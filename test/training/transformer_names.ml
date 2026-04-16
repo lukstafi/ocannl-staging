@@ -114,11 +114,13 @@ let () =
 
   (* === Training computation === *)
   let train_logits = model ~train_step:(Some step_n) ~mask input_batch in
-  let%op counts = exp train_logits in
-  let%op probs = counts /. (counts ++ "...|... => ...|0") in
-  let%op output_probs = (probs *. target_batch) ++ "...|... => ...|0" in
-  let%op loss = neg (log output_probs) in
-  let%op batch_loss = (loss ++ "...|... => 0") /. !..total_tokens in
+  (* Numerically stable log-softmax cross-entropy: subtract max before exp to avoid overflow. *)
+  let%op max_logits = train_logits @^^ "...|... => ...|0" in
+  let%op shifted = train_logits - max_logits in
+  let%op log_sum_exp = log (exp shifted ++ "...|... => ...|0") in
+  let%op log_probs = shifted - log_sum_exp in
+  let%op nll = neg ((target_batch *. log_probs) ++ "...|... => ...|0") in
+  let%op batch_loss = (nll ++ "...|... => 0") /. !..total_tokens in
 
   let update = Train.grad_update batch_loss in
   let steps = epochs * n_batches in
