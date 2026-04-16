@@ -38,6 +38,9 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
     | { Tn.array = (lazy (Some hosted)); _ }, Some src ->
         [%log "copying", Tn.debug_name tn, "at", (src : Backend.buffer_ptr), "to host"];
         (* Stdio.printf "copying: %s to_host\n" (Tn.debug_name tn); *)
+        (* No cross-stream writer synchronization needed: multi-streaming was removed
+           (gh-ocannl-341). Only one stream exists per device, so there are no
+           concurrent cross-stream writes to wait for before this device-to-host copy. *)
         Backend.to_host ~src_ptr:src ~src:ctx hosted;
         true
     | _ -> false
@@ -65,6 +68,9 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
   let%track3_sexp from_host (ctx : Backend.context) tn =
     match (tn, Map.find ctx.ctx_arrays tn) with
     | { Tn.array = (lazy (Some hosted)); _ }, Some dst ->
+        (* No cross-stream reader synchronization needed: multi-streaming was removed
+           (gh-ocannl-341). Only one stream exists per device, so there are no
+           concurrent cross-stream readers to wait for before this host-to-device upload. *)
         [%log "copying", Tn.debug_name tn, "to", (dst : Backend.buffer_ptr), "from host"];
         (* Stdio.printf "copying: %s from_host\n" (Tn.debug_name tn); *)
         Backend.from_host ~dst_ptr:dst ~dst:ctx hosted;
