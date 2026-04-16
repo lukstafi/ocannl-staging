@@ -1703,16 +1703,34 @@ let%track6_sexp rec unify_dim ~stage origin (eq : dim * dim) env : constraint_ l
     ->
       (* input_size = stride * (output_size - 1) + effective_kernel_span *)
       let span = effective_kernel_span ~dilation ~kernel_size:k.d in
-      unify_dim ~stage origin (get_dim ~d:((stride * (s.d - 1)) + span) ?label:s.label (), dim) env
+      let label =
+        match (s.label, k.label) with
+        | Some l1, Some l2 when not (String.equal l1 l2) ->
+            raise
+            @@ Shape_error
+                 ( "convolution: conflicting dimension labels between stride and kernel",
+                   [ Dim_mismatch [ Dim s; Dim k ] ] )
+        | l1, l2 -> Option.first_some l1 l2
+      in
+      unify_dim ~stage origin (get_dim ~d:((stride * (s.d - 1)) + span) ?label (), dim) env
   | Affine { stride; over; conv = Some { dilation; kernel = Dim k; use_padding = false }; _ }, Dim s
   | Dim s, Affine { stride; over; conv = Some { dilation; kernel = Dim k; use_padding = false }; _ }
     ->
       (* Reverse: solve for output_size given input_size s. input_size = stride * (output_size - 1)
          + effective_kernel_span output_size = (input_size - effective_kernel_span) / stride + 1 *)
       let span : int = effective_kernel_span ~dilation ~kernel_size:k.d in
+      let label =
+        match (s.label, k.label) with
+        | Some l1, Some l2 when not (String.equal l1 l2) ->
+            raise
+            @@ Shape_error
+                 ( "convolution: conflicting dimension labels between stride and kernel",
+                   [ Dim_mismatch [ Dim s; Dim k ] ] )
+        | l1, l2 -> Option.first_some l1 l2
+      in
       let numerator : int = s.d - span in
       if numerator >= 0 && numerator % stride = 0 then
-        unify_dim ~stage origin (get_dim ~d:((numerator / stride) + 1) ?label:s.label (), over) env
+        unify_dim ~stage origin (get_dim ~d:((numerator / stride) + 1) ?label (), over) env
       else
         raise
         @@ Shape_error
