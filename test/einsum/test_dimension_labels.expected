@@ -1,0 +1,75 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+=== Dimension Label Tests ===
+
+Test 1: Same label, same size -- succeeds
+  Result labels: [batch]
+  PASS: label preserved in result
+
+Test 2: Conflicting labels, same size -- raises
+  PASS: got expected Shape_error: solved dimensions for axis: different labels
+
+Test 3: One labeled, one unlabeled, same size -- compatible
+  Result labels: [batch]
+  PASS: labeled + unlabeled compatible
+
+Test 4: Variable-mediated: unlabeled first, labeled later -- compatible
+  PASS: variable-mediated unlabeled then labeled
+
+Test 5: Variable-mediated: unlabeled, labeled, then conflicting -- raises
+  PASS: got expected Shape_error: solved dimensions for axis: different labels
+
+Test 5b: Variable-mediated: label upgrade verified in environment
+  Var v label after upgrade: "batch"
+  PASS: variable label upgraded to "batch"
+
+Test 6: Shape.to_labels after inference
+  Labels: [batch]
+  PASS: label visible in Shape.to_labels
+
+Test 7: Tensor.number ~axis_label
+  Labels: [count]
+  PASS: axis_label survives inference
+
+Test 8: Operation.range ~axis_label
+  Labels: [idx]
+  PASS: range axis_label survives inference
+
+Test 9: Concat, consistent labels -- label preserved
+  Solved to d=5, label="x"
+  PASS: concat preserved label "x" with d=5
+
+Test 10: Concat, conflicting labels -- raises
+  PASS: got expected Shape_error: concat: conflicting dimension labels
+
+Test 11: Concat, mix labeled/unlabeled -- label preserved
+  Solved to d=5, label="x"
+  PASS: concat preserved label "x" from labeled component
+
+Test 12: Affine, matching labels -- preserved
+  Solved to d=6, label="x"
+  PASS: affine preserved label "x" with d=6
+
+Test 13: Affine, conflicting labels -- raises
+  PASS: got expected Shape_error: convolution: conflicting dimension labels between stride and kernel
+
+Test 14: Stride no-conv forward -- label propagated
+  Solved to d=8, label="x"
+  PASS: stride forward propagated label "x"
+
+Test 15: Stride no-conv reverse -- label propagated
+  Solved over to d=4, label="x"
+  PASS: stride reverse propagated label "x" to over
+
+Test 16: Conv no-padding forward -- label propagated
+  Solved to d=6, label="x"
+  PASS: conv forward propagated label "x"
+
+Test 17: Conv no-padding reverse -- label propagated
+  Solved over to d=4, label="x"
+  PASS: conv reverse propagated label "x" to over
+
+Test 18: LUB with conflicting labels -- strict equality raises
+  PASS: conflicting labels in mutual inequality correctly raises: dimension comparison for axis: different labels
+
+=== Done ===
