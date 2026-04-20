@@ -87,8 +87,6 @@ type memory_mode =
           optional [array] of {!t}). *)
  ```
 
- Note: the `sharing` type (`Per_stream`, `Shared_cross_streams`, `Unset`) and the cross-stream sharing algorithm were removed in the streams cleanup. `On_device` and `Changed_on_devices` are no longer parameterized by `sharing`.
-
  `Tnode.update_memory_mode` verifies consistency of the updates of these modes. Currently, these properties are either set explicitly (directly or indirectly) by the user, or determined by the `Low_level` analysis and optimization process. Moreover, the `Tensor` module can influence whether the mode is constant (`Tensor.number`, `Tensor.ndarray`) or non-constant (`Tensor.param`).
 
 A backend can make more refined distinctions, for example a `Local` node in CUDA could optionally be shared across threads of a block.
@@ -130,26 +128,19 @@ When using the default stream, CUDA would predictably write to the standard outp
 
 ## Synchronization and data transfers
 
-OCANNL expects backends to implement FIFO queue scheduling, and an event mechanism for synchronizing between streams (and ideally devices), matching the CUDA specification. On top of events, OCANNL implements per-tensor-node synchronization.
+OCANNL expects backends to implement FIFO queue scheduling, and an event mechanism for asynchronous operation tracking. Each device has a single execution context (stream). Events track whether a stream has finished computing past a particular point, and are used for async GPU correctness (e.g. waiting for a transfer to complete before reading the result).
 
-Note: the per-device fields `shared_writer_streams`, `host_reading_streams`, `host_writing_streams` and the per-stream fields `reader_streams`, `updating_for_merge_buffer` (with its `Streaming_for` mode) were removed in the streams cleanup. The remaining synchronization field is:
-
-```ocaml
-  updating_for : 'event Hashtbl.M(Tnode).t;
-      (* The completion event for updating (writing to) a node via this stream, if any. *)
-```
-
-Besides routines, calling `from_host`, `to_host`, `device_to_device` from a backend puts the corresponding tasks on the device's queue. Both invoking a routine and calling these copying functions will perform the necessary event creations and synchronizations to ensure that when scheduling writing into an array precedes scheduling reading from it, the actual writing also precedes the actual reading.
+Besides routines, calling `from_host`, `to_host`, `device_to_device` from a backend puts the corresponding tasks on the device's queue. Invoking a routine and calling these copying functions will perform the necessary event tracking to ensure correct ordering of reads and writes.
 
 ### Data transfers
 
-OCANNL supports asynchronous data transfers -- `from_host`, `to_host`, `device_to_device` -- by embedding them in the scheduling mechanism. The transfers themselves synchronize streams in a non-blocking way -- when it's time for the destination stream to copy a node, it waits for the source stream to finish computing the node.
+OCANNL supports asynchronous data transfers -- `from_host`, `to_host`, `device_to_device` -- by embedding them in the scheduling mechanism.
 
-OCANNL provides explicit _merge buffers_ for performing those tensor node updates, where different versions of a tensor node from two streams feature in the same computation. The `%cd` syntax for using merge buffers is via the `.merge` pseudo-field. For example, the code for merging gradients might be: `[%cd p.grad =+ p.grad.merge]`. In the current design, there's at most one merge buffer per stream, and the memory is reused for merging different nodes.
+OCANNL provides explicit _merge buffers_ for performing tensor node updates where different versions of a tensor node from two devices feature in the same computation. The `%cd` syntax for using merge buffers is via the `.merge` pseudo-field. For example, the code for merging gradients might be: `[%cd p.grad =+ p.grad.merge]`. In the current design, there's at most one merge buffer per device stream, and the memory is reused for merging different nodes. We keep track of the specific tensor node that was scheduled to occupy this buffer, and the merge node expected by the linked code, so that we can detect mismatches at scheduling time.
 
-The `Copy` mode uses physical arrays to back merge buffers. The merge buffer array (one per stream) is resized (grown) if needed to fit a node's array. Note: the `Streaming_for` mode (which relied on source array pointers and was parameterized by the task intended to use the merge buffer) was removed in the streams cleanup.
+The `Copy` mode uses physical arrays to back merge buffers. The merge buffer array is resized (grown) if needed to fit a node's array.
 
-Currently, OCANNL does not support merge buffers for `from_host` transfers. But it might in the future. Currently, combining `to_host` and `from_host` is the only way to make different backends cooperate.
+Currently, OCANNL does not support merge buffers for `from_host` transfers. Currently, combining `to_host` and `from_host` is the only way to make different backends cooperate.
 
 #### Automated transfers to / from host
 

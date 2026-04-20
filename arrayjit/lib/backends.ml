@@ -14,33 +14,21 @@ let _get_local_debug_runtime = Utils.get_local_debug_runtime
 
 let check_merge_buffer stream ~code_node =
   let name = function Some tn -> Tnode.debug_name tn | None -> "none" in
-  match (stream.updating_for_merge_buffer, code_node) with
+  match (!(stream.merge_buffer_node), code_node) with
   | _, None -> ()
-  | Some (actual, _), Some expected when Tnode.equal actual expected -> ()
+  | Some actual, Some expected when Tnode.equal actual expected -> ()
   | _ ->
       raise
       @@ Utils.User_error
            ("Merge buffer mismatch, on stream: "
-           ^ name (Option.map ~f:fst stream.updating_for_merge_buffer)
+           ^ name !(stream.merge_buffer_node)
            ^ ", expected by code: " ^ name code_node)
 
 module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncing) = struct
-  let wait_for_ready ~dst ~src tn =
-    let s = src.stream in
-    let d = dst.stream in
-    (* TODO: maybe it's worthwhile to clean up s.updating_for every now and then. *)
-    Hashtbl.find s.updating_for tn
-    |> Option.iter ~f:(fun upd_e ->
-        if not (equal_stream s d || Backend.is_done upd_e) then Backend.will_wait_for dst upd_e)
-
   let%track3_sexp to_host (ctx : Backend.context) (tn : Tn.t) =
     match (tn, Map.find ctx.ctx_arrays tn) with
     | { Tn.array = (lazy (Some hosted)); _ }, Some src ->
         [%log "copying", Tn.debug_name tn, "at", (src : Backend.buffer_ptr), "to host"];
-        (* Stdio.printf "copying: %s to_host\n" (Tn.debug_name tn); *)
-        (* No cross-stream writer synchronization needed: multi-streaming was removed
-           (gh-ocannl-341). Only one stream exists per device, so there are no
-           concurrent cross-stream writes to wait for before this device-to-host copy. *)
         Backend.to_host ~src_ptr:src ~src:ctx hosted;
         true
     | _ -> false
@@ -48,7 +36,6 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
   let update_writer_event ?e ctx tn =
     let s = ctx.stream in
     let e = Option.value_or_thunk e ~default:(fun () -> Backend.all_work s) in
-    (* Wait for writing to finish before reading. *)
     (match tn with
     | Assignments.Merge_buffer _ -> ()
     | Assignments.Node tn ->
@@ -59,20 +46,14 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
           tn);
     match tn with
     | Node tn ->
-        Hash_set.add tn.devices_not_lagging_host ctx.stream.device.device_id;
-        Hashtbl.update s.updating_for tn ~f:(fun _ -> e)
+        Hash_set.add tn.devices_not_lagging_host ctx.stream.device.device_id
     | Merge_buffer tn ->
-        (* Note: the previous event does not need to be done! *)
-        s.updating_for_merge_buffer <- Some (tn, Some e)
+        s.merge_buffer_node := Some tn
 
   let%track3_sexp from_host (ctx : Backend.context) tn =
     match (tn, Map.find ctx.ctx_arrays tn) with
     | { Tn.array = (lazy (Some hosted)); _ }, Some dst ->
-        (* No cross-stream reader synchronization needed: multi-streaming was removed
-           (gh-ocannl-341). Only one stream exists per device, so there are no
-           concurrent cross-stream readers to wait for before this host-to-device upload. *)
         [%log "copying", Tn.debug_name tn, "to", (dst : Backend.buffer_ptr), "from host"];
-        (* Stdio.printf "copying: %s from_host\n" (Tn.debug_name tn); *)
         Backend.from_host ~dst_ptr:dst ~dst:ctx hosted;
         update_writer_event ctx @@ Node tn;
         true
@@ -82,10 +63,8 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
     match (tn, Map.find ctx.ctx_arrays tn) with
     | { Tn.array = (lazy (Some hosted)); _ }, None ->
         let dims = Lazy.force tn.dims in
-        (* Use alloc_array since we're immediately copying from host *)
         let dst = Backend.alloc_array (Lazy.force tn.prec) ~dims ctx.stream in
         [%log "copying", Tn.debug_name tn, "to", (dst : Backend.buffer_ptr), "from host"];
-        (* Stdio.printf "copying: %s from_host\n" (Tn.debug_name tn); *)
         Backend.from_host ~dst_ptr:dst ~dst:ctx hosted;
         update_writer_event ctx @@ Node tn;
         { ctx with ctx_arrays = Map.add_exn ctx.ctx_arrays ~key:tn ~data:dst }
@@ -102,56 +81,63 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
 
   let%track3_sexp device_to_device (tn : Tn.t) ~into_merge_buffer ~(dst : Backend.context)
       ~(src : Backend.context) =
-    match Map.find src.ctx_arrays tn with
-    | None -> false
-    | Some s_arr -> (
-        wait_for_ready ~dst ~src tn;
-        match into_merge_buffer with
-        | No -> (
-            match Map.find dst.ctx_arrays tn with
-            | None -> false
-            | Some d_arr ->
-                if phys_equal s_arr d_arr then false
-                else (
+    let name_of ctx = Backend.(get_name ctx.stream) in
+    let same_device = dst.stream.device.ordinal = src.stream.device.ordinal in
+    if same_device && String.equal (name_of src) (name_of dst) then false
+    else
+      match Map.find src.ctx_arrays tn with
+      | None -> false
+      | Some s_arr -> (
+          match into_merge_buffer with
+          | No -> (
+              match Map.find dst.ctx_arrays tn with
+              | None -> false
+              | Some d_arr ->
                   Backend.(
                     device_to_device tn ~into_merge_buffer ~dst_ptr:(Some d_arr) ~dst ~src_ptr:s_arr
                       ~src);
                   update_writer_event dst @@ Node tn;
-                  [%log "copying", Tn.debug_name tn, "from", Backend.get_name src.stream, "to", Backend.get_name dst.stream];
-                  true))
-        | Copy ->
-            Backend.(
-              device_to_device tn ~into_merge_buffer ~dst_ptr:None ~dst ~src_ptr:s_arr ~src);
-            update_writer_event dst @@ Merge_buffer tn;
-            [%log "copy into merge buffer", Tn.debug_name tn, "from", Backend.get_name src.stream];
-            true)
+                  [%log "copying", Tn.debug_name tn, "from", name_of src, "to", name_of dst];
+                  true)
+          | Copy ->
+              Backend.(
+                device_to_device tn ~into_merge_buffer ~dst_ptr:None ~dst ~src_ptr:s_arr ~src);
+              update_writer_event dst @@ Merge_buffer tn;
+              [%log "copy into merge buffer", Tn.debug_name tn, "from", name_of src];
+              true)
 
   let%track3_sexp init_from_device (tn : Tn.t) ~(dst : Backend.context) ~(src : Backend.context) =
+    let name_of ctx = Backend.(get_name ctx.stream) in
     match Map.find src.ctx_arrays tn with
     | None ->
         raise
         @@ Utils.User_error
              ("init_from_device: tensor node " ^ Tn.debug_name tn ^ " is not in input context "
             ^ Backend.get_name src.stream ^ ", for stream " ^ Backend.get_name dst.stream)
-    | Some s_arr -> (
-        wait_for_ready ~dst ~src tn;
-        match Map.find dst.ctx_arrays tn with
-        | Some _ ->
-            raise
-            @@ Utils.User_error
-                 ("init_from_device: tensor node " ^ Tn.debug_name tn
-                ^ " already in output context " ^ Backend.get_name dst.stream ^ ", for stream "
-                ^ Backend.get_name src.stream)
-        | None ->
-            let dims = Lazy.force tn.dims in
-            (* Use alloc_array since we're immediately copying from another device *)
-            let d_arr = Backend.alloc_array (Lazy.force tn.prec) ~dims dst.stream in
-            Backend.(
-              device_to_device tn ~into_merge_buffer:No ~dst_ptr:(Some d_arr) ~dst ~src_ptr:s_arr
-                ~src);
-            update_writer_event dst @@ Node tn;
-            [%log "copying", Tn.debug_name tn, "from", Backend.get_name src.stream, "to", Backend.get_name dst.stream];
-            { dst with ctx_arrays = Map.add_exn dst.ctx_arrays ~key:tn ~data:d_arr })
+    | Some s_arr ->
+        let same_device = dst.stream.device.ordinal = src.stream.device.ordinal in
+        if same_device && String.equal (name_of src) (name_of dst) then
+          raise
+          @@ Utils.User_error
+               ("init_from_device: tensor node " ^ Tn.debug_name tn
+              ^ " already on same stream, for stream " ^ Backend.get_name src.stream)
+        else (
+          match Map.find dst.ctx_arrays tn with
+          | Some _ ->
+              raise
+              @@ Utils.User_error
+                   ("init_from_device: tensor node " ^ Tn.debug_name tn
+                  ^ " already in output context " ^ Backend.get_name dst.stream ^ ", for stream "
+                  ^ Backend.get_name src.stream)
+          | None ->
+              let dims = Lazy.force tn.dims in
+              let d_arr = Backend.alloc_array (Lazy.force tn.prec) ~dims dst.stream in
+              Backend.(
+                device_to_device tn ~into_merge_buffer:No ~dst_ptr:(Some d_arr) ~dst ~src_ptr:s_arr
+                  ~src);
+              update_writer_event dst @@ Node tn;
+              [%log "copying", Tn.debug_name tn, "from", name_of src, "to", name_of dst];
+              { dst with ctx_arrays = Map.add_exn dst.ctx_arrays ~key:tn ~data:d_arr })
 
   type r = Backend.context routine [@@deriving sexp_of]
 
@@ -164,7 +150,6 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
         Set.iter hosted_inputs ~f:(fun tn ->
             if not (Hash_set.mem tn.devices_not_lagging_host s.device.device_id) then
               assert (from_host r.context tn))
-      (* Since merge buffers are always per-stream, no need to check r.merge_buffer_input. *)
     in
     let post () =
       let e = Backend.all_work s in
@@ -178,10 +163,9 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
     { r with schedule = Task.(prepend ~work:pre @@ append ~work:post r.schedule) }
 
   let sync_device device =
-    Utils.weak_iter device.streams ~f:Backend.await;
-    Utils.weak_iter device.streams ~f:(fun s ->
-        s.updating_for_merge_buffer <- None;
-        Hashtbl.clear s.updating_for)
+    Option.iter device.current_stream ~f:(fun s ->
+        Backend.await s;
+        s.merge_buffer_node := None)
 end
 
 let%track6_sexp lower_assignments optim_ctx ?name bindings asgns =
@@ -408,9 +392,6 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
       [%log (key : Tnode.t)];
       let default () =
         let dims = Lazy.force key.dims in
-        (* Use alloc_array when zero initialization is not needed: - When copying from host
-           immediately after allocation - When the node has explicit Zero_out operations in the
-           lowered code *)
         let will_copy_from_host =
           Utils.settings.automatic_host_transfers && Tn.known_constant key
           && match key.array with (lazy (Some _)) -> true | _ -> false
@@ -441,29 +422,28 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
           raise exn
       in
       let device = stream.device in
-      (* It's the user's responsibility to ensure that constants are initialized on devices, the
-         user can choose to run initialization code on multiple streams redundantly, or on the owner
-         stream only and then to use init_from_device. *)
       if node.Low_level.read_only || Tn.known_constant key then (
         if not node.Low_level.read_only then
           [%log "Backends.alloc_if_needed: constant node is not read-only", (key : Tnode.t)];
-        let read_only_buffer : Device.buffer_ptr =
+        (* Use per-device buffer cache for read-only/constant nodes *)
+        let cached_buffer : Device.buffer_ptr =
           match use_host_memory with
-          | None -> Hashtbl.find_or_add device.constant_buffer_cache key ~default
+          | None -> Hashtbl.find_or_add device.device_buffer_cache key ~default
           | Some get_buffer_ptr ->
               if
-                (not (Hashtbl.mem device.constant_buffer_cache key))
-                && Tn.known_constant key && Tn.is_hosted_force key 44
+                (not (Hashtbl.mem device.device_buffer_cache key))
+                && Tn.is_hosted_force key 44
               then
-                Hashtbl.update_and_return device.constant_buffer_cache key ~f:(fun _ ->
+                Hashtbl.update_and_return device.device_buffer_cache key ~f:(fun _ ->
                     get_buffer_ptr ~size_in_bytes:(Lazy.force key.size_in_bytes)
                     @@ Ndarray.get_voidptr_not_managed
                     @@ Option.value_exn ~here:[%here]
                     @@ Lazy.force key.array)
-              else Hashtbl.find_or_add device.constant_buffer_cache key ~default
+              else Hashtbl.find_or_add device.device_buffer_cache key ~default
         in
-        add_old_exn read_only_buffer)
-      else add_new_exn ())
+        add_old_exn cached_buffer)
+      else
+        add_new_exn ())
     else ctx_arrays
 
   let%debug3_sexp link context (code : code) =
@@ -541,12 +521,11 @@ let finalize (type buffer_ptr dev runner event optimize_ctx)
         Map.iteri ctx.ctx_arrays ~f:(fun ~key ~data ->
             if
               (not (Option.exists ctx.parent ~f:(fun pc -> Map.mem pc.ctx_arrays key)))
-              && not (Hashtbl.mem ctx.stream.device.constant_buffer_cache key)
+              && not (Hashtbl.mem ctx.stream.device.device_buffer_cache key)
             then mem_free ctx.stream data)))
 
 let%track5_sexp fresh_backend ?backend_name () =
   Stdlib.Gc.full_major ();
-  (* TODO: is running again needed to give time to weak arrays to become empty? *)
   Stdlib.Gc.full_major ();
   (* Note: we invoke functors from within fresh_backend to fully isolate backends from distinct
      calls to fresh_backend. *)
@@ -559,7 +538,6 @@ let%track5_sexp fresh_backend ?backend_name () =
       (module Make_device_backend_from_lowered (Schedulers.Multicore) (Cc_backend) : Backend)
   | "sync_cc" ->
       (module Make_device_backend_from_lowered (Schedulers.Sync) (Cc_backend) : Backend)
-  | "cuda" -> (module Raise_backend (Cuda_backend_impl.Fresh () : Lowered_backend) : Backend)
-  | "metal" ->
-      (module Raise_backend (Metal_backend_impl.Fresh () : Lowered_backend) : Backend)
+  | "cuda" -> (module Raise_backend (Cuda_backend_impl.Fresh : Lowered_backend) : Backend)
+  | "metal" -> (module Raise_backend (Metal_backend_impl.Fresh : Lowered_backend) : Backend)
   | backend -> invalid_arg [%string "Backends.fresh_backend: unknown backend %{backend}"]

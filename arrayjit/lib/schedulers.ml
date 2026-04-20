@@ -174,17 +174,21 @@ module Multicore (Backend : For_add_scheduler) :
       { state; domain = Domain.spawn worker }
     in
     (* We cannot use make_stream because runner needs stream_id. *)
-    Utils.register_new device.streams ~grow_by:8 (fun stream_id ->
-        let runner = create stream_id in
-        {
-          device;
-          runner;
-          merge_buffer = ref None;
-          stream_id;
-          allocated_buffer = None;
-          updating_for = Hashtbl.create (module Ir.Tnode);
-          updating_for_merge_buffer = None;
-        })
+    let stream_id = device.next_stream_id in
+    device.next_stream_id <- stream_id + 1;
+    let runner = create stream_id in
+    let stream =
+      {
+        device;
+        runner;
+        merge_buffer = ref None;
+        stream_id;
+        allocated_buffer = None;
+        merge_buffer_node = ref None;
+      }
+    in
+    device.current_stream <- Some stream;
+    stream
 
   let num_devices () = 1
 

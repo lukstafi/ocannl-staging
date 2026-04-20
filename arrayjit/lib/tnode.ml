@@ -229,7 +229,6 @@ let rec is_materialized_force tn provenance =
 let%debug3_sexp rec is_in_context_force ~(use_host_memory : 'a option) (tn : t) (provenance : int) :
     bool =
   match tn.memory_mode with
-  | Some (Hosted Changed_on_devices, _) -> true
   | Some ((Materialized | Hosted Nonconstant), _) when Option.is_none use_host_memory -> true
   | Some (Hosted (Constant | Volatile), _) when Option.is_some use_host_memory -> false
   | Some (Hosted _, _) -> true
@@ -253,6 +252,7 @@ let known_non_virtual tn =
   match tn.memory_mode with None | Some ((Virtual | Effectively_constant), _) -> false | _ -> true
 
 let known_virtual tn = match tn.memory_mode with Some (Virtual, _) -> true | _ -> false
+
 
 let mode_is_unspecified tn =
   match tn.memory_mode with
