@@ -110,7 +110,7 @@ module Alloc_buffer = struct
 end
 
 (* Functor defining the backend *)
-module Fresh () : Ir.Backend_impl.Lowered_backend = struct
+module Fresh : Ir.Backend_impl.Lowered_backend = struct
   (* Include the device setup with types and allocation *)
   include Backend_impl.Device (Device_stream) (Alloc_buffer)
 
@@ -747,7 +747,7 @@ using namespace metal;|} in
                 Me.ComputeCommandEncoder.set_buffer encoder ~index buffer
             | Kparam_ptr tn when Tn.known_constant tn && Tn.is_hosted_force tn 48 ->
                 let buffer =
-                  Hashtbl.find_or_add stream.device.constant_buffer_cache tn ~default:(fun () ->
+                  Hashtbl.find_or_add stream.device.device_buffer_cache tn ~default:(fun () ->
                       get_buffer_for_ptr device ~size_in_bytes:(Lazy.force tn.size_in_bytes)
                       @@ Ndarray.get_voidptr_not_managed
                       @@ Option.value_exn ~here:[%here]

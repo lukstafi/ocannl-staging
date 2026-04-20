@@ -87,11 +87,11 @@ type ('buffer_ptr, 'dev, 'runner, 'event) device_ref = {
   dev : 'dev;
   ordinal : int;
   device_id : int;
-  constant_buffer_cache : 'buffer_ptr Hashtbl.M(Tnode).t;
-      (** Per-device cache for read-only/constant buffer allocations. Also contains buffer/pointer
-          wrappers for hosted tnodes on unified memory systems. *)
-  mutable streams : ('buffer_ptr, 'dev, 'runner, 'event) stream_ref Utils.weak_dynarray;
-      (** All (live) streams created on the device. *)
+  device_buffer_cache : 'buffer_ptr Hashtbl.M(Tnode).t;
+      (** Per-device buffer cache for reusing allocated arrays (e.g. read-only/constant nodes, or
+          host-backed buffers on unified memory systems). *)
+  mutable current_stream : ('buffer_ptr, 'dev, 'runner, 'event) stream_ref option;
+  mutable next_stream_id : int;
 }
 
 and ('buffer_ptr, 'dev, 'runner, 'event) stream_ref = {
@@ -100,8 +100,9 @@ and ('buffer_ptr, 'dev, 'runner, 'event) stream_ref = {
   merge_buffer : 'buffer_ptr buffer option ref;
   stream_id : int;
   mutable allocated_buffer : 'buffer_ptr buffer option;
-  updating_for : 'event Hashtbl.M(Tnode).t;
-  mutable updating_for_merge_buffer : (Tnode.t * 'event option) option;
+  merge_buffer_node : Tnode.t option ref;
+      (** The tensor node currently occupying this stream's merge buffer, if any. Used for
+          consistency checking before routine execution. *)
 }
 
 let sexp_of_device_ref _ _ _ _ device = [%sexp_of: string * int] ("ordinal", device.ordinal)
@@ -109,38 +110,11 @@ let sexp_of_stream_ref _ _ _ _ stream = [%sexp_of: string * int] ("stream_id", s
 let equal_stream_ref s1 s2 = s1.stream_id = s2.stream_id && s1.device.ordinal = s2.device.ordinal
 
 type ('buffer_ptr, 'dev, 'runner, 'event) device =
-      ('buffer_ptr, 'dev, 'runner, 'event) device_ref = {
-  dev : 'dev;
-  ordinal : int;
-      (** The number of the represented backend's device, in the range from 0 to the number of the
-          backend's devices - 1. *)
-  device_id : int;
-      (** A unique identifier among all device instances of all backends. Note that multiple
-          [device_id] (distinct device instances) might refer to the same physical device. *)
-  constant_buffer_cache : 'buffer_ptr Hashtbl.M(Tnode).t;
-      (** Per-device cache for read-only/constant buffer allocations. Also contains buffer/pointer
-          wrappers for hosted tnodes on unified memory systems. *)
-  mutable streams : ('buffer_ptr, 'dev, 'runner, 'event) stream_ref Utils.weak_dynarray;
-      (** All (live) streams created on the device. *)
-}
+  ('buffer_ptr, 'dev, 'runner, 'event) device_ref
 [@@deriving sexp_of]
 
 type ('buffer_ptr, 'dev, 'runner, 'event) stream =
-      ('buffer_ptr, 'dev, 'runner, 'event) stream_ref = {
-  device : ('buffer_ptr, 'dev, 'runner, 'event) device_ref;
-  runner : 'runner;
-  merge_buffer : 'buffer_ptr buffer option ref;
-      (** Depending on backend implementations, either the currently used merge buffer, or the one
-          most recently scheduled. Note that the pointer can be reused for nodes that fit in an
-          already allocated buffer. *)
-  stream_id : int;  (** An ID unique within the device for the lifetime of the stream. *)
-  mutable allocated_buffer : 'buffer_ptr buffer option;
-  updating_for : 'event Hashtbl.M(Tnode).t;
-      (** The completion event for the most recent updating (writing to) a node via this stream. *)
-  mutable updating_for_merge_buffer : (Tnode.t * 'event option) option;
-      (** The tensor node that was most recently scheduled to be in the [stream]'s merge buffer. See
-          also {!field-updating_for}. *)
-}
+  ('buffer_ptr, 'dev, 'runner, 'event) stream_ref
 [@@deriving sexp_of]
 
 let equal_stream = equal_stream_ref
@@ -289,11 +263,11 @@ module type With_buffer_retrieval_and_syncing = sig
   val device_to_device :
     Tnode.t -> into_merge_buffer:merge_buffer_use -> dst:context -> src:context -> bool
   (** [device_to_device tn ~into_merge_buffer ~dst ~src] proceeds as follows:
-      - If the node is absent from [src]: returns false.
-      - Schedules waiting for writing into the tensor node on [src] to finish, if any.
+      - If the node is absent from the [src] context and either it is present in the [dst] context
+        or [into_merge_buffer] is different from [No]: raises an error.
+      - If the node is absent from [dst] and [into_merge_buffer=No]: returns false.
       - If [into_merge_buffer=No]: schedules a copy of the tensor node from [src] to [dst] and
-        updates the writer event for the node. Skips if source and destination buffers are
-        physically the same.
+        updates the writer event for the node.
       - If [into_merge_buffer=Copy], schedules copying from [src] to the merge buffer of [dst]'s
         stream, and updates the writer event for the merge buffer. *)
 
@@ -303,7 +277,7 @@ module type With_buffer_retrieval_and_syncing = sig
       and outputs the [dst] context with the tensor node. *)
 
   val sync_device : device -> unit
-  (** Synchronizes all the streams on a device, and cleans up (removes) all associated events. *)
+  (** Synchronizes the device's stream and cleans up merge buffer state. *)
 end
 
 module type Backend = sig

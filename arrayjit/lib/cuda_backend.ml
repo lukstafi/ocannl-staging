@@ -91,7 +91,7 @@ end
 let initialized_devices = Hash_set.create (module Int)
 let initialized = ref false
 
-module Fresh () : Ir.Backend_impl.Lowered_backend = struct
+module Fresh : Ir.Backend_impl.Lowered_backend = struct
   include Backend_impl.Device (Device_stream) (Alloc_buffer)
 
   let use_host_memory = None
@@ -129,7 +129,7 @@ module Fresh () : Ir.Backend_impl.Lowered_backend = struct
     Cu.Context.set_current device.dev.primary_context;
     Cu.Context.synchronize ();
     (* Note: this is not necessary as releasing the primary context by GC will reset the context. *)
-    Hashtbl.iter device.constant_buffer_cache ~f:(fun buffer_ptr ->
+    Hashtbl.iter device.device_buffer_cache ~f:(fun buffer_ptr ->
         Cu.Deviceptr.mem_free buffer_ptr)
 
   let%diagn2_sexp cuda_to_ptx ~name cu_src =
