@@ -1,0 +1,25 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+Names loaded: 32033
+train/dev/test examples (after batch truncation): 182000/22000/22000
+Epoch 0, mean train loss=2.7422 below 4=true
+Epoch 1, mean train loss=2.6099 below 3=true
+Epoch 2, mean train loss=2.5823 below 3=true
+Epoch 3, mean train loss=2.5748 below 3=true
+Epoch 4, mean train loss=2.5621 below 3=true
+Epoch 5, mean train loss=2.5592 below 2.65=true
+Epoch 6, mean train loss=2.5612 below 2.65=true
+Epoch 7, mean train loss=2.5482 below 2.65=true
+Epoch 8, mean train loss=2.5497 below 2.65=true
+Epoch 9, mean train loss=2.5407 below 2.65=true
+Epoch 10, mean train loss=2.5320 below 2.6=true
+Epoch 11, mean train loss=2.5320 below 2.6=true
+Epoch 12, mean train loss=2.5285 below 2.6=true
+Epoch 13, mean train loss=2.5244 below 2.6=true
+Epoch 14, mean train loss=2.5204 below 2.6=true
+Final train loss=2.5187 train_below=true
+Final dev   loss=2.5129 dev_below=true
+Final test  loss=2.5218 test_below=true
+urolcayikaoyea
+naotxouaiaosh
+autailitrinoanscyyhh

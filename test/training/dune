@@ -35,6 +35,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name mlp_bn_names)
+ (package neural_nets_lib)
+ (modules mlp_bn_names)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (libraries ocannl dataprep)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name circles_conv)
  (package neural_nets_lib)
  (modules circles_conv)
