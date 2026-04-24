@@ -97,7 +97,7 @@ let train_step = Train.to_routine ctx bindings (Asgns.sequence [update; sgd]) in
 
 - Verify examples compile with `dune build` and run showing learning progress
 - Add dune stanzas in `test/training/dune` for each new executable
-- Ensure no regression in existing `moons_demo`, `bigram`, `bigram_mlp`, `circles_conv` tests
+- Ensure no regression in existing `moons_demo`, `bigram`, `mlp_names`, `mlp_bn_names`, `circles_conv` tests
 - Print learning curves (episode return vs episode number) to stdout
 
 ## Key Technical Decisions

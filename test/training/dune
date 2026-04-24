@@ -24,9 +24,20 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
- (name bigram_mlp)
+ (name mlp_names)
  (package neural_nets_lib)
- (modules bigram_mlp)
+ (modules mlp_names)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (libraries ocannl dataprep)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
+ (name mlp_bn_names)
+ (package neural_nets_lib)
+ (modules mlp_bn_names)
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
@@ -92,16 +103,5 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (libraries ocannl dataprep)
- (preprocess
-  (pps ppx_here ppx_ocannl)))
-
-(test
- (name fsm_transformer)
- (package neural_nets_lib)
- (modules fsm_transformer)
- (deps
-  ocannl_config
-  (env_var OCANNL_BACKEND))
- (libraries ocannl)
  (preprocess
   (pps ppx_here ppx_ocannl)))

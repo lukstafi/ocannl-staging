@@ -40,6 +40,7 @@ A possible route to learning OCANNL:
 4. Read [the migration guide](docs/migration_guide.md).
 5. Read the syntax extensions documentation [docs/syntax_extensions.md](docs/syntax_extensions.md).
 6. Read the NN building blocks file [lib/nn_blocks.ml](lib/nn_blocks.ml) and the training recipes [lib/train.ml](lib/train.ml).
+  * Work through the [makemore tutorial](docs/makemore_tutorial.md) — a character-level language-model progression mirroring Andrej Karpathy's *Neural Networks: Zero to Hero* lectures.
 7. Read the introductory part of the shape inference documentation [docs/shape_inference.md](docs/shape_inference.md).
 8. Skim the configuration documentation [ocannl_config.example](ocannl_config.example).
 9. Improve your understanding by reading or skimming the framework internals: [tensor/shape.mli](tensor/shape.mli), [tensor/tensor.mli](tensor/tensor.mli), [tensor/operation.ml](tensor/operation.ml), [arrayjit/lib/context.mli](arrayjit/lib/context.mli).

@@ -467,6 +467,27 @@ let%op batch_norm2d ~label ?(epsilon = 1e-5) ?(momentum = 0.9) () ~train_step x 
       (* During inference: use running statistics (simplified for now) *)
       (gamma *. normalized) + beta
 
+(** Batch normalization for MLP layers - normalizes across the batch axis only.
+    Unlike {!batch_norm2d} there are no spatial axes to reduce over; channel axes
+    are carried through unchanged via the [..c..] row variable.
+
+    See the FIXME on {!batch_norm2d}: running statistics are not implemented, so
+    [momentum] is ignored and inference falls back to the learned
+    [gamma]/[beta] parameters rather than population statistics. Acceptable for
+    tutorial examples; do not rely on inference correctness for
+    distribution-shifted inputs. *)
+let%op batch_norm1d ~label ?(epsilon = 1e-5) ?(momentum = 0.9) () ~train_step x =
+  let _ = momentum in
+  (* Compute batch statistics across the batch axis only, for each channel *)
+  let mean = (x ++ "..o.. | ..c.. => 0 | ..c.." [ "o" ]) /. dim o in
+  let centered = x - mean in
+  let variance = ((centered *. centered) ++ "..o.. | ..c.. => 0 | ..c..") /. dim o in
+  let std_dev = sqrt (variance + !.epsilon) in
+  let normalized = centered /. std_dev in
+  match train_step with
+  | Some _ -> ({ gamma = 1. } *. normalized) + { beta = 0. }
+  | None -> (gamma *. normalized) + beta
+
 (** Conv block with conv -> batch norm -> activation pattern *)
 let%op conv_bn_relu ~label ?(kernel_size = 3) ?(stride = 1) () =
   let conv = conv2d ~label:("conv" :: label) ~kernel_size ~stride () in
