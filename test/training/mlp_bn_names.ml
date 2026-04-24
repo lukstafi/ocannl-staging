@@ -185,15 +185,21 @@ let () =
   (* Recenter all-positive uniform1 inits to [-0.25, 0.25). Same mitigation as
      transformer_names.ml / fsm_transformer.ml — OCANNL's default init produces
      non-negative weights, which makes the hidden preactivation saturate and
-     traps SGD at a high-loss plateau. Skip w1, which already uses Kaiming
-     (centered normal-scaled); recentering would shrink its variance. *)
-  let is_w1 p =
-    List.exists (Tn.label p.Tensor.value |> String.split ~on:'_') ~f:(String.equal "w1")
+     traps SGD at a high-loss plateau. Exclusions:
+     - [w1] uses Kaiming-normal (already centered & correctly scaled);
+       recentering would shrink its variance.
+     - [gamma] and [beta] of [batch_norm1d] are initialized to 1 and 0 so the
+       BN layer begins as an identity affine transform; the recenter would
+       turn that into 0.25 and -0.25, biasing the model from step 0. *)
+  let label_parts p = Tn.label p.Tensor.value |> String.split ~on:'_' in
+  let is_excluded p =
+    List.exists (label_parts p) ~f:(fun s ->
+        String.equal s "w1" || String.equal s "gamma" || String.equal s "beta")
   in
   Set.iter batch_loss.Tensor.params ~f:(fun p ->
       let tn = p.Tensor.value in
       Train.set_on_host tn;
-      if not (is_w1 p) then begin
+      if not (is_excluded p) then begin
         let vals = Tn.get_values tn in
         Array.iteri vals ~f:(fun i v -> vals.(i) <- 0.5 *. (v -. 0.5));
         Tn.set_values tn vals
