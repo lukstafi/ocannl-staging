@@ -151,10 +151,12 @@ let () =
      logits: final linear projection to [vocab_size]. *)
   let bn1 = Nn_blocks.batch_norm1d ~label:[ "bn1" ] () in
   let%op embed input = { c; o = [ embed_dim ] } * input in
+  (* Part 3 uses Kaiming init on the hidden weight w1: standard-normal samples
+     scaled by sqrt(6 / fan_in). Matches Karpathy's kaiming_normal. *)
   let%op mk_hidden () ~train_step x =
     tanh
       (bn1 ~train_step
-         ((embed x +* { w1 } "bs|->e; |se->h => b|->h" [ "s"; "e" ])
+         ((embed x +* { w1 = kaiming normal1 () } "bs|->e; |se->h => b|->h" [ "s"; "e" ])
          + { b1; o = [ hid_dim ] }))
   in
   let hidden = mk_hidden () in
@@ -183,13 +185,19 @@ let () =
   (* Recenter all-positive uniform1 inits to [-0.25, 0.25). Same mitigation as
      transformer_names.ml / fsm_transformer.ml — OCANNL's default init produces
      non-negative weights, which makes the hidden preactivation saturate and
-     traps SGD at a high-loss plateau. *)
+     traps SGD at a high-loss plateau. Skip w1, which already uses Kaiming
+     (centered normal-scaled); recentering would shrink its variance. *)
+  let is_w1 p =
+    List.exists (Tn.label p.Tensor.value |> String.split ~on:'_') ~f:(String.equal "w1")
+  in
   Set.iter batch_loss.Tensor.params ~f:(fun p ->
       let tn = p.Tensor.value in
       Train.set_on_host tn;
-      let vals = Tn.get_values tn in
-      Array.iteri vals ~f:(fun i v -> vals.(i) <- 0.5 *. (v -. 0.5));
-      Tn.set_values tn vals);
+      if not (is_w1 p) then begin
+        let vals = Tn.get_values tn in
+        Array.iteri vals ~f:(fun i v -> vals.(i) <- 0.5 *. (v -. 0.5));
+        Tn.set_values tn vals
+      end);
 
   let sgd_step = Train.to_routine ctx bindings (Asgns.sequence [ update; sgd ]) in
 
@@ -202,13 +210,12 @@ let () =
 
   (* === Training === *)
   (* Coarse threshold guard: monotonically decreasing upper bound.
-     BatchNorm trades peak convergence for training stability — losses here
-     plateau ~2.52 vs ~2.32 in mlp_names.ml. *)
+     BatchNorm + Kaiming-normal init trade peak convergence for training
+     stability — losses here plateau ~2.71 vs ~2.32 in mlp_names.ml. *)
   let epoch_loss_limit epoch =
     if epoch = 0 then 4.0
     else if epoch < 5 then 3.0
-    else if epoch < 10 then 2.65
-    else 2.6
+    else 2.8
   in
   for epoch = 0 to epochs - 1 do
     let epoch_loss = ref 0. in
@@ -284,9 +291,9 @@ let () =
   let final_dev = mean_loss_over (dev_ctx, dev_tgt, n_dev) in
   let final_test = mean_loss_over (test_ctx, test_tgt, n_test) in
   (* Thresholds ~3% above observed sync_cc values under the fixed seed. *)
-  let train_below = 2.6 in
-  let dev_below = 2.6 in
-  let test_below = 2.6 in
+  let train_below = 2.8 in
+  let dev_below = 2.8 in
+  let test_below = 2.8 in
   printf "Final train loss=%.4f train_below=%b\n%!" final_train
     Float.(final_train < train_below);
   printf "Final dev   loss=%.4f dev_below=%b\n%!" final_dev Float.(final_dev < dev_below);

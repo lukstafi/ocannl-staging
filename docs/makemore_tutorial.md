@@ -163,24 +163,30 @@ The model becomes:
 embed → (w1 +* ... + b1) → batch_norm1d → tanh → (w2 * hidden + b2)
 ```
 
-Threading `train_step` through the layers requires the unit-closure pattern
-from `nn_blocks.ml`:
+The hidden weight `w1` uses Kaiming-normal initialization — `normal1 ()`
+sampled from a standard normal then scaled by `sqrt(scale_sq / fan_in)` per
+[`Nn_blocks.kaiming`](../lib/nn_blocks.ml). Threading `train_step` through
+the layers requires the unit-closure pattern from `nn_blocks.ml`:
 
 ```ocaml
 let bn1 = Nn_blocks.batch_norm1d ~label:[ "bn1" ] () in
 let%op mk_hidden () ~train_step x =
   tanh
     (bn1 ~train_step
-       ((embed x +* { w1 } "bs|->e; |se->h => b|->h" [ "s"; "e" ])
+       ((embed x +* { w1 = kaiming normal1 () }
+           "bs|->e; |se->h => b|->h" [ "s"; "e" ])
        + { b1; o = [ hid_dim ] }))
 in
 let hidden = mk_hidden ()
 ```
 
-`let%op mk_hidden () ~train_step x = ...` lifts the inline `{ w1 }` and
+`let%op mk_hidden () ~train_step x = ...` lifts the inline `{ w1 = … }` and
 `{ b1 }` parameters to the `()` closure scope — they are constructed *once*
 when `mk_hidden ()` is called, and shared across every subsequent invocation
-(training, dev/test eval, inference generation).
+(training, dev/test eval, inference generation). The post-init recentering
+pass (inherited from Part 2) explicitly skips `w1` so Kaiming's scale is
+preserved; `c`, `b1`, `w2`, `b2` are still recentered from uniform `[0,1)`
+to roughly centered.
 
 ### Known limitation — running statistics
 
