@@ -2,6 +2,22 @@
 
 ### Added
 
+- `Nn_blocks.batch_norm1d` — MLP batch normalization that normalizes over the
+  batch axis only. Mirrors `batch_norm2d`; inherits its running-statistics
+  FIXME (inference uses the learned `gamma`/`beta` on batch statistics rather
+  than population estimates).
+- `test/training/mlp_names.ml` — Bengio-style MLP (makemore Part 2): learned
+  character embeddings, `block_size = 3` context, einsum-contracted hidden
+  layer, deterministic 80/10/10 train/dev/test split. Prints numeric final
+  train/dev/test NLL plus threshold booleans, then three generated names.
+- `test/training/mlp_bn_names.ml` — MLP + `batch_norm1d` (makemore Part 3).
+  Same data pipeline as Part 2 with BatchNorm between the hidden linear and
+  `tanh`. Documents the single-example-inference collapse from the
+  running-stats FIXME.
+- `docs/makemore_tutorial.md` — walk-through of the makemore progression
+  (Parts 1–4 + cross-link to the transformer variant) mirroring Andrej
+  Karpathy's *Neural Networks: Zero to Hero* lectures, with a README entry
+  and Part 4 instructions for inspecting the generated backward code.
 - Axis concatenation/block tensor support in einsum notation (`a^b` syntax)
   - Tensor concatenation (`a; b => a^b`)
   - Axis slicing to extract prefix/suffix (`a^b => a`, `a^b => b`)
@@ -17,6 +33,10 @@
 
 ### Changed
 
+- `test/training/bigram_mlp.ml` renamed to `test/training/mlp_names.ml` and
+  rewritten as a true multi-character-context Bengio MLP. The old file's name
+  misrepresented its architecture (bigram-width input but "MLP" label); the
+  new file is the makemore Part 2 example (see `docs/makemore_tutorial.md`).
 - Parser updated to allow n-ary einsum specs (e.g., `a;b;c;d=>result`)
 - Concat symbols are now grouped into connected components for iteration using union-find
 - Product space and product iterators now use list arrays to handle concatenated dimensions
@@ -24,6 +44,9 @@
 
 ### Fixed
 
+- Removed a duplicate `fsm_transformer` test stanza in `test/training/dune`
+  that tripped `dune build @check` with `Executable "fsm_transformer" appears
+  for the second time in this directory`.
 - Missing on-device margin initialization for `Fetch` cases
 - `invalid_vars` computation now uses correct four-quantifier logic
 - Zero-dimension components filtered out in `s_dim_one` substitution
