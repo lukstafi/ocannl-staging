@@ -62,11 +62,11 @@ summarizing comment on issue #263. The write-up must cover:
       *not* answered (e.g. backwards pass, multi-query / grouped-query
       attention specifics, paged KV cache integration, cross-backend story
       for Metal). *See `## Out of scope` below.*
-- [ ] A comment summarizing the findings is posted on
-      [issue #263](https://github.com/ahrefs/ocannl/issues/263). *Comment is
-      staged under `## Proposed issue comment` below; posting is deferred to
-      a post-merge step (operator confirmation required), since posting
-      before merge would link to a non-existent revision.*
+- [x] A comment summarizing the findings is posted on
+      [issue #263](https://github.com/ahrefs/ocannl/issues/263). *Posted at
+      [issue #263 comment 4351844753](https://github.com/ahrefs/ocannl/issues/263#issuecomment-4351844753);
+      the staged text is preserved under `## Proposed issue comment` below
+      for reference.*
 
 ## Context
 
@@ -678,12 +678,10 @@ reviewer/operator decision:
 
 ## Proposed issue comment
 
-Draft for posting to https://github.com/ahrefs/ocannl/issues/263 once
-this write-up is on `master`. The comment is staged here; **it is not
-posted as part of this round**, since posting before merge would link
-to a non-existent revision. Post-merge action: confirm with the
-operator, then run `gh issue comment 263 -F <body-file>` and verify
-with `gh issue view 263 --comments`.
+**Posted** at
+https://github.com/ahrefs/ocannl/issues/263#issuecomment-4351844753 on
+2026-04-30. The text below is preserved verbatim for reference; any
+future edits should be made on GitHub directly.
 
 > Feasibility study landed in `docs/proposals/gh-ocannl-263.md`.
 >
