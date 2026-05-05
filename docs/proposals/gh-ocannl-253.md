@@ -4,6 +4,12 @@
 **Issue**: https://github.com/ahrefs/ocannl/issues/253
 **Milestone**: v0.8
 
+> Imbue counterpart: the Imbue 70B infrastructure-guide lessons live in
+> [`docs/imbue-infrastructure-lessons.md`](../imbue-infrastructure-lessons.md)
+> ([gh-ocannl-270](https://github.com/ahrefs/ocannl/issues/270)). That memo
+> defers all kernel/training-loop material here; this proposal stays the
+> canonical home for llm.c-derived recommendations.
+
 ## Goal
 
 Produce a structured analysis of Andrej Karpathy's [llm.c](https://github.com/karpathy/llm.c) project, identifying which design decisions and optimization techniques are applicable to OCANNL, which are already covered by existing tasks, and which represent unique lessons that should inform OCANNL's v0.8-v0.9 development. The deliverable is a documented gap analysis with concrete recommendations, not direct code porting -- llm.c is hand-written C/CUDA for GPT-2, while OCANNL generates kernels from a high-level einsum IR. The value is in understanding *why* llm.c's choices work and mapping those insights to OCANNL's architecture.
