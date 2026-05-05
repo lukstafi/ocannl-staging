@@ -84,24 +84,54 @@ let test_scale_consistent_with_einsum () =
   Stdio.printf "k = %s\n"
     (Option.value_map k.var_ref.solved_dim ~default:"unresolved" ~f:Int.to_string)
 
-(* Both-unsolved Dim/Dim branch: directly bind two delayed_var_refs to fresh dim vars (the
-   einsum-capture path resolves solved_dim eagerly via update_delayed_var_refs, so it does not
-   reach this branch). The set_scale call must succeed and accumulate the Affine constraint
-   without raising; solved_dim stays None on both sides because no constraint solver runs. *)
-let test_scale_dim_dim_direct () =
+(* Both-unsolved Dim/Dim branch end-to-end: shape-free parameters leave their einsum captures with
+   var = `Dim _ but solved_dim = None (the +* with concrete-shape inputs resolves solved_dim
+   eagerly via update_delayed_var_refs). set_scale therefore reaches the both-unsolved Dim/Dim
+   branch and emits the Affine constraint into active_constraints. set_dim then pins the small
+   side, and forward_once runs the constraint solver, which must reduce
+     Dim_eq { Var v_k, Affine { stride=2; over=Var v_i; conv=None; stride_offset=0 } }
+   against Var v_i = 4 to derive Var v_k = 8. The asserted post-condition (k = 8) would fail
+   under any local mutation of the emitted constraint -- e.g. stride = 1 (would give k=4), the
+   wrong over variable (self-reference becomes unsat), or replacing Affine with plain Dim_eq
+   equality (would force k=i=4). *)
+let test_scale_dim_dim_propagates_through_solver () =
   let open Nn_blocks.DSL_modules in
   Tensor.unsafe_reinitialize ();
-  Stdio.printf "\n=== set_scale: both unsolved Dim/Dim direct construction ===\n";
-  let large = Shape.get_variable_ref "large_dim" in
-  let small = Shape.get_variable_ref "small_dim" in
-  large.var <- `Dim (Row.get_var ~name:"large_v" ());
-  small.var <- `Dim (Row.get_var ~name:"small_v" ());
-  Shape.set_scale ~factor:2 large small;
-  Stdio.printf "set_scale Dim/Dim returned without raising\n";
-  Stdio.printf "large.solved_dim = %s\n"
-    (Option.value_map large.var_ref.solved_dim ~default:"unresolved" ~f:Int.to_string);
-  Stdio.printf "small.solved_dim = %s\n"
-    (Option.value_map small.var_ref.solved_dim ~default:"unresolved" ~f:Int.to_string)
+  Stdio.printf "\n=== set_scale: Dim/Dim propagates through solver ===\n";
+  let ctx = Context.auto () in
+  let%op a = { a } in
+  let%op b = { b } in
+  let%op c = a +* "i;k=>ik" [ "i"; "k" ] b in
+  Shape.set_scale ~factor:2 k i;
+  Shape.set_dim i 4;
+  let _ctx = Train.forward_once ctx c in
+  Stdio.printf "i = %s\n"
+    (Option.value_map i.var_ref.solved_dim ~default:"unresolved" ~f:Int.to_string);
+  Stdio.printf "k = %s\n"
+    (Option.value_map k.var_ref.solved_dim ~default:"unresolved" ~f:Int.to_string)
+
+(* Negative companion to the above: pin both sides to values inconsistent with the Affine
+   relationship (i = 8, k = 15, factor = 2 -> 2*8 = 16 != 15), then trigger inference. The
+   solver must surface a Shape_error. If the emitted constraint were a plain equality or a
+   different Affine shape, the solver would either silently accept or fail with a different
+   error -- the assertion on the first error line catches both. *)
+let test_scale_dim_dim_mismatch_through_solver () =
+  let open Nn_blocks.DSL_modules in
+  Tensor.unsafe_reinitialize ();
+  Stdio.printf "\n=== set_scale: Dim/Dim mismatch surfaces through solver ===\n";
+  let ctx = Context.auto () in
+  let%op a = { a } in
+  let%op b = { b } in
+  let%op c = a +* "i;k=>ik" [ "i"; "k" ] b in
+  Shape.set_scale ~factor:2 k i;
+  Shape.set_dim i 8;
+  Shape.set_dim k 15;
+  try
+    let _ctx = Train.forward_once ctx c in
+    Stdio.printf "ERROR: expected Shape_error, got none\n"
+  with Row.Shape_error (msg, _) ->
+    let first_line = List.hd_exn (String.split_lines msg) in
+    Stdio.printf "got expected Shape_error: %s\n" first_line
 
 (* Row-variable rejection: mirror the row capture pattern from
    test/einsum/test_einsum_capture.ml (`"a..s..;..s..b=>ab" [ "s" ]`). propagate_shapes
@@ -129,5 +159,6 @@ let () =
   test_scale_non_divisible ();
   test_scale_invalid_factor ();
   test_scale_consistent_with_einsum ();
-  test_scale_dim_dim_direct ();
+  test_scale_dim_dim_propagates_through_solver ();
+  test_scale_dim_dim_mismatch_through_solver ();
   test_scale_rejects_row_variable ()

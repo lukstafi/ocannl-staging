@@ -23,10 +23,12 @@ i = 4
 j = 6
 k = 12
 
-=== set_scale: both unsolved Dim/Dim direct construction ===
-set_scale Dim/Dim returned without raising
-large.solved_dim = unresolved
-small.solved_dim = unresolved
+=== set_scale: Dim/Dim propagates through solver ===
+i = 4
+k = 8
+
+=== set_scale: Dim/Dim mismatch surfaces through solver ===
+got expected Shape_error: solved dimensions for axis: mismatch
 
 === set_scale: rejects row-variable ref ===
 got expected Shape_error: Shape.set_scale: requires two dimension variables; got at least one row variable (labels s, dim_var)
