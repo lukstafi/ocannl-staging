@@ -1,0 +1,34 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+
+=== set_scale: input solved first, hidden propagated ===
+input = 8
+hidden = 16
+
+=== set_scale: hidden solved first, input propagated ===
+input = 8
+hidden = 16
+
+=== set_scale: both solved, mismatch ===
+got expected Shape_error: Shape.set_scale: dimensions do not satisfy d_large = factor * d_small
+
+=== set_scale: solved hidden not divisible by factor ===
+got expected Shape_error: Shape.set_scale: solved dimension 17 for hidden_dim is not divisible by factor 2
+
+=== set_scale: invalid factor (0) ===
+got expected Shape_error: Shape.set_scale: factor must be >= 1, got 0
+
+=== set_scale: consistent factor alongside einsum capture ===
+i = 4
+j = 6
+k = 12
+
+=== set_scale: Dim/Dim propagates through solver ===
+i = 4
+k = 8
+
+=== set_scale: Dim/Dim mismatch surfaces through solver ===
+got expected Shape_error: solved dimensions for axis: mismatch
+
+=== set_scale: rejects row-variable ref ===
+got expected Shape_error: Shape.set_scale: requires two dimension variables; got at least one row variable (labels s, dim_var)
