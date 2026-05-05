@@ -228,3 +228,14 @@
  (libraries base ocannl stdio)
  (preprocess
   (pps ppx_here ppx_ocannl)))
+
+(test
+ (name test_set_scale)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules test_set_scale)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))

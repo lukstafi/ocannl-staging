@@ -1674,6 +1674,85 @@ let set_equal delayed_ref1 delayed_ref2 =
           }
         :: !active_constraints
 
+let set_scale ~factor delayed_ref_large delayed_ref_small =
+  if factor < 1 then
+    raise
+    @@ Row.Shape_error
+         ("Shape.set_scale: factor must be >= 1, got " ^ Int.to_string factor, []);
+  (* Row-variable guard: reject any ref whose var is `Row _, regardless of which side is solved.
+     Without this, the solved-side branches below would forward to set_dim on a Row ref, which
+     silently emits a Rows_constr Total_elems constraint -- out of scope for this API. *)
+  (match (delayed_ref_large.var, delayed_ref_small.var) with
+  | `Row _, _ | _, `Row _ ->
+      raise
+      @@ Row.Shape_error
+           ( "Shape.set_scale: requires two dimension variables; got at least one row variable \
+              (labels " ^ delayed_ref_large.var_ref.ref_label ^ ", "
+             ^ delayed_ref_small.var_ref.ref_label ^ ")",
+             [] )
+  | _ -> ());
+  if factor = 1 then set_equal delayed_ref_large delayed_ref_small
+  else
+    match (delayed_ref_large, delayed_ref_small) with
+    | ( { var_ref = { solved_dim = Some d_large; _ }; _ },
+        { var_ref = { solved_dim = Some d_small; _ }; _ } ) ->
+        if d_large = factor * d_small then ()
+        else
+          raise
+          @@ Row.Shape_error
+               ( "Shape.set_scale: dimensions do not satisfy d_large = factor * d_small",
+                 [
+                   Row.Dim_mismatch
+                     [ Row.get_dim ~d:d_large (); Row.get_dim ~d:(factor * d_small) () ];
+                 ] )
+    | { var_ref = { solved_dim = Some d_large; ref_label; _ }; _ }, delayed_ref_small ->
+        if d_large % factor <> 0 then
+          raise
+          @@ Row.Shape_error
+               ( "Shape.set_scale: solved dimension " ^ Int.to_string d_large ^ " for "
+                 ^ ref_label ^ " is not divisible by factor " ^ Int.to_string factor,
+                 [] );
+        set_dim delayed_ref_small (d_large / factor)
+    | delayed_ref_large, { var_ref = { solved_dim = Some d_small; _ }; _ } ->
+        set_dim delayed_ref_large (factor * d_small)
+    | ( { var_ref = { solved_dim = None; ref_label = label_l; _ }; var = var_l },
+        { var_ref = { solved_dim = None; ref_label = label_s; _ }; var = var_s } ) -> (
+        match (var_l, var_s) with
+        | `Dim dim_var_large, `Dim dim_var_small ->
+            active_constraints :=
+              Row.Dim_eq
+                {
+                  d1 = Row.Var dim_var_large;
+                  d2 =
+                    Row.Affine
+                      {
+                        stride = factor;
+                        over = Row.Var dim_var_small;
+                        conv = None;
+                        stride_offset = 0;
+                      };
+                  origin =
+                    [
+                      {
+                        lhs_name = label_l;
+                        lhs_kind = `Output;
+                        rhs_name = Int.to_string factor ^ "*" ^ label_s;
+                        rhs_kind = `Output;
+                        operation = Some "Shape.set_scale Dim-Dim";
+                      };
+                    ];
+                }
+              :: !active_constraints
+        | `Not_set_yet, _ | _, `Not_set_yet ->
+            raise
+            @@ Row.Shape_error
+                 ( "Shape.set_scale: insufficient information between labels " ^ label_l ^ " and "
+                   ^ label_s,
+                   [] )
+        | `Row _, _ | _, `Row _ ->
+            (* Defensive: already caught by the top-of-function row guard. *)
+            assert false)
+
 let set_terminal ~is_param (sh : t) =
   Hash_set.add unused_shapes sh.id;
   let get_origin kind =
