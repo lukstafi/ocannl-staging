@@ -825,26 +825,25 @@ module Fresh () : Ir.Backend_impl.Lowered_backend = struct
       | Byte_prec _, Byte_prec _
       | Uint16_prec _, Uint16_prec _
       | Int32_prec _, Int32_prec _
+      | Uint32_prec _, Uint32_prec _
       | Int64_prec _, Int64_prec _
+      | Uint64_prec _, Uint64_prec _
       | Uint4x32_prec _, Uint4x32_prec _
       | Bfloat16_prec _, Bfloat16_prec _
       | Fp8_prec _, Fp8_prec _
       | Void_prec, Void_prec ->
           ("", "")
+      (* CUDA-native half-precision intrinsics (no shared/Metal equivalent). *)
       | Double_prec _, Half_prec _ -> ("__double2half(", ")")
       | Single_prec _, Half_prec _ -> ("__float2half(", ")")
       | Byte_prec _, Half_prec _ -> ("__ushort2half_rn((unsigned short int)", ")")
-      | Double_prec _, Uint4x32_prec _ -> ("double_to_uint4x32(", ")")
-      | Single_prec _, Uint4x32_prec _ -> ("single_to_uint4x32(", ")")
-      | Int32_prec _, Uint4x32_prec _ -> ("int32_to_uint4x32(", ")")
-      | Int64_prec _, Uint4x32_prec _ -> ("int64_to_uint4x32(", ")")
-      | Uint4x32_prec _, _ -> ("", ".v[0]")
-      | Byte_prec _, Uint4x32_prec _ -> ("byte_to_uint4x32(", ")")
-      | Uint16_prec _, Uint4x32_prec _ -> ("uint16_to_uint4x32(", ")")
-      | Bfloat16_prec _, Uint4x32_prec _ -> ("bfloat16_to_uint4x32(", ")")
-      | Half_prec _, Uint4x32_prec _ -> ("half_to_uint4x32(", ")")
-      | Fp8_prec _, Uint4x32_prec _ -> ("fp8_to_uint4x32(", ")")
-      | _, Uint4x32_prec _ -> ("{(unsigned int)(", "), 0, 0, 0}")
+      (* Uint4x32 conversions: mirror the shared [Ops.c_convert_precision] / Metal backend so the
+         per-element threefry counter (the uint32/uint64 index offset coerced to the Uint4x32 binop
+         precision) is bit-spread across all four words via [<prec>_to_uint4x32] instead of landing
+         un-spread in v[0]. The device helpers exist in builtins_cuda.ml; the to-scalar direction
+         uses the [_uniform] variants (the only ones defined, matching [ternop_syntax] above). *)
+      | Uint4x32_prec _, _ -> ("uint4x32_to_" ^ Ops.prec_string to_ ^ "_uniform(", ")")
+      | _, Uint4x32_prec _ -> (Ops.prec_string from ^ "_to_uint4x32(", ")")
       | _ -> ("(" ^ typ_of_prec to_ ^ ")(", ")")
 
     let kernel_log_param = Some ("int", "log_id")
