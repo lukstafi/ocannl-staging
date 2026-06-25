@@ -97,6 +97,55 @@ end
 let initialized_devices = Hash_set.create (module Int)
 let initialized = ref false
 
+(* Hoisted out of [Fresh ().Cuda_syntax_config] so it can be unit-tested without a CUDA device (see
+   test/operations/test_cuda_prng_convert_precision.ml). *)
+let typ_of_prec = function
+  | Ops.Byte_prec _ -> "unsigned char"
+  | Ops.Uint16_prec _ -> "unsigned short"
+  | Ops.Int32_prec _ -> "int"
+  | Ops.Int64_prec _ -> "long long"
+  | Ops.Uint4x32_prec _ -> "uint4x32_t"
+  | Ops.Half_prec _ -> "__half"
+  | Ops.Bfloat16_prec _ -> "__nv_bfloat16" (* CUDA bfloat16 type *)
+  | Ops.Fp8_prec _ -> "__nv_fp8_e5m2" (* CUDA FP8 type (E5M2 format) *)
+  | Ops.Single_prec _ -> "float"
+  | Ops.Double_prec _ -> "double"
+  | Ops.Void_prec -> "void"
+  | Ops.Uint32_prec _ -> "unsigned int"
+  | Ops.Uint64_prec _ -> "unsigned long long"
+
+(* CUDA precision-conversion codegen. Mirrors the shared [Ops.c_convert_precision] / Metal backend
+   for the [Uint4x32] cases so the per-element threefry counter (the uint32/uint64 index offset
+   coerced to the Uint4x32 binop precision) is bit-spread across all four words via
+   [<prec>_to_uint4x32] instead of landing un-spread in v[0] — the latter is what made on-device PRNG
+   statistically broken. The device helpers exist in builtins_cuda.ml; the to-scalar direction uses
+   the [_uniform] variants (the only ones defined for CUDA/Metal, unlike the bare names referenced by
+   [Ops.c_convert_precision]). Only the half-precision arms are genuinely CUDA-native intrinsics. *)
+let convert_precision ~from ~to_ =
+  match (from, to_) with
+  | Ops.Double_prec _, Ops.Double_prec _
+  | Single_prec _, Single_prec _
+  | Half_prec _, Half_prec _
+  | Byte_prec _, Byte_prec _
+  | Uint16_prec _, Uint16_prec _
+  | Int32_prec _, Int32_prec _
+  | Uint32_prec _, Uint32_prec _
+  | Int64_prec _, Int64_prec _
+  | Uint64_prec _, Uint64_prec _
+  | Uint4x32_prec _, Uint4x32_prec _
+  | Bfloat16_prec _, Bfloat16_prec _
+  | Fp8_prec _, Fp8_prec _
+  | Void_prec, Void_prec ->
+      ("", "")
+  (* CUDA-native half-precision intrinsics (no shared/Metal equivalent). *)
+  | Double_prec _, Half_prec _ -> ("__double2half(", ")")
+  | Single_prec _, Half_prec _ -> ("__float2half(", ")")
+  | Byte_prec _, Half_prec _ -> ("__ushort2half_rn((unsigned short int)", ")")
+  (* Uint4x32 conversions: see the module-comment above. *)
+  | Uint4x32_prec _, _ -> ("uint4x32_to_" ^ Ops.prec_string to_ ^ "_uniform(", ")")
+  | _, Uint4x32_prec _ -> (Ops.prec_string from ^ "_to_uint4x32(", ")")
+  | _ -> ("(" ^ typ_of_prec to_ ^ ")(", ")")
+
 module Fresh () : Ir.Backend_impl.Lowered_backend = struct
   include Backend_impl.Device (Device_stream) (Slab)
 
@@ -362,20 +411,7 @@ module Fresh () : Ir.Backend_impl.Lowered_backend = struct
     let arg_int_prefix =
       if Utils.settings.large_models then "const unsigned long long " else "const unsigned int "
 
-    let typ_of_prec = function
-      | Ops.Byte_prec _ -> "unsigned char"
-      | Ops.Uint16_prec _ -> "unsigned short"
-      | Ops.Int32_prec _ -> "int"
-      | Ops.Int64_prec _ -> "long long"
-      | Ops.Uint4x32_prec _ -> "uint4x32_t"
-      | Ops.Half_prec _ -> "__half"
-      | Ops.Bfloat16_prec _ -> "__nv_bfloat16" (* CUDA bfloat16 type *)
-      | Ops.Fp8_prec _ -> "__nv_fp8_e5m2" (* CUDA FP8 type (E5M2 format) *)
-      | Ops.Single_prec _ -> "float"
-      | Ops.Double_prec _ -> "double"
-      | Ops.Void_prec -> "void"
-      | Ops.Uint32_prec _ -> "unsigned int"
-      | Ops.Uint64_prec _ -> "unsigned long long"
+    let typ_of_prec = typ_of_prec
 
     let vec_typ_of_prec ~length prec =
       match (prec, length) with
@@ -817,34 +853,7 @@ module Fresh () : Ir.Backend_impl.Lowered_backend = struct
       | FMA, _ -> func "fma"
       | Mul3, _ -> fun v1 v2 v3 -> group (parens (v1 ^^ string " * " ^^ v2 ^^ string " * " ^^ v3))
 
-    let convert_precision ~from ~to_ =
-      match (from, to_) with
-      | Ops.Double_prec _, Ops.Double_prec _
-      | Single_prec _, Single_prec _
-      | Half_prec _, Half_prec _
-      | Byte_prec _, Byte_prec _
-      | Uint16_prec _, Uint16_prec _
-      | Int32_prec _, Int32_prec _
-      | Uint32_prec _, Uint32_prec _
-      | Int64_prec _, Int64_prec _
-      | Uint64_prec _, Uint64_prec _
-      | Uint4x32_prec _, Uint4x32_prec _
-      | Bfloat16_prec _, Bfloat16_prec _
-      | Fp8_prec _, Fp8_prec _
-      | Void_prec, Void_prec ->
-          ("", "")
-      (* CUDA-native half-precision intrinsics (no shared/Metal equivalent). *)
-      | Double_prec _, Half_prec _ -> ("__double2half(", ")")
-      | Single_prec _, Half_prec _ -> ("__float2half(", ")")
-      | Byte_prec _, Half_prec _ -> ("__ushort2half_rn((unsigned short int)", ")")
-      (* Uint4x32 conversions: mirror the shared [Ops.c_convert_precision] / Metal backend so the
-         per-element threefry counter (the uint32/uint64 index offset coerced to the Uint4x32 binop
-         precision) is bit-spread across all four words via [<prec>_to_uint4x32] instead of landing
-         un-spread in v[0]. The device helpers exist in builtins_cuda.ml; the to-scalar direction
-         uses the [_uniform] variants (the only ones defined, matching [ternop_syntax] above). *)
-      | Uint4x32_prec _, _ -> ("uint4x32_to_" ^ Ops.prec_string to_ ^ "_uniform(", ")")
-      | _, Uint4x32_prec _ -> (Ops.prec_string from ^ "_to_uint4x32(", ")")
-      | _ -> ("(" ^ typ_of_prec to_ ^ ")(", ")")
+    let convert_precision = convert_precision
 
     let kernel_log_param = Some ("int", "log_id")
     let log_involves_file_management = false
