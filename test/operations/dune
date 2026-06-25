@@ -379,6 +379,19 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; task-7d2ed931 regression: asserts the CUDA convert_precision bit-spreading codegen directly,
+; without a CUDA device. (optional) so it is dropped on hosts where cudajit / arrayjit.cuda_backend
+; is unavailable.
+(test
+ (name test_cuda_prng_convert_precision)
+ (package neural_nets_lib)
+ (optional)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules test_cuda_prng_convert_precision)
+ (libraries base arrayjit.ir arrayjit.utils arrayjit.cuda_backend stdio))
+
 (test
  (name test_where_simple)
  (package neural_nets_lib)
