@@ -1,0 +1,6 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+uint32 -> uint4x32: uint32_to_uint4x32(_)
+uint64 -> uint4x32: uint64_to_uint4x32(_)
+uint4x32 -> single: uint4x32_to_single_uniform(_)
+CUDA PRNG convert_precision tests passed!

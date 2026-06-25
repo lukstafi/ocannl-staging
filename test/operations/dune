@@ -380,17 +380,24 @@
   (pps ppx_here ppx_ocannl)))
 
 ; task-7d2ed931 regression: asserts the CUDA convert_precision bit-spreading codegen directly,
-; without a CUDA device. (optional) so it is dropped on hosts where cudajit / arrayjit.cuda_backend
-; is unavailable.
+; without a CUDA device. The (select ...) gates on arrayjit.cuda_backend (which needs cudajit): on
+; CUDA hosts the .real.ml asserts the codegen; off-platform the .missing.ml reproduces the golden
+; output so the test passes trivially (mirrors test_cuda_pool_offset).
 (test
  (name test_cuda_prng_convert_precision)
  (package neural_nets_lib)
- (optional)
- (deps
-  ocannl_config
-  (env_var OCANNL_BACKEND))
+ (deps ocannl_config test_cuda_prng_convert_precision.expected)
  (modules test_cuda_prng_convert_precision)
- (libraries base arrayjit.ir arrayjit.utils arrayjit.cuda_backend stdio))
+ (libraries
+  base
+  stdio
+  arrayjit.ir
+  arrayjit.utils
+  (select
+   test_cuda_prng_convert_precision.ml
+   from
+   (arrayjit.cuda_backend -> test_cuda_prng_convert_precision.real.ml)
+   (-> test_cuda_prng_convert_precision.missing.ml))))
 
 (test
  (name test_where_simple)
