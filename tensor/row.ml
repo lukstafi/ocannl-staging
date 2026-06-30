@@ -2241,74 +2241,6 @@ let add_rank_edge ~rows v w k =
     then Hashtbl.add_multi global_rank_edges ~key:v ~data:(w, k)
 
 (* Equate two rows, no broadcasting. Does not resolve inequalities. *)
-let check_row_eq_stage1 _origin (r1 : t) (r2 : t) : unit =
-  let check_dim d1 d2 =
-    match (d1, d2) with
-    | Dim _, Dim _ when not (equal_dim d1 d2) ->
-        raise @@ Shape_error ("solved dimensions for axis: mismatch", [ Dim_mismatch [ d1; d2 ] ])
-    | _ -> ()
-  in
-  let check_pairs dims1 dims2 =
-    List.iter (List.zip_exn dims1 dims2) ~f:(fun (d1, d2) -> check_dim d1 d2)
-  in
-  let check_common_anchors (r1 : t) (r2 : t) =
-    let beg_l = min (List.length r1.beg_dims) (List.length r2.beg_dims) in
-    let dims_l = min (List.length r1.dims) (List.length r2.dims) in
-    check_pairs (List.take r1.beg_dims beg_l) (List.take r2.beg_dims beg_l);
-    check_pairs (take_from_end r1.dims dims_l) (take_from_end r2.dims dims_l)
-  in
-  let explicit_rank r = List.length r.beg_dims + List.length r.dims in
-  let check_open_closed ~(open_ : t) ~(closed : t) =
-    let closed_flat = closed.beg_dims @ closed.dims in
-    if explicit_rank open_ > List.length closed_flat then
-      raise @@ Shape_error ("Number of axes mismatch", [ Row_mismatch [ r1; r2 ] ]);
-    check_pairs open_.beg_dims (List.take closed_flat (List.length open_.beg_dims));
-    check_pairs open_.dims (take_from_end closed_flat (List.length open_.dims))
-  in
-  match (r1, r2) with
-  | r1, r2 when equal_row r1 r2 -> ()
-  | { bcast = Broadcastable; _ }, { bcast = Broadcastable; _ } ->
-      let r1_flat = r1.beg_dims @ r1.dims in
-      let r2_flat = r2.beg_dims @ r2.dims in
-      if List.length r1_flat <> List.length r2_flat then
-        raise @@ Shape_error ("Mismatching number of axes", [ Row_mismatch [ r1; r2 ] ]);
-      check_pairs r1_flat r2_flat
-  | { bcast = Row_var v1; _ }, { bcast = Row_var v2; _ } ->
-      if equal_row_var v1 v2 && explicit_rank r1 <> explicit_rank r2 then
-        raise
-        @@ Shape_error ("Infinite number of axes by self-reference", [ Row_mismatch [ r1; r2 ] ]);
-      check_common_anchors r1 r2
-  | ({ bcast = Row_var _; _ } as open_), ({ bcast = Broadcastable; _ } as closed)
-  | ({ bcast = Broadcastable; _ } as closed), ({ bcast = Row_var _; _ } as open_) ->
-      check_open_closed ~open_ ~closed
-
-let stage1_row_eq_commits_marker ~row_ineq_mentions (r1 : t) (r2 : t) : bool =
-  let closed_middle_is_nonempty ~(open_ : t) ~(closed : t) =
-    let open_beg_l = List.length open_.beg_dims in
-    let open_dims_l = List.length open_.dims in
-    let closed_beg_l = List.length closed.beg_dims in
-    let closed_dims_l = List.length closed.dims in
-    if open_beg_l + open_dims_l > closed_beg_l + closed_dims_l then false
-    else
-      let beg_overlap = min open_beg_l closed_beg_l in
-      let end_overlap = min open_dims_l closed_dims_l in
-      let end_spill = open_dims_l - end_overlap in
-      let value_beg_dims =
-        closed.beg_dims |> Fn.flip List.drop beg_overlap |> Fn.flip drop_from_end end_spill
-      in
-      let value_dims =
-        closed.dims
-        |> Fn.flip List.drop (open_beg_l - beg_overlap)
-        |> Fn.flip drop_from_end end_overlap
-      in
-      not (List.is_empty value_beg_dims && List.is_empty value_dims)
-  in
-  match (r1, r2) with
-  | ({ bcast = Row_var v; _ } as open_), ({ bcast = Broadcastable; _ } as closed)
-  | ({ bcast = Broadcastable; _ } as closed), ({ bcast = Row_var v; _ } as open_) ->
-      row_ineq_mentions v && closed_middle_is_nonempty ~open_ ~closed
-  | _ -> false
-
 let%debug5_sexp rec unify_row ~stage origin (eq : t * t) env : constraint_ list * _ =
   let rec solve (ineqs, env) : constraint_ -> constraint_ list * _ = function
     | Dim_eq { d1; d2; origin = eq_origin } ->
@@ -4001,15 +3933,6 @@ let%debug4_sexp solve_inequalities ~(stage : stage)
     ?(discardable_vars : dim_var_set = dim_var_set_empty) (ineqs : constraint_ list) env :
     constraint_ list * _ =
   let env = { env with discardable_vars = Set.union discardable_vars env.discardable_vars } in
-  let row_ineq_mentions =
-    let row_mentions v (row : row) =
-      match row.bcast with Row_var v' -> equal_row_var v v' | Broadcastable -> false
-    in
-    fun v ->
-      List.exists ineqs ~f:(function
-        | Row_ineq { res; opnd; _ } -> row_mentions v res || row_mentions v opnd
-        | _ -> false)
-  in
   let rec solve ineqs (env : environment) : constraint_ list * _ =
     (* Process a single constraint and return new constraints + updated env *)
     let process_constraint env ineq =
@@ -4019,14 +3942,8 @@ let%debug4_sexp solve_inequalities ~(stage : stage)
           (* Substituted inside unify_dim. *)
           unify_dim ~stage origin (d1, d2) env
       | Row_eq { r1; r2; origin } ->
-          let r1 = subst_row env r1 and r2 = subst_row env r2 in
-          if (not (is_stage2_up stage)) && stage1_row_eq_commits_marker ~row_ineq_mentions r1 r2
-          then (
-            check_row_eq_stage1 origin r1 r2;
-            if equal_row r1 r2 then ([], env) else ([ Row_eq { r1; r2; origin } ], env))
-          else
-            (* Substituted inside unify_row. *)
-            unify_row ~stage origin (r1, r2) env
+          (* Substituted inside unify_row. *)
+          unify_row ~stage origin (r1, r2) env
       | Dim_ineq { res; opnd; origin; _ } ->
           let _ineq : constraint_ = ineq in
           let res = subst_dim env res and opnd = subst_dim env opnd in

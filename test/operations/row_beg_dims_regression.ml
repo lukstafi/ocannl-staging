@@ -52,8 +52,7 @@ let test_2_substitution_preserves_beg_dims () =
   let value : Row.t = { beg_dims = []; dims = [ dim 4 ]; bcast = Broadcastable; prov } in
   let rho_row : Row.t = { beg_dims = []; dims = []; bcast = Row_var rho; prov } in
   let eq = Row.Row_eq { r1 = rho_row; r2 = value; origin = dummy_origin } in
-  let remaining, env = Row.solve_inequalities ~stage:Stage1 [ eq ] Row.empty_env in
-  let _remaining, env = Row.solve_inequalities ~stage:Stage2 remaining env in
+  let _remaining, env = Row.solve_inequalities ~stage:Stage1 [ eq ] Row.empty_env in
   let result = Row.subst_row env in_ in
   let expected : Row.t = { beg_dims = [ dim 3 ]; dims = [ dim 4 ]; bcast = Broadcastable; prov } in
   if Row.equal result expected then Stdio.printf "  PASS\n"
