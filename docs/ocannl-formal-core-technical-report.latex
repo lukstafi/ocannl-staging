@@ -758,6 +758,22 @@ That choice is a policy commitment: sound, but not complete for all
 $\approx$-solutions. RE-nested is the same phenomenon with another
 row variable in the middle.
 
+Operationally, stage 1 now avoids this commitment when the same stage-1
+worklist contains an inequality that can observe the placement. If an
+open/closed row equality would bind the row variable to a non-empty
+middle segment and a row inequality in the same worklist mentions that
+variable, stage 1 treats the equality as a constraint, not as a rewrite:
+it substitutes facts already known from the environment, rejects
+necessary failures such as excessive explicit flank length or concrete
+forced-axis mismatch, and re-emits the equality. The empty closure
+$\rho=[]$ still discharges in stage 1 because it has no marker
+placement choice, and isolated exact bindings still discharge online so
+shape propagation can make progress. The deferred RE-open-closed binding
+begins in stage 2. Internal row equalities emitted by row-inequality
+rules, such as RI-deficit template bindings, still discharge in stage 1
+because they are rank-growth facts rather than flat-equivalence
+representative choices.
+
 RE-cross is a two-variable word equation. Its solutions are the
 principal family
 
@@ -994,6 +1010,13 @@ original flat equality, so the step is sound. It can lose solutions
 because marked row inequalities can distinguish
 $\approx$-equivalent marker placements, and because the deferred
 word equations can have non-selected rank branches. $\square$
+
+The stage-1 implementation refinement does not change this proof.
+Delaying an open/closed row equality whose binding would be non-empty is
+a semantic no-op: the same constraint remains in $\Phi$. The
+online check only rejects cases already shown unsatisfiable by Lemma
+4.5. When the equality is deferred, the later stage-2 discharge is the
+same policy-refining RE-open-closed step accounted for above.
 
 \textbf{Definition 5.2 (Rank abstraction).} The rank abstraction of
 $\Chat$ is the finite set of rank facts obtained from row
@@ -1412,6 +1435,18 @@ inequality, but the deterministic inherited-split policy commits
 $\rho=[]\cdot\diamond\cdot[3,5]$, after which the
 inequality fails.
 
+Earlier solver versions could make this commitment during stage 1, so
+merely prepending or appending constraints could determine whether the
+row equality was substituted before the row inequality had recorded its
+cap. The current implementation removes that online-order dependence for
+the same-batch form of the witness: because the worklist also contains a
+row inequality mentioning $\rho$, stage 1 records and checks the
+equality but postpones the marker-placement rewrite to stage 2. This is
+not a completeness theorem for the mixed flat/marked theory; it only
+makes the first policy point phase-delimited when a marker-sensitive
+obligation is locally visible, rather than an accident of constraint
+order inside that generated batch.
+
 It is tempting to try to prove that this cannot happen for surface
 OCANNL programs. That claim should be split into two smaller statements.
 
@@ -1825,6 +1860,14 @@ following places:
   Open-vs-closed row equality matches explicit open flanks against the
   closed flat list and then commits an inherited split for the bound row
   variable.
+\item
+  During stage 1, open-vs-closed row equality whose binding would be
+  non-empty is checked but not used as a rewrite when the same worklist
+  contains a row inequality mentioning the bound variable. Empty
+  bindings and isolated exact bindings still discharge in stage 1. The
+  deferred inherited-split binding starts in stage 2; internal
+  rank-growth row equalities emitted by inequality solving are still
+  discharged in stage 1.
 \item
   Shifted same-variable equality and inequality are deferred until
   another constraint solves the variable or stage-6 upward closing

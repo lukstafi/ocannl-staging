@@ -13,3 +13,7 @@ eq, cross surpluses alone (satisfiable, family binding): no error
 eq, cross surpluses then rho2 ~ [] (satisfiable only sporadically): no error
 eq, rho2 ~ [] then cross surpluses (same store, pinned first): no error
 eq, mirror cross surpluses then rho2 ~ [] (trailing guard rejects): Shape_error: Number of axes mismatch
+stage1 defers Prop 2.9 witness, equality first: no error, rho solved in stage1: false
+stage1 defers Prop 2.9 witness, inequality first: no error, rho solved in stage1: false
+stage1 discharges empty row equality: no error, rho solved in stage1: true
+stage1 discharges isolated right-anchored row equality: no error, rho solved in stage1: true
