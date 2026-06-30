@@ -128,7 +128,8 @@ let test_spec_substitution_preserves_leading () =
         origin = dummy_origin;
       }
   in
-  let _remaining, env = Row.solve_inequalities ~stage:Stage1 [ eq ] Row.empty_env in
+  let remaining, env = Row.solve_inequalities ~stage:Stage1 [ eq ] Row.empty_env in
+  let _remaining, env = Row.solve_inequalities ~stage:Stage2 remaining env in
   let result = Row.subst_row env row in
   match row_has_structure result ~expected_beg:[ 3 ] ~expected_trailing:[ 4; 7 ] with
   | Ok () -> (
