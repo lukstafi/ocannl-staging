@@ -4,15 +4,27 @@
 
 Modern neural network code is often cluttered with shape bookkeeping: explicit calls to reshape, unsqueeze, expand, transpose, reductions, and integer-axis arguments. OCANNL combines an embedded DSL that removes this boilerplate, with an end-to-end compiler with GPU backends. Users define tensor operations as OCaml functions using concise notation generalizing the Einstein summation convention. Concatenation is an expression over indices e.g. `i^j`, convolution is a contraction with affine operand addressing e.g. `stride*i + dilation*k`. A sequence of axes can be captured by a single variable, e.g. `..batch..` or `..activations..`, sandwiched between leading and trailing axes; with up to three such variables per shape. We call these *row variables*. The paper showcases three examples: tensor expressions core multi-head attention, rank-polymorphic 2D convolution; and tensor computation for Stochastic Gradient Descent with momentum and Nesterov-inspired correction. OCANNL performs broadcast-aware global bidirectional shape inference and derives loop-index maps for code generation. We formalize the inference problem for the core calculus (excluding affine and concatenation) and show properties of OCANNL's solver (proofs in the appendix). OCANNL's compiler inlines computations to avoid materializing intermediate tensors, and performs common subexpression elimination. This paper does not showcase benchmarks nor argue for performance, leaving that to follow-up work and the Q&A.
 
-## Shapes, Syntax Extensions and Examples
+## Shapes, Tensor Expressions, Syntax Extensions and Examples
 
 OCANNL shapes have three kinds (sequences) of axes, from outermost: batch, output, input. The kind designation is by convention (not enforced, but facilitated). In specifications, the syntax resembles programming language types: `batch | input -> output`. For example: tensor multiplication `*` reduces the input axes of the operator tensor (matrix etc.) with output axes of the operand tensor (vector or matrix etc.), while broadcasting or treating pointwise the batch axes.
 
-OCANNL introduces two syntaxes. Extension point `%op` creates *tensor expressions* (type `Tensor.t`), or OCaml functions returning tensor expressions which we call tensor *operations*. Extension point `%cd` creates tensor *computations* (assignments, type `Assignments.comp`). Unlike computations, tensor expressions are differentiable and support separate initialization. Both extensions support inline definitions of new tensors via OCaml's record syntax. For example: `{ w1 = kaiming normal1 () }` inside `%op` introduces tensor `w1` with initialization expression `kaiming normal1 ()`; `{ sgd_momentum }` inside `%cd` below introduces a (non-differentiable, no initialization) tensor `sgd_momentum`; `{ w_q }` inside `%op` below introduces a tensor with default initialization (e.g. centered uniform distribution).
+A *tensor node* `Tnode.t` is an identity that also carries dimensionality, precision and padding information, but neither data (memory) nor computation. Computations themselves (assignments, type `Assignments.comp`) are expressed in terms of tensor nodes, which makes them hardware (backend) agnostic.
+
+*Tensor expressions* `Tensor.t` are the primary type of the OCANNL frontend. They combine an inferrable shape, a value node and *forward computation* to update it, and optionally a gradient node and *backprop computation* to propagate the gradient to its component tensors. OCANNL tracks initialization via a field `Tensor.t.params` that's a set of tensors. OCANNL frontend does not have a separate abstraction for machine learning models: any tensor can be considered to be a model, whose trainable parameters are the differentiable subset of its `params`.
+
+OCANNL introduces two syntaxes. Extension point `%op` creates tensor expressions, or OCaml functions returning tensor expressions which we call tensor *operations*. Extension point `%cd` creates tensor computations. Both extensions support inline definitions of new tensors via OCaml's record syntax. For example: `{ w1 = kaiming normal1 () }` inside `%op` introduces tensor `w1` with initialization expression `kaiming normal1 ()`; `{ sgd_momentum }` inside `%cd` below introduces a (non-differentiable, no initialization) tensor `sgd_momentum`; `{ w_q }` inside `%op` below introduces a tensor with default initialization (e.g. centered uniform distribution).
 
 At the heart of OCANNL are indexing specifications for expressing tensor computations. They generalize the Einstein summation convention: indices missing from the result are reduced over. The specification syntax uses `;` to separate arguments and `=>` to separate out the result. Ellipsis `...` in the specifications are expanded contextually as either `..batch..`, `..input..` or `..output..` row variables. Assignments in the `%cd` syntax specify the unary or binary arithmetic and the accumulation arithmetic explicitly. For the `%op` syntax, we have mixfix operators combining the arithmetic semantics, for example: `++` is identity with additive accumulation, `+*` is multiplication with additive accumulation. These operators also support *variable capture* for both dimensions and rows -- the variables from a trailing string list are introduced into scope earlier than they first appear (simiarly to inline definitions). The captured variables can be used for both shape constraints `Shape.set_dim`, `Shape.equal_dims` and converted to scalars via `dim` (for row variables, the value is the product of the dimensions of the axes).
 
 ```ocaml
+let%op softmax ~spec ?(temperature = 1.0) () =
+  let spec = spec ^ " => " ^ replace_alphanum_by_0 spec in
+  fun x ->
+    let x_scaled = if Float.(temperature <> 1.0) then x /. !.temperature else x in
+    let max_vals = x_scaled @^^ spec in
+    let exp_vals = exp (x_scaled - max_vals) in
+    exp_vals /. (exp_vals ++ spec)
+
 let%op multi_head_attention ~num_heads ~d_k ~d_v () x =
   let q = { w_q } * x in
   let k = { w_k } * x in
@@ -29,7 +41,7 @@ let%op multi_head_attention ~num_heads ~d_k ~d_v () x =
     (attn_weights +* v
        " ... s | t -> h; ... t | h e => ... s | h e" [ "e" ])
 ```
-> **Figure 1. Core multi-head attention in OCANNL.** Axes: query position `s`, key/value position `t`, head `h`, key width `d`, and value width `e`. Batch rank, parameter shapes, score shape, contractions, and loop-index maps are inferred.
+> **Figure 1. Core multi-head attention in OCANNL.** Axes: query position `s`, key/value position `t`, head `h`, key width `d`, and value width `e`. Batch rank, parameter shapes, score shape, contractions, and loop-index maps are inferred. `@^` is infix for `max`, and `@^^` is the `max` reducing equivalent of `++`.
 
 ```ocaml
 let%op conv2d ~label ?(kernel_size = 3) ?(stride = 1)
@@ -60,15 +72,25 @@ let sgd_one ~learning_rate ?(momentum = 0.0) ?(weight_decay = 0.0)
 ```
 > **Figure 3. Stochastic Gradient Descent with momentum.** Introduces intermediate state-tracking tensors in a computation. Optional Nesterov-inspired correction.
 
+OCANNL implements coproduct of axes `^`, generalizing concatenation. It is unlocked by the n-ary operator `++^`. We extend the solution space for dimensions with dimension-0, the unit of the coproduct; it is not a valid shape dimension (actual axes never end up at dimension-0). The operator `++^` reduces additively (users can define their own variants).
+
+| PyTorch/TensorFlow | OCANNL | Notes |
+|-----|------|----|
+| `torch.cat([a, b], dim=0)` | `(a, b) ++^ "x,...; y,... => x^y,..."` | Concatenate tensors |
+| `torch.stack([a, b], dim=0)` | `[a; b]` | Stack with new axis (block tensor syntax) |
+| `x[:n]` (prefix slice) | `x ++^ "a^b => a"` | Extract prefix (size inferred) |
+| `x[n:]` (suffix slice) | `x ++^ "a^b => b"` | Extract suffix (size inferred) |
+| `x[:-3]` (all but last 3) | `x ++^ "a^3 => a"` | Drop last 3 elements |
+
 ## Shapes and Projections: design choices and claims
 
 We say "row" for analogy with type systems, but our shape rows are sequences of axes rather than records. OCANNL doesn't have a "full-blown" parametric polymorphism because we don't generalize inferred shapes into shape schemes, but it does have "poor man's" parametric polymophism because we generate fresh shape variables for shape constraints derived at tensor operation call sites. Thus OCANNL has two forms of rank polymorphism: structural (subtyping) via broadcasting and parametric via row variables.
 
 The motivation to have left flank axes in shape (row) terms first came from the slice operation -- for example when subdividing data into hierarchical minibatches (like in data parallel batched training). This impacts broadcasting: rather assuming that implicit axes from broadcasting land to the left of the "left flank", we generalize broadcasting to happen in the middle between left and right flanks of already-determined axes of a shape row. This allows uniform handling of broadcast axes and inferred axes in inference (removing a major source of non-determinism).
 
-However, consistently applying the semantics that falls out of the subtyping polymorphism (formally $\sqsubseteq$ in the Appendix) to the indexing (aka. *einsum*) specifications seen in examples above would be both counter-intuitive and overly restrictive: the broadcasting behavior of the operands would have to match the position of the row variables in the specification. To relax this, we introduce a *flat row equivalence* relation (formally $\approx$ in the Appendix), it preserves rank but erases the broadcasting position. Except for relaxing broadcast position checking, $C \approx T^{\mathrm{lhs}}$ is stricter than $C \sqsubseteq T^{\mathrm{lhs}}$ would be (see Appendix section 3), improving shape propagation through inference. 
+However, consistently applying the semantics that falls out of the structural rank-polymorphism (subtyping polymorphism, formally $\sqsubseteq$ in the Appendix) to the indexing (aka. *einsum*) specifications seen in examples above would be both counter-intuitive and overly restrictive: the broadcasting behavior of the operands would have to match the position of the row variables in the specification. To relax this, we introduce a *flat row equivalence* relation (formally $\approx$ in the Appendix), it preserves rank but erases the broadcasting position. Except for relaxing broadcast position checking, $C \approx T^{\mathrm{lhs}}$ is stricter than $C \sqsubseteq T^{\mathrm{lhs}}$ would be (see Appendix section 3), improving shape propagation through inference. 
 
-In the Appendix, we provide formal semantics for the core shape constraints (for simplicity, excluding affine indexing and concatenation), present the shape and projections inference algorithms (where projections represent tensor indexing for tensor assignment loops), and prove their properties. Proofs are available online. In particular, Theorem 5.2, Theorem 5.6, and Proposition 6.2, together state inference termination and soundness. Inference is declarative: the result does not depend on the ordering of the constraints. The shape inference problem is non-principal, and the algorithm is in general incomplete. Should the incompleteness ever manifest in practice, users can provide additional constraints via for example variable capture and `Shape.set_equal`. Example of incompleteness from Remark 6.3 in the Appendix, where our inference fails although constraints are satisfiable, with $\alpha,\beta$ coming from leaf tensors and $\gamma$ result tensor:
+In the Appendix, we provide formal semantics for the core shape constraints (for simplicity, excluding affine indexing and concatenation), present the shape and projections inference algorithms (where projections represent tensor indexing for tensor assignment loops), and prove their properties. Proofs are available online. In particular, Theorem 5.2, Theorem 5.6, and Proposition 6.2, together state inference termination and soundness. Inference is declarative: the result does not depend on the ordering of the constraints. The shape inference problem is non-principal, and the algorithm is in general incomplete. Should the incompleteness ever manifest in practice, users can provide additional constraints via for example `Shape.infer_equal`, or variable capture and `Shape.set_equal`. Example of incompleteness from Remark 6.3 in the Appendix, where our inference fails although constraints are satisfiable, with $\alpha,\beta$ coming from leaf tensors and $\gamma$ result tensor:
 
 $$
 \Phi_2 = \{3_b \sqsubseteq \alpha,\ 5_b \sqsubseteq \beta,\ \gamma \sqsubseteq \alpha,\ \gamma \sqsubseteq \beta\}
@@ -78,17 +100,45 @@ Failing here is the more useful outcome, relative to guessing either $\alpha = 1
 
 ### Dimension basis instead of axis name
 
-OCANNL does not support attaching axis names to tensors, as both the semantics and ergonomics of indexing is sequence based. Instead OCANNL supports attaching bases (arbitrary identifiers) to dimensions. Dimensions of different bases are incompatible even when they're of the same size. $1_b$ is not broadcastable for any basis $b$ except for $1_\emptyset$ (basis $\emptyset$ is the identifier `bcast_if_1` and is available for explicit use). When not specified, user provided dimensions get basis `default`. This improves shape inference as it ensures data vectors of dimension 1 don't become accidentally broadcastable.
+OCANNL does not support attaching axis names to tensors, as both the semantics and ergonomics of indexing are sequence based. Instead OCANNL supports attaching bases (arbitrary identifiers) to dimensions. Dimensions of different bases are incompatible even when they're of the same size. $1_b$ is not broadcastable for any basis $b$ except for $1_\emptyset$ (basis $\emptyset$ is the identifier `bcast_if_1` and is available for explicit use). When not specified, user provided dimensions get basis `default`. This improves shape inference as it ensures data vectors of dimension 1 don't become accidentally broadcastable.
 
 We track the distinction between parameter tensors and other leaf tensors. When an axis of a parameter tensor has nothing constraining it, inference fails with `"you forgot to specify a hidden dimension"`. When it is of a non-paramenter tensor, the unconstrained axis closes upward to $1_\emptyset$.
 
 ## Contexts and explicit compilation
 
-Unified, explicitly passed (immutable) context values. Empty root contexts determine device.
+OCANNL has an immutable context `Context.t` that unifies compilation, device, and execution contexts. Root contexts determine the device. Here are the most important operations on a context -- the bindings argument of `compile` contains the externally bound indexing symbols used in the computation:
+
+```ocaml
+val compile : t -> Assignments.comp -> Indexing.unit_bindings -> t * routine
+val run : t -> routine -> t
+val copy : src:t -> dst:t -> Tnode.t -> unit
+val to_host : t -> Tnode.t -> Ndarray.t
+val from_host : t -> Tnode.t -> Ndarray.t -> t
+```
+
+Contexts track dependencies (e.g. whether a tensor node is initialized before use) both at routine's compile time and at runtime.
+
+OCANNL has multi-stage shape inference. Stage 1 runs as tensor expressions are constructed. Calling `Context.compile` triggers stages 2 and later for constraints that are in flight (global store) at that time.
 
 ## Related work
 
-## Conclusion
+OCANNL's shape inference design arose from the author's appreciation for the readability of einsum notation in JAX, and familiarity with constraint-based type inference combining parametricity and subtyping. In particular, variable elimination, such as the closure computation in *Pottier, “A Framework for Type Inference with Subtyping”, ICFP 1998*, inspired OCANNL's shape inference solver. Other related works discussed below are not influences; we only offer a selection as an exhaustive treatment would require a survey paper.
+
+Dependent types enable tracking tensor shapes in tensor types; they are included in restricted forms in ergonomic programming languages with type inference. The DML system *Xi, Pfenning, "Dependent Types in Practical Programming", 1999* paved the way to GADTs and refinement types. The most prominent current example is Futhark *Henriksen, Elsman, Bailly, "Shape-Constrained Array Programming with Size-Dependent Types", 2023*. It has capable type inference, but no rank-polymorphism. This contrasts with Qube *Trojahner, Grelck, "Dependently typed array programs don’t go wrong", 2009*. Qube has parametric rank-polymorphism but no type inference.
+
+An interesting recent work is Star *Bachurski, Mycroft, and Orchard, "Structuring Arrays with Algebraic Shapes", 2025*. It interprets algebraic data types as types of tensor indices. This is reminiscent of OCANNL's connection between shapes and projections. Star supports structural rank-polymoprhism via subtyping: as in OCANNL, Star's shapes form a lattice (but as in type systems, the lattice is distributive, while OCANNL's lattice is not distributive). Star does not aim at tracking array (dimension) sizes. Star does not have shape inference in the following sense: it does not synthesize new algebraic data types.
+
+APL and J introduced the rank-polymorphic array-programming tradition: functions consume cells and are lifted over frames of extra axes, as formalized in Remora *Justin Slepak, Olin Shivers, Panagiotis Manolios, "The Semantics of Rank Polymorphism", 2019*. This is structural rank-polymorphism. A similarity with OCANNL is that the computation semantics are derived at function application site. In OCANNL, freshened constraints are introduced when a function computes tensor values (at OCaml runtime), these constraints are used both for shapes and for indexing (computation semantics). Refined Remora *Matviichuk, Shivers, "Refined Remora: Constraining Array Shapes", 2026* adds SMT-checked refinements over dimensions and shape sequences, bringing expressivity from below to beyond what's available in OCANNL. However, refinements are not inferred.
+
+*Vasilache, Zinenko, Theodoridis et. al. "Tensor Comprehensions: Framework-Agnostic High-Performance Machine Learning Abstractions", 2018*. This is the closest surface precedent: index variables induce ranges, right-hand-side-only indices induce reductions, affine subscripts express convolution, and underconstrained ranges require explicit annotations. Production systems propagate symbolic or partial shapes through graphs or IRs. There is no rank-polymorphism. The notation is not as concise as in OCANNL: numeric precisions need to always be specified (in OCANNL they are inferred bidirectionally), and tensor fixed rank templates need to be declared.
+
+## Conclusions and future work
+
+OCANNL uniquely combines parametric rank-polymorphism and structural rank-polymorphism, and offers powerful shape inference. It aims to cover most practical shape inference challenges, barring inherent incompleteness that would require backtracking.
+
+The Appendix presents definitions and theorems showing termination and soundness, and illustrating the degree of (in)completeness. A full treatment with proofs is available at: [ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf](https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf).
+
+**Authorship:** all the content above was written entirely by the human author, without any AI/LLM feedback except for some help in the *Related work* section. The appendix below and the accompanying [technical report](https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf) were created by Claude Fable 5 (interactively, Appendix trimmed down for brevity) and GPT 5.5 (final compilation and proof gaps).
 
 ## Appendix: Shape and Projections inference: semantics and correctness
 
@@ -137,20 +187,15 @@ and symmetrically for $r_\vee$ aligned from the back (joins taken in $D$; note t
 
 The implementation does not use the observational equivalence of rows-as-operands: its equality sites use $\approx$ (observational equivalence is finer), its order sites the marked order (observational equivalence is looser because it absorbs explicit inner-edge $1_\emptyset$ entries into the middle).
 
-**Remark 2.11 (Equality-as-$\approx$ is underdetermined; the marker placement is a policy choice).** Reading the ground meaning of closed-row equality as $\approx$ (forced by practice: an einsum spec row must equate with a literal shape whose marker sits at the front — §10) makes row-equality constraints underdetermined: in $l_1\cdot\langle\rho\rangle\cdot r_1 \approx C$, the flat content of $\gamma\rho$ is forced (the middle of $\mathrm{flat}(C)$) but its marker placement is free, and by Prop. 2.10(ii) the candidates are pairwise $\sqsubseteq$-incomparable — a later *inequality* on $\rho$ can distinguish them. Witness: $\Phi = \{\,\langle\rho\rangle \approx [\,]\cdot\diamond\cdot[3,5],\ \ [3]\cdot\diamond\cdot[9,5] \sqsubseteq \langle\rho\rangle\,\}$. Under $\approx$, $\gamma\rho = [3]\cdot\diamond\cdot[5]$ satisfies both ($[3,9,5]$ vs $[3,1_\emptyset,5]$). The implementation is *$\approx$-checking but marked-committing*: it accepts the flat alignment, then commits the closed side's structural split as the value's marker placement — on this $\Phi$ it fails. Def. 3.4 now **adopts** the $\approx$ reading, so that failure is officially a *policy rejection* (Lemma 5.1's policy steps), not semantic unsatisfiability: closed-row equality joins closing (Remark 6.5) as a deliberately non-principal site.
+**Remark 2.11 (Equality-as-$\approx$ is underdetermined; the marker placement is a policy choice).** Reading the ground meaning of closed-row equality as $\approx$ (forced by practice: an einsum spec row must equate with a literal shape whose marker sits at the front — §10) makes row-equality constraints underdetermined: in $l_1\cdot\langle\rho\rangle\cdot r_1 \approx C$, the flat content of $\gamma\rho$ is forced (the middle of $\mathrm{flat}(C)$) but its marker placement is free, and by Prop. 2.10(ii) the candidates are pairwise $\sqsubseteq$-incomparable — a later *inequality* on $\rho$ can distinguish them. Witness: $\Phi = \{\,\langle\rho\rangle \approx [\,]\cdot\diamond\cdot[3,5],\ \ [3]\cdot\diamond\cdot[9,5] \sqsubseteq \langle\rho\rangle\,\}$. Under $\approx$, $\gamma\rho = [3]\cdot\diamond\cdot[5]$ satisfies both ($[3,9,5]$ vs $[3,1_\emptyset,5]$). The implementation is *$\approx$-checking but marked-committing*: it accepts the flat alignment, then commits the closed side's structural split as the value's marker placement — on this $\Phi$ it fails. Def. 3.4 now adopts the $\approx$ reading, so that failure is officially a *policy rejection* (Lemma 5.1's policy steps), not semantic unsatisfiability: closed-row equality joins closing (Remark 6.5) as a deliberately non-principal site.
 
-**Definition 2.12 (Two-sorted ground rows — proposal).** Adjoin to the marked rows of Def. 2.1 a second sort of *rigid* rows: $F^\bullet$ with $F \in D^n$, a flat sequence with **no marker**; $\mathrm{rank}(F^\bullet) = n$, and the expansion $F^\bullet{\uparrow}m$ is defined only at $m = n$, where it is $F$. Extend $\sqsubseteq$:
+**Definition 2.12 (Two-sorted ground rows).** Adjoin to the marked rows of Def. 2.1 a second sort of *rigid* rows: $F^\bullet$ with $F \in D^n$, a flat sequence with **no marker**; $\mathrm{rank}(F^\bullet) = n$, and the expansion $F^\bullet{\uparrow}m$ is defined only at $m = n$, where it is $F$. Extend $\sqsubseteq$:
 (a) marked–marked: Def. 2.3 unchanged;
 (b) $F_2^\bullet \sqsubseteq F_1^\bullet$ iff equal rank and pointwise refinement;
 (c) $F^\bullet \sqsubseteq R$ ($R$ marked) iff $\mathrm{rank}(F) \ge \mathrm{rank}(R)$ and $F[i] \sqsubseteq R{\uparrow}\mathrm{rank}(F)\,[i]$ pointwise — a rigid result may refine a broadcastable operand;
 (d) $R \sqsubseteq F^\bullet$: **never** — nothing broadcastable sits below a rigid row.
 
-**Proposition 2.13 (The two-sorted order).** The extended relation is a partial order; the empty marked row remains the unique top; and on the rigid sort, flat equality *is* equality — trivially a congruence, since no context consults a marker that does not exist. Admitting even rank-equal $R \sqsubseteq F^\bullet$ would break transitivity — $[5]\cdot\diamond\cdot[3] \sqsubseteq [\,]\cdot\diamond\cdot[3] \sqsubseteq [3]^\bullet$ would demand $[5]\cdot\diamond\cdot[3] \sqsubseteq [3]^\bullet$, a rank mismatch against a rigid row. The desired relation exists in the system as the derived *one-shot* relation — "$R \sqsubseteq F^\bullet$ at equal rank, pointwise" is literally $R \sqsubseteq^{1} F^\bullet$ of Remark 2.15.
-
-**Remark 2.14 (What the rigid sort buys, and what it costs).** TODO: re-introduce once we know what's needed by later sections.
-
-**Remark 2.15 (Einsum constraints: kind-indexed ellipsis, checking vs inference, and the one-shot order).** TODO: re-introduce once we know what's needed by later sections.
-
+**Proposition 2.13 (The two-sorted order).** The extended relation is a partial order; the empty marked row remains the unique top; and on the rigid sort, flat equality is trivially a congruence, since no context consults a marker that does not exist. Admitting even rank-equal $R \sqsubseteq F^\bullet$ would break transitivity: $[5]\cdot\diamond\cdot[3] \sqsubseteq [\,]\cdot\diamond\cdot[3] \sqsubseteq [3]^\bullet$ would demand $[5]\cdot\diamond\cdot[3] \sqsubseteq [3]^\bullet$, a rank mismatch against a rigid row. The desired relation exists in the system as the derived *one-shot* relation, "$R \sqsubseteq F^\bullet$ at equal rank, pointwise" is literally $R \sqsubseteq^{1} F^\bullet$ of Remark 2.15.
 
 ### 3. Terms, substitutions, and constraint derivation
 
