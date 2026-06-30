@@ -480,8 +480,10 @@ stage 1 treats the equality as a constraint, not as a rewrite: it substitutes
 facts already known from the environment, rejects necessary failures such as
 excessive explicit flank length or concrete forced-axis mismatch, and
 re-emits the equality. The empty closure `rho = []` still discharges in stage
-1 because it has no marker placement choice, and isolated exact bindings still
-discharge online so shape propagation can make progress. The deferred
+1 because it has no marker placement choice; exact open/closed bindings with no
+same-worklist marker-sensitive observer also discharge online so shape
+propagation can make progress. Frequent right-anchored equalities are common
+instances of that isolated case, not a separate exemption. The deferred
 RE-open-closed binding begins in stage 2. Internal row equalities emitted by
 row-inequality rules, such as RI-deficit template bindings, still discharge in
 stage 1 because they are rank-growth facts rather than flat-equivalence
@@ -1372,10 +1374,12 @@ places:
   flat list and then commits an inherited split for the bound row variable.
 - During stage 1, open-vs-closed row equality whose binding would be non-empty
   is checked but not used as a rewrite when the same worklist contains a row
-  inequality mentioning the bound variable. Empty bindings and isolated exact
-  bindings still discharge in stage 1. The deferred inherited-split binding
-  starts in stage 2; internal rank-growth row equalities emitted by inequality
-  solving are still discharged in stage 1.
+  inequality mentioning the bound variable. Empty bindings still discharge in
+  stage 1; so do exact open/closed bindings with no same-worklist
+  marker-sensitive observer. Right-anchored equalities are not a separate
+  exemption. The deferred inherited-split binding starts in stage 2; internal
+  rank-growth row equalities emitted by inequality solving are still discharged
+  in stage 1.
 - Shifted same-variable equality and inequality are deferred until another
   constraint solves the variable or stage-6 upward closing supplies the empty
   middle.
