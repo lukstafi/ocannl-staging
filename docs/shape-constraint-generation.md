@@ -13,7 +13,9 @@ read against the code. In particular, this note discharges most of the informal
 for affine axes, concatenation, total-element constraints, and marker provenance.
 
 Notation follows the formal core. Dimensions are ordered by `\sqsubseteq`, with
-the claim-free broadcast unit `1_emptyset` as top. Rows are written
+the claim-free broadcast unit `1_emptyset` as top. Row subtype/refinement
+constraints use `\preceq`, where the lower/result side is rigidified by
+flattening and the upper/operand side remains marker-sensitive. Rows are written
 `l . <rho> . r` when open and `l . diamond . r` when closed. OCANNL's concrete
 row record is:
 
@@ -45,13 +47,14 @@ The first four are the core equality and inequality forms. They are generated
 with the convention:
 
 ```text
-res \sqsubseteq opnd
+res \preceq opnd
 ```
 
 where `res` is the shape demanded by the result position and `opnd` is an
 operand shape that may broadcast into that demand. Thus pointwise operations say
 "the result row refines each operand row"; composition says "the consuming input
-row refines the produced output row".
+row refines the produced output row". `Dim_ineq` uses the dimension order
+`d_res \sqsubseteq d_opnd`.
 
 The remaining forms are implementation extensions:
 
@@ -214,17 +217,17 @@ axis list without saying which operation row forced it.
 Transpose emits inequalities:
 
 ```text
-C_B \sqsubseteq A_B
-C_I \sqsubseteq A_O
-C_O \sqsubseteq A_I
+C_B \preceq A_B
+C_I \preceq A_O
+C_O \preceq A_I
 ```
 
 Pointwise unary emits:
 
 ```text
-C_B \sqsubseteq A_B
-C_I \sqsubseteq A_I
-C_O \sqsubseteq A_O
+C_B \preceq A_B
+C_I \preceq A_I
+C_O \preceq A_O
 ```
 
 Batch slicing is exact rather than broadcast-style. It creates a fresh dimension
@@ -267,9 +270,9 @@ The coefficient may be forced only in a later stage, which is why
 Pointwise binary is pure broadcast matching:
 
 ```text
-C_B \sqsubseteq A_B    C_B \sqsubseteq B_B
-C_I \sqsubseteq A_I    C_I \sqsubseteq B_I
-C_O \sqsubseteq A_O    C_O \sqsubseteq B_O
+C_B \preceq A_B    C_B \preceq B_B
+C_I \preceq A_I    C_I \preceq B_I
+C_O \preceq A_O    C_O \preceq B_O
 ```
 
 Pointwise ternary is the same rule with three operands.
@@ -278,11 +281,11 @@ Composition, corresponding to `A * B` or function composition, emits one
 contraction compatibility plus the row flows for the remaining parts:
 
 ```text
-A_I \sqsubseteq B_O
-C_B \sqsubseteq A_B
-C_B \sqsubseteq B_B
-C_I \sqsubseteq B_I
-C_O \sqsubseteq A_O
+A_I \preceq B_O
+C_B \preceq A_B
+C_B \preceq B_B
+C_I \preceq B_I
+C_O \preceq A_O
 ```
 
 `Compose_accumulate` adds a third operand `D` that is pointwise-compatible with
@@ -292,9 +295,9 @@ the result:
 D_B, D_I, D_O are each above C_B, C_I, C_O respectively
 ```
 
-in the same `C_k \sqsubseteq D_k` direction.
+in the same `C_k \preceq D_k` direction.
 
-These rules are the concrete source of the core's row inequalities. They also
+These rules are the concrete source of the core's row-subtyping constraints. They also
 show that non-einsum operations are already "checking semantics" operations:
 they permit ordinary broadcasting.
 
@@ -317,16 +320,16 @@ C_k            \approx template_lhs_k
 template_rhs_i_k \approx A_i_k       for each operand i
 ```
 
-That is all: einsum-family operations emit row equalities, not row inequalities.
+That is all: einsum-family operations emit row equalities, not row-subtyping constraints.
 This is an inference policy, not the weakest possible checking relation. The
-formal core's one-shot inequality sandwich would be:
+formal core's row-subtyping inequality sandwich would be:
 
 ```text
-flat(C_k)       \sqsubseteq template_lhs_k
-flat(template_rhs_i_k) \sqsubseteq A_i_k
+C_k                  \preceq template_lhs_k
+template_rhs_i_k     \preceq A_i_k
 ```
 
-at the rigid/one-shot boundary. `shape.ml` deliberately strengthens this to
+at the rigid/row-subtyping boundary. `shape.ml` deliberately strengthens this to
 equality so that labels and row variables are inferred bidirectionally. This is
 the implementation fact behind Remark 2.15 and Appendix A.8.
 
@@ -415,7 +418,7 @@ feedback and simplification.
 ### 6.1 Why Equality Appears in Einsum
 
 The formal core distinguishes checking from inference. Checking an einsum-like
-operation could be expressed by one-shot inequalities against rigidified spec
+operation could be expressed by row-subtyping inequalities against rigidified spec
 rows. `shape.ml` instead emits `Row_eq` constraints for every spec row. This
 stronger relation is what lets a label in the result determine a parameter axis,
 or an operand axis determine a result axis.
@@ -604,7 +607,8 @@ For quick reference, the core generation rules in `get_inequalities` are:
 | uint4x32 conversion | input `Exact [v]`; output `Total_elems(coeff * v)` |
 | defined-by-cd | no constraints in `shape.ml` |
 
-Here `<=` abbreviates `\sqsubseteq`, and every row rule is emitted separately
+Here `<=` in implementation traces corresponds to row `\preceq` for `Row_ineq`
+and dimension `\sqsubseteq` for `Dim_ineq`; every row rule is emitted separately
 for batch, input, and output unless the rule states a cross-kind connection.
 
 ## 9. Suggested Formal Statements
@@ -621,7 +625,7 @@ dimension variables.
 `Shape_row`, `Affine`, and `Concat` leaves a constraint set in the formal core's
 language. For pointwise, transpose, and compose operations this erased set is
 exactly the broadcast checking relation. For einsum-family operations it is the
-chosen equality-based inference strengthening of the one-shot checking relation.
+chosen equality-based inference strengthening of the row subtype/refinement checking relation.
 
 **Marker Provenance.** Every marker placement in a generated or solved row is
 traceable to an external left-marked row, a written spec ellipsis, `Batch_slice`,

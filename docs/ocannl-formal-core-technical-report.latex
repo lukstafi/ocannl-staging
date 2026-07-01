@@ -167,9 +167,9 @@ The implementation was checked against the formal rules while preparing
 this report, especially \texttt{tensor/row.ml} and
 \texttt{tensor/shape.ml}. The current code already implements the key
 corrections discovered by the formalization: flat closed-row equality,
-deferred shifted self equations/inequalities, explicit closed-closed
-inequality checks across structural flanks, and the persistent rank
-graph. No code change was required for this report.
+deferred shifted self equations/row-subtyping constraints, explicit
+closed-closed row-subtyping checks across structural flanks, and the
+persistent rank graph. No code change was required for this report.
 
 \subsection{1. Dimensions}\label{1-dimensions}
 
@@ -438,15 +438,15 @@ is $[3,\oneempty,4]$. But
 $R\le S'$ fails because the upper
 row would need a leading flank of length at most one, while
 $S'$ has leading length two. Thus replacing an
-$\approx$-equivalent row inside an inequality can change truth.
+$\approx$-equivalent row inside the marked order can change truth.
 $\square$
 
 This is the first non-principality point. Flat equality is needed for
 useful spec matching, but marker placement remains a real policy choice
 whenever an equality binds a row variable.
 
-\subsubsection{2.1 Rigid Rows and One-Shot
-Checking}\label{21-rigid-rows-and-one-shot-checking}
+\subsubsection{2.1 Rigid Rows and Row
+Subtyping}\label{21-rigid-rows-and-row-subtyping}
 
 It is useful to name the marker-free interpretation of a flat row.
 
@@ -504,12 +504,17 @@ would require
 $[5]\cdot\diamond\cdot[3]\le[3]^\bullet$,
 impossible by rank.
 
-\textbf{Definition 2.12 (One-shot order).} Write
-$R\le_1 S$ when
+\textbf{Definition 2.12 (Row subtype/refinement).} Write
+$R\preceq S$ when
 $\flatrow(R)^\bullet\le S$ in the two-sorted order.
-This is the marker-erasing, single-check relation used to state results
-that should not depend on the solver\textquotesingle s marker-placement
-policy.
+This is the marker-erasing-on-the-left, marker-sensitive-on-the-right
+relation used for semantic row-subtyping constraints. The left row is
+viewed as a rigid flat result; the right row remains a marked
+broadcastable operand whose marker determines where implicit
+$\oneempty$ axes are inserted. We call this a row subtype/refinement
+relation to emphasize its role as the surface shape relation, while
+reserving the marked order $\le$ for the internal structural order of
+rows.
 
 \subsection{3. Terms, Substitutions, and
 Constraints}\label{3-terms-substitutions-and-constraints}
@@ -570,17 +575,18 @@ t_1\le t_2,
 \qquad
 R_1\approx R_2,
 \qquad
-R_1\le R_2.
+R_1\preceq R_2.
 \]
 
 A ground substitution $\gamma$ satisfies dimension equality by
 identity, dimension inequality by Definition 1.2, row equality by flat
-equivalence $\approx$, and row inequality by Definition 2.3. Write
+equivalence $\approx$, and row subtyping by Definition 2.12. Write
 $\Sol(\Phi)$ for the set of ground substitutions satisfying every
 constraint in $\Phi$.
 
 The row equality choice is the important one: equality constraints are
-marker-blind, while inequality constraints use the marked order.
+marker-blind, while row-subtyping constraints are marker-blind on the
+lower/result side and marker-sensitive on the upper/operand side.
 
 \textbf{Definition 3.5 (Substitution models and order).} A substitution
 $\sigma$ models $\Phi$, written $\sigma\modelsC\Phi$,
@@ -603,7 +609,7 @@ residual bound store.
 \subsubsection{3.1 Constraint
 Generation}\label{31-constraint-generation}
 
-The core operation rules generate row inequalities for ordinary
+The core operation rules generate row-subtyping constraints for ordinary
 broadcasting and row equalities for spec-based operations. Let
 $C$ be the result shape; $A$, $B$, and $D$
 operands; and $S_k$ the row of kind
@@ -616,14 +622,15 @@ Operation & Generated row constraints \\
 \endhead
 \bottomrule\noalign{}
 \endlastfoot
-transpose & $C_B\le A_B$, $C_I\le A_O$, $C_O\le A_I$ \\
-pointwise unary & $C_k\le A_k$ for every kind $k$ \\
-pointwise binary & $C_k\le A_k$, $C_k\le B_k$ for every kind $k$ \\
-pointwise ternary & result row below each operand row for every kind \\
-compose & $A_I\le B_O$, $C_B\le A_B$, $C_B\le B_B$,
-$C_I\le B_I$, $C_O\le A_O$ \\
+transpose & $C_B\preceq A_B$, $C_I\preceq A_O$, $C_O\preceq A_I$ \\
+pointwise unary & $C_k\preceq A_k$ for every kind $k$ \\
+pointwise binary & $C_k\preceq A_k$, $C_k\preceq B_k$ for every kind $k$ \\
+pointwise ternary & $C_k\preceq A_k$, $C_k\preceq B_k$,
+$C_k\preceq D_k$ for every kind $k$ \\
+compose & $A_I\preceq B_O$, $C_B\preceq A_B$, $C_B\preceq B_B$,
+$C_I\preceq B_I$, $C_O\preceq A_O$ \\
 compose accumulate & compose constraints plus
-$C_k\le D_k$ \\
+$C_k\preceq D_k$ \\
 batch slice & $s\cdot C_B\approx A_B$, $C_I\approx A_I$,
 $C_O\approx A_O$ \\
 permute & $C_k\approx T_{\mathit{lhs},k}$,
@@ -849,12 +856,12 @@ total flank lengths is unsatisfiable by length. RE-same-rot is a
 deferred word equation; deferral is exact, while the eventual
 least-material resolution is policy.
 
-For row inequalities, the aligned explicit overlaps are exactly the
-pointwise requirements of Definition 2.3. RI-cap packages the remaining
+For row-subtyping constraints, the aligned explicit overlaps are exactly the
+pointwise requirements of Definition 2.12. RI-cap packages the remaining
 interior requirement as a stored cap. RI-closed-op discards only
 positions where the operand expansion inserts $\oneempty$, and
 emits comparisons for explicit operand axes. RI-short-closed violates
-flank-fit with a fixed-rank result. RI-deficit is exact because any
+the rank requirement with a fixed-rank result. RI-deficit is exact because any
 solution must give the result variable at least the missing $k$
 axes; those axes decompose uniquely around the marker according to the
 template. Fresh dimensions and the fresh row variable are assigned from
@@ -867,9 +874,9 @@ The row rules without an extra check can diverge on rank-unsatisfiable
 inputs:
 
 \[
-\rho_1\le [a]\cdot\langle\rho_2\rangle,
+\rho_1\preceq [a]\cdot\langle\rho_2\rangle,
 \qquad
-\rho_2\le [b]\cdot\langle\rho_1\rangle.
+\rho_2\preceq [b]\cdot\langle\rho_1\rangle.
 \]
 
 The first constraint forces
@@ -903,7 +910,7 @@ Edges are recorded at three points:
   $\rho\xrightarrow{|l|+|r|}\rho'$;
 \item
   \textbf{RG-equal-flanks:} processing
-  $R_{\mathrm{res}}\le R_{\mathrm{op}}$ with both sides open and equal
+  $R_{\mathrm{res}}\preceq R_{\mathrm{op}}$ with both sides open and equal
   known flank lengths records
   $\rho_{\mathrm{res}}\xrightarrow{0}\rho_{\mathrm{op}}$;
 \item
@@ -991,8 +998,9 @@ The only non-semantic components are exactly:
 These choose one representative or branch from a family of
 $\approx$-solutions. The committed representative satisfies the
 original flat equality, so the step is sound. It can lose solutions
-because marked row inequalities can distinguish
-$\approx$-equivalent marker placements, and because the deferred
+because row-subtyping constraints can distinguish
+$\approx$-equivalent marker placements when the committed variable
+appears on the upper/operand side, and because the deferred
 word equations can have non-selected rank branches. $\square$
 
 \textbf{Definition 5.2 (Rank abstraction).} The rank abstraction of
@@ -1005,7 +1013,7 @@ l\cdot\langle\rho\rangle\cdot r,
 l'\cdot\langle\rho'\rangle\cdot r'.
 \]
 
-as result/operand of $\le$, the fact is
+as result/operand of $\preceq$, the fact is
 
 \[
 \rank(\rho)\ge \rank(\rho')+(|l'|+|r'|)-(|l|+|r|).
@@ -1080,7 +1088,7 @@ persistent rank graph.
 \textbf{Proof.} We use the rank abstraction of Definition 5.2 and the
 operational facts already used in Theorem 5.4: row-sort lineages are
 finite in number and do not fork; every variable binds at most once; and
-a fair run eventually processes every re-emitted row inequality.
+a fair run eventually processes every re-emitted row-subtyping constraint.
 
 First, an infinite run must perform infinitely many RI-deficit steps
 with open operands. If only finitely many binding events occurred, then
@@ -1204,22 +1212,25 @@ Define $\gammaup$ on unsolved variables by
 \]
 
 and extend through $\sigma_*$. Then $\gammaup$
-satisfies $\Constr(B_*)\cup\Eqns(\sigma_*)$ and is the
-pointwise greatest solution of that final configuration.
+satisfies $\Constr(B_*)\cup\Eqns(\sigma_*)$ and is
+pointwise greatest for that final configuration: row variables compare
+by $\preceq$, and dimension variables compare by $\le$.
 
 \textbf{Proof.} Atom caps $d\le\alpha$ hold because
 $d\le\oneempty$. Dimension adjacencies hold because
 both sides are $\oneempty$. Row caps and row adjacencies hold
-because every row is below the empty row by Proposition 2.6. Bindings
+because every row is below the empty row by Definition 2.12. Bindings
 hold by extension through $\sigma_*$.
 
 For greatestness, any solution maps unsolved dimension variables below
-$\oneempty$ and unsolved row variables below the empty row. For
+$\oneempty$ and unsolved row variables below the empty row under
+$\preceq$. For
 solved variables, use structural induction on the solved term. Ground
 dimensions and ground flanks compare by equality; variable occurrences
-use the unsolved case; an open row term under $\gammaup$ has an
-empty middle, so any material that another solution inserts at the
-marker compares against $\oneempty$ in the expanded middle.
+use the unsolved case; for an open row term, the lower side is
+flattened and the upper side under $\gammaup$ supplies
+$\oneempty$ in the middle, so shared flank entries compare by
+induction and middle positions compare against $\oneempty$.
 $\square$
 
 \textbf{Corollary 5.8 (Decision status).} Successful solving implies
@@ -1359,7 +1370,7 @@ uniform-upward solution $\gammaup$ of Proposition 5.7 is a
 solution of the final configuration. It is pointwise greatest among
 solutions of the policy-strengthened system in the marked order.
 Moreover, for every solution of the rank-policy-strengthened initial
-system, $\gamma(x)\le_1\gammaup(x)$ at row sort and
+system, $\gamma(x)\preceq\gammaup(x)$ at row sort and
 $\gamma(x)\le\gammaup(x)$ at dimension sort.
 
 \textbf{Proof.} Membership and marked greatestness for the final
@@ -1367,7 +1378,7 @@ configuration are Proposition 5.7. The policy-strengthened initial
 system maps exactly to the final configuration by Lemma 5.1 and Theorem
 5.9.
 
-For the $\le_1$ statement, dimensions are immediate from
+For the $\preceq$ statement, dimensions are immediate from
 topness or entailed ground bindings. For rows, if $x$ is
 unsolved, $\gammaup(x)$ is the empty row, and every rigidified
 flat row is below it. If $x$ is solved by a term $T$, the
@@ -1397,13 +1408,14 @@ choice.
 Discharge}\label{61-marker-provenance-and-surface-discharge}
 
 The abstract calculus admits placement-sensitive counterexamples because
-row equality is flat while row inequality is marked. The two-constraint
+row equality is flat while row subtyping still observes marker placement
+on the upper/operand side. The two-constraint
 witness is
 
 \[
 \langle\rho\rangle\approx []\cdot\diamond\cdot[3,5],
 \qquad
-[3]\cdot\diamond\cdot[9,5]\le\langle\rho\rangle.
+[3]\cdot\diamond\cdot[9,5]\preceq\langle\rho\rangle.
 \]
 
 The flat equality permits
@@ -1459,9 +1471,10 @@ flat content under a distinct declared marker split, then placement policy
 failures cannot occur in that fragment.
 
 The proof is by provenance induction. Each equality binding inherits a
-marker split from one of the declared origins above. A later marked
-inequality can distinguish another split only if the same flat content
-is reintroduced with a different declared origin. Pointwise/compose
+marker split from one of the declared origins above. A later
+row-subtyping constraint can distinguish another split only when that
+inferred content appears on the upper/operand side and the same flat
+content is reintroduced with a different declared origin. Pointwise/compose
 inequalities reuse tensor-row origins; spec equalities reuse spec
 ellipsis origins; slice is the only construct that can deliberately
 shift an origin by prepending a leading axis. Thus slice and
@@ -1518,7 +1531,7 @@ Each projection id has a solved positive size.
   $R_1\approx R_2$ aligns flat rows and emits equality equations
   per pair.
 \item
-  $R_{\mathrm{res}}\le R_{\mathrm{op}}$ aligns explicit material from the
+  $R_{\mathrm{res}}\preceq R_{\mathrm{op}}$ aligns explicit material from the
   outer edges; surplus result axes are iterated; operand axes of size
   one are pinned to zero as above.
 \item
@@ -1826,21 +1839,21 @@ following places:
   closed flat list and then commits an inherited split for the bound row
   variable.
 \item
-  Shifted same-variable equality and inequality are deferred until
-  another constraint solves the variable or stage-6 upward closing
-  supplies the empty middle.
+  Shifted same-variable equality and row-subtyping constraints are
+  deferred until another constraint solves the variable or stage-6
+  upward closing supplies the empty middle.
 \item
   \texttt{solve\_row\_ineq} records a persistent rank graph with
   non-negative edges for RG-bind, RG-equal-flanks, and RG-deficit. It
   deliberately records no edge for the RI-cap surplus case.
 \item
-  Closed-closed row inequality compares the operand\textquotesingle s
-  explicit leading and trailing material against the
-  result\textquotesingle s flat row from the outer edges, so shifted
-  explicit axes are checked rather than silently accepted.
+  Closed-closed row-subtyping compares the
+  operand\textquotesingle s explicit leading and trailing material
+  against the result\textquotesingle s flat row from the outer edges, so
+  shifted explicit axes are checked rather than silently accepted.
 \item
-  \texttt{tensor/shape.ml} emits row inequalities for pointwise,
-  transpose, and compose-style broadcasting, and emits row equalities
+  \texttt{tensor/shape.ml} emits row-subtyping constraints for
+  pointwise, transpose, and compose-style broadcasting, and emits row equalities
   for batch slice, permute, and einsum templates.
 \item
   Batch slice prepends the slice dimension to \texttt{beg\_dims},
@@ -1872,7 +1885,7 @@ Proved in this report:
 \item
   incompatibility of flat equality with the marked order;
 \item
-  two-sorted rigid-row order and one-shot checking relation;
+  two-sorted rigid-row order and row subtype/refinement relation;
 \item
   solution preservation for all semantic dimension and row rules;
 \item
