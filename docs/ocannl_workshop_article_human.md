@@ -99,7 +99,7 @@ $$
 Failing here is the more useful outcome, relative to guessing either $\alpha = 1_\emptyset, \gamma = 5_b$ or $\beta = 1_\emptyset, \gamma = 3_b$. Another example stems from the leniency in the semantics of row equivalence. See Remark after Proposition 2.9 in the appendix:
 
 $$
-\Phi = \{\,\langle\rho\rangle \approx [\,]\cdot\diamond\cdot[3,5],\ \ [3]\cdot\diamond\cdot[9,5] \sqsubseteq \langle\rho\rangle\,\}
+\Phi = \{\,\langle\rho\rangle \approx [\,]\cdot\diamond\cdot[3,5],\ \ [3]\cdot\diamond\cdot[9,5] \preceq \langle\rho\rangle\,\}
 $$
 
 Solution $\gamma\rho = [3]\cdot\diamond\cdot[5]$ would satisfy both constraints ($[3,9,5]$ vs $[3,1_\emptyset,5]$). OCANNL fails here by comitting to $\gamma\rho = [\,]\cdot\diamond\cdot[3,5]$. 
