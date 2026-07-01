@@ -148,7 +148,7 @@ One problem to explore in OCANNL's shape inference is the current semantics of d
 
 OCANNL also intends to provide to the OCaml ecosystem a compilation path for tensor computations across various GPU backends: Nvidia (CUDA), Apple Silicon (Metal), AMD (HIP). The compiler performs inlining and Common Subexpression Elimination on the lowered IR (a loop nest language). Tiling for threadblocks and tensor cores, and further optimizations, are ongoing/future work.
 
-**Authorship:** all the content above was written entirely by the human author, without any AI/LLM feedback. The appendix below and the accompanying [technical report](https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf) were created by Claude Fable 5 (interactively, Appendix trimmed down for brevity) and GPT 5.5 (final compilation and proof gaps).
+**Authorship:** all the content above was written entirely by the human author, without any AI/LLM feedback. The appendix below and the accompanying [technical report](https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf) were created by Claude Fable 5 (interactively, Appendix trimmed down for brevity) and GPT 5.5 (fixing issues I noticed, final compilation and proof gaps).
 
 ## Appendix: Shape and Projections inference: semantics and correctness
 
