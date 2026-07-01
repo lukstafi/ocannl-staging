@@ -76,7 +76,7 @@ OCANNL implements coproduct of axes `^`, generalizing concatenation. It is unloc
 
 | PyTorch/TensorFlow | OCANNL | Notes |
 |-----|------|----|
-| `torch.cat([a, b], dim=0)` | `(a, b) ++^ "x,...; y,... => x^y,..."` | Concatenate tensors |
+| `torch.cat([a, b], dim=0)` | `(a, b) ++^ "x, ...; y, ... => x^y, ..."` | Concatenate tensors |
 | `torch.stack([a, b], dim=0)` | `[a; b]` | Stack with new axis (block tensor syntax) |
 | `x[:n]` (prefix slice) | `x ++^ "a^b => a"` | Extract prefix (size inferred) |
 | `x[n:]` (suffix slice) | `x ++^ "a^b => b"` | Extract suffix (size inferred) |
@@ -96,7 +96,13 @@ $$
 \Phi_2 = \{3_b \sqsubseteq \alpha,\ 5_b \sqsubseteq \beta,\ \gamma \sqsubseteq \alpha,\ \gamma \sqsubseteq \beta\}
 $$
 
-Failing here is the more useful outcome, relative to guessing either $\alpha = 1_\emptyset, \gamma = 5_b$ or $\beta = 1_\emptyset, \gamma = 3_b$.
+Failing here is the more useful outcome, relative to guessing either $\alpha = 1_\emptyset, \gamma = 5_b$ or $\beta = 1_\emptyset, \gamma = 3_b$. Another example stems from the leniency in the semantics of row equivalence. See Remark after Proposition 2.9 in the appendix:
+
+$$
+\Phi = \{\,\langle\rho\rangle \approx [\,]\cdot\diamond\cdot[3,5],\ \ [3]\cdot\diamond\cdot[9,5] \sqsubseteq \langle\rho\rangle\,\}
+$$
+
+Solution $\gamma\rho = [3]\cdot\diamond\cdot[5]$ would satisfy both constraints ($[3,9,5]$ vs $[3,1_\emptyset,5]$). OCANNL fails here by comitting to $\gamma\rho = [\,]\cdot\diamond\cdot[3,5]$. 
 
 ### Dimension basis instead of axis name
 
@@ -130,7 +136,7 @@ An interesting recent work is Star *Bachurski, Mycroft, and Orchard, "Structurin
 
 APL and J introduced the rank-polymorphic array-programming tradition: functions consume cells and are lifted over frames of extra axes, as formalized in Remora *Slepak, Shivers, Manolios, "The Semantics of Rank Polymorphism", 2019*. This is structural rank-polymorphism. A similarity with OCANNL is that the computation semantics are derived at function application site. In OCANNL, freshened constraints are introduced when a function computes tensor values (at OCaml runtime), these constraints are used both for shapes and for indexing (computation semantics). Refined Remora *Matviichuk, Shivers, "Refined Remora: Constraining Array Shapes", 2026* adds SMT-checked refinements over dimensions and shape sequences, bringing expressivity from below to beyond what's available in OCANNL. However, refinements are not inferred.
 
-*Vasilache, Zinenko, Theodoridis et. al. "Tensor Comprehensions: Framework-Agnostic High-Performance Machine Learning Abstractions", 2018*. This is the closest surface precedent: index variables induce ranges, right-hand-side-only indices induce reductions, affine subscripts express convolution, and underconstrained ranges require explicit annotations. Production systems propagate symbolic or partial shapes through graphs or IRs. There is no rank-polymorphism. The notation is not as concise as in OCANNL: numeric precisions need to always be specified (in OCANNL they are inferred bidirectionally), and tensor fixed rank templates need to be declared.
+*Vasilache, Zinenko, Theodoridis et. al. "Tensor Comprehensions: Framework-Agnostic High-Performance Machine Learning Abstractions", 2018* is the closest surface precedent: index variables induce ranges, right-hand-side-only indices induce reductions, affine subscripts express convolution, and underconstrained ranges require explicit annotations. Production systems propagate symbolic or partial shapes through graphs or IRs. There is no rank-polymorphism. The notation is not as concise as in OCANNL: numeric precisions need to always be specified (in OCANNL they are inferred bidirectionally), and tensor fixed rank templates need to be declared.
 
 ## Conclusions and future work
 
@@ -138,7 +144,11 @@ OCANNL uniquely combines parametric rank-polymorphism and structural rank-polymo
 
 The Appendix presents definitions and theorems showing termination and soundness, and illustrating the degree of (in)completeness. A full treatment with proofs is available at: [ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf](https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf).
 
-**Authorship:** all the content above was written entirely by the human author, without any AI/LLM feedback except for some help in the *Related work* section. The appendix below and the accompanying [technical report](https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf) were created by Claude Fable 5 (interactively, Appendix trimmed down for brevity) and GPT 5.5 (final compilation and proof gaps).
+One problem to explore in OCANNL's shape inference is the current semantics of dimension basis comparisons: $1_\emptyset \neq 1_\texttt{default}$. For example, it makes scalars incompatible with dimension-1 data vectors as same-size arguments to einsum-based operations. This problem has not yet surfaced in practice: "it's a feature, not a bug". Once practical examples suffer from this incompatibility, they might motivate a more sophisticated approach (e.g. basis polymorphism).
+
+OCANNL also intends to provide to the OCaml ecosystem a compilation path for tensor computations across various GPU backends: Nvidia (CUDA), Apple Silicon (Metal), AMD (HIP). The compiler performs inlining and Common Subexpression Elimination on the lowered IR (a loop nest language). Tiling for threadblocks and tensor cores, and further optimizations, are ongoing/future work.
+
+**Authorship:** all the content above was written entirely by the human author, without any AI/LLM feedback. The appendix below and the accompanying [technical report](https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf) were created by Claude Fable 5 (interactively, Appendix trimmed down for brevity) and GPT 5.5 (final compilation and proof gaps).
 
 ## Appendix: Shape and Projections inference: semantics and correctness
 
@@ -189,7 +199,7 @@ and symmetrically for $r_\vee$ aligned from the back (joins taken in $D$; note t
 
 The implementation does not use the observational equivalence of rows-as-operands: its equality sites use $\approx$ (observational equivalence is finer), its order sites the marked order (observational equivalence is looser because it absorbs explicit inner-edge $1_\emptyset$ entries into the middle).
 
-**Remark [TR after Proposition 2.9; §6.1] (Equality-as-$\approx$ is underdetermined; the marker placement is a policy choice).** Reading the ground meaning of closed-row equality as $\approx$ (forced by practice: an einsum spec row must equate with a literal shape whose marker sits at the front — §10) makes row-equality constraints underdetermined: in $l_1\cdot\langle\rho\rangle\cdot r_1 \approx C$, the flat content of $\gamma\rho$ is forced (the middle of $\mathrm{flat}(C)$) but its marker placement is free, and by TR Proposition 2.9(ii) the candidates are pairwise $\sqsubseteq$-incomparable — a later *inequality* on $\rho$ can distinguish them. Witness: $\Phi = \{\,\langle\rho\rangle \approx [\,]\cdot\diamond\cdot[3,5],\ \ [3]\cdot\diamond\cdot[9,5] \sqsubseteq \langle\rho\rangle\,\}$. Under $\approx$, $\gamma\rho = [3]\cdot\diamond\cdot[5]$ satisfies both ($[3,9,5]$ vs $[3,1_\emptyset,5]$). The implementation is *$\approx$-checking but marked-committing*: it accepts the flat alignment, then commits the closed side's structural split as the value's marker placement — on this $\Phi$ it fails. TR Definition 3.4 now adopts the $\approx$ reading, so that failure is officially a *policy rejection* (TR Lemma 5.1's policy steps), not semantic unsatisfiability: closed-row equality joins closing (the non-principality remark below) as a deliberately non-principal site.
+**Remark [TR after Proposition 2.9; §6.1] (Equality-as-$\approx$ is underdetermined; the marker placement is a policy choice).** Reading the ground meaning of closed-row equality as $\approx$ (forced by practice: an einsum spec row must equate with a literal shape whose marker sits at the front) makes row-equality constraints underdetermined: in $l_1\cdot\langle\rho\rangle\cdot r_1 \approx C$, the flat content of $\gamma\rho$ is forced (the middle of $\mathrm{flat}(C)$) but its marker placement is free, and by TR Proposition 2.9(ii) the candidates are pairwise $\sqsubseteq$-incomparable — a later *inequality* on $\rho$ can distinguish them. Witness: $\Phi = \{\,\langle\rho\rangle \approx [\,]\cdot\diamond\cdot[3,5],\ \ [3]\cdot\diamond\cdot[9,5] \sqsubseteq \langle\rho\rangle\,\}$. Under $\approx$, $\gamma\rho = [3]\cdot\diamond\cdot[5]$ satisfies both ($[3,9,5]$ vs $[3,1_\emptyset,5]$). The implementation is *$\approx$-checking but marked-committing*: it accepts the flat alignment, then commits the closed side's structural split as the value's marker placement — on this $\Phi$ it fails. TR Definition 3.4 adopts the $\approx$ reading, so that failure is officially a *policy rejection* (TR Lemma 5.1's policy steps), not semantic unsatisfiability: closed-row equality joins closing (the non-principality remark below) as a deliberately non-principal site. A potential improvement in coverage would be to delay row equivalence constraints till a later stage of solving, but that would have its own trade-offs.
 
 **Definition [TR Definition 2.10] (Two-sorted ground rows).** Adjoin to the marked rows of TR Definition 2.1 a second sort of *rigid* rows: $F^\bullet$ with $F \in D^n$, a flat sequence with **no marker**; $\mathrm{rank}(F^\bullet) = n$, and the expansion $F^\bullet{\uparrow}m$ is defined only at $m = n$, where it is $F$. Extend $\sqsubseteq$:
 (a) marked–marked: TR Definition 2.3 unchanged;
