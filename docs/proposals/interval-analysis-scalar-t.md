@@ -66,9 +66,12 @@ Soundness design (third instance of the `delayed_prec` lifecycle pattern):
 [#340](https://github.com/ahrefs/ocannl/issues/340),
 [#343](https://github.com/ahrefs/ocannl/issues/343), landed #420;
 [schedule-ir-optops](schedule-ir-optops.md) (downstream consumer);
-[signed-index-precision](signed-index-precision.md) (removes the need to model unsigned
-wrap in the integer lattice — with signed indices, machine and mathematical integers
-agree and the "lower bound could cross zero" refusal rule disappears).
+[signed-index-precision](signed-index-precision.md) (**blocks on this**, revised
+2026-07-03: intervals need no wrap modeling over the current IR — physical padding keeps
+emitted index arithmetic non-negative by construction, so the "lower bound could cross
+zero" rule is a cheap assert until masks land — while the signed migration waits for
+intervals so tnode-granular width selection ships in its final form and the golden churn
+is paid once).
 
 ## Acceptance criteria (for the elaborated proposal)
 
