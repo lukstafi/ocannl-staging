@@ -28,7 +28,6 @@ This is the consolidated "paper-ready" release. It absorbs the frontend-finaliza
 **Frontend finalization (done):**
 - **Remove the hosted tensor mode** (#333) — got rid of the `array` field of `Tnode.t` and the "hosted" memory mode; value access and printing are now context-mediated.
 - **Tensor persistence** (#373) — tensor saving, loading, and restoring.
-- **Tensor-node ID namespaces** (#372).
 - **Axis concatenation / block tensors** (#49) — `a^b` einsum syntax for stacking/concatenation, with shifting (`1^i=>i`) and padding (`i=>1^i`) as fixed-index special cases; n-ary block-tensor specs.
 - **RoPE and non-learned position embeddings** (#398).
 - **Decoder-only autoregressive transformer toy example** (#57).
@@ -53,6 +52,7 @@ This is the consolidated "paper-ready" release. It absorbs the frontend-finaliza
 - **Shape constraint generation notes:** `docs/shape-constraint-generation.md`, documenting the front-end elaboration boundary from `shape.ml` into core constraints.
 
 **Deferred after v0.7:**
+- **Tensor-node ID namespaces** (#372).
 - **`Local_scope` initialization tracking** (#340).
 - Remaining sharding/slicing extensions beyond the v0.7 data-parallel and zero-copy leading-axis foundation (#293 follow-ups).
 - Inlining stretch goals: share one `for` loop across virtual tensors (#134); inline virtual nodes with non-linear index symbols (#133).
