@@ -63,6 +63,17 @@ bit-manipulation, threefry counters) — the exact split this proposal adopts.
   instead of a global read. (A per-routine max-numel fold remains the trivial fallback
   for expressions the analysis cannot bound, and the correct width for launch-parameter
   FFI types.)
+- Launch-parameter (FFI) widths need no first-class symbols: tinygrad's `DEFINE_VAR` is a
+  graph node only because everything there is a UOp; the load-bearing ingredients are
+  declared bounds + bind-time validation + a width pin, and OCANNL's
+  `Indexing.static_symbol` already carries the bounds slot (`static_range : int option`,
+  min 0 implicit). The interval analysis consumes symbols through its environment
+  (`symbol → interval`, as `visit_llc` already does concretely): iterators from
+  `For_loop`'s `[from_, to_]`, bound symbols from `[0, static_range)`. To add: validate
+  the bound value against `static_range` at the `lowered_bindings` assignment (mirroring
+  tinygrad's `bind` assert; one host compare per launch); parameter width = int32 when
+  the range fits, per-routine fallback when `static_range` is `None` — unbounded launch
+  params are the fallback clause's main customer.
 - The unsigned single-compare trick stays available *at guard sites* as a codegen choice:
   `(uint32_t)(i) < size` implements `0 <= i < size` in one comparison. Signed core
   arithmetic + unsigned-cast guards is strictly more expressive than either pure regime.
