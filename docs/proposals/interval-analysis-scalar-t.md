@@ -37,6 +37,14 @@ prove indices in-bounds, and fold comparisons.
   `None` — see [signed-index-precision](signed-index-precision.md) on bind-time
   validation). The one env serves both value analysis (`Embed_index` into guards and
   comparisons) and position analysis (`Get`/`Set` `idcs`, the #133/#420-style facts).
+  Wiring is already in place: `optimize_proc` receives the full
+  `static_indices : static_symbol list` (ranges included) and passes it to every
+  candidate host pass; bounds are lost only to the per-pass idiom that strips the list
+  to a bare-symbol membership `Set` (low_level.ml lines 613/796/1479 as of 2026-07-03).
+  Seeding = building a `symbol → interval` map from the same list before the strip.
+  Verify at implementation time that `static_range` (a `mutable int option`) is settled
+  before `optimize_proc` runs — dims are forced by lowering, so ranges derived from dims
+  should be; assert rather than assume.
 - **The memo must be env-scoped.** The same `scalar_t` subtree can be physically shared
   under different loop nests (immutable-tree sharing after rewrites; CSE/`Local_scope`
   reuse), and its interval differs per enclosing scope. Key the memo by (expression,
