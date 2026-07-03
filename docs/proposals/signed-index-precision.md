@@ -33,8 +33,9 @@ bit-manipulation, threefry counters) — the exact split this proposal adopts.
 
 ## Design points
 
-- `index_prec ()` returns int32 (int64 under `large_models`). Loop counters, `Embed_index`,
-  and `Get_dynamic` index casts follow.
+- Signed int32/int64 everywhere index arithmetic is emitted (loop counters, `Embed_index`,
+  `Get_dynamic` casts), with width chosen at codegen — see the tnode-granularity bullet;
+  the `large_models` switch is retired rather than flipped to signed.
 - Int32 overflow is excluded by contract, not by widening: per-node (padded) element count
   must fit int32 unless 64-bit indices are in use. This is sufficient — every index
   intermediate is bounded by some node's extent by projection construction (axis indices by
@@ -43,22 +44,43 @@ bit-manipulation, threefry counters) — the exact split this proposal adopts.
   wrapping the dims lazy in `Tnode.create` (forcing dims validates padded numel; every
   consumer inherits the guarantee). Violation is a hard error naming the node — auto-setting
   the global flag would be inconsistent across already-compiled routines.
-- Stronger endpoint: choose index width *per compiled routine* as int32/int64 by max
-  numel over touched nodes — index width is routine-internal (loop counters and casts;
-  indices are never stored in tensors), and the `large_models` switch then disappears.
-  `Ops.index_prec ()` becomes a codegen parameter instead of a global read.
-- Strongest endpoint (tinygrad's actual mechanism, verified against the 2026-06 source):
-  index expressions are built in an abstract signed dtype (`dtypes.weakint`) and width is
-  selected **per expression node** at codegen ("lower all index dtypes",
-  `pm_lower_index_dtype` in `tinygrad/uop/ops.py`): `select_dtype u = int64 if
-  u.overflows(int32) else int32`, where `overflows` is one vmin/vmax interval query
-  (`u.vmin < dtype.min or dtype.max < u.vmax`); binary ops join widths via
-  `least_upper_dtype` with casts at the boundaries; GPU special dims are pinned int32.
-  All produced widths are signed — unsigned never appears in indexing. For OCANNL this
-  means per-expression width selection falls out of
-  [interval-analysis-scalar-t](interval-analysis-scalar-t.md) for free (one
-  `interval_of` query per node at codegen); the per-routine max-numel rule above is the
-  interim approximation implementable before intervals land.
+- Width selection at **tnode granularity**, interval-driven (this task now *blocks on*
+  [interval-analysis-scalar-t](interval-analysis-scalar-t.md) — see Sequencing): an index
+  expression's width is the join over the extents and settled `vmin`/`vmax` bounds of the
+  tensor nodes it indexes or reads. Static offsets into a node are bounded by its (padded)
+  numel from projections; dynamic index values (`Get_dynamic.dyn_value`) are bounded by
+  the Tnode interprocedural bounds layer — the same summaries that discharge guards also
+  serve as the width oracle. This is tinygrad's actual mechanism (verified against the
+  2026-06 source): index expressions are built in an abstract signed dtype
+  (`dtypes.weakint`), and `pm_lower_index_dtype` in `tinygrad/uop/ops.py` selects width
+  per expression at codegen — `select_dtype u = int64 if u.overflows(int32) else int32`,
+  where `overflows` is one vmin/vmax query; binary ops join widths via
+  `least_upper_dtype` with casts at boundaries; GPU special dims pinned int32. All
+  produced widths are signed — unsigned never appears in tinygrad indexing. Mixed widths
+  within a routine are safe *because* the choices derive from proven bounds; without
+  intervals this would be ad-hoc casting, which is why the migration waits for them.
+  `Ops.index_prec ()` becomes a codegen-time resolution instead of a global read, and the
+  `large_models` switch is retired *from index-width selection only*: the same setting
+  currently also selects Metal pool-slot/offset width (`pool_slot_msl_typ`, `uint` vs
+  `ulong`), which needs its own resolution — always-64-bit slots, or a link-time
+  per-device choice from actual pooled buffer sizes — before the flag can be deleted.
+  (A per-routine max-numel fold remains the fallback for *position* expressions the
+  analysis cannot otherwise bound; value-embedded launch params instead default to
+  int64 — see the launch-parameter bullet.)
+- Launch-parameter (FFI) widths need no first-class symbols: tinygrad's `DEFINE_VAR` is a
+  graph node only because everything there is a UOp; the load-bearing ingredients are
+  declared bounds + bind-time validation + a width pin, and OCANNL's
+  `Indexing.static_symbol` already carries the bounds slot (`static_range : int option`,
+  min 0 implicit). The interval analysis consumes symbols through its environment
+  (`symbol → interval`, as `visit_llc` already does concretely): iterators from
+  `For_loop`'s `[from_, to_]`, bound symbols from `[0, static_range)`. To add: validate
+  the bound value against `static_range` at the `lowered_bindings` assignment (mirroring
+  tinygrad's `bind` assert; one host compare per launch); parameter width = int32 when
+  the declared range fits, **int64 when `static_range` is `None`**. The per-routine
+  max-numel fallback is NOT sound for launch params: value-embedded params (`!@step_n`,
+  `uniform_at`-style counters) take runtime values unrelated to any touched node's
+  extent, so a small routine could pick int32 and silently truncate a large counter.
+  Narrowing an unbounded param requires declaring (and bind-validating) a range.
 - The unsigned single-compare trick stays available *at guard sites* as a codegen choice:
   `(uint32_t)(i) < size` implements `0 <= i < size` in one comparison. Signed core
   arithmetic + unsigned-cast guards is strictly more expressive than either pure regime.
@@ -97,14 +119,13 @@ The OCANNL translation of tinygrad's `weakint`: a payload-less constructor in `O
   resolves `index_prec ()` at codegen) — the only early width commitments today are
   optimization-created guards (the gather's int64/uint64 branches become `Index_prec`)
   and the `Get_dynamic` cast target.
-- Backends resolve it per routine (max numel over touched nodes → int32/int64) before
-  emission; kernel-parameter and launch-site FFI types agree automatically since both
-  come from the same resolution. `Ops.index_prec ()` becomes this resolution rather than
-  a settings read.
-- Per-expression narrowing (tinygrad's `least_upper_dtype` joins) remains available later
-  as a pure backend optimization powered by `interval_of` — no IR change — but is
-  deferred: it only pays when a >2^31-element tensor coexists with small hot loops in one
-  kernel, and mixed-width index arithmetic invites conversion bugs.
+- Backends resolve it at emission, tnode-granularly via `interval_of` + Tnode bounds (see
+  design points), with a per-routine max-numel fold as the fallback for unbounded
+  expressions and as the launch-parameter FFI width; kernel-parameter and launch-site
+  types agree automatically since both come from the same resolution. `Ops.index_prec ()`
+  becomes this resolution rather than a settings read. (An earlier draft deferred
+  per-expression narrowing as bug-prone; that held only without intervals — widths derived
+  from proven bounds make the mixed-width joins mechanical, per tinygrad.)
 
 ## Migration inventory (churn accepted)
 
@@ -116,17 +137,28 @@ The OCANNL translation of tinygrad's `weakint`: a payload-less constructor in `O
   the gather's signed branch can use index precision directly.
 - Test goldens: `.expected` files asserting `((uint32_t)(` / `((uint64_t)(` casts
   (e.g. `test/operations/test_one_hot_embedding_lookup`), plus any `build_files` snapshots.
-- Audit: pool slot types and buffer-offset arithmetic stay 64-bit-safe.
+- Audit: pool slot types and buffer-offset arithmetic stay 64-bit-safe; the `large_models`
+  retirement must not regress Metal pool-slot width (`pool_slot_msl_typ` and the
+  large-model slot-width test) — make slots always 64-bit or add a separate allocator
+  knob before deleting the flag.
 
 ## Sequencing
 
-Before or together with masks-replacing-physical-padding (negative offsets are the first
-real consumer). Independent of the interval analysis (which works under either signedness
-but gets simpler after this lands).
+**Blocks on [interval-analysis-scalar-t](interval-analysis-scalar-t.md)** (revised
+2026-07-03; previously "independent"). The two are independent at their cores — intervals
+over the current IR need no wrap modeling because physical padding keeps all emitted index
+arithmetic non-negative by construction — but implementing this migration before intervals
+would mean an interim per-routine width scheme and paying the `.expected` golden churn
+twice. Landing after intervals lets width selection ship in its final tnode-granular form
+in one pass. Nothing correctness-urgent is delayed: the unsigned wrap traps only bite when
+logical-padding masks introduce negative offsets, and masks are sequenced after intervals
+regardless. Still before or together with masks-replacing-physical-padding (negative
+offsets are the first real consumer of signedness).
 
 ## Relations
 
-[interval-analysis-scalar-t](interval-analysis-scalar-t.md) (simplified by this);
+[interval-analysis-scalar-t](interval-analysis-scalar-t.md) (blocks this; also simplified
+by this once masks introduce negative offsets);
 [schedule-ir-optops](schedule-ir-optops.md) (Padto masks are the first consumer of
 negative index arithmetic); gh-343 integer-guard flavors in `build_guarded_gather`
 (2026-07-03) as the transitional state.
@@ -134,8 +166,9 @@ negative index arithmetic); gh-343 integer-guard flavors in `build_guarded_gathe
 ## Acceptance criteria (for the elaborated proposal)
 
 - [ ] Decided: int32 default, overflow excluded by the per-node numel contract (see design
-      points). Remaining choice: global `large_models` error-enforcement vs per-routine
-      width selection (preferred; deprecates the switch).
+      points); width selection is interval-driven at tnode granularity with a per-routine
+      max-numel fallback, deprecating `large_models`. Blocks on
+      [interval-analysis-scalar-t](interval-analysis-scalar-t.md).
 - [ ] Enforcement site specified: dims-lazy wrapper in `Tnode.create` validating padded
       numel once per node.
 - [ ] Inventory verified by grep: every `index_prec` consumer and every unsigned-idiom
