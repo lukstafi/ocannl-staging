@@ -364,6 +364,27 @@ and proc_mentions_symbol (s : Indexing.symbol) (llc : t) : bool =
   | Zero_out _ | Declare_local _ | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier ->
       false
 
+let rec scalar_reads_tn (target : Tn.t) (llsc : scalar_t) : bool =
+  match llsc with
+  | Get (tn, _) | Get_merge_buffer (tn, _) | Get_local { tn; _ } -> Tn.equal target tn
+  | Get_dynamic { tn; dyn_value = v, _; _ } -> Tn.equal target tn || scalar_reads_tn target v
+  | Local_scope { id = { tn; _ }; body; _ } -> Tn.equal target tn || proc_reads_tn target body
+  | Ternop (_, (v1, _), (v2, _), (v3, _)) ->
+      scalar_reads_tn target v1 || scalar_reads_tn target v2 || scalar_reads_tn target v3
+  | Binop (_, (v1, _), (v2, _)) -> scalar_reads_tn target v1 || scalar_reads_tn target v2
+  | Unop (_, (v, _)) -> scalar_reads_tn target v
+  | Constant _ | Constant_bits _ | Embed_index _ -> false
+
+and proc_reads_tn (target : Tn.t) (llc : t) : bool =
+  match llc with
+  | Set { llsc; _ } -> scalar_reads_tn target llsc
+  | Set_from_vec { arg = v, _; _ } -> scalar_reads_tn target v
+  | Set_local (_, llsc) -> scalar_reads_tn target llsc
+  | Seq (a, b) -> proc_reads_tn target a || proc_reads_tn target b
+  | For_loop { body; _ } -> proc_reads_tn target body
+  | Zero_out _ | Declare_local _ | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier ->
+      false
+
 (* Count occurrences of [Iterator s] in [idcs], and report whether every occurrence is a plain
    [Iterator s] (no [Affine]/[Concat] use). Returns [(count, axis_of_last_plain_occurrence)]. *)
 let count_plain_iterator (s : Indexing.symbol) (idcs : Indexing.axis_index array) :
@@ -1523,28 +1544,445 @@ and substitute_proc ~var ~value llc =
   | Staged_compilation _ -> llc
   | Workgroup_barrier -> llc
 
-let simplify_llc llc =
+module Interval = struct
+  type bounds = { lo : float; hi : float; integral : bool; exact : bool; sources : Set.M(Tn).t }
+
+  let no_sources = Set.empty (module Tn)
+
+  let top =
+    {
+      lo = Float.neg_infinity;
+      hi = Float.infinity;
+      integral = false;
+      exact = false;
+      sources = no_sources;
+    }
+
+  let bool_top = { lo = 0.; hi = 1.; integral = true; exact = true; sources = no_sources }
+  let exact_integer_limit = Float.(2. ** 53.)
+  let exact_fp32_integer_limit = Float.(2. ** 24.)
+  let exact_fp16_integer_limit = 2048.
+  let is_finite_interval b = Float.is_finite b.lo && Float.is_finite b.hi
+  let is_whole x = Float.is_finite x && Float.is_integer x
+  let exact_float_integer x = is_whole x && Float.(abs x <= exact_integer_limit)
+
+  let exact_float_endpoint x =
+    (not (Float.is_finite x)) || (not (is_whole x)) || exact_float_integer x
+
+  let exact_endpoints lo hi = exact_float_endpoint lo && exact_float_endpoint hi
+
+  let make ?(integral = false) ?exact ?(sources = no_sources) lo hi =
+    if Float.is_nan lo || Float.is_nan hi || Float.(lo > hi) then top
+    else
+      let exact = Option.value exact ~default:(exact_endpoints lo hi) in
+      { lo; hi; integral; exact; sources }
+
+  let point c =
+    if Float.is_nan c then top
+    else
+      let integral = is_whole c in
+      make ~integral ~exact:((not integral) || exact_float_integer c) c c
+
+  let of_int i = point (Float.of_int i)
+
+  let union a b =
+    {
+      lo = Float.min a.lo b.lo;
+      hi = Float.max a.hi b.hi;
+      integral = a.integral && b.integral;
+      exact = a.exact && b.exact;
+      sources = Set.union a.sources b.sources;
+    }
+
+  let map_integral_precision prec b =
+    if not b.integral then b
+    else
+      let limit =
+        match prec with
+        | Ops.Half_prec _ | Ops.Bfloat16_prec _ -> Some exact_fp16_integer_limit
+        | Ops.Fp8_prec _ -> Some 1.
+        | Ops.Single_prec _ -> Some exact_fp32_integer_limit
+        | Ops.Double_prec _ -> Some exact_integer_limit
+        | Ops.Byte_prec _ | Ops.Uint16_prec _ | Ops.Int32_prec _ | Ops.Uint32_prec _
+        | Ops.Int64_prec _ | Ops.Uint64_prec _ | Ops.Uint4x32_prec _ ->
+            None
+        | Ops.Void_prec -> Some 0.
+      in
+      match limit with
+      | None -> b
+      | Some limit ->
+          if Float.(abs b.lo <= limit && abs b.hi <= limit) then b
+          else { b with integral = false; exact = false }
+
+  let of_tnode_bounds tn (b : Tn.value_bounds) =
+    {
+      lo = b.lo;
+      hi = b.hi;
+      integral = b.integral;
+      exact = b.exact;
+      sources = Set.singleton (module Tn) tn;
+    }
+
+  let dtype_bounds = function
+    | Ops.Byte_prec _ -> make ~integral:true ~exact:true 0. 255.
+    | Ops.Uint16_prec _ -> make ~integral:true ~exact:true 0. 65535.
+    | Ops.Int32_prec _ -> make ~integral:true ~exact:true (-2147483648.) 2147483647.
+    | Ops.Uint32_prec _ -> make ~integral:true ~exact:true 0. 4294967295.
+    | Ops.Int64_prec _ ->
+        make ~integral:true ~exact:false (-.Float.(2. ** 63.)) Float.((2. ** 63.) -. 1.)
+    | Ops.Uint64_prec _ -> make ~integral:true ~exact:false 0. Float.((2. ** 64.) -. 1.)
+    | Ops.Uint4x32_prec _ | Ops.Half_prec _ | Ops.Bfloat16_prec _ | Ops.Fp8_prec _
+    | Ops.Single_prec _ | Ops.Double_prec _ | Ops.Void_prec ->
+        top
+
+  let static_env (static_indices : Indexing.static_symbol list) =
+    List.fold static_indices
+      ~init:(Map.empty (module Indexing.Symbol))
+      ~f:(fun env s ->
+        let data =
+          match s.Indexing.static_range with
+          | None -> top
+          | Some range when range <= 0 -> top
+          | Some range ->
+              let hi = Float.of_int (range - 1) in
+              make ~integral:true ~exact:Float.(hi <= exact_integer_limit) 0. hi
+        in
+        Map.set env ~key:s.Indexing.static_symbol ~data)
+
+  let add_loop env ~index ~from_ ~to_ =
+    let data =
+      if from_ <= to_ then make ~integral:true (Float.of_int from_) (Float.of_int to_) else top
+    in
+    Map.set env ~key:index ~data
+
+  let interval_of_axis_index env = function
+    | Indexing.Fixed_idx i -> of_int i
+    | Indexing.Sub_axis -> of_int 0
+    | Indexing.Iterator s -> Map.find env s |> Option.value ~default:top
+    | Indexing.Concat _ -> top
+    | Indexing.Affine { symbols; offset } ->
+        List.fold symbols ~init:(of_int offset) ~f:(fun acc (coeff, s) ->
+            let b = Map.find env s |> Option.value ~default:top in
+            if phys_equal b top || not (is_finite_interval b) then top
+            else
+              let coeff_f = Float.of_int coeff in
+              let lo, hi =
+                if coeff >= 0 then (coeff_f *. b.lo, coeff_f *. b.hi)
+                else (coeff_f *. b.hi, coeff_f *. b.lo)
+              in
+              if phys_equal acc top || not (is_finite_interval acc) then top
+              else
+                make ~integral:(acc.integral && b.integral)
+                  ~exact:(acc.exact && b.exact && exact_endpoints lo hi)
+                  (acc.lo +. lo) (acc.hi +. hi))
+
+  let extremal_product a b =
+    [ a.lo *. b.lo; a.lo *. b.hi; a.hi *. b.lo; a.hi *. b.hi ]
+    |> List.fold ~init:(Float.infinity, Float.neg_infinity) ~f:(fun (lo, hi) x ->
+        (Float.min lo x, Float.max hi x))
+
+  let arithmetic_exact a b lo hi = a.exact && b.exact && exact_endpoints lo hi
+  let sources2 a b = Set.union a.sources b.sources
+
+  let add a b =
+    make ~integral:(a.integral && b.integral)
+      ~exact:(arithmetic_exact a b (a.lo +. b.lo) (a.hi +. b.hi))
+      ~sources:(sources2 a b) (a.lo +. b.lo) (a.hi +. b.hi)
+
+  let sub a b =
+    make ~integral:(a.integral && b.integral)
+      ~exact:(arithmetic_exact a b (a.lo -. b.hi) (a.hi -. b.lo))
+      ~sources:(sources2 a b) (a.lo -. b.hi) (a.hi -. b.lo)
+
+  let mul a b =
+    let lo, hi = extremal_product a b in
+    make ~integral:(a.integral && b.integral) ~exact:(arithmetic_exact a b lo hi)
+      ~sources:(sources2 a b) lo hi
+
+  let div a b =
+    if Float.(b.lo <= 0. && b.hi >= 0.) then top
+    else
+      let candidates = [ a.lo /. b.lo; a.lo /. b.hi; a.hi /. b.lo; a.hi /. b.hi ] in
+      let lo, hi =
+        List.fold candidates ~init:(Float.infinity, Float.neg_infinity) ~f:(fun (lo, hi) x ->
+            (Float.min lo x, Float.max hi x))
+      in
+      make ~integral:false ~exact:false ~sources:(sources2 a b) lo hi
+
+  let trunc_bound x = if Float.(x >= 0.) then Float.round_down x else Float.round_up x
+  let definitely_false b = b.integral && Float.(b.lo = 0. && b.hi = 0.)
+  let definitely_true b = b.integral && (Float.(b.lo > 0.) || Float.(b.hi < 0.))
+  let maybe_boolean b = b.integral && Float.(b.lo >= 0. && b.hi <= 1.)
+  let settle_sources b = Set.iter b.sources ~f:Tn.settle_value_bounds
+  let settle_sources2 a b = Set.iter (Set.union a.sources b.sources) ~f:Tn.settle_value_bounds
+
+  let fold_comparison op a arg1 b arg2 =
+    if not (a.integral && b.integral) then None
+    else
+      match op with
+      | Ops.Cmplt ->
+          if Float.(a.hi < b.lo) then Some true
+          else if Float.(a.lo >= b.hi) then Some false
+          else None
+      | Ops.Cmpeq ->
+          if equal_scalar_arg arg1 arg2 then Some true
+          else if Float.(a.hi < b.lo || b.hi < a.lo) then Some false
+          else if Float.(a.lo = a.hi && b.lo = b.hi && a.lo = b.lo && a.exact && b.exact) then
+            Some true
+          else None
+      | Ops.Cmpne ->
+          if equal_scalar_arg arg1 arg2 then Some false
+          else if Float.(a.hi < b.lo || b.hi < a.lo) then Some true
+          else if Float.(a.lo = a.hi && b.lo = b.hi && a.lo = b.lo && a.exact && b.exact) then
+            Some false
+          else None
+      | Ops.Arg1 | Ops.Arg2 | Ops.Add | Ops.Sub | Ops.Mul | Ops.Div | Ops.ToPowOf | Ops.Relu_gate
+      | Ops.Satur01_gate | Ops.Max | Ops.Min | Ops.Mod | Ops.Or | Ops.And | Ops.Threefry4x32_crypto
+      | Ops.Threefry4x32_light ->
+          None
+
+  let interval_of_arg env =
+    let memo = ref [] in
+    let rec scalar ((llsc, prec) as arg : scalar_arg) =
+      match List.Assoc.find !memo ~equal:equal_scalar_arg arg with
+      | Some b -> b
+      | None ->
+          let b = scalar_uncached llsc prec in
+          memo := (arg, b) :: !memo;
+          b
+    and scalar_uncached llsc prec =
+      let result =
+        match llsc with
+        | Constant c -> point c |> map_integral_precision prec
+        | Constant_bits _ -> top
+        | Embed_index idx -> interval_of_axis_index env idx |> map_integral_precision prec
+        | Get (tn, _) | Get_dynamic { tn; _ } | Get_merge_buffer (tn, _) -> (
+            match Tn.value_bounds_candidate tn with
+            | Some b -> of_tnode_bounds tn b
+            | None -> dtype_bounds (Lazy.force tn.Tn.prec))
+        | Get_local _ | Local_scope _ -> top
+        | Binop (op, a1, a2) -> binop op a1 a2 |> map_integral_precision prec
+        | Ternop (op, a1, a2, a3) -> ternop op a1 a2 a3 |> map_integral_precision prec
+        | Unop (op, a) -> unop op a |> map_integral_precision prec
+      in
+      if Float.is_nan result.lo || Float.is_nan result.hi then top else result
+    and binop op arg1 arg2 =
+      let a = scalar arg1 and b = scalar arg2 in
+      match op with
+      | Ops.Arg1 -> a
+      | Ops.Arg2 -> b
+      | Ops.Add -> add a b
+      | Ops.Sub -> sub a b
+      | Ops.Mul -> mul a b
+      | Ops.Div -> div a b
+      | Ops.Max ->
+          make ~integral:(a.integral && b.integral) ~exact:(a.exact && b.exact)
+            ~sources:(sources2 a b) (Float.max a.lo b.lo) (Float.max a.hi b.hi)
+      | Ops.Min ->
+          make ~integral:(a.integral && b.integral) ~exact:(a.exact && b.exact)
+            ~sources:(sources2 a b) (Float.min a.lo b.lo) (Float.min a.hi b.hi)
+      | Ops.Mod -> (
+          match arg2 with
+          | Constant c, _ when a.integral && Float.(a.lo >= 0. && c > 0.) && Float.is_integer c ->
+              make ~integral:true
+                ~exact:(a.exact && exact_float_integer c)
+                ~sources:a.sources 0.
+                (Float.min a.hi (c -. 1.))
+          | _ -> top)
+      | Ops.Relu_gate | Ops.Satur01_gate -> union (point 0.) b
+      | Ops.Cmplt | Ops.Cmpeq | Ops.Cmpne -> (
+          match fold_comparison op a arg1 b arg2 with
+          | Some true -> { (point 1.) with sources = sources2 a b }
+          | Some false -> { (point 0.) with sources = sources2 a b }
+          | None -> { bool_top with sources = sources2 a b })
+      | Ops.And ->
+          if definitely_false a || definitely_false b then
+            { (point 0.) with sources = sources2 a b }
+          else if definitely_true a && definitely_true b then
+            { (point 1.) with sources = sources2 a b }
+          else { bool_top with sources = sources2 a b }
+      | Ops.Or ->
+          if definitely_true a || definitely_true b then { (point 1.) with sources = sources2 a b }
+          else if definitely_false a && definitely_false b then
+            { (point 0.) with sources = sources2 a b }
+          else { bool_top with sources = sources2 a b }
+      | Ops.ToPowOf | Ops.Threefry4x32_crypto | Ops.Threefry4x32_light -> top
+    and ternop op arg1 arg2 arg3 =
+      let a = scalar arg1 and b = scalar arg2 and c = scalar arg3 in
+      match op with
+      | Ops.Where -> if definitely_true a then b else if definitely_false a then c else union b c
+      | Ops.FMA -> add (mul a b) c
+      | Ops.Mul3 -> mul (mul a b) c
+    and unop op arg =
+      let a = scalar arg in
+      match op with
+      | Ops.Identity -> a
+      | Ops.Relu ->
+          make ~integral:a.integral ~exact:a.exact ~sources:a.sources (Float.max 0. a.lo)
+            (Float.max 0. a.hi)
+      | Ops.Satur01 -> make ~integral:false ~exact:false ~sources:a.sources 0. 1.
+      | Ops.Neg -> make ~integral:a.integral ~exact:a.exact ~sources:a.sources (-.a.hi) (-.a.lo)
+      | Ops.Trunc ->
+          if a.integral then a
+          else
+            make ~integral:true ~exact:false ~sources:a.sources (trunc_bound a.lo)
+              (trunc_bound a.hi)
+      | Ops.Not ->
+          if definitely_false a then { (point 1.) with sources = a.sources }
+          else if definitely_true a then { (point 0.) with sources = a.sources }
+          else { bool_top with sources = a.sources }
+      | Ops.Recip ->
+          if Float.(a.lo <= 0. && a.hi >= 0.) then top
+          else make ~integral:false ~exact:false ~sources:a.sources (1. /. a.hi) (1. /. a.lo)
+      | Ops.Recip_sqrt ->
+          if Float.(a.lo <= 0.) then top
+          else
+            make ~integral:false ~exact:false ~sources:a.sources
+              (1. /. Float.sqrt a.hi)
+              (1. /. Float.sqrt a.lo)
+      | Ops.Sqrt ->
+          if Float.(a.lo < 0.) then top
+          else
+            make ~integral:false ~exact:false ~sources:a.sources (Float.sqrt a.lo) (Float.sqrt a.hi)
+      | Ops.Exp | Ops.Exp2 | Ops.Log | Ops.Log2 | Ops.Sin | Ops.Cos | Ops.Tanh_approx
+      | Ops.Uint4x32_to_prec_uniform1 ->
+          top
+    in
+    scalar
+
+  let fold_arg ~env ((llsc, prec) as arg : scalar_arg) : scalar_arg =
+    let interval_of = interval_of_arg env in
+    let as_const b =
+      if definitely_true b then Some (Constant 1., prec)
+      else if definitely_false b then Some (Constant 0., prec)
+      else None
+    in
+    match llsc with
+    | Binop (((Ops.Cmplt | Ops.Cmpeq | Ops.Cmpne) as op), arg1, arg2) -> (
+        let b1 = interval_of arg1 and b2 = interval_of arg2 in
+        match fold_comparison op b1 arg1 b2 arg2 with
+        | Some true ->
+            settle_sources2 b1 b2;
+            (Constant 1., prec)
+        | Some false ->
+            settle_sources2 b1 b2;
+            (Constant 0., prec)
+        | None -> arg)
+    | Binop (Ops.And, arg1, arg2) ->
+        let b1 = interval_of arg1 and b2 = interval_of arg2 in
+        if definitely_false b1 || definitely_false b2 then (
+          settle_sources2 b1 b2;
+          (Constant 0., prec))
+        else if definitely_true b1 && definitely_true b2 then (
+          settle_sources2 b1 b2;
+          (Constant 1., prec))
+        else if definitely_true b1 && maybe_boolean b2 then arg2
+        else if definitely_true b2 && maybe_boolean b1 then arg1
+        else arg
+    | Binop (Ops.Or, arg1, arg2) ->
+        let b1 = interval_of arg1 and b2 = interval_of arg2 in
+        if definitely_true b1 || definitely_true b2 then (
+          settle_sources2 b1 b2;
+          (Constant 1., prec))
+        else if definitely_false b1 && definitely_false b2 then (
+          settle_sources2 b1 b2;
+          (Constant 0., prec))
+        else if definitely_false b1 && maybe_boolean b2 then arg2
+        else if definitely_false b2 && maybe_boolean b1 then arg1
+        else arg
+    | Ternop (Ops.Where, cond, then_, else_) -> (
+        let b = interval_of cond in
+        match as_const b with
+        | Some (Constant 1., _) ->
+            settle_sources b;
+            then_
+        | Some (Constant 0., _) ->
+            settle_sources b;
+            else_
+        | _ -> arg)
+    | Unop (Ops.Trunc, inner) ->
+        let b = interval_of inner in
+        if b.integral then (
+          settle_sources b;
+          inner)
+        else arg
+    | Constant _ | Constant_bits _ | Get _ | Get_dynamic _ | Get_merge_buffer _ | Get_local _
+    | Local_scope _ | Embed_index _ | Binop _ | Ternop _ | Unop _ ->
+        arg
+end
+
+let rec fold_interval_scalar_arg ~env ((llsc, prec) as arg : scalar_arg) : scalar_arg =
+  let rebuilt =
+    match llsc with
+    | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, p } ->
+        (Get_dynamic { tn; idcs; dyn_axis; dyn_value = fold_interval_scalar_arg ~env (v, p) }, prec)
+    | Ternop (op, a, b, c) ->
+        ( Ternop
+            ( op,
+              fold_interval_scalar_arg ~env a,
+              fold_interval_scalar_arg ~env b,
+              fold_interval_scalar_arg ~env c ),
+          prec )
+    | Binop (op, a, b) ->
+        (Binop (op, fold_interval_scalar_arg ~env a, fold_interval_scalar_arg ~env b), prec)
+    | Unop (op, a) -> (Unop (op, fold_interval_scalar_arg ~env a), prec)
+    | Constant _ | Constant_bits _ | Get _ | Get_local _ | Get_merge_buffer _ | Local_scope _
+    | Embed_index _ ->
+        arg
+  in
+  let folded = Interval.fold_arg ~env rebuilt in
+  if equal_scalar_arg rebuilt folded then folded else fold_interval_scalar_arg ~env folded
+
+let propose_compiled_writer_bounds ~static_indices (llc : t) =
+  let tnode_bounds_of_interval (b : Interval.bounds) : Tn.value_bounds =
+    { lo = b.lo; hi = b.hi; integral = b.integral; exact = b.exact }
+  in
+  let rec loop_proc ~env = function
+    | Noop | Comment _ | Staged_compilation _ | Declare_local _ | Workgroup_barrier -> ()
+    | Seq (a, b) ->
+        loop_proc ~env a;
+        loop_proc ~env b
+    | For_loop { index; from_; to_; body; _ } ->
+        loop_proc ~env:(Interval.add_loop env ~index ~from_ ~to_) body
+    | Zero_out tn -> Tn.propose_value_bounds tn (Tn.value_bounds_point 0.)
+    | Set { tn; llsc; _ } ->
+        if scalar_reads_tn tn llsc then Tn.propose_value_bounds_top tn
+        else
+          let interval_of = Interval.interval_of_arg env in
+          Tn.propose_value_bounds tn
+            (tnode_bounds_of_interval (interval_of (llsc, Lazy.force tn.Tn.prec)))
+    | Set_from_vec { tn; arg = arg_scalar, _; _ } ->
+        if scalar_reads_tn tn arg_scalar then Tn.propose_value_bounds_top tn
+        else Tn.propose_value_bounds_top tn
+    | Set_local _ -> ()
+  in
+  loop_proc ~env:(Interval.static_env static_indices) llc
+
+let simplify_llc ?(static_indices = []) llc =
   (* Implements top-down rewriting. *)
-  let rec loop_proc (llc : t) : t =
+  let static_env = Interval.static_env static_indices in
+  let rec loop_proc ~env (llc : t) : t =
     let loop = loop_proc in
     match llc with
     | Noop -> Noop
     | Seq (c1, c2) ->
-        let c1 = loop c1 in
-        let c2 = loop c2 in
+        let c1 = loop ~env c1 in
+        let c2 = loop ~env c2 in
         Seq (c1, c2)
-    | For_loop for_config -> For_loop { for_config with body = loop for_config.body }
+    | For_loop ({ index; from_; to_; body; _ } as for_config) ->
+        let env = Interval.add_loop env ~index ~from_ ~to_ in
+        For_loop { for_config with body = loop ~env body }
     | Zero_out _ -> llc
     | Set { tn; idcs; llsc; debug } ->
-        Set { tn; idcs; llsc = fst (loop_scalar (llsc, Lazy.force tn.Tn.prec)); debug }
+        Set { tn; idcs; llsc = fst (loop_scalar ~env (llsc, Lazy.force tn.Tn.prec)); debug }
     | Set_from_vec { tn; idcs; length; vec_unop; arg; debug } ->
-        Set_from_vec { tn; idcs; length; vec_unop; arg = loop_scalar arg; debug }
-    | Set_local (id, llsc) -> Set_local (id, fst (loop_scalar (llsc, Lazy.force id.tn.Tn.prec)))
+        Set_from_vec { tn; idcs; length; vec_unop; arg = loop_scalar ~env arg; debug }
+    | Set_local (id, llsc) -> Set_local (id, fst (loop_scalar ~env (llsc, Lazy.force id.tn.Tn.prec)))
     | Declare_local _ -> llc
     | Comment _ -> llc
     | Staged_compilation _ -> llc
     | Workgroup_barrier -> llc
-  and loop_scalar ((llsc, prec) : scalar_t * Ops.prec) : scalar_t * Ops.prec =
+  and loop_scalar ~env ((llsc, prec) : scalar_t * Ops.prec) : scalar_t * Ops.prec =
     let local_scope_body, llsc' =
       match llsc with
       | Local_scope opts ->
@@ -1567,18 +2005,20 @@ let simplify_llc llc =
         (* gh-343: defensive -- simplify runs before the one-hot rewrite, so this is unreachable in
            practice; still simplify the dynamic index sub-expression and never fold to a
            constant. *)
-        let v', vprec' = loop_scalar (v, vprec) in
+        let v', vprec' = loop_scalar ~env (v, vprec) in
         (Get_dynamic { tn; idcs; dyn_axis; dyn_value = (v', vprec') }, Lazy.force tn.Tn.prec)
     | Local_scope { id; body = Set_local (id2, v); _ } when equal_scope_id id id2 ->
         ignore (Lazy.force id.tn.Tn.dims);
-        loop_scalar (v, Lazy.force id.tn.Tn.prec)
+        loop_scalar ~env (v, Lazy.force id.tn.Tn.prec)
     | Local_scope { id; body = Seq (Set_local (id1, v1), Set_local (id2, v2)); _ }
       when equal_scope_id id id1 && equal_scope_id id id2 ->
         ignore (Lazy.force id.tn.Tn.dims);
         let result = substitute_float ~var:(Get_local id) ~value:v1 v2 in
-        loop_scalar (result, Lazy.force id.tn.Tn.prec)
+        loop_scalar ~env (result, Lazy.force id.tn.Tn.prec)
     | Local_scope opts ->
-        (Local_scope { opts with body = loop_proc local_scope_body }, Lazy.force opts.id.tn.Tn.prec)
+        Interval.fold_arg ~env
+          ( Local_scope { opts with body = loop_proc ~env local_scope_body },
+            Lazy.force opts.id.tn.Tn.prec )
     | Get_local id -> (llsc, Lazy.force id.tn.Tn.prec)
     | Get_merge_buffer (tn, _) -> (llsc, Lazy.force tn.Tn.prec)
     | Embed_index (Fixed_idx i) -> (Constant (Float.of_int i), prec)
@@ -1586,21 +2026,21 @@ let simplify_llc llc =
     | Embed_index (Iterator _) -> (llsc, prec)
     | Embed_index (Affine _) -> (llsc, prec) (* Cannot simplify affine expressions to constants *)
     | Embed_index (Concat _) -> (llsc, prec) (* Cannot simplify concat to constants *)
-    | Binop (Arg1, (llv1, prec1), _) -> loop_scalar (llv1, prec1)
-    | Binop (Arg2, _, (llv2, prec2)) -> loop_scalar (llv2, prec2)
+    | Binop (Arg1, (llv1, prec1), _) -> loop_scalar ~env (llv1, prec1)
+    | Binop (Arg2, _, (llv2, prec2)) -> loop_scalar ~env (llv2, prec2)
     | Binop ((Threefry4x32_crypto | Threefry4x32_light), _, _) -> (llsc, prec)
     | Binop (op, (Constant c1, prec1), (Constant c2, prec2)) ->
         (Constant (Ops.interpret_binop op c1 c2), Ops.promote_prec prec1 prec2)
     | Binop (Add, (llsc, prec1), (Constant 0., _))
     | Binop (Sub, (llsc, prec1), (Constant 0., _))
     | Binop (Add, (Constant 0., _), (llsc, prec1)) ->
-        loop_scalar (llsc, prec1)
+        loop_scalar ~env (llsc, prec1)
     | Binop (Sub, (Constant 0., _), (llsc, prec1)) ->
-        loop_scalar (Binop (Mul, (Constant (-1.), prec1), (llsc, prec1)), prec1)
+        loop_scalar ~env (Binop (Mul, (Constant (-1.), prec1), (llsc, prec1)), prec1)
     | Binop (Mul, (llsc, prec1), (Constant 1., _))
     | Binop (Div, (llsc, prec1), (Constant 1., _))
     | Binop (Mul, (Constant 1., _), (llsc, prec1)) ->
-        loop_scalar (llsc, prec1)
+        loop_scalar ~env (llsc, prec1)
     | Binop (Mul, (_, prec1), (Constant 0., _))
     | Binop (Div, (Constant 0., _), (_, prec1))
     | Binop (Mul, (Constant 0., _), (_, prec1)) ->
@@ -1615,26 +2055,29 @@ let simplify_llc llc =
           (Constant c1, prec1),
           ( Binop (Add, (Constant c2, prec2), llsc), prec3
           | Binop (Add, llsc, (Constant c2, prec2)), prec3 ) ) ->
-        loop_scalar (Binop (Add, (Constant (c1 +. c2), Ops.promote_prec prec1 prec2), llsc), prec3)
+        loop_scalar ~env
+          (Binop (Add, (Constant (c1 +. c2), Ops.promote_prec prec1 prec2), llsc), prec3)
     | Binop
         ( Sub,
           ( Binop (Add, (Constant c2, prec2), llsc), prec3
           | Binop (Add, llsc, (Constant c2, prec2)), prec3 ),
           (Constant c1, prec1) ) ->
-        loop_scalar (Binop (Add, (Constant (c2 -. c1), Ops.promote_prec prec2 prec1), llsc), prec3)
+        loop_scalar ~env
+          (Binop (Add, (Constant (c2 -. c1), Ops.promote_prec prec2 prec1), llsc), prec3)
     | Binop
         ( Sub,
           (Constant c1, prec1),
           ( Binop (Add, (Constant c2, prec2), llsc), prec3
           | Binop (Add, llsc, (Constant c2, prec2)), prec3 ) ) ->
-        loop_scalar (Binop (Add, (Constant (c1 -. c2), Ops.promote_prec prec1 prec2), llsc), prec3)
+        loop_scalar ~env
+          (Binop (Add, (Constant (c1 -. c2), Ops.promote_prec prec1 prec2), llsc), prec3)
     | Binop (Add, llv1, (Binop (Sub, llv2, llv3), prec3))
     | Binop (Add, (Binop (Sub, llv2, llv3), prec3), llv1) ->
-        loop_scalar (Binop (Sub, (Binop (Add, llv1, llv2), prec), llv3), prec3)
+        loop_scalar ~env (Binop (Sub, (Binop (Add, llv1, llv2), prec), llv3), prec3)
     | Binop (Sub, llv1, (Binop (Sub, llv2, llv3), prec3)) ->
-        loop_scalar (Binop (Sub, (Binop (Add, llv1, llv3), prec), llv2), prec3)
+        loop_scalar ~env (Binop (Sub, (Binop (Add, llv1, llv3), prec), llv2), prec3)
     | Binop (Sub, (Binop (Sub, llv1, llv2), prec1), llv3) ->
-        loop_scalar (Binop (Sub, llv1, (Binop (Add, llv2, llv3), prec1)), prec1)
+        loop_scalar ~env (Binop (Sub, llv1, (Binop (Add, llv2, llv3), prec1)), prec1)
     | Binop
         ( Mul,
           ( Binop (Mul, (Constant c2, prec2), llsc), prec3
@@ -1645,63 +2088,71 @@ let simplify_llc llc =
           (Constant c1, prec1),
           ( Binop (Mul, (Constant c2, prec2), llsc), prec3
           | Binop (Mul, llsc, (Constant c2, prec2)), prec3 ) ) ->
-        loop_scalar (Binop (Mul, (Constant (c1 *. c2), Ops.promote_prec prec1 prec2), llsc), prec3)
+        loop_scalar ~env
+          (Binop (Mul, (Constant (c1 *. c2), Ops.promote_prec prec1 prec2), llsc), prec3)
     | Binop
         ( Div,
           ( Binop (Mul, (Constant c2, prec2), llsc), prec3
           | Binop (Mul, llsc, (Constant c2, prec2)), prec3 ),
           (Constant c1, prec1) )
       when Ops.is_float prec ->
-        loop_scalar (Binop (Mul, (Constant (c2 /. c1), Ops.promote_prec prec2 prec1), llsc), prec3)
+        loop_scalar ~env
+          (Binop (Mul, (Constant (c2 /. c1), Ops.promote_prec prec2 prec1), llsc), prec3)
     | Binop (Div, (Constant c1, prec1), (Binop (Mul, (Constant c2, prec2), llsc), prec3))
     | Binop (Div, (Constant c1, prec1), (Binop (Mul, llsc, (Constant c2, prec2)), prec3))
       when Ops.is_float prec ->
         (* TODO: this might worsen the conditioning in hand-designed formula cases. *)
-        loop_scalar (Binop (Div, (Constant (c1 /. c2), Ops.promote_prec prec1 prec2), llsc), prec3)
+        loop_scalar ~env
+          (Binop (Div, (Constant (c1 /. c2), Ops.promote_prec prec1 prec2), llsc), prec3)
     | Binop (Mul, llv1, (Binop (Div, llv2, llv3), prec23))
     | Binop (Mul, (Binop (Div, llv2, llv3), prec23), llv1)
       when Ops.is_float prec ->
-        loop_scalar (Binop (Div, (Binop (Mul, llv1, llv2), prec), llv3), prec23)
+        loop_scalar ~env (Binop (Div, (Binop (Mul, llv1, llv2), prec), llv3), prec23)
     | Binop (Div, llv1, (Binop (Div, llv2, llv3), prec23)) when Ops.is_float prec ->
-        loop_scalar (Binop (Div, (Binop (Mul, llv1, llv3), prec), llv2), prec23)
+        loop_scalar ~env (Binop (Div, (Binop (Mul, llv1, llv3), prec), llv2), prec23)
     | Binop (Div, (Binop (Div, llv1, llv2), prec12), llv3) when Ops.is_float prec ->
-        loop_scalar (Binop (Div, (Binop (Mul, llv1, llv3), prec), llv2), prec12)
+        loop_scalar ~env (Binop (Div, (Binop (Mul, llv1, llv3), prec), llv2), prec12)
     | Binop (ToPowOf, llv1, llv2) -> (
-        let ((v1_scalar, _) as v1) = loop_scalar llv1 in
-        let v2 = loop_scalar llv2 in
+        let ((v1_scalar, _) as v1) = loop_scalar ~env llv1 in
+        let v2 = loop_scalar ~env llv2 in
         let result = (Binop (ToPowOf, v1, v2), prec) in
         if not !optimize_integer_pow then result
         else
           match v2 with
           | Constant c, _ when Float.is_integer c ->
-              loop_scalar (unroll_pow ~base:v1_scalar ~exp:(Float.to_int c), prec)
+              loop_scalar ~env (unroll_pow ~base:v1_scalar ~exp:(Float.to_int c), prec)
           | _ -> result)
     | Binop (Add, (Binop (Mul, llv1, llv2), prec12), llv3)
     | Binop (Add, llv3, (Binop (Mul, llv1, llv2), prec12)) ->
         (* TODO: this is tentative. *)
-        loop_scalar @@ (Ternop (FMA, llv1, llv2, llv3), Ops.promote_prec prec12 prec)
+        loop_scalar ~env @@ (Ternop (FMA, llv1, llv2, llv3), Ops.promote_prec prec12 prec)
     | Binop (op, llv1, llv2) ->
-        let v1 = loop_scalar llv1 in
-        let v2 = loop_scalar llv2 in
+        let v1 = loop_scalar ~env llv1 in
+        let v2 = loop_scalar ~env llv2 in
         let result = (Binop (op, v1, v2), prec) in
-        if equal_scalar_arg llv1 v1 && equal_scalar_arg llv2 v2 then result else loop_scalar result
+        let result = fold_interval_scalar_arg ~env result in
+        if equal_scalar_arg llv1 v1 && equal_scalar_arg llv2 v2 then result
+        else loop_scalar ~env result
     | Ternop (Where, (Binop (Cmpeq, (Embed_index a, _), (Embed_index b, _)), _), then_, _)
       when Indexing.equal_axis_index a b ->
         (* gh-133 Stage A: a repeated-symbol equality guard whose two embedded indices are
            syntactically identical is always taken; fold it to its then-branch. *)
-        loop_scalar then_
+        loop_scalar ~env then_
     | Ternop (op, llv1, llv2, llv3) ->
-        let v1 = loop_scalar llv1 in
-        let v2 = loop_scalar llv2 in
-        let v3 = loop_scalar llv3 in
+        let v1 = loop_scalar ~env llv1 in
+        let v2 = loop_scalar ~env llv2 in
+        let v3 = loop_scalar ~env llv3 in
         let result = (Ternop (op, v1, v2, v3), prec) in
-        if equal_scalar_arg llv1 v1 && equal_scalar_arg llv2 v2 then result else loop_scalar result
-    | Unop (Identity, llsc) -> loop_scalar llsc
+        let result = fold_interval_scalar_arg ~env result in
+        if equal_scalar_arg llv1 v1 && equal_scalar_arg llv2 v2 then result
+        else loop_scalar ~env result
+    | Unop (Identity, llsc) -> loop_scalar ~env llsc
     | Unop (op, (Constant c, _)) -> (Constant (Ops.interpret_unop op c), prec)
     | Unop (op, llsc) ->
-        let v = loop_scalar llsc in
+        let v = loop_scalar ~env llsc in
         let result = (Unop (op, v), prec) in
-        if equal_scalar_arg llsc v then result else loop_scalar result
+        let result = fold_interval_scalar_arg ~env result in
+        if equal_scalar_arg llsc v then result else loop_scalar ~env result
   in
   let check_constant tn c =
     (* Prevent triggering over-eager guard against forcing precision. *)
@@ -1743,7 +2194,7 @@ let simplify_llc llc =
     | Get_dynamic { dyn_value = v, _; _ } -> loop v
     | Embed_index _ | Get_local _ | Get_merge_buffer (_, _) | Get (_, _) -> ()
   in
-  let result = loop_proc llc in
+  let result = loop_proc ~env:static_env llc in
   if Option.is_some Utils.settings.check_half_prec_constants_cutoff then check_proc result;
   result
 
@@ -2283,47 +2734,36 @@ let match_one_hot_contribution (k : Indexing.symbol) (contribution : scalar_t) :
 
 (* gh-343: build the guarded dynamic gather replacing a matched one-hot reduction. [class_count] is
    the size of the table axis being gathered; [value_prec] is the table (result) precision. *)
-let build_guarded_gather ~table ~table_idcs ~dyn_axis ~(index_expr : scalar_arg) ~class_count
-    ~value_prec : scalar_t =
+let build_guarded_gather ~symbol_env ~table ~table_idcs ~dyn_axis ~(index_expr : scalar_arg)
+    ~class_count ~value_prec : scalar_t =
   let iv, iprec = index_expr in
   let gather = Get_dynamic { tn = table; idcs = table_idcs; dyn_axis; dyn_value = index_expr } in
   let upper_const = Constant (Float.of_int class_count) in
-  match iprec with
-  | Ops.Byte_prec _ | Ops.Uint16_prec _ | Ops.Uint32_prec _ | Ops.Uint64_prec _ ->
-      (* Unsigned integer indices cannot be negative or fractional, so the guard reduces to the
-         upper bound. Compare in uint64: zero-extension from any unsigned precision is lossless and
-         [class_count] is exactly representable. *)
-      let guard_prec = Ops.uint64 in
-      let in_range = Binop (Ops.Cmplt, (iv, guard_prec), (upper_const, guard_prec)) in
-      Ternop (Ops.Where, (in_range, guard_prec), (gather, value_prec), (Constant 0., value_prec))
-  | Ops.Int32_prec _ | Ops.Int64_prec _ ->
-      (* Signed integer indices cannot be fractional; only the bounds need guarding, in int64
-         (exact and native on all backends, including Metal which lacks double). [0 <= idx] is
-         encoded as [-1 < idx] (there is no [Cmple]); the upper bound is [idx < class_count]. *)
-      let guard_prec = Ops.int64 in
-      let lower = Binop (Ops.Cmplt, (Constant (-1.), guard_prec), (iv, guard_prec)) in
-      let upper = Binop (Ops.Cmplt, (iv, guard_prec), (upper_const, guard_prec)) in
-      let in_range = Binop (Ops.And, (lower, guard_prec), (upper, guard_prec)) in
-      Ternop (Ops.Where, (in_range, guard_prec), (gather, value_prec), (Constant 0., value_prec))
-  | _ ->
-      (* Float-precision indices. The bounds comparison must NOT be evaluated in the unsigned index
-         precision: [-1] would wrap to UINT_MAX and the guard would always be false (gh:
-         unsigned-index-precision). We do the whole guard in a signed precision ([double], exact
-         for the integer-valued indices in scope). [0 <= idx] is encoded as [-1 < idx] (there is no
-         [Cmple]); the upper bound is [idx < class_count]. *)
-      let guard_prec = Ops.double in
-      let lower = Binop (Ops.Cmplt, (Constant (-1.), guard_prec), (iv, guard_prec)) in
-      let upper = Binop (Ops.Cmplt, (iv, guard_prec), (upper_const, guard_prec)) in
-      (* The backend casts [iv] to int when gathering. To preserve one-hot semantics for
-         non-integer indices (e.g. 1.5, where every [k == idx] is false so the reduction is 0), the
-         gather must only fire when [idx] is exactly integral: [idx == trunc(idx)]. Otherwise
-         return 0. *)
-      let is_integral =
-        Binop (Ops.Cmpeq, (iv, guard_prec), (Unop (Ops.Trunc, (iv, guard_prec)), guard_prec))
-      in
-      let bounds = Binop (Ops.And, (lower, guard_prec), (upper, guard_prec)) in
-      let in_range = Binop (Ops.And, (bounds, guard_prec), (is_integral, guard_prec)) in
-      Ternop (Ops.Where, (in_range, guard_prec), (gather, value_prec), (Constant 0., value_prec))
+  let guard_prec =
+    match iprec with
+    | Ops.Byte_prec _ | Ops.Uint16_prec _ | Ops.Uint32_prec _ | Ops.Uint64_prec _ -> Ops.uint64
+    | Ops.Int32_prec _ | Ops.Int64_prec _ -> Ops.int64
+    | Ops.Void_prec | Ops.Uint4x32_prec _ | Ops.Half_prec _ | Ops.Bfloat16_prec _ | Ops.Fp8_prec _
+    | Ops.Single_prec _ | Ops.Double_prec _ ->
+        Ops.double
+  in
+  (* The generic one-hot-preserving guard is: [0 <= idx && idx < class_count && idx == trunc(idx)].
+
+     [0 <= idx] is encoded as [-1 < idx] because Low_level has no [Cmple]. The interval folder
+     erases conjuncts proved by the index expression's precision/range: unsigned indices lose the
+     lower bound, all integer indices lose the integrality check, and range-derived indices can lose
+     the whole guard. *)
+  let lower = Binop (Ops.Cmplt, (Constant (-1.), guard_prec), (iv, guard_prec)) in
+  let upper = Binop (Ops.Cmplt, (iv, guard_prec), (upper_const, guard_prec)) in
+  let is_integral =
+    Binop (Ops.Cmpeq, (iv, guard_prec), (Unop (Ops.Trunc, (iv, guard_prec)), guard_prec))
+  in
+  let bounds = Binop (Ops.And, (lower, guard_prec), (upper, guard_prec)) in
+  let in_range = Binop (Ops.And, (bounds, guard_prec), (is_integral, guard_prec)) in
+  fst
+  @@ fold_interval_scalar_arg ~env:symbol_env
+       ( Ternop (Ops.Where, (in_range, guard_prec), (gather, value_prec), (Constant 0., value_prec)),
+         value_prec )
 
 (* gh-343: peel a possible zero-initializer off a reduction body, returning the inner [For_loop]. *)
 let strip_zero_init_for_local (id : scope_id) (body : t) : t option =
@@ -2347,7 +2787,7 @@ let accumulation_contribution ~(acc_is : scalar_t -> bool) (acc : scalar_t) : sc
 (* gh-343: shared core -- given a reduction over [k] with bounds [\[from_, to_\]] and a
    per-iteration [contribution], check the narrow one-hot side conditions and build the guarded
    gather. *)
-let gather_of_reduction ~(k : Indexing.symbol) ~from_ ~to_ (contribution : scalar_t) :
+let gather_of_reduction ~symbol_env ~(k : Indexing.symbol) ~from_ ~to_ (contribution : scalar_t) :
     scalar_t option =
   Option.bind (match_one_hot_contribution k contribution) ~f:(fun (table, table_idcs, index_expr) ->
       let count, axis, only_plain = count_plain_iterator k table_idcs in
@@ -2365,17 +2805,17 @@ let gather_of_reduction ~(k : Indexing.symbol) ~from_ ~to_ (contribution : scala
             let table_idcs = Array.copy table_idcs in
             table_idcs.(dyn_axis) <- Indexing.Fixed_idx 0;
             Some
-              (build_guarded_gather ~table ~table_idcs ~dyn_axis ~index_expr ~class_count
-                 ~value_prec))
+              (build_guarded_gather ~symbol_env ~table ~table_idcs ~dyn_axis ~index_expr
+                 ~class_count ~value_prec))
 
 (* gh-343: scalar-local form -- Local_scope { id; body = [init;] For k { Set_local (id, acc) } }. *)
-let try_rewrite_local_scope (id : scope_id) (body : t) : scalar_t option =
+let try_rewrite_local_scope ~symbol_env (id : scope_id) (body : t) : scalar_t option =
   match strip_zero_init_for_local id body with
   | Some (For_loop { index = k; from_; to_; body = Set_local (id', acc); _ })
     when equal_scope_id id id' ->
       let acc_is = function Get_local id' -> equal_scope_id id id' | _ -> false in
       Option.bind (accumulation_contribution ~acc_is acc) ~f:(fun contribution ->
-          gather_of_reduction ~k ~from_ ~to_ contribution)
+          gather_of_reduction ~symbol_env ~k ~from_ ~to_ contribution)
   | _ -> None
 
 (* gh-343: materialized form -- a reduction loop [For k { Set lhs idcs acc }] at any nesting depth,
@@ -2384,7 +2824,7 @@ let try_rewrite_local_scope (id : scope_id) (body : t) : scalar_t option =
    vocabulary loop. Reading-and-adding [lhs\[idcs\]] keeps the rewrite sound regardless of any
    preceding zero-init: sum_k contribution == gather, so [lhs += gather] equals the original [lhs +
    sum_k contribution]. *)
-let try_rewrite_materialized_loop (llc : t) : t option =
+let try_rewrite_materialized_loop ~symbol_env (llc : t) : t option =
   match llc with
   | For_loop { index = k; from_; to_; body = Set { tn; idcs; llsc; _ }; _ }
     when not (Array.exists idcs ~f:(axis_index_mentions_symbol k)) ->
@@ -2393,7 +2833,7 @@ let try_rewrite_materialized_loop (llc : t) : t option =
         | _ -> false
       in
       Option.bind (accumulation_contribution ~acc_is llsc) ~f:(fun contribution ->
-          Option.map (gather_of_reduction ~k ~from_ ~to_ contribution) ~f:(fun gather ->
+          Option.map (gather_of_reduction ~symbol_env ~k ~from_ ~to_ contribution) ~f:(fun gather ->
               let value_prec = scalar_precision gather in
               Set
                 {
@@ -2404,41 +2844,44 @@ let try_rewrite_materialized_loop (llc : t) : t option =
                 }))
   | _ -> None
 
-let rewrite_one_hot_reductions (llc : t) : t =
-  let rec loop_proc (llc : t) : t =
-    match try_rewrite_materialized_loop llc with
+let rewrite_one_hot_reductions ?(static_indices = []) (llc : t) : t =
+  let static_env = Interval.static_env static_indices in
+  let rec loop_proc ~env (llc : t) : t =
+    match try_rewrite_materialized_loop ~symbol_env:env llc with
     | Some replacement -> replacement
     | None -> (
         match llc with
-        | Seq (a, b) -> Seq (loop_proc a, loop_proc b)
-        | For_loop fc -> For_loop { fc with body = loop_proc fc.body }
-        | Set { tn; idcs; llsc; debug } -> Set { tn; idcs; llsc = loop_scalar llsc; debug }
+        | Seq (a, b) -> Seq (loop_proc ~env a, loop_proc ~env b)
+        | For_loop ({ index; from_; to_; body; _ } as fc) ->
+            let body = loop_proc ~env:(Interval.add_loop env ~index ~from_ ~to_) body in
+            For_loop { fc with body }
+        | Set { tn; idcs; llsc; debug } -> Set { tn; idcs; llsc = loop_scalar ~env llsc; debug }
         | Set_from_vec { tn; idcs; length; vec_unop; arg = s, p; debug } ->
-            Set_from_vec { tn; idcs; length; vec_unop; arg = (loop_scalar s, p); debug }
-        | Set_local (id, llsc) -> Set_local (id, loop_scalar llsc)
+            Set_from_vec { tn; idcs; length; vec_unop; arg = (loop_scalar ~env s, p); debug }
+        | Set_local (id, llsc) -> Set_local (id, loop_scalar ~env llsc)
         | ( Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _
           | Workgroup_barrier ) as other ->
             other)
-  and loop_scalar (llsc : scalar_t) : scalar_t =
+  and loop_scalar ~env (llsc : scalar_t) : scalar_t =
     match llsc with
     | Local_scope { id; body; orig_indices } -> (
         (* Recurse into the body first so inner reductions are handled, then try to collapse this
            scope itself. *)
-        let body = loop_proc body in
-        match try_rewrite_local_scope id body with
+        let body = loop_proc ~env body in
+        match try_rewrite_local_scope ~symbol_env:env id body with
         | Some gather -> gather
         | None -> Local_scope { id; body; orig_indices })
     | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, p } ->
-        Get_dynamic { tn; idcs; dyn_axis; dyn_value = (loop_scalar v, p) }
+        Get_dynamic { tn; idcs; dyn_axis; dyn_value = (loop_scalar ~env v, p) }
     | Ternop (op, (a, pa), (b, pb), (c, pc)) ->
-        Ternop (op, (loop_scalar a, pa), (loop_scalar b, pb), (loop_scalar c, pc))
-    | Binop (op, (a, pa), (b, pb)) -> Binop (op, (loop_scalar a, pa), (loop_scalar b, pb))
-    | Unop (op, (a, pa)) -> Unop (op, (loop_scalar a, pa))
+        Ternop (op, (loop_scalar ~env a, pa), (loop_scalar ~env b, pb), (loop_scalar ~env c, pc))
+    | Binop (op, (a, pa), (b, pb)) -> Binop (op, (loop_scalar ~env a, pa), (loop_scalar ~env b, pb))
+    | Unop (op, (a, pa)) -> Unop (op, (loop_scalar ~env a, pa))
     | (Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _) as
       other ->
         other
   in
-  loop_proc llc
+  loop_proc ~env:static_env llc
 
 let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
   let traced_store = Hashtbl.create (module Tnode) in
@@ -2453,11 +2896,13 @@ let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
     virtual_llc input_ctx.computations traced_store reverse_node_map static_indices llc
   in
   let llc =
-    hoist_cross_statement_cse @@ eliminate_common_subexpressions @@ rewrite_one_hot_reductions
-    @@ simplify_llc
+    hoist_cross_statement_cse @@ eliminate_common_subexpressions
+    @@ rewrite_one_hot_reductions ~static_indices
+    @@ simplify_llc ~static_indices
     @@ cleanup_virtual_llc ~static_indices
     @@ virtual_llc_result
   in
+  propose_compiled_writer_bounds ~static_indices llc;
   let merge_node =
     Option.map !merge_node_id ~f:(fun id -> Option.value_exn ~here:[%here] @@ Tnode.find ~id)
   in

@@ -30,6 +30,14 @@ prove indices in-bounds, and fold comparisons.
   *because* interval reasoning discharges most of the masks it introduces.
 - Receiving site exists: `interval_of : scalar_t -> bounds` slots into `simplify_llc`'s
   world; loop extents are statically known from projections.
+- **Pass-order caveat for the acceptance target.** `optimize_proc` currently composes
+  right-to-left as `cleanup_virtual_llc` → `simplify_llc` → `rewrite_one_hot_reductions`
+  → CSE → hoist. Therefore a generic gather guard built by `rewrite_one_hot_reductions`
+  is born after the only global simplification pass. Phase A should use the local fix:
+  `build_guarded_gather` constructs the generic guard and invokes the interval folder on
+  that guard before returning it. A second post-rewrite fold pass is the general fix if
+  later rewrites start emitting foldable code too, but it is deliberately not required for
+  Phase A.
 - **Symbol environment tracks all symbols.** `Embed_index` is where a symbol crosses from
   the index world into the value world, so the analysis threads `symbol → interval` —
   the abstract twin of `visit_llc`'s concrete `symbol → int` env. Completeness is by
@@ -54,11 +62,15 @@ prove indices in-bounds, and fold comparisons.
 
 ## Lattice and rules (draft)
 
-Domain: closed intervals over extended reals with an integrality flag,
-`{ lo : float; hi : float; integral : bool }`. Top = `[-inf, +inf]` non-integral. No
-bottom (expressions always evaluate). NaN policy: any expression that may evaluate to NaN
-is top — folding decisions require NaN-freedom, which the integer fragment guarantees and
-the float fragment mostly forfeits.
+Domain: closed intervals over extended reals with an integrality flag and an exactness
+bit, `{ lo : float; hi : float; integral : bool; exact : bool }`. Top =
+`[-inf, +inf]` non-integral, inexact. No bottom (expressions always evaluate). Bounds are
+outward-rounded when exact representation is impossible; ordering folds stay sound under
+that convention, but equality/singleton folds require `exact`. In particular, clear
+`exact` for integer endpoints not representable in binary64 (notably around signed/unsigned
+64-bit dtype extrema; OCaml native `int` would not solve this either). NaN policy: any
+expression that may evaluate to NaN is top — folding decisions require NaN-freedom, which
+the exact integer/index fragment guarantees and the float fragment mostly forfeits.
 
 `axis_index` (exact, integral): `Fixed_idx i → [i,i]`; `Iterator s → env(s)`;
 `Sub_axis → [0,0]`; `Affine {symbols; offset}` → `offset + Σ coeff·env(s)` with endpoints
@@ -68,42 +80,58 @@ picked by coefficient sign. `Concat` is gone by lowering.
 - `Embed_index idx` → interval of `idx`, integral.
 - `Constant c` → `[c,c]`, integral iff `c` is a whole number; NaN → top. `Constant_bits` → top.
 - `Get (tn, _)` → settled `Tnode` bounds (Phase B), else dtype range: integer precs give
-  `[0, 2^w)` or `[-2^(w-1), 2^(w-1))` integral; float precs top. `Get_dynamic` likewise
-  via the table's node. `Get_local`/`Local_scope` → top in Phase A.
+  `[0, 2^w)` or `[-2^(w-1), 2^(w-1))` integral, clearing `exact` when endpoints exceed
+  binary64's exact-integer range; float precs top. `Get_dynamic` likewise via the table's
+  node. `Get_local`/`Local_scope` → top in Phase A.
 - Binops: `Add`/`Sub`/`Mul` by endpoint arithmetic (extremal products). `Div`: top when
   the divisor interval contains 0, else endpoint rules. `Mod` by a constant `c > 0`:
   `[0, min(hi, c-1)]` when the argument is integral with `lo ≥ 0`, else top (avoids
   C-remainder sign traps). `Max`/`Min`: pointwise endpoints. `Relu_gate`/`Satur01_gate`:
   hull of `[0,0]` and the gated argument. Comparisons (`Cmplt`/`Cmpeq`/`Cmpne`) →
-  `[0,1]` integral, folding to a point when intervals decide: `Cmplt` true iff
-  `hi1 < lo2`, false iff `lo1 >= hi2`; `Cmpeq` false iff disjoint, true iff both are the
-  same singleton. `And` → `[0,1]`, folds when either side is a decided point.
+  `[0,1]` integral. Phase A folds comparisons only from exact integral facts (index
+  arithmetic, integer `Get`s, whole constants): `Cmplt` true iff `hi1 < lo2`, false iff
+  `lo1 >= hi2`; `Cmpeq` false iff disjoint, true iff both are the same exact singleton.
+  `And`/`Or` → `[0,1]`, folding from decided points and derived truthiness.
 - Ternops: `Where (c, a, b)` → `a` when `c` folds true, `b` when false, else hull;
-  `FMA` composes the `Mul`/`Add` rules.
+  `FMA` composes the `Mul`/`Add` rules; `Mul3` composes the `Mul` rules.
 - Unops: `Relu → [max(0,lo), max(0,hi)]`; `Trunc` → truncated endpoints, integral;
-  monotone transcendentals map endpoints; non-monotone → codomain bounds or top.
+  monotone transcendentals map endpoints only as inexact non-folding facts; non-monotone →
+  codomain bounds or top. `Satur01` → `[0,1]`; `Neg` swaps/negates endpoints; `Not` →
+  `[0,1]` and folds from derived truthiness. `Recip`/`Recip_sqrt` are top when their
+  domains include invalid values, otherwise inexact bounds only.
+- Unhandled operations must return top explicitly in exhaustive matches, not via a wildcard:
+  adding an `Ops` constructor should force a conscious interval-rule decision at compile time.
 - Precision annotations (`scalar_arg`): arithmetic at prec `p` preserves integrality
   claims only within `p`'s exact-integer range (fp16: 2048, fp32: 2^24, fp64: 2^53) —
-  check the annotation before asserting `integral`, else drop the flag and widen.
-  Machine-value soundness today: emitted index arithmetic is non-negative by
-  construction (physical padding), so no unsigned-wrap modeling; keep a "lower bound
-  could cross zero → top" assert until [signed-index-precision](signed-index-precision.md)
-  lands.
+  check the annotation before asserting `integral`, else drop the flag and widen. Phase A
+  deliberately does not fold comparisons from genuine float computations: real-endpoint
+  arithmetic can underapproximate rounded fp32/fp16 machine values. Machine-value
+  soundness today: emitted index arithmetic is non-negative by construction (physical
+  padding), so no unsigned-wrap modeling; keep a "lower bound could cross zero → top"
+  assert until [signed-index-precision](signed-index-precision.md) lands.
+
+Truthiness is a derived view in Phase A, not a separate lattice facet: `[1,1]` is
+definitely true, `[0,0]` definitely false, `[0,1]` maybe, and any interval excluding zero
+is definitely nonzero. A distinct nonzero facet (e.g. `x != 0` while `x ∈ [-3,5]`) is
+deferred until a consumer produces or needs that shape of fact.
 
 Designated re-expression target (acceptance criterion): re-derive
 `build_guarded_gather`'s three guard flavors. Construct the guard generically (lower
-bound, upper bound, integrality conjunct) and let interval folding erase what the ids
-precision proves — unsigned `Get` gives `[0, 2^w)` so the lower conjunct folds; integer
-precs prove integrality so `Trunc` folds — leaving the current hand-written flavors as
-emergent behavior. It is landed, executable, and already golden-tested
-(`test_one_hot_embedding_lookup` asserts `Trunc` counts on both paths).
+bound, upper bound, integrality conjunct) inside `build_guarded_gather`, then locally run
+the interval folder on that guard because the one-hot rewrite runs after the global
+`simplify_llc` pass. Folding erases what the ids precision proves — unsigned `Get` gives
+`[0, 2^w)` so the lower conjunct folds; integer precs prove integrality so `Trunc` folds —
+leaving the current hand-written flavors as emergent behavior. It is landed, executable,
+and already golden-tested (`test_one_hot_embedding_lookup` asserts `Trunc` counts on both
+paths). Phase A should keep the executed parity test, not only structural IR assertions,
+because the risk class is "mathematical-real analysis consulted about machine values."
 
 ## Phasing
 
 - **Phase A** (implementable now): `interval_of` over `axis_index` + `scalar_t` with the
   total symbol env (seeded from `static_indices` before the membership strip),
   env-scoped memo, rules above; consumers: comparison folding in `simplify_llc` and the
-  gather-guard re-derivation.
+  gather-guard re-derivation via a local interval-fold call in `build_guarded_gather`.
 - **Phase B**: `Tnode` vmin/vmax with the propose/settle/conflict lifecycle and
   host-write symmetry (below); consumer: full guard fold for runtime ids.
 - **Phase C** (separate proposal, blocks on A):
@@ -115,8 +143,9 @@ emergent behavior. It is landed, executable, and already golden-tested
 The `scalar_t`-level analysis is intra-routine; without more, every `Get`/`Get_dynamic`
 degrades to dtype range at routine boundaries (a reader routine lowers its own comp; the
 writer's defining expression is in a different comp — the tensor node is the only artifact
-crossing between them). Store per-tensor scalar bounds (float `vmin`/`vmax` pair, exact for
-integer values below 2^53) on `Tnode.t` as writer-derived summaries. Payoff: with ids
+crossing between them). Store per-tensor scalar bounds (`vmin`/`vmax` with the same
+integral/exact metadata as the intra-routine lattice; exact for integer values below 2^53)
+on `Tnode.t` as writer-derived summaries. Payoff: with ids
 settled at `[0, vocab)`, the gh-343 gather guard folds *entirely* for genuinely runtime
 ids, not just range-produced ones; same for data-dependent mask discharge.
 
@@ -128,17 +157,20 @@ Soundness design (third instance of the `delayed_prec` lifecycle pattern):
   a reader that discharges a guard *settles* them (like forcing the prec lazy); a
   post-settlement writer whose interval does not fit is a compile-time error (like
   `update_prec` on a settled precision).
-- **Host writes**: symmetric with compiled writers around the settlement point.
-  *Pre-settlement*, `set_values`/`from_host` (and ndarray-backed `init_data` — proposed
-  *lazily* when the `Host_inits` buffer is forced at link/upload time, not at tensor
-  creation: `Reshape` inits deliberately wait for shape and padding inference, so an
-  eager scan would force unresolved dims or miss padding added by `create_with_reshape`)
-  act as writers: scan the uploaded values (O(n), trivial next to the copy) and *propose*
-  the observed `[min, max]` into the join — or pin the tensor to top if scanning is
-  disabled. Otherwise a later reader could settle narrow writer-derived bounds and fold a
-  guard against host contents that were never inspected. A bonus: tensors created via
-  `class_ids_of_int_list`-style host arrays get tight bounds automatically.
-  *Post-settlement*, host writes validate against the settled bounds or error.
+- **Host writes and transfers**: symmetric with compiled writers around the settlement
+  point. *Pre-settlement*, every host-to-device entrypoint acts as a writer:
+  `Context.set_values`/`Context.from_host`, persistence/checkpoint restore, direct backend
+  `from_host`/`init_from_host` paths, and ndarray-backed `init_data` proposed *lazily*
+  when the `Host_inits` buffer is forced at link/upload time, not at tensor creation
+  (`Reshape` inits deliberately wait for shape and padding inference, so an eager scan
+  would force unresolved dims or miss padding added by `create_with_reshape`). Scan the
+  uploaded values (O(n), trivial next to the copy) and *propose* the observed `[min, max]`
+  into the join — or pin the tensor to top if scanning is disabled. Otherwise a later
+  reader could settle narrow writer-derived bounds and fold a guard against host contents
+  that were never inspected. A bonus: tensors created via `class_ids_of_int_list`-style
+  host arrays get tight bounds automatically. *Post-settlement*, host writes validate
+  against the settled bounds or error. Device-to-device copies need no scan: they
+  propagate the source node's bounds into the destination by join.
 - **Self-referential writers** (read-modify-write across executions: param updates,
   accumulators) default to top — a fixpoint over unbounded repetitions is not attempted.
   The profitable cases (ids, range producers, one-hots) are write-once/functional.
@@ -158,13 +190,15 @@ is paid once).
 
 ## Acceptance criteria
 
-- [x] Lattice and rules specified (draft above; single lattice with an integrality flag
-      rather than two variants; widening not needed — loop extents are finite and
-      static).
+- [x] Lattice and rules specified (draft above; single lattice with integrality and
+      exactness bits rather than dual carriers; widening not needed — loop extents are
+      finite and static).
 - [x] Re-expression target designated: `build_guarded_gather`'s guard flavors re-derived
-      by folding a generically-constructed guard (implementation lands with Phase A).
+      by locally folding a generically-constructed guard inside `build_guarded_gather`
+      (implementation lands with Phase A).
 - [x] Caching strategy decided: per-node memo, env-scoped (see the symbol-environment
       key point).
 - [x] `Tnode` bounds lifecycle specified (propose/settle/conflict semantics mirroring
-      `delayed_prec`; host-write symmetry around settlement; self-referential writers
-      pinned to top) — implementation is Phase B.
+      `delayed_prec`; host-to-device write symmetry around settlement; device-to-device
+      bound propagation; self-referential writers pinned to top) — implementation is
+      Phase B.

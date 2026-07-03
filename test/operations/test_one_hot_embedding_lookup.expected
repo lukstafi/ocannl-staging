@@ -4,7 +4,7 @@ forward equals direct gather of table rows: true
 optimized IR contains a Get_dynamic gather: true
 vocabulary reduction loop is eliminated: true
 gather's dynamic index reads the token-id tensor: true
-float ids: guard contains the integrality Trunc: true
+float ids with integer host init fold the integrality Trunc: true
 generated C contains a guarded dynamic table read: true
 generated C has no vocabulary reduction loop: true
 in-range row of OOB batch is correct: true

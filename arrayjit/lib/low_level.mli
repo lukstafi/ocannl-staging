@@ -210,7 +210,7 @@ val reads_scope_before_set : scope_id -> t -> bool
     first definitely-executed [Set_local id] in [body]. Use this at code-generation time to decide
     whether a [Local_scope] or [Declare_local] declaration needs a zero initializer. *)
 
-val rewrite_one_hot_reductions : t -> t
+val rewrite_one_hot_reductions : ?static_indices:Indexing.static_symbol list -> t -> t
 (** gh-343: rewrites the narrow one-hot embedding pattern -- an [Add] reduction over a loop variable
     [k] whose body selects an embedding-table row via [k == index_expr] (a logical one-hot) -- into
     a guarded dynamic gather ({!Get_dynamic}) that reads the table row at [index_expr] directly,

@@ -35,9 +35,9 @@ let read_generated_c base_name =
 let cvals = Array.init (embed * vocab) ~f:Float.of_int
 let approx a b = Float.(abs (a - b) < 1e-4)
 
-(* Lower the (shape-forced) forward comp and report (#Get_dynamic, #For_loop,
-   index-tensor-is-input, #Trunc). The [Trunc] count distinguishes the guard flavors: float-prec
-   ids need the integrality check [idx == trunc(idx)]; integer-prec ids must not emit it. *)
+(* Lower the (shape-forced) forward comp and report (#Get_dynamic, #For_loop, index-tensor-is-input,
+   #Trunc). Without tensor-node value bounds, float-prec ids need the integrality check [idx ==
+   trunc(idx)]; host-derived integral bounds can now fold it away. *)
 let inspect (t : Tensor.t) (index_tn : Ir.Tnode.t) : int * int * bool * int =
   let comp = t.Tensor.forward in
   let optim_ctx = { LL.computations = Hashtbl.create (module Ir.Tnode) } in
@@ -136,9 +136,11 @@ let () =
      as constant fills, contributing no loops). *)
   p "vocabulary reduction loop is eliminated" (loops <= 2);
   p "gather's dynamic index reads the token-id tensor" index_is_input;
-  (* Positive control for the integer-ids section below: float-precision ids DO carry the
-     integrality check in the optimized IR. *)
-  p "float ids: guard contains the integrality Trunc" (truncs > 0);
+  (* Phase B: these float-precision ids come from an all-integer host initializer, so the tensor
+     bounds prove integrality and discharge the guard's [idx == trunc(idx)] conjunct. The fractional
+     case below keeps the guard and validates that non-integral host values still produce one-hot
+     semantics. *)
+  p "float ids with integer host init fold the integrality Trunc" (truncs = 0);
   (* Proposal AC: the generated C for the optimized kernel contains a guarded dynamic table read and
      no reduction loop over the vocabulary axis. The dynamic index renders as a cast to
      [Ops.index_prec ()] (uint32_t under default settings, uint64_t under large_models) inside a
@@ -222,10 +224,10 @@ let () =
     && Array.for_all2_exn cid_vals (Array.of_list id_list) ~f:(fun v i -> approx v (Float.of_int i))
     );
 
-  (* --- Integer-precision ids: [class_ids_of_int_list] stores uint32 IDs and [one_hot_of_ids]
-     flows the integer precision into the gather (threefry-style backward precision). The guard
-     then needs no integrality check ([Trunc]) -- integer values cannot be fractional -- and, being
-     unsigned, no lower bound. Out-of-range must still yield a zero row via the upper bound. --- *)
+  (* --- Integer-precision ids: [class_ids_of_int_list] stores uint32 IDs and [one_hot_of_ids] flows
+     the integer precision into the gather (threefry-style backward precision). The guard then needs
+     no integrality check ([Trunc]) -- integer values cannot be fractional -- and, being unsigned,
+     no lower bound. Out-of-range must still yield a zero row via the upper bound. --- *)
   let ids_int = Nn_blocks.class_ids_of_int_list [ 1; 3; 0; vocab (* out of [0, vocab) *) ] in
   let c_int =
     TDSL.ndarray cvals ~label:[ "C_int" ] ~input_dims:[ vocab ] ~output_dims:[ embed ] ()

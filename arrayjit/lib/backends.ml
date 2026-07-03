@@ -136,6 +136,7 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
         (* No cross-stream reader synchronization needed: multi-streaming was removed
            (gh-ocannl-341). Only one stream exists per device, so there are no concurrent
            cross-stream readers to wait for before this host-to-device upload. *)
+        Tn.propose_host_bounds tn hosted;
         [%log "copying", Tn.debug_name tn, "to", (dst : Backend_intf.buffer_loc), "from host"];
         Backend.from_host ~dst:ctx ~dst_loc:dst hosted;
         update_writer_event ctx @@ Node tn;
@@ -147,6 +148,7 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
     | None ->
         (* No zero-init: we are immediately copying from host. *)
         let dst = allocate ctx.device tn ~zero_init:false in
+        Tn.propose_host_bounds tn hosted;
         [%log "copying", Tn.debug_name tn, "to", (dst : Backend_intf.buffer_loc), "from host"];
         Backend.from_host ~dst:ctx ~dst_loc:dst hosted;
         update_writer_event ctx @@ Node tn;
@@ -588,7 +590,9 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
               if zero_init then memset_zero device ~pool_id ~offset ~size_in_bytes;
               let loc = { pool_id; offset } in
               Option.iter host_init ~f:(fun nd ->
-                  Device.from_host ~dst:context ~dst_loc:loc (Lazy.force nd));
+                  let nd = Lazy.force nd in
+                  Tn.propose_host_bounds key nd;
+                  Device.from_host ~dst:context ~dst_loc:loc nd);
               loc
             in
             register key ~alloc)

@@ -14,23 +14,22 @@ type memory_mode =
   | Virtual
       (** The tensor node's computations are inlined on a per-scalar basis. The node has no buffer
           in any context; its defining computation is tracked (in [Low_level.optimize_ctx]), so it
-          remains observable: its value can be recomputed on demand, including by later routines
-          and for printing. Observability is inductive, not intrinsic: recomputation requires the
-          nodes the tracked computation reads to be observable themselves, so a [Virtual] node
-          that depends -- directly or transitively through other [Virtual] nodes -- on a [Local]
-          node inherits its unobservability (the recompilation raises the same [User_error]). *)
+          remains observable: its value can be recomputed on demand, including by later routines and
+          for printing. Observability is inductive, not intrinsic: recomputation requires the nodes
+          the tracked computation reads to be observable themselves, so a [Virtual] node that
+          depends -- directly or transitively through other [Virtual] nodes -- on a [Local] node
+          inherits its unobservability (the recompilation raises the same [User_error]). *)
   | Never_virtual  (** An as-yet-unresolved request; resolves to [Local] or [On_device]. *)
   | Local
-      (** Routine-scoped scratch: the tensor node exists only for the duration of a single call to
-          a compiled function, stored to whatever degree the optimizer decides on (e.g. a stack
-          array), and is not persisted across calls. It is not materialized (owns no context
-          buffer) and is not available for merging across devices. Unlike [Virtual] -- which stays
+      (** Routine-scoped scratch: the tensor node exists only for the duration of a single call to a
+          compiled function, stored to whatever degree the optimizer decides on (e.g. a stack
+          array), and is not persisted across calls. It is not materialized (owns no context buffer)
+          and is not available for merging across devices. Unlike [Virtual] -- which stays
           observable via recomputation -- [Local] is {b unobservable}, and the sole source of
-          unobservability: its computation is not tracked, and compiling a later routine that
-          reads it raises a [User_error] directing to mark it as materialized before its first
-          use. This mode is only ever assigned by the
-          compiler (never requested), reserving the freedom to optimize placement of nodes whose
-          lifetime is confined to one routine. *)
+          unobservability: its computation is not tracked, and compiling a later routine that reads
+          it raises a [User_error] directing to mark it as materialized before its first use. This
+          mode is only ever assigned by the compiler (never requested), reserving the freedom to
+          optimize placement of nodes whose lifetime is confined to one routine. *)
   | On_device
       (** The tensor node is stored on the devices that compute with it and persisted across
           function calls. It is available for merging across devices (for devices that support
@@ -40,6 +39,14 @@ type memory_mode =
 
 type delayed_prec = Default of Ops.prec | Inferred of Ops.prec Lazy.t | Specified of Ops.prec
 [@@deriving sexp, equal]
+
+type value_bounds = { lo : float; hi : float; integral : bool; exact : bool } [@@deriving sexp_of]
+
+type value_bounds_state =
+  | Bounds_unknown
+  | Bounds_proposed of value_bounds
+  | Bounds_settled of value_bounds
+[@@deriving sexp_of]
 
 type t = {
   prec : Ops.prec Lazy.t;
@@ -57,6 +64,7 @@ type t = {
   mutable delayed_prec_unsafe : delayed_prec;
       (** Participates in the computation of {!field-prec}. *)
   mutable memory_mode : (memory_mode * int) option;
+  mutable value_bounds : value_bounds_state;
   mutable alias_of : ((t * Indexing.static_symbol) option[@sexp.opaque]);
       (** When [Some (parent, batch_idx)], this node is a zero-copy slice-alias *view* of [parent]:
           it owns no buffer of its own, and every read/write of it is redirected (during lowering)
@@ -156,6 +164,78 @@ let log_debug_info ~from_log_level tn =
         debug_memory_mode tn.memory_mode,
         "backends:",
         (tn.backend_info : Sexp.t)]]]
+
+let value_bounds_top =
+  { lo = Float.neg_infinity; hi = Float.infinity; integral = false; exact = false }
+
+let value_bounds_point c =
+  let integral = Float.is_finite c && Float.is_integer c in
+  let exact = (not integral) || Float.(abs c <= 2. ** 53.) in
+  { lo = c; hi = c; integral; exact }
+
+let value_bounds_join a b =
+  {
+    lo = Float.min a.lo b.lo;
+    hi = Float.max a.hi b.hi;
+    integral = a.integral && b.integral;
+    exact = a.exact && b.exact;
+  }
+
+let value_bounds_contains outer inner =
+  Float.(outer.lo <= inner.lo && outer.hi >= inner.hi)
+  && ((not outer.integral) || inner.integral)
+  && ((not outer.exact) || inner.exact)
+
+let value_bounds_candidate tn =
+  match tn.value_bounds with
+  | Bounds_unknown -> None
+  | Bounds_proposed b | Bounds_settled b -> Some b
+
+let settled_value_bounds tn =
+  match tn.value_bounds with
+  | Bounds_settled b -> Some b
+  | Bounds_unknown | Bounds_proposed _ -> None
+
+let propose_value_bounds tn b =
+  let b =
+    if Float.is_nan b.lo || Float.is_nan b.hi || Float.(b.lo > b.hi) then value_bounds_top else b
+  in
+  match tn.value_bounds with
+  | Bounds_unknown -> tn.value_bounds <- Bounds_proposed b
+  | Bounds_proposed old -> tn.value_bounds <- Bounds_proposed (value_bounds_join old b)
+  | Bounds_settled settled ->
+      if not (value_bounds_contains settled b) then
+        raise
+        @@ Utils.User_error
+             [%string
+               "Tnode.propose_value_bounds: writer for %{debug_name tn} produced [%{b.lo#Float}, \
+                %{b.hi#Float}], outside settled bounds [%{settled.lo#Float}, %{settled.hi#Float}]"]
+
+let propose_value_bounds_top tn = propose_value_bounds tn value_bounds_top
+
+let settle_value_bounds tn =
+  match tn.value_bounds with
+  | Bounds_unknown | Bounds_settled _ -> ()
+  | Bounds_proposed b -> tn.value_bounds <- Bounds_settled b
+
+let exact_float_integer x = Float.is_finite x && Float.is_integer x && Float.(abs x <= 2. ** 53.)
+
+let scan_host_bounds ?padding nd =
+  let values = Nd.retrieve_flat_values ?padding nd in
+  if Array.is_empty values then value_bounds_top
+  else if Array.exists values ~f:Float.is_nan then value_bounds_top
+  else
+    let lo, hi, integral =
+      Array.fold values ~init:(Float.infinity, Float.neg_infinity, true)
+        ~f:(fun (lo, hi, integral) v ->
+          (Float.min lo v, Float.max hi v, integral && Float.is_finite v && Float.is_integer v))
+    in
+    let exact = (not integral) || (exact_float_integer lo && exact_float_integer hi) in
+    { lo; hi; integral; exact }
+
+let propose_host_bounds tn nd =
+  let padding = Option.map ~f:fst (Lazy.force tn.padding) in
+  propose_value_bounds tn (scan_host_bounds ?padding nd)
 
 (** Defaults to the most local memory mode compatible with the current setting. *)
 let default_to_most_local tn provenance =
@@ -510,6 +590,7 @@ let create delayed_prec ~id ~label ~unpadded_dims ~padding () =
       id;
       label;
       memory_mode = None;
+      value_bounds = Bounds_unknown;
       alias_of = None;
       slice_of = None;
       backend_info = Sexp.List [];
@@ -541,6 +622,7 @@ let create_from_padded ~id ~label ~ndarray ~padding () =
       id;
       label;
       memory_mode = Some (On_device, 49);
+      value_bounds = Bounds_unknown;
       alias_of = None;
       slice_of = None;
       backend_info = Sexp.List [];
@@ -617,6 +699,7 @@ let create_with_reshape ~id ~label ~base_ndarray ~unpadded_dims ~padding ~from_p
       id;
       label;
       memory_mode = Some (On_device, 49);
+      value_bounds = Bounds_unknown;
       alias_of = None;
       slice_of = None;
       backend_info = Sexp.List [];
@@ -640,6 +723,7 @@ let find =
       id = -1;
       label = [];
       memory_mode = None;
+      value_bounds = Bounds_unknown;
       alias_of = None;
       slice_of = None;
       backend_info = Sexp.List [];
