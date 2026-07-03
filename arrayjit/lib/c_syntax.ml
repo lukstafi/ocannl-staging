@@ -1030,9 +1030,14 @@ module C_syntax (B : C_syntax_config) = struct
   let compile_main llc : PPrint.document = pp_ll llc
 
   let compile_proc ~name idx_params
-      Low_level.{ traced_store; llc; merge_node; optimize_ctx = _; workgroup_shared = _ } :
+      Low_level.{ traced_store; llc; merge_node; optimize_ctx = _; workgroup_shared } :
       (string * kparam_source) list * PPrint.document =
     let open PPrint in
+    (* Phase A of docs/proposals/axis-types-for-loops.md: the local-declaration pass below would
+       silently emit workgroup-shared nodes as per-thread stack arrays -- wrong sharing semantics.
+       Fail clearly until shared declarations land (with the rendering phase). *)
+    if not (Set.is_empty workgroup_shared) then
+      invalid_arg "C_syntax.compile_proc: workgroup_shared placement not supported yet";
     current_traced_store := Some traced_store;
     Hash_set.clear zero_out_seen;
     (* The materialized in-context nodes, in deterministic [traced_store] order, with their

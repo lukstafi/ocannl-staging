@@ -2091,19 +2091,44 @@ let reads_scope_before_set (target : scope_id) (body : t) : bool =
   in
   match scan body with `Written -> false | `Read | `Neither -> true
 
+(** Whether a statement tree contains a [Workgroup_barrier] anywhere, including inside [For_loop]
+    bodies and [Local_scope] bodies of its scalar expressions. Used to delimit code motion:
+    [flat_lines] keeps [For_loop] opaque and [writes_of_stmt] treats barriers as writing no tensor,
+    so this recursive check is what makes a barrier nested in a sibling statement visible to
+    hoisting. *)
+let rec contains_barrier (llc : t) : bool =
+  match llc with
+  | Workgroup_barrier -> true
+  | Seq (a, b) -> contains_barrier a || contains_barrier b
+  | For_loop { body; _ } -> contains_barrier body
+  | Set { llsc; _ } -> scalar_contains_barrier llsc
+  | Set_from_vec { arg = s, _; _ } -> scalar_contains_barrier s
+  | Set_local (_, llsc) -> scalar_contains_barrier llsc
+  | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ -> false
+
+and scalar_contains_barrier (llsc : scalar_t) : bool =
+  match llsc with
+  | Local_scope { body; _ } -> contains_barrier body
+  | Get_dynamic { dyn_value = v, _; _ } -> scalar_contains_barrier v
+  | Ternop (_, (s1, _), (s2, _), (s3, _)) ->
+      scalar_contains_barrier s1 || scalar_contains_barrier s2 || scalar_contains_barrier s3
+  | Binop (_, (s1, _), (s2, _)) -> scalar_contains_barrier s1 || scalar_contains_barrier s2
+  | Unop (_, (s, _)) -> scalar_contains_barrier s
+  | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> false
+
 (** Hoists shared [Local_scope] computations from sibling statements to the enclosing scope.
     Operates on a flat list of sibling statements. *)
 let rec hoist_shared_locals (stmts : t list) : t list =
   (* No code motion across a barrier: hoist within each barrier-delimited segment separately. The
      write-hazard check below cannot see barriers (they write no tensor), so splitting here is what
-     enforces the barrier's full-fence contract for cross-statement CSE. *)
-  match
-    List.findi stmts ~f:(fun _ stmt -> match stmt with Workgroup_barrier -> true | _ -> false)
-  with
+     enforces the barrier's full-fence contract for cross-statement CSE. A statement merely
+     *containing* a barrier (e.g. a loop with a barrier in its body) is a boundary too: hoisting a
+     shared computation from after it to before it would move work across the barrier. *)
+  match List.findi stmts ~f:(fun _ stmt -> contains_barrier stmt) with
   | Some (i, _) ->
       let before, rest = List.split_n stmts i in
-      hoist_shared_locals_segment before
-      @ (Workgroup_barrier :: hoist_shared_locals (List.drop rest 1))
+      let boundary = List.hd_exn rest in
+      hoist_shared_locals_segment before @ (boundary :: hoist_shared_locals (List.tl_exn rest))
   | None -> hoist_shared_locals_segment stmts
 
 and hoist_shared_locals_segment (stmts : t list) : t list =
