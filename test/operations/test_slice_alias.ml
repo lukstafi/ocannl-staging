@@ -45,7 +45,7 @@ let count_writes_to (llc : Ir.Low_level.t) (id : int) : int =
   let n = ref 0 in
   let hit (tn : Ir.Tnode.t) = if tn.Ir.Tnode.id = id then Int.incr n in
   let rec go_t : Ir.Low_level.t -> unit = function
-    | Noop | Comment _ | Staged_compilation _ | Declare_local _ -> ()
+    | Noop | Comment _ | Staged_compilation _ | Declare_local _ | Workgroup_barrier -> ()
     | Seq (a, b) ->
         go_t a;
         go_t b

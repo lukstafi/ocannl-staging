@@ -30,12 +30,40 @@ let get_scope =
     Int.incr uid;
     { tn; scope_id = !uid }
 
+(** How a loop's iterations map to hardware; see docs/proposals/axis-types-for-loops.md. [Serial] is
+    an ordinary for-loop. [Grid] / [Workgroup] bind the loop index to a GPU grid / workgroup (block,
+    threadgroup) hardware index instead of looping; [Workgroup_reduce] is a [Workgroup] axis
+    participating in a shared-memory reduction (distinguished for schedule transforms and
+    validation, rendered like [Workgroup]). [Unrolled] is emitted as the repeated body with
+    substituted constants. Hardware slots are positional: among a kernel's loops of one kind, the
+    innermost binds [.x], then [.y], [.z]. Annotated loops must have [from_ = 0] and iterations with
+    no cross-iteration dependencies ([Workgroup_reduce] excepted: its communication must be staged
+    through workgroup-shared nodes and barriers). *)
+type axis_type = Serial | Grid | Workgroup | Workgroup_reduce | Unrolled
+[@@deriving sexp, compare, equal]
+
+(** Loop keyword used by the human-readable printers: plain [for] for [Serial] (unchanged legacy
+    output), [for@<axis>] otherwise. *)
+let axis_type_label = function
+  | Serial -> "for"
+  | Grid -> "for@grid"
+  | Workgroup -> "for@workgroup"
+  | Workgroup_reduce -> "for@workgroup_reduce"
+  | Unrolled -> "for@unrolled"
+
 type t =
   | Noop
   | Comment of string
   | Staged_compilation of ((unit -> PPrint.document)[@equal.ignore] [@compare.ignore])
   | Seq of t * t
-  | For_loop of { index : Indexing.symbol; from_ : int; to_ : int; body : t; trace_it : bool }
+  | For_loop of {
+      index : Indexing.symbol;
+      from_ : int;
+      to_ : int;
+      body : t;
+      trace_it : bool;
+      axis : axis_type;
+    }
   | Zero_out of Tn.t
   | Set of { tn : Tn.t; idcs : Indexing.axis_index array; llsc : scalar_t; mutable debug : string }
   | Set_from_vec of {
@@ -48,6 +76,10 @@ type t =
     }
   | Set_local of scope_id * scalar_t
   | Declare_local of { id : scope_id; needs_init : bool }
+  | Workgroup_barrier
+      (** Workgroup-scoped synchronization ([__syncthreads()] / [threadgroup_barrier]). An opaque
+          effectful statement: no CSE, hoisting, or code motion across it. Grid-scoped
+          synchronization is deliberately not representable. *)
 [@@deriving sexp_of, equal]
 
 and scalar_t =
@@ -184,6 +216,10 @@ type optimized = {
   optimize_ctx : optimize_ctx;
   llc : t;
   merge_node : Tnode.t option;
+  workgroup_shared : Set.M(Tnode).t;
+      (** [Local]-memory-mode nodes to be placed in workgroup-shared memory ([__shared__] /
+          [threadgroup]) instead of kernel-local arrays. Populated by schedule transforms; empty for
+          unscheduled code. See docs/proposals/axis-types-for-loops.md. *)
 }
 [@@deriving sexp_of]
 
@@ -325,7 +361,8 @@ and proc_mentions_symbol (s : Indexing.symbol) (llc : t) : bool =
   | Set_local (_, llsc) -> scalar_mentions_symbol s llsc
   | Seq (a, b) -> proc_mentions_symbol s a || proc_mentions_symbol s b
   | For_loop { body; _ } -> proc_mentions_symbol s body
-  | Zero_out _ | Declare_local _ | Noop | Comment _ | Staged_compilation _ -> false
+  | Zero_out _ | Declare_local _ | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier ->
+      false
 
 (* Count occurrences of [Iterator s] in [idcs], and report whether every occurrence is a plain
    [Iterator s] (no [Affine]/[Concat] use). Returns [(count, axis_of_last_plain_occurrence)]. *)
@@ -404,9 +441,9 @@ let visit_llc traced_store ~merge_node_id reverse_node_map ~max_visits llc =
     | (Seq (c1, c2) : t) ->
         loop c1;
         loop c2
-    | For_loop { index; from_; to_ = _; body; trace_it = false } ->
+    | For_loop { index; from_; to_ = _; body; trace_it = false; axis = _ } ->
         loop_proc ~first_visit (Map.add_exn ~key:index ~data:from_ env) body
-    | For_loop { index; from_; to_; body; trace_it = true } ->
+    | For_loop { index; from_; to_; body; trace_it = true; axis = _ } ->
         for data = from_ to min to_ (from_ + virtualize_settings.max_tracing_dim) do
           loop_proc
             ~first_visit:(first_visit && data = from_)
@@ -489,6 +526,7 @@ let visit_llc traced_store ~merge_node_id reverse_node_map ~max_visits llc =
     | Declare_local _ -> ()
     | Comment _ -> ()
     | Staged_compilation _ -> ()
+    | Workgroup_barrier -> ()
   and loop_scalar env (access_pos : int array option) llsc =
     let loop = loop_scalar env access_pos in
     match llsc with
@@ -663,7 +701,7 @@ let%diagn2_sexp check_and_store_virtual computations_table traced static_indices
         loop c1;
         loop c2
     | For_loop { trace_it = false; _ } -> raise @@ Non_virtual 6
-    | For_loop { index; body; from_; to_; trace_it = true } ->
+    | For_loop { index; body; from_; to_; trace_it = true; axis = _ } ->
         loop_proc ~env_dom:(Set.add env_dom index)
           ~loop_ranges:(Map.set loop_ranges ~key:index ~data:(to_ - from_ + 1))
           body
@@ -689,6 +727,9 @@ let%diagn2_sexp check_and_store_virtual computations_table traced static_indices
     | Declare_local _ -> raise @@ Non_virtual 19
     | Comment _ -> ()
     | Staged_compilation _ -> raise @@ Non_virtual 8
+    (* A barrier is an opaque effect: a computation containing one cannot be inlined/recomputed.
+       Defensive: schedule transforms run after virtualization, so this should be unreachable. *)
+    | Workgroup_barrier -> raise @@ Non_virtual 141
   and loop_scalar ~env_dom ~loop_ranges llsc =
     match llsc with
     | Constant _ | Constant_bits _ -> ()
@@ -1005,11 +1046,12 @@ let%track7_sexp inline_computation ~id
           if List.is_empty body then None else Some (unflat_lines body)
       | For_loop { trace_it = false; _ } -> assert false
       | For_loop { index; body; _ } when Map.mem env index -> loop env body
-      | For_loop { index; from_; to_; body; trace_it } ->
+      | For_loop { index; from_; to_; body; trace_it; axis } ->
           (* Freshen the binding. *)
           let fresh = Indexing.get_symbol () in
           let env = Map.add_exn ~key:index ~data:(Indexing.Iterator fresh) env in
-          Option.map ~f:(fun body : t -> For_loop { index = fresh; from_; to_; body; trace_it })
+          Option.map ~f:(fun body : t ->
+              For_loop { index = fresh; from_; to_; body; trace_it; axis })
           @@ loop env body
       | Zero_out tn when Tn.equal tn traced.tn -> Some (Set_local (id, Constant 0.0))
       | Set { tn; idcs; llsc; debug = _ } when Tn.equal tn traced.tn ->
@@ -1090,6 +1132,8 @@ let%track7_sexp inline_computation ~id
       | Declare_local _ -> None
       | Comment _ -> Some llc
       | Staged_compilation _ -> Some llc
+      (* Unreachable: [check_and_store_virtual] rejects computations containing barriers. *)
+      | Workgroup_barrier -> assert false
     and loop_scalar env llsc : scalar_t =
       match llsc with
       | Constant _ | Constant_bits _ -> llsc
@@ -1275,6 +1319,7 @@ let virtual_llc computations_table traced_store reverse_node_map static_indices 
     | Declare_local _ -> llc
     | Comment _ -> llc
     | Staged_compilation _ -> llc
+    | Workgroup_barrier -> llc
   and loop_scalar ~process_for ~owned ~in_storage_pass (llsc : scalar_t) : scalar_t =
     let loop = loop_scalar ~process_for ~owned ~in_storage_pass in
     match llsc with
@@ -1380,6 +1425,7 @@ let cleanup_virtual_llc ~static_indices (llc : t) : t =
     | Declare_local _ -> Some llc
     | Comment _ -> Some llc
     | Staged_compilation _ -> Some llc
+    | Workgroup_barrier -> Some llc
   and loop_scalar ~balanced ~env_dom (llsc : scalar_t) : scalar_t =
     let loop = loop_scalar ~balanced ~env_dom in
     match llsc with
@@ -1475,6 +1521,7 @@ and substitute_proc ~var ~value llc =
   | Declare_local _ -> llc
   | Comment _ -> llc
   | Staged_compilation _ -> llc
+  | Workgroup_barrier -> llc
 
 let simplify_llc llc =
   (* Implements top-down rewriting. *)
@@ -1496,6 +1543,7 @@ let simplify_llc llc =
     | Declare_local _ -> llc
     | Comment _ -> llc
     | Staged_compilation _ -> llc
+    | Workgroup_barrier -> llc
   and loop_scalar ((llsc, prec) : scalar_t * Ops.prec) : scalar_t * Ops.prec =
     let local_scope_body, llsc' =
       match llsc with
@@ -1676,7 +1724,7 @@ let simplify_llc llc =
     | Set { tn; llsc; _ } -> check_float tn llsc
     | Set_from_vec { tn; arg = arg_scalar, _; _ } -> check_float tn arg_scalar
     | Set_local (id, llsc) -> check_float id.tn llsc
-    | Declare_local _ | Noop | Comment _ | Staged_compilation _ -> ()
+    | Declare_local _ | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier -> ()
   and check_float tn llsc =
     let loop = check_float tn in
     match llsc with
@@ -1753,15 +1801,18 @@ let cse_equal_scalar s1 s2 =
     | Noop, Noop -> true
     | Comment s1, Comment s2 -> String.equal s1 s2
     | Seq (a1, a2), Seq (b1, b2) -> equal_t a1 b1 && equal_t a2 b2
-    | ( For_loop { index = i1; from_ = f1; to_ = t1; body = bd1; trace_it = tr1 },
-        For_loop { index = i2; from_ = f2; to_ = t2; body = bd2; trace_it = tr2 } ) ->
-        Int.equal f1 f2 && Int.equal t1 t2 && Bool.equal tr1 tr2 && sym_equal i1 i2
-        && equal_t bd1 bd2
+    | ( For_loop { index = i1; from_ = f1; to_ = t1; body = bd1; trace_it = tr1; axis = ax1 },
+        For_loop { index = i2; from_ = f2; to_ = t2; body = bd2; trace_it = tr2; axis = ax2 } ) ->
+        Int.equal f1 f2 && Int.equal t1 t2 && Bool.equal tr1 tr2 && equal_axis_type ax1 ax2
+        && sym_equal i1 i2 && equal_t bd1 bd2
     | Zero_out tn1, Zero_out tn2 -> Tn.equal tn1 tn2
     | Set { tn = tn1; idcs = i1; llsc = s1; _ }, Set { tn = tn2; idcs = i2; llsc = s2; _ } ->
         Tn.equal tn1 tn2 && Array.equal idx_equal i1 i2 && equal_scalar s1 s2
     | Set_local (id1, s1), Set_local (id2, s2) -> ids_equal id1 id2 && equal_scalar s1 s2
     | Declare_local { id = id1; _ }, Declare_local { id = id2; _ } -> ids_equal id1 id2
+    (* Conservative: computations containing barriers are never judged alpha-equivalent --
+       deduplicating them would delete a synchronization point. *)
+    | Workgroup_barrier, _ -> false
     | _ -> false
   and equal_scalar (a : scalar_t) (b : scalar_t) : bool =
     match (a, b) with
@@ -1830,7 +1881,7 @@ let eliminate_common_subexpressions llc =
     and loop_proc (llc : t) : t =
       match llc with
       | Noop -> Noop
-      | Comment _ | Staged_compilation _ | Zero_out _ -> llc
+      | Comment _ | Staged_compilation _ | Zero_out _ | Workgroup_barrier -> llc
       | Seq (c1, c2) -> Seq (loop_proc c1, loop_proc c2)
       | For_loop for_config -> For_loop { for_config with body = loop_proc for_config.body }
       | Set { tn; idcs; llsc; debug } ->
@@ -1857,7 +1908,7 @@ let eliminate_common_subexpressions llc =
   let rec loop_proc (llc : t) : t =
     match llc with
     | Noop -> Noop
-    | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ -> llc
+    | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier -> llc
     | Seq (c1, c2) -> Seq (loop_proc c1, loop_proc c2)
     | For_loop for_config -> For_loop { for_config with body = loop_proc for_config.body }
     | Set { tn; idcs; llsc; debug } -> Set { tn; idcs; llsc = cse_scalar llsc; debug }
@@ -1934,7 +1985,8 @@ let reads_of_body (body : t) : Set.M(Tn).t =
   let acc = ref (Set.empty (module Tn)) in
   let rec loop_proc (llc : t) =
     match llc with
-    | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ -> ()
+    | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier ->
+        ()
     | Seq (c1, c2) ->
         loop_proc c1;
         loop_proc c2
@@ -1984,7 +2036,8 @@ let writes_of_stmt (stmt : t) : Set.M(Tn).t =
         loop a;
         loop b
     | For_loop { body; _ } -> loop body
-    | Noop | Comment _ | Staged_compilation _ | Declare_local _ | Set_local _ -> ()
+    | Noop | Comment _ | Staged_compilation _ | Declare_local _ | Set_local _ | Workgroup_barrier ->
+        ()
   in
   loop stmt;
   !acc
@@ -2008,7 +2061,8 @@ let reads_scope_before_set (target : scope_id) (body : t) : bool =
     | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> false
   and proc_has_read (llc : t) : bool =
     match llc with
-    | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ -> false
+    | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier ->
+        false
     | Seq (a, b) -> proc_has_read a || proc_has_read b
     | For_loop { body; _ } -> proc_has_read body
     | Set { llsc; _ } -> scalar_has_read llsc
@@ -2019,7 +2073,8 @@ let reads_scope_before_set (target : scope_id) (body : t) : bool =
      before any get), Neither. *)
   let rec scan (llc : t) : [ `Read | `Written | `Neither ] =
     match llc with
-    | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ -> `Neither
+    | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier ->
+        `Neither
     | Set { llsc; _ } -> if scalar_has_read llsc then `Read else `Neither
     | Set_from_vec { arg = s, _; _ } -> if scalar_has_read s then `Read else `Neither
     | Set_local (id, llsc) ->
@@ -2038,7 +2093,20 @@ let reads_scope_before_set (target : scope_id) (body : t) : bool =
 
 (** Hoists shared [Local_scope] computations from sibling statements to the enclosing scope.
     Operates on a flat list of sibling statements. *)
-let hoist_shared_locals (stmts : t list) : t list =
+let rec hoist_shared_locals (stmts : t list) : t list =
+  (* No code motion across a barrier: hoist within each barrier-delimited segment separately. The
+     write-hazard check below cannot see barriers (they write no tensor), so splitting here is what
+     enforces the barrier's full-fence contract for cross-statement CSE. *)
+  match
+    List.findi stmts ~f:(fun _ stmt -> match stmt with Workgroup_barrier -> true | _ -> false)
+  with
+  | Some (i, _) ->
+      let before, rest = List.split_n stmts i in
+      hoist_shared_locals_segment before
+      @ (Workgroup_barrier :: hoist_shared_locals (List.drop rest 1))
+  | None -> hoist_shared_locals_segment stmts
+
+and hoist_shared_locals_segment (stmts : t list) : t list =
   (* Step 1: Collect all Local_scope candidates with their statement indices *)
   let candidates =
     List.concat_mapi stmts ~f:(fun stmt_idx stmt ->
@@ -2305,8 +2373,9 @@ let rewrite_one_hot_reductions (llc : t) : t =
         | Set_from_vec { tn; idcs; length; vec_unop; arg = s, p; debug } ->
             Set_from_vec { tn; idcs; length; vec_unop; arg = (loop_scalar s, p); debug }
         | Set_local (id, llsc) -> Set_local (id, loop_scalar llsc)
-        | (Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _) as other -> other
-        )
+        | ( Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _
+          | Workgroup_barrier ) as other ->
+            other)
   and loop_scalar (llsc : scalar_t) : scalar_t =
     match llsc with
     | Local_scope { id; body; orig_indices } -> (
@@ -2350,7 +2419,7 @@ let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
     Option.map !merge_node_id ~f:(fun id -> Option.value_exn ~here:[%here] @@ Tnode.find ~id)
   in
   let optimize_ctx = input_ctx in
-  { traced_store; optimize_ctx; llc; merge_node }
+  { traced_store; optimize_ctx; llc; merge_node; workgroup_shared = Set.empty (module Tnode) }
 
 let code_hum_margin = ref 100
 
@@ -2385,7 +2454,7 @@ let get_ident_within_code ?no_dots ?(blacklist = []) llcs =
   in
   let rec loop (c : t) =
     match c with
-    | Noop | Comment _ | Staged_compilation _ -> ()
+    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier -> ()
     | Seq (c1, c2) ->
         loop c1;
         loop c2
@@ -2454,13 +2523,14 @@ let to_doc_cstyle ?name ?static_indices () llc =
           List.filter_map [ c1; c2 ] ~f:(function Noop -> None | c -> Some (doc_of_code c))
         in
         separate hardline docs
-    | For_loop { index = i; from_; to_; body; trace_it = _ } ->
+    | For_loop { index = i; from_; to_; body; trace_it = _; axis } ->
         let header =
-          string "for " ^^ pp_symbol i ^^ string " = " ^^ int from_ ^^ string " to " ^^ int to_
-          ^^ string " {"
+          string (axis_type_label axis ^ " ")
+          ^^ pp_symbol i ^^ string " = " ^^ int from_ ^^ string " to " ^^ int to_ ^^ string " {"
         in
         let body_doc = nest 2 (break 1 ^^ doc_of_code body) in
         group (header ^^ body_doc ^^ break 1 ^^ string "}")
+    | Workgroup_barrier -> string "workgroup_barrier;"
     | Zero_out tn -> string "zero_out " ^^ doc_ident tn ^^ string ";"
     | Set p ->
         let prec = Lazy.force p.tn.prec in
@@ -2561,13 +2631,14 @@ let to_doc ?name ?static_indices () llc =
           List.filter_map [ c1; c2 ] ~f:(function Noop -> None | c -> Some (doc_of_code c))
         in
         separate hardline docs
-    | For_loop { index = i; from_; to_; body; trace_it = _ } ->
+    | For_loop { index = i; from_; to_; body; trace_it = _; axis } ->
         let header =
-          string "for " ^^ pp_symbol i ^^ string " = " ^^ int from_ ^^ string " to " ^^ int to_
-          ^^ string " {"
+          string (axis_type_label axis ^ " ")
+          ^^ pp_symbol i ^^ string " = " ^^ int from_ ^^ string " to " ^^ int to_ ^^ string " {"
         in
         let body_doc = nest 2 (break 1 ^^ doc_of_code body) in
         group (header ^^ body_doc ^^ break 1 ^^ string "}")
+    | Workgroup_barrier -> string "workgroup_barrier;"
     | Zero_out tn -> string "zero_out " ^^ doc_ident tn ^^ string ";"
     | Set p ->
         let result =
@@ -2668,6 +2739,7 @@ let loop_over_dims dims ~body =
             to_ = d - 1;
             body = for_loop (Indexing.Iterator index :: rev_idcs) product;
             trace_it = true;
+            axis = Serial;
           }
   in
   for_loop [] (Array.to_list dims)
@@ -2735,6 +2807,7 @@ let loop_over_padding_region ~dims ~(padding : Ops.axis_padding array) ~body =
             body =
               build_loops ~any_padding_so_far (dim_idx + 1) (Indexing.Iterator index :: rev_idcs);
             trace_it = true;
+            axis = Serial;
           }
       else
         (* Has padding - generate left strip, middle (recurse), right strip *)
@@ -2754,6 +2827,7 @@ let loop_over_padding_region ~dims ~(padding : Ops.axis_padding array) ~body =
                       @@ Array.concat
                            [ Array.of_list_rev rev_idcs; [| Indexing.Iterator index |]; rest_idcs ]);
                 trace_it = true;
+                axis = Serial;
               }
           else Noop
         in
@@ -2770,6 +2844,7 @@ let loop_over_padding_region ~dims ~(padding : Ops.axis_padding array) ~body =
                   (* In middle - NOT in padding for this dim, recurse to find other padded dims *)
                   build_loops ~any_padding_so_far (dim_idx + 1) (Indexing.Iterator index :: rev_idcs);
                 trace_it = true;
+                axis = Serial;
               }
           else Noop
         in
@@ -2794,6 +2869,7 @@ let loop_over_padding_region ~dims ~(padding : Ops.axis_padding array) ~body =
                              rest_idcs;
                            ]);
                 trace_it = true;
+                axis = Serial;
               }
           else Noop
         in

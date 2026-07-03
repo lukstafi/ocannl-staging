@@ -23,6 +23,7 @@ let make_optimized llc =
       optimize_ctx = { computations = Hashtbl.create (module Tn) };
       llc;
       merge_node = None;
+      workgroup_shared = Base.Set.empty (module Tn);
     }
 
 let pp llc =
@@ -72,6 +73,7 @@ let () =
         to_ = 3;
         body = LL.Set_local (id, LL.Constant 1.);
         trace_it = false;
+        axis = Serial;
       }
   in
   assert (not (LL.reads_scope_before_set id loop_with_write));
@@ -87,6 +89,7 @@ let () =
           LL.Set_local
             (id, LL.Binop (Ops.Add, (LL.Get_local id, Ops.single), (LL.Constant 1., Ops.single)));
         trace_it = false;
+        axis = Serial;
       }
   in
   assert (LL.reads_scope_before_set id loop_with_read);
@@ -107,6 +110,7 @@ let () =
         to_ = 0;
         body = LL.Set_local (id, LL.Constant 1.);
         trace_it = false;
+        axis = Serial;
       }
   in
   assert (LL.reads_scope_before_set id empty_loop_write);
@@ -163,6 +167,7 @@ let () =
                   (LL.Get_local id, Ops.single),
                   (LL.Get (tn_src, [| Idx.Iterator idx |]), Ops.single) ) );
         trace_it = false;
+        axis = Serial;
       }
   in
   let local_scope = LL.Local_scope { id; body; orig_indices = [||] } in
@@ -206,6 +211,7 @@ let () =
         to_ = 0;
         body = LL.Set_local (id, LL.Constant 0.);
         trace_it = false;
+        axis = Serial;
       }
   in
   let acc_step =
@@ -280,6 +286,7 @@ let () =
                         (LL.Get_local sid, Ops.single),
                         (LL.Get (tn_src, [| Idx.Iterator idx |]), Ops.single) ) );
               trace_it = false;
+              axis = Serial;
             };
         orig_indices = [||];
       }

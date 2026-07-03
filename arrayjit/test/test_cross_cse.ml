@@ -18,7 +18,7 @@ let make_tn ~id ~label ~dim =
 let summarize (llc : LL.t) : int * int * int =
   let rec count_proc ((dl, ls, gl) as acc) (llc : LL.t) =
     match llc with
-    | LL.Noop | LL.Comment _ | LL.Staged_compilation _ | LL.Zero_out _ -> acc
+    | LL.Noop | LL.Comment _ | LL.Staged_compilation _ | LL.Zero_out _ | LL.Workgroup_barrier -> acc
     | LL.Declare_local _ -> (dl + 1, ls, gl)
     | LL.Seq (a, b) -> count_proc (count_proc acc a) b
     | LL.For_loop { body; _ } -> count_proc acc body
@@ -122,6 +122,7 @@ let () =
         body =
           LL.Set { tn = tn_src; idcs = [| Idx.Iterator k |]; llsc = LL.Constant 1.0; debug = "" };
         trace_it = false;
+        axis = Serial;
       }
   in
   let d_prog =
@@ -156,6 +157,7 @@ let () =
                         (LL.Get_local scope_id, Ops.single),
                         (LL.Get (tn_src, [| Idx.Iterator idx |]), Ops.single) ) );
               trace_it = true;
+              axis = Serial;
             };
         orig_indices = [||];
       }
@@ -201,6 +203,7 @@ let () =
       optimize_ctx = { computations = Hashtbl.create (module Ir.Tnode) };
       llc = result;
       merge_node = None;
+      workgroup_shared = Base.Set.empty (module Tn);
     }
   in
   let module Syntax = Ir.C_syntax.C_syntax (Ir.C_syntax.Pure_C_config (struct

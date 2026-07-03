@@ -42,7 +42,10 @@ let get s tn : LL.scalar_t = LL.Get (tn, [| iter s |])
 let add a b : LL.scalar_t = LL.Binop (Ops.Add, (a, single), (b, single))
 let mul a b : LL.scalar_t = LL.Binop (Ops.Mul, (a, single), (b, single))
 let c x : LL.scalar_t = LL.Constant x
-let loop s body : LL.t = LL.For_loop { index = s; from_ = 0; to_ = 2; body; trace_it = true }
+
+let loop s body : LL.t =
+  LL.For_loop { index = s; from_ = 0; to_ = 2; body; trace_it = true; axis = Serial }
+
 let seq a b : LL.t = LL.Seq (a, b)
 
 let optimize llc : LL.optimized =
@@ -52,7 +55,8 @@ let optimize llc : LL.optimized =
 (* --- structural probes on the optimized form --- *)
 let rec walk_t ~on_set ~on_get (llc : LL.t) =
   match llc with
-  | LL.Noop | LL.Declare_local _ | LL.Comment _ | LL.Staged_compilation _ -> ()
+  | LL.Noop | LL.Declare_local _ | LL.Comment _ | LL.Staged_compilation _ | LL.Workgroup_barrier ->
+      ()
   | LL.Seq (a, b) ->
       walk_t ~on_set ~on_get a;
       walk_t ~on_set ~on_get b

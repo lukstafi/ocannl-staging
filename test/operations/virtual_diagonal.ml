@@ -46,7 +46,10 @@ let zero tn : LL.t = LL.Zero_out tn
 (* a setter writing [tn] at the given index array *)
 let set_at idcs tn llsc : LL.t = LL.Set { tn; idcs; llsc; debug = "" }
 let get_at idcs tn : LL.scalar_t = LL.Get (tn, idcs)
-let loop s body : LL.t = LL.For_loop { index = s; from_ = 0; to_ = 2; body; trace_it = true }
+
+let loop s body : LL.t =
+  LL.For_loop { index = s; from_ = 0; to_ = 2; body; trace_it = true; axis = Serial }
+
 let seq a b : LL.t = LL.Seq (a, b)
 
 let optimize llc : LL.optimized =
@@ -56,7 +59,8 @@ let optimize llc : LL.optimized =
 (* --- structural probes on the optimized form --- *)
 let rec walk_t ~on_get ~on_where (llc : LL.t) =
   match llc with
-  | LL.Noop | LL.Declare_local _ | LL.Comment _ | LL.Staged_compilation _ -> ()
+  | LL.Noop | LL.Declare_local _ | LL.Comment _ | LL.Staged_compilation _ | LL.Workgroup_barrier ->
+      ()
   | LL.Seq (a, b) ->
       walk_t ~on_get ~on_where a;
       walk_t ~on_get ~on_where b

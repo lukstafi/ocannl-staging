@@ -27,7 +27,9 @@ let summarize (llc : LL.t) : int * int =
   let dyn = ref 0 and loops = ref 0 in
   let rec proc (llc : LL.t) =
     match llc with
-    | LL.Noop | LL.Comment _ | LL.Staged_compilation _ | LL.Zero_out _ | LL.Declare_local _ -> ()
+    | LL.Noop | LL.Comment _ | LL.Staged_compilation _ | LL.Zero_out _ | LL.Declare_local _
+    | LL.Workgroup_barrier ->
+        ()
     | LL.Seq (a, b) ->
         proc a;
         proc b
@@ -84,7 +86,9 @@ let make_local_scope_reduction ~table ~ids ~result ~table_idcs ~vocab ~bounds ~r
   let body =
     LL.Seq
       ( LL.Set_local (id, LL.Constant 0.),
-        LL.For_loop { index = k; from_; to_; trace_it = false; body = LL.Set_local (id, acc) } )
+        LL.For_loop
+          { index = k; from_; to_; trace_it = false; axis = Serial; body = LL.Set_local (id, acc) }
+      )
   in
   ignore vocab;
   LL.Set
