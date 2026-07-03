@@ -45,7 +45,7 @@ let run ctx routine = ignore (Context.run ctx routine)
    old hosted-array-based save/restore helpers were removed with the hosted memory mode
    (gh-ocannl-333). *)
 
-let set_materialized (a : Tn.t) = Tn.update_memory_mode a Materialized 28
+let set_materialized (a : Tn.t) = Tn.update_memory_mode a On_device 28
 
 (** Sets the tensor's value as materialized (device-resident, inspectable on demand via the
     context), and returns the tensor's forward code with a label-derived comment. *)

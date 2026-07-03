@@ -45,15 +45,13 @@ let () =
     Stdio.printf "alloc_pool %-13s -> %s\n" label (sm_str (B.storage_mode_of_pool device ~pool_id))
   in
   check_pool "Local" (Some Tn.Local);
-  check_pool "Device_only" (Some Tn.Device_only);
   check_pool "On_device" (Some Tn.On_device);
   check_pool "Effectively_constant" (Some Tn.Effectively_constant);
-  check_pool "Materialized" (Some Tn.Materialized);
   check_pool "(no mode)" None;
 
   (* --- A multi-tenant pool: region A at offset 0, region B at offset [region_bytes]. --- *)
   let ctx = B.make_context device in
-  let pool = fresh_pool ~mode:Tn.Device_only ~size_in_bytes:(2 * region_bytes) () in
+  let pool = fresh_pool ~mode:Tn.On_device ~size_in_bytes:(2 * region_bytes) () in
   let loc_a = { BI.pool_id = pool; offset = 0 } in
   let loc_b = { BI.pool_id = pool; offset = region_bytes } in
 

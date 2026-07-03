@@ -62,25 +62,31 @@ OCANNL classifies tensor nodes according to their memory properties:
  ```ocaml
 type memory_mode =
   | Effectively_constant  (** A constant, or a subset of [Virtual]. *)
-  | Virtual  (** The tensor node's computations are inlined on a per-scalar basis. *)
-  | Never_virtual  (** One of: [Local], [On_device], [Materialized]. *)
+  | Virtual
+      (** The tensor node's computations are inlined on a per-scalar basis. The node has no buffer
+          in any context, but remains observable: its defining computation is tracked, so its value
+          can be recomputed on demand, including by later routines and for printing. Observability
+          is inductive: a [Virtual] node that (transitively) depends on a [Local] node inherits its
+          unobservability. *)
+  | Never_virtual  (** An as-yet-unresolved request; resolves to [Local] or [On_device]. *)
   | Local
-      (** The full tensor node is cached for the duration of a computation but not persisted across
-          calls to compiled functions. It is not available for merging across devices. *)
-  | Device_only  (** One of: [Local], [On_device]. *)
+      (** Routine-scoped scratch: exists only for the duration of a single call to a compiled
+          function, stored to whatever degree the optimizer decides on (e.g. a stack array). Not
+          materialized (no context buffer), not persisted across calls, not available for merging
+          across devices, and unobservable (its computation is not tracked) — the sole source of
+          unobservability. Only ever assigned by the compiler, never requested. *)
   | On_device
       (** The tensor node is stored on the devices that compute with it and persisted across
           function calls. It is available for merging across devices (for devices that support
           merging / P2P). CPU-side access (printing, persistence, inspection) is on-demand via
           context-mediated device-to-host transfers; no host copy is stored on the node. *)
-  | Materialized
-      (** An as-yet-unresolved request for a persisted (non-virtual, non-local) node; resolves to
-          [On_device]. *)
  ```
 
  Note: after [gh-ocannl-333] there is no `Hosted` memory mode and no `memory_type`: nothing is
- stored on the host side of a tensor node, and `Materialized` collapses to `On_device`. (The
- `sharing` type and the cross-stream sharing algorithm were removed earlier, in the streams cleanup.)
+ stored on the host side of a tensor node. The former `Materialized` unresolved-request mode was
+ folded into `On_device` (its only possible resolution), and `Device_only` into `Never_virtual`
+ (with `Materialized` gone, the two constraints admitted the same resolutions). (The `sharing` type
+ and the cross-stream sharing algorithm were removed earlier, in the streams cleanup.)
 
  `Tnode.update_memory_mode` verifies consistency of the updates of these modes. Currently, these properties are either set explicitly (directly or indirectly) by the user, or determined by the `Low_level` analysis and optimization process. Moreover, the `Tensor` module can influence whether the mode is constant (`Tensor.number`, `Tensor.ndarray`) or non-constant (`Tensor.param`).
 

@@ -11,20 +11,31 @@ let _get_local_debug_runtime = Utils.get_local_debug_runtime
 
 type memory_mode =
   | Effectively_constant  (** A constant, or a subset of [Virtual]. *)
-  | Virtual  (** The tensor node's computations are inlined on a per-scalar basis. *)
-  | Never_virtual  (** One of: [Local], [On_device], [Materialized]. *)
+  | Virtual
+      (** The tensor node's computations are inlined on a per-scalar basis. The node has no buffer
+          in any context; its defining computation is tracked (in [Low_level.optimize_ctx]), so it
+          remains observable: its value can be recomputed on demand, including by later routines
+          and for printing. Observability is inductive, not intrinsic: recomputation requires the
+          nodes the tracked computation reads to be observable themselves, so a [Virtual] node
+          that depends -- directly or transitively through other [Virtual] nodes -- on a [Local]
+          node inherits its unobservability (the recompilation raises the same [User_error]). *)
+  | Never_virtual  (** An as-yet-unresolved request; resolves to [Local] or [On_device]. *)
   | Local
-      (** The full tensor node is cached for the duration of a computation but not persisted across
-          calls to compiled functions. It is not available for merging across devices. *)
-  | Device_only  (** One of: [Local], [On_device]. *)
+      (** Routine-scoped scratch: the tensor node exists only for the duration of a single call to
+          a compiled function, stored to whatever degree the optimizer decides on (e.g. a stack
+          array), and is not persisted across calls. It is not materialized (owns no context
+          buffer) and is not available for merging across devices. Unlike [Virtual] -- which stays
+          observable via recomputation -- [Local] is {b unobservable}, and the sole source of
+          unobservability: its computation is not tracked, and compiling a later routine that
+          reads it raises a [User_error] directing to mark it as materialized before its first
+          use. This mode is only ever assigned by the
+          compiler (never requested), reserving the freedom to optimize placement of nodes whose
+          lifetime is confined to one routine. *)
   | On_device
       (** The tensor node is stored on the devices that compute with it and persisted across
           function calls. It is available for merging across devices (for devices that support
           merging / P2P). CPU-side access (printing, persistence, inspection) is on-demand via
           context-mediated device-to-host transfers; no host copy is stored on the node. *)
-  | Materialized
-      (** An as-yet-unresolved request for a persisted (non-virtual, non-local) node; resolves to
-          [On_device]. *)
 [@@deriving sexp, compare, equal]
 
 type delayed_prec = Default of Ops.prec | Inferred of Ops.prec Lazy.t | Specified of Ops.prec
@@ -129,8 +140,6 @@ let debug_memory_mode = function
         | Virtual -> "Virt"
         | Never_virtual -> "Non-virt"
         | Local -> "Local"
-        | Device_only -> "Dev"
-        | Materialized -> "Material"
         | On_device -> "On-dev")
       ^ "/" ^ Int.to_string prov
 
@@ -166,8 +175,6 @@ let default_to_most_local tn provenance =
   match tn.memory_mode with
   | None | Some (Effectively_constant, _) -> tn.memory_mode <- Some (Virtual, provenance)
   | Some (Never_virtual, _) -> tn.memory_mode <- Some (local_mode, provenance)
-  | Some (Device_only, _) -> tn.memory_mode <- Some (local_mode, provenance)
-  | Some (Materialized, _) -> tn.memory_mode <- Some (On_device, provenance)
   | Some ((Virtual | Local | On_device), _) -> ()
 
 let is_virtual_force tn provenance =
@@ -185,8 +192,8 @@ let rec is_materialized_force tn provenance =
   match tn.memory_mode with
   | None -> assert false
   | Some ((Virtual | Local), _) -> false
-  | Some ((On_device | Materialized), _) -> true
-  | Some ((Never_virtual | Device_only | Effectively_constant), _) ->
+  | Some (On_device, _) -> true
+  | Some ((Never_virtual | Effectively_constant), _) ->
       default_to_most_local tn provenance;
       is_materialized_force tn provenance
 
@@ -220,7 +227,7 @@ let%debug3_sexp rec is_in_context_force (tn : t) (provenance : int) : bool =
     match tn.memory_mode with
     | Some ((Virtual | Local), _) -> false
     | Some (On_device, _) -> true
-    | None | Some ((Materialized | Effectively_constant | Never_virtual | Device_only), _) ->
+    | None | Some ((Effectively_constant | Never_virtual), _) ->
         default_to_most_local tn provenance;
         is_in_context_force tn provenance
 
@@ -251,11 +258,11 @@ let update_memory_mode tn mode provenance =
              "Tnode.update_memory_mode: update %{prov2#Int} -> %{provenance#Int} for %{debug_name \
               tn}: cannot be virtual"]
   | Some (Virtual, _), Effectively_constant -> ()
-  | Some ((Never_virtual | Materialized), _), Effectively_constant
-  | Some (Effectively_constant, _), (Never_virtual | Materialized) ->
+  | Some (Never_virtual, _), Effectively_constant | Some (Effectively_constant, _), Never_virtual ->
       (* A constant that must be persisted is just a materialized (device-resident) node now; there
          is no separate hosted-constant state. *)
-      tn.memory_mode <- Some (Materialized, provenance)
+      tn.memory_mode <- Some (On_device, provenance)
+  | Some (On_device, _), Effectively_constant -> ()
   | Some (Effectively_constant, _), Virtual -> tn.memory_mode <- Some (mode, provenance)
   | Some (Effectively_constant, _), On_device -> tn.memory_mode <- Some (On_device, provenance)
   | Some (Never_virtual, _), mode -> tn.memory_mode <- Some (mode, provenance)
@@ -266,13 +273,6 @@ let update_memory_mode tn mode provenance =
              "Tnode.update_memory_mode: update %{prov2#Int} -> %{provenance#Int} for %{debug_name \
               tn} is already virtual"]
   | Some (_, _), Never_virtual -> ()
-  | Some (Device_only, _), (Local | On_device) -> tn.memory_mode <- Some (mode, provenance)
-  | Some (On_device, _), On_device -> ()
-  | Some (Materialized, _), On_device -> tn.memory_mode <- Some (mode, provenance)
-  | Some ((Local | On_device), _), Device_only -> ()
-  | Some (On_device, _), Materialized -> ()
-  | Some (Device_only, _), Materialized | Some (Materialized, _), Device_only ->
-      tn.memory_mode <- Some (On_device, provenance)
   | Some (_, prov2), _ ->
       invalid_arg
         [%string
@@ -540,7 +540,7 @@ let create_from_padded ~id ~label ~ndarray ~padding () =
       size_in_bytes;
       id;
       label;
-      memory_mode = Some (Materialized, 49);
+      memory_mode = Some (On_device, 49);
       alias_of = None;
       slice_of = None;
       backend_info = Sexp.List [];
@@ -616,7 +616,7 @@ let create_with_reshape ~id ~label ~base_ndarray ~unpadded_dims ~padding ~from_p
       size_in_bytes;
       id;
       label;
-      memory_mode = Some (Materialized, 49);
+      memory_mode = Some (On_device, 49);
       alias_of = None;
       slice_of = None;
       backend_info = Sexp.List [];
