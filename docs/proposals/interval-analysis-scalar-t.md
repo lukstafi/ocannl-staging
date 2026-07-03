@@ -29,6 +29,19 @@ prove indices in-bounds, and fold comparisons.
   *because* interval reasoning discharges most of the masks it introduces.
 - Receiving site exists: `interval_of : scalar_t -> bounds` slots into `simplify_llc`'s
   world; loop extents are statically known from projections.
+- **Symbol environment tracks all symbols.** `Embed_index` is where a symbol crosses from
+  the index world into the value world, so the analysis threads `symbol → interval` —
+  the abstract twin of `visit_llc`'s concrete `symbol → int` env. Completeness is by
+  construction: every in-scope symbol at lowering time comes from a `For_loop`
+  (`[from_, to_]`) or a static binding (`[0, static_range)`; top when the range is
+  `None` — see [signed-index-precision](signed-index-precision.md) on bind-time
+  validation). The one env serves both value analysis (`Embed_index` into guards and
+  comparisons) and position analysis (`Get`/`Set` `idcs`, the #133/#420-style facts).
+- **The memo must be env-scoped.** The same `scalar_t` subtree can be physically shared
+  under different loop nests (immutable-tree sharing after rewrites; CSE/`Local_scope`
+  reuse), and its interval differs per enclosing scope. Key the memo by (expression,
+  symbol-env) or scope it per loop body — a global identity-keyed memo would return
+  another scope's bounds.
 
 ## Interprocedural layer: vmin/vmax on `Tnode.t`
 
