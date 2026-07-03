@@ -66,7 +66,12 @@ let class_ids_of_int_list ?(label = "class_ids") lst =
   let len = Array.length arr in
   let genarray = Genarray.create Int32 c_layout [| len |] in
   for i = 0 to len - 1 do
-    Genarray.set genarray [| i |] (Int32.of_int_exn arr.(i))
+    let id = arr.(i) in
+    (* Bits-preserving conversion: ids in [2^31, 2^32) are valid uint32 values whose int32
+       representation is negative, so [of_int_exn] would wrongly reject them. *)
+    if id < 0 || id > 0xFFFF_FFFF then
+      invalid_arg [%string "class_ids_of_int_list: id %{id#Int} is out of the uint32 range"];
+    Genarray.set genarray [| i |] (Int32.of_int_trunc id)
   done;
   TDSL.rebatch ~l:label (Ir.Ndarray.as_array Ir.Ops.Uint32 genarray) ()
 
