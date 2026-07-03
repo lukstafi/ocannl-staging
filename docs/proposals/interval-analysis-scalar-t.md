@@ -89,6 +89,28 @@ picked by coefficient sign. `Concat` is gone by lowering.
   construction (physical padding), so no unsigned-wrap modeling; keep a "lower bound
   could cross zero → top" assert until [signed-index-precision](signed-index-precision.md)
   lands.
+- Exactness of the bound carrier: the float `lo`/`hi` cannot represent all int64/uint64
+  values (dtype-range endpoints like 2^64-1 round). Carry an `exact : bool` bit, cleared
+  whenever an endpoint is not exactly representable (in particular |v| >= 2^53).
+  Range/ordering folds remain sound with outward-rounded endpoints; equality/singleton
+  folds (`Cmpeq` true) are forbidden unless `exact` — two distinct integers may round to
+  the same float.
+- Float-arithmetic folding policy (Phase A): comparison folds fire only on facts derived
+  from exact integral intervals (index arithmetic, integer `Get`s, whole constants).
+  Intervals of genuinely float computations are carried conservatively (top, or
+  outward-rounded endpoints) and never fold comparisons — real-endpoint arithmetic can
+  underapproximate rounded fp results. Revisit with explicit outward rounding if a float
+  consumer materializes.
+- Unknown-op policy: conservative by construction, but via *exhaustive* matches whose
+  currently-unhandled arms (`Or`, `ToPowOf`, `Threefry4x32_*`, `Satur01`, `Recip`,
+  `Recip_sqrt`, `Tanh_approx`, `Not`, `Mul3`, ...) explicitly return top — not a `_ ->
+  top` wildcard, so adding an op to `Ops` forces a conscious interval-rule decision at
+  compile time.
+- Truthiness is a derived view, not a lattice facet: definitely-false iff the interval
+  is `[0,0]`, definitely-true iff `0` is outside `[lo, hi]`, else unknown. Comparison
+  outputs are `[0,1]`-integral points so this is complete for `And`/`Where` over guard
+  fragments; a separate "nonzero with mixed-sign range" facet is deferred until a
+  consumer needs it.
 
 Designated re-expression target (acceptance criterion): re-derive
 `build_guarded_gather`'s three guard flavors. Construct the guard generically (lower
@@ -98,6 +120,13 @@ precs prove integrality so `Trunc` folds — leaving the current hand-written fl
 emergent behavior. It is landed, executable, and already golden-tested
 (`test_one_hot_embedding_lookup` asserts `Trunc` counts on both paths).
 
+Pass-ordering caveat: the optimize pipeline applies `simplify_llc` *before*
+`rewrite_one_hot_reductions` (low_level.ml `optimize_proc`), so a generically-built
+guard is born after the only fold pass. Phase A therefore has `build_guarded_gather`
+call the interval folder directly on the guard it constructs (local, no pipeline
+change, no golden perturbation elsewhere); an additional post-rewrite simplify/fold
+pass is the general fix if later rewrites also start emitting foldable code.
+
 ## Phasing
 
 - **Phase A** (implementable now): `interval_of` over `axis_index` + `scalar_t` with the
@@ -105,7 +134,11 @@ emergent behavior. It is landed, executable, and already golden-tested
   env-scoped memo, rules above; consumers: comparison folding in `simplify_llc` and the
   gather-guard re-derivation.
 - **Phase B**: `Tnode` vmin/vmax with the propose/settle/conflict lifecycle and
-  host-write symmetry (below); consumer: full guard fold for runtime ids.
+  host-write symmetry (below); consumer: full guard fold for runtime ids. Includes an
+  audit of *all* host-write paths, not just `Context.set_values`/`from_host`: direct
+  backend init/upload paths, persistence/checkpoint restore, and link-time `Host_inits`
+  must participate in propose/settle/validate; device-to-device copies propagate the
+  source node's bounds by join (no scan needed).
 - **Phase C** (separate proposal, blocks on A):
   [signed-index-precision](signed-index-precision.md) with tnode-granular width
   selection; then logical-padding masks per [schedule-ir-optops](schedule-ir-optops.md).
