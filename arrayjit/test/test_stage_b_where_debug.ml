@@ -50,6 +50,7 @@ let compile_to_c ~name llc =
       optimize_ctx = { computations = Hashtbl.create (module Tn) };
       llc;
       merge_node = None;
+      workgroup_shared = Base.Set.empty (module Tn);
     }
   in
   let module Syntax = Ir.C_syntax.C_syntax (Ir.C_syntax.Pure_C_config (struct
@@ -97,7 +98,7 @@ let () =
   let llc =
     LL.Seq
       ( LL.Declare_local { id; needs_init = true },
-        LL.For_loop { index = t; from_ = 0; to_ = 5; body; trace_it = false } )
+        LL.For_loop { index = t; from_ = 0; to_ = 5; body; trace_it = false; axis = Serial } )
   in
   let c = compile_to_c ~name:"stage_b_where_debug" llc in
   (* then-branch producer read short-circuited on the range condition: [(<cond> ? producer[t] : 0)].
@@ -125,7 +126,7 @@ let () =
         (LL.Get (belse, [| Idx.Iterator t |]), Ops.single) )
   in
   let body = LL.Set { tn = out; idcs = [| Idx.Iterator t |]; llsc = where; debug = "symmetric" } in
-  let llc = LL.For_loop { index = t; from_ = 0; to_ = 3; body; trace_it = false } in
+  let llc = LL.For_loop { index = t; from_ = 0; to_ = 3; body; trace_it = false; axis = Serial } in
   let c = compile_to_c ~name:"symmetric_where" llc in
   (* then read gated by [cond]; else read gated by [!cond]. Both branch reads are array
      dereferences, so both must short-circuit. *)
@@ -172,7 +173,8 @@ let () =
       ( LL.Declare_local { id = id1; needs_init = true },
         LL.Seq
           ( LL.Declare_local { id = id2; needs_init = true },
-            LL.For_loop { index = t; from_ = 0; to_ = 3; body; trace_it = false } ) )
+            LL.For_loop { index = t; from_ = 0; to_ = 3; body; trace_it = false; axis = Serial } )
+      )
   in
   let c = compile_to_c ~name:"nested_where" llc in
   (* The inner condition's read [condrd3[t]] is gated by the OUTER guard: [(<outer_cond> ?

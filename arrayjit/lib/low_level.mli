@@ -18,13 +18,36 @@ val get_scope : Tnode.t -> scope_id
 
 (** {2 Low-level representation} *)
 
+(** How a loop's iterations map to hardware; see docs/proposals/axis-types-for-loops.md. [Serial] is
+    an ordinary for-loop. [Grid] / [Workgroup] bind the loop index to a GPU grid / workgroup (block,
+    threadgroup) hardware index instead of looping; [Workgroup_reduce] is a [Workgroup] axis
+    participating in a shared-memory reduction (distinguished for schedule transforms and
+    validation, rendered like [Workgroup]). [Unrolled] is emitted as the repeated body with
+    substituted constants. Hardware slots are positional: among a kernel's loops of one kind, the
+    innermost binds [.x], then [.y], [.z]. Annotated loops must have [from_ = 0] and iterations with
+    no cross-iteration dependencies ([Workgroup_reduce] excepted: its communication must be staged
+    through workgroup-shared nodes and barriers). *)
+type axis_type = Serial | Grid | Workgroup | Workgroup_reduce | Unrolled
+[@@deriving sexp, compare, equal]
+
+val axis_type_label : axis_type -> string
+(** Loop keyword used by the human-readable printers: plain ["for"] for [Serial], ["for@<axis>"]
+    otherwise. *)
+
 (** Cases: [t] -- code, [scalar_t] -- single number at some precision. *)
 type t =
   | Noop
   | Comment of string
   | Staged_compilation of (unit -> PPrint.document)
   | Seq of t * t
-  | For_loop of { index : Indexing.symbol; from_ : int; to_ : int; body : t; trace_it : bool }
+  | For_loop of {
+      index : Indexing.symbol;
+      from_ : int;
+      to_ : int;
+      body : t;
+      trace_it : bool;
+      axis : axis_type;
+    }
   | Zero_out of Tnode.t
   | Set of {
       tn : Tnode.t;
@@ -42,6 +65,10 @@ type t =
     }
   | Set_local of scope_id * scalar_t
   | Declare_local of { id : scope_id; needs_init : bool }
+  | Workgroup_barrier
+      (** Workgroup-scoped synchronization ([__syncthreads()] / [threadgroup_barrier]). An opaque
+          effectful statement: no CSE, hoisting, or code motion across it. Grid-scoped
+          synchronization is deliberately not representable. *)
 [@@deriving sexp_of, equal]
 
 and scalar_t =
@@ -162,6 +189,10 @@ type optimized = {
   optimize_ctx : optimize_ctx;
   llc : t;
   merge_node : Tnode.t option;
+  workgroup_shared : Set.M(Tnode).t;
+      (** [Local]-memory-mode nodes to be placed in workgroup-shared memory ([__shared__] /
+          [threadgroup]) instead of kernel-local arrays. Populated by schedule transforms; empty for
+          unscheduled code. See docs/proposals/axis-types-for-loops.md. *)
 }
 [@@deriving sexp_of]
 

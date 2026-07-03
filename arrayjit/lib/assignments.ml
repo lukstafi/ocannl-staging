@@ -445,6 +445,7 @@ let%track4_sexp to_low_level code =
                   to_ = d - 1;
                   body = for_loop (iter :: block_iters) (index :: rev_iters) product;
                   trace_it = true;
+                  axis = Serial;
                 })
     in
     let for_loops =
@@ -632,6 +633,7 @@ let%track4_sexp to_low_level code =
                   to_ = d - 1;
                   body = for_loop (iter :: block_iters) (index :: rev_iters) product;
                   trace_it = true;
+                  axis = Serial;
                 })
     in
     let for_loops =
@@ -757,6 +759,7 @@ let%track4_sexp to_low_level code =
                   to_ = d - 1;
                   body = for_loop (index :: rev_iters) product;
                   trace_it = true;
+                  axis = Serial;
                 }
           | _ -> raise @@ Utils.User_error "Concat indexing not supported in Set_vec_unop"
         in

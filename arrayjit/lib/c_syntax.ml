@@ -418,8 +418,8 @@ module C_syntax (B : C_syntax_config) = struct
 
   (* A [Zero_out] loop is redundant when the array's declaration already initializes it with [=
      {0}]. That happens for local (non-virtual, non-materialized) declarations whose traced node has
-     [zero_initialized_by_code = true]; see [compile_proc]'s [local_decls]. Materialized
-     (on-device) nodes do NOT get [= {0}] (allocation handles zeroing, and is skipped exactly when
+     [zero_initialized_by_code = true]; see [compile_proc]'s [local_decls]. Materialized (on-device)
+     nodes do NOT get [= {0}] (allocation handles zeroing, and is skipped exactly when
      [zero_initialized_by_code] is true), so their [Zero_out] loop must be kept. *)
   let zero_out_loop_redundant tn =
     match !current_traced_store with
@@ -447,7 +447,14 @@ module C_syntax (B : C_syntax_config) = struct
         let d2 = pp_ll ~log_set_locals ~in_loop c2 in
         (* Avoid extra hardlines if one side is empty *)
         if PPrint.is_empty d1 then d2 else if PPrint.is_empty d2 then d1 else d1 ^^ hardline ^^ d2
-    | For_loop { index = i; from_; to_; body; trace_it = _ } ->
+    | For_loop { index = i; from_; to_; body; trace_it = _; axis } ->
+        (* Phase A of docs/proposals/axis-types-for-loops.md: only [Serial] loops are renderable;
+           hardware bindings (Grid/Workgroup) and unrolling land with the rendering phase. *)
+        (match axis with
+        | Low_level.Serial -> ()
+        | _ ->
+            invalid_arg
+              ("C_syntax.pp_ll: axis type not supported yet: " ^ Low_level.axis_type_label axis));
         let header =
           string ("for (" ^ B.loop_index_type)
           ^^ pp_symbol i ^^ string " = " ^^ PPrint.OCaml.int from_ ^^ semi ^^ space ^^ pp_symbol i
@@ -702,6 +709,10 @@ module C_syntax (B : C_syntax_config) = struct
           else empty
         in
         num_typ ^^ space ^^ pp_scope_id id ^^ init_zero ^^ semi
+    | Workgroup_barrier ->
+        (* Phase A of docs/proposals/axis-types-for-loops.md: barrier rendering (a [C_syntax_config]
+           hook) lands together with the hardware-binding phase. *)
+        invalid_arg "C_syntax.pp_ll: Workgroup_barrier not supported yet"
 
   and pp_scalar (prec : Ops.prec) (vcomp : Low_level.scalar_t) :
       (int * PPrint.document) list * PPrint.document =
@@ -1018,9 +1029,15 @@ module C_syntax (B : C_syntax_config) = struct
 
   let compile_main llc : PPrint.document = pp_ll llc
 
-  let compile_proc ~name idx_params Low_level.{ traced_store; llc; merge_node; optimize_ctx = _ } :
+  let compile_proc ~name idx_params
+      Low_level.{ traced_store; llc; merge_node; optimize_ctx = _; workgroup_shared } :
       (string * kparam_source) list * PPrint.document =
     let open PPrint in
+    (* Phase A of docs/proposals/axis-types-for-loops.md: the local-declaration pass below would
+       silently emit workgroup-shared nodes as per-thread stack arrays -- wrong sharing semantics.
+       Fail clearly until shared declarations land (with the rendering phase). *)
+    if not (Set.is_empty workgroup_shared) then
+      invalid_arg "C_syntax.compile_proc: workgroup_shared placement not supported yet";
     current_traced_store := Some traced_store;
     Hash_set.clear zero_out_seen;
     (* The materialized in-context nodes, in deterministic [traced_store] order, with their
