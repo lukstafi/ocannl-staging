@@ -75,7 +75,25 @@ val copy : src:t -> dst:t -> Ir.Tnode.t -> unit
     After [gh-ocannl-333] no tensor data is stored on the host side of a tensor node. All CPU-side
     value access is an {b on-demand, context-mediated} device-to-host (or host-to-device) transfer
     through a temporary host buffer. There is no cache: every call performs a fresh transfer, which
-    is {b expensive on non-unified-memory backends} — prefer batching over polling. *)
+    is {b expensive on non-unified-memory backends} — prefer batching over polling.
+
+    Which nodes are observable is determined by their {!Ir.Tnode.memory_mode}:
+    - [On_device] (materialized) nodes have a context buffer; {!to_host}/{!get_values} read it
+      directly.
+    - [Virtual] nodes have no buffer anywhere, but they remain observable: their defining
+      computation is tracked, so their value can be recomputed on demand — [Train.printf] does
+      this via the for-print proxy mechanism ({!register_for_print}); raw {!to_host} on them
+      raises unless a proxy or host-init data exists. Observability is inductive: it holds only
+      when every node the tracked computation reads is itself observable — a [Virtual] node
+      depending (even transitively through other [Virtual] nodes) on a [Local] node inherits its
+      unobservability.
+    - [Local] nodes are routine-scoped scratch and {b unobservable}: their computation is not
+      tracked, and they are stored (to whatever degree the optimizer decides on) only within a
+      single routine invocation. This is a deliberate opt-out from the observability guarantee
+      that licenses backend optimizations (e.g. stack allocation). The mode is only ever assigned
+      by the compiler, to nodes never read outside their defining routine; to prevent it, request
+      materialization (e.g. [Train.set_materialized]) before the first routine using the node is
+      compiled. *)
 
 val mem : t -> Ir.Tnode.t -> bool
 (** Whether the node has a device buffer allocated in this context. *)

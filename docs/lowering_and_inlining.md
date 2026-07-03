@@ -423,12 +423,21 @@ The optimization behavior is controlled by `virtualize_settings`:
 
 The optimization process works closely with OCANNL's memory mode system:
 
-- **Virtual**: computations are inlined, no storage allocated.
-- **Never_virtual**: tensor must be stored (the provenance int indicates why).
-- **Materialized**: an unresolved request for a persisted node; resolves to **On_device**.
-- **Device_only**: stored only on device (one of **Local** / **On_device**).
-- **On_device**: stored on the devices that compute with it; CPU access is on-demand via
-  context-mediated device-to-host transfers (no host copy on the node, after gh-ocannl-333).
+- **Virtual**: computations are inlined, no storage allocated; the node remains observable because
+  its defining computation is tracked in the optimization context, so later routines (and printing)
+  can recompute the value. Observability is inductive: it requires the nodes the computation reads
+  to be observable themselves, so a **Virtual** node that (transitively) depends on a **Local**
+  node inherits its unobservability.
+- **Never_virtual**: an unresolved request that the tensor must be stored (the provenance int
+  indicates why); resolves to **Local** or **On_device** depending on `stack_threshold_in_bytes`.
+- **Local**: routine-scoped scratch, stored to whatever degree the optimizer decides on (e.g. a
+  stack array in the generated function); not materialized (no context buffer), not persisted
+  across routine calls, and unobservable (the sole source of unobservability) — its computation is
+  not tracked. Only ever assigned by the compiler — it reserves freedom for placement
+  optimizations of within-routine temporaries.
+- **On_device**: materialized — stored on the devices that compute with it and persisted across
+  calls; CPU access is on-demand via context-mediated device-to-host transfers (no host copy on
+  the node, after gh-ocannl-333).
 
 The optimizer uses provenance tracking (the `int` in memory mode updates) to debug conflicts in
 memory mode decisions. The cleanup-phase provenances (151/152 for default-to-Virtual, 17 for

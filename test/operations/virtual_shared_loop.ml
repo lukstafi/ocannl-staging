@@ -32,7 +32,7 @@ let mk ?(dims = [| 3 |]) label =
     ~padding:(lazy None)
     ()
 
-let materialize tn = Tn.update_memory_mode tn Tn.Materialized 99
+let materialize tn = Tn.update_memory_mode tn Tn.On_device 99
 
 (* --- low-level builders --- *)
 let sym () = Ir.Indexing.get_symbol ()

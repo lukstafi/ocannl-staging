@@ -35,9 +35,7 @@ let () =
   in
   (* GPU-only modes that used to select Private now allocate Shared like everything else. *)
   check "Local" (Some Tn.Local);
-  check "Device_only" (Some Tn.Device_only);
   check "On_device" (Some Tn.On_device);
-  check "Materialized" (Some Tn.Materialized);
   check "Effectively_constant" (Some Tn.Effectively_constant);
   check "Never_virtual" (Some Tn.Never_virtual);
   check "Virtual" (Some Tn.Virtual);

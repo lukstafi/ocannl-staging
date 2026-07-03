@@ -418,8 +418,8 @@ module C_syntax (B : C_syntax_config) = struct
 
   (* A [Zero_out] loop is redundant when the array's declaration already initializes it with [=
      {0}]. That happens for local (non-virtual, non-materialized) declarations whose traced node has
-     [zero_initialized_by_code = true]; see [compile_proc]'s [local_decls]. Materialized nodes do
-     NOT get [= {0}] (allocation handles zeroing, and is skipped exactly when
+     [zero_initialized_by_code = true]; see [compile_proc]'s [local_decls]. Materialized
+     (on-device) nodes do NOT get [= {0}] (allocation handles zeroing, and is skipped exactly when
      [zero_initialized_by_code] is true), so their [Zero_out] loop must be kept. *)
   let zero_out_loop_redundant tn =
     match !current_traced_store with

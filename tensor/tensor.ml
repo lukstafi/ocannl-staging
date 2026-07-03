@@ -698,7 +698,7 @@ let%debug7_sexp param ?(require_grad = true) ~t (name : string) ?(more_label = [
   let v = t.value in
   (* Parameters live on device and are materialized; CPU access (init, inspection) is on-demand via
      the context (gh-ocannl-333). *)
-  Tn.update_memory_mode v Materialized 241;
+  Tn.update_memory_mode v On_device 241;
   (* In principle, gradients can even be local, if a single jitted block does forward, backprop, and
      update computations. *)
   (match t.diff with
