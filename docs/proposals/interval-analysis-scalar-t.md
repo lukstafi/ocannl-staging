@@ -48,8 +48,14 @@ Soundness design (third instance of the `delayed_prec` lifecycle pattern):
   a reader that discharges a guard *settles* them (like forcing the prec lazy); a
   post-settlement writer whose interval does not fit is a compile-time error (like
   `update_prec` on a settled precision).
-- **Host writes**: `set_values`/`from_host` into a bounds-settled tensor must validate
-  (O(n) host scan, trivial next to the copy) or error.
+- **Host writes**: symmetric with compiled writers around the settlement point.
+  *Pre-settlement*, `set_values`/`from_host` (and ndarray-backed `init_data` at creation)
+  act as writers: scan the uploaded values (O(n), trivial next to the copy) and *propose*
+  the observed `[min, max]` into the join — or pin the tensor to top if scanning is
+  disabled. Otherwise a later reader could settle narrow writer-derived bounds and fold a
+  guard against host contents that were never inspected. A bonus: tensors created via
+  `class_ids_of_int_list`-style host arrays get tight bounds automatically.
+  *Post-settlement*, host writes validate against the settled bounds or error.
 - **Self-referential writers** (read-modify-write across executions: param updates,
   accumulators) default to top — a fixpoint over unbounded repetitions is not attempted.
   The profitable cases (ids, range producers, one-hots) are write-once/functional.
