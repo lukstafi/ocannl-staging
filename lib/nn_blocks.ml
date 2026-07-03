@@ -56,16 +56,24 @@ open DSL_modules
 
 (** Convert a list of integers to a compact tensor of class IDs (no [num_classes] allocation).
     @param lst List of integer class indices (0-based)
-    @return A tensor of shape [len] (a [len]-sized batch axis) holding the IDs as floats. *)
+    @return
+      A tensor of shape [len] (a [len]-sized batch axis) holding the IDs in uint32 precision, so
+      that the gh-343 embedding gather can guard the dynamic index with native integer comparisons
+      (no double-precision guard, no integrality check). *)
 let class_ids_of_int_list ?(label = "class_ids") lst =
   let open Bigarray in
   let arr = lst |> Array.of_list in
   let len = Array.length arr in
-  let genarray = Genarray.create Float32 c_layout [| len |] in
+  let genarray = Genarray.create Int32 c_layout [| len |] in
   for i = 0 to len - 1 do
-    Genarray.set genarray [| i |] (Float.of_int arr.(i))
+    let id = arr.(i) in
+    (* Bits-preserving conversion: ids in [2^31, 2^32) are valid uint32 values whose int32
+       representation is negative, so [of_int_exn] would wrongly reject them. *)
+    if id < 0 || id > 0xFFFF_FFFF then
+      invalid_arg [%string "class_ids_of_int_list: id %{id#Int} is out of the uint32 range"];
+    Genarray.set genarray [| i |] (Int32.of_int_trunc id)
   done;
-  TDSL.rebatch ~l:label (Ir.Ndarray.as_array Ir.Ops.Single genarray) ()
+  TDSL.rebatch ~l:label (Ir.Ndarray.as_array Ir.Ops.Uint32 genarray) ()
 
 (** Build a logical one-hot tensor from a tensor of class IDs, using only existing operations
     ([range] + equality) so the compiler keeps the proof that the result is one-hot (enabling the
@@ -74,6 +82,12 @@ let class_ids_of_int_list ?(label = "class_ids") lst =
     [one_hot[i, k] = (k == ids[i])].
     @param num_classes The number of classes (size of the one-hot dimension). *)
 let one_hot_of_ids ~num_classes ids =
+  (* Class IDs are integer-valued: flow an integer precision backward into [ids], like the threefry
+     operations do with uint4x32, so the gather guard runs in native integer comparisons. This is
+     soft: a tensor with an explicitly specified or already-settled precision (e.g. float IDs) is
+     unaffected and keeps the double-precision guard path. *)
+  if not (Lazy.is_val ids.Tensor.value.Tn.prec) then
+    Tn.update_infer_prec ids.Tensor.value (lazy Ir.Ops.uint32);
   let classes = TDSL.range num_classes in
   let open TDSL.O in
   classes = ids

@@ -35,7 +35,10 @@ prove indices in-bounds, and fold comparisons.
 [#133](https://github.com/ahrefs/ocannl/issues/133),
 [#340](https://github.com/ahrefs/ocannl/issues/340),
 [#343](https://github.com/ahrefs/ocannl/issues/343), landed #420;
-[schedule-ir-optops](schedule-ir-optops.md) (downstream consumer).
+[schedule-ir-optops](schedule-ir-optops.md) (downstream consumer);
+[signed-index-precision](signed-index-precision.md) (removes the need to model unsigned
+wrap in the integer lattice — with signed indices, machine and mathematical integers
+agree and the "lower bound could cross zero" refusal rule disappears).
 
 ## Acceptance criteria (for the elaborated proposal)
 

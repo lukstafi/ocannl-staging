@@ -36,15 +36,16 @@ let cvals = Array.init (embed * vocab) ~f:Float.of_int
 let approx a b = Float.(abs (a - b) < 1e-4)
 
 (* Lower the (shape-forced) forward comp and report (#Get_dynamic, #For_loop,
-   index-tensor-is-input). *)
-let inspect (t : Tensor.t) (index_tn : Ir.Tnode.t) : int * int * bool =
+   index-tensor-is-input, #Trunc). The [Trunc] count distinguishes the guard flavors: float-prec
+   ids need the integrality check [idx == trunc(idx)]; integer-prec ids must not emit it. *)
+let inspect (t : Tensor.t) (index_tn : Ir.Tnode.t) : int * int * bool * int =
   let comp = t.Tensor.forward in
   let optim_ctx = { LL.computations = Hashtbl.create (module Ir.Tnode) } in
   let opt =
     Ir.Assignments.lower optim_ctx ~unoptim_ll_source:None ~ll_source:None ~cd_source:None
       ~name:"probe" [] comp.Ir.Assignments.asgns
   in
-  let dyn = ref 0 and loops = ref 0 and index_read = ref false in
+  let dyn = ref 0 and loops = ref 0 and index_read = ref false and truncs = ref 0 in
   (* Does scalar [s] read [index_tn] via a plain [Get]? Exercises that traversals descend into a
      [Get_dynamic]'s [dyn_value] sub-expression (gh-343 read-tracking). *)
   let rec reads_index (s : LL.scalar_t) =
@@ -91,11 +92,13 @@ let inspect (t : Tensor.t) (index_tn : Ir.Tnode.t) : int * int * bool =
     | Binop (_, (a, _), (b, _)) ->
         scal a;
         scal b
-    | Unop (_, (a, _)) -> scal a
+    | Unop (op, (a, _)) ->
+        (match op with Ir.Ops.Trunc -> Int.incr truncs | _ -> ());
+        scal a
     | _ -> ()
   in
   proc opt.LL.llc;
-  (!dyn, !loops, !index_read)
+  (!dyn, !loops, !index_read, !truncs)
 
 let build_embedding id_values =
   let ids =
@@ -120,7 +123,7 @@ let () =
   let ctx = Context.cpu () in
   let ctx = Train.forward_once ctx embedded in
   let got = Context.get_values ctx embedded.Tensor.value in
-  let dyn, loops, index_is_input = inspect embedded ids.Tensor.value in
+  let dyn, loops, index_is_input, truncs = inspect embedded ids.Tensor.value in
   (* expected: emb[b,o] = C[o, ids[b]] = o*vocab + ids[b] *)
   let expected =
     Array.concat_map id_values ~f:(fun idf ->
@@ -133,6 +136,9 @@ let () =
      as constant fills, contributing no loops). *)
   p "vocabulary reduction loop is eliminated" (loops <= 2);
   p "gather's dynamic index reads the token-id tensor" index_is_input;
+  (* Positive control for the integer-ids section below: float-precision ids DO carry the
+     integrality check in the optimized IR. *)
+  p "float ids: guard contains the integrality Trunc" (truncs > 0);
   (* Proposal AC: the generated C for the optimized kernel contains a guarded dynamic table read and
      no reduction loop over the vocabulary axis. The dynamic index renders as a cast to
      [Ops.index_prec ()] (uint32_t under default settings, uint64_t under large_models) inside a
@@ -191,7 +197,7 @@ let () =
   let ctx3 = Context.cpu () in
   let ctx3 = Train.forward_once ctx3 plain in
   ignore (Context.get_values ctx3 plain.Tensor.value : float array);
-  let dyn_plain, _, _ = inspect plain x.Tensor.value in
+  let dyn_plain, _, _, _ = inspect plain x.Tensor.value in
   p "ordinary matmul is not rewritten to Get_dynamic" (dyn_plain = 0);
 
   (* --- Helper migration: Nn_blocks.one_hot_of_int_list is now logical (no dense host data) but
@@ -216,6 +222,32 @@ let () =
     && Array.for_all2_exn cid_vals (Array.of_list id_list) ~f:(fun v i -> approx v (Float.of_int i))
     );
 
+  (* --- Integer-precision ids: [class_ids_of_int_list] stores uint32 IDs and [one_hot_of_ids]
+     flows the integer precision into the gather (threefry-style backward precision). The guard
+     then needs no integrality check ([Trunc]) -- integer values cannot be fractional -- and, being
+     unsigned, no lower bound. Out-of-range must still yield a zero row via the upper bound. --- *)
+  let ids_int = Nn_blocks.class_ids_of_int_list [ 1; 3; 0; vocab (* out of [0, vocab) *) ] in
+  let c_int =
+    TDSL.ndarray cvals ~label:[ "C_int" ] ~input_dims:[ vocab ] ~output_dims:[ embed ] ()
+  in
+  let%op embedded_int = c_int * Nn_blocks.one_hot_of_ids ~num_classes:vocab ids_int in
+  let ctx6 = Context.cpu () in
+  let ctx6 = Train.forward_once ctx6 embedded_int in
+  let got_int = Context.get_values ctx6 embedded_int.Tensor.value in
+  let expected_int =
+    Array.concat_map [| 1; 3; 0 |] ~f:(fun idx ->
+        Array.init embed ~f:(fun o -> Float.of_int ((o * vocab) + idx)))
+  in
+  let int_in_range_ok =
+    Array.for_alli got_int ~f:(fun i v -> i >= 3 * embed || approx v expected_int.(i))
+  in
+  let int_oob_zero = Array.for_alli got_int ~f:(fun i v -> i < 3 * embed || approx v 0.) in
+  p "uint32 ids: forward equals direct gather of table rows" int_in_range_ok;
+  p "uint32 ids: out-of-range id gives a zero embedding row" int_oob_zero;
+  let dyn_int, _, _, truncs_int = inspect embedded_int ids_int.Tensor.value in
+  p "uint32 ids: optimized IR contains a Get_dynamic gather" (dyn_int >= 1);
+  p "uint32 ids: guard has no integrality Trunc" (truncs_int = 0);
+
   (* --- Negative-1 (task-73617488): non-Cmpeq complex tensors still obey max_visits ---
      [not_hot[b,k] = range[k] + ids_neg[b]] is complex (reads an accessing tensor) but NOT a one-hot
      [Cmpeq], so the virtualizer exemption does NOT apply: the tensor stays materialized
@@ -232,7 +264,7 @@ let () =
   let ctx_neg = Context.cpu () in
   let ctx_neg = Train.forward_once ctx_neg emb_neg in
   ignore (Context.get_values ctx_neg emb_neg.Tensor.value : float array);
-  let dyn_neg, loops_neg, _ = inspect emb_neg ids_neg.Tensor.value in
+  let dyn_neg, loops_neg, _, _ = inspect emb_neg ids_neg.Tensor.value in
   p "non-one-hot complex tensor does not produce Get_dynamic" (dyn_neg = 0);
   (* Without the one-hot exemption the vocab reduction loop is NOT collapsed: batch + output loops
      are 2, so total > 2 means the vocabulary loop survived. *)

@@ -2285,27 +2285,45 @@ let match_one_hot_contribution (k : Indexing.symbol) (contribution : scalar_t) :
    the size of the table axis being gathered; [value_prec] is the table (result) precision. *)
 let build_guarded_gather ~table ~table_idcs ~dyn_axis ~(index_expr : scalar_arg) ~class_count
     ~value_prec : scalar_t =
-  let iv, _iprec = index_expr in
-  (* The bounds comparison must NOT be evaluated in the unsigned index precision: [-1] would wrap to
-     UINT_MAX and the guard would always be false (gh: unsigned-index-precision). We do the whole
-     guard in a signed precision ([double], exact for the integer-valued indices in scope). [0 <=
-     idx] is encoded as [-1 < idx] (there is no [Cmple]); the upper bound is [idx < class_count]. *)
-  let guard_prec = Ops.double in
-  let lower = Binop (Ops.Cmplt, (Constant (-1.), guard_prec), (iv, guard_prec)) in
-  let upper =
-    Binop (Ops.Cmplt, (iv, guard_prec), (Constant (Float.of_int class_count), guard_prec))
-  in
-  (* The backend casts [iv] to int when gathering. To preserve one-hot semantics for non-integer
-     indices (e.g. 1.5, where every [k == idx] is false so the reduction is 0), the gather must only
-     fire when [idx] is exactly integral: [idx == trunc(idx)]. Otherwise return 0. *)
-  let is_integral =
-    Binop (Ops.Cmpeq, (iv, guard_prec), (Unop (Ops.Trunc, (iv, guard_prec)), guard_prec))
-  in
-  let bounds = Binop (Ops.And, (lower, guard_prec), (upper, guard_prec)) in
-  let in_range = Binop (Ops.And, (bounds, guard_prec), (is_integral, guard_prec)) in
-  let index_prec = guard_prec in
+  let iv, iprec = index_expr in
   let gather = Get_dynamic { tn = table; idcs = table_idcs; dyn_axis; dyn_value = index_expr } in
-  Ternop (Ops.Where, (in_range, index_prec), (gather, value_prec), (Constant 0., value_prec))
+  let upper_const = Constant (Float.of_int class_count) in
+  match iprec with
+  | Ops.Byte_prec _ | Ops.Uint16_prec _ | Ops.Uint32_prec _ | Ops.Uint64_prec _ ->
+      (* Unsigned integer indices cannot be negative or fractional, so the guard reduces to the
+         upper bound. Compare in uint64: zero-extension from any unsigned precision is lossless and
+         [class_count] is exactly representable. *)
+      let guard_prec = Ops.uint64 in
+      let in_range = Binop (Ops.Cmplt, (iv, guard_prec), (upper_const, guard_prec)) in
+      Ternop (Ops.Where, (in_range, guard_prec), (gather, value_prec), (Constant 0., value_prec))
+  | Ops.Int32_prec _ | Ops.Int64_prec _ ->
+      (* Signed integer indices cannot be fractional; only the bounds need guarding, in int64
+         (exact and native on all backends, including Metal which lacks double). [0 <= idx] is
+         encoded as [-1 < idx] (there is no [Cmple]); the upper bound is [idx < class_count]. *)
+      let guard_prec = Ops.int64 in
+      let lower = Binop (Ops.Cmplt, (Constant (-1.), guard_prec), (iv, guard_prec)) in
+      let upper = Binop (Ops.Cmplt, (iv, guard_prec), (upper_const, guard_prec)) in
+      let in_range = Binop (Ops.And, (lower, guard_prec), (upper, guard_prec)) in
+      Ternop (Ops.Where, (in_range, guard_prec), (gather, value_prec), (Constant 0., value_prec))
+  | _ ->
+      (* Float-precision indices. The bounds comparison must NOT be evaluated in the unsigned index
+         precision: [-1] would wrap to UINT_MAX and the guard would always be false (gh:
+         unsigned-index-precision). We do the whole guard in a signed precision ([double], exact
+         for the integer-valued indices in scope). [0 <= idx] is encoded as [-1 < idx] (there is no
+         [Cmple]); the upper bound is [idx < class_count]. *)
+      let guard_prec = Ops.double in
+      let lower = Binop (Ops.Cmplt, (Constant (-1.), guard_prec), (iv, guard_prec)) in
+      let upper = Binop (Ops.Cmplt, (iv, guard_prec), (upper_const, guard_prec)) in
+      (* The backend casts [iv] to int when gathering. To preserve one-hot semantics for
+         non-integer indices (e.g. 1.5, where every [k == idx] is false so the reduction is 0), the
+         gather must only fire when [idx] is exactly integral: [idx == trunc(idx)]. Otherwise
+         return 0. *)
+      let is_integral =
+        Binop (Ops.Cmpeq, (iv, guard_prec), (Unop (Ops.Trunc, (iv, guard_prec)), guard_prec))
+      in
+      let bounds = Binop (Ops.And, (lower, guard_prec), (upper, guard_prec)) in
+      let in_range = Binop (Ops.And, (bounds, guard_prec), (is_integral, guard_prec)) in
+      Ternop (Ops.Where, (in_range, guard_prec), (gather, value_prec), (Constant 0., value_prec))
 
 (* gh-343: peel a possible zero-initializer off a reduction body, returning the inner [For_loop]. *)
 let strip_zero_init_for_local (id : scope_id) (body : t) : t option =

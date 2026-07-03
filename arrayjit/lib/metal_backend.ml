@@ -655,8 +655,10 @@ module Fresh () = struct
       (* Metal has no native double. Keep double tensor storage unsupported in [typ_of_prec], so a
          declared double buffer/local still fails instead of being silently degraded. This
          conversion case is only for scalar expression casts emitted by the shared lowering;
-         currently the guarded dynamic gather uses [double] as a signed guard precision and Metal
-         renders that scalar guard as [float]. *)
+         currently the guarded dynamic gather uses [double] as a signed guard precision for
+         float-precision ids, and Metal renders that scalar guard as [float] (exact only below
+         2^24 -- prefer integer-precision ids, e.g. [Nn_blocks.class_ids_of_int_list], whose guard
+         runs in native integer comparisons instead). *)
       | _, Ops.Double_prec _ -> ("(float)(", ")")
       (* Default case for all other conversions *)
       | _ -> ("(" ^ typ_of_prec to_ ^ ")(", ")")
