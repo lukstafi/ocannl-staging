@@ -129,7 +129,10 @@ Soundness design (third instance of the `delayed_prec` lifecycle pattern):
   post-settlement writer whose interval does not fit is a compile-time error (like
   `update_prec` on a settled precision).
 - **Host writes**: symmetric with compiled writers around the settlement point.
-  *Pre-settlement*, `set_values`/`from_host` (and ndarray-backed `init_data` at creation)
+  *Pre-settlement*, `set_values`/`from_host` (and ndarray-backed `init_data` — proposed
+  *lazily* when the `Host_inits` buffer is forced at link/upload time, not at tensor
+  creation: `Reshape` inits deliberately wait for shape and padding inference, so an
+  eager scan would force unresolved dims or miss padding added by `create_with_reshape`)
   act as writers: scan the uploaded values (O(n), trivial next to the copy) and *propose*
   the observed `[min, max]` into the join — or pin the tensor to top if scanning is
   disabled. Otherwise a later reader could settle narrow writer-derived bounds and fold a

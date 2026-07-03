@@ -58,11 +58,15 @@ bit-manipulation, threefry counters) — the exact split this proposal adopts.
   `least_upper_dtype` with casts at boundaries; GPU special dims pinned int32. All
   produced widths are signed — unsigned never appears in tinygrad indexing. Mixed widths
   within a routine are safe *because* the choices derive from proven bounds; without
-  intervals this would be ad-hoc casting, which is why the migration waits for them. The
-  `large_models` switch disappears; `Ops.index_prec ()` becomes a codegen-time resolution
-  instead of a global read. (A per-routine max-numel fold remains the trivial fallback
-  for expressions the analysis cannot bound, and the correct width for launch-parameter
-  FFI types.)
+  intervals this would be ad-hoc casting, which is why the migration waits for them.
+  `Ops.index_prec ()` becomes a codegen-time resolution instead of a global read, and the
+  `large_models` switch is retired *from index-width selection only*: the same setting
+  currently also selects Metal pool-slot/offset width (`pool_slot_msl_typ`, `uint` vs
+  `ulong`), which needs its own resolution — always-64-bit slots, or a link-time
+  per-device choice from actual pooled buffer sizes — before the flag can be deleted.
+  (A per-routine max-numel fold remains the fallback for *position* expressions the
+  analysis cannot otherwise bound; value-embedded launch params instead default to
+  int64 — see the launch-parameter bullet.)
 - Launch-parameter (FFI) widths need no first-class symbols: tinygrad's `DEFINE_VAR` is a
   graph node only because everything there is a UOp; the load-bearing ingredients are
   declared bounds + bind-time validation + a width pin, and OCANNL's
@@ -72,8 +76,11 @@ bit-manipulation, threefry counters) — the exact split this proposal adopts.
   `For_loop`'s `[from_, to_]`, bound symbols from `[0, static_range)`. To add: validate
   the bound value against `static_range` at the `lowered_bindings` assignment (mirroring
   tinygrad's `bind` assert; one host compare per launch); parameter width = int32 when
-  the range fits, per-routine fallback when `static_range` is `None` — unbounded launch
-  params are the fallback clause's main customer.
+  the declared range fits, **int64 when `static_range` is `None`**. The per-routine
+  max-numel fallback is NOT sound for launch params: value-embedded params (`!@step_n`,
+  `uniform_at`-style counters) take runtime values unrelated to any touched node's
+  extent, so a small routine could pick int32 and silently truncate a large counter.
+  Narrowing an unbounded param requires declaring (and bind-validating) a range.
 - The unsigned single-compare trick stays available *at guard sites* as a codegen choice:
   `(uint32_t)(i) < size` implements `0 <= i < size` in one comparison. Signed core
   arithmetic + unsigned-cast guards is strictly more expressive than either pure regime.
@@ -130,7 +137,10 @@ The OCANNL translation of tinygrad's `weakint`: a payload-less constructor in `O
   the gather's signed branch can use index precision directly.
 - Test goldens: `.expected` files asserting `((uint32_t)(` / `((uint64_t)(` casts
   (e.g. `test/operations/test_one_hot_embedding_lookup`), plus any `build_files` snapshots.
-- Audit: pool slot types and buffer-offset arithmetic stay 64-bit-safe.
+- Audit: pool slot types and buffer-offset arithmetic stay 64-bit-safe; the `large_models`
+  retirement must not regress Metal pool-slot width (`pool_slot_msl_typ` and the
+  large-model slot-width test) — make slots always 64-bit or add a separate allocator
+  knob before deleting the flag.
 
 ## Sequencing
 
