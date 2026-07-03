@@ -42,9 +42,10 @@ A possible route to learning OCANNL:
 6. Read the NN building blocks file [lib/nn_blocks.ml](lib/nn_blocks.ml) and the training recipes [lib/train.ml](lib/train.ml).
   * Work through the [makemore tutorial](docs/makemore_tutorial.md) — a character-level language-model progression mirroring Andrej Karpathy's *Neural Networks: Zero to Hero* lectures.
 7. Read the introductory part of the shape inference documentation [docs/shape_inference.md](docs/shape_inference.md).
-8. Skim the configuration documentation [ocannl_config.reference](ocannl_config.reference).
-9. Improve your understanding by reading or skimming the framework internals: [tensor/shape.mli](tensor/shape.mli), [tensor/tensor.mli](tensor/tensor.mli), [tensor/operation.ml](tensor/operation.ml), [arrayjit/lib/context.mli](arrayjit/lib/context.mli).
-10. Read the implementation overview:
+8. For the paper-facing account, read the workshop article [docs/ocannl_workshop_article_human.md](docs/ocannl_workshop_article_human.md), the formal core technical report [docs/ocannl-formal-core-technical-report.md](docs/ocannl-formal-core-technical-report.md), and the constraint-generation notes [docs/shape-constraint-generation.md](docs/shape-constraint-generation.md).
+9. Skim the configuration documentation [ocannl_config.reference](ocannl_config.reference).
+10. Improve your understanding by reading or skimming the framework internals: [tensor/shape.mli](tensor/shape.mli), [tensor/tensor.mli](tensor/tensor.mli), [tensor/operation.ml](tensor/operation.ml), [arrayjit/lib/context.mli](arrayjit/lib/context.mli).
+11. Read the implementation overview:
    1. The various tests.
    2. Shape inference details [docs/shape_inference.md](docs/shape_inference.md).
    3. Backend-independent optimizations [docs/lowering_and_inlining.md](docs/lowering_and_inlining.md) -- _lowering_ means translating (compiling) from the high-level representation (as assignments) to the low-level representation.
@@ -55,13 +56,13 @@ To use debugging as provided by configuring `Utils.settings.debug_log_from_routi
 
 NOTE: debug logging from CUDA in complex settings is a bit tricky, it involves another thread (domain) intercepting and filtering `stdout`. If facing issues, try the setting `never_capture_stdout=true` (see [ocannl_config.reference](ocannl_config.reference)).
 
-## Upcoming milestones
+## Milestones
 
 See [ROADMAP.md](ROADMAP.md) for the detailed schedule. Headline target: **ICFP 2026 week (August 24, 2026)**.
 
-> Note (June 2026): the schedule drifted because of a slowdown from January to May; we are catching up. **v0.6.4 is skipped as a release** — its work (concatenation, RoPE, transformer toy) ships inside v0.7 — and **v0.7.2 is consolidated into v0.7**. **v0.7.1 is dissolved**: its AMD HIP backend (#411) moves to v0.8, and its real-world examples and tokenizer bindings move to v0.9. The last tagged release is 0.6.3. The sequence is now `0.6.3 → 0.7 → 0.8 → 0.9 → 1.0`.
+> Note (July 2026): **v0.7 shipped on July 3, 2026** as the consolidated paper-ready release. **v0.6.4 was skipped as a release** — its work (concatenation, RoPE, transformer toy) shipped inside v0.7 — and **v0.7.2 was consolidated into v0.7**. **v0.7.1 is dissolved**: its AMD HIP backend (#411) moves to v0.8, and its real-world examples and tokenizer bindings move to v0.9. The sequence is now `0.7 → 0.8 → 0.9 → 1.0`.
 
-* **0.7 (Late Jun 2026): Frontend finalization + compiler optimizations.** The consolidated paper-ready release for workshop submissions (OCaml Workshop, FProPer). Absorbs the former v0.6.4/v0.6.5/v0.7.0 frontend work and the former v0.7.2 optimization work.
+* **0.7 (Jul 3, 2026, released): Frontend finalization + compiler optimizations.** The consolidated paper-ready release for workshop submissions (OCaml Workshop, FProPer). Absorbs the former v0.6.4/v0.6.5/v0.7.0 frontend work and the former v0.7.2 optimization work.
   - [x] Migrate from the "hosted tensor" idea to always requiring a context when accessing tensors and dealing with devices directly; remove the `array` field of `Tnode.t` and the hosted memory mode (#333).
   - [x] Tensor saving, loading, and restoring (#373).
   - [x] Axis concatenation in the einsum syntax (`a^b`), generalizing tensor stacking; shifting (`1^i=>i`) and padding (`i=>1^i`) as fixed-index special cases (#49).
@@ -69,6 +70,7 @@ See [ROADMAP.md](ROADMAP.md) for the detailed schedule. Headline target: **ICFP 
   - [x] Ternary einsum notation (#305); loop-invariant hoisting (#350) and common subexpression elimination (#351).
   - [x] Universal Pool Allocator across backends (#344): per-context-delta working pools, per-device constant pools, reserved merge pool, and pooled Metal bindings.
   - [x] Sharding primitives, data-parallel training driver, and zero-copy leading-axis slice views (#293).
+  - [x] Workshop article, formal core technical report, and shape-constraint-generation notes.
 * **0.8 (Summer 2026): GPU-style performance -- low hanging fruit; AMD HIP backend.**
   - [ ] First harvested from [Fast Multidimensional Matrix Multiplication on CPU from Scratch](https://siboehm.com/articles/22/Fast-MMM-on-CPU).
   - [ ] Then harvested from [How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance: a Worklog](https://siboehm.com/articles/22/CUDA-MMM).
@@ -96,6 +98,11 @@ See [ROADMAP.md](ROADMAP.md) for the detailed schedule. Headline target: **ICFP 
 
 For more details, see [CHANGES](CHANGES.md).
 
+* **0.7: Frontend finalization, compiler optimizations, and paper-ready formal docs.**
+  * Removed hosted tensors in favor of explicit context-mediated access.
+  * Added axis concatenation/block tensors, RoPE, the decoder-only transformer toy, ternary einsum, sharding primitives, and zero-copy leading-axis slice views.
+  * Added loop hoisting, CSE, broader virtual-node inlining, and the universal pool allocator across backends.
+  * Added the workshop article, formal core technical report, and shape-constraint-generation notes.
 * **0.6.3: Padding inference for convolutions.**
   * Padding inference during shape inference.
   * Toy CNN example: circle counting.

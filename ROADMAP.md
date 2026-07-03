@@ -4,13 +4,13 @@
 
 This roadmap outlines the development plan for OCANNL from the current state to version 1.0, incorporating academic paper milestones for workshops collocated with ICFP 2026 (OCaml Workshop, FProPer). Dates indicate **end of period** targets.
 
-> **Schedule note (June 2026):** the roadmap drifted from its original dating because of a slowdown between January and May 2026. We are now catching up. Three structural changes follow from that:
+> **Schedule note (July 2026):** the roadmap drifted from its original dating because of a slowdown between January and May 2026. v0.7 is now the catch-up release. Three structural changes follow from that:
 >
-> - **v0.6.4 is skipped as a release.** Its scope — axis concatenation/block tensors (#49), RoPE and non-learned position embeddings (#398), the decoder-only transformer toy (#57) — is complete (the GitHub milestone is closed), but it ships inside **v0.7** rather than as a separate tagged release. The last tagged release is **0.6.3**.
+> - **v0.6.4 is skipped as a release.** Its scope — axis concatenation/block tensors (#49), RoPE and non-learned position embeddings (#398), the decoder-only transformer toy (#57) — is complete (the GitHub milestone is closed), but it ships inside **v0.7** rather than as a separate tagged release. The last tagged release before v0.7 was **0.6.3**.
 > - **v0.7.2 is consolidated into v0.7.** The compiler-optimization and memory-management work that was scheduled separately (loop hoisting, CSE, the universal pool allocator) is part of the single **v0.7** milestone.
 > - **v0.7.1 is dissolved.** Its two tracks were redistributed: the **AMD HIP backend (#411)** moves to **v0.8**, and the **real-world examples** (makemore #59, CNN/CIFAR #54, LSTM #60, transformer inference #377) and **tokenizer bindings** move to **v0.9**. The GitHub milestone has been deleted.
 >
-> The version sequence is now: `0.6.3 → 0.7 → 0.8 → 0.9 → 1.0 → 1.1`. Milestone *scope* below tracks the GitHub milestones, which are the source of truth.
+> The version sequence is now: `0.7 → 0.8 → 0.9 → 1.0 → 1.1`. Milestone *scope* below tracks the GitHub milestones, which are the source of truth.
 
 ---
 
@@ -20,7 +20,7 @@ The 0.6.x line stabilized the frontend: the Menhir einsum parser and "missing hi
 
 ---
 
-## v0.7 — Late June 2026
+## v0.7 — July 3, 2026
 **Theme: Frontend finalization and compiler optimizations (paper-ready)**
 
 This is the consolidated "paper-ready" release. It absorbs the frontend-finalization work originally split across v0.6.4/v0.6.5/v0.7.0 and the compiler-optimization work originally planned as v0.7.2. GitHub milestone scope: *"inlining- and simplification-related optimizations, memory management, session management."*
@@ -43,15 +43,21 @@ This is the consolidated "paper-ready" release. It absorbs the frontend-finaliza
 - **Loop-invariant code motion** (#350), prior to visit counting.
 - **Common subexpression elimination** after inlining (#351).
 - Extend virtual-node inlining to non-scalar constants and ranges (#142).
+- **Universal pool allocator across backends** (#344) — tensors are addressed through pooled locations; working tensors are bump-packed per context delta, constants live in per-device pools, merge buffers stay reserved, and Metal uses pool slabs plus a slot table to avoid binding-limit pressure.
+- **Sharding and minimal-copy slicing foundation** (#293) — `shard_along` / `gather`, data-parallel training with merge-buffer all-reduce, and zero-copy leading-axis slice views.
 
-**Still open in v0.7:**
-- **Universal Pool Allocator across backends** (#344) — in progress (buffer-addressing seam landed; full pooling scoped).
+**Documentation and paper artifacts (done):**
+- **`lowering_and_inlining.md` audit** (#296) — the lowering/optimization docs were fleshed out alongside a `low_level.ml` audit.
+- **Workshop article:** `docs/ocannl_workshop_article_human.md`, LaTeX source, and rendered PDF.
+- **Formal core technical report:** `docs/ocannl-formal-core-technical-report.md` and LaTeX source, covering the core shape/projection inference proof effort.
+- **Shape constraint generation notes:** `docs/shape-constraint-generation.md`, documenting the front-end elaboration boundary from `shape.ml` into core constraints.
+
+**Deferred after v0.7:**
 - **`Local_scope` initialization tracking** (#340).
-- **Sharding and slicing with minimal copying** (#293) — the data-parallel driver with merge-buffer all-reduce has landed; remaining work continues here.
-- **Documentation:** flesh out `lowering_and_inlining.md` and audit `low_level.ml` (#296).
+- Remaining sharding/slicing extensions beyond the v0.7 data-parallel and zero-copy leading-axis foundation (#293 follow-ups).
 - Inlining stretch goals: share one `for` loop across virtual tensors (#134); inline virtual nodes with non-linear index symbols (#133).
 
-This release is the basis for the workshop paper examples: a clean context-based API (no hosted tensors), shape concatenation, and a complete transformer with RoPE.
+This release is the basis for the workshop paper examples: a clean context-based API (no hosted tensors), shape concatenation, a complete transformer with RoPE, and a written formal account of the core shape/projection inference machinery.
 
 ---
 
@@ -123,7 +129,7 @@ GitHub milestone scope: *"Consider introducing axis labels. Consider introducing
 | 0.6.2  | Nov 2025 | released | Menhir parser, hidden-dimension errors |
 | 0.6.3  | Dec 2025 | released | Padding inference, toy CNN |
 | ~~0.6.4~~ | — | **skipped** (folds into 0.7) | Concatenation, RoPE, transformer toy |
-| **0.7** | Late Jun 2026 | **in progress** | **Frontend finalization + compiler optimizations** (consolidates 0.7.2) |
+| **0.7** | Jul 3, 2026 | **released** | **Frontend finalization + compiler optimizations** (consolidates 0.7.2) |
 | ~~0.7.1~~ | — | **dissolved** | AMD HIP backend → 0.8; examples + tokenizers → 0.9 |
 | 0.8    | Summer 2026 | planned | GPU tiling, megakernels, matmul; AMD HIP backend (major) |
 | 0.9    | Aug 24, 2026 | planned | Program search **(ICFP week)**; examples: makemore, MNIST/CIFAR, LSTM, transformer inference, tokenizers |
@@ -132,9 +138,14 @@ GitHub milestone scope: *"Consider introducing axis labels. Consider introducing
 
 ---
 
-## Workshop Paper Plan (OCaml Workshop / FProPer at ICFP 2026)
+## Workshop Paper Artifacts (OCaml Workshop / FProPer at ICFP 2026)
 
-**Target deadline: per each workshop's CFP (typically May–June 2026).**
+The v0.7 release includes the paper-facing material needed for workshop submission and follow-up discussion:
+
+- Workshop article: [docs/ocannl_workshop_article_human.md](docs/ocannl_workshop_article_human.md).
+- Workshop article PDF: [docs/html/pdfs/ocannl_workshop_article_human.pdf](docs/html/pdfs/ocannl_workshop_article_human.pdf).
+- Formal core technical report: [docs/ocannl-formal-core-technical-report.md](docs/ocannl-formal-core-technical-report.md).
+- Shape constraint generation notes: [docs/shape-constraint-generation.md](docs/shape-constraint-generation.md).
 
 ### Proposed Title
 *"Generalized Einsum with Row Variables: Shape Inference for Deep Learning in OCaml"*

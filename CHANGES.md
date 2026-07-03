@@ -1,6 +1,6 @@
-## [Unreleased] — targeting 0.7
+## [0.7] -- 2026-07-03
 
-> Release note: **0.6.4 is skipped** as a tagged release (last release is 0.6.3). The
+> Release note: **0.6.4 is skipped** as a tagged release (last release before 0.7 was 0.6.3). The
 > work originally planned for 0.6.4/0.6.5/0.7.0 (frontend finalization, concatenation,
 > position embeddings, transformer toy) and for 0.7.2 (compiler optimizations, pool
 > allocator) is **consolidated into 0.7**. See [ROADMAP.md](ROADMAP.md).
@@ -71,6 +71,16 @@
   - Unary ops: `relu`, `sat01`, `exp`, `log`, `exp2`, `log2`, `sin`, `cos`, `sqrt`, `recip`, `recip_sqrt`, `tanh`, `neg`, `not`, `stop_gradient`
 - Common gotchas and idioms section in CLAUDE.md documentation
 - `Rev_sides` support in lowering for reverse-direction Block operations
+- Completed the workshop article in Markdown and LaTeX, with a rendered PDF published
+  under `docs/html/pdfs/ocannl_workshop_article_human.pdf`.
+- Added the standalone formal core technical report
+  (`docs/ocannl-formal-core-technical-report.md` / `.latex`) covering the core
+  shape/projection inference proof effort: dimensions, rows, broadcasting,
+  flat row equality, solving, closing, and projection inference.
+- Added `docs/shape-constraint-generation.md`, documenting how `tensor/shape.ml`
+  generates the core constraints and projection metadata used by inference.
+- Added regression coverage for shape-inference counterexamples, closing order,
+  and row-rank-cycle behavior used while validating the formalization.
 
 ### Changed
 
@@ -98,6 +108,9 @@
 - Heavy training integration tests are now gated behind Dune's `slow` alias, while
   backend-divergent goldens and CUDA/Metal generated-source expectations were normalized
   for release testing.
+- Documentation for the formal core now uses the direct row-subtyping/refinement
+  presentation consistently, including the closed-row equality and dimension-closing
+  policy clarifications made while preparing the workshop article.
 - **Breaking:** `Backend.device_to_device` now returns `context routine option` instead of `bool`.
   Instead of scheduling the copy as a side effect, it builds a transfer *routine*: callers run
   `r.schedule` (or link a consumer against `r.context`). `None` replaces the old `false` ("nothing
