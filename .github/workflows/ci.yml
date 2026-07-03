@@ -28,6 +28,11 @@ jobs:
         git config --global core.autocrlf false
         git config --global core.eol lf
         git config --global core.ignorecase false
+    # Refresh the apt index: the runner image's package lists go stale, making
+    # opam's depext step 404 on superseded package versions.
+    - name: Update apt package index
+      if: runner.os == 'Linux'
+      run: sudo apt-get update
     - uses: actions/checkout@v4
     - uses: ocaml/setup-ocaml@v3
       with:

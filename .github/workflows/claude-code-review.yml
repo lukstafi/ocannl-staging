@@ -26,6 +26,11 @@ jobs:
       id-token: write
     
     steps:
+      # Refresh the apt index: the runner image's package lists go stale, making
+      # opam's depext step 404 on superseded package versions.
+      - name: Update apt package index
+        run: sudo apt-get update
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
