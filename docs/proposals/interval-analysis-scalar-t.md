@@ -138,7 +138,9 @@ pass is the general fix if later rewrites also start emitting foldable code.
   audit of *all* host-write paths, not just `Context.set_values`/`from_host`: direct
   backend init/upload paths, persistence/checkpoint restore, and link-time `Host_inits`
   must participate in propose/settle/validate; device-to-device copies propagate the
-  source node's bounds by join (no scan needed).
+  source node's bounds by join (no scan needed). **v1 scope restriction** (binding
+  constraint 3 below): fold only on bounds of host-initialized, never-device-written
+  tensors.
 - **Phase C** (separate proposal, blocks on A):
   [signed-index-precision](signed-index-precision.md) with tnode-granular width
   selection; then logical-padding masks per [schedule-ir-optops](schedule-ir-optops.md).
@@ -176,6 +178,78 @@ Soundness design (third instance of the `delayed_prec` lifecycle pattern):
   accumulators) default to top — a fixpoint over unbounded repetitions is not attempted.
   The profitable cases (ids, range producers, one-hots) are write-once/functional.
 
+## Binding constraints from the first implementation attempt (PR #87, reviewed 2026-07-04)
+
+A full first implementation (Codex, PR #87 — discarded, starting over) was reviewed
+in depth; its Phase A core was close to this spec, but the review surfaced design gaps
+that this proposal must state as binding rules, not implementation advice. The redo must
+satisfy all of these:
+
+1. **Fail-safe guard construction.** Construct-then-fold is sound only when every
+   generically-built conjunct is *correct unfolded* at its guard precision. `-1 < iv` at
+   uint64 is not: it survives whenever `iv`'s interval is top (`Local_scope`/`Get_local`
+   — e.g. a virtualized computed unsigned ids expression), and casting `-1.0` to
+   `uint64_t` is C UB — the guard goes silently always-false. Keep precision-flavored
+   construction for any conjunct whose unfolded form is wrong (the unsigned lower bound),
+   or emit such conjuncts only when the fold succeeds. Folding is an optimization; it
+   must never be a correctness obligation.
+2. **Settlement is transitive and fires at every consumption point.** PR #87 settled only
+   on full comparison/Where folds and leaked everywhere else: (a) writer-bound
+   derivations read other nodes' *unsettled* candidates and dropped the interval's
+   `sources` — a later legal widening of the source leaves a stale derived candidate that
+   a reader then folds and settles (OOB with no error, ever); (b) the one-sided `And`/`Or`
+   eliminations rewrote on a conjunct's bounds without settling them; (c) the `Where`
+   interval rule returned the chosen branch's interval while dropping the *condition's*
+   sources. Rule: every rewrite or proposal that consumes a node's bounds settles that
+   node (the `sources` plumbing exists for exactly this); interval rules must propagate
+   sources through branch selection.
+3. **Proposals must be execution-anchored, not compile-anchored.** A compiled writer may
+   never run, run after the reader, or run repeatedly. A per-`Set` *syntactic* self-read
+   check is insufficient: `Seq(Set tmp = Get tn; Set tn = Get tmp + 1)` and two-routine
+   cycles escape it, yielding bounds valid only for the first execution with no runtime
+   validation of device writes. Pin to top any node whose value can transitively depend
+   on its own prior state (dataflow closure, per routine and across routines), and
+   account for the pre-first-write buffer contents (see 4). **Phase B v1 simplification
+   (recommended): fold only on bounds of host-initialized, never-device-written tensors**
+   — this covers the ids payoff with none of the above hazards.
+4. **The domain of a node includes what the routine did not write.** A `Set` proposal is
+   a fact about written elements only; allocation-time backend zero-init (memset — not
+   represented as `Zero_out` in the llc) and the physical-padding halo fill are part of
+   the node's value domain. Join `[0,0]` for backend-zero-initialized nodes and the
+   padding fill value for padded tensors (host scans skip margins — the fill must be
+   joined explicitly), unless surjective coverage is proven.
+5. **Model the store conversion.** Writer intervals must be clamped/widened to the
+   storage dtype's behavior: integer casts wrap (propose top unless the RHS is provably
+   in range), float stores overflow to inf. Readers intersect candidates with dtype
+   bounds. And bfloat16's exact-integer limit is **256** (7 mantissa bits), not fp16's
+   2048 — witness: 257 is unrepresentable.
+6. **Exactness discipline for all folds.** Ordering folds (`Cmplt`), not just
+   equality/singleton folds, require `exact` endpoints or outward rounding at every
+   operation — round-to-nearest endpoint arithmetic can round *inward* above 2^53.
+   Host-scan exactness must be strict (`< 2^53`): the value 2^53 + 1 rounds *to* 2^53
+   and would pass a `<=` test.
+7. **The crosses-zero rule is not optional.** PR #87 skipped the "lower bound could cross
+   zero at unsigned precision → top" assert entirely; real-arithmetic `Sub` at unsigned
+   annotations folded by real ordering is latent unsoundness (no current emitter, but
+   nothing prevents one). Implement the assert in `sub`/affine evaluation.
+8. **Performance is part of the contract.** Host scans run per upload: gate them to
+   nodes that can profit (integer precisions / gather-index candidates), fold directly
+   over the bigarray in one pass (no boxed flat-values copy), and skip when settled-top.
+   The memo is one table per env scope shared across queries — not a fresh assoc list
+   per query — and bottom-up simplify folds at the top node only (children are already
+   folded), never re-walking subtrees per nesting level.
+9. **One lattice, one module.** The bounds record and its ops (top/point/join/contains,
+   exactness) live in a single shared module that `Tnode` stores and the analysis extends
+   with `sources`/env — PR #87's twin records with field-by-field converters is a drift
+   trap (its two `point` functions already disagreed on finiteness).
+10. **Executed parity for the folded path.** At least one test must *execute* a kernel
+    whose guard folded via `Tnode` bounds — compile after the upload proposes — and
+    compare values against the unfolded build. PR #87's suite only ever executed
+    pre-bounds kernels and inspected folds via re-lowering, so a fold that produced
+    wrong values would have passed everything. Structural assertions and `.expected`
+    files (which the standalone test must ship, per repo convention) complement but do
+    not replace this.
+
 ## Relations
 
 [#133](https://github.com/ahrefs/ocannl/issues/133),
@@ -201,3 +275,8 @@ is paid once).
 - [x] `Tnode` bounds lifecycle specified (propose/settle/conflict semantics mirroring
       `delayed_prec`; host-write symmetry around settlement; self-referential writers
       pinned to top) — implementation is Phase B.
+- [ ] All ten binding constraints from the PR #87 review satisfied by the redo (fail-safe
+      guard construction; transitive settlement; execution anchoring / host-init-only v1;
+      unwritten-domain joins; store-conversion modeling; exactness for all folds;
+      crosses-zero assert; gated single-pass scans + env-scoped shared memo; single
+      lattice module; executed parity of a bounds-folded kernel).
