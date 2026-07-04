@@ -19,6 +19,8 @@ type optop =
   | Swap of { outer : Indexing.symbol; inner : Indexing.symbol }
   | Retype of { axis : Indexing.symbol; ty : Low_level.axis_type }
   | Unroll of { axis : Indexing.symbol; materialize : bool }
+  | Stage of { source : Tn.t; tile_loops : Indexing.symbol list; shared : bool }
+  | Expand_zero of { tn : Tn.t; indices : Indexing.symbol list }
 [@@deriving sexp_of]
 
 type schedule = optop list [@@deriving sexp_of]
@@ -26,6 +28,11 @@ type schedule = optop list [@@deriving sexp_of]
 let split ~axis ~factor ~outer ~inner =
   let outer_index = Indexing.get_symbol () and inner_index = Indexing.get_symbol () in
   (Split { axis; factor; outer; inner; outer_index; inner_index }, outer_index, inner_index)
+
+let expand_zero ~tn =
+  let rank = Array.length (Lazy.force tn.Tn.dims) in
+  let indices = List.init rank ~f:(fun _ -> Indexing.get_symbol ()) in
+  (Expand_zero { tn; indices }, indices)
 
 (** {2 Index substitution}
 
@@ -141,6 +148,7 @@ let rewrite_loop ~what ~sym ~(f : floop -> Low_level.t) (llc : Low_level.t) : Lo
 let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
   let open Low_level in
   match op with
+  | Stage _ -> assert false (* Handled by [apply_opt_op]: it needs the whole [optimized]. *)
   | Split { axis; factor; outer; inner; outer_index; inner_index } ->
       rewrite_loop ~what:"Schedule.Split" ~sym:axis llc ~f:(fun fc ->
           if factor <= 0 then invalid_arg "Schedule.Split: factor must be positive";
@@ -219,12 +227,349 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
                ~f:(fun k ->
                  let v = fc.from_ + k in
                  map_code ~fidx:(subst_axis_index ~sym:axis ~by:{ terms = []; offset = v }) fc.body)))
+  | Expand_zero { tn; indices } ->
+      (* Whole-node [Zero_out] is never distributed across hardware threads ([validate_parallel]
+         rejects it in multi-threaded kernels); expand it into an ordinary loop nest — over the
+         caller-supplied symbols, so subsequent ops in the schedule can split and annotate the
+         zeroing with the same geometry as the computation. *)
+      let dims = Lazy.force tn.Tn.dims in
+      if Array.length dims <> List.length indices then
+        invalid_arg
+          ("Schedule.Expand_zero: " ^ Int.to_string (List.length indices) ^ " indices for a rank-"
+          ^ Int.to_string (Array.length dims)
+          ^ " node");
+      let idcs = Array.of_list_map indices ~f:(fun s -> Indexing.Iterator s) in
+      let nest =
+        List.fold_right
+          (List.zip_exn indices (Array.to_list dims))
+          ~init:(Set { tn; idcs; llsc = Constant 0.; debug = "" })
+          ~f:(fun (s, d) body ->
+            For_loop { index = s; from_ = 0; to_ = d - 1; body; trace_it = false; axis = Serial })
+      in
+      let found = ref false in
+      let rec go llc =
+        match llc with
+        | Zero_out tn' when Tn.equal tn tn' ->
+            if !found then
+              invalid_arg
+                ("Schedule.Expand_zero: multiple Zero_out statements for " ^ Tn.debug_name tn);
+            found := true;
+            nest
+        | Seq (a, b) -> Seq (go a, go b)
+        | For_loop fc -> For_loop { fc with body = go fc.body }
+        | If { cond; body } -> If { cond; body = go body }
+        | other -> other
+      in
+      let result = go llc in
+      if not !found then
+        invalid_arg ("Schedule.Expand_zero: no Zero_out of " ^ Tn.debug_name tn);
+      result
+
+(** {2 [Stage]: tile staging (schedule-ir-optops §5)}
+
+    The one transform that synthesizes code. [Stage { source; tile_loops; shared }] requires all
+    reads of [source] to use one index vector (v1). Each source axis's index is decomposed into a
+    tile part (terms over [tile_loops], positive coefficients) and an outer part; source axes with
+    a nonempty tile part become tile axes, sized by the tile part's range over the tile loops'
+    extents. The load nest is inserted at the deepest loop that must stay outside the tile — the
+    innermost loop carrying an outer-part symbol or a reused [Workgroup] tile axis — by replacing
+    that loop's body with [loads; barrier; body-with-reads-remapped; barrier] ([shared]) or
+    [loads; remapped body] (packing). Cooperative loads reuse [Workgroup]-typed tile loops as the
+    cooperating thread indices, iterate [Serial] tile loops under fresh symbols, guard each tile
+    axis with an [If (index < dim)] edge guard (construct-then-fold), and — for [shared] — restrict
+    redundant loading along non-participating workgroup axes with [If (w == 0)] guards. The tile is
+    a fresh [Local]-mode node registered in the traced store (and in [workgroup_shared] when
+    [shared]). *)
+
+let fresh_tile_id =
+  (* Well clear of tensor-land ids (allocated from 0 by the [Tensor] session counter). *)
+  let c = ref 900_000_000 in
+  fun () ->
+    Int.incr c;
+    !c
+
+let terms_of_index (idx : Indexing.axis_index) : ((int * Indexing.symbol) list * int) option =
+  match idx with
+  | Indexing.Fixed_idx k -> Some ([], k)
+  | Indexing.Iterator s -> Some ([ (1, s) ], 0)
+  | Indexing.Affine { symbols; offset } -> Some (symbols, offset)
+  | Indexing.Sub_axis -> Some ([], 0)
+  | Indexing.Concat _ -> None
+
+(* All reads [Get (source, idcs)] with their enclosing statement-level loop stacks
+   (outermost-first; [floop.body] is dummied out). Writes to [source] are rejected. *)
+let collect_source_accesses ~source (llc : Low_level.t) :
+    (Indexing.axis_index array * floop list) list =
+  let open Low_level in
+  let acc = ref [] in
+  let reject_write tn =
+    if Tn.equal tn source then
+      invalid_arg ("Schedule.Stage: source " ^ Tn.debug_name source ^ " is written in the routine")
+  in
+  let rec code stack llc =
+    match llc with
+    | Noop | Comment _ | Staged_compilation _ | Declare_local _ | Workgroup_barrier -> ()
+    | Zero_out tn -> reject_write tn
+    | Seq (a, b) ->
+        code stack a;
+        code stack b
+    | For_loop { index; from_; to_; body; trace_it; axis } ->
+        code ({ index; from_; to_; body = Noop; trace_it; axis } :: stack) body
+    | Set { tn; llsc; _ } ->
+        reject_write tn;
+        scalar stack llsc
+    | Set_from_vec { tn; arg = a, _; _ } ->
+        reject_write tn;
+        scalar stack a
+    | Set_local (_, llsc) -> scalar stack llsc
+    | If { cond = c, _; body } ->
+        scalar stack c;
+        code stack body
+  and scalar stack (llsc : scalar_t) =
+    match llsc with
+    | Local_scope { body; _ } -> code stack body
+    | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
+    | Get (tn, idcs) -> if Tn.equal tn source then acc := (idcs, List.rev stack) :: !acc
+    | Get_dynamic { tn; dyn_value = v, _; _ } ->
+        if Tn.equal tn source then
+          invalid_arg "Schedule.Stage: dynamically indexed source reads are unsupported";
+        scalar stack v
+    | Get_merge_buffer (_, _) -> ()
+    | Ternop (_, (a, _), (b, _), (c, _)) ->
+        scalar stack a;
+        scalar stack b;
+        scalar stack c
+    | Binop (_, (a, _), (b, _)) ->
+        scalar stack a;
+        scalar stack b
+    | Unop (_, (a, _)) -> scalar stack a
+  in
+  code [] llc;
+  !acc
+
+(* Replaces reads [Get (source, idcs)] with [idcs] equal to [from_idcs] by [Get (tile, tile_idcs)]. *)
+let remap_reads ~source ~from_idcs ~tile ~tile_idcs (llc : Low_level.t) : Low_level.t =
+  let open Low_level in
+  let rec code llc =
+    match llc with
+    | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier ->
+        llc
+    | Seq (a, b) -> Seq (code a, code b)
+    | For_loop fc -> For_loop { fc with body = code fc.body }
+    | Set { tn; idcs; llsc; debug } -> Set { tn; idcs; llsc = scalar llsc; debug }
+    | Set_from_vec ({ arg = a, p; _ } as sv) -> Set_from_vec { sv with arg = (scalar a, p) }
+    | Set_local (id, llsc) -> Set_local (id, scalar llsc)
+    | If { cond = c, p; body } -> If { cond = (scalar c, p); body = code body }
+  and scalar (llsc : scalar_t) : scalar_t =
+    match llsc with
+    | Get (tn, idcs)
+      when Tn.equal tn source && Array.equal Indexing.equal_axis_index idcs from_idcs ->
+        Get (tile, tile_idcs)
+    | Get _ | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ ->
+        llsc
+    | Local_scope ({ body; _ } as ls) -> Local_scope { ls with body = code body }
+    | Get_dynamic ({ dyn_value = v, p; _ } as gd) -> Get_dynamic { gd with dyn_value = (scalar v, p) }
+    | Ternop (op, (a, pa), (b, pb), (c, pc)) ->
+        Ternop (op, (scalar a, pa), (scalar b, pb), (scalar c, pc))
+    | Binop (op, (a, pa), (b, pb)) -> Binop (op, (scalar a, pa), (scalar b, pb))
+    | Unop (op, (a, pa)) -> Unop (op, (scalar a, pa))
+  in
+  code llc
+
+let apply_stage ~source ~tile_loops ~shared (opt : Low_level.optimized) : Low_level.optimized =
+  let open Low_level in
+  if List.is_empty tile_loops then invalid_arg "Schedule.Stage: empty tile_loops";
+  let accesses = collect_source_accesses ~source opt.llc in
+  let idcs0, stack0 =
+    match accesses with
+    | [] -> invalid_arg ("Schedule.Stage: no reads of " ^ Tn.debug_name source ^ " in the routine")
+    | hd :: _ -> hd
+  in
+  List.iter accesses ~f:(fun (idcs, _) ->
+      if not (Array.equal Indexing.equal_axis_index idcs idcs0) then
+        invalid_arg
+          ("Schedule.Stage: v1 requires all reads of " ^ Tn.debug_name source
+         ^ " to use identical index vectors"));
+  let stack0 = Array.of_list stack0 (* outermost-first *) in
+  let is_tile s = List.mem tile_loops s ~equal:Indexing.equal_symbol in
+  let depth_of s = Array.findi stack0 ~f:(fun _ fl -> Indexing.equal_symbol fl.index s) in
+  let floop_of_exn s =
+    match depth_of s with
+    | Some (_, fl) -> fl
+    | None ->
+        invalid_arg
+          ("Schedule.Stage: tile loop " ^ Indexing.symbol_ident s
+         ^ " does not enclose the source access")
+  in
+  (* Per source axis: tile part (terms over tile loops), outer part, offset. *)
+  let decomp =
+    Array.map idcs0 ~f:(fun idx ->
+        match terms_of_index idx with
+        | None -> invalid_arg "Schedule.Stage: Concat indices are unsupported"
+        | Some (terms, offset) ->
+            let tile_part, outer_part = List.partition_tf terms ~f:(fun (_, s) -> is_tile s) in
+            (tile_part, outer_part, offset))
+  in
+  Array.iter decomp ~f:(fun (tp, _, _) ->
+      List.iter tp ~f:(fun (c, s) ->
+          if c <= 0 then
+            invalid_arg "Schedule.Stage: nonpositive coefficient on a tile loop index";
+          let fl = floop_of_exn s in
+          if fl.from_ <> 0 then invalid_arg "Schedule.Stage: tile loops must start at 0"));
+  List.iter tile_loops ~f:(fun s ->
+      if
+        not
+          (Array.exists decomp ~f:(fun (tp, _, _) ->
+               List.exists tp ~f:(fun (_, s') -> Indexing.equal_symbol s s')))
+      then
+        invalid_arg
+          ("Schedule.Stage: tile loop " ^ Indexing.symbol_ident s
+         ^ " does not occur in the source access"));
+  let extent s =
+    let fl = floop_of_exn s in
+    fl.to_ - fl.from_ + 1
+  in
+  (* Tile axes: source axes with a nonempty tile part; dim = the tile part's range. *)
+  let tile_axes =
+    Array.filter_mapi decomp ~f:(fun a (tp, _, _) ->
+        if List.is_empty tp then None
+        else Some (a, List.fold tp ~init:1 ~f:(fun acc (c, s) -> acc + (c * (extent s - 1)))))
+  in
+  (* Classify tile loops: Workgroup-typed loops are reused as cooperating thread indices in the
+     load nest; Serial ones are iterated under fresh symbols. *)
+  let reused, iterated =
+    List.partition_tf tile_loops ~f:(fun s ->
+        match (floop_of_exn s).axis with
+        | Workgroup | Workgroup_reduce -> true
+        | Serial -> false
+        | Grid -> invalid_arg "Schedule.Stage: a Grid-typed loop cannot be a tile loop"
+        | Unrolled ->
+            invalid_arg "Schedule.Stage: apply Stage before (materializing) Unroll of a tile loop")
+  in
+  if (not shared) && not (List.is_empty reused) then
+    invalid_arg "Schedule.Stage: non-shared (packing) staging requires Serial tile loops";
+  (* The insertion point L*: the deepest loop that must stay outside the tile — carrying an
+     outer-part symbol or a reused workgroup tile axis. *)
+  let outer_sym_depths =
+    Array.to_list decomp
+    |> List.concat_map ~f:(fun (_, op_, _) -> op_)
+    |> List.filter_map ~f:(fun (_, s) -> Option.map (depth_of s) ~f:fst)
+  in
+  let reused_depths = List.map reused ~f:(fun s -> fst (Option.value_exn (depth_of s))) in
+  let lstar_depth = List.max_elt (outer_sym_depths @ reused_depths) ~compare:Int.compare in
+  (* Serial tile loops may sit above or below L*: the load nest iterates them under fresh symbols,
+     so only outer-part symbols and reused workgroup axes pin the staging point. *)
+  (* Mint the tile. *)
+  let prec = Lazy.force source.Tn.prec in
+  let tile_dims = Array.map tile_axes ~f:snd in
+  let tile =
+    Tn.create (Tn.Specified prec) ~id:(fresh_tile_id ())
+      ~label:("tile" :: source.Tn.label)
+      ~unpadded_dims:(lazy tile_dims)
+      ~padding:(lazy None) ()
+  in
+  Tn.update_memory_mode tile Tn.Local 175;
+  ignore (get_node opt.traced_store tile : traced_array);
+  (* The load nest. *)
+  let fresh = List.map iterated ~f:(fun s -> (s, Indexing.get_symbol ())) in
+  let load_sym s =
+    match List.Assoc.find fresh ~equal:Indexing.equal_symbol s with Some s' -> s' | None -> s
+  in
+  let subst_terms terms = List.map terms ~f:(fun (c, s) -> (c, load_sym s)) in
+  let load_src_idcs =
+    Array.map decomp ~f:(fun (tp, op_, off) ->
+        normalize_affine ~terms:(subst_terms tp @ op_) ~offset:off)
+  in
+  let tile_store_idcs =
+    Array.map tile_axes ~f:(fun (a, _) ->
+        let tp, _, _ = decomp.(a) in
+        normalize_affine ~terms:(subst_terms tp) ~offset:0)
+  in
+  let tile_read_idcs =
+    Array.map tile_axes ~f:(fun (a, _) ->
+        let tp, _, _ = decomp.(a) in
+        normalize_affine ~terms:tp ~offset:0)
+  in
+  let iprec = Ops.index_prec () in
+  let src_dims = Lazy.force source.Tn.dims in
+  let load_stmt =
+    Set { tn = tile; idcs = tile_store_idcs; llsc = Get (source, load_src_idcs); debug = "" }
+  in
+  (* Edge guards per tile axis (construct-then-fold: [apply]'s trailing simplify erases the ones
+     the loop extents prove, i.e. whenever the tile sizes divide the source extents). *)
+  let load_stmt =
+    Array.fold tile_axes ~init:load_stmt ~f:(fun stmt (a, _) ->
+        let cond =
+          Binop
+            ( Ops.Cmplt,
+              (Embed_index load_src_idcs.(a), iprec),
+              (Constant (Float.of_int src_dims.(a)), iprec) )
+        in
+        If { cond = (cond, iprec); body = stmt })
+  in
+  let load_nest =
+    List.fold (List.rev fresh) ~init:load_stmt ~f:(fun body (s, s') ->
+        For_loop { index = s'; from_ = 0; to_ = extent s - 1; body; trace_it = false; axis = Serial })
+  in
+  (* Restrict redundant cooperative loading along in-scope workgroup axes that do not participate
+     in this tile: one representative thread ([w == 0]) loads for all. *)
+  let load_nest =
+    if not shared then load_nest
+    else
+      let in_scope =
+        match lstar_depth with
+        | None -> []
+        | Some ld -> Array.to_list (Array.sub stack0 ~pos:0 ~len:(ld + 1))
+      in
+      List.fold in_scope ~init:load_nest ~f:(fun body fl ->
+          match fl.axis with
+          | (Workgroup | Workgroup_reduce)
+            when not (List.mem reused fl.index ~equal:Indexing.equal_symbol) ->
+              If
+                {
+                  cond =
+                    ( Binop
+                        ( Ops.Cmpeq,
+                          (Embed_index (Indexing.Iterator fl.index), iprec),
+                          (Constant 0., iprec) ),
+                      iprec );
+                  body;
+                }
+          | _ -> body)
+  in
+  let build inner =
+    let remapped =
+      remap_reads ~source ~from_idcs:idcs0 ~tile ~tile_idcs:tile_read_idcs inner
+    in
+    if shared then unflat_lines [ load_nest; Workgroup_barrier; remapped; Workgroup_barrier ]
+    else unflat_lines [ load_nest; remapped ]
+  in
+  let llc =
+    match lstar_depth with
+    | None -> build opt.llc
+    | Some ld ->
+        rewrite_loop ~what:"Schedule.Stage" ~sym:stack0.(ld).index opt.llc ~f:(fun fc ->
+            for_loop { fc with body = build fc.body })
+  in
+  {
+    opt with
+    llc;
+    workgroup_shared =
+      (if shared then Set.add opt.workgroup_shared tile else opt.workgroup_shared);
+  }
+
+let apply_opt_op (opt : Low_level.optimized) (op : optop) : Low_level.optimized =
+  match op with
+  | Stage { source; tile_loops; shared } -> apply_stage ~source ~tile_loops ~shared opt
+  | (Split _ | Swap _ | Retype _ | Unroll _ | Expand_zero _) as op ->
+      { opt with llc = apply_op opt.Low_level.llc op }
 
 let apply ?(static_indices = []) (sched : schedule) (opt : Low_level.optimized) :
     Low_level.optimized =
   if List.is_empty sched then opt
   else
-    let llc = List.fold sched ~init:opt.Low_level.llc ~f:apply_op in
+    let opt = List.fold sched ~init:opt ~f:apply_opt_op in
+    let llc = opt.Low_level.llc in
     (* Transforms fold their own guards (schedule-ir-optops §2): the pipeline's simplify already
        ran, so re-run it here; and when a transform duplicated code, re-run CSE + hoisting too. *)
     let llc = Low_level.simplify_llc static_indices llc in

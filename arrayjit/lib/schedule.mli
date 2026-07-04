@@ -8,6 +8,7 @@
     CSE and hoisting when a transform duplicated code), and there is no re-virtualization. *)
 
 open Base
+module Tn = Tnode
 
 type optop =
   | Split of {
@@ -42,6 +43,28 @@ type optop =
           constants, so that {!apply}'s trailing simplify + CSE see the copies — constant-folding
           [Affine] indices and deduplicating repeated loads. Register blocktiling is [Split] +
           materializing [Unroll] + the existing CSE (schedule-ir-optops §4). *)
+  | Stage of { source : Tn.t; tile_loops : Indexing.symbol list; shared : bool }
+      (** Stage reads of [source] through a tile: a fresh [Local]-mode node registered in the
+          traced store, its dims derived per source axis from the range of the index terms over
+          [tile_loops] (schedule-ir-optops §5). All reads of [source] must use one index vector
+          (v1) whose per-axis terms split cleanly into tile-loop terms (positive coefficients) and
+          outer terms. With [shared = true] the tile is added to [workgroup_shared] and a
+          cooperative-load nest plus barriers are inserted at the deepest loop carrying an
+          outer-part symbol or a reused [Workgroup] tile axis: [Workgroup]-typed tile loops are
+          reused as the cooperating thread indices, [Serial] tile loops are iterated under fresh
+          symbols, per-axis edge guards are constructed then folded, and redundant loading along
+          non-participating workgroup axes is restricted to one representative thread. Note that
+          [Split]'s whole-body remainder guards would place the inserted barriers under divergent
+          control flow (rejected by [validate_parallel]), so v1 shared staging requires tile sizes
+          dividing the extents. With [shared = false] (CPU operand packing) all tile loops must be
+          [Serial] and a plain serial copy nest is inserted, no barriers. The source must not be
+          written in the routine. *)
+  | Expand_zero of { tn : Tn.t; indices : Indexing.symbol list }
+      (** Expand the unique [Zero_out tn] statement into an ordinary loop nest over the supplied
+          symbols (one per axis of [tn]'s padded dims; see {!expand_zero}). Whole-node [Zero_out]
+          of a materialized node is rejected by [Low_level.validate_parallel] in multi-threaded
+          kernels — expanding it first lets the schedule split and annotate the zeroing with the
+          same hardware geometry as the computation that follows. *)
 [@@deriving sexp_of]
 
 type schedule = optop list [@@deriving sexp_of]
@@ -57,17 +80,22 @@ val split :
     [Indexing.get_symbol]) and returns them, so subsequent ops in a programmatically built
     schedule can reference the new loops. *)
 
+val expand_zero : tn:Tn.t -> optop * Indexing.symbol list
+(** Builds an {!constructor-Expand_zero} with one fresh symbol per axis of [tn] (forcing [tn]'s
+    dims) and returns the symbols for subsequent [Split]/[Retype] ops. *)
+
 val apply :
   ?static_indices:Indexing.static_symbol list ->
   schedule ->
   Low_level.optimized ->
   Low_level.optimized
-(** Applies the ops left to right to [optimized.llc], then re-runs [Low_level.simplify_llc] (which
-    folds remainder guards the loop extents prove) and, when a materializing [Unroll] duplicated
-    code, CSE + cross-statement hoisting. The traced store, optimization context and merge node
-    are unchanged — v1 ops are structural rewrites that create no tensor nodes. Raises
-    [Invalid_argument] when an op references a loop that does not exist at its point in the
-    schedule, or violates an op precondition (see {!optop}). An empty schedule is the identity. *)
+(** Applies the ops left to right to the optimized code, then re-runs [Low_level.simplify_llc]
+    (which folds remainder and edge guards the loop extents prove) and, when a materializing
+    [Unroll] duplicated code, CSE + cross-statement hoisting. [Stage] registers its tile in the
+    traced store (and [workgroup_shared] when shared); the optimization context and merge node are
+    never changed. Raises [Invalid_argument] when an op references a loop that does not exist at
+    its point in the schedule, or violates an op precondition (see {!optop}). An empty schedule is
+    the identity. *)
 
 val default_gpu : ?block_size:int -> ?min_parallel:int -> Low_level.optimized -> schedule
 (** The default GPU annotator preset (schedule-ir-optops §6): for each top-level loop nest whose

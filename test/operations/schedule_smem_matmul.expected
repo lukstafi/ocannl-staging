@@ -1,0 +1,4 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+SMEM matmul parity (GPU) or clean rejection (CPU): true
+shared tiles, barriers, no edge guards (GPU) or rejected (CPU): true
