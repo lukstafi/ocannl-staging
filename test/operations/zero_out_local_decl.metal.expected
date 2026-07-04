@@ -29,10 +29,10 @@ kernel void out_fwd(
 
   /* Main logic. */
   /* out fwd */
-  for (uint32_t i7 = 0; i7 <= 3; ++i7) {
+  for (int32_t i7 = 0; i7 <= 3; ++i7) {
     sparse[(i7) * 3 + 0] = (float)(i7);
   }
-  for (uint32_t i10 = 0; i10 <= 3; ++i10) {
+  for (int32_t i10 = 0; i10 <= 3; ++i10) {
     out[i10] = (sparse[(i10) * 3 + 2] * sparse[(i10) * 3 + 2]);
   }
   /* end */

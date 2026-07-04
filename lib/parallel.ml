@@ -330,6 +330,8 @@ let data_parallel ?backend_name ?(reduction = Mean) ?(weight_decay = 0.0) ?(mome
     let src_nd =
       Lazy.force (Option.value_exn ~here:[%here] (Ir.Host_inits.find src.Tensor.value))
     in
+    (* Interval analysis, Phase B: every host-write path proposes/validates bounds. *)
+    Tn.propose_bounds_from_host dst src_nd;
     ignore (Backend.from_host ctx dst src_nd : bool);
     Backend.await stream
   in

@@ -35,6 +35,7 @@
  (alias slow)
  (package neural_nets_lib)
  (deps
+  bigram.expected
   ocannl_config
   (env_var OCANNL_BACKEND))
  (action
@@ -69,6 +70,7 @@
  (alias slow)
  (package neural_nets_lib)
  (deps
+  mlp_names.expected
   ocannl_config
   (env_var OCANNL_BACKEND))
  ; no-infer keeps mlp_names.actual from becoming a build target, so plain
@@ -94,6 +96,7 @@
  (alias slow)
  (package neural_nets_lib)
  (deps
+  mlp_bn_names.expected
   ocannl_config
   (env_var OCANNL_BACKEND))
  ; no-infer keeps mlp_bn_names.actual from becoming a build target (see mlp_names).
@@ -118,6 +121,7 @@
  (alias slow)
  (package neural_nets_lib)
  (deps
+  circles_conv.expected
   ocannl_config
   (env_var OCANNL_BACKEND))
  ; no-infer keeps circles_conv.actual from becoming a build target (see mlp_names).
@@ -148,6 +152,7 @@
  (alias slow)
  (package neural_nets_lib)
  (deps
+  mnist_conv.expected
   ocannl_config
   (env_var OCANNL_BACKEND))
  ; no-infer keeps mnist_conv.actual from becoming a build target (see mlp_names).
@@ -174,6 +179,7 @@
  (alias slow)
  (package neural_nets_lib)
  (deps
+  cifar_conv.expected
   ocannl_config
   (env_var OCANNL_BACKEND))
  ; no-infer keeps cifar_conv.actual from becoming a build target (see mlp_names).
@@ -200,6 +206,7 @@
  (alias slow)
  (package neural_nets_lib)
  (deps
+  fsm_transformer.expected
   ocannl_config
   (env_var OCANNL_BACKEND))
  (action
@@ -224,6 +231,7 @@
  (alias slow)
  (package neural_nets_lib)
  (deps
+  transformer_names.expected
   ocannl_config
   (env_var OCANNL_BACKEND))
  (action

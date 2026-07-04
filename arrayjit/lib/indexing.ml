@@ -92,6 +92,41 @@ let get_static_symbol ?static_range bindings =
   let s = { static_symbol = get_symbol (); static_range } in
   (s, Bind (s, bindings))
 
+(** Validates a launch-parameter value against its declared range (minimum 0 is implicit) and,
+    when [width64] is false, against the int32 index width
+    (docs/proposals/signed-index-precision.md: bind-time validation mirroring tinygrad's [bind]
+    assert; one host compare per launch). The per-routine node-extent contract is NOT sound for
+    launch parameters -- value-embedded parameters (step counters) take runtime values unrelated
+    to any touched node's extent -- so narrowing an unbounded parameter requires declaring (and
+    thereby bind-validating) a range. *)
+let validate_bound_value ?(width64 = false) ({ static_symbol; static_range } : static_symbol)
+    (v : int) =
+  let ident = symbol_ident static_symbol in
+  if v < 0 then
+    raise
+    @@ Utils.User_error
+         (Printf.sprintf "Indexing: bound value %d for static index %s is negative" v ident);
+  (* The width check applies regardless of a declared range: a range wider than the emitted
+     parameter width does not make an unrepresentable value representable. *)
+  if (not width64) && v > 2147483647 then
+    raise
+    @@ Utils.User_error
+         (Printf.sprintf
+            "Indexing: bound value %d for static index %s exceeds the int32 index width; enable \
+             large_models for 64-bit indices"
+            v ident);
+  match static_range with
+  | Some range when v >= range ->
+      raise
+      @@ Utils.User_error
+           (Printf.sprintf
+              "Indexing: bound value %d for static index %s exceeds its declared range [0, %d)" v
+              ident range)
+  | Some _ | None -> ()
+
+let validate_lowered_bindings ?width64 (bs : lowered_bindings) =
+  List.iter bs ~f:(fun (s, r) -> validate_bound_value ?width64 s !r)
+
 (** Dimensions to string, ["x"]-separated, e.g. 1x2x3 for batch dims 1, input dims 3, output dims 2.
     Outputs ["-"] for empty dimensions. *)
 let dims_to_string ?(with_axis_numbers = false) dims =

@@ -41,6 +41,26 @@ type memory_mode =
 type delayed_prec = Default of Ops.prec | Inferred of Ops.prec Lazy.t | Specified of Ops.prec
 [@@deriving sexp, equal]
 
+(** Per-tensor scalar value bounds: the interprocedural layer of the interval analysis
+    (docs/proposals/interval-analysis-scalar-t.md), the third instance of the {!delayed_prec}
+    propose/settle lifecycle. Writers {e propose} bounds (joined, like [Inferred] promotion); a
+    reader that discharges a guard against the candidate {e settles} it (like forcing the prec
+    lazy); a post-settlement proposal that does not fit the settled interval is an error (like
+    {!update_prec} on a settled precision) -- otherwise already-generated code that folded a
+    bounds guard away would become unsound.
+
+    Phase B v1 execution anchoring (binding constraint 3): every compiled device write of a node
+    proposes [Interval.top] at lowering time (see [Low_level.optimize_proc]), so a candidate can
+    only be narrower than [top] for host-initialized, never-device-written tensors; guard folds
+    therefore never depend on device-computed values, sidestepping the
+    runs-never/runs-later/runs-repeatedly hazards. *)
+type bounds_state =
+  | Bounds_unknown  (** No proposal yet: readers fall back to the precision's machine range. *)
+  | Bounds_proposed of Interval.t  (** Join of all proposals so far. *)
+  | Bounds_settled of Interval.t
+      (** Consumed by a guard fold; subsequent proposals must fit or raise. *)
+[@@deriving sexp, equal]
+
 type t = {
   prec : Ops.prec Lazy.t;
   dims : int array Lazy.t;
@@ -56,6 +76,8 @@ type t = {
           alphanumeric, e.g. an identifier. *)
   mutable delayed_prec_unsafe : delayed_prec;
       (** Participates in the computation of {!field-prec}. *)
+  mutable bounds : bounds_state;
+      (** Scalar value bounds summary; see {!bounds_state} for the lifecycle. *)
   mutable memory_mode : (memory_mode * int) option;
   mutable alias_of : ((t * Indexing.static_symbol) option[@sexp.opaque]);
       (** When [Some (parent, batch_idx)], this node is a zero-copy slice-alias *view* of [parent]:
@@ -369,6 +391,108 @@ let update_infer_prec ?only_if tn delayed_prec =
 let get_specified_prec tn =
   match tn.delayed_prec_unsafe with Specified prec -> Some prec | _ -> None
 
+(** {2 Value-bounds lifecycle} (see {!bounds_state}) *)
+
+(** Joins [iv] into the node's candidate bounds. Post-settlement, instead validates that [iv]
+    fits the settled interval and raises {!Utils.User_error} otherwise -- a wider write after a
+    reader already folded a guard against the bounds would leave compiled code unsound. [what]
+    names the proposing write for the error message. *)
+let propose_bounds ~what tn iv =
+  match tn.bounds with
+  | Bounds_unknown -> tn.bounds <- Bounds_proposed iv
+  | Bounds_proposed old -> tn.bounds <- Bounds_proposed (Interval.join old iv)
+  | Bounds_settled s ->
+      if not (Interval.is_within ~outer:s iv) then
+        raise
+        @@ Utils.User_error
+             (String.concat
+                [
+                  "Tnode.propose_bounds: ";
+                  what;
+                  " of ";
+                  debug_name tn;
+                  " has value bounds ";
+                  Sexp.to_string_hum (Interval.sexp_of_t iv);
+                  " that do not fit the settled bounds ";
+                  Sexp.to_string_hum (Interval.sexp_of_t s);
+                  " -- already-compiled code discharged an in-range guard against the settled \
+                   bounds; write the wider data before compiling readers, or avoid narrowing \
+                   host initializations";
+                ])
+
+(** Pins the candidate to [Interval.top]: Phase B v1 execution anchoring for compiled device
+    writes. Post-settlement (of non-top bounds) this raises like any non-fitting proposal. *)
+let pin_bounds_top ~what tn = propose_bounds ~what tn Interval.top
+
+(** The current candidate (or settled) bounds, if any proposal was made. Readers should intersect
+    with the precision's machine range themselves. *)
+let bounds_candidate tn =
+  match tn.bounds with
+  | Bounds_unknown -> None
+  | Bounds_proposed iv | Bounds_settled iv -> Some iv
+
+(** Marks the candidate as consumed by a guard fold. Idempotent; raises if nothing was ever
+    proposed (folds must only consume existing candidates). *)
+let settle_bounds tn =
+  match tn.bounds with
+  | Bounds_settled _ -> ()
+  | Bounds_proposed iv -> tn.bounds <- Bounds_settled iv
+  | Bounds_unknown ->
+      invalid_arg @@ "Tnode.settle_bounds: no bounds were proposed for " ^ debug_name tn
+
+(** Whether host-upload scans can profit for this precision: integer storage only -- the current
+    consumers (gather-guard discharge, index-width selection) act on integer-valued facts, and
+    the Phase A folding policy ignores float bounds (binding constraint 8: gate the O(n) scans).
+*)
+let bounds_scan_worthwhile (prec : Ops.prec) =
+  match prec with
+  | Ops.Byte_prec _ | Ops.Uint16_prec _ | Ops.Int32_prec _ | Ops.Uint32_prec _ | Ops.Int64_prec _
+  | Ops.Uint64_prec _ ->
+      true
+  | Ops.Void_prec | Ops.Uint4x32_prec _ | Ops.Half_prec _ | Ops.Bfloat16_prec _ | Ops.Fp8_prec _
+  | Ops.Single_prec _ | Ops.Double_prec _ ->
+      false
+
+(* Single pass directly over the bigarray (binding constraint 8), whole buffer including any
+   padding margins -- the upload copies the margins too, so the halo fill participates in the
+   node's value domain automatically (binding constraint 4). The float view of unsigned storage
+   reinterprets the sign bit ([Nd.fold_as_float] reads uint32/uint64 through
+   [Int32.to_float]/[Int64.to_float]), so map negative readings back to the unsigned value.
+   Endpoints at or above 2^53 are inexact (strict cutoff, binding constraint 6) and nudged
+   outward, covering both the int64-to-float conversion error and the unsigned fixup rounding. *)
+let scan_host_bounds (prec : Ops.prec) (nd : Nd.t) : Interval.t =
+  let fixup =
+    match prec with
+    | Ops.Uint32_prec _ -> fun v -> if Float.(v < 0.) then v +. 4294967296. else v
+    | Ops.Uint64_prec _ -> fun v -> if Float.(v < 0.) then v +. 1.8446744073709552e19 else v
+    | _ -> Fn.id
+  in
+  let lo = ref Float.infinity and hi = ref Float.neg_infinity in
+  let integral = ref true and exact = ref true in
+  Nd.fold_as_float nd ~init:() ~f:(fun () _idx v ->
+      let v = fixup v in
+      if Float.(v < !lo) then lo := v;
+      if Float.(v > !hi) then hi := v;
+      if not (Float.is_integer v) then integral := false;
+      if not (Float.(abs v < Interval.exact_int_cutoff)) then exact := false);
+  if Float.(!lo > !hi) then (* no elements *) Interval.top
+  else
+    let iv = { Interval.lo = !lo; hi = !hi; integral = !integral; exact = !exact } in
+    if !exact then iv else Interval.round_out iv
+
+(** Scans a host buffer about to initialize [tn]'s device data and proposes the observed bounds
+    (pre-settlement) or validates them (post-settlement). Call on every host-write path
+    ([Context.from_host]-mediated writes and link-time [Host_inits] uploads). No-op for float and
+    opaque precisions, and when the candidate is already pinned to [top]. *)
+let propose_bounds_from_host tn (nd : Nd.t) =
+  let prec = Lazy.force tn.prec in
+  if bounds_scan_worthwhile prec then
+    match tn.bounds with
+    | (Bounds_proposed iv | Bounds_settled iv) when Interval.is_top iv ->
+        () (* Pinned or settled-top: scanning cannot narrow nor violate anything. *)
+    | Bounds_unknown | Bounds_proposed _ | Bounds_settled _ ->
+        propose_bounds ~what:"host upload" tn (scan_host_bounds prec nd)
+
 include Comparator.Make (struct
   type nonrec t = t
 
@@ -486,15 +610,37 @@ let registry = Registry.create 16
 let prec_of_dalayed tn =
   match tn.delayed_prec_unsafe with Default prec | Specified prec | Inferred (lazy prec) -> prec
 
+(* docs/proposals/signed-index-precision.md: index arithmetic is signed int32 unless
+   [large_models] selects int64. Int32 overflow is excluded by contract, not by widening: every
+   index intermediate is bounded by some node's extent by projection construction (axis indices
+   by their dims, conv affine forms by the padded input dim, flat offsets by numel), so
+   validating the padded element count once per node -- here, where dims are forced -- makes
+   every consumer inherit the guarantee. Violation is a hard error naming the node: auto-setting
+   the global flag would be inconsistent across already-compiled routines. *)
+let validate_padded_numel_contract ~id ~label (dims : int array) =
+  if not Utils.settings.large_models then
+    let n = Array.fold dims ~init:1 ~f:( * ) in
+    if n > 2147483647 then
+      raise
+      @@ Utils.User_error
+           [%string
+             "Tensor node %{get_debug_name ~id ~label ()}: padded element count %{n#Int} exceeds \
+              the int32 index range; set large_models=true to use 64-bit indices"]
+
 let create delayed_prec ~id ~label ~unpadded_dims ~padding () =
   (* Compute padded dimensions: tn.dims stores buffer-inclusive (padded) dimensions *)
   let dims =
     lazy
       (let unpadded = Lazy.force unpadded_dims in
-       match Lazy.force padding with
-       | None -> unpadded
-       | Some (padding_arr, _) ->
-           Array.map2_exn unpadded padding_arr ~f:(fun d Ops.{ left; right } -> d + left + right))
+       let padded =
+         match Lazy.force padding with
+         | None -> unpadded
+         | Some (padding_arr, _) ->
+             Array.map2_exn unpadded padding_arr ~f:(fun d Ops.{ left; right } ->
+                 d + left + right)
+       in
+       validate_padded_numel_contract ~id ~label padded;
+       padded)
   in
   let rec size_in_bytes =
     lazy
@@ -503,6 +649,7 @@ let create delayed_prec ~id ~label ~unpadded_dims ~padding () =
   and tn =
     {
       delayed_prec_unsafe = delayed_prec;
+      bounds = Bounds_unknown;
       prec = lazy (prec_of_dalayed tn);
       dims;
       padding;
@@ -529,11 +676,13 @@ let create delayed_prec ~id ~label ~unpadded_dims ~padding () =
    buffer is shaped only after shape inference completes. *)
 let create_from_padded ~id ~label ~ndarray ~padding () =
   let dims_val = Nd.dims ndarray in
+  validate_padded_numel_contract ~id ~label dims_val;
   let prec_val = Nd.get_prec ndarray in
   let size_in_bytes = lazy (Nd.size_in_bytes ndarray) in
   let rec tn =
     {
       delayed_prec_unsafe = Specified prec_val;
+      bounds = Bounds_unknown;
       prec = lazy (prec_of_dalayed tn);
       dims = lazy dims_val;
       padding = lazy padding;
@@ -557,10 +706,15 @@ let create_with_reshape ~id ~label ~base_ndarray ~unpadded_dims ~padding ~from_p
   let dims =
     lazy
       (let unpadded = Lazy.force unpadded_dims in
-       match Lazy.force padding with
-       | None -> unpadded
-       | Some (padding_arr, _) ->
-           Array.map2_exn unpadded padding_arr ~f:(fun d Ops.{ left; right } -> d + left + right))
+       let padded =
+         match Lazy.force padding with
+         | None -> unpadded
+         | Some (padding_arr, _) ->
+             Array.map2_exn unpadded padding_arr ~f:(fun d Ops.{ left; right } ->
+                 d + left + right)
+       in
+       validate_padded_numel_contract ~id ~label padded;
+       padded)
   in
   let rec init_buffer =
     lazy
@@ -610,6 +764,7 @@ let create_with_reshape ~id ~label ~base_ndarray ~unpadded_dims ~padding ~from_p
   and tn =
     {
       delayed_prec_unsafe = Specified prec_val;
+      bounds = Bounds_unknown;
       prec = lazy (prec_of_dalayed tn);
       dims;
       padding;
@@ -634,6 +789,7 @@ let find =
     {
       prec = lazy initial_default_prec;
       delayed_prec_unsafe = Specified initial_default_prec;
+      bounds = Bounds_unknown;
       dims = lazy [||];
       padding = lazy None;
       size_in_bytes = lazy 0;

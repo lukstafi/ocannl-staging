@@ -248,6 +248,11 @@ let run ctx routine =
        (Printf.sprintf "Context.run: routine %s (id=%d) has unexecuted dependencies: %s"
           routine.name routine.routine_id dep_names));
 
+  (* Bind-time validation of launch parameters (docs/proposals/signed-index-precision.md): each
+     bound value must be non-negative, within its declared static range, and within the index
+     width. *)
+  Idx.validate_lowered_bindings ~width64:Utils.settings.large_models routine.bindings;
+
   (* Run the routine's task/schedule *)
   Ir.Task.run routine.task;
 
@@ -377,6 +382,11 @@ let from_host ctx (tn : Tn.t) (nd : Nd.t) : t =
               "Context.from_host: node %s is an @| slice view; write its parent %s instead"
               (Tn.debug_name tn) (Tn.debug_name parent))
   | None -> ());
+  (* Interval analysis, Phase B: a host write acts as a writer around the bounds-settlement point
+     -- pre-settlement it proposes the scanned [min, max] into the node's bounds candidate,
+     post-settlement it validates against the settled bounds (or raises). See
+     [Tnode.bounds_state]. *)
+  Tn.propose_bounds_from_host tn nd;
   let (Wrapper wrapper) = ctx.backend_wrapper in
   let module Backend = (val wrapper.backend) in
   let ctx =

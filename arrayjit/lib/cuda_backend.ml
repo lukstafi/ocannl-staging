@@ -359,12 +359,10 @@ module Fresh () : Ir.Backend_impl.Lowered_backend = struct
     let kernel_prep_line =
       "/* FIXME: single-threaded for now. */if (threadIdx.x != 0 || blockIdx.x != 0) { return; }"
 
-    (* Use native CUDA types for loop indices and arguments instead of stdint.h types *)
-    let loop_index_type =
-      if Utils.settings.large_models then "unsigned long long " else "unsigned int "
-
-    let arg_int_prefix =
-      if Utils.settings.large_models then "const unsigned long long " else "const unsigned int "
+    (* Use native CUDA types for loop indices and arguments instead of stdint.h types. Signed
+       index arithmetic (docs/proposals/signed-index-precision.md). *)
+    let loop_index_type = if Utils.settings.large_models then "long long " else "int "
+    let arg_int_prefix = if Utils.settings.large_models then "const long long " else "const int "
 
     let typ_of_prec = function
       | Ops.Byte_prec _ -> "unsigned char"
@@ -856,13 +854,15 @@ module Fresh () : Ir.Backend_impl.Lowered_backend = struct
       | Bfloat16_prec _, Uint4x32_prec _ -> ("bfloat16_to_uint4x32(", ")")
       | Half_prec _, Uint4x32_prec _ -> ("half_to_uint4x32(", ")")
       | Fp8_prec _, Uint4x32_prec _ -> ("fp8_to_uint4x32(", ")")
-      (* The unsigned-integer counter conversions MUST call the builtins, which spread the bits
-         across all four uint4x32 lanes (golden-ratio / MMIX / rotation mixing). The raw struct
-         literal below only fills lane 0, leaving lanes 1-3 zero; with the 2-round light threefry
-         used for parameter init that produces near-identical outputs for consecutive counters
-         (periodicity), so random inits diverge from CC/Metal. [Ops.index_prec] is [uint32]
-         (or [uint64] under [large_models]), so this is the conversion hit by every PRNG init
-         loop, e.g. centered [uniform1] parameter initialization (task-04f97340). *)
+      (* The integer counter conversions MUST call the builtins, which spread the bits across all
+         four uint4x32 lanes (golden-ratio / MMIX / rotation mixing). The raw struct literal below
+         only fills lane 0, leaving lanes 1-3 zero; with the 2-round light threefry used for
+         parameter init that produces near-identical outputs for consecutive counters
+         (periodicity), so random inits diverge from CC/Metal. [Ops.index_prec] is signed [int32]
+         (or [int64] under [large_models]), so the signed arms are the conversion hit by every
+         PRNG init loop, e.g. centered [uniform1] parameter initialization (task-04f97340). *)
+      | Int32_prec _, Uint4x32_prec _ -> ("int32_to_uint4x32(", ")")
+      | Int64_prec _, Uint4x32_prec _ -> ("int64_to_uint4x32(", ")")
       | Uint32_prec _, Uint4x32_prec _ -> ("uint32_to_uint4x32(", ")")
       | Uint64_prec _, Uint4x32_prec _ -> ("uint64_to_uint4x32(", ")")
       | _, Uint4x32_prec _ -> ("{(unsigned int)(", "), 0, 0, 0}")

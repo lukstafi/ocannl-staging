@@ -588,7 +588,12 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
               if zero_init then memset_zero device ~pool_id ~offset ~size_in_bytes;
               let loc = { pool_id; offset } in
               Option.iter host_init ~f:(fun nd ->
-                  Device.from_host ~dst:context ~dst_loc:loc (Lazy.force nd));
+                  let nd = Lazy.force nd in
+                  (* Interval analysis, Phase B: [Host_inits] uploads are host writes; propose the
+                     scanned bounds lazily -- here, where the buffer is forced at link/upload time
+                     -- so [Reshape] inits wait for shape and padding inference as designed. *)
+                  Tnode.propose_bounds_from_host key nd;
+                  Device.from_host ~dst:context ~dst_loc:loc nd);
               loc
             in
             register key ~alloc)

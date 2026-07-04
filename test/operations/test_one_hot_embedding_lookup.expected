@@ -23,4 +23,4 @@ non-one-hot complex tensor keeps the vocab reduction loop: true
 non-range Cmpeq equality tensor stays Never_virtual: true
 large-index (IR): Get_dynamic.dyn_value iprec is double, not float32: true
 large-index (C): ids_wide parameter declared as double*: true
-large-index (C): dynamic index cast is widened (uint32_t or uint64_t): true
+large-index (C): dynamic index cast tracks the index precision: true
