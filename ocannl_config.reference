@@ -89,6 +89,22 @@ clean_up_log_files_on_startup=true
 # The default backend for computations, if `Backends.fresh_backend` isn't passed `backend_name`.
 backend=multicore_cc
 
+# If true, on GPU backends (cuda, metal) kernels compiled without an explicit `lowered_transform`
+# get the default GPU schedule (docs/proposals/schedule-ir-optops.md §6): parallelizable loops are
+# annotated / split into Grid x Workgroup pairs when a conservative analysis proves the kernel
+# race-free under the annotation; otherwise the kernel runs single-threaded as before. Disabled
+# automatically while `debug_log_from_routines` is active (to keep kernel logs serial).
+automatic_gpu_schedule=true
+
+# The workgroup (threadgroup, block) size the default GPU schedule targets: single parallel loops
+# are split by this factor; a second parallelizable loop is used as the Workgroup axis directly
+# when its extent fits.
+gpu_schedule_block_size=256
+
+# Kernels whose largest parallelizable loop nest has fewer than this many parallel iterations are
+# left unscheduled by the default GPU schedule (launch overhead would dominate).
+gpu_schedule_min_parallel=1024
+
 # If true, stdout capturing is disabled, so some logs meant for the ppx_minidebug log files
 # (in particular CUDA logs) remain on the stdout.
 #

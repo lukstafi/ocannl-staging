@@ -1,0 +1,12 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+split (dividing factor) values correct: true
+split (dividing factor) structure as expected: true
+split (remainder) values correct: true
+split (remainder) guard survives: true
+swap values correct: true
+swap reorders the loop bounds: true
+default annotator combo values correct: true
+default annotator schedules both nests: true
+default annotator structure as expected: true
+default annotator matmul values match the serial twin: true
