@@ -106,6 +106,15 @@ let validate_bound_value ?(width64 = false) ({ static_symbol; static_range } : s
     raise
     @@ Utils.User_error
          (Printf.sprintf "Indexing: bound value %d for static index %s is negative" v ident);
+  (* The width check applies regardless of a declared range: a range wider than the emitted
+     parameter width does not make an unrepresentable value representable. *)
+  if (not width64) && v > 2147483647 then
+    raise
+    @@ Utils.User_error
+         (Printf.sprintf
+            "Indexing: bound value %d for static index %s exceeds the int32 index width; enable \
+             large_models for 64-bit indices"
+            v ident);
   match static_range with
   | Some range when v >= range ->
       raise
@@ -113,15 +122,7 @@ let validate_bound_value ?(width64 = false) ({ static_symbol; static_range } : s
            (Printf.sprintf
               "Indexing: bound value %d for static index %s exceeds its declared range [0, %d)" v
               ident range)
-  | Some _ -> ()
-  | None ->
-      if (not width64) && v > 2147483647 then
-        raise
-        @@ Utils.User_error
-             (Printf.sprintf
-                "Indexing: bound value %d for static index %s exceeds the int32 index width; \
-                 enable large_models or declare a static range for the symbol"
-                v ident)
+  | Some _ | None -> ()
 
 let validate_lowered_bindings ?width64 (bs : lowered_bindings) =
   List.iter bs ~f:(fun (s, r) -> validate_bound_value ?width64 s !r)
