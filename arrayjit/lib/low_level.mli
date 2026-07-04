@@ -143,8 +143,12 @@ val validate_parallel : t -> unit
 (** Backend-independent well-formedness of hardware annotations (axis-types proposal §2); a no-op
     for all-[Serial] code. Raises [Invalid_argument] on structural violations: nonzero [from_],
     more than 3 slots per kind, annotated loops inside [Local_scope] bodies, barriers under
-    divergent extents or [If] guards, and writes to materialized nodes outside all annotated
-    loops. Cannot prove iteration independence — that is the annotating pass's obligation. *)
+    divergent extents or [If] guards, writes to materialized nodes not nested under annotated
+    loops covering {e every} active (non-unit) hardware dimension — launch dimensions are global
+    to the kernel, so an uncovered dimension executes the write once per hardware index — and
+    whole-node [Zero_out] of materialized nodes in multi-threaded kernels (nesting never
+    distributes it). Cannot prove iteration independence — that is the annotating pass's
+    obligation. *)
 
 val guard_annotated_extents : should_guard:([ `Grid | `Workgroup ] -> bool) -> t -> t
 (** Wraps bodies of annotated loops whose extent is below their slot's launch dimension in

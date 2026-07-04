@@ -2612,25 +2612,57 @@ let validate_parallel (llc : t) : unit =
             ()
       in
       no_guarded_barrier llc);
-    let rec check_writes ~in_hw llc =
+    (* Launch dimensions are global to the kernel, so a materialized write must be nested under
+       annotated loops covering EVERY active (non-unit) hardware dimension -- a statement covering
+       only some of them executes once per hardware index of each uncovered dimension, racing or
+       repeating read-modify-write updates (PR #89 review). A whole-node [Zero_out] is never
+       distributed across threads by nesting, so in a multi-threaded kernel it is rejected
+       outright; distribute zeroing as ordinary per-element [Set]s instead. *)
+    let pair_equal (k1, s1) (k2, s2) = Poly.equal k1 k2 && s1 = s2 in
+    let active =
+      List.filter_map axes ~f:(fun a ->
+          if slot_max_extent axes a.ha_kind a.ha_slot > 1 then Some (a.ha_kind, a.ha_slot)
+          else None)
+      |> List.dedup_and_sort ~compare:Poly.compare
+    in
+    let slot_of_index = List.map axes ~f:(fun a -> (a.ha_index, (a.ha_kind, a.ha_slot))) in
+    let describe_pair (kind, slot) = hardware_kind_label kind ^ " slot " ^ Int.to_string slot in
+    let rec check_writes ~covered llc =
       match llc with
-      | For_loop { axis; body; _ } ->
-          check_writes ~in_hw:(in_hw || Option.is_some (hardware_kind_of_axis axis)) body
+      | For_loop { index; body; _ } ->
+          let covered =
+            match List.Assoc.find slot_of_index ~equal:Indexing.equal_symbol index with
+            | Some pair -> pair :: covered
+            | None -> covered
+          in
+          check_writes ~covered body
       | Seq (a, b) ->
-          check_writes ~in_hw a;
-          check_writes ~in_hw b
-      | If { body; _ } -> check_writes ~in_hw body
-      | (Set { tn; _ } | Set_from_vec { tn; _ } | Zero_out tn) when not in_hw ->
-          if Tn.is_materialized_force tn 160 then
+          check_writes ~covered a;
+          check_writes ~covered b
+      | If { body; _ } -> check_writes ~covered body
+      | Zero_out tn ->
+          if (not (List.is_empty active)) && Tn.is_materialized_force tn 160 then
+            invalid_arg
+              ("Low_level.validate_parallel: Zero_out of materialized node " ^ Tn.debug_name tn
+             ^ " in a multi-threaded kernel: whole-node zeroing is not distributed across \
+                hardware threads; zero via per-element writes under the annotated loops instead")
+      | Set { tn; _ } | Set_from_vec { tn; _ } ->
+          let missing =
+            List.filter active ~f:(fun p -> not (List.mem covered p ~equal:pair_equal))
+          in
+          if (not (List.is_empty missing)) && Tn.is_materialized_force tn 160 then
             invalid_arg
               ("Low_level.validate_parallel: write to materialized node " ^ Tn.debug_name tn
-             ^ " outside all hardware-annotated loops: every hardware thread would execute it, \
-                racing with the annotated writes")
-      | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Set _ | Set_from_vec _ | Set_local _
-      | Declare_local _ | Workgroup_barrier ->
+             ^ " is not nested under annotated loops covering all active hardware dimensions \
+                (missing: "
+              ^ String.concat ~sep:", " (List.map missing ~f:describe_pair)
+              ^ "): every hardware index of an uncovered dimension executes it, racing or \
+                 repeating the update")
+      | Noop | Comment _ | Staged_compilation _ | Set_local _ | Declare_local _ | Workgroup_barrier
+        ->
           ()
     in
-    check_writes ~in_hw:false llc)
+    check_writes ~covered:[] llc)
 
 (** Wraps the body of each hardware-annotated loop whose extent is smaller than its slot's launch
     dimension in an [If (index < extent)] guard, for the kinds [should_guard] selects (backends

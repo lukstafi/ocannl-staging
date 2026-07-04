@@ -5,3 +5,4 @@ annotated combo values match the serial twin: true
 annotated kernel structure as expected: true
 unrolled variant values correct: true
 unrolled kernel repeats the body with constant bindings: true
+partial hardware coverage rejected: true

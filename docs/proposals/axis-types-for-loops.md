@@ -38,8 +38,12 @@ Four deltas from the design as written below:
    sibling nests align positionally (`Low_level.hardware_axes`); `Workgroup` and
    `Workgroup_reduce` share the block-slot space. `validate_parallel` additionally
    rejects annotated loops inside `Local_scope` bodies, barriers under `If` guards or
-   divergent workgroup extents, and writes to materialized nodes lexically outside all
-   annotated loops (per-thread redundant execution would race).
+   divergent workgroup extents, writes to materialized nodes not nested under annotated
+   loops covering *every* active (non-unit) hardware dimension (launch dims are global
+   to the kernel, so an uncovered dimension executes the write once per hardware index —
+   per-review hardening of the initial outside-all-loops check), and whole-node
+   `Zero_out` of materialized nodes in multi-threaded kernels (nesting never
+   distributes it).
 4. **`Unrolled` rendering** needs no substitution machinery: the body is emitted
    repeatedly with the index bound as a per-block constant
    (`{ const int32_t iN = k; ... }`).

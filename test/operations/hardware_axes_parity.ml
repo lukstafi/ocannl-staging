@@ -127,9 +127,50 @@ let () =
   let ctx_u = Context.run ctx_u routine_u in
   let got_c3u = Context.get_values ctx_u c3u.Tensor.value in
   p "unrolled variant values correct" (Array.for_all2_exn got_c3u expected_c1 ~f:approx);
-  match read_generated "unroll_annot" with
+  (match read_generated "unroll_annot" with
   | None -> p "unrolled kernel repeats the body with constant bindings" false
   | Some src ->
       (* The inner extent-8 loop unrolls into blocks binding the index to 0..7. *)
       p "unrolled kernel repeats the body with constant bindings"
-        (String.is_substring src ~substring:" = 0;" && String.is_substring src ~substring:" = 7;")
+        (String.is_substring src ~substring:" = 0;" && String.is_substring src ~substring:" = 7;"));
+
+  (* --- Negative: partial hardware coverage is rejected (PR #89 review) --- *)
+  (* Launch dimensions are global to the kernel: with the first nest annotated Grid+Workgroup
+     (block.x = 8), a sibling Grid-only nest would execute its materialized write once per thread
+     of the workgroup — racing or repeating the update. [validate_parallel] must reject this, on
+     every backend (the check is backend-independent). *)
+  let annotate_mixed (opt : LL.optimized) : LL.optimized =
+    let first = ref true in
+    let rec map_inner (llc : LL.t) : LL.t =
+      match llc with
+      | LL.Seq (x, y) -> LL.Seq (map_inner x, map_inner y)
+      | LL.For_loop fc -> LL.For_loop { fc with axis = LL.Workgroup }
+      | other -> other
+    in
+    let rec map_outer (llc : LL.t) : LL.t =
+      match llc with
+      | LL.Seq (x, y) -> LL.Seq (map_outer x, map_outer y)
+      | LL.For_loop fc ->
+          let body = if !first then map_inner fc.body else fc.body in
+          first := false;
+          LL.For_loop { fc with axis = LL.Grid; body }
+      | other -> other
+    in
+    { opt with llc = map_outer opt.llc }
+  in
+  let%op c1m = a + b in
+  let%op c2m = e *. f in
+  let mixed_comp = named "combo_mixed" (Asgns.sequence [ Train.forward c1m; Train.forward c2m ]) in
+  let ctx_m = Context.auto () in
+  match
+    try
+      ignore
+        (Context.compile ~lowered_transform:annotate_mixed ctx_m mixed_comp Ir.Indexing.Empty
+          : Context.t * Context.routine);
+      None
+    with Invalid_argument msg -> Some msg
+  with
+  | Some msg ->
+      p "partial hardware coverage rejected"
+        (String.is_substring msg ~substring:"all active hardware dimensions")
+  | None -> p "partial hardware coverage rejected" false
