@@ -1,0 +1,15 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+guarded baseline executes the direct table gather: true
+guarded baseline C contains the guard ternary: true
+bounds-folded kernel executes with values equal to the guarded baseline: true
+folded IR keeps the Get_dynamic gather: true
+folded IR has no Where guard and no Trunc: true
+folded C has no guard ternary: true
+ids bounds are settled by the fold: true
+post-settlement widening host write is rejected: true
+in-range re-upload validates against the settled bounds: true
+device-written ids are pinned to top: true
+device-written ids kernel executes the direct table gather: true
+device-written ids keep the Get_dynamic gather: true
+device-written ids keep the guard (bounds pinned to top): true

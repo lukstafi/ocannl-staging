@@ -1,7 +1,19 @@
 # Interval (min/max) analysis over scalar_t
 
-**Date**: 2026-06-12, elaborated 2026-07-03
-**Status**: Elaborated — Phase A ready to implement. Originally seeded by the tinygrad
+**Date**: 2026-06-12, elaborated 2026-07-03, implemented 2026-07-04
+**Status**: Implemented — Phase A and Phase B v1 (host-initialized, never-device-written
+tensors) landed: `Interval` lattice module, `Low_level.interval_of` with the total symbol
+env and env-scoped memo, comparison/`Where` folding in `simplify_llc`, the re-derived
+`build_guarded_gather`, the `Tnode.bounds_state` propose/settle lifecycle with device-write
+pinning and host-upload scans, and the executed-parity test
+(`test/operations/test_bounds_folded_gather.ml`). One deviation from the draft lattice
+rules: instead of gating ordering folds on `exact`, endpoints maintain an *outwardness
+invariant* (outward 2-ulp rounding whenever endpoint arithmetic is not exactly
+representable), which satisfies binding constraint 6's "exact endpoints **or** outward
+rounding" and lets `dtype_range uint64`-style facts (inexact upper endpoint) still
+discharge lower-bound conjuncts; `exact` remains required for equality/singleton folds.
+The crosses-zero rule is implemented as sound widening to the unsigned dtype range in
+`Interval.at_prec` rather than an assert. Originally seeded by the tinygrad
 deep dive ([a-range-is-not-its-shape](../blog/a-range-is-not-its-shape.md), port area 3).
 Judged there the best effort-to-payoff item of the six ports; no blocking dependency
 ([signed-index-precision](signed-index-precision.md) now blocks on *this*).
@@ -275,8 +287,11 @@ is paid once).
 - [x] `Tnode` bounds lifecycle specified (propose/settle/conflict semantics mirroring
       `delayed_prec`; host-write symmetry around settlement; self-referential writers
       pinned to top) — implementation is Phase B.
-- [ ] All ten binding constraints from the PR #87 review satisfied by the redo (fail-safe
+- [x] All ten binding constraints from the PR #87 review satisfied by the redo (fail-safe
       guard construction; transitive settlement; execution anchoring / host-init-only v1;
-      unwritten-domain joins; store-conversion modeling; exactness for all folds;
-      crosses-zero assert; gated single-pass scans + env-scoped shared memo; single
-      lattice module; executed parity of a bounds-folded kernel).
+      unwritten-domain joins — via whole-buffer scans including padding margins, plus
+      device-write pinning making memset-zero domains moot in v1; store-conversion
+      modeling in `Interval.at_prec`; exactness/outwardness for all folds; crosses-zero
+      widening; gated single-pass scans + env-scoped shared memo; single lattice module
+      `Interval`; executed parity of a bounds-folded kernel in
+      `test/operations/test_bounds_folded_gather.ml`).

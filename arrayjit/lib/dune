@@ -48,6 +48,7 @@
    ppx_minidebug))
  (modules
   ops
+  interval
   ndarray
   indexing
   tnode

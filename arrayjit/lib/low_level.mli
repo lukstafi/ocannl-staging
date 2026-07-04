@@ -210,13 +210,17 @@ val reads_scope_before_set : scope_id -> t -> bool
     first definitely-executed [Set_local id] in [body]. Use this at code-generation time to decide
     whether a [Local_scope] or [Declare_local] declaration needs a zero initializer. *)
 
-val rewrite_one_hot_reductions : t -> t
+val rewrite_one_hot_reductions : ?static_indices:Indexing.static_symbol list -> t -> t
 (** gh-343: rewrites the narrow one-hot embedding pattern -- an [Add] reduction over a loop variable
     [k] whose body selects an embedding-table row via [k == index_expr] (a logical one-hot) -- into
     a guarded dynamic gather ({!Get_dynamic}) that reads the table row at [index_expr] directly,
     with an in-range guard returning 0 out of [\[0, vocab_size)] to preserve the one-hot semantics.
-    Unmatched or unsupported reductions are left unchanged. Called internally by [optimize] between
-    [simplify_llc] and [eliminate_common_subexpressions]; exposed for testing. *)
+    The guard is constructed generically and interval analysis
+    (docs/proposals/interval-analysis-scalar-t.md) erases the conjuncts it can prove -- from the
+    index precision's machine range, loop extents seeded from [static_indices], and settled
+    per-tensor bounds ({!Tnode.bounds_state}). Unmatched or unsupported reductions are left
+    unchanged. Called internally by [optimize] between [simplify_llc] and
+    [eliminate_common_subexpressions]; exposed for testing. *)
 
 val eliminate_common_subexpressions : t -> t
 (** Eliminates common subexpressions within each statement's scalar expression tree. Replaces

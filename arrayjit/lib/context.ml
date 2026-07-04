@@ -377,6 +377,11 @@ let from_host ctx (tn : Tn.t) (nd : Nd.t) : t =
               "Context.from_host: node %s is an @| slice view; write its parent %s instead"
               (Tn.debug_name tn) (Tn.debug_name parent))
   | None -> ());
+  (* Interval analysis, Phase B: a host write acts as a writer around the bounds-settlement point
+     -- pre-settlement it proposes the scanned [min, max] into the node's bounds candidate,
+     post-settlement it validates against the settled bounds (or raises). See
+     [Tnode.bounds_state]. *)
+  Tn.propose_bounds_from_host tn nd;
   let (Wrapper wrapper) = ctx.backend_wrapper in
   let module Backend = (val wrapper.backend) in
   let ctx =

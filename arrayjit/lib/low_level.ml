@@ -1523,17 +1523,277 @@ and substitute_proc ~var ~value llc =
   | Staged_compilation _ -> llc
   | Workgroup_barrier -> llc
 
-let simplify_llc llc =
-  (* Implements top-down rewriting. *)
-  let rec loop_proc (llc : t) : t =
-    let loop = loop_proc in
+(** {2 Interval analysis over [scalar_t]}
+
+    Phase A of docs/proposals/interval-analysis-scalar-t.md: [interval_of] computes machine-value
+    bounds of a scalar expression as consumed at a given precision, threading a total symbol
+    environment (every in-scope symbol comes from a [For_loop] or a static binding) -- the
+    abstract twin of [visit_llc]'s concrete [symbol -> int] env. Results carry the set of tensor
+    nodes whose {e proposed} (unsettled) bounds candidates were consulted; any rewrite that
+    consumes a result must settle those sources ({!Tnode.settle_bounds}, binding constraint 2) --
+    facts derived purely from precisions and loop extents have no sources and need no settlement.
+*)
+
+type interval_result = { ival : Interval.t; srcs : Set.M(Tn).t }
+
+let no_srcs = Set.empty (module Tn)
+
+(* Physical-identity memo keyed per expression node ([Stdlib.Hashtbl.hash] is total, including on
+   the closures inside [Tnode.t]; physically equal keys are structurally equal, so the hash is
+   consistent). One table per symbol-environment scope, shared across queries within the scope
+   (binding constraint 8); the same subtree can be physically shared under different loop nests
+   with different intervals, so the memo must not outlive its scope. *)
+module Phys_memo = Stdlib.Hashtbl.Make (struct
+  type t = scalar_t
+
+  let equal = phys_equal
+  let hash = Stdlib.Hashtbl.hash
+end)
+
+type ienv = {
+  sym_env : Interval.t Map.M(Indexing.Symbol).t;
+  memo : (Ops.prec * interval_result) list Phys_memo.t;
+}
+
+let interval_of_symbol ienv s =
+  match Map.find ienv.sym_env s with Some iv -> iv | None -> Interval.top
+
+(* [from_ > to_] (a dead loop) yields an empty range; give the singleton [from_] -- the loop body
+   never executes, so any interval is sound for its occurrences. *)
+let interval_of_loop_range ~from_ ~to_ =
+  if from_ <= to_ then Interval.of_int_range from_ to_ else Interval.of_int from_
+
+let ienv_of_static_indices (static_indices : Indexing.static_symbol list) =
+  let sym_env =
+    List.fold static_indices
+      ~init:(Map.empty (module Indexing.Symbol))
+      ~f:(fun env { Indexing.static_symbol; static_range } ->
+        (* [static_range] is a declared-bounds slot ([None] = unbounded, hence top); see
+           docs/proposals/signed-index-precision.md on bind-time validation. *)
+        let iv =
+          match static_range with
+          | Some range when range > 0 -> Interval.of_int_range 0 (range - 1)
+          | _ -> Interval.top
+        in
+        Map.set env ~key:static_symbol ~data:iv)
+  in
+  { sym_env; memo = Phys_memo.create 64 }
+
+let ienv_extend ienv sym ~from_ ~to_ =
+  {
+    sym_env = Map.set ienv.sym_env ~key:sym ~data:(interval_of_loop_range ~from_ ~to_);
+    memo = Phys_memo.create 16;
+  }
+
+(* Exact integral intervals of index expressions; machine validity (the unsigned index precision,
+   binding constraint 7's crosses-zero widening) is applied by [interval_of] via
+   [Interval.at_prec (Ops.index_prec ())] at the [Embed_index] boundary. *)
+let interval_of_index ienv (idx : Indexing.axis_index) : Interval.t =
+  match idx with
+  | Indexing.Fixed_idx i -> Interval.of_int i
+  | Iterator s -> interval_of_symbol ienv s
+  | Sub_axis -> Interval.of_int 0
+  | Affine { symbols; offset } ->
+      List.fold symbols
+        ~init:(Interval.of_int offset)
+        ~f:(fun acc (coeff, s) ->
+          Interval.add acc (Interval.mul (Interval.of_int coeff) (interval_of_symbol ienv s)))
+  | Concat _ -> Interval.top (* Eliminated during lowering; conservative if ever reached. *)
+
+(* Bounds of a tensor-node read: the machine range of the stored precision, narrowed by the
+   node's bounds candidate when one exists. The node becomes a source only when the candidate
+   actually narrows -- folds justified by the dtype range alone are static facts requiring no
+   settlement. *)
+let interval_of_node ~prec (tn : Tn.t) : interval_result =
+  let stored_prec = Lazy.force tn.Tn.prec in
+  let dtype = Interval.dtype_range stored_prec in
+  let ival, srcs =
+    match Tn.bounds_candidate tn with
+    | Some c when not (Interval.is_top c) ->
+        let narrowed = Interval.inter c dtype in
+        if Interval.equal narrowed dtype then (dtype, no_srcs)
+        else (narrowed, Set.singleton (module Tn) tn)
+    | _ -> (dtype, no_srcs)
+  in
+  { ival = Interval.at_prec prec ival; srcs }
+
+(** [interval_of ~ienv ~prec llsc] bounds the machine value of [llsc] evaluated at (converted
+    into) precision [prec] -- matching [C_syntax.pp_scalar]'s convention that homogeneous
+    operations evaluate their arguments at the consumer's precision, while [Where] conditions
+    keep their annotation precision. Every rule pipes its real-arithmetic result through
+    [Interval.at_prec prec], accounting for wrapping/rounding of the precision actually computed
+    in (binding constraint 5). Currently-unhandled operations return top explicitly (exhaustive
+    match: adding an op to [Ops] forces a conscious interval-rule decision). *)
+let rec interval_of ~ienv ~(prec : Ops.prec) (llsc : scalar_t) : interval_result =
+  let cached =
+    match Phys_memo.find_opt ienv.memo llsc with
+    | Some entries -> List.Assoc.find entries ~equal:Ops.equal_prec prec
+    | None -> None
+  in
+  match cached with
+  | Some r -> r
+  | None ->
+      let r = interval_of_uncached ~ienv ~prec llsc in
+      let entries = Option.value (Phys_memo.find_opt ienv.memo llsc) ~default:[] in
+      Phys_memo.replace ienv.memo llsc ((prec, r) :: entries);
+      r
+
+and interval_of_uncached ~ienv ~(prec : Ops.prec) (llsc : scalar_t) : interval_result =
+  let at iv = Interval.at_prec prec iv in
+  let pure iv = { ival = at iv; srcs = no_srcs } in
+  let bool_undecided = { ival = Interval.bool_range; srcs = no_srcs } in
+  let decided ~srcs b = { ival = (if b then Interval.true_ else Interval.false_); srcs } in
+  match llsc with
+  | Constant c -> pure (Interval.point c)
+  | Constant_bits _ -> pure Interval.top
+  | Embed_index idx ->
+      (* The symbol crosses from the index world into the value world: computed at the index
+         precision, then converted to the consumer's precision. *)
+      pure (Interval.at_prec (Ops.index_prec ()) (interval_of_index ienv idx))
+  | Get (tn, _) | Get_merge_buffer (tn, _) | Get_dynamic { tn; _ } -> interval_of_node ~prec tn
+  | Get_local _ | Local_scope _ -> pure Interval.top (* Phase A: locals are unanalyzed. *)
+  | Binop (Arg1, (v1, _), _) -> interval_of ~ienv ~prec v1
+  | Binop (Arg2, _, (v2, _)) -> interval_of ~ienv ~prec v2
+  | Binop (op, (v1, _), (v2, _)) -> (
+      let r1 () = interval_of ~ienv ~prec v1 in
+      let r2 () = interval_of ~ienv ~prec v2 in
+      let lift2 rule =
+        let a = r1 () and b = r2 () in
+        { ival = at (rule a.ival b.ival); srcs = Set.union a.srcs b.srcs }
+      in
+      let cmp decides =
+        let a = r1 () and b = r2 () in
+        match decides a.ival b.ival with
+        | Some v -> decided ~srcs:(Set.union a.srcs b.srcs) v
+        | None -> bool_undecided
+      in
+      match op with
+      | Ops.Arg1 | Ops.Arg2 -> assert false
+      | Ops.Add -> lift2 Interval.add
+      | Ops.Sub -> lift2 Interval.sub
+      | Ops.Mul -> lift2 Interval.mul
+      | Ops.Div -> lift2 Interval.div
+      | Ops.Mod -> lift2 Interval.mod_
+      | Ops.Max -> lift2 Interval.max_
+      | Ops.Min -> lift2 Interval.min_
+      | Ops.Relu_gate | Ops.Satur01_gate ->
+          (* Hull of [0] (gate shut, also the NaN-condition outcome) and the gated argument. *)
+          let b = r2 () in
+          { ival = at (Interval.join Interval.false_ b.ival); srcs = b.srcs }
+      | Ops.Cmplt -> cmp Interval.cmplt_decides
+      | Ops.Cmpeq -> cmp Interval.cmpeq_decides
+      | Ops.Cmpne ->
+          cmp (fun a b -> Option.map (Interval.cmpeq_decides a b) ~f:not)
+      | Ops.And ->
+          let a = r1 () and b = r2 () in
+          if Interval.definitely_false a.ival then decided ~srcs:a.srcs false
+          else if Interval.definitely_false b.ival then decided ~srcs:b.srcs false
+          else if Interval.definitely_true a.ival && Interval.definitely_true b.ival then
+            decided ~srcs:(Set.union a.srcs b.srcs) true
+          else bool_undecided
+      | Ops.Or ->
+          let a = r1 () and b = r2 () in
+          if Interval.definitely_true a.ival then decided ~srcs:a.srcs true
+          else if Interval.definitely_true b.ival then decided ~srcs:b.srcs true
+          else if Interval.definitely_false a.ival && Interval.definitely_false b.ival then
+            decided ~srcs:(Set.union a.srcs b.srcs) false
+          else bool_undecided
+      | Ops.ToPowOf | Ops.Threefry4x32_crypto | Ops.Threefry4x32_light -> pure Interval.top)
+  | Ternop (op, ((v1, p1) as _a1), (v2, _), (v3, _)) -> (
+      match op with
+      | Ops.Where ->
+          (* Heterogeneous: the condition is evaluated at its annotation precision. Branch
+             selection propagates the condition's sources (binding constraint 2). *)
+          let c = interval_of ~ienv ~prec:p1 v1 in
+          if Interval.definitely_true c.ival then
+            let t = interval_of ~ienv ~prec v2 in
+            { t with srcs = Set.union c.srcs t.srcs }
+          else if Interval.definitely_false c.ival then
+            let e = interval_of ~ienv ~prec v3 in
+            { e with srcs = Set.union c.srcs e.srcs }
+          else
+            let t = interval_of ~ienv ~prec v2 and e = interval_of ~ienv ~prec v3 in
+            { ival = at (Interval.join t.ival e.ival); srcs = Set.union t.srcs e.srcs }
+      | Ops.FMA ->
+          let a = interval_of ~ienv ~prec v1
+          and b = interval_of ~ienv ~prec v2
+          and c = interval_of ~ienv ~prec v3 in
+          {
+            ival = at (Interval.add (Interval.mul a.ival b.ival) c.ival);
+            srcs = Set.union a.srcs (Set.union b.srcs c.srcs);
+          }
+      | Ops.Mul3 ->
+          let a = interval_of ~ienv ~prec v1
+          and b = interval_of ~ienv ~prec v2
+          and c = interval_of ~ienv ~prec v3 in
+          {
+            ival = at (Interval.mul (Interval.mul a.ival b.ival) c.ival);
+            srcs = Set.union a.srcs (Set.union b.srcs c.srcs);
+          })
+  | Unop (op, (v, _)) -> (
+      let r () = interval_of ~ienv ~prec v in
+      let lift1 rule =
+        let a = r () in
+        { ival = at (rule a.ival); srcs = a.srcs }
+      in
+      match op with
+      | Ops.Identity -> interval_of ~ienv ~prec v
+      | Ops.Relu -> lift1 Interval.relu
+      | Ops.Satur01 -> lift1 Interval.satur01
+      | Ops.Neg -> lift1 Interval.neg
+      | Ops.Trunc -> lift1 Interval.trunc
+      | Ops.Exp | Ops.Exp2 -> lift1 Interval.exp_like
+      | Ops.Sin | Ops.Cos | Ops.Tanh_approx -> lift1 Interval.abs_le_1
+      | Ops.Sqrt -> lift1 Interval.sqrt_
+      | Ops.Not ->
+          let a = r () in
+          if Interval.definitely_false a.ival then decided ~srcs:a.srcs true
+          else if Interval.definitely_true a.ival then decided ~srcs:a.srcs false
+          else bool_undecided
+      | Ops.Log | Ops.Log2 | Ops.Recip | Ops.Recip_sqrt | Ops.Uint4x32_to_prec_uniform1 ->
+          pure Interval.top)
+
+(** Settles the bounds of every source node consumed by a fold decision (binding constraint 2:
+    settlement is transitive and fires at every consumption point). *)
+let settle_srcs { srcs; _ } = Set.iter srcs ~f:Tn.settle_bounds
+
+(* Interval-driven comparison folding for [simplify_llc]: when the interval of a comparison /
+   logical connective is decided, replace it by the constant and settle the consumed bounds. Only
+   these [0,1]-valued operations are folded -- their decided intervals are exact points by
+   construction. *)
+let try_interval_fold ~ienv ~prec (llsc : scalar_t) : scalar_t option =
+  match llsc with
+  | Binop ((Ops.Cmplt | Ops.Cmpeq | Ops.Cmpne | Ops.And | Ops.Or), _, _) ->
+      let r = interval_of ~ienv ~prec llsc in
+      if Interval.is_singleton r.ival then (
+        settle_srcs r;
+        Some (Constant r.ival.Interval.lo))
+      else None
+  | _ -> None
+
+let simplify_llc static_indices llc =
+  (* Implements top-down rewriting. The interval environment [ienv] tracks every in-scope
+     symbol's bounds (seeded from the static indices, extended per [For_loop]) for the
+     interval-driven comparison folds. *)
+  let rec loop_proc ~ienv (llc : t) : t =
+    let loop = loop_proc ~ienv in
+    let loop_scalar = loop_scalar ~ienv in
     match llc with
     | Noop -> Noop
     | Seq (c1, c2) ->
         let c1 = loop c1 in
         let c2 = loop c2 in
         Seq (c1, c2)
-    | For_loop for_config -> For_loop { for_config with body = loop for_config.body }
+    | For_loop for_config ->
+        For_loop
+          {
+            for_config with
+            body =
+              loop_proc
+                ~ienv:
+                  (ienv_extend ienv for_config.index ~from_:for_config.from_ ~to_:for_config.to_)
+                for_config.body;
+          }
     | Zero_out _ -> llc
     | Set { tn; idcs; llsc; debug } ->
         Set { tn; idcs; llsc = fst (loop_scalar (llsc, Lazy.force tn.Tn.prec)); debug }
@@ -1544,7 +1804,9 @@ let simplify_llc llc =
     | Comment _ -> llc
     | Staged_compilation _ -> llc
     | Workgroup_barrier -> llc
-  and loop_scalar ((llsc, prec) : scalar_t * Ops.prec) : scalar_t * Ops.prec =
+  and loop_scalar ~ienv ((llsc, prec) : scalar_t * Ops.prec) : scalar_t * Ops.prec =
+    let loop_scalar = loop_scalar ~ienv in
+    let loop_proc = loop_proc ~ienv in
     let local_scope_body, llsc' =
       match llsc with
       | Local_scope opts ->
@@ -1680,22 +1942,41 @@ let simplify_llc llc =
     | Binop (Add, llv3, (Binop (Mul, llv1, llv2), prec12)) ->
         (* TODO: this is tentative. *)
         loop_scalar @@ (Ternop (FMA, llv1, llv2, llv3), Ops.promote_prec prec12 prec)
-    | Binop (op, llv1, llv2) ->
+    | Binop (op, llv1, llv2) -> (
         let v1 = loop_scalar llv1 in
         let v2 = loop_scalar llv2 in
         let result = (Binop (op, v1, v2), prec) in
-        if equal_scalar_arg llv1 v1 && equal_scalar_arg llv2 v2 then result else loop_scalar result
+        if equal_scalar_arg llv1 v1 && equal_scalar_arg llv2 v2 then
+          (* At the rewriting fixpoint, try the interval-driven comparison fold. *)
+          match try_interval_fold ~ienv ~prec (fst result) with
+          | Some c -> (c, prec)
+          | None -> result
+        else loop_scalar result)
     | Ternop (Where, (Binop (Cmpeq, (Embed_index a, _), (Embed_index b, _)), _), then_, _)
       when Indexing.equal_axis_index a b ->
         (* gh-133 Stage A: a repeated-symbol equality guard whose two embedded indices are
            syntactically identical is always taken; fold it to its then-branch. *)
         loop_scalar then_
-    | Ternop (op, llv1, llv2, llv3) ->
+    | Ternop (op, llv1, llv2, llv3) -> (
         let v1 = loop_scalar llv1 in
         let v2 = loop_scalar llv2 in
         let v3 = loop_scalar llv3 in
         let result = (Ternop (op, v1, v2, v3), prec) in
-        if equal_scalar_arg llv1 v1 && equal_scalar_arg llv2 v2 then result else loop_scalar result
+        if equal_scalar_arg llv1 v1 && equal_scalar_arg llv2 v2 then
+          match op with
+          | Ops.Where ->
+              (* Interval-decided condition: fold to the taken branch, settling any tensor-node
+                 bounds the decision consumed (binding constraint 2). *)
+              let c = interval_of ~ienv ~prec:(snd v1) (fst v1) in
+              if Interval.definitely_true c.ival then (
+                settle_srcs c;
+                loop_scalar v2)
+              else if Interval.definitely_false c.ival then (
+                settle_srcs c;
+                loop_scalar v3)
+              else result
+          | _ -> result
+        else loop_scalar result)
     | Unop (Identity, llsc) -> loop_scalar llsc
     | Unop (op, (Constant c, _)) -> (Constant (Ops.interpret_unop op c), prec)
     | Unop (op, llsc) ->
@@ -1743,7 +2024,7 @@ let simplify_llc llc =
     | Get_dynamic { dyn_value = v, _; _ } -> loop v
     | Embed_index _ | Get_local _ | Get_merge_buffer (_, _) | Get (_, _) -> ()
   in
-  let result = loop_proc llc in
+  let result = loop_proc ~ienv:(ienv_of_static_indices static_indices) llc in
   if Option.is_some Utils.settings.check_half_prec_constants_cutoff then check_proc result;
   result
 
@@ -2282,47 +2563,81 @@ let match_one_hot_contribution (k : Indexing.symbol) (contribution : scalar_t) :
   | _ -> None
 
 (* gh-343: build the guarded dynamic gather replacing a matched one-hot reduction. [class_count] is
-   the size of the table axis being gathered; [value_prec] is the table (result) precision. *)
-let build_guarded_gather ~table ~table_idcs ~dyn_axis ~(index_expr : scalar_arg) ~class_count
-    ~value_prec : scalar_t =
+   the size of the table axis being gathered; [value_prec] is the table (result) precision.
+
+   The guard is constructed generically -- a lower-bound conjunct, an upper-bound conjunct, and an
+   integrality conjunct -- and interval analysis erases each conjunct it can prove
+   (docs/proposals/interval-analysis-scalar-t.md, the designated re-expression target). The
+   precision facts alone reproduce the previous hand-written flavors as emergent behavior: an
+   unsigned index precision proves the lower bound (its machine range starts at 0), and any
+   integer precision proves integrality. Settled [Tnode] bounds can additionally discharge the
+   upper bound (and the lower bound for signed indices), leaving a bare gather.
+
+   Fail-safe construction (binding constraint 1): folding is an optimization, never a correctness
+   obligation. Every conjunct that can be emitted is correct unfolded at its guard precision; the
+   only exception -- a lower-bound compare against [-1] at the unsigned guard precision, which
+   would be C UB -- cannot be requested, because [Interval.at_prec] at an unsigned precision
+   always yields a non-negative lower bound, discharging that conjunct by construction (asserted
+   below rather than assumed).
+
+   Guard precision by index flavor (unchanged from the hand-written version): unsigned compares
+   in uint64 (zero-extension is lossless; casting to int64 instead could map huge values to
+   negatives and pass the upper bound); signed compares in int64 (exact and native on all
+   backends, including Metal which lacks double); float compares in double (exact for the
+   integer-valued indices in scope). [0 <= idx] is encoded as [-1 < idx] (there is no [Cmple]);
+   integrality as [idx == trunc(idx)] (the backend casts [idx] to int when gathering, so for
+   non-integer indices, where every [k == idx] is false and the reduction is 0, the gather must
+   not fire). *)
+let build_guarded_gather ~ienv ~table ~table_idcs ~dyn_axis ~(index_expr : scalar_arg)
+    ~class_count ~value_prec : scalar_t =
   let iv, iprec = index_expr in
   let gather = Get_dynamic { tn = table; idcs = table_idcs; dyn_axis; dyn_value = index_expr } in
-  let upper_const = Constant (Float.of_int class_count) in
-  match iprec with
-  | Ops.Byte_prec _ | Ops.Uint16_prec _ | Ops.Uint32_prec _ | Ops.Uint64_prec _ ->
-      (* Unsigned integer indices cannot be negative or fractional, so the guard reduces to the
-         upper bound. Compare in uint64: zero-extension from any unsigned precision is lossless and
-         [class_count] is exactly representable. *)
-      let guard_prec = Ops.uint64 in
-      let in_range = Binop (Ops.Cmplt, (iv, guard_prec), (upper_const, guard_prec)) in
-      Ternop (Ops.Where, (in_range, guard_prec), (gather, value_prec), (Constant 0., value_prec))
-  | Ops.Int32_prec _ | Ops.Int64_prec _ ->
-      (* Signed integer indices cannot be fractional; only the bounds need guarding, in int64
-         (exact and native on all backends, including Metal which lacks double). [0 <= idx] is
-         encoded as [-1 < idx] (there is no [Cmple]); the upper bound is [idx < class_count]. *)
-      let guard_prec = Ops.int64 in
-      let lower = Binop (Ops.Cmplt, (Constant (-1.), guard_prec), (iv, guard_prec)) in
-      let upper = Binop (Ops.Cmplt, (iv, guard_prec), (upper_const, guard_prec)) in
-      let in_range = Binop (Ops.And, (lower, guard_prec), (upper, guard_prec)) in
-      Ternop (Ops.Where, (in_range, guard_prec), (gather, value_prec), (Constant 0., value_prec))
-  | _ ->
-      (* Float-precision indices. The bounds comparison must NOT be evaluated in the unsigned index
-         precision: [-1] would wrap to UINT_MAX and the guard would always be false (gh:
-         unsigned-index-precision). We do the whole guard in a signed precision ([double], exact
-         for the integer-valued indices in scope). [0 <= idx] is encoded as [-1 < idx] (there is no
-         [Cmple]); the upper bound is [idx < class_count]. *)
-      let guard_prec = Ops.double in
-      let lower = Binop (Ops.Cmplt, (Constant (-1.), guard_prec), (iv, guard_prec)) in
-      let upper = Binop (Ops.Cmplt, (iv, guard_prec), (upper_const, guard_prec)) in
-      (* The backend casts [iv] to int when gathering. To preserve one-hot semantics for
-         non-integer indices (e.g. 1.5, where every [k == idx] is false so the reduction is 0), the
-         gather must only fire when [idx] is exactly integral: [idx == trunc(idx)]. Otherwise
-         return 0. *)
-      let is_integral =
-        Binop (Ops.Cmpeq, (iv, guard_prec), (Unop (Ops.Trunc, (iv, guard_prec)), guard_prec))
+  let guard_prec, unsigned_guard, prec_proves_integral =
+    match iprec with
+    | Ops.Byte_prec _ | Ops.Uint16_prec _ | Ops.Uint32_prec _ | Ops.Uint64_prec _ ->
+        (Ops.uint64, true, true)
+    | Ops.Int32_prec _ | Ops.Int64_prec _ -> (Ops.int64, false, true)
+    | _ -> (Ops.double, false, false)
+  in
+  (* Bounds of the index value as evaluated at the guard precision (the conjuncts are homogeneous
+     binops, so this is exactly what the comparisons see). *)
+  let ivr = interval_of ~ienv ~prec:guard_prec iv in
+  let lower_proved = Float.(ivr.ival.Interval.lo >= 0.) (* outward endpoints: sound *) in
+  (* The gather compares against [class_count], an exact small integer. *)
+  let upper_proved = Float.(ivr.ival.Interval.hi < Float.of_int class_count) in
+  let integral_proved = prec_proves_integral || ivr.ival.Interval.integral in
+  (* An unsigned guard precision proves the lower bound by construction; emitting [-1 < idx] at
+     uint64 would be wrong unfolded (constraint 1), so this must never be requested. *)
+  assert ((not unsigned_guard) || lower_proved);
+  let lower =
+    if lower_proved then None
+    else Some (Binop (Ops.Cmplt, (Constant (-1.), guard_prec), (iv, guard_prec)))
+  in
+  let upper =
+    if upper_proved then None
+    else Some (Binop (Ops.Cmplt, (iv, guard_prec), (Constant (Float.of_int class_count), guard_prec)))
+  in
+  let is_integral =
+    if integral_proved then None
+    else
+      Some
+        (Binop (Ops.Cmpeq, (iv, guard_prec), (Unop (Ops.Trunc, (iv, guard_prec)), guard_prec)))
+  in
+  let conjuncts = List.filter_opt [ lower; upper; is_integral ] in
+  let dropped_any =
+    Option.is_none lower || Option.is_none upper || Option.is_none is_integral
+  in
+  (* Any conjunct erased while tensor-node bounds narrowed the interval settles those bounds
+     (binding constraint 2; over-settling when a drop was justified by the precision alone is
+     harmless -- it only locks in bounds that later writers must respect). *)
+  if dropped_any && not (Set.is_empty ivr.srcs) then settle_srcs ivr;
+  match conjuncts with
+  | [] -> gather (* Fully discharged: the (settled) bounds prove every access in range. *)
+  | first :: rest ->
+      let in_range =
+        List.fold rest ~init:first ~f:(fun acc c ->
+            Binop (Ops.And, (acc, guard_prec), (c, guard_prec)))
       in
-      let bounds = Binop (Ops.And, (lower, guard_prec), (upper, guard_prec)) in
-      let in_range = Binop (Ops.And, (bounds, guard_prec), (is_integral, guard_prec)) in
       Ternop (Ops.Where, (in_range, guard_prec), (gather, value_prec), (Constant 0., value_prec))
 
 (* gh-343: peel a possible zero-initializer off a reduction body, returning the inner [For_loop]. *)
@@ -2347,7 +2662,7 @@ let accumulation_contribution ~(acc_is : scalar_t -> bool) (acc : scalar_t) : sc
 (* gh-343: shared core -- given a reduction over [k] with bounds [\[from_, to_\]] and a
    per-iteration [contribution], check the narrow one-hot side conditions and build the guarded
    gather. *)
-let gather_of_reduction ~(k : Indexing.symbol) ~from_ ~to_ (contribution : scalar_t) :
+let gather_of_reduction ~ienv ~(k : Indexing.symbol) ~from_ ~to_ (contribution : scalar_t) :
     scalar_t option =
   Option.bind (match_one_hot_contribution k contribution) ~f:(fun (table, table_idcs, index_expr) ->
       let count, axis, only_plain = count_plain_iterator k table_idcs in
@@ -2365,17 +2680,17 @@ let gather_of_reduction ~(k : Indexing.symbol) ~from_ ~to_ (contribution : scala
             let table_idcs = Array.copy table_idcs in
             table_idcs.(dyn_axis) <- Indexing.Fixed_idx 0;
             Some
-              (build_guarded_gather ~table ~table_idcs ~dyn_axis ~index_expr ~class_count
+              (build_guarded_gather ~ienv ~table ~table_idcs ~dyn_axis ~index_expr ~class_count
                  ~value_prec))
 
 (* gh-343: scalar-local form -- Local_scope { id; body = [init;] For k { Set_local (id, acc) } }. *)
-let try_rewrite_local_scope (id : scope_id) (body : t) : scalar_t option =
+let try_rewrite_local_scope ~ienv (id : scope_id) (body : t) : scalar_t option =
   match strip_zero_init_for_local id body with
   | Some (For_loop { index = k; from_; to_; body = Set_local (id', acc); _ })
     when equal_scope_id id id' ->
       let acc_is = function Get_local id' -> equal_scope_id id id' | _ -> false in
       Option.bind (accumulation_contribution ~acc_is acc) ~f:(fun contribution ->
-          gather_of_reduction ~k ~from_ ~to_ contribution)
+          gather_of_reduction ~ienv ~k ~from_ ~to_ contribution)
   | _ -> None
 
 (* gh-343: materialized form -- a reduction loop [For k { Set lhs idcs acc }] at any nesting depth,
@@ -2384,7 +2699,7 @@ let try_rewrite_local_scope (id : scope_id) (body : t) : scalar_t option =
    vocabulary loop. Reading-and-adding [lhs\[idcs\]] keeps the rewrite sound regardless of any
    preceding zero-init: sum_k contribution == gather, so [lhs += gather] equals the original [lhs +
    sum_k contribution]. *)
-let try_rewrite_materialized_loop (llc : t) : t option =
+let try_rewrite_materialized_loop ~ienv (llc : t) : t option =
   match llc with
   | For_loop { index = k; from_; to_; body = Set { tn; idcs; llsc; _ }; _ }
     when not (Array.exists idcs ~f:(axis_index_mentions_symbol k)) ->
@@ -2393,7 +2708,7 @@ let try_rewrite_materialized_loop (llc : t) : t option =
         | _ -> false
       in
       Option.bind (accumulation_contribution ~acc_is llsc) ~f:(fun contribution ->
-          Option.map (gather_of_reduction ~k ~from_ ~to_ contribution) ~f:(fun gather ->
+          Option.map (gather_of_reduction ~ienv ~k ~from_ ~to_ contribution) ~f:(fun gather ->
               let value_prec = scalar_precision gather in
               Set
                 {
@@ -2404,28 +2719,34 @@ let try_rewrite_materialized_loop (llc : t) : t option =
                 }))
   | _ -> None
 
-let rewrite_one_hot_reductions (llc : t) : t =
-  let rec loop_proc (llc : t) : t =
-    match try_rewrite_materialized_loop llc with
+let rewrite_one_hot_reductions ?(static_indices = []) (llc : t) : t =
+  let rec loop_proc ~ienv (llc : t) : t =
+    match try_rewrite_materialized_loop ~ienv llc with
     | Some replacement -> replacement
     | None -> (
         match llc with
-        | Seq (a, b) -> Seq (loop_proc a, loop_proc b)
-        | For_loop fc -> For_loop { fc with body = loop_proc fc.body }
-        | Set { tn; idcs; llsc; debug } -> Set { tn; idcs; llsc = loop_scalar llsc; debug }
+        | Seq (a, b) -> Seq (loop_proc ~ienv a, loop_proc ~ienv b)
+        | For_loop fc ->
+            For_loop
+              {
+                fc with
+                body = loop_proc ~ienv:(ienv_extend ienv fc.index ~from_:fc.from_ ~to_:fc.to_) fc.body;
+              }
+        | Set { tn; idcs; llsc; debug } -> Set { tn; idcs; llsc = loop_scalar ~ienv llsc; debug }
         | Set_from_vec { tn; idcs; length; vec_unop; arg = s, p; debug } ->
-            Set_from_vec { tn; idcs; length; vec_unop; arg = (loop_scalar s, p); debug }
-        | Set_local (id, llsc) -> Set_local (id, loop_scalar llsc)
+            Set_from_vec { tn; idcs; length; vec_unop; arg = (loop_scalar ~ienv s, p); debug }
+        | Set_local (id, llsc) -> Set_local (id, loop_scalar ~ienv llsc)
         | ( Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _
           | Workgroup_barrier ) as other ->
             other)
-  and loop_scalar (llsc : scalar_t) : scalar_t =
+  and loop_scalar ~ienv (llsc : scalar_t) : scalar_t =
+    let loop_scalar = loop_scalar ~ienv in
     match llsc with
     | Local_scope { id; body; orig_indices } -> (
         (* Recurse into the body first so inner reductions are handled, then try to collapse this
            scope itself. *)
-        let body = loop_proc body in
-        match try_rewrite_local_scope id body with
+        let body = loop_proc ~ienv body in
+        match try_rewrite_local_scope ~ienv id body with
         | Some gather -> gather
         | None -> Local_scope { id; body; orig_indices })
     | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, p } ->
@@ -2438,13 +2759,53 @@ let rewrite_one_hot_reductions (llc : t) : t =
       other ->
         other
   in
-  loop_proc llc
+  loop_proc ~ienv:(ienv_of_static_indices static_indices) llc
+
+(* Phase B v1 execution anchoring (interval-analysis proposal, binding constraint 3): every
+   tensor node written by compiled code has its bounds candidate pinned to top at lowering time,
+   BEFORE any interval consultation, so guard folds only ever rely on host-initialized,
+   never-device-written data -- sidestepping the writer-runs-never/-later/-repeatedly hazards and
+   read-modify-write cycles wholesale. Pinning a node whose bounds a previously-compiled reader
+   already settled (to a non-top interval) raises, as required: that reader's generated code
+   discharged an in-range guard the new writer could invalidate. Walks the unoptimized code so
+   writes that later become virtual are included (conservative). *)
+let rec pin_device_written_bounds (llc : t) : unit =
+  let pin tn = Tn.pin_bounds_top ~what:"compiled device write" tn in
+  match llc with
+  | Noop | Comment _ | Staged_compilation _ | Declare_local _ | Workgroup_barrier -> ()
+  | Seq (c1, c2) ->
+      pin_device_written_bounds c1;
+      pin_device_written_bounds c2
+  | For_loop { body; _ } -> pin_device_written_bounds body
+  | Zero_out tn -> pin tn
+  | Set { tn; llsc; _ } ->
+      pin tn;
+      pin_scalar_written_bounds llsc
+  | Set_from_vec { tn; arg = s, _; _ } ->
+      pin tn;
+      pin_scalar_written_bounds s
+  | Set_local (_, llsc) -> pin_scalar_written_bounds llsc
+
+and pin_scalar_written_bounds (llsc : scalar_t) : unit =
+  match llsc with
+  | Local_scope { body; _ } -> pin_device_written_bounds body
+  | Get_dynamic { dyn_value = v, _; _ } -> pin_scalar_written_bounds v
+  | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
+  | Ternop (_, (v1, _), (v2, _), (v3, _)) ->
+      pin_scalar_written_bounds v1;
+      pin_scalar_written_bounds v2;
+      pin_scalar_written_bounds v3
+  | Binop (_, (v1, _), (v2, _)) ->
+      pin_scalar_written_bounds v1;
+      pin_scalar_written_bounds v2
+  | Unop (_, (v, _)) -> pin_scalar_written_bounds v
 
 let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
   let traced_store = Hashtbl.create (module Tnode) in
   (* Identifies the computations that the code block associated with the symbol belongs to. *)
   let reverse_node_map = Hashtbl.create (module Indexing.Symbol) in
   [%log "tracing"];
+  pin_device_written_bounds llc;
   let merge_node_id = ref None in
   visit_llc traced_store ~merge_node_id reverse_node_map ~max_visits:virtualize_settings.max_visits
     llc;
@@ -2453,8 +2814,9 @@ let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
     virtual_llc input_ctx.computations traced_store reverse_node_map static_indices llc
   in
   let llc =
-    hoist_cross_statement_cse @@ eliminate_common_subexpressions @@ rewrite_one_hot_reductions
-    @@ simplify_llc
+    hoist_cross_statement_cse @@ eliminate_common_subexpressions
+    @@ rewrite_one_hot_reductions ~static_indices
+    @@ simplify_llc static_indices
     @@ cleanup_virtual_llc ~static_indices
     @@ virtual_llc_result
   in
