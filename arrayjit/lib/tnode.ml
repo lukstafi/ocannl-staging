@@ -610,15 +610,37 @@ let registry = Registry.create 16
 let prec_of_dalayed tn =
   match tn.delayed_prec_unsafe with Default prec | Specified prec | Inferred (lazy prec) -> prec
 
+(* docs/proposals/signed-index-precision.md: index arithmetic is signed int32 unless
+   [large_models] selects int64. Int32 overflow is excluded by contract, not by widening: every
+   index intermediate is bounded by some node's extent by projection construction (axis indices
+   by their dims, conv affine forms by the padded input dim, flat offsets by numel), so
+   validating the padded element count once per node -- here, where dims are forced -- makes
+   every consumer inherit the guarantee. Violation is a hard error naming the node: auto-setting
+   the global flag would be inconsistent across already-compiled routines. *)
+let validate_padded_numel_contract ~id ~label (dims : int array) =
+  if not Utils.settings.large_models then
+    let n = Array.fold dims ~init:1 ~f:( * ) in
+    if n > 2147483647 then
+      raise
+      @@ Utils.User_error
+           [%string
+             "Tensor node %{get_debug_name ~id ~label ()}: padded element count %{n#Int} exceeds \
+              the int32 index range; set large_models=true to use 64-bit indices"]
+
 let create delayed_prec ~id ~label ~unpadded_dims ~padding () =
   (* Compute padded dimensions: tn.dims stores buffer-inclusive (padded) dimensions *)
   let dims =
     lazy
       (let unpadded = Lazy.force unpadded_dims in
-       match Lazy.force padding with
-       | None -> unpadded
-       | Some (padding_arr, _) ->
-           Array.map2_exn unpadded padding_arr ~f:(fun d Ops.{ left; right } -> d + left + right))
+       let padded =
+         match Lazy.force padding with
+         | None -> unpadded
+         | Some (padding_arr, _) ->
+             Array.map2_exn unpadded padding_arr ~f:(fun d Ops.{ left; right } ->
+                 d + left + right)
+       in
+       validate_padded_numel_contract ~id ~label padded;
+       padded)
   in
   let rec size_in_bytes =
     lazy
@@ -654,6 +676,7 @@ let create delayed_prec ~id ~label ~unpadded_dims ~padding () =
    buffer is shaped only after shape inference completes. *)
 let create_from_padded ~id ~label ~ndarray ~padding () =
   let dims_val = Nd.dims ndarray in
+  validate_padded_numel_contract ~id ~label dims_val;
   let prec_val = Nd.get_prec ndarray in
   let size_in_bytes = lazy (Nd.size_in_bytes ndarray) in
   let rec tn =
@@ -683,10 +706,15 @@ let create_with_reshape ~id ~label ~base_ndarray ~unpadded_dims ~padding ~from_p
   let dims =
     lazy
       (let unpadded = Lazy.force unpadded_dims in
-       match Lazy.force padding with
-       | None -> unpadded
-       | Some (padding_arr, _) ->
-           Array.map2_exn unpadded padding_arr ~f:(fun d Ops.{ left; right } -> d + left + right))
+       let padded =
+         match Lazy.force padding with
+         | None -> unpadded
+         | Some (padding_arr, _) ->
+             Array.map2_exn unpadded padding_arr ~f:(fun d Ops.{ left; right } ->
+                 d + left + right)
+       in
+       validate_padded_numel_contract ~id ~label padded;
+       padded)
   in
   let rec init_buffer =
     lazy

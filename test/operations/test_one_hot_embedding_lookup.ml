@@ -141,20 +141,19 @@ let () =
   p "float ids: guard contains the integrality Trunc" (truncs > 0);
   (* Proposal AC: the generated C for the optimized kernel contains a guarded dynamic table read and
      no reduction loop over the vocabulary axis. The dynamic index renders as a cast to
-     [Ops.index_prec ()] (uint32_t under default settings, uint64_t under large_models) inside a
-     ternary guard; a vocabulary loop would iterate up to [vocab - 1] ([<= 3] here), which is
-     distinct from the batch/output loop bounds ([<= 2]). Note: [iprec] (the precision of the index
-     value expression) comes from the IDs tensor's precision verbatim (default: single/float32,
-     exact for integers up to 2^24). For very large vocabularies, callers should use
-     double-precision IDs so the value survives to the widened cast without prior float-rounding
-     loss. *)
+     [Ops.index_prec ()] (signed: int under default settings, long long under large_models --
+     docs/proposals/signed-index-precision.md) inside a ternary guard; a vocabulary loop would
+     iterate up to [vocab - 1] ([<= 3] here), which is distinct from the batch/output loop bounds
+     ([<= 2]). Note: [iprec] (the precision of the index value expression) comes from the IDs
+     tensor's precision verbatim (default: single/float32, exact for integers up to 2^24). For very
+     large vocabularies, callers should use double-precision IDs so the value survives to the
+     widened cast without prior float-rounding loss. *)
   (match read_generated_c "embedded_fwd" with
   | None -> p "generated C: guarded dynamic table read present (skipped: non-C backend)" true
   | Some c ->
-      (* The cast is to Ops.index_prec () = uint32_t (default) or uint64_t (large_models). *)
+      (* The cast is to Ops.index_prec () = int (default) or long long (large_models). *)
       let has_index_prec_cast =
-        String.is_substring c ~substring:"((uint32_t)("
-        || String.is_substring c ~substring:"((uint64_t)("
+        String.is_substring c ~substring:"((int)(" || String.is_substring c ~substring:"((long long)("
       in
       p "generated C contains a guarded dynamic table read"
         (has_index_prec_cast && String.is_substring c ~substring:"?");
@@ -299,15 +298,17 @@ let () =
    double-precision IDs tensor whose first entry 2_200_000_000.0 exceeds INT_MAX (2_147_483_648).
    Two properties must hold: (1) IR level: [Get_dynamic.dyn_value] carries iprec = double — the
    index value is not truncated to float32 (exact only to 2^24 = 16M) before reaching the cast. (2)
-   C level: the generated C declares [ids_wide] as [double*] and casts the dynamic index with
-   [((uint32_t)(] (default) or [((uint64_t)(] (large_models), not the old [((int)(] which is C
-   undefined behaviour for values > INT_MAX. Mutation evidence: (1) fails if
+   C level: the generated C declares [ids_wide] as [double*] and casts the dynamic index to
+   [Ops.index_prec ()] — signed [((int)(] by default, [((long long)(] under large_models
+   (docs/proposals/signed-index-precision.md). An out-of-range id never reaches the cast: the
+   in-range guard's ternary short-circuits (here 2_200_000_000 >= vocab, so the row is zero), and
+   tables genuinely needing indices past 2^31 require [large_models] by the per-node element-count
+   contract enforced in [Tnode.create]. Mutation evidence: (1) fails if
    [Tensor.default_value_prec] is left at single/float32 (ids_wide.value.prec = single → iprec =
-   single → inner cast is (float) not (double)); (2) fails if the cast in [c_syntax.ml Get_dynamic
-   arm] is reverted to [((int)(]. Note: a 1-element IDs array is always inlined as a [Constant]
-   literal by [low_level.scalar_precision], whose [Constant] arm defaults to [single]. We use 2
-   elements so [ids_wide] has backing storage and [Get(ids_tn)] carries its declared [double]
-   prec. *)
+   single → inner cast is (float) not (double)). Note: a 1-element IDs array is always inlined as a
+   [Constant] literal by [low_level.scalar_precision], whose [Constant] arm defaults to [single].
+   We use 2 elements so [ids_wide] has backing storage and [Get(ids_tn)] carries its declared
+   [double] prec. *)
 let () =
   (* Temporarily widen the default tensor precision so [ids_wide] is stored as double. *)
   let saved_prec = !Tensor.default_value_prec in
@@ -370,16 +371,15 @@ let () =
   scan_ll opt_wide.LL.llc;
   p "large-index (IR): Get_dynamic.dyn_value iprec is double, not float32"
     (match !found_iprec with Some prec -> Ir.Ops.equal_prec prec Ir.Ops.double | None -> false);
-  (* (2) C-level inspection: emb_wide kernel is [emb_wide_fwd.c]. Mutation evidence: reverting
-     [c_syntax.ml Get_dynamic arm] to [((int)(] would change the cast from [((uint32_t)(] to
-     [((int)(], flipping both assertions below. *)
+  (* (2) C-level inspection: emb_wide kernel is [emb_wide_fwd.c]. The dynamic-index cast must
+     track [Ops.index_prec ()] (signed since docs/proposals/signed-index-precision.md), not some
+     hardcoded type: under large_models the same arm renders [((long long)(]. *)
   match read_generated_c "emb_wide_fwd" with
-  | None -> p "large-index (C): double *ids_wide and wide cast (skipped: non-C backend)" true
+  | None -> p "large-index (C): double *ids_wide and index-prec cast (skipped: non-C backend)" true
   | Some c ->
       p "large-index (C): ids_wide parameter declared as double*"
         (String.is_substring c ~substring:"double *ids_wide");
-      let has_wide_cast =
-        String.is_substring c ~substring:"((uint32_t)("
-        || String.is_substring c ~substring:"((uint64_t)("
+      let has_index_prec_cast =
+        String.is_substring c ~substring:"((int)(" || String.is_substring c ~substring:"((long long)("
       in
-      p "large-index (C): dynamic index cast is widened (uint32_t or uint64_t)" has_wide_cast
+      p "large-index (C): dynamic index cast tracks the index precision" has_index_prec_cast

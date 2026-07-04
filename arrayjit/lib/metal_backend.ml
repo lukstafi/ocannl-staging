@@ -430,8 +430,9 @@ module Fresh () = struct
     let buffer_prefix = "device "
     let buffer_suffix = fun ~pos -> " [[buffer(" ^ Int.to_string pos ^ ")]]"
 
+    (* Signed index arithmetic (docs/proposals/signed-index-precision.md). *)
     let arg_int_prefix =
-      if Utils.settings.large_models then "const uint64_t& " else "const uint32_t& "
+      if Utils.settings.large_models then "const int64_t& " else "const int32_t& "
 
     (* gh-ocannl-344: pass materialized tensor nodes through [metal_max_pools] bound pool buffers +
        a slot table instead of one buffer per tnode, so a kernel reaching hundreds of nodes stays
@@ -881,6 +882,9 @@ using namespace metal;|} in
                 Me.ComputeCommandEncoder.set_buffer encoder ~index slots_buf
             | Static_idx s ->
                 let value = !(Indexing.find_exn lowered_bindings s) in
+                (* Bind-time validation (docs/proposals/signed-index-precision.md), mirroring the
+                   CUDA backend's launch-side checks. *)
+                Indexing.validate_bound_value ~width64:Utils.settings.large_models s value;
                 let size = Ctypes.sizeof Ctypes.int in
                 let bytes_ptr = Ctypes.(allocate int value |> to_voidp) in
                 Me.ComputeCommandEncoder.set_bytes encoder ~bytes:bytes_ptr ~length:size ~index

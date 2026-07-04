@@ -248,6 +248,11 @@ let run ctx routine =
        (Printf.sprintf "Context.run: routine %s (id=%d) has unexecuted dependencies: %s"
           routine.name routine.routine_id dep_names));
 
+  (* Bind-time validation of launch parameters (docs/proposals/signed-index-precision.md): each
+     bound value must be non-negative, within its declared static range, and within the index
+     width. *)
+  Idx.validate_lowered_bindings ~width64:Utils.settings.large_models routine.bindings;
+
   (* Run the routine's task/schedule *)
   Ir.Task.run routine.task;
 

@@ -1,9 +1,30 @@
 # Signed index precision
 
-**Date**: 2026-07-03
-**Status**: Stub — seeded by the interval-analysis discussion
-([interval-analysis-scalar-t](interval-analysis-scalar-t.md)) and the integer-ids gather work.
-Decision: migrate and accept the churn — signedness simplifies correctness.
+**Date**: 2026-07-03, core migration implemented 2026-07-04
+**Status**: Core migration implemented — seeded by the interval-analysis discussion
+([interval-analysis-scalar-t](interval-analysis-scalar-t.md), now landed) and the integer-ids
+gather work. Decision: migrate and accept the churn — signedness simplifies correctness.
+
+**Implemented (2026-07-04)**: `Ops.index_prec ()` is signed (int32; int64 under
+`large_models`); signed loop counters and index kernel arguments in the cc, CUDA, and Metal
+backends (`loop_index_type` / `arg_int_prefix`); the CUDA `int32/int64 → uint4x32` PRNG counter
+conversions route through the bit-spreading builtins (the previously-unsigned index precision
+now hits the signed arms); the per-node padded-element-count contract enforced in
+`Tnode.create`/`create_from_padded`/`create_with_reshape` (hard `User_error` naming the node);
+bind-time validation of launch parameters (`Indexing.validate_bound_value`, called per launch
+from `Context.run` and the Metal argument marshalling; the CUDA backend already validated) —
+non-negative, within the declared `static_range`, and within the int32 index width when
+unbounded (turning what used to be silent truncation into a hard error directing to
+`large_models` or a declared range). Golden churn: 8 `.expected` files (loop counter types) +
+the index-precision unit test.
+
+**Deferred** (in dependency order): the abstract storable `Index_prec` constructor (host
+native-int arrays, `TDSL.range` as `Index_prec` by construction); tnode-granular
+interval-driven width selection at codegen (the global int32/int64 switch stands in as the
+fallback width; the interval infrastructure it needs is now in place); per-parameter FFI widths
+(unbounded params as int64 requires ctypes-variadic and `set_bytes` surgery — the bind-time
+width validation covers the soundness gap meanwhile); `large_models` retirement (explicitly
+gated on a separate resolution for the Metal pool-slot width, which stays unsigned).
 
 ## Goal
 
@@ -165,14 +186,28 @@ negative index arithmetic); gh-343 integer-guard flavors in `build_guarded_gathe
 
 ## Acceptance criteria (for the elaborated proposal)
 
-- [ ] Decided: int32 default, overflow excluded by the per-node numel contract (see design
-      points); width selection is interval-driven at tnode granularity with a per-routine
-      max-numel fallback, deprecating `large_models`. Blocks on
-      [interval-analysis-scalar-t](interval-analysis-scalar-t.md).
-- [ ] Enforcement site specified: dims-lazy wrapper in `Tnode.create` validating padded
-      numel once per node.
-- [ ] Inventory verified by grep: every `index_prec` consumer and every unsigned-idiom
-      guard listed with its replacement.
-- [ ] Guard-form policy specified: when to emit signed two-compare vs unsigned-cast
-      single-compare (per-axis, pre-flattening restriction stated).
-- [ ] Golden-churn estimate: count of `.expected` files touched.
+- [x] Decided: int32 default, overflow excluded by the per-node numel contract (see design
+      points); interval-analysis dependency landed first as sequenced. Tnode-granular
+      interval-driven width selection remains future work; until then the global switch is the
+      fallback width and `large_models` is NOT yet deprecated (see Deferred above).
+- [x] Enforcement site specified and implemented: dims-lazy wrapper in `Tnode.create` (and the
+      eager/`create_with_reshape` variants) validating padded numel once per node.
+- [x] Inventory verified by grep (2026-07-04): `ops.ml:index_prec`; `c_syntax.ml`
+      `arg_int_prefix`/`loop_index_type` + `Get_dynamic`/`Embed_index` cast targets (both track
+      `index_prec` and needed no per-site change); `cuda_backend.ml` and `metal_backend.ml`
+      overrides of the same; CUDA `convert_precision` uint4x32 counter arms (needed new
+      int32/int64 arms — cc and Metal use `prec_string`-generic naming and the
+      `int32/int64_to_uint4x32` builtins already existed in all three backends);
+      `low_level.ml` gh-133 `a < b + 1` guards (kept: there is no `Cmple` primitive, and the
+      form is correct — merely no longer load-bearing against wrap); gh-343
+      `build_guarded_gather` guard precisions (unchanged by design: uint64/int64/double are
+      chosen by the ids storage precision, not the index precision); Metal
+      `pool_slot_msl_typ` (kept unsigned).
+- [x] Guard-form policy: signed two-compare everywhere today (no mask consumers exist yet);
+      the unsigned-cast single-compare trick remains available at guard sites once masks land,
+      restricted to per-axis guards before flat-offset computation (a possibly-negative value
+      must flow directly into the bounds compare, never through div/mod/multiply first).
+- [x] Golden churn measured: 8 `.expected` files (7 loop-counter-type goldens across
+      `arrayjit/test` and `test/operations`, incl. the Metal variant) plus
+      `test_index_prec.expected` and the cast assertions inside
+      `test_one_hot_embedding_lookup.ml`.

@@ -108,8 +108,10 @@ struct
   let kernel_prep_line = ""
   let buffer_prefix = ""
   let buffer_suffix = fun ~pos:_ -> ""
-  let arg_int_prefix = if Utils.settings.large_models then "const uint64_t " else "const uint32_t "
-  let loop_index_type = if Utils.settings.large_models then "uint64_t " else "uint32_t "
+  (* Signed index arithmetic (docs/proposals/signed-index-precision.md); the width tracks
+     [Ops.index_prec ()]. *)
+  let arg_int_prefix = if Utils.settings.large_models then "const int64_t " else "const int32_t "
+  let loop_index_type = if Utils.settings.large_models then "int64_t " else "int32_t "
   let extra_args = []
   let typ_of_prec = Ops.c_typ_of_prec
   let vec_typ_of_prec = Ops.c_vec_typ_of_prec
@@ -763,10 +765,11 @@ module C_syntax (B : C_syntax_config) = struct
         ([], expr)
     | Get_dynamic { tn; idcs; dyn_axis; dyn_value = iv, iprec } ->
         (* gh-343: a guarded dynamic gather. The dynamic index is spliced into the row-major offset
-           at [dyn_axis] as an integer; the enclosing [Where] guard guarantees it is in range before
-           this load is evaluated (C ternary short-circuits). Cast to [Ops.index_prec ()] so the
-           index tracks the same width as loop counters (uint32_t normally, uint64_t under
-           large_models), preventing truncation for very large table/vocabulary axes. *)
+           at [dyn_axis] as an integer; the enclosing [Where] guard (when interval analysis has not
+           discharged it against proven bounds) guarantees it is in range before this load is
+           evaluated (C ternary short-circuits). Cast to [Ops.index_prec ()] so the index tracks
+           the same width as loop counters (signed int32 normally, int64 under large_models),
+           preventing truncation for very large table/vocabulary axes. *)
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
         let from_prec = Lazy.force tn.prec in

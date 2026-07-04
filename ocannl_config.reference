@@ -60,9 +60,12 @@ check_half_prec_constants_cutoff=16384.0
 # "light" (2 rounds). Defaults to "light" for better performance.
 default_prng_variant=light
 
-# If true, use uint64 for indexing arithmetic. If false (default), use uint32 for indexing arithmetic.
-# This affects all backends' kernel index parameters and local index variables, and the Metal pool
-# offset width. Set to true for models with tensors/pools larger than 2^32 elements/bytes.
+# If true, use int64 for indexing arithmetic. If false (default), use int32 for indexing arithmetic
+# (signed since docs/proposals/signed-index-precision.md; unsigned precisions remain for data
+# domains). This affects all backends' kernel index parameters and local index variables, and the
+# Metal pool offset width (which stays unsigned: uint vs ulong). Set to true for models with
+# tensors/pools larger than 2^31 elements / 2^32 bytes; with the default, each tensor node's padded
+# element count must fit int32 (enforced with an error when the node's dimensions are resolved).
 large_models=false
 
 # Deprecated alias for large_models (its pre-gh-ocannl-344 name): read as a fallback only when

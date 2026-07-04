@@ -32,7 +32,7 @@ declare v700_src;
 
 === Scenario A: legitimate hoist (c_syntax pp_ll, after) ===
 float v700_src = (float)(0);
-for (uint32_t i12 = 0; i12 <= 3; ++i12) {
+for (int32_t i12 = 0; i12 <= 3; ++i12) {
   if (log_file_name && log_file) fprintf(log_file, "index i12 = %d\n", i12);
   {
     float new_set_local_v = (v700_src + src[i12]);
