@@ -3,6 +3,71 @@
 **Task**: gh-ocannl-412
 **Issue**: https://github.com/ahrefs/ocannl/issues/412
 
+## Status update (2026-07-04) — infrastructure landed; transform layer is the remaining work
+
+The [axis-types-for-loops](axis-types-for-loops.md) proposal landed in full (Phase A in
+PR #84 on 2026-07-03; Phases B+C plus the `validate_parallel` write-coverage hardening
+on 2026-07-04), together with [interval-analysis-scalar-t](interval-analysis-scalar-t.md)
+and the [signed-index-precision](signed-index-precision.md) core migration (both PR #88).
+This delivers, in different form, most of what Phases 2–3 below planned as
+infrastructure:
+
+- **The single-threaded baseline is gone as a hard limit.** `kernel_prep_line` is empty
+  (`cuda_backend.ml:362`); CUDA launches real grid/block dims from
+  `Low_level.launch_dims` (`cuda_backend.ml:1062`), Metal dispatches real
+  `threadgroups_per_grid`/`threads_per_threadgroup` and validates the block product at
+  pipeline creation (`metal_backend.ml:854,929-933`). All-`Serial` kernels still launch
+  1×1 — which is every kernel today, because nothing *produces* annotations yet.
+- **Phase 2's "Parallel_loop variant / parallel_for_syntax hook" exists** as the `axis`
+  field on `For_loop` (`axis_type = Serial | Grid | Workgroup | Workgroup_reduce |
+  Unrolled`, `low_level.ml:42,59`) and the `C_syntax_config` hooks
+  `hardware_index`/`barrier_syntax`/`shared_decl_prefix` (`c_syntax.ml:73-84`), with
+  serial fallback on cc exactly as §Phase 2's option 1 wanted.
+- **Phase 3's IR constructs exist** in the "aligned with existing architecture" variant
+  this proposal recommended: no `Shared_decl`/`Cooperative_load` vocabulary — instead
+  `Workgroup_barrier` (`low_level.ml:79`), shared placement as
+  `optimized.workgroup_shared : Set.M(Tnode).t` over `Local`-mode nodes
+  (`low_level.ml:227`), and cooperative loads as ordinary annotated
+  `For_loop`/`Set`/`Get` code. Executed on Metal/CUDA via
+  `test/operations/hardware_workgroup_reduce.ml` (hand-built GROUP_REDUCE).
+- **Boundary handling has a mechanism**: the new `If` guard statement
+  (`low_level.ml:83`) plus interval folding in `simplify_llc` — guards provable from
+  loop extents fold away (construct-then-fold). `compile_proc` auto-injects
+  extent-mismatch guards for sibling nests (`guard_annotated_extents`).
+- **Structural safety**: `validate_parallel` (`low_level.ml:2574`) rejects slot
+  overflow, barriers under divergence, and materialized writes not covering every
+  active hardware dimension.
+
+**Two decisions in this proposal are superseded:**
+
+1. *Integration point* (Phase 1): tiling is **not** applied in `assignments.ml`'s
+   `loop_accum`. The landed seam is `?lowered_transform` on `Context.compile`
+   (`backend_intf.ml:198`, `backends.ml:492`): a pure
+   `Low_level.optimized -> Low_level.optimized` applied after `optimize_proc`
+   (virtualize → simplify → CSE → hoisting) and before backend validation/rendering.
+   Projection information is not needed there: parallel (output) vs. reduction
+   (contracted) loops are recoverable from the lowered IR — a loop is parallelizable
+   iff its index appears in the index vector of every materialized `Set` beneath it,
+   the same property `validate_parallel` enforces. Scheduling post-optimization also
+   means inlined elementwise epilogues get tiled together with the contraction for
+   free.
+2. *Phase ordering across backends*: implementation order is **Metal first**, then cc's
+   serial fallback, then CUDA (CI-only here) — the CUDA-centric phase list below
+   predates that decision; treat it as a catalogue of transforms and benchmark targets,
+   not a sequence.
+
+**Remaining work** — the transform layer, now specified in
+[schedule-ir-optops](schedule-ir-optops.md) (elaborated 2026-07-04), which supersedes
+Phases 1–5 as the implementation plan; this document remains the requirements and
+benchmark-criteria reference:
+
+- Split/Swap/Retype/Unroll transforms + the default GPU annotator preset (subsumes
+  Phases 1–2; the annotator is what makes *every* kernel stop running single-threaded).
+- `Stage` (shared-tile staging with cooperative loads) — subsumes Phase 3.
+- Register blocktiling via Split + IR-level Unroll + existing CSE — subsumes Phase 4.
+- CPU tiling/packing presets — subsumes Phase 5 (OpenMP/`Cpu_parallel` still deferred).
+- Tiling-parameter configuration and the size-threshold fallback (unchanged ACs below).
+
 ## Status update (2026-06-12)
 
 - Issue #412 is OPEN, milestone v0.8 ("GPU tiling and related optimizations in the polyhedral style"). ROADMAP.md still targets v0.8 for mid-June 2026 with tiling as the lead item — this proposal remains the plan of record.
@@ -34,10 +99,13 @@ Transform OCANNL from single-threaded GPU kernels into properly parallelized, ti
 
 ### Current Architecture
 
-**The single-threaded baseline.** All CUDA kernels currently run with a single thread:
-- `cuda_backend.ml` lines 317-318: `kernel_prep_line = "/* FIXME: single-threaded for now. */if (threadIdx.x != 0 || blockIdx.x != 0) { return; }"`
-- `cuda_backend.ml` line 970: `S.launch_kernel func ~grid_dim_x:1 ~block_dim_x:1 ~shared_mem_bytes:0 stream.runner args`
-- `metal_backend.ml` lines 818-823: dispatches with `threadgroups_per_grid: {1,1,1}` and `width = min max_threads 1`
+**The single-threaded baseline.** *(Superseded 2026-07-04: the guard and hardcoded 1×1
+launches are gone — launch dims now come from `Low_level.launch_dims` on all backends.
+Kernels still run single-threaded in practice only because no pass annotates loops yet.)*
+Original state for reference:
+- `cuda_backend.ml`: `kernel_prep_line = "/* FIXME: single-threaded for now. */if (threadIdx.x != 0 || blockIdx.x != 0) { return; }"` (now `""`, line 362)
+- `cuda_backend.ml`: `S.launch_kernel func ~grid_dim_x:1 ~block_dim_x:1 ~shared_mem_bytes:0 stream.runner args` (now launch-dims-driven, line 1062)
+- `metal_backend.ml`: dispatched with `threadgroups_per_grid: {1,1,1}` and `width = min max_threads 1` (now real dispatch, lines 929-933)
 
 **The IR-to-code pipeline.** Operations flow through:
 1. **Shape system** (`shape.ml`): einsum specs with batch/output/input dimensions. "Input" dims are the contracted (reduction) dimensions in an einsum; "batch" and "output" are non-contracted.
@@ -58,22 +126,26 @@ The tiling strategy maps directly:
 
 ### Key Code Pointers
 
+*(Refreshed 2026-07-04.)*
+
 | Location | Description |
 |----------|-------------|
-| `arrayjit/lib/low_level.ml` lines 33-50 | IR type definition: `For_loop`, `Set`, `Get`, `Local_scope` |
-| `arrayjit/lib/low_level.ml` line 1929 | `loop_over_dims` -- generates nested for-loops from dimension array |
-| `arrayjit/lib/low_level.ml` line 1947 | `unroll_dims` -- full unrolling for small dimensions |
-| `arrayjit/lib/low_level.ml` line 1619 | `optimize_proc` -- the optimization pipeline entry point |
-| `arrayjit/lib/low_level.ml` line 169 | `optimized` record type (traced_store, llc, merge_node) |
-| `arrayjit/lib/assignments.ml` lines 282-451 | `loop_accum` -- lowers `Accum_op` to `For_loop` nests with projection-based indexing |
-| `arrayjit/lib/indexing.ml` lines 137-157 | `projections` type with `product_space`, `product_iterators`, `project_lhs`, `project_rhs` |
-| `arrayjit/lib/c_syntax.ml` lines 16-75 | `C_syntax_config` module type -- backend-specific hooks |
-| `arrayjit/lib/c_syntax.ml` line 331 | `pp_ll` -- For_loop to C for-loop emission |
-| `arrayjit/lib/c_syntax.ml` line 842 | `compile_proc` -- kernel function assembly, `kernel_prep_line` emission |
-| `arrayjit/lib/cuda_backend.ml` lines 310-390 | `Cuda_syntax_config` -- CUDA-specific types, builtins |
-| `arrayjit/lib/cuda_backend.ml` line 970 | Kernel launch with hardcoded `grid_dim_x:1, block_dim_x:1` |
+| `arrayjit/lib/low_level.ml:42,59` | `axis_type` and `For_loop` with the `axis` field |
+| `arrayjit/lib/low_level.ml:79,83` | `Workgroup_barrier` and the `If` guard statement |
+| `arrayjit/lib/low_level.ml:222-227` | `optimized` record type, incl. `workgroup_shared` |
+| `arrayjit/lib/low_level.ml:2498-2672` | `hardware_axes`, `launch_dims`, `validate_parallel`, `guard_annotated_extents` |
+| `arrayjit/lib/low_level.ml:3109` | `optimize_proc` -- virtualize → simplify → CSE → `hoist_cross_statement_cse` |
+| `arrayjit/lib/low_level.ml:3448,3467` | `loop_over_dims` / `unroll_dims` |
+| `arrayjit/lib/assignments.ml:311,490` | `loop_accum` / `loop_accum_rev` -- projection-driven lowering |
+| `arrayjit/lib/indexing.ml:139-146,172-189` | `axis_index` (incl. `Affine` -- Split's substitution target); `projections` |
+| `arrayjit/lib/c_syntax.ml:73-84` | `C_syntax_config` hooks: `hardware_index`, `barrier_syntax`, `shared_decl_prefix` |
+| `arrayjit/lib/c_syntax.ml:475,484` | `pp_ll`; its `For_loop` case branches on `axis` (hardware binding at 527) |
+| `arrayjit/lib/c_syntax.ml:1134-1354` | `compile_proc` -- validates, injects guards, returns launch dims |
+| `arrayjit/lib/backend_intf.ml:198`, `backends.ml:486-492` | the `?lowered_transform` seam -- where the tiling/schedule pass plugs in |
+| `arrayjit/lib/cuda_backend.ml:334-390,1062` | `Cuda_syntax_config` (incl. `hardware_index` at 372); launch-dims-driven launch |
 | `arrayjit/lib/builtins_cuda.ml` | CUDA builtins: vector types (`float4_t`, `half8_t`), FMA, conversions |
-| `arrayjit/lib/metal_backend.ml` lines 818-823 | Metal dispatch with 1 threadgroup |
+| `arrayjit/lib/metal_backend.ml:445-454,854,929-933` | `gid`/`lid` extra args + `hardware_index`; block-product validation; real dispatch |
+| `test/operations/hardware_axes_parity.ml`, `hardware_workgroup_reduce.ml` | parity-test templates for annotated kernels |
 | `ROADMAP.md` lines 118-150 | v0.8 milestone definition |
 
 ### Related Work
@@ -95,6 +167,14 @@ The optimization techniques are well-documented in the articles collected in iss
 - [gau-nernst: Blackwell tcgen05](https://gau-nernst.github.io/tcgen05/) -- next-gen tensor core architecture
 
 ## Approach
+
+> **Superseded as a plan (2026-07-04).** The five phases below are kept as the
+> catalogue of transforms and benchmark targets; the implementation plan is now
+> [schedule-ir-optops](schedule-ir-optops.md) (Phases S1–S4), operating at the
+> `?lowered_transform` seam with Metal-first backend ordering. Mapping: Phase 1 → S1
+> `Split` (as a schedule transform, not a `loop_accum` change); Phase 2 → landed
+> infrastructure + S1's default annotator preset; Phase 3 → landed IR constructs + S2
+> `Stage`; Phase 4 → S3 (Split + materializing Unroll + existing CSE); Phase 5 → S4.
 
 The implementation is structured in five phases, each building on the previous and producing a testable, committable increment. Metal backend parallelism and tensor core support are deferred to follow-up work.
 
