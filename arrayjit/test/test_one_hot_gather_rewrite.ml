@@ -39,6 +39,9 @@ let summarize (llc : LL.t) : int * int =
     | LL.Set { llsc; _ } -> scal llsc
     | LL.Set_from_vec { arg = s, _; _ } -> scal s
     | LL.Set_local (_, s) -> scal s
+    | LL.If { cond = c, _; body } ->
+        scal c;
+        proc body
   and scal (s : LL.scalar_t) =
     match s with
     | LL.Get_dynamic { dyn_value = v, _; _ } ->

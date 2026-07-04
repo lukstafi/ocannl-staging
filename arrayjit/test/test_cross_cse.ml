@@ -25,6 +25,7 @@ let summarize (llc : LL.t) : int * int * int =
     | LL.Set { llsc; _ } -> count_scalar acc llsc
     | LL.Set_from_vec { arg = s, _; _ } -> count_scalar acc s
     | LL.Set_local (_, s) -> count_scalar acc s
+    | LL.If { cond = c, _; body } -> count_proc (count_scalar acc c) body
   and count_scalar ((dl, ls, gl) as acc) (s : LL.scalar_t) =
     match s with
     | LL.Local_scope { body; _ } -> count_proc (dl, ls + 1, gl) body

@@ -80,6 +80,14 @@ type t =
       (** Workgroup-scoped synchronization ([__syncthreads()] / [threadgroup_barrier]). An opaque
           effectful statement: no CSE, hoisting, or code motion across it. Grid-scoped
           synchronization is deliberately not representable. *)
+  | If of { cond : scalar_arg; body : t }
+      (** Guarded statement: [body] executes iff [cond] is nonzero (renders as
+          [if (cond != 0) { body }], mirroring how [Where] renders its condition). Introduced by
+          launch-extent guards on hardware-annotated loops whose extent is smaller than the per-slot
+          launch dimension (docs/proposals/axis-types-for-loops.md §2, construct-then-fold:
+          [simplify_llc] erases a guard whose condition an interval proves), and available to
+          hand-built IR. A conditional write is never a definite write; virtualization treats
+          guarded computations as non-inlineable in v1. *)
 [@@deriving sexp_of, equal]
 
 and scalar_t =
@@ -361,6 +369,7 @@ and proc_mentions_symbol (s : Indexing.symbol) (llc : t) : bool =
   | Set_local (_, llsc) -> scalar_mentions_symbol s llsc
   | Seq (a, b) -> proc_mentions_symbol s a || proc_mentions_symbol s b
   | For_loop { body; _ } -> proc_mentions_symbol s body
+  | If { cond = c, _; body } -> scalar_mentions_symbol s c || proc_mentions_symbol s body
   | Zero_out _ | Declare_local _ | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier ->
       false
 
@@ -527,6 +536,9 @@ let visit_llc traced_store ~merge_node_id reverse_node_map ~max_visits llc =
     | Comment _ -> ()
     | Staged_compilation _ -> ()
     | Workgroup_barrier -> ()
+    | If { cond = c, _; body } ->
+        loop_scalar env None c;
+        loop body
   and loop_scalar env (access_pos : int array option) llsc =
     let loop = loop_scalar env access_pos in
     match llsc with
@@ -730,6 +742,10 @@ let%diagn2_sexp check_and_store_virtual computations_table traced static_indices
     (* A barrier is an opaque effect: a computation containing one cannot be inlined/recomputed.
        Defensive: schedule transforms run after virtualization, so this should be unreachable. *)
     | Workgroup_barrier -> raise @@ Non_virtual 141
+    (* Conservative in v1: a guarded computation is not inlined (a conditional write is not a
+       definite write, so recomputing it at the read site could read an unset scope). Defensive:
+       launch-extent guards are introduced at backend-compile time, after virtualization. *)
+    | If _ -> raise @@ Non_virtual 142
   and loop_scalar ~env_dom ~loop_ranges llsc =
     match llsc with
     | Constant _ | Constant_bits _ -> ()
@@ -1132,8 +1148,9 @@ let%track7_sexp inline_computation ~id
       | Declare_local _ -> None
       | Comment _ -> Some llc
       | Staged_compilation _ -> Some llc
-      (* Unreachable: [check_and_store_virtual] rejects computations containing barriers. *)
-      | Workgroup_barrier -> assert false
+      (* Unreachable: [check_and_store_virtual] rejects computations containing barriers and
+         guarded statements. *)
+      | Workgroup_barrier | If _ -> assert false
     and loop_scalar env llsc : scalar_t =
       match llsc with
       | Constant _ | Constant_bits _ -> llsc
@@ -1320,6 +1337,12 @@ let virtual_llc computations_table traced_store reverse_node_map static_indices 
     | Comment _ -> llc
     | Staged_compilation _ -> llc
     | Workgroup_barrier -> llc
+    | If { cond = c, prec; body } ->
+        If
+          {
+            cond = (loop_scalar ~process_for ~owned ~in_storage_pass c, prec);
+            body = loop_proc ~process_for ~owned ~in_storage_pass body;
+          }
   and loop_scalar ~process_for ~owned ~in_storage_pass (llsc : scalar_t) : scalar_t =
     let loop = loop_scalar ~process_for ~owned ~in_storage_pass in
     match llsc with
@@ -1426,6 +1449,10 @@ let cleanup_virtual_llc ~static_indices (llc : t) : t =
     | Comment _ -> Some llc
     | Staged_compilation _ -> Some llc
     | Workgroup_barrier -> Some llc
+    | If { cond = c, prec; body } ->
+        (* The guard is elided when its cleaned body is empty, like an empty loop. *)
+        Option.map (loop_proc ~balanced ~env_dom body) ~f:(fun body : t ->
+            If { cond = (loop_scalar ~balanced ~env_dom c, prec); body })
   and loop_scalar ~balanced ~env_dom (llsc : scalar_t) : scalar_t =
     let loop = loop_scalar ~balanced ~env_dom in
     match llsc with
@@ -1522,6 +1549,7 @@ and substitute_proc ~var ~value llc =
   | Comment _ -> llc
   | Staged_compilation _ -> llc
   | Workgroup_barrier -> llc
+  | If { cond = c, prec; body } -> If { cond = (loop_scalar c, prec); body = loop_proc body }
 
 (** {2 Interval analysis over [scalar_t]}
 
@@ -1804,6 +1832,15 @@ let simplify_llc static_indices llc =
     | Comment _ -> llc
     | Staged_compilation _ -> llc
     | Workgroup_barrier -> llc
+    | If { cond = c, cprec; body } -> (
+        (* Construct-then-fold (axis-types proposal §2): a guard whose condition the interval
+           environment decides is erased -- provably true folds to the body, provably false to
+           [Noop]. The comparison folds happen inside [loop_scalar]. *)
+        let c', _ = loop_scalar (c, cprec) in
+        match c' with
+        | Constant f when Float.(f = 0.) -> Noop
+        | Constant _ -> loop body
+        | _ -> If { cond = (c', cprec); body = loop body })
   and loop_scalar ~ienv ((llsc, prec) : scalar_t * Ops.prec) : scalar_t * Ops.prec =
     let loop_scalar = loop_scalar ~ienv in
     let loop_proc = loop_proc ~ienv in
@@ -2005,6 +2042,7 @@ let simplify_llc static_indices llc =
     | Set { tn; llsc; _ } -> check_float tn llsc
     | Set_from_vec { tn; arg = arg_scalar, _; _ } -> check_float tn arg_scalar
     | Set_local (id, llsc) -> check_float id.tn llsc
+    | If { body; _ } -> loop body
     | Declare_local _ | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier -> ()
   and check_float tn llsc =
     let loop = check_float tn in
@@ -2094,6 +2132,8 @@ let cse_equal_scalar s1 s2 =
     (* Conservative: computations containing barriers are never judged alpha-equivalent --
        deduplicating them would delete a synchronization point. *)
     | Workgroup_barrier, _ -> false
+    (* Conservative in v1: guarded statements are not deduplicated. *)
+    | If _, _ -> false
     | _ -> false
   and equal_scalar (a : scalar_t) (b : scalar_t) : bool =
     match (a, b) with
@@ -2182,6 +2222,11 @@ let eliminate_common_subexpressions llc =
           let llsc = loop_scalar llsc in
           seen := saved;
           Set_local (id, llsc)
+      | If { cond = c, prec; body } ->
+          let saved = !seen in
+          let c = loop_scalar c in
+          seen := saved;
+          If { cond = (c, prec); body = loop_proc body }
       | Declare_local _ -> llc
     in
     loop_scalar llsc
@@ -2196,6 +2241,7 @@ let eliminate_common_subexpressions llc =
     | Set_from_vec { tn; idcs; length; vec_unop; arg = arg_scalar, arg_prec; debug } ->
         Set_from_vec { tn; idcs; length; vec_unop; arg = (cse_scalar arg_scalar, arg_prec); debug }
     | Set_local (id, llsc) -> Set_local (id, cse_scalar llsc)
+    | If { cond = c, prec; body } -> If { cond = (cse_scalar c, prec); body = loop_proc body }
   in
   loop_proc llc
 
@@ -2275,6 +2321,9 @@ let reads_of_body (body : t) : Set.M(Tn).t =
     | Set { llsc; _ } -> loop_scalar llsc
     | Set_from_vec { arg = arg_scalar, _; _ } -> loop_scalar arg_scalar
     | Set_local (_, llsc) -> loop_scalar llsc
+    | If { cond = c, _; body } ->
+        loop_scalar c;
+        loop_proc body
   and loop_scalar (llsc : scalar_t) =
     match llsc with
     | Get (tn, _) -> acc := Set.add !acc tn
@@ -2317,6 +2366,7 @@ let writes_of_stmt (stmt : t) : Set.M(Tn).t =
         loop a;
         loop b
     | For_loop { body; _ } -> loop body
+    | If { body; _ } -> loop body
     | Noop | Comment _ | Staged_compilation _ | Declare_local _ | Set_local _ | Workgroup_barrier ->
         ()
   in
@@ -2346,6 +2396,7 @@ let reads_scope_before_set (target : scope_id) (body : t) : bool =
         false
     | Seq (a, b) -> proc_has_read a || proc_has_read b
     | For_loop { body; _ } -> proc_has_read body
+    | If { cond = c, _; body } -> scalar_has_read c || proc_has_read body
     | Set { llsc; _ } -> scalar_has_read llsc
     | Set_from_vec { arg = s, _; _ } -> scalar_has_read s
     | Set_local (_, llsc) -> scalar_has_read llsc
@@ -2369,6 +2420,10 @@ let reads_scope_before_set (target : scope_id) (body : t) : bool =
         | `Read -> `Read
         | `Written -> if from_ <= to_ then `Written else `Neither
         | `Neither -> `Neither)
+    | If { cond = c, _; body } -> (
+        (* A guarded write is never a definite write. *)
+        if scalar_has_read c then `Read
+        else match scan body with `Read -> `Read | `Written | `Neither -> `Neither)
   in
   match scan body with `Written -> false | `Read | `Neither -> true
 
@@ -2385,6 +2440,7 @@ let rec contains_barrier (llc : t) : bool =
   | Set { llsc; _ } -> scalar_contains_barrier llsc
   | Set_from_vec { arg = s, _; _ } -> scalar_contains_barrier s
   | Set_local (_, llsc) -> scalar_contains_barrier llsc
+  | If { cond = c, _; body } -> scalar_contains_barrier c || contains_barrier body
   | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ -> false
 
 and scalar_contains_barrier (llsc : scalar_t) : bool =
@@ -2396,6 +2452,219 @@ and scalar_contains_barrier (llsc : scalar_t) : bool =
   | Binop (_, (s1, _), (s2, _)) -> scalar_contains_barrier s1 || scalar_contains_barrier s2
   | Unop (_, (s, _)) -> scalar_contains_barrier s
   | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> false
+
+(** {2 Hardware axis analyses}
+
+    Phase B of docs/proposals/axis-types-for-loops.md: pure analyses of hardware-annotated loops.
+    Hardware slot assignment is positional, not stored in the IR: among a kernel's loops of one
+    kind, the innermost binds [.x] (slot 0), the next [.y], then [.z] — the slot of a loop is the
+    maximum nesting depth of same-kind annotated loops strictly inside it, so sibling nests align
+    positionally. [Grid] occupies the grid dimensions; [Workgroup] and [Workgroup_reduce] share the
+    block/threadgroup dimensions. *)
+
+type launch_dims = { grid : int array; block : int array } [@@deriving sexp_of, equal]
+
+let hardware_kind_of_axis = function
+  | Grid -> Some `Grid
+  | Workgroup | Workgroup_reduce -> Some `Workgroup
+  | Serial | Unrolled -> None
+
+let hardware_kind_label = function `Grid -> "Grid" | `Workgroup -> "Workgroup"
+
+(* Max nesting depth of [kind]-annotated loops within [llc]. Statement tree only: annotated loops
+   inside [Local_scope] bodies are rejected by [validate_parallel]. *)
+let rec hardware_depth kind (llc : t) : int =
+  match llc with
+  | For_loop { axis; body; _ } ->
+      let d = hardware_depth kind body in
+      if Option.value_map (hardware_kind_of_axis axis) ~default:false ~f:(Poly.equal kind) then
+        d + 1
+      else d
+  | Seq (a, b) -> max (hardware_depth kind a) (hardware_depth kind b)
+  | If { body; _ } -> hardware_depth kind body
+  | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Set _ | Set_from_vec _ | Set_local _
+  | Declare_local _ | Workgroup_barrier ->
+      0
+
+type hardware_axis_info = {
+  ha_index : Indexing.symbol;
+  ha_kind : [ `Grid | `Workgroup ];
+  ha_slot : int;  (** Positional: the innermost same-kind loop binds [.x] = slot 0. *)
+  ha_from_ : int;
+  ha_extent : int;  (** [to_ - from_ + 1]. *)
+}
+
+(** All hardware-annotated loops of [llc] in pre-order, with their positional slots. *)
+let hardware_axes (llc : t) : hardware_axis_info list =
+  let acc = ref [] in
+  let rec walk llc =
+    match llc with
+    | For_loop { axis; body; index; from_; to_; _ } ->
+        Option.iter (hardware_kind_of_axis axis) ~f:(fun kind ->
+            acc :=
+              {
+                ha_index = index;
+                ha_kind = kind;
+                ha_slot = hardware_depth kind body;
+                ha_from_ = from_;
+                ha_extent = to_ - from_ + 1;
+              }
+              :: !acc);
+        walk body
+    | Seq (a, b) ->
+        walk a;
+        walk b
+    | If { body; _ } -> walk body
+    | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Set _ | Set_from_vec _ | Set_local _
+    | Declare_local _ | Workgroup_barrier ->
+        ()
+  in
+  walk llc;
+  List.rev !acc
+
+let slot_max_extent axes kind slot =
+  List.fold axes ~init:1 ~f:(fun m a ->
+      if Poly.equal a.ha_kind kind && a.ha_slot = slot then max m a.ha_extent else m)
+
+(** Launch dimensions: per-slot maximum extents over the kernel's annotated loops ([.x], [.y],
+    [.z]; all-1s for all-[Serial] code). Smaller-extent sibling bindings are wrapped in [If] guards
+    by {!guard_annotated_extents}. *)
+let launch_dims (llc : t) : launch_dims =
+  let axes = hardware_axes llc in
+  let grid = [| 1; 1; 1 |] and block = [| 1; 1; 1 |] in
+  List.iter axes ~f:(fun a ->
+      if a.ha_slot < 3 then (
+        let arr = match a.ha_kind with `Grid -> grid | `Workgroup -> block in
+        arr.(a.ha_slot) <- max arr.(a.ha_slot) a.ha_extent));
+  { grid; block }
+
+(* Whether any [Local_scope] body within [llc]'s scalars contains a hardware-annotated loop. *)
+let rec scalar_scopes_have_annotated (llc : t) : bool =
+  let scalar (llsc : scalar_t) : bool =
+    let rec go = function
+      | Local_scope { body; _ } ->
+          (not (List.is_empty (hardware_axes body))) || scalar_scopes_have_annotated body
+      | Get_dynamic { dyn_value = v, _; _ } -> go v
+      | Ternop (_, (s1, _), (s2, _), (s3, _)) -> go s1 || go s2 || go s3
+      | Binop (_, (s1, _), (s2, _)) -> go s1 || go s2
+      | Unop (_, (s, _)) -> go s
+      | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ ->
+          false
+    in
+    go llsc
+  in
+  match llc with
+  | Seq (a, b) -> scalar_scopes_have_annotated a || scalar_scopes_have_annotated b
+  | For_loop { body; _ } -> scalar_scopes_have_annotated body
+  | If { cond = c, _; body } -> scalar c || scalar_scopes_have_annotated body
+  | Set { llsc; _ } -> scalar llsc
+  | Set_from_vec { arg = s, _; _ } -> scalar s
+  | Set_local (_, llsc) -> scalar llsc
+  | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier ->
+      false
+
+(** Backend-independent well-formedness of hardware annotations (axis-types proposal §2). A no-op
+    for all-[Serial] code. Raises [Invalid_argument] on: annotated loops with [from_ <> 0]; more
+    than 3 slots of one kind; annotated loops inside [Local_scope] bodies; a kernel containing
+    barriers whose same-slot workgroup extents differ (a barrier under divergent control flow is
+    UB) or with a barrier lexically under an [If] guard; and writes to materialized tensor nodes
+    lexically outside all annotated loops (every hardware thread would execute them, racing with
+    the annotated writes — there is no grid-wide synchronization). Cannot prove iteration
+    independence; that is the annotating pass's obligation. *)
+let validate_parallel (llc : t) : unit =
+  let axes = hardware_axes llc in
+  if not (List.is_empty axes) then (
+    List.iter axes ~f:(fun a ->
+        if a.ha_from_ <> 0 then
+          invalid_arg
+            ("Low_level.validate_parallel: annotated loop " ^ Indexing.symbol_ident a.ha_index
+           ^ " must start at 0, starts at " ^ Int.to_string a.ha_from_);
+        if a.ha_slot > 2 then
+          invalid_arg
+            ("Low_level.validate_parallel: more than 3 " ^ hardware_kind_label a.ha_kind
+           ^ " axes in one kernel (loop " ^ Indexing.symbol_ident a.ha_index ^ " needs slot "
+           ^ Int.to_string a.ha_slot ^ ")"));
+    if scalar_scopes_have_annotated llc then
+      invalid_arg "Low_level.validate_parallel: hardware-annotated loop inside a Local_scope body";
+    if contains_barrier llc then (
+      List.iter axes ~f:(fun a ->
+          match a.ha_kind with
+          | `Workgroup ->
+              let m = slot_max_extent axes `Workgroup a.ha_slot in
+              if a.ha_extent <> m then
+                invalid_arg
+                  ("Low_level.validate_parallel: kernel contains barriers but workgroup extents \
+                    differ at slot " ^ Int.to_string a.ha_slot
+                 ^ " (a barrier under divergent control flow is UB): "
+                  ^ Int.to_string a.ha_extent ^ " vs " ^ Int.to_string m)
+          | `Grid -> ());
+      let rec no_guarded_barrier llc =
+        match llc with
+        | If { body; _ } ->
+            if contains_barrier body then
+              invalid_arg "Low_level.validate_parallel: barrier under an If guard is divergent"
+        | Seq (a, b) ->
+            no_guarded_barrier a;
+            no_guarded_barrier b
+        | For_loop { body; _ } -> no_guarded_barrier body
+        | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Set _ | Set_from_vec _
+        | Set_local _ | Declare_local _ | Workgroup_barrier ->
+            ()
+      in
+      no_guarded_barrier llc);
+    let rec check_writes ~in_hw llc =
+      match llc with
+      | For_loop { axis; body; _ } ->
+          check_writes ~in_hw:(in_hw || Option.is_some (hardware_kind_of_axis axis)) body
+      | Seq (a, b) ->
+          check_writes ~in_hw a;
+          check_writes ~in_hw b
+      | If { body; _ } -> check_writes ~in_hw body
+      | (Set { tn; _ } | Set_from_vec { tn; _ } | Zero_out tn) when not in_hw ->
+          if Tn.is_materialized_force tn 160 then
+            invalid_arg
+              ("Low_level.validate_parallel: write to materialized node " ^ Tn.debug_name tn
+             ^ " outside all hardware-annotated loops: every hardware thread would execute it, \
+                racing with the annotated writes")
+      | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Set _ | Set_from_vec _ | Set_local _
+      | Declare_local _ | Workgroup_barrier ->
+          ()
+    in
+    check_writes ~in_hw:false llc)
+
+(** Wraps the body of each hardware-annotated loop whose extent is smaller than its slot's launch
+    dimension in an [If (index < extent)] guard, for the kinds [should_guard] selects (backends
+    binding the axis in hardware; the serial fallback iterates the true extent and needs no
+    guard). Construct-then-fold: extents are non-negative ints at the signed index width, so every
+    emitted conjunct is correct unfolded; the common equal-extent case emits nothing. *)
+let guard_annotated_extents ~(should_guard : [ `Grid | `Workgroup ] -> bool) (llc : t) : t =
+  let axes = hardware_axes llc in
+  let iprec = Ops.index_prec () in
+  let rec walk llc =
+    match llc with
+    | For_loop ({ axis; index; to_; body; _ } as fc) -> (
+        let body = walk body in
+        match hardware_kind_of_axis axis with
+        | Some kind when should_guard kind ->
+            let slot = hardware_depth kind body in
+            let m = slot_max_extent axes kind slot in
+            if to_ + 1 < m then
+              let cond =
+                Binop
+                  ( Ops.Cmplt,
+                    (Embed_index (Indexing.Iterator index), iprec),
+                    (Constant (Float.of_int (to_ + 1)), iprec) )
+              in
+              For_loop { fc with body = If { cond = (cond, iprec); body } }
+            else For_loop { fc with body }
+        | _ -> For_loop { fc with body })
+    | Seq (a, b) -> Seq (walk a, walk b)
+    | If { cond; body } -> If { cond; body = walk body }
+    | ( Noop | Comment _ | Staged_compilation _ | Zero_out _ | Set _ | Set_from_vec _ | Set_local _
+      | Declare_local _ | Workgroup_barrier ) as other ->
+        other
+  in
+  walk llc
 
 (** Hoists shared [Local_scope] computations from sibling statements to the enclosing scope.
     Operates on a flat list of sibling statements. *)
@@ -2736,6 +3005,8 @@ let rewrite_one_hot_reductions ?(static_indices = []) (llc : t) : t =
         | Set_from_vec { tn; idcs; length; vec_unop; arg = s, p; debug } ->
             Set_from_vec { tn; idcs; length; vec_unop; arg = (loop_scalar ~ienv s, p); debug }
         | Set_local (id, llsc) -> Set_local (id, loop_scalar ~ienv llsc)
+        | If { cond = c, p; body } ->
+            If { cond = (loop_scalar ~ienv c, p); body = loop_proc ~ienv body }
         | ( Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _
           | Workgroup_barrier ) as other ->
             other)
@@ -2785,6 +3056,9 @@ let rec pin_device_written_bounds (llc : t) : unit =
       pin tn;
       pin_scalar_written_bounds s
   | Set_local (_, llsc) -> pin_scalar_written_bounds llsc
+  | If { cond = c, _; body } ->
+      pin_scalar_written_bounds c;
+      pin_device_written_bounds body
 
 and pin_scalar_written_bounds (llsc : scalar_t) : unit =
   match llsc with
@@ -2874,6 +3148,9 @@ let get_ident_within_code ?no_dots ?(blacklist = []) llcs =
     | Set_local ({ tn; _ }, llsc) ->
         visit tn;
         loop_scalar llsc
+    | If { cond = c, _; body } ->
+        loop_scalar c;
+        loop body
     | Declare_local { id = { tn; _ }; _ } -> visit tn
   and loop_scalar fc =
     match fc with
@@ -2936,6 +3213,9 @@ let to_doc_cstyle ?name ?static_indices () llc =
         let body_doc = nest 2 (break 1 ^^ doc_of_code body) in
         group (header ^^ body_doc ^^ break 1 ^^ string "}")
     | Workgroup_barrier -> string "workgroup_barrier;"
+    | If { cond = c, cprec; body } ->
+        let header = string "if " ^^ doc_of_float cprec c ^^ string " != 0 {" in
+        group (header ^^ nest 2 (break 1 ^^ doc_of_code body) ^^ break 1 ^^ string "}")
     | Zero_out tn -> string "zero_out " ^^ doc_ident tn ^^ string ";"
     | Set p ->
         let prec = Lazy.force p.tn.prec in
@@ -3044,6 +3324,9 @@ let to_doc ?name ?static_indices () llc =
         let body_doc = nest 2 (break 1 ^^ doc_of_code body) in
         group (header ^^ body_doc ^^ break 1 ^^ string "}")
     | Workgroup_barrier -> string "workgroup_barrier;"
+    | If { cond = c, _; body } ->
+        let header = string "if " ^^ doc_of_float c ^^ string " != 0 {" in
+        group (header ^^ nest 2 (break 1 ^^ doc_of_code body) ^^ break 1 ^^ string "}")
     | Zero_out tn -> string "zero_out " ^^ doc_ident tn ^^ string ";"
     | Set p ->
         let result =

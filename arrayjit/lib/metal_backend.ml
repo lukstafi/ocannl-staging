@@ -400,13 +400,15 @@ module Fresh () = struct
     kparams : (string * kparam_source) list;
     bindings : Indexing.unit_bindings;
     traced_store : Low_level.traced_store;
+    launch : Low_level.launch_dims;
   }
   [@@deriving sexp_of]
 
   type code_batch = {
     metal_source : string; (* Store combined source *)
     compiled_code : Me.Library.t option array; (* Store compiled code per device *)
-    funcs : (string * (string * kparam_source) list) option array; (* func_name * kparams *)
+    funcs : (string * (string * kparam_source) list * Low_level.launch_dims) option array;
+        (* func_name * kparams * launch dims *)
     bindings : Indexing.unit_bindings;
     traced_stores : Low_level.traced_store option array;
   }
@@ -444,6 +446,20 @@ module Fresh () = struct
       [
         "uint3 gid [[threadgroup_position_in_grid]]"; "uint3 lid [[thread_position_in_threadgroup]]";
       ]
+
+    (* Hardware axis bindings (docs/proposals/axis-types-for-loops.md §5): [Grid] loops bind
+       threadgroup positions, [Workgroup] loops thread-in-threadgroup positions, both already
+       passed via [extra_args]. The binding site casts to the signed [loop_index_type]. *)
+    let hardware_index ~kind ~slot =
+      let reg = match kind with `Grid -> "gid" | `Workgroup -> "lid" in
+      match slot with
+      | 0 -> Some (reg ^ ".x")
+      | 1 -> Some (reg ^ ".y")
+      | 2 -> Some (reg ^ ".z")
+      | _ -> None
+
+    let barrier_syntax = Some "threadgroup_barrier(mem_flags::mem_threadgroup);"
+    let shared_decl_prefix = Some "threadgroup "
 
     let ident_blacklist =
       ident_blacklist
@@ -722,7 +738,7 @@ module Fresh () = struct
     in
     let idx_params = Indexing.bound_symbols bindings in
     (* Add Metal address space qualifiers *)
-    let kparams, proc_doc = Syntax.compile_proc ~name idx_params lowered in
+    let kparams, proc_doc, launch = Syntax.compile_proc ~name idx_params lowered in
     let metal_includes = {|#include <metal_stdlib>
 using namespace metal;|} in
     let source =
@@ -737,6 +753,7 @@ using namespace metal;|} in
       kparams;
       bindings;
       traced_store = lowered.traced_store;
+      launch;
     }
 
   let compile_batch ~names bindings lowereds =
@@ -749,8 +766,8 @@ using namespace metal;|} in
       Array.map2_exn names lowereds
         ~f:
           (Option.map2 ~f:(fun name lowered ->
-               let kparams, doc = Syntax.compile_proc ~name idx_params lowered in
-               ((name, kparams), doc)))
+               let kparams, doc, launch = Syntax.compile_proc ~name idx_params lowered in
+               ((name, kparams, launch), doc)))
     in
     let all_proc_docs = List.filter_map (Array.to_list funcs_and_docs) ~f:(Option.map ~f:snd) in
     let final_doc = PPrint.(separate hardline all_proc_docs) in
@@ -823,14 +840,24 @@ using namespace metal;|} in
     (Array.of_list (List.rev !index_to_pool), slots_buf, keep)
 
   let%debug4_sexp link_proc ~prior_context ~library ~func_name
-      ~(kparams : (string * kparam_source) list) ~lowered_bindings ~(ctx_buffers : ctx_buffers) :
-      Task.t =
+      ~(kparams : (string * kparam_source) list) ~(launch : Low_level.launch_dims)
+      ~lowered_bindings ~(ctx_buffers : ctx_buffers) : Task.t =
     let dev = prior_context.device in
     let metal_device = dev.dev in
     let queue = dev.runner.queue in
     let runner_label = get_name dev in
     let func = Me.Library.new_function_with_name library func_name in
     let pso, _ = Me.ComputePipelineState.on_device_with_function metal_device func in
+    (* Device-limit check at pipeline creation (axis-types proposal §4): the threadgroup size
+       derived from Workgroup-annotated loops must fit this pipeline. *)
+    let block_product = launch.block.(0) * launch.block.(1) * launch.block.(2) in
+    let max_threads = Me.ComputePipelineState.get_max_total_threads_per_threadgroup pso in
+    if block_product > max_threads then
+      raise
+      @@ Utils.User_error
+           [%string
+             "Metal: threadgroup size %{block_product#Int} for %{func_name} exceeds \
+              maxTotalThreadsPerThreadgroup %{max_threads#Int}"];
     (* Precompute the pool-index assignment + slot table once (addresses/offsets are stable after
        allocation). [Some (index_to_pool, slots_buf, arr)] iff this routine uses the pooled
        params. *)
@@ -898,14 +925,13 @@ using namespace metal;|} in
                 (* TODO:We could tag logs with a run id. *)
                 assert false);
 
-        (* Dispatch - TODO: Determine grid/group sizes properly *)
-        let max_threads = Me.ComputePipelineState.get_max_total_threads_per_threadgroup pso in
-        let width = Int.min max_threads (* 32 *) 1 in
-        (* Example: Use a small group size *)
-        (* Example: single group *)
+        (* Launch dimensions derived from hardware-annotated loops (axis-types proposal §4);
+           all-Serial kernels dispatch one threadgroup of one thread, as before. *)
         Me.ComputeCommandEncoder.dispatch_threadgroups encoder
-          ~threadgroups_per_grid:{ width = 1; height = 1; depth = 1 }
-          ~threads_per_threadgroup:{ width; height = 1; depth = 1 };
+          ~threadgroups_per_grid:
+            { width = launch.grid.(0); height = launch.grid.(1); depth = launch.grid.(2) }
+          ~threads_per_threadgroup:
+            { width = launch.block.(0); height = launch.block.(1); depth = launch.block.(2) };
 
         Me.ComputeCommandEncoder.end_encoding encoder;
         Me.CommandBuffer.commit command_buffer
@@ -932,7 +958,7 @@ using namespace metal;|} in
     in
     let task =
       link_proc ~prior_context ~library ~func_name:code.func_name ~kparams:code.kparams
-        ~lowered_bindings ~ctx_buffers
+        ~launch:code.launch ~lowered_bindings ~ctx_buffers
     in
     (lowered_bindings, task)
 
@@ -945,9 +971,9 @@ using namespace metal;|} in
 
     let tasks =
       Array.mapi code_batch.funcs ~f:(fun i func_opt ->
-          Option.bind func_opt ~f:(fun (func_name, kparams) ->
+          Option.bind func_opt ~f:(fun (func_name, kparams, launch) ->
               Option.map ctx_buffers_opts.(i) ~f:(fun ctx_buffers ->
-                  link_proc ~prior_context ~library ~func_name ~kparams ~lowered_bindings
+                  link_proc ~prior_context ~library ~func_name ~kparams ~launch ~lowered_bindings
                     ~ctx_buffers)))
     in
     (lowered_bindings, tasks)

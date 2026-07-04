@@ -69,6 +69,12 @@ type t =
       (** Workgroup-scoped synchronization ([__syncthreads()] / [threadgroup_barrier]). An opaque
           effectful statement: no CSE, hoisting, or code motion across it. Grid-scoped
           synchronization is deliberately not representable. *)
+  | If of { cond : scalar_arg; body : t }
+      (** Guarded statement: [body] executes iff [cond] is nonzero (renders as
+          [if (cond != 0) { body }]). Introduced by launch-extent guards on hardware-annotated
+          loops (docs/proposals/axis-types-for-loops.md §2); [simplify_llc] erases a guard whose
+          condition an interval proves. A conditional write is never a definite write;
+          virtualization treats guarded computations as non-inlineable in v1. *)
 [@@deriving sexp_of, equal]
 
 and scalar_t =
@@ -108,6 +114,41 @@ val loop_over_padding_region :
 (** Generate loops that iterate only over the padding margins of a tensor. For dimensions with
     padding, generates separate loops for left margin, middle (recursing), and right margin. The
     middle region continues recursing to find padding in other dimensions. *)
+
+(** {2 Hardware axis analyses}
+
+    Phase B of docs/proposals/axis-types-for-loops.md. Hardware slot assignment is positional, not
+    stored in the IR: among a kernel's annotated loops of one kind, the innermost binds [.x] (slot
+    0), the next [.y], then [.z]; [Workgroup] and [Workgroup_reduce] share the block/threadgroup
+    slot space. *)
+
+type launch_dims = { grid : int array; block : int array } [@@deriving sexp_of, equal]
+(** Arrays of length 3 ([.x], [.y], [.z]); all-1s for all-[Serial] code. *)
+
+type hardware_axis_info = {
+  ha_index : Indexing.symbol;
+  ha_kind : [ `Grid | `Workgroup ];
+  ha_slot : int;  (** Positional: the innermost same-kind loop binds [.x] = slot 0. *)
+  ha_from_ : int;
+  ha_extent : int;  (** [to_ - from_ + 1]. *)
+}
+
+val hardware_axes : t -> hardware_axis_info list
+(** All hardware-annotated loops in pre-order, with their positional slots. *)
+
+val launch_dims : t -> launch_dims
+(** Per-slot maximum extents over the kernel's annotated loops. *)
+
+val validate_parallel : t -> unit
+(** Backend-independent well-formedness of hardware annotations (axis-types proposal §2); a no-op
+    for all-[Serial] code. Raises [Invalid_argument] on structural violations: nonzero [from_],
+    more than 3 slots per kind, annotated loops inside [Local_scope] bodies, barriers under
+    divergent extents or [If] guards, and writes to materialized nodes outside all annotated
+    loops. Cannot prove iteration independence — that is the annotating pass's obligation. *)
+
+val guard_annotated_extents : should_guard:([ `Grid | `Workgroup ] -> bool) -> t -> t
+(** Wraps bodies of annotated loops whose extent is below their slot's launch dimension in
+    [If (index < extent)] guards, for the kinds the backend binds in hardware. *)
 
 (** {2 Optimization} *)
 

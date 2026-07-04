@@ -70,6 +70,21 @@ module type C_syntax_config = sig
   val vec_unop_syntax : Ops.prec -> Ops.vec_unop -> PPrint.document -> PPrint.document
   val convert_precision : from:Ops.prec -> to_:Ops.prec -> string * string
 
+  val hardware_index : kind:[ `Grid | `Workgroup ] -> slot:int -> string option
+  (** The hardware register expression an annotated loop's index binds to (e.g. ["blockIdx.x"],
+      ["gid.y"]), or [None] when the backend cannot bind this axis in hardware — the loop then
+      renders as a serial [for] (a legal implementation absent barriers; see
+      docs/proposals/axis-types-for-loops.md §2/§5). Slots are positional: 0 = [.x], 1 = [.y],
+      2 = [.z]. *)
+
+  val barrier_syntax : string option
+  (** Workgroup barrier statement ([__syncthreads();] / [threadgroup_barrier(...);]); [None] makes
+      [Workgroup_barrier] a compile-time error (serialization cannot implement a barrier). *)
+
+  val shared_decl_prefix : string option
+  (** Declaration prefix for workgroup-shared placements ([__shared__ ] / [threadgroup ]); [None]
+      makes a non-empty [workgroup_shared] set a compile-time error. *)
+
   val kernel_log_param : (string * string) option
   (** Kernel parameter for logging, if any. E.g., (Some ("int", "log_id")) or (Some ("const char*",
       "log_file_name")). *)
@@ -116,6 +131,12 @@ struct
   let typ_of_prec = Ops.c_typ_of_prec
   let vec_typ_of_prec = Ops.c_vec_typ_of_prec
   let ptr_param_style = `Per_param
+
+  (* Plain C backends bind no hardware axes: annotated loops fall back to serial [for] loops
+     (sound absent barriers), and barriers / shared placements are compile-time errors. *)
+  let hardware_index ~kind:_ ~slot:_ = None
+  let barrier_syntax = None
+  let shared_decl_prefix = None
   let float_log_style = if Input.full_printf_support then "%g" else "%de-3"
 
   let styled_log_arg doc =
@@ -418,6 +439,16 @@ module C_syntax (B : C_syntax_config) = struct
      [Zero_out] loop that the declaration's [= {0}] already covers). *)
   let current_traced_store : Low_level.traced_store option ref = ref None
 
+  (* Set by [compile_proc]: the kernel's hardware-annotated loops with their positional slots
+     (docs/proposals/axis-types-for-loops.md §1/§5), consulted by [pp_ll]'s [For_loop] case to
+     render hardware index bindings. *)
+  let current_hardware_axes : Low_level.hardware_axis_info list ref = ref []
+
+  (* Set by [compile_proc]: nodes placed in workgroup-shared memory. Their declarations carry
+     [shared_decl_prefix] and cannot use [= {0}] (not allowed for [__shared__]/[threadgroup]), so
+     their [Zero_out] is never elided. *)
+  let current_workgroup_shared : Set.M(Tn).t ref = ref (Set.empty (module Tn))
+
   (* A [Zero_out] loop is redundant when the array's declaration already initializes it with [=
      {0}]. That happens for local (non-virtual, non-materialized) declarations whose traced node has
      [zero_initialized_by_code = true]; see [compile_proc]'s [local_decls]. Materialized (on-device)
@@ -430,7 +461,8 @@ module C_syntax (B : C_syntax_config) = struct
         match Hashtbl.find traced_store tn with
         | Some node ->
             node.Low_level.zero_initialized_by_code
-            && not (Tn.is_virtual_force tn 337 || Tn.is_materialized_force tn 338)
+            && (not (Tn.is_virtual_force tn 337 || Tn.is_materialized_force tn 338))
+            && not (Set.mem !current_workgroup_shared tn)
         | None -> false)
 
   (* Tensor node ids whose [Zero_out] has already been encountered during the current [pp_ll]
@@ -449,31 +481,81 @@ module C_syntax (B : C_syntax_config) = struct
         let d2 = pp_ll ~log_set_locals ~in_loop c2 in
         (* Avoid extra hardlines if one side is empty *)
         if PPrint.is_empty d1 then d2 else if PPrint.is_empty d2 then d1 else d1 ^^ hardline ^^ d2
-    | For_loop { index = i; from_; to_; body; trace_it = _; axis } ->
-        (* Phase A of docs/proposals/axis-types-for-loops.md: only [Serial] loops are renderable;
-           hardware bindings (Grid/Workgroup) and unrolling land with the rendering phase. *)
-        (match axis with
-        | Low_level.Serial -> ()
-        | _ ->
-            invalid_arg
-              ("C_syntax.pp_ll: axis type not supported yet: " ^ Low_level.axis_type_label axis));
-        let header =
-          string ("for (" ^ B.loop_index_type)
-          ^^ pp_symbol i ^^ string " = " ^^ PPrint.OCaml.int from_ ^^ semi ^^ space ^^ pp_symbol i
-          ^^ string " <= " ^^ PPrint.OCaml.int to_ ^^ semi ^^ space ^^ string "++" ^^ pp_symbol i
-          ^^ string ")"
+    | For_loop { index = i; from_; to_; body; trace_it = _; axis } -> (
+        (* Rendering phase of docs/proposals/axis-types-for-loops.md (§5): [Serial] loops render as
+           C [for] statements; [Grid]/[Workgroup]/[Workgroup_reduce] loops bind their index to the
+           backend's hardware register (at the signed [loop_index_type] width, with an explicit
+           cast from the unsigned register) when [B.hardware_index] provides one, and fall back to
+           a serial loop otherwise (legal absent barriers); [Unrolled] loops emit the repeated body
+           with the index bound as a per-block constant. *)
+        let body_doc () =
+          let doc = ref (pp_ll ~log_set_locals ~in_loop:true body) in
+          (if Utils.debug_log_from_routines () then
+             let log_doc =
+               let base_message = Printf.sprintf "index %s = %%d\n" (symbol_ident i) in
+               let log_param_doc =
+                 Option.map B.kernel_log_param ~f:(fun (_, name) -> string name)
+               in
+               B.pp_log_statement ~log_param_c_expr_doc:log_param_doc
+                 ~base_message_literal:base_message
+                 ~args_docs:[ pp_symbol i ]
+             in
+             doc := log_doc ^^ hardline ^^ !doc);
+          !doc
         in
-        let body_doc = ref (pp_ll ~log_set_locals ~in_loop:true body) in
-        (if Utils.debug_log_from_routines () then
-           let log_doc =
-             let base_message = Printf.sprintf "index %s = %%d\n" (symbol_ident i) in
-             let log_param_doc = Option.map B.kernel_log_param ~f:(fun (_, name) -> string name) in
-             B.pp_log_statement ~log_param_c_expr_doc:log_param_doc
-               ~base_message_literal:base_message
-               ~args_docs:[ pp_symbol i ]
-           in
-           body_doc := log_doc ^^ hardline ^^ !body_doc);
-        group (header ^^ space ^^ lbrace ^^ nest 2 (hardline ^^ !body_doc) ^^ hardline ^^ rbrace)
+        let serial_loop () =
+          let header =
+            string ("for (" ^ B.loop_index_type)
+            ^^ pp_symbol i ^^ string " = " ^^ PPrint.OCaml.int from_ ^^ semi ^^ space ^^ pp_symbol i
+            ^^ string " <= " ^^ PPrint.OCaml.int to_ ^^ semi ^^ space ^^ string "++" ^^ pp_symbol i
+            ^^ string ")"
+          in
+          group (header ^^ space ^^ lbrace ^^ nest 2 (hardline ^^ body_doc ()) ^^ hardline ^^ rbrace)
+        in
+        let hardware_binding kind =
+          let slot =
+            match
+              List.find !current_hardware_axes ~f:(fun a ->
+                  Indexing.equal_symbol a.Low_level.ha_index i)
+            with
+            | Some a -> a.Low_level.ha_slot
+            | None ->
+                invalid_arg
+                  ("C_syntax.pp_ll: hardware-annotated loop " ^ symbol_ident i
+                 ^ " missing from the slot table (pp_ll called outside compile_proc?)")
+          in
+          match B.hardware_index ~kind ~slot with
+          | None -> serial_loop ()
+          | Some reg ->
+              let cast = "(" ^ String.strip B.loop_index_type ^ ")" in
+              let binding =
+                string ("const " ^ B.loop_index_type)
+                ^^ pp_symbol i
+                ^^ string (" = " ^ cast ^ reg ^ ";")
+              in
+              group
+                (lbrace
+                ^^ nest 2 (hardline ^^ binding ^^ hardline ^^ body_doc ())
+                ^^ hardline ^^ rbrace)
+        in
+        match axis with
+        | Low_level.Serial -> serial_loop ()
+        | Grid -> hardware_binding `Grid
+        | Workgroup | Workgroup_reduce -> hardware_binding `Workgroup
+        | Unrolled ->
+            separate hardline
+            @@ List.init
+                 (to_ - from_ + 1)
+                 ~f:(fun k ->
+                   let binding =
+                     string ("const " ^ B.loop_index_type)
+                     ^^ pp_symbol i
+                     ^^ string (" = " ^ Int.to_string (from_ + k) ^ ";")
+                   in
+                   group
+                     (lbrace
+                     ^^ nest 2 (hardline ^^ binding ^^ hardline ^^ body_doc ())
+                     ^^ hardline ^^ rbrace)))
     | Zero_out tn ->
         let first_touch = not (Hash_set.mem zero_out_seen tn.Tn.id) in
         Hash_set.add zero_out_seen tn.Tn.id;
@@ -711,10 +793,27 @@ module C_syntax (B : C_syntax_config) = struct
           else empty
         in
         num_typ ^^ space ^^ pp_scope_id id ^^ init_zero ^^ semi
-    | Workgroup_barrier ->
-        (* Phase A of docs/proposals/axis-types-for-loops.md: barrier rendering (a [C_syntax_config]
-           hook) lands together with the hardware-binding phase. *)
-        invalid_arg "C_syntax.pp_ll: Workgroup_barrier not supported yet"
+    | Workgroup_barrier -> (
+        match B.barrier_syntax with
+        | Some s -> string s
+        | None ->
+            invalid_arg
+              "C_syntax.pp_ll: Workgroup_barrier not supported by this backend (serialization \
+               cannot implement a barrier)")
+    | If { cond = c, cprec; body } ->
+        (* Guarded statement (axis-types proposal §2): [body] executes iff [cond] is nonzero --
+           C's [if] tests exactly that. *)
+        let local_defs, cond_doc = pp_scalar cprec c in
+        let local_defs = pp_local_defs local_defs in
+        let body_doc = pp_ll ~log_set_locals ~in_loop:true body in
+        let if_doc =
+          group
+            (string "if (" ^^ cond_doc ^^ string ") " ^^ lbrace
+            ^^ nest 2 (hardline ^^ body_doc)
+            ^^ hardline ^^ rbrace)
+        in
+        if PPrint.is_empty local_defs then if_doc
+        else lbrace ^^ nest 2 (hardline ^^ local_defs ^^ hardline ^^ if_doc) ^^ hardline ^^ rbrace
 
   and pp_scalar (prec : Ops.prec) (vcomp : Low_level.scalar_t) :
       (int * PPrint.document) list * PPrint.document =
@@ -1034,13 +1133,27 @@ module C_syntax (B : C_syntax_config) = struct
 
   let compile_proc ~name idx_params
       Low_level.{ traced_store; llc; merge_node; optimize_ctx = _; workgroup_shared } :
-      (string * kparam_source) list * PPrint.document =
+      (string * kparam_source) list * PPrint.document * Low_level.launch_dims =
     let open PPrint in
-    (* Phase A of docs/proposals/axis-types-for-loops.md: the local-declaration pass below would
-       silently emit workgroup-shared nodes as per-thread stack arrays -- wrong sharing semantics.
-       Fail clearly until shared declarations land (with the rendering phase). *)
-    if not (Set.is_empty workgroup_shared) then
-      invalid_arg "C_syntax.compile_proc: workgroup_shared placement not supported yet";
+    (if not (Set.is_empty workgroup_shared) then
+       match B.shared_decl_prefix with
+       | Some _ -> ()
+       | None ->
+           (* The local-declaration pass below would silently emit workgroup-shared nodes as
+              per-thread stack arrays -- wrong sharing semantics. *)
+           invalid_arg
+             "C_syntax.compile_proc: workgroup-shared placement not supported by this backend");
+    Low_level.validate_parallel llc;
+    (* Launch-extent guards (construct-then-fold, axis-types proposal §2), only for kinds this
+       backend binds in hardware -- the serial fallback iterates the true extent. *)
+    let llc =
+      Low_level.guard_annotated_extents
+        ~should_guard:(fun kind -> Option.is_some (B.hardware_index ~kind ~slot:0))
+        llc
+    in
+    let launch = Low_level.launch_dims llc in
+    current_hardware_axes := Low_level.hardware_axes llc;
+    current_workgroup_shared := workgroup_shared;
     current_traced_store := Some traced_store;
     Hash_set.clear zero_out_seen;
     (* The materialized in-context nodes, in deterministic [traced_store] order, with their
@@ -1206,10 +1319,21 @@ module C_syntax (B : C_syntax_config) = struct
                let ident_doc = string (get_ident tn) in
                let num_elems = Tn.num_elems tn in
                let size_doc = OCaml.int num_elems in
-               let init_doc =
-                 if node.Low_level.zero_initialized_by_code then string " = {0}" else empty
+               let is_shared = Set.mem workgroup_shared tn in
+               let prefix_doc =
+                 (* Workgroup-shared placement (axis-types proposal §3): one tile per workgroup
+                    instead of one per thread. [= {0}] is not allowed for shared declarations, so
+                    zero-initialization stays as explicit [Zero_out] code (never elided for shared
+                    nodes; see [zero_out_loop_redundant]). *)
+                 if is_shared then string (Option.value_exn ~here:[%here] B.shared_decl_prefix)
+                 else empty
                in
-               typ_doc ^^ space ^^ ident_doc ^^ brackets size_doc ^^ init_doc ^^ semi ^^ hardline
+               let init_doc =
+                 if node.Low_level.zero_initialized_by_code && not is_shared then string " = {0}"
+                 else empty
+               in
+               prefix_doc ^^ typ_doc ^^ space ^^ ident_doc ^^ brackets size_doc ^^ init_doc ^^ semi
+               ^^ hardline
              else empty)
            (Hashtbl.to_alist traced_store)
     in
@@ -1227,5 +1351,5 @@ module C_syntax (B : C_syntax_config) = struct
     let func_doc =
       func_header ^^ space ^^ lbrace ^^ nest 2 (hardline ^^ !body) ^^ hardline ^^ rbrace
     in
-    (sorted_params, func_doc)
+    (sorted_params, func_doc, launch)
 end

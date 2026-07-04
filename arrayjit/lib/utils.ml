@@ -315,11 +315,15 @@ let build_file fname =
     if String.is_empty prefix then "build_files"
     else filename_concat "build_files" (clean_filename prefix)
   in
+  (* Concurrently running tests share the working directory: tolerate mkdir races (like
+     [diagn_log_file] below). *)
   (try assert (Stdlib.Sys.is_directory build_files_dir)
    with Stdlib.Sys_error _ | Assert_failure _ ->
      (try assert (Stdlib.Sys.is_directory "build_files")
-      with Stdlib.Sys_error _ | Assert_failure _ -> Stdlib.Sys.mkdir "build_files" 0o777);
-     if not (String.is_empty prefix) then Stdlib.Sys.mkdir build_files_dir 0o777);
+      with Stdlib.Sys_error _ | Assert_failure _ -> (
+        try Stdlib.Sys.mkdir "build_files" 0o777 with Stdlib.Sys_error _ -> ()));
+     if not (String.is_empty prefix) then
+       try Stdlib.Sys.mkdir build_files_dir 0o777 with Stdlib.Sys_error _ -> ());
   filename_concat build_files_dir @@ clean_filename fname
 
 let diagn_log_file fname =

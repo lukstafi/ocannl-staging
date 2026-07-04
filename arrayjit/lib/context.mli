@@ -28,10 +28,18 @@ val auto : unit -> t
 
 (** {2 Core operations} *)
 
-val compile : t -> Ir.Assignments.comp -> Ir.Indexing.unit_bindings -> t * routine
+val compile :
+  ?lowered_transform:(Ir.Low_level.optimized -> Ir.Low_level.optimized) ->
+  t ->
+  Ir.Assignments.comp ->
+  Ir.Indexing.unit_bindings ->
+  t * routine
 (** Compile assignments into an executable routine. Returns updated context and the compiled
     routine. The returned context carries the updated compilation frontier for dependency tracking;
-    the input context is unchanged (see {!section:execution_deps}). *)
+    the input context is unchanged (see {!section:execution_deps}). [lowered_transform] rewrites
+    the optimized lowered code before backend compilation — the seam for schedule transforms and
+    for hand-annotating hardware axis types in tests
+    (docs/proposals/axis-types-for-loops.md). *)
 
 val run : t -> routine -> t
 (** Execute a compiled routine. Mutates buffers in-place. Returns updated context with newly

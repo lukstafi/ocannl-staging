@@ -58,6 +58,9 @@ let count_writes_to (llc : Ir.Low_level.t) (id : int) : int =
         hit tn;
         go_scalar s
     | Set_local (_, s) -> go_scalar s
+    | If { cond = c, _; body } ->
+        go_scalar c;
+        go_t body
   and go_scalar : scalar_t -> unit = function
     | Local_scope { body; _ } -> go_t body
     | Get_dynamic { dyn_value = v, _; _ } -> go_scalar v

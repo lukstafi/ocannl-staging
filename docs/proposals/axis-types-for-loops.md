@@ -1,16 +1,56 @@
 # Axis-type annotations on Low_level loops
 
-**Date**: 2026-06-12 (stub); elaborated 2026-07-03; refreshed 2026-07-04
-**Status**: Phase A (representation) **landed** via
-[PR #84](https://github.com/lukstafi/ocannl-staging/pull/84) (merged 2026-07-03) — seeded
-by the tinygrad deep dive ([a-range-is-not-its-shape](../blog/a-range-is-not-its-shape.md),
-port area 2); first site of the decision is
-[#412](https://github.com/ahrefs/ocannl/issues/412)'s grid/block mapping. This refresh
-folds in two sibling landings that touch Phase B's design:
+**Date**: 2026-06-12 (stub); elaborated 2026-07-03; refreshed 2026-07-04; Phases B+C
+landed 2026-07-04
+**Status**: **landed** — Phase A (representation) via
+[PR #84](https://github.com/lukstafi/ocannl-staging/pull/84) (merged 2026-07-03), Phases
+B (rendering + launch) and C (barriers + workgroup-shared) together on 2026-07-04 (see
+"As landed" below for deltas from the design). Seeded by the tinygrad deep dive
+([a-range-is-not-its-shape](../blog/a-range-is-not-its-shape.md), port area 2); first
+site of the decision is [#412](https://github.com/ahrefs/ocannl/issues/412)'s grid/block
+mapping. Two sibling landings shaped Phase B's design:
 [interval-analysis-scalar-t](interval-analysis-scalar-t.md) (Phase A + B v1, PR #88) makes
 the extent-mismatch guards of §2 dischargeable by construction, and
 [signed-index-precision](signed-index-precision.md) (core migration, PR #88) fixes the
 type of the hardware index bindings in §1/§5.
+
+### As landed (Phases B+C, 2026-07-04)
+
+Four deltas from the design as written below:
+
+1. **The IR gained a guarded-statement constructor** `If of { cond : scalar_arg; body : t }`
+   (`low_level.ml`), because §2's extent-mismatch guards were not otherwise representable:
+   `Where` is expression-level, and a suppressed *write* (not just a value) is what a
+   launch guard needs. Pass contract mirrors the barrier's: inert-descend for analyses,
+   `Non_virtual 142` in virtualization, no CSE dedup, a conditional write is never a
+   definite write (`reads_scope_before_set`), and `simplify_llc` folds an
+   interval-decided condition (true → body, false → `Noop`) — the construct-then-fold
+   discipline of §2. Guards are injected at backend-compile time by
+   `Low_level.guard_annotated_extents`, only for axis kinds the backend binds in hardware
+   (the serial fallback iterates the true extent and needs none).
+2. **The annotation seam is `?lowered_transform`** on `Context.compile` /
+   `Backend_common.compile`: an optional `Low_level.optimized -> Low_level.optimized`
+   applied between lowering and backend compilation. The parity tests hand-annotate (and
+   for Phase C wholesale-replace) the lowered code through it; the schedule layer will
+   occupy the same seam.
+3. **Slot assignment for sibling nests** is formalized as: the slot of an annotated loop
+   is the maximum nesting depth of same-kind annotated loops strictly inside it, so
+   sibling nests align positionally (`Low_level.hardware_axes`); `Workgroup` and
+   `Workgroup_reduce` share the block-slot space. `validate_parallel` additionally
+   rejects annotated loops inside `Local_scope` bodies, barriers under `If` guards or
+   divergent workgroup extents, and writes to materialized nodes lexically outside all
+   annotated loops (per-thread redundant execution would race).
+4. **`Unrolled` rendering** needs no substitution machinery: the body is emitted
+   repeatedly with the index bound as a per-block constant
+   (`{ const int32_t iN = k; ... }`).
+
+Tests: `test/operations/hardware_axes_parity.ml` (Grid+Workgroup elementwise parity vs.
+the Serial twin, unequal Grid extents exercising the `If` guard, `Unrolled` variant;
+structural checks on `build_files/` source, backend-dispatched) and
+`test/operations/hardware_workgroup_reduce.ml` (hand-built GROUP_REDUCE: shared tile,
+barriers, tree combine — executed parity on Metal/CUDA, clean rejection pinned on cc).
+Also fixed in passing: a mkdir TOCTOU race in `Utils.build_file` exposed by concurrently
+running tests.
 
 ## Goal
 
@@ -38,15 +78,21 @@ tinygrad-`LOCAL`-addrspace analogue).
       and the clear cc rejection are Phase B/C (today `c_syntax.ml` rejects *all*
       non-`Serial` axes, barriers, and shared placements with explicit errors:
       `c_syntax.ml:456-459,717,1043`).
-- [ ] Launch dimensions derived from annotations and plumbed to `launch_kernel`
+- [x] Launch dimensions derived from annotations and plumbed to `launch_kernel`
       (CUDA) / `dispatch_threadgroups` (Metal); the `kernel_prep_line` single-thread
-      guard is gone.
-- [ ] A hand-annotated executable parity test: the same `Assignments.comp` lowered
+      guard is gone — **landed 2026-07-04** (`Low_level.launch_dims`, `compile_proc`
+      returns launch dims, backend `code` records carry them; Metal validates the block
+      product against `maxTotalThreadsPerThreadgroup` at pipeline creation).
+- [x] A hand-annotated executable parity test: the same `Assignments.comp` lowered
       once with all-`Serial` loops and once with `Grid`/`Workgroup` annotations
-      produces equal results (Metal locally, CUDA in CI, cc via serial fallback).
-- [ ] A structural expected-file test showing the generated `.cu`/`.metal` source for
+      produces equal results (Metal locally, CUDA in CI, cc via serial fallback) —
+      **landed 2026-07-04**, `test/operations/hardware_axes_parity.ml`, annotated via
+      the `?lowered_transform` seam.
+- [x] A structural expected-file test showing the generated `.cu`/`.metal` source for
       an annotated kernel (index bindings, `__shared__`/`threadgroup` declaration,
-      barrier).
+      barrier) — **landed 2026-07-04**: the parity tests assert on `build_files/`
+      source (booleans dispatched per backend so one `.expected` holds everywhere);
+      `hardware_workgroup_reduce.ml` covers the shared declaration and barrier.
 
 ## Context
 

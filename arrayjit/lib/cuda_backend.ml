@@ -319,6 +319,7 @@ module Fresh () : Ir.Backend_impl.Lowered_backend = struct
     kparams : (string * kparam_source) list;
     bindings : Indexing.unit_bindings;
     name : string;
+    launch : Low_level.launch_dims;
   }
   [@@deriving sexp_of]
 
@@ -326,7 +327,7 @@ module Fresh () : Ir.Backend_impl.Lowered_backend = struct
     traced_stores : Low_level.traced_store option array;
     ptx : Nvrtc.compile_to_ptx_result;
     bindings : Indexing.unit_bindings;
-    kparams_and_names : ((string * kparam_source) list * string) option array;
+    kparams_and_names : ((string * kparam_source) list * string * Low_level.launch_dims) option array;
   }
   [@@deriving sexp_of]
 
@@ -356,13 +357,28 @@ module Fresh () : Ir.Backend_impl.Lowered_backend = struct
 
     let main_kernel_prefix = "extern \"C\" __global__"
 
-    let kernel_prep_line =
-      "/* FIXME: single-threaded for now. */if (threadIdx.x != 0 || blockIdx.x != 0) { return; }"
+    (* The pre-Phase-B single-thread guard is gone (axis-types proposal §4): an all-Serial kernel
+       launches 1x1x1, making the guard redundant; annotated kernels need every thread. *)
+    let kernel_prep_line = ""
 
     (* Use native CUDA types for loop indices and arguments instead of stdint.h types. Signed
        index arithmetic (docs/proposals/signed-index-precision.md). *)
     let loop_index_type = if Utils.settings.large_models then "long long " else "int "
     let arg_int_prefix = if Utils.settings.large_models then "const long long " else "const int "
+
+    (* Hardware axis bindings (docs/proposals/axis-types-for-loops.md §5); the binding site casts
+       the unsigned register to the signed [loop_index_type] (values fit by device limits and the
+       per-node numel contract). *)
+    let hardware_index ~kind ~slot =
+      let base = match kind with `Grid -> "blockIdx" | `Workgroup -> "threadIdx" in
+      match slot with
+      | 0 -> Some (base ^ ".x")
+      | 1 -> Some (base ^ ".y")
+      | 2 -> Some (base ^ ".z")
+      | _ -> None
+
+    let barrier_syntax = Some "__syncthreads();"
+    let shared_decl_prefix = Some "__shared__ "
 
     let typ_of_prec = function
       | Ops.Byte_prec _ -> "unsigned char"
@@ -903,7 +919,7 @@ module Fresh () : Ir.Backend_impl.Lowered_backend = struct
     end))
     in
     let idx_params = Indexing.bound_symbols bindings in
-    let kparams, proc_doc = Syntax.compile_proc ~name idx_params lowered in
+    let kparams, proc_doc, launch = Syntax.compile_proc ~name idx_params lowered in
     let cuda_includes =
       {|#include <cuda_fp16.h>
 #include <cuda_bf16.h>
@@ -925,7 +941,7 @@ module Fresh () : Ir.Backend_impl.Lowered_backend = struct
         ~proc_doc
     in
     let ptx = cuda_to_ptx ~name source in
-    { traced_store; ptx; kparams; bindings; name }
+    { traced_store; ptx; kparams; bindings; name; launch }
 
   let%diagn2_sexp compile_batch ~names bindings lowereds =
     let module Syntax = C_syntax.C_syntax (Cuda_syntax_config (struct
@@ -937,8 +953,8 @@ module Fresh () : Ir.Backend_impl.Lowered_backend = struct
       Array.map2_exn names lowereds
         ~f:
           (Option.map2 ~f:(fun name lowered ->
-               let kparams, doc = Syntax.compile_proc ~name idx_params lowered in
-               ((kparams, name), doc)))
+               let kparams, doc, launch = Syntax.compile_proc ~name idx_params lowered in
+               ((kparams, name, launch), doc)))
     in
     let all_proc_docs = List.filter_map (Array.to_list kparams_and_docs) ~f:(Option.map ~f:snd) in
     let final_doc = PPrint.(separate hardline all_proc_docs) in
@@ -980,8 +996,8 @@ module Fresh () : Ir.Backend_impl.Lowered_backend = struct
       if !next_id < 0 then next_id := 0;
       !next_id
 
-  let link_proc ~prior_context ~name ~(kparams : (string * kparam_source) list) ~ctx_buffers
-      lowered_bindings run_module =
+  let link_proc ~prior_context ~name ~(kparams : (string * kparam_source) list)
+      ~(launch : Low_level.launch_dims) ~ctx_buffers lowered_bindings run_module =
     let func = Cu.Module.get_function run_module ~name in
     let device = prior_context.device in
     let stream_name = get_name device in
@@ -1040,7 +1056,13 @@ module Fresh () : Ir.Backend_impl.Lowered_backend = struct
       (if Utils.debug_log_from_routines () then
          Utils.add_log_processor ~prefix:log_id_prefix @@ fun log_contents ->
          Utils.log_debug_routine_logs ~log_contents ~stream_name);
-      S.launch_kernel func ~grid_dim_x:1 ~block_dim_x:1 ~shared_mem_bytes:0 device.runner args;
+      (* Launch dimensions derived from hardware-annotated loops (axis-types proposal §4);
+         all-Serial kernels launch 1x1x1, as before. Static [__shared__] declarations do not use
+         the dynamic pool, so [shared_mem_bytes] stays 0. *)
+      S.launch_kernel func ~grid_dim_x:launch.Low_level.grid.(0)
+        ~grid_dim_y:launch.Low_level.grid.(1) ~grid_dim_z:launch.Low_level.grid.(2)
+        ~block_dim_x:launch.Low_level.block.(0) ~block_dim_y:launch.Low_level.block.(1)
+        ~block_dim_z:launch.Low_level.block.(2) ~shared_mem_bytes:0 device.runner args;
       [%log "kernel launched"]
     in
     Task.Task
@@ -1060,8 +1082,8 @@ module Fresh () : Ir.Backend_impl.Lowered_backend = struct
       List.map idx_params ~f:(fun s -> (s, ref 0))
     in
     let task =
-      link_proc ~prior_context ~name:code.name ~kparams:code.kparams ~ctx_buffers lowered_bindings
-        run_module
+      link_proc ~prior_context ~name:code.name ~kparams:code.kparams ~launch:code.launch
+        ~ctx_buffers lowered_bindings run_module
     in
     (lowered_bindings, task)
 
@@ -1077,9 +1099,10 @@ module Fresh () : Ir.Backend_impl.Lowered_backend = struct
     let procs =
       Array.mapi code_batch.kparams_and_names ~f:(fun i pns ->
           Option.value ~default:None
-          @@ Option.map2 pns ctx_buffers.(i) ~f:(fun (kparams, name) ctx_buffers ->
+          @@ Option.map2 pns ctx_buffers.(i) ~f:(fun (kparams, name, launch) ctx_buffers ->
               let task =
-                link_proc ~prior_context ~name ~kparams ~ctx_buffers lowered_bindings run_module
+                link_proc ~prior_context ~name ~kparams ~launch ~ctx_buffers lowered_bindings
+                  run_module
               in
               Some task))
     in
