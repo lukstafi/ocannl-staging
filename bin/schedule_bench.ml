@@ -89,6 +89,24 @@ let () =
     ]
   in
 
+  (* CPU cache tiling + operand packing (all-Serial; the S4 shape, Boehm's packed CPU kernel). *)
+  let cpupack_schedule ~mc opt =
+    ignore mc;
+    let bm, bn, bk = (64, 64, 16) in
+    let i, j, k = accum_syms opt in
+    let sp_i, _, i_i = Sched.split ~axis:i ~factor:bm ~outer:LL.Serial ~inner:LL.Serial in
+    let sp_j, j_o, j_i = Sched.split ~axis:j ~factor:bn ~outer:LL.Serial ~inner:LL.Serial in
+    let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
+    let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner }) in
+    [ sp_i; sp_j; sp_k ]
+    @ sink i_i [ j_o; j_i; k_o; k_i ]
+    @ sink j_i [ k_o; k_i; i_i ]
+    @ [
+        Sched.Stage { source = ma.Tensor.value; tile_loops = [ i_i; k_i ]; shared = false };
+        Sched.Stage { source = mb.Tensor.value; tile_loops = [ k_i; j_i ]; shared = false };
+      ]
+  in
+
   (* + TM x TN register tiles via materialized unroll (64x64 block, 8x8 per thread). *)
   let regtile_schedule ~mc opt =
     let bm, bn, bk, tm, tn = (64, 64, 8, 8, 8) in
@@ -139,9 +157,17 @@ let () =
     secs
   in
   p "matmul %dx%dx%d, %d repeats, backend from config/OCANNL_BACKEND\n" n n n repeats;
+  let backend = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"sync_cc") in
+  let has_shared =
+    String.is_substring backend ~substring:"metal" || String.is_substring backend ~substring:"cuda"
+  in
   let t_naive = bench ~variant:"naive" ~schedule:None in
-  let t_par = bench ~variant:"parallel" ~schedule:(Some parallel_schedule) in
-  let t_smem = bench ~variant:"smem" ~schedule:(Some smem_schedule) in
-  let t_reg = bench ~variant:"regtile" ~schedule:(Some regtile_schedule) in
-  p "speedups vs naive: parallel %.1fx, smem %.1fx, regtile %.1fx\n" (t_naive /. t_par)
-    (t_naive /. t_smem) (t_naive /. t_reg)
+  if has_shared then (
+    let t_par = bench ~variant:"parallel" ~schedule:(Some parallel_schedule) in
+    let t_smem = bench ~variant:"smem" ~schedule:(Some smem_schedule) in
+    let t_reg = bench ~variant:"regtile" ~schedule:(Some regtile_schedule) in
+    p "speedups vs naive: parallel %.1fx, smem %.1fx, regtile %.1fx\n" (t_naive /. t_par)
+      (t_naive /. t_smem) (t_naive /. t_reg))
+  else
+    let t_pack = bench ~variant:"cpupack" ~schedule:(Some cpupack_schedule) in
+    p "speedup vs naive: cpupack %.1fx\n" (t_naive /. t_pack)

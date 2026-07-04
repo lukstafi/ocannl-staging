@@ -1,7 +1,28 @@
 # Schedule IR: OptOps-style loop transforms as values
 
-**Date**: 2026-06-12 (stub); elaborated 2026-07-04
-**Status**: Elaborated — ready to implement. Both prerequisites landed on 2026-07-04:
+**Date**: 2026-06-12 (stub); elaborated 2026-07-04; implemented 2026-07-05
+**Status**: Phases S1–S4 implemented (`arrayjit/lib/schedule.ml`). Deviations and findings:
+
+- The vocabulary gained `Expand_zero` (not in the original §1): lowering keeps `Zero_out` as an
+  opaque statement, and whole-node zeroing is rejected in multi-threaded kernels, so annotated
+  matmul schedules must first expand it into a splittable loop nest.
+- `Split` carries caller-minted fresh symbols (`Schedule.split` smart constructor) instead of
+  minting inside `apply` — programmatic schedules need the symbols for later ops.
+- `Stage`'s tile shape generalizes §5: dims derive per source axis from the range of the
+  tile-loop terms, so multi-term register-tile decompositions (`TM*i_w + i_t`) stage cleanly.
+  V1 shared staging requires tile sizes dividing the extents — `Split`'s whole-body remainder
+  guards would put the barriers under divergent control flow.
+- The §6 default annotator ships and is on by default for cuda/metal (config
+  `automatic_gpu_schedule`, `gpu_schedule_block_size`, `gpu_schedule_min_parallel`); it adds a
+  conservative race analysis beyond the §6 sketch (cross-nest producer/consumer bail, per-node
+  index-agreement on parallel components).
+- Benchmarks (`bin/schedule_bench.exe`, Apple-silicon Metal, 256³/512³ f32 matmul): parallel
+  (S1 shape) ≈ 100–130 GFLOP/s, 1800–3000× over the naive 1×1 launch — the #412 >10× criterion
+  is met by parallelization alone. SMEM (S2) and register tiles (S3) land at parity with S1
+  rather than ahead: every fma still round-trips the output element through global memory.
+  Unlocking the rest of the Böhm curve needs accumulator privatization (a future optop) plus
+  [gh-ocannl-164](gh-ocannl-164.md) `restrict`. On cc, S4 cache tiles + packing give 3.3×
+  single-threaded (2.5 → 8.1 GFLOP/s at 256³). Both prerequisites landed on 2026-07-04:
 [axis-types-for-loops](axis-types-for-loops.md) (Phases A–C: `axis_type` on `For_loop`,
 `Workgroup_barrier`, `workgroup_shared`, the `If` guard statement, hardware rendering,
 launch dims, `validate_parallel`) and
@@ -254,18 +275,21 @@ parity-testable — which is exactly the property BEAM search needs.
 
 ## Acceptance criteria
 
-- [ ] `optop` type and `Schedule.apply` implemented against `Low_level.optimized`,
+- [x] `optop` type and `Schedule.apply` implemented against `Low_level.optimized`,
       with substitution over `axis_index` and `Embed_index`, remainder guards via
       `If`, and the trailing simplify/CSE contract of §2.
-- [ ] Pass-ordering decision recorded (§2: post-optimization seam, transforms
-      re-simplify locally, no re-virtualization) — done in this document; keep the
-      code comments in `schedule.ml` pointing here.
-- [ ] Default GPU annotator preset: all-`Serial` elementwise kernels above the
+- [x] Pass-ordering decision recorded (§2: post-optimization seam, transforms
+      re-simplify locally, no re-virtualization) — done in this document; the
+      code comments in `schedule.ml` point here.
+- [x] Default GPU annotator preset: all-`Serial` elementwise kernels above the
       threshold get Grid×Workgroup schedules automatically; parity suite green on
-      cc/Metal/CUDA.
-- [ ] Hand-written SMEM+register matmul schedule passes executed parity and beats the
-      unscheduled kernel by the #412 target on at least one GPU backend.
-- [ ] Search harness scoped (BEAM first; cost models deferred to #261 follow-ups) —
+      cc/Metal locally (CUDA via CI).
+- [x] Hand-written SMEM+register matmul schedule passes executed parity
+      (`test/operations/schedule_smem_matmul.ml`, `schedule_register_matmul.ml`) and
+      beats the unscheduled kernel by far more than the #412 target on Metal
+      (~1800–3000×; see the status note — the margin comes from parallelization,
+      with SMEM/register tiles at parity pending accumulator privatization).
+- [x] Search harness scoped (BEAM first; cost models deferred to #261 follow-ups) —
       §7; implementation deferred.
 
 ## Relations

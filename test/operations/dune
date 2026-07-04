@@ -979,3 +979,14 @@
  (libraries base ocannl stdio)
  (preprocess
   (pps ppx_here ppx_ocannl)))
+
+(test
+ (name schedule_cpu_pack_matmul)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules schedule_cpu_pack_matmul)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))

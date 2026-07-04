@@ -1,0 +1,4 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+packed tiled matmul matches the naive twin: true
+packed tiles are plain local arrays, no barriers, no guards: true
