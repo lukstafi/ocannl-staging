@@ -122,11 +122,11 @@ let auto () =
       try create_from_backend_name ~device_id:0 backend_name
       with _ -> invalid_arg ("Unknown backend: " ^ backend_name))
 
-let compile ctx comp bindings =
+let compile ?lowered_transform ctx comp bindings =
   let (Wrapper wrapper) = ctx.backend_wrapper in
   let module Backend = (val wrapper.backend) in
   (* Compile and link following train.ml pattern *)
-  let code = Backend.compile wrapper.context.optimize_ctx bindings comp in
+  let code = Backend.compile ?lowered_transform wrapper.context.optimize_ctx bindings comp in
   let backend_routine = Backend.link wrapper.context code in
 
   (* Allocate unique ID from shared ledger *)

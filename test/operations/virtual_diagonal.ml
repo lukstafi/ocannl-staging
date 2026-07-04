@@ -69,6 +69,9 @@ let rec walk_t ~on_get ~on_where (llc : LL.t) =
   | LL.Set { llsc; _ } -> walk_s ~on_get ~on_where llsc
   | LL.Set_from_vec { arg = s, _; _ } -> walk_s ~on_get ~on_where s
   | LL.Set_local (_, s) -> walk_s ~on_get ~on_where s
+  | LL.If { cond = c, _; body } ->
+      walk_s ~on_get ~on_where c;
+      walk_t ~on_get ~on_where body
 
 and walk_s ~on_get ~on_where (s : LL.scalar_t) =
   match s with

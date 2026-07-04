@@ -192,9 +192,18 @@ module type Backend_common = sig
   val get_optimize_ctx : code -> optimize_ctx
   val get_optimize_ctx_batch : code_batch -> optimize_ctx
 
-  val compile : optimize_ctx -> ?name:string -> Indexing.unit_bindings -> Assignments.comp -> code
+  val compile :
+    optimize_ctx ->
+    ?name:string ->
+    ?lowered_transform:(Low_level.optimized -> Low_level.optimized) ->
+    Indexing.unit_bindings ->
+    Assignments.comp ->
+    code
   (** [name] is used to derive names for compilation artifacts. If omitted, it's derived via
-      {!Assignments.get_name_exn}. *)
+      {!Assignments.get_name_exn}. [lowered_transform] is applied to the optimized lowered code
+      before backend compilation — the seam where schedule transforms (and hand-annotating tests)
+      rewrite loops with hardware axis types, barriers and shared placements
+      (docs/proposals/axis-types-for-loops.md). *)
 
   val compile_batch :
     optimize_ctx ->

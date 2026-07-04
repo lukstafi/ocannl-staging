@@ -60,7 +60,7 @@ let compile_to_c ~name llc =
     let full_printf_support = true
   end))
   in
-  let _kparams, doc = Syntax.compile_proc ~name [] optimized in
+  let _kparams, doc, _launch = Syntax.compile_proc ~name [] optimized in
   doc_to_string doc
 
 let index_prec = Ops.index_prec ()

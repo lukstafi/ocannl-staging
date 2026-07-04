@@ -79,6 +79,6 @@ let () =
     let full_printf_support = true
   end))
   in
-  let _kparams, doc = Syntax.compile_proc ~name:"zero_out_codegen" [] optimized in
+  let _kparams, doc, _launch = Syntax.compile_proc ~name:"zero_out_codegen" [] optimized in
   PPrint.ToChannel.pretty 0.9 100 Stdio.stdout doc;
   Stdio.printf "\n%!"

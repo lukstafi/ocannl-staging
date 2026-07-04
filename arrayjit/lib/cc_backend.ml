@@ -329,7 +329,9 @@ let%diagn_sexp compile ~(name : string) bindings (lowered : Low_level.optimized)
   in
   let idx_params = Indexing.bound_symbols bindings in
   let build_file = Utils.open_build_file ~base_name:name ~extension:".c" in
-  let kparams, proc_doc = Syntax.compile_proc ~name idx_params lowered in
+  (* Launch dims are ignored: the C backends render annotated loops as serial [for] loops (legal
+     absent barriers, which [pp_ll] rejects via [barrier_syntax = None]). *)
+  let kparams, proc_doc, _launch = Syntax.compile_proc ~name idx_params lowered in
   let filtered_code =
     Syntax.filter_and_prepend_builtins ~includes:Builtins_cc.includes ~builtins:Builtins_cc.builtins
       ~proc_doc
@@ -361,7 +363,9 @@ let%diagn_sexp compile_batch ~names bindings (lowereds : Low_level.optimized opt
         Option.map2 name_opt lowered_opt ~f:(fun name lowered ->
             Syntax.compile_proc ~name idx_params lowered))
   in
-  let all_proc_docs = List.filter_map (Array.to_list params_and_docs) ~f:(Option.map ~f:snd) in
+  let all_proc_docs =
+    List.filter_map (Array.to_list params_and_docs) ~f:(Option.map ~f:(fun (_, doc, _) -> doc))
+  in
   let combined_proc_doc = PPrint.separate PPrint.hardline all_proc_docs in
   let filtered_code =
     Syntax.filter_and_prepend_builtins ~includes:Builtins_cc.includes ~builtins:Builtins_cc.builtins
@@ -372,7 +376,7 @@ let%diagn_sexp compile_batch ~names bindings (lowereds : Low_level.optimized opt
   let result_library = c_compile_and_load ~f_path:build_file.f_path in
   (* Note: for simplicity, we share ctx_arrays across all contexts. *)
   Array.mapi params_and_docs ~f:(fun i opt_params_and_doc ->
-      Option.bind opt_params_and_doc ~f:(fun (kparams, _doc) ->
+      Option.bind opt_params_and_doc ~f:(fun (kparams, _doc, _launch) ->
           Option.map names.(i) ~f:(fun name -> { result = result_library; kparams; bindings; name })))
 
 let%track3_sexp link_compiled ~merge_buffer ~resolve ~runner_label ctx_buffers (code : procedure) =

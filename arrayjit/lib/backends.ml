@@ -483,9 +483,13 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     Array.find_map code_batch.lowereds ~f:(Option.map ~f:(fun l -> l.Low_level.optimize_ctx))
     |> Option.value_or_thunk ~default:empty_optimize_ctx
 
-  let%debug3_sexp compile optim_ctx ?name bindings (comp : Assignments.comp) : code =
+  let%debug3_sexp compile optim_ctx ?name ?lowered_transform bindings (comp : Assignments.comp) :
+      code =
     let (name : string), (lowered : Low_level.optimized) =
       lower_assignments optim_ctx ?name bindings comp.asgns
+    in
+    let lowered =
+      match lowered_transform with None -> lowered | Some transform -> transform lowered
     in
     let code : Device.code = compile ~name bindings lowered in
     let from_prior_context : Tn.t_set =
