@@ -1,4 +1,4 @@
-module Fresh () : sig
+module Impl : sig
   include Ir.Backend_impl.Lowered_backend
 
   val storage_mode_of_pool : device -> pool_id:int -> Metal.Resource.StorageMode.t

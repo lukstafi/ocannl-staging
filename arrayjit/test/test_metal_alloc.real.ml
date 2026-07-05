@@ -16,7 +16,7 @@ module Nd = Ir.Ndarray
 module Ops = Ir.Ops
 module SM = Metal.Resource.StorageMode
 module BI = Ir.Backend_intf
-module B = Metal_backend.Fresh ()
+module B = Metal_backend.Impl
 
 let sm_str = function
   | SM.Shared -> "Shared"

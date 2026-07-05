@@ -12,7 +12,7 @@
 open Base
 module Tn = Ir.Tnode
 module SM = Metal.Resource.StorageMode
-module B = Metal_backend.Fresh ()
+module B = Metal_backend.Impl
 
 let string_of_storage_mode = function
   | SM.Shared -> "Shared"

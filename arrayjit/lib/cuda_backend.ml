@@ -97,7 +97,7 @@ end
 let initialized_devices = Hash_set.create (module Int)
 let initialized = ref false
 
-module Fresh () : Ir.Backend_impl.Lowered_backend = struct
+module Impl : Ir.Backend_impl.Lowered_backend = struct
   include Backend_impl.Device (Device_stream) (Slab)
 
   (* The concrete [buffer_ptr]/[buffer] + sexps for the impl-facing interface (no longer carried by

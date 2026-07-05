@@ -4,7 +4,6 @@ module Tn = Tnode
 module Lazy = Utils.Lazy
 module Me = Metal (* Alias for Metal module *)
 open Backend_intf
-module Impl = Backend_impl (* Alias for Backend_impl *)
 
 let _get_local_debug_runtime = Utils.get_local_debug_runtime
 
@@ -30,7 +29,7 @@ module Backend_buffer = struct
   (* Provide a sexp_of for Me.Buffer.t *)
   let sexp_of_buffer_ptr = Me.Buffer.sexp_of_t
 
-  include Impl.Buffer_types (struct
+  include Backend_impl.Buffer_types (struct
     type nonrec buffer_ptr = buffer_ptr [@@deriving sexp_of]
   end)
 end
@@ -128,9 +127,9 @@ module Slab = struct
       (Me.Buffer.super (Hashtbl.find_exn pools (device.device_id, pool_id)))
 end
 
-(* Functor defining the backend. The exact public signature (Lowered_backend + storage_mode_of_pool)
+(* Module defining the backend. The exact public signature (Lowered_backend + storage_mode_of_pool)
    is sealed by metal_backend.mli. *)
-module Fresh () = struct
+module Impl = struct
   (* Include the device setup with types and allocation *)
   include Backend_impl.Device (Device_stream) (Slab)
 

@@ -1,1 +1,1 @@
-module Fresh () : Ir.Backend_impl.Lowered_backend
+module Impl : Ir.Backend_impl.Lowered_backend

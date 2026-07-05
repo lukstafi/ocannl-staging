@@ -732,20 +732,111 @@ let finalize (type dev runner event)
               && not (Hashtbl.mem ctx.device.constant_buffer_cache key)
             then free_pool ctx.device ~pool_id:loc.pool_id)))
 
-let%track5_sexp fresh_backend ?backend_name () =
-  Stdlib.Gc.full_major ();
-  (* TODO: is running again needed to give time to weak arrays to become empty? *)
-  Stdlib.Gc.full_major ();
-  (* Note: we invoke functors from within fresh_backend to fully isolate backends from distinct
-     calls to fresh_backend. *)
+(* {2 The implemented backends, as singletons}
+
+   One instantiation per backend for the whole process, so backend context types are nameable
+   ([Sync_cc_b.context], ...) and two independently-created contexts on the same backend unify --
+   the precondition for [Context.copy] dispatching to backend-specific [device_to_device] via
+   {!wrapped_context}. The retired [fresh_backend] applied these functors per call to isolate
+   tnode-keyed backend caches between tests (reinitialization reuses tnode ids); tnode identity is
+   now the never-reused [Tnode.uid], so stale cache entries cannot alias fresh nodes and the
+   isolation is unnecessary. Eager instantiation is safe by the build contract: a device backend
+   is only compiled in (dune [select]) on platforms that have the hardware; elsewhere the
+   [Lowered_backend_missing] stub is selected, whose module init is harmless and whose operations
+   raise on use. *)
+
+module Sync_cc_b : Backend = Make_device_backend_from_lowered (Schedulers.Sync) (Cc_backend)
+module Multicore_cc_b : Backend = Make_device_backend_from_lowered (Schedulers.Multicore) (Cc_backend)
+module Cuda_b : Backend = Raise_backend ((Cuda_backend_impl.Impl : Lowered_backend))
+module Metal_b : Backend = Raise_backend ((Metal_backend_impl.Impl : Lowered_backend))
+
+type backend = Sync_cc | Multicore_cc | Cuda | Metal [@@deriving sexp, equal]
+
+let get_backend ?backend_name () =
   match
     Option.value_or_thunk backend_name ~default:(fun () ->
         Utils.get_global_arg ~arg_name:"backend" ~default:"multicore_cc")
     |> String.lowercase
   with
-  | "multicore_cc" ->
-      (module Make_device_backend_from_lowered (Schedulers.Multicore) (Cc_backend) : Backend)
-  | "sync_cc" -> (module Make_device_backend_from_lowered (Schedulers.Sync) (Cc_backend) : Backend)
-  | "cuda" -> (module Raise_backend (Cuda_backend_impl.Fresh () : Lowered_backend) : Backend)
-  | "metal" -> (module Raise_backend (Metal_backend_impl.Fresh () : Lowered_backend) : Backend)
-  | backend -> invalid_arg [%string "Backends.fresh_backend: unknown backend %{backend}"]
+  | "multicore_cc" -> Multicore_cc
+  | "sync_cc" -> Sync_cc
+  | "cuda" -> Cuda
+  | "metal" -> Metal
+  | backend -> invalid_arg [%string "Backends.get_backend: unknown backend %{backend}"]
+
+let backend_name = function
+  | Sync_cc -> "sync_cc"
+  | Multicore_cc -> "multicore_cc"
+  | Cuda -> "cuda"
+  | Metal -> "metal"
+
+let backend_module : backend -> (module Backend) = function
+  | Sync_cc -> (module Sync_cc_b)
+  | Multicore_cc -> (module Multicore_cc_b)
+  | Cuda -> (module Cuda_b)
+  | Metal -> (module Metal_b)
+
+type wrapped_context =
+  | Sync_cc_ctx of Sync_cc_b.context
+  | Multicore_cc_ctx of Multicore_cc_b.context
+  | Cuda_ctx of Cuda_b.context
+  | Metal_ctx of Metal_b.context
+
+let wrapped_backend = function
+  | Sync_cc_ctx _ -> Sync_cc
+  | Multicore_cc_ctx _ -> Multicore_cc
+  | Cuda_ctx _ -> Cuda
+  | Metal_ctx _ -> Metal
+
+let make_context ?(device_id = 0) backend =
+  let fresh (type dev runner event)
+      (module B : Backend with type dev = dev and type runner = runner and type event = event) =
+    let device = B.get_device ~ordinal:device_id in
+    B.make_context ~optimize_ctx:(B.empty_optimize_ctx ()) device
+  in
+  match backend with
+  | Sync_cc -> Sync_cc_ctx (fresh (module Sync_cc_b))
+  | Multicore_cc -> Multicore_cc_ctx (fresh (module Multicore_cc_b))
+  | Cuda -> Cuda_ctx (fresh (module Cuda_b))
+  | Metal -> Metal_ctx (fresh (module Metal_b))
+
+type 'a ctx_op = {
+  f :
+    'dev 'runner 'event.
+    (module Backend with type dev = 'dev and type runner = 'runner and type event = 'event) ->
+    ('dev, 'runner, 'event) Backend_intf.context ->
+    ('dev, 'runner, 'event) Backend_intf.context * 'a;
+}
+(** A context-transforming backend operation, polymorphic over the backend's type components so
+    {!with_backend} can rebuild the same {!wrapped_context} constructor around the result. *)
+
+let with_backend (w : wrapped_context) { f } =
+  match w with
+  | Sync_cc_ctx c ->
+      let c, r = f (module Sync_cc_b) c in
+      (Sync_cc_ctx c, r)
+  | Multicore_cc_ctx c ->
+      let c, r = f (module Multicore_cc_b) c in
+      (Multicore_cc_ctx c, r)
+  | Cuda_ctx c ->
+      let c, r = f (module Cuda_b) c in
+      (Cuda_ctx c, r)
+  | Metal_ctx c ->
+      let c, r = f (module Metal_b) c in
+      (Metal_ctx c, r)
+
+type 'a ctx_query = {
+  q :
+    'dev 'runner 'event.
+    (module Backend with type dev = 'dev and type runner = 'runner and type event = 'event) ->
+    ('dev, 'runner, 'event) Backend_intf.context ->
+    'a;
+}
+(** A read-only backend operation; like {!ctx_op} but leaves the context untouched. *)
+
+let query (w : wrapped_context) { q } =
+  match w with
+  | Sync_cc_ctx c -> q (module Sync_cc_b) c
+  | Multicore_cc_ctx c -> q (module Multicore_cc_b) c
+  | Cuda_ctx c -> q (module Cuda_b) c
+  | Metal_ctx c -> q (module Metal_b) c
