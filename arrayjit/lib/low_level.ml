@@ -218,8 +218,23 @@ type traced_array = {
 
 type optimize_ctx = {
   computations : (Tnode.t, (Indexing.axis_index array option * t) list) Base.Hashtbl.t;
+  placements : Tnode.Placements.t;
+      (** Per-compilation-lineage memory-mode resolution
+          (docs/proposals/context-scoped-memory-modes.md): decisions land here, not on the tnode.
+          Copied per backend [compile] (see {!copy_optimize_ctx}) so sibling compiles are hermetic.
+      *)
 }
 [@@deriving sexp_of]
+
+let empty_optimize_ctx () =
+  { computations = Hashtbl.create (module Tnode); placements = Tnode.Placements.create () }
+
+(** A shallow-copy fork of the lineage state: the copy sees everything decided so far, and neither
+    the original nor sibling copies observe its later mutations. Backend [compile] forks the
+    incoming context's [optimize_ctx] through this, which is what makes sibling candidate compiles
+    from one frontier hermetic. *)
+let copy_optimize_ctx { computations; placements } =
+  { computations = Hashtbl.copy computations; placements = Tnode.Placements.copy placements }
 
 type traced_store = (Tn.t, traced_array) Base.Hashtbl.t [@@deriving sexp_of]
 
@@ -430,7 +445,7 @@ let is_one_hot_selector_assignment traced_store ~(idcs : Indexing.axis_index arr
         | _ -> false)
     | _ -> false)
 
-let visit_llc traced_store ~merge_node_id reverse_node_map ~max_visits llc =
+let visit_llc plc traced_store ~merge_node_id reverse_node_map ~max_visits llc =
   let is_too_many = function Visits i -> i > max_visits | Recurrent -> true in
   (* FIXME: migrate hashtable to use offsets instead of indices *)
   let lookup env indices =
@@ -590,41 +605,44 @@ let visit_llc traced_store ~merge_node_id reverse_node_map ~max_visits llc =
       let tn = traced.tn in
       if
         virtualize_settings.inline_scalar_constexprs && traced.is_scalar_constexpr
-        && not (Tn.known_non_virtual tn)
-      then Tn.update_memory_mode tn Virtual 40;
+        && not (Tn.Placements.known_non_virtual plc tn)
+      then Tn.Placements.update plc tn Virtual 40;
       let skip_simple =
         virtualize_settings.inline_simple_computations && (not traced.is_complex)
-        && not (Tn.known_non_virtual tn)
+        && not (Tn.Placements.known_non_virtual plc tn)
       in
       if
-        (not skip_simple) && Option.is_none tn.memory_mode
+        (not skip_simple)
+        && Option.is_none (Tn.Placements.get plc tn)
         && Hashtbl.exists traced.accesses ~f:is_too_many
         (* task-73617488: one-hot selector producers are exempt from the visit-count cap. The
            ordinary [virtual_llc]/[cleanup_virtual_llc] path will inline them so that
            [rewrite_one_hot_reductions] can fire at default [max_visits = 1]. *)
         && not (traced.prefers_virtual_one_hot && not traced.has_non_one_hot_setter)
-      then Tn.update_memory_mode tn Never_virtual 1;
+      then Tn.Placements.update plc tn Never_virtual 1;
       if (not traced.zeroed_out) && Hash_set.is_empty traced.assignments then (
         (* The tensor node is read-only/recurrent for this computation, but maybe computed or
-           specified as virtual by another routine. However, if the memory mode is unspecified, we
-           assume this will be the first computation involving the tensor node. *)
+           specified as virtual by another routine (in this compilation lineage). However, if the
+           placement is unspecified, we assume this will be the first computation involving the
+           tensor node. *)
         traced.read_only <- true;
-        if Tn.mode_is_unspecified tn then Tn.update_memory_mode tn On_device 37
-        else if Tn.known_not_materialized tn then (
-          if Tn.known_non_virtual tn then
+        if Tn.Placements.mode_is_unspecified plc tn then Tn.Placements.update plc tn On_device 37
+        else if Tn.Placements.known_not_materialized plc tn then (
+          if Tn.Placements.known_non_virtual plc tn then
             raise
               (Utils.User_error
                  [%string
                    "Mark %{Tn.debug_name tn} as materialized (e.g. via Train.set_materialized) \
                     before the first routine using it gets compiled; another routine re-uses that \
-                    computation. Debug: %{Tn.debug_memory_mode tn.Tn.memory_mode}"]))
-        else if Tn.known_non_virtual tn then Tn.update_memory_mode tn On_device 35);
+                    computation. Debug: %{Tn.Placements.debug plc tn}"]))
+        else if Tn.Placements.known_non_virtual plc tn then Tn.Placements.update plc tn On_device 35);
       (* We allow sharing virtual nodes across routines. *)
-      if Hashtbl.exists traced.accesses ~f:is_recurrent && not (Tn.known_virtual tn) then (
+      if Hashtbl.exists traced.accesses ~f:is_recurrent && not (Tn.Placements.known_virtual plc tn)
+      then (
         traced.read_before_write <- true;
-        Tn.update_memory_mode tn On_device 36))
+        Tn.Placements.update plc tn On_device 36))
 
-let%diagn2_sexp check_and_store_virtual computations_table traced static_indices top_llc =
+let%diagn2_sexp check_and_store_virtual (optim_ctx : optimize_ctx) traced static_indices top_llc =
   let exception Non_virtual of int in
   let static_indices =
     Set.of_list (module Indexing.Symbol)
@@ -799,26 +817,26 @@ let%diagn2_sexp check_and_store_virtual computations_table traced static_indices
     | Unop (_, (llsc, _)) -> loop_scalar ~env_dom ~loop_ranges llsc
   in
   try
-    if Tn.known_non_virtual traced.tn then raise @@ Non_virtual 11;
+    if Tn.Placements.known_non_virtual optim_ctx.placements traced.tn then raise @@ Non_virtual 11;
     loop_proc ~env_dom:static_indices ~loop_ranges:(Map.empty (module Indexing.Symbol)) top_llc;
     if not !has_setter then raise @@ Non_virtual 12;
     let current_computations =
-      Hashtbl.find computations_table traced.tn |> Option.value ~default:[]
+      Hashtbl.find optim_ctx.computations traced.tn |> Option.value ~default:[]
     in
-    Hashtbl.set computations_table ~key:traced.tn ~data:((!at_idcs, top_llc) :: current_computations)
-  with Non_virtual i -> Tn.update_memory_mode traced.tn Never_virtual i
+    Hashtbl.set optim_ctx.computations ~key:traced.tn
+      ~data:((!at_idcs, top_llc) :: current_computations)
+  with Non_virtual i -> Tn.Placements.update optim_ctx.placements traced.tn Never_virtual i
 
-let%track7_sexp inline_computation ~id
-    (computations_table : (Tn.t, (Indexing.axis_index array option * t) list) Hashtbl.t)
-    (traced : traced_array) (static_indices : Indexing.static_symbol list)
-    (call_args : Indexing.axis_index array) : t option =
+let%track7_sexp inline_computation ~id (optim_ctx : optimize_ctx) (traced : traced_array)
+    (static_indices : Indexing.static_symbol list) (call_args : Indexing.axis_index array) :
+    t option =
   let exception Non_virtual of int in
   let static_indices =
     Set.of_list (module Indexing.Symbol)
     @@ List.map ~f:(fun s -> s.Indexing.static_symbol) static_indices
   in
   let computations =
-    Hashtbl.find computations_table traced.tn
+    Hashtbl.find optim_ctx.computations traced.tn
     |> Option.value_or_thunk ~default:(fun () ->
         raise
         @@ Utils.User_error
@@ -1211,7 +1229,7 @@ let%track7_sexp inline_computation ~id
       in
       Some (unflat_lines body)
   with Non_virtual i ->
-    Tn.update_memory_mode traced.tn Never_virtual i;
+    Tn.Placements.update optim_ctx.placements traced.tn Never_virtual i;
     None
 
 let optimize_integer_pow = ref true
@@ -1227,7 +1245,9 @@ let rec unroll_pow ~(base : scalar_t) ~(exp : int) : scalar_t =
       (fun accu -> Binop (Mul, (base, scalar_precision base), (accu, scalar_precision accu)))
       base
 
-let virtual_llc computations_table traced_store reverse_node_map static_indices (llc : t) : t =
+let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_indices (llc : t) :
+    t =
+  let plc = optim_ctx.placements in
   (* [process_for] holds tensors whose [Get]s must be left untouched (self/recursive references,
      replaced by [Get_local] during the tensor's own [inline_computation]). [owned] holds tensors
      whose whole-loop computation is captured at an enclosing [For_loop]: their per-statement
@@ -1255,7 +1275,7 @@ let virtual_llc computations_table traced_store reverse_node_map static_indices 
             List.filter tns ~f:(fun tn ->
                 (not @@ Set.mem process_for tn)
                 && (not @@ Set.mem owned tn)
-                && (not @@ Tn.known_non_virtual tn))
+                && (not @@ Tn.Placements.known_non_virtual plc tn))
           in
           match candidates with
           | [] ->
@@ -1285,7 +1305,7 @@ let virtual_llc computations_table traced_store reverse_node_map static_indices 
                           loop_proc ~process_for:store_pf ~owned:owned' ~in_storage_pass:true body;
                       }
                   in
-                  check_and_store_virtual computations_table node static_indices stored);
+                  check_and_store_virtual optim_ctx node static_indices stored);
               (* Phase 2 -- emit. Candidates are NOT in [process_for], so surviving readers
                  (materialized siblings, and later virtual siblings, all now stored) inline the
                  provider; [owned'] still suppresses candidate auto-store; each candidate setter
@@ -1301,24 +1321,30 @@ let virtual_llc computations_table traced_store reverse_node_map static_indices 
         if
           (not @@ Set.mem process_for tn)
           && (not @@ Set.mem owned tn)
-          && (not @@ Tn.known_non_virtual traced.tn)
-        then check_and_store_virtual computations_table traced static_indices llc;
+          && (not @@ Tn.Placements.known_non_virtual plc traced.tn)
+        then check_and_store_virtual optim_ctx traced static_indices llc;
         llc
     | Set { tn; idcs; llsc; debug } ->
         let traced : traced_array = get_node traced_store tn in
-        let next = if Tn.known_non_virtual traced.tn then process_for else Set.add process_for tn in
+        let next =
+          if Tn.Placements.known_non_virtual plc traced.tn then process_for
+          else Set.add process_for tn
+        in
         let result =
           Set { tn; idcs; llsc = loop_scalar ~process_for:next ~owned ~in_storage_pass llsc; debug }
         in
         if
           (not @@ Set.mem process_for tn)
           && (not @@ Set.mem owned tn)
-          && (not @@ Tn.known_non_virtual traced.tn)
-        then check_and_store_virtual computations_table traced static_indices result;
+          && (not @@ Tn.Placements.known_non_virtual plc traced.tn)
+        then check_and_store_virtual optim_ctx traced static_indices result;
         result
     | Set_from_vec { tn; idcs; length; vec_unop; arg = arg_scalar, arg_prec; debug } ->
         let traced : traced_array = get_node traced_store tn in
-        let next = if Tn.known_non_virtual traced.tn then process_for else Set.add process_for tn in
+        let next =
+          if Tn.Placements.known_non_virtual plc traced.tn then process_for
+          else Set.add process_for tn
+        in
         let result =
           Set_from_vec
             {
@@ -1333,8 +1359,8 @@ let virtual_llc computations_table traced_store reverse_node_map static_indices 
         if
           (not @@ Set.mem process_for tn)
           && (not @@ Set.mem owned tn)
-          && (not @@ Tn.known_non_virtual traced.tn)
-        then check_and_store_virtual computations_table traced static_indices result;
+          && (not @@ Tn.Placements.known_non_virtual plc traced.tn)
+        then check_and_store_virtual optim_ctx traced static_indices result;
         result
     | Set_local (id, llsc) -> Set_local (id, loop_scalar ~process_for ~owned ~in_storage_pass llsc)
     | Declare_local _ -> llc
@@ -1358,11 +1384,11 @@ let virtual_llc computations_table traced_store reverse_node_map static_indices 
         llsc
     | Get (tn, indices) ->
         let traced = get_node traced_store tn in
-        if Tn.known_non_virtual traced.tn then llsc
+        if Tn.Placements.known_non_virtual plc traced.tn then llsc
         else
           let id = get_scope tn in
           Option.value ~default:llsc
-          @@ Option.map (inline_computation ~id computations_table traced static_indices indices)
+          @@ Option.map (inline_computation ~id optim_ctx traced static_indices indices)
                ~f:(fun body -> Local_scope { id; body; orig_indices = indices })
     | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, prec } ->
         Get_dynamic { tn; idcs; dyn_axis; dyn_value = (loop v, prec) }
@@ -1387,7 +1413,7 @@ let virtual_llc computations_table traced_store reverse_node_map static_indices 
     ~owned:(Set.empty (module Tnode))
     ~in_storage_pass:false llc
 
-let cleanup_virtual_llc ~static_indices (llc : t) : t =
+let cleanup_virtual_llc plc ~static_indices (llc : t) : t =
   (* The current position is within scope of the definitions of the process_for virtual arrays. *)
   let rec loop_proc ~balanced ~env_dom (llc : t) : t option =
     let loop = loop_proc ~balanced ~env_dom in
@@ -1405,32 +1431,32 @@ let cleanup_virtual_llc ~static_indices (llc : t) : t =
         Option.map ~f:(fun body : t -> For_loop { for_config with body })
         @@ loop_proc ~balanced ~env_dom body
     | Zero_out tn ->
-        if not @@ Tn.known_non_virtual tn then (
+        if not @@ Tn.Placements.known_non_virtual plc tn then (
           (* #296: a tnode still not [known_non_virtual] by cleanup was never forced [Never_virtual]
              during tracing/virtualization, so it has no materialized reader left -- its only uses
              were inlined into [Local_scope] bodies. We therefore commit it to [Virtual] and drop
              this now-dead initializer. Provenance 151 = dropped from the [Zero_out] cleanup arm. *)
-          Tn.update_memory_mode tn Virtual 151;
+          Tn.Placements.update plc tn Virtual 151;
           None)
         else Some llc
     | Set { tn; idcs; llsc; debug } ->
-        if not @@ Tn.known_non_virtual tn then (
+        if not @@ Tn.Placements.known_non_virtual plc tn then (
           (* #296: same default-to-[Virtual] policy as the [Zero_out] arm above -- an undecided
              tnode has no materialized reader left after inlining, so commit it [Virtual] and drop
              the store. Provenance 152 = dropped from the [Set]/[Set_from_vec] cleanup arms. *)
-          Tn.update_memory_mode tn Virtual 152;
+          Tn.Placements.update plc tn Virtual 152;
           None)
         else (
           assert (
             Array.for_all idcs ~f:(function Indexing.Iterator s -> Set.mem env_dom s | _ -> true));
           Some (Set { tn; idcs; llsc = loop_scalar ~balanced ~env_dom llsc; debug }))
     | Set_from_vec { tn; idcs; length; vec_unop; arg = arg_scalar, arg_prec; debug } ->
-        if not @@ Tn.known_non_virtual tn then (
+        if not @@ Tn.Placements.known_non_virtual plc tn then (
           (* #296: same default-to-[Virtual] policy as [Set]. A vector op that genuinely cannot be
              scalar-inlined was already forced [Never_virtual] (via [Non_virtual 140] in
              [inline_computation]), so reaching here means the node stayed virtual-eligible and its
              vector store is dead -- drop it. Provenance 152. *)
-          Tn.update_memory_mode tn Virtual 152;
+          Tn.Placements.update plc tn Virtual 152;
           None)
         else (
           assert (
@@ -1446,8 +1472,8 @@ let cleanup_virtual_llc ~static_indices (llc : t) : t =
                  debug;
                }))
     | Set_local (id, llsc) ->
-        assert (not @@ Tn.known_non_virtual id.tn);
-        Tn.update_memory_mode id.tn Virtual 16;
+        assert (not @@ Tn.Placements.known_non_virtual plc id.tn);
+        Tn.Placements.update plc id.tn Virtual 16;
         Some (Set_local (id, loop_scalar ~balanced ~env_dom llsc))
     | Declare_local _ -> Some llc
     | Comment _ -> Some llc
@@ -1469,27 +1495,27 @@ let cleanup_virtual_llc ~static_indices (llc : t) : t =
            surviving reads to [Never_virtual] (a node read here but only written under a virtualized
            setter is decided right now), so this update is the commitment point, not a redundant
            re-assertion. Mirrors the [Get_dynamic] arm just below. Provenance 17. *)
-        Tn.update_memory_mode a Never_virtual 17;
+        Tn.Placements.update plc a Never_virtual 17;
         assert (
           Array.for_all indices ~f:(function Indexing.Iterator s -> Set.mem env_dom s | _ -> true));
         llsc
     | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, prec } ->
         (* gh-343: defensive -- the table is a materialized read; recurse into the dynamic index. *)
-        Tn.update_memory_mode tn Never_virtual 17;
+        Tn.Placements.update plc tn Never_virtual 17;
         Get_dynamic { tn; idcs; dyn_axis; dyn_value = (loop v, prec) }
     | Local_scope { id; body; orig_indices } ->
         assert (
           Array.for_all orig_indices ~f:(function
             | Indexing.Iterator s -> Set.mem env_dom s
             | _ -> true));
-        if Tn.known_non_virtual id.tn then Get (id.tn, orig_indices)
+        if Tn.Placements.known_non_virtual plc id.tn then Get (id.tn, orig_indices)
         else
           let body = Option.value_exn ~here:[%here] @@ loop_proc ~balanced ~env_dom body in
-          Tn.update_memory_mode id.tn Virtual 18;
+          Tn.Placements.update plc id.tn Virtual 18;
           Local_scope { id; orig_indices; body }
     | Get_local id ->
-        assert (not @@ Tn.known_non_virtual id.tn);
-        Tn.update_memory_mode id.tn Virtual 16;
+        assert (not @@ Tn.Placements.known_non_virtual plc id.tn);
+        Tn.Placements.update plc id.tn Virtual 16;
         llsc
     | Get_merge_buffer (_, _) -> llsc
     | Embed_index (Fixed_idx _ | Sub_axis) -> llsc
@@ -2575,7 +2601,7 @@ let rec scalar_scopes_have_annotated (llc : t) : bool =
     lexically outside all annotated loops (every hardware thread would execute them, racing with
     the annotated writes — there is no grid-wide synchronization). Cannot prove iteration
     independence; that is the annotating pass's obligation. *)
-let validate_parallel (llc : t) : unit =
+let validate_parallel plc (llc : t) : unit =
   let axes = hardware_axes llc in
   if not (List.is_empty axes) then (
     List.iter axes ~f:(fun a ->
@@ -2645,7 +2671,7 @@ let validate_parallel (llc : t) : unit =
           check_writes ~covered b
       | If { body; _ } -> check_writes ~covered body
       | Zero_out tn ->
-          if (not (List.is_empty active)) && Tn.is_materialized_force tn 160 then
+          if (not (List.is_empty active)) && Tn.Placements.is_materialized_force plc tn 160 then
             invalid_arg
               ("Low_level.validate_parallel: Zero_out of materialized node " ^ Tn.debug_name tn
              ^ " in a multi-threaded kernel: whole-node zeroing is not distributed across \
@@ -2654,7 +2680,7 @@ let validate_parallel (llc : t) : unit =
           let missing =
             List.filter active ~f:(fun p -> not (List.mem covered p ~equal:pair_equal))
           in
-          if (not (List.is_empty missing)) && Tn.is_materialized_force tn 160 then
+          if (not (List.is_empty missing)) && Tn.Placements.is_materialized_force plc tn 160 then
             invalid_arg
               ("Low_level.validate_parallel: write to materialized node " ^ Tn.debug_name tn
              ^ " is not nested under annotated loops covering all active hardware dimensions \
@@ -2814,14 +2840,15 @@ let hoist_cross_statement_cse llc =
   loop_proc llc
 
 let input_and_output_nodes optimized =
+  let plc = optimized.optimize_ctx.placements in
   ( Hashtbl.fold optimized.traced_store
       ~init:(Set.empty (module Tn), Set.empty (module Tn))
       ~f:(fun ~key ~data (inputs, outputs) ->
-        let materialized = Tn.is_materialized_force key 50 in
+        let materialized = Tn.Placements.is_materialized_force plc key 50 in
         let inputs =
           if
             materialized
-            && (not (Tn.known_constant key))
+            && (not (Tn.Placements.known_constant plc key))
             && (data.read_only || data.read_before_write)
           then Set.add inputs key
           else inputs
@@ -3117,17 +3144,15 @@ let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
   [%log "tracing"];
   pin_device_written_bounds llc;
   let merge_node_id = ref None in
-  visit_llc traced_store ~merge_node_id reverse_node_map ~max_visits:virtualize_settings.max_visits
-    llc;
+  visit_llc input_ctx.placements traced_store ~merge_node_id reverse_node_map
+    ~max_visits:virtualize_settings.max_visits llc;
   [%log "optimizing"];
-  let virtual_llc_result =
-    virtual_llc input_ctx.computations traced_store reverse_node_map static_indices llc
-  in
+  let virtual_llc_result = virtual_llc input_ctx traced_store reverse_node_map static_indices llc in
   let llc =
     hoist_cross_statement_cse @@ eliminate_common_subexpressions
     @@ rewrite_one_hot_reductions ~static_indices
     @@ simplify_llc static_indices
-    @@ cleanup_virtual_llc ~static_indices
+    @@ cleanup_virtual_llc input_ctx.placements ~static_indices
     @@ virtual_llc_result
   in
   let merge_node =

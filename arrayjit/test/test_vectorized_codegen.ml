@@ -21,7 +21,7 @@ let make_optimized llc tns : LL.optimized =
   List.iter tns ~f:(fun tn -> ignore (LL.get_node traced_store tn : LL.traced_array));
   {
     traced_store;
-    optimize_ctx = { computations = Hashtbl.create (module Tn) };
+    optimize_ctx = Ir.Low_level.empty_optimize_ctx ();
     llc;
     merge_node = None;
     workgroup_shared = Base.Set.empty (module Tn);

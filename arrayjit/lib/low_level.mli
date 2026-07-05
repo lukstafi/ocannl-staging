@@ -142,7 +142,7 @@ val hardware_axes : t -> hardware_axis_info list
 val launch_dims : t -> launch_dims
 (** Per-slot maximum extents over the kernel's annotated loops. *)
 
-val validate_parallel : t -> unit
+val validate_parallel : Tnode.Placements.t -> t -> unit
 (** Backend-independent well-formedness of hardware annotations (axis-types proposal §2); a no-op
     for all-[Serial] code. Raises [Invalid_argument] on structural violations: nonzero [from_],
     more than 3 slots per kind, annotated loops inside [Local_scope] bodies, barriers under
@@ -229,8 +229,21 @@ type optimize_ctx = {
           all assignments and accesses must happen via the index tuple; if this is not the case for
           some assignment, the node cannot be virtual. Currently, we only allow for-loop symbols in
           assignment indices of virtual nodes. *)
+  placements : Tnode.Placements.t;
+      (** Per-compilation-lineage memory-mode resolution
+          (docs/proposals/context-scoped-memory-modes.md): the pipeline's placement decisions
+          (Virtual / Local / On_device) land here, seeded by and never written back to the tnodes'
+          declared intent ({!Tnode.field-memory_mode}). *)
 }
 [@@deriving sexp_of]
+
+val empty_optimize_ctx : unit -> optimize_ctx
+
+val copy_optimize_ctx : optimize_ctx -> optimize_ctx
+(** A shallow-copy fork of the lineage state ([computations] and [placements] tables): the copy
+    sees everything decided so far; its later mutations are invisible to the original and to
+    sibling copies. Backend [compile] forks the incoming context's [optimize_ctx] through this, so
+    sibling candidate compiles from one frontier are hermetic. *)
 
 type optimized = {
   traced_store : traced_store;

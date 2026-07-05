@@ -381,7 +381,16 @@ module C_syntax (B : C_syntax_config) = struct
     Low_level.get_ident_within_code ~no_dots:true ~blacklist:B.ident_blacklist
     @@ Array.map B.procs ~f:(fun l -> l.llc)
 
-  let in_ctx tn = Tn.is_in_context_force tn 46
+  (* Set by [compile_proc]: the per-compilation-lineage placement resolution
+     (docs/proposals/context-scoped-memory-modes.md). Codegen both consults and settles placements
+     here -- never on the tnode. *)
+  let current_placements : Tn.Placements.t option ref = ref None
+
+  let placements () =
+    Option.value_exn ~message:"C_syntax: placements consulted outside compile_proc"
+      !current_placements
+
+  let in_ctx tn = Tn.Placements.is_in_context_force (placements ()) tn 46
 
   let filter_and_prepend_builtins ~includes ~builtins ~proc_doc =
     let doc_buffer = Buffer.create 4096 in
@@ -493,8 +502,11 @@ module C_syntax (B : C_syntax_config) = struct
     | Some traced_store -> (
         match Hashtbl.find traced_store tn with
         | Some node ->
+            let plc = placements () in
             node.Low_level.zero_initialized_by_code
-            && (not (Tn.is_virtual_force tn 337 || Tn.is_materialized_force tn 338))
+            && (not
+                  (Tn.Placements.is_virtual_force plc tn 337
+                  || Tn.Placements.is_materialized_force plc tn 338))
             && not (Set.mem !current_workgroup_shared tn)
         | None -> false)
 
@@ -1173,7 +1185,7 @@ module C_syntax (B : C_syntax_config) = struct
   let compile_main llc : PPrint.document = pp_ll llc
 
   let compile_proc ~name idx_params
-      Low_level.{ traced_store; llc; merge_node; optimize_ctx = _; workgroup_shared } :
+      Low_level.{ traced_store; llc; merge_node; optimize_ctx; workgroup_shared } :
       (string * kparam_source) list * PPrint.document * Low_level.launch_dims =
     let open PPrint in
     (if not (Set.is_empty workgroup_shared) then
@@ -1184,7 +1196,8 @@ module C_syntax (B : C_syntax_config) = struct
               per-thread stack arrays -- wrong sharing semantics. *)
            invalid_arg
              "C_syntax.compile_proc: workgroup-shared placement not supported by this backend");
-    Low_level.validate_parallel llc;
+    current_placements := Some optimize_ctx.Low_level.placements;
+    Low_level.validate_parallel optimize_ctx.Low_level.placements llc;
     (* Launch-extent guards (construct-then-fold, axis-types proposal §2), only for kinds this
        backend binds in hardware -- the serial fallback iterates the true extent. *)
     let llc =
@@ -1203,10 +1216,11 @@ module C_syntax (B : C_syntax_config) = struct
       List.rev
       @@ Hashtbl.fold traced_store ~init:[] ~f:(fun ~key:tn ~data:_ acc ->
           let backend_info, is_param =
-            if Tn.is_virtual_force tn 334 then ("Virt", false)
+            let plc = placements () in
+            if Tn.Placements.is_virtual_force plc tn 334 then ("Virt", false)
             else if in_ctx tn then ("Ctx", true)
-            else if Tn.is_materialized_force tn 335 then ("Global", true)
-            else if Tn.known_not_materialized tn then ("Local", false)
+            else if Tn.Placements.is_materialized_force plc tn 335 then ("Global", true)
+            else if Tn.Placements.known_not_materialized plc tn then ("Local", false)
             else assert false
           in
           let backend_info = Sexp.Atom backend_info in
@@ -1372,7 +1386,12 @@ module C_syntax (B : C_syntax_config) = struct
       ^^ hardline
       ^^ separate_map empty
            (fun (tn, node) ->
-             if not (Tn.is_virtual_force tn 333 || Tn.is_materialized_force tn 336) then
+             let plc = placements () in
+             if
+               not
+                 (Tn.Placements.is_virtual_force plc tn 333
+                 || Tn.Placements.is_materialized_force plc tn 336)
+             then
                let typ_doc = string (B.typ_of_prec @@ Lazy.force tn.prec) in
                let ident_doc = string (get_ident tn) in
                let num_elems = Tn.num_elems tn in

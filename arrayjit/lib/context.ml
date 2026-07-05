@@ -10,14 +10,10 @@ module Backends_deprecated = Backends
 type backend_wrapper =
   | Wrapper : {
       backend :
-        (module BI.Backend
-           with type dev = 'dev
-            and type runner = 'runner
-            and type event = 'event
-            and type optimize_ctx = 'optimize_ctx);
+        (module BI.Backend with type dev = 'dev and type runner = 'runner and type event = 'event);
       device : ('dev, 'runner, 'event) BI.device;
       device_id : int;
-      context : ('dev, 'runner, 'event, 'optimize_ctx) BI.context;
+      context : ('dev, 'runner, 'event) BI.context;
     }
       -> backend_wrapper
 
@@ -182,12 +178,13 @@ let compile ?lowered_transform ctx comp bindings =
   let name = backend_routine.name in
   Hashtbl.set ctx.ledger.routine_names ~key:id ~data:name;
 
-  (* Required inputs for the initialization check below. Nodes with registered host initialization
-     data (ndarray-backed literals, loaded tensors) self-initialize at link time from [Host_inits]
-     (gh-ocannl-333), so they are excluded. *)
-  let context_nodes = Asgns.context_nodes comp.Asgns.asgns in
+  (* Required inputs for the initialization check below: the backend routine's materialized
+     read-only / read-before-write nodes, resolved against this compile's placements (the
+     context-scoped memory-modes split removed the pre-lowering [context_nodes] settlement). Nodes
+     with registered host initialization data (ndarray-backed literals, loaded tensors)
+     self-initialize at link time from [Host_inits] (gh-ocannl-333), so they are excluded. *)
   let inputs =
-    Set.filter (Set.diff context_nodes comp.Asgns.embedded_nodes) ~f:(fun tn ->
+    Set.filter (Set.diff backend_routine.inputs comp.Asgns.embedded_nodes) ~f:(fun tn ->
         not (Ir.Host_inits.mem tn))
   in
 
@@ -441,3 +438,7 @@ let points_2d ?from_axis ~xdim ~ydim ctx (tn : Tn.t) =
 let is_initialized ctx node = Set.mem ctx.initialized_nodes node
 let backend_name ctx = ctx.backend_name
 let device_id ctx = ctx.device_id
+
+let placements ctx =
+  let (Wrapper wrapper) = ctx.backend_wrapper in
+  wrapper.context.BI.optimize_ctx.Ir.Low_level.placements

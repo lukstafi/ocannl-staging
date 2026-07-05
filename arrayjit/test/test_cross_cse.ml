@@ -201,7 +201,7 @@ let () =
   let optimized : LL.optimized =
     {
       traced_store = Hashtbl.create (module Ir.Tnode);
-      optimize_ctx = { computations = Hashtbl.create (module Ir.Tnode) };
+      optimize_ctx = Ir.Low_level.empty_optimize_ctx ();
       llc = result;
       merge_node = None;
       workgroup_shared = Base.Set.empty (module Tn);

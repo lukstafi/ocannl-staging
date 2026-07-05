@@ -40,7 +40,7 @@ let approx a b = Float.(abs (a - b) < 1e-4)
    ids need the integrality check [idx == trunc(idx)]; integer-prec ids must not emit it. *)
 let inspect (t : Tensor.t) (index_tn : Ir.Tnode.t) : int * int * bool * int =
   let comp = t.Tensor.forward in
-  let optim_ctx = { LL.computations = Hashtbl.create (module Ir.Tnode) } in
+  let optim_ctx = LL.empty_optimize_ctx () in
   let opt =
     Ir.Assignments.lower optim_ctx ~unoptim_ll_source:None ~ll_source:None ~cd_source:None
       ~name:"probe" [] comp.Ir.Assignments.asgns
@@ -286,12 +286,13 @@ let () =
   let%op not_hot2 = arb_table = ids_neg2 in
   let%op emb_neg2 = c_neg2 * not_hot2 in
   let ctx_neg2 = Context.cpu () in
-  let _ctx_neg2 = Train.forward_once ctx_neg2 emb_neg2 in
+  let ctx_neg2 = Train.forward_once ctx_neg2 emb_neg2 in
   (* The tensor [not_hot2] must be Never_virtual after compilation: the indirect arm uses
      [is_range_producer] to reject non-range inputs. If this fails the indirect check was too broad
-     (allowed arbitrary inputs as a "range side"). *)
+     (allowed arbitrary inputs as a "range side"). The decision is recorded in the lineage's
+     placements (context-scoped memory modes). *)
   p "non-range Cmpeq equality tensor stays Never_virtual"
-    (Ir.Tnode.known_non_virtual not_hot2.Tensor.value)
+    (Ir.Tnode.Placements.known_non_virtual (Context.placements ctx_neg2) not_hot2.Tensor.value)
 
 (* --- AC 3: generated-C inspection for the large-index (> INT_MAX) path --- A real gather with
    vocab > 2^31 is impractical. Instead verify the full codegen chain statically with a
@@ -336,7 +337,7 @@ let () =
      [Ir.Ops.single] before creating [ids_wide] would change [ids_wide.value.prec] from [double] to
      [single], making [iprec = single] here. *)
   let comp_wide = emb_wide.Tensor.forward in
-  let optim_ctx_wide = { LL.computations = Hashtbl.create (module Ir.Tnode) } in
+  let optim_ctx_wide = LL.empty_optimize_ctx () in
   let opt_wide =
     Ir.Assignments.lower optim_ctx_wide ~unoptim_ll_source:None ~ll_source:None ~cd_source:None
       ~name:"probe_wide" [] comp_wide.Ir.Assignments.asgns

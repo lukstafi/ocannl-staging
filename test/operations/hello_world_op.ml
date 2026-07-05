@@ -768,7 +768,7 @@ let%expect_test "Embed self id" =
     HERE: test/operations/hello_world_op.ml:765:26
                        #4 +_bar
                         3.00
-        #3 + Virt/40         │#2 !@self_id Virt/40
+        #3 + unknown         │#2 !@self_id unknown
         <not-in-context>     │<not-in-context>
     #1 !@self_id│#0 !@self_id│
      1.00       │ 0.00       │

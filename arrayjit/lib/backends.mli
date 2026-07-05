@@ -17,13 +17,12 @@ val plan_pool_segments :
 *)
 
 val finalize :
-  'dev 'runner 'event 'optimize_ctx.
+  'dev 'runner 'event.
   (module Ir.Backend_intf.Backend
      with type dev = 'dev
       and type event = 'event
-      and type runner = 'runner
-      and type optimize_ctx = 'optimize_ctx) ->
-  ('dev, 'runner, 'event, 'optimize_ctx) Ir.Backend_intf.context ->
+      and type runner = 'runner) ->
+  ('dev, 'runner, 'event) Ir.Backend_intf.context ->
   unit
 (** Frees the pools that are specific to the context -- not contained in the parent context. Note:
     use [finalize] to optimize memory, it is not obligatory because all pools are freed when their

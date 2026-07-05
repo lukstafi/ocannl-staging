@@ -53,8 +53,14 @@ let loop s body : LL.t =
 let seq a b : LL.t = LL.Seq (a, b)
 
 let optimize llc : LL.optimized =
-  let ctx : LL.optimize_ctx = { computations = Hashtbl.create (module Tn) } in
+  let ctx : LL.optimize_ctx = LL.empty_optimize_ctx () in
   LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name:"virtual_diagonal" [] llc
+
+
+(* Post-optimization placement probes: decisions live on the optimize_ctx's placements
+   (context-scoped memory modes), not on the tnode (which now holds only declared intent). *)
+let known_virtual (o : LL.optimized) tn = Tn.Placements.known_virtual o.optimize_ctx.placements tn
+
 
 (* --- structural probes on the optimized form --- *)
 let rec walk_t ~on_get ~on_where (llc : LL.t) =
@@ -115,7 +121,7 @@ let case_diagonal_generic () =
   let producer = seq (zero d) (loop i (set_at [| iter i; iter i |] d (embed i))) in
   let consumer = loop j (loop k (set_at [| iter j; iter k |] o (get_at [| iter j; iter k |] d))) in
   let opt = optimize (seq producer consumer) in
-  p "diagonal-generic: producer virtual" (Tn.known_virtual d);
+  p "diagonal-generic: producer virtual" (known_virtual opt d);
   p "diagonal-generic: read inlined (no array read of d)" (count_get opt d = 0);
   p "diagonal-generic: one equality guard survives" (count_where opt >= 1);
   p "diagonal-generic: consumer read inlined under guard" (count_get opt d = 0)
@@ -129,7 +135,7 @@ let case_diagonal_equal () =
   (* read d[j,j]: the two call-site indices are syntactically equal, so no guard. *)
   let consumer = loop j (set_at [| iter j; iter j |] o (get_at [| iter j; iter j |] d)) in
   let opt = optimize (seq producer consumer) in
-  p "diagonal-equal: producer virtual" (Tn.known_virtual d);
+  p "diagonal-equal: producer virtual" (known_virtual opt d);
   p "diagonal-equal: read inlined (no array read of d)" (count_get opt d = 0);
   p "diagonal-equal: guard folded away (no Where)" (count_where opt = 0)
 
@@ -147,7 +153,7 @@ let case_partial_diagonal () =
          (loop cc (set_at [| iter a; iter b; iter cc |] o (get_at [| iter a; iter b; iter cc |] d))))
   in
   let opt = optimize (seq producer consumer) in
-  p "partial-diagonal: producer virtual" (Tn.known_virtual d);
+  p "partial-diagonal: producer virtual" (known_virtual opt d);
   p "partial-diagonal: read inlined (no array read of d)" (count_get opt d = 0);
   p "partial-diagonal: one equality guard survives" (count_where opt >= 1)
 
@@ -161,7 +167,7 @@ let case_static_dynamic () =
   let producer = seq (zero d) (loop i (set_at [| iter i; iter i |] d (embed i))) in
   let consumer = loop j (set_at [| iter j |] o (get_at [| Idx.Fixed_idx 0; iter j |] d)) in
   let opt = optimize (seq producer consumer) in
-  p "static-dynamic: producer virtual" (Tn.known_virtual d);
+  p "static-dynamic: producer virtual" (known_virtual opt d);
   p "static-dynamic: read inlined (no array read of d)" (count_get opt d = 0);
   p "static-dynamic: one equality guard survives" (count_where opt >= 1)
 
@@ -176,7 +182,7 @@ let case_single_symbol_affine () =
   let producer = seq (zero d) (loop i (set_at [| iter i; aff i |] d (embed i))) in
   let consumer = loop j (set_at [| iter j |] o (get_at [| iter j; aff j |] d)) in
   let opt = optimize (seq producer consumer) in
-  p "single-affine: producer virtual" (Tn.known_virtual d);
+  p "single-affine: producer virtual" (known_virtual opt d);
   p "single-affine: read inlined (no array read of d)" (count_get opt d = 0);
   p "single-affine: no guard for matching affine" (count_where opt = 0)
 
@@ -193,7 +199,7 @@ let case_single_symbol_affine_mismatch () =
   let producer = seq (zero d) (loop i (set_at [| iter i; aff 1 i |] d (embed i))) in
   let consumer = loop j (set_at [| iter j |] o (get_at [| iter j; aff 2 j |] d)) in
   let opt = optimize (seq producer consumer) in
-  p "single-affine-mismatch: producer virtual" (Tn.known_virtual d);
+  p "single-affine-mismatch: producer virtual" (known_virtual opt d);
   p "single-affine-mismatch: read inlined (no array read of d)" (count_get opt d = 0);
   p "single-affine-mismatch: equality guard survives" (count_where opt >= 1)
 
@@ -205,7 +211,7 @@ let case_single_symbol () =
   let producer = loop i (set_at [| iter i |] d (embed i)) in
   let consumer = loop j (set_at [| iter j |] o (get_at [| iter j |] d)) in
   let opt = optimize (seq producer consumer) in
-  p "single-symbol: producer virtual" (Tn.known_virtual d);
+  p "single-symbol: producer virtual" (known_virtual opt d);
   p "single-symbol: read inlined (no array read of d)" (count_get opt d = 0);
   p "single-symbol: no guard" (count_where opt = 0)
 

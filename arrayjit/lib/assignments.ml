@@ -102,12 +102,16 @@ let can_skip_accumulation ~projections =
   (* We can skip accumulation (use = instead of +=) only if the projection is injective *)
   Indexing.is_injective projections
 
-(** Returns materialized nodes in the sense of {!Tnode.is_in_context_force}. NOTE: it must be called
-    after compilation; otherwise, it will disrupt memory mode inference. *)
-let%debug3_sexp context_nodes (asgns : t) : Tn.t_set =
+(** Returns materialized nodes in the sense of {!Tnode.Placements.is_in_context_force}, resolved
+    against the given compilation lineage's placements. NOTE: it must be called after compilation
+    (when the placements of all involved nodes are settled); otherwise, it will disrupt memory mode
+    inference. *)
+let%debug3_sexp context_nodes ~(plc : Tn.Placements.t) (asgns : t) : Tn.t_set =
   let open Utils.Set_O in
   let empty = Set.empty (module Tn) in
-  let one tn = if Tn.is_in_context_force tn 34 then Set.singleton (module Tn) tn else empty in
+  let one tn =
+    if Tn.Placements.is_in_context_force plc tn 34 then Set.singleton (module Tn) tn else empty
+  in
   let of_node = function Node rhs -> one rhs | Merge_buffer _ -> empty in
   let rec loop = function
     | Noop -> empty
@@ -839,8 +843,16 @@ let%track4_sexp to_low_level code =
     Array.length pdims = Array.length cdims + 1
     && Array.equal Int.equal (Array.subo pdims ~pos:1) cdims
     && Ops.equal_prec (Lazy.force array.Tn.prec) (Lazy.force sliced.Tn.prec)
+    (* Alias-ness is a semantic fact settled deterministically at assignments lowering, BEFORE
+       per-lineage placement decisions diverge (context-scoped memory modes, category 1). So
+       eligibility may consult only lineage-independent facts -- shapes, precision, padding, and
+       the parent's DECLARED INTENT -- never a lineage's placements: the alias mark is cached
+       globally on the tnode, and a lineage-dependent eligibility input would let one lineage's
+       alias redirect accesses to a parent that another lineage virtualized (PR #93 review).
+       Conversely, confirming an alias declares [On_device] intent on the parent (see
+       [mark_aliases]), so no lineage can resolve the backing buffer away from under the view. *)
     && (not (Tn.known_virtual sliced))
-    && (match sliced.Tn.memory_mode with Some (Tn.Effectively_constant, _) -> false | _ -> true)
+    && (not (Tn.known_constant sliced))
     && Option.is_none (Tn.get_padding sliced)
     && Option.is_none (Tn.get_padding array)
   in
@@ -852,7 +864,14 @@ let%track4_sexp to_low_level code =
         mark_aliases c2
     | Block_comment (_, c) -> mark_aliases c
     | Fetch { array; fetch_op = Slice { batch_idx; sliced }; dims = _ } ->
-        if slice_alias_eligible ~array ~sliced then Tn.set_alias_of array ~parent:sliced ~batch_idx
+        if slice_alias_eligible ~array ~sliced then (
+          (* The view's write semantics (a write through [array] is a write to [sliced]'s
+             sub-range, potentially observed by a later routine) require the parent to own a
+             persistent buffer in EVERY lineage that lowers this alias. Declare the intent
+             globally, like the alias mark itself -- monotone and idempotent; mirrors
+             [collect_nodes_guess_output]'s materialization of slice parents. Provenance 27. *)
+          Tn.update_memory_mode sliced On_device 27;
+          Tn.set_alias_of array ~parent:sliced ~batch_idx)
     | Fetch _ | Accum_op _ | Set_vec_unop _ -> ()
   in
   mark_aliases code;

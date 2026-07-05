@@ -9,9 +9,6 @@ struct
   type dev
   type runner
   type event
-  type optimize_ctx = Low_level.optimize_ctx [@@deriving sexp_of]
-
-  let empty_optimize_ctx () = { Low_level.computations = Hashtbl.create (module Tnode) }
 
   let sexp_of_dev _dev =
     failwith @@ "Backend " ^ Config.name ^ " missing -- install the corresponding library"
@@ -29,7 +26,7 @@ struct
   let sexp_of_device _device =
     failwith @@ "Backend " ^ Config.name ^ " missing -- install the corresponding library"
 
-  type nonrec context = (dev, runner, event, Low_level.optimize_ctx) Backend_intf.context
+  type nonrec context = (dev, runner, event) Backend_intf.context
 
   let sexp_of_context _context =
     failwith @@ "Backend " ^ Config.name ^ " missing -- install the corresponding library"

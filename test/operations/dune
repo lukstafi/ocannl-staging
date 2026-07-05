@@ -685,6 +685,28 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name sibling_placements)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules sibling_placements)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
+ (name observable_grads)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules observable_grads)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name virtual_diagonal)
  (package neural_nets_lib)
  (deps

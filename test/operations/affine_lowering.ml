@@ -165,7 +165,9 @@ let run_scatter_then_copy ~materialize_dst =
   let ctx = Context.set_values ctx src [| 10.; 11.; 12.; 13.; 14.; 15. |] in
   let ctx, routine = Context.compile ctx comp Idx.Empty in
   let ctx = Context.run ctx routine in
-  (Context.get_values ctx out, Tn.known_virtual dst)
+  (* The virtualization decision is recorded in the compilation lineage's placements, not on the
+     tnode (context-scoped memory modes). *)
+  (Context.get_values ctx out, Tn.Placements.known_virtual (Context.placements ctx) dst)
 
 (* Triangular scatter dst[s1, s1+s2] = src[s1,s2], s1 in [0,3), s2 in [0,2), consumed at plain
    [out[a,b] = dst[a,b]]. Unit-coefficient solving binds s1<-a then solves s2 = b - a with range
@@ -209,7 +211,7 @@ let run_triangular ~materialize_dst =
   let ctx = Context.set_values ctx src [| 0.; 1.; 2.; 3.; 4.; 5. |] in
   let ctx, routine = Context.compile ctx comp Idx.Empty in
   let ctx = Context.run ctx routine in
-  (Context.get_values ctx out, Tn.known_virtual dst)
+  (Context.get_values ctx out, Tn.Placements.known_virtual (Context.placements ctx) dst)
 
 let show a = String.concat ~sep:" " (Array.to_list (Array.map a ~f:Float.to_string))
 
