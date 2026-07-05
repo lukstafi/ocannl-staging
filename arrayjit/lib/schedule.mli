@@ -65,6 +65,21 @@ type optop =
           dividing the extents. With [shared = false] (CPU operand packing) all tile loops must be
           [Serial] and a plain serial copy nest is inserted, no barriers. The source must not be
           written in the routine. *)
+  | Privatize of { target : Tn.t; over : Indexing.symbol }
+      (** Accumulator privatization: contract the read-modify-write accumulation of the
+          materialized [target] across the (Serial) [over] loop's whole subtree into a per-thread
+          [Local] accumulator tile — initialized from [target] before the loop, accumulated in
+          place, stored back after, one final write per element. This recovers, for materialized
+          nodes, the scope-local form virtualization gives virtual accumulators ([Local_scope]) —
+          and because a routine-local tile cannot alias the kernel's device pointers, downstream
+          compilers register-allocate it without waiting for [restrict] (gh-ocannl-164). Tile
+          shape: per target axis, the index terms over loops nested inside [over] (required
+          [Serial] with [from_ = 0]); no such terms yields a scalar accumulator. All accesses of
+          [target] under [over] must use one index vector, which must not mention [over] itself.
+          A [Zero_out] of [target] elsewhere is left in place — the init-load observes it, so
+          semantics are preserved without a surjectivity analysis. Compose as: [Split]s →
+          [Stage]s → [Privatize] → materializing [Unroll]s (the unrolls then turn the tile
+          accesses into constant-indexed, register-allocatable form). *)
   | Expand_zero of { tn : Tn.t; indices : Indexing.symbol list }
       (** Expand the unique [Zero_out tn] statement into an ordinary loop nest over the supplied
           symbols (one per axis of [tn]'s padded dims; see {!expand_zero}). Whole-node [Zero_out]

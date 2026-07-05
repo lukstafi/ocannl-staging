@@ -20,6 +20,7 @@ type optop =
   | Retype of { axis : Indexing.symbol; ty : Low_level.axis_type }
   | Unroll of { axis : Indexing.symbol; materialize : bool }
   | Stage of { source : Tn.t; tile_loops : Indexing.symbol list; shared : bool }
+  | Privatize of { target : Tn.t; over : Indexing.symbol }
   | Expand_zero of { tn : Tn.t; indices : Indexing.symbol list }
 [@@deriving sexp_of]
 
@@ -145,10 +146,79 @@ let rewrite_loop ~what ~sym ~(f : floop -> Low_level.t) (llc : Low_level.t) : Lo
      ^ " in this routine");
   result
 
+(* Fresh scope ids for scalar locals declared within [llc] (binders: [Declare_local],
+   [Local_scope]). Materializing [Unroll] duplicates its body: without refreshing, sibling copies
+   would declare the same scope id — rendered as duplicate declarations in one C block — and
+   confuse the scope-id-keyed CSE/hoisting passes. References to locals declared outside [llc]
+   are left alone. *)
+let refresh_scopes (llc : Low_level.t) : Low_level.t =
+  let open Low_level in
+  let mapping = ref [] in
+  let bind id =
+    if not (List.Assoc.mem !mapping ~equal:equal_scope_id id) then
+      mapping := (id, get_scope id.tn) :: !mapping
+  in
+  let rec collect llc =
+    match llc with
+    | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Workgroup_barrier -> ()
+    | Declare_local { id; _ } -> bind id
+    | Seq (a, b) ->
+        collect a;
+        collect b
+    | For_loop { body; _ } | If { body; _ } -> collect body
+    | Set { llsc; _ } | Set_local (_, llsc) -> collect_scalar llsc
+    | Set_from_vec { arg = a, _; _ } -> collect_scalar a
+  and collect_scalar (llsc : scalar_t) =
+    match llsc with
+    | Local_scope { id; body; _ } ->
+        bind id;
+        collect body
+    | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
+    | Get_dynamic { dyn_value = v, _; _ } -> collect_scalar v
+    | Ternop (_, (a, _), (b, _), (c, _)) ->
+        collect_scalar a;
+        collect_scalar b;
+        collect_scalar c
+    | Binop (_, (a, _), (b, _)) ->
+        collect_scalar a;
+        collect_scalar b
+    | Unop (_, (a, _)) -> collect_scalar a
+  in
+  collect llc;
+  if List.is_empty !mapping then llc
+  else
+    let subst id =
+      match List.Assoc.find !mapping ~equal:equal_scope_id id with Some id' -> id' | None -> id
+    in
+    let rec code llc =
+      match llc with
+      | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Workgroup_barrier -> llc
+      | Declare_local { id; needs_init } -> Declare_local { id = subst id; needs_init }
+      | Seq (a, b) -> Seq (code a, code b)
+      | For_loop fc -> For_loop { fc with body = code fc.body }
+      | If { cond = c, p; body } -> If { cond = (scalar c, p); body = code body }
+      | Set ({ llsc; _ } as s) -> Set { s with llsc = scalar llsc }
+      | Set_local (id, llsc) -> Set_local (subst id, scalar llsc)
+      | Set_from_vec ({ arg = a, p; _ } as sv) -> Set_from_vec { sv with arg = (scalar a, p) }
+    and scalar (llsc : scalar_t) : scalar_t =
+      match llsc with
+      | Local_scope { id; body; orig_indices } ->
+          Local_scope { id = subst id; body = code body; orig_indices }
+      | Get_local id -> Get_local (subst id)
+      | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> llsc
+      | Get_dynamic ({ dyn_value = v, p; _ } as gd) -> Get_dynamic { gd with dyn_value = (scalar v, p) }
+      | Ternop (op, (a, pa), (b, pb), (c, pc)) ->
+          Ternop (op, (scalar a, pa), (scalar b, pb), (scalar c, pc))
+      | Binop (op, (a, pa), (b, pb)) -> Binop (op, (scalar a, pa), (scalar b, pb))
+      | Unop (op, (a, pa)) -> Unop (op, (scalar a, pa))
+    in
+    code llc
+
 let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
   let open Low_level in
   match op with
-  | Stage _ -> assert false (* Handled by [apply_opt_op]: it needs the whole [optimized]. *)
+  | Stage _ | Privatize _ ->
+      assert false (* Handled by [apply_opt_op]: they need the whole [optimized]. *)
   | Split { axis; factor; outer; inner; outer_index; inner_index } ->
       rewrite_loop ~what:"Schedule.Split" ~sym:axis llc ~f:(fun fc ->
           if factor <= 0 then invalid_arg "Schedule.Split: factor must be positive";
@@ -226,7 +296,9 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
                (fc.to_ - fc.from_ + 1)
                ~f:(fun k ->
                  let v = fc.from_ + k in
-                 map_code ~fidx:(subst_axis_index ~sym:axis ~by:{ terms = []; offset = v }) fc.body)))
+                 refresh_scopes
+                 @@ map_code ~fidx:(subst_axis_index ~sym:axis ~by:{ terms = []; offset = v })
+                      fc.body)))
   | Expand_zero { tn; indices } ->
       (* Whole-node [Zero_out] is never distributed across hardware threads ([validate_parallel]
          rejects it in multi-threaded kernels); expand it into an ordinary loop nest — over the
@@ -347,8 +419,11 @@ let collect_source_accesses ~source (llc : Low_level.t) :
   code [] llc;
   !acc
 
-(* Replaces reads [Get (source, idcs)] with [idcs] equal to [from_idcs] by [Get (tile, tile_idcs)]. *)
-let remap_reads ~source ~from_idcs ~tile ~tile_idcs (llc : Low_level.t) : Low_level.t =
+(* Replaces reads [Get (source, idcs)] — and, when [writes] is set, writes
+   [Set { tn = source; idcs; _ }] — with [idcs] equal to [from_idcs] by accesses of [tile] at
+   [tile_idcs]. *)
+let remap_reads ?(writes = false) ~source ~from_idcs ~tile ~tile_idcs (llc : Low_level.t) :
+    Low_level.t =
   let open Low_level in
   let rec code llc =
     match llc with
@@ -356,6 +431,9 @@ let remap_reads ~source ~from_idcs ~tile ~tile_idcs (llc : Low_level.t) : Low_le
         llc
     | Seq (a, b) -> Seq (code a, code b)
     | For_loop fc -> For_loop { fc with body = code fc.body }
+    | Set { tn; idcs; llsc; debug }
+      when writes && Tn.equal tn source && Array.equal Indexing.equal_axis_index idcs from_idcs ->
+        Set { tn = tile; idcs = tile_idcs; llsc = scalar llsc; debug }
     | Set { tn; idcs; llsc; debug } -> Set { tn; idcs; llsc = scalar llsc; debug }
     | Set_from_vec ({ arg = a, p; _ } as sv) -> Set_from_vec { sv with arg = (scalar a, p) }
     | Set_local (id, llsc) -> Set_local (id, scalar llsc)
@@ -605,9 +683,208 @@ let apply_stage ~source ~tile_loops ~shared (opt : Low_level.optimized) : Low_le
       (if shared then Set.add opt.workgroup_shared tile else opt.workgroup_shared);
   }
 
+(** {2 [Privatize]: accumulator privatization}
+
+    Virtualization already privatizes accumulators — that is what [Local_scope] is — but it is
+    forbidden from touching materialized nodes (they are observable). [Privatize { target; over }]
+    recovers the same form inside one kernel for a materialized accumulation: the read-modify-write
+    of [target] across the [over] loop's whole subtree is contracted to a per-thread [Local]
+    accumulator tile — initialized from [target] before the loop, accumulated in place, stored
+    back after — keeping a single final write per element. Because the tile is routine-local
+    scratch whose address cannot alias the kernel's device pointers, downstream C/CUDA/MSL
+    compilers can register-allocate it without [restrict] (gh-ocannl-164).
+
+    Tile shape: per [target] axis, the index terms over loops nested inside [over] (they must be
+    [Serial] — a workgroup-indexed private tile would make the store-back nest write other
+    threads' elements) form the tile part sizing that axis; terms over loops outside [over] are
+    the per-thread element selection, kept in the init-load and store-back indices. No tile part
+    at all yields a scalar accumulator (dims [|1|]). Init/store nests iterate fresh serial
+    symbols with per-axis edge guards (construct-then-fold, as in [Stage]). Any [Zero_out] of
+    [target] elsewhere in the routine is left in place: the init-load observes its effect, so
+    semantics are preserved without a surjectivity analysis (dropping the redundant zeroing is a
+    follow-up). *)
+
+let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimized =
+  let open Low_level in
+  let iprec = Ops.index_prec () in
+  let tgt_dims = Lazy.force target.Tn.dims in
+  rewrite_loop ~what:"Schedule.Privatize" ~sym:over opt.llc ~f:(fun fc ->
+      if not (equal_axis_type fc.axis Serial) then
+        invalid_arg "Schedule.Privatize: the accumulation loop must be Serial";
+      (* Accesses of [target] within the loop's subtree, with their loop stacks relative to it. *)
+      let accesses = ref [] in
+      let has_write = ref false in
+      let rec scan stack llc =
+        match llc with
+        | Noop | Comment _ | Staged_compilation _ | Declare_local _ | Workgroup_barrier -> ()
+        | Zero_out tn ->
+            if Tn.equal tn target then
+              invalid_arg "Schedule.Privatize: Zero_out of the target inside the accumulation loop"
+        | Seq (a, b) ->
+            scan stack a;
+            scan stack b
+        | For_loop { index; from_; to_; body; trace_it; axis } ->
+            scan ({ index; from_; to_; body = Noop; trace_it; axis } :: stack) body
+        | Set { tn; idcs; llsc; _ } ->
+            if Tn.equal tn target then (
+              has_write := true;
+              accesses := (idcs, stack) :: !accesses);
+            scan_scalar stack llsc
+        | Set_from_vec { tn; arg = a, _; _ } ->
+            if Tn.equal tn target then
+              invalid_arg "Schedule.Privatize: vector writes to the target are unsupported";
+            scan_scalar stack a
+        | Set_local (_, llsc) -> scan_scalar stack llsc
+        | If { cond = c, _; body } ->
+            scan_scalar stack c;
+            scan stack body
+      and scan_scalar stack (llsc : scalar_t) =
+        match llsc with
+        | Local_scope { body; _ } -> scan stack body
+        | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
+        | Get (tn, idcs) -> if Tn.equal tn target then accesses := (idcs, stack) :: !accesses
+        | Get_dynamic { tn; dyn_value = v, _; _ } ->
+            if Tn.equal tn target then
+              invalid_arg "Schedule.Privatize: dynamically indexed target accesses are unsupported";
+            scan_scalar stack v
+        | Get_merge_buffer (_, _) -> ()
+        | Ternop (_, (a, _), (b, _), (c, _)) ->
+            scan_scalar stack a;
+            scan_scalar stack b;
+            scan_scalar stack c
+        | Binop (_, (a, _), (b, _)) ->
+            scan_scalar stack a;
+            scan_scalar stack b
+        | Unop (_, (a, _)) -> scan_scalar stack a
+      in
+      scan [] fc.body;
+      let idcs0 =
+        match !accesses with
+        | [] ->
+            invalid_arg
+              ("Schedule.Privatize: no accesses of " ^ Tn.debug_name target
+             ^ " under the accumulation loop")
+        | (idcs, _) :: _ -> idcs
+      in
+      if not !has_write then
+        invalid_arg ("Schedule.Privatize: " ^ Tn.debug_name target ^ " is not written (no accumulation)");
+      List.iter !accesses ~f:(fun (idcs, _) ->
+          if not (Array.equal Indexing.equal_axis_index idcs idcs0) then
+            invalid_arg
+              ("Schedule.Privatize: v1 requires all accesses of " ^ Tn.debug_name target
+             ^ " under the loop to use identical index vectors"));
+      (* Loops bound inside the subtree, by index symbol (union over access paths). *)
+      let inner_loop s =
+        List.find_map !accesses ~f:(fun (_, stack) ->
+            List.find stack ~f:(fun fl -> Indexing.equal_symbol fl.index s))
+      in
+      (* Per axis: tile part (terms over inner loops) and outer part. The [over] symbol itself
+         must not occur — the accumulator is carried across that loop. *)
+      let decomp =
+        Array.map idcs0 ~f:(fun idx ->
+            match terms_of_index idx with
+            | None -> invalid_arg "Schedule.Privatize: Concat indices are unsupported"
+            | Some (terms, offset) ->
+                if List.exists terms ~f:(fun (_, s) -> Indexing.equal_symbol s over) then
+                  invalid_arg
+                    ("Schedule.Privatize: the target's indices mention the accumulation loop "
+                    ^ Indexing.symbol_ident over ^ " — nothing to carry the accumulator across");
+                let tile_part, outer_part =
+                  List.partition_tf terms ~f:(fun (_, s) -> Option.is_some (inner_loop s))
+                in
+                List.iter tile_part ~f:(fun (c, s) ->
+                    if c <= 0 then
+                      invalid_arg "Schedule.Privatize: nonpositive coefficient on an inner index";
+                    let fl = Option.value_exn (inner_loop s) in
+                    if not (equal_axis_type fl.axis Serial) || fl.from_ <> 0 then
+                      invalid_arg
+                        ("Schedule.Privatize: inner index loop " ^ Indexing.symbol_ident s
+                       ^ " must be Serial starting at 0 (a workgroup-indexed private tile would \
+                          store back other threads' elements)"));
+                (tile_part, outer_part, offset))
+      in
+      let extent s =
+        let fl = Option.value_exn (inner_loop s) in
+        fl.to_ - fl.from_ + 1
+      in
+      let tile_axes =
+        Array.filter_mapi decomp ~f:(fun a (tp, _, _) ->
+            if List.is_empty tp then None
+            else Some (a, List.fold tp ~init:1 ~f:(fun acc (c, s) -> acc + (c * (extent s - 1)))))
+      in
+      let scalar_acc = Array.is_empty tile_axes in
+      let tile_dims = if scalar_acc then [| 1 |] else Array.map tile_axes ~f:snd in
+      let prec = Lazy.force target.Tn.prec in
+      let tile =
+        Tn.create (Tn.Specified prec) ~id:(fresh_tile_id ())
+          ~label:("acc" :: target.Tn.label)
+          ~unpadded_dims:(lazy tile_dims)
+          ~padding:(lazy None) ()
+      in
+      Tn.update_memory_mode tile Tn.Local 176;
+      ignore (get_node opt.traced_store tile : traced_array);
+      let tile_read_idcs =
+        if scalar_acc then [| Indexing.Fixed_idx 0 |]
+        else
+          Array.map tile_axes ~f:(fun (a, _) ->
+              let tp, _, _ = decomp.(a) in
+              normalize_affine ~terms:tp ~offset:0)
+      in
+      (* Init-load and store-back nests over fresh serial symbols (two independent sets). *)
+      let transfer ~into_tile =
+        let fresh_syms =
+          Array.fold_right tile_axes
+            ~init:(Map.empty (module Indexing.Symbol))
+            ~f:(fun (a, _) m ->
+              let tp, _, _ = decomp.(a) in
+              List.fold tp ~init:m ~f:(fun m (_, s) ->
+                  if Map.mem m s then m else Map.set m ~key:s ~data:(Indexing.get_symbol ())))
+        in
+        let load_sym s = Option.value (Map.find fresh_syms s) ~default:s in
+        let subst_terms terms = List.map terms ~f:(fun (c, s) -> (c, load_sym s)) in
+        let src_idcs =
+          Array.map decomp ~f:(fun (tp, op_, off) ->
+              normalize_affine ~terms:(subst_terms tp @ op_) ~offset:off)
+        in
+        let t_idcs =
+          if scalar_acc then [| Indexing.Fixed_idx 0 |]
+          else
+            Array.map tile_axes ~f:(fun (a, _) ->
+                let tp, _, _ = decomp.(a) in
+                normalize_affine ~terms:(subst_terms tp) ~offset:0)
+        in
+        let stmt =
+          if into_tile then
+            Set { tn = tile; idcs = t_idcs; llsc = Get (target, src_idcs); debug = "" }
+          else Set { tn = target; idcs = src_idcs; llsc = Get (tile, t_idcs); debug = "" }
+        in
+        (* Per-axis edge guards (construct-then-fold; they survive only for non-dividing tiles). *)
+        let stmt =
+          Array.fold tile_axes ~init:stmt ~f:(fun stmt (a, _) ->
+              let cond =
+                Binop
+                  ( Ops.Cmplt,
+                    (Embed_index src_idcs.(a), iprec),
+                    (Constant (Float.of_int tgt_dims.(a)), iprec) )
+              in
+              If { cond = (cond, iprec); body = stmt })
+        in
+        Map.fold fresh_syms ~init:stmt ~f:(fun ~key:s ~data:s' body ->
+            For_loop
+              { index = s'; from_ = 0; to_ = extent s - 1; body; trace_it = false; axis = Serial })
+      in
+      let remapped =
+        remap_reads ~writes:true ~source:target ~from_idcs:idcs0 ~tile ~tile_idcs:tile_read_idcs
+          fc.body
+      in
+      unflat_lines
+        [ transfer ~into_tile:true; for_loop { fc with body = remapped }; transfer ~into_tile:false ])
+  |> fun llc -> { opt with llc }
+
 let apply_opt_op (opt : Low_level.optimized) (op : optop) : Low_level.optimized =
   match op with
   | Stage { source; tile_loops; shared } -> apply_stage ~source ~tile_loops ~shared opt
+  | Privatize { target; over } -> apply_privatize ~target ~over opt
   | (Split _ | Swap _ | Retype _ | Unroll _ | Expand_zero _) as op ->
       { opt with llc = apply_op opt.Low_level.llc op }
 

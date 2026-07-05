@@ -71,6 +71,7 @@ let () =
   let got_naive = Context.get_values ctx_s mc0.Tensor.value in
 
   (* --- Tiled + packed --- *)
+  let%op mc1 = ma * mb in
   let pack_schedule (opt : LL.optimized) : Sched.schedule =
     let paths = nest_paths opt.LL.llc in
     let accum = List.find_exn paths ~f:(fun p -> List.length p = 3) in
@@ -86,9 +87,9 @@ let () =
     @ [
         Sched.Stage { source = ma.Tensor.value; tile_loops = [ i_i; k_i ]; shared = false };
         Sched.Stage { source = mb.Tensor.value; tile_loops = [ k_i; j_i ]; shared = false };
+        Sched.Privatize { target = mc1.Tensor.value; over = k_o };
       ]
   in
-  let%op mc1 = ma * mb in
   let pack_comp = named "mmp_packed" (Train.forward mc1) in
   let transform opt = Sched.apply (pack_schedule opt) opt in
   let ctx_a = Context.auto () in
@@ -108,6 +109,7 @@ let () =
       in
       p "packed tiles are plain local arrays, no barriers, no guards"
         (count_sub "float tile_" = 2
+        && has "acc_mc1"
         && (not (has "threadgroup float tile_"))
         && (not (has "__shared__"))
         && (not (has "barrier"))

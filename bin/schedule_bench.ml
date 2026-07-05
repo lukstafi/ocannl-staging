@@ -4,9 +4,10 @@
 
    - parallel: one thread per output element (Split i / Split j into Grid x Workgroup; the S1
      shape, Boehm kernel 1 equivalent);
-   - smem: + Split k, operands staged through workgroup-shared tiles (S2, Boehm kernel 3);
-   - regtile: + second-level splits with materialized-unroll TM x TN register tiles (S3,
-     Boehm kernel 4/5 shape).
+   - smem: + Split k, operands staged through workgroup-shared tiles, the output accumulator
+     privatized to a per-thread scalar (S2 + Privatize, Boehm kernel 3);
+   - regtile: + second-level splits with materialized-unroll TM x TN register tiles accumulating
+     into a privatized per-thread tile (S3 + Privatize, Boehm kernel 4/5 shape).
 
    Usage: dune exec bin/schedule_bench.exe -- [n] [repeats] (defaults 256 and 20; n must be a
    multiple of 64). Run with OCANNL_BACKEND=metal (or cuda); the C backends reject the shared
@@ -81,17 +82,17 @@ let () =
     let sp_zj, _, _ = Sched.split ~axis:zj ~factor:bn ~outer:LL.Grid ~inner:LL.Workgroup in
     let sp_i, _, i_i = Sched.split ~axis:i ~factor:bm ~outer:LL.Grid ~inner:LL.Workgroup in
     let sp_j, _, j_i = Sched.split ~axis:j ~factor:bn ~outer:LL.Grid ~inner:LL.Workgroup in
-    let sp_k, _, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
+    let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
     [
       ez; sp_zi; sp_zj; sp_i; sp_j; sp_k;
       Sched.Stage { source = ma.Tensor.value; tile_loops = [ i_i; k_i ]; shared = true };
       Sched.Stage { source = mb.Tensor.value; tile_loops = [ k_i; j_i ]; shared = true };
+      Sched.Privatize { target = mc; over = k_o };
     ]
   in
 
   (* CPU cache tiling + operand packing (all-Serial; the S4 shape, Boehm's packed CPU kernel). *)
   let cpupack_schedule ~mc opt =
-    ignore mc;
     let bm, bn, bk = (64, 64, 16) in
     let i, j, k = accum_syms opt in
     let sp_i, _, i_i = Sched.split ~axis:i ~factor:bm ~outer:LL.Serial ~inner:LL.Serial in
@@ -104,6 +105,7 @@ let () =
     @ [
         Sched.Stage { source = ma.Tensor.value; tile_loops = [ i_i; k_i ]; shared = false };
         Sched.Stage { source = mb.Tensor.value; tile_loops = [ k_i; j_i ]; shared = false };
+        Sched.Privatize { target = mc; over = k_o };
       ]
   in
 
@@ -129,6 +131,7 @@ let () =
     @ [
         Sched.Stage { source = ma.Tensor.value; tile_loops = [ i_w; i_t; k_i ]; shared = true };
         Sched.Stage { source = mb.Tensor.value; tile_loops = [ k_i; j_w; j_t ]; shared = true };
+        Sched.Privatize { target = mc; over = k_o };
         Sched.Unroll { axis = i_t; materialize = true };
         Sched.Unroll { axis = j_t; materialize = true };
       ]
