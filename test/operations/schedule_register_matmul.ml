@@ -102,6 +102,7 @@ let () =
     @ [
         Sched.Stage { source = ma.Tensor.value; tile_loops = [ i_w; i_t; k_i ]; shared = true };
         Sched.Stage { source = mb.Tensor.value; tile_loops = [ k_i; j_w; j_t ]; shared = true };
+        Sched.Privatize { target = mc1.Tensor.value; over = k_o };
         Sched.Unroll { axis = i_t; materialize = true };
         Sched.Unroll { axis = j_t; materialize = true };
       ]
@@ -128,6 +129,7 @@ let () =
         p "unrolled register tile structure (GPU) or rejected (CPU)"
           (count_sub "fma(" = tm * tn
           && count_sub "if (" = 2
+          && String.is_substring src ~substring:"acc_mc1"
           &&
           if String.is_substring backend_name ~substring:"metal" then
             count_sub "threadgroup float tile_" = 2

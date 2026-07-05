@@ -18,11 +18,19 @@
   index-agreement on parallel components).
 - Benchmarks (`bin/schedule_bench.exe`, Apple-silicon Metal, 256³/512³ f32 matmul): parallel
   (S1 shape) ≈ 100–130 GFLOP/s, 1800–3000× over the naive 1×1 launch — the #412 >10× criterion
-  is met by parallelization alone. SMEM (S2) and register tiles (S3) land at parity with S1
-  rather than ahead: every fma still round-trips the output element through global memory.
-  Unlocking the rest of the Böhm curve needs accumulator privatization (a future optop) plus
-  [gh-ocannl-164](gh-ocannl-164.md) `restrict`. On cc, S4 cache tiles + packing give 3.3×
-  single-threaded (2.5 → 8.1 GFLOP/s at 256³). Both prerequisites landed on 2026-07-04:
+  is met by parallelization alone. SMEM (S2) and register tiles (S3) initially landed at parity
+  with S1: every fma round-tripped the output element through global memory.
+- **`Privatize` (2026-07-05, also not in the original §1)** closes that gap: it contracts the
+  read-modify-write of a materialized accumulator across a reduction loop into a per-thread
+  `Local` tile (init-load before, store-back after) — recovering for materialized nodes the
+  scope-local form virtualization gives virtual accumulators, and sidestepping the aliasing
+  obstacle since a routine-local tile cannot alias kernel pointers (no `restrict` needed for
+  the accumulator; [gh-ocannl-164](gh-ocannl-164.md) still helps the loads). Composition order:
+  Splits → Stages → Privatize → materializing Unrolls (which turn the tile accesses into
+  constant-indexed, register-allocatable form). With it, register tiling pulls ahead of plain
+  parallel: 200 vs 184 GFLOP/s at 512³, 145 vs 125 at 1024³ (~16%); cc cache tiles + packing
+  improve from 3.3× to 3.8× single-threaded (9.0 GFLOP/s at 256³). The remaining headroom is
+  tile-size tuning, vectorized loads, and eventually the BEAM search. Both prerequisites landed on 2026-07-04:
 [axis-types-for-loops](axis-types-for-loops.md) (Phases A–C: `axis_type` on `For_loop`,
 `Workgroup_barrier`, `workgroup_shared`, the `If` guard statement, hardware rendering,
 launch dims, `validate_parallel`) and

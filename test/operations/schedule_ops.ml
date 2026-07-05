@@ -174,4 +174,99 @@ let () =
         Sched.apply (Sched.default_gpu ~min_parallel:1 opt) opt)
   in
   p "default annotator matmul values match the serial twin"
-    (Array.for_all2_exn mm_sched mm_serial ~f:approx)
+    (Array.for_all2_exn mm_sched mm_serial ~f:approx);
+
+  (* --- Privatize under If guards (PR #91 review): a lane-guarded accumulation
+     [if (w == 0) c += va[k]] must carry the guard onto the synthesized init-load and
+     store-back (stale lanes would otherwise clobber the result); a per-iteration guard
+     (mentioning a symbol bound inside the accumulation loop) must be rejected. Structural
+     checks on hand-built IR, backend-independent. --- *)
+  let cacc = TDSL.ndarray [| 0. |] ~label:[ "cacc" ] ~output_dims:[ 1 ] () in
+  let va = TDSL.ndarray [| 1.; 2.; 3.; 4. |] ~label:[ "va" ] ~output_dims:[ 4 ] () in
+  let single = Ir.Ops.single in
+  let iprec = Ir.Ops.index_prec () in
+  let fake llc : LL.optimized =
+    {
+      LL.traced_store = Hashtbl.create (module Ir.Tnode);
+      optimize_ctx = { LL.computations = Hashtbl.create (module Ir.Tnode) };
+      llc;
+      merge_node = None;
+      workgroup_shared = Set.empty (module Ir.Tnode);
+    }
+  in
+  let guarded_accum ~cond_of =
+    let w = Ir.Indexing.get_symbol () and k = Ir.Indexing.get_symbol () in
+    let accum =
+      LL.Set
+        {
+          tn = cacc.Tensor.value;
+          idcs = [| Ir.Indexing.Fixed_idx 0 |];
+          llsc =
+            LL.Binop
+              ( Ir.Ops.Add,
+                (LL.Get (cacc.Tensor.value, [| Ir.Indexing.Fixed_idx 0 |]), single),
+                (LL.Get (va.Tensor.value, [| Ir.Indexing.Iterator k |]), single) );
+          debug = "";
+        }
+    in
+    let llc =
+      LL.For_loop
+        {
+          index = w;
+          from_ = 0;
+          to_ = 3;
+          trace_it = false;
+          axis = LL.Workgroup;
+          body =
+            LL.For_loop
+              {
+                index = k;
+                from_ = 0;
+                to_ = 3;
+                trace_it = false;
+                axis = LL.Serial;
+                body = LL.If { cond = (cond_of ~w ~k, iprec); body = accum };
+              };
+        }
+    in
+    (llc, k)
+  in
+  let doc_to_str doc =
+    let b = Buffer.create 256 in
+    PPrint.ToBuffer.pretty 0.7 110 b doc;
+    Buffer.contents b
+  in
+  let lane_llc, lane_k =
+    guarded_accum ~cond_of:(fun ~w ~k:_ ->
+        LL.Binop
+          ( Ir.Ops.Cmpeq,
+            (LL.Embed_index (Ir.Indexing.Iterator w), iprec),
+            (LL.Constant 0., iprec) ))
+  in
+  let lane_res =
+    Sched.apply [ Sched.Privatize { target = cacc.Tensor.value; over = lane_k } ] (fake lane_llc)
+  in
+  let lane_src = doc_to_str (LL.to_doc () lane_res.LL.llc) in
+  let count_sub sub = String.substr_index_all lane_src ~may_overlap:false ~pattern:sub |> List.length in
+  p "lane-guarded privatize gates init and store-back"
+    (count_sub "if " = 3 && String.is_substring lane_src ~substring:"acc_");
+  let iter_llc, iter_k =
+    guarded_accum ~cond_of:(fun ~w:_ ~k ->
+        LL.Binop
+          ( Ir.Ops.Cmplt,
+            (LL.Embed_index (Ir.Indexing.Iterator k), iprec),
+            (LL.Constant 3., iprec) ))
+  in
+  p "per-iteration guard rejected by privatize"
+    (match
+       try
+         ignore
+           (Sched.apply
+              [ Sched.Privatize { target = cacc.Tensor.value; over = iter_k } ]
+              (fake iter_llc)
+             : LL.optimized);
+         None
+       with Invalid_argument msg -> Some msg
+     with
+    | Some msg -> String.is_substring msg ~substring:"varies across the accumulation"
+    | None -> false)

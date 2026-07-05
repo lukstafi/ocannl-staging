@@ -92,7 +92,7 @@ let () =
     let sp_zj, _, _ = Sched.split ~axis:zj ~factor:bn ~outer:LL.Grid ~inner:LL.Workgroup in
     let sp_i, _, i_i = Sched.split ~axis:i ~factor:bm ~outer:LL.Grid ~inner:LL.Workgroup in
     let sp_j, _, j_i = Sched.split ~axis:j ~factor:bn ~outer:LL.Grid ~inner:LL.Workgroup in
-    let sp_k, _, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
+    let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
     [
       ez;
       sp_zi;
@@ -102,6 +102,7 @@ let () =
       sp_k;
       Sched.Stage { source = ma.Tensor.value; tile_loops = [ i_i; k_i ]; shared = true };
       Sched.Stage { source = mb.Tensor.value; tile_loops = [ k_i; j_i ]; shared = true };
+      Sched.Privatize { target = mc1.Tensor.value; over = k_o };
     ]
   in
   let smem_comp = named "mm_smem" (Train.forward mc1) in
@@ -125,10 +126,12 @@ let () =
             count_sub "threadgroup float tile_" = 2 && has "threadgroup_barrier"
           else count_sub "__shared__ float tile_" = 2 && has "__syncthreads()"
         in
-        (* All tile sizes divide the extents: Split remainder guards and Stage edge guards fold;
-           the only Ifs left are the two thread-0 load restrictions. *)
+        (* All tile sizes divide the extents: Split remainder guards and Stage/Privatize edge
+           guards fold; the only Ifs left are the two thread-0 load restrictions. The k loop
+           accumulates into the privatized scalar [acc_mc1] instead of round-tripping mc1
+           through global memory. *)
         p "shared tiles, barriers, no edge guards (GPU) or rejected (CPU)"
-          (shared_ok && count_sub "if (" = 2))
+          (shared_ok && count_sub "if (" = 2 && has "acc_mc1"))
   else (
     (match
        try

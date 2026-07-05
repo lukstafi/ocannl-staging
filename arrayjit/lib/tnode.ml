@@ -219,6 +219,25 @@ let rec is_materialized_force tn provenance =
       default_to_most_local tn provenance;
       is_materialized_force tn provenance
 
+(** Like {!is_materialized_force}, but pure: computes what forcing would decide — mirroring
+    {!default_to_most_local}'s resolution of [Never_virtual] / [Effectively_constant] — without
+    recording the decision or a provenance. For analyses (e.g. [Schedule.default_gpu]) that must
+    not perturb the settlement state observed by debug output and by later compilations; the
+    eventual force (e.g. at codegen) lands the same mode deterministically. *)
+let is_materialized_peek tn =
+  match tn.memory_mode with
+  | None -> assert false
+  | Some ((Virtual | Local), _) -> false
+  | Some (On_device, _) -> true
+  | Some (Effectively_constant, _) -> false (* [default_to_most_local] resolves to [Virtual]. *)
+  | Some (Never_virtual, _) ->
+      (* [default_to_most_local] resolves to [Local] or [On_device] by the stack threshold. *)
+      let stack_threshold_in_bytes =
+        Int.of_string @@ Utils.get_global_arg ~default:"16384" ~arg_name:"stack_threshold_in_bytes"
+      in
+      stack_threshold_in_bytes > 0
+      && num_elems tn > stack_threshold_in_bytes / (Ops.prec_in_bytes @@ Lazy.force tn.prec)
+
 (** A slice-alias view (see {!field-alias_of}). Such a node owns no buffer of its own; its accesses
     are redirected to its parent during lowering. *)
 let is_alias tn = Option.is_some tn.alias_of
