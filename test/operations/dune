@@ -820,6 +820,7 @@
     %{dep:../../arrayjit/lib/context.ml}
     %{dep:../../arrayjit/lib/cuda_backend.ml}
     %{dep:../../arrayjit/lib/low_level.ml}
+    %{dep:../../arrayjit/lib/schedule.ml}
     %{dep:../../arrayjit/lib/tnode.ml}
     %{dep:../../arrayjit/lib/assignments.ml}
     %{dep:../../tensor/tensor.ml}

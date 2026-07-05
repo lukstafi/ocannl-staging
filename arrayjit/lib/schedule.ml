@@ -1037,14 +1037,14 @@ let scan_accesses (llc : Low_level.t) : access list =
         if not (equal_axis_type axis Serial) then raise Bail;
         code ~depth body
     | Zero_out tn ->
-        if Tn.is_materialized_force tn 172 then raise Bail
+        if Tn.is_materialized_peek tn then raise Bail
         (* Zeroing per-thread scratch is safe: each thread zeroes its own copy. *)
     | Set { tn; idcs; llsc; _ } ->
-        if depth > 0 && Tn.is_materialized_force tn 172 then raise Bail;
+        if depth > 0 && Tn.is_materialized_peek tn then raise Bail;
         add ~depth ~write:true ~dynamic:false tn idcs;
         scalar ~depth llsc
     | Set_from_vec { tn; idcs; arg = a, _; _ } ->
-        if depth > 0 && Tn.is_materialized_force tn 172 then raise Bail;
+        if depth > 0 && Tn.is_materialized_peek tn then raise Bail;
         add ~depth ~write:true ~dynamic:false tn idcs;
         scalar ~depth a
     | Set_local (_, llsc) -> scalar ~depth llsc
@@ -1134,7 +1134,7 @@ let default_gpu ?block_size ?min_parallel (opt : Low_level.optimized) : schedule
   try
     let nests, bare = split_nests opt.llc in
     (* Bare materialized writes cannot be covered by annotated loops. *)
-    if List.exists bare ~f:(fun a -> a.a_write && Tn.is_materialized_force a.a_tn 172) then
+    if List.exists bare ~f:(fun a -> a.a_write && Tn.is_materialized_peek a.a_tn) then
       raise Bail;
     (* Chains: per nest, the outermost (up to two) Serial path loops whose index occurs as a plain
        [Iterator] component in every materialized write vector of the nest. *)
@@ -1142,7 +1142,7 @@ let default_gpu ?block_size ?min_parallel (opt : Low_level.optimized) : schedule
       List.map nests ~f:(fun n ->
           let mat_writes =
             List.filter n.n_accesses ~f:(fun a ->
-                a.a_write && Tn.is_materialized_force a.a_tn 172)
+                a.a_write && Tn.is_materialized_peek a.a_tn)
           in
           let qualifies s =
             (not (List.is_empty mat_writes))
@@ -1171,7 +1171,7 @@ let default_gpu ?block_size ?min_parallel (opt : Low_level.optimized) : schedule
         Hashtbl.iter by_tn ~f:(fun accs ->
             let written = List.exists accs ~f:(fun a -> a.a_write) in
             if written then (
-              let is_mat = Tn.is_materialized_force (List.hd_exn accs).a_tn 172 in
+              let is_mat = Tn.is_materialized_peek (List.hd_exn accs).a_tn in
               let chain_relevant =
                 List.exists accs ~f:(fun a -> Array.exists a.a_idcs ~f:(mentions_sym syms))
               in
@@ -1209,7 +1209,7 @@ let default_gpu ?block_size ?min_parallel (opt : Low_level.optimized) : schedule
                       List.exists accs_j ~f:(fun a -> a.a_tn.Tn.id = w.a_tn.Tn.id)
                     in
                     if touched_elsewhere then
-                      if Tn.is_materialized_force w.a_tn 172 then raise Bail
+                      if Tn.is_materialized_peek w.a_tn then raise Bail
                       else if
                         (* Local scratch: safe only if every thread writes its whole private
                            copy, i.e. the writes do not depend on parallel symbols. *)
