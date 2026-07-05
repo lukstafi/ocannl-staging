@@ -198,7 +198,7 @@ let collect_neutral_elem (asgns : t) : float option =
   in
   match loop None asgns with None -> None | Some v -> v
 
-let%track4_sexp to_low_level ?(plc = Tn.Placements.create ()) code =
+let%track4_sexp to_low_level code =
   let open Indexing in
   (* Apply left padding offsets to convert from semantic to buffer indices. Semantic indices can be
      negative (e.g., -1 for convolution padding), but buffer indices must be non-negative. Adding
@@ -843,12 +843,16 @@ let%track4_sexp to_low_level ?(plc = Tn.Placements.create ()) code =
     Array.length pdims = Array.length cdims + 1
     && Array.equal Int.equal (Array.subo pdims ~pos:1) cdims
     && Ops.equal_prec (Lazy.force array.Tn.prec) (Lazy.force sliced.Tn.prec)
-    (* Backing storage is judged against the compilation lineage's placements ([plc]): a parent
-       virtualized by a prior compile in this lineage has no buffer for the alias to share. With no
-       placements in hand (debug printing, hand-built IR) this falls back to the tnode's declared
-       intent, since an empty placements table defers to it. *)
-    && (not (Tn.Placements.known_virtual plc sliced))
-    && (not (Tn.Placements.known_constant plc sliced))
+    (* Alias-ness is a semantic fact settled deterministically at assignments lowering, BEFORE
+       per-lineage placement decisions diverge (context-scoped memory modes, category 1). So
+       eligibility may consult only lineage-independent facts -- shapes, precision, padding, and
+       the parent's DECLARED INTENT -- never a lineage's placements: the alias mark is cached
+       globally on the tnode, and a lineage-dependent eligibility input would let one lineage's
+       alias redirect accesses to a parent that another lineage virtualized (PR #93 review).
+       Conversely, confirming an alias declares [On_device] intent on the parent (see
+       [mark_aliases]), so no lineage can resolve the backing buffer away from under the view. *)
+    && (not (Tn.known_virtual sliced))
+    && (not (Tn.known_constant sliced))
     && Option.is_none (Tn.get_padding sliced)
     && Option.is_none (Tn.get_padding array)
   in
@@ -860,7 +864,14 @@ let%track4_sexp to_low_level ?(plc = Tn.Placements.create ()) code =
         mark_aliases c2
     | Block_comment (_, c) -> mark_aliases c
     | Fetch { array; fetch_op = Slice { batch_idx; sliced }; dims = _ } ->
-        if slice_alias_eligible ~array ~sliced then Tn.set_alias_of array ~parent:sliced ~batch_idx
+        if slice_alias_eligible ~array ~sliced then (
+          (* The view's write semantics (a write through [array] is a write to [sliced]'s
+             sub-range, potentially observed by a later routine) require the parent to own a
+             persistent buffer in EVERY lineage that lowers this alias. Declare the intent
+             globally, like the alias mark itself -- monotone and idempotent; mirrors
+             [collect_nodes_guess_output]'s materialization of slice parents. Provenance 27. *)
+          Tn.update_memory_mode sliced On_device 27;
+          Tn.set_alias_of array ~parent:sliced ~batch_idx)
     | Fetch _ | Accum_op _ | Set_vec_unop _ -> ()
   in
   mark_aliases code;
@@ -1084,5 +1095,5 @@ let%track6_sexp lower optim_ctx ~unoptim_ll_source ~ll_source ~cd_source ~name s
   (match cd_source with
   | None -> ()
   | Some callback -> callback (to_doc ~name ~static_indices () proc));
-  let llc : Low_level.t = to_low_level ~plc:optim_ctx.Low_level.placements proc in
+  let llc : Low_level.t = to_low_level proc in
   Low_level.optimize optim_ctx ~unoptim_ll_source ~ll_source ~name static_indices llc
