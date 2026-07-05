@@ -40,6 +40,49 @@ let compiler_command =
   fun () ->
     Utils.get_global_arg ~default:(Lazy.force default) ~arg_name:"cc_backend_compiler_command"
 
+(* gh-ocannl-164: explicit SIMD flags appended to the compiler invocation. The "auto" default
+   probes once per process, in two stages. Stage 1 test-compiles a translation unit that #errors
+   unless the target selected by [arch_flags] alone already defines __AVX2__ and __FMA__ — so the
+   explicit flags never escalate the ISA beyond the configured target (a non-AVX2 x86 CPU under
+   -march=native, or any ARM target, gets no flags and the generated code runs wherever the target
+   does). Stage 2 verifies the compiler accepts the candidate flags themselves, preferring the
+   variant with -ftree-vectorize (explicit, though -O3 usually implies it). Any other config value
+   is passed through verbatim (empty disables). *)
+let simd_flags =
+  let probed =
+    lazy
+      (let compile ~flags ~data =
+         let src = Stdlib.Filename.temp_file "ocannl_simd_probe_" ".c" in
+         let obj = Stdlib.Filename.temp_file "ocannl_simd_probe_" ".o" in
+         let log = Stdlib.Filename.temp_file "ocannl_simd_probe_" ".log" in
+         let ok =
+           try
+             Stdio.Out_channel.write_all src ~data;
+             let cmd =
+               Printf.sprintf "%s %s -c %s -o %s > %s 2>&1" (compiler_command ()) flags src obj log
+             in
+             Stdlib.Sys.command cmd = 0
+           with _ -> false
+         in
+         List.iter [ src; obj; log ] ~f:(fun f -> try Stdlib.Sys.remove f with _ -> ());
+         ok
+       in
+       let guard =
+         "#if !defined(__AVX2__) || !defined(__FMA__)\n#error \"target lacks AVX2/FMA\"\n\
+          #endif\nint ocannl_simd_probe;\n"
+       in
+       let trivial = "int ocannl_simd_probe;\n" in
+       if not (compile ~flags:(String.strip (arch_flags ())) ~data:guard) then ""
+       else if compile ~flags:"-mavx2 -mfma -ftree-vectorize" ~data:trivial then
+         "-mavx2 -mfma -ftree-vectorize"
+       else if compile ~flags:"-mavx2 -mfma" ~data:trivial then "-mavx2 -mfma"
+       else "")
+  in
+  fun () ->
+    match Utils.get_global_arg ~default:"auto" ~arg_name:"cc_backend_simd_flags" with
+    | "auto" -> Lazy.force probed
+    | flags -> flags
+
 module Tn = Tnode
 
 type library = { lib : (Dl.library[@sexp.opaque]); libname : string } [@@deriving sexp_of]
@@ -87,10 +130,12 @@ let%track7_sexp c_compile_and_load ~f_path =
   let compiler_flags =
     let optimization_flag = "-O" ^ Int.to_string (optimization_level ()) in
     let arch_flag = String.strip (arch_flags ()) in
+    let simd_flag = String.strip (simd_flags ()) in
     let fast_math_flag = if fast_math_enabled () then Some "-ffast-math" else None in
     [
       Some optimization_flag;
       Option.some_if (not (String.is_empty arch_flag)) arch_flag;
+      Option.some_if (not (String.is_empty simd_flag)) simd_flag;
       fast_math_flag;
     ]
     |> List.filter_opt |> String.concat ~sep:" "

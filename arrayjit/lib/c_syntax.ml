@@ -99,6 +99,11 @@ module type C_syntax_config = sig
       renders the loop as a plain serial [for] — the legal fallback, mirroring
       [hardware_index = None]. *)
 
+  val aligned_local_attr : string option
+  (** Declaration suffix aligning stack-allocated local arrays for SIMD access, e.g.
+      [__attribute__((aligned(32)))] (gh-ocannl-164). Applies to the plain stack-array branch only,
+      never to workgroup-shared placements. *)
+
   val kernel_log_param : (string * string) option
   (** Kernel parameter for logging, if any. E.g., (Some ("int", "log_id")) or (Some ("const char*",
       "log_file_name")). *)
@@ -163,6 +168,8 @@ struct
       "#endif";
     ]
 
+  let aligned_local_attr =
+    Some (Printf.sprintf "__attribute__((aligned(%d)))" Ops.buffer_alignment)
   let float_log_style = if Input.full_printf_support then "%g" else "%de-3"
 
   let styled_log_arg doc =
@@ -1383,8 +1390,15 @@ module C_syntax (B : C_syntax_config) = struct
                  if node.Low_level.zero_initialized_by_code && not is_shared then string " = {0}"
                  else empty
                in
-               prefix_doc ^^ typ_doc ^^ space ^^ ident_doc ^^ brackets size_doc ^^ init_doc ^^ semi
-               ^^ hardline
+               let align_doc =
+                 (* SIMD alignment for plain stack arrays only (gh-ocannl-164); shared placements
+                    keep the backend's default layout. *)
+                 match B.aligned_local_attr with
+                 | Some attr when not is_shared -> string (" " ^ attr)
+                 | _ -> empty
+               in
+               prefix_doc ^^ typ_doc ^^ space ^^ ident_doc ^^ brackets size_doc ^^ align_doc
+               ^^ init_doc ^^ semi ^^ hardline
              else empty)
            (Hashtbl.to_alist traced_store)
     in

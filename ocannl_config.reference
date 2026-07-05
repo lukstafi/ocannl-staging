@@ -132,6 +132,13 @@ cc_backend_compiler_command=
 # To disable arch-specific tuning from commandline, pass `--ocannl_cc_backend_arch_flags=`.
 cc_backend_arch_flags=-march=native
 
+# Explicit SIMD flags appended to the CC backend compiler invocation (gh-ocannl-164).
+# The default "auto" probes once per process: if the target selected by cc_backend_arch_flags
+# already has AVX2 and FMA, `-mavx2 -mfma -ftree-vectorize` (or the subset the compiler accepts)
+# is appended; otherwise (non-AVX2 x86, ARM) nothing is, so generated code never requires an ISA
+# beyond the configured target. Any other value is passed through verbatim; empty disables.
+cc_backend_simd_flags=auto
+
 # If true, enables `-ffast-math` for the CC backend. This may change numerical behavior.
 cc_backend_fast_math=false
 
