@@ -119,9 +119,12 @@ when applying).
 Deliberately absent from v1, mirroring the axis-types enum's restraint: `Upcast`
 (vectorize — waits on the `Set_from_vec`/`vec_unop` growth path and a `Vectorized`
 axis type), `Padto` (masking is representable today via `If` + interval discharge, but
-its profitability case is tensor-core alignment, which is far), tensor-core ops, and
-`Cpu_parallel` retyping (no codegen for within-routine CPU threading yet). The
-exhaustive-match language keeps late additions safe.
+its profitability case is tensor-core alignment, which is far), and tensor-core ops.
+`Cpu_parallel` retyping is **retired** (decision 2026-07-05, recorded in
+[gh-ocannl-164](gh-ocannl-164.md)): within-routine CPU threading binds `Grid` axes to a
+task pool in the C backend's rendering — `Grid`'s contract is exactly the task-pool
+contract, so the same schedules serve GPU and CPU. The exhaustive-match language keeps
+late additions safe.
 
 ### 2. Pass ordering — the seam is *post*-optimization (decision)
 
@@ -279,7 +282,8 @@ parity-testable — which is exactly the property BEAM search needs.
   benchmark against S2 and the naive baseline (the #412 >10× criterion lives here).
 - **Phase S4 — CPU**: non-shared `Stage` (packing) + cache-sized `Split` presets for
   cc ([watch-ocannl-README-md-347818d3](watch-ocannl-README-md-347818d3.md) scope);
-  vectorization/`Upcast` and `Cpu_parallel` remain follow-ups.
+  vectorization/`Upcast` remains a follow-up (`Cpu_parallel` is retired — CPU
+  parallelism is pool-backed `Grid` rendering; see [gh-ocannl-164](gh-ocannl-164.md)).
 
 ## Acceptance criteria
 

@@ -3,6 +3,84 @@
 Task: gh-ocannl-164
 Issue: https://github.com/ahrefs/ocannl/issues/164
 
+## Scope broadened: the CPU-improvements bundle (2026-07-05)
+
+With the schedule layer landed (PRs #90/#91), this task's consumers are concrete: the S4
+packed matmul sits at 3.8× / 9.0 GFLOP/s single-threaded on cc (256³), and after
+`Privatize` the profiles on every backend point at the *loads* — exactly what this
+bundle accelerates. Scope is broadened from "AVX floor" to the CPU-improvements bundle,
+with `restrict` kept in scope and ordered **first**:
+
+### 1. `restrict` — early, and cross-backend
+
+Not CPU-only: `restrict` on cc kernel parameters, `__restrict__` on CUDA, `__restrict`
+on Metal's pooled per-node pointers (Clang-based MSL; the derived pointers address
+disjoint slab sub-ranges, which is all restrict asserts).
+
+**Soundness vs. copy-less slices — analyzed 2026-07-05, safe by construction.** The
+worry: a kernel receiving both a parent buffer and a zero-copy slice view of it would
+make `restrict` a lie. This cannot happen: alias resolution runs at assignments→low-level
+lowering (`resolve_alias` in `assignments.ml:226-240`) — every read/write of an alias
+view is rewritten on the spot to a parent access with the batch index prepended
+(recursively over chains), and an eligible slice's `Fetch Slice` lowers to `Noop`. Alias
+tnodes therefore never appear in `Low_level.t` index vectors, hence never in
+`traced_store`, hence never in `compile_proc`'s `ptr_params`: kernel parameter lists
+contain only buffer-owning roots, and the parent+view parameter pair is unrepresentable.
+Ineligible slices (precision mismatch etc.) materialize genuine copies — also fine.
+
+Belt-and-braces, part of this task:
+
+- **Assert the invariant where `ptr_params` is built**: `not (Tn.is_alias tn)` for every
+  parameter. The invariant is enforced by assignments lowering, but the schedule layer
+  and tests hand-build `Low_level.t` directly — a hand-built `Get` of an alias tn would
+  silently mint an aliased parameter, and with `restrict` that is a miscompile instead
+  of a redundant pointer. Fail loudly at compile.
+- **Leave `restrict` off the merge-buffer parameter** (it is already `const`, which
+  captures most of the benefit), or gate it on the `Copy` transfer mode after auditing
+  whether any streaming/zero-copy merge mode can point the merge buffer at a live
+  same-device buffer.
+- Note: after `Privatize` (PR #91) the accumulator no longer needs `restrict` — a
+  routine-local tile cannot alias kernel pointers — so the payoff here is on the loads.
+
+### 2. Aligned allocation (Phase 1 below, unchanged)
+
+CPU-only (drivers already align device buffers); also the prerequisite for aligned
+vector loads and eventually `Padto`-style lane-multiple tiles.
+
+### 3. `Vectorized` axis-type rendering as pragma hints
+
+The reserved `Vectorized` axis type gets its first semantics here, schedule-driven
+rather than heuristic: a `C_syntax_config` hook (in the spirit of `hardware_index`)
+renders a `Vectorized`-typed loop as a pragma-annotated serial loop on cc
+(`#pragma clang loop vectorize(enable)` / `#pragma GCC ivdep`) and as a plain serial
+loop on backends without the hook — the same legal-fallback discipline as
+`Grid`/`Workgroup`→serial. This supersedes Phase 3b's structural innermost-loop
+detection: schedules (or the default annotator) decide which loops get hints, and the
+rendering upgrades in place when explicit intrinsic codegen lands. The axis type itself
+is backend-neutral — on CPU the payoff is compute (wide FMA), on GPU it is memory
+transactions (float4/packed loads, notably for `Stage`'s cooperative loads — a
+follow-up, not this task); the `Set_from_vec`/`vec_unop` machinery is the shared growth
+path.
+
+### 4. Explicit SIMD FMA micro-kernel foundations (Phases 2–3 below, unchanged)
+
+Arch flags, platform-detection macros, alignment attributes — the floor for the
+explicit-intrinsics follow-up to S4's packed matmul.
+
+### Explicitly not in this bundle: CPU parallelism
+
+**`Cpu_parallel` as an axis type is retired.** Within-routine CPU threading will bind
+`Grid` axes to a task pool in the C backend's rendering (`dispatch_apply` on macOS,
+avoiding Apple-clang's missing libomp; OpenMP or a small pthread pool elsewhere), with
+`Workgroup` axes serial inside a task and barriers rejected in v1 (barrier support under
+serialized workgroups requires loop fission at barrier boundaries — later, if needed).
+`Grid`'s contract — independent iterations, `from_ = 0`, `validate_parallel` coverage —
+is exactly the task-pool contract, so the default GPU annotator's output parallelizes
+CPU with no new analysis; pool-specific knobs (chunk size, pinning) are renderer/launch
+parameters, not axis semantics. Separate work item, as is the possible multicore_cc →
+"CPU multi-device" repurposing (data-parallel debugging and GPU-less CI for the
+multi-device machinery).
+
 ## Status update (2026-07-04)
 
 - **Still not started**: no `restrict` qualifiers on kernel parameters, no
