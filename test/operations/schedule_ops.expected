@@ -10,3 +10,5 @@ default annotator combo values correct: true
 default annotator schedules both nests: true
 default annotator structure as expected: true
 default annotator matmul values match the serial twin: true
+lane-guarded privatize gates init and store-back: true
+per-iteration guard rejected by privatize: true

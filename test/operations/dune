@@ -954,7 +954,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_ops)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio pprint)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 

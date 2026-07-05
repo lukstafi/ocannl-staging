@@ -711,71 +711,145 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
   rewrite_loop ~what:"Schedule.Privatize" ~sym:over opt.llc ~f:(fun fc ->
       if not (equal_axis_type fc.axis Serial) then
         invalid_arg "Schedule.Privatize: the accumulation loop must be Serial";
-      (* Accesses of [target] within the loop's subtree, with their loop stacks relative to it. *)
+      (* Accesses of [target] within the loop's subtree, with their loop stacks and enclosing
+         [If] guard chains relative to it. Guards matter (PR #91 review): the remap keeps a guard
+         on the update itself, but a thread-identifying guard (e.g. [w == 0] lane restriction)
+         means only some threads' private accumulators receive updates — the init-load and
+         store-back must then run under the {e same} predicate, or stale lanes clobber the
+         result. *)
       let accesses = ref [] in
       let has_write = ref false in
-      let rec scan stack llc =
+      let rec scan stack conds llc =
         match llc with
         | Noop | Comment _ | Staged_compilation _ | Declare_local _ | Workgroup_barrier -> ()
         | Zero_out tn ->
             if Tn.equal tn target then
               invalid_arg "Schedule.Privatize: Zero_out of the target inside the accumulation loop"
         | Seq (a, b) ->
-            scan stack a;
-            scan stack b
+            scan stack conds a;
+            scan stack conds b
         | For_loop { index; from_; to_; body; trace_it; axis } ->
-            scan ({ index; from_; to_; body = Noop; trace_it; axis } :: stack) body
+            scan ({ index; from_; to_; body = Noop; trace_it; axis } :: stack) conds body
         | Set { tn; idcs; llsc; _ } ->
             if Tn.equal tn target then (
               has_write := true;
-              accesses := (idcs, stack) :: !accesses);
-            scan_scalar stack llsc
+              accesses := (idcs, stack, conds) :: !accesses);
+            scan_scalar stack conds llsc
         | Set_from_vec { tn; arg = a, _; _ } ->
             if Tn.equal tn target then
               invalid_arg "Schedule.Privatize: vector writes to the target are unsupported";
-            scan_scalar stack a
-        | Set_local (_, llsc) -> scan_scalar stack llsc
-        | If { cond = c, _; body } ->
-            scan_scalar stack c;
-            scan stack body
-      and scan_scalar stack (llsc : scalar_t) =
+            scan_scalar stack conds a
+        | Set_local (_, llsc) -> scan_scalar stack conds llsc
+        | If { cond = (c, _) as cond; body } ->
+            scan_scalar stack conds c;
+            scan stack (cond :: conds) body
+      and scan_scalar stack conds (llsc : scalar_t) =
         match llsc with
-        | Local_scope { body; _ } -> scan stack body
+        | Local_scope { body; _ } -> scan stack conds body
         | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
-        | Get (tn, idcs) -> if Tn.equal tn target then accesses := (idcs, stack) :: !accesses
+        | Get (tn, idcs) ->
+            if Tn.equal tn target then accesses := (idcs, stack, conds) :: !accesses
         | Get_dynamic { tn; dyn_value = v, _; _ } ->
             if Tn.equal tn target then
               invalid_arg "Schedule.Privatize: dynamically indexed target accesses are unsupported";
-            scan_scalar stack v
+            scan_scalar stack conds v
         | Get_merge_buffer (_, _) -> ()
         | Ternop (_, (a, _), (b, _), (c, _)) ->
-            scan_scalar stack a;
-            scan_scalar stack b;
-            scan_scalar stack c
+            scan_scalar stack conds a;
+            scan_scalar stack conds b;
+            scan_scalar stack conds c
         | Binop (_, (a, _), (b, _)) ->
-            scan_scalar stack a;
-            scan_scalar stack b
-        | Unop (_, (a, _)) -> scan_scalar stack a
+            scan_scalar stack conds a;
+            scan_scalar stack conds b
+        | Unop (_, (a, _)) -> scan_scalar stack conds a
       in
-      scan [] fc.body;
+      scan [] [] fc.body;
       let idcs0 =
         match !accesses with
         | [] ->
             invalid_arg
               ("Schedule.Privatize: no accesses of " ^ Tn.debug_name target
              ^ " under the accumulation loop")
-        | (idcs, _) :: _ -> idcs
+        | (idcs, _, _) :: _ -> idcs
       in
       if not !has_write then
         invalid_arg ("Schedule.Privatize: " ^ Tn.debug_name target ^ " is not written (no accumulation)");
-      List.iter !accesses ~f:(fun (idcs, _) ->
+      List.iter !accesses ~f:(fun (idcs, _, _) ->
           if not (Array.equal Indexing.equal_axis_index idcs idcs0) then
             invalid_arg
               ("Schedule.Privatize: v1 requires all accesses of " ^ Tn.debug_name target
              ^ " under the loop to use identical index vectors"));
+      (* Guard chains must agree across accesses, and must be iteration-invariant — free of
+         memory reads and of symbols bound by [over] or any loop inside its subtree — so the
+         same predicate can gate the init-load and store-back. A per-iteration (data- or
+         index-dependent) guard cannot be contracted: rejected. *)
+      let conds0 = match !accesses with (_, _, conds) :: _ -> conds | [] -> [] in
+      List.iter !accesses ~f:(fun (_, _, conds) ->
+          if not (List.equal equal_scalar_arg conds conds0) then
+            invalid_arg
+              ("Schedule.Privatize: accesses of " ^ Tn.debug_name target
+             ^ " sit under differing If guards"));
+      (if not (List.is_empty conds0) then
+         let bound_inside =
+           let acc = ref [ over ] in
+           let rec go llc =
+             match llc with
+             | For_loop { index; body; _ } ->
+                 acc := index :: !acc;
+                 go body
+             | Seq (a, b) ->
+                 go a;
+                 go b
+             | If { body; _ } -> go body
+             | Set { llsc; _ } | Set_local (_, llsc) -> go_scalar llsc
+             | Set_from_vec { arg = a, _; _ } -> go_scalar a
+             | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _
+             | Workgroup_barrier ->
+                 ()
+           and go_scalar (llsc : scalar_t) =
+             match llsc with
+             | Local_scope { body; _ } -> go body
+             | Get_dynamic { dyn_value = v, _; _ } -> go_scalar v
+             | Ternop (_, (a, _), (b, _), (c, _)) ->
+                 go_scalar a;
+                 go_scalar b;
+                 go_scalar c
+             | Binop (_, (a, _), (b, _)) ->
+                 go_scalar a;
+                 go_scalar b
+             | Unop (_, (a, _)) -> go_scalar a
+             | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _
+             | Embed_index _ ->
+                 ()
+           in
+           go fc.body;
+           !acc
+         in
+         let sym_free s = not (List.mem bound_inside s ~equal:Indexing.equal_symbol) in
+         let idx_invariant = function
+           | Indexing.Fixed_idx _ | Indexing.Sub_axis -> true
+           | Indexing.Iterator s -> sym_free s
+           | Indexing.Affine { symbols; _ } -> List.for_all symbols ~f:(fun (_, s) -> sym_free s)
+           | Indexing.Concat _ -> false
+         in
+         let rec invariant (llsc : scalar_t) =
+           match llsc with
+           | Constant _ | Constant_bits _ -> true
+           | Embed_index idx -> idx_invariant idx
+           | Ternop (_, (a, _), (b, _), (c, _)) -> invariant a && invariant b && invariant c
+           | Binop (_, (a, _), (b, _)) -> invariant a && invariant b
+           | Unop (_, (a, _)) -> invariant a
+           | Get _ | Get_local _ | Get_dynamic _ | Get_merge_buffer _ | Local_scope _ -> false
+         in
+         List.iter conds0 ~f:(fun (c, _) ->
+             if not (invariant c) then
+               invalid_arg
+                 ("Schedule.Privatize: accesses of " ^ Tn.debug_name target
+                ^ " sit under an If guard that varies across the accumulation (mentions memory \
+                   or a symbol bound inside the loop); cannot gate the init/store-back with it")));
       (* Loops bound inside the subtree, by index symbol (union over access paths). *)
       let inner_loop s =
-        List.find_map !accesses ~f:(fun (_, stack) ->
+        List.find_map !accesses ~f:(fun (_, stack, _) ->
             List.find stack ~f:(fun fl -> Indexing.equal_symbol fl.index s))
       in
       (* Per axis: tile part (terms over inner loops) and outer part. The [over] symbol itself
@@ -869,9 +943,15 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
               in
               If { cond = (cond, iprec); body = stmt })
         in
-        Map.fold fresh_syms ~init:stmt ~f:(fun ~key:s ~data:s' body ->
-            For_loop
-              { index = s'; from_ = 0; to_ = extent s - 1; body; trace_it = false; axis = Serial })
+        let nest =
+          Map.fold fresh_syms ~init:stmt ~f:(fun ~key:s ~data:s' body ->
+              For_loop
+                { index = s'; from_ = 0; to_ = extent s - 1; body; trace_it = false; axis = Serial })
+        in
+        (* Carry the accesses' (uniform, iteration-invariant) guard chain onto the transfers:
+           only the lanes that update their private accumulator may load and store it back
+           (PR #91 review). *)
+        List.fold conds0 ~init:nest ~f:(fun body cond -> If { cond; body })
       in
       let remapped =
         remap_reads ~writes:true ~source:target ~from_idcs:idcs0 ~tile ~tile_idcs:tile_read_idcs

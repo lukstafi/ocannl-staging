@@ -75,7 +75,11 @@ type optop =
           compilers register-allocate it without waiting for [restrict] (gh-ocannl-164). Tile
           shape: per target axis, the index terms over loops nested inside [over] (required
           [Serial] with [from_ = 0]); no such terms yields a scalar accumulator. All accesses of
-          [target] under [over] must use one index vector, which must not mention [over] itself.
+          [target] under [over] must use one index vector, which must not mention [over] itself,
+          and must sit under one [If] guard chain, which must be iteration-invariant (no memory
+          reads, no symbols bound inside [over]'s subtree) — the same predicate then gates the
+          init-load and store-back, so lane-restricted accumulations (e.g. [w == 0]) privatize
+          correctly; per-iteration guards are rejected.
           A [Zero_out] of [target] elsewhere is left in place — the init-load observes it, so
           semantics are preserved without a surjectivity analysis. Compose as: [Split]s →
           [Stage]s → [Privatize] → materializing [Unroll]s (the unrolls then turn the tile
