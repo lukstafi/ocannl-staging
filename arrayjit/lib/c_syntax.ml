@@ -93,6 +93,12 @@ module type C_syntax_config = sig
       [compile_proc]'s parameter list (asserted there; gh-ocannl-164). The merge buffer stays
       unqualified — a streaming merge mode could point it at a live same-device buffer. *)
 
+  val vectorize_pragma : string list
+  (** Lines emitted verbatim before a [Vectorized]-typed loop's [for] statement (gh-ocannl-164),
+      e.g. guarded [#pragma clang loop vectorize(enable)] / [#pragma GCC ivdep]. An empty list
+      renders the loop as a plain serial [for] — the legal fallback, mirroring
+      [hardware_index = None]. *)
+
   val kernel_log_param : (string * string) option
   (** Kernel parameter for logging, if any. E.g., (Some ("int", "log_id")) or (Some ("const char*",
       "log_file_name")). *)
@@ -146,6 +152,17 @@ struct
   let barrier_syntax = None
   let shared_decl_prefix = None
   let restrict_keyword = Some "restrict"
+
+  (* Clang defines both [__clang__] and [__GNUC__], so test [__clang__] first. *)
+  let vectorize_pragma =
+    [
+      "#if defined(__clang__)";
+      "#pragma clang loop vectorize(enable) interleave(enable)";
+      "#elif defined(__GNUC__)";
+      "#pragma GCC ivdep";
+      "#endif";
+    ]
+
   let float_log_style = if Input.full_printf_support then "%g" else "%de-3"
 
   let styled_log_arg doc =
@@ -495,8 +512,9 @@ module C_syntax (B : C_syntax_config) = struct
            C [for] statements; [Grid]/[Workgroup]/[Workgroup_reduce] loops bind their index to the
            backend's hardware register (at the signed [loop_index_type] width, with an explicit
            cast from the unsigned register) when [B.hardware_index] provides one, and fall back to
-           a serial loop otherwise (legal absent barriers); [Unrolled] loops emit the repeated body
-           with the index bound as a per-block constant. *)
+           a serial loop otherwise (legal absent barriers); [Vectorized] loops render serially,
+           prefixed with [B.vectorize_pragma] when non-empty; [Unrolled] loops emit the repeated
+           body with the index bound as a per-block constant. *)
         let body_doc () =
           let doc = ref (pp_ll ~log_set_locals ~in_loop:true body) in
           (if Utils.debug_log_from_routines () then
@@ -551,6 +569,13 @@ module C_syntax (B : C_syntax_config) = struct
         | Low_level.Serial -> serial_loop ()
         | Grid -> hardware_binding `Grid
         | Workgroup | Workgroup_reduce -> hardware_binding `Workgroup
+        | Vectorized -> (
+            (* gh-ocannl-164: a serial loop annotated with the backend's vectorization pragmas;
+               without them the plain serial loop is the legal fallback (same discipline as
+               unbound [Grid]/[Workgroup] axes). *)
+            match B.vectorize_pragma with
+            | [] -> serial_loop ()
+            | lines -> separate_map hardline string lines ^^ hardline ^^ serial_loop ())
         | Unrolled ->
             separate hardline
             @@ List.init

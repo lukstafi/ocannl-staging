@@ -465,6 +465,9 @@ module Fresh () = struct
        disjoint slab sub-ranges (gh-ocannl-164). *)
     let restrict_keyword = Some "__restrict"
 
+    (* No vectorization pragmas: the GPU payoff is memory transactions, a follow-up. *)
+    let vectorize_pragma = []
+
     let ident_blacklist =
       ident_blacklist
       @ [

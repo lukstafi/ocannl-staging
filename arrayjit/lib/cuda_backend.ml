@@ -381,6 +381,11 @@ module Fresh () : Ir.Backend_impl.Lowered_backend = struct
     let shared_decl_prefix = Some "__shared__ "
     let restrict_keyword = Some "__restrict__"
 
+    (* No vectorization pragmas in device code — SIMD-style gains on GPU come from memory
+       transactions (float4/packed loads), a follow-up to gh-ocannl-164; [Vectorized] loops render
+       as plain serial loops. *)
+    let vectorize_pragma = []
+
     let typ_of_prec = function
       | Ops.Byte_prec _ -> "unsigned char"
       | Ops.Uint16_prec _ -> "unsigned short"

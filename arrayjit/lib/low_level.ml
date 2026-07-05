@@ -35,11 +35,14 @@ let get_scope =
     threadgroup) hardware index instead of looping; [Workgroup_reduce] is a [Workgroup] axis
     participating in a shared-memory reduction (distinguished for schedule transforms and
     validation, rendered like [Workgroup]). [Unrolled] is emitted as the repeated body with
-    substituted constants. Hardware slots are positional: among a kernel's loops of one kind, the
-    innermost binds [.x], then [.y], [.z]. Annotated loops must have [from_ = 0] and iterations with
-    no cross-iteration dependencies ([Workgroup_reduce] excepted: its communication must be staged
-    through workgroup-shared nodes and barriers). *)
-type axis_type = Serial | Grid | Workgroup | Workgroup_reduce | Unrolled
+    substituted constants. [Vectorized] renders as a serial loop annotated with the backend's
+    vectorization pragmas when it provides them (gh-ocannl-164; a plain serial loop otherwise) —
+    like the hardware kinds, the annotating pass asserts iteration independence. Hardware slots are
+    positional: among a kernel's loops of one kind, the innermost binds [.x], then [.y], [.z].
+    Annotated loops must have [from_ = 0] and iterations with no cross-iteration dependencies
+    ([Workgroup_reduce] excepted: its communication must be staged through workgroup-shared nodes
+    and barriers). *)
+type axis_type = Serial | Grid | Workgroup | Workgroup_reduce | Unrolled | Vectorized
 [@@deriving sexp, compare, equal]
 
 (** Loop keyword used by the human-readable printers: plain [for] for [Serial] (unchanged legacy
@@ -50,6 +53,7 @@ let axis_type_label = function
   | Workgroup -> "for@workgroup"
   | Workgroup_reduce -> "for@workgroup_reduce"
   | Unrolled -> "for@unrolled"
+  | Vectorized -> "for@vectorized"
 
 type t =
   | Noop
@@ -2467,7 +2471,7 @@ type launch_dims = { grid : int array; block : int array } [@@deriving sexp_of, 
 let hardware_kind_of_axis = function
   | Grid -> Some `Grid
   | Workgroup | Workgroup_reduce -> Some `Workgroup
-  | Serial | Unrolled -> None
+  | Serial | Unrolled | Vectorized -> None
 
 let hardware_kind_label = function `Grid -> "Grid" | `Workgroup -> "Workgroup"
 
