@@ -1,0 +1,7 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+printed ids equal across reinitialize: true (n0 = n0)
+stale node still hits its own table entry: true
+fresh same-id node misses the stale table entry: true
+fresh same-id node is not Tn.equal to the stale node: true
+fresh same-id node is not a member of the stale set: true

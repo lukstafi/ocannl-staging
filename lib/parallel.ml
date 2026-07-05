@@ -167,7 +167,7 @@ let data_parallel ?backend_name ?(reduction = Mean) ?(weight_decay = 0.0) ?(mome
     ?(base_seed = 0) ~n_shards ~(bindings : Idx.unit_bindings) ~(learning_rate : Tensor.t)
     ~(inputs : Tensor.t) ~(targets : Tensor.t) ~(loss_of : Tensor.t -> Tensor.t -> Tensor.t) ~f () =
   if n_shards <= 0 then invalid_arg "Parallel.data_parallel: n_shards must be > 0";
-  let backend = Backends.fresh_backend ?backend_name () in
+  let backend = Backends.backend_module (Backends.get_backend ?backend_name ()) in
   let module Backend = (val backend : Ir.Backend_intf.Backend) in
   let num_devices = Backend.num_devices () in
   let xs = shard_along ~axis:0 ~n_shards inputs in

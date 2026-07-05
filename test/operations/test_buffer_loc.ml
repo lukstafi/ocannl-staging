@@ -4,8 +4,12 @@
    byte offsets rather than one pool per tnode.
 
    Two invariants are pinned: 1. Determinism / reproducibility: linking the same graph into two
-   independently-created fresh [sync_cc] backends yields identical [{ pool_id; offset }] values (the
-   debuggability win). 2. Pooling: when a single routine materializes several non-constant tnodes,
+   independently-created root contexts yields identical offsets and pooling structure (the
+   debuggability win). Pool ids are deterministic but advance monotonically across the runs: the
+   backend and its devices are process singletons since the backend-singletons refactor
+   (docs/proposals/backend-singletons-context-copy.md), so [device.next_pool_id] is not reset by
+   creating a fresh root. 2. Pooling: when a single routine materializes several non-constant
+   tnodes,
    they share one [pool_id] with distinct, increasing offsets; read-only inputs (constants) live in
    separate per-device pools. If the allocator regressed to one-pool-per-tnode, the two outputs
    below would print different pool ids (and all offsets 0); if it stopped honoring offsets, the
@@ -31,7 +35,7 @@ let make_tensor label vals =
 
 let run_once tag =
   Tensor.unsafe_reinitialize ();
-  let backend = Backends.fresh_backend ~backend_name:"sync_cc" () in
+  let backend = Backends.backend_module (Backends.get_backend ~backend_name:"sync_cc" ()) in
   let module Backend = (val backend : Ir.Backend_intf.Backend) in
   let device = Backend.get_device ~ordinal:0 in
   let root = Backend.make_context ~optimize_ctx:(Backend.empty_optimize_ctx ()) device in
@@ -53,7 +57,7 @@ let run_once tag =
    delta packs into a single pool. *)
 let run_packed () =
   Tensor.unsafe_reinitialize ();
-  let backend = Backends.fresh_backend ~backend_name:"sync_cc" () in
+  let backend = Backends.backend_module (Backends.get_backend ~backend_name:"sync_cc" ()) in
   let module Backend = (val backend : Ir.Backend_intf.Backend) in
   let device = Backend.get_device ~ordinal:0 in
   let root = Backend.make_context ~optimize_ctx:(Backend.empty_optimize_ctx ()) device in
@@ -94,7 +98,7 @@ let run_packed () =
    Run with OCANNL_BACKEND=cuda to exercise the CUDA pool-addressing path on minipc-wsl. *)
 let run_pooled_values_correct () =
   Tensor.unsafe_reinitialize ();
-  let backend = Backends.fresh_backend ~backend_name:"sync_cc" () in
+  let backend = Backends.backend_module (Backends.get_backend ~backend_name:"sync_cc" ()) in
   let module Backend = (val backend : Ir.Backend_intf.Backend) in
   let device = Backend.get_device ~ordinal:0 in
   let root = Backend.make_context ~optimize_ctx:(Backend.empty_optimize_ctx ()) device in

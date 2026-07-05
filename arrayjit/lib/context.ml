@@ -6,16 +6,10 @@ module Idx = Ir.Indexing
 module BI = Ir.Backend_intf
 module Backends_deprecated = Backends
 
-(** Existential wrapper to hide backend types *)
-type backend_wrapper =
-  | Wrapper : {
-      backend :
-        (module BI.Backend with type dev = 'dev and type runner = 'runner and type event = 'event);
-      device : ('dev, 'runner, 'event) BI.device;
-      device_id : int;
-      context : ('dev, 'runner, 'event) BI.context;
-    }
-      -> backend_wrapper
+(* The backend context rides in [Backends.wrapped_context] -- a closed disjunction over the
+   backend singletons' context types (no existential): [Backends.query]/[Backends.with_backend]
+   dispatch generic operations, and [copy] pair-matches the constructors to recover type equality
+   for same-backend transfers. *)
 
 type compile_frontier = {
   last_writer : int Map.M(Tn).t;
@@ -42,14 +36,15 @@ let create_ledger () =
   { next_id = 0; routine_names = Hashtbl.create (module Int); executed = Set.empty (module Int) }
 
 type t = {
-  backend_wrapper : (backend_wrapper[@sexp.opaque]);
+  wrapped : (Backends.wrapped_context[@sexp.opaque]);
   device_id : int;
-  backend_name : string;
   initialized_nodes : Set.M(Tn).t;
   frontier : (compile_frontier[@sexp.opaque]);
   ledger : (execution_ledger[@sexp.opaque]);
 }
 [@@deriving sexp_of]
+
+let backend_name ctx = Backends.backend_name (Backends.wrapped_backend ctx.wrapped)
 
 type routine = {
   context : t;
@@ -71,31 +66,20 @@ let can_run ctx routine = Set.is_subset routine.execution_deps ~of_:ctx.ledger.e
 
 (** Create a context from a backend name *)
 let create_from_backend_name ~device_id backend_name =
-  let backend_module = Backends.fresh_backend ~backend_name () in
-  let module Backend = (val backend_module : Ir.Backend_intf.Backend) in
-  let device = Backend.get_device ~ordinal:device_id in
-  let context = Backend.make_context ~optimize_ctx:(Backend.empty_optimize_ctx ()) device in
-
-  let backend_wrapper = Wrapper { backend = (module Backend); device; device_id; context } in
-
+  let backend = Backends.get_backend ~backend_name () in
   {
-    backend_wrapper;
-    device_id = 0;
-    backend_name;
+    wrapped = Backends.make_context ~device_id backend;
+    device_id;
     initialized_nodes = Set.empty (module Tn);
     frontier = empty_frontier;
     ledger = create_ledger ();
   }
 
 let cuda ?device_id () =
-  let device_id = Option.value device_id ~default:0 in
-  let ctx = create_from_backend_name ~device_id "cuda" in
-  { ctx with device_id }
+  create_from_backend_name ~device_id:(Option.value device_id ~default:0) "cuda"
 
 let metal ?device_id () =
-  let device_id = Option.value device_id ~default:0 in
-  let ctx = create_from_backend_name ~device_id "metal" in
-  { ctx with device_id }
+  create_from_backend_name ~device_id:(Option.value device_id ~default:0) "metal"
 
 let cpu ?threads () =
   let backend_name = match threads with None | Some 1 -> "sync_cc" | Some _ -> "multicore_cc" in
@@ -119,21 +103,30 @@ let auto () =
       with _ -> invalid_arg ("Unknown backend: " ^ backend_name))
 
 let compile ?lowered_transform ctx comp bindings =
-  let (Wrapper wrapper) = ctx.backend_wrapper in
-  let module Backend = (val wrapper.backend) in
-  (* Compile and link following train.ml pattern *)
-  let code = Backend.compile ?lowered_transform wrapper.context.optimize_ctx bindings comp in
-  let backend_routine = Backend.link wrapper.context code in
+  (* Compile and link on the wrapped backend context; only backend-independent routine components
+     (and, via [with_backend]'s rebuilt constructor, the updated context) escape the dispatch. *)
+  let wrapped, (task, lowered_bindings, name, backend_inputs, backend_outputs) =
+    Backends.with_backend ctx.wrapped
+      {
+        f =
+          (fun (type dev runner event)
+               (module Backend : BI.Backend
+                 with type dev = dev
+                  and type runner = runner
+                  and type event = event) bctx ->
+            let code = Backend.compile ?lowered_transform bctx.BI.optimize_ctx bindings comp in
+            let r = Backend.link bctx code in
+            (r.BI.context, (r.BI.schedule, r.BI.bindings, r.BI.name, r.BI.inputs, r.BI.outputs)));
+      }
+  in
 
   (* Allocate unique ID from shared ledger *)
   let id = ctx.ledger.next_id in
   ctx.ledger.next_id <- id + 1;
 
-  (* Use backend routine's precise access sets for dependency tracking. backend_routine.inputs =
-     materialized read-only and read-before-write nodes. backend_routine.outputs = all materialized
+  (* Use the backend routine's precise access sets for dependency tracking. [backend_inputs] =
+     materialized read-only and read-before-write nodes. [backend_outputs] = all materialized
      written-to nodes. *)
-  let backend_inputs = backend_routine.inputs in
-  let backend_outputs = backend_routine.outputs in
   let frontier = ctx.frontier in
   let empty_int_set = Set.empty (module Int) in
 
@@ -175,7 +168,6 @@ let compile ?lowered_transform ctx comp bindings =
   let new_frontier = { last_writer = new_last_writer; last_readers = new_last_readers } in
 
   (* Register in shared ledger *)
-  let name = backend_routine.name in
   Hashtbl.set ctx.ledger.routine_names ~key:id ~data:name;
 
   (* Required inputs for the initialization check below: the backend routine's materialized
@@ -184,21 +176,20 @@ let compile ?lowered_transform ctx comp bindings =
      with registered host initialization data (ndarray-backed literals, loaded tensors)
      self-initialize at link time from [Host_inits] (gh-ocannl-333), so they are excluded. *)
   let inputs =
-    Set.filter (Set.diff backend_routine.inputs comp.Asgns.embedded_nodes) ~f:(fun tn ->
+    Set.filter (Set.diff backend_inputs comp.Asgns.embedded_nodes) ~f:(fun tn ->
         not (Ir.Host_inits.mem tn))
   in
 
   (* Outputs are all nodes written by the computation *)
-  let outputs = backend_routine.outputs in
+  let outputs = backend_outputs in
 
-  let updated_wrapper = Wrapper { wrapper with context = backend_routine.context } in
-  let updated_ctx = { ctx with backend_wrapper = updated_wrapper; frontier = new_frontier } in
+  let updated_ctx = { ctx with wrapped; frontier = new_frontier } in
 
   let routine =
     {
       context = updated_ctx;
-      task = backend_routine.schedule;
-      bindings = backend_routine.bindings;
+      task;
+      bindings = lowered_bindings;
       name;
       inputs;
       outputs;
@@ -220,8 +211,8 @@ let run ctx routine =
      Catching that precisely needs per-node "needs-nonzero-init" metadata OCANNL does not currently
      carry; a stricter check produces false positives on read-only accumulator gradients
      (zero2hero_1of7, primitive_ops). *)
-  let (Wrapper run_wrapper) = ctx.backend_wrapper in
-  let in_backend tn = Map.mem run_wrapper.context.BI.ctx_buffers tn in
+  let ctx_buffers = Backends.query ctx.wrapped { q = (fun _ c -> c.BI.ctx_buffers) } in
+  let in_backend tn = Map.mem ctx_buffers tn in
   let missing_inputs =
     Set.filter routine.inputs ~f:(fun tn -> not (Set.mem ctx.initialized_nodes tn || in_backend tn))
   in
@@ -260,17 +251,6 @@ let run ctx routine =
   let initialized_nodes = Set.union ctx.initialized_nodes routine.outputs in
   { ctx with initialized_nodes }
 
-let copy ~src ~dst _tnode =
-  (* Device-to-device copy *)
-  let (Wrapper _src_wrapper) = src.backend_wrapper in
-
-  (* For now, only support same backend type *)
-  if not (String.equal src.backend_name dst.backend_name) then
-    failwith "Context.copy: cross-backend copy not yet supported";
-
-  (* This is a simplified placeholder - proper implementation needs device_to_device *)
-  failwith "Context.copy: not yet implemented - needs proper device_to_device integration"
-
 (* Internal helper - not exposed in interface to maintain invariants *)
 let mark_initialized ctx nodes =
   { ctx with initialized_nodes = Set.union ctx.initialized_nodes nodes }
@@ -290,18 +270,19 @@ let host_buffer (tn : Tn.t) =
 
 (** Whether [tn] has a device buffer allocated in this context. *)
 let mem ctx (tn : Tn.t) : bool =
-  let (Wrapper wrapper) = ctx.backend_wrapper in
-  Map.mem wrapper.context.BI.ctx_buffers tn
+  Backends.query ctx.wrapped { q = (fun _ c -> Map.mem c.BI.ctx_buffers tn) }
 
 (* For-print proxies (gh-ocannl-333 AC 5): when a tensor's node is not materialized in a context,
    [Train.printf] recompiles a copy ([%cd "for_print" =: t]) into a fresh node and registers it here
    as a proxy for the source node, so {!to_host} can read the source's value through the copy. The
-   table is keyed by the source node's id and holds the proxy node; it is read-only from [to_host]'s
-   point of view and is for printing only — never a general host cache. *)
-let for_print_proxies : Tn.t Hashtbl.M(Int).t = Hashtbl.create (module Int)
+   table is keyed by the source node and holds the proxy node; it is read-only from [to_host]'s
+   point of view and is for printing only — never a general host cache. (Keyed by the tnode, whose
+   identity is the never-reused [uid]: an id-keyed table here would resolve stale proxies for
+   reused ids after [Tensor.unsafe_reinitialize].) *)
+let for_print_proxies : Tn.t Hashtbl.M(Tn).t = Hashtbl.create (module Tn)
 
 let register_for_print ~(src : Tn.t) ~(proxy : Tn.t) =
-  Hashtbl.set for_print_proxies ~key:src.Tn.id ~data:proxy
+  Hashtbl.set for_print_proxies ~key:src ~data:proxy
 
 (* A deep copy of a host [Ndarray] (same precision, dims, and layout). Used so reads of shared
    initialization buffers hand the caller a private buffer it may mutate. *)
@@ -334,15 +315,26 @@ let to_host ctx (tn : Tn.t) : Nd.t =
               "Context.to_host: node %s is an @| slice view; read its parent %s instead"
               (Tn.debug_name tn) (Tn.debug_name parent))
   | None -> ());
-  let (Wrapper wrapper) = ctx.backend_wrapper in
-  let module Backend = (val wrapper.backend) in
-  (* Ensure pending device writes feeding [tn] have completed before reading it back. *)
-  Backend.await wrapper.context.device;
   let nd = host_buffer tn in
-  if Backend.to_host wrapper.context tn nd then (
-    (* Ensure the device-to-host copy itself has completed before the host buffer is read. *)
-    Backend.await wrapper.context.device;
-    nd)
+  (* [transfer] awaits pending device writes feeding the node, attempts the device-to-host copy,
+     and awaits its completion before the host buffer is read. *)
+  let transfer node =
+    Backends.query ctx.wrapped
+      {
+        q =
+          (fun (type dev runner event)
+               (module Backend : BI.Backend
+                 with type dev = dev
+                  and type runner = runner
+                  and type event = event) c ->
+            Backend.await c.BI.device;
+            if Backend.to_host c node nd then (
+              Backend.await c.BI.device;
+              true)
+            else false);
+      }
+  in
+  if transfer tn then nd
   else
     match Ir.Host_inits.find tn with
     | Some init ->
@@ -353,15 +345,13 @@ let to_host ctx (tn : Tn.t) : Nd.t =
         copy_nd (Lazy.force init)
     | None -> (
         (* Read through a for-print proxy, if a copy of [tn] was materialized for printing. *)
-        match Hashtbl.find for_print_proxies tn.Tn.id with
-        | Some proxy when Backend.to_host wrapper.context proxy nd ->
-            Backend.await wrapper.context.device;
-            nd
+        match Hashtbl.find for_print_proxies tn with
+        | Some proxy when transfer proxy -> nd
         | _ ->
             raise
             @@ Utils.User_error
                  (Printf.sprintf "Context.to_host: node %s is not present in context (backend %s)"
-                    (Tn.debug_name tn) ctx.backend_name))
+                    (Tn.debug_name tn) (backend_name ctx)))
 
 (** Uploads the host buffer [nd] into [tn]'s device buffer, allocating it if needed, and returns a
     context in which [tn] is marked initialized (so a subsequent {!run} reading [tn] succeeds). *)
@@ -384,17 +374,83 @@ let from_host ctx (tn : Tn.t) (nd : Nd.t) : t =
      post-settlement it validates against the settled bounds (or raises). See
      [Tnode.bounds_state]. *)
   Tn.propose_bounds_from_host tn nd;
-  let (Wrapper wrapper) = ctx.backend_wrapper in
-  let module Backend = (val wrapper.backend) in
-  let ctx =
-    if Backend.from_host wrapper.context tn nd then ctx
-    else
-      let new_backend_context = Backend.init_from_host wrapper.context tn nd in
-      let updated_wrapper = Wrapper { wrapper with context = new_backend_context } in
-      { ctx with backend_wrapper = updated_wrapper }
+  let wrapped, () =
+    Backends.with_backend ctx.wrapped
+      {
+        f =
+          (fun (type dev runner event)
+               (module Backend : BI.Backend
+                 with type dev = dev
+                  and type runner = runner
+                  and type event = event) c ->
+            let c = if Backend.from_host c tn nd then c else Backend.init_from_host c tn nd in
+            Backend.await c.BI.device;
+            (c, ()));
+      }
   in
-  Backend.await wrapper.context.device;
-  mark_initialized ctx (Set.singleton (module Tn) tn)
+  mark_initialized { ctx with wrapped } (Set.singleton (module Tn) tn)
+
+(** Copies [tn]'s device buffer from [src] into [dst] (or into [dst]'s stream's merge buffer for
+    [~into_merge_buffer:Copy]), returning the updated destination context. When both contexts come
+    from the same backend, the pair match on {!Backends.wrapped_context} recovers type equality
+    and the copy dispatches to the backend's [device_to_device] transfer machinery; otherwise it
+    falls back to a host round-trip. *)
+let copy ?(into_merge_buffer = BI.No) ~src ~dst tn =
+  (* The fallback also serves nodes with no device buffer in [src]: [to_host] reads host-init
+     literals and for-print proxies. A merge buffer cannot be filled host-side, so [Copy] raises
+     where the fallback would engage. *)
+  let host_roundtrip what =
+    match into_merge_buffer with
+    | BI.No -> from_host dst tn (to_host src tn)
+    | BI.Copy ->
+        raise
+        @@ Utils.User_error
+             (Printf.sprintf "Context.copy: cannot fill the merge buffer with node %s: %s"
+                (Tn.debug_name tn) what)
+  in
+  let same (type dev runner event)
+      (module Backend : BI.Backend
+        with type dev = dev
+         and type runner = runner
+         and type event = event)
+      ~(rewrap : (dev, runner, event) BI.context -> Backends.wrapped_context)
+      (sctx : (dev, runner, event) BI.context) (dctx : (dev, runner, event) BI.context) =
+    match Backend.device_to_device tn ~into_merge_buffer ~dst:dctx ~src:sctx with
+    | Some r ->
+        (* The transfer routine's schedule is ordered on [dst]'s stream; host reads await the
+           device as usual. For [Copy], the rewrapped [r.context] is what carries
+           [merge_buffer_node = Some tn] into the next [compile]'s static merge-node check
+           (gh-ocannl-288). *)
+        Ir.Task.run r.BI.schedule;
+        let dst = { dst with wrapped = rewrap r.BI.context } in
+        (match into_merge_buffer with
+        | BI.No -> mark_initialized dst (Set.singleton (module Tn) tn)
+        | BI.Copy -> dst)
+    | None ->
+        if not (Map.mem sctx.BI.ctx_buffers tn) then
+          host_roundtrip "the node is absent from the source context"
+        else if not (Map.mem dctx.BI.ctx_buffers tn) then
+          (* Present in [src], absent in [dst]: allocate in [dst] and schedule the copy. *)
+          mark_initialized
+            { dst with wrapped = rewrap (Backend.init_from_device tn ~dst:dctx ~src:sctx) }
+            (Set.singleton (module Tn) tn)
+        else
+          (* The source and destination buffers are physically the same: nothing to transfer. *)
+          mark_initialized dst (Set.singleton (module Tn) tn)
+  in
+  match (src.wrapped, dst.wrapped) with
+  | Backends.Sync_cc_ctx s, Backends.Sync_cc_ctx d ->
+      same (module Backends.Sync_cc_b) ~rewrap:(fun c -> Backends.Sync_cc_ctx c) s d
+  | Backends.Multicore_cc_ctx s, Backends.Multicore_cc_ctx d ->
+      same (module Backends.Multicore_cc_b) ~rewrap:(fun c -> Backends.Multicore_cc_ctx c) s d
+  | Backends.Cuda_ctx s, Backends.Cuda_ctx d ->
+      same (module Backends.Cuda_b) ~rewrap:(fun c -> Backends.Cuda_ctx c) s d
+  | Backends.Metal_ctx s, Backends.Metal_ctx d ->
+      same (module Backends.Metal_b) ~rewrap:(fun c -> Backends.Metal_ctx c) s d
+  | (Backends.Sync_cc_ctx _ | Backends.Multicore_cc_ctx _ | Backends.Cuda_ctx _ | Backends.Metal_ctx _), _
+    ->
+      host_roundtrip
+        (Printf.sprintf "cross-backend transfer (%s to %s)" (backend_name src) (backend_name dst))
 
 let get_values ctx (tn : Tn.t) : float array =
   let nd = to_host ctx tn in
@@ -436,9 +492,8 @@ let points_2d ?from_axis ~xdim ~ydim ctx (tn : Tn.t) =
   Nd.retrieve_2d_points ?from_axis ?padding ~xdim ~ydim nd
 
 let is_initialized ctx node = Set.mem ctx.initialized_nodes node
-let backend_name ctx = ctx.backend_name
 let device_id ctx = ctx.device_id
 
 let placements ctx =
-  let (Wrapper wrapper) = ctx.backend_wrapper in
-  wrapper.context.BI.optimize_ctx.Ir.Low_level.placements
+  Backends.query ctx.wrapped
+    { q = (fun _ c -> c.BI.optimize_ctx.Ir.Low_level.placements) }

@@ -203,7 +203,7 @@ module Multicore (Backend : For_add_scheduler) :
   let new_stream device = device
   let num_devices () = 1
 
-  let static_properties =
+  let static_properties () =
     Sexp.List
       [
         Sexp.Atom "multicore_devices";
@@ -262,7 +262,7 @@ module Sync (Backend : For_add_scheduler) = struct
   let is_idle _device = true
   let await _device = ()
 
-  let static_properties =
+  let static_properties () =
     Sexp.List
       [
         Sexp.Atom "sync_devices";

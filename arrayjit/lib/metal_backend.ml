@@ -4,7 +4,6 @@ module Tn = Tnode
 module Lazy = Utils.Lazy
 module Me = Metal (* Alias for Metal module *)
 open Backend_intf
-module Impl = Backend_impl (* Alias for Backend_impl *)
 
 let _get_local_debug_runtime = Utils.get_local_debug_runtime
 
@@ -30,7 +29,7 @@ module Backend_buffer = struct
   (* Provide a sexp_of for Me.Buffer.t *)
   let sexp_of_buffer_ptr = Me.Buffer.sexp_of_t
 
-  include Impl.Buffer_types (struct
+  include Backend_impl.Buffer_types (struct
     type nonrec buffer_ptr = buffer_ptr [@@deriving sexp_of]
   end)
 end
@@ -128,9 +127,9 @@ module Slab = struct
       (Me.Buffer.super (Hashtbl.find_exn pools (device.device_id, pool_id)))
 end
 
-(* Functor defining the backend. The exact public signature (Lowered_backend + storage_mode_of_pool)
+(* Module defining the backend. The exact public signature (Lowered_backend + storage_mode_of_pool)
    is sealed by metal_backend.mli. *)
-module Fresh () = struct
+module Impl = struct
   (* Include the device setup with types and allocation *)
   include Backend_impl.Device (Device_stream) (Slab)
 
@@ -140,16 +139,23 @@ module Fresh () = struct
 
   let storage_mode_of_pool = Slab.storage_mode_of_pool
 
-  (* Global state for Metal devices *)
-  let metal_devices : Me.Device.t array = Me.Device.copy_all_devices ()
-  let () = assert (Array.length metal_devices > 0)
+  (* Global state for Metal devices. Device discovery is lazy: the singleton [Impl] module
+     initializes at program startup (Backends instantiates it eagerly for nameable types), and
+     enumerating devices there would make runs that never use Metal depend on the Metal runtime
+     (e.g. headless machines). Forced at first device use, where [Context.auto] can catch a
+     failure per call. *)
+  let metal_devices : Me.Device.t array Lazy.t =
+    lazy
+      (let devices = Me.Device.copy_all_devices () in
+       assert (Array.length devices > 0);
+       devices)
 
   (* Store for captured logs per device_id (the device is its own single compute stream). *)
   let stream_logs : (int, string list ref) Hashtbl.t = Hashtbl.create (module Int)
 
   (* Device Management *)
-  let num_devs = Array.length metal_devices
-  let devices_cache = Array.create ~len:num_devs None
+  let num_devs () = Array.length (Lazy.force metal_devices)
+  let devices_cache = lazy (Array.create ~len:(num_devs ()) None)
 
   (* Builds the device's single compute runner (command queue + sync event), optionally with a
      debug-log-capturing queue. Returns the runner and the captured-log ref (if logging is on). *)
@@ -181,10 +187,11 @@ module Fresh () = struct
     ({ queue = actual_queue; event = shared_event_obj; counter }, opt_log_entries_ref)
 
   let get_device ~(ordinal : int) : device =
-    if ordinal < 0 || num_devs <= ordinal then
+    if ordinal < 0 || num_devs () <= ordinal then
       invalid_arg [%string "Metal_backend.get_device %{ordinal#Int}: invalid ordinal"];
+    let devices_cache = Lazy.force devices_cache in
     let default () =
-      let metal_device = metal_devices.(ordinal) in
+      let metal_device = (Lazy.force metal_devices).(ordinal) in
       let runner, opt_log_entries_ref = spinup_runner metal_device in
       let result_device = make_device metal_device runner ~ordinal in
       (* The device is its own single compute stream; key captured logs by [device_id]. *)
@@ -199,7 +206,7 @@ module Fresh () = struct
   let num_devices () =
     (* FIXME: refactor the whole backend interface to use constant num_devices per backend
        instance *)
-    num_devs
+    num_devs ()
 
   let new_stream (device : device) : device = device
 
@@ -263,9 +270,9 @@ module Fresh () = struct
   (* --- Configuration and Info --- *)
   let get_used_memory _device = Atomic.get allocated_memory
 
-  let static_properties =
+  let static_properties () =
     let device_properties =
-      Array.mapi metal_devices ~f:(fun ordinal device ->
+      Array.mapi (Lazy.force metal_devices) ~f:(fun ordinal device ->
           let attributes = Me.Device.get_attributes device in
           Sexp.List
             [
@@ -754,7 +761,7 @@ using namespace metal;|} in
     in
     {
       metal_source = source;
-      compiled_code = Array.create ~len:num_devs None;
+      compiled_code = Array.create ~len:(num_devs ()) None;
       (* One slot per device *)
       func_name = name;
       kparams;
@@ -788,7 +795,7 @@ using namespace metal;|} in
     let funcs = Array.map funcs_and_docs ~f:(Option.map ~f:fst) in
     {
       metal_source = source;
-      compiled_code = Array.create ~len:num_devs None;
+      compiled_code = Array.create ~len:(num_devs ()) None;
       (* One slot per device *)
       funcs;
       bindings;

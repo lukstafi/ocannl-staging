@@ -71,6 +71,13 @@ type t = {
           operation. *)
   size_in_bytes : int Lazy.t;
   id : int;
+  uid : (int[@sexp_drop_if fun _ -> true]);
+      (** Process-unique identity, from a counter that {b no} reinitialization ever resets --
+          unlike {!field-id}, which restarts at 0 on [Tensor.unsafe_reinitialize] for
+          deterministic printing. All comparison/hashing (hence every tnode-keyed map, set and
+          cache in the process) uses [uid], so a stale entry surviving a reinitialization can
+          never alias a fresh tnode that reuses its [id]. Excluded from sexps to keep debug
+          output reinitialization-deterministic. *)
   label : string list;
       (** Display information. It is better if the last element of the list is the most narrow or
           alphanumeric, e.g. an identifier. *)
@@ -112,7 +119,15 @@ type t = {
 }
 [@@deriving sexp_of]
 
-let compare a1 a2 = compare_int a1.id a2.id
+let compare a1 a2 = compare_int a1.uid a2.uid
+
+(* The [uid] counter deliberately lives outside any reinitializable session state. *)
+let next_uid = ref 0
+
+let fresh_uid () =
+  let uid = !next_uid in
+  next_uid := uid + 1;
+  uid
 
 let num_elems tn =
   let dims = Lazy.force tn.dims in
@@ -490,9 +505,9 @@ include Comparator.Make (struct
   let sexp_of_t = sexp_of_t
 end)
 
-let equal a1 a2 = equal_int a1.id a2.id
-let hash nd = Int.hash nd.id
-let hash_fold_t acc nd = hash_fold_int acc nd.id
+let equal a1 a2 = equal_int a1.uid a2.uid
+let hash nd = Int.hash nd.uid
+let hash_fold_t acc nd = hash_fold_int acc nd.uid
 let hash_t = hash
 
 module Comp = struct
@@ -724,8 +739,11 @@ let header tn =
 module Registry = Stdlib.Weak.Make (struct
   type nonrec t = t
 
-  let equal = equal
-  let hash = hash
+  (* Deliberately keyed by the presentational [id], not [uid]: [find ~id] queries with a mock
+     tnode carrying only the target [id] (e.g. to resolve "n42" from debug output back to a live
+     node). Note the id-reuse caveat on {!find}. *)
+  let equal a1 a2 = equal_int a1.id a2.id
+  let hash nd = Int.hash nd.id
 end)
 
 let registry = Registry.create 16
@@ -778,6 +796,7 @@ let create delayed_prec ~id ~label ~unpadded_dims ~padding () =
       padding;
       size_in_bytes;
       id;
+      uid = fresh_uid ();
       label;
       memory_mode = None;
       observable = false;
@@ -812,6 +831,7 @@ let create_from_padded ~id ~label ~ndarray ~padding () =
       padding = lazy padding;
       size_in_bytes;
       id;
+      uid = fresh_uid ();
       label;
       memory_mode = Some (On_device, 49);
       observable = false;
@@ -895,6 +915,7 @@ let create_with_reshape ~id ~label ~base_ndarray ~unpadded_dims ~padding ~from_p
       padding;
       size_in_bytes;
       id;
+      uid = fresh_uid ();
       label;
       memory_mode = Some (On_device, 49);
       observable = false;
@@ -920,6 +941,7 @@ let find =
       padding = lazy None;
       size_in_bytes = lazy 0;
       id = -1;
+      uid = -1;
       label = [];
       memory_mode = None;
       observable = false;
@@ -929,6 +951,9 @@ let find =
       code_name = None;
     }
   in
+  (* Caveat: [id]s are reused across [Tensor.unsafe_reinitialize], so if a pre-reinitialization
+     node with this [id] is still reachable, [find] may return it instead of the current session's
+     node. Debug-resolution only; identity-sensitive code must hold the tnode itself. *)
   fun ~id -> Registry.find_opt registry { mock with id }
 
 (** {2 Accessors}
