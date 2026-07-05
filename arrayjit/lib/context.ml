@@ -251,14 +251,6 @@ let run ctx routine =
   let initialized_nodes = Set.union ctx.initialized_nodes routine.outputs in
   { ctx with initialized_nodes }
 
-let copy ~src ~dst _tnode =
-  (* Device-to-device copy *)
-  if not (Backends.equal_backend (Backends.wrapped_backend src.wrapped) (Backends.wrapped_backend dst.wrapped))
-  then failwith "Context.copy: cross-backend copy not yet supported";
-
-  (* This is a simplified placeholder - proper implementation needs device_to_device *)
-  failwith "Context.copy: not yet implemented - needs proper device_to_device integration"
-
 (* Internal helper - not exposed in interface to maintain invariants *)
 let mark_initialized ctx nodes =
   { ctx with initialized_nodes = Set.union ctx.initialized_nodes nodes }
@@ -397,6 +389,68 @@ let from_host ctx (tn : Tn.t) (nd : Nd.t) : t =
       }
   in
   mark_initialized { ctx with wrapped } (Set.singleton (module Tn) tn)
+
+(** Copies [tn]'s device buffer from [src] into [dst] (or into [dst]'s stream's merge buffer for
+    [~into_merge_buffer:Copy]), returning the updated destination context. When both contexts come
+    from the same backend, the pair match on {!Backends.wrapped_context} recovers type equality
+    and the copy dispatches to the backend's [device_to_device] transfer machinery; otherwise it
+    falls back to a host round-trip. *)
+let copy ?(into_merge_buffer = BI.No) ~src ~dst tn =
+  (* The fallback also serves nodes with no device buffer in [src]: [to_host] reads host-init
+     literals and for-print proxies. A merge buffer cannot be filled host-side, so [Copy] raises
+     where the fallback would engage. *)
+  let host_roundtrip what =
+    match into_merge_buffer with
+    | BI.No -> from_host dst tn (to_host src tn)
+    | BI.Copy ->
+        raise
+        @@ Utils.User_error
+             (Printf.sprintf "Context.copy: cannot fill the merge buffer with node %s: %s"
+                (Tn.debug_name tn) what)
+  in
+  let same (type dev runner event)
+      (module Backend : BI.Backend
+        with type dev = dev
+         and type runner = runner
+         and type event = event)
+      ~(rewrap : (dev, runner, event) BI.context -> Backends.wrapped_context)
+      (sctx : (dev, runner, event) BI.context) (dctx : (dev, runner, event) BI.context) =
+    match Backend.device_to_device tn ~into_merge_buffer ~dst:dctx ~src:sctx with
+    | Some r ->
+        (* The transfer routine's schedule is ordered on [dst]'s stream; host reads await the
+           device as usual. For [Copy], the rewrapped [r.context] is what carries
+           [merge_buffer_node = Some tn] into the next [compile]'s static merge-node check
+           (gh-ocannl-288). *)
+        Ir.Task.run r.BI.schedule;
+        let dst = { dst with wrapped = rewrap r.BI.context } in
+        (match into_merge_buffer with
+        | BI.No -> mark_initialized dst (Set.singleton (module Tn) tn)
+        | BI.Copy -> dst)
+    | None ->
+        if not (Map.mem sctx.BI.ctx_buffers tn) then
+          host_roundtrip "the node is absent from the source context"
+        else if not (Map.mem dctx.BI.ctx_buffers tn) then
+          (* Present in [src], absent in [dst]: allocate in [dst] and schedule the copy. *)
+          mark_initialized
+            { dst with wrapped = rewrap (Backend.init_from_device tn ~dst:dctx ~src:sctx) }
+            (Set.singleton (module Tn) tn)
+        else
+          (* The source and destination buffers are physically the same: nothing to transfer. *)
+          mark_initialized dst (Set.singleton (module Tn) tn)
+  in
+  match (src.wrapped, dst.wrapped) with
+  | Backends.Sync_cc_ctx s, Backends.Sync_cc_ctx d ->
+      same (module Backends.Sync_cc_b) ~rewrap:(fun c -> Backends.Sync_cc_ctx c) s d
+  | Backends.Multicore_cc_ctx s, Backends.Multicore_cc_ctx d ->
+      same (module Backends.Multicore_cc_b) ~rewrap:(fun c -> Backends.Multicore_cc_ctx c) s d
+  | Backends.Cuda_ctx s, Backends.Cuda_ctx d ->
+      same (module Backends.Cuda_b) ~rewrap:(fun c -> Backends.Cuda_ctx c) s d
+  | Backends.Metal_ctx s, Backends.Metal_ctx d ->
+      same (module Backends.Metal_b) ~rewrap:(fun c -> Backends.Metal_ctx c) s d
+  | (Backends.Sync_cc_ctx _ | Backends.Multicore_cc_ctx _ | Backends.Cuda_ctx _ | Backends.Metal_ctx _), _
+    ->
+      host_roundtrip
+        (Printf.sprintf "cross-backend transfer (%s to %s)" (backend_name src) (backend_name dst))
 
 let get_values ctx (tn : Tn.t) : float array =
   let nd = to_host ctx tn in

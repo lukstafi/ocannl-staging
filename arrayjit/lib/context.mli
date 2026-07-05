@@ -75,8 +75,16 @@ val can_run : t -> routine -> bool
 (** Note: These operations work with backend-specific buffer types hidden behind the context
     abstraction. *)
 
-val copy : src:t -> dst:t -> Ir.Tnode.t -> unit
-(** Copy a tensor from source context to destination context. *)
+val copy :
+  ?into_merge_buffer:Ir.Backend_intf.merge_buffer_use -> src:t -> dst:t -> Ir.Tnode.t -> t
+(** Copies the node's device buffer from [src] into [dst] (default [~into_merge_buffer:No]), or
+    into [dst]'s stream's merge buffer for [~into_merge_buffer:Copy], returning the updated
+    destination context. When both contexts come from the same backend the copy stays on-device
+    via the backend's [device_to_device] transfer machinery (for [Copy], the returned context
+    carries the merge-buffer node against which the next [compile] of merge-consuming code is
+    statically verified); a cross-backend copy falls back to a host round-trip ([Copy] raises).
+    Nodes absent from [src]'s device buffers fall back to the host round-trip as well, serving
+    host-init literals and for-print proxies. *)
 
 (** {2 On-demand host access}
 

@@ -707,6 +707,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name context_copy)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules context_copy)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name tnode_uid_identity)
  (package neural_nets_lib)
  (deps
