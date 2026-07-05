@@ -231,6 +231,11 @@ let prec_in_bytes = function
   | Single_prec _ -> 4
   | Double_prec _ -> 8
 
+(* Byte alignment of tensor buffers: pool bases and per-node offsets within multi-tenant pools.
+   32 suffices for AVX/AVX2 and NEON vector loads; AVX-512 would need 64 — raise it here
+   (gh-ocannl-164; every consumer parameterizes on this constant, nothing hardcodes 32). *)
+let buffer_alignment = 32
+
 let is_float = function
   | Void_prec -> false
   | Byte_prec _ -> false
