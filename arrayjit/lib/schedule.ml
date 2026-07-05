@@ -511,16 +511,60 @@ let apply_stage ~source ~tile_loops ~shared (opt : Low_level.optimized) : Low_le
     List.fold (List.rev fresh) ~init:load_stmt ~f:(fun body (s, s') ->
         For_loop { index = s'; from_ = 0; to_ = extent s - 1; body; trace_it = false; axis = Serial })
   in
+  (* The splice target. With an anchor L* (an outer-part symbol or reused workgroup axis), the
+     load nest goes at the start of L*'s body. A shared stage with no anchor (e.g. staging a
+     broadcast vector indexed only by serial tile loops) must NOT go to the routine root: every
+     hardware thread executes top-level statements, and no workgroup index symbol is bound there
+     to restrict the loads — so wrap the outermost tile loop instead, where the workgroup axes
+     enclosing the consumer also enclose (and can guard) the loads (PR #90 review). Packing
+     (shared = false) writes per-thread scratch, so the root is fine. *)
+  let outermost_tile_depth =
+    List.map tile_loops ~f:(fun s -> fst (Option.value_exn (depth_of s)))
+    |> List.min_elt ~compare:Int.compare
+    |> Option.value_exn
+  in
+  let wrap_outermost_tile = shared && Option.is_none lstar_depth in
+  (* Loops enclosing the staging point, outermost-first. *)
+  let in_scope =
+    match lstar_depth with
+    | Some ld -> Array.to_list (Array.sub stack0 ~pos:0 ~len:(ld + 1))
+    | None when wrap_outermost_tile ->
+        Array.to_list (Array.sub stack0 ~pos:0 ~len:outermost_tile_depth)
+    | None -> []
+  in
+  (* Every workgroup slot active in the kernel's launch must be either reused by this tile's
+     cooperative load or bound by an enclosing loop at the staging point (restricted to [w == 0]
+     below): hardware threads differing only in an uncovered slot would all execute the loads,
+     writing the same shared addresses concurrently — a same-value race is still a race. *)
+  (if shared then
+     let axes = hardware_axes opt.llc in
+     let wg_axes = List.filter axes ~f:(fun a -> match a.ha_kind with `Workgroup -> true | `Grid -> false) in
+     let active_slots =
+       List.filter_map wg_axes ~f:(fun a -> if a.ha_extent > 1 then Some a.ha_slot else None)
+       |> List.dedup_and_sort ~compare:Int.compare
+     in
+     let covered =
+       List.filter_map in_scope ~f:(fun fl ->
+           match fl.axis with
+           | Workgroup | Workgroup_reduce ->
+               List.find_map wg_axes ~f:(fun a ->
+                   if Indexing.equal_symbol a.ha_index fl.index then Some a.ha_slot else None)
+           | Serial | Grid | Unrolled -> None)
+     in
+     let missing = List.filter active_slots ~f:(fun s -> not (List.mem covered s ~equal:Int.equal)) in
+     if not (List.is_empty missing) then
+       invalid_arg
+         ("Schedule.Stage: workgroup slot(s) "
+         ^ String.concat ~sep:", " (List.map missing ~f:Int.to_string)
+         ^ " are active in this kernel but no loop binding them encloses the staging point for "
+         ^ Tn.debug_name source
+         ^ ": their threads would race on the shared tile; restructure the schedule so the \
+            workgroup loops enclose the staging point (or reuse them as tile loops)"));
   (* Restrict redundant cooperative loading along in-scope workgroup axes that do not participate
      in this tile: one representative thread ([w == 0]) loads for all. *)
   let load_nest =
     if not shared then load_nest
     else
-      let in_scope =
-        match lstar_depth with
-        | None -> []
-        | Some ld -> Array.to_list (Array.sub stack0 ~pos:0 ~len:(ld + 1))
-      in
       List.fold in_scope ~init:load_nest ~f:(fun body fl ->
           match fl.axis with
           | (Workgroup | Workgroup_reduce)
@@ -546,10 +590,13 @@ let apply_stage ~source ~tile_loops ~shared (opt : Low_level.optimized) : Low_le
   in
   let llc =
     match lstar_depth with
-    | None -> build opt.llc
     | Some ld ->
         rewrite_loop ~what:"Schedule.Stage" ~sym:stack0.(ld).index opt.llc ~f:(fun fc ->
             for_loop { fc with body = build fc.body })
+    | None when wrap_outermost_tile ->
+        rewrite_loop ~what:"Schedule.Stage" ~sym:stack0.(outermost_tile_depth).index opt.llc
+          ~f:(fun fc -> build (for_loop fc))
+    | None -> build opt.llc
   in
   {
     opt with

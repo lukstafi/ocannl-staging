@@ -142,4 +142,68 @@ let () =
         p "SMEM matmul parity (GPU) or clean rejection (CPU)"
           (String.is_substring msg ~substring:"not supported")
     | None -> p "SMEM matmul parity (GPU) or clean rejection (CPU)" false);
-    p "shared tiles, barriers, no edge guards (GPU) or rejected (CPU)" true)
+    p "shared tiles, barriers, no edge guards (GPU) or rejected (CPU)" true);
+
+  (* --- Broadcast-vector staging (PR #90 review regression): a shared Stage with no anchor —
+     the source access has no outer-part symbols and no reused workgroup axis. The load nest
+     must NOT go to the routine top level (every hardware thread executes top-level statements,
+     and no workgroup index symbol is bound there to restrict the writers): Stage wraps the
+     outermost tile loop instead, where the enclosing Workgroup axis guards the cooperative
+     load down to one representative thread. --- *)
+  let a2v = Array.init (n * 32) ~f:(fun idx -> Float.of_int (idx % 19) *. 0.5) in
+  let vv = Array.init 32 ~f:(fun idx -> Float.of_int idx -. 15.5) in
+  let a2 = TDSL.ndarray a2v ~label:[ "a2" ] ~output_dims:[ n; 32 ] () in
+  let v = TDSL.ndarray vv ~label:[ "v" ] ~output_dims:[ 32 ] () in
+  let bcast_expected = Array.init (n * 32) ~f:(fun idx -> a2v.(idx) +. vv.(idx % 32)) in
+  let%op cb = a2 + v in
+  let bcast_comp = named "bcast_staged" (Train.forward cb) in
+  let bcast_transform (opt : LL.optimized) : LL.optimized =
+    let paths = nest_paths opt.LL.llc in
+    let i, j =
+      match List.find_exn paths ~f:(fun p -> List.length p = 2) with
+      | [ i; j ] -> (i, j)
+      | _ -> assert false
+    in
+    let sp_i, _, _ = Sched.split ~axis:i ~factor:bm ~outer:LL.Grid ~inner:LL.Workgroup in
+    Sched.apply
+      [ sp_i; Sched.Stage { source = v.Tensor.value; tile_loops = [ j ]; shared = true } ]
+      opt
+  in
+  let ctx_b = Context.auto () in
+  if has_shared then (
+    let ctx_b, routine_b =
+      Context.compile ~lowered_transform:bcast_transform ctx_b bcast_comp Ir.Indexing.Empty
+    in
+    let ctx_b = Context.run ctx_b routine_b in
+    let got_b = Context.get_values ctx_b cb.Tensor.value in
+    p "broadcast staging values correct (GPU) or clean rejection (CPU)"
+      (Array.for_all2_exn got_b bcast_expected ~f:approx);
+    match read_generated "bcast_staged" with
+    | None -> p "broadcast load is thread-0 guarded under the workgroup axis" false
+    | Some src ->
+        let count_sub sub =
+          String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
+        in
+        (* One shared tile; the single If is the thread-0 restriction of the cooperative load —
+           its presence is exactly what the review fix guarantees (previously the load sat
+           unguarded at routine top level). *)
+        p "broadcast load is thread-0 guarded under the workgroup axis"
+          (count_sub "if (" = 1
+          &&
+          if String.is_substring backend_name ~substring:"metal" then
+            count_sub "threadgroup float tile_" = 1
+          else count_sub "__shared__ float tile_" = 1))
+  else (
+    (match
+       try
+         ignore
+           (Context.compile ~lowered_transform:bcast_transform ctx_b bcast_comp Ir.Indexing.Empty
+             : Context.t * Context.routine);
+         None
+       with Invalid_argument msg -> Some msg
+     with
+    | Some msg ->
+        p "broadcast staging values correct (GPU) or clean rejection (CPU)"
+          (String.is_substring msg ~substring:"not supported")
+    | None -> p "broadcast staging values correct (GPU) or clean rejection (CPU)" false);
+    p "broadcast load is thread-0 guarded under the workgroup axis" true)

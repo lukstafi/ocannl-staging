@@ -53,7 +53,13 @@ type optop =
           outer-part symbol or a reused [Workgroup] tile axis: [Workgroup]-typed tile loops are
           reused as the cooperating thread indices, [Serial] tile loops are iterated under fresh
           symbols, per-axis edge guards are constructed then folded, and redundant loading along
-          non-participating workgroup axes is restricted to one representative thread. Note that
+          non-participating workgroup axes is restricted to one representative thread. A shared
+          stage with no anchor (no outer-part symbol, no reused workgroup axis — e.g. staging a
+          broadcast vector) wraps the outermost tile loop instead of the routine root, so
+          enclosing workgroup axes can guard the loads; every workgroup slot active in the
+          kernel's launch must be reused or bound by a loop enclosing the staging point,
+          otherwise threads differing in the uncovered slot would race on the shared tile and
+          the op raises. Note that
           [Split]'s whole-body remainder guards would place the inserted barriers under divergent
           control flow (rejected by [validate_parallel]), so v1 shared staging requires tile sizes
           dividing the extents. With [shared = false] (CPU operand packing) all tile loops must be
