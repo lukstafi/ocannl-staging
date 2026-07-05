@@ -85,6 +85,14 @@ module type C_syntax_config = sig
   (** Declaration prefix for workgroup-shared placements ([__shared__ ] / [threadgroup ]); [None]
       makes a non-empty [workgroup_shared] set a compile-time error. *)
 
+  val restrict_keyword : string option
+  (** No-alias qualifier for kernel pointer parameters and, in the pooled style, for the derived
+      per-node pointers ([restrict] / [__restrict__] / [__restrict]); [None] emits no qualifier.
+      Sound because kernel parameters are buffer-owning roots addressing disjoint (sub-)ranges:
+      alias views are rewritten to parent accesses at assignments lowering and never reach
+      [compile_proc]'s parameter list (asserted there; gh-ocannl-164). The merge buffer stays
+      unqualified — a streaming merge mode could point it at a live same-device buffer. *)
+
   val kernel_log_param : (string * string) option
   (** Kernel parameter for logging, if any. E.g., (Some ("int", "log_id")) or (Some ("const char*",
       "log_file_name")). *)
@@ -137,6 +145,7 @@ struct
   let hardware_index ~kind:_ ~slot:_ = None
   let barrier_syntax = None
   let shared_decl_prefix = None
+  let restrict_keyword = Some "restrict"
   let float_log_style = if Input.full_printf_support then "%g" else "%de-3"
 
   let styled_log_arg doc =
@@ -1171,7 +1180,20 @@ module C_syntax (B : C_syntax_config) = struct
           let backend_info = Sexp.Atom backend_info in
           if not @@ Utils.sexp_mem ~elem:backend_info tn.backend_info then
             tn.backend_info <- Utils.sexp_append ~elem:backend_info tn.backend_info;
-          if is_param then (B.typ_of_prec (Lazy.force tn.Tn.prec) ^ " *" ^ get_ident tn, tn) :: acc
+          if is_param then (
+            (* Assignments lowering rewrites every alias-view access to a parent access, so alias
+               tnodes never reach this parameter list — but hand-built [Low_level.t] (schedule
+               layer, tests) could mint one, and with [restrict_keyword] an aliased parameter pair
+               is a miscompile rather than a redundant pointer. Fail loudly (gh-ocannl-164). *)
+            if Tn.is_alias tn then
+              invalid_arg
+                ("C_syntax.compile_proc: alias view " ^ Tn.debug_name tn
+               ^ " as a kernel parameter: accesses must be rewritten to the buffer-owning parent \
+                  (aliased parameters would falsify the restrict qualifier)");
+            let restrict_ =
+              match B.restrict_keyword with Some kw -> kw ^ " " | None -> ""
+            in
+            (B.typ_of_prec (Lazy.force tn.Tn.prec) ^ " *" ^ restrict_ ^ get_ident tn, tn) :: acc)
           else acc)
     in
     (* [`Per_param]: one typed pointer param per node (C/CUDA, byte-identical to before). [`Pooled
@@ -1295,10 +1317,14 @@ module C_syntax (B : C_syntax_config) = struct
             (String.concat ~sep:", " (List.init n_pools ~f:(Printf.sprintf "__pool%d")))
         in
         let defs =
+          (* The derived per-node pointers address disjoint slab sub-ranges, and the kernel body
+             accesses nodes only through them (never through the pool bases), which is all the
+             restrict qualifier asserts (gh-ocannl-164). *)
+          let restrict_ = match B.restrict_keyword with Some kw -> kw ^ " " | None -> "" in
           List.mapi ptr_params ~f:(fun k (_decl, tn) ->
               let typ = B.typ_of_prec (Lazy.force tn.Tn.prec) in
-              Printf.sprintf "%s%s* %s = (%s%s*)(__pools[__pool_slots[%d]] + __pool_slots[%d]);"
-                B.buffer_prefix typ (get_ident tn) B.buffer_prefix typ (2 * k)
+              Printf.sprintf "%s%s* %s%s = (%s%s*)(__pools[__pool_slots[%d]] + __pool_slots[%d]);"
+                B.buffer_prefix typ restrict_ (get_ident tn) B.buffer_prefix typ (2 * k)
                 ((2 * k) + 1))
         in
         body :=

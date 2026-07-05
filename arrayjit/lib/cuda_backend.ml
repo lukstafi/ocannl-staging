@@ -379,6 +379,7 @@ module Fresh () : Ir.Backend_impl.Lowered_backend = struct
 
     let barrier_syntax = Some "__syncthreads();"
     let shared_decl_prefix = Some "__shared__ "
+    let restrict_keyword = Some "__restrict__"
 
     let typ_of_prec = function
       | Ops.Byte_prec _ -> "unsigned char"
