@@ -23,10 +23,10 @@ kernel void where_fwd(
 
   /* Pool base pointers. */
   device char* __pools[16] = { __pool0, __pool1, __pool2, __pool3, __pool4, __pool5, __pool6, __pool7, __pool8, __pool9, __pool10, __pool11, __pool12, __pool13, __pool14, __pool15 };
-  device uchar* cond_condition = (device uchar*)(__pools[__pool_slots[0]] + __pool_slots[1]);
-  device bfloat* b_else_val = (device bfloat*)(__pools[__pool_slots[2]] + __pool_slots[3]);
-  device float* where = (device float*)(__pools[__pool_slots[4]] + __pool_slots[5]);
-  device half* a_then_val = (device half*)(__pools[__pool_slots[6]] + __pool_slots[7]);
+  device uchar* __restrict cond_condition = (device uchar*)(__pools[__pool_slots[0]] + __pool_slots[1]);
+  device bfloat* __restrict b_else_val = (device bfloat*)(__pools[__pool_slots[2]] + __pool_slots[3]);
+  device float* __restrict where = (device float*)(__pools[__pool_slots[4]] + __pool_slots[5]);
+  device half* __restrict a_then_val = (device half*)(__pools[__pool_slots[6]] + __pool_slots[7]);
   /* Local declarations and initialization. */
 
   /* Main logic. */

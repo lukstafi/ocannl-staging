@@ -1,10 +1,10 @@
 Retrieving commandline, environment, or config file variable ocannl_log_level
 Found 0, in the config file
 run1: a              -> { pool_id = 2; offset = 0 }
-run1: b              -> { pool_id = 2; offset = 8 }
+run1: b              -> { pool_id = 2; offset = 32 }
 run1: out            -> { pool_id = 1; offset = 0 }
 run2: a              -> { pool_id = 2; offset = 0 }
-run2: b              -> { pool_id = 2; offset = 8 }
+run2: b              -> { pool_id = 2; offset = 32 }
 run2: out            -> { pool_id = 1; offset = 0 }
 two outputs share a pool = true
 two outputs have distinct offsets = true
@@ -12,7 +12,7 @@ offsets are 8-byte aligned (2x float32) = true
 two constants share a pool = true
 two constants have distinct offsets = true
 constant pool is separate from working pool = true
-pooled p.offset=0 q.offset=8 share_pool=true
+pooled p.offset=0 q.offset=32 share_pool=true
 pooled p (a+b expect [4.0;6.0]) correct = true
 pooled q (a*b expect [3.0;8.0]) correct = true
 done

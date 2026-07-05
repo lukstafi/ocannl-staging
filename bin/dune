@@ -17,3 +17,13 @@
  (preprocess
   (pps ppx_here ppx_ocannl))
  (modes exe))
+
+(executable
+ (package neural_nets_lib)
+ (public_name cpu_vectorization_bench)
+ (name cpu_vectorization_bench)
+ (modules cpu_vectorization_bench)
+ (libraries ocannl base stdio time_now)
+ (preprocess
+  (pps ppx_here ppx_ocannl))
+ (modes exe))
