@@ -2,7 +2,9 @@
 
 **Date**: 2026-07-05
 **Status**: Stub — design discussion captured from the schedule-layer work
-(PR #90 follow-up); not scheduled.
+(PR #90 follow-up); not scheduled. Elaborated 2026-07-05 (post-PR #92
+brainstorm): intent-bits-vs-decisions formulation, candidate masking, the
+`Never_virtual` decomposition and drift audit.
 
 ## Motivation
 
@@ -22,7 +24,10 @@
 Now that contexts are values (`Context.t` carries the compile frontier, execution ledger,
 and per-context buffers), observability questions always have a context in hand — and the
 buffer side is *already* per-context: whether a node has storage is a fact about a
-context, not about the node. The decision layer just doesn't match yet.
+context, not about the node. The decision layer just doesn't match yet. (gh-ocannl-164
+added a small illustration from the other direction: the 32-byte within-pool offset
+padding landed entirely inside `allocate_delta`, which is already per-context — the
+buffer machinery keeps demonstrating that per-context is its natural scope.)
 
 ## The forcing function: autotuning isolation
 
@@ -40,17 +45,98 @@ inference kernel but device-resident in the training lineage), and making Virtua
 officially a per-compilation choice — the "unobservable middle" where a future
 `Materialize`/`Devirtualize` optop could operate without touching global state.
 
-## Sketch
+## Sketch: what stays on `Tnode.t`, and why
 
-- Keep on `Tnode.t` the *requests and facts with global meaning*: hosted-required,
-  effectively-constant, `Never_virtual` requests — the API-level intent, monotonic as
-  today.
-- Move the *resolution* (Virtual | Local | On_device) into the compilation lineage:
-  either a `placements : placement Map.M(Tnode).t` on `Context.t` threaded through
-  compile (matching how buffers already live per-context), or on the routine/`optimized`
-  result keyed by the context that produced it.
-- `is_virtual_force`/`is_materialized_force ~provenance` call sites (c_syntax, validate,
-  schedule) become lookups against the resolution carried by the compile in progress.
+Move the memory-mode lattice wholesale under the (optimization) context: the resolution
+(Virtual | Local | On_device | hosted-materialization) becomes per-compilation-lineage
+state — a `placements : placement Map.M(Tnode).t` on `Context.t` threaded through
+compile (matching how buffers already live per-context), or on the routine/`optimized`
+result keyed by the context that produced it. The `is_virtual_force` /
+`is_materialized_force ~provenance` call sites (c_syntax, validate, schedule, backend
+pool/transfer logic, host-init upload paths) become lookups against the resolution
+carried by the compile in progress — and crucially, the *forcing* (settlement) those
+sites perform today moves into the per-context resolver; reads elsewhere become
+side-effect free.
+
+What remains on `Tnode.t` is a deliberately small residue, in two categories:
+
+1. **Semantic facts that define program meaning** — same category as shapes and
+   precision, out of scope for context-scoping entirely:
+   - `alias_of` / `is_alias`: defines the *write semantics* (a write through the view is
+     a write to the parent's sub-range). Not a placement decision; settled
+     deterministically at assignments lowering, before schedule-level candidates diverge.
+   - Op-support constraints: a primitive that cannot consume or produce an inlined
+     operand states a fact about the operation, not about any lineage's preference.
+   - Global constancy (semantic-adjacent): "no routine in the program writes this node"
+     is a fact about the program's use of the node, like alias-ness, and it anchors
+     shared infrastructure — `constant_buffer_cache` dedups constant pools **per device
+     across contexts**, so per-lineage divergence on read-only-ness would let one lineage
+     write a buffer another lineage registered as shared-constant. Keep it on `Tnode.t`.
+     Optimization-relevant *scoped* constancy — constant within a routine or lineage
+     (invariant hoisting, per-lineage constant pooling) — is a distinct concept to
+     bifurcate as per-context state when a consumer needs it, not a weakening of the
+     global bit.
+
+2. **Declarative intent bits protecting cross-context shared substrates**:
+   - `is_observed` (host-observation intent): the host ndarray mirror is a **per-tnode
+     singleton** — one logical tensor has one host buffer regardless of how many lineages
+     compile it; it is what `Host_inits` and ndarray literals feed, what `set_values`
+     writes, what printing reads. Configuration that guards a shared substrate has to key
+     on the thing that is shared.
+
+   Intent bits are **monotone-upward only** (a node can start being observed, never
+   stop) and **side-effect free to read**. This is the crisp version of the motivation:
+   today's settlement raises come from *decisions* colliding, and decisions collide
+   because they are two-sided. One-directional facts cannot conflict, so keeping them
+   global does not reintroduce the poisoning problem the split is meant to fix.
+
+Notably absent from the residue: cross-routine and cross-stream sharing. These are
+*derivable* — the lineage's frontier discovers a second reader at its compile and the
+device/stream layer sees cross-stream use — so they need no declared bit at all.
+
+### Observation is not materialization: recomputation, and the `Never_virtual` drift
+
+`is_observed` intent does **not** map to "must materialize". The design intent is that
+virtual nodes remain observable *via recomputation* — the inlined computation can be
+re-run on demand to produce values — **except when they depend on [Local] nodes**
+(routine-scoped scratch is gone after the routine, unobservable by contract, and that
+unobservability is contagious to virtual computations reading it). So the placement
+constraint `is_observed` imposes is only: do not resolve the node (or its recomputation
+closure) into the Local-dependent unobservable class. Materialization is one way to
+serve observation; recomputation is another; the resolver picks.
+
+`Never_virtual` has diverged from its original meaning ("someone will read this, so it
+must not be inlined away") — under the recomputation intent, observability alone never
+requires `Never_virtual`. It decomposes as:
+
+- observation-flavored uses → subsumed by `is_observed` + recomputation (no
+  materialization requirement);
+- op-support uses ("this primitive cannot take a virtual operand") → stay tnode-level
+  semantic constraints (category 1 above);
+- performance pinning ("keep this materialized because the schedule wants it") →
+  per-context, the `Materialize`/`Devirtualize` optop territory.
+
+**Audit item**: some call sites may still assume the old meaning (observable ⇒
+never-virtual). Sweep `Never_virtual` requests and consumers during the refactor and
+classify each into the three buckets; sites found relying on the old meaning are bugs
+against the recomputation intent, not constraints to preserve.
+
+### Candidate masking
+
+To serve the autotuning forcing function, contexts can **mask** intent: candidate
+compiles in a search serve no host reads, so they compile with observation suppressed
+(and hence maximal freedom to virtualize/localize) and stay hermetic; the winning
+schedule recompiles unmasked. Masking is sound precisely because intent reads are
+side-effect free — a masked compile leaves no trace on the tnode.
+
+### Enforcement
+
+Enforcement moves entirely per-context, on the bounds-settlement model: observing a node
+through a lineage consults that lineage's resolution. Virtual resolves are served by
+recomputation; the raise is reserved for what recomputation cannot serve — [Local]
+placements and Local-dependent virtual closures. Intent strengthened *after* a lineage
+compiled does not invalidate that lineage; observation through it may fail while new
+compiles honor the stronger intent.
 
 ## Honest caveats
 
@@ -64,6 +150,14 @@ officially a per-compilation choice — the "unobservable middle" where a future
   host-init upload paths). This is a refactor to schedule deliberately, not to fold into
   a feature PR — in particular, `Privatize` did not need it (its tiles are born
   per-kernel with fresh ids, so global `Local` mode is correct for them).
+- **gh-ocannl-164 raised the stakes at the c_syntax site** (landed 2026-07-05, PR #92):
+  the `ptr_params` force-site cluster now also emits the `restrict` qualifier and asserts
+  `not (Tn.is_alias tn)` per parameter. Both must ride along with the migrated lookup,
+  and a placement-resolution bug that ever produced overlapping kernel parameters is now
+  miscompile-grade (restrict makes it UB) rather than a redundant pointer. Also one more
+  hand-built-IR test pins global-mode behavior and joins the refactor's sweep:
+  `arrayjit/test/test_vectorized_codegen.ml` (hand-settles `On_device`/`Local` to drive
+  `compile_proc` directly, like `test_zero_out_codegen.ml`).
 
 ## Relations
 
@@ -71,4 +165,6 @@ officially a per-compilation choice — the "unobservable middle" where a future
 [gh-ocannl-261](gh-ocannl-261.md) (autotuning consumer),
 [memory-mode-streamlined; Local contract] (the 2026-07-03 lattice this splits),
 [interval-analysis-scalar-t](interval-analysis-scalar-t.md) (the bounds-settlement
-precedent for lineage-scoped monotonic facts).
+precedent for lineage-scoped monotonic facts),
+[gh-ocannl-164](gh-ocannl-164.md) (restrict on kernel parameters — the alias assert and
+qualifier that the migrated `ptr_params` lookup must preserve).
