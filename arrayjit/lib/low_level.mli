@@ -255,6 +255,12 @@ val reads_scope_before_set : scope_id -> t -> bool
     first definitely-executed [Set_local id] in [body]. Use this at code-generation time to decide
     whether a [Local_scope] or [Declare_local] declaration needs a zero initializer. *)
 
+val simplify_llc : Indexing.static_symbol list -> t -> t
+(** Top-down algebraic simplification with interval-driven comparison folding (in particular, it
+    erases [If] guards whose conditions the loop extents prove). Called internally by [optimize];
+    exposed for [Schedule.apply], whose transforms construct guards after the pipeline's simplify
+    already ran (docs/proposals/schedule-ir-optops.md §2), and for testing. Pure and idempotent. *)
+
 val rewrite_one_hot_reductions : ?static_indices:Indexing.static_symbol list -> t -> t
 (** gh-343: rewrites the narrow one-hot embedding pattern -- an [Add] reduction over a loop variable
     [k] whose body selects an embedding-table row via [k == index_expr] (a logical one-hot) -- into

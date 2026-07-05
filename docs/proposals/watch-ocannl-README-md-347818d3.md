@@ -3,6 +3,46 @@
 Task: watch-ocannl-README-md-347818d3
 Issue: https://github.com/ahrefs/ocannl/issues/412
 
+## Status update (2026-07-04)
+
+- **The tiling infrastructure this proposal asked to share with the GPU work now has a
+  concrete home**: [schedule-ir-optops](schedule-ir-optops.md) was elaborated
+  2026-07-04 and specifies `Split`/`Swap`/`Unroll`/`Stage` transforms over
+  `Low_level.optimized`, applied at the landed `?lowered_transform` seam on
+  `Context.compile` (`backend_intf.ml:198`, `backends.ml:492`). The CPU work here is
+  its Phase S4: cache-sized `Split` presets, loop-order `Swap`s, and non-shared
+  `Stage` (operand packing into contiguous `Local` stack tiles — no barriers needed on
+  cc). The unique remaining scope of *this* proposal is the CPU micro-kernel (SIMD FMA)
+  and the CPU benchmark/tuning story.
+- **Groundwork landed 2026-07-04** that the CPU tiling directly reuses:
+  - the `If` guard statement (`low_level.ml:83`) + interval folding in `simplify_llc`
+    ([interval-analysis-scalar-t](interval-analysis-scalar-t.md), PR #88) — remainder
+    /edge tiles are expressed as guards that fold away when the tile size divides the
+    extent, replacing hand-rolled remainder-loop generation;
+  - `axis_type` on `For_loop` (PR #84 + follow-ups), including `Unrolled` (codegen-time
+    repetition) — though register tiling wants IR-level unrolling so simplify/CSE see
+    the copies (schedule-ir-optops §4); `Vectorized`/`Cpu_parallel` axis types are
+    deliberately deferred until their codegen exists;
+  - signed `int32` loop indices with the per-node numel contract
+    ([signed-index-precision](signed-index-precision.md)) — split-index `Affine`
+    arithmetic cannot overflow.
+- **Still no tiling/SIMD-FMA work in the tree**: no loop splitting pass, `pp_ll` emits
+  plain `for` loops for `Serial` axes, and the matmul kernel remains the naive triple
+  loop. gh-ocannl-164 (alignment, `restrict`, pragmas, AVX/NEON macros) also remains
+  unstarted and is still the floor for the micro-kernel here.
+- **Pipeline-order correction to the 2026-06-12 note below**: in today's
+  `optimize_proc` (`low_level.ml:3109`) the order is virtualize → cleanup →
+  `simplify_llc` → one-hot rewrite → CSE → `hoist_cross_statement_cse` (hoisting runs
+  *last*, after CSE). Tiling runs later still — at the `?lowered_transform` seam, after
+  the whole pipeline — and re-invokes simplify/CSE on its own output (see
+  schedule-ir-optops §2), rather than being inserted "after hoisting" inside the
+  pipeline.
+- Line drift since 2026-06-12: `For_loop` now `low_level.ml:59` (with the `axis`
+  field), `loop_over_dims` 3448, `unroll_dims` 3467, `optimize_proc` 3109;
+  `loop_accum` now `assignments.ml:311` (`to_low_level` 197); `pp_ll` now
+  `c_syntax.ml:475` with the `For_loop` case at 484 (branching on `axis`),
+  `Set_from_vec` codegen at 639, `vec_unop_syntax` at 310.
+
 ## Status update (2026-06-12)
 
 - Issue #412 is OPEN. Its GH milestone is v0.8 (due date 2026-02-28 has lagged); ROADMAP.md

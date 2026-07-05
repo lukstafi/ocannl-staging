@@ -489,7 +489,14 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
       lower_assignments optim_ctx ?name bindings comp.asgns
     in
     let lowered =
-      match lowered_transform with None -> lowered | Some transform -> transform lowered
+      match lowered_transform with
+      | Some transform -> transform lowered
+      | None ->
+          (* No explicit schedule: on GPU backends the default annotator parallelizes kernels it
+             can prove safe (docs/proposals/schedule-ir-optops.md §6); the identity otherwise. *)
+          Schedule.maybe_default_gpu ~backend_name:Device.name
+            ~static_indices:(Indexing.bound_symbols bindings)
+            lowered
     in
     let code : Device.code = compile ~name bindings lowered in
     let from_prior_context : Tn.t_set =
@@ -502,6 +509,14 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     let names, lowereds =
       lower_batch_assignments optim_ctx ?names ?occupancy bindings
       @@ Array.map comps ~f:(fun c -> c.asgns)
+    in
+    let lowereds =
+      Array.map lowereds
+        ~f:
+          (Option.map
+             ~f:
+               (Schedule.maybe_default_gpu ~backend_name:Device.name
+                  ~static_indices:(Indexing.bound_symbols bindings)))
     in
     let code_batch = compile_batch ~names bindings lowereds in
     let from_prior_context =

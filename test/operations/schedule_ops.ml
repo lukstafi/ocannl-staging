@@ -1,0 +1,177 @@
+(* Schedule IR, Phase S1 (docs/proposals/schedule-ir-optops.md): executed parity of scheduled
+   kernels against their unscheduled twins, plus structural checks on the generated source read
+   from [build_files/].
+
+   Covered here: [Split] with a dividing factor (the remainder guard folds away), [Split] with a
+   non-dividing factor (the guard survives on every backend -- it is part of the loop structure,
+   not launch guarding), [Swap] of a perfectly nested pair, and the default GPU annotator preset
+   ([Schedule.default_gpu]) on a two-nest elementwise kernel (unequal Grid extents => launch-extent
+   guard on GPU backends) and on a matmul (reduction; whatever the conservative analysis decides,
+   the values must match the unscheduled twin).
+
+   On GPU backends (Metal locally, CUDA in CI) annotated kernels execute with real grid /
+   threadgroup dimensions; on the C backends annotated loops legally fall back to serial loops.
+   Every printed boolean holds on every backend -- structural expectations are dispatched on the
+   configured backend. *)
+
+open Base
+open Ocannl
+open Ocannl.Operation.DSL_modules
+module LL = Ir.Low_level
+module Sched = Ir.Schedule
+module Asgns = Ir.Assignments
+
+let () = Utils.settings.output_debug_files_in_build_directory <- true
+let p name b = Stdio.printf "%s: %b\n" name b
+let approx a b = Float.(abs (a - b) < 1e-4)
+
+let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"sync_cc")
+let on_gpu = String.is_substring backend_name ~substring:"metal"
+             || String.is_substring backend_name ~substring:"cuda"
+
+let read_generated base_name =
+  let ext = if String.is_substring backend_name ~substring:"metal" then ".metal" else ".c" in
+  let ext = if String.is_substring backend_name ~substring:"cuda" then ".cu" else ext in
+  let path = Stdlib.Filename.concat "build_files" (base_name ^ ext) in
+  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+
+let has_hardware_regs src =
+  String.is_substring src ~substring:"gid." || String.is_substring src ~substring:"blockIdx."
+
+(* The outermost statement-level loop of the optimized code: its index symbol and body. *)
+let rec first_loop (llc : LL.t) =
+  match llc with
+  | LL.Seq (a, b) -> ( match first_loop a with Some r -> Some r | None -> first_loop b)
+  | LL.For_loop { index; body; _ } -> Some (index, body)
+  | _ -> None
+
+let first_loop_exn llc = Option.value_exn ~here:[%here] (first_loop llc)
+
+let named name (comp : Asgns.comp) : Asgns.comp =
+  { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
+
+let () =
+  let av = Array.init 32 ~f:(fun i -> Float.of_int i *. 0.5) in
+  let bv = Array.init 32 ~f:(fun i -> Float.of_int (i % 7) -. 3.) in
+  let expected_c = Array.init 32 ~f:(fun i -> av.(i) +. bv.(i)) in
+  let a = TDSL.ndarray av ~label:[ "a" ] ~output_dims:[ 4; 8 ] () in
+  let b = TDSL.ndarray bv ~label:[ "b" ] ~output_dims:[ 4; 8 ] () in
+  let run_variant ~name ~transform =
+    let%op c = a + b in
+    let comp = named name (Train.forward c) in
+    let ctx = Context.auto () in
+    let ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
+    let ctx = Context.run ctx routine in
+    Context.get_values ctx c.Tensor.value
+  in
+
+  (* --- Split with a dividing factor: the remainder guard must fold away --- *)
+  let got_div =
+    run_variant ~name:"split_div" ~transform:(fun opt ->
+        let sym, _ = first_loop_exn opt.LL.llc in
+        let op, _, _ = Sched.split ~axis:sym ~factor:2 ~outer:LL.Grid ~inner:LL.Workgroup in
+        Sched.apply [ op ] opt)
+  in
+  p "split (dividing factor) values correct" (Array.for_all2_exn got_div expected_c ~f:approx);
+  (match read_generated "split_div" with
+  | None -> p "split (dividing factor) structure as expected" false
+  | Some src ->
+      let has s = String.is_substring src ~substring:s in
+      let ok =
+        if on_gpu then
+          (* Hardware bindings for the split pair, the inner elementwise loop stays serial, and
+             no guard: 2 divides 4 (fold) and extents are slot-uniform (no launch guard). *)
+          has_hardware_regs src && has "for (" && not (has "if (")
+        else (not (has_hardware_regs src)) && has "for (" && not (has "if (")
+      in
+      p "split (dividing factor) structure as expected" ok);
+
+  (* --- Split with a non-dividing factor: the remainder guard survives on every backend --- *)
+  let got_rem =
+    run_variant ~name:"split_rem" ~transform:(fun opt ->
+        let sym, _ = first_loop_exn opt.LL.llc in
+        let op, _, _ = Sched.split ~axis:sym ~factor:3 ~outer:LL.Grid ~inner:LL.Workgroup in
+        Sched.apply [ op ] opt)
+  in
+  p "split (remainder) values correct" (Array.for_all2_exn got_rem expected_c ~f:approx);
+  (match read_generated "split_rem" with
+  | None -> p "split (remainder) guard survives" false
+  | Some src -> p "split (remainder) guard survives" (String.is_substring src ~substring:"if ("));
+
+  (* --- Swap of the perfectly nested elementwise pair --- *)
+  let got_swap =
+    run_variant ~name:"swap_ij" ~transform:(fun opt ->
+        let i, body = first_loop_exn opt.LL.llc in
+        let j, _ = first_loop_exn body in
+        Sched.apply [ Sched.Swap { outer = i; inner = j } ] opt)
+  in
+  p "swap values correct" (Array.for_all2_exn got_swap expected_c ~f:approx);
+  (match read_generated "swap_ij" with
+  | None -> p "swap reorders the loop bounds" false
+  | Some src ->
+      (* After the interchange the extent-8 loop is outermost: [<= 7] appears before [<= 3]. *)
+      let idx7 = String.substr_index src ~pattern:"<= 7" in
+      let idx3 = String.substr_index src ~pattern:"<= 3" in
+      p "swap reorders the loop bounds"
+        (match (idx7, idx3) with Some i7, Some i3 -> i7 < i3 | _ -> false));
+
+  (* --- The default GPU annotator on a two-nest elementwise kernel (4x8 and 6x8: unequal Grid
+     extents => launch-extent guard on GPU backends) --- *)
+  let ev = Array.init 48 ~f:(fun i -> Float.of_int i *. 0.25) in
+  let fv = Array.init 48 ~f:(fun i -> Float.of_int ((i % 5) + 1)) in
+  let expected_c2 = Array.init 48 ~f:(fun i -> ev.(i) *. fv.(i)) in
+  let e = TDSL.ndarray ev ~label:[ "e" ] ~output_dims:[ 6; 8 ] () in
+  let f = TDSL.ndarray fv ~label:[ "f" ] ~output_dims:[ 6; 8 ] () in
+  let%op c1 = a + b in
+  let%op c2 = e *. f in
+  let combo = named "combo_default" (Asgns.sequence [ Train.forward c1; Train.forward c2 ]) in
+  let sched_len = ref (-1) in
+  let ctx = Context.auto () in
+  let ctx, routine =
+    Context.compile
+      ~lowered_transform:(fun opt ->
+        let sched = Sched.default_gpu ~min_parallel:1 opt in
+        sched_len := List.length sched;
+        Sched.apply sched opt)
+      ctx combo Ir.Indexing.Empty
+  in
+  let ctx = Context.run ctx routine in
+  let got_c1 = Context.get_values ctx c1.Tensor.value in
+  let got_c2 = Context.get_values ctx c2.Tensor.value in
+  p "default annotator combo values correct"
+    (Array.for_all2_exn got_c1 expected_c ~f:approx
+    && Array.for_all2_exn got_c2 expected_c2 ~f:approx);
+  p "default annotator schedules both nests" (!sched_len = 4);
+  (match read_generated "combo_default" with
+  | None -> p "default annotator structure as expected" false
+  | Some src ->
+      let has s = String.is_substring src ~substring:s in
+      let ok =
+        if on_gpu then
+          (* Both nests fully hardware-bound (no loops left) and the smaller Grid nest guarded. *)
+          has_hardware_regs src && has "if (" && not (has "for (")
+        else (not (has_hardware_regs src)) && has "for ("
+      in
+      p "default annotator structure as expected" ok);
+
+  (* --- The default GPU annotator on a matmul: values must match the unscheduled twin whatever
+     the conservative analysis decides (reduction loops stay serial in the preset) --- *)
+  let mav = Array.init 20 ~f:(fun i -> Float.of_int (i % 7) *. 0.5) in
+  let mbv = Array.init 30 ~f:(fun i -> Float.of_int (i % 11) -. 4.) in
+  let ma = TDSL.ndarray mav ~label:[ "ma" ] ~input_dims:[ 5 ] ~output_dims:[ 4 ] () in
+  let mb = TDSL.ndarray mbv ~label:[ "mb" ] ~input_dims:[ 6 ] ~output_dims:[ 5 ] () in
+  let run_mm ~name ~transform =
+    let%op mc = ma * mb in
+    let comp = named name (Train.forward mc) in
+    let ctx = Context.auto () in
+    let ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
+    let ctx = Context.run ctx routine in
+    Context.get_values ctx mc.Tensor.value
+  in
+  let mm_serial = run_mm ~name:"mm_serial" ~transform:(fun opt -> opt) in
+  let mm_sched =
+    run_mm ~name:"mm_default" ~transform:(fun opt ->
+        Sched.apply (Sched.default_gpu ~min_parallel:1 opt) opt)
+  in
+  p "default annotator matmul values match the serial twin"
+    (Array.for_all2_exn mm_sched mm_serial ~f:approx)

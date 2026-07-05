@@ -3,6 +3,29 @@
 Task: gh-ocannl-164
 Issue: https://github.com/ahrefs/ocannl/issues/164
 
+## Status update (2026-07-04)
+
+- **Still not started**: no `restrict` qualifiers on kernel parameters, no
+  vectorization pragmas, no `OCANNL_HAS_AVX2`/`OCANNL_HAS_NEON` macros in
+  `builtins_cc.ml`, and `backend_impl.ml:79` still allocates via unaligned
+  `Ctypes.allocate_n` (line moved from 48). `arch_flags` is unchanged
+  (`cc_backend.ml:20`, flags assembled ~89).
+- **Rebase targets moved** with the axis-types-for-loops landing (Phases B+C,
+  2026-07-04): `compile_proc` is now `c_syntax.ml:1134-1354` and returns launch
+  dimensions in addition to params and the function doc; Phase 3a's `restrict` change
+  still lands in its `kparams`/`Kparam_ptr` construction. The local-declaration pass
+  (Phase 3c's alignment attribute) now has a workgroup-shared branch
+  (`c_syntax.ml:1328`, `shared_decl_prefix`) — the `__attribute__((aligned(32)))`
+  applies to the plain stack-array branch only. `pp_ll` is at `c_syntax.ml:475` and
+  its `For_loop` case (Phase 3b's pragma site) at 484 now branches on the loop's
+  `axis` field — emit pragmas in the `Serial` rendering path (which also covers cc's
+  serial fallback for `Grid`/`Workgroup` annotations, where the pragma remains valid).
+- **Priority note**: the schedule layer ([schedule-ir-optops](schedule-ir-optops.md),
+  elaborated 2026-07-04) plans CPU tiling/packing as its Phase S4 and explicit SIMD
+  micro-kernels after that; this task is the auto-vectorization floor beneath both and
+  is independently landable — nothing here depends on the schedule work.
+- All Acceptance Criteria and the phased Approach remain valid as written.
+
 ## Status update (2026-06-12)
 
 - Issue #164 is still OPEN, milestone v0.8 (ROADMAP targets mid-June 2026 for v0.8); gh-ocannl-412 (tiling) is also still OPEN on v0.8.
