@@ -48,7 +48,7 @@ let read_generated_c base_name =
    generated C files (written at original compile time) for pre-upload structure. *)
 let inspect (t : Tensor.t) : int * int * int =
   let comp = t.Tensor.forward in
-  let optim_ctx = { LL.computations = Hashtbl.create (module Ir.Tnode) } in
+  let optim_ctx = LL.empty_optimize_ctx () in
   let opt =
     Ir.Assignments.lower optim_ctx ~unoptim_ll_source:None ~ll_source:None ~cd_source:None
       ~name:"probe" [] comp.Ir.Assignments.asgns

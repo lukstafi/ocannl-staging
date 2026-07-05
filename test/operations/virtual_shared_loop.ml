@@ -49,8 +49,16 @@ let loop s body : LL.t =
 let seq a b : LL.t = LL.Seq (a, b)
 
 let optimize llc : LL.optimized =
-  let ctx : LL.optimize_ctx = { computations = Hashtbl.create (module Tn) } in
+  let ctx : LL.optimize_ctx = LL.empty_optimize_ctx () in
   LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name:"shared_loop" [] llc
+
+
+(* Post-optimization placement probes: decisions live on the optimize_ctx's placements
+   (context-scoped memory modes), not on the tnode (which now holds only declared intent). *)
+let known_virtual (o : LL.optimized) tn = Tn.Placements.known_virtual o.optimize_ctx.placements tn
+
+let known_non_virtual (o : LL.optimized) tn =
+  Tn.Placements.known_non_virtual o.optimize_ctx.placements tn
 
 (* --- structural probes on the optimized form --- *)
 let rec walk_t ~on_set ~on_get (llc : LL.t) =
@@ -115,7 +123,7 @@ let case_independent () =
   let use_a = loop j (set j oa (get j a)) in
   let use_b = loop k (set k ob (get k b)) in
   let o = optimize (seq shared (seq use_a use_b)) in
-  p "independent siblings both virtual" (Tn.known_virtual a && Tn.known_virtual b);
+  p "independent siblings both virtual" (known_virtual o a && known_virtual o b);
   p "independent siblings setters dropped" (count_set o a = 0 && count_set o b = 0);
   p "independent siblings inlined at use sites (no array reads survive)"
     (count_get o a = 0 && count_get o b = 0);
@@ -133,7 +141,7 @@ let case_mixed () =
   let o = optimize (seq shared use_a) in
   p "mixed cleanup keeps b setter" (count_set o b = 1);
   p "mixed drops virtual a setter" (count_set o a = 0);
-  p "mixed a virtual, b non-virtual" (Tn.known_virtual a && Tn.known_non_virtual b)
+  p "mixed a virtual, b non-virtual" (known_virtual o a && known_non_virtual o b)
 
 (* === Case 3: forward sibling provider inlined into a surviving materialized reader === *)
 let case_forward_provider () =
@@ -144,7 +152,7 @@ let case_forward_provider () =
   let shared = loop i (seq (set i a (c 2.)) (set i b (add (get i a) (c 1.)))) in
   let o = optimize shared in
   p "forward provider inlined into materialized reader"
-    (Tn.known_virtual a && count_set o a = 0 && count_get o a = 0 && count_set o b = 1)
+    (known_virtual o a && count_set o a = 0 && count_get o a = 0 && count_set o b = 1)
 
 (* === Case 4: forward virtual->virtual chain consumed downstream === *)
 let case_chain () =
@@ -155,13 +163,13 @@ let case_chain () =
   let shared = loop i (seq (set i a (c 2.)) (set i b (add (get i a) (c 1.)))) in
   let use_b = loop j (set j out (mul (get j b) (c 2.))) in
   let o = optimize (seq shared use_b) in
-  p "forward virtual-to-virtual chain both virtual" (Tn.known_virtual a && Tn.known_virtual b);
+  p "forward virtual-to-virtual chain both virtual" (known_virtual o a && known_virtual o b);
   p "forward virtual-to-virtual chain fully inlined"
     (count_set o a = 0
     && count_set o b = 0
     && count_get o a = 0
     && count_get o b = 0
-    && Tn.known_non_virtual out)
+    && known_non_virtual o out)
 
 (* === Case 5: loop-carried / read-before-write sibling read stays materialized === [a] is written
    at [i] but read at [i+1] in the same loop, so the read of [a[i+1]] precedes its write in trace
@@ -175,7 +183,7 @@ let case_reverse () =
   let read_ahead = LL.Get (a, [| Ir.Indexing.Affine { symbols = [ (1, i) ]; offset = 1 } |]) in
   let shared = loop i (seq (set i a (c 2.)) (set i b (add read_ahead (c 1.)))) in
   let o = optimize shared in
-  p "loop-carried provider kept materialized" (Tn.known_non_virtual a);
+  p "loop-carried provider kept materialized" (known_non_virtual o a);
   p "loop-carried provider read NOT rewritten (array read preserved)" (count_get o a >= 1)
 
 (* === Case 6: is_complex still set by a genuine complex scalar computation === *)
@@ -202,7 +210,7 @@ let case_inloop_consumer () =
     loop i (seq (set i a (c 2.)) (seq (set i b (c 3.)) (set i cons (add (get i a) (get i b)))))
   in
   let o = optimize shared in
-  p "in-loop consumer: both providers virtual" (Tn.known_virtual a && Tn.known_virtual b);
+  p "in-loop consumer: both providers virtual" (known_virtual o a && known_virtual o b);
   p "in-loop consumer: providers inlined (no array reads survive)"
     (count_get o a = 0 && count_get o b = 0);
   p "in-loop consumer: consumer setter kept" (count_set o cons = 1)

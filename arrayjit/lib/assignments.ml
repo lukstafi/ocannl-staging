@@ -102,12 +102,16 @@ let can_skip_accumulation ~projections =
   (* We can skip accumulation (use = instead of +=) only if the projection is injective *)
   Indexing.is_injective projections
 
-(** Returns materialized nodes in the sense of {!Tnode.is_in_context_force}. NOTE: it must be called
-    after compilation; otherwise, it will disrupt memory mode inference. *)
-let%debug3_sexp context_nodes (asgns : t) : Tn.t_set =
+(** Returns materialized nodes in the sense of {!Tnode.Placements.is_in_context_force}, resolved
+    against the given compilation lineage's placements. NOTE: it must be called after compilation
+    (when the placements of all involved nodes are settled); otherwise, it will disrupt memory mode
+    inference. *)
+let%debug3_sexp context_nodes ~(plc : Tn.Placements.t) (asgns : t) : Tn.t_set =
   let open Utils.Set_O in
   let empty = Set.empty (module Tn) in
-  let one tn = if Tn.is_in_context_force tn 34 then Set.singleton (module Tn) tn else empty in
+  let one tn =
+    if Tn.Placements.is_in_context_force plc tn 34 then Set.singleton (module Tn) tn else empty
+  in
   let of_node = function Node rhs -> one rhs | Merge_buffer _ -> empty in
   let rec loop = function
     | Noop -> empty
@@ -194,7 +198,7 @@ let collect_neutral_elem (asgns : t) : float option =
   in
   match loop None asgns with None -> None | Some v -> v
 
-let%track4_sexp to_low_level code =
+let%track4_sexp to_low_level ?(plc = Tn.Placements.create ()) code =
   let open Indexing in
   (* Apply left padding offsets to convert from semantic to buffer indices. Semantic indices can be
      negative (e.g., -1 for convolution padding), but buffer indices must be non-negative. Adding
@@ -839,8 +843,12 @@ let%track4_sexp to_low_level code =
     Array.length pdims = Array.length cdims + 1
     && Array.equal Int.equal (Array.subo pdims ~pos:1) cdims
     && Ops.equal_prec (Lazy.force array.Tn.prec) (Lazy.force sliced.Tn.prec)
-    && (not (Tn.known_virtual sliced))
-    && (match sliced.Tn.memory_mode with Some (Tn.Effectively_constant, _) -> false | _ -> true)
+    (* Backing storage is judged against the compilation lineage's placements ([plc]): a parent
+       virtualized by a prior compile in this lineage has no buffer for the alias to share. With no
+       placements in hand (debug printing, hand-built IR) this falls back to the tnode's declared
+       intent, since an empty placements table defers to it. *)
+    && (not (Tn.Placements.known_virtual plc sliced))
+    && (not (Tn.Placements.known_constant plc sliced))
     && Option.is_none (Tn.get_padding sliced)
     && Option.is_none (Tn.get_padding array)
   in
@@ -1076,5 +1084,5 @@ let%track6_sexp lower optim_ctx ~unoptim_ll_source ~ll_source ~cd_source ~name s
   (match cd_source with
   | None -> ()
   | Some callback -> callback (to_doc ~name ~static_indices () proc));
-  let llc : Low_level.t = to_low_level proc in
+  let llc : Low_level.t = to_low_level ~plc:optim_ctx.Low_level.placements proc in
   Low_level.optimize optim_ctx ~unoptim_ll_source ~ll_source ~name static_indices llc

@@ -282,6 +282,11 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
 end
 
 let%track6_sexp lower_assignments optim_ctx ?name bindings asgns =
+  (* Fork the lineage state (computations and placements) so this compile's decisions do not leak
+     into the incoming context or into sibling compiles from the same context
+     (docs/proposals/context-scoped-memory-modes.md). The forked state travels with the code and
+     reaches the child context at link time. *)
+  let optim_ctx = Low_level.copy_optimize_ctx optim_ctx in
   let name : string =
     Option.value_or_thunk name ~default:(fun () -> Assignments.get_name_exn asgns)
   in
@@ -293,6 +298,9 @@ let%track6_sexp lower_assignments optim_ctx ?name bindings asgns =
       (Indexing.bound_symbols bindings) asgns )
 
 let lower_batch_assignments optim_ctx ?names ?occupancy bindings asgns_l =
+  (* One fork for the whole batch: the batch is a single compilation unit, so its members share the
+     lineage state, but the batch as a whole stays hermetic w.r.t. sibling compiles. *)
+  let optim_ctx = Low_level.copy_optimize_ctx optim_ctx in
   let names =
     Option.value_or_thunk names ~default:(fun () ->
         Array.map asgns_l ~f:(fun asgns -> Assignments.get_name_exn asgns))
@@ -313,10 +321,11 @@ let lower_batch_assignments optim_ctx ?names ?occupancy bindings asgns_l =
         )
       else (None, None))
 
-let%debug3_sexp verify_prior_context ~ctx_arrays ~from_prior_context : unit =
+let%debug3_sexp verify_prior_context ~(plc : Tn.Placements.t) ~ctx_arrays ~from_prior_context :
+    unit =
   Set.iter from_prior_context ~f:(fun tn ->
       if
-        Tn.is_in_context_force tn 42
+        Tn.Placements.is_in_context_force plc tn 42
         && (not (Option.is_some @@ Map.find ctx_arrays tn))
         (* Nodes with registered host initialization data (ndarray-backed literals, loaded tensors)
            self-initialize in this context at link time from [Host_inits] (gh-ocannl-333), so they
@@ -324,10 +333,11 @@ let%debug3_sexp verify_prior_context ~ctx_arrays ~from_prior_context : unit =
         && not (Host_inits.mem tn)
       then raise @@ Utils.User_error ("The linked context lacks node " ^ Tnode.debug_name tn))
 
-let%debug3_sexp from_prior_context_batch (comps : Assignments.comp option array) : Tn.t_set =
+let%debug3_sexp from_prior_context_batch ~(plc : Tn.Placements.t)
+    (comps : Assignments.comp option array) : Tn.t_set =
   Array.filter_map comps ~f:(fun comp ->
       Option.map comp ~f:(fun comp ->
-          Set.diff (Assignments.context_nodes comp.Assignments.asgns) comp.embedded_nodes))
+          Set.diff (Assignments.context_nodes ~plc comp.Assignments.asgns) comp.embedded_nodes))
   |> Array.fold ~init:(Set.empty (module Tnode)) ~f:Set.union
 
 (** Adds a scheduler and brings a lowered no-device backend on par with lowered device backends. *)
@@ -488,8 +498,12 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
             lowered
     in
     let code : Device.code = compile ~name bindings lowered in
+    (* Placements of all context nodes are settled by codegen (the [compile] just above), so this
+       query resolves against the code's own lineage fork. *)
     let from_prior_context : Tn.t_set =
-      Set.diff (Assignments.context_nodes comp.asgns) comp.embedded_nodes
+      Set.diff
+        (Assignments.context_nodes ~plc:lowered.Low_level.optimize_ctx.placements comp.asgns)
+        comp.embedded_nodes
     in
     { from_prior_context; name; lowered; code; expected_merge_node = lowered.Low_level.merge_node }
 
@@ -508,8 +522,13 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
                   ~static_indices:(Indexing.bound_symbols bindings)))
     in
     let code_batch = compile_batch ~names bindings lowereds in
+    let batch_plc =
+      (Array.find_map lowereds ~f:(Option.map ~f:(fun l -> l.Low_level.optimize_ctx))
+      |> Option.value_or_thunk ~default:Low_level.empty_optimize_ctx)
+        .placements
+    in
     let from_prior_context =
-      from_prior_context_batch
+      from_prior_context_batch ~plc:batch_plc
       @@ Array.mapi lowereds ~f:(fun i -> Option.map ~f:(fun _ -> comps.(i)))
     in
     {
@@ -534,8 +553,9 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
      (freed at device teardown). Enumeration follows [traced_store] order so pool ids and offsets
      stay deterministic across runs. The per-pool 4 GB cap (uint32 offsets unless large_models) is
      enforced by {!Backend_utils.plan_pool_segments}. *)
-  let%track3_sexp allocate_delta (context : context) (traced_store : Low_level.traced_store) :
+  let%track3_sexp allocate_delta (context : context) (lowered : Low_level.optimized) :
       ctx_buffers =
+    let traced_store = lowered.Low_level.traced_store in
     let device = context.device in
     let cap = if Utils.settings.large_models then Int.max_value else 0x1_0000_0000 in
     (* Pass 1: partition the delta, preserving [traced_store] iteration order. Slice-alias views own
@@ -545,8 +565,14 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
        reference the parent in the lowered code. *)
     let working = ref [] and constants = ref [] in
     Hashtbl.iteri traced_store ~f:(fun ~key ~data:node ->
-        if Tnode.is_in_context_force key 43 && not (Map.mem context.ctx_buffers key) then
-          if node.Low_level.read_only || Tn.known_constant key then
+        if
+          Tnode.Placements.is_in_context_force lowered.Low_level.optimize_ctx.placements key 43
+          && not (Map.mem context.ctx_buffers key)
+        then
+          if
+            node.Low_level.read_only
+            || Tn.Placements.known_constant lowered.Low_level.optimize_ctx.placements key
+          then
             constants := (key, node) :: !constants
           else working := (key, node) :: !working);
     let working = List.rev !working and constants = List.rev !constants in
@@ -631,14 +657,15 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     !ctx_buffers
 
   let%debug3_sexp link context (code : code) =
-    verify_prior_context ~ctx_arrays:context.ctx_buffers ~from_prior_context:code.from_prior_context;
+    verify_prior_context ~plc:code.lowered.Low_level.optimize_ctx.placements
+      ~ctx_arrays:context.ctx_buffers ~from_prior_context:code.from_prior_context;
     (* Static merge-buffer verification "in the right direction" (gh-ocannl-288): the linked context
        carries the merge-buffer node of the producing [device_to_device] transfer routine; a
        mismatch with the consuming code raises here, at link time, before any schedule runs. *)
     check_merge_buffer_static ~merge_buffer_node:context.merge_buffer_node
       ~code_node:code.expected_merge_node;
     let (inputs, outputs), merge_buffer_input = Low_level.input_and_output_nodes code.lowered in
-    let ctx_buffers = allocate_delta context code.lowered.traced_store in
+    let ctx_buffers = allocate_delta context code.lowered in
     let optimize_ctx = code.lowered.optimize_ctx in
     let bindings, schedule = link context code.code ctx_buffers in
     let context = make_child ~ctx_buffers ~optimize_ctx context in
@@ -650,11 +677,12 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
       { context; schedule; bindings; name = code.name; inputs; merge_buffer_input; outputs }
 
   let%debug3_sexp link_batch context code_batch =
-    verify_prior_context ~ctx_arrays:context.ctx_buffers
-      ~from_prior_context:code_batch.from_prior_context;
+    verify_prior_context
+      ~plc:(get_optimize_ctx_batch code_batch).Low_level.placements
+      ~ctx_arrays:context.ctx_buffers ~from_prior_context:code_batch.from_prior_context;
     let ctx_buffers =
       Array.map code_batch.lowereds
-        ~f:(Option.map ~f:(fun l -> allocate_delta context l.Low_level.traced_store))
+        ~f:(Option.map ~f:(fun l -> allocate_delta context l))
     in
     let bindings, schedules = link_batch context code_batch.code_batch ctx_buffers in
     Array.fold_mapi schedules ~init:context ~f:(fun i context -> function

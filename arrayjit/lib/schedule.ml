@@ -546,7 +546,7 @@ let apply_stage ~source ~tile_loops ~shared (opt : Low_level.optimized) : Low_le
       ~unpadded_dims:(lazy tile_dims)
       ~padding:(lazy None) ()
   in
-  Tn.update_memory_mode tile Tn.Local 175;
+  Tn.Placements.update opt.Low_level.optimize_ctx.placements tile Tn.Local 175;
   ignore (get_node opt.traced_store tile : traced_array);
   (* The load nest. *)
   let fresh = List.map iterated ~f:(fun s -> (s, Indexing.get_symbol ())) in
@@ -895,7 +895,7 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
           ~unpadded_dims:(lazy tile_dims)
           ~padding:(lazy None) ()
       in
-      Tn.update_memory_mode tile Tn.Local 176;
+      Tn.Placements.update opt.Low_level.optimize_ctx.placements tile Tn.Local 176;
       ignore (get_node opt.traced_store tile : traced_array);
       let tile_read_idcs =
         if scalar_acc then [| Indexing.Fixed_idx 0 |]
@@ -1019,7 +1019,7 @@ exception Bail
 (* Collects accesses of tensor nodes (not scalar scope-locals) in [llc]. Raises [Bail] on opaque
    or clearly unschedulable constructs. [depth] counts enclosing [Local_scope] bodies:
    materialized writes there are invisible to [validate_parallel]'s coverage check, so bail. *)
-let scan_accesses (llc : Low_level.t) : access list =
+let scan_accesses plc (llc : Low_level.t) : access list =
   let open Low_level in
   let acc = ref [] in
   let add ~depth:_ ~write ~dynamic tn idcs =
@@ -1037,14 +1037,14 @@ let scan_accesses (llc : Low_level.t) : access list =
         if not (equal_axis_type axis Serial) then raise Bail;
         code ~depth body
     | Zero_out tn ->
-        if Tn.is_materialized_peek tn then raise Bail
+        if Tn.Placements.is_materialized_peek plc tn then raise Bail
         (* Zeroing per-thread scratch is safe: each thread zeroes its own copy. *)
     | Set { tn; idcs; llsc; _ } ->
-        if depth > 0 && Tn.is_materialized_peek tn then raise Bail;
+        if depth > 0 && Tn.Placements.is_materialized_peek plc tn then raise Bail;
         add ~depth ~write:true ~dynamic:false tn idcs;
         scalar ~depth llsc
     | Set_from_vec { tn; idcs; arg = a, _; _ } ->
-        if depth > 0 && Tn.is_materialized_peek tn then raise Bail;
+        if depth > 0 && Tn.Placements.is_materialized_peek plc tn then raise Bail;
         add ~depth ~write:true ~dynamic:false tn idcs;
         scalar ~depth a
     | Set_local (_, llsc) -> scalar ~depth llsc
@@ -1080,7 +1080,7 @@ type nest_info = {
 (* Top-level statements of the kernel: [For_loop] (possibly [If]-wrapped) statements become nests;
    everything else contributes to the "bare" pseudo-nest (executed unconditionally by every
    thread of the launch). *)
-let split_nests (llc : Low_level.t) : nest_info list * access list =
+let split_nests plc (llc : Low_level.t) : nest_info list * access list =
   let open Low_level in
   let rec is_nest = function
     | For_loop _ -> true
@@ -1090,8 +1090,8 @@ let split_nests (llc : Low_level.t) : nest_info list * access list =
   let stmts = flat_lines [ llc ] in
   let nests, bare =
     List.partition_map stmts ~f:(fun stmt ->
-        if is_nest stmt then First { n_loops = stmt; n_accesses = scan_accesses stmt }
-        else Second (scan_accesses stmt))
+        if is_nest stmt then First { n_loops = stmt; n_accesses = scan_accesses plc stmt }
+        else Second (scan_accesses plc stmt))
   in
   (nests, List.concat bare)
 
@@ -1132,9 +1132,10 @@ let default_gpu ?block_size ?min_parallel (opt : Low_level.optimized) : schedule
         (Int.of_string @@ Utils.get_global_arg ~arg_name:"gpu_schedule_min_parallel" ~default:"1024")
   in
   try
-    let nests, bare = split_nests opt.llc in
+    let plc = opt.optimize_ctx.placements in
+    let nests, bare = split_nests plc opt.llc in
     (* Bare materialized writes cannot be covered by annotated loops. *)
-    if List.exists bare ~f:(fun a -> a.a_write && Tn.is_materialized_peek a.a_tn) then
+    if List.exists bare ~f:(fun a -> a.a_write && Tn.Placements.is_materialized_peek plc a.a_tn) then
       raise Bail;
     (* Chains: per nest, the outermost (up to two) Serial path loops whose index occurs as a plain
        [Iterator] component in every materialized write vector of the nest. *)
@@ -1142,7 +1143,7 @@ let default_gpu ?block_size ?min_parallel (opt : Low_level.optimized) : schedule
       List.map nests ~f:(fun n ->
           let mat_writes =
             List.filter n.n_accesses ~f:(fun a ->
-                a.a_write && Tn.is_materialized_peek a.a_tn)
+                a.a_write && Tn.Placements.is_materialized_peek plc a.a_tn)
           in
           let qualifies s =
             (not (List.is_empty mat_writes))
@@ -1171,7 +1172,7 @@ let default_gpu ?block_size ?min_parallel (opt : Low_level.optimized) : schedule
         Hashtbl.iter by_tn ~f:(fun accs ->
             let written = List.exists accs ~f:(fun a -> a.a_write) in
             if written then (
-              let is_mat = Tn.is_materialized_peek (List.hd_exn accs).a_tn in
+              let is_mat = Tn.Placements.is_materialized_peek plc (List.hd_exn accs).a_tn in
               let chain_relevant =
                 List.exists accs ~f:(fun a -> Array.exists a.a_idcs ~f:(mentions_sym syms))
               in
@@ -1209,7 +1210,7 @@ let default_gpu ?block_size ?min_parallel (opt : Low_level.optimized) : schedule
                       List.exists accs_j ~f:(fun a -> a.a_tn.Tn.id = w.a_tn.Tn.id)
                     in
                     if touched_elsewhere then
-                      if Tn.is_materialized_peek w.a_tn then raise Bail
+                      if Tn.Placements.is_materialized_peek plc w.a_tn then raise Bail
                       else if
                         (* Local scratch: safe only if every thread writes its whole private
                            copy, i.e. the writes do not depend on parallel symbols. *)

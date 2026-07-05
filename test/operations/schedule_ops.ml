@@ -209,7 +209,7 @@ let () =
   let fake llc : LL.optimized =
     {
       LL.traced_store = Hashtbl.create (module Ir.Tnode);
-      optimize_ctx = { LL.computations = Hashtbl.create (module Ir.Tnode) };
+      optimize_ctx = LL.empty_optimize_ctx ();
       llc;
       merge_node = None;
       workgroup_shared = Set.empty (module Ir.Tnode);

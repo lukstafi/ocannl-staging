@@ -79,6 +79,13 @@ type t = {
   mutable bounds : bounds_state;
       (** Scalar value bounds summary; see {!bounds_state} for the lifecycle. *)
   mutable memory_mode : (memory_mode * int) option;
+      (** The tnode's {e declared intent} -- requests made at graph-construction time (parameter
+          and constant marking, [Train.set_materialized], op-support [Never_virtual]), paired with
+          a provenance identifier. Since the context-scoped memory-modes split
+          (docs/proposals/context-scoped-memory-modes.md) this is monotone, side-effect free to
+          read, and never written by the compilation pipeline: placement {e decisions} are
+          per-compilation-lineage, recorded in {!module-Placements} tables riding
+          [Low_level.optimize_ctx]. *)
   mutable alias_of : ((t * Indexing.static_symbol) option[@sexp.opaque]);
       (** When [Some (parent, batch_idx)], this node is a zero-copy slice-alias *view* of [parent]:
           it owns no buffer of its own, and every read/write of it is redirected (during lowering)
@@ -179,64 +186,22 @@ let log_debug_info ~from_log_level tn =
         "backends:",
         (tn.backend_info : Sexp.t)]]]
 
-(** Defaults to the most local memory mode compatible with the current setting. *)
-let default_to_most_local tn provenance =
-  let provenance =
-    match tn.memory_mode with Some (_, prov) -> (1000 * prov) + provenance | None -> provenance
-  in
+(** The mode [Never_virtual] resolves to when defaulted: [Local] if the node fits the stack
+    threshold, [On_device] otherwise. *)
+let most_local_materialized_mode tn =
   let stack_threshold_in_bytes =
     Int.of_string @@ Utils.get_global_arg ~default:"16384" ~arg_name:"stack_threshold_in_bytes"
   in
-  let local_mode =
-    if
-      stack_threshold_in_bytes > 0
-      && num_elems tn > stack_threshold_in_bytes / (Ops.prec_in_bytes @@ Lazy.force tn.prec)
-    then On_device
-    else Local
-  in
-  match tn.memory_mode with
-  | None | Some (Effectively_constant, _) -> tn.memory_mode <- Some (Virtual, provenance)
-  | Some (Never_virtual, _) -> tn.memory_mode <- Some (local_mode, provenance)
-  | Some ((Virtual | Local | On_device), _) -> ()
+  if
+    stack_threshold_in_bytes > 0
+    && num_elems tn > stack_threshold_in_bytes / (Ops.prec_in_bytes @@ Lazy.force tn.prec)
+  then On_device
+  else Local
 
-let is_virtual_force tn provenance =
-  match tn.memory_mode with
-  | Some (Virtual, _) -> true
-  | None ->
-      tn.memory_mode <- Some (Virtual, provenance);
-      true
-  | Some (Effectively_constant, _) ->
-      tn.memory_mode <- Some (Virtual, provenance);
-      true
-  | _ -> false
-
-let rec is_materialized_force tn provenance =
-  match tn.memory_mode with
-  | None -> assert false
-  | Some ((Virtual | Local), _) -> false
-  | Some (On_device, _) -> true
-  | Some ((Never_virtual | Effectively_constant), _) ->
-      default_to_most_local tn provenance;
-      is_materialized_force tn provenance
-
-(** Like {!is_materialized_force}, but pure: computes what forcing would decide — mirroring
-    {!default_to_most_local}'s resolution of [Never_virtual] / [Effectively_constant] — without
-    recording the decision or a provenance. For analyses (e.g. [Schedule.default_gpu]) that must
-    not perturb the settlement state observed by debug output and by later compilations; the
-    eventual force (e.g. at codegen) lands the same mode deterministically. *)
-let is_materialized_peek tn =
-  match tn.memory_mode with
-  | None -> assert false
-  | Some ((Virtual | Local), _) -> false
-  | Some (On_device, _) -> true
-  | Some (Effectively_constant, _) -> false (* [default_to_most_local] resolves to [Virtual]. *)
-  | Some (Never_virtual, _) ->
-      (* [default_to_most_local] resolves to [Local] or [On_device] by the stack threshold. *)
-      let stack_threshold_in_bytes =
-        Int.of_string @@ Utils.get_global_arg ~default:"16384" ~arg_name:"stack_threshold_in_bytes"
-      in
-      stack_threshold_in_bytes > 0
-      && num_elems tn > stack_threshold_in_bytes / (Ops.prec_in_bytes @@ Lazy.force tn.prec)
+(* Note (context-scoped memory modes): the tnode-level forcing family ([is_virtual_force],
+   [is_materialized_force], [is_in_context_force], [default_to_most_local], [is_materialized_peek])
+   was removed -- {!field-memory_mode} now holds only declared intent, side-effect free to read.
+   Settlement lives in {!module-Placements}, per compilation lineage. *)
 
 (** A slice-alias view (see {!field-alias_of}). Such a node owns no buffer of its own; its accesses
     are redirected to its parent during lowering. *)
@@ -258,20 +223,6 @@ let slice_of tn = tn.slice_of
     known). Idempotent. *)
 let set_slice_of tn ~parent ~batch_idx = tn.slice_of <- Some (parent, batch_idx)
 
-let%debug3_sexp rec is_in_context_force (tn : t) (provenance : int) : bool =
-  (* Since gh-ocannl-333 there is no host-only storage, so being in context depends only on the
-     memory mode. (Buffers never alias host memory: every backend copies on to_host/from_host.) *)
-  (* A slice-alias view owns no buffer: it is never independently in context -- its accesses are
-     redirected to its parent (gh-ocannl-293 subtask 293a). *)
-  if is_alias tn then false
-  else
-    match tn.memory_mode with
-    | Some ((Virtual | Local), _) -> false
-    | Some (On_device, _) -> true
-    | None | Some ((Effectively_constant | Never_virtual), _) ->
-        default_to_most_local tn provenance;
-        is_in_context_force tn provenance
-
 let known_not_materialized tn =
   match tn.memory_mode with Some ((Virtual | Local), _) -> true | _ -> false
 
@@ -288,37 +239,44 @@ let mode_is_unspecified tn =
   | None | Some ((Never_virtual | Effectively_constant), _) -> true
   | _ -> false
 
-let update_memory_mode tn mode provenance =
-  match (tn.memory_mode, mode) with
-  | None, _ -> tn.memory_mode <- Some (mode, provenance)
-  | Some (m1, _), m2 when equal_memory_mode m1 m2 -> ()
+(** The pure memory-mode lattice transition, shared between {!update_memory_mode} (tnode-level
+    declared intent) and per-context placement resolution ({!module-Placements}). Returns the new
+    state; raises on conflicting requests. *)
+let transition_memory_mode ~debug_name:name current mode provenance =
+  match (current, mode) with
+  | None, _ -> (mode, provenance)
+  | Some ((m1, _) as cur), m2 when equal_memory_mode m1 m2 -> cur
   | Some (Never_virtual, prov2), Virtual ->
       raise
       @@ Utils.User_error
            [%string
-             "Tnode.update_memory_mode: update %{prov2#Int} -> %{provenance#Int} for %{debug_name \
-              tn}: cannot be virtual"]
-  | Some (Virtual, _), Effectively_constant -> ()
+             "Tnode.update_memory_mode: update %{prov2#Int} -> %{provenance#Int} for %{name}: \
+              cannot be virtual"]
+  | Some ((Virtual, _) as cur), Effectively_constant -> cur
   | Some (Never_virtual, _), Effectively_constant | Some (Effectively_constant, _), Never_virtual ->
       (* A constant that must be persisted is just a materialized (device-resident) node now; there
          is no separate hosted-constant state. *)
-      tn.memory_mode <- Some (On_device, provenance)
-  | Some (On_device, _), Effectively_constant -> ()
-  | Some (Effectively_constant, _), Virtual -> tn.memory_mode <- Some (mode, provenance)
-  | Some (Effectively_constant, _), On_device -> tn.memory_mode <- Some (On_device, provenance)
-  | Some (Never_virtual, _), mode -> tn.memory_mode <- Some (mode, provenance)
+      (On_device, provenance)
+  | Some ((On_device, _) as cur), Effectively_constant -> cur
+  | Some (Effectively_constant, _), Virtual -> (mode, provenance)
+  | Some (Effectively_constant, _), On_device -> (On_device, provenance)
+  | Some (Never_virtual, _), mode -> (mode, provenance)
   | Some (Virtual, prov2), Never_virtual ->
       raise
       @@ Utils.User_error
            [%string
-             "Tnode.update_memory_mode: update %{prov2#Int} -> %{provenance#Int} for %{debug_name \
-              tn} is already virtual"]
-  | Some (_, _), Never_virtual -> ()
+             "Tnode.update_memory_mode: update %{prov2#Int} -> %{provenance#Int} for %{name} is \
+              already virtual"]
+  | Some ((_, _) as cur), Never_virtual -> cur
   | Some (_, prov2), _ ->
       invalid_arg
         [%string
           "Tnode.update_memory_mode: update %{prov2#Int} -> %{provenance#Int} inconsistent for \
-           %{debug_name tn}"]
+           %{name}"]
+
+let update_memory_mode tn mode provenance =
+  tn.memory_mode <-
+    Some (transition_memory_mode ~debug_name:(debug_name tn) tn.memory_mode mode provenance)
 
 let update_prec ?only_if tn prec =
   let do_update =
@@ -527,6 +485,121 @@ let hash_t = hash
 module Comp = struct
   type nonrec t = t
   type nonrec comparator_witness = comparator_witness
+end
+
+(** {2 Per-context placement resolution}
+
+    The context-scoped side of the memory-mode split
+    (docs/proposals/context-scoped-memory-modes.md): {!field-memory_mode} on the tnode is
+    *declared intent* -- requests made at graph-construction time (user [set_materialized],
+    parameter/constant marking, op-support [Never_virtual]) -- while the *decisions* (resolving to
+    [Virtual] / [Local] / [On_device]) are recorded here, per compilation lineage. A [Placements]
+    table rides [Low_level.optimize_ctx]: it is copied at the start of each backend [compile], so
+    sibling compiles from the same context are hermetic (a candidate compile cannot poison
+    another's placement resolution), while child contexts inherit the lineage's decisions.
+
+    Lookups fall back to the tnode's intent when the lineage has not yet decided; updates apply
+    the same lattice as {!update_memory_mode} but never write the tnode. Intent strengthened after
+    a lineage compiled does not invalidate that lineage. *)
+module Placements = struct
+  open struct
+    type tn = t
+
+    let sexp_of_tn = sexp_of_t
+  end
+
+  module Key = struct
+    type t = tn
+
+    let compare = compare
+    let sexp_of_t = sexp_of_tn
+    let hash = hash
+  end
+
+  type nonrec t = { table : (tn, memory_mode * int) Hashtbl.t }
+
+  let sexp_of_t p =
+    [%sexp_of: (string * (memory_mode * int)) list]
+      (List.map (Hashtbl.to_alist p.table) ~f:(fun (tn, d) -> (debug_name tn, d)))
+
+  let create () = { table = Hashtbl.create (module Key) }
+  let copy p = { table = Hashtbl.copy p.table }
+
+  (** The effective placement state: the lineage's decision if any, otherwise the tnode's declared
+      intent. Side-effect free. *)
+  let get p tn = match Hashtbl.find p.table tn with Some e -> Some e | None -> tn.memory_mode
+
+  let update p tn mode provenance =
+    Hashtbl.set p.table ~key:tn
+      ~data:(transition_memory_mode ~debug_name:(debug_name tn) (get p tn) mode provenance)
+
+  let debug p tn = debug_memory_mode (get p tn)
+
+  (** Mirrors {!default_to_most_local}, resolving into the placements table. *)
+  let default_to_most_local p tn provenance =
+    let provenance =
+      match get p tn with Some (_, prov) -> (1000 * prov) + provenance | None -> provenance
+    in
+    match get p tn with
+    | None | Some (Effectively_constant, _) ->
+        Hashtbl.set p.table ~key:tn ~data:(Virtual, provenance)
+    | Some (Never_virtual, _) ->
+        Hashtbl.set p.table ~key:tn ~data:(most_local_materialized_mode tn, provenance)
+    | Some ((Virtual | Local | On_device), _) -> ()
+
+  let is_virtual_force p tn provenance =
+    match get p tn with
+    | Some (Virtual, _) -> true
+    | None | Some (Effectively_constant, _) ->
+        Hashtbl.set p.table ~key:tn ~data:(Virtual, provenance);
+        true
+    | _ -> false
+
+  let rec is_materialized_force p tn provenance =
+    match get p tn with
+    | None -> assert false
+    | Some ((Virtual | Local), _) -> false
+    | Some (On_device, _) -> true
+    | Some ((Never_virtual | Effectively_constant), _) ->
+        default_to_most_local p tn provenance;
+        is_materialized_force p tn provenance
+
+  let rec is_in_context_force p tn provenance =
+    (* See {!is_in_context_force} on tnodes: a slice-alias view owns no buffer. *)
+    if is_alias tn then false
+    else
+      match get p tn with
+      | Some ((Virtual | Local), _) -> false
+      | Some (On_device, _) -> true
+      | None | Some ((Effectively_constant | Never_virtual), _) ->
+          default_to_most_local p tn provenance;
+          is_in_context_force p tn provenance
+
+  (** Pure counterpart of {!is_materialized_force}; see {!Tnode.is_materialized_peek}. *)
+  let is_materialized_peek p tn =
+    match get p tn with
+    | None -> assert false
+    | Some ((Virtual | Local), _) -> false
+    | Some (On_device, _) -> true
+    | Some (Effectively_constant, _) -> false
+    | Some (Never_virtual, _) -> (
+        match most_local_materialized_mode tn with On_device -> true | _ -> false)
+
+  let known_not_materialized p tn =
+    match get p tn with Some ((Virtual | Local), _) -> true | _ -> false
+
+  let known_constant p tn =
+    match get p tn with Some (Effectively_constant, _) -> true | _ -> false
+
+  let known_non_virtual p tn =
+    match get p tn with None | Some ((Virtual | Effectively_constant), _) -> false | _ -> true
+
+  let known_virtual p tn = match get p tn with Some (Virtual, _) -> true | _ -> false
+
+  let mode_is_unspecified p tn =
+    match get p tn with
+    | None | Some ((Never_virtual | Effectively_constant), _) -> true
+    | _ -> false
 end
 
 type t_set = Set.M(Comp).t

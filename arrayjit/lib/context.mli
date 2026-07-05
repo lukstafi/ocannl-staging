@@ -85,7 +85,8 @@ val copy : src:t -> dst:t -> Ir.Tnode.t -> unit
     through a temporary host buffer. There is no cache: every call performs a fresh transfer, which
     is {b expensive on non-unified-memory backends} — prefer batching over polling.
 
-    Which nodes are observable is determined by their {!Ir.Tnode.memory_mode}:
+    Which nodes are observable is determined by the compilation lineage's placement resolution
+    ({!placements}; the tnode's {!Ir.Tnode.field-memory_mode} only records declared intent):
     - [On_device] (materialized) nodes have a context buffer; {!to_host}/{!get_values} read it
       directly.
     - [Virtual] nodes have no buffer anywhere, but they remain observable: their defining
@@ -152,3 +153,9 @@ val backend_name : t -> string
 
 val device_id : t -> int
 (** Get the device ID. *)
+
+val placements : t -> Ir.Tnode.Placements.t
+(** The context's compilation lineage's memory-mode resolution
+    (docs/proposals/context-scoped-memory-modes.md): which nodes this lineage decided to inline
+    ([Virtual]), keep as routine-scoped scratch ([Local]), or give a device buffer ([On_device]).
+    Reads are side-effect free; chiefly for tests and diagnostics. *)

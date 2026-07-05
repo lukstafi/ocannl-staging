@@ -1,10 +1,21 @@
 # Context-scoped memory modes: split observability facts from placement decisions
 
 **Date**: 2026-07-05
-**Status**: Stub — design discussion captured from the schedule-layer work
-(PR #90 follow-up); not scheduled. Elaborated 2026-07-05 (post-PR #92
-brainstorm): intent-bits-vs-decisions formulation, candidate masking, the
-`Never_virtual` decomposition and drift audit.
+**Status**: Implemented 2026-07-05 (core split). `Tnode.memory_mode` is now declared
+intent only (monotone, side-effect free to read; the tnode-level forcing family was
+removed); decisions land in `Tnode.Placements` tables riding `Low_level.optimize_ctx`,
+forked per backend `compile` (`Low_level.copy_optimize_ctx`) so sibling candidate
+compiles are hermetic. All pipeline force sites (low_level virtualizer, c_syntax
+codegen/`ptr_params` incl. the restrict/alias assert, `validate_parallel`, schedule
+tiles and peeks, backends allocation/verify, `Assignments.context_nodes` and slice-alias
+eligibility) resolve per-lineage; `Context.placements` exposes the resolution.
+Not yet done: an explicit `is_observed` intent bit with recomputation-backed
+enforcement and candidate masking (observation intent is still expressed as `On_device`
+requests, e.g. `Train.set_materialized`); scoped constancy; `Materialize`/`Devirtualize`
+optops. Never_virtual audit: the one surviving intent-level requester is parameter
+gradients (tensor.ml provenance 26), documented in place as cross-routine
+forward-declared intent — the temporal-monotonicity caveat below is why it cannot yet be
+derived.
 
 ## Motivation
 

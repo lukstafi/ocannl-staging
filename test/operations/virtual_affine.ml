@@ -51,8 +51,16 @@ let loop_r s n body : LL.t =
 let seq a b : LL.t = LL.Seq (a, b)
 
 let optimize llc : LL.optimized =
-  let ctx : LL.optimize_ctx = { computations = Hashtbl.create (module Tn) } in
+  let ctx : LL.optimize_ctx = LL.empty_optimize_ctx () in
   LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name:"virtual_affine" [] llc
+
+
+(* Post-optimization placement probes: decisions live on the optimize_ctx's placements
+   (context-scoped memory modes), not on the tnode (which now holds only declared intent). *)
+let known_virtual (o : LL.optimized) tn = Tn.Placements.known_virtual o.optimize_ctx.placements tn
+
+let known_non_virtual (o : LL.optimized) tn =
+  Tn.Placements.known_non_virtual o.optimize_ctx.placements tn
 
 (* --- structural probes on the optimized form --- *)
 let rec walk_t ~on_set ~on_get (llc : LL.t) =
@@ -151,7 +159,7 @@ let case_structural_match () =
       (loop_r b 2 (set out [| aff [ (2, a); (1, b) ] 0 |] (get tgt [| aff [ (2, a); (1, b) ] 0 |])))
   in
   let o = optimize (seq prod cons) in
-  p "structural-match producer virtual" (Tn.known_virtual tgt);
+  p "structural-match producer virtual" (known_virtual o tgt);
   p "structural-match producer inlined (no array reads survive)" (count_get o tgt = 0);
   p "structural-match producer setter dropped" (count_set o tgt = 0);
   p "structural-match consumer setter kept" (count_set o out = 1);
@@ -167,7 +175,7 @@ let case_unit_solve_plain () =
   let prod = loop_r oh 3 (loop_r wh 2 (set tgt [| aff [ (2, oh); (1, wh) ] 0 |] (c 7.))) in
   let cons = loop_r t 6 (set out [| iter t |] (get tgt [| iter t |])) in
   let o = optimize (seq prod cons) in
-  p "unit-solve(plain) producer virtual" (Tn.known_virtual tgt);
+  p "unit-solve(plain) producer virtual" (known_virtual o tgt);
   p "unit-solve(plain) producer inlined (no array reads survive)" (count_get o tgt = 0);
   p "unit-solve(plain) producer setter dropped" (count_set o tgt = 0);
   p "unit-solve(plain) consumer setter kept" (count_set o out = 1);
@@ -190,7 +198,7 @@ let case_triangular () =
     loop_r a 3 (loop_r b 4 (set out [| iter a; iter b |] (get tgt [| iter a; iter b |])))
   in
   let o = optimize (seq prod cons) in
-  p "triangular producer virtual" (Tn.known_virtual tgt);
+  p "triangular producer virtual" (known_virtual o tgt);
   p "triangular producer inlined (no array reads survive)" (count_get o tgt = 0);
   p "triangular consumer setter kept" (count_set o out = 1);
   (* s2 = b - a is solved and range-guarded [0 <= b-a < 2]. *)
@@ -210,7 +218,7 @@ let case_noninjective () =
   let o = optimize (seq prod cons) in
   (* i+j with both ranges > 1 is not injective: the dropped producer loops fold over a fiber, so the
      producer must stay materialized (the reason is the injectivity soundness line). *)
-  p "non-injective producer stays non-virtual" (Tn.known_non_virtual tgt);
+  p "non-injective producer stays non-virtual" (known_non_virtual o tgt);
   p "non-injective producer array read preserved" (count_get o tgt >= 1)
 
 (* === Case 5: Stage A diagonal [i;i] still virtualizes (no regression) === *)
@@ -221,7 +229,7 @@ let case_stage_a_diagonal () =
   let prod = seq (zero d) (loop_r i 3 (set d [| iter i; iter i |] (c 4.))) in
   let cons = loop_r a 3 (loop_r b 3 (set out [| iter a; iter b |] (get d [| iter a; iter b |]))) in
   let o = optimize (seq prod cons) in
-  p "stage-a diagonal producer virtual" (Tn.known_virtual d);
+  p "stage-a diagonal producer virtual" (known_virtual o d);
   p "stage-a diagonal inlined (no array reads survive)" (count_get o d = 0)
 
 let () =
