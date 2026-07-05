@@ -260,7 +260,31 @@ The benchmark can use the existing `Utils.get_global_flag` mechanism to toggle t
 
 ### What this task does NOT do
 
-- **No explicit SIMD intrinsics** (`_mm256_fmadd_ps`, etc.) in generated code -- that belongs to the tiling task (watch-ocannl-README-md-347818d3).
-- **No loop tiling or reordering** -- that is gh-ocannl-412.
-- **No multi-threading** -- out of scope.
-- **No AVX-512** -- AVX2 is the baseline; AVX-512 can be added later behind a feature flag.
+*(Revised 2026-07-05 for the broadened scope; the original bullets predated the landed
+schedule layer.)*
+
+- **No explicit SIMD intrinsics** (`_mm256_fmadd_ps` / `vfmaq_f32`) in generated code.
+  This bundle provides the floor — alignment, `restrict`, flags, detection macros, and
+  `Vectorized`-as-pragma rendering — but real `Vectorized` codegen (intrinsic or vector-
+  type emission through the `Set_from_vec`/`vec_unop` growth path) is the follow-up:
+  the SIMD FMA micro-kernel under
+  [watch-ocannl-README-md-347818d3](watch-ocannl-README-md-347818d3.md)'s remaining
+  scope, composed with the S4 packed-tile schedules.
+- **No loop transformations** — tiling, reordering, packing, and accumulator
+  privatization landed with the schedule layer
+  ([schedule-ir-optops](schedule-ir-optops.md), PRs #90/#91); this task changes only
+  codegen and allocation beneath them. In particular it does not add or change optops,
+  the default annotator, or tile-size presets.
+- **No multi-threading** — but no longer "out of scope" of the roadmap, just of this
+  bundle: within-routine CPU parallelism is pool-backed `Grid` rendering in the C
+  backend (the `Cpu_parallel` axis type is retired, see the 2026-07-05 scope section),
+  and the possible multicore_cc → CPU-multi-device repurposing is likewise separate
+  work. Neither blocks nor is blocked by this task; `restrict` and alignment benefit
+  the pool-rendered kernels unchanged.
+- **No alignment-driven shape padding** — aligned allocation and aligned stack/local
+  arrays are in scope, but padding tile extents to lane multiples so vector loads never
+  straddle an edge is `Padto` territory (deferred in the schedule vocabulary; masking
+  is representable today via `If` + interval discharge).
+- **No AVX-512** — AVX2/NEON is the baseline; AVX-512 can be added later behind a
+  feature flag (and would raise the alignment constant from 32 to 64 in Phase 1's
+  helper — worth parameterizing now, hardcoding nothing).
