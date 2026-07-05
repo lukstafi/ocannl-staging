@@ -296,12 +296,14 @@ let mem ctx (tn : Tn.t) : bool =
 (* For-print proxies (gh-ocannl-333 AC 5): when a tensor's node is not materialized in a context,
    [Train.printf] recompiles a copy ([%cd "for_print" =: t]) into a fresh node and registers it here
    as a proxy for the source node, so {!to_host} can read the source's value through the copy. The
-   table is keyed by the source node's id and holds the proxy node; it is read-only from [to_host]'s
-   point of view and is for printing only — never a general host cache. *)
-let for_print_proxies : Tn.t Hashtbl.M(Int).t = Hashtbl.create (module Int)
+   table is keyed by the source node and holds the proxy node; it is read-only from [to_host]'s
+   point of view and is for printing only — never a general host cache. (Keyed by the tnode, whose
+   identity is the never-reused [uid]: an id-keyed table here would resolve stale proxies for
+   reused ids after [Tensor.unsafe_reinitialize].) *)
+let for_print_proxies : Tn.t Hashtbl.M(Tn).t = Hashtbl.create (module Tn)
 
 let register_for_print ~(src : Tn.t) ~(proxy : Tn.t) =
-  Hashtbl.set for_print_proxies ~key:src.Tn.id ~data:proxy
+  Hashtbl.set for_print_proxies ~key:src ~data:proxy
 
 (* A deep copy of a host [Ndarray] (same precision, dims, and layout). Used so reads of shared
    initialization buffers hand the caller a private buffer it may mutate. *)
@@ -353,7 +355,7 @@ let to_host ctx (tn : Tn.t) : Nd.t =
         copy_nd (Lazy.force init)
     | None -> (
         (* Read through a for-print proxy, if a copy of [tn] was materialized for printing. *)
-        match Hashtbl.find for_print_proxies tn.Tn.id with
+        match Hashtbl.find for_print_proxies tn with
         | Some proxy when Backend.to_host wrapper.context proxy nd ->
             Backend.await wrapper.context.device;
             nd
