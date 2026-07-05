@@ -1,25 +1,25 @@
 Retrieving commandline, environment, or config file variable ocannl_log_level
 Found 0, in the config file
-                                    #15 +_f_nd
-                                     6.00e+1
-                                    #16 grad_+_f_nd unknown
-                                    <not-in-context>
-                              #13 - unknown                                    │#2 5 Const/24
-                              <not-in-context>                                 │<not-in-context>
-                              #14 grad_- unknown                               │
-                              <not-in-context>                                 │
-                  #11 *. unknown                       │  #4 *. unknown        │
-                  <not-in-context>                     │  <not-in-context>     │
-                  #12 grad_*. unknown                  │  #5 grad_*. unknown   │
-                  <not-in-context>                     │  <not-in-context>     │
-#10 3 Const/24  │         #7 **. unknown               │#3 4 Const/24   │[#0 x]│
-<not-in-context>│         <not-in-context>             │<not-in-context>│      │
-                │         #8 grad_**. unknown          │                │      │
-                │         <not-in-context>             │                │      │
-                │#0 x non-emb         │#6 2 Const/24   │                │      │
-                │ 5.00                │<not-in-context>│                │      │
-                │#1 grad_x Non-virt/26│                │                │      │
-                │<not-in-context>     │                │                │      │                                      #32 +_f
+                                  #15 +_f_nd
+                                   6.00e+1
+                                  #16 grad_+_f_nd unknown
+                                  <not-in-context>
+                            #13 - unknown                                  │#2 5 Const/24
+                            <not-in-context>                               │<not-in-context>
+                            #14 grad_- unknown                             │
+                            <not-in-context>                               │
+                #11 *. unknown                     │  #4 *. unknown        │
+                <not-in-context>                   │  <not-in-context>     │
+                #12 grad_*. unknown                │  #5 grad_*. unknown   │
+                <not-in-context>                   │  <not-in-context>     │
+#10 3 Const/24  │       #7 **. unknown             │#3 4 Const/24   │[#0 x]│
+<not-in-context>│       <not-in-context>           │<not-in-context>│      │
+                │       #8 grad_**. unknown        │                │      │
+                │       <not-in-context>           │                │      │
+                │#0 x non-emb     │#6 2 Const/24   │                │      │
+                │ 5.00            │<not-in-context>│                │      │
+                │#1 grad_x unknown│                │                │      │
+                │<not-in-context> │                │                │      │                                      #32 +_f
                                        6.00e+1
                                       #33 grad_+_f
                                        1.00

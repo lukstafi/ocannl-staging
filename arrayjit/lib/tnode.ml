@@ -86,6 +86,14 @@ type t = {
           read, and never written by the compilation pipeline: placement {e decisions} are
           per-compilation-lineage, recorded in {!module-Placements} tables riding
           [Low_level.optimize_ctx]. *)
+  mutable observable : bool;
+      (** Declared host-observation intent (docs/proposals/context-scoped-memory-modes.md category
+          2): someone intends to read this node's values (printing, persistence, inspection).
+          Monotone-upward (set, never cleared) and side-effect free to read. Observation does {b
+          not} require materialization -- a [Virtual] resolution stays observable via recomputation
+          -- so the only constraint this imposes on placement is: do not resolve the node into the
+          [Local]-dependent unobservable class ({!Placements.default_to_most_local} resolves
+          [Never_virtual] to [On_device] rather than [Local] for observable nodes). *)
   mutable alias_of : ((t * Indexing.static_symbol) option[@sexp.opaque]);
       (** When [Some (parent, batch_idx)], this node is a zero-copy slice-alias *view* of [parent]:
           it owns no buffer of its own, and every read/write of it is redirected (during lowering)
@@ -202,6 +210,11 @@ let most_local_materialized_mode tn =
    [is_materialized_force], [is_in_context_force], [default_to_most_local], [is_materialized_peek])
    was removed -- {!field-memory_mode} now holds only declared intent, side-effect free to read.
    Settlement lives in {!module-Placements}, per compilation lineage. *)
+
+let is_observable tn = tn.observable
+
+(** Declares host-observation intent (see {!field-observable}). Monotone: there is no unset. *)
+let set_observable tn = tn.observable <- true
 
 (** A slice-alias view (see {!field-alias_of}). Such a node owns no buffer of its own; its accesses
     are redirected to its parent during lowering. *)
@@ -535,21 +548,38 @@ module Placements = struct
 
   let debug p tn = debug_memory_mode (get p tn)
 
-  (** Mirrors {!default_to_most_local}, resolving into the placements table. *)
+  (** Mirrors the retired tnode-level [default_to_most_local], resolving into the placements
+      table, with two observation guards (docs/proposals/context-scoped-memory-modes.md):
+
+      - An observable node never defaults to [Local]: [Local] is the unobservable class, and
+        unlike [Virtual] it cannot be served by recomputation.
+      - An observable node still undecided ([None]) at a forcing point materializes instead of
+        defaulting to [Virtual]: a node that stayed undecided through optimization has no tracked
+        computation (the virtualizer commits every stored candidate at cleanup), so a [Virtual]
+        resolution would be unobservable in practice -- there would be nothing to recompute from.
+        [Effectively_constant] keeps folding to [Virtual]: observation of constants is served by
+        their registered host-init data. *)
   let default_to_most_local p tn provenance =
     let provenance =
       match get p tn with Some (_, prov) -> (1000 * prov) + provenance | None -> provenance
     in
     match get p tn with
+    | None when is_observable tn -> Hashtbl.set p.table ~key:tn ~data:(On_device, provenance)
     | None | Some (Effectively_constant, _) ->
         Hashtbl.set p.table ~key:tn ~data:(Virtual, provenance)
     | Some (Never_virtual, _) ->
-        Hashtbl.set p.table ~key:tn ~data:(most_local_materialized_mode tn, provenance)
+        let mode = if is_observable tn then On_device else most_local_materialized_mode tn in
+        Hashtbl.set p.table ~key:tn ~data:(mode, provenance)
     | Some ((Virtual | Local | On_device), _) -> ()
 
   let is_virtual_force p tn provenance =
     match get p tn with
     | Some (Virtual, _) -> true
+    | None when is_observable tn ->
+        (* The undecided-observable guard of {!default_to_most_local}: no tracked computation to
+           recompute from, so materialize rather than claim virtual. *)
+        Hashtbl.set p.table ~key:tn ~data:(On_device, provenance);
+        false
     | None | Some (Effectively_constant, _) ->
         Hashtbl.set p.table ~key:tn ~data:(Virtual, provenance);
         true
@@ -582,8 +612,9 @@ module Placements = struct
     | Some ((Virtual | Local), _) -> false
     | Some (On_device, _) -> true
     | Some (Effectively_constant, _) -> false
-    | Some (Never_virtual, _) -> (
-        match most_local_materialized_mode tn with On_device -> true | _ -> false)
+    | Some (Never_virtual, _) ->
+        is_observable tn
+        || (match most_local_materialized_mode tn with On_device -> true | _ -> false)
 
   let known_not_materialized p tn =
     match get p tn with Some ((Virtual | Local), _) -> true | _ -> false
@@ -749,6 +780,7 @@ let create delayed_prec ~id ~label ~unpadded_dims ~padding () =
       id;
       label;
       memory_mode = None;
+      observable = false;
       alias_of = None;
       slice_of = None;
       backend_info = Sexp.List [];
@@ -782,6 +814,7 @@ let create_from_padded ~id ~label ~ndarray ~padding () =
       id;
       label;
       memory_mode = Some (On_device, 49);
+      observable = false;
       alias_of = None;
       slice_of = None;
       backend_info = Sexp.List [];
@@ -864,6 +897,7 @@ let create_with_reshape ~id ~label ~base_ndarray ~unpadded_dims ~padding ~from_p
       id;
       label;
       memory_mode = Some (On_device, 49);
+      observable = false;
       alias_of = None;
       slice_of = None;
       backend_info = Sexp.List [];
@@ -888,6 +922,7 @@ let find =
       id = -1;
       label = [];
       memory_mode = None;
+      observable = false;
       alias_of = None;
       slice_of = None;
       backend_info = Sexp.List [];

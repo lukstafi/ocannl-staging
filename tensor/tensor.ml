@@ -699,16 +699,13 @@ let%debug7_sexp param ?(require_grad = true) ~t (name : string) ?(more_label = [
   (* Parameters live on device and are materialized; CPU access (init, inspection) is on-demand via
      the context (gh-ocannl-333). *)
   Tn.update_memory_mode v On_device 241;
-  (* In principle, gradients can even be local, if a single jitted block does forward, backprop,
-     and update computations. Never_virtual audit (context-scoped memory modes): this is declared
-     cross-routine intent -- backprop writes the gradient and a later routine (the optimizer step)
-     reads it. The lineage frontier could derive the second reader, but only at ITS compile:
-     without this forward declaration the backprop compile is free to resolve the gradient
-     [Local], and late materialization must raise (temporal monotonicity). Keep as intent until
-     recomputation/derivation can serve it. *)
-  (match t.diff with
-  | Some diff -> Tn.update_memory_mode diff.grad Never_virtual 26
-  | None -> ());
+  (* Never_virtual audit resolution (context-scoped memory modes): parameter gradients carry
+     observation intent, not a materialization requirement -- users print and inspect them, and
+     the optimizer step's read is an ordinary cross-routine use the lineage can serve (a fused
+     forward+backprop+update block may still inline them entirely). [set_observable] only
+     forbids resolving them into the [Local] unobservable class; [Virtual] stays available via
+     recomputation. *)
+  (match t.diff with Some diff -> Tn.set_observable diff.grad | None -> ());
   Shape.set_terminal ~is_param:(Option.is_some t.diff) t.shape;
   remove_fwd_root t;
   { t with params = Set.singleton (module T) t }

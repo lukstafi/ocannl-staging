@@ -1,14 +1,14 @@
 Retrieving commandline, environment, or config file variable ocannl_log_level
 Found 0, in the config file
-                      #8 *._d
-                       8.00
-                      #9 grad_*._d unknown
-                      <not-in-context>
-             #6 + unknown                  │#4 c non-emb
-             <not-in-context>              │ 2.00
-             #7 grad_+ unknown             │#5 grad_c Non-virt/26
-             <not-in-context>              │<not-in-context>
-#0 a non-emb         │#2 b non-emb         │
- 2.00                │ 2.00                │
-#1 grad_a Non-virt/26│#3 grad_b Non-virt/26│
-<not-in-context>     │<not-in-context>     │
+                #8 *._d
+                 8.00
+                #9 grad_*._d unknown
+                <not-in-context>
+         #6 + unknown              │#4 c non-emb
+         <not-in-context>          │ 2.00
+         #7 grad_+ unknown         │#5 grad_c unknown
+         <not-in-context>          │<not-in-context>
+#0 a non-emb     │#2 b non-emb     │
+ 2.00            │ 2.00            │
+#1 grad_a unknown│#3 grad_b unknown│
+<not-in-context> │<not-in-context> │

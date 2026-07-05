@@ -9,13 +9,24 @@ compiles are hermetic. All pipeline force sites (low_level virtualizer, c_syntax
 codegen/`ptr_params` incl. the restrict/alias assert, `validate_parallel`, schedule
 tiles and peeks, backends allocation/verify, `Assignments.context_nodes` and slice-alias
 eligibility) resolve per-lineage; `Context.placements` exposes the resolution.
-Not yet done: an explicit `is_observed` intent bit with recomputation-backed
-enforcement and candidate masking (observation intent is still expressed as `On_device`
-requests, e.g. `Train.set_materialized`); scoped constancy; `Materialize`/`Devirtualize`
-optops. Never_virtual audit: the one surviving intent-level requester is parameter
-gradients (tensor.ml provenance 26), documented in place as cross-routine
-forward-declared intent — the temporal-monotonicity caveat below is why it cannot yet be
-derived.
+Same day, the `is_observed` intent bit landed as `Tnode.is_observable` /
+`set_observable` (monotone-up, side-effect free), replacing the last intent-level
+`Never_virtual` requester — parameter gradients (provenance 26). Enforcement is the
+minimal pair of guards in `Placements.default_to_most_local` / `is_virtual_force`: an
+observable node never resolves `Local`, and an observable node still **undecided at a
+forcing point** materializes instead of defaulting `Virtual` (an undecided node has no
+tracked computation — the virtualizer commits every stored candidate at cleanup — so
+`Virtual` would be unobservable in practice; this is the "observable nodes without
+computations are materialized" heuristic). Observable nodes **with** tracked
+computations stay virtualizable, and cross-routine recomputation genuinely serves them:
+`test/operations/observable_grads.ml` pins that a raw split grad-update/sgd flow works
+with the gradient `Virtual` in both lineages (sgd inlines the gradient's computation),
+while the fused flow virtualizes the gradient the old regime forced `Local` (the
+unobservable class — the old default actively contradicted observation intent for small
+gradients). Still not done: candidate masking; scoped constancy;
+`Materialize`/`Devirtualize` optops; recomputation-backed *host reads* of virtual nodes
+outside `Train.printf`'s for-print proxies (e.g. `printf_tree ~with_grad` of a fused
+lineage's virtual gradient shows `<not-in-context>` rather than recomputing).
 
 ## Motivation
 

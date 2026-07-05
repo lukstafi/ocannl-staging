@@ -18,26 +18,26 @@ let%expect_test "Graph drawing recompile" =
   Train.printf_tree ~with_grad:true ~depth:9 ctx f_nd;
   [%expect
     {|
-                                        #15 +_f_nd
-                                         6.00e+1
-                                        #16 grad_+_f_nd unknown
-                                        <not-in-context>
-                                  #13 - unknown                                    │#2 5 Const/24
-                                  <not-in-context>                                 │<not-in-context>
-                                  #14 grad_- unknown                               │
-                                  <not-in-context>                                 │
-                      #11 *. unknown                       │  #4 *. unknown        │
-                      <not-in-context>                     │  <not-in-context>     │
-                      #12 grad_*. unknown                  │  #5 grad_*. unknown   │
-                      <not-in-context>                     │  <not-in-context>     │
-    #10 3 Const/24  │         #7 **. unknown               │#3 4 Const/24   │[#0 x]│
-    <not-in-context>│         <not-in-context>             │<not-in-context>│      │
-                    │         #8 grad_**. unknown          │                │      │
-                    │         <not-in-context>             │                │      │
-                    │#0 x non-emb         │#6 2 Const/24   │                │      │
-                    │ 5.00                │<not-in-context>│                │      │
-                    │#1 grad_x Non-virt/26│                │                │      │
-                    │<not-in-context>     │                │                │      │
+                                      #15 +_f_nd
+                                       6.00e+1
+                                      #16 grad_+_f_nd unknown
+                                      <not-in-context>
+                                #13 - unknown                                  │#2 5 Const/24
+                                <not-in-context>                               │<not-in-context>
+                                #14 grad_- unknown                             │
+                                <not-in-context>                               │
+                    #11 *. unknown                     │  #4 *. unknown        │
+                    <not-in-context>                   │  <not-in-context>     │
+                    #12 grad_*. unknown                │  #5 grad_*. unknown   │
+                    <not-in-context>                   │  <not-in-context>     │
+    #10 3 Const/24  │       #7 **. unknown             │#3 4 Const/24   │[#0 x]│
+    <not-in-context>│       <not-in-context>           │<not-in-context>│      │
+                    │       #8 grad_**. unknown        │                │      │
+                    │       <not-in-context>           │                │      │
+                    │#0 x non-emb     │#6 2 Const/24   │                │      │
+                    │ 5.00            │<not-in-context>│                │      │
+                    │#1 grad_x unknown│                │                │      │
+                    │<not-in-context> │                │                │      │
     |}];
   let%op f = (3 *. ({ x = [ 5 ] } **. 2)) - (4 *. x) + 5 in
   Train.every_non_literal_materialized f;
