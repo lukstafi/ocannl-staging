@@ -5,6 +5,21 @@
 #include <string.h>
 #include <stdlib.h>
 
+/* SIMD platform detection (gh-ocannl-164): compile-time macros for conditional SIMD code paths
+   (explicit intrinsics are emitted by follow-up work; auto-vectorization needs no guards). */
+#ifdef __AVX2__
+  #define OCANNL_HAS_AVX2 1
+  #include <immintrin.h>
+#else
+  #define OCANNL_HAS_AVX2 0
+#endif
+#ifdef __ARM_NEON
+  #define OCANNL_HAS_NEON 1
+  #include <arm_neon.h>
+#else
+  #define OCANNL_HAS_NEON 0
+#endif
+
 /* No longer need export macros since we're using textual prepending */
 
 
@@ -83,10 +98,10 @@ uint16_t single_to_bfloat16(float f)
 }
 
  void d_fwd(
-    HALF_T *a,
-    HALF_T *b,
-    unsigned short *c,
-    unsigned short *d) {
+    HALF_T *restrict a,
+    HALF_T *restrict b,
+    unsigned short *restrict c,
+    unsigned short *restrict d) {
 
   /* Local declarations and initialization. */
 

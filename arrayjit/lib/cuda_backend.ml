@@ -379,6 +379,14 @@ module Fresh () : Ir.Backend_impl.Lowered_backend = struct
 
     let barrier_syntax = Some "__syncthreads();"
     let shared_decl_prefix = Some "__shared__ "
+    let restrict_keyword = Some "__restrict__"
+
+    (* No vectorization pragmas in device code — SIMD-style gains on GPU come from memory
+       transactions (float4/packed loads), a follow-up to gh-ocannl-164; [Vectorized] loops render
+       as plain serial loops. Local arrays live in registers/local memory; no alignment attribute
+       needed (and nvcc's GNU-attribute support is not worth relying on here). *)
+    let vectorize_pragma = []
+    let aligned_local_attr = None
 
     let typ_of_prec = function
       | Ops.Byte_prec _ -> "unsigned char"

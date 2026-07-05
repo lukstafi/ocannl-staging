@@ -284,7 +284,7 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
                 invalid_arg
                   ("Schedule.Retype: hardware-annotated loop " ^ Indexing.symbol_ident axis
                  ^ " must start at 0")
-          | Serial | Unrolled -> ());
+          | Serial | Unrolled | Vectorized -> ());
           for_loop { fc with axis = ty })
   | Unroll { axis; materialize = false } ->
       rewrite_loop ~what:"Schedule.Unroll" ~sym:axis llc ~f:(fun fc ->
@@ -519,7 +519,7 @@ let apply_stage ~source ~tile_loops ~shared (opt : Low_level.optimized) : Low_le
     List.partition_tf tile_loops ~f:(fun s ->
         match (floop_of_exn s).axis with
         | Workgroup | Workgroup_reduce -> true
-        | Serial -> false
+        | Serial | Vectorized -> false
         | Grid -> invalid_arg "Schedule.Stage: a Grid-typed loop cannot be a tile loop"
         | Unrolled ->
             invalid_arg "Schedule.Stage: apply Stage before (materializing) Unroll of a tile loop")
@@ -627,7 +627,7 @@ let apply_stage ~source ~tile_loops ~shared (opt : Low_level.optimized) : Low_le
            | Workgroup | Workgroup_reduce ->
                List.find_map wg_axes ~f:(fun a ->
                    if Indexing.equal_symbol a.ha_index fl.index then Some a.ha_slot else None)
-           | Serial | Grid | Unrolled -> None)
+           | Serial | Grid | Unrolled | Vectorized -> None)
      in
      let missing = List.filter active_slots ~f:(fun s -> not (List.mem covered s ~equal:Int.equal)) in
      if not (List.is_empty missing) then

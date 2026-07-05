@@ -76,7 +76,25 @@ module No_device_buffer_and_copying () :
     let%track7_sexp finalize (_ptr : buffer_ptr) : unit =
       ignore (Atomic.fetch_and_add used_memory ~-size_in_bytes : int)
     in
-    let ptr = Ctypes.(to_voidp @@ allocate_n int8_t ~count:(max 1 size_in_bytes)) in
+    (* Over-allocate and advance to the next [Ops.buffer_alignment] boundary: [Ctypes.allocate_n]
+       (calloc) only guarantees the ABI's ~16 bytes, short of AVX/NEON vector loads
+       (gh-ocannl-164). Ctypes pointer arithmetic preserves the managed root, so the zeroed
+       allocation and GC lifetime semantics (derived pointers keep the buffer alive) are exactly
+       as before. *)
+    let align = Ops.buffer_alignment in
+    let count = max 1 size_in_bytes + align - 1 in
+    let base = Ctypes.(allocate_n int8_t ~count) in
+    let pad =
+      (* [align] is a power of two; masking keeps the offset non-negative even for addresses with
+         the top bit set. *)
+      let mask = Nativeint.of_int (align - 1) in
+      let m =
+        Nativeint.to_int_exn
+          (Nativeint.bit_and (Ctypes.raw_address_of_ptr (Ctypes.to_voidp base)) mask)
+      in
+      if m = 0 then 0 else align - m
+    in
+    let ptr = Ctypes.(to_voidp (base +@ pad)) in
     let _ : int = Atomic.fetch_and_add used_memory size_in_bytes in
     Stdlib.Gc.finalise finalize ptr;
     ptr

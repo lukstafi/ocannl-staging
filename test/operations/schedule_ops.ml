@@ -115,6 +115,27 @@ let () =
       p "swap reorders the loop bounds"
         (match (idx7, idx3) with Some i7, Some i3 -> i7 < i3 | _ -> false));
 
+  (* --- Retype to Vectorized (gh-ocannl-164): a pragma-annotated serial loop on the C backends,
+     a plain serial loop on GPU backends (empty [vectorize_pragma]); values must match either way,
+     and on cc the pragma-annotated source must actually compile under the real C compiler. --- *)
+  let got_vec =
+    run_variant ~name:"vec_inner" ~transform:(fun opt ->
+        let _, body = first_loop_exn opt.LL.llc in
+        let j, _ = first_loop_exn body in
+        Sched.apply [ Sched.Retype { axis = j; ty = LL.Vectorized } ] opt)
+  in
+  p "vectorized retype values correct" (Array.for_all2_exn got_vec expected_c ~f:approx);
+  (match read_generated "vec_inner" with
+  | None -> p "vectorized retype structure as expected" false
+  | Some src ->
+      let has s = String.is_substring src ~substring:s in
+      let ok =
+        if on_gpu then has "for (" && not (has "#pragma")
+        else
+          has "#pragma clang loop vectorize(enable)" && has "#pragma GCC ivdep" && has "for ("
+      in
+      p "vectorized retype structure as expected" ok);
+
   (* --- The default GPU annotator on a two-nest elementwise kernel (4x8 and 6x8: unequal Grid
      extents => launch-extent guard on GPU backends) --- *)
   let ev = Array.init 48 ~f:(fun i -> Float.of_int i *. 0.25) in

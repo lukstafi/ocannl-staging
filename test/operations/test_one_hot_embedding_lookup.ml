@@ -378,7 +378,7 @@ let () =
   | None -> p "large-index (C): double *ids_wide and index-prec cast (skipped: non-C backend)" true
   | Some c ->
       p "large-index (C): ids_wide parameter declared as double*"
-        (String.is_substring c ~substring:"double *ids_wide");
+        (String.is_substring c ~substring:"double *restrict ids_wide");
       let has_index_prec_cast =
         String.is_substring c ~substring:"((int)(" || String.is_substring c ~substring:"((long long)("
       in

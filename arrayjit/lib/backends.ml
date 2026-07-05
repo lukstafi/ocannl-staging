@@ -570,8 +570,12 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
         ~(register : Tn.t -> alloc:(unit -> buffer_loc) -> unit) : unit =
       if not (List.is_empty group) then begin
         let items =
+          (* Within-pool offsets are padded to [Ops.buffer_alignment] (not just the element size)
+             so that every node's buffer — not only each pool's base — is SIMD-aligned
+             (gh-ocannl-164); ≤31 bytes of padding per node. *)
           List.map group ~f:(fun (key, _) ->
-              (size_in_bytes_of key, Ops.prec_in_bytes (Lazy.force key.Tn.prec)))
+              ( size_in_bytes_of key,
+                max (Ops.prec_in_bytes (Lazy.force key.Tn.prec)) Ops.buffer_alignment ))
         in
         let assignments, segment_sizes =
           plan_pool_segments ~cap ~what:"Backends.allocate_delta"

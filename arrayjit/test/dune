@@ -59,6 +59,24 @@
  (libraries base stdio arrayjit.ir))
 
 (test
+ (name test_aligned_alloc)
+ (package arrayjit)
+ (modules test_aligned_alloc)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (libraries base stdio ctypes arrayjit.ir))
+
+(test
+ (name test_vectorized_codegen)
+ (package arrayjit)
+ (modules test_vectorized_codegen)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (libraries base stdio arrayjit.ir))
+
+(test
  (name test_local_scope_init)
  (package arrayjit)
  (modules test_local_scope_init)

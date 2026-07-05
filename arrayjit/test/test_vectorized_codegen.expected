@@ -1,0 +1,40 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+ void vec_kernel(
+    float *restrict out) {
+
+  /* Local declarations and initialization. */
+
+  /* Main logic. */
+  #if defined(__clang__)
+  #pragma clang loop vectorize(enable) interleave(enable)
+  #elif defined(__GNUC__)
+  #pragma GCC ivdep
+  #endif
+  for (int32_t i1 = 0; i1 <= 7; ++i1) {
+    out[i1] = (float)(1);
+  }
+}
+ void vec_fallback_kernel(
+    float *restrict out2) {
+
+  /* Local declarations and initialization. */
+
+  /* Main logic. */
+  for (int32_t i2 = 0; i2 <= 7; ++i2) {
+    out2[i2] = (float)(1);
+  }
+}
+ void aligned_local_kernel(
+    float *restrict out3) {
+
+  /* Local declarations and initialization. */
+  float scratch[8] __attribute__((aligned(32)));
+
+  /* Main logic. */
+  for (int32_t i3 = 0; i3 <= 7; ++i3) {
+    scratch[i3] = (float)(2);
+    out3[i3] = scratch[i3];
+  }
+}
+alias parameter rejected: true

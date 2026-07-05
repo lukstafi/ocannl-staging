@@ -6,6 +6,21 @@ let includes =
 #include <string.h>
 #include <stdlib.h>
 
+/* SIMD platform detection (gh-ocannl-164): compile-time macros for conditional SIMD code paths
+   (explicit intrinsics are emitted by follow-up work; auto-vectorization needs no guards). */
+#ifdef __AVX2__
+  #define OCANNL_HAS_AVX2 1
+  #include <immintrin.h>
+#else
+  #define OCANNL_HAS_AVX2 0
+#endif
+#ifdef __ARM_NEON
+  #define OCANNL_HAS_NEON 1
+  #include <arm_neon.h>
+#else
+  #define OCANNL_HAS_NEON 0
+#endif
+
 /* No longer need export macros since we're using textual prepending */
 |}
 

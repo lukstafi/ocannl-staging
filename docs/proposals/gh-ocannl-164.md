@@ -81,6 +81,41 @@ parameters, not axis semantics. Separate work item, as is the possible multicore
 "CPU multi-device" repurposing (data-parallel debugging and GPU-less CI for the
 multi-device machinery).
 
+## Status update (2026-07-05): implemented
+
+The CPU-improvements bundle landed on this branch; all four items plus verification:
+
+1. **`restrict`, cross-backend**: `C_syntax_config` gains `restrict_keyword` — `restrict` on cc
+   kernel pointer params (`Pure_C_config` default), `__restrict__` on CUDA, `__restrict` on
+   Metal's pooled per-node derived pointers. The merge-buffer param stays unqualified (it is
+   `const`). The belt-and-braces alias assert lives where `ptr_params` is built in
+   `compile_proc`: a `Tn.is_alias` parameter raises `Invalid_argument` naming the restrict
+   miscompile hazard (covered by `arrayjit/test/test_vectorized_codegen.ml`).
+2. **Aligned allocation**: `Ops.buffer_alignment = 32` (single parameterized constant);
+   `alloc_pool_raw` over-allocates via `Ctypes.allocate_n` and advances to the boundary —
+   pointer arithmetic preserves the ctypes managed root, so calloc zeroing and GC lifetime
+   semantics are unchanged. Within-pool offsets in `Backends.allocate_delta` pad to the same
+   constant, so every node (not just pool bases) is aligned. Covered by
+   `arrayjit/test/test_aligned_alloc.ml`; `test_buffer_loc.expected` shows the padded offsets.
+3. **`Vectorized` axis type**: added to `Low_level.axis_type` (label `for@vectorized`,
+   `hardware_kind_of_axis = None`, `Retype` accepts it with no `from_` restriction, `Stage`
+   treats it like `Serial` tile loops). Rendering via `C_syntax_config.vectorize_pragma`:
+   `Pure_C_config` emits `#pragma clang loop vectorize(enable) interleave(enable)` /
+   `#pragma GCC ivdep` (compiler-guarded, `__clang__` first); CUDA/Metal override to `[]` →
+   plain serial loop. Executed end-to-end in `test/operations/schedule_ops.ml` (`vec_inner`).
+4. **Flags, macros, local alignment**: `cc_backend_simd_flags` (default `auto`) probes once per
+   process — stage 1 checks the `arch_flags` target already defines `__AVX2__`/`__FMA__` (so the
+   explicit flags never escalate the ISA: graceful fallback on non-AVX2 x86 and ARM), stage 2
+   appends `-mavx2 -mfma -ftree-vectorize` or the accepted subset. `builtins_cc.ml` includes
+   define `OCANNL_HAS_AVX2`/`OCANNL_HAS_NEON` and include `immintrin.h`/`arm_neon.h`.
+   `aligned_local_attr` puts `__attribute__((aligned(32)))` on plain stack arrays (not
+   workgroup-shared placements; the constant tracks `Ops.buffer_alignment`).
+5. **Benchmark**: `bin/cpu_vectorization_bench.ml` — on Apple-Silicon NEON the compute-bound
+   elementwise polynomial measures **2.0x** (36.5 vs 18.2 GFLOP/s) against
+   `-fno-vectorize -fno-slp-vectorize` at the same `-O3 -march=native`; the strict-FP dot
+   reduction is documented as needing `cc_backend_fast_math` for reassociation. Full test suite
+   green on `sync_cc` and `metal`.
+
 ## Status update (2026-07-04)
 
 - **Still not started**: no `restrict` qualifiers on kernel parameters, no

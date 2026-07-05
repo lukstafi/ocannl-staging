@@ -461,6 +461,13 @@ module Fresh () = struct
     let barrier_syntax = Some "threadgroup_barrier(mem_flags::mem_threadgroup);"
     let shared_decl_prefix = Some "threadgroup "
 
+    (* MSL is Clang-based C++: [__restrict] applies to the pooled per-node pointers, which address
+       disjoint slab sub-ranges (gh-ocannl-164). No vectorization pragmas / stack-array alignment:
+       the GPU payoff is memory transactions, a follow-up. *)
+    let restrict_keyword = Some "__restrict"
+    let vectorize_pragma = []
+    let aligned_local_attr = None
+
     let ident_blacklist =
       ident_blacklist
       @ [

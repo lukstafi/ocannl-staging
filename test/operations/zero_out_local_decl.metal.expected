@@ -23,7 +23,7 @@ kernel void out_fwd(
 
   /* Pool base pointers. */
   device char* __pools[16] = { __pool0, __pool1, __pool2, __pool3, __pool4, __pool5, __pool6, __pool7, __pool8, __pool9, __pool10, __pool11, __pool12, __pool13, __pool14, __pool15 };
-  device float* out = (device float*)(__pools[__pool_slots[0]] + __pool_slots[1]);
+  device float* __restrict out = (device float*)(__pools[__pool_slots[0]] + __pool_slots[1]);
   /* Local declarations and initialization. */
   float sparse[12] = {0};
 

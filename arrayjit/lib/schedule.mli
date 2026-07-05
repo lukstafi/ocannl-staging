@@ -35,7 +35,9 @@ type optop =
   | Retype of { axis : Indexing.symbol; ty : Low_level.axis_type }
       (** Change a loop's axis type in place. Retyping to a hardware kind requires [from_ = 0] and
           iteration independence (the caller's obligation; structure is checked downstream by
-          [Low_level.validate_parallel]). *)
+          [Low_level.validate_parallel]). Retyping to [Vectorized] likewise asserts iteration
+          independence: the C backends render the loop under vectorization pragmas (gh-ocannl-164),
+          backends without pragmas render it as a plain serial loop. *)
   | Unroll of { axis : Indexing.symbol; materialize : bool }
       (** [materialize = false]: set the axis type to [Unrolled] — codegen repeats the body with
           the index bound as a per-block constant (after simplify/CSE have run, so the copies are
