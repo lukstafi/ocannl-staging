@@ -110,15 +110,23 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
   let sync event = Cu.Delimited_event.synchronize event
   let all_work device = Cu.Delimited_event.record device.runner
 
-  let () =
-    if not !initialized then (
-      Cu.init ();
-      initialized := true)
+  (* Driver initialization and device discovery are lazy: the singleton [Impl] module initializes
+     at program startup (Backends instantiates it eagerly for nameable types), and cudajit is a
+     depopt -- the library being installed does not imply a usable driver/GPU. Forcing here, at
+     first device use, keeps CPU-only runs from touching the driver and lets [Context.auto] catch
+     unusable-CUDA failures per call, as the retired per-call [fresh_backend] did. *)
+  let ensure_initialized =
+    lazy
+      (if not !initialized then (
+         Cu.init ();
+         initialized := true))
 
-  let num_devices = Cu.Device.get_count
+  let num_devices () =
+    Lazy.force ensure_initialized;
+    Cu.Device.get_count ()
 
   (* [devices] is mutable to support plugging in new devices. *)
-  let devices = ref @@ Array.create ~len:(num_devices ()) None
+  let devices = lazy (ref @@ Array.create ~len:(num_devices ()) None)
 
   let get_used_memory (device : device) =
     set_ctx device.dev.primary_context;
@@ -208,13 +216,12 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     else []
 
   (* No longer need runtime linking since Threefry is included directly in each kernel *)
-  let set_builtins_for_device =
-    assert !initialized;
-    fun ~primary_context:_ -> fun _kernel_module -> ()
+  let set_builtins_for_device ~primary_context:_ _kernel_module = assert !initialized
 
   let%track3_sexp get_device ~(ordinal : int) : device =
     if num_devices () <= ordinal then
       invalid_arg [%string "Exec_as_cuda.get_device %{ordinal#Int}: not enough devices"];
+    let devices = Lazy.force devices in
     (if Array.length !devices <= ordinal then
        let old, len = (!devices, Array.length !devices) in
        devices := Array.init (ordinal + 1) ~f:(fun i -> if i < len then old.(i) else None));
@@ -1120,7 +1127,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     Sexp.message "cuda_global_debug"
       [ ("live_streams", [%sexp_of: int] @@ Cu.Stream.get_total_live_streams ()) ]
 
-  let static_properties =
+  let static_properties () =
     let device_properties =
       Array.init (num_devices ()) ~f:(fun ordinal ->
           let dev = Cu.Device.get ~ordinal in

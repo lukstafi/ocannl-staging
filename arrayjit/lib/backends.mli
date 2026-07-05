@@ -32,11 +32,13 @@ val finalize :
 
     Each backend is instantiated once per process, so its context type is nameable and two
     independently-created contexts on the same backend unify -- the precondition for
-    [Context.copy] dispatching to the backend's [device_to_device] via {!wrapped_context}. On
-    platforms without the corresponding hardware the dune-[select]ed missing stub is what gets
-    instantiated: harmless at init, raising on use. Backend caches consequently persist across
-    [Tensor.unsafe_reinitialize]; that is safe because tnode identity ([Tnode.uid]) is never
-    reused. *)
+    [Context.copy] dispatching to the backend's [device_to_device] via {!wrapped_context}.
+    Instantiation touches no driver or hardware: device discovery stays lazy inside the backends
+    (forced at first [get_device], where [Context.auto]'s fallback can catch an unusable
+    driver/device per call), and on platforms without the corresponding library the
+    dune-[select]ed missing stub is what gets instantiated -- harmless at init, raising on use.
+    Backend caches consequently persist across [Tensor.unsafe_reinitialize]; that is safe because
+    tnode identity ([Tnode.uid]) is never reused. *)
 
 module Sync_cc_b : Ir.Backend_intf.Backend
 module Multicore_cc_b : Ir.Backend_intf.Backend

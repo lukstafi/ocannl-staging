@@ -38,10 +38,15 @@ One instantiation per backend for the whole process, at the top of `backends.ml`
 
 - `Sync_cc_b`, `Multicore_cc_b`, `Cuda_b`, `Metal_b` — `Raise_backend` /
   `Make_device_backend_from_lowered` applied once; the impl-level `Fresh ()` functors became
-  plain `Impl` modules. Eager instantiation is safe by the build contract: a device backend is
-  only compiled in (dune `select`) on platforms that have the hardware; elsewhere the
-  `Lowered_backend_missing` stub is selected — harmless at module init, raising on use (which is
-  exactly where `Context.auto`'s try-in-order fallback catches it).
+  plain `Impl` modules. Instantiation must not touch drivers or hardware, so device
+  discovery/driver init stays **lazy inside the impls**, forced at first `get_device` (PR #94
+  review): cudajit is a depopt — the library being installed does not imply a usable driver —
+  and a CPU-only run must not depend on GPU runtimes (`static_properties` became `unit ->
+  Sexp.t` for the same reason). On platforms without the corresponding library the
+  dune-`select`ed `Lowered_backend_missing` stub is instantiated instead — harmless at module
+  init, raising on use. Either failure mode surfaces at first device use, which is exactly where
+  `Context.auto`'s try-in-order fallback catches it, matching the retired per-call
+  `fresh_backend` semantics.
 - `type backend = Sync_cc | Multicore_cc | Cuda | Metal` with `get_backend` (non-generative
   successor of `fresh_backend`; same config-driven name resolution) and `backend_module` (the
   erased first-class-module view, for consumers that thread a single backend through and never

@@ -740,10 +740,13 @@ let finalize (type dev runner event)
    {!wrapped_context}. The retired [fresh_backend] applied these functors per call to isolate
    tnode-keyed backend caches between tests (reinitialization reuses tnode ids); tnode identity is
    now the never-reused [Tnode.uid], so stale cache entries cannot alias fresh nodes and the
-   isolation is unnecessary. Eager instantiation is safe by the build contract: a device backend
-   is only compiled in (dune [select]) on platforms that have the hardware; elsewhere the
-   [Lowered_backend_missing] stub is selected, whose module init is harmless and whose operations
-   raise on use. *)
+   isolation is unnecessary. Instantiating a module here must not touch any driver or hardware:
+   device backends keep discovery/driver-init lazy, forced at first device use (cudajit is a
+   depopt -- the library being installed does not imply a usable driver -- and a CPU-only run
+   must not depend on GPU runtimes). On platforms without the corresponding library the dune
+   [select]ed [Lowered_backend_missing] stub is instantiated instead, likewise harmless at init
+   and raising on use. Either failure mode surfaces at [get_device], where [Context.auto]'s
+   fallback catches it per call, as with the retired per-call instantiation. *)
 
 module Sync_cc_b : Backend = Make_device_backend_from_lowered (Schedulers.Sync) (Cc_backend)
 module Multicore_cc_b : Backend = Make_device_backend_from_lowered (Schedulers.Multicore) (Cc_backend)
