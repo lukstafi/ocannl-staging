@@ -11,9 +11,7 @@ let _get_local_debug_runtime = Utils.get_local_debug_runtime
 [%%global_debug_log_level_from_env_var "OCANNL_LOG_LEVEL_SCHEDULERS"]
 
 module Multicore (Backend : For_add_scheduler) :
-  With_scheduler
-    with type buffer_ptr = Backend.buffer_ptr
-     and type optimize_ctx = Ir.Low_level.optimize_ctx = struct
+  With_scheduler with type buffer_ptr = Backend.buffer_ptr = struct
   include Backend
   module Domain = Domain [@warning "-3"]
 

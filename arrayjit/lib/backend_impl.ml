@@ -134,22 +134,11 @@ module No_device_buffer_and_copying () :
     memcpy ~dst:(Ndarray.get_fatptr_not_managed dst) ~src ~size_in_bytes:(Ndarray.size_in_bytes dst)
 end
 
-module Device_types (Device_config : Device_config) = struct
-  include Device_config
-
-  type nonrec device = (dev, runner, event) device [@@deriving sexp_of]
-  type nonrec context = (dev, runner, event, optimize_ctx) context [@@deriving sexp_of]
-end
-
 module Device_types_ll (Device_config : Device_config_common) = struct
   include Device_config
 
-  type optimize_ctx = Low_level.optimize_ctx [@@deriving sexp_of]
-
-  let empty_optimize_ctx () = { Low_level.computations = Hashtbl.create (module Tnode) }
-
   type nonrec device = (dev, runner, event) device [@@deriving sexp_of]
-  type nonrec context = (dev, runner, event, Low_level.optimize_ctx) context [@@deriving sexp_of]
+  type nonrec context = (dev, runner, event) context [@@deriving sexp_of]
 end
 
 (** The device-level slab interface a {!Device} functor consumes: the {!Backend_intf.Slab_alloc}
@@ -236,7 +225,7 @@ struct
   let get_name device = [%string "%{name}:%{device.ordinal#Int}:%{device.device_id#Int}"]
 
   let make_context ?(ctx_buffers = Map.empty (module Tnode)) ?optimize_ctx device =
-    let optimize_ctx = Option.value_or_thunk optimize_ctx ~default:empty_optimize_ctx in
+    let optimize_ctx = Option.value_or_thunk optimize_ctx ~default:Low_level.empty_optimize_ctx in
     {
       device;
       parent = None;
@@ -350,14 +339,13 @@ end
 (** Lowered-level backend interface: implementation-facing API for device-based (GPU, or CPU after
     adding a scheduler) backends based on the {!Low_level} IR. *)
 module type Lowered_backend = sig
-  include Backend_device_common with type optimize_ctx := Low_level.optimize_ctx
+  include Backend_device_common
 
   include
     No_buffer_retrieval_or_syncing
       with type dev := dev
        and type runner := runner
        and type event := event
-       and type optimize_ctx := Low_level.optimize_ctx
 
   type code [@@deriving sexp_of]
   type code_batch [@@deriving sexp_of]

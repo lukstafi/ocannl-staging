@@ -334,10 +334,7 @@ let%debug3_sexp from_prior_context_batch (comps : Assignments.comp option array)
 module Add_device
     (Add_scheduler : functor
       (Impl : For_add_scheduler)
-      ->
-      With_scheduler
-        with type buffer_ptr = Impl.buffer_ptr
-         and type optimize_ctx = Low_level.optimize_ctx)
+      -> With_scheduler with type buffer_ptr = Impl.buffer_ptr)
     (Backend : Lowered_no_device_backend)
 (* : Lowered_backend *) =
 struct
@@ -447,14 +444,8 @@ struct
 end
 
 module Raise_backend (Device : Lowered_backend) : Backend = struct
-  module Device_with_optimize_ctx = struct
-    include Device
-
-    type optimize_ctx = Low_level.optimize_ctx [@@deriving sexp_of]
-  end
-
-  include Device_with_optimize_ctx
-  include Add_buffer_retrieval_and_syncing (Device_with_optimize_ctx)
+  include Device
+  include Add_buffer_retrieval_and_syncing (Device)
 
   type nonrec code = {
     from_prior_context : Set.M(Tnode).t;
@@ -474,14 +465,12 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
   }
   [@@deriving sexp_of]
 
-  type nonrec optimize_ctx = Low_level.optimize_ctx
-
-  let empty_optimize_ctx () = { Low_level.computations = Hashtbl.create (module Tnode) }
+  let empty_optimize_ctx = Low_level.empty_optimize_ctx
   let get_optimize_ctx (code : code) = code.lowered.optimize_ctx
 
   let get_optimize_ctx_batch (code_batch : code_batch) =
     Array.find_map code_batch.lowereds ~f:(Option.map ~f:(fun l -> l.Low_level.optimize_ctx))
-    |> Option.value_or_thunk ~default:empty_optimize_ctx
+    |> Option.value_or_thunk ~default:Low_level.empty_optimize_ctx
 
   let%debug3_sexp compile optim_ctx ?name ?lowered_transform bindings (comp : Assignments.comp) :
       code =
@@ -695,10 +684,7 @@ end
 module Make_device_backend_from_lowered
     (Add_scheduler : functor
       (Impl : For_add_scheduler)
-      ->
-      With_scheduler
-        with type buffer_ptr = Impl.buffer_ptr
-         and type optimize_ctx = Low_level.optimize_ctx)
+      -> With_scheduler with type buffer_ptr = Impl.buffer_ptr)
     (Backend_impl : Lowered_no_device_backend) =
 struct
   module Lowered_device = Add_device (Add_scheduler) (Backend_impl)
@@ -706,12 +692,9 @@ struct
   include Backend_device
 end
 
-let finalize (type dev runner event optimize_ctx)
-    (module Backend : Backend
-      with type dev = dev
-       and type runner = runner
-       and type event = event
-       and type optimize_ctx = optimize_ctx) (ctx : Backend.context) : unit =
+let finalize (type dev runner event)
+    (module Backend : Backend with type dev = dev and type runner = runner and type event = event)
+    (ctx : Backend.context) : unit =
   Option.iter Backend.free_pool ~f:(fun free_pool ->
       if Atomic.compare_and_set ctx.finalized false true then (
         Backend.await ctx.device;

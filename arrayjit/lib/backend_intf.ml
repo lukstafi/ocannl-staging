@@ -84,16 +84,6 @@ module type Device_config_common = sig
   val name : string
 end
 
-module type Device_config = sig
-  include Device_config_common
-
-  type optimize_ctx [@@deriving sexp_of]
-  (** The optimization context for compiling code, in particular {!Low_level.optimize_ctx} for
-      low-level backends. *)
-
-  val empty_optimize_ctx : unit -> optimize_ctx
-end
-
 type ('dev, 'runner, 'event) device = {
   dev : 'dev;
   ordinal : int;
@@ -131,14 +121,18 @@ let equal_device d1 d2 = d1.device_id = d2.device_id
 (** Pool id 0 on every device is reserved for the (single-tenant) merge buffer. *)
 let merge_buffer_pool_id = 0
 
-type ('dev, 'runner, 'event, 'optimize_ctx) context = {
+type ('dev, 'runner, 'event) context = {
   device : ('dev, 'runner, 'event) device;
-  parent : ('dev, 'runner, 'event, 'optimize_ctx) context option;
+  parent : ('dev, 'runner, 'event) context option;
   ctx_buffers : ctx_buffers;
       (** This map contains the deterministic buffer locations used in this context or an ancestor
           context. *)
   finalized : Utils.atomic_bool;
-  optimize_ctx : 'optimize_ctx;
+  optimize_ctx : Low_level.optimize_ctx;
+      (** The optimization context threaded through compilation: all OCANNL backends compile through
+          the {!Low_level} IR, so this is concretely {!Low_level.optimize_ctx} (the abstraction for
+          hypothetical assignments-level backends was retired; the [Assignments.comp -> code] seam
+          can be reintroduced if such a backend ever materializes). *)
   merge_buffer_node : Tnode.t option;
       (** The tensor node that a {!Backend.device_to_device} transfer with [into_merge_buffer:Copy]
           placed (or will place) into this context's device's merge buffer. It is a static,
@@ -149,10 +143,10 @@ type ('dev, 'runner, 'event, 'optimize_ctx) context = {
 [@@deriving sexp_of]
 
 module type Device_types = sig
-  include Device_config
+  include Device_config_common
 
   type nonrec device = (dev, runner, event) device [@@deriving sexp_of]
-  type nonrec context = (dev, runner, event, optimize_ctx) context [@@deriving sexp_of]
+  type nonrec context = (dev, runner, event) context [@@deriving sexp_of]
 end
 
 module type Device = sig
@@ -165,12 +159,13 @@ module type Device = sig
 
   val make_device : dev -> runner -> ordinal:int -> device
 
-  val make_context : ?ctx_buffers:ctx_buffers -> ?optimize_ctx:optimize_ctx -> device -> context
+  val make_context :
+    ?ctx_buffers:ctx_buffers -> ?optimize_ctx:Low_level.optimize_ctx -> device -> context
   (** Returns a context without a parent. *)
 
   val make_child :
     ?ctx_buffers:ctx_buffers ->
-    ?optimize_ctx:optimize_ctx ->
+    ?optimize_ctx:Low_level.optimize_ctx ->
     ?merge_buffer_node:Tnode.t option ->
     context ->
     context
@@ -186,14 +181,13 @@ end
 module type Backend_common = sig
   type code [@@deriving sexp_of]
   type code_batch [@@deriving sexp_of]
-  type optimize_ctx [@@deriving sexp_of]
 
-  val empty_optimize_ctx : unit -> optimize_ctx
-  val get_optimize_ctx : code -> optimize_ctx
-  val get_optimize_ctx_batch : code_batch -> optimize_ctx
+  val empty_optimize_ctx : unit -> Low_level.optimize_ctx
+  val get_optimize_ctx : code -> Low_level.optimize_ctx
+  val get_optimize_ctx_batch : code_batch -> Low_level.optimize_ctx
 
   val compile :
-    optimize_ctx ->
+    Low_level.optimize_ctx ->
     ?name:string ->
     ?lowered_transform:(Low_level.optimized -> Low_level.optimized) ->
     Indexing.unit_bindings ->
@@ -206,7 +200,7 @@ module type Backend_common = sig
       (docs/proposals/axis-types-for-loops.md). *)
 
   val compile_batch :
-    optimize_ctx ->
+    Low_level.optimize_ctx ->
     ?names:string array ->
     ?occupancy:(name:string -> src_n:int -> bool) ->
     Indexing.unit_bindings ->
@@ -327,7 +321,7 @@ end
 
 module type Backend = sig
   include Backend_common
-  include Backend_device_common with type optimize_ctx := optimize_ctx
+  include Backend_device_common
 
   val link : context -> code -> context routine
   (** Returns the routine for the code's procedure, in a new context derived from the given context.

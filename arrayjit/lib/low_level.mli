@@ -232,6 +232,8 @@ type optimize_ctx = {
 }
 [@@deriving sexp_of]
 
+val empty_optimize_ctx : unit -> optimize_ctx
+
 type optimized = {
   traced_store : traced_store;
   optimize_ctx : optimize_ctx;

@@ -10,14 +10,10 @@ module Backends_deprecated = Backends
 type backend_wrapper =
   | Wrapper : {
       backend :
-        (module BI.Backend
-           with type dev = 'dev
-            and type runner = 'runner
-            and type event = 'event
-            and type optimize_ctx = 'optimize_ctx);
+        (module BI.Backend with type dev = 'dev and type runner = 'runner and type event = 'event);
       device : ('dev, 'runner, 'event) BI.device;
       device_id : int;
-      context : ('dev, 'runner, 'event, 'optimize_ctx) BI.context;
+      context : ('dev, 'runner, 'event) BI.context;
     }
       -> backend_wrapper
 

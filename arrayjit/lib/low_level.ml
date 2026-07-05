@@ -221,6 +221,8 @@ type optimize_ctx = {
 }
 [@@deriving sexp_of]
 
+let empty_optimize_ctx () = { computations = Hashtbl.create (module Tnode) }
+
 type traced_store = (Tn.t, traced_array) Base.Hashtbl.t [@@deriving sexp_of]
 
 type optimized = {
