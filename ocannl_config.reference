@@ -117,6 +117,17 @@ automatic_cpu_schedule=true
 # left unscheduled by the default CPU schedule (task fan-out overhead would dominate).
 cpu_schedule_min_parallel=16384
 
+# If true (and the automatic schedule for the backend is active), routines are split into multiple
+# kernels at cross-workgroup dependency edges — sibling top-level statements whose
+# producer/consumer (or WAW/WAR) pairing over a materialized node the default annotator's race
+# analysis would otherwise reject, plus bare materialized writes and whole-node zeroing. The
+# segment kernels launch in order on the routine's stream with a device-side event chained at
+# each boundary (providing the grid-wide synchronization threads within one launch lack) and each
+# segment is scheduled on its own launch geometry. Adjacent segments that end up serial are coalesced, so an all-serial
+# routine still compiles to a single kernel. If false, such routines compile to one kernel and run
+# serially whenever the analysis bails, as before.
+schedule_fission=true
+
 # How the C backend renders eligible outermost Grid loops (pool-backed Grid rendering,
 # docs/proposals/gh-ocannl-164.md): "dispatch" uses libdispatch's dispatch_apply (macOS),
 # "openmp" uses `#pragma omp parallel for` (adds -fopenmp to the kernel compile), "none" keeps

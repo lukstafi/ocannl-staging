@@ -279,6 +279,7 @@ module type Lowered_no_device_backend = sig
     procedure option array
 
   val link_compiled :
+    ?lowered_bindings:Indexing.lowered_bindings ->
     merge_buffer:Backend_intf.buffer_loc option ref ->
     resolve:(Backend_intf.buffer_loc -> buffer_ptr) ->
     runner_label:string ->
@@ -288,7 +289,11 @@ module type Lowered_no_device_backend = sig
   (** [resolve] is the device's backend-private [buffer_loc -> base] lookup, supplied at the backend
       boundary so that the {e shared} layer never handles a raw pointer: this function resolves both
       the context's [ctx_buffers] (eagerly, at link time) and the lazily-set [merge_buffer] (at
-      execution time). [runner_label] is [get_name device] of the device holding the buffers. *)
+      execution time). [runner_label] is [get_name device] of the device holding the buffers.
+      [lowered_bindings], when given, supplies the static-index refs to bind (looked up by symbol)
+      instead of freshly minted ones, and is returned as-is: procedures linked as a batch — in
+      particular the segment kernels of one fissioned routine — must share their binding refs, so
+      setting a static index through the routine's bindings reaches every kernel. *)
 
   include No_device_buffer_and_copying with type buffer_ptr := buffer_ptr
 end

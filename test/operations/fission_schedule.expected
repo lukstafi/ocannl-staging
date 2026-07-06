@@ -1,0 +1,21 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+chain values correct: true
+chain rerun deterministic: true
+chain fissioned into two kernels: true
+both chain segments parallelize: true
+capture: two segments: true
+capture: both segments hardware-annotated: true
+capture: traced stores are filtered: true
+capture: identity on non-scheduling backends: true
+replication: two segments: true
+replication: both segments annotated: true
+replication: consumer segment carries a replica of the local's definition: true
+merge-back: two segments: true
+merge-back: producer segment annotated, merged range serial: true
+merge-back: merged segment still carries the replica: true
+promotion: scratch starts unmaterialized: true
+promotion: two segments, both annotated: true
+promotion: stranded Local scratch promoted to On_device: true
+backward gradient values correct: true
+backward pass fissioned: true

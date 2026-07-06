@@ -18,7 +18,8 @@ struct
   let compile_batch ~names:_ _unit_bindings _optimizeds =
     failwith @@ "Backend " ^ Config.name ^ " missing (no device)"
 
-  let link_compiled ~merge_buffer:_ ~resolve:_ ~runner_label:_ _ctx_arrays _procedure =
+  let link_compiled ?lowered_bindings:_ ~merge_buffer:_ ~resolve:_ ~runner_label:_ _ctx_arrays
+      _procedure =
     failwith @@ "Backend " ^ Config.name ^ " missing (no device)"
 
   let sexp_of_buffer_ptr _buffer_ptr = failwith @@ "Backend " ^ Config.name ^ " missing (no device)"

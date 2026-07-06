@@ -359,6 +359,8 @@ struct
   type code_batch = {
     lowereds : Low_level.optimized option array;
     procs : Backend.procedure option array;
+    bindings : Indexing.unit_bindings;
+        (** Kept for {!link_batch}: the batch's procedures share one set of static-index refs. *)
   }
   [@@deriving sexp_of]
 
@@ -368,7 +370,7 @@ struct
 
   let compile_batch ~names bindings lowereds : code_batch =
     let procs = compile_batch ~names bindings lowereds in
-    { lowereds; procs }
+    { lowereds; procs; bindings }
 
   let link context (code : code) ctx_buffers : Indexing.lowered_bindings * Task.t =
     let runner_label = get_name context.device in
@@ -389,21 +391,26 @@ struct
     let runner_label = get_name context.device in
     let merge_buffer = context.device.merge_buffer in
     let resolve = resolve_pool context.device in
-    let bindings, schedules =
-      Array.fold_mapi code_batch.procs ~init:None ~f:(fun i bindings -> function
+    (* One shared bindings assoc for the whole batch (mirroring the CUDA/Metal backends): the
+       batch's procedures — in particular the segment kernels of one fissioned routine — must see
+       the same static-index refs, or setting a binding through the routine would reach only one
+       of them. *)
+    let lowered_bindings : Indexing.lowered_bindings =
+      List.map (Indexing.bound_symbols code_batch.bindings) ~f:(fun s -> (s, ref 0))
+    in
+    let schedules =
+      Array.mapi code_batch.procs ~f:(fun i -> function
         | Some proc ->
             let ctx_buffers = Option.value_exn ~here:[%here] ctx_buffers.(i) in
             let bindings', to_schedule =
-              link_compiled ~merge_buffer ~resolve ~runner_label ctx_buffers proc
+              link_compiled ~lowered_bindings ~merge_buffer ~resolve ~runner_label ctx_buffers proc
             in
-            Option.iter bindings ~f:(fun bindings -> assert (phys_equal bindings bindings'));
-            let schedule =
-              Task.enschedule ~schedule_task ~get_stream_name:get_name context.device to_schedule
-            in
-            (Some bindings', Some schedule)
-        | None -> (bindings, None))
+            assert (phys_equal bindings' lowered_bindings);
+            Some
+              (Task.enschedule ~schedule_task ~get_stream_name:get_name context.device to_schedule)
+        | None -> None)
     in
-    (Option.value_exn ~here:[%here] bindings, schedules)
+    (lowered_bindings, schedules)
 
   (* Transfers take {!Backend_intf.buffer_loc} and resolve to the backend pointer here, against the
      device's private pool table -- the resolution is backend-side, not in the generic shared
@@ -457,11 +464,17 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
   include Device
   include Add_buffer_retrieval_and_syncing (Device)
 
+  type fissioned = { batch : Device.code_batch; count : int } [@@deriving sexp_of]
+
   type nonrec code = {
     from_prior_context : Set.M(Tnode).t;
     name : string;
     lowered : Low_level.optimized;
-    code : code;
+        (** The whole-routine lowered code, used for allocation and I/O analysis. When the routine
+            is fissioned this is the pre-fission form; the per-segment kernels live in [proc]. *)
+    proc : (code, fissioned) Either.t;
+        (** [First]: a single kernel, as before fission. [Second]: the segment kernels of one
+            routine, compiled as a batch and launched back-to-back on the routine's stream. *)
     expected_merge_node : Tnode.t option;
   }
   [@@deriving sexp_of]
@@ -476,7 +489,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
   [@@deriving sexp_of]
 
   let empty_optimize_ctx = Low_level.empty_optimize_ctx
-  let get_optimize_ctx (code : code) = code.lowered.optimize_ctx
+  let get_optimize_ctx (code : code) = code.lowered.Low_level.optimize_ctx
 
   let get_optimize_ctx_batch (code_batch : code_batch) =
     Array.find_map code_batch.lowereds ~f:(Option.map ~f:(fun l -> l.Low_level.optimize_ctx))
@@ -487,19 +500,41 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     let (name : string), (lowered : Low_level.optimized) =
       lower_assignments optim_ctx ?name bindings comp.asgns
     in
-    let lowered =
+    let limits = Device.hardware_limits () in
+    let lowereds =
       match lowered_transform with
-      | Some transform -> transform lowered
+      | Some transform -> [ transform lowered ]
       | None ->
           (* No explicit schedule: the default annotator parallelizes kernels it can prove safe
              (docs/proposals/schedule-ir-optops.md §6) -- Grid x Workgroup on GPU backends,
-             pool-rendered Grid on CPU backends; the identity otherwise. *)
-          Schedule.maybe_default_schedule ~backend_name:Device.name ~limits:(Device.hardware_limits ())
+             pool-rendered Grid on CPU backends; the identity otherwise. Kernel fission may split
+             the routine into several kernels at cross-workgroup dependency edges; they run
+             back-to-back on the routine's stream (see [link]). *)
+          Schedule.maybe_default_schedules ~backend_name:Device.name ~limits
             ~static_indices:(Indexing.bound_symbols bindings)
             lowered
     in
-    Schedule.check_hardware_limits ~name ~limits:(Device.hardware_limits ()) lowered;
-    let code : Device.code = compile ~name bindings lowered in
+    let (proc : (Device.code, fissioned) Either.t), (lowered : Low_level.optimized) =
+      match lowereds with
+      | [] -> assert false
+      | [ single ] ->
+          Schedule.check_hardware_limits ~name ~limits single;
+          (Either.First (compile ~name bindings single), single)
+      | segments ->
+          let seg_names = List.mapi segments ~f:(fun i _ -> name ^ "__seg" ^ Int.to_string i) in
+          List.iter2_exn seg_names segments ~f:(fun seg_name seg ->
+              Schedule.check_hardware_limits ~name:seg_name ~limits seg);
+          let batch =
+            compile_batch
+              ~names:(Array.of_list_map seg_names ~f:Option.some)
+              bindings
+              (Array.of_list_map segments ~f:Option.some)
+          in
+          (* Keep the whole-routine (pre-fission) lowered code: context allocation and I/O
+             analysis need the union footprint, and each segment's [optimized] carries only its
+             filtered slice of the traced store. *)
+          (Either.Second { batch; count = List.length segments }, lowered)
+    in
     (* Placements of all context nodes are settled by codegen (the [compile] just above), so this
        query resolves against the code's own lineage fork. *)
     let from_prior_context : Tn.t_set =
@@ -507,7 +542,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
         (Assignments.context_nodes ~plc:lowered.Low_level.optimize_ctx.placements comp.asgns)
         comp.embedded_nodes
     in
-    { from_prior_context; name; lowered; code; expected_merge_node = lowered.Low_level.merge_node }
+    { from_prior_context; name; lowered; proc; expected_merge_node = lowered.Low_level.merge_node }
 
   let%debug3_sexp compile_batch optim_ctx ?names ?occupancy bindings
       (comps : Assignments.comp array) : code_batch =
@@ -674,8 +709,41 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
       ~code_node:code.expected_merge_node;
     let (inputs, outputs), merge_buffer_input = Low_level.input_and_output_nodes code.lowered in
     let ctx_buffers = allocate_delta context code.lowered in
-    let optimize_ctx = code.lowered.optimize_ctx in
-    let bindings, schedule = link context code.code ctx_buffers in
+    let optimize_ctx = code.lowered.Low_level.optimize_ctx in
+    let bindings, schedule =
+      match code.proc with
+      | Either.First single -> link context single ctx_buffers
+      | Either.Second { batch; count } ->
+          (* Fissioned routine: every segment kernel links against the routine's one ctx_buffers
+             delta and shares the one bindings assoc; the combined task launches the segments in
+             order on the routine's stream, whose FIFO ordering supplies the grid-wide
+             synchronization at each segment boundary (the same contract consecutive routines on
+             one stream already rely on). *)
+          let bindings, tasks =
+            link_batch context batch (Array.create ~len:count (Some ctx_buffers))
+          in
+          let tasks = Array.to_list (Array.filter_opt tasks) in
+          assert (List.length tasks = count);
+          let schedule =
+            Task.Task
+              {
+                context_lifetime = tasks;
+                description = "fissioned segments of " ^ code.name;
+                work =
+                  (fun () ->
+                    (* Device-side ordering at each segment boundary: the cut is where the
+                       kernel-internal code lacks grid-wide synchronization, so the stream must
+                       provide it. Queue FIFO alone is not enough on Metal — command buffers over
+                       untracked resources may overlap in execution (caught by
+                       test_random_histograms) — so chain an event: schedule each next segment to
+                       wait for all work enqueued so far. No host blocking. *)
+                    List.iteri tasks ~f:(fun i t ->
+                        if i > 0 then will_wait_for context (all_work context.device);
+                        Task.run t));
+              }
+          in
+          (bindings, schedule)
+    in
     let context = make_child ~ctx_buffers ~optimize_ctx context in
     let schedule =
       Task.prepend schedule ~work:(fun () ->

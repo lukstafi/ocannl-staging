@@ -117,6 +117,7 @@ let known_config_keys =
       "gpu_schedule_min_parallel";
       "automatic_cpu_schedule";
       "cpu_schedule_min_parallel";
+      "schedule_fission";
       "cc_parallel_grid";
       "cc_parallel_chunks";
       (* Identifiers and other *)

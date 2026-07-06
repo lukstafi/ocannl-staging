@@ -598,10 +598,17 @@ module C_syntax (B : C_syntax_config) = struct
     go body;
     !ok
     && Hashtbl.for_all locals ~f:(fun (written, accs) ->
-           (not written)
-           || (* Distinct grid iterations must touch disjoint elements: every access mentions
-                 [sym]... *)
-           (List.for_all accs ~f:(fun idcs -> Array.exists idcs ~f:mentions_comp)
+           (* The blocks extension ([`Dispatch]) cannot capture function-scope arrays at all:
+              even a read-only reference fails to compile ("cannot refer to declaration with an
+              array type inside block"). Fissioned segments hit this with serially-precomputed
+              local scratch read under a Grid loop (e.g. softmax gradients in the backward
+              segments of the training tests); OpenMP has no such restriction and keeps the
+              finer written-under-the-loop analysis below. *)
+           (match B.parallel_grid_syntax with `Dispatch -> false | `Openmp | `None -> true)
+           && ((not written)
+              || (* Distinct grid iterations must touch disjoint elements: every access mentions
+                    [sym]... *)
+              List.for_all accs ~f:(fun idcs -> Array.exists idcs ~f:mentions_comp)
            &&
            (* ...and all accesses agree on every component that mentions [sym], so within one
               iteration reads hit exactly the cells that iteration writes. *)

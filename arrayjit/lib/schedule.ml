@@ -1284,6 +1284,576 @@ let default_cpu ?min_parallel (opt : Low_level.optimized) : schedule =
         | _ -> [])
   with Bail -> []
 
+(** {2 Kernel fission at cross-workgroup edges}
+
+    The default annotator's cross-nest interference check (see {!analyze_parallel_chains}) is a
+    fact about hardware threads: sibling nests of one kernel execute with no grid-wide
+    synchronization between them, so a producer/consumer (or WAW/WAR) pair of top-level statements
+    over a materialized node is a race once threads interleave — and the whole routine used to
+    fall back to a 1×1 launch. Fission recovers the synchronization from the stream instead:
+    top-level statements are partitioned into {e segments} at exactly those dependency edges, each
+    segment compiles to its own kernel, and the routine's task launches them in order on the
+    routine's stream with a device-side event chained at each boundary (queue FIFO alone does not
+    order overlapping command buffers over Metal's untracked resources; see [Raise_backend.link]).
+    Each segment then gets the default schedule independently, on its own launch geometry.
+
+    Segmentation is conservative and total (no [Bail]): a statement opaque to the analysis
+    ([Staged_compilation], barriers, pre-annotated loops) or one the annotator can never cover
+    (bare materialized writes, materialized writes inside [Local_scope] bodies, non-injective
+    nests) is isolated into its own serial segment rather than poisoning its neighbors' schedules.
+    Materialized whole-node [Zero_out]s are likewise isolated and — on GPU — expanded
+    ({!optop.Expand_zero}) and annotated with the same geometry policy as ordinary nests.
+
+    Two constructs cross segment boundaries and need repair, because a kernel's locals die at
+    launch end:
+
+    - Scalar scope-locals hoisted by [Low_level.hoist_cross_statement_cse] (top-level
+      [Declare_local] + defining statements): the defining statements are {e replicated} at the
+      head of every consuming segment. This is valid exactly when nothing written between the
+      definition's original position and the segment start overlaps the definition's reads (the
+      replica then computes the same value); otherwise the offending segments are merged back and
+      run serially, preserving today's behavior.
+    - [Local]-placed scratch tensor nodes whose accesses end up split across segments are promoted
+      to [On_device] ({!Tnode.Placements.promote_local_to_device}): [Local] is always a compiler
+      decision premised on single-kernel lifetime, and fission runs before any consumer of the
+      decision (codegen parameter lists, context allocation) has read it.
+
+    Adjacent segments that both end up unannotated are coalesced back (fewer launches); if
+    everything coalesces, the routine compiles to a single kernel exactly as before. *)
+
+(* Per top-level statement: tensor-node access sets, scope-local references crossing statement
+   boundaries, and the statement kind for segmentation. [None] = opaque to the analysis. *)
+type stmt_summary = {
+  s_reads : Set.M(Tn).t;
+  s_writes : Set.M(Tn).t;  (** Includes [Zero_out] targets. *)
+  s_top_zero : Tn.t option;
+      (** The statement is exactly [Zero_out tn] of a materialized node (expandable). *)
+  s_scope_reads : Low_level.scope_id list;
+      (** [Get_local]s of scope ids bound outside this statement. *)
+  s_scope_writes : Low_level.scope_id list;
+      (** [Set_local]s of scope ids bound outside this statement. *)
+  s_scope_declares : Low_level.scope_id list;  (** [Declare_local]s within this statement. *)
+}
+
+exception Opaque_stmt
+
+let summarize_stmt plc (stmt : Low_level.t) : stmt_summary option =
+  let open Low_level in
+  let reads = ref (Set.empty (module Tn)) and writes = ref (Set.empty (module Tn)) in
+  let top_zero = ref None in
+  let scope_reads = ref [] and scope_writes = ref [] in
+  let bound = ref [] and declares = ref [] in
+  let rec code ~top llc =
+    match llc with
+    | Noop | Comment _ -> ()
+    | Staged_compilation _ | Workgroup_barrier -> raise Opaque_stmt
+    | Declare_local { id; _ } -> declares := id :: !declares
+    | Seq (a, b) ->
+        code ~top a;
+        code ~top b
+    | For_loop { axis; body; _ } ->
+        if not (equal_axis_type axis Serial) then raise Opaque_stmt;
+        code ~top:false body
+    | Zero_out tn ->
+        writes := Set.add !writes tn;
+        if top && Tn.Placements.is_materialized_peek plc tn then top_zero := Some tn
+    | Set { tn; llsc; _ } ->
+        writes := Set.add !writes tn;
+        scalar llsc
+    | Set_from_vec { tn; arg = a, _; _ } ->
+        writes := Set.add !writes tn;
+        scalar a
+    | Set_local (id, llsc) ->
+        scope_writes := id :: !scope_writes;
+        scalar llsc
+    | If { cond = c, _; body } ->
+        scalar c;
+        code ~top:false body
+  and scalar (llsc : scalar_t) =
+    match llsc with
+    | Local_scope { id; body; _ } ->
+        bound := id :: !bound;
+        code ~top:false body
+    | Get_local id -> scope_reads := id :: !scope_reads
+    | Get (tn, _) -> reads := Set.add !reads tn
+    | Get_dynamic { tn; dyn_value = v, _; _ } ->
+        reads := Set.add !reads tn;
+        scalar v
+    | Get_merge_buffer (_, _) -> () (* A separate read-only input buffer: never a hazard. *)
+    | Constant _ | Constant_bits _ | Embed_index _ -> ()
+    | Ternop (_, (a, _), (b, _), (c, _)) ->
+        scalar a;
+        scalar b;
+        scalar c
+    | Binop (_, (a, _), (b, _)) ->
+        scalar a;
+        scalar b
+    | Unop (_, (a, _)) -> scalar a
+  in
+  match code ~top:true stmt with
+  | exception Opaque_stmt -> None
+  | () ->
+      let internal = !bound @ !declares in
+      let externals ids =
+        List.filter ids ~f:(fun id ->
+            not (List.mem internal id ~equal:Low_level.equal_scope_id))
+        |> List.dedup_and_sort ~compare:Low_level.compare_scope_id
+      in
+      Some
+        {
+          s_reads = !reads;
+          s_writes = !writes;
+          s_top_zero = !top_zero;
+          s_scope_reads = externals !scope_reads;
+          s_scope_writes = externals !scope_writes;
+          s_scope_declares = List.dedup_and_sort !declares ~compare:Low_level.compare_scope_id;
+        }
+
+type funit = {
+  f_stmts : Low_level.t list;  (** Leading comments/noops + the statement, original order. *)
+  f_index : int;  (** Position among units, for scope-replication validity ranges. *)
+  f_sum : stmt_summary option;
+  f_kind : [ `Normal | `Zeros | `Solo ];
+}
+
+(* Units: each real statement with the comments preceding it. Trailing comments attach to the last
+   unit. *)
+let collect_units plc (opt : Low_level.optimized) (stmts : Low_level.t list) : funit list =
+  let open Low_level in
+  let is_glue = function Noop | Comment _ -> true | _ -> false in
+  let mk index glue stmt =
+    let f_sum = summarize_stmt plc stmt in
+    let f_kind =
+      match f_sum with
+      | None -> `Solo
+      | Some { s_top_zero = Some _; _ } -> `Zeros
+      | Some s when Set.is_empty s.s_writes -> `Normal
+      | Some _ -> (
+          (* Isolate statements the annotator could never share a parallel kernel with: it raises
+             [Bail] on them even in isolation (bare materialized writes, materialized writes
+             inside [Local_scope] bodies, dynamic accesses or non-injective/uncovered writes).
+             In its own segment such a statement runs as a serial 1×1 launch and its neighbors
+             keep their parallelism. *)
+          match analyze_parallel_chains { opt with llc = stmt } with
+          | (_ : Low_level.t list list) -> `Normal
+          | exception Bail -> `Solo)
+    in
+    { f_stmts = List.rev (stmt :: glue); f_index = index; f_sum; f_kind }
+  in
+  let rec go index glue acc = function
+    | [] -> (
+        (* Trailing glue: attach to the last unit. *)
+        match (acc, glue) with
+        | _, [] | [], _ -> List.rev acc
+        | last :: rest, glue ->
+            List.rev ({ last with f_stmts = last.f_stmts @ List.rev glue } :: rest))
+    | stmt :: tl when is_glue stmt -> go index (stmt :: glue) acc tl
+    | stmt :: tl -> go (index + 1) [] (mk index glue stmt :: acc) tl
+  in
+  go 0 [] [] stmts
+
+type segment = {
+  g_units : funit list;
+  g_kind : [ `Normal | `Zeros | `Solo ];
+  g_reads : Set.M(Tn).t;
+  g_writes : Set.M(Tn).t;
+}
+
+let seg_of_unit u =
+  let reads, writes =
+    match u.f_sum with
+    | Some s -> (s.s_reads, s.s_writes)
+    | None -> (Set.empty (module Tn), Set.empty (module Tn))
+  in
+  { g_units = [ u ]; g_kind = u.f_kind; g_reads = reads; g_writes = writes }
+
+let merge_segs ~kind a b =
+  {
+    g_units = a.g_units @ b.g_units;
+    g_kind = kind;
+    g_reads = Set.union a.g_reads b.g_reads;
+    g_writes = Set.union a.g_writes b.g_writes;
+  }
+
+(* The within-kernel interference rule of {!analyze_parallel_chains}, reformulated as a cut
+   criterion: a materialized node written on one side and touched on the other must not share a
+   kernel. Local-scratch pairs deliberately do NOT cut — the per-segment annotator retains the
+   finer per-thread-privacy analysis for those (and simply declines to annotate when it fails). *)
+let mat_conflict plc seg (s : stmt_summary) =
+  let mat tn = Tn.Placements.is_materialized_peek plc tn in
+  let hits w touched = Set.exists w ~f:(fun tn -> mat tn && Set.mem touched tn) in
+  hits seg.g_writes (Set.union s.s_reads s.s_writes)
+  || hits s.s_writes (Set.union seg.g_reads seg.g_writes)
+
+let group_units plc (units : funit list) : segment list =
+  let close cur acc = match cur with None -> acc | Some seg -> seg :: acc in
+  let rec go cur acc = function
+    | [] -> List.rev (close cur acc)
+    | u :: tl -> (
+        match (cur, u.f_kind, u.f_sum) with
+        | Some ({ g_kind = `Normal; _ } as seg), `Normal, Some s when not (mat_conflict plc seg s)
+          ->
+            go (Some (merge_segs ~kind:`Normal seg (seg_of_unit u))) acc tl
+        | Some ({ g_kind = `Zeros; _ } as seg), `Zeros, Some s when not (mat_conflict plc seg s) ->
+            go (Some (merge_segs ~kind:`Zeros seg (seg_of_unit u))) acc tl
+        | _ -> go (Some (seg_of_unit u)) (close cur acc) tl)
+  in
+  go None [] units
+
+(** {3 Scope-local replication across segments (option (b) v2)} *)
+
+exception Unfissionable
+(* Malformed scope-local shape (a scope id referenced with no defining statement before it, or a
+   merge cascade reaching the first segment): the driver falls back to single-kernel compilation.
+   Repairable crossings do not raise — they return [None] from [plan_replicas] and merge their
+   segment range instead. *)
+
+(* Def units of scope id [id] strictly before unit index [limit]: the declaring unit and every
+   unit that [Set_local]s it from outside. *)
+let def_units_of (units : funit array) ~limit id =
+  Array.to_list units
+  |> List.filter ~f:(fun u ->
+         u.f_index < limit
+         &&
+         match u.f_sum with
+         | None -> false
+         | Some s ->
+             List.mem s.s_scope_declares id ~equal:Low_level.equal_scope_id
+             || List.mem s.s_scope_writes id ~equal:Low_level.equal_scope_id)
+
+(* The replica set for one segment: transitive closure of def units over the scope ids they read
+   themselves. Returns [None] when replication is invalid — a def unit writes tensors or is
+   opaque, or a unit between the (earliest) def and the segment start writes a tensor some def
+   reads (the replica would compute a different value than the original definition did). *)
+let plan_replicas (units : funit array) ~seg_start (ext_ids : Low_level.scope_id list) :
+    funit list option =
+  let module SId = struct
+    let equal = Low_level.equal_scope_id
+  end in
+  let rec closure needed_ids collected =
+    match needed_ids with
+    | [] -> collected
+    | id :: rest ->
+        let defs = def_units_of units ~limit:seg_start id in
+        if List.is_empty defs then raise Unfissionable;
+        let fresh = List.filter defs ~f:(fun d -> not (List.mem collected d ~equal:phys_equal)) in
+        let more_ids =
+          List.concat_map fresh ~f:(fun d ->
+              match d.f_sum with None -> [] | Some s -> s.s_scope_reads)
+          |> List.filter ~f:(fun id' ->
+                 (not (List.mem rest id' ~equal:SId.equal))
+                 && not
+                      (List.exists collected ~f:(fun d ->
+                           match d.f_sum with
+                           | None -> false
+                           | Some s -> List.mem s.s_scope_declares id' ~equal:SId.equal)))
+        in
+        closure (rest @ more_ids) (collected @ fresh)
+  in
+  match closure ext_ids [] with
+  | [] -> Some []
+  | defs ->
+      let defs = List.sort defs ~compare:(fun a b -> Int.compare a.f_index b.f_index) in
+      let valid =
+        List.for_all defs ~f:(fun d ->
+            match d.f_sum with None -> false | Some s -> Set.is_empty s.s_writes)
+        &&
+        let def_reads =
+          List.fold defs
+            ~init:(Set.empty (module Tn))
+            ~f:(fun acc d ->
+              match d.f_sum with None -> acc | Some s -> Set.union acc s.s_reads)
+        in
+        let earliest = (List.hd_exn defs).f_index in
+        Array.for_all units ~f:(fun u ->
+            u.f_index <= earliest || u.f_index >= seg_start
+            ||
+            match u.f_sum with
+            | None -> false
+            | Some s -> Set.is_empty (Set.inter s.s_writes def_reads))
+      in
+      if valid then Some defs else None
+
+(* External scope ids a segment references: read or written by its units but not declared by an
+   earlier unit of the same segment (statement order is preserved, so any in-segment declaration
+   precedes in-segment uses of well-formed code). *)
+let seg_external_ids seg =
+  let declared =
+    List.concat_map seg.g_units ~f:(fun u ->
+        match u.f_sum with None -> [] | Some s -> s.s_scope_declares)
+  in
+  List.concat_map seg.g_units ~f:(fun u ->
+      match u.f_sum with None -> [] | Some s -> s.s_scope_reads @ s.s_scope_writes)
+  |> List.filter ~f:(fun id -> not (List.mem declared id ~equal:Low_level.equal_scope_id))
+  |> List.dedup_and_sort ~compare:Low_level.compare_scope_id
+
+(* Resolve scope-local crossings: per segment, either a replica plan or a forced merge of the
+   def..use segment range (the merged segment runs serially — exactly today's behavior for that
+   region). Restarts after each merge; terminates because the segment count strictly decreases. *)
+let rec resolve_scope_crossings (units : funit array) (segs : segment list) :
+    segment list * funit list list =
+  let plans =
+    List.map segs ~f:(fun seg ->
+        let ext = seg_external_ids seg in
+        if List.is_empty ext then `Replicas []
+        else
+          let seg_start = (List.hd_exn seg.g_units).f_index in
+          match plan_replicas units ~seg_start ext with
+          | Some defs -> `Replicas defs
+          | None -> `Merge_back seg_start)
+  in
+  match
+    List.findi plans ~f:(fun _ -> function `Merge_back _ -> true | `Replicas _ -> false)
+  with
+  | None ->
+      ( segs,
+        List.map plans ~f:(function `Replicas defs -> defs | `Merge_back _ -> assert false) )
+  | Some (j, _) ->
+      (* Merge from the segment holding the earliest def through segment [j]. We do not know the
+         def segment without re-running the failed plan; merging [j] with its predecessor is the
+         minimal step that makes progress and re-checks. *)
+      if j = 0 then raise Unfissionable
+      else
+        let before = List.take segs (j - 1) in
+        let merged =
+          match List.drop segs (j - 1) with
+          | a :: b :: rest -> merge_segs ~kind:`Solo a b :: rest
+          | _ -> assert false
+        in
+        resolve_scope_crossings units (before @ merged)
+
+(* Per segment (units + replicas): the (reads, writes) tensor-node footprint. *)
+let seg_footprints (segs_with_replicas : (segment * funit list) list) :
+    (Set.M(Tn).t * Set.M(Tn).t) list =
+  List.map segs_with_replicas ~f:(fun (seg, replicas) ->
+      List.fold (replicas @ seg.g_units)
+        ~init:(Set.empty (module Tn), Set.empty (module Tn))
+        ~f:(fun (r, w) u ->
+          match u.f_sum with
+          | None -> (r, w)
+          | Some s -> (Set.union r s.s_reads, Set.union w s.s_writes)))
+
+let crosses_segments segs_with_replicas tn =
+  List.count (seg_footprints segs_with_replicas) ~f:(fun (r, w) ->
+      Set.mem r tn || Set.mem w tn)
+  >= 2
+
+(* Promote [Local]-placed scratch whose accesses (including replicas') span segments: kernel-local
+   arrays do not survive a launch boundary. Runs before per-segment schedules are computed, so the
+   annotator sees the promoted (materialized) status consistently — the converse order would let a
+   segment annotate without covering the node's writes. Returns the undo list: coalescing may
+   later remove a crossing, and a promotion without a surviving crossing must be restored (it
+   would otherwise leak an observable placement change out of an all-serial routine). *)
+let promote_crossing plc (segs_with_replicas : (segment * funit list) list) :
+    (Tn.t * (Tn.memory_mode * int) option) list =
+  let footprints = seg_footprints segs_with_replicas in
+  let written =
+    List.fold footprints ~init:(Set.empty (module Tn)) ~f:(fun acc (_, w) -> Set.union acc w)
+  in
+  let touched = List.map footprints ~f:(fun (r, w) -> Set.union r w) in
+  Set.fold written ~init:[] ~f:(fun undo tn ->
+      if
+        (not (Tn.Placements.is_materialized_peek plc tn))
+        && List.count touched ~f:(fun t -> Set.mem t tn) >= 2
+      then (
+        let prior = Tn.Placements.raw_entry plc tn in
+        Tn.Placements.promote_local_to_device plc tn 177;
+        (tn, prior) :: undo)
+      else undo)
+
+(* All tensor nodes a segment's code references — including scope ids' backing tnodes, so the
+   filtered traced store retains every entry codegen consults — and whether it reads the merge
+   buffer. *)
+let code_footprint (llc : Low_level.t) : Set.M(Tn).t * bool =
+  let open Low_level in
+  let tns = ref (Set.empty (module Tn)) and merge = ref false in
+  let add tn = tns := Set.add !tns tn in
+  let rec code llc =
+    match llc with
+    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier -> ()
+    | Declare_local { id; _ } -> add id.tn
+    | Seq (a, b) ->
+        code a;
+        code b
+    | For_loop { body; _ } -> code body
+    | Zero_out tn -> add tn
+    | Set { tn; llsc; _ } ->
+        add tn;
+        scalar llsc
+    | Set_from_vec { tn; arg = a, _; _ } ->
+        add tn;
+        scalar a
+    | Set_local (id, llsc) ->
+        add id.tn;
+        scalar llsc
+    | If { cond = c, _; body } ->
+        scalar c;
+        code body
+  and scalar (llsc : scalar_t) =
+    match llsc with
+    | Local_scope { id; body; _ } ->
+        add id.tn;
+        code body
+    | Get_local id -> add id.tn
+    | Get (tn, _) -> add tn
+    | Get_dynamic { tn; dyn_value = v, _; _ } ->
+        add tn;
+        scalar v
+    | Get_merge_buffer (tn, _) ->
+        add tn;
+        merge := true
+    | Constant _ | Constant_bits _ | Embed_index _ -> ()
+    | Ternop (_, (a, _), (b, _), (c, _)) ->
+        scalar a;
+        scalar b;
+        scalar c
+    | Binop (_, (a, _), (b, _)) ->
+        scalar a;
+        scalar b
+    | Unop (_, (a, _)) -> scalar a
+  in
+  code llc;
+  (!tns, !merge)
+
+let segment_optimized (full : Low_level.optimized) (llc : Low_level.t) : Low_level.optimized =
+  let tns, reads_merge = code_footprint llc in
+  {
+    Low_level.traced_store =
+      Hashtbl.filteri full.Low_level.traced_store ~f:(fun ~key ~data:_ -> Set.mem tns key);
+    optimize_ctx = full.Low_level.optimize_ctx;
+    llc;
+    merge_node = (if reads_merge then full.Low_level.merge_node else None);
+    workgroup_shared = Set.filter full.Low_level.workgroup_shared ~f:(Set.mem tns);
+  }
+
+(* Expand-and-annotate schedule for a segment of materialized whole-node [Zero_out]s (GPU): the
+   expanded nests get the same geometry policy as {!default_gpu}'s chains. Below [min_parallel]
+   (largest node) the zeros stay whole-node — a serial kernel renders them as [memset]. *)
+let zero_expansion ?block_size ?min_parallel ~(limits : Backend_intf.hardware_limits)
+    (tns : Tn.t list) : schedule =
+  let block_size =
+    Option.value block_size
+      ~default:
+        (Int.of_string @@ Utils.get_global_arg ~arg_name:"gpu_schedule_block_size" ~default:"256")
+  in
+  let block_size =
+    Option.value_map limits.Backend_intf.max_threads_per_workgroup ~default:block_size
+      ~f:(min block_size)
+  in
+  let min_parallel =
+    Option.value min_parallel
+      ~default:
+        (Int.of_string @@ Utils.get_global_arg ~arg_name:"gpu_schedule_min_parallel" ~default:"1024")
+  in
+  let dims tn = Lazy.force tn.Tn.dims in
+  let numel tn = Array.fold (dims tn) ~init:1 ~f:( * ) in
+  if
+    List.exists tns ~f:(fun tn -> Array.is_empty (dims tn))
+    (* A rank-0 expansion is a bare write: uncoverable in a multi-threaded kernel. *)
+    || List.fold tns ~init:0 ~f:(fun m tn -> max m (numel tn)) < min_parallel
+  then []
+  else
+    List.concat_map tns ~f:(fun tn ->
+        let op, syms = expand_zero ~tn in
+        let ds = dims tn in
+        let annots =
+          match syms with
+          | [] -> assert false
+          | [ s0 ] ->
+              let n0 = ds.(0) in
+              let sp, _, _ =
+                split ~axis:s0 ~factor:(min block_size n0) ~outer:Low_level.Grid
+                  ~inner:Low_level.Workgroup
+              in
+              [ sp ]
+          | s0 :: s1 :: _ ->
+              let n1 = ds.(1) in
+              if n1 <= block_size then
+                [
+                  Retype { axis = s0; ty = Low_level.Grid };
+                  Retype { axis = s1; ty = Low_level.Workgroup };
+                ]
+              else
+                let sp, _, _ =
+                  split ~axis:s1 ~factor:block_size ~outer:Low_level.Serial
+                    ~inner:Low_level.Workgroup
+                in
+                [ Retype { axis = s0; ty = Low_level.Grid }; sp ]
+        in
+        op :: annots)
+
+let seg_llc replicas seg =
+  Low_level.unflat_lines (List.concat_map (replicas @ seg.g_units) ~f:(fun u -> u.f_stmts))
+
+let fission_default ~(preset : Low_level.optimized -> schedule)
+    ~(zero_sched : Tn.t list -> schedule) ~static_indices (opt : Low_level.optimized) :
+    Low_level.optimized list =
+  let plc = opt.Low_level.optimize_ctx.placements in
+  let fallback () = [ apply ~static_indices (preset opt) opt ] in
+  let units = collect_units plc opt (Low_level.flat_lines [ opt.Low_level.llc ]) in
+  let segs = group_units plc units in
+  if List.length segs <= 1 then fallback ()
+  else
+    match resolve_scope_crossings (Array.of_list units) segs with
+    | exception Unfissionable -> fallback ()
+    | segs, replicas when List.length segs <= 1 -> ignore replicas; fallback ()
+    | segs, replicas ->
+        let segs_with_replicas = List.zip_exn segs replicas in
+        let promoted = promote_crossing plc segs_with_replicas in
+        let undo_promotions which =
+          List.iter which ~f:(fun (tn, prior) -> Tn.Placements.unsafe_restore plc tn prior)
+        in
+        let scheduled =
+          List.map segs_with_replicas ~f:(fun (seg, replicas) ->
+              let sched =
+                match seg.g_kind with
+                | `Solo -> []
+                | `Zeros ->
+                    zero_sched
+                      (List.filter_map seg.g_units ~f:(fun u ->
+                           Option.bind u.f_sum ~f:(fun s -> s.s_top_zero)))
+                | `Normal -> preset (segment_optimized opt (seg_llc replicas seg))
+              in
+              (seg, replicas, sched))
+        in
+        (* Coalesce adjacent unannotated segments: consecutive serial kernels gain nothing from a
+           launch boundary. Merged segments are rebuilt from original units and their replicas
+           recomputed for the new boundary (the def..start gap only shrinks under merging, so
+           feasibility is preserved). *)
+        let coalesced =
+          List.fold scheduled ~init:[] ~f:(fun acc (seg, replicas, sched) ->
+              match acc with
+              | (pseg, _, []) :: rest when List.is_empty sched ->
+                  let merged = merge_segs ~kind:`Solo pseg seg in
+                  let replicas =
+                    match
+                      plan_replicas (Array.of_list units)
+                        ~seg_start:(List.hd_exn merged.g_units).f_index
+                        (seg_external_ids merged)
+                    with
+                    | Some defs -> defs
+                    | None -> assert false (* Merging only shrinks the validity range. *)
+                  in
+                  (merged, replicas, []) :: rest
+              | _ -> (seg, replicas, sched) :: acc)
+          |> List.rev
+        in
+        if List.length coalesced <= 1 then (
+          (* Everything merged back: single kernel, exactly as before fission — including
+             placements, so undo every promotion (an all-serial small routine must not leak
+             observable placement changes; zero2hero's virtual-neuron printouts pinned this). *)
+          undo_promotions promoted;
+          fallback ())
+        else (
+          (* Coalescing may have absorbed a crossing: promotions without a surviving crossing
+             are restored. Sound in this direction — the segments' schedules were computed under
+             the stricter materialized view (see [promote_crossing]). *)
+          let final_swr = List.map coalesced ~f:(fun (seg, replicas, _) -> (seg, replicas)) in
+          undo_promotions
+            (List.filter promoted ~f:(fun (tn, _) -> not (crosses_segments final_swr tn)));
+          List.map coalesced ~f:(fun (seg, replicas, sched) ->
+              apply ~static_indices sched (segment_optimized opt (seg_llc replicas seg))))
+
 (** {2 Wiring: the implicit transform for GPU and CPU backends} *)
 
 let automatic_gpu_schedule =
@@ -1297,6 +1867,8 @@ let backend_is_gpu name =
 
 let backend_is_cpu name = String.is_substring name ~substring:"cc"
 
+let schedule_fission = lazy (Utils.get_global_flag ~default:true ~arg_name:"schedule_fission")
+
 let maybe_default_schedule ~backend_name ?(limits = Backend_intf.no_hardware_limits)
     ~static_indices (opt : Low_level.optimized) : Low_level.optimized =
   (* Runtime kernel logging is line-interleaved under parallel execution; keep logged runs
@@ -1307,6 +1879,22 @@ let maybe_default_schedule ~backend_name ?(limits = Backend_intf.no_hardware_lim
   else if backend_is_cpu backend_name && Lazy.force automatic_cpu_schedule then
     apply ~static_indices (default_cpu opt) opt
   else opt
+
+let maybe_default_schedules ~backend_name ?(limits = Backend_intf.no_hardware_limits)
+    ~static_indices (opt : Low_level.optimized) : Low_level.optimized list =
+  if Utils.debug_log_from_routines () then [ opt ]
+  else
+    let gpu = backend_is_gpu backend_name && Lazy.force automatic_gpu_schedule in
+    let cpu = backend_is_cpu backend_name && Lazy.force automatic_cpu_schedule in
+    if not (gpu || cpu) then [ opt ]
+    else if not (Lazy.force schedule_fission) then
+      [ maybe_default_schedule ~backend_name ~limits ~static_indices opt ]
+    else
+      let preset o = if gpu then default_gpu ~limits o else default_cpu o in
+      (* CPU zero segments stay whole-node: a serial kernel renders them as [memset], which is
+         hard to beat below many-megabyte sizes; parallel zero expansion on CPU is a follow-up. *)
+      let zero_sched tns = if gpu then zero_expansion ~limits tns else [] in
+      fission_default ~preset ~zero_sched ~static_indices opt
 
 let check_hardware_limits ~name ~(limits : Backend_intf.hardware_limits)
     (opt : Low_level.optimized) : unit =

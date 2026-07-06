@@ -500,9 +500,16 @@ let%diagn_sexp compile_batch ~names bindings (lowereds : Low_level.optimized opt
       Option.bind opt_params_and_doc ~f:(fun (kparams, _doc, _launch) ->
           Option.map names.(i) ~f:(fun name -> { result = result_library; kparams; bindings; name })))
 
-let%track3_sexp link_compiled ~merge_buffer ~resolve ~runner_label ctx_buffers (code : procedure) =
+let%track3_sexp link_compiled ?lowered_bindings ~merge_buffer ~resolve ~runner_label ctx_buffers
+    (code : procedure) =
   let name : string = code.name in
   let log_file_name = Utils.diagn_log_file [%string "debug-%{runner_label}-%{code.name}.log"] in
+  (* When [lowered_bindings] is given (batch linking, e.g. fissioned segments of one routine), the
+     static-index refs are shared: looked up by the [Static_idx] param's symbol rather than
+     freshly minted, so one bindings assoc drives every procedure of the batch. *)
+  let idx_ref s =
+    match lowered_bindings with Some lb -> Indexing.find_exn lb s | None -> ref 0
+  in
   let run_variadic =
     [%log_level
       0;
@@ -516,7 +523,7 @@ let%track3_sexp link_compiled ~merge_buffer ~resolve ~runner_label ctx_buffers (
         match (binds, kparams) with
         | Empty, [] -> Indexing.Result (Foreign.foreign ~from:code.result.lib name cs)
         | Bind _, [] -> invalid_arg "Cc_backend.link: too few static index params"
-        | Bind (_, bs), Static_idx _ :: ps -> Param_idx (ref 0, link bs ps Ctypes.(int @-> cs))
+        | Bind (_, bs), Static_idx s :: ps -> Param_idx (idx_ref s, link bs ps Ctypes.(int @-> cs))
         | Empty, Static_idx _ :: _ -> invalid_arg "Cc_backend.link: too many static index params"
         | bs, Log_file_name :: ps ->
             Param_1 (ref (Some log_file_name), link bs ps Ctypes.(string @-> cs))
@@ -558,7 +565,9 @@ let%track3_sexp link_compiled ~merge_buffer ~resolve ~runner_label ctx_buffers (
     if Utils.debug_log_from_routines () then
       Utils.log_debug_routine_file ~log_file_name ~stream_name:runner_label
   in
-  ( Indexing.lowered_bindings code.bindings run_variadic,
+  ( (match lowered_bindings with
+    | Some lb -> lb
+    | None -> Indexing.lowered_bindings code.bindings run_variadic),
     Task.Task
       {
         (* In particular, keep code alive so it doesn't get unloaded. *)
