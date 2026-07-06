@@ -98,7 +98,8 @@ automatic_gpu_schedule=true
 
 # The workgroup (threadgroup, block) size the default GPU schedule targets: single parallel loops
 # are split by this factor; a second parallelizable loop is used as the Workgroup axis directly
-# when its extent fits.
+# when its extent fits. The configured value is a target: the annotator clamps it to the backend's
+# max-threads-per-workgroup device limit (minimum across devices on multi-device backends).
 gpu_schedule_block_size=256
 
 # Kernels whose largest parallelizable loop nest has fewer than this many parallel iterations are

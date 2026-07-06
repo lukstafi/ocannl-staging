@@ -301,6 +301,13 @@ parity-testable — which is exactly the property BEAM search needs.
       beats the unscheduled kernel by far more than the #412 target on Metal
       (~1800–3000×; see the status note — the margin comes from parallelization,
       with SMEM/register tiles at parity pending accumulator privatization).
+- [x] Device-limit-aware tile sizes: `hardware_limits` on `Backend_device_common`
+      (max threads per workgroup, workgroup-shared memory capacity; min across
+      devices, all-`None` on CPU backends) — the annotator clamps the configured
+      `gpu_schedule_block_size` to the max-threads limit, and backend `compile`
+      validates every kernel (including hand-written `?lowered_transform`
+      schedules) against both limits via `Schedule.check_hardware_limits`,
+      turning driver-level launch failures into early, named errors.
 - [x] Search harness scoped (BEAM first; cost models deferred to #261 follow-ups) —
       §7; implementation deferred.
 

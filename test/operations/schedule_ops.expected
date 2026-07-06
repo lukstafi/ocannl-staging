@@ -14,3 +14,8 @@ default annotator structure as expected: true
 default annotator matmul values match the serial twin: true
 lane-guarded privatize gates init and store-back: true
 per-iteration guard rejected by privatize: true
+device-limit clamp values correct: true
+device-limit clamp splits by the max-threads limit: true
+workgroup size over the limit rejected: true
+shared tiles within the memory limit accepted: true
+shared tiles over the memory limit rejected: true

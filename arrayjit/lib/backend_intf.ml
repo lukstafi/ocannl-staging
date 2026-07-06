@@ -15,6 +15,19 @@ type buffer_loc = { pool_id : int; offset : int } [@@deriving sexp, compare, equ
 
 type ctx_buffers = buffer_loc Map.M(Tnode).t [@@deriving sexp_of]
 
+type hardware_limits = {
+  max_threads_per_workgroup : int option;
+      (** Upper bound on the number of threads in one workgroup (CUDA thread block / Metal
+          threadgroup); [None] when the backend imposes no limit (the C backends render annotated
+          loops serially). *)
+  max_workgroup_memory_bytes : int option;
+      (** Capacity in bytes of the workgroup-shared memory (CUDA [__shared__] / Metal
+          [threadgroup]); [None] when the backend imposes no limit. *)
+}
+[@@deriving sexp, compare, equal]
+
+let no_hardware_limits = { max_threads_per_workgroup = None; max_workgroup_memory_bytes = None }
+
 (** The backend slab allocator, replacing the per-tnode [Alloc_buffer] interface. The shared
     allocator seam (see {!Backends}) mints deterministic per-device [pool_id]s and calls these
     int-in / int-out primitives; the backend keeps the [pool_id -> 'base] table private. The
@@ -241,6 +254,13 @@ module type Backend_device_common = sig
       (device enumeration) does not run at backend-module initialization: singleton backends
       instantiate eagerly at program startup, where touching a driver could fail runs that never
       use the backend. *)
+
+  val hardware_limits : unit -> hardware_limits
+  (** Conservative per-workgroup device limits: on multi-device backends the minimum across the
+      devices, so code compiled once (compilation is not per-device) is valid wherever it links.
+      All-[None] for backends that do not bind hardware axes. A function for the same reason as
+      {!static_properties}: computing it (device enumeration) must not run at backend-module
+      initialization. *)
 
   val get_used_memory : device -> int
   (** Returns (an upper bound of) the memory used for arrays, in bytes. *)

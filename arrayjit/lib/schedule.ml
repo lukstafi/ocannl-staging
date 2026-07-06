@@ -1119,12 +1119,18 @@ let path_loops (nest : Low_level.t) : Low_level.t list =
   in
   go nest []
 
-let default_gpu ?block_size ?min_parallel (opt : Low_level.optimized) : schedule =
+let default_gpu ?block_size ?min_parallel ?(limits = Backend_intf.no_hardware_limits)
+    (opt : Low_level.optimized) : schedule =
   let open Low_level in
   let block_size =
     Option.value block_size
       ~default:
         (Int.of_string @@ Utils.get_global_arg ~arg_name:"gpu_schedule_block_size" ~default:"256")
+  in
+  (* The configured block size is a target, the device's workgroup capacity is a hard cap. *)
+  let block_size =
+    Option.value_map limits.Backend_intf.max_threads_per_workgroup ~default:block_size
+      ~f:(min block_size)
   in
   let min_parallel =
     Option.value min_parallel
@@ -1259,13 +1265,36 @@ let automatic_gpu_schedule =
 let backend_is_gpu name =
   String.is_substring name ~substring:"cuda" || String.is_substring name ~substring:"metal"
 
-let maybe_default_gpu ~backend_name ~static_indices (opt : Low_level.optimized) :
-    Low_level.optimized =
+let maybe_default_gpu ~backend_name ?(limits = Backend_intf.no_hardware_limits) ~static_indices
+    (opt : Low_level.optimized) : Low_level.optimized =
   if
     backend_is_gpu backend_name
     && Lazy.force automatic_gpu_schedule
     (* Runtime kernel logging is line-interleaved under parallel execution; keep logged runs
        serial so the logs stay deterministic and readable. *)
     && not (Utils.debug_log_from_routines ())
-  then apply ~static_indices (default_gpu opt) opt
+  then apply ~static_indices (default_gpu ~limits opt) opt
   else opt
+
+let check_hardware_limits ~name ~(limits : Backend_intf.hardware_limits)
+    (opt : Low_level.optimized) : unit =
+  Option.iter limits.max_threads_per_workgroup ~f:(fun max_threads ->
+      let block = (Low_level.launch_dims opt.llc).block in
+      let block_product = Array.fold block ~init:1 ~f:( * ) in
+      if block_product > max_threads then
+        raise
+        @@ Utils.User_error
+             [%string
+               "Schedule: kernel %{name} requests a workgroup of %{block_product#Int} threads, \
+                exceeding the device limit of %{max_threads#Int} threads per workgroup"]);
+  Option.iter limits.max_workgroup_memory_bytes ~f:(fun max_bytes ->
+      let shared_bytes =
+        Set.fold opt.workgroup_shared ~init:0 ~f:(fun acc tn ->
+            acc + Lazy.force tn.Tn.size_in_bytes)
+      in
+      if shared_bytes > max_bytes then
+        raise
+        @@ Utils.User_error
+             [%string
+               "Schedule: kernel %{name} stages %{shared_bytes#Int} bytes of workgroup-shared \
+                tiles, exceeding the device limit of %{max_bytes#Int} bytes"])

@@ -328,6 +328,29 @@ module Impl = struct
     in
     Sexp.List (Sexp.Atom "metal_devices" :: Array.to_list device_properties)
 
+  (* Conservative per-workgroup device limits for the schedule layer (schedule-ir-optops §6):
+     minimum across devices. [max_threads_per_threadgroup.width] is the device-level 1-D bound;
+     a pipeline's [maxTotalThreadsPerThreadgroup] (checked at PSO creation in [compile_proc]) can
+     restrict it further under register pressure. *)
+  (* Memoized behind [lazy] like [metal_devices] itself: device enumeration must not run at
+     backend-module initialization (see the [metal_devices] comment). *)
+  let hardware_limits =
+    let limits =
+      lazy
+        (let min_over f =
+           Array.map (Lazy.force metal_devices) ~f:(fun d -> f (Me.Device.get_attributes d))
+           |> Array.min_elt ~compare:Int.compare
+         in
+         {
+           Backend_intf.max_threads_per_workgroup =
+             min_over (fun (a : Me.Device.attributes) -> a.max_threads_per_threadgroup.width);
+           max_workgroup_memory_bytes =
+             min_over (fun (a : Me.Device.attributes) ->
+                 Unsigned.ULong.to_int a.max_threadgroup_memory_length);
+         })
+    in
+    fun () -> Lazy.force limits
+
   let get_global_debug_info () = Sexp.Atom "Metal global debug info NYI"
 
   let get_debug_info device =
