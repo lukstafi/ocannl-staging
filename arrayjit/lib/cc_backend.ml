@@ -48,28 +48,33 @@ let compiler_command =
    does). Stage 2 verifies the compiler accepts the candidate flags themselves, preferring the
    variant with -ftree-vectorize (explicit, though -O3 usually implies it). Any other config value
    is passed through verbatim (empty disables). *)
-(* Probe whether the configured compiler accepts [flags] on the translation unit [data]
-   (compile-only). Shared by the SIMD-flags and parallel-grid probes. *)
-let probe_compiles ~flags ~data =
+(* Probe whether the configured compiler accepts [flags] on the translation unit [data].
+   [`Compile] is compile-only ([-c]); [`Link] builds a full executable ([data] must define
+   [main]), catching runtimes that the compiler accepts flags for but cannot link -- e.g. clang
+   accepting [-fopenmp] at compile time without libomp installed. Shared by the SIMD-flags and
+   parallel-grid probes. *)
+let probe_compiles ?(mode = `Compile) ~flags ~data () =
   let src = Stdlib.Filename.temp_file "ocannl_cc_probe_" ".c" in
-  let obj = Stdlib.Filename.temp_file "ocannl_cc_probe_" ".o" in
+  let out = Stdlib.Filename.temp_file "ocannl_cc_probe_" ".out" in
   let log = Stdlib.Filename.temp_file "ocannl_cc_probe_" ".log" in
   let ok =
     try
       Stdio.Out_channel.write_all src ~data;
+      let compile_only = match mode with `Compile -> "-c " | `Link -> "" in
       let cmd =
-        Printf.sprintf "%s %s -c %s -o %s > %s 2>&1" (compiler_command ()) flags src obj log
+        Printf.sprintf "%s %s %s%s -o %s > %s 2>&1" (compiler_command ()) flags compile_only src
+          out log
       in
       Stdlib.Sys.command cmd = 0
     with _ -> false
   in
-  List.iter [ src; obj; log ] ~f:(fun f -> try Stdlib.Sys.remove f with _ -> ());
+  List.iter [ src; out; log ] ~f:(fun f -> try Stdlib.Sys.remove f with _ -> ());
   ok
 
 let simd_flags =
   let probed =
     lazy
-      (let compile = probe_compiles in
+      (let compile ~flags ~data = probe_compiles ~flags ~data () in
        let guard =
          "#if !defined(__AVX2__) || !defined(__FMA__)\n#error \"target lacks AVX2/FMA\"\n\
           #endif\nint ocannl_simd_probe;\n"
@@ -95,20 +100,26 @@ let simd_flags =
 let parallel_grid_syntax_setting =
   let probed =
     lazy
-      (let dispatch_src =
+      ((* Probes link full executables: a compiler can accept the flags yet lack the runtime
+          library at link time (clang without libomp), and the kernel command compiles and links
+          in one step. *)
+       let dispatch_src =
          "#include <dispatch/dispatch.h>\n\
-          void ocannl_dispatch_probe(void) {\n\
+          int main(void) {\n\
          \  dispatch_apply(1, DISPATCH_APPLY_AUTO, ^(size_t i) { (void)i; });\n\
+         \  return 0;\n\
           }\n"
        in
        let omp_src =
-         "void ocannl_omp_probe(int n, float *a) {\n\
+         "int main(void) {\n\
+         \  float a[4] = {0.0f, 0.0f, 0.0f, 0.0f};\n\
           #pragma omp parallel for\n\
-         \  for (int i = 0; i < n; ++i) a[i] += 1.0f;\n\
+         \  for (int i = 0; i < 4; ++i) a[i] += 1.0f;\n\
+         \  return (int)a[0] - 1;\n\
           }\n"
        in
-       if probe_compiles ~flags:"" ~data:dispatch_src then `Dispatch
-       else if probe_compiles ~flags:"-fopenmp" ~data:omp_src then `Openmp
+       if probe_compiles ~mode:`Link ~flags:"" ~data:dispatch_src () then `Dispatch
+       else if probe_compiles ~mode:`Link ~flags:"-fopenmp" ~data:omp_src () then `Openmp
        else `None)
   in
   fun () ->
@@ -246,8 +257,17 @@ let%track7_sexp c_compile_and_load ~f_path =
             libname);
   (* Note: RTLD_DEEPBIND not available on MacOS. *)
   let result = { lib = Dl.dlopen ~filename:libname ~flags:[ RTLD_NOW ]; libname } in
-  let%track7_sexp finalize (lib : library) : unit = Dl.dlclose ~handle:lib.lib in
-  Stdlib.Gc.finalise finalize result;
+  (match parallel_grid_syntax_setting () with
+  | `Openmp ->
+      (* Never dlclose kernels built with -fopenmp: unloading an object whose parallel regions
+         executed is a documented GOMP restriction -- libgomp's pool threads can retain references
+         into it, and the dlclose can drop libgomp itself (loaded only as this object's
+         dependency) under its parked workers. Observed as a SIGSEGV shortly after a routine was
+         collected (ubuntu CI, PR #97). Leak the mapping instead; kernels are small. *)
+      ()
+  | `Dispatch | `None ->
+      let%track7_sexp finalize (lib : library) : unit = Dl.dlclose ~handle:lib.lib in
+      Stdlib.Gc.finalise finalize result);
   result
 
 module CC_syntax_config (Procs : sig

@@ -519,34 +519,37 @@ module C_syntax (B : C_syntax_config) = struct
      as separate parallel loops with a join in between (stronger than the GPU's single launch).
      The hazards are the function-scope stack arrays declared by [local_decls]: on GPU each thread
      gets a private copy, so a GPU-valid kernel may legally write them grid-invariantly (identical
-     values per iteration) -- under one shared array that is a data race. Hence: a local written
-     under the loop requires every access to it (read or write) to mention [sym], making
-     iterations touch disjoint elements. [Set_local] scope locals must have their declaration
-     within the loop body (block scope = per-chunk storage). Opaque statements and barriers
-     disqualify. *)
+     values per iteration) -- under one shared array that is a data race. Hence, for a local
+     written under the loop: every access to it (read or write) must mention [sym], and all
+     accesses must agree on every index component that mentions [sym] -- the same agreement rule
+     as the default annotator's hazard analysis; mere mention is not enough, e.g. a stencil write
+     [tmp[i]] + read [tmp[i-1]] both mention [sym] but reach across iterations. [Set_local] scope
+     locals must have their declaration within the loop body (block scope = per-chunk storage).
+     Opaque statements and barriers disqualify. *)
   let parallel_grid_safe ~sym (body : Low_level.t) : bool =
     let plc = placements () in
     let is_local tn =
       (not (Tn.Placements.is_virtual_force plc tn 431))
       && not (Tn.Placements.is_materialized_force plc tn 432)
     in
-    let mentions idcs =
-      Array.exists idcs ~f:(fun idx ->
-          match idx with
-          | Indexing.Iterator s -> Indexing.equal_symbol s sym
-          | Indexing.Affine { symbols; _ } ->
-              List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
-          | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false)
+    let mentions_comp (idx : Indexing.axis_index) =
+      match idx with
+      | Indexing.Iterator s -> Indexing.equal_symbol s sym
+      | Indexing.Affine { symbols; _ } ->
+          List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
+      | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
     in
-    (* Per accessed function-scope local: (written under the loop, some access misses [sym]). *)
-    let locals : (bool * bool) Hashtbl.M(Int).t = Hashtbl.create (module Int) in
+    (* Per accessed function-scope local: (written under the loop, access index vectors). *)
+    let locals : (bool * Indexing.axis_index array list) Hashtbl.M(Int).t =
+      Hashtbl.create (module Int)
+    in
     let declared_scopes = Hash_set.create (module Int) in
     let ok = ref true in
     let access tn idcs ~write =
       if is_local tn then
         Hashtbl.update locals tn.Tn.id ~f:(fun st ->
-            let written, misses = Option.value st ~default:(false, false) in
-            (written || write, misses || not (mentions idcs)))
+            let written, accs = Option.value st ~default:(false, []) in
+            (written || write, idcs :: accs))
     in
     let rec go (llc : Low_level.t) =
       match llc with
@@ -594,7 +597,28 @@ module C_syntax (B : C_syntax_config) = struct
     in
     go body;
     !ok
-    && Hashtbl.for_all locals ~f:(fun (written, misses) -> not (written && misses))
+    && Hashtbl.for_all locals ~f:(fun (written, accs) ->
+           (not written)
+           || (* Distinct grid iterations must touch disjoint elements: every access mentions
+                 [sym]... *)
+           (List.for_all accs ~f:(fun idcs -> Array.exists idcs ~f:mentions_comp)
+           &&
+           (* ...and all accesses agree on every component that mentions [sym], so within one
+              iteration reads hit exactly the cells that iteration writes. *)
+           let rank = List.fold accs ~init:0 ~f:(fun m a -> max m (Array.length a)) in
+           let agree = ref true in
+           for p = 0 to rank - 1 do
+             let comps =
+               List.map accs ~f:(fun a ->
+                   if p < Array.length a then a.(p) else Indexing.Fixed_idx 0)
+             in
+             if List.exists comps ~f:mentions_comp then
+               match comps with
+               | [] -> ()
+               | c0 :: rest ->
+                   if not (List.for_all rest ~f:(Indexing.equal_axis_index c0)) then agree := false
+           done;
+           !agree))
 
   (* The outermost [Grid] loops safe to render in parallel. Nested [Grid] loops render serially
      inside a chunk (still correct: write coverage holds per grid index). Runtime kernel logging
