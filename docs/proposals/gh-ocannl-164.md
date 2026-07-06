@@ -81,6 +81,21 @@ parameters, not axis semantics. Separate work item, as is the possible multicore
 "CPU multi-device" repurposing (data-parallel debugging and GPU-less CI for the
 multi-device machinery).
 
+**Status update (2026-07-06): pool-backed Grid rendering implemented.** Eligible
+outermost `Grid` loops render as contiguous chunks over `dispatch_apply` (macOS) or
+`#pragma omp parallel for` (elsewhere; config `cc_parallel_grid`, "auto" probes the
+compiler) — both process-global pools, so no pool state lives in the kernel `.so` and
+the OCaml runtime is never involved. Eligibility (`C_syntax.collect_parallel_grid`)
+keeps a loop serial when a kernel-scope local (per-thread on GPU, shared under the C
+serialization) is written without mentioning the grid index — this is what makes
+GPU-valid hand schedules (e.g. `Privatize` accumulators) safe rather than racy —
+and under barriers, opaque statements, or runtime kernel logging. The new
+`Schedule.default_cpu` preset (config `automatic_cpu_schedule`,
+`cpu_schedule_min_parallel`) reuses the GPU annotator's analysis and just retypes each
+nest's outermost chain loop to `Grid`. Workgroup loops stay serial inside a chunk;
+barrier support via loop fission remains future work, as does the multi-device
+repurposing. Coverage: `test/operations/cpu_parallel.ml`.
+
 ## Status update (2026-07-05): implemented
 
 The CPU-improvements bundle landed on this branch; all four items plus verification:
