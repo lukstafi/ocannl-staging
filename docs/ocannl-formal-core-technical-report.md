@@ -1,8 +1,10 @@
 # The Formal Core of OCANNL Shape and Projection Inference
 
-This report is a standalone companion to the OCANNL workshop article,
-`docs/ocannl_workshop_article_human.md`. It consolidates the working notes in
-`docs/blog/ocannl-formal-core.md` and `docs/formal-core-appendix.md` into one
+This report is a standalone companion to the OCANNL workshop article
+"Neural Networks Without Shape Boilerplate: An OCaml DSL Case Study"
+(`docs/ocannl_workshop_article_human.md` in the OCANNL repository). It
+consolidates the working notes in `docs/blog/ocannl-formal-core.md` and
+`docs/formal-core-appendix.md` (also in the repository) into one
 coherent account. The scope is the core shape language used by the current
 proof effort: dimensions, row variables, broadcasting, flat row equality,
 solving, closing, and core projection inference. The staged extensions for
@@ -58,10 +60,10 @@ Elements `n_b` are atoms. Adjoin a fresh bottom element `bottom` and write
 **Definition 1.2 (Broadcast order).** On `D`,
 
 ```text
-d1 <= d2    iff    d2 = 1_empty or d1 = d2.
+d1 sqsubseteq d2    iff    d2 = 1_empty or d1 = d2.
 ```
 
-Extend this to `D_bottom` by `bottom <= d` for every `d`.
+Extend this to `D_bottom` by `bottom sqsubseteq d` for every `d`.
 
 Thus `1_empty` is the greatest element, atoms are pairwise incomparable, and
 `bottom` is only a proof device for meets.
@@ -81,7 +83,7 @@ d1 join d2 = 1_empty       for distinct atoms d1, d2.
 ```
 
 **Proof.** Reflexivity follows from equality in Definition 1.2. For
-antisymmetry, if `d1 <= d2` and `d2 <= d1` and `d1 != d2`, then the first
+antisymmetry, if `d1 sqsubseteq d2` and `d2 sqsubseteq d1` and `d1 != d2`, then the first
 inequality forces `d2 = 1_empty`, while the second forces `d1 = 1_empty`, a
 contradiction. For transitivity, if the rightmost element is `1_empty` the
 claim is immediate; otherwise the second inequality is equality, and the first
@@ -109,7 +111,7 @@ a meet (b join c) = a meet 1_empty = a
 
 So any lattice containing it as a sublattice is not distributive. The same
 argument cannot show non-modularity because `M_3` is modular. In fact the
-height-two atom lattice is modular: if `x <= z`, then the only non-trivial
+height-two atom lattice is modular: if `x sqsubseteq z`, then the only non-trivial
 case is `x = bottom` or `z = 1_empty`, and the modular law reduces to the
 defining equations for meet and join. `square`
 
@@ -138,26 +140,26 @@ The expansion inserts claim-free broadcast axes at the marker.
 
 **Definition 2.3 (Row order).** Write
 `R2 = l2 . diamond . r2` and `R1 = l1 . diamond . r1`. Then
-`R2 <= R1` iff:
+`R2 sqsubseteq R1` iff:
 
 1. `|l1| <= |l2|` and `|r1| <= |r2|`;
 2. for every position `i < rank(R2)`,
-   `(l2 . r2)[i] <= (R1 up rank(R2))[i]`.
+   `(l2 . r2)[i] sqsubseteq (R1 up rank(R2))[i]`.
 
 The left row is the more material row. A shorter row can sit above a longer
 one because the shorter row has more broadcast credit at its marker.
 
-**Lemma 2.4 (Expansion monotonicity).** If `R2 <= R1`, then for every
+**Lemma 2.4 (Expansion monotonicity).** If `R2 sqsubseteq R1`, then for every
 `n >= rank(R2)` and every position `i < n`,
 
 ```text
-(R2 up n)[i] <= (R1 up n)[i].
+(R2 up n)[i] sqsubseteq (R1 up n)[i].
 ```
 
 **Proof.** Write `Rj = lj . diamond . rj`. There are three regions.
 
 If `i < |l2|`, the left side is `l2[i]`. When `i < |l1|`, the defining
-pointwise condition gives `l2[i] <= l1[i]`. When `i >= |l1|`, the position
+pointwise condition gives `l2[i] sqsubseteq l1[i]`. When `i >= |l1|`, the position
 lies in the middle of `R1 up n` unless it is already in the trailing region;
 but `i < |l2| <= n - |r2| <= n - |r1|`, so it is not trailing. Hence the
 right side is `1_empty`, and the inequality is automatic.
@@ -169,17 +171,17 @@ conditions, `i` also lies in the middle of `R1 up n`, so the right side is
 If `i >= n - |r2|`, the proof is symmetric to the leading-flank case, using
 the outer-right alignment of trailing flanks. `square`
 
-**Proposition 2.5 (Partial order).** The row relation `<=` is a partial order.
+**Proposition 2.5 (Partial order).** The row relation `sqsubseteq` is a partial order.
 
 **Proof.** Reflexivity is immediate. For antisymmetry, mutual flank-fit gives
 equal leading and trailing flank lengths. The expansions at that common rank
 are the rows' flat contents, so pointwise antisymmetry in `D` gives equal
 flanks.
 
-For transitivity, suppose `R3 <= R2 <= R1` and let `n = rank(R3)`. Flank-fit
+For transitivity, suppose `R3 sqsubseteq R2 sqsubseteq R1` and let `n = rank(R3)`. Flank-fit
 conditions compose. The pointwise condition follows from
-`R3 up n <= R2 up n` by the first inequality and `R2 up n <= R1 up n` by
-Lemma 2.4 applied to `R2 <= R1`. Transitivity in `D` completes the proof.
+`R3 up n sqsubseteq R2 up n` by the first inequality and `R2 up n sqsubseteq R1 up n` by
+Lemma 2.4 applied to `R2 sqsubseteq R1`. Transitivity in `D` completes the proof.
 `square`
 
 **Proposition 2.6 (Top row).** The empty marked row
@@ -204,13 +206,13 @@ and similarly for the trailing flank, aligned from the right.
 input flank. On positions retained in `Rj`, the dimension join is an upper
 bound; positions outside the retained flanks expand to `1_empty`.
 
-Now let `U` be any upper bound. Since `R1 <= U` and `R2 <= U`, the flanks of
+Now let `U` be any upper bound. Since `R1 sqsubseteq U` and `R2 sqsubseteq U`, the flanks of
 `U` are no longer than the corresponding flanks of both inputs, hence no
-longer than the flanks of `Rj`. Thus the flank-fit condition for `Rj <= U`
+longer than the flanks of `Rj`. Thus the flank-fit condition for `Rj sqsubseteq U`
 holds. At each retained leading position of `U`, both `l1[i]` and `l2[i]`
 are below `U`'s dimension there, so their join is below it. The trailing side
 is symmetric. Positions in the middle of `U` are `1_empty`. Therefore
-`Rj <= U`. `square`
+`Rj sqsubseteq U`. `square`
 
 **Definition 2.8 (Flat equivalence).** The flat content of
 `l . diamond . r` is `l . r`. Define `R approx R'` iff their flat contents
@@ -220,10 +222,10 @@ rank.
 `approx` is not the identity of row elements. It is the equality relation used
 for row equality constraints, including einsum template matching.
 
-**Proposition 2.9 (`approx` versus `<=`).**
+**Proposition 2.9 (`approx` versus `sqsubseteq`).**
 
-1. The equivalence induced by mutual `<=` is identity.
-2. Distinct rows related by `approx` are incomparable under `<=`.
+1. The equivalence induced by mutual `sqsubseteq` is identity.
+2. Distinct rows related by `approx` are incomparable under `sqsubseteq`.
 3. `approx` is not a congruence for the marked row order.
 
 **Proof.** Item 1 is antisymmetry. For item 2, two flat-equal but distinct
@@ -240,8 +242,8 @@ S  = [3] . diamond . [4]
 S' = [3,4] . diamond . [].
 ```
 
-Then `S approx S'`, and `R <= S`: the expansion of `S` to rank three is
-`[3, 1_empty, 4]`. But `R <= S'` fails because the upper row would need a
+Then `S approx S'`, and `R sqsubseteq S`: the expansion of `S` to rank three is
+`[3, 1_empty, 4]`. But `R sqsubseteq S'` fails because the upper row would need a
 leading flank of length at most one, while `S'` has leading length two. Thus
 replacing an `approx`-equivalent row inside the marked order can change truth.
 `square`
@@ -260,8 +262,8 @@ the order by:
 
 - marked-marked: Definition 2.3;
 - rigid-rigid: equal rank and pointwise refinement;
-- rigid below marked: `F^bullet <= R` iff `rank(F) >= rank(R)` and
-  `F[i] <= (R up rank(F))[i]` pointwise;
+- rigid below marked: `F^bullet sqsubseteq R` iff `rank(F) >= rank(R)` and
+  `F[i] sqsubseteq (R up rank(F))[i]` pointwise;
 - marked below rigid: never.
 
 **Proposition 2.11 (Two-sorted order).** The extended relation is a partial
@@ -273,9 +275,9 @@ cross-sort mutual comparison is impossible because marked rows are never below
 rigid rows. For transitivity, the all-marked case is Proposition 2.5, the
 all-rigid case is pointwise transitivity, and the mixed cases are:
 
-- rigid `<=` rigid `<=` marked, where the equal rigid ranks and pointwise
+- rigid `sqsubseteq` rigid `sqsubseteq` marked, where the equal rigid ranks and pointwise
   inequalities compose;
-- rigid `<=` marked `<=` marked, where Lemma 2.4 transports the second
+- rigid `sqsubseteq` marked `sqsubseteq` marked, where Lemma 2.4 transports the second
   marked inequality to the rigid rank.
 
 No other mixed chain is possible because marked-below-rigid comparisons are
@@ -286,19 +288,19 @@ The forbidden marked-below-rigid clause is forced. If even rank-equal marked
 rows were allowed below their rigidifications, then
 
 ```text
-[5] . diamond . [3] <= [] . diamond . [3] <= [3]^bullet
+[5] . diamond . [3] sqsubseteq [] . diamond . [3] sqsubseteq [3]^bullet
 ```
 
-would require `[5] . diamond . [3] <= [3]^bullet`, impossible by rank.
+would require `[5] . diamond . [3] sqsubseteq [3]^bullet`, impossible by rank.
 
 **Definition 2.12 (Row subtype/refinement).** Write `R preceq S` when
-`flat(R)^bullet <= S` in the two-sorted order. This is the
+`flat(R)^bullet sqsubseteq S` in the two-sorted order. This is the
 marker-erasing-on-the-left, marker-sensitive-on-the-right relation used for
 semantic row-subtyping constraints. The left row is viewed as a rigid flat
 result; the right row remains a marked broadcastable operand whose marker
 determines where implicit `1_empty` axes are inserted. We call this a row
 subtype/refinement relation to emphasize its role as the surface shape
-relation, while reserving the marked order `<=` for the internal structural
+relation, while reserving the marked order `sqsubseteq` for the internal structural
 order of rows.
 
 ## 3. Terms, Substitutions, and Constraints
@@ -348,7 +350,7 @@ component of the composite substitution. `square`
 
 ```text
 t1 = t2
-t1 <= t2
+t1 sqsubseteq t2
 R1 approx R2
 R1 preceq R2.
 ```
@@ -367,7 +369,7 @@ models `Phi`, written `sigma models Phi`, iff every ground substitution
 `gamma` makes `gamma o sigma` a solution. The substitution preorder is
 `sigma1 <= sigma2` iff there exists `u` with `u o sigma1 = sigma2`.
 
-**Example 3.6 (No principal model).** For `Phi = { 3_b <= alpha }`, the
+**Example 3.6 (No principal model).** For `Phi = { 3_b sqsubseteq alpha }`, the
 identity substitution is not a model because `alpha` could be grounded to a
 different atom. The substitutions `[alpha -> 3_b]` and
 `[alpha -> 1_empty]` are both models, and neither factors through the other:
@@ -422,14 +424,14 @@ reason stored facts can be interpreted as constraints in the metatheory.
 - **DE-refl:** `t = t`; discard.
 - **DE-clash:** distinct ground dimensions; `fail`.
 - **DE-bind:** `alpha = t`, `t != alpha`; bind `alpha -> t`.
-- **DI-top:** `t <= 1_empty`; discard.
-- **DI-refl:** `t <= t`; discard.
-- **DI-ground:** ground `d <= d'`; check Definition 1.2, else `fail`.
-- **DI-pin:** `alpha <= d`, with `d` an atom; replace by `alpha = d`.
-- **DI-pin-top:** `1_empty <= alpha`; replace by `alpha = 1_empty`.
-- **DI-cap:** `d <= alpha`, with `d` an atom; record the lower bound. If a
+- **DI-top:** `t sqsubseteq 1_empty`; discard.
+- **DI-refl:** `t sqsubseteq t`; discard.
+- **DI-ground:** ground `d sqsubseteq d'`; check Definition 1.2, else `fail`.
+- **DI-pin:** `alpha sqsubseteq d`, with `d` an atom; replace by `alpha = d`.
+- **DI-pin-top:** `1_empty sqsubseteq alpha`; replace by `alpha = 1_empty`.
+- **DI-cap:** `d sqsubseteq alpha`, with `d` an atom; record the lower bound. If a
   distinct atom is already recorded, bind `alpha -> 1_empty`.
-- **DI-adj:** `alpha <= beta`, `alpha != beta`; record the adjacency and
+- **DI-adj:** `alpha sqsubseteq beta`, `alpha != beta`; record the adjacency and
   forward existing caps.
 
 **Lemma 4.2 (Dimension rules preserve solutions).** Each non-failing
@@ -445,7 +447,7 @@ DI-pin-top, the only dimension above the top is the top. For DI-cap, storing
 a first lower bound only moves the constraint into `B`. If a distinct atom is
 already stored, any common upper bound of the two atoms is `1_empty`, so the
 two caps are equivalent to `alpha = 1_empty`. DI-adj only records and forwards
-the transitive consequence `d <= alpha <= beta`. `square`
+the transitive consequence `d sqsubseteq alpha sqsubseteq beta`. `square`
 
 ### 4.2 Row Rules
 
@@ -852,9 +854,9 @@ gamma_up(rho)   = [] . diamond . []
 and extend through `sigma_star`. Then `gamma_up` satisfies
 `constr(B_star) union eqns(sigma_star)` and is pointwise greatest for that
 final configuration: row variables compare by `preceq`, and dimension
-variables compare by `<=`.
+variables compare by `sqsubseteq`.
 
-**Proof.** Atom caps `d <= alpha` hold because `d <= 1_empty`. Dimension
+**Proof.** Atom caps `d sqsubseteq alpha` hold because `d sqsubseteq 1_empty`. Dimension
 adjacencies hold because both sides are `1_empty`. Row caps and row
 adjacencies hold because every row is below the empty row by Definition 2.12.
 Bindings hold by extension through `sigma_star`.
@@ -866,6 +868,16 @@ ground flanks compare by equality; variable occurrences use the unsolved
 case; for an open row term, the lower side is flattened and the upper side
 under `gamma_up` supplies `1_empty` in the middle, so shared flank entries
 compare by induction and middle positions compare against `1_empty`. `square`
+
+The `preceq` comparison at row sort is forced, not merely convenient:
+`eqns(sigma_star)` is read under `approx`, so a solution may re-place the
+marker of a solved row variable, and distinct placements of the same flat
+content are pairwise `sqsubseteq`-incomparable (Proposition 2.9). Once a row
+variable is solved to a row of positive rank, the final configuration has no
+`sqsubseteq`-greatest solution at all. When the solver substitutes for a row
+variable it commits to one marker placement; the commitment is a source of
+incompleteness (the policy steps of Lemma 5.1), not of order-theoretic
+strength.
 
 **Corollary 5.8 (Decision status).** Successful solving implies
 `Sol(Phi0)` is non-empty. Semantic failure implies `Sol(Phi0)` is empty.
@@ -961,10 +973,10 @@ Lemma 5.1. `square`
 
 ```text
 Phi = {
-  3_b <= alpha,
-  5_b <= beta,
-  gamma <= alpha,
-  gamma <= beta
+  3_b sqsubseteq alpha,
+  5_b sqsubseteq beta,
+  gamma sqsubseteq alpha,
+  gamma sqsubseteq beta
 }
 ```
 
@@ -977,14 +989,17 @@ silently broadening a leaf tensor with a concrete lower bound unless the user
 asks for that shape.
 
 **Proposition 6.4 (Upward closing greatestness).** The uniform-upward solution
-`gamma_up` of Proposition 5.7 is a solution of the final configuration. It is
-pointwise greatest among solutions of the policy-strengthened system in the
-marked order. Moreover, for every solution of the rank-policy-strengthened
+`gamma_up` of Proposition 5.7 is a solution of the final configuration, and
+pointwise greatest among its solutions with rows compared by `preceq`
+(Proposition 5.7). Moreover, for every solution of the rank-policy-strengthened
 initial system, `gamma(x) preceq gamma_up(x)` at row sort and
-`gamma(x) <= gamma_up(x)` at dimension sort.
+`gamma(x) sqsubseteq gamma_up(x)` at dimension sort. There is no marked-order
+(`sqsubseteq`) strengthening at row sort to state: by the remark after
+Proposition 5.7, re-placed markers already defeat it over the final
+configuration, hence over any larger solution set.
 
-**Proof.** Membership and marked greatestness for the final configuration are
-Proposition 5.7. The policy-strengthened initial system maps exactly to the
+**Proof.** Membership and greatestness for the final configuration are
+Proposition 5.7. The rank-policy-strengthened initial system maps to the
 final configuration by Lemma 5.1 and Theorem 5.9.
 
 For the `preceq` statement, dimensions are immediate from topness or entailed
@@ -1103,9 +1118,9 @@ Each projection id has a solved positive size.
 **Definition 7.2 (Elaboration from closed core constraints).**
 
 - `d1 = d2` emits `Eq(d1, d2)`.
-- `d_res <= d_op` with `size(d_op) = 1` emits
+- `d_res sqsubseteq d_op` with `size(d_op) = 1` emits
   `Eq(d_op, Fix 0)`: the operand broadcasts and is pinned.
-- Other `d_res <= d_op` emits `Eq(d_res, d_op)`.
+- Other `d_res sqsubseteq d_op` emits `Eq(d_res, d_op)`.
 - `R1 approx R2` aligns flat rows and emits equality equations per pair.
 - `R_res preceq R_op` aligns explicit material from the outer edges; surplus
   result axes are iterated; operand axes of size one are pinned to zero as
@@ -1302,10 +1317,10 @@ The lower-level probe in `test/einsum/test_closing_order.ml` contains the
 dimension store
 
 ```text
-3_b <= alpha
-5_b <= beta
-gamma <= alpha
-gamma <= beta
+3_b sqsubseteq alpha
+5_b sqsubseteq beta
+gamma sqsubseteq alpha
+gamma sqsubseteq beta
 ```
 
 with `alpha` and `beta` treated as leaves. The store is satisfiable by raising

@@ -133,9 +133,9 @@ e.g.~\passthrough{\lstinline!..batch..!} or
 \passthrough{\lstinline!..activations..!}, sandwiched between leading
 and trailing axes; with up to three such variables per shape. We call
 these \emph{row variables}. The paper showcases three examples: tensor
-expressions core multi-head attention, rank-polymorphic 2D convolution;
-and tensor computation for Stochastic Gradient Descent with momentum and
-Nesterov-inspired correction. OCANNL performs broadcast-aware global
+expressions for core multi-head attention and for rank-polymorphic 2D
+convolution, and a tensor computation for Stochastic Gradient Descent
+with momentum and Nesterov-inspired correction. OCANNL performs broadcast-aware global
 bidirectional shape inference and derives loop-index maps for code
 generation. We formalize the inference problem for the core calculus
 (excluding affine and concatenation) and show properties of OCANNL's
@@ -211,10 +211,10 @@ combining the arithmetic semantics, for example:
 \passthrough{\lstinline!+*!} is multiplication with additive
 accumulation. These operators also support \emph{variable capture} for
 both dimensions and rows -- the variables from a trailing string list
-are introduced into scope earlier than they first appear (simiarly to
+are introduced into scope earlier than they first appear (similarly to
 inline definitions). The captured variables can be used for both shape
 constraints \passthrough{\lstinline!Shape.set\_dim!},
-\passthrough{\lstinline!Shape.equal\_dims!} and converted to scalars via
+\passthrough{\lstinline!Shape.set\_equal!} and converted to scalars via
 \passthrough{\lstinline!dim!} (for row variables, the value is the
 product of the dimensions of the axes).
 
@@ -255,6 +255,10 @@ contractions, and loop-index maps are inferred.
 \passthrough{\lstinline!max!}, and \passthrough{\lstinline!@\^\^!} is
 the \passthrough{\lstinline!max!} reducing equivalent of
 \passthrough{\lstinline!++!}.
+\passthrough{\lstinline!replace\_alphanum\_by\_0!} stands for the elided
+helper that replaces axis identifiers with the fixed index
+\passthrough{\lstinline!0!} (in the library:
+\passthrough{\lstinline!reduce\_specified\_axes!}).
 \end{quote}
 
 \begin{lstlisting}[language=Caml]
@@ -280,7 +284,12 @@ addressed at affine spatial positions
 with the input-channel row \passthrough{\lstinline!..ic..!}, are
 contracted. The context row \passthrough{\lstinline!...!} and
 output-channel row \passthrough{\lstinline!..oc..!} are inferred and may
-have arbitrary rank.
+have arbitrary rank. The \passthrough{\lstinline!use\_padding!} argument
+is consumed implicitly by the syntax extension: a convolution index
+expression written with plain \passthrough{\lstinline!+!} elaborates to
+read \passthrough{\lstinline!use\_padding!} from scope, selecting
+size-preserving padding (explicitly: \passthrough{\lstinline!=+!}) when
+true and valid convolution (\passthrough{\lstinline!<+!}) when false.
 \end{quote}
 
 \begin{lstlisting}[language=Caml]
@@ -349,7 +358,7 @@ We say ``row'' for analogy with type systems, but our shape rows are
 sequences of axes rather than records. OCANNL doesn't have a
 ``full-blown'' parametric polymorphism because we don't generalize
 inferred shapes into shape schemes, but it does have ``poor man's''
-parametric polymophism because we generate fresh shape variables for
+parametric polymorphism because we generate fresh shape variables for
 shape constraints derived at tensor operation call sites. Thus OCANNL
 has two forms of rank polymorphism: structural (subtyping) via
 broadcasting and parametric via row variables.
@@ -357,7 +366,7 @@ broadcasting and parametric via row variables.
 The motivation to have left flank axes in shape (row) terms first came
 from the slice operation -- for example when subdividing data into
 hierarchical minibatches (like in data parallel batched training). This
-impacts broadcasting: rather assuming that implicit axes from
+impacts broadcasting: rather than assuming that implicit axes from
 broadcasting land to the left of the ``left flank'', we generalize
 broadcasting to happen in the middle between left and right flanks of
 already-determined axes of a shape row. This allows uniform handling of
@@ -384,8 +393,10 @@ concatenation), present the shape and projections inference algorithms
 loops), and prove their properties. Proofs are available online. In
 particular, TR Theorem 5.4, TR Theorem 5.9, and TR Proposition 6.2,
 together state inference termination and soundness. Inference is
-declarative: the result does not depend on the ordering of the
-constraints. The shape inference problem is non-principal, and the
+declarative --- the result does not depend on the ordering of the
+constraints --- except at the solver's documented policy commitments
+(marker placement and deferred word equations, see the Appendix). The
+shape inference problem is non-principal, and the
 algorithm is in general incomplete. Should the incompleteness ever
 manifest in practice, users can provide additional constraints via for
 example \passthrough{\lstinline!Shape.infer\_equal!}, or variable
@@ -410,7 +421,7 @@ Proposition 2.9 in the appendix:
 
 Solution \(\gamma\rho = [3]\cdot\diamond\cdot[5]\) would satisfy both
 constraints (\([3,9,5]\) vs \([3,1_\emptyset,5]\)). OCANNL fails here by
-comitting to \(\gamma\rho = [\,]\cdot\diamond\cdot[3,5]\).
+committing to \(\gamma\rho = [\,]\cdot\diamond\cdot[3,5]\).
 
 \subsection{Dimension basis instead of axis
 name}\label{dimension-basis-instead-of-axis-name}
@@ -430,8 +441,8 @@ broadcastable.
 We track the distinction between parameter tensors and other leaf
 tensors. When an axis of a parameter tensor has nothing constraining it,
 inference fails with
-\passthrough{\lstinline!"you forgot to specify a hidden dimension"!}.
-When it is of a non-paramenter tensor, the unconstrained axis closes
+\passthrough{\lstinline!"You forgot to specify the hidden dimension(s)"!}.
+When it is of a non-parameter tensor, the unconstrained axis closes
 upward to \(1_\emptyset\).
 
 \section{Contexts and explicit
@@ -474,8 +485,8 @@ Dependent types enable tracking tensor shapes in tensor types; they are
 included in restricted forms in ergonomic programming languages with
 type inference. The DML system \emph{Xi, Pfenning, ``Dependent Types in
 Practical Programming'', 1999} paved the way to GADTs and refinement
-types. The most prominent current example is Futhark \emph{Henriksen,
-Elsman, Bailly, ``Shape-Constrained Array Programming with
+types. The most prominent current example is Futhark \emph{Bailly,
+Henriksen, Elsman, ``Shape-Constrained Array Programming with
 Size-Dependent Types'', 2023}. It has capable type inference, but no
 rank-polymorphism. This contrasts with Qube \emph{Trojahner, Grelck,
 ``Dependently typed array programs don't go wrong'', 2009}. Qube has
@@ -485,7 +496,7 @@ An interesting recent work is Star \emph{Bachurski, Mycroft, and
 Orchard, ``Structuring Arrays with Algebraic Shapes'', 2025}. It
 interprets algebraic data types as types of tensor indices. This is
 reminiscent of OCANNL's connection between shapes and projections. Star
-supports structural rank-polymoprhism via subtyping: as in OCANNL,
+supports structural rank-polymorphism via subtyping: as in OCANNL,
 Star's shapes form a lattice (but as in type systems, the lattice is
 distributive, while OCANNL's lattice is not distributive). Star does not
 aim at tracking array (dimension) sizes. Star does not have shape
@@ -506,7 +517,7 @@ dimensions and shape sequences, bringing expressivity from below to
 beyond what's available in OCANNL. However, refinements are not
 inferred.
 
-\emph{Vasilache, Zinenko, Theodoridis et. al.~``Tensor Comprehensions:
+\emph{Vasilache, Zinenko, Theodoridis et al.~``Tensor Comprehensions:
 Framework-Agnostic High-Performance Machine Learning Abstractions'',
 2018} is the closest surface precedent: index variables induce ranges,
 right-hand-side-only indices induce reductions, affine subscripts
@@ -546,9 +557,10 @@ Common Subexpression Elimination on the lowered IR (a loop nest
 language). Tiling for threadblocks and tensor cores, and further
 optimizations, are ongoing/future work.
 
-\textbf{Authorship:} all the content above was written entirely by the
-human author, without any AI/LLM feedback. The appendix below and the
-accompanying
+\textbf{Authorship:} the content above was written by the human author
+without AI/LLM feedback, apart from a final AI-assisted review pass
+(Claude Fable 5) that caught typos and consistency issues against the
+technical report. The appendix below and the accompanying
 \href{https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf}{technical
 report} were created by Claude Fable 5 (interactively, Appendix trimmed
 down for brevity) and GPT 5.5 (fixing issues I noticed, final compilation and proof gaps).
@@ -558,6 +570,12 @@ correctness}\label{appendix-shape-and-projections-inference-semantics-and-correc
 
 TR refers to
 \href{https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf}{ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf}.
+Notation (shared with the TR): \(\sqsubseteq\) is the algebraic order,
+on dimensions and on marked rows; \(\preceq\) is the row
+subtype/refinement relation of TR Definition 2.12, the relation used
+when generating row constraints --- the algebraic order on rows is too
+strong for the broadcast semantics; \(\le\) is reserved for the
+substitution preorder.
 
 \subsection{1. Dimensions}\label{dimensions}
 
@@ -582,7 +600,7 @@ covering \(\bot\) and covered by \(1_\emptyset\). Meets and joins:
 \textbf{Proposition {[}TR Proposition 1.4{]} (Non-distributivity).}
 \(D\) contains at least three atoms,
 e.g.~\(\{1_{\texttt{default}}, 2_{\texttt{default}}, 3_{\texttt{default}}\} \subseteq D\),
-so \(D_\bot\) is not distributive, and not modular.
+so \(D_\bot\) is not distributive (it is, however, modular).
 
 \subsection{2. Rows}\label{rows}
 
@@ -899,8 +917,7 @@ to \(\beta\) \\
 DI-pin-top: the only element above the top is the top. DI-cap collapse:
 any \(\gamma(\alpha)\) above two distinct atoms must be \(1_\emptyset\)
 (TR Proposition 1.3). DI-cap/DI-adj forwarding emits only transitive
-consequences of already-stored constraints. DI-pin-top is the case the
-blog's narrative omits.
+consequences of already-stored constraints.
 
 \textbf{Definition {[}TR Definitions 4.3-4.4; TR Lemma 4.5{]} (Row
 rules).} Write both sides aligned at the \textbf{outer edges}: leading
@@ -961,9 +978,6 @@ additionally chooses a placement that \(\approx\) leaves free (the
 marker-placement remark above): it commits to the closed side's declared
 split where that split falls inside \(m\), and to the left edge
 otherwise. This is a policy step in the family of TR Definition 6.1.
-\emph{(The implementation additionally rejects when the open side's
-trailing flank overflows the closed side's; conservative under
-\(\approx\).)}
 
 RE-nested is entailed by cancelling common outer flanks of the flat
 words; only placement is policy, as above. RE-cross is the two-variable
@@ -1169,7 +1183,7 @@ a solution of the old; conversely a solution of the old survives into
 the new after re-placing the bound variables' markers, which is possible
 iff no row-subtyping constraint of \(\widehat{C}\) discriminates the
 placement --- the witness in the marker-placement remark above is the
-counterexample, and the order-dependence discussion in TR §6.1 is its
+counterexample, and the marker-provenance discussion in TR §6.1 is its
 operational trace. A \(\mathsf{fail}\) arising from a substituted
 placement, where another representative would have passed, is therefore
 a \emph{policy rejection}, not semantic unsatisfiability.
@@ -1196,7 +1210,7 @@ with a rank model agreeing on the old variables (extended on fresh
 ones). RI-deficit extends by
 \(r(\rho') := r(\rho_{\mathrm{res}}) - k \ge 0\), justified by the
 triggering constraint's own rank fact; everything else preserves the
-model verbatim. \emph{(A.2's remark: the previously drafted RE-cross
+model verbatim. \emph{(As the TR notes, the previously drafted RE-cross
 fresh-variable binding would break this lemma --- its
 \(\mathrm{rank}(\rho_2) \ge |s|\) commitment is not implied by the
 consumed fact --- an independent reason for RE-cross's correction to
@@ -1216,8 +1230,8 @@ guarding is semantically free.
 \(\mathrm{Sol}(\Phi_0) = \emptyset\) and no run reaches solved form (TR
 Proposition 5.7 plus TR Lemma 5.1 would otherwise produce a solution,
 hence a rank model); every run either fails or diverges, and the cycle
-check is what must convert divergence into failure. A small gap remains
-in our proof that it always does. The proof is built around:
+check is what converts divergence into failure. The proof (completed in
+the TR) is built around:
 
 \textbf{Detection Lemma {[}TR Lemma 5.5{]}.} Every infinite run inserts,
 at some finite stage, an edge closing a positive-weight cycle in \(G\).
@@ -1232,8 +1246,7 @@ lower bound; all stored row caps and adjacencies are between unsolved
 variables and contain no pending pins (else a rule would fire).
 
 \textbf{Proposition {[}TR Proposition 5.7{]} (The residual store is
-always satisfiable; \(\gamma_\uparrow\) is its greatest solution).
-{[}proved{]}} Define \(\gamma_\uparrow\) on the unsolved variables:
+always satisfiable; \(\gamma_\uparrow\) is its greatest solution).} Define \(\gamma_\uparrow\) on the unsolved variables:
 \(\gamma_\uparrow(\alpha) = 1_\emptyset\),
 \(\gamma_\uparrow(\rho) = [\,]\cdot\diamond\cdot[\,]\), extended through
 \(\sigma_\star\) on solved variables
@@ -1241,7 +1254,8 @@ always satisfiable; \(\gamma_\uparrow\) is its greatest solution).
 \(\gamma_\uparrow \in \mathrm{Sol}(\mathrm{constr}(B_\star) \cup \mathrm{eqns}(\sigma_\star))\);
 (ii) \(\gamma_\uparrow\) is the pointwise-greatest element of that
 solution set: for every solution \(\gamma\) and every variable \(x\),
-\(\gamma(x) \sqsubseteq \gamma_\uparrow(x)\).
+\(\gamma(x) \sqsubseteq \gamma_\uparrow(x)\) at dimension sort and
+\(\gamma(x) \preceq \gamma_\uparrow(x)\) at row sort.
 
 \emph{(Scope notes. First: solved form here is taken with the
 RE-same-rot deferrals discharged --- an in-flight deferred equation
@@ -1249,11 +1263,15 @@ RE-same-rot deferrals discharged --- an in-flight deferred equation
 \(s = t\), so a surviving \(s \ne t\) deferral postpones (i) to the
 closing step that resolves or fails it; the success direction of TR
 Corollary 5.8 is unaffected, since an end-to-end successful run has
-discharged its deferrals. Second: (ii)'s greatestness is over the
-solution set of the} final configuration, \emph{which encodes the run's
-placement commitments; it does not by itself give greatestness over
-\(\mathrm{Sol}(\Phi_0)\) --- that transfer is the content, and the
-caveat, of TR Proposition 6.4.)}
+discharged its deferrals. Second: (ii) compares rows by \(\preceq\) of
+necessity: \(\mathrm{eqns}(\sigma_\star)\) is read under \(\approx\), so
+a solution may re-place a solved row variable's marker, and distinct
+placements are \(\sqsubseteq\)-incomparable (TR Proposition 2.9(ii)) ---
+when the solver substitutes, it commits one placement, a policy
+incompleteness rather than order-theoretic strength. The greatestness is
+over the solution set of the} final configuration\emph{; it does not by
+itself give greatestness over \(\mathrm{Sol}(\Phi_0)\) --- that transfer
+is the content, and the caveat, of TR Proposition 6.4.)}
 
 \textbf{Corollary {[}TR Corollary 5.8{]} (Decision).} A fair run fails
 iff the \emph{policy-strengthened} system is unsatisfiable ---
@@ -1305,7 +1323,7 @@ placement-undiscriminated inputs (the conjectured surface fragment ---
 TR Corollary 5.8). (3) is up to \(\approx\) as the proof now states:
 \(\sigma_\star\) is most general in content; its marker placements are
 the policy's, not canonical. This is the theorem-level form of the
-order-dependence caveat in TR §6.1.
+marker-placement caveat in TR §6.1.
 
 \textbf{Caveat to (1)/(2):} the extension over fresh variables is
 existential, exactly as in standard unification with fresh-variable
@@ -1323,8 +1341,8 @@ solved form.
 If \(B_\star\) stores no atom caps and no row caps (adjacencies
 allowed), then \(\sigma_\star\) (read as a model, free variables
 universal) satisfies \(\sigma_\star \models \Phi_0\), and by TR Theorem
-5.9(3) it is the \(\le\)-least model: the blog's ``principal model''
-claim holds exactly in this case. TR Example 3.6 shows the restriction
+5.9(3) it is the \(\le\)-least model: a principal model exists exactly
+in this case. TR Example 3.6 shows the restriction
 is necessary.
 
 \subsection{6. Closing}\label{closing}
@@ -1365,8 +1383,8 @@ deficit potential consults only open-result lineages); a rank-breaking
 commitment therefore fails \emph{finitely}, through the absolute
 fragment. TR Lemma 5.5 is not needed here.
 
-\textbf{Remark {[}TR Example 6.3{]} (Transitive \(\mathrm{glb}\) and
-incomplete leaf closing).} Let \[
+\textbf{Remark {[}TR Definition 4.1; TR Example 6.3{]} (Transitive
+\(\mathrm{glb}\) and incomplete leaf closing).} Let \[
 \Phi_1 = \{3_b \sqsubseteq \alpha,\ \alpha \sqsubseteq \beta,\ 5_b \sqsubseteq \beta\}
 \] with \(\alpha,\beta\) leaves. By TR Definition 4.1,
 \(3_b \sqsubseteq \alpha \sqsubseteq \beta\) contributes the lower bound
@@ -1397,21 +1415,27 @@ direction of TR Lemma 5.1 composes through policy steps. Its
 \emph{greatestness} needs more care than the original one-line proof
 (``TR Proposition 5.7 plus TR Theorem 5.9(1)'') admitted: that route
 uses TR Theorem 5.9(1)'s only-if direction, which policy steps break ---
-the final configuration encodes the run's placement commitments, so TR
-Proposition 5.7(ii) quantifies over a possibly \emph{proper} subset of
-\(\mathrm{Sol}(\Phi_0)\). Three correct forms:
+the run's policy commitments strengthen the configuration (placements
+through substituted occurrences on operand sides, rank choices through
+deferred-equation resolutions), so TR Proposition 5.7(ii) quantifies
+over a possibly \emph{proper} subset of \(\mathrm{Sol}(\Phi_0)\). Three
+correct forms:
 
 \begin{enumerate}
 \def\labelenumi{(\roman{enumi})}
 \item
-  \emph{Policy-relative, marked order.} \(\gamma_\uparrow\) is
-  pointwise-greatest among the solutions of the
-  \emph{policy-strengthened} system --- \(\Phi_0\) plus the run's
-  placement commitments; equivalently, the solutions that extend into
-  the final configuration (TR Corollary 5.8's phrase). On
-  placement-undiscriminated inputs (conjecturally the whole surface
-  fragment) this set is all of \(\mathrm{Sol}(\Phi_0)\) and the
-  unqualified claim holds.
+  \emph{Final-configuration form, and why \(\preceq\).}
+  \(\gamma_\uparrow\) is pointwise-greatest among the solutions of the
+  final configuration, rows compared by \(\preceq\) (TR Proposition
+  5.7). No marked-order (\(\sqsubseteq\)) strengthening holds at row
+  sort: row equations --- including
+  \(\mathrm{eqns}(\sigma_\star)\) --- are read under \(\approx\), so a
+  solution may re-place the marker of a solved row variable, and
+  distinct placements are pairwise \(\sqsubseteq\)-incomparable (TR
+  Proposition 2.9(ii)); once a row variable is solved to a row of
+  positive rank, no \(\sqsubseteq\)-greatest solution exists at all.
+  The solver's substitution commits one placement --- a policy
+  incompleteness (TR Lemma 5.1), not order-theoretic strength.
 \item
   \emph{The unqualified marked claim is false.}
   \(\Phi_0 = \{\langle\rho\rangle \approx [\,]\cdot\diamond\cdot[3,5]\}\):
@@ -1424,10 +1448,10 @@ Proposition 5.7(ii) quantifies over a possibly \emph{proper} subset of
 \item
   \emph{Absolute up to \(\approx\), relative to the rank policy.} For
   every \(\gamma \in \mathrm{Sol}(\Phi_0^{\mathrm{rk}})\) --- \(\Phi_0\)
-  plus the run's deferred-equation resolutions, the rank-level policy
-  commitments of (c-split)/(d) --- and every \(x \in V\):
-  \(\gamma(x) \preceq \gamma_\uparrow(x)\) at row sort, plain
-  \(\sqsubseteq\) at dimension sort. \textbf{{[}proved --- A.6{]}}
+  plus the run's deferred-equation resolutions, i.e.~the rank-level
+  policy commitments of RE-cross and RE-same-rot --- and every
+  \(x \in V\): \(\gamma(x) \preceq \gamma_\uparrow(x)\) at row sort,
+  plain \(\sqsubseteq\) at dimension sort. \textbf{(proved in the TR)}
   Placement commitments need no exclusion: \(\preceq\) is marker-blind
   on its lower side, which is exactly why the row subtype/refinement
   relation is the right comparison. Rank commitments do: a solution
@@ -1497,14 +1521,23 @@ an external symbol. Equations
 
 \textbf{Definition {[}TR Definition 7.3{]} (Solver).} A single pass over
 the finite equation set \(E\) maintaining: a union--find partition of
-\(P\); a partial pin map on classes; an iterate set \(I\) of classes. -
-\(\mathsf{Eq}(\mathsf{Proj}\,p, \mathsf{Proj}\,q)\): union,
-\(\mathsf{fail}\) if class sizes differ. -
-\(\mathsf{Eq}(\mathsf{Proj}\,p, \mathsf{Sol}\,i)\): pin \(p\)'s class at
-\(i\), \(\mathsf{fail}\) on a conflicting pin. -
-\(\mathsf{Eq}(\mathsf{Sol}\,i, \mathsf{Sol}\,j)\): check \(i = j\).
-\(\mathsf{Iter}(\mathsf{Proj}\,p)\): add class to \(I\). -
-\(\mathsf{Iter}(\mathsf{Sol}\,\_)\): no-op.
+\(P\); a partial pin map on classes; an iterate set \(I\) of classes.
+
+\begin{itemize}
+\tightlist
+\item
+  \(\mathsf{Eq}(\mathsf{Proj}\,p, \mathsf{Proj}\,q)\): union,
+  \(\mathsf{fail}\) if class sizes differ.
+\item
+  \(\mathsf{Eq}(\mathsf{Proj}\,p, \mathsf{Sol}\,i)\): pin \(p\)'s class
+  at \(i\), \(\mathsf{fail}\) on a conflicting pin.
+\item
+  \(\mathsf{Eq}(\mathsf{Sol}\,i, \mathsf{Sol}\,j)\): check \(i = j\).
+\item
+  \(\mathsf{Iter}(\mathsf{Proj}\,p)\): add class to \(I\).
+\item
+  \(\mathsf{Iter}(\mathsf{Sol}\,\_)\): no-op.
+\end{itemize}
 
 \textbf{Labeling:} pinned class \(\mapsto\) its pin (pins dominate
 \(I\)); unpinned class in \(I\) with size \(> 1\) \(\mapsto\) a fresh
@@ -1532,40 +1565,24 @@ of \(\pi_{\mathrm{LHS}}\) is \(\mathsf{Iter}(s_j)\).
 and the reduction characterization).} With core labels only
 (\(\mathsf{Iter}/\mathsf{Fix}\)):
 
-\begin{itemize}
+\begin{enumerate}
+\def\labelenumi{(\roman{enumi})}
 \tightlist
 \item
-  \begin{enumerate}
-  \def\labelenumi{(\roman{enumi})}
-  \tightlist
-  \item
-    \(\pi_{\mathrm{LHS}} : P^\times \to \mathrm{Addr}\) is injective iff
-    every product variable occurs in some component of
-    \(\pi_{\mathrm{LHS}}\) --- i.e.~iff there is no reduction axis.
-  \end{enumerate}
+  \(\pi_{\mathrm{LHS}} : P^\times \to \mathrm{Addr}\) is injective iff
+  every product variable occurs in some component of
+  \(\pi_{\mathrm{LHS}}\) --- i.e.~iff there is no reduction axis.
 \item
-  \begin{enumerate}
-  \def\labelenumi{(\roman{enumi})}
-  \setcounter{enumi}{1}
-  \tightlist
-  \item
-    \(\pi_{\mathrm{LHS}}\) is surjective onto the LHS's index domain iff
-    every LHS axis of size \(> 1\) is labeled \(\mathsf{Iter}\) and the
-    map (axis \(\mapsto\) its variable) is injective on those axes.
-  \end{enumerate}
+  \(\pi_{\mathrm{LHS}}\) is surjective onto the LHS's index domain iff
+  every LHS axis of size \(> 1\) is labeled \(\mathsf{Iter}\) and the
+  map (axis \(\mapsto\) its variable) is injective on those axes.
 \item
-  \begin{enumerate}
-  \def\labelenumi{(\roman{enumi})}
-  \setcounter{enumi}{2}
-  \tightlist
-  \item
-    Hence: the accumulating read-modify-write is required iff a
-    reduction axis exists (non-injectivity), and pre-initialization is
-    required iff \(\pi_{\mathrm{LHS}}\) is non-surjective or (under an
-    erasing accumulator) non-injective --- the
-    \passthrough{\lstinline!=:+!} analysis, now a corollary.
-  \end{enumerate}
-\end{itemize}
+  Hence: the accumulating read-modify-write is required iff a reduction
+  axis exists (non-injectivity), and pre-initialization is required iff
+  \(\pi_{\mathrm{LHS}}\) is non-surjective or (under an erasing
+  accumulator) non-injective --- the \passthrough{\lstinline!=:+!}
+  analysis, now a corollary.
+\end{enumerate}
 
 \textbf{Lemma {[}TR Lemma 7.7{]} (Local re-solve succeeds; locality).}
 If the global solve and closing succeeded, then for each operation: (a)
