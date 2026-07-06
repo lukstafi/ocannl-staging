@@ -128,7 +128,9 @@ module type C_syntax_config = sig
       never to workgroup-shared placements. *)
 
   val mma_syntax :
-    (prec:Ops.prec ->
+    (d_prec:Ops.prec ->
+    a_prec:Ops.prec ->
+    b_prec:Ops.prec ->
     m:int ->
     n:int ->
     k:int ->
@@ -138,14 +140,16 @@ module type C_syntax_config = sig
     PPrint.document option)
     option
   (** Cooperative tile-MMA emission for [Low_level.Tile_mma]
-      (docs/proposals/tensorize-mma.md §4): given the uniform operand precision, the covered block
-      extents [m]/[n]/[k], and per operand a pointer expression to the tile base (already offset),
-      its leading-dimension stride in elements, and its address space, emit the intrinsic sequence
+      (docs/proposals/tensorize-mma.md §4): given the per-operand precisions (the backend decides
+      which combinations its units support — Metal [simdgroup_matrix] is uniform-precision only,
+      CUDA wmma's flagship combination is mixed f16×f16→f32), the covered block extents
+      [m]/[n]/[k], and per operand a pointer expression to the tile base (already offset), its
+      leading-dimension stride in elements, and its address space, emit the intrinsic sequence
       (fragment declarations / loads / mma steps / stores) executed by every lane of the enclosing
-      lane loop. Return [None] to decline a particular call (unsupported precision, extents not
-      multiples of the intrinsic tile, thread-space operand) — the caller then renders the scalar
-      [fallback] under an [if (lane == 0)] guard, which is also the path when the whole hook is
-      [None] (cc, and any backend until wired). *)
+      lane loop. Return [None] to decline a particular call (unsupported precision combination,
+      extents not multiples of the intrinsic tile, thread-space operand) — the caller then renders
+      the scalar [fallback] under an [if (lane == 0)] guard, which is also the path when the whole
+      hook is [None] (cc, and any backend until wired). *)
 
   val kernel_log_param : (string * string) option
   (** Kernel parameter for logging, if any. E.g., (Some ("int", "log_id")) or (Some ("const char*",
@@ -1380,14 +1384,9 @@ module C_syntax (B : C_syntax_config) = struct
             let d_prec, d_op = operand d in
             let a_prec, a_op = operand a in
             let b_prec, b_op = operand b in
-            if not (Ops.equal_prec d_prec a_prec && Ops.equal_prec d_prec b_prec) then
-              (* v1: uniform operand precision only (Metal [simdgroup_matrix] has no mixed-prec
-                 multiply-accumulate); mixed-precision combinations stay on the scalar path. *)
-              fallback_doc ()
-            else
-              match emit ~prec:d_prec ~m ~n ~k ~d:d_op ~a:a_op ~b:b_op with
-              | Some doc -> doc
-              | None -> fallback_doc ()))
+            match emit ~d_prec ~a_prec ~b_prec ~m ~n ~k ~d:d_op ~a:a_op ~b:b_op with
+            | Some doc -> doc
+            | None -> fallback_doc ()))
     | If { cond = c, cprec; body } ->
         (* Guarded statement (axis-types proposal §2): [body] executes iff [cond] is nonzero --
            C's [if] tests exactly that. *)

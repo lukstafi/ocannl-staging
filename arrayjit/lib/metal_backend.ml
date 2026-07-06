@@ -507,6 +507,62 @@ module Impl = struct
     let vectorize_pragma = []
     let aligned_local_attr = None
 
+    let ident_blacklist =
+      ident_blacklist
+      @ [
+          (* MSL address-space qualifiers and function attributes — highly plausible tensor
+             labels *)
+          "kernel";
+          "device";
+          "constant";
+          "thread";
+          "threadgroup";
+          "threadgroup_imageblock";
+          (* MSL primitive types that differ from C and would shadow type declarations *)
+          "half";
+          "uint";
+          "ushort";
+          "uchar";
+          "ulong";
+          "bfloat";
+          (* MSL built-in variables *)
+          "gid";
+          "lid";
+        ]
+
+    let metal_log_object_name = "os_log_default"
+
+    let typ_of_prec = function
+      | Ops.Byte_prec _ -> "uchar"
+      | Ops.Uint16_prec _ -> "ushort"
+      | Ops.Int32_prec _ -> "int"
+      | Ops.Uint32_prec _ -> "uint"
+      | Ops.Uint4x32_prec _ -> "uint4" (* Metal's uint4 type - 128-bit *)
+      | Ops.Half_prec _ -> "half"
+      | Ops.Bfloat16_prec _ -> "bfloat" (* Metal supports bfloat16 natively *)
+      | Ops.Fp8_prec _ -> invalid_arg "Metal backend does not support FP8 precision"
+      | Ops.Single_prec _ -> "float"
+      | Ops.Double_prec _ ->
+          raise @@ Utils.User_error "Metal backend does not support double precision"
+      | Ops.Int64_prec _ -> "long"
+      | Ops.Uint64_prec _ -> "ulong"
+      | Ops.Void_prec -> "void"
+
+    let vec_typ_of_prec ~length prec =
+      match (prec, length) with
+      | Ops.Single_prec _, 4 -> "float4_t"
+      | Ops.Double_prec _, 2 ->
+          raise @@ Utils.User_error "Metal backend does not support double precision"
+      | Ops.Int32_prec _, 4 -> "int32x4_t"
+      | Ops.Uint32_prec _, 4 -> "uint32x4_t"
+      | Ops.Int64_prec _, 2 -> "int64x2_t"
+      | Ops.Uint64_prec _, 2 -> "uint64x2_t"
+      | (Ops.Byte_prec _ | Ops.Fp8_prec _), 16 -> "int8x16_t"
+      | (Ops.Uint16_prec _ | Ops.Bfloat16_prec _), 8 -> "uint16x8_t"
+      | Ops.Half_prec _, 8 -> "half8_t"
+      | _, 1 -> typ_of_prec prec
+      | _ -> invalid_arg "Metal_backend.vec_typ_of_prec: invalid combination"
+
     (* Cooperative tile-MMA emission for [Low_level.Tile_mma] via MSL [simdgroup_matrix]
        (docs/proposals/tensorize-mma.md §4): fragment blocks of 8×8 tiles held jointly by the
        32-thread simdgroup, loaded with [simdgroup_load] straight from [device] memory or
@@ -517,15 +573,18 @@ module Impl = struct
        operands (not loadable by [simdgroup_load]), and devices below the Apple7 family. *)
     let mma_syntax =
       Some
-        (fun ~prec ~m ~n ~k ~d:(d_ptr, ldd, d_space) ~a:(a_ptr, lda, a_space)
+        (fun ~d_prec ~a_prec ~b_prec ~m ~n ~k ~d:(d_ptr, ldd, d_space) ~a:(a_ptr, lda, a_space)
              ~b:(b_ptr, ldb, b_space) ->
           let tile = 8 in
+          (* [simdgroup_matrix] has no mixed-precision multiply-accumulate: uniform only. *)
           let frag_typ =
-            match prec with
-            | Ops.Single_prec _ -> Some "simdgroup_float8x8"
-            | Ops.Half_prec _ -> Some "simdgroup_half8x8"
-            | Ops.Bfloat16_prec _ -> Some "simdgroup_bfloat8x8"
-            | _ -> None
+            if not (Ops.equal_prec d_prec a_prec && Ops.equal_prec d_prec b_prec) then None
+            else
+              match d_prec with
+              | Ops.Single_prec _ -> Some "simdgroup_float8x8"
+              | Ops.Half_prec _ -> Some "simdgroup_half8x8"
+              | Ops.Bfloat16_prec _ -> Some "simdgroup_bfloat8x8"
+              | _ -> None
           in
           let addr_space = function
             | `Device -> Some "device"
@@ -537,7 +596,7 @@ module Impl = struct
             when m % tile = 0 && n % tile = 0 && k % tile = 0
                  && Option.is_some (hardware_limits ()).Backend_intf.mma ->
               let mt = m / tile and nt = n / tile and kt = k / tile in
-              let elem = typ_of_prec prec in
+              let elem = typ_of_prec d_prec in
               let ptr_decl name aspace ptr =
                 string (Printf.sprintf "%s %s *%s = " aspace elem name) ^^ ptr ^^ semi
               in
@@ -606,62 +665,6 @@ module Impl = struct
                    ^^ nest 2 (hardline ^^ body)
                    ^^ hardline ^^ rbrace))
           | _ -> None)
-
-    let ident_blacklist =
-      ident_blacklist
-      @ [
-          (* MSL address-space qualifiers and function attributes — highly plausible tensor
-             labels *)
-          "kernel";
-          "device";
-          "constant";
-          "thread";
-          "threadgroup";
-          "threadgroup_imageblock";
-          (* MSL primitive types that differ from C and would shadow type declarations *)
-          "half";
-          "uint";
-          "ushort";
-          "uchar";
-          "ulong";
-          "bfloat";
-          (* MSL built-in variables *)
-          "gid";
-          "lid";
-        ]
-
-    let metal_log_object_name = "os_log_default"
-
-    let typ_of_prec = function
-      | Ops.Byte_prec _ -> "uchar"
-      | Ops.Uint16_prec _ -> "ushort"
-      | Ops.Int32_prec _ -> "int"
-      | Ops.Uint32_prec _ -> "uint"
-      | Ops.Uint4x32_prec _ -> "uint4" (* Metal's uint4 type - 128-bit *)
-      | Ops.Half_prec _ -> "half"
-      | Ops.Bfloat16_prec _ -> "bfloat" (* Metal supports bfloat16 natively *)
-      | Ops.Fp8_prec _ -> invalid_arg "Metal backend does not support FP8 precision"
-      | Ops.Single_prec _ -> "float"
-      | Ops.Double_prec _ ->
-          raise @@ Utils.User_error "Metal backend does not support double precision"
-      | Ops.Int64_prec _ -> "long"
-      | Ops.Uint64_prec _ -> "ulong"
-      | Ops.Void_prec -> "void"
-
-    let vec_typ_of_prec ~length prec =
-      match (prec, length) with
-      | Ops.Single_prec _, 4 -> "float4_t"
-      | Ops.Double_prec _, 2 ->
-          raise @@ Utils.User_error "Metal backend does not support double precision"
-      | Ops.Int32_prec _, 4 -> "int32x4_t"
-      | Ops.Uint32_prec _, 4 -> "uint32x4_t"
-      | Ops.Int64_prec _, 2 -> "int64x2_t"
-      | Ops.Uint64_prec _, 2 -> "uint64x2_t"
-      | (Ops.Byte_prec _ | Ops.Fp8_prec _), 16 -> "int8x16_t"
-      | (Ops.Uint16_prec _ | Ops.Bfloat16_prec _), 8 -> "uint16x8_t"
-      | Ops.Half_prec _, 8 -> "half8_t"
-      | _, 1 -> typ_of_prec prec
-      | _ -> invalid_arg "Metal_backend.vec_typ_of_prec: invalid combination"
 
     let metal_prec_suffix_float = function
       | Ops.Byte_prec _ -> ""
