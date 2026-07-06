@@ -21,6 +21,10 @@ module Sched = Ir.Schedule
 module Asgns = Ir.Assignments
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
+
+(* Progress markers on stderr: the test's stdout is captured into [.exe.output], but stderr
+   reaches dune's log, so a crash (e.g. in a native worker thread) is attributable in CI. *)
+let phase name = Stdio.eprintf "cpu_parallel phase: %s\n%!" name
 let p name b = Stdio.printf "%s: %b\n" name b
 let approx a b = Float.(abs (a - b) < 1e-2)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"sync_cc")
@@ -64,10 +68,13 @@ let () =
   let%op c = a + b in
   let comp = named "cpu_par_auto" (Train.forward c) in
   let ctx = Context.auto () in
+  phase "auto: compile";
   let ctx, routine = Context.compile ctx comp Ir.Indexing.Empty in
+  phase "auto: first run";
   let ctx = Context.run ctx routine in
   let got1 = Context.get_values ctx c.Tensor.value in
   p "automatic schedule values correct" (Array.for_all2_exn got1 expected ~f:approx);
+  phase "auto: second run";
   let ctx = Context.run ctx routine in
   let got2 = Context.get_values ctx c.Tensor.value in
   p "parallel runs bitwise deterministic" (Array.equal Float.( = ) got1 got2);
@@ -82,6 +89,7 @@ let () =
       p "large kernel rendered in parallel" ok);
 
   (* --- Small kernel: below [cpu_schedule_min_parallel], must stay serial. --- *)
+  phase "small kernel";
   let m = 8 in
   let sv = Array.init (m * m) ~f:(fun i -> Float.of_int i) in
   let s1 = TDSL.ndarray sv ~label:[ "s1" ] ~output_dims:[ m; m ] () in
@@ -101,6 +109,7 @@ let () =
      retype. The accumulator tile is a kernel-scope stack array whose accesses do not mention the
      grid index, so parallel chunks sharing it would race: the renderer must fall back to a serial
      loop (values must still match the twin). --- *)
+  phase "matmul twin";
   let k = 64 in
   let mav = Array.init (k * k) ~f:(fun i -> Float.of_int (i % 13) *. 0.25) in
   let mbv = Array.init (k * k) ~f:(fun i -> Float.of_int (i % 17) -. 8.) in
@@ -115,6 +124,7 @@ let () =
   in
   let%op mc0 = ma * mb in
   let mm_twin = run_mm ~name:"cpu_par_twin" ~transform:(fun opt -> opt) mc0 in
+  phase "matmul privatized";
   let%op mc1 = ma * mb in
   let mm_priv =
     run_mm ~name:"cpu_par_privatized"
@@ -148,4 +158,5 @@ let () =
         |> List.length
       in
       p "unsafe local keeps the accumulation grid loop serial"
-        (if on_cpu then count = 1 else count = 0)
+        (if on_cpu then count = 1 else count = 0);
+      phase "done" 
