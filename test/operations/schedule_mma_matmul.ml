@@ -1,0 +1,158 @@
+(* Tensorize / Tile_mma, T1+T2 of docs/proposals/tensorize-mma.md: the tensorized matmul schedule
+   executed against the serial twin on every backend.
+
+   [mc = ma * mb] (32x32 times 32x32) lowers to a zeroing nest plus the naive triple loop. The
+   schedule: expand the zeroing, split its row loop into Grid(4) x Serial(8) and retype its column
+   loop to Workgroup(32) (partition-aligned with the accumulation's grid blocks, and covering the
+   lane slot -- barrier-strength uniformity requires every workgroup extent to equal 32 once a
+   [Tile_mma] is present); split the accumulation's i by 8 into Grid x Serial; then
+   [Tensorize { i = i_i; j; k }], which replaces the serial 8x32x32 micro-kernel with a [Tile_mma]
+   block statement wrapped in a fresh extent-32 Workgroup lane loop.
+
+   On Metal the statement renders as [simdgroup_matrix] fragments (simdgroup_load /
+   simdgroup_multiply_accumulate / simdgroup_store, barrier-bracketed) and must match the serial
+   twin within f32 tolerance (the tile reduction reassociates). On backends without an MMA hook
+   (the C backends; CUDA until T3) the scalar fallback runs once per simdgroup under an
+   [if (lane == 0)] guard: on the C backends the lane loop renders serially, so the values must
+   match the serial twin BITWISE (same operation order). The negative check pins Tensorize's
+   pattern discipline. *)
+
+open Base
+open Ocannl
+open Ocannl.Operation.DSL_modules
+module LL = Ir.Low_level
+module Sched = Ir.Schedule
+module Asgns = Ir.Assignments
+
+let () = Utils.settings.output_debug_files_in_build_directory <- true
+let p name b = Stdio.printf "%s: %b\n" name b
+let approx a b = Float.(abs (a - b) < 1e-2)
+
+let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"sync_cc")
+let on_metal = String.is_substring backend_name ~substring:"metal"
+
+let on_gpu =
+  on_metal || String.is_substring backend_name ~substring:"cuda"
+
+let read_generated base_name =
+  let ext = if on_metal then ".metal" else if on_gpu then ".cu" else ".c" in
+  let path = Stdlib.Filename.concat "build_files" (base_name ^ ext) in
+  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+
+(* The maximal single-child chains of statement-level loops: one symbol list per top-level nest. *)
+let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
+  let strip stmts = List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true) in
+  let rec path (llc : LL.t) : Ir.Indexing.symbol list =
+    match llc with
+    | LL.For_loop { index; body; _ } -> (
+        index :: (match strip (LL.flat_lines [ body ]) with [ single ] -> path single | _ -> []))
+    | LL.If { body; _ } -> path body
+    | _ -> []
+  in
+  List.filter_map (LL.flat_lines [ llc ]) ~f:(fun stmt ->
+      match path stmt with [] -> None | p -> Some p)
+
+let named name (comp : Asgns.comp) : Asgns.comp =
+  { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
+
+let n = 32
+let bm = 8
+
+(* The cooperating width of one tile-MMA instruction: the Metal simdgroup and the CUDA warp are
+   both 32 wide ({!Ir.Backend_intf.mma_simd_width}); on the C backends the lane loop renders
+   serially and any extent is correct. *)
+let simd_width = 32
+
+let () =
+  let mav = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 13) *. 0.25) in
+  let mbv = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 17) -. 8.) in
+  let ma = TDSL.ndarray mav ~label:[ "ma" ] ~input_dims:[ n ] ~output_dims:[ n ] () in
+  let mb = TDSL.ndarray mbv ~label:[ "mb" ] ~input_dims:[ n ] ~output_dims:[ n ] () in
+
+  (* --- Serial twin --- *)
+  let%op mc0 = ma * mb in
+  let serial_comp = named "mm_serial" (Train.forward mc0) in
+  let ctx_s = Context.auto () in
+  let ctx_s, routine_s =
+    Context.compile ~lowered_transform:(fun opt -> opt) ctx_s serial_comp Ir.Indexing.Empty
+  in
+  let ctx_s = Context.run ctx_s routine_s in
+  let got_serial = Context.get_values ctx_s mc0.Tensor.value in
+
+  (* --- The tensorized schedule --- *)
+  let%op mc1 = ma * mb in
+  let mma_schedule (opt : LL.optimized) : Sched.schedule =
+    let paths = nest_paths opt.LL.llc in
+    let i, j, k =
+      match List.find_exn paths ~f:(fun p -> List.length p = 3) with
+      | [ i; j; k ] -> (i, j, k)
+      | _ -> assert false
+    in
+    let ez, zsyms = Sched.expand_zero ~tn:mc1.Tensor.value in
+    let zi, zj = match zsyms with [ zi; zj ] -> (zi, zj) | _ -> assert false in
+    (* Zeroing: Grid(4) x Serial(8) rows aligned with the accumulation's grid blocks, and the
+       column loop as the Workgroup(32) axis -- each lane zeroes its own column, and the extent
+       matches the lane loop (barrier-strength uniformity). *)
+    let sp_zi, _, _ = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+    let rz = Sched.Retype { axis = zj; ty = LL.Workgroup } in
+    let sp_i, _, i_i = Sched.split ~axis:i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+    let tz, _lane = Sched.tensorize ~i:i_i ~j ~k ~simd_width in
+    [ ez; sp_zi; rz; sp_i; tz ]
+  in
+  let mma_comp = named "mm_mma" (Train.forward mc1) in
+  let transform opt = Sched.apply (mma_schedule opt) opt in
+  let ctx_a = Context.auto () in
+  let ctx_a, routine_a =
+    Context.compile ~lowered_transform:transform ctx_a mma_comp Ir.Indexing.Empty
+  in
+  let ctx_a = Context.run ctx_a routine_a in
+  let got_mma = Context.get_values ctx_a mc1.Tensor.value in
+  p "tensorized matmul values match the serial twin"
+    (Array.for_all2_exn got_mma got_serial ~f:approx);
+  p "C-backend fallback matches bitwise"
+    (on_gpu || Array.for_all2_exn got_mma got_serial ~f:Float.equal);
+  (match read_generated "mm_mma" with
+  | None -> p "tensorized structure as expected" false
+  | Some src ->
+      let has s = String.is_substring src ~substring:s in
+      let ok =
+        if on_metal then
+          (* The intrinsic path: fragment loads and stores, the mma step, and the bracketing
+             barriers; no lane-0 fallback guard. *)
+          has "simdgroup_load" && has "simdgroup_multiply_accumulate" && has "simdgroup_store"
+          && has "threadgroup_barrier"
+          && not (has "== 0)")
+        else
+          (* The fallback path: the scalar micro-kernel under the lane-0 guard (a serial loop of
+             extent 32 binds the lane on the C backends). *)
+          has "== 0)" && has "fma" && not (has "simdgroup")
+      in
+      p "tensorized structure as expected" ok);
+
+  (* --- Pattern discipline: Tensorize on a non-micro-kernel nest is a targeted error --- *)
+  let%op mc2 = ma * mb in
+  let bad_transform (opt : LL.optimized) : LL.optimized =
+    let paths = nest_paths opt.LL.llc in
+    let i, j, k =
+      match List.find_exn paths ~f:(fun p -> List.length p = 3) with
+      | [ i; j; k ] -> (i, j, k)
+      | _ -> assert false
+    in
+    (* Roles misassigned: j as the row symbol of the accumulator fails the index discipline. *)
+    let tz, _ = Sched.tensorize ~i:j ~j:i ~k ~simd_width in
+    Sched.apply [ tz ] opt
+  in
+  let bad_comp = named "mm_bad" (Train.forward mc2) in
+  (match
+     try
+       ignore
+         (Context.compile ~lowered_transform:bad_transform (Context.auto ()) bad_comp
+            Ir.Indexing.Empty
+           : Context.t * Context.routine);
+       None
+     with Invalid_argument msg -> Some msg
+   with
+  | Some msg ->
+      p "misassigned roles are rejected with a targeted error"
+        (String.is_substring msg ~substring:"Schedule.Tensorize")
+  | None -> p "misassigned roles are rejected with a targeted error" false)

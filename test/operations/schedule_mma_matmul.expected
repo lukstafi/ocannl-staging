@@ -1,0 +1,6 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+tensorized matmul values match the serial twin: true
+C-backend fallback matches bitwise: true
+tensorized structure as expected: true
+misassigned roles are rejected with a targeted error: true

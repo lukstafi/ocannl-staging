@@ -211,6 +211,53 @@ proposal.
 - [ ] Every schedule prefix without `Tensorize` behaves exactly as today (the op is
       purely additive).
 
+## As landed (2026-07-06, T1+T2 core)
+
+The implementation adjusted the design in a few places; the differences are recorded here rather
+than rewritten into the sections above.
+
+- **Block semantics for `Tile_mma`.** `m`/`n`/`k` are the *covered block extents* (multiples of
+  the backend's intrinsic tile), not the intrinsic shape: one statement is the whole
+  `d[0..m)×[0..n) += a·b` block over `k` reduction steps. Fragment residency across the reduction
+  thereby becomes an intra-statement codegen concern — the Metal emission declares the
+  `(m/8)×(n/8)` accumulator fragment array, loads `d` once, loops `k/8` mma steps, stores once —
+  so the `simdgroup_fragment` node marking and the `Privatize`-style accumulator contraction of
+  §3.4 were not needed. The proposal's per-intrinsic-step statement plus fragment-marked `Local`
+  node remains available as a refinement if cross-statement residency (e.g. across a staged `k_o`
+  loop) is ever required.
+- **`Tensorize` names loops, not shapes**: `Tensorize { i; j; k; lane; simd_width }` (the
+  `Schedule.tensorize` helper mints `lane`). It requires the perfectly nested serial `i×j×k`
+  micro-kernel with the single accumulation body (`d[...,i,j] += a[...,i,k] * b[...,k,j]`,
+  plain-add or FMA form as `optimize`'s simplify leaves it; unit coefficients on the last two
+  axes, transposed layouts rejected). Divisibility by the intrinsic tile is *not* checked by the
+  transform — the schedule layer is backend-agnostic; `mma_syntax` declines per call and the
+  fallback runs, so the op is always semantics-preserving.
+- **The `mma_syntax` hook** receives, per operand: a pointer expression to the tile base (already
+  offset), the leading-dimension stride in elements, and the address space
+  (`` `Device | `Shared | `Thread ``); it returns `PPrint.document option`, `None` declining that
+  call (unsupported precision, non-multiple extents, thread-space operand). v1 requires uniform
+  operand precision (MSL `simdgroup_matrix` has no mixed-precision multiply-accumulate).
+- **Barrier bracketing.** Sibling statements (the zeroing of `d`, staged loads) execute
+  lane-partitioned, so both the emitted intrinsic block and the `if (lane == 0)` fallback are
+  bracketed in `threadgroup_barrier`s on backends that bind the lane in hardware. Relatedly,
+  `Tile_mma` *is* a barrier for validation and code motion (`contains_barrier` returns true), so
+  the workgroup-extent-uniformity and no-`If`-guard rules apply wholesale, as §2 intended.
+- **Capability gating**: `Backend_intf.hardware_limits` grew
+  `mma : { mma_simd_width; mma_tile } option` (Metal: 32, 8×8×8, gated on the Apple7 GPU family);
+  supported precisions live in the emission, not the descriptor.
+- **Composition with shared `Stage` is deferred.** `Stage` runs before `Tensorize`, so it cannot
+  see the future lane loop: its cooperative loads would be unguarded along the lane axis (a
+  same-value race). v1 tensorized schedules read `a`/`b` from device memory — acceptable because
+  one statement spans the full reduction extent, amortizing `d` traffic entirely and `a`/`b`
+  traffic over the fragment block. The follow-up is either a lane-aware `Stage` (the
+  `Workgroup_lane` note in §2) or teaching `Stage` to remap `Tile_mma` operands.
+- **Parity nuance**: the C-backend fallback matches the serial twin *bitwise* (same operation
+  order); the Metal simdgroup path matches within f32 tolerance — the tile reduction
+  reassociates, so "cc matches bitwise" is the exact criterion and GPU parity is tolerance-based.
+- Exercised by `test/operations/schedule_mma_matmul.ml` (serial twin vs. tensorized schedule;
+  structural checks per backend; pattern-discipline error). CUDA stays on the fallback path
+  (`mma = None`) until T3.
+
 ## Relations
 
 - [schedule-ir-optops](schedule-ir-optops.md): §5 `Stage` supplies the shared tiles and
