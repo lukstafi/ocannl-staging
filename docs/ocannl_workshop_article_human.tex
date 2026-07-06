@@ -91,6 +91,7 @@
 \usepackage{calc} % for calculating minipage widths
 % Correct order of tables after \paragraph or \subparagraph
 \usepackage{etoolbox}
+\usepackage{authblk}
 \makeatletter
 \patchcmd\longtable{\par}{\if@noskipsec\mbox{}\fi\par}{}{}
 \makeatother
@@ -111,7 +112,8 @@
   pdfcreator={LaTeX via pandoc}}
 
 \title{Neural Networks Without Shape Boilerplate: An OCaml DSL Case Study}
-\author{}
+\author{Łukasz Stafiniak}
+\affil{Independent researcher, sponsored by Ahrefs}
 \date{}
 
 \begin{document}

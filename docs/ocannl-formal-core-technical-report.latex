@@ -111,7 +111,7 @@
 \newcommand{\modelsC}{\mathrel{\models}}
 
 \title{The Formal Core of OCANNL Shape and Projection Inference}
-\author{}
+\author{Lukasz Stafiniak, Claude Fable 5, GPT 5.5}
 \date{}
 
 \begin{document}
