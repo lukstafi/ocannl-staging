@@ -491,9 +491,10 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
       match lowered_transform with
       | Some transform -> transform lowered
       | None ->
-          (* No explicit schedule: on GPU backends the default annotator parallelizes kernels it
-             can prove safe (docs/proposals/schedule-ir-optops.md §6); the identity otherwise. *)
-          Schedule.maybe_default_gpu ~backend_name:Device.name ~limits:(Device.hardware_limits ())
+          (* No explicit schedule: the default annotator parallelizes kernels it can prove safe
+             (docs/proposals/schedule-ir-optops.md §6) -- Grid x Workgroup on GPU backends,
+             pool-rendered Grid on CPU backends; the identity otherwise. *)
+          Schedule.maybe_default_schedule ~backend_name:Device.name ~limits:(Device.hardware_limits ())
             ~static_indices:(Indexing.bound_symbols bindings)
             lowered
     in
@@ -519,7 +520,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
         ~f:
           (Option.map
              ~f:
-               (Schedule.maybe_default_gpu ~backend_name:Device.name
+               (Schedule.maybe_default_schedule ~backend_name:Device.name
                   ~limits:(Device.hardware_limits ())
                   ~static_indices:(Indexing.bound_symbols bindings)))
     in

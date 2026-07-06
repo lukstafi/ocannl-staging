@@ -21,6 +21,12 @@ let includes =
   #define OCANNL_HAS_NEON 0
 #endif
 
+/* Parallel Grid loops (gh-ocannl-164) use libdispatch on Apple platforms; OpenMP needs no
+   header. Guarded unconditionally so generated sources are byte-identical across platforms. */
+#ifdef __APPLE__
+  #include <dispatch/dispatch.h>
+#endif
+
 /* No longer need export macros since we're using textual prepending */
 |}
 

@@ -115,6 +115,10 @@ let known_config_keys =
       "automatic_gpu_schedule";
       "gpu_schedule_block_size";
       "gpu_schedule_min_parallel";
+      "automatic_cpu_schedule";
+      "cpu_schedule_min_parallel";
+      "cc_parallel_grid";
+      "cc_parallel_chunks";
       (* Identifiers and other *)
       "ll_ident_style";
       "cd_ident_style";
