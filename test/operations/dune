@@ -1015,6 +1015,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name fission_schedule)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules fission_schedule)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name schedule_smem_matmul)
  (package neural_nets_lib)
  (deps
