@@ -81,6 +81,19 @@ module type C_syntax_config = sig
   (** Workgroup barrier statement ([__syncthreads();] / [threadgroup_barrier(...);]); [None] makes
       [Workgroup_barrier] a compile-time error (serialization cannot implement a barrier). *)
 
+  val parallel_grid_syntax : [ `None | `Dispatch | `Openmp ]
+  (** Pool-backed [Grid] rendering (docs/proposals/gh-ocannl-164.md): how to render an eligible
+      outermost [Grid] loop when [hardware_index] does not bind it. [`Dispatch] emits libdispatch's
+      [dispatch_apply] over contiguous chunks (macOS; blocks extension), [`Openmp] a
+      [#pragma omp parallel for] over the chunk loop; both runtimes own a single process-global
+      thread pool, so no pool state lives in the compiled kernel. [`None] keeps the serial
+      fallback. Eligibility is decided per loop by [compile_proc] (see [parallel_grid_safe]);
+      [Workgroup] loops always stay serial inside a chunk. *)
+
+  val parallel_grid_chunks : int
+  (** Target chunk count for [parallel_grid_syntax] (e.g. a small multiple of the core count); the
+      actual count is capped by the loop extent. Values [<= 1] disable parallel rendering. *)
+
   val shared_decl_prefix : string option
   (** Declaration prefix for workgroup-shared placements ([__shared__ ] / [threadgroup ]); [None]
       makes a non-empty [workgroup_shared] set a compile-time error. *)
@@ -155,6 +168,8 @@ struct
      (sound absent barriers), and barriers / shared placements are compile-time errors. *)
   let hardware_index ~kind:_ ~slot:_ = None
   let barrier_syntax = None
+  let parallel_grid_syntax = `None
+  let parallel_grid_chunks = 1
   let shared_decl_prefix = None
   let restrict_keyword = Some "restrict"
 
@@ -491,6 +506,122 @@ module C_syntax (B : C_syntax_config) = struct
      their [Zero_out] is never elided. *)
   let current_workgroup_shared : Set.M(Tn).t ref = ref (Set.empty (module Tn))
 
+  (* Set by [compile_proc]: outermost [Grid] loops eligible for pool-backed parallel rendering
+     (docs/proposals/gh-ocannl-164.md), identified by index symbol. Empty unless
+     [B.parallel_grid_syntax] renders in parallel. *)
+  let current_parallel_grid : Set.M(Indexing.Symbol).t ref =
+    ref (Set.empty (module Indexing.Symbol))
+
+  (* Whether the body of an outermost [Grid] loop over [sym] tolerates its iterations being
+     partitioned into chunks that execute on parallel CPU threads sharing the kernel's
+     function-scope state. Materialized accesses are already safe: [validate_parallel] requires
+     every materialized write to cover [sym], so chunks write disjoint elements, and nests execute
+     as separate parallel loops with a join in between (stronger than the GPU's single launch).
+     The hazards are the function-scope stack arrays declared by [local_decls]: on GPU each thread
+     gets a private copy, so a GPU-valid kernel may legally write them grid-invariantly (identical
+     values per iteration) -- under one shared array that is a data race. Hence: a local written
+     under the loop requires every access to it (read or write) to mention [sym], making
+     iterations touch disjoint elements. [Set_local] scope locals must have their declaration
+     within the loop body (block scope = per-chunk storage). Opaque statements and barriers
+     disqualify. *)
+  let parallel_grid_safe ~sym (body : Low_level.t) : bool =
+    let plc = placements () in
+    let is_local tn =
+      (not (Tn.Placements.is_virtual_force plc tn 431))
+      && not (Tn.Placements.is_materialized_force plc tn 432)
+    in
+    let mentions idcs =
+      Array.exists idcs ~f:(fun idx ->
+          match idx with
+          | Indexing.Iterator s -> Indexing.equal_symbol s sym
+          | Indexing.Affine { symbols; _ } ->
+              List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
+          | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false)
+    in
+    (* Per accessed function-scope local: (written under the loop, some access misses [sym]). *)
+    let locals : (bool * bool) Hashtbl.M(Int).t = Hashtbl.create (module Int) in
+    let declared_scopes = Hash_set.create (module Int) in
+    let ok = ref true in
+    let access tn idcs ~write =
+      if is_local tn then
+        Hashtbl.update locals tn.Tn.id ~f:(fun st ->
+            let written, misses = Option.value st ~default:(false, false) in
+            (written || write, misses || not (mentions idcs)))
+    in
+    let rec go (llc : Low_level.t) =
+      match llc with
+      | Low_level.Noop | Comment _ -> ()
+      | Staged_compilation _ | Workgroup_barrier -> ok := false
+      | Seq (a, b) ->
+          go a;
+          go b
+      | For_loop { body; _ } -> go body
+      | If { cond = c, _; body } ->
+          go_sc c;
+          go body
+      | Zero_out tn -> access tn [||] ~write:true
+      | Set { tn; idcs; llsc; _ } ->
+          access tn idcs ~write:true;
+          go_sc llsc
+      | Set_from_vec { tn; idcs; arg = a, _; _ } ->
+          access tn idcs ~write:true;
+          go_sc a
+      | Set_local (id, llsc) ->
+          if not (Hash_set.mem declared_scopes id.Low_level.scope_id) then ok := false;
+          go_sc llsc
+      | Declare_local { id; _ } -> Hash_set.add declared_scopes id.Low_level.scope_id
+    and go_sc (llsc : Low_level.scalar_t) =
+      match llsc with
+      | Local_scope { id; body; _ } ->
+          Hash_set.add declared_scopes id.Low_level.scope_id;
+          go body
+      | Get_local _ -> ()
+      | Get (tn, idcs) -> access tn idcs ~write:false
+      | Get_dynamic { tn; dyn_value = v, _; _ } ->
+          (* The dynamic slot's effective index is data-dependent: conservatively a miss. *)
+          access tn [||] ~write:false;
+          go_sc v
+      | Get_merge_buffer _ -> ()
+      | Ternop (_, (a, _), (b, _), (c, _)) ->
+          go_sc a;
+          go_sc b;
+          go_sc c
+      | Binop (_, (a, _), (b, _)) ->
+          go_sc a;
+          go_sc b
+      | Unop (_, (a, _)) -> go_sc a
+      | Constant _ | Constant_bits _ | Embed_index _ -> ()
+    in
+    go body;
+    !ok
+    && Hashtbl.for_all locals ~f:(fun (written, misses) -> not (written && misses))
+
+  (* The outermost [Grid] loops safe to render in parallel. Nested [Grid] loops render serially
+     inside a chunk (still correct: write coverage holds per grid index). Runtime kernel logging
+     writes to a shared FILE, so parallel rendering is skipped under [debug_log_from_routines]. *)
+  let collect_parallel_grid (llc : Low_level.t) : Set.M(Indexing.Symbol).t =
+    if
+      Poly.equal B.parallel_grid_syntax `None
+      || B.parallel_grid_chunks <= 1
+      || Utils.debug_log_from_routines ()
+    then Set.empty (module Indexing.Symbol)
+    else
+      let acc = ref (Set.empty (module Indexing.Symbol)) in
+      let rec go (llc : Low_level.t) =
+        match llc with
+        | Low_level.For_loop { axis = Grid; index; from_; to_; body; _ } ->
+            if from_ = 0 && to_ >= 1 && parallel_grid_safe ~sym:index body then
+              acc := Set.add !acc index
+        | For_loop { body; _ } -> go body
+        | If { body; _ } -> go body
+        | Seq (a, b) ->
+            go a;
+            go b
+        | _ -> ()
+      in
+      go llc;
+      !acc
+
   (* A [Zero_out] loop is redundant when the array's declaration already initializes it with [=
      {0}]. That happens for local (non-virtual, non-materialized) declarations whose traced node has
      [zero_initialized_by_code = true]; see [compile_proc]'s [local_decls]. Materialized (on-device)
@@ -584,8 +715,59 @@ module C_syntax (B : C_syntax_config) = struct
                 ^^ nest 2 (hardline ^^ binding ^^ hardline ^^ body_doc ())
                 ^^ hardline ^^ rbrace)
         in
+        let parallel_grid_loop () =
+          (* Pool-backed Grid rendering (gh-ocannl-164): contiguous chunks of the grid extent
+             execute on the process-global native pool ([dispatch_apply] / OpenMP); [Workgroup]
+             loops and nested [Grid] loops stay serial inside a chunk. Eligibility (including
+             [from_ = 0]) was established by [collect_parallel_grid]. *)
+          let extent = to_ + 1 in
+          let target = min B.parallel_grid_chunks extent in
+          let grain = (extent + target - 1) / target in
+          let nchunks = (extent + grain - 1) / grain in
+          let it = B.loop_index_type in
+          let ident = symbol_ident i in
+          let chunk = ident ^ "_chunk" and lo = ident ^ "_lo" and hi = ident ^ "_hi" in
+          let decls =
+            string
+              (Printf.sprintf "const %s%s = (%s)(%s * %d);" it lo (String.strip it) chunk grain)
+            ^^ hardline
+            ^^ string
+                 (Printf.sprintf "const %s%s = %s + %d <= %d ? %s + %d : %d;" it hi lo grain extent
+                    lo grain extent)
+          in
+          let inner =
+            string (Printf.sprintf "for (%s%s = %s; %s < %s; ++%s)" it ident lo ident hi ident)
+            ^^ space ^^ lbrace
+            ^^ nest 2 (hardline ^^ body_doc ())
+            ^^ hardline ^^ rbrace
+          in
+          let comment =
+            string
+              (Printf.sprintf "/* Pool-backed Grid rendering: %d chunks of up to %d. */" nchunks
+                 grain)
+          in
+          match B.parallel_grid_syntax with
+          | `Dispatch ->
+              comment ^^ hardline
+              ^^ string
+                   (Printf.sprintf "dispatch_apply((size_t)%d, DISPATCH_APPLY_AUTO, ^(size_t %s) {"
+                      nchunks chunk)
+              ^^ nest 2 (hardline ^^ decls ^^ hardline ^^ inner)
+              ^^ hardline ^^ string "});"
+          | `Openmp ->
+              comment ^^ hardline
+              ^^ string "#pragma omp parallel for schedule(static)"
+              ^^ hardline
+              ^^ string
+                   (Printf.sprintf "for (%s%s = 0; %s < %d; ++%s)" it chunk chunk nchunks chunk)
+              ^^ space ^^ lbrace
+              ^^ nest 2 (hardline ^^ decls ^^ hardline ^^ inner)
+              ^^ hardline ^^ rbrace
+          | `None -> assert false
+        in
         match axis with
         | Low_level.Serial -> serial_loop ()
+        | Grid when Set.mem !current_parallel_grid i -> parallel_grid_loop ()
         | Grid -> hardware_binding `Grid
         | Workgroup | Workgroup_reduce -> hardware_binding `Workgroup
         | Vectorized -> (
@@ -1207,6 +1389,7 @@ module C_syntax (B : C_syntax_config) = struct
     in
     let launch = Low_level.launch_dims llc in
     current_hardware_axes := Low_level.hardware_axes llc;
+    current_parallel_grid := collect_parallel_grid llc;
     current_workgroup_shared := workgroup_shared;
     current_traced_store := Some traced_store;
     Hash_set.clear zero_out_seen;
