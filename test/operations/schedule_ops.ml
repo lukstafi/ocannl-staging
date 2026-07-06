@@ -290,4 +290,62 @@ let () =
        with Invalid_argument msg -> Some msg
      with
     | Some msg -> String.is_substring msg ~substring:"varies across the accumulation"
+    | None -> false);
+
+  (* --- Device-limit-aware tile sizes: the annotator clamps the (configured) block size to the
+     backend's max-threads-per-workgroup limit, and [check_hardware_limits] (called by backend
+     [compile] after any transform) rejects kernels exceeding the workgroup-size or shared-memory
+     capacity. Backend-independent: limits are passed explicitly. --- *)
+  let tight_limits =
+    { Ir.Backend_intf.max_threads_per_workgroup = Some 4; max_workgroup_memory_bytes = None }
+  in
+  let clamp_sched = ref [] in
+  let got_clamp =
+    run_variant ~name:"limit_clamp" ~transform:(fun opt ->
+        (* Without the clamp, block_size 8 covers the extent-8 inner loop => two Retypes and no
+           Split; clamped to 4, the inner loop must be split by 4. *)
+        let sched = Sched.default_gpu ~min_parallel:1 ~block_size:8 ~limits:tight_limits opt in
+        clamp_sched := sched;
+        Sched.apply sched opt)
+  in
+  p "device-limit clamp values correct" (Array.for_all2_exn got_clamp expected_c ~f:approx);
+  p "device-limit clamp splits by the max-threads limit"
+    (List.exists !clamp_sched ~f:(function
+      | Sched.Split { factor; inner = LL.Workgroup; _ } -> factor = 4
+      | _ -> false));
+  p "workgroup size over the limit rejected"
+    (match
+       try
+         ignore
+           (Sched.check_hardware_limits ~name:"limit_threads"
+              ~limits:
+                {
+                  Ir.Backend_intf.max_threads_per_workgroup = Some 2;
+                  max_workgroup_memory_bytes = None;
+                }
+              (fake lane_llc)
+             : unit);
+         None
+       with Utils.User_error msg -> Some msg
+     with
+    | Some msg -> String.is_substring msg ~substring:"threads per workgroup"
+    | None -> false);
+  (* [a] is 4x8 single precision = 128 shared bytes when staged. *)
+  let shared_opt = { (fake LL.Noop) with LL.workgroup_shared = Set.singleton (module Ir.Tnode) a.Tensor.value } in
+  let smem_limits bytes =
+    { Ir.Backend_intf.max_threads_per_workgroup = None; max_workgroup_memory_bytes = Some bytes }
+  in
+  p "shared tiles within the memory limit accepted"
+    (try
+       Sched.check_hardware_limits ~name:"limit_smem_ok" ~limits:(smem_limits 128) shared_opt;
+       true
+     with Utils.User_error _ -> false);
+  p "shared tiles over the memory limit rejected"
+    (match
+       try
+         Sched.check_hardware_limits ~name:"limit_smem" ~limits:(smem_limits 64) shared_opt;
+         None
+       with Utils.User_error msg -> Some msg
+     with
+    | Some msg -> String.is_substring msg ~substring:"workgroup-shared"
     | None -> false)

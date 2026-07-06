@@ -493,10 +493,11 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
       | None ->
           (* No explicit schedule: on GPU backends the default annotator parallelizes kernels it
              can prove safe (docs/proposals/schedule-ir-optops.md §6); the identity otherwise. *)
-          Schedule.maybe_default_gpu ~backend_name:Device.name
+          Schedule.maybe_default_gpu ~backend_name:Device.name ~limits:Device.hardware_limits
             ~static_indices:(Indexing.bound_symbols bindings)
             lowered
     in
+    Schedule.check_hardware_limits ~name ~limits:Device.hardware_limits lowered;
     let code : Device.code = compile ~name bindings lowered in
     (* Placements of all context nodes are settled by codegen (the [compile] just above), so this
        query resolves against the code's own lineage fork. *)
@@ -519,8 +520,14 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
           (Option.map
              ~f:
                (Schedule.maybe_default_gpu ~backend_name:Device.name
+                  ~limits:Device.hardware_limits
                   ~static_indices:(Indexing.bound_symbols bindings)))
     in
+    Array.iter2_exn names lowereds ~f:(fun name lowered ->
+        Option.iter lowered ~f:(fun lowered ->
+            Schedule.check_hardware_limits
+              ~name:(Option.value name ~default:"<unnamed>")
+              ~limits:Device.hardware_limits lowered));
     let code_batch = compile_batch ~names bindings lowereds in
     let batch_plc =
       (Array.find_map lowereds ~f:(Option.map ~f:(fun l -> l.Low_level.optimize_ctx))

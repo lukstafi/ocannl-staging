@@ -220,6 +220,7 @@ module Multicore (Backend : For_add_scheduler) :
           ];
       ]
 
+  let hardware_limits = no_hardware_limits
   let get_global_debug_info () = Sexp.message "global_debug" []
   let get_debug_info (device : device) = sexp_of_runner device.runner
 end
@@ -277,6 +278,8 @@ module Sync (Backend : For_add_scheduler) = struct
               ];
           ];
       ]
+
+  let hardware_limits = no_hardware_limits
 
   (* let global_run_no = ref 0 *)
   let schedule_task _device task = Ir.Task.run task

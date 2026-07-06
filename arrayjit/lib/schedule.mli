@@ -124,11 +124,19 @@ val apply :
     its point in the schedule, or violates an op precondition (see {!optop}). An empty schedule is
     the identity. *)
 
-val default_gpu : ?block_size:int -> ?min_parallel:int -> Low_level.optimized -> schedule
+val default_gpu :
+  ?block_size:int ->
+  ?min_parallel:int ->
+  ?limits:Backend_intf.hardware_limits ->
+  Low_level.optimized ->
+  schedule
 (** The default GPU annotator preset (schedule-ir-optops §6): for each top-level loop nest whose
     parallelism is provable from the lowered code alone, produce ops annotating exactly one [Grid]
     and one [Workgroup] loop (splitting single parallel loops by [block_size], default from config
-    [gpu_schedule_block_size] = 256). A loop is parallelizable when its index occurs as a plain
+    [gpu_schedule_block_size] = 256, clamped to [limits]'
+    {!field:Backend_intf.max_threads_per_workgroup} when given — the configured block size is a
+    target, the device's workgroup capacity a hard cap). A loop is parallelizable when its index
+    occurs as a plain
     [Iterator] component in every materialized write vector beneath it — the same coverage
     property [Low_level.validate_parallel] enforces, used generatively — and the kernel passes a
     conservative race analysis (no cross-nest producer/consumer pairs, all accesses to written
@@ -143,10 +151,23 @@ val backend_is_gpu : string -> bool
 
 val maybe_default_gpu :
   backend_name:string ->
+  ?limits:Backend_intf.hardware_limits ->
   static_indices:Indexing.static_symbol list ->
   Low_level.optimized ->
   Low_level.optimized
 (** The implicit transform applied by backend [compile] when the caller passes no
     [?lowered_transform]: {!apply} of {!default_gpu} on GPU backends, the identity otherwise.
-    Disabled by config [automatic_gpu_schedule=false], and skipped when runtime kernel logging
+    [limits] (default {!Backend_intf.no_hardware_limits}) should be the compiling backend's
+    {!Backend_intf.Backend_device_common.hardware_limits}. Disabled by config
+    [automatic_gpu_schedule=false], and skipped when runtime kernel logging
     ([debug_log_from_routines]) is active, to keep logs serial and deterministic. *)
+
+val check_hardware_limits :
+  name:string -> limits:Backend_intf.hardware_limits -> Low_level.optimized -> unit
+(** Validates the scheduled kernel [name] against the device limits, raising [Utils.User_error] on
+    violation: the launch's workgroup size (the product of {!Low_level.launch_dims}' block
+    dimensions) against {!field:Backend_intf.max_threads_per_workgroup}, and the total bytes of
+    [workgroup_shared] tiles against {!field:Backend_intf.max_workgroup_memory_bytes}. Backend
+    [compile] calls this after any [?lowered_transform] (or the default annotator, which already
+    respects the limits), turning driver-level launch failures into early, named errors. A no-op
+    for all-[None] limits. *)
