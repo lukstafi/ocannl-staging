@@ -1166,6 +1166,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
              min_over (fun (a : Cu.Device.attributes) -> a.max_threads_per_block);
            max_workgroup_memory_bytes =
              min_over (fun (a : Cu.Device.attributes) -> a.max_shared_memory_per_block);
+           (* Tensor cores (wmma) are the T3 phase of docs/proposals/tensorize-mma.md; until the
+              [mma_syntax] hook is wired, [Tile_mma] renders its scalar fallback on CUDA. *)
+           mma = None;
          })
     in
     fun () -> Lazy.force limits

@@ -299,7 +299,11 @@ let () =
      [compile] after any transform) rejects kernels exceeding the workgroup-size or shared-memory
      capacity. Backend-independent: limits are passed explicitly. --- *)
   let tight_limits =
-    { Ir.Backend_intf.max_threads_per_workgroup = Some 4; max_workgroup_memory_bytes = None }
+    {
+      Ir.Backend_intf.max_threads_per_workgroup = Some 4;
+      max_workgroup_memory_bytes = None;
+      mma = None;
+    }
   in
   let clamp_sched = ref [] in
   let got_clamp =
@@ -324,6 +328,7 @@ let () =
                 {
                   Ir.Backend_intf.max_threads_per_workgroup = Some 2;
                   max_workgroup_memory_bytes = None;
+                  mma = None;
                 }
               (fake lane_llc)
              : unit);
@@ -335,7 +340,11 @@ let () =
   (* [a] is 4x8 single precision = 128 shared bytes when staged. *)
   let shared_opt = { (fake LL.Noop) with LL.workgroup_shared = Set.singleton (module Ir.Tnode) a.Tensor.value } in
   let smem_limits bytes =
-    { Ir.Backend_intf.max_threads_per_workgroup = None; max_workgroup_memory_bytes = Some bytes }
+    {
+      Ir.Backend_intf.max_threads_per_workgroup = None;
+      max_workgroup_memory_bytes = Some bytes;
+      mma = None;
+    }
   in
   p "shared tiles within the memory limit accepted"
     (try

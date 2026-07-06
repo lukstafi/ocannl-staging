@@ -92,6 +92,26 @@ type t =
           [simplify_llc] erases a guard whose condition an interval proves), and available to
           hand-built IR. A conditional write is never a definite write; virtualization treats
           guarded computations as non-inlineable in v1. *)
+  | Tile_mma of {
+      d : Tn.t * Indexing.axis_index array;  (** Accumulator block base. *)
+      a : Tn.t * Indexing.axis_index array;
+      b : Tn.t * Indexing.axis_index array;
+      m : int;
+      n : int;
+      k : int;  (** Covered block extents (multiples of the backend's intrinsic tile). *)
+      lane : Indexing.symbol;  (** The cooperating [Workgroup] axis (extent = SIMD width). *)
+      fallback : t;  (** Semantically equivalent scalar micro-kernel over fresh serial symbols. *)
+    }
+      (** Cooperative tile multiply-accumulate (docs/proposals/tensorize-mma.md):
+          [d[i,j] += Σ_{l<k} a[i,l] * b[l,j]] for [i < m], [j < n], relative to the operands' base
+          index vectors, executed jointly by the threads of the [lane] axis (tensor cores /
+          [simdgroup_matrix]). The per-lane ownership of tile elements is architecture-defined and
+          deliberately opaque — the [lane] index must not occur in the base indices. Each operand's
+          tile spans its tnode's last two axes (row-major, minor axis stride 1); strides come from
+          the tnode dims. Backends without an MMA hook render [fallback] once per simdgroup, under
+          an [if (lane == 0)] guard — the renderer's obligation, keyed off [lane]. The statement
+          validates like {!Workgroup_barrier} (it is one for code-motion and divergence purposes)
+          plus a write of [d] for the coverage rule. *)
 [@@deriving sexp_of, equal]
 
 and scalar_t =
@@ -389,6 +409,12 @@ and proc_mentions_symbol (s : Indexing.symbol) (llc : t) : bool =
   | Seq (a, b) -> proc_mentions_symbol s a || proc_mentions_symbol s b
   | For_loop { body; _ } -> proc_mentions_symbol s body
   | If { cond = c, _; body } -> scalar_mentions_symbol s c || proc_mentions_symbol s body
+  | Tile_mma { d = _, d_idcs; a = _, a_idcs; b = _, b_idcs; lane; fallback; _ } ->
+      Indexing.equal_symbol s lane
+      || Array.exists d_idcs ~f:(axis_index_mentions_symbol s)
+      || Array.exists a_idcs ~f:(axis_index_mentions_symbol s)
+      || Array.exists b_idcs ~f:(axis_index_mentions_symbol s)
+      || proc_mentions_symbol s fallback
   | Zero_out _ | Declare_local _ | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier ->
       false
 
@@ -555,6 +581,10 @@ let visit_llc plc traced_store ~merge_node_id reverse_node_map ~max_visits llc =
     | Comment _ -> ()
     | Staged_compilation _ -> ()
     | Workgroup_barrier -> ()
+    | Tile_mma _ ->
+        (* Schedule transforms construct [Tile_mma] after the optimization pipeline ran; it never
+           reaches visit tracing. *)
+        invalid_arg "Low_level.visit_llc: Tile_mma reached the optimization pipeline"
     | If { cond = c, _; body } ->
         loop_scalar env None c;
         loop body
@@ -764,6 +794,8 @@ let%diagn2_sexp check_and_store_virtual (optim_ctx : optimize_ctx) traced static
     (* A barrier is an opaque effect: a computation containing one cannot be inlined/recomputed.
        Defensive: schedule transforms run after virtualization, so this should be unreachable. *)
     | Workgroup_barrier -> raise @@ Non_virtual 141
+    (* Cooperative statements are barrier-strength opaque effects; defensive like the barrier. *)
+    | Tile_mma _ -> raise @@ Non_virtual 143
     (* Conservative in v1: a guarded computation is not inlined (a conditional write is not a
        definite write, so recomputing it at the read site could read an unset scope). Defensive:
        launch-extent guards are introduced at backend-compile time, after virtualization. *)
@@ -1170,9 +1202,9 @@ let%track7_sexp inline_computation ~id (optim_ctx : optimize_ctx) (traced : trac
       | Declare_local _ -> None
       | Comment _ -> Some llc
       | Staged_compilation _ -> Some llc
-      (* Unreachable: [check_and_store_virtual] rejects computations containing barriers and
-         guarded statements. *)
-      | Workgroup_barrier | If _ -> assert false
+      (* Unreachable: [check_and_store_virtual] rejects computations containing barriers,
+         cooperative tile statements, and guarded statements. *)
+      | Workgroup_barrier | Tile_mma _ | If _ -> assert false
     and loop_scalar env llsc : scalar_t =
       match llsc with
       | Constant _ | Constant_bits _ -> llsc
@@ -1367,6 +1399,8 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
     | Comment _ -> llc
     | Staged_compilation _ -> llc
     | Workgroup_barrier -> llc
+    (* Unreachable pre-schedule (visit tracing already rejected it); kept opaque. *)
+    | Tile_mma _ -> llc
     | If { cond = c, prec; body } ->
         If
           {
@@ -1479,6 +1513,8 @@ let cleanup_virtual_llc plc ~static_indices (llc : t) : t =
     | Comment _ -> Some llc
     | Staged_compilation _ -> Some llc
     | Workgroup_barrier -> Some llc
+    (* Unreachable pre-schedule; kept opaque. *)
+    | Tile_mma _ -> Some llc
     | If { cond = c, prec; body } ->
         (* The guard is elided when its cleaned body is empty, like an empty loop. *)
         Option.map (loop_proc ~balanced ~env_dom body) ~f:(fun body : t ->
@@ -1579,6 +1615,7 @@ and substitute_proc ~var ~value llc =
   | Comment _ -> llc
   | Staged_compilation _ -> llc
   | Workgroup_barrier -> llc
+  | Tile_mma ({ fallback; _ } as tm) -> Tile_mma { tm with fallback = loop_proc fallback }
   | If { cond = c, prec; body } -> If { cond = (loop_scalar c, prec); body = loop_proc body }
 
 (** {2 Interval analysis over [scalar_t]}
@@ -1862,6 +1899,9 @@ let simplify_llc static_indices llc =
     | Comment _ -> llc
     | Staged_compilation _ -> llc
     | Workgroup_barrier -> llc
+    (* The base indices and block extents are already static; only the scalar fallback benefits
+       from simplification. The statement itself is never folded. *)
+    | Tile_mma ({ fallback; _ } as tm) -> Tile_mma { tm with fallback = loop fallback }
     | If { cond = c, cprec; body } -> (
         (* Construct-then-fold (axis-types proposal §2): a guard whose condition the interval
            environment decides is erased -- provably true folds to the body, provably false to
@@ -2073,6 +2113,7 @@ let simplify_llc static_indices llc =
     | Set_from_vec { tn; arg = arg_scalar, _; _ } -> check_float tn arg_scalar
     | Set_local (id, llsc) -> check_float id.tn llsc
     | If { body; _ } -> loop body
+    | Tile_mma { fallback; _ } -> loop fallback
     | Declare_local _ | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier -> ()
   and check_float tn llsc =
     let loop = check_float tn in
@@ -2257,6 +2298,7 @@ let eliminate_common_subexpressions llc =
           let c = loop_scalar c in
           seen := saved;
           If { cond = (c, prec); body = loop_proc body }
+      | Tile_mma _ -> llc (* Opaque: no CSE into the cooperative statement or its fallback. *)
       | Declare_local _ -> llc
     in
     loop_scalar llsc
@@ -2264,7 +2306,9 @@ let eliminate_common_subexpressions llc =
   let rec loop_proc (llc : t) : t =
     match llc with
     | Noop -> Noop
-    | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier -> llc
+    | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier
+    | Tile_mma _ ->
+        llc
     | Seq (c1, c2) -> Seq (loop_proc c1, loop_proc c2)
     | For_loop for_config -> For_loop { for_config with body = loop_proc for_config.body }
     | Set { tn; idcs; llsc; debug } -> Set { tn; idcs; llsc = cse_scalar llsc; debug }
@@ -2351,6 +2395,9 @@ let reads_of_body (body : t) : Set.M(Tn).t =
     | Set { llsc; _ } -> loop_scalar llsc
     | Set_from_vec { arg = arg_scalar, _; _ } -> loop_scalar arg_scalar
     | Set_local (_, llsc) -> loop_scalar llsc
+    | Tile_mma { d = d_tn, _; a = a_tn, _; b = b_tn, _; _ } ->
+        (* [d] is read-modify-written; [a]/[b] are reads. The fallback touches the same nodes. *)
+        acc := Set.add (Set.add (Set.add !acc d_tn) a_tn) b_tn
     | If { cond = c, _; body } ->
         loop_scalar c;
         loop_proc body
@@ -2392,6 +2439,7 @@ let writes_of_stmt (stmt : t) : Set.M(Tn).t =
     match s with
     | Set { tn; _ } | Set_from_vec { tn; _ } -> acc := Set.add !acc tn
     | Zero_out tn -> acc := Set.add !acc tn
+    | Tile_mma { d = tn, _; _ } -> acc := Set.add !acc tn
     | Seq (a, b) ->
         loop a;
         loop b
@@ -2430,6 +2478,7 @@ let reads_scope_before_set (target : scope_id) (body : t) : bool =
     | Set { llsc; _ } -> scalar_has_read llsc
     | Set_from_vec { arg = s, _; _ } -> scalar_has_read s
     | Set_local (_, llsc) -> scalar_has_read llsc
+    | Tile_mma { fallback; _ } -> proc_has_read fallback
   in
   (* Three-valued scan: Read (found a get before first definite set), Written (found a definite set
      before any get), Neither. *)
@@ -2443,6 +2492,7 @@ let reads_scope_before_set (target : scope_id) (body : t) : bool =
         if scalar_has_read llsc then `Read
         else if equal_scope_id id target then `Written
         else `Neither
+    | Tile_mma { fallback; _ } -> if proc_has_read fallback then `Read else `Neither
     | Seq (a, b) -> (
         match scan a with `Read -> `Read | `Written -> `Written | `Neither -> scan b)
     | For_loop { body; from_; to_; _ } -> (
@@ -2465,6 +2515,10 @@ let reads_scope_before_set (target : scope_id) (body : t) : bool =
 let rec contains_barrier (llc : t) : bool =
   match llc with
   | Workgroup_barrier -> true
+  (* A cooperative tile statement is barrier-strength: all lanes must reach it together, and no
+     code motion may cross it. Treating it as a barrier also makes [validate_parallel] apply the
+     workgroup-extent-uniformity and no-If-guard rules to kernels containing it. *)
+  | Tile_mma _ -> true
   | Seq (a, b) -> contains_barrier a || contains_barrier b
   | For_loop { body; _ } -> contains_barrier body
   | Set { llsc; _ } -> scalar_contains_barrier llsc
@@ -2513,7 +2567,7 @@ let rec hardware_depth kind (llc : t) : int =
   | Seq (a, b) -> max (hardware_depth kind a) (hardware_depth kind b)
   | If { body; _ } -> hardware_depth kind body
   | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Set _ | Set_from_vec _ | Set_local _
-  | Declare_local _ | Workgroup_barrier ->
+  | Declare_local _ | Workgroup_barrier | Tile_mma _ ->
       0
 
 type hardware_axis_info = {
@@ -2545,8 +2599,9 @@ let hardware_axes (llc : t) : hardware_axis_info list =
         walk a;
         walk b
     | If { body; _ } -> walk body
+    (* The fallback's loops are fresh serial symbols; the statement binds no hardware axes. *)
     | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Set _ | Set_from_vec _ | Set_local _
-    | Declare_local _ | Workgroup_barrier ->
+    | Declare_local _ | Workgroup_barrier | Tile_mma _ ->
         ()
   in
   walk llc;
@@ -2590,6 +2645,7 @@ let rec scalar_scopes_have_annotated (llc : t) : bool =
   | Set { llsc; _ } -> scalar llsc
   | Set_from_vec { arg = s, _; _ } -> scalar s
   | Set_local (_, llsc) -> scalar llsc
+  | Tile_mma { fallback; _ } -> scalar_scopes_have_annotated fallback
   | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier ->
       false
 
@@ -2638,7 +2694,7 @@ let validate_parallel plc (llc : t) : unit =
             no_guarded_barrier b
         | For_loop { body; _ } -> no_guarded_barrier body
         | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Set _ | Set_from_vec _
-        | Set_local _ | Declare_local _ | Workgroup_barrier ->
+        | Set_local _ | Declare_local _ | Workgroup_barrier | Tile_mma _ ->
             ()
       in
       no_guarded_barrier llc);
@@ -2657,7 +2713,18 @@ let validate_parallel plc (llc : t) : unit =
     in
     let slot_of_index = List.map axes ~f:(fun a -> (a.ha_index, (a.ha_kind, a.ha_slot))) in
     let describe_pair (kind, slot) = hardware_kind_label kind ^ " slot " ^ Int.to_string slot in
-    let rec check_writes ~covered llc =
+    let check_covered_write ~covered tn =
+      let missing = List.filter active ~f:(fun p -> not (List.mem covered p ~equal:pair_equal)) in
+      if (not (List.is_empty missing)) && Tn.Placements.is_materialized_force plc tn 160 then
+        invalid_arg
+          ("Low_level.validate_parallel: write to materialized node " ^ Tn.debug_name tn
+         ^ " is not nested under annotated loops covering all active hardware dimensions \
+            (missing: "
+          ^ String.concat ~sep:", " (List.map missing ~f:describe_pair)
+          ^ "): every hardware index of an uncovered dimension executes it, racing or repeating \
+             the update")
+    in
+    let rec check_writes ~covered ~enclosing llc =
       match llc with
       | For_loop { index; body; _ } ->
           let covered =
@@ -2665,34 +2732,45 @@ let validate_parallel plc (llc : t) : unit =
             | Some pair -> pair :: covered
             | None -> covered
           in
-          check_writes ~covered body
+          check_writes ~covered ~enclosing:(index :: enclosing) body
       | Seq (a, b) ->
-          check_writes ~covered a;
-          check_writes ~covered b
-      | If { body; _ } -> check_writes ~covered body
+          check_writes ~covered ~enclosing a;
+          check_writes ~covered ~enclosing b
+      | If { body; _ } -> check_writes ~covered ~enclosing body
       | Zero_out tn ->
           if (not (List.is_empty active)) && Tn.Placements.is_materialized_force plc tn 160 then
             invalid_arg
               ("Low_level.validate_parallel: Zero_out of materialized node " ^ Tn.debug_name tn
              ^ " in a multi-threaded kernel: whole-node zeroing is not distributed across \
                 hardware threads; zero via per-element writes under the annotated loops instead")
-      | Set { tn; _ } | Set_from_vec { tn; _ } ->
-          let missing =
-            List.filter active ~f:(fun p -> not (List.mem covered p ~equal:pair_equal))
-          in
-          if (not (List.is_empty missing)) && Tn.Placements.is_materialized_force plc tn 160 then
-            invalid_arg
-              ("Low_level.validate_parallel: write to materialized node " ^ Tn.debug_name tn
-             ^ " is not nested under annotated loops covering all active hardware dimensions \
-                (missing: "
-              ^ String.concat ~sep:", " (List.map missing ~f:describe_pair)
-              ^ "): every hardware index of an uncovered dimension executes it, racing or \
-                 repeating the update")
+      | Set { tn; _ } | Set_from_vec { tn; _ } -> check_covered_write ~covered tn
+      | Tile_mma { d = d_tn, d_idcs; a = _, a_idcs; b = _, b_idcs; lane; _ } ->
+          (* The cooperating [lane] axis must be a real enclosing [Workgroup]-typed loop: the
+             launch needs its threads, hardware backends reach the intrinsic on all of them
+             together, and serial renderers key their once-per-simdgroup guard off its index. *)
+          (match List.Assoc.find slot_of_index ~equal:Indexing.equal_symbol lane with
+          | Some (`Workgroup, _) when List.mem enclosing lane ~equal:Indexing.equal_symbol -> ()
+          | _ ->
+              invalid_arg
+                ("Low_level.validate_parallel: Tile_mma lane " ^ Indexing.symbol_ident lane
+               ^ " must be bound by an enclosing Workgroup-typed loop"));
+          (* The tile is jointly owned by the simdgroup: per-lane element ownership is
+             architecture-opaque, so no base index may mention the lane. *)
+          Array.iter
+            (Array.concat [ d_idcs; a_idcs; b_idcs ])
+            ~f:(fun idx ->
+              if axis_index_mentions_symbol lane idx then
+                invalid_arg
+                  ("Low_level.validate_parallel: Tile_mma base indices must not mention the lane \
+                    axis " ^ Indexing.symbol_ident lane ^ " (the tile is jointly owned)"));
+          (* The tile store covers the lane slot by decree (the statement is nested under the lane
+             loop, adding its slot to [covered]); other active slots follow the ordinary rule. *)
+          check_covered_write ~covered d_tn
       | Noop | Comment _ | Staged_compilation _ | Set_local _ | Declare_local _ | Workgroup_barrier
         ->
           ()
     in
-    check_writes ~covered:[] llc)
+    check_writes ~covered:[] ~enclosing:[] llc)
 
 (** Wraps the body of each hardware-annotated loop whose extent is smaller than its slot's launch
     dimension in an [If (index < extent)] guard, for the kinds [should_guard] selects (backends
@@ -2723,7 +2801,7 @@ let guard_annotated_extents ~(should_guard : [ `Grid | `Workgroup ] -> bool) (ll
     | Seq (a, b) -> Seq (walk a, walk b)
     | If { cond; body } -> If { cond; body = walk body }
     | ( Noop | Comment _ | Staged_compilation _ | Zero_out _ | Set _ | Set_from_vec _ | Set_local _
-      | Declare_local _ | Workgroup_barrier ) as other ->
+      | Declare_local _ | Workgroup_barrier | Tile_mma _ ) as other ->
         other
   in
   walk llc
@@ -3071,7 +3149,7 @@ let rewrite_one_hot_reductions ?(static_indices = []) (llc : t) : t =
         | If { cond = c, p; body } ->
             If { cond = (loop_scalar ~ienv c, p); body = loop_proc ~ienv body }
         | ( Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _
-          | Workgroup_barrier ) as other ->
+          | Workgroup_barrier | Tile_mma _ ) as other ->
             other)
   and loop_scalar ~ienv (llsc : scalar_t) : scalar_t =
     let loop_scalar = loop_scalar ~ienv in
@@ -3119,6 +3197,9 @@ let rec pin_device_written_bounds (llc : t) : unit =
       pin tn;
       pin_scalar_written_bounds s
   | Set_local (_, llsc) -> pin_scalar_written_bounds llsc
+  | Tile_mma { d = d_tn, _; fallback; _ } ->
+      pin d_tn;
+      pin_device_written_bounds fallback
   | If { cond = c, _; body } ->
       pin_scalar_written_bounds c;
       pin_device_written_bounds body
@@ -3212,6 +3293,11 @@ let get_ident_within_code ?no_dots ?(blacklist = []) llcs =
     | If { cond = c, _; body } ->
         loop_scalar c;
         loop body
+    | Tile_mma { d = d_tn, _; a = a_tn, _; b = b_tn, _; fallback; _ } ->
+        visit d_tn;
+        visit a_tn;
+        visit b_tn;
+        loop fallback
     | Declare_local { id = { tn; _ }; _ } -> visit tn
   and loop_scalar fc =
     match fc with
@@ -3274,6 +3360,18 @@ let to_doc_cstyle ?name ?static_indices () llc =
         let body_doc = nest 2 (break 1 ^^ doc_of_code body) in
         group (header ^^ body_doc ^^ break 1 ^^ string "}")
     | Workgroup_barrier -> string "workgroup_barrier;"
+    | Tile_mma { d = d_tn, d_idcs; a = a_tn, a_idcs; b = b_tn, b_idcs; m; n; k; lane; fallback } ->
+        let header =
+          string (Printf.sprintf "tile_mma<%dx%dx%d>@" m n k)
+          ^^ pp_symbol lane ^^ string " " ^^ doc_ident d_tn
+          ^^ brackets (pp_indices d_idcs)
+          ^^ string " += " ^^ doc_ident a_tn
+          ^^ brackets (pp_indices a_idcs)
+          ^^ string " * " ^^ doc_ident b_tn
+          ^^ brackets (pp_indices b_idcs)
+          ^^ string " fallback {"
+        in
+        group (header ^^ nest 2 (break 1 ^^ doc_of_code fallback) ^^ break 1 ^^ string "}")
     | If { cond = c, cprec; body } ->
         let header = string "if " ^^ doc_of_float cprec c ^^ string " != 0 {" in
         group (header ^^ nest 2 (break 1 ^^ doc_of_code body) ^^ break 1 ^^ string "}")
@@ -3385,6 +3483,18 @@ let to_doc ?name ?static_indices () llc =
         let body_doc = nest 2 (break 1 ^^ doc_of_code body) in
         group (header ^^ body_doc ^^ break 1 ^^ string "}")
     | Workgroup_barrier -> string "workgroup_barrier;"
+    | Tile_mma { d = d_tn, d_idcs; a = a_tn, a_idcs; b = b_tn, b_idcs; m; n; k; lane; fallback } ->
+        let header =
+          string (Printf.sprintf "tile_mma<%dx%dx%d>@" m n k)
+          ^^ pp_symbol lane ^^ string " " ^^ doc_ident d_tn
+          ^^ brackets (pp_indices d_idcs)
+          ^^ string " += " ^^ doc_ident a_tn
+          ^^ brackets (pp_indices a_idcs)
+          ^^ string " * " ^^ doc_ident b_tn
+          ^^ brackets (pp_indices b_idcs)
+          ^^ string " fallback {"
+        in
+        group (header ^^ nest 2 (break 1 ^^ doc_of_code fallback) ^^ break 1 ^^ string "}")
     | If { cond = c, _; body } ->
         let header = string "if " ^^ doc_of_float c ^^ string " != 0 {" in
         group (header ^^ nest 2 (break 1 ^^ doc_of_code body) ^^ break 1 ^^ string "}")

@@ -65,7 +65,8 @@ let known_virtual (o : LL.optimized) tn = Tn.Placements.known_virtual o.optimize
 (* --- structural probes on the optimized form --- *)
 let rec walk_t ~on_get ~on_where (llc : LL.t) =
   match llc with
-  | LL.Noop | LL.Declare_local _ | LL.Comment _ | LL.Staged_compilation _ | LL.Workgroup_barrier ->
+  | LL.Noop | LL.Declare_local _ | LL.Comment _ | LL.Staged_compilation _ | LL.Workgroup_barrier
+  | LL.Tile_mma _ ->
       ()
   | LL.Seq (a, b) ->
       walk_t ~on_get ~on_where a;

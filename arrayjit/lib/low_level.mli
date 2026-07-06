@@ -78,6 +78,25 @@ type t =
           loops (docs/proposals/axis-types-for-loops.md §2); [simplify_llc] erases a guard whose
           condition an interval proves. A conditional write is never a definite write;
           virtualization treats guarded computations as non-inlineable in v1. *)
+  | Tile_mma of {
+      d : Tnode.t * Indexing.axis_index array;  (** Accumulator block base. *)
+      a : Tnode.t * Indexing.axis_index array;
+      b : Tnode.t * Indexing.axis_index array;
+      m : int;
+      n : int;
+      k : int;  (** Covered block extents (multiples of the backend's intrinsic tile). *)
+      lane : Indexing.symbol;  (** The cooperating [Workgroup] axis (extent = SIMD width). *)
+      fallback : t;  (** Semantically equivalent scalar micro-kernel over fresh serial symbols. *)
+    }
+      (** Cooperative tile multiply-accumulate (docs/proposals/tensorize-mma.md):
+          [d[i,j] += Σ_{l<k} a[i,l] * b[l,j]] for [i < m], [j < n], relative to the operands' base
+          index vectors, executed jointly by the threads of the [lane] axis (tensor cores /
+          [simdgroup_matrix]). Each operand's tile spans its tnode's last two axes (row-major);
+          the base indices must not mention [lane]. Constructed by schedule transforms only
+          ({!Schedule.optop.Tensorize}), after the optimization pipeline. Backends without an MMA
+          hook render [fallback] under an [if (lane == 0)] guard. Validates like
+          {!Workgroup_barrier} plus a write of [d] for the coverage rule; see
+          {!validate_parallel}. *)
 [@@deriving sexp_of, equal]
 
 and scalar_t =

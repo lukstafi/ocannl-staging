@@ -127,6 +127,26 @@ module type C_syntax_config = sig
       [__attribute__((aligned(32)))] (gh-ocannl-164). Applies to the plain stack-array branch only,
       never to workgroup-shared placements. *)
 
+  val mma_syntax :
+    (prec:Ops.prec ->
+    m:int ->
+    n:int ->
+    k:int ->
+    d:PPrint.document * int * [ `Device | `Shared | `Thread ] ->
+    a:PPrint.document * int * [ `Device | `Shared | `Thread ] ->
+    b:PPrint.document * int * [ `Device | `Shared | `Thread ] ->
+    PPrint.document option)
+    option
+  (** Cooperative tile-MMA emission for [Low_level.Tile_mma]
+      (docs/proposals/tensorize-mma.md §4): given the uniform operand precision, the covered block
+      extents [m]/[n]/[k], and per operand a pointer expression to the tile base (already offset),
+      its leading-dimension stride in elements, and its address space, emit the intrinsic sequence
+      (fragment declarations / loads / mma steps / stores) executed by every lane of the enclosing
+      lane loop. Return [None] to decline a particular call (unsupported precision, extents not
+      multiples of the intrinsic tile, thread-space operand) — the caller then renders the scalar
+      [fallback] under an [if (lane == 0)] guard, which is also the path when the whole hook is
+      [None] (cc, and any backend until wired). *)
+
   val kernel_log_param : (string * string) option
   (** Kernel parameter for logging, if any. E.g., (Some ("int", "log_id")) or (Some ("const char*",
       "log_file_name")). *)
@@ -196,6 +216,10 @@ struct
 
   let aligned_local_attr =
     Some (Printf.sprintf "__attribute__((aligned(%d)))" Ops.buffer_alignment)
+
+  (* No tile-MMA units on plain C backends: [Tile_mma] renders its scalar fallback under the
+     [lane == 0] guard. *)
+  let mma_syntax = None
   let float_log_style = if Input.full_printf_support then "%g" else "%de-3"
 
   let styled_log_arg doc =
@@ -565,7 +589,7 @@ module C_syntax (B : C_syntax_config) = struct
     let rec go (llc : Low_level.t) =
       match llc with
       | Low_level.Noop | Comment _ -> ()
-      | Staged_compilation _ | Workgroup_barrier -> ok := false
+      | Staged_compilation _ | Workgroup_barrier | Tile_mma _ -> ok := false
       | Seq (a, b) ->
           go a;
           go b
@@ -1313,6 +1337,57 @@ module C_syntax (B : C_syntax_config) = struct
             invalid_arg
               "C_syntax.pp_ll: Workgroup_barrier not supported by this backend (serialization \
                cannot implement a barrier)")
+    | Tile_mma { d; a; b; m; n; k; lane; fallback } -> (
+        (* Cooperative tile-MMA (docs/proposals/tensorize-mma.md §4). Backends with an [mma_syntax]
+           hook emit the intrinsic sequence on every lane; everywhere else (including per-call
+           declines and logged runs, which must stay serial and deterministic) the scalar fallback
+           runs once per simdgroup, guarded on lane 0 — the lane loop still supplies the launch's
+           threads. *)
+        let operand (tn, idcs) =
+          let dims = Lazy.force tn.Tn.dims in
+          let prec = Lazy.force tn.Tn.prec in
+          let rank = Array.length dims in
+          let ld = if rank >= 1 then dims.(rank - 1) else 1 in
+          let space =
+            if Set.mem !current_workgroup_shared tn then `Shared
+            else if Tn.Placements.is_materialized_force (placements ()) tn 440 then `Device
+            else `Thread
+          in
+          let ptr_doc =
+            parens (string (get_ident tn) ^^ string " + " ^^ pp_array_offset (idcs, dims))
+          in
+          (prec, (ptr_doc, ld, space))
+        in
+        let fallback_doc () =
+          let guarded =
+            group
+              (string "if (" ^^ pp_symbol lane ^^ string " == 0) " ^^ lbrace
+              ^^ nest 2 (hardline ^^ pp_ll ~log_set_locals ~in_loop:true fallback)
+              ^^ hardline ^^ rbrace)
+          in
+          (* On backends that bind the lane loop in hardware, sibling statements (e.g. the zeroing
+             of [d]) execute lane-partitioned: bracket the single-lane fallback in barriers so lane
+             0 observes the other lanes' writes, and they its. Uniform by the barrier-strength
+             validation [Tile_mma] inherits. Serial renderers need no ordering. *)
+          match B.barrier_syntax with
+          | Some s -> string s ^^ hardline ^^ guarded ^^ hardline ^^ string s
+          | None -> guarded
+        in
+        match B.mma_syntax with
+        | None -> fallback_doc ()
+        | Some _ when Utils.debug_log_from_routines () -> fallback_doc ()
+        | Some emit -> (
+            let d_prec, d_op = operand d in
+            let a_prec, a_op = operand a in
+            let b_prec, b_op = operand b in
+            if not (Ops.equal_prec d_prec a_prec && Ops.equal_prec d_prec b_prec) then
+              (* v1: uniform operand precision only (Metal [simdgroup_matrix] has no mixed-prec
+                 multiply-accumulate); mixed-precision combinations stay on the scalar path. *)
+              fallback_doc ()
+            else
+              match emit ~prec:d_prec ~m ~n ~k ~d:d_op ~a:a_op ~b:b_op with
+              | Some doc -> doc
+              | None -> fallback_doc ()))
     | If { cond = c, cprec; body } ->
         (* Guarded statement (axis-types proposal §2): [body] executes iff [cond] is nonzero --
            C's [if] tests exactly that. *)
