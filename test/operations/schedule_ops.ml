@@ -132,7 +132,9 @@ let () =
       let ok =
         if on_gpu then has "for (" && not (has "#pragma")
         else
-          has "#pragma clang loop vectorize(enable)" && has "#pragma GCC ivdep" && has "for ("
+          (* Explicit SIMD emission (GCC/Clang vector extensions) supersedes the pragma hints for
+             eligible bodies; the serial remainder loop follows the vector main loop. *)
+          has "vector_size" && has "__builtin_memcpy" && not (has "#pragma")
       in
       p "vectorized retype structure as expected" ok);
 

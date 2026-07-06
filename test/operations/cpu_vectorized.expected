@@ -1,0 +1,6 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+vectorized mul-add values match the serial twin: true
+vectorized rendering with serial remainder: true
+split+vectorized values match the serial twin: true
+affine-indexed vector accesses rendered: true

@@ -319,7 +319,9 @@ schedule layer.)*
   type emission through the `Set_from_vec`/`vec_unop` growth path) is the follow-up:
   the SIMD FMA micro-kernel under
   [watch-ocannl-README-md-347818d3](watch-ocannl-README-md-347818d3.md)'s remaining
-  scope, composed with the S4 packed-tile schedules.
+  scope, composed with the S4 packed-tile schedules. *(Landed 2026-07-06: explicit
+  vector-extension emission for eligible `Vectorized` bodies, config
+  `cc_vector_bytes`; see that proposal's status note.)*
 - **No loop transformations** — tiling, reordering, packing, and accumulator
   privatization landed with the schedule layer
   ([schedule-ir-optops](schedule-ir-optops.md), PRs #90/#91); this task changes only
