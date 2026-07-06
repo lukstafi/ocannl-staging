@@ -248,13 +248,18 @@ module Sync (Backend : For_add_scheduler) = struct
   let sync () = ()
   let is_done () = true
   let will_wait_for _context () = ()
-  let device : device = make_device CPU () ~ordinal:0
+
+  (* Lazy like [Multicore]'s device and for the same reason as the GPU backends' device discovery
+     (PR #94): the singleton backend module initializes at program startup, and minting the device
+     there would advance the process-global [device_id] counter in runs that never use sync_cc --
+     shifting other backends' stream names and log files (e.g. [multicore_cc-0-0.log]). *)
+  let device : device Lazy.t = lazy (make_device CPU () ~ordinal:0)
 
   let get_device ~ordinal =
     if ordinal <> 0 then
       invalid_arg @@ "Sync_scheduler.get_device: there is only one device, but ordinal="
       ^ Int.to_string ordinal;
-    device
+    Lazy.force device
 
   let num_devices () = 1
   let get_used_memory _ = Backend.get_used_memory ()
