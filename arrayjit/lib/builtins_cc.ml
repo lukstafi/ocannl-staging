@@ -21,6 +21,18 @@ let includes =
   #define OCANNL_HAS_NEON 0
 #endif
 
+/* Fused elementwise FMA for explicit SIMD rendering of Vectorized loops: clang's builtin where
+   available, else the codegen's per-lane fmaf/fma loop. __has_builtin needs a shim on compilers
+   that lack it (function-like use of an undefined macro is a preprocessor error). */
+#ifndef __has_builtin
+  #define __has_builtin(x) 0
+#endif
+#if __has_builtin(__builtin_elementwise_fma)
+  #define OCANNL_HAS_ELEMENTWISE_FMA 1
+#else
+  #define OCANNL_HAS_ELEMENTWISE_FMA 0
+#endif
+
 /* Parallel Grid loops (gh-ocannl-164) use libdispatch on Apple platforms; OpenMP needs no
    header. Guarded unconditionally so generated sources are byte-identical across platforms. */
 #ifdef __APPLE__

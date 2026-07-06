@@ -208,6 +208,42 @@ let () =
   PPrint.ToChannel.pretty 0.9 100 Stdio.stdout doc5;
   Stdio.printf "\n";
 
+  (* --- [Ops.FMA] renders fused (the simplifier synthesizes it from mul-add trees): clang's
+     [__builtin_elementwise_fma] where available, else a per-lane fmaf loop -- never the
+     maybe-contracted [a * b + c], which could double-round against the fused scalar path. --- *)
+  let g1 = make_on_device 11 "g1" in
+  let g2 = make_on_device 12 "g2" in
+  let out6 = make_on_device 13 "out6" in
+  let i = Idx.get_symbol () in
+  let fma_body =
+    LL.For_loop
+      {
+        index = i;
+        from_ = 0;
+        to_ = 7;
+        trace_it = false;
+        axis = LL.Vectorized;
+        body =
+          LL.Set
+            {
+              tn = out6;
+              idcs = [| Idx.Iterator i |];
+              llsc =
+                LL.Ternop
+                  ( Ops.FMA,
+                    (LL.Get (g1, [| Idx.Iterator i |]), Ops.single),
+                    (LL.Get (g2, [| Idx.Iterator i |]), Ops.single),
+                    (LL.Get (out6, [| Idx.Iterator i |]), Ops.single) );
+              debug = "";
+            };
+      }
+  in
+  let doc6 =
+    compile_with_vector_config ~name:"vec_fma_kernel" (make_optimized fma_body [ g1; g2; out6 ])
+  in
+  PPrint.ToChannel.pretty 0.9 100 Stdio.stdout doc6;
+  Stdio.printf "\n";
+
   (* --- An alias view as a would-be kernel parameter must be rejected loudly. --- *)
   let parent = make_on_device 5 "parent" in
   let view = make_on_device 6 "view" in

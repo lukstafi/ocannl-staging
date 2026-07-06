@@ -814,7 +814,9 @@ module C_syntax (B : C_syntax_config) = struct
            contiguous in it (the index appears only in the last component, with coefficient 1 —
            the flat offset then advances by exactly 1 per iteration). Index-free subexpressions
            render as scalars (vector-scalar arithmetic splats across lanes); vector subexpressions
-           allow [Add]/[Sub]/[Mul]/[Div]/[Neg]/[FMA]. At most one store per node, and every read
+           allow [Add]/[Sub]/[Mul]/[Div]/[Neg] and fused [FMA] (matching the scalar path's
+           [fmaf]/[fma] rounding; see the note in [vec_expr]). At most one store per node, and
+           every read
            of a stored node must use the store's exact index vector — vector semantics evaluates
            all lanes' loads before the store, so cross-lane flow would reorder against the serial
            loop. The main loop advances by [lanes]; a serial remainder loop reuses [body_doc].
@@ -959,21 +961,52 @@ module C_syntax (B : C_syntax_config) = struct
                     in
                     parens (vec_expr a pa ^^ string inf ^^ vec_expr b pb)
                 | Ternop (Ops.FMA, (a, pa), (b, pb), (c, pc)) ->
-                    parens
-                      (vec_expr a pa ^^ string " * " ^^ vec_expr b pb ^^ string " + "
-                     ^^ vec_expr c pc)
+                    (* Fused, matching the scalar path's [fmaf]/[fma] single rounding (the
+                       simplifier synthesizes [FMA] from mul-add trees, so this is the hot case):
+                       clang's [__builtin_elementwise_fma] where available, otherwise a per-lane
+                       fused-fma loop (fixed trip count; SLP-vectorizes under -mfma/NEON). A plain
+                       [a * b + c] would be only maybe-contracted, so vector lanes could differ
+                       from the serial remainder loop and twin. Operands bind to vector temps
+                       (lane-uniform ones splat explicitly: vector = scalar init is invalid). *)
+                    let bind llsc p =
+                      let name = fresh "vfop" in
+                      emit
+                        (string (vtyp ^ " " ^ name ^ " = ") ^^ vec_operand llsc p ^^ semi);
+                      name
+                    in
+                    let na = bind a pa and nb = bind b pb and nc = bind c pc in
+                    let nr = fresh "vfma" in
+                    let fma_fn =
+                      match prec with Ops.Double_prec _ -> "fma" | _ -> "fmaf"
+                    in
+                    emit
+                      (string (vtyp ^ " " ^ nr ^ ";")
+                      ^^ hardline
+                      ^^ string "#if OCANNL_HAS_ELEMENTWISE_FMA"
+                      ^^ hardline
+                      ^^ string
+                           (Printf.sprintf "%s = __builtin_elementwise_fma(%s, %s, %s);" nr na nb
+                              nc)
+                      ^^ hardline ^^ string "#else" ^^ hardline
+                      ^^ string
+                           (Printf.sprintf
+                              "for (int ocannl_l__ = 0; ocannl_l__ < %d; ++ocannl_l__) %s[ocannl_l__] = %s(%s[ocannl_l__], %s[ocannl_l__], %s[ocannl_l__]);"
+                              lanes nr fma_fn na nb nc)
+                      ^^ hardline ^^ string "#endif");
+                    string nr
                 | Unop (Ops.Identity, (a, pa)) -> vec_expr a pa
                 | Unop (Ops.Neg, (a, pa)) -> parens (string "-" ^^ vec_expr a pa)
                 | _ -> raise Bail
+            and vec_operand (llsc : Low_level.scalar_t) (p : Ops.prec) : PPrint.document =
+              (* A vector-typed rendering even for lane-uniform values: initializers and builtin
+                 arguments need a vector, where the implicit vector-scalar splat of binary
+                 operators does not apply. *)
+              if scalar_mentions llsc then vec_expr llsc p
+              else string ("((" ^ vtyp ^ "){0} + ") ^^ uniform_scalar llsc ^^ string ")"
             in
             List.iter sets ~f:(fun (tn, idcs, llsc) ->
                 if not (contiguous idcs) then raise Bail;
-                let rhs =
-                  if scalar_mentions llsc then vec_expr llsc prec
-                  else
-                    (* A lane-uniform store: splat via the vector-plus-scalar idiom. *)
-                    string ("((" ^ vtyp ^ "){0} + ") ^^ uniform_scalar llsc ^^ string ")"
-                in
+                let rhs = vec_operand llsc prec in
                 let vname = fresh "vset" in
                 emit (string (vtyp ^ " " ^ vname ^ " = ") ^^ rhs ^^ semi);
                 emit
