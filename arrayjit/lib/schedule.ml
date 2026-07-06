@@ -22,6 +22,13 @@ type optop =
   | Stage of { source : Tn.t; tile_loops : Indexing.symbol list; shared : bool }
   | Privatize of { target : Tn.t; over : Indexing.symbol }
   | Expand_zero of { tn : Tn.t; indices : Indexing.symbol list }
+  | Tensorize of {
+      i : Indexing.symbol;
+      j : Indexing.symbol;
+      k : Indexing.symbol;
+      lane : Indexing.symbol;
+      simd_width : int;
+    }
 [@@deriving sexp_of]
 
 type schedule = optop list [@@deriving sexp_of]
@@ -29,6 +36,10 @@ type schedule = optop list [@@deriving sexp_of]
 let split ~axis ~factor ~outer ~inner =
   let outer_index = Indexing.get_symbol () and inner_index = Indexing.get_symbol () in
   (Split { axis; factor; outer; inner; outer_index; inner_index }, outer_index, inner_index)
+
+let tensorize ~i ~j ~k ~simd_width =
+  let lane = Indexing.get_symbol () in
+  (Tensorize { i; j; k; lane; simd_width }, lane)
 
 let expand_zero ~tn =
   let rank = Array.length (Lazy.force tn.Tn.dims) in
@@ -90,6 +101,20 @@ let rec map_code ~fidx (llc : Low_level.t) : Low_level.t =
       Set_from_vec
         { tn; idcs = Array.map idcs ~f:fidx; length; vec_unop; arg = (map_scalar ~fidx a, p); debug }
   | Set_local (id, llsc) -> Set_local (id, map_scalar ~fidx llsc)
+  | Tile_mma { d = d_tn, d_idcs; a = a_tn, a_idcs; b = b_tn, b_idcs; m; n; k; lane; fallback } ->
+      Tile_mma
+        {
+          d = (d_tn, Array.map d_idcs ~f:fidx);
+          a = (a_tn, Array.map a_idcs ~f:fidx);
+          b = (b_tn, Array.map b_idcs ~f:fidx);
+          m;
+          n;
+          k;
+          lane;
+          (* The fallback's loop symbols are fresh and bound inside it; only free (outer) symbols
+             are substituted, exactly like the base indices. *)
+          fallback = map_code ~fidx fallback;
+        }
   | If { cond = c, p; body } -> If { cond = (map_scalar ~fidx c, p); body = map_code ~fidx body }
 
 and map_scalar ~fidx (llsc : Low_level.scalar_t) : Low_level.scalar_t =
@@ -161,6 +186,7 @@ let refresh_scopes (llc : Low_level.t) : Low_level.t =
   let rec collect llc =
     match llc with
     | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Workgroup_barrier -> ()
+    | Tile_mma { fallback; _ } -> collect fallback
     | Declare_local { id; _ } -> bind id
     | Seq (a, b) ->
         collect a;
@@ -193,6 +219,7 @@ let refresh_scopes (llc : Low_level.t) : Low_level.t =
     let rec code llc =
       match llc with
       | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Workgroup_barrier -> llc
+      | Tile_mma ({ fallback; _ } as tm) -> Tile_mma { tm with fallback = code fallback }
       | Declare_local { id; needs_init } -> Declare_local { id = subst id; needs_init }
       | Seq (a, b) -> Seq (code a, code b)
       | For_loop fc -> For_loop { fc with body = code fc.body }
@@ -299,6 +326,151 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
                  refresh_scopes
                  @@ map_code ~fidx:(subst_axis_index ~sym:axis ~by:{ terms = []; offset = v })
                       fc.body)))
+  | Tensorize { i; j; k; lane; simd_width } ->
+      (* docs/proposals/tensorize-mma.md §3: replace the innermost serial [i × j × k] matmul
+         micro-kernel — whose body is a single accumulation [d[...] += a[...] * b[...]] (plain-add
+         or FMA form, as [optimize]'s simplify leaves it) — with a [Tile_mma] block statement
+         wrapped in a fresh extent-[simd_width] [Workgroup] lane loop. The statement covers the
+         whole [m×n×k] block, so fragment residency across the reduction is an intra-statement
+         codegen concern; the original nest becomes the scalar [fallback]. Divisibility by the
+         backend's intrinsic tile is checked at emission ([mma_syntax] declines per call and the
+         fallback runs), since the schedule layer is backend-agnostic. *)
+      rewrite_loop ~what:"Schedule.Tensorize" ~sym:i llc ~f:(fun ifc ->
+          if simd_width <= 0 then invalid_arg "Schedule.Tensorize: simd_width must be positive";
+          let strip body =
+            List.filter (flat_lines [ body ]) ~f:(function Noop | Comment _ -> false | _ -> true)
+          in
+          let nested ~of_ sym body =
+            match strip body with
+            | [ For_loop { index; from_; to_; body; trace_it; axis } ]
+              when Indexing.equal_symbol index sym ->
+                { index; from_; to_; body; trace_it; axis }
+            | _ ->
+                invalid_arg
+                  ("Schedule.Tensorize: loop " ^ Indexing.symbol_ident sym
+                 ^ " must be exactly the body of loop " ^ Indexing.symbol_ident of_
+                 ^ " (a perfectly nested i x j x k micro-kernel)")
+          in
+          let jfc = nested ~of_:i j ifc.body in
+          let kfc = nested ~of_:j k jfc.body in
+          List.iter
+            [ { ifc with body = Noop }; { jfc with body = Noop }; { kfc with body = Noop } ]
+            ~f:(fun fc ->
+              if not (equal_axis_type fc.axis Serial) || fc.from_ <> 0 then
+                invalid_arg
+                  ("Schedule.Tensorize: loop " ^ Indexing.symbol_ident fc.index
+                 ^ " must be Serial starting at 0"));
+          let d_tn, d_idcs, llsc =
+            match strip kfc.body with
+            | [ Set { tn; idcs; llsc; _ } ] -> (tn, idcs, llsc)
+            | _ ->
+                invalid_arg
+                  "Schedule.Tensorize: the micro-kernel body must be a single accumulation Set"
+          in
+          let is_d_read (sc : Low_level.scalar_t) =
+            match sc with
+            | Get (tn, idcs) ->
+                Tn.equal tn d_tn && Array.equal Indexing.equal_axis_index idcs d_idcs
+            | _ -> false
+          in
+          let get_operand (sc : Low_level.scalar_t) =
+            match sc with Get (tn, idcs) -> Some (tn, idcs) | _ -> None
+          in
+          let operands =
+            match llsc with
+            | Ternop (Ops.FMA, (x, _), (y, _), (acc, _)) when is_d_read acc ->
+                Option.both (get_operand x) (get_operand y)
+            | Binop (Ops.Add, (acc, _), (Binop (Ops.Mul, (x, _), (y, _)), _)) when is_d_read acc ->
+                Option.both (get_operand x) (get_operand y)
+            | Binop (Ops.Add, (Binop (Ops.Mul, (x, _), (y, _)), _), (acc, _)) when is_d_read acc ->
+                Option.both (get_operand x) (get_operand y)
+            | _ -> None
+          in
+          let x_op, y_op =
+            match operands with
+            | Some ops -> ops
+            | None ->
+                invalid_arg
+                  ("Schedule.Tensorize: the micro-kernel must accumulate a product of reads into "
+                 ^ Tn.debug_name d_tn ^ " (d[...] += a[...] * b[...], plain-add or FMA form)")
+          in
+          let mentions sym (idx : Indexing.axis_index) =
+            match idx with
+            | Indexing.Iterator s -> Indexing.equal_symbol s sym
+            | Indexing.Affine { symbols; _ } ->
+                List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
+            | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
+          in
+          let coeff sym (idx : Indexing.axis_index) =
+            match idx with
+            | Indexing.Iterator s when Indexing.equal_symbol s sym -> 1
+            | Indexing.Affine { symbols; _ } ->
+                List.sum
+                  (module Int)
+                  symbols
+                  ~f:(fun (c, s) -> if Indexing.equal_symbol s sym then c else 0)
+            | _ -> 0
+          in
+          (* Index discipline: the tile spans the operand's last two axes with unit strides in the
+             micro-kernel symbols — [row] appears with coefficient 1 exactly in component
+             [rank-2], [col] in component [rank-1], and the third symbol not at all. Outer-loop
+             terms (the block base) may appear anywhere. *)
+          let role_ok (_tn, idcs) ~row ~col =
+            let rank = Array.length idcs in
+            rank >= 2
+            && coeff row idcs.(rank - 2) = 1
+            && coeff col idcs.(rank - 1) = 1
+            && List.for_all [ i; j; k ] ~f:(fun s ->
+                   Array.for_alli idcs ~f:(fun p idx ->
+                       let allowed =
+                         if Indexing.equal_symbol s row then p = rank - 2
+                         else if Indexing.equal_symbol s col then p = rank - 1
+                         else false
+                       in
+                       (not (mentions s idx)) || allowed))
+          in
+          if not (role_ok (d_tn, d_idcs) ~row:i ~col:j) then
+            invalid_arg
+              ("Schedule.Tensorize: accumulator " ^ Tn.debug_name d_tn
+             ^ " must be indexed [..., i, j] over its last two axes (unit coefficients)");
+          let a_op, b_op =
+            if role_ok x_op ~row:i ~col:k && role_ok y_op ~row:k ~col:j then (x_op, y_op)
+            else if role_ok y_op ~row:i ~col:k && role_ok x_op ~row:k ~col:j then (y_op, x_op)
+            else
+              invalid_arg
+                ("Schedule.Tensorize: operands of the product must be indexed [..., i, k] and \
+                  [..., k, j] over their last two axes (unit coefficients; transposed layouts are \
+                  not supported in v1): "
+                ^ Tn.debug_name (fst x_op)
+                ^ ", "
+                ^ Tn.debug_name (fst y_op))
+          in
+          let zero = { terms = []; offset = 0 } in
+          let base idcs =
+            Array.map idcs ~f:(fun idx ->
+                subst_axis_index ~sym:i ~by:zero
+                  (subst_axis_index ~sym:j ~by:zero (subst_axis_index ~sym:k ~by:zero idx)))
+          in
+          For_loop
+            {
+              index = lane;
+              from_ = 0;
+              to_ = simd_width - 1;
+              axis = Workgroup;
+              trace_it = false;
+              body =
+                Tile_mma
+                  {
+                    d = (d_tn, base d_idcs);
+                    a = (fst a_op, base (snd a_op));
+                    b = (fst b_op, base (snd b_op));
+                    m = ifc.to_ + 1;
+                    n = jfc.to_ + 1;
+                    k = kfc.to_ + 1;
+                    lane;
+                    fallback = for_loop ifc;
+                  };
+            })
   | Expand_zero { tn; indices } ->
       (* Whole-node [Zero_out] is never distributed across hardware threads ([validate_parallel]
          rejects it in multi-threaded kernels); expand it into an ordinary loop nest — over the
@@ -381,6 +553,9 @@ let collect_source_accesses ~source (llc : Low_level.t) :
   let rec code stack llc =
     match llc with
     | Noop | Comment _ | Staged_compilation _ | Declare_local _ | Workgroup_barrier -> ()
+    | Tile_mma _ ->
+        (* Cooperative-tile operands are not remappable reads in v1. *)
+        invalid_arg "Schedule.Stage: apply Stage before Tensorize"
     | Zero_out tn -> reject_write tn
     | Seq (a, b) ->
         code stack a;
@@ -429,6 +604,8 @@ let remap_reads ?(writes = false) ~source ~from_idcs ~tile ~tile_idcs (llc : Low
     match llc with
     | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier ->
         llc
+    (* Unreachable: [collect_source_accesses] / Privatize's scan reject [Tile_mma] first. *)
+    | Tile_mma _ -> llc
     | Seq (a, b) -> Seq (code a, code b)
     | For_loop fc -> For_loop { fc with body = code fc.body }
     | Set { tn; idcs; llsc; debug }
@@ -722,6 +899,7 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
       let rec scan stack conds llc =
         match llc with
         | Noop | Comment _ | Staged_compilation _ | Declare_local _ | Workgroup_barrier -> ()
+        | Tile_mma _ -> invalid_arg "Schedule.Privatize: apply Privatize before Tensorize"
         | Zero_out tn ->
             if Tn.equal tn target then
               invalid_arg "Schedule.Privatize: Zero_out of the target inside the accumulation loop"
@@ -804,7 +982,7 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
              | Set { llsc; _ } | Set_local (_, llsc) -> go_scalar llsc
              | Set_from_vec { arg = a, _; _ } -> go_scalar a
              | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _
-             | Workgroup_barrier ->
+             | Workgroup_barrier | Tile_mma _ ->
                  ()
            and go_scalar (llsc : scalar_t) =
              match llsc with
@@ -965,7 +1143,7 @@ let apply_opt_op (opt : Low_level.optimized) (op : optop) : Low_level.optimized 
   match op with
   | Stage { source; tile_loops; shared } -> apply_stage ~source ~tile_loops ~shared opt
   | Privatize { target; over } -> apply_privatize ~target ~over opt
-  | (Split _ | Swap _ | Retype _ | Unroll _ | Expand_zero _) as op ->
+  | (Split _ | Swap _ | Retype _ | Unroll _ | Expand_zero _ | Tensorize _) as op ->
       { opt with llc = apply_op opt.Low_level.llc op }
 
 let apply ?(static_indices = []) (sched : schedule) (opt : Low_level.optimized) :
@@ -1030,6 +1208,8 @@ let scan_accesses plc (llc : Low_level.t) : access list =
     | Noop | Comment _ | Declare_local _ -> ()
     | Staged_compilation _ -> raise Bail
     | Workgroup_barrier -> raise Bail
+    (* Already-scheduled cooperative code: the default annotator leaves it alone. *)
+    | Tile_mma _ -> raise Bail
     | Seq (a, b) ->
         code ~depth a;
         code ~depth b
@@ -1346,7 +1526,7 @@ let summarize_stmt plc (stmt : Low_level.t) : stmt_summary option =
   let rec code ~top llc =
     match llc with
     | Noop | Comment _ -> ()
-    | Staged_compilation _ | Workgroup_barrier -> raise Opaque_stmt
+    | Staged_compilation _ | Workgroup_barrier | Tile_mma _ -> raise Opaque_stmt
     | Declare_local { id; _ } -> declares := id :: !declares
     | Seq (a, b) ->
         code ~top a;
@@ -1671,6 +1851,10 @@ let code_footprint (llc : Low_level.t) : Set.M(Tn).t * bool =
   let rec code llc =
     match llc with
     | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier -> ()
+    | Tile_mma { d = d_tn, _; a = a_tn, _; b = b_tn, _; _ } ->
+        add d_tn;
+        add a_tn;
+        add b_tn
     | Declare_local { id; _ } -> add id.tn
     | Seq (a, b) ->
         code a;
