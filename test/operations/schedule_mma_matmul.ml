@@ -20,6 +20,7 @@
 open Base
 open Ocannl
 open Ocannl.Operation.DSL_modules
+module Tn = Ir.Tnode
 module LL = Ir.Low_level
 module Sched = Ir.Schedule
 module Asgns = Ir.Assignments
@@ -80,15 +81,14 @@ let () =
   let got_serial = Context.get_values ctx_s mc0.Tensor.value in
 
   (* --- The tensorized schedule --- *)
-  let%op mc1 = ma * mb in
-  let mma_schedule (opt : LL.optimized) : Sched.schedule =
+  let mma_schedule ~out (opt : LL.optimized) : Sched.schedule =
     let paths = nest_paths opt.LL.llc in
     let i, j, k =
       match List.find_exn paths ~f:(fun p -> List.length p = 3) with
       | [ i; j; k ] -> (i, j, k)
       | _ -> assert false
     in
-    let ez, zsyms = Sched.expand_zero ~tn:mc1.Tensor.value in
+    let ez, zsyms = Sched.expand_zero ~tn:out in
     let zi, zj = match zsyms with [ zi; zj ] -> (zi, zj) | _ -> assert false in
     (* Zeroing: Grid(4) x Serial(8) rows aligned with the accumulation's grid blocks, and the
        column loop as the Workgroup(32) axis -- each lane zeroes its own column, and the extent
@@ -99,8 +99,9 @@ let () =
     let tz, _lane = Sched.tensorize ~i:i_i ~j ~k ~simd_width in
     [ ez; sp_zi; rz; sp_i; tz ]
   in
+  let%op mc1 = ma * mb in
   let mma_comp = named "mm_mma" (Train.forward mc1) in
-  let transform opt = Sched.apply (mma_schedule opt) opt in
+  let transform opt = Sched.apply (mma_schedule ~out:mc1.Tensor.value opt) opt in
   let ctx_a = Context.auto () in
   let ctx_a, routine_a =
     Context.compile ~lowered_transform:transform ctx_a mma_comp Ir.Indexing.Empty
@@ -128,6 +129,57 @@ let () =
           has "== 0)" && has "fma" && not (has "simdgroup")
       in
       p "tensorized structure as expected" ok);
+
+  (* --- Half precision: [simdgroup_half8x8] on Metal, the wmma f16 path on CUDA (T3 draft), the
+     scalar fallback on the C backends. The inputs are multiples of 1/8 and 1/4 with 32-term sums
+     bounded by 12, so every product and partial sum is exactly representable in f16: the result
+     is EXACT regardless of accumulation order, and parity is bitwise on every backend and either
+     rendering path. --- *)
+  let mah =
+    NTDSL.init ~l:"mah" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ n ]
+      ~f:(fun idcs -> Float.of_int (((idcs.(0) * n) + idcs.(1)) % 5) *. 0.125)
+      ()
+  in
+  let mbh =
+    NTDSL.init ~l:"mbh" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ n ]
+      ~f:(fun idcs -> (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 7) -. 3.) *. 0.25)
+      ()
+  in
+  let%op mch0 = mah * mbh in
+  Tn.update_prec mch0.Tensor.value Ir.Ops.half;
+  let ctx_hs = Context.auto () in
+  let ctx_hs, routine_hs =
+    Context.compile ~lowered_transform:(fun opt -> opt) ctx_hs
+      (named "mm_h_serial" (Train.forward mch0))
+      Ir.Indexing.Empty
+  in
+  let ctx_hs = Context.run ctx_hs routine_hs in
+  let got_h_serial = Context.get_values ctx_hs mch0.Tensor.value in
+  let%op mch1 = mah * mbh in
+  Tn.update_prec mch1.Tensor.value Ir.Ops.half;
+  let transform_h opt = Sched.apply (mma_schedule ~out:mch1.Tensor.value opt) opt in
+  let ctx_h = Context.auto () in
+  let ctx_h, routine_h =
+    Context.compile ~lowered_transform:transform_h ctx_h
+      (named "mm_h_mma" (Train.forward mch1))
+      Ir.Indexing.Empty
+  in
+  let ctx_h = Context.run ctx_h routine_h in
+  let got_h = Context.get_values ctx_h mch1.Tensor.value in
+  p "half tensorized matmul matches the serial twin bitwise"
+    (Array.for_all2_exn got_h got_h_serial ~f:Float.equal);
+  (match read_generated "mm_h_mma" with
+  | None -> p "half tensorized structure as expected" false
+  | Some src ->
+      let has s = String.is_substring src ~substring:s in
+      let ok =
+        if on_metal then has "simdgroup_half8x8" && not (has "== 0)")
+        else if on_gpu then
+          (* CUDA: the T3 wmma draft, or the lane-0 fallback until it is verified. *)
+          has "nvcuda::wmma" || has "== 0)"
+        else has "== 0)" && not (has "simdgroup")
+      in
+      p "half tensorized structure as expected" ok);
 
   (* --- Pattern discipline: Tensorize on a non-micro-kernel nest is a targeted error --- *)
   let%op mc2 = ma * mb in
