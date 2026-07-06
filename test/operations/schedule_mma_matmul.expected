@@ -5,4 +5,6 @@ C-backend fallback matches bitwise: true
 tensorized structure as expected: true
 half tensorized matmul matches the serial twin bitwise: true
 half tensorized structure as expected: true
+staged+tensorized matmul parity (GPU) or clean rejection (CPU): true
+staged+tensorized structure as expected: true
 misassigned roles are rejected with a targeted error: true

@@ -181,6 +181,99 @@ let () =
       in
       p "half tensorized structure as expected" ok);
 
+  (* --- The staged + tensorized composition (lane-aware Stage): shared tiles for ma and mb,
+     cooperatively loaded under fresh extent-32 Workgroup lane loops, then the micro-kernel
+     tensorized. Loop order after the swaps is i_o(Grid) { k_o { i_i { j { k_i } } } }, so both
+     stages anchor at k_o (loads + barriers per k-block) and Tensorize replaces the perfectly
+     nested i_i x j x k_i micro-kernel reading the tiles. The ma tile's minor extent (8) is below
+     the width: 8 lanes load under a folded-or-surviving [lane < 8] guard; the mb tile's minor
+     extent (32) equals the width: the lane replaces the loop outright. GPU backends execute and
+     must match the serial twin; the C backends cannot express shared placement and must reject
+     cleanly (same pinning as the SMEM matmul test). --- *)
+  let%op mc3 = ma * mb in
+  let staged_schedule (opt : LL.optimized) : Sched.schedule =
+    let paths = nest_paths opt.LL.llc in
+    let i, j, k =
+      match List.find_exn paths ~f:(fun p -> List.length p = 3) with
+      | [ i; j; k ] -> (i, j, k)
+      | _ -> assert false
+    in
+    let ez, zsyms = Sched.expand_zero ~tn:mc3.Tensor.value in
+    let zi, zj = match zsyms with [ zi; zj ] -> (zi, zj) | _ -> assert false in
+    let sp_zi, _, _ = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+    let rz = Sched.Retype { axis = zj; ty = LL.Workgroup } in
+    let sp_i, _, i_i = Sched.split ~axis:i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+    let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bm ~outer:LL.Serial ~inner:LL.Serial in
+    let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width in
+    [
+      ez;
+      sp_zi;
+      rz;
+      sp_i;
+      sp_k;
+      Sched.Swap { outer = j; inner = k_o };
+      Sched.Swap { outer = i_i; inner = k_o };
+      Sched.Stage
+        {
+          source = ma.Tensor.value;
+          tile_loops = [ i_i; k_i ];
+          shared = true;
+          cooperative = Some simd_width;
+        };
+      Sched.Stage
+        {
+          source = mb.Tensor.value;
+          tile_loops = [ k_i; j ];
+          shared = true;
+          cooperative = Some simd_width;
+        };
+      tz;
+    ]
+  in
+  let staged_comp = named "mm_staged_mma" (Train.forward mc3) in
+  let staged_transform opt = Sched.apply (staged_schedule opt) opt in
+  let ctx_c = Context.auto () in
+  if on_gpu then (
+    let ctx_c, routine_c =
+      Context.compile ~lowered_transform:staged_transform ctx_c staged_comp Ir.Indexing.Empty
+    in
+    let ctx_c = Context.run ctx_c routine_c in
+    let got_staged = Context.get_values ctx_c mc3.Tensor.value in
+    p "staged+tensorized matmul parity (GPU) or clean rejection (CPU)"
+      (Array.for_all2_exn got_staged got_serial ~f:approx);
+    match read_generated "mm_staged_mma" with
+    | None -> p "staged+tensorized structure as expected" false
+    | Some src ->
+        let has s = String.is_substring src ~substring:s in
+        let count_sub sub =
+          String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
+        in
+        let ok =
+          if on_metal then
+            (* Two shared tiles cooperatively loaded, the mma reading them from threadgroup
+               memory; the ma tile's partial-width load keeps its [lane < 8] guard. *)
+            count_sub "threadgroup float tile_" = 2
+            && has "simdgroup_multiply_accumulate" && has "threadgroup_barrier"
+          else
+            (* CUDA: shared tiles; the wmma draft declines f32, so the lane-0 fallback guard. *)
+            count_sub "__shared__ float tile_" = 2 && has "__syncthreads()"
+        in
+        p "staged+tensorized structure as expected" ok)
+  else (
+    (match
+       try
+         ignore
+           (Context.compile ~lowered_transform:staged_transform ctx_c staged_comp Ir.Indexing.Empty
+             : Context.t * Context.routine);
+         None
+       with Invalid_argument msg -> Some msg
+     with
+    | Some msg ->
+        p "staged+tensorized matmul parity (GPU) or clean rejection (CPU)"
+          (String.is_substring msg ~substring:"not supported")
+    | None -> p "staged+tensorized matmul parity (GPU) or clean rejection (CPU)" false);
+    p "staged+tensorized structure as expected" true);
+
   (* --- Pattern discipline: Tensorize on a non-micro-kernel nest is a targeted error --- *)
   let%op mc2 = ma * mb in
   let bad_transform (opt : LL.optimized) : LL.optimized =

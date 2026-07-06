@@ -45,7 +45,12 @@ type optop =
           constants, so that {!apply}'s trailing simplify + CSE see the copies — constant-folding
           [Affine] indices and deduplicating repeated loads. Register blocktiling is [Split] +
           materializing [Unroll] + the existing CSE (schedule-ir-optops §4). *)
-  | Stage of { source : Tn.t; tile_loops : Indexing.symbol list; shared : bool }
+  | Stage of {
+      source : Tn.t;
+      tile_loops : Indexing.symbol list;
+      shared : bool;
+      cooperative : int option;
+    }
       (** Stage reads of [source] through a tile: a fresh [Local]-mode node registered in the
           traced store, its dims derived per source axis from the range of the index terms over
           [tile_loops] (schedule-ir-optops §5). All reads of [source] must use one index vector
@@ -66,7 +71,20 @@ type optop =
           control flow (rejected by [validate_parallel]), so v1 shared staging requires tile sizes
           dividing the extents. With [shared = false] (CPU operand packing) all tile loops must be
           [Serial] and a plain serial copy nest is inserted, no barriers. The source must not be
-          written in the routine. *)
+          written in the routine.
+
+          [cooperative = Some w] is the lane-aware mode for composing with
+          {!constructor-Tensorize} (docs/proposals/tensorize-mma.md, "Lane-aware Stage"): shared
+          staging with all-[Serial] tile loops whose load nest is wrapped in a {e fresh}
+          extent-[w] [Workgroup] lane loop — positionally the same slot 0 the tensorized
+          micro-kernel's lane loop binds, with extent agreement enforced downstream by
+          [Low_level.validate_parallel]'s barrier-strength uniformity (pass the backend's
+          {!field:Backend_intf.mma_simd_width} to both ops). The lane is folded linearly into the
+          innermost fresh copy loop: extent [<= w] replaces the loop by the lane index under a
+          [lane < extent] guard (folds when equal); an extent divisible by [w] iterates
+          [extent / w] chunks at [w*step + lane]; otherwise the whole nest is restricted to lane
+          0 (division is not expressible in affine indices). The lane loop covers workgroup slot
+          0 for the staging-point coverage rule by construction. *)
   | Privatize of { target : Tn.t; over : Indexing.symbol }
       (** Accumulator privatization: contract the read-modify-write accumulation of the
           materialized [target] across the (Serial) [over] loop's whole subtree into a per-thread

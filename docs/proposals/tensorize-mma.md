@@ -247,12 +247,11 @@ than rewritten into the sections above.
 - **Capability gating**: `Backend_intf.hardware_limits` grew
   `mma : { mma_simd_width; mma_tile } option` (Metal: 32, 8×8×8, gated on the Apple7 GPU family);
   supported precisions live in the emission, not the descriptor.
-- **Composition with shared `Stage` is deferred.** `Stage` runs before `Tensorize`, so it cannot
-  see the future lane loop: its cooperative loads would be unguarded along the lane axis (a
-  same-value race). v1 tensorized schedules read `a`/`b` from device memory — acceptable because
-  one statement spans the full reduction extent, amortizing `d` traffic entirely and `a`/`b`
-  traffic over the fragment block. The follow-up is either a lane-aware `Stage` (the
-  `Workgroup_lane` note in §2) or teaching `Stage` to remap `Tile_mma` operands.
+- **Composition with shared `Stage`** initially deferred (Stage runs before Tensorize and could
+  not see the future lane loop, so its cooperative loads would have raced along the lane axis);
+  since 2026-07-07 the lane-aware `cooperative` mode implements the composition — see the
+  dedicated section below. Plain (unstaged) tensorized schedules remain valid and simpler: one
+  statement spans the full reduction extent, amortizing `d` traffic entirely.
 - **Parity nuance**: the C-backend fallback matches the serial twin *bitwise* (same operation
   order); the Metal simdgroup path matches within f32 tolerance — the tile reduction
   reassociates, so "cc matches bitwise" is the exact criterion and GPU parity is tolerance-based.
@@ -273,9 +272,14 @@ than rewritten into the sections above.
   `mma.h`, wmma's 256-bit pointer-alignment requirement for `__shared__` tiles (device pools are
   alignment-safe), and the exact stride-multiple rules per element type.
 
-## Lane-aware Stage (design sketch, the deferred composition)
+## Lane-aware Stage (implemented 2026-07-07)
 
-What it takes to compose shared-memory staging with `Tensorize` (the item deferred above):
+Composes shared-memory staging with `Tensorize`, dissolving the deferral above:
+`Stage { …; cooperative = Some simd_width }` (shared, all-`Serial` tile loops). Exercised by the
+staged+tensorized variant of `schedule_mma_matmul` — on Metal the micro-kernel reads both tiles
+from `threadgroup` memory via `simdgroup_load`, the mb tile's lane load replaces the minor-axis
+loop outright (extent = width, guard folded), and the ma tile keeps its surviving `lane < 8`
+guard. Design as sketched:
 
 1. **Stage mints its own lane loop.** A `~cooperative:simd_width` mode on shared `Stage` wraps the
    cooperative load nest in a *fresh* extent-`simd_width` `Workgroup`-typed loop. No coordination
@@ -303,8 +307,10 @@ What it takes to compose shared-memory staging with `Tensorize` (the item deferr
 5. **`Workgroup_lane` only if needed.** A distinguished axis flavor becomes worthwhile only when
    some transform must *recognize* lane loops structurally; extent-matching suffices for v1.
 
-Estimated scope: ~100 lines in `apply_stage` plus parameter plumbing; no IR changes; no
-`validate_parallel` changes.
+Landed scope matched the estimate: ~100 lines in `apply_stage` plus the `cooperative` field; no
+IR changes; no `validate_parallel` changes. One addition the sketch missed: the staging-point
+workgroup-slot coverage check counts slot 0 as covered by construction in cooperative mode (the
+fresh lane loop binds it; extent agreement is enforced downstream by the uniformity rule).
 
 ## Relations
 

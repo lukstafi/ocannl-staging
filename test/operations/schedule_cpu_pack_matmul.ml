@@ -85,8 +85,8 @@ let () =
     @ sink i_i [ j_o; j_i; k_o; k_i ]
     @ sink j_i [ k_o; k_i; i_i ]
     @ [
-        Sched.Stage { source = ma.Tensor.value; tile_loops = [ i_i; k_i ]; shared = false };
-        Sched.Stage { source = mb.Tensor.value; tile_loops = [ k_i; j_i ]; shared = false };
+        Sched.Stage { source = ma.Tensor.value; tile_loops = [ i_i; k_i ]; shared = false; cooperative = None };
+        Sched.Stage { source = mb.Tensor.value; tile_loops = [ k_i; j_i ]; shared = false; cooperative = None };
         Sched.Privatize { target = mc1.Tensor.value; over = k_o };
       ]
   in

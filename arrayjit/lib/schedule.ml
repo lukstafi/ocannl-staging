@@ -19,7 +19,12 @@ type optop =
   | Swap of { outer : Indexing.symbol; inner : Indexing.symbol }
   | Retype of { axis : Indexing.symbol; ty : Low_level.axis_type }
   | Unroll of { axis : Indexing.symbol; materialize : bool }
-  | Stage of { source : Tn.t; tile_loops : Indexing.symbol list; shared : bool }
+  | Stage of {
+      source : Tn.t;
+      tile_loops : Indexing.symbol list;
+      shared : bool;
+      cooperative : int option;
+    }
   | Privatize of { target : Tn.t; over : Indexing.symbol }
   | Expand_zero of { tn : Tn.t; indices : Indexing.symbol list }
   | Tensorize of {
@@ -631,9 +636,13 @@ let remap_reads ?(writes = false) ~source ~from_idcs ~tile ~tile_idcs (llc : Low
   in
   code llc
 
-let apply_stage ~source ~tile_loops ~shared (opt : Low_level.optimized) : Low_level.optimized =
+let apply_stage ~source ~tile_loops ~shared ~cooperative (opt : Low_level.optimized) :
+    Low_level.optimized =
   let open Low_level in
   if List.is_empty tile_loops then invalid_arg "Schedule.Stage: empty tile_loops";
+  Option.iter cooperative ~f:(fun w ->
+      if not shared then invalid_arg "Schedule.Stage: cooperative staging requires shared = true";
+      if w <= 0 then invalid_arg "Schedule.Stage: cooperative simd width must be positive");
   let accesses = collect_source_accesses ~source opt.llc in
   let idcs0, stack0 =
     match accesses with
@@ -703,6 +712,10 @@ let apply_stage ~source ~tile_loops ~shared (opt : Low_level.optimized) : Low_le
   in
   if (not shared) && not (List.is_empty reused) then
     invalid_arg "Schedule.Stage: non-shared (packing) staging requires Serial tile loops";
+  if Option.is_some cooperative && not (List.is_empty reused) then
+    invalid_arg
+      "Schedule.Stage: cooperative staging requires Serial tile loops (the fresh lane loop is the \
+       cooperating axis; reusing Workgroup tile loops is the non-cooperative mode)";
   (* The insertion point L*: the deepest loop that must stay outside the tile — carrying an
      outer-part symbol or a reused workgroup tile axis. *)
   let outer_sym_depths =
@@ -762,9 +775,60 @@ let apply_stage ~source ~tile_loops ~shared (opt : Low_level.optimized) : Low_le
         in
         If { cond = (cond, iprec); body = stmt })
   in
+  (* Lane-aware cooperative staging (docs/proposals/tensorize-mma.md, "Lane-aware Stage"): a
+     fresh extent-[w] [Workgroup] lane loop will wrap the load nest, so the loads are partitioned
+     (or restricted) along the same hardware slot the tensorized micro-kernel's lane loop binds —
+     positional slot assignment aligns the two loops at slot 0, and [validate_parallel]'s
+     barrier-strength extent-uniformity rejects a width mismatch, so the only coordination with
+     [Tensorize] is passing the same simd width. The partition folds the lane linearly into the
+     innermost fresh copy loop (consecutive lanes touch consecutive minor-axis elements):
+     division/modulo are not in the affine index algebra, so an extent that neither divides nor
+     is bounded by the width falls back to the representative-lane ([w == 0]) discipline. *)
+  let lane = Option.map cooperative ~f:(fun w -> (Indexing.get_symbol (), w)) in
+  let lane_plan =
+    match (lane, List.last fresh) with
+    | None, _ | _, None -> `Serial_all
+    | Some (w_sym, w), Some (s_orig, s_inner) ->
+        let e = extent s_orig in
+        if e <= w then `Drop_inner (s_inner, e, w_sym)
+        else if e % w = 0 then `Divide_inner (s_inner, e / w, w_sym, w)
+        else `Restrict_lane0
+  in
+  let load_stmt =
+    match lane_plan with
+    | `Serial_all | `Restrict_lane0 -> load_stmt
+    | `Drop_inner (s_inner, e, w_sym) ->
+        (* The lane replaces the innermost copy loop; the edge guard folds exactly when the
+           extent equals the width (construct-then-fold, as everywhere in this transform). *)
+        let stmt =
+          map_code
+            ~fidx:(subst_axis_index ~sym:s_inner ~by:{ terms = [ (1, w_sym) ]; offset = 0 })
+            load_stmt
+        in
+        let cond =
+          Binop
+            ( Ops.Cmplt,
+              (Embed_index (Indexing.Iterator w_sym), iprec),
+              (Constant (Float.of_int e), iprec) )
+        in
+        If { cond = (cond, iprec); body = stmt }
+    | `Divide_inner (s_inner, _, w_sym, w) ->
+        (* [s_inner := w * s_inner + w_sym]: per copy step, the [w] lanes cover a contiguous
+           chunk of the minor axis. *)
+        map_code
+          ~fidx:
+            (subst_axis_index ~sym:s_inner ~by:{ terms = [ (w, s_inner); (1, w_sym) ]; offset = 0 })
+          load_stmt
+  in
   let load_nest =
     List.fold (List.rev fresh) ~init:load_stmt ~f:(fun body (s, s') ->
-        For_loop { index = s'; from_ = 0; to_ = extent s - 1; body; trace_it = false; axis = Serial })
+        match lane_plan with
+        | `Drop_inner (si, _, _) when Indexing.equal_symbol s' si -> body
+        | `Divide_inner (si, ext', _, _) when Indexing.equal_symbol s' si ->
+            For_loop { index = s'; from_ = 0; to_ = ext' - 1; body; trace_it = false; axis = Serial }
+        | _ ->
+            For_loop
+              { index = s'; from_ = 0; to_ = extent s - 1; body; trace_it = false; axis = Serial })
   in
   (* The splice target. With an anchor L* (an outer-part symbol or reused workgroup axis), the
      load nest goes at the start of L*'s body. A shared stage with no anchor (e.g. staging a
@@ -806,6 +870,10 @@ let apply_stage ~source ~tile_loops ~shared (opt : Low_level.optimized) : Low_le
                    if Indexing.equal_symbol a.ha_index fl.index then Some a.ha_slot else None)
            | Serial | Grid | Unrolled | Vectorized -> None)
      in
+     (* Cooperative staging covers slot 0 by construction: the fresh lane loop is the innermost
+        Workgroup loop of the load nest, and extent agreement with the kernel's other slot-0 loops
+        is enforced downstream by [validate_parallel]'s barrier-strength uniformity. *)
+     let covered = if Option.is_some cooperative then 0 :: covered else covered in
      let missing = List.filter active_slots ~f:(fun s -> not (List.mem covered s ~equal:Int.equal)) in
      if not (List.is_empty missing) then
        invalid_arg
@@ -835,6 +903,31 @@ let apply_stage ~source ~tile_loops ~shared (opt : Low_level.optimized) : Low_le
                   body;
                 }
           | _ -> body)
+  in
+  (* The lane loop wraps the (possibly lane-restricted) load nest, including the [w == 0]
+     restrictions along other in-scope workgroup axes; the barriers stay its siblings at the
+     staging point — hardware [Workgroup] loops bind rather than iterate, so they remain
+     uniformly reached. *)
+  let load_nest =
+    match lane with
+    | None -> load_nest
+    | Some (w_sym, w) ->
+        let body =
+          match lane_plan with
+          | `Restrict_lane0 ->
+              If
+                {
+                  cond =
+                    ( Binop
+                        ( Ops.Cmpeq,
+                          (Embed_index (Indexing.Iterator w_sym), iprec),
+                          (Constant 0., iprec) ),
+                      iprec );
+                  body = load_nest;
+                }
+          | `Serial_all | `Drop_inner _ | `Divide_inner _ -> load_nest
+        in
+        For_loop { index = w_sym; from_ = 0; to_ = w - 1; axis = Workgroup; trace_it = false; body }
   in
   let build inner =
     let remapped =
@@ -1141,7 +1234,8 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
 
 let apply_opt_op (opt : Low_level.optimized) (op : optop) : Low_level.optimized =
   match op with
-  | Stage { source; tile_loops; shared } -> apply_stage ~source ~tile_loops ~shared opt
+  | Stage { source; tile_loops; shared; cooperative } ->
+      apply_stage ~source ~tile_loops ~shared ~cooperative opt
   | Privatize { target; over } -> apply_privatize ~target ~over opt
   | (Split _ | Swap _ | Retype _ | Unroll _ | Expand_zero _ | Tensorize _) as op ->
       { opt with llc = apply_op opt.Low_level.llc op }
