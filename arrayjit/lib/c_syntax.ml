@@ -110,7 +110,17 @@ module type C_syntax_config = sig
   (** Lines emitted verbatim before a [Vectorized]-typed loop's [for] statement (gh-ocannl-164),
       e.g. guarded [#pragma clang loop vectorize(enable)] / [#pragma GCC ivdep]. An empty list
       renders the loop as a plain serial [for] — the legal fallback, mirroring
-      [hardware_index = None]. *)
+      [hardware_index = None]. Used when explicit vector emission ([vector_bytes]) is disabled or
+      the loop body is ineligible for it. *)
+
+  val vector_bytes : int
+  (** Vector register width in bytes for explicit SIMD rendering of [Vectorized] loops via
+      GCC/Clang vector extensions (the [Vectorized] codegen follow-up of gh-ocannl-164 /
+      docs/proposals/watch-ocannl-README-md-347818d3.md): eligible loop bodies emit vector-typed
+      loads, arithmetic and stores in [lanes = vector_bytes / element size] chunks plus a serial
+      remainder loop, instead of relying on the compiler's auto-vectorizer (which e.g. cannot
+      reassociate strict-FP reductions — the [Vectorized] retype carries that permission, like
+      [Swap]). [0] disables explicit emission ([vectorize_pragma] fallback). *)
 
   val aligned_local_attr : string option
   (** Declaration suffix aligning stack-allocated local arrays for SIMD access, e.g.
@@ -170,6 +180,7 @@ struct
   let barrier_syntax = None
   let parallel_grid_syntax = `None
   let parallel_grid_chunks = 1
+  let vector_bytes = 0
   let shared_decl_prefix = None
   let restrict_keyword = Some "restrict"
 
@@ -796,18 +807,221 @@ module C_syntax (B : C_syntax_config) = struct
               ^^ hardline ^^ rbrace
           | `None -> assert false
         in
+        (* Explicit SIMD rendering of a [Vectorized] loop via GCC/Clang vector extensions
+           (portable across gcc/clang and AVX2/NEON; the [Vectorized]-codegen follow-up of
+           gh-ocannl-164). The loop must start at 0 and its body must be a sequence of plain [Set]
+           statements over one floating precision, with every access that mentions the loop index
+           contiguous in it (the index appears only in the last component, with coefficient 1 —
+           the flat offset then advances by exactly 1 per iteration). Index-free subexpressions
+           render as scalars (vector-scalar arithmetic splats across lanes); vector subexpressions
+           allow [Add]/[Sub]/[Mul]/[Div]/[Neg]/[FMA]. At most one store per node, and every read
+           of a stored node must use the store's exact index vector — vector semantics evaluates
+           all lanes' loads before the store, so cross-lane flow would reorder against the serial
+           loop. The main loop advances by [lanes]; a serial remainder loop reuses [body_doc].
+           Anything else falls back to [vectorize_pragma] / serial. *)
+        let try_vectorize () : PPrint.document option =
+          let exception Bail in
+          let mentions_comp (idx : Indexing.axis_index) =
+            match idx with
+            | Indexing.Iterator s -> Indexing.equal_symbol s i
+            | Indexing.Affine { symbols; _ } ->
+                List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s i)
+            | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
+          in
+          let rec scalar_mentions (llsc : Low_level.scalar_t) =
+            match llsc with
+            | Low_level.Get (_, idcs) | Get_merge_buffer (_, idcs) ->
+                Array.exists idcs ~f:mentions_comp
+            | Get_dynamic { idcs; dyn_value = v, _; _ } ->
+                Array.exists idcs ~f:mentions_comp || scalar_mentions v
+            (* Scope-local bodies could bind or mention the index in statement position;
+               conservatively ineligible. *)
+            | Local_scope _ | Get_local _ -> raise Bail
+            | Embed_index idx -> mentions_comp idx
+            | Ternop (_, (a, _), (b, _), (c, _)) ->
+                scalar_mentions a || scalar_mentions b || scalar_mentions c
+            | Binop (_, (a, _), (b, _)) -> scalar_mentions a || scalar_mentions b
+            | Unop (_, (a, _)) -> scalar_mentions a
+            | Constant _ | Constant_bits _ -> false
+          in
+          try
+            if B.vector_bytes < 8 || from_ <> 0 || Utils.debug_log_from_routines () then
+              raise Bail;
+            let extent = to_ + 1 in
+            let stmts =
+              List.filter (Low_level.flat_lines [ body ]) ~f:(function
+                | Low_level.Noop | Comment _ -> false
+                | _ -> true)
+            in
+            let sets =
+              List.map stmts ~f:(function
+                | Low_level.Set { tn; idcs; llsc; _ } -> (tn, idcs, llsc)
+                | _ -> raise Bail)
+            in
+            if List.is_empty sets then raise Bail;
+            let prec =
+              let tn, _, _ = List.hd_exn sets in
+              Lazy.force tn.Tn.prec
+            in
+            (match prec with Ops.Single_prec _ | Ops.Double_prec _ -> () | _ -> raise Bail);
+            let lanes = B.vector_bytes / Ops.prec_in_bytes prec in
+            if lanes < 2 || extent < lanes then raise Bail;
+            let written = Hashtbl.create (module Int) in
+            List.iter sets ~f:(fun (tn, idcs, _) ->
+                if not (Ops.equal_prec (Lazy.force tn.Tn.prec) prec) then raise Bail;
+                match Hashtbl.add written ~key:tn.Tn.id ~data:idcs with
+                | `Ok -> ()
+                | `Duplicate -> raise Bail);
+            let contiguous idcs =
+              let n = Array.length idcs in
+              n > 0
+              && Array.for_alli idcs ~f:(fun p idx -> p = n - 1 || not (mentions_comp idx))
+              &&
+              match idcs.(n - 1) with
+              | Indexing.Iterator s -> Indexing.equal_symbol s i
+              | Indexing.Affine { symbols; _ } ->
+                  List.for_all symbols ~f:(fun (c, s) ->
+                      (not (Indexing.equal_symbol s i)) || c = 1)
+                  && List.count symbols ~f:(fun (_, s) -> Indexing.equal_symbol s i) = 1
+              | _ -> false
+            in
+            let check_read tn idcs =
+              match Hashtbl.find written tn.Tn.id with
+              | Some w_idcs ->
+                  if not (Array.equal Indexing.equal_axis_index w_idcs idcs) then raise Bail
+              | None -> ()
+            in
+            let rec no_written_reads (llsc : Low_level.scalar_t) =
+              match llsc with
+              | Low_level.Get (tn, _) | Get_merge_buffer (tn, _) | Get_dynamic { tn; _ } ->
+                  if Hashtbl.mem written tn.Tn.id then raise Bail
+              | Local_scope _ | Get_local _ -> raise Bail
+              | Embed_index _ | Constant _ | Constant_bits _ -> ()
+              | Ternop (_, (a, _), (b, _), (c, _)) ->
+                  no_written_reads a;
+                  no_written_reads b;
+                  no_written_reads c
+              | Binop (_, (a, _), (b, _)) ->
+                  no_written_reads a;
+                  no_written_reads b
+              | Unop (_, (a, _)) -> no_written_reads a
+            in
+            let vtyp =
+              Printf.sprintf "ocannl_vec%d%s" lanes
+                (match prec with Ops.Double_prec _ -> "d" | _ -> "f")
+            in
+            let stmts_docs = ref [] in
+            let emit d = stmts_docs := d :: !stmts_docs in
+            let fresh =
+              let ctr = ref 0 in
+              fun pfx ->
+                Int.incr ctr;
+                Printf.sprintf "%s%d__" pfx !ctr
+            in
+            let uniform_scalar llsc =
+              (* Uniform across lanes: a read of a stored node cannot equal its (index-mentioning)
+                 store vector, so reject those; then render as a plain scalar (vector-scalar
+                 arithmetic splats). *)
+              no_written_reads llsc;
+              let local_defs, sdoc = pp_scalar prec llsc in
+              if not (List.is_empty local_defs) then raise Bail;
+              parens sdoc
+            in
+            let vload tn idcs =
+              if not (contiguous idcs) then raise Bail;
+              check_read tn idcs;
+              let name = fresh "vget" in
+              let offset = pp_array_offset (idcs, Lazy.force tn.Tn.dims) in
+              emit
+                (string (vtyp ^ " " ^ name ^ ";")
+                ^^ hardline
+                ^^ string ("__builtin_memcpy(&" ^ name ^ ", &")
+                ^^ string (get_ident tn) ^^ brackets offset
+                ^^ string (", sizeof(" ^ name ^ "));"));
+              string name
+            in
+            let rec vec_expr (llsc : Low_level.scalar_t) (p : Ops.prec) : PPrint.document =
+              if not (scalar_mentions llsc) then uniform_scalar llsc
+              else if not (Ops.equal_prec p prec) then raise Bail
+              else
+                match llsc with
+                | Low_level.Get (tn, idcs) ->
+                    if not (Ops.equal_prec (Lazy.force tn.Tn.prec) prec) then raise Bail;
+                    vload tn idcs
+                | Binop (op, (a, pa), (b, pb)) ->
+                    let inf =
+                      match op with
+                      | Ops.Add -> " + "
+                      | Sub -> " - "
+                      | Mul -> " * "
+                      | Div -> " / "
+                      | _ -> raise Bail
+                    in
+                    parens (vec_expr a pa ^^ string inf ^^ vec_expr b pb)
+                | Ternop (Ops.FMA, (a, pa), (b, pb), (c, pc)) ->
+                    parens
+                      (vec_expr a pa ^^ string " * " ^^ vec_expr b pb ^^ string " + "
+                     ^^ vec_expr c pc)
+                | Unop (Ops.Identity, (a, pa)) -> vec_expr a pa
+                | Unop (Ops.Neg, (a, pa)) -> parens (string "-" ^^ vec_expr a pa)
+                | _ -> raise Bail
+            in
+            List.iter sets ~f:(fun (tn, idcs, llsc) ->
+                if not (contiguous idcs) then raise Bail;
+                let rhs =
+                  if scalar_mentions llsc then vec_expr llsc prec
+                  else
+                    (* A lane-uniform store: splat via the vector-plus-scalar idiom. *)
+                    string ("((" ^ vtyp ^ "){0} + ") ^^ uniform_scalar llsc ^^ string ")"
+                in
+                let vname = fresh "vset" in
+                emit (string (vtyp ^ " " ^ vname ^ " = ") ^^ rhs ^^ semi);
+                emit
+                  (string "__builtin_memcpy(&" ^^ string (get_ident tn)
+                  ^^ brackets (pp_array_offset (idcs, Lazy.force tn.Tn.dims))
+                  ^^ string (", &" ^ vname ^ ", sizeof(" ^ vname ^ "));")));
+            let ivar = symbol_ident i in
+            let it = B.loop_index_type in
+            let body_vec = separate hardline (List.rev !stmts_docs) in
+            Some
+              (string
+                 (Printf.sprintf "{ /* Vectorized rendering: %d lanes of %s. */" lanes
+                    (B.typ_of_prec prec))
+              ^^ nest 2
+                   (hardline
+                   ^^ string
+                        (Printf.sprintf "typedef %s %s __attribute__((vector_size(%d)));"
+                           (B.typ_of_prec prec) vtyp
+                           (lanes * Ops.prec_in_bytes prec))
+                   ^^ hardline
+                   ^^ string (Printf.sprintf "%s%s = 0;" it ivar)
+                   ^^ hardline
+                   ^^ string
+                        (Printf.sprintf "for (; %s + %d <= %d; %s += %d) {" ivar lanes extent ivar
+                           lanes)
+                   ^^ nest 2 (hardline ^^ body_vec)
+                   ^^ hardline ^^ string "}" ^^ hardline
+                   ^^ string (Printf.sprintf "for (; %s <= %d; ++%s) {" ivar to_ ivar)
+                   ^^ nest 2 (hardline ^^ body_doc ())
+                   ^^ hardline ^^ string "}")
+              ^^ hardline ^^ string "}")
+          with Bail -> None
+        in
         match axis with
         | Low_level.Serial -> serial_loop ()
         | Grid when Set.mem !current_parallel_grid i -> parallel_grid_loop ()
         | Grid -> hardware_binding `Grid
         | Workgroup | Workgroup_reduce -> hardware_binding `Workgroup
         | Vectorized -> (
-            (* gh-ocannl-164: a serial loop annotated with the backend's vectorization pragmas;
-               without them the plain serial loop is the legal fallback (same discipline as
-               unbound [Grid]/[Workgroup] axes). *)
-            match B.vectorize_pragma with
-            | [] -> serial_loop ()
-            | lines -> separate_map hardline string lines ^^ hardline ^^ serial_loop ())
+            match try_vectorize () with
+            | Some doc -> doc
+            | None -> (
+                (* gh-ocannl-164: a serial loop annotated with the backend's vectorization
+                   pragmas; without them the plain serial loop is the legal fallback (same
+                   discipline as unbound [Grid]/[Workgroup] axes). *)
+                match B.vectorize_pragma with
+                | [] -> serial_loop ()
+                | lines -> separate_map hardline string lines ^^ hardline ^^ serial_loop ()))
         | Unrolled ->
             separate hardline
             @@ List.init

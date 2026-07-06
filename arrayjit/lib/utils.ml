@@ -120,6 +120,7 @@ let known_config_keys =
       "schedule_fission";
       "cc_parallel_grid";
       "cc_parallel_chunks";
+      "cc_vector_bytes";
       (* Identifiers and other *)
       "ll_ident_style";
       "cd_ident_style";
