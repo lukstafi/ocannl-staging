@@ -1151,18 +1151,24 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
 
   (* Conservative per-workgroup device limits for the schedule layer (schedule-ir-optops §6):
      minimum across devices, so code compiled once is valid wherever it links. *)
+  (* Memoized behind [lazy]: driver init and device enumeration must not run at backend-module
+     initialization ([num_devices] forces [ensure_initialized]). *)
   let hardware_limits =
-    let attrs =
-      Array.init (num_devices ()) ~f:(fun ordinal ->
-          Cu.Device.get_attributes (Cu.Device.get ~ordinal))
+    let limits =
+      lazy
+        (let attrs =
+           Array.init (num_devices ()) ~f:(fun ordinal ->
+               Cu.Device.get_attributes (Cu.Device.get ~ordinal))
+         in
+         let min_over f = Array.map attrs ~f |> Array.min_elt ~compare:Int.compare in
+         {
+           Backend_intf.max_threads_per_workgroup =
+             min_over (fun (a : Cu.Device.attributes) -> a.max_threads_per_block);
+           max_workgroup_memory_bytes =
+             min_over (fun (a : Cu.Device.attributes) -> a.max_shared_memory_per_block);
+         })
     in
-    let min_over f = Array.map attrs ~f |> Array.min_elt ~compare:Int.compare in
-    {
-      Backend_intf.max_threads_per_workgroup =
-        min_over (fun (a : Cu.Device.attributes) -> a.max_threads_per_block);
-      max_workgroup_memory_bytes =
-        min_over (fun (a : Cu.Device.attributes) -> a.max_shared_memory_per_block);
-    }
+    fun () -> Lazy.force limits
 
   let get_debug_info (device : device) =
     let tot, unr, unf = Cu.Stream.total_unreleased_unfinished_delimited_events device.runner in

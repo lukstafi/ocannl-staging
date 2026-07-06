@@ -255,10 +255,12 @@ module type Backend_device_common = sig
       instantiate eagerly at program startup, where touching a driver could fail runs that never
       use the backend. *)
 
-  val hardware_limits : hardware_limits
+  val hardware_limits : unit -> hardware_limits
   (** Conservative per-workgroup device limits: on multi-device backends the minimum across the
       devices, so code compiled once (compilation is not per-device) is valid wherever it links.
-      All-[None] for backends that do not bind hardware axes. *)
+      All-[None] for backends that do not bind hardware axes. A function for the same reason as
+      {!static_properties}: computing it (device enumeration) must not run at backend-module
+      initialization. *)
 
   val get_used_memory : device -> int
   (** Returns (an upper bound of) the memory used for arrays, in bytes. *)
