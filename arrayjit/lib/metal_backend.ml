@@ -347,6 +347,15 @@ module Impl = struct
            max_workgroup_memory_bytes =
              min_over (fun (a : Me.Device.attributes) ->
                  Unsigned.ULong.to_int a.max_threadgroup_memory_length);
+           (* [simdgroup_matrix] (docs/proposals/tensorize-mma.md): 8×8×8 tiles cooperatively held
+              by the 32-thread simdgroup, available on Apple7+ (M1 and later). Supported operand
+              precisions are decided per call by [mma_syntax] (f32/f16/bf16, uniform). *)
+           mma =
+             (if
+                Array.for_all (Lazy.force metal_devices) ~f:(fun d ->
+                    Me.Device.supports_family d Me.Device.GPUFamily.Apple7)
+              then Some { Backend_intf.mma_simd_width = 32; mma_tile = (8, 8, 8) }
+              else None);
          })
     in
     fun () -> Lazy.force limits
@@ -497,6 +506,106 @@ module Impl = struct
     let restrict_keyword = Some "__restrict"
     let vectorize_pragma = []
     let aligned_local_attr = None
+
+    (* Cooperative tile-MMA emission for [Low_level.Tile_mma] via MSL [simdgroup_matrix]
+       (docs/proposals/tensorize-mma.md §4): fragment blocks of 8×8 tiles held jointly by the
+       32-thread simdgroup, loaded with [simdgroup_load] straight from [device] memory or
+       [threadgroup] tiles (i.e. out of [Stage]'s shared staging), accumulated with
+       [simdgroup_multiply_accumulate], stored once at the end — the accumulator fragments are
+       resident across the whole [k] extent of the block statement. Declines (fallback path) on:
+       non-{f32,f16,bf16} precision, extents not multiples of 8, thread-space (stack-array)
+       operands (not loadable by [simdgroup_load]), and devices below the Apple7 family. *)
+    let mma_syntax =
+      Some
+        (fun ~prec ~m ~n ~k ~d:(d_ptr, ldd, d_space) ~a:(a_ptr, lda, a_space)
+             ~b:(b_ptr, ldb, b_space) ->
+          let tile = 8 in
+          let frag_typ =
+            match prec with
+            | Ops.Single_prec _ -> Some "simdgroup_float8x8"
+            | Ops.Half_prec _ -> Some "simdgroup_half8x8"
+            | Ops.Bfloat16_prec _ -> Some "simdgroup_bfloat8x8"
+            | _ -> None
+          in
+          let addr_space = function
+            | `Device -> Some "device"
+            | `Shared -> Some "threadgroup"
+            | `Thread -> None
+          in
+          match (frag_typ, addr_space d_space, addr_space a_space, addr_space b_space) with
+          | Some frag, Some d_as, Some a_as, Some b_as
+            when m % tile = 0 && n % tile = 0 && k % tile = 0
+                 && Option.is_some (hardware_limits ()).Backend_intf.mma ->
+              let mt = m / tile and nt = n / tile and kt = k / tile in
+              let elem = typ_of_prec prec in
+              let ptr_decl name aspace ptr =
+                string (Printf.sprintf "%s %s *%s = " aspace elem name) ^^ ptr ^^ semi
+              in
+              (* Bracketing barriers: sibling statements (zeroing of [d], cooperative staging)
+                 execute lane-partitioned, so the fragment loads must observe the other lanes'
+                 writes, and later statements the stores. Uniform per the barrier-strength
+                 validation. *)
+              let barrier =
+                "threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);"
+              in
+              let body_lines =
+                [
+                  barrier;
+                  Printf.sprintf "%s __mma_acc[%d][%d];" frag mt nt;
+                  Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                  Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                  Printf.sprintf
+                    "    simdgroup_load(__mma_acc[__mi][__ni], __mma_dp + __mi * %d * %d + __ni * \
+                     %d, (ulong)%d);"
+                    tile ldd tile ldd;
+                  "  }";
+                  "}";
+                  Printf.sprintf "for (int __ki = 0; __ki < %d; ++__ki) {" kt;
+                  Printf.sprintf "  %s __mma_bf[%d];" frag nt;
+                  Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                  Printf.sprintf
+                    "    simdgroup_load(__mma_bf[__ni], __mma_bp + __ki * %d * %d + __ni * %d, \
+                     (ulong)%d);"
+                    tile ldb tile ldb;
+                  "  }";
+                  Printf.sprintf "  for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                  Printf.sprintf "    %s __mma_af;" frag;
+                  Printf.sprintf
+                    "    simdgroup_load(__mma_af, __mma_ap + __mi * %d * %d + __ki * %d, \
+                     (ulong)%d);"
+                    tile lda tile lda;
+                  Printf.sprintf "    for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                  "      simdgroup_multiply_accumulate(__mma_acc[__mi][__ni], __mma_af, \
+                   __mma_bf[__ni], __mma_acc[__mi][__ni]);";
+                  "    }";
+                  "  }";
+                  "}";
+                  Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                  Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                  Printf.sprintf
+                    "    simdgroup_store(__mma_acc[__mi][__ni], __mma_dp + __mi * %d * %d + __ni \
+                     * %d, (ulong)%d);"
+                    tile ldd tile ldd;
+                  "  }";
+                  "}";
+                  barrier;
+                ]
+              in
+              let body =
+                ptr_decl "__mma_dp" d_as d_ptr
+                ^^ hardline
+                ^^ ptr_decl "__mma_ap" (Printf.sprintf "const %s" a_as) a_ptr
+                ^^ hardline
+                ^^ ptr_decl "__mma_bp" (Printf.sprintf "const %s" b_as) b_ptr
+                ^^ hardline
+                ^^ separate_map hardline string body_lines
+              in
+              Some
+                (group
+                   (string (Printf.sprintf "{ /* tile_mma %dx%dx%d */" m n k)
+                   ^^ nest 2 (hardline ^^ body)
+                   ^^ hardline ^^ rbrace))
+          | _ -> None)
 
     let ident_blacklist =
       ident_blacklist
