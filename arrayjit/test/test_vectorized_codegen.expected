@@ -37,4 +37,79 @@ Found 0, in the config file
     out3[i3] = scratch[i3];
   }
 }
+ void vec_simd_kernel(
+    float *restrict inp,
+    float *restrict out4) {
+
+  /* Local declarations and initialization. */
+
+  /* Main logic. */
+  { /* Vectorized rendering: 8 lanes of float. */
+    typedef float ocannl_vec8f __attribute__((vector_size(32)));
+    int32_t i4 = 0;
+    for (; i4 + 8 <= 8; i4 += 8) {
+      ocannl_vec8f vget1__;
+      __builtin_memcpy(&vget1__, &inp[i4], sizeof(vget1__));
+      ocannl_vec8f vset2__ = (vget1__ + ((float)(2)));
+      __builtin_memcpy(&out4[i4], &vset2__, sizeof(vset2__));
+      ocannl_vec8f vset3__ = ((ocannl_vec8f){0} + ((float)(1)));
+      __builtin_memcpy(&inp[i4], &vset3__, sizeof(vset3__));
+    }
+    for (; i4 <= 7; ++i4) {
+      out4[i4] = (inp[i4] + (float)(2));
+      inp[i4] = (float)(1);
+    }
+  }
+}
+ void vec_strided_kernel(
+    float *restrict inp2,
+    float *restrict out5) {
+
+  /* Local declarations and initialization. */
+
+  /* Main logic. */
+  #if defined(__clang__)
+  #pragma clang loop vectorize(enable) interleave(enable)
+  #elif defined(__GNUC__)
+  #pragma GCC ivdep
+  #endif
+  for (int32_t i5 = 0; i5 <= 3; ++i5) {
+    out5[i5] = inp2[2*i5];
+  }
+}
+ void vec_fma_kernel(
+    float *restrict g1,
+    float *restrict g2,
+    float *restrict out6) {
+
+  /* Local declarations and initialization. */
+
+  /* Main logic. */
+  { /* Vectorized rendering: 8 lanes of float. */
+    typedef float ocannl_vec8f __attribute__((vector_size(32)));
+    int32_t i6 = 0;
+    for (; i6 + 8 <= 8; i6 += 8) {
+      ocannl_vec8f vget2__;
+      __builtin_memcpy(&vget2__, &g1[i6], sizeof(vget2__));
+      ocannl_vec8f vfop1__ = vget2__;
+      ocannl_vec8f vget4__;
+      __builtin_memcpy(&vget4__, &g2[i6], sizeof(vget4__));
+      ocannl_vec8f vfop3__ = vget4__;
+      ocannl_vec8f vget6__;
+      __builtin_memcpy(&vget6__, &out6[i6], sizeof(vget6__));
+      ocannl_vec8f vfop5__ = vget6__;
+      ocannl_vec8f vfma7__;
+      #if OCANNL_HAS_ELEMENTWISE_FMA
+      vfma7__ = __builtin_elementwise_fma(vfop1__, vfop3__, vfop5__);
+      #else
+      for (int ocannl_l__ = 0; ocannl_l__ < 8; ++ocannl_l__) vfma7__[ocannl_l__] = fmaf(vfop1__[ocannl_l__], vfop3__[ocannl_l__], vfop5__[ocannl_l__]);
+      #endif
+      ocannl_vec8f vset8__ = vfma7__;
+      __builtin_memcpy(&out6[i6], &vset8__, sizeof(vset8__));
+    }
+    for (; i6 <= 7; ++i6) {
+      out6[i6] = fmaf(g1[i6], g2[i6], out6[i6]);
+    }
+  }
+}
 alias parameter rejected: true

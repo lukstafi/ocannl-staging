@@ -132,6 +132,15 @@ let parallel_grid_syntax_setting =
         invalid_arg
           ("cc_parallel_grid: expected auto | dispatch | openmp | none, got " ^ s)
 
+(* Explicit SIMD width for [Vectorized] loops (gh-ocannl-164 follow-up): vector register bytes
+   for the GCC/Clang vector-extension rendering in [C_syntax]. Auto (-1 or unset): 32 bytes when
+   the SIMD probe found AVX2, else 16 (NEON width; clang/gcc lower 16-byte vectors natively on
+   ARM). 0 disables explicit emission (auto-vectorization pragmas remain). *)
+let vector_bytes_setting () =
+  match Int.of_string @@ Utils.get_global_arg ~default:"-1" ~arg_name:"cc_vector_bytes" with
+  | n when n >= 0 -> n
+  | _ -> if String.is_substring (simd_flags ()) ~substring:"avx2" then 32 else 16
+
 let parallel_grid_chunks_setting () =
   match Int.of_string @@ Utils.get_global_arg ~default:"0" ~arg_name:"cc_parallel_chunks" with
   | n when n > 0 -> n
@@ -285,6 +294,7 @@ struct
 
   let parallel_grid_syntax = parallel_grid_syntax_setting ()
   let parallel_grid_chunks = parallel_grid_chunks_setting ()
+  let vector_bytes = vector_bytes_setting ()
 
   (* Override operation syntax to handle special precision types *)
   let ternop_syntax prec op v1 v2 v3 =

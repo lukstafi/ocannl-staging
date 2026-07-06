@@ -3,6 +3,23 @@
 Task: watch-ocannl-README-md-347818d3
 Issue: https://github.com/ahrefs/ocannl/issues/412
 
+## Status update (2026-07-06)
+
+- **Explicit `Vectorized` codegen landed** (the "SIMD FMA micro-kernel floor"): eligible
+  `Vectorized`-typed loop bodies render via GCC/Clang vector extensions in the C backends —
+  vector-typed loads/arithmetic/stores in `lanes = cc_vector_bytes / element size` chunks
+  (auto: 32 bytes under AVX2, 16 under NEON), lane-uniform subexpressions as scalar splats, and
+  a serial remainder loop; ineligible bodies keep the pragma-hinted auto-vectorization. The
+  eligibility rules (contiguity with coefficient 1 in the last index component, single store per
+  node, reads of stored nodes at the store's exact index vector) make the rendering bitwise
+  equivalent to the serial loop per lane. Structural coverage in
+  `arrayjit/test/test_vectorized_codegen.ml`, executed parity (including the post-`Split`
+  `Affine` indexing of tiled schedules) in `test/operations/cpu_vectorized.ml`.
+- **Remaining unique scope of this proposal**: vector accumulators for reductions (horizontal
+  sums; the strict-FP dot in `bin/cpu_vectorization_bench.ml` still cannot vectorize without the
+  explicit transform carrying reassociation), composing the full matmul micro-kernel
+  (`Split`/`Swap`/`Privatize`-with-vector-tile + `Vectorized`), and the benchmark/tuning story.
+
 ## Status update (2026-07-04)
 
 - **The tiling infrastructure this proposal asked to share with the GPU work now has a

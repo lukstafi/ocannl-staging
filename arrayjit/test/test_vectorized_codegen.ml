@@ -2,8 +2,13 @@
    through the actual backend codegen path ([C_syntax.compile_proc]).
 
    - A [Vectorized] loop renders as the backend's vectorization pragmas followed by a plain serial
-     [for] under [Pure_C_config]; with [vectorize_pragma = []] (the GPU configs' choice) it renders
-     as the plain serial loop — the legal fallback.
+     [for] under [Pure_C_config] (whose [vector_bytes = 0] disables explicit SIMD); with
+     [vectorize_pragma = []] (the GPU configs' choice) it renders as the plain serial loop — the
+     legal fallback.
+   - With [vector_bytes > 0] (the cc backend's default), an eligible [Vectorized] body renders via
+     GCC/Clang vector extensions: typedef + vector loads/arithmetic/stores in lanes-sized chunks,
+     a splat for lane-uniform stores, and a serial remainder loop; ineligible bodies (e.g. a
+     non-contiguous access) keep the pragma rendering.
    - Materialized kernel parameters carry the [restrict] qualifier; local stack arrays carry the
      SIMD alignment attribute.
    - A slice-alias tnode reaching the parameter list is rejected loudly: with [restrict] an
@@ -120,6 +125,123 @@ let () =
   in
   let doc3 = compile_with_pure_config ~name:"aligned_local_kernel" (make_optimized llc3 [ local; out3 ]) in
   PPrint.ToChannel.pretty 0.9 100 Stdio.stdout doc3;
+  Stdio.printf "\n";
+
+  (* --- Explicit SIMD emission with [vector_bytes = 32]: an eligible elementwise body renders
+     as vector-extension code (8 float lanes); the lane-uniform constant store splats. --- *)
+  let compile_with_vector_config ~name optimized =
+    let module Syntax = Ir.C_syntax.C_syntax (struct
+      include Ir.C_syntax.Pure_C_config (struct
+        type buffer_ptr = unit Ctypes.ptr
+
+        let procs = [| optimized |]
+        let full_printf_support = true
+      end)
+
+      let vector_bytes = 32
+    end)
+    in
+    let _kparams, doc, _launch = Syntax.compile_proc ~name [] optimized in
+    doc
+  in
+  let inp = make_on_device 7 "inp" in
+  let out4 = make_on_device 8 "out4" in
+  let i = Idx.get_symbol () in
+  let elementwise =
+    LL.For_loop
+      {
+        index = i;
+        from_ = 0;
+        to_ = 7;
+        trace_it = false;
+        axis = LL.Vectorized;
+        body =
+          LL.Seq
+            ( LL.Set
+                {
+                  tn = out4;
+                  idcs = [| Idx.Iterator i |];
+                  llsc =
+                    LL.Binop
+                      ( Ops.Add,
+                        (LL.Get (inp, [| Idx.Iterator i |]), Ops.single),
+                        (LL.Constant 2.0, Ops.single) );
+                  debug = "";
+                },
+              LL.Set { tn = inp; idcs = [| Idx.Iterator i |]; llsc = LL.Constant 1.0; debug = "" }
+            );
+      }
+  in
+  let doc4 =
+    compile_with_vector_config ~name:"vec_simd_kernel"
+      (make_optimized elementwise [ inp; out4 ])
+  in
+  PPrint.ToChannel.pretty 0.9 100 Stdio.stdout doc4;
+  Stdio.printf "\n";
+
+  (* --- Ineligible for explicit SIMD (non-contiguous: coefficient 2 on the loop index): the
+     pragma rendering remains. --- *)
+  let inp2 = make_on_device 9 "inp2" in
+  let out5 = make_on_device 10 "out5" in
+  let i = Idx.get_symbol () in
+  let strided =
+    LL.For_loop
+      {
+        index = i;
+        from_ = 0;
+        to_ = 3;
+        trace_it = false;
+        axis = LL.Vectorized;
+        body =
+          LL.Set
+            {
+              tn = out5;
+              idcs = [| Idx.Iterator i |];
+              llsc = LL.Get (inp2, [| Idx.Affine { symbols = [ (2, i) ]; offset = 0 } |]);
+              debug = "";
+            };
+      }
+  in
+  let doc5 =
+    compile_with_vector_config ~name:"vec_strided_kernel" (make_optimized strided [ inp2; out5 ])
+  in
+  PPrint.ToChannel.pretty 0.9 100 Stdio.stdout doc5;
+  Stdio.printf "\n";
+
+  (* --- [Ops.FMA] renders fused (the simplifier synthesizes it from mul-add trees): clang's
+     [__builtin_elementwise_fma] where available, else a per-lane fmaf loop -- never the
+     maybe-contracted [a * b + c], which could double-round against the fused scalar path. --- *)
+  let g1 = make_on_device 11 "g1" in
+  let g2 = make_on_device 12 "g2" in
+  let out6 = make_on_device 13 "out6" in
+  let i = Idx.get_symbol () in
+  let fma_body =
+    LL.For_loop
+      {
+        index = i;
+        from_ = 0;
+        to_ = 7;
+        trace_it = false;
+        axis = LL.Vectorized;
+        body =
+          LL.Set
+            {
+              tn = out6;
+              idcs = [| Idx.Iterator i |];
+              llsc =
+                LL.Ternop
+                  ( Ops.FMA,
+                    (LL.Get (g1, [| Idx.Iterator i |]), Ops.single),
+                    (LL.Get (g2, [| Idx.Iterator i |]), Ops.single),
+                    (LL.Get (out6, [| Idx.Iterator i |]), Ops.single) );
+              debug = "";
+            };
+      }
+  in
+  let doc6 =
+    compile_with_vector_config ~name:"vec_fma_kernel" (make_optimized fma_body [ g1; g2; out6 ])
+  in
+  PPrint.ToChannel.pretty 0.9 100 Stdio.stdout doc6;
   Stdio.printf "\n";
 
   (* --- An alias view as a would-be kernel parameter must be rejected loudly. --- *)
