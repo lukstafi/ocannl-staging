@@ -1001,7 +1001,18 @@ using namespace metal;|} in
 
   let link_batch prior_context code_batch ctx_buffers_opts =
     let device = prior_context.device.dev in
-    let library = compile_metal_source ~name:"batch" ~source:code_batch.metal_source ~device in
+    (* Name the (debug) source file from the batch's function names — fissioned segments of one
+       routine share the routine name as a prefix; a fixed "batch" name would collide across
+       routines. *)
+    let base_name =
+      String.(
+        strip ~drop:(equal_char '_')
+        @@ common_prefix
+             (List.filter_map (Array.to_list code_batch.funcs)
+                ~f:(Option.map ~f:(fun (n, _, _) -> n))))
+    in
+    let base_name = if String.is_empty base_name then "batch" else base_name in
+    let library = compile_metal_source ~name:base_name ~source:code_batch.metal_source ~device in
     let lowered_bindings : Indexing.lowered_bindings =
       List.map (Indexing.bound_symbols code_batch.bindings) ~f:(fun s -> (s, ref 0))
     in
