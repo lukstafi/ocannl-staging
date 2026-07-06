@@ -257,7 +257,60 @@ retype `i_o,j_o=Grid`, `i_i,j_i=Workgroup` → `Swap` k_o outward → `Stage A ~
 register tile. Each prefix of that schedule is independently runnable and
 parity-testable — which is exactly the property BEAM search needs.
 
-### 7. Search and caching (scoped, deferred)
+### 7. Kernel fission at cross-workgroup edges
+
+The §6 analysis bails — whole routine serial — whenever sibling top-level nests form a
+producer/consumer (or WAW/WAR) pair over a materialized node: threads of one launch have
+no grid-wide synchronization, so the pair is a race once the kernel is multi-threaded.
+That bail is *the* blocker for real models: any routine with a materialized intermediate
+(retained activations, `virtualize_max_visits` overflow), every backward pass
+(`Zero_out` of gradients + accumulation), any bare scalar update.
+
+Fission (`Schedule.maybe_default_schedules`, config `schedule_fission`) recovers the
+synchronization from the stream instead of the launch: top-level statements are
+partitioned into **segments** at exactly those dependency edges, each segment compiles
+to its own kernel (`name__seg<i>`, via the backend's batch compile), and the routine's
+task launches them in order on the routine's stream, chaining a device-side event
+(`all_work` + `will_wait_for`) at each boundary. The event is load-bearing: Metal
+command buffers over untracked resources may overlap in execution even on one queue
+(caught by `test_random_histograms` — the parallel copy segment raced the serial
+threefry segment), so queue FIFO alone is not an ordering contract there. Each segment
+then receives the §6 preset
+*independently*, so a wide elementwise nest and a narrow bias nest no longer share one
+launch geometry, and statements the annotator can never cover (bare materialized
+writes, opaque `Staged_compilation`, non-injective nests) are quarantined into serial
+1×1 segments instead of poisoning their neighbors. Materialized whole-node `Zero_out`s
+are isolated and — on GPU — expanded (`Expand_zero`) and annotated like ordinary nests.
+A cut at a materialized edge adds **no** memory traffic (the node already round-trips
+through device memory); the only cost is launch overhead, so adjacent segments that
+both end up unannotated are coalesced back and an all-serial routine still compiles to
+a single kernel.
+
+Two constructs cross segment boundaries and need repair, because a kernel's locals die
+at launch end:
+
+- **Hoisted scope-locals** (`hoist_cross_statement_cse`'s top-level `Declare_local` +
+  defining statements): the definitions are *replicated* at the head of every consuming
+  segment — valid exactly when nothing written between the definition's original
+  position and the segment start overlaps the definition's reads; otherwise the
+  offending segment range merges back and runs serially (today's behavior).
+- **`Local`-placed scratch** whose accesses split across segments is promoted to
+  `On_device` (`Tnode.Placements.promote_local_to_device`) — sound because `Local` is
+  always a compiler decision premised on single-kernel lifetime, and fission runs
+  before any consumer of the decision (codegen parameter lists, context allocation)
+  reads it. This in particular unlocks inference-mode chains whose unobservable hidden
+  activations resolve `Local`.
+
+CPU backends get the same treatment: the §6 CPU preset has the same cross-nest bail,
+and segments there are just separate C functions called in order by the routine's task.
+Segment kernels of one routine share one `lowered_bindings` (static-index refs) — the
+CUDA/Metal batch link already did; the cc batch link now mints one shared assoc.
+Grid-sync via cooperative launch (CUDA-only, occupancy-bound) is a possible later
+execution strategy over the *same* segmentation: one kernel with `grid.sync()` at
+segment boundaries when launches are numerous and small; Metal has no device-scope
+barrier, so fission remains the portable mechanism.
+
+### 8. Search and caching (scoped, deferred)
 
 - BEAM over schedule prefixes, timing candidates on-device; contexts-as-values means
   candidate compiles are sibling `Context.compile` calls from one frontier — no global
@@ -284,6 +337,12 @@ parity-testable — which is exactly the property BEAM search needs.
   cc ([watch-ocannl-README-md-347818d3](watch-ocannl-README-md-347818d3.md) scope);
   vectorization/`Upcast` remains a follow-up (`Cpu_parallel` is retired — CPU
   parallelism is pool-backed `Grid` rendering; see [gh-ocannl-164](gh-ocannl-164.md)).
+- **Phase S5 — kernel fission** (§7): segmentation at cross-workgroup edges, per-segment
+  default schedules, scope-local replication, `Local` promotion, `Zero_out` expansion;
+  routines with materialized intermediates (notably forward+backward passes) stop
+  falling back to 1×1 launches. Follow-ups: parallel zero expansion on CPU,
+  re-classifying promoted scratch's whole-node zeroing, CUDA cooperative-launch
+  grid-sync over the same segmentation.
 
 ## Acceptance criteria
 

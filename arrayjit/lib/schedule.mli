@@ -176,6 +176,31 @@ val maybe_default_schedule :
     skipped when runtime kernel logging ([debug_log_from_routines]) is active, to keep logs serial
     and deterministic. *)
 
+val maybe_default_schedules :
+  backend_name:string ->
+  ?limits:Backend_intf.hardware_limits ->
+  static_indices:Indexing.static_symbol list ->
+  Low_level.optimized ->
+  Low_level.optimized list
+(** Like {!maybe_default_schedule}, but with kernel fission: the routine's top-level statements
+    are partitioned into segments at the cross-workgroup dependency edges the default annotator's
+    interference analysis would otherwise reject wholesale — materialized producer/consumer (and
+    WAW/WAR) pairs of sibling statements, bare materialized writes, materialized whole-node
+    [Zero_out]s, statements opaque to the analysis — and each segment receives the default
+    schedule independently, on its own launch geometry. The caller compiles each returned
+    [optimized] as its own kernel and runs them in order on the routine's stream, chaining a
+    device-side event at each boundary — that event supplies the grid-wide synchronization at
+    each cut (queue FIFO alone does not order overlapping command buffers over Metal's untracked
+    resources). Scalar scope-locals hoisted across
+    statements are replicated into consuming segments when provably value-preserving (segments
+    merge back and run serially otherwise); [Local]-placed scratch whose live range crosses a cut
+    is promoted to [On_device] in the compile's placement fork. On GPU, segments consisting of
+    materialized [Zero_out]s are expanded ({!expand_zero}) and annotated like ordinary nests.
+    Adjacent segments that end up unannotated are coalesced, so an all-serial routine stays a
+    single kernel. Returns a singleton equal to {!maybe_default_schedule}'s result when fission
+    does not apply (non-GPU/CPU backend, automatic scheduling disabled, config
+    [schedule_fission=false], kernel logging active, or nothing to split). *)
+
 val check_hardware_limits :
   name:string -> limits:Backend_intf.hardware_limits -> Low_level.optimized -> unit
 (** Validates the scheduled kernel [name] against the device limits, raising [Utils.User_error] on

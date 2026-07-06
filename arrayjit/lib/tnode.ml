@@ -561,6 +561,37 @@ module Placements = struct
     Hashtbl.set p.table ~key:tn
       ~data:(transition_memory_mode ~debug_name:(debug_name tn) (get p tn) mode provenance)
 
+  (** Kernel-fission escape hatch: strengthen a routine-scoped [Local] decision to [On_device].
+      [Local] is only ever a compiler decision (never declared intent), premised on the node's
+      lifetime being confined to one kernel launch; when the schedule layer splits a routine into
+      multiple kernels at a point where the node's live range crosses, that premise is withdrawn
+      and the node must own a context buffer. The {!update} lattice deliberately rejects
+      [Local] -> [On_device] (decisions are final within a lineage); this is the one sanctioned
+      override, sound exactly because fission runs between optimization and code generation —
+      before any consumer of the decision (codegen parameter lists, context allocation) has read
+      it. *)
+  let promote_local_to_device p tn provenance =
+    match get p tn with
+    | Some (On_device, _) -> ()
+    | None | Some ((Local | Never_virtual), _) ->
+        Hashtbl.set p.table ~key:tn ~data:(On_device, provenance)
+    | Some ((Virtual | Effectively_constant), _) ->
+        invalid_arg
+          ("Tnode.Placements.promote_local_to_device: " ^ debug_name tn
+         ^ " is virtual or constant, not routine-scoped scratch")
+
+  (** Fission bookkeeping around {!promote_local_to_device}: the raw lineage entry (no intent
+      fallback), captured before a promotion so {!unsafe_restore} can undo it when segment
+      coalescing removes the crossing that motivated it. Undoing is sound in that direction only:
+      schedules computed under the (stricter) materialized view remain valid for a [Local] node,
+      while the converse would miss coverage requirements. *)
+  let raw_entry p tn = Hashtbl.find p.table tn
+
+  let unsafe_restore p tn prior =
+    match prior with
+    | Some entry -> Hashtbl.set p.table ~key:tn ~data:entry
+    | None -> Hashtbl.remove p.table tn
+
   let debug p tn = debug_memory_mode (get p tn)
 
   (** Mirrors the retired tnode-level [default_to_most_local], resolving into the placements
