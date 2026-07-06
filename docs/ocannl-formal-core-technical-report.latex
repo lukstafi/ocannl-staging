@@ -118,10 +118,13 @@
 
 \maketitle
 
-This report is a standalone companion to the OCANNL workshop article,
-\texttt{docs/ocannl\_workshop\_article\_human.md}. It consolidates the
-working notes in \texttt{docs/blog/ocannl-formal-core.md} and
-\texttt{docs/formal-core-appendix.md} into one coherent account. The
+This report is a standalone companion to the OCANNL workshop article
+``Neural Networks Without Shape Boilerplate: An OCaml DSL Case Study''
+(\texttt{docs/ocannl\_workshop\_article\_human.md} in the OCANNL
+repository). It consolidates the working notes in
+\texttt{docs/blog/ocannl-formal-core.md} and
+\texttt{docs/formal-core-appendix.md} (also in the repository) into one
+coherent account. The
 scope is the core shape language used by the current proof effort:
 dimensions, row variables, broadcasting, flat row equality, solving,
 closing, and core projection inference. The staged extensions for affine
@@ -193,10 +196,10 @@ $\Dbot=D\cup\{\bot\}$.
 \textbf{Definition 1.2 (Broadcast order).} On $D$,
 
 \[
-d_1 \le d_2 \quad\Longleftrightarrow\quad d_2=\oneempty \text{ or } d_1=d_2.
+d_1 \sqsubseteq d_2 \quad\Longleftrightarrow\quad d_2=\oneempty \text{ or } d_1=d_2.
 \]
 
-Extend this to $\Dbot$ by $\bot\le d$
+Extend this to $\Dbot$ by $\bot\sqsubseteq d$
 for every $d$.
 
 Thus $\oneempty$ is the greatest element, atoms are pairwise
@@ -221,8 +224,8 @@ d_1\vee d_2 &= \oneempty
 \]
 
 \textbf{Proof.} Reflexivity follows from equality in Definition 1.2. For
-antisymmetry, if $d_1\le d_2$ and
-$d_2\le d_1$ and $d_1\ne d_2$, then the first
+antisymmetry, if $d_1\sqsubseteq d_2$ and
+$d_2\sqsubseteq d_1$ and $d_1\ne d_2$, then the first
 inequality forces $d_2=\oneempty$, while the second forces
 $d_1=\oneempty$, a contradiction. For transitivity, if the
 rightmost element is $\oneempty$ the claim is immediate; otherwise
@@ -254,7 +257,7 @@ a\wedge(b\vee c)=a\wedge\oneempty=a,
 So any lattice containing it as a sublattice is not distributive. The
 same argument cannot show non-modularity because $M_3$ is
 modular. In fact the height-two atom lattice is modular: if
-$x\le z$, then the only non-trivial case is
+$x\sqsubseteq z$, then the only non-trivial case is
 $x=\bot$ or $z=\oneempty$, and the modular law
 reduces to the defining equations for meet and join. $\square$
 
@@ -287,7 +290,7 @@ The expansion inserts claim-free broadcast axes at the marker.
 \textbf{Definition 2.3 (Row order).} Write
 $R_2=l_2\cdot\diamond\cdot r_2$ and
 $R_1=l_1\cdot\diamond\cdot r_1$. Then
-$R_2\le R_1$ iff:
+$R_2\sqsubseteq R_1$ iff:
 
 \begin{enumerate}
 \def\labelenumi{\arabic{enumi}.}
@@ -298,7 +301,7 @@ $R_2\le R_1$ iff:
   $|r_1|\le |r_2|$;
 \item
   for every position $i<\rank(R_2)$,
-  $(l_2\cdot r_2)[i]\le(R_1\uparrow\rank(R_2))[i]$.
+  $(l_2\cdot r_2)[i]\sqsubseteq(R_1\uparrow\rank(R_2))[i]$.
 \end{enumerate}
 
 The left row is the more material row. A shorter row can sit above a
@@ -306,12 +309,12 @@ longer one because the shorter row has more broadcast credit at its
 marker.
 
 \textbf{Lemma 2.4 (Expansion monotonicity).} If
-$R_2\le R_1$, then for every
+$R_2\sqsubseteq R_1$, then for every
 $n\ge\rank(R_2)$ and every position
 $i<n$,
 
 \[
-(R_2\uparrow n)[i]\le (R_1\uparrow n)[i].
+(R_2\uparrow n)[i]\sqsubseteq (R_1\uparrow n)[i].
 \]
 
 \textbf{Proof.} Write $R_j=l_j\cdot\diamond\cdot r_j$. There are
@@ -320,7 +323,7 @@ three regions.
 If $i<|l_2|$, the left side is
 $l_2[i]$. When
 $i<|l_1|$, the defining pointwise
-condition gives $l_2[i]\le l_1[i]$. When
+condition gives $l_2[i]\sqsubseteq l_1[i]$. When
 $i\ge |l_1|$, the position lies
 in the middle of $R_1\uparrow n$ unless it is already in the trailing
 region; but
@@ -339,7 +342,7 @@ is symmetric to the leading-flank case, using the outer-right alignment
 of trailing flanks. $\square$
 
 \textbf{Proposition 2.5 (Partial order).} The row relation
-$\le$ is a partial order.
+$\sqsubseteq$ is a partial order.
 
 \textbf{Proof.} Reflexivity is immediate. For antisymmetry, mutual
 flank-fit gives equal leading and trailing flank lengths. The expansions
@@ -347,11 +350,11 @@ at that common rank are the rows\textquotesingle{} flat contents, so
 pointwise antisymmetry in $D$ gives equal flanks.
 
 For transitivity, suppose
-$R_3\le R_2\le R_1$ and let
+$R_3\sqsubseteq R_2\sqsubseteq R_1$ and let
 $n=\rank(R_3)$. Flank-fit conditions compose. The pointwise
-condition follows from $R_3\uparrow n\le R_2\uparrow n$ by
-the first inequality and $R_2\uparrow n\le R_1\uparrow n$ by
-Lemma 2.4 applied to $R_2\le R_1$. Transitivity in
+condition follows from $R_3\uparrow n\sqsubseteq R_2\uparrow n$ by
+the first inequality and $R_2\uparrow n\sqsubseteq R_1\uparrow n$ by
+Lemma 2.4 applied to $R_2\sqsubseteq R_1$. Transitivity in
 $D$ completes the proof. $\square$
 
 \textbf{Proposition 2.6 (Top row).} The empty marked row
@@ -382,15 +385,15 @@ the dimension join is an upper bound; positions outside the retained
 flanks expand to $\oneempty$.
 
 Now let $U$ be any upper bound. Since
-$R_1\le U$ and $R_2\le U$, the
+$R_1\sqsubseteq U$ and $R_2\sqsubseteq U$, the
 flanks of $U$ are no longer than the corresponding flanks of both
 inputs, hence no longer than the flanks of $R_j$. Thus the
-flank-fit condition for $R_j\le U$ holds. At each
+flank-fit condition for $R_j\sqsubseteq U$ holds. At each
 retained leading position of $U$, both $l_1[i]$ and
 $l_2[i]$ are below $U$\textquotesingle s dimension
 there, so their join is below it. The trailing side is symmetric.
 Positions in the middle of $U$ are $\oneempty$. Therefore
-$R_j\le U$. $\square$
+$R_j\sqsubseteq U$. $\square$
 
 \textbf{Definition 2.8 (Flat equivalence).} The flat content of
 $l\cdot\diamond\cdot r$ is $l\cdot r$. Define
@@ -402,16 +405,16 @@ $\approx$ is not the identity of row elements. It is the equality
 relation used for row equality constraints, including einsum template
 matching.
 
-\textbf{Proposition 2.9 ($\approx$ versus $\le$).}
+\textbf{Proposition 2.9 ($\approx$ versus $\sqsubseteq$).}
 
 \begin{enumerate}
 \def\labelenumi{\arabic{enumi}.}
 \tightlist
 \item
-  The equivalence induced by mutual $\le$ is identity.
+  The equivalence induced by mutual $\sqsubseteq$ is identity.
 \item
   Distinct rows related by $\approx$ are incomparable under
-  $\le$.
+  $\sqsubseteq$.
 \item
   $\approx$ is not a congruence for the marked row order.
 \end{enumerate}
@@ -433,9 +436,9 @@ S'=[3,4]\cdot\diamond\cdot[].
 \]
 
 Then $S\approx S'$, and
-$R\le S$: the expansion of $S$ to rank three
+$R\sqsubseteq S$: the expansion of $S$ to rank three
 is $[3,\oneempty,4]$. But
-$R\le S'$ fails because the upper
+$R\sqsubseteq S'$ fails because the upper
 row would need a leading flank of length at most one, while
 $S'$ has leading length two. Thus replacing an
 $\approx$-equivalent row inside the marked order can change truth.
@@ -462,9 +465,9 @@ by:
 \item
   rigid-rigid: equal rank and pointwise refinement;
 \item
-  rigid below marked: $F^\bullet\le R$ iff
+  rigid below marked: $F^\bullet\sqsubseteq R$ iff
   $\rank(F)\ge\rank(R)$ and
-  $F[i]\le(R\uparrow\rank(F))[i]$ pointwise;
+  $F[i]\sqsubseteq(R\uparrow\rank(F))[i]$ pointwise;
 \item
   marked below rigid: never.
 \end{itemize}
@@ -482,10 +485,10 @@ mixed cases are:
 \begin{itemize}
 \tightlist
 \item
-  rigid $\le$ rigid $\le$ marked, where
+  rigid $\sqsubseteq$ rigid $\sqsubseteq$ marked, where
   the equal rigid ranks and pointwise inequalities compose;
 \item
-  rigid $\le$ marked $\le$ marked, where
+  rigid $\sqsubseteq$ marked $\sqsubseteq$ marked, where
   Lemma 2.4 transports the second marked inequality to the rigid rank.
 \end{itemize}
 
@@ -497,23 +500,23 @@ The forbidden marked-below-rigid clause is forced. If even rank-equal
 marked rows were allowed below their rigidifications, then
 
 \[
-[5]\cdot\diamond\cdot[3]\le []\cdot\diamond\cdot[3]\le [3]^\bullet.
+[5]\cdot\diamond\cdot[3]\sqsubseteq []\cdot\diamond\cdot[3]\sqsubseteq [3]^\bullet.
 \]
 
 would require
-$[5]\cdot\diamond\cdot[3]\le[3]^\bullet$,
+$[5]\cdot\diamond\cdot[3]\sqsubseteq[3]^\bullet$,
 impossible by rank.
 
 \textbf{Definition 2.12 (Row subtype/refinement).} Write
 $R\preceq S$ when
-$\flatrow(R)^\bullet\le S$ in the two-sorted order.
+$\flatrow(R)^\bullet\sqsubseteq S$ in the two-sorted order.
 This is the marker-erasing-on-the-left, marker-sensitive-on-the-right
 relation used for semantic row-subtyping constraints. The left row is
 viewed as a rigid flat result; the right row remains a marked
 broadcastable operand whose marker determines where implicit
 $\oneempty$ axes are inserted. We call this a row subtype/refinement
 relation to emphasize its role as the surface shape relation, while
-reserving the marked order $\le$ for the internal structural order of
+reserving the marked order $\sqsubseteq$ for the internal structural order of
 rows.
 
 \subsection{3. Terms, Substitutions, and
@@ -571,7 +574,7 @@ component of the composite substitution. $\square$
 \[
 t_1=t_2,
 \qquad
-t_1\le t_2,
+t_1\sqsubseteq t_2,
 \qquad
 R_1\approx R_2,
 \qquad
@@ -596,7 +599,7 @@ $\sigma_1\le\sigma_2$ iff there exists $u$ with
 $u\circ\sigma_1=\sigma_2$.
 
 \textbf{Example 3.6 (No principal model).} For
-$\Phi=\{3_b\le\alpha\}$, the identity
+$\Phi=\{3_b\sqsubseteq\alpha\}$, the identity
 substitution is not a model because $\alpha$ could be grounded to
 a different atom. The substitutions
 $[\alpha\mapsto3_b]$ and
@@ -677,25 +680,25 @@ constraints in the metatheory.
   \textbf{DE-bind:} $\alpha=t$, $t\ne\alpha$; bind
   $\alpha\mapsto t$.
 \item
-  \textbf{DI-top:} $t\le\oneempty$; discard.
+  \textbf{DI-top:} $t\sqsubseteq\oneempty$; discard.
 \item
-  \textbf{DI-refl:} $t\le t$; discard.
+  \textbf{DI-refl:} $t\sqsubseteq t$; discard.
 \item
   \textbf{DI-ground:} ground
-  $d\le d'$; check Definition 1.2,
+  $d\sqsubseteq d'$; check Definition 1.2,
   else $\mathsf{fail}$.
 \item
-  \textbf{DI-pin:} $\alpha\le d$, with $d$ an
+  \textbf{DI-pin:} $\alpha\sqsubseteq d$, with $d$ an
   atom; replace by $\alpha=d$.
 \item
-  \textbf{DI-pin-top:} $\oneempty\le\alpha$; replace
+  \textbf{DI-pin-top:} $\oneempty\sqsubseteq\alpha$; replace
   by $\alpha=\oneempty$.
 \item
-  \textbf{DI-cap:} $d\le\alpha$, with $d$ an
+  \textbf{DI-cap:} $d\sqsubseteq\alpha$, with $d$ an
   atom; record the lower bound. If a distinct atom is already recorded,
   bind $\alpha\mapsto\oneempty$.
 \item
-  \textbf{DI-adj:} $\alpha\le\beta$,
+  \textbf{DI-adj:} $\alpha\sqsubseteq\beta$,
   $\alpha\ne\beta$; record the adjacency and forward existing
   caps.
 \end{itemize}
@@ -716,7 +719,7 @@ If a distinct atom is already stored, any common upper bound of the two
 atoms is $\oneempty$, so the two caps are equivalent to
 $\alpha=\oneempty$. DI-adj only records and forwards the
 transitive consequence
-$d\le\alpha\le\beta$. $\square$
+$d\sqsubseteq\alpha\sqsubseteq\beta$. $\square$
 
 \subsubsection{4.2 Row Rules}\label{42-row-rules}
 
@@ -1214,10 +1217,10 @@ Define $\gammaup$ on unsolved variables by
 and extend through $\sigma_*$. Then $\gammaup$
 satisfies $\Constr(B_*)\cup\Eqns(\sigma_*)$ and is
 pointwise greatest for that final configuration: row variables compare
-by $\preceq$, and dimension variables compare by $\le$.
+by $\preceq$, and dimension variables compare by $\sqsubseteq$.
 
-\textbf{Proof.} Atom caps $d\le\alpha$ hold because
-$d\le\oneempty$. Dimension adjacencies hold because
+\textbf{Proof.} Atom caps $d\sqsubseteq\alpha$ hold because
+$d\sqsubseteq\oneempty$. Dimension adjacencies hold because
 both sides are $\oneempty$. Row caps and row adjacencies hold
 because every row is below the empty row by Definition 2.12. Bindings
 hold by extension through $\sigma_*$.
@@ -1232,6 +1235,16 @@ flattened and the upper side under $\gammaup$ supplies
 $\oneempty$ in the middle, so shared flank entries compare by
 induction and middle positions compare against $\oneempty$.
 $\square$
+
+The $\preceq$ comparison at row sort is forced, not merely convenient:
+$\Eqns(\sigma_*)$ is read under $\approx$, so a solution may re-place
+the marker of a solved row variable, and distinct placements of the same
+flat content are pairwise $\sqsubseteq$-incomparable (Proposition 2.9).
+Once a row variable is solved to a row of positive rank, the final
+configuration has no $\sqsubseteq$-greatest solution at all. When the
+solver substitutes for a row variable it commits to one marker
+placement; the commitment is a source of incompleteness (the policy
+steps of Lemma 5.1), not of order-theoretic strength.
 
 \textbf{Corollary 5.8 (Decision status).} Successful solving implies
 $\Sol(\Phi_0)$ is non-empty. Semantic failure implies
@@ -1353,7 +1366,7 @@ sound direction of Lemma 5.1. $\square$
 \textbf{Example 6.3 (Incomplete but intentional leaf closing).} Let
 
 \[
-\Phi=\{\,3_b\le\alpha,\;5_b\le\beta,\;\gamma\le\alpha,\;\gamma\le\beta\,\}.
+\Phi=\{\,3_b\sqsubseteq\alpha,\;5_b\sqsubseteq\beta,\;\gamma\sqsubseteq\alpha,\;\gamma\sqsubseteq\beta\,\}.
 \]
 
 with $\alpha$ and $\beta$ leaves and $\gamma$
@@ -1367,15 +1380,18 @@ tensor with a concrete lower bound unless the user asks for that shape.
 
 \textbf{Proposition 6.4 (Upward closing greatestness).} The
 uniform-upward solution $\gammaup$ of Proposition 5.7 is a
-solution of the final configuration. It is pointwise greatest among
-solutions of the policy-strengthened system in the marked order.
-Moreover, for every solution of the rank-policy-strengthened initial
-system, $\gamma(x)\preceq\gammaup(x)$ at row sort and
-$\gamma(x)\le\gammaup(x)$ at dimension sort.
+solution of the final configuration, and pointwise greatest among its
+solutions with rows compared by $\preceq$ (Proposition 5.7). Moreover,
+for every solution of the rank-policy-strengthened initial system,
+$\gamma(x)\preceq\gammaup(x)$ at row sort and
+$\gamma(x)\sqsubseteq\gammaup(x)$ at dimension sort. There is no
+marked-order ($\sqsubseteq$) strengthening at row sort to state: by the
+remark after Proposition 5.7, re-placed markers already defeat it over
+the final configuration, hence over any larger solution set.
 
-\textbf{Proof.} Membership and marked greatestness for the final
-configuration are Proposition 5.7. The policy-strengthened initial
-system maps exactly to the final configuration by Lemma 5.1 and Theorem
+\textbf{Proof.} Membership and greatestness for the final
+configuration are Proposition 5.7. The rank-policy-strengthened initial
+system maps to the final configuration by Lemma 5.1 and Theorem
 5.9.
 
 For the $\preceq$ statement, dimensions are immediate from
@@ -1521,11 +1537,11 @@ Each projection id has a solved positive size.
 \item
   $d_1=d_2$ emits $\operatorname{Eq}(d_1,d_2)$.
 \item
-  $d_{\mathrm{res}}\le d_{\mathrm{op}}$ with $\operatorname{size}(d_{\mathrm{op}})=1$
+  $d_{\mathrm{res}}\sqsubseteq d_{\mathrm{op}}$ with $\operatorname{size}(d_{\mathrm{op}})=1$
   emits $\operatorname{Eq}(d_{\mathrm{op}},\operatorname{Fix}(0))$: the operand broadcasts and is
   pinned.
 \item
-  Other $d_{\mathrm{res}}\le d_{\mathrm{op}}$ emits
+  Other $d_{\mathrm{res}}\sqsubseteq d_{\mathrm{op}}$ emits
   $\operatorname{Eq}(d_{\mathrm{res}},d_{\mathrm{op}})$.
 \item
   $R_1\approx R_2$ aligns flat rows and emits equality equations
@@ -1774,10 +1790,10 @@ The lower-level probe in \texttt{test/einsum/test\_closing\_order.ml}
 contains the dimension store
 
 \[
-3_b\le\alpha,\qquad
-5_b\le\beta,\qquad
-\gamma\le\alpha,\qquad
-\gamma\le\beta.
+3_b\sqsubseteq\alpha,\qquad
+5_b\sqsubseteq\beta,\qquad
+\gamma\sqsubseteq\alpha,\qquad
+\gamma\sqsubseteq\beta.
 \]
 
 with $\alpha$ and $\beta$ treated as leaves. The store is
