@@ -145,22 +145,36 @@ val default_gpu :
     fails or when the largest parallelizable nest has fewer than [min_parallel] iterations
     (default from config [gpu_schedule_min_parallel] = 1024). *)
 
+val default_cpu : ?min_parallel:int -> Low_level.optimized -> schedule
+(** The default CPU annotator preset: the same conservative analysis as {!default_gpu}, but each
+    nest's outermost parallelizable loop is merely retyped to [Grid] — pool-backed Grid rendering
+    in the C backend (docs/proposals/gh-ocannl-164.md) partitions that loop into contiguous chunks
+    executing on a process-global native thread pool, and a [Workgroup] split would only add loop
+    structure that runs serially inside a chunk. Returns the empty schedule below [min_parallel]
+    (default from config [cpu_schedule_min_parallel] = 16384; task fan-out costs more than a GPU
+    launch is worth on small kernels). *)
+
 val backend_is_gpu : string -> bool
 (** Whether the named backend binds hardware indices (currently: name contains ["cuda"] or
     ["metal"]). *)
 
-val maybe_default_gpu :
+val backend_is_cpu : string -> bool
+(** Whether the named backend renders [Grid] loops on the CPU pool (currently: name contains
+    ["cc"]). *)
+
+val maybe_default_schedule :
   backend_name:string ->
   ?limits:Backend_intf.hardware_limits ->
   static_indices:Indexing.static_symbol list ->
   Low_level.optimized ->
   Low_level.optimized
 (** The implicit transform applied by backend [compile] when the caller passes no
-    [?lowered_transform]: {!apply} of {!default_gpu} on GPU backends, the identity otherwise.
-    [limits] (default {!Backend_intf.no_hardware_limits}) should be the compiling backend's
-    {!Backend_intf.Backend_device_common.hardware_limits}. Disabled by config
-    [automatic_gpu_schedule=false], and skipped when runtime kernel logging
-    ([debug_log_from_routines]) is active, to keep logs serial and deterministic. *)
+    [?lowered_transform]: {!apply} of {!default_gpu} on GPU backends, of {!default_cpu} on CPU
+    backends, the identity otherwise. [limits] (default {!Backend_intf.no_hardware_limits}) should
+    be the compiling backend's {!Backend_intf.Backend_device_common.hardware_limits}. Disabled by
+    config [automatic_gpu_schedule=false] / [automatic_cpu_schedule=false] respectively, and
+    skipped when runtime kernel logging ([debug_log_from_routines]) is active, to keep logs serial
+    and deterministic. *)
 
 val check_hardware_limits :
   name:string -> limits:Backend_intf.hardware_limits -> Low_level.optimized -> unit

@@ -1119,26 +1119,12 @@ let path_loops (nest : Low_level.t) : Low_level.t list =
   in
   go nest []
 
-let default_gpu ?block_size ?min_parallel ?(limits = Backend_intf.no_hardware_limits)
-    (opt : Low_level.optimized) : schedule =
+(* Shared analysis of the default annotator presets (schedule-ir-optops §6): per top-level nest,
+   the parallelizable chain of outermost Serial path loops, validated by the conservative race
+   analysis (see {!default_gpu}'s doc). Raises [Bail] when any check fails. *)
+let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list =
   let open Low_level in
-  let block_size =
-    Option.value block_size
-      ~default:
-        (Int.of_string @@ Utils.get_global_arg ~arg_name:"gpu_schedule_block_size" ~default:"256")
-  in
-  (* The configured block size is a target, the device's workgroup capacity is a hard cap. *)
-  let block_size =
-    Option.value_map limits.Backend_intf.max_threads_per_workgroup ~default:block_size
-      ~f:(min block_size)
-  in
-  let min_parallel =
-    Option.value min_parallel
-      ~default:
-        (Int.of_string @@ Utils.get_global_arg ~arg_name:"gpu_schedule_min_parallel" ~default:"1024")
-  in
-  try
-    let plc = opt.optimize_ctx.placements in
+  let plc = opt.optimize_ctx.placements in
     let nests, bare = split_nests plc opt.llc in
     (* Bare materialized writes cannot be covered by annotated loops. *)
     if List.exists bare ~f:(fun a -> a.a_write && Tn.Placements.is_materialized_peek plc a.a_tn) then
@@ -1222,16 +1208,38 @@ let default_gpu ?block_size ?min_parallel ?(limits = Backend_intf.no_hardware_li
                            copy, i.e. the writes do not depend on parallel symbols. *)
                         Array.exists w.a_idcs ~f:(mentions_sym syms_i)
                       then raise Bail)));
-    (* Threshold: skip kernels whose largest parallelizable nest is too small to pay for a
-       launch. *)
-    let nest_parallel_size chain =
-      List.fold chain ~init:1 ~f:(fun sz -> function
-        | For_loop fc -> sz * (fc.to_ + 1) | _ -> sz)
-    in
-    let max_parallel =
-      List.fold chains ~init:0 ~f:(fun m chain -> max m (nest_parallel_size chain))
-    in
-    if max_parallel < min_parallel then []
+  chains
+
+(* Threshold helper: skip kernels whose largest parallelizable nest is too small to pay for a
+   launch (GPU) or a task fan-out (CPU). *)
+let max_parallel_size chains =
+  let nest_parallel_size chain =
+    List.fold chain ~init:1 ~f:(fun sz -> function
+      | Low_level.For_loop fc -> sz * (fc.to_ + 1) | _ -> sz)
+  in
+  List.fold chains ~init:0 ~f:(fun m chain -> max m (nest_parallel_size chain))
+
+let default_gpu ?block_size ?min_parallel ?(limits = Backend_intf.no_hardware_limits)
+    (opt : Low_level.optimized) : schedule =
+  let open Low_level in
+  let block_size =
+    Option.value block_size
+      ~default:
+        (Int.of_string @@ Utils.get_global_arg ~arg_name:"gpu_schedule_block_size" ~default:"256")
+  in
+  (* The configured block size is a target, the device's workgroup capacity is a hard cap. *)
+  let block_size =
+    Option.value_map limits.Backend_intf.max_threads_per_workgroup ~default:block_size
+      ~f:(min block_size)
+  in
+  let min_parallel =
+    Option.value min_parallel
+      ~default:
+        (Int.of_string @@ Utils.get_global_arg ~arg_name:"gpu_schedule_min_parallel" ~default:"1024")
+  in
+  try
+    let chains = analyze_parallel_chains opt in
+    if max_parallel_size chains < min_parallel then []
     else
       (* Emit per-nest ops. Every annotated nest contributes exactly one Grid and one Workgroup
          loop, so hardware slots are uniform ([.x] of each kind) across nests and every
@@ -1257,23 +1265,47 @@ let default_gpu ?block_size ?min_parallel ?(limits = Backend_intf.no_hardware_li
           | _ -> [])
   with Bail -> []
 
-(** {2 Wiring: the implicit transform for GPU backends} *)
+let default_cpu ?min_parallel (opt : Low_level.optimized) : schedule =
+  let min_parallel =
+    Option.value min_parallel
+      ~default:
+        (Int.of_string
+        @@ Utils.get_global_arg ~arg_name:"cpu_schedule_min_parallel" ~default:"16384")
+  in
+  try
+    let chains = analyze_parallel_chains opt in
+    if max_parallel_size chains < min_parallel then []
+    else
+      (* Retype the outermost chain loop to [Grid], nothing else: pool-backed Grid rendering
+         (gh-ocannl-164) partitions that loop into contiguous chunks, and a [Workgroup] split
+         would only add loop structure that executes serially inside a chunk. *)
+      List.concat_map chains ~f:(function
+        | Low_level.For_loop fc :: _ -> [ Retype { axis = fc.index; ty = Low_level.Grid } ]
+        | _ -> [])
+  with Bail -> []
+
+(** {2 Wiring: the implicit transform for GPU and CPU backends} *)
 
 let automatic_gpu_schedule =
   lazy (Utils.get_global_flag ~default:true ~arg_name:"automatic_gpu_schedule")
 
+let automatic_cpu_schedule =
+  lazy (Utils.get_global_flag ~default:true ~arg_name:"automatic_cpu_schedule")
+
 let backend_is_gpu name =
   String.is_substring name ~substring:"cuda" || String.is_substring name ~substring:"metal"
 
-let maybe_default_gpu ~backend_name ?(limits = Backend_intf.no_hardware_limits) ~static_indices
-    (opt : Low_level.optimized) : Low_level.optimized =
-  if
-    backend_is_gpu backend_name
-    && Lazy.force automatic_gpu_schedule
-    (* Runtime kernel logging is line-interleaved under parallel execution; keep logged runs
-       serial so the logs stay deterministic and readable. *)
-    && not (Utils.debug_log_from_routines ())
-  then apply ~static_indices (default_gpu ~limits opt) opt
+let backend_is_cpu name = String.is_substring name ~substring:"cc"
+
+let maybe_default_schedule ~backend_name ?(limits = Backend_intf.no_hardware_limits)
+    ~static_indices (opt : Low_level.optimized) : Low_level.optimized =
+  (* Runtime kernel logging is line-interleaved under parallel execution; keep logged runs
+     serial so the logs stay deterministic and readable. *)
+  if Utils.debug_log_from_routines () then opt
+  else if backend_is_gpu backend_name && Lazy.force automatic_gpu_schedule then
+    apply ~static_indices (default_gpu ~limits opt) opt
+  else if backend_is_cpu backend_name && Lazy.force automatic_cpu_schedule then
+    apply ~static_indices (default_cpu opt) opt
   else opt
 
 let check_hardware_limits ~name ~(limits : Backend_intf.hardware_limits)

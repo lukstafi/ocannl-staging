@@ -106,6 +106,31 @@ gpu_schedule_block_size=256
 # left unscheduled by the default GPU schedule (launch overhead would dominate).
 gpu_schedule_min_parallel=1024
 
+# If true, on CPU backends (sync_cc, multicore_cc) kernels compiled without an explicit
+# `lowered_transform` get the default CPU schedule: the same conservative analysis as the GPU
+# schedule, retyping each nest's outermost parallelizable loop to Grid, which the C backend
+# renders as chunked parallel loops on a native thread pool (see `cc_parallel_grid`). Disabled
+# automatically while `debug_log_from_routines` is active.
+automatic_cpu_schedule=true
+
+# Kernels whose largest parallelizable loop nest has fewer than this many parallel iterations are
+# left unscheduled by the default CPU schedule (task fan-out overhead would dominate).
+cpu_schedule_min_parallel=16384
+
+# How the C backend renders eligible outermost Grid loops (pool-backed Grid rendering,
+# docs/proposals/gh-ocannl-164.md): "dispatch" uses libdispatch's dispatch_apply (macOS),
+# "openmp" uses `#pragma omp parallel for` (adds -fopenmp to the kernel compile), "none" keeps
+# serial loops, "auto" (default) probes what the configured compiler accepts. Both runtimes own a
+# single process-global thread pool; worker threads run pure C and never touch the OCaml runtime.
+# Applies to explicitly annotated (schedule-transformed) kernels as well as the automatic
+# schedule; results are bitwise identical to serial execution (grid iterations write disjoint
+# elements).
+cc_parallel_grid=auto
+
+# Target chunk count for parallel Grid rendering; the actual count is capped by the loop extent.
+# 0 (default) means automatic: 4 x the recommended domain count (core count).
+cc_parallel_chunks=0
+
 # If true, stdout capturing is disabled, so some logs meant for the ppx_minidebug log files
 # (in particular CUDA logs) remain on the stdout.
 #
