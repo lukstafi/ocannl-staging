@@ -95,7 +95,10 @@ let () =
   let epochs = 1000 in
   let total_steps = epochs * n_batches in
   Train.every_non_literal_materialized batch_loss;
-  let update = Train.grad_update batch_loss in
+  (* Accumulate the loss on device so the training loop syncs on the host only once per epoch:
+     a per-step [Context.get_values] awaits the whole device, serializing the stream. *)
+  let loss_accum = Train.loss_accumulator () in
+  let update = Train.grad_update ~accum_loss:loss_accum batch_loss in
   (* Mild lr scaling for the larger batch (0.01 at batch 8 -> 0.015 at batch 32), partially
      compensating the 4x fewer updates; this lenet destabilizes at 0.02+ (loss collapses to the
      uniform-prediction plateau). *)
@@ -121,14 +124,13 @@ let () =
 
   printf "\nStarting training for %d epochs (%d steps)...\n%!" epochs total_steps;
 
-  let open Operation.At in
   for epoch = 1 to epochs do
-    let epoch_loss = ref 0. in
     Train.sequential_loop (Context.bindings sgd_routine) ~f:(fun () ->
         Train.run ctx sgd_routine;
-        (* printf "batch_loss = %.4f\n%!" (ctx, batch_loss).@[0]; *)
-        epoch_loss := !epoch_loss +. (ctx, batch_loss).@[0];
         Int.incr step_ref);
+    (* The only device sync of the epoch: read the accumulated loss sum, then reset it. *)
+    let epoch_loss = ref (Context.get_values ctx loss_accum.Tensor.value).(0) in
+    ignore (Context.set_values ctx loss_accum.Tensor.value [| 0. |] : Context.t);
     (* One decimal: cross-backend float drift over thousands of steps can flip the second
        decimal at a rounding boundary (cc vs metal differed at 0.215+-drift), and the expected
        output must stay byte-identical across backends. *)
