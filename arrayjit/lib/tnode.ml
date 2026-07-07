@@ -958,7 +958,9 @@ let create_with_reshape ~id ~label ~base_ndarray ~unpadded_dims ~padding ~from_p
        | None, _ | _, true ->
            (* Use reshape to conform to inferred dims *)
            let f_reshape_with_prec prec arr =
-             let total_elems = Array.reduce_exn padded_dims ~f:( * ) in
+             (* [fold ~init:1] rather than [reduce_exn]: rank-0 tensors (empty dims) hold 1
+                element. *)
+             let total_elems = Array.fold padded_dims ~init:1 ~f:( * ) in
              let source_total =
                let source_dims = Bigarray.Genarray.dims arr in
                Array.fold source_dims ~init:1 ~f:( * )
