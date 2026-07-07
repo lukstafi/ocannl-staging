@@ -410,6 +410,45 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
   let fwds =
     List.filter_map ordered_ts ~f:(fun ti -> if is_fwd_root ti then Some ti.forward else None)
   in
+  (* The id-ascending order of [ordered_ts] does not suffice to avoid computed-after-use bugs
+     across sibling forward fragments: the code of a shared subtensor is embedded in the forward of
+     its first-constructed consumer, while sibling subtrees are constructed in the application
+     order of the current operation (right-to-left for OCaml arguments), so an earlier-id sibling
+     can read a node whose defining code is embedded under a later-id sibling. Order the fragments
+     topologically: a fragment embedding a node must precede fragments that read it. *)
+  let fwds =
+    match fwds with
+    | [] | [ _ ] -> fwds
+    | _ ->
+        let tagged =
+          List.map fwds ~f:(fun c ->
+              ( c,
+                Set.diff
+                  (fst @@ Asgns.collect_nodes_guess_output c.Asgns.asgns)
+                  c.Asgns.embedded_nodes ))
+        in
+        let rec order acc remaining =
+          match remaining with
+          | [] -> List.concat @@ List.rev acc
+          | _ ->
+              let blocked_by (_, requires) =
+                List.exists remaining ~f:(fun (other, _) ->
+                    not (Set.is_empty (Set.inter requires other.Asgns.embedded_nodes)))
+              in
+              let ready, blocked = List.partition_tf remaining ~f:(Fn.non blocked_by) in
+              if List.is_empty ready then (
+                (* A fragment-level dependency cycle would need statement-level interleaving to
+                   schedule correctly; fall back to the given order like before this check. *)
+                Stdlib.Printf.eprintf
+                  "Warning: OCANNL forward-code fragments have a dependency cycle (tensor %s); \
+                   some values may be read before they are computed.\n\
+                   %!"
+                  (Tn.debug_name v);
+                (List.concat @@ List.rev acc) @ List.map remaining ~f:fst)
+              else order (List.map ready ~f:fst :: acc) blocked
+        in
+        order [] tagged
+  in
   let this_op_asn = op_asn ~t ~projections in
   let forward = Asgns.sequence @@ fwds @ [ this_op_asn ] in
   (* Extract the neutral element from THIS operation's assignments only, not the whole forward
