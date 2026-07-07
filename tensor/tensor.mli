@@ -25,8 +25,9 @@ type t = {
           initialization. *)
   forward : comp;
   diff : diff option;
-  id : int;  (** Same as [value.id]. *)
   value : tn;
+      (** The session id and namespace of the tensor are [value.id] / [value.namespace]; tensor
+          identity (comparison) follows [value.uid]. *)
   top_down_prec : bool;  (** Whether to propagate precision bottom-up (the default) or top-down. *)
   shape : Shape.t;
       (** The eventual shape of [t.value] and [t.diff.grad], incorporating the current state of
@@ -257,9 +258,15 @@ val bump_next_id : int -> unit
 val get_next_id : unit -> int
 (** [get_next_id ()] returns the next tensor ID that will be allocated by the session. *)
 
-val unsafe_reinitialize : unit -> unit
+val unsafe_reinitialize : ?namespace:string -> unit -> unit
 (** Bring global state to its initialization values. This invalidates any previously defined tensors
     and tensor nodes. Also reinitializes the modules: {!Shape}, {!Ir.Tnode}.
+
+    [namespace] sets the namespace stamped on subsequently created tensor nodes (gh-ocannl-372);
+    this is the only way to change it. Defaults to {!Ir.Tnode.default_namespace} ([ocannl]) — also
+    when omitted, i.e. reinitializing never preserves a previously set namespace. Namespaces must
+    match [A-Za-z_][A-Za-z0-9_]* so they can qualify identifiers in generated code and debug names
+    (rendered as [ns__n42]; the default namespace is elided).
 
     While this function is intended for testing, using it can prevent unintentional session state
     pollution errors. *)

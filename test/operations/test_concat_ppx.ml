@@ -18,13 +18,13 @@ let () =
   let t3 = TDSL.term ~batch_dims:[] ~input_dims:[] ~output_dims:[ 1 ] () in
 
   let r1 = concat2 t1 t2 in
-  Stdio.printf "concat2 id: %d\n" r1.Tensor.id;
+  Stdio.printf "concat2 id: %d\n" r1.Tensor.value.Ir.Tnode.id;
 
   let r2 = concat3 t1 t2 t3 in
-  Stdio.printf "concat3 id: %d\n" r2.Tensor.id;
+  Stdio.printf "concat3 id: %d\n" r2.Tensor.value.Ir.Tnode.id;
 
   let r3 = concat_capture t1 t2 in
-  Stdio.printf "concat_capture id: %d\n" r3.Tensor.id;
+  Stdio.printf "concat_capture id: %d\n" r3.Tensor.value.Ir.Tnode.id;
 
   let p1 =
     Tensor.ndarray ~grad_spec:Tensor.Require_grad [| 1.0; 2.0; 3.0 |] ~batch_dims:[] ~input_dims:[]

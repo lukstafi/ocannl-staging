@@ -28,7 +28,6 @@ module rec Self : sig
     params : (t, Self_comparator.comparator_witness) Set.t;
     forward : comp;
     diff : diff option;
-    id : int;
     value : tn;
     top_down_prec : bool;
     shape : Shape.t;
@@ -44,7 +43,6 @@ end = struct
     params : (t, Self_comparator.comparator_witness) Set.t;
     forward : comp;
     diff : diff option;
-    id : int;
     value : tn;
     top_down_prec : bool;
     shape : Shape.t;
@@ -56,7 +54,7 @@ end = struct
   let rec sexp_of_t t =
     Sexp.message "Tensor"
       [
-        ("id", sexp_of_int t.id);
+        ("id", sexp_of_int t.value.Tn.id);
         ("label", [%sexp_of: string list] t.value.label);
         ("forward", [%sexp_of: Asgns.comp] t.forward);
         ("diff", [%sexp_of: diff option] t.diff);
@@ -67,10 +65,12 @@ end = struct
     Sexp.message "child"
       [
         (if ch.embedded then ("", sexp_of_t ch.subtensor)
-         else ("ref-id", sexp_of_int ch.subtensor.id));
+         else ("ref-id", sexp_of_int ch.subtensor.value.Tn.id));
       ]
 
-  let compare t1 t2 = Int.compare t1.id t2.id
+  (* Tensor identity follows the value node's process-unique [uid] (never reused across
+     [unsafe_reinitialize], unlike the session-scoped [value.id]). *)
+  let compare t1 t2 = Int.compare t1.value.Tn.uid t2.value.Tn.uid
 end
 
 and Self_comparator : (Comparator.S with type t := Self.t) = Comparator.Make (Self)
@@ -96,12 +96,12 @@ let session_state =
 
 let bump_next_id id = session_state.next_id <- max session_state.next_id (id + 1)
 let get_next_id () = session_state.next_id
-let is_fwd_root t = Map.mem session_state.forward_roots t.id
-let remove_fwd_root t = session_state.forward_roots <- Map.remove session_state.forward_roots t.id
-let is_bprop_root t = Map.mem session_state.backprop_roots t.id
+let is_fwd_root t = Map.mem session_state.forward_roots t.value.id
+let remove_fwd_root t = session_state.forward_roots <- Map.remove session_state.forward_roots t.value.id
+let is_bprop_root t = Map.mem session_state.backprop_roots t.value.id
 
 let remove_bprop_root t =
-  session_state.backprop_roots <- Map.remove session_state.backprop_roots t.id
+  session_state.backprop_roots <- Map.remove session_state.backprop_roots t.value.id
 
 let with_unchanged_roots ~f =
   let fwd_roots = session_state.forward_roots in
@@ -127,7 +127,7 @@ let%debug7_sexp rec init_params ?skip (t : t) : Asgns.comp =
       | None -> Fn.id
       | Some skip -> List.filter ~f:(fun p -> not (Map.mem skip p.value)))
       (* Compare to ordered_ts in op -- we need to sort to avoid computed-after-use bugs! *)
-    |> List.sort ~compare:(fun p1 p2 -> Int.ascending p1.id p2.id)
+    |> List.sort ~compare:(fun p1 p2 -> Int.ascending p1.value.id p2.value.id)
   in
   let asgns =
     Asgns.Block_comment
@@ -169,7 +169,7 @@ exception Session_error of string * t option [@@deriving sexp]
 let session_error_printer = function
   | Session_error (msg, None) -> Some msg
   | Session_error (msg, Some m) ->
-      Some [%string "For #%{m.id#Int} %{Tn.debug_name m.value}: %{msg}"]
+      Some [%string "For #%{m.value.id#Int} %{Tn.debug_name m.value}: %{msg}"]
   | _ -> None
 
 let () = Stdlib.Printexc.register_printer session_error_printer
@@ -276,16 +276,16 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
     ?shape_logic ~op_asn ~grad_asn ?(grad_spec = If_needed) ?(top_down_prec = false) make_shape
     (orig_ts : t list) : t =
   List.iter orig_ts ~f:(fun t ->
-      if t.id >= session_state.next_id then
+      if t.value.id >= session_state.next_id then
         raise
         @@ Session_error
              ( [%string
-                 "Tensor #%{t.id#Int} %{Tn.debug_name t.value} has an id greater than the last id \
+                 "Tensor #%{t.value.id#Int} %{Tn.debug_name t.value} has an id greater than the last id \
                   #%{session_state.next_id - 1#Int} -- check your uses of \
                   Tensor.unsafe_reinitialize, if all your uses are valid, report this as a bug."],
                Some t ));
   (* The code needs to be included in the order it was computed due to potential non-tree DAGs. *)
-  let ordered_ts = List.dedup_and_sort orig_ts ~compare:(fun t1 t2 -> Int.ascending t1.id t2.id) in
+  let ordered_ts = List.dedup_and_sort orig_ts ~compare:(fun t1 t2 -> Int.ascending t1.value.id t2.value.id) in
   let id : int = session_state.next_id in
   session_state.next_id <- session_state.next_id + 1;
   let _session_state_next_id : int = session_state.next_id in
@@ -374,10 +374,10 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
     List.folding_map orig_ts
       ~init:(Set.empty (module Int))
       ~f:(fun used ti ->
-        let embedded = is_fwd_root ti && not (Set.mem used ti.id) in
+        let embedded = is_fwd_root ti && not (Set.mem used ti.value.id) in
         if embedded then
           embedded_nodes := Set.add (Set.union !embedded_nodes ti.forward.embedded_nodes) ti.value;
-        (Set.add used ti.id, { subtensor = ti; embedded }))
+        (Set.add used ti.value.id, { subtensor = ti; embedded }))
   in
   let params = Set.union_list (module T) @@ List.map ordered_ts ~f:(fun ti -> ti.params) in
   (* Create a preliminary shape_update to get projections_debug and projections for op_asn. *)
@@ -401,7 +401,6 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
       params;
       forward = Asgns.empty_comp;
       diff = None;
-      id;
       value = v;
       top_down_prec;
       shape;
@@ -444,7 +443,7 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
     (* Apply delayed top-down precision updates to parameter gradient subtensors *)
     List.iter top_down_ts ~f:(fun ti ->
         Option.iter ti.diff ~f:(fun d -> update_infer_prec d.grad g.Tn.prec));
-    let is_bck_root ti = Map.mem session_state.backprop_roots ti.id in
+    let is_bck_root ti = Map.mem session_state.backprop_roots ti.value.id in
     let zero_grads =
       let zero_g ti =
         Option.value_map ti.diff ~default:Asgns.Noop ~f:(fun diff -> diff.zero_grads)
@@ -487,7 +486,7 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
       }
     in
     List.iter ordered_ts ~f:(fun ti ->
-        session_state.backprop_roots <- Map.remove session_state.backprop_roots ti.id);
+        session_state.backprop_roots <- Map.remove session_state.backprop_roots ti.value.id);
     let diff = Some { grad = g; zero_grads; backprop } in
     let t = { t with diff } in
     session_state.forward_roots <- Map.add_exn session_state.forward_roots ~key:id ~data:t;
@@ -679,7 +678,7 @@ let force_param_diff t =
   in
   let diff = { grad = g; zero_grads = fetch_zeros g t.shape; backprop = Asgns.empty_comp } in
   let t = { t with diff = Some diff } in
-  session_state.backprop_roots <- Map.set session_state.backprop_roots ~key:t.id ~data:t;
+  session_state.backprop_roots <- Map.set session_state.backprop_roots ~key:t.value.id ~data:t;
   t
 
 let strip_param_diff t =
@@ -724,7 +723,7 @@ let consume_forward_code t =
   let all_read = fst @@ Asgns.collect_nodes_guess_output t.forward.asgns in
   let non_embedded_descendants = Set.diff all_read t.forward.embedded_nodes in
   let other_roots =
-    Map.data session_state.forward_roots |> List.filter ~f:(fun r -> r.id <> t.id)
+    Map.data session_state.forward_roots |> List.filter ~f:(fun r -> r.value.id <> t.value.id)
   in
   let conflicting_roots =
     List.filter other_roots ~f:(fun root ->
@@ -757,7 +756,7 @@ let consume_backprop_code t =
   let all_read = fst @@ Asgns.collect_nodes_guess_output diff.backprop.asgns in
   let non_embedded_grad_descendants = Set.diff all_read diff.backprop.embedded_nodes in
   let other_roots =
-    Map.data session_state.backprop_roots |> List.filter ~f:(fun r -> r.id <> t.id)
+    Map.data session_state.backprop_roots |> List.filter ~f:(fun r -> r.value.id <> t.value.id)
   in
   let conflicting_roots =
     List.filter other_roots ~f:(fun root ->
@@ -796,7 +795,8 @@ let with_saved_random_seed f =
   let saved = !random_seed in
   Exn.protectx ~f ~finally:(fun () -> random_seed := saved) ()
 
-let%track5_sexp unsafe_reinitialize () : unit =
+let%track5_sexp unsafe_reinitialize ?(namespace = Tn.default_namespace) () : unit =
+  Tn.set_current_namespace namespace;
   session_state.next_id <- 0;
   session_state.forward_roots <- Map.empty (module Int);
   session_state.backprop_roots <- Map.empty (module Int);
@@ -813,9 +813,9 @@ let header t =
     if String.equal v_dims_s g_dims_s then "dims " ^ v_dims_s
     else "dims val " ^ v_dims_s ^ " grad " ^ g_dims_s
   in
-  "#" ^ Int.to_string t.id ^ " " ^ Tn.label t.value ^ " " ^ dims_s ^ " ["
+  "#" ^ Int.to_string t.value.id ^ " " ^ Tn.label t.value ^ " " ^ dims_s ^ " ["
   ^ String.concat ~sep:","
-      (List.map t.children ~f:(fun { subtensor = { id; _ }; _ } -> Int.to_string id))
+      (List.map t.children ~f:(fun { subtensor; _ } -> Int.to_string subtensor.value.id))
   ^ "]"
 (*^" "^PrintBox_text.to_string (PrintBox.Simple.to_box v.label)*)
 
@@ -839,14 +839,14 @@ let%debug5_sexp to_dag ?(single_node = false) ?(embedded_only = false) ?entries_
   (* First scan to identify which tensors appear embedded anywhere *)
   let tensors_with_embedded_occurrence = Hash_set.create (module Int) in
   let rec scan_for_embedded { subtensor = t; embedded } =
-    if embedded then Hash_set.add tensors_with_embedded_occurrence t.id;
+    if embedded then Hash_set.add tensors_with_embedded_occurrence t.value.id;
     if not single_node then List.iter ~f:scan_for_embedded t.children
   in
   if not embedded_only then scan_for_embedded { subtensor = t; embedded = true };
 
   let visited = if embedded_only then None else Some (Hash_set.create (module Int)) in
   let rec to_dag { subtensor = t; embedded } : PrintBox_utils.dag =
-    let id = Int.to_string t.id in
+    let id = Int.to_string t.value.id in
     let children = if single_node then [] else List.map ~f:to_dag t.children in
     let indices = Shape.default_display_indices t.shape in
     (* Reserved (claim-free) tags ([default] / [bcast_if_1]) are not user-meaningful axis names;
@@ -876,16 +876,16 @@ let%debug5_sexp to_dag ?(single_node = false) ?(embedded_only = false) ?entries_
       if embedded_only then not embedded
       else if
         (* If this tensor appears embedded anywhere, use embedded logic for consistency *)
-        Hash_set.mem tensors_with_embedded_occurrence t.id
+        Hash_set.mem tensors_with_embedded_occurrence t.value.id
       then not embedded
       else
         (* Only use visited tracking for tensors that are never embedded anywhere *)
         match visited with
         | None -> not embedded
         | Some visited_set ->
-            if Hash_set.mem visited_set t.id then true
+            if Hash_set.mem visited_set t.value.id then true
             else (
-              Hash_set.add visited_set t.id;
+              Hash_set.add visited_set t.value.id;
               false)
     in
     let txt = txt ^ if (not should_elide) && not embedded then " non-emb" else "" in
@@ -967,7 +967,7 @@ let%debug5_sexp to_doc ?ctx ~force ~with_grad ~with_code ?(with_low_level = fals
   let sh = t.shape in
   let label = Tn.label t.value in
   let prefix_str =
-    "[" ^ Int.to_string t.id ^ "]: " ^ label ^ " shape "
+    "[" ^ Int.to_string t.value.id ^ "]: " ^ label ^ " shape "
     ^ Shape.to_string_hum ~style:Row.Axis_number_and_size sh
     ^ " "
   in
@@ -1125,7 +1125,7 @@ let print ?here ?(force = false) ?ctx ~with_grad ~with_code ?(with_low_level = f
 
 let print_forward_roots ~with_grad ~with_code (style : array_print_style) =
   List.iter (Map.to_alist ~key_order:`Increasing session_state.forward_roots) ~f:(fun (id, root) ->
-      assert (id = root.id);
+      assert (id = root.value.id);
       print ~with_grad ~with_code style root)
 
 let print_tree ?here ?(force = false) ?ctx ?entries_per_axis ?(with_backend_info = false)
