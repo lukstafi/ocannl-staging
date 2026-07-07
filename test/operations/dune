@@ -1038,6 +1038,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name autotune_fission_sketch)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules autotune_fission_sketch)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name fission_schedule)
  (package neural_nets_lib)
  (deps
