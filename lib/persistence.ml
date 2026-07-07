@@ -7,7 +7,9 @@ module Ops = Ir.Ops
 
 type tensor_meta = {
   id : int;
-  namespace : string;  (** Reserved for #372, always [""] for now. *)
+  namespace : string;
+      (** The tnode's namespace (gh-ocannl-372). The empty string is a legacy encoding of
+          {!Ir.Tnode.default_namespace}, produced by pre-namespace checkpoints. *)
   label : string list;
   prec : Ops.prec;
   dims : int array;  (** Padded (buffer) dimensions. *)
@@ -168,12 +170,20 @@ let read_header ic =
   let sexp = Sexplib.Sexp.of_string header_str in
   checkpoint_header_of_sexp sexp
 
+(* Pre-namespace checkpoints wrote namespace = "". The namespace charset excludes ':', so this
+   key encoding is injective. *)
+let meta_namespace m =
+  if String.is_empty m.namespace then Tn.default_namespace else m.namespace
+
+let meta_key m = meta_namespace m ^ ":" ^ Int.to_string m.id
+let meta_name m = Tn.ident_prefix (meta_namespace m) ^ Int.to_string m.id
+
 let validate_header header =
   if header.version <> 1 then
     failwith ("unsupported checkpoint version: " ^ Int.to_string header.version);
-  (* Check for duplicate IDs *)
-  let ids = List.map header.tensors ~f:(fun m -> m.id) in
-  let unique_ids = Set.of_list (module Int) ids in
+  (* Check for duplicate (namespace, id) pairs *)
+  let ids = List.map header.tensors ~f:meta_key in
+  let unique_ids = Set.of_list (module String) ids in
   if Set.length unique_ids <> List.length ids then
     failwith "checkpoint contains duplicate tensor IDs"
 
@@ -200,9 +210,8 @@ let save ~ctx ~appending t_set path =
   List.iter tn_list ~f:(fun tn ->
       match try Some (Context.to_host ctx tn) with _ -> None with
       | None ->
-          failwith
-            ("save: tensor " ^ Int.to_string tn.Tn.id ^ " is not present in the given context")
-      | Some nd -> Hashtbl.set host_of ~key:tn.Tn.id ~data:nd);
+          failwith ("save: tensor " ^ Tn.id tn ^ " is not present in the given context")
+      | Some nd -> Hashtbl.set host_of ~key:tn.Tn.uid ~data:nd);
   (* Collect current tensor data *)
   let new_entries =
     List.map tn_list ~f:(fun tn ->
@@ -213,7 +222,7 @@ let save ~ctx ~appending t_set path =
         let meta =
           {
             id = tn.Tn.id;
-            namespace = "";
+            namespace = tn.Tn.namespace;
             label = tn.Tn.label;
             prec;
             dims;
@@ -234,18 +243,19 @@ let save ~ctx ~appending t_set path =
       (* Read the data offset for seeking *)
       let data_start = Stdlib.pos_in ic in
       (* Read existing binary payloads for non-overlapping tensors *)
-      let new_ids = Set.of_list (module Int) (List.map new_entries ~f:(fun (m, _) -> m.id)) in
+      let new_ids =
+        Set.of_list (module String) (List.map new_entries ~f:(fun (m, _) -> meta_key m))
+      in
       let kept_entries =
         List.filter_map existing_header.tensors ~f:(fun meta ->
-            if Set.mem new_ids meta.id then None
+            if Set.mem new_ids (meta_key meta) then None
             else begin
               (* Read the existing payload *)
               Stdlib.seek_in ic (data_start + meta.offset);
               let payload = Bytes.create meta.byte_length in
               (try Stdlib.really_input ic payload 0 meta.byte_length
                with End_of_file ->
-                 failwith
-                   ("save: failed to read existing payload for tensor " ^ Int.to_string meta.id));
+                 failwith ("save: failed to read existing payload for tensor " ^ meta_name meta));
               Some (`Existing (meta, payload))
             end)
       in
@@ -284,7 +294,7 @@ let save ~ctx ~appending t_set path =
     List.iter entries_with_offsets ~f:(function
       | `Existing (_, payload) -> Stdlib.output_bytes oc payload
       | `New (_, tn) ->
-          let nd = Hashtbl.find_exn host_of tn.Tn.id in
+          let nd = Hashtbl.find_exn host_of tn.Tn.uid in
           let padding = Option.map ~f:fst (Lazy.force tn.Tn.padding) in
           let _n = Nd.write_payload_to_channel ?padding nd oc in
           ())
@@ -298,9 +308,20 @@ let save ~ctx ~appending t_set path =
       raise exn
 
 let load ~ctx ?prefix_namespace path =
-  (match prefix_namespace with
-  | None | Some "" -> ()
-  | Some _ -> failwith "load: prefix_namespace is not yet supported (requires #372 namespaces)");
+  let prefix_namespace =
+    match prefix_namespace with
+    | None | Some "" -> None
+    | Some p ->
+        Tn.validate_namespace p;
+        Some p
+  in
+  (* [prefix_namespace] preserves the internal namespace structure of a multi-namespace file:
+     corresponding s_ids stay equal, keeping [Embed_self_id] semantics invariant. *)
+  let target_namespace meta =
+    match prefix_namespace with
+    | None -> meta_namespace meta
+    | Some p -> p ^ "__" ^ meta_namespace meta
+  in
   let ic = Stdlib.open_in_bin path in
   let result =
     match
@@ -309,10 +330,11 @@ let load ~ctx ?prefix_namespace path =
       let data_start = Stdlib.pos_in ic in
       (* Pre-check: verify no ID clashes before creating anything *)
       List.iter header.tensors ~f:(fun meta ->
-          match Tn.find ~id:meta.id with
+          match Tn.find_namespaced ~namespace:(target_namespace meta) ~id:meta.id with
           | Some _ ->
               failwith
-                ("load: tensor with id " ^ Int.to_string meta.id ^ " already exists in registry")
+                ("load: tensor with id " ^ Tn.ident_prefix (target_namespace meta)
+               ^ Int.to_string meta.id ^ " already exists in registry")
           | None -> ());
       let max_id = ref (-1) in
       let loaded =
@@ -328,11 +350,13 @@ let load ~ctx ?prefix_namespace path =
             (* Create the tnode (no host data is stored on it); register the loaded buffer so it is
                uploaded into the context below (gh-ocannl-333). *)
             let tn, init =
-              Tn.create_from_padded ~id:meta.id ~label:meta.label ~ndarray:nd ~padding:meta.padding
-                ()
+              Tn.create_from_padded ~namespace:(target_namespace meta) ~id:meta.id
+                ~label:meta.label ~ndarray:nd ~padding:meta.padding ()
             in
             Ir.Host_inits.register tn init;
-            if meta.id > !max_id then max_id := meta.id;
+            (* Only nodes landing in the ambient namespace can collide with future session ids. *)
+            if String.equal (target_namespace meta) (Tn.get_current_namespace ()) && meta.id > !max_id
+            then max_id := meta.id;
             (tn, nd))
       in
       (* Bump session ID floor *)
@@ -360,21 +384,21 @@ let restore ~ctx t_set path =
       let data_start = Stdlib.pos_in ic in
       (* Build lookup map *)
       let file_tensors =
-        Map.of_alist_exn (module Int) (List.map header.tensors ~f:(fun m -> (m.id, m)))
+        Map.of_alist_exn (module String) (List.map header.tensors ~f:(fun m -> (meta_key m, m)))
       in
+      let tn_key tn = tn.Tn.namespace ^ ":" ^ Int.to_string tn.Tn.id in
       Set.fold t_set ~init:ctx ~f:(fun ctx tn ->
-          match Map.find file_tensors tn.Tn.id with
-          | None ->
-              failwith ("restore: tensor " ^ Int.to_string tn.Tn.id ^ " not found in checkpoint")
+          match Map.find file_tensors (tn_key tn) with
+          | None -> failwith ("restore: tensor " ^ Tn.id tn ^ " not found in checkpoint")
           | Some meta ->
               (* Verify precision matches *)
               let tn_prec = Lazy.force tn.Tn.prec in
               if not (Ops.equal_prec tn_prec meta.prec) then
-                failwith ("restore: precision mismatch for tensor " ^ Int.to_string tn.Tn.id);
+                failwith ("restore: precision mismatch for tensor " ^ Tn.id tn);
               (* Verify padded dims match *)
               let tn_dims = Lazy.force tn.Tn.dims in
               if not (Array.equal Int.equal tn_dims meta.dims) then
-                failwith ("restore: dimension mismatch for tensor " ^ Int.to_string tn.Tn.id);
+                failwith ("restore: dimension mismatch for tensor " ^ Tn.id tn);
               (* Verify padding matches *)
               let tn_padding = Lazy.force tn.Tn.padding in
               let padding_equal =
@@ -385,7 +409,7 @@ let restore ~ctx t_set path =
                 | _ -> false
               in
               if not padding_equal then
-                failwith ("restore: padding mismatch for tensor " ^ Int.to_string tn.Tn.id);
+                failwith ("restore: padding mismatch for tensor " ^ Tn.id tn);
               (* Read the payload into a fresh host buffer and upload it into the context's device
                  buffer (gh-ocannl-333). *)
               let nd =

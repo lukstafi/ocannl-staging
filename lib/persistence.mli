@@ -7,8 +7,8 @@ val save : ctx:Context.t -> appending:bool -> Ocannl_tensor.Tensor.tn_set -> str
 (** [save ~ctx ~appending t_set path] writes tensor data to a checkpoint file.
 
     When [~appending:false], creates a fresh checkpoint (overwriting any existing file). When
-    [~appending:true] and the file exists, replaces tensors with matching IDs and keeps
-    non-overlapping entries from the existing file.
+    [~appending:true] and the file exists, replaces tensors with matching (namespace, id) pairs and
+    keeps non-overlapping entries from the existing file.
 
     Each tensor's data is retrieved on demand from its device buffer in [ctx] via {!Context.to_host}
     (gh-ocannl-333). Raises if any tnode in [t_set] is not present in [ctx]. *)
@@ -19,18 +19,22 @@ val load :
     uploads their data into [ctx] via {!Context.from_host}, and returns the updated context together
     with the loaded set (gh-ocannl-333).
 
-    Raises if any loaded tensor ID clashes with an existing tnode in the registry. After loading,
-    bumps the session ID floor so that subsequently created tensors get IDs strictly above any
-    loaded ID.
+    Raises if any loaded tensor's (namespace, id) pair clashes with an existing tnode in the
+    registry. After loading, bumps the session ID floor so that subsequently created tensors get
+    IDs strictly above any loaded ID that landed in the ambient namespace.
 
-    [?prefix_namespace] is reserved for future namespace support (#372). Currently, only [None] or
-    [Some ""] are accepted; any non-empty prefix raises an error. *)
+    [?prefix_namespace] (gh-ocannl-372) rewrites each loaded tensor's namespace to
+    [prefix ^ "__" ^ file_namespace], preserving the file's internal namespace structure and the
+    session ids (so [Embed_self_id] values are invariant under prefixing). The prefix must match
+    [A-Za-z_][A-Za-z0-9_]*; [None] and [Some ""] keep the file namespaces as-is. Pre-namespace
+    checkpoints that recorded the namespace as [""] are read as the default namespace [ocannl]. *)
 
 val restore : ctx:Context.t -> Ocannl_tensor.Tensor.tn_set -> string -> Context.t
 (** [restore ~ctx t_set path] updates existing tensor device buffers from a checkpoint file,
     returning the updated context.
 
-    For each tnode in [t_set], finds its data in the file by ID, reads it into a temporary host
+    For each tnode in [t_set], finds its data in the file by (namespace, id) — file entries with
+    the legacy [""] namespace match the default namespace — reads it into a temporary host
     buffer, and uploads it into the node's device buffer in [ctx] via {!Context.from_host}
     (gh-ocannl-333).
 
