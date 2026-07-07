@@ -29,8 +29,7 @@ let () =
   let backend = Backends.backend_module (Backends.get_backend ~backend_name:"sync_cc" ()) in
   let module Backend = (val backend : Ir.Backend_intf.Backend) in
   let device = Backend.get_device ~ordinal:0 in
-  let stream = Backend.new_stream device in
-  let root = Backend.make_context ~optimize_ctx:(Backend.empty_optimize_ctx ()) stream in
+  let root = Backend.make_context ~optimize_ctx:(Backend.empty_optimize_ctx ()) device in
 
   (* Three hosted tensors with identical shapes. [b] carries the data to transfer; [out] starts at a
      distinct value so an inert (non-copying) pipeline would be observable. *)
@@ -72,10 +71,10 @@ let () =
          back out into out.value (initialized to [9 9]). *)
       Task.run transfer_b.schedule;
       Task.run consumer_routine.schedule;
-      Backend.await stream;
+      Backend.await device;
       let out_nd = host_of out.value in
       ignore (Backend.to_host consumer_routine.context out.value out_nd : bool);
-      Backend.await stream;
+      Backend.await device;
       let vals = Ir.Ndarray.retrieve_flat_values out_nd in
       Stdio.printf "matched: out (init [9 9]) after transfer + consumer = [%s]\n"
         (String.concat ~sep:" " (Array.to_list (Array.map vals ~f:(Printf.sprintf "%g")))));

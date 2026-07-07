@@ -28,10 +28,6 @@ module Backend_buffer = struct
   type buffer_ptr = Cu.Deviceptr.t
 
   let sexp_of_buffer_ptr ptr = Sexp.Atom (Cu.Deviceptr.string_of ptr)
-
-  include Backend_impl.Buffer_types (struct
-    type nonrec buffer_ptr = buffer_ptr [@@deriving sexp_of]
-  end)
 end
 
 module Device_config = struct
@@ -255,8 +251,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       result
     in
     Option.value_or_thunk !devices.(ordinal) ~default
-
-  let new_stream (device : device) : device = device
 
   let _cuda_properties =
     let cache =

@@ -54,11 +54,6 @@ struct
   let sexp_of_buffer_ptr _buffer_ptr =
     failwith @@ "Backend " ^ Config.name ^ " missing -- install the corresponding library"
 
-  type nonrec buffer = buffer_ptr Backend_impl.buffer
-
-  let sexp_of_buffer _buffer =
-    failwith @@ "Backend " ^ Config.name ^ " missing -- install the corresponding library"
-
   let sync _event =
     failwith @@ "Backend " ^ Config.name ^ " missing -- install the corresponding library"
 
@@ -103,9 +98,6 @@ struct
     failwith @@ "Backend " ^ Config.name ^ " missing -- install the corresponding library"
 
   let num_devices () = 0
-
-  let new_stream _device =
-    failwith @@ "Backend " ^ Config.name ^ " missing -- install the corresponding library"
 
   let from_host ~dst:_ ~dst_loc:_ _nd =
     failwith @@ "Backend " ^ Config.name ^ " missing -- install the corresponding library"

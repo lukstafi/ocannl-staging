@@ -1,6 +1,9 @@
 (** {1 The interface types for backends}
 
-    User-facing backend API. *)
+    The shared backend-interface types: the user-facing API ({!Backend}, {!routine},
+    {!buffer_loc}) together with the interface pieces the implementation layers assemble from
+    (marked implementation-facing where applicable). Implementation-only components live in
+    {!Backend_impl}. *)
 
 open Base
 
@@ -67,6 +70,10 @@ end
 
 type merge_buffer_use = No | Copy [@@deriving sexp_of]
 
+(** Kernel-parameter sources: the codegen <-> backend contract for a compiled routine's
+    parameters. Implementation-facing (consumed by {!C_syntax} and the backends' link steps); it
+    lives in this file because the shared {!Backend_impl.Lowered_no_device_backend} signature
+    mentions it. *)
 type kparam_source =
   | Log_file_name
   | Merge_buffer
@@ -138,11 +145,10 @@ type ('dev, 'runner, 'event) device = {
       (** Deterministic per-device pool-id counter, advanced by the shared allocator seam in tnode
           iteration order. Pool id 0 is reserved for the merge buffer; tnode pools start at 1. *)
 }
-(** A device folds in the (formerly per-stream) single compute runner and its buffer/event tracking:
-    with one compute stream per device, the surviving [runner] / [merge_buffer] / [updating_for] /
-    [updating_for_merge_buffer] fields live on the device. The [updating_for] writer-event tracking
-    and {!Backend.device_to_device} coherence are preserved (relocated here), now for cross-device
-    coherence, and are forward-compatible with a future fixed-role prefetch/transfer runner. *)
+(** A device bundles its single compute [runner] with the associated buffer and event tracking:
+    the [merge_buffer], the [updating_for] writer events (used for cross-device coherence by
+    {!Backend.device_to_device}), and the deterministic pool-id counter. The design is
+    forward-compatible with a future fixed-role prefetch/transfer runner. *)
 
 let sexp_of_device _ _ _ device = [%sexp_of: string * int] ("device_id", device.device_id)
 let equal_device d1 d2 = d1.device_id = d2.device_id
@@ -206,53 +212,12 @@ module type Device = sig
   val get_name : device -> string
 end
 
-(** Parts shared by assignments-level backend interfaces. *)
-module type Backend_common = sig
-  type code [@@deriving sexp_of]
-  type code_batch [@@deriving sexp_of]
-
-  val empty_optimize_ctx : unit -> Low_level.optimize_ctx
-  val get_optimize_ctx : code -> Low_level.optimize_ctx
-  val get_optimize_ctx_batch : code_batch -> Low_level.optimize_ctx
-
-  val compile :
-    Low_level.optimize_ctx ->
-    ?name:string ->
-    ?lowered_transform:(Low_level.optimized -> Low_level.optimized) ->
-    ?lowered_transforms:(Low_level.optimized -> Low_level.optimized list) ->
-    Indexing.unit_bindings ->
-    Assignments.comp ->
-    code
-  (** [name] is used to derive names for compilation artifacts. If omitted, it's derived via
-      {!Assignments.get_name_exn}. [lowered_transform] is applied to the optimized lowered code
-      before backend compilation — the seam where schedule transforms (and hand-annotating tests)
-      rewrite loops with hardware axis types, barriers and shared placements
-      (docs/proposals/axis-types-for-loops.md). [lowered_transforms] is the plural variant for
-      transforms that split the routine into several kernels (fission,
-      {!Schedule.fission_scheduled}): the returned segments compile as one fissioned routine and
-      run back-to-back on the routine's stream with a device-side event chained at each boundary,
-      exactly as {!Schedule.maybe_default_schedules}' segments do. It must return a non-empty
-      list; passing both transforms raises [Invalid_argument]. *)
-
-  val compile_batch :
-    Low_level.optimize_ctx ->
-    ?names:string array ->
-    ?occupancy:(name:string -> src_n:int -> bool) ->
-    Indexing.unit_bindings ->
-    Assignments.comp array ->
-    code_batch
-  (** [compile_batch] vs. [compile] is mostly about improving the compile time and debugging
-      convenience by generating fewer files -- ideally does not affect execution, but there can be
-      backend-specific differences. Only array entries for which [occupancy] returns true are
-      included. [names] are used to derive names for compilation artifacts. If omitted, they're
-      derived via {!Assignments.get_name_exn}. *)
-end
-
-(** Parts shared by both assignments-level and lowered-level backend interfaces providing streams
-    and devices, both user-facing and implementation-facing. Does not include: compilation and
-    linking (differnt for assignments-level and lowered-level); copying and tensor-node-level
-    synchronization (copying is different for user-facing and implementation-facing APIs,
-    synchronization is provided by a component outside of backend implementations). *)
+(** The device, event and synchronization part of the backend interface, shared by the user-facing
+    {!Backend} and the implementation-facing {!Backend_impl.Lowered_backend}. Does not include:
+    compilation and linking (they differ between the user-facing and lowered interfaces); copying
+    and tensor-node-level synchronization (copying is different for user-facing and
+    implementation-facing APIs, synchronization is provided by a component outside of backend
+    implementations). *)
 module type Backend_device_common = sig
   include Device
 
@@ -306,11 +271,6 @@ module type Backend_device_common = sig
 
   val get_device : ordinal:int -> device
   val num_devices : unit -> int
-
-  val new_stream : device -> device
-  (** After the stream-into-device fold there is one compute stream per device, so the device is its
-      own single stream; [new_stream] returns the device unchanged. Retained for call-site
-      compatibility (callers create a fresh {!context} per logical stream via {!make_context}). *)
 end
 
 module type With_buffer_retrieval_and_syncing = sig
@@ -365,7 +325,45 @@ module type With_buffer_retrieval_and_syncing = sig
 end
 
 module type Backend = sig
-  include Backend_common
+  type code [@@deriving sexp_of]
+  type code_batch [@@deriving sexp_of]
+
+  val empty_optimize_ctx : unit -> Low_level.optimize_ctx
+  val get_optimize_ctx : code -> Low_level.optimize_ctx
+  val get_optimize_ctx_batch : code_batch -> Low_level.optimize_ctx
+
+  val compile :
+    Low_level.optimize_ctx ->
+    ?name:string ->
+    ?lowered_transform:(Low_level.optimized -> Low_level.optimized) ->
+    ?lowered_transforms:(Low_level.optimized -> Low_level.optimized list) ->
+    Indexing.unit_bindings ->
+    Assignments.comp ->
+    code
+  (** [name] is used to derive names for compilation artifacts. If omitted, it's derived via
+      {!Assignments.get_name_exn}. [lowered_transform] is applied to the optimized lowered code
+      before backend compilation — the seam where schedule transforms (and hand-annotating tests)
+      rewrite loops with hardware axis types, barriers and shared placements
+      (docs/proposals/axis-types-for-loops.md). [lowered_transforms] is the plural variant for
+      transforms that split the routine into several kernels (fission,
+      {!Schedule.fission_scheduled}): the returned segments compile as one fissioned routine and
+      run back-to-back on the routine's stream with a device-side event chained at each boundary,
+      exactly as {!Schedule.maybe_default_schedules}' segments do. It must return a non-empty
+      list; passing both transforms raises [Invalid_argument]. *)
+
+  val compile_batch :
+    Low_level.optimize_ctx ->
+    ?names:string array ->
+    ?occupancy:(name:string -> src_n:int -> bool) ->
+    Indexing.unit_bindings ->
+    Assignments.comp array ->
+    code_batch
+  (** [compile_batch] vs. [compile] is mostly about improving the compile time and debugging
+      convenience by generating fewer files -- ideally does not affect execution, but there can be
+      backend-specific differences. Only array entries for which [occupancy] returns true are
+      included. [names] are used to derive names for compilation artifacts. If omitted, they're
+      derived via {!Assignments.get_name_exn}. *)
+
   include Backend_device_common
 
   val link : context -> code -> context routine

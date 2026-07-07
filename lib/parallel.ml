@@ -202,10 +202,7 @@ let data_parallel ?backend_name ?(reduction = Mean) ?(weight_decay = 0.0) ?(mome
      it leaves. *)
   let updates = Array.map losses ~f:(Train.grad_update ~setup_for_parallel:true) in
   let init_comps = Array.map losses ~f:Tensor.init_params in
-  let streams =
-    Array.init n_shards ~f:(fun i ->
-        Backend.new_stream (Backend.get_device ~ordinal:(i % num_devices)))
-  in
+  let streams = Array.init n_shards ~f:(fun i -> Backend.get_device ~ordinal:(i % num_devices)) in
   let owner_stream = streams.(0) in
   (* Per shard: a fresh context, parameters initialized and the input slice staged, then the linked
      forward+backward routine. *)

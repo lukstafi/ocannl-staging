@@ -1,5 +1,3 @@
-open Ir
-
 module Missing (Config : sig
   val name : string
 end) =
@@ -23,10 +21,6 @@ struct
     failwith @@ "Backend " ^ Config.name ^ " missing (no device)"
 
   let sexp_of_buffer_ptr _buffer_ptr = failwith @@ "Backend " ^ Config.name ^ " missing (no device)"
-
-  type nonrec buffer = buffer_ptr Backend_impl.buffer
-
-  let sexp_of_buffer _buffer = failwith @@ "Backend " ^ Config.name ^ " missing (no device)"
 
   let alloc_pool_raw ~size_in_bytes:_ =
     failwith @@ "Backend " ^ Config.name ^ " missing (no device)"

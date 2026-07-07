@@ -26,9 +26,6 @@ module Multicore (Backend : For_add_scheduler) :
     Sexp.(List [ Atom "task_queue_of_size"; Atom (Int.to_string @@ Queue.size q) ])
 
   module Device_config = struct
-    include (
-      Backend : Buffer with type buffer_ptr = Backend.buffer_ptr and type buffer = Backend.buffer)
-
     type dev = CPU [@@deriving sexp_of]
 
     type stream_state = {
@@ -200,7 +197,6 @@ module Multicore (Backend : For_add_scheduler) :
         the_device := Some device;
         device
 
-  let new_stream device = device
   let num_devices () = 1
 
   let static_properties () =
@@ -225,15 +221,12 @@ module Multicore (Backend : For_add_scheduler) :
   let get_debug_info (device : device) = sexp_of_runner device.runner
 end
 
-(** A minimalisitc wrapper creating backends where all calls run synchronously on the main thread.
-    There is only one device, but an arbitrary number of streams. *)
+(** A minimalistic wrapper creating backends where all calls run synchronously on the main thread.
+    There is a single CPU device. *)
 module Sync (Backend : For_add_scheduler) = struct
   include Backend
 
   module Device_config = struct
-    include (
-      Backend : Buffer with type buffer_ptr = Backend.buffer_ptr and type buffer = Backend.buffer)
-
     type dev = CPU [@@deriving sexp_of]
     type runner = unit [@@deriving sexp_of]
     type event = unit [@@deriving sexp_of]
@@ -263,7 +256,6 @@ module Sync (Backend : For_add_scheduler) = struct
 
   let num_devices () = 1
   let get_used_memory _ = Backend.get_used_memory ()
-  let new_stream device = device
   let all_work _device = ()
   let is_idle _device = true
   let await _device = ()

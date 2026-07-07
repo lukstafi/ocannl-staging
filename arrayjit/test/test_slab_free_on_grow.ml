@@ -20,13 +20,6 @@ module Mock_raw = struct
   type buffer_ptr = int
 
   let sexp_of_buffer_ptr = Int.sexp_of_t
-
-  include Backend_impl.Buffer_types (struct
-    type nonrec buffer_ptr = buffer_ptr
-
-    let sexp_of_buffer_ptr = sexp_of_buffer_ptr
-  end)
-
   let get_used_memory () = 0
   let next = ref 0
   let freed : int list ref = ref []
@@ -66,13 +59,6 @@ module Mock_raw_gc = struct
   type buffer_ptr = int
 
   let sexp_of_buffer_ptr = Int.sexp_of_t
-
-  include Backend_impl.Buffer_types (struct
-    type nonrec buffer_ptr = buffer_ptr
-
-    let sexp_of_buffer_ptr = sexp_of_buffer_ptr
-  end)
-
   let get_used_memory () = 0
   let next = ref 100
 

@@ -28,10 +28,6 @@ module Backend_buffer = struct
 
   (* Provide a sexp_of for Me.Buffer.t *)
   let sexp_of_buffer_ptr = Me.Buffer.sexp_of_t
-
-  include Backend_impl.Buffer_types (struct
-    type nonrec buffer_ptr = buffer_ptr [@@deriving sexp_of]
-  end)
 end
 
 module Device_config = struct
@@ -207,8 +203,6 @@ module Impl = struct
     (* FIXME: refactor the whole backend interface to use constant num_devices per backend
        instance *)
     num_devs ()
-
-  let new_stream (device : device) : device = device
 
   (* --- Event Handling --- *)
   let is_done event =
