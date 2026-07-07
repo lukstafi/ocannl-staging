@@ -13,7 +13,7 @@ let () =
   Utils.set_log_level 2;
   Utils.settings.output_debug_files_in_build_directory <- true;
   Utils.settings.debug_log_from_routines <- true;
-  let backend = Utils.get_global_arg ~default:"sync_cc" ~arg_name:"backend" in
+  let backend = Utils.get_global_arg ~default:"cc" ~arg_name:"backend" in
   (if Utils.get_global_flag ~default:false ~arg_name:"debug_log_to_stream_files" then
      match backend with
      | "cuda" ->

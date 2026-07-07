@@ -40,14 +40,14 @@ val finalize :
     Backend caches consequently persist across [Tensor.unsafe_reinitialize]; that is safe because
     tnode identity ([Tnode.uid]) is never reused. *)
 
-module Sync_cc_b : Ir.Backend_intf.Backend
+module Cc_b : Ir.Backend_intf.Backend
 module Multicore_cc_b : Ir.Backend_intf.Backend
 module Cuda_b : Ir.Backend_intf.Backend
 module Metal_b : Ir.Backend_intf.Backend
 
-type backend = Sync_cc | Multicore_cc | Cuda | Metal [@@deriving sexp, equal]
+type backend = Cc | Multicore_cc | Cuda | Metal [@@deriving sexp, equal]
 (** The implemented backends. Constructors statically imply the corresponding singleton module
-    ([Sync_cc] -> {!Sync_cc_b}, ...). *)
+    ([Cc] -> {!Cc_b}, ...). *)
 
 val get_backend : ?backend_name:string -> unit -> backend
 (** The backend corresponding to [backend_name], or if omitted, selected via the global [backend]
@@ -69,7 +69,7 @@ val backend_module : backend -> (module Ir.Backend_intf.Backend)
     the backend-specific [device_to_device] when both contexts come from the same backend. *)
 
 type wrapped_context =
-  | Sync_cc_ctx of Sync_cc_b.context
+  | Cc_ctx of Cc_b.context
   | Multicore_cc_ctx of Multicore_cc_b.context
   | Cuda_ctx of Cuda_b.context
   | Metal_ctx of Metal_b.context

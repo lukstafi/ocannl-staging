@@ -7,7 +7,7 @@
    documents (as comments) the ones OCANNL cannot currently express, naming the missing capability.
 
    The output is a deterministic, human-checkable trace (tiny inputs) committed as
-   [tensor_puzzles.expected]. Run under the sync_cc backend: OCANNL_BACKEND=sync_cc dune build
+   [tensor_puzzles.expected]. Run under the cc backend: OCANNL_BACKEND=cc dune build
    test/einsum/tensor_puzzles.exe.output
 
    ============================================================================================

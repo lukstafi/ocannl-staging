@@ -11,7 +11,7 @@
     - Set [num_train = 60000], [num_test = 10000], [epochs = 20], [batch_size = 100]
 
     Full-run manual validation:
-    {v OCANNL_BACKEND=sync_cc dune exec test/training/mnist_conv.exe v}
+    {v OCANNL_BACKEND=cc dune exec test/training/mnist_conv.exe v}
 
     after editing the constants below. Expect ~5-10 minutes on CPU. *)
 

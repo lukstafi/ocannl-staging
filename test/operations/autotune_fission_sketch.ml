@@ -30,7 +30,7 @@ let approx a b = Float.(abs (a - b) < 1e-2)
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
-let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"sync_cc")
+let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let is_gpu = Sched.backend_is_gpu backend_name
 let is_cpu = Sched.backend_is_cpu backend_name
 

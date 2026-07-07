@@ -231,7 +231,7 @@ module Sync (Backend : For_add_scheduler) = struct
     type runner = unit [@@deriving sexp_of]
     type event = unit [@@deriving sexp_of]
 
-    let name = "sync_" ^ Backend.name
+    let name = Backend.name
   end
 
   module Device_types = Device_types_ll (Device_config)
@@ -244,7 +244,7 @@ module Sync (Backend : For_add_scheduler) = struct
 
   (* Lazy like [Multicore]'s device and for the same reason as the GPU backends' device discovery
      (PR #94): the singleton backend module initializes at program startup, and minting the device
-     there would advance the process-global [device_id] counter in runs that never use sync_cc --
+     there would advance the process-global [device_id] counter in runs that never use cc --
      shifting other backends' stream names and log files (e.g. [multicore_cc-0-0.log]). *)
   let device : device Lazy.t = lazy (make_device CPU () ~ordinal:0)
 
@@ -263,7 +263,7 @@ module Sync (Backend : For_add_scheduler) = struct
   let static_properties () =
     Sexp.List
       [
-        Sexp.Atom "sync_devices";
+        Sexp.Atom "cc_devices";
         Sexp.List
           [
             Sexp.Atom "device";

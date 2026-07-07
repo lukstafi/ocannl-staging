@@ -26,7 +26,7 @@ let make_tensor label vals =
 
 let () =
   Tensor.unsafe_reinitialize ();
-  let backend = Backends.backend_module (Backends.get_backend ~backend_name:"sync_cc" ()) in
+  let backend = Backends.backend_module (Backends.get_backend ~backend_name:"cc" ()) in
   let module Backend = (val backend : Ir.Backend_intf.Backend) in
   let device = Backend.get_device ~ordinal:0 in
   let root = Backend.make_context ~optimize_ctx:(Backend.empty_optimize_ctx ()) device in

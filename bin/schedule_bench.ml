@@ -160,7 +160,7 @@ let () =
     secs
   in
   p "matmul %dx%dx%d, %d repeats, backend from config/OCANNL_BACKEND\n" n n n repeats;
-  let backend = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"sync_cc") in
+  let backend = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc") in
   let has_shared =
     String.is_substring backend ~substring:"metal" || String.is_substring backend ~substring:"cuda"
   in

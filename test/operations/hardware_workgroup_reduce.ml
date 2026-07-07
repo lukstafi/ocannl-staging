@@ -30,7 +30,7 @@ let vv = Array.init n ~f:(fun i -> (Float.of_int i *. 0.5) -. 7.)
 let expected_sum = Array.fold vv ~init:0. ~f:( +. )
 let approx a b = Float.(abs (a - b) < 1e-3)
 
-let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"sync_cc")
+let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
 let has_barriers =
   String.is_substring backend_name ~substring:"metal"
