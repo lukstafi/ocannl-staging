@@ -55,6 +55,7 @@
   host_inits
   low_level
   schedule
+  schedule_cache
   assignments
   task
   backend_intf
