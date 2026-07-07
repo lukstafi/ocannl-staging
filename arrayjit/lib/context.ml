@@ -93,7 +93,7 @@ let auto () =
   match Utils.get_global_arg ~arg_name:"backend" ~default:"" with
   | "" ->
       (* No global config, try backends in order of preference *)
-      let backends_to_try = [ "metal"; "cuda"; "multidev_cc"; "cc" ] in
+      let backends_to_try = [ "metal"; "cuda"; "cc" ] in
       let rec try_backends = function
         | [] -> failwith "No backend available"
         | name :: rest -> (

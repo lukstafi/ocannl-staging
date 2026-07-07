@@ -19,7 +19,7 @@ runnable example under `test/training/`:
 5. [Part 5 — WaveNet](#part-5--wavenet) *(stretch goal — deferred)*
 6. [Part 6 — Transformer](#part-6--transformer) → [`transformer_names.ml`](../test/training/transformer_names.ml)
 
-All examples run on the CPU (`OCANNL_BACKEND=sync_cc dune runtest
+All examples run on the CPU (`OCANNL_BACKEND=cc dune runtest
 test/training/`) and use `Utils.settings.fixed_state_for_init <- Some 3` so
 that `.expected` fixtures stay deterministic across runs.
 
@@ -206,7 +206,7 @@ generate both forward and backward code at `Train.grad_update` time. To read
 the generated code for yourself, enable the debug flag:
 
 ```bash
-OCANNL_BACKEND=sync_cc \
+OCANNL_BACKEND=cc \
   dune exec test/training/mlp_bn_names.exe \
   -- --ocannl_output_debug_files_in_build_directory=true
 ```

@@ -840,7 +840,7 @@ type backend = Cc | Multidev_cc | Cuda | Metal [@@deriving sexp, equal]
 let get_backend ?backend_name () =
   match
     Option.value_or_thunk backend_name ~default:(fun () ->
-        Utils.get_global_arg ~arg_name:"backend" ~default:"multicore_cc")
+        Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
     |> String.lowercase
   with
   (* "sync_cc" and "multicore_cc" are accepted as deprecated aliases of the renamed backends. *)
