@@ -121,6 +121,11 @@ let known_config_keys =
       "cc_parallel_grid";
       "cc_parallel_chunks";
       "cc_vector_bytes";
+      (* Autotuning (Autotune.tune) *)
+      "autotune_beam_width";
+      "autotune_rounds";
+      "autotune_repeats";
+      "autotune_cache_dir";
       (* Identifiers and other *)
       "ll_ident_style";
       "cd_ident_style";

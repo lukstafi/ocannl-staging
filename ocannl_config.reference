@@ -152,6 +152,23 @@ cc_parallel_chunks=0
 # rendering.
 cc_vector_bytes=-1
 
+# The beam width of `Autotune.tune`'s empirical schedule search: how many of the fastest
+# candidates each round expands with further schedule ops.
+autotune_beam_width=2
+
+# The maximum number of beam-expansion rounds beyond the seed candidates (the serial baseline and
+# the default-annotator block-size sweep). The search also stops when a round improves the best
+# time by less than 1%.
+autotune_rounds=2
+
+# Timed runs per tuning candidate (after one warmup run); the minimum is kept.
+autotune_repeats=3
+
+# Directory of the autotuner's schedule disk cache, keyed by the canonical digest of the
+# optimized code and the backend name. Relative paths resolve against the working directory.
+# An empty value disables the cache (every `Autotune.tune` call searches afresh).
+autotune_cache_dir=autotune_cache
+
 # If true, stdout capturing is disabled, so some logs meant for the ppx_minidebug log files
 # (in particular CUDA logs) remain on the stdout.
 #

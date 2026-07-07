@@ -55,6 +55,7 @@
   host_inits
   low_level
   schedule
+  schedule_cache
   assignments
   task
   backend_intf
@@ -142,4 +143,11 @@
   schedulers
   backends
   context)
+ (modes best))
+
+(library
+ (name autotune)
+ (public_name arrayjit.autotune)
+ (libraries base stdio unix utils ir context)
+ (modules autotune)
  (modes best))
