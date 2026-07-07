@@ -266,9 +266,24 @@ That bail is *the* blocker for real models: any routine with a materialized inte
 (retained activations, `virtualize_max_visits` overflow), every backward pass
 (`Zero_out` of gradients + accumulation), any bare scalar update.
 
+**Aligned cross-nest parallelism** relaxes the bail without a launch boundary: a
+dependency component of nests is race-free when every member's chain trims to one common
+equal-extent prefix (identical annotation geometry, so a hardware thread covers the same
+index slice in every member) and every write/access pair over a shared node aligns per
+axis position — plain `Iterator`s at the same chain position on both sides, or parallel
+symbols on neither. Each thread then touches only its own elements in every nest and
+reads back its own program-order writes, matching serial semantics with no barrier. This
+keeps e.g. an elementwise/softmax chain over one batch-parallel intermediate in a single
+kernel; a parallelism switch (batch-parallel producer feeding a reduce-over-batch
+consumer), a `Get_dynamic` access, or an `Affine` component over a parallel symbol still
+bails to fission.
+
 Fission (`Schedule.maybe_default_schedules`, config `schedule_fission`) recovers the
 synchronization from the stream instead of the launch: top-level statements are
-partitioned into **segments** at exactly those dependency edges, each segment compiles
+partitioned into **segments** at the remaining dependency edges (an aligned edge merges
+only when the shared kernel keeps every nest's standalone parallelism — alignment may
+trim chains, and a launch boundary is the better default than trading parallelism for
+one launch), each segment compiles
 to its own kernel (`name__seg<i>`, via the backend's batch compile), and the routine's
 task launches them in order on the routine's stream, chaining a device-side event
 (`all_work` + `will_wait_for`) at each boundary. The event is load-bearing: Metal

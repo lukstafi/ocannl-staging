@@ -98,9 +98,10 @@
     (diff mlp_bn_names.expected mlp_bn_names.actual)))))
 
 ; circles_conv is a training integration run: in the default runtest suite since its sgd step
-; is autotuned (materialized intermediates + Autotune.tune). NOTE: ~28s on cc, but still ~11min
-; on the metal backend (20k steps; the backward's reduce-outer segments stay serial until the
-; default annotator learns aligned cross-nest parallelism).
+; is autotuned (materialized intermediates + Autotune.tune). NOTE: ~28s on cc, ~7min on the
+; metal backend with a fresh tune cache (20k steps; aligned cross-nest parallelism merges the
+; pointwise chains — the remaining gap is launch/event overhead of the segments genuine
+; parallelism switches still force).
 
 (test
  (name circles_conv)
@@ -186,8 +187,8 @@
   (pps ppx_here ppx_ocannl)))
 
 ; transformer_names is a transformer training integration run: in the default runtest suite since
-; its sgd step is autotuned (materialized intermediates + Autotune.tune). NOTE: ~17s on cc, but
-; still ~10min on the metal backend (10k steps; see the circles_conv note).
+; its sgd step is autotuned (materialized intermediates + Autotune.tune). NOTE: ~17s on cc,
+; ~4.5min on the metal backend with a fresh tune cache (10k steps; see the circles_conv note).
 
 (test
  (name transformer_names)

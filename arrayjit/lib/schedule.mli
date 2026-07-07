@@ -185,11 +185,16 @@ val default_gpu :
     occurs as a plain
     [Iterator] component in every materialized write vector beneath it — the same coverage
     property [Low_level.validate_parallel] enforces, used generatively — and the kernel passes a
-    conservative race analysis (no cross-nest producer/consumer pairs, all accesses to written
-    nodes agree on parallel-index components, no [Zero_out] of materialized nodes, no barriers or
-    opaque statements; reduction loops stay serial). Returns the empty schedule when any check
-    fails or when the largest parallelizable nest has fewer than [min_parallel] iterations
-    (default from config [gpu_schedule_min_parallel] = 1024). *)
+    conservative race analysis (all accesses to written nodes agree on parallel-index components,
+    no [Zero_out] of materialized nodes, no barriers or opaque statements; reduction loops stay
+    serial). Cross-nest producer/consumer (or WAW/WAR) pairs over a written node are allowed only
+    when {e aligned}: the linked nests' chains are trimmed to a common equal-extent prefix —
+    identical annotation geometry, so each hardware thread covers the same index slice in every
+    linked nest — and per axis position the paired accesses either both use plain [Iterator]s of
+    same-chain-position parallel symbols or neither mentions one; otherwise the analysis bails.
+    Returns the empty schedule when any check fails or when the largest parallelizable nest has
+    fewer than [min_parallel] iterations (default from config [gpu_schedule_min_parallel] =
+    1024). *)
 
 val default_cpu : ?min_parallel:int -> Low_level.optimized -> schedule
 (** The default CPU annotator preset: the same conservative analysis as {!default_gpu}, but each
@@ -243,7 +248,9 @@ val fission_scheduled :
   ([ `Normal | `Zeros | `Solo ] * Low_level.optimized * schedule * Low_level.optimized) list
 (** The kernel-fission pipeline underlying {!maybe_default_schedules}, with caller-supplied
     per-segment schedules and a per-segment result: the routine's top-level statements are
-    partitioned at cross-workgroup dependency edges exactly as described there, [preset] is
+    partitioned at cross-workgroup dependency edges exactly as described there (edges the aligned
+    cross-nest rule of {!default_gpu} proves race-free without losing any nest's standalone
+    parallelism do not cut), [preset] is
     called on each [`Normal] segment's (pre-schedule) [optimized] slice and [zero_sched] on each
     [`Zeros] segment's nodes, and each result tuple carries the segment kind, the pre-schedule
     segment, the schedule chosen for it, and the scheduled segment ({!apply} of the schedule).

@@ -2,11 +2,11 @@ Retrieving commandline, environment, or config file variable ocannl_log_level
 Found 0, in the config file
 chain values correct: true
 chain rerun deterministic: true
-chain fissioned into two kernels: true
-both chain segments parallelize: true
-capture: two segments: true
-capture: both segments hardware-annotated: true
-capture: traced stores are filtered: true
+chain stays a single aligned kernel: true
+the merged chain kernel parallelizes: true
+capture: one aligned segment: true
+capture: the merged segment is hardware-annotated: true
+capture: traced store covers the whole chain: true
 capture: identity on non-scheduling backends: true
 replication: two segments: true
 replication: both segments annotated: true
@@ -17,5 +17,12 @@ merge-back: merged segment still carries the replica: true
 promotion: scratch starts unmaterialized: true
 promotion: two segments, both annotated: true
 promotion: stranded Local scratch promoted to On_device: true
+aligned: pointwise pair merges into one kernel with both nests annotated: true
+aligned: extent mismatch still cuts, both segments annotated: true
+aligned: transposed read still cuts, both segments annotated: true
+aligned: parallelism switch still cuts, both segments annotated: true
+aligned: lossy trim still cuts, producer keeps its 2-D parallelism: true
+aligned: scratch pair merges into one kernel with both nests annotated: true
+aligned: the scratch is not promoted: true
 backward gradient values correct: true
 backward pass fissioned: true

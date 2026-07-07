@@ -1274,11 +1274,24 @@ let apply ?(static_indices = []) (sched : schedule) (opt : Low_level.optimized) 
       [Split]'s [factor*i_o + i_i] substitution preserves injectivity because [i_i < factor].
     - All accesses to a written node agree on every component that mentions a parallel symbol, so
       reads only ever hit the reading thread's own elements.
-    - No node written in one top-level nest is accessed in another: sibling nests execute with no
-      global synchronization between them, so any cross-nest producer/consumer pair (or WAW/WAR
-      pair) is a race once threads interleave. Non-materialized (routine-local) scratch is
-      per-thread, hence exempt — unless its writes mention parallel symbols, in which case each
-      thread only writes a slice of its private copy and cross-nest reads would see garbage.
+    - Cross-nest pairs over a written node (producer/consumer, WAW, WAR) are races once threads
+      interleave — sibling nests execute with no global synchronization between them — unless the
+      accesses are {e aligned}: each thread then touches only its own elements in both nests, and
+      a thread's writes are visible to its own later reads by program order, so values match the
+      serial execution. Nests transitively linked by such pairs form a dependency component;
+      alignment of a component means: (a) every member's chain is trimmed to one common prefix
+      with pointwise-equal extents — the annotator then emits identical geometry for all members,
+      so a hardware thread maps to the same chain-index tuple in every member nest; and (b) per
+      axis position of every write/access pair over a shared node, either neither side's
+      component mentions its own nest's (trimmed) parallel symbols, or both are plain [Iterator]s
+      of symbols at the same chain position. Statically-unknown ([Get_dynamic]) accesses never
+      align. If no common trim depth >= 1 aligns every pair of the component, the analysis bails.
+      Bare statements (outside every nest, executed unconditionally by every thread) have no
+      parallel symbols, so a bare access to a nest-written node bails by the same rule.
+      Non-materialized (routine-local) scratch is per-thread, hence exempt when its writes
+      mention no parallel symbols (each thread writes its whole private copy); otherwise it needs
+      alignment like a materialized node (each thread reads back exactly the slice of its private
+      copy that it wrote).
     - Whole-node [Zero_out] of a materialized node, barriers, opaque [Staged_compilation],
       pre-existing hardware annotations, and materialized writes outside every nest all bail. *)
 
@@ -1398,103 +1411,198 @@ let path_loops (nest : Low_level.t) : Low_level.t list =
 
 (* Shared analysis of the default annotator presets (schedule-ir-optops §6): per top-level nest,
    the parallelizable chain of outermost Serial path loops, validated by the conservative race
-   analysis (see {!default_gpu}'s doc). Raises [Bail] when any check fails. *)
+   analysis (see {!default_gpu}'s doc). Nests linked by cross-nest dependencies keep a common
+   aligned prefix of their chains (see the module comment). Raises [Bail] when any check fails. *)
 let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list =
   let open Low_level in
   let plc = opt.optimize_ctx.placements in
-    let nests, bare = split_nests plc opt.llc in
-    (* Bare materialized writes cannot be covered by annotated loops. *)
-    if List.exists bare ~f:(fun a -> a.a_write && Tn.Placements.is_materialized_peek plc a.a_tn) then
-      raise Bail;
-    (* Chains: per nest, the outermost (up to two) Serial path loops whose index occurs as a plain
-       [Iterator] component in every materialized write vector of the nest. *)
-    let chains =
-      List.map nests ~f:(fun n ->
-          let mat_writes =
-            List.filter n.n_accesses ~f:(fun a ->
-                a.a_write && Tn.Placements.is_materialized_peek plc a.a_tn)
-          in
-          let qualifies s =
-            (not (List.is_empty mat_writes))
-            && List.for_all mat_writes ~f:(fun a ->
-                   Array.exists a.a_idcs ~f:(fun idx ->
-                       Indexing.equal_axis_index idx (Indexing.Iterator s)))
-          in
-          let chain =
-            List.filter (path_loops n.n_loops) ~f:(function
-              | For_loop fc -> fc.from_ = 0 && qualifies fc.index
-              | _ -> false)
-            |> fun l -> List.take l 2
-          in
-          if List.is_empty chain && not (List.is_empty mat_writes) then raise Bail;
-          chain)
-    in
-    let chain_syms chain =
-      List.filter_map chain ~f:(function For_loop fc -> Some fc.index | _ -> None)
-    in
-    (* Per-nest hazard analysis (see the module comment for the safety argument). *)
-    List.iter2_exn nests chains ~f:(fun n chain ->
-        let syms = chain_syms chain in
-        let by_tn = Hashtbl.create (module Int) in
-        List.iter n.n_accesses ~f:(fun a ->
-            Hashtbl.add_multi by_tn ~key:a.a_tn.Tn.uid ~data:a);
-        Hashtbl.iter by_tn ~f:(fun accs ->
-            let written = List.exists accs ~f:(fun a -> a.a_write) in
-            if written then (
-              let is_mat = Tn.Placements.is_materialized_peek plc (List.hd_exn accs).a_tn in
-              let chain_relevant =
-                List.exists accs ~f:(fun a -> Array.exists a.a_idcs ~f:(mentions_sym syms))
+  let nests, bare = split_nests plc opt.llc in
+  (* Bare materialized writes cannot be covered by annotated loops. *)
+  if List.exists bare ~f:(fun a -> a.a_write && Tn.Placements.is_materialized_peek plc a.a_tn) then
+    raise Bail;
+  (* Chains: per nest, the outermost (up to two) Serial path loops whose index occurs as a plain
+     [Iterator] component in every materialized write vector of the nest. *)
+  let chains =
+    List.map nests ~f:(fun n ->
+        let mat_writes =
+          List.filter n.n_accesses ~f:(fun a ->
+              a.a_write && Tn.Placements.is_materialized_peek plc a.a_tn)
+        in
+        let qualifies s =
+          (not (List.is_empty mat_writes))
+          && List.for_all mat_writes ~f:(fun a ->
+                 Array.exists a.a_idcs ~f:(fun idx ->
+                     Indexing.equal_axis_index idx (Indexing.Iterator s)))
+        in
+        let chain =
+          List.filter (path_loops n.n_loops) ~f:(function
+            | For_loop fc -> fc.from_ = 0 && qualifies fc.index
+            | _ -> false)
+          |> fun l -> List.take l 2
+        in
+        if List.is_empty chain && not (List.is_empty mat_writes) then raise Bail;
+        chain)
+  in
+  let chain_syms chain =
+    List.filter_map chain ~f:(function For_loop fc -> Some fc.index | _ -> None)
+  in
+  (* Access groups: the nests plus the bare pseudo-group (executed unconditionally, no chain). *)
+  let groups =
+    Array.of_list (List.map2_exn nests chains ~f:(fun n c -> (n.n_accesses, c)) @ [ (bare, []) ])
+  in
+  let n_groups = Array.length groups in
+  let group_tbls =
+    Array.map groups ~f:(fun (accs, _) ->
+        let tbl = Hashtbl.create (module Int) in
+        List.iter accs ~f:(fun a -> Hashtbl.add_multi tbl ~key:a.a_tn.Tn.uid ~data:a);
+        tbl)
+  in
+  let full_syms = Array.map groups ~f:(fun (_, c) -> chain_syms c) in
+  let sym_arr = Array.map full_syms ~f:Array.of_list in
+  let extent_arr =
+    Array.map groups ~f:(fun (_, c) ->
+        Array.of_list (List.filter_map c ~f:(function For_loop fc -> Some (fc.to_ + 1) | _ -> None)))
+  in
+  (* Cross-group dependency edges (module comment, aligned cross-nest parallelism): a node
+     written in one group and touched in another must have all its write/access pairs aligned —
+     unless it is per-thread scratch whose writes never mention the writer's parallel symbols
+     (every thread then writes its whole private copy, and cross-nest reads are per-thread
+     coherent regardless of geometry). *)
+  let edges = ref [] in
+  for i = 0 to n_groups - 1 do
+    for j = i + 1 to n_groups - 1 do
+      Hashtbl.iteri group_tbls.(i) ~f:(fun ~key:uid ~data:accs_i ->
+          match Hashtbl.find group_tbls.(j) uid with
+          | None -> ()
+          | Some accs_j ->
+              let writes_mention accs syms =
+                List.exists accs ~f:(fun a ->
+                    a.a_write && Array.exists a.a_idcs ~f:(mentions_sym syms))
               in
-              if is_mat || chain_relevant then (
-                if List.exists accs ~f:(fun a -> a.a_dynamic) then raise Bail;
-                (* All accesses must agree on every component that mentions a parallel symbol. *)
-                let rank =
-                  List.fold accs ~init:0 ~f:(fun m a -> max m (Array.length a.a_idcs))
+              if
+                (List.exists accs_i ~f:(fun a -> a.a_write)
+                || List.exists accs_j ~f:(fun a -> a.a_write))
+                && (Tn.Placements.is_materialized_peek plc (List.hd_exn accs_i).a_tn
+                   || writes_mention accs_i full_syms.(i)
+                   || writes_mention accs_j full_syms.(j))
+              then edges := (i, j, uid) :: !edges)
+    done
+  done;
+  (* [trims.(g)]: how many chain loops group [g] keeps; alignment may lower it (uniformly per
+     dependency component, so the annotator emits identical geometry for linked nests). *)
+  let trims = Array.map groups ~f:(fun (_, c) -> List.length c) in
+  (if not (List.is_empty !edges) then
+     let parent = Array.init n_groups ~f:Fn.id in
+     let rec find x =
+       if parent.(x) = x then x
+       else (
+         parent.(x) <- find parent.(x);
+         parent.(x))
+     in
+     List.iter !edges ~f:(fun (i, j, _) ->
+         let ri = find i and rj = find j in
+         if ri <> rj then parent.(ri) <- rj);
+     (* One write/access pair at trim depth [l]: statically-known indices; per axis position,
+        parallel symbols are mentioned on both sides or neither; where both, plain [Iterator]s at
+        the same chain position (extents are equal by the [l_max] prefix rule below). *)
+     let pair_aligned ~l gi gj (a : access) (b : access) =
+       (not a.a_dynamic) && (not b.a_dynamic)
+       &&
+       let syms_i = List.take full_syms.(gi) l and syms_j = List.take full_syms.(gj) l in
+       let pos g s =
+         Array.findi sym_arr.(g) ~f:(fun k s' -> k < l && Indexing.equal_symbol s s')
+         |> Option.map ~f:fst
+       in
+       let comp idcs p = if p < Array.length idcs then idcs.(p) else Indexing.Fixed_idx 0 in
+       let rank = max (Array.length a.a_idcs) (Array.length b.a_idcs) in
+       let aligned_at p =
+         let ci = comp a.a_idcs p and cj = comp b.a_idcs p in
+         match (mentions_sym syms_i ci, mentions_sym syms_j cj) with
+         | false, false -> true
+         | true, true -> (
+             match (ci, cj) with
+             | Indexing.Iterator si, Indexing.Iterator sj -> (
+                 match (pos gi si, pos gj sj) with
+                 | Some ki, Some kj -> ki = kj
+                 | _ -> false)
+             (* An [Affine] over a parallel symbol is never a plain aligned slice. *)
+             | _ -> false)
+         | _ -> false
+       in
+       List.for_all (List.init rank ~f:Fn.id) ~f:aligned_at
+     in
+     let edge_aligned ~l (i, j, uid) =
+       let accs_i = Hashtbl.find_multi group_tbls.(i) uid
+       and accs_j = Hashtbl.find_multi group_tbls.(j) uid in
+       List.for_all accs_i ~f:(fun a ->
+           List.for_all accs_j ~f:(fun b ->
+               (not (a.a_write || b.a_write)) || pair_aligned ~l i j a b))
+     in
+     let comps = Hashtbl.create (module Int) in
+     Array.iteri parent ~f:(fun g _ -> Hashtbl.add_multi comps ~key:(find g) ~data:g);
+     Hashtbl.iteri comps ~f:(fun ~key:root ~data:members ->
+         if List.length members > 1 then (
+           let comp_edges = List.filter !edges ~f:(fun (i, _, _) -> find i = root) in
+           (* Longest prefix of the members' chains with pointwise-equal extents: the geometry
+              must be identical for the thread->iteration maps to coincide across the component
+              (a 1-loop chain splits Grid x Workgroup while a 2-loop chain retypes in place, so
+              even a shared axis maps differently across different chain shapes). *)
+           let l_max =
+             List.fold members ~init:2 ~f:(fun m g -> min m (Array.length extent_arr.(g)))
+           in
+           let ext_eq k =
+             match members with
+             | [] -> true
+             | g0 :: rest -> List.for_all rest ~f:(fun g -> extent_arr.(g).(k) = extent_arr.(g0).(k))
+           in
+           let rec agree k = if k >= l_max || not (ext_eq k) then k else agree (k + 1) in
+           let l_max = agree 0 in
+           let rec search l =
+             if l < 1 then raise Bail
+             else if List.for_all comp_edges ~f:(edge_aligned ~l) then
+               List.iter members ~f:(fun g -> trims.(g) <- l)
+             else search (l - 1)
+           in
+           search l_max)));
+  let chains = List.mapi chains ~f:(fun i c -> List.take c trims.(i)) in
+  (* Per-nest hazard analysis over the final (possibly trimmed) parallel symbols (see the module
+     comment for the safety argument). *)
+  List.iter2_exn nests chains ~f:(fun n chain ->
+      let syms = chain_syms chain in
+      let by_tn = Hashtbl.create (module Int) in
+      List.iter n.n_accesses ~f:(fun a -> Hashtbl.add_multi by_tn ~key:a.a_tn.Tn.uid ~data:a);
+      Hashtbl.iter by_tn ~f:(fun accs ->
+          let written = List.exists accs ~f:(fun a -> a.a_write) in
+          if written then (
+            let is_mat = Tn.Placements.is_materialized_peek plc (List.hd_exn accs).a_tn in
+            let chain_relevant =
+              List.exists accs ~f:(fun a -> Array.exists a.a_idcs ~f:(mentions_sym syms))
+            in
+            if is_mat || chain_relevant then (
+              if List.exists accs ~f:(fun a -> a.a_dynamic) then raise Bail;
+              (* All accesses must agree on every component that mentions a parallel symbol. *)
+              let rank = List.fold accs ~init:0 ~f:(fun m a -> max m (Array.length a.a_idcs)) in
+              for p = 0 to rank - 1 do
+                let comps =
+                  List.map accs ~f:(fun a ->
+                      if p < Array.length a.a_idcs then a.a_idcs.(p) else Indexing.Fixed_idx 0)
                 in
-                for p = 0 to rank - 1 do
-                  let comps =
-                    List.map accs ~f:(fun a ->
-                        if p < Array.length a.a_idcs then a.a_idcs.(p) else Indexing.Fixed_idx 0)
-                  in
-                  if List.exists comps ~f:(mentions_sym syms) then
-                    match comps with
-                    | [] -> ()
-                    | c0 :: rest ->
-                        if not (List.for_all rest ~f:(Indexing.equal_axis_index c0)) then
-                          raise Bail
-                done))));
-    (* Cross-nest interference: nothing written in one nest may be touched in another (or in bare
-       statements), except fully-per-thread scratch. *)
-    let groups =
-      List.map2_exn nests chains ~f:(fun n chain -> (n.n_accesses, chain_syms chain))
-      @ [ (bare, []) ]
-    in
-    List.iteri groups ~f:(fun i (accs_i, syms_i) ->
-        let writes_i = List.filter accs_i ~f:(fun a -> a.a_write) in
-        if not (List.is_empty writes_i) then
-          List.iteri groups ~f:(fun j (accs_j, _) ->
-              if i <> j then
-                List.iter writes_i ~f:(fun w ->
-                    let touched_elsewhere =
-                      List.exists accs_j ~f:(fun a -> a.a_tn.Tn.uid = w.a_tn.Tn.uid)
-                    in
-                    if touched_elsewhere then
-                      if Tn.Placements.is_materialized_peek plc w.a_tn then raise Bail
-                      else if
-                        (* Local scratch: safe only if every thread writes its whole private
-                           copy, i.e. the writes do not depend on parallel symbols. *)
-                        Array.exists w.a_idcs ~f:(mentions_sym syms_i)
-                      then raise Bail)));
+                if List.exists comps ~f:(mentions_sym syms) then
+                  match comps with
+                  | [] -> ()
+                  | c0 :: rest ->
+                      if not (List.for_all rest ~f:(Indexing.equal_axis_index c0)) then raise Bail
+              done))));
   chains
+
+(* Parallel iterations a chain covers. *)
+let chain_size chain =
+  List.fold chain ~init:1 ~f:(fun sz -> function
+    | Low_level.For_loop fc -> sz * (fc.to_ + 1) | _ -> sz)
 
 (* Threshold helper: skip kernels whose largest parallelizable nest is too small to pay for a
    launch (GPU) or a task fan-out (CPU). *)
-let max_parallel_size chains =
-  let nest_parallel_size chain =
-    List.fold chain ~init:1 ~f:(fun sz -> function
-      | Low_level.For_loop fc -> sz * (fc.to_ + 1) | _ -> sz)
-  in
-  List.fold chains ~init:0 ~f:(fun m chain -> max m (nest_parallel_size chain))
+let max_parallel_size chains = List.fold chains ~init:0 ~f:(fun m chain -> max m (chain_size chain))
 
 let default_gpu ?block_size ?min_parallel ?(limits = Backend_intf.no_hardware_limits)
     (opt : Low_level.optimized) : schedule =
@@ -1568,11 +1676,15 @@ let default_cpu ?min_parallel (opt : Low_level.optimized) : schedule =
     synchronization between them, so a producer/consumer (or WAW/WAR) pair of top-level statements
     over a materialized node is a race once threads interleave — and the whole routine used to
     fall back to a 1×1 launch. Fission recovers the synchronization from the stream instead:
-    top-level statements are partitioned into {e segments} at exactly those dependency edges, each
+    top-level statements are partitioned into {e segments} at those dependency edges, each
     segment compiles to its own kernel, and the routine's task launches them in order on the
     routine's stream with a device-side event chained at each boundary (queue FIFO alone does not
     order overlapping command buffers over Metal's untracked resources; see [Raise_backend.link]).
     Each segment then gets the default schedule independently, on its own launch geometry.
+    Dependency edges the aligned cross-nest rule proves race-free do {e not} cut, provided the
+    shared kernel keeps every nest's standalone parallelism (see {!aligned_merge}): elementwise
+    chains over one intermediate stay a single kernel, while parallelism switches (a batch-parallel
+    producer feeding a reduce-over-batch consumer) and alignment-trimming merges still cut.
 
     Segmentation is conservative and total (no [Bail]): a statement opaque to the analysis
     ([Staged_compilation], barriers, pre-annotated loops) or one the annotator can never cover
@@ -1691,6 +1803,9 @@ type funit = {
   f_index : int;  (** Position among units, for scope-replication validity ranges. *)
   f_sum : stmt_summary option;
   f_kind : [ `Normal | `Zeros | `Solo ];
+  f_chains : Low_level.t list list;
+      (** The statement's chains analyzed standalone ([[]] for non-[`Normal] units): the
+          no-parallelism-loss baseline for aligned segment merging (see {!aligned_merge}). *)
 }
 
 (* Units: each real statement with the comments preceding it. Trailing comments attach to the last
@@ -1700,22 +1815,21 @@ let collect_units plc (opt : Low_level.optimized) (stmts : Low_level.t list) : f
   let is_glue = function Noop | Comment _ -> true | _ -> false in
   let mk index glue stmt =
     let f_sum = summarize_stmt plc stmt in
-    let f_kind =
+    let f_kind, f_chains =
       match f_sum with
-      | None -> `Solo
-      | Some { s_top_zero = Some _; _ } -> `Zeros
-      | Some s when Set.is_empty s.s_writes -> `Normal
+      | None -> (`Solo, [])
+      | Some { s_top_zero = Some _; _ } -> (`Zeros, [])
       | Some _ -> (
           (* Isolate statements the annotator could never share a parallel kernel with: it raises
              [Bail] on them even in isolation (bare materialized writes, materialized writes
              inside [Local_scope] bodies, dynamic accesses or non-injective/uncovered writes).
              In its own segment such a statement runs as a serial 1×1 launch and its neighbors
-             keep their parallelism. *)
+             keep their parallelism. Read-only statements never bail; their chains are empty. *)
           match analyze_parallel_chains { opt with llc = stmt } with
-          | (_ : Low_level.t list list) -> `Normal
-          | exception Bail -> `Solo)
+          | chains -> (`Normal, chains)
+          | exception Bail -> (`Solo, []))
     in
-    { f_stmts = List.rev (stmt :: glue); f_index = index; f_sum; f_kind }
+    { f_stmts = List.rev (stmt :: glue); f_index = index; f_sum; f_kind; f_chains }
   in
   let rec go index glue acc = function
     | [] -> (
@@ -1734,6 +1848,9 @@ type segment = {
   g_kind : [ `Normal | `Zeros | `Solo ];
   g_reads : Set.M(Tn).t;
   g_writes : Set.M(Tn).t;
+  g_chains : Low_level.t list list;
+      (** Concatenation of the units' standalone chains, in statement order (the merged code's
+          nest order): the baseline for {!aligned_merge}'s no-parallelism-loss guard. *)
 }
 
 let seg_of_unit u =
@@ -1742,7 +1859,7 @@ let seg_of_unit u =
     | Some s -> (s.s_reads, s.s_writes)
     | None -> (Set.empty (module Tn), Set.empty (module Tn))
   in
-  { g_units = [ u ]; g_kind = u.f_kind; g_reads = reads; g_writes = writes }
+  { g_units = [ u ]; g_kind = u.f_kind; g_reads = reads; g_writes = writes; g_chains = u.f_chains }
 
 let merge_segs ~kind a b =
   {
@@ -1750,26 +1867,50 @@ let merge_segs ~kind a b =
     g_kind = kind;
     g_reads = Set.union a.g_reads b.g_reads;
     g_writes = Set.union a.g_writes b.g_writes;
+    g_chains = a.g_chains @ b.g_chains;
   }
 
 (* The within-kernel interference rule of {!analyze_parallel_chains}, reformulated as a cut
    criterion: a materialized node written on one side and touched on the other must not share a
-   kernel. Local-scratch pairs deliberately do NOT cut — the per-segment annotator retains the
-   finer per-thread-privacy analysis for those (and simply declines to annotate when it fails). *)
+   kernel — unless the merged statements pass the aligned cross-nest analysis without losing
+   parallelism ({!aligned_merge}). Local-scratch pairs deliberately do NOT cut — the per-segment
+   annotator retains the finer per-thread-privacy analysis for those (and simply declines to
+   annotate when it fails). *)
 let mat_conflict plc seg (s : stmt_summary) =
   let mat tn = Tn.Placements.is_materialized_peek plc tn in
   let hits w touched = Set.exists w ~f:(fun tn -> mat tn && Set.mem touched tn) in
   hits seg.g_writes (Set.union s.s_reads s.s_writes)
   || hits s.s_writes (Set.union seg.g_reads seg.g_writes)
 
-let group_units plc (units : funit list) : segment list =
+(* Whether extending [seg] with [u] keeps one parallelizable kernel: the merged statements pass
+   {!analyze_parallel_chains} (its aligned cross-nest rule proves the dependency race-free) AND no
+   nest's parallel size shrinks versus its standalone analysis. Alignment may trim linked chains
+   to a common prefix; when it would, cutting (a launch boundary, today's behavior) is the better
+   default than trading parallelism for one launch — and keeps the fissioned candidates of the
+   schedule search at full per-segment parallelism. *)
+let aligned_merge (opt : Low_level.optimized) seg (u : funit) : bool =
+  let llc =
+    Low_level.unflat_lines (List.concat_map (seg.g_units @ [ u ]) ~f:(fun u' -> u'.f_stmts))
+  in
+  match analyze_parallel_chains { opt with llc } with
+  | exception Bail -> false
+  | merged -> (
+      match
+        List.for_all2 merged (seg.g_chains @ u.f_chains) ~f:(fun m s ->
+            chain_size m >= chain_size s)
+      with
+      | List.Or_unequal_lengths.Ok ok -> ok
+      | Unequal_lengths -> false)
+
+let group_units (opt : Low_level.optimized) (units : funit list) : segment list =
+  let plc = opt.Low_level.optimize_ctx.placements in
   let close cur acc = match cur with None -> acc | Some seg -> seg :: acc in
   let rec go cur acc = function
     | [] -> List.rev (close cur acc)
     | u :: tl -> (
         match (cur, u.f_kind, u.f_sum) with
-        | Some ({ g_kind = `Normal; _ } as seg), `Normal, Some s when not (mat_conflict plc seg s)
-          ->
+        | Some ({ g_kind = `Normal; _ } as seg), `Normal, Some s
+          when (not (mat_conflict plc seg s)) || aligned_merge opt seg u ->
             go (Some (merge_segs ~kind:`Normal seg (seg_of_unit u))) acc tl
         | Some ({ g_kind = `Zeros; _ } as seg), `Zeros, Some s when not (mat_conflict plc seg s) ->
             go (Some (merge_segs ~kind:`Zeros seg (seg_of_unit u))) acc tl
@@ -2075,7 +2216,7 @@ let fission_scheduled ~(preset : Low_level.optimized -> schedule)
     [ (`Normal, opt, sched, apply ~static_indices sched opt) ]
   in
   let units = collect_units plc opt (Low_level.flat_lines [ opt.Low_level.llc ]) in
-  let segs = group_units plc units in
+  let segs = group_units opt units in
   if List.length segs <= 1 then fallback ()
   else
     match resolve_scope_crossings (Array.of_list units) segs with
