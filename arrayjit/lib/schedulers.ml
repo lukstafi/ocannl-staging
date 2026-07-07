@@ -57,7 +57,15 @@ module Multidev (Backend : For_add_scheduler) :
     while dev_state.keep_spinning && not (Atomic.get is_done) do
       Stdlib.Condition.wait dev_state.progress dev_state.mut
     done;
-    Mut.unlock dev_state.mut
+    (* A stopped worker is not completion: if the device died before the event's tick ran, surface
+       its error to the waiter -- a cross-device consumer would otherwise proceed with stale or
+       uninitialized source data. When this runs on a waiting device's worker (via
+       [will_wait_for]), the re-raise fails that worker's task, propagating the failure to the
+       waiting device. *)
+    let err = if Atomic.get is_done then None else dev_state.dev_error in
+    Mut.unlock dev_state.mut;
+    Option.iter err ~f:(fun e ->
+        Exn.reraise e [%string "Multidev_scheduler.sync: device %{dev_state.ordinal#Int} failed"])
 
   let is_done { dev_state = _; is_done } = Atomic.get is_done
   let get_used_memory _device = get_used_memory ()
