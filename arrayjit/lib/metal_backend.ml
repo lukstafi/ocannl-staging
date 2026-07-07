@@ -43,6 +43,12 @@ module Device_config = struct
     queue : Me.CommandQueue.t;
     event : Me.SharedEvent.t; (* Use SharedEvent for signalling *)
     mutable counter : ullong; (* Next value to signal *)
+    mutable fused : (Me.CommandBuffer.t * Me.ComputeCommandEncoder.t) option;
+        [@sexp.opaque]
+        (* While [Some], kernel launches encode into this open serial compute pass instead of
+           committing their own command buffer — set for the span of one fissioned routine's
+           segment batch by [sequence_segments]. Only the task running on this queue touches
+           it. *)
   }
   [@@deriving sexp_of]
 
@@ -180,7 +186,7 @@ module Impl = struct
     let shared_event_obj = Me.SharedEvent.on_device metal_device in
     let counter = Unsigned.ULLong.one in
     (* Next value = 1 *)
-    ({ queue = actual_queue; event = shared_event_obj; counter }, opt_log_entries_ref)
+    ({ queue = actual_queue; event = shared_event_obj; counter; fused = None }, opt_log_entries_ref)
 
   let get_device ~(ordinal : int) : device =
     if ordinal < 0 || num_devs () <= ordinal then
@@ -1028,8 +1034,16 @@ using namespace metal;|} in
          handler installed on the CommandQueue. They will be processed by Utils.log_trace_tree in
          `await`. *)
       try
-        let command_buffer = Me.CommandBuffer.on_queue queue in
-        let encoder = Me.ComputeCommandEncoder.on_buffer command_buffer in
+        (* Inside a [sequence_segments] batch, encode into the routine's open serial compute pass
+           (one command buffer for all segments); standalone, commit our own command buffer. *)
+        let fused = dev.runner.fused in
+        let command_buffer, encoder =
+          match fused with
+          | Some (cb, enc) -> (cb, enc)
+          | None ->
+              let cb = Me.CommandBuffer.on_queue queue in
+              (cb, Me.ComputeCommandEncoder.on_buffer cb)
+        in
         Me.ComputeCommandEncoder.set_compute_pipeline_state encoder pso;
 
         (* Set arguments *)
@@ -1089,8 +1103,11 @@ using namespace metal;|} in
           ~threads_per_threadgroup:
             { width = launch.block.(0); height = launch.block.(1); depth = launch.block.(2) };
 
-        Me.ComputeCommandEncoder.end_encoding encoder;
-        Me.CommandBuffer.commit command_buffer
+        (match fused with
+        | Some _ -> () (* [sequence_segments] ends the pass and commits once, after all segments. *)
+        | None ->
+            Me.ComputeCommandEncoder.end_encoding encoder;
+            Me.CommandBuffer.commit command_buffer)
         (* Make execution synchronous for debugging/simplicity, remove later *)
         (* Me.CommandBuffer.wait_until_completed command_buffer; *)
       with exn ->
@@ -1144,4 +1161,35 @@ using namespace metal;|} in
                     ~ctx_buffers)))
     in
     (lowered_bindings, tasks)
+
+  (* One command buffer for a fissioned routine's whole segment batch: a [Serial]-dispatch compute
+     pass executes its dispatches in encoding order — MTLDispatchType.serial semantics,
+     independent of resource hazard tracking — which is exactly the grid-wide synchronization each
+     fission boundary needs. This replaces per-segment command buffers plus two event command
+     buffers per boundary (the dominant per-step cost of fissioned training steps; each command
+     buffer costs ~0.2-0.5 ms of pipeline latency). The tasks are this backend's [link_batch]
+     kernel launches: while [runner.fused] is set, [link_proc]'s work encodes into the open pass
+     instead of committing its own buffer. *)
+  let sequence_segments (context : context) ~name (tasks : Task.t list) : Task.t option =
+    let dev = context.device in
+    Some
+      (Task.Task
+         {
+           context_lifetime = tasks;
+           description = "fused segments of " ^ name ^ " on " ^ get_name dev;
+           work =
+             (fun () ->
+               let command_buffer = Me.CommandBuffer.on_queue dev.runner.queue in
+               let encoder =
+                 Me.ComputeCommandEncoder.on_buffer_with_dispatch_type command_buffer
+                   Me.ComputeCommandEncoder.DispatchType.Serial
+               in
+               dev.runner.fused <- Some (command_buffer, encoder);
+               Exn.protect
+                 ~f:(fun () -> List.iter tasks ~f:Task.run)
+                 ~finally:(fun () ->
+                   dev.runner.fused <- None;
+                   Me.ComputeCommandEncoder.end_encoding encoder;
+                   Me.CommandBuffer.commit command_buffer));
+         })
 end

@@ -412,6 +412,10 @@ struct
     in
     (lowered_bindings, schedules)
 
+  (* CPU segment tasks are host closures the stream runner executes in order; the generic event
+     chain degenerates to no-ops there, so there is nothing cheaper to provide. *)
+  let sequence_segments _context ~name:_ _tasks = None
+
   (* Transfers take {!Backend_intf.buffer_loc} and resolve to the backend pointer here, against the
      device's private pool table -- the resolution is backend-side, not in the generic shared
      layer. *)
@@ -730,23 +734,27 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
           in
           let tasks = Array.to_list (Array.filter_opt tasks) in
           assert (List.length tasks = count);
+          (* Device-side ordering at each segment boundary: the cut is where the kernel-internal
+             code lacks grid-wide synchronization, so the stream must provide it. Queue FIFO
+             alone is not enough on Metal — command buffers over untracked resources may overlap
+             in execution (caught by test_random_histograms). Backends that can order the batch
+             device-side more cheaply (one Metal command buffer with a serial compute pass)
+             provide [sequence_segments]; the fallback chains an event per boundary: schedule
+             each next segment to wait for all work enqueued so far. No host blocking. *)
           let schedule =
-            Task.Task
-              {
-                context_lifetime = tasks;
-                description = "fissioned segments of " ^ code.name;
-                work =
-                  (fun () ->
-                    (* Device-side ordering at each segment boundary: the cut is where the
-                       kernel-internal code lacks grid-wide synchronization, so the stream must
-                       provide it. Queue FIFO alone is not enough on Metal — command buffers over
-                       untracked resources may overlap in execution (caught by
-                       test_random_histograms) — so chain an event: schedule each next segment to
-                       wait for all work enqueued so far. No host blocking. *)
-                    List.iteri tasks ~f:(fun i t ->
-                        if i > 0 then will_wait_for context (all_work context.device);
-                        Task.run t));
-              }
+            match sequence_segments context ~name:code.name tasks with
+            | Some fused -> fused
+            | None ->
+                Task.Task
+                  {
+                    context_lifetime = tasks;
+                    description = "fissioned segments of " ^ code.name;
+                    work =
+                      (fun () ->
+                        List.iteri tasks ~f:(fun i t ->
+                            if i > 0 then will_wait_for context (all_work context.device);
+                            Task.run t));
+                  }
           in
           (bindings, schedule)
     in

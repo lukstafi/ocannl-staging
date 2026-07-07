@@ -350,4 +350,12 @@ module type Lowered_backend = sig
     Indexing.lowered_bindings * Task.t option array
   (** [context] is the prior context, while the [ctx_buffers] are the locations of the resulting
       contexts. Returns the schedule tasks for the procedures included in the code batch. *)
+
+  val sequence_segments : context -> name:string -> Task.t list -> Task.t option
+  (** When the backend can run an ordered batch of same-stream kernel tasks — the segment
+      schedules of one fissioned routine, all from this backend's [link_batch] on [context]'s
+      device — with device-side ordering cheaper than per-boundary events, returns the combined
+      task. E.g. the Metal backend encodes every segment's dispatch into one command buffer whose
+      serial compute pass executes them in encoding order, replacing two event command buffers
+      per boundary. [None] falls back to the generic event chain of [Raise_backend.link]. *)
 end
