@@ -3,6 +3,24 @@
 Task: gh-ocannl-163
 Issue: https://github.com/ahrefs/ocannl/issues/163
 
+## Status update (2026-07-07)
+
+- **Deep dive delivered**: the research note exists at
+  [`../research/ggml-lessons.md`](../research/ggml-lessons.md) (ggml read from
+  llama.cpp `c198af4d`, OCANNL surfaces verified at `605d565a`). It supersedes the
+  verdict-relevant assumptions in the 2026-06-12 update below: the #164 CPU bundle,
+  explicit `Vectorized` vector-extension codegen (`cc_vector_bytes`), the schedule
+  IR + autotune, pool-backed parallel `Grid` rendering, 32-byte-aligned pool
+  allocation, and tensor persistence all landed since; `backend_impl.ml`
+  allocation is no longer unaligned and CPU intra-kernel parallelism now exists.
+- Verdict tally: already covered 6, file follow-up issue 4 (mmap weights, SIMD
+  reductions, register-tiled matmul micro-kernel, pack-once constant operands),
+  not applicable 5, future 5 (all quantization items are `future` per #137's
+  not-planned closure — none cite 137 as coverage).
+- **Remaining deliverable**: post the findings comment on issue #163 and file the
+  follow-up issues — drafts for both are included in the research note (§10
+  comment draft, §11 issue drafts F1–F4).
+
 ## Status update (2026-06-12)
 
 - Issue #163 is still OPEN, milestone v0.8 (ROADMAP targets mid-June 2026 for v0.8).
