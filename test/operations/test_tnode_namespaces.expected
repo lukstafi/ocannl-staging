@@ -1,0 +1,25 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+=== Test 1: Namespace rendering ===
+default: id=n0 debug_name=n0 namespace=ocannl
+snap1: id=snap1__n0 debug_name=snap1__n0 namespace=snap1
+after plain reinit: current namespace=ocannl
+=== Test 2: Namespace validation ===
+Caught: Tnode: invalid namespace 1bad: must match [A-Za-z_][A-Za-z0-9_]*
+Caught: Tnode: invalid namespace a.b: must match [A-Za-z_][A-Za-z0-9_]*
+Caught: Tnode: invalid namespace with space: must match [A-Za-z_][A-Za-z0-9_]*
+Caught: Tnode: invalid namespace : must match [A-Za-z_][A-Za-z0-9_]*
+=== Test 3: Prefixed loads ===
+  left__ocannl__n0 values=[1.0; 2.0]
+  left__ocannl__n1 values=[3.0; 4.0]
+  right__ocannl__n0 values=[1.0; 2.0]
+  right__ocannl__n1 values=[3.0; 4.0]
+next_id before=0 after=0 (prefixed loads do not bump)
+  n0 values=[1.0; 2.0]
+  n1 values=[3.0; 4.0]
+next_id after unprefixed load=2
+Caught: load: tensor with id left__ocannl__n0 already exists in registry
+Caught: Tnode: invalid namespace not ok: must match [A-Za-z_][A-Za-z0-9_]*
+=== Test 4: Embed_self_id invariance ===
+self_id default=1.0 other_ns=1.0 equal=true
+=== All namespace tests completed ===

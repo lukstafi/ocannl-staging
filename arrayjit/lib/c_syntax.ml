@@ -586,7 +586,7 @@ module C_syntax (B : C_syntax_config) = struct
     let ok = ref true in
     let access tn idcs ~write =
       if is_local tn then
-        Hashtbl.update locals tn.Tn.id ~f:(fun st ->
+        Hashtbl.update locals tn.Tn.uid ~f:(fun st ->
             let written, accs = Option.value st ~default:(false, []) in
             (written || write, idcs :: accs))
     in
@@ -899,7 +899,7 @@ module C_syntax (B : C_syntax_config) = struct
             let written = Hashtbl.create (module Int) in
             List.iter sets ~f:(fun (tn, idcs, _) ->
                 if not (Ops.equal_prec (Lazy.force tn.Tn.prec) prec) then raise Bail;
-                match Hashtbl.add written ~key:tn.Tn.id ~data:idcs with
+                match Hashtbl.add written ~key:tn.Tn.uid ~data:idcs with
                 | `Ok -> ()
                 | `Duplicate -> raise Bail);
             let contiguous idcs =
@@ -916,7 +916,7 @@ module C_syntax (B : C_syntax_config) = struct
               | _ -> false
             in
             let check_read tn idcs =
-              match Hashtbl.find written tn.Tn.id with
+              match Hashtbl.find written tn.Tn.uid with
               | Some w_idcs ->
                   if not (Array.equal Indexing.equal_axis_index w_idcs idcs) then raise Bail
               | None -> ()
@@ -924,7 +924,7 @@ module C_syntax (B : C_syntax_config) = struct
             let rec no_written_reads (llsc : Low_level.scalar_t) =
               match llsc with
               | Low_level.Get (tn, _) | Get_merge_buffer (tn, _) | Get_dynamic { tn; _ } ->
-                  if Hashtbl.mem written tn.Tn.id then raise Bail
+                  if Hashtbl.mem written tn.Tn.uid then raise Bail
               | Local_scope _ | Get_local _ -> raise Bail
               | Embed_index _ | Constant _ | Constant_bits _ -> ()
               | Ternop (_, (a, _), (b, _), (c, _)) ->
@@ -1098,8 +1098,8 @@ module C_syntax (B : C_syntax_config) = struct
                      ^^ nest 2 (hardline ^^ binding ^^ hardline ^^ body_doc ())
                      ^^ hardline ^^ rbrace)))
     | Zero_out tn ->
-        let first_touch = not (Hash_set.mem zero_out_seen tn.Tn.id) in
-        Hash_set.add zero_out_seen tn.Tn.id;
+        let first_touch = not (Hash_set.mem zero_out_seen tn.Tn.uid) in
+        Hash_set.add zero_out_seen tn.Tn.uid;
         if first_touch && (not in_loop) && zero_out_loop_redundant tn then
           (* First-touch, executed once at function scope: the declaration's [= {0}] already covers
              it. A later [Zero_out tn], or one reached inside a loop, is a real re-zero and falls

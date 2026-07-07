@@ -7,6 +7,7 @@ This document describes how to work with tensors and execution contexts in OCANN
 - [Core Concepts](#core-concepts)
 - [Tensors](#tensors)
   - [Tensor Structure](#tensor-structure)
+  - [Tensor Node Namespaces](#tensor-node-namespaces)
   - [Roots, Embedded Nodes, and Params](#roots-embedded-nodes-and-params)
   - [Creating Tensors](#creating-tensors)
   - [Operation Functions and Shape Parameters](#operation-functions-and-shape-parameters)
@@ -52,7 +53,6 @@ type t = {
   params : (t, comparator_witness) Base.Set.t;  (* Learnable parameters *)
   forward : comp;                                (* Forward computation *)
   diff : diff option;                            (* Gradient info if differentiable *)
-  id : int;                                      (* Unique identifier *)
   value : tn;                                    (* The underlying tensor node *)
   shape : Shape.t;                               (* Shape with inference state *)
   children : subtensor list;                     (* Sub-tensors in the computation *)
@@ -61,11 +61,28 @@ type t = {
 ```
 
 Key fields:
-- **`value`**: The tensor node (`Ir.Tnode.t`) holding the actual data
+- **`value`**: The tensor node (`Ir.Tnode.t`) holding the actual data; the tensor's identifiers
+  live here: `value.id` is the consecutive session id, `value.namespace` qualifies it
+  (see below), and `value.uid` is the process-unique identity used for comparison
 - **`diff`**: Contains gradient node and backpropagation code (if differentiable)
 - **`params`**: Set of tensors requiring separate initialization (see [Roots, Embedded Nodes, and Params](#roots-embedded-nodes-and-params))
 - **`forward`**: Computation to produce this tensor's value, including embedded subtensor computations
 - **`shape`**: Shape information, progressively refined during inference
+
+### Tensor Node Namespaces
+
+Every tensor node carries a `namespace` string alongside its session `id` (gh-ocannl-372).
+Within a session all nodes share the ambient namespace — `"ocannl"` by default — and only
+`Tensor.unsafe_reinitialize ~namespace:"my_ns" ()` changes it. Namespaces must be legal
+identifiers (`[A-Za-z_][A-Za-z0-9_]*`); non-default namespaces show up as a prefix in debug
+names and generated code (`my_ns__n42` instead of `n42`).
+
+Namespaces exist for "model surgery": `Persistence.load ~prefix_namespace` rewrites the
+namespaces of the tensors stored in a checkpoint file (to `prefix ^ "__" ^ file_namespace`)
+while keeping their session ids, so weights of independently developed models — or two
+snapshots of the same model — can coexist in one registry and one routine without id
+clashes. Since `Embed_self_id` embeds only the session id, its values are invariant under
+namespace prefixing.
 
 ### Roots, Embedded Nodes, and Params
 

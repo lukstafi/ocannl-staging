@@ -530,9 +530,12 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
     a fresh [Local]-mode node registered in the traced store (and in [workgroup_shared] when
     [shared]). *)
 
+(* Schedule-minted tile/accumulator nodes live in their own reserved namespace, so their session
+   ids are independent of tensor-land ids (allocated from 0 by the [Tensor] session counter). *)
+let tile_namespace = "tile"
+
 let fresh_tile_id =
-  (* Well clear of tensor-land ids (allocated from 0 by the [Tensor] session counter). *)
-  let c = ref 900_000_000 in
+  let c = ref (-1) in
   fun () ->
     Int.incr c;
     !c
@@ -731,7 +734,7 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative (opt : Low_level.optimi
   let prec = Lazy.force source.Tn.prec in
   let tile_dims = Array.map tile_axes ~f:snd in
   let tile =
-    Tn.create (Tn.Specified prec) ~id:(fresh_tile_id ())
+    Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
       ~label:("tile" :: source.Tn.label)
       ~unpadded_dims:(lazy tile_dims)
       ~padding:(lazy None) ()
@@ -1161,7 +1164,7 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
       let tile_dims = if scalar_acc then [| 1 |] else Array.map tile_axes ~f:snd in
       let prec = Lazy.force target.Tn.prec in
       let tile =
-        Tn.create (Tn.Specified prec) ~id:(fresh_tile_id ())
+        Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
           ~label:("acc" :: target.Tn.label)
           ~unpadded_dims:(lazy tile_dims)
           ~padding:(lazy None) ()
@@ -1434,7 +1437,7 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
         let syms = chain_syms chain in
         let by_tn = Hashtbl.create (module Int) in
         List.iter n.n_accesses ~f:(fun a ->
-            Hashtbl.add_multi by_tn ~key:a.a_tn.Tn.id ~data:a);
+            Hashtbl.add_multi by_tn ~key:a.a_tn.Tn.uid ~data:a);
         Hashtbl.iter by_tn ~f:(fun accs ->
             let written = List.exists accs ~f:(fun a -> a.a_write) in
             if written then (
@@ -1473,7 +1476,7 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
               if i <> j then
                 List.iter writes_i ~f:(fun w ->
                     let touched_elsewhere =
-                      List.exists accs_j ~f:(fun a -> a.a_tn.Tn.id = w.a_tn.Tn.id)
+                      List.exists accs_j ~f:(fun a -> a.a_tn.Tn.uid = w.a_tn.Tn.uid)
                     in
                     if touched_elsewhere then
                       if Tn.Placements.is_materialized_peek plc w.a_tn then raise Bail

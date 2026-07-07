@@ -61,6 +61,29 @@ type bounds_state =
       (** Consumed by a guard fold; subsequent proposals must fit or raise. *)
 [@@deriving sexp, equal]
 
+let default_namespace = "ocannl"
+
+(** Namespaces must be legal C-family identifiers so they can prefix generated-code identifiers
+    and debug names verbatim (rendered as [ns__n42]); see docs/proposals gh-ocannl-372. *)
+let validate_namespace ns =
+  let ok_first c = Char.is_alpha c || Char.equal c '_' in
+  let ok c = Char.is_alphanum c || Char.equal c '_' in
+  if String.is_empty ns || not (ok_first ns.[0] && String.for_all ns ~f:ok) then
+    invalid_arg
+      [%string
+        "Tnode: invalid namespace %{String.escaped ns}: must match [A-Za-z_][A-Za-z0-9_]*"]
+
+(* The ambient namespace stamped on newly created tnodes. Only [Tensor.unsafe_reinitialize
+   ~namespace] is meant to change it (via {!set_current_namespace}); explicitly-namespaced
+   creation ([Persistence.load ~prefix_namespace], schedule-internal tile nodes) bypasses it. *)
+let current_namespace = ref default_namespace
+
+let set_current_namespace ns =
+  validate_namespace ns;
+  current_namespace := ns
+
+let get_current_namespace () = !current_namespace
+
 type t = {
   prec : Ops.prec Lazy.t;
   dims : int array Lazy.t;
@@ -71,6 +94,15 @@ type t = {
           operation. *)
   size_in_bytes : int Lazy.t;
   id : int;
+      (** The within-session id ("s_id" of gh-ocannl-372): consecutive number for nodes created in
+          the current session, restarting at 0 on [Tensor.unsafe_reinitialize]. Full node identity
+          for presentation and persistence is the pair ({!field-namespace}, [id]); in-memory
+          identity is {!field-uid}. *)
+  namespace : (string[@sexp_drop_if String.equal default_namespace]);
+      (** The namespace qualifying {!field-id}, stamped at creation from the ambient
+          {!current_namespace} unless created with an explicit [?namespace] (persistence loads,
+          schedule-internal nodes). Grads share their value node's session namespace. Elided from
+          sexps and renderings when it is {!default_namespace}. *)
   uid : (int[@sexp_drop_if fun _ -> true]);
       (** Process-unique identity, from a counter that {b no} reinitialization ever resets --
           unlike {!field-id}, which restarts at 0 on [Tensor.unsafe_reinitialize] for
@@ -141,7 +173,13 @@ let dims_without_padding tn =
       Array.map2_exn dims padding ~f:(fun dim { left; right } -> dim - left - right)
 
 let get_padding tn = Lazy.force tn.padding
-let id { id; _ } = "n" ^ Int.to_string id
+
+(* The "n" prefix of numeric idents, qualified by the namespace when non-default: [n42] vs
+   [snap1__n42]. Namespace validation guarantees the result is a legal C-family identifier. *)
+let ident_prefix namespace =
+  if String.equal namespace default_namespace then "n" else namespace ^ "__n"
+
+let id { id; namespace; _ } = ident_prefix namespace ^ Int.to_string id
 let label a = String.concat ~sep:"_" a.label
 
 let is_alphanum_ s =
@@ -159,7 +197,7 @@ let collapse_consecutive = function
       in
       List.rev (emit last_ident last_count acc)
 
-let get_debug_name ?code_name ~id ~label () =
+let get_debug_name ?code_name ?(namespace = default_namespace) ~id ~label () =
   match code_name with
   | Some code_name -> (
       match String.chop_suffix code_name ~suffix:"_grad" with
@@ -175,14 +213,15 @@ let get_debug_name ?code_name ~id ~label () =
         if List.is_empty components then None else Some (String.concat ~sep:"_" components)
       in
       let opt_grad = if is_grad then ".grad" else "" in
+      let n = ident_prefix namespace in
       match ident_label with
       | Some ident -> [%string "%{ident}%{opt_grad}"]
-      | None when is_grad -> [%string "n%{id - 1#Int}%{opt_grad}"]
-      | None -> "n" ^ Int.to_string id)
+      | None when is_grad -> [%string "%{n}%{id - 1#Int}%{opt_grad}"]
+      | None -> n ^ Int.to_string id)
 
 let debug_name tn =
   let id = tn.id and label = tn.label and code_name = tn.code_name in
-  get_debug_name ?code_name ~id ~label ()
+  get_debug_name ?code_name ~namespace:tn.namespace ~id ~label ()
 
 let debug_memory_mode = function
   | None -> "unknown"
@@ -727,12 +766,13 @@ let styled_ident ~repeating_nograd_idents ~repeating_grad_idents style arr =
         | (`Dot_grad | `Under_grad), _ -> ""
       in
       let n_id = if is_grad then arr.id - 1 else arr.id in
+      let np = ident_prefix arr.namespace in
       match ident with
       | Some ident ->
           if Hashtbl.mem (if is_grad then repeating_grad_idents else repeating_nograd_idents) ident
-          then [%string "n%{n_id#Int}_%{ident}%{opt_grad}"]
+          then [%string "%{np}%{n_id#Int}_%{ident}%{opt_grad}"]
           else [%string "%{ident}%{opt_grad}"]
-      | None when is_grad -> [%string "n%{n_id#Int}%{opt_grad}"]
+      | None when is_grad -> [%string "%{np}%{n_id#Int}%{opt_grad}"]
       | None -> n)
 
 let update_code_name tn ident =
@@ -770,11 +810,11 @@ let header tn =
 module Registry = Stdlib.Weak.Make (struct
   type nonrec t = t
 
-  (* Deliberately keyed by the presentational [id], not [uid]: [find ~id] queries with a mock
-     tnode carrying only the target [id] (e.g. to resolve "n42" from debug output back to a live
-     node). Note the id-reuse caveat on {!find}. *)
-  let equal a1 a2 = equal_int a1.id a2.id
-  let hash nd = Int.hash nd.id
+  (* Deliberately keyed by the presentational ([namespace], [id]) pair, not [uid]: [find ~id]
+     queries with a mock tnode carrying only the target pair (e.g. to resolve "n42" from debug
+     output back to a live node). Note the id-reuse caveat on {!find}. *)
+  let equal a1 a2 = equal_int a1.id a2.id && equal_string a1.namespace a2.namespace
+  let hash nd = Int.hash nd.id lxor String.hash nd.namespace
 end)
 
 let registry = Registry.create 16
@@ -799,7 +839,14 @@ let validate_padded_numel_contract ~id ~label (dims : int array) =
              "Tensor node %{get_debug_name ~id ~label ()}: padded element count %{n#Int} exceeds \
               the int32 index range; set large_models=true to use 64-bit indices"]
 
-let create delayed_prec ~id ~label ~unpadded_dims ~padding () =
+let create ?namespace delayed_prec ~id ~label ~unpadded_dims ~padding () =
+  let namespace =
+    match namespace with
+    | Some ns ->
+        validate_namespace ns;
+        ns
+    | None -> !current_namespace
+  in
   (* Compute padded dimensions: tn.dims stores buffer-inclusive (padded) dimensions *)
   let dims =
     lazy
@@ -827,6 +874,7 @@ let create delayed_prec ~id ~label ~unpadded_dims ~padding () =
       padding;
       size_in_bytes;
       id;
+      namespace;
       uid = fresh_uid ();
       label;
       memory_mode = None;
@@ -848,7 +896,14 @@ let create delayed_prec ~id ~label ~unpadded_dims ~padding () =
    caller (e.g. [Tensor.term], [Persistence.load]) records it in the computation's [host_inits] map
    so each [Context.compile] can upload it into its own context. The laziness is preserved so the
    buffer is shaped only after shape inference completes. *)
-let create_from_padded ~id ~label ~ndarray ~padding () =
+let create_from_padded ?namespace ~id ~label ~ndarray ~padding () =
+  let namespace =
+    match namespace with
+    | Some ns ->
+        validate_namespace ns;
+        ns
+    | None -> !current_namespace
+  in
   let dims_val = Nd.dims ndarray in
   validate_padded_numel_contract ~id ~label dims_val;
   let prec_val = Nd.get_prec ndarray in
@@ -862,6 +917,7 @@ let create_from_padded ~id ~label ~ndarray ~padding () =
       padding = lazy padding;
       size_in_bytes;
       id;
+      namespace;
       uid = fresh_uid ();
       label;
       memory_mode = Some (On_device, 49);
@@ -876,7 +932,8 @@ let create_from_padded ~id ~label ~ndarray ~padding () =
   (tn, lazy ndarray)
 
 let create_with_reshape ~id ~label ~base_ndarray ~unpadded_dims ~padding ~from_padded () =
-  let debug = "Host array for " ^ get_debug_name ~id ~label () in
+  let namespace = !current_namespace in
+  let debug = "Host array for " ^ get_debug_name ~namespace ~id ~label () in
   let prec_val = Nd.get_prec base_ndarray in
   (* Compute padded dimensions: tn.dims stores buffer-inclusive (padded) dimensions *)
   let dims =
@@ -946,6 +1003,7 @@ let create_with_reshape ~id ~label ~base_ndarray ~unpadded_dims ~padding ~from_p
       padding;
       size_in_bytes;
       id;
+      namespace;
       uid = fresh_uid ();
       label;
       memory_mode = Some (On_device, 49);
@@ -962,7 +1020,7 @@ let create_with_reshape ~id ~label ~base_ndarray ~unpadded_dims ~padding ~from_p
 let initial_default_prec =
   Ops.prec_of_string (Utils.get_global_arg ~default:"single" ~arg_name:"default_prec")
 
-let find =
+let find_namespaced =
   let mock =
     {
       prec = lazy initial_default_prec;
@@ -972,6 +1030,7 @@ let find =
       padding = lazy None;
       size_in_bytes = lazy 0;
       id = -1;
+      namespace = default_namespace;
       uid = -1;
       label = [];
       memory_mode = None;
@@ -982,10 +1041,14 @@ let find =
       code_name = None;
     }
   in
-  (* Caveat: [id]s are reused across [Tensor.unsafe_reinitialize], so if a pre-reinitialization
-     node with this [id] is still reachable, [find] may return it instead of the current session's
-     node. Debug-resolution only; identity-sensitive code must hold the tnode itself. *)
-  fun ~id -> Registry.find_opt registry { mock with id }
+  (* Caveat: ([namespace], [id]) pairs are reused across a [Tensor.unsafe_reinitialize] into the
+     same namespace, so if a pre-reinitialization node with this pair is still reachable, lookups
+     may return it instead of the current session's node. Debug-resolution only;
+     identity-sensitive code must hold the tnode itself. *)
+  fun ~namespace ~id -> Registry.find_opt registry { mock with id; namespace }
+
+(* Session-internal resolution: the ambient {!current_namespace} is what these callers mean. *)
+let find ~id = find_namespaced ~namespace:!current_namespace ~id
 
 (** {2 Accessors}
 
@@ -997,16 +1060,24 @@ let print_accessible_headers ?(pred = fun _ -> true) () =
   Stdio.printf "Tnode: collecting accessible arrays...%!\n";
   Stdlib.Gc.full_major ();
   let results =
-    Registry.fold (fun arr acc -> if pred arr then (arr.id, header arr) :: acc else acc) registry []
+    Registry.fold
+      (fun arr acc -> if pred arr then ((arr.namespace, arr.id), header arr) :: acc else acc)
+      registry []
   in
-  List.sort results ~compare:(fun (a, _) (b, _) -> compare_int a b)
+  List.sort results ~compare:(fun ((ns_a, a), _) ((ns_b, b), _) ->
+      let c = compare_string ns_a ns_b in
+      if c <> 0 then c else compare_int a b)
   |> List.iter ~f:(fun (_, header) -> Stdio.print_endline header);
   Stdio.printf "Tnode: Finished printing headers.%!\n"
 
 let%debug_sexp log_accessible_headers ?(pred = fun _ -> true) () =
   Stdlib.Gc.full_major ();
   let results =
-    Registry.fold (fun arr acc -> if pred arr then (arr.id, header arr) :: acc else acc) registry []
+    Registry.fold
+      (fun arr acc -> if pred arr then ((arr.namespace, arr.id), header arr) :: acc else acc)
+      registry []
   in
-  List.sort results ~compare:(fun (a, _) (b, _) -> compare_int a b)
+  List.sort results ~compare:(fun ((ns_a, a), _) ((ns_b, b), _) ->
+      let c = compare_string ns_a ns_b in
+      if c <> 0 then c else compare_int a b)
   |> List.iter ~f:(fun (_, _header) -> [%log _header])
