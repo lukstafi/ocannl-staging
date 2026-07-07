@@ -202,4 +202,17 @@ let () =
   p "matmul tune searches then hits the cache"
     ((not mr1.Autotune.cache_hit) && mr2.Autotune.cache_hit);
   p "matmul cache-hit values match the serial twin"
-    (Array.for_all2_exn got_mm2 got_serial ~f:approx)
+    (Array.for_all2_exn got_mm2 got_serial ~f:approx);
+
+  (* --- timing_ctx on a different backend is rejected (Codex P2 on PR #109): candidates timed
+     elsewhere do not predict the target device, and the winner would be cached under the target
+     backend's key without ever having been timed on it. sync_cc vs multicore_cc are both always
+     available. --- *)
+  p "timing_ctx on a different backend rejected"
+    (match
+       Autotune.tune ~rounds:0 ~repeats:1 ~cache_dir:""
+         ~timing_ctx:(Context.cpu ~threads:4 ())
+         (Context.cpu ()) mm_comp Ir.Indexing.Empty
+     with
+    | _ -> false
+    | exception Invalid_argument msg -> String.is_substring msg ~substring:"same backend")

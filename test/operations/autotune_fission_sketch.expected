@@ -13,3 +13,4 @@ matmul sketch instantiations seeded: true
 tuned matmul matches the serial twin: true
 matmul tune searches then hits the cache: true
 matmul cache-hit values match the serial twin: true
+timing_ctx on a different backend rejected: true

@@ -75,9 +75,11 @@ val tune :
      runs never mutate [ctx]'s live buffers (parameters, accumulators — running a training step
      on scratch/zero data can even poison them with inf/NaN). It must contain the nodes the
      computation requires from a prior context, e.g. by repeating parameter initialization on a
-     fresh root context. Only the winning schedule is then compiled from [ctx], exactly like a
-     cache hit. Without it, the search shares [ctx]'s buffers and the caller should re-initialize
-     mutated state afterwards. *)
+     fresh root context, and must live on the same backend and device as the target context
+     (raises [Invalid_argument] otherwise — candidates timed elsewhere do not predict this
+     device). Only the winning schedule is then compiled from [ctx], exactly like a cache hit.
+     Without it, the search shares [ctx]'s buffers and the caller should re-initialize mutated
+     state afterwards. *)
   ?report:(report -> unit) ->
   Context.t ->
   Ir.Assignments.comp ->

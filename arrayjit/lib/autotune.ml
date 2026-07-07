@@ -590,7 +590,20 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
      scratch lineage's buffers, and only the winner is compiled from [ctx] — so the timing runs
      never mutate the caller's live state (parameters, accumulators). The scratch context must
      contain the nodes the computation requires from a prior context (e.g. initialized
-     parameters), typically by repeating the caller's initialization on a fresh root context. *)
+     parameters), typically by repeating the caller's initialization on a fresh root context. It
+     must live on the same backend and device as [ctx] (Codex P2 on PR #109): candidates timed
+     elsewhere do not predict this device, and the winner would be cached under this backend's
+     key without ever having been timed on it. *)
+  Option.iter timing_ctx ~f:(fun tctx ->
+      if
+        (not (String.equal (Context.backend_name tctx) backend))
+        || Context.device_id tctx <> Context.device_id ctx
+      then
+        invalid_arg
+          (Printf.sprintf
+             "Autotune.tune: timing_ctx must be on the same backend and device as the target \
+              context (timing: %s device %d, target: %s device %d)"
+             (Context.backend_name tctx) (Context.device_id tctx) backend (Context.device_id ctx)));
   let search_ctx = Option.value timing_ctx ~default:ctx in
   (* The base compile: identity transform (= the serial baseline candidate), capturing the
      optimized code for canonicalization. *)
