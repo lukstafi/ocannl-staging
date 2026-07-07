@@ -17,13 +17,13 @@ Loaded 2 tensors after append
 Loaded 0 tensors from empty checkpoint
 Restore on empty set succeeded
 === Test 6: Missing tensor on restore ===
-Caught: restore: tensor 1 not found in checkpoint
+Caught: restore: tensor n1 not found in checkpoint
 === Test 7: Dimension mismatch on restore ===
-Caught: restore: dimension mismatch for tensor 0
+Caught: restore: dimension mismatch for tensor n0
 === Test 8: ID clash on load ===
-Caught: load: tensor with id 0 already exists in registry
+Caught: load: tensor with id n0 already exists in registry
 === Test 9: ID floor after load ===
 next_id before load=0, after load=6 (should be >= 6)
 === Test 10: Padding mismatch on restore ===
-Caught: restore: padding mismatch for tensor 0
+Caught: restore: padding mismatch for tensor n0
 === All persistence tests completed ===
