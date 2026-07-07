@@ -434,12 +434,15 @@ type entry = {
   backend : string;
   source_digest : string;
   saved : saved_schedule;
+  segments : (string * saved_schedule) list option; [@sexp.option]
+      (** A fissioned winner: per-segment schedules keyed by the {e pre-schedule} segment's
+          canonical digest ([saved] is then empty). [None] for whole-routine schedules. *)
   best_ms : float;
   baseline_ms : float;
 }
 [@@deriving sexp]
 
-let entry_version = 1
+let entry_version = 2
 
 let sanitize name =
   String.map name ~f:(fun c ->

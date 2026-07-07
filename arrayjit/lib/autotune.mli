@@ -3,12 +3,29 @@
     tinygrad-style beam search over {!Ir.Schedule} transforms, timed on the real device
     (docs/proposals/schedule-ir-optops.md; the search-harness half of the OptOps port). {!tune} is
     a drop-in replacement for {!Context.compile}: it compiles candidate schedules through the
-    [?lowered_transform] seam, times each on the context's device, and returns the routine of the
-    fastest one. Candidates are carried in the canonical form of {!Ir.Schedule_cache} — every
-    candidate compile re-lowers with fresh symbols, so schedules are rebound structurally inside
-    each compile's transform closure, guarded by digest equality. Winning schedules are persisted
-    to a disk cache keyed by the code's canonical digest and the backend, so a re-run of the same
-    program skips the search.
+    [?lowered_transform] / [?lowered_transforms] seams, times each on the context's device, and
+    returns the routine of the fastest one. Candidates are carried in the canonical form of
+    {!Ir.Schedule_cache} — every candidate compile re-lowers with fresh symbols, so schedules are
+    rebound structurally inside each compile's transform closure, guarded by digest equality.
+    Winning schedules are persisted to a disk cache keyed by the code's canonical digest and the
+    backend, so a re-run of the same program skips the search.
+
+    The candidate space:
+
+    - {b Whole-routine presets}: the serial baseline, the default annotator, and a block-size
+      sweep through {!Ir.Schedule.default_gpu}.
+    - {b Fissioned candidates}: the kernel-fission pipeline ({!Ir.Schedule.fission_scheduled})
+      with per-segment schedules — the same preset sweep per segment, and beam rounds that extend
+      {e one segment at a time}. Per-segment schedules are cached keyed by the pre-schedule
+      segment's canonical digest. [`Zeros] segments keep the default zero-expansion; [`Solo]
+      segments stay unscheduled.
+    - {b Matmul sketches}: when a matmul micro-kernel is detected, parameterized instantiations
+      of the composed pipelines pinned by the schedule tests — register blocktiling
+      (Split + Swap + shared Stage + Privatize + materializing Unroll) on GPU backends, operand
+      packing (non-shared Stage + Privatize) on CPU backends — with dividing tile sizes.
+    - {b Beam-round menu actions} on the incumbents: dividing serial Splits, Swaps of perfect
+      serial pairs, Unrolls, Retype-Vectorized on non-accumulating innermost loops (CPU), and
+      Tensorize role permutations when the backend reports an mma capability.
 
     Caveats (v1):
 
@@ -16,12 +33,9 @@
       non-idempotent routine, e.g. gradient accumulation, will accumulate the timing runs).
       Initialize inputs before tuning, and tune before meaningful state exists, or re-initialize
       afterwards.
-    - Passing an explicit transform disables the default annotator's kernel fission
-      ({!Ir.Schedule.maybe_default_schedules}); the tuner searches whole-routine schedules. When
-      the default annotator's conservative analysis rejects a routine wholesale, the seeds reduce
-      to the serial baseline (menu actions can still improve serial code).
     - Timing uses wall clock around a device sync, so it includes queue overhead; times are
-      min-of-N. *)
+      min-of-N. Static indices are bound to the midpoint of their declared ranges during timing
+      and restored afterwards. *)
 
 type report = {
   cache_hit : bool;  (** The schedule came from the disk cache; no search ran. *)
@@ -29,9 +43,15 @@ type report = {
   candidates_failed : int;
       (** Candidates rejected by op preconditions, hardware limits, or backend compilation. *)
   rounds_run : int;  (** Beam-expansion rounds actually executed (0 = seeds only). *)
+  sketch_candidates : int;
+      (** Matmul-sketch instantiations seeded (0 when no matmul micro-kernel was detected or no
+          tile sizes divide the extents). Deterministic given the computation and backend. *)
+  fissioned : bool;  (** The winning candidate compiles as multiple fissioned kernels. *)
   baseline_ms : float;
   best_ms : float;
   best_schedule : Ir.Schedule_cache.saved_schedule;
+      (** The winner's schedule; for a fissioned winner, the concatenation of the per-segment
+          schedules (informational). *)
 }
 
 val tune :
@@ -45,8 +65,8 @@ val tune :
      [autotune_repeats] (3). *)
   ?seed_block_sizes:int list ->
   (* Workgroup sizes swept through {!Ir.Schedule.default_gpu} as seed candidates on GPU backends
-     (default [[64; 128; 256; 512]]), in addition to the config-default preset and the serial
-     baseline. *)
+     (default [[64; 128; 256; 512]]), both whole-routine and per-fission-segment, in addition to
+     the config-default preset and the serial baseline. *)
   ?cache_dir:string ->
   (* Directory of the schedule disk cache; [""] disables caching. Default from config
      [autotune_cache_dir] ([autotune_cache]). *)
@@ -57,6 +77,6 @@ val tune :
   Context.t * Context.routine
 (** Like {!Context.compile}, but returns the empirically fastest of the searched schedule
     candidates. The returned context/routine come from an ordinary sibling compile of [ctx], so
-    execution-dependency tracking behaves as if the winning compile were the only one. Static
-    indices are bound to the midpoint of their declared ranges during timing runs. Raises like
-    {!Context.run} would (e.g. uninitialized inputs) — tune in the same state you would run in. *)
+    execution-dependency tracking behaves as if the winning compile were the only one. Raises
+    like {!Context.run} would (e.g. uninitialized inputs) — tune in the same state you would run
+    in. *)
