@@ -530,6 +530,45 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
             else bprop ti
           else None)
     in
+    (* Mirror of the forward-fragment ordering above (gh-461), with the edge reversed: a fragment
+       accumulating into a node's gradient must precede the fragment that embeds the node's
+       backprop code. The reversed [ordered_ts] already handles this whenever backprop ownership
+       coincides with forward ownership (both belong to the first-constructed consumer); this pass
+       also covers children whose forward root was consumed separately (e.g. by a
+       non-differentiable operation), for which the forward ordering gives no constraint. *)
+    let bcks =
+      match bcks with
+      | [] | [ _ ] -> bcks
+      | _ ->
+          let tagged =
+            List.map bcks ~f:(fun c ->
+                ( c,
+                  Set.diff
+                    (snd @@ Asgns.collect_nodes_guess_output c.Asgns.asgns)
+                    c.Asgns.embedded_nodes ))
+          in
+          let rec order acc remaining =
+            match remaining with
+            | [] -> List.concat @@ List.rev acc
+            | _ ->
+                let blocked_by (c, _) =
+                  List.exists remaining ~f:(fun (_, other_writes) ->
+                      not (Set.is_empty (Set.inter c.Asgns.embedded_nodes other_writes)))
+                in
+                let ready, blocked = List.partition_tf remaining ~f:(Fn.non blocked_by) in
+                if List.is_empty ready then (
+                  (* A fragment-level dependency cycle would need statement-level interleaving to
+                     schedule correctly; fall back to the given order like before this check. *)
+                  Stdlib.Printf.eprintf
+                    "Warning: OCANNL backprop-code fragments have a dependency cycle (operands of \
+                     tensor #%d); some gradients may be read before they are accumulated.\n\
+                     %!"
+                    id;
+                  (List.concat @@ List.rev acc) @ List.map remaining ~f:fst)
+                else order (List.map ready ~f:fst :: acc) blocked
+          in
+          order [] tagged
+    in
     let diff = Some { grad = g; zero_grads; backprop = Asgns.empty_comp } in
     let t = { t with diff } in
     let backprop = Asgns.sequence @@ (grad_asn ~t ~g ~projections :: bcks) in
