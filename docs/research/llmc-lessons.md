@@ -17,6 +17,9 @@ fused_classifier,matmul,encoder,global_norm,zero,cuda_utils}.cuh`,
 `llmc/schedulers.h`, `llmc/cudnn_att.cpp`, and the `dev/cuda` directory page.
 OCANNL was verified against `master` @ `e22a1d69` (2026-07-07); file citations
 are by module/function name, with line numbers only where load-bearing.
+Note: `e22a1d69` is ahead of the docs branch this note lands on (based on
+`605d565a`) — items marked (†) below are on master but not yet in this branch's
+tree; they become accurate here once the branch merges into current master.
 
 ---
 
@@ -36,7 +39,7 @@ Verified current state (all on `master` @ `e22a1d69`):
 - **Default GPU annotator + kernel fission**: `Schedule.maybe_default_schedules`
   auto-parallelizes CUDA/Metal kernels (`automatic_gpu_schedule`, default true);
   `schedule_fission` splits routines at materialized cross-nest edges, with
-  aligned cross-nest parallelism (PR #111) merging what can stay in one kernel.
+  aligned cross-nest parallelism (PR #111, †) merging what can stay in one kernel.
   `Schedule.check_hardware_limits` validates every kernel against
   `Backend_intf.hardware_limits` (threads, shared memory, MMA capability).
 - **Autotune** (`arrayjit/lib/autotune.ml{,i}`): beam search over schedule
@@ -54,11 +57,12 @@ Verified current state (all on `master` @ `e22a1d69`):
 - **Interval analysis** (`arrayjit/lib/interval.ml`) folds bounds guards;
   index precision is signed int32/int64 selected by `Ops.index_prec` /
   `large_models` (`arrayjit/lib/ops.ml:74`).
-- **Backends renamed**: `cc` (default), `multidev_cc` (one domain + FIFO per
+- **Backends renamed** (†): `cc` (default), `multidev_cc` (one domain + FIFO per
   device ordinal), `cuda`, `metal`; old names are `get_backend` aliases
-  (`arrayjit/lib/backends.ml:843-855`). Metal encodes fissioned segments of one
-  routine into batched dispatches on one command buffer with event chains at
-  segment boundaries.
+  (`arrayjit/lib/backends.ml:843-855` on master — this branch's tree still has
+  the pre-rename `sync_cc`/`multicore_cc` surface). Metal encodes fissioned
+  segments of one routine into batched dispatches on one command buffer with
+  event chains at segment boundaries (†).
 - **Model-side**: tensor persistence with namespaced checkpoints
   (`lib/persistence.mli`), one-hot→gather rewrite
   (`Low_level.rewrite_one_hot_reductions` / `Get_dynamic`, gh-343), RoPE and
