@@ -99,9 +99,6 @@ struct
 
   let num_devices () = 0
 
-  let new_stream _device =
-    failwith @@ "Backend " ^ Config.name ^ " missing -- install the corresponding library"
-
   let from_host ~dst:_ ~dst_loc:_ _nd =
     failwith @@ "Backend " ^ Config.name ^ " missing -- install the corresponding library"
 

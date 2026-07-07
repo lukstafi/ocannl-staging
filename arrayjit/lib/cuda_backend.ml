@@ -252,8 +252,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     in
     Option.value_or_thunk !devices.(ordinal) ~default
 
-  let new_stream (device : device) : device = device
-
   let _cuda_properties =
     let cache =
       let%debug2_sexp f (ordinal : int) =

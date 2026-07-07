@@ -204,8 +204,6 @@ module Impl = struct
        instance *)
     num_devs ()
 
-  let new_stream (device : device) : device = device
-
   (* --- Event Handling --- *)
   let is_done event =
     let current_value = Me.SharedEvent.get_signaled_value event.shared in

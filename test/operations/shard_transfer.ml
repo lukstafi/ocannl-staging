@@ -13,9 +13,10 @@ module Tn = Ir.Tnode
    invalid configurations must raise.
 
    Part 2 exercises the raw-backend merge-buffer all-reduce that [Parallel.grad_sync] is built on:
-   two streams hold distinct values of the same tnode; a [device_to_device ~into_merge_buffer:Copy]
-   transfer routine plus an accumulating consumer ([g =+ g.merge]) must sum them on the owner
-   stream. This is the cross-stream channel that survived gh-ocannl-341. *)
+   two context trees hold distinct values of the same tnode; a [device_to_device
+   ~into_merge_buffer:Copy] transfer routine plus an accumulating consumer ([g =+ g.merge]) must
+   sum them into the owner context. This is the cross-context channel that survived
+   gh-ocannl-341. *)
 
 let make_batch label vals =
   (* A batch-major tensor of shape [n] along the batch axis, values from [vals]. *)
@@ -74,8 +75,6 @@ let () =
   let backend = Backends.backend_module (Backends.get_backend ~backend_name:"sync_cc" ()) in
   let module Backend = (val backend : Ir.Backend_intf.Backend) in
   let device = Backend.get_device ~ordinal:0 in
-  let stream0 = Backend.new_stream device in
-  let stream1 = Backend.new_stream device in
   (* Note: [g]/[m] are reserved shorthands in %cd, so use descriptive names. *)
   let owner_g = make_vec "owner_g" [| 0.; 0. |] in
   let tmp = make_vec "tmp" [| 0.; 0. |] in
@@ -91,12 +90,13 @@ let () =
     Ir.Ndarray.set_flat_values nd vals;
     nd
   in
-  (* Owner (stream0) starts at [1 2]; source (stream1) holds [3 4]. *)
-  let ctx1 = Backend.make_context ~optimize_ctx:(Backend.empty_optimize_ctx ()) stream1 in
+  (* Owner (ctx0) starts at [1 2]; source (ctx1) holds [3 4] -- two independent context trees on
+     the same device. *)
+  let ctx1 = Backend.make_context ~optimize_ctx:(Backend.empty_optimize_ctx ()) device in
   let ctx1 = Backend.init_from_host ctx1 owner_g.Tensor.value (host_vec [| 3.; 4. |]) in
-  let ctx0 = Backend.make_context ~optimize_ctx:(Backend.empty_optimize_ctx ()) stream0 in
+  let ctx0 = Backend.make_context ~optimize_ctx:(Backend.empty_optimize_ctx ()) device in
   let ctx0 = Backend.init_from_host ctx0 owner_g.Tensor.value (host_vec [| 1.; 2. |]) in
-  (* All-reduce stream1's value into stream0 via the merge buffer: owner = [1 2] + [3 4] = [4 6].
+  (* All-reduce ctx1's value into ctx0 via the merge buffer: owner = [1 2] + [3 4] = [4 6].
      The merge buffer is array-level (no shape inference), so it is copied into a pre-shaped temp
      [tmp] and then accumulated into the owner. *)
   let%cd copy_merge = tmp =: owner_g.merge in
@@ -115,10 +115,10 @@ let () =
       Task.run copy_routine.schedule;
       let add_routine = Backend.link copy_routine.context add_code in
       Task.run add_routine.schedule);
-  Backend.await stream0;
+  Backend.await device;
   let out_nd = host_vec [| 0.; 0. |] in
   ignore (Backend.to_host ctx0 owner_g.Tensor.value out_nd : bool);
-  Backend.await stream0;
+  Backend.await device;
   let summed = Ir.Ndarray.retrieve_flat_values out_nd in
   Stdio.printf "all-reduce sum = [%s]\n"
     (String.concat ~sep:" " (Array.to_list (Array.map summed ~f:(Printf.sprintf "%g"))));
