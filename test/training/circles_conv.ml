@@ -91,6 +91,7 @@ let () =
   (* Training setup *)
   let epochs = 1000 in
   let total_steps = epochs * n_batches in
+  Train.every_non_literal_materialized batch_loss;
   let update = Train.grad_update batch_loss in
   let%op learning_rate = 0.01 *. ((1.2 *. !..total_steps) - !@step_n) /. !..total_steps in
   Train.set_materialized learning_rate.value;
@@ -101,8 +102,14 @@ let () =
 
   let ctx = Context.auto () in
   let ctx = Train.init_params ctx bindings batch_loss in
-  let sgd_routine = Train.to_routine ctx bindings (Asgns.sequence [ update; sgd ]) in
-  let ctx = Context.context sgd_routine in
+  (* Tune the step schedule empirically. [rounds:0] keeps only the preset seed candidates,
+     which all preserve reduction order — the trained values are schedule-invariant, so this
+     file's expected output stays deterministic no matter which seed wins. [timing_ctx] gives the
+     tuner a scratch lineage (with its own freshly initialized parameter buffers) to time
+     candidates against, so the timing runs cannot perturb the real training state (a step timed
+     on all-zero data inputs poisons parameters with inf/NaN through log 0). *)
+  let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
+  let ctx, sgd_routine = Autotune.tune ~rounds:0 ~timing_ctx:scratch ctx (Asgns.sequence [ update; sgd ]) bindings in
   let step_ref = IDX.find_exn (Context.bindings sgd_routine) step_n in
   step_ref := 0;
 

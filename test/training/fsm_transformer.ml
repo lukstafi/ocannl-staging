@@ -121,6 +121,7 @@ let () =
   let%op loss = neg (log output_probs) in
   let%op batch_loss = (loss ++ "...|... => 0") /. !..total_tokens in
 
+  Train.every_non_literal_materialized batch_loss;
   let update = Train.grad_update batch_loss in
   let steps = epochs * n_batches in
   let%op learning_rate = 0.5 *. ((1.5 *. !..steps) - !@step_n) /. !..steps in
@@ -157,7 +158,14 @@ let () =
   Set.iter
     (snd @@ Asgns.collect_nodes_guess_output train_comp.Asgns.asgns)
     ~f:Train.set_materialized;
-  let ctx, sgd_step = Context.compile ctx train_comp bindings in
+  (* Tune the step schedule empirically. [rounds:0] keeps only the preset seed candidates,
+     which all preserve reduction order — the trained values are schedule-invariant, so this
+     file's expected output stays deterministic no matter which seed wins. [timing_ctx] gives the
+     tuner a scratch lineage (with its own freshly initialized parameter buffers) to time
+     candidates against, so the timing runs cannot perturb the real training state (a step timed
+     on all-zero data inputs poisons parameters with inf/NaN through log 0). *)
+  let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
+  let ctx, sgd_step = Autotune.tune ~rounds:0 ~timing_ctx:scratch ctx train_comp bindings in
   (* Compile the inference routine using the context from training compilation, which already
      contains the mask constant and all model weight buffers. This is forward-only: no backprop, no
      SGD update. *)
