@@ -77,21 +77,15 @@ let grad_update ?(setup_for_parallel = false) ?accum_loss loss =
     Set.iter loss.Tensor.params ~f:(fun p ->
         set_materialized (Option.value_exn ~here:[%here] p.diff).grad);
   (* Note: the %cd syntax for [loss.grad] does not modify roots. *)
-  let update =
-    [%cd
-      ~~(loss "forward and gradient update";
-         loss.forward;
-         ~~(loss "zero grads and backprop";
-            loss.zero_grads;
-            loss.grad =: 1;
-            loss.backprop))]
-  in
-  match accum_loss with
-  | None -> update
-  | Some acc ->
-      (* Sequenced after the update so referencing [loss] reads its (already computed) value
-         rather than embedding its forward code a second time. *)
-      Asgns.sequence [ update; [%cd ~~(loss "accumulate loss"; acc =+ loss)] ]
+  [%cd
+    ~~(loss "forward and gradient update";
+       (* In the accumulating branch, referencing [loss] embeds its forward code (the single
+          consumption of it), so the one statement computes the loss and accumulates it. *)
+       (match accum_loss with Some acc -> acc =+ loss | None -> loss.forward);
+       ~~(loss "zero grads and backprop";
+          loss.zero_grads;
+          loss.grad =: 1;
+          loss.backprop))]
 
 (** See: https://github.com/tinygrad/tinygrad/blob/master/tinygrad/nn/optim.py *)
 let sgd_one ~learning_rate ?(momentum = 0.0) ?(weight_decay = 0.0) ?(nesterov = false) p =
