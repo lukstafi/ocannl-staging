@@ -880,6 +880,17 @@ module Impl = struct
       Stdio.prerr_endline error_msg;
       failwith error_msg
 
+  (* The simdgroup-matrix types and functions are declared in <metal_simdgroup_matrix>.
+     <metal_stdlib> is the umbrella header and pulls them in on current toolchains (the
+     tensorized parity tests compile and run against it alone), but the dedicated header is the
+     documented home, so inject it into kernels that emit the intrinsics — and only those, keeping
+     every other kernel's source byte-identical (PR #101 review; mirrors [cuda_to_ptx]'s <mma.h>
+     injection). *)
+  let maybe_include_simdgroup_matrix source =
+    if String.is_substring source ~substring:"simdgroup_load" then
+      "#include <metal_simdgroup_matrix>\n" ^ source
+    else source
+
   let compile ~name bindings lowered =
     let module Syntax = C_syntax.C_syntax (C_syntax_config (struct
       let procs = [| lowered |]
@@ -891,8 +902,9 @@ module Impl = struct
     let metal_includes = {|#include <metal_stdlib>
 using namespace metal;|} in
     let source =
-      Syntax.filter_and_prepend_builtins ~includes:metal_includes ~builtins:Builtins_metal.builtins
-        ~proc_doc
+      maybe_include_simdgroup_matrix
+      @@ Syntax.filter_and_prepend_builtins ~includes:metal_includes
+           ~builtins:Builtins_metal.builtins ~proc_doc
     in
     {
       metal_source = source;
@@ -923,8 +935,9 @@ using namespace metal;|} in
     let metal_includes = {|#include <metal_stdlib>
 using namespace metal;|} in
     let source =
-      Syntax.filter_and_prepend_builtins ~includes:metal_includes ~builtins:Builtins_metal.builtins
-        ~proc_doc:final_doc
+      maybe_include_simdgroup_matrix
+      @@ Syntax.filter_and_prepend_builtins ~includes:metal_includes
+           ~builtins:Builtins_metal.builtins ~proc_doc:final_doc
     in
     let traced_stores = Array.map lowereds ~f:(Option.map ~f:(fun l -> l.Low_level.traced_store)) in
     let funcs = Array.map funcs_and_docs ~f:(Option.map ~f:fst) in
