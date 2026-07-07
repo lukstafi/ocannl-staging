@@ -52,10 +52,10 @@ Once the tokenizer is functional and the integration test passes:
 
 ### Acceptance criteria
 
-- [ ] A utility function converts BPE tokenizer output (`int array`) to OCANNL tensors with padding/truncation
-- [ ] At least one integration test demonstrates the dataprep tokenizer working with OCANNL tensors
-- [ ] README line 73 checkbox is checked
-- [ ] ROADMAP tokenizer entry is marked complete
+- [x] A utility function converts BPE tokenizer output (`int array`) to OCANNL tensors with padding/truncation (`Nn_blocks.token_ids_of_array` and the batched `Nn_blocks.token_ids_of_batch`)
+- [x] At least one integration test demonstrates the dataprep tokenizer working with OCANNL tensors (`test/training/tokenizer_roundtrip.ml`)
+- [x] README milestone checkbox is checked
+- [x] ROADMAP tokenizer entry is marked complete
 
 ### Edge cases to consider
 
