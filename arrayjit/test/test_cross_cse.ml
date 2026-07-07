@@ -18,7 +18,9 @@ let make_tn ~id ~label ~dim =
 let summarize (llc : LL.t) : int * int * int =
   let rec count_proc ((dl, ls, gl) as acc) (llc : LL.t) =
     match llc with
-    | LL.Noop | LL.Comment _ | LL.Staged_compilation _ | LL.Zero_out _ | LL.Workgroup_barrier -> acc
+    | LL.Noop | LL.Comment _ | LL.Staged_compilation _ | LL.Zero_out _ | LL.Workgroup_barrier
+    | LL.Tile_mma _ ->
+        acc
     | LL.Declare_local _ -> (dl + 1, ls, gl)
     | LL.Seq (a, b) -> count_proc (count_proc acc a) b
     | LL.For_loop { body; _ } -> count_proc acc body

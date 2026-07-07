@@ -28,7 +28,7 @@ let summarize (llc : LL.t) : int * int =
   let rec proc (llc : LL.t) =
     match llc with
     | LL.Noop | LL.Comment _ | LL.Staged_compilation _ | LL.Zero_out _ | LL.Declare_local _
-    | LL.Workgroup_barrier ->
+    | LL.Workgroup_barrier | LL.Tile_mma _ ->
         ()
     | LL.Seq (a, b) ->
         proc a;

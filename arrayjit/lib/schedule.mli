@@ -45,7 +45,12 @@ type optop =
           constants, so that {!apply}'s trailing simplify + CSE see the copies — constant-folding
           [Affine] indices and deduplicating repeated loads. Register blocktiling is [Split] +
           materializing [Unroll] + the existing CSE (schedule-ir-optops §4). *)
-  | Stage of { source : Tn.t; tile_loops : Indexing.symbol list; shared : bool }
+  | Stage of {
+      source : Tn.t;
+      tile_loops : Indexing.symbol list;
+      shared : bool;
+      cooperative : int option;
+    }
       (** Stage reads of [source] through a tile: a fresh [Local]-mode node registered in the
           traced store, its dims derived per source axis from the range of the index terms over
           [tile_loops] (schedule-ir-optops §5). All reads of [source] must use one index vector
@@ -66,7 +71,20 @@ type optop =
           control flow (rejected by [validate_parallel]), so v1 shared staging requires tile sizes
           dividing the extents. With [shared = false] (CPU operand packing) all tile loops must be
           [Serial] and a plain serial copy nest is inserted, no barriers. The source must not be
-          written in the routine. *)
+          written in the routine.
+
+          [cooperative = Some w] is the lane-aware mode for composing with
+          {!constructor-Tensorize} (docs/proposals/tensorize-mma.md, "Lane-aware Stage"): shared
+          staging with all-[Serial] tile loops whose load nest is wrapped in a {e fresh}
+          extent-[w] [Workgroup] lane loop — positionally the same slot 0 the tensorized
+          micro-kernel's lane loop binds, with extent agreement enforced downstream by
+          [Low_level.validate_parallel]'s barrier-strength uniformity (pass the backend's
+          {!field:Backend_intf.mma_simd_width} to both ops). The lane is folded linearly into the
+          innermost fresh copy loop: extent [<= w] replaces the loop by the lane index under a
+          [lane < extent] guard (folds when equal); an extent divisible by [w] iterates
+          [extent / w] chunks at [w*step + lane]; otherwise the whole nest is restricted to lane
+          0 (division is not expressible in affine indices). The lane loop covers workgroup slot
+          0 for the staging-point coverage rule by construction. *)
   | Privatize of { target : Tn.t; over : Indexing.symbol }
       (** Accumulator privatization: contract the read-modify-write accumulation of the
           materialized [target] across the (Serial) [over] loop's whole subtree into a per-thread
@@ -92,6 +110,25 @@ type optop =
           of a materialized node is rejected by [Low_level.validate_parallel] in multi-threaded
           kernels — expanding it first lets the schedule split and annotate the zeroing with the
           same hardware geometry as the computation that follows. *)
+  | Tensorize of {
+      i : Indexing.symbol;
+      j : Indexing.symbol;
+      k : Indexing.symbol;
+      lane : Indexing.symbol;  (** Fresh symbol for the cooperating lane loop; see {!tensorize}. *)
+      simd_width : int;  (** Extent of the lane loop (the backend's
+                             {!field:Backend_intf.mma_simd_width}; 32 on Metal and CUDA). *)
+    }
+      (** Tensor-core emission (docs/proposals/tensorize-mma.md §3): replace the perfectly nested
+          serial [i × j × k] matmul micro-kernel — whose body is the single accumulation
+          [d[..., i, j] += a[..., i, k] * b[..., k, j]] (plain-add or FMA form; each operand's
+          tile spans its last two axes with unit coefficients, transposed layouts rejected in v1)
+          — with a [Low_level.Tile_mma] block statement covering the full [m×n×k] extents,
+          wrapped in a fresh [Workgroup]-typed lane loop of extent [simd_width]. The original nest
+          is kept as the statement's scalar [fallback]: backends without an MMA hook (or declining
+          a particular precision/shape) render it once per simdgroup under an [if (lane == 0)]
+          guard, so the op is always semantics-preserving. Apply after [Split]s and [Stage]s;
+          [Stage]/[Privatize] must come before it. Divisibility by the intrinsic tile (8 on
+          Metal) is a per-call emission concern, not checked here. *)
 [@@deriving sexp_of]
 
 type schedule = optop list [@@deriving sexp_of]
@@ -110,6 +147,15 @@ val split :
 val expand_zero : tn:Tn.t -> optop * Indexing.symbol list
 (** Builds an {!constructor-Expand_zero} with one fresh symbol per axis of [tn] (forcing [tn]'s
     dims) and returns the symbols for subsequent [Split]/[Retype] ops. *)
+
+val tensorize :
+  i:Indexing.symbol ->
+  j:Indexing.symbol ->
+  k:Indexing.symbol ->
+  simd_width:int ->
+  optop * Indexing.symbol
+(** Builds a {!constructor-Tensorize} with a fresh lane symbol (via [Indexing.get_symbol]) and
+    returns it. *)
 
 val apply :
   ?static_indices:Indexing.static_symbol list ->

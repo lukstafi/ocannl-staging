@@ -100,8 +100,8 @@ let () =
       sp_i;
       sp_j;
       sp_k;
-      Sched.Stage { source = ma.Tensor.value; tile_loops = [ i_i; k_i ]; shared = true };
-      Sched.Stage { source = mb.Tensor.value; tile_loops = [ k_i; j_i ]; shared = true };
+      Sched.Stage { source = ma.Tensor.value; tile_loops = [ i_i; k_i ]; shared = true; cooperative = None };
+      Sched.Stage { source = mb.Tensor.value; tile_loops = [ k_i; j_i ]; shared = true; cooperative = None };
       Sched.Privatize { target = mc1.Tensor.value; over = k_o };
     ]
   in
@@ -169,7 +169,7 @@ let () =
     in
     let sp_i, _, _ = Sched.split ~axis:i ~factor:bm ~outer:LL.Grid ~inner:LL.Workgroup in
     Sched.apply
-      [ sp_i; Sched.Stage { source = v.Tensor.value; tile_loops = [ j ]; shared = true } ]
+      [ sp_i; Sched.Stage { source = v.Tensor.value; tile_loops = [ j ]; shared = true; cooperative = None } ]
       opt
   in
   let ctx_b = Context.auto () in

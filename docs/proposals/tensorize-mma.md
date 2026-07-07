@@ -211,6 +211,107 @@ proposal.
 - [ ] Every schedule prefix without `Tensorize` behaves exactly as today (the op is
       purely additive).
 
+## As landed (2026-07-06, T1+T2 core)
+
+The implementation adjusted the design in a few places; the differences are recorded here rather
+than rewritten into the sections above.
+
+- **Block semantics for `Tile_mma`.** `m`/`n`/`k` are the *covered block extents* (multiples of
+  the backend's intrinsic tile), not the intrinsic shape: one statement is the whole
+  `d[0..m)×[0..n) += a·b` block over `k` reduction steps. Fragment residency across the reduction
+  thereby becomes an intra-statement codegen concern — the Metal emission declares the
+  `(m/8)×(n/8)` accumulator fragment array, loads `d` once, loops `k/8` mma steps, stores once —
+  so the `simdgroup_fragment` node marking and the `Privatize`-style accumulator contraction of
+  §3.4 were not needed. The proposal's per-intrinsic-step statement plus fragment-marked `Local`
+  node remains available as a refinement if cross-statement residency (e.g. across a staged `k_o`
+  loop) is ever required.
+- **`Tensorize` names loops, not shapes**: `Tensorize { i; j; k; lane; simd_width }` (the
+  `Schedule.tensorize` helper mints `lane`). It requires the perfectly nested serial `i×j×k`
+  micro-kernel with the single accumulation body (`d[...,i,j] += a[...,i,k] * b[...,k,j]`,
+  plain-add or FMA form as `optimize`'s simplify leaves it; unit coefficients on the last two
+  axes, transposed layouts rejected). Divisibility by the intrinsic tile is *not* checked by the
+  transform — the schedule layer is backend-agnostic; `mma_syntax` declines per call and the
+  fallback runs, so the op is always semantics-preserving.
+- **The `mma_syntax` hook** receives the three operand precisions (`d_prec`/`a_prec`/`b_prec` —
+  the backend decides which combinations its units support: Metal declines mixed, CUDA wmma's
+  flagship is f16×f16→f32) and, per operand: a pointer expression to the tile base (already
+  offset), the leading-dimension stride in elements, and the address space
+  (`` `Device | `Shared | `Thread ``); it returns `PPrint.document option`, `None` declining that
+  call (unsupported combination, non-multiple extents, stride constraints, thread-space
+  operand).
+- **Barrier bracketing.** Sibling statements (the zeroing of `d`, staged loads) execute
+  lane-partitioned, so both the emitted intrinsic block and the `if (lane == 0)` fallback are
+  bracketed in `threadgroup_barrier`s on backends that bind the lane in hardware. Relatedly,
+  `Tile_mma` *is* a barrier for validation and code motion (`contains_barrier` returns true), so
+  the workgroup-extent-uniformity and no-`If`-guard rules apply wholesale, as §2 intended.
+- **Capability gating**: `Backend_intf.hardware_limits` grew
+  `mma : { mma_simd_width; mma_tile } option` (Metal: 32, 8×8×8, gated on the Apple7 GPU family);
+  supported precisions live in the emission, not the descriptor.
+- **Composition with shared `Stage`** initially deferred (Stage runs before Tensorize and could
+  not see the future lane loop, so its cooperative loads would have raced along the lane axis);
+  since 2026-07-07 the lane-aware `cooperative` mode implements the composition — see the
+  dedicated section below. Plain (unstaged) tensorized schedules remain valid and simpler: one
+  statement spans the full reduction extent, amortizing `d` traffic entirely.
+- **Parity nuance**: the C-backend fallback matches the serial twin *bitwise* (same operation
+  order); the Metal simdgroup path matches within f32 tolerance — the tile reduction
+  reassociates, so "cc matches bitwise" is the exact criterion and GPU parity is tolerance-based.
+- Exercised by `test/operations/schedule_mma_matmul.ml` (serial twin vs. tensorized schedule; an
+  f32 variant and an f16 variant whose inputs make half arithmetic exact — so parity is bitwise on
+  every backend and rendering path, `simdgroup_half8x8` included; structural checks per backend;
+  pattern-discipline error).
+- **T3 status (2026-07-07): drafted, unverified.** `cuda_backend.ml` carries a wmma `mma_syntax`
+  (16×16×16 fragment blocks mirroring the Metal emission; f16×f16→f32, f16×f16→f16, and
+  bf16×bf16→f32 on sm_80+, the rest declined — uniform f32 could target tf32 shapes but truncates
+  the mantissa, left on the scalar path until the numerics policy is decided). `cuda_to_ptx`
+  injects `#include <mma.h>` and a `--gpu-architecture` option only into kernels whose source uses
+  wmma, so everything else compiles exactly as before; `hardware_limits.mma` is populated from the
+  minimum device compute capability (≥ 7.0). There is no CUDA device in local development (the
+  Metal-first ordering), so this is compile-checked only: the f16 leg of `schedule_mma_matmul`
+  accepts either the wmma or the fallback rendering structurally, while its bitwise parity check
+  is the verification signal for CI. Known draft risks: nvrtc's toolkit-header resolution for
+  `mma.h`, wmma's 256-bit pointer-alignment requirement for `__shared__` tiles (device pools are
+  alignment-safe), and the exact stride-multiple rules per element type.
+
+## Lane-aware Stage (implemented 2026-07-07)
+
+Composes shared-memory staging with `Tensorize`, dissolving the deferral above:
+`Stage { …; cooperative = Some simd_width }` (shared, all-`Serial` tile loops). Exercised by the
+staged+tensorized variant of `schedule_mma_matmul` — on Metal the micro-kernel reads both tiles
+from `threadgroup` memory via `simdgroup_load`, the mb tile's lane load replaces the minor-axis
+loop outright (extent = width, guard folded), and the ma tile keeps its surviving `lane < 8`
+guard. Design as sketched:
+
+1. **Stage mints its own lane loop.** A `~cooperative:simd_width` mode on shared `Stage` wraps the
+   cooperative load nest in a *fresh* extent-`simd_width` `Workgroup`-typed loop. No coordination
+   with `Tensorize`'s lane loop is needed beyond passing the same `simd_width`: positional slot
+   assignment puts both innermost `Workgroup` loops in slot 0, and `validate_parallel`'s
+   barrier-strength uniformity (a `Tile_mma` *is* a barrier) rejects any extent mismatch. This
+   dissolves the ordering dilemma — Stage still runs before Tensorize and never needs to know
+   about the statement it feeds.
+2. **Partition the loads along the lane.** Fold the lane symbol linearly into the copy nest's
+   innermost fresh loop: when that loop's extent `E` is a multiple of `simd_width`, iterate
+   `E / simd_width` steps at index `e·W + w` — an `Affine` term, expressible today. Division and
+   modulo are *not* in the affine index algebra, so non-multiple extents fall back to the existing
+   representative-thread discipline (`w == 0`, or `w < E` when `E < W`) rather than a flattened
+   partition. Edge guards stay construct-then-fold.
+3. **Barriers unchanged.** The loads sit inside the lane loop, the `Workgroup_barrier` stays its
+   sibling at the staging point — hardware `Workgroup` loops bind rather than iterate, so the
+   barrier remains uniformly reached.
+4. **Tensorize composes as-is.** Its micro-kernel recognition already works over Stage-remapped
+   tile reads, and `Tile_mma` takes strides from the operand tnode's dims, so the staged tile's
+   leading dimension is automatic. The cost: with staging at a serial `k_o`, `Tile_mma.k` becomes
+   `BK` per iteration, so `d` fragments are loaded/stored once per `k_o` — the residency the
+   full-`K` block statement otherwise keeps. Recovering cross-`k_o` residency is the original
+   proposal's fragment-marked accumulator node (§3.4), or an emission-time hoist of the `d`
+   load/store when the enclosing serial loop provably doesn't otherwise touch `d`.
+5. **`Workgroup_lane` only if needed.** A distinguished axis flavor becomes worthwhile only when
+   some transform must *recognize* lane loops structurally; extent-matching suffices for v1.
+
+Landed scope matched the estimate: ~100 lines in `apply_stage` plus the `cooperative` field; no
+IR changes; no `validate_parallel` changes. One addition the sketch missed: the staging-point
+workgroup-slot coverage check counts slot 0 as covered by construction in cooperative mode (the
+fresh lane loop binds it; extent agreement is enforced downstream by the uniformity rule).
+
 ## Relations
 
 - [schedule-ir-optops](schedule-ir-optops.md): §5 `Stage` supplies the shared tiles and

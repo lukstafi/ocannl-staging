@@ -155,6 +155,18 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
         Option.iter Slab.free_pool ~f:(fun free -> free device ~pool_id))
 
   let%diagn2_sexp cuda_to_ptx ~name cu_src =
+    (* DRAFT (tensorize-mma T3): kernels containing wmma intrinsics need <mma.h> and an explicit
+       arch (nvrtc's default is below sm_70). Injected only when used, so kernels without tensor
+       cores compile exactly as before even where the toolkit headers are absent. The
+       [(wmma-bf16)] marker is emitted by [mma_syntax] for bf16 fragments (sm_80+). *)
+    let uses_wmma = String.is_substring cu_src ~substring:"nvcuda::wmma" in
+    let cu_src = if uses_wmma then "#include <mma.h>\n" ^ cu_src else cu_src in
+    let wmma_arch_opts =
+      if not uses_wmma then []
+      else if String.is_substring cu_src ~substring:"(wmma-bf16)" then
+        [ "--gpu-architecture=compute_80" ]
+      else [ "--gpu-architecture=compute_70" ]
+    in
     let name_cu = name ^ ".cu" in
     if Utils.settings.output_debug_files_in_build_directory then (
       let build_file = Utils.open_build_file ~base_name:name ~extension:".cu" in
@@ -194,7 +206,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           else []
     in
     let options =
-      cuda_include_opt
+      cuda_include_opt @ wmma_arch_opts
       @ ("--use_fast_math" :: (if Utils.with_runtime_debug () then [ "--device-debug" ] else []))
     in
     let ptx = Nvrtc.compile_to_ptx ~cu_src ~name:name_cu ~options ~with_debug in
@@ -338,6 +350,23 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
   }
   [@@deriving sexp_of]
 
+  (* Minimum compute capability (major) across devices, memoized behind [lazy] (driver init and
+     device enumeration must not run at backend-module initialization). Tensor cores (wmma) need
+     sm_70+, bf16 wmma sm_80+ (docs/proposals/tensorize-mma.md T3). *)
+  let min_compute_capability_major =
+    let cc =
+      lazy
+        (let n = num_devices () in
+         if n = 0 then 0
+         else
+           Array.init n ~f:(fun ordinal ->
+               let a : Cu.Device.attributes = Cu.Device.get_attributes (Cu.Device.get ~ordinal) in
+               a.compute_capability_major)
+           |> Array.min_elt ~compare:Int.compare
+           |> Option.value ~default:0)
+    in
+    fun () -> Lazy.force cc
+
   module Cuda_syntax_config (Input : sig
     val procs : Low_level.optimized array
   end) =
@@ -421,6 +450,121 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Ops.Half_prec _, 8 -> "half8_t"
       | _, 1 -> typ_of_prec prec
       | _ -> invalid_arg "Cuda_backend.vec_typ_of_prec: invalid combination"
+
+    (* DRAFT (tensorize-mma T3; unexercised locally -- no CUDA device, per the Metal-first
+       backend ordering; to be verified in CI): cooperative tile-MMA emission for
+       [Low_level.Tile_mma] via the CUDA wmma C++ API. The extent-32 lane loop binds threadIdx.x,
+       so the 32 consecutive .x threads reaching the statement form the cooperating warp; 16x16x16
+       fragment blocks are resident across the whole [k] extent, mirroring the Metal emission.
+       Supported combinations: f16 x f16 -> f32 (the flagship), f16 x f16 -> f16, and
+       bf16 x bf16 -> f32 (sm_80+; the [(wmma-bf16)] marker makes [cuda_to_ptx] select the
+       arch). Uniform f32 could target tf32 shapes on sm_80+, but tf32 truncates the mantissa to
+       10 bits -- left on the scalar path until the numerics policy is decided. Declines (the
+       barrier-bracketed lane-0 fallback renders instead) on: other precision combinations,
+       extents not multiples of 16, leading dimensions violating wmma's stride constraint (a
+       multiple of 8 elements for 16-bit types, 4 for f32), thread-space operands (per-thread
+       stacks are not a jointly-owned tile), and devices below sm_70. *)
+    let mma_syntax =
+      Some
+        (fun ~d_prec ~a_prec ~b_prec ~m ~n ~k ~d:(d_ptr, ldd, d_space) ~a:(a_ptr, lda, a_space)
+             ~b:(b_ptr, ldb, b_space) ->
+          let tile = 16 in
+          (* (a/b fragment element type, ld multiple for a/b, ld multiple for d, min sm major,
+             bf16 marker). Pointer declarations use [typ_of_prec] of the operand's own precision,
+             which coincides with the fragment element types below. *)
+          let combo =
+            match (a_prec, b_prec, d_prec) with
+            | Ops.Half_prec _, Ops.Half_prec _, Ops.Single_prec _ ->
+                Some ("__half", "float", 8, 4, 7, false)
+            | Ops.Half_prec _, Ops.Half_prec _, Ops.Half_prec _ ->
+                Some ("__half", "__half", 8, 8, 7, false)
+            | Ops.Bfloat16_prec _, Ops.Bfloat16_prec _, Ops.Single_prec _ ->
+                Some ("__nv_bfloat16", "float", 8, 4, 8, true)
+            | _ -> None
+          in
+          let loadable = function
+            | `Device | `Shared -> true (* generic-address loads cover both *)
+            | `Thread -> false
+          in
+          match combo with
+          | Some (ab_typ, acc_typ, ab_ld_mult, d_ld_mult, min_major, is_bf16)
+            when m % tile = 0 && n % tile = 0 && k % tile = 0
+                 && lda % ab_ld_mult = 0 && ldb % ab_ld_mult = 0 && ldd % d_ld_mult = 0
+                 && loadable d_space && loadable a_space && loadable b_space
+                 && min_compute_capability_major () >= min_major ->
+              let open PPrint in
+              let mt = m / tile and nt = n / tile and kt = k / tile in
+              let frag kind typ layout =
+                Printf.sprintf "nvcuda::wmma::fragment<nvcuda::wmma::%s, %d, %d, %d, %s%s>" kind
+                  tile tile tile typ
+                  (match layout with Some l -> ", nvcuda::wmma::" ^ l | None -> "")
+              in
+              let ptr_decl name typ ptr =
+                string (Printf.sprintf "%s *%s = " typ name) ^^ ptr ^^ semi
+              in
+              let barrier = "__syncthreads();" in
+              let body_lines =
+                [
+                  barrier;
+                  Printf.sprintf "%s __mma_acc[%d][%d];" (frag "accumulator" acc_typ None) mt nt;
+                  Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                  Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                  Printf.sprintf
+                    "    nvcuda::wmma::load_matrix_sync(__mma_acc[__mi][__ni], __mma_dp + __mi * \
+                     %d * %d + __ni * %d, %d, nvcuda::wmma::mem_row_major);"
+                    tile ldd tile ldd;
+                  "  }";
+                  "}";
+                  Printf.sprintf "for (int __ki = 0; __ki < %d; ++__ki) {" kt;
+                  Printf.sprintf "  %s __mma_bf[%d];"
+                    (frag "matrix_b" ab_typ (Some "row_major"))
+                    nt;
+                  Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                  Printf.sprintf
+                    "    nvcuda::wmma::load_matrix_sync(__mma_bf[__ni], __mma_bp + __ki * %d * %d \
+                     + __ni * %d, %d);"
+                    tile ldb tile ldb;
+                  "  }";
+                  Printf.sprintf "  for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                  Printf.sprintf "    %s __mma_af;" (frag "matrix_a" ab_typ (Some "row_major"));
+                  Printf.sprintf
+                    "    nvcuda::wmma::load_matrix_sync(__mma_af, __mma_ap + __mi * %d * %d + \
+                     __ki * %d, %d);"
+                    tile lda tile lda;
+                  Printf.sprintf "    for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                  "      nvcuda::wmma::mma_sync(__mma_acc[__mi][__ni], __mma_af, __mma_bf[__ni], \
+                   __mma_acc[__mi][__ni]);";
+                  "    }";
+                  "  }";
+                  "}";
+                  Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                  Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                  Printf.sprintf
+                    "    nvcuda::wmma::store_matrix_sync(__mma_dp + __mi * %d * %d + __ni * %d, \
+                     __mma_acc[__mi][__ni], %d, nvcuda::wmma::mem_row_major);"
+                    tile ldd tile ldd;
+                  "  }";
+                  "}";
+                  barrier;
+                ]
+              in
+              let body =
+                ptr_decl "__mma_dp" (typ_of_prec d_prec) d_ptr
+                ^^ hardline
+                ^^ ptr_decl "__mma_ap" ("const " ^ typ_of_prec a_prec) a_ptr
+                ^^ hardline
+                ^^ ptr_decl "__mma_bp" ("const " ^ typ_of_prec b_prec) b_ptr
+                ^^ hardline
+                ^^ separate_map hardline string body_lines
+              in
+              Some
+                (group
+                   (string
+                      (Printf.sprintf "{ /* tile_mma %dx%dx%d (wmma%s) */" m n k
+                         (if is_bf16 then "-bf16" else ""))
+                   ^^ nest 2 (hardline ^^ body)
+                   ^^ hardline ^^ rbrace))
+          | _ -> None)
 
     let binop_syntax prec v =
       (* TODO: consider using binop_syntax inherited from Pure_C_config and overriding only where
@@ -1166,6 +1310,13 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
              min_over (fun (a : Cu.Device.attributes) -> a.max_threads_per_block);
            max_workgroup_memory_bytes =
              min_over (fun (a : Cu.Device.attributes) -> a.max_shared_memory_per_block);
+           (* Tensor cores via wmma (tensorize-mma T3, draft): the 32-thread warp cooperates on
+              16x16x16 tiles from sm_70 up. Precision combinations are decided per call by
+              [mma_syntax]. *)
+           mma =
+             (if min_compute_capability_major () >= 7 then
+                Some { Backend_intf.mma_simd_width = 32; mma_tile = (16, 16, 16) }
+              else None);
          })
     in
     fun () -> Lazy.force limits

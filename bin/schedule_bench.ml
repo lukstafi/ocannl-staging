@@ -85,8 +85,8 @@ let () =
     let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
     [
       ez; sp_zi; sp_zj; sp_i; sp_j; sp_k;
-      Sched.Stage { source = ma.Tensor.value; tile_loops = [ i_i; k_i ]; shared = true };
-      Sched.Stage { source = mb.Tensor.value; tile_loops = [ k_i; j_i ]; shared = true };
+      Sched.Stage { source = ma.Tensor.value; tile_loops = [ i_i; k_i ]; shared = true; cooperative = None };
+      Sched.Stage { source = mb.Tensor.value; tile_loops = [ k_i; j_i ]; shared = true; cooperative = None };
       Sched.Privatize { target = mc; over = k_o };
     ]
   in
@@ -103,8 +103,8 @@ let () =
     @ sink i_i [ j_o; j_i; k_o; k_i ]
     @ sink j_i [ k_o; k_i; i_i ]
     @ [
-        Sched.Stage { source = ma.Tensor.value; tile_loops = [ i_i; k_i ]; shared = false };
-        Sched.Stage { source = mb.Tensor.value; tile_loops = [ k_i; j_i ]; shared = false };
+        Sched.Stage { source = ma.Tensor.value; tile_loops = [ i_i; k_i ]; shared = false; cooperative = None };
+        Sched.Stage { source = mb.Tensor.value; tile_loops = [ k_i; j_i ]; shared = false; cooperative = None };
         Sched.Privatize { target = mc; over = k_o };
       ]
   in
@@ -129,8 +129,8 @@ let () =
     @ sink i_t [ j_o; j_w; j_t; k_o; k_i ]
     @ sink j_t [ k_o; k_i ]
     @ [
-        Sched.Stage { source = ma.Tensor.value; tile_loops = [ i_w; i_t; k_i ]; shared = true };
-        Sched.Stage { source = mb.Tensor.value; tile_loops = [ k_i; j_w; j_t ]; shared = true };
+        Sched.Stage { source = ma.Tensor.value; tile_loops = [ i_w; i_t; k_i ]; shared = true; cooperative = None };
+        Sched.Stage { source = mb.Tensor.value; tile_loops = [ k_i; j_w; j_t ]; shared = true; cooperative = None };
         Sched.Privatize { target = mc; over = k_o };
         Sched.Unroll { axis = i_t; materialize = true };
         Sched.Unroll { axis = j_t; materialize = true };

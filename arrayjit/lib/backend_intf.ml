@@ -15,6 +15,18 @@ type buffer_loc = { pool_id : int; offset : int } [@@deriving sexp, compare, equ
 
 type ctx_buffers = buffer_loc Map.M(Tnode).t [@@deriving sexp_of]
 
+type mma_capability = {
+  mma_simd_width : int;
+      (** Threads cooperating in one tile-MMA instruction (CUDA warp / Metal simdgroup width). *)
+  mma_tile : int * int * int;
+      (** The intrinsic tile shape [(m, n, k)] (8×8×8 for Metal [simdgroup_matrix], 16×16×16 for
+          CUDA wmma); a {!Low_level.t.Tile_mma}'s block extents must be multiples of it. *)
+}
+[@@deriving sexp, compare, equal]
+(** Tensor-core capability descriptor (docs/proposals/tensorize-mma.md §6). Which operand
+    precisions are supported is decided per call by the backend's [mma_syntax] hook (the emission
+    is the source of truth); this record carries what schedule construction needs. *)
+
 type hardware_limits = {
   max_threads_per_workgroup : int option;
       (** Upper bound on the number of threads in one workgroup (CUDA thread block / Metal
@@ -23,10 +35,14 @@ type hardware_limits = {
   max_workgroup_memory_bytes : int option;
       (** Capacity in bytes of the workgroup-shared memory (CUDA [__shared__] / Metal
           [threadgroup]); [None] when the backend imposes no limit. *)
+  mma : mma_capability option;
+      (** Tile-MMA units ([simdgroup_matrix] / tensor cores); [None] when the backend has none
+          wired — [Tile_mma] statements then render their scalar fallback. *)
 }
 [@@deriving sexp, compare, equal]
 
-let no_hardware_limits = { max_threads_per_workgroup = None; max_workgroup_memory_bytes = None }
+let no_hardware_limits =
+  { max_threads_per_workgroup = None; max_workgroup_memory_bytes = None; mma = None }
 
 (** The backend slab allocator, replacing the per-tnode [Alloc_buffer] interface. The shared
     allocator seam (see {!Backends}) mints deterministic per-device [pool_id]s and calls these
