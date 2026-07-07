@@ -55,10 +55,23 @@ let forward t =
   let label = Tn.debug_name t.value in
   { fwd with asgns = Asgns.Block_comment (label ^ " fwd", fwd.asgns) }
 
+(** A scalar non-differentiable accumulator for {!grad_update}'s [?accum_loss]: zero-initialized
+    at allocation and materialized. Read it with [Context.get_values] (which awaits the device)
+    and reset it with [Context.set_values ctx t.value [| 0. |]] — e.g. once per epoch. *)
+let loss_accumulator ?(label = "loss_accum") () =
+  let t = NTDSL.init ~l:label ~prec:Ir.Ops.single ~o:[ 1 ] ~f:(fun _ -> 0.) () in
+  set_materialized t.Tensor.value;
+  t
+
 (** Returns the tensor's forward, zeroing gradients, and backprop code wrapped with label-derived
     comments. Sets the tensor's value as materialized. If [setup_for_parallel] is true (false by
-    default), sets the parameters and their gradients as "non-local" (on-device). *)
-let grad_update ?(setup_for_parallel = false) loss =
+    default), sets the parameters and their gradients as "non-local" (on-device). When
+    [accum_loss] is given (see {!loss_accumulator}), the update also accumulates the loss value
+    into it ([accum_loss =+ loss]): training loops can then read the loss sum once per epoch
+    instead of once per step — on GPU backends a per-step [Context.get_values] awaits the whole
+    device, serializing the stream, while steps that only accumulate on device queue up and
+    overlap with host-side scheduling. *)
+let grad_update ?(setup_for_parallel = false) ?accum_loss loss =
   set_materialized loss.Tensor.value;
   if setup_for_parallel then
     Set.iter loss.Tensor.params ~f:(fun p ->
@@ -66,7 +79,9 @@ let grad_update ?(setup_for_parallel = false) loss =
   (* Note: the %cd syntax for [loss.grad] does not modify roots. *)
   [%cd
     ~~(loss "forward and gradient update";
-       loss.forward;
+       (* In the accumulating branch, referencing [loss] embeds its forward code (the single
+          consumption of it), so the one statement computes the loss and accumulates it. *)
+       (match accum_loss with Some acc -> acc =+ loss | None -> loss.forward);
        ~~(loss "zero grads and backprop";
           loss.zero_grads;
           loss.grad =: 1;

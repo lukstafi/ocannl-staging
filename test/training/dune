@@ -98,9 +98,10 @@
     (diff mlp_bn_names.expected mlp_bn_names.actual)))))
 
 ; circles_conv is a training integration run: in the default runtest suite since its sgd step
-; is autotuned (materialized intermediates + Autotune.tune). NOTE: ~27s on cc, ~75s on the metal
-; backend with a fresh tune cache (batch 32 / 5k steps: the per-step cost is dominated by the
-; fissioned step's per-dispatch overhead, so fewer larger steps are Metal-friendlier).
+; is autotuned (materialized intermediates + Autotune.tune), and the loss accumulates on device
+; (Train.grad_update ?accum_loss) so the loop syncs once per epoch. NOTE: ~27s on cc, ~60s on
+; the metal backend with a fresh tune cache (batch 32 / 5k steps: the remaining metal cost is
+; GPU execution of the fissioned step's ~40 serialized dispatches).
 
 (test
  (name circles_conv)
@@ -186,9 +187,10 @@
   (pps ppx_here ppx_ocannl)))
 
 ; transformer_names is a transformer training integration run: in the default runtest suite since
-; its sgd step is autotuned (materialized intermediates + Autotune.tune). NOTE: ~16s on cc,
-; ~2min on the metal backend with a fresh tune cache (batch 128 / 2.5k steps; see the
-; circles_conv note — most of the metal time is now the tune search itself).
+; its sgd step is autotuned (materialized intermediates + Autotune.tune), the whole one-hot
+; dataset lives on device (batches via @| batch_n — no per-step host transfers), and the loss
+; accumulates on device so the loop syncs once per epoch. NOTE: ~10s on cc, ~36s on the metal
+; backend with a fresh tune cache (batch 128 / 2.5k steps).
 
 (test
  (name transformer_names)

@@ -53,15 +53,25 @@ let prepare_dataset () =
   printf "Training examples: %d\n%!" num_examples;
   (inputs, targets, num_examples)
 
-let seqs_to_flat_one_hot (seqs : int array array) ~offset =
-  let flat = Array.create ~len:(batch_size * eff_seq_len * vocab_size) 0. in
-  for i = 0 to batch_size - 1 do
+(* The whole dataset as a one-hot device tensor (num_examples x eff_seq_len x vocab, ~54 MB in
+   single precision): batches are selected on device via [@| batch_n], so the training loop does
+   no per-step host transfers — a [Context.set_values] awaits the whole device, serializing the
+   stream (see [Train.grad_update]'s [?accum_loss] doc). *)
+let full_one_hot ~label (seqs : int array array) ~num_examples ~n_batches =
+  let open Bigarray in
+  let ga = Genarray.create Float32 c_layout [| num_examples; eff_seq_len; vocab_size |] in
+  Genarray.fill ga 0.;
+  for i = 0 to num_examples - 1 do
     for t = 0 to eff_seq_len - 1 do
-      let base = ((i * eff_seq_len) + t) * vocab_size in
-      flat.(base + seqs.(offset + i).(t)) <- 1.
+      Genarray.set ga [| i; t; seqs.(i).(t) |] 1.
     done
   done;
-  flat
+  let nd = Ir.Ndarray.as_array Ir.Ops.Single ga in
+  (* The leading batch axis is declared pre-split into [n_batches; batch_size] (same row-major
+     layout), so [@| batch_n] can slice off the batch-count axis. *)
+  Tensor.term ~init_data:(Reshape nd) ~grad_spec:If_needed ~label:[ label ]
+    ~batch_dims:[ n_batches; batch_size; eff_seq_len ] ~input_dims:[] ~output_dims:[ vocab_size ]
+    ()
 
 (* === Main === *)
 
@@ -72,20 +82,17 @@ let () =
   let train_inputs, train_targets, num_examples = prepare_dataset () in
   let n_batches = num_examples / batch_size in
 
-  let step_n, bindings = IDX.get_static_symbol IDX.empty in
+  let batch_n, bindings = IDX.get_static_symbol ~static_range:n_batches IDX.empty in
+  let step_n, bindings = IDX.get_static_symbol bindings in
   let total_tokens = batch_size * eff_seq_len in
 
-  (* === Data tensors === *)
-  let make_data_tensor label =
-    let open Bigarray in
-    let ga = Genarray.create Float32 c_layout [| batch_size; eff_seq_len; vocab_size |] in
-    Bigarray.Genarray.fill ga 0.;
-    let nd = Ir.Ndarray.as_array Ir.Ops.Single ga in
-    Tensor.term ~init_data:(Reshape nd) ~grad_spec:If_needed ~label:[ label ]
-      ~batch_dims:[ batch_size; eff_seq_len ] ~input_dims:[] ~output_dims:[ vocab_size ] ()
+  (* === Data tensors: the full dataset on device, batch selected by static index === *)
+  let full_inputs = full_one_hot ~label:"train_inputs_oh" train_inputs ~num_examples ~n_batches in
+  let full_targets =
+    full_one_hot ~label:"train_targets_oh" train_targets ~num_examples ~n_batches
   in
-  let input_batch = make_data_tensor "input_batch" in
-  let target_batch = make_data_tensor "target_batch" in
+  let%op input_batch = full_inputs @| batch_n in
+  let%op target_batch = full_targets @| batch_n in
 
   (* === Causal mask === *)
   let mask =
@@ -122,7 +129,9 @@ let () =
   let%op batch_loss = (nll ++ "...|... => 0") /. !..total_tokens in
 
   Train.every_non_literal_materialized batch_loss;
-  let update = Train.grad_update batch_loss in
+  (* Accumulate the loss on device: the training loop then syncs on the host once per epoch. *)
+  let loss_accum = Train.loss_accumulator () in
+  let update = Train.grad_update ~accum_loss:loss_accum batch_loss in
   let steps = epochs * n_batches in
   (* Linear lr scaling for the larger batch (0.01 at batch 32 -> 0.04 at batch 128): the same
      per-sample progress with 4x fewer updates; epoch-loss thresholds pass with margin. *)
@@ -179,6 +188,7 @@ let () =
 
   let open Operation.At in
   let step_ref = IDX.find_exn (Context.bindings sgd_step) step_n in
+  let batch_ref = IDX.find_exn (Context.bindings sgd_step) batch_n in
   let counter_ref = IDX.find_exn (Context.bindings infer_routine) counter_n in
   counter_ref := 0;
   Train.set_materialized batch_loss.value;
@@ -189,20 +199,15 @@ let () =
   let epoch_loss_limit_mid = 1.4 *. Float.of_int n_batches in
   let epoch_loss_limit_last = 1.3 *. Float.of_int n_batches in
   for epoch = 0 to epochs - 1 do
-    let epoch_loss = ref 0. in
     for batch = 0 to n_batches - 1 do
-      let offset = batch * batch_size in
-      ignore
-        (Context.set_values ctx input_batch.value (seqs_to_flat_one_hot train_inputs ~offset)
-          : Context.t);
-      ignore
-        (Context.set_values ctx target_batch.value (seqs_to_flat_one_hot train_targets ~offset)
-          : Context.t);
+      batch_ref := batch;
       let ctx' = Context.run ctx sgd_step in
       ignore (ctx' : Context.t);
-      epoch_loss := !epoch_loss +. (ctx, batch_loss).@[0];
       Int.incr step_ref
     done;
+    (* The only device sync of the epoch: read the accumulated loss sum, then reset it. *)
+    let epoch_loss = ref (Context.get_values ctx loss_accum.Tensor.value).(0) in
+    ignore (Context.set_values ctx loss_accum.Tensor.value [| 0. |] : Context.t);
     if epoch = 0 || epoch = epochs / 2 || epoch = epochs - 1 then
       let limit =
         if epoch = 0 then epoch_loss_limit_first
