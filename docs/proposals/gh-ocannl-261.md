@@ -1,319 +1,440 @@
-# Superoptimizers for tensor programs: literature review and follow-up plan
+# Superoptimizers for tensor programs: deep dive and follow-up plan
 
 **Issue:** [ahrefs/ocannl#261](https://github.com/ahrefs/ocannl/issues/261)
-**Status:** Draft proposal — research / scouting task
-**Milestone:** v0.9 (Program search with execution-based cost functions)
+**Status:** Deep dive **done in this revision (2026-07-07)** — the reading, literature
+re-selection, and technique-to-seam mapping below replace the earlier scouting plan.
+Detailed evidence base (full paper extractions, verified survey with citations,
+cross-cutting implementation notes): [docs/research/superoptimizers.md](../research/superoptimizers.md).
+Remaining deliverable: file the follow-up issues and comment on #261.
+**Milestone:** v0.9 (Program search with execution-based cost functions; due Aug 24, 2026 — ICFP week)
 
-## Status update (2026-06-12)
+## Status update (2026-07-07) — supersedes the 2026-06-12 update
 
-- Issue [#261](https://github.com/ahrefs/ocannl/issues/261) is **OPEN**, milestone **v0.9** (GH milestone due-date 2026-05-30 is stale; per ROADMAP.md, v0.9 targets Aug 24, 2026 — ICFP week).
-- The deliverable (`docs/research/superoptimizers.md` write-up + follow-up issues) has **not** been produced; `docs/research/` still does not exist (the sibling deep-dive write-ups live as proposals under `docs/proposals/`, not under `docs/research/` — adjust the AC path or create the directory when executing).
-- Sibling-task states corrected: #242 (TVM) CLOSED/completed; #301 (IREE) and #306 (Petalisp/Caten) CLOSED as **not planned** (no `docs/research/` write-ups landed for them). #267 (Tiramisu) and #265 (Candle) remain OPEN as draft proposals.
-- Line-number drift in `arrayjit/lib/low_level.ml` (re-verified 2026-06-12): `optimize_proc` now at line 1619; `simplify_llc` at 1014; `eliminate_common_subexpressions` at 1317; `hoist_shared_locals` at 1504; `hoist_cross_statement_cse` at 1586. `Assignments.to_low_level` (line 190) and `Assignments.lower` (line 983) unchanged. `c_syntax.ml` is now ~981 lines, `tensor/tensor.ml` ~1105 lines.
-- The CUDA single-threaded baseline still holds: kernels launch with `grid_dim_x:1, block_dim_x:1` in `cuda_backend.ml`.
-- Repo-wide changes since April 2026 that new text should respect: broadcast-order reversal (LUB→GLB, meet→join, "⊑" reads "refines"), dimension "label"→"basis" rename, "invalid"→"discardable" rename, and `device_to_device` now returning a transfer routine with static merge-buffer verification (`merge_buffer_use = No | Copy`). None of these invalidate the design content here, but rewrite-rule work over `Assignments.t` should use the post-reversal vocabulary.
-- Verdict: still actionable as written (research + issue fan-out); nothing has been implemented or filed yet.
+The repo moved out from under the previous revision of this document. Every
+"known constraint" that shaped the old plan has flipped:
 
-## Goal
+- **The schedule layer exists.** `arrayjit/lib/schedule.ml` (2198 lines) implements
+  Halide-style loop-nest transforms as values — `Split`, `Swap`, `Retype`, `Unroll`
+  (with IR-materializing mode), `Stage` (shared-memory tiles with cooperative loads
+  and lane-aware mode), `Privatize` (accumulator privatization), `Expand_zero`,
+  `Tensorize`/`Tile_mma` (tensor-core MMA) — applied as a pure
+  `Low_level.optimized -> Low_level.optimized` pass at the `?lowered_transform` seam
+  (`backend_intf.ml:221`, applied at `backends.ml:498-505`). See
+  [schedule-ir-optops.md](schedule-ir-optops.md) (Phases S1–S5 implemented).
+- **Kernels are no longer single-threaded.** The default GPU annotator
+  (`automatic_gpu_schedule`, on by default for cuda/metal) parallelizes to
+  Grid×Workgroup launches; hand schedules reach ~200 GFLOP/s f32 matmul on
+  Apple-silicon Metal (register tiling + `Privatize`), 1800–3000× over the old 1×1
+  baseline. Kernel fission splits routines at materialized cross-nest edges;
+  `validate_parallel` (`low_level.ml:2660`) plus
+  `Schedule.check_hardware_limits` gate legality at compile time.
+- **BEAM search is in progress** (parallel work, modeled after tinygrad): beam over
+  schedule prefixes with on-device timing, candidates as sibling `Context.compile`
+  calls from one frontier, executed parity against the unscheduled twin as the
+  correctness gate (scoped in [schedule-ir-optops.md](schedule-ir-optops.md) §8).
+- **Consequence for #261:** the issue no longer owns "build a search space" — the
+  schedule IR is the search space and BEAM is the search loop. What #261 owns now is
+  what the papers below are actually about: (a) making the search converge fast
+  (candidate construction, pruning, cost models vs. timing), (b) rewriting *above*
+  the schedule layer (algebraic/graph-level rules), and (c) trusting rewrites
+  (equivalence oracles).
+- Refreshed code pointers (the old ones are all stale): the optimization pipeline
+  entry is `Low_level.optimize` (`low_level.mli:279`), composing
+  `cleanup_virtual_llc` (`low_level.ml:1450`) → `simplify_llc` (1869) →
+  `eliminate_common_subexpressions` (2240) → `hoist_shared_locals` (2811) →
+  `hoist_cross_statement_cse` (2908). Lowering: `Assignments.to_low_level`
+  (`assignments.ml:201`), `Assignments.lower` (~1098). Codegen: `c_syntax.ml` is
+  now ~1974 lines with hardware-axis rendering, SIMD vector rendering
+  (gh-ocannl-164), and `mma_syntax` hooks.
+- Issue states re-verified: #261 OPEN (v0.9), #267 (Tiramisu) OPEN, #412 (matmul
+  tiling) OPEN with its >10× criterion already met by parallelization alone.
+  v0.7 shipped 2026-07-03; the workshop-paper deadline pressure of the old
+  "Known Constraints" section has passed.
 
-This is a **research / scouting task**, not an implementation task. The
-deliverable is a literature-anchored set of *concrete follow-up tasks* for
-OCANNL's compilation pipeline, derived from two papers:
+## Goal (revised)
 
-- *A Multi-Level Superoptimizer for Tensor Programs* — "Mirage", arxiv
-  [2405.05751](https://arxiv.org/abs/2405.05751), OSDI'25. Multi-level
-  superoptimizer over GPU kernel / thread-block / thread tiers, unified by a
-  μGraphs IR, with abstraction-based pruning and a probabilistic equivalence
-  verifier. Reported up to 3.3× over heavily-tuned baselines on DNNs.
-- *Equality Saturation for Tensor Graph Superoptimization* — arxiv
-  [2101.01332](https://arxiv.org/abs/2101.01332). Applies *all* available
-  rewrite substitutions simultaneously via e-graphs to escape the
-  ordering sensitivity of sequential graph rewriters; reports up to 16%
-  speedup over (TASO-class) state of the art at ~48× lower optimisation
-  cost. Widely associated with the `egg` / Rust e-graph library.
+Deliver the deep dive (done — this document) and derive concrete follow-up tasks
+for v0.9's program-search milestone. Success criterion unchanged: a maintainer can
+pick a follow-up and start work without re-reading the papers — every follow-up
+names a specific technique, a specific OCANNL seam, and a prerequisite chain.
 
-Success looks like: an OCANNL maintainer reading the resulting follow-up
-tasks should be able to pick one and start work without re-reading the
-papers — every follow-up names a specific paper technique, a specific
-OCANNL file, and a specific prerequisite chain.
+## Literature selection: verdict
 
-The format mirrors the closed deep-dive scouting tasks
-gh-ocannl-242 (TVM), gh-ocannl-301 (IREE/MLIR), and gh-ocannl-306
-(Petalisp / Caten), and the in-flight gh-ocannl-267 (Tiramisu) — each of
-which produces a write-up plus a fan-out of issues. This proposal explicitly
-inherits that pattern.
+**Is Mirage + Tensat the ideal pair? Mostly yes as anchors — but no longer
+sufficient.** A 2026-07 scouting sweep (arXiv/venue pages verified, not from
+memory) found the lineage alive and two gaps in the original selection:
 
-## Acceptance Criteria
+1. Nothing has displaced **Mirage** (OSDI'25) as the state of the art in joint
+   algebraic + schedule superoptimization. Its lineage continues: **MPK / Mirage
+   Persistent Kernel** (arXiv 2512.22219, accepted OSDI'26) compiles whole LLM
+   inference into one megakernel — the opposite pole of OCANNL's kernel fission —
+   and **Axon** (arXiv 2606.26344, June 2026 preprint, unreviewed) synthesizes
+   transformations with SMT verification over unbounded tensors, replacing exactly
+   the probabilistic-verifier part of Mirage. Watch Axon; don't anchor on it yet.
+2. **Tensat** (MLSys'21) remains the canonical tensor-graph equality-saturation
+   paper. Its documented weaknesses (multi-pattern blowup, ILP-extraction wall)
+   now have a modern companion fix: **Hartmann, He & Yoneki** (PACT'24, arXiv
+   2410.05534) — MCTS-guided rewrite selection + fast extraction. Read paired.
+3. **Gap 1 — verification.** **TensorRight** (POPL'25, ADAPT/UIUC) verifies tensor
+   graph rewrites for *arbitrary rank and size* via "aggregated axes" — a formalism
+   that is conceptually cousin to OCANNL's row variables (`..d..`). It proves
+   115/175 XLA rewrite rules in full generality. Promoted to the anchor set as the
+   principled alternative to Mirage's probabilistic verifier.
+4. **Gap 2 — the BEAM track.** The original selection predates OCANNL having a
+   BEAM search to tune. The highest-value reading for making a beam converge:
+   **ROLLER** (OSDI'22 — constructive, hardware-aligned candidate generation
+   instead of pruning a huge space; seconds instead of hours, no learned model)
+   and **Pruner** (ASPLOS'25, arXiv 2402.02361 — "draft-then-verify": a cheap
+   *analytical* hardware-fitness model drafts a small candidate set, expensive
+   measurement verifies; ~4× tuning-time reduction). Both compose directly with a
+   beam over schedule prefixes. Promoted to the anchor set.
 
-- [ ] **Write-up exists.** A Markdown document at
-  `docs/research/superoptimizers.md` (create the directory if absent —
-  see gh-ocannl-267 which uses the same path) summarises both papers,
-  with a one-paragraph technique-by-technique mapping to OCANNL's
-  compilation seams (named files, named functions / passes).
-- [ ] **≥3 follow-up tasks filed.** At least three concrete follow-up
-  GitHub issues exist on `ahrefs/ocannl`, each cross-referenced from
-  the write-up and from a comment on issue #261. Each follow-up:
-  - Names a *specific* paper technique (e.g. "Mirage's μGraphs
-    kernel-level rewrites", "Tensat-style e-graph extraction
-    over `Assignments.t`", "abstraction-based pruning of the
-    schedule search space").
-  - Names a *specific* OCANNL file or pass it would touch
-    (e.g. `arrayjit/lib/low_level.ml`'s `optimize_proc` pipeline,
-    `arrayjit/lib/assignments.ml` `to_low_level`, the schedule layer
-    proposed in gh-ocannl-267).
-  - Carries an effort estimate (small / medium / large) backed by a
-    paragraph that names its prerequisites, including which existing
-    OCANNL issues / proposals must land first.
-- [ ] **≥1 explicit *skip* decision.** At least one paper technique
-  is evaluated and *ruled out* in the write-up, with reasoning
-  (cost, OCaml ecosystem fit, scope mismatch with v0.9 goals, etc.).
-  This locks the rule that the deliverable is honest evaluation, not
-  rubber-stamped task creation.
-- [ ] **Effort plausibility.** The total estimated effort across all
-  filed follow-ups is ≤ "the v0.9 milestone budget can absorb this",
-  i.e. the worker has not produced a wishlist that obviously overflows
-  the milestone. If the honest answer is "this is more than v0.9 can
-  hold", that fact is stated and a triage recommendation is given.
-- [ ] **Issue 261 comment.** A comment on
-  [ahrefs/ocannl#261](https://github.com/ahrefs/ocannl/issues/261)
-  links to the write-up and to each filed follow-up issue, lists
-  the techniques explicitly skipped, and recommends whether to close
-  #261 (it is the meta-tracker — closing on completion is appropriate
-  if all follow-ups are filed).
-- [ ] **No implementation.** No code changes are made under
-  `arrayjit/`, `tensor/`, or `lib/`. The proposal scope is research +
-  issue filing only. (Failure of this criterion would mean the worker
-  silently turned an explore task into an implementation task.)
+**Revised reading list:**
 
-## Context
+| Tier | Work | Why |
+|---|---|---|
+| Anchor | Mirage (OSDI'25, 2405.05751) | search-space architecture, pruning, verifier, where the wins actually came from |
+| Anchor | Tensat (MLSys'21, 2101.01332) + Hartmann et al. (PACT'24, 2410.05534) | e-graph rewriting: what pays, what blows up, the modern extraction fix |
+| Anchor | TensorRight (POPL'25) | verified rewrites at arbitrary rank; aggregated axes ↔ row variables |
+| Anchor | Pruner (ASPLOS'25, 2402.02361) + ROLLER (OSDI'22) | making BEAM converge: analytical draft filter + hardware-aligned candidates |
+| Secondary | EinNet (OSDI'23) | derivation-based rewriting over einsum-like expressions — closest ancestor to OCANNL's IR |
+| Secondary | Heron (ASPLOS'23) | constraint-based search for tensor-core schedules (relevant post-`Tensorize`) |
+| Secondary | MPK (OSDI'26) | megakernel pole of the fission/fusion axis; grid-sync execution strategy |
+| Secondary | Minotaur (OOPSLA'24) | SIMD peephole superoptimization; cut granularity ≈ OCANNL's vectorized loop bodies |
+| Secondary | egglog (PLDI'23); Halide autoscheduler (2019); Ansor (OSDI'20); KernelBench (2502.10517) | ecosystem/background; KernelBench's `fast_p` metric for evaluating search output |
+| Watch | Axon (2606.26344); LLM-guided kernel gen (AlphaEvolve, etc.) | re-check in 6 months; not actionable for a small OCaml project today |
+| Skip | Felix (ASPLOS'24), Hydride (ASPLOS'24), TVM MetaSchedule, TLP | need differentiable schedules / backend synthesis / learned-model infra OCANNL doesn't have |
 
-### Why now
+## Deep dive I: Mirage (OSDI'25)
 
-The v0.9 milestone description on GitHub reads: *"Program search with
-execution-based per-backend or aggregate-of-backends cost functions.
-Starting with augmenting the tiling and layout mechanisms from v0.8 with
-cost functions, progressing to a broader range of code graph rewriting
-rules."* Both papers in scope are direct prior art for that milestone:
+### What it does
 
-- Mirage's multi-level search is a candidate architecture for the
-  "program search" half.
-- Equality saturation is a candidate architecture for the "broader range
-  of code graph rewriting rules" half.
+A μGraph is a hierarchy mirroring the CUDA hierarchy: **kernel graph** (nodes are
+kernels — pre-defined cuDNN/cuBLAS ops or *graph-defined* operators whose semantics
+are a nested **block graph**), block graph (one thread block; intermediates always
+in shared memory; grid dims ≤3 with per-input `imap` — grid dim ↦ data dim or
+replicate — per-output `omap` — disjoint concatenation only — and a for-loop body
+with input iterators, **for-loop accumulators**, and `fmap`), and **thread graph**
+(registers; built by greedy fusion only, not searched). Search: exhaustive
+enumeration at kernel+block levels in canonical form (ops added in increasing rank
+— no duplicate graphs generated), with per-prefix **abstract-expression pruning**:
+each tensor is abstracted to a FOL term over integer arithmetic + uninterpreted
+functions (crucially keeping reduction *sizes*: `sum(k, mul(E(X),E(Y)))` for
+matmul), and a Z3 query checks whether the prefix's expression is still derivable
+as a subexpression of the goal under axiom sets A_eq (associativity,
+distributivity, sum-collapsing, exp(x)·exp(y)=exp(x+y)) and A_sub. Cancellation
+axioms are deliberately excluded — with them "everything is a subexpression of
+everything" and pruning nulls out. Theorem 4.1: no equivalent μGraph reachable
+via A_eq is pruned. The ablation is stark: RMSNorm search with pruning takes 11 s
+at 5 block-ops and 28 s at 11; without it, 768 s at 5 ops and >10 h at ≥7 — and
+the winning RMSNorm kernel needs 11.
 
-Filing follow-ups now lets v0.9 work plug into one of these designs
-deliberately rather than re-deriving the design space mid-implementation.
+Correctness: a **probabilistic equivalence verifier** for the *Lax* fragment
+(multi-linear ops + division + at most one exponentiation per path). Outputs have
+a closed form whose zero-testing generalizes Schwartz–Zippel polynomial identity
+testing over two linked finite fields (Z_q inside exponents, Z_p outside, q | p−1;
+in practice p=227, q=113 so a test fits in 16 bits and runs on GPU). No false
+negatives; false-positive probability bounded and shrinkable by repetition — though
+the deployed system runs a *single* random test and has "not observed" false
+positives. ReLU is unsupported (SiLU was added as a first-class op with its own
+axioms); layouts/scheduling/memory-planning are deferred to a *post-verification*
+ILP + DP optimizer, since they don't affect correctness.
 
-### What OCANNL already does at each level the papers target
+Where the up-to-3.3× actually came from (§8): **grid-dimension and
+parallelization-axis choice** (GQA: FlashDecoding parallelizes over sample/head/
+KV-seq, Mirage picks per-scenario among sample/heads/query-seq/KV-seq — up to 7×
+less device-memory traffic; using TensorRT-LLM's fixed grid dims costs 18%);
+**running two accumulators in one for-loop** (RMSNorm's Σx² alongside the matmul's
+Σ, division commuted past the matmul); **fusing tiny kernels** (LoRA's
+(W‖B)×(X‖(A×X)) identity — which required *manually adding* a 4-input concat-matmul
+operator to the vocabulary); and QKNorm-style fusion of normalizations into
+attention. The one structural loss: nTrans vs TensorRT, because graph-defined
+kernels *always* stage tensors through shared memory — a hard-wired memory-level
+policy that dominates light-compute kernels.
 
-The Tentative Design in `tasks/gh-ocannl-261.md` (dated 2026-02-08) is
-partially stale and should be re-checked by the worker. Verified state
-of the world as of 2026-04-30:
+### What transfers to OCANNL
 
-- **Lowering boundary:**
-  `arrayjit/lib/assignments.ml` → `Assignments.to_low_level`
-  (around line 190) and `Assignments.lower` (around line 982) — the
-  bridge from the high-level `Assignments.t` IR to `Low_level.t`.
-- **Optimisation pipeline** (`arrayjit/lib/low_level.ml`):
-  `optimize_proc` at line ~1619 *(line numbers re-verified 2026-06-12)* composes
-  `cleanup_virtual_llc → simplify_llc → eliminate_common_subexpressions
-   → hoist_cross_statement_cse`. `simplify_llc` itself is at line 1014
-  (the Tentative Design's pointer to lines 1007–1192 is approximately
-  correct — the body now extends to ~1180).
-- **Already landed (stale claims in the task file):**
-  - gh-ocannl-351 (CSE after inlining) — **CLOSED**. CSE is
-    `eliminate_common_subexpressions` at line 1317.
-  - gh-ocannl-350 (loop hoisting / loop-invariant code motion) —
-    **CLOSED**. Hoisting is `hoist_cross_statement_cse` /
-    `hoist_shared_locals` at lines 1504–1618.
-  - gh-ocannl-25 (loop fusion exploration) — **CLOSED**.
-  - gh-ocannl-131 (single product_space iteration for grouped
-    accumulations) — **CLOSED**.
-  - gh-ocannl-242 (TVM deep dive), gh-ocannl-301 (IREE), gh-ocannl-306
-    (Petalisp / Caten) — **CLOSED**. *(Update 2026-06-12: only #242 was
-    closed as completed; #301 and #306 were closed as not planned, and
-    no `docs/research/` write-ups exist — the deep-dive material lives
-    in the corresponding `docs/proposals/gh-ocannl-NNN.md` files.)*
-- **Still open and adjacent:**
-  - gh-ocannl-267 (Tiramisu deep dive) — proposal already at
-    `docs/proposals/gh-ocannl-267.md`. Identifies the *missing
-    schedule layer* between `Assignments.to_low_level` and
-    `optimize_proc` as the central structural gap. The
-    superoptimizer follow-ups must cross-reference this — both
-    papers operate above any reasonable schedule layer and a schedule
-    layer is a likely prerequisite.
-  - gh-ocannl-265 (Candle scouting), gh-ocannl-261 (this).
-  - watch-ocannl-README-md-1c953381 (program search infrastructure,
-    `large`, blocked) and watch-ocannl-README-md-d7a63af1
-    (reproduce tinygrad / Halide search, depends on the former) —
-    these are the milestone tasks the follow-ups should slot into.
-- **Codegen:** `arrayjit/lib/c_syntax.ml` is a shared C-like emitter
-  used by CC / CUDA / Metal backends. Instruction-level rewrites
-  (vectorisation, register tiling) would land here or earlier. CUDA
-  kernels currently run with `grid_dim=1, block_dim=1`
-  (`kernel_prep_line` in `cuda_backend.ml`) — the entire v0.8 GPU
-  performance milestone starts from that baseline, which is relevant
-  for any "Mirage GPU thread-block tier" follow-up.
+- **The search-space factorization is already OCANNL's.** μGraph's
+  grid/fmap/imap ≈ which loops get `Retype`d to `Grid`/`Workgroup` and how `Split`
+  factors them; for-loop accumulators ≈ `Privatize` + `Workgroup_reduce`; thread
+  graphs ≈ register tiles via materializing `Unroll`; graph-defined operators ≈
+  what kernel fission already decides at materialized cross-nest edges. Mirage
+  validates the *decomposition*; OCANNL needn't adopt μGraphs as an IR.
+- **The single biggest transferable fact: parallelization-axis choice is where
+  the money was.** OCANNL's default annotator currently picks a fixed
+  Grid×Workgroup shape. The BEAM action space should include *which* axes (batch
+  vs. output vs. reduction — split-K via `Workgroup_reduce`) map to hardware dims,
+  not just tile sizes. `validate_parallel` already gates legality.
+- **Feasibility pruning vs. cost pruning.** Mirage prunes by *derivability toward
+  the goal* (SMT), not by cost — cost appears only in post-verification layout ILP
+  and final profiling. For OCANNL's schedule-space BEAM (transforms are
+  semantics-preserving by construction) the analog is cheap *legality/fitness*
+  filtering before timing — which is exactly Pruner's draft-then-verify (Part III).
+  The SMT machinery itself is only needed if OCANNL ever searches over *algebraic*
+  rewrites generatively; skip until then.
+- **The verifier idea scales down.** OCANNL's planned per-candidate gate is
+  executed float parity vs. the unscheduled twin. Mirage's lesson: randomized
+  testing with a principled story is cheap (16-bit finite fields, GPU-executed,
+  reusing the optimizer's own kernels). A scaled-down oracle — random inputs,
+  tolerance-aware comparison, and exact integer/finite-field mode for the linear
+  fragment — is the right trust layer for future *graph-level* rewrite rules,
+  where "preserving by construction" no longer holds.
+- **The nTrans warning.** Don't hard-wire staging policy: OCANNL's `Stage` is an
+  explicit optop rather than an IR invariant — keep it that way (a schedule
+  *without* `Stage` must remain reachable for light-compute kernels).
+- **Vocabulary bounds the search.** Mirage's LoRA win needed a hand-added
+  operator. OCANNL's einsum-with-concat syntax (`a^b`, landed v0.7 #49) expresses
+  the concat/split algebra *natively* — an unusual structural advantage for the
+  sharing-rewrite family (Part II).
 
-### Quality-audit pause
+## Deep dive II: Tensat (MLSys'21) and the e-graph question
 
-Per Mag memory, the user is currently doing a hands-on OCANNL quality
-audit; autonomous OCANNL work is paused. This proposal is being drafted
-so that follow-ups can be queued for after the audit; the task itself
-should remain `deferred_launch: true` and not auto-start.
+### What it does
 
-## Approach
+Encodes TASO's operator language as e-graph terms (parameters as child nodes;
+multi-output `split` as tuple + projections; fixed-arity `concat_n`; one `noop`
+root), reuses TASO's 743 synthesized-and-verified rewrite rules unchanged, runs
+`egg` to (bounded) saturation, and extracts with ILP. Contributions beyond plumbing:
+(a) **multi-pattern rewrites** (Algorithm 1: canonicalize patterns, single-pattern
+e-match each, Cartesian-product compatible matches) — with the honest finding that
+these grow the e-graph *double-exponentially*, so they're capped at k_multi
+iterations (default **1**); (b) **cycle filtering** during exploration (descendants
+map + post-iteration DFS onto a filter list), because acyclicity constraints make
+the extraction ILP 10–1000× slower or infeasible — with them, NasRNN extraction is
+1116 s vs. 0.32 s without; at k_multi=2 everything with cycle constraints times
+out at 1 h; (c) the ILP itself: binary per e-node, minimize Σ cost, one pick at
+root, demand propagation to children, filter-list zeroing.
 
-*Suggested methodology — the worker may deviate if a better path
-emerges. The structure mirrors gh-ocannl-242 / gh-ocannl-267.*
+Results: 9.5–379× (avg ~48×) faster optimization than TASO's backtracking search,
+finding graphs up to 16% faster than TASO's (NasRNN; ~6.6% average). E-graph capped
+at 50k nodes, 15 iterations, total optimizer time 0.2–11 s at k_multi=1.
 
-### Phase 1 — Read
+The load-bearing detail: **every showcased win is a *sharing* rewrite** — k
+matmuls/convs sharing an operand merged via concat+matmul+split, or conv weights
+concatenated and precomputed. These are precisely the rules that (a) blow up the
+e-graph, (b) create cycles, (c) defeat greedy extraction (greedy *pessimizes*
+NasNet-A, 22.5 ms vs 17.8 original, because the merged kernel pays off only if
+both consumers pick their `split_i` — a cross-e-class decision). And the cost
+model is sum-of-measured-per-op-runtimes, whose admitted failure (SqueezeNet gets
+*slower* as k_multi grows while the model claims wins) previews any cost-model
+fidelity gap. ResNet-50: zero speedup — the rule set, not the search, binds.
 
-1. Read both abstracts + introductions + the experimental sections.
-   For Mirage (2405.05751), focus on §3 (μGraphs) and §4 (search /
-   pruning) and the equivalence-verification section. For the
-   equality-saturation paper (2101.01332), focus on §3 (e-graph
-   construction over tensor graphs) and the rewrite-rule catalogue.
-2. Skim the closed sibling write-ups (`docs/research/tvm.md`,
-   `docs/research/iree.md`, `docs/research/petalisp-caten.md` if those
-   are the actual paths used by gh-ocannl-242 / 301 / 306 — verify) and
-   the in-flight Tiramisu plan at `docs/proposals/gh-ocannl-267.md`,
-   to inherit the table format and to avoid duplicating discussion of
-   schedule layers / cost models.
+### What transfers to OCANNL
 
-### Phase 2 — Map techniques to OCANNL seams
+- **The minimal viable deployment is small.** Single-pattern algebraic rules to
+  saturation + *one* iteration of the concat/split sharing family + non-greedy
+  extraction. OCANNL doesn't need 743 rules or a saturation engine to capture the
+  demonstrated value: the sharing family is a handful of rule schemas, and
+  OCANNL's concat axes make them expressible as targeted `Assignments.t`-level
+  rewrites (`Accum_op` trees with einsum specs) — appliable destructively under a
+  measured accept/reject gate (the BEAM cost function reused at the graph level)
+  rather than via an e-graph. Phase-ordering pain is real but only bites once
+  rules number in the dozens and interact; Tensat itself shows k_multi=1 suffices
+  for the wins.
+- **The OCaml e-graph situation (re-verified 2026-07):** the one OCaml library,
+  **`ego`** ([opam](https://opam.ocaml.org/packages/ego/), verse-lab), is an egg
+  port — but latest release 0.0.6 (Nov 2021), ~35 commits, effectively
+  unmaintained 4+ years, and **GPL-3.0+** (license concern for vendoring).
+  egglog (PLDI'23) is the ecosystem center of gravity but means FFI or shelling
+  out to Rust. A from-scratch minimal e-graph is ~1–2 kLOC of core. All three
+  remain heavy relative to demonstrated need → **defer** (see follow-up F5), with
+  the PACT'24 MCTS-extraction paper as the map for when that day comes.
+- **Cost-model humility.** Tensat's per-op-sum model failed exactly where kernels
+  interact. OCANNL's execution-based cost function (time the real compiled
+  routine) sidesteps this class of error — a genuine architectural advantage of
+  the BEAM-with-timing design worth preserving even for graph-level rewrites:
+  measure the rewritten graph end-to-end, don't sum per-op estimates.
 
-For each technique extracted in Phase 1, fill in a row in a table with
-columns:
+## Deep dive III: making BEAM converge (ROLLER, Pruner, Heron, tinygrad)
 
-| Paper technique | Closest OCANNL seam | What OCANNL does today | What the change would look like | Effort | Prerequisites |
+The in-progress BEAM search (tinygrad-style: beam over optop prefixes, on-device
+timing, winner cache) will face the classic budget problem: compile+time per
+candidate is tens of milliseconds to seconds, and the schedule space is
+combinatorial in tile factors × axis assignments × staging choices. What the
+literature says, in decreasing order of leverage:
 
-Seams to consider, with concrete file pointers:
+1. **Construct hardware-aligned candidates instead of enumerating and pruning**
+   (ROLLER). rTiles are tile shapes aligned to memory-transaction granularity,
+   tensor-core shapes, and bank widths; construction walks the memory hierarchy
+   expanding tiles greedily by a *static* throughput model. OCANNL already has the
+   inputs: `hardware_limits` (max threads, shared-mem capacity) on
+   `Backend_device_common`, `mma_simd_width`, per-node numel bounds, and
+   `launch_dims`/`workgroup_shared` computed at compile time. Constraining `Split`
+   factors to divisors aligned with these (and to extents — v1 shared `Stage`
+   requires divisibility anyway) shrinks the beam's branching factor by orders of
+   magnitude before any timing happens.
+2. **Draft-then-verify ordering** (Pruner). Score every frontier extension with a
+   cheap analytical fitness (occupancy proxy, shared-mem footprint vs. capacity,
+   arithmetic intensity of the staged tile, divergence of remainder guards —
+   all computable from the transformed `Low_level.t` without compiling); time only
+   the top-k drafts. This is the "cost functions" half of the v0.9 milestone in
+   its cheapest viable form — an *analytical filter* rather than a learned model.
+   A learned model (Halide 2019, TLP) is not worth its training-set cost at
+   OCANNL's scale; revisit only if the analytical filter's hit-rate stalls.
+3. **Constraint-based generation for tensor-core schedules** (Heron). Post-
+   `Tensorize`, the valid-schedule manifold is thin (lane loops, fragment shapes,
+   `Stage` divisibility, barrier uniformity). Encoding validity as constraints and
+   enumerating within them beats generate-and-reject; OCANNL's
+   `validate_parallel` failures are already *named* — the same predicates can run
+   forward as generators instead of backward as rejectors.
+4. **Timing-harness robustness** (the Sakana "AI CUDA Engineer" fiasco, distilled):
+   any execution-based cost function will be exploited by its search — not just by
+   LLMs. Guard the harness: fixed warm-up/repeat protocol, parity gate *before*
+   admission to the cache, cache keyed by canonicalized kernel hash + device
+   identity (already scoped in schedule-ir-optops §8), and KernelBench's `fast_p`
+   (fraction of workloads both correct and >p× faster) as the reporting metric for
+   the search as a whole.
 
-- **Graph-level rewrites** → `arrayjit/lib/assignments.ml` (`Accum_op`,
-  `Set_vec_unop`, `Fetch`, `sequential` / `sequence` builders);
-  `tensor/tensor.ml` (operator definitions, ~1105 lines). Equality
-  saturation would build an e-graph over `Assignments.t` or a
-  pre-`Assignments` form; this is the most natural fit for the
-  e-graph paper.
-- **Schedule-level rewrites** → currently *missing* (per gh-ocannl-267).
-  Mirage's μGraphs sit at this level. A follow-up proposing a schedule
-  layer is a likely prerequisite for the Mirage-derived work and
-  should be cross-linked with gh-ocannl-267 rather than duplicating it.
-- **Loop-level rewrites** → `arrayjit/lib/low_level.ml`'s
-  `optimize_proc` pipeline (line 1595). Note that
-  `simplify_llc`, `eliminate_common_subexpressions`, and
-  `hoist_cross_statement_cse` *already exist* — Mirage-style
-  thread-block / loop-tile rewrites would compose with these, not
-  replace them. Identify the natural insertion point in the pipeline.
-- **Instruction-level rewrites** → `arrayjit/lib/c_syntax.ml`
-  (~981 lines) and the per-backend emitters
-  (`cc_backend.ml`, `cuda_backend.ml`, `metal_backend.ml`). Mirage's
-  thread-tier rewrites correspond to choices made here.
+tinygrad remains the engineering reference (hand-coded action space, beam width
+~4-8, persistent winner cache) but contributes no literature beyond what the
+deep-dive blog article already extracted.
 
-### Phase 3 — Filter and file
+## Deep dive IV: trusting rewrites (TensorRight, Mirage's verifier, Axon)
 
-For each row, decide one of:
-- **File.** Write a GitHub issue on `ahrefs/ocannl` with title, body,
-  effort estimate, and a prerequisite-chain paragraph. Cross-reference
-  from the write-up and from the comment on #261.
-- **Skip.** Record the reason in a "Skipped techniques" section of the
-  write-up. At least one skip is required (AC).
-- **Defer.** A "Future work past v0.9" subsection captures techniques
-  that are interesting but out of scope for this milestone (e.g.
-  probabilistic equivalence checking — likely defer; OCaml e-graph
-  bindings — likely defer).
+Three trust models for rewrite rules, in increasing strength and cost:
 
-Likely-promising leads the worker should test against the seams above
-(non-binding — these are starting hypotheses, not conclusions):
+- **Randomized testing** (Mirage §5): cheap, GPU-executable, principled error
+  bounds within the Lax fragment; degrades gracefully to tolerance-aware float
+  testing outside it. Right size for OCANNL *today* as the gate on hand-written
+  graph-level rules and on BEAM candidates (follow-up F3).
+- **Automated verification at arbitrary rank** (TensorRight, POPL'25): a DSL with
+  *aggregated axes* — bundles of axes quantified as a unit — proving rewrites for
+  unbounded rank/size; 115/175 XLA rules verified in full generality (vs. 18 for
+  bounded verification). The formalism is strikingly close to OCANNL's row
+  variables: a rule stated with `..b..` row variables *is* an aggregated-axes
+  statement. Not an implementation target for v0.9 (Haskell/SMT toolchain, and
+  OCANNL has no rule catalogue yet to amortize it), but the *research affinity* is
+  worth a note in any workshop-paper follow-up: OCANNL's einsum specs with row
+  variables are a rule language TensorRight-style verification could consume.
+- **SMT over unbounded tensors inside the superoptimizer** (Axon, 2606.26344):
+  the June 2026 preprint replacing probabilistic verification with sound synthesis.
+  Unreviewed; watch, re-check at the 6-month mark.
 
-1. **Equality saturation over `Assignments.t`.** Smaller and more
-   targeted than reimplementing the full TASO substitution catalogue.
-   Would need an e-graph; see Known Constraints.
-2. **Mirage-style multi-level search at the loop level only.** Skip
-   the GPU thread / thread-block tiers initially (CUDA is single-threaded
-   today), keep μGraphs-style multi-level representation as a design
-   target for when a schedule layer exists.
-3. **Abstraction-based pruning** (Mirage §4) as a *technique*
-   independent of μGraphs: applicable to any future search loop in
-   `optimize_proc` or in the v0.9 program-search infrastructure
-   (watch-ocannl-README-md-1c953381).
-4. **Probabilistic equivalence verification** — almost certainly
-   *skip / defer*: OCANNL's algebraic rewrites are currently
-   deterministic and locally provable, and a probabilistic verifier
-   is a heavy piece of infrastructure to introduce purely as
-   insurance. Worth at least documenting the skip.
+## Technique-to-seam map
 
-### Phase 4 — Comment + close-or-leave
+| Paper technique | OCANNL seam | Today | Change | Effort | Verdict |
+|---|---|---|---|---|---|
+| Mirage: parallelization-axis / grid-dim search | `Schedule` annotator + BEAM action space; `validate_parallel` | fixed Grid×Workgroup preset | axis-assignment actions (incl. split-K via `Workgroup_reduce`) | M | **File (F2)** |
+| Pruner: draft-then-verify; ROLLER: aligned tiles | BEAM harness; `hardware_limits`, `launch_dims`, `workgroup_shared` | timing every candidate (planned) | analytical fitness filter + divisor-aligned `Split` factors | M | **File (F1)** |
+| Mirage: randomized equivalence testing | parity harness (`hardware_axes_parity` generalized) | float parity vs. unscheduled twin | reusable oracle: seeded random inputs, tolerance policy, exact mode for linear fragment | S–M | **File (F3)** |
+| Tensat: concat/split sharing rewrites | `Assignments.t` rewrites; einsum concat axes (`a^b`) | no graph-level rewriting | targeted rule schemas, measured accept/reject, no e-graph | M–L | **File (F4)** |
+| Tensat/egg(log): e-graph infrastructure | new library or FFI | `ego` unmaintained+GPL; egglog is Rust | defer until rule interactions demonstrably bite | L | **Defer (F5 records decision)** |
+| Mirage: μGraph enumeration + SMT pruning | would be a new generative search layer | schedule BEAM covers the schedule half | not needed while rewrites are hand-curated | L | **Skip** |
+| Mirage: full finite-field verifier machinery | — | — | adopt the *idea* (F3), not the Lax-fragment apparatus | — | **Skip** |
+| TensorRight: aggregated-axes verification | row-variable einsum specs as rule language | rules trusted by testing | research note / workshop-paper angle, not v0.9 code | L | **Skip for v0.9, note affinity** |
+| Heron: constraint-based tensor-core search | `Tensorize` composition rules in `Schedule` | generate-and-reject via `validate_parallel` | run validity predicates forward as generators | M | Fold into F1/F2, not separate |
+| Minotaur: SIMD peephole superoptimization | vectorized loop bodies (`c_syntax` SIMD rendering) | rule-based vectorization (gh-164) | offline synthesis of missed peepholes | L | **Skip** (revisit post-v0.9 if SIMD underperforms) |
+| MPK: megakernel / grid-sync execution | kernel-fission segmentation | event chains at boundaries | CUDA cooperative-launch over same segmentation | L | Already noted in schedule-ir-optops §7; no new issue |
+| LLM-guided kernel search | — | — | — | — | **Watch only** |
 
-Post a single comment on issue #261 listing: write-up link, filed
-follow-ups (with one-line summary each), explicitly skipped techniques.
-Recommend whether to close #261 (yes, if all follow-ups are filed —
-it is a meta-tracker and the deliverable is the fan-out).
+## Recommended follow-ups (to file on ahrefs/ocannl)
 
-## Known Constraints
+**F1 — BEAM candidate construction: hardware-aligned actions + analytical draft
+filter** (Pruner + ROLLER + Heron). Constrain `Split` factors to
+divisor/alignment sets derived from `hardware_limits`, `mma_simd_width`, and
+extents; score frontier extensions with a static fitness (occupancy proxy,
+shared-mem footprint, remainder-guard divergence) computed from the transformed
+IR; time only top-k. *Seam:* the BEAM harness + `schedule.ml` preset machinery.
+*Effort:* medium. *Prereq:* BEAM v1 lands (in progress). This is the core
+"cost functions" deliverable of v0.9.
 
-These constraints should be surfaced explicitly in the write-up (they
-are part of what makes some techniques skip / defer rather than file):
+**F2 — Parallelization-axis choice in the schedule search space** (Mirage's GQA
+result). Add axis-assignment actions: which loops retype to `Grid`/`Workgroup`,
+reduction-axis parallelization via `Workgroup_reduce` + `Privatize` (split-K),
+per-shape rather than fixed. *Seam:* `Schedule` optops (exist), default annotator,
+BEAM action space. *Effort:* medium. *Prereq:* F1 (otherwise the branching factor
+explodes the beam).
 
-- **No OCaml e-graph library.** The dominant e-graph implementation
-  is `egg` (Rust). Adopting equality saturation in OCANNL means one of:
-  (a) write OCaml bindings to `egg` (FFI complexity, build-system
-  pain, deployment cost — non-trivial for an academic OCaml
-  project); (b) reimplement an e-graph library in OCaml (substantial
-  upfront cost, narrows it to a hobbyist/research effort); (c) shell
-  out to a Rust binary at compile time (deployment friction). All
-  three are heavy lifts. *Any equality-saturation follow-up must
-  carry an explicit prerequisite for resolving this.*
-- **No schedule layer yet.** Mirage's μGraphs presuppose schedule-level
-  control over kernel / block / thread structure. OCANNL's loop nest
-  is fixed by `product_space` order at lowering time. A
-  Mirage-derived follow-up is plausibly *blocked by* the
-  schedule-layer work proposed in gh-ocannl-267.
-- **CUDA single-threaded baseline.** All CUDA kernels currently run
-  with `grid_dim=1, block_dim=1` (Mag memory; `kernel_prep_line` in
-  `cuda_backend.ml`). Mirage's GPU thread-block / thread-tier
-  rewrites are not directly applicable until v0.8 GPU-parallelism
-  work lands. This is a v0.8 → v0.9 ordering constraint, not a
-  showstopper, but should be noted.
-- **OCANNL workshop-paper deadlines.** Per Mag memory, the project
-  is targeting OCaml Workshop / FProPer 2026 (May–June deadlines). A
-  follow-up that claims to be tractable inside v0.9 must be honest
-  about that calendar.
+**F3 — Randomized equivalence oracle** (Mirage §5, scaled down). A reusable
+harness: seeded random inputs, per-precision tolerance policy, exact
+integer/finite-field mode for linear-fragment programs; gates BEAM candidates
+(cheap re-gate on cache hits) and any future `Assignments.t` rewrite rule.
+*Seam:* generalize `test/operations/hardware_axes_parity.ml` into a library
+function. *Effort:* small–medium. *Prereq:* none. File first — F4 depends on it.
 
-## Scope
+**F4 — Sharing rewrites over `Assignments.t` via concat axes** (Tensat's winning
+family + Mirage's LoRA identity). Rule schemas: k matmuls sharing an operand →
+concat+matmul+split; weight-concat precompute; (W‖B)×(X‖(A×X)) for LoRA-shaped
+graphs. Expressed with einsum concat specs, applied destructively under a
+measured accept/reject gate — no e-graph. *Seam:* `assignments.ml` (`Accum_op`),
+`tensor/operation.ml` einsum builders. *Effort:* medium–large. *Prereq:* F3;
+the rules-as-data audit (#296) for provenance discipline. Honest framing: this
+is the "broader rewriting rules" half of v0.9 and may slip to v0.9.x — the
+demonstrated wins (Tensat: multi-branch inference graphs; Mirage: LoRA) are
+narrower than OCANNL's current training-loop benchmarks.
 
-**In scope:**
-- The `docs/research/superoptimizers.md` write-up (worker may rename if
-  a different convention is in force — verify against existing
-  `docs/research/` contents).
-- A comment on issue #261.
-- Filing follow-up issues on `ahrefs/ocannl`, cross-referenced.
+**F5 — Decision record: defer e-graph infrastructure.** Not an implementation
+issue; a short issue recording *why* (ego unmaintained + GPL, egglog = Rust FFI,
+from-scratch ~1–2 kLOC core unjustified below ~dozens of interacting rules),
+the trigger for revisiting (F4 rules start needing phase-ordering machinery /
+a second rule family lands), and the reading map for that day (Tensat + PACT'24
+MCTS extraction + egglog). *Effort:* small (writing only).
 
-**Out of scope:**
-- Implementing any superoptimizer technique. Each follow-up issue is
-  its own task once filed.
-- Building or running Mirage / Tensat. The published abstracts plus
-  paper bodies (and the open-source repos for spot-checks) suffice.
-- Re-deriving the schedule-layer discussion already in gh-ocannl-267 —
-  cross-reference it.
+**Effort plausibility vs. v0.9 (due 2026-08-24):** F1+F2+F3 fit the milestone and
+constitute its program-search core; F4 is the stretch item — file it in v0.9,
+expect completion in v0.9.x; F5 is an afternoon. This is a triage, not a wishlist:
+if the BEAM v1 slips past July, drop F2 from v0.9 before dropping F1.
 
-**Dependencies:**
-- Closed sibling write-ups: gh-ocannl-242 (TVM), gh-ocannl-301 (IREE),
-  gh-ocannl-306 (Petalisp/Caten). Format and depth target.
-- In-flight: gh-ocannl-267 (Tiramisu) — overlaps on schedule-layer
-  discussion; cross-reference.
-- v0.9 milestone tasks: watch-ocannl-README-md-1c953381 (program
-  search) and watch-ocannl-README-md-d7a63af1 (reproduce tinygrad /
-  Halide search). The filed follow-ups should slot into one of these
-  or be filed as siblings.
+## Skipped techniques (explicit, per AC)
+
+1. **Mirage's generative μGraph enumeration + SMT-based abstract-expression
+   pruning.** OCANNL's search is over semantics-preserving schedule transforms of
+   a *given* program; nothing is generated whose derivability toward a goal needs
+   proving. Adopting it would mean a bounded operator vocabulary (Mirage hand-added
+   an op to win LoRA), a Z3 dependency, and 4-hour-class search budgets — against
+   OCANNL's einsum front-end which already expresses the algebra Mirage searches
+   for. Revisit only if hand-curated rewrite rules (F4) prove too narrow.
+2. **Mirage's full probabilistic-verifier apparatus** (Lax fragment, linked
+   finite fields, error-bound theorems). The *idea* ships in F3; the apparatus is
+   insurance OCANNL's deterministic, locally-provable rewrites don't need yet.
+3. **Equality saturation as infrastructure** — deferred with a written decision
+   record (F5) rather than silently dropped.
+4. **TensorRight-style automated rule verification** for v0.9 — no rule catalogue
+   to amortize it yet; the row-variable affinity is recorded as a research note.
+5. **Learned cost models** (Halide 2019, TLP) — training-set cost unjustified at
+   OCANNL's kernel diversity; the analytical filter (F1) is the right first rung.
+6. **LLM-guided kernel optimization** — watch-only; the transferable artifact is
+   the Sakana cautionary tale, folded into F1's harness-robustness requirements.
+
+## Acceptance criteria (revised)
+
+- [x] **Write-up exists** — two-tier: this document is the decision record (kept
+  at `docs/proposals/gh-ocannl-261.md` with the rest of the deep-dive family),
+  and `docs/research/superoptimizers.md` (the originally planned AC path) holds
+  the detailed extractions and survey. Technique-by-technique mapping with named
+  files/passes: see the seam map above.
+- [ ] **≥3 follow-up tasks filed** — F1–F5 above are ready to transcribe into
+  GitHub issues (F3 first, then F1, F2, F4, F5), each cross-referenced from a
+  comment on #261.
+- [x] **≥1 explicit skip decision** — six, with reasoning (previous section).
+- [x] **Effort plausibility** — stated with a triage order (drop F2 before F1 if
+  BEAM v1 slips).
+- [ ] **Issue #261 comment** — post after filing: link this write-up, list F1–F5,
+  list the skips, recommend closing #261 as the meta-tracker once the fan-out
+  exists.
+- [x] **No implementation** — no code changes under `arrayjit/`, `tensor/`, `lib/`.
+
+## Known constraints (refreshed)
+
+- **BEAM v1 is in flight, elsewhere.** F1/F2 must land as extensions of that
+  harness, not competitors; coordinate before filing so the issues name the
+  actual module.
+- **OCaml e-graph gap persists** — but is now a recorded deferral (F5) with
+  verified facts (ego 0.0.6/Nov-2021/GPL-3; egglog = Rust), not a blocker.
+- **Measured-gate costs compound.** F4's accept/reject and F3's oracle both run
+  real compiles; they inherit F1's harness-robustness requirements (seeded
+  inputs, warm-up protocol, canonicalized cache keys).
+- **The schedule layer's v1 restrictions bound the search space**: shared `Stage`
+  requires tile-divides-extent; `Swap` requires perfect nesting; barrier placement
+  rejects divergent control flow. These are search-space *constraints to encode*
+  (Heron-style), not bugs to fix under #261.
 
 ## Notes
 
-- Estimated effort: medium (3–5 days), primarily reading + writing.
-  The worker should not try to compress this into a single session
-  if the paper bodies are dense; phase 1 (reading) and phase 3 (filing)
-  benefit from a sleep in between.
-- This proposal does not auto-start: `start_confidence: low` reflects
-  that the deliverable is a judgment call about which paper techniques
-  matter for OCANNL, and that judgment should be reviewed by the user
-  before issues are filed against `ahrefs/ocannl`.
+- Original two-paper scope, phasing, and the 2026-06-12 status snapshot are
+  superseded by this revision; consult git history for the scouting-era text.
+- Estimated remaining effort: small — transcribe F1–F5 into issues (~half a day,
+  after coordinating F1/F2 wording with the BEAM branch), post the #261 comment.
+- `start_confidence` rationale updated: the judgment calls are now made and
+  documented; what needs user review before filing is the F1/F2 split against
+  the in-progress BEAM work, and whether F4 targets v0.9 or v0.9.x.
