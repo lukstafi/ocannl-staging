@@ -54,11 +54,6 @@ struct
   let sexp_of_buffer_ptr _buffer_ptr =
     failwith @@ "Backend " ^ Config.name ^ " missing -- install the corresponding library"
 
-  type nonrec buffer = buffer_ptr Backend_impl.buffer
-
-  let sexp_of_buffer _buffer =
-    failwith @@ "Backend " ^ Config.name ^ " missing -- install the corresponding library"
-
   let sync _event =
     failwith @@ "Backend " ^ Config.name ^ " missing -- install the corresponding library"
 

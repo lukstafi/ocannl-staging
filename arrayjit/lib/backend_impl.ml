@@ -14,25 +14,11 @@ let _get_local_debug_runtime = Utils.get_local_debug_runtime
 
 open Backend_intf
 
-(* The backend's concrete buffer handle (`'base`) and its helpers live here, in the implementation-
-   facing layer -- NOT in the shared {!Backend_intf}, which only ever speaks
-   {!Backend_intf.buffer_loc}. These are used by the raw allocator and the backend-private pool
-   tables. *)
-type 'buffer_ptr buffer = { ptr : 'buffer_ptr; size_in_bytes : int } [@@deriving sexp_of]
-
-module Buffer_types (Buffer_ptr : sig
-  type buffer_ptr [@@deriving sexp_of]
-end) =
-struct
-  type nonrec buffer = Buffer_ptr.buffer_ptr buffer [@@deriving sexp_of]
-end
-
+(* The backend's concrete buffer-pointer type lives here, in the implementation-facing layer --
+   NOT in the shared {!Backend_intf}, which only ever speaks {!Backend_intf.buffer_loc}. It is
+   used by the raw allocator and the backend-private pool tables. *)
 module type Buffer = sig
   type buffer_ptr [@@deriving sexp_of]
-
-  include module type of Buffer_types (struct
-    type nonrec buffer_ptr = buffer_ptr [@@deriving sexp_of]
-  end)
 end
 
 module type No_device_buffer_and_copying = sig
@@ -64,11 +50,6 @@ module No_device_buffer_and_copying () :
   type buffer_ptr = unit Ctypes.ptr
 
   let sexp_of_buffer_ptr = Ops.sexp_of_voidptr
-
-  include Buffer_types (struct
-    type nonrec buffer_ptr = buffer_ptr [@@deriving sexp_of]
-  end)
-
   let used_memory = Atomic.make 0
   let get_used_memory () = Atomic.get used_memory
 
@@ -154,7 +135,7 @@ module type Device_slab = sig
 end
 
 (** Backs the device-level slab interface with a backend's raw byte-buffer primitives and a private
-    [(device_id, pool_id) -> 'base] table. Replaces the old [Alloc_buffer_ignore_stream]. *)
+    [(device_id, pool_id) -> 'base] table. *)
 module Make_slab (Device_types : Device_types) (Raw : No_device_buffer_and_copying) :
   Device_slab with type device = Device_types.device and type buffer_ptr = Raw.buffer_ptr = struct
   open Backend_intf
@@ -249,11 +230,6 @@ struct
     }
 end
 
-(** Parts shared by backend implementations. *)
-module type Backend_impl_common = sig
-  include Buffer
-end
-
 (** An interface to adding schedulers for stream-agnostic (typically CPU) backend implementations.
 *)
 module type For_add_scheduler = sig
@@ -264,7 +240,7 @@ end
 
 (** Lowered-level stream agnostic backend interface: implementation-facing API for CPU backends. *)
 module type Lowered_no_device_backend = sig
-  include Backend_impl_common
+  include Buffer
 
   val name : string
 
@@ -302,7 +278,7 @@ end
     {!Backend_intf.buffer_loc} only -- the concrete backend pointer never crosses this boundary;
     each backend resolves [buffer_loc -> base] internally. *)
 module type No_buffer_retrieval_or_syncing = sig
-  include Backend_impl_common
+  include Buffer
   include Backend_device_common
 
   val from_host : dst:context -> dst_loc:Backend_intf.buffer_loc -> Ndarray.t -> unit
@@ -327,9 +303,8 @@ module type No_buffer_retrieval_or_syncing = sig
 end
 
 (** An intermediate stage for converting {!Lowered_no_device_backend} backends into
-    {!Lowered_backend}. It could potentially be used for assignments-level backends too. This
-    impl-facing stage may carry the backend-private [resolve_pool] (its base type does not escape to
-    {!Backend_intf}). *)
+    {!Lowered_backend}. This impl-facing stage may carry the backend-private [resolve_pool] (its
+    base type does not escape to {!Backend_intf}). *)
 module type With_scheduler = sig
   include Backend_device_common
   include Buffer

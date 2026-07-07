@@ -28,10 +28,6 @@ module Backend_buffer = struct
   type buffer_ptr = Cu.Deviceptr.t
 
   let sexp_of_buffer_ptr ptr = Sexp.Atom (Cu.Deviceptr.string_of ptr)
-
-  include Backend_impl.Buffer_types (struct
-    type nonrec buffer_ptr = buffer_ptr [@@deriving sexp_of]
-  end)
 end
 
 module Device_config = struct

@@ -26,9 +26,6 @@ module Multicore (Backend : For_add_scheduler) :
     Sexp.(List [ Atom "task_queue_of_size"; Atom (Int.to_string @@ Queue.size q) ])
 
   module Device_config = struct
-    include (
-      Backend : Buffer with type buffer_ptr = Backend.buffer_ptr and type buffer = Backend.buffer)
-
     type dev = CPU [@@deriving sexp_of]
 
     type stream_state = {
@@ -231,9 +228,6 @@ module Sync (Backend : For_add_scheduler) = struct
   include Backend
 
   module Device_config = struct
-    include (
-      Backend : Buffer with type buffer_ptr = Backend.buffer_ptr and type buffer = Backend.buffer)
-
     type dev = CPU [@@deriving sexp_of]
     type runner = unit [@@deriving sexp_of]
     type event = unit [@@deriving sexp_of]
