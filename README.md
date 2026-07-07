@@ -85,7 +85,7 @@ See [ROADMAP.md](ROADMAP.md) for the detailed schedule. Headline target: **ICFP 
   - [x] makemore progression (bigram → MLP → BatchNorm → transformer), mirroring Karpathy's lectures (#59).
   - [ ] Convnet examples: MNIST and CIFAR (#54); LSTM example (#60).
   - [ ] Transformer inference for a small open-weights model (one of GPT-2, LLaMA, Gemma) (#377).
-  - [ ] Tokenizers are being developed in the spin-off project [ocaml-dataprep](https://github.com/ahrefs/ocaml-dataprep) (opam package `dataprep`, currently unreleased).
+  - [x] Tokenizers are developed in the spin-off project [ocaml-dataprep](https://github.com/ahrefs/ocaml-dataprep) (opam package `dataprep`): the `Dataprep.Bpe` HuggingFace-compatible BPE tokenizer is bridged to OCANNL tensors via `Nn_blocks.token_ids_of_array` / `token_ids_of_batch` (see `test/training/tokenizer_roundtrip.ml`).
 * **1.0 (End Oct 2026): Few documentation gaps, some degree of feature completeness, ergonomics, safety.**
   - [ ] Feature completeness demonstrated by resolving / implementing a few of the $\color{green}{\text{explore}}$ issues.
   - [ ] Concise syntax for transfers into the merge buffer since we know which tensor node is transferred and where to.

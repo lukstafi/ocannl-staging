@@ -92,7 +92,7 @@ A research-heavy milestone (~2.5 months). GitHub milestone scope: *"Program sear
 - **CNN classifiers** (#54) — MNIST and CIFAR-10 training examples.
 - **LSTM example** (#60).
 - **Transformer inference demo** (#377) — inference for a small open-weights model (GPT-2, LLaMA, or Gemma).
-- **Tokenizer bindings** — developed in the spin-off [ocaml-dataprep](https://github.com/ahrefs/ocaml-dataprep) project (opam package `dataprep`).
+- **Tokenizer bindings** (done) — developed in the spin-off [ocaml-dataprep](https://github.com/ahrefs/ocaml-dataprep) project (opam package `dataprep`); the `Dataprep.Bpe` HuggingFace-compatible BPE tokenizer is bridged to OCANNL tensors via `Nn_blocks.token_ids_of_array` / `token_ids_of_batch`, integration-tested in `test/training/tokenizer_roundtrip.ml`.
 
 > **Date note:** the GitHub milestone carries a stale 2026-05-30 due date; the ICFP-week anchor above is authoritative.
 

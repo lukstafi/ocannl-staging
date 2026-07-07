@@ -199,3 +199,17 @@
  (libraries ocannl dataprep)
  (preprocess
   (pps ppx_here ppx_ocannl)))
+
+; tokenizer_roundtrip is a fast integration test for the dataprep BPE tokenizer -> tensor bridge
+; (hermetic: it writes its own minimal tokenizer.json, no network access).
+
+(test
+ (name tokenizer_roundtrip)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules tokenizer_roundtrip)
+ (libraries base ocannl stdio dataprep)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
