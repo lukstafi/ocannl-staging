@@ -899,7 +899,7 @@ let get_ident_within_code ?no_dots c =
     Option.iter ident
       ~f:
         (Hashtbl.update idents ~f:(fun old ->
-             Set.add (Option.value ~default:Utils.no_ints old) tn.id))
+             Set.add (Option.value ~default:Utils.no_ints old) tn.uid))
   in
   let tn = function Node tn -> tn | Merge_buffer tn -> tn in
   let rec loop (c : t) =

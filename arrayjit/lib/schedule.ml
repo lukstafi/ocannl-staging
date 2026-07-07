@@ -1434,7 +1434,7 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
         let syms = chain_syms chain in
         let by_tn = Hashtbl.create (module Int) in
         List.iter n.n_accesses ~f:(fun a ->
-            Hashtbl.add_multi by_tn ~key:a.a_tn.Tn.id ~data:a);
+            Hashtbl.add_multi by_tn ~key:a.a_tn.Tn.uid ~data:a);
         Hashtbl.iter by_tn ~f:(fun accs ->
             let written = List.exists accs ~f:(fun a -> a.a_write) in
             if written then (
@@ -1473,7 +1473,7 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
               if i <> j then
                 List.iter writes_i ~f:(fun w ->
                     let touched_elsewhere =
-                      List.exists accs_j ~f:(fun a -> a.a_tn.Tn.id = w.a_tn.Tn.id)
+                      List.exists accs_j ~f:(fun a -> a.a_tn.Tn.uid = w.a_tn.Tn.uid)
                     in
                     if touched_elsewhere then
                       if Tn.Placements.is_materialized_peek plc w.a_tn then raise Bail

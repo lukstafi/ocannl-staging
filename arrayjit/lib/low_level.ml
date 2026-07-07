@@ -471,7 +471,7 @@ let is_one_hot_selector_assignment traced_store ~(idcs : Indexing.axis_index arr
         | _ -> false)
     | _ -> false)
 
-let visit_llc plc traced_store ~merge_node_id reverse_node_map ~max_visits llc =
+let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits llc =
   let is_too_many = function Visits i -> i > max_visits | Recurrent -> true in
   (* FIXME: migrate hashtable to use offsets instead of indices *)
   let lookup env indices =
@@ -609,15 +609,14 @@ let visit_llc plc traced_store ~merge_node_id reverse_node_map ~max_visits llc =
     | Local_scope { body; _ } -> loop_proc ~first_visit:true env body
     | Get_local _ -> ()
     | Get_merge_buffer (source, _) ->
-        let source_node_id = source.Tn.id in
-        Option.iter !merge_node_id ~f:(fun merge_node_id ->
-            if merge_node_id <> source_node_id then
+        Option.iter !merge_node_ref ~f:(fun merge_node ->
+            if not (Tn.equal merge_node source) then
               raise
               @@ Utils.User_error
                    [%string
                      "Low_evel.optimize_proc: currently only one merge buffer per routine is \
-                      allowed, found node ids %{source_node_id#Int} and %{merge_node_id#Int}"]);
-        merge_node_id := Some source_node_id
+                      allowed, found nodes %{Tn.debug_name source} and %{Tn.debug_name merge_node}"]);
+        merge_node_ref := Some source
     | Embed_index _ -> ()
     | Binop (Arg1, (llv1, _), _llv2) -> loop llv1
     | Binop (Arg2, _llv1, (llv2, _)) -> loop llv2
@@ -3224,8 +3223,8 @@ let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
   let reverse_node_map = Hashtbl.create (module Indexing.Symbol) in
   [%log "tracing"];
   pin_device_written_bounds llc;
-  let merge_node_id = ref None in
-  visit_llc input_ctx.placements traced_store ~merge_node_id reverse_node_map
+  let merge_node_ref = ref None in
+  visit_llc input_ctx.placements traced_store ~merge_node_ref reverse_node_map
     ~max_visits:virtualize_settings.max_visits llc;
   [%log "optimizing"];
   let virtual_llc_result = virtual_llc input_ctx traced_store reverse_node_map static_indices llc in
@@ -3236,9 +3235,7 @@ let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
     @@ cleanup_virtual_llc input_ctx.placements ~static_indices
     @@ virtual_llc_result
   in
-  let merge_node =
-    Option.map !merge_node_id ~f:(fun id -> Option.value_exn ~here:[%here] @@ Tnode.find ~id)
-  in
+  let merge_node = !merge_node_ref in
   let optimize_ctx = input_ctx in
   { traced_store; optimize_ctx; llc; merge_node; workgroup_shared = Set.empty (module Tnode) }
 
@@ -3271,7 +3268,7 @@ let get_ident_within_code ?no_dots ?(blacklist = []) llcs =
     Option.iter ident
       ~f:
         (Hashtbl.update idents ~f:(fun old ->
-             Set.add (Option.value ~default:Utils.no_ints old) tn.id))
+             Set.add (Option.value ~default:Utils.no_ints old) tn.uid))
   in
   let rec loop (c : t) =
     match c with
