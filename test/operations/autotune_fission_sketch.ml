@@ -35,16 +35,23 @@ let is_gpu = Sched.backend_is_gpu backend_name
 let is_cpu = Sched.backend_is_cpu backend_name
 
 let () =
-  (* === The fissionable chain: d = a + b (forced materialized), e = d *. d === *)
+  (* === The fissionable chain: d = a + b (forced materialized), e = d *. d^T. The transposed
+     read keeps the cross-nest edge misaligned, so the aligned cross-nest rule cannot merge the
+     pair and the chain still fissions (a plain pointwise consumer would now stay one kernel). === *)
   let n = 16 in
   let av = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 7) *. 0.5) in
   let bv = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 5) -. 2.) in
-  let expected_e = Array.map (Array.mapi av ~f:(fun i x -> x +. bv.(i))) ~f:(fun x -> x *. x) in
+  let expected_e =
+    Array.init (n * n) ~f:(fun idx ->
+        let i = idx / n and j = idx % n in
+        let dv k l = av.((k * n) + l) +. bv.((k * n) + l) in
+        dv i j *. dv j i)
+  in
   let a = TDSL.ndarray av ~label:[ "a" ] ~output_dims:[ n; n ] () in
   let b = TDSL.ndarray bv ~label:[ "b" ] ~output_dims:[ n; n ] () in
   let%op d = a + b in
   Train.set_materialized d.Tensor.value;
-  let%op e = d *. d in
+  let%op e = d *. (d ++ "ij=>ji") in
   let chain_comp = named "af_chain" (Train.forward e) in
 
   (* --- fission_scheduled + the plural transforms seam, directly --- *)
