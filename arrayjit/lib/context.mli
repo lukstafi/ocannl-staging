@@ -21,7 +21,9 @@ val metal : ?device_id:int -> unit -> t
 (** Create a Metal context. *)
 
 val cpu : ?threads:int -> unit -> t
-(** Create a CPU context. *)
+(** Create a CPU context. [threads] > 1 selects the [multidev_cc] backend (multiple worker-domain
+    CPU devices, for debugging parallel workflows); otherwise the [cc] backend. Kernel-level CPU
+    parallelism is automatic either way. *)
 
 val auto : unit -> t
 (** Automatically select the best available backend. *)

@@ -266,7 +266,7 @@ let () =
   let final_train = mean_loss_over (train_ctx, train_tgt, n_train) in
   let final_dev = mean_loss_over (dev_ctx, dev_tgt, n_dev) in
   let final_test = mean_loss_over (test_ctx, test_tgt, n_test) in
-  (* Thresholds ~3% above observed sync_cc values under the fixed seed. *)
+  (* Thresholds ~3% above observed cc values under the fixed seed. *)
   let train_below = 2.8 in
   let dev_below = 2.8 in
   let test_below = 2.8 in

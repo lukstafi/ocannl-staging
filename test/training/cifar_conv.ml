@@ -15,7 +15,7 @@
     - Use wider channels: [out_channels1 = 32], [out_channels2 = 64]
 
     Full-run manual validation:
-    {v OCANNL_BACKEND=sync_cc dune exec test/training/cifar_conv.exe v}
+    {v OCANNL_BACKEND=cc dune exec test/training/cifar_conv.exe v}
 
     after editing the constants below. Expect ~30-60 minutes on CPU. *)
 

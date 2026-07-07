@@ -87,7 +87,12 @@ clean_up_log_files_on_startup=true
 # Other configurations:
 
 # The default backend for computations, if `Backends.fresh_backend` isn't passed `backend_name`.
-backend=multicore_cc
+backend=cc
+
+# The number of devices the multidev_cc backend exposes (each is a worker domain with its own
+# FIFO queue, for debugging multi-device parallel workflows on CPU); 0 means the domain count
+# recommended for this machine. Fixed at first use of the backend.
+multidev_num_devices=0
 
 # If true, on GPU backends (cuda, metal) kernels compiled without an explicit `lowered_transform`
 # get the default GPU schedule (docs/proposals/schedule-ir-optops.md §6): parallelizable loops are
@@ -106,7 +111,7 @@ gpu_schedule_block_size=256
 # left unscheduled by the default GPU schedule (launch overhead would dominate).
 gpu_schedule_min_parallel=1024
 
-# If true, on CPU backends (sync_cc, multicore_cc) kernels compiled without an explicit
+# If true, on CPU backends (cc, multidev_cc) kernels compiled without an explicit
 # `lowered_transform` get the default CPU schedule: the same conservative analysis as the GPU
 # schedule, retyping each nest's outermost parallelizable loop to Grid, which the C backend
 # renders as chunked parallel loops on a native thread pool (see `cc_parallel_grid`). Disabled
@@ -184,10 +189,10 @@ debug_log_to_stream_files=false
 # If set and relevant, it's the `CU_LIMIT_PRINTF_FIFO_SIZE` CUDA configuration.
 cuda_printf_fifo_size=
 
-# The `-O` argument to the compiler executable for the `multicore_cc` and `sync_cc` backends.
+# The `-O` argument to the compiler executable for the `cc` and `multidev_cc` backends.
 cc_backend_optimization_level=3
 
-# The `multicore_cc` and `sync_cc` backends compiler executable name.
+# The `cc` and `multidev_cc` backends compiler executable name.
 # By default, `ocamlc -config` field `c_compiler` is used.
 cc_backend_compiler_command=
 

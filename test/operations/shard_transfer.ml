@@ -72,7 +72,7 @@ let () =
     (raises (fun () -> ignore (Parallel.shard_along ~axis:1 ~n_shards:2 batch)));
 
   (* --- Part 2: raw-backend merge-buffer all-reduce (grad_sync core) --- *)
-  let backend = Backends.backend_module (Backends.get_backend ~backend_name:"sync_cc" ()) in
+  let backend = Backends.backend_module (Backends.get_backend ~backend_name:"cc" ()) in
   let module Backend = (val backend : Ir.Backend_intf.Backend) in
   let device = Backend.get_device ~ordinal:0 in
   (* Note: [g]/[m] are reserved shorthands in %cd, so use descriptive names. *)

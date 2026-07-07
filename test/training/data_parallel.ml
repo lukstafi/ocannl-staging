@@ -42,7 +42,7 @@ let run ~n_shards : float array =
     let w = TDSL.param ~values:[| 0.5 |] "w" ~output_dims:[ 1 ] () in
     [%op (((w *. x) - y) *. ((w *. x) - y)) ++ "...|... => 0"]
   in
-  Parallel.data_parallel ~backend_name:"sync_cc" ~reduction:Parallel.Sum ~n_shards
+  Parallel.data_parallel ~backend_name:"cc" ~reduction:Parallel.Sum ~n_shards
     ~bindings:IDX.empty ~learning_rate ~inputs:(inputs ()) ~targets:(targets ()) ~loss_of
     ~f:(fun h ->
       h.Parallel.step ();
@@ -61,7 +61,9 @@ let multistep_ok () : bool =
     let w = TDSL.param ~values:[| 0.5 |] "w" ~output_dims:[ 1 ] () in
     [%op (((w *. x) - y) *. ((w *. x) - y)) ++ "...|... => 0"]
   in
-  Parallel.data_parallel ~backend_name:"sync_cc" ~reduction:Parallel.Mean ~n_shards:2
+  (* Run on multidev_cc: with 2 shards the shards land on devices 0 and 1, exercising the
+     cross-device merge-buffer broadcast and gradient all-reduce paths. *)
+  Parallel.data_parallel ~backend_name:"multidev_cc" ~reduction:Parallel.Mean ~n_shards:2
     ~bindings:IDX.empty ~learning_rate ~inputs:(inputs ()) ~targets:(targets ()) ~loss_of
     ~f:(fun h ->
       h.Parallel.step ();
@@ -86,7 +88,7 @@ let owner_loss_with_base_seed base_seed : float =
     let w = TDSL.param ~values:[| 0.5 |] "w" ~output_dims:[ 1 ] () in
     [%op (((w *. x) + uniform1 () - y) *. ((w *. x) + uniform1 () - y)) ++ "...|... => 0"]
   in
-  Parallel.data_parallel ~backend_name:"sync_cc" ~reduction:Parallel.Sum ~n_shards:2 ~base_seed
+  Parallel.data_parallel ~backend_name:"cc" ~reduction:Parallel.Sum ~n_shards:2 ~base_seed
     ~bindings:IDX.empty ~learning_rate ~inputs:(inputs ()) ~targets:(targets ()) ~loss_of
     ~f:(fun h ->
       h.Parallel.step ();
@@ -115,7 +117,7 @@ let shards_seeded_distinctly () : bool =
     let w = TDSL.param ~values:[| 0.5 |] "w" ~output_dims:[ 1 ] () in
     [%op (((w *. x) + uniform1 () - y) *. ((w *. x) + uniform1 () - y)) ++ "...|... => 0"]
   in
-  Parallel.data_parallel ~backend_name:"sync_cc" ~n_shards:2 ~base_seed:100 ~bindings:IDX.empty
+  Parallel.data_parallel ~backend_name:"cc" ~n_shards:2 ~base_seed:100 ~bindings:IDX.empty
     ~learning_rate ~inputs:(inputs ()) ~targets:(targets ()) ~loss_of
     ~f:(fun h ->
       let s = h.Parallel.shard_seeds in
@@ -135,7 +137,7 @@ let seed_singleton_preserved () : bool =
     let w = TDSL.param ~values:[| 0.5 |] "w" ~output_dims:[ 1 ] () in
     [%op (((w *. x) - y) *. ((w *. x) - y)) ++ "...|... => 0"]
   in
-  Parallel.data_parallel ~backend_name:"sync_cc" ~n_shards:2 ~base_seed:0 ~bindings:IDX.empty
+  Parallel.data_parallel ~backend_name:"cc" ~n_shards:2 ~base_seed:0 ~bindings:IDX.empty
     ~learning_rate ~inputs:(inputs ()) ~targets:(targets ()) ~loss_of
     ~f:(fun h -> h.Parallel.step ())
     ();

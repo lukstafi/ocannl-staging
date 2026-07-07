@@ -29,7 +29,7 @@ let p name b = Stdio.printf "%s: %b\n" name b
 let approx a b = Float.(abs (a - b) < 1e-5)
 
 let backend_name =
-  String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"sync_cc")
+  String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
 let read_generated base_name =
   let ext = if String.is_substring backend_name ~substring:"metal" then ".metal" else ".c" in

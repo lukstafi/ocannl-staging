@@ -161,8 +161,8 @@ opam install cudajit  # for CUDA backend
 - `clean_up_artifacts_on_startup=false` - preserves debug files between runs
 
 **Available Backends**:
-- `sync_cc` combines the implementation cc_backend.ml with the scheduler `Sync` in schedulers.ml
-- `multicore_cc` combines the implementation cc_backend.ml with the scheduler `Multicore` in schedulers.ml
+- `cc` (the default) combines the implementation cc_backend.ml with the scheduler `Sync` in schedulers.ml; kernel-level CPU parallelism is automatic (pool-rendered Grid loops)
+- `multidev_cc` combines cc_backend.ml with the scheduler `Multidev`: multiple worker-domain CPU devices, for debugging multi-device parallel workflows ("sync_cc"/"multicore_cc" are accepted as deprecated aliases of cc/multidev_cc)
 - `cuda` with implementation in cuda_backend.ml
 - `metal` with implementation in metal_backend.ml
 

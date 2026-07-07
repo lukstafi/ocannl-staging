@@ -154,3 +154,12 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (libraries base stdio arrayjit.ir))
+
+(test
+ (name test_multidev_error_propagation)
+ (package arrayjit)
+ (modules test_multidev_error_propagation)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (libraries base stdio arrayjit.ir arrayjit.context))

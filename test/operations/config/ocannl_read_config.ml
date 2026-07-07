@@ -40,12 +40,24 @@ let () =
       let backend = Utils.get_global_arg ~default:"" ~arg_name:"backend" in
       let extension =
         match backend with
-        | "multicore_cc" | "sync_cc" -> "c"
+        | "cc" | "multidev_cc" | "multicore_cc" | "sync_cc" -> "c"
         | "cuda" -> "cu"
         | "metal" -> "metal"
         | _ -> "c" (* Default to C for unknown backends *)
       in
       output_config "backend_extension" extension output_dest
+  | Some "backend" ->
+      (* Normalize to the canonical backend name, mirroring [Backends.get_backend]'s deprecated
+         aliases: stream/log file names use the canonical name (e.g.
+         [log_files/cc-0-0.log], [micrograd_demo_logging-cc-0-0.log.expected]), so an alias-based
+         run (OCANNL_BACKEND=sync_cc) must not leak the raw string into dune's log paths. *)
+      let backend =
+        match String.lowercase (Utils.get_global_arg ~default:"" ~arg_name:"backend") with
+        | "sync_cc" -> "cc"
+        | "multicore_cc" -> "multidev_cc"
+        | b -> b
+      in
+      output_config "backend" backend output_dest
   | Some config ->
       let value = Utils.get_global_arg ~default:"" ~arg_name:config in
       output_config config value output_dest

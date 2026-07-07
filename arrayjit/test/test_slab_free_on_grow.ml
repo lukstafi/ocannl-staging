@@ -53,7 +53,7 @@ module Mock_dt = Backend_impl.Device_types_ll (Mock_config)
 module Mock_slab = Backend_impl.Make_slab (Mock_dt) (Mock_raw)
 module Mock_dev = Backend_impl.Device (Mock_dt) (Mock_slab)
 
-(* A raw backend that relies on GC (no explicit deallocator), like the sync/multicore CPU
+(* A raw backend that relies on GC (no explicit deallocator), like the CPU
    backends. *)
 module Mock_raw_gc = struct
   type buffer_ptr = int
