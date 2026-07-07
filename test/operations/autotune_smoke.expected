@@ -1,0 +1,13 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+canonical digest stable across sibling compiles: true
+canonical form complete: true
+different computations have different digests: true
+replayed schedule values correct: true
+replayed schedule structurally equals the direct application: true
+saved schedule roundtrips through sexp: true
+tuned routine values correct: true
+first tune call searches (cache miss): true
+first tune call timed at least the baseline: true
+second tune call hits the schedule cache: true
+cached schedule replays to correct values: true

@@ -865,6 +865,7 @@
     %{dep:../../arrayjit/lib/cuda_backend.ml}
     %{dep:../../arrayjit/lib/low_level.ml}
     %{dep:../../arrayjit/lib/schedule.ml}
+    %{dep:../../arrayjit/lib/autotune.ml}
     %{dep:../../arrayjit/lib/tnode.ml}
     %{dep:../../arrayjit/lib/assignments.ml}
     %{dep:../../tensor/tensor.ml}
@@ -1022,6 +1023,17 @@
   (env_var OCANNL_BACKEND))
  (modules schedule_ops)
  (libraries base ocannl stdio pprint)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
+ (name autotune_smoke)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules autotune_smoke)
+ (libraries base ocannl stdio)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
