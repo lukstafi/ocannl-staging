@@ -40,7 +40,7 @@ let () =
       let backend = Utils.get_global_arg ~default:"" ~arg_name:"backend" in
       let extension =
         match backend with
-        | "cc" | "multicore_cc" | "sync_cc" -> "c"
+        | "cc" | "multidev_cc" | "multicore_cc" | "sync_cc" -> "c"
         | "cuda" -> "cu"
         | "metal" -> "metal"
         | _ -> "c" (* Default to C for unknown backends *)

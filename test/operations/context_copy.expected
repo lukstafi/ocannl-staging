@@ -8,9 +8,9 @@ re-copied (expect 100 200 300): 100.0 200.0 300.0
 === 3. Source-absent node: host-init data via the round-trip fallback ===
 source has the node: false
 copied (expect 5 6): 5.0 6.0
-=== 4. Cross-backend copy (cc -> multicore_cc) ===
+=== 4. Cross-backend copy (cc -> multidev_cc) ===
 copied (expect 1.5 2.2): 1.5 2.2
-backends: cc -> multicore_cc
+backends: cc -> multidev_cc
 === 5. Merge-buffer copy + statically verified consumer ===
 consumer against a transfer-less context: Merge buffer mismatch at link time: the linked context provides none, but the linked code expects t
 b after b += a.merge (expect 12 23 34): 12.0 23.0 34.0

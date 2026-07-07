@@ -1,7 +1,7 @@
 (* Context.copy (docs/proposals/backend-singletons-context-copy.md): same-backend copies pair-match
    Backends.wrapped_context to dispatch onto the backend's device_to_device transfer machinery;
    cross-backend copies fall back to a host round-trip. Backends are pinned explicitly (cc /
-   multicore_cc, always available) so the output is deterministic regardless of the configured
+   multidev_cc, always available) so the output is deterministic regardless of the configured
    default backend.
 
    Scenarios:
@@ -10,7 +10,7 @@
       destination's values.
    3. Fallback for a node with no device buffer in the source: host-init literal data reaches the
       destination via the host round-trip.
-   4. Cross-backend (cc -> multicore_cc) host round-trip.
+   4. Cross-backend (cc -> multidev_cc) host round-trip.
    5. ~into_merge_buffer:Copy plus a %cd consumer of [t.merge]: the copy returns a context carrying
       the merge-buffer node, against which compiling the consumer statically verifies
       (gh-ocannl-288); compiling the same consumer against a context with no prior transfer fails
@@ -60,7 +60,7 @@ let scenario_host_init_fallback () =
   show "copied (expect 5 6)" dst c.Tensor.value
 
 let scenario_cross_backend () =
-  printf "=== 4. Cross-backend copy (cc -> multicore_cc) ===\n";
+  printf "=== 4. Cross-backend copy (cc -> multidev_cc) ===\n";
   Tensor.unsafe_reinitialize ();
   let ctx = Context.cpu () in
   let%op t = [ 1.; 2. ] + [ 0.5; 0.25 ] in

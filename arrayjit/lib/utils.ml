@@ -102,6 +102,7 @@ let known_config_keys =
       "cc_backend_verify_codesign";
       "output_dlls_in_build_directory";
       "cuda_printf_fifo_size";
+      "multidev_num_devices";
       (* Low-level / optimization *)
       "virtualize_max_visits";
       "virtualize_max_tracing_dim";

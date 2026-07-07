@@ -435,7 +435,7 @@ struct
     let work =
       (* TODO: log the operation if [Utils.settings.with_log_level > 1]. *)
       match (into_merge_buffer, dst_loc) with
-      | No, None -> invalid_arg "Multicore_scheduler.device_to_device: missing dst_loc"
+      | No, None -> invalid_arg "Add_device.device_to_device: missing dst_loc"
       | No, Some dst_loc ->
           let dst_ptr = resolve_pool dst.device dst_loc in
           fun () -> buffer_to_buffer ~dst:dst_ptr ~src:src_ptr ~size_in_bytes
@@ -831,11 +831,11 @@ let finalize (type dev runner event)
    fallback catches it per call, as with the retired per-call instantiation. *)
 
 module Cc_b : Backend = Make_device_backend_from_lowered (Schedulers.Sync) (Cc_backend)
-module Multicore_cc_b : Backend = Make_device_backend_from_lowered (Schedulers.Multicore) (Cc_backend)
+module Multidev_cc_b : Backend = Make_device_backend_from_lowered (Schedulers.Multidev) (Cc_backend)
 module Cuda_b : Backend = Raise_backend ((Cuda_backend_impl.Impl : Lowered_backend))
 module Metal_b : Backend = Raise_backend ((Metal_backend_impl.Impl : Lowered_backend))
 
-type backend = Cc | Multicore_cc | Cuda | Metal [@@deriving sexp, equal]
+type backend = Cc | Multidev_cc | Cuda | Metal [@@deriving sexp, equal]
 
 let get_backend ?backend_name () =
   match
@@ -843,34 +843,34 @@ let get_backend ?backend_name () =
         Utils.get_global_arg ~arg_name:"backend" ~default:"multicore_cc")
     |> String.lowercase
   with
-  | "multicore_cc" -> Multicore_cc
-  (* "sync_cc" and (below) "multicore_cc" are accepted as deprecated aliases. *)
+  (* "sync_cc" and "multicore_cc" are accepted as deprecated aliases of the renamed backends. *)
   | "cc" | "sync_cc" -> Cc
+  | "multidev_cc" | "multicore_cc" -> Multidev_cc
   | "cuda" -> Cuda
   | "metal" -> Metal
   | backend -> invalid_arg [%string "Backends.get_backend: unknown backend %{backend}"]
 
 let backend_name = function
   | Cc -> "cc"
-  | Multicore_cc -> "multicore_cc"
+  | Multidev_cc -> "multidev_cc"
   | Cuda -> "cuda"
   | Metal -> "metal"
 
 let backend_module : backend -> (module Backend) = function
   | Cc -> (module Cc_b)
-  | Multicore_cc -> (module Multicore_cc_b)
+  | Multidev_cc -> (module Multidev_cc_b)
   | Cuda -> (module Cuda_b)
   | Metal -> (module Metal_b)
 
 type wrapped_context =
   | Cc_ctx of Cc_b.context
-  | Multicore_cc_ctx of Multicore_cc_b.context
+  | Multidev_cc_ctx of Multidev_cc_b.context
   | Cuda_ctx of Cuda_b.context
   | Metal_ctx of Metal_b.context
 
 let wrapped_backend = function
   | Cc_ctx _ -> Cc
-  | Multicore_cc_ctx _ -> Multicore_cc
+  | Multidev_cc_ctx _ -> Multidev_cc
   | Cuda_ctx _ -> Cuda
   | Metal_ctx _ -> Metal
 
@@ -882,7 +882,7 @@ let make_context ?(device_id = 0) backend =
   in
   match backend with
   | Cc -> Cc_ctx (fresh (module Cc_b))
-  | Multicore_cc -> Multicore_cc_ctx (fresh (module Multicore_cc_b))
+  | Multidev_cc -> Multidev_cc_ctx (fresh (module Multidev_cc_b))
   | Cuda -> Cuda_ctx (fresh (module Cuda_b))
   | Metal -> Metal_ctx (fresh (module Metal_b))
 
@@ -901,9 +901,9 @@ let with_backend (w : wrapped_context) { f } =
   | Cc_ctx c ->
       let c, r = f (module Cc_b) c in
       (Cc_ctx c, r)
-  | Multicore_cc_ctx c ->
-      let c, r = f (module Multicore_cc_b) c in
-      (Multicore_cc_ctx c, r)
+  | Multidev_cc_ctx c ->
+      let c, r = f (module Multidev_cc_b) c in
+      (Multidev_cc_ctx c, r)
   | Cuda_ctx c ->
       let c, r = f (module Cuda_b) c in
       (Cuda_ctx c, r)
@@ -923,6 +923,6 @@ type 'a ctx_query = {
 let query (w : wrapped_context) { q } =
   match w with
   | Cc_ctx c -> q (module Cc_b) c
-  | Multicore_cc_ctx c -> q (module Multicore_cc_b) c
+  | Multidev_cc_ctx c -> q (module Multidev_cc_b) c
   | Cuda_ctx c -> q (module Cuda_b) c
   | Metal_ctx c -> q (module Metal_b) c

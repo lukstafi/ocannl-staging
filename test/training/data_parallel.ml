@@ -61,7 +61,9 @@ let multistep_ok () : bool =
     let w = TDSL.param ~values:[| 0.5 |] "w" ~output_dims:[ 1 ] () in
     [%op (((w *. x) - y) *. ((w *. x) - y)) ++ "...|... => 0"]
   in
-  Parallel.data_parallel ~backend_name:"cc" ~reduction:Parallel.Mean ~n_shards:2
+  (* Run on multidev_cc: with 2 shards the shards land on devices 0 and 1, exercising the
+     cross-device merge-buffer broadcast and gradient all-reduce paths. *)
+  Parallel.data_parallel ~backend_name:"multidev_cc" ~reduction:Parallel.Mean ~n_shards:2
     ~bindings:IDX.empty ~learning_rate ~inputs:(inputs ()) ~targets:(targets ()) ~loss_of
     ~f:(fun h ->
       h.Parallel.step ();

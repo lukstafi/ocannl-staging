@@ -7,7 +7,7 @@
    ocannl_config is a personal, gitignored file, so in fresh clones / CI / worktrees there is no
    config along the cwd path and [Context.auto]'s preference order would silently land a "CPU"
    benchmark on metal/cuda. A configured backend (personal ocannl_config, OCANNL_BACKEND,
-   --ocannl_backend) is respected, e.g. to compare multicore_cc.
+   --ocannl_backend) is respected, e.g. to compare multidev_cc.
 
    To measure the vectorization delta, compare the default run against one with the compiler's
    vectorizers disabled at the same optimization level (cc_backend_simd_flags is appended verbatim
