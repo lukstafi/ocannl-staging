@@ -70,6 +70,14 @@ val tune :
   ?cache_dir:string ->
   (* Directory of the schedule disk cache; [""] disables caching. Default from config
      [autotune_cache_dir] ([autotune_cache]). *)
+  ?timing_ctx:Context.t ->
+  (* A scratch context lineage against which candidates are compiled and timed, so the timing
+     runs never mutate [ctx]'s live buffers (parameters, accumulators — running a training step
+     on scratch/zero data can even poison them with inf/NaN). It must contain the nodes the
+     computation requires from a prior context, e.g. by repeating parameter initialization on a
+     fresh root context. Only the winning schedule is then compiled from [ctx], exactly like a
+     cache hit. Without it, the search shares [ctx]'s buffers and the caller should re-initialize
+     mutated state afterwards. *)
   ?report:(report -> unit) ->
   Context.t ->
   Ir.Assignments.comp ->

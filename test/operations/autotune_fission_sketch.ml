@@ -181,8 +181,11 @@ let () =
   let mm_reports = ref [] in
   let tune_mm () =
     let ctx = Context.auto () in
+    (* [timing_ctx]: candidates compile and time against a scratch lineage; only the winner is
+       compiled from [ctx] (the caller's buffers are never touched by timing runs). *)
     let ctx, routine =
       Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:cache_dir3
+        ~timing_ctx:(Context.auto ())
         ~report:(fun r -> mm_reports := r :: !mm_reports)
         ctx mm_comp Ir.Indexing.Empty
     in
