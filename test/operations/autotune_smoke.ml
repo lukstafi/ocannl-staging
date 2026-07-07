@@ -86,6 +86,92 @@ let () =
   p "different computations have different digests"
     (not (String.equal (SC.digest canon1) (SC.digest (SC.canonicalize mm_opt))));
 
+  (* --- Local scope ids are alpha-numbered in the digest (Codex P2 on PR #103): [get_scope]
+     draws from a process-global counter, so the same schedule applied in two compiles consumes
+     different raw ids. [Privatize] introduces [Declare_local]/[Set_local]/[Get_local]: without
+     alpha-numbering, the digest of a fresh compile's replay could never match the digest of the
+     direct application. --- *)
+  let mm_expected = Array.create ~len:24 0. in
+  Array.iteri mm_expected ~f:(fun idx _ ->
+      let i = idx / 6 and j = idx % 6 in
+      let acc = ref 0. in
+      for k = 0 to 4 do
+        acc := !acc +. (mav.((i * 5) + k) *. mbv.((k * 6) + j))
+      done;
+      mm_expected.(idx) <- !acc);
+  let mm_canon = SC.canonicalize mm_opt in
+  let _i, mm_b1 = first_loop_exn mm_opt.LL.llc in
+  let _j, mm_b2 = first_loop_exn mm_b1 in
+  let mm_k, _ = first_loop_exn mm_b2 in
+  let priv_sched = [ Sched.Privatize { target = mc.Tensor.value; over = mm_k } ] in
+  let priv_saved, _reg = SC.to_saved (SC.base_registry mm_canon) priv_sched in
+  let priv_direct = Sched.apply priv_sched mm_opt in
+  let priv_direct_digest = SC.digest (SC.canonicalize priv_direct) in
+  (* Two structurally identical codes whose scope ids differ (as two lowering / transform runs
+     produce, [LL.get_scope] being a process-global counter) must digest equally. *)
+  let scope_tn =
+    Ir.Tnode.create (Ir.Tnode.Specified Ir.Ops.single) ~id:9001 ~label:[ "scope_probe" ]
+      ~unpadded_dims:(lazy [| 4 |])
+      ~padding:(lazy None)
+      ()
+  in
+  let build_scoped () =
+    let s = Ir.Indexing.get_symbol () in
+    let scope = LL.get_scope scope_tn in
+    let fake llc : LL.optimized =
+      {
+        LL.traced_store = Hashtbl.create (module Ir.Tnode);
+        optimize_ctx = LL.empty_optimize_ctx ();
+        llc;
+        merge_node = None;
+        workgroup_shared = Set.empty (module Ir.Tnode);
+      }
+    in
+    fake
+      (LL.For_loop
+         {
+           index = s;
+           from_ = 0;
+           to_ = 3;
+           trace_it = false;
+           axis = LL.Serial;
+           body =
+             LL.Seq
+               ( LL.Declare_local { id = scope; needs_init = false },
+                 LL.Seq
+                   ( LL.Set_local (scope, LL.Constant 1.),
+                     LL.Set
+                       {
+                         tn = scope_tn;
+                         idcs = [| Ir.Indexing.Iterator s |];
+                         llsc = LL.Get_local scope;
+                         debug = "";
+                       } ) );
+         })
+  in
+  p "scope ids alpha-numbered in the digest"
+    (String.equal
+       (SC.digest (SC.canonicalize (build_scoped ())))
+       (SC.digest (SC.canonicalize (build_scoped ()))));
+  let priv_replay_digest = ref "" in
+  let pctx = Context.auto () in
+  let pctx, proutine =
+    Context.compile
+      ~lowered_transform:(fun opt ->
+        let canon = SC.canonicalize opt in
+        assert (String.equal (SC.digest canon) (SC.digest mm_canon));
+        let sched, _reg = SC.of_saved canon priv_saved in
+        let opt' = Sched.apply sched opt in
+        priv_replay_digest := SC.digest (SC.canonicalize opt');
+        opt')
+      pctx mm_comp Ir.Indexing.Empty
+  in
+  let pctx = Context.run pctx proutine in
+  let priv_got = Context.get_values pctx mc.Tensor.value in
+  p "privatized replay values correct" (Array.for_all2_exn priv_got mm_expected ~f:approx);
+  p "privatized replay structurally equals the direct application"
+    (String.equal !priv_replay_digest priv_direct_digest);
+
   (* --- to_saved / of_saved roundtrip: serialize a split+swap schedule built against compile #1,
      replay it inside a fresh compile, check executed values and structural (digest) parity --- *)
   let sym1, _ = first_loop_exn opt1.LL.llc in
@@ -124,14 +210,6 @@ let () =
   let tune_comp =
     named "tune_combo" (Asgns.sequence [ Train.forward tc1; Train.forward tc2 ])
   in
-  let mm_expected = Array.create ~len:24 0. in
-  Array.iteri mm_expected ~f:(fun idx _ ->
-      let i = idx / 6 and j = idx % 6 in
-      let acc = ref 0. in
-      for k = 0 to 4 do
-        acc := !acc +. (mav.((i * 5) + k) *. mbv.((k * 6) + j))
-      done;
-      mm_expected.(idx) <- !acc);
   let cache_dir = "autotune_cache_test" in
   let reports = ref [] in
   let tune_once () =

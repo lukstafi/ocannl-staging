@@ -98,9 +98,14 @@ let canonicalize ?(static_indices = []) (opt : LL.optimized) : canonical =
              (String.concat_array ~sep:"," (Array.map dims ~f:Int.to_string))
              (Sexp.to_string (Ops.sexp_of_prec (Lazy.force tn.Tn.prec))))
   in
+  (* Local scope ids come from a process-global counter freshly on each lowering (like loop
+     symbols), so digest their first-occurrence alpha index, not the raw id — otherwise sibling
+     compiles of local-heavy routines would never agree on a digest (Codex P2 on PR #103). *)
+  let scope_alpha = Hashtbl.create (module LL.Scope_id) in
   let emit_scope (id : LL.scope_id) =
     emit_tn id.tn;
-    add ("." ^ Int.to_string id.scope_id)
+    let a = Hashtbl.find_or_add scope_alpha id ~default:(fun () -> Hashtbl.length scope_alpha) in
+    add ("." ^ Int.to_string a)
   in
   let emit_idx = function
     | Idx.Fixed_idx i -> add ("#" ^ Int.to_string i)

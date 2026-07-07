@@ -27,20 +27,28 @@ let set_test_bindings routine =
   List.iter (Context.bindings routine) ~f:(fun (ss, r) ->
       match ss.Idx.static_range with Some range when range > 0 -> r := range / 2 | _ -> ())
 
+(* [Context.bindings] exposes the routine's live binding refs — restore them after timing
+   (Codex P2 on PR #103), or the returned winner would stay bound to the tuner's midpoint test
+   values. *)
 let time_routine ~repeats cctx routine =
-  set_test_bindings routine;
-  (* Warmup run: absorbs lazy initialization and fills caches like a steady-state iteration. *)
-  let ctx = ref (Context.run cctx routine) in
-  Context.sync !ctx;
-  let best = ref Float.infinity in
-  for _ = 1 to max 1 repeats do
-    let t0 = Unix.gettimeofday () in
-    ctx := Context.run !ctx routine;
-    Context.sync !ctx;
-    let dt = (Unix.gettimeofday () -. t0) *. 1000. in
-    if Float.(dt < !best) then best := dt
-  done;
-  !best
+  let saved_bindings = List.map (Context.bindings routine) ~f:(fun (_ss, r) -> (r, !r)) in
+  Exn.protect
+    ~finally:(fun () -> List.iter saved_bindings ~f:(fun (r, v) -> r := v))
+    ~f:(fun () ->
+      set_test_bindings routine;
+      (* Warmup run: absorbs lazy initialization and fills caches like a steady-state
+         iteration. *)
+      let ctx = ref (Context.run cctx routine) in
+      Context.sync !ctx;
+      let best = ref Float.infinity in
+      for _ = 1 to max 1 repeats do
+        let t0 = Unix.gettimeofday () in
+        ctx := Context.run !ctx routine;
+        Context.sync !ctx;
+        let dt = (Unix.gettimeofday () -. t0) *. 1000. in
+        if Float.(dt < !best) then best := dt
+      done;
+      !best)
 
 (** {2 Candidate compilation}
 

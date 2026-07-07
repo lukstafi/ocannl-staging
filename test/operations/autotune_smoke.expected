@@ -3,6 +3,9 @@ Found 0, in the config file
 canonical digest stable across sibling compiles: true
 canonical form complete: true
 different computations have different digests: true
+scope ids alpha-numbered in the digest: true
+privatized replay values correct: true
+privatized replay structurally equals the direct application: true
 replayed schedule values correct: true
 replayed schedule structurally equals the direct application: true
 saved schedule roundtrips through sexp: true
