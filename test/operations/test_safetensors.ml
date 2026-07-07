@@ -53,3 +53,25 @@ let () =
   (match Safetensors.to_float32 st "missing" with
   | exception Failure msg -> printf "missing tensor: %s\n" msg
   | _ -> printf "missing tensor: unexpectedly succeeded\n")
+
+(* The payload ranges must tile the byte buffer exactly (safetensors invariant): overlapping or
+   non-contiguous data_offsets, and trailing uncovered bytes, are rejected. *)
+let () =
+  let write_file path header payload =
+    let len_bytes = Bytes.create 8 in
+    Stdlib.Bytes.set_int64_le len_bytes 0 (Int64.of_int (String.length header));
+    Out_channel.write_all path ~data:(Bytes.to_string len_bytes ^ header ^ payload)
+  in
+  let payload = le_bytes_of_floats [| 1.; 2.; 3.; 4.; 5.; 6. |] in
+  let overlapping =
+    {|{"a":{"dtype":"F32","shape":[4],"data_offsets":[0,16]},"b":{"dtype":"F32","shape":[4],"data_offsets":[8,24]}}|}
+  in
+  write_file "overlap.safetensors" overlapping payload;
+  (match Safetensors.read "overlap.safetensors" with
+  | exception Failure msg -> printf "overlap rejected: %s\n" msg
+  | _ -> printf "overlap rejected: unexpectedly accepted\n");
+  let trailing = {|{"a":{"dtype":"F32","shape":[4],"data_offsets":[0,16]}}|} in
+  write_file "trailing.safetensors" trailing payload;
+  match Safetensors.read "trailing.safetensors" with
+  | exception Failure msg -> printf "trailing rejected: %s\n" msg
+  | _ -> printf "trailing rejected: unexpectedly accepted\n"

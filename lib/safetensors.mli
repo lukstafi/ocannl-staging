@@ -22,7 +22,9 @@ val read : string -> t
 (** [read path] parses the header of the safetensors file at [path]. Tensor payloads are read
     lazily by the accessors below, so this is cheap even for multi-gigabyte files.
 
-    Raises [Failure] on malformed headers and header/file-size inconsistencies. *)
+    Raises [Failure] on malformed headers and header/file-size inconsistencies, including when
+    the payload ranges do not tile the byte buffer exactly (overlapping or non-contiguous
+    [data_offsets], or trailing uncovered bytes). *)
 
 val path : t -> string
 val names : t -> string list
