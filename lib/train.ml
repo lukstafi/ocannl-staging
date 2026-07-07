@@ -55,22 +55,43 @@ let forward t =
   let label = Tn.debug_name t.value in
   { fwd with asgns = Asgns.Block_comment (label ^ " fwd", fwd.asgns) }
 
+(** A scalar non-differentiable accumulator for {!grad_update}'s [?accum_loss]: zero-initialized
+    at allocation and materialized. Read it with [Context.get_values] (which awaits the device)
+    and reset it with [Context.set_values ctx t.value [| 0. |]] — e.g. once per epoch. *)
+let loss_accumulator ?(label = "loss_accum") () =
+  let t = NTDSL.init ~l:label ~prec:Ir.Ops.single ~o:[ 1 ] ~f:(fun _ -> 0.) () in
+  set_materialized t.Tensor.value;
+  t
+
 (** Returns the tensor's forward, zeroing gradients, and backprop code wrapped with label-derived
     comments. Sets the tensor's value as materialized. If [setup_for_parallel] is true (false by
-    default), sets the parameters and their gradients as "non-local" (on-device). *)
-let grad_update ?(setup_for_parallel = false) loss =
+    default), sets the parameters and their gradients as "non-local" (on-device). When
+    [accum_loss] is given (see {!loss_accumulator}), the update also accumulates the loss value
+    into it ([accum_loss =+ loss]): training loops can then read the loss sum once per epoch
+    instead of once per step — on GPU backends a per-step [Context.get_values] awaits the whole
+    device, serializing the stream, while steps that only accumulate on device queue up and
+    overlap with host-side scheduling. *)
+let grad_update ?(setup_for_parallel = false) ?accum_loss loss =
   set_materialized loss.Tensor.value;
   if setup_for_parallel then
     Set.iter loss.Tensor.params ~f:(fun p ->
         set_materialized (Option.value_exn ~here:[%here] p.diff).grad);
   (* Note: the %cd syntax for [loss.grad] does not modify roots. *)
-  [%cd
-    ~~(loss "forward and gradient update";
-       loss.forward;
-       ~~(loss "zero grads and backprop";
-          loss.zero_grads;
-          loss.grad =: 1;
-          loss.backprop))]
+  let update =
+    [%cd
+      ~~(loss "forward and gradient update";
+         loss.forward;
+         ~~(loss "zero grads and backprop";
+            loss.zero_grads;
+            loss.grad =: 1;
+            loss.backprop))]
+  in
+  match accum_loss with
+  | None -> update
+  | Some acc ->
+      (* Sequenced after the update so referencing [loss] reads its (already computed) value
+         rather than embedding its forward code a second time. *)
+      Asgns.sequence [ update; [%cd ~~(loss "accumulate loss"; acc =+ loss)] ]
 
 (** See: https://github.com/tinygrad/tinygrad/blob/master/tinygrad/nn/optim.py *)
 let sgd_one ~learning_rate ?(momentum = 0.0) ?(weight_decay = 0.0) ?(nesterov = false) p =
