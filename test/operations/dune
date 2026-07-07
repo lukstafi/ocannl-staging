@@ -83,6 +83,17 @@
    "backend-0-0.log.actual")))
 
 (test
+ (name one_element_reshape)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules one_element_reshape)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name threefry4x32_demo)
  (package neural_nets_lib)
  (deps

@@ -240,7 +240,13 @@ type total_elems =
 
 type row_constraint =
   | Unconstrained
-  | Total_elems of { numerator : total_elems; divided_by : dim_var list }
+  | Total_elems of { numerator : total_elems; divided_by : dim_var list; keep_axis : bool }
+      (** The row's total number of elements is [numerator] divided by the product of the
+          [divided_by] variables. [keep_axis] means the constraint comes from a data terminal whose
+          preference, when the constrained rows receive no other shape information, is to keep a
+          single dim-1 axis rather than close the leftover row variable to the empty row ("identity
+          reshape", see gh-460); it is reset once the constraint is reduced by consuming axes or
+          variables. *)
   | Exact of dim list
 [@@deriving equal, hash, compare, sexp_of, variants]
 
@@ -561,13 +567,15 @@ let rec row_conjunction ~prov ~origin stage constr1 constr2 =
   | _ when [%equal: row_constraint] constr1 constr2 -> Some ([], constr2)
   | Unconstrained, _ -> Some ([], constr2)
   | _, Unconstrained -> Some ([], constr1)
-  | ( Total_elems { numerator = n1; divided_by = vars1 },
-      Total_elems { numerator = n2; divided_by = vars2 } )
+  | ( Total_elems { numerator = n1; divided_by = vars1; keep_axis = ka1 },
+      Total_elems { numerator = n2; divided_by = vars2; keep_axis = ka2 } )
     when [%equal: dim_var list]
            (List.sort ~compare:compare_dim_var vars1)
            (List.sort ~compare:compare_dim_var vars2) -> (
       match (n1, n2) with
-      | n1, n2 when [%equal: total_elems] n1 n2 -> Some ([], constr2)
+      | n1, n2 when [%equal: total_elems] n1 n2 ->
+          (* Only keep the identity-reshape preference if both sources agree on it. *)
+          Some ([], Total_elems { numerator = n2; divided_by = vars2; keep_axis = ka1 && ka2 })
       | Num_elems _, Num_elems _ ->
           (* Both are solved and different - this is a mismatch *)
           elems_mismatch n1 n2
@@ -638,25 +646,28 @@ let rec row_conjunction ~prov ~origin stage constr1 constr2 =
       | _ ->
           (* We don't want to force delayed values - keep both constraints *)
           None)
-  | ( Total_elems { numerator = Strided_var { coeff = c1; var = v1; denom = _ }; divided_by = vars1 },
+  | ( Total_elems
+        { numerator = Strided_var { coeff = c1; var = v1; denom = _ }; divided_by = vars1; _ },
       constr2 )
     when List.mem vars1 v1 ~equal:equal_dim_var && late ->
       (* Variable appears in both numerator and denominator, they cancel out *)
       (* (c1 * v1 / d1) / (... * v1 * ...) = c1 / (d1 * ... * ...) *)
       let vars1' = remove_var v1 vars1 in
       row_conjunction ~prov ~origin stage
-        (Total_elems { numerator = Num_elems (Utils.safe_force c1); divided_by = vars1' })
+        (Total_elems
+           { numerator = Num_elems (Utils.safe_force c1); divided_by = vars1'; keep_axis = false })
         constr2
   | ( constr2,
       Total_elems
-        { numerator = Strided_var { coeff = c1; var = v1; denom = _ }; divided_by = vars1 } )
+        { numerator = Strided_var { coeff = c1; var = v1; denom = _ }; divided_by = vars1; _ } )
     when List.mem vars1 v1 ~equal:equal_dim_var && late ->
       let vars1' = remove_var v1 vars1 in
       row_conjunction ~prov ~origin stage
-        (Total_elems { numerator = Num_elems (Utils.safe_force c1); divided_by = vars1' })
+        (Total_elems
+           { numerator = Num_elems (Utils.safe_force c1); divided_by = vars1'; keep_axis = false })
         constr2
-  | ( Total_elems { numerator = n1; divided_by = vars1 },
-      Total_elems { numerator = n2; divided_by = vars2 } ) ->
+  | ( Total_elems { numerator = n1; divided_by = vars1; _ },
+      Total_elems { numerator = n2; divided_by = vars2; _ } ) ->
       (* Helper function to compute multiset difference *)
       let list_diff l1 l2 = List.fold l2 ~init:l1 ~f:(fun acc x -> remove_var x acc) in
       let vars1_only = list_diff vars1 vars2 in
@@ -709,7 +720,12 @@ let rec row_conjunction ~prov ~origin stage constr1 constr2 =
                   Strided_var { coeff; var; denom = n_small }
             in
             [
-              Rows_constr { r = [ r ]; constr = Total_elems { numerator; divided_by = [] }; origin };
+              Rows_constr
+                {
+                  r = [ r ];
+                  constr = Total_elems { numerator; divided_by = []; keep_axis = false };
+                  origin;
+                };
             ]
       in
       let lazy_extras ~keep_constr1 ~num_var ?(extra_var = []) ~coeff ~denom () =
@@ -728,7 +744,12 @@ let rec row_conjunction ~prov ~origin stage constr1 constr2 =
           }
         in
         let constr =
-          Total_elems { numerator = Strided_var { coeff; var = num_var; denom }; divided_by = [] }
+          Total_elems
+            {
+              numerator = Strided_var { coeff; var = num_var; denom };
+              divided_by = [];
+              keep_axis = false;
+            }
         in
         [ Rows_constr { r = [ r ]; constr; origin } ]
       in
@@ -790,8 +811,8 @@ let rec row_conjunction ~prov ~origin stage constr1 constr2 =
       else
         let eqs = List.map2_exn dims1 dims2 ~f:(fun d1 d2 -> Dim_eq { d1; d2; origin }) in
         Some (eqs, constr1)
-  | Total_elems { numerator; divided_by }, Exact dims
-  | Exact dims, Total_elems { numerator; divided_by } -> (
+  | Total_elems { numerator; divided_by; _ }, Exact dims
+  | Exact dims, Total_elems { numerator; divided_by; _ } -> (
       match collect_factors dims with
       | None -> None (* Give up on complex cases *)
       | Some (known_product, vars) -> (
@@ -952,7 +973,7 @@ exception Given_up
    variable is also prevented. *)
 let mark_total_elems_vars (constr : row_constraint) env : environment =
   match constr with
-  | Total_elems { numerator = Strided_var { var; _ }; divided_by } -> (
+  | Total_elems { numerator = Strided_var { var; _ }; divided_by; _ } -> (
       let unless_set = Set.of_list (module Dim_var) divided_by in
       match find_dim env.dim_env var with
       | Some (Bounds_dim bounds) ->
@@ -984,13 +1005,16 @@ let reduce_row_constraint (constr : row_constraint) ~(beg_dims : dim list) ~(dim
     row_constraint =
   match constr with
   | Unconstrained -> Unconstrained
-  | Total_elems { numerator; divided_by } -> (
+  | Total_elems { numerator; divided_by; keep_axis } -> (
       try
         let d, vars =
           match collect_factors (beg_dims @ dims) with
           | Some (d, vars) -> (d, vars)
           | None -> raise Given_up
         in
+        (* Consuming any axes, even dim-1 ones, means the constrained rows received other shape
+           information: reset the identity-reshape preference. *)
+        let keep_axis = keep_axis && List.is_empty beg_dims && List.is_empty dims in
         (* Check if any vars appear in divided_by (multiset intersection) *)
         let has_common_var =
           List.exists vars ~f:(fun v -> List.mem divided_by v ~equal:equal_dim_var)
@@ -1003,8 +1027,7 @@ let reduce_row_constraint (constr : row_constraint) ~(beg_dims : dim list) ~(dim
             @@ Shape_error
                  ( "reduce_row_constraint: Total_elems constraint failed, shape is too big",
                    [ Dim_mismatch (beg_dims @ dims) ] )
-          else if d = 1 && List.is_empty vars then constr
-          else Total_elems { numerator; divided_by = divided_by @ vars }
+          else Total_elems { numerator; divided_by = divided_by @ vars; keep_axis }
       with Given_up -> Unconstrained)
   | Exact exact_dims ->
       let beg_len = List.length beg_dims in
@@ -1021,7 +1044,7 @@ let reduce_row_constraint (constr : row_constraint) ~(beg_dims : dim list) ~(dim
 let _lift_row_constraint (constr : row_constraint) ~(beg_dims : dim list) ~(dims : dim list) :
     row_constraint =
   match constr with
-  | Total_elems { numerator; divided_by } -> (
+  | Total_elems { numerator; divided_by; keep_axis } -> (
       let ds, vars =
         List.partition_map (beg_dims @ dims) ~f:(function
           | Dim { d; _ } -> Either.First d
@@ -1042,7 +1065,9 @@ let _lift_row_constraint (constr : row_constraint) ~(beg_dims : dim list) ~(dims
       | Some remaining ->
           let d = List.fold ds ~init:1 ~f:( * ) in
           if d = 1 && List.is_empty vars then constr
-          else Total_elems { numerator = total_elems_multiply numerator d; divided_by = remaining })
+          else
+            Total_elems
+              { numerator = total_elems_multiply numerator d; divided_by = remaining; keep_axis })
   | Unconstrained -> Unconstrained
   | Exact exact_dims -> Exact (beg_dims @ exact_dims @ dims)
 
@@ -1197,24 +1222,29 @@ let s_dim_one_in_row v ~value in_ =
 let reapply_rows_constr = ref false
 
 let subst_row_constraint_impl ~subst_in_dim ~get_dim_val stage constr =
-  let subst_total_elems_divided_by numerator divided_by =
+  let subst_total_elems_divided_by numerator divided_by ~keep_axis =
     let substituted_divided_by = List.map divided_by ~f:(fun v -> subst_in_dim (Var v)) in
     match collect_factors substituted_divided_by with
     | Some (known_product, residual_vars) ->
         reapply_rows_constr := true;
         Total_elems
-          { numerator = total_elems_divide numerator known_product; divided_by = residual_vars }
+          {
+            numerator = total_elems_divide numerator known_product;
+            divided_by = residual_vars;
+            keep_axis;
+          }
     | None ->
         (* Fall back to preserving the original constraint *)
-        Total_elems { numerator; divided_by }
+        Total_elems { numerator; divided_by; keep_axis }
   in
   match constr with
-  | Total_elems { numerator = Strided_var { coeff; var; denom }; divided_by }
+  | Total_elems { numerator = Strided_var { coeff; var; denom }; divided_by; keep_axis }
     when is_stage2_up stage && Option.is_some (get_dim_val var) ->
       let dim = Option.value_exn (get_dim_val var) in
       let tot = Utils.safe_force coeff * dim in
       reapply_rows_constr := true;
-      if tot % denom = 0 then subst_total_elems_divided_by (Num_elems (tot / denom)) divided_by
+      if tot % denom = 0 then
+        subst_total_elems_divided_by (Num_elems (tot / denom)) divided_by ~keep_axis
       else
         raise
         @@ Shape_error
@@ -1222,7 +1252,7 @@ let subst_row_constraint_impl ~subst_in_dim ~get_dim_val stage constr =
                  "Total_elems constraint: shape cannot be strided, %{tot#Int} not divisible by \
                   %{denom#Int}"],
                [ Rows_constr_failed { constr } ] )
-  | Total_elems { numerator = Strided_var { coeff; var; denom }; divided_by }
+  | Total_elems { numerator = Strided_var { coeff; var; denom }; divided_by; keep_axis }
     when not (equal_dim (Var var) (subst_in_dim (Var var))) -> (
       reapply_rows_constr := true;
       match subst_in_dim (Var var) with
@@ -1230,7 +1260,7 @@ let subst_row_constraint_impl ~subst_in_dim ~get_dim_val stage constr =
           (* Stage 2+: Replace (coeff * v / denom) with (coeff * d / denom) *)
           let new_num = Utils.safe_force coeff * d in
           if new_num % denom = 0 then
-            Total_elems { numerator = Num_elems (new_num / denom); divided_by }
+            Total_elems { numerator = Num_elems (new_num / denom); divided_by; keep_axis }
           else
             raise
             @@ Shape_error
@@ -1239,15 +1269,17 @@ let subst_row_constraint_impl ~subst_in_dim ~get_dim_val stage constr =
                    [ Dim_mismatch [ value ] ] )
       | Dim _ ->
           (* Stage 1: Don't force coeff yet, keep the constraint as-is *)
-          Total_elems { numerator = Strided_var { coeff; var; denom }; divided_by }
-      | Var v' -> Total_elems { numerator = Strided_var { coeff; var = v'; denom }; divided_by }
+          Total_elems { numerator = Strided_var { coeff; var; denom }; divided_by; keep_axis }
+      | Var v' ->
+          Total_elems { numerator = Strided_var { coeff; var = v'; denom }; divided_by; keep_axis }
       | Affine _ ->
           (* FIXME: NOT IMPLEMENTED YET *)
           failwith "NOT IMPLEMENTED YET"
       | Concat _ ->
           (* FIXME: NOT IMPLEMENTED YET *)
           failwith "NOT IMPLEMENTED YET")
-  | Total_elems { numerator; divided_by } -> subst_total_elems_divided_by numerator divided_by
+  | Total_elems { numerator; divided_by; keep_axis } ->
+      subst_total_elems_divided_by numerator divided_by ~keep_axis
   | Exact dims ->
       (* The constraint update does not affect its applicability, so we don't need to reapply it. *)
       Exact (List.map dims ~f:subst_in_dim)
@@ -1401,7 +1433,7 @@ let%track5_sexp rec apply_rows_constraint ~depth ~stage origin (rows : row list)
                     })
             in
             (dim_eqs @ row_eqs, env)
-        | Total_elems { numerator = Num_elems n; divided_by } -> (
+        | Total_elems { numerator = Num_elems n; divided_by; keep_axis } -> (
             (* Case 3: Total_elems with known numerator *)
             match collect_factors all_dims with
             | None ->
@@ -1422,12 +1454,35 @@ let%track5_sexp rec apply_rows_constraint ~depth ~stage origin (rows : row list)
                     List.map all_product_vars ~f:(fun v ->
                         Dim_eq { d1 = Var v; d2 = get_bcast_dim ~d:1 ~proj_id:45 (); origin })
                   in
+                  (* The identity-reshape preference survives only if no axes were consumed, and
+                     goes to a single row variable: the sole one, or the last output-kind one
+                     (mirroring the preference in [eliminate_rows_constraint]). *)
+                  let keep_axis = keep_axis && List.is_empty all_dims in
+                  let keep_var =
+                    if not keep_axis then None
+                    else
+                      match row_vars with
+                      | [ (v, _) ] -> Some v
+                      | _ ->
+                          Option.map ~f:(fun (_, (v, _)) -> v)
+                          @@ List.findi (List.rev row_vars) ~f:(fun _ (_, prov) ->
+                                 List.exists prov ~f:(fun (o : provenance_origin) ->
+                                     equal_kind o.kind `Output))
+                  in
                   let row_constrs =
                     List.map row_vars ~f:(fun (v, id) ->
                         Rows_constr
                           {
                             r = [ row_of_var v id ];
-                            constr = Total_elems { numerator = Num_elems 1; divided_by = [] };
+                            constr =
+                              Total_elems
+                                {
+                                  numerator = Num_elems 1;
+                                  divided_by = [];
+                                  keep_axis =
+                                    Option.value_map keep_var ~default:false
+                                      ~f:(equal_row_var v);
+                                };
                             origin;
                           })
                   in
@@ -1546,15 +1601,15 @@ and apply_row_constraint ~depth stage origin (r : row) (constr : row_constraint)
     match (r, constr) with
     | _ when stored && not updated -> (extras, env)
     | _, Unconstrained -> assert false
-    | _, Total_elems { numerator = Strided_var { coeff; var; denom }; divided_by = [] }
+    | _, Total_elems { numerator = Strided_var { coeff; var; denom }; divided_by = []; _ }
       when is_stage2_up stage && Option.is_some (get_dim_val env var) ->
         let tot = Option.value_exn (get_dim_val env var) in
         let tot = Utils.safe_force coeff * tot / denom in
         apply_row_constraint ~depth:(depth + 1) stage origin r
-          (Total_elems { numerator = Num_elems tot; divided_by = [] })
+          (Total_elems { numerator = Num_elems tot; divided_by = []; keep_axis = false })
           env
     | ( { dims; bcast = Broadcastable; _ },
-        Total_elems { numerator = Strided_var { coeff; var; denom }; divided_by = [] } )
+        Total_elems { numerator = Strided_var { coeff; var; denom }; divided_by = []; _ } )
       when is_stage2_up stage && known_dims_product dims ->
         let (d : int), _ = Option.value_exn (collect_factors dims) in
         let coeff : int = Utils.safe_force coeff in
@@ -1568,7 +1623,7 @@ and apply_row_constraint ~depth stage origin (r : row) (constr : row_constraint)
                    "apply_row_constraint: Total_elems constraint failed: %{denom*d#Int} not \
                     divisible by %{coeff#Int}"],
                  [ Row_mismatch [ r ] ] )
-    | { dims; bcast = Broadcastable; _ }, Total_elems { numerator; divided_by }
+    | { dims; bcast = Broadcastable; _ }, Total_elems { numerator; divided_by; _ }
       when List.length divided_by <= 1 -> (
         try
           let d, vars =
@@ -1641,7 +1696,7 @@ and apply_row_constraint ~depth stage origin (r : row) (constr : row_constraint)
           @ extras,
           env )
     | ( { bcast = Row_var v; _ },
-        Total_elems { numerator = Strided_var { coeff; var = _; denom }; divided_by = [] } )
+        Total_elems { numerator = Strided_var { coeff; var = _; denom }; divided_by = []; _ } )
       when is_stage2_up stage -> (
         (* Check if we have a GLB and if it meets our conditions *)
         match find_row env.row_env v with
@@ -1664,7 +1719,7 @@ and apply_row_constraint ~depth stage origin (r : row) (constr : row_constraint)
         | _ ->
             if stored then (extras, env)
             else (Rows_constr { r = [ r ]; constr; origin } :: extras, env))
-    | { bcast = Row_var _; _ }, _ | _, Total_elems { numerator = _; divided_by = _ } ->
+    | { bcast = Row_var _; _ }, _ | _, Total_elems _ ->
         if stored then (extras, env)
         else
           ( Rows_constr { r = [ r ]; constr; origin } :: extras,
@@ -3580,9 +3635,29 @@ and eliminate_row_constraint ~depth stage origin ~terminal ~(glb : row option) (
       in
       (* Note: the reduced constraint applies to just the row variable. *)
       match reduce_row_constraint constr ~beg_dims ~dims with
-      | Total_elems { numerator; divided_by } -> (
+      | Total_elems { numerator; divided_by; keep_axis } -> (
           let _divided_by : dim_var list = divided_by in
           match (numerator, divided_by, glb) with
+          | Num_elems 1, [], (None | Some { beg_dims = []; dims = []; _ })
+            when keep_axis && is_stage5_up stage ->
+              (* Identity-reshape preference (gh-460): a 1-element data terminal whose rows
+                 received no other shape information keeps a single dim-1 axis instead of
+                 collapsing to a scalar. *)
+              ( [
+                  Row_eq
+                    {
+                      r1;
+                      r2 =
+                        {
+                          beg_dims = [];
+                          dims = [ get_default_dim ~d:1 ~proj_id:60 () ];
+                          bcast = Broadcastable;
+                          prov;
+                        };
+                      origin;
+                    };
+                ],
+                env )
           | Num_elems 1, vs, _ when is_stage5_up stage ->
               ( no_further_axes ~guess:false ()
                 :: List.map vs ~f:(fun v ->
@@ -4248,7 +4323,7 @@ let%track4_sexp get_proj_equations (inequalities : constraint_ list) proj_axis_e
     | Rows_constr
         {
           r;
-          constr = Total_elems { numerator = Strided_var { coeff; var; denom }; divided_by };
+          constr = Total_elems { numerator = Strided_var { coeff; var; denom }; divided_by; _ };
           origin = _;
         } -> (
         let divided_by =
