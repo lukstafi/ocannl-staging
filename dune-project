@@ -106,6 +106,8 @@
    (= :version))
   (dataprep
    (>= 0.1.0))
+  (yojson
+   (>= 2.0.0))
   (printbox
    (>= 0.12))
   ; FIXME: Depend on printbox-text > 0.12.0 when it is released.

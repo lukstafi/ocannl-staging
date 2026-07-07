@@ -10,7 +10,8 @@
   arrayjit.ir
   arrayjit.context
   arrayjit.autotune
-  ocannl_tensor)
+  ocannl_tensor
+  yojson)
  (preprocessor_deps
   (env_var OCANNL_LOG_LEVEL))
  (preprocess
@@ -22,6 +23,6 @@
    ppx_string
    ppx_ocannl
    ppx_minidebug))
- (modules train parallel nn_blocks ocannl persistence)
+ (modules train parallel nn_blocks ocannl persistence safetensors)
  (modes best)
  (c_library_flags -lpthread))

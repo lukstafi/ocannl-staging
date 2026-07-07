@@ -1,0 +1,8 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+names: a, b
+metadata format = pt
+a: dtype F32, shape [2; 3], offset 0, nbytes 24
+a roundtrips (2x3): true
+b via tensor: [10; 20; 30; 40]
+missing tensor: Safetensors.to_float32 roundtrip.safetensors: no tensor named missing
