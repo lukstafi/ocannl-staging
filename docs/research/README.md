@@ -21,3 +21,5 @@ Two kinds of entries:
 | `dumpy-torchdim-deep-dive.md` | `../proposals/gh-ocannl-316.md` | DumPy & torchdim dimension-naming comparison (#316; findings comment in `gh-ocannl-316-comment.md`) |
 | `imbue-infrastructure-lessons.md` | `../imbue-infrastructure-lessons.md` | Imbue 70B infrastructure lessons (#270) |
 | `megakernel-deep-dive.md` | `../megakernel-deep-dive.md` | Megakernel patterns (Hazy Research, Mirage MPK) (#318) |
+| `ggml-lessons.md` | (regular file) | Efficiency lessons from ggml for CPU inference (#163) |
+| `llmc-lessons.md` | (regular file) | llm.c lessons for GPU training/inference of the GPT-2 driver workload (#253) |
