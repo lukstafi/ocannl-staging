@@ -1001,6 +1001,23 @@ using namespace metal;|} in
     in
     (Array.of_list (List.rev !index_to_pool), slots_buf, keep)
 
+  (* Metal command buffers on one queue may begin executing while earlier ones are still running
+     (untracked resources), and a routine's task only waits for the input events captured at link
+     time — so back-to-back runs of one routine (e.g. training steps that read the loss only once
+     per epoch, via [Train.grad_update ?accum_loss]) would race with themselves. Encode a wait for
+     the latest all-work signal into the launch's own command buffer: every routine run is
+     followed by an [all_work] signal ([Raise_backend.sync_routine]), so this orders the launch
+     after all previously enqueued routine work at no extra command buffer — the FIFO-execution
+     semantics CUDA streams have natively. No-op on a fresh queue: [all_work] signals
+     [counter + 1] and stores it, so the latest signaled value is the current counter, and
+     counter = 1 means no signal was issued yet. *)
+  let encode_wait_for_enqueued dev command_buffer =
+    let counter = dev.runner.counter in
+    if Unsigned.ULLong.compare counter Unsigned.ULLong.one > 0 then
+      Me.CommandBuffer.encode_wait_for_event command_buffer
+        (Me.SharedEvent.super dev.runner.event)
+        counter
+
   let%debug4_sexp link_proc ~prior_context ~library ~func_name
       ~(kparams : (string * kparam_source) list) ~(launch : Low_level.launch_dims)
       ~lowered_bindings ~(ctx_buffers : ctx_buffers) : Task.t =
@@ -1042,6 +1059,7 @@ using namespace metal;|} in
           | Some (cb, enc) -> (cb, enc)
           | None ->
               let cb = Me.CommandBuffer.on_queue queue in
+              encode_wait_for_enqueued dev cb;
               (cb, Me.ComputeCommandEncoder.on_buffer cb)
         in
         Me.ComputeCommandEncoder.set_compute_pipeline_state encoder pso;
@@ -1180,6 +1198,7 @@ using namespace metal;|} in
            work =
              (fun () ->
                let command_buffer = Me.CommandBuffer.on_queue dev.runner.queue in
+               encode_wait_for_enqueued dev command_buffer;
                let encoder =
                  Me.ComputeCommandEncoder.on_buffer_with_dispatch_type command_buffer
                    Me.ComputeCommandEncoder.DispatchType.Serial
