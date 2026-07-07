@@ -570,7 +570,8 @@ let extend_spec (elem : compiled) (u : unit_gen) (op : SC.saved_optop) : spec op
 
 (** {2 The search} *)
 
-let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?report ctx comp bindings =
+let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?report ctx comp
+    bindings =
   let beam_width =
     max 1 (Option.value beam_width ~default:(int_arg ~arg_name:"autotune_beam_width" ~default:2))
   in
@@ -585,6 +586,25 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?report ctx c
   let backend = Context.backend_name ctx in
   let is_gpu = Sched.backend_is_gpu backend and is_cpu = Sched.backend_is_cpu backend in
   let limits = Context.hardware_limits ctx in
+  (* With [timing_ctx], the search (candidate compiles and timing runs) happens against that
+     scratch lineage's buffers, and only the winner is compiled from [ctx] — so the timing runs
+     never mutate the caller's live state (parameters, accumulators). The scratch context must
+     contain the nodes the computation requires from a prior context (e.g. initialized
+     parameters), typically by repeating the caller's initialization on a fresh root context. It
+     must live on the same backend and device as [ctx] (Codex P2 on PR #109): candidates timed
+     elsewhere do not predict this device, and the winner would be cached under this backend's
+     key without ever having been timed on it. *)
+  Option.iter timing_ctx ~f:(fun tctx ->
+      if
+        (not (String.equal (Context.backend_name tctx) backend))
+        || Context.device_id tctx <> Context.device_id ctx
+      then
+        invalid_arg
+          (Printf.sprintf
+             "Autotune.tune: timing_ctx must be on the same backend and device as the target \
+              context (timing: %s device %d, target: %s device %d)"
+             (Context.backend_name tctx) (Context.device_id tctx) backend (Context.device_id ctx)));
+  let search_ctx = Option.value timing_ctx ~default:ctx in
   (* The base compile: identity transform (= the serial baseline candidate), capturing the
      optimized code for canonicalization. *)
   let base_opt = ref None in
@@ -593,7 +613,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?report ctx c
       ~lowered_transform:(fun opt ->
         base_opt := Some opt;
         opt)
-      ctx comp bindings
+      search_ctx comp bindings
   in
   let base_opt =
     match !base_opt with
@@ -605,6 +625,10 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?report ctx c
   let use_cache = (not (String.is_empty cache_dir)) && SC.complete canon in
   let key = SC.cache_key canon ~backend in
   let compile_spec =
+    compile_candidate ~static_indices ~base_digest ~limits ~is_gpu ~is_cpu search_ctx comp bindings
+  in
+  (* Winner (and cache-hit) compiles target the caller's context. *)
+  let compile_spec_real =
     compile_candidate ~static_indices ~base_digest ~limits ~is_gpu ~is_cpu ctx comp bindings
   in
   let emit_report r = Option.iter report ~f:(fun f -> f r) in
@@ -623,7 +647,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?report ctx c
             | Some assoc -> Fiss (F_saved assoc)
             | None -> Whole (W_saved entry.SC.saved)
           in
-          match compile_spec spec with
+          match compile_spec_real spec with
           | Ok c ->
               emit_report
                 {
@@ -748,4 +772,16 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?report ctx c
           best_ms;
           best_schedule = flat_schedule best_c.form;
         };
-      (best_c.cctx, best_c.routine)
+      if Option.is_none timing_ctx then (best_c.cctx, best_c.routine)
+      else
+        (* The search ran against the scratch lineage; compile the winner from the caller's
+           context (like the cache-hit path). Digest mismatch or replay failure falls back to the
+           production default schedule. *)
+        let spec =
+          match best_c.form with
+          | Whole_saved saved -> Whole (W_saved saved)
+          | Fiss_saved assoc -> Fiss (F_saved assoc)
+        in
+        match compile_spec_real spec with
+        | Ok c -> (c.cctx, c.routine)
+        | Error _ -> Context.compile ctx comp bindings

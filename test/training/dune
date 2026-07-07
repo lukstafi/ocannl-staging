@@ -21,30 +21,19 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
-; bigram is a training integration run: gated behind the `slow` alias so default runtest stays
-; bounded on the Metal backend.
+; bigram is a training integration run: in the default runtest suite since its sgd step is
+; autotuned (materialized intermediates + Autotune.tune), which keeps Metal wall time bounded.
 
-(executable
+(test
  (name bigram)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
  (modules bigram)
  (libraries ocannl dataprep)
  (preprocess
   (pps ppx_here ppx_ocannl)))
-
-(rule
- (alias slow)
- (package neural_nets_lib)
- (deps
-  bigram.expected
-  ocannl_config
-  (env_var OCANNL_BACKEND))
- (action
-  (no-infer
-   (progn
-    (with-stdout-to
-     bigram.actual
-     (run %{dep:bigram.exe}))
-    (diff bigram.expected bigram.actual)))))
 
 (test
  (name embedding_ids)
@@ -108,30 +97,21 @@
      (run %{dep:mlp_bn_names.exe}))
     (diff mlp_bn_names.expected mlp_bn_names.actual)))))
 
-; circles_conv is a slow training run: gated behind the `slow` alias (see cifar_conv).
+; circles_conv is a training integration run: in the default runtest suite since its sgd step
+; is autotuned (materialized intermediates + Autotune.tune). NOTE: ~28s on cc, but still ~11min
+; on the metal backend (20k steps; the backward's reduce-outer segments stay serial until the
+; default annotator learns aligned cross-nest parallelism).
 
-(executable
+(test
  (name circles_conv)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
  (modules circles_conv)
  (libraries ocannl dataprep)
  (preprocess
   (pps ppx_here ppx_ocannl)))
-
-(rule
- (alias slow)
- (package neural_nets_lib)
- (deps
-  circles_conv.expected
-  ocannl_config
-  (env_var OCANNL_BACKEND))
- ; no-infer keeps circles_conv.actual from becoming a build target (see mlp_names).
- (action
-  (no-infer
-   (progn
-    (with-stdout-to
-     circles_conv.actual
-     (run %{dep:circles_conv.exe}))
-    (diff circles_conv.expected circles_conv.actual)))))
 
 (library
  (name conv_data)
@@ -191,53 +171,31 @@
      (run %{dep:cifar_conv.exe}))
     (diff cifar_conv.expected cifar_conv.actual)))))
 
-; fsm_transformer is a larger transformer training integration test. Keep it compiled during
-; normal builds, but run it only through @slow so Metal runtest does not depend on a long pipeline
-; compilation that can fail with Metal's XPC compiler service under load.
+; fsm_transformer is a transformer training integration test: in the default runtest suite since
+; its sgd step is autotuned (materialized intermediates + Autotune.tune).
 
-(executable
+(test
  (name fsm_transformer)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
  (modules fsm_transformer)
  (libraries ocannl)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
-(rule
- (alias slow)
+; transformer_names is a transformer training integration run: in the default runtest suite since
+; its sgd step is autotuned (materialized intermediates + Autotune.tune). NOTE: ~17s on cc, but
+; still ~10min on the metal backend (10k steps; see the circles_conv note).
+
+(test
+ (name transformer_names)
  (package neural_nets_lib)
  (deps
-  fsm_transformer.expected
   ocannl_config
   (env_var OCANNL_BACKEND))
- (action
-  (no-infer
-   (progn
-    (with-stdout-to
-     fsm_transformer.actual
-     (run %{dep:fsm_transformer.exe}))
-    (diff fsm_transformer.expected fsm_transformer.actual)))))
-
-; transformer_names is a slow training run: gated behind the `slow` alias so default runtest stays
-; bounded on the Metal backend.
-
-(executable
- (name transformer_names)
  (modules transformer_names)
  (libraries ocannl dataprep)
  (preprocess
   (pps ppx_here ppx_ocannl)))
-
-(rule
- (alias slow)
- (package neural_nets_lib)
- (deps
-  transformer_names.expected
-  ocannl_config
-  (env_var OCANNL_BACKEND))
- (action
-  (no-infer
-   (progn
-    (with-stdout-to
-     transformer_names.actual
-     (run %{dep:transformer_names.exe}))
-    (diff transformer_names.expected transformer_names.actual)))))
