@@ -98,10 +98,9 @@
     (diff mlp_bn_names.expected mlp_bn_names.actual)))))
 
 ; circles_conv is a training integration run: in the default runtest suite since its sgd step
-; is autotuned (materialized intermediates + Autotune.tune). NOTE: ~28s on cc, ~2.5min on the
-; metal backend with a fresh tune cache (20k steps; the fissioned step encodes as one command
-; buffer per run — the remaining gap is per-dispatch overhead of the ~40 tiny segment kernels a
-; batch size of 8 leaves).
+; is autotuned (materialized intermediates + Autotune.tune). NOTE: ~27s on cc, ~75s on the metal
+; backend with a fresh tune cache (batch 32 / 5k steps: the per-step cost is dominated by the
+; fissioned step's per-dispatch overhead, so fewer larger steps are Metal-friendlier).
 
 (test
  (name circles_conv)
@@ -187,8 +186,9 @@
   (pps ppx_here ppx_ocannl)))
 
 ; transformer_names is a transformer training integration run: in the default runtest suite since
-; its sgd step is autotuned (materialized intermediates + Autotune.tune). NOTE: ~17s on cc,
-; ~2min on the metal backend with a fresh tune cache (10k steps; see the circles_conv note).
+; its sgd step is autotuned (materialized intermediates + Autotune.tune). NOTE: ~16s on cc,
+; ~2min on the metal backend with a fresh tune cache (batch 128 / 2.5k steps; see the
+; circles_conv note — most of the metal time is now the tune search itself).
 
 (test
  (name transformer_names)

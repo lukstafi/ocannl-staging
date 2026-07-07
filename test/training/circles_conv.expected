@@ -3,27 +3,28 @@ Found 0, in the config file
 Generating 160 circle counting images (3 classes)...
 Dataset generated: images shape [160; 16; 16; 1], labels shape [160; 1]
 
-Starting training for 1000 epochs (20000 steps)...
-Epoch 10: avg loss = 1.04
-Epoch 20: avg loss = 1.00
-Epoch 30: avg loss = 0.97
-Epoch 40: avg loss = 0.93
-Epoch 50: avg loss = 0.89
-Epoch 60: avg loss = 0.85
-Epoch 70: avg loss = 0.79
-Epoch 80: avg loss = 0.72
-Epoch 90: avg loss = 0.66
-Epoch 100: avg loss = 0.61
-Epoch 900: avg loss = 0.01
-Epoch 910: avg loss = 0.01
-Epoch 920: avg loss = 0.01
-Epoch 930: avg loss = 0.01
-Epoch 940: avg loss = 0.01
-Epoch 950: avg loss = 0.01
-Epoch 960: avg loss = 0.01
-Epoch 970: avg loss = 0.01
-Epoch 980: avg loss = 0.01
-Epoch 990: avg loss = 0.01
-Epoch 1000: avg loss = 0.01
+Starting training for 1000 epochs (5000 steps)...
+Epoch 10: avg loss = 1.1
+Epoch 20: avg loss = 1.0
+Epoch 30: avg loss = 1.0
+Epoch 40: avg loss = 1.0
+Epoch 50: avg loss = 1.0
+Epoch 60: avg loss = 1.0
+Epoch 70: avg loss = 1.0
+Epoch 80: avg loss = 1.0
+Epoch 90: avg loss = 1.0
+Epoch 100: avg loss = 0.9
+Epoch 900: avg loss = 0.2
+Epoch 910: avg loss = 0.2
+Epoch 920: avg loss = 0.2
+Epoch 930: avg loss = 0.2
+Epoch 940: avg loss = 0.2
+Epoch 950: avg loss = 0.2
+Epoch 960: avg loss = 0.2
+Epoch 970: avg loss = 0.2
+Epoch 980: avg loss = 0.2
+Epoch 990: avg loss = 0.2
+Epoch 1000: avg loss = 0.2
+Final avg loss below threshold=true
 
 Training complete!

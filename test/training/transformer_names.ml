@@ -15,7 +15,10 @@ let d_k = 8
 let d_v = 8
 let d_ff = 32
 let vocab_size = Dataprep.Names.dict_size
-let batch_size = 32
+(* Batch 128 keeps GPU wall time bounded: the fissioned sgd step has a near-constant per-step
+   dispatch cost, so fewer, larger steps at the same samples-per-epoch are strictly
+   Metal-friendlier (10k steps at batch 32 -> 2.5k steps at batch 128). *)
+let batch_size = 128
 let epochs = 10
 let pad_char = ' '
 let pad_idx = Dataprep.Names.char_index pad_char
@@ -121,7 +124,9 @@ let () =
   Train.every_non_literal_materialized batch_loss;
   let update = Train.grad_update batch_loss in
   let steps = epochs * n_batches in
-  let%op learning_rate = 0.01 *. ((1.5 *. !..steps) - !@step_n) /. !..steps in
+  (* Linear lr scaling for the larger batch (0.01 at batch 32 -> 0.04 at batch 128): the same
+     per-sample progress with 4x fewer updates; epoch-loss thresholds pass with margin. *)
+  let%op learning_rate = 0.04 *. ((1.5 *. !..steps) - !@step_n) /. !..steps in
   let sgd = Train.sgd_update ~learning_rate batch_loss in
 
   (* === Inference computation (forward-only, shares trained weights) === *)
