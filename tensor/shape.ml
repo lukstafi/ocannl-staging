@@ -339,7 +339,9 @@ let bind_delayed_vars_to_envs ~for_projections ~spec ~dim_var_env ~row_var_env ~
                   Row.Rows_constr
                     {
                       r = [ Row.get_row_for_var Row.empty_provenance var ];
-                      constr = Row.Total_elems { numerator = Num_elems solved_dim; divided_by = [] };
+                      constr =
+                        Row.Total_elems
+                          { numerator = Num_elems solved_dim; divided_by = []; keep_axis = false };
                       origin =
                         [
                           {
@@ -588,10 +590,13 @@ let%debug4_sexp get_inequalities ?(for_projections = false)
           {
             r = [ cur_sh.batch; cur_sh.output; cur_sh.input ];
             constr =
+              (* [keep_axis]: a 1-element reshape prefers keeping a single dim-1 axis over
+                 collapsing to a scalar when nothing else constrains the rows (gh-460). *)
               Total_elems
                 {
                   numerator = Num_elems (Array.fold (Ir.Ndarray.dims nd) ~init:1 ~f:( * ));
                   divided_by = [];
+                  keep_axis = true;
                 };
             origin =
               [
@@ -669,7 +674,7 @@ let%debug4_sexp get_inequalities ?(for_projections = false)
         Rows_constr
           {
             r = [ cur_sh.batch; cur_sh.output; cur_sh.input ];
-            constr = Total_elems { numerator = Num_elems len; divided_by = [] };
+            constr = Total_elems { numerator = Num_elems len; divided_by = []; keep_axis = false };
             origin =
               [
                 {
@@ -1197,7 +1202,11 @@ let%debug4_sexp get_inequalities ?(for_projections = false)
                r = [ cur_sh.batch; cur_sh.output; cur_sh.input ];
                constr =
                  Total_elems
-                   { numerator = Row.Strided_var { coeff; var; denom = 1 }; divided_by = [] };
+                   {
+                     numerator = Row.Strided_var { coeff; var; denom = 1 };
+                     divided_by = [];
+                     keep_axis = false;
+                   };
                origin =
                  [
                    {
@@ -1356,7 +1365,7 @@ let%track7_sexp set_dim (delayed_var_ref : delayed_var_ref) (dim : int) : unit =
             (* TODO: actually, the Row.provenance should be the one of the shape that the row
                variable is in, should be stored in `Row and in env_row_var. *)
             r = [ Row.get_row_for_var Row.empty_provenance row_var ];
-            constr = Total_elems { numerator = Num_elems dim; divided_by = [] };
+            constr = Total_elems { numerator = Num_elems dim; divided_by = []; keep_axis = false };
             origin =
               [
                 {
@@ -1454,6 +1463,7 @@ let set_equal delayed_ref1 delayed_ref2 =
                         denom = 1;
                       };
                   divided_by = [];
+                  keep_axis = false;
                 };
             origin =
               [

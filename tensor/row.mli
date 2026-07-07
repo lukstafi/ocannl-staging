@@ -124,10 +124,14 @@ type total_elems =
 
 type row_constraint =
   | Unconstrained
-  | Total_elems of { numerator : total_elems; divided_by : dim_var list }
+  | Total_elems of { numerator : total_elems; divided_by : dim_var list; keep_axis : bool }
       (** The rows, inclusive of the further row spec, have this many elements. The total is
           numerator / (product of divided_by variables). divided_by has multiset semantics - the
-          same variable can appear multiple times. *)
+          same variable can appear multiple times. [keep_axis] means the constraint comes from a
+          data terminal that prefers, when the constrained rows receive no other shape information,
+          keeping a single dim-1 axis over closing the leftover row variable to the empty row
+          ("identity reshape"); it is reset once the constraint is reduced by consuming axes or
+          variables. *)
   | Exact of dim list  (** The concatenated rows have these axes. *)
 [@@deriving equal, hash, compare, sexp_of]
 
