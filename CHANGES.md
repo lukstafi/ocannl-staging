@@ -124,6 +124,10 @@
 
 ### Fixed
 
+- 1-element `Reshape`/`rebatch` data no longer collapses to a scalar: when the rows
+  receive no other shape information, the leftover row variable keeps a single dim-1
+  axis (identity-reshape preference, `keep_axis` on the `Total_elems` constraint); also
+  fixed `Tnode.create_with_reshape` crashing on rank-0 targets (gh-ocannl-460).
 - Detect rank cycles among row variables during shape inference (gh-ocannl-247).
 - CUDA `Where` expression codegen now parenthesizes ternaries correctly, and
   `Uint32`/`Uint64` to `uint4x32` PRNG-counter conversions spread bits rather than

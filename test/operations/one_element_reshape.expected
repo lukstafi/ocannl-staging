@@ -1,0 +1,22 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+single-token ids dims: uint32 prec 1
+single-token one-hot dims: uint32 prec 1x5
+HERE: test/operations/one_element_reshape.ml:27:21
+┌───────────────────────────────────────┐
+│[2]: = shape 0:1|1:5                   │
+│┌──────┬──────────────────────────────┐│
+││      │axis 1                        ││
+│├──────┼──────────────────────────────┤│
+││axis 0│ 0.00  0.00  1.00  0.00  0.00 ││
+│└──────┴──────────────────────────────┘│
+└───────────────────────────────────────┘
+two-token ids dims: uint32 prec 2
+two-token one-hot dims: uint32 prec 2x5
+rebatch of 1 element dims: single prec 1
+reshape 6 elements ~o:[2;3] dims: single prec 2x3
+reshape 1 element ~b:[] ~o:[] dims: single prec -
+HERE: test/operations/one_element_reshape.ml:50:21
+[8]: one_scalar shape  
+scalar 3.00
+reshape 1 element inferred dims: single prec 1
