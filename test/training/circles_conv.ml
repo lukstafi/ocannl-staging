@@ -45,9 +45,12 @@ let () =
       { image_size; max_radius = 4; min_radius = 2; max_circles; seed = Some seed }
   in
 
-  (* Generate training data *)
-  let batch_size = 8 in
-  let total_samples = batch_size * 20 in
+  (* Generate training data. Batch 32 over the same 160 images (5 batches instead of 20) keeps
+     GPU wall time bounded: the fissioned sgd step has a near-constant per-step dispatch cost, so
+     fewer, larger steps at the same samples-per-epoch are strictly Metal-friendlier (20k steps
+     at batch 8 -> 5k steps at batch 32). *)
+  let batch_size = 32 in
+  let total_samples = batch_size * 5 in
   let n_batches = total_samples / batch_size in
 
   printf "Generating %d circle counting images (%d classes)...\n%!" total_samples num_classes;
@@ -93,7 +96,10 @@ let () =
   let total_steps = epochs * n_batches in
   Train.every_non_literal_materialized batch_loss;
   let update = Train.grad_update batch_loss in
-  let%op learning_rate = 0.01 *. ((1.2 *. !..total_steps) - !@step_n) /. !..total_steps in
+  (* Mild lr scaling for the larger batch (0.01 at batch 8 -> 0.015 at batch 32), partially
+     compensating the 4x fewer updates; this lenet destabilizes at 0.02+ (loss collapses to the
+     uniform-prediction plateau). *)
+  let%op learning_rate = 0.015 *. ((1.2 *. !..total_steps) - !@step_n) /. !..total_steps in
   Train.set_materialized learning_rate.value;
   let sgd = Train.sgd_update ~learning_rate batch_loss in
 
@@ -123,8 +129,14 @@ let () =
         (* printf "batch_loss = %.4f\n%!" (ctx, batch_loss).@[0]; *)
         epoch_loss := !epoch_loss +. (ctx, batch_loss).@[0];
         Int.incr step_ref);
+    (* One decimal: cross-backend float drift over thousands of steps can flip the second
+       decimal at a rounding boundary (cc vs metal differed at 0.215+-drift), and the expected
+       output must stay byte-identical across backends. *)
     if epoch % 10 = 0 && (epoch <= 100 || epochs - epoch <= 100) then
-      printf "Epoch %d: avg loss = %.2f\n%!" epoch (!epoch_loss /. Float.of_int n_batches)
+      printf "Epoch %d: avg loss = %.1f\n%!" epoch (!epoch_loss /. Float.of_int n_batches);
+    if epoch = epochs then
+      printf "Final avg loss below threshold=%b\n%!"
+        Float.(!epoch_loss /. Float.of_int n_batches < 0.3)
   done;
 
   printf "\nTraining complete!\n%!"
