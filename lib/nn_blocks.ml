@@ -60,18 +60,20 @@ open DSL_modules
       A tensor of shape [len] (a [len]-sized batch axis) holding the IDs in uint32 precision, so
       that the gh-343 embedding gather can guard the dynamic index with native integer comparisons
       (no double-precision guard, no integrality check). *)
+(* Bits-preserving conversion: ids in [2^31, 2^32) are valid uint32 values whose int32
+   representation is negative, so [of_int_exn] would wrongly reject them. *)
+let set_uint32_id ~fn_name genarray idx id =
+  if id < 0 || id > 0xFFFF_FFFF then
+    invalid_arg [%string "%{fn_name}: id %{id#Int} is out of the uint32 range"];
+  Bigarray.Genarray.set genarray idx (Int32.of_int_trunc id)
+
 let class_ids_of_int_list ?(label = "class_ids") lst =
   let open Bigarray in
   let arr = lst |> Array.of_list in
   let len = Array.length arr in
   let genarray = Genarray.create Int32 c_layout [| len |] in
   for i = 0 to len - 1 do
-    let id = arr.(i) in
-    (* Bits-preserving conversion: ids in [2^31, 2^32) are valid uint32 values whose int32
-       representation is negative, so [of_int_exn] would wrongly reject them. *)
-    if id < 0 || id > 0xFFFF_FFFF then
-      invalid_arg [%string "class_ids_of_int_list: id %{id#Int} is out of the uint32 range"];
-    Genarray.set genarray [| i |] (Int32.of_int_trunc id)
+    set_uint32_id ~fn_name:"class_ids_of_int_list" genarray [| i |] arr.(i)
   done;
   TDSL.rebatch ~l:label (Ir.Ndarray.as_array Ir.Ops.Uint32 genarray) ()
 
@@ -118,6 +120,53 @@ let dense_one_hot_of_int_list ~num_classes lst =
     Genarray.set genarray [| i; arr.(i) |] 1.
   done;
   TDSL.rebatch ~l:"one_hot" (Ir.Ndarray.as_array Ir.Ops.Single genarray) ()
+
+(** Convert an array of token IDs (e.g. the output of [Dataprep.Bpe.encode]) to a tensor of shape
+    [len] (a [len]-sized batch axis, output rank 0) holding the IDs in uint32 precision -- large
+    enough for any practical vocabulary (e.g. Gemma's 256K) and integer-native for the gh-343
+    embedding gather (see {!class_ids_of_int_list}). Feed the result to {!one_hot_of_ids} for an
+    embedding lookup.
+
+    If [max_len] is given, the sequence is truncated or right-padded with [pad_id] to exactly
+    [max_len] (needed for fixed-shape batched inference). Prepending/appending special tokens
+    (BOS/EOS) is the caller's responsibility.
+    @param pad_id The token ID used for padding (default 0)
+    @param max_len If given, the result has exactly this length regardless of [Array.length ids] *)
+let token_ids_of_array ?(label = "token_ids") ?max_len ?(pad_id = 0) ids =
+  let open Bigarray in
+  let len = Option.value max_len ~default:(Array.length ids) in
+  let genarray = Genarray.create Int32 c_layout [| len |] in
+  for i = 0 to len - 1 do
+    let id = if i < Array.length ids then ids.(i) else pad_id in
+    set_uint32_id ~fn_name:"token_ids_of_array" genarray [| i |] id
+  done;
+  TDSL.rebatch ~l:label (Ir.Ndarray.as_array Ir.Ops.Uint32 genarray) ()
+
+(** Batched variant of {!token_ids_of_array}: convert several token-ID sequences to a single tensor
+    of shape [num_seqs; max_len] (two batch axes, output rank 0) in uint32 precision. Each sequence
+    is truncated or right-padded with [pad_id] to [max_len], which defaults to the length of the
+    longest sequence. Composes with {!one_hot_of_ids} the same way as the unbatched variant, giving
+    a [num_seqs; max_len; num_classes] logical one-hot.
+    @param pad_id The token ID used for padding (default 0)
+    @param max_len The common sequence length (default: longest sequence in [seqs]) *)
+let token_ids_of_batch ?(label = "token_ids") ?max_len ?(pad_id = 0) seqs =
+  let open Bigarray in
+  let num_seqs = Array.length seqs in
+  if num_seqs = 0 then invalid_arg "token_ids_of_batch: the batch must be non-empty";
+  let max_len =
+    match max_len with
+    | Some len -> len
+    | None -> Array.fold seqs ~init:0 ~f:(fun acc s -> max acc (Array.length s))
+  in
+  let genarray = Genarray.create Int32 c_layout [| num_seqs; max_len |] in
+  for s = 0 to num_seqs - 1 do
+    let seq = seqs.(s) in
+    for i = 0 to max_len - 1 do
+      let id = if i < Array.length seq then seq.(i) else pad_id in
+      set_uint32_id ~fn_name:"token_ids_of_batch" genarray [| s; i |] id
+    done
+  done;
+  TDSL.wrap ~l:label ~b:[ num_seqs; max_len ] ~o:[] (Ir.Ndarray.as_array Ir.Ops.Uint32 genarray) ()
 
 let%op mlp_layer ~label ~hid_dim () x = relu (({ w } * x) + { b = 0.; o = [ hid_dim ] })
 
