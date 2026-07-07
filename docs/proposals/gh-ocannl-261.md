@@ -316,7 +316,7 @@ Three trust models for rewrite rules, in increasing strength and cost:
 |---|---|---|---|---|---|
 | Mirage: parallelization-axis / grid-dim search | `Schedule` annotator + BEAM action space; `validate_parallel` | fixed Grid×Workgroup preset | axis-assignment actions (incl. split-K via `Workgroup_reduce`) | M | **File (F2)** |
 | Pruner: draft-then-verify; ROLLER: aligned tiles | BEAM harness; `hardware_limits`, `launch_dims`, `workgroup_shared` | timing every candidate (planned) | analytical fitness filter + divisor-aligned `Split` factors | M | **File (F1)** |
-| Mirage: randomized equivalence testing | parity harness (`hardware_axes_parity` generalized) | float parity vs. unscheduled twin | reusable oracle: seeded random inputs, tolerance policy, exact mode for linear fragment | S–M | **File (F3)** |
+| Mirage: randomized equivalence testing | parity harness (`hardware_axes_parity` generalized) | float parity vs. unscheduled twin | reusable oracle: seeded random inputs, tolerance policy, rounding-free randomized modes | S–M | **File (F3)** |
 | Tensat: concat/split sharing rewrites | `Assignments.t` rewrites; einsum concat axes (`a^b`) | no graph-level rewriting | targeted rule schemas, measured accept/reject, no e-graph | M–L | **File (F4)** |
 | Tensat/egg(log): e-graph infrastructure | new library or FFI | `ego` unmaintained+GPL; egglog is Rust | defer until rule interactions demonstrably bite | L | **Defer (F5 records decision)** |
 | Mirage: μGraph enumeration + SMT pruning | would be a new generative search layer | schedule BEAM covers the schedule half | not needed while rewrites are hand-curated | L | **Skip** |
@@ -346,8 +346,10 @@ BEAM action space. *Effort:* medium. *Prereq:* F1 (otherwise the branching facto
 explodes the beam).
 
 **F3 — Randomized equivalence oracle** (Mirage §5, scaled down). A reusable
-harness: seeded random inputs, per-precision tolerance policy, exact
-integer/finite-field mode for linear-fragment programs; gates BEAM candidates
+harness: seeded random inputs, per-precision tolerance policy, rounding-free
+integer/finite-field modes (bounded false-positive probability for the linear
+fragment; probabilistic-only for max-plus — see the research notes §4.2); gates
+BEAM candidates
 (cheap re-gate on cache hits) and any future `Assignments.t` rewrite rule.
 *Seam:* generalize `test/operations/hardware_axes_parity.ml` into a library
 function. *Effort:* small–medium. *Prereq:* none. File first — F4 depends on it.

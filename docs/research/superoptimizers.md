@@ -460,11 +460,16 @@ because they inform *how* to implement F1–F4, not *whether*.
 2. **Mirage's Lax fragment does not cover tropical accumulation.** OCANNL's
    `@^+`/`@^^` (max-reduce) operators fall outside multi-linear + div + exp, so
    finite-field identity testing does not apply to them. For the F3 oracle this
-   partitions cleanly: exact testing (integer or finite-field) for the linear
-   fragment, and for max-plus programs integer random testing is *also exact*
-   (max and add are exact on ints) — only genuinely floating-point programs
-   need the tolerance policy. Worth encoding as three oracle modes rather than
-   one tolerance knob.
+   partitions cleanly: finite-field testing with Schwartz–Zippel-style error
+   bounds for the linear fragment; for max-plus programs, integer sampling makes
+   each trial *rounding-free* (max and add are exact on ints — any discrepancy
+   is decisive, no tolerance needed), **but the check remains probabilistic**:
+   inequivalent tropical expressions can agree on sampled inputs, and no
+   Schwartz–Zippel analog is claimed here, so acceptance means "passed N
+   randomized trials", not proven equivalence; only genuinely floating-point
+   programs additionally need a tolerance policy. Worth encoding as three
+   oracle modes rather than one tolerance knob — with the false-positive story
+   documented per mode (bounded / unbounded-but-rounding-free / tolerance).
 3. **imap/omap/fmap ↔ existing OCANNL invariants.** Mirage's "no replication on
    outputs" (omap) is the same fact as `validate_parallel`'s
    materialized-write-coverage check; fmap = φ on an accumulator is
