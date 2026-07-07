@@ -45,6 +45,15 @@ val run : t -> routine -> t
 (** Execute a compiled routine. Mutates buffers in-place. Returns updated context with newly
     initialized nodes tracked. Raises [Failure] if execution dependencies are not satisfied. *)
 
+val sync : t -> unit
+(** Blocks until the context's device is idle. Host reads ({!to_host}, {!get_values}) synchronize
+    on their own; explicit [sync] is for timing runs (e.g. the autotuner) and for fencing against
+    out-of-band observation. *)
+
+val hardware_limits : t -> Ir.Backend_intf.hardware_limits
+(** The backend's conservative per-workgroup device limits (all-[None] on backends that do not
+    bind hardware axes). Chiefly for schedule transforms and the autotuner. *)
+
 (** {2 Execution dependency tracking}
 
     Execution dependencies mirror compilation dependencies: they record which routines must execute

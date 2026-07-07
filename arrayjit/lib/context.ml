@@ -251,6 +251,28 @@ let run ctx routine =
   let initialized_nodes = Set.union ctx.initialized_nodes routine.outputs in
   { ctx with initialized_nodes }
 
+let sync ctx =
+  Backends.query ctx.wrapped
+    {
+      q =
+        (fun (type dev runner event)
+             (module Backend : BI.Backend
+               with type dev = dev
+                and type runner = runner
+                and type event = event) c -> Backend.await c.BI.device);
+    }
+
+let hardware_limits ctx =
+  Backends.query ctx.wrapped
+    {
+      q =
+        (fun (type dev runner event)
+             (module Backend : BI.Backend
+               with type dev = dev
+                and type runner = runner
+                and type event = event) _c -> Backend.hardware_limits ());
+    }
+
 (* Internal helper - not exposed in interface to maintain invariants *)
 let mark_initialized ctx nodes =
   { ctx with initialized_nodes = Set.union ctx.initialized_nodes nodes }
