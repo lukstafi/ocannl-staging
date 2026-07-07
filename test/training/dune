@@ -98,10 +98,10 @@
     (diff mlp_bn_names.expected mlp_bn_names.actual)))))
 
 ; circles_conv is a training integration run: in the default runtest suite since its sgd step
-; is autotuned (materialized intermediates + Autotune.tune). NOTE: ~28s on cc, ~7min on the
-; metal backend with a fresh tune cache (20k steps; aligned cross-nest parallelism merges the
-; pointwise chains — the remaining gap is launch/event overhead of the segments genuine
-; parallelism switches still force).
+; is autotuned (materialized intermediates + Autotune.tune). NOTE: ~28s on cc, ~2.5min on the
+; metal backend with a fresh tune cache (20k steps; the fissioned step encodes as one command
+; buffer per run — the remaining gap is per-dispatch overhead of the ~40 tiny segment kernels a
+; batch size of 8 leaves).
 
 (test
  (name circles_conv)
@@ -188,7 +188,7 @@
 
 ; transformer_names is a transformer training integration run: in the default runtest suite since
 ; its sgd step is autotuned (materialized intermediates + Autotune.tune). NOTE: ~17s on cc,
-; ~4.5min on the metal backend with a fresh tune cache (10k steps; see the circles_conv note).
+; ~2min on the metal backend with a fresh tune cache (10k steps; see the circles_conv note).
 
 (test
  (name transformer_names)
@@ -212,5 +212,15 @@
   (env_var OCANNL_BACKEND))
  (modules tokenizer_roundtrip)
  (libraries base ocannl stdio dataprep)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+; bench_circles_step is a manual diagnostic (not a test): segment census + per-step timing of the
+; circles_conv sgd step. Run from test/config.
+
+(executable
+ (name bench_circles_step)
+ (modules bench_circles_step)
+ (libraries ocannl dataprep unix)
  (preprocess
   (pps ppx_here ppx_ocannl)))
