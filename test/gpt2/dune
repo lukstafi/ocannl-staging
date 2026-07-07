@@ -1,0 +1,49 @@
+(copy_files
+ (files ../config/ocannl_config))
+
+(library
+ (name gpt2_model)
+ (package neural_nets_lib)
+ (modules gpt2_model)
+ (libraries base ocannl)
+ (preprocess
+  (pps ppx_here ppx_ocannl ppx_string)))
+
+; gpt2_dry_run builds the full GPT-2 124M graph with deterministic host-random weights and runs
+; one forward pass -- exercising shape inference and compilation at real-model scale, no network.
+; ~66s (dominated by codegen/clang), so gated behind the `slow` alias (see test/training/dune).
+
+(executable
+ (name gpt2_dry_run)
+ (modules gpt2_dry_run)
+ (libraries base ocannl stdio gpt2_model)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(rule
+ (alias slow)
+ (package neural_nets_lib)
+ (deps
+  gpt2_dry_run.expected
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ ; no-infer keeps gpt2_dry_run.actual from becoming a build target, so plain
+ ; `dune build` (@all) does not run this slow exe -- only `dune build @slow` does.
+ (action
+  (no-infer
+   (progn
+    (with-stdout-to
+     gpt2_dry_run.actual
+     (run %{dep:gpt2_dry_run.exe}))
+    (diff gpt2_dry_run.expected gpt2_dry_run.actual)))))
+
+; gpt2_generate is a tutorial executable, NOT a test: it downloads the pretrained GPT-2 tokenizer
+; and weights (~500MB) from HuggingFace on first run and greedy-decodes a prompt continuation.
+; Run with: dune exec test/gpt2/gpt2_generate.exe -- "Your prompt"
+
+(executable
+ (name gpt2_generate)
+ (modules gpt2_generate)
+ (libraries base ocannl stdio dataprep gpt2_model)
+ (preprocess
+  (pps ppx_here ppx_ocannl ppx_string)))

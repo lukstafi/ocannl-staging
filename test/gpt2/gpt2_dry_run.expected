@@ -1,0 +1,7 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+logits dims: 8x50257
+logits count: 402056
+all finite: true
+positions differ: true
+max |logit| below 100: true

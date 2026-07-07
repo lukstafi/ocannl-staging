@@ -1,0 +1,10 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+names: a, b
+metadata format = pt
+a: dtype F32, shape [2; 3], offset 0, nbytes 24
+a roundtrips (2x3): true
+b via tensor: [10; 20; 30; 40]
+missing tensor: Safetensors.to_float32 roundtrip.safetensors: no tensor named missing
+overlap rejected: Safetensors.read overlap.safetensors: tensor b starts at byte 8 but the previous payload ends at 16 (overlapping or non-contiguous data_offsets)
+trailing rejected: Safetensors.read trailing.safetensors: payloads end at byte 16 but the byte buffer has 24 bytes (trailing uncovered data)

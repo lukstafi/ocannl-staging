@@ -91,7 +91,7 @@ A research-heavy milestone (~2.5 months). GitHub milestone scope: *"Program sear
 - **makemore progression** (#59, done) — the character-level language-model series mirroring Karpathy's *Neural Networks: Zero to Hero* (see [docs/makemore_tutorial.md](docs/makemore_tutorial.md)); includes the Bengio-style MLP and BatchNorm variants.
 - **CNN classifiers** (#54) — MNIST and CIFAR-10 training examples.
 - **LSTM example** (#60).
-- **Transformer inference demo** (#377) — inference for a small open-weights model (GPT-2, LLaMA, or Gemma).
+- **Transformer inference demo** (#377, done) — GPT-2 124M inference with pretrained HuggingFace weights (safetensors reader, BPE tokenizer, greedy decoding), exact against a NumPy reference; `test/gpt2/gpt2_generate.ml` is the tutorial executable and `test/gpt2/gpt2_dry_run.ml` the full-scale dry run.
 - **Tokenizer bindings** (done) — developed in the spin-off [ocaml-dataprep](https://github.com/ahrefs/ocaml-dataprep) project (opam package `dataprep`); the `Dataprep.Bpe` HuggingFace-compatible BPE tokenizer is bridged to OCANNL tensors via `Nn_blocks.token_ids_of_array` / `token_ids_of_batch`, integration-tested in `test/training/tokenizer_roundtrip.ml`.
 
 > **Date note:** the GitHub milestone carries a stale 2026-05-30 due date; the ICFP-week anchor above is authoritative.

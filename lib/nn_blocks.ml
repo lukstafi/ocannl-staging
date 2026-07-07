@@ -170,6 +170,11 @@ let token_ids_of_batch ?(label = "token_ids") ?max_len ?(pad_id = 0) seqs =
   done;
   TDSL.wrap ~l:label ~b:[ num_seqs; max_len ] ~o:[] (Ir.Ndarray.as_array Ir.Ops.Uint32 genarray) ()
 
+(** Gaussian Error Linear Unit, tanh approximation (Hendrycks & Gimpel 2016): [0.5 * x * (1 +
+    tanh (sqrt (2/pi) * (x + 0.044715 * x^3)))]. This is the GPT-2 activation (HF [gelu_new]); it
+    uses only existing primitives (notably [Tanh_approx]), no dedicated backend support needed. *)
+let%op gelu x = 0.5 *. x *. (1.0 + tanh (0.7978845608028654 *. (x + (0.044715 *. (x *. x *. x)))))
+
 let%op mlp_layer ~label ~hid_dim () x = relu (({ w } * x) + { b = 0.; o = [ hid_dim ] })
 
 (** Masks and scales by 1/keep_prob to maintain expected value. When [train_step = None], the

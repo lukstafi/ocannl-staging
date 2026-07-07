@@ -172,6 +172,24 @@ let%debug3_sexp collect_nodes_guess_output (asgns : t) : Tn.t_set * Tn.t_set =
   in
   loop asgns
 
+(** All nodes that any assignment writes to (unlike the second set of
+    {!collect_nodes_guess_output}, nodes also read within [asgns] are included). *)
+let collect_written (asgns : t) : Tn.t_set =
+  let open Utils.Set_O in
+  let empty = Set.empty (module Tn) in
+  let one = Set.singleton (module Tn) in
+  let rec loop = function
+    | Noop -> empty
+    | Seq (t1, t2) -> loop t1 + loop t2
+    | Block_comment (_, t) -> loop t
+    | Accum_op { rhs = Rev_sides { lhses; _ }; _ } ->
+        Array.fold lhses ~init:empty ~f:(fun acc buf ->
+            match buf with Node rhs -> acc + one rhs | Merge_buffer _ -> acc)
+    | Accum_op { lhs; _ } | Set_vec_unop { lhs; _ } -> one lhs
+    | Fetch { array; _ } -> one array
+  in
+  loop asgns
+
 let sequential l =
   Option.value ~default:Noop @@ List.reduce l ~f:(fun sts another_st -> Seq (sts, another_st))
 

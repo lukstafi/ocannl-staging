@@ -124,7 +124,7 @@ let () =
   Train.every_non_literal_materialized batch_loss;
   let update = Train.grad_update batch_loss in
   let steps = epochs * n_batches in
-  let%op learning_rate = 0.5 *. ((1.5 *. !..steps) - !@step_n) /. !..steps in
+  let%op learning_rate = 0.2 *. ((1.5 *. !..steps) - !@step_n) /. !..steps in
   let sgd = Train.sgd_update ~learning_rate batch_loss in
 
   (* === Inference computation (forward-only, shares trained weights) === Following the
@@ -187,7 +187,12 @@ let () =
 
   (* === Training loop === Per-token random baseline: ln(8) ≈ 2.08, epoch sum ≈ 2.08 * n_batches ≈
      16.6. Optimal loss for binary FSM: ln(2) ≈ 0.693 per token, epoch sum ≈ 5.5. *)
-  let epoch_loss_limit_first = 16.2 in
+  (* Thresholds and the learning rate were re-tuned after the gh-461 forward-fragment
+     ordering fix: previously the attention value projection read its input before it was
+     computed (silently zero), so this test trained a degenerate model -- and its lr 0.5
+     schedule makes the now-correct attention diverge to NaN. With lr 0.2 the correct model
+     reaches 100% held-out valid-transition accuracy (the degenerate one plateaued near 90%). *)
+  let epoch_loss_limit_first = 17.0 in
   let epoch_loss_limit_mid = 8.0 in
   let epoch_loss_limit_last = 7.0 in
   for epoch = 0 to epochs - 1 do

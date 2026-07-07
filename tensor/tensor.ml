@@ -286,6 +286,83 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
                Some t ));
   (* The code needs to be included in the order it was computed due to potential non-tree DAGs. *)
   let ordered_ts = List.dedup_and_sort orig_ts ~compare:(fun t1 t2 -> Int.ascending t1.value.id t2.value.id) in
+  (* Id-ascending order does not suffice to avoid computed-after-use bugs across sibling forward
+     fragments: the code of a shared subtensor is embedded in the forward of its first-constructed
+     consumer, while siblings are constructed in the application order of the current operation
+     (right-to-left for OCaml arguments), so an earlier-id sibling can read a node whose defining
+     code is embedded under a later-id sibling (gh-461). Re-order the forward-root children
+     topologically: a fragment embedding a node must precede fragments that read it. Non-root
+     children keep their positions -- their forward code is owned elsewhere, so their (stale)
+     embedded_nodes must not contribute dependency edges. The backprop code below includes the
+     backprop fragments via [List.rev ordered_ts], so it inherits the mirrored owner-last order
+     (for children that are backprop roots but not forward roots, this still degenerates to the
+     id order, see gh-461). *)
+  let ordered_ts =
+    match List.filter ordered_ts ~f:is_fwd_root with
+    | [] | [ _ ] -> ordered_ts
+    | roots ->
+        let tagged =
+          List.map roots ~f:(fun ti ->
+              (* A node only constrains the order if the owning fragment actually computes it:
+                 data-backed terminals are uploaded at link time (Host_inits) and have no forward
+                 code, so embedding them must not create edges (e.g. an input shared between two
+                 RoPE applications is not a scheduling constraint). *)
+              let defines =
+                Set.inter ti.forward.embedded_nodes (Asgns.collect_written ti.forward.asgns)
+              in
+              let requires =
+                Set.diff
+                  (fst @@ Asgns.collect_nodes_guess_output ti.forward.asgns)
+                  ti.forward.embedded_nodes
+              in
+              (ti, requires, defines))
+        in
+        let rec order acc remaining =
+          match remaining with
+          | [] -> List.concat @@ List.rev acc
+          | _ ->
+              let blocked_by (_, requires, _) =
+                List.exists remaining ~f:(fun (_, _, other_defines) ->
+                    not (Set.is_empty (Set.inter requires other_defines)))
+              in
+              let ready, blocked = List.partition_tf remaining ~f:(Fn.non blocked_by) in
+              if List.is_empty ready then (
+                (* A fragment-level dependency cycle would need statement-level interleaving to
+                   schedule correctly, which is not supported: any whole-fragment order would read
+                   some values before they are computed. Raise rather than risk silently wrong
+                   results; restructure the program so that shared subexpressions are first
+                   consumed in a consistent order across the conflicting operands. *)
+                List.iter remaining ~f:(fun (ti, requires, _) ->
+                    let blockers =
+                      List.concat_map remaining ~f:(fun (other, _, other_defines) ->
+                          Set.inter requires other_defines |> Set.to_list
+                          |> List.map ~f:(fun tn ->
+                                 [%string "%{Tn.debug_name tn} (in #%{other.value.id#Int})"]))
+                    in
+                    Stdlib.Printf.eprintf "  fragment #%d %s waits for: %s\n%!" ti.value.id
+                      (Tn.debug_name ti.value)
+                      (String.concat ~sep:", " blockers));
+                raise
+                @@ Session_error
+                     ( [%string
+                         "Tensor.raw: forward-code fragments of the operands of tensor \
+                          #%{session_state.next_id#Int} have a dependency cycle: each fragment \
+                          reads a node whose defining code is embedded in another"],
+                       Some ((fun (ti, _, _) -> ti) @@ List.hd_exn remaining) ))
+              else order (List.map ready ~f:(fun (ti, _, _) -> ti) :: acc) blocked
+        in
+        let sorted_roots = order [] tagged in
+        (* Splice the re-ordered roots back into the root positions, keeping non-roots put. *)
+        let rec splice roots_left ts =
+          match (ts, roots_left) with
+          | [], [] -> []
+          | [], _ :: _ -> assert false
+          | ti :: rest, _ when not (is_fwd_root ti) -> ti :: splice roots_left rest
+          | _ :: rest, r :: roots_left -> r :: splice roots_left rest
+          | _ :: _, [] -> assert false
+        in
+        splice sorted_roots ordered_ts
+  in
   let id : int = session_state.next_id in
   session_state.next_id <- session_state.next_id + 1;
   let _session_state_next_id : int = session_state.next_id in
@@ -475,6 +552,46 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
               None)
             else bprop ti
           else None)
+    in
+    (* Mirror of the forward-fragment ordering above (gh-461), with the edge reversed: a fragment
+       accumulating into a node's gradient must precede the fragment that embeds the node's
+       backprop code. The reversed [ordered_ts] already handles this whenever backprop ownership
+       coincides with forward ownership (both belong to the first-constructed consumer); this pass
+       also covers children whose forward root was consumed separately (e.g. by a
+       non-differentiable operation), for which the forward ordering gives no constraint. *)
+    let bcks =
+      match bcks with
+      | [] | [ _ ] -> bcks
+      | _ ->
+          let tagged =
+            List.map bcks ~f:(fun c ->
+                ( c,
+                  Set.diff (Asgns.collect_written c.Asgns.asgns) c.Asgns.embedded_nodes ))
+          in
+          let rec order acc remaining =
+            match remaining with
+            | [] -> List.concat @@ List.rev acc
+            | _ ->
+                let blocked_by (c, _) =
+                  List.exists remaining ~f:(fun (_, other_writes) ->
+                      not (Set.is_empty (Set.inter c.Asgns.embedded_nodes other_writes)))
+                in
+                let ready, blocked = List.partition_tf remaining ~f:(Fn.non blocked_by) in
+                if List.is_empty ready then
+                  (* A fragment-level dependency cycle would need statement-level interleaving to
+                     schedule correctly, which is not supported: any whole-fragment order would
+                     read some gradients before all their contributions are accumulated. Raise
+                     rather than risk silently wrong results. *)
+                  raise
+                  @@ Session_error
+                       ( [%string
+                           "Tensor.raw: backprop-code fragments of the operands of tensor \
+                            #%{id#Int} have a dependency cycle: each fragment accumulates into a \
+                            gradient whose backprop code is embedded in another"],
+                         Some t )
+                else order (List.map ready ~f:fst :: acc) blocked
+          in
+          order [] tagged
     in
     let diff = Some { grad = g; zero_grads; backprop = Asgns.empty_comp } in
     let t = { t with diff } in
