@@ -30,6 +30,7 @@ val auto : unit -> t
 
 val compile :
   ?lowered_transform:(Ir.Low_level.optimized -> Ir.Low_level.optimized) ->
+  ?lowered_transforms:(Ir.Low_level.optimized -> Ir.Low_level.optimized list) ->
   t ->
   Ir.Assignments.comp ->
   Ir.Indexing.unit_bindings ->
@@ -39,7 +40,10 @@ val compile :
     the input context is unchanged (see {!section:execution_deps}). [lowered_transform] rewrites
     the optimized lowered code before backend compilation — the seam for schedule transforms and
     for hand-annotating hardware axis types in tests
-    (docs/proposals/axis-types-for-loops.md). *)
+    (docs/proposals/axis-types-for-loops.md). [lowered_transforms] is the plural seam for
+    transforms that split the routine into several kernels (fission): the returned segments run
+    back-to-back on the routine's stream with device-side events at the boundaries, like
+    {!Ir.Schedule.maybe_default_schedules}' segments. Pass at most one of the two. *)
 
 val run : t -> routine -> t
 (** Execute a compiled routine. Mutates buffers in-place. Returns updated context with newly

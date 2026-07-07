@@ -2063,11 +2063,14 @@ let zero_expansion ?block_size ?min_parallel ~(limits : Backend_intf.hardware_li
 let seg_llc replicas seg =
   Low_level.unflat_lines (List.concat_map (replicas @ seg.g_units) ~f:(fun u -> u.f_stmts))
 
-let fission_default ~(preset : Low_level.optimized -> schedule)
+let fission_scheduled ~(preset : Low_level.optimized -> schedule)
     ~(zero_sched : Tn.t list -> schedule) ~static_indices (opt : Low_level.optimized) :
-    Low_level.optimized list =
+    ([ `Normal | `Zeros | `Solo ] * Low_level.optimized * schedule * Low_level.optimized) list =
   let plc = opt.Low_level.optimize_ctx.placements in
-  let fallback () = [ apply ~static_indices (preset opt) opt ] in
+  let fallback () =
+    let sched = preset opt in
+    [ (`Normal, opt, sched, apply ~static_indices sched opt) ]
+  in
   let units = collect_units plc opt (Low_level.flat_lines [ opt.Low_level.llc ]) in
   let segs = group_units plc units in
   if List.length segs <= 1 then fallback ()
@@ -2130,7 +2133,13 @@ let fission_default ~(preset : Low_level.optimized -> schedule)
           undo_promotions
             (List.filter promoted ~f:(fun (tn, _) -> not (crosses_segments final_swr tn)));
           List.map coalesced ~f:(fun (seg, replicas, sched) ->
-              apply ~static_indices sched (segment_optimized opt (seg_llc replicas seg))))
+              let pre = segment_optimized opt (seg_llc replicas seg) in
+              (seg.g_kind, pre, sched, apply ~static_indices sched pre)))
+
+let fission_default ~preset ~zero_sched ~static_indices (opt : Low_level.optimized) :
+    Low_level.optimized list =
+  List.map (fission_scheduled ~preset ~zero_sched ~static_indices opt)
+    ~f:(fun (_kind, _pre, _sched, post) -> post)
 
 (** {2 Wiring: the implicit transform for GPU and CPU backends} *)
 

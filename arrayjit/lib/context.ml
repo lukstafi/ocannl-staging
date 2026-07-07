@@ -102,7 +102,7 @@ let auto () =
       try create_from_backend_name ~device_id:0 backend_name
       with _ -> invalid_arg ("Unknown backend: " ^ backend_name))
 
-let compile ?lowered_transform ctx comp bindings =
+let compile ?lowered_transform ?lowered_transforms ctx comp bindings =
   (* Compile and link on the wrapped backend context; only backend-independent routine components
      (and, via [with_backend]'s rebuilt constructor, the updated context) escape the dispatch. *)
   let wrapped, (task, lowered_bindings, name, backend_inputs, backend_outputs) =
@@ -114,7 +114,10 @@ let compile ?lowered_transform ctx comp bindings =
                  with type dev = dev
                   and type runner = runner
                   and type event = event) bctx ->
-            let code = Backend.compile ?lowered_transform bctx.BI.optimize_ctx bindings comp in
+            let code =
+              Backend.compile ?lowered_transform ?lowered_transforms bctx.BI.optimize_ctx bindings
+                comp
+            in
             let r = Backend.link bctx code in
             (r.BI.context, (r.BI.schedule, r.BI.bindings, r.BI.name, r.BI.inputs, r.BI.outputs)));
       }

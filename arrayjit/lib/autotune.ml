@@ -9,6 +9,8 @@ type report = {
   candidates_timed : int;
   candidates_failed : int;
   rounds_run : int;
+  sketch_candidates : int;
+  fissioned : bool;
   baseline_ms : float;
   best_ms : float;
   best_schedule : SC.saved_schedule;
@@ -50,60 +52,325 @@ let time_routine ~repeats cctx routine =
       done;
       !best)
 
+(** {2 Matmul detection and sketch schedules}
+
+    Sketch candidates instantiate the composed matmul pipelines pinned by
+    test/operations/schedule_register_matmul.ml (GPU register blocktiling: Split + Swap + shared
+    Stage + Privatize + materializing Unroll) and schedule_cpu_pack_matmul.ml (CPU operand
+    packing: Split + Swap + non-shared Stage + Privatize), parameterized by tile sizes. Detection
+    is permissive — a mis-detected site fails its candidate compile (op preconditions,
+    [validate_parallel], hardware limits) and is skipped like any other invalid candidate. *)
+
+type sketch_params = {
+  sk_gpu : bool;  (** Register blocktiling with shared staging vs. CPU operand packing. *)
+  sk_bm : int;
+  sk_bn : int;
+  sk_bk : int;
+  sk_tm : int;  (** Register-tile factors; unused on CPU. *)
+  sk_tn : int;
+}
+
+type matmul_site = {
+  m_i : Idx.symbol;
+  m_j : Idx.symbol;
+  m_k : Idx.symbol;
+  m_ni : int;
+  m_nj : int;
+  m_nk : int;
+  m_d : Ir.Tnode.t;
+  m_a : Ir.Tnode.t;
+  m_b : Ir.Tnode.t;
+  m_zeroed : bool;  (** A whole-node [Zero_out] of [m_d] is present (needed by [expand_zero]). *)
+}
+
+let idcs_mention idcs s =
+  Array.exists idcs ~f:(function
+    | Idx.Iterator s2 -> Idx.equal_symbol s s2
+    | Idx.Affine { symbols; _ } -> List.exists symbols ~f:(fun (_, s2) -> Idx.equal_symbol s s2)
+    | _ -> false)
+
+let strip_stmts stmts =
+  List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true)
+
+(* The perfectly nested serial prefix of a statement: (symbol, extent) per loop, plus the leaf. *)
+let rec serial_nest_of (llc : LL.t) : (Idx.symbol * int) list * LL.t =
+  match llc with
+  | LL.For_loop { index; body; from_ = 0; to_; axis = LL.Serial; _ } -> (
+      match strip_stmts (LL.flat_lines [ body ]) with
+      | [ single ] ->
+          let rest, leaf = serial_nest_of single in
+          ((index, to_ + 1) :: rest, leaf)
+      | _ -> ([ (index, to_ + 1) ], body))
+  | LL.If { body; _ } -> serial_nest_of body
+  | _ -> ([], llc)
+
+let rec collect_gets (sc : LL.scalar_t) : (Ir.Tnode.t * Idx.axis_index array) list =
+  let arg (s, _prec) = collect_gets s in
+  match sc with
+  | LL.Get (tn, idcs) -> [ (tn, idcs) ]
+  | LL.Ternop (_, a, b, c) -> arg a @ arg b @ arg c
+  | LL.Binop (_, a, b) -> arg a @ arg b
+  | LL.Unop (_, a) -> arg a
+  | LL.Get_dynamic { dyn_value; _ } -> arg dyn_value
+  | LL.Local_scope _ | LL.Get_local _ | LL.Get_merge_buffer _ | LL.Constant _ | LL.Constant_bits _
+  | LL.Embed_index _ ->
+      []
+
+let detect_matmul (llc : LL.t) : matmul_site option =
+  let stmts = strip_stmts (LL.flat_lines [ llc ]) in
+  let zeroed = List.filter_map stmts ~f:(function LL.Zero_out tn -> Some tn | _ -> None) in
+  List.find_map stmts ~f:(fun stmt ->
+      match serial_nest_of stmt with
+      | [ (i, ni); (j, nj); (k, nk) ], LL.Set { tn = d; idcs = di; llsc; _ } -> (
+          let gets = collect_gets llsc in
+          let d_reads, others =
+            List.partition_tf gets ~f:(fun (tn, idcs) ->
+                phys_equal tn d && Array.equal Idx.equal_axis_index idcs di)
+          in
+          match (d_reads, others) with
+          | _ :: _, [ (t1, i1); (t2, i2) ]
+            when idcs_mention di i && idcs_mention di j && not (idcs_mention di k) ->
+              let role_a (idcs : Idx.axis_index array) = idcs_mention idcs i && idcs_mention idcs k
+              and role_b idcs = idcs_mention idcs k && idcs_mention idcs j in
+              let assign =
+                if role_a i1 && role_b i2 then Some (t1, t2)
+                else if role_a i2 && role_b i1 then Some (t2, t1)
+                else None
+              in
+              Option.map assign ~f:(fun (m_a, m_b) ->
+                  {
+                    m_i = i;
+                    m_j = j;
+                    m_k = k;
+                    m_ni = ni;
+                    m_nj = nj;
+                    m_nk = nk;
+                    m_d = d;
+                    m_a;
+                    m_b;
+                    m_zeroed = List.exists zeroed ~f:(phys_equal d);
+                  })
+          | _ -> None)
+      | _ -> None)
+
+let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner })
+
+(* The register-blocktiled GPU matmul (schedule_register_matmul.ml): each output dimension split
+   twice (block tile -> Grid, register tile -> Workgroup), register loops sunk innermost, operands
+   staged through workgroup-shared tiles at the k-block loop, output privatized, register loops
+   materially unrolled. The zeroing nest gets the same geometry (barriers need slot-uniform
+   workgroup extents). *)
+let gpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_tm = tm; sk_tn = tn; _ }
+    : Sched.schedule =
+  if not site.m_zeroed then
+    invalid_arg "Autotune sketch: no whole-node Zero_out of the matmul output";
+  if Array.length (Lazy.force site.m_d.Ir.Tnode.dims) <> 2 then
+    invalid_arg "Autotune sketch: only rank-2 outputs in v1";
+  let ez, zsyms = Sched.expand_zero ~tn:site.m_d in
+  let zi, zj =
+    match zsyms with [ zi; zj ] -> (zi, zj) | _ -> invalid_arg "Autotune sketch: non-2d zero"
+  in
+  let sp_zi, _, zi_i = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+  let sp_zi2, _, _ = Sched.split ~axis:zi_i ~factor:tm ~outer:LL.Workgroup ~inner:LL.Serial in
+  let sp_zj, _, zj_i = Sched.split ~axis:zj ~factor:bn ~outer:LL.Grid ~inner:LL.Serial in
+  let sp_zj2, _, _ = Sched.split ~axis:zj_i ~factor:tn ~outer:LL.Workgroup ~inner:LL.Serial in
+  let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+  let sp_i2, i_w, i_t = Sched.split ~axis:i_i ~factor:tm ~outer:LL.Workgroup ~inner:LL.Serial in
+  let sp_j, j_o, j_i = Sched.split ~axis:site.m_j ~factor:bn ~outer:LL.Grid ~inner:LL.Serial in
+  let sp_j2, j_w, j_t = Sched.split ~axis:j_i ~factor:tn ~outer:LL.Workgroup ~inner:LL.Serial in
+  let sp_k, k_o, k_i = Sched.split ~axis:site.m_k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
+  let swaps = sink i_t [ j_o; j_w; j_t; k_o; k_i ] @ sink j_t [ k_o; k_i ] in
+  [ ez; sp_zi; sp_zi2; sp_zj; sp_zj2; sp_i; sp_i2; sp_j; sp_j2; sp_k ]
+  @ swaps
+  @ [
+      Sched.Stage
+        { source = site.m_a; tile_loops = [ i_w; i_t; k_i ]; shared = true; cooperative = None };
+      Sched.Stage
+        { source = site.m_b; tile_loops = [ k_i; j_w; j_t ]; shared = true; cooperative = None };
+      Sched.Privatize { target = site.m_d; over = k_o };
+      Sched.Unroll { axis = i_t; materialize = true };
+      Sched.Unroll { axis = j_t; materialize = true };
+    ]
+
+(* The CPU operand-packing matmul (schedule_cpu_pack_matmul.ml): all-serial tiling with the tile
+   loops sunk to [i_o j_o k_o k_i i_i j_i], operands packed into contiguous stack scratch, output
+   privatized across the k-block loop. *)
+let cpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = bk; _ } :
+    Sched.schedule =
+  let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Serial ~inner:LL.Serial in
+  let sp_j, j_o, j_i = Sched.split ~axis:site.m_j ~factor:bn ~outer:LL.Serial ~inner:LL.Serial in
+  let sp_k, k_o, k_i = Sched.split ~axis:site.m_k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
+  [ sp_i; sp_j; sp_k ]
+  @ sink i_i [ j_o; j_i; k_o; k_i ]
+  @ sink j_i [ k_o; k_i; i_i ]
+  @ [
+      Sched.Stage
+        { source = site.m_a; tile_loops = [ i_i; k_i ]; shared = false; cooperative = None };
+      Sched.Stage
+        { source = site.m_b; tile_loops = [ k_i; j_i ]; shared = false; cooperative = None };
+      Sched.Privatize { target = site.m_d; over = k_o };
+    ]
+
+let sketch_schedule ~p (opt : LL.optimized) : Sched.schedule =
+  match detect_matmul opt.LL.llc with
+  | None -> invalid_arg "Autotune sketch: no matmul micro-kernel detected"
+  | Some site -> if p.sk_gpu then gpu_sketch_schedule site p else cpu_sketch_schedule site p
+
+(* Sketch seed parameters compatible with the site's extents (dividing tiles: every constructed
+   guard folds, and shared staging requires them). *)
+let sketch_seed_params ~is_gpu ~is_cpu (opt : LL.optimized) : sketch_params list =
+  match detect_matmul opt.LL.llc with
+  | None -> []
+  | Some site ->
+      let divides c n = c <= n && n % c = 0 in
+      if is_gpu && site.m_zeroed then
+        List.filter_map
+          [
+            (64, 64, 8, 4, 4); (32, 32, 8, 4, 4); (16, 16, 8, 4, 4); (32, 32, 16, 2, 2);
+            (16, 16, 8, 2, 2);
+          ]
+          ~f:(fun (bm, bn, bk, tm, tn) ->
+            if
+              divides bm site.m_ni && divides bn site.m_nj && divides bk site.m_nk
+              && divides tm bm && divides tn bn
+            then Some { sk_gpu = true; sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_tm = tm; sk_tn = tn }
+            else None)
+      else if is_cpu then
+        List.filter_map [ 16; 8 ] ~f:(fun b ->
+            if divides b site.m_ni && divides b site.m_nj && divides b site.m_nk then
+              Some { sk_gpu = false; sk_bm = b; sk_bn = b; sk_bk = b; sk_tm = 0; sk_tn = 0 }
+            else None)
+      else []
+
 (** {2 Candidate compilation}
 
-    A candidate is a recipe producing a schedule against a {e fresh} lowering: backend [compile]
-    re-lowers (with fresh symbols) on every call, so the schedule is rebound structurally inside
+    A candidate is a recipe producing schedules against a {e fresh} lowering: backend [compile]
+    re-lowers (with fresh symbols) on every call, so schedules are rebound structurally inside
     the transform closure, after checking the fresh code's canonical digest against the base
-    compile's. *)
+    compile's. Whole-routine candidates go through the singular [?lowered_transform] seam;
+    fissioned candidates through the plural [?lowered_transforms] seam, with per-segment
+    schedules keyed by the pre-schedule segment's canonical digest. *)
 
-type spec =
-  | Saved of SC.saved_schedule  (** Replay this saved schedule. *)
-  | Preset of { block_size : int option }
-      (** The default annotator ({!Sched.default_gpu} / {!Sched.default_cpu}) with
-          [min_parallel:1] — the tuner measures instead of guessing whether parallelism pays. *)
+type whole_flavor =
+  | W_saved of SC.saved_schedule
+  | W_preset of { block_size : int option }
+  | W_sketch of sketch_params
+
+type fiss_flavor = F_preset of { block_size : int option } | F_saved of (string * SC.saved_schedule) list
+
+type spec = Whole of whole_flavor | Fiss of fiss_flavor
+
+(* The replayable/cacheable description of a compiled candidate. *)
+type form = Whole_saved of SC.saved_schedule | Fiss_saved of (string * SC.saved_schedule) list
+
+type unit_gen = {
+  u_key : string option;  (** [Some pre_digest] for a fission segment; [None] whole-routine. *)
+  u_saved : SC.saved_schedule;
+  u_registry : SC.registry;
+  u_opt : LL.optimized;  (** The transformed unit, for menu generation. *)
+}
 
 type compiled = {
-  saved : SC.saved_schedule;
+  form : form;
   cctx : Context.t;
   routine : Context.routine;
-  opt_after : LL.optimized;
-  registry : SC.registry;
+  units : unit_gen list;
   digest_after : string;
 }
 
 let compile_candidate ~static_indices ~base_digest ~limits ~is_gpu ~is_cpu ctx comp bindings spec :
     (compiled, string) Result.t =
-  let captured = ref None in
-  let transform opt =
+  let check_digest opt =
     let canon = SC.canonicalize ~static_indices opt in
     if not (String.equal (SC.digest canon) base_digest) then
       invalid_arg "Autotune: fresh lowering does not match the tuned code (digest mismatch)";
-    let sched, saved, registry =
-      match spec with
-      | Saved saved ->
-          let sched, registry = SC.of_saved canon saved in
-          (sched, saved, registry)
-      | Preset { block_size } ->
-          let sched =
-            if is_gpu then Sched.default_gpu ?block_size ~min_parallel:1 ~limits opt
-            else if is_cpu then Sched.default_cpu ~min_parallel:1 opt
-            else []
+    canon
+  in
+  let preset_sched ?block_size opt =
+    if is_gpu then Sched.default_gpu ?block_size ~min_parallel:1 ~limits opt
+    else if is_cpu then Sched.default_cpu ~min_parallel:1 opt
+    else []
+  in
+  let captured = ref None in
+  let compile_ctx () =
+    match spec with
+    | Whole flavor ->
+        let transform opt =
+          let canon = check_digest opt in
+          let sched, saved, registry =
+            match flavor with
+            | W_saved saved ->
+                let sched, registry = SC.of_saved canon saved in
+                (sched, saved, registry)
+            | W_preset { block_size } ->
+                let sched = preset_sched ?block_size opt in
+                let saved, registry = SC.to_saved (SC.base_registry canon) sched in
+                (sched, saved, registry)
+            | W_sketch p ->
+                let sched = sketch_schedule ~p opt in
+                let saved, registry = SC.to_saved (SC.base_registry canon) sched in
+                (sched, saved, registry)
           in
-          let saved, registry = SC.to_saved (SC.base_registry canon) sched in
-          (sched, saved, registry)
-    in
-    let opt' = Sched.apply ~static_indices sched opt in
-    let digest_after = SC.digest (SC.canonicalize ~static_indices opt') in
-    captured := Some (saved, registry, opt', digest_after);
-    opt'
+          let opt' = Sched.apply ~static_indices sched opt in
+          let digest_after = SC.digest (SC.canonicalize ~static_indices opt') in
+          captured :=
+            Some
+              ( Whole_saved saved,
+                [ { u_key = None; u_saved = saved; u_registry = registry; u_opt = opt' } ],
+                digest_after );
+          opt'
+        in
+        Context.compile ~lowered_transform:transform ctx comp bindings
+    | Fiss flavor ->
+        let transforms opt =
+          let (_ : SC.canonical) = check_digest opt in
+          let zero_sched tns = if is_gpu then Sched.zero_expansion ~limits tns else [] in
+          let preset seg =
+            match flavor with
+            | F_preset { block_size } -> preset_sched ?block_size seg
+            | F_saved assoc -> (
+                let seg_canon = SC.canonicalize ~static_indices seg in
+                match List.Assoc.find assoc ~equal:String.equal (SC.digest seg_canon) with
+                | Some saved -> fst (SC.of_saved seg_canon saved)
+                | None -> [])
+          in
+          let tuples = Sched.fission_scheduled ~preset ~zero_sched ~static_indices opt in
+          let posts = List.map tuples ~f:(fun (_, _, _, post) -> post) in
+          let units =
+            List.filter_map tuples ~f:(fun (kind, pre, sched, post) ->
+                match kind with
+                | `Zeros | `Solo -> None
+                | `Normal ->
+                    let pre_canon = SC.canonicalize ~static_indices pre in
+                    let saved, registry = SC.to_saved (SC.base_registry pre_canon) sched in
+                    Some
+                      {
+                        u_key = Some (SC.digest pre_canon);
+                        u_saved = saved;
+                        u_registry = registry;
+                        u_opt = post;
+                      })
+          in
+          let assoc =
+            (* Structurally identical segments share a digest and hence a schedule; dedup keys. *)
+            List.dedup_and_sort
+              ~compare:(fun (k1, _) (k2, _) -> String.compare k1 k2)
+              (List.map units ~f:(fun u -> (Option.value_exn u.u_key, u.u_saved)))
+          in
+          let digest_after =
+            String.concat ~sep:"+"
+              (List.map posts ~f:(fun post -> SC.digest (SC.canonicalize ~static_indices post)))
+          in
+          captured := Some (Fiss_saved assoc, units, digest_after);
+          posts
+        in
+        Context.compile ~lowered_transforms:transforms ctx comp bindings
   in
   try
-    let cctx, routine = Context.compile ~lowered_transform:transform ctx comp bindings in
+    let cctx, routine = compile_ctx () in
     match !captured with
-    | Some (saved, registry, opt_after, digest_after) ->
-        Ok { saved; cctx; routine; opt_after; registry; digest_after }
-    | None -> Error "Autotune: lowered_transform was not invoked"
+    | Some (form, units, digest_after) -> Ok { form; cctx; routine; units; digest_after }
+    | None -> Error "Autotune: the transform was not invoked"
   with exn -> Error (Exn.to_string exn)
 
 (** {2 The action menu} *)
@@ -226,19 +493,18 @@ let collect_serial_triples registry llc =
   List.rev !acc
 
 let split_factors = [ 2; 4; 8; 16; 32 ]
-let max_actions_per_elem = 48
+let max_actions_per_unit = 48
 
-let menu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) (elem : compiled) :
-    SC.saved_optop list =
-  let loops = collect_loops elem.registry elem.opt_after.LL.llc in
+let menu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) (u : unit_gen) : SC.saved_optop list
+    =
+  let loops = collect_loops u.u_registry u.u_opt.LL.llc in
   let splits =
     List.concat_map loops ~f:(fun ld ->
         if not (LL.equal_axis_type ld.ld_axis LL.Serial) then []
         else
           List.filter_map split_factors ~f:(fun factor ->
               if factor < ld.ld_extent && ld.ld_extent % factor = 0 then
-                Some
-                  (SC.Split { axis = ld.ld_ref; factor; outer = LL.Serial; inner = LL.Serial })
+                Some (SC.Split { axis = ld.ld_ref; factor; outer = LL.Serial; inner = LL.Serial })
               else None))
   in
   let swaps =
@@ -275,7 +541,7 @@ let menu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) (elem : compiled) :
            accumulation pattern, which [Schedule.apply] validates (invalid permutations fail the
            candidate compile and are skipped). Propose role assignments compatible with the
            intrinsic tile's divisibility per role. *)
-        List.concat_map (collect_serial_triples elem.registry elem.opt_after.LL.llc)
+        List.concat_map (collect_serial_triples u.u_registry u.u_opt.LL.llc)
           ~f:(fun ((r1, e1), (r2, e2), (r3, e3)) ->
             List.filter_map
               [
@@ -291,9 +557,16 @@ let menu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) (elem : compiled) :
                   Some (SC.Tensorize { i; j; k; simd_width = mma_simd_width })
                 else None))
   in
-  List.take
-    (tensorizes @ splits @ swaps @ unrolls @ vectorizes)
-    max_actions_per_elem
+  List.take (tensorizes @ splits @ swaps @ unrolls @ vectorizes) max_actions_per_unit
+
+(* Extend one unit of a compiled candidate with a menu action. *)
+let extend_spec (elem : compiled) (u : unit_gen) (op : SC.saved_optop) : spec option =
+  match (elem.form, u.u_key) with
+  | Whole_saved _, None -> Some (Whole (W_saved (u.u_saved @ [ op ])))
+  | Fiss_saved assoc, Some key ->
+      let assoc = List.Assoc.remove assoc ~equal:String.equal key in
+      Some (Fiss (F_saved ((key, u.u_saved @ [ op ]) :: assoc)))
+  | _ -> None
 
 (** {2 The search} *)
 
@@ -331,13 +604,26 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?report ctx c
   let base_digest = SC.digest canon in
   let use_cache = (not (String.is_empty cache_dir)) && SC.complete canon in
   let key = SC.cache_key canon ~backend in
-  let compile_spec = compile_candidate ~static_indices ~base_digest ~limits ~is_gpu ~is_cpu ctx comp bindings in
+  let compile_spec =
+    compile_candidate ~static_indices ~base_digest ~limits ~is_gpu ~is_cpu ctx comp bindings
+  in
   let emit_report r = Option.iter report ~f:(fun f -> f r) in
+  let flat_schedule = function
+    | Whole_saved saved -> saved
+    | Fiss_saved assoc -> List.concat_map assoc ~f:snd
+  in
+  let is_fissioned = function Whole_saved _ -> false | Fiss_saved _ -> true
+  in
   let cached =
     if use_cache then
       match SC.lookup ~dir:cache_dir ~key with
       | Some entry when String.equal entry.SC.source_digest base_digest -> (
-          match compile_spec (Saved entry.SC.saved) with
+          let spec =
+            match entry.SC.segments with
+            | Some assoc -> Fiss (F_saved assoc)
+            | None -> Whole (W_saved entry.SC.saved)
+          in
+          match compile_spec spec with
           | Ok c ->
               emit_report
                 {
@@ -345,9 +631,11 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?report ctx c
                   candidates_timed = 0;
                   candidates_failed = 0;
                   rounds_run = 0;
+                  sketch_candidates = 0;
+                  fissioned = is_fissioned c.form;
                   baseline_ms = entry.SC.baseline_ms;
                   best_ms = entry.SC.best_ms;
-                  best_schedule = entry.SC.saved;
+                  best_schedule = flat_schedule c.form;
                 };
               Some (c.cctx, c.routine)
           | Error _ -> (* Stale or corrupt entry: fall through to a fresh search. *) None)
@@ -364,11 +652,18 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?report ctx c
       let baseline_ms = time_routine ~repeats bctx broutine in
       let baseline =
         {
-          saved = [];
+          form = Whole_saved [];
           cctx = bctx;
           routine = broutine;
-          opt_after = base_opt;
-          registry = SC.base_registry canon;
+          units =
+            [
+              {
+                u_key = None;
+                u_saved = [];
+                u_registry = SC.base_registry canon;
+                u_opt = base_opt;
+              };
+            ];
           digest_after = base_digest;
         }
       in
@@ -390,11 +685,16 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?report ctx c
                   Int.incr n_failed;
                   None)
       in
+      let block_size_presets mk =
+        mk None :: (if is_gpu then List.map seed_block_sizes ~f:(fun bs -> mk (Some bs)) else [])
+      in
+      let sketch_params = sketch_seed_params ~is_gpu ~is_cpu base_opt in
       let seed_specs =
-        Preset { block_size = None }
-        :: (if is_gpu then
-              List.map seed_block_sizes ~f:(fun bs -> Preset { block_size = Some bs })
-            else [])
+        block_size_presets (fun block_size -> Whole (W_preset { block_size }))
+        @ (if is_gpu || is_cpu then
+             block_size_presets (fun block_size -> Fiss (F_preset { block_size }))
+           else [])
+        @ List.map sketch_params ~f:(fun p -> Whole (W_sketch p))
       in
       let by_time (_, a) (_, b) = Float.compare a b in
       let pool = (baseline, baseline_ms) :: List.filter_map seed_specs ~f:try_spec in
@@ -406,7 +706,8 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?report ctx c
         Int.incr rounds_run;
         let cands =
           List.concat_map !beam ~f:(fun (elem, _) ->
-              List.map (menu ~is_cpu ~limits elem) ~f:(fun op -> Saved (elem.saved @ [ op ])))
+              List.concat_map elem.units ~f:(fun u ->
+                  List.filter_map (menu ~is_cpu ~limits u) ~f:(extend_spec elem u)))
         in
         let results = List.sort (List.filter_map cands ~f:try_spec) ~compare:by_time in
         match results with
@@ -419,24 +720,32 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?report ctx c
             else continue_ := false
       done;
       let best_c, best_ms = !best in
-      if use_cache then
-        SC.store ~dir:cache_dir ~key
-          {
-            SC.version = SC.entry_version;
-            backend;
-            source_digest = base_digest;
-            saved = best_c.saved;
-            best_ms;
-            baseline_ms;
-          };
+      (if use_cache then
+         let saved, segments =
+           match best_c.form with
+           | Whole_saved saved -> (saved, None)
+           | Fiss_saved assoc -> ([], Some assoc)
+         in
+         SC.store ~dir:cache_dir ~key
+           {
+             SC.version = SC.entry_version;
+             backend;
+             source_digest = base_digest;
+             saved;
+             segments;
+             best_ms;
+             baseline_ms;
+           });
       emit_report
         {
           cache_hit = false;
           candidates_timed = !n_timed;
           candidates_failed = !n_failed;
           rounds_run = !rounds_run;
+          sketch_candidates = List.length sketch_params;
+          fissioned = is_fissioned best_c.form;
           baseline_ms;
           best_ms;
-          best_schedule = best_c.saved;
+          best_schedule = flat_schedule best_c.form;
         };
       (best_c.cctx, best_c.routine)

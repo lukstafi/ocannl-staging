@@ -219,6 +219,7 @@ module type Backend_common = sig
     Low_level.optimize_ctx ->
     ?name:string ->
     ?lowered_transform:(Low_level.optimized -> Low_level.optimized) ->
+    ?lowered_transforms:(Low_level.optimized -> Low_level.optimized list) ->
     Indexing.unit_bindings ->
     Assignments.comp ->
     code
@@ -226,7 +227,12 @@ module type Backend_common = sig
       {!Assignments.get_name_exn}. [lowered_transform] is applied to the optimized lowered code
       before backend compilation — the seam where schedule transforms (and hand-annotating tests)
       rewrite loops with hardware axis types, barriers and shared placements
-      (docs/proposals/axis-types-for-loops.md). *)
+      (docs/proposals/axis-types-for-loops.md). [lowered_transforms] is the plural variant for
+      transforms that split the routine into several kernels (fission,
+      {!Schedule.fission_scheduled}): the returned segments compile as one fissioned routine and
+      run back-to-back on the routine's stream with a device-side event chained at each boundary,
+      exactly as {!Schedule.maybe_default_schedules}' segments do. It must return a non-empty
+      list; passing both transforms raises [Invalid_argument]. *)
 
   val compile_batch :
     Low_level.optimize_ctx ->

@@ -495,16 +495,22 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     Array.find_map code_batch.lowereds ~f:(Option.map ~f:(fun l -> l.Low_level.optimize_ctx))
     |> Option.value_or_thunk ~default:Low_level.empty_optimize_ctx
 
-  let%debug3_sexp compile optim_ctx ?name ?lowered_transform bindings (comp : Assignments.comp) :
-      code =
+  let%debug3_sexp compile optim_ctx ?name ?lowered_transform ?lowered_transforms bindings
+      (comp : Assignments.comp) : code =
     let (name : string), (lowered : Low_level.optimized) =
       lower_assignments optim_ctx ?name bindings comp.asgns
     in
     let limits = Device.hardware_limits () in
     let lowereds =
-      match lowered_transform with
-      | Some transform -> [ transform lowered ]
-      | None ->
+      match (lowered_transform, lowered_transforms) with
+      | Some _, Some _ ->
+          invalid_arg "Backend.compile: pass at most one of lowered_transform, lowered_transforms"
+      | Some transform, None -> [ transform lowered ]
+      | None, Some transforms -> (
+          match transforms lowered with
+          | [] -> invalid_arg "Backend.compile: lowered_transforms returned an empty list"
+          | segments -> segments)
+      | None, None ->
           (* No explicit schedule: the default annotator parallelizes kernels it can prove safe
              (docs/proposals/schedule-ir-optops.md §6) -- Grid x Workgroup on GPU backends,
              pool-rendered Grid on CPU backends; the identity otherwise. Kernel fission may split

@@ -222,6 +222,38 @@ val maybe_default_schedule :
     skipped when runtime kernel logging ([debug_log_from_routines]) is active, to keep logs serial
     and deterministic. *)
 
+val zero_expansion :
+  ?block_size:int ->
+  ?min_parallel:int ->
+  limits:Backend_intf.hardware_limits ->
+  Tnode.t list ->
+  schedule
+(** The expand-and-annotate schedule {!maybe_default_schedules} applies to a fission segment of
+    materialized whole-node [Zero_out]s on GPU backends: {!expand_zero} plus the same
+    Grid/Workgroup geometry policy as {!default_gpu}. Below [min_parallel] (largest node) the
+    zeros stay whole-node (a serial kernel renders them as [memset]). Exposed for callers
+    (e.g. the autotuner) that replicate the default fission pipeline with custom per-segment
+    schedules. *)
+
+val fission_scheduled :
+  preset:(Low_level.optimized -> schedule) ->
+  zero_sched:(Tnode.t list -> schedule) ->
+  static_indices:Indexing.static_symbol list ->
+  Low_level.optimized ->
+  ([ `Normal | `Zeros | `Solo ] * Low_level.optimized * schedule * Low_level.optimized) list
+(** The kernel-fission pipeline underlying {!maybe_default_schedules}, with caller-supplied
+    per-segment schedules and a per-segment result: the routine's top-level statements are
+    partitioned at cross-workgroup dependency edges exactly as described there, [preset] is
+    called on each [`Normal] segment's (pre-schedule) [optimized] slice and [zero_sched] on each
+    [`Zeros] segment's nodes, and each result tuple carries the segment kind, the pre-schedule
+    segment, the schedule chosen for it, and the scheduled segment ({!apply} of the schedule).
+    [`Solo] segments (opaque to the analysis, or coalesced runs of unannotated segments) get the
+    empty schedule. When fission does not apply (single segment, unfissionable crossings, or
+    everything coalesces back) the result is a single [`Normal] tuple over the whole routine with
+    [preset]'s schedule. Callers compile each scheduled segment as its own kernel in order (the
+    plural transform seam of backend [compile]); see {!maybe_default_schedules} for the
+    synchronization contract. *)
+
 val maybe_default_schedules :
   backend_name:string ->
   ?limits:Backend_intf.hardware_limits ->

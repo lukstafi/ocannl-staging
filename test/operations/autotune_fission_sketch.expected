@@ -1,0 +1,15 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+fission_scheduled splits the chain into two normal segments: true
+fissioned segments through lowered_transforms compute correctly: true
+hand-crafted fissioned entry hits the cache: true
+cache-hit replay is fissioned: true
+fissioned cache-hit replay computes correctly: true
+tuned fissionable chain values correct: true
+chain tune searches then hits the cache: true
+chain tune timed multiple candidates: true
+chain cache-hit values correct: true
+matmul sketch instantiations seeded: true
+tuned matmul matches the serial twin: true
+matmul tune searches then hits the cache: true
+matmul cache-hit values match the serial twin: true
