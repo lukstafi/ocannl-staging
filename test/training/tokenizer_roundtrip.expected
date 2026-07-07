@@ -6,6 +6,7 @@ decode roundtrip: "ab ab ab"
 tensor: dims 3, prec uint32, values [2; 3; 3]
 padded to 5: dims 5, values [2; 3; 3; 4; 4]
 decode of padded tensor contents: "ab ab ab  "
+single token: dims 1, one-hot dims 1x5, values [0; 0; 1; 0; 0]
 truncated to 2: dims 2, values [2; 3]
 batch: dims 2x3, prec uint32, values [2; 4; 4; 2; 3; 3]
 one-hot of batch: dims 2x3x5, matches the token ids: true

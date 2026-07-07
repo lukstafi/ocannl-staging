@@ -140,7 +140,9 @@ let token_ids_of_array ?(label = "token_ids") ?max_len ?(pad_id = 0) ids =
     let id = if i < Array.length ids then ids.(i) else pad_id in
     set_uint32_id ~fn_name:"token_ids_of_array" genarray [| i |] id
   done;
-  TDSL.rebatch ~l:label (Ir.Ndarray.as_array Ir.Ops.Uint32 genarray) ()
+  (* Not [rebatch]: a Reshape-inferred batch row only constrains the total element count, so a
+     length-1 sequence would collapse to a scalar instead of a [1] batch. *)
+  TDSL.wrap ~l:label ~b:[ len ] ~o:[] (Ir.Ndarray.as_array Ir.Ops.Uint32 genarray) ()
 
 (** Batched variant of {!token_ids_of_array}: convert several token-ID sequences to a single tensor
     of shape [num_seqs; max_len] (two batch axes, output rank 0) in uint32 precision. Each sequence

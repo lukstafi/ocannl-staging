@@ -61,6 +61,15 @@ let () =
   printf "decode of padded tensor contents: %S\n"
     (Bpe.decode tok (Array.map padded_vals ~f:Float.to_int));
 
+  (* A single-token sequence must keep its [1] batch axis (a Reshape-inferred row would collapse
+     total-elements-1 to a scalar), so that e.g. one-hot composition yields [1; vocab]. *)
+  let single = Nn_blocks.token_ids_of_array (Bpe.encode tok "ab") in
+  let single_oh = Nn_blocks.one_hot_of_ids ~num_classes:(Bpe.vocab_size tok) single in
+  let ctx = Train.forward_once ctx single_oh in
+  let single_oh_vals = Context.get_values ctx single_oh.Tensor.value in
+  printf "single token: dims %s, one-hot dims %s, values [%s]\n" (dims_str single)
+    (dims_str single_oh) (vals_str single_oh_vals);
+
   (* Truncation. *)
   let truncated = Nn_blocks.token_ids_of_array ~max_len:2 ids in
   let ctx = Train.forward_once ctx truncated in
