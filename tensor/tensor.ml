@@ -303,30 +303,53 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
     | roots ->
         let tagged =
           List.map roots ~f:(fun ti ->
-              ( ti,
+              (* A node only constrains the order if the owning fragment actually computes it:
+                 data-backed terminals are uploaded at link time (Host_inits) and have no forward
+                 code, so embedding them must not create edges (e.g. an input shared between two
+                 RoPE applications is not a scheduling constraint). *)
+              let defines =
+                Set.inter ti.forward.embedded_nodes (Asgns.collect_written ti.forward.asgns)
+              in
+              let requires =
                 Set.diff
                   (fst @@ Asgns.collect_nodes_guess_output ti.forward.asgns)
-                  ti.forward.embedded_nodes ))
+                  ti.forward.embedded_nodes
+              in
+              (ti, requires, defines))
         in
         let rec order acc remaining =
           match remaining with
           | [] -> List.concat @@ List.rev acc
           | _ ->
-              let blocked_by (_, requires) =
-                List.exists remaining ~f:(fun (other, _) ->
-                    not (Set.is_empty (Set.inter requires other.forward.Asgns.embedded_nodes)))
+              let blocked_by (_, requires, _) =
+                List.exists remaining ~f:(fun (_, _, other_defines) ->
+                    not (Set.is_empty (Set.inter requires other_defines)))
               in
               let ready, blocked = List.partition_tf remaining ~f:(Fn.non blocked_by) in
               if List.is_empty ready then (
                 (* A fragment-level dependency cycle would need statement-level interleaving to
-                   schedule correctly; fall back to the given order like before this check. *)
-                Stdlib.Printf.eprintf
-                  "Warning: OCANNL forward-code fragments have a dependency cycle (operands of \
-                   tensor #%d); some values may be read before they are computed.\n\
-                   %!"
-                  session_state.next_id;
-                (List.concat @@ List.rev acc) @ List.map remaining ~f:fst)
-              else order (List.map ready ~f:fst :: acc) blocked
+                   schedule correctly, which is not supported: any whole-fragment order would read
+                   some values before they are computed. Raise rather than risk silently wrong
+                   results; restructure the program so that shared subexpressions are first
+                   consumed in a consistent order across the conflicting operands. *)
+                List.iter remaining ~f:(fun (ti, requires, _) ->
+                    let blockers =
+                      List.concat_map remaining ~f:(fun (other, _, other_defines) ->
+                          Set.inter requires other_defines |> Set.to_list
+                          |> List.map ~f:(fun tn ->
+                                 [%string "%{Tn.debug_name tn} (in #%{other.value.id#Int})"]))
+                    in
+                    Stdlib.Printf.eprintf "  fragment #%d %s waits for: %s\n%!" ti.value.id
+                      (Tn.debug_name ti.value)
+                      (String.concat ~sep:", " blockers));
+                raise
+                @@ Session_error
+                     ( [%string
+                         "Tensor.raw: forward-code fragments of the operands of tensor \
+                          #%{session_state.next_id#Int} have a dependency cycle: each fragment \
+                          reads a node whose defining code is embedded in another"],
+                       Some ((fun (ti, _, _) -> ti) @@ List.hd_exn remaining) ))
+              else order (List.map ready ~f:(fun (ti, _, _) -> ti) :: acc) blocked
         in
         let sorted_roots = order [] tagged in
         (* Splice the re-ordered roots back into the root positions, keeping non-roots put. *)
@@ -543,9 +566,7 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
           let tagged =
             List.map bcks ~f:(fun c ->
                 ( c,
-                  Set.diff
-                    (snd @@ Asgns.collect_nodes_guess_output c.Asgns.asgns)
-                    c.Asgns.embedded_nodes ))
+                  Set.diff (Asgns.collect_written c.Asgns.asgns) c.Asgns.embedded_nodes ))
           in
           let rec order acc remaining =
             match remaining with
@@ -556,15 +577,18 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
                       not (Set.is_empty (Set.inter c.Asgns.embedded_nodes other_writes)))
                 in
                 let ready, blocked = List.partition_tf remaining ~f:(Fn.non blocked_by) in
-                if List.is_empty ready then (
+                if List.is_empty ready then
                   (* A fragment-level dependency cycle would need statement-level interleaving to
-                     schedule correctly; fall back to the given order like before this check. *)
-                  Stdlib.Printf.eprintf
-                    "Warning: OCANNL backprop-code fragments have a dependency cycle (operands of \
-                     tensor #%d); some gradients may be read before they are accumulated.\n\
-                     %!"
-                    id;
-                  (List.concat @@ List.rev acc) @ List.map remaining ~f:fst)
+                     schedule correctly, which is not supported: any whole-fragment order would
+                     read some gradients before all their contributions are accumulated. Raise
+                     rather than risk silently wrong results. *)
+                  raise
+                  @@ Session_error
+                       ( [%string
+                           "Tensor.raw: backprop-code fragments of the operands of tensor \
+                            #%{id#Int} have a dependency cycle: each fragment accumulates into a \
+                            gradient whose backprop code is embedded in another"],
+                         Some t )
                 else order (List.map ready ~f:fst :: acc) blocked
           in
           order [] tagged

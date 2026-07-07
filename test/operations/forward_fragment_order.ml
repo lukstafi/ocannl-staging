@@ -54,3 +54,29 @@ let () =
   p "q" q;
   p "k" k;
   p "v" v
+
+(* Fragment-level dependency cycle: a2 embeds the computed l's code (via a1) but reads the
+   computed p; b2 embeds p's code (via b1) but reads l. Statement-level interleaving
+   (l; a1; p; b1; a2; b2) could schedule this, but whole-fragment ordering cannot -- any order
+   reads some value before it is computed. The compiler errs on the sound side and raises at
+   construction. Note the shared nodes must be COMPUTED tensors: data-backed terminals are
+   uploaded at link time and correctly create no ordering constraints. *)
+let () =
+  let mk name =
+    NTDSL.init ~l:name ~prec:Ir.Ops.single ~b:[] ~i:[] ~o:[ 2 ]
+      ~f:(function [| i |] -> Float.of_int (i + 1) | _ -> assert false)
+      ()
+  in
+  let base = mk "base2" and base' = mk "base2b" in
+  let open NTDSL.O in
+  let l = base *. base in
+  let p = relu base' in
+  let a1 = l *. l in
+  let b1 = relu p in
+  let a2 = a1 *. p in
+  let b2 = b1 *. l in
+  match a2 + b2 with
+  | exception Ocannl_tensor.Tensor.Session_error (msg, _) ->
+      printf "fragment cycle raises Session_error: %b\n"
+        (String.is_substring msg ~substring:"dependency cycle")
+  | _ -> printf "fragment cycle raises Session_error: false\n"
