@@ -47,27 +47,3 @@
  (libraries base ocannl stdio dataprep gpt2_model)
  (preprocess
   (pps ppx_here ppx_ocannl ppx_string)))
-
-; gpt2_probe is a debugging aid (not a test): stage-by-stage comparison against a numpy
-; reference on the cached pretrained weights.
-
-(executable
- (name gpt2_probe)
- (modules gpt2_probe)
- (libraries base ocannl stdio dataprep gpt2_model)
- (preprocess
-  (pps ppx_here ppx_ocannl)))
-
-(executable
- (name gpt2_probe2)
- (modules gpt2_probe2)
- (libraries base ocannl stdio dataprep gpt2_model)
- (preprocess
-  (pps ppx_here ppx_ocannl)))
-
-(executable
- (name gpt2_probe3)
- (modules gpt2_probe3)
- (libraries base ocannl stdio gpt2_model)
- (preprocess
-  (pps ppx_here ppx_ocannl)))

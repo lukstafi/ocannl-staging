@@ -84,7 +84,7 @@ See [ROADMAP.md](ROADMAP.md) for the detailed schedule. Headline target: **ICFP 
   - [ ] Check which optimizations are missing against the implementation of [llm.c](https://github.com/karpathy/llm.c).
   - [x] makemore progression (bigram → MLP → BatchNorm → transformer), mirroring Karpathy's lectures (#59).
   - [ ] Convnet examples: MNIST and CIFAR (#54); LSTM example (#60).
-  - [ ] Transformer inference for a small open-weights model (one of GPT-2, LLaMA, Gemma) (#377).
+  - [x] Transformer inference for a small open-weights model (one of GPT-2, LLaMA, Gemma) (#377): GPT-2 124M greedy decoding with pretrained HuggingFace weights, exact against a NumPy reference -- see `test/gpt2/gpt2_generate.ml` (tutorial executable) and `test/gpt2/gpt2_dry_run.ml`.
   - [x] Tokenizers are developed in the spin-off project [ocaml-dataprep](https://github.com/ahrefs/ocaml-dataprep) (opam package `dataprep`): the `Dataprep.Bpe` HuggingFace-compatible BPE tokenizer is bridged to OCANNL tensors via `Nn_blocks.token_ids_of_array` / `token_ids_of_batch` (see `test/training/tokenizer_roundtrip.ml`).
 * **1.0 (End Oct 2026): Few documentation gaps, some degree of feature completeness, ergonomics, safety.**
   - [ ] Feature completeness demonstrated by resolving / implementing a few of the $\color{green}{\text{explore}}$ issues.
