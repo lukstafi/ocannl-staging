@@ -10,6 +10,14 @@ let _get_local_debug_runtime = Utils.get_local_debug_runtime
 (* export OCANNL_LOG_LEVEL_SCHEDULERS=9 to enable debugging into the log_files/ directory. *)
 [%%global_debug_log_level_from_env_var "OCANNL_LOG_LEVEL_SCHEDULERS"]
 
+(* The CPU "tile-MMA capability" (gh-ocannl-469): no tensor cores, but the C backends render
+   [Tile_mma] as the register-tiled vector micro-kernel ([C_syntax]'s [try_register_tile]), so
+   the autotune menu may propose [Tensorize] over CPU serial triples. The register renderer peels
+   edge tiles, so any block extents are legal (intrinsic tile 1×1×1); the lane loop renders
+   serially, so a single lane suffices. *)
+let cpu_mma_limits =
+  { no_hardware_limits with mma = Some { mma_simd_width = 1; mma_tile = (1, 1, 1) } }
+
 module Multidev (Backend : For_add_scheduler) :
   With_scheduler with type buffer_ptr = Backend.buffer_ptr = struct
   include Backend
@@ -212,7 +220,7 @@ module Multidev (Backend : For_add_scheduler) :
         Sexp.List [ Sexp.Atom "num_devices"; [%sexp_of: int] (num_devices ()) ];
       ]
 
-  let hardware_limits () = no_hardware_limits
+  let hardware_limits () = cpu_mma_limits
   let get_global_debug_info () = Sexp.message "global_debug" []
   let get_debug_info (device : device) = sexp_of_runner device.runner
 end
@@ -272,7 +280,7 @@ module Sync (Backend : For_add_scheduler) = struct
           ];
       ]
 
-  let hardware_limits () = no_hardware_limits
+  let hardware_limits () = cpu_mma_limits
 
   (* let global_run_no = ref 0 *)
   let schedule_task _device task = Ir.Task.run task
