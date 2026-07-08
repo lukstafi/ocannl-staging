@@ -17,7 +17,8 @@
    the same [if (lane == 0)] guard as the scalar fallback; each output element's k-chain stays in
    serial order with the same fused rounding, so the values must match the serial twin BITWISE.
    Non-FMA-form and non-f32/f64 statements (the half case below) keep the scalar fallback, also
-   bitwise. The negative check pins Tensorize's pattern discipline. *)
+   bitwise; so does uniform f32 on CUDA, whose wmma draft supports only the half/bf16
+   combinations. The negative check pins Tensorize's pattern discipline. *)
 
 open Base
 open Ocannl
@@ -125,6 +126,11 @@ let () =
           has "simdgroup_load" && has "simdgroup_multiply_accumulate" && has "simdgroup_store"
           && has "threadgroup_barrier"
           && not (has "== 0)")
+        else if on_gpu then
+          (* CUDA: the wmma draft supports the half/bf16 combinations only, so uniform f32
+             declines to the scalar fallback under the lane-0 guard (the register tiling is
+             CPU-only — the packed vector style never takes it). *)
+          has "== 0)" && has "fma" && not (has "simdgroup")
         else
           (* The register-tiled path (gh-ocannl-469): the vector C-tile under the lane-0 guard (a
              serial loop of extent 32 binds the lane on the C backends); fused per-element chains
