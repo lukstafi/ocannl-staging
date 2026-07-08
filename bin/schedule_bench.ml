@@ -137,6 +137,21 @@ let () =
       ]
   in
 
+  (* Register-tiled Tile_mma micro-kernel (gh-ocannl-469): the whole i x j x k triple becomes one
+     Tile_mma statement, which the C backends render tinyBLAS-style — the C-tile held in an RM x
+     RN grid of vector registers across the entire k-loop, edges peeled. The zeroing must cover
+     the lane slot (validate_parallel's coverage rule), so its column loop becomes the Workgroup
+     axis and the lane width matches its extent (the lane loop renders serially on the C
+     backends, executing the guarded statement once). *)
+  let tensorize_schedule ~mc opt =
+    let i, j, k = accum_syms opt in
+    let ez, zsyms = Sched.expand_zero ~tn:mc in
+    let zj = match zsyms with [ _; zj ] -> zj | _ -> assert false in
+    let rz = Sched.Retype { axis = zj; ty = LL.Workgroup } in
+    let tz, _lane = Sched.tensorize ~i ~j ~k ~simd_width:n in
+    [ ez; rz; tz ]
+  in
+
   let bench ~variant ~schedule =
     let%op mc = ma * mb in
     let comp = named ("mm_" ^ variant) (Train.forward mc) in
@@ -173,4 +188,6 @@ let () =
       (t_naive /. t_smem) (t_naive /. t_reg))
   else
     let t_pack = bench ~variant:"cpupack" ~schedule:(Some cpupack_schedule) in
-    p "speedup vs naive: cpupack %.1fx\n" (t_naive /. t_pack)
+    let t_tmma = bench ~variant:"tensorize" ~schedule:(Some tensorize_schedule) in
+    p "speedups vs naive: cpupack %.1fx, tensorize %.1fx\n" (t_naive /. t_pack)
+      (t_naive /. t_tmma)

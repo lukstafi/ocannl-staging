@@ -11,11 +11,13 @@
 
    On Metal the statement renders as [simdgroup_matrix] fragments (simdgroup_load /
    simdgroup_multiply_accumulate / simdgroup_store, barrier-bracketed) and must match the serial
-   twin within f32 tolerance (the tile reduction reassociates). On backends without an MMA hook
-   (the C backends; CUDA until T3) the scalar fallback runs once per simdgroup under an
-   [if (lane == 0)] guard: on the C backends the lane loop renders serially, so the values must
-   match the serial twin BITWISE (same operation order). The negative check pins Tensorize's
-   pattern discipline. *)
+   twin within f32 tolerance (the tile reduction reassociates). On the C backends the f32
+   statement renders as the register-tiled vector micro-kernel (gh-ocannl-469, tinyBLAS's mnpack:
+   the C-tile in an RM×RN grid of vector registers held across the k-loop, edges peeled) under
+   the same [if (lane == 0)] guard as the scalar fallback; each output element's k-chain stays in
+   serial order with the same fused rounding, so the values must match the serial twin BITWISE.
+   Non-FMA-form and non-f32/f64 statements (the half case below) keep the scalar fallback, also
+   bitwise. The negative check pins Tensorize's pattern discipline. *)
 
 open Base
 open Ocannl
@@ -124,9 +126,10 @@ let () =
           && has "threadgroup_barrier"
           && not (has "== 0)")
         else
-          (* The fallback path: the scalar micro-kernel under the lane-0 guard (a serial loop of
-             extent 32 binds the lane on the C backends). *)
-          has "== 0)" && has "fma" && not (has "simdgroup")
+          (* The register-tiled path (gh-ocannl-469): the vector C-tile under the lane-0 guard (a
+             serial loop of extent 32 binds the lane on the C backends); fused per-element chains
+             are what makes the bitwise parity above hold. *)
+          has "== 0)" && has "Tile_mma register tiling" && has "fma" && not (has "simdgroup")
       in
       p "tensorized structure as expected" ok);
 
@@ -177,9 +180,71 @@ let () =
         else if on_gpu then
           (* CUDA: the T3 wmma draft, or the lane-0 fallback until it is verified. *)
           has "nvcuda::wmma" || has "== 0)"
-        else has "== 0)" && not (has "simdgroup")
+        else
+          (* Half precision declines the register tiling (single/double only): the scalar
+             fallback. *)
+          has "== 0)" && (not (has "simdgroup")) && not (has "Tile_mma register tiling")
       in
       p "half tensorized structure as expected" ok);
+
+  (* --- Edge extents (gh-ocannl-469): a 7x19 output of a 7x13 by 13x19 matmul, tensorized over
+     the whole triple. The register tiling covers the full 4x(RN*lanes) blocks and peels the
+     partial row block and column strip into scalar loops; per-element chains stay serial-ordered
+     and fused, so cc parity with the serial twin is BITWISE. Pinned on the C backends only: the
+     GPU intrinsic paths decline non-multiple-of-tile extents by contract (already covered by the
+     half case's fallback pin). --- *)
+  (if not on_gpu then (
+     let mi = 7 and mk = 13 and mj = 19 in
+     let eav = Array.init (mi * mk) ~f:(fun x -> Float.of_int (x % 11) *. 0.375) in
+     let ebv = Array.init (mk * mj) ~f:(fun x -> Float.of_int (x % 9) -. 4.) in
+     let ea = TDSL.ndarray eav ~label:[ "ea" ] ~input_dims:[ mk ] ~output_dims:[ mi ] () in
+     let eb = TDSL.ndarray ebv ~label:[ "eb" ] ~input_dims:[ mj ] ~output_dims:[ mk ] () in
+     let%op ec0 = ea * eb in
+     let ctx_e0 = Context.auto () in
+     let ctx_e0, routine_e0 =
+       Context.compile ~lowered_transform:(fun opt -> opt) ctx_e0
+         (named "mm_edge_serial" (Train.forward ec0))
+         Ir.Indexing.Empty
+     in
+     let ctx_e0 = Context.run ctx_e0 routine_e0 in
+     let got_edge_serial = Context.get_values ctx_e0 ec0.Tensor.value in
+     let%op ec1 = ea * eb in
+     let edge_schedule (opt : LL.optimized) : Sched.schedule =
+       let paths = nest_paths opt.LL.llc in
+       let i, j, k =
+         match List.find_exn paths ~f:(fun p -> List.length p = 3) with
+         | [ i; j; k ] -> (i, j, k)
+         | _ -> assert false
+       in
+       (* The zeroing must cover the lane slot (validate_parallel's coverage rule), so its column
+          loop becomes the Workgroup axis and the lane width matches its extent — arbitrary on
+          the C backends, where the lane loop renders serially. *)
+       let ez, zsyms = Sched.expand_zero ~tn:ec1.Tensor.value in
+       let zj = match zsyms with [ _; zj ] -> zj | _ -> assert false in
+       let rz = Sched.Retype { axis = zj; ty = LL.Workgroup } in
+       let tz, _lane = Sched.tensorize ~i ~j ~k ~simd_width:mj in
+       [ ez; rz; tz ]
+     in
+     let transform_e opt = Sched.apply (edge_schedule opt) opt in
+     let ctx_e = Context.auto () in
+     let ctx_e, routine_e =
+       Context.compile ~lowered_transform:transform_e ctx_e
+         (named "mm_edge_mma" (Train.forward ec1))
+         Ir.Indexing.Empty
+     in
+     let ctx_e = Context.run ctx_e routine_e in
+     let got_edge = Context.get_values ctx_e ec1.Tensor.value in
+     p "edge-extent tensorized matmul matches the serial twin bitwise"
+       (Array.for_all2_exn got_edge got_edge_serial ~f:Float.equal);
+     match read_generated "mm_edge_mma" with
+     | None -> p "edge-extent register tiling with peeled edges" false
+     | Some src ->
+         let has s = String.is_substring src ~substring:s in
+         p "edge-extent register tiling with peeled edges"
+           (has "Tile_mma register tiling" && has "full blocks 4x"))
+   else (
+     p "edge-extent tensorized matmul matches the serial twin bitwise" true;
+     p "edge-extent register tiling with peeled edges" true));
 
   (* --- The staged + tensorized composition (lane-aware Stage): shared tiles for ma and mb,
      cooperatively loaded under fresh extent-32 Workgroup lane loops, then the micro-kernel
