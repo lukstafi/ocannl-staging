@@ -507,10 +507,13 @@ module Impl = struct
 
     (* MSL is Clang-based C++: [__restrict] applies to the pooled per-node pointers, which address
        disjoint slab sub-ranges (gh-ocannl-164). No vectorization pragmas / stack-array alignment:
-       the GPU payoff is memory transactions, a follow-up. *)
+       the GPU payoff is memory transactions — eligible [Vectorized] loops render 128-bit packed
+       loads/stores through the [float4]-payload pack structs (gh-ocannl-463). *)
     let restrict_keyword = Some "__restrict"
     let vectorize_pragma = []
     let aligned_local_attr = None
+    let vector_bytes = 16
+    let vector_style = `Packed_struct
 
     let ident_blacklist =
       ident_blacklist

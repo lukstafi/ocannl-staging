@@ -4,8 +4,11 @@ let builtins =
     ("uint4x32_t", {|typedef struct {
     unsigned int v[4];
 } uint4x32_t;|}, []);
-    ("float4_t", {|typedef struct { float v[4]; } float4_t;|}, []);
-    ("double2_t", {|typedef struct { double v[2]; } double2_t;|}, []);
+    (* The 16-byte alignment lets the [Vectorized] packed rendering (gh-ocannl-463) load/store
+       these through [reinterpret_cast] as single 128-bit transactions (llm.c's Packed128); it is
+       harmless for the value-typed [Set_from_vec] uses. *)
+    ("float4_t", {|typedef struct __align__(16) { float v[4]; } float4_t;|}, []);
+    ("double2_t", {|typedef struct __align__(16) { double v[2]; } double2_t;|}, []);
     ( "ocannl_shfl_xor",
       (* Butterfly warp shuffle for the [Workgroup_reduce] warp-shuffle rendering
          (gh-ocannl-462). The full mask is sound because the rendering requires the reduce axis to

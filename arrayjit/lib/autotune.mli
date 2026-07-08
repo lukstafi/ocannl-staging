@@ -24,8 +24,9 @@
       (Split + Swap + shared Stage + Privatize + materializing Unroll) on GPU backends, operand
       packing (non-shared Stage + Privatize) on CPU backends — with dividing tile sizes.
     - {b Beam-round menu actions} on the incumbents: dividing serial Splits, Swaps of perfect
-      serial pairs, Unrolls, Retype-Vectorized on non-accumulating innermost loops (CPU), and
-      Tensorize role permutations when the backend reports an mma capability.
+      serial pairs, Unrolls, Retype-Vectorized on non-accumulating innermost loops (explicit SIMD
+      on CPU, 128-bit packed loads/stores on GPU — gh-ocannl-463), and Tensorize role permutations
+      when the backend reports an mma capability.
 
     Caveats (v1):
 

@@ -8,8 +8,12 @@
    - [Split] then [Retype] of the inner loop: the store/load index vectors carry an [Affine] last
      component (factor * outer + inner), exercising the coefficient-1 contiguity rule.
 
-   On GPU backends the same transforms render serially (no pragmas, no vector extensions); every
-   printed boolean holds on every backend. *)
+   On GPU backends (gh-ocannl-463) eligible loops render as 128-bit packed loads/stores
+   ([reinterpret_cast] of the aligned pack structs, llm.c's Packed128) instead of vector
+   extensions. The 517-column case is ineligible there — a 517-wide last dimension breaks the
+   lane-alignment guarantee — and renders serially, while the split 512-column case is eligible
+   (the [Affine] coefficient 8 and last dimension 512 are lane multiples). Every printed boolean
+   holds on every backend. *)
 
 open Base
 open Ocannl
@@ -79,7 +83,10 @@ let () =
       let has s = String.is_substring src ~substring:s in
       let ok =
         if on_cpu then has "vector_size" && has "__builtin_memcpy" && not (has "#pragma")
-        else not (has "vector_size")
+        else
+          (* 517 is not a lane multiple: rows other than the first start at unaligned offsets, so
+             the packed rendering must decline and fall back to a plain serial loop. *)
+          (not (has "vector_size")) && not (has "reinterpret_cast")
       in
       p "vectorized rendering with serial remainder" ok);
 
@@ -107,4 +114,8 @@ let () =
   | Some src ->
       let has s = String.is_substring src ~substring:s in
       p "affine-indexed vector accesses rendered"
-        (if on_cpu then has "vector_size" && not (has "#pragma") else not (has "vector_size"))
+        (if on_cpu then has "vector_size" && not (has "#pragma")
+         else
+           (* Eligible on GPU: dims and the Affine coefficient are lane multiples, so the packed
+              rendering emits reinterpret_cast float4_t loads/stores (gh-ocannl-463). *)
+           has "reinterpret_cast" && has "float4_t" && not (has "vector_size"))

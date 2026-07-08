@@ -417,11 +417,15 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     let warp_size = 32
 
     (* No vectorization pragmas in device code — SIMD-style gains on GPU come from memory
-       transactions (float4/packed loads), a follow-up to gh-ocannl-164; [Vectorized] loops render
-       as plain serial loops. Local arrays live in registers/local memory; no alignment attribute
-       needed (and nvcc's GNU-attribute support is not worth relying on here). *)
+       transactions: eligible [Vectorized] loops render 128-bit packed loads/stores through the
+       [__align__(16)] pack structs (gh-ocannl-463; llm.c's Packed128 shows LDG.128/STS.128 are
+       the baseline for bandwidth-bound kernels), and everything else falls back to plain serial
+       loops. Local arrays live in registers/local memory; no alignment attribute needed (packed
+       accesses require device-resident nodes). *)
     let vectorize_pragma = []
     let aligned_local_attr = None
+    let vector_bytes = 16
+    let vector_style = `Packed_struct
 
     let typ_of_prec = function
       | Ops.Byte_prec _ -> "unsigned char"

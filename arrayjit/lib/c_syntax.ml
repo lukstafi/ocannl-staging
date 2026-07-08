@@ -122,6 +122,20 @@ module type C_syntax_config = sig
       reassociate strict-FP reductions — the [Vectorized] retype carries that permission, like
       [Swap]). [0] disables explicit emission ([vectorize_pragma] fallback). *)
 
+  val vector_style : [ `Vec_extensions | `Packed_struct ]
+  (** How eligible [Vectorized] loops emit explicit vector code when [vector_bytes > 0].
+      [`Vec_extensions] (CPU): GCC/Clang [vector_size] types, unaligned [__builtin_memcpy]
+      loads/stores, vector-infix arithmetic. [`Packed_struct] (GPU, gh-ocannl-463; llm.c's
+      [Packed128], llmc/cuda_utils.cuh): the backend's [vec_typ_of_prec] aggregate is loaded and
+      stored through [reinterpret_cast] at guaranteed-aligned offsets — the 128-bit LDG/STS
+      transactions that bandwidth-bound kernels need — while the arithmetic stays scalar in a
+      per-lane loop over the pack's [.v] payload (on GPU the payoff is memory transactions, not
+      SIMD ALUs; per-lane [fmaf]/[fma] also matches the serial path's rounding exactly).
+      [`Packed_struct] eligibility additionally requires every vector-accessed node to be
+      materialized (device buffers and pool offsets are [Ops.buffer_alignment]-aligned, stack and
+      workgroup-shared arrays only element-aligned) and every access's non-loop offset
+      contribution to be a lane multiple. *)
+
   val aligned_local_attr : string option
   (** Declaration suffix aligning stack-allocated local arrays for SIMD access, e.g.
       [__attribute__((aligned(32)))] (gh-ocannl-164). Applies to the plain stack-array branch only,
@@ -215,6 +229,7 @@ struct
   let parallel_grid_syntax = `None
   let parallel_grid_chunks = 1
   let vector_bytes = 0
+  let vector_style = `Vec_extensions
   let shared_decl_prefix = None
   let restrict_keyword = Some "restrict"
 
@@ -950,10 +965,6 @@ module C_syntax (B : C_syntax_config) = struct
                   no_written_reads b
               | Unop (_, (a, _)) -> no_written_reads a
             in
-            let vtyp =
-              Printf.sprintf "ocannl_vec%d%s" lanes
-                (match prec with Ops.Double_prec _ -> "d" | _ -> "f")
-            in
             let stmts_docs = ref [] in
             let emit d = stmts_docs := d :: !stmts_docs in
             let fresh =
@@ -965,96 +976,196 @@ module C_syntax (B : C_syntax_config) = struct
             let uniform_scalar llsc =
               (* Uniform across lanes: a read of a stored node cannot equal its (index-mentioning)
                  store vector, so reject those; then render as a plain scalar (vector-scalar
-                 arithmetic splats). *)
+                 arithmetic splats; in the packed style the scalar participates per lane). *)
               no_written_reads llsc;
               let local_defs, sdoc = pp_scalar prec llsc in
               if not (List.is_empty local_defs) then raise Bail;
               parens sdoc
             in
-            let vload tn idcs =
-              if not (contiguous idcs) then raise Bail;
-              check_read tn idcs;
-              let name = fresh "vget" in
-              let offset = pp_array_offset (idcs, Lazy.force tn.Tn.dims) in
-              emit
-                (string (vtyp ^ " " ^ name ^ ";")
-                ^^ hardline
-                ^^ string ("__builtin_memcpy(&" ^ name ^ ", &")
-                ^^ string (get_ident tn) ^^ brackets offset
-                ^^ string (", sizeof(" ^ name ^ "));"));
-              string name
-            in
-            let rec vec_expr (llsc : Low_level.scalar_t) (p : Ops.prec) : PPrint.document =
-              if not (scalar_mentions llsc) then uniform_scalar llsc
-              else if not (Ops.equal_prec p prec) then raise Bail
-              else
-                match llsc with
-                | Low_level.Get (tn, idcs) ->
-                    if not (Ops.equal_prec (Lazy.force tn.Tn.prec) prec) then raise Bail;
-                    vload tn idcs
-                | Binop (op, (a, pa), (b, pb)) ->
-                    let inf =
-                      match op with
-                      | Ops.Add -> " + "
-                      | Sub -> " - "
-                      | Mul -> " * "
-                      | Div -> " / "
-                      | _ -> raise Bail
-                    in
-                    parens (vec_expr a pa ^^ string inf ^^ vec_expr b pb)
-                | Ternop (Ops.FMA, (a, pa), (b, pb), (c, pc)) ->
-                    (* Fused, matching the scalar path's [fmaf]/[fma] single rounding (the
-                       simplifier synthesizes [FMA] from mul-add trees, so this is the hot case):
-                       clang's [__builtin_elementwise_fma] where available, otherwise a per-lane
-                       fused-fma loop (fixed trip count; SLP-vectorizes under -mfma/NEON). A plain
-                       [a * b + c] would be only maybe-contracted, so vector lanes could differ
-                       from the serial remainder loop and twin. Operands bind to vector temps
-                       (lane-uniform ones splat explicitly: vector = scalar init is invalid). *)
-                    let bind llsc p =
-                      let name = fresh "vfop" in
-                      emit
-                        (string (vtyp ^ " " ^ name ^ " = ") ^^ vec_operand llsc p ^^ semi);
-                      name
-                    in
-                    let na = bind a pa and nb = bind b pb and nc = bind c pc in
-                    let nr = fresh "vfma" in
-                    let fma_fn =
-                      match prec with Ops.Double_prec _ -> "fma" | _ -> "fmaf"
-                    in
+            let prelude =
+              match B.vector_style with
+              | `Vec_extensions ->
+                  let vtyp =
+                    Printf.sprintf "ocannl_vec%d%s" lanes
+                      (match prec with Ops.Double_prec _ -> "d" | _ -> "f")
+                  in
+                  let vload tn idcs =
+                    if not (contiguous idcs) then raise Bail;
+                    check_read tn idcs;
+                    let name = fresh "vget" in
+                    let offset = pp_array_offset (idcs, Lazy.force tn.Tn.dims) in
                     emit
-                      (string (vtyp ^ " " ^ nr ^ ";")
+                      (string (vtyp ^ " " ^ name ^ ";")
                       ^^ hardline
-                      ^^ string "#if OCANNL_HAS_ELEMENTWISE_FMA"
-                      ^^ hardline
-                      ^^ string
-                           (Printf.sprintf "%s = __builtin_elementwise_fma(%s, %s, %s);" nr na nb
-                              nc)
-                      ^^ hardline ^^ string "#else" ^^ hardline
-                      ^^ string
-                           (Printf.sprintf
-                              "for (int ocannl_l__ = 0; ocannl_l__ < %d; ++ocannl_l__) %s[ocannl_l__] = %s(%s[ocannl_l__], %s[ocannl_l__], %s[ocannl_l__]);"
-                              lanes nr fma_fn na nb nc)
-                      ^^ hardline ^^ string "#endif");
-                    string nr
-                | Unop (Ops.Identity, (a, pa)) -> vec_expr a pa
-                | Unop (Ops.Neg, (a, pa)) -> parens (string "-" ^^ vec_expr a pa)
-                | _ -> raise Bail
-            and vec_operand (llsc : Low_level.scalar_t) (p : Ops.prec) : PPrint.document =
-              (* A vector-typed rendering even for lane-uniform values: initializers and builtin
-                 arguments need a vector, where the implicit vector-scalar splat of binary
-                 operators does not apply. *)
-              if scalar_mentions llsc then vec_expr llsc p
-              else string ("((" ^ vtyp ^ "){0} + ") ^^ uniform_scalar llsc ^^ string ")"
+                      ^^ string ("__builtin_memcpy(&" ^ name ^ ", &")
+                      ^^ string (get_ident tn) ^^ brackets offset
+                      ^^ string (", sizeof(" ^ name ^ "));"));
+                    string name
+                  in
+                  let rec vec_expr (llsc : Low_level.scalar_t) (p : Ops.prec) : PPrint.document =
+                    if not (scalar_mentions llsc) then uniform_scalar llsc
+                    else if not (Ops.equal_prec p prec) then raise Bail
+                    else
+                      match llsc with
+                      | Low_level.Get (tn, idcs) ->
+                          if not (Ops.equal_prec (Lazy.force tn.Tn.prec) prec) then raise Bail;
+                          vload tn idcs
+                      | Binop (op, (a, pa), (b, pb)) ->
+                          let inf =
+                            match op with
+                            | Ops.Add -> " + "
+                            | Sub -> " - "
+                            | Mul -> " * "
+                            | Div -> " / "
+                            | _ -> raise Bail
+                          in
+                          parens (vec_expr a pa ^^ string inf ^^ vec_expr b pb)
+                      | Ternop (Ops.FMA, (a, pa), (b, pb), (c, pc)) ->
+                          (* Fused, matching the scalar path's [fmaf]/[fma] single rounding (the
+                             simplifier synthesizes [FMA] from mul-add trees, so this is the hot
+                             case): clang's [__builtin_elementwise_fma] where available, otherwise
+                             a per-lane fused-fma loop (fixed trip count; SLP-vectorizes under
+                             -mfma/NEON). A plain [a * b + c] would be only maybe-contracted, so
+                             vector lanes could differ from the serial remainder loop and twin.
+                             Operands bind to vector temps (lane-uniform ones splat explicitly:
+                             vector = scalar init is invalid). *)
+                          let bind llsc p =
+                            let name = fresh "vfop" in
+                            emit
+                              (string (vtyp ^ " " ^ name ^ " = ") ^^ vec_operand llsc p ^^ semi);
+                            name
+                          in
+                          let na = bind a pa and nb = bind b pb and nc = bind c pc in
+                          let nr = fresh "vfma" in
+                          let fma_fn =
+                            match prec with Ops.Double_prec _ -> "fma" | _ -> "fmaf"
+                          in
+                          emit
+                            (string (vtyp ^ " " ^ nr ^ ";")
+                            ^^ hardline
+                            ^^ string "#if OCANNL_HAS_ELEMENTWISE_FMA"
+                            ^^ hardline
+                            ^^ string
+                                 (Printf.sprintf "%s = __builtin_elementwise_fma(%s, %s, %s);" nr
+                                    na nb nc)
+                            ^^ hardline ^^ string "#else" ^^ hardline
+                            ^^ string
+                                 (Printf.sprintf
+                                    "for (int ocannl_l__ = 0; ocannl_l__ < %d; ++ocannl_l__) %s[ocannl_l__] = %s(%s[ocannl_l__], %s[ocannl_l__], %s[ocannl_l__]);"
+                                    lanes nr fma_fn na nb nc)
+                            ^^ hardline ^^ string "#endif");
+                          string nr
+                      | Unop (Ops.Identity, (a, pa)) -> vec_expr a pa
+                      | Unop (Ops.Neg, (a, pa)) -> parens (string "-" ^^ vec_expr a pa)
+                      | _ -> raise Bail
+                  and vec_operand (llsc : Low_level.scalar_t) (p : Ops.prec) : PPrint.document =
+                    (* A vector-typed rendering even for lane-uniform values: initializers and
+                       builtin arguments need a vector, where the implicit vector-scalar splat of
+                       binary operators does not apply. *)
+                    if scalar_mentions llsc then vec_expr llsc p
+                    else string ("((" ^ vtyp ^ "){0} + ") ^^ uniform_scalar llsc ^^ string ")"
+                  in
+                  List.iter sets ~f:(fun (tn, idcs, llsc) ->
+                      if not (contiguous idcs) then raise Bail;
+                      let rhs = vec_operand llsc prec in
+                      let vname = fresh "vset" in
+                      emit (string (vtyp ^ " " ^ vname ^ " = ") ^^ rhs ^^ semi);
+                      emit
+                        (string "__builtin_memcpy(&" ^^ string (get_ident tn)
+                        ^^ brackets (pp_array_offset (idcs, Lazy.force tn.Tn.dims))
+                        ^^ string (", &" ^ vname ^ ", sizeof(" ^ vname ^ "));")));
+                  string
+                    (Printf.sprintf "typedef %s %s __attribute__((vector_size(%d)));"
+                       (B.typ_of_prec prec) vtyp
+                       (lanes * Ops.prec_in_bytes prec))
+                  ^^ hardline
+              | `Packed_struct ->
+                  (* GPU 128-bit packed loads/stores (gh-ocannl-463; llm.c's Packed128): the
+                     backend's aligned pack aggregate is loaded/stored via [reinterpret_cast] —
+                     one 128-bit memory transaction — while the arithmetic stays scalar in a
+                     per-lane loop over the pack's [.v] payload (per-lane [fmaf]/[fma] keeps the
+                     serial path's rounding). Sound only at provably lane-aligned offsets of
+                     device-resident buffers, hence the extra eligibility checks. *)
+                  let vtyp =
+                    match B.vec_typ_of_prec ~length:lanes prec with
+                    | s -> s
+                    | exception _ -> raise Bail
+                  in
+                  (* The flat offset must stay a lane multiple whenever the loop index is one:
+                     components before the last contribute stride multiples of [dims.(n - 1)], so
+                     the last dimension must be a lane multiple (unless the access is 1-D), and
+                     the last component's constant offset and non-index coefficients must be lane
+                     multiples. Buffer bases and pool offsets are [Ops.buffer_alignment >= 16]
+                     aligned, so lane-multiple element offsets are 16-byte-aligned addresses. *)
+                  let lane_aligned tn idcs =
+                    let dims = Lazy.force tn.Tn.dims in
+                    let n = Array.length idcs in
+                    n > 0
+                    && (n = 1 || dims.(n - 1) % lanes = 0)
+                    &&
+                    match idcs.(n - 1) with
+                    | Indexing.Iterator _ -> true
+                    | Indexing.Affine { symbols; offset } ->
+                        offset % lanes = 0
+                        && List.for_all symbols ~f:(fun (c, s) ->
+                               Indexing.equal_symbol s i || c % lanes = 0)
+                    | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
+                  in
+                  let eligible tn idcs =
+                    contiguous idcs && lane_aligned tn idcs
+                    && Tn.Placements.is_materialized_force (placements ()) tn 463
+                    (* Stack and workgroup-shared arrays are only element-aligned. *)
+                    && not (Set.mem !current_workgroup_shared tn)
+                  in
+                  let vload tn idcs =
+                    if not (eligible tn idcs) then raise Bail;
+                    check_read tn idcs;
+                    let name = fresh "vget" in
+                    emit
+                      (string
+                         (Printf.sprintf "const %s %s = *reinterpret_cast<%sconst %s*>(&" vtyp
+                            name B.buffer_prefix vtyp)
+                      ^^ string (get_ident tn)
+                      ^^ brackets (pp_array_offset (idcs, Lazy.force tn.Tn.dims))
+                      ^^ string ");");
+                    name
+                  in
+                  let lane_var = "ocannl_l__" in
+                  let rec lane_expr (llsc : Low_level.scalar_t) (p : Ops.prec) : PPrint.document =
+                    if not (scalar_mentions llsc) then uniform_scalar llsc
+                    else if not (Ops.equal_prec p prec) then raise Bail
+                    else
+                      match llsc with
+                      | Low_level.Get (tn, idcs) ->
+                          if not (Ops.equal_prec (Lazy.force tn.Tn.prec) prec) then raise Bail;
+                          string (vload tn idcs ^ ".v[" ^ lane_var ^ "]")
+                      | Binop (((Ops.Add | Ops.Sub | Ops.Mul | Ops.Div) as op), (a, pa), (b, pb))
+                        ->
+                          B.binop_syntax prec op (lane_expr a pa) (lane_expr b pb)
+                      | Ternop (Ops.FMA, (a, pa), (b, pb), (c, pc)) ->
+                          B.ternop_syntax prec Ops.FMA (lane_expr a pa) (lane_expr b pb)
+                            (lane_expr c pc)
+                      | Unop (Ops.Identity, (a, pa)) -> lane_expr a pa
+                      | Unop (Ops.Neg, (a, pa)) -> parens (string "-" ^^ lane_expr a pa)
+                      | _ -> raise Bail
+                  in
+                  List.iter sets ~f:(fun (tn, idcs, llsc) ->
+                      if not (eligible tn idcs) then raise Bail;
+                      let rhs = lane_expr llsc prec in
+                      let vname = fresh "vset" in
+                      emit (string (vtyp ^ " " ^ vname ^ ";"));
+                      emit
+                        (string
+                           (Printf.sprintf "for (int %s = 0; %s < %d; ++%s) { %s.v[%s] = "
+                              lane_var lane_var lanes lane_var vname lane_var)
+                        ^^ rhs ^^ string "; }");
+                      emit
+                        (string (Printf.sprintf "*reinterpret_cast<%s%s*>(&" B.buffer_prefix vtyp)
+                        ^^ string (get_ident tn)
+                        ^^ brackets (pp_array_offset (idcs, Lazy.force tn.Tn.dims))
+                        ^^ string (") = " ^ vname ^ ";")));
+                  empty
             in
-            List.iter sets ~f:(fun (tn, idcs, llsc) ->
-                if not (contiguous idcs) then raise Bail;
-                let rhs = vec_operand llsc prec in
-                let vname = fresh "vset" in
-                emit (string (vtyp ^ " " ^ vname ^ " = ") ^^ rhs ^^ semi);
-                emit
-                  (string "__builtin_memcpy(&" ^^ string (get_ident tn)
-                  ^^ brackets (pp_array_offset (idcs, Lazy.force tn.Tn.dims))
-                  ^^ string (", &" ^ vname ^ ", sizeof(" ^ vname ^ "));")));
             let ivar = symbol_ident i in
             let it = B.loop_index_type in
             let body_vec = separate hardline (List.rev !stmts_docs) in
@@ -1063,12 +1174,7 @@ module C_syntax (B : C_syntax_config) = struct
                  (Printf.sprintf "{ /* Vectorized rendering: %d lanes of %s. */" lanes
                     (B.typ_of_prec prec))
               ^^ nest 2
-                   (hardline
-                   ^^ string
-                        (Printf.sprintf "typedef %s %s __attribute__((vector_size(%d)));"
-                           (B.typ_of_prec prec) vtyp
-                           (lanes * Ops.prec_in_bytes prec))
-                   ^^ hardline
+                   (hardline ^^ prelude
                    ^^ string (Printf.sprintf "%s%s = 0;" it ivar)
                    ^^ hardline
                    ^^ string
