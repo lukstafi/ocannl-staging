@@ -926,6 +926,7 @@ struct
     let cos ?label t = cos ?label t ()
     let neg ?label t = neg ?label t ()
     let sqrt ?label t = sqrt ?label t ()
+    let stop_gradient ?label t = stop_gradient ?label t ()
     let recip ?label t = recip ?label t ()
     let recip_sqrt ?label t = recip_sqrt ?label t ()
     let tanh ?label t = tanh ?label t ()
