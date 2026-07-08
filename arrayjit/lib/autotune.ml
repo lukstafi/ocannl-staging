@@ -495,8 +495,8 @@ let collect_serial_triples registry llc =
 let split_factors = [ 2; 4; 8; 16; 32 ]
 let max_actions_per_unit = 48
 
-let menu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) (u : unit_gen) : SC.saved_optop list
-    =
+let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) (u : unit_gen) :
+    SC.saved_optop list =
   let loops = collect_loops u.u_registry u.u_opt.LL.llc in
   let splits =
     List.concat_map loops ~f:(fun ld ->
@@ -523,7 +523,11 @@ let menu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) (u : unit_gen) : SC
         else [])
   in
   let vectorizes =
-    if not is_cpu then []
+    (* CPU renders eligible retyped loops via vector extensions (or vectorization pragmas); GPU
+       backends render them as 128-bit packed loads/stores (gh-ocannl-463). Ineligible candidates
+       fall back to plain serial loops, so a proposal that fails codegen eligibility merely times
+       like the baseline. *)
+    if not (is_cpu || is_gpu) then []
     else
       List.filter_map loops ~f:(fun ld ->
           if
@@ -731,7 +735,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
         let cands =
           List.concat_map !beam ~f:(fun (elem, _) ->
               List.concat_map elem.units ~f:(fun u ->
-                  List.filter_map (menu ~is_cpu ~limits u) ~f:(extend_spec elem u)))
+                  List.filter_map (menu ~is_cpu ~is_gpu ~limits u) ~f:(extend_spec elem u)))
         in
         let results = List.sort (List.filter_map cands ~f:try_spec) ~compare:by_time in
         match results with

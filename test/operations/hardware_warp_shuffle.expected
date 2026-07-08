@@ -1,0 +1,10 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+serial sum correct: true
+warp-shuffle sum parity: true
+two-phase shuffle rendering (GPU) or serial fallback (CPU): true
+warp-shuffle fma dot parity: true
+single-warp shuffle rendering (GPU) or serial fallback (CPU): true
+warp-shuffle max parity: true
+non-warp-multiple extent rejected (GPU) or runs serially (CPU): true
+guarded smaller-extent accumulation rejected (GPU) or runs serially (CPU): true

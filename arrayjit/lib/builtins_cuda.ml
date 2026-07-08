@@ -4,8 +4,22 @@ let builtins =
     ("uint4x32_t", {|typedef struct {
     unsigned int v[4];
 } uint4x32_t;|}, []);
-    ("float4_t", {|typedef struct { float v[4]; } float4_t;|}, []);
-    ("double2_t", {|typedef struct { double v[2]; } double2_t;|}, []);
+    (* The 16-byte alignment lets the [Vectorized] packed rendering (gh-ocannl-463) load/store
+       these through [reinterpret_cast] as single 128-bit transactions (llm.c's Packed128); it is
+       harmless for the value-typed [Set_from_vec] uses. *)
+    ("float4_t", {|typedef struct __align__(16) { float v[4]; } float4_t;|}, []);
+    ("double2_t", {|typedef struct __align__(16) { double v[2]; } double2_t;|}, []);
+    ( "ocannl_shfl_xor",
+      (* Butterfly warp shuffle for the [Workgroup_reduce] warp-shuffle rendering
+         (gh-ocannl-462). The full mask is sound because the rendering requires the reduce axis to
+         cover whole warps of the block's .x dimension, so every lane reaches the call. *)
+      {|__device__ __forceinline__ float ocannl_shfl_xor(float v, int lane_mask) {
+  return __shfl_xor_sync(0xffffffffu, v, lane_mask);
+}
+__device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
+  return __shfl_xor_sync(0xffffffffu, v, lane_mask);
+}|},
+      [] );
     ("int32x4_t", {|typedef struct { int v[4]; } int32x4_t;|}, []);
     ("int64x2_t", {|typedef struct { long long v[2]; } int64x2_t;|}, []);
     ("int8x16_t", {|typedef struct { signed char v[16]; } int8x16_t;|}, []);

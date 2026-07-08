@@ -1014,6 +1014,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name hardware_warp_shuffle)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules hardware_warp_shuffle)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name cpu_vectorized)
  (package neural_nets_lib)
  (deps
