@@ -80,7 +80,7 @@ opam install cudajit  # for CUDA backend
    - Einsum notation supports convolutions, reductions, and arbitrary permutations
    - "Principle of least commitment": use row variables where axis count doesn't matter
    - Shape inference completion is forced by lowering: via `Context.compile`, or wrappers such as `Train.to_routine`, `Train.run_once` or `Train.forward_once`
-   - Operations in `Operation`, `TDSL`, `NTDSL`, `PDSL` return functions with `Tensor.op_fun` type, so that shapes can be specified at call sites if needed
+   - Operations in `Operation`, `TDSL`, `NTDSL` return functions with `Tensor.op_fun` type, so that shapes can be specified at call sites if needed
    -  Operations in `TDSL.O` (opened for `%op`), `NTDSL.O` (opened for `%cd`) hide this so that shapes have to be inferred
    
 3. **Backend Architecture**: Unified interface supporting CPU (multicore), CUDA, and Metal backends
@@ -122,14 +122,15 @@ opam install cudajit  # for CUDA backend
 
 **Module Paths and Common APIs**:
 
-- **For files outside OCANNL implementation (tests, examples, user code), always start with `open Ocannl.Operation.DSL_modules`** - this brings all DSL modules into scope (defined in `tensor/operation.ml` lines 720-737)
+- **For files outside OCANNL implementation (tests, examples, user code), always start with `open Ocannl.Operation.DSL_modules`** - this brings all DSL modules into scope (defined near the end of `tensor/operation.ml`)
 - Available modules after `open Ocannl.Operation.DSL_modules`:
   - `Ir` - Low-level IR types and operations (Ndarray, Ops, Tnode, etc.)
+  - `Row` - Row variables for shape inference
   - `Shape` - Shape inference and einsum notation
   - `Tensor` - Core tensor type and operations
   - `TDSL` - Tensor DSL with automatic differentiation (grad_spec: If_needed)
   - `NTDSL` - No-gradient tensor DSL (grad_spec: Prohibit_grad)
-  - `PDSL` - Parameter/gradient-required DSL (grad_spec: Require_grad)
+- There is no `PDSL` (Require_grad DSL). To build a differentiable leaf tensor with concrete values (e.g. in tests), pass the grad spec explicitly: `Operation.init ~l ~prec ~b ~o ~f ~grad_spec:Tensor.Require_grad ()` or `Tensor.term_init values ~grad_spec:Require_grad ()` (1-D); see `test/training/fused_classifier.ml`, `test/operations/primitive_ops.ml`
 - Precision values: `Ir.Ops.single`, `Ir.Ops.double`, `Ir.Ops.half` (lowercase)
 - Tensor printing in expect tests: `Tensor.print ~here:[%here] ~force:false ~with_code:false ~with_grad:false \`Inline tensor`
 - For simple test executables, use `(libraries base ocannl stdio)` in dune file
