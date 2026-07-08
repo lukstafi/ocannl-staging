@@ -411,6 +411,11 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     let shared_decl_prefix = Some "__shared__ "
     let restrict_keyword = Some "__restrict__"
 
+    (* Warp-shuffle rendering of [Workgroup_reduce] accumulation loops (gh-ocannl-462):
+       [ocannl_shfl_xor] wraps [__shfl_xor_sync] (builtins_cuda.ml). All supported devices have
+       32-wide warps. *)
+    let warp_size = 32
+
     (* No vectorization pragmas in device code — SIMD-style gains on GPU come from memory
        transactions (float4/packed loads), a follow-up to gh-ocannl-164; [Vectorized] loops render
        as plain serial loops. Local arrays live in registers/local memory; no alignment attribute

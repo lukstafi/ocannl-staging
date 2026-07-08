@@ -176,6 +176,14 @@ using namespace metal;|}, []);
       [ "arrayjit_threefry4x32_light" ] );
     ("float4_t", {|struct float4_t { float4 v; };|}, []);
     ("float2_t", {|struct float2_t { float2 v; };|}, []);
+    ( "ocannl_shfl_xor",
+      (* Butterfly simdgroup shuffle for the [Workgroup_reduce] warp-shuffle rendering
+         (gh-ocannl-462): the rendering requires the reduce axis to cover whole simdgroups of the
+         threadgroup's .x dimension, so every lane reaches the call. *)
+      {|inline float ocannl_shfl_xor(float v, ushort lane_mask) {
+    return simd_shuffle_xor(v, lane_mask);
+}|},
+      [] );
     ("int32x4_t", {|struct int32x4_t { int4 v; };|}, []);
     ("int64x2_t", {|struct int64x2_t { int64_t v[2]; };|}, []);
     ("uint64x2_t", {|struct uint64x2_t { uint64_t v[2]; };|}, []);

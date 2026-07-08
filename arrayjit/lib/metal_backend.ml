@@ -500,6 +500,11 @@ module Impl = struct
     let barrier_syntax = Some "threadgroup_barrier(mem_flags::mem_threadgroup);"
     let shared_decl_prefix = Some "threadgroup "
 
+    (* Warp-shuffle rendering of [Workgroup_reduce] accumulation loops (gh-ocannl-462):
+       [ocannl_shfl_xor] wraps [simd_shuffle_xor] (builtins_metal.ml). Apple-silicon simdgroups
+       are 32 threads wide (the same width [mma_syntax] relies on). *)
+    let warp_size = 32
+
     (* MSL is Clang-based C++: [__restrict] applies to the pooled per-node pointers, which address
        disjoint slab sub-ranges (gh-ocannl-164). No vectorization pragmas / stack-array alignment:
        the GPU payoff is memory transactions, a follow-up. *)

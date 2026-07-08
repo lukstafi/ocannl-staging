@@ -127,6 +127,16 @@ module type C_syntax_config = sig
       [__attribute__((aligned(32)))] (gh-ocannl-164). Applies to the plain stack-array branch only,
       never to workgroup-shared placements. *)
 
+  val warp_size : int
+  (** SIMD-group (warp) width for the warp-shuffle rendering of [Workgroup_reduce] accumulation
+      loops (gh-ocannl-462; llm.c's [warpReduceSum]/[blockReduce] idiom). Backends setting this to
+      a nonzero power of two must define [ocannl_shfl_xor(value, lane_mask)] overloads in their
+      builtins for the supported accumulator precisions (single, and double where it exists), bind
+      workgroup slot 0 in [hardware_index], and provide [barrier_syntax] plus [shared_decl_prefix]
+      (needed by the two-phase multi-warp form). [0] disables the rendering: [Workgroup_reduce]
+      loops render like [Workgroup] — hardware binding, or the serial fallback (which is the
+      correct meaning of a recognized accumulation body on CPU backends). *)
+
   val mma_syntax :
     (d_prec:Ops.prec ->
     a_prec:Ops.prec ->
@@ -220,6 +230,10 @@ struct
 
   let aligned_local_attr =
     Some (Printf.sprintf "__attribute__((aligned(%d)))" Ops.buffer_alignment)
+
+  (* No shuffle intrinsics on plain C backends: a [Workgroup_reduce] accumulation loop renders as
+     the serial fallback, which is exactly its serial meaning. *)
+  let warp_size = 0
 
   (* No tile-MMA units on plain C backends: [Tile_mma] renders its scalar fallback under the
      [lane == 0] guard. *)
@@ -1068,11 +1082,243 @@ module C_syntax (B : C_syntax_config) = struct
               ^^ hardline ^^ string "}")
           with Bail -> None
         in
+        (* Warp-shuffle rendering of a [Workgroup_reduce] accumulation loop (gh-ocannl-462;
+           llm.c's [warpReduceSum] / [blockReduce] idiom, llmc/cuda_utils.cuh). Recognizes a body
+           that is a single accumulation statement [acc[idcs] = op(acc[idcs], contrib)] (or its
+           FMA form [acc = FMA(a, b, acc)]) where [idcs] does not mention the loop index and [op]
+           is an associative-commutative reduction — such a body IS the loop's serial meaning, so
+           backends without shuffle support ([warp_size = 0]) render it with the ordinary
+           fallbacks. With shuffle support the loop renders as: every thread computes its
+           contribution, a log2(warp) [ocannl_shfl_xor] tree reduces within each warp, then (for
+           multi-warp extents) lane 0 of each warp stages one value in a workgroup-shared slot, a
+           barrier, and the first warp shuffle-reduces the per-warp partials — thread 0 finally
+           folds the total into the accumulator (reassociation is the annotation's license, like
+           [Vectorized]). This halves the shared-memory traffic and barrier count of the
+           explicitly staged tree, which remains supported: unrecognized bodies keep the
+           [Workgroup]-style hardware binding and their own staging and barriers.
+
+           The multi-warp phase needs no identity constant: [num_warps] must be a power of two,
+           and XOR with offsets [< num_warps] maps lanes [< num_warps] onto themselves, so the
+           garbage held by lanes [>= num_warps] never mixes into the reduced prefix.
+
+           A recognized accumulation that cannot be rendered (extent not covering whole warps,
+           reduce axis not at workgroup slot 0, ...) raises: binding the index like a plain
+           [Workgroup] axis would make every thread race the read-modify-write. *)
+        let try_warp_reduce () : PPrint.document option =
+          if B.warp_size <= 0 then None
+          else
+            let mentions_comp (idx : Indexing.axis_index) =
+              match idx with
+              | Indexing.Iterator s -> Indexing.equal_symbol s i
+              | Indexing.Affine { symbols; _ } ->
+                  List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s i)
+              | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
+            in
+            let rec touches_tn tn (llsc : Low_level.scalar_t) =
+              match llsc with
+              | Low_level.Get (tn2, _) | Get_merge_buffer (tn2, _) -> Tn.equal tn tn2
+              | Get_dynamic { tn = tn2; dyn_value = v, _; _ } ->
+                  Tn.equal tn tn2 || touches_tn tn v
+              | Local_scope { body; _ } -> body_touches tn body
+              | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ -> false
+              | Ternop (_, (a, _), (b, _), (c, _)) ->
+                  touches_tn tn a || touches_tn tn b || touches_tn tn c
+              | Binop (_, (a, _), (b, _)) -> touches_tn tn a || touches_tn tn b
+              | Unop (_, (a, _)) -> touches_tn tn a
+            and body_touches tn (llc : Low_level.t) =
+              match llc with
+              | Low_level.Noop | Comment _ | Staged_compilation _ | Workgroup_barrier
+              | Declare_local _ ->
+                  false
+              | Seq (a, b) -> body_touches tn a || body_touches tn b
+              | For_loop { body; _ } -> body_touches tn body
+              | If { cond = c, _; body } -> touches_tn tn c || body_touches tn body
+              | Zero_out tn2 -> Tn.equal tn tn2
+              | Set { tn = tn2; llsc; _ } -> Tn.equal tn tn2 || touches_tn tn llsc
+              | Set_from_vec { tn = tn2; arg = a, _; _ } -> Tn.equal tn tn2 || touches_tn tn a
+              | Set_local (_, llsc) -> touches_tn tn llsc
+              | Tile_mma { d = d_tn, _; a = a_tn, _; b = b_tn, _; _ } ->
+                  Tn.equal tn d_tn || Tn.equal tn a_tn || Tn.equal tn b_tn
+            in
+            let stmts =
+              List.filter (Low_level.flat_lines [ body ]) ~f:(function
+                | Low_level.Noop | Comment _ -> false
+                | _ -> true)
+            in
+            let recognized =
+              match stmts with
+              | [ Low_level.Set { tn; idcs; llsc; _ } ]
+                when not (Array.exists idcs ~f:mentions_comp) -> (
+                  let is_acc s = Low_level.equal_scalar_t s (Low_level.Get (tn, idcs)) in
+                  let reduce_op = function
+                    | Ops.Add | Ops.Mul | Ops.Max | Ops.Min -> true
+                    | _ -> false
+                  in
+                  match llsc with
+                  | Binop (op, (a, _), (b, _))
+                    when reduce_op op && is_acc a && not (touches_tn tn b) ->
+                      Some (tn, idcs, op, b)
+                  | Binop (op, (a, _), (b, _))
+                    when reduce_op op && is_acc b && not (touches_tn tn a) ->
+                      Some (tn, idcs, op, a)
+                  | Ternop (Ops.FMA, (a, pa), (b, pb), (c, _))
+                    when is_acc c && (not (touches_tn tn a)) && not (touches_tn tn b) ->
+                      Some (tn, idcs, Ops.Add, Low_level.Binop (Ops.Mul, (a, pa), (b, pb)))
+                  | _ -> None)
+              | _ -> None
+            in
+            match recognized with
+            | None -> None
+            | Some (tn, idcs, op, contrib) ->
+                let fail msg =
+                  invalid_arg
+                    ("C_syntax.pp_ll: Workgroup_reduce loop " ^ symbol_ident i
+                   ^ " is a recognized accumulation, but the warp-shuffle rendering requires "
+                   ^ msg ^ " (a plain hardware binding would race the accumulator update)")
+                in
+                let warp = B.warp_size in
+                assert (warp > 1 && Int.is_pow2 warp);
+                let extent = to_ - from_ + 1 in
+                let prec = Lazy.force tn.Tn.prec in
+                (match prec with
+                | Ops.Single_prec _ | Ops.Double_prec _ -> ()
+                | _ -> fail "a single- or double-precision accumulator");
+                if Utils.debug_log_from_routines () then
+                  fail "debug_log_from_routines to be disabled";
+                if extent % warp <> 0 then
+                  fail
+                    (Printf.sprintf "the extent (%d) to be a multiple of the warp size (%d)"
+                       extent warp);
+                let num_warps = extent / warp in
+                let axes = !current_hardware_axes in
+                (match
+                   List.find axes ~f:(fun a -> Indexing.equal_symbol a.Low_level.ha_index i)
+                 with
+                | Some a when a.Low_level.ha_slot = 0 -> ()
+                | Some _ ->
+                    fail
+                      "the reduce axis at workgroup slot 0 (warp lanes are consecutive .x \
+                       threads)"
+                | None ->
+                    invalid_arg
+                      ("C_syntax.pp_ll: hardware-annotated loop " ^ symbol_ident i
+                     ^ " missing from the slot table (pp_ll called outside compile_proc?)"));
+                let slot_max =
+                  List.fold axes ~init:1 ~f:(fun m a ->
+                      match a.Low_level.ha_kind with
+                      | `Workgroup when a.Low_level.ha_slot = 0 -> max m a.Low_level.ha_extent
+                      | _ -> m)
+                in
+                if extent <> slot_max then
+                  fail
+                    "the extent to cover the whole workgroup .x dimension (a smaller sibling \
+                     extent would diverge the shuffles)";
+                let reg =
+                  match B.hardware_index ~kind:`Workgroup ~slot:0 with
+                  | Some reg -> reg
+                  | None -> fail "the backend to bind workgroup slot 0"
+                in
+                if num_warps > 1 then (
+                  if not (Int.is_pow2 num_warps) then
+                    fail "a power-of-two number of warps (for the identity-free second phase)";
+                  if num_warps > warp then
+                    fail "at most warp-size warps (one second-phase slot per warp)";
+                  if Option.is_none B.barrier_syntax || Option.is_none B.shared_decl_prefix then
+                    fail "barrier and workgroup-shared support";
+                  if
+                    List.exists axes ~f:(fun a ->
+                        match a.Low_level.ha_kind with
+                        | `Workgroup -> not (Indexing.equal_symbol a.Low_level.ha_index i)
+                        | `Grid -> false)
+                  then
+                    fail
+                      "the reduce axis to be the only workgroup axis (the per-warp staging \
+                       slots are not replicated per sibling workgroup thread)");
+                let ident = symbol_ident i in
+                let ctyp = B.typ_of_prec prec in
+                let cast = "(" ^ String.strip B.loop_index_type ^ ")" in
+                let vname = "wred_v_" ^ ident ^ "__" in
+                let combine a b = B.binop_syntax prec op a b in
+                let rec halvings n = if n < 1 then [] else n :: halvings (n / 2) in
+                let shuffle_stage off =
+                  string (vname ^ " = ")
+                  ^^ combine (string vname)
+                       (string (Printf.sprintf "ocannl_shfl_xor(%s, %d)" vname off))
+                  ^^ semi
+                in
+                let acc_doc =
+                  string (get_ident tn) ^^ brackets (pp_array_offset (idcs, Lazy.force tn.Tn.dims))
+                in
+                let fold_total =
+                  group
+                    (string "if (" ^^ pp_symbol i ^^ string " == 0) " ^^ lbrace
+                    ^^ nest 2
+                         (hardline ^^ acc_doc ^^ string " = "
+                         ^^ combine acc_doc (string vname)
+                         ^^ semi)
+                    ^^ hardline ^^ rbrace)
+                in
+                let tail =
+                  if num_warps = 1 then fold_total
+                  else
+                    let pname = "wred_partials_" ^ ident ^ "__" in
+                    let barrier = string (Option.value_exn B.barrier_syntax) in
+                    string
+                      (Printf.sprintf "%s%s %s[%d];"
+                         (Option.value_exn B.shared_decl_prefix)
+                         ctyp pname num_warps)
+                    ^^ hardline
+                    ^^ string
+                         (Printf.sprintf "if ((%s & %d) == 0) { %s[%s >> %d] = %s; }" ident
+                            (warp - 1) pname ident (Int.ceil_log2 warp) vname)
+                    ^^ hardline ^^ barrier ^^ hardline
+                    ^^ group
+                         (string (Printf.sprintf "if (%s < %d) " ident warp)
+                         ^^ lbrace
+                         ^^ nest 2
+                              (hardline
+                              ^^ string
+                                   (Printf.sprintf "if (%s < %d) { %s = %s[%s]; }" ident
+                                      num_warps vname pname ident)
+                              ^^ hardline
+                              ^^ separate hardline
+                                   (List.map (halvings (num_warps / 2)) ~f:shuffle_stage)
+                              ^^ hardline ^^ fold_total)
+                         ^^ hardline ^^ rbrace)
+                    ^^ hardline ^^ barrier
+                in
+                let local_defs, contrib_doc = pp_scalar prec contrib in
+                let local_defs = pp_local_defs local_defs in
+                let binding =
+                  string ("const " ^ B.loop_index_type)
+                  ^^ pp_symbol i
+                  ^^ string (" = " ^ cast ^ reg ^ ";")
+                in
+                Some
+                  (string
+                     (Printf.sprintf
+                        "{ /* Workgroup_reduce warp-shuffle rendering: extent %d = %d \
+                         simdgroup(s) of %d. */"
+                        extent num_warps warp)
+                  ^^ nest 2
+                       (hardline ^^ binding ^^ hardline
+                       ^^ (if PPrint.is_empty local_defs then empty
+                           else local_defs ^^ hardline)
+                       ^^ string (ctyp ^ " " ^ vname ^ " = ")
+                       ^^ contrib_doc ^^ semi ^^ hardline
+                       ^^ separate hardline (List.map (halvings (warp / 2)) ~f:shuffle_stage)
+                       ^^ hardline ^^ tail)
+                  ^^ hardline ^^ rbrace)
+        in
         match axis with
         | Low_level.Serial -> serial_loop ()
         | Grid when Set.mem !current_parallel_grid i -> parallel_grid_loop ()
         | Grid -> hardware_binding `Grid
-        | Workgroup | Workgroup_reduce -> hardware_binding `Workgroup
+        | Workgroup -> hardware_binding `Workgroup
+        | Workgroup_reduce -> (
+            match try_warp_reduce () with
+            | Some doc -> doc
+            | None -> hardware_binding `Workgroup)
         | Vectorized -> (
             match try_vectorize () with
             | Some doc -> doc

@@ -33,15 +33,20 @@ let get_scope =
 (** How a loop's iterations map to hardware; see docs/proposals/axis-types-for-loops.md. [Serial] is
     an ordinary for-loop. [Grid] / [Workgroup] bind the loop index to a GPU grid / workgroup (block,
     threadgroup) hardware index instead of looping; [Workgroup_reduce] is a [Workgroup] axis
-    participating in a shared-memory reduction (distinguished for schedule transforms and
-    validation, rendered like [Workgroup]). [Unrolled] is emitted as the repeated body with
+    participating in a workgroup-cooperative reduction (see the contract below). [Unrolled] is
+    emitted as the repeated body with
     substituted constants. [Vectorized] renders as a serial loop annotated with the backend's
     vectorization pragmas when it provides them (gh-ocannl-164; a plain serial loop otherwise) —
     like the hardware kinds, the annotating pass asserts iteration independence. Hardware slots are
     positional: among a kernel's loops of one kind, the innermost binds [.x], then [.y], [.z].
-    Annotated loops must have [from_ = 0] and iterations with no cross-iteration dependencies
-    ([Workgroup_reduce] excepted: its communication must be staged through workgroup-shared nodes
-    and barriers). *)
+    Annotated loops must have [from_ = 0] and iterations with no cross-iteration dependencies.
+    [Workgroup_reduce] is the labelled exception; its body must either stage its communication
+    explicitly through workgroup-shared nodes and barriers (rendered by binding the index like
+    [Workgroup]), or be a single accumulation statement [acc = op(acc, contrib)] over an
+    associative-commutative [op] with the accumulator's indices free of the loop index — the
+    renderer then owns the communication: warp/simdgroup shuffles on GPU backends
+    (gh-ocannl-462), the plain serial loop on CPU backends. Like [Vectorized], the annotation
+    licenses reassociating the (floating-point) reduction. *)
 type axis_type = Serial | Grid | Workgroup | Workgroup_reduce | Unrolled | Vectorized
 [@@deriving sexp, compare, equal]
 
