@@ -190,17 +190,84 @@ let () =
             debug = "";
           })
   in
+  (if on_gpu then
+     match
+       try
+         ignore (run ~name:"odd_extent_wshfl" ~transform y1 : float);
+         None
+       with Invalid_argument msg -> Some msg
+     with
+     | Some msg ->
+         p "non-warp-multiple extent rejected (GPU) or runs serially (CPU)"
+           (String.is_substring msg ~substring:"multiple of the warp size")
+     | None -> p "non-warp-multiple extent rejected (GPU) or runs serially (CPU)" false
+   else
+     p "non-warp-multiple extent rejected (GPU) or runs serially (CPU)"
+       (approx (run ~name:"odd_extent_wshfl" ~transform y1) expected_u));
+
+  (* --- A recognized accumulation sharing workgroup slot 0 with a LARGER sibling extent: on GPU
+     [guard_annotated_extents] wraps the reduce body in the synthetic [If (i < 64)] launch guard,
+     and the renderer must still see through it and reject (a plain binding would race the
+     accumulator; PR #119 review). The sibling nest is a benign self-copy of the input, so on the
+     C backends the whole kernel runs serially with a partial (first-64) sum. --- *)
+  let t = 128 in
+  let tv = Array.init t ~f:(fun k -> (Float.of_int (k % 17) *. 0.5) -. 3.) in
+  let expected_partial = Array.fold (Array.sub tv ~pos:0 ~len:64) ~init:0. ~f:( +. ) in
+  let tt = TDSL.ndarray tv ~label:[ "tt" ] ~output_dims:[ t ] () in
+  let%op z1 = tt ++ "i=>0" in
+  let sibling_transform (opt : LL.optimized) : LL.optimized =
+    (LL.get_node opt.traced_store z1.Tensor.value).LL.zero_initialized_by_code <- false;
+    let j = Idx.get_symbol () in
+    let i = Idx.get_symbol () in
+    let copy_nest =
+      LL.For_loop
+        {
+          index = j;
+          from_ = 0;
+          to_ = t - 1;
+          trace_it = false;
+          axis = Workgroup;
+          body =
+            LL.Set
+              { tn = tt.Tensor.value; idcs = [| it j |]; llsc = Get (tt.Tensor.value, [| it j |]);
+                debug = "" };
+        }
+    in
+    let reduce_nest =
+      LL.For_loop
+        {
+          index = i;
+          from_ = 0;
+          to_ = 63;
+          trace_it = false;
+          axis = Workgroup_reduce;
+          body =
+            LL.Set
+              {
+                tn = z1.Tensor.value;
+                idcs = [| f0 |];
+                llsc =
+                  Binop
+                    ( Ir.Ops.Add,
+                      (Get (z1.Tensor.value, [| f0 |]), single),
+                      (Get (tt.Tensor.value, [| it i |]), single) );
+                debug = "";
+              };
+        }
+    in
+    { opt with llc = LL.Seq (copy_nest, reduce_nest) }
+  in
   if on_gpu then
     match
       try
-        ignore (run ~name:"odd_extent_wshfl" ~transform y1 : float);
+        ignore (run ~name:"guarded_extent_wshfl" ~transform:sibling_transform z1 : float);
         None
       with Invalid_argument msg -> Some msg
     with
     | Some msg ->
-        p "non-warp-multiple extent rejected (GPU) or runs serially (CPU)"
-          (String.is_substring msg ~substring:"multiple of the warp size")
-    | None -> p "non-warp-multiple extent rejected (GPU) or runs serially (CPU)" false
+        p "guarded smaller-extent accumulation rejected (GPU) or runs serially (CPU)"
+          (String.is_substring msg ~substring:"cover the whole workgroup")
+    | None -> p "guarded smaller-extent accumulation rejected (GPU) or runs serially (CPU)" false
   else
-    p "non-warp-multiple extent rejected (GPU) or runs serially (CPU)"
-      (approx (run ~name:"odd_extent_wshfl" ~transform y1) expected_u)
+    p "guarded smaller-extent accumulation rejected (GPU) or runs serially (CPU)"
+      (approx (run ~name:"guarded_extent_wshfl" ~transform:sibling_transform z1) expected_partial)

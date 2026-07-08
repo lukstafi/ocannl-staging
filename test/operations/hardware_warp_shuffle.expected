@@ -7,3 +7,4 @@ warp-shuffle fma dot parity: true
 single-warp shuffle rendering (GPU) or serial fallback (CPU): true
 warp-shuffle max parity: true
 non-warp-multiple extent rejected (GPU) or runs serially (CPU): true
+guarded smaller-extent accumulation rejected (GPU) or runs serially (CPU): true

@@ -1251,6 +1251,31 @@ module C_syntax (B : C_syntax_config) = struct
                 | Low_level.Noop | Comment _ -> false
                 | _ -> true)
             in
+            (* When this loop's extent is smaller than its slot's launch dimension,
+               [guard_annotated_extents] has already wrapped the body in the synthetic launch
+               guard [If (i < extent)]. Strip exactly that shape — it is vacuous with respect to
+               the loop's own iteration space — so a guarded accumulation is still recognized,
+               and then rejected by the extent-coverage check below, instead of silently racing
+               under the hardware-binding fallback (PR #119 review). *)
+            let stmts =
+              match stmts with
+              | [
+               Low_level.If
+                 {
+                   cond =
+                     ( Binop
+                         (Ops.Cmplt, (Embed_index (Indexing.Iterator s), _), (Constant c, _)),
+                       _ );
+                   body = guarded;
+                 };
+              ]
+                when Indexing.equal_symbol s i
+                     && Float.equal c (Float.of_int (to_ - from_ + 1)) ->
+                  List.filter (Low_level.flat_lines [ guarded ]) ~f:(function
+                    | Low_level.Noop | Comment _ -> false
+                    | _ -> true)
+              | _ -> stmts
+            in
             let recognized =
               match stmts with
               | [ Low_level.Set { tn; idcs; llsc; _ } ]
