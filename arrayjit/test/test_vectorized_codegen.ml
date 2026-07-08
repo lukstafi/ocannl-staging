@@ -244,6 +244,125 @@ let () =
   PPrint.ToChannel.pretty 0.9 100 Stdio.stdout doc6;
   Stdio.printf "\n";
 
+  (* --- SIMD reduction rendering (gh-ocannl-468): an FMA-form dot-product accumulation renders
+     as 4 independent accumulator chains (ggml's ggml_vec_dot_f32 pattern) initialized from the
+     first 4 blocks, a fused main loop advancing by 32, a register + lane fold into the
+     accumulator, and a serial tail. --- *)
+  let make_sized id label dims =
+    let tn =
+      Tn.create (Tn.Default Ops.single) ~id ~label:[ label ]
+        ~unpadded_dims:(lazy dims)
+        ~padding:(lazy None)
+        ()
+    in
+    Tn.update_memory_mode tn Tn.On_device 996;
+    tn
+  in
+  let da = make_sized 14 "da" [| 72 |] in
+  let db = make_sized 15 "db" [| 72 |] in
+  let dacc = make_sized 16 "dacc" [| 1 |] in
+  let i = Idx.get_symbol () in
+  let dot_red =
+    LL.For_loop
+      {
+        index = i;
+        from_ = 0;
+        to_ = 71;
+        trace_it = false;
+        axis = LL.Vectorized;
+        body =
+          LL.Set
+            {
+              tn = dacc;
+              idcs = [| Idx.Fixed_idx 0 |];
+              llsc =
+                LL.Ternop
+                  ( Ops.FMA,
+                    (LL.Get (da, [| Idx.Iterator i |]), Ops.single),
+                    (LL.Get (db, [| Idx.Iterator i |]), Ops.single),
+                    (LL.Get (dacc, [| Idx.Fixed_idx 0 |]), Ops.single) );
+              debug = "";
+            };
+      }
+  in
+  let doc7 =
+    compile_with_vector_config ~name:"vec_dot_reduce_kernel"
+      (make_optimized dot_red [ da; db; dacc ])
+  in
+  PPrint.ToChannel.pretty 0.9 100 Stdio.stdout doc7;
+  Stdio.printf "\n";
+
+  (* --- A max-reduce over extent 16 clamps to 2 chains; the combines and folds go through the
+     per-lane fmaxf loops (no vector infix for Max), keeping the scalar path's NaN semantics. --- *)
+  let ma = make_sized 17 "ma" [| 16 |] in
+  let macc = make_sized 18 "macc" [| 1 |] in
+  let i = Idx.get_symbol () in
+  let max_red =
+    LL.For_loop
+      {
+        index = i;
+        from_ = 0;
+        to_ = 15;
+        trace_it = false;
+        axis = LL.Vectorized;
+        body =
+          LL.Set
+            {
+              tn = macc;
+              idcs = [| Idx.Fixed_idx 0 |];
+              llsc =
+                LL.Binop
+                  ( Ops.Max,
+                    (LL.Get (macc, [| Idx.Fixed_idx 0 |]), Ops.single),
+                    (LL.Get (ma, [| Idx.Iterator i |]), Ops.single) );
+              debug = "";
+            };
+      }
+  in
+  let doc8 =
+    compile_with_vector_config ~name:"vec_max_reduce_kernel"
+      (make_optimized max_red [ ma; macc ])
+  in
+  PPrint.ToChannel.pretty 0.9 100 Stdio.stdout doc8;
+  Stdio.printf "\n";
+
+  (* --- An accumulating body the explicit renderings decline (strided, non-contiguous contrib)
+     must fall back to a plain serial loop with NO vectorization pragma: the pragma would assert
+     iteration independence that the loop-carried accumulation does not satisfy. Under
+     Pure_C_config the pragmas are otherwise emitted (see the first kernel above). --- *)
+  let sa = make_sized 19 "sa" [| 16 |] in
+  let sacc = make_sized 20 "sacc" [| 1 |] in
+  let i = Idx.get_symbol () in
+  let strided_red =
+    LL.For_loop
+      {
+        index = i;
+        from_ = 0;
+        to_ = 7;
+        trace_it = false;
+        axis = LL.Vectorized;
+        body =
+          LL.Set
+            {
+              tn = sacc;
+              idcs = [| Idx.Fixed_idx 0 |];
+              llsc =
+                LL.Binop
+                  ( Ops.Add,
+                    (LL.Get (sacc, [| Idx.Fixed_idx 0 |]), Ops.single),
+                    (LL.Get (sa, [| Idx.Affine { symbols = [ (2, i) ]; offset = 0 } |]), Ops.single)
+                  );
+              debug = "";
+            };
+      }
+  in
+  let doc9 =
+    compile_with_pure_config ~name:"vec_strided_reduce_kernel"
+      (make_optimized strided_red [ sa; sacc ])
+  in
+  PPrint.ToChannel.pretty 0.9 100 Stdio.stdout doc9;
+  Stdio.printf "\n";
+
   (* --- An alias view as a would-be kernel parameter must be rejected loudly. --- *)
   let parent = make_on_device 5 "parent" in
   let view = make_on_device 6 "view" in

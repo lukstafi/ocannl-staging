@@ -23,11 +23,16 @@ val get_scope : Tnode.t -> scope_id
     threadgroup) hardware index instead of looping; [Workgroup_reduce] is a [Workgroup] axis
     participating in a workgroup-cooperative reduction (see the contract below). [Unrolled] is
     emitted as the repeated body with
-    substituted constants. [Vectorized] renders as a serial loop annotated with the backend's
-    vectorization pragmas when it provides them (gh-ocannl-164; a plain serial loop otherwise) —
-    like the hardware kinds, the annotating pass asserts iteration independence. Hardware slots are
-    positional: among a kernel's loops of one kind, the innermost binds [.x], then [.y], [.z].
-    Annotated loops must have [from_ = 0] and iterations with no cross-iteration dependencies.
+    substituted constants. [Vectorized] renders eligible bodies as explicit SIMD code — elementwise
+    statements via vector extensions / packed loads (gh-ocannl-164 / gh-ocannl-463), a single
+    recognized accumulation as independent accumulator chains with a horizontal reduce at exit on
+    CPU backends (gh-ocannl-468) — and everything else as a serial loop annotated with the
+    backend's vectorization pragmas when it provides them (a plain, un-annotated serial loop for
+    accumulating bodies, whose loop-carried dependency the pragmas would deny) — like the hardware
+    kinds, the annotating pass asserts iteration independence or, for a recognized accumulation,
+    licenses reassociating it. Hardware slots are positional: among a kernel's loops of one kind,
+    the innermost binds [.x], then [.y], [.z]. Annotated loops must have [from_ = 0] and
+    iterations with no cross-iteration dependencies ([Vectorized] accumulations again excepted).
     [Workgroup_reduce] is the labelled exception; its body must either stage its communication
     explicitly through workgroup-shared nodes and barriers (rendered by binding the index like
     [Workgroup]), or be a single accumulation statement [acc = op(acc, contrib)] over an
@@ -141,6 +146,14 @@ val loop_over_padding_region :
 (** Generate loops that iterate only over the padding margins of a tensor. For dimensions with
     padding, generates separate loops for left margin, middle (recursing), and right margin. The
     middle region continues recursing to find padding in other dimensions. *)
+
+val has_accumulation : t -> bool
+(** Whether the tree carries a read-modify-write accumulation: some [Set] (resp. [Set_local])
+    reads its own target — a loop-carried dependency through memory when the written cell does
+    not vary with an enclosing loop. Conservative: [Local_scope] contents count as reading
+    anything, and [Tile_mma] accumulates by construction. Used by the autotune menu and by
+    codegen fallbacks that must not assert iteration independence (e.g. vectorization pragmas)
+    over an accumulating body (gh-ocannl-468). *)
 
 (** {2 Hardware axis analyses}
 
