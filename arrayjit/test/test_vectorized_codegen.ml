@@ -363,6 +363,84 @@ let () =
   PPrint.ToChannel.pretty 0.9 100 Stdio.stdout doc9;
   Stdio.printf "\n";
 
+  (* --- Register-tiled Tile_mma rendering (gh-ocannl-469, tinyBLAS's mnpack): a hand-built
+     Tile_mma with an FMA-form fallback over awkward extents (6x29x5) renders the 4x3 C-tile of
+     8-lane vectors (AVX2-class register budget at vector_bytes = 32) held across the k-loop,
+     with the row and column edges peeled into scalar fmaf loops — all under the same lane-0
+     guard as the fallback. --- *)
+  let tile_operands () =
+    let td = make_sized 21 "td" [| 6; 29 |] in
+    let ta = make_sized 22 "ta" [| 6; 5 |] in
+    let tb = make_sized 23 "tb" [| 5; 29 |] in
+    (td, ta, tb)
+  in
+  let f00 = [| Idx.Fixed_idx 0; Idx.Fixed_idx 0 |] in
+  let tile_mma_loop ~body_form (td, ta, tb) =
+    let lane = Idx.get_symbol () in
+    let fi = Idx.get_symbol () and fj = Idx.get_symbol () and fl = Idx.get_symbol () in
+    let dg = LL.Get (td, [| Idx.Iterator fi; Idx.Iterator fj |]) in
+    let ag = LL.Get (ta, [| Idx.Iterator fi; Idx.Iterator fl |]) in
+    let bg = LL.Get (tb, [| Idx.Iterator fl; Idx.Iterator fj |]) in
+    let llsc =
+      match body_form with
+      | `Fma -> LL.Ternop (Ops.FMA, (ag, Ops.single), (bg, Ops.single), (dg, Ops.single))
+      | `Plain ->
+          LL.Binop
+            ( Ops.Add,
+              (dg, Ops.single),
+              (LL.Binop (Ops.Mul, (ag, Ops.single), (bg, Ops.single)), Ops.single) )
+    in
+    let nest =
+      let set =
+        LL.Set { tn = td; idcs = [| Idx.Iterator fi; Idx.Iterator fj |]; llsc; debug = "" }
+      in
+      let mk index to_ body =
+        LL.For_loop { index; from_ = 0; to_; trace_it = false; axis = LL.Serial; body }
+      in
+      mk fi 5 (mk fj 28 (mk fl 4 set))
+    in
+    LL.For_loop
+      {
+        index = lane;
+        from_ = 0;
+        to_ = 0;
+        trace_it = false;
+        axis = LL.Workgroup;
+        body =
+          LL.Tile_mma
+            {
+              d = (td, f00);
+              a = (ta, f00);
+              b = (tb, f00);
+              m = 6;
+              n = 29;
+              k = 5;
+              lane;
+              fallback = nest;
+            };
+      }
+  in
+  let td, ta, tb = tile_operands () in
+  let doc10 =
+    compile_with_vector_config ~name:"tile_mma_reg_kernel"
+      (make_optimized (tile_mma_loop ~body_form:`Fma (td, ta, tb)) [ td; ta; tb ])
+  in
+  PPrint.ToChannel.pretty 0.9 100 Stdio.stdout doc10;
+  Stdio.printf "\n";
+
+  (* --- The plain-add (non-FMA) fallback form is declined: its maybe-contracted [a * b + c]
+     could not promise bitwise equality with a fused vector twin, so the scalar fallback renders
+     under the lane-0 guard instead. --- *)
+  let td2 = make_sized 24 "td2" [| 6; 29 |] in
+  let ta2 = make_sized 25 "ta2" [| 6; 5 |] in
+  let tb2 = make_sized 26 "tb2" [| 5; 29 |] in
+  let doc11 =
+    compile_with_vector_config ~name:"tile_mma_plain_kernel"
+      (make_optimized (tile_mma_loop ~body_form:`Plain (td2, ta2, tb2)) [ td2; ta2; tb2 ])
+  in
+  PPrint.ToChannel.pretty 0.9 100 Stdio.stdout doc11;
+  Stdio.printf "\n";
+
   (* --- An alias view as a would-be kernel parameter must be rejected loudly. --- *)
   let parent = make_on_device 5 "parent" in
   let view = make_on_device 6 "view" in

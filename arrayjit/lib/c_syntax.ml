@@ -1971,11 +1971,11 @@ module C_syntax (B : C_syntax_config) = struct
           in
           (prec, (ptr_doc, ld, space))
         in
-        let fallback_doc () =
+        let lane0_guarded body_doc =
           let guarded =
             group
               (string "if (" ^^ pp_symbol lane ^^ string " == 0) " ^^ lbrace
-              ^^ nest 2 (hardline ^^ pp_ll ~log_set_locals ~in_loop:true fallback)
+              ^^ nest 2 (hardline ^^ body_doc)
               ^^ hardline ^^ rbrace)
           in
           (* On backends that bind the lane loop in hardware, sibling statements (e.g. the zeroing
@@ -1986,8 +1986,188 @@ module C_syntax (B : C_syntax_config) = struct
           | Some s -> string s ^^ hardline ^^ guarded ^^ hardline ^^ string s
           | None -> guarded
         in
+        let fallback_doc () = lane0_guarded (pp_ll ~log_set_locals ~in_loop:true fallback) in
+        (* Register-tiled CPU rendering (gh-ocannl-469; tinyBLAS/llamafile's [mnpack] and the S4
+           micro-kernel shape): the C-tile lives in an RM×RN grid of vector-extension registers
+           across the ENTIRE k-loop — per k step: RN B-row vector loads, RM A-element splats, and
+           RM×RN fused-FMA updates — loaded from [d] at block entry (the statement's [+=]
+           semantics) and stored back at block exit. RM = 4 rows; RN = 3 vector columns on
+           AVX2-class 16-register files ([vector_bytes = 32]), 6 on NEON/AVX-512-class 32-register
+           files — RM×RN + RM + RN live registers, tinyBLAS's budget. Edge tiles are peeled into
+           scalar loops, not masked. For each output element the k-chain runs in serial order with
+           the same fused rounding, so the rendering is BITWISE equal to the scalar fallback; the
+           plain-add (non-FMA) fallback form is declined — its [a * b + c] arithmetic is only
+           maybe-contracted, so a vector twin could not promise that equality. Emitted under the
+           same lane-0 guard as the fallback ([`Vec_extensions] backends render the lane loop
+           serially; GPU backends never take this path). *)
+        let try_register_tile () : PPrint.document option =
+          let no_test cond = if cond then None else Some () in
+          let ( let* ) o f = Option.bind o ~f in
+          let* () =
+            no_test
+              ((match B.vector_style with `Vec_extensions -> false | `Packed_struct -> true)
+              || B.vector_bytes < 8
+              || Utils.debug_log_from_routines ())
+          in
+          let d_tn = fst d in
+          let prec = Lazy.force d_tn.Tn.prec in
+          let* () =
+            no_test (match prec with Ops.Single_prec _ | Ops.Double_prec _ -> false | _ -> true)
+          in
+          let* () =
+            no_test
+              (not
+                 (Ops.equal_prec (Lazy.force (fst a).Tn.prec) prec
+                 && Ops.equal_prec (Lazy.force (fst b).Tn.prec) prec))
+          in
+          (* The fallback carries the arithmetic form; require the fused one (see above). *)
+          let rec innermost_set (llc : Low_level.t) =
+            match llc with
+            | Low_level.For_loop { body; _ } | If { body; _ } -> innermost_set body
+            | Seq (x, y) -> (
+                match innermost_set x with Some _ as r -> r | None -> innermost_set y)
+            | Set { tn; llsc; _ } -> Some (tn, llsc)
+            | _ -> None
+          in
+          let* () =
+            no_test
+              (match innermost_set fallback with
+              | Some (tn, Low_level.Ternop (Ops.FMA, _, _, (Low_level.Get (tn2, _), _))) ->
+                  not (Tn.equal tn d_tn && Tn.equal tn2 d_tn)
+              | _ -> true)
+          in
+          let lanes = B.vector_bytes / Ops.prec_in_bytes prec in
+          let* () = no_test (lanes < 2 || n < lanes) in
+          let rm = min 4 m in
+          let rn = min (if B.vector_bytes = 32 then 3 else 6) (n / lanes) in
+          let bw = rn * lanes in
+          let m_full = m - (m % rm) in
+          let n_full = n - (n % bw) in
+          let vtyp, typedef_doc = vec_ext_typ ~prec ~lanes in
+          let ctyp = B.typ_of_prec prec in
+          let it = B.loop_index_type in
+          let fma_fn = match prec with Ops.Double_prec _ -> "fma" | _ -> "fmaf" in
+          let _, (d_ptr, ldd, _) = operand d in
+          let _, (a_ptr, lda, _) = operand a in
+          let _, (b_ptr, ldb, _) = operand b in
+          let stmts = separate hardline in
+          (* Scalar peel of rows [i_lo, i_hi) × cols [j_lo, j_hi): same fmaf chain per element. *)
+          let scalar_peel ~i_lo ~i_hi ~j_lo ~j_hi =
+            if i_lo >= i_hi || j_lo >= j_hi then []
+            else
+              [
+                string
+                  (Printf.sprintf
+                     "for (%stmma_i__ = %d; tmma_i__ < %d; ++tmma_i__) { for (%stmma_j__ = %d; \
+                      tmma_j__ < %d; ++tmma_j__) {"
+                     it i_lo i_hi it j_lo j_hi)
+                ^^ nest 2
+                     (hardline
+                     ^^ string
+                          (Printf.sprintf "%s tmma_acc__ = tmma_d__[tmma_i__ * %d + tmma_j__];"
+                             ctyp ldd)
+                     ^^ hardline
+                     ^^ string
+                          (Printf.sprintf
+                             "for (%stmma_l__ = 0; tmma_l__ < %d; ++tmma_l__) tmma_acc__ = \
+                              %s(tmma_a__[tmma_i__ * %d + tmma_l__], tmma_b__[tmma_l__ * %d + \
+                              tmma_j__], tmma_acc__);"
+                             it k fma_fn lda ldb)
+                     ^^ hardline
+                     ^^ string (Printf.sprintf "tmma_d__[tmma_i__ * %d + tmma_j__] = tmma_acc__;" ldd)
+                     )
+                ^^ hardline ^^ string "} }";
+              ]
+          in
+          let grid = vec_acc_grid ~prefix:"tmma_c" ~rows:rm ~cols:rn in
+          let c_move ~load r c =
+            let mem =
+              Printf.sprintf "&tmma_d__[(tmma_i__ + %d) * %d + tmma_j__ + %d]" r ldd (c * lanes)
+            in
+            let reg = "&" ^ grid.(r).(c) in
+            let src, dst = if load then (mem, reg) else (reg, mem) in
+            string
+              (Printf.sprintf "__builtin_memcpy(%s, %s, sizeof(%s));" dst src grid.(r).(c))
+          in
+          let full_blocks =
+            if m_full = 0 || n_full = 0 then []
+            else
+              let k_body =
+                List.init rn ~f:(fun c ->
+                    string
+                      (Printf.sprintf
+                         "%s tmma_b_%d__; __builtin_memcpy(&tmma_b_%d__, &tmma_b__[tmma_l__ * %d \
+                          + tmma_j__ + %d], sizeof(tmma_b_%d__));"
+                         vtyp c c ldb (c * lanes) c))
+                @ List.concat
+                    (List.init rm ~f:(fun r ->
+                         string
+                           (Printf.sprintf
+                              "%s tmma_a_%d__ = ((%s){0} + tmma_a__[(tmma_i__ + %d) * %d + \
+                               tmma_l__]);"
+                              vtyp r vtyp r lda)
+                         :: List.init rn ~f:(fun c ->
+                                vec_acc_fma ~prec ~lanes ~dst:grid.(r).(c)
+                                  ~a:(Printf.sprintf "tmma_a_%d__" r)
+                                  ~b:(Printf.sprintf "tmma_b_%d__" c))))
+              in
+              let per_cell f =
+                List.concat (List.init rm ~f:(fun r -> List.init rn ~f:(fun c -> f r c)))
+              in
+              [
+                string
+                  (Printf.sprintf "for (%stmma_i__ = 0; tmma_i__ + %d <= %d; tmma_i__ += %d) {" it
+                     rm m rm)
+                ^^ nest 2
+                     (hardline
+                     ^^ string
+                          (Printf.sprintf
+                             "for (%stmma_j__ = 0; tmma_j__ + %d <= %d; tmma_j__ += %d) {" it bw n
+                             bw)
+                     ^^ nest 2
+                          (hardline
+                          ^^ stmts
+                               (per_cell (fun r c ->
+                                    string (Printf.sprintf "%s %s;" vtyp grid.(r).(c))
+                                    ^^ space ^^ c_move ~load:true r c))
+                          ^^ hardline
+                          ^^ string
+                               (Printf.sprintf "for (%stmma_l__ = 0; tmma_l__ < %d; ++tmma_l__) {"
+                                  it k)
+                          ^^ nest 2 (hardline ^^ stmts k_body)
+                          ^^ hardline ^^ string "}" ^^ hardline
+                          ^^ stmts (per_cell (fun r c -> c_move ~load:false r c)))
+                     ^^ hardline ^^ string "}")
+                ^^ hardline ^^ string "}";
+              ]
+          in
+          let body =
+            [
+              typedef_doc;
+              string (Printf.sprintf "%s *tmma_d__ = " ctyp) ^^ d_ptr ^^ semi;
+              string (Printf.sprintf "const %s *tmma_a__ = " ctyp) ^^ a_ptr ^^ semi;
+              string (Printf.sprintf "const %s *tmma_b__ = " ctyp) ^^ b_ptr ^^ semi;
+            ]
+            @ full_blocks
+            @ scalar_peel ~i_lo:0 ~i_hi:m_full ~j_lo:n_full ~j_hi:n
+            @ scalar_peel ~i_lo:m_full ~i_hi:m ~j_lo:0 ~j_hi:n
+          in
+          Some
+            (string
+               (Printf.sprintf
+                  "{ /* Tile_mma register tiling: %dx%d C-tile of %d-lane %s held across the \
+                   k-loop (full blocks %dx%d of %dx%d). */"
+                  rm rn lanes ctyp m_full n_full m n)
+            ^^ nest 2 (hardline ^^ stmts body)
+            ^^ hardline ^^ string "}")
+        in
+        let fallback_or_tiled () =
+          match try_register_tile () with
+          | Some doc -> lane0_guarded doc
+          | None -> fallback_doc ()
+        in
         match B.mma_syntax with
-        | None -> fallback_doc ()
+        | None -> fallback_or_tiled ()
         | Some _ when Utils.debug_log_from_routines () -> fallback_doc ()
         | Some emit -> (
             let d_prec, d_op = operand d in
@@ -1995,7 +2175,7 @@ module C_syntax (B : C_syntax_config) = struct
             let b_prec, b_op = operand b in
             match emit ~d_prec ~a_prec ~b_prec ~m ~n ~k ~d:d_op ~a:a_op ~b:b_op with
             | Some doc -> doc
-            | None -> fallback_doc ()))
+            | None -> fallback_or_tiled ()))
     | If { cond = c, cprec; body } ->
         (* Guarded statement (axis-types proposal §2): [body] executes iff [cond] is nonzero --
            C's [if] tests exactly that. *)
