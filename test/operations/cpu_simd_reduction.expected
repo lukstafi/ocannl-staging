@@ -1,0 +1,11 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+serial sum correct: true
+vectorized sum matches the serial twin: true
+sum renders as accumulator chains (CPU) or serially (GPU): true
+vectorized fma dot parity: true
+dot renders as accumulator chains (CPU) or serially (GPU): true
+vectorized max parity: true
+max renders as accumulator chains (CPU) or serially (GPU): true
+strided accumulation parity (serial fallback): true
+strided accumulation declines chains and emits no pragma: true

@@ -1036,6 +1036,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name cpu_simd_reduction)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules cpu_simd_reduction)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name cpu_parallel)
  (package neural_nets_lib)
  (deps
