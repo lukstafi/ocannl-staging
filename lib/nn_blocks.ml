@@ -212,6 +212,30 @@ let%op softmax ~spec ?(temperature = 1.0) () =
     let exp_vals = exp (x_scaled - max_vals) in
     exp_vals /. (exp_vals ++ spec)
 
+(** Cross-entropy loss from raw logits, adopting the llm.c [fused_classifier] contract (issue
+    gh-464): numerically stable log-sum-exp (never [log (softmax logits)]), written so that the
+    softmax-probabilities intermediate stays virtual — never materialized in either pass — and the
+    backward accumulates [probs - targets] directly into the logits gradient. The row-wise max is
+    detached via [stop_gradient]: the max term cancels exactly in the loss, so no gradient should
+    flow through it (llm.c likewise treats it as a constant).
+
+    [spec] follows the {!softmax} convention: it names the class/vocabulary axes to reduce over
+    (e.g. ["... | v"]). [targets] is a probability distribution over those axes (typically one-hot;
+    label smoothing works too). [mask] multiplies the per-position losses (e.g. 0/1 to exclude
+    padding tokens); [normalize_by] divides the summed loss (e.g. by a valid-token count). Without
+    [mask] and [normalize_by], returns the summed scalar loss. *)
+let%op cross_entropy_loss ~spec ?mask ?normalize_by () ~logits ~targets =
+  let reduce_spec = reduce_specified_axes spec in
+  let max_logits = stop_gradient logits @^^ reduce_spec in
+  let shifted = logits - max_logits in
+  let log_probs = shifted - log (exp shifted ++ reduce_spec) in
+  let nll = neg ((targets *. log_probs) ++ reduce_spec) in
+  let masked_nll = match mask with None -> nll | Some m -> nll *. m in
+  (* Reduce all three axis kinds: [spec] may name class axes in the input row (e.g. the attention
+     convention "... | t -> ..."), in which case [nll] still has an input row here. *)
+  let cross_entropy = masked_nll ++ "...|...->... => 0" in
+  match normalize_by with None -> cross_entropy | Some n -> cross_entropy /. n
+
 (** {2 Position Embedding Strategies} *)
 
 (** Strategy for positional encoding in attention / transformer blocks. *)
@@ -461,13 +485,9 @@ let%op transformer_with_loss ~label:_ ~model () ~train_step ~src ~tgt_input ~tgt
   (* Get model predictions for the input sequence *)
   let logits = model ~train_step ~src ~tgt:tgt_input ~mask in
 
-  (* Compute cross-entropy loss between predictions and target *)
-  (* softmax over vocabulary dimension *)
-  let log_probs = log (softmax ~spec:"... | v" () logits) in
-
-  (* Negative log likelihood loss: -sum(target * log_probs) *)
-  (* tgt_target should be one-hot encoded or use label smoothing *)
-  let loss = -(tgt_target *. log_probs) ++ "...|... => 0" in
+  (* Numerically stable cross-entropy over the vocabulary dimension; tgt_target should be one-hot
+     encoded or use label smoothing *)
+  let loss = cross_entropy_loss ~spec:"... | v" () ~logits ~targets:tgt_target in
 
   (* Return both loss and logits for potential additional metrics *)
   (loss, logits)

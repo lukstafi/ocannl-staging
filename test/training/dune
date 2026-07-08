@@ -11,6 +11,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name fused_classifier)
+ (package neural_nets_lib)
+ (modules fused_classifier)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name moons_demo)
  (package neural_nets_lib)
  (modules moons_demo)
