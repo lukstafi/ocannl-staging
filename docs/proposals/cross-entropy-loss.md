@@ -1,5 +1,14 @@
 # Add Nn_blocks.cross_entropy_loss helper
 
+## Status update (2026-07-08)
+
+- Implemented as part of gh-464 (fused cross-entropy classifier, which absorbed this proposal):
+  `Nn_blocks.cross_entropy_loss` with `~spec`/`?mask`/`?normalize_by`, stable log-sum-exp, and a
+  `stop_gradient`-detached row max so the backward accumulates `probs - targets` directly into the
+  logits gradient without materializing the probabilities. `transformer_with_loss` now uses it.
+  Test: `test/training/fused_classifier.ml` (stability, dlogits, virtualness census, fission
+  segment count).
+
 ## Status update (2026-06-12)
 
 - Not implemented yet: there is no `cross_entropy_loss` in `lib/nn_blocks.ml`, and `transformer_with_loss` (now at line 347) still computes `log (softmax ~spec:"... | v" () logits)` — the numerical instability this proposal targets is still present.
