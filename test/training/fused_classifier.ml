@@ -136,6 +136,35 @@ let () =
   let rel_err2 = Float.(abs (masked_loss - expected_masked) / abs expected_masked) in
   printf "masked+normalized loss matches oracle (rel err < 1e-4): %b\n" Float.(rel_err2 < 1e-4);
 
+  (* 6. Class axes in the input row (the attention-style spec convention, e.g. "... | t -> ..."):
+     the final reduction must still produce the scalar loss. *)
+  let batch_in = 8 and vocab_in = 16 in
+  let target_in b = if b = 1 then 1 else ((b * 7) + 3) % vocab_in in
+  let row_loss_in b =
+    lse (Array.init vocab_in ~f:(logit b)) -. logit b (target_in b)
+  in
+  let logits_in =
+    NTDSL.init ~l:"logits_in" ~prec:Ir.Ops.single ~b:[ batch_in ] ~i:[ vocab_in ] ~o:[]
+      ~f:(function [| b; v |] -> logit b v | _ -> assert false)
+      ()
+  in
+  let targets_in =
+    NTDSL.init ~l:"targets_in" ~prec:Ir.Ops.single ~b:[ batch_in ] ~i:[ vocab_in ] ~o:[]
+      ~f:(function [| b; v |] -> if v = target_in b then 1. else 0. | _ -> assert false)
+      ()
+  in
+  let loss_in =
+    Nn_blocks.cross_entropy_loss ~spec:"... | v -> ..." () ~logits:logits_in ~targets:targets_in
+  in
+  let ctx4 = Train.forward_once (Context.auto ()) loss_in in
+  let input_axis_loss = (ctx4, loss_in).@[0] in
+  let expected_in =
+    List.init batch_in ~f:row_loss_in |> List.fold ~init:0. ~f:( +. )
+  in
+  let rel_err3 = Float.(abs (input_axis_loss - expected_in) / abs expected_in) in
+  printf "input-axis spec (attention convention) matches oracle (rel err < 1e-4): %b\n"
+    Float.(rel_err3 < 1e-4);
+
   (* Contrast: the naive log(softmax) formulation is non-finite on the same input. *)
   let logits_ng =
     NTDSL.init ~l:"logits_ng" ~prec:Ir.Ops.single ~b:[ batch ] ~o:[ vocab ]

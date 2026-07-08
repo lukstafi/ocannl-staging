@@ -7,4 +7,5 @@ probabilities and other [batch, vocab] intermediates stay virtual: true
 logits value and gradient are materialized: true
 fission segments of forward+backprop: 4
 masked+normalized loss matches oracle (rel err < 1e-4): true
+input-axis spec (attention convention) matches oracle (rel err < 1e-4): true
 naive log(softmax) loss is finite: false

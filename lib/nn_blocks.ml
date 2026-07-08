@@ -231,7 +231,9 @@ let%op cross_entropy_loss ~spec ?mask ?normalize_by () ~logits ~targets =
   let log_probs = shifted - log (exp shifted ++ reduce_spec) in
   let nll = neg ((targets *. log_probs) ++ reduce_spec) in
   let masked_nll = match mask with None -> nll | Some m -> nll *. m in
-  let cross_entropy = masked_nll ++ "...|... => 0" in
+  (* Reduce all three axis kinds: [spec] may name class axes in the input row (e.g. the attention
+     convention "... | t -> ..."), in which case [nll] still has an input row here. *)
+  let cross_entropy = masked_nll ++ "...|...->... => 0" in
   match normalize_by with None -> cross_entropy | Some n -> cross_entropy /. n
 
 (** {2 Position Embedding Strategies} *)
