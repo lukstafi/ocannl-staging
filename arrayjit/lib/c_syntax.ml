@@ -120,7 +120,9 @@ module type C_syntax_config = sig
       loads, arithmetic and stores in [lanes = vector_bytes / element size] chunks plus a serial
       remainder loop, instead of relying on the compiler's auto-vectorizer (which e.g. cannot
       reassociate strict-FP reductions — the [Vectorized] retype carries that permission, like
-      [Swap]). [0] disables explicit emission ([vectorize_pragma] fallback). *)
+      [Swap]). A recognized accumulation body renders as independent accumulator chains with a
+      horizontal reduce at loop exit (gh-ocannl-468; [`Vec_extensions] only). [0] disables
+      explicit emission ([vectorize_pragma] fallback). *)
 
   val vector_style : [ `Vec_extensions | `Packed_struct ]
   (** How eligible [Vectorized] loops emit explicit vector code when [vector_bytes > 0].
@@ -560,6 +562,89 @@ module C_syntax (B : C_syntax_config) = struct
     let open PPrint in
     string ("v" ^ Int.to_string scope_id ^ "_" ^ get_ident tn)
 
+  (* {3 Vector-extension accumulator grids (gh-ocannl-468 / gh-ocannl-469)}
+
+     Emission helpers for grids of vector-register accumulators in the [`Vec_extensions] style.
+     The SIMD reduction rendering of [Vectorized] accumulation loops (gh-ocannl-468; ggml's
+     [ggml_vec_dot_f32] pattern) uses a 1×N grid — N independent accumulator chains folded at loop
+     exit — and the register-tiled [Tile_mma] micro-kernel (gh-ocannl-469) will hold its C-tile as
+     an RM×RN grid of vector registers across the fused k-loop. *)
+
+  (* The vector-extension typedef shared by the explicit-SIMD renderings: [lanes] elements of
+     [prec] (single or double). *)
+  let vec_ext_typ ~prec ~lanes =
+    let vtyp =
+      Printf.sprintf "ocannl_vec%d%s" lanes
+        (match prec with Ops.Double_prec _ -> "d" | _ -> "f")
+    in
+    ( vtyp,
+      PPrint.string
+        (Printf.sprintf "typedef %s %s __attribute__((vector_size(%d)));" (B.typ_of_prec prec)
+           vtyp
+           (lanes * Ops.prec_in_bytes prec)) )
+
+  (* The names of a [rows]×[cols] grid of vector accumulator registers. *)
+  let vec_acc_grid ~prefix ~rows ~cols : string array array =
+    Array.init rows ~f:(fun r ->
+        Array.init cols ~f:(fun c -> Printf.sprintf "%s_%d_%d__" prefix r c))
+
+  (* [dst = op(dst, src)] on whole vector registers ([src] must also name a register): vector
+     infix arithmetic for the ring operators, a fixed-trip per-lane loop for [Max]/[Min] (which
+     have no vector infix; keeps the scalar path's [fmaxf]/[fminf] NaN semantics and
+     SLP-vectorizes under -O2 like the per-lane FMA fallback). *)
+  let vec_acc_combine ~prec ~lanes ~op ~dst ~src =
+    let open PPrint in
+    match op with
+    | Ops.Add | Ops.Sub | Ops.Mul | Ops.Div ->
+        let inf =
+          match op with Ops.Add -> " + " | Sub -> " - " | Mul -> " * " | _ -> " / "
+        in
+        string (Printf.sprintf "%s = %s%s%s;" dst dst inf src)
+    | Ops.Max | Ops.Min ->
+        let lane v = string (v ^ "[ocannl_l__]") in
+        string
+          (Printf.sprintf
+             "for (int ocannl_l__ = 0; ocannl_l__ < %d; ++ocannl_l__) %s[ocannl_l__] = " lanes dst)
+        ^^ B.binop_syntax prec op (lane dst) (lane src)
+        ^^ semi
+    | _ -> invalid_arg "C_syntax.vec_acc_combine: not an accumulation operator"
+
+  (* [dst = fma(a, b, dst)] elementwise-fused on vector registers (single rounding, matching the
+     scalar path's [fmaf]/[fma]): clang's [__builtin_elementwise_fma] where available, otherwise
+     the per-lane fused loop. *)
+  let vec_acc_fma ~prec ~lanes ~dst ~a ~b =
+    let open PPrint in
+    let fma_fn = match prec with Ops.Double_prec _ -> "fma" | _ -> "fmaf" in
+    string "#if OCANNL_HAS_ELEMENTWISE_FMA"
+    ^^ hardline
+    ^^ string (Printf.sprintf "%s = __builtin_elementwise_fma(%s, %s, %s);" dst a b dst)
+    ^^ hardline ^^ string "#else" ^^ hardline
+    ^^ string
+         (Printf.sprintf
+            "for (int ocannl_l__ = 0; ocannl_l__ < %d; ++ocannl_l__) %s[ocannl_l__] = \
+             %s(%s[ocannl_l__], %s[ocannl_l__], %s[ocannl_l__]);"
+            lanes dst fma_fn a b dst)
+    ^^ hardline ^^ string "#endif"
+
+  (* Fold every register of the grid into [grid.(0).(0)] (a statement list; empty for a 1×1
+     grid). *)
+  let vec_acc_grid_fold ~prec ~lanes ~op (grid : string array array) : PPrint.document list =
+    let dst = grid.(0).(0) in
+    Array.concat_map grid ~f:Fn.id |> Array.to_list
+    |> List.filter ~f:(fun s -> not (String.equal s dst))
+    |> List.map ~f:(fun src -> vec_acc_combine ~prec ~lanes ~op ~dst ~src)
+
+  (* Horizontal reduction of one vector register into the fresh scalar [out] (a statement list):
+     a linear lane chain through the scalar combine — per-element semantics identical to the
+     serial loop's. *)
+  let vec_acc_lane_fold ~prec ~lanes ~op ~vname ~out : PPrint.document list =
+    let open PPrint in
+    string (Printf.sprintf "%s %s = %s[0];" (B.typ_of_prec prec) out vname)
+    :: List.init (lanes - 1) ~f:(fun l ->
+           string (out ^ " = ")
+           ^^ B.binop_syntax prec op (string out) (string (Printf.sprintf "%s[%d]" vname (l + 1)))
+           ^^ semi)
+
   (* Set by [compile_proc] so that [pp_ll] can consult per-node tracing info (e.g. to elide a
      [Zero_out] loop that the declaration's [= {0}] already covers). *)
   let current_traced_store : Low_level.traced_store option ref = ref None
@@ -864,6 +949,201 @@ module C_syntax (B : C_syntax_config) = struct
               ^^ hardline ^^ rbrace
           | `None -> assert false
         in
+        (* --- Shared analysis for the explicit-SIMD ([Vectorized]) and warp-shuffle
+           ([Workgroup_reduce]) renderings below. --- *)
+        let mentions_comp (idx : Indexing.axis_index) =
+          match idx with
+          | Indexing.Iterator s -> Indexing.equal_symbol s i
+          | Indexing.Affine { symbols; _ } ->
+              List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s i)
+          | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
+        in
+        let rec touches_tn tn (llsc : Low_level.scalar_t) =
+          match llsc with
+          | Low_level.Get (tn2, _) | Get_merge_buffer (tn2, _) -> Tn.equal tn tn2
+          | Get_dynamic { tn = tn2; dyn_value = v, _; _ } -> Tn.equal tn tn2 || touches_tn tn v
+          | Local_scope { body; _ } -> body_touches tn body
+          | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ -> false
+          | Ternop (_, (a, _), (b, _), (c, _)) ->
+              touches_tn tn a || touches_tn tn b || touches_tn tn c
+          | Binop (_, (a, _), (b, _)) -> touches_tn tn a || touches_tn tn b
+          | Unop (_, (a, _)) -> touches_tn tn a
+        and body_touches tn (llc : Low_level.t) =
+          match llc with
+          | Low_level.Noop | Comment _ | Staged_compilation _ | Workgroup_barrier
+          | Declare_local _ ->
+              false
+          | Seq (a, b) -> body_touches tn a || body_touches tn b
+          | For_loop { body; _ } -> body_touches tn body
+          | If { cond = c, _; body } -> touches_tn tn c || body_touches tn body
+          | Zero_out tn2 -> Tn.equal tn tn2
+          | Set { tn = tn2; llsc; _ } -> Tn.equal tn tn2 || touches_tn tn llsc
+          | Set_from_vec { tn = tn2; arg = a, _; _ } -> Tn.equal tn tn2 || touches_tn tn a
+          | Set_local (_, llsc) -> touches_tn tn llsc
+          | Tile_mma { d = d_tn, _; a = a_tn, _; b = b_tn, _; _ } ->
+              Tn.equal tn d_tn || Tn.equal tn a_tn || Tn.equal tn b_tn
+        in
+        let nonempty_stmts body =
+          List.filter (Low_level.flat_lines [ body ]) ~f:(function
+            | Low_level.Noop | Comment _ -> false
+            | _ -> true)
+        in
+        (* A body that is a single accumulation statement [acc[idcs] = op(acc[idcs], contrib)]
+           (or its FMA form [acc = FMA(a, b, acc)]) where [idcs] does not mention the loop index
+           and [op] is an associative-commutative reduction — such a body IS the loop's serial
+           meaning. Recognized by the warp-shuffle rendering of [Workgroup_reduce] loops
+           (gh-ocannl-462) and by the SIMD reduction rendering of [Vectorized] loops
+           (gh-ocannl-468). *)
+        let recognize_accumulation stmts =
+          match stmts with
+          | [ Low_level.Set { tn; idcs; llsc; _ } ] when not (Array.exists idcs ~f:mentions_comp)
+            -> (
+              let is_acc s = Low_level.equal_scalar_t s (Low_level.Get (tn, idcs)) in
+              let reduce_op = function
+                | Ops.Add | Ops.Mul | Ops.Max | Ops.Min -> true
+                | _ -> false
+              in
+              match llsc with
+              | Binop (op, (a, _), (b, _)) when reduce_op op && is_acc a && not (touches_tn tn b)
+                ->
+                  Some (tn, idcs, op, b)
+              | Binop (op, (a, _), (b, _)) when reduce_op op && is_acc b && not (touches_tn tn a)
+                ->
+                  Some (tn, idcs, op, a)
+              | Ternop (Ops.FMA, (a, pa), (b, pb), (c, _))
+                when is_acc c && (not (touches_tn tn a)) && not (touches_tn tn b) ->
+                  Some (tn, idcs, Ops.Add, Low_level.Binop (Ops.Mul, (a, pa), (b, pb)))
+              | _ -> None)
+          | _ -> None
+        in
+        (* Eligibility bail-out of the explicit-SIMD renderings ([try_vectorize] /
+           [try_vectorize_reduce]) back to the pragma/serial fallbacks. *)
+        let exception Bail in
+        let rec scalar_mentions (llsc : Low_level.scalar_t) =
+          match llsc with
+          | Low_level.Get (_, idcs) | Get_merge_buffer (_, idcs) ->
+              Array.exists idcs ~f:mentions_comp
+          | Get_dynamic { idcs; dyn_value = v, _; _ } ->
+              Array.exists idcs ~f:mentions_comp || scalar_mentions v
+          (* Scope-local bodies could bind or mention the index in statement position;
+             conservatively ineligible. *)
+          | Local_scope _ | Get_local _ -> raise Bail
+          | Embed_index idx -> mentions_comp idx
+          | Ternop (_, (a, _), (b, _), (c, _)) ->
+              scalar_mentions a || scalar_mentions b || scalar_mentions c
+          | Binop (_, (a, _), (b, _)) -> scalar_mentions a || scalar_mentions b
+          | Unop (_, (a, _)) -> scalar_mentions a
+          | Constant _ | Constant_bits _ -> false
+        in
+        let contiguous idcs =
+          let n = Array.length idcs in
+          n > 0
+          && Array.for_alli idcs ~f:(fun p idx -> p = n - 1 || not (mentions_comp idx))
+          &&
+          match idcs.(n - 1) with
+          | Indexing.Iterator s -> Indexing.equal_symbol s i
+          | Indexing.Affine { symbols; _ } ->
+              List.for_all symbols ~f:(fun (c, s) -> (not (Indexing.equal_symbol s i)) || c = 1)
+              && List.count symbols ~f:(fun (_, s) -> Indexing.equal_symbol s i) = 1
+          | _ -> false
+        in
+        let check_read ~written tn idcs =
+          match Hashtbl.find written tn.Tn.uid with
+          | Some w_idcs ->
+              if not (Array.equal Indexing.equal_axis_index w_idcs idcs) then raise Bail
+          | None -> ()
+        in
+        let rec no_written_reads ~written (llsc : Low_level.scalar_t) =
+          match llsc with
+          | Low_level.Get (tn, _) | Get_merge_buffer (tn, _) | Get_dynamic { tn; _ } ->
+              if Hashtbl.mem written tn.Tn.uid then raise Bail
+          | Local_scope _ | Get_local _ -> raise Bail
+          | Embed_index _ | Constant _ | Constant_bits _ -> ()
+          | Ternop (_, (a, _), (b, _), (c, _)) ->
+              no_written_reads ~written a;
+              no_written_reads ~written b;
+              no_written_reads ~written c
+          | Binop (_, (a, _), (b, _)) ->
+              no_written_reads ~written a;
+              no_written_reads ~written b
+          | Unop (_, (a, _)) -> no_written_reads ~written a
+        in
+        let uniform_scalar ~written prec llsc =
+          (* Uniform across lanes: a read of a stored node cannot equal its (index-mentioning)
+             store vector, so reject those; then render as a plain scalar (vector-scalar
+             arithmetic splats; in the packed style the scalar participates per lane). *)
+          no_written_reads ~written llsc;
+          let local_defs, sdoc = pp_scalar prec llsc in
+          if not (List.is_empty local_defs) then raise Bail;
+          parens sdoc
+        in
+        (* The [`Vec_extensions] expression renderer shared by the elementwise ([try_vectorize])
+           and reduction ([try_vectorize_reduce]) renderings. Emitted binding statements
+           accumulate through [emit]; [written] maps written nodes to their store index vectors —
+           every read of a written node must use that exact vector (vector semantics evaluates
+           all lanes' loads before the store, so cross-lane flow would reorder against the serial
+           loop). *)
+        let vec_ext_machinery ~prec ~lanes ~vtyp ~written ~emit ~fresh =
+          let vload tn idcs =
+            if not (contiguous idcs) then raise Bail;
+            check_read ~written tn idcs;
+            let name = fresh "vget" in
+            let offset = pp_array_offset (idcs, Lazy.force tn.Tn.dims) in
+            emit
+              (string (vtyp ^ " " ^ name ^ ";")
+              ^^ hardline
+              ^^ string ("__builtin_memcpy(&" ^ name ^ ", &")
+              ^^ string (get_ident tn) ^^ brackets offset
+              ^^ string (", sizeof(" ^ name ^ "));"));
+            string name
+          in
+          let rec vec_expr (llsc : Low_level.scalar_t) (p : Ops.prec) : PPrint.document =
+            if not (scalar_mentions llsc) then uniform_scalar ~written prec llsc
+            else if not (Ops.equal_prec p prec) then raise Bail
+            else
+              match llsc with
+              | Low_level.Get (tn, idcs) ->
+                  if not (Ops.equal_prec (Lazy.force tn.Tn.prec) prec) then raise Bail;
+                  vload tn idcs
+              | Binop (op, (a, pa), (b, pb)) ->
+                  let inf =
+                    match op with
+                    | Ops.Add -> " + "
+                    | Sub -> " - "
+                    | Mul -> " * "
+                    | Div -> " / "
+                    | _ -> raise Bail
+                  in
+                  parens (vec_expr a pa ^^ string inf ^^ vec_expr b pb)
+              | Ternop (Ops.FMA, (a, pa), (b, pb), (c, pc)) ->
+                  (* Fused, matching the scalar path's [fmaf]/[fma] single rounding (the
+                     simplifier synthesizes [FMA] from mul-add trees, so this is the hot case). A
+                     plain [a * b + c] would be only maybe-contracted, so vector lanes could
+                     differ from the serial remainder loop and twin. Operands bind to vector
+                     temps (lane-uniform ones splat explicitly: vector = scalar init is
+                     invalid). *)
+                  let bind llsc p =
+                    let name = fresh "vfop" in
+                    emit (string (vtyp ^ " " ^ name ^ " = ") ^^ vec_operand llsc p ^^ semi);
+                    name
+                  in
+                  let na = bind a pa and nb = bind b pb and nc = bind c pc in
+                  let nr = fresh "vfma" in
+                  emit (string (vtyp ^ " " ^ nr ^ " = ") ^^ string nc ^^ semi);
+                  emit (vec_acc_fma ~prec ~lanes ~dst:nr ~a:na ~b:nb);
+                  string nr
+              | Unop (Ops.Identity, (a, pa)) -> vec_expr a pa
+              | Unop (Ops.Neg, (a, pa)) -> parens (string "-" ^^ vec_expr a pa)
+              | _ -> raise Bail
+          and vec_operand (llsc : Low_level.scalar_t) (p : Ops.prec) : PPrint.document =
+            (* A vector-typed rendering even for lane-uniform values: initializers and builtin
+               arguments need a vector, where the implicit vector-scalar splat of binary
+               operators does not apply. *)
+            if scalar_mentions llsc then vec_expr llsc p
+            else string ("((" ^ vtyp ^ "){0} + ") ^^ uniform_scalar ~written prec llsc ^^ string ")"
+          in
+          (vec_expr, vec_operand)
+        in
         (* Explicit SIMD rendering of a [Vectorized] loop via GCC/Clang vector extensions
            (portable across gcc/clang and AVX2/NEON; the [Vectorized]-codegen follow-up of
            gh-ocannl-164). The loop must start at 0 and its body must be a sequence of plain [Set]
@@ -879,39 +1159,11 @@ module C_syntax (B : C_syntax_config) = struct
            loop. The main loop advances by [lanes]; a serial remainder loop reuses [body_doc].
            Anything else falls back to [vectorize_pragma] / serial. *)
         let try_vectorize () : PPrint.document option =
-          let exception Bail in
-          let mentions_comp (idx : Indexing.axis_index) =
-            match idx with
-            | Indexing.Iterator s -> Indexing.equal_symbol s i
-            | Indexing.Affine { symbols; _ } ->
-                List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s i)
-            | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
-          in
-          let rec scalar_mentions (llsc : Low_level.scalar_t) =
-            match llsc with
-            | Low_level.Get (_, idcs) | Get_merge_buffer (_, idcs) ->
-                Array.exists idcs ~f:mentions_comp
-            | Get_dynamic { idcs; dyn_value = v, _; _ } ->
-                Array.exists idcs ~f:mentions_comp || scalar_mentions v
-            (* Scope-local bodies could bind or mention the index in statement position;
-               conservatively ineligible. *)
-            | Local_scope _ | Get_local _ -> raise Bail
-            | Embed_index idx -> mentions_comp idx
-            | Ternop (_, (a, _), (b, _), (c, _)) ->
-                scalar_mentions a || scalar_mentions b || scalar_mentions c
-            | Binop (_, (a, _), (b, _)) -> scalar_mentions a || scalar_mentions b
-            | Unop (_, (a, _)) -> scalar_mentions a
-            | Constant _ | Constant_bits _ -> false
-          in
           try
             if B.vector_bytes < 8 || from_ <> 0 || Utils.debug_log_from_routines () then
               raise Bail;
             let extent = to_ + 1 in
-            let stmts =
-              List.filter (Low_level.flat_lines [ body ]) ~f:(function
-                | Low_level.Noop | Comment _ -> false
-                | _ -> true)
-            in
+            let stmts = nonempty_stmts body in
             let sets =
               List.map stmts ~f:(function
                 | Low_level.Set { tn; idcs; llsc; _ } -> (tn, idcs, llsc)
@@ -931,40 +1183,6 @@ module C_syntax (B : C_syntax_config) = struct
                 match Hashtbl.add written ~key:tn.Tn.uid ~data:idcs with
                 | `Ok -> ()
                 | `Duplicate -> raise Bail);
-            let contiguous idcs =
-              let n = Array.length idcs in
-              n > 0
-              && Array.for_alli idcs ~f:(fun p idx -> p = n - 1 || not (mentions_comp idx))
-              &&
-              match idcs.(n - 1) with
-              | Indexing.Iterator s -> Indexing.equal_symbol s i
-              | Indexing.Affine { symbols; _ } ->
-                  List.for_all symbols ~f:(fun (c, s) ->
-                      (not (Indexing.equal_symbol s i)) || c = 1)
-                  && List.count symbols ~f:(fun (_, s) -> Indexing.equal_symbol s i) = 1
-              | _ -> false
-            in
-            let check_read tn idcs =
-              match Hashtbl.find written tn.Tn.uid with
-              | Some w_idcs ->
-                  if not (Array.equal Indexing.equal_axis_index w_idcs idcs) then raise Bail
-              | None -> ()
-            in
-            let rec no_written_reads (llsc : Low_level.scalar_t) =
-              match llsc with
-              | Low_level.Get (tn, _) | Get_merge_buffer (tn, _) | Get_dynamic { tn; _ } ->
-                  if Hashtbl.mem written tn.Tn.uid then raise Bail
-              | Local_scope _ | Get_local _ -> raise Bail
-              | Embed_index _ | Constant _ | Constant_bits _ -> ()
-              | Ternop (_, (a, _), (b, _), (c, _)) ->
-                  no_written_reads a;
-                  no_written_reads b;
-                  no_written_reads c
-              | Binop (_, (a, _), (b, _)) ->
-                  no_written_reads a;
-                  no_written_reads b
-              | Unop (_, (a, _)) -> no_written_reads a
-            in
             let stmts_docs = ref [] in
             let emit d = stmts_docs := d :: !stmts_docs in
             let fresh =
@@ -973,97 +1191,12 @@ module C_syntax (B : C_syntax_config) = struct
                 Int.incr ctr;
                 Printf.sprintf "%s%d__" pfx !ctr
             in
-            let uniform_scalar llsc =
-              (* Uniform across lanes: a read of a stored node cannot equal its (index-mentioning)
-                 store vector, so reject those; then render as a plain scalar (vector-scalar
-                 arithmetic splats; in the packed style the scalar participates per lane). *)
-              no_written_reads llsc;
-              let local_defs, sdoc = pp_scalar prec llsc in
-              if not (List.is_empty local_defs) then raise Bail;
-              parens sdoc
-            in
             let prelude =
               match B.vector_style with
               | `Vec_extensions ->
-                  let vtyp =
-                    Printf.sprintf "ocannl_vec%d%s" lanes
-                      (match prec with Ops.Double_prec _ -> "d" | _ -> "f")
-                  in
-                  let vload tn idcs =
-                    if not (contiguous idcs) then raise Bail;
-                    check_read tn idcs;
-                    let name = fresh "vget" in
-                    let offset = pp_array_offset (idcs, Lazy.force tn.Tn.dims) in
-                    emit
-                      (string (vtyp ^ " " ^ name ^ ";")
-                      ^^ hardline
-                      ^^ string ("__builtin_memcpy(&" ^ name ^ ", &")
-                      ^^ string (get_ident tn) ^^ brackets offset
-                      ^^ string (", sizeof(" ^ name ^ "));"));
-                    string name
-                  in
-                  let rec vec_expr (llsc : Low_level.scalar_t) (p : Ops.prec) : PPrint.document =
-                    if not (scalar_mentions llsc) then uniform_scalar llsc
-                    else if not (Ops.equal_prec p prec) then raise Bail
-                    else
-                      match llsc with
-                      | Low_level.Get (tn, idcs) ->
-                          if not (Ops.equal_prec (Lazy.force tn.Tn.prec) prec) then raise Bail;
-                          vload tn idcs
-                      | Binop (op, (a, pa), (b, pb)) ->
-                          let inf =
-                            match op with
-                            | Ops.Add -> " + "
-                            | Sub -> " - "
-                            | Mul -> " * "
-                            | Div -> " / "
-                            | _ -> raise Bail
-                          in
-                          parens (vec_expr a pa ^^ string inf ^^ vec_expr b pb)
-                      | Ternop (Ops.FMA, (a, pa), (b, pb), (c, pc)) ->
-                          (* Fused, matching the scalar path's [fmaf]/[fma] single rounding (the
-                             simplifier synthesizes [FMA] from mul-add trees, so this is the hot
-                             case): clang's [__builtin_elementwise_fma] where available, otherwise
-                             a per-lane fused-fma loop (fixed trip count; SLP-vectorizes under
-                             -mfma/NEON). A plain [a * b + c] would be only maybe-contracted, so
-                             vector lanes could differ from the serial remainder loop and twin.
-                             Operands bind to vector temps (lane-uniform ones splat explicitly:
-                             vector = scalar init is invalid). *)
-                          let bind llsc p =
-                            let name = fresh "vfop" in
-                            emit
-                              (string (vtyp ^ " " ^ name ^ " = ") ^^ vec_operand llsc p ^^ semi);
-                            name
-                          in
-                          let na = bind a pa and nb = bind b pb and nc = bind c pc in
-                          let nr = fresh "vfma" in
-                          let fma_fn =
-                            match prec with Ops.Double_prec _ -> "fma" | _ -> "fmaf"
-                          in
-                          emit
-                            (string (vtyp ^ " " ^ nr ^ ";")
-                            ^^ hardline
-                            ^^ string "#if OCANNL_HAS_ELEMENTWISE_FMA"
-                            ^^ hardline
-                            ^^ string
-                                 (Printf.sprintf "%s = __builtin_elementwise_fma(%s, %s, %s);" nr
-                                    na nb nc)
-                            ^^ hardline ^^ string "#else" ^^ hardline
-                            ^^ string
-                                 (Printf.sprintf
-                                    "for (int ocannl_l__ = 0; ocannl_l__ < %d; ++ocannl_l__) %s[ocannl_l__] = %s(%s[ocannl_l__], %s[ocannl_l__], %s[ocannl_l__]);"
-                                    lanes nr fma_fn na nb nc)
-                            ^^ hardline ^^ string "#endif");
-                          string nr
-                      | Unop (Ops.Identity, (a, pa)) -> vec_expr a pa
-                      | Unop (Ops.Neg, (a, pa)) -> parens (string "-" ^^ vec_expr a pa)
-                      | _ -> raise Bail
-                  and vec_operand (llsc : Low_level.scalar_t) (p : Ops.prec) : PPrint.document =
-                    (* A vector-typed rendering even for lane-uniform values: initializers and
-                       builtin arguments need a vector, where the implicit vector-scalar splat of
-                       binary operators does not apply. *)
-                    if scalar_mentions llsc then vec_expr llsc p
-                    else string ("((" ^ vtyp ^ "){0} + ") ^^ uniform_scalar llsc ^^ string ")"
+                  let vtyp, typedef_doc = vec_ext_typ ~prec ~lanes in
+                  let _vec_expr, vec_operand =
+                    vec_ext_machinery ~prec ~lanes ~vtyp ~written ~emit ~fresh
                   in
                   List.iter sets ~f:(fun (tn, idcs, llsc) ->
                       if not (contiguous idcs) then raise Bail;
@@ -1074,11 +1207,7 @@ module C_syntax (B : C_syntax_config) = struct
                         (string "__builtin_memcpy(&" ^^ string (get_ident tn)
                         ^^ brackets (pp_array_offset (idcs, Lazy.force tn.Tn.dims))
                         ^^ string (", &" ^ vname ^ ", sizeof(" ^ vname ^ "));")));
-                  string
-                    (Printf.sprintf "typedef %s %s __attribute__((vector_size(%d)));"
-                       (B.typ_of_prec prec) vtyp
-                       (lanes * Ops.prec_in_bytes prec))
-                  ^^ hardline
+                  typedef_doc ^^ hardline
               | `Packed_struct ->
                   (* GPU 128-bit packed loads/stores (gh-ocannl-463; llm.c's Packed128): the
                      backend's aligned pack aggregate is loaded/stored via [reinterpret_cast] —
@@ -1119,7 +1248,7 @@ module C_syntax (B : C_syntax_config) = struct
                   in
                   let vload tn idcs =
                     if not (eligible tn idcs) then raise Bail;
-                    check_read tn idcs;
+                    check_read ~written tn idcs;
                     let name = fresh "vget" in
                     emit
                       (string
@@ -1132,7 +1261,7 @@ module C_syntax (B : C_syntax_config) = struct
                   in
                   let lane_var = "ocannl_l__" in
                   let rec lane_expr (llsc : Low_level.scalar_t) (p : Ops.prec) : PPrint.document =
-                    if not (scalar_mentions llsc) then uniform_scalar llsc
+                    if not (scalar_mentions llsc) then uniform_scalar ~written prec llsc
                     else if not (Ops.equal_prec p prec) then raise Bail
                     else
                       match llsc with
@@ -1188,6 +1317,160 @@ module C_syntax (B : C_syntax_config) = struct
               ^^ hardline ^^ string "}")
           with Bail -> None
         in
+        (* SIMD reduction rendering of a [Vectorized] accumulation loop (gh-ocannl-468; ggml's
+           [ggml_vec_dot_f32] pattern, ggml/src/ggml-cpu/vec.h). A recognized accumulation body
+           [acc[idcs] = op(acc[idcs], contrib(i))] renders as a 1×[chains] grid of independent
+           vector accumulator registers — splitting the loop-carried dependency into
+           [chains * lanes] independent chains is exactly the strict-FP reassociation the
+           [Vectorized] retype licenses — updated in a fused main loop advancing by
+           [chains * lanes], then folded register-wise, lane-wise, and finally into the
+           accumulator cell; a serial tail loop reuses the scalar body. [chains] defaults to 4
+           (ggml's [GGML_F32_ARR]: enough independent chains to cover the FMA latency-throughput
+           gap), halved until the first-block initialization fits the extent. Initializing the
+           chains from the first [chains] blocks of contributions avoids needing an identity
+           constant, so [Max]/[Min] reductions work unchanged. [`Vec_extensions] only: on GPU
+           backends reductions parallelize via [Workgroup_reduce] warp shuffles instead, and a
+           bailed-out accumulation falls back to a plain serial loop (never to
+           [vectorize_pragma], which would assert iteration independence). *)
+        let try_vectorize_reduce () : PPrint.document option =
+          try
+            (match B.vector_style with `Vec_extensions -> () | `Packed_struct -> raise Bail);
+            if B.vector_bytes < 8 || from_ <> 0 || Utils.debug_log_from_routines () then
+              raise Bail;
+            let acc_tn, acc_idcs, op, contrib =
+              match recognize_accumulation (nonempty_stmts body) with
+              | Some r -> r
+              | None -> raise Bail
+            in
+            let prec = Lazy.force acc_tn.Tn.prec in
+            (match prec with Ops.Single_prec _ | Ops.Double_prec _ -> () | _ -> raise Bail);
+            (* A loop-invariant contribution deserves strength reduction, not chains. *)
+            if not (scalar_mentions contrib) then raise Bail;
+            let lanes = B.vector_bytes / Ops.prec_in_bytes prec in
+            let extent = to_ + 1 in
+            if lanes < 2 || extent < lanes then raise Bail;
+            let chains =
+              if 4 * lanes <= extent then 4 else if 2 * lanes <= extent then 2 else 1
+            in
+            let step = chains * lanes in
+            let vtyp, typedef_doc = vec_ext_typ ~prec ~lanes in
+            (* The accumulator is not vector-loaded ([contrib] cannot touch it, per the
+               recognizer), so nothing is [written] from the vector expressions' viewpoint. *)
+            let written = Hashtbl.create (module Int) in
+            let stmts_docs = ref [] in
+            let emit d = stmts_docs := d :: !stmts_docs in
+            let take () =
+              let docs = List.rev !stmts_docs in
+              stmts_docs := [];
+              docs
+            in
+            let fresh =
+              let ctr = ref 0 in
+              fun pfx ->
+                Int.incr ctr;
+                Printf.sprintf "%s%d__" pfx !ctr
+            in
+            let _vec_expr, vec_operand =
+              vec_ext_machinery ~prec ~lanes ~vtyp ~written ~emit ~fresh
+            in
+            (* Chain [c] consumes the flat-offset window shifted by [c * lanes]: under the
+               contiguity rule the shift is a constant added to each access's last (loop-index)
+               component. *)
+            let shift_idx ~by (idx : Indexing.axis_index) =
+              match idx with
+              | Indexing.Iterator s when Indexing.equal_symbol s i ->
+                  Indexing.Affine { symbols = [ (1, s) ]; offset = by }
+              | Indexing.Affine { symbols; offset }
+                when List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s i) ->
+                  Indexing.Affine { symbols; offset = offset + by }
+              | _ -> idx
+            in
+            let rec shift ~by (llsc : Low_level.scalar_t) : Low_level.scalar_t =
+              if by = 0 then llsc
+              else
+                match llsc with
+                | Low_level.Get (tn, idcs) ->
+                    Low_level.Get (tn, Array.map idcs ~f:(shift_idx ~by))
+                | Binop (op, (a, pa), (b, pb)) ->
+                    Binop (op, (shift ~by a, pa), (shift ~by b, pb))
+                | Ternop (op, (a, pa), (b, pb), (c, pc)) ->
+                    Ternop (op, (shift ~by a, pa), (shift ~by b, pb), (shift ~by c, pc))
+                | Unop (op, (a, pa)) -> Unop (op, (shift ~by a, pa))
+                (* Any other index-mentioning form bails inside [vec_ext_machinery]. *)
+                | _ -> llsc
+            in
+            let ivar = symbol_ident i in
+            let grid = vec_acc_grid ~prefix:("vred_" ^ ivar) ~rows:1 ~cols:chains in
+            let acc_regs = grid.(0) in
+            (* Chain initialization from the first [chains] blocks, read at [i = 0]. *)
+            Array.iteri acc_regs ~f:(fun c name ->
+                let rhs = vec_operand (shift ~by:(c * lanes) contrib) prec in
+                emit (string (vtyp ^ " " ^ name ^ " = ") ^^ rhs ^^ semi));
+            let init_docs = take () in
+            (* The fused main-loop body: one independent update per chain. *)
+            Array.iteri acc_regs ~f:(fun c name ->
+                match (op, contrib) with
+                | Ops.Add, Low_level.Binop (Ops.Mul, (a, pa), (b, pb)) ->
+                    (* The dot-product case (also reached from the recognizer's FMA form):
+                       fused-multiply-accumulate straight into the chain register. *)
+                    let bind llsc p =
+                      let nm = fresh "vfop" in
+                      emit
+                        (string (vtyp ^ " " ^ nm ^ " = ")
+                        ^^ vec_operand (shift ~by:(c * lanes) llsc) p
+                        ^^ semi);
+                      nm
+                    in
+                    let na = bind a pa in
+                    let nb = bind b pb in
+                    emit (vec_acc_fma ~prec ~lanes ~dst:name ~a:na ~b:nb)
+                | _ ->
+                    let nm = fresh "vsrc" in
+                    emit
+                      (string (vtyp ^ " " ^ nm ^ " = ")
+                      ^^ vec_operand (shift ~by:(c * lanes) contrib) prec
+                      ^^ semi);
+                    emit (vec_acc_combine ~prec ~lanes ~op ~dst:name ~src:nm));
+            let update_docs = take () in
+            let total = "vred_total_" ^ ivar ^ "__" in
+            let acc_cell () =
+              string (get_ident acc_tn)
+              ^^ brackets (pp_array_offset (acc_idcs, Lazy.force acc_tn.Tn.dims))
+            in
+            let epilogue =
+              vec_acc_grid_fold ~prec ~lanes ~op grid
+              @ vec_acc_lane_fold ~prec ~lanes ~op ~vname:acc_regs.(0) ~out:total
+              @ [
+                  acc_cell () ^^ string " = "
+                  ^^ B.binop_syntax prec op (acc_cell ()) (string total)
+                  ^^ semi;
+                ]
+            in
+            let it = B.loop_index_type in
+            Some
+              (string
+                 (Printf.sprintf
+                    "{ /* Vectorized reduction rendering: %d chain(s) of %d lanes of %s. */"
+                    chains lanes (B.typ_of_prec prec))
+              ^^ nest 2
+                   (hardline ^^ typedef_doc ^^ hardline
+                   ^^ string (Printf.sprintf "%s%s = 0;" it ivar)
+                   ^^ hardline
+                   ^^ separate hardline init_docs
+                   ^^ hardline
+                   ^^ string
+                        (Printf.sprintf "for (%s = %d; %s + %d <= %d; %s += %d) {" ivar step ivar
+                           step extent ivar step)
+                   ^^ nest 2 (hardline ^^ separate hardline update_docs)
+                   ^^ hardline ^^ string "}" ^^ hardline
+                   ^^ separate hardline epilogue
+                   ^^ hardline
+                   ^^ string (Printf.sprintf "for (; %s <= %d; ++%s) {" ivar to_ ivar)
+                   ^^ nest 2 (hardline ^^ body_doc ())
+                   ^^ hardline ^^ string "}")
+              ^^ hardline ^^ string "}")
+          with Bail -> None
+        in
         (* Warp-shuffle rendering of a [Workgroup_reduce] accumulation loop (gh-ocannl-462;
            llm.c's [warpReduceSum] / [blockReduce] idiom, llmc/cuda_utils.cuh). Recognizes a body
            that is a single accumulation statement [acc[idcs] = op(acc[idcs], contrib)] (or its
@@ -1213,44 +1496,7 @@ module C_syntax (B : C_syntax_config) = struct
         let try_warp_reduce () : PPrint.document option =
           if B.warp_size <= 0 then None
           else
-            let mentions_comp (idx : Indexing.axis_index) =
-              match idx with
-              | Indexing.Iterator s -> Indexing.equal_symbol s i
-              | Indexing.Affine { symbols; _ } ->
-                  List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s i)
-              | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
-            in
-            let rec touches_tn tn (llsc : Low_level.scalar_t) =
-              match llsc with
-              | Low_level.Get (tn2, _) | Get_merge_buffer (tn2, _) -> Tn.equal tn tn2
-              | Get_dynamic { tn = tn2; dyn_value = v, _; _ } ->
-                  Tn.equal tn tn2 || touches_tn tn v
-              | Local_scope { body; _ } -> body_touches tn body
-              | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ -> false
-              | Ternop (_, (a, _), (b, _), (c, _)) ->
-                  touches_tn tn a || touches_tn tn b || touches_tn tn c
-              | Binop (_, (a, _), (b, _)) -> touches_tn tn a || touches_tn tn b
-              | Unop (_, (a, _)) -> touches_tn tn a
-            and body_touches tn (llc : Low_level.t) =
-              match llc with
-              | Low_level.Noop | Comment _ | Staged_compilation _ | Workgroup_barrier
-              | Declare_local _ ->
-                  false
-              | Seq (a, b) -> body_touches tn a || body_touches tn b
-              | For_loop { body; _ } -> body_touches tn body
-              | If { cond = c, _; body } -> touches_tn tn c || body_touches tn body
-              | Zero_out tn2 -> Tn.equal tn tn2
-              | Set { tn = tn2; llsc; _ } -> Tn.equal tn tn2 || touches_tn tn llsc
-              | Set_from_vec { tn = tn2; arg = a, _; _ } -> Tn.equal tn tn2 || touches_tn tn a
-              | Set_local (_, llsc) -> touches_tn tn llsc
-              | Tile_mma { d = d_tn, _; a = a_tn, _; b = b_tn, _; _ } ->
-                  Tn.equal tn d_tn || Tn.equal tn a_tn || Tn.equal tn b_tn
-            in
-            let stmts =
-              List.filter (Low_level.flat_lines [ body ]) ~f:(function
-                | Low_level.Noop | Comment _ -> false
-                | _ -> true)
-            in
+            let stmts = nonempty_stmts body in
             (* When this loop's extent is smaller than its slot's launch dimension,
                [guard_annotated_extents] has already wrapped the body in the synthetic launch
                guard [If (i < extent)]. Strip exactly that shape — it is vacuous with respect to
@@ -1271,34 +1517,10 @@ module C_syntax (B : C_syntax_config) = struct
               ]
                 when Indexing.equal_symbol s i
                      && Float.equal c (Float.of_int (to_ - from_ + 1)) ->
-                  List.filter (Low_level.flat_lines [ guarded ]) ~f:(function
-                    | Low_level.Noop | Comment _ -> false
-                    | _ -> true)
+                  nonempty_stmts guarded
               | _ -> stmts
             in
-            let recognized =
-              match stmts with
-              | [ Low_level.Set { tn; idcs; llsc; _ } ]
-                when not (Array.exists idcs ~f:mentions_comp) -> (
-                  let is_acc s = Low_level.equal_scalar_t s (Low_level.Get (tn, idcs)) in
-                  let reduce_op = function
-                    | Ops.Add | Ops.Mul | Ops.Max | Ops.Min -> true
-                    | _ -> false
-                  in
-                  match llsc with
-                  | Binop (op, (a, _), (b, _))
-                    when reduce_op op && is_acc a && not (touches_tn tn b) ->
-                      Some (tn, idcs, op, b)
-                  | Binop (op, (a, _), (b, _))
-                    when reduce_op op && is_acc b && not (touches_tn tn a) ->
-                      Some (tn, idcs, op, a)
-                  | Ternop (Ops.FMA, (a, pa), (b, pb), (c, _))
-                    when is_acc c && (not (touches_tn tn a)) && not (touches_tn tn b) ->
-                      Some (tn, idcs, Ops.Add, Low_level.Binop (Ops.Mul, (a, pa), (b, pb)))
-                  | _ -> None)
-              | _ -> None
-            in
-            match recognized with
+            match recognize_accumulation stmts with
             | None -> None
             | Some (tn, idcs, op, contrib) ->
                 let fail msg =
@@ -1451,15 +1673,25 @@ module C_syntax (B : C_syntax_config) = struct
             | Some doc -> doc
             | None -> hardware_binding `Workgroup)
         | Vectorized -> (
-            match try_vectorize () with
+            match try_vectorize_reduce () with
             | Some doc -> doc
             | None -> (
-                (* gh-ocannl-164: a serial loop annotated with the backend's vectorization
-                   pragmas; without them the plain serial loop is the legal fallback (same
-                   discipline as unbound [Grid]/[Workgroup] axes). *)
-                match B.vectorize_pragma with
-                | [] -> serial_loop ()
-                | lines -> separate_map hardline string lines ^^ hardline ^^ serial_loop ()))
+                match try_vectorize () with
+                | Some doc -> doc
+                | None ->
+                    (* gh-ocannl-164: a serial loop annotated with the backend's vectorization
+                       pragmas; without them the plain serial loop is the legal fallback (same
+                       discipline as unbound [Grid]/[Workgroup] axes). The pragmas assert
+                       iteration independence, which a loop-carried accumulation does not
+                       satisfy — an accumulating body that no explicit rendering accepted always
+                       falls back to the plain serial loop (gh-ocannl-468: this is what lets the
+                       autotune menu propose Retype-[Vectorized] over reductions). *)
+                    if Low_level.has_accumulation body then serial_loop ()
+                    else (
+                      match B.vectorize_pragma with
+                      | [] -> serial_loop ()
+                      | lines ->
+                          separate_map hardline string lines ^^ hardline ^^ serial_loop ())))
         | Unrolled ->
             separate hardline
             @@ List.init

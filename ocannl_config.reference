@@ -151,10 +151,14 @@ cc_parallel_chunks=0
 # backends (GCC/Clang vector extensions): eligible loop bodies emit vector loads/arithmetic/stores
 # in width/element-size lanes plus a serial remainder, instead of relying on the compiler's
 # auto-vectorizer (which e.g. cannot reassociate strict-FP reductions -- the Vectorized retype
-# carries that permission, like schedule Swap). Unset or -1 means automatic: 32 when the SIMD
-# probe finds AVX2, else 16 (NEON). 0 disables explicit emission (pragma-hinted auto-vectorization
-# remains). Ineligible bodies (non-elementwise, non-contiguous, cross-lane flow) keep the pragma
-# rendering.
+# carries that permission, like schedule Swap). A recognized accumulation body
+# (acc = op(acc, contrib(i)), op one of + * max min, or the FMA form) renders as independent
+# vector accumulator chains with a horizontal reduce at loop exit (ggml's vec_dot pattern).
+# Unset or -1 means automatic: 32 when the SIMD probe finds AVX2, else 16 (NEON). 0 disables
+# explicit emission (pragma-hinted auto-vectorization remains). Ineligible bodies
+# (non-elementwise, non-contiguous, cross-lane flow) keep the pragma rendering; ineligible
+# ACCUMULATING bodies fall back to a plain serial loop instead (the pragmas would assert
+# iteration independence).
 cc_vector_bytes=-1
 
 # The beam width of `Autotune.tune`'s empirical schedule search: how many of the fastest

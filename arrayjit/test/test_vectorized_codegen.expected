@@ -98,11 +98,11 @@ Found 0, in the config file
       ocannl_vec8f vget6__;
       __builtin_memcpy(&vget6__, &out6[i6], sizeof(vget6__));
       ocannl_vec8f vfop5__ = vget6__;
-      ocannl_vec8f vfma7__;
+      ocannl_vec8f vfma7__ = vfop5__;
       #if OCANNL_HAS_ELEMENTWISE_FMA
-      vfma7__ = __builtin_elementwise_fma(vfop1__, vfop3__, vfop5__);
+      vfma7__ = __builtin_elementwise_fma(vfop1__, vfop3__, vfma7__);
       #else
-      for (int ocannl_l__ = 0; ocannl_l__ < 8; ++ocannl_l__) vfma7__[ocannl_l__] = fmaf(vfop1__[ocannl_l__], vfop3__[ocannl_l__], vfop5__[ocannl_l__]);
+      for (int ocannl_l__ = 0; ocannl_l__ < 8; ++ocannl_l__) vfma7__[ocannl_l__] = fmaf(vfop1__[ocannl_l__], vfop3__[ocannl_l__], vfma7__[ocannl_l__]);
       #endif
       ocannl_vec8f vset8__ = vfma7__;
       __builtin_memcpy(&out6[i6], &vset8__, sizeof(vset8__));
@@ -110,6 +110,155 @@ Found 0, in the config file
     for (; i6 <= 7; ++i6) {
       out6[i6] = fmaf(g1[i6], g2[i6], out6[i6]);
     }
+  }
+}
+ void vec_dot_reduce_kernel(
+    float *restrict da,
+    float *restrict dacc,
+    float *restrict db) {
+
+  /* Local declarations and initialization. */
+
+  /* Main logic. */
+  { /* Vectorized reduction rendering: 4 chain(s) of 8 lanes of float. */
+    typedef float ocannl_vec8f __attribute__((vector_size(32)));
+    int32_t i7 = 0;
+    ocannl_vec8f vget1__;
+    __builtin_memcpy(&vget1__, &db[i7], sizeof(vget1__));
+    ocannl_vec8f vget2__;
+    __builtin_memcpy(&vget2__, &da[i7], sizeof(vget2__));
+    ocannl_vec8f vred_i7_0_0__ = (vget2__ * vget1__);
+    ocannl_vec8f vget3__;
+    __builtin_memcpy(&vget3__, &db[i7+8], sizeof(vget3__));
+    ocannl_vec8f vget4__;
+    __builtin_memcpy(&vget4__, &da[i7+8], sizeof(vget4__));
+    ocannl_vec8f vred_i7_0_1__ = (vget4__ * vget3__);
+    ocannl_vec8f vget5__;
+    __builtin_memcpy(&vget5__, &db[i7+16], sizeof(vget5__));
+    ocannl_vec8f vget6__;
+    __builtin_memcpy(&vget6__, &da[i7+16], sizeof(vget6__));
+    ocannl_vec8f vred_i7_0_2__ = (vget6__ * vget5__);
+    ocannl_vec8f vget7__;
+    __builtin_memcpy(&vget7__, &db[i7+24], sizeof(vget7__));
+    ocannl_vec8f vget8__;
+    __builtin_memcpy(&vget8__, &da[i7+24], sizeof(vget8__));
+    ocannl_vec8f vred_i7_0_3__ = (vget8__ * vget7__);
+    for (i7 = 32; i7 + 32 <= 72; i7 += 32) {
+      ocannl_vec8f vget10__;
+      __builtin_memcpy(&vget10__, &da[i7], sizeof(vget10__));
+      ocannl_vec8f vfop9__ = vget10__;
+      ocannl_vec8f vget12__;
+      __builtin_memcpy(&vget12__, &db[i7], sizeof(vget12__));
+      ocannl_vec8f vfop11__ = vget12__;
+      #if OCANNL_HAS_ELEMENTWISE_FMA
+      vred_i7_0_0__ = __builtin_elementwise_fma(vfop9__, vfop11__, vred_i7_0_0__);
+      #else
+      for (int ocannl_l__ = 0; ocannl_l__ < 8; ++ocannl_l__) vred_i7_0_0__[ocannl_l__] = fmaf(vfop9__[ocannl_l__], vfop11__[ocannl_l__], vred_i7_0_0__[ocannl_l__]);
+      #endif
+      ocannl_vec8f vget14__;
+      __builtin_memcpy(&vget14__, &da[i7+8], sizeof(vget14__));
+      ocannl_vec8f vfop13__ = vget14__;
+      ocannl_vec8f vget16__;
+      __builtin_memcpy(&vget16__, &db[i7+8], sizeof(vget16__));
+      ocannl_vec8f vfop15__ = vget16__;
+      #if OCANNL_HAS_ELEMENTWISE_FMA
+      vred_i7_0_1__ = __builtin_elementwise_fma(vfop13__, vfop15__, vred_i7_0_1__);
+      #else
+      for (int ocannl_l__ = 0; ocannl_l__ < 8; ++ocannl_l__) vred_i7_0_1__[ocannl_l__] = fmaf(vfop13__[ocannl_l__], vfop15__[ocannl_l__], vred_i7_0_1__[ocannl_l__]);
+      #endif
+      ocannl_vec8f vget18__;
+      __builtin_memcpy(&vget18__, &da[i7+16], sizeof(vget18__));
+      ocannl_vec8f vfop17__ = vget18__;
+      ocannl_vec8f vget20__;
+      __builtin_memcpy(&vget20__, &db[i7+16], sizeof(vget20__));
+      ocannl_vec8f vfop19__ = vget20__;
+      #if OCANNL_HAS_ELEMENTWISE_FMA
+      vred_i7_0_2__ = __builtin_elementwise_fma(vfop17__, vfop19__, vred_i7_0_2__);
+      #else
+      for (int ocannl_l__ = 0; ocannl_l__ < 8; ++ocannl_l__) vred_i7_0_2__[ocannl_l__] = fmaf(vfop17__[ocannl_l__], vfop19__[ocannl_l__], vred_i7_0_2__[ocannl_l__]);
+      #endif
+      ocannl_vec8f vget22__;
+      __builtin_memcpy(&vget22__, &da[i7+24], sizeof(vget22__));
+      ocannl_vec8f vfop21__ = vget22__;
+      ocannl_vec8f vget24__;
+      __builtin_memcpy(&vget24__, &db[i7+24], sizeof(vget24__));
+      ocannl_vec8f vfop23__ = vget24__;
+      #if OCANNL_HAS_ELEMENTWISE_FMA
+      vred_i7_0_3__ = __builtin_elementwise_fma(vfop21__, vfop23__, vred_i7_0_3__);
+      #else
+      for (int ocannl_l__ = 0; ocannl_l__ < 8; ++ocannl_l__) vred_i7_0_3__[ocannl_l__] = fmaf(vfop21__[ocannl_l__], vfop23__[ocannl_l__], vred_i7_0_3__[ocannl_l__]);
+      #endif
+    }
+    vred_i7_0_0__ = vred_i7_0_0__ + vred_i7_0_1__;
+    vred_i7_0_0__ = vred_i7_0_0__ + vred_i7_0_2__;
+    vred_i7_0_0__ = vred_i7_0_0__ + vred_i7_0_3__;
+    float vred_total_i7__ = vred_i7_0_0__[0];
+    vred_total_i7__ = (vred_total_i7__ + vred_i7_0_0__[1]);
+    vred_total_i7__ = (vred_total_i7__ + vred_i7_0_0__[2]);
+    vred_total_i7__ = (vred_total_i7__ + vred_i7_0_0__[3]);
+    vred_total_i7__ = (vred_total_i7__ + vred_i7_0_0__[4]);
+    vred_total_i7__ = (vred_total_i7__ + vred_i7_0_0__[5]);
+    vred_total_i7__ = (vred_total_i7__ + vred_i7_0_0__[6]);
+    vred_total_i7__ = (vred_total_i7__ + vred_i7_0_0__[7]);
+    dacc[0] = (dacc[0] + vred_total_i7__);
+    for (; i7 <= 71; ++i7) {
+      dacc[0] = fmaf(da[i7], db[i7], dacc[0]);
+    }
+  }
+}
+ void vec_max_reduce_kernel(
+    float *restrict ma,
+    float *restrict macc) {
+
+  /* Local declarations and initialization. */
+
+  /* Main logic. */
+  { /* Vectorized reduction rendering: 2 chain(s) of 8 lanes of float. */
+    typedef float ocannl_vec8f __attribute__((vector_size(32)));
+    int32_t i8 = 0;
+    ocannl_vec8f vget1__;
+    __builtin_memcpy(&vget1__, &ma[i8], sizeof(vget1__));
+    ocannl_vec8f vred_i8_0_0__ = vget1__;
+    ocannl_vec8f vget2__;
+    __builtin_memcpy(&vget2__, &ma[i8+8], sizeof(vget2__));
+    ocannl_vec8f vred_i8_0_1__ = vget2__;
+    for (i8 = 16; i8 + 16 <= 16; i8 += 16) {
+      ocannl_vec8f vget4__;
+      __builtin_memcpy(&vget4__, &ma[i8], sizeof(vget4__));
+      ocannl_vec8f vsrc3__ = vget4__;
+      for (int ocannl_l__ = 0; ocannl_l__ < 8; ++ocannl_l__) vred_i8_0_0__[ocannl_l__] = fmaxf(vred_i8_0_0__[ocannl_l__],
+        vsrc3__[ocannl_l__]);
+      ocannl_vec8f vget6__;
+      __builtin_memcpy(&vget6__, &ma[i8+8], sizeof(vget6__));
+      ocannl_vec8f vsrc5__ = vget6__;
+      for (int ocannl_l__ = 0; ocannl_l__ < 8; ++ocannl_l__) vred_i8_0_1__[ocannl_l__] = fmaxf(vred_i8_0_1__[ocannl_l__],
+        vsrc5__[ocannl_l__]);
+    }
+    for (int ocannl_l__ = 0; ocannl_l__ < 8; ++ocannl_l__) vred_i8_0_0__[ocannl_l__] = fmaxf(vred_i8_0_0__[ocannl_l__],
+      vred_i8_0_1__[ocannl_l__]);
+    float vred_total_i8__ = vred_i8_0_0__[0];
+    vred_total_i8__ = fmaxf(vred_total_i8__, vred_i8_0_0__[1]);
+    vred_total_i8__ = fmaxf(vred_total_i8__, vred_i8_0_0__[2]);
+    vred_total_i8__ = fmaxf(vred_total_i8__, vred_i8_0_0__[3]);
+    vred_total_i8__ = fmaxf(vred_total_i8__, vred_i8_0_0__[4]);
+    vred_total_i8__ = fmaxf(vred_total_i8__, vred_i8_0_0__[5]);
+    vred_total_i8__ = fmaxf(vred_total_i8__, vred_i8_0_0__[6]);
+    vred_total_i8__ = fmaxf(vred_total_i8__, vred_i8_0_0__[7]);
+    macc[0] = fmaxf(macc[0], vred_total_i8__);
+    for (; i8 <= 15; ++i8) {
+      macc[0] = fmaxf(macc[0], ma[i8]);
+    }
+  }
+}
+ void vec_strided_reduce_kernel(
+    float *restrict sa,
+    float *restrict sacc) {
+
+  /* Local declarations and initialization. */
+
+  /* Main logic. */
+  for (int32_t i9 = 0; i9 <= 7; ++i9) {
+    sacc[0] = (sacc[0] + sa[2*i9]);
   }
 }
 alias parameter rejected: true

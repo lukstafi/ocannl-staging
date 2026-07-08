@@ -2541,6 +2541,42 @@ and scalar_contains_barrier (llsc : scalar_t) : bool =
   | Unop (_, (s, _)) -> scalar_contains_barrier s
   | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> false
 
+(* Whether the tree carries a read-modify-write accumulation: some [Set] (resp. [Set_local])
+   reads its own target — a loop-carried dependency through memory when the written cell does not
+   vary with an enclosing loop. Conservative: [Local_scope] contents count as reading anything,
+   and [Tile_mma] accumulates by construction. Used by the autotune menu and by codegen fallbacks
+   that must not assert iteration independence (e.g. vectorization pragmas) over an accumulating
+   body (gh-ocannl-468). *)
+let has_accumulation (llc : t) : bool =
+  let rec scalar_reads ~read (sc : scalar_t) =
+    let arg (s, _prec) = scalar_reads ~read s in
+    match sc with
+    | Get (tn2, _) -> ( match read with `Tn tn -> Tnode.equal tn tn2 | `Local _ -> false)
+    | Get_local id2 -> (
+        match read with `Local id -> equal_scope_id id id2 | `Tn _ -> false)
+    | Local_scope _ -> true (* Conservative: opaque nested computation. *)
+    | Get_dynamic { tn = tn2; dyn_value; _ } ->
+        (match read with `Tn tn -> Tnode.equal tn tn2 | `Local _ -> false) || arg dyn_value
+    | Get_merge_buffer _ -> false
+    | Ternop (_, a, b, c) -> arg a || arg b || arg c
+    | Binop (_, a, b) -> arg a || arg b
+    | Unop (_, a) -> arg a
+    | Constant _ | Constant_bits _ | Embed_index _ -> false
+  in
+  let rec loop (llc : t) =
+    match llc with
+    | Seq (a, b) -> loop a || loop b
+    | If { body; _ } -> loop body
+    | For_loop { body; _ } -> loop body
+    | Set { tn; llsc; _ } -> scalar_reads ~read:(`Tn tn) llsc
+    | Set_local (id, sc) -> scalar_reads ~read:(`Local id) sc
+    | Tile_mma _ -> true
+    | Set_from_vec _ | Zero_out _ | Declare_local _ | Workgroup_barrier | Noop | Comment _
+    | Staged_compilation _ ->
+        false
+  in
+  loop llc
+
 (** {2 Hardware axis analyses}
 
     Phase B of docs/proposals/axis-types-for-loops.md: pure analyses of hardware-annotated loops.

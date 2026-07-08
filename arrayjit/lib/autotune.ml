@@ -390,39 +390,6 @@ let rec contains_loop = function
   | LL.For_loop _ -> true
   | _ -> false
 
-(* Whether the body carries a read-modify-write accumulation (a loop-carried dependency through
-   memory when the written cell does not vary with the loop). Retype-to-[Vectorized] asserts
-   iteration independence with no structural check downstream (the C backends emit e.g.
-   [#pragma GCC ivdep] when the explicit-SIMD eligibility check falls back to pragmas), so the
-   menu must not propose it over an accumulation. Conservative: [Local_scope] and [Tile_mma]
-   bodies count as accumulating. *)
-let rec accumulates (llc : LL.t) =
-  match llc with
-  | LL.Seq (a, b) -> accumulates a || accumulates b
-  | LL.If { body; _ } -> accumulates body
-  | LL.For_loop { body; _ } -> accumulates body
-  | LL.Set { tn; llsc; _ } -> scalar_reads ~read:(`Tn tn) llsc
-  | LL.Set_local (id, sc) -> scalar_reads ~read:(`Local id) sc
-  | LL.Tile_mma _ -> true
-  | LL.Set_from_vec _ | LL.Zero_out _ | LL.Declare_local _ | LL.Workgroup_barrier | LL.Noop
-  | LL.Comment _ | LL.Staged_compilation _ ->
-      false
-
-and scalar_reads ~read (sc : LL.scalar_t) =
-  let arg (s, _prec) = scalar_reads ~read s in
-  match sc with
-  | LL.Get (tn2, _) -> ( match read with `Tn tn -> phys_equal tn tn2 | `Local _ -> false)
-  | LL.Get_local id2 -> (
-      match read with `Local id -> LL.equal_scope_id id id2 | `Tn _ -> false)
-  | LL.Local_scope _ -> true (* Conservative: opaque nested computation. *)
-  | LL.Get_dynamic { tn = tn2; dyn_value; _ } ->
-      (match read with `Tn tn -> phys_equal tn tn2 | `Local _ -> false) || arg dyn_value
-  | LL.Get_merge_buffer _ -> false
-  | LL.Ternop (_, a, b, c) -> arg a || arg b || arg c
-  | LL.Binop (_, a, b) -> arg a || arg b
-  | LL.Unop (_, a) -> arg a
-  | LL.Constant _ | LL.Constant_bits _ | LL.Embed_index _ -> false
-
 (* Loops proposable for schedule ops: the statement-level nest structure (we do not descend into
    [Local_scope] bodies or [Tile_mma] fallbacks — transforming those is never profitable and
    often invalid), restricted to loops whose binder the registry can name (Stage-internal copy
@@ -449,7 +416,7 @@ let collect_loops registry llc =
                 ld_extent = to_ + 1;
                 ld_axis = axis;
                 ld_innermost = not (contains_loop body);
-                ld_accumulating = accumulates body;
+                ld_accumulating = LL.has_accumulation body;
                 ld_perfect_child;
               }
               :: !acc
@@ -526,14 +493,18 @@ let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) (u : unit_g
     (* CPU renders eligible retyped loops via vector extensions (or vectorization pragmas); GPU
        backends render them as 128-bit packed loads/stores (gh-ocannl-463). Ineligible candidates
        fall back to plain serial loops, so a proposal that fails codegen eligibility merely times
-       like the baseline. *)
+       like the baseline. Accumulating bodies are proposable on CPU (gh-ocannl-468): the renderer
+       either emits the reduction-chains rendering or falls back to a plain serial loop — never
+       to a vectorization pragma, which would assert iteration independence the loop-carried
+       accumulation does not satisfy. On GPU the reduction rendering does not exist (reductions
+       parallelize via [Workgroup_reduce] instead), so accumulations stay excluded. *)
     if not (is_cpu || is_gpu) then []
     else
       List.filter_map loops ~f:(fun ld ->
           if
             LL.equal_axis_type ld.ld_axis LL.Serial
             && ld.ld_innermost
-            && not ld.ld_accumulating
+            && ((not ld.ld_accumulating) || is_cpu)
           then Some (SC.Retype { axis = ld.ld_ref; ty = LL.Vectorized })
           else None)
   in
