@@ -23,7 +23,13 @@ type saved_optop =
   | Swap of { outer : sym_ref; inner : sym_ref }
   | Retype of { axis : sym_ref; ty : LL.axis_type }
   | Unroll of { axis : sym_ref; materialize : bool }
-  | Stage of { source : int; tile_loops : sym_ref list; shared : bool; cooperative : int option }
+  | Stage of {
+      source : int;
+      tile_loops : sym_ref list;
+      shared : bool;
+      cooperative : int option;
+      hoisted : bool;
+    }
   | Privatize of { target : int; over : sym_ref }
   | Expand_zero of { tn : int }
   | Tensorize of { i : sym_ref; j : sym_ref; k : sym_ref; simd_width : int }
@@ -350,7 +356,7 @@ let to_saved r (sched : Schedule.schedule) : saved_schedule * registry =
           | Schedule.Retype { axis; ty } -> (r, Retype { axis = resolve_exn r axis; ty })
           | Schedule.Unroll { axis; materialize } ->
               (r, Unroll { axis = resolve_exn r axis; materialize })
-          | Schedule.Stage { source; tile_loops; shared; cooperative } ->
+          | Schedule.Stage { source; tile_loops; shared; cooperative; hoisted } ->
               ( r,
                 Stage
                   {
@@ -358,6 +364,7 @@ let to_saved r (sched : Schedule.schedule) : saved_schedule * registry =
                     tile_loops = List.map tile_loops ~f:(resolve_exn r);
                     shared;
                     cooperative;
+                    hoisted;
                   } )
           | Schedule.Privatize { target; over } ->
               (r, Privatize { target = resolve_tn_exn r target; over = resolve_exn r over })
@@ -396,7 +403,7 @@ let of_saved canonical (saved : saved_schedule) : Schedule.schedule * registry =
           | Retype { axis; ty } -> (r, Schedule.Retype { axis = unresolve_exn r axis; ty })
           | Unroll { axis; materialize } ->
               (r, Schedule.Unroll { axis = unresolve_exn r axis; materialize })
-          | Stage { source; tile_loops; shared; cooperative } ->
+          | Stage { source; tile_loops; shared; cooperative; hoisted } ->
               ( r,
                 Schedule.Stage
                   {
@@ -404,6 +411,7 @@ let of_saved canonical (saved : saved_schedule) : Schedule.schedule * registry =
                     tile_loops = List.map tile_loops ~f:(unresolve_exn r);
                     shared;
                     cooperative;
+                    hoisted;
                   } )
           | Privatize { target; over } ->
               ( r,
@@ -442,7 +450,7 @@ type entry = {
 }
 [@@deriving sexp]
 
-let entry_version = 2
+let entry_version = 3
 
 let sanitize name =
   String.map name ~f:(fun c ->

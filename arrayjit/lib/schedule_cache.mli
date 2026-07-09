@@ -44,7 +44,13 @@ type saved_optop =
   | Swap of { outer : sym_ref; inner : sym_ref }
   | Retype of { axis : sym_ref; ty : Low_level.axis_type }
   | Unroll of { axis : sym_ref; materialize : bool }
-  | Stage of { source : int; tile_loops : sym_ref list; shared : bool; cooperative : int option }
+  | Stage of {
+      source : int;
+      tile_loops : sym_ref list;
+      shared : bool;
+      cooperative : int option;
+      hoisted : bool;
+    }
   | Privatize of { target : int; over : sym_ref }
   | Expand_zero of { tn : int }
   | Tensorize of { i : sym_ref; j : sym_ref; k : sym_ref; simd_width : int }
