@@ -176,6 +176,13 @@ val tensorize :
 (** Builds a {!constructor-Tensorize} with a fresh lane symbol (via [Indexing.get_symbol]) and
     returns it. *)
 
+val hoistable_constant : Tn.t -> bool
+(** Whether the node is eligible as a [hoisted] {!constructor-Stage} source: declared
+    value-constant ([Tnode.known_host_constant]) with registered host-init data to pack from.
+    Shared by the autotune sketch and by [Schedule_cache.canonicalize], which renders it per
+    tensor node so that same-shape programs differing in operand constancy do not share cached
+    schedules. *)
+
 val apply :
   ?static_indices:Indexing.static_symbol list ->
   schedule ->

@@ -170,3 +170,29 @@ let () =
   | exception Invalid_argument msg ->
       p "hoisting a non-constant source is rejected"
         (String.is_substring msg ~substring:"hoisted staging requires a known-constant source")
+
+(* --- 4. Operand constancy enters the canonical digest --- *)
+(* Same-shape matmuls over constant vs trainable operands must not share schedule-cache keys: a
+   cached non-hoisted winner for the trainable program would otherwise mask the constant
+   program's hoisted candidates, and a hoisted winner would replay against a site it cannot
+   apply to (Codex P2 on PR #123). *)
+let () =
+  let n = 32 in
+  let ma, mb = make_pair n in
+  let%op mc0 = ma * mb in
+  let wv = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 7) *. 0.5) in
+  let w = TDSL.param ~values:wv "w" ~input_dims:[ n ] ~output_dims:[ n ] () in
+  let%op mc1 = ma * w in
+  let digest comp =
+    let d = ref "" in
+    let transform opt =
+      d := Ir.Schedule_cache.digest (Ir.Schedule_cache.canonicalize opt);
+      opt
+    in
+    let (_ : Context.t * _) = Context.compile ~lowered_transform:transform (Context.auto ()) comp Ir.Indexing.Empty in
+    !d
+  in
+  let d_const = digest (named "mmd_const" (Train.forward mc0)) in
+  let d_param = digest (named "mmd_param" (Train.forward mc1)) in
+  p "operand constancy enters the schedule-cache digest"
+    ((not (String.is_empty d_const)) && not (String.equal d_const d_param))

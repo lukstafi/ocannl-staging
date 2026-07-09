@@ -4,3 +4,4 @@ hoisted-packed matmul matches the naive twin: true
 no in-kernel scratch or copy nests; packed constants are buffer params: true
 mixed hoisted + in-kernel packing on edge tiles matches the naive twin: true
 hoisting a non-constant source is rejected: true
+operand constancy enters the schedule-cache digest: true

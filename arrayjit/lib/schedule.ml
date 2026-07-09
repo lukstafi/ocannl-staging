@@ -640,6 +640,15 @@ let remap_reads ?(writes = false) ~source ~from_idcs ~tile ~tile_idcs (llc : Low
   in
   code llc
 
+(* A constant operand eligible for hoisted (out-of-routine) packing: declared value-constant with
+   registered host-init data to pack from (gh-ocannl-470). Shared by the autotune sketch (which
+   proposes hoisted candidates only for such operands) and the canonical digest
+   ([Schedule_cache.canonicalize] renders it per tnode, so same-shape programs differing in
+   operand constancy do not share cached schedules — a hoisted winner must not replay against a
+   non-hoistable site, and a non-hoisted winner must not mask the hoisted candidates of a
+   constant site; Codex P2 on PR #123). *)
+let hoistable_constant tn = Tn.known_host_constant tn && Host_inits.mem tn
+
 (* Host-side packing for hoisted Stage (gh-ocannl-470): materialize the packed layout of a
    constant operand from its host-init data. Forced at link/upload time — through the packed
    node's own [Host_inits] lazy — and uploaded into the per-device constant pool like any other

@@ -99,10 +99,16 @@ let canonicalize ?(static_indices = []) (opt : LL.optimized) : canonical =
         Hashtbl.set tn_refs ~key:tn ~data:i;
         rev_tns := tn :: !rev_tns;
         let dims = Lazy.force tn.Tn.dims in
+        (* Hoistability enters the digest alongside dims and precision (gh-ocannl-470, Codex P2
+           on PR #123): a hoisted-[Stage] winner is only valid against constant operands, and a
+           non-hoisted winner cached for a same-shape non-constant program must not mask a
+           constant program's hoisted candidates — so such programs must not share cache keys. *)
+        let hc = if Schedule.hoistable_constant tn then ";const" else "" in
         add
-          (Printf.sprintf "t%d=[%s;%s]" i
+          (Printf.sprintf "t%d=[%s;%s%s]" i
              (String.concat_array ~sep:"," (Array.map dims ~f:Int.to_string))
-             (Sexp.to_string (Ops.sexp_of_prec (Lazy.force tn.Tn.prec))))
+             (Sexp.to_string (Ops.sexp_of_prec (Lazy.force tn.Tn.prec)))
+             hc)
   in
   (* Local scope ids come from a process-global counter freshly on each lowering (like loop
      symbols), so digest their first-occurrence alpha index, not the raw id — otherwise sibling

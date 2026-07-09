@@ -209,9 +209,11 @@ let gpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = b
       Sched.Unroll { axis = j_t; materialize = true };
     ]
 
-(* A constant operand eligible for hoisted (out-of-routine) packing: declared compile-time
-   constant with registered host-init data to pack from (gh-ocannl-470). *)
-let hoistable tn = Ir.Tnode.known_host_constant tn && Ir.Host_inits.mem tn
+(* A constant operand eligible for hoisted (out-of-routine) packing (gh-ocannl-470). The same
+   predicate enters the canonical digest ([Schedule_cache.canonicalize]), so a cached winner for
+   a same-shape program of different operand constancy never replays here — hoisted candidates
+   are always measured for constant sites. *)
+let hoistable = Sched.hoistable_constant
 
 (* The CPU operand-packing matmul (schedule_cpu_pack_matmul.ml): all-serial tiling with the tile
    loops sunk to [i_o j_o k_o k_i i_i j_i], operands packed into contiguous stack scratch, output
