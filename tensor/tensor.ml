@@ -771,6 +771,10 @@ let ndarray ?(grad_spec = Prohibit_grad) values ?(label = []) ?top_down_prec ?ba
       ?output_dims ?input_axes ?output_axes ?deduced ()
   in
   Tn.update_memory_mode t.value Effectively_constant 24;
+  (* The ndarray-backed path mints the node [On_device] (provenance 49), so the update above
+     cannot stick as [Effectively_constant] there; the explicit marker carries the constancy
+     (consumed by hoisted operand packing, gh-ocannl-470). *)
+  Tn.set_host_constant t.value;
   let max_abs = Array.fold values ~init:0. ~f:(fun acc v -> Float.(max acc @@ abs v)) in
   Ir.Ops.(
     if exceeds_fp16_cutoff max_abs then
