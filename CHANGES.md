@@ -7,6 +7,15 @@
 
 ### Added
 
+- Packed constants (gh-ocannl-470): `Schedule.Stage` gained `hoisted = true`, packing a
+  compile-time-constant operand once, out of the routine — the packed layout covers the
+  whole source, is computed on the host at link time from the operand's host-init data
+  (the compiler-native analog of ggml's `CPU_REPACK` `set_tensor` hook), and is uploaded
+  once per device into the constant pool; the kernel reads it directly, with no
+  per-invocation load nest. The CPU autotune sketch proposes hoisted and in-kernel
+  packing side by side for constant operands, so the choice stays measured. Constancy
+  rides a new `Tnode.host_constant` marker set by `Tensor.ndarray` (ndarray-backed
+  literals are minted `On_device`, so `Effectively_constant` intent could not stick).
 - **Removed the hosted tensor mode** (gh-ocannl-333): dropped the `array` field of
   `Tnode.t` and the "hosted" memory mode. Tensor value access and printing are now
   context-mediated; host-init nodes self-initialize at link time. Removed the dead
