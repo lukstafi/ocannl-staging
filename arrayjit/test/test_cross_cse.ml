@@ -25,6 +25,7 @@ let summarize (llc : LL.t) : int * int * int =
     | LL.Seq (a, b) -> count_proc (count_proc acc a) b
     | LL.For_loop { body; _ } -> count_proc acc body
     | LL.Set { llsc; _ } -> count_scalar acc llsc
+    | LL.Set_dynamic { dyn_value = v, _; llsc; _ } -> count_scalar (count_scalar acc v) llsc
     | LL.Set_from_vec { arg = s, _; _ } -> count_scalar acc s
     | LL.Set_local (_, s) -> count_scalar acc s
     | LL.If { cond = c, _; body } -> count_proc (count_scalar acc c) body

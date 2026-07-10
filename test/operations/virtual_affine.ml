@@ -76,6 +76,10 @@ let rec walk_t ~on_set ~on_get (llc : LL.t) =
   | LL.Set { tn; llsc; _ } ->
       on_set tn;
       walk_s ~on_set ~on_get llsc
+  | LL.Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
+      on_set tn;
+      walk_s ~on_set ~on_get v;
+      walk_s ~on_set ~on_get llsc
   | LL.Set_from_vec { tn; arg = s, _; _ } ->
       on_set tn;
       walk_s ~on_set ~on_get s

@@ -7,6 +7,15 @@
 
 ### Added
 
+- Deterministic scatter for embedding-table gradients (gh-ocannl-466):
+  `rewrite_one_hot_reductions` also recognizes the transposed one-hot pattern — the
+  embedding backward `d_C[o,v] += Σ_pos (v == ids[pos]) * g[pos,o]` — and replaces the
+  vocabulary loop with a guarded scatter-accumulate at the dynamic row (`Set_dynamic`,
+  the write counterpart of gh-343's `Get_dynamic` gather), dropping the O(vocab)
+  per-position work. Positions accumulate in their original serial order and the
+  schedule analyses treat dynamically-indexed writes as never parallelizable, so results
+  stay deterministic with no atomics (llm.c's encoder-backward invariant; host-side
+  bucketing for GPU position-parallelism is a possible phase 2).
 - Packed constants (gh-ocannl-470): `Schedule.Stage` gained `hoisted = true`, packing a
   compile-time-constant operand once, out of the routine — the packed layout covers the
   whole source, is computed on the host at link time from the operand's host-init data

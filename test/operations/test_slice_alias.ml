@@ -56,6 +56,10 @@ let count_writes_to (llc : Ir.Low_level.t) (id : int) : int =
     | Set { tn; llsc; _ } ->
         hit tn;
         go_scalar llsc
+    | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
+        hit tn;
+        go_scalar v;
+        go_scalar llsc
     | Set_from_vec { tn; arg = s, _; _ } ->
         hit tn;
         go_scalar s

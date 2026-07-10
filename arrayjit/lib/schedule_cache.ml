@@ -232,6 +232,15 @@ let canonicalize ?(static_indices = []) (opt : LL.optimized) : canonical =
         add ":=";
         emit_scalar llsc;
         add ";"
+    | LL.Set_dynamic { tn; idcs; dyn_axis; dyn_value; llsc; debug = _ } ->
+        add "setdyn ";
+        emit_tn tn;
+        emit_idcs idcs;
+        add ("@" ^ Int.to_string dyn_axis ^ "=");
+        emit_arg dyn_value;
+        add ":=";
+        emit_scalar llsc;
+        add ";"
     | LL.Set_from_vec { tn; idcs; length; vec_unop; arg; debug = _ } ->
         add ("setv" ^ Int.to_string length ^ " ");
         emit_tn tn;

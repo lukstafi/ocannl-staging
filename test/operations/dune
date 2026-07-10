@@ -981,6 +981,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name test_one_hot_embedding_backward)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules test_one_hot_embedding_backward)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name test_bounds_folded_gather)
  (package neural_nets_lib)
  (deps

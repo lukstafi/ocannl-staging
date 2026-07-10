@@ -719,6 +719,11 @@ module C_syntax (B : C_syntax_config) = struct
       | Set { tn; idcs; llsc; _ } ->
           access tn idcs ~write:true;
           go_sc llsc
+      | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
+          (* The dynamic slot's effective index is data-dependent: conservatively a miss. *)
+          access tn [||] ~write:true;
+          go_sc v;
+          go_sc llsc
       | Set_from_vec { tn; idcs; arg = a, _; _ } ->
           access tn idcs ~write:true;
           go_sc a
@@ -970,14 +975,16 @@ module C_syntax (B : C_syntax_config) = struct
           | Unop (_, (a, _)) -> touches_tn tn a
         and body_touches tn (llc : Low_level.t) =
           match llc with
-          | Low_level.Noop | Comment _ | Staged_compilation _ | Workgroup_barrier
-          | Declare_local _ ->
+          | Low_level.Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _
+            ->
               false
           | Seq (a, b) -> body_touches tn a || body_touches tn b
           | For_loop { body; _ } -> body_touches tn body
           | If { cond = c, _; body } -> touches_tn tn c || body_touches tn body
           | Zero_out tn2 -> Tn.equal tn tn2
           | Set { tn = tn2; llsc; _ } -> Tn.equal tn tn2 || touches_tn tn llsc
+          | Set_dynamic { tn = tn2; dyn_value = v, _; llsc; _ } ->
+              Tn.equal tn tn2 || touches_tn tn v || touches_tn tn llsc
           | Set_from_vec { tn = tn2; arg = a, _; _ } -> Tn.equal tn tn2 || touches_tn tn a
           | Set_local (_, llsc) -> touches_tn tn llsc
           | Tile_mma { d = d_tn, _; a = a_tn, _; b = b_tn, _; _ } ->
@@ -1778,6 +1785,73 @@ module C_syntax (B : C_syntax_config) = struct
         else
           let block_content = local_defs ^^ hardline ^^ assignment in
           lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace
+    | Set_dynamic { tn; idcs; dyn_axis; dyn_value = iv, iprec; llsc; debug } ->
+        (* gh-466: the scatter counterpart of the [Get_dynamic] gather — the write offset splices
+           the runtime index (cast to [Ops.index_prec ()], mirroring the gather) at [dyn_axis]. The
+           enclosing [If] guard (when interval analysis has not discharged it) guarantees the index
+           is in range before this statement executes. *)
+        let ident_doc = string (get_ident tn) in
+        let dims = Lazy.force tn.dims in
+        let prec = Lazy.force tn.prec in
+        let dyn_defs, dyn_expr = pp_scalar iprec iv in
+        let idx_typ = B.typ_of_prec (Ops.index_prec ()) in
+        let dyn_idx_doc = string ("((" ^ idx_typ ^ ")(") ^^ dyn_expr ^^ string "))" in
+        let offset_doc = pp_array_offset_dyn (idcs, dims) ~dyn_axis ~dyn_idx_doc in
+        let val_defs, val_doc = pp_scalar prec llsc in
+        let local_defs = pp_local_defs (dyn_defs @ val_defs) in
+        let assignment =
+          group
+            (ident_doc ^^ brackets offset_doc ^^ string " ="
+            ^^ ifflat (space ^^ val_doc) (nest 4 (hardline ^^ val_doc))
+            ^^ semi)
+        in
+        if Utils.debug_log_from_routines () then
+          let num_typ = string (B.typ_of_prec prec) in
+          let new_var = string "new_set_v" in
+          let decl = num_typ ^^ space ^^ new_var ^^ string " = " ^^ val_doc ^^ semi in
+          let debug_val_doc, debug_args_docs = debug_float prec llsc in
+          let debug_val_str = doc_to_string debug_val_doc in
+          let pp_args_docs =
+            List.map debug_args_docs ~f:(function
+              | `Accessor idx -> pp_array_offset idx
+              | `Value v_doc -> B.styled_log_arg v_doc)
+          in
+          let log_args_for_printf =
+            offset_doc
+            :: B.styled_log_arg (ident_doc ^^ brackets offset_doc)
+            :: B.styled_log_arg new_var :: pp_args_docs
+          in
+          let log_doc =
+            let log_param_doc = Option.map B.kernel_log_param ~f:(fun (_, name) -> string name) in
+            let comment_base_msg = "# " ^ debug ^ "\n" in
+            let value_base_msg =
+              Printf.sprintf "%s[%%u]{=%s} = %s = %s\n" (get_ident tn) B.float_log_style
+                B.float_log_style debug_val_str
+            in
+            let comment_log =
+              B.pp_log_statement ~log_param_c_expr_doc:log_param_doc
+                ~base_message_literal:comment_base_msg ~args_docs:[]
+            in
+            let value_log =
+              B.pp_log_statement ~log_param_c_expr_doc:log_param_doc
+                ~base_message_literal:value_base_msg ~args_docs:log_args_for_printf
+            in
+            let flush_log =
+              if B.log_involves_file_management then string "fflush(log_file);" else empty
+            in
+            comment_log ^^ hardline ^^ value_log ^^ hardline ^^ flush_log
+          in
+          let assignment' = ident_doc ^^ brackets offset_doc ^^ string " = " ^^ new_var ^^ semi in
+          let block_content =
+            if PPrint.is_empty local_defs then
+              decl ^^ hardline ^^ log_doc ^^ hardline ^^ assignment'
+            else local_defs ^^ hardline ^^ decl ^^ hardline ^^ log_doc ^^ hardline ^^ assignment'
+          in
+          lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace
+        else if PPrint.is_empty local_defs then assignment
+        else
+          let block_content = local_defs ^^ hardline ^^ assignment in
+          lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace
     | Comment message ->
         if Utils.debug_log_from_routines () then
           let base_message = "COMMENT: " ^ message ^ "\n" in
@@ -2242,9 +2316,9 @@ module C_syntax (B : C_syntax_config) = struct
         (* gh-343: a guarded dynamic gather. The dynamic index is spliced into the row-major offset
            at [dyn_axis] as an integer; the enclosing [Where] guard (when interval analysis has not
            discharged it against proven bounds) guarantees it is in range before this load is
-           evaluated (C ternary short-circuits). Cast to [Ops.index_prec ()] so the index tracks
-           the same width as loop counters (signed int32 normally, int64 under large_models),
-           preventing truncation for very large table/vocabulary axes. *)
+           evaluated (C ternary short-circuits). Cast to [Ops.index_prec ()] so the index tracks the
+           same width as loop counters (signed int32 normally, int64 under large_models), preventing
+           truncation for very large table/vocabulary axes. *)
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
         let from_prec = Lazy.force tn.prec in

@@ -103,9 +103,26 @@ let rec map_code ~fidx (llc : Low_level.t) : Low_level.t =
   | For_loop fc -> For_loop { fc with body = map_code ~fidx fc.body }
   | Set { tn; idcs; llsc; debug } ->
       Set { tn; idcs = Array.map idcs ~f:fidx; llsc = map_scalar ~fidx llsc; debug }
+  | Set_dynamic { tn; idcs; dyn_axis; dyn_value = v, p; llsc; debug } ->
+      Set_dynamic
+        {
+          tn;
+          idcs = Array.map idcs ~f:fidx;
+          dyn_axis;
+          dyn_value = (map_scalar ~fidx v, p);
+          llsc = map_scalar ~fidx llsc;
+          debug;
+        }
   | Set_from_vec { tn; idcs; length; vec_unop; arg = a, p; debug } ->
       Set_from_vec
-        { tn; idcs = Array.map idcs ~f:fidx; length; vec_unop; arg = (map_scalar ~fidx a, p); debug }
+        {
+          tn;
+          idcs = Array.map idcs ~f:fidx;
+          length;
+          vec_unop;
+          arg = (map_scalar ~fidx a, p);
+          debug;
+        }
   | Set_local (id, llsc) -> Set_local (id, map_scalar ~fidx llsc)
   | Tile_mma { d = d_tn, d_idcs; a = a_tn, a_idcs; b = b_tn, b_idcs; m; n; k; lane; fallback } ->
       Tile_mma
@@ -131,7 +148,8 @@ and map_scalar ~fidx (llsc : Low_level.scalar_t) : Low_level.scalar_t =
   | Get_local _ | Constant _ | Constant_bits _ -> llsc
   | Get (tn, idcs) -> Get (tn, Array.map idcs ~f:fidx)
   | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, p } ->
-      Get_dynamic { tn; idcs = Array.map idcs ~f:fidx; dyn_axis; dyn_value = (map_scalar ~fidx v, p) }
+      Get_dynamic
+        { tn; idcs = Array.map idcs ~f:fidx; dyn_axis; dyn_value = (map_scalar ~fidx v, p) }
   | Get_merge_buffer (tn, idcs) -> Get_merge_buffer (tn, Array.map idcs ~f:fidx)
   | Ternop (op, (a, pa), (b, pb), (c, pc)) ->
       Ternop (op, (map_scalar ~fidx a, pa), (map_scalar ~fidx b, pb), (map_scalar ~fidx c, pc))
@@ -199,6 +217,9 @@ let refresh_scopes (llc : Low_level.t) : Low_level.t =
         collect b
     | For_loop { body; _ } | If { body; _ } -> collect body
     | Set { llsc; _ } | Set_local (_, llsc) -> collect_scalar llsc
+    | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+        collect_scalar v;
+        collect_scalar llsc
     | Set_from_vec { arg = a, _; _ } -> collect_scalar a
   and collect_scalar (llsc : scalar_t) =
     match llsc with
@@ -231,6 +252,8 @@ let refresh_scopes (llc : Low_level.t) : Low_level.t =
       | For_loop fc -> For_loop { fc with body = code fc.body }
       | If { cond = c, p; body } -> If { cond = (scalar c, p); body = code body }
       | Set ({ llsc; _ } as s) -> Set { s with llsc = scalar llsc }
+      | Set_dynamic ({ dyn_value = v, p; llsc; _ } as sd) ->
+          Set_dynamic { sd with dyn_value = (scalar v, p); llsc = scalar llsc }
       | Set_local (id, llsc) -> Set_local (subst id, scalar llsc)
       | Set_from_vec ({ arg = a, p; _ } as sv) -> Set_from_vec { sv with arg = (scalar a, p) }
     and scalar (llsc : scalar_t) : scalar_t =
@@ -239,7 +262,8 @@ let refresh_scopes (llc : Low_level.t) : Low_level.t =
           Local_scope { id = subst id; body = code body; orig_indices }
       | Get_local id -> Get_local (subst id)
       | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> llsc
-      | Get_dynamic ({ dyn_value = v, p; _ } as gd) -> Get_dynamic { gd with dyn_value = (scalar v, p) }
+      | Get_dynamic ({ dyn_value = v, p; _ } as gd) ->
+          Get_dynamic { gd with dyn_value = (scalar v, p) }
       | Ternop (op, (a, pa), (b, pb), (c, pc)) ->
           Ternop (op, (scalar a, pa), (scalar b, pb), (scalar c, pc))
       | Binop (op, (a, pa), (b, pb)) -> Binop (op, (scalar a, pa), (scalar b, pb))
@@ -574,6 +598,10 @@ let collect_source_accesses ~source (llc : Low_level.t) :
     | Set { tn; llsc; _ } ->
         reject_write tn;
         scalar stack llsc
+    | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
+        reject_write tn;
+        scalar stack v;
+        scalar stack llsc
     | Set_from_vec { tn; arg = a, _; _ } ->
         reject_write tn;
         scalar stack a
@@ -621,18 +649,22 @@ let remap_reads ?(writes = false) ~source ~from_idcs ~tile ~tile_idcs (llc : Low
       when writes && Tn.equal tn source && Array.equal Indexing.equal_axis_index idcs from_idcs ->
         Set { tn = tile; idcs = tile_idcs; llsc = scalar llsc; debug }
     | Set { tn; idcs; llsc; debug } -> Set { tn; idcs; llsc = scalar llsc; debug }
+    (* A dynamically-indexed write never matches the exact [from_idcs]; leave it in place. *)
+    | Set_dynamic ({ dyn_value = v, p; llsc; _ } as sd) ->
+        Set_dynamic { sd with dyn_value = (scalar v, p); llsc = scalar llsc }
     | Set_from_vec ({ arg = a, p; _ } as sv) -> Set_from_vec { sv with arg = (scalar a, p) }
     | Set_local (id, llsc) -> Set_local (id, scalar llsc)
     | If { cond = c, p; body } -> If { cond = (scalar c, p); body = code body }
   and scalar (llsc : scalar_t) : scalar_t =
     match llsc with
-    | Get (tn, idcs)
-      when Tn.equal tn source && Array.equal Indexing.equal_axis_index idcs from_idcs ->
+    | Get (tn, idcs) when Tn.equal tn source && Array.equal Indexing.equal_axis_index idcs from_idcs
+      ->
         Get (tile, tile_idcs)
     | Get _ | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ ->
         llsc
     | Local_scope ({ body; _ } as ls) -> Local_scope { ls with body = code body }
-    | Get_dynamic ({ dyn_value = v, p; _ } as gd) -> Get_dynamic { gd with dyn_value = (scalar v, p) }
+    | Get_dynamic ({ dyn_value = v, p; _ } as gd) ->
+        Get_dynamic { gd with dyn_value = (scalar v, p) }
     | Ternop (op, (a, pa), (b, pb), (c, pc)) ->
         Ternop (op, (scalar a, pa), (scalar b, pb), (scalar c, pc))
     | Binop (op, (a, pa), (b, pb)) -> Binop (op, (scalar a, pa), (scalar b, pb))
@@ -1199,6 +1231,11 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
               has_write := true;
               accesses := (idcs, stack, conds) :: !accesses);
             scan_scalar stack conds llsc
+        | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
+            if Tn.equal tn target then
+              invalid_arg "Schedule.Privatize: dynamically indexed target writes are unsupported";
+            scan_scalar stack conds v;
+            scan_scalar stack conds llsc
         | Set_from_vec { tn; arg = a, _; _ } ->
             if Tn.equal tn target then
               invalid_arg "Schedule.Privatize: vector writes to the target are unsupported";
@@ -1211,8 +1248,7 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
         match llsc with
         | Local_scope { body; _ } -> scan stack conds body
         | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
-        | Get (tn, idcs) ->
-            if Tn.equal tn target then accesses := (idcs, stack, conds) :: !accesses
+        | Get (tn, idcs) -> if Tn.equal tn target then accesses := (idcs, stack, conds) :: !accesses
         | Get_dynamic { tn; dyn_value = v, _; _ } ->
             if Tn.equal tn target then
               invalid_arg "Schedule.Privatize: dynamically indexed target accesses are unsupported";
@@ -1266,6 +1302,9 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
                  go b
              | If { body; _ } -> go body
              | Set { llsc; _ } | Set_local (_, llsc) -> go_scalar llsc
+             | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+                 go_scalar v;
+                 go_scalar llsc
              | Set_from_vec { arg = a, _; _ } -> go_scalar a
              | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _
              | Workgroup_barrier | Tile_mma _ ->
@@ -1518,10 +1557,19 @@ let scan_accesses plc (llc : Low_level.t) : access list =
         code ~depth body
     | Zero_out tn ->
         if Tn.Placements.is_materialized_peek plc tn then raise Bail
-        (* Zeroing per-thread scratch is safe: each thread zeroes its own copy. *)
+          (* Zeroing per-thread scratch is safe: each thread zeroes its own copy. *)
     | Set { tn; idcs; llsc; _ } ->
         if depth > 0 && Tn.Placements.is_materialized_peek plc tn then raise Bail;
         add ~depth ~write:true ~dynamic:false tn idcs;
+        scalar ~depth llsc
+    | Set_dynamic { tn; idcs; dyn_value = v, _; llsc; _ } ->
+        (* gh-466: the scatter's effective write index is not statically known. Registering it
+           [~dynamic:true] makes the per-nest hazard analysis bail on any parallelization over the
+           written node and the cross-nest alignment reject it — the deterministic no-atomics
+           invariant: loops driving the dynamic index stay serial. *)
+        if depth > 0 && Tn.Placements.is_materialized_peek plc tn then raise Bail;
+        add ~depth ~write:true ~dynamic:true tn idcs;
+        scalar ~depth v;
         scalar ~depth llsc
     | Set_from_vec { tn; idcs; arg = a, _; _ } ->
         if depth > 0 && Tn.Placements.is_materialized_peek plc tn then raise Bail;
@@ -1939,6 +1987,11 @@ let summarize_stmt plc (stmt : Low_level.t) : stmt_summary option =
     | Set { tn; llsc; _ } ->
         writes := Set.add !writes tn;
         scalar llsc
+    | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
+        (* The RMW read of [tn] surfaces via the [Get_dynamic] inside [llsc]. *)
+        writes := Set.add !writes tn;
+        scalar v;
+        scalar llsc
     | Set_from_vec { tn; arg = a, _; _ } ->
         writes := Set.add !writes tn;
         scalar a
@@ -2291,6 +2344,10 @@ let code_footprint (llc : Low_level.t) : Set.M(Tn).t * bool =
     | Zero_out tn -> add tn
     | Set { tn; llsc; _ } ->
         add tn;
+        scalar llsc
+    | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
+        add tn;
+        scalar v;
         scalar llsc
     | Set_from_vec { tn; arg = a, _; _ } ->
         add tn;

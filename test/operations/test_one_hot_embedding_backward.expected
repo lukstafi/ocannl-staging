@@ -1,0 +1,14 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+float ids: table gradient equals the dense one-hot gradient: true
+optimized IR contains a Set_dynamic scatter: true
+vocabulary loop is eliminated from the whole update: true
+float ids: scatter guard contains the integrality Trunc: true
+generated C contains a dynamically indexed write: true
+generated C has no vocabulary reduction loop (zero-init only): true
+OOB and fractional ids: untouched rows stay zero, in-range rows correct: true
+uint32 ids: table gradient equals the dense one-hot gradient (OOB id skipped): true
+uint32 ids: optimized IR contains a Set_dynamic scatter: true
+uint32 ids: vocabulary loop is eliminated: true
+uint32 ids: scatter guard has no integrality Trunc: true
+ordinary matmul backward is not rewritten to a scatter: true
