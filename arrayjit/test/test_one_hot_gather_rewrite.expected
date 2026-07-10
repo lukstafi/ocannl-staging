@@ -6,3 +6,10 @@ scalar-local multiply form (reversed Cmpeq) rewrites to Get_dynamic: true
 double-use of loop var is not rewritten: true
 partial loop bounds are not rewritten: true
 affine table index is not rewritten: true
+transposed FMA form rewrites to Set_dynamic: true
+transposed FMA form removes the vocab loop: true
+transposed Add-of-Where form rewrites to Set_dynamic: true
+contribution reading the scattered tensor is not rewritten: true
+contribution mentioning the loop var is not rewritten: true
+transposed partial bounds are not rewritten: true
+double-use of loop var in the written indices is not rewritten: true
