@@ -290,6 +290,7 @@ let () =
           tile_loops = [ i_i; k_i ];
           shared = true;
           cooperative = Some simd_width;
+          hoisted = false;
         };
       Sched.Stage
         {
@@ -297,6 +298,7 @@ let () =
           tile_loops = [ k_i; j ];
           shared = true;
           cooperative = Some simd_width;
+          hoisted = false;
         };
       tz;
     ]

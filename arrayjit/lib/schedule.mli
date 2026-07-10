@@ -50,6 +50,7 @@ type optop =
       tile_loops : Indexing.symbol list;
       shared : bool;
       cooperative : int option;
+      hoisted : bool;
     }
       (** Stage reads of [source] through a tile: a fresh [Local]-mode node registered in the
           traced store, its dims derived per source axis from the range of the index terms over
@@ -84,7 +85,25 @@ type optop =
           [lane < extent] guard (folds when equal); an extent divisible by [w] iterates
           [extent / w] chunks at [w*step + lane]; otherwise the whole nest is restricted to lane
           0 (division is not expressible in affine indices). The lane loop covers workgroup slot
-          0 for the staging-point coverage rule by construction. *)
+          0 for the staging-point coverage rule by construction.
+
+          [hoisted = true] packs a compile-time-constant operand once, out of the routine
+          (gh-ocannl-470, the compiler-native analog of ggml's [CPU_REPACK] [set_tensor] hook):
+          instead of a per-invocation scratch tile refilled by an in-kernel load nest, the packed
+          layout covers the {e whole} source — one packed-buffer axis per outer coordinate
+          ([outer part / tile dim], requiring outer-part coefficients and offsets divisible by
+          the tile dim on tiled axes) followed by the tile axes — and the reads are remapped to
+          it directly; no load nest, no barriers. The packed node is minted as a host-initialized
+          constant: its buffer is computed on the host when first forced (a [Host_inits] lazy
+          driven by the same affine index maps; pad slots of edge tiles are zero-filled) and
+          uploaded once per device into the constant pool ([constant_buffer_cache]), so
+          re-linking into sibling contexts reuses the same packed buffer. Requires
+          [shared = false] (and hence all-[Serial] tile loops), a source with registered
+          host-init data that is known constant (declared [Effectively_constant] intent or a
+          constant placement), no padding on the source, and every outer-part symbol bound by an
+          enclosing loop (static/dynamic indices are rejected — packing runs at link time with no
+          bindings). Note: later host-side writes to the source (e.g. [set_values]) do NOT
+          refresh the packed copy. *)
   | Privatize of { target : Tn.t; over : Indexing.symbol }
       (** Accumulator privatization: contract the read-modify-write accumulation of the
           materialized [target] across the (Serial) [over] loop's whole subtree into a per-thread
@@ -156,6 +175,13 @@ val tensorize :
   optop * Indexing.symbol
 (** Builds a {!constructor-Tensorize} with a fresh lane symbol (via [Indexing.get_symbol]) and
     returns it. *)
+
+val hoistable_constant : Tn.t -> bool
+(** Whether the node is eligible as a [hoisted] {!constructor-Stage} source: declared
+    value-constant ([Tnode.known_host_constant]) with registered host-init data to pack from.
+    Shared by the autotune sketch and by [Schedule_cache.canonicalize], which renders it per
+    tensor node so that same-shape programs differing in operand constancy do not share cached
+    schedules. *)
 
 val apply :
   ?static_indices:Indexing.static_symbol list ->

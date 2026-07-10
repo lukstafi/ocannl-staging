@@ -133,6 +133,14 @@ type t = {
           -- so the only constraint this imposes on placement is: do not resolve the node into the
           [Local]-dependent unobservable class ({!Placements.default_to_most_local} resolves
           [Never_virtual] to [On_device] rather than [Local] for observable nodes). *)
+  mutable host_constant : bool;
+      (** Declared value-constancy: the node's values are fixed at construction and always equal
+          its registered host-init data (an ndarray-backed literal). Set by [Tensor.ndarray] (and
+          eligible loaders), never cleared. This carries the constancy that
+          [Effectively_constant] intent cannot: ndarray-backed nodes are minted [On_device]
+          (provenance 49), so the memory-mode lattice has no room left for the constant marking.
+          Consumed by [Schedule.Stage]'s hoisted packing (gh-ocannl-470) to justify materializing
+          a repacked copy once per device. *)
   mutable alias_of : ((t * Indexing.static_symbol) option[@sexp.opaque]);
       (** When [Some (parent, batch_idx)], this node is a zero-copy slice-alias *view* of [parent]:
           it owns no buffer of its own, and every read/write of it is redirected (during lowering)
@@ -295,6 +303,16 @@ let known_not_materialized tn =
 
 let known_constant tn =
   match tn.memory_mode with Some (Effectively_constant, _) -> true | _ -> false
+
+(** Whether [tn]'s values are declared fixed at construction, forever equal to its registered
+    host-init data (see {!field-host_constant}). Includes [known_constant] intent: small constants
+    keep the [Effectively_constant] marking (their creation does not pass through the
+    [On_device]-minting ndarray-backed path). *)
+let known_host_constant tn = tn.host_constant || known_constant tn
+
+(** Declares that [tn]'s values are fixed at construction (host-init-backed literal). Monotone:
+    set, never cleared. *)
+let set_host_constant tn = tn.host_constant <- true
 
 let known_non_virtual tn =
   match tn.memory_mode with None | Some ((Virtual | Effectively_constant), _) -> false | _ -> true
@@ -879,6 +897,7 @@ let create ?namespace delayed_prec ~id ~label ~unpadded_dims ~padding () =
       label;
       memory_mode = None;
       observable = false;
+      host_constant = false;
       alias_of = None;
       slice_of = None;
       backend_info = Sexp.List [];
@@ -922,6 +941,7 @@ let create_from_padded ?namespace ~id ~label ~ndarray ~padding () =
       label;
       memory_mode = Some (On_device, 49);
       observable = false;
+      host_constant = false;
       alias_of = None;
       slice_of = None;
       backend_info = Sexp.List [];
@@ -1010,6 +1030,7 @@ let create_with_reshape ~id ~label ~base_ndarray ~unpadded_dims ~padding ~from_p
       label;
       memory_mode = Some (On_device, 49);
       observable = false;
+      host_constant = false;
       alias_of = None;
       slice_of = None;
       backend_info = Sexp.List [];
@@ -1037,6 +1058,7 @@ let find_namespaced =
       label = [];
       memory_mode = None;
       observable = false;
+      host_constant = false;
       alias_of = None;
       slice_of = None;
       backend_info = Sexp.List [];

@@ -24,6 +24,7 @@ type optop =
       tile_loops : Indexing.symbol list;
       shared : bool;
       cooperative : int option;
+      hoisted : bool;
     }
   | Privatize of { target : Tn.t; over : Indexing.symbol }
   | Expand_zero of { tn : Tn.t; indices : Indexing.symbol list }
@@ -639,13 +640,64 @@ let remap_reads ?(writes = false) ~source ~from_idcs ~tile ~tile_idcs (llc : Low
   in
   code llc
 
-let apply_stage ~source ~tile_loops ~shared ~cooperative (opt : Low_level.optimized) :
+(* A constant operand eligible for hoisted (out-of-routine) packing: declared value-constant with
+   registered host-init data to pack from (gh-ocannl-470). Shared by the autotune sketch (which
+   proposes hoisted candidates only for such operands) and the canonical digest
+   ([Schedule_cache.canonicalize] renders it per tnode, so same-shape programs differing in
+   operand constancy do not share cached schedules — a hoisted winner must not replay against a
+   non-hoistable site, and a non-hoisted winner must not mask the hoisted candidates of a
+   constant site; Codex P2 on PR #123). *)
+let hoistable_constant tn = Tn.known_host_constant tn && Host_inits.mem tn
+
+(* Host-side packing for hoisted Stage (gh-ocannl-470): materialize the packed layout of a
+   constant operand from its host-init data. Forced at link/upload time — through the packed
+   node's own [Host_inits] lazy — and uploaded into the per-device constant pool like any other
+   host-initialized constant. [src_prog]/[packed_prog] are the per-axis affine index programs:
+   [(coefficient, position in sym_extents) array * offset], evaluated over the odometer
+   enumeration of the tile and outer loop symbols. *)
+let pack_constant_tile ~debug ~(src_nd : Ndarray.t) ~(src_dims : int array) ~(prec : Ops.prec)
+    ~(packed_dims : int array) ~(sym_extents : int array)
+    ~(src_prog : ((int * int) array * int) array)
+    ~(packed_prog : ((int * int) array * int) array) : Ndarray.t =
+  if not (Ops.equal_prec (Ndarray.get_prec src_nd) prec) then
+    invalid_arg ("Schedule.Stage: hoisted staging: host-init precision mismatch for " ^ debug);
+  if not (Array.equal Int.equal (Ndarray.dims src_nd) src_dims) then
+    invalid_arg ("Schedule.Stage: hoisted staging: host-init dims mismatch for " ^ debug);
+  (* Zero-filled at creation: pad slots of edge tiles (never written below) must read as zeros. *)
+  let dst = Ndarray.create_array ~debug prec ~dims:packed_dims ~padding:(Some ([||], Some 0.0)) in
+  let n_syms = Array.length sym_extents in
+  let vals = Array.create ~len:n_syms 0 in
+  let eval (terms, off) = Array.fold terms ~init:off ~f:(fun acc (c, p) -> acc + (c * vals.(p))) in
+  let src_idx = Array.create ~len:(Array.length src_dims) 0 in
+  let dst_idx = Array.create ~len:(Array.length packed_dims) 0 in
+  let f2 src dstb =
+    let rec go d =
+      if d = n_syms then (
+        Array.iteri src_prog ~f:(fun a pr -> src_idx.(a) <- eval pr);
+        (* The edge guard: out-of-range coordinates arise only from edge tiles. *)
+        if Array.for_alli src_idx ~f:(fun a i -> i < src_dims.(a)) then (
+          Array.iteri packed_prog ~f:(fun a pr -> dst_idx.(a) <- eval pr);
+          Stdlib.Bigarray.Genarray.set dstb dst_idx (Stdlib.Bigarray.Genarray.get src src_idx)))
+      else
+        for v = 0 to sym_extents.(d) - 1 do
+          vals.(d) <- v;
+          go (d + 1)
+        done
+    in
+    go 0
+  in
+  Ndarray.apply2 { f2 } src_nd dst;
+  dst
+
+let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted (opt : Low_level.optimized) :
     Low_level.optimized =
   let open Low_level in
   if List.is_empty tile_loops then invalid_arg "Schedule.Stage: empty tile_loops";
   Option.iter cooperative ~f:(fun w ->
       if not shared then invalid_arg "Schedule.Stage: cooperative staging requires shared = true";
       if w <= 0 then invalid_arg "Schedule.Stage: cooperative simd width must be positive");
+  if hoisted && shared then
+    invalid_arg "Schedule.Stage: hoisted staging requires shared = false (it emits no load nest)";
   let accesses = collect_source_accesses ~source opt.llc in
   let idcs0, stack0 =
     match accesses with
@@ -719,6 +771,144 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative (opt : Low_level.optimi
     invalid_arg
       "Schedule.Stage: cooperative staging requires Serial tile loops (the fresh lane loop is the \
        cooperating axis; reusing Workgroup tile loops is the non-cooperative mode)";
+  if hoisted then (
+    (* Hoisted (out-of-routine) packing for a compile-time-constant source (gh-ocannl-470): the
+       packed layout covers the whole source — one packed axis per outer coordinate followed by
+       the tile axes — so no load nest is emitted; the reads are remapped to a fresh
+       host-initialized constant whose buffer is packed on the host at link time and uploaded
+       once per device into the constant pool. *)
+    if not (Host_inits.mem source) then
+      invalid_arg
+        ("Schedule.Stage: hoisted staging requires registered host-init data for "
+       ^ Tn.debug_name source);
+    if
+      not
+        (Tn.known_host_constant source
+        || Tn.Placements.known_constant opt.Low_level.optimize_ctx.placements source)
+    then
+      invalid_arg
+        ("Schedule.Stage: hoisted staging requires a known-constant source, got "
+       ^ Tn.debug_name source);
+    (match Lazy.force source.Tn.padding with
+    | Some _ ->
+        invalid_arg
+          ("Schedule.Stage: hoisted staging does not support a padded source: "
+         ^ Tn.debug_name source)
+    | None -> ());
+    (* Packing runs at link time, outside the routine: every outer-part symbol must be an
+       enclosing loop with a known extent (static/dynamic indices have no binding there), and the
+       affine maps below need nonnegative source coordinates. *)
+    Array.iter decomp ~f:(fun (_, op_, off) ->
+        if off < 0 then
+          invalid_arg "Schedule.Stage: hoisted staging requires nonnegative index offsets";
+        List.iter op_ ~f:(fun (c, s) ->
+            if c <= 0 then
+              invalid_arg
+                "Schedule.Stage: hoisted staging requires positive outer-part coefficients";
+            if Option.is_none (depth_of s) then
+              invalid_arg
+                ("Schedule.Stage: hoisted staging requires outer-part symbol "
+                ^ Indexing.symbol_ident s
+                ^ " to be bound by an enclosing loop")));
+    let tile_dim a = Array.find_map tile_axes ~f:(fun (a', d) -> Option.some_if (a = a') d) in
+    (* Packed outer axes, in source-axis order: on a tiled axis the outer part (plus offset)
+       divided by the tile dim is the tile-count coordinate (divisibility required — the standard
+       blocked decomposition [k := bk*KT + k_i] satisfies it); an axis without a tile part keeps
+       its outer index expression as-is. Raw [(terms, offset, extent)] — the terms drive both the
+       consumer's remapped reads and the host-side packing program. *)
+    let outer_axes =
+      Array.filter_mapi decomp ~f:(fun a (_tp, op_, off) ->
+          if List.is_empty op_ && off = 0 then None
+          else
+            match tile_dim a with
+            | None ->
+                let ext =
+                  List.fold op_ ~init:(off + 1) ~f:(fun acc (c, s) -> acc + (c * (extent s - 1)))
+                in
+                Some (op_, off, ext)
+            | Some t_a ->
+                List.iter op_ ~f:(fun (c, _) ->
+                    if c % t_a <> 0 then
+                      invalid_arg
+                        "Schedule.Stage: hoisted staging requires outer-part coefficients \
+                         divisible by the tile dim of their axis");
+                if off % t_a <> 0 then
+                  invalid_arg
+                    "Schedule.Stage: hoisted staging requires the index offset divisible by the \
+                     tile dim of its axis";
+                let q = List.map op_ ~f:(fun (c, s) -> (c / t_a, s)) in
+                let qoff = off / t_a in
+                let ext =
+                  List.fold q ~init:(qoff + 1) ~f:(fun acc (c, s) -> acc + (c * (extent s - 1)))
+                in
+                Some (q, qoff, ext))
+    in
+    let packed_dims =
+      Array.append (Array.map outer_axes ~f:(fun (_, _, ext) -> ext)) (Array.map tile_axes ~f:snd)
+    in
+    let packed_read_idcs =
+      Array.append
+        (Array.map outer_axes ~f:(fun (terms, off, _) -> normalize_affine ~terms ~offset:off))
+        (Array.map tile_axes ~f:(fun (a, _) ->
+             let tp, _, _ = decomp.(a) in
+             normalize_affine ~terms:tp ~offset:0))
+    in
+    let prec = Lazy.force source.Tn.prec in
+    let tile =
+      Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
+        ~label:("packed" :: source.Tn.label)
+        ~unpadded_dims:(lazy packed_dims)
+        ~padding:(lazy None) ()
+    in
+    (* A host-initialized constant: [Effectively_constant] intent, materialized in this lineage —
+       [allocate_delta] routes it (read-only, host-init-backed) into the per-device constant
+       pool, and [Host_inits.mem] keeps it out of the routine's required inputs. *)
+    Tn.update_memory_mode tile Effectively_constant 176;
+    Tn.Placements.update opt.Low_level.optimize_ctx.placements tile Tn.On_device 176;
+    let traced = get_node opt.traced_store tile in
+    traced.read_only <- true;
+    (* The packing program: odometer enumeration of every tile and outer symbol, evaluated
+       through positional [(coefficient, symbol slot)] compiles of the affine maps. Captured
+       eagerly — the lazy below must not reference the pre-remap loop structure. *)
+    let syms =
+      Array.to_list decomp
+      |> List.concat_map ~f:(fun (tp, op_, _) -> List.map (tp @ op_) ~f:snd)
+      |> List.dedup_and_sort ~compare:Indexing.Symbol.compare
+      |> List.map ~f:(fun s -> (s, extent s))
+      |> Array.of_list
+    in
+    let pos_of s =
+      fst
+        (Option.value_exn
+           (Array.findi syms ~f:(fun _ (s', _) -> Indexing.equal_symbol s s')))
+    in
+    let compile_terms terms = Array.of_list_map terms ~f:(fun (c, s) -> (c, pos_of s)) in
+    let src_prog = Array.map decomp ~f:(fun (tp, op_, off) -> (compile_terms (tp @ op_), off)) in
+    let packed_prog =
+      Array.append
+        (Array.map outer_axes ~f:(fun (terms, off, _) -> (compile_terms terms, off)))
+        (Array.map tile_axes ~f:(fun (a, _) ->
+             let tp, _, _ = decomp.(a) in
+             (compile_terms tp, 0)))
+    in
+    let sym_extents = Array.map syms ~f:snd in
+    let src_dims = Lazy.force source.Tn.dims in
+    let debug = Tn.debug_name tile in
+    Host_inits.register tile
+      (lazy
+        (let src_nd =
+           match Host_inits.find source with
+           | Some l -> Lazy.force l
+           | None ->
+               invalid_arg
+                 ("Schedule.Stage: host-init data for " ^ Tn.debug_name source
+                ^ " disappeared before link")
+         in
+         pack_constant_tile ~debug ~src_nd ~src_dims ~prec ~packed_dims ~sym_extents ~src_prog
+           ~packed_prog));
+    let llc = remap_reads ~source ~from_idcs:idcs0 ~tile ~tile_idcs:packed_read_idcs opt.llc in
+    { opt with llc })
+  else
   (* The insertion point L*: the deepest loop that must stay outside the tile — carrying an
      outer-part symbol or a reused workgroup tile axis. *)
   let outer_sym_depths =
@@ -1237,8 +1427,8 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
 
 let apply_opt_op (opt : Low_level.optimized) (op : optop) : Low_level.optimized =
   match op with
-  | Stage { source; tile_loops; shared; cooperative } ->
-      apply_stage ~source ~tile_loops ~shared ~cooperative opt
+  | Stage { source; tile_loops; shared; cooperative; hoisted } ->
+      apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted opt
   | Privatize { target; over } -> apply_privatize ~target ~over opt
   | (Split _ | Swap _ | Retype _ | Unroll _ | Expand_zero _ | Tensorize _) as op ->
       { opt with llc = apply_op opt.Low_level.llc op }

@@ -203,7 +203,9 @@ let apply2 { f2 } x1 x2 =
   | Byte_nd arr1, Byte_nd arr2 -> f2 arr1 arr2
   | Uint16_nd arr1, Uint16_nd arr2 -> f2 arr1 arr2
   | Int32_nd arr1, Int32_nd arr2 -> f2 arr1 arr2
+  | Uint32_nd arr1, Uint32_nd arr2 -> f2 arr1 arr2
   | Int64_nd arr1, Int64_nd arr2 -> f2 arr1 arr2
+  | Uint64_nd arr1, Uint64_nd arr2 -> f2 arr1 arr2
   | Uint4x32_nd arr1, Uint4x32_nd arr2 -> f2 arr1 arr2
   | Half_nd arr1, Half_nd arr2 -> f2 arr1 arr2
   | Bfloat16_nd arr1, Bfloat16_nd arr2 -> f2 arr1 arr2

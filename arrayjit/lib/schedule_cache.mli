@@ -44,7 +44,13 @@ type saved_optop =
   | Swap of { outer : sym_ref; inner : sym_ref }
   | Retype of { axis : sym_ref; ty : Low_level.axis_type }
   | Unroll of { axis : sym_ref; materialize : bool }
-  | Stage of { source : int; tile_loops : sym_ref list; shared : bool; cooperative : int option }
+  | Stage of {
+      source : int;
+      tile_loops : sym_ref list;
+      shared : bool;
+      cooperative : int option;
+      hoisted : bool;
+    }
   | Privatize of { target : int; over : sym_ref }
   | Expand_zero of { tn : int }
   | Tensorize of { i : sym_ref; j : sym_ref; k : sym_ref; simd_width : int }
@@ -58,9 +64,10 @@ type canonical
 
 val canonicalize : ?static_indices:Indexing.static_symbol list -> Low_level.optimized -> canonical
 (** Walks the optimized code once in preorder, numbering [For_loop] binders, first-occurrence
-    tensor nodes (their dims and precision enter the digest), and rendering the canonical form.
-    [static_indices] must be the same list the code was lowered with ({!Indexing.bound_symbols} of
-    the compile's bindings). *)
+    tensor nodes (their dims, precision, and hoisted-packing eligibility
+    [Schedule.hoistable_constant] enter the digest — schedule validity depends on operand
+    constancy, gh-ocannl-470), and rendering the canonical form. [static_indices] must be the
+    same list the code was lowered with ({!Indexing.bound_symbols} of the compile's bindings). *)
 
 val digest : canonical -> string
 (** Hex digest of the canonical rendering. Equal digests mean structurally identical code, hence

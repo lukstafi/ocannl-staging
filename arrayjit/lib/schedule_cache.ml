@@ -23,7 +23,13 @@ type saved_optop =
   | Swap of { outer : sym_ref; inner : sym_ref }
   | Retype of { axis : sym_ref; ty : LL.axis_type }
   | Unroll of { axis : sym_ref; materialize : bool }
-  | Stage of { source : int; tile_loops : sym_ref list; shared : bool; cooperative : int option }
+  | Stage of {
+      source : int;
+      tile_loops : sym_ref list;
+      shared : bool;
+      cooperative : int option;
+      hoisted : bool;
+    }
   | Privatize of { target : int; over : sym_ref }
   | Expand_zero of { tn : int }
   | Tensorize of { i : sym_ref; j : sym_ref; k : sym_ref; simd_width : int }
@@ -93,10 +99,16 @@ let canonicalize ?(static_indices = []) (opt : LL.optimized) : canonical =
         Hashtbl.set tn_refs ~key:tn ~data:i;
         rev_tns := tn :: !rev_tns;
         let dims = Lazy.force tn.Tn.dims in
+        (* Hoistability enters the digest alongside dims and precision (gh-ocannl-470, Codex P2
+           on PR #123): a hoisted-[Stage] winner is only valid against constant operands, and a
+           non-hoisted winner cached for a same-shape non-constant program must not mask a
+           constant program's hoisted candidates — so such programs must not share cache keys. *)
+        let hc = if Schedule.hoistable_constant tn then ";const" else "" in
         add
-          (Printf.sprintf "t%d=[%s;%s]" i
+          (Printf.sprintf "t%d=[%s;%s%s]" i
              (String.concat_array ~sep:"," (Array.map dims ~f:Int.to_string))
-             (Sexp.to_string (Ops.sexp_of_prec (Lazy.force tn.Tn.prec))))
+             (Sexp.to_string (Ops.sexp_of_prec (Lazy.force tn.Tn.prec)))
+             hc)
   in
   (* Local scope ids come from a process-global counter freshly on each lowering (like loop
      symbols), so digest their first-occurrence alpha index, not the raw id — otherwise sibling
@@ -350,7 +362,7 @@ let to_saved r (sched : Schedule.schedule) : saved_schedule * registry =
           | Schedule.Retype { axis; ty } -> (r, Retype { axis = resolve_exn r axis; ty })
           | Schedule.Unroll { axis; materialize } ->
               (r, Unroll { axis = resolve_exn r axis; materialize })
-          | Schedule.Stage { source; tile_loops; shared; cooperative } ->
+          | Schedule.Stage { source; tile_loops; shared; cooperative; hoisted } ->
               ( r,
                 Stage
                   {
@@ -358,6 +370,7 @@ let to_saved r (sched : Schedule.schedule) : saved_schedule * registry =
                     tile_loops = List.map tile_loops ~f:(resolve_exn r);
                     shared;
                     cooperative;
+                    hoisted;
                   } )
           | Schedule.Privatize { target; over } ->
               (r, Privatize { target = resolve_tn_exn r target; over = resolve_exn r over })
@@ -396,7 +409,7 @@ let of_saved canonical (saved : saved_schedule) : Schedule.schedule * registry =
           | Retype { axis; ty } -> (r, Schedule.Retype { axis = unresolve_exn r axis; ty })
           | Unroll { axis; materialize } ->
               (r, Schedule.Unroll { axis = unresolve_exn r axis; materialize })
-          | Stage { source; tile_loops; shared; cooperative } ->
+          | Stage { source; tile_loops; shared; cooperative; hoisted } ->
               ( r,
                 Schedule.Stage
                   {
@@ -404,6 +417,7 @@ let of_saved canonical (saved : saved_schedule) : Schedule.schedule * registry =
                     tile_loops = List.map tile_loops ~f:(unresolve_exn r);
                     shared;
                     cooperative;
+                    hoisted;
                   } )
           | Privatize { target; over } ->
               ( r,
@@ -442,7 +456,7 @@ type entry = {
 }
 [@@deriving sexp]
 
-let entry_version = 2
+let entry_version = 3
 
 let sanitize name =
   String.map name ~f:(fun c ->

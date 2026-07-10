@@ -68,6 +68,11 @@ type sketch_params = {
   sk_bk : int;
   sk_tm : int;  (** Register-tile factors; unused on CPU. *)
   sk_tn : int;
+  sk_hoist : bool;
+      (** CPU packing only: pack compile-time-constant operands out of the routine, into the
+          per-device constant pool (gh-ocannl-470). Proposed alongside the in-kernel packing
+          variant so the choice stays measured; applied per operand, only to hoistable
+          (known-constant, host-init-backed) sources. *)
 }
 
 type matmul_site = {
@@ -184,19 +189,38 @@ let gpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = b
   @ swaps
   @ [
       Sched.Stage
-        { source = site.m_a; tile_loops = [ i_w; i_t; k_i ]; shared = true; cooperative = None };
+        {
+          source = site.m_a;
+          tile_loops = [ i_w; i_t; k_i ];
+          shared = true;
+          cooperative = None;
+          hoisted = false;
+        };
       Sched.Stage
-        { source = site.m_b; tile_loops = [ k_i; j_w; j_t ]; shared = true; cooperative = None };
+        {
+          source = site.m_b;
+          tile_loops = [ k_i; j_w; j_t ];
+          shared = true;
+          cooperative = None;
+          hoisted = false;
+        };
       Sched.Privatize { target = site.m_d; over = k_o };
       Sched.Unroll { axis = i_t; materialize = true };
       Sched.Unroll { axis = j_t; materialize = true };
     ]
 
+(* A constant operand eligible for hoisted (out-of-routine) packing (gh-ocannl-470). The same
+   predicate enters the canonical digest ([Schedule_cache.canonicalize]), so a cached winner for
+   a same-shape program of different operand constancy never replays here — hoisted candidates
+   are always measured for constant sites. *)
+let hoistable = Sched.hoistable_constant
+
 (* The CPU operand-packing matmul (schedule_cpu_pack_matmul.ml): all-serial tiling with the tile
    loops sunk to [i_o j_o k_o k_i i_i j_i], operands packed into contiguous stack scratch, output
-   privatized across the k-block loop. *)
-let cpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = bk; _ } :
-    Sched.schedule =
+   privatized across the k-block loop. With [sk_hoist], constant operands are instead packed once
+   at link time into the per-device constant pool. *)
+let cpu_sketch_schedule (site : matmul_site)
+    { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_hoist; _ } : Sched.schedule =
   let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Serial ~inner:LL.Serial in
   let sp_j, j_o, j_i = Sched.split ~axis:site.m_j ~factor:bn ~outer:LL.Serial ~inner:LL.Serial in
   let sp_k, k_o, k_i = Sched.split ~axis:site.m_k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
@@ -205,9 +229,21 @@ let cpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = b
   @ sink j_i [ k_o; k_i; i_i ]
   @ [
       Sched.Stage
-        { source = site.m_a; tile_loops = [ i_i; k_i ]; shared = false; cooperative = None };
+        {
+          source = site.m_a;
+          tile_loops = [ i_i; k_i ];
+          shared = false;
+          cooperative = None;
+          hoisted = sk_hoist && hoistable site.m_a;
+        };
       Sched.Stage
-        { source = site.m_b; tile_loops = [ k_i; j_i ]; shared = false; cooperative = None };
+        {
+          source = site.m_b;
+          tile_loops = [ k_i; j_i ];
+          shared = false;
+          cooperative = None;
+          hoisted = sk_hoist && hoistable site.m_b;
+        };
       Sched.Privatize { target = site.m_d; over = k_o };
     ]
 
@@ -233,13 +269,39 @@ let sketch_seed_params ~is_gpu ~is_cpu (opt : LL.optimized) : sketch_params list
             if
               divides bm site.m_ni && divides bn site.m_nj && divides bk site.m_nk
               && divides tm bm && divides tn bn
-            then Some { sk_gpu = true; sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_tm = tm; sk_tn = tn }
+            then
+              Some
+                {
+                  sk_gpu = true;
+                  sk_bm = bm;
+                  sk_bn = bn;
+                  sk_bk = bk;
+                  sk_tm = tm;
+                  sk_tn = tn;
+                  sk_hoist = false;
+                }
             else None)
       else if is_cpu then
-        List.filter_map [ 16; 8 ] ~f:(fun b ->
-            if divides b site.m_ni && divides b site.m_nj && divides b site.m_nk then
-              Some { sk_gpu = false; sk_bm = b; sk_bn = b; sk_bk = b; sk_tm = 0; sk_tn = 0 }
-            else None)
+        let base =
+          List.filter_map [ 16; 8 ] ~f:(fun b ->
+              if divides b site.m_ni && divides b site.m_nj && divides b site.m_nk then
+                Some
+                  {
+                    sk_gpu = false;
+                    sk_bm = b;
+                    sk_bn = b;
+                    sk_bk = b;
+                    sk_tm = 0;
+                    sk_tn = 0;
+                    sk_hoist = false;
+                  }
+              else None)
+        in
+        (* Hoisted vs in-kernel packing stays a measured choice (gh-ocannl-470): when a constant
+           operand can be packed at link time, propose each tiling in both flavors. *)
+        if hoistable site.m_a || hoistable site.m_b then
+          base @ List.map base ~f:(fun p -> { p with sk_hoist = true })
+        else base
       else []
 
 (** {2 Candidate compilation}
