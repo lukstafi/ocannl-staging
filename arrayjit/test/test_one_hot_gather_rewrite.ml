@@ -37,6 +37,9 @@ let summarize (llc : LL.t) : int * int =
         Int.incr loops;
         proc body
     | LL.Set { llsc; _ } -> scal llsc
+    | LL.Set_dynamic { dyn_value = v, _; llsc; _ } ->
+        scal v;
+        scal llsc
     | LL.Set_from_vec { arg = s, _; _ } -> scal s
     | LL.Set_local (_, s) -> scal s
     | LL.If { cond = c, _; body } ->

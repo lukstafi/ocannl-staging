@@ -74,6 +74,9 @@ let rec walk_t ~on_get ~on_where (llc : LL.t) =
   | LL.For_loop { body; _ } -> walk_t ~on_get ~on_where body
   | LL.Zero_out _ -> ()
   | LL.Set { llsc; _ } -> walk_s ~on_get ~on_where llsc
+  | LL.Set_dynamic { dyn_value = v, _; llsc; _ } ->
+      walk_s ~on_get ~on_where v;
+      walk_s ~on_get ~on_where llsc
   | LL.Set_from_vec { arg = s, _; _ } -> walk_s ~on_get ~on_where s
   | LL.Set_local (_, s) -> walk_s ~on_get ~on_where s
   | LL.If { cond = c, _; body } ->

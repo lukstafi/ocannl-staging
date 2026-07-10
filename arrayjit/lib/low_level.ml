@@ -75,6 +75,24 @@ type t =
     }
   | Zero_out of Tn.t
   | Set of { tn : Tn.t; idcs : Indexing.axis_index array; llsc : scalar_t; mutable debug : string }
+  | Set_dynamic of {
+      tn : Tn.t;
+      idcs : Indexing.axis_index array;
+          (** Static everywhere except [dyn_axis] (a [Fixed_idx 0] placeholder there). *)
+      dyn_axis : int;  (** Which [idcs] slot is replaced by [dyn_value] at codegen time. *)
+      dyn_value : scalar_arg;
+          (** Integer-valued index spliced into the row-major offset at [dyn_axis]. A nested scalar:
+              all recursive scalar traversals must descend into it. *)
+      llsc : scalar_t;
+      mutable debug : string;
+    }
+      (** A scatter: like [Set] but the write lands at a runtime row of axis [dyn_axis] — the write
+          counterpart of {!Get_dynamic}. gh-466: produced only by [rewrite_one_hot_reductions]
+          (transposed one-hot pattern, the embedding-table gradient); never constructed by
+          [Assignments] lowering. The enclosing guard (when interval analysis has not discharged it)
+          guarantees [dyn_value] is in range before the write executes. Loops whose index reaches
+          [dyn_value] carry a cross-iteration write dependency, so schedule analyses must treat this
+          write as statically unknown (never parallelize/align over it). *)
   | Set_from_vec of {
       tn : Tn.t;
       idcs : Indexing.axis_index array;
@@ -408,6 +426,9 @@ and proc_mentions_symbol (s : Indexing.symbol) (llc : t) : bool =
   match llc with
   | Set { idcs; llsc; _ } ->
       Array.exists idcs ~f:(axis_index_mentions_symbol s) || scalar_mentions_symbol s llsc
+  | Set_dynamic { idcs; dyn_value = v, _; llsc; _ } ->
+      Array.exists idcs ~f:(axis_index_mentions_symbol s)
+      || scalar_mentions_symbol s v || scalar_mentions_symbol s llsc
   | Set_from_vec { idcs; arg = v, _; _ } ->
       Array.exists idcs ~f:(axis_index_mentions_symbol s) || scalar_mentions_symbol s v
   | Set_local (_, llsc) -> scalar_mentions_symbol s llsc
@@ -586,6 +607,9 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits llc 
     | Comment _ -> ()
     | Staged_compilation _ -> ()
     | Workgroup_barrier -> ()
+    | Set_dynamic _ ->
+        (* gh-466: [rewrite_one_hot_reductions] constructs [Set_dynamic] after visit tracing. *)
+        invalid_arg "Low_level.visit_llc: Set_dynamic reached visit tracing"
     | Tile_mma _ ->
         (* Schedule transforms construct [Tile_mma] after the optimization pipeline ran; it never
            reaches visit tracing. *)
@@ -800,6 +824,9 @@ let%diagn2_sexp check_and_store_virtual (optim_ctx : optimize_ctx) traced static
     | Workgroup_barrier -> raise @@ Non_virtual 141
     (* Cooperative statements are barrier-strength opaque effects; defensive like the barrier. *)
     | Tile_mma _ -> raise @@ Non_virtual 143
+    (* gh-466: a dynamically-indexed write is never a definite write of a virtual candidate.
+       Defensive: [rewrite_one_hot_reductions] runs after virtualization. *)
+    | Set_dynamic _ -> raise @@ Non_virtual 144
     (* Conservative in v1: a guarded computation is not inlined (a conditional write is not a
        definite write, so recomputing it at the read site could read an unset scope). Defensive:
        launch-extent guards are introduced at backend-compile time, after virtualization. *)
@@ -1207,8 +1234,8 @@ let%track7_sexp inline_computation ~id (optim_ctx : optimize_ctx) (traced : trac
       | Comment _ -> Some llc
       | Staged_compilation _ -> Some llc
       (* Unreachable: [check_and_store_virtual] rejects computations containing barriers,
-         cooperative tile statements, and guarded statements. *)
-      | Workgroup_barrier | Tile_mma _ | If _ -> assert false
+         cooperative tile statements, guarded statements, and (gh-466) dynamic scatters. *)
+      | Workgroup_barrier | Tile_mma _ | If _ | Set_dynamic _ -> assert false
     and loop_scalar env llsc : scalar_t =
       match llsc with
       | Constant _ | Constant_bits _ -> llsc
@@ -1405,6 +1432,8 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
     | Workgroup_barrier -> llc
     (* Unreachable pre-schedule (visit tracing already rejected it); kept opaque. *)
     | Tile_mma _ -> llc
+    (* gh-466: unreachable — [Set_dynamic] is produced after virtualization; kept opaque. *)
+    | Set_dynamic _ -> llc
     | If { cond = c, prec; body } ->
         If
           {
@@ -1519,6 +1548,20 @@ let cleanup_virtual_llc plc ~static_indices (llc : t) : t =
     | Workgroup_barrier -> Some llc
     (* Unreachable pre-schedule; kept opaque. *)
     | Tile_mma _ -> Some llc
+    (* gh-466: defensive — [Set_dynamic] is produced after cleanup; a scatter target is always
+       materialized. Keep, recursing like the [Set] arm. *)
+    | Set_dynamic { tn; idcs; dyn_axis; dyn_value = v, prec; llsc; debug } ->
+        Tn.Placements.update plc tn Never_virtual 17;
+        Some
+          (Set_dynamic
+             {
+               tn;
+               idcs;
+               dyn_axis;
+               dyn_value = (loop_scalar ~balanced ~env_dom v, prec);
+               llsc = loop_scalar ~balanced ~env_dom llsc;
+               debug;
+             })
     | If { cond = c, prec; body } ->
         (* The guard is elided when its cleaned body is empty, like an empty loop. *)
         Option.map (loop_proc ~balanced ~env_dom body) ~f:(fun body : t ->
@@ -1612,6 +1655,9 @@ and substitute_proc ~var ~value llc =
   | For_loop for_config -> For_loop { for_config with body = loop_proc for_config.body }
   | Zero_out _ -> llc
   | Set { tn; idcs; llsc; debug } -> Set { tn; idcs; llsc = loop_scalar llsc; debug }
+  | Set_dynamic { tn; idcs; dyn_axis; dyn_value = v, vprec; llsc; debug } ->
+      Set_dynamic
+        { tn; idcs; dyn_axis; dyn_value = (loop_scalar v, vprec); llsc = loop_scalar llsc; debug }
   | Set_from_vec { tn; idcs; length; vec_unop; arg = arg_scalar, arg_prec; debug } ->
       Set_from_vec { tn; idcs; length; vec_unop; arg = (loop_scalar arg_scalar, arg_prec); debug }
   | Set_local (id, llsc) -> Set_local (id, loop_scalar llsc)
@@ -1896,6 +1942,18 @@ let simplify_llc static_indices llc =
     | Zero_out _ -> llc
     | Set { tn; idcs; llsc; debug } ->
         Set { tn; idcs; llsc = fst (loop_scalar (llsc, Lazy.force tn.Tn.prec)); debug }
+    | Set_dynamic { tn; idcs; dyn_axis; dyn_value; llsc; debug } ->
+        (* gh-466: reached via [Schedule.apply]'s simplify of post-rewrite code. The scatter itself
+           is never folded; its index value and RHS are. *)
+        Set_dynamic
+          {
+            tn;
+            idcs;
+            dyn_axis;
+            dyn_value = loop_scalar dyn_value;
+            llsc = fst (loop_scalar (llsc, Lazy.force tn.Tn.prec));
+            debug;
+          }
     | Set_from_vec { tn; idcs; length; vec_unop; arg; debug } ->
         Set_from_vec { tn; idcs; length; vec_unop; arg = loop_scalar arg; debug }
     | Set_local (id, llsc) -> Set_local (id, fst (loop_scalar (llsc, Lazy.force id.tn.Tn.prec)))
@@ -2114,6 +2172,9 @@ let simplify_llc static_indices llc =
     | For_loop { body; _ } -> loop body
     | Zero_out _ -> ()
     | Set { tn; llsc; _ } -> check_float tn llsc
+    | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
+        check_float tn v;
+        check_float tn llsc
     | Set_from_vec { tn; arg = arg_scalar, _; _ } -> check_float tn arg_scalar
     | Set_local (id, llsc) -> check_float id.tn llsc
     | If { body; _ } -> loop body
@@ -2287,6 +2348,12 @@ let eliminate_common_subexpressions llc =
           let llsc = loop_scalar llsc in
           seen := saved;
           Set { tn; idcs; llsc; debug }
+      | Set_dynamic { tn; idcs; dyn_axis; dyn_value = v, vprec; llsc; debug } ->
+          let saved = !seen in
+          let v = loop_scalar v in
+          let llsc = loop_scalar llsc in
+          seen := saved;
+          Set_dynamic { tn; idcs; dyn_axis; dyn_value = (v, vprec); llsc; debug }
       | Set_from_vec { tn; idcs; length; vec_unop; arg = arg_scalar, arg_prec; debug } ->
           let saved = !seen in
           let arg_scalar = loop_scalar arg_scalar in
@@ -2316,6 +2383,9 @@ let eliminate_common_subexpressions llc =
     | Seq (c1, c2) -> Seq (loop_proc c1, loop_proc c2)
     | For_loop for_config -> For_loop { for_config with body = loop_proc for_config.body }
     | Set { tn; idcs; llsc; debug } -> Set { tn; idcs; llsc = cse_scalar llsc; debug }
+    | Set_dynamic { tn; idcs; dyn_axis; dyn_value = v, vprec; llsc; debug } ->
+        Set_dynamic
+          { tn; idcs; dyn_axis; dyn_value = (cse_scalar v, vprec); llsc = cse_scalar llsc; debug }
     | Set_from_vec { tn; idcs; length; vec_unop; arg = arg_scalar, arg_prec; debug } ->
         Set_from_vec { tn; idcs; length; vec_unop; arg = (cse_scalar arg_scalar, arg_prec); debug }
     | Set_local (id, llsc) -> Set_local (id, cse_scalar llsc)
@@ -2397,6 +2467,10 @@ let reads_of_body (body : t) : Set.M(Tn).t =
         loop_proc c2
     | For_loop { body; _ } -> loop_proc body
     | Set { llsc; _ } -> loop_scalar llsc
+    | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+        (* The RMW read of the scatter target surfaces via the [Get_dynamic] inside [llsc]. *)
+        loop_scalar v;
+        loop_scalar llsc
     | Set_from_vec { arg = arg_scalar, _; _ } -> loop_scalar arg_scalar
     | Set_local (_, llsc) -> loop_scalar llsc
     | Tile_mma { d = d_tn, _; a = a_tn, _; b = b_tn, _; _ } ->
@@ -2441,7 +2515,7 @@ let writes_of_stmt (stmt : t) : Set.M(Tn).t =
   let acc = ref (Set.empty (module Tn)) in
   let rec loop (s : t) =
     match s with
-    | Set { tn; _ } | Set_from_vec { tn; _ } -> acc := Set.add !acc tn
+    | Set { tn; _ } | Set_dynamic { tn; _ } | Set_from_vec { tn; _ } -> acc := Set.add !acc tn
     | Zero_out tn -> acc := Set.add !acc tn
     | Tile_mma { d = tn, _; _ } -> acc := Set.add !acc tn
     | Seq (a, b) ->
@@ -2480,6 +2554,7 @@ let reads_scope_before_set (target : scope_id) (body : t) : bool =
     | For_loop { body; _ } -> proc_has_read body
     | If { cond = c, _; body } -> scalar_has_read c || proc_has_read body
     | Set { llsc; _ } -> scalar_has_read llsc
+    | Set_dynamic { dyn_value = v, _; llsc; _ } -> scalar_has_read v || scalar_has_read llsc
     | Set_from_vec { arg = s, _; _ } -> scalar_has_read s
     | Set_local (_, llsc) -> scalar_has_read llsc
     | Tile_mma { fallback; _ } -> proc_has_read fallback
@@ -2491,6 +2566,8 @@ let reads_scope_before_set (target : scope_id) (body : t) : bool =
     | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier ->
         `Neither
     | Set { llsc; _ } -> if scalar_has_read llsc then `Read else `Neither
+    | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+        if scalar_has_read v || scalar_has_read llsc then `Read else `Neither
     | Set_from_vec { arg = s, _; _ } -> if scalar_has_read s then `Read else `Neither
     | Set_local (id, llsc) ->
         if scalar_has_read llsc then `Read
@@ -2519,13 +2596,15 @@ let reads_scope_before_set (target : scope_id) (body : t) : bool =
 let rec contains_barrier (llc : t) : bool =
   match llc with
   | Workgroup_barrier -> true
-  (* A cooperative tile statement is barrier-strength: all lanes must reach it together, and no
-     code motion may cross it. Treating it as a barrier also makes [validate_parallel] apply the
+  (* A cooperative tile statement is barrier-strength: all lanes must reach it together, and no code
+     motion may cross it. Treating it as a barrier also makes [validate_parallel] apply the
      workgroup-extent-uniformity and no-If-guard rules to kernels containing it. *)
   | Tile_mma _ -> true
   | Seq (a, b) -> contains_barrier a || contains_barrier b
   | For_loop { body; _ } -> contains_barrier body
   | Set { llsc; _ } -> scalar_contains_barrier llsc
+  | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+      scalar_contains_barrier v || scalar_contains_barrier llsc
   | Set_from_vec { arg = s, _; _ } -> scalar_contains_barrier s
   | Set_local (_, llsc) -> scalar_contains_barrier llsc
   | If { cond = c, _; body } -> scalar_contains_barrier c || contains_barrier body
@@ -2541,19 +2620,18 @@ and scalar_contains_barrier (llsc : scalar_t) : bool =
   | Unop (_, (s, _)) -> scalar_contains_barrier s
   | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> false
 
-(* Whether the tree carries a read-modify-write accumulation: some [Set] (resp. [Set_local])
-   reads its own target — a loop-carried dependency through memory when the written cell does not
-   vary with an enclosing loop. Conservative: [Local_scope] contents count as reading anything,
-   and [Tile_mma] accumulates by construction. Used by the autotune menu and by codegen fallbacks
-   that must not assert iteration independence (e.g. vectorization pragmas) over an accumulating
-   body (gh-ocannl-468). *)
+(* Whether the tree carries a read-modify-write accumulation: some [Set] (resp. [Set_local]) reads
+   its own target — a loop-carried dependency through memory when the written cell does not vary
+   with an enclosing loop. Conservative: [Local_scope] contents count as reading anything, and
+   [Tile_mma] accumulates by construction. Used by the autotune menu and by codegen fallbacks that
+   must not assert iteration independence (e.g. vectorization pragmas) over an accumulating body
+   (gh-ocannl-468). *)
 let has_accumulation (llc : t) : bool =
   let rec scalar_reads ~read (sc : scalar_t) =
     let arg (s, _prec) = scalar_reads ~read s in
     match sc with
     | Get (tn2, _) -> ( match read with `Tn tn -> Tnode.equal tn tn2 | `Local _ -> false)
-    | Get_local id2 -> (
-        match read with `Local id -> equal_scope_id id id2 | `Tn _ -> false)
+    | Get_local id2 -> ( match read with `Local id -> equal_scope_id id id2 | `Tn _ -> false)
     | Local_scope _ -> true (* Conservative: opaque nested computation. *)
     | Get_dynamic { tn = tn2; dyn_value; _ } ->
         (match read with `Tn tn -> Tnode.equal tn tn2 | `Local _ -> false) || arg dyn_value
@@ -2569,6 +2647,9 @@ let has_accumulation (llc : t) : bool =
     | If { body; _ } -> loop body
     | For_loop { body; _ } -> loop body
     | Set { tn; llsc; _ } -> scalar_reads ~read:(`Tn tn) llsc
+    (* gh-466: a dynamic scatter accumulates by construction (its RHS reads the target row) and its
+       write location is not statically known — never assert iteration independence over it. *)
+    | Set_dynamic _ -> true
     | Set_local (id, sc) -> scalar_reads ~read:(`Local id) sc
     | Tile_mma _ -> true
     | Set_from_vec _ | Zero_out _ | Declare_local _ | Workgroup_barrier | Noop | Comment _
@@ -2606,8 +2687,8 @@ let rec hardware_depth kind (llc : t) : int =
       else d
   | Seq (a, b) -> max (hardware_depth kind a) (hardware_depth kind b)
   | If { body; _ } -> hardware_depth kind body
-  | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Set _ | Set_from_vec _ | Set_local _
-  | Declare_local _ | Workgroup_barrier | Tile_mma _ ->
+  | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Set _ | Set_dynamic _ | Set_from_vec _
+  | Set_local _ | Declare_local _ | Workgroup_barrier | Tile_mma _ ->
       0
 
 type hardware_axis_info = {
@@ -2640,8 +2721,8 @@ let hardware_axes (llc : t) : hardware_axis_info list =
         walk b
     | If { body; _ } -> walk body
     (* The fallback's loops are fresh serial symbols; the statement binds no hardware axes. *)
-    | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Set _ | Set_from_vec _ | Set_local _
-    | Declare_local _ | Workgroup_barrier | Tile_mma _ ->
+    | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Set _ | Set_dynamic _ | Set_from_vec _
+    | Set_local _ | Declare_local _ | Workgroup_barrier | Tile_mma _ ->
         ()
   in
   walk llc;
@@ -2683,6 +2764,7 @@ let rec scalar_scopes_have_annotated (llc : t) : bool =
   | For_loop { body; _ } -> scalar_scopes_have_annotated body
   | If { cond = c, _; body } -> scalar c || scalar_scopes_have_annotated body
   | Set { llsc; _ } -> scalar llsc
+  | Set_dynamic { dyn_value = v, _; llsc; _ } -> scalar v || scalar llsc
   | Set_from_vec { arg = s, _; _ } -> scalar s
   | Set_local (_, llsc) -> scalar llsc
   | Tile_mma { fallback; _ } -> scalar_scopes_have_annotated fallback
@@ -2733,8 +2815,8 @@ let validate_parallel plc (llc : t) : unit =
             no_guarded_barrier a;
             no_guarded_barrier b
         | For_loop { body; _ } -> no_guarded_barrier body
-        | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Set _ | Set_from_vec _
-        | Set_local _ | Declare_local _ | Workgroup_barrier | Tile_mma _ ->
+        | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Set _ | Set_dynamic _
+        | Set_from_vec _ | Set_local _ | Declare_local _ | Workgroup_barrier | Tile_mma _ ->
             ()
       in
       no_guarded_barrier llc);
@@ -2781,13 +2863,14 @@ let validate_parallel plc (llc : t) : unit =
           if (not (List.is_empty active)) && Tn.Placements.is_materialized_force plc tn 160 then
             invalid_arg
               ("Low_level.validate_parallel: Zero_out of materialized node " ^ Tn.debug_name tn
-             ^ " in a multi-threaded kernel: whole-node zeroing is not distributed across \
-                hardware threads; zero via per-element writes under the annotated loops instead")
-      | Set { tn; _ } | Set_from_vec { tn; _ } -> check_covered_write ~covered tn
+             ^ " in a multi-threaded kernel: whole-node zeroing is not distributed across hardware \
+                threads; zero via per-element writes under the annotated loops instead")
+      | Set { tn; _ } | Set_dynamic { tn; _ } | Set_from_vec { tn; _ } ->
+          check_covered_write ~covered tn
       | Tile_mma { d = d_tn, d_idcs; a = _, a_idcs; b = _, b_idcs; lane; _ } ->
-          (* The cooperating [lane] axis must be a real enclosing [Workgroup]-typed loop: the
-             launch needs its threads, hardware backends reach the intrinsic on all of them
-             together, and serial renderers key their once-per-simdgroup guard off its index. *)
+          (* The cooperating [lane] axis must be a real enclosing [Workgroup]-typed loop: the launch
+             needs its threads, hardware backends reach the intrinsic on all of them together, and
+             serial renderers key their once-per-simdgroup guard off its index. *)
           (match List.Assoc.find slot_of_index ~equal:Indexing.equal_symbol lane with
           | Some (`Workgroup, _) when List.mem enclosing lane ~equal:Indexing.equal_symbol -> ()
           | _ ->
@@ -2840,8 +2923,9 @@ let guard_annotated_extents ~(should_guard : [ `Grid | `Workgroup ] -> bool) (ll
         | _ -> For_loop { fc with body })
     | Seq (a, b) -> Seq (walk a, walk b)
     | If { cond; body } -> If { cond; body = walk body }
-    | ( Noop | Comment _ | Staged_compilation _ | Zero_out _ | Set _ | Set_from_vec _ | Set_local _
-      | Declare_local _ | Workgroup_barrier | Tile_mma _ ) as other ->
+    | ( Noop | Comment _ | Staged_compilation _ | Zero_out _ | Set _ | Set_dynamic _
+      | Set_from_vec _ | Set_local _ | Declare_local _ | Workgroup_barrier | Tile_mma _ ) as other
+      ->
         other
   in
   walk llc
@@ -2984,18 +3068,19 @@ let input_and_output_nodes optimized =
    table_get, Constant 0.)] (either operand order of [Cmpeq]); - the multiply form [Binop (Mul,
    <cmpeq 0/1>, table_get)] (either factor order). On success returns [Some (table, table_idcs,
    index_expr)] where [index_expr] is the scalar value used as the dynamic index. *)
+(* Match a Cmpeq comparing [Embed_index (Iterator k)] against an index expression free of [k].
+   Returns the index expression (with its precision). Uses [is_embedded_range_iterator] defined
+   above, sharing the recognition logic with [is_one_hot_selector_assignment]. *)
+let match_one_hot_cmpeq (k : Indexing.symbol) : scalar_t -> scalar_arg option = function
+  | Binop (Ops.Cmpeq, (a, pa), (b, pb)) ->
+      if is_embedded_range_iterator k a && not (scalar_mentions_symbol k b) then Some (b, pb)
+      else if is_embedded_range_iterator k b && not (scalar_mentions_symbol k a) then Some (a, pa)
+      else None
+  | _ -> None
+
 let match_one_hot_contribution (k : Indexing.symbol) (contribution : scalar_t) :
     (Tn.t * Indexing.axis_index array * scalar_arg) option =
-  (* Match a Cmpeq comparing [Embed_index (Iterator k)] against an index expression free of [k].
-     Returns the index expression (with its precision). Uses [is_embedded_range_iterator] defined
-     above, sharing the recognition logic with [is_one_hot_selector_assignment]. *)
-  let match_cmpeq = function
-    | Binop (Ops.Cmpeq, (a, pa), (b, pb)) ->
-        if is_embedded_range_iterator k a && not (scalar_mentions_symbol k b) then Some (b, pb)
-        else if is_embedded_range_iterator k b && not (scalar_mentions_symbol k a) then Some (a, pa)
-        else None
-    | _ -> None
-  in
+  let match_cmpeq = match_one_hot_cmpeq k in
   let as_table_get = function Get (table, table_idcs) -> Some (table, table_idcs) | _ -> None in
   match contribution with
   | Ternop (Ops.Where, cond, (then_, _), (Constant 0., _)) -> (
@@ -3012,36 +3097,52 @@ let match_one_hot_contribution (k : Indexing.symbol) (contribution : scalar_t) :
           | _ -> None))
   | _ -> None
 
-(* gh-343: build the guarded dynamic gather replacing a matched one-hot reduction. [class_count] is
-   the size of the table axis being gathered; [value_prec] is the table (result) precision.
+(* gh-466: recognize the transposed one-hot contribution — the embedding-table gradient. Matches the
+   same two selector forms as [match_one_hot_contribution], but where the selected operand is an
+   arbitrary scalar [g] (the incoming gradient) instead of a table read: - [Where (Cmpeq
+   (Embed_index (Iterator k), index_expr), g, Constant 0.)]; - the multiply form [Binop (Mul, <cmpeq
+   0/1>, g)] (either factor order). On success returns [Some (index_expr, g_arg)]; the caller checks
+   that [g] is free of [k] and does not read the written tensor. *)
+let match_transposed_one_hot_contribution (k : Indexing.symbol) (contribution : scalar_t) :
+    (scalar_arg * scalar_arg) option =
+  let match_cmpeq = match_one_hot_cmpeq k in
+  match contribution with
+  | Ternop (Ops.Where, cond, then_, (Constant 0., _)) ->
+      Option.map (match_cmpeq (fst cond)) ~f:(fun index_expr -> (index_expr, then_))
+  | Binop (Ops.Mul, a, b) -> (
+      match match_cmpeq (fst a) with
+      | Some index_expr -> Some (index_expr, b)
+      | None -> Option.map (match_cmpeq (fst b)) ~f:(fun index_expr -> (index_expr, a)))
+  | _ -> None
+
+(* gh-343: in-range guard conjuncts for the dynamic index of a gather ([build_guarded_gather]) or,
+   gh-466, a scatter ([build_guarded_scatter]). [class_count] is the size of the table axis being
+   dynamically indexed.
 
    The guard is constructed generically -- a lower-bound conjunct, an upper-bound conjunct, and an
    integrality conjunct -- and interval analysis erases each conjunct it can prove
    (docs/proposals/interval-analysis-scalar-t.md, the designated re-expression target). The
    precision facts alone reproduce the previous hand-written flavors as emergent behavior: an
-   unsigned index precision proves the lower bound (its machine range starts at 0), and any
-   integer precision proves integrality. Settled [Tnode] bounds can additionally discharge the
-   upper bound (and the lower bound for signed indices), leaving a bare gather.
+   unsigned index precision proves the lower bound (its machine range starts at 0), and any integer
+   precision proves integrality. Settled [Tnode] bounds can additionally discharge the upper bound
+   (and the lower bound for signed indices), leaving a bare gather.
 
    Fail-safe construction (binding constraint 1): folding is an optimization, never a correctness
    obligation. Every conjunct that can be emitted is correct unfolded at its guard precision; the
-   only exception -- a lower-bound compare against [-1] at the unsigned guard precision, which
-   would be C UB -- cannot be requested, because [Interval.at_prec] at an unsigned precision
-   always yields a non-negative lower bound, discharging that conjunct by construction (asserted
-   below rather than assumed).
+   only exception -- a lower-bound compare against [-1] at the unsigned guard precision, which would
+   be C UB -- cannot be requested, because [Interval.at_prec] at an unsigned precision always yields
+   a non-negative lower bound, discharging that conjunct by construction (asserted below rather than
+   assumed).
 
-   Guard precision by index flavor (unchanged from the hand-written version): unsigned compares
-   in uint64 (zero-extension is lossless; casting to int64 instead could map huge values to
-   negatives and pass the upper bound); signed compares in int64 (exact and native on all
-   backends, including Metal which lacks double); float compares in double (exact for the
-   integer-valued indices in scope). [0 <= idx] is encoded as [-1 < idx] (there is no [Cmple]);
-   integrality as [idx == trunc(idx)] (the backend casts [idx] to int when gathering, so for
-   non-integer indices, where every [k == idx] is false and the reduction is 0, the gather must
-   not fire). *)
-let build_guarded_gather ~ienv ~table ~table_idcs ~dyn_axis ~(index_expr : scalar_arg)
-    ~class_count ~value_prec : scalar_t =
+   Guard precision by index flavor (unchanged from the hand-written version): unsigned compares in
+   uint64 (zero-extension is lossless; casting to int64 instead could map huge values to negatives
+   and pass the upper bound); signed compares in int64 (exact and native on all backends, including
+   Metal which lacks double); float compares in double (exact for the integer-valued indices in
+   scope). [0 <= idx] is encoded as [-1 < idx] (there is no [Cmple]); integrality as [idx ==
+   trunc(idx)] (the backend casts [idx] to int when gathering, so for non-integer indices, where
+   every [k == idx] is false and the reduction is 0, the gather must not fire). *)
+let guard_conjuncts ~ienv ~(index_expr : scalar_arg) ~class_count : scalar_t list * Ops.prec =
   let iv, iprec = index_expr in
-  let gather = Get_dynamic { tn = table; idcs = table_idcs; dyn_axis; dyn_value = index_expr } in
   let guard_prec, unsigned_guard, prec_proves_integral =
     match iprec with
     | Ops.Byte_prec _ | Ops.Uint16_prec _ | Ops.Uint32_prec _ | Ops.Uint64_prec _ ->
@@ -3052,7 +3153,10 @@ let build_guarded_gather ~ienv ~table ~table_idcs ~dyn_axis ~(index_expr : scala
   (* Bounds of the index value as evaluated at the guard precision (the conjuncts are homogeneous
      binops, so this is exactly what the comparisons see). *)
   let ivr = interval_of ~ienv ~prec:guard_prec iv in
-  let lower_proved = Float.(ivr.ival.Interval.lo >= 0.) (* outward endpoints: sound *) in
+  let lower_proved =
+    Float.(ivr.ival.Interval.lo >= 0.)
+    (* outward endpoints: sound *)
+  in
   (* The gather compares against [class_count], an exact small integer. *)
   let upper_proved = Float.(ivr.ival.Interval.hi < Float.of_int class_count) in
   let integral_proved = prec_proves_integral || ivr.ival.Interval.integral in
@@ -3065,30 +3169,63 @@ let build_guarded_gather ~ienv ~table ~table_idcs ~dyn_axis ~(index_expr : scala
   in
   let upper =
     if upper_proved then None
-    else Some (Binop (Ops.Cmplt, (iv, guard_prec), (Constant (Float.of_int class_count), guard_prec)))
+    else
+      Some (Binop (Ops.Cmplt, (iv, guard_prec), (Constant (Float.of_int class_count), guard_prec)))
   in
   let is_integral =
     if integral_proved then None
     else
-      Some
-        (Binop (Ops.Cmpeq, (iv, guard_prec), (Unop (Ops.Trunc, (iv, guard_prec)), guard_prec)))
+      Some (Binop (Ops.Cmpeq, (iv, guard_prec), (Unop (Ops.Trunc, (iv, guard_prec)), guard_prec)))
   in
   let conjuncts = List.filter_opt [ lower; upper; is_integral ] in
-  let dropped_any =
-    Option.is_none lower || Option.is_none upper || Option.is_none is_integral
-  in
+  let dropped_any = Option.is_none lower || Option.is_none upper || Option.is_none is_integral in
   (* Any conjunct erased while tensor-node bounds narrowed the interval settles those bounds
      (binding constraint 2; over-settling when a drop was justified by the precision alone is
      harmless -- it only locks in bounds that later writers must respect). *)
   if dropped_any && not (Set.is_empty ivr.srcs) then settle_srcs ivr;
+  (conjuncts, guard_prec)
+
+let conjoin ~guard_prec conjuncts =
   match conjuncts with
-  | [] -> gather (* Fully discharged: the (settled) bounds prove every access in range. *)
+  | [] -> None
   | first :: rest ->
-      let in_range =
-        List.fold rest ~init:first ~f:(fun acc c ->
-            Binop (Ops.And, (acc, guard_prec), (c, guard_prec)))
-      in
+      Some
+        (List.fold rest ~init:first ~f:(fun acc c ->
+             Binop (Ops.And, (acc, guard_prec), (c, guard_prec))))
+
+let build_guarded_gather ~ienv ~table ~table_idcs ~dyn_axis ~(index_expr : scalar_arg) ~class_count
+    ~value_prec : scalar_t =
+  let gather = Get_dynamic { tn = table; idcs = table_idcs; dyn_axis; dyn_value = index_expr } in
+  let conjuncts, guard_prec = guard_conjuncts ~ienv ~index_expr ~class_count in
+  match conjoin ~guard_prec conjuncts with
+  | None -> gather (* Fully discharged: the (settled) bounds prove every access in range. *)
+  | Some in_range ->
       Ternop (Ops.Where, (in_range, guard_prec), (gather, value_prec), (Constant 0., value_prec))
+
+(* gh-466: build the guarded scatter-accumulate replacing a matched transposed one-hot reduction:
+   [if in_range(e) then tn[.., e @dyn_axis, ..] += g]. The write reads back its own cell via
+   [Get_dynamic] (an explicit read-modify-write), so the accumulation is visible to read-tracking
+   and [has_accumulation]. When interval analysis discharges every guard conjunct the [If] wrapper
+   is omitted. *)
+let build_guarded_scatter ~ienv ~tn ~idcs ~dyn_axis ~(index_expr : scalar_arg)
+    ~(grad_arg : scalar_arg) ~class_count ~debug : t =
+  let value_prec = Lazy.force tn.Tn.prec in
+  let gather = Get_dynamic { tn; idcs; dyn_axis; dyn_value = index_expr } in
+  let scatter =
+    Set_dynamic
+      {
+        tn;
+        idcs;
+        dyn_axis;
+        dyn_value = index_expr;
+        llsc = Binop (Ops.Add, (gather, value_prec), grad_arg);
+        debug;
+      }
+  in
+  let conjuncts, guard_prec = guard_conjuncts ~ienv ~index_expr ~class_count in
+  match conjoin ~guard_prec conjuncts with
+  | None -> scatter
+  | Some in_range -> If { cond = (in_range, guard_prec); body = scatter }
 
 (* gh-343: peel a possible zero-initializer off a reduction body, returning the inner [For_loop]. *)
 let strip_zero_init_for_local (id : scope_id) (body : t) : t option =
@@ -3169,28 +3306,121 @@ let try_rewrite_materialized_loop ~ienv (llc : t) : t option =
                 }))
   | _ -> None
 
+(* gh-466: conservative "mentions [tn]" scan over a scalar, descending into [Local_scope] bodies and
+   [Get_dynamic] index values. *)
+let rec scalar_mentions_tn (tn : Tn.t) (llsc : scalar_t) : bool =
+  match llsc with
+  | Get (g, _) | Get_merge_buffer (g, _) -> Tn.equal g tn
+  | Get_dynamic { tn = g; dyn_value = v, _; _ } -> Tn.equal g tn || scalar_mentions_tn tn v
+  | Local_scope { body; _ } -> proc_mentions_tn tn body
+  | Ternop (_, (a, _), (b, _), (c, _)) ->
+      scalar_mentions_tn tn a || scalar_mentions_tn tn b || scalar_mentions_tn tn c
+  | Binop (_, (a, _), (b, _)) -> scalar_mentions_tn tn a || scalar_mentions_tn tn b
+  | Unop (_, (a, _)) -> scalar_mentions_tn tn a
+  | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ -> false
+
+and proc_mentions_tn (tn : Tn.t) (llc : t) : bool =
+  match llc with
+  | Noop | Comment _ | Staged_compilation _ | Declare_local _ | Workgroup_barrier -> false
+  | Seq (a, b) -> proc_mentions_tn tn a || proc_mentions_tn tn b
+  | For_loop { body; _ } -> proc_mentions_tn tn body
+  | Zero_out g -> Tn.equal g tn
+  | Set { tn = g; llsc; _ } -> Tn.equal g tn || scalar_mentions_tn tn llsc
+  | Set_dynamic { tn = g; dyn_value = v, _; llsc; _ } ->
+      Tn.equal g tn || scalar_mentions_tn tn v || scalar_mentions_tn tn llsc
+  | Set_from_vec { tn = g; arg = a, _; _ } -> Tn.equal g tn || scalar_mentions_tn tn a
+  | Set_local (_, llsc) -> scalar_mentions_tn tn llsc
+  | If { cond = c, _; body } -> scalar_mentions_tn tn c || proc_mentions_tn tn body
+  | Tile_mma { d = d_tn, _; a = a_tn, _; b = b_tn, _; fallback; _ } ->
+      Tn.equal d_tn tn || Tn.equal a_tn tn || Tn.equal b_tn tn || proc_mentions_tn tn fallback
+
+(* gh-466: transposed (scatter) form -- the embedding-table gradient. A loop [For k { Set { tn;
+   idcs; llsc } }] where [k] indexes [tn] itself (once, as a plain [Iterator] -- the table axis) and
+   each iteration accumulates the one-hot-selected contribution into its own row:
+
+   for k in [0, class_count): tn[.., k, ..] += (k == e) * g
+
+   with [e] and [g] free of [k] and [g] not touching [tn]. Every iteration adds 0 except [k = e]
+   (when [e] is in range and integral -- one-hot semantics), so the loop equals a single guarded
+   scatter-accumulate at the dynamic row [e]:
+
+   if in_range(e): tn[.., e, ..] += g
+
+   -- O(1) rows touched per position instead of O(class_count), llm.c's deterministic no-atomics
+   encoder backward (docs/research/llmc-lessons.md B5). Enclosing position loops execute in their
+   original serial order, so for every cell the accumulation order matches the dense form. Like the
+   forward rewrite, contributions that the dense form multiplies by 0 are dropped rather than added
+   (a NaN/Inf [g] at a non-selected or out-of-range position no longer poisons the table). *)
+let try_rewrite_transposed_loop ~ienv (llc : t) : t option =
+  match llc with
+  | For_loop { index = k; from_; to_; body = Set { tn; idcs; llsc; _ }; _ } -> (
+      let count, axis, only_plain = count_plain_iterator k idcs in
+      match if count = 1 && only_plain then axis else None with
+      | None -> None
+      | Some dyn_axis ->
+          let acc_is = function
+            | Get (g, gi) -> Tn.equal g tn && [%equal: Indexing.axis_index array] gi idcs
+            | _ -> false
+          in
+          Option.bind (accumulation_contribution ~acc_is llsc) ~f:(fun contribution ->
+              Option.bind (match_transposed_one_hot_contribution k contribution)
+                ~f:(fun (index_expr, grad_arg) ->
+                  let class_count = from_ + (Lazy.force tn.Tn.dims).(dyn_axis) in
+                  (* The loop must span exactly [0, class_count) over the written axis; the index
+                     expression is free of [k] by construction ([match_one_hot_cmpeq]); the
+                     contribution must be loop-invariant and must not read (or re-write, via a
+                     [Local_scope]) the scattered tensor, else dropping the per-row iterations could
+                     change what it observes. *)
+                  if from_ <> 0 || to_ <> class_count - 1 then None
+                  else if scalar_mentions_symbol k (fst grad_arg) then None
+                  else if scalar_mentions_tn tn (fst grad_arg) then None
+                  else if scalar_mentions_tn tn (fst index_expr) then None
+                  else
+                    (* Neutralize the now-dead loop symbol at the dynamic axis. *)
+                    let idcs = Array.copy idcs in
+                    idcs.(dyn_axis) <- Indexing.Fixed_idx 0;
+                    Some
+                      (build_guarded_scatter ~ienv ~tn ~idcs ~dyn_axis ~index_expr ~grad_arg
+                         ~class_count ~debug:""))))
+  | _ -> None
+
 let rewrite_one_hot_reductions ?(static_indices = []) (llc : t) : t =
   let rec loop_proc ~ienv (llc : t) : t =
     match try_rewrite_materialized_loop ~ienv llc with
     | Some replacement -> replacement
     | None -> (
-        match llc with
-        | Seq (a, b) -> Seq (loop_proc ~ienv a, loop_proc ~ienv b)
-        | For_loop fc ->
-            For_loop
-              {
-                fc with
-                body = loop_proc ~ienv:(ienv_extend ienv fc.index ~from_:fc.from_ ~to_:fc.to_) fc.body;
-              }
-        | Set { tn; idcs; llsc; debug } -> Set { tn; idcs; llsc = loop_scalar ~ienv llsc; debug }
-        | Set_from_vec { tn; idcs; length; vec_unop; arg = s, p; debug } ->
-            Set_from_vec { tn; idcs; length; vec_unop; arg = (loop_scalar ~ienv s, p); debug }
-        | Set_local (id, llsc) -> Set_local (id, loop_scalar ~ienv llsc)
-        | If { cond = c, p; body } ->
-            If { cond = (loop_scalar ~ienv c, p); body = loop_proc ~ienv body }
-        | ( Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _
-          | Workgroup_barrier | Tile_mma _ ) as other ->
-            other)
+        match try_rewrite_transposed_loop ~ienv llc with
+        | Some replacement -> replacement
+        | None -> loop_unmatched ~ienv llc)
+  and loop_unmatched ~ienv (llc : t) : t =
+    match llc with
+    | Seq (a, b) -> Seq (loop_proc ~ienv a, loop_proc ~ienv b)
+    | For_loop fc ->
+        For_loop
+          {
+            fc with
+            body = loop_proc ~ienv:(ienv_extend ienv fc.index ~from_:fc.from_ ~to_:fc.to_) fc.body;
+          }
+    | Set { tn; idcs; llsc; debug } -> Set { tn; idcs; llsc = loop_scalar ~ienv llsc; debug }
+    | Set_dynamic { tn; idcs; dyn_axis; dyn_value = v, p; llsc; debug } ->
+        (* Only produced by this pass; recurse for exhaustiveness/idempotence. *)
+        Set_dynamic
+          {
+            tn;
+            idcs;
+            dyn_axis;
+            dyn_value = (loop_scalar ~ienv v, p);
+            llsc = loop_scalar ~ienv llsc;
+            debug;
+          }
+    | Set_from_vec { tn; idcs; length; vec_unop; arg = s, p; debug } ->
+        Set_from_vec { tn; idcs; length; vec_unop; arg = (loop_scalar ~ienv s, p); debug }
+    | Set_local (id, llsc) -> Set_local (id, loop_scalar ~ienv llsc)
+    | If { cond = c, p; body } ->
+        If { cond = (loop_scalar ~ienv c, p); body = loop_proc ~ienv body }
+    | ( Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier
+      | Tile_mma _ ) as other ->
+        other
   and loop_scalar ~ienv (llsc : scalar_t) : scalar_t =
     let loop_scalar = loop_scalar ~ienv in
     match llsc with
@@ -3232,6 +3462,11 @@ let rec pin_device_written_bounds (llc : t) : unit =
   | Zero_out tn -> pin tn
   | Set { tn; llsc; _ } ->
       pin tn;
+      pin_scalar_written_bounds llsc
+  (* gh-466: defensive -- [Set_dynamic] is produced after lowering-time pinning. *)
+  | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
+      pin tn;
+      pin_scalar_written_bounds v;
       pin_scalar_written_bounds llsc
   | Set_from_vec { tn; arg = s, _; _ } ->
       pin tn;
@@ -3321,6 +3556,10 @@ let get_ident_within_code ?no_dots ?(blacklist = []) llcs =
     | Zero_out la -> visit la
     | Set { tn; llsc; _ } ->
         visit tn;
+        loop_scalar llsc
+    | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
+        visit tn;
+        loop_scalar v;
         loop_scalar llsc
     | Set_from_vec { tn; arg = arg_scalar, _; _ } ->
         visit tn;
@@ -3420,6 +3659,22 @@ let to_doc_cstyle ?name ?static_indices () llc =
           group
             (doc_ident p.tn
             ^^ brackets (pp_indices p.idcs)
+            ^^ string " := " ^^ doc_of_float prec p.llsc ^^ string ";")
+        in
+        if not (String.is_empty p.debug) then (
+          let b = Buffer.create 100 in
+          PPrint.ToBuffer.pretty 0.7 100 b result;
+          p.debug <- Buffer.contents b);
+        result
+    | Set_dynamic p ->
+        let prec = Lazy.force p.tn.prec in
+        let v, vprec = p.dyn_value in
+        let result =
+          group
+            (doc_ident p.tn
+            ^^ brackets (pp_indices p.idcs)
+            ^^ string (Printf.sprintf "@dyn[%d]=" p.dyn_axis)
+            ^^ parens (doc_of_float vprec v)
             ^^ string " := " ^^ doc_of_float prec p.llsc ^^ string ";")
         in
         if not (String.is_empty p.debug) then (
@@ -3542,6 +3797,19 @@ let to_doc ?name ?static_indices () llc =
           group
             (doc_ident p.tn
             ^^ brackets (pp_indices p.idcs)
+            ^^ string " := " ^^ doc_of_float p.llsc ^^ string ";")
+        in
+        let b = Buffer.create 100 in
+        PPrint.ToBuffer.pretty 0.7 100 b result;
+        p.debug <- Buffer.contents b;
+        result
+    | Set_dynamic p ->
+        let result =
+          group
+            (doc_ident p.tn
+            ^^ brackets (pp_indices p.idcs)
+            ^^ string (Printf.sprintf "@dyn[%d]=" p.dyn_axis)
+            ^^ parens (doc_of_float (fst p.dyn_value))
             ^^ string " := " ^^ doc_of_float p.llsc ^^ string ";")
         in
         let b = Buffer.create 100 in

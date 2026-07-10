@@ -68,6 +68,22 @@ type t =
       llsc : scalar_t;
       mutable debug : string;
     }
+  | Set_dynamic of {
+      tn : Tnode.t;
+      idcs : Indexing.axis_index array;
+          (** Static everywhere except [dyn_axis] (a [Fixed_idx 0] placeholder there). *)
+      dyn_axis : int;  (** Which [idcs] slot is replaced by [dyn_value] at codegen time. *)
+      dyn_value : scalar_arg;
+          (** Integer-valued index spliced into the row-major offset at [dyn_axis]. *)
+      llsc : scalar_t;
+      mutable debug : string;
+    }
+      (** A scatter: like [Set] but the write lands at a runtime row of axis [dyn_axis] — the write
+          counterpart of {!scalar_t.Get_dynamic}. gh-466: produced only by
+          {!rewrite_one_hot_reductions} (transposed one-hot pattern, the embedding-table gradient);
+          never constructed by [Assignments] lowering. Schedule analyses must treat this write as
+          statically unknown: loops whose index reaches [dyn_value] carry a cross-iteration write
+          dependency and must stay serial (the deterministic no-atomics invariant). *)
   | Set_from_vec of {
       tn : Tnode.t;
       idcs : Indexing.axis_index array;
@@ -151,9 +167,9 @@ val has_accumulation : t -> bool
 (** Whether the tree carries a read-modify-write accumulation: some [Set] (resp. [Set_local])
     reads its own target — a loop-carried dependency through memory when the written cell does
     not vary with an enclosing loop. Conservative: [Local_scope] contents count as reading
-    anything, and [Tile_mma] accumulates by construction. Used by the autotune menu and by
-    codegen fallbacks that must not assert iteration independence (e.g. vectorization pragmas)
-    over an accumulating body (gh-ocannl-468). *)
+    anything, and [Tile_mma] and (gh-466) [Set_dynamic] accumulate by construction. Used by the
+    autotune menu and by codegen fallbacks that must not assert iteration independence (e.g.
+    vectorization pragmas) over an accumulating body (gh-ocannl-468). *)
 
 (** {2 Hardware axis analyses}
 
@@ -322,9 +338,18 @@ val rewrite_one_hot_reductions : ?static_indices:Indexing.static_symbol list -> 
     The guard is constructed generically and interval analysis
     (docs/proposals/interval-analysis-scalar-t.md) erases the conjuncts it can prove -- from the
     index precision's machine range, loop extents seeded from [static_indices], and settled
-    per-tensor bounds ({!Tnode.bounds_state}). Unmatched or unsupported reductions are left
-    unchanged. Called internally by [optimize] between [simplify_llc] and
-    [eliminate_common_subexpressions]; exposed for testing. *)
+    per-tensor bounds ({!Tnode.bounds_state}).
+
+    gh-466: also rewrites the {e transposed} one-hot pattern -- the embedding-table gradient
+    [for k in \[0, V): tn\[.., k, ..\] += (k == index_expr) * g] where the loop variable indexes
+    the written tensor itself -- into a guarded dynamic scatter-accumulate ({!Set_dynamic}):
+    [if in_range(index_expr): tn\[.., index_expr, ..\] += g], dropping the O(V) per-position work
+    (llm.c's deterministic encoder backward, docs/research/llmc-lessons.md B5). The enclosing
+    position loops keep their original serial order and the schedule analyses never parallelize
+    over a dynamically-written node, preserving determinism without atomics.
+
+    Unmatched or unsupported reductions are left unchanged. Called internally by [optimize]
+    between [simplify_llc] and [eliminate_common_subexpressions]; exposed for testing. *)
 
 val eliminate_common_subexpressions : t -> t
 (** Eliminates common subexpressions within each statement's scalar expression tree. Replaces
