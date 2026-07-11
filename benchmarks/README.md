@@ -18,25 +18,44 @@ it caught two real backward-pass optimizer bugs (wrong gradients with a correct 
 since fixed — CSE alpha-equivalence renaming free loop symbols, and the simplifier's
 nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`.
 
+## Workloads
+
+- **mlp_small / mlp_wide** (`model: mlp`, training): n-layer relu MLPs; overhead- vs
+  GEMM-dominated.
+- **lenet** (`model: conv`, training): LeNet-5 with *valid* convolutions on random 32×32×1
+  images, built from the idiomatic nn_blocks pieces (`conv2d ~use_padding:false`,
+  `max_pool2d`, `mlp_layer`). Fixture weights are injected into the block-created inline
+  params by debug-name token matching (`Bench_harness.inject`). Note: OCANNL's `conv2d`
+  block infers its inline bias to the full feature map `[oh, ow, oc]` (least-commitment
+  broadcast) rather than per-channel `[oc]`; the fixture and Python runners mirror that.
+- **gpt2_mini** (`model: gpt`, `mode: infer`): pre-LN GPT-2-style decoder (4 layers, d=256,
+  8 heads, seq 128, vocab 1024, tanh-gelu, learned positional embeddings, tied lm_head,
+  causal mask filled with -1e9), forward-only. The parity metric is softmax-CE of the
+  logits against fixture target ids, recorded per batch with no updates; the report shows
+  tokens/s. Token embedding uses the logical one-hot gather (gh-343). LayerNorm is
+  hand-built in the runner (`nn_blocks.layer_norm` currently subtracts an un-divided sum —
+  pending fix).
+
 ## Layout
 
-- `workloads/*.json` — workload specs (dims, batch size, lr, step counts, data kind, seed).
-- `gen_fixtures.py` — generates `fixtures/<name>.safetensors` from a spec: initial weights
-  (`w<i>` as `[fan_out, fan_in]` — the shared row-major convention — and `b<i>`), dataset
-  (`x`, one-hot `y`), and all hyperparameters embedded in the safetensors `__metadata__` map,
-  so fixtures are self-describing and runners need only the fixture path.
-- `runners/ocannl/bench_mlp.ml` — OCANNL runner (`dune build benchmarks/runners/ocannl/bench_mlp.exe`).
-  Env: `BENCH_FIXTURE` (path), `BENCH_TUNE=1` (materialize-all + `Autotune.tune` variant);
-  backend via the usual `--ocannl_backend=cc|metal`. Debug helpers: `BENCH_DEBUG=1` prints
-  bias gradients and values after one step and exits; `BENCH_NO_SGD=1` compiles the gradient
-  update without the SGD step; `BENCH_NO_SLICE=1` skips `@|` batch slicing (requires a
-  single-batch fixture).
+- `workloads/*.json` — workload specs; `gen_fixtures.py` generates
+  `fixtures/<name>.safetensors` with initial weights in OCANNL's axis conventions (output
+  axes then input axes; channels-last images — layouts documented per model in the
+  generator), dataset, and all hyperparameters in the safetensors `__metadata__` map, so
+  fixtures are self-describing and runners need only the fixture path.
+- `runners/ocannl/bench_{mlp,conv,gpt}.ml` + `bench_harness.ml` — OCANNL runners
+  (`dune build benchmarks/runners/ocannl/bench_mlp.exe` etc.). Env: `BENCH_FIXTURE` (path),
+  `BENCH_TUNE=1` (materialize-all + `Autotune.tune`), `BENCH_MATERIALIZE=1` (materialize
+  intermediates without tuning); backend via the usual `--ocannl_backend=cc|metal`. Debug
+  helpers: `BENCH_DEBUG=1` prints param names/dims (conv/gpt) or bias gradients (mlp) and
+  exits; `BENCH_NO_SGD=1` compiles the gradient update without the SGD step (mlp);
+  `BENCH_NO_SLICE=1` skips `@|` batch slicing (mlp, single-batch fixture).
 - `runners/pytorch/run.py` — flags: `--device cpu|mps`, `--compile` (torch.compile variant).
 - `runners/tinygrad/run.py` — flags: `--device CPU|METAL`, `--jit 0|1`.
-- `orchestrate.py` — runs the matrix, enforces the parity gate, writes
-  `results/results.jsonl` and `results/report.md`. Flags: `--workloads mlp_small ...`,
-  `--tuned` (adds the OCANNL autotuned variant), `--nojit` (adds tinygrad nojit),
-  `--only ocannl pytorch tinygrad`, `--skip-build`.
+- `orchestrate.py` — runs the matrix (dispatching the OCANNL executable on the fixture's
+  `model`), enforces the parity gate, writes `results/results.jsonl` and
+  `results/report.md`. Flags: `--workloads mlp_small ...`, `--tuned`, `--materialized`,
+  `--nojit` (tinygrad nojit), `--only ocannl pytorch tinygrad`, `--skip-build`.
 
 ## Setup
 
