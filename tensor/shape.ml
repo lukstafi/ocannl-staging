@@ -195,20 +195,24 @@ let axes_spec_to_dims_bio ~sh_id ~row_var_env ~dim_var_env:_ ~f labels =
     axis_map_to_dims_bio labels.labels
   in
   let to_dim kind = Array.(Fn.compose to_list @@ map ~f:(f kind)) in
-  let to_bcast kind v beg_dims =
+  let to_bcast kind ~implicit v beg_dims =
     let beg_dims = to_dim kind beg_dims in
     Option.value_map v ~default:(Row.Broadcastable, beg_dims) ~f:(fun vname ->
         let v = Hashtbl.find_or_add row_var_env vname ~default:(fun () -> Row.get_row_var ()) in
         Row.add_used_in_spec_or_compose v;
+        (* A row omitted together with its kind separator reads as the context ellipsis, but
+           unlike an explicit ellipsis it may be silently closed to an empty row (even on
+           parameters) when nothing else constrains it. *)
+        if implicit then Row.add_safe_to_guess v;
         (Row.Row_var v, beg_dims))
   in
-  let to_row kind v dims beg_dims =
-    let bcast, beg_dims = to_bcast kind v beg_dims in
+  let to_row kind ~implicit v dims beg_dims =
+    let bcast, beg_dims = to_bcast kind ~implicit v beg_dims in
     { Row.beg_dims; dims = to_dim kind dims; bcast; prov = Row.provenance ~sh_id ~kind }
   in
-  let batch = to_row `Batch labels.bcast_batch b_dims beg_b_dims in
-  let input = to_row `Input labels.bcast_input i_dims beg_i_dims in
-  let output = to_row `Output labels.bcast_output o_dims beg_o_dims in
+  let batch = to_row `Batch ~implicit:labels.implicit_batch labels.bcast_batch b_dims beg_b_dims in
+  let input = to_row `Input ~implicit:labels.implicit_input labels.bcast_input i_dims beg_i_dims in
+  let output = to_row `Output ~implicit:false labels.bcast_output o_dims beg_o_dims in
   (batch, input, output)
 
 let einsum_slot_spec_to_dims_bio ~original_spec ~sh_id ~row_var_env ~dim_var_env labels =

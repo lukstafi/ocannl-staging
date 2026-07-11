@@ -32,6 +32,16 @@
     spec doesn't contain ["|"], labels to the left of ["->"] are [Input] and to the right [Output].
     Labels to the left of ["|"] are [Batch], and between ["|"] and ["->"] are [Input].
 
+    A row whose kind separator is omitted altogether reads as the context ellipsis ["..."]: [x] is
+    equivalent to [...|...->x], so batch and input axes broadcast through terse specs by default.
+    Writing the separator with an empty row spec closes the row: [| ->x] means no batch and no input
+    axes, [|x] means no batch axes, [->x] means no input axes. In einsum specs the distinction
+    matters wherever another row of the same kind is written ["..."]: an omitted row shares the
+    context row variable with it. On the result side of [=>] this means those axes pass through
+    (write e.g. [=> |->0] to reduce over them instead), and across operands it forces the rows equal
+    (close the row, e.g. a [|]-prefixed kernel slot, when an operand must not receive the broadcast
+    axes).
+
     The labels [".."ident".."], ["..."] (where [ident] does not contain any of the special
     characters) are only allowed once for a kind. They are used to enable (in-the-middle)
     broadcasting for the axis kind in the einsum-related shape inference (like the ellipsis ["..."]

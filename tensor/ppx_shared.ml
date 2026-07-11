@@ -237,18 +237,13 @@ let substitute_identifiers_in_einsum_spec ~loc str_input =
     let output_segments =
       row_to_segments ~kind:"output" parsed.bcast_output parsed.given_beg_output parsed.given_output
     in
-    let has_batch = (not (List.is_empty batch_segments)) || Option.is_some parsed.bcast_batch in
-    let has_input = (not (List.is_empty input_segments)) || Option.is_some parsed.bcast_input in
-    let segments =
-      if has_batch then
-        batch_segments
-        @ [ estring ~loc "|" ]
-        @ (if has_input then input_segments @ [ estring ~loc "->" ] else [])
-        @ output_segments
-      else if has_input then input_segments @ [ estring ~loc "->" ] @ output_segments
-      else output_segments
-    in
-    segments
+    (* Minimal-form rendering: a row parsed as implicit (omitted together with its kind
+       separator) is rendered as omitted again — reparsing restores it. Any explicitly written
+       row, including a closed (empty) one and an explicit ellipsis, must keep its separator so
+       that the reconstructed string preserves the closed-vs-implicit distinction. *)
+    (if parsed.implicit_batch then [] else batch_segments @ [ estring ~loc "|" ])
+    @ (if parsed.implicit_input then [] else input_segments @ [ estring ~loc "->" ])
+    @ output_segments
   in
   (* Try to parse as einsum spec *)
   try
