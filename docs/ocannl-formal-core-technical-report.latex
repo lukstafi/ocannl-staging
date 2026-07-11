@@ -1,5 +1,5 @@
-% Mirror of docs/ocannl-formal-core-technical-report.md.
-% Regenerate or update alongside the Markdown report when the proof text changes.
+% Primary source of the formal core technical report (the Markdown mirror was
+% removed after the two variants diverged; this LaTeX file is authoritative).
 % Options for packages loaded elsewhere
 \PassOptionsToPackage{unicode}{hyperref}
 \PassOptionsToPackage{hyphens}{url}
