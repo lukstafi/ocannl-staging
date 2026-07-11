@@ -166,16 +166,28 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        conservatively floored at compute_80 too. *)
     let has s = String.is_substring cu_src ~substring:s in
     let uses_h_arith =
+      (* Every half-arith token [unop_syntax]/[binop_syntax]/[ternop_syntax] can emit; [hexp]/[hlog]
+         also cover their [2]-suffixed variants and [__hmax]/[__hmin] the [_nan] variants as
+         substrings. *)
       List.exists ~f:has
         [ "__hadd"; "__hsub"; "__hmul"; "__hdiv"; "__hmax"; "__hmin"; "__hgt"; "__hfma"; "hexp";
-          "hlog"; "hsqrt"; "htanh_approx" ]
+          "hlog"; "hsin"; "hcos"; "hsqrt"; "hrcp"; "hrsqrt"; "htanh_approx" ]
     in
-    let wmma_arch_opts =
-      if uses_wmma && has "(wmma-bf16)" then [ "--gpu-architecture=compute_80" ]
-      else if uses_wmma then [ "--gpu-architecture=compute_70" ]
-      else if uses_h_arith && has "__nv_bfloat16" then [ "--gpu-architecture=compute_80" ]
-      else if uses_h_arith then [ "--gpu-architecture=compute_53" ]
-      else []
+    (* [compile_batch] concatenates several kernels into one source, so the floors can trigger
+       independently (e.g. a half-wmma kernel batched with scalar bf16 arithmetic needs
+       compute_80 even without the [(wmma-bf16)] marker): take the max, not the first match. *)
+    let arch_floor =
+      List.filter_opt
+        [
+          (if uses_wmma then Some (if has "(wmma-bf16)" then 80 else 70) else None);
+          (if uses_h_arith then Some (if has "__nv_bfloat16" then 80 else 53) else None);
+        ]
+      |> List.max_elt ~compare:Int.compare
+    in
+    let arch_opts =
+      match arch_floor with
+      | Some arch -> [ Printf.sprintf "--gpu-architecture=compute_%d" arch ]
+      | None -> []
     in
     let name_cu = name ^ ".cu" in
     if Utils.settings.output_debug_files_in_build_directory then (
@@ -216,7 +228,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           else []
     in
     let options =
-      cuda_include_opt @ wmma_arch_opts
+      cuda_include_opt @ arch_opts
       @ ("--use_fast_math" :: (if Utils.with_runtime_debug () then [ "--device-debug" ] else []))
     in
     let ptx = Nvrtc.compile_to_ptx ~cu_src ~name:name_cu ~options ~with_debug in
