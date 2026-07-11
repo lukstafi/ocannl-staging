@@ -394,18 +394,25 @@ let () =
             (Exn.to_string exn))
   in
   (* Cleanup is scoped to this process's own subdirectory (see [artifacts_subdir]), so a
-     starting test cannot delete the in-flight artifacts of a concurrently running one. *)
-  let scoped_dir base =
-    match artifacts_subdir () with None -> base | Some p -> filename_concat base p
+     starting test cannot delete the in-flight artifacts of a concurrently running one. If the
+     artifact root itself is a symlink, skip the scoped cleanup rather than follow it: appending
+     the subdirectory would resolve through the link, deleting files outside the working tree. *)
+  let remove_scoped_dir base =
+    match artifacts_subdir () with
+    | None -> remove_dir_if_exists base
+    | Some p -> (
+        match lstat_kind base with
+        | Some Unix.S_DIR -> remove_dir_if_exists (filename_concat base p)
+        | Some _ | None -> ())
   in
   let clean_up_log_files_on_startup =
     get_global_flag ~default:true ~arg_name:"clean_up_log_files_on_startup"
   in
-  if clean_up_log_files_on_startup then remove_dir_if_exists (scoped_dir "log_files");
+  if clean_up_log_files_on_startup then remove_scoped_dir "log_files";
   let clean_up_build_files_on_startup =
     get_global_flag ~default:true ~arg_name:"clean_up_build_files_on_startup"
   in
-  if clean_up_build_files_on_startup then remove_dir_if_exists (scoped_dir "build_files")
+  if clean_up_build_files_on_startup then remove_scoped_dir "build_files"
 
 let get_local_debug_runtime =
   let snapshot_every_sec =
