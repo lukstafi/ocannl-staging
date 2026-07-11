@@ -2673,11 +2673,11 @@ let%track5_sexp solve_dim_ineq ~(stage : stage) origin ~(res : dim) ~(opnd : dim
                  origin = origin2;
                  _;
                }) )
-        when is_stage2_up stage
-             && equal_dim_var opnd_v opnd1 && equal_dim_var res_v res2
-             && (match (constr1, constr2) with
-                | At_least_dim _, _ | _, At_least_dim _ -> false
-                | _ -> true) ->
+        when is_stage2_up stage && equal_dim_var opnd_v opnd1 && equal_dim_var res_v res2
+             &&
+             match (constr1, constr2) with
+             | At_least_dim _, _ | _, At_least_dim _ -> false
+             | _ -> true ->
           let origin = merge_origins origin (merge_origins origin1 origin2) in
           (* A heuristic to reduce template variables coming from e.g. einsum notation expansion.
              Vars carrying [At_least_dim] (fixed-index slots such as [=> ...|0]) are excluded: they
