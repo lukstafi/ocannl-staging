@@ -2096,7 +2096,8 @@ let simplify_llc static_indices llc =
     | Binop (Div, llv1, (Binop (Div, llv2, llv3), prec23)) when Ops.is_float prec ->
         loop_scalar (Binop (Div, (Binop (Mul, llv1, llv3), prec), llv2), prec23)
     | Binop (Div, (Binop (Div, llv1, llv2), prec12), llv3) when Ops.is_float prec ->
-        loop_scalar (Binop (Div, (Binop (Mul, llv1, llv3), prec), llv2), prec12)
+        (* (a / b) / c = a / (b * c). *)
+        loop_scalar (Binop (Div, llv1, (Binop (Mul, llv2, llv3), prec)), prec12)
     | Binop (ToPowOf, llv1, llv2) -> (
         let ((v1_scalar, _) as v1) = loop_scalar llv1 in
         let v2 = loop_scalar llv2 in
