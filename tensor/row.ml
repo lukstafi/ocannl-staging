@@ -3907,9 +3907,14 @@ let%track5_sexp process_shape_row ~(stage : stage) origin env
       let dim_eqs = process_dims beg_dims @ process_dims dims in
       let r1 : row = row_of_var v prov in
       let empty_broadcastable : row = { beg_dims = []; dims = []; bcast = Broadcastable; prov } in
+      (* When an arm closes the row variable but the row still has unresolved dim vars (whose
+         elimination may be deferred to a later stage, e.g. the [At_least_dim 1] guess-to-1 at stage
+         7), re-emit the [Shape_row] so those vars get revisited: consuming the constraint here
+         would leave them unresolved forever. *)
+      let keep = if final then [] else [ Shape_row (r, origin) ] in
       match find_row env.row_env v with
       | Some (Bounds_row { glb = Some glb; constr = Unconstrained; _ }) when is_stage6_up stage ->
-          (Row_eq { r1; r2 = glb; origin } :: dim_eqs, env)
+          (keep @ (Row_eq { r1; r2 = glb; origin } :: dim_eqs), env)
       | Some (Bounds_row { constr = Unconstrained; _ }) when not final ->
           (Shape_row (r, origin) :: dim_eqs, env)
       | Some (Bounds_row { constr = Unconstrained; _ }) when final ->
@@ -3928,13 +3933,12 @@ let%track5_sexp process_shape_row ~(stage : stage) origin env
                _;
              }) ->
           (* That's a greatest-lower-bound (most specific) value for a row. *)
-          (Row_eq { r1; r2 = glb; origin } :: dim_eqs, env)
+          (keep @ (Row_eq { r1; r2 = glb; origin } :: dim_eqs), env)
       | Some (Bounds_row { glb; constr; _ }) ->
           let ineqs, env =
             try eliminate_row_constraint ~depth:0 stage origin r1 ~terminal:false ~glb constr env
             with Shape_error (s, trace) -> raise @@ Shape_error (s, Row_mismatch [ r1 ] :: trace)
           in
-          let keep = if not final then [ Shape_row (r, origin) ] else [] in
           (keep @ ineqs @ dim_eqs, env)
       | Some (Solved_row _) -> assert false
       | _ when final -> (Row_eq { r1; r2 = empty_broadcastable; origin } :: dim_eqs, env)
