@@ -157,11 +157,37 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        [(wmma-bf16)] marker is emitted by [mma_syntax] for bf16 fragments (sm_80+). *)
     let uses_wmma = String.is_substring cu_src ~substring:"nvcuda::wmma" in
     let cu_src = if uses_wmma then "#include <mma.h>\n" ^ cu_src else cu_src in
-    let wmma_arch_opts =
-      if not uses_wmma then []
-      else if String.is_substring cu_src ~substring:"(wmma-bf16)" then
-        [ "--gpu-architecture=compute_80" ]
-      else [ "--gpu-architecture=compute_70" ]
+    (* Half/bf16 ARITHMETIC intrinsics (unlike the conversions, which cuda_fp16.h/cuda_bf16.h
+       emulate on any arch) are only declared for __CUDA_ARCH__ >= 530 (halfs) resp. >= 800
+       (bfloat16s), while nvrtc's default target is compute_52 — e.g. [__hfma] in a serial half
+       matmul fails with "identifier undefined" unless we raise the floor. The bf16 overloads share
+       the half intrinsics' names, so a bf16 kernel is recognized by the type name appearing
+       alongside the arithmetic tokens; a kernel mixing half arithmetic with bf16 storage-only is
+       conservatively floored at compute_80 too. *)
+    let has s = String.is_substring cu_src ~substring:s in
+    let uses_h_arith =
+      (* Every half-arith token [unop_syntax]/[binop_syntax]/[ternop_syntax] can emit; [hexp]/[hlog]
+         also cover their [2]-suffixed variants and [__hmax]/[__hmin] the [_nan] variants as
+         substrings. *)
+      List.exists ~f:has
+        [ "__hadd"; "__hsub"; "__hmul"; "__hdiv"; "__hmax"; "__hmin"; "__hgt"; "__hfma"; "hexp";
+          "hlog"; "hsin"; "hcos"; "hsqrt"; "hrcp"; "hrsqrt"; "htanh_approx" ]
+    in
+    (* [compile_batch] concatenates several kernels into one source, so the floors can trigger
+       independently (e.g. a half-wmma kernel batched with scalar bf16 arithmetic needs
+       compute_80 even without the [(wmma-bf16)] marker): take the max, not the first match. *)
+    let arch_floor =
+      List.filter_opt
+        [
+          (if uses_wmma then Some (if has "(wmma-bf16)" then 80 else 70) else None);
+          (if uses_h_arith then Some (if has "__nv_bfloat16" then 80 else 53) else None);
+        ]
+      |> List.max_elt ~compare:Int.compare
+    in
+    let arch_opts =
+      match arch_floor with
+      | Some arch -> [ Printf.sprintf "--gpu-architecture=compute_%d" arch ]
+      | None -> []
     in
     let name_cu = name ^ ".cu" in
     if Utils.settings.output_debug_files_in_build_directory then (
@@ -202,7 +228,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           else []
     in
     let options =
-      cuda_include_opt @ wmma_arch_opts
+      cuda_include_opt @ arch_opts
       @ ("--use_fast_math" :: (if Utils.with_runtime_debug () then [ "--device-debug" ] else []))
     in
     let ptx = Nvrtc.compile_to_ptx ~cu_src ~name:name_cu ~options ~with_debug in
@@ -1024,8 +1050,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Byte_prec _, Half_prec _ -> ("__ushort2half_rn((unsigned short int)", ")")
       | Double_prec _, Uint4x32_prec _ -> ("double_to_uint4x32(", ")")
       | Single_prec _, Uint4x32_prec _ -> ("single_to_uint4x32(", ")")
-      | Int32_prec _, Uint4x32_prec _ -> ("int32_to_uint4x32(", ")")
-      | Int64_prec _, Uint4x32_prec _ -> ("int64_to_uint4x32(", ")")
       | Uint4x32_prec _, _ -> ("", ".v[0]")
       | Byte_prec _, Uint4x32_prec _ -> ("byte_to_uint4x32(", ")")
       | Uint16_prec _, Uint4x32_prec _ -> ("uint16_to_uint4x32(", ")")

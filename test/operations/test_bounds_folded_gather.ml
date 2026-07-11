@@ -51,7 +51,7 @@ let inspect (t : Tensor.t) : int * int * int =
   let optim_ctx = LL.empty_optimize_ctx () in
   let opt =
     Ir.Assignments.lower optim_ctx ~unoptim_ll_source:None ~ll_source:None ~cd_source:None
-      ~name:"probe" [] comp.Ir.Assignments.asgns
+      ~name:"bfg_probe" [] comp.Ir.Assignments.asgns
   in
   let dyn = ref 0 and wheres = ref 0 and truncs = ref 0 in
   let rec proc (llc : LL.t) =

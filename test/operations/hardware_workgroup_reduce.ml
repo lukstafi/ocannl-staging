@@ -123,7 +123,7 @@ let () =
 
   (* --- Serial twin --- *)
   let%op s0 = v ++ "i=>0" in
-  let serial_comp = named "sum_serial" (Train.forward s0) in
+  let serial_comp = named "wgred_sum_serial" (Train.forward s0) in
   let ctx_s = Context.auto () in
   let ctx_s, routine_s = Context.compile ctx_s serial_comp Ir.Indexing.Empty in
   let ctx_s = Context.run ctx_s routine_s in

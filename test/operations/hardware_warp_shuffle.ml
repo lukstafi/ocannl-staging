@@ -75,7 +75,7 @@ let () =
   let expected_sum = Array.fold vv ~init:0. ~f:( +. ) in
   let v = TDSL.ndarray vv ~label:[ "v" ] ~output_dims:[ n ] () in
   let%op s0 = v ++ "i=>0" in
-  let got_serial = run ~name:"sum_serial" ~transform:(fun opt -> opt) s0 in
+  let got_serial = run ~name:"wshfl_sum_serial" ~transform:(fun opt -> opt) s0 in
   p "serial sum correct" (approx got_serial expected_sum);
   let%op s1 = v ++ "i=>0" in
   let got =
