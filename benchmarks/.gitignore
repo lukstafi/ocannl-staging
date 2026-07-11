@@ -1,0 +1,8 @@
+.venv/
+fixtures/
+results/
+__pycache__/
+_build/
+autotune_cache/
+build_files/
+log_files/

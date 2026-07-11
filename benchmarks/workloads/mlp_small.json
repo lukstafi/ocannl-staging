@@ -1,0 +1,12 @@
+{
+  "name": "mlp_small",
+  "data": "moons",
+  "dims": [2, 64, 64, 2],
+  "batch_size": 64,
+  "n_batches": 32,
+  "lr": 0.1,
+  "seed": 42,
+  "parity_steps": 24,
+  "warmup_steps": 30,
+  "timed_steps": 200
+}
