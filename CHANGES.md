@@ -152,6 +152,19 @@
 
 ### Fixed
 
+- Two executed-backward gradient-correctness bugs found by cross-framework loss parity
+  testing (regression test `test/training/virtual_grads_parity.ml`):
+  - Per-statement CSE (`Low_level.eliminate_common_subexpressions`, gh-ocannl-351) and
+    cross-statement hoisting treated *free* iterator symbols and scope ids as renameable
+    during alpha-equivalence, so a nested recomputation of a virtual node at inner loop
+    indices was deduplicated into a `Get_local` of the enclosing iteration's stale local
+    (e.g. `cross_entropy_loss` backward through a Virtual pre-activation used one class's
+    logit for every class in its exp-sum). Renamings are now registered only at binder
+    sites (`For_loop` indices, `Local_scope`/`Declare_local` scope ids); free names must
+    match exactly.
+  - The scalar simplifier rewrote `(a / b) / c` to `(a * c) / b` (a regression from the
+    precision-handling refactor; originally `a / (b * c)`), corrupting e.g. the division
+    backward of the standalone `Nn_blocks.softmax`.
 - 1-element `Reshape`/`rebatch` data no longer collapses to a scalar: when the rows
   receive no other shape information, the leftover row variable keeps a single dim-1
   axis (identity-reshape preference, `keep_axis` on the `Total_elems` constraint); also
