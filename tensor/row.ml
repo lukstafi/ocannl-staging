@@ -2658,7 +2658,7 @@ let%track5_sexp solve_dim_ineq ~(stage : stage) origin ~(res : dim) ~(opnd : dim
                  res = _;
                  opnd = [ opnd1 ];
                  glb = None;
-                 constr = _;
+                 constr = constr1;
                  origin = origin1;
                  _;
                }),
@@ -2669,13 +2669,20 @@ let%track5_sexp solve_dim_ineq ~(stage : stage) origin ~(res : dim) ~(opnd : dim
                  res = [ res2 ];
                  opnd = _;
                  glb = None;
-                 constr = _;
+                 constr = constr2;
                  origin = origin2;
                  _;
                }) )
-        when is_stage2_up stage && equal_dim_var opnd_v opnd1 && equal_dim_var res_v res2 ->
+        when is_stage2_up stage
+             && equal_dim_var opnd_v opnd1 && equal_dim_var res_v res2
+             && (match (constr1, constr2) with
+                | At_least_dim _, _ | _, At_least_dim _ -> false
+                | _ -> true) ->
           let origin = merge_origins origin (merge_origins origin1 origin2) in
-          (* A heuristic to reduce template variables coming from e.g. einsum notation expansion. *)
+          (* A heuristic to reduce template variables coming from e.g. einsum notation expansion.
+             Vars carrying [At_least_dim] (fixed-index slots such as [=> ...|0]) are excluded: they
+             prefer resolving to the minimal dimension (broadcast into consumers), and equating them
+             with a consumer's axis would irreversibly adopt the consumer's dimension instead. *)
           ([ Dim_eq { d1 = opnd; d2 = res; origin } ], env)
       | Some (Bounds_dim { res = ress; origin = origin1; _ }), Some (Bounds_dim _)
         when cyclic ~opnd_v ~ress ->
