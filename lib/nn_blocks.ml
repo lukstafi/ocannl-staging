@@ -343,9 +343,9 @@ let%op multi_head_att_workshop ~num_heads ~d_k ~d_v () x =
   { w_o } * (attn_weights +* v " ... s | t -> h; ... t | h e => ... s | h e" [ "e" ])
 
 let%op layer_norm ~label ?(epsilon = 1e-5) () x =
-  let mean = x ++ " ... | ..d..  => ... | 0 " [ "d" ] in
-  let centered = (x - mean) /. dim d in
-  let variance = (centered *. centered) ++ " ... | ... => ... |  0 " in
+  let mean = (x ++ " ... | ..d..  => ... | 0 " [ "d" ]) /. dim d in
+  let centered = x - mean in
+  let variance = ((centered *. centered) ++ " ... | ... => ... |  0 ") /. dim d in
   let std_dev = sqrt (variance + !.epsilon) in
   let normalized = centered /. std_dev in
   (* gamma and beta are learned, but initialized to good defaults *)
