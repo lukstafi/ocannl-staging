@@ -44,8 +44,10 @@ let grad_oracle b i =
   in
   (g.(i) -. mean_g -. (y_hat b i *. mean_gy)) /. sigma (x_val.(b))
 
-let report ~what ~tol max_err =
-  Stdio.printf "layer_norm %s matches hand-computed LayerNorm (max abs err < %g): %b\n" what tol
+(* [tol_label] instead of printf %g: Windows printf renders 1e-05 as "1e-005". *)
+let report ~what ~tol ~tol_label max_err =
+  Stdio.printf "layer_norm %s matches hand-computed LayerNorm (max abs err < %s): %b\n" what
+    tol_label
     Float.(max_err < tol);
   if Float.(max_err >= tol) then Stdio.printf "  max abs err: %.8f\n" max_err
 
@@ -69,7 +71,7 @@ let () =
     done;
     Stdio.printf "\n"
   done;
-  report ~what:"forward" ~tol:1e-5 !max_err
+  report ~what:"forward" ~tol:1e-5 ~tol_label:"1e-5" !max_err
 
 let () =
   Tensor.unsafe_reinitialize ();
@@ -99,4 +101,4 @@ let () =
       max_err := Float.max !max_err (Float.abs (actual -. grad_oracle b i))
     done
   done;
-  report ~what:"input gradient" ~tol:1e-4 !max_err
+  report ~what:"input gradient" ~tol:1e-4 ~tol_label:"1e-4" !max_err
