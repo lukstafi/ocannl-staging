@@ -125,6 +125,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name test_default_init_std)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules test_default_init_std)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name to_routine_embedded_init)
  (package neural_nets_lib)
  (deps

@@ -1,0 +1,13 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+default uniform1 [-0.25,0.25): std: expected 0.1443 (tol 0.0300): PASS
+default uniform1 [-0.25,0.25): mean: expected 0.0000 (tol 0.0400): PASS
+default uniform1 unique values: 50 of 5000
+default kaiming normal1 scale_sq 2 fan_in 100: std: expected 0.1414 (tol 0.0300): PASS
+default kaiming normal1 scale_sq 2 fan_in 100: mean: expected 0.0000 (tol 0.0600): PASS
+default kaiming unique values: 50 of 5000
+default xavier uniform1 scale_sq 6 fans 100+50: std: expected 0.0577 (tol 0.0120): PASS
+default xavier uniform1 scale_sq 6 fans 100+50: mean: expected 0.1000 (tol 0.0200): PASS
+default xavier unique values: 50 of 5000
+inline kaiming normal1 default scale_sq 6 fan_in 100: std: expected 0.2449 (tol 0.0500): PASS
+inline kaiming unique values: 50 of 5000
