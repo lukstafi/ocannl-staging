@@ -20,9 +20,15 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 VENV_PY = HERE / ".venv/bin/python"
-OCANNL_EXE = ROOT / "_build/default/benchmarks/runners/ocannl/bench_mlp.exe"
 PARITY_TOL = 2e-3
 REFERENCE = ("pytorch", "cpu", "eager")
+
+sys.path.insert(0, str(HERE / "runners"))
+from bench_common import read_st_metadata  # noqa: E402
+
+
+def ocannl_exe(model):
+    return ROOT / f"_build/default/benchmarks/runners/ocannl/bench_{model}.exe"
 
 
 def run_cell(label, cmd, env=None, cwd=None):
@@ -87,21 +93,29 @@ def report(results, out_dir):
     )
     for workload in sorted({r["workload"] for r in results}):
         lines.append(f"\n## {workload}\n")
-        lines.append(
-            "| framework | backend | variant | step p50 ms | p10 | p90 | queued ms | compile s | parity |"
-        )
-        lines.append("|---|---|---|---|---|---|---|---|---|")
         rows = [r for r in results if r["workload"] == workload]
         rows.sort(key=lambda r: r["step_ms"]["p50"])
+        with_tokens = any(r.get("tokens_per_step") for r in rows)
+        header = "| framework | backend | variant | step p50 ms | p10 | p90 | queued ms | compile s | parity |"
+        rule = "|---|---|---|---|---|---|---|---|---|"
+        if with_tokens:
+            header += " tok/s |"
+            rule += "---|"
+        lines.append(header)
+        lines.append(rule)
         for r in rows:
             s = r["step_ms"]
             parity = r["parity"]
             if parity not in ("REF", "NO-REF"):
                 parity += f" ({r['parity_max_rel']:.1e})"
+            tokens = ""
+            if with_tokens:
+                tps = r.get("tokens_per_step")
+                tokens = f" {tps * 1000 / s['p50']:,.0f} |" if tps else " |"
             lines.append(
                 f"| {r['framework']} | {r['backend']} | {r['variant']} "
                 f"| {s['p50']:.3f} | {s['p10']:.3f} | {s['p90']:.3f} "
-                f"| {r['queued_step_ms']:.3f} | {r['compile_s']:.2f} | {parity} |"
+                f"| {r['queued_step_ms']:.3f} | {r['compile_s']:.2f} | {parity} |{tokens}"
             )
     text = "\n".join(lines) + "\n"
     (out_dir / "report.md").write_text(text)
@@ -112,6 +126,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--workloads", nargs="*", help="workload names (default: all fixtures)")
     ap.add_argument("--tuned", action="store_true", help="add the OCANNL autotuned variant")
+    ap.add_argument(
+        "--materialized",
+        action="store_true",
+        help="add the OCANNL materialized-activations variant",
+    )
     ap.add_argument("--nojit", action="store_true", help="add the tinygrad nojit variant")
     ap.add_argument("--skip-build", action="store_true")
     ap.add_argument(
@@ -128,12 +147,12 @@ def main():
     if not fixtures:
         sys.exit("no fixtures found — run gen_fixtures.py first")
 
+    models = {fx: read_st_metadata(fx).get("model", "mlp") for fx in fixtures}
     if "ocannl" in args.only and not args.skip_build:
-        subprocess.run(
-            ["dune", "build", "--root", ".", "benchmarks/runners/ocannl/bench_mlp.exe"],
-            cwd=ROOT,
-            check=True,
+        targets = sorted(
+            {f"benchmarks/runners/ocannl/bench_{m}.exe" for m in models.values()}
         )
+        subprocess.run(["dune", "build", "--root", ".", *targets], cwd=ROOT, check=True)
 
     results = []
     failures = []
@@ -147,16 +166,24 @@ def main():
 
     for fx in fixtures:
         name = fx.stem
+        model = models[fx]
         if "ocannl" in args.only:
+            variants = ["default"]
+            if args.materialized:
+                variants.append("materialized")
+            if args.tuned:
+                variants.append("tuned")
             for backend in ["cc", "metal"]:
-                for tuned in [False] + ([True] if args.tuned else []):
+                for variant in variants:
                     env = dict(
-                        os.environ, BENCH_FIXTURE=str(fx), BENCH_TUNE="1" if tuned else "0"
+                        os.environ,
+                        BENCH_FIXTURE=str(fx),
+                        BENCH_TUNE="1" if variant == "tuned" else "0",
+                        BENCH_MATERIALIZE="1" if variant == "materialized" else "0",
                     )
-                    variant = "tuned" if tuned else "default"
                     collect(
                         f"{name} ocannl/{backend}/{variant}",
-                        [str(OCANNL_EXE), f"--ocannl_backend={backend}"],
+                        [str(ocannl_exe(model)), f"--ocannl_backend={backend}"],
                         env=env,
                         cwd=HERE,  # picks up benchmarks/ocannl_config
                     )

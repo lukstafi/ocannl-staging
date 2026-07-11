@@ -1,6 +1,6 @@
-(executable
- (name bench_mlp)
- (modules bench_mlp)
+(executables
+ (names bench_mlp bench_conv bench_gpt)
+ (modules bench_mlp bench_conv bench_gpt bench_harness)
  (libraries base ocannl stdio unix)
  (preprocess
   (pps ppx_here ppx_ocannl))

@@ -71,11 +71,17 @@ let () =
         let b = TDSL.wrap_param ~l:b_name ~o:[ dout ] (St.to_ndarray st b_name) () in
         (w, b))
   in
+  let materialize =
+    match Stdlib.Sys.getenv_opt "BENCH_MATERIALIZE" with Some "1" -> true | _ -> false
+  in
   let logits =
     List.foldi params ~init:batch_x ~f:(fun idx acc (w, b) ->
         let last = Int.equal idx (n_layers - 1) in
         let open TDSL.O in
         let z = b + (w * acc) in
+        (* Explicit variant: store pre-activations for the backward pass (what the other
+           frameworks do) instead of the default fully-Virtual recompute-in-backward. *)
+        if materialize then Train.set_materialized z.Tensor.value;
         if last then z else relu z)
   in
   let%op batch_loss =
@@ -153,7 +159,7 @@ let () =
   Stdio.printf
     {|{"framework":"ocannl","backend":"%s","variant":"%s","workload":"%s","compile_s":%.3f,"step_ms":{"p10":%.6g,"p50":%.6g,"p90":%.6g},"queued_step_ms":%.6g,"timed_steps":%d,"losses":[%s]}|}
     backend
-    (if tune then "tuned" else "default")
+    (if tune then "tuned" else if materialize then "materialized" else "default")
     workload compile_s (percentile synced 10.) (percentile synced 50.) (percentile synced 90.)
     queued_ms timed_steps (json_floats losses);
   Stdio.printf "\n"
