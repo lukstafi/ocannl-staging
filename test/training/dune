@@ -237,3 +237,17 @@
  (libraries ocannl dataprep unix)
  (preprocess
   (pps ppx_here ppx_ocannl)))
+
+; virtual_grads_parity is a fast regression test for the backward stale-local CSE bug: parameter
+; gradients through a Virtual pre-activation must match the softmax-CE oracle.
+
+(test
+ (name virtual_grads_parity)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules virtual_grads_parity)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))

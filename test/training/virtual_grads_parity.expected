@@ -1,0 +1,4 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+cross_entropy_loss (virtual logits) gradients match softmax-CE oracle (max abs err < 1e-6): true
+neg log softmax (virtual logits) gradients match softmax-CE oracle (max abs err < 1e-6): true
