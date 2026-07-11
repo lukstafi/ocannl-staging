@@ -1,0 +1,7 @@
+(executable
+ (name bench_mlp)
+ (modules bench_mlp)
+ (libraries base ocannl stdio unix)
+ (preprocess
+  (pps ppx_here ppx_ocannl))
+ (modes exe))
