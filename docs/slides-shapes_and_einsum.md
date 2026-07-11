@@ -78,12 +78,14 @@ Row variables enable flexible axis handling:
 
 {#ellipsis-examples .example title="Using Ellipsis"}
 ```ocaml
-(* Reduce all output axes to scalar,
-   require no batch or input axes *)
+(* Reduce all output axes to scalar;
+   batch and input axes broadcast through:
+   omitted rows read as the context ellipsis *)
 let%op sum_all_output x = x ++ "... => 0"
 
-(* Reduce all axes to scalar *)
-let%op sum_all x = x ++ "...|...->... => 0"
+(* Reduce all axes to scalar: bare separators
+   close the result's batch and input rows *)
+let%op sum_all x = x ++ "... => |->0"
 
 (* Pointwise operation preserving all axes *)
 let%op square x = x *. x
@@ -305,8 +307,8 @@ let sgd_and_track ~learning_rate p =
   let%cd update =
     ~~(p "sgd track min max";
        p =- learning_rate * sgd_delta ~logic:".";
-       { p_min } =@- p ~logic:"...->... => 0";
-       { p_max } =@^ p ~logic:"...->... => 0") in
+       { p_min } =@- p ~logic:"...->... => |->0";
+       { p_max } =@^ p ~logic:"...->... => |->0") in
   update, p_min, p_max
 ```
 
@@ -343,9 +345,9 @@ The `[%oc ...]` syntax allows embedding arbitrary OCaml code without `%op` attem
 {#patterns .block title="Common Shape Patterns"}
 > **Principle of least commitment**: Use row variables where possible
 > 
-> * `"...|...->..."` - Handle ANY shape (all three axis kinds)
-> * `"...->..."` - Parameters (no batch axes expected)
-> * `"...|..."` - Data tensors (no input axes expected)
+> * `"..."` - Handle ANY shape (omitted rows read as ellipses: same as `"...|...->..."`)
+> * `"|...->..."` - Parameters (the bare `|` requires no batch axes)
+> * `"...| ->..."` - Data tensors (the bare `->` with an empty input row requires no input axes)
 > * `"... | ..d.. => ... | 0"` - Reduce unknown output axes
 > * `"...|...->...; ...|...->... => ...|...->..."` - Pointwise binary op
 
@@ -472,7 +474,8 @@ let spec = "i j => j i" in (x ++ spec [ "j" ]) /. dim j
 (a, b) ++^ "x; y => x^y"  (* Result has size(x) + size(y) *)
 
 (* Reduction - combines elements: *)
-x ++ "a => 0"         (* Sums all elements to scalar *)
+x ++ "a => 0"         (* Sums the output axis to scalar;
+                         batch/input axes broadcast through *)
 ```
 
 **Concatenation is not flattening:**

@@ -89,7 +89,7 @@ let () =
   let%op correct_prob = (probs *. batch_labels) ++ "...|... => ...|0" in
   (* Cross-entropy: -log(p) for each sample, then average *)
   let%op sample_loss = neg (log correct_prob) in
-  let%op batch_loss = (sample_loss ++ "...|... => 0") /. !..batch_size in
+  let%op batch_loss = (sample_loss ++ "...|... => |->0") /. !..batch_size in
 
   (* Training setup *)
   let epochs = 1000 in

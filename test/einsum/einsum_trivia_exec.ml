@@ -25,7 +25,7 @@ let () =
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx ho2;
   let a = TDSL.range_of_shape ~batch_dims:[ 3 ] ~input_dims:[ 4 ] ~output_dims:[ 2 ] () in
   let b = TDSL.range_of_shape ~batch_dims:[ 3 ] ~input_dims:[ 1 ] ~output_dims:[ 4 ] () in
-  let%op c = a +* "...|i->1; ...|...->i => ...|i" b in
+  let%op c = a +* "...|i->1; ...|...->i => ...|->i" b in
   let ctx = Train.forward_once ctx c in
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx c
 
@@ -104,11 +104,11 @@ let () =
   let%op ho4 = hey2 ++ "...b|...i->...o => i|o->b" in
   ignore (Train.forward_once hey2_ctx ho4);
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx ho4;
-  let%op ho5 = hey ++ "...|...->...o => o" in
+  let%op ho5 = hey ++ "...|...->...o => |->o" in
   ignore (Train.forward_once hey_ctx ho5);
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx ho5;
   let hey3 = TDSL.range_of_shape ~output_dims:[ 3; 4 ] () in
-  let%op ho6 = hey3 ++ "...|...->...o => o" in
+  let%op ho6 = hey3 ++ "...|...->...o => |->o" in
   let ctx = Train.forward_once ctx ho6 in
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx ho6;
   (* Broadcast with a shift. *)
@@ -123,7 +123,7 @@ let () =
 
   let a = TDSL.range_of_shape ~batch_dims:[ 3 ] ~input_dims:[ 4 ] ~output_dims:[ 2 ] () in
   let b = TDSL.range_of_shape ~batch_dims:[ 3 ] ~input_dims:[ 1 ] ~output_dims:[ 4 ] () in
-  let%op c = a +* "...|i->...; ...|...->i => ...|i" b in
+  let%op c = a +* "...|i->...; ...|...->i => ...|->i" b in
   let ctx = Train.forward_once ctx c in
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx c;
   (* Broadcast with a shift. *)
@@ -146,7 +146,7 @@ let () =
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx ho2;
 
   let hey2 = TDSL.range_of_shape ~input_dims:[ 2 ] ~output_dims:[ 3 ] () in
-  let%op ho3 = hey2 ++ "...|...->... => 0" in
+  let%op ho3 = hey2 ++ "...|...->... => |->0" in
   let ctx = Train.forward_once ctx ho3 in
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx ho3;
   let%op ho4 = hey2 ++ "i->j => i0j" in
@@ -159,7 +159,7 @@ let () =
 
   let a = TDSL.range_of_shape ~batch_dims:[ 3 ] ~input_dims:[ 4 ] ~output_dims:[ 2 ] () in
   let b = TDSL.range_of_shape ~batch_dims:[ 3 ] ~input_dims:[ 1 ] ~output_dims:[ 4 ] () in
-  let%op c = a +* "...|i->1; ...|...->i => ...|i" b in
+  let%op c = a +* "...|i->1; ...|...->i => ...|->i" b in
   let ctx = Train.forward_once ctx c in
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx c
 
@@ -192,7 +192,7 @@ let () =
   let b =
     TDSL.range_of_shape ~label:[ "b" ] ~batch_dims:[ 3 ] ~input_dims:[ 2; 3 ] ~output_dims:[ 4 ] ()
   in
-  let%op c = a +* "...|i->1; ...|j...->i => ...|ij" b in
+  let%op c = a +* "...|i->1; ...|j...->i => ...|->ij" b in
   let ctx = Train.forward_once ctx c in
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx c
 

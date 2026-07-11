@@ -126,7 +126,7 @@ let () =
   let%op log_sum_exp = log (exp shifted ++ "...|... => ...|0") in
   let%op log_probs = shifted - log_sum_exp in
   let%op nll = neg ((target_batch *. log_probs) ++ "...|... => ...|0") in
-  let%op batch_loss = (nll ++ "...|... => 0") /. !..total_tokens in
+  let%op batch_loss = (nll ++ "...|... => |->0") /. !..total_tokens in
 
   Train.every_non_literal_materialized batch_loss;
   (* Accumulate the loss on device: the training loop then syncs on the host once per epoch. *)

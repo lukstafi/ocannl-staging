@@ -124,7 +124,7 @@ let () =
       ~output_dims:[ d_model ] ()
   in
   let%op out = x + attn ~train_step:None x in
-  let%op loss = out ++ "...|... => 0" in
+  let%op loss = out ++ "...|... => |->0" in
   let ctx = Ocannl.Train.update_once ctx loss in
   Stdio.printf "Loss: %.4f\n" At.((ctx, loss).@{[| 0 |]});
   Stdio.printf "freqs has grad: %b (expect false)\n" (Option.is_some freqs.Tensor.diff);

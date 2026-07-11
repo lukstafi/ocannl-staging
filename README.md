@@ -42,7 +42,7 @@ A possible route to learning OCANNL:
 6. Read the NN building blocks file [lib/nn_blocks.ml](lib/nn_blocks.ml) and the training recipes [lib/train.ml](lib/train.ml).
   * Work through the [makemore tutorial](docs/makemore_tutorial.md) — a character-level language-model progression mirroring Andrej Karpathy's *Neural Networks: Zero to Hero* lectures.
 7. Read the introductory part of the shape inference documentation [docs/shape_inference.md](docs/shape_inference.md).
-8. For the paper-facing account, read the workshop article [docs/ocannl_workshop_article_human.md](docs/ocannl_workshop_article_human.md), the formal core technical report [docs/ocannl-formal-core-technical-report.md](docs/ocannl-formal-core-technical-report.md), and the constraint-generation notes [docs/shape-constraint-generation.md](docs/shape-constraint-generation.md).
+8. For the paper-facing account, read the workshop article [docs/ocannl_workshop_article_human.md](docs/ocannl_workshop_article_human.md), the formal core technical report [ocannl-formal-core-technical-report.pdf](https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf) (LaTeX source in [docs/](docs/ocannl-formal-core-technical-report.latex)), and the constraint-generation notes [docs/shape-constraint-generation.md](docs/shape-constraint-generation.md).
 9. Skim the configuration documentation [ocannl_config.reference](ocannl_config.reference).
 10. Improve your understanding by reading or skimming the framework internals: [tensor/shape.mli](tensor/shape.mli), [tensor/tensor.mli](tensor/tensor.mli), [tensor/operation.ml](tensor/operation.ml), [arrayjit/lib/context.mli](arrayjit/lib/context.mli).
 11. Read the implementation overview:

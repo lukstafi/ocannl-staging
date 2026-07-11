@@ -29,7 +29,7 @@ let tropical_conv2d ?(stride = 2) ?(window_size = 2) () =
     Shape.set_dim wh window_size;
     Shape.set_dim ww window_size;
     x
-    @^+ "... | stride*oh< + wh, stride*ow< + ww, ..c..; wh, ww => ... | oh, ow, ..c.."
+    @^+ "... | stride*oh< + wh, stride*ow< + ww, ..c..; |wh, ww => ... | oh, ow, ..c.."
           [ "wh"; "ww" ] kernel
   in
   op
@@ -109,7 +109,7 @@ let test_tropical_kernel_backprop_zero_kernel () =
   let%op kernel = { k = [ [ 0; 0 ]; [ 0; 0 ] ] } in
 
   let%op output = tropical_conv2d () input kernel in
-  let%op loss = output ++ "...|... => 0" in
+  let%op loss = output ++ "...|... => |->0" in
 
   let ctx = Context.auto () in
   Train.set_materialized loss.value;
@@ -166,7 +166,7 @@ let test_tropical_kernel_backprop_nonzero_kernel () =
   let%op kernel = { k = [ [ 0; 0 ]; [ 0; 10 ] ] } in
 
   let%op output = tropical_conv2d () input kernel in
-  let%op loss = output ++ "...|... => 0" in
+  let%op loss = output ++ "...|... => |->0" in
 
   let ctx = Context.auto () in
   Train.set_materialized loss.value;

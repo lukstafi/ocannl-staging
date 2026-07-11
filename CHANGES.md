@@ -102,7 +102,17 @@
 
 ### Changed
 
-- `test/training/bigram_mlp.ml` renamed to `test/training/mlp_names.ml` and
+- **Breaking notation change**: in einsum and labels specs, a row whose kind separator
+  is omitted now reads as the context ellipsis instead of an empty row: `x` is
+  equivalent to `...|...->x`, so batch and input axes broadcast through terse specs by
+  default (e.g. `counts ++ "... => 0"` is a per-row softmax denominator). The empty-row
+  reading is preserved when the separator is written with an empty row spec: `| ->x`
+  means no batch and no input axes, `|x` no batch axes, `->x` no input axes. Because an
+  omitted row shares the context row variable with rows written `...`, reduce-over-
+  everything results must now close their rows — the sum-to-scalar idiom
+  `++ "...|... => 0"` becomes `++ "...|... => |->0"` — and multi-operand specs where
+  one slot passes batch through must close the other slots' batch rows (e.g. the
+  conv kernel slot `; |kh, kw, ..ic.. -> ..oc..` in `Nn_blocks.conv2d`).
   rewritten as a true multi-character-context Bengio MLP. The old file's name
   misrepresented its architecture (bigram-width input but "MLP" label); the
   new file is the makemore Part 2 example (see `docs/makemore_tutorial.md`).

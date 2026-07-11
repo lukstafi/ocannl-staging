@@ -37,7 +37,7 @@ let () =
   (* We don't need a regression loss formula thanks to weight_decay built into the sgd_update
      computation. *)
   let weight_decay = 0.0001 in
-  let%op scalar_loss = (margin_loss ++ "...|... => 0") /. !..batch_size in
+  let%op scalar_loss = (margin_loss ++ "...|... => |->0") /. !..batch_size in
   let update = Train.grad_update scalar_loss in
   let%op learning_rate = 0.1 *. ((2 *. !..len) - !@step_n) /. !..len in
   Train.set_materialized learning_rate.value;

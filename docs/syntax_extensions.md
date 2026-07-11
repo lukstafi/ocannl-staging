@@ -414,11 +414,13 @@ As we mentioned above, in the `%cd` syntax you can set up an arbitrary assignmen
 `+*`, `+++` and `++` use addition for the accumulation operation; `@^+` and `@^^` use maximum. You can verify that looking at the definitions of `Operation.einsum`, `Operation.einsum1`, etc. You can find examples of `+*` and `++` behavior in the test suite [einsum_trivia.ml](test/einsum_trivia.ml) and in [nn_blocks.ml](lib/nn_blocks.ml). A frequent use-case for `++` is to sum out all axes of a tensor:
 
 ```ocaml
-  let%op scalar_loss = (margin_loss ++ "...|... => 0") /. !..batch_size in
+  let%op scalar_loss = (margin_loss ++ "...|... => |->0") /. !..batch_size in
   ...
 ```
 
-where `(!..)` converts an integer into a constant tensor.
+where `(!..)` converts an integer into a constant tensor. Note the `|->0` result spec: the bare
+separators close the result's batch and input rows, so the batch axes are reduced rather than
+broadcast through (see below).
 
 ### Syntax of the generalized einsum notation
 
@@ -438,6 +440,8 @@ Recall that a tensor _shape_ is composed of three _rows_, i.e. sequences of axes
 - the input row to the left of `->`, if given,
 - the batch row to the left of `|`, if given.
 
+A row whose kind separator is omitted altogether reads as the context ellipsis: `x` is equivalent to `...|...->x`, so batch and input axes broadcast through terse specs by default. To require an empty row, write the separator with an empty row spec: `| ->x` means no batch and no input axes, `|x` no batch axes, `->x` no input axes.
+
 The notation for a row is composed of sequences of row specs, and an optional _row variable_ spec. A row variable tracks broadcasting. The syntax of a row:
 
 - a sequence of axis specs: specifies the rightmost axes, with untracked broadcasting "to the left",
@@ -447,7 +451,7 @@ The notation for a row is composed of sequences of row specs, and an optional _r
 The syntax of a row variable:
 
 - `..`variable_id`..`: variable_id stands for the row variable identifier,
-- ellipsis `...` is context dependent: in the batch row it means `..batch..`, in the input row `..input..`, in the output row `..output..`.
+- ellipsis `...` is context dependent: it stands for a reserved row variable specific to the kind of the row it appears in (batch, input or output), shared by every `...` of that kind within one spec. The reserved variables cannot be named, so `batch`, `input`, `output` remain available as ordinary labels and `..batch..` is an ordinary user row variable.
 
 The syntax of an axis spec:
 
@@ -465,18 +469,18 @@ The syntax of an axis spec:
 
 Examples:
 
-- `...|...->... => 0`: reduce all axes of the argument into a single number. Useful e.g. for reducing losses to a single number.
-- `...|... => 0`, `...->... => 0`, `... => 0` do the same but will fail if the argument has axes of the kind for which the ellipsis is missing.
+- `...|...->... => |->0`: reduce all axes of the argument into a single number. Useful e.g. for reducing losses to a single number. The bare separators `|->` close the result's batch and input rows; with a plain `0` result the batch and input axes would broadcast through instead (they are shared with the argument's ellipses).
+- `... => |->0` does the same: a row whose kind separator is omitted reads as the context ellipsis, so `... => |->0` is equivalent to `...|...->... => |->0`.
 - `...|...->... => ...|...->...`: fully pointwise unary operation.
-- `...->... => ...->...`, `...|... => ...|...`, `... => ...`: fully pointwise but will fail if the argument has axes of the kind for which the ellipsis is missing.
-- `...|...->... ; ...|...->... => ...|...->...`: fully pointwise binary operation.
-- `...|...->... => ...->...`: reduce the batch axes into the result.
+- `... => ...`, or the same operation written out: `...->... => ...->...`, `...|... => ...|...`: fully pointwise — omitted rows read as the context ellipsis shared between argument and result, so all axes broadcast through.
+- `...|...->... ; ...|...->... => ...|...->...`: fully pointwise binary operation. Note that omitted rows of the same kind share one row variable across operands, forcing those rows equal: in `ij;jk=>ik` the two operands' batch rows must match (close a row, e.g. `ij;|jk=>ik`, when one operand must stay batch-free). This exact pairing is einsum's long-standing semantics for shared row variables (explicit `...` behaves the same); it differs from operations built on the broadcasting shape logics (`Pointwise_*`, `Compose` — see `tensor/operation.ml`, which user code can extend with further such operations), which have subtyping rather than equivalence semantics: `*` relates each operand's batch row to the result independently, so `w * x` distributes an unbatched matrix over batched inputs where the terse einsum spelling requires the explicit `|`. This is also why the broadcasting shape logics are not reducible to einsum specs.
+- `...|...->... => |...->...`: reduce the batch axes into the result (the leading `|` closes the result's batch row; with an omitted batch row the batch axes would pass through).
 - `2...|...->... => ...|...->...`: slice the tensor at dimension 2 of the leftmost batch axis. Note that the tensor operation `@|` implements slicing at the leftmost batch axis for arbitrary dimension.
-- `...|... => ...|...2`: expand the tensor by putting the argument at leftmost output dimension 2 of the result (and reduce input axes if any). `rhs ++ "...|... => ...|...2"` will fill the other cells of the new tensor with zeroes; `[%cd lhs =:* rhs ~logic:"...|... => ...|...2"]` will fill the other cells of `lhs` with ones since it's the neutral element of the assignment (reduction) operator, here with ones.
-- `ijk => kji`: reverse the three output axes, fails if the argument has any other axes.
+- `...|... => ...|...2`: expand the tensor by putting the argument at leftmost output dimension 2 of the result (input axes, if any, broadcast through). `rhs ++ "...|... => ...|...2"` will fill the other cells of the new tensor with zeroes; `[%cd lhs =:* rhs ~logic:"...|... => ...|...2"]` will fill the other cells of `lhs` with ones since it's the neutral element of the assignment (reduction) operator, here with ones.
+- `ijk => kji`: reverse the three output axes (exactly three output axes required; batch and input axes broadcast through). Write `|->kji` as the result (and/or `|->ijk` as the argument) to require no batch and no input axes.
 - `ijk => ki`: as above but also reduce the second-leftmost output axis.
-- `..v..|...ijk => ..v..kji`: reverse the three rightmost output axes, reduce any other output axes, pointwise for batch axes, pairing the batch axes with the leftmost output axes of the result. Fails if the argument has input axes.
-- `2..v..|... => ..v..`: slice the tensor at dimension 2 of the leftmost batch axis, reduce all its output axes, preserve its other batch axes as output axes. Fails if the argument has input axes.
+- `..v..|...ijk => ..v..kji`: reverse the three rightmost output axes, reduce any other output axes, pointwise for batch axes, pairing the batch axes with the leftmost output axes of the result. Input axes broadcast through.
+- `2..v..|... => ..v..`: slice the tensor at dimension 2 of the leftmost batch axis, reduce all its output axes, preserve its other batch axes as output axes. Input axes broadcast through.
 
 #### Affine indexing for convolutions and pooling
 

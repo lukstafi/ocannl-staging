@@ -34,26 +34,34 @@ let merge_maps m1 m2 =
 let make_row_spec ~kind in_axes (beg_axes, row_var_spec, end_axes) =
   let from_beg = make_axes_map ~in_axes ~from_end:false beg_axes in
   let from_end = make_axes_map ~in_axes ~from_end:true end_axes in
-  ( Option.map row_var_spec ~f:(fun rv -> if String.equal rv "..." then kind else rv),
+  (* The context ellipsis translates to a reserved per-kind row variable name. The "..." prefix
+     cannot appear in a lexed identifier, so the reserved names never collide with user-written
+     dimension labels or row variables (e.g. a dimension label [batch] stays available). *)
+  ( Option.map row_var_spec ~f:(fun rv -> if String.equal rv "..." then "..." ^ kind else rv),
     end_axes,
     beg_axes,
     merge_maps from_beg from_end )
 
-let default_row = (None, [], [], Map.empty (module AxisKey))
+(* An omitted row whose kind separator is also omitted reads as the context ellipsis:
+   [x] is equivalent to [...|...->x]. Writing the separator with an empty row spec
+   ([| ->x]) denotes explicitly empty (closed) rows. The implicit flag records the
+   omission: unlike an explicit ellipsis, an implicit row variable may be silently
+   closed to an empty row when nothing else constrains it. *)
+let row_spec_or_implicit ~kind in_axes = function
+  | Some row -> (make_row_spec ~kind in_axes row, false)
+  | None -> (make_row_spec ~kind in_axes ([], Some "...", []), true)
 
-let make_parsed_labels batch_opt input_opt output =
-  let (bcast_batch, given_batch, given_beg_batch, batch_labels) =
-    Option.value batch_opt ~default:default_row
-  in
-  let (bcast_input, given_input, given_beg_input, input_labels) =
-    Option.value input_opt ~default:default_row
-  in
+let make_parsed_labels (batch, implicit_batch) (input, implicit_input) output =
+  let (bcast_batch, given_batch, given_beg_batch, batch_labels) = batch in
+  let (bcast_input, given_input, given_beg_input, input_labels) = input in
   let (bcast_output, given_output, given_beg_output, output_labels) = output in
   let labels = merge_maps input_labels (merge_maps output_labels batch_labels) in
   {
     bcast_batch;
     bcast_input;
     bcast_output;
+    implicit_batch;
+    implicit_input;
     given_batch;
     given_input;
     given_output;
@@ -248,8 +256,8 @@ shape_spec:
 axis_labels_spec:
   | spec = shape_spec; EOF
     { let (batch, input, output) = spec in
-      let batch_res = Option.map batch ~f:(make_row_spec ~kind:"batch" `Batch) in
-      let input_res = Option.map input ~f:(make_row_spec ~kind:"input" `Input) in
+      let batch_res = row_spec_or_implicit ~kind:"batch" `Batch batch in
+      let input_res = row_spec_or_implicit ~kind:"input" `Input input in
       let output_res = make_row_spec ~kind:"output" `Output output in
       make_parsed_labels batch_res input_res output_res }
 
@@ -258,8 +266,8 @@ axis_labels_spec:
   | spec = shape_spec
     { let batch, input, output = spec in
       make_parsed_labels
-        (Option.map batch ~f:(make_row_spec ~kind:"batch" `Batch))
-        (Option.map input ~f:(make_row_spec ~kind:"input" `Input))
+        (row_spec_or_implicit ~kind:"batch" `Batch batch)
+        (row_spec_or_implicit ~kind:"input" `Input input)
         (make_row_spec ~kind:"output" `Output output) }
 
 /* List of RHS specs separated by semicolons */

@@ -56,14 +56,18 @@ The softmax denominator is expressed as an einsum reduction:
 
 ```ocaml
 let counts = exp (({ w } + 1) * input) in
-counts /. (counts ++ "...|... => ...|0")
+counts /. (counts ++ "... => 0")
 ```
 
 In PyTorch that would be `F.softmax(w @ input, dim=-1)`. In OCANNL the
-`...|... => ...|0` einsum reduces the *output* axis to size 1 by summing,
-leaving batch and other axes untouched. This is the same pattern you'll see
-repeated in each subsequent part, plus a numerical-stability `max` subtraction
-starting from Part 2.
+`... => 0` einsum reduces the *output* axis to size 1 by summing, leaving
+batch and other axes untouched: rows whose kind separator is omitted read as
+the context ellipsis, so `... => 0` is shorthand for
+`...|...->... => ...|...->0`. (To instead sum over *all* axes, close the
+result's batch and input rows with bare separators — `... => |->0` is the
+spelling the training loop's `batch_loss` uses.) This is the same pattern
+you'll see repeated in each subsequent part, plus a numerical-stability `max`
+subtraction starting from Part 2.
 
 Sampling is a CDF-based walk over the 28 outputs (`counts[i] / sum(counts)`),
 terminated when `.` is emitted.

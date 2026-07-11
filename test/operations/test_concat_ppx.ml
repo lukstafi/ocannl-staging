@@ -7,7 +7,7 @@ open Ocannl.Operation.DSL_modules
 let%op concat2 a b = (a, b) ++^ "a; b => a^b"
 let%op concat3 a b c = (a, b, c) ++^ "a; b; c => a^b^c"
 let%op concat_capture a b = (a, b) ++^ "i; j => i^j" [ "i"; "j" ]
-let%op sum_all x = x ++ "...|... => 0"
+let%op sum_all x = x ++ "...|... => |->0"
 
 let () =
   Tensor.unsafe_reinitialize ();

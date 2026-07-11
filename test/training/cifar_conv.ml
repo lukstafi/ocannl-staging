@@ -114,7 +114,7 @@ let () =
   let%op probs = softmax ~spec:"...|v" () logits in
   let%op correct_prob = (probs *. batch_labels) ++ "...|... => ...|0" in
   let%op sample_loss = neg (log (correct_prob + 1e-7)) in
-  let%op batch_loss = (sample_loss ++ "...|... => 0") /. !..batch_size in
+  let%op batch_loss = (sample_loss ++ "...|... => |->0") /. !..batch_size in
 
   (* --- Training Setup --- *)
   let total_steps = epochs * n_batches in
@@ -166,7 +166,7 @@ let () =
   (* Test loss: cross-entropy on held-out data *)
   let%op eval_correct_prob = (eval_probs *. _eval_batch_labels) ++ "...|... => ...|0" in
   let%op eval_sample_loss = neg (log (eval_correct_prob + 1e-7)) in
-  let%op eval_batch_loss = (eval_sample_loss ++ "...|... => 0") /. !..batch_size in
+  let%op eval_batch_loss = (eval_sample_loss ++ "...|... => |->0") /. !..batch_size in
 
   Train.set_materialized eval_batch_loss.value;
   Train.set_materialized eval_probs.value;

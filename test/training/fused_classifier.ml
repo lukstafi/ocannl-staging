@@ -172,7 +172,7 @@ let () =
       ()
   in
   let%op naive_loss =
-    neg ((targets *. log (Nn_blocks.softmax ~spec:"... | v" () logits_ng)) ++ "...|... => 0")
+    neg ((targets *. log (Nn_blocks.softmax ~spec:"... | v" () logits_ng)) ++ "...|... => |->0")
   in
   let ctx3 = Train.forward_once (Context.auto ()) naive_loss in
   let naive = (ctx3, naive_loss).@[0] in
