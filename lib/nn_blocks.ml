@@ -515,7 +515,9 @@ let%op conv2d ~label ?(kernel_size = 3) ?(stride = 1) ?(use_padding = true) ?out
   +* { kernel }
        "... | stride*oh+kh, stride*ow+kw, ..ic..; |kh, kw, ..ic.. -> ..oc.. => ... | oh, ow, ..oc.."
        [ "kh"; "kw"; "oc" ]
-  + { bias = 0. }
+  (* The spec'd add keeps the bias per-channel: a plain [+] would broadcast-unify the bias to the
+     full feature map [oh, ow, ..oc..]. *)
+  +++ { bias = 0. } "... | oh, ow, ..oc..; |..oc.. => ... | oh, ow, ..oc.."
 
 (** Depthwise separable convolution - more efficient for mobile/edge devices. Consists of depthwise
     conv (spatial filtering per channel) followed by pointwise conv (1x1 conv for channel mixing).
@@ -535,7 +537,7 @@ let%op depthwise_separable_conv2d ~label ?(kernel_size = 3) ?(stride = 1) ?(use_
   (* Pointwise: 1x1 conv to mix channels *)
   depthwise
   +* { pw_kernel } "... | h, w, ..ic..; |..ic.. -> ..oc.. => ... | h, w, ..oc.."
-  + { bias = 0. }
+  +++ { bias = 0. } "... | h, w, ..oc..; |..oc.. => ... | h, w, ..oc.."
 
 (** Max pooling for 2D spatial data - reduces spatial dimensions by taking maximum values.
 
