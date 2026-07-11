@@ -125,7 +125,7 @@ let generate_with_kind kind ?(config = Config.default) ~len () =
   let%op margin_loss =
     relu (1 - (moons_class *. mlp moons_input)) in
   let%op scalar_loss =
-    (margin_loss ++ "...|... => 0") /. !..batch_size in
+    (margin_loss ++ "...|... => |->0") /. !..batch_size in
 ```
 
 {pause unfocus down}
@@ -513,7 +513,7 @@ flowchart LR
 >
 > {.unrevealed #einsum-logic}
 > > * `~logic:"...=>..."` where `...=>...` uses _generalized einsum notation_, is the most general case of providing projections in OCANNL.
-> >   * For example, `~logic:"...|... => 0"` assumes there are no input axes in RHS1 and LHS has only one  axis, and reduces all batch and output axes of RHS1 onto dimension 0 of LHS.
+> >   * For example, `~logic:"...|... => |->0"` requires that LHS has only one axis, and reduces all axes of RHS1 onto dimension 0 of LHS (the bare `|->` closes the LHS rows; with a plain `0` the batch and input axes would broadcast through instead).
 
 {pause center #backprop-by-example}
 ## Backprop by example

@@ -528,11 +528,11 @@ These functions use einsum dimension capture to extract fan_in and fan_out:
 
 ```ocaml
 (* kaiming_impl captures input dimension *)
-let%op _ = w_raw ++ "...|..i.. -> ... => 0" [ "i" ] in
+let%op _ = w_raw ++ "...|..i.. -> ... => |->0" [ "i" ] in
 ... sqrt (!.scale_sq /. dim i)
 
 (* xavier_impl captures both input and output dimensions *)
-let%op _ = w_raw ++ "...|..i.. -> ..o.. => 0" [ "i"; "o" ] in
+let%op _ = w_raw ++ "...|..i.. -> ..o.. => |->0" [ "i"; "o" ] in
 ... sqrt (!.scale_sq /. (dim i + dim o))
 ```
 

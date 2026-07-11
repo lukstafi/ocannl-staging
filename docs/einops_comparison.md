@@ -61,10 +61,10 @@ reduce(x, 'b c h w -> ', 'sum')
 
 OCANNL:
 ```ocaml
-x ++ "...|...->... => 0"
+x ++ "... => |->0"
 ```
 
-This reduces all axis kinds (batch, input, output) into a single number.
+This reduces all axis kinds (batch, input, output) into a single number. The `|->0` result spec closes the result's batch and input rows with bare separators; a plain `0` result would instead share the omitted rows with the argument's (implicit) ellipses, broadcasting batch and input axes through — unlike `numpy.einsum`, OCANNL reads an omitted row as an implicit ellipsis.
 
 ### Matrix multiplication / einsum
 
