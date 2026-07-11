@@ -136,6 +136,15 @@ def main():
         )
 
     results = []
+    failures = []
+
+    def collect(label, cmd, **kwargs):
+        r = run_cell(label, cmd, **kwargs)
+        if r:
+            results.append(r)
+        else:
+            failures.append(label)
+
     for fx in fixtures:
         name = fx.stem
         if "ocannl" in args.only:
@@ -145,37 +154,46 @@ def main():
                         os.environ, BENCH_FIXTURE=str(fx), BENCH_TUNE="1" if tuned else "0"
                     )
                     variant = "tuned" if tuned else "default"
-                    r = run_cell(
+                    collect(
                         f"{name} ocannl/{backend}/{variant}",
                         [str(OCANNL_EXE), f"--ocannl_backend={backend}"],
                         env=env,
                         cwd=HERE,  # picks up benchmarks/ocannl_config
                     )
-                    if r:
-                        results.append(r)
         if "pytorch" in args.only:
             for device in ["cpu", "mps"]:
-                r = run_cell(
+                collect(
                     f"{name} pytorch/{device}/eager",
                     [str(VENV_PY), str(HERE / "runners/pytorch/run.py"), "--fixture", str(fx), "--device", device],
                 )
-                if r:
-                    results.append(r)
         if "tinygrad" in args.only:
             for device in ["CPU", "METAL"]:
                 for jit in [1] + ([0] if args.nojit else []):
-                    r = run_cell(
+                    collect(
                         f"{name} tinygrad/{device}/{'jit' if jit else 'nojit'}",
                         [str(VENV_PY), str(HERE / "runners/tinygrad/run.py"), "--fixture", str(fx), "--device", device, "--jit", str(jit)],
                     )
-                    if r:
-                        results.append(r)
 
     parity_check(results)
     report(results, HERE / "results")
+    ok = True
+    if failures:
+        ok = False
+        print(
+            f"RUNNER FAILURES: {len(failures)} cell(s) produced no result: "
+            + ", ".join(failures),
+            flush=True,
+        )
+    no_ref = [r for r in results if r["parity"] == "NO-REF"]
+    if no_ref and "pytorch" in args.only:
+        # The reference cell was requested but is missing — the gate would be vacuous.
+        ok = False
+        print(f"PARITY GATE: {len(no_ref)} cell(s) have no reference to compare against", flush=True)
     failed = [r for r in results if r["parity"] == "FAIL"]
     if failed:
+        ok = False
         print(f"PARITY GATE: {len(failed)} cell(s) FAILED", flush=True)
+    if not ok:
         sys.exit(1)
     print("PARITY GATE: all cells passed", flush=True)
 
