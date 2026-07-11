@@ -52,7 +52,7 @@ let param_by_label l name =
 let inspect (update : Asgns.comp) : int * int * int =
   let optim_ctx = LL.empty_optimize_ctx () in
   let opt =
-    Asgns.lower optim_ctx ~unoptim_ll_source:None ~ll_source:None ~cd_source:None ~name:"probe" []
+    Asgns.lower optim_ctx ~unoptim_ll_source:None ~ll_source:None ~cd_source:None ~name:"onehot_bwd_probe" []
       update.Asgns.asgns
   in
   let dyn = ref 0 and vocab_loops = ref 0 and guard_truncs = ref 0 in

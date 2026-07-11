@@ -43,7 +43,7 @@ let inspect (t : Tensor.t) (index_tn : Ir.Tnode.t) : int * int * bool * int =
   let optim_ctx = LL.empty_optimize_ctx () in
   let opt =
     Ir.Assignments.lower optim_ctx ~unoptim_ll_source:None ~ll_source:None ~cd_source:None
-      ~name:"probe" [] comp.Ir.Assignments.asgns
+      ~name:"onehot_probe" [] comp.Ir.Assignments.asgns
   in
   let dyn = ref 0 and loops = ref 0 and index_read = ref false and truncs = ref 0 in
   (* Does scalar [s] read [index_tn] via a plain [Get]? Exercises that traversals descend into a
@@ -340,7 +340,7 @@ let () =
   let optim_ctx_wide = LL.empty_optimize_ctx () in
   let opt_wide =
     Ir.Assignments.lower optim_ctx_wide ~unoptim_ll_source:None ~ll_source:None ~cd_source:None
-      ~name:"probe_wide" [] comp_wide.Ir.Assignments.asgns
+      ~name:"onehot_probe_wide" [] comp_wide.Ir.Assignments.asgns
   in
   let found_iprec = ref None in
   let rec scan_scalar (s : LL.scalar_t) =

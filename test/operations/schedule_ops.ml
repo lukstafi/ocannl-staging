@@ -191,7 +191,7 @@ let () =
     let ctx = Context.run ctx routine in
     Context.get_values ctx mc.Tensor.value
   in
-  let mm_serial = run_mm ~name:"mm_serial" ~transform:(fun opt -> opt) in
+  let mm_serial = run_mm ~name:"ops_mm_serial" ~transform:(fun opt -> opt) in
   let mm_sched =
     run_mm ~name:"mm_default" ~transform:(fun opt ->
         Sched.apply (Sched.default_gpu ~min_parallel:1 opt) opt)

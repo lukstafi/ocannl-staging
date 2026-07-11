@@ -453,6 +453,19 @@ struct
         group (string op_prefix ^^ v ^^ string op_suffix)
 end
 
+(* Under [output_debug_files_in_build_directory] the generated source lives at the predictable
+   shared path [build_files/<name>.c], which a concurrently running process compiling a same-named
+   kernel can rewrite while our C compiler reads it — macOS CI hit this as an "extraneous closing
+   brace" in a torn sum_serial.c (two tests, one base name). Compile from a private unique copy;
+   the [build_files/] copy stays purely informational. Without debug files, [open_build_file]
+   already returned a unique temp path — use it directly. *)
+let compilation_copy ~name (build_file : Utils.build_file_channel) filtered_code =
+  if Utils.settings.output_debug_files_in_build_directory then (
+    let tmp = Stdlib.Filename.temp_file (name ^ "_") ".c" in
+    Stdio.Out_channel.write_all tmp ~data:filtered_code;
+    tmp)
+  else build_file.f_path
+
 let%diagn_sexp compile ~(name : string) bindings (lowered : Low_level.optimized) : procedure =
   let module Syntax = C_syntax.C_syntax (CC_syntax_config (struct
     let procs = [| lowered |]
@@ -471,8 +484,7 @@ let%diagn_sexp compile ~(name : string) bindings (lowered : Low_level.optimized)
   Out_channel.output_string build_file.oc filtered_code;
   build_file.finalize ();
 
-  (* let result = c_compile_and_load ~f_name:pp_file.f_name in *)
-  let result_library = c_compile_and_load ~f_path:build_file.f_path in
+  let result_library = c_compile_and_load ~f_path:(compilation_copy ~name build_file filtered_code) in
   { result = result_library; kparams; bindings; name }
 
 let%diagn_sexp compile_batch ~names bindings (lowereds : Low_level.optimized option array) :
@@ -504,7 +516,9 @@ let%diagn_sexp compile_batch ~names bindings (lowereds : Low_level.optimized opt
   in
   Out_channel.output_string build_file.oc filtered_code;
   build_file.finalize ();
-  let result_library = c_compile_and_load ~f_path:build_file.f_path in
+  let result_library =
+    c_compile_and_load ~f_path:(compilation_copy ~name:base_name build_file filtered_code)
+  in
   (* Note: for simplicity, we share ctx_arrays across all contexts. *)
   Array.mapi params_and_docs ~f:(fun i opt_params_and_doc ->
       Option.bind opt_params_and_doc ~f:(fun (kparams, _doc, _launch) ->

@@ -70,7 +70,7 @@ let () =
 
   (* --- Serial twin --- *)
   let%op mc0 = ma * mb in
-  let serial_comp = named "mm_serial" (Train.forward mc0) in
+  let serial_comp = named "smem_mm_serial" (Train.forward mc0) in
   let ctx_s = Context.auto () in
   let ctx_s, routine_s =
     Context.compile ~lowered_transform:(fun opt -> opt) ctx_s serial_comp Ir.Indexing.Empty
