@@ -14,8 +14,9 @@ Apples-to-apples training-step benchmarks built on two pillars:
    `compile_s`, never amortized into step time.
 
 The parity gate doubles as a cross-framework correctness oracle for OCANNL: on its first run
-it caught a real backward-pass virtual-inlining bug (wrong gradients with a correct forward;
-see the workaround note in `runners/ocannl/bench_mlp.ml`).
+it caught two real backward-pass optimizer bugs (wrong gradients with a correct forward), both
+since fixed — CSE alpha-equivalence renaming free loop symbols, and the simplifier's
+nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`.
 
 ## Layout
 
@@ -54,8 +55,8 @@ benchmarks/.venv/bin/python benchmarks/orchestrate.py
 - SGD is plain `p -= lr * grad` in all three (OCANNL's `Train.sgd_one` and tinygrad's
   `nn.optim.SGD` share the same reference semantics). Don't switch parity workloads to Adam:
   epsilon-placement differs across frameworks and fails the gate for uninteresting reasons.
-- The OCANNL runner materializes layer pre-activations (as the other frameworks do for
-  backward) — currently also a necessary workaround for the virtual-inlining backward bug.
+- The OCANNL runner keeps intermediates Virtual (recomputed in backward) in the untimed
+  parity configuration; the tuned variant materializes everything before autotuning.
 - tinygrad's loss must be realized before `opt.step()` (in-place assigns; a later realize
   would recompute the loss from updated weights). tinygrad JIT capture happens during the
   first parity steps; loss values are unaffected.

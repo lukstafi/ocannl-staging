@@ -74,16 +74,8 @@ let () =
   let logits =
     List.foldi params ~init:batch_x ~f:(fun idx acc (w, b) ->
         let last = Int.equal idx (n_layers - 1) in
-        let z =
-          let open TDSL.O in
-          b + (w * acc)
-        in
-        (* Store pre-activations (like the other frameworks do for backward) instead of
-           recomputing them in the backward pass: works around the virtual-inlining bug where
-           the backward recompute of the loss's exp-sum reuses a stale inlined logit local
-           (found by this suite's parity gate; see benchmarks/README.md). *)
-        Train.set_materialized z.Tensor.value;
         let open TDSL.O in
+        let z = b + (w * acc) in
         if last then z else relu z)
   in
   let%op batch_loss =
