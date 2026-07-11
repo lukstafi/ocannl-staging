@@ -261,6 +261,14 @@ When outputs differ between backends:
 - Runtime logs from kernel execution are written to `<backend>-<device>-<stream>.log` (e.g., `cuda-0-0.log`) inside that subdirectory
 - Generated code files in `build_files/<exe-name>/` show high-level `.cd`, intermediate `.ll`, and backend-specific `.c`/`.cu` files
 
+**Tracing library internals with ppx_minidebug (e.g. the shape/row solver)**:
+
+- High-level `%debug5_sexp`/`%track5_sexp` etc. log statements are stripped at COMPILE time; each module has its own gate env var: `[%%global_debug_log_level_from_env_var "OCANNL_LOG_LEVEL_ROW"]` at the top of `row.ml`, similarly `..._SHAPE`, `..._TNODE`, `..._ASSIGNMENTS`, `..._CC_BACKEND`, etc. (grep for `global_debug_log_level_from_env_var`)
+- Only the generic `OCANNL_LOG_LEVEL` is declared as a preprocessor dep in dune, so per-module vars need a `touch` of the affected `.ml` files (or `dune clean`) to force re-preprocessing: `touch tensor/row.ml tensor/shape.ml && OCANNL_LOG_LEVEL_ROW=9 OCANNL_LOG_LEVEL_SHAPE=9 dune build ...`
+- At runtime, pass `--ocannl_log_level=9` and run from a directory with an `ocannl_config` on its ancestor path (e.g. `test/config/`); logs land in `log_files/`
+- Backend choice: the default `debug_backend=db` writes a database supporting structured queries (e.g. print a subtree containing two given terms); `--ocannl_debug_backend=flushing` writes greppable flat text to `log_files/debug.log` and survives crashes mid-trace
+- Useful flat-text queries: `stage = StageN` lines segment `finish_inference`'s solver passes; track a variable by grepping `Row_var N` / `(id N)` for its transition to `Solved_row`/`Solved_dim`, then inspect the surrounding `unify_row`/`solve_dim_ineq` scope
+
 ## Performance Considerations
 
 - Virtual nodes are inlined automatically (controlled by `virtualize_max_visits`)

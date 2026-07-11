@@ -21,15 +21,18 @@ let train_once ~seed () : run_result =
   (* The global default param init is a centered, scaled uniform [-0.25, 0.25) with low signal
      energy. This relu-MLP hinge-loss recipe needs |f(x)| ~ 1 to separate the half-moons, so we pin a
      higher-energy fan-scaled init locally (mirroring the conv training tests, which likewise override
-     the global default). *)
-  TDSL.default_param_init := NTDSL.xavier ~scale_sq:2.0 TDSL.O.uniform1;
+     the global default). The classic Glorot bound sqrt(6/(fan_in+fan_out)): with the actual fans of
+     the 16-wide hidden layers (the fan products used to silently resolve to 1), the previous
+     scale_sq 2.0 left the scalar output too small for the hinge loss to separate within the epoch
+     budget. *)
+  TDSL.default_param_init := NTDSL.xavier ~scale_sq:6.0 TDSL.O.uniform1;
   let ctx = Context.auto () in
   let open Operation.At in
   (* Sensitive to batch size -- smaller batch sizes are better. *)
   let batch_size = 10 in
   let len = batch_size * 40 in
   let n_batches = 2 * len / batch_size in
-  let epochs = 80 in
+  let epochs = 200 in
   let steps = epochs * 2 * len / batch_size in
   let config = Dataprep.Half_moons.Config.{ noise_range = 0.1; seed = Some seed } in
   let moons_coordinates, moons_labels = Dataprep.Half_moons.generate_single_prec ~config ~len () in
