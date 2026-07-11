@@ -34,7 +34,10 @@ let merge_maps m1 m2 =
 let make_row_spec ~kind in_axes (beg_axes, row_var_spec, end_axes) =
   let from_beg = make_axes_map ~in_axes ~from_end:false beg_axes in
   let from_end = make_axes_map ~in_axes ~from_end:true end_axes in
-  ( Option.map row_var_spec ~f:(fun rv -> if String.equal rv "..." then kind else rv),
+  (* The context ellipsis translates to a reserved per-kind row variable name. The "..." prefix
+     cannot appear in a lexed identifier, so the reserved names never collide with user-written
+     dimension labels or row variables (e.g. a dimension label [batch] stays available). *)
+  ( Option.map row_var_spec ~f:(fun rv -> if String.equal rv "..." then "..." ^ kind else rv),
     end_axes,
     beg_axes,
     merge_maps from_beg from_end )

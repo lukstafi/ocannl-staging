@@ -211,7 +211,7 @@ let substitute_identifiers_in_einsum_spec ~loc str_input =
       match bcast with
       | None -> []
       | Some s ->
-          if String.equal s kind then [ estring ~loc "..." ]
+          if String.equal s ("..." ^ kind) then [ estring ~loc "..." ]
           else [ estring ~loc ".."; estring ~loc s; estring ~loc ".." ]
     in
     let beg_segments = axes_to_segments given_beg in

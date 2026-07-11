@@ -1,6 +1,6 @@
 Testing conv syntax parsing...
 Test 1: Parsed '2*o+3*k' successfully
-  Structure: ((bcast_batch (batch)) (bcast_input (input)) (bcast_output ())
+  Structure: ((bcast_batch (...batch)) (bcast_input (...input)) (bcast_output ())
  (implicit_batch true) (implicit_input true) (given_batch ())
  (given_input ())
  (given_output
@@ -15,7 +15,7 @@ Test 1: Parsed '2*o+3*k' successfully
      (stride_offset 0))))))
 
 Test 2: Parsed 'o+k' successfully
-  Structure: ((bcast_batch (batch)) (bcast_input (input)) (bcast_output ())
+  Structure: ((bcast_batch (...batch)) (bcast_input (...input)) (bcast_output ())
  (implicit_batch true) (implicit_input true) (given_batch ())
  (given_input ())
  (given_output
@@ -30,7 +30,7 @@ Test 2: Parsed 'o+k' successfully
      (stride_offset 0))))))
 
 Test 3: Parsed 'a, 2*b+c' successfully
-  Structure: ((bcast_batch (batch)) (bcast_input (input)) (bcast_output ())
+  Structure: ((bcast_batch (...batch)) (bcast_input (...input)) (bcast_output ())
  (implicit_batch true) (implicit_input true) (given_batch ())
  (given_input ())
  (given_output
@@ -47,7 +47,7 @@ Test 3: Parsed 'a, 2*b+c' successfully
    (((in_axes Output) (pos 2) (from_end true)) (Label a)))))
 
 Test 4: Parsed 'i, o+k, j' successfully (multichar mode)
-  Structure: ((bcast_batch (batch)) (bcast_input (input)) (bcast_output ())
+  Structure: ((bcast_batch (...batch)) (bcast_input (...input)) (bcast_output ())
  (implicit_batch true) (implicit_input true) (given_batch ())
  (given_input ())
  (given_output
@@ -66,7 +66,7 @@ Test 4: Parsed 'i, o+k, j' successfully (multichar mode)
    (((in_axes Output) (pos 3) (from_end true)) (Label i)))))
 
 Test 5: Parsed 'a+bc' successfully (multichar mode)
-  Structure: ((bcast_batch (batch)) (bcast_input (input)) (bcast_output ())
+  Structure: ((bcast_batch (...batch)) (bcast_input (...input)) (bcast_output ())
  (implicit_batch true) (implicit_input true) (given_batch ())
  (given_input ())
  (given_output
@@ -81,7 +81,7 @@ Test 5: Parsed 'a+bc' successfully (multichar mode)
      (stride_offset 0))))))
 
 Test 6: Parsed 'i, j -> 2*i+j' successfully
-  Structure: ((bcast_batch (batch)) (bcast_input ()) (bcast_output ())
+  Structure: ((bcast_batch (...batch)) (bcast_input ()) (bcast_output ())
  (implicit_batch true) (implicit_input false) (given_batch ())
  (given_input ((Label i) (Label j)))
  (given_output
@@ -118,7 +118,7 @@ All conv syntax parsing tests passed!
 
 Testing strided iteration syntax parsing...
 Test 1: Parsed strided iteration '2*output' successfully
-  Structure: ((bcast_batch (batch)) (bcast_input (input)) (bcast_output ())
+  Structure: ((bcast_batch (...batch)) (bcast_input (...input)) (bcast_output ())
  (implicit_batch true) (implicit_input true) (given_batch ())
  (given_input ())
  (given_output
@@ -129,7 +129,7 @@ Test 1: Parsed strided iteration '2*output' successfully
     (Affine_spec (stride 2) (over_label output) (conv ()) (stride_offset 0))))))
 
 Test 2: Parsed strided iteration '3*i' successfully
-  Structure: ((bcast_batch (batch)) (bcast_input (input)) (bcast_output ())
+  Structure: ((bcast_batch (...batch)) (bcast_input (...input)) (bcast_output ())
  (implicit_batch true) (implicit_input true) (given_batch ())
  (given_input ())
  (given_output
@@ -140,7 +140,7 @@ Test 2: Parsed strided iteration '3*i' successfully
     (Affine_spec (stride 3) (over_label i) (conv ()) (stride_offset 0))))))
 
 Test 3: Parsed einsum with strided iteration 'input -> 2*output' successfully
-  Structure: ((bcast_batch (batch)) (bcast_input ()) (bcast_output ())
+  Structure: ((bcast_batch (...batch)) (bcast_input ()) (bcast_output ())
  (implicit_batch true) (implicit_input false) (given_batch ())
  (given_input ((Label input)))
  (given_output
@@ -152,7 +152,7 @@ Test 3: Parsed einsum with strided iteration 'input -> 2*output' successfully
    (((in_axes Input) (pos 1) (from_end true)) (Label input)))))
 
 Test 4: Parsed mixed labels with strided iteration 'regular, 3*strided' successfully
-  Structure: ((bcast_batch (batch)) (bcast_input (input)) (bcast_output ())
+  Structure: ((bcast_batch (...batch)) (bcast_input (...input)) (bcast_output ())
  (implicit_batch true) (implicit_input true) (given_batch ())
  (given_input ())
  (given_output
@@ -181,7 +181,7 @@ Testing multichar mode detection...
 ✓ Single-char spec '...|i->1' parsed correctly
 
 Testing conv spec parsing...
-Conv spec 'a+b': ((bcast_batch (batch)) (bcast_input (input)) (bcast_output ())
+Conv spec 'a+b': ((bcast_batch (...batch)) (bcast_input (...input)) (bcast_output ())
  (implicit_batch true) (implicit_input true) (given_batch ())
  (given_input ())
  (given_output
@@ -198,7 +198,7 @@ Note: Conv expressions with + or * now always use multichar mode
 
 Testing use_padding syntax (= for true, < for false)...
 Test 1: Parsed 'o=+k' (use_padding=true)
-  Structure: ((bcast_batch (batch)) (bcast_input (input)) (bcast_output ())
+  Structure: ((bcast_batch (...batch)) (bcast_input (...input)) (bcast_output ())
  (implicit_batch true) (implicit_input true) (given_batch ())
  (given_input ())
  (given_output
@@ -213,7 +213,7 @@ Test 1: Parsed 'o=+k' (use_padding=true)
      (stride_offset 0))))))
 
 Test 2: Parsed 'o<+k' (use_padding=false)
-  Structure: ((bcast_batch (batch)) (bcast_input (input)) (bcast_output ())
+  Structure: ((bcast_batch (...batch)) (bcast_input (...input)) (bcast_output ())
  (implicit_batch true) (implicit_input true) (given_batch ())
  (given_input ())
  (given_output
@@ -228,7 +228,7 @@ Test 2: Parsed 'o<+k' (use_padding=false)
      (stride_offset 0))))))
 
 Test 3: Parsed '2*o=+k' (stride with use_padding=true)
-  Structure: ((bcast_batch (batch)) (bcast_input (input)) (bcast_output ())
+  Structure: ((bcast_batch (...batch)) (bcast_input (...input)) (bcast_output ())
  (implicit_batch true) (implicit_input true) (given_batch ())
  (given_input ())
  (given_output
@@ -243,7 +243,7 @@ Test 3: Parsed '2*o=+k' (stride with use_padding=true)
      (stride_offset 0))))))
 
 Test 4: Parsed 'o<+3*k' (dilation with use_padding=false)
-  Structure: ((bcast_batch (batch)) (bcast_input (input)) (bcast_output ())
+  Structure: ((bcast_batch (...batch)) (bcast_input (...input)) (bcast_output ())
  (implicit_batch true) (implicit_input true) (given_batch ())
  (given_input ())
  (given_output
@@ -258,7 +258,7 @@ Test 4: Parsed 'o<+3*k' (dilation with use_padding=false)
      (stride_offset 0))))))
 
 Test 5: Parsed '2*o=+3*k' (stride, dilation, use_padding=true)
-  Structure: ((bcast_batch (batch)) (bcast_input (input)) (bcast_output ())
+  Structure: ((bcast_batch (...batch)) (bcast_input (...input)) (bcast_output ())
  (implicit_batch true) (implicit_input true) (given_batch ())
  (given_input ())
  (given_output
@@ -273,7 +273,7 @@ Test 5: Parsed '2*o=+3*k' (stride, dilation, use_padding=true)
      (stride_offset 0))))))
 
 Test 6: Parsed 'o+k' (unspecified use_padding)
-  Structure: ((bcast_batch (batch)) (bcast_input (input)) (bcast_output ())
+  Structure: ((bcast_batch (...batch)) (bcast_input (...input)) (bcast_output ())
  (implicit_batch true) (implicit_input true) (given_batch ())
  (given_input ())
  (given_output

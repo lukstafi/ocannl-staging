@@ -18,3 +18,5 @@ terse sum over non-batch: batched ++ "... => 0": 2|1
 
 binary einsum with omitted rows: batched matmul "ij;jk=>ik": Shape_error Mismatching number of axes
 
+"batch" as a dimension label: "batch, seq, d; batch, time, d => batch, seq, time": 2,3,5
+

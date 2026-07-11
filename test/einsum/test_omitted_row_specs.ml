@@ -53,4 +53,12 @@ let () =
       let a = TDSL.range_of_shape ~batch_dims:[ 2 ] ~output_dims:[ 3; 4 ] () in
       let b = TDSL.range_of_shape ~output_dims:[ 4; 5 ] () in
       let%op c = a +* "ij;jk=>ik" b in
+      c);
+  (* The implicit context row variables use reserved names, so [batch]/[input]/[output] stay
+     available as ordinary dimension labels in terse multichar specs. *)
+  shape_case "\"batch\" as a dimension label: \"batch, seq, d; batch, time, d => batch, seq, time\""
+    (fun () ->
+      let a = TDSL.range_of_shape ~output_dims:[ 2; 3; 4 ] () in
+      let b = TDSL.range_of_shape ~output_dims:[ 2; 5; 4 ] () in
+      let%op c = a +* "batch, seq, d; batch, time, d => batch, seq, time" b in
       c)

@@ -151,7 +151,7 @@ OCANNL's einsum has two syntax modes:
 | Convolution | N/A | always multi-char | `x +* kernel "... \| stride*oh+kh, stride*ow+kw, ic; kh, kw, ic -> oc => ... \| oh, ow, oc"` |
 
 ### Row Variables
-- `...` context-dependent ellipsis: expands to `..batch..` in batch position, `..input..` before `->`, `..output..` after `->`
+- `...` context-dependent ellipsis: expands to a reserved per-kind row variable (batch position, before `->`, after `->`), shared by every `...` of that kind in the spec; not nameable, so `batch` etc. remain ordinary labels
 - Single-char mode example: `..b..|` for batch axes (arbitrary number)
 - Multi-char mode examples: `h, w, ..ic..`, `h, w, ..oc..` for input/output channels (can be multi-axis), `..spatial.., channel` for spatial dimensions
 

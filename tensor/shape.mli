@@ -46,10 +46,12 @@
     characters) are only allowed once for a kind. They are used to enable (in-the-middle)
     broadcasting for the axis kind in the einsum-related shape inference (like the ellipsis ["..."]
     in [numpy.einsum]), and are translated to row variables. The ellipsis ["..."] is context
-    dependent: in the batch row it is the same as ["..batch.."], in the input row the same as
-    ["..input.."], in the output row the same as ["..output.."]. When the same row variable is used
-    in multiple rows, the corresponding broadcasted axes are matched pointwise in the resulting
-    operation.
+    dependent: it stands for a reserved row variable specific to the kind of the row it appears in
+    (batch, input or output), shared by every ["..."] of that kind within one einsum spec. The
+    reserved variables cannot be referred to by name, so identifiers such as [batch] remain
+    available as ordinary dimension labels and ["..batch.."] is an ordinary user row variable. When
+    the same row variable is used in multiple rows, the corresponding broadcasted axes are matched
+    pointwise in the resulting operation.
 
     The label ["_"] is a place-holder: it is not output to the resulting map but aligns the axes of
     other labels.

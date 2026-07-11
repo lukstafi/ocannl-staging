@@ -77,8 +77,9 @@ type parsed_axis_labels = {
 [@@deriving compare, sexp, fields]
 (** The labels are strings assigned to [AxisKey] axes. Moreover the [bcast_] fields represent
     whether additional leading/middle axes are allowed (corresponding to the dot-ellipsis syntax for
-    broadcasting). The string can be used to identify a row variable, and defaults to ["batch"],
-    ["input"], ["output"] respectively when parsing ["..."]. The [implicit_] fields record that the
+    broadcasting). The string can be used to identify a row variable; parsing ["..."] yields the
+    reserved per-kind names ["...batch"], ["...input"], ["...output"], which cannot collide with
+    user-written identifiers. The [implicit_] fields record that the
     row was omitted together with its kind separator, in which case it reads as the context ellipsis
     but its row variable may be silently closed to an empty row (even on parameters) when nothing
     else constrains it — unlike an explicitly written ellipsis. The [given_] fields are lists of

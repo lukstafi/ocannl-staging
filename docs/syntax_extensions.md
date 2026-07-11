@@ -451,7 +451,7 @@ The notation for a row is composed of sequences of row specs, and an optional _r
 The syntax of a row variable:
 
 - `..`variable_id`..`: variable_id stands for the row variable identifier,
-- ellipsis `...` is context dependent: in the batch row it means `..batch..`, in the input row `..input..`, in the output row `..output..`.
+- ellipsis `...` is context dependent: it stands for a reserved row variable specific to the kind of the row it appears in (batch, input or output), shared by every `...` of that kind within one spec. The reserved variables cannot be named, so `batch`, `input`, `output` remain available as ordinary labels and `..batch..` is an ordinary user row variable.
 
 The syntax of an axis spec:
 
