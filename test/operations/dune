@@ -588,6 +588,17 @@
   (pps ppx_here ppx_ocannl ppx_sexp_conv)))
 
 (test
+ (name layer_norm_1d)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules layer_norm_1d)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl ppx_sexp_conv)))
+
+(test
  (name decoder_only_test)
  (package neural_nets_lib)
  (deps
