@@ -1,0 +1,12 @@
+{
+  "name": "mlp_wide",
+  "data": "gaussian",
+  "dims": [256, 1024, 1024, 10],
+  "batch_size": 256,
+  "n_batches": 16,
+  "lr": 0.01,
+  "seed": 42,
+  "parity_steps": 24,
+  "warmup_steps": 30,
+  "timed_steps": 200
+}
