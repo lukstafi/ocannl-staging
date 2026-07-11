@@ -62,9 +62,9 @@ def build_mlp(meta, data):
 
 def build_conv(meta, data):
     w1 = param(np.ascontiguousarray(data["conv1_kernel"].transpose(0, 3, 1, 2)))
-    b1 = param(np.ascontiguousarray(data["conv1_bias"].transpose(2, 0, 1)))
+    b1 = param(data["conv1_bias"])  # per-channel bias [oc]
     w2 = param(np.ascontiguousarray(data["conv2_kernel"].transpose(0, 3, 1, 2)))
-    b2 = param(np.ascontiguousarray(data["conv2_bias"].transpose(2, 0, 1)))
+    b2 = param(data["conv2_bias"])
     wf1 = param(data["fc1_w"].reshape(data["fc1_w"].shape[0], -1))
     bf1 = param(data["fc1_b"])
     wf2 = param(data["fc2_w"])
@@ -74,9 +74,9 @@ def build_conv(meta, data):
     flat = [w1, b1, w2, b2, wf1, bf1, wf2, bf2, wl, bl]
 
     def forward(xb):
-        z = xb.conv2d(w1) + b1  # valid convolution, per-position bias
+        z = xb.conv2d(w1, b1)  # valid convolution
         z = z.relu().max_pool2d(kernel_size=(2, 2))
-        z = z.conv2d(w2) + b2
+        z = z.conv2d(w2, b2)
         z = z.relu().max_pool2d(kernel_size=(2, 2))
         h = z.permute(0, 2, 3, 1).reshape(z.shape[0], -1)
         h = h.linear(wf1.T, bf1).relu()

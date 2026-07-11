@@ -25,9 +25,9 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
 - **lenet** (`model: conv`, training): LeNet-5 with *valid* convolutions on random 32×32×1
   images, built from the idiomatic nn_blocks pieces (`conv2d ~use_padding:false`,
   `max_pool2d`, `mlp_layer`). Fixture weights are injected into the block-created inline
-  params by debug-name token matching (`Bench_harness.inject`). Note: OCANNL's `conv2d`
-  block infers its inline bias to the full feature map `[oh, ow, oc]` (least-commitment
-  broadcast) rather than per-channel `[oc]`; the fixture and Python runners mirror that.
+  params by debug-name token matching (`Bench_harness.inject`). Conv biases are the
+  conventional per-channel `[oc]` (the `conv2d` block pins its inline bias to the channel
+  row); the Python runners pass them as the conv's own bias argument.
 - **gpt2_mini** (`model: gpt`, `mode: infer`): pre-LN GPT-2-style decoder (4 layers, d=256,
   8 heads, seq 128, vocab 1024, tanh-gelu, learned positional embeddings, tied lm_head,
   causal mask filled with -1e9), forward-only. The parity metric is softmax-CE of the

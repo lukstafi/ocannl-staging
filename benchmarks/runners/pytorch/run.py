@@ -57,9 +57,9 @@ def build_conv(meta, data, dev):
         return t.contiguous().to(dev).requires_grad_()
 
     w1 = leaf(data["conv1_kernel"].permute(0, 3, 1, 2))  # [oc,ic,kh,kw]
-    b1 = leaf(data["conv1_bias"].permute(2, 0, 1))  # per-position bias [oc,oh,ow]
+    b1 = leaf(data["conv1_bias"])  # per-channel bias [oc]
     w2 = leaf(data["conv2_kernel"].permute(0, 3, 1, 2))
-    b2 = leaf(data["conv2_bias"].permute(2, 0, 1))
+    b2 = leaf(data["conv2_bias"])
     wf1 = leaf(data["fc1_w"].reshape(data["fc1_w"].shape[0], -1))  # [hid, oh*ow*oc]
     bf1 = leaf(data["fc1_b"])
     wf2 = leaf(data["fc2_w"])
@@ -69,9 +69,9 @@ def build_conv(meta, data, dev):
     flat = [w1, b1, w2, b2, wf1, bf1, wf2, bf2, wl, bl]
 
     def forward(xb):
-        z = F.conv2d(xb, w1) + b1  # valid convolution
+        z = F.conv2d(xb, w1, b1)  # valid convolution
         z = F.max_pool2d(torch.relu(z), 2)
-        z = F.conv2d(z, w2) + b2
+        z = F.conv2d(z, w2, b2)
         z = F.max_pool2d(torch.relu(z), 2)
         h = z.permute(0, 2, 3, 1).reshape(z.shape[0], -1)  # match OCANNL [oh,ow,oc] order
         h = torch.relu(h @ wf1.T + bf1)

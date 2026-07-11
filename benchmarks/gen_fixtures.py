@@ -75,15 +75,10 @@ def build_conv(spec, rng, tensors, meta):
     c1, c2, k = spec["channels1"], spec["channels2"], spec["kernel_size"]
     fm = (((img - k + 1) // 2) - k + 1) // 2  # after conv5-valid, pool2, conv5-valid, pool2
     fc1, fc2 = spec["fc1"], spec["fc2"]
-    # OCANNL's conv2d block infers its inline bias to the full feature map [oh, ow, oc]
-    # (least-commitment broadcast), not per-channel [oc]; the fixture and the Python runners
-    # mirror that so training trajectories stay comparable.
-    fm1 = img - k + 1
-    fm2 = fm1 // 2 - k + 1
     tensors["conv1_kernel"] = uniform(rng, k * k * 1, (c1, k, k, 1))
-    tensors["conv1_bias"] = np.zeros((fm1, fm1, c1), np.float32)
+    tensors["conv1_bias"] = np.zeros(c1, np.float32)
     tensors["conv2_kernel"] = uniform(rng, k * k * c1, (c2, k, k, c1))
-    tensors["conv2_bias"] = np.zeros((fm2, fm2, c2), np.float32)
+    tensors["conv2_bias"] = np.zeros(c2, np.float32)
     tensors["fc1_w"] = uniform(rng, fm * fm * c2, (fc1, fm, fm, c2))
     tensors["fc1_b"] = np.zeros(fc1, np.float32)
     tensors["fc2_w"] = uniform(rng, fc1, (fc2, fc1))
