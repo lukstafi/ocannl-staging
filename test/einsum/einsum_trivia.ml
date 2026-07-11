@@ -545,7 +545,7 @@ let%expect_test "einsum1 broadcast or sum out prefix axes" =
     HERE: test/einsum/einsum_trivia.ml:542:21
     [7]: =>_ho4 shape 0:5|2:7->1:3  <not-in-context>
     |}];
-  let%op ho5 = hey ++ "...|...->...o => o" in
+  let%op ho5 = hey ++ "...|...->...o => |->o" in
   let ctx = Train.forward_once ctx ho5 in
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx hey;
   [%expect
@@ -578,7 +578,7 @@ let%expect_test "einsum1 broadcast or sum out prefix axes" =
     └───────────────────────────────────────┘
     |}];
   let hey3 = TDSL.range_of_shape ~output_dims:[ 3; 4 ] () in
-  let%op ho6 = hey3 ++ "...|...->...o => o" in
+  let%op ho6 = hey3 ++ "...|...->...o => |->o" in
   let ctx = Train.forward_once ctx ho6 in
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx ho6;
   [%expect
@@ -624,7 +624,7 @@ let%expect_test "einsum broadcast or sum out prefix axes" =
 
   let a = TDSL.range_of_shape ~batch_dims:[ 3 ] ~input_dims:[ 4 ] ~output_dims:[ 2 ] () in
   let b = TDSL.range_of_shape ~batch_dims:[ 3 ] ~input_dims:[ 1 ] ~output_dims:[ 4 ] () in
-  let%op c = a +* "...|i->...; ...|...->i => ...|i" b in
+  let%op c = a +* "...|i->...; ...|...->i => ...|->i" b in
   let ctx = Train.forward_once ctx c in
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx c;
   [%expect
@@ -705,7 +705,7 @@ let%expect_test "einsum1 fixed dim axis" =
     └────────────────────────────────────────────────────────────────┘
     |}];
   let hey2 = TDSL.range_of_shape ~input_dims:[ 2 ] ~output_dims:[ 3 ] () in
-  let%op ho3 = hey2 ++ "...|...->... => 0" in
+  let%op ho3 = hey2 ++ "...|...->... => |->0" in
   let ctx = Train.forward_once ctx ho3 in
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx ho3;
   [%expect
@@ -746,7 +746,7 @@ let%expect_test "einsum with fixed dim axes" =
 
   let a = TDSL.range_of_shape ~batch_dims:[ 3 ] ~input_dims:[ 4 ] ~output_dims:[ 2 ] () in
   let b = TDSL.range_of_shape ~batch_dims:[ 3 ] ~input_dims:[ 1 ] ~output_dims:[ 4 ] () in
-  let%op c = a +* "...|i->1; ...|...->i => ...|i" b in
+  let%op c = a +* "...|i->1; ...|...->i => ...|->i" b in
   let ctx = Train.forward_once ctx c in
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx c;
   [%expect
@@ -956,7 +956,7 @@ let%expect_test "einsum with a leftmost input axis preserved as output axis" =
   let b =
     TDSL.range_of_shape ~label:[ "b" ] ~batch_dims:[ 3 ] ~input_dims:[ 2; 3 ] ~output_dims:[ 4 ] ()
   in
-  let%op c = a +* "...|i->1; ...|j...->i => ...|ij" b in
+  let%op c = a +* "...|i->1; ...|j...->i => ...|->ij" b in
   let ctx = Train.forward_once ctx c in
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx c;
   [%expect

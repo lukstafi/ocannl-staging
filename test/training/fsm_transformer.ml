@@ -119,7 +119,7 @@ let () =
   let%op probs = counts /. (counts ++ "...|... => ...|0") in
   let%op output_probs = (probs *. target_batch) ++ "...|... => ...|0" in
   let%op loss = neg (log output_probs) in
-  let%op batch_loss = (loss ++ "...|... => 0") /. !..total_tokens in
+  let%op batch_loss = (loss ++ "...|... => |->0") /. !..total_tokens in
 
   Train.every_non_literal_materialized batch_loss;
   let update = Train.grad_update batch_loss in

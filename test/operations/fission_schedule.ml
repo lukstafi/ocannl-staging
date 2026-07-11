@@ -393,7 +393,7 @@ let () =
   let n = 192 in
   let xv = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 29) *. 0.125) in
   let x = TDSL.ndarray xv ~label:[ "x" ] ~output_dims:[ n; n ] () in
-  let%op l = ({ w = uniform (); o = [ 192; 192 ] } *. x) ++ "...|... => 0" in
+  let%op l = ({ w = uniform (); o = [ 192; 192 ] } *. x) ++ "...|... => |->0" in
   let update = named "fission_bwd" (Train.grad_update l) in
   let ctx = Train.init_params (Context.auto ()) IDX.empty l in
   let routine = Train.to_routine ctx IDX.empty update in

@@ -49,7 +49,7 @@ let train_once ~seed () : run_result =
   (* We don't need a regression loss formula thanks to weight_decay built into the sgd_update
      computation. *)
   let weight_decay = 0.0001 in
-  let%op scalar_loss = (margin_loss ++ "...|... => 0") /. !..batch_size in
+  let%op scalar_loss = (margin_loss ++ "...|... => |->0") /. !..batch_size in
   let update = Train.grad_update scalar_loss in
   (* TODO(#321): Define learning_rate above the call to grad_update to test the consume_forward_code
      fix *)

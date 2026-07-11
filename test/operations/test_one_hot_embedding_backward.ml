@@ -133,7 +133,7 @@ let run_backward ?name ids =
   let coeff =
     TDSL.ndarray coeff_values ~label:[ "coeff" ] ~batch_dims:[ positions ] ~output_dims:[ embed ] ()
   in
-  let%op loss = (embedded *. coeff) ++ "...|... => 0" in
+  let%op loss = (embedded *. coeff) ++ "...|... => |->0" in
   let update = Train.grad_update loss in
   let update = match name with Some n -> named n update | None -> update in
   let ctx = Context.cpu () in
@@ -197,7 +197,7 @@ let () =
     TDSL.ndarray coeff_values ~label:[ "coeff_int" ] ~batch_dims:[ positions ]
       ~output_dims:[ embed ] ()
   in
-  let%op loss_int = (embedded_int *. coeff_int) ++ "...|... => 0" in
+  let%op loss_int = (embedded_int *. coeff_int) ++ "...|... => |->0" in
   let update_int = Train.grad_update loss_int in
   let ctx = Context.cpu () in
   let ctx = Train.init_params ctx IDX.empty loss_int in
@@ -220,7 +220,7 @@ let () =
       ~label:[ "x" ] ~batch_dims:[ positions ] ~output_dims:[ vocab ] ()
   in
   let%op y = { w = uniform (); i = [ vocab ]; o = [ embed ] } * x in
-  let%op loss_mm = y ++ "...|... => 0" in
+  let%op loss_mm = y ++ "...|... => |->0" in
   let update_mm = Train.grad_update loss_mm in
   let ctx = Context.cpu () in
   let ctx = Train.init_params ctx IDX.empty loss_mm in

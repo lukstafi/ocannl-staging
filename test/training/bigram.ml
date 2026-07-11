@@ -48,12 +48,12 @@ let () =
 
   let%op mlp input =
     let counts = exp (({ w } + 1) * input) in
-    counts /. (counts ++ "...|... => ...|0")
+    counts /. (counts ++ "... => 0")
   in
 
-  let%op output_probs = (mlp input_gram *. output_gram) ++ "...|... => ...|0" in
+  let%op output_probs = (mlp input_gram *. output_gram) ++ "... => 0" in
   let%op loss = neg (log output_probs) in
-  let%op batch_loss = (loss ++ "...|... => 0") /. !..batch_size in
+  let%op batch_loss = (loss ++ "...|... => |->0") /. !..batch_size in
 
   (* When using as a tutorial, try both with the following source line included and commented out.
      Run with the option --ocannl_output_debug_files_in_build_directory=true and check the

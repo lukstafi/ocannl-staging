@@ -157,7 +157,7 @@ let test_max_pool2d_backprop () =
   (* Apply max_pool2d with default params (stride=2, window=2) *)
   let%op output = max_pool2d () input in
   (* Sum to scalar for backprop *)
-  let%op loss = output ++ "...|... => 0" in
+  let%op loss = output ++ "...|... => |->0" in
 
   let ctx = Context.auto () in
   Train.set_materialized loss.value;

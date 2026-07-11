@@ -30,7 +30,7 @@ let () =
   let%op embedded = { c; o = [ embed ] } * Nn_blocks.one_hot_of_ids ~num_classes:vocab ids in
   let%op pred = ({ w } * embedded) + { b = 0.; o = [ 1 ] } in
   let%op diff = pred - target in
-  let%op batch_loss = ((diff *. diff) ++ "...|... => 0") /. !..n in
+  let%op batch_loss = ((diff *. diff) ++ "...|... => |->0") /. !..n in
 
   let update = Train.grad_update batch_loss in
   let%op learning_rate = 0.5 in

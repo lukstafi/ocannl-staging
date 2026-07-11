@@ -112,7 +112,7 @@ let test_conv2d_stride_with_padding_backprop () =
       input
   in
   (* Sum to scalar for backprop *)
-  let%op loss = output ++ "...|... => 0" in
+  let%op loss = output ++ "...|... => |->0" in
 
   let ctx = Context.auto () in
   Train.set_materialized loss.value;
@@ -180,7 +180,7 @@ let test_conv2d_stride_without_padding_backprop () =
       input
   in
   (* Sum to scalar for backprop *)
-  let%op loss = output ++ "...|... => 0" in
+  let%op loss = output ++ "...|... => |->0" in
 
   let ctx = Context.auto () in
   Train.set_materialized loss.value;

@@ -30,12 +30,12 @@ let%op box_muller grad_spec init_f () =
 
 let kaiming_impl ?(scale_sq = 6.0) grad_spec init_f () =
   let w_raw = init_f () in
-  let%op _ = w_raw ++ "...|..i.. -> ... => 0" [ "i" ] in
+  let%op _ = w_raw ++ "...|..i.. -> ... => |->0" [ "i" ] in
   Ocannl_tensor.Operation.pointmul ~grad_spec w_raw [%op sqrt (!.scale_sq /. dim i)]
 
 let xavier_impl ?(scale_sq = 6.0) grad_spec init_f () =
   let w_raw = init_f () in
-  let%op _ = w_raw ++ "...|..i.. -> ..o.. => 0" [ "i"; "o" ] in
+  let%op _ = w_raw ++ "...|..i.. -> ..o.. => |->0" [ "i"; "o" ] in
   Ocannl_tensor.Operation.pointmul ~grad_spec w_raw [%op sqrt (!.scale_sq /. (dim i + dim o))]
 
 [%%extend_dsls
@@ -233,7 +233,7 @@ let%op cross_entropy_loss ~spec ?mask ?normalize_by () ~logits ~targets =
   let masked_nll = match mask with None -> nll | Some m -> nll *. m in
   (* Reduce all three axis kinds: [spec] may name class axes in the input row (e.g. the attention
      convention "... | t -> ..."), in which case [nll] still has an input row here. *)
-  let cross_entropy = masked_nll ++ "...|...->... => 0" in
+  let cross_entropy = masked_nll ++ "...|...->... => |->0" in
   match normalize_by with None -> cross_entropy | Some n -> cross_entropy /. n
 
 (** {2 Position Embedding Strategies} *)
@@ -513,7 +513,7 @@ let%op conv2d ~label ?(kernel_size = 3) ?(stride = 1) ?(use_padding = true) ?out
   Option.iter out_channels ~f:(Shape.set_dim oc);
   x
   +* { kernel }
-       "... | stride*oh+kh, stride*ow+kw, ..ic..; kh, kw, ..ic.. -> ..oc.. => ... | oh, ow, ..oc.."
+       "... | stride*oh+kh, stride*ow+kw, ..ic..; |kh, kw, ..ic.. -> ..oc.. => ... | oh, ow, ..oc.."
        [ "kh"; "kw"; "oc" ]
   + { bias = 0. }
 
@@ -529,12 +529,12 @@ let%op depthwise_separable_conv2d ~label ?(kernel_size = 3) ?(stride = 1) ?(use_
   let depthwise =
     x
     +* { dw_kernel }
-         "... | stride*oh+kh, stride*ow+kw, ..ic..; kh, kw -> ..ic.. => ... | oh, ow, ..ic.."
+         "... | stride*oh+kh, stride*ow+kw, ..ic..; |kh, kw -> ..ic.. => ... | oh, ow, ..ic.."
          [ "kh"; "kw" ]
   in
   (* Pointwise: 1x1 conv to mix channels *)
   depthwise
-  +* { pw_kernel } "... | h, w, ..ic..; ..ic.. -> ..oc.. => ... | h, w, ..oc.."
+  +* { pw_kernel } "... | h, w, ..ic..; |..ic.. -> ..oc.. => ... | h, w, ..oc.."
   + { bias = 0. }
 
 (** Max pooling for 2D spatial data - reduces spatial dimensions by taking maximum values.
@@ -553,7 +553,7 @@ let%op max_pool2d ?(stride = 2) ?(window_size = 2) () x =
      ~fetch_op:(Constant 0.0) ()" but that's less concise. See:
      https://github.com/ahrefs/ocannl/discussions/381 *)
   x
-  @^+ "... | stride*oh< + wh, stride*ow< + ww, ..c..; wh, ww => ... | oh, ow, ..c.." [ "wh"; "ww" ]
+  @^+ "... | stride*oh< + wh, stride*ow< + ww, ..c..; |wh, ww => ... | oh, ow, ..c.." [ "wh"; "ww" ]
         (0.0 + 0.0)
 
 (** Average pooling for 2D spatial data - reduces spatial dimensions by averaging values.
@@ -564,7 +564,7 @@ let%op avg_pool2d ?(stride = 2) ?(window_size = 2) () x =
   Shape.set_dim ww window_size;
   let sum =
     x
-    +++ "... | stride*oh< + wh, stride*ow< + ww, ..c..; wh, ww => ... | oh, ow, ..c.."
+    +++ "... | stride*oh< + wh, stride*ow< + ww, ..c..; |wh, ww => ... | oh, ow, ..c.."
           [ "wh"; "ww" ] (0.0 + 0.0)
   in
   sum /. (dim wh *. dim ww)

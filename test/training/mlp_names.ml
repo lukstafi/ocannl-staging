@@ -164,7 +164,7 @@ let () =
   let%op shifted = train_logits - max_l in
   let%op lse = log (exp shifted ++ "... | ... => ... | 0") in
   let%op log_probs = shifted - lse in
-  let%op nll = neg ((target_batch *. log_probs) ++ "... | ... => 0") in
+  let%op nll = neg ((target_batch *. log_probs) ++ "... | ... => |->0") in
   let%op batch_loss = (nll ++ "... => 0") /. !..batch_size in
 
   (* FIXME(#344): When uncommented, this exceeds the number of buffer arguments
@@ -236,7 +236,7 @@ let () =
   let%cd eval_shifted = eval_logits - eval_max_l in
   let%cd eval_lse = log (exp eval_shifted ++ "... | ... => ... | 0") in
   let%cd eval_log_probs = eval_shifted - eval_lse in
-  let%cd eval_nll = neg ((eval_target *. eval_log_probs) ++ "... | ... => 0") in
+  let%cd eval_nll = neg ((eval_target *. eval_log_probs) ++ "... | ... => |->0") in
   let%cd eval_loss = (eval_nll ++ "... => 0") /. !..batch_size in
   Train.set_materialized eval_loss.value;
   Train.set_materialized eval_input.value;

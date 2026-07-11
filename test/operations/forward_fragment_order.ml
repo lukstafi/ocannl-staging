@@ -43,7 +43,7 @@ let () =
   Train.set_materialized q.Tensor.value;
   Train.set_materialized k.Tensor.value;
   Train.set_materialized v.Tensor.value;
-  let%op total = (q ++ "...|... => 0") + (k ++ "...|... => 0") + (v ++ "...|... => 0") in
+  let%op total = (q ++ "...|... => |->0") + (k ++ "...|... => |->0") + (v ++ "...|... => |->0") in
   let ctx = Train.forward_once (Context.auto ()) total in
   let p name t =
     let vals = Context.get_values ctx t.Tensor.value in

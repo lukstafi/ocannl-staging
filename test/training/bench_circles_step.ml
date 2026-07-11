@@ -50,7 +50,7 @@ let () =
   let%op probs = softmax ~spec:"...|v" () logits in
   let%op correct_prob = (probs *. batch_labels) ++ "...|... => ...|0" in
   let%op sample_loss = neg (log correct_prob) in
-  let%op batch_loss = (sample_loss ++ "...|... => 0") /. !..batch_size in
+  let%op batch_loss = (sample_loss ++ "...|... => |->0") /. !..batch_size in
   let epochs = 1000 in
   let total_steps = epochs * n_batches in
   Train.every_non_literal_materialized batch_loss;

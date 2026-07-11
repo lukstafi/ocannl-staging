@@ -14,7 +14,7 @@ let centered_uniform1 ?label ?top_down_prec ?batch_dims ?batch_axes ?input_dims 
 let () =
   Tensor.unsafe_reinitialize ();
   let w = TDSL.param ~param_init:centered_uniform1 "w" ~output_dims:[ 4 ] () in
-  let%op loss = (w *. w) ++ "...|... => 0" in
+  let%op loss = (w *. w) ++ "...|... => |->0" in
   let update = Train.grad_update loss in
   let ctx = Train.init_params (Context.auto ()) Train.IDX.empty loss in
   let%op learning_rate = 0.01 in

@@ -266,7 +266,7 @@ let () =
       ~batch_dims:[] ~input_dims:[] ~output_dims:[ 7 ] ()
   in
   let%op concat_g = (q1, q2, q3) ++^ "ii; jj; kk => ii^jj^kk" + fixed7h in
-  let%op loss_g = concat_g ++ "...|... => 0" in
+  let%op loss_g = concat_g ++ "...|... => |->0" in
   Train.set_materialized loss_g.value;
   Train.set_materialized concat_g.value;
   Train.set_materialized (Option.value_exn ~here:[%here] q1.diff).grad;
@@ -349,7 +349,7 @@ let () =
       ~output_dims:[ 2 ] ()
   in
   let%op grad_result = sin [ g1; g2 ] in
-  let%op loss = grad_result ++ "...|... => 0" in
+  let%op loss = grad_result ++ "...|... => |->0" in
   Train.set_materialized loss.value;
   Train.set_materialized grad_result.value;
   Train.set_materialized (Option.value_exn ~here:[%here] g1.diff).grad;
@@ -378,7 +378,7 @@ let () =
       ~output_dims:[ 2 ] ()
   in
   let%op grad3_result = sin [ h1; h2; h3 ] in
-  let%op loss3 = grad3_result ++ "...|... => 0" in
+  let%op loss3 = grad3_result ++ "...|... => |->0" in
   Train.set_materialized loss3.value;
   Train.set_materialized grad3_result.value;
   Train.set_materialized (Option.value_exn ~here:[%here] h1.diff).grad;
@@ -416,7 +416,7 @@ let () =
       ~output_dims:[ 2 ] ()
   in
   let%op grad_nested = sin [ [ n1; n2 ]; [ n3; n4 ] ] in
-  let%op loss_nested = grad_nested ++ "...|... => 0" in
+  let%op loss_nested = grad_nested ++ "...|... => |->0" in
   Train.set_materialized loss_nested.value;
   Train.set_materialized grad_nested.value;
   Train.set_materialized (Option.value_exn ~here:[%here] n1.diff).grad;

@@ -25,7 +25,7 @@ let () =
   let%op result = sin ((x1, x2) ++^ "a; b => a^b") in
 
   (* Sum to scalar for backprop *)
-  let%op loss = result ++ "...|... => 0" in
+  let%op loss = result ++ "...|... => |->0" in
 
   let ctx = Context.auto () in
 
@@ -74,7 +74,7 @@ let () =
   let%op result3 = sin ((x1_3, x2_3, x3_3) ++^ "a; b; c => a^b^c") in
 
   (* Sum to scalar for backprop *)
-  let%op loss3 = result3 ++ "...|... => 0" in
+  let%op loss3 = result3 ++ "...|... => |->0" in
 
   let ctx3 = Context.auto () in
 
@@ -125,7 +125,7 @@ let () =
   in
 
   let%op result_u = sin ((x1_u, x2_u, x3_u) ++^ "a; b; c => a^b^c") in
-  let%op loss_u = result_u ++ "...|... => 0" in
+  let%op loss_u = result_u ++ "...|... => |->0" in
 
   let ctx_u = Context.auto () in
 
@@ -184,7 +184,7 @@ let () =
   (* First concatenate n1 and n2, then concatenate with n3 *)
   let%op inner = (n1, n2) ++^ "a; b => a^b" in
   let%op nested = sin ((inner, n3) ++^ "a; b => a^b") in
-  let%op loss_n = nested ++ "...|... => 0" in
+  let%op loss_n = nested ++ "...|... => |->0" in
 
   let ctx_n = Context.auto () in
 
@@ -233,7 +233,7 @@ let () =
   in
 
   let%op result_b1 = sin ((b1, b2, b3) ++^ "a; b; c => a^b^c") in
-  let%op loss_b1 = result_b1 ++ "...|... => 0" in
+  let%op loss_b1 = result_b1 ++ "...|... => |->0" in
 
   let ctx_b1 = Context.auto () in
 
@@ -279,7 +279,7 @@ let () =
   in
 
   let%op result_l = sin ((l1, l2, l3) ++^ "a; b; c => a^b^c") in
-  let%op loss_l = result_l ++ "...|... => 0" in
+  let%op loss_l = result_l ++ "...|... => |->0" in
 
   let ctx_l = Context.auto () in
 
