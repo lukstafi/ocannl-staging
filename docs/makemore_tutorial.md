@@ -215,8 +215,9 @@ OCANNL_BACKEND=cc \
   -- --ocannl_output_debug_files_in_build_directory=true
 ```
 
-After the run, `_build/default/test/training/build_files/` holds three files
-per compiled routine:
+After the run, `_build/default/test/training/build_files/mlp_bn_names/` holds
+three files per compiled routine (each executable writes into its own
+subdirectory of `build_files/`, named after the executable):
 
 1. `*.cd` — the high-level assignment IR (forward + backward interleaved),
 2. `*.ll` — the low-level for-loop IR, and

@@ -156,9 +156,9 @@ opam install cudajit  # for CUDA backend
   4. OCANNL_BACKEND environment variable is an exception (explicit dependency)
 
 **Important Debug Settings**:
-- `output_debug_files_in_build_directory=true` - enables `build_files/` generation
+- `output_debug_files_in_build_directory=true` - enables `build_files/` generation; files go to `build_files/<exe-name>/` (per-executable subdirectory, override with `build_files_prefix`; `build_files_prefix=.` for a flat layout)
 - `debug_log_from_routines=true` - enables runtime logging from kernels aka. routines
-- `debug_log_to_stream_files=true` - writes logs from kernels/routines to `log_files/<backend>-<device>-<stream>.log`
+- `debug_log_to_stream_files=true` - writes logs from kernels/routines to `log_files/<exe-name>/<backend>-<device>-<stream>.log`
 - `clean_up_artifacts_on_startup=false` - preserves debug files between runs
 
 **Available Backends**:
@@ -234,7 +234,7 @@ opam install cudajit  # for CUDA backend
 When outputs differ between backends:
 
 1. Compare runtime logs in `<backend>-<device>-<stream>.log` files (might require minimizing test tensors)
-2. Check generated code in `build_files/*.c` vs `*.cu` / `*.metal` for differences
+2. Check generated code in `build_files/<exe-name>/*.c` vs `*.cu` / `*.metal` for differences
 3. Common issues:
    - Incorrect type conversion in `convert_precision` overrides
    - Different numerical precision between CPU and GPU operations
@@ -257,9 +257,9 @@ When outputs differ between backends:
 - Set `debug_log_from_routines=true` in config for kernel/routine-level debugging
 - Use `log_level=2` for verbose ppx_minidebug output
 - CUDA debugging requires `Utils.capture_stdout_logs` wrapper
-- Debug files generated in `log_files/` directory (cleaned on startup by default)
-- Runtime logs from kernel execution are written to `<backend>-<device>-<stream>.log` (e.g., `cuda-0-0.log`)
-- Generated code files in `build_files/` show high-level `.cd`, intermediate `.ll`, and backend-specific `.c`/`.cu` files
+- Debug files generated in `log_files/<exe-name>/` (this process's subdirectory is cleaned on startup by default)
+- Runtime logs from kernel execution are written to `<backend>-<device>-<stream>.log` (e.g., `cuda-0-0.log`) inside that subdirectory
+- Generated code files in `build_files/<exe-name>/` show high-level `.cd`, intermediate `.ll`, and backend-specific `.c`/`.cu` files
 
 ## Performance Considerations
 
