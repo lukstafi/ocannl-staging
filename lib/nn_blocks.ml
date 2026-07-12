@@ -22,10 +22,15 @@ module Tn = Ir.Tnode
 
 let%op box_muller grad_spec init_f () =
   let epsilon = [%oc Float.ldexp 1. (-24)] in
+  let one_minus_epsilon = [%oc 1. -. Float.ldexp 1. (-24)] in
   let u1 = init_f () in
   let u2 = init_f () in
-  Ocannl_tensor.Operation.pointmul ~grad_spec
-    (sqrt (-2. *. log (u1 + (!.epsilon *. (1. - u1)))))
+  (* The clamp away from 0 is written as [epsilon + (1 - epsilon) * u1] so that [u1] appears once,
+     under scalar-operand ops only, and the final pointmul carries an equality spec: pointwise
+     broadcasting would otherwise let the uniform draws close to smaller shapes than the result and
+     repeat random values along the broadcast axes. *)
+  Ocannl_tensor.Operation.pointmul ~grad_spec ~spec:"..b..; ..b.. => ..b.."
+    (sqrt (-2. *. log (!.epsilon + (!.one_minus_epsilon *. u1))))
     (cos (2. *. !.Float.pi *. u2))
 
 let kaiming_impl ?(scale_sq = 6.0) grad_spec init_f () =
@@ -54,14 +59,15 @@ let xavier_at ?scale_sq init_f counter =
 
 open DSL_modules
 
+(* Bits-preserving conversion: ids in [2^31, 2^32) are valid uint32 values whose int32
+   representation is negative, so [of_int_exn] would wrongly reject them. *)
+
 (** Convert a list of integers to a compact tensor of class IDs (no [num_classes] allocation).
     @param lst List of integer class indices (0-based)
     @return
       A tensor of shape [len] (a [len]-sized batch axis) holding the IDs in uint32 precision, so
       that the gh-343 embedding gather can guard the dynamic index with native integer comparisons
       (no double-precision guard, no integrality check). *)
-(* Bits-preserving conversion: ids in [2^31, 2^32) are valid uint32 values whose int32
-   representation is negative, so [of_int_exn] would wrongly reject them. *)
 let set_uint32_id ~fn_name genarray idx id =
   if id < 0 || id > 0xFFFF_FFFF then
     invalid_arg [%string "%{fn_name}: id %{id#Int} is out of the uint32 range"];
@@ -170,9 +176,10 @@ let token_ids_of_batch ?(label = "token_ids") ?max_len ?(pad_id = 0) seqs =
   done;
   TDSL.wrap ~l:label ~b:[ num_seqs; max_len ] ~o:[] (Ir.Ndarray.as_array Ir.Ops.Uint32 genarray) ()
 
-(** Gaussian Error Linear Unit, tanh approximation (Hendrycks & Gimpel 2016): [0.5 * x * (1 +
-    tanh (sqrt (2/pi) * (x + 0.044715 * x^3)))]. This is the GPT-2 activation (HF [gelu_new]); it
-    uses only existing primitives (notably [Tanh_approx]), no dedicated backend support needed. *)
+(** Gaussian Error Linear Unit, tanh approximation (Hendrycks & Gimpel 2016):
+    [0.5 * x * (1 + tanh (sqrt (2/pi) * (x + 0.044715 * x^3)))]. This is the GPT-2 activation (HF
+    [gelu_new]); it uses only existing primitives (notably [Tanh_approx]), no dedicated backend
+    support needed. *)
 let%op gelu x = 0.5 *. x *. (1.0 + tanh (0.7978845608028654 *. (x + (0.044715 *. (x *. x *. x)))))
 
 let%op mlp_layer ~label ~hid_dim () x = relu (({ w } * x) + { b = 0.; o = [ hid_dim ] })
