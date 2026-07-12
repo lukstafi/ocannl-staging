@@ -98,10 +98,25 @@ let () =
   let backend = Context.backend_name ctx in
   let ctx = Train.init_params ctx bindings batch_loss in
   let t0 = Unix.gettimeofday () in
+  (* BENCH_TUNE_REPORT=1: print both placement arms' search reports on stderr. *)
+  let report =
+    match Stdlib.Sys.getenv_opt "BENCH_TUNE_REPORT" with
+    | Some "1" ->
+        Some
+          (fun (r : Autotune.report) ->
+            Stdlib.Printf.eprintf
+              "tune arm: cache_hit=%b timed=%d failed=%d rounds=%d sketch=%d fissioned=%b \
+               baseline_ms=%.4f best_ms=%.4f\n\
+               %!"
+              r.cache_hit r.candidates_timed r.candidates_failed r.rounds_run
+              r.sketch_candidates r.fissioned r.baseline_ms r.best_ms)
+    | _ -> None
+  in
   let ctx, routine =
     if tune then
       let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
-      Train.tune_placements ~rounds:0 ~timing_ctx:scratch ctx batch_loss step_comp bindings
+      Train.tune_placements ?report ~rounds:0 ~timing_ctx:scratch ctx batch_loss step_comp
+        bindings
     else Context.compile ctx step_comp bindings
   in
   let compile_s = Unix.gettimeofday () -. t0 in
