@@ -544,40 +544,28 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu c
         let transforms fresh =
           let opt = rebase fresh in
           let zero_sched tns = if is_gpu then Sched.zero_expansion ~limits tns else [] in
-          (* Position of the current [`Normal] segment among the saved entries (which are stored
-             in segment order, duplicates kept): [fission_scheduled] calls [preset] on the
-             [`Normal] segments in order. *)
-          let seg_idx = ref (-1) in
+          (* Per-segment schedule matching keys on the STRUCTURAL canon ([with_placements:false]):
+             placement classes can render differently across compilation lineages on
+             byte-identical segments (decided in one, undecided in the other — e.g. tuning with
+             [timing_ctx]), which used to fail winner replays wholesale. A lookup miss returns
+             the empty schedule: [fission_scheduled] probes {e fine} (pre-coalescing) segments
+             through this closure, and only the empty-on-miss answer lets coalescing re-converge
+             to the saved segmentation, where every final [`Normal] segment's digest hits (the
+             verification after fission below catches genuine drift loudly instead of silently
+             replaying unscheduled segments). *)
+          let seg_key seg = SC.digest (SC.canonicalize ~static_indices ~with_placements:false seg) in
           let preset seg =
             match flavor with
             | F_preset { block_size; privatize; config_thresholds } ->
                 let sched = preset_sched ?block_size ~config_thresholds seg in
                 if privatize then extend_with_privatize ~static_indices sched seg else sched
             | F_saved entries -> (
-                Int.incr seg_idx;
-                let seg_canon = SC.canonicalize ~static_indices seg in
-                let d = SC.digest seg_canon in
-                match List.Assoc.find entries ~equal:String.equal d with
+                let seg_canon =
+                  SC.canonicalize ~static_indices ~with_placements:false seg
+                in
+                match List.Assoc.find entries ~equal:String.equal (SC.digest seg_canon) with
                 | Some saved -> fst (SC.of_saved seg_canon saved)
-                | None -> (
-                    (* Segment digests include placement classes, which can render differently
-                       between the search's and the replay's compilation lineages (decided in
-                       one, undecided in the other — e.g. tuning with [timing_ctx]) while the
-                       code structure is identical. Segments derive from the same base lowering
-                       in order, so fall back to the positional entry; a genuine structural
-                       mismatch then fails in [of_saved]/[apply], loudly (never silently empty
-                       schedules — the cache-hit path falls through to a fresh search, the
-                       winner replay to the default compile). *)
-                    match List.nth entries !seg_idx with
-                    | Some (saved_d, saved) ->
-                        logf "fissioned replay: segment %d digest %s <> saved %s, applying \
-                              positionally"
-                          !seg_idx (dshort d) (dshort saved_d);
-                        fst (SC.of_saved seg_canon saved)
-                    | None ->
-                        invalid_arg
-                          "Autotune: fissioned replay: more segments than saved schedules \
-                           (segmentation drifted)"))
+                | None -> [])
           in
           let tuples =
             (* Match the default pipeline's placements (statement-crossing [Local]s promoted on
@@ -585,13 +573,33 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu c
             Sched.fission_scheduled ~promote_locals:is_gpu ~preset ~zero_sched ~static_indices
               opt
           in
+          (* Genuine-drift guard for saved replays (cross-process cache entries): with the
+             empty-on-miss closure above, a saved winner whose segmentation no longer matches
+             would coalesce differently and silently replay some segments unscheduled. Verify
+             instead that every final [`Normal] segment found its saved schedule. *)
+          (match flavor with
+          | F_preset _ -> ()
+          | F_saved entries ->
+              List.iter tuples ~f:(fun (kind, pre, _, _) ->
+                  match kind with
+                  | `Zeros | `Solo -> ()
+                  | `Normal ->
+                      if not (List.Assoc.mem entries ~equal:String.equal (seg_key pre)) then
+                        invalid_arg
+                          "Autotune: fissioned replay: no saved schedule for a segment \
+                           (segmentation drifted)"));
           let posts = List.map tuples ~f:(fun (_, _, _, post) -> post) in
           let units =
             List.filter_map tuples ~f:(fun (kind, pre, sched, post) ->
                 match kind with
                 | `Zeros | `Solo -> None
                 | `Normal ->
-                    let pre_canon = SC.canonicalize ~static_indices pre in
+                    (* The structural canon: [u_key] must match the replay closure's lookup, and
+                       [of_saved] at replay resolves against the same (placement-independent)
+                       binder/tnode numbering. *)
+                    let pre_canon =
+                      SC.canonicalize ~static_indices ~with_placements:false pre
+                    in
                     let saved, registry = SC.to_saved (SC.base_registry pre_canon) sched in
                     Some
                       {
@@ -602,9 +610,9 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu c
                       })
           in
           let assoc =
-            (* One entry per [`Normal] segment, in segment order, duplicates kept: the digest
-               lookup serves structurally identical segments (positionally interchangeable saved
-               forms), and the order carries the positional fallback above. *)
+            (* One entry per [`Normal] segment in segment order; structurally identical segments
+               share a key and their saved forms are interchangeable, so duplicates are
+               harmless. *)
             List.map units ~f:(fun u -> (Option.value_exn u.u_key, u.u_saved))
           in
           let digest_after =
