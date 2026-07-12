@@ -1157,6 +1157,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name fission_equivalence)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules fission_equivalence)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name materialize_after_compile)
  (package neural_nets_lib)
  (deps
