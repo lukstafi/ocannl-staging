@@ -28,17 +28,25 @@ open Nn_blocks.DSL_modules
 module Asgns = Ir.Assignments
 
 let lenet = Nn_blocks.lenet
-let softmax = Nn_blocks.softmax
+let cross_entropy_loss = Nn_blocks.cross_entropy_loss
 
 let () =
   let seed = 42 in
   Utils.settings.fixed_state_for_init <- Some seed;
   Tensor.unsafe_reinitialize ();
 
-  (* Xavier init -- same as circles_conv.ml and mnist_conv.ml. CIFAR data is centered to [-0.5, 0.5]
-     in Conv_data.cifar_images_to_float32 so that all-positive Xavier-uniform weights produce
-     zero-centered conv outputs. *)
-  TDSL.default_param_init := NTDSL.xavier ~scale_sq:0.06 TDSL.O.uniform1;
+  (* Centered uniform init over [-0.05, 0.05) -- same rationale as mnist_conv.ml. CIFAR data is
+     centered to [-0.5, 0.5] in Conv_data.cifar_images_to_float32. Earlier revisions used an
+     all-positive xavier-uniform1 ~scale_sq:0.06 init that relied on the (since fixed)
+     full-feature-map conv biases for early learning.
+
+     TODO: training currently stays at the uniform-prediction plateau (the threshold checks below
+     print false): the default uniform1-based init produces row-constant (rank-degenerate) weights
+     -- each output neuron gets one random value replicated across its inputs -- and unlike
+     mnist_conv, SGD does not break the symmetry here within a reasonable number of epochs (checked
+     up to 300 epochs at lr 0.02). Re-tune and re-promote once the initializers are fixed (see also
+     the kaiming/xavier fan-capture bug: fan resolves to 1 under default_param_init). *)
+  TDSL.default_param_init := Ocannl_tensor.Operation.centered_uniform1_param_init ~scale:0.1;
 
   (* --- Configuration --- Regression mode (default): fast, loose thresholds, used by dune runtest.
      Full-run mode: change these constants for issue acceptance targets (>60% accuracy). *)
@@ -110,16 +118,16 @@ let () =
   let model = lenet ~out_channels1 ~out_channels2 () in
   let%op logits = model ~train_step:None batch_images in
 
-  (* Softmax cross-entropy loss. Epsilon prevents log(0) when softmax underflows. *)
-  let%op probs = softmax ~spec:"...|v" () logits in
-  let%op correct_prob = (probs *. batch_labels) ++ "...|... => ...|0" in
-  let%op sample_loss = neg (log (correct_prob + 1e-7)) in
-  let%op batch_loss = (sample_loss ++ "...|... => |->0") /. !..batch_size in
+  (* Numerically stable softmax cross-entropy (max-shifted log-sum-exp): unlike -log(probs + eps),
+     it neither freezes nor produces unbounded gradients when logits saturate early in training. *)
+  let%op batch_loss =
+    cross_entropy_loss ~spec:"...|v" () ~logits ~targets:batch_labels /. !..batch_size
+  in
 
   (* --- Training Setup --- *)
   let total_steps = epochs * n_batches in
   let update = Train.grad_update batch_loss in
-  let%op learning_rate = 0.01 *. ((1.2 *. !..total_steps) - !@step_n) /. !..total_steps in
+  let%op learning_rate = 0.015 *. ((1.2 *. !..total_steps) - !@step_n) /. !..total_steps in
   Train.set_materialized learning_rate.value;
   let sgd = Train.sgd_update ~learning_rate batch_loss in
   Train.set_materialized batch_loss.value;
@@ -161,15 +169,16 @@ let () =
 
   (* Reuse the trained lenet function -- shares parameters with training graph *)
   let%op eval_logits = model ~train_step:None eval_batch_images in
-  let%op eval_probs = softmax ~spec:"...|v" () eval_logits in
 
-  (* Test loss: cross-entropy on held-out data *)
-  let%op eval_correct_prob = (eval_probs *. _eval_batch_labels) ++ "...|... => ...|0" in
-  let%op eval_sample_loss = neg (log (eval_correct_prob + 1e-7)) in
-  let%op eval_batch_loss = (eval_sample_loss ++ "...|... => |->0") /. !..batch_size in
+  (* Test loss: cross-entropy on held-out data. Accuracy uses argmax over the logits directly
+     (same argmax as over softmax probabilities). *)
+  let%op eval_batch_loss =
+    cross_entropy_loss ~spec:"...|v" () ~logits:eval_logits ~targets:_eval_batch_labels
+    /. !..batch_size
+  in
 
   Train.set_materialized eval_batch_loss.value;
-  Train.set_materialized eval_probs.value;
+  Train.set_materialized eval_logits.value;
 
   (* Forward-only routine via %cd .forward -- no grad_update, no sgd_update *)
   let eval_routine =
@@ -187,14 +196,14 @@ let () =
   Train.sequential_loop (Context.bindings eval_routine) ~f:(fun () ->
       Train.run ctx eval_routine;
       test_loss := !test_loss +. (ctx, eval_batch_loss).@[0];
-      (* Read all probability values for this batch as a flat array, then compute argmax per sample
-         in OCaml. *)
-      let flat_probs = Context.get_values ctx eval_probs.value in
+      (* Read all logit values for this batch as a flat array, then compute argmax per sample in
+         OCaml. *)
+      let flat_logits = Context.get_values ctx eval_logits.value in
       for s = 0 to batch_size - 1 do
         let max_c = ref 0 in
         let max_v = ref Float.neg_infinity in
         for c = 0 to num_classes - 1 do
-          let v = flat_probs.((s * num_classes) + c) in
+          let v = flat_logits.((s * num_classes) + c) in
           if Float.(v > !max_v) then (
             max_v := v;
             max_c := c)

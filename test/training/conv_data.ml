@@ -8,15 +8,20 @@
 
 open Bigarray
 
-(** Convert MNIST [int8_unsigned] images [[N; 28; 28]] to [float32] [[N; 28; 28; 1]] in [[0, 1]].
-    Adds a trailing singleton channel dimension for [conv2d] compatibility. *)
+(** Convert MNIST [int8_unsigned] images [[N; 28; 28]] to zero-mean [float32] [[N; 28; 28; 1]]
+    (pixel value / 255 minus the MNIST mean 0.1307). Adds a trailing singleton channel dimension
+    for [conv2d] compatibility.
+
+    Data centering is critical (see {!cifar_images_to_float32}): with all-positive inputs, relu +
+    max-pooling amplify the positive mean through the network, saturating the logits at any weight
+    initialization scale. *)
 let mnist_images_to_float32 raw_images =
   let n = (Genarray.dims raw_images).(0) in
   let result = Genarray.create Float32 c_layout [| n; 28; 28; 1 |] in
   for i = 0 to n - 1 do
     for r = 0 to 27 do
       for c = 0 to 27 do
-        let v = Float.of_int (Genarray.get raw_images [| i; r; c |]) /. 255.0 in
+        let v = (Float.of_int (Genarray.get raw_images [| i; r; c |]) /. 255.0) -. 0.1307 in
         Genarray.set result [| i; r; c; 0 |] v
       done
     done

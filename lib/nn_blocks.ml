@@ -643,10 +643,15 @@ let%op resnet_block ~label ?(stride = 1) () =
 
 (** LeNet-style architecture for simple image classification (e.g., MNIST). Classic architecture:
     conv -> pool -> conv -> pool -> fc layers. Output shape is inferred from training data. *)
-let%op lenet ?(label = [ "lenet" ]) ?(out_channels1 = 6) ?(out_channels2 = 16) () =
-  let conv1 = conv2d ~label:("conv1" :: label) ~kernel_size:5 ~out_channels:out_channels1 () in
+let%op lenet ?(label = [ "lenet" ]) ?(out_channels1 = 6) ?(out_channels2 = 16)
+    ?(use_padding = true) () =
+  let conv1 =
+    conv2d ~label:("conv1" :: label) ~kernel_size:5 ~use_padding ~out_channels:out_channels1 ()
+  in
   let pool1 = max_pool2d ~stride:2 () in
-  let conv2 = conv2d ~label:("conv2" :: label) ~kernel_size:5 ~out_channels:out_channels2 () in
+  let conv2 =
+    conv2d ~label:("conv2" :: label) ~kernel_size:5 ~use_padding ~out_channels:out_channels2 ()
+  in
   let pool2 = max_pool2d ~stride:2 () in
   let fc1 = mlp_layer ~label:("fc1" :: label) ~hid_dim:120 () in
   let fc2 = mlp_layer ~label:("fc2" :: label) ~hid_dim:84 () in

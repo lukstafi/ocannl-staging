@@ -4,21 +4,21 @@ Loading CIFAR-10 dataset...
 Training on 2000 samples, testing on 1000 samples, batch_size=50
 
 Starting training for 100 epochs (4000 steps)...
-Epoch 10: avg loss = 2.18
-Epoch 20: avg loss = 2.15
-Epoch 30: avg loss = 2.13
-Epoch 40: avg loss = 2.11
-Epoch 50: avg loss = 2.10
-Epoch 60: avg loss = 2.09
-Epoch 70: avg loss = 2.08
-Epoch 80: avg loss = 2.07
-Epoch 90: avg loss = 2.07
-Epoch 100: avg loss = 2.06
+Epoch 10: avg loss = 2.30
+Epoch 20: avg loss = 2.30
+Epoch 30: avg loss = 2.30
+Epoch 40: avg loss = 2.30
+Epoch 50: avg loss = 2.30
+Epoch 60: avg loss = 2.30
+Epoch 70: avg loss = 2.30
+Epoch 80: avg loss = 2.30
+Epoch 90: avg loss = 2.30
+Epoch 100: avg loss = 2.30
 
 Evaluating on 1000 test samples...
-Test loss = 2.10
-Test accuracy = 19.9% (199/1000)
-Test loss below 2.3 = true
-Test accuracy above 15% = true
+Test loss = 2.30
+Test accuracy = 9.0% (90/1000)
+Test loss below 2.3 = false
+Test accuracy above 15% = false
 
 Training complete!
