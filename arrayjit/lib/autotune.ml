@@ -457,6 +457,11 @@ let log_enabled =
 let logf fmt =
   Printf.ksprintf (fun s -> if Lazy.force log_enabled then Stdio.eprintf "autotune: %s\n%!" s) fmt
 
+(* Log tag for a (possibly '+'-concatenated, fissioned) digest: a plain prefix only reflects the
+   first segment — two fissioned programs identical in segment 1 would read as "the same digest"
+   (misled the CUDA round-4 analysis on PR #140) — so fold the whole string into the tag. *)
+let dshort d = String.prefix d 8 ^ "/" ^ String.prefix (Stdlib.Digest.to_hex (Stdlib.Digest.string d)) 8
+
 let bs_label = function None -> "cfg" | Some b -> Int.to_string b
 
 let spec_label = function
@@ -539,26 +544,40 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu c
         let transforms fresh =
           let opt = rebase fresh in
           let zero_sched tns = if is_gpu then Sched.zero_expansion ~limits tns else [] in
+          (* Position of the current [`Normal] segment among the saved entries (which are stored
+             in segment order, duplicates kept): [fission_scheduled] calls [preset] on the
+             [`Normal] segments in order. *)
+          let seg_idx = ref (-1) in
           let preset seg =
             match flavor with
             | F_preset { block_size; privatize; config_thresholds } ->
                 let sched = preset_sched ?block_size ~config_thresholds seg in
                 if privatize then extend_with_privatize ~static_indices sched seg else sched
-            | F_saved assoc -> (
+            | F_saved entries -> (
+                Int.incr seg_idx;
                 let seg_canon = SC.canonicalize ~static_indices seg in
-                match List.Assoc.find assoc ~equal:String.equal (SC.digest seg_canon) with
+                let d = SC.digest seg_canon in
+                match List.Assoc.find entries ~equal:String.equal d with
                 | Some saved -> fst (SC.of_saved seg_canon saved)
-                | None ->
-                    (* Every [`Normal] segment of the saved winner has an assoc entry, and
-                       in-process replays re-derive segments from the same base lowering — so a
-                       miss means a disk-cached winner's segmentation drifted from this
-                       process's (environment/config differences). Fail the candidate loudly —
-                       replaying the remaining segments with silently empty schedules would
-                       degrade the winner without any signal (the cache-hit path then falls
-                       through to a fresh search). *)
-                    invalid_arg
-                      "Autotune: fissioned replay: no saved schedule for a segment (segmentation \
-                       drifted)")
+                | None -> (
+                    (* Segment digests include placement classes, which can render differently
+                       between the search's and the replay's compilation lineages (decided in
+                       one, undecided in the other — e.g. tuning with [timing_ctx]) while the
+                       code structure is identical. Segments derive from the same base lowering
+                       in order, so fall back to the positional entry; a genuine structural
+                       mismatch then fails in [of_saved]/[apply], loudly (never silently empty
+                       schedules — the cache-hit path falls through to a fresh search, the
+                       winner replay to the default compile). *)
+                    match List.nth entries !seg_idx with
+                    | Some (saved_d, saved) ->
+                        logf "fissioned replay: segment %d digest %s <> saved %s, applying \
+                              positionally"
+                          !seg_idx (dshort d) (dshort saved_d);
+                        fst (SC.of_saved seg_canon saved)
+                    | None ->
+                        invalid_arg
+                          "Autotune: fissioned replay: more segments than saved schedules \
+                           (segmentation drifted)"))
           in
           let tuples =
             (* Match the default pipeline's placements (statement-crossing [Local]s promoted on
@@ -583,10 +602,10 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu c
                       })
           in
           let assoc =
-            (* Structurally identical segments share a digest and hence a schedule; dedup keys. *)
-            List.dedup_and_sort
-              ~compare:(fun (k1, _) (k2, _) -> String.compare k1 k2)
-              (List.map units ~f:(fun u -> (Option.value_exn u.u_key, u.u_saved)))
+            (* One entry per [`Normal] segment, in segment order, duplicates kept: the digest
+               lookup serves structurally identical segments (positionally interchangeable saved
+               forms), and the order carries the positional fallback above. *)
+            List.map units ~f:(fun u -> (Option.value_exn u.u_key, u.u_saved))
           in
           let digest_after =
             String.concat ~sep:"+"
@@ -765,13 +784,19 @@ let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) (u : unit_g
   in
   List.take (tensorizes @ splits @ swaps @ unrolls @ vectorizes) max_actions_per_unit
 
-(* Extend one unit of a compiled candidate with a menu action. *)
+(* Extend one unit of a compiled candidate with a menu action. The fissioned entries stay in
+   segment order (the positional replay fallback relies on it); extending by key updates every
+   structurally identical segment — they carry interchangeable saved forms, so extending them
+   uniformly keeps the digest lookup and the positional entries consistent. *)
 let extend_spec (elem : compiled) (u : unit_gen) (op : SC.saved_optop) : spec option =
   match (elem.form, u.u_key) with
   | Whole_saved _, None -> Some (Whole (W_saved (u.u_saved @ [ op ])))
   | Fiss_saved assoc, Some key ->
-      let assoc = List.Assoc.remove assoc ~equal:String.equal key in
-      Some (Fiss (F_saved ((key, u.u_saved @ [ op ]) :: assoc)))
+      Some
+        (Fiss
+           (F_saved
+              (List.map assoc ~f:(fun (k, s) ->
+                   if String.equal k key then (k, u.u_saved @ [ op ]) else (k, s)))))
   | _ -> None
 
 (** {2 The search} *)
@@ -891,7 +916,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
       (* Baseline timing runs uncaught: its failures (e.g. uninitialized inputs) are the user's
          bug, with the same message [Context.run] would give. *)
       let baseline_ms = time_routine ~repeats bctx broutine in
-      logf "baseline: %.4f ms (digest %s)" baseline_ms (String.prefix base_digest 12);
+      logf "baseline: %.4f ms (digest %s)" baseline_ms (dshort base_digest);
       let baseline =
         {
           form = Whole_saved [];
@@ -918,7 +943,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
             None
         | Ok c ->
             if Hash_set.mem seen c.digest_after then (
-              logf "%s: dedup (digest %s)" (spec_label spec) (String.prefix c.digest_after 12);
+              logf "%s: dedup (digest %s)" (spec_label spec) (dshort c.digest_after);
               None)
             else (
               Hash_set.add seen c.digest_after;
@@ -926,7 +951,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
               | ms ->
                   Int.incr n_timed;
                   logf "%s: %.4f ms (digest %s)" (spec_label spec) ms
-                    (String.prefix c.digest_after 12);
+                    (dshort c.digest_after);
                   Some (c, ms)
               | exception exn ->
                   Int.incr n_failed;
