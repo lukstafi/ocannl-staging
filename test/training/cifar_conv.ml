@@ -35,18 +35,11 @@ let () =
   Utils.settings.fixed_state_for_init <- Some seed;
   Tensor.unsafe_reinitialize ();
 
-  (* Centered uniform init over [-0.05, 0.05) -- same rationale as mnist_conv.ml. CIFAR data is
-     centered to [-0.5, 0.5] in Conv_data.cifar_images_to_float32. Earlier revisions used an
-     all-positive xavier-uniform1 ~scale_sq:0.06 init that relied on the (since fixed)
-     full-feature-map conv biases for early learning.
-
-     TODO: training currently stays at the uniform-prediction plateau (the threshold checks below
-     print false): the default uniform1-based init produces row-constant (rank-degenerate) weights
-     -- each output neuron gets one random value replicated across its inputs -- and unlike
-     mnist_conv, SGD does not break the symmetry here within a reasonable number of epochs (checked
-     up to 300 epochs at lr 0.02). Re-tune and re-promote once the initializers are fixed (see also
-     the kaiming/xavier fan-capture bug: fan resolves to 1 under default_param_init). *)
-  TDSL.default_param_init := Ocannl_tensor.Operation.centered_uniform1_param_init ~scale:0.1;
+  (* He-normal init (fan-in-scaled): standard for relu convnets; CIFAR data is centered to
+     [-0.5, 0.5] in Conv_data.cifar_images_to_float32. Earlier revisions used an all-positive
+     xavier-uniform1 ~scale_sq:0.06 init that relied on the (since fixed) full-feature-map conv
+     biases for early learning. *)
+  TDSL.default_param_init := NTDSL.kaiming ~scale_sq:2.0 TDSL.O.normal1;
 
   (* --- Configuration --- Regression mode (default): fast, loose thresholds, used by dune runtest.
      Full-run mode: change these constants for issue acceptance targets (>60% accuracy). *)
@@ -56,7 +49,7 @@ let () =
   (* Full-run: 10000 *)
   let batch_size = 50 in
   (* Full-run: 100 *)
-  let epochs = 100 in
+  let epochs = 50 in
   (* Full-run: 50 *)
   let num_classes = 10 in
   let out_channels1 = 6 in

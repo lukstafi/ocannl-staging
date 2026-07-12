@@ -4,20 +4,20 @@ Loading MNIST dataset...
 Training on 2000 samples, testing on 1000 samples, batch_size=50
 
 Starting training for 100 epochs (4000 steps)...
-Epoch 10: avg loss = 2.28
-Epoch 20: avg loss = 2.27
-Epoch 30: avg loss = 2.25
-Epoch 40: avg loss = 2.23
-Epoch 50: avg loss = 2.20
-Epoch 60: avg loss = 2.10
-Epoch 70: avg loss = 2.04
-Epoch 80: avg loss = 2.00
-Epoch 90: avg loss = 1.98
-Epoch 100: avg loss = 1.96
+Epoch 10: avg loss = 0.20
+Epoch 20: avg loss = 0.09
+Epoch 30: avg loss = 0.04
+Epoch 40: avg loss = 0.02
+Epoch 50: avg loss = 0.01
+Epoch 60: avg loss = 0.01
+Epoch 70: avg loss = 0.01
+Epoch 80: avg loss = 0.01
+Epoch 90: avg loss = 0.01
+Epoch 100: avg loss = 0.00
 
 Evaluating on 1000 test samples...
-Test loss = 1.95
-Test accuracy = 27.2% (272/1000)
+Test loss = 0.25
+Test accuracy = 93.6% (936/1000)
 Test loss below 2.0 = true
 Test accuracy above 25% = true
 

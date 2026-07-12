@@ -31,12 +31,10 @@ let () =
   Utils.settings.fixed_state_for_init <- Some seed;
   Tensor.unsafe_reinitialize ();
 
-  (* Centered uniform init over [-0.05, 0.05): with the zero-mean images from
-     [Conv_data.mnist_images_to_float32], keeps the relu+maxpool stack from saturating the logits
-     at initialization (this lenet has no normalization layers). The previous all-positive
-     xavier-uniform1 ~scale_sq:0.06 init relied on the (since fixed) full-feature-map conv biases
-     for early learning. *)
-  TDSL.default_param_init := Ocannl_tensor.Operation.centered_uniform1_param_init ~scale:0.1;
+  (* He-normal init (fan-in-scaled): standard for relu convnets; the images are zero-mean via
+     [Conv_data.mnist_images_to_float32]. The previous all-positive xavier-uniform1 ~scale_sq:0.06
+     init relied on the (since fixed) full-feature-map conv biases for early learning. *)
+  TDSL.default_param_init := NTDSL.kaiming ~scale_sq:2.0 TDSL.O.normal1;
 
   (* --- Configuration --- Regression mode (default): fast, loose thresholds, used by dune runtest.
      Full-run mode: change these constants for issue acceptance targets (>95% accuracy). *)
