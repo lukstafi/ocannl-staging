@@ -29,6 +29,16 @@ let set_test_bindings routine =
   List.iter (Context.bindings routine) ~f:(fun (ss, r) ->
       match ss.Idx.static_range with Some range when range > 0 -> r := range / 2 | _ -> ())
 
+(* Fast routines get extra timed runs beyond [repeats], until this much total measured time (or
+   [max_timing_runs]): on sub-millisecond kernels a min-of-3 is dominated by launch jitter, and
+   the winner selection becomes a lottery — a heavier candidate can be crowned by one lucky
+   sample while the true winner's few samples all landed under contention. Noise only ever adds
+   time, so min-of-N converges monotonically to the true best case and more samples strictly
+   reduce mis-selection; for routines slower than [min_timing_ms / repeats] per run nothing
+   changes. *)
+let min_timing_ms = 25.
+let max_timing_runs = 64
+
 (* [Context.bindings] exposes the routine's live binding refs — restore them after timing
    (Codex P2 on PR #103), or the returned winner would stay bound to the tuner's midpoint test
    values. *)
@@ -43,11 +53,18 @@ let time_routine ~repeats cctx routine =
       let ctx = ref (Context.run cctx routine) in
       Context.sync !ctx;
       let best = ref Float.infinity in
-      for _ = 1 to max 1 repeats do
+      let total = ref 0. in
+      let count = ref 0 in
+      while
+        !count < max 1 repeats
+        || (Float.(!total < min_timing_ms) && !count < max_timing_runs)
+      do
         let t0 = Unix.gettimeofday () in
         ctx := Context.run !ctx routine;
         Context.sync !ctx;
         let dt = (Unix.gettimeofday () -. t0) *. 1000. in
+        total := !total +. dt;
+        Int.incr count;
         if Float.(dt < !best) then best := dt
       done;
       !best)
@@ -395,7 +412,16 @@ type whole_flavor =
   | W_sketch of sketch_params
 
 type fiss_flavor =
-  | F_preset of { block_size : int option; privatize : bool }
+  | F_preset of {
+      block_size : int option;
+      privatize : bool;
+      config_thresholds : bool;
+          (** Use the config-default [min_parallel] thresholds instead of the search's
+              [min_parallel:1] — with [block_size = None] this reproduces the untuned default
+              pipeline ({!Sched.maybe_default_schedules}) exactly, so the candidate pool always
+              contains the behavior the user gets without tuning: on launch-overhead-bound
+              workloads the aggressive [min_parallel:1] presets can all lose to it. *)
+    }
   | F_saved of (string * SC.saved_schedule) list
 
 type spec = Whole of whole_flavor | Fiss of fiss_flavor
@@ -426,9 +452,10 @@ let compile_candidate ~static_indices ~base_digest ~limits ~is_gpu ~is_cpu ctx c
       invalid_arg "Autotune: fresh lowering does not match the tuned code (digest mismatch)";
     canon
   in
-  let preset_sched ?block_size opt =
-    if is_gpu then Sched.default_gpu ?block_size ~min_parallel:1 ~limits opt
-    else if is_cpu then Sched.default_cpu ~min_parallel:1 opt
+  let preset_sched ?block_size ?(config_thresholds = false) opt =
+    let min_parallel = if config_thresholds then None else Some 1 in
+    if is_gpu then Sched.default_gpu ?block_size ?min_parallel ~limits opt
+    else if is_cpu then Sched.default_cpu ?min_parallel opt
     else []
   in
   let captured = ref None in
@@ -467,8 +494,8 @@ let compile_candidate ~static_indices ~base_digest ~limits ~is_gpu ~is_cpu ctx c
           let zero_sched tns = if is_gpu then Sched.zero_expansion ~limits tns else [] in
           let preset seg =
             match flavor with
-            | F_preset { block_size; privatize } ->
-                let sched = preset_sched ?block_size seg in
+            | F_preset { block_size; privatize; config_thresholds } ->
+                let sched = preset_sched ?block_size ~config_thresholds seg in
                 if privatize then extend_with_privatize ~static_indices sched seg else sched
             | F_saved assoc -> (
                 let seg_canon = SC.canonicalize ~static_indices seg in
@@ -728,21 +755,26 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
              (Context.backend_name tctx) (Context.device_id tctx) backend (Context.device_id ctx)));
   let search_ctx = Option.value timing_ctx ~default:ctx in
   (* The base compile: identity transform (= the serial baseline candidate), capturing the
-     optimized code for canonicalization. *)
-  let base_opt = ref None in
+     optimized code for canonicalization. Canonicalize INSIDE the transform: after the transform
+     returns, codegen forces the remaining undecided placements into the very placements table
+     the captured [opt] references, and placement classes enter the digest
+     (Schedule_cache.canonicalize) — a base digest computed after the compile returned would
+     disagree with the candidates' [check_digest], which runs at transform time, failing every
+     candidate with a digest mismatch (found by the CUDA benchmark run on PR #140: the
+     default-placements A/B arm degenerated to its serial baseline). *)
+  let base_capture = ref None in
   let bctx, broutine =
     Context.compile
       ~lowered_transform:(fun opt ->
-        base_opt := Some opt;
+        base_capture := Some (opt, SC.canonicalize ~static_indices opt);
         opt)
       search_ctx comp bindings
   in
-  let base_opt =
-    match !base_opt with
-    | Some o -> o
+  let base_opt, canon =
+    match !base_capture with
+    | Some oc -> oc
     | None -> failwith "Autotune.tune: backend compile did not invoke lowered_transform"
   in
-  let canon = SC.canonicalize ~static_indices base_opt in
   let base_digest = SC.digest canon in
   let use_cache = (not (String.is_empty cache_dir)) && SC.complete canon in
   let key = SC.cache_key canon ~backend in
@@ -839,9 +871,14 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
         block_size_presets (fun block_size -> Whole (W_preset { block_size }))
         @ (if is_gpu || is_cpu then
              (* Each fissioned preset is seeded plain and privatized (the latter dedups away by
-                digest when no accumulator is eligible). *)
+                digest when no accumulator is eligible). The [config_thresholds] seeds reproduce
+                the untuned default pipeline exactly (plus its privatized variant), so the
+                winner is never worse than not tuning — the aggressive [min_parallel:1] presets
+                can all lose to it on launch-overhead-bound workloads. *)
              List.concat_map [ false; true ] ~f:(fun privatize ->
-                 block_size_presets (fun block_size -> Fiss (F_preset { block_size; privatize })))
+                 Fiss (F_preset { block_size = None; privatize; config_thresholds = true })
+                 :: block_size_presets (fun block_size ->
+                        Fiss (F_preset { block_size; privatize; config_thresholds = false })))
            else [])
         @ List.map sketch_params ~f:(fun p -> Whole (W_sketch p))
       in

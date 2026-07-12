@@ -18,7 +18,10 @@
       with per-segment schedules — the same preset sweep per segment, and beam rounds that extend
       {e one segment at a time}. Per-segment schedules are cached keyed by the pre-schedule
       segment's canonical digest. [`Zeros] segments keep the default zero-expansion; [`Solo]
-      segments stay unscheduled. Each preset is additionally seeded in a {e privatized} variant
+      segments stay unscheduled. One seed uses the config-default thresholds, reproducing the
+      untuned default pipeline exactly — so the winner is never worse than not tuning, even on
+      launch-overhead-bound workloads where every aggressive preset loses to it. Each preset is
+      additionally seeded in a {e privatized} variant
       ({!extend_with_privatize}): per segment, every materialized read-modify-write accumulator is
       contracted into a per-thread register tile ({!Ir.Schedule.optop.Privatize}) over its serial
       reduction loop where the op's preconditions permit — a routine-local accumulator beats a
@@ -41,8 +44,10 @@
       Initialize inputs before tuning, and tune before meaningful state exists, or re-initialize
       afterwards.
     - Timing uses wall clock around a device sync, so it includes queue overhead; times are
-      min-of-N. Static indices are bound to the midpoint of their declared ranges during timing
-      and restored afterwards. *)
+      min-of-N, where fast routines get extra runs beyond [repeats] until ~25 ms of total
+      measured time — on sub-millisecond kernels a min-of-3 is launch-jitter roulette and can
+      crown the wrong candidate. Static indices are bound to the midpoint of their declared
+      ranges during timing and restored afterwards. *)
 
 val extend_with_privatize :
   static_indices:Ir.Indexing.static_symbol list ->
