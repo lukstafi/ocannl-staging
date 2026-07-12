@@ -72,16 +72,20 @@ large_models=false
 # large_models is unset, so existing configs / CLI / OCANNL_BIG_MODELS keep working.
 big_models=false
 
-# If non-empty, generated code files are placed in build_files/<prefix>/ instead of
-# build_files/. This prevents filename collisions when multiple test executables run
-# in parallel. Each test should use a unique prefix (typically its executable name).
+# Generated code files are placed in build_files/<prefix>/, and diagnostic / routine-debug
+# logs in log_files/<prefix>/. When unset (the default), the prefix is derived from the
+# executable's base name, so concurrently running programs sharing a working directory
+# (e.g. parallel dune tests) never collide on same-named kernels. Set to a non-empty value
+# to pick the subdirectory explicitly, or to the special value "." for the flat legacy
+# layout (files directly in build_files/ and log_files/).
 build_files_prefix=
 
-# If true, the build_files directory is deleted on startup.
-# When build_files_prefix is set, only the specific prefix subdirectory is deleted.
+# If true, the build_files/<prefix>/ subdirectory of this process (see build_files_prefix)
+# is deleted on startup; the whole build_files/ directory when the prefix is ".".
 clean_up_build_files_on_startup=true
 
-# If true, the log_files directory is deleted on startup.
+# If true, the log_files/<prefix>/ subdirectory of this process (see build_files_prefix)
+# is deleted on startup; the whole log_files/ directory when the prefix is ".".
 clean_up_log_files_on_startup=true
 
 # Other configurations:

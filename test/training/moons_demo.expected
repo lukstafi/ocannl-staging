@@ -18,7 +18,7 @@ Learning rate:
 │t        │                         │
 │e-2.00e-1│                         │
 ├─────────┼─────────────────────────┤
-│         │0.00              6.39e+3│
+│         │0.00              1.59e+4│
 │         │          step           │
 └─────────┴─────────────────────────┘mlp_result's name: mlp_point_mlp_result
 (mlp moons_input) name: mlp_moons_input

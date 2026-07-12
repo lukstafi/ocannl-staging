@@ -1,0 +1,28 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+Chained layer norms output shape:
+((batch
+  ((beg_dims ())
+   (dims
+    ((Dim ((d 2) (basis default) (proj_id ((Proj_id 1)))))
+     (Dim ((d 8) (basis default) (proj_id ((Proj_id 2)))))))
+   (bcast Broadcastable) (prov (((sh_id 100) (kind Batch))))))
+ (input
+  ((beg_dims ()) (dims ()) (bcast Broadcastable)
+   (prov (((sh_id 100) (kind Input))))))
+ (output
+  ((beg_dims ())
+   (dims ((Dim ((d 16) (basis default) (proj_id ((Proj_id 3)))))))
+   (bcast Broadcastable) (prov (((sh_id 100) (kind Output))))))
+ (batch_padding ()) (input_padding ()) (output_padding ()) (padding_elem ())
+ (id 100) (debug_name layer_norm))
+HERE: test/operations/layer_norm_divided_mean.ml:49:28
+┌─────────────────────────────────────────┐
+│[121]: +_layer_norm shape 0:2|1:4        │
+│┌──────┬────────────────────────────────┐│
+││      │axis 1                          ││
+│├──────┼────────────────────────────────┤│
+││axis 0│ -1.34  -4.47e-1  4.47e-1  1.34 ││
+││      │ -1.34  -4.47e-1  4.47e-1  1.34 ││
+│└──────┴────────────────────────────────┘│
+└─────────────────────────────────────────┘

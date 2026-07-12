@@ -41,7 +41,7 @@ let iprec = Ir.Ops.index_prec ()
 
 let read_generated base_name =
   let ext = if String.is_substring backend_name ~substring:"metal" then ".metal" else ".cu" in
-  let path = Stdlib.Filename.concat "build_files" (base_name ^ ext) in
+  let path = Utils.build_file (base_name ^ ext) in
   if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
 
 (* Replace the lowered serial sum with the hand-built workgroup tree reduction. *)
