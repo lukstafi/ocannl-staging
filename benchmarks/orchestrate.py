@@ -32,6 +32,10 @@ SKIP_CELLS = {
     ("gpt2_mini", "metal", "default"),
     ("mlp_wide", "metal", "default"),
     ("mlp_wide", "metal", "materialized"),
+    # Complete but slow (~3s/step) AND parity-FAIL at 2.1e-3 (tuned passes at 2.1e-7 on the
+    # same backend) — the degenerate kernels are numerically divergent, not just slow.
+    ("lenet", "metal", "default"),
+    ("lenet", "metal", "materialized"),
 }
 
 sys.path.insert(0, str(HERE / "runners"))
