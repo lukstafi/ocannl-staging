@@ -531,3 +531,27 @@ let device_id ctx = ctx.device_id
 let placements ctx =
   Backends.query ctx.wrapped
     { q = (fun _ c -> c.BI.optimize_ctx.Ir.Low_level.placements) }
+
+let decide_materialized ctx tns =
+  let wrapped, () =
+    Backends.with_backend ctx.wrapped
+      {
+        f =
+          (fun (type dev runner event)
+               (module Backend : BI.Backend
+                 with type dev = dev
+                  and type runner = runner
+                  and type event = event) bctx ->
+            (* Fork the lineage state exactly like a compile would, then record the decisions in
+               the fork: the argument context and its other descendants are unaffected. *)
+            let optimize_ctx = Ir.Low_level.copy_optimize_ctx bctx.BI.optimize_ctx in
+            let plc = optimize_ctx.Ir.Low_level.placements in
+            List.iter tns ~f:(fun tn ->
+                match Tn.Placements.get plc tn with
+                | None | Some ((Tn.Never_virtual | Tn.On_device), _) ->
+                    Tn.Placements.update plc tn Tn.On_device 31
+                | Some ((Tn.Virtual | Tn.Local | Tn.Effectively_constant), _) -> ());
+            (Backend.make_child ~optimize_ctx bctx, ()));
+      }
+  in
+  { ctx with wrapped }

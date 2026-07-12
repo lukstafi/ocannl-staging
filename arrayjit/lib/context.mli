@@ -182,3 +182,13 @@ val placements : t -> Ir.Tnode.Placements.t
     (docs/proposals/context-scoped-memory-modes.md): which nodes this lineage decided to inline
     ([Virtual]), keep as routine-scoped scratch ([Local]), or give a device buffer ([On_device]).
     Reads are side-effect free; chiefly for tests and diagnostics. *)
+
+val decide_materialized : t -> Ir.Tnode.t list -> t
+(** A child context whose compilation lineage additionally decides [On_device] placement for the
+    given nodes: subsequent compiles from the returned context materialize them. This is the
+    functional, context-scoped counterpart of strengthening tnode-level intent
+    ([Train.set_materialized]) — the nodes' declared intent is untouched and the argument context
+    (with its other descendants) is unaffected, so a default-placement sibling and a
+    materialize-all sibling can coexist (e.g. the placement-A/B arms of [Train.tune_placements]).
+    Nodes the lineage or intent already constrains away from plain materialization ([Virtual],
+    [Local], or constant) are skipped. *)

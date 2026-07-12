@@ -1,0 +1,10 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+intermediate intent unspecified before compiling: true
+A-arm lineage decides the intermediate virtual (not materialized): true
+intermediate intent still unspecified after the A-arm compile: true
+B-arm lineage materializes the intermediate: true
+intermediate intent still unspecified after the B-arm compile: true
+the parent context is unaffected by the B-arm's decisions: true
+A-arm and B-arm routines compute the same values: true
+every_non_literal_materialized after both compiles does not raise: true
