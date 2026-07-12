@@ -117,7 +117,9 @@ let () =
           List.filter_map tuples ~f:(fun (kind, pre, sched, _post) ->
               match kind with
               | `Normal ->
-                  let pre_canon = SC.canonicalize pre in
+                  (* Per-segment replay matching keys on the structural canon (see
+                     Schedule_cache.canonicalize's [with_placements]). *)
+                  let pre_canon = SC.canonicalize ~with_placements:false pre in
                   let saved, _reg = SC.to_saved (SC.base_registry pre_canon) sched in
                   Some (SC.digest pre_canon, saved)
               | _ -> None);

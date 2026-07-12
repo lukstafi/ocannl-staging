@@ -57,7 +57,8 @@ let tn_of_ref c i =
          (Array.length c.ref_tns))
   else c.ref_tns.(i)
 
-let canonicalize ?(static_indices = []) (opt : LL.optimized) : canonical =
+let canonicalize ?(static_indices = []) ?(with_placements = true) (opt : LL.optimized) :
+    canonical =
   let buf = Buffer.create 4096 in
   let add = Buffer.add_string buf in
   let complete = ref true in
@@ -114,9 +115,16 @@ let canonicalize ?(static_indices = []) (opt : LL.optimized) : canonical =
            measurement. Placements of nodes reaching the optimized code are settled by the end
            of the pipeline; render an undecided node defensively rather than assert. *)
         let pc =
-          match Tn.Placements.get plc tn with
-          | None -> ";u"
-          | Some (m, _) -> ";" ^ Sexp.to_string (Tn.sexp_of_memory_mode m)
+          (* [with_placements = false] gives the structural identity: placement classes can
+             render differently across compilation lineages on byte-identical code (decided in
+             one, undecided in the other), so per-segment schedule matching in fissioned replays
+             keys on structure only, while disk-cache keys and post-schedule dedup keep the
+             placement-aware form. *)
+          if not with_placements then ""
+          else
+            match Tn.Placements.get plc tn with
+            | None -> ";u"
+            | Some (m, _) -> ";" ^ Sexp.to_string (Tn.sexp_of_memory_mode m)
         in
         add
           (Printf.sprintf "t%d=[%s;%s%s%s]" i
