@@ -24,6 +24,14 @@ VENV_PY = HERE / ".venv/bin/python"
 PARITY_TOL = 2e-3
 REFERENCE = ("pytorch", "cpu", "eager")
 
+# The GPU column of the matrix, per --gpu choice: OCANNL backend, PyTorch device,
+# tinygrad device. The CPU column (cc / cpu / CPU) is always run.
+GPU_DEVICES = {
+    "metal": ("metal", "mps", "METAL"),
+    "cuda": ("cuda", "cuda", "CUDA"),
+    "none": (None, None, None),
+}
+
 # Known-pathological cells excluded from the default matrix, as (workload, backend, variant).
 # Currently empty: the metal-default-schedule pathologies (gpt2_mini 81 s/step -> ~0.3 s,
 # lenet 3.2 s/step + parity FAIL -> 0.22 s exact, mlp_wide >10 s/step -> 6 ms) were fixed by
@@ -142,6 +150,13 @@ def main():
         help="add the OCANNL materialized-activations variant",
     )
     ap.add_argument("--nojit", action="store_true", help="add the tinygrad nojit variant")
+    ap.add_argument(
+        "--gpu",
+        choices=sorted(GPU_DEVICES),
+        default="metal" if platform.system() == "Darwin" else "cuda",
+        help="GPU backend for the non-CPU column of the matrix (default: metal on macOS, "
+        "cuda elsewhere; none = CPU-only matrix)",
+    )
     ap.add_argument("--skip-build", action="store_true")
     ap.add_argument(
         "--only",
@@ -150,6 +165,7 @@ def main():
         help="frameworks to run",
     )
     args = ap.parse_args()
+    gpu_ocannl, gpu_torch, gpu_tiny = GPU_DEVICES[args.gpu]
 
     fixtures = sorted((HERE / "fixtures").glob("*.safetensors"))
     if args.workloads:
@@ -191,7 +207,7 @@ def main():
                 variants.append("materialized")
             if args.tuned:
                 variants.append("tuned")
-            for backend in ["cc", "metal"]:
+            for backend in ["cc"] + ([gpu_ocannl] if gpu_ocannl else []):
                 for variant in variants:
                     if (name, backend, variant) in SKIP_CELLS:
                         print(f"--- {name} ocannl/{backend}/{variant}: SKIPPED (SKIP_CELLS)")
@@ -209,13 +225,13 @@ def main():
                         cwd=HERE,  # picks up benchmarks/ocannl_config
                     )
         if "pytorch" in args.only:
-            for device in ["cpu", "mps"]:
+            for device in ["cpu"] + ([gpu_torch] if gpu_torch else []):
                 collect(
                     f"{name} pytorch/{device}/eager",
                     [str(VENV_PY), str(HERE / "runners/pytorch/run.py"), "--fixture", str(fx), "--device", device],
                 )
         if "tinygrad" in args.only:
-            for device in ["CPU", "METAL"]:
+            for device in ["CPU"] + ([gpu_tiny] if gpu_tiny else []):
                 for jit in [1] + ([0] if args.nojit else []):
                     collect(
                         f"{name} tinygrad/{device}/{'jit' if jit else 'nojit'}",

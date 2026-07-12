@@ -19,7 +19,7 @@ from bench_common import emit, percentiles, read_st_metadata
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--fixture", required=True)
-ap.add_argument("--device", default="CPU", choices=["CPU", "METAL"])
+ap.add_argument("--device", default="CPU", choices=["CPU", "METAL", "CUDA"])
 ap.add_argument("--jit", type=int, default=1)
 args = ap.parse_args()
 os.environ["DEV"] = args.device

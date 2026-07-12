@@ -46,18 +46,22 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
 - `runners/ocannl/bench_{mlp,conv,gpt}.ml` + `bench_harness.ml` — OCANNL runners
   (`dune build benchmarks/runners/ocannl/bench_mlp.exe` etc.). Env: `BENCH_FIXTURE` (path),
   `BENCH_TUNE=1` (materialize-all + `Autotune.tune`), `BENCH_MATERIALIZE=1` (materialize
-  intermediates without tuning); backend via the usual `--ocannl_backend=cc|metal`. Debug
+  intermediates without tuning); backend via the usual `--ocannl_backend=cc|metal|cuda`. Debug
   helpers: `BENCH_DEBUG=1` prints param names/dims (conv/gpt) or bias gradients (mlp) and
   exits; `BENCH_NO_SGD=1` compiles the gradient update without the SGD step (mlp);
   `BENCH_NO_SLICE=1` skips `@|` batch slicing (mlp, single-batch fixture).
-- `runners/pytorch/run.py` — flags: `--device cpu|mps`, `--compile` (torch.compile variant).
-- `runners/tinygrad/run.py` — flags: `--device CPU|METAL`, `--jit 0|1`.
+- `runners/pytorch/run.py` — flags: `--device cpu|mps|cuda`, `--compile` (torch.compile
+  variant).
+- `runners/tinygrad/run.py` — flags: `--device CPU|METAL|CUDA`, `--jit 0|1`.
 - `orchestrate.py` — runs the matrix (dispatching the OCANNL executable on the fixture's
   `model`), enforces the parity gate, writes `results/results.jsonl` and
   `results/report.md`. Flags: `--workloads mlp_small ...`, `--tuned`, `--materialized`,
-  `--nojit` (tinygrad nojit), `--only ocannl pytorch tinygrad`, `--skip-build`. See
-  [example-report.md](example-report.md) for checked-in example output (a full
-  `--tuned --materialized` matrix; `results/` itself is gitignored).
+  `--nojit` (tinygrad nojit), `--only ocannl pytorch tinygrad`, `--skip-build`,
+  `--gpu metal|cuda|none` (the GPU column of the matrix — OCANNL backend, PyTorch device,
+  tinygrad device together; defaults to metal on macOS and cuda elsewhere, `none` runs a
+  CPU-only matrix). See [example-report.md](example-report.md) (macOS/Metal) and
+  [example-report-cuda.md](example-report-cuda.md) (Linux/CUDA) for checked-in example
+  output (full `--tuned --materialized` matrices; `results/` itself is gitignored).
 - `runners/ocannl/bench_{gpt,conv}_diag.ml` — schedule diagnostics: print the default
   fission-pipeline segment census (launch geometry, per-nest loop extents, written nodes with
   materialization markers) for the gpt2_mini / lenet graphs, then optionally time steps
@@ -78,6 +82,10 @@ benchmarks/.venv/bin/pip install numpy safetensors torch tinygrad
 benchmarks/.venv/bin/python benchmarks/gen_fixtures.py
 benchmarks/.venv/bin/python benchmarks/orchestrate.py
 ```
+
+tinygrad's CPU device JIT-compiles kernels with `clang`; on a machine without clang, point
+`CC` at a substitute (a `zig cc` wrapper script from `pip install ziglang` works — translate
+`--target=x86_64-none-unknown-elf` to `--target=x86_64-freestanding-none` and add `-g0`).
 
 ## Methodology notes / fairness pitfalls
 
