@@ -42,18 +42,17 @@ def one_hot(y, num_classes):
     return out
 
 
-def build(spec_path: Path, out_dir: Path):
-    spec = json.loads(spec_path.read_text())
-    rng = np.random.default_rng(spec["seed"])
+def uniform(rng, fan_in, shape):
+    scale = np.sqrt(1.0 / fan_in)
+    return rng.uniform(-scale, scale, shape).astype(np.float32)
+
+
+def build_mlp(spec, rng, tensors, meta):
     dims = spec["dims"]
     total = spec["batch_size"] * spec["n_batches"]
-
-    tensors = {}
     for i, (din, dout) in enumerate(zip(dims, dims[1:]), start=1):
-        scale = np.sqrt(1.0 / din)
-        tensors[f"w{i}"] = rng.uniform(-scale, scale, (dout, din)).astype(np.float32)
+        tensors[f"w{i}"] = uniform(rng, din, (dout, din))
         tensors[f"b{i}"] = np.zeros(dout, np.float32)
-
     if spec["data"] == "moons":
         assert dims[0] == 2 and dims[-1] == 2, "moons data is 2-D input, 2 classes"
         x, y = gen_moons(rng, total)
@@ -63,17 +62,83 @@ def build(spec_path: Path, out_dir: Path):
         raise ValueError(f"unknown data kind {spec['data']!r}")
     tensors["x"] = x
     tensors["y"] = one_hot(y, dims[-1])
+    meta["n_layers"] = str(len(dims) - 1)
 
+
+def build_conv(spec, rng, tensors, meta):
+    """LeNet-5 with valid convolutions. Weight layouts follow OCANNL's axis order
+    (output axes then input axes, channels-last images):
+    conv kernel [oc, kh, kw, ic]; fc1 weight [hid, oh, ow, oc] (input axes = the conv
+    feature map); images [total, h, w, c]. The Python runners permute to NCHW."""
+    total = spec["batch_size"] * spec["n_batches"]
+    img, classes = spec["image_size"], spec["classes"]
+    c1, c2, k = spec["channels1"], spec["channels2"], spec["kernel_size"]
+    fm = (((img - k + 1) // 2) - k + 1) // 2  # after conv5-valid, pool2, conv5-valid, pool2
+    fc1, fc2 = spec["fc1"], spec["fc2"]
+    tensors["conv1_kernel"] = uniform(rng, k * k * 1, (c1, k, k, 1))
+    tensors["conv1_bias"] = np.zeros(c1, np.float32)
+    tensors["conv2_kernel"] = uniform(rng, k * k * c1, (c2, k, k, c1))
+    tensors["conv2_bias"] = np.zeros(c2, np.float32)
+    tensors["fc1_w"] = uniform(rng, fm * fm * c2, (fc1, fm, fm, c2))
+    tensors["fc1_b"] = np.zeros(fc1, np.float32)
+    tensors["fc2_w"] = uniform(rng, fc1, (fc2, fc1))
+    tensors["fc2_b"] = np.zeros(fc2, np.float32)
+    tensors["w_logits"] = uniform(rng, fc2, (classes, fc2))
+    tensors["b_logits"] = np.zeros(classes, np.float32)
+    tensors["x"] = rng.normal(0.0, 1.0, (total, img, img, 1)).astype(np.float32)
+    tensors["y"] = one_hot(rng.integers(0, classes, total), classes)
+    for key in ("image_size", "classes", "channels1", "channels2", "kernel_size", "fc1", "fc2"):
+        meta[key] = str(spec[key])
+
+
+def build_gpt(spec, rng, tensors, meta):
+    """GPT-2-style decoder, inference-only. OCANNL layouts:
+    wte [d_model, vocab] (output d, input v — used transposed as the tied lm_head);
+    wq/wk/wv [heads, d_head, d_model]; wo [d_model, heads, d_head];
+    ffn w1 [d_ff, d_model], w2 [d_model, d_ff]; ln gammas/betas [d_model];
+    wpe [seq, d_model]. Token ids and CE-target ids as integral float32 [total, seq]."""
+    total = spec["batch_size"] * spec["n_batches"]
+    d, v, seq = spec["d_model"], spec["vocab"], spec["seq_len"]
+    nh, dh, dff = spec["n_head"], spec["d_model"] // spec["n_head"], spec["d_ff"]
+    tensors["wte"] = uniform(rng, d, (d, v))
+    tensors["wpe"] = (0.01 * rng.normal(0.0, 1.0, (seq, d))).astype(np.float32)
+    for i in range(spec["n_layer"]):
+        for w in ("wq", "wk", "wv"):
+            tensors[f"l{i}_{w}"] = uniform(rng, d, (nh, dh, d))
+        tensors[f"l{i}_wo"] = uniform(rng, nh * dh, (d, nh, dh))
+        tensors[f"l{i}_ln1_g"] = np.ones(d, np.float32)
+        tensors[f"l{i}_ln1_b"] = np.zeros(d, np.float32)
+        tensors[f"l{i}_ln2_g"] = np.ones(d, np.float32)
+        tensors[f"l{i}_ln2_b"] = np.zeros(d, np.float32)
+        tensors[f"l{i}_ffn_w1"] = uniform(rng, d, (dff, d))
+        tensors[f"l{i}_ffn_b1"] = np.zeros(dff, np.float32)
+        tensors[f"l{i}_ffn_w2"] = uniform(rng, dff, (d, dff))
+        tensors[f"l{i}_ffn_b2"] = np.zeros(d, np.float32)
+    tensors["lnf_g"] = np.ones(d, np.float32)
+    tensors["lnf_b"] = np.zeros(d, np.float32)
+    tensors["ids"] = rng.integers(0, v, (total, seq)).astype(np.float32)
+    tensors["tgt"] = rng.integers(0, v, (total, seq)).astype(np.float32)
+    for key in ("n_layer", "n_head", "d_model", "d_ff", "vocab", "seq_len"):
+        meta[key] = str(spec[key])
+
+
+def build(spec_path: Path, out_dir: Path):
+    spec = json.loads(spec_path.read_text())
+    rng = np.random.default_rng(spec["seed"])
+    model = spec.get("model", "mlp")
+    tensors = {}
     meta = {
         "name": spec["name"],
-        "n_layers": str(len(dims) - 1),
+        "model": model,
+        "mode": spec.get("mode", "train"),
         "batch_size": str(spec["batch_size"]),
-        "lr": repr(spec["lr"]),
+        "lr": repr(spec.get("lr", 0.0)),
         "seed": str(spec["seed"]),
         "parity_steps": str(spec["parity_steps"]),
         "warmup_steps": str(spec["warmup_steps"]),
         "timed_steps": str(spec["timed_steps"]),
     }
+    {"mlp": build_mlp, "conv": build_conv, "gpt": build_gpt}[model](spec, rng, tensors, meta)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{spec['name']}.safetensors"
     save_file(tensors, str(out_path), metadata=meta)

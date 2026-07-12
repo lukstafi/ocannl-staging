@@ -1,0 +1,18 @@
+{
+  "name": "lenet",
+  "model": "conv",
+  "image_size": 32,
+  "classes": 10,
+  "channels1": 6,
+  "channels2": 16,
+  "kernel_size": 5,
+  "fc1": 120,
+  "fc2": 84,
+  "batch_size": 64,
+  "n_batches": 16,
+  "lr": 0.05,
+  "seed": 42,
+  "parity_steps": 24,
+  "warmup_steps": 20,
+  "timed_steps": 100
+}
