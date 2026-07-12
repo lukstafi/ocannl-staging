@@ -32,9 +32,9 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   8 heads, seq 128, vocab 1024, tanh-gelu, learned positional embeddings, tied lm_head,
   causal mask filled with -1e9), forward-only. The parity metric is softmax-CE of the
   logits against fixture target ids, recorded per batch with no updates; the report shows
-  tokens/s. Token embedding uses the logical one-hot gather (gh-343). LayerNorm is
-  hand-built in the runner (`nn_blocks.layer_norm` currently subtracts an un-divided sum —
-  pending fix).
+  tokens/s. Token embedding uses the logical one-hot gather (gh-343); LayerNorm is the
+  idiomatic `Nn_blocks.layer_norm` (gammas/betas injected by name like the attention
+  weights).
 
 ## Layout
 
