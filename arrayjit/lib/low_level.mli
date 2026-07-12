@@ -215,6 +215,10 @@ val guard_annotated_extents : should_guard:([ `Grid | `Workgroup ] -> bool) -> t
 type virtualize_settings = {
   mutable enable_device_only : bool;
   mutable max_visits : int;
+  mutable max_inline_reduction : int;
+      (** Recompute-cost cap for inlining: a node whose setters have enclosing reduction loops
+          (loops not appearing in the setter's indices) with a trip-count product exceeding this
+          value is never virtualized. Negative values disable the cap. *)
   mutable max_tracing_dim : int;
   mutable inline_scalar_constexprs : bool;
   mutable inline_simple_computations : bool;
@@ -266,6 +270,11 @@ type traced_array = {
           the tensor is a [Range_over_offsets] producer. Used by the indirect arm of
           [is_one_hot_selector_assignment] to prove that a [Get(rtn, [k])] will inline to
           [Embed_index k] rather than arbitrary values (task-73617488). *)
+  mutable inline_reduction_extent : int;
+      (** The largest product of trip counts of loops that enclose one of the node's setters
+          without appearing in its indices (i.e. reduction loops). Inlining the computation
+          replays these loops at every read site; compared against
+          [virtualize_settings.max_inline_reduction]. *)
 }
 [@@deriving sexp_of]
 

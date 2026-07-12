@@ -208,6 +208,7 @@ let rec unflat_lines = function
 type virtualize_settings = {
   mutable enable_device_only : bool;
   mutable max_visits : int;
+  mutable max_inline_reduction : int;
   mutable max_tracing_dim : int;
   mutable inline_scalar_constexprs : bool;
   mutable inline_simple_computations : bool;
@@ -217,6 +218,9 @@ type virtualize_settings = {
 let virtualize_settings =
   let max_visits =
     Int.of_string @@ Utils.get_global_arg ~arg_name:"virtualize_max_visits" ~default:"1"
+  in
+  let max_inline_reduction =
+    Int.of_string @@ Utils.get_global_arg ~arg_name:"virtualize_max_inline_reduction" ~default:"16"
   in
   let max_tracing_dim =
     Int.of_string @@ Utils.get_global_arg ~arg_name:"virtualize_max_tracing_dim" ~default:"5"
@@ -234,6 +238,7 @@ let virtualize_settings =
   {
     enable_device_only;
     max_visits;
+    max_inline_reduction;
     max_tracing_dim;
     inline_scalar_constexprs;
     inline_simple_computations;
@@ -256,6 +261,11 @@ type traced_array = {
   mutable prefers_virtual_one_hot : bool;
   mutable has_non_one_hot_setter : bool;
   mutable is_range_producer : bool;
+  mutable inline_reduction_extent : int;
+      (** The largest product of trip counts of loops that enclose one of the node's setters
+          without appearing in its indices (i.e. reduction loops). Inlining the computation
+          replays these loops at every read site, so large extents make virtualization
+          pathological; see [virtualize_max_inline_reduction]. *)
 }
 [@@deriving sexp_of]
 
@@ -309,6 +319,7 @@ let get_node store tn =
         prefers_virtual_one_hot = false;
         has_non_one_hot_setter = false;
         is_range_producer = false;
+        inline_reduction_extent = 1;
       })
 
 let visit ~is_assigned old =
@@ -514,19 +525,31 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits llc 
             "BUG: Concat index encountered during virtualization - should have been eliminated \
              during lowering")
   in
-  let rec loop_proc ~first_visit env llc =
-    let loop = loop_proc ~first_visit env in
+  (* [loop_ranges] maps each enclosing loop's index symbol to its full trip count; at a setter,
+     the product over symbols absent from the LHS indices is the recompute cost (per read site)
+     of inlining that setter's computation. *)
+  let reduction_extent loop_ranges idcs =
+    Map.fold loop_ranges ~init:1 ~f:(fun ~key ~data acc ->
+        if Array.exists idcs ~f:(axis_index_mentions_symbol key) then acc else acc * data)
+  in
+  let rec loop_proc ~first_visit ~loop_ranges env llc =
+    let loop = loop_proc ~first_visit ~loop_ranges env in
     match llc with
     | Noop -> ()
     | (Seq (c1, c2) : t) ->
         loop c1;
         loop c2
-    | For_loop { index; from_; to_ = _; body; trace_it = false; axis = _ } ->
-        loop_proc ~first_visit (Map.add_exn ~key:index ~data:from_ env) body
+    | For_loop { index; from_; to_; body; trace_it = false; axis = _ } ->
+        loop_proc ~first_visit
+          ~loop_ranges:(Map.set loop_ranges ~key:index ~data:(to_ - from_ + 1))
+          (Map.add_exn ~key:index ~data:from_ env)
+          body
     | For_loop { index; from_; to_; body; trace_it = true; axis = _ } ->
+        let loop_ranges = Map.set loop_ranges ~key:index ~data:(to_ - from_ + 1) in
         for data = from_ to min to_ (from_ + virtualize_settings.max_tracing_dim) do
           loop_proc
             ~first_visit:(first_visit && data = from_)
+            ~loop_ranges
             (Map.add_exn ~key:index ~data env)
             body
         done
@@ -539,8 +562,10 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits llc 
           if is_scalar_dims tn then traced.is_scalar_constexpr <- true);
         traced.zeroed_out <- true
     | Set { tn; idcs; llsc; debug = _ } ->
-        loop_scalar env (Some (lookup env idcs)) llsc;
+        loop_scalar ~loop_ranges env (Some (lookup env idcs)) llsc;
         let traced : traced_array = get_node traced_store tn in
+        traced.inline_reduction_extent <-
+          max traced.inline_reduction_extent (reduction_extent loop_ranges idcs);
         if
           Hash_set.is_empty traced.assignments
           && Hashtbl.is_empty traced.accesses && is_scalar_dims tn
@@ -567,8 +592,10 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits llc 
            genuine computation complexity does (see #134). *)
         track_symbol reverse_node_map tn idcs
     | Set_from_vec { tn; idcs; length; vec_unop = _; arg = arg, _; debug = _ } ->
-        loop_scalar env (Some (lookup env idcs)) arg;
+        loop_scalar ~loop_ranges env (Some (lookup env idcs)) arg;
         let traced : traced_array = get_node traced_store tn in
+        traced.inline_reduction_extent <-
+          max traced.inline_reduction_extent (reduction_extent loop_ranges idcs);
         (* Vector operations cannot be scalar constexpr or one-hot selectors. *)
         traced.is_scalar_constexpr <- false;
         traced.has_non_one_hot_setter <- true;
@@ -602,7 +629,7 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits llc 
           Hash_set.add traced.assignments (lookup env pos_idcs)
         done;
         track_symbol reverse_node_map tn idcs
-    | Set_local (_, llsc) -> loop_scalar env None llsc
+    | Set_local (_, llsc) -> loop_scalar ~loop_ranges env None llsc
     | Declare_local _ -> ()
     | Comment _ -> ()
     | Staged_compilation _ -> ()
@@ -615,10 +642,10 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits llc 
            reaches visit tracing. *)
         invalid_arg "Low_level.visit_llc: Tile_mma reached the optimization pipeline"
     | If { cond = c, _; body } ->
-        loop_scalar env None c;
+        loop_scalar ~loop_ranges env None c;
         loop body
-  and loop_scalar env (access_pos : int array option) llsc =
-    let loop = loop_scalar env access_pos in
+  and loop_scalar ~loop_ranges env (access_pos : int array option) llsc =
+    let loop = loop_scalar ~loop_ranges env access_pos in
     match llsc with
     | Constant _ | Constant_bits _ -> ()
     | Get (ptr, indices) ->
@@ -635,7 +662,7 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits llc 
         (* gh-343: [Get_dynamic] is produced after this tracing pass, so this arm is defensive; the
            dynamic index sub-expression is still traversed for completeness. *)
         loop v
-    | Local_scope { body; _ } -> loop_proc ~first_visit:true env body
+    | Local_scope { body; _ } -> loop_proc ~first_visit:true ~loop_ranges env body
     | Get_local _ -> ()
     | Get_merge_buffer (source, _) ->
         Option.iter !merge_node_ref ~f:(fun merge_node ->
@@ -658,13 +685,26 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits llc 
         loop llv2
     | Unop (_, (llsc, _)) -> loop llsc
   in
-  loop_proc ~first_visit:true Indexing.empty_env llc;
+  loop_proc ~first_visit:true ~loop_ranges:(Map.empty (module Indexing.Symbol)) Indexing.empty_env
+    llc;
   Hashtbl.iter traced_store ~f:(fun traced ->
       let tn = traced.tn in
       if
         virtualize_settings.inline_scalar_constexprs && traced.is_scalar_constexpr
         && not (Tn.Placements.known_non_virtual plc tn)
       then Tn.Placements.update plc tn Virtual 40;
+      (* Recompute-cost guard: inlining a computation replays its reduction loops (loops enclosing
+         a setter without appearing in its indices) at every read site, and the cost multiplies
+         through chains of virtual consumers -- reads of the consumers replay the producer's
+         reduction too. Cap the tolerated extent. One-hot selector producers are exempt like for
+         the visit cap: they must stay virtual so [rewrite_one_hot_reductions] can fire (the
+         rewrite itself removes the recompute cost). *)
+      if
+        virtualize_settings.max_inline_reduction >= 0
+        && traced.inline_reduction_extent > virtualize_settings.max_inline_reduction
+        && Option.is_none (Tn.Placements.get plc tn)
+        && not (traced.prefers_virtual_one_hot && not traced.has_non_one_hot_setter)
+      then Tn.Placements.update plc tn Never_virtual 39;
       let skip_simple =
         virtualize_settings.inline_simple_computations && (not traced.is_complex)
         && not (Tn.Placements.known_non_virtual plc tn)

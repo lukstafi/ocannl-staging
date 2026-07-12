@@ -229,6 +229,13 @@ stack_threshold_in_bytes=16384
 # can be inlined. Values worth considering: 0 (disables inlining) to 3.
 virtualize_max_visits=1
 
+# Recompute-cost cap for inlining: a tensor node whose computation contains reduction loops
+# (loops enclosing a setter without appearing in its indices) with a total trip-count product
+# exceeding this value is never virtualized, because inlining would replay the reduction at
+# every read site (multiplying through chains of virtual consumers). Negative values disable
+# the cap.
+virtualize_max_inline_reduction=16
+
 # Truncate longer axes to this many dimensions in the generic optimizer's interpreter.
 virtualize_max_tracing_dim=5
 
