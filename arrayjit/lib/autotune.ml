@@ -304,6 +304,82 @@ let sketch_seed_params ~is_gpu ~is_cpu (opt : LL.optimized) : sketch_params list
         else base
       else []
 
+(** {2 The privatized fission flavor}
+
+    A variant of the per-segment preset that contracts each materialized read-modify-write
+    accumulator into a per-thread register tile ({!Sched.optop.Privatize}) over its serial
+    reduction loop. A routine-local accumulator beats a device-memory RMW on every backend, and
+    on Metal it additionally sidesteps the volatile-RMW miscompile workaround tax
+    (c_syntax.ml [volatile_scalar_rmw]). Detection is permissive: each proposal is validated by
+    try-applying against the segment (Privatize's own preconditions — single index vector,
+    uniform iteration-invariant guards, etc.), and dropped rather than failing the candidate. *)
+
+let rec subtree_has_hardware_loop (llc : LL.t) =
+  match llc with
+  | LL.For_loop { axis = LL.Grid | LL.Workgroup | LL.Workgroup_reduce; _ } -> true
+  | LL.For_loop { body; _ } -> subtree_has_hardware_loop body
+  | LL.Seq (a, b) -> subtree_has_hardware_loop a || subtree_has_hardware_loop b
+  | LL.If { body; _ } -> subtree_has_hardware_loop body
+  | _ -> false
+
+(* Materialized RMW accumulation sites of the (post-preset) scheduled segment, each paired with
+   the outermost enclosing Serial loop eligible to privatize over: the access vector must not
+   mention its symbol (so the accumulation is carried across it), and no hardware-typed loop may
+   sit inside its subtree (the private tile is per-thread; spanning other threads' iterations
+   would store back their elements). *)
+let privatize_proposals (post : LL.optimized) : (Ir.Tnode.t * Idx.symbol) list =
+  let plc = post.LL.optimize_ctx.LL.placements in
+  let proposals = ref [] in
+  let rec walk stack (llc : LL.t) =
+    match llc with
+    | LL.Seq (a, b) ->
+        walk stack a;
+        walk stack b
+    | LL.If { body; _ } -> walk stack body
+    | LL.For_loop { index; from_; body; axis; _ } -> walk ((index, from_, axis, body) :: stack) body
+    | LL.Set { tn; idcs; llsc; _ }
+      when Ir.Tnode.Placements.is_materialized_peek plc tn
+           && List.exists (collect_gets llsc) ~f:(fun (t, i) ->
+                  phys_equal t tn && Array.equal Idx.equal_axis_index i idcs) ->
+        List.find (List.rev stack) ~f:(fun (index, from_, axis, body) ->
+            LL.equal_axis_type axis LL.Serial
+            && from_ = 0
+            && (not (idcs_mention idcs index))
+            && not (subtree_has_hardware_loop body))
+        |> Option.iter ~f:(fun (index, _, _, _) ->
+               if
+                 not
+                   (List.exists !proposals ~f:(fun (t, s) ->
+                        Ir.Tnode.equal t tn && Idx.equal_symbol s index))
+               then proposals := (tn, index) :: !proposals)
+    | _ -> ()
+  in
+  walk [] post.LL.llc;
+  List.rev !proposals
+
+(** The preset schedule extended with a [Privatize] per detected accumulator. Proposals are
+    detected on the preset-scheduled segment and validated one at a time by re-applying the
+    growing schedule; a proposal violating an op precondition is dropped. The exploratory applies
+    run against a hermetic copy of the segment: [Privatize] registers its (fresh) tile in the
+    traced store and placements, and abandoned tiles would otherwise be emitted as dead local
+    declarations when the caller applies the returned schedule to the real segment. *)
+let extend_with_privatize ~static_indices sched (seg : LL.optimized) : Sched.schedule =
+  let scratch () =
+    {
+      seg with
+      LL.traced_store = Hashtbl.copy seg.LL.traced_store;
+      LL.optimize_ctx = LL.copy_optimize_ctx seg.LL.optimize_ctx;
+    }
+  in
+  match Sched.apply ~static_indices sched (scratch ()) with
+  | exception _ -> sched
+  | post ->
+      List.fold (privatize_proposals post) ~init:sched ~f:(fun acc (target, over) ->
+          let acc' = acc @ [ Sched.Privatize { target; over } ] in
+          match Sched.apply ~static_indices acc' (scratch ()) with
+          | (_ : LL.optimized) -> acc'
+          | exception _ -> acc)
+
 (** {2 Candidate compilation}
 
     A candidate is a recipe producing schedules against a {e fresh} lowering: backend [compile]
@@ -318,7 +394,9 @@ type whole_flavor =
   | W_preset of { block_size : int option }
   | W_sketch of sketch_params
 
-type fiss_flavor = F_preset of { block_size : int option } | F_saved of (string * SC.saved_schedule) list
+type fiss_flavor =
+  | F_preset of { block_size : int option; privatize : bool }
+  | F_saved of (string * SC.saved_schedule) list
 
 type spec = Whole of whole_flavor | Fiss of fiss_flavor
 
@@ -389,7 +467,9 @@ let compile_candidate ~static_indices ~base_digest ~limits ~is_gpu ~is_cpu ctx c
           let zero_sched tns = if is_gpu then Sched.zero_expansion ~limits tns else [] in
           let preset seg =
             match flavor with
-            | F_preset { block_size } -> preset_sched ?block_size seg
+            | F_preset { block_size; privatize } ->
+                let sched = preset_sched ?block_size seg in
+                if privatize then extend_with_privatize ~static_indices sched seg else sched
             | F_saved assoc -> (
                 let seg_canon = SC.canonicalize ~static_indices seg in
                 match List.Assoc.find assoc ~equal:String.equal (SC.digest seg_canon) with
@@ -758,7 +838,10 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
       let seed_specs =
         block_size_presets (fun block_size -> Whole (W_preset { block_size }))
         @ (if is_gpu || is_cpu then
-             block_size_presets (fun block_size -> Fiss (F_preset { block_size }))
+             (* Each fissioned preset is seeded plain and privatized (the latter dedups away by
+                digest when no accumulator is eligible). *)
+             List.concat_map [ false; true ] ~f:(fun privatize ->
+                 block_size_presets (fun block_size -> Fiss (F_preset { block_size; privatize })))
            else [])
         @ List.map sketch_params ~f:(fun p -> Whole (W_sketch p))
       in

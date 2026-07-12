@@ -18,7 +18,11 @@
       with per-segment schedules — the same preset sweep per segment, and beam rounds that extend
       {e one segment at a time}. Per-segment schedules are cached keyed by the pre-schedule
       segment's canonical digest. [`Zeros] segments keep the default zero-expansion; [`Solo]
-      segments stay unscheduled.
+      segments stay unscheduled. Each preset is additionally seeded in a {e privatized} variant
+      ({!extend_with_privatize}): per segment, every materialized read-modify-write accumulator is
+      contracted into a per-thread register tile ({!Ir.Schedule.optop.Privatize}) over its serial
+      reduction loop where the op's preconditions permit — a routine-local accumulator beats a
+      device-memory RMW, and on Metal it sidesteps the volatile scalar-RMW workaround.
     - {b Matmul sketches}: when a matmul micro-kernel is detected, parameterized instantiations
       of the composed pipelines pinned by the schedule tests — register blocktiling
       (Split + Swap + shared Stage + Privatize + materializing Unroll) on GPU backends, operand
@@ -39,6 +43,19 @@
     - Timing uses wall clock around a device sync, so it includes queue overhead; times are
       min-of-N. Static indices are bound to the midpoint of their declared ranges during timing
       and restored afterwards. *)
+
+val extend_with_privatize :
+  static_indices:Ir.Indexing.static_symbol list ->
+  Ir.Schedule.schedule ->
+  Ir.Low_level.optimized ->
+  Ir.Schedule.schedule
+(** The privatized preset extension used by the fissioned candidates: appends a
+    [Schedule.Privatize { target; over }] for every materialized read-modify-write accumulator
+    detected in the schedule's application to the segment — [over] being the outermost enclosing
+    [Serial] loop whose symbol the access vector does not mention and whose subtree contains no
+    hardware-typed loop. Each proposal is validated by try-applying the grown schedule against a
+    hermetic copy of the segment (proposals violating the op's preconditions are dropped), so the
+    result always applies cleanly where the input schedule does. Exposed for tests. *)
 
 type report = {
   cache_hit : bool;  (** The schedule came from the disk cache; no search ran. *)
