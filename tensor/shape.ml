@@ -1982,7 +1982,8 @@ let apply_env_t env sh =
   sh.output <- Row.subst_row env sh.output
 
 (** Computes the product of dimensions in a row (both flanks). Returns [None] if any dimension is
-    not yet resolved (still a variable or unresolved affine). *)
+    not yet resolved (still a variable or unresolved affine), or if the row ends in a row variable
+    that is not yet resolved -- the row could still gain axes, so its product is unknown. *)
 let compute_row_product env (row : Row.t) : int option =
   let rec product = function
     | [] -> Some 1
@@ -2006,7 +2007,18 @@ let compute_row_product env (row : Row.t) : int option =
         | Some d, Some rest_product -> Some (d * rest_product)
         | _ -> None)
   in
-  product (row.beg_dims @ row.dims)
+  (* Fuel guards against reference cycles among row variables. *)
+  let rec row_product fuel (row : Row.t) =
+    match (product (row.beg_dims @ row.dims), row.bcast) with
+    | None, _ -> None
+    | Some p, Row.Broadcastable -> Some p
+    | Some p, Row.Row_var v when fuel > 0 -> (
+        match Row.get_row_from_env env v with
+        | Some tail -> Option.map (row_product (fuel - 1) tail) ~f:(fun q -> p * q)
+        | None -> None)
+    | Some _, Row.Row_var _ -> None
+  in
+  row_product 100 row
 
 (** Updates delayed variable references with inferred dimensions/row products from the environment.
     If [solved_dim] was previously set by [set_dim], we skip updating to preserve the user's

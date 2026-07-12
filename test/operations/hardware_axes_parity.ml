@@ -34,7 +34,7 @@ let backend_name =
 let read_generated base_name =
   let ext = if String.is_substring backend_name ~substring:"metal" then ".metal" else ".c" in
   let ext = if String.is_substring backend_name ~substring:"cuda" then ".cu" else ext in
-  let path = Stdlib.Filename.concat "build_files" (base_name ^ ext) in
+  let path = Utils.build_file (base_name ^ ext) in
   if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
 
 (* Annotate every top-level loop nest of the optimized code: the outermost loop gets

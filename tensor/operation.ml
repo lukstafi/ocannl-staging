@@ -310,9 +310,14 @@ let uint4x32_to_prec_uniform1 ?grad_spec =
     (* Ignore what the caller says, since we must learn the precision from the outside. *)
     ignore (top_down_prec : bool option);
     Tn.update_prec t1.Tensor.value Ir.Ops.uint4x32;
-    Tensor.unop (* A placeholder that will be replaced by the actual precision by Tensor.op. *)
-      ~transpose_op:Pointwise_un ~op_asn ~grad_asn
-      ?grad_spec (* Modifying the label would cause identifier pollution. *)
+    Tensor.unop
+    (* The argument's shape must EQUAL the result's: with [Pointwise_un] the random bits tensor
+       could close smaller than the result and broadcast, repeating random values along the
+       broadcast axes (few unique values in inferred-shape params). The batch and input rows are
+       left implicit (shared context ellipsis), so they remain safe to close to empty rows when
+       nothing constrains them. *)
+      ~transpose_op:(Permute ("..b.. => ..b..", []))
+      ~op_asn ~grad_asn ?grad_spec (* Modifying the label would cause identifier pollution. *)
       ?label ~top_down_prec:true t1
 
 let lt ?spec ?(capture_dims = []) =
@@ -371,7 +376,7 @@ let deinterleave_odd =
   in
   Tensor.unop ~op_label:"deinterleave_odd" ~transpose_op:Defined_by_cd_logic ~op_asn ~grad_asn
 
-let threefry4x32_crypto =
+let threefry4x32_crypto ?spec =
   let module NTDSL = Initial_NTDSL in
   let%cd op_asn ~t ~t1 ~t2 ~projections = v =: v1 ^^^^ v2 in
   let%cd grad_asn ~t:_ ~g:_ ~t1:_ ~t2:_ ~projections:_ = Asgns.empty_comp in
@@ -390,7 +395,7 @@ let threefry4x32_crypto =
       ()
     ->
       let result =
-        Tensor.binop ~compose_op:Pointwise_bin ~op_asn ~grad_asn t1 t2
+        Tensor.binop ~compose_op:(compose_op_of_spec ?spec ()) ~op_asn ~grad_asn t1 t2
           ~op_label:"threefry4x32_crypto" ?grad_spec ?label ?batch_dims ?batch_axes ?input_dims
           ?output_dims ?input_axes ?output_axes ?deduced ()
       in
@@ -398,7 +403,7 @@ let threefry4x32_crypto =
       Tn.update_prec result.value Ir.Ops.uint4x32;
       result
 
-let threefry4x32_light =
+let threefry4x32_light ?spec =
   let module NTDSL = Initial_NTDSL in
   let%cd op_asn ~t ~t1 ~t2 ~projections = v =: v1 ^^ v2 in
   let%cd grad_asn ~t:_ ~g:_ ~t1:_ ~t2:_ ~projections:_ = Asgns.empty_comp in
@@ -417,7 +422,7 @@ let threefry4x32_light =
       ()
     ->
       let result =
-        Tensor.binop ~compose_op:Pointwise_bin ~op_asn ~grad_asn t1 t2
+        Tensor.binop ~compose_op:(compose_op_of_spec ?spec ()) ~op_asn ~grad_asn t1 t2
           ~op_label:"threefry4x32_light" ?grad_spec ?label ?batch_dims ?batch_axes ?input_dims
           ?output_dims ?input_axes ?output_axes ?deduced ()
       in
@@ -427,9 +432,19 @@ let threefry4x32_light =
 
 let threefry4x32 =
  (* Select based on configuration *)
- fun t1 t2 ->
+ fun ?spec t1 t2 ->
   let variant = Utils.settings.default_prng_variant in
-  if String.equal variant "crypto" then threefry4x32_crypto t1 t2 else threefry4x32_light t1 t2
+  if String.equal variant "crypto" then threefry4x32_crypto ?spec t1 t2
+  else threefry4x32_light ?spec t1 t2
+
+(* In the [uniform]/[uniform1] builders, the counter operand's ([range_over_offsets]'s) shape must
+   EQUAL the result's: with [Pointwise_bin] the counter could close smaller than the result and
+   broadcast, repeating random values along the broadcast axes (few unique values in inferred-shape
+   params). The key operand keeps private rows: they are reduced away (trivially, since the key is
+   scalar-like), so the key broadcasts as before. The counter's and result's batch and input rows
+   are left implicit (shared context ellipsis), so they remain safe to close to empty rows when
+   nothing constrains them. *)
+let pin_counter_spec = "..p..|..q..->..r..; ..b.. => ..b.."
 
 let fma ~grad_spec t1 t2 t3 =
   let module NTDSL = Initial_NTDSL in
@@ -698,14 +713,19 @@ let embed_dim ?grad_spec ?(label = []) variable_ref =
 
 let uniform ?grad_spec () =
   uint4x32_to_prec_uniform ?grad_spec
-    (threefry4x32
+    (threefry4x32 ~spec:pin_counter_spec
        (threefry4x32 (embed_self_id ()) (Tensor.get_random_seed ()) ())
        (Tensor.term ~fetch_op:Range_over_offsets ~grad_spec:Prohibit_grad
           ~label:[ "range_over_offsets" ] ())
        ())
 
 (** Generates a single uniform random number using a counter symbol for PRNG state. This is useful
-    for sequential sampling in recurrent contexts. *)
+    for sequential sampling in recurrent contexts.
+
+    Note: unlike {!uniform}, this stays pointwise (no [pin_counter_spec]): the user counter's shape
+    must propagate to the result through the key operand, so the key slot cannot be reduced away.
+    Entropy across draws comes from the user counter; within one draw, [range_over_offsets] may
+    close smaller than the result and repeat values along broadcast axes. *)
 let uniform_at ?grad_spec counter =
   uint4x32_to_prec_uniform ?grad_spec
     (threefry4x32
@@ -719,7 +739,7 @@ let uniform_at ?grad_spec counter =
     "light" threefry variant. *)
 let uniform1 ?grad_spec () =
   uint4x32_to_prec_uniform1 ?grad_spec
-    (threefry4x32
+    (threefry4x32 ~spec:pin_counter_spec
        (threefry4x32 (embed_self_id ()) (Tensor.get_random_seed ()) ())
        (Tensor.term ~fetch_op:Range_over_offsets ~grad_spec:Prohibit_grad
           ~label:[ "range_over_offsets" ] ())

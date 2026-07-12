@@ -40,7 +40,7 @@ let on_gpu =
 
 let read_generated base_name =
   let ext = if on_metal then ".metal" else if on_gpu then ".cu" else ".c" in
-  let path = Stdlib.Filename.concat "build_files" (base_name ^ ext) in
+  let path = Utils.build_file (base_name ^ ext) in
   if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
 
 (* The maximal single-child chains of statement-level loops: one symbol list per top-level nest. *)
