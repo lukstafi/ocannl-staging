@@ -71,10 +71,15 @@ let measure_and_emit ~st ~backend ~variant ~compile_s ?tokens_per_step ~run_step
   let parity_steps = meta_int st "parity_steps" in
   let warmup_steps = meta_int st "warmup_steps" in
   let timed_steps = meta_int st "timed_steps" in
+  Stdio.eprintf "bench: compiled in %.1fs, starting %d parity steps\n%!" compile_s parity_steps;
   let losses =
-    Array.init parity_steps ~f:(fun _ ->
+    Array.init parity_steps ~f:(fun i ->
+        let t0 = Unix.gettimeofday () in
         run_step ();
-        read_loss ())
+        let l = read_loss () in
+        Stdio.eprintf "bench: parity step %d loss %.6g (%.2fs)\n%!" i l
+          (Unix.gettimeofday () -. t0);
+        l)
   in
   for _ = 1 to warmup_steps do
     run_step ()

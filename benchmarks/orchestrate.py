@@ -15,6 +15,7 @@ import os
 import platform
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -22,6 +23,16 @@ ROOT = HERE.parent
 VENV_PY = HERE / ".venv/bin/python"
 PARITY_TOL = 2e-3
 REFERENCE = ("pytorch", "cpu", "eager")
+
+# Known-pathological cells excluded from the default matrix, as (workload, backend, variant).
+# The default schedule on metal is currently degenerate on larger graphs (see the pending
+# metal-default-schedule task): gpt2_mini ~81 s/step, mlp_wide >10 s/step (killed after
+# 90 min). The materialized and tuned variants cover metal on those workloads.
+SKIP_CELLS = {
+    ("gpt2_mini", "metal", "default"),
+    ("mlp_wide", "metal", "default"),
+    ("mlp_wide", "metal", "materialized"),
+}
 
 sys.path.insert(0, str(HERE / "runners"))
 from bench_common import read_st_metadata  # noqa: E402
@@ -156,13 +167,21 @@ def main():
 
     results = []
     failures = []
+    partial = HERE / "results" / "partial.jsonl"
+    partial.parent.mkdir(parents=True, exist_ok=True)
+    partial.write_text("")  # fresh run
 
     def collect(label, cmd, **kwargs):
+        t0 = time.monotonic()
         r = run_cell(label, cmd, **kwargs)
         if r:
             results.append(r)
+            # Stream each cell as it lands so an interrupted run keeps its results.
+            with open(partial, "a") as f:
+                f.write(json.dumps(r) + "\n")
         else:
             failures.append(label)
+        print(f"    cell took {time.monotonic() - t0:.0f}s", flush=True)
 
     for fx in fixtures:
         name = fx.stem
@@ -175,6 +194,9 @@ def main():
                 variants.append("tuned")
             for backend in ["cc", "metal"]:
                 for variant in variants:
+                    if (name, backend, variant) in SKIP_CELLS:
+                        print(f"--- {name} ocannl/{backend}/{variant}: SKIPPED (SKIP_CELLS)")
+                        continue
                     env = dict(
                         os.environ,
                         BENCH_FIXTURE=str(fx),
