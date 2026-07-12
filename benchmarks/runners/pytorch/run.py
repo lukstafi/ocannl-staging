@@ -155,7 +155,7 @@ def build_gpt(meta, data, dev):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fixture", required=True)
-    ap.add_argument("--device", default="cpu", choices=["cpu", "mps"])
+    ap.add_argument("--device", default="cpu", choices=["cpu", "mps", "cuda"])
     ap.add_argument("--compile", action="store_true")
     args = ap.parse_args()
 
@@ -205,6 +205,8 @@ def main():
     def sync():
         if args.device == "mps":
             torch.mps.synchronize()
+        elif args.device == "cuda":
+            torch.cuda.synchronize()
 
     # The first step doubles as the compile probe (graph build; with --compile, compilation).
     # Its loss value is unaffected by the timing, so it is also parity step 0.
