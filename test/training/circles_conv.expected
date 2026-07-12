@@ -5,7 +5,7 @@ Dataset generated: images shape [160; 16; 16; 1], labels shape [160; 1]
 
 Starting training for 1000 epochs (5000 steps)...
 Epoch 10: avg loss = 1.1
-Epoch 20: avg loss = 1.0
+Epoch 20: avg loss = 1.1
 Epoch 30: avg loss = 1.0
 Epoch 40: avg loss = 1.0
 Epoch 50: avg loss = 1.0

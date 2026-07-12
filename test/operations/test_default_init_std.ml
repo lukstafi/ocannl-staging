@@ -1,21 +1,20 @@
 (* Regression test for the realized statistics of parameter initializers, measured via
    [Context.get_values] after [Train.forward_once].
 
-   Fan-scaled initializers ([Nn_blocks.kaiming] / [xavier]) capture the fan from the raw init
-   tensor with einsum row variables ([w_raw ++ "...|..i.. -> ... => |->0" ["i"]]). Before the
+   Fan-scaled initializers ([Nn_blocks.kaiming] / [xavier]) capture the fan from the raw init tensor
+   with einsum row variables ([w_raw ++ "...|..i.. -> ... => |->0" ["i"]]). Before the
    compute_row_product open-tail fix, the captured row product latched at 1 while the param's rows
-   were still open, so the multiplier was sqrt(scale_sq / 1) regardless of the actual fan — e.g.
-   std 1.41 instead of 0.141 for a fan-in-100 weight under
-   [TDSL.default_param_init := NTDSL.kaiming ~scale_sq:2.0 TDSL.O.normal1]. The std checks below
-   guard against that: they fail hard when the fan resolves to 1.
+   were still open, so the multiplier was sqrt(scale_sq / 1) regardless of the actual fan — e.g. std
+   1.41 instead of 0.141 for a fan-in-100 weight under [TDSL.default_param_init := NTDSL.kaiming
+   ~scale_sq:2.0 TDSL.O.normal1]. The std checks below guard against that: they fail hard when the
+   fan resolves to 1.
 
-   The "unique values" lines document a separate, currently open bug: for params with inferred
-   shapes, the PRNG counter tensor ([range_over_offsets]) connects to the result only through
-   pointwise broadcasts, so its shape closes smaller than the param and the random values repeat
-   along the fan-in axis (50 unique values for a [100 -> 50] weight). FIXME: once the counter's
-   shape is pinned to the result's, these lines should report full uniqueness — promote the new
-   output. The statistical tolerances are loose enough to hold both before and after that fix
-   (with 50 repeated values the effective sample size is 50, not 5000). *)
+   The "unique values" lines guard against a second bug: for params with inferred shapes, the PRNG
+   counter tensor ([range_over_offsets]) used to connect to the result only through pointwise
+   broadcasts, so its shape closed smaller than the param and the random values repeated along the
+   fan-in axis (50 unique values for a [100 -> 50] weight). The counter's shape is now pinned to the
+   result's by equality specs on [threefry4x32], [uint4x32_to_prec_uniform1] and
+   [Nn_blocks.box_muller], so these lines must report full uniqueness. *)
 
 open Base
 open Ocannl
@@ -63,8 +62,9 @@ let default_init_weight_values init =
 let () =
   (* The standard default: centered uniform over [-0.25, 0.25), std 0.5/sqrt(12) ~ 0.1443. *)
   let values = default_init_weight_values Operation.default_uniform1_param_init in
-  check ~name:"default uniform1 [-0.25,0.25): std" ~expected:(0.5 /. Float.sqrt 12.) ~tol:0.03
-    (std values);
+  check ~name:"default uniform1 [-0.25,0.25): std"
+    ~expected:(0.5 /. Float.sqrt 12.)
+    ~tol:0.03 (std values);
   check ~name:"default uniform1 [-0.25,0.25): mean" ~expected:0. ~tol:0.04 (mean values);
   printf "default uniform1 unique values: %d of %d\n" (unique values) (Array.length values)
 
@@ -91,8 +91,8 @@ let () =
   printf "default xavier unique values: %d of %d\n" (unique values) (Array.length values)
 
 let () =
-  (* Inline-record init path, as in test/training/mlp_bn_names.ml. The default scale_sq is 6, so
-     the realized std is sqrt(6/100) ~ 0.245 — NOT PyTorch's kaiming_normal_ (std sqrt(2/fan_in) =
+  (* Inline-record init path, as in test/training/mlp_bn_names.ml. The default scale_sq is 6, so the
+     realized std is sqrt(6/100) ~ 0.245 — NOT PyTorch's kaiming_normal_ (std sqrt(2/fan_in) =
      0.1414 for relu), nor Karpathy's tanh-gain (5/3)/sqrt(fan_in) ~ 0.1667: sqrt(6) is the gain of
      the kaiming UNIFORM bound. *)
   Tensor.unsafe_reinitialize ();
