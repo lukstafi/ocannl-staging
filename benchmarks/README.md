@@ -104,6 +104,13 @@ tinygrad's CPU device JIT-compiles kernels with `clang`; on a machine without cl
   first parity steps; loss values are unaffected.
 - Tuned-vs-untuned must be paired within a comparison: OCANNL `BENCH_TUNE=1` corresponds to
   tinygrad `BEAM=...` search and `torch.compile` — one-time search cost for better kernels.
+- OCANNL tuned cells run a two-pass protocol: pass 1 runs the search and populates
+  `autotune_cache/` (its `compile_s` — the search cost — is what gets reported), then a fresh
+  pass-2 process replays the cached winner and provides the step timings. Rationale: the search
+  leaves its own process measurably slower (extra per-launch overhead from accumulated
+  modules/buffers; 2.5–3.5x on small CUDA kernels), which would penalize the tuned artifact for
+  the one-time search it already paid for in `compile_s`. Wipe `autotune_cache/` before a run
+  whose `compile_s` should reflect a from-scratch search.
 - Timing on a laptop: prefer the p50 of the per-step synced times; rerun and compare rounds
   if thermals are suspect. Keep timing out of CI; the parity gate is the CI-worthy part.
 

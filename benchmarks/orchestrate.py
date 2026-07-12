@@ -186,10 +186,12 @@ def main():
     partial.parent.mkdir(parents=True, exist_ok=True)
     partial.write_text("")  # fresh run
 
-    def collect(label, cmd, **kwargs):
+    def collect(label, cmd, override=None, **kwargs):
         t0 = time.monotonic()
         r = run_cell(label, cmd, **kwargs)
         if r:
+            if override:
+                r.update(override)
             results.append(r)
             # Stream each cell as it lands so an interrupted run keeps its results.
             with open(partial, "a") as f:
@@ -218,12 +220,22 @@ def main():
                         BENCH_TUNE="1" if variant == "tuned" else "0",
                         BENCH_MATERIALIZE="1" if variant == "materialized" else "0",
                     )
-                    collect(
-                        f"{name} ocannl/{backend}/{variant}",
-                        [str(ocannl_exe(model)), f"--ocannl_backend={backend}"],
-                        env=env,
-                        cwd=HERE,  # picks up benchmarks/ocannl_config
-                    )
+                    cmd = [str(ocannl_exe(model)), f"--ocannl_backend={backend}"]
+                    label = f"{name} ocannl/{backend}/{variant}"
+                    if variant == "tuned":
+                        # Two-pass protocol: the search leaves the process slower (extra
+                        # per-launch overhead from accumulated modules/buffers — measured
+                        # 2.5-3.5x on small CUDA kernels), so pass 1 runs the search and
+                        # populates autotune_cache (its compile_s is the search cost), and a
+                        # fresh pass-2 process replays the cached winner for the step timings.
+                        pass1 = run_cell(f"{label} (search pass)", cmd, env=env, cwd=HERE)
+                        if pass1 is None:
+                            failures.append(f"{label} (search pass)")
+                            continue
+                        collect(label, cmd, env=env, cwd=HERE,
+                                override={"compile_s": pass1["compile_s"]})
+                    else:
+                        collect(label, cmd, env=env, cwd=HERE)
         if "pytorch" in args.only:
             for device in ["cpu"] + ([gpu_torch] if gpu_torch else []):
                 collect(
