@@ -1812,7 +1812,9 @@ module C_syntax (B : C_syntax_config) = struct
           if not rmw_volatile then stmt_doc
           else
             let vol_ptr = string (B.buffer_prefix ^ "volatile " ^ B.typ_of_prec prec ^ "*") in
-            let tmp = string ("__rmw_" ^ get_ident tn) in
+            (* Uid-derived: label-derived identifiers (get_ident) could legally collide with a
+               prefixed name, and the inner scope must shadow nothing except the target node. *)
+            let tmp = string ("__rmw_" ^ Int.to_string tn.Tn.uid) in
             lbrace
             ^^ nest 2
                  (hardline ^^ vol_ptr ^^ space ^^ tmp ^^ string " = " ^^ ident_doc ^^ semi
