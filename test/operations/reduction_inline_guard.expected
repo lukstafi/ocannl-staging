@@ -4,3 +4,4 @@ small reduction (K=4): virtual=true non-virtual=false
 small reduction (K=4): out=[10; 20] expected=[10; 20]
 large reduction (K=64): virtual=false non-virtual=true
 large reduction (K=64): out=[2080; 4160] expected=[2080; 4160]
+dead large reduction (K=64): virtual=true non-virtual=false

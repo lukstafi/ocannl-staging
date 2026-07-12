@@ -275,6 +275,11 @@ type traced_array = {
           without appearing in its indices (i.e. reduction loops). Inlining the computation
           replays these loops at every read site; compared against
           [virtualize_settings.max_inline_reduction]. *)
+  mutable read_by_other : bool;
+      (** True when some statement other than the node's own setters reads the node. Unlike
+          [accesses], same-cell reads count, while a setter's own read-modify-write does not.
+          Gates the recompute-cost guard: a node never read in the routine has no inlining cost,
+          so it must stay eligible for virtual dead-code elimination. *)
 }
 [@@deriving sexp_of]
 

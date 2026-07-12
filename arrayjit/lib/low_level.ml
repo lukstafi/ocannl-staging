@@ -266,6 +266,12 @@ type traced_array = {
           without appearing in its indices (i.e. reduction loops). Inlining the computation
           replays these loops at every read site, so large extents make virtualization
           pathological; see [virtualize_max_inline_reduction]. *)
+  mutable read_by_other : bool;
+      (** True when some statement other than the node's own setters reads the node. Unlike
+          [accesses], same-cell reads count (they are exempt from the visit cap), while a setter's
+          own read-modify-write does not. A node never read in the routine has no inlining cost,
+          so the recompute-cost guard must not materialize it (it may instead be dropped as a
+          committed virtual computation, or inlined by a later routine in the lineage). *)
 }
 [@@deriving sexp_of]
 
@@ -320,6 +326,7 @@ let get_node store tn =
         has_non_one_hot_setter = false;
         is_range_producer = false;
         inline_reduction_extent = 1;
+        read_by_other = false;
       })
 
 let visit ~is_assigned old =
@@ -562,7 +569,7 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits llc 
           if is_scalar_dims tn then traced.is_scalar_constexpr <- true);
         traced.zeroed_out <- true
     | Set { tn; idcs; llsc; debug = _ } ->
-        loop_scalar ~loop_ranges env (Some (lookup env idcs)) llsc;
+        loop_scalar ~loop_ranges ~lhs_tn:(Some tn) env (Some (lookup env idcs)) llsc;
         let traced : traced_array = get_node traced_store tn in
         traced.inline_reduction_extent <-
           max traced.inline_reduction_extent (reduction_extent loop_ranges idcs);
@@ -592,7 +599,7 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits llc 
            genuine computation complexity does (see #134). *)
         track_symbol reverse_node_map tn idcs
     | Set_from_vec { tn; idcs; length; vec_unop = _; arg = arg, _; debug = _ } ->
-        loop_scalar ~loop_ranges env (Some (lookup env idcs)) arg;
+        loop_scalar ~loop_ranges ~lhs_tn:(Some tn) env (Some (lookup env idcs)) arg;
         let traced : traced_array = get_node traced_store tn in
         traced.inline_reduction_extent <-
           max traced.inline_reduction_extent (reduction_extent loop_ranges idcs);
@@ -629,7 +636,7 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits llc 
           Hash_set.add traced.assignments (lookup env pos_idcs)
         done;
         track_symbol reverse_node_map tn idcs
-    | Set_local (_, llsc) -> loop_scalar ~loop_ranges env None llsc
+    | Set_local (_, llsc) -> loop_scalar ~loop_ranges ~lhs_tn:None env None llsc
     | Declare_local _ -> ()
     | Comment _ -> ()
     | Staged_compilation _ -> ()
@@ -642,14 +649,15 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits llc 
            reaches visit tracing. *)
         invalid_arg "Low_level.visit_llc: Tile_mma reached the optimization pipeline"
     | If { cond = c, _; body } ->
-        loop_scalar ~loop_ranges env None c;
+        loop_scalar ~loop_ranges ~lhs_tn:None env None c;
         loop body
-  and loop_scalar ~loop_ranges env (access_pos : int array option) llsc =
-    let loop = loop_scalar ~loop_ranges env access_pos in
+  and loop_scalar ~loop_ranges ~lhs_tn env (access_pos : int array option) llsc =
+    let loop = loop_scalar ~loop_ranges ~lhs_tn env access_pos in
     match llsc with
     | Constant _ | Constant_bits _ -> ()
     | Get (ptr, indices) ->
         let traced : traced_array = get_node traced_store ptr in
+        if not (Option.exists lhs_tn ~f:(Tn.equal ptr)) then traced.read_by_other <- true;
         let at_pos = lookup env indices in
         if
           (not virtualize_settings.inline_complex_computations)
@@ -702,6 +710,7 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits llc 
       if
         virtualize_settings.max_inline_reduction >= 0
         && traced.inline_reduction_extent > virtualize_settings.max_inline_reduction
+        && traced.read_by_other
         && Option.is_none (Tn.Placements.get plc tn)
         && not (traced.prefers_virtual_one_hot && not traced.has_non_one_hot_setter)
       then Tn.Placements.update plc tn Never_virtual 39;

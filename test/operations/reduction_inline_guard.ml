@@ -77,6 +77,22 @@ let copy_asgn ~dst ~src proj =
 
 let n = 2
 
+(* A large reduction that nothing reads must NOT be materialized by the recompute-cost guard:
+   with no read site there is no inlining cost, and forcing it non-virtual would turn dead
+   virtual-eligible work into executed work. It stays a committed virtual computation. *)
+let run_dead ~kdim =
+  let i = Idx.get_symbol () and k = Idx.get_symbol () in
+  let a = mk ~dims:[| n; kdim |] "a_dead" in
+  let prod = mk ~dims:[| n |] "prod_dead" in
+  let reduce = reduce_asgn ~dst:prod ~src:a (reduce_proj i k ~n ~kdim) in
+  let asgns = Asgns.Block_comment ("reduction_dead", reduce) in
+  let comp = { Asgns.asgns; embedded_nodes = Set.of_list (module Tn) [ prod ] } in
+  let ctx = Context.auto () in
+  let ctx = Context.set_values ctx a (Array.create ~len:(n * kdim) 1.) in
+  let ctx, _routine = Context.compile ctx comp Idx.Empty in
+  let plc = Context.placements ctx in
+  (Tn.Placements.known_virtual plc prod, Tn.Placements.known_non_virtual plc prod)
+
 (* Returns (out values, prod known-virtual, prod known-non-virtual). *)
 let run ~kdim =
   let i = Idx.get_symbol () and k = Idx.get_symbol () and t = Idx.get_symbol () in
@@ -115,4 +131,6 @@ let () =
   Stdio.printf "large reduction (K=64): virtual=%b non-virtual=%b\n" virt_large nonvirt_large;
   Stdio.printf "large reduction (K=64): out=[%s] expected=[%s]\n" (show out_large)
     (expected ~kdim:64);
+  let virt_dead, nonvirt_dead = run_dead ~kdim:64 in
+  Stdio.printf "dead large reduction (K=64): virtual=%b non-virtual=%b\n" virt_dead nonvirt_dead;
   Stdio.printf "%!"
