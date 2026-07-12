@@ -55,7 +55,9 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
 - `orchestrate.py` — runs the matrix (dispatching the OCANNL executable on the fixture's
   `model`), enforces the parity gate, writes `results/results.jsonl` and
   `results/report.md`. Flags: `--workloads mlp_small ...`, `--tuned`, `--materialized`,
-  `--nojit` (tinygrad nojit), `--only ocannl pytorch tinygrad`, `--skip-build`.
+  `--nojit` (tinygrad nojit), `--only ocannl pytorch tinygrad`, `--skip-build`. See
+  [example-report.md](example-report.md) for checked-in example output (a full
+  `--tuned --materialized` matrix; `results/` itself is gitignored).
 - `runners/ocannl/bench_{gpt,conv}_diag.ml` — schedule diagnostics: print the default
   fission-pipeline segment census (launch geometry, per-nest loop extents, written nodes with
   materialization markers) for the gpt2_mini / lenet graphs, then optionally time steps
