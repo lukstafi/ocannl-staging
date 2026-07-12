@@ -510,6 +510,10 @@ module Impl = struct
        the GPU payoff is memory transactions — eligible [Vectorized] loops render 128-bit packed
        loads/stores through the [float4]-payload pack structs (gh-ocannl-463). *)
     let restrict_keyword = Some "__restrict"
+
+    (* Metal shader-compiler miscompilation workaround; see {!C_syntax.C_syntax_config} and the
+       standalone repro [benchmarks/runners/ocannl/bench_metal_bug.ml]. *)
+    let volatile_scalar_rmw = true
     let vectorize_pragma = []
     let aligned_local_attr = None
     let vector_bytes = 16

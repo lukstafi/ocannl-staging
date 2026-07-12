@@ -128,9 +128,11 @@ let () =
       p "no in-kernel scratch or copy nests; packed constants are buffer params"
         (has "packed_ma" && has "packed_mb"
         && (not (has "float tile_"))
-        && (not (has "threadgroup"))
+        (* Shared-tile declarations — not the [[..._in_threadgroup]] parameter attributes every
+           Metal kernel carries. *)
+        && (not (has "threadgroup float"))
         && (not (has "__shared__"))
-        && not (has "barrier"))
+        && not (has "barrier("))
 
 (* --- 2. Mixed flavors, non-dividing extents (edge tiles) --- *)
 let () =
