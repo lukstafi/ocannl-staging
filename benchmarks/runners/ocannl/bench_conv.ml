@@ -52,7 +52,7 @@ let () =
   let%op batch_loss =
     cross_entropy_loss ~spec:"...|v" ~normalize_by:!..batch_size () ~logits ~targets:batch_y
   in
-  if tune || materialize then Train.every_non_literal_materialized batch_loss;
+  if materialize then Train.every_non_literal_materialized batch_loss;
   let update = Train.grad_update batch_loss in
   let learning_rate = TDSL.O.( !. ) lr in
   let sgd = Train.sgd_update ~learning_rate batch_loss in
@@ -82,7 +82,9 @@ let () =
   let ctx, routine =
     if tune then
       let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
-      Autotune.tune ~rounds:0 ~timing_ctx:scratch ctx step_comp bindings
+      (* Placement A/B: tune the default (virtual + promotion) graph and the materialize-all
+         graph, keep the measured winner. *)
+      Train.tune_placements ~rounds:0 ~timing_ctx:scratch ctx batch_loss step_comp bindings
     else Context.compile ctx step_comp bindings
   in
   let compile_s = Unix.gettimeofday () -. t0 in

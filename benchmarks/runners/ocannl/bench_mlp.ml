@@ -8,7 +8,8 @@
 
    The backend is selected the usual OCANNL way (e.g. [--ocannl_backend=metal]). Environment:
    BENCH_FIXTURE is the fixture path; BENCH_TUNE=1 enables the autotuned variant
-   (materialize-all + [Autotune.tune], the recipe from the training tests). *)
+   ([Train.tune_placements]: placement A/B — the default virtual-plus-promotion graph and the
+   materialize-all graph are both tuned and the measured winner kept). *)
 
 open Base
 open Ocannl
@@ -87,7 +88,6 @@ let () =
   let%op batch_loss =
     cross_entropy_loss ~spec:"...|v" ~normalize_by:!..batch_size () ~logits ~targets:batch_y
   in
-  if tune then Train.every_non_literal_materialized batch_loss;
   let debug = match Stdlib.Sys.getenv_opt "BENCH_DEBUG" with Some "1" -> true | _ -> false in
   let update = Train.grad_update ~setup_for_parallel:debug batch_loss in
   let learning_rate = TDSL.O.( !. ) lr in
@@ -101,7 +101,7 @@ let () =
   let ctx, routine =
     if tune then
       let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
-      Autotune.tune ~rounds:0 ~timing_ctx:scratch ctx step_comp bindings
+      Train.tune_placements ~rounds:0 ~timing_ctx:scratch ctx batch_loss step_comp bindings
     else Context.compile ctx step_comp bindings
   in
   let compile_s = Unix.gettimeofday () -. t0 in

@@ -94,7 +94,7 @@ let () =
   let%op batch_loss =
     cross_entropy_loss ~spec:"...|v" ~normalize_by:!..n_positions () ~logits ~targets
   in
-  if tune || materialize then Train.every_non_literal_materialized batch_loss;
+  if materialize then Train.every_non_literal_materialized batch_loss;
   let fwd = Train.forward batch_loss in
   let ctx = Context.auto () in
   let backend = Context.backend_name ctx in
@@ -122,7 +122,9 @@ let () =
   let ctx, routine =
     if tune then
       let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
-      Autotune.tune ~rounds:0 ~timing_ctx:scratch ctx fwd bindings
+      (* Placement A/B: tune the default (virtual + promotion) graph and the materialize-all
+         graph, keep the measured winner. *)
+      Train.tune_placements ~rounds:0 ~timing_ctx:scratch ctx batch_loss fwd bindings
     else Context.compile ctx fwd bindings
   in
   let compile_s = Unix.gettimeofday () -. t0 in
