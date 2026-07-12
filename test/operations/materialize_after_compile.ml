@@ -18,6 +18,8 @@ open Base
 open Ocannl
 open Ocannl.Operation.DSL_modules
 module Tn = Ir.Tnode
+module LL = Ir.Low_level
+module SC = Ir.Schedule_cache
 
 let p name b = Stdio.printf "%s: %b\n" name b
 let approx a b = Float.(abs (a -. b) < 1e-4)
@@ -34,8 +36,16 @@ let () =
   let ctx = Context.auto () in
   p "intermediate intent unspecified before compiling" (Tn.mode_is_unspecified mc.Tensor.value);
   (* Arm A: the default-placement compile — the matmul intermediate inlines into the pointwise
-     consumer, so this lineage decides it Virtual. *)
-  let ctx_a, routine_a = Context.compile ctx comp Ir.Indexing.Empty in
+     consumer, so this lineage decides it Virtual. The identity transform also captures the
+     optimized code for the digest check below. *)
+  let opt_a = ref None in
+  let ctx_a, routine_a =
+    Context.compile
+      ~lowered_transform:(fun o ->
+        opt_a := Some o;
+        o)
+      ctx comp Ir.Indexing.Empty
+  in
   p "A-arm lineage decides the intermediate virtual (not materialized)"
     (not (Tn.Placements.is_materialized_peek (Context.placements ctx_a) mc.Tensor.value));
   p "intermediate intent still unspecified after the A-arm compile"
@@ -59,6 +69,18 @@ let () =
   let got_b = Context.get_values ctx_b t2.Tensor.value in
   p "A-arm and B-arm routines compute the same values"
     (Array.for_all2_exn got_a got_b ~f:approx);
+  (* The autotune-cache identity must distinguish placements (Codex P1 on PR #140): optimized
+     code can be identical while placements differ (Local scratch vs On_device buffer), and the
+     A/B arms must not cache-hit each other's entries in that case. Pin the mechanism directly:
+     flipping one node's placement class in a copied optimize_ctx changes the canonical
+     digest. *)
+  let opt = Option.value_exn !opt_a in
+  let d1 = SC.digest (SC.canonicalize opt) in
+  let flipped_ctx = LL.copy_optimize_ctx opt.LL.optimize_ctx in
+  Tn.Placements.unsafe_restore flipped_ctx.LL.placements mc.Tensor.value
+    (Some (Tn.On_device, 999));
+  let d2 = SC.digest (SC.canonicalize { opt with LL.optimize_ctx = flipped_ctx }) in
+  p "canonical digest distinguishes placement classes" (not (String.equal d1 d2));
   (* Intent-level strengthening (the "materialized" benchmark variant) stays legal afterwards:
      it only touches unspecified intent, never requesting virtual-to-materialized. *)
   let strengthened =

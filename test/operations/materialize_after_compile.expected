@@ -7,4 +7,5 @@ B-arm lineage materializes the intermediate: true
 intermediate intent still unspecified after the B-arm compile: true
 the parent context is unaffected by the B-arm's decisions: true
 A-arm and B-arm routines compute the same values: true
+canonical digest distinguishes placement classes: true
 every_non_literal_materialized after both compiles does not raise: true

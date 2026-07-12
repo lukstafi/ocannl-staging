@@ -64,9 +64,12 @@ type canonical
 
 val canonicalize : ?static_indices:Indexing.static_symbol list -> Low_level.optimized -> canonical
 (** Walks the optimized code once in preorder, numbering [For_loop] binders, first-occurrence
-    tensor nodes (their dims, precision, and hoisted-packing eligibility
-    [Schedule.hoistable_constant] enter the digest — schedule validity depends on operand
-    constancy, gh-ocannl-470), and rendering the canonical form. [static_indices] must be the
+    tensor nodes (their dims, precision, hoisted-packing eligibility
+    [Schedule.hoistable_constant] — schedule validity depends on operand constancy,
+    gh-ocannl-470 — and effective placement class from the compile's
+    {!Ir.Low_level.optimize_ctx} — identical code over [Local] scratch vs an [On_device] buffer
+    generates different kernels, so same-code different-placement programs must not share cache
+    keys — all enter the digest), and rendering the canonical form. [static_indices] must be the
     same list the code was lowered with ({!Indexing.bound_symbols} of the compile's bindings). *)
 
 val digest : canonical -> string

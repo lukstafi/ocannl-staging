@@ -91,6 +91,7 @@ let canonicalize ?(static_indices = []) (opt : LL.optimized) : canonical =
         complete := false;
         add "?"
   in
+  let plc = opt.LL.optimize_ctx.LL.placements in
   let emit_tn tn =
     match Hashtbl.find tn_refs tn with
     | Some i -> add ("t" ^ Int.to_string i)
@@ -104,11 +105,24 @@ let canonicalize ?(static_indices = []) (opt : LL.optimized) : canonical =
            non-hoisted winner cached for a same-shape non-constant program must not mask a
            constant program's hoisted candidates — so such programs must not share cache keys. *)
         let hc = if Schedule.hoistable_constant tn then ";const" else "" in
+        (* The effective placement class enters the digest too (Codex P1 on PR #140): the
+           optimized code can be identical while placements differ — [Local] scratch vs an
+           [On_device] buffer — and the generated backend code then differs in kind and
+           performance, so such programs must not share cache keys. In particular the
+           placement-A/B arms of [Train.tune_placements] would otherwise cache-hit each other's
+           entries whenever their code diverges only in placements, skipping the second arm's
+           measurement. Placements of nodes reaching the optimized code are settled by the end
+           of the pipeline; render an undecided node defensively rather than assert. *)
+        let pc =
+          match Tn.Placements.get plc tn with
+          | None -> ";u"
+          | Some (m, _) -> ";" ^ Sexp.to_string (Tn.sexp_of_memory_mode m)
+        in
         add
-          (Printf.sprintf "t%d=[%s;%s%s]" i
+          (Printf.sprintf "t%d=[%s;%s%s%s]" i
              (String.concat_array ~sep:"," (Array.map dims ~f:Int.to_string))
              (Sexp.to_string (Ops.sexp_of_prec (Lazy.force tn.Tn.prec)))
-             hc)
+             hc pc)
   in
   (* Local scope ids come from a process-global counter freshly on each lowering (like loop
      symbols), so digest their first-occurrence alpha index, not the raw id — otherwise sibling
