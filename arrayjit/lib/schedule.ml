@@ -2595,6 +2595,9 @@ let backend_is_cpu name = String.is_substring name ~substring:"cc"
 
 let schedule_fission = lazy (Utils.get_global_flag ~default:true ~arg_name:"schedule_fission")
 
+(* Per-compile launch-geometry trace on stderr; consumed by backend [compile]. *)
+let log_launches = lazy (Utils.get_global_flag ~default:false ~arg_name:"schedule_log_launches")
+
 let maybe_default_schedule ~backend_name ?(limits = Backend_intf.no_hardware_limits)
     ~static_indices (opt : Low_level.optimized) : Low_level.optimized =
   (* Runtime kernel logging is line-interleaved under parallel execution; keep logged runs

@@ -1017,6 +1017,18 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
              best_ms;
              baseline_ms;
            });
+      (* Diagnostic control (config [autotune_log]): compile and time the UNTUNED default
+         pipeline in this very process, on the search context — discriminates a genuinely slow
+         winner from process-state effects when the winner's code nominally equals the untuned
+         program yet a separately-run untuned process measures faster (PR #140 round 6: same
+         digest, 3.4x runtime difference across processes on cuda). *)
+      (if Lazy.force log_enabled then
+         match Context.compile search_ctx comp bindings with
+         | cctx, croutine -> (
+             match time_routine ~repeats cctx croutine with
+             | ms -> logf "untuned-default in-process control: %.4f ms" ms
+             | exception exn -> logf "untuned-default control run failed: %s" (Exn.to_string exn))
+         | exception exn -> logf "untuned-default control compile failed: %s" (Exn.to_string exn));
       emit_report
         {
           cache_hit = false;

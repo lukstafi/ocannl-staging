@@ -234,6 +234,11 @@ val default_cpu : ?min_parallel:int -> Low_level.optimized -> schedule
     (default from config [cpu_schedule_min_parallel] = 16384; task fan-out costs more than a GPU
     launch is worth on small kernels). *)
 
+val log_launches : bool Lazy.t
+(** Config [schedule_log_launches]: backend [compile] logs one stderr line per compiled segment
+    with its launch grid/block dims and statement count — for diffing what two compiles of
+    nominally identical code actually emit. *)
+
 val backend_is_gpu : string -> bool
 (** Whether the named backend binds hardware indices (currently: name contains ["cuda"] or
     ["metal"]). *)

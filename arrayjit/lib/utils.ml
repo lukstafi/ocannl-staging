@@ -120,6 +120,7 @@ let known_config_keys =
       "automatic_cpu_schedule";
       "cpu_schedule_min_parallel";
       "schedule_fission";
+      "schedule_log_launches";
       "cc_parallel_grid";
       "cc_parallel_chunks";
       "cc_vector_bytes";

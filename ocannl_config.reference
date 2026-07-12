@@ -141,6 +141,11 @@ cpu_schedule_min_parallel=16384
 # serially whenever the analysis bails, as before.
 schedule_fission=true
 
+# If true, backend compilation logs one stderr line per compiled kernel/segment with its launch
+# grid/block dimensions and statement count — for diffing what two compiles of nominally
+# identical code actually emit. Debugging aid; independent of the ppx_minidebug log levels.
+schedule_log_launches=false
+
 # How the C backend renders eligible outermost Grid loops (pool-backed Grid rendering,
 # docs/proposals/gh-ocannl-164.md): "dispatch" uses libdispatch's dispatch_apply (macOS),
 # "openmp" uses `#pragma omp parallel for` (adds -fopenmp to the kernel compile), "none" keeps

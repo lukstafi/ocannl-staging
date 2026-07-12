@@ -524,6 +524,17 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
             ~static_indices:(Indexing.bound_symbols bindings)
             lowered
     in
+    (* Per-compile launch-geometry trace (config [schedule_log_launches]): one line per segment
+       with its grid/block dims — for diffing what two compiles of nominally identical code
+       actually emit (PR #140 round 6). *)
+    (if Lazy.force Schedule.log_launches then
+       let n_segs = List.length lowereds in
+       List.iteri lowereds ~f:(fun i seg ->
+           let d = Low_level.launch_dims seg.Low_level.llc in
+           Stdlib.Printf.eprintf
+             "schedule: %s seg %d/%d grid=[%d;%d;%d] block=[%d;%d;%d] stmts=%d\n%!" name i n_segs
+             d.grid.(0) d.grid.(1) d.grid.(2) d.block.(0) d.block.(1) d.block.(2)
+             (List.length (Low_level.flat_lines [ seg.Low_level.llc ]))));
     let (proc : (Device.code, fissioned) Either.t), (lowered : Low_level.optimized) =
       match lowereds with
       | [] -> assert false
