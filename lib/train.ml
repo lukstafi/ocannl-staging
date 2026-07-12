@@ -146,26 +146,45 @@ let every_non_literal_materialized =
     {!Autotune.tune}; the same caveats apply (notably [timing_ctx] and non-idempotent routines —
     both arms share [timing_ctx]'s device for their searches). *)
 let tune_placements ?beam_width ?rounds ?repeats ?timing_ctx ?report ctx loss comp bindings =
+  (* Arm attribution on the same stderr trace as Autotune's config [autotune_log] — winner-arm
+     ambiguity misdirected the CUDA benchmark debugging on PR #140. *)
+  let log_arms =
+    match
+      String.lowercase
+        (String.strip (Utils.get_global_arg ~arg_name:"autotune_log" ~default:"false"))
+    with
+    | "true" | "1" -> true
+    | _ -> false
+  in
+  let logf fmt =
+    Stdlib.Printf.ksprintf
+      (fun s -> if log_arms then Stdio.eprintf "tune_placements: %s\n%!" s)
+      fmt
+  in
   let best_ms = ref Float.infinity in
   let capture r =
     best_ms := r.Autotune.best_ms;
     Option.iter report ~f:(fun f -> f r)
   in
-  let tune ctx timing_ctx =
+  let tune arm ctx timing_ctx =
+    logf "arm %s search:" arm;
     best_ms := Float.infinity;
     let result =
       Autotune.tune ?beam_width ?rounds ?repeats ?timing_ctx ~report:capture ctx comp bindings
     in
+    logf "arm %s best: %.4f ms" arm !best_ms;
     (result, !best_ms)
   in
-  let a, a_ms = tune ctx timing_ctx in
+  let a, a_ms = tune "A (default placements)" ctx timing_ctx in
   let embedded = ref [] in
   Tensor.iter_embedded ~f:(fun tn -> embedded := tn :: !embedded) loss;
   (* [decide_materialized] skips the nodes constrained away from materialization (constants,
      declared-virtual), mirroring [every_non_literal_materialized]'s guards at the decision
      level. *)
   let materialize c = Context.decide_materialized c !embedded in
-  let b, b_ms = tune (materialize ctx) (Option.map timing_ctx ~f:materialize) in
+  let b, b_ms = tune "B (materialize-all)" (materialize ctx) (Option.map timing_ctx ~f:materialize) in
+  logf "winner: arm %s (A %.4f ms vs B %.4f ms)" (if Float.( <= ) a_ms b_ms then "A" else "B") a_ms
+    b_ms;
   if Float.( <= ) a_ms b_ms then a else b
 
 module Lazy = Utils.Lazy
