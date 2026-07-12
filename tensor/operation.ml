@@ -745,16 +745,21 @@ let uniform1 ?grad_spec () =
           ~label:[ "range_over_offsets" ] ())
        ())
 
-let default_uniform1_param_init () ?label ?top_down_prec ?batch_dims ?batch_axes ?input_dims
-    ?output_dims ?input_axes ?output_axes ?deduced () =
+(** A centered uniform distribution over [[-scale/2, scale/2)] built from {!uniform1}. With the
+    default [scale = 0.5] this is the default parameter initialization (see
+    {!Make_DSL.default_param_init}). *)
+let centered_uniform1_param_init ?(scale = 0.5) () ?label ?top_down_prec ?batch_dims ?batch_axes
+    ?input_dims ?output_dims ?input_axes ?output_axes ?deduced () =
   let number = Tensor.number ~grad_spec:Prohibit_grad in
   let u =
     uniform1 ~grad_spec:Prohibit_grad () ?top_down_prec ?batch_dims ?batch_axes ?input_dims
       ?output_dims ?input_axes ?output_axes ?deduced ()
   in
   let centered = sub ~grad_spec:Prohibit_grad u (number 0.5) () in
-  pointmul ~grad_spec:Prohibit_grad (number 0.5) centered ?label ?top_down_prec ?batch_dims
+  pointmul ~grad_spec:Prohibit_grad (number scale) centered ?label ?top_down_prec ?batch_dims
     ?batch_axes ?input_dims ?output_dims ?input_axes ?output_axes ?deduced ()
+
+let default_uniform1_param_init = centered_uniform1_param_init ?scale:None
 
 (** A wasteful variant of {!uniform_at} that produces a single value from each 4x32 random bits. The
     bit-spreading in int32_to_uint4x32/uint32_to_uint4x32 ensures good entropy even with the 2-round

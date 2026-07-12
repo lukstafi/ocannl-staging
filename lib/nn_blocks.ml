@@ -522,7 +522,9 @@ let%op conv2d ~label ?(kernel_size = 3) ?(stride = 1) ?(use_padding = true) ?out
   +* { kernel }
        "... | stride*oh+kh, stride*ow+kw, ..ic..; |kh, kw, ..ic.. -> ..oc.. => ... | oh, ow, ..oc.."
        [ "kh"; "kw"; "oc" ]
-  + { bias = 0. }
+  (* The spec'd add keeps the bias per-channel: a plain [+] would broadcast-unify the bias to the
+     full feature map [oh, ow, ..oc..]. *)
+  +++ { bias = 0. } "... | oh, ow, ..oc..; |..oc.. => ... | oh, ow, ..oc.."
 
 (** Depthwise separable convolution - more efficient for mobile/edge devices. Consists of depthwise
     conv (spatial filtering per channel) followed by pointwise conv (1x1 conv for channel mixing).
@@ -542,7 +544,7 @@ let%op depthwise_separable_conv2d ~label ?(kernel_size = 3) ?(stride = 1) ?(use_
   (* Pointwise: 1x1 conv to mix channels *)
   depthwise
   +* { pw_kernel } "... | h, w, ..ic..; |..ic.. -> ..oc.. => ... | h, w, ..oc.."
-  + { bias = 0. }
+  +++ { bias = 0. } "... | h, w, ..oc..; |..oc.. => ... | h, w, ..oc.."
 
 (** Max pooling for 2D spatial data - reduces spatial dimensions by taking maximum values.
 
@@ -648,10 +650,15 @@ let%op resnet_block ~label ?(stride = 1) () =
 
 (** LeNet-style architecture for simple image classification (e.g., MNIST). Classic architecture:
     conv -> pool -> conv -> pool -> fc layers. Output shape is inferred from training data. *)
-let%op lenet ?(label = [ "lenet" ]) ?(out_channels1 = 6) ?(out_channels2 = 16) () =
-  let conv1 = conv2d ~label:("conv1" :: label) ~kernel_size:5 ~out_channels:out_channels1 () in
+let%op lenet ?(label = [ "lenet" ]) ?(out_channels1 = 6) ?(out_channels2 = 16)
+    ?(use_padding = true) () =
+  let conv1 =
+    conv2d ~label:("conv1" :: label) ~kernel_size:5 ~use_padding ~out_channels:out_channels1 ()
+  in
   let pool1 = max_pool2d ~stride:2 () in
-  let conv2 = conv2d ~label:("conv2" :: label) ~kernel_size:5 ~out_channels:out_channels2 () in
+  let conv2 =
+    conv2d ~label:("conv2" :: label) ~kernel_size:5 ~use_padding ~out_channels:out_channels2 ()
+  in
   let pool2 = max_pool2d ~stride:2 () in
   let fc1 = mlp_layer ~label:("fc1" :: label) ~hid_dim:120 () in
   let fc2 = mlp_layer ~label:("fc2" :: label) ~hid_dim:84 () in

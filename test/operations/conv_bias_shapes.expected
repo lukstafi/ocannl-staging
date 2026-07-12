@@ -1,0 +1,12 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+conv2d params:
+  bias_test_conv: single prec 4
+  kernel_test_conv: single prec 4x3x3x1
+conv2d output dims: single prec 2x8x8x4
+
+depthwise_separable_conv2d params:
+  bias_test_dsconv: single prec 5
+  dw_kernel_test_dsconv: single prec 3x3x3
+  pw_kernel_test_dsconv: single prec 5x3
+depthwise_separable_conv2d output dims: single prec 2x8x8x5
