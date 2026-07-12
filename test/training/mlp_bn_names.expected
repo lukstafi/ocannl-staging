@@ -2,24 +2,24 @@ Retrieving commandline, environment, or config file variable ocannl_log_level
 Found 0, in the config file
 Names loaded: 32033
 train/dev/test examples (after batch truncation): 182000/22000/22000
-Epoch 0, mean train loss=4.8949 below 5=true
-Epoch 1, mean train loss=2.7690 below 3=true
-Epoch 2, mean train loss=2.7281 below 3=true
-Epoch 3, mean train loss=2.7100 below 3=true
-Epoch 4, mean train loss=2.7000 below 3=true
-Epoch 5, mean train loss=2.6935 below 2.8=true
-Epoch 6, mean train loss=2.6889 below 2.8=true
-Epoch 7, mean train loss=2.6853 below 2.8=true
-Epoch 8, mean train loss=2.6826 below 2.8=true
-Epoch 9, mean train loss=2.6804 below 2.8=true
-Epoch 10, mean train loss=2.6786 below 2.8=true
-Epoch 11, mean train loss=2.6771 below 2.8=true
-Epoch 12, mean train loss=2.6760 below 2.8=true
-Epoch 13, mean train loss=2.6750 below 2.8=true
-Epoch 14, mean train loss=2.6742 below 2.8=true
-Final train loss=2.6739 train_below=true
-Final dev   loss=2.6682 dev_below=true
-Final test  loss=2.6770 test_below=true
-ria
-ehnlk
-lc
+Epoch 0, mean train loss=2.5843 below 5=true
+Epoch 1, mean train loss=2.3719 below 3=true
+Epoch 2, mean train loss=2.3366 below 3=true
+Epoch 3, mean train loss=2.3173 below 3=true
+Epoch 4, mean train loss=2.3042 below 3=true
+Epoch 5, mean train loss=2.2942 below 2.8=true
+Epoch 6, mean train loss=2.2861 below 2.8=true
+Epoch 7, mean train loss=2.2792 below 2.8=true
+Epoch 8, mean train loss=2.2734 below 2.8=true
+Epoch 9, mean train loss=2.2684 below 2.8=true
+Epoch 10, mean train loss=2.2639 below 2.8=true
+Epoch 11, mean train loss=2.2600 below 2.8=true
+Epoch 12, mean train loss=2.2566 below 2.8=true
+Epoch 13, mean train loss=2.2536 below 2.8=true
+Epoch 14, mean train loss=2.2509 below 2.8=true
+Final train loss=2.2485 train_below=true
+Final dev   loss=2.2506 dev_below=true
+Final test  loss=2.2574 test_below=true
+evebnarslneiyiaseeaa
+kadayyareyoitzneaxce
+lausaaraolilulluaiat

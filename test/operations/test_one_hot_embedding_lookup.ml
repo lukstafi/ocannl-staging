@@ -28,7 +28,7 @@ let embed = 3
 
 (* Read the generated C source for a forward kernel, if the C-family backend wrote one. *)
 let read_generated_c base_name =
-  let path = Stdlib.Filename.concat "build_files" (base_name ^ ".c") in
+  let path = Utils.build_file (base_name ^ ".c") in
   if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
 
 (* Embedding table C with C[o,i] = o*vocab + i, so row i (over the input axis) is distinctive. *)

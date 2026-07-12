@@ -6,12 +6,11 @@ open! Base
 open Ocannl
 open Operation.DSL_modules
 
-let build_prefix = "test_metal_guarded_gather_codegen"
 let vocab = 4
 let embed = 3
 
 let read_metal_sources () =
-  let dir = Stdlib.Filename.concat "build_files" build_prefix in
+  let dir = Utils.build_files_dir () in
   (try Stdlib.Sys.readdir dir |> Array.to_list with _ -> [])
   |> List.filter ~f:(String.is_suffix ~suffix:".metal")
   |> List.map ~f:(fun file -> Stdio.In_channel.read_all (Stdlib.Filename.concat dir file))
@@ -35,7 +34,6 @@ let build_embedding id_values =
 let () =
   Tensor.unsafe_reinitialize ();
   Utils.settings.output_debug_files_in_build_directory <- true;
-  Unix.putenv "OCANNL_BUILD_FILES_PREFIX" build_prefix;
   let ctx = Context.metal () in
   let embedded = build_embedding [| 1.; 3.; 0. |] in
   let _ctx = Train.forward_once ctx embedded in

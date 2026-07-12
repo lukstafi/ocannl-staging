@@ -40,7 +40,7 @@ let expected =
       Array.init embed ~f:(fun o -> Float.of_int ((o * vocab) + idx)))
 
 let read_generated_c base_name =
-  let path = Stdlib.Filename.concat "build_files" (base_name ^ ".c") in
+  let path = Utils.build_file (base_name ^ ".c") in
   if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
 
 (* Count (#Get_dynamic, #Where, #Trunc) in the freshly re-lowered forward comp of [t]. Because

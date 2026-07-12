@@ -105,6 +105,7 @@ let known_config_keys =
       "multidev_num_devices";
       (* Low-level / optimization *)
       "virtualize_max_visits";
+      "virtualize_max_inline_reduction";
       "virtualize_max_tracing_dim";
       "enable_device_only";
       "inline_scalar_constexprs";
@@ -326,30 +327,42 @@ let clean_filename fname =
   | "" | "." | ".." -> "_"
   | _ -> fname
 
-let build_file fname =
-  let prefix = get_global_arg ~default:"" ~arg_name:"build_files_prefix" in
-  let build_files_dir =
-    if String.is_empty prefix then "build_files"
-    else filename_concat "build_files" (clean_filename prefix)
-  in
-  (* Concurrently running tests share the working directory: tolerate mkdir races (like
-     [diagn_log_file] below). *)
-  (try assert (Stdlib.Sys.is_directory build_files_dir)
-   with Stdlib.Sys_error _ | Assert_failure _ ->
-     (try assert (Stdlib.Sys.is_directory "build_files")
-      with Stdlib.Sys_error _ | Assert_failure _ -> (
-        try Stdlib.Sys.mkdir "build_files" 0o777 with Stdlib.Sys_error _ -> ()));
-     if not (String.is_empty prefix) then
-       try Stdlib.Sys.mkdir build_files_dir 0o777 with Stdlib.Sys_error _ -> ());
-  filename_concat build_files_dir @@ clean_filename fname
+(* Concurrently running programs (e.g. dune tests) share the working directory, so a flat
+   [build_files/] (or [log_files/]) would race on same-named artifacts. Unless overridden by
+   [build_files_prefix], every process gets its own subdirectory derived from the executable
+   name; the sentinel value "." restores the flat legacy layout. *)
+let artifacts_subdir () =
+  match get_global_arg ~default:"" ~arg_name:"build_files_prefix" with
+  | "" ->
+      Some
+        (clean_filename @@ Stdlib.Filename.remove_extension
+        @@ Stdlib.Filename.basename Stdlib.Sys.executable_name)
+  | "." -> None
+  | prefix -> Some (clean_filename prefix)
 
-let diagn_log_file fname =
-  let log_files_dir = "log_files" in
-  (try assert (Stdlib.Sys.is_directory log_files_dir)
-   with Stdlib.Sys_error _ -> (
-     (* NOTE: is this can be called concurrently. *)
-     try Stdlib.Sys.mkdir log_files_dir 0o777 with Stdlib.Sys_error _ -> ()));
-  filename_concat log_files_dir @@ clean_filename fname
+(* Tolerates mkdir races between concurrently running tests. *)
+let ensure_artifacts_dir base subdir =
+  let dir = match subdir with None -> base | Some p -> filename_concat base p in
+  (try assert (Stdlib.Sys.is_directory dir)
+   with Stdlib.Sys_error _ | Assert_failure _ ->
+     (try assert (Stdlib.Sys.is_directory base)
+      with Stdlib.Sys_error _ | Assert_failure _ -> (
+        try Stdlib.Sys.mkdir base 0o777 with Stdlib.Sys_error _ -> ()));
+     if Option.is_some subdir then
+       try Stdlib.Sys.mkdir dir 0o777 with Stdlib.Sys_error _ -> ());
+  dir
+
+(** The directory generated-code debug files are written to (created if missing):
+    [build_files/<prefix>/], where the prefix defaults to the executable's base name. *)
+let build_files_dir () = ensure_artifacts_dir "build_files" (artifacts_subdir ())
+
+let build_file fname = filename_concat (build_files_dir ()) @@ clean_filename fname
+
+(** The directory diagnostic and routine-debug logs are written to (created if missing):
+    [log_files/<prefix>/], sharing the prefix resolution of {!build_files_dir}. *)
+let log_files_dir () = ensure_artifacts_dir "log_files" (artifacts_subdir ())
+
+let diagn_log_file fname = filename_concat (log_files_dir ()) @@ clean_filename fname
 
 let () =
   (* Cleanup needs to happen before get_local_debug_runtime (or any other code is run). *)
@@ -381,17 +394,26 @@ let () =
           Stdio.eprintf "Failed to delete %s (expected a directory): %s\n%!" dirname
             (Exn.to_string exn))
   in
+  (* Cleanup is scoped to this process's own subdirectory (see [artifacts_subdir]), so a
+     starting test cannot delete the in-flight artifacts of a concurrently running one. If the
+     artifact root itself is a symlink, skip the scoped cleanup rather than follow it: appending
+     the subdirectory would resolve through the link, deleting files outside the working tree. *)
+  let remove_scoped_dir base =
+    match artifacts_subdir () with
+    | None -> remove_dir_if_exists base
+    | Some p -> (
+        match lstat_kind base with
+        | Some Unix.S_DIR -> remove_dir_if_exists (filename_concat base p)
+        | Some _ | None -> ())
+  in
   let clean_up_log_files_on_startup =
     get_global_flag ~default:true ~arg_name:"clean_up_log_files_on_startup"
   in
-  if clean_up_log_files_on_startup then remove_dir_if_exists "log_files";
+  if clean_up_log_files_on_startup then remove_scoped_dir "log_files";
   let clean_up_build_files_on_startup =
     get_global_flag ~default:true ~arg_name:"clean_up_build_files_on_startup"
   in
-  if clean_up_build_files_on_startup then
-    let prefix = get_global_arg ~default:"" ~arg_name:"build_files_prefix" in
-    if String.is_empty prefix then remove_dir_if_exists "build_files"
-    else remove_dir_if_exists (filename_concat "build_files" (clean_filename prefix))
+  if clean_up_build_files_on_startup then remove_scoped_dir "build_files"
 
 let get_local_debug_runtime =
   let snapshot_every_sec =

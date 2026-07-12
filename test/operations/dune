@@ -53,13 +53,14 @@
     "--ocannl_log_main_domain_to_stdout=false"
     "--ocannl_debug_log_to_stream_files=true"
     ; We have to clean up to avoid appending to results of a previous run
-    "--ocannl_clean_up_log_files_on_startup=true")
+    "--ocannl_clean_up_log_files_on_startup=true"
+    "--ocannl_build_files_prefix=micrograd_demo_logging")
    (run
     %{dep:../../tools/minised.exe}
     "--normalize-eol"
     " = 0x[0-9a-fA-F]+"
     " = 0xNNNN"
-    "log_files/%{read:config/ocannl_backend.txt}-0-0.log"
+    "log_files/micrograd_demo_logging/%{read:config/ocannl_backend.txt}-0-0.log"
     "%{target}")
    (run
     %{dep:../../tools/minised.exe}
@@ -120,6 +121,17 @@
   (env_var OCANNL_BACKEND))
  (modules test_composite_param_init)
  (libraries base ocannl)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
+ (name test_default_init_std)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules test_default_init_std)
+ (libraries base ocannl stdio)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -274,14 +286,15 @@
     (run
      %{dep:zero_out_local_decl.exe}
      "--ocannl_output_prec_in_ll_files=true"
-     "--ocannl_output_debug_files_in_build_directory=true")
+     "--ocannl_output_debug_files_in_build_directory=true"
+     "--ocannl_build_files_prefix=zero_out_local_decl")
     (copy
-     build_files/out_fwd-unoptimized.ll
+     build_files/zero_out_local_decl/out_fwd-unoptimized.ll
      zero_out_local_decl-unoptimized.ll.actual)
     (run
      %{dep:../../tools/minised.exe}
      "--normalize-eol-only"
-     build_files/out_fwd.%{read:config/ocannl_backend_extension.txt}
+     build_files/zero_out_local_decl/out_fwd.%{read:config/ocannl_backend_extension.txt}
      zero_out_local_decl.extension.actual)))))
 
 (rule
@@ -575,6 +588,39 @@
   (pps ppx_here ppx_ocannl ppx_sexp_conv)))
 
 (test
+ (name layer_norm_numeric)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules layer_norm_numeric)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
+ (name layer_norm_divided_mean)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules layer_norm_divided_mean)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl ppx_sexp_conv)))
+
+(test
+ (name layer_norm_1d)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules layer_norm_1d)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl ppx_sexp_conv)))
+
+(test
  (name decoder_only_test)
  (package neural_nets_lib)
  (deps
@@ -703,6 +749,17 @@
   (env_var OCANNL_BACKEND))
  (modules affine_lowering)
  (libraries base ocannl stdio unix)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
+ (name reduction_inline_guard)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules reduction_inline_guard)
+ (libraries base ocannl stdio)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -933,7 +990,6 @@
  (libraries
   base
   stdio
-  unix
   ocannl
   arrayjit.utils
   (select
@@ -952,7 +1008,6 @@
  (libraries
   base
   stdio
-  unix
   ocannl
   arrayjit.utils
   (select
