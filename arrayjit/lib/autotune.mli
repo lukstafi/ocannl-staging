@@ -4,11 +4,14 @@
     (docs/proposals/schedule-ir-optops.md; the search-harness half of the OptOps port). {!tune} is
     a drop-in replacement for {!Context.compile}: it compiles candidate schedules through the
     [?lowered_transform] / [?lowered_transforms] seams, times each on the context's device, and
-    returns the routine of the fastest one. Candidates are carried in the canonical form of
-    {!Ir.Schedule_cache} — every candidate compile re-lowers with fresh symbols, so schedules are
-    rebound structurally inside each compile's transform closure, guarded by digest equality.
-    Winning schedules are persisted to a disk cache keyed by the code's canonical digest and the
-    backend, so a re-run of the same program skips the search.
+    returns the routine of the fastest one. Every candidate (and the winner replay) derives from
+    a hermetic copy of the {e one} base lowering captured at the start — each candidate compile's
+    own fresh lowering is ignored, because timing runs settle tensor-node value bounds and later
+    lowerings can fold guards or re-segment fission differently, silently corrupting digest
+    comparisons and replays. Winning schedules are persisted, in the structurally-rebindable
+    saved form of {!Ir.Schedule_cache}, to a disk cache keyed by the code's canonical digest and
+    the backend, so a re-run of the same program skips the search (cross-process replay is
+    guarded by digest equality against that process's own base lowering).
 
     The candidate space:
 

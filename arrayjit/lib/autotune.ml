@@ -473,17 +473,31 @@ let spec_label = function
         (if config_thresholds then " cfg-thresh" else "")
   | Fiss (F_saved assoc) -> Printf.sprintf "F_saved[%d segs]" (List.length assoc)
 
-(* [base_digests] are the accepted reference digests of the tuned code: the pre-run capture
-   and, when it differs, the post-settlement recapture (see the recapture in [tune] — timing
-   runs settle tensor-node value bounds, and later lowerings may fold guards the pre-run
-   lowering still had). *)
-let compile_candidate ~static_indices ~base_digests ~limits ~is_gpu ~is_cpu ctx comp bindings
+(* Every candidate derives its CODE from the ONE base lowering ([base_opt] with [canon] its
+   canonical form, captured together in [tune]) rather than from the compile's own fresh
+   lowering, whose llc the transform ignores. Re-lowering per candidate was subtly unsound:
+   timing runs settle tensor-node value bounds, so later fresh lowerings can fold guards (and
+   even re-segment fission) differently from the base — failing digest checks at best (the CUDA
+   rounds on PR #140: whole arms degenerating to their serial baselines) and silently replaying
+   the winner with empty per-segment schedules at worst (a 296 ms winner returning as a 2614 ms
+   routine). Deriving from the base makes candidates and the winner replay drift-immune and
+   byte-comparable by construction; the fresh-lowering digest check survives only in spirit via
+   the disk cache's [source_digest] guard (cross-process compatibility).
+
+   The rebased code keeps the fresh compile's OWN [optimize_ctx] (the per-compile fork of the
+   context's lineage): link-time buffer allocation consults that fork, so placement mutations by
+   schedule ops — fission's Local promotions above all — must land there or the allocator would
+   miss buffers the kernels reference. Candidate hermeticity is unchanged: each compile forks
+   the lineage table anew. The traced store is copied from the base (schedule ops register their
+   tiles in it). *)
+let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ctx comp bindings
     spec : (compiled, string) Result.t =
-  let check_digest opt =
-    let canon = SC.canonicalize ~static_indices opt in
-    if not (List.mem base_digests (SC.digest canon) ~equal:String.equal) then
-      invalid_arg "Autotune: fresh lowering does not match the tuned code (digest mismatch)";
-    canon
+  let rebase (fresh : LL.optimized) =
+    {
+      base_opt with
+      LL.traced_store = Hashtbl.copy base_opt.LL.traced_store;
+      LL.optimize_ctx = fresh.LL.optimize_ctx;
+    }
   in
   let preset_sched ?block_size ?(config_thresholds = false) opt =
     let min_parallel = if config_thresholds then None else Some 1 in
@@ -495,8 +509,8 @@ let compile_candidate ~static_indices ~base_digests ~limits ~is_gpu ~is_cpu ctx 
   let compile_ctx () =
     match spec with
     | Whole flavor ->
-        let transform opt =
-          let canon = check_digest opt in
+        let transform fresh =
+          let opt = rebase fresh in
           let sched, saved, registry =
             match flavor with
             | W_saved saved ->
@@ -522,8 +536,8 @@ let compile_candidate ~static_indices ~base_digests ~limits ~is_gpu ~is_cpu ctx 
         in
         Context.compile ~lowered_transform:transform ctx comp bindings
     | Fiss flavor ->
-        let transforms opt =
-          let (_ : SC.canonical) = check_digest opt in
+        let transforms fresh =
+          let opt = rebase fresh in
           let zero_sched tns = if is_gpu then Sched.zero_expansion ~limits tns else [] in
           let preset seg =
             match flavor with
@@ -535,13 +549,13 @@ let compile_candidate ~static_indices ~base_digests ~limits ~is_gpu ~is_cpu ctx 
                 match List.Assoc.find assoc ~equal:String.equal (SC.digest seg_canon) with
                 | Some saved -> fst (SC.of_saved seg_canon saved)
                 | None ->
-                    (* Every [`Normal] segment of the saved winner has an assoc entry, so a miss
-                       means the fresh lowering's segmentation drifted from the saved one (e.g.
-                       bounds settled by runs folding guards across process boundaries). Fail
-                       the candidate loudly — replaying the remaining segments with silently
-                       empty schedules would degrade the winner without any signal (the
-                       cache-hit path then falls through to a fresh search; the winner-replay
-                       path falls back to the default compile). *)
+                    (* Every [`Normal] segment of the saved winner has an assoc entry, and
+                       in-process replays re-derive segments from the same base lowering — so a
+                       miss means a disk-cached winner's segmentation drifted from this
+                       process's (environment/config differences). Fail the candidate loudly —
+                       replaying the remaining segments with silently empty schedules would
+                       degrade the winner without any signal (the cache-hit path then falls
+                       through to a fresh search). *)
                     invalid_arg
                       "Autotune: fissioned replay: no saved schedule for a segment (segmentation \
                        drifted)")
@@ -798,13 +812,12 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
              (Context.backend_name tctx) (Context.device_id tctx) backend (Context.device_id ctx)));
   let search_ctx = Option.value timing_ctx ~default:ctx in
   (* The base compile: identity transform (= the serial baseline candidate), capturing the
-     optimized code for canonicalization. Canonicalize INSIDE the transform: after the transform
-     returns, codegen forces the remaining undecided placements into the very placements table
-     the captured [opt] references, and placement classes enter the digest
-     (Schedule_cache.canonicalize) — a base digest computed after the compile returned would
-     disagree with the candidates' [check_digest], which runs at transform time, failing every
-     candidate with a digest mismatch (found by the CUDA benchmark run on PR #140: the
-     default-placements A/B arm degenerated to its serial baseline). *)
+     optimized code every candidate derives from (see [compile_candidate]) and its canonical
+     form. Canonicalize INSIDE the transform: after the transform returns, codegen forces the
+     remaining undecided placements into the very placements table the captured [opt]
+     references, and placement classes enter the digest (Schedule_cache.canonicalize) — the
+     disk-cache key must be the deterministic transform-time form so that storing and
+     replaying processes agree. *)
   let base_capture = ref None in
   let bctx, broutine =
     Context.compile
@@ -821,12 +834,15 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
   let base_digest = SC.digest canon in
   let use_cache = (not (String.is_empty cache_dir)) && SC.complete canon in
   let key = SC.cache_key canon ~backend in
-  let compile_spec_with ~base_digests cctx =
-    compile_candidate ~static_indices ~base_digests ~limits ~is_gpu ~is_cpu cctx comp bindings
+  let compile_spec =
+    compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu search_ctx comp
+      bindings
   in
-  (* Winner (and cache-hit) compiles target the caller's context. This pre-run instance serves
-     the cache-hit path; the search branch shadows both with post-settlement instances. *)
-  let compile_spec_real = compile_spec_with ~base_digests:[ base_digest ] ctx in
+  (* Winner (and cache-hit) compiles target the caller's context; they replay against the same
+     base lowering as the search's candidates. *)
+  let compile_spec_real =
+    compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ctx comp bindings
+  in
   let emit_report r = Option.iter report ~f:(fun f -> f r) in
   let flat_schedule = function
     | Whole_saved saved -> saved
@@ -876,35 +892,6 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
          bug, with the same message [Context.run] would give. *)
       let baseline_ms = time_routine ~repeats bctx broutine in
       logf "baseline: %.4f ms (digest %s)" baseline_ms (String.prefix base_digest 12);
-      (* Timing runs settle tensor-node value bounds, and later lowerings can fold guards the
-         pre-run base lowering still had (interval analysis over settled bounds) — every
-         candidate compiles after the baseline run, so recapture the reference digest
-         post-settlement and accept either form (found by the CUDA benchmark runs on PR #140:
-         late candidates failed the digest check against the pre-run digest). The disk-cache
-         key stays the pre-run canon — a fresh process looks up before any run. *)
-      let settled_digest =
-        let cap = ref None in
-        let (_ : Context.t * Context.routine) =
-          Context.compile
-            ~lowered_transform:(fun opt ->
-              cap := Some (SC.digest (SC.canonicalize ~static_indices opt));
-              opt)
-            search_ctx comp bindings
-        in
-        Option.value !cap ~default:base_digest
-      in
-      let base_digests =
-        if String.equal settled_digest base_digest then [ base_digest ]
-        else (
-          logf "post-run lowering drift: digest %s -> %s" (String.prefix base_digest 12)
-            (String.prefix settled_digest 12);
-          [ base_digest; settled_digest ])
-      in
-      let compile_spec = compile_spec_with ~base_digests search_ctx in
-      let compile_spec_real = compile_spec_with ~base_digests ctx in
-      (* An identity candidate lowers post-settlement, so its digest_after is the settled
-         digest — dedup it against the baseline like the pre-run form. *)
-      Hash_set.add seen settled_digest;
       let baseline =
         {
           form = Whole_saved [];
