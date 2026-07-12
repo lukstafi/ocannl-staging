@@ -1,7 +1,22 @@
 (executables
- (names bench_mlp bench_conv bench_gpt)
- (modules bench_mlp bench_conv bench_gpt bench_harness)
+ (names bench_mlp bench_conv bench_gpt bench_gpt_diag bench_conv_diag bench_min_repro)
+ (modules
+  bench_mlp
+  bench_conv
+  bench_gpt
+  bench_gpt_diag
+  bench_conv_diag
+  bench_min_repro
+  bench_harness)
  (libraries base ocannl stdio unix)
  (preprocess
   (pps ppx_here ppx_ocannl))
+ (modes exe))
+
+(executable
+ (name bench_metal_bug)
+ (modules bench_metal_bug)
+ (libraries metal ctypes)
+ (enabled_if
+  (= %{system} macosx))
  (modes exe))
