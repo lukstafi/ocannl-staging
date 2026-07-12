@@ -62,6 +62,77 @@ let dump_params loss =
         (String.concat ~sep:";"
            (Array.to_list (Array.map (Lazy.force tn.Tn.dims) ~f:Int.to_string))))
 
+(** Diagnostic: prints the default fission-pipeline segment census for the captured lowered
+    routine — per segment its kind, launch geometry and schedule size, and per top-level nest
+    the loop extents (with axis-type letters) and written tensor nodes ([!] materialized, [~]
+    routine-local). Used by the [bench_*_diag] runners; not part of the benchmark protocol. *)
+let print_census ?promote_locals ~backend ~limits ~static_indices opt =
+  let module LL = Ir.Low_level in
+  let module Sched = Ir.Schedule in
+  let stmt_detail plc stmt =
+    let loops = ref [] and writes = ref [] and zeros = ref [] in
+    let rec code (llc : LL.t) =
+      match llc with
+      | LL.Noop | LL.Comment _ | LL.Declare_local _ | LL.Staged_compilation _
+      | LL.Workgroup_barrier | LL.Tile_mma _ ->
+          ()
+      | LL.Seq (a, b) ->
+          code a;
+          code b
+      | LL.For_loop { from_; to_; body; axis; _ } ->
+          loops :=
+            ( to_ - from_ + 1,
+              match axis with
+              | LL.Serial -> "s"
+              | LL.Grid -> "G"
+              | LL.Workgroup -> "W"
+              | LL.Workgroup_reduce -> "R"
+              | LL.Vectorized -> "v"
+              | LL.Unrolled -> "u" )
+            :: !loops;
+          code body
+      | LL.Zero_out tn -> zeros := tn :: !zeros
+      | LL.Set { tn; _ } -> writes := tn :: !writes
+      | LL.Set_dynamic { tn; _ } -> writes := tn :: !writes
+      | LL.Set_from_vec { tn; _ } -> writes := tn :: !writes
+      | LL.Set_local _ -> ()
+      | LL.If { body; _ } -> code body
+    in
+    code stmt;
+    let tn_s tn =
+      Printf.sprintf "%s%s(%d)" (Tn.debug_name tn)
+        (if Tn.Placements.is_materialized_peek plc tn then "!" else "~")
+        (Tn.num_elems tn)
+    in
+    let loops_s =
+      String.concat ~sep:"," (List.rev_map !loops ~f:(fun (n, k) -> Printf.sprintf "%d%s" n k))
+    in
+    let ws = List.dedup_and_sort ~compare:Tn.compare (!writes @ !zeros) in
+    if List.is_empty ws && String.is_empty loops_s then None
+    else
+      Some (Printf.sprintf "loops[%s] w:%s" loops_s (String.concat ~sep:" " (List.map ws ~f:tn_s)))
+  in
+  let gpu = Sched.backend_is_gpu backend in
+  let promote_locals = Option.value promote_locals ~default:gpu in
+  let preset o = if gpu then Sched.default_gpu ~limits o else Sched.default_cpu o in
+  let zero_sched tns = if gpu then Sched.zero_expansion ~limits tns else [] in
+  let segs = Sched.fission_scheduled ~promote_locals ~preset ~zero_sched ~static_indices opt in
+  Stdio.printf "default pipeline: %d segments\n" (List.length segs);
+  List.iteri segs ~f:(fun i (kind, pre, sched, post) ->
+      let dims = LL.launch_dims post.LL.llc in
+      let np = Array.fold dims.grid ~init:1 ~f:( * ) * Array.fold dims.block ~init:1 ~f:( * ) in
+      let stmts = List.length (LL.flat_lines [ post.LL.llc ]) in
+      let kind_s = match kind with `Normal -> "N" | `Zeros -> "Z" | `Solo -> "S" in
+      Stdio.printf "  seg%-3d %s threads=%-8d grid=[%d;%d;%d] block=[%d;%d;%d] ops=%d stmts=%d\n" i
+        kind_s np dims.grid.(0) dims.grid.(1) dims.grid.(2) dims.block.(0) dims.block.(1)
+        dims.block.(2) (List.length sched) stmts;
+      let plc = pre.LL.optimize_ctx.LL.placements in
+      List.iter (LL.flat_lines [ pre.LL.llc ]) ~f:(fun stmt ->
+          match stmt_detail plc stmt with
+          | Some s -> Stdio.printf "        %s\n" s
+          | None -> ()));
+  Stdio.Out_channel.flush Stdio.stdout
+
 (** Runs the measurement protocol and prints the JSON result line. [run_step] advances the
     batch binding and enqueues one step; [read_loss] returns the current loss value (awaits
     the device); [sync] awaits all queued work. *)

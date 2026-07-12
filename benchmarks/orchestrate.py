@@ -25,18 +25,13 @@ PARITY_TOL = 2e-3
 REFERENCE = ("pytorch", "cpu", "eager")
 
 # Known-pathological cells excluded from the default matrix, as (workload, backend, variant).
-# The default schedule on metal is currently degenerate on larger graphs (see the pending
-# metal-default-schedule task): gpt2_mini ~81 s/step, mlp_wide >10 s/step (killed after
-# 90 min). The materialized and tuned variants cover metal on those workloads.
-SKIP_CELLS = {
-    ("gpt2_mini", "metal", "default"),
-    ("mlp_wide", "metal", "default"),
-    ("mlp_wide", "metal", "materialized"),
-    # Complete but slow (~3s/step) AND parity-FAIL at 2.1e-3 (tuned passes at 2.1e-7 on the
-    # same backend) — the degenerate kernels are numerically divergent, not just slow.
-    ("lenet", "metal", "default"),
-    ("lenet", "metal", "materialized"),
-}
+# Currently empty: the metal-default-schedule pathologies (gpt2_mini 81 s/step -> ~0.3 s,
+# lenet 3.2 s/step + parity FAIL -> 0.22 s exact, mlp_wide >10 s/step -> 6 ms) were fixed by
+# lowering the default GPU schedule's serial-fallback threshold, promoting statement-crossing
+# Local scratch at fission, and working around a Metal compiler miscompilation of scalar
+# read-modify-write accumulation (see arrayjit/lib/c_syntax.ml volatile_scalar_rmw and
+# benchmarks/runners/ocannl/bench_metal_bug.ml).
+SKIP_CELLS = set()
 
 sys.path.insert(0, str(HERE / "runners"))
 from bench_common import read_st_metadata  # noqa: E402

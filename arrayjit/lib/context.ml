@@ -411,6 +411,12 @@ let from_host ctx (tn : Tn.t) (nd : Nd.t) : t =
                  with type dev = dev
                   and type runner = runner
                   and type event = event) c ->
+            (* Await pending device work BEFORE the upload, mirroring [to_host]: backends with
+               host-visible (Shared) buffers implement [from_host] as a direct CPU memcpy, which
+               already-queued kernels writing [tn] (e.g. a just-scheduled parameter
+               initialization) would otherwise execute after and overwrite — [set_values] right
+               after [Train.init_params] silently lost its writes on Metal. *)
+            Backend.await c.BI.device;
             let c = if Backend.from_host c tn nd then c else Backend.init_from_host c tn nd in
             Backend.await c.BI.device;
             (c, ()));

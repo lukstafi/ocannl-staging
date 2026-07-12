@@ -55,7 +55,20 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
 - `orchestrate.py` — runs the matrix (dispatching the OCANNL executable on the fixture's
   `model`), enforces the parity gate, writes `results/results.jsonl` and
   `results/report.md`. Flags: `--workloads mlp_small ...`, `--tuned`, `--materialized`,
-  `--nojit` (tinygrad nojit), `--only ocannl pytorch tinygrad`, `--skip-build`.
+  `--nojit` (tinygrad nojit), `--only ocannl pytorch tinygrad`, `--skip-build`. See
+  [example-report.md](example-report.md) for checked-in example output (a full
+  `--tuned --materialized` matrix; `results/` itself is gitignored).
+- `runners/ocannl/bench_{gpt,conv}_diag.ml` — schedule diagnostics: print the default
+  fission-pipeline segment census (launch geometry, per-nest loop extents, written nodes with
+  materialization markers) for the gpt2_mini / lenet graphs, then optionally time steps
+  (`BENCH_STEPS=1`) or dump tensor values (`BENCH_PROBE=1`, `BENCH_DUMP=1`; `BENCH_FWD=1`
+  compiles forward-only, `BENCH_PROMOTE=0` disables fission's Local promotion in the census).
+- `runners/ocannl/bench_metal_bug.ml` — standalone (no OCANNL) repro of an Apple Metal
+  shader-compiler miscompilation: a serial `acc[0] = acc[0] + f(i)` loop over
+  slot-table-derived pool pointers keeps only the last iteration's contribution. OCANNL works
+  around it via `volatile_scalar_rmw` in `arrayjit/lib/c_syntax.ml`; this repro documents the
+  raw bug (prints the wrong value as long as the toolchain is affected) and
+  `test/operations/scalar_rmw_accumulation.ml` guards the workaround end to end.
 
 ## Setup
 

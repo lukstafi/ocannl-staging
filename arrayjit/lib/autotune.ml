@@ -396,7 +396,12 @@ let compile_candidate ~static_indices ~base_digest ~limits ~is_gpu ~is_cpu ctx c
                 | Some saved -> fst (SC.of_saved seg_canon saved)
                 | None -> [])
           in
-          let tuples = Sched.fission_scheduled ~preset ~zero_sched ~static_indices opt in
+          let tuples =
+            (* Match the default pipeline's placements (statement-crossing [Local]s promoted on
+               GPU), so fissioned candidates and the untuned baseline schedule the same code. *)
+            Sched.fission_scheduled ~promote_locals:is_gpu ~preset ~zero_sched ~static_indices
+              opt
+          in
           let posts = List.map tuples ~f:(fun (_, _, _, post) -> post) in
           let units =
             List.filter_map tuples ~f:(fun (kind, pre, sched, post) ->

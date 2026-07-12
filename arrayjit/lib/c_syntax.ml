@@ -98,6 +98,22 @@ module type C_syntax_config = sig
   (** Declaration prefix for workgroup-shared placements ([__shared__ ] / [threadgroup ]); [None]
       makes a non-empty [workgroup_shared] set a compile-time error. *)
 
+  val volatile_scalar_rmw : bool
+  (** Workaround for a Metal shader-compiler miscompilation (observed on macOS 15/Metal 3.1-3.2,
+      reproduced standalone in [benchmarks/runners/ocannl/bench_metal_bug.ml]): a serial loop
+      accumulating into a loop-invariant address of a kernel-parameter-derived pointer —
+      [acc[k] = acc[k] + f(i)] with [k] free of [i] — can execute as if the load were hoisted
+      above the loop and the store sunk below it {e without} carrying the accumulation, leaving
+      only the last iteration's contribution (scalar losses collapsed to the last sample's CE;
+      [w.grad] accumulated only the last batch element). The trigger involves pointers derived
+      from dynamically-loaded offsets (the pooled-parameter slot table) but is otherwise
+      capricious — plain-FMA and inlined-recompute statements alike miscompiled in some kernels
+      and compiled fine in byte-alike others — so the rule keys on the pass's precondition: when
+      [true], [Set] statements that read the written node at an index invariant across at least
+      one enclosing serial [for] loop render both accesses through a [volatile]-qualified shadow
+      pointer, pinning the per-iteration read-modify-write. This covers reduction accumulators
+      (address invariant across the reduction loop); pointwise updates stay unqualified. *)
+
   val restrict_keyword : string option
   (** No-alias qualifier for kernel pointer parameters and, in the pooled style, for the derived
       per-node pointers ([restrict] / [__restrict__] / [__restrict]); [None] emits no qualifier.
@@ -234,6 +250,7 @@ struct
   let vector_style = `Vec_extensions
   let shared_decl_prefix = None
   let restrict_keyword = Some "restrict"
+  let volatile_scalar_rmw = false
 
   (* Clang defines both [__clang__] and [__GNUC__], so test [__clang__] first. *)
   let vectorize_pragma =
@@ -837,6 +854,11 @@ module C_syntax (B : C_syntax_config) = struct
      [compile_proc]. *)
   let zero_out_seen : int Hash_set.t = Hash_set.create (module Int)
 
+  (* Symbols of the serial [for] loops enclosing the current [pp_ll] rendering point (innermost
+     first): maintained by [serial_loop] below, consulted by the [Set] case's
+     [volatile_scalar_rmw] rule. *)
+  let serial_loop_stack : Indexing.symbol list ref = ref []
+
   let rec pp_ll ?(log_set_locals = true) ?(in_loop = false) (c : Low_level.t) : PPrint.document =
     let open PPrint in
     match c with
@@ -876,7 +898,12 @@ module C_syntax (B : C_syntax_config) = struct
             ^^ string " <= " ^^ PPrint.OCaml.int to_ ^^ semi ^^ space ^^ string "++" ^^ pp_symbol i
             ^^ string ")"
           in
-          group (header ^^ space ^^ lbrace ^^ nest 2 (hardline ^^ body_doc ()) ^^ hardline ^^ rbrace)
+          serial_loop_stack := i :: !serial_loop_stack;
+          let body =
+            Exn.protect ~f:body_doc ~finally:(fun () ->
+                serial_loop_stack := List.tl_exn !serial_loop_stack)
+          in
+          group (header ^^ space ^^ lbrace ^^ nest 2 (hardline ^^ body) ^^ hardline ^^ rbrace)
         in
         let hardware_binding kind =
           let slot =
@@ -1732,6 +1759,73 @@ module C_syntax (B : C_syntax_config) = struct
         let local_defs, val_doc = pp_scalar prec llsc in
         let local_defs = pp_local_defs local_defs in
         let offset_doc = pp_array_offset (idcs, dims) in
+        (* See {!C_syntax_config.volatile_scalar_rmw}: pin the per-iteration read-modify-write of
+           loop-invariant-address accumulators by shadowing the node's pointer with a
+           volatile-qualified alias for the whole statement (the shadow also covers reads inside
+           [local_defs]). The rule keys on the miscompiling pass's precondition — a
+           read-modify-write whose address is invariant across at least one enclosing serial
+           [for] loop (a scalar loss reduction's constant index, a gradient accumulated over an
+           outer batch loop, a matmul/conv accumulator indexed only by loops outside its
+           reduction) — because no finer syntactic discriminator survived the observed cases:
+           plain-FMA and Local-scope-bearing statements both miscompiled in some kernels while
+           byte-alike statements in others compiled fine. *)
+        let mentions_sym s (idx : Indexing.axis_index) =
+          match idx with
+          | Indexing.Iterator s2 -> Indexing.equal_symbol s s2
+          | Indexing.Affine { symbols; _ } ->
+              List.exists symbols ~f:(fun (_, s2) -> Indexing.equal_symbol s s2)
+          | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
+        in
+        let rmw_volatile =
+          B.volatile_scalar_rmw
+          && List.exists !serial_loop_stack ~f:(fun s ->
+                 not (Array.exists idcs ~f:(mentions_sym s)))
+          (* Only kernel-parameter-derived device pointers: routine-local scratch is declared as
+             a plain local array (not address-castable, and compiler-visible anyway). *)
+          && Tn.Placements.is_materialized_force (placements ()) tn 433
+          &&
+          let rec reads_tn (llsc : Low_level.scalar_t) =
+            match llsc with
+            | Low_level.Get (tn2, _) -> Tn.equal tn tn2
+            | Get_dynamic { tn = tn2; dyn_value = v, _; _ } -> Tn.equal tn tn2 || reads_tn v
+            | Local_scope { body; _ } -> body_reads_tn body
+            | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ ->
+                false
+            | Ternop (_, (a, _), (b, _), (c, _)) -> reads_tn a || reads_tn b || reads_tn c
+            | Binop (_, (a, _), (b, _)) -> reads_tn a || reads_tn b
+            | Unop (_, (a, _)) -> reads_tn a
+          and body_reads_tn (body : Low_level.t) =
+            match body with
+            | Low_level.Seq (a, b) -> body_reads_tn a || body_reads_tn b
+            | For_loop { body; _ } -> body_reads_tn body
+            | If { cond = c, _; body } -> reads_tn c || body_reads_tn body
+            | Set { llsc; _ } | Set_local (_, llsc) -> reads_tn llsc
+            | Set_dynamic { dyn_value = v, _; llsc; _ } -> reads_tn v || reads_tn llsc
+            | Set_from_vec { arg = a, _; _ } -> reads_tn a
+            | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _
+            | Workgroup_barrier | Tile_mma _ ->
+                false
+          in
+          reads_tn llsc
+        in
+        let wrap_rmw_volatile stmt_doc =
+          if not rmw_volatile then stmt_doc
+          else
+            let vol_ptr = string (B.buffer_prefix ^ "volatile " ^ B.typ_of_prec prec ^ "*") in
+            (* The ident is for readability of the generated source; the uid suffix guarantees
+               uniqueness — label-derived identifiers (get_ident) could legally collide with a
+               prefixed name, and the inner scope must shadow nothing except the target node. *)
+            let tmp = string ("__rmw_" ^ get_ident tn ^ "_" ^ Int.to_string tn.Tn.uid) in
+            lbrace
+            ^^ nest 2
+                 (hardline ^^ vol_ptr ^^ space ^^ tmp ^^ string " = " ^^ ident_doc ^^ semi
+                 ^^ hardline ^^ lbrace
+                 ^^ nest 2
+                      (hardline ^^ vol_ptr ^^ space ^^ ident_doc ^^ string " = " ^^ tmp ^^ semi
+                     ^^ hardline ^^ stmt_doc)
+                 ^^ hardline ^^ rbrace)
+            ^^ hardline ^^ rbrace
+        in
         let assignment =
           group
             (ident_doc ^^ brackets offset_doc ^^ string " ="
@@ -1780,11 +1874,11 @@ module C_syntax (B : C_syntax_config) = struct
               decl ^^ hardline ^^ log_doc ^^ hardline ^^ assignment'
             else local_defs ^^ hardline ^^ decl ^^ hardline ^^ log_doc ^^ hardline ^^ assignment'
           in
-          lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace
-        else if PPrint.is_empty local_defs then assignment
+          wrap_rmw_volatile (lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace)
+        else if PPrint.is_empty local_defs then wrap_rmw_volatile assignment
         else
           let block_content = local_defs ^^ hardline ^^ assignment in
-          lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace
+          wrap_rmw_volatile (lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace)
     | Set_dynamic { tn; idcs; dyn_axis; dyn_value = iv, iprec; llsc; debug } ->
         (* gh-466: the scatter counterpart of the [Get_dynamic] gather — the write offset splices
            the runtime index (cast to [Ops.index_prec ()], mirroring the gather) at [dyn_axis]. The

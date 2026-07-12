@@ -346,8 +346,9 @@ let () =
     (match segs with [ s0; s1 ] -> annotated s0 && annotated s1 | _ -> false);
 
   (* Alignment by trimming would shrink the producer's parallelism (2-D chain to 1-D): the
-     lossless guard prefers the cut. The consumer (64 iterations, below [min_parallel]) then
-     stays serial in its own kernel. *)
+     lossless guard prefers the cut. The consumer's own kernel is annotated as well (64 parallel
+     iterations, at the default [gpu_schedule_min_parallel] = 64 — real parallelism beats the
+     serial 1x1 fallback). *)
   let mp = fresh_tn "pmp" [| 64; 64 |] in
   let mq = fresh_tn "pmq" [| 64 |] in
   let k1 = Idx.get_symbol () and k2 = Idx.get_symbol () and q = Idx.get_symbol () in
@@ -361,7 +362,10 @@ let () =
   in
   let _, segs = segs_of ~stmts:[ np; nq ] ~tns_on_device:[ a2; mp; mq ] ~tns_local:[] in
   p "aligned: lossy trim still cuts, producer keeps its 2-D parallelism"
-    (match segs with [ s0; s1 ] -> annotated s0 && not (annotated s1) | _ -> false);
+    (match segs with
+    | [ s0; s1 ] ->
+        annotated s0 && List.length (LL.hardware_axes s0.LL.llc) = 2 && annotated s1
+    | _ -> false);
 
   (* Aligned [Local] scratch: the pair shares one kernel — each thread reads back the slice of
      its private copy it wrote — so the scratch needs no promotion, unlike the stranded case of
