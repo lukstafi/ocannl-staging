@@ -105,6 +105,7 @@ let known_config_keys =
       "multidev_num_devices";
       (* Low-level / optimization *)
       "virtualize_max_visits";
+      "virtualize_max_inline_reduction";
       "virtualize_max_tracing_dim";
       "enable_device_only";
       "inline_scalar_constexprs";
