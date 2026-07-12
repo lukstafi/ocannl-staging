@@ -1855,10 +1855,17 @@ let default_gpu ?block_size ?min_parallel ?(limits = Backend_intf.no_hardware_li
     Option.value_map limits.Backend_intf.max_threads_per_workgroup ~default:block_size
       ~f:(min block_size)
   in
+  (* Default 64 (was 1024): a kernel launches either way, so on GPU any real parallelism beats
+     the serial 1x1 fallback — a single GPU thread is 1-2 orders of magnitude slower than a CPU
+     core, and the "too small to pay for a launch" reasoning of the CPU preset's fan-out
+     threshold does not transfer (there is no cheaper non-launching alternative). The remaining
+     small threshold keeps sub-simdgroup-scale programs (tutorials, scalar tails) fully serial:
+     their segments then coalesce back to a single kernel and fission's placement promotions are
+     undone, so tiny programs keep byte-identical artifacts and context contents. *)
   let min_parallel =
     Option.value min_parallel
       ~default:
-        (Int.of_string @@ Utils.get_global_arg ~arg_name:"gpu_schedule_min_parallel" ~default:"1024")
+        (Int.of_string @@ Utils.get_global_arg ~arg_name:"gpu_schedule_min_parallel" ~default:"64")
   in
   try
     let chains = analyze_parallel_chains opt in
@@ -2412,7 +2419,7 @@ let zero_expansion ?block_size ?min_parallel ~(limits : Backend_intf.hardware_li
   let min_parallel =
     Option.value min_parallel
       ~default:
-        (Int.of_string @@ Utils.get_global_arg ~arg_name:"gpu_schedule_min_parallel" ~default:"1024")
+        (Int.of_string @@ Utils.get_global_arg ~arg_name:"gpu_schedule_min_parallel" ~default:"64")
   in
   let dims tn = Lazy.force tn.Tn.dims in
   let numel tn = Array.fold (dims tn) ~init:1 ~f:( * ) in
@@ -2454,15 +2461,55 @@ let zero_expansion ?block_size ?min_parallel ~(limits : Backend_intf.hardware_li
 let seg_llc replicas seg =
   Low_level.unflat_lines (List.concat_map (replicas @ seg.g_units) ~f:(fun u -> u.f_stmts))
 
-let fission_scheduled ~(preset : Low_level.optimized -> schedule)
+(* Statement-crossing [Local] intermediates: a nest whose only writes land in [Local] scratch
+   gets no parallel chain — the annotator's coverage property quantifies over {e materialized}
+   writes — and Local producer/consumer edges deliberately do not cut, so such producers either
+   drag their whole segment down to a serial 1x1 launch (when no materialized-writing nest
+   shares it, e.g. a softmax max/denominator pair feeding a scalar loss) or are redundantly
+   re-executed by every hardware thread of an annotated kernel (e.g. layer-norm statistics).
+   Small reduction intermediates land exactly here: [most_local_materialized_mode] keeps any
+   node under the stack threshold [Local]. Promoting the statement-crossing ones to [On_device]
+   up front lets the ordinary materialized machinery apply — chains qualify, [mat_conflict]
+   cuts, aligned merges keep single kernels — with the fission boundary supplying the
+   synchronization. Within-statement scratch is untouched. Returns undo entries; the caller
+   restores promotions that fission did not end up needing (see the undo filter and the
+   fallback paths — restoring is sound because schedules computed under the stricter
+   materialized view remain valid for a [Local] node, cf. {!Tn.Placements.raw_entry}). *)
+let promote_statement_crossing_locals plc (stmts : Low_level.t list) :
+    (Tn.t * (Tn.memory_mode * int) option) list =
+  let summaries = List.map stmts ~f:(summarize_stmt plc) in
+  let footprints = List.map stmts ~f:(fun s -> fst (code_footprint s)) in
+  let crossing tn i = List.existsi footprints ~f:(fun j fp -> j <> i && Set.mem fp tn) in
+  List.foldi summaries ~init:[] ~f:(fun i undo -> function
+    | None -> undo
+    | Some s ->
+        Set.fold s.s_writes ~init:undo ~f:(fun undo tn ->
+            let eligible =
+              match Tn.Placements.get plc tn with
+              | Some ((Virtual | Effectively_constant | On_device), _) -> false
+              | Some ((Local | Never_virtual), _) | None ->
+                  not (Tn.Placements.is_materialized_peek plc tn)
+            in
+            if eligible && crossing tn i then (
+              let prior = Tn.Placements.raw_entry plc tn in
+              Tn.Placements.promote_local_to_device plc tn 178;
+              (tn, prior) :: undo)
+            else undo))
+
+let fission_scheduled ?(promote_locals = false) ~(preset : Low_level.optimized -> schedule)
     ~(zero_sched : Tn.t list -> schedule) ~static_indices (opt : Low_level.optimized) :
     ([ `Normal | `Zeros | `Solo ] * Low_level.optimized * schedule * Low_level.optimized) list =
   let plc = opt.Low_level.optimize_ctx.placements in
+  let stmts = Low_level.flat_lines [ opt.Low_level.llc ] in
+  let pre_promoted = if promote_locals then promote_statement_crossing_locals plc stmts else [] in
   let fallback () =
+    (* Single-kernel compilation, exactly as before fission: no boundary needs the promotions,
+       and placement changes must not leak out of an unfissioned routine. *)
+    List.iter pre_promoted ~f:(fun (tn, prior) -> Tn.Placements.unsafe_restore plc tn prior);
     let sched = preset opt in
     [ (`Normal, opt, sched, apply ~static_indices sched opt) ]
   in
-  let units = collect_units plc opt (Low_level.flat_lines [ opt.Low_level.llc ]) in
+  let units = collect_units plc opt stmts in
   let segs = group_units opt units in
   if List.length segs <= 1 then fallback ()
   else
@@ -2471,7 +2518,7 @@ let fission_scheduled ~(preset : Low_level.optimized -> schedule)
     | segs, replicas when List.length segs <= 1 -> ignore replicas; fallback ()
     | segs, replicas ->
         let segs_with_replicas = List.zip_exn segs replicas in
-        let promoted = promote_crossing plc segs_with_replicas in
+        let promoted = pre_promoted @ promote_crossing plc segs_with_replicas in
         let undo_promotions which =
           List.iter which ~f:(fun (tn, prior) -> Tn.Placements.unsafe_restore plc tn prior)
         in
@@ -2527,9 +2574,10 @@ let fission_scheduled ~(preset : Low_level.optimized -> schedule)
               let pre = segment_optimized opt (seg_llc replicas seg) in
               (seg.g_kind, pre, sched, apply ~static_indices sched pre)))
 
-let fission_default ~preset ~zero_sched ~static_indices (opt : Low_level.optimized) :
-    Low_level.optimized list =
-  List.map (fission_scheduled ~preset ~zero_sched ~static_indices opt)
+let fission_default ?promote_locals ~preset ~zero_sched ~static_indices
+    (opt : Low_level.optimized) : Low_level.optimized list =
+  List.map
+    (fission_scheduled ?promote_locals ~preset ~zero_sched ~static_indices opt)
     ~f:(fun (_kind, _pre, _sched, post) -> post)
 
 (** {2 Wiring: the implicit transform for GPU and CPU backends} *)
@@ -2572,7 +2620,11 @@ let maybe_default_schedules ~backend_name ?(limits = Backend_intf.no_hardware_li
       (* CPU zero segments stay whole-node: a serial kernel renders them as [memset], which is
          hard to beat below many-megabyte sizes; parallel zero expansion on CPU is a follow-up. *)
       let zero_sched tns = if gpu then zero_expansion ~limits tns else [] in
-      fission_default ~preset ~zero_sched ~static_indices opt
+      (* Statement-crossing [Local]s are promoted on GPU only: a serial (or per-thread
+         redundant) producer nest costs little next to CPU cores but is catastrophic next to
+         GPU threads, and keeping CPU placements unchanged keeps small-routine codegen
+         stable. *)
+      fission_default ~promote_locals:gpu ~preset ~zero_sched ~static_indices opt
 
 let check_hardware_limits ~name ~(limits : Backend_intf.hardware_limits)
     (opt : Low_level.optimized) : unit =

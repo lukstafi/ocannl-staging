@@ -219,8 +219,11 @@ val default_gpu :
     linked nest — and per axis position the paired accesses either both use plain [Iterator]s of
     same-chain-position parallel symbols or neither mentions one; otherwise the analysis bails.
     Returns the empty schedule when any check fails or when the largest parallelizable nest has
-    fewer than [min_parallel] iterations (default from config [gpu_schedule_min_parallel] =
-    1024). *)
+    fewer than [min_parallel] iterations (default from config [gpu_schedule_min_parallel] = 64: a
+    kernel launches either way, so any real parallelism beats the serial 1x1 fallback — a single
+    GPU thread is 1-2 orders of magnitude slower than a CPU core; the remaining small threshold
+    keeps sub-simdgroup-scale programs fully serial so their segments coalesce and placements
+    stay unchanged). *)
 
 val default_cpu : ?min_parallel:int -> Low_level.optimized -> schedule
 (** The default CPU annotator preset: the same conservative analysis as {!default_gpu}, but each
@@ -267,6 +270,7 @@ val zero_expansion :
     schedules. *)
 
 val fission_scheduled :
+  ?promote_locals:bool ->
   preset:(Low_level.optimized -> schedule) ->
   zero_sched:(Tnode.t list -> schedule) ->
   static_indices:Indexing.static_symbol list ->
@@ -285,7 +289,18 @@ val fission_scheduled :
     everything coalesces back) the result is a single [`Normal] tuple over the whole routine with
     [preset]'s schedule. Callers compile each scheduled segment as its own kernel in order (the
     plural transform seam of backend [compile]); see {!maybe_default_schedules} for the
-    synchronization contract. *)
+    synchronization contract.
+
+    [promote_locals] (default [false]): promote statement-crossing [Local] scratch to
+    [On_device] before segmentation. A nest whose only writes land in [Local] scratch gets no
+    parallel chain (the annotator's coverage property quantifies over materialized writes), and
+    Local producer/consumer edges do not cut — so such producers either drag their segment down
+    to a serial 1x1 launch or are redundantly re-executed by every hardware thread; small
+    reduction intermediates (layer-norm statistics, softmax max/denominator) land exactly here
+    via the [Local] stack threshold. Promotion lets the ordinary materialized machinery apply;
+    promotions fission does not end up needing (single-kernel fallbacks, or all accesses within
+    one segment after coalescing) are restored. {!maybe_default_schedules} passes [true] on GPU
+    backends, where a serial nest costs orders of magnitude more than on CPU. *)
 
 val maybe_default_schedules :
   backend_name:string ->
