@@ -186,6 +186,12 @@ autotune_repeats=3
 # An empty value disables the cache (every `Autotune.tune` call searches afresh).
 autotune_cache_dir=autotune_cache
 
+# If true, `Autotune.tune` logs each candidate to stderr: its spec, whether it failed (with the
+# error message), deduplicated against an already-seen post-schedule digest, or was timed (and
+# its time), plus the cache-hit, winner-replay and fallback outcomes. For debugging search
+# quality; independent of the ppx_minidebug log levels.
+autotune_log=false
+
 # If true, stdout capturing is disabled, so some logs meant for the ppx_minidebug log files
 # (in particular CUDA logs) remain on the stdout.
 #

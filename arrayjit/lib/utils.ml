@@ -128,6 +128,7 @@ let known_config_keys =
       "autotune_rounds";
       "autotune_repeats";
       "autotune_cache_dir";
+      "autotune_log";
       (* Identifiers and other *)
       "ll_ident_style";
       "cd_ident_style";

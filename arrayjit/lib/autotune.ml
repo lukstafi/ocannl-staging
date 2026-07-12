@@ -444,11 +444,44 @@ type compiled = {
   digest_after : string;
 }
 
-let compile_candidate ~static_indices ~base_digest ~limits ~is_gpu ~is_cpu ctx comp bindings spec :
-    (compiled, string) Result.t =
+(* Per-candidate search diagnostics on stderr, gated by config [autotune_log]. *)
+let log_enabled =
+  lazy
+    (match
+       String.lowercase
+         (String.strip (Utils.get_global_arg ~arg_name:"autotune_log" ~default:"false"))
+     with
+    | "true" | "1" -> true
+    | _ -> false)
+
+let logf fmt =
+  Printf.ksprintf (fun s -> if Lazy.force log_enabled then Stdio.eprintf "autotune: %s\n%!" s) fmt
+
+let bs_label = function None -> "cfg" | Some b -> Int.to_string b
+
+let spec_label = function
+  | Whole (W_saved s) -> Printf.sprintf "W_saved[%d ops]" (List.length s)
+  | Whole (W_preset { block_size }) -> Printf.sprintf "W_preset[bs=%s]" (bs_label block_size)
+  | Whole (W_sketch p) ->
+      Printf.sprintf "W_sketch[%s %dx%dx%d/%dx%d%s]"
+        (if p.sk_gpu then "gpu" else "cpu")
+        p.sk_bm p.sk_bn p.sk_bk p.sk_tm p.sk_tn
+        (if p.sk_hoist then " hoist" else "")
+  | Fiss (F_preset { block_size; privatize; config_thresholds }) ->
+      Printf.sprintf "F_preset[bs=%s%s%s]" (bs_label block_size)
+        (if privatize then " priv" else "")
+        (if config_thresholds then " cfg-thresh" else "")
+  | Fiss (F_saved assoc) -> Printf.sprintf "F_saved[%d segs]" (List.length assoc)
+
+(* [base_digests] are the accepted reference digests of the tuned code: the pre-run capture
+   and, when it differs, the post-settlement recapture (see the recapture in [tune] — timing
+   runs settle tensor-node value bounds, and later lowerings may fold guards the pre-run
+   lowering still had). *)
+let compile_candidate ~static_indices ~base_digests ~limits ~is_gpu ~is_cpu ctx comp bindings
+    spec : (compiled, string) Result.t =
   let check_digest opt =
     let canon = SC.canonicalize ~static_indices opt in
-    if not (String.equal (SC.digest canon) base_digest) then
+    if not (List.mem base_digests (SC.digest canon) ~equal:String.equal) then
       invalid_arg "Autotune: fresh lowering does not match the tuned code (digest mismatch)";
     canon
   in
@@ -501,7 +534,17 @@ let compile_candidate ~static_indices ~base_digest ~limits ~is_gpu ~is_cpu ctx c
                 let seg_canon = SC.canonicalize ~static_indices seg in
                 match List.Assoc.find assoc ~equal:String.equal (SC.digest seg_canon) with
                 | Some saved -> fst (SC.of_saved seg_canon saved)
-                | None -> [])
+                | None ->
+                    (* Every [`Normal] segment of the saved winner has an assoc entry, so a miss
+                       means the fresh lowering's segmentation drifted from the saved one (e.g.
+                       bounds settled by runs folding guards across process boundaries). Fail
+                       the candidate loudly — replaying the remaining segments with silently
+                       empty schedules would degrade the winner without any signal (the
+                       cache-hit path then falls through to a fresh search; the winner-replay
+                       path falls back to the default compile). *)
+                    invalid_arg
+                      "Autotune: fissioned replay: no saved schedule for a segment (segmentation \
+                       drifted)")
           in
           let tuples =
             (* Match the default pipeline's placements (statement-crossing [Local]s promoted on
@@ -778,13 +821,12 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
   let base_digest = SC.digest canon in
   let use_cache = (not (String.is_empty cache_dir)) && SC.complete canon in
   let key = SC.cache_key canon ~backend in
-  let compile_spec =
-    compile_candidate ~static_indices ~base_digest ~limits ~is_gpu ~is_cpu search_ctx comp bindings
+  let compile_spec_with ~base_digests cctx =
+    compile_candidate ~static_indices ~base_digests ~limits ~is_gpu ~is_cpu cctx comp bindings
   in
-  (* Winner (and cache-hit) compiles target the caller's context. *)
-  let compile_spec_real =
-    compile_candidate ~static_indices ~base_digest ~limits ~is_gpu ~is_cpu ctx comp bindings
-  in
+  (* Winner (and cache-hit) compiles target the caller's context. This pre-run instance serves
+     the cache-hit path; the search branch shadows both with post-settlement instances. *)
+  let compile_spec_real = compile_spec_with ~base_digests:[ base_digest ] ctx in
   let emit_report r = Option.iter report ~f:(fun f -> f r) in
   let flat_schedule = function
     | Whole_saved saved -> saved
@@ -803,6 +845,8 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
           in
           match compile_spec_real spec with
           | Ok c ->
+              logf "cache hit: %s (best %.4f ms, baseline %.4f ms)" (spec_label spec)
+                entry.SC.best_ms entry.SC.baseline_ms;
               emit_report
                 {
                   cache_hit = true;
@@ -816,7 +860,10 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
                   best_schedule = flat_schedule c.form;
                 };
               Some (c.cctx, c.routine)
-          | Error _ -> (* Stale or corrupt entry: fall through to a fresh search. *) None)
+          | Error msg ->
+              (* Stale or corrupt entry: fall through to a fresh search. *)
+              logf "cache entry replay FAILED, re-searching: %s" msg;
+              None)
       | _ -> None
     else None
   in
@@ -828,6 +875,36 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
       (* Baseline timing runs uncaught: its failures (e.g. uninitialized inputs) are the user's
          bug, with the same message [Context.run] would give. *)
       let baseline_ms = time_routine ~repeats bctx broutine in
+      logf "baseline: %.4f ms (digest %s)" baseline_ms (String.prefix base_digest 12);
+      (* Timing runs settle tensor-node value bounds, and later lowerings can fold guards the
+         pre-run base lowering still had (interval analysis over settled bounds) — every
+         candidate compiles after the baseline run, so recapture the reference digest
+         post-settlement and accept either form (found by the CUDA benchmark runs on PR #140:
+         late candidates failed the digest check against the pre-run digest). The disk-cache
+         key stays the pre-run canon — a fresh process looks up before any run. *)
+      let settled_digest =
+        let cap = ref None in
+        let (_ : Context.t * Context.routine) =
+          Context.compile
+            ~lowered_transform:(fun opt ->
+              cap := Some (SC.digest (SC.canonicalize ~static_indices opt));
+              opt)
+            search_ctx comp bindings
+        in
+        Option.value !cap ~default:base_digest
+      in
+      let base_digests =
+        if String.equal settled_digest base_digest then [ base_digest ]
+        else (
+          logf "post-run lowering drift: digest %s -> %s" (String.prefix base_digest 12)
+            (String.prefix settled_digest 12);
+          [ base_digest; settled_digest ])
+      in
+      let compile_spec = compile_spec_with ~base_digests search_ctx in
+      let compile_spec_real = compile_spec_with ~base_digests ctx in
+      (* An identity candidate lowers post-settlement, so its digest_after is the settled
+         digest — dedup it against the baseline like the pre-run form. *)
+      Hash_set.add seen settled_digest;
       let baseline =
         {
           form = Whole_saved [];
@@ -848,19 +925,25 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
       let n_timed = ref 1 and n_failed = ref 0 in
       let try_spec spec =
         match compile_spec spec with
-        | Error _ ->
+        | Error msg ->
             Int.incr n_failed;
+            logf "%s: FAILED %s" (spec_label spec) msg;
             None
         | Ok c ->
-            if Hash_set.mem seen c.digest_after then None
+            if Hash_set.mem seen c.digest_after then (
+              logf "%s: dedup (digest %s)" (spec_label spec) (String.prefix c.digest_after 12);
+              None)
             else (
               Hash_set.add seen c.digest_after;
               match time_routine ~repeats c.cctx c.routine with
               | ms ->
                   Int.incr n_timed;
+                  logf "%s: %.4f ms (digest %s)" (spec_label spec) ms
+                    (String.prefix c.digest_after 12);
                   Some (c, ms)
-              | exception _ ->
+              | exception exn ->
                   Int.incr n_failed;
+                  logf "%s: RUN FAILED %s" (spec_label spec) (Exn.to_string exn);
                   None)
       in
       let block_size_presets mk =
@@ -945,5 +1028,10 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
           | Fiss_saved assoc -> Fiss (F_saved assoc)
         in
         match compile_spec_real spec with
-        | Ok c -> (c.cctx, c.routine)
-        | Error _ -> Context.compile ctx comp bindings
+        | Ok c ->
+            logf "winner replay ok: %s" (spec_label spec);
+            (c.cctx, c.routine)
+        | Error msg ->
+            logf "winner replay FAILED (%s), falling back to the default compile: %s"
+              (spec_label spec) msg;
+            Context.compile ctx comp bindings
