@@ -64,7 +64,9 @@ let () =
   let load_quietly f =
     Stdlib.flush_all ();
     let old_stdout = Unix.dup Unix.stdout in
-    let devnull = Unix.openfile "/dev/null" [ Unix.O_WRONLY ] 0o644 in
+    let devnull =
+      Unix.openfile (if Stdlib.Sys.win32 then "NUL" else "/dev/null") [ Unix.O_WRONLY ] 0o644
+    in
     Unix.dup2 devnull Unix.stdout;
     Unix.close devnull;
     Exn.protect ~f ~finally:(fun () ->
