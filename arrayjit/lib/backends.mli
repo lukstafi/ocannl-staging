@@ -43,9 +43,10 @@ val finalize :
 module Cc_b : Ir.Backend_intf.Backend
 module Multidev_cc_b : Ir.Backend_intf.Backend
 module Cuda_b : Ir.Backend_intf.Backend
+module Hip_b : Ir.Backend_intf.Backend
 module Metal_b : Ir.Backend_intf.Backend
 
-type backend = Cc | Multidev_cc | Cuda | Metal [@@deriving sexp, equal]
+type backend = Cc | Multidev_cc | Cuda | Hip | Metal [@@deriving sexp, equal]
 (** The implemented backends. Constructors statically imply the corresponding singleton module
     ([Cc] -> {!Cc_b}, ...). *)
 
@@ -72,6 +73,7 @@ type wrapped_context =
   | Cc_ctx of Cc_b.context
   | Multidev_cc_ctx of Multidev_cc_b.context
   | Cuda_ctx of Cuda_b.context
+  | Hip_ctx of Hip_b.context
   | Metal_ctx of Metal_b.context
 
 val wrapped_backend : wrapped_context -> backend

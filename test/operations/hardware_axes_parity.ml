@@ -34,6 +34,7 @@ let backend_name =
 let read_generated base_name =
   let ext = if String.is_substring backend_name ~substring:"metal" then ".metal" else ".c" in
   let ext = if String.is_substring backend_name ~substring:"cuda" then ".cu" else ext in
+  let ext = if String.is_substring backend_name ~substring:"hip" then ".hip" else ext in
   let path = Utils.build_file (base_name ^ ext) in
   if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
 
@@ -106,8 +107,10 @@ let () =
           (* Hardware bindings from the gid/lid extra args, no loops left, and the launch-extent
              guard on the smaller Grid nest. *)
           has "gid.x" && has "lid.x" && has "if (" && not (has "for (")
-        else if String.is_substring backend_name ~substring:"cuda" then
-          has "blockIdx.x" && has "threadIdx.x" && has "if (" && not (has "for (")
+        else if
+          String.is_substring backend_name ~substring:"cuda"
+          || String.is_substring backend_name ~substring:"hip"
+        then has "blockIdx.x" && has "threadIdx.x" && has "if (" && not (has "for (")
         else
           (* C backends: legal serial fallback, no hardware registers, no guard (the serial loop
              iterates the true extent). *)

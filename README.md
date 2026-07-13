@@ -28,7 +28,7 @@ OCANNL is sponsored by [Ahrefs](https://ocaml.org/success-stories/peta-byte-scal
 
 ## Usage
 
-The CUDA backend requires at least CUDA version 12.8. The Metal backend requires at least MSL version 3.1.
+The CUDA backend requires at least CUDA version 12.8. The Metal backend requires at least MSL version 3.1. The HIP backend (AMD GPUs) requires ROCm / the AMD HIP SDK, via the [hipjit](https://github.com/lukstafi/ocaml-hipjit) bindings (`opam install hipjit`).
 
 [API documentation entry point](https://ahrefs.github.io/ocannl/dev/).
 
