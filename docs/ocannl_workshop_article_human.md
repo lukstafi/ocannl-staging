@@ -132,7 +132,35 @@ We report preliminary results from OCANNL's cross-framework benchmark harness (`
 
 Measurement is identical across frameworks: the device is synchronized around timed regions, warmup steps are untimed, and we report per-step wall-time percentiles (p50/p10/p90). One-time cost --- graph build, code generation, JIT capture, or autotune search --- is reported separately as compile seconds and never amortized into step time. OCANNL appears in three variants: *default* keeps intermediates virtual (recomputed in the backward pass), *materialized* materializes them, and *tuned* runs `Train.tune_placements`, an autotuning search over placement decisions that keeps the measured winner --- the counterpart of tinygrad's BEAM search and `torch.compile`. Tuned step timings come from a fresh process replaying the cached winning schedule; the tuned row's compile seconds is the from-scratch search cost. Full reports (including enqueue-only timings and throughput) are checked into the repository.
 
-The snapshot below reflects where the compiler work has gone so far: on CPU (`cc` backend) OCANNL is competitive with the reference frameworks' CPU cells on the MLP and LeNet workloads, while the GPU backends currently trail the mature GPU stacks --- by one to two orders of magnitude on the attention workload --- since kernel scheduling (fusion granularity, memory-hierarchy placement) is still early-stage work.
+The per-machine result tables are collected in the Benchmark tables appendix. The snapshot they give reflects where the compiler work has gone so far: on CPU (`cc` backend) OCANNL is competitive with the reference frameworks' CPU cells on the MLP and LeNet workloads, while the GPU backends currently trail the mature GPU stacks --- by one to two orders of magnitude on the attention workload --- since kernel scheduling (fusion granularity, memory-hierarchy placement) is still early-stage work.
+
+## Related work
+
+OCANNL's shape inference design arose from the author's appreciation for the readability of einsum notation in JAX, and familiarity with constraint-based type inference combining parametricity and subtyping. In particular, variable elimination, such as the closure computation in *Pottier, “A Framework for Type Inference with Subtyping”, ICFP 1998*, inspired OCANNL's shape inference solver. Other related works discussed below are not influences; we only offer a selection as an exhaustive treatment would require a survey paper.
+
+Dependent types enable tracking tensor shapes in tensor types; they are included in restricted forms in ergonomic programming languages with type inference. The DML system *Xi, Pfenning, "Dependent Types in Practical Programming", 1999* paved the way to GADTs and refinement types. The most prominent current example is Futhark *Bailly, Henriksen, Elsman, "Shape-Constrained Array Programming with Size-Dependent Types", 2023*. It has capable type inference, but no rank-polymorphism. This contrasts with Qube *Trojahner, Grelck, "Dependently typed array programs don’t go wrong", 2009*. Qube has parametric rank-polymorphism but no type inference.
+
+An interesting recent work is Star *Bachurski, Mycroft, and Orchard, "Structuring Arrays with Algebraic Shapes", 2025*. It interprets algebraic data types as types of tensor indices. This is reminiscent of OCANNL's connection between shapes and projections. Star supports structural rank-polymorphism via subtyping: as in OCANNL, Star's shapes form a lattice (but as in type systems, the lattice is distributive, while OCANNL's lattice is not distributive). Star does not aim at tracking array (dimension) sizes. Star does not have shape inference in the following sense: it does not synthesize new algebraic data types.
+
+APL and J introduced the rank-polymorphic array-programming tradition: functions consume cells and are lifted over frames of extra axes, as formalized in Remora *Slepak, Shivers, Manolios, "The Semantics of Rank Polymorphism", 2019*. This is structural rank-polymorphism. A similarity with OCANNL is that the computation semantics are derived at function application site. In OCANNL, freshened constraints are introduced when a function computes tensor values (at OCaml runtime), these constraints are used both for shapes and for indexing (computation semantics). Refined Remora *Matviichuk, Shivers, "Refined Remora: Constraining Array Shapes", 2026* adds SMT-checked refinements over dimensions and shape sequences, bringing expressivity from below to beyond what's available in OCANNL. However, refinements are not inferred.
+
+*Vasilache, Zinenko, Theodoridis et al. "Tensor Comprehensions: Framework-Agnostic High-Performance Machine Learning Abstractions", 2018* is the closest surface precedent: index variables induce ranges, right-hand-side-only indices induce reductions, affine subscripts express convolution, and underconstrained ranges require explicit annotations. Production systems propagate symbolic or partial shapes through graphs or IRs. There is no rank-polymorphism. The notation is not as concise as in OCANNL: numeric precisions need to always be specified (in OCANNL they are inferred bidirectionally), and tensor fixed rank templates need to be declared.
+
+## Conclusions and future work
+
+OCANNL uniquely combines parametric rank-polymorphism and structural rank-polymorphism, and offers powerful shape inference. It aims to cover most practical shape inference challenges, barring inherent incompleteness that would require backtracking.
+
+The Appendix presents definitions and theorems showing termination and soundness, and illustrating the degree of (in)completeness. A full treatment with proofs is available at: [ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf](https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf).
+
+One problem to explore in OCANNL's shape inference is the current semantics of dimension basis comparisons: $1_\emptyset \neq 1_\texttt{default}$. For example, it makes scalars incompatible with dimension-1 data vectors as same-size arguments to einsum-based operations. This problem has not yet surfaced in practice: "it's a feature, not a bug". Once practical examples suffer from this incompatibility, they might motivate a more sophisticated approach (e.g. basis polymorphism).
+
+OCANNL also intends to provide to the OCaml ecosystem a compilation path for tensor computations across various GPU backends: Nvidia (CUDA), Apple Silicon (Metal), AMD (HIP). The compiler performs inlining and Common Subexpression Elimination on the lowered IR (a loop nest language). Tiling for threadblocks and tensor cores, and further optimizations, are ongoing/future work.
+
+**Authorship:** the content above was written by the human author without AI/LLM feedback, apart from a final AI-assisted review pass (Claude Fable 5) that caught typos and consistency issues against the technical report. The appendix below and the accompanying [technical report](https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf) were created by Claude Fable 5 (interactively, Appendix trimmed down for brevity) and GPT 5.5 (fixing issues I noticed, final compilation and proof gaps).
+
+## Appendix: Benchmark tables
+
+Methodology, workloads, variants and column meanings are described in the Benchmarks section.
 
 ### Apple silicon, Metal backend
 
@@ -265,30 +293,6 @@ Measured on an NVIDIA GeForce RTX 3050 Ti Laptop GPU (4 GB) under WSL2 (Linux x8
 ### AMD, HIP backend
 
 Results for the AMD HIP backend (`hip`, mirroring the CUDA backend through ROCm) are being collected and will be included in the final version.
-
-## Related work
-
-OCANNL's shape inference design arose from the author's appreciation for the readability of einsum notation in JAX, and familiarity with constraint-based type inference combining parametricity and subtyping. In particular, variable elimination, such as the closure computation in *Pottier, “A Framework for Type Inference with Subtyping”, ICFP 1998*, inspired OCANNL's shape inference solver. Other related works discussed below are not influences; we only offer a selection as an exhaustive treatment would require a survey paper.
-
-Dependent types enable tracking tensor shapes in tensor types; they are included in restricted forms in ergonomic programming languages with type inference. The DML system *Xi, Pfenning, "Dependent Types in Practical Programming", 1999* paved the way to GADTs and refinement types. The most prominent current example is Futhark *Bailly, Henriksen, Elsman, "Shape-Constrained Array Programming with Size-Dependent Types", 2023*. It has capable type inference, but no rank-polymorphism. This contrasts with Qube *Trojahner, Grelck, "Dependently typed array programs don’t go wrong", 2009*. Qube has parametric rank-polymorphism but no type inference.
-
-An interesting recent work is Star *Bachurski, Mycroft, and Orchard, "Structuring Arrays with Algebraic Shapes", 2025*. It interprets algebraic data types as types of tensor indices. This is reminiscent of OCANNL's connection between shapes and projections. Star supports structural rank-polymorphism via subtyping: as in OCANNL, Star's shapes form a lattice (but as in type systems, the lattice is distributive, while OCANNL's lattice is not distributive). Star does not aim at tracking array (dimension) sizes. Star does not have shape inference in the following sense: it does not synthesize new algebraic data types.
-
-APL and J introduced the rank-polymorphic array-programming tradition: functions consume cells and are lifted over frames of extra axes, as formalized in Remora *Slepak, Shivers, Manolios, "The Semantics of Rank Polymorphism", 2019*. This is structural rank-polymorphism. A similarity with OCANNL is that the computation semantics are derived at function application site. In OCANNL, freshened constraints are introduced when a function computes tensor values (at OCaml runtime), these constraints are used both for shapes and for indexing (computation semantics). Refined Remora *Matviichuk, Shivers, "Refined Remora: Constraining Array Shapes", 2026* adds SMT-checked refinements over dimensions and shape sequences, bringing expressivity from below to beyond what's available in OCANNL. However, refinements are not inferred.
-
-*Vasilache, Zinenko, Theodoridis et al. "Tensor Comprehensions: Framework-Agnostic High-Performance Machine Learning Abstractions", 2018* is the closest surface precedent: index variables induce ranges, right-hand-side-only indices induce reductions, affine subscripts express convolution, and underconstrained ranges require explicit annotations. Production systems propagate symbolic or partial shapes through graphs or IRs. There is no rank-polymorphism. The notation is not as concise as in OCANNL: numeric precisions need to always be specified (in OCANNL they are inferred bidirectionally), and tensor fixed rank templates need to be declared.
-
-## Conclusions and future work
-
-OCANNL uniquely combines parametric rank-polymorphism and structural rank-polymorphism, and offers powerful shape inference. It aims to cover most practical shape inference challenges, barring inherent incompleteness that would require backtracking.
-
-The Appendix presents definitions and theorems showing termination and soundness, and illustrating the degree of (in)completeness. A full treatment with proofs is available at: [ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf](https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf).
-
-One problem to explore in OCANNL's shape inference is the current semantics of dimension basis comparisons: $1_\emptyset \neq 1_\texttt{default}$. For example, it makes scalars incompatible with dimension-1 data vectors as same-size arguments to einsum-based operations. This problem has not yet surfaced in practice: "it's a feature, not a bug". Once practical examples suffer from this incompatibility, they might motivate a more sophisticated approach (e.g. basis polymorphism).
-
-OCANNL also intends to provide to the OCaml ecosystem a compilation path for tensor computations across various GPU backends: Nvidia (CUDA), Apple Silicon (Metal), AMD (HIP). The compiler performs inlining and Common Subexpression Elimination on the lowered IR (a loop nest language). Tiling for threadblocks and tensor cores, and further optimizations, are ongoing/future work.
-
-**Authorship:** the content above was written by the human author without AI/LLM feedback, apart from a final AI-assisted review pass (Claude Fable 5) that caught typos and consistency issues against the technical report. The appendix below and the accompanying [technical report](https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf) were created by Claude Fable 5 (interactively, Appendix trimmed down for brevity) and GPT 5.5 (fixing issues I noticed, final compilation and proof gaps).
 
 ## Appendix: Shape and Projections inference: semantics and correctness
 
