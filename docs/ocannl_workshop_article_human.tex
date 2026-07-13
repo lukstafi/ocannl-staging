@@ -41,6 +41,25 @@
 \makeatother
 \usepackage{listings}
 \newcommand{\passthrough}[1]{#1}
+\lstset{defaultdialect=[5.3]Lua}
+\lstset{defaultdialect=[x86masm]Assembler}
+\usepackage{longtable,booktabs,array}
+\usepackage{calc} % for calculating minipage widths
+% Correct order of tables after \paragraph or \subparagraph
+\usepackage{etoolbox}
+\makeatletter
+\patchcmd\longtable{\par}{\if@noskipsec\mbox{}\fi\par}{}{}
+\makeatother
+% Allow footnotes in longtable head/foot
+\IfFileExists{footnotehyper.sty}{\usepackage{footnotehyper}}{\usepackage{footnote}}
+\makesavenoteenv{longtable}
+\setlength{\emergencystretch}{3em} % prevent overfull lines
+\providecommand{\tightlist}{%
+  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+% Custom preamble for the workshop article, injected via pandoc -H.
+% Everything OCANNL-specific that pandoc's default LaTeX template
+% does not generate lives here: the OCaml listings language/theme,
+% authblk for the affiliation line, and math macros used by the md.
 \definecolor{ocamlkeyword}{RGB}{0,80,150}
 \definecolor{ocamlmodule}{RGB}{110,55,130}
 \definecolor{ocamlcomment}{RGB}{80,125,75}
@@ -64,8 +83,6 @@
   morestring=[b]",
   alsoletter={\%,',_,!,?,.}
 }
-\lstset{defaultdialect=[5.3]Lua}
-\lstset{defaultdialect=[x86masm]Assembler}
 \lstset{
   basicstyle=\small\ttfamily,
   keywordstyle=\bfseries\color{ocamlkeyword},
@@ -87,20 +104,7 @@
   xrightmargin=0.6em,
   framesep=0.45em
 }
-\usepackage{longtable,booktabs,array}
-\usepackage{calc} % for calculating minipage widths
-% Correct order of tables after \paragraph or \subparagraph
-\usepackage{etoolbox}
 \usepackage{authblk}
-\makeatletter
-\patchcmd\longtable{\par}{\if@noskipsec\mbox{}\fi\par}{}{}
-\makeatother
-% Allow footnotes in longtable head/foot
-\IfFileExists{footnotehyper.sty}{\usepackage{footnotehyper}}{\usepackage{footnote}}
-\makesavenoteenv{longtable}
-\setlength{\emergencystretch}{3em} % prevent overfull lines
-\providecommand{\tightlist}{%
-  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
 \providecommand{\llbracket}{\mathopen{[\![}}
 \providecommand{\rrbracket}{\mathclose{]\!]}}
 \usepackage{bookmark}
@@ -108,19 +112,19 @@
 \urlstyle{same}
 \hypersetup{
   pdftitle={Neural Networks Without Shape Boilerplate: An OCaml DSL Case Study},
+  pdfauthor={Łukasz Stafiniak},
   hidelinks,
   pdfcreator={LaTeX via pandoc}}
 
-\title{Neural Networks Without Shape Boilerplate: An OCaml DSL Case Study}
+\title{Neural Networks Without Shape Boilerplate: An OCaml DSL Case
+Study}
 \author{Łukasz Stafiniak}
 \affil{Independent researcher, sponsored by Ahrefs}
 \date{}
 
 \begin{document}
 \maketitle
-
 \begin{abstract}
-
 Modern neural network code is often cluttered with shape bookkeeping:
 explicit calls to reshape, unsqueeze, expand, transpose, reductions, and
 integer-axis arguments. OCANNL combines an embedded DSL that removes
@@ -137,15 +141,15 @@ and trailing axes; with up to three such variables per shape. We call
 these \emph{row variables}. The paper showcases three examples: tensor
 expressions for core multi-head attention and for rank-polymorphic 2D
 convolution, and a tensor computation for Stochastic Gradient Descent
-with momentum and Nesterov-inspired correction. OCANNL performs broadcast-aware global
-bidirectional shape inference and derives loop-index maps for code
-generation. We formalize the inference problem for the core calculus
-(excluding affine and concatenation) and show properties of OCANNL's
-solver (proofs in the appendix). OCANNL's compiler inlines computations
-to avoid materializing intermediate tensors, and performs common
-subexpression elimination. This paper does not showcase benchmarks nor
-argue for performance, leaving that to follow-up work and the Q\&A.
-
+with momentum and Nesterov-inspired correction. OCANNL performs
+broadcast-aware global bidirectional shape inference and derives
+loop-index maps for code generation. We formalize the inference problem
+for the core calculus (excluding affine and concatenation) and show
+properties of OCANNL's solver (proofs in the appendix). OCANNL's
+compiler inlines computations to avoid materializing intermediate
+tensors, and performs common subexpression elimination. This paper does
+not showcase benchmarks nor argue for performance, leaving that to
+follow-up work and the Q\&A.
 \end{abstract}
 
 \section{Shapes, Tensor Expressions, Syntax Extensions and
@@ -212,7 +216,7 @@ combining the arithmetic semantics, for example:
 \passthrough{\lstinline!++!} is identity with additive accumulation,
 \passthrough{\lstinline!+*!} is multiplication with additive
 accumulation. These operators also support \emph{variable capture} for
-both dimensions and rows -- the variables from a trailing string list
+both dimensions and rows --- the variables from a trailing string list
 are introduced into scope earlier than they first appear (similarly to
 inline definitions). The captured variables can be used for both shape
 constraints \passthrough{\lstinline!Shape.set\_dim!},
@@ -366,7 +370,7 @@ has two forms of rank polymorphism: structural (subtyping) via
 broadcasting and parametric via row variables.
 
 The motivation to have left flank axes in shape (row) terms first came
-from the slice operation -- for example when subdividing data into
+from the slice operation --- for example when subdividing data into
 hierarchical minibatches (like in data parallel batched training). This
 impacts broadcasting: rather than assuming that implicit axes from
 broadcasting land to the left of the ``left flank'', we generalize
@@ -398,14 +402,14 @@ together state inference termination and soundness. Inference is
 declarative --- the result does not depend on the ordering of the
 constraints --- except at the solver's documented policy commitments
 (marker placement and deferred word equations, see the Appendix). The
-shape inference problem is non-principal, and the
-algorithm is in general incomplete. Should the incompleteness ever
-manifest in practice, users can provide additional constraints via for
-example \passthrough{\lstinline!Shape.infer\_equal!}, or variable
-capture and \passthrough{\lstinline!Shape.set\_equal!}. Example of
-incompleteness from TR Example 6.3, where our inference fails although
-constraints are satisfiable, with \(\alpha,\beta\) coming from leaf
-tensors and \(\gamma\) result tensor:
+shape inference problem is non-principal, and the algorithm is in
+general incomplete. Should the incompleteness ever manifest in practice,
+users can provide additional constraints via for example
+\passthrough{\lstinline!Shape.infer\_equal!}, or variable capture and
+\passthrough{\lstinline!Shape.set\_equal!}. Example of incompleteness
+from TR Example 6.3, where our inference fails although constraints are
+satisfiable, with \(\alpha,\beta\) coming from leaf tensors and
+\(\gamma\) result tensor:
 
 \[
 \Phi_2 = \{3_b \sqsubseteq \alpha,\ 5_b \sqsubseteq \beta,\ \gamma \sqsubseteq \alpha,\ \gamma \sqsubseteq \beta\}
@@ -453,7 +457,7 @@ compilation}\label{contexts-and-explicit-compilation}
 OCANNL has an immutable context \passthrough{\lstinline!Context.t!} that
 unifies compilation, device, and execution contexts. Root contexts
 determine the device. Here are the most important operations on a
-context -- the bindings argument of \passthrough{\lstinline!compile!}
+context --- the bindings argument of \passthrough{\lstinline!compile!}
 contains the externally bound indexing symbols used in the computation:
 
 \begin{lstlisting}[language=Caml]
@@ -530,8 +534,7 @@ not as concise as in OCANNL: numeric precisions need to always be
 specified (in OCANNL they are inferred bidirectionally), and tensor
 fixed rank templates need to be declared.
 
-\section{Conclusions and future
-work}\label{conclusions-and-future-work}
+\section{Conclusions and future work}\label{conclusions-and-future-work}
 
 OCANNL uniquely combines parametric rank-polymorphism and structural
 rank-polymorphism, and offers powerful shape inference. It aims to cover
@@ -565,7 +568,8 @@ without AI/LLM feedback, apart from a final AI-assisted review pass
 technical report. The appendix below and the accompanying
 \href{https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf}{technical
 report} were created by Claude Fable 5 (interactively, Appendix trimmed
-down for brevity) and GPT 5.5 (fixing issues I noticed, final compilation and proof gaps).
+down for brevity) and GPT 5.5 (fixing issues I noticed, final
+compilation and proof gaps).
 
 \section{Appendix: Shape and Projections inference: semantics and
 correctness}\label{appendix-shape-and-projections-inference-semantics-and-correctness}
@@ -1248,7 +1252,8 @@ lower bound; all stored row caps and adjacencies are between unsolved
 variables and contain no pending pins (else a rule would fire).
 
 \textbf{Proposition {[}TR Proposition 5.7{]} (The residual store is
-always satisfiable; \(\gamma_\uparrow\) is its greatest solution).} Define \(\gamma_\uparrow\) on the unsolved variables:
+always satisfiable; \(\gamma_\uparrow\) is its greatest solution).}
+Define \(\gamma_\uparrow\) on the unsolved variables:
 \(\gamma_\uparrow(\alpha) = 1_\emptyset\),
 \(\gamma_\uparrow(\rho) = [\,]\cdot\diamond\cdot[\,]\), extended through
 \(\sigma_\star\) on solved variables
@@ -1344,8 +1349,7 @@ If \(B_\star\) stores no atom caps and no row caps (adjacencies
 allowed), then \(\sigma_\star\) (read as a model, free variables
 universal) satisfies \(\sigma_\star \models \Phi_0\), and by TR Theorem
 5.9(3) it is the \(\le\)-least model: a principal model exists exactly
-in this case. TR Example 3.6 shows the restriction
-is necessary.
+in this case. TR Example 3.6 shows the restriction is necessary.
 
 \subsection{6. Closing}\label{closing}
 
@@ -1430,14 +1434,14 @@ correct forms:
   \(\gamma_\uparrow\) is pointwise-greatest among the solutions of the
   final configuration, rows compared by \(\preceq\) (TR Proposition
   5.7). No marked-order (\(\sqsubseteq\)) strengthening holds at row
-  sort: row equations --- including
-  \(\mathrm{eqns}(\sigma_\star)\) --- are read under \(\approx\), so a
-  solution may re-place the marker of a solved row variable, and
-  distinct placements are pairwise \(\sqsubseteq\)-incomparable (TR
-  Proposition 2.9(ii)); once a row variable is solved to a row of
-  positive rank, no \(\sqsubseteq\)-greatest solution exists at all.
-  The solver's substitution commits one placement --- a policy
-  incompleteness (TR Lemma 5.1), not order-theoretic strength.
+  sort: row equations --- including \(\mathrm{eqns}(\sigma_\star)\) ---
+  are read under \(\approx\), so a solution may re-place the marker of a
+  solved row variable, and distinct placements are pairwise
+  \(\sqsubseteq\)-incomparable (TR Proposition 2.9(ii)); once a row
+  variable is solved to a row of positive rank, no
+  \(\sqsubseteq\)-greatest solution exists at all. The solver's
+  substitution commits one placement --- a policy incompleteness (TR
+  Lemma 5.1), not order-theoretic strength.
 \item
   \emph{The unqualified marked claim is false.}
   \(\Phi_0 = \{\langle\rho\rangle \approx [\,]\cdot\diamond\cdot[3,5]\}\):
@@ -1517,8 +1521,8 @@ an external symbol. Equations
   P6. each terminal axis
   \(\rightsquigarrow \mathsf{Iter}(\llbracket\cdot\rrbracket)\). Side
   condition: \(\mathsf{Sol}(\mathsf{Fix}\,c)\) is emitted only with
-  \(0 \le c <\) the axis's size (slices are validated against
-  solved sizes).
+  \(0 \le c <\) the axis's size (slices are validated against solved
+  sizes).
 \end{itemize}
 
 \textbf{Definition {[}TR Definition 7.3{]} (Solver).} A single pass over
@@ -1569,7 +1573,6 @@ and the reduction characterization).} With core labels only
 
 \begin{enumerate}
 \def\labelenumi{(\roman{enumi})}
-\tightlist
 \item
   \(\pi_{\mathrm{LHS}} : P^\times \to \mathrm{Addr}\) is injective iff
   every product variable occurs in some component of

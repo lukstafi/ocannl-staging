@@ -14,7 +14,7 @@ A *tensor node* `Tnode.t` is an identity that also carries dimensionality, preci
 
 OCANNL introduces two syntaxes. Extension point `%op` creates tensor expressions, or OCaml functions returning tensor expressions which we call tensor *operations*. Extension point `%cd` creates tensor computations. Both extensions support inline definitions of new tensors via OCaml's record syntax. For example: `{ w1 = kaiming normal1 () }` inside `%op` introduces tensor `w1` with initialization expression `kaiming normal1 ()`; `{ sgd_momentum }` inside `%cd` below introduces a (non-differentiable, no initialization) tensor `sgd_momentum`; `{ w_q }` inside `%op` below introduces a tensor with default initialization (e.g. centered uniform distribution).
 
-At the heart of OCANNL are indexing specifications for expressing tensor computations. They generalize the Einstein summation convention: indices missing from the result are reduced over. The specification syntax uses `;` to separate arguments and `=>` to separate out the result. Ellipsis `...` in the specifications are expanded contextually as either `..batch..`, `..input..` or `..output..` row variables. Assignments in the `%cd` syntax specify the unary or binary arithmetic and the accumulation arithmetic explicitly. For the `%op` syntax, we have mixfix operators combining the arithmetic semantics, for example: `++` is identity with additive accumulation, `+*` is multiplication with additive accumulation. These operators also support *variable capture* for both dimensions and rows -- the variables from a trailing string list are introduced into scope earlier than they first appear (similarly to inline definitions). The captured variables can be used for both shape constraints `Shape.set_dim`, `Shape.set_equal` and converted to scalars via `dim` (for row variables, the value is the product of the dimensions of the axes).
+At the heart of OCANNL are indexing specifications for expressing tensor computations. They generalize the Einstein summation convention: indices missing from the result are reduced over. The specification syntax uses `;` to separate arguments and `=>` to separate out the result. Ellipsis `...` in the specifications are expanded contextually as either `..batch..`, `..input..` or `..output..` row variables. Assignments in the `%cd` syntax specify the unary or binary arithmetic and the accumulation arithmetic explicitly. For the `%op` syntax, we have mixfix operators combining the arithmetic semantics, for example: `++` is identity with additive accumulation, `+*` is multiplication with additive accumulation. These operators also support *variable capture* for both dimensions and rows --- the variables from a trailing string list are introduced into scope earlier than they first appear (similarly to inline definitions). The captured variables can be used for both shape constraints `Shape.set_dim`, `Shape.set_equal` and converted to scalars via `dim` (for row variables, the value is the product of the dimensions of the axes).
 
 ```ocaml
 let%op softmax ~spec ?(temperature = 1.0) () =
@@ -86,11 +86,11 @@ OCANNL implements coproduct of axes `^`, generalizing concatenation. It is unloc
 
 We say "row" for analogy with type systems, but our shape rows are sequences of axes rather than records. OCANNL doesn't have a "full-blown" parametric polymorphism because we don't generalize inferred shapes into shape schemes, but it does have "poor man's" parametric polymorphism because we generate fresh shape variables for shape constraints derived at tensor operation call sites. Thus OCANNL has two forms of rank polymorphism: structural (subtyping) via broadcasting and parametric via row variables.
 
-The motivation to have left flank axes in shape (row) terms first came from the slice operation -- for example when subdividing data into hierarchical minibatches (like in data parallel batched training). This impacts broadcasting: rather than assuming that implicit axes from broadcasting land to the left of the "left flank", we generalize broadcasting to happen in the middle between left and right flanks of already-determined axes of a shape row. This allows uniform handling of broadcast axes and inferred axes in inference (removing a major source of non-determinism).
+The motivation to have left flank axes in shape (row) terms first came from the slice operation --- for example when subdividing data into hierarchical minibatches (like in data parallel batched training). This impacts broadcasting: rather than assuming that implicit axes from broadcasting land to the left of the "left flank", we generalize broadcasting to happen in the middle between left and right flanks of already-determined axes of a shape row. This allows uniform handling of broadcast axes and inferred axes in inference (removing a major source of non-determinism).
 
 However, consistently applying the surface row subtype/refinement relation (formally $\preceq$ in the Appendix, derived from the internal marked order $\sqsubseteq$) to the indexing (aka. *einsum*) specifications seen in examples above would be both counter-intuitive and overly restrictive: the broadcasting behavior of the operands would have to match the position of the row variables in the specification. To relax this, we introduce a *flat row equivalence* relation (formally $\approx$ in the Appendix), it preserves rank but erases the broadcasting position. Except for relaxing broadcast position checking, $C \approx T^{\mathrm{lhs}}$ is stricter than $C \preceq T^{\mathrm{lhs}}$ would be (see Appendix section 3), improving shape propagation through inference.
 
-In the Appendix, we provide formal semantics for the core shape constraints (for simplicity, excluding affine indexing and concatenation), present the shape and projections inference algorithms (where projections represent tensor indexing for tensor assignment loops), and prove their properties. Proofs are available online. In particular, TR Theorem 5.4, TR Theorem 5.9, and TR Proposition 6.2, together state inference termination and soundness. Inference is declarative -- the result does not depend on the ordering of the constraints -- except at the solver's documented policy commitments (marker placement and deferred word equations, see the Appendix). The shape inference problem is non-principal, and the algorithm is in general incomplete. Should the incompleteness ever manifest in practice, users can provide additional constraints via for example `Shape.infer_equal`, or variable capture and `Shape.set_equal`. Example of incompleteness from TR Example 6.3, where our inference fails although constraints are satisfiable, with $\alpha,\beta$ coming from leaf tensors and $\gamma$ result tensor:
+In the Appendix, we provide formal semantics for the core shape constraints (for simplicity, excluding affine indexing and concatenation), present the shape and projections inference algorithms (where projections represent tensor indexing for tensor assignment loops), and prove their properties. Proofs are available online. In particular, TR Theorem 5.4, TR Theorem 5.9, and TR Proposition 6.2, together state inference termination and soundness. Inference is declarative --- the result does not depend on the ordering of the constraints --- except at the solver's documented policy commitments (marker placement and deferred word equations, see the Appendix). The shape inference problem is non-principal, and the algorithm is in general incomplete. Should the incompleteness ever manifest in practice, users can provide additional constraints via for example `Shape.infer_equal`, or variable capture and `Shape.set_equal`. Example of incompleteness from TR Example 6.3, where our inference fails although constraints are satisfiable, with $\alpha,\beta$ coming from leaf tensors and $\gamma$ result tensor:
 
 $$
 \Phi_2 = \{3_b \sqsubseteq \alpha,\ 5_b \sqsubseteq \beta,\ \gamma \sqsubseteq \alpha,\ \gamma \sqsubseteq \beta\}
@@ -112,7 +112,7 @@ We track the distinction between parameter tensors and other leaf tensors. When 
 
 ## Contexts and explicit compilation
 
-OCANNL has an immutable context `Context.t` that unifies compilation, device, and execution contexts. Root contexts determine the device. Here are the most important operations on a context -- the bindings argument of `compile` contains the externally bound indexing symbols used in the computation:
+OCANNL has an immutable context `Context.t` that unifies compilation, device, and execution contexts. Root contexts determine the device. Here are the most important operations on a context --- the bindings argument of `compile` contains the externally bound indexing symbols used in the computation:
 
 ```ocaml
 val compile : t -> Assignments.comp -> Indexing.unit_bindings -> t * routine
@@ -152,7 +152,7 @@ OCANNL also intends to provide to the OCaml ecosystem a compilation path for ten
 
 ## Appendix: Shape and Projections inference: semantics and correctness
 
-TR refers to [ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf](https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf). Notation (shared with the TR): $\sqsubseteq$ is the algebraic order, on dimensions and on marked rows; $\preceq$ is the row subtype/refinement relation of TR Definition 2.12, the relation used when generating row constraints -- the algebraic order on rows is too strong for the broadcast semantics; $\le$ is reserved for the substitution preorder.
+TR refers to [ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf](https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf). Notation (shared with the TR): $\sqsubseteq$ is the algebraic order, on dimensions and on marked rows; $\preceq$ is the row subtype/refinement relation of TR Definition 2.12, the relation used when generating row constraints --- the algebraic order on rows is too strong for the broadcast semantics; $\le$ is reserved for the substitution preorder.
 
 ### 1. Dimensions
 
@@ -234,7 +234,7 @@ elaborating the result and operand slots of the specification. The generated
 core constraints are:
 
 | Operation logic | Generated constraints |
-|---|---|
+|----------|------------------------------|
 | transpose | $C_B \preceq A_B,\quad C_I \preceq A_O,\quad C_O \preceq A_I$ |
 | pointwise unary | $C_k \preceq A_k$ for every $k$ |
 | pointwise binary | $C_k \preceq A_k,\quad C_k \preceq B_k$ for every $k$ |
@@ -449,7 +449,7 @@ Throughout, fix one operation; its shapes are solved and **closed** (ground). It
 - P4. $R_1 \approx R_2$: outer-edge alignment; P1 per aligned pair (ranks match — shapes are closed and the equality held).
 - P5. $R_{\mathrm{res}} \preceq R_{\mathrm{op}}$: outer-edge alignment; P2/P3 per aligned pair, with P2's severance applied row-wise (result side of the pair $\rightsquigarrow \mathsf{Iter}$, operand pinned); each surplus interior result axis $\rightsquigarrow \mathsf{Iter}(\llbracket\cdot\rrbracket)$.
 - P6. each terminal axis $\rightsquigarrow \mathsf{Iter}(\llbracket\cdot\rrbracket)$.
-Side condition: $\mathsf{Sol}(\mathsf{Fix}\,c)$ is emitted only with $0 \le c < $ the axis's size (slices are validated against solved sizes).
+Side condition: $\mathsf{Sol}(\mathsf{Fix}\,c)$ is emitted only with $0 \le c <$ the axis's size (slices are validated against solved sizes).
 
 **Definition [TR Definition 7.3] (Solver).** A single pass over the finite equation set $E$ maintaining: a union–find partition of $P$; a partial pin map on classes; an iterate set $I$ of classes.
 
