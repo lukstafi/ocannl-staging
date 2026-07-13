@@ -126,7 +126,10 @@ let () =
   let%op out = x + attn ~train_step:None x in
   let%op loss = out ++ "...|... => |->0" in
   let ctx = Ocannl.Train.update_once ctx loss in
-  Stdio.printf "Loss: %.4f\n" At.((ctx, loss).@{[| 0 |]});
+  (* 2 decimals only: the loss is a float32 full-tensor sum of magnitude ~2e3, where one ULP is
+     ~1.2e-4, so the 4th decimal depends on reduction order and differs across backends (e.g. hip's
+     parallel reduction; cc and hip agree exactly when run at double precision). *)
+  Stdio.printf "Loss: %.2f\n" At.((ctx, loss).@{[| 0 |]});
   Stdio.printf "freqs has grad: %b (expect false)\n" (Option.is_some freqs.Tensor.diff);
   Stdio.printf "positions has grad: %b (expect false)\n" (Option.is_some positions.Tensor.diff);
   (* Verify that learnable params exist and have gradients allocated. This proves the backward pass

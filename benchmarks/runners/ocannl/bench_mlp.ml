@@ -154,19 +154,22 @@ let () =
     run_step ()
   done;
   Context.sync ctx;
+  (* Monotonic high-resolution clock (not [Unix.gettimeofday]): on Windows the latter ticks at
+     ~1 ms, which floors sub-millisecond step times to 0 (see bench_harness.ml). *)
+  let elapsed_ms c0 = Mtime.Span.to_float_ns (Mtime_clock.count c0) /. 1e6 in
   let synced =
     Array.init timed_steps ~f:(fun _ ->
-        let t0 = Unix.gettimeofday () in
+        let c0 = Mtime_clock.counter () in
         run_step ();
         Context.sync ctx;
-        (Unix.gettimeofday () -. t0) *. 1000.)
+        elapsed_ms c0)
   in
-  let t0 = Unix.gettimeofday () in
+  let c0 = Mtime_clock.counter () in
   for _ = 1 to timed_steps do
     run_step ()
   done;
   Context.sync ctx;
-  let queued_ms = (Unix.gettimeofday () -. t0) /. Float.of_int timed_steps *. 1000. in
+  let queued_ms = elapsed_ms c0 /. Float.of_int timed_steps in
   Array.sort synced ~compare:Float.compare;
   let json_floats arr =
     String.concat ~sep:"," (Array.to_list (Array.map arr ~f:(Printf.sprintf "%.9g")))

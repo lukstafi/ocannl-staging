@@ -8,7 +8,7 @@
   bench_conv_diag
   bench_min_repro
   bench_harness)
- (libraries base ocannl stdio unix)
+ (libraries base ocannl stdio unix mtime mtime.clock.os)
  (preprocess
   (pps ppx_here ppx_ocannl))
  (modes exe))

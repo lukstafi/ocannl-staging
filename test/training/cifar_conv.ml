@@ -64,7 +64,9 @@ let () =
   let load_quietly f =
     Stdlib.flush_all ();
     let old_stdout = Unix.dup Unix.stdout in
-    let devnull = Unix.openfile "/dev/null" [ Unix.O_WRONLY ] 0o644 in
+    let devnull =
+      Unix.openfile (if Stdlib.Sys.win32 then "NUL" else "/dev/null") [ Unix.O_WRONLY ] 0o644
+    in
     Unix.dup2 devnull Unix.stdout;
     Unix.close devnull;
     Exn.protect ~f ~finally:(fun () ->
@@ -143,7 +145,9 @@ let () =
         epoch_loss := !epoch_loss +. (ctx, batch_loss).@[0];
         Int.incr step_ref);
     if epoch % 10 = 0 then
-      printf "Epoch %d: avg loss = %.2f\n%!" epoch (!epoch_loss /. Float.of_int n_batches)
+      (* 1 decimal only: the exact trajectory digits depend on FP reduction order, which varies
+         with platform, SIMD width and worker count — 2 decimals is not portable. *)
+      printf "Epoch %d: avg loss = %.1f\n%!" epoch (!epoch_loss /. Float.of_int n_batches)
   done;
 
   (* --- Test-Set Evaluation (forward-only) --- Build a separate eval graph that reuses trained
@@ -207,8 +211,12 @@ let () =
       Int.incr batch_idx);
   let avg_test_loss = !test_loss /. Float.of_int n_test_batches in
   let accuracy = Float.of_int !correct /. Float.of_int num_test *. 100. in
-  printf "Test loss = %.2f\n%!" avg_test_loss;
-  printf "Test accuracy = %.1f%% (%d/%d)\n%!" accuracy !correct num_test;
+  (* Exact test metrics go to stderr: per-sample counts after 2000 training steps are not
+     portable (accumulated FP drift flips borderline samples across platforms/SIMD/worker
+     counts), so they stay out of the .expected golden; the threshold gates below are the
+     portable stdout record. *)
+  Stdio.eprintf "Test loss = %.2f\n%!" avg_test_loss;
+  Stdio.eprintf "Test accuracy = %.1f%% (%d/%d)\n%!" accuracy !correct num_test;
   (* Regression-mode threshold checks (conservative, must pass on small subsets). CIFAR-10 is harder
      than MNIST; random chance = 10%, so 15% demonstrates some learning. *)
   printf "Test loss below 2.3 = %b\n%!" Float.(avg_test_loss < 2.3);

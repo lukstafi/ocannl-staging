@@ -143,13 +143,15 @@ let measure_and_emit ~st ~backend ~variant ~compile_s ?tokens_per_step ~run_step
   let warmup_steps = meta_int st "warmup_steps" in
   let timed_steps = meta_int st "timed_steps" in
   Stdio.eprintf "bench: compiled in %.1fs, starting %d parity steps\n%!" compile_s parity_steps;
+  (* Monotonic high-resolution clock (not [Unix.gettimeofday]): on Windows the latter ticks at
+     ~1 ms, which floors sub-millisecond step times to 0. *)
+  let elapsed_ms c0 = Mtime.Span.to_float_ns (Mtime_clock.count c0) /. 1e6 in
   let losses =
     Array.init parity_steps ~f:(fun i ->
-        let t0 = Unix.gettimeofday () in
+        let c0 = Mtime_clock.counter () in
         run_step ();
         let l = read_loss () in
-        Stdio.eprintf "bench: parity step %d loss %.6g (%.2fs)\n%!" i l
-          (Unix.gettimeofday () -. t0);
+        Stdio.eprintf "bench: parity step %d loss %.6g (%.2fs)\n%!" i l (elapsed_ms c0 /. 1000.);
         l)
   in
   for _ = 1 to warmup_steps do
@@ -158,17 +160,17 @@ let measure_and_emit ~st ~backend ~variant ~compile_s ?tokens_per_step ~run_step
   sync ();
   let synced =
     Array.init timed_steps ~f:(fun _ ->
-        let t0 = Unix.gettimeofday () in
+        let c0 = Mtime_clock.counter () in
         run_step ();
         sync ();
-        (Unix.gettimeofday () -. t0) *. 1000.)
+        elapsed_ms c0)
   in
-  let t0 = Unix.gettimeofday () in
+  let c0 = Mtime_clock.counter () in
   for _ = 1 to timed_steps do
     run_step ()
   done;
   sync ();
-  let queued_ms = (Unix.gettimeofday () -. t0) /. Float.of_int timed_steps *. 1000. in
+  let queued_ms = elapsed_ms c0 /. Float.of_int timed_steps in
   Array.sort synced ~compare:Float.compare;
   let json_floats arr =
     String.concat ~sep:"," (Array.to_list (Array.map arr ~f:(Printf.sprintf "%.9g")))

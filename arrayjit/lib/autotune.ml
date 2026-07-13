@@ -59,10 +59,12 @@ let time_routine ~repeats cctx routine =
         !count < max 1 repeats
         || (Float.(!total < min_timing_ms) && !count < max_timing_runs)
       do
-        let t0 = Unix.gettimeofday () in
+        (* Monotonic high-resolution clock: on Windows, [Unix.gettimeofday] ticks at ~1 ms, which
+           makes sub-millisecond candidates indistinguishable (they all measure 0). *)
+        let c0 = Mtime_clock.counter () in
         ctx := Context.run !ctx routine;
         Context.sync !ctx;
-        let dt = (Unix.gettimeofday () -. t0) *. 1000. in
+        let dt = Mtime.Span.to_float_ns (Mtime_clock.count c0) /. 1e6 in
         total := !total +. dt;
         Int.incr count;
         if Float.(dt < !best) then best := dt

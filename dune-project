@@ -74,6 +74,8 @@
    (>= 2.4.0))
   (ppx_minidebug
    (>= 3.0.0))
+  (mtime
+   (>= 2.0.0))
   (metal
    (= :os macos)))
  (depopts
