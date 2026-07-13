@@ -168,6 +168,6 @@
 (library
  (name autotune)
  (public_name arrayjit.autotune)
- (libraries base stdio unix utils ir context)
+ (libraries base stdio unix mtime mtime.clock.os utils ir context)
  (modules autotune)
  (modes best))
