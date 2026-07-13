@@ -19,7 +19,8 @@ from bench_common import emit, percentiles, read_st_metadata
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--fixture", required=True)
-ap.add_argument("--device", default="CPU", choices=["CPU", "METAL", "CUDA"])
+# AMD is tinygrad's Linux ROCm device (orchestrate --gpu hip maps to it there).
+ap.add_argument("--device", default="CPU", choices=["CPU", "METAL", "CUDA", "AMD"])
 ap.add_argument("--jit", type=int, default=1)
 args = ap.parse_args()
 os.environ["DEV"] = args.device
