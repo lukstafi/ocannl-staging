@@ -63,9 +63,11 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   CPU-only matrix). With `--gpu hip`, the PyTorch/tinygrad GPU cells run only on Linux (ROCm
   PyTorch presents HIP as its `cuda` device, tinygrad as `AMD`); on Windows neither framework
   reaches an AMD GPU, so OCANNL alone populates the GPU column while the CPU parity
-  reference still runs. See [example-report.md](example-report.md) (macOS/Metal) and
-  [example-report-cuda.md](example-report-cuda.md) (Linux/CUDA) for checked-in example
-  output (full `--tuned --materialized` matrices; `results/` itself is gitignored).
+  reference still runs. See [example-report.md](example-report.md) (macOS/Metal),
+  [example-report-cuda.md](example-report-cuda.md) (Linux/CUDA) and
+  [report-hip.md](report-hip.md) (Windows/HIP on gfx1151, `--only ocannl pytorch`) for
+  checked-in example output (full `--tuned --materialized` matrices; `results/` itself is
+  gitignored).
 - `runners/ocannl/bench_{gpt,conv}_diag.ml` — schedule diagnostics: print the default
   fission-pipeline segment census (launch geometry, per-nest loop extents, written nodes with
   materialization markers) for the gpt2_mini / lenet graphs, then optionally time steps
