@@ -156,6 +156,13 @@ def main():
         help="add the pytorch torch.compile variant",
     )
     ap.add_argument(
+        "--beam",
+        type=int,
+        default=0,
+        metavar="N",
+        help="add the tinygrad BEAM=N search variant (0 = off)",
+    )
+    ap.add_argument(
         "--gpu",
         choices=sorted(GPU_DEVICES),
         default="metal" if platform.system() == "Darwin" else "cuda",
@@ -255,6 +262,11 @@ def main():
                     collect(
                         f"{name} tinygrad/{device}/{'jit' if jit else 'nojit'}",
                         [str(VENV_PY), str(HERE / "runners/tinygrad/run.py"), "--fixture", str(fx), "--device", device, "--jit", str(jit)],
+                    )
+                if args.beam:
+                    collect(
+                        f"{name} tinygrad/{device}/beam",
+                        [str(VENV_PY), str(HERE / "runners/tinygrad/run.py"), "--fixture", str(fx), "--device", device, "--beam", str(args.beam)],
                     )
 
     parity_check(results)

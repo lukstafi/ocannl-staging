@@ -21,8 +21,13 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--fixture", required=True)
 ap.add_argument("--device", default="CPU", choices=["CPU", "METAL", "CUDA"])
 ap.add_argument("--jit", type=int, default=1)
+ap.add_argument("--beam", type=int, default=0, help="BEAM search width (0 = off); implies --jit")
 args = ap.parse_args()
 os.environ["DEV"] = args.device
+if args.beam:
+    # Must be set before the tinygrad import: BEAM is read into a ContextVar at import time.
+    os.environ["BEAM"] = str(args.beam)
+    args.jit = 1
 
 import numpy as np
 from safetensors.numpy import load_file
@@ -243,7 +248,7 @@ def main():
     result = {
         "framework": "tinygrad",
         "backend": args.device,
-        "variant": "jit" if args.jit else "nojit",
+        "variant": "beam" if args.beam else ("jit" if args.jit else "nojit"),
         "workload": meta["name"],
         "compile_s": round(compile_s, 3),
         "step_ms": percentiles(synced),
