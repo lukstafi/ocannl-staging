@@ -852,9 +852,10 @@ let finalize (type dev runner event)
 module Cc_b : Backend = Make_device_backend_from_lowered (Schedulers.Sync) (Cc_backend)
 module Multidev_cc_b : Backend = Make_device_backend_from_lowered (Schedulers.Multidev) (Cc_backend)
 module Cuda_b : Backend = Raise_backend ((Cuda_backend_impl.Impl : Lowered_backend))
+module Hip_b : Backend = Raise_backend ((Hip_backend_impl.Impl : Lowered_backend))
 module Metal_b : Backend = Raise_backend ((Metal_backend_impl.Impl : Lowered_backend))
 
-type backend = Cc | Multidev_cc | Cuda | Metal [@@deriving sexp, equal]
+type backend = Cc | Multidev_cc | Cuda | Hip | Metal [@@deriving sexp, equal]
 
 let get_backend ?backend_name () =
   match
@@ -866,6 +867,7 @@ let get_backend ?backend_name () =
   | "cc" | "sync_cc" -> Cc
   | "multidev_cc" | "multicore_cc" -> Multidev_cc
   | "cuda" -> Cuda
+  | "hip" -> Hip
   | "metal" -> Metal
   | backend -> invalid_arg [%string "Backends.get_backend: unknown backend %{backend}"]
 
@@ -873,24 +875,28 @@ let backend_name = function
   | Cc -> "cc"
   | Multidev_cc -> "multidev_cc"
   | Cuda -> "cuda"
+  | Hip -> "hip"
   | Metal -> "metal"
 
 let backend_module : backend -> (module Backend) = function
   | Cc -> (module Cc_b)
   | Multidev_cc -> (module Multidev_cc_b)
   | Cuda -> (module Cuda_b)
+  | Hip -> (module Hip_b)
   | Metal -> (module Metal_b)
 
 type wrapped_context =
   | Cc_ctx of Cc_b.context
   | Multidev_cc_ctx of Multidev_cc_b.context
   | Cuda_ctx of Cuda_b.context
+  | Hip_ctx of Hip_b.context
   | Metal_ctx of Metal_b.context
 
 let wrapped_backend = function
   | Cc_ctx _ -> Cc
   | Multidev_cc_ctx _ -> Multidev_cc
   | Cuda_ctx _ -> Cuda
+  | Hip_ctx _ -> Hip
   | Metal_ctx _ -> Metal
 
 let make_context ?(device_id = 0) backend =
@@ -903,6 +909,7 @@ let make_context ?(device_id = 0) backend =
   | Cc -> Cc_ctx (fresh (module Cc_b))
   | Multidev_cc -> Multidev_cc_ctx (fresh (module Multidev_cc_b))
   | Cuda -> Cuda_ctx (fresh (module Cuda_b))
+  | Hip -> Hip_ctx (fresh (module Hip_b))
   | Metal -> Metal_ctx (fresh (module Metal_b))
 
 type 'a ctx_op = {
@@ -926,6 +933,9 @@ let with_backend (w : wrapped_context) { f } =
   | Cuda_ctx c ->
       let c, r = f (module Cuda_b) c in
       (Cuda_ctx c, r)
+  | Hip_ctx c ->
+      let c, r = f (module Hip_b) c in
+      (Hip_ctx c, r)
   | Metal_ctx c ->
       let c, r = f (module Metal_b) c in
       (Metal_ctx c, r)
@@ -944,4 +954,5 @@ let query (w : wrapped_context) { q } =
   | Cc_ctx c -> q (module Cc_b) c
   | Multidev_cc_ctx c -> q (module Multidev_cc_b) c
   | Cuda_ctx c -> q (module Cuda_b) c
+  | Hip_ctx c -> q (module Hip_b) c
   | Metal_ctx c -> q (module Metal_b) c

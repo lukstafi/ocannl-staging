@@ -37,9 +37,15 @@ let on_metal = String.is_substring backend_name ~substring:"metal"
 
 let on_gpu =
   on_metal || String.is_substring backend_name ~substring:"cuda"
+  || String.is_substring backend_name ~substring:"hip"
 
 let read_generated base_name =
-  let ext = if on_metal then ".metal" else if on_gpu then ".cu" else ".c" in
+  let ext =
+    if on_metal then ".metal"
+    else if String.is_substring backend_name ~substring:"hip" then ".hip"
+    else if on_gpu then ".cu"
+    else ".c"
+  in
   let path = Utils.build_file (base_name ^ ext) in
   if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
 

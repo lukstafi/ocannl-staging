@@ -17,6 +17,9 @@ val context : routine -> t
 val cuda : ?device_id:int -> unit -> t
 (** Create a CUDA context. *)
 
+val hip : ?device_id:int -> unit -> t
+(** Create an AMD HIP (ROCm) context. *)
+
 val metal : ?device_id:int -> unit -> t
 (** Create a Metal context. *)
 

@@ -32,7 +32,7 @@
 (package
  (name arrayjit)
  (synopsis
-  "An array language compiler with multiple backends (CPU, CUDA, Metal), staged compilation")
+  "An array language compiler with multiple backends (CPU, CUDA, HIP, Metal), staged compilation")
  (description
   "The optimizing compiler sub-package of OCANNL. Use neural_nets_lib instead to also get: nice syntax, shape inference, backpropagation, optimizers.")
  (depends
@@ -78,12 +78,13 @@
    (= :os macos)))
  (depopts
   (cudajit
-   (>= 0.7.0)))
+   (>= 0.7.0))
+  hipjit)
  (conflicts
   (cudajit
    (< 0.7.0)))
  (tags
-  (deeplearning array jit CUDA Metal)))
+  (deeplearning array jit CUDA HIP Metal)))
 
 (package
  (name neural_nets_lib)

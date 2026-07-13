@@ -42,6 +42,7 @@ let () =
         match backend with
         | "cc" | "multidev_cc" | "multicore_cc" | "sync_cc" -> "c"
         | "cuda" -> "cu"
+        | "hip" -> "hip"
         | "metal" -> "metal"
         | _ -> "c" (* Default to C for unknown backends *)
       in

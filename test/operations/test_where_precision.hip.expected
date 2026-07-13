@@ -1,0 +1,23 @@
+#include <hip/hip_fp16.h>
+#include <hip/hip_bf16.h>
+
+/* Define math constants that would normally come from <math.h> */
+#ifndef INFINITY
+#define INFINITY __builtin_huge_valf()
+#endif
+#ifndef NAN
+#define NAN __builtin_nanf("")
+#endif
+extern "C" __global__ void where_fwd(
+    __half *__restrict__ a_then_val,
+    __hip_bfloat16 *__restrict__ b_else_val,
+    float *__restrict__ where,
+    unsigned char *__restrict__ cond_condition) {
+
+  /* Local declarations and initialization. */
+
+  /* Main logic. */
+  /* where fwd */
+  where[0] = ((cond_condition[0]) ? (float)(a_then_val[0]) : (float)(__bfloat162float(b_else_val[0])));
+  /* end */
+}
