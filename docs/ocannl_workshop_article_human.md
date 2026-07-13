@@ -2,7 +2,7 @@
 
 ## Abstract
 
-Modern neural network code is often cluttered with shape bookkeeping: explicit calls to reshape, unsqueeze, expand, transpose, reductions, and integer-axis arguments. OCANNL combines an embedded DSL that removes this boilerplate, with an end-to-end compiler with GPU backends. Users define tensor operations as OCaml functions using concise notation generalizing the Einstein summation convention. Concatenation is an expression over indices e.g. `i^j`, convolution is a contraction with affine operand addressing e.g. `stride*i + dilation*k`. A sequence of axes can be captured by a single variable, e.g. `..batch..` or `..activations..`, sandwiched between leading and trailing axes; with up to three such variables per shape. We call these *row variables*. The paper showcases three examples: tensor expressions for core multi-head attention and for rank-polymorphic 2D convolution, and a tensor computation for Stochastic Gradient Descent with momentum and Nesterov-inspired correction. OCANNL performs broadcast-aware global bidirectional shape inference and derives loop-index maps for code generation. We formalize the inference problem for the core calculus (excluding affine and concatenation) and show properties of OCANNL's solver (proofs in the appendix). OCANNL's compiler inlines computations to avoid materializing intermediate tensors, and performs common subexpression elimination. This paper does not showcase benchmarks nor argue for performance, leaving that to follow-up work and the Q&A.
+Modern neural network code is often cluttered with shape bookkeeping: explicit calls to reshape, unsqueeze, expand, transpose, reductions, and integer-axis arguments. OCANNL combines an embedded DSL that removes this boilerplate, with an end-to-end compiler with GPU backends. Users define tensor operations as OCaml functions using concise notation generalizing the Einstein summation convention. Concatenation is an expression over indices e.g. `i^j`, convolution is a contraction with affine operand addressing e.g. `stride*i + dilation*k`. A sequence of axes can be captured by a single variable, e.g. `..batch..` or `..activations..`, sandwiched between leading and trailing axes; with up to three such variables per shape. We call these *row variables*. The paper showcases three examples: tensor expressions for core multi-head attention and for rank-polymorphic 2D convolution, and a tensor computation for Stochastic Gradient Descent with momentum and Nesterov-inspired correction. OCANNL performs broadcast-aware global bidirectional shape inference and derives loop-index maps for code generation. We formalize the inference problem for the core calculus (excluding affine and concatenation) and show properties of OCANNL's solver (proofs in the appendix). OCANNL's compiler inlines computations to avoid materializing intermediate tensors, and performs common subexpression elimination. This paper does not argue for performance --- we include preliminary parity-checked benchmarks for transparency, leaving optimization to follow-up work.
 
 ## Shapes, Tensor Expressions, Syntax Extensions and Examples
 
@@ -125,6 +125,146 @@ val from_host : t -> Tnode.t -> Ndarray.t -> t
 Contexts track dependencies (e.g. whether a tensor node is initialized before use) both at routine's compile time and at runtime.
 
 OCANNL has multi-stage shape inference. Stage 1 runs as tensor expressions are constructed. Calling `Context.compile` triggers stages 2 and later for constraints that are in flight (global store) at that time.
+
+## Benchmarks
+
+We report preliminary results from OCANNL's cross-framework benchmark harness (`benchmarks/` in the repository), which compares OCANNL against PyTorch (eager) and tinygrad (JIT) on identical workloads. Every runner loads the same initial weights, data and hyperparameters from a shared safetensors fixture, and a parity gate compares the loss trajectory of the first steps against the PyTorch CPU reference --- timing rows are comparable only because the math agrees (the parity column reports the maximum relative difference; REF marks the reference row). The gate doubled as a cross-framework correctness oracle: on its first run it caught two real backward-pass bugs in OCANNL's optimizer (both since fixed, and turned into a regression test). There are four workloads: `mlp_small` and `mlp_wide` train n-layer relu MLPs with softmax cross-entropy and plain SGD (overhead- vs GEMM-dominated); `lenet` trains LeNet-5 with valid convolutions; `gpt2_mini` runs a pre-LN GPT-2-style decoder (4 layers, model width 256, 8 heads, sequence length 128) forward-only.
+
+Measurement is identical across frameworks: the device is synchronized around timed regions, warmup steps are untimed, and we report per-step wall-time percentiles (p50/p10/p90). One-time cost --- graph build, code generation, JIT capture, or autotune search --- is reported separately as compile seconds and never amortized into step time. OCANNL appears in three variants: *default* keeps intermediates virtual (recomputed in the backward pass), *materialized* materializes them, and *tuned* runs `Train.tune_placements`, an autotuning search over placement decisions that keeps the measured winner --- the counterpart of tinygrad's BEAM search and `torch.compile`. Tuned step timings come from a fresh process replaying the cached winning schedule; the tuned row's compile seconds is the from-scratch search cost. Full reports (including enqueue-only timings and throughput) are checked into the repository.
+
+The snapshot below reflects where the compiler work has gone so far: on CPU (`cc` backend) OCANNL is competitive with the reference frameworks' CPU cells on the MLP and LeNet workloads, while the GPU backends currently trail the mature GPU stacks --- by one to two orders of magnitude on the attention workload --- since kernel scheduling (fusion granularity, memory-hierarchy placement) is still early-stage work.
+
+### Apple silicon, Metal backend
+
+Measured on an Apple-silicon laptop (macOS 26.5, arm64); OCANNL backends `cc` (CPU) and `metal`, PyTorch devices `cpu` and `mps`, tinygrad devices `CPU` and `METAL`. Step times are milliseconds.
+
+**gpt2_mini** (forward-only; the full report additionally lists tokens/s):
+
+| framework | backend | variant | step p50 ms | p10 | p90 | compile s | parity |
+|---|---|---|---|---|---|---|---|
+| tinygrad | METAL | jit | 3.662 | 3.165 | 3.764 | 0.69 | 1.3e-07 |
+| pytorch | mps | eager | 5.905 | 5.002 | 6.997 | 0.05 | 1.3e-07 |
+| pytorch | cpu | eager | 13.457 | 13.323 | 13.671 | 0.02 | REF |
+| tinygrad | CPU | jit | 45.157 | 44.748 | 45.377 | 0.79 | 8.0e-07 |
+| ocannl | metal | tuned | 92.707 | 92.545 | 92.907 | 1947.18 | 2.0e-07 |
+| ocannl | metal | default | 367.015 | 365.519 | 367.335 | 0.23 | 2.0e-07 |
+| ocannl | cc | tuned | 381.585 | 379.912 | 382.755 | 150.71 | 8.1e-07 |
+| ocannl | metal | materialized | 399.998 | 398.475 | 400.709 | 0.31 | 8.1e-07 |
+| ocannl | cc | default | 2085.600 | 2084.080 | 2090.320 | 3.65 | 8.1e-07 |
+| ocannl | cc | materialized | 2261.310 | 2258.720 | 2263.830 | 14.97 | 8.1e-07 |
+
+**lenet**:
+
+| framework | backend | variant | step p50 ms | p10 | p90 | compile s | parity |
+|---|---|---|---|---|---|---|---|
+| tinygrad | METAL | jit | 1.176 | 0.764 | 1.313 | 1.30 | 2.1e-07 |
+| pytorch | mps | eager | 5.639 | 5.495 | 5.830 | 0.10 | 1.0e-07 |
+| tinygrad | CPU | jit | 5.726 | 5.602 | 5.812 | 1.31 | 3.1e-07 |
+| pytorch | cpu | eager | 12.527 | 12.245 | 12.775 | 0.02 | REF |
+| ocannl | cc | tuned | 14.269 | 14.196 | 14.365 | 21.86 | 2.1e-07 |
+| ocannl | cc | materialized | 14.301 | 14.207 | 14.373 | 1.65 | 2.1e-07 |
+| ocannl | cc | default | 18.988 | 18.911 | 19.062 | 1.38 | 2.1e-07 |
+| ocannl | metal | tuned | 36.612 | 36.316 | 37.129 | 72.69 | 2.1e-07 |
+| ocannl | metal | materialized | 37.819 | 37.443 | 38.327 | 0.55 | 2.1e-07 |
+| ocannl | metal | default | 216.387 | 215.266 | 217.781 | 0.55 | 2.1e-07 |
+
+**mlp_small**:
+
+| framework | backend | variant | step p50 ms | p10 | p90 | compile s | parity |
+|---|---|---|---|---|---|---|---|
+| ocannl | cc | tuned | 0.129 | 0.107 | 0.148 | 7.70 | 2.2e-07 |
+| ocannl | cc | materialized | 0.177 | 0.155 | 0.216 | 0.46 | 2.2e-07 |
+| pytorch | cpu | eager | 0.178 | 0.161 | 0.221 | 0.01 | REF |
+| ocannl | cc | default | 0.182 | 0.158 | 0.247 | 0.45 | 2.2e-07 |
+| tinygrad | CPU | jit | 0.302 | 0.295 | 0.314 | 0.32 | 2.8e-07 |
+| tinygrad | METAL | jit | 0.823 | 0.311 | 0.942 | 0.35 | 2.4e-07 |
+| pytorch | mps | eager | 1.134 | 0.990 | 1.235 | 0.07 | 1.2e-07 |
+| ocannl | metal | tuned | 1.273 | 1.162 | 1.368 | 1.17 | 3.2e-07 |
+| ocannl | metal | materialized | 1.300 | 1.213 | 1.383 | 0.01 | 3.2e-07 |
+| ocannl | metal | default | 1.508 | 1.326 | 1.893 | 0.01 | 3.2e-07 |
+
+**mlp_wide**:
+
+| framework | backend | variant | step p50 ms | p10 | p90 | compile s | parity |
+|---|---|---|---|---|---|---|---|
+| pytorch | mps | eager | 1.079 | 0.941 | 1.131 | 0.08 | 2.1e-07 |
+| tinygrad | METAL | jit | 1.168 | 0.744 | 1.290 | 0.52 | 2.1e-07 |
+| pytorch | cpu | eager | 1.608 | 1.582 | 1.634 | 0.01 | REF |
+| ocannl | metal | tuned | 4.144 | 4.091 | 4.313 | 510.25 | 5.2e-07 |
+| ocannl | metal | materialized | 5.946 | 5.850 | 6.287 | 0.02 | 5.2e-07 |
+| ocannl | metal | default | 6.281 | 6.168 | 6.591 | 0.02 | 5.2e-07 |
+| tinygrad | CPU | jit | 13.441 | 13.220 | 13.842 | 0.49 | 7.3e-07 |
+| ocannl | cc | tuned | 49.034 | 48.413 | 49.787 | 14.55 | 5.2e-07 |
+| ocannl | cc | materialized | 218.940 | 218.124 | 219.787 | 0.57 | 6.2e-07 |
+| ocannl | cc | default | 219.023 | 218.179 | 220.031 | 0.54 | 6.2e-07 |
+
+### NVIDIA, CUDA backend
+
+Measured on an NVIDIA GeForce RTX 3050 Ti Laptop GPU (4 GB) under WSL2 (Linux x86_64); torch 2.13.0+cu130, tinygrad 0.13.0, CUDA 12.8. Step times are milliseconds.
+
+**gpt2_mini** (forward-only; the full report additionally lists tokens/s):
+
+| framework | backend | variant | step p50 ms | p10 | p90 | compile s | parity |
+|---|---|---|---|---|---|---|---|
+| pytorch | cuda | eager | 8.172 | 7.615 | 8.689 | 0.23 | 6.7e-08 |
+| tinygrad | CUDA | jit | 12.830 | 11.786 | 12.922 | 1.03 | 1.3e-07 |
+| pytorch | cpu | eager | 82.427 | 80.647 | 86.397 | 0.10 | REF |
+| tinygrad | CPU | jit | 157.738 | 153.594 | 159.969 | 1.41 | 8.7e-07 |
+| ocannl | cuda | default | 274.629 | 274.563 | 274.788 | 1.40 | 8.7e-07 |
+| ocannl | cuda | tuned | 275.133 | 275.002 | 275.299 | 633.80 | 8.7e-07 |
+| ocannl | cuda | materialized | 330.590 | 330.364 | 331.165 | 2.67 | 8.7e-07 |
+| ocannl | cc | tuned | 1212.400 | 1113.860 | 1256.160 | 148.66 | 9.4e-07 |
+| ocannl | cc | default | 2330.670 | 2275.380 | 2355.680 | 2.28 | 8.7e-07 |
+| ocannl | cc | materialized | 2590.840 | 2568.950 | 2605.810 | 7.27 | 9.4e-07 |
+
+**lenet**:
+
+| framework | backend | variant | step p50 ms | p10 | p90 | compile s | parity |
+|---|---|---|---|---|---|---|---|
+| tinygrad | CUDA | jit | 1.296 | 1.085 | 1.317 | 2.18 | 2.1e-07 |
+| pytorch | cuda | eager | 1.782 | 1.669 | 2.701 | 0.56 | 8.8e-05 |
+| pytorch | cpu | eager | 3.652 | 3.247 | 4.005 | 0.18 | REF |
+| ocannl | cuda | tuned | 18.514 | 18.456 | 18.567 | 89.13 | 2.1e-07 |
+| ocannl | cuda | materialized | 18.580 | 18.539 | 18.635 | 1.44 | 2.1e-07 |
+| tinygrad | CPU | jit | 22.030 | 21.481 | 22.639 | 2.17 | 3.1e-07 |
+| ocannl | cc | tuned | 23.509 | 22.934 | 24.820 | 48.58 | 3.1e-07 |
+| ocannl | cc | materialized | 23.876 | 23.324 | 25.042 | 3.29 | 3.1e-07 |
+| ocannl | cc | default | 40.553 | 39.790 | 42.219 | 2.49 | 3.1e-07 |
+| ocannl | cuda | default | 174.170 | 174.095 | 174.252 | 1.26 | 2.1e-07 |
+
+**mlp_small**:
+
+| framework | backend | variant | step p50 ms | p10 | p90 | compile s | parity |
+|---|---|---|---|---|---|---|---|
+| ocannl | cc | tuned | 0.151 | 0.147 | 0.164 | 10.36 | 2.8e-07 |
+| ocannl | cc | materialized | 0.166 | 0.161 | 0.175 | 0.58 | 2.8e-07 |
+| ocannl | cuda | tuned | 0.169 | 0.122 | 0.323 | 34.52 | 2.2e-07 |
+| tinygrad | CUDA | jit | 0.179 | 0.175 | 0.217 | 0.50 | 2.8e-07 |
+| ocannl | cuda | default | 0.180 | 0.126 | 0.303 | 0.13 | 2.2e-07 |
+| ocannl | cc | default | 0.181 | 0.176 | 0.193 | 0.56 | 2.8e-07 |
+| ocannl | cuda | materialized | 0.203 | 0.152 | 0.305 | 0.14 | 2.2e-07 |
+| pytorch | cpu | eager | 0.253 | 0.231 | 0.636 | 0.15 | REF |
+| tinygrad | CPU | jit | 0.680 | 0.638 | 0.749 | 0.56 | 2.4e-07 |
+| pytorch | cuda | eager | 1.296 | 0.981 | 1.573 | 0.17 | 1.2e-07 |
+
+**mlp_wide**:
+
+| framework | backend | variant | step p50 ms | p10 | p90 | compile s | parity |
+|---|---|---|---|---|---|---|---|
+| pytorch | cuda | eager | 1.110 | 1.067 | 1.415 | 0.17 | 1.0e-07 |
+| tinygrad | CUDA | jit | 2.749 | 2.732 | 3.314 | 0.67 | 1.0e-07 |
+| pytorch | cpu | eager | 11.554 | 10.863 | 12.394 | 0.13 | REF |
+| ocannl | cuda | tuned | 13.912 | 13.604 | 14.212 | 453.11 | 5.1e-07 |
+| ocannl | cuda | default | 14.120 | 13.855 | 14.373 | 0.21 | 5.1e-07 |
+| ocannl | cuda | materialized | 14.215 | 13.982 | 14.477 | 0.18 | 5.1e-07 |
+| tinygrad | CPU | jit | 43.799 | 42.511 | 45.605 | 0.86 | 6.2e-07 |
+| ocannl | cc | tuned | 89.214 | 85.214 | 116.715 | 21.66 | 5.2e-07 |
+| ocannl | cc | default | 286.176 | 275.921 | 322.762 | 0.73 | 5.2e-07 |
+| ocannl | cc | materialized | 289.759 | 278.446 | 322.250 | 0.73 | 5.2e-07 |
+
+### AMD, HIP backend
+
+Results for the AMD HIP backend (`hip`, mirroring the CUDA backend through ROCm) are being collected and will be included in the final version.
 
 ## Related work
 
