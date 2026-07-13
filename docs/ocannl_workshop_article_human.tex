@@ -856,8 +856,17 @@ ocannl & cc & default & 219.023 & 218.179 & 220.031 & 0.54 & 6.2e-07 \\
 
 Measured on an NVIDIA GeForce RTX 3050 Ti Laptop GPU (4 GB) under WSL2
 (Linux x86\_64); torch 2.13.0+cu130, tinygrad 0.13.0, CUDA 12.8. Step
-times are milliseconds. The \passthrough{\lstinline!torch.compile!}
-variant is not yet included for this machine.
+times are milliseconds. The \passthrough{\lstinline!compiled!} rows
+(torch 2.13.0+cu130) and the \passthrough{\lstinline!beam!} rows
+(tinygrad BEAM=2, tinygrad 0.13.0) come from later single-framework
+reruns on the same machine at the same framework versions, each
+parity-gated against its own CPU eager reference. This thermally limited
+machine shows sizable run-to-run variance on CPU-bound cells (up to
+roughly 1.7x between the original run and the reruns; GPU cells
+reproduce within about 10\%), so comparisons across rows are indicative.
+In several cells the BEAM-searched kernels time slower than plain JIT,
+consistent with throttling right after the long search phase; the lenet
+speedups survive it.
 
 \textbf{gpt2\_mini} (forward-only; the full report additionally lists
 tokens/s):
@@ -893,9 +902,14 @@ parity
 \endhead
 \bottomrule\noalign{}
 \endlastfoot
+pytorch & cuda & compiled & 3.507 & 3.319 & 3.567 & 5.67 & 6.7e-08 \\
 pytorch & cuda & eager & 8.172 & 7.615 & 8.689 & 0.23 & 6.7e-08 \\
 tinygrad & CUDA & jit & 12.830 & 11.786 & 12.922 & 1.03 & 1.3e-07 \\
+tinygrad & CUDA & beam & 15.844 & 15.769 & 16.065 & 62.87 & 5.4e-07 \\
+pytorch & cpu & compiled & 42.936 & 35.991 & 45.764 & 9.05 & 1.3e-07 \\
 pytorch & cpu & eager & 82.427 & 80.647 & 86.397 & 0.10 & REF \\
+tinygrad & CPU & beam & 143.347 & 132.362 & 150.304 & 125.59 &
+8.7e-07 \\
 tinygrad & CPU & jit & 157.738 & 153.594 & 159.969 & 1.41 & 8.7e-07 \\
 ocannl & cuda & default & 274.629 & 274.563 & 274.788 & 1.40 &
 8.7e-07 \\
@@ -944,9 +958,13 @@ parity
 \endhead
 \bottomrule\noalign{}
 \endlastfoot
+tinygrad & CUDA & beam & 0.736 & 0.703 & 4.060 & 200.54 & 3.1e-07 \\
 tinygrad & CUDA & jit & 1.296 & 1.085 & 1.317 & 2.18 & 2.1e-07 \\
 pytorch & cuda & eager & 1.782 & 1.669 & 2.701 & 0.56 & 8.8e-05 \\
+pytorch & cuda & compiled & 2.174 & 1.576 & 2.359 & 6.16 & 8.8e-05 \\
 pytorch & cpu & eager & 3.652 & 3.247 & 4.005 & 0.18 & REF \\
+pytorch & cpu & compiled & 4.349 & 4.116 & 4.627 & 5.17 & 2.1e-07 \\
+tinygrad & CPU & beam & 5.226 & 5.055 & 5.381 & 340.88 & 3.1e-07 \\
 ocannl & cuda & tuned & 18.514 & 18.456 & 18.567 & 89.13 & 2.1e-07 \\
 ocannl & cuda & materialized & 18.580 & 18.539 & 18.635 & 1.44 &
 2.1e-07 \\
@@ -1000,7 +1018,11 @@ ocannl & cuda & default & 0.180 & 0.126 & 0.303 & 0.13 & 2.2e-07 \\
 ocannl & cc & default & 0.181 & 0.176 & 0.193 & 0.56 & 2.8e-07 \\
 ocannl & cuda & materialized & 0.203 & 0.152 & 0.305 & 0.14 & 2.2e-07 \\
 pytorch & cpu & eager & 0.253 & 0.231 & 0.636 & 0.15 & REF \\
+tinygrad & CPU & beam & 0.348 & 0.340 & 0.402 & 89.53 & 2.4e-07 \\
+tinygrad & CUDA & beam & 0.354 & 0.347 & 0.429 & 39.47 & 2.4e-07 \\
+pytorch & cpu & compiled & 0.411 & 0.370 & 0.470 & 3.27 & 2.2e-07 \\
 tinygrad & CPU & jit & 0.680 & 0.638 & 0.749 & 0.56 & 2.4e-07 \\
+pytorch & cuda & compiled & 1.088 & 0.940 & 1.369 & 2.16 & 1.2e-07 \\
 pytorch & cuda & eager & 1.296 & 0.981 & 1.573 & 0.17 & 1.2e-07 \\
 \end{longtable}
 
@@ -1038,12 +1060,16 @@ parity
 \bottomrule\noalign{}
 \endlastfoot
 pytorch & cuda & eager & 1.110 & 1.067 & 1.415 & 0.17 & 1.0e-07 \\
+pytorch & cuda & compiled & 1.415 & 1.341 & 1.526 & 3.64 & 2.1e-07 \\
 tinygrad & CUDA & jit & 2.749 & 2.732 & 3.314 & 0.67 & 1.0e-07 \\
+tinygrad & CUDA & beam & 2.904 & 2.862 & 3.051 & 76.87 & 4.1e-07 \\
+pytorch & cpu & compiled & 11.485 & 9.872 & 12.268 & 3.14 & 1.0e-07 \\
 pytorch & cpu & eager & 11.554 & 10.863 & 12.394 & 0.13 & REF \\
 ocannl & cuda & tuned & 13.912 & 13.604 & 14.212 & 453.11 & 5.1e-07 \\
 ocannl & cuda & default & 14.120 & 13.855 & 14.373 & 0.21 & 5.1e-07 \\
 ocannl & cuda & materialized & 14.215 & 13.982 & 14.477 & 0.18 &
 5.1e-07 \\
+tinygrad & CPU & beam & 27.802 & 27.101 & 29.370 & 144.05 & 6.2e-07 \\
 tinygrad & CPU & jit & 43.799 & 42.511 & 45.605 & 0.86 & 6.2e-07 \\
 ocannl & cc & tuned & 89.214 & 85.214 & 116.715 & 21.66 & 5.2e-07 \\
 ocannl & cc & default & 286.176 & 275.921 & 322.762 & 0.73 & 5.2e-07 \\
