@@ -128,11 +128,11 @@ OCANNL has multi-stage shape inference. Stage 1 runs as tensor expressions are c
 
 ## Benchmarks
 
-We report preliminary results from OCANNL's cross-framework benchmark harness (`benchmarks/` in the repository), which compares OCANNL against PyTorch (eager, and `torch.compile` where available) and tinygrad (JIT) on identical workloads. Every runner loads the same initial weights, data and hyperparameters from a shared safetensors fixture, and a parity gate compares the loss trajectory of the first steps against the PyTorch CPU reference --- timing rows are comparable only because the math agrees (the parity column reports the maximum relative difference; REF marks the reference row). The gate doubled as a cross-framework correctness oracle: on its first run it caught two real backward-pass bugs in OCANNL's optimizer (both since fixed, and turned into a regression test). There are four workloads: `mlp_small` and `mlp_wide` train n-layer relu MLPs with softmax cross-entropy and plain SGD (overhead- vs GEMM-dominated); `lenet` trains LeNet-5 with valid convolutions; `gpt2_mini` runs a pre-LN GPT-2-style decoder (4 layers, model width 256, 8 heads, sequence length 128) forward-only.
+We report preliminary results from OCANNL's cross-framework benchmark harness (`benchmarks/` in the repository), which compares OCANNL against PyTorch (eager, and `torch.compile` where available) and tinygrad (JIT, and BEAM search where available) on identical workloads. Every runner loads the same initial weights, data and hyperparameters from a shared safetensors fixture, and a parity gate compares the loss trajectory of the first steps against the PyTorch CPU reference --- timing rows are comparable only because the math agrees (the parity column reports the maximum relative difference; REF marks the reference row). The gate doubled as a cross-framework correctness oracle: on its first run it caught two real backward-pass bugs in OCANNL's optimizer (both since fixed, and turned into a regression test). There are four workloads: `mlp_small` and `mlp_wide` train n-layer relu MLPs with softmax cross-entropy and plain SGD (overhead- vs GEMM-dominated); `lenet` trains LeNet-5 with valid convolutions; `gpt2_mini` runs a pre-LN GPT-2-style decoder (4 layers, model width 256, 8 heads, sequence length 128) forward-only.
 
 Measurement is identical across frameworks: the device is synchronized around timed regions, warmup steps are untimed, and we report per-step wall-time percentiles (p50/p10/p90). One-time cost --- graph build, code generation, JIT capture, or autotune search --- is reported separately as compile seconds and never amortized into step time. OCANNL appears in three variants: *default* keeps intermediates virtual (recomputed in the backward pass), *materialized* materializes them, and *tuned* runs `Train.tune_placements`, an autotuning search over placement decisions that keeps the measured winner --- the counterpart of tinygrad's BEAM search and `torch.compile`. Tuned step timings come from a fresh process replaying the cached winning schedule; the tuned row's compile seconds is the from-scratch search cost. Full reports (including enqueue-only timings and throughput) are checked into the repository.
 
-The per-machine result tables are collected in the Benchmark tables appendix. The snapshot they give reflects where the compiler work has gone so far: on CPU (`cc` backend) OCANNL is competitive with the reference frameworks' CPU cells on the MLP and LeNet workloads, while the GPU backends currently trail the mature GPU stacks --- by one to two orders of magnitude on the attention workload --- since kernel scheduling (fusion granularity, memory-hierarchy placement) is still early-stage work.
+The per-machine result tables are collected in the Benchmark tables appendix. The snapshot they give reflects where the compiler work has gone so far: on CPU (`cc` backend) OCANNL is competitive with the reference frameworks' CPU cells on the MLP and LeNet workloads, while the GPU backends currently trail the mature GPU stacks --- by one to two orders of magnitude on the attention workload --- since kernel scheduling (fusion granularity, memory-hierarchy placement) is still early-stage work; the Conclusions sketch the planned search-based direction.
 
 ## Related work
 
@@ -154,9 +154,9 @@ The Appendix presents definitions and theorems showing termination and soundness
 
 One problem to explore in OCANNL's shape inference is the current semantics of dimension basis comparisons: $1_\emptyset \neq 1_\texttt{default}$. For example, it makes scalars incompatible with dimension-1 data vectors as same-size arguments to einsum-based operations. This problem has not yet surfaced in practice: "it's a feature, not a bug". Once practical examples suffer from this incompatibility, they might motivate a more sophisticated approach (e.g. basis polymorphism).
 
-OCANNL also intends to provide to the OCaml ecosystem a compilation path for tensor computations across various GPU backends: Nvidia (CUDA), Apple Silicon (Metal), AMD (HIP). The compiler performs inlining and Common Subexpression Elimination on the lowered IR (a loop nest language). Tiling for threadblocks and tensor cores, and further optimizations, are ongoing/future work.
+OCANNL also intends to provide to the OCaml ecosystem a compilation path for tensor computations across various GPU backends: Nvidia (CUDA), Apple Silicon (Metal), AMD (HIP). The compiler performs inlining and Common Subexpression Elimination on the lowered IR (a loop nest language). Tiling for threadblocks and tensor cores, and further optimizations, are ongoing/future work. We expect this effort to revolve around automated search over schedules and programs, in the line of tinygrad's BEAM search, *Ragan-Kelley et al., “Halide: A Language and Compiler for Optimizing Parallelism, Locality, and Recomputation in Image Processing Pipelines”, PLDI 2013*, and *Baghdadi et al., “Tiramisu: A Polyhedral Compiler for Expressing Fast and Portable Code”, CGO 2019*.
 
-**Authorship:** the content above was written by the human author without AI/LLM feedback, apart from a final AI-assisted review pass (Claude Fable 5) that caught typos and consistency issues against the technical report. The appendix below and the accompanying [technical report](https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf) were created by Claude Fable 5 (interactively, Appendix trimmed down for brevity) and GPT 5.5 (fixing issues I noticed, final compilation and proof gaps).
+**Authorship:** the content above, apart from the Benchmarks section and the benchmark tables appendix (drafted by Claude Fable 5 from the repository's benchmark-harness reports), was written by the human author without AI/LLM feedback, apart from a final AI-assisted review pass (Claude Fable 5) that caught typos and consistency issues against the technical report. The appendix below and the accompanying [technical report](https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf) were created by Claude Fable 5 (interactively, Appendix trimmed down for brevity) and GPT 5.5 (fixing issues I noticed, final compilation and proof gaps).
 
 ## Appendix: Benchmark tables
 
@@ -164,17 +164,19 @@ Methodology, workloads, variants and column meanings are described in the Benchm
 
 ### Apple silicon, Metal backend
 
-Measured on an Apple-silicon laptop (macOS 26.5, arm64); OCANNL backends `cc` (CPU) and `metal`, PyTorch devices `cpu` and `mps`, tinygrad devices `CPU` and `METAL`. Step times are milliseconds. The `compiled` rows (torch 2.13.0) come from a later PyTorch-only rerun on the same machine, whose parity gate ran against its own CPU eager reference and whose eager timings reproduce the rows below within about 1%.
+Measured on an Apple-silicon laptop (macOS 26.5, arm64); OCANNL backends `cc` (CPU) and `metal`, PyTorch devices `cpu` and `mps`, tinygrad devices `CPU` and `METAL`. Step times are milliseconds. The `compiled` rows (torch 2.13.0) and the `beam` rows (tinygrad BEAM=2) come from later single-framework reruns on the same machine, each parity-gated against its own CPU eager reference; the reruns' eager and jit timings reproduce the rows below within a few percent.
 
 **gpt2_mini** (forward-only; the full report additionally lists tokens/s):
 
 | framework | backend | variant | step p50 ms | p10 | p90 | compile s | parity |
 |---|---|---|---|---|---|---|---|
 | pytorch | mps | compiled | 1.935 | 1.478 | 2.059 | 1.48 | 6.7e-08 |
+| tinygrad | METAL | beam | 2.146 | 2.051 | 2.185 | 21.53 | 4.7e-07 |
 | tinygrad | METAL | jit | 3.662 | 3.165 | 3.764 | 0.69 | 1.3e-07 |
 | pytorch | mps | eager | 5.905 | 5.002 | 6.997 | 0.05 | 1.3e-07 |
 | pytorch | cpu | compiled | 9.624 | 9.407 | 9.889 | 7.82 | 2.0e-07 |
 | pytorch | cpu | eager | 13.457 | 13.323 | 13.671 | 0.02 | REF |
+| tinygrad | CPU | beam | 27.124 | 27.042 | 27.189 | 80.14 | 8.0e-07 |
 | tinygrad | CPU | jit | 45.157 | 44.748 | 45.377 | 0.79 | 8.0e-07 |
 | ocannl | metal | tuned | 92.707 | 92.545 | 92.907 | 1947.18 | 2.0e-07 |
 | ocannl | metal | default | 367.015 | 365.519 | 367.335 | 0.23 | 2.0e-07 |
@@ -187,7 +189,9 @@ Measured on an Apple-silicon laptop (macOS 26.5, arm64); OCANNL backends `cc` (C
 
 | framework | backend | variant | step p50 ms | p10 | p90 | compile s | parity |
 |---|---|---|---|---|---|---|---|
+| tinygrad | METAL | beam | 0.980 | 0.520 | 1.058 | 57.16 | 2.1e-07 |
 | tinygrad | METAL | jit | 1.176 | 0.764 | 1.313 | 1.30 | 2.1e-07 |
+| tinygrad | CPU | beam | 2.882 | 2.796 | 2.986 | 205.16 | 3.1e-07 |
 | pytorch | mps | eager | 5.639 | 5.495 | 5.830 | 0.10 | 1.0e-07 |
 | pytorch | mps | compiled | 5.641 | 5.292 | 5.746 | 1.08 | 2.1e-07 |
 | tinygrad | CPU | jit | 5.726 | 5.602 | 5.812 | 1.31 | 3.1e-07 |
@@ -209,7 +213,9 @@ Measured on an Apple-silicon laptop (macOS 26.5, arm64); OCANNL backends `cc` (C
 | ocannl | cc | materialized | 0.177 | 0.155 | 0.216 | 0.46 | 2.2e-07 |
 | pytorch | cpu | eager | 0.178 | 0.161 | 0.221 | 0.01 | REF |
 | ocannl | cc | default | 0.182 | 0.158 | 0.247 | 0.45 | 2.2e-07 |
+| tinygrad | CPU | beam | 0.214 | 0.212 | 0.225 | 53.47 | 3.6e-07 |
 | tinygrad | CPU | jit | 0.302 | 0.295 | 0.314 | 0.32 | 2.8e-07 |
+| tinygrad | METAL | beam | 0.800 | 0.299 | 0.990 | 12.34 | 1.2e-07 |
 | tinygrad | METAL | jit | 0.823 | 0.311 | 0.942 | 0.35 | 2.4e-07 |
 | pytorch | mps | compiled | 1.048 | 0.938 | 1.120 | 0.57 | 2.4e-07 |
 | pytorch | mps | eager | 1.134 | 0.990 | 1.235 | 0.07 | 1.2e-07 |
@@ -223,12 +229,14 @@ Measured on an Apple-silicon laptop (macOS 26.5, arm64); OCANNL backends `cc` (C
 |---|---|---|---|---|---|---|---|
 | pytorch | mps | compiled | 1.048 | 0.982 | 1.127 | 0.59 | 2.1e-07 |
 | pytorch | mps | eager | 1.079 | 0.941 | 1.131 | 0.08 | 2.1e-07 |
+| tinygrad | METAL | beam | 1.095 | 0.615 | 1.212 | 18.65 | 3.1e-07 |
 | tinygrad | METAL | jit | 1.168 | 0.744 | 1.290 | 0.52 | 2.1e-07 |
 | pytorch | cpu | eager | 1.608 | 1.582 | 1.634 | 0.01 | REF |
 | pytorch | cpu | compiled | 1.750 | 1.717 | 1.788 | 3.10 | 2.1e-07 |
 | ocannl | metal | tuned | 4.144 | 4.091 | 4.313 | 510.25 | 5.2e-07 |
 | ocannl | metal | materialized | 5.946 | 5.850 | 6.287 | 0.02 | 5.2e-07 |
 | ocannl | metal | default | 6.281 | 6.168 | 6.591 | 0.02 | 5.2e-07 |
+| tinygrad | CPU | beam | 6.702 | 6.377 | 6.916 | 66.08 | 7.3e-07 |
 | tinygrad | CPU | jit | 13.441 | 13.220 | 13.842 | 0.49 | 7.3e-07 |
 | ocannl | cc | tuned | 49.034 | 48.413 | 49.787 | 14.55 | 5.2e-07 |
 | ocannl | cc | materialized | 218.940 | 218.124 | 219.787 | 0.57 | 6.2e-07 |
