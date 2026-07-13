@@ -29,6 +29,16 @@ let set_test_bindings routine =
   List.iter (Context.bindings routine) ~f:(fun (ss, r) ->
       match ss.Idx.static_range with Some range when range > 0 -> r := range / 2 | _ -> ())
 
+(* Fast routines get extra timed runs beyond [repeats], until this much total measured time (or
+   [max_timing_runs]): on sub-millisecond kernels a min-of-3 is dominated by launch jitter, and
+   the winner selection becomes a lottery — a heavier candidate can be crowned by one lucky
+   sample while the true winner's few samples all landed under contention. Noise only ever adds
+   time, so min-of-N converges monotonically to the true best case and more samples strictly
+   reduce mis-selection; for routines slower than [min_timing_ms / repeats] per run nothing
+   changes. *)
+let min_timing_ms = 25.
+let max_timing_runs = 64
+
 (* [Context.bindings] exposes the routine's live binding refs — restore them after timing
    (Codex P2 on PR #103), or the returned winner would stay bound to the tuner's midpoint test
    values. *)
@@ -43,11 +53,18 @@ let time_routine ~repeats cctx routine =
       let ctx = ref (Context.run cctx routine) in
       Context.sync !ctx;
       let best = ref Float.infinity in
-      for _ = 1 to max 1 repeats do
+      let total = ref 0. in
+      let count = ref 0 in
+      while
+        !count < max 1 repeats
+        || (Float.(!total < min_timing_ms) && !count < max_timing_runs)
+      do
         let t0 = Unix.gettimeofday () in
         ctx := Context.run !ctx routine;
         Context.sync !ctx;
         let dt = (Unix.gettimeofday () -. t0) *. 1000. in
+        total := !total +. dt;
+        Int.incr count;
         if Float.(dt < !best) then best := dt
       done;
       !best)
@@ -304,6 +321,82 @@ let sketch_seed_params ~is_gpu ~is_cpu (opt : LL.optimized) : sketch_params list
         else base
       else []
 
+(** {2 The privatized fission flavor}
+
+    A variant of the per-segment preset that contracts each materialized read-modify-write
+    accumulator into a per-thread register tile ({!Sched.optop.Privatize}) over its serial
+    reduction loop. A routine-local accumulator beats a device-memory RMW on every backend, and
+    on Metal it additionally sidesteps the volatile-RMW miscompile workaround tax
+    (c_syntax.ml [volatile_scalar_rmw]). Detection is permissive: each proposal is validated by
+    try-applying against the segment (Privatize's own preconditions — single index vector,
+    uniform iteration-invariant guards, etc.), and dropped rather than failing the candidate. *)
+
+let rec subtree_has_hardware_loop (llc : LL.t) =
+  match llc with
+  | LL.For_loop { axis = LL.Grid | LL.Workgroup | LL.Workgroup_reduce; _ } -> true
+  | LL.For_loop { body; _ } -> subtree_has_hardware_loop body
+  | LL.Seq (a, b) -> subtree_has_hardware_loop a || subtree_has_hardware_loop b
+  | LL.If { body; _ } -> subtree_has_hardware_loop body
+  | _ -> false
+
+(* Materialized RMW accumulation sites of the (post-preset) scheduled segment, each paired with
+   the outermost enclosing Serial loop eligible to privatize over: the access vector must not
+   mention its symbol (so the accumulation is carried across it), and no hardware-typed loop may
+   sit inside its subtree (the private tile is per-thread; spanning other threads' iterations
+   would store back their elements). *)
+let privatize_proposals (post : LL.optimized) : (Ir.Tnode.t * Idx.symbol) list =
+  let plc = post.LL.optimize_ctx.LL.placements in
+  let proposals = ref [] in
+  let rec walk stack (llc : LL.t) =
+    match llc with
+    | LL.Seq (a, b) ->
+        walk stack a;
+        walk stack b
+    | LL.If { body; _ } -> walk stack body
+    | LL.For_loop { index; from_; body; axis; _ } -> walk ((index, from_, axis, body) :: stack) body
+    | LL.Set { tn; idcs; llsc; _ }
+      when Ir.Tnode.Placements.is_materialized_peek plc tn
+           && List.exists (collect_gets llsc) ~f:(fun (t, i) ->
+                  phys_equal t tn && Array.equal Idx.equal_axis_index i idcs) ->
+        List.find (List.rev stack) ~f:(fun (index, from_, axis, body) ->
+            LL.equal_axis_type axis LL.Serial
+            && from_ = 0
+            && (not (idcs_mention idcs index))
+            && not (subtree_has_hardware_loop body))
+        |> Option.iter ~f:(fun (index, _, _, _) ->
+               if
+                 not
+                   (List.exists !proposals ~f:(fun (t, s) ->
+                        Ir.Tnode.equal t tn && Idx.equal_symbol s index))
+               then proposals := (tn, index) :: !proposals)
+    | _ -> ()
+  in
+  walk [] post.LL.llc;
+  List.rev !proposals
+
+(** The preset schedule extended with a [Privatize] per detected accumulator. Proposals are
+    detected on the preset-scheduled segment and validated one at a time by re-applying the
+    growing schedule; a proposal violating an op precondition is dropped. The exploratory applies
+    run against a hermetic copy of the segment: [Privatize] registers its (fresh) tile in the
+    traced store and placements, and abandoned tiles would otherwise be emitted as dead local
+    declarations when the caller applies the returned schedule to the real segment. *)
+let extend_with_privatize ~static_indices sched (seg : LL.optimized) : Sched.schedule =
+  let scratch () =
+    {
+      seg with
+      LL.traced_store = Hashtbl.copy seg.LL.traced_store;
+      LL.optimize_ctx = LL.copy_optimize_ctx seg.LL.optimize_ctx;
+    }
+  in
+  match Sched.apply ~static_indices sched (scratch ()) with
+  | exception _ -> sched
+  | post ->
+      List.fold (privatize_proposals post) ~init:sched ~f:(fun acc (target, over) ->
+          let acc' = acc @ [ Sched.Privatize { target; over } ] in
+          match Sched.apply ~static_indices acc' (scratch ()) with
+          | (_ : LL.optimized) -> acc'
+          | exception _ -> acc)
+
 (** {2 Candidate compilation}
 
     A candidate is a recipe producing schedules against a {e fresh} lowering: backend [compile]
@@ -318,7 +411,18 @@ type whole_flavor =
   | W_preset of { block_size : int option }
   | W_sketch of sketch_params
 
-type fiss_flavor = F_preset of { block_size : int option } | F_saved of (string * SC.saved_schedule) list
+type fiss_flavor =
+  | F_preset of {
+      block_size : int option;
+      privatize : bool;
+      config_thresholds : bool;
+          (** Use the config-default [min_parallel] thresholds instead of the search's
+              [min_parallel:1] — with [block_size = None] this reproduces the untuned default
+              pipeline ({!Sched.maybe_default_schedules}) exactly, so the candidate pool always
+              contains the behavior the user gets without tuning: on launch-overhead-bound
+              workloads the aggressive [min_parallel:1] presets can all lose to it. *)
+    }
+  | F_saved of (string * SC.saved_schedule) list
 
 type spec = Whole of whole_flavor | Fiss of fiss_flavor
 
@@ -340,25 +444,78 @@ type compiled = {
   digest_after : string;
 }
 
-let compile_candidate ~static_indices ~base_digest ~limits ~is_gpu ~is_cpu ctx comp bindings spec :
-    (compiled, string) Result.t =
-  let check_digest opt =
-    let canon = SC.canonicalize ~static_indices opt in
-    if not (String.equal (SC.digest canon) base_digest) then
-      invalid_arg "Autotune: fresh lowering does not match the tuned code (digest mismatch)";
-    canon
+(* Per-candidate search diagnostics on stderr, gated by config [autotune_log]. *)
+let log_enabled =
+  lazy
+    (match
+       String.lowercase
+         (String.strip (Utils.get_global_arg ~arg_name:"autotune_log" ~default:"false"))
+     with
+    | "true" | "1" -> true
+    | _ -> false)
+
+let logf fmt =
+  Printf.ksprintf (fun s -> if Lazy.force log_enabled then Stdio.eprintf "autotune: %s\n%!" s) fmt
+
+(* Log tag for a (possibly '+'-concatenated, fissioned) digest: a plain prefix only reflects the
+   first segment — two fissioned programs identical in segment 1 would read as "the same digest"
+   (misled the CUDA round-4 analysis on PR #140) — so fold the whole string into the tag. *)
+let dshort d = String.prefix d 8 ^ "/" ^ String.prefix (Stdlib.Digest.to_hex (Stdlib.Digest.string d)) 8
+
+let bs_label = function None -> "cfg" | Some b -> Int.to_string b
+
+let spec_label = function
+  | Whole (W_saved s) -> Printf.sprintf "W_saved[%d ops]" (List.length s)
+  | Whole (W_preset { block_size }) -> Printf.sprintf "W_preset[bs=%s]" (bs_label block_size)
+  | Whole (W_sketch p) ->
+      Printf.sprintf "W_sketch[%s %dx%dx%d/%dx%d%s]"
+        (if p.sk_gpu then "gpu" else "cpu")
+        p.sk_bm p.sk_bn p.sk_bk p.sk_tm p.sk_tn
+        (if p.sk_hoist then " hoist" else "")
+  | Fiss (F_preset { block_size; privatize; config_thresholds }) ->
+      Printf.sprintf "F_preset[bs=%s%s%s]" (bs_label block_size)
+        (if privatize then " priv" else "")
+        (if config_thresholds then " cfg-thresh" else "")
+  | Fiss (F_saved assoc) -> Printf.sprintf "F_saved[%d segs]" (List.length assoc)
+
+(* Every candidate derives its CODE from the ONE base lowering ([base_opt] with [canon] its
+   canonical form, captured together in [tune]) rather than from the compile's own fresh
+   lowering, whose llc the transform ignores. Re-lowering per candidate was subtly unsound:
+   timing runs settle tensor-node value bounds, so later fresh lowerings can fold guards (and
+   even re-segment fission) differently from the base — failing digest checks at best (the CUDA
+   rounds on PR #140: whole arms degenerating to their serial baselines) and silently replaying
+   the winner with empty per-segment schedules at worst (a 296 ms winner returning as a 2614 ms
+   routine). Deriving from the base makes candidates and the winner replay drift-immune and
+   byte-comparable by construction; the fresh-lowering digest check survives only in spirit via
+   the disk cache's [source_digest] guard (cross-process compatibility).
+
+   The rebased code keeps the fresh compile's OWN [optimize_ctx] (the per-compile fork of the
+   context's lineage): link-time buffer allocation consults that fork, so placement mutations by
+   schedule ops — fission's Local promotions above all — must land there or the allocator would
+   miss buffers the kernels reference. Candidate hermeticity is unchanged: each compile forks
+   the lineage table anew. The traced store is copied from the base (schedule ops register their
+   tiles in it). *)
+let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ctx comp bindings
+    spec : (compiled, string) Result.t =
+  let rebase (fresh : LL.optimized) =
+    {
+      base_opt with
+      LL.traced_store = Hashtbl.copy base_opt.LL.traced_store;
+      LL.optimize_ctx = fresh.LL.optimize_ctx;
+    }
   in
-  let preset_sched ?block_size opt =
-    if is_gpu then Sched.default_gpu ?block_size ~min_parallel:1 ~limits opt
-    else if is_cpu then Sched.default_cpu ~min_parallel:1 opt
+  let preset_sched ?block_size ?(config_thresholds = false) opt =
+    let min_parallel = if config_thresholds then None else Some 1 in
+    if is_gpu then Sched.default_gpu ?block_size ?min_parallel ~limits opt
+    else if is_cpu then Sched.default_cpu ?min_parallel opt
     else []
   in
   let captured = ref None in
   let compile_ctx () =
     match spec with
     | Whole flavor ->
-        let transform opt =
-          let canon = check_digest opt in
+        let transform fresh =
+          let opt = rebase fresh in
           let sched, saved, registry =
             match flavor with
             | W_saved saved ->
@@ -384,15 +541,29 @@ let compile_candidate ~static_indices ~base_digest ~limits ~is_gpu ~is_cpu ctx c
         in
         Context.compile ~lowered_transform:transform ctx comp bindings
     | Fiss flavor ->
-        let transforms opt =
-          let (_ : SC.canonical) = check_digest opt in
+        let transforms fresh =
+          let opt = rebase fresh in
           let zero_sched tns = if is_gpu then Sched.zero_expansion ~limits tns else [] in
+          (* Per-segment schedule matching keys on the STRUCTURAL canon ([with_placements:false]):
+             placement classes can render differently across compilation lineages on
+             byte-identical segments (decided in one, undecided in the other — e.g. tuning with
+             [timing_ctx]), which used to fail winner replays wholesale. A lookup miss returns
+             the empty schedule: [fission_scheduled] probes {e fine} (pre-coalescing) segments
+             through this closure, and only the empty-on-miss answer lets coalescing re-converge
+             to the saved segmentation, where every final [`Normal] segment's digest hits (the
+             verification after fission below catches genuine drift loudly instead of silently
+             replaying unscheduled segments). *)
+          let seg_key seg = SC.digest (SC.canonicalize ~static_indices ~with_placements:false seg) in
           let preset seg =
             match flavor with
-            | F_preset { block_size } -> preset_sched ?block_size seg
-            | F_saved assoc -> (
-                let seg_canon = SC.canonicalize ~static_indices seg in
-                match List.Assoc.find assoc ~equal:String.equal (SC.digest seg_canon) with
+            | F_preset { block_size; privatize; config_thresholds } ->
+                let sched = preset_sched ?block_size ~config_thresholds seg in
+                if privatize then extend_with_privatize ~static_indices sched seg else sched
+            | F_saved entries -> (
+                let seg_canon =
+                  SC.canonicalize ~static_indices ~with_placements:false seg
+                in
+                match List.Assoc.find entries ~equal:String.equal (SC.digest seg_canon) with
                 | Some saved -> fst (SC.of_saved seg_canon saved)
                 | None -> [])
           in
@@ -402,13 +573,33 @@ let compile_candidate ~static_indices ~base_digest ~limits ~is_gpu ~is_cpu ctx c
             Sched.fission_scheduled ~promote_locals:is_gpu ~preset ~zero_sched ~static_indices
               opt
           in
+          (* Genuine-drift guard for saved replays (cross-process cache entries): with the
+             empty-on-miss closure above, a saved winner whose segmentation no longer matches
+             would coalesce differently and silently replay some segments unscheduled. Verify
+             instead that every final [`Normal] segment found its saved schedule. *)
+          (match flavor with
+          | F_preset _ -> ()
+          | F_saved entries ->
+              List.iter tuples ~f:(fun (kind, pre, _, _) ->
+                  match kind with
+                  | `Zeros | `Solo -> ()
+                  | `Normal ->
+                      if not (List.Assoc.mem entries ~equal:String.equal (seg_key pre)) then
+                        invalid_arg
+                          "Autotune: fissioned replay: no saved schedule for a segment \
+                           (segmentation drifted)"));
           let posts = List.map tuples ~f:(fun (_, _, _, post) -> post) in
           let units =
             List.filter_map tuples ~f:(fun (kind, pre, sched, post) ->
                 match kind with
                 | `Zeros | `Solo -> None
                 | `Normal ->
-                    let pre_canon = SC.canonicalize ~static_indices pre in
+                    (* The structural canon: [u_key] must match the replay closure's lookup, and
+                       [of_saved] at replay resolves against the same (placement-independent)
+                       binder/tnode numbering. *)
+                    let pre_canon =
+                      SC.canonicalize ~static_indices ~with_placements:false pre
+                    in
                     let saved, registry = SC.to_saved (SC.base_registry pre_canon) sched in
                     Some
                       {
@@ -419,10 +610,10 @@ let compile_candidate ~static_indices ~base_digest ~limits ~is_gpu ~is_cpu ctx c
                       })
           in
           let assoc =
-            (* Structurally identical segments share a digest and hence a schedule; dedup keys. *)
-            List.dedup_and_sort
-              ~compare:(fun (k1, _) (k2, _) -> String.compare k1 k2)
-              (List.map units ~f:(fun u -> (Option.value_exn u.u_key, u.u_saved)))
+            (* One entry per [`Normal] segment in segment order; structurally identical segments
+               share a key and their saved forms are interchangeable, so duplicates are
+               harmless. *)
+            List.map units ~f:(fun u -> (Option.value_exn u.u_key, u.u_saved))
           in
           let digest_after =
             String.concat ~sep:"+"
@@ -601,13 +792,19 @@ let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) (u : unit_g
   in
   List.take (tensorizes @ splits @ swaps @ unrolls @ vectorizes) max_actions_per_unit
 
-(* Extend one unit of a compiled candidate with a menu action. *)
+(* Extend one unit of a compiled candidate with a menu action. The fissioned entries stay in
+   segment order (the positional replay fallback relies on it); extending by key updates every
+   structurally identical segment — they carry interchangeable saved forms, so extending them
+   uniformly keeps the digest lookup and the positional entries consistent. *)
 let extend_spec (elem : compiled) (u : unit_gen) (op : SC.saved_optop) : spec option =
   match (elem.form, u.u_key) with
   | Whole_saved _, None -> Some (Whole (W_saved (u.u_saved @ [ op ])))
   | Fiss_saved assoc, Some key ->
-      let assoc = List.Assoc.remove assoc ~equal:String.equal key in
-      Some (Fiss (F_saved ((key, u.u_saved @ [ op ]) :: assoc)))
+      Some
+        (Fiss
+           (F_saved
+              (List.map assoc ~f:(fun (k, s) ->
+                   if String.equal k key then (k, u.u_saved @ [ op ]) else (k, s)))))
   | _ -> None
 
 (** {2 The search} *)
@@ -648,30 +845,36 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
              (Context.backend_name tctx) (Context.device_id tctx) backend (Context.device_id ctx)));
   let search_ctx = Option.value timing_ctx ~default:ctx in
   (* The base compile: identity transform (= the serial baseline candidate), capturing the
-     optimized code for canonicalization. *)
-  let base_opt = ref None in
+     optimized code every candidate derives from (see [compile_candidate]) and its canonical
+     form. Canonicalize INSIDE the transform: after the transform returns, codegen forces the
+     remaining undecided placements into the very placements table the captured [opt]
+     references, and placement classes enter the digest (Schedule_cache.canonicalize) — the
+     disk-cache key must be the deterministic transform-time form so that storing and
+     replaying processes agree. *)
+  let base_capture = ref None in
   let bctx, broutine =
     Context.compile
       ~lowered_transform:(fun opt ->
-        base_opt := Some opt;
+        base_capture := Some (opt, SC.canonicalize ~static_indices opt);
         opt)
       search_ctx comp bindings
   in
-  let base_opt =
-    match !base_opt with
-    | Some o -> o
+  let base_opt, canon =
+    match !base_capture with
+    | Some oc -> oc
     | None -> failwith "Autotune.tune: backend compile did not invoke lowered_transform"
   in
-  let canon = SC.canonicalize ~static_indices base_opt in
   let base_digest = SC.digest canon in
   let use_cache = (not (String.is_empty cache_dir)) && SC.complete canon in
   let key = SC.cache_key canon ~backend in
   let compile_spec =
-    compile_candidate ~static_indices ~base_digest ~limits ~is_gpu ~is_cpu search_ctx comp bindings
+    compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu search_ctx comp
+      bindings
   in
-  (* Winner (and cache-hit) compiles target the caller's context. *)
+  (* Winner (and cache-hit) compiles target the caller's context; they replay against the same
+     base lowering as the search's candidates. *)
   let compile_spec_real =
-    compile_candidate ~static_indices ~base_digest ~limits ~is_gpu ~is_cpu ctx comp bindings
+    compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ctx comp bindings
   in
   let emit_report r = Option.iter report ~f:(fun f -> f r) in
   let flat_schedule = function
@@ -691,6 +894,8 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
           in
           match compile_spec_real spec with
           | Ok c ->
+              logf "cache hit: %s (best %.4f ms, baseline %.4f ms)" (spec_label spec)
+                entry.SC.best_ms entry.SC.baseline_ms;
               emit_report
                 {
                   cache_hit = true;
@@ -704,7 +909,10 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
                   best_schedule = flat_schedule c.form;
                 };
               Some (c.cctx, c.routine)
-          | Error _ -> (* Stale or corrupt entry: fall through to a fresh search. *) None)
+          | Error msg ->
+              (* Stale or corrupt entry: fall through to a fresh search. *)
+              logf "cache entry replay FAILED, re-searching: %s" msg;
+              None)
       | _ -> None
     else None
   in
@@ -716,6 +924,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
       (* Baseline timing runs uncaught: its failures (e.g. uninitialized inputs) are the user's
          bug, with the same message [Context.run] would give. *)
       let baseline_ms = time_routine ~repeats bctx broutine in
+      logf "baseline: %.4f ms (digest %s)" baseline_ms (dshort base_digest);
       let baseline =
         {
           form = Whole_saved [];
@@ -736,19 +945,25 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
       let n_timed = ref 1 and n_failed = ref 0 in
       let try_spec spec =
         match compile_spec spec with
-        | Error _ ->
+        | Error msg ->
             Int.incr n_failed;
+            logf "%s: FAILED %s" (spec_label spec) msg;
             None
         | Ok c ->
-            if Hash_set.mem seen c.digest_after then None
+            if Hash_set.mem seen c.digest_after then (
+              logf "%s: dedup (digest %s)" (spec_label spec) (dshort c.digest_after);
+              None)
             else (
               Hash_set.add seen c.digest_after;
               match time_routine ~repeats c.cctx c.routine with
               | ms ->
                   Int.incr n_timed;
+                  logf "%s: %.4f ms (digest %s)" (spec_label spec) ms
+                    (dshort c.digest_after);
                   Some (c, ms)
-              | exception _ ->
+              | exception exn ->
                   Int.incr n_failed;
+                  logf "%s: RUN FAILED %s" (spec_label spec) (Exn.to_string exn);
                   None)
       in
       let block_size_presets mk =
@@ -758,7 +973,15 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
       let seed_specs =
         block_size_presets (fun block_size -> Whole (W_preset { block_size }))
         @ (if is_gpu || is_cpu then
-             block_size_presets (fun block_size -> Fiss (F_preset { block_size }))
+             (* Each fissioned preset is seeded plain and privatized (the latter dedups away by
+                digest when no accumulator is eligible). The [config_thresholds] seeds reproduce
+                the untuned default pipeline exactly (plus its privatized variant), so the
+                winner is never worse than not tuning — the aggressive [min_parallel:1] presets
+                can all lose to it on launch-overhead-bound workloads. *)
+             List.concat_map [ false; true ] ~f:(fun privatize ->
+                 Fiss (F_preset { block_size = None; privatize; config_thresholds = true })
+                 :: block_size_presets (fun block_size ->
+                        Fiss (F_preset { block_size; privatize; config_thresholds = false })))
            else [])
         @ List.map sketch_params ~f:(fun p -> Whole (W_sketch p))
       in
@@ -802,6 +1025,18 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
              best_ms;
              baseline_ms;
            });
+      (* Diagnostic control (config [autotune_log]): compile and time the UNTUNED default
+         pipeline in this very process, on the search context — discriminates a genuinely slow
+         winner from process-state effects when the winner's code nominally equals the untuned
+         program yet a separately-run untuned process measures faster (PR #140 round 6: same
+         digest, 3.4x runtime difference across processes on cuda). *)
+      (if Lazy.force log_enabled then
+         match Context.compile search_ctx comp bindings with
+         | cctx, croutine -> (
+             match time_routine ~repeats cctx croutine with
+             | ms -> logf "untuned-default in-process control: %.4f ms" ms
+             | exception exn -> logf "untuned-default control run failed: %s" (Exn.to_string exn))
+         | exception exn -> logf "untuned-default control compile failed: %s" (Exn.to_string exn));
       emit_report
         {
           cache_hit = false;
@@ -825,5 +1060,10 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
           | Fiss_saved assoc -> Fiss (F_saved assoc)
         in
         match compile_spec_real spec with
-        | Ok c -> (c.cctx, c.routine)
-        | Error _ -> Context.compile ctx comp bindings
+        | Ok c ->
+            logf "winner replay ok: %s" (spec_label spec);
+            (c.cctx, c.routine)
+        | Error msg ->
+            logf "winner replay FAILED (%s), falling back to the default compile: %s"
+              (spec_label spec) msg;
+            Context.compile ctx comp bindings

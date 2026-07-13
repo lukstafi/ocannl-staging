@@ -45,7 +45,8 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   fixtures are self-describing and runners need only the fixture path.
 - `runners/ocannl/bench_{mlp,conv,gpt}.ml` + `bench_harness.ml` — OCANNL runners
   (`dune build benchmarks/runners/ocannl/bench_mlp.exe` etc.). Env: `BENCH_FIXTURE` (path),
-  `BENCH_TUNE=1` (materialize-all + `Autotune.tune`), `BENCH_MATERIALIZE=1` (materialize
+  `BENCH_TUNE=1` (`Train.tune_placements`: autotunes both the default placements graph and
+  the materialize-all graph, keeping the measured winner), `BENCH_MATERIALIZE=1` (materialize
   intermediates without tuning); backend via the usual `--ocannl_backend=cc|metal|cuda`. Debug
   helpers: `BENCH_DEBUG=1` prints param names/dims (conv/gpt) or bias gradients (mlp) and
   exits; `BENCH_NO_SGD=1` compiles the gradient update without the SGD step (mlp);
@@ -96,12 +97,20 @@ tinygrad's CPU device JIT-compiles kernels with `clang`; on a machine without cl
   `nn.optim.SGD` share the same reference semantics). Don't switch parity workloads to Adam:
   epsilon-placement differs across frameworks and fails the gate for uninteresting reasons.
 - The OCANNL runner keeps intermediates Virtual (recomputed in backward) in the untimed
-  parity configuration; the tuned variant materializes everything before autotuning.
+  parity configuration; the tuned variant tunes both that graph and the materialize-all
+  graph (placement A/B) and keeps the faster one.
 - tinygrad's loss must be realized before `opt.step()` (in-place assigns; a later realize
   would recompute the loss from updated weights). tinygrad JIT capture happens during the
   first parity steps; loss values are unaffected.
 - Tuned-vs-untuned must be paired within a comparison: OCANNL `BENCH_TUNE=1` corresponds to
   tinygrad `BEAM=...` search and `torch.compile` — one-time search cost for better kernels.
+- OCANNL tuned cells run a two-pass protocol: pass 1 runs the search and populates
+  `autotune_cache/` (its `compile_s` — the search cost — is what gets reported), then a fresh
+  pass-2 process replays the cached winner and provides the step timings. Rationale: the search
+  leaves its own process measurably slower (extra per-launch overhead from accumulated
+  modules/buffers; 2.5–3.5x on small CUDA kernels), which would penalize the tuned artifact for
+  the one-time search it already paid for in `compile_s`. Wipe `autotune_cache/` before a run
+  whose `compile_s` should reflect a from-scratch search.
 - Timing on a laptop: prefer the p50 of the per-step synced times; rerun and compare rounds
   if thermals are suspect. Keep timing out of CI; the parity gate is the CI-worthy part.
 

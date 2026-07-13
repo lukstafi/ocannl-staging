@@ -62,12 +62,23 @@ type canonical
 (** The canonical identity of one [Low_level.optimized] value: the digest, the loop-binder and
     static-symbol numbering, and the tensor-node numbering. *)
 
-val canonicalize : ?static_indices:Indexing.static_symbol list -> Low_level.optimized -> canonical
+val canonicalize :
+  ?static_indices:Indexing.static_symbol list ->
+  ?with_placements:bool ->
+  Low_level.optimized ->
+  canonical
 (** Walks the optimized code once in preorder, numbering [For_loop] binders, first-occurrence
-    tensor nodes (their dims, precision, and hoisted-packing eligibility
-    [Schedule.hoistable_constant] enter the digest — schedule validity depends on operand
-    constancy, gh-ocannl-470), and rendering the canonical form. [static_indices] must be the
-    same list the code was lowered with ({!Indexing.bound_symbols} of the compile's bindings). *)
+    tensor nodes (their dims, precision, hoisted-packing eligibility
+    [Schedule.hoistable_constant] — schedule validity depends on operand constancy,
+    gh-ocannl-470 — and effective placement class from the compile's
+    {!Ir.Low_level.optimize_ctx} — identical code over [Local] scratch vs an [On_device] buffer
+    generates different kernels, so same-code different-placement programs must not share cache
+    keys — all enter the digest), and rendering the canonical form. [with_placements = false]
+    omits the placement classes, giving the {e structural} identity: placement classes can render
+    differently across compilation lineages on byte-identical code, so per-segment schedule
+    matching in fissioned replays keys on structure only. The binder/tensor-node numbering is
+    identical either way. [static_indices] must be the same list the code was lowered with
+    ({!Indexing.bound_symbols} of the compile's bindings). *)
 
 val digest : canonical -> string
 (** Hex digest of the canonical rendering. Equal digests mean structurally identical code, hence

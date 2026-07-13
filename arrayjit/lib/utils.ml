@@ -121,6 +121,7 @@ let known_config_keys =
       "automatic_cpu_schedule";
       "cpu_schedule_min_parallel";
       "schedule_fission";
+      "schedule_log_launches";
       "cc_parallel_grid";
       "cc_parallel_chunks";
       "cc_vector_bytes";
@@ -129,6 +130,7 @@ let known_config_keys =
       "autotune_rounds";
       "autotune_repeats";
       "autotune_cache_dir";
+      "autotune_log";
       (* Identifiers and other *)
       "ll_ident_style";
       "cd_ident_style";

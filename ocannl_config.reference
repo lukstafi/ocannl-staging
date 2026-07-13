@@ -142,6 +142,11 @@ cpu_schedule_min_parallel=16384
 # serially whenever the analysis bails, as before.
 schedule_fission=true
 
+# If true, backend compilation logs one stderr line per compiled kernel/segment with its launch
+# grid/block dimensions and statement count — for diffing what two compiles of nominally
+# identical code actually emit. Debugging aid; independent of the ppx_minidebug log levels.
+schedule_log_launches=false
+
 # How the C backend renders eligible outermost Grid loops (pool-backed Grid rendering,
 # docs/proposals/gh-ocannl-164.md): "dispatch" uses libdispatch's dispatch_apply (macOS),
 # "openmp" uses `#pragma omp parallel for` (adds -fopenmp to the kernel compile), "none" keeps
@@ -186,6 +191,12 @@ autotune_repeats=3
 # optimized code and the backend name. Relative paths resolve against the working directory.
 # An empty value disables the cache (every `Autotune.tune` call searches afresh).
 autotune_cache_dir=autotune_cache
+
+# If true, `Autotune.tune` logs each candidate to stderr: its spec, whether it failed (with the
+# error message), deduplicated against an already-seen post-schedule digest, or was timed (and
+# its time), plus the cache-hit, winner-replay and fallback outcomes. For debugging search
+# quality; independent of the ppx_minidebug log levels.
+autotune_log=false
 
 # If true, stdout capturing is disabled, so some logs meant for the ppx_minidebug log files
 # (in particular CUDA logs) remain on the stdout.

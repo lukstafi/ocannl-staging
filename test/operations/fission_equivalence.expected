@@ -1,0 +1,7 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+base lowerings agree across sibling roots: true
+same capture: segment counts agree: true
+same capture: per-segment digests agree: true
+cross capture (arm-A candidate vs untuned cell): segment counts agree: true
+cross capture (arm-A candidate vs untuned cell): per-segment digests agree: true

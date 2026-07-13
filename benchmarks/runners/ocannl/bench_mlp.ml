@@ -8,7 +8,8 @@
 
    The backend is selected the usual OCANNL way (e.g. [--ocannl_backend=metal]). Environment:
    BENCH_FIXTURE is the fixture path; BENCH_TUNE=1 enables the autotuned variant
-   (materialize-all + [Autotune.tune], the recipe from the training tests). *)
+   ([Train.tune_placements]: placement A/B — the default virtual-plus-promotion graph and the
+   materialize-all graph are both tuned and the measured winner kept). *)
 
 open Base
 open Ocannl
@@ -87,7 +88,6 @@ let () =
   let%op batch_loss =
     cross_entropy_loss ~spec:"...|v" ~normalize_by:!..batch_size () ~logits ~targets:batch_y
   in
-  if tune then Train.every_non_literal_materialized batch_loss;
   let debug = match Stdlib.Sys.getenv_opt "BENCH_DEBUG" with Some "1" -> true | _ -> false in
   let update = Train.grad_update ~setup_for_parallel:debug batch_loss in
   let learning_rate = TDSL.O.( !. ) lr in
@@ -98,10 +98,25 @@ let () =
   let backend = Context.backend_name ctx in
   let ctx = Train.init_params ctx bindings batch_loss in
   let t0 = Unix.gettimeofday () in
+  (* BENCH_TUNE_REPORT=1: print both placement arms' search reports on stderr. *)
+  let report =
+    match Stdlib.Sys.getenv_opt "BENCH_TUNE_REPORT" with
+    | Some "1" ->
+        Some
+          (fun (r : Autotune.report) ->
+            Stdlib.Printf.eprintf
+              "tune arm: cache_hit=%b timed=%d failed=%d rounds=%d sketch=%d fissioned=%b \
+               baseline_ms=%.4f best_ms=%.4f\n\
+               %!"
+              r.cache_hit r.candidates_timed r.candidates_failed r.rounds_run
+              r.sketch_candidates r.fissioned r.baseline_ms r.best_ms)
+    | _ -> None
+  in
   let ctx, routine =
     if tune then
       let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
-      Autotune.tune ~rounds:0 ~timing_ctx:scratch ctx step_comp bindings
+      Train.tune_placements ?report ~rounds:0 ~timing_ctx:scratch ctx batch_loss step_comp
+        bindings
     else Context.compile ctx step_comp bindings
   in
   let compile_s = Unix.gettimeofday () -. t0 in

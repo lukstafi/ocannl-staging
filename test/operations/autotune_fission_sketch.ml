@@ -34,7 +34,16 @@ let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~d
 let is_gpu = Sched.backend_is_gpu backend_name
 let is_cpu = Sched.backend_is_cpu backend_name
 
+(* The dune sandbox persists across runs: stale entries written by an older binary (digest
+   ingredients and the saved-schedule format evolve) would break miss-then-hit assertions. *)
+let clean_cache dir =
+  if Stdlib.Sys.file_exists dir && Stdlib.Sys.is_directory dir then
+    Array.iter (Stdlib.Sys.readdir dir) ~f:(fun f ->
+        Stdlib.Sys.remove (Stdlib.Filename.concat dir f))
+
 let () =
+  List.iter [ "autotune_fission_cache"; "autotune_fission_cache2"; "autotune_sketch_cache" ]
+    ~f:clean_cache;
   (* === The fissionable chain: d = a + b (forced materialized), e = d *. d^T. The transposed
      read keeps the cross-nest edge misaligned, so the aligned cross-nest rule cannot merge the
      pair and the chain still fissions (a plain pointwise consumer would now stay one kernel). === *)
@@ -108,7 +117,9 @@ let () =
           List.filter_map tuples ~f:(fun (kind, pre, sched, _post) ->
               match kind with
               | `Normal ->
-                  let pre_canon = SC.canonicalize pre in
+                  (* Per-segment replay matching keys on the structural canon (see
+                     Schedule_cache.canonicalize's [with_placements]). *)
+                  let pre_canon = SC.canonicalize ~with_placements:false pre in
                   let saved, _reg = SC.to_saved (SC.base_registry pre_canon) sched in
                   Some (SC.digest pre_canon, saved)
               | _ -> None);

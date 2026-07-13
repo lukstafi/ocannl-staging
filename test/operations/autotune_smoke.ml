@@ -211,6 +211,12 @@ let () =
     named "tune_combo" (Asgns.sequence [ Train.forward tc1; Train.forward tc2 ])
   in
   let cache_dir = "autotune_cache_test" in
+  (* The dune sandbox persists across runs: a stale entry written by an older binary (digest
+     ingredients and the saved-schedule format evolve) breaks the miss-then-hit assertions
+     below, so start from a clean cache. *)
+  (if Stdlib.Sys.file_exists cache_dir && Stdlib.Sys.is_directory cache_dir then
+     Array.iter (Stdlib.Sys.readdir cache_dir) ~f:(fun f ->
+         Stdlib.Sys.remove (Stdlib.Filename.concat cache_dir f)));
   let reports = ref [] in
   let tune_once () =
     let ctx = Context.auto () in
