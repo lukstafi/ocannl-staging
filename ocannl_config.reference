@@ -91,6 +91,7 @@ clean_up_log_files_on_startup=true
 # Other configurations:
 
 # The default backend for computations, if `Backends.fresh_backend` isn't passed `backend_name`.
+# Available: cc, multidev_cc, cuda, hip, metal.
 backend=cc
 
 # The number of devices the multidev_cc backend exposes (each is a worker domain with its own
@@ -98,7 +99,7 @@ backend=cc
 # recommended for this machine. Fixed at first use of the backend.
 multidev_num_devices=0
 
-# If true, on GPU backends (cuda, metal) kernels compiled without an explicit `lowered_transform`
+# If true, on GPU backends (cuda, hip, metal) kernels compiled without an explicit `lowered_transform`
 # get the default GPU schedule (docs/proposals/schedule-ir-optops.md §6): parallelizable loops are
 # annotated / split into Grid x Workgroup pairs when a conservative analysis proves the kernel
 # race-free under the annotation; otherwise the kernel runs single-threaded as before. Disabled
@@ -200,6 +201,9 @@ debug_log_to_stream_files=false
 
 # If set and relevant, it's the `CU_LIMIT_PRINTF_FIFO_SIZE` CUDA configuration.
 cuda_printf_fifo_size=
+
+# If set and relevant, it's the `hipLimitPrintfFifoSize` HIP configuration.
+hip_printf_fifo_size=
 
 # The `-O` argument to the compiler executable for the `cc` and `multidev_cc` backends.
 cc_backend_optimization_level=3

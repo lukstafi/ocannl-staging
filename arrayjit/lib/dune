@@ -79,6 +79,22 @@
    ppx_minidebug)))
 
 (library
+ (name hip_backend)
+ (public_name arrayjit.hip_backend)
+ (optional)
+ (modules hip_backend builtins_hip)
+ (libraries base hipjit.hip hipjit.hiprtc utils ir)
+ (preprocess
+  (pps
+   ppx_compare
+   ppx_hash
+   ppx_here
+   ppx_sexp_conv
+   ppx_string
+   ppx_variants_conv
+   ppx_minidebug)))
+
+(library
  (name metal_backend)
  (public_name arrayjit.metal_backend)
  (optional)
@@ -116,6 +132,11 @@
    (cuda_backend -> cuda_backend_impl.cudajit.ml)
    (-> cuda_backend_impl.missing.ml))
   (select
+   hip_backend_impl.ml
+   from
+   (hip_backend -> hip_backend_impl.hipjit.ml)
+   (-> hip_backend_impl.missing.ml))
+  (select
    metal_backend_impl.ml
    from
    (metal_backend -> metal_backend_impl.metal.ml)
@@ -135,6 +156,7 @@
   cc_backend
   builtins_cc
   cuda_backend_impl
+  hip_backend_impl
   metal_backend_impl
   lowered_backend_missing
   no_device_backend_missing

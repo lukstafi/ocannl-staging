@@ -35,6 +35,7 @@ opam install . --deps-only
 
 # Install with optional backends  
 opam install cudajit  # for CUDA backend
+opam install hipjit   # for AMD HIP backend
 ```
 
 ## Architecture Overview
@@ -165,6 +166,7 @@ opam install cudajit  # for CUDA backend
 - `cc` (the default) combines the implementation cc_backend.ml with the scheduler `Sync` in schedulers.ml; kernel-level CPU parallelism is automatic (pool-rendered Grid loops)
 - `multidev_cc` combines cc_backend.ml with the scheduler `Multidev`: multiple worker-domain CPU devices, for debugging multi-device parallel workflows ("sync_cc"/"multicore_cc" are accepted as deprecated aliases of cc/multidev_cc)
 - `cuda` with implementation in cuda_backend.ml
+- `hip` (AMD ROCm/HIP) with implementation in hip_backend.ml, mirroring the CUDA backend
 - `metal` with implementation in metal_backend.ml
 
 ### Backend Development

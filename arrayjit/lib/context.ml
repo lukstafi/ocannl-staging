@@ -78,6 +78,9 @@ let create_from_backend_name ~device_id backend_name =
 let cuda ?device_id () =
   create_from_backend_name ~device_id:(Option.value device_id ~default:0) "cuda"
 
+let hip ?device_id () =
+  create_from_backend_name ~device_id:(Option.value device_id ~default:0) "hip"
+
 let metal ?device_id () =
   create_from_backend_name ~device_id:(Option.value device_id ~default:0) "metal"
 
@@ -93,7 +96,7 @@ let auto () =
   match Utils.get_global_arg ~arg_name:"backend" ~default:"" with
   | "" ->
       (* No global config, try backends in order of preference *)
-      let backends_to_try = [ "metal"; "cuda"; "cc" ] in
+      let backends_to_try = [ "metal"; "cuda"; "hip"; "cc" ] in
       let rec try_backends = function
         | [] -> failwith "No backend available"
         | name :: rest -> (
@@ -479,10 +482,13 @@ let copy ?(into_merge_buffer = BI.No) ~src ~dst tn =
       same (module Backends.Multidev_cc_b) ~rewrap:(fun c -> Backends.Multidev_cc_ctx c) s d
   | Backends.Cuda_ctx s, Backends.Cuda_ctx d ->
       same (module Backends.Cuda_b) ~rewrap:(fun c -> Backends.Cuda_ctx c) s d
+  | Backends.Hip_ctx s, Backends.Hip_ctx d ->
+      same (module Backends.Hip_b) ~rewrap:(fun c -> Backends.Hip_ctx c) s d
   | Backends.Metal_ctx s, Backends.Metal_ctx d ->
       same (module Backends.Metal_b) ~rewrap:(fun c -> Backends.Metal_ctx c) s d
-  | (Backends.Cc_ctx _ | Backends.Multidev_cc_ctx _ | Backends.Cuda_ctx _ | Backends.Metal_ctx _), _
-    ->
+  | ( ( Backends.Cc_ctx _ | Backends.Multidev_cc_ctx _ | Backends.Cuda_ctx _ | Backends.Hip_ctx _
+      | Backends.Metal_ctx _ ),
+      _ ) ->
       host_roundtrip
         (Printf.sprintf "cross-backend transfer (%s to %s)" (backend_name src) (backend_name dst))
 
