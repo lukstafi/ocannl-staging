@@ -57,9 +57,12 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
 }|},
       [ "uint4x32_t"; "uint32_to_single_uniform" ] );
     ( "uint4x32_to_double_uniform",
+      (* Combine the lanes as an integer and convert NUMERICALLY before scaling (mirroring
+         builtins.c); bit-casting the lanes to a double (as builtins_cuda.ml does, via
+         [__longlong_as_double]) would yield NaN/Inf/huge values instead of [0, 1). *)
       {|__device__ double uint4x32_to_double_uniform(uint4x32_t x) {
-  unsigned long long combined = __double_as_longlong(__hiloint2double(x.v[1], x.v[0]));
-  return __longlong_as_double(combined) * (1.0 / 18446744073709551616.0);
+  unsigned long long combined = ((unsigned long long)x.v[1] << 32) | x.v[0];
+  return (double)combined * (1.0 / 18446744073709551616.0);
 }|},
       [ "uint4x32_t" ] );
     ( "uint4x32_to_int32_uniform",
@@ -146,10 +149,11 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
 }|},
       [ "uint4x32_t"; "float4_t"; "uint32_to_single_uniform" ] );
     ( "uint4x32_to_double_uniform_vec",
+      (* Numeric integer-to-double conversion, like the scalar variant (see the note there). *)
       {|__device__ double2_t uint4x32_to_double_uniform_vec(uint4x32_t x) {
   double2_t result;
-  result.v[0] = __longlong_as_double(__double_as_longlong(__hiloint2double(x.v[1], x.v[0]))) * (1.0 / 18446744073709551616.0);
-  result.v[1] = __longlong_as_double(__double_as_longlong(__hiloint2double(x.v[3], x.v[2]))) * (1.0 / 18446744073709551616.0);
+  result.v[0] = (double)(((unsigned long long)x.v[1] << 32) | x.v[0]) * (1.0 / 18446744073709551616.0);
+  result.v[1] = (double)(((unsigned long long)x.v[3] << 32) | x.v[2]) * (1.0 / 18446744073709551616.0);
   return result;
 }|},
       [ "uint4x32_t"; "double2_t" ] );
@@ -222,6 +226,31 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
   return result;
 }|},
       [ "uint4x32_t"; "half8_t" ] );
+    (* The [Uint4x32_to_prec_uniform] emission names helpers by [Ops.prec_string]
+       ("uint4x32_to_int64_uniform_vec", ...), while the workhorse definitions above use short
+       names; provide the emitted names as wrappers (mirroring builtins.c, which defines the long
+       names directly). Return types match [vec_typ_of_prec], which maps both byte and fp8 to
+       [int8x16_t]. *)
+    ( "uint4x32_to_int64_uniform_vec",
+      {|__device__ int64x2_t uint4x32_to_int64_uniform_vec(uint4x32_t x) {
+  return uint4x32_to_i64_uniform_vec(x);
+}|},
+      [ "uint4x32_t"; "int64x2_t"; "uint4x32_to_i64_uniform_vec" ] );
+    ( "uint4x32_to_uint16_uniform_vec",
+      {|__device__ uint16x8_t uint4x32_to_uint16_uniform_vec(uint4x32_t x) {
+  return uint4x32_to_u16_uniform_vec(x);
+}|},
+      [ "uint4x32_t"; "uint16x8_t"; "uint4x32_to_u16_uniform_vec" ] );
+    ( "uint4x32_to_byte_uniform_vec",
+      {|__device__ int8x16_t uint4x32_to_byte_uniform_vec(uint4x32_t x) {
+  return uint4x32_to_i8_uniform_vec(x);
+}|},
+      [ "uint4x32_t"; "int8x16_t"; "uint4x32_to_i8_uniform_vec" ] );
+    ( "uint4x32_to_fp8_uniform_vec",
+      {|__device__ int8x16_t uint4x32_to_fp8_uniform_vec(uint4x32_t x) {
+  return uint4x32_to_i8_uniform_vec(x);
+}|},
+      [ "uint4x32_t"; "int8x16_t"; "uint4x32_to_i8_uniform_vec" ] );
     ( "uint4x32_to_u8_uniform_vec",
       {|__device__ uint8x16_t uint4x32_to_u8_uniform_vec(uint4x32_t x) {
   uint8x16_t result;
