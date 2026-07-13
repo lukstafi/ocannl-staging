@@ -72,7 +72,12 @@ let take_prefix_images ~n float_images =
 
 let cifar10_cache_dir () =
   let home =
-    try Sys.getenv "HOME" with Not_found -> failwith "HOME environment variable not set"
+    (* On Windows, HOME is set under MSYS/git-bash shells but not cmd/PowerShell; fall back to
+       USERPROFILE (forward slashes are fine for Windows file APIs). *)
+    try Sys.getenv "HOME"
+    with Not_found -> (
+      try Sys.getenv "USERPROFILE"
+      with Not_found -> failwith "Neither HOME nor USERPROFILE environment variable is set")
   in
   home ^ "/.cache/ocaml-dataprep/datasets/cifar-10-bin/"
 
@@ -85,10 +90,15 @@ let ensure_cifar10_binary () =
   if not (Sys.file_exists check_file) then begin
     let tar_path = cache_dir ^ "cifar-10-binary.tar.gz" in
     let url = "https://www.cs.toronto.edu/~kriz/cifar-10-binary.tar.gz" in
-    (* Create cache dir *)
-    (match Unix.system (Printf.sprintf "mkdir -p %s" (Filename.quote cache_dir)) with
-    | Unix.WEXITED 0 -> ()
-    | _ -> failwith ("Failed to create cache directory: " ^ cache_dir));
+    (* Create cache dir natively: `mkdir -p` via Unix.system goes through cmd.exe on Windows,
+       which has no -p flag. *)
+    let rec mkdir_p dir =
+      if not (Sys.file_exists dir) then begin
+        mkdir_p (Filename.dirname dir);
+        try Unix.mkdir dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
+      end
+    in
+    mkdir_p (Filename.dirname (cache_dir ^ "."));
     (* Download if needed *)
     if not (Sys.file_exists tar_path) then begin
       Printf.printf "Downloading CIFAR-10 binary dataset...\n%!";
