@@ -1079,9 +1079,187 @@ ocannl & cc & materialized & 289.759 & 278.446 & 322.250 & 0.73 &
 
 \subsection{AMD, HIP backend}\label{amd-hip-backend}
 
-Results for the AMD HIP backend (\passthrough{\lstinline!hip!},
-mirroring the CUDA backend through ROCm) are being collected and will be
-included in the final version.
+Measured on an AMD Strix Halo (Radeon 8060S iGPU, gfx1151) under Windows
+11, ROCm/HIP SDK 7.1; OCANNL backends \passthrough{\lstinline!cc!} (CPU)
+and \passthrough{\lstinline!hip!}. Coverage is partial: on Windows
+neither PyTorch nor tinygrad reaches the AMD GPU, so PyTorch appears
+only as the CPU eager parity reference, and the compiled/BEAM variants
+are absent. Step times are milliseconds.
+
+\textbf{gpt2\_mini} (forward-only; the full report additionally lists
+tokens/s):
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+framework
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+backend
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+variant
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+step p50 ms
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+p10
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+p90
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+compile s
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+parity
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+pytorch & cpu & eager & 23.356 & 22.367 & 24.945 & 0.03 & REF \\
+ocannl & hip & tuned & 67.331 & 66.451 & 70.356 & 542.34 & 1.3e-07 \\
+ocannl & hip & default & 68.278 & 66.471 & 71.358 & 1.96 & 1.3e-07 \\
+ocannl & hip & materialized & 72.636 & 71.460 & 73.412 & 2.73 &
+8.7e-07 \\
+ocannl & cc & tuned & 500.138 & 486.113 & 509.318 & 151.19 & 8.0e-07 \\
+ocannl & cc & default & 2212.050 & 2209.280 & 2214.540 & 3.14 &
+8.7e-07 \\
+ocannl & cc & materialized & 2387.700 & 2385.920 & 2389.150 & 10.01 &
+8.0e-07 \\
+\end{longtable}
+
+\textbf{lenet}:
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+framework
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+backend
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+variant
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+step p50 ms
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+p10
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+p90
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+compile s
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+parity
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+pytorch & cpu & eager & 1.371 & 1.246 & 1.755 & 0.01 & REF \\
+ocannl & hip & materialized & 22.246 & 21.962 & 22.622 & 1.75 &
+3.1e-07 \\
+ocannl & hip & tuned & 22.318 & 21.994 & 22.616 & 89.72 & 3.1e-07 \\
+ocannl & cc & materialized & 22.509 & 22.374 & 22.752 & 3.35 &
+3.1e-07 \\
+ocannl & cc & tuned & 22.644 & 22.477 & 23.071 & 196.90 & 3.1e-07 \\
+ocannl & cc & default & 32.370 & 32.121 & 32.684 & 3.24 & 3.1e-07 \\
+ocannl & hip & default & 82.096 & 81.653 & 82.477 & 1.50 & 2.1e-07 \\
+\end{longtable}
+
+\textbf{mlp\_small}:
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+framework
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+backend
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+variant
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+step p50 ms
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+p10
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+p90
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+compile s
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+parity
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+ocannl & cc & tuned & 0.107 & 0.106 & 0.115 & 16.66 & 2.8e-07 \\
+ocannl & cc & materialized & 0.139 & 0.137 & 0.142 & 0.92 & 2.8e-07 \\
+ocannl & cc & default & 0.140 & 0.135 & 0.148 & 0.82 & 2.8e-07 \\
+ocannl & hip & default & 0.190 & 0.182 & 0.213 & 0.09 & 3.0e-07 \\
+ocannl & hip & materialized & 0.208 & 0.199 & 0.241 & 0.09 & 2.8e-07 \\
+ocannl & hip & tuned & 0.210 & 0.199 & 0.257 & 5.65 & 3.0e-07 \\
+pytorch & cpu & eager & 0.268 & 0.239 & 0.310 & 0.00 & REF \\
+\end{longtable}
+
+\textbf{mlp\_wide}:
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1250}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+framework
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+backend
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+variant
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+step p50 ms
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+p10
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+p90
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+compile s
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+parity
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+ocannl & hip & tuned & 1.630 & 1.584 & 1.730 & 114.01 & 4.2e-07 \\
+ocannl & hip & materialized & 1.750 & 1.703 & 1.823 & 0.40 & 4.2e-07 \\
+ocannl & hip & default & 1.832 & 1.766 & 2.038 & 0.40 & 4.2e-07 \\
+pytorch & cpu & eager & 3.984 & 3.587 & 4.720 & 0.01 & REF \\
+ocannl & cc & tuned & 130.773 & 129.064 & 134.170 & 27.34 & 4.2e-07 \\
+ocannl & cc & materialized & 331.161 & 329.459 & 333.288 & 1.21 &
+5.2e-07 \\
+ocannl & cc & default & 331.693 & 329.856 & 333.346 & 1.18 & 5.2e-07 \\
+\end{longtable}
 
 \section{Appendix: Shape and Projections inference: semantics and
 correctness}\label{appendix-shape-and-projections-inference-semantics-and-correctness}
