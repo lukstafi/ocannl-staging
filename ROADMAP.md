@@ -61,28 +61,44 @@ This release is the basis for the workshop paper examples: a clean context-based
 
 ---
 
-## v0.8 — Summer 2026
-**Theme: GPU-style performance — low-hanging fruit; AMD HIP backend**
+## v0.8 — July 13, 2026
+**Theme: Parallel schedules and autotuning; AMD HIP backend**
 
-A substantial milestone (~2 months). GitHub milestone scope: *"GPU tiling and related optimizations in the polyhedral style, with heuristic syntactic metrics for now."*
+GitHub milestone scope: *"GPU tiling and related optimizations in the polyhedral style, with heuristic syntactic metrics for now. HIP backend (AMD hardware)."*
 
-- **Matmul tiling** (#412) — fast multidimensional matrix multiplication, first from Böhm's CPU article, then the CUDA worklog, then lessons from llm.c (#253).
-- **Megakernel exploration** (#318, done as a study) — may require splitting routines into multiple kernels.
-- **Metal private mode** (#320, done).
-- **MSVC on the native-Windows C backend** (#313) — grouped here with the other backend work (moved from v0.7's open list; the GitHub milestone is v0.8).
-- **AMD HIP backend** (#411) — a major effort, comparable to the CUDA and Metal backends (redistributed here from the dissolved v0.7.1). Standalone HIP bindings ship as an independent GitHub project and opam package, following the same pattern as the CUDA bindings (`cudajit`) and the Metal bindings (`metal`), so the OCaml community can use them without taking on the weight of OCANNL; the `arrayjit` backend then **depends on** those bindings, with the usual code-generation, memory-management, and synchronization plumbing.
-- Stretch / study: AVX/AVX2 intrinsics for the C backend (#164); `ggml` efficiency lessons (#163); restore CUDA `__constant__` arrays (#195); small-Transformer digit-addition reproduction (#427).
+> **Scope changes vs. the original plan:** **tensor cores** — the end point of the matmul-tiling track (#412) — are **pushed out to v0.9**. Conversely, **autotuning** was not on the original roadmap at all: measured schedule search was pulled in and lands in v0.8, with a **full beam search still scheduled for v0.9**. In effect the milestone traded "heuristic syntactic metrics" for execution-measured tuning one release early.
 
-> **Date note:** the GitHub milestone still carries a stale 2026-02-28 due date from before the slip; treat the date above as authoritative.
+**Parallel schedules (done):**
+- **Automatic GPU schedules** — CUDA and Metal kernels now parallelize by default (`automatic_gpu_schedule`): hardware axis types render to grid/block/thread loops with launch dimensions, barriers, and shared-memory tiles; per-backend `hardware_limits` validate block sizes, thread counts, and shared-memory use of every kernel.
+- **Kernel fission** — routines split into multiple kernels at materialized cross-nest edges, with aligned cross-nest parallelism merging equal-geometry nests losslessly; Metal encodes fissioned steps as fused command-buffer segments.
+- **CPU kernel-level parallelism** — the `cc` backend renders parallel loops through a thread pool by default; backends renamed to `cc` / `multidev_cc` (`sync_cc` / `multicore_cc` remain as deprecated aliases).
+- **Matmul tiling** (#412, partial) — register-tiled `Tile_mma` microkernels and SIMD vector-extension codegen with reduction chains (#468, #469), warp shuffles and packed vectors on the GPU backends — the Böhm-CPU-article and CUDA-worklog legs of the track; the tensor-cores conclusion moves to v0.9.
+
+**Autotuning (done — pulled into v0.8):**
+- **Measured schedule search** — `Autotune.tune` searches canonical schedule candidates with execution-based timing: a digest-guarded schedule cache, per-segment schedules for fissioned routines, sketch seeding (e.g. matmul), and placement A/B tuning. Full beam search over schedules remains v0.9.
+
+**AMD HIP backend (done)** (#411) — implemented via the standalone `hipjit` bindings (independent GitHub project and opam package, following the `cudajit`/`metal` pattern), mirroring the CUDA backend's code generation, memory management, and synchronization.
+
+**Benchmarks and platforms (done):**
+- **Cross-framework benchmark suite** — `benchmarks/` compares OCANNL against PyTorch (including `torch.compile`) and tinygrad (including BEAM search), gated on loss-parity; checked-in example reports for Metal, CUDA, and Windows/HIP feed the workshop article's benchmark appendix.
+- **Windows** — the full test suite is green on the `cc` and `hip` backends; the CUDA backend was restored on Windows (NVRTC arch floors for half/bf16 intrinsics).
+- **Megakernel exploration** (#318, done as a study); **Metal private mode** (#320, done).
+
+**Deferred after v0.8:**
+- **Tensor cores** (#412 conclusion, with llm.c lessons #253) → v0.9.
+- **MSVC on the native-Windows C backend** (#313) — Windows is green via mingw-w64; MSVC support stays open.
+- **AVX/AVX2 intrinsics** (#164) — the issue drove the v0.8 CPU-parallelism and SIMD bundle (pool-backed `Grid` rendering, probed SIMD compiler flags, vector-extension codegen); explicit intrinsics remain open, to revisit only if they measurably beat the vector extensions.
+- Stretch / study items not taken up: `ggml` efficiency lessons (#163); restore CUDA `__constant__` arrays (#195); small-Transformer digit-addition reproduction (#427).
 
 ---
 
 ## v0.9 — August 24, 2026 (ICFP week)
 **Theme: Program search and optimization**
 
-A research-heavy milestone (~2.5 months). GitHub milestone scope: *"Program search with execution-based per-backend or aggregate-of-backends cost functions; broadening code-graph rewriting rules."*
+A research-heavy milestone. GitHub milestone scope: *"Program search with execution-based per-backend or aggregate-of-backends cost functions; broadening code-graph rewriting rules."*
 
-- **Static scheduling via program search** — an alternative to tinygrad's dynamic scheduling; Halide-inspired search.
+- **Tensor cores** (#412 conclusion, moved from v0.8) — hardware matrix units (CUDA WMMA/mma, Metal simdgroup matrices) building on the register-tiled `Tile_mma` microkernels landed in v0.8; incorporating llm.c lessons (#253).
+- **Full beam search over schedules** — extend v0.8's measured autotuner (single-step candidate menus) to a Halide-/tinygrad-BEAM-style beam search over schedule compositions.
 - **Cost functions** — per-backend execution-based metrics and aggregate cost functions across backends.
 - **Code-graph rewriting** — a broader range of rewriting rules, augmenting the v0.8 tiling/layout mechanisms.
 - Study tracks: Tiramisu (#267), Candle (#265), superoptimizers for tensor programs (#261).
@@ -131,8 +147,8 @@ GitHub milestone scope: *"Consider introducing axis labels. Consider introducing
 | ~~0.6.4~~ | — | **skipped** (folds into 0.7) | Concatenation, RoPE, transformer toy |
 | **0.7** | Jul 3, 2026 | **released** | **Frontend finalization + compiler optimizations** (consolidates 0.7.2) |
 | ~~0.7.1~~ | — | **dissolved** | AMD HIP backend → 0.8; examples + tokenizers → 0.9 |
-| 0.8    | Summer 2026 | planned | GPU tiling, megakernels, matmul; AMD HIP backend (major) |
-| 0.9    | Aug 24, 2026 | planned | Program search **(ICFP week)**; examples: makemore, MNIST/CIFAR, LSTM, transformer inference, tokenizers |
+| **0.8** | Jul 13, 2026 | **released** | **Parallel schedules (GPU + CPU), autotuning, SIMD/`Tile_mma`, AMD HIP backend, benchmark suite** |
+| 0.9    | Aug 24, 2026 | planned | Program search: beam search, tensor cores **(ICFP week)**; examples: makemore, MNIST/CIFAR, LSTM, transformer inference, tokenizers |
 | 1.0    | Q4 2026 | mostly de-risked | Docs, completeness, ergonomics, safety |
 | 1.1+   | post-1.0 | backlog | Shape schemes, axis labels, BERT, DisTrO |
 

@@ -1,13 +1,118 @@
-## [0.7] -- 2026-07-03
+## [0.8] -- 2026-07-13
 
-> Release note: **0.6.4 is skipped** as a tagged release (last release before 0.7 was 0.6.3). The
-> work originally planned for 0.6.4/0.6.5/0.7.0 (frontend finalization, concatenation,
-> position embeddings, transformer toy) and for 0.7.2 (compiler optimizations, pool
-> allocator) is **consolidated into 0.7**. See [ROADMAP.md](ROADMAP.md).
+> Release note: theme — parallel schedules and autotuning; AMD HIP backend. Scope changes
+> vs. the original plan: **tensor cores are pushed out to v0.9**; conversely **autotuning**
+> (measured schedule search) was not on the original roadmap and lands here, with full
+> beam search still scheduled for v0.9. See [ROADMAP.md](ROADMAP.md).
 
 ### Added
 
-- Deterministic scatter for embedding-table gradients (gh-ocannl-466):
+- **Schedule IR with automatic GPU schedules** (docs/proposals/axis-types-for-loops.md,
+  docs/proposals/schedule-ir-optops.md): `Low_level` loops carry an axis type
+  (`Serial | Grid | Workgroup | Workgroup_reduce | Unrolled | Vectorized`); `Grid`/`Workgroup`
+  loops render as hardware index bindings with launch dimensions, barriers, workgroup-shared
+  declarations, and `Low_level.If` extent guards (a new guarded statement that is a barrier for
+  CSE/hoisting/virtualization). Schedule transforms are values (`Split`, `Swap`, `Retype`,
+  `Unroll`, `Stage` workgroup-shared/packed tiles, `Expand_zero`, `Privatize` accumulator
+  privatization, `Tensorize`) applied at the new `Context.compile ?lowered_transform` seam.
+  On cuda/hip/metal, kernels without an explicit transform get the default GPU schedule when a
+  conservative analysis proves them race-free (`automatic_gpu_schedule`, default true;
+  `gpu_schedule_block_size`, `gpu_schedule_min_parallel`); the annotator clamps block sizes to
+  the backend's new `hardware_limits` query, and compile validates every kernel's thread count
+  and shared-memory bytes (`Schedule.check_hardware_limits`), turning driver launch failures
+  into early named errors.
+- **Kernel fission** (`schedule_fission`, default true): routines are split into segment kernels
+  at the cross-workgroup dependency edges the race analysis would otherwise reject (materialized
+  producer/consumer and WAW/WAR pairs, bare materialized writes, whole-node zeroing); segments
+  launch in order with a device-side event chained at each boundary and each gets its own launch
+  geometry, while adjacent serial segments coalesce back to a single kernel. Aligned cross-nest
+  parallelism keeps race-free chains fused: nests linked by producer/consumer pairs stay in one
+  kernel when every member trims to a common equal-extent parallel prefix with per-axis-aligned
+  accesses, and fission merges across a materialized edge only when lossless (no nest's
+  parallelism shrinks). On Metal, a fissioned routine's segments encode into one command buffer
+  with a serial-dispatch compute pass (`sequence_segments` backend hook), replacing per-boundary
+  event command buffers (circles_conv sgd step 19.7 → 7.1 ms).
+- **Within-kernel CPU parallelism** (gh-ocannl-164): the default CPU schedule
+  (`automatic_cpu_schedule`, `cpu_schedule_min_parallel`) retypes each nest's outermost
+  parallelizable loop to `Grid`, which the C backend renders as contiguous chunks on a
+  process-global native pool — `dispatch_apply` on macOS, chunked OpenMP elsewhere
+  (`cc_parallel_grid=auto` probes the compiler; `cc_parallel_chunks`); worker threads run pure C
+  and never touch the OCaml runtime, and results are bitwise identical to serial execution.
+  The rest of the CPU-improvements bundle: `restrict`-qualified kernel pointers, 32-byte-aligned
+  pool bases and node offsets, pragma hints on `Vectorized` loops, and probed SIMD compiler
+  flags (`cc_backend_simd_flags=auto`).
+- **Explicit SIMD codegen on the C backends** (`cc_vector_bytes`, default automatic AVX2/NEON
+  width): eligible `Vectorized` loop bodies emit GCC/Clang vector-extension loads, arithmetic
+  (including fused vector FMA), stores, and a serial remainder instead of relying on the
+  auto-vectorizer; recognized accumulation bodies render as independent vector accumulator
+  chains with a horizontal reduce at loop exit, ggml's `vec_dot` pattern (gh-ocannl-468); and a
+  `Tile_mma` statement renders tinyBLAS-style register tiling — a grid of vector-register
+  accumulators held across the whole k-loop with splat/FMA updates and peeled edges
+  (gh-ocannl-469).
+- **Tensor-core / GPU vector rendering**: the `Tensorize` optop recognizes the matmul
+  micro-kernel and replaces it with a cooperative `Tile_mma` block statement (Metal emits
+  `simdgroup_matrix` MMA, CUDA has a draft wmma path with a lane-0 scalar fallback);
+  `Workgroup_reduce` accumulations render as llm.c's two-phase block reduction with warp /
+  simdgroup shuffle butterflies (gh-ocannl-462); `Vectorized` loops on CUDA and Metal emit
+  128-bit packed loads/stores through reinterpret casts with per-lane scalar arithmetic
+  preserving serial rounding (gh-ocannl-463).
+- **Autotuning**: `Autotune.tune` is a drop-in replacement for `Context.compile` that beam-searches
+  schedules (seeds: serial baseline, default annotator, block-size sweep; menu: splits, swaps,
+  unrolls, `Retype`-`Vectorized`, `Tensorize` permutations), timing each candidate on the real
+  device and returning the fastest routine (`autotune_beam_width`, `autotune_rounds`,
+  `autotune_repeats`, `autotune_log`). `Schedule_cache` gives schedules a structural identity —
+  canonical symbol/tnode naming with a digest that guards replay — plus a disk cache
+  (`autotune_cache_dir`) so re-running the same program skips the search. Follow-ups: fissioned
+  candidates with per-segment schedules keyed by pre-schedule segment digests, a matmul sketch
+  generator seeding register-blocktiled/SMEM/packed pipelines, `?timing_ctx` to search on a
+  scratch context lineage without touching live training state, and `Train.tune_placements`
+  which A/B-tunes default vs materialize-all placements (`Context.decide_materialized`) and
+  keeps the measured winner — tuned is now the fastest OCANNL variant in every benchmark cell.
+- **AMD HIP backend** via the hipjit bindings (gh-ocannl-411): `hip_backend.ml` mirrors the CUDA
+  backend with hiprtc compilation to a code object, device-keyed peer copies,
+  `__hip_bfloat16`/fp8 type support (conversions routed through float), ported builtins with
+  wave32/wave64-correct shuffles, and the lane-0 fallback for tile-MMA. Registers everywhere
+  the other backends do (`Backends.Hip`, `Context.hip`, the `Context.auto` fallback list,
+  per-backend test goldens, config key `hip_printf_fifo_size`), including on Windows.
+- **Cross-framework benchmark suite** under `benchmarks/`: OCANNL vs PyTorch (eager and
+  `torch.compile`) vs tinygrad (default and BEAM) training/inference steps on shared
+  safetensors fixtures — mlp_small/mlp_wide, LeNet-5, and a GPT-2-style gpt2_mini inference
+  workload — with an orchestrator that gates every cell on loss-trajectory parity against the
+  PyTorch CPU reference before timings count, and reports synced and queued per-step
+  percentiles with compile time separated out. Example reports checked in for Metal, CUDA, and
+  Windows/HIP. The parity gate doubles as a correctness oracle: its first run caught two real
+  backward-pass bugs (see the gradient-correctness entry under Fixed).
+- **Fused cross-entropy classifier** (gh-ocannl-464): `Nn_blocks.cross_entropy_loss` computes
+  log-sum-exp cross-entropy from raw logits (optional `?mask` / `?normalize_by`), detaching the
+  row max via `stop_gradient` (now exposed in the DSL `O` modules) so the backward accumulates
+  `probs - targets` directly into the logits gradient with no `[batch, vocab]` intermediate
+  materialized in either pass; `transformer_with_loss` uses it instead of the unstable
+  `log (softmax logits)`.
+- **GPT-2 with pretrained weights**: `Nn_blocks.gelu` (tanh-approximate), a HuggingFace
+  safetensors checkpoint reader (`Safetensors`, lazy payloads with exact buffer tiling), a
+  GPT-2 model module assembling HF `GPT2LMHeadModel` semantics from OCANNL operations (verified
+  exact against a NumPy reference), a full-scale 124M dry run, and a `gpt2_generate` tutorial
+  that downloads the pretrained tokenizer + weights and greedy-decodes. Plus the dataprep BPE
+  bridge `Nn_blocks.token_ids_of_array` / `token_ids_of_batch` (uint32 IDs, padding/truncation,
+  composing with the one-hot embedding gather) and a hermetic tokenizer-roundtrip test.
+- On-device epoch-loss accumulation: `Train.grad_update ?accum_loss` with
+  `Train.loss_accumulator` sequences `acc =+ loss` after the update, so training loops read the
+  loss once per epoch instead of forcing a device-serializing `Context.get_values` every step.
+- Interval analysis over index expressions and scalars (gh-ocannl-134 lineage): an interval
+  lattice with a total symbol environment lets `simplify_llc` fold interval-decided comparisons
+  and `Where` branches (construct-then-fold for schedule guards), erases provably-true
+  dynamic-gather guard conjuncts, and backs `Tnode` bounds propose/settle plus int32
+  launch-parameter width checks.
+- Recompute-cost guard for virtualization: nodes whose computation contains reduction loops
+  with trip-count product exceeding `virtualize_max_inline_reduction` (default 16) are decided
+  `Never_virtual`, since inlining would replay the reduction at every read site through chains
+  of virtual consumers (gpt2_mini on cc: ~13,000 → 2,361 ms/step at defaults).
+- Namespaces for tensor node IDs (gh-ocannl-372): `Tnode.t` carries a namespace derived from
+  the defining file (`<prefix>__<file_ns>` debug names), `Tensor.t.id` was dropped in favor of
+  the tnode's uid, per-routine node tables are keyed by uid rather than session-dependent ids,
+  schedule-minted tile nodes live in a reserved `tile` namespace, and checkpoints are
+  namespaced (`Persistence.load ?prefix_namespace`). (Listed under 0.7 in earlier drafts of
+  these notes, but merged after the 0.7 tag.)
   `rewrite_one_hot_reductions` also recognizes the transposed one-hot pattern — the
   embedding backward `d_C[o,v] += Σ_pos (v == ids[pos]) * g[pos,o]` — and replaces the
   vocabulary loop with a guarded scatter-accumulate at the dynamic row (`Set_dynamic`,
@@ -25,12 +130,131 @@
   packing side by side for constant operands, so the choice stays measured. Constancy
   rides a new `Tnode.host_constant` marker set by `Tensor.ndarray` (ndarray-backed
   literals are minted `On_device`, so `Effectively_constant` intent could not stick).
+
+### Changed
+
+- **Breaking notation change**: in einsum and labels specs, a row whose kind separator
+  is omitted now reads as the context ellipsis instead of an empty row: `x` is
+  equivalent to `...|...->x`, so batch and input axes broadcast through terse specs by
+  default (e.g. `counts ++ "... => 0"` is a per-row softmax denominator). The empty-row
+  reading is preserved when the separator is written with an empty row spec: `| ->x`
+  means no batch and no input axes, `|x` no batch axes, `->x` no input axes. Because an
+  omitted row shares the context row variable with rows written `...`, reduce-over-
+  everything results must now close their rows — the sum-to-scalar idiom
+  `++ "...|... => 0"` becomes `++ "...|... => |->0"` — and multi-operand specs where
+  one slot passes batch through must close the other slots' batch rows (e.g. the
+  conv kernel slot `; |kh, kw, ..ic.. -> ..oc..` in `Nn_blocks.conv2d`).
+- **The default backend is now `cc`**; `sync_cc` was renamed to `cc` and `multicore_cc` to
+  `multidev_cc` (old names accepted as deprecated aliases). The `Multidev` scheduler exposes
+  multiple worker-domain CPU devices, each with its own FIFO queue, for debugging multi-device
+  parallel workflows (`multidev_num_devices`, 0 = recommended domain count).
+- **Breaking**: backends are process-wide singletons — `fresh_backend` became `get_backend`
+  returning a closed enum, `Backends.wrapped_context` is a closed disjunction over the
+  singleton context types (matching two values on the same constructor recovers type equality),
+  and `Context.copy` dispatches through it to backend-specific transfers. Backend module tower
+  cleanup retired `new_stream` and vestigial signatures. GPU driver init and device discovery
+  stay lazy.
+- Memory placement decisions are context-scoped: `Tnode.memory_mode` (streamlined to five
+  constructors, `Materialized`/`Device_only` folded away) is declared intent only — monotone and
+  never written by the compilation pipeline — while decisions land in per-lineage
+  `Tnode.Placements` tables riding `Low_level.optimize_ctx`, forked per compile so sibling
+  compiles from one context are hermetic (the autotuning forcing function); gradients'
+  `Never_virtual` was replaced by an `is_observable` intent.
+- Index arithmetic is now signed: `Ops.index_prec` is int32, or int64 under `large_models`
+  (unsigned precisions remain for data domains); loop counters and index kernel arguments are
+  signed across cc/CUDA/Metal (Metal pool-slot offsets deliberately stay unsigned), and each
+  tensor node's padded element count must fit int32 unless `large_models` (checked with a named
+  error when dims are forced).
+- Generated code and runtime logs go to per-executable subdirectories
+  `build_files/<exe>/` and `log_files/<exe>/` (override with `build_files_prefix`; `"."`
+  restores the flat layout), so concurrently running tests sharing a working directory no
+  longer race on same-named kernels or wholesale startup cleanup.
+- The four gated training tests (bigram, fsm_transformer, transformer_names, circles_conv)
+  moved from the `slow` alias back to `runtest`: they materialize all intermediates and compile
+  through `Autotune.tune ~rounds:0` with a scratch `timing_ctx`, cutting e.g. bigram on Metal
+  from 345 s to 25-29 s while keeping deterministic expected outputs.
+- Autotune and benchmark step timing uses the monotonic mtime clock
+  (QueryPerformanceCounter-backed on Windows): `Unix.gettimeofday` ticks at ~1 ms there, which
+  floored sub-millisecond step times to 0/1 ms and made the tuner pick winners by noise.
+- Workshop article: benchmarks section and appendix with Metal, CUDA, and partial AMD HIP
+  tables (including torch.compile and tinygrad BEAM rows), and automated Markdown-to-LaTeX
+  conversion.
+
+### Fixed
+
+- Two executed-backward gradient-correctness bugs found by cross-framework loss parity
+  testing (regression test `test/training/virtual_grads_parity.ml`):
+  - Per-statement CSE (`Low_level.eliminate_common_subexpressions`, gh-ocannl-351) and
+    cross-statement hoisting treated *free* iterator symbols and scope ids as renameable
+    during alpha-equivalence, so a nested recomputation of a virtual node at inner loop
+    indices was deduplicated into a `Get_local` of the enclosing iteration's stale local
+    (e.g. `cross_entropy_loss` backward through a Virtual pre-activation used one class's
+    logit for every class in its exp-sum). Renamings are now registered only at binder
+    sites (`For_loop` indices, `Local_scope`/`Declare_local` scope ids); free names must
+    match exactly.
+  - The scalar simplifier rewrote `(a / b) / c` to `(a * c) / b` (a regression from the
+    precision-handling refactor; originally `a / (b * c)`), corrupting e.g. the division
+    backward of the standalone `Nn_blocks.softmax`.
+- 1-element `Reshape`/`rebatch` data no longer collapses to a scalar: when the rows
+  receive no other shape information, the leftover row variable keeps a single dim-1
+  axis (identity-reshape preference, `keep_axis` on the `Total_elems` constraint); also
+  fixed `Tnode.create_with_reshape` crashing on rank-0 targets (gh-ocannl-460).
+- `Nn_blocks.layer_norm` now computes the actual mean and variance: it used the `++`
+  add-reduction result as if it were a mean — `(x - sum(x))/d` instead of `x - sum(x)/d`, and
+  never divided the squared-deviation sum by `d` — an error not absorbable by the learned
+  gamma/beta (fixed by scaling the reduction operands, `sum(x /. d) = mean(x)`); added a
+  numeric forward+backward oracle test.
+- Shape-inference fixes surfaced by the layer_norm work: `compute_row_product` no longer
+  latches a product while the row has an open variable tail (xavier/kaiming fan_in was silently
+  1, producing wrong init scales — training tests retuned for real fan values, and
+  `TDSL.default_param_init` fans fixed likewise); fixed-index axes are kept out of the
+  singleton-bounds dimension equality; and GLB-closing a row variable re-emits its `Shape_row`
+  constraint so deferred guess-to-1 variables still resolve.
+- Repeated random values in inferred-shape parameter initialization: the PRNG counter's shape
+  is now pinned to the result in `uniform`/`uniform1` (and `box_muller` keeps its draws pinned)
+  via an optional `?spec` on the threefry ops — previously shape inference could close the
+  counter's rows smaller than the result and broadcast it, repeating values along the broadcast
+  axes (e.g. 50 unique of 5000 for a `[100 -> 50]` weight); regression test on realized
+  parameter std.
+- `Nn_blocks.conv2d` (and `depthwise_separable_conv2d`) inline bias is per-channel: least-
+  commitment inference broadcast the plain `+ { bias = 0. }` to the full feature map (4704
+  params for LeNet-5 conv1 where 6 are expected); the bias slot is now pinned to the channel
+  row via a spec'd `+++`.
+- Forward and backward fragment ordering (gh-ocannl-461): sibling forward fragments are ordered
+  topologically by embedded-nodes/read-nodes instead of tensor-id order (GPT-2's attention v
+  projection silently read zeros), backprop fragments are ordered by gradient-accumulation
+  dependencies with the forward edge reversed, and fragment cycles error instead of silently
+  reordering.
+- Worked around an Apple Metal shader-compiler miscompile of serial loops accumulating into a
+  loop-invariant address (only the last iteration contributed — cross-entropy sums collapsed to
+  `correct/batch_size`): affected read-modify-write statements go through a volatile shadow
+  pointer; standalone repro checked in. Also on Metal: every kernel launch is now ordered after
+  all previously enqueued work (back-to-back runs of the same routine raced, producing NaN),
+  `get_values`/`set_values` do full device awaits, and `from_host` uploads await pending device
+  work.
+- Metal default-schedule pathology on gpt2_mini (81 s → 0.3 s steps): `gpu_schedule_min_parallel`
+  default lowered to 64 — any real parallelism beats the serial 1×1 fallback — and `Local`
+  scratch crossing a statement boundary is promoted at fission instead of stranding.
+- Windows: the CUDA backend was restored (NVRTC targets compute_52 by default, but half
+  arithmetic intrinsics need compute_53+ and their bf16 overloads compute_80+ — the arch
+  heuristic now floors accordingly), and the test suite is green on the cc and hip backends
+  (binary-mode stdout for byte-identical goldens under autocrlf, `NUL` vs `/dev/null`,
+  reduction-order-tolerant loss printing, fixed-point formatting for mingw's `%g`).
+
+## [0.7] -- 2026-07-03
+
+> Release note: **0.6.4 is skipped** as a tagged release (last release before 0.7 was 0.6.3). The
+> work originally planned for 0.6.4/0.6.5/0.7.0 (frontend finalization, concatenation,
+> position embeddings, transformer toy) and for 0.7.2 (compiler optimizations, pool
+> allocator) is **consolidated into 0.7**. See [ROADMAP.md](ROADMAP.md).
+
+### Added
+
 - **Removed the hosted tensor mode** (gh-ocannl-333): dropped the `array` field of
   `Tnode.t` and the "hosted" memory mode. Tensor value access and printing are now
   context-mediated; host-init nodes self-initialize at link time. Removed the dead
   `automatic_host_transfers` setting and the `use_host_memory` hook.
 - Tensor saving, loading, and restoring (gh-ocannl-373).
-- Namespaces for tensor node IDs (gh-ocannl-372).
 - Ternary einsum notation: `Einsum_tern` in shape inference, PPX dispatch, a `Mul3`
   ternary scalar op across all backends, and `einsum3` / where-with-spec (gh-ocannl-305).
 - Loop-invariant code motion (loop hoisting) prior to visit counting (gh-ocannl-350).
@@ -102,17 +326,7 @@
 
 ### Changed
 
-- **Breaking notation change**: in einsum and labels specs, a row whose kind separator
-  is omitted now reads as the context ellipsis instead of an empty row: `x` is
-  equivalent to `...|...->x`, so batch and input axes broadcast through terse specs by
-  default (e.g. `counts ++ "... => 0"` is a per-row softmax denominator). The empty-row
-  reading is preserved when the separator is written with an empty row spec: `| ->x`
-  means no batch and no input axes, `|x` no batch axes, `->x` no input axes. Because an
-  omitted row shares the context row variable with rows written `...`, reduce-over-
-  everything results must now close their rows — the sum-to-scalar idiom
-  `++ "...|... => 0"` becomes `++ "...|... => |->0"` — and multi-operand specs where
-  one slot passes batch through must close the other slots' batch rows (e.g. the
-  conv kernel slot `; |kh, kw, ..ic.. -> ..oc..` in `Nn_blocks.conv2d`).
+- `test/training/bigram_mlp.ml` renamed to `test/training/mlp_names.ml` and
   rewritten as a true multi-character-context Bengio MLP. The old file's name
   misrepresented its architecture (bigram-width input but "MLP" label); the
   new file is the makemore Part 2 example (see `docs/makemore_tutorial.md`).
@@ -152,23 +366,6 @@
 
 ### Fixed
 
-- Two executed-backward gradient-correctness bugs found by cross-framework loss parity
-  testing (regression test `test/training/virtual_grads_parity.ml`):
-  - Per-statement CSE (`Low_level.eliminate_common_subexpressions`, gh-ocannl-351) and
-    cross-statement hoisting treated *free* iterator symbols and scope ids as renameable
-    during alpha-equivalence, so a nested recomputation of a virtual node at inner loop
-    indices was deduplicated into a `Get_local` of the enclosing iteration's stale local
-    (e.g. `cross_entropy_loss` backward through a Virtual pre-activation used one class's
-    logit for every class in its exp-sum). Renamings are now registered only at binder
-    sites (`For_loop` indices, `Local_scope`/`Declare_local` scope ids); free names must
-    match exactly.
-  - The scalar simplifier rewrote `(a / b) / c` to `(a * c) / b` (a regression from the
-    precision-handling refactor; originally `a / (b * c)`), corrupting e.g. the division
-    backward of the standalone `Nn_blocks.softmax`.
-- 1-element `Reshape`/`rebatch` data no longer collapses to a scalar: when the rows
-  receive no other shape information, the leftover row variable keeps a single dim-1
-  axis (identity-reshape preference, `keep_axis` on the `Total_elems` constraint); also
-  fixed `Tnode.create_with_reshape` crashing on rank-0 targets (gh-ocannl-460).
 - Detect rank cycles among row variables during shape inference (gh-ocannl-247).
 - CUDA `Where` expression codegen now parenthesizes ternaries correctly, and
   `Uint32`/`Uint64` to `uint4x32` PRNG-counter conversions spread bits rather than
