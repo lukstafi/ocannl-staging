@@ -1,0 +1,51 @@
+% Custom preamble for the workshop article, injected via pandoc -H.
+% Everything OCANNL-specific that pandoc's default LaTeX template
+% does not generate lives here: the OCaml listings language/theme,
+% authblk for the affiliation line, and math macros used by the md.
+\definecolor{ocamlkeyword}{RGB}{0,80,150}
+\definecolor{ocamlmodule}{RGB}{110,55,130}
+\definecolor{ocamlcomment}{RGB}{80,125,75}
+\definecolor{ocamlstring}{RGB}{160,70,50}
+\definecolor{ocamlbackground}{RGB}{248,248,246}
+\definecolor{ocamlframe}{RGB}{220,220,216}
+\lstdefinelanguage{Caml}{
+  morekeywords={
+    and,as,assert,begin,class,constraint,do,done,downto,else,end,exception,
+    external,false,for,fun,function,functor,if,in,include,inherit,initializer,
+    lazy,let,let%op,let%cd,match,method,module,mutable,new,nonrec,object,of,
+    open,or,private,rec,sig,struct,then,to,true,try,type,val,virtual,when,while,
+    with
+  },
+  morekeywords=[2]{
+    Assignments,Backends,Context,Float,Ir,NTDSL,Option,PDSL,Shape,TDSL,Tensor,
+    Tnode
+  },
+  sensitive=true,
+  morecomment=[s]{(*}{*)},
+  morestring=[b]",
+  alsoletter={\%,',_,!,?,.}
+}
+\lstset{
+  basicstyle=\small\ttfamily,
+  keywordstyle=\bfseries\color{ocamlkeyword},
+  keywordstyle=[2]\color{ocamlmodule},
+  commentstyle=\itshape\color{ocamlcomment},
+  stringstyle=\color{ocamlstring},
+  backgroundcolor=\color{ocamlbackground},
+  breakatwhitespace=false,
+  breaklines=true,
+  columns=flexible,
+  frame=single,
+  framerule=0.3pt,
+  rulecolor=\color{ocamlframe},
+  keepspaces=true,
+  numberstyle=\scriptsize\color{gray},
+  showstringspaces=false,
+  upquote=true,
+  xleftmargin=0.6em,
+  xrightmargin=0.6em,
+  framesep=0.45em
+}
+\usepackage{authblk}
+\providecommand{\llbracket}{\mathopen{[\![}}
+\providecommand{\rrbracket}{\mathclose{]\!]}}
