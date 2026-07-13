@@ -2589,7 +2589,9 @@ let automatic_cpu_schedule =
   lazy (Utils.get_global_flag ~default:true ~arg_name:"automatic_cpu_schedule")
 
 let backend_is_gpu name =
-  String.is_substring name ~substring:"cuda" || String.is_substring name ~substring:"metal"
+  String.is_substring name ~substring:"cuda"
+  || String.is_substring name ~substring:"hip"
+  || String.is_substring name ~substring:"metal"
 
 let backend_is_cpu name = String.is_substring name ~substring:"cc"
 

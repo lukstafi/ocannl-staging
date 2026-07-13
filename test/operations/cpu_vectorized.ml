@@ -31,6 +31,7 @@ let on_cpu = String.is_substring backend_name ~substring:"cc"
 let read_generated base_name =
   let ext = if String.is_substring backend_name ~substring:"metal" then ".metal" else ".c" in
   let ext = if String.is_substring backend_name ~substring:"cuda" then ".cu" else ext in
+  let ext = if String.is_substring backend_name ~substring:"hip" then ".hip" else ext in
   let path = Utils.build_file (base_name ^ ext) in
   if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
 

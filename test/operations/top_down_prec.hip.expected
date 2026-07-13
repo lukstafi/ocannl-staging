@@ -1,0 +1,23 @@
+#include <hip/hip_fp16.h>
+#include <hip/hip_bf16.h>
+
+/* Define math constants that would normally come from <math.h> */
+#ifndef INFINITY
+#define INFINITY __builtin_huge_valf()
+#endif
+#ifndef NAN
+#define NAN __builtin_nanf("")
+#endif
+extern "C" __global__ void d_fwd(
+    __half *__restrict__ a,
+    __half *__restrict__ b,
+    __hip_bfloat16 *__restrict__ c,
+    __hip_bfloat16 *__restrict__ d) {
+
+  /* Local declarations and initialization. */
+
+  /* Main logic. */
+  /* d fwd */
+  d[0] = ((__float2bfloat16(__half2float(a[0])) + __float2bfloat16(__half2float(b[0]))) * c[0]);
+  /* end */
+}
