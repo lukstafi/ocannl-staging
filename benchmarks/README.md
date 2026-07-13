@@ -53,7 +53,7 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   `BENCH_NO_SLICE=1` skips `@|` batch slicing (mlp, single-batch fixture).
 - `runners/pytorch/run.py` — flags: `--device cpu|mps|cuda`, `--compile` (torch.compile
   variant).
-- `runners/tinygrad/run.py` — flags: `--device CPU|METAL|CUDA`, `--jit 0|1`, `--beam N`
+- `runners/tinygrad/run.py` — flags: `--device CPU|METAL|CUDA|AMD`, `--jit 0|1`, `--beam N`
   (BEAM=N kernel search, implies jit; the search cost lands in `compile_s`).
 - `orchestrate.py` — runs the matrix (dispatching the OCANNL executable on the fixture's
   `model`), enforces the parity gate, writes `results/results.jsonl` and
@@ -61,11 +61,16 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   `--nojit` (tinygrad nojit), `--torch-compile` (pytorch compiled variant), `--beam N`
   (tinygrad BEAM=N variant; wipe tinygrad's kernel cache for from-scratch search costs),
   `--only ocannl pytorch tinygrad`, `--skip-build`,
-  `--gpu metal|cuda|none` (the GPU column of the matrix — OCANNL backend, PyTorch device,
+  `--gpu metal|cuda|hip|none` (the GPU column of the matrix — OCANNL backend, PyTorch device,
   tinygrad device together; defaults to metal on macOS and cuda elsewhere, `none` runs a
-  CPU-only matrix). See [example-report.md](example-report.md) (macOS/Metal) and
-  [example-report-cuda.md](example-report-cuda.md) (Linux/CUDA) for checked-in example
-  output (full `--tuned --materialized` matrices; `results/` itself is gitignored).
+  CPU-only matrix). With `--gpu hip`, the PyTorch/tinygrad GPU cells run only on Linux (ROCm
+  PyTorch presents HIP as its `cuda` device, tinygrad as `AMD`); on Windows neither framework
+  reaches an AMD GPU, so OCANNL alone populates the GPU column while the CPU parity
+  reference still runs. See [example-report.md](example-report.md) (macOS/Metal),
+  [example-report-cuda.md](example-report-cuda.md) (Linux/CUDA) and
+  [report-hip.md](report-hip.md) (Windows/HIP on gfx1151, `--only ocannl pytorch`) for
+  checked-in example output (full `--tuned --materialized` matrices; `results/` itself is
+  gitignored).
 - `runners/ocannl/bench_{gpt,conv}_diag.ml` — schedule diagnostics: print the default
   fission-pipeline segment census (launch geometry, per-nest loop extents, written nodes with
   materialization markers) for the gpt2_mini / lenet graphs, then optionally time steps

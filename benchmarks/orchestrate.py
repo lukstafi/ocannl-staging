@@ -20,7 +20,16 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-VENV_PY = HERE / ".venv/bin/python"
+# BENCH_VENV_PY overrides the venv interpreter — for environments where benchmarks/.venv
+# is unusable (e.g. deep worktree paths hitting Windows MAX_PATH during torch install).
+VENV_PY = Path(
+    os.environ.get(
+        "BENCH_VENV_PY",
+        HERE / ".venv/Scripts/python.exe"
+        if (HERE / ".venv/Scripts/python.exe").exists()
+        else HERE / ".venv/bin/python",
+    )
+)
 PARITY_TOL = 2e-3
 REFERENCE = ("pytorch", "cpu", "eager")
 
@@ -29,6 +38,11 @@ REFERENCE = ("pytorch", "cpu", "eager")
 GPU_DEVICES = {
     "metal": ("metal", "mps", "METAL"),
     "cuda": ("cuda", "cuda", "CUDA"),
+    # OCANNL's hip backend (AMD ROCm/HIP). On Linux ROCm, PyTorch exposes HIP as its "cuda"
+    # device and tinygrad has AMD; on Windows neither framework supports the GPU, so their
+    # columns fall back to CPU-only (the parity reference still runs).
+    "hip": ("hip", "cuda" if platform.system() == "Linux" else None,
+            "AMD" if platform.system() == "Linux" else None),
     "none": (None, None, None),
 }
 
