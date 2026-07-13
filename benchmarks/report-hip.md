@@ -2,6 +2,12 @@
 
 platform: Windows-11-10.0.26200-SP0 AMD64 | ocannl commit: c1a985ef | parity tol: 0.002 (max rel diff over first parity steps vs pytorch/cpu/eager)
 
+Hardware: AMD Strix Halo (Radeon 8060S iGPU, gfx1151), ROCm/HIP SDK 7.1. Run as
+`orchestrate.py --tuned --materialized --gpu hip --only ocannl pytorch` (neither PyTorch nor
+tinygrad reaches an AMD GPU on Windows). Measured at the PR tip of ocannl-staging#145 — the
+commit above is the merge base; the PR's monotonic-clock timing fixes are included, without
+which sub-millisecond step times quantize to 0/1 ms on Windows.
+
 
 ## gpt2_mini
 
