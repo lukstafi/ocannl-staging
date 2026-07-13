@@ -151,6 +151,11 @@ def main():
     )
     ap.add_argument("--nojit", action="store_true", help="add the tinygrad nojit variant")
     ap.add_argument(
+        "--torch-compile",
+        action="store_true",
+        help="add the pytorch torch.compile variant",
+    )
+    ap.add_argument(
         "--gpu",
         choices=sorted(GPU_DEVICES),
         default="metal" if platform.system() == "Darwin" else "cuda",
@@ -238,10 +243,12 @@ def main():
                         collect(label, cmd, env=env, cwd=HERE)
         if "pytorch" in args.only:
             for device in ["cpu"] + ([gpu_torch] if gpu_torch else []):
-                collect(
-                    f"{name} pytorch/{device}/eager",
-                    [str(VENV_PY), str(HERE / "runners/pytorch/run.py"), "--fixture", str(fx), "--device", device],
-                )
+                for compiled in [False] + ([True] if args.torch_compile else []):
+                    collect(
+                        f"{name} pytorch/{device}/{'compiled' if compiled else 'eager'}",
+                        [str(VENV_PY), str(HERE / "runners/pytorch/run.py"), "--fixture", str(fx), "--device", device]
+                        + (["--compile"] if compiled else []),
+                    )
         if "tinygrad" in args.only:
             for device in ["CPU"] + ([gpu_tiny] if gpu_tiny else []):
                 for jit in [1] + ([0] if args.nojit else []):
