@@ -106,10 +106,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
   let sync event = Cu.Delimited_event.synchronize event
   let all_work device = Cu.Delimited_event.record device.runner
 
-  (* Driver initialization and device discovery are lazy: the singleton [Impl] module initializes
-     at program startup (Backends instantiates it eagerly for nameable types), and cudajit is a
-     depopt -- the library being installed does not imply a usable driver/GPU. Forcing here, at
-     first device use, keeps CPU-only runs from touching the driver and lets [Context.auto] catch
+  (* Driver initialization and device discovery are lazy: the singleton [Impl] module initializes at
+     program startup (Backends instantiates it eagerly for nameable types), and cudajit is a depopt
+     -- the library being installed does not imply a usable driver/GPU. Forcing here, at first
+     device use, keeps CPU-only runs from touching the driver and lets [Context.auto] catch
      unusable-CUDA failures per call, as the retired per-call [fresh_backend] did. *)
   let ensure_initialized =
     lazy
@@ -153,8 +153,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
   let%diagn2_sexp cuda_to_ptx ~name cu_src =
     (* DRAFT (tensorize-mma T3): kernels containing wmma intrinsics need <mma.h> and an explicit
        arch (nvrtc's default is below sm_70). Injected only when used, so kernels without tensor
-       cores compile exactly as before even where the toolkit headers are absent. The
-       [(wmma-bf16)] marker is emitted by [mma_syntax] for bf16 fragments (sm_80+). *)
+       cores compile exactly as before even where the toolkit headers are absent. The [(wmma-bf16)]
+       marker is emitted by [mma_syntax] for bf16 fragments (sm_80+). *)
     let uses_wmma = String.is_substring cu_src ~substring:"nvcuda::wmma" in
     let cu_src = if uses_wmma then "#include <mma.h>\n" ^ cu_src else cu_src in
     (* Half/bf16 ARITHMETIC intrinsics (unlike the conversions, which cuda_fp16.h/cuda_bf16.h
@@ -170,12 +170,28 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
          also cover their [2]-suffixed variants and [__hmax]/[__hmin] the [_nan] variants as
          substrings. *)
       List.exists ~f:has
-        [ "__hadd"; "__hsub"; "__hmul"; "__hdiv"; "__hmax"; "__hmin"; "__hgt"; "__hfma"; "hexp";
-          "hlog"; "hsin"; "hcos"; "hsqrt"; "hrcp"; "hrsqrt"; "htanh_approx" ]
+        [
+          "__hadd";
+          "__hsub";
+          "__hmul";
+          "__hdiv";
+          "__hmax";
+          "__hmin";
+          "__hgt";
+          "__hfma";
+          "hexp";
+          "hlog";
+          "hsin";
+          "hcos";
+          "hsqrt";
+          "hrcp";
+          "hrsqrt";
+          "htanh_approx";
+        ]
     in
     (* [compile_batch] concatenates several kernels into one source, so the floors can trigger
-       independently (e.g. a half-wmma kernel batched with scalar bf16 arithmetic needs
-       compute_80 even without the [(wmma-bf16)] marker): take the max, not the first match. *)
+       independently (e.g. a half-wmma kernel batched with scalar bf16 arithmetic needs compute_80
+       even without the [(wmma-bf16)] marker): take the max, not the first match. *)
     let arch_floor =
       List.filter_opt
         [
@@ -366,7 +382,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     traced_stores : Low_level.traced_store option array;
     ptx : Nvrtc.compile_to_ptx_result;
     bindings : Indexing.unit_bindings;
-    kparams_and_names : ((string * kparam_source) list * string * Low_level.launch_dims) option array;
+    kparams_and_names :
+      ((string * kparam_source) list * string * Low_level.launch_dims) option array;
   }
   [@@deriving sexp_of]
 
@@ -417,8 +434,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        launches 1x1x1, making the guard redundant; annotated kernels need every thread. *)
     let kernel_prep_line = ""
 
-    (* Use native CUDA types for loop indices and arguments instead of stdint.h types. Signed
-       index arithmetic (docs/proposals/signed-index-precision.md). *)
+    (* Use native CUDA types for loop indices and arguments instead of stdint.h types. Signed index
+       arithmetic (docs/proposals/signed-index-precision.md). *)
     let loop_index_type = if Utils.settings.large_models then "long long " else "int "
     let arg_int_prefix = if Utils.settings.large_models then "const long long " else "const int "
 
@@ -444,10 +461,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
 
     (* No vectorization pragmas in device code — SIMD-style gains on GPU come from memory
        transactions: eligible [Vectorized] loops render 128-bit packed loads/stores through the
-       [__align__(16)] pack structs (gh-ocannl-463; llm.c's Packed128 shows LDG.128/STS.128 are
-       the baseline for bandwidth-bound kernels), and everything else falls back to plain serial
-       loops. Local arrays live in registers/local memory; no alignment attribute needed (packed
-       accesses require device-resident nodes). *)
+       [__align__(16)] pack structs (gh-ocannl-463; llm.c's Packed128 shows LDG.128/STS.128 are the
+       baseline for bandwidth-bound kernels), and everything else falls back to plain serial loops.
+       Local arrays live in registers/local memory; no alignment attribute needed (packed accesses
+       require device-resident nodes). *)
     let vectorize_pragma = []
     let aligned_local_attr = None
     let vector_bytes = 16
@@ -474,33 +491,44 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Ops.Double_prec _, 2 -> "double2_t"
       | Ops.Int32_prec _, 4 -> "int32x4_t"
       | Ops.Int64_prec _, 2 -> "int64x2_t"
-      | (Ops.Byte_prec _ | Ops.Fp8_prec _), 16 -> "int8x16_t"
+      | Ops.Byte_prec _, 16 -> "int8x16_t"
+      (* [Set_from_vec] assigns lanes to array cells ([dst[i] = vec.v[i]]), and __nv_fp8_e5m2 has no
+         implicit constructors, so fp8 lanes must already have the fp8 type. *)
+      | Ops.Fp8_prec _, 16 -> "fp8x16_t"
       | (Ops.Uint16_prec _ | Ops.Bfloat16_prec _), 8 -> "uint16x8_t"
       | Ops.Half_prec _, 8 -> "half8_t"
       | _, 1 -> typ_of_prec prec
       | _ -> invalid_arg "Cuda_backend.vec_typ_of_prec: invalid combination"
 
-    (* DRAFT (tensorize-mma T3; unexercised locally -- no CUDA device, per the Metal-first
-       backend ordering; to be verified in CI): cooperative tile-MMA emission for
-       [Low_level.Tile_mma] via the CUDA wmma C++ API. The extent-32 lane loop binds threadIdx.x,
-       so the 32 consecutive .x threads reaching the statement form the cooperating warp; 16x16x16
-       fragment blocks are resident across the whole [k] extent, mirroring the Metal emission.
-       Supported combinations: f16 x f16 -> f32 (the flagship), f16 x f16 -> f16, and
-       bf16 x bf16 -> f32 (sm_80+; the [(wmma-bf16)] marker makes [cuda_to_ptx] select the
-       arch). Uniform f32 could target tf32 shapes on sm_80+, but tf32 truncates the mantissa to
-       10 bits -- left on the scalar path until the numerics policy is decided. Declines (the
-       barrier-bracketed lane-0 fallback renders instead) on: other precision combinations,
-       extents not multiples of 16, leading dimensions violating wmma's stride constraint (a
-       multiple of 8 elements for 16-bit types, 4 for f32), thread-space operands (per-thread
-       stacks are not a jointly-owned tile), and devices below sm_70. *)
+    (* DRAFT (tensorize-mma T3; unexercised locally -- no CUDA device, per the Metal-first backend
+       ordering; to be verified in CI): cooperative tile-MMA emission for [Low_level.Tile_mma] via
+       the CUDA wmma C++ API. The extent-32 lane loop binds threadIdx.x, so the 32 consecutive .x
+       threads reaching the statement form the cooperating warp; 16x16x16 fragment blocks are
+       resident across the whole [k] extent, mirroring the Metal emission. Supported combinations:
+       f16 x f16 -> f32 (the flagship), f16 x f16 -> f16, and bf16 x bf16 -> f32 (sm_80+; the
+       [(wmma-bf16)] marker makes [cuda_to_ptx] select the arch). Uniform f32 could target tf32
+       shapes on sm_80+, but tf32 truncates the mantissa to 10 bits -- left on the scalar path until
+       the numerics policy is decided. Declines (the barrier-bracketed lane-0 fallback renders
+       instead) on: other precision combinations, extents not multiples of 16, leading dimensions
+       violating wmma's stride constraint (a multiple of 8 elements for 16-bit types, 4 for f32),
+       thread-space operands (per-thread stacks are not a jointly-owned tile), and devices below
+       sm_70. *)
     let mma_syntax =
       Some
-        (fun ~d_prec ~a_prec ~b_prec ~m ~n ~k ~d:(d_ptr, ldd, d_space) ~a:(a_ptr, lda, a_space)
-             ~b:(b_ptr, ldb, b_space) ->
+        (fun ~d_prec
+          ~a_prec
+          ~b_prec
+          ~m
+          ~n
+          ~k
+          ~d:(d_ptr, ldd, d_space)
+          ~a:(a_ptr, lda, a_space)
+          ~b:(b_ptr, ldb, b_space)
+        ->
           let tile = 16 in
-          (* (a/b fragment element type, ld multiple for a/b, ld multiple for d, min sm major,
-             bf16 marker). Pointer declarations use [typ_of_prec] of the operand's own precision,
-             which coincides with the fragment element types below. *)
+          (* (a/b fragment element type, ld multiple for a/b, ld multiple for d, min sm major, bf16
+             marker). Pointer declarations use [typ_of_prec] of the operand's own precision, which
+             coincides with the fragment element types below. *)
           let combo =
             match (a_prec, b_prec, d_prec) with
             | Ops.Half_prec _, Ops.Half_prec _, Ops.Single_prec _ ->
@@ -517,8 +545,12 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           in
           match combo with
           | Some (ab_typ, acc_typ, ab_ld_mult, d_ld_mult, min_major, is_bf16)
-            when m % tile = 0 && n % tile = 0 && k % tile = 0
-                 && lda % ab_ld_mult = 0 && ldb % ab_ld_mult = 0 && ldd % d_ld_mult = 0
+            when m % tile = 0
+                 && n % tile = 0
+                 && k % tile = 0
+                 && lda % ab_ld_mult = 0
+                 && ldb % ab_ld_mult = 0
+                 && ldd % d_ld_mult = 0
                  && loadable d_space && loadable a_space && loadable b_space
                  && min_compute_capability_major () >= min_major ->
               let open PPrint in
@@ -545,9 +577,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                   "  }";
                   "}";
                   Printf.sprintf "for (int __ki = 0; __ki < %d; ++__ki) {" kt;
-                  Printf.sprintf "  %s __mma_bf[%d];"
-                    (frag "matrix_b" ab_typ (Some "row_major"))
-                    nt;
+                  Printf.sprintf "  %s __mma_bf[%d];" (frag "matrix_b" ab_typ (Some "row_major")) nt;
                   Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
                   Printf.sprintf
                     "    nvcuda::wmma::load_matrix_sync(__mma_bf[__ni], __mma_bp + __ki * %d * %d \
@@ -557,8 +587,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                   Printf.sprintf "  for (int __mi = 0; __mi < %d; ++__mi) {" mt;
                   Printf.sprintf "    %s __mma_af;" (frag "matrix_a" ab_typ (Some "row_major"));
                   Printf.sprintf
-                    "    nvcuda::wmma::load_matrix_sync(__mma_af, __mma_ap + __mi * %d * %d + \
-                     __ki * %d, %d);"
+                    "    nvcuda::wmma::load_matrix_sync(__mma_af, __mma_ap + __mi * %d * %d + __ki \
+                     * %d, %d);"
                     tile lda tile lda;
                   Printf.sprintf "    for (int __ni = 0; __ni < %d; ++__ni) {" nt;
                   "      nvcuda::wmma::mma_sync(__mma_acc[__mi][__ni], __mma_af, __mma_bf[__ni], \
@@ -595,7 +625,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                    ^^ hardline ^^ rbrace))
           | _ -> None)
 
-    let binop_syntax prec v =
+    let rec binop_syntax prec v =
       (* TODO: consider using binop_syntax inherited from Pure_C_config and overriding only where
          different. *)
       let open PPrint in
@@ -610,6 +640,35 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Ops.Arg1, _ -> invalid_arg "Cuda_backend.binop_syntax: Arg1 is not an operator"
       | Arg2, _ -> invalid_arg "Cuda_backend.binop_syntax: Arg2 is not an operator"
       | _, Ops.Void_prec -> invalid_arg "Cuda_backend.binop_syntax: Void precision"
+      | Threefry4x32_crypto, _ -> (
+          (* Threefry4x32_crypto must output to uint4x32 precision *)
+          match prec with
+          | Ops.Uint4x32_prec _ -> func "arrayjit_threefry4x32_crypto"
+          | _ ->
+              raise
+              @@ Utils.User_error
+                   (Printf.sprintf
+                      "CUDA backend: Threefry4x32_crypto requires target precision to be uint4x32, \
+                       but got %s"
+                      (Ops.prec_string prec)))
+      | Threefry4x32_light, _ -> (
+          (* Threefry4x32_light must output to uint4x32 precision *)
+          match prec with
+          | Ops.Uint4x32_prec _ -> func "arrayjit_threefry4x32_light"
+          | _ ->
+              raise
+              @@ Utils.User_error
+                   (Printf.sprintf
+                      "CUDA backend: Threefry4x32_light requires target precision to be uint4x32, \
+                       but got %s"
+                      (Ops.prec_string prec)))
+      | _, Fp8_prec _ ->
+          (* __nv_fp8_e5m2 defines no arithmetic operators and all its constructors and conversion
+             operators are explicit (cuda_fp8.hpp), so bridge fp8 math through float, mirroring the
+             CC backend's fp8 handling. *)
+          fun v1 v2 ->
+            let fl v = string "(float)" ^^ parens v in
+            group (string "(__nv_fp8_e5m2)" ^^ parens (binop_syntax Ops.single v (fl v1) (fl v2)))
       | Add, Half_prec _ -> func "__hadd"
       | Sub, Half_prec _ -> func "__hsub"
       | Mul, Half_prec _ -> func "__hmul"
@@ -626,16 +685,14 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               (string "hexp2(hlog2(" ^^ v1 ^^ string "),"
               ^^ ifflat (space ^^ v2) (nest 2 (break 1 ^^ v2))
               ^^ string ")")
-      | ( ToPowOf,
-          (Byte_prec _ | Uint16_prec _ | Int32_prec _ | Int64_prec _ | Fp8_prec _ | Uint4x32_prec _)
-        ) ->
+      | ToPowOf, (Byte_prec _ | Uint16_prec _ | Int32_prec _ | Int64_prec _ | Uint4x32_prec _) ->
           invalid_arg "Cuda_backend.binop_syntax: ToPowOf not supported for integer precisions"
       | ToPowOf, Bfloat16_prec _ ->
           fun v1 v2 ->
             group
               (string "__float2bfloat16(powf(__bfloat162float("
               ^^ v1 ^^ string "), __bfloat162float(" ^^ v2 ^^ string ")))")
-      | Relu_gate, (Byte_prec _ | Uint16_prec _ | Int32_prec _ | Int64_prec _ | Fp8_prec _) ->
+      | Relu_gate, (Byte_prec _ | Uint16_prec _ | Int32_prec _ | Int64_prec _) ->
           fun v1 v2 ->
             group
               (parens
@@ -824,20 +881,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                       (nest 2
                          (break 1 ^^ string "?" ^^ space ^^ v2 ^^ break 1 ^^ string ":" ^^ space
                         ^^ string "__float2bfloat16(0.0f)"))))
-      | Satur01_gate, Fp8_prec _ ->
-          fun v1 v2 ->
-            group
-              (parens
-                 (group
-                    (parens
-                       (string "(float)" ^^ v1 ^^ string " > 0.0f && (float)" ^^ v1
-                      ^^ string " < 1.0f"))
-                 ^^ ifflat
-                      (space ^^ string "?" ^^ space ^^ v2 ^^ space ^^ string ":" ^^ space
-                     ^^ string "(unsigned char)0")
-                      (nest 2
-                         (break 1 ^^ string "?" ^^ space ^^ v2 ^^ break 1 ^^ string ":" ^^ space
-                        ^^ string "(unsigned char)0"))))
       | Max, Byte_prec _ -> func "max"
       | Max, Half_prec _ -> func "__hmax"
       | Max, Double_prec _ -> func "fmax"
@@ -849,7 +892,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Max, Bfloat16_prec _ ->
           (* FIXME: This might be wrong, definitely verify and maybe fix, here and elsewhere *)
           func "__hmax"
-      | Max, Fp8_prec _ -> func "max"
       | Min, Byte_prec _ -> func "min"
       | Min, Half_prec _ -> func "__hmin"
       | Min, Double_prec _ -> func "fmin"
@@ -859,7 +901,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Min, Int64_prec _ -> func "min"
       | Min, Uint4x32_prec _ -> func "min"
       | Min, Bfloat16_prec _ -> func "__hmin"
-      | Min, Fp8_prec _ -> func "min"
       | Mod, Byte_prec _ -> f "%"
       | Mod, _ -> func "fmod"
       | Cmplt, _ -> f "<"
@@ -867,28 +908,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Cmpeq, _ -> f "=="
       | Or, _ -> f "||"
       | And, _ -> f "&&"
-      | Threefry4x32_crypto, _ -> (
-          (* Threefry4x32_crypto must output to uint4x32 precision *)
-          match prec with
-          | Ops.Uint4x32_prec _ -> func "arrayjit_threefry4x32_crypto"
-          | _ ->
-              raise
-              @@ Utils.User_error
-                   (Printf.sprintf
-                      "CUDA backend: Threefry4x32_crypto requires target precision to be uint4x32, \
-                       but got %s"
-                      (Ops.prec_string prec)))
-      | Threefry4x32_light, _ -> (
-          (* Threefry4x32_light must output to uint4x32 precision *)
-          match prec with
-          | Ops.Uint4x32_prec _ -> func "arrayjit_threefry4x32_light"
-          | _ ->
-              raise
-              @@ Utils.User_error
-                   (Printf.sprintf
-                      "CUDA backend: Threefry4x32_light requires target precision to be uint4x32, \
-                       but got %s"
-                      (Ops.prec_string prec)))
       | ToPowOf, (Uint32_prec _ | Uint64_prec _) ->
           invalid_arg "Cuda_backend.binop_syntax: ToPowOf not supported for integer precisions"
       | Relu_gate, Uint32_prec _ ->
@@ -940,12 +959,26 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Min, Uint32_prec _ -> func "min"
       | Min, Uint64_prec _ -> func "min"
 
-    let unop_syntax prec v =
+    let rec unop_syntax prec v =
       let open PPrint in
       let f prefix suffix expr = group (string prefix ^^ expr ^^ string suffix) in
       let func fn expr = group (string fn ^^ parens expr) in
       match (v, prec) with
       | Ops.Identity, _ -> f "" ""
+      | Uint4x32_to_prec_uniform1, Ops.Uint4x32_prec _ ->
+          invalid_arg
+            "Cuda_backend.unop_syntax: Uint4x32_to_prec_uniform1 not supported for Uint4x32"
+      (* Heterogeneous op: the argument is uint4x32 whatever the result precision, so it must stay
+         ahead of the fp8 float-bridging below; the fp8 builtin returns __nv_fp8_e5m2. *)
+      | Uint4x32_to_prec_uniform1, _ -> func ("uint4x32_to_" ^ Ops.prec_string prec ^ "_uniform")
+      | _, Ops.Fp8_prec _ ->
+          (* __nv_fp8_e5m2 defines no arithmetic operators and all its constructors and conversion
+             operators are explicit (cuda_fp8.hpp), so bridge fp8 math through float, mirroring the
+             CC backend's fp8 handling. *)
+          fun expr ->
+            group
+              (string "(__nv_fp8_e5m2)"
+              ^^ parens (unop_syntax Ops.single v (string "(float)" ^^ parens expr)))
       | Relu, Ops.Single_prec _ -> f "fmaxf(0.0, " ")"
       | Relu, Ops.Half_prec _ -> f "__hmax_nan(__ushort_as_half((unsigned short)0x0000U), " ")"
       | Relu, Ops.Byte_prec _ -> f "fmax(0, " ")"
@@ -1002,10 +1035,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Tanh_approx, Single_prec _ -> func "__tanhf"
       | Tanh_approx, _ -> func "tanh"
       | Not, _ -> f "(" " == 0.0 ? 1.0 : 0.0)"
-      | Uint4x32_to_prec_uniform1, Uint4x32_prec _ ->
-          invalid_arg
-            "Cuda_backend.unop_syntax: Uint4x32_to_prec_uniform1 not supported for Uint4x32"
-      | Uint4x32_to_prec_uniform1, _ -> func ("uint4x32_to_" ^ Ops.prec_string prec ^ "_uniform")
 
     let vec_unop_syntax prec op v =
       let open PPrint in
@@ -1013,19 +1042,27 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Ops.Uint4x32_to_prec_uniform, _ ->
           group (string ("uint4x32_to_" ^ Ops.prec_string prec ^ "_uniform_vec(") ^^ v ^^ rparen)
 
-    let ternop_syntax prec v =
+    let rec ternop_syntax prec v =
       let open PPrint in
       let func fn v1 v2 v3 = group (string fn ^^ parens (separate comma [ v1; v2; v3 ])) in
       match (v, prec) with
+      | _, Ops.Fp8_prec _ ->
+          (* __nv_fp8_e5m2 defines no arithmetic operators and all its constructors and conversion
+             operators are explicit (cuda_fp8.hpp), so bridge fp8 math through float, mirroring the
+             CC backend's fp8 handling. *)
+          fun v1 v2 v3 ->
+            let fl v = string "(float)" ^^ parens v in
+            group
+              (string "(__nv_fp8_e5m2)"
+              ^^ parens (ternop_syntax Ops.single v (fl v1) (fl v2) (fl v3)))
       | Ops.Where, _ ->
-          (* The whole ternary must be parenthesized, not just the condition: C's [?:] binds
-             looser than the surrounding arithmetic, so for an expression like [where(c,a,b) + 1]
-             the trailing [+ 1] would otherwise be absorbed into the else-branch ([c ? a : b + 1]),
+          (* The whole ternary must be parenthesized, not just the condition: C's [?:] binds looser
+             than the surrounding arithmetic, so for an expression like [where(c,a,b) + 1] the
+             trailing [+ 1] would otherwise be absorbed into the else-branch ([c ? a : b + 1]),
              silently dropping it from the then-branch. This off-by-one surfaced only on CUDA
              (task-04f97340): CC wraps the conditional in [(... ? ... : ...)] via
              [Ops.ternop_c_syntax] and Metal emits a fully-bracketed [select(...)] call. *)
-          fun v1 v2 v3 ->
-            group (parens (parens v1 ^^ string " ? " ^^ v2 ^^ string " : " ^^ v3))
+          fun v1 v2 v3 -> group (parens (parens v1 ^^ string " ? " ^^ v2 ^^ string " : " ^^ v3))
       | FMA, Ops.Half_prec _ -> func "__hfma"
       | FMA, Ops.Single_prec _ -> func "fmaf"
       | FMA, _ -> func "fma"
@@ -1050,19 +1087,29 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Byte_prec _, Half_prec _ -> ("__ushort2half_rn((unsigned short int)", ")")
       | Double_prec _, Uint4x32_prec _ -> ("double_to_uint4x32(", ")")
       | Single_prec _, Uint4x32_prec _ -> ("single_to_uint4x32(", ")")
+      (* __nv_fp8_e5m2's constructors are all explicit, so the [.v[0]] arm below would not
+         implicitly convert on assignment; spell out the (numeric) constructor call. *)
+      | Uint4x32_prec _, Fp8_prec _ -> ("(__nv_fp8_e5m2)((", ").v[0])")
       | Uint4x32_prec _, _ -> ("", ".v[0]")
       | Byte_prec _, Uint4x32_prec _ -> ("byte_to_uint4x32(", ")")
       | Uint16_prec _, Uint4x32_prec _ -> ("uint16_to_uint4x32(", ")")
       | Bfloat16_prec _, Uint4x32_prec _ -> ("bfloat16_to_uint4x32(", ")")
       | Half_prec _, Uint4x32_prec _ -> ("half_to_uint4x32(", ")")
       | Fp8_prec _, Uint4x32_prec _ -> ("fp8_to_uint4x32(", ")")
+      | ( Fp8_prec _,
+          (Byte_prec _ | Uint16_prec _ | Int32_prec _ | Uint32_prec _ | Int64_prec _ | Uint64_prec _)
+        ) ->
+          (* __nv_fp8_e5m2 has no integer conversion operators: a C-style cast to an integer type
+             would resolve through the saturating [operator unsigned char] (wrong for negative
+             values). Convert via float, like the CC backend. *)
+          ("(" ^ typ_of_prec to_ ^ ")((float)(", "))")
       (* The integer counter conversions MUST call the builtins, which spread the bits across all
          four uint4x32 lanes (golden-ratio / MMIX / rotation mixing). The raw struct literal below
          only fills lane 0, leaving lanes 1-3 zero; with the 2-round light threefry used for
-         parameter init that produces near-identical outputs for consecutive counters
-         (periodicity), so random inits diverge from CC/Metal. [Ops.index_prec] is signed [int32]
-         (or [int64] under [large_models]), so the signed arms are the conversion hit by every
-         PRNG init loop, e.g. centered [uniform1] parameter initialization (task-04f97340). *)
+         parameter init that produces near-identical outputs for consecutive counters (periodicity),
+         so random inits diverge from CC/Metal. [Ops.index_prec] is signed [int32] (or [int64] under
+         [large_models]), so the signed arms are the conversion hit by every PRNG init loop, e.g.
+         centered [uniform1] parameter initialization (task-04f97340). *)
       | Int32_prec _, Uint4x32_prec _ -> ("int32_to_uint4x32(", ")")
       | Int64_prec _, Uint4x32_prec _ -> ("int64_to_uint4x32(", ")")
       | Uint32_prec _, Uint4x32_prec _ -> ("uint32_to_uint4x32(", ")")
@@ -1109,6 +1156,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     let cuda_includes =
       {|#include <cuda_fp16.h>
 #include <cuda_bf16.h>
+#include <cuda_fp8.h>
 
 /* Define math constants that would normally come from <math.h> */
 #ifndef INFINITY
@@ -1147,6 +1195,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     let cuda_includes =
       {|#include <cuda_fp16.h>
 #include <cuda_bf16.h>
+#include <cuda_fp8.h>
 
 /* Define math constants that would normally come from <math.h> */
 #ifndef INFINITY
@@ -1243,8 +1292,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
          Utils.add_log_processor ~prefix:log_id_prefix @@ fun log_contents ->
          Utils.log_debug_routine_logs ~log_contents ~stream_name);
       (* Launch dimensions derived from hardware-annotated loops (axis-types proposal §4);
-         all-Serial kernels launch 1x1x1, as before. Static [__shared__] declarations do not use
-         the dynamic pool, so [shared_mem_bytes] stays 0. *)
+         all-Serial kernels launch 1x1x1, as before. Static [__shared__] declarations do not use the
+         dynamic pool, so [shared_mem_bytes] stays 0. *)
       S.launch_kernel func ~grid_dim_x:launch.Low_level.grid.(0)
         ~grid_dim_y:launch.Low_level.grid.(1) ~grid_dim_z:launch.Low_level.grid.(2)
         ~block_dim_x:launch.Low_level.block.(0) ~block_dim_y:launch.Low_level.block.(1)
@@ -1294,8 +1343,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     in
     (lowered_bindings, procs)
 
-  (* CUDA kernel launches on one stream already execute in FIFO order, so the generic event chain
-     is correct; a cheaper plain-sequence task is a possible follow-up (events are ~free there). *)
+  (* CUDA kernel launches on one stream already execute in FIFO order, so the generic event chain is
+     correct; a cheaper plain-sequence task is a possible follow-up (events are ~free there). *)
   let sequence_segments _context ~name:_ _tasks = None
 
   let get_global_debug_info () =

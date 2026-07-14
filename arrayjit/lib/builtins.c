@@ -733,11 +733,20 @@ uint8_t single_to_fp8(float f)
     return (sign << 7) | mant_bits;
   }
 
-  /* Normalized numbers: convert mantissa from [0.5, 1) to [0, 0.75] */
-  mant_f = (mant_f - 0.5f) * 4.0f;
+  /* Normalized numbers: frexp mantissa is in [0.5, 1); map it to the 2-bit fraction in
+     [0, 4) (value = (1 + mant/4) * 2^(exp-15), so mant = (mant_f * 2 - 1) * 4). */
+  mant_f = (mant_f - 0.5f) * 8.0f;
   uint32_t mant_bits = (uint32_t)(mant_f + 0.5f); /* Round to nearest */
   if (mant_bits > 3)
-    mant_bits = 3;
+  {
+    /* Mantissa rounded up past the top: carry into the exponent. */
+    mant_bits = 0;
+    exp++;
+    if (exp > 30)
+    {
+      return (sign << 7) | 0x7C; /* Overflow to infinity */
+    }
+  }
 
   return (uint8_t)((sign << 7) | ((exp & 0x1F) << 2) | (mant_bits & 0x3));
 }
