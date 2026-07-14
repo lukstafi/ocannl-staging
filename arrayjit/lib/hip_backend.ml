@@ -456,7 +456,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Ops.Double_prec _, 2 -> "double2_t"
       | Ops.Int32_prec _, 4 -> "int32x4_t"
       | Ops.Int64_prec _, 2 -> "int64x2_t"
-      | (Ops.Byte_prec _ | Ops.Fp8_prec _), 16 -> "int8x16_t"
+      | Ops.Byte_prec _, 16 -> "int8x16_t"
+      (* Fp8 needs [__hip_fp8_e5m2] elements: [Set_from_vec] assigns them to the fp8 array cells
+         without a cast, and [__hip_fp8_e5m2] has no assignment from integer types. *)
+      | Ops.Fp8_prec _, 16 -> "fp8x16_t"
       | (Ops.Uint16_prec _ | Ops.Bfloat16_prec _), 8 -> "uint16x8_t"
       | Ops.Half_prec _, 8 -> "half8_t"
       | _, 1 -> typ_of_prec prec
@@ -466,7 +469,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        are arch-specific); the barrier-bracketed lane-0 fallback renders instead. *)
     let mma_syntax = None
 
-    let binop_syntax prec v =
+    let rec binop_syntax prec v =
       let open PPrint in
       let f op_str v1 v2 =
         group
@@ -479,6 +482,36 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Ops.Arg1, _ -> invalid_arg "Hip_backend.binop_syntax: Arg1 is not an operator"
       | Arg2, _ -> invalid_arg "Hip_backend.binop_syntax: Arg2 is not an operator"
       | _, Ops.Void_prec -> invalid_arg "Hip_backend.binop_syntax: Void precision"
+      | Threefry4x32_crypto, _ -> (
+          (* Threefry4x32_crypto must output to uint4x32 precision; checked ahead of the fp8
+             bridging so the error names the actual target precision. *)
+          match prec with
+          | Ops.Uint4x32_prec _ -> func "arrayjit_threefry4x32_crypto"
+          | _ ->
+              raise
+              @@ Utils.User_error
+                   (Printf.sprintf
+                      "HIP backend: Threefry4x32_crypto requires target precision to be uint4x32, \
+                       but got %s"
+                      (Ops.prec_string prec)))
+      | Threefry4x32_light, _ -> (
+          (* Threefry4x32_light must output to uint4x32 precision *)
+          match prec with
+          | Ops.Uint4x32_prec _ -> func "arrayjit_threefry4x32_light"
+          | _ ->
+              raise
+              @@ Utils.User_error
+                   (Printf.sprintf
+                      "HIP backend: Threefry4x32_light requires target precision to be uint4x32, \
+                       but got %s"
+                      (Ops.prec_string prec)))
+      | _, Fp8_prec _ ->
+          (* __hip_fp8_e5m2 defines no arithmetic operators, and its implicit conversion operators
+             (float, double, int, char, ... in amd_hip_fp8.h) make the built-in operators ambiguous,
+             so bridge fp8 math through float, mirroring the CC backend's fp8 handling. *)
+          fun v1 v2 ->
+            let fl v = string "(float)" ^^ parens v in
+            group (string "(__hip_fp8_e5m2)" ^^ parens (binop_syntax Ops.single v (fl v1) (fl v2)))
       | Add, Half_prec _ -> func "__hadd"
       | Sub, Half_prec _ -> func "__hsub"
       | Mul, Half_prec _ -> func "__hmul"
@@ -495,16 +528,14 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               (string "hexp2(hlog2(" ^^ v1 ^^ string "),"
               ^^ ifflat (space ^^ v2) (nest 2 (break 1 ^^ v2))
               ^^ string ")")
-      | ( ToPowOf,
-          (Byte_prec _ | Uint16_prec _ | Int32_prec _ | Int64_prec _ | Fp8_prec _ | Uint4x32_prec _)
-        ) ->
+      | ToPowOf, (Byte_prec _ | Uint16_prec _ | Int32_prec _ | Int64_prec _ | Uint4x32_prec _) ->
           invalid_arg "Hip_backend.binop_syntax: ToPowOf not supported for integer precisions"
       | ToPowOf, Bfloat16_prec _ ->
           fun v1 v2 ->
             group
               (string "__float2bfloat16(powf(__bfloat162float("
               ^^ v1 ^^ string "), __bfloat162float(" ^^ v2 ^^ string ")))")
-      | Relu_gate, (Byte_prec _ | Uint16_prec _ | Int32_prec _ | Int64_prec _ | Fp8_prec _) ->
+      | Relu_gate, (Byte_prec _ | Uint16_prec _ | Int32_prec _ | Int64_prec _) ->
           fun v1 v2 ->
             group
               (parens
@@ -697,20 +728,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                       (nest 2
                          (break 1 ^^ string "?" ^^ space ^^ v2 ^^ break 1 ^^ string ":" ^^ space
                         ^^ string "__float2bfloat16(0.0f)"))))
-      | Satur01_gate, Fp8_prec _ ->
-          fun v1 v2 ->
-            group
-              (parens
-                 (group
-                    (parens
-                       (string "(float)" ^^ v1 ^^ string " > 0.0f && (float)" ^^ v1
-                      ^^ string " < 1.0f"))
-                 ^^ ifflat
-                      (space ^^ string "?" ^^ space ^^ v2 ^^ space ^^ string ":" ^^ space
-                     ^^ string "(unsigned char)0")
-                      (nest 2
-                         (break 1 ^^ string "?" ^^ space ^^ v2 ^^ break 1 ^^ string ":" ^^ space
-                        ^^ string "(unsigned char)0"))))
       | Max, Byte_prec _ -> func "max"
       | Max, Half_prec _ -> func "__hmax"
       | Max, Double_prec _ -> func "fmax"
@@ -720,7 +737,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Max, Int64_prec _ -> func "max"
       | Max, Uint4x32_prec _ -> func "max"
       | Max, Bfloat16_prec _ -> func "__hmax"
-      | Max, Fp8_prec _ -> func "max"
       | Min, Byte_prec _ -> func "min"
       | Min, Half_prec _ -> func "__hmin"
       | Min, Double_prec _ -> func "fmin"
@@ -730,7 +746,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Min, Int64_prec _ -> func "min"
       | Min, Uint4x32_prec _ -> func "min"
       | Min, Bfloat16_prec _ -> func "__hmin"
-      | Min, Fp8_prec _ -> func "min"
       | Mod, Byte_prec _ -> f "%"
       | Mod, _ -> func "fmod"
       | Cmplt, _ -> f "<"
@@ -738,28 +753,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Cmpeq, _ -> f "=="
       | Or, _ -> f "||"
       | And, _ -> f "&&"
-      | Threefry4x32_crypto, _ -> (
-          (* Threefry4x32_crypto must output to uint4x32 precision *)
-          match prec with
-          | Ops.Uint4x32_prec _ -> func "arrayjit_threefry4x32_crypto"
-          | _ ->
-              raise
-              @@ Utils.User_error
-                   (Printf.sprintf
-                      "HIP backend: Threefry4x32_crypto requires target precision to be uint4x32, \
-                       but got %s"
-                      (Ops.prec_string prec)))
-      | Threefry4x32_light, _ -> (
-          (* Threefry4x32_light must output to uint4x32 precision *)
-          match prec with
-          | Ops.Uint4x32_prec _ -> func "arrayjit_threefry4x32_light"
-          | _ ->
-              raise
-              @@ Utils.User_error
-                   (Printf.sprintf
-                      "HIP backend: Threefry4x32_light requires target precision to be uint4x32, \
-                       but got %s"
-                      (Ops.prec_string prec)))
       | ToPowOf, (Uint32_prec _ | Uint64_prec _) ->
           invalid_arg "Hip_backend.binop_syntax: ToPowOf not supported for integer precisions"
       | Relu_gate, Uint32_prec _ ->
@@ -811,12 +804,26 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Min, Uint32_prec _ -> func "min"
       | Min, Uint64_prec _ -> func "min"
 
-    let unop_syntax prec v =
+    let rec unop_syntax prec v =
       let open PPrint in
       let f prefix suffix expr = group (string prefix ^^ expr ^^ string suffix) in
       let func fn expr = group (string fn ^^ parens expr) in
       match (v, prec) with
       | Ops.Identity, _ -> f "" ""
+      | Uint4x32_to_prec_uniform1, Ops.Uint4x32_prec _ ->
+          invalid_arg
+            "Hip_backend.unop_syntax: Uint4x32_to_prec_uniform1 not supported for Uint4x32"
+      (* Heterogeneous op: the argument is uint4x32 whatever the result precision, so it must stay
+         ahead of the fp8 float-bridging below; the fp8 builtin returns __hip_fp8_e5m2. *)
+      | Uint4x32_to_prec_uniform1, _ -> func ("uint4x32_to_" ^ Ops.prec_string prec ^ "_uniform")
+      | _, Ops.Fp8_prec _ ->
+          (* __hip_fp8_e5m2 defines no arithmetic operators, and its implicit conversion operators
+             (float, double, int, char, ... in amd_hip_fp8.h) make the built-in operators ambiguous,
+             so bridge fp8 math through float, mirroring the CC backend's fp8 handling. *)
+          fun expr ->
+            group
+              (string "(__hip_fp8_e5m2)"
+              ^^ parens (unop_syntax Ops.single v (string "(float)" ^^ parens expr)))
       | Relu, Ops.Single_prec _ -> f "fmaxf(0.0, " ")"
       | Relu, Ops.Half_prec _ -> f "__hmax_nan(__ushort_as_half((unsigned short)0x0000U), " ")"
       | Relu, Ops.Byte_prec _ -> f "fmax(0, " ")"
@@ -873,10 +880,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Tanh_approx, Single_prec _ -> func "tanhf"
       | Tanh_approx, _ -> func "tanh"
       | Not, _ -> f "(" " == 0.0 ? 1.0 : 0.0)"
-      | Uint4x32_to_prec_uniform1, Uint4x32_prec _ ->
-          invalid_arg
-            "Hip_backend.unop_syntax: Uint4x32_to_prec_uniform1 not supported for Uint4x32"
-      | Uint4x32_to_prec_uniform1, _ -> func ("uint4x32_to_" ^ Ops.prec_string prec ^ "_uniform")
 
     let vec_unop_syntax prec op v =
       let open PPrint in
@@ -884,10 +887,19 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Ops.Uint4x32_to_prec_uniform, _ ->
           group (string ("uint4x32_to_" ^ Ops.prec_string prec ^ "_uniform_vec(") ^^ v ^^ rparen)
 
-    let ternop_syntax prec v =
+    let rec ternop_syntax prec v =
       let open PPrint in
       let func fn v1 v2 v3 = group (string fn ^^ parens (separate comma [ v1; v2; v3 ])) in
       match (v, prec) with
+      | _, Ops.Fp8_prec _ ->
+          (* __hip_fp8_e5m2 defines no arithmetic operators, and its implicit conversion operators
+             (float, double, int, char, ... in amd_hip_fp8.h) make the built-in operators ambiguous,
+             so bridge fp8 math through float, mirroring the CC backend's fp8 handling. *)
+          fun v1 v2 v3 ->
+            let fl v = string "(float)" ^^ parens v in
+            group
+              (string "(__hip_fp8_e5m2)"
+              ^^ parens (ternop_syntax Ops.single v (fl v1) (fl v2) (fl v3)))
       | Ops.Where, _ ->
           (* The whole ternary must be parenthesized, not just the condition: C's [?:] binds looser
              than the surrounding arithmetic, so for an expression like [where(c,a,b) + 1] the
@@ -947,6 +959,13 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Bfloat16_prec _, _ -> ("(" ^ typ_of_prec to_ ^ ")(__bfloat162float(", "))")
       | Half_prec _, Fp8_prec _ -> ("(__hip_fp8_e5m2)(__half2float(", "))")
       | Fp8_prec _, Half_prec _ -> ("__float2half((float)(", "))")
+      | ( Fp8_prec _,
+          (Byte_prec _ | Uint16_prec _ | Int32_prec _ | Uint32_prec _ | Int64_prec _ | Uint64_prec _)
+        ) ->
+          (* __hip_fp8_e5m2's integer conversion operators saturate (wrong for negative values into
+             unsigned types) and overlap enough to make direct casts ambiguity-prone; convert via
+             float, like the CC backend. *)
+          ("(" ^ typ_of_prec to_ ^ ")((float)(", "))")
       | _ -> ("(" ^ typ_of_prec to_ ^ ")(", ")")
 
     let kernel_log_param = Some ("int", "log_id")
@@ -980,6 +999,12 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
   let hip_includes =
     {|#include <hip/hip_fp16.h>
 #include <hip/hip_bf16.h>
+/* hip_fp8.h ships with ROCm >= 6.2 (hiprtc is clang, so __has_include is available); guarding
+   keeps non-fp8 kernels compiling on older SDKs, where fp8 kernels still fail with unknown type
+   __hip_fp8_e5m2. */
+#if __has_include(<hip/hip_fp8.h>)
+#include <hip/hip_fp8.h>
+#endif
 
 /* Define math constants that would normally come from <math.h> */
 #ifndef INFINITY

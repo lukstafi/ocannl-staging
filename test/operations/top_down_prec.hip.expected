@@ -1,5 +1,11 @@
 #include <hip/hip_fp16.h>
 #include <hip/hip_bf16.h>
+/* hip_fp8.h ships with ROCm >= 6.2 (hiprtc is clang, so __has_include is available); guarding
+   keeps non-fp8 kernels compiling on older SDKs, where fp8 kernels still fail with unknown type
+   __hip_fp8_e5m2. */
+#if __has_include(<hip/hip_fp8.h>)
+#include <hip/hip_fp8.h>
+#endif
 
 /* Define math constants that would normally come from <math.h> */
 #ifndef INFINITY
