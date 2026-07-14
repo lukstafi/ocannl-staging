@@ -36,7 +36,7 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
     (* Elements are the class type [__hip_fp8_e5m2] (not a plain integer): the [Set_from_vec]
        emission assigns vector elements to the fp8 array cells without a cast, and
        [__hip_fp8_e5m2] has no assignment from integer types. *)
-    ("fp8x16_t", {|typedef struct { __hip_fp8_e5m2 v[16]; } fp8x16_t;|}, []);
+    ("fp8x16_t", {|typedef struct __align__(16) { __hip_fp8_e5m2 v[16]; } fp8x16_t;|}, []);
     ("half8_t", {|typedef struct { __half v[8]; } half8_t;|}, []);
     ( "htanh_approx",
       (* hip_fp16.h has no htanh/htanh_approx (unlike CUDA 12.8+); route through float. *)
@@ -363,8 +363,9 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
 }|},
       [ "uint4x32_t" ] );
     ( "fp8_to_uint4x32",
-      {|__device__ uint4x32_t fp8_to_uint4x32(unsigned char x) {
-  uint4x32_t result = {{(unsigned int)x, 0, 0, 0}};
+      {|__device__ uint4x32_t fp8_to_uint4x32(__hip_fp8_e5m2 x) {
+  /* Spread the raw bit pattern, matching the CC backend's byte-typed fp8. */
+  uint4x32_t result = {{(unsigned int)x.__x, 0, 0, 0}};
   return result;
 }|},
       [ "uint4x32_t" ] );
