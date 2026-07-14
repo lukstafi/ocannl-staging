@@ -360,19 +360,19 @@ using namespace metal;|}, []);
 }|},
       [ "half8_t" ] );
     ( "uint4x32_to_fp8_uniform_vec",
-      {|uint8x16_t uint4x32_to_fp8_uniform_vec(uint4 x) {
-    uint8x16_t result;
+      {|int8x16_t uint4x32_to_fp8_uniform_vec(uint4 x) {
+    int8x16_t result;
     uint4 v = x;
     for (int i = 0; i < 4; i++) {
         uint32_t val = v[i];
-        result.v[i*4 + 0] = uint8_t(val & 0xFF);
-        result.v[i*4 + 1] = uint8_t((val >> 8) & 0xFF);
-        result.v[i*4 + 2] = uint8_t((val >> 16) & 0xFF);
-        result.v[i*4 + 3] = uint8_t((val >> 24) & 0xFF);
+        result.v[i*4 + 0] = int8_t(val & 0xFF);
+        result.v[i*4 + 1] = int8_t((val >> 8) & 0xFF);
+        result.v[i*4 + 2] = int8_t((val >> 16) & 0xFF);
+        result.v[i*4 + 3] = int8_t((val >> 24) & 0xFF);
     }
     return result;
 }|},
-      [ "uint8x16_t" ] );
+      [ "int8x16_t" ] );
     ( "single_to_uint4x32",
       {|uint4 single_to_uint4x32(float x) {
     uint32_t bits = as_type<uint32_t>(x);

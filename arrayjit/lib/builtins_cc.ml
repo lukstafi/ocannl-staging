@@ -16,7 +16,10 @@ let includes =
 #endif
 #ifdef __ARM_NEON
   #define OCANNL_HAS_NEON 1
-  #include <arm_neon.h>
+  /* Do NOT include <arm_neon.h> here: it defines int8x16_t, int64x2_t, uint16x8_t, etc. as
+     native vector types, colliding with the pack-struct typedefs emitted by the builtins below
+     (e.g. the uint4x32_to_*_uniform_vec result types). Nothing emits NEON intrinsics yet; when
+     that changes, the emitter must rename the pack types or include the header per-kernel. */
 #else
   #define OCANNL_HAS_NEON 0
 #endif
@@ -967,18 +970,18 @@ uint16x8_t uint4x32_to_bfloat16_uniform_vec(uint4x32_t x) {
     ( "uint4x32_to_fp8_uniform_vec",
       {|
 /* Convert uint4x32 to 16 fp8s uniform */
-uint8x16_t uint4x32_to_fp8_uniform_vec(uint4x32_t x) {
-    uint8x16_t result;
+int8x16_t uint4x32_to_fp8_uniform_vec(uint4x32_t x) {
+    int8x16_t result;
     for (int i = 0; i < 4; i++) {
-        result.v[i*4 + 0] = (uint8_t)(x.v[i] & 0xFF);
-        result.v[i*4 + 1] = (uint8_t)((x.v[i] >> 8) & 0xFF);
-        result.v[i*4 + 2] = (uint8_t)((x.v[i] >> 16) & 0xFF);
-        result.v[i*4 + 3] = (uint8_t)((x.v[i] >> 24) & 0xFF);
+        result.v[i*4 + 0] = (int8_t)(x.v[i] & 0xFF);
+        result.v[i*4 + 1] = (int8_t)((x.v[i] >> 8) & 0xFF);
+        result.v[i*4 + 2] = (int8_t)((x.v[i] >> 16) & 0xFF);
+        result.v[i*4 + 3] = (int8_t)((x.v[i] >> 24) & 0xFF);
     }
     return result;
 }
 |},
-      [ "uint4x32_t"; "uint8x16_t" ] );
+      [ "uint4x32_t"; "int8x16_t" ] );
   ]
 
 let source = includes ^ String.concat "" (List.map (fun (_, def, _) -> def) builtins)

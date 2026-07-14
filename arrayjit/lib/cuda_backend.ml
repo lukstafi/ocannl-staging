@@ -474,7 +474,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Ops.Double_prec _, 2 -> "double2_t"
       | Ops.Int32_prec _, 4 -> "int32x4_t"
       | Ops.Int64_prec _, 2 -> "int64x2_t"
-      | (Ops.Byte_prec _ | Ops.Fp8_prec _), 16 -> "int8x16_t"
+      | Ops.Byte_prec _, 16 -> "int8x16_t"
+      (* Fp8 needs [__nv_fp8_e5m2] elements: [Set_from_vec] assigns them to the fp8 array cells
+         without a cast, and [__nv_fp8_e5m2] has no assignment from integer types. *)
+      | Ops.Fp8_prec _, 16 -> "fp8x16_t"
       | (Ops.Uint16_prec _ | Ops.Bfloat16_prec _), 8 -> "uint16x8_t"
       | Ops.Half_prec _, 8 -> "half8_t"
       | _, 1 -> typ_of_prec prec
@@ -1109,6 +1112,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     let cuda_includes =
       {|#include <cuda_fp16.h>
 #include <cuda_bf16.h>
+#include <cuda_fp8.h>
 
 /* Define math constants that would normally come from <math.h> */
 #ifndef INFINITY
@@ -1147,6 +1151,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     let cuda_includes =
       {|#include <cuda_fp16.h>
 #include <cuda_bf16.h>
+#include <cuda_fp8.h>
 
 /* Define math constants that would normally come from <math.h> */
 #ifndef INFINITY
