@@ -45,10 +45,12 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
     ( "uint4x32_to_double_uniform",
       (* Combine the lanes as an integer and convert NUMERICALLY before scaling (mirroring
          builtins.c); bit-casting the lanes to a double (via [__longlong_as_double]) would yield
-         NaN/Inf/huge values instead of [0, 1). *)
+         NaN/Inf/huge values instead of [0, 1). Only the top 53 bits are used so the conversion is
+         exact and the result stays below 1.0 (all 64 bits could round up to 2^64, yielding
+         exactly 1.0). *)
       {|__device__ double uint4x32_to_double_uniform(uint4x32_t x) {
   unsigned long long combined = ((unsigned long long)x.v[1] << 32) | x.v[0];
-  return (double)combined * (1.0 / 18446744073709551616.0);
+  return (double)(combined >> 11) * (1.0 / 9007199254740992.0);
 }|},
       [ "uint4x32_t" ] );
     ( "uint4x32_to_int32_uniform",
@@ -135,11 +137,12 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
 }|},
       [ "uint4x32_t"; "float4_t"; "uint32_to_single_uniform" ] );
     ( "uint4x32_to_double_uniform_vec",
-      (* Numeric integer-to-double conversion, like the scalar variant (see the note there). *)
+      (* Numeric top-53-bits integer-to-double conversion, like the scalar variant (see the note
+         there). *)
       {|__device__ double2_t uint4x32_to_double_uniform_vec(uint4x32_t x) {
   double2_t result;
-  result.v[0] = (double)(((unsigned long long)x.v[1] << 32) | x.v[0]) * (1.0 / 18446744073709551616.0);
-  result.v[1] = (double)(((unsigned long long)x.v[3] << 32) | x.v[2]) * (1.0 / 18446744073709551616.0);
+  result.v[0] = (double)((((unsigned long long)x.v[1] << 32) | x.v[0]) >> 11) * (1.0 / 9007199254740992.0);
+  result.v[1] = (double)((((unsigned long long)x.v[3] << 32) | x.v[2]) >> 11) * (1.0 / 9007199254740992.0);
   return result;
 }|},
       [ "uint4x32_t"; "double2_t" ] );

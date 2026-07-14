@@ -203,9 +203,10 @@ using namespace metal;|}, []);
       [ "uint32_to_single_uniform" ] );
     ( "uint4x32_to_double_uniform",
       {|float uint4x32_to_double_uniform(uint4 x) {
-    /* Fallback to float precision */
+    /* Fallback to float precision: top 24 bits so the int-to-float conversion is exact and the
+       result stays below 1.0 (converting all 64 bits could round up to 2^64, yielding 1.0) */
     uint64_t combined = (uint64_t(x.y) << 32) | x.x;
-    return float(combined) * (1.0f / 18446744073709551616.0f);
+    return float(combined >> 40) * (1.0f / 16777216.0f);
 }|},
       [] );
     ( "uint4x32_to_int32_uniform",
@@ -267,11 +268,12 @@ using namespace metal;|}, []);
       [ "float4_t"; "uint32_to_single_uniform" ] );
     ( "uint4x32_to_double_uniform_vec",
       {|float2_t uint4x32_to_double_uniform_vec(uint4 x) {
+    /* Top 24 bits per lane pair, see uint4x32_to_double_uniform */
     float2_t result;
     uint64_t combined1 = (uint64_t(x.y) << 32) | x.x;
     uint64_t combined2 = (uint64_t(x.w) << 32) | x.z;
-    result.v.x = float(combined1) * (1.0f / 18446744073709551616.0f);
-    result.v.y = float(combined2) * (1.0f / 18446744073709551616.0f);
+    result.v.x = float(combined1 >> 40) * (1.0f / 16777216.0f);
+    result.v.y = float(combined2 >> 40) * (1.0f / 16777216.0f);
     return result;
 }|},
       [ "float2_t" ] );
