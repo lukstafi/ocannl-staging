@@ -16,7 +16,10 @@ let includes =
 #endif
 #ifdef __ARM_NEON
   #define OCANNL_HAS_NEON 1
-  #include <arm_neon.h>
+  /* Do NOT include <arm_neon.h> here: it defines int8x16_t, int64x2_t, uint16x8_t, etc. as
+     native vector types, colliding with the pack-struct typedefs emitted by the builtins below
+     (e.g. the uint4x32_to_*_uniform_vec result types). Nothing emits NEON intrinsics yet; when
+     that changes, the emitter must rename the pack types or include the header per-kernel. */
 #else
   #define OCANNL_HAS_NEON 0
 #endif
