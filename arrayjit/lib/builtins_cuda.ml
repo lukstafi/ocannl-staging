@@ -4,15 +4,15 @@ let builtins =
     ("uint4x32_t", {|typedef struct {
     unsigned int v[4];
 } uint4x32_t;|}, []);
-    (* The 16-byte alignment lets the [Vectorized] packed rendering (gh-ocannl-463) load/store
-       these through [reinterpret_cast] as single 128-bit transactions (llm.c's Packed128); it is
-       harmless for the value-typed [Set_from_vec] uses. *)
+    (* The 16-byte alignment lets the [Vectorized] packed rendering (gh-ocannl-463) load/store these
+       through [reinterpret_cast] as single 128-bit transactions (llm.c's Packed128); it is harmless
+       for the value-typed [Set_from_vec] uses. *)
     ("float4_t", {|typedef struct __align__(16) { float v[4]; } float4_t;|}, []);
     ("double2_t", {|typedef struct __align__(16) { double v[2]; } double2_t;|}, []);
     ( "ocannl_shfl_xor",
-      (* Butterfly warp shuffle for the [Workgroup_reduce] warp-shuffle rendering
-         (gh-ocannl-462). The full mask is sound because the rendering requires the reduce axis to
-         cover whole warps of the block's .x dimension, so every lane reaches the call. *)
+      (* Butterfly warp shuffle for the [Workgroup_reduce] warp-shuffle rendering (gh-ocannl-462).
+         The full mask is sound because the rendering requires the reduce axis to cover whole warps
+         of the block's .x dimension, so every lane reaches the call. *)
       {|__device__ __forceinline__ float ocannl_shfl_xor(float v, int lane_mask) {
   return __shfl_xor_sync(0xffffffffu, v, lane_mask);
 }
@@ -27,8 +27,9 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
     ("uint8x16_t", {|typedef struct { unsigned char v[16]; } uint8x16_t;|}, []);
     (* Elements are the class type [__nv_fp8_e5m2] (not a plain integer): the [Set_from_vec]
        emission assigns vector elements to the fp8 array cells without a cast, and
-       [__nv_fp8_e5m2] has no assignment from integer types. *)
-    ("fp8x16_t", {|typedef struct { __nv_fp8_e5m2 v[16]; } fp8x16_t;|}, []);
+       [__nv_fp8_e5m2] has no assignment from integer types. The 16-byte alignment supports the
+       [Vectorized] packed [reinterpret_cast] loads/stores, like float4_t above. *)
+    ("fp8x16_t", {|typedef struct __align__(16) { __nv_fp8_e5m2 v[16]; } fp8x16_t;|}, []);
     ("half8_t", {|typedef struct { __half v[8]; } half8_t;|}, []);
     ( "uint32_to_single_uniform",
       {|__device__ __forceinline__ float uint32_to_single_uniform(unsigned int x) {
@@ -120,7 +121,9 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
       [ "uint4x32_t"; "uint32_to_single_uniform" ] );
     ( "uint4x32_to_fp8_uniform",
       {|__device__ __nv_fp8_e5m2 uint4x32_to_fp8_uniform(uint4x32_t x) {
-  /* Reinterpret uniform random bits as an FP8 E5M2 bit pattern (matching builtins.c) */
+  /* Random FP8 E5M2 bit pattern from the low 8 bits (matches the CC backend, which stores fp8
+     as a raw byte). Assign through the storage member: constructing __nv_fp8_e5m2 from the
+     byte would be a numeric conversion, not a bit reinterpretation. */
   __nv_fp8_e5m2 result;
   result.__x = (__nv_fp8_storage_t)(x.v[0] & 0xFF);
   return result;
@@ -224,8 +227,8 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
     (* The [Uint4x32_to_prec_uniform] emission names helpers by [Ops.prec_string]
        ("uint4x32_to_int64_uniform_vec", ...), while the workhorse definitions above use short
        names; provide the emitted names as wrappers (mirroring builtins.c, which defines the long
-       names directly). Return types match [vec_typ_of_prec], which maps both byte and fp8 to
-       [int8x16_t]. *)
+       names directly). Return types match [vec_typ_of_prec]; fp8's wrapper is defined further
+       below with the fp8-typed pack. *)
     ( "uint4x32_to_int64_uniform_vec",
       {|__device__ int64x2_t uint4x32_to_int64_uniform_vec(uint4x32_t x) {
   return uint4x32_to_i64_uniform_vec(x);
@@ -238,11 +241,6 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
       [ "uint4x32_t"; "uint16x8_t"; "uint4x32_to_u16_uniform_vec" ] );
     ( "uint4x32_to_byte_uniform_vec",
       {|__device__ int8x16_t uint4x32_to_byte_uniform_vec(uint4x32_t x) {
-  return uint4x32_to_i8_uniform_vec(x);
-}|},
-      [ "uint4x32_t"; "int8x16_t"; "uint4x32_to_i8_uniform_vec" ] );
-    ( "uint4x32_to_fp8_uniform_vec",
-      {|__device__ int8x16_t uint4x32_to_fp8_uniform_vec(uint4x32_t x) {
   return uint4x32_to_i8_uniform_vec(x);
 }|},
       [ "uint4x32_t"; "int8x16_t"; "uint4x32_to_i8_uniform_vec" ] );
@@ -259,28 +257,9 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
   return result;
 }|},
       [ "uint4x32_t"; "uint8x16_t" ] );
-    (* The [Uint4x32_to_prec_uniform] emission names helpers by [Ops.prec_string]
-       ("uint4x32_to_int64_uniform_vec", ...), while the workhorse definitions above use short
-       names; provide the emitted names as wrappers (mirroring builtins_hip.ml). Return types
-       match [vec_typ_of_prec]. *)
-    ( "uint4x32_to_int64_uniform_vec",
-      {|__device__ int64x2_t uint4x32_to_int64_uniform_vec(uint4x32_t x) {
-  return uint4x32_to_i64_uniform_vec(x);
-}|},
-      [ "uint4x32_t"; "int64x2_t"; "uint4x32_to_i64_uniform_vec" ] );
-    ( "uint4x32_to_uint16_uniform_vec",
-      {|__device__ uint16x8_t uint4x32_to_uint16_uniform_vec(uint4x32_t x) {
-  return uint4x32_to_u16_uniform_vec(x);
-}|},
-      [ "uint4x32_t"; "uint16x8_t"; "uint4x32_to_u16_uniform_vec" ] );
-    ( "uint4x32_to_byte_uniform_vec",
-      {|__device__ int8x16_t uint4x32_to_byte_uniform_vec(uint4x32_t x) {
-  return uint4x32_to_i8_uniform_vec(x);
-}|},
-      [ "uint4x32_t"; "int8x16_t"; "uint4x32_to_i8_uniform_vec" ] );
     ( "uint4x32_to_fp8_uniform_vec",
       {|__device__ fp8x16_t uint4x32_to_fp8_uniform_vec(uint4x32_t x) {
-  /* Reinterpret uniform random bits as FP8 E5M2 bit patterns (matching builtins.c) */
+  /* 16 random FP8 E5M2 bit patterns; see uint4x32_to_fp8_uniform for the __x rationale. */
   fp8x16_t result;
   #pragma unroll
   for (int i = 0; i < 4; i++) {
@@ -374,8 +353,9 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
 }|},
       [ "uint4x32_t" ] );
     ( "fp8_to_uint4x32",
-      {|__device__ uint4x32_t fp8_to_uint4x32(unsigned char x) {
-  uint4x32_t result = {{(unsigned int)x, 0, 0, 0}};
+      {|__device__ uint4x32_t fp8_to_uint4x32(__nv_fp8_e5m2 x) {
+  /* Spread the raw bit pattern, matching the CC backend's byte-typed fp8. */
+  uint4x32_t result = {{(unsigned int)x.__x, 0, 0, 0}};
   return result;
 }|},
       [ "uint4x32_t" ] );

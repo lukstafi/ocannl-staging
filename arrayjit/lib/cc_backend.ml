@@ -62,8 +62,8 @@ let probe_compiles ?(mode = `Compile) ~flags ~data () =
       Stdio.Out_channel.write_all src ~data;
       let compile_only = match mode with `Compile -> "-c " | `Link -> "" in
       let cmd =
-        Printf.sprintf "%s %s %s%s -o %s > %s 2>&1" (compiler_command ()) flags compile_only src
-          out log
+        Printf.sprintf "%s %s %s%s -o %s > %s 2>&1" (compiler_command ()) flags compile_only src out
+          log
       in
       Stdlib.Sys.command cmd = 0
     with _ -> false
@@ -76,8 +76,10 @@ let simd_flags =
     lazy
       (let compile ~flags ~data = probe_compiles ~flags ~data () in
        let guard =
-         "#if !defined(__AVX2__) || !defined(__FMA__)\n#error \"target lacks AVX2/FMA\"\n\
-          #endif\nint ocannl_simd_probe;\n"
+         "#if !defined(__AVX2__) || !defined(__FMA__)\n\
+          #error \"target lacks AVX2/FMA\"\n\
+          #endif\n\
+          int ocannl_simd_probe;\n"
        in
        let trivial = "int ocannl_simd_probe;\n" in
        if not (compile ~flags:(String.strip (arch_flags ())) ~data:guard) then ""
@@ -100,9 +102,9 @@ let simd_flags =
 let parallel_grid_syntax_setting =
   let probed =
     lazy
-      ((* Probes link full executables: a compiler can accept the flags yet lack the runtime
-          library at link time (clang without libomp), and the kernel command compiles and links
-          in one step. *)
+      ((* Probes link full executables: a compiler can accept the flags yet lack the runtime library
+          at link time (clang without libomp), and the kernel command compiles and links in one
+          step. *)
        let dispatch_src =
          "#include <dispatch/dispatch.h>\n\
           int main(void) {\n\
@@ -128,14 +130,12 @@ let parallel_grid_syntax_setting =
     | "dispatch" -> `Dispatch
     | "openmp" -> `Openmp
     | "none" | "false" -> `None
-    | s ->
-        invalid_arg
-          ("cc_parallel_grid: expected auto | dispatch | openmp | none, got " ^ s)
+    | s -> invalid_arg ("cc_parallel_grid: expected auto | dispatch | openmp | none, got " ^ s)
 
-(* Explicit SIMD width for [Vectorized] loops (gh-ocannl-164 follow-up): vector register bytes
-   for the GCC/Clang vector-extension rendering in [C_syntax]. Auto (-1 or unset): 32 bytes when
-   the SIMD probe found AVX2, else 16 (NEON width; clang/gcc lower 16-byte vectors natively on
-   ARM). 0 disables explicit emission (auto-vectorization pragmas remain). *)
+(* Explicit SIMD width for [Vectorized] loops (gh-ocannl-164 follow-up): vector register bytes for
+   the GCC/Clang vector-extension rendering in [C_syntax]. Auto (-1 or unset): 32 bytes when the
+   SIMD probe found AVX2, else 16 (NEON width; clang/gcc lower 16-byte vectors natively on ARM). 0
+   disables explicit emission (auto-vectorization pragmas remain). *)
 let vector_bytes_setting () =
   match Int.of_string @@ Utils.get_global_arg ~default:"-1" ~arg_name:"cc_vector_bytes" with
   | n when n >= 0 -> n
@@ -270,9 +270,9 @@ let%track7_sexp c_compile_and_load ~f_path =
   | `Openmp ->
       (* Never dlclose kernels built with -fopenmp: unloading an object whose parallel regions
          executed is a documented GOMP restriction -- libgomp's pool threads can retain references
-         into it, and the dlclose can drop libgomp itself (loaded only as this object's
-         dependency) under its parked workers. Observed as a SIGSEGV shortly after a routine was
-         collected (ubuntu CI, PR #97). Leak the mapping instead; kernels are small. *)
+         into it, and the dlclose can drop libgomp itself (loaded only as this object's dependency)
+         under its parked workers. Observed as a SIGSEGV shortly after a routine was collected
+         (ubuntu CI, PR #97). Leak the mapping instead; kernels are small. *)
       ()
   | `Dispatch | `None ->
       let%track7_sexp finalize (lib : library) : unit = Dl.dlclose ~handle:lib.lib in
@@ -425,40 +425,50 @@ struct
               ^^ string op_suffix))
 
   let unop_syntax prec op v =
-    match prec with
-    | Ops.Bfloat16_prec _ ->
-        (* For BFloat16, perform operations in float precision *)
-        let open PPrint in
-        let float_v = string "bfloat16_to_single(" ^^ v ^^ string ")" in
-        let op_prefix, op_suffix = Ops.unop_c_syntax Ops.single op in
-        let float_result = group (string op_prefix ^^ float_v ^^ string op_suffix) in
-        string "single_to_bfloat16(" ^^ float_result ^^ string ")"
-    | Ops.Fp8_prec _ ->
-        (* For FP8, perform operations in float precision *)
-        let open PPrint in
-        let float_v = string "fp8_to_single(" ^^ v ^^ string ")" in
-        let op_prefix, op_suffix = Ops.unop_c_syntax Ops.single op in
-        let float_result = group (string op_prefix ^^ float_v ^^ string op_suffix) in
-        string "single_to_fp8(" ^^ float_result ^^ string ")"
-    | Ops.Half_prec _ ->
-        (* For Half, perform operations in float precision on non-native systems *)
-        let open PPrint in
-        let float_v = string "HALF_TO_FP(" ^^ v ^^ string ")" in
-        let op_prefix, op_suffix = Ops.unop_c_syntax Ops.single op in
-        let float_result = group (string op_prefix ^^ float_v ^^ string op_suffix) in
-        string "FP_TO_HALF(" ^^ float_result ^^ string ")"
-    | _ ->
+    match op with
+    | Ops.Uint4x32_to_prec_uniform1 ->
+        (* Heterogeneous op: the argument is uint4x32 whatever the result precision, so the
+           per-precision float-bridging below must not wrap it (e.g. [fp8_to_single] on a uint4x32_t
+           would not even compile); the builtin already returns the result precision's storage
+           type. *)
         let op_prefix, op_suffix = Ops.unop_c_syntax prec op in
         let open PPrint in
         group (string op_prefix ^^ v ^^ string op_suffix)
+    | _ -> (
+        match prec with
+        | Ops.Bfloat16_prec _ ->
+            (* For BFloat16, perform operations in float precision *)
+            let open PPrint in
+            let float_v = string "bfloat16_to_single(" ^^ v ^^ string ")" in
+            let op_prefix, op_suffix = Ops.unop_c_syntax Ops.single op in
+            let float_result = group (string op_prefix ^^ float_v ^^ string op_suffix) in
+            string "single_to_bfloat16(" ^^ float_result ^^ string ")"
+        | Ops.Fp8_prec _ ->
+            (* For FP8, perform operations in float precision *)
+            let open PPrint in
+            let float_v = string "fp8_to_single(" ^^ v ^^ string ")" in
+            let op_prefix, op_suffix = Ops.unop_c_syntax Ops.single op in
+            let float_result = group (string op_prefix ^^ float_v ^^ string op_suffix) in
+            string "single_to_fp8(" ^^ float_result ^^ string ")"
+        | Ops.Half_prec _ ->
+            (* For Half, perform operations in float precision on non-native systems *)
+            let open PPrint in
+            let float_v = string "HALF_TO_FP(" ^^ v ^^ string ")" in
+            let op_prefix, op_suffix = Ops.unop_c_syntax Ops.single op in
+            let float_result = group (string op_prefix ^^ float_v ^^ string op_suffix) in
+            string "FP_TO_HALF(" ^^ float_result ^^ string ")"
+        | _ ->
+            let op_prefix, op_suffix = Ops.unop_c_syntax prec op in
+            let open PPrint in
+            group (string op_prefix ^^ v ^^ string op_suffix))
 end
 
 (* Under [output_debug_files_in_build_directory] the generated source lives at the predictable
    shared path [build_files/<name>.c], which a concurrently running process compiling a same-named
    kernel can rewrite while our C compiler reads it — macOS CI hit this as an "extraneous closing
-   brace" in a torn sum_serial.c (two tests, one base name). Compile from a private unique copy;
-   the [build_files/] copy stays purely informational. Without debug files, [open_build_file]
-   already returned a unique temp path — use it directly. *)
+   brace" in a torn sum_serial.c (two tests, one base name). Compile from a private unique copy; the
+   [build_files/] copy stays purely informational. Without debug files, [open_build_file] already
+   returned a unique temp path — use it directly. *)
 let compilation_copy ~name (build_file : Utils.build_file_channel) filtered_code =
   if Utils.settings.output_debug_files_in_build_directory then (
     let tmp = Stdlib.Filename.temp_file (name ^ "_") ".c" in
@@ -484,7 +494,9 @@ let%diagn_sexp compile ~(name : string) bindings (lowered : Low_level.optimized)
   Out_channel.output_string build_file.oc filtered_code;
   build_file.finalize ();
 
-  let result_library = c_compile_and_load ~f_path:(compilation_copy ~name build_file filtered_code) in
+  let result_library =
+    c_compile_and_load ~f_path:(compilation_copy ~name build_file filtered_code)
+  in
   { result = result_library; kparams; bindings; name }
 
 let%diagn_sexp compile_batch ~names bindings (lowereds : Low_level.optimized option array) :
@@ -529,11 +541,9 @@ let%track3_sexp link_compiled ?lowered_bindings ~merge_buffer ~resolve ~runner_l
   let name : string = code.name in
   let log_file_name = Utils.diagn_log_file [%string "debug-%{runner_label}-%{code.name}.log"] in
   (* When [lowered_bindings] is given (batch linking, e.g. fissioned segments of one routine), the
-     static-index refs are shared: looked up by the [Static_idx] param's symbol rather than
-     freshly minted, so one bindings assoc drives every procedure of the batch. *)
-  let idx_ref s =
-    match lowered_bindings with Some lb -> Indexing.find_exn lb s | None -> ref 0
-  in
+     static-index refs are shared: looked up by the [Static_idx] param's symbol rather than freshly
+     minted, so one bindings assoc drives every procedure of the batch. *)
+  let idx_ref s = match lowered_bindings with Some lb -> Indexing.find_exn lb s | None -> ref 0 in
   let run_variadic =
     [%log_level
       0;

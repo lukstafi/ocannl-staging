@@ -661,11 +661,20 @@ uint8_t single_to_fp8(float f)
     return (sign << 7) | mant_bits;
   }
 
-  /* Normalized numbers: convert mantissa from [0.5, 1) to [0, 0.75] */
-  mant_f = (mant_f - 0.5f) * 4.0f;
+  /* Normalized numbers: frexp mantissa is in [0.5, 1); map it to the 2-bit fraction in
+     [0, 4) (value = (1 + mant/4) * 2^(exp-15), so mant = (mant_f * 2 - 1) * 4). */
+  mant_f = (mant_f - 0.5f) * 8.0f;
   uint32_t mant_bits = (uint32_t)(mant_f + 0.5f); /* Round to nearest */
   if (mant_bits > 3)
-    mant_bits = 3;
+  {
+    /* Mantissa rounded up past the top: carry into the exponent. */
+    mant_bits = 0;
+    exp++;
+    if (exp > 30)
+    {
+      return (sign << 7) | 0x7C; /* Overflow to infinity */
+    }
+  }
 
   return (uint8_t)((sign << 7) | ((exp & 0x1F) << 2) | (mant_bits & 0x3));
 }
@@ -969,7 +978,9 @@ uint16x8_t uint4x32_to_bfloat16_uniform_vec(uint4x32_t x) {
       [ "uint4x32_t"; "uint16x8_t" ] );
     ( "uint4x32_to_fp8_uniform_vec",
       {|
-/* Convert uint4x32 to 16 fp8s uniform */
+/* Convert uint4x32 to 16 fp8s uniform (raw bit patterns). Returns int8x16_t to match
+   [Ops.c_vec_typ_of_prec], which maps both byte and fp8 to int8x16_t; the casts preserve
+   the bit patterns. */
 int8x16_t uint4x32_to_fp8_uniform_vec(uint4x32_t x) {
     int8x16_t result;
     for (int i = 0; i < 4; i++) {
