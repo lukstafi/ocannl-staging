@@ -965,18 +965,18 @@ uint16x8_t uint4x32_to_bfloat16_uniform_vec(uint4x32_t x) {
     ( "uint4x32_to_fp8_uniform_vec",
       {|
 /* Convert uint4x32 to 16 fp8s uniform */
-uint8x16_t uint4x32_to_fp8_uniform_vec(uint4x32_t x) {
-    uint8x16_t result;
+int8x16_t uint4x32_to_fp8_uniform_vec(uint4x32_t x) {
+    int8x16_t result;
     for (int i = 0; i < 4; i++) {
-        result.v[i*4 + 0] = (uint8_t)(x.v[i] & 0xFF);
-        result.v[i*4 + 1] = (uint8_t)((x.v[i] >> 8) & 0xFF);
-        result.v[i*4 + 2] = (uint8_t)((x.v[i] >> 16) & 0xFF);
-        result.v[i*4 + 3] = (uint8_t)((x.v[i] >> 24) & 0xFF);
+        result.v[i*4 + 0] = (int8_t)(x.v[i] & 0xFF);
+        result.v[i*4 + 1] = (int8_t)((x.v[i] >> 8) & 0xFF);
+        result.v[i*4 + 2] = (int8_t)((x.v[i] >> 16) & 0xFF);
+        result.v[i*4 + 3] = (int8_t)((x.v[i] >> 24) & 0xFF);
     }
     return result;
 }
 |},
-      [ "uint4x32_t"; "uint8x16_t" ] );
+      [ "uint4x32_t"; "int8x16_t" ] );
   ]
 
 let source = includes ^ String.concat "" (List.map (fun (_, def, _) -> def) builtins)

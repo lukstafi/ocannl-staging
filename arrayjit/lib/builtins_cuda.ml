@@ -25,6 +25,10 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
     ("int8x16_t", {|typedef struct { signed char v[16]; } int8x16_t;|}, []);
     ("uint16x8_t", {|typedef struct { unsigned short v[8]; } uint16x8_t;|}, []);
     ("uint8x16_t", {|typedef struct { unsigned char v[16]; } uint8x16_t;|}, []);
+    (* Elements are the class type [__nv_fp8_e5m2] (not a plain integer): the [Set_from_vec]
+       emission assigns vector elements to the fp8 array cells without a cast, and
+       [__nv_fp8_e5m2] has no assignment from integer types. *)
+    ("fp8x16_t", {|typedef struct { __nv_fp8_e5m2 v[16]; } fp8x16_t;|}, []);
     ("half8_t", {|typedef struct { __half v[8]; } half8_t;|}, []);
     ( "uint32_to_single_uniform",
       {|__device__ __forceinline__ float uint32_to_single_uniform(unsigned int x) {
@@ -110,9 +114,11 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
 }|},
       [ "uint4x32_t"; "uint32_to_single_uniform" ] );
     ( "uint4x32_to_fp8_uniform",
-      {|__device__ unsigned char uint4x32_to_fp8_uniform(uint4x32_t x) {
-  /* FP8 E5M2 format conversion from uniform random bits */
-  return (unsigned char)(x.v[0] & 0xFF);
+      {|__device__ __nv_fp8_e5m2 uint4x32_to_fp8_uniform(uint4x32_t x) {
+  /* Reinterpret uniform random bits as an FP8 E5M2 bit pattern (matching builtins.c) */
+  __nv_fp8_e5m2 result;
+  result.__x = (__nv_fp8_storage_t)(x.v[0] & 0xFF);
+  return result;
 }|},
       [ "uint4x32_t" ] );
     ( "uint4x32_to_half_uniform",
@@ -221,6 +227,39 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
   return result;
 }|},
       [ "uint4x32_t"; "uint8x16_t" ] );
+    (* The [Uint4x32_to_prec_uniform] emission names helpers by [Ops.prec_string]
+       ("uint4x32_to_int64_uniform_vec", ...), while the workhorse definitions above use short
+       names; provide the emitted names as wrappers (mirroring builtins_hip.ml). Return types
+       match [vec_typ_of_prec]. *)
+    ( "uint4x32_to_int64_uniform_vec",
+      {|__device__ int64x2_t uint4x32_to_int64_uniform_vec(uint4x32_t x) {
+  return uint4x32_to_i64_uniform_vec(x);
+}|},
+      [ "uint4x32_t"; "int64x2_t"; "uint4x32_to_i64_uniform_vec" ] );
+    ( "uint4x32_to_uint16_uniform_vec",
+      {|__device__ uint16x8_t uint4x32_to_uint16_uniform_vec(uint4x32_t x) {
+  return uint4x32_to_u16_uniform_vec(x);
+}|},
+      [ "uint4x32_t"; "uint16x8_t"; "uint4x32_to_u16_uniform_vec" ] );
+    ( "uint4x32_to_byte_uniform_vec",
+      {|__device__ int8x16_t uint4x32_to_byte_uniform_vec(uint4x32_t x) {
+  return uint4x32_to_i8_uniform_vec(x);
+}|},
+      [ "uint4x32_t"; "int8x16_t"; "uint4x32_to_i8_uniform_vec" ] );
+    ( "uint4x32_to_fp8_uniform_vec",
+      {|__device__ fp8x16_t uint4x32_to_fp8_uniform_vec(uint4x32_t x) {
+  /* Reinterpret uniform random bits as FP8 E5M2 bit patterns (matching builtins.c) */
+  fp8x16_t result;
+  #pragma unroll
+  for (int i = 0; i < 4; i++) {
+    result.v[i*4 + 0].__x = (__nv_fp8_storage_t)(x.v[i] & 0xFF);
+    result.v[i*4 + 1].__x = (__nv_fp8_storage_t)((x.v[i] >> 8) & 0xFF);
+    result.v[i*4 + 2].__x = (__nv_fp8_storage_t)((x.v[i] >> 16) & 0xFF);
+    result.v[i*4 + 3].__x = (__nv_fp8_storage_t)((x.v[i] >> 24) & 0xFF);
+  }
+  return result;
+}|},
+      [ "uint4x32_t"; "fp8x16_t" ] );
     ( "single_to_uint4x32",
       {|__device__ uint4x32_t single_to_uint4x32(float x) {
   unsigned int bits = __float_as_uint(x);
