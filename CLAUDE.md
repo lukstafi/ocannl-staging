@@ -38,6 +38,8 @@ opam install cudajit  # for CUDA backend
 opam install hipjit   # for AMD HIP backend
 ```
 
+**Working from a Claude Code worktree**: worktrees under `.claude/worktrees/` are nested inside the parent repo, so dune resolves the PARENT checkout as the project root — pass `--root .` to every dune command run from a worktree. `dune promote` rejects `--root`; run `dune promotion apply` from the worktree root instead.
+
 ## Architecture Overview
 
 ### Core Directory Structure
@@ -113,6 +115,7 @@ opam install hipjit   # for AMD HIP backend
 - **Inline tests**: Files included in library `modules` field with `inline_tests` stanza (e.g., `test_threefry4x32.ml` in `operations_tutorials` library)
 - **Standalone tests**: Files with dedicated `test` stanza and corresponding `.expected` files (e.g., `threefry4x32_demo`)
 - Use `dune promote` to accept test output changes
+- Backend codegen snapshots (e.g. `.cu.expected` files, `test_cuda_pool_offset.expected`) go stale when codegen changes land without that backend's hardware available to re-record them — expect to re-promote such snapshots when the hardware next runs the suite
 - **Test Placement Guidelines**:
   * Always add tests under one of the test subdirectories
   * Default location is `test/operations`
@@ -120,6 +123,12 @@ opam install hipjit   # for AMD HIP backend
   * Use `test/training` for tests involving training loops
   * When adding a test, update the corresponding test stanza
   * For standalone tests, add an `.expected` file for test results (can initially be empty)
+  * Tests that enable `output_debug_files_in_build_directory` in one directory all execute from the same `_build` directory and share `build_files/`, and dune runs them concurrently — always give kernels/tensors a test-unique name prefix (like the existing `af_`, `ops_`, `smem_` conventions), otherwise same-named generated sources get torn by concurrent writers
+
+**Windows portability for `.expected` tests**:
+- `dune promote` on Windows writes CRLF line endings into `.expected` files (the test exe's stdout is text-mode); after promoting, normalize with `sed -i 's/\r$//' <file>`. PowerShell `Set-Content`/`Out-File` also write CRLF — edit `.expected` files with bash tools instead
+- The Windows C runtime prints 3-digit float exponents (`e+018` where Linux prints `e+18`) — format floats destined for `.expected` files with `Ir.Ndarray.concise_float ~prec` (normalizes exponents portably) instead of `%g`/`%e`
+- The Windows C runtime rounds representable decimal ties away from zero while glibc rounds to even (`%.1f` of `2.25` prints `2.3` on Windows, `2.2` on Linux) — avoid tie values in test data, or print with OCaml's `%h` hex-float format, which sidesteps decimal rounding entirely
 
 **Module Paths and Common APIs**:
 
