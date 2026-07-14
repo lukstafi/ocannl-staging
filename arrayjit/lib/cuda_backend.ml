@@ -492,8 +492,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Ops.Int32_prec _, 4 -> "int32x4_t"
       | Ops.Int64_prec _, 2 -> "int64x2_t"
       | Ops.Byte_prec _, 16 -> "int8x16_t"
-      (* [Set_from_vec] assigns lanes to array cells ([dst[i] = vec.v[i]]), and __nv_fp8_e5m2 has no
-         implicit constructors, so fp8 lanes must already have the fp8 type. *)
+      (* Fp8 needs [__nv_fp8_e5m2] elements: [Set_from_vec] assigns them to the fp8 array cells
+         without a cast, and [__nv_fp8_e5m2] has no assignment from integer types. *)
       | Ops.Fp8_prec _, 16 -> "fp8x16_t"
       | (Ops.Uint16_prec _ | Ops.Bfloat16_prec _), 8 -> "uint16x8_t"
       | Ops.Half_prec _, 8 -> "half8_t"

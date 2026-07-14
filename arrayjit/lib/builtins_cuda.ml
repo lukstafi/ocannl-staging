@@ -25,8 +25,12 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
     ("int8x16_t", {|typedef struct { signed char v[16]; } int8x16_t;|}, []);
     ("uint16x8_t", {|typedef struct { unsigned short v[8]; } uint16x8_t;|}, []);
     ("uint8x16_t", {|typedef struct { unsigned char v[16]; } uint8x16_t;|}, []);
-    ("half8_t", {|typedef struct { __half v[8]; } half8_t;|}, []);
+    (* Elements are the class type [__nv_fp8_e5m2] (not a plain integer): the [Set_from_vec]
+       emission assigns vector elements to the fp8 array cells without a cast, and
+       [__nv_fp8_e5m2] has no assignment from integer types. The 16-byte alignment supports the
+       [Vectorized] packed [reinterpret_cast] loads/stores, like float4_t above. *)
     ("fp8x16_t", {|typedef struct __align__(16) { __nv_fp8_e5m2 v[16]; } fp8x16_t;|}, []);
+    ("half8_t", {|typedef struct { __half v[8]; } half8_t;|}, []);
     ( "uint32_to_single_uniform",
       {|__device__ __forceinline__ float uint32_to_single_uniform(unsigned int x) {
   /* Use __uint2float_rn for correct rounding */
@@ -44,9 +48,14 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
 }|},
       [ "uint4x32_t"; "uint32_to_single_uniform" ] );
     ( "uint4x32_to_double_uniform",
+      (* Combine the lanes as an integer and convert NUMERICALLY before scaling (mirroring
+         builtins.c); bit-casting the lanes to a double (via [__longlong_as_double]) would yield
+         NaN/Inf/huge values instead of [0, 1). Only the top 53 bits are used so the conversion is
+         exact and the result stays below 1.0 (all 64 bits could round up to 2^64, yielding
+         exactly 1.0). *)
       {|__device__ double uint4x32_to_double_uniform(uint4x32_t x) {
-  unsigned long long combined = __double_as_longlong(__hiloint2double(x.v[1], x.v[0]));
-  return __longlong_as_double(combined) * (1.0 / 18446744073709551616.0);
+  unsigned long long combined = ((unsigned long long)x.v[1] << 32) | x.v[0];
+  return (double)(combined >> 11) * (1.0 / 9007199254740992.0);
 }|},
       [ "uint4x32_t" ] );
     ( "uint4x32_to_int32_uniform",
@@ -137,10 +146,12 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
 }|},
       [ "uint4x32_t"; "float4_t"; "uint32_to_single_uniform" ] );
     ( "uint4x32_to_double_uniform_vec",
+      (* Numeric top-53-bits integer-to-double conversion, like the scalar variant (see the note
+         there). *)
       {|__device__ double2_t uint4x32_to_double_uniform_vec(uint4x32_t x) {
   double2_t result;
-  result.v[0] = __longlong_as_double(__double_as_longlong(__hiloint2double(x.v[1], x.v[0]))) * (1.0 / 18446744073709551616.0);
-  result.v[1] = __longlong_as_double(__double_as_longlong(__hiloint2double(x.v[3], x.v[2]))) * (1.0 / 18446744073709551616.0);
+  result.v[0] = (double)((((unsigned long long)x.v[1] << 32) | x.v[0]) >> 11) * (1.0 / 9007199254740992.0);
+  result.v[1] = (double)((((unsigned long long)x.v[3] << 32) | x.v[2]) >> 11) * (1.0 / 9007199254740992.0);
   return result;
 }|},
       [ "uint4x32_t"; "double2_t" ] );
@@ -213,6 +224,26 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
   return result;
 }|},
       [ "uint4x32_t"; "half8_t" ] );
+    (* The [Uint4x32_to_prec_uniform] emission names helpers by [Ops.prec_string]
+       ("uint4x32_to_int64_uniform_vec", ...), while the workhorse definitions above use short
+       names; provide the emitted names as wrappers (mirroring builtins.c, which defines the long
+       names directly). Return types match [vec_typ_of_prec]; fp8's wrapper is defined further
+       below with the fp8-typed pack. *)
+    ( "uint4x32_to_int64_uniform_vec",
+      {|__device__ int64x2_t uint4x32_to_int64_uniform_vec(uint4x32_t x) {
+  return uint4x32_to_i64_uniform_vec(x);
+}|},
+      [ "uint4x32_t"; "int64x2_t"; "uint4x32_to_i64_uniform_vec" ] );
+    ( "uint4x32_to_uint16_uniform_vec",
+      {|__device__ uint16x8_t uint4x32_to_uint16_uniform_vec(uint4x32_t x) {
+  return uint4x32_to_u16_uniform_vec(x);
+}|},
+      [ "uint4x32_t"; "uint16x8_t"; "uint4x32_to_u16_uniform_vec" ] );
+    ( "uint4x32_to_byte_uniform_vec",
+      {|__device__ int8x16_t uint4x32_to_byte_uniform_vec(uint4x32_t x) {
+  return uint4x32_to_i8_uniform_vec(x);
+}|},
+      [ "uint4x32_t"; "int8x16_t"; "uint4x32_to_i8_uniform_vec" ] );
     ( "uint4x32_to_u8_uniform_vec",
       {|__device__ uint8x16_t uint4x32_to_u8_uniform_vec(uint4x32_t x) {
   uint8x16_t result;

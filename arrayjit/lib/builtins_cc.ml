@@ -16,7 +16,10 @@ let includes =
 #endif
 #ifdef __ARM_NEON
   #define OCANNL_HAS_NEON 1
-  #include <arm_neon.h>
+  /* Do NOT include <arm_neon.h> here: it defines int8x16_t, int64x2_t, uint16x8_t, etc. as
+     native vector types, colliding with the pack-struct typedefs emitted by the builtins below
+     (e.g. the uint4x32_to_*_uniform_vec result types). Nothing emits NEON intrinsics yet; when
+     that changes, the emitter must rename the pack types or include the header per-kernel. */
 #else
   #define OCANNL_HAS_NEON 0
 #endif
@@ -791,10 +794,11 @@ uint4x32_t fp8_to_uint4x32(uint8_t x) {
     (* More uint4x32 to various precision conversion functions *)
     ( "uint4x32_to_double_uniform",
       {|
-/* Uint4x32 to float64 uniform - uses first 64 bits */
+/* Uint4x32 to float64 uniform - top 53 of the first 64 bits, so the int-to-double conversion
+   is exact and the result stays below 1.0 (all 64 bits could round up to 2^64, yielding 1.0) */
 double uint4x32_to_double_uniform(uint4x32_t x) {
     uint64_t combined = ((uint64_t)x.v[1] << 32) | x.v[0];
-    return combined * (1.0 / 18446744073709551616.0);
+    return (combined >> 11) * (1.0 / 9007199254740992.0);
 }
 |},
       [ "uint4x32_t" ] );
@@ -884,13 +888,14 @@ float4_t uint4x32_to_single_uniform_vec(uint4x32_t x) {
       [ "uint4x32_t"; "float4_t"; "uint32_to_single_uniform" ] );
     ( "uint4x32_to_double_uniform_vec",
       {|
-/* Convert uint4x32 to 2 doubles in [0, 1) */
+/* Convert uint4x32 to 2 doubles in [0, 1) - top 53 bits per lane pair, see
+   uint4x32_to_double_uniform */
 double2_t uint4x32_to_double_uniform_vec(uint4x32_t x) {
     double2_t result;
     uint64_t combined1 = ((uint64_t)x.v[1] << 32) | x.v[0];
     uint64_t combined2 = ((uint64_t)x.v[3] << 32) | x.v[2];
-    result.v[0] = combined1 * (1.0 / 18446744073709551616.0);
-    result.v[1] = combined2 * (1.0 / 18446744073709551616.0);
+    result.v[0] = (combined1 >> 11) * (1.0 / 9007199254740992.0);
+    result.v[1] = (combined2 >> 11) * (1.0 / 9007199254740992.0);
     return result;
 }
 |},

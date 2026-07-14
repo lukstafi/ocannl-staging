@@ -357,10 +357,11 @@ float uint4x32_to_single_uniform(uint4x32_t x) {
     return uint32_to_single_uniform(x.v[0]);
 }
 
-/* Uint4x32 to float64 uniform - uses first 64 bits */
+/* Uint4x32 to float64 uniform - top 53 of the first 64 bits, so the int-to-double conversion
+   is exact and the result stays below 1.0 (all 64 bits could round up to 2^64, yielding 1.0) */
 double uint4x32_to_double_uniform(uint4x32_t x) {
     uint64_t combined = ((uint64_t)x.v[1] << 32) | x.v[0];
-    return combined * (1.0 / 18446744073709551616.0);
+    return (combined >> 11) * (1.0 / 9007199254740992.0);
 }
 
 /* Uint4x32 to int32 uniform - full range */
@@ -428,13 +429,14 @@ float4_t uint4x32_to_single_uniform_vec(uint4x32_t x) {
     return result;
 }
 
-/* Convert uint4x32 to 2 doubles in [0, 1) */
+/* Convert uint4x32 to 2 doubles in [0, 1) - top 53 bits per lane pair, see
+   uint4x32_to_double_uniform */
 double2_t uint4x32_to_double_uniform_vec(uint4x32_t x) {
     double2_t result;
     uint64_t combined1 = ((uint64_t)x.v[1] << 32) | x.v[0];
     uint64_t combined2 = ((uint64_t)x.v[3] << 32) | x.v[2];
-    result.v[0] = combined1 * (1.0 / 18446744073709551616.0);
-    result.v[1] = combined2 * (1.0 / 18446744073709551616.0);
+    result.v[0] = (combined1 >> 11) * (1.0 / 9007199254740992.0);
+    result.v[1] = (combined2 >> 11) * (1.0 / 9007199254740992.0);
     return result;
 }
 
@@ -516,13 +518,13 @@ half8_t uint4x32_to_half_uniform_vec(uint4x32_t x) {
 }
 
 /* Convert uint4x32 to 16 fp8s uniform */
-uint8x16_t uint4x32_to_fp8_uniform_vec(uint4x32_t x) {
-    uint8x16_t result;
+int8x16_t uint4x32_to_fp8_uniform_vec(uint4x32_t x) {
+    int8x16_t result;
     for (int i = 0; i < 4; i++) {
-        result.v[i*4 + 0] = (uint8_t)(x.v[i] & 0xFF);
-        result.v[i*4 + 1] = (uint8_t)((x.v[i] >> 8) & 0xFF);
-        result.v[i*4 + 2] = (uint8_t)((x.v[i] >> 16) & 0xFF);
-        result.v[i*4 + 3] = (uint8_t)((x.v[i] >> 24) & 0xFF);
+        result.v[i*4 + 0] = (int8_t)(x.v[i] & 0xFF);
+        result.v[i*4 + 1] = (int8_t)((x.v[i] >> 8) & 0xFF);
+        result.v[i*4 + 2] = (int8_t)((x.v[i] >> 16) & 0xFF);
+        result.v[i*4 + 3] = (int8_t)((x.v[i] >> 24) & 0xFF);
     }
     return result;
 }
