@@ -38,11 +38,11 @@ REFERENCE = ("pytorch", "cpu", "eager")
 GPU_DEVICES = {
     "metal": ("metal", "mps", "METAL"),
     "cuda": ("cuda", "cuda", "CUDA"),
-    # OCANNL's hip backend (AMD ROCm/HIP). On Linux ROCm, PyTorch exposes HIP as its "cuda"
-    # device and tinygrad has AMD; on Windows neither framework supports the GPU, so their
-    # columns fall back to CPU-only (the parity reference still runs).
-    "hip": ("hip", "cuda" if platform.system() == "Linux" else None,
-            "AMD" if platform.system() == "Linux" else None),
+    # OCANNL's hip backend (AMD ROCm/HIP). PyTorch exposes HIP as its "cuda" device — on
+    # Linux ROCm and, since ROCm 7.2, on Windows via AMD's official wheels (main() probes
+    # torch.version.hip and drops the column when the venv's torch is not a HIP build).
+    # tinygrad uses AMD on Linux ROCm and its OpenCL device (CL) on Windows.
+    "hip": ("hip", "cuda", "AMD" if platform.system() == "Linux" else "CL"),
     "none": (None, None, None),
 }
 
@@ -192,6 +192,17 @@ def main():
     )
     args = ap.parse_args()
     gpu_ocannl, gpu_torch, gpu_tiny = GPU_DEVICES[args.gpu]
+    if args.gpu == "hip" and gpu_torch and "pytorch" in args.only:
+        # "cuda" only reaches the AMD GPU when torch is a ROCm/HIP build (a stock CPU or
+        # CUDA wheel isn't); probe the bench venv and fall back to the CPU-only column.
+        probe = subprocess.run(
+            [str(VENV_PY), "-c", "import sys, torch; sys.exit(0 if torch.version.hip else 1)"],
+            capture_output=True,
+        )
+        if probe.returncode != 0:
+            print("torch in the bench venv is not a ROCm/HIP build; "
+                  "skipping the PyTorch GPU column", flush=True)
+            gpu_torch = None
 
     fixtures = sorted((HERE / "fixtures").glob("*.safetensors"))
     if args.workloads:
