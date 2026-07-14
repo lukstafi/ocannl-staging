@@ -237,9 +237,11 @@ def main():
     sync()
     queued = (time.perf_counter() - t0) / timed_steps * 1e3
 
+    # ROCm builds alias HIP onto torch's "cuda" device; label the report row honestly.
+    backend = "cuda(hip)" if args.device == "cuda" and torch.version.hip else args.device
     result = {
         "framework": "pytorch",
-        "backend": args.device,
+        "backend": backend,
         "variant": "compiled" if args.compile else "eager",
         "workload": meta["name"],
         "compile_s": round(compile_s, 3),
