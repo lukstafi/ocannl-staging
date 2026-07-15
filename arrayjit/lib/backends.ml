@@ -553,7 +553,16 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
           in
           (* Keep the whole-routine (pre-fission) lowered code: context allocation and I/O
              analysis need the union footprint, and each segment's [optimized] carries only its
-             filtered slice of the traced store. *)
+             filtered slice of the traced store. Schedule ops applied per segment can CREATE
+             tnodes the pre-fission store has never seen — a hoisted [Stage] registers its
+             packed-constant tile in the segment's filtered store (its placement lands in the
+             shared lineage fork, but [allocate_delta] enumerates the traced store) — so fold
+             segment-added entries back in. Pre-existing keys are shared mutable records
+             (filtered slices alias them), so only genuinely new keys need copying. *)
+          List.iter segments ~f:(fun seg ->
+              Hashtbl.iteri seg.Low_level.traced_store ~f:(fun ~key ~data ->
+                  if not (Hashtbl.mem lowered.Low_level.traced_store key) then
+                    Hashtbl.add_exn lowered.Low_level.traced_store ~key ~data));
           (Either.Second { batch; count = List.length segments }, lowered)
     in
     (* Placements of all context nodes are settled by codegen (the [compile] just above), so this

@@ -14,4 +14,7 @@ tensorized (mma) sketch instantiations seeded: true
 tuned matmul matches the serial twin: true
 matmul tune searches then hits the cache: true
 matmul cache-hit values match the serial twin: true
+per-segment sketch candidates seeded: true
+per-segment sketch candidates timed: true
+tuned fissioned matmul matches the serial twin: true
 timing_ctx on a different backend rejected: true

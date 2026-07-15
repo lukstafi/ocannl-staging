@@ -278,6 +278,56 @@ than rewritten into the sections above.
   `mma.h`, wmma's 256-bit pointer-alignment requirement for `__shared__` tiles (device pools are
   alignment-safe), and the exact stride-multiple rules per element type.
 
+## T3 connection fixes + the fp8 inline-PTX path (2026-07-15)
+
+Prompted by the RTX 5070 (sm_120 Blackwell GeForce, driver CUDA 13.0) machine. Two classes of
+change, both in `cuda_backend.ml`:
+
+- **The arch-flag disconnect.** CUDA 13 removed offline compilation below `compute_75` (Maxwell
+  through Volta), so nvrtc 13 rejects the draft's `--gpu-architecture=compute_70` (f16 wmma) and
+  `compute_53` (scalar half arithmetic) outright — on a CUDA-13 toolchain every half-precision
+  kernel failed to compile, tensor cores or not. Fix: a triggered arch floor is raised to
+  `max(floor, min(75, min-device-CC))`, where `min_compute_capability` (formerly `..._major`) now
+  returns `major*10 + minor` minimized across devices. A device below sm_75 keeps the literal
+  floor (it must be paired with an nvrtc 12.x that still accepts it); everything newer compiles at
+  a CUDA-13-acceptable arch. We deliberately do *not* raise to the device arch: PTX targeted at a
+  floor arch is forward-JIT-compiled by the driver on every later GPU, whereas targeting e.g.
+  `compute_120` invalidates the plain sm_89 fp8 `mma.sync` encoding in favor of Blackwell's
+  family-specific `kind::f8f6f4` forms.
+- **fp8 tensor cores via inline PTX.** wmma has no fp8 element type, so `mma_syntax` gained a
+  second arm: fp8(e5m2) × fp8 → f32 emits `mma.sync.aligned.m16n8k32.row.col.f32.e5m2.e5m2.f32`
+  as inline asm with the architecture-defined per-lane fragment layouts (PTX ISA "Matrix
+  Fragments for mma.m16n8k32"; fp8 shares the `.s8`/`.u8` layouts) — per-lane byte gathers into
+  `.b32` registers, so there are no stride/alignment constraints and both `__shared__` tiles and
+  device pointers load through generic addresses. Gated on min device CC ≥ 89 (Ada) and extents
+  `m%16 = n%8 = k%32 = 0`; the `(mma-fp8)` source marker makes `cuda_to_ptx` target `compute_89`.
+  The `hardware_limits.mma` advisory tile stays at the wmma 16×16×16 (it is only the autotuner's
+  divisibility filter; a k-multiple-of-16-but-not-32 fp8 proposal declines at emission into the
+  fallback, which is always correct). Uniform-f32-via-tf32 remains parked on the numerics policy.
+- Exercised by a new fp8 leg of `schedule_mma_matmul` (e5m2-exact inputs, f32 accumulation —
+  parity bitwise on every backend and path), alongside the existing half leg.
+- **Verified on hardware (2026-07-15, RTX 5070 / sm_120, driver CUDA 13.0, toolkit 13.3)**: the
+  f16 leg emits `nvcuda::wmma` (PTX `.target sm_75`) and the fp8 leg the inline
+  `mma.sync...e5m2` (`.target sm_89`); both match their serial twins BITWISE, confirming the
+  per-lane m16n8k32 fragment layouts. Two traps uncovered by the run:
+  - The test schedule originally split rows by `bm = 8`, sized for Metal's 8×8×8 tile — every
+    CUDA emission declined on `m = 8` and silently took the (correct) scalar fallback, so
+    "parity passed" said nothing about tensor cores. `bm = 16` exercises the intrinsics on both
+    backends; when a GPU leg unexpectedly shows the `== 0)` lane guard, suspect a declined
+    emission, not a codegen bug.
+  - Toolkit-newer-than-driver skew (nvrtc 13.3 emits PTX ISA 9.3; a CUDA 13.0 driver rejects it
+    with `CUDA_ERROR_UNSUPPORTED_PTX_VERSION` for *every* kernel): handled in cudajit's
+    `Module.load_data_ex`, which retries with the PTX `.version` header downgraded in place.
+  The same session fixed cudajit for CUDA 13 on Windows/mingw (cuCtxCreate_v4 arity shim,
+  nvrtcCompileProgram constness shim, cuda.lib's MSVC-only /DEFAULTLIB directives satisfied by
+  empty archives + `_fltused`, and the `cmd /C .\` bat-invocation fix) — see the local
+  ocaml-cudajit checkout; the OCANNL `pin-depends` for cudajit should be bumped once those land
+  upstream.
+
+Possible follow-ups, in profile-completeness order: e4m3 if/when OCANNL grows the second fp8
+format; tf32 for uniform f32 behind a numerics-policy config; `ldmatrix`-based fragment loads
+from swizzled shared tiles and Blackwell's block-scaled `kind::mxf8f6f4` (the T4 ceiling chase).
+
 ## Lane-aware Stage (implemented 2026-07-07)
 
 Composes shared-memory staging with `Tensorize`, dissolving the deferral above:
@@ -346,9 +396,28 @@ mirrors the accumulation's grid geometry with an inner Workgroup loop of extent 
 covering the lane slot (barrier-strength uniformity). Verified on Metal: all five mma sketch
 candidates of the 32×32 site compile, validate, and time (`autotune_fission_sketch.ml`).
 
-Known gap: sketches remain whole-routine seeds — heavily fissioned graphs (gpt2, multi-layer
-MLPs) tune per segment, where only menu actions apply; a per-segment `F_sketch` flavor is the
-follow-up.
+### Per-fission-segment seeding (`F_sketch`, 2026-07-15)
+
+Whole-routine seeds alone would never reach heavily fissioned graphs (gpt2, multi-layer MLPs),
+which tune per segment — so the sketches are additionally seeded per fission segment. The
+`F_sketch` fissioned flavor carries `(pre-schedule segment digest, sketch params)` pairs (keyed
+like `F_saved`): at seed time the fission segmentation is enumerated once on a hermetic copy of
+the base lowering (same pipeline settings as the fissioned preset candidates), `detect_matmul`
+runs per `` `Normal `` segment, and each keyed segment gets its sketch pipeline while the rest
+keep the default preset — so the segmentation converges with the enumeration. Two consequences
+of fission shaped the implementation:
+
+- A segment's site is **unzeroed** — the whole-node `Zero_out` fissions into its own `` `Zeros ``
+  segment — so all sketch pipelines now make the zero-expansion geometry conditional on
+  `m_zeroed`. Sound without it: `Privatize` init-loads the accumulator tile from the
+  (pre-zeroed) target, and `Tile_mma` loads the accumulator fragment before the reduction.
+- Hoisted (constant-pool) `Stage` packing used to fail at link time under fission: the packed
+  tile registered only in the segment's *filtered* traced store, while context allocation
+  enumerates the routine-level (pre-fission) store. `Backends.compile` now folds
+  segment-created traced-store entries back into the routine-level store.
+
+Verified on cc (6 per-segment candidates: 2 packing + 2 hoisted + 2 tensorized) and Metal (9:
+4 blocktiling + 5 simdgroup) — all compile and time (`autotune_fission_sketch.ml`).
 
 ## Relations
 

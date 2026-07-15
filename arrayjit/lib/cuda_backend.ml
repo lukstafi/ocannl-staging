@@ -124,6 +124,24 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
   (* [devices] is mutable to support plugging in new devices. *)
   let devices = lazy (ref @@ Array.create ~len:(num_devices ()) None)
 
+  (* Minimum compute capability across devices as [major * 10 + minor] (e.g. 89 for sm_89, 120 for
+     sm_120), memoized behind [lazy] (driver init and device enumeration must not run at
+     backend-module initialization). Tensor cores (wmma) need sm_70+, bf16 wmma sm_80+, fp8 mma.sync
+     sm_89+ (docs/proposals/tensorize-mma.md T3). *)
+  let min_compute_capability =
+    let cc =
+      lazy
+        (let n = num_devices () in
+         if n = 0 then 0
+         else
+           Array.init n ~f:(fun ordinal ->
+               let a : Cu.Device.attributes = Cu.Device.get_attributes (Cu.Device.get ~ordinal) in
+               (a.compute_capability_major * 10) + a.compute_capability_minor)
+           |> Array.min_elt ~compare:Int.compare
+           |> Option.value ~default:0)
+    in
+    fun () -> Lazy.force cc
+
   let get_used_memory (device : device) =
     set_ctx device.dev.primary_context;
     let free, total = Cu.Device.get_free_and_total_mem () in
@@ -151,10 +169,11 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
         Option.iter Slab.free_pool ~f:(fun free -> free device ~pool_id))
 
   let%diagn2_sexp cuda_to_ptx ~name cu_src =
-    (* DRAFT (tensorize-mma T3): kernels containing wmma intrinsics need <mma.h> and an explicit
-       arch (nvrtc's default is below sm_70). Injected only when used, so kernels without tensor
-       cores compile exactly as before even where the toolkit headers are absent. The [(wmma-bf16)]
-       marker is emitted by [mma_syntax] for bf16 fragments (sm_80+). *)
+    (* Tensorize-mma T3: kernels containing wmma intrinsics need <mma.h> and an explicit arch
+       (nvrtc's default is below sm_70). Injected only when used, so kernels without tensor cores
+       compile exactly as before even where the toolkit headers are absent. The [(wmma-bf16)] marker
+       is emitted by [mma_syntax] for bf16 fragments (sm_80+); the [(mma-fp8)] marker for the
+       inline-PTX fp8 [mma.sync] path (sm_89+, no header needed). *)
     let uses_wmma = String.is_substring cu_src ~substring:"nvcuda::wmma" in
     let cu_src = if uses_wmma then "#include <mma.h>\n" ^ cu_src else cu_src in
     (* Half/bf16 ARITHMETIC intrinsics (unlike the conversions, which cuda_fp16.h/cuda_bf16.h
@@ -196,13 +215,25 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       List.filter_opt
         [
           (if uses_wmma then Some (if has "(wmma-bf16)" then 80 else 70) else None);
+          (if has "(mma-fp8)" then Some 89 else None);
           (if uses_h_arith then Some (if has "__nv_bfloat16" then 80 else 53) else None);
         ]
       |> List.max_elt ~compare:Int.compare
     in
     let arch_opts =
       match arch_floor with
-      | Some arch -> [ Printf.sprintf "--gpu-architecture=compute_%d" arch ]
+      | Some floor ->
+          (* CUDA 13 dropped offline compilation below compute_75 (Maxwell through Volta), so nvrtc
+             13 rejects the compute_53/compute_70 floors outright: raise a triggered floor to
+             compute_75 whenever every attached device can load such PTX (a device below sm_75 keeps
+             the literal floor — it must be paired with an nvrtc 12.x that still accepts it). We
+             deliberately do NOT raise all the way to the device arch (e.g. compute_120 on Blackwell
+             GeForce): PTX targeted at a floor arch is forward-JIT-compiled by the driver on every
+             later GPU, and instruction variants like the sm_89 fp8 [mma.sync] remain valid under a
+             compute_89 target where a compute_120 target would demand the family-specific [kind::]
+             forms. *)
+          let arch = max floor (min 75 (min_compute_capability ())) in
+          [ Printf.sprintf "--gpu-architecture=compute_%d" arch ]
       | None -> []
     in
     let name_cu = name ^ ".cu" in
@@ -387,23 +418,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
   }
   [@@deriving sexp_of]
 
-  (* Minimum compute capability (major) across devices, memoized behind [lazy] (driver init and
-     device enumeration must not run at backend-module initialization). Tensor cores (wmma) need
-     sm_70+, bf16 wmma sm_80+ (docs/proposals/tensorize-mma.md T3). *)
-  let min_compute_capability_major =
-    let cc =
-      lazy
-        (let n = num_devices () in
-         if n = 0 then 0
-         else
-           Array.init n ~f:(fun ordinal ->
-               let a : Cu.Device.attributes = Cu.Device.get_attributes (Cu.Device.get ~ordinal) in
-               a.compute_capability_major)
-           |> Array.min_elt ~compare:Int.compare
-           |> Option.value ~default:0)
-    in
-    fun () -> Lazy.force cc
-
   module Cuda_syntax_config (Input : sig
     val procs : Low_level.optimized array
   end) =
@@ -500,19 +514,28 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | _, 1 -> typ_of_prec prec
       | _ -> invalid_arg "Cuda_backend.vec_typ_of_prec: invalid combination"
 
-    (* DRAFT (tensorize-mma T3; unexercised locally -- no CUDA device, per the Metal-first backend
-       ordering; to be verified in CI): cooperative tile-MMA emission for [Low_level.Tile_mma] via
-       the CUDA wmma C++ API. The extent-32 lane loop binds threadIdx.x, so the 32 consecutive .x
-       threads reaching the statement form the cooperating warp; 16x16x16 fragment blocks are
-       resident across the whole [k] extent, mirroring the Metal emission. Supported combinations:
-       f16 x f16 -> f32 (the flagship), f16 x f16 -> f16, and bf16 x bf16 -> f32 (sm_80+; the
-       [(wmma-bf16)] marker makes [cuda_to_ptx] select the arch). Uniform f32 could target tf32
-       shapes on sm_80+, but tf32 truncates the mantissa to 10 bits -- left on the scalar path until
-       the numerics policy is decided. Declines (the barrier-bracketed lane-0 fallback renders
-       instead) on: other precision combinations, extents not multiples of 16, leading dimensions
-       violating wmma's stride constraint (a multiple of 8 elements for 16-bit types, 4 for f32),
-       thread-space operands (per-thread stacks are not a jointly-owned tile), and devices below
-       sm_70. *)
+    (* Tensorize-mma T3: cooperative tile-MMA emission for [Low_level.Tile_mma]. Two renderings:
+
+       - The CUDA wmma C++ API for the 16-bit combinations: f16 x f16 -> f32 (the flagship), f16 x
+       f16 -> f16, and bf16 x bf16 -> f32 (sm_80+; the [(wmma-bf16)] marker makes [cuda_to_ptx]
+       select the arch). 16x16x16 fragment blocks are resident across the whole [k] extent,
+       mirroring the Metal emission. - Inline-PTX
+       [mma.sync.aligned.m16n8k32.row.col.f32.e5m2.e5m2.f32] for fp8 x fp8 -> f32 (OCANNL's fp8 is
+       e5m2), which wmma cannot express. sm_89+ (Ada); the [(mma-fp8)] marker makes [cuda_to_ptx]
+       target compute_89, whose PTX the driver forward-JIT-compiles on newer GPUs (e.g. sm_120
+       Blackwell GeForce) — deliberately NOT the device arch, where the plain e5m2 encoding gives
+       way to the family-specific [kind::f8f6f4] forms.
+
+       The extent-32 lane loop binds threadIdx.x, so the 32 consecutive .x threads reaching the
+       statement form the cooperating warp. Transposed operand storage ([ta]/[tb]) loads wmma
+       fragments as [col_major] with swapped offset arithmetic; the fp8 path declines it in v1.
+       Uniform f32 could target tf32 shapes on sm_80+, but tf32 truncates the mantissa to 10 bits --
+       left on the scalar path until the numerics policy is decided. Declines (the barrier-bracketed
+       lane-0 fallback renders instead) on: other precision combinations, extents not multiples of
+       the intrinsic tile, leading dimensions violating wmma's stride constraint (a multiple of 8
+       elements for 16-bit types, 4 for f32; the fp8 path loads per-lane bytes and has no stride
+       constraint), thread-space operands (per-thread stacks are not a jointly-owned tile), and
+       devices below the arch floor. *)
     let mma_syntax =
       Some
         (fun ~d_prec
@@ -528,121 +551,229 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           ~b:(b_ptr, ldb, b_space)
         ->
           let tile = 16 in
-          (* (a/b fragment element type, ld multiple for a/b, ld multiple for d, min sm major, bf16
-             marker). Pointer declarations use [typ_of_prec] of the operand's own precision, which
-             coincides with the fragment element types below. *)
+          (* (a/b fragment element type, ld multiple for a/b, ld multiple for d, min compute
+             capability, bf16 marker). Pointer declarations use [typ_of_prec] of the operand's own
+             precision, which coincides with the fragment element types below. *)
           let combo =
             match (a_prec, b_prec, d_prec) with
             | Ops.Half_prec _, Ops.Half_prec _, Ops.Single_prec _ ->
-                Some ("__half", "float", 8, 4, 7, false)
+                Some ("__half", "float", 8, 4, 70, false)
             | Ops.Half_prec _, Ops.Half_prec _, Ops.Half_prec _ ->
-                Some ("__half", "__half", 8, 8, 7, false)
+                Some ("__half", "__half", 8, 8, 70, false)
             | Ops.Bfloat16_prec _, Ops.Bfloat16_prec _, Ops.Single_prec _ ->
-                Some ("__nv_bfloat16", "float", 8, 4, 8, true)
+                Some ("__nv_bfloat16", "float", 8, 4, 80, true)
             | _ -> None
           in
           let loadable = function
             | `Device | `Shared -> true (* generic-address loads cover both *)
             | `Thread -> false
           in
-          match combo with
-          | Some (ab_typ, acc_typ, ab_ld_mult, d_ld_mult, min_major, is_bf16)
-            when m % tile = 0
-                 && n % tile = 0
-                 && k % tile = 0
-                 && lda % ab_ld_mult = 0
-                 && ldb % ab_ld_mult = 0
-                 && ldd % d_ld_mult = 0
-                 && loadable d_space && loadable a_space && loadable b_space
-                 && min_compute_capability_major () >= min_major ->
-              let open PPrint in
-              let mt = m / tile and nt = n / tile and kt = k / tile in
-              let frag kind typ layout =
-                Printf.sprintf "nvcuda::wmma::fragment<nvcuda::wmma::%s, %d, %d, %d, %s%s>" kind
-                  tile tile tile typ
-                  (match layout with Some l -> ", nvcuda::wmma::" ^ l | None -> "")
-              in
-              let ptr_decl name typ ptr =
-                string (Printf.sprintf "%s *%s = " typ name) ^^ ptr ^^ semi
-              in
-              let a_layout = if ta then "col_major" else "row_major" in
-              let b_layout = if tb then "col_major" else "row_major" in
-              let barrier = "__syncthreads();" in
-              let body_lines =
-                [
-                  barrier;
-                  Printf.sprintf "%s __mma_acc[%d][%d];" (frag "accumulator" acc_typ None) mt nt;
-                  Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
-                  Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                  Printf.sprintf
-                    "    nvcuda::wmma::load_matrix_sync(__mma_acc[__mi][__ni], __mma_dp + __mi * \
-                     %d * %d + __ni * %d, %d, nvcuda::wmma::mem_row_major);"
-                    tile ldd tile ldd;
-                  "  }";
-                  "}";
-                  Printf.sprintf "for (int __ki = 0; __ki < %d; ++__ki) {" kt;
-                  Printf.sprintf "  %s __mma_bf[%d];" (frag "matrix_b" ab_typ (Some b_layout)) nt;
-                  Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                  (* Transposed storage ([tb]): the stored matrix is the role's transpose — index
-                     it at (col, row) and declare the fragment [col_major]; the leading dimension
-                     stays the operand's own. Same for [ta] below. *)
-                  (if tb then
-                     Printf.sprintf
-                       "    nvcuda::wmma::load_matrix_sync(__mma_bf[__ni], __mma_bp + __ni * %d * \
-                        %d + __ki * %d, %d);"
-                       tile ldb tile ldb
-                   else
-                     Printf.sprintf
-                       "    nvcuda::wmma::load_matrix_sync(__mma_bf[__ni], __mma_bp + __ki * %d * \
-                        %d + __ni * %d, %d);"
-                       tile ldb tile ldb);
-                  "  }";
-                  Printf.sprintf "  for (int __mi = 0; __mi < %d; ++__mi) {" mt;
-                  Printf.sprintf "    %s __mma_af;" (frag "matrix_a" ab_typ (Some a_layout));
-                  (if ta then
-                     Printf.sprintf
-                       "    nvcuda::wmma::load_matrix_sync(__mma_af, __mma_ap + __ki * %d * %d + \
-                        __mi * %d, %d);"
-                       tile lda tile lda
-                   else
-                     Printf.sprintf
-                       "    nvcuda::wmma::load_matrix_sync(__mma_af, __mma_ap + __mi * %d * %d + \
-                        __ki * %d, %d);"
-                       tile lda tile lda);
-                  Printf.sprintf "    for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                  "      nvcuda::wmma::mma_sync(__mma_acc[__mi][__ni], __mma_af, __mma_bf[__ni], \
-                   __mma_acc[__mi][__ni]);";
-                  "    }";
-                  "  }";
-                  "}";
-                  Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
-                  Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                  Printf.sprintf
-                    "    nvcuda::wmma::store_matrix_sync(__mma_dp + __mi * %d * %d + __ni * %d, \
-                     __mma_acc[__mi][__ni], %d, nvcuda::wmma::mem_row_major);"
-                    tile ldd tile ldd;
-                  "  }";
-                  "}";
-                  barrier;
-                ]
-              in
-              let body =
-                ptr_decl "__mma_dp" (typ_of_prec d_prec) d_ptr
-                ^^ hardline
-                ^^ ptr_decl "__mma_ap" ("const " ^ typ_of_prec a_prec) a_ptr
-                ^^ hardline
-                ^^ ptr_decl "__mma_bp" ("const " ^ typ_of_prec b_prec) b_ptr
-                ^^ hardline
-                ^^ separate_map hardline string body_lines
-              in
-              Some
-                (group
-                   (string
-                      (Printf.sprintf "{ /* tile_mma %dx%dx%d (wmma%s) */" m n k
-                         (if is_bf16 then "-bf16" else ""))
-                   ^^ nest 2 (hardline ^^ body)
-                   ^^ hardline ^^ rbrace))
-          | _ -> None)
+          let is_fp8_combo =
+            match (a_prec, b_prec, d_prec) with
+            | Ops.Fp8_prec _, Ops.Fp8_prec _, Ops.Single_prec _ -> true
+            | _ -> false
+          in
+          if
+            is_fp8_combo
+            (* Transposed operand storage ([ta]/[tb]) is declined in v1: the per-lane byte gathers
+               below assume the roles' own layouts (A row-major, B row-major source gathered into
+               the col-major fragment); the scalar fallback keeps transposed fp8 correct. Swapping
+               the gather arithmetic per flag is the natural extension. *)
+            && (not ta)
+            && (not tb)
+            && m % 16 = 0
+            && n % 8 = 0
+            && k % 32 = 0
+            && loadable d_space && loadable a_space && loadable b_space
+            && min_compute_capability () >= 89
+          then
+            (* Raw [mma.sync] with the architecture-defined per-lane fragment layouts of m16n8k32
+               (PTX ISA "Matrix Fragments for mma.m16n8k32"; fp8 shares the .s8/.u8 layouts). Thread
+               [lane], with groupID g = lane>>2 and threadID-in-group t = lane&3, holds: A (16x32,
+               row-major source) regs a0..a3 = 4 consecutive bytes at rows {g, g+8} x column groups
+               {4t, 4t+16}; B (32x8, column-major fragment from our row-major source) regs b0,b1 =
+               rows {4t..4t+3, 16+4t..16+4t+3} down column g, gathered bytewise (stride ldb);
+               accumulator D (16x8 f32) regs d0..d3 = rows {g, g+8} x columns {2t, 2t+1}.
+               Low-indexed elements sit in low-order bytes of each .b32 register. Byte loads impose
+               no alignment or stride constraints and read generic addresses, covering both
+               __shared__ tiles and device pointers. *)
+            let open PPrint in
+            let mt = m / 16 and nt = n / 8 and kt = k / 32 in
+            let pack4 name base offs =
+              Printf.sprintf
+                "unsigned %s = (unsigned)%s[%s] | ((unsigned)%s[%s] << 8) | ((unsigned)%s[%s] << \
+                 16) | ((unsigned)%s[%s] << 24);"
+                name base offs.(0) base offs.(1) base offs.(2) base offs.(3)
+            in
+            let consec p0 = [| p0 ^ " + 0"; p0 ^ " + 1"; p0 ^ " + 2"; p0 ^ " + 3" |] in
+            let strided p0 stride =
+              [|
+                p0 ^ " + 0 * " ^ stride;
+                p0 ^ " + 1 * " ^ stride;
+                p0 ^ " + 2 * " ^ stride;
+                p0 ^ " + 3 * " ^ stride;
+              |]
+            in
+            let barrier = "__syncthreads();" in
+            let body_lines =
+              [
+                barrier;
+                "unsigned __mma_lid;";
+                "asm(\"mov.u32 %0, %%laneid;\" : \"=r\"(__mma_lid));";
+                "const int __mma_g = (int)(__mma_lid >> 2);";
+                "const int __mma_t = (int)(__mma_lid & 3);";
+                Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                Printf.sprintf
+                  "    float *__mma_dr0 = __mma_dp + (__mi * 16 + __mma_g) * %d + __ni * 8 + 2 * \
+                   __mma_t;"
+                  ldd;
+                Printf.sprintf "    float *__mma_dr1 = __mma_dr0 + 8 * %d;" ldd;
+                "    float __mma_d0 = __mma_dr0[0], __mma_d1 = __mma_dr0[1];";
+                "    float __mma_d2 = __mma_dr1[0], __mma_d3 = __mma_dr1[1];";
+                Printf.sprintf "    for (int __ki = 0; __ki < %d; ++__ki) {" kt;
+                Printf.sprintf
+                  "      const unsigned char *__mma_ar0 = __mma_ap + (__mi * 16 + __mma_g) * %d + \
+                   __ki * 32 + 4 * __mma_t;"
+                  lda;
+                Printf.sprintf "      const unsigned char *__mma_ar1 = __mma_ar0 + 8 * %d;" lda;
+                "      " ^ pack4 "__mma_a0" "__mma_ar0" (consec "0");
+                "      " ^ pack4 "__mma_a1" "__mma_ar1" (consec "0");
+                "      " ^ pack4 "__mma_a2" "__mma_ar0" (consec "16");
+                "      " ^ pack4 "__mma_a3" "__mma_ar1" (consec "16");
+                Printf.sprintf
+                  "      const unsigned char *__mma_br0 = __mma_bp + (__ki * 32 + 4 * __mma_t) * \
+                   %d + __ni * 8 + __mma_g;"
+                  ldb;
+                Printf.sprintf "      const unsigned char *__mma_br1 = __mma_br0 + 16 * %d;" ldb;
+                "      " ^ pack4 "__mma_b0" "__mma_br0" (strided "0" (Int.to_string ldb));
+                "      " ^ pack4 "__mma_b1" "__mma_br1" (strided "0" (Int.to_string ldb));
+                "      asm(\"mma.sync.aligned.m16n8k32.row.col.f32.e5m2.e5m2.f32 \"";
+                "          \"{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\"";
+                "          : \"+f\"(__mma_d0), \"+f\"(__mma_d1), \"+f\"(__mma_d2), \"+f\"(__mma_d3)";
+                "          : \"r\"(__mma_a0), \"r\"(__mma_a1), \"r\"(__mma_a2), \"r\"(__mma_a3), \
+                 \"r\"(__mma_b0), \"r\"(__mma_b1));";
+                "    }";
+                "    __mma_dr0[0] = __mma_d0; __mma_dr0[1] = __mma_d1;";
+                "    __mma_dr1[0] = __mma_d2; __mma_dr1[1] = __mma_d3;";
+                "  }";
+                "}";
+                barrier;
+              ]
+            in
+            let cast_ptr name ptr =
+              string (Printf.sprintf "const unsigned char *%s = (const unsigned char *)(" name)
+              ^^ ptr ^^ string ");"
+            in
+            let body =
+              string "float *__mma_dp = " ^^ d_ptr ^^ semi ^^ hardline ^^ cast_ptr "__mma_ap" a_ptr
+              ^^ hardline ^^ cast_ptr "__mma_bp" b_ptr ^^ hardline
+              ^^ separate_map hardline string body_lines
+            in
+            Some
+              (group
+                 (string (Printf.sprintf "{ /* tile_mma %dx%dx%d (mma-fp8) e5m2 */" m n k)
+                 ^^ nest 2 (hardline ^^ body)
+                 ^^ hardline ^^ rbrace))
+          else
+            match combo with
+            | Some (ab_typ, acc_typ, ab_ld_mult, d_ld_mult, min_cc, is_bf16)
+              when m % tile = 0
+                   && n % tile = 0
+                   && k % tile = 0
+                   && lda % ab_ld_mult = 0
+                   && ldb % ab_ld_mult = 0
+                   && ldd % d_ld_mult = 0
+                   && loadable d_space && loadable a_space && loadable b_space
+                   && min_compute_capability () >= min_cc ->
+                let open PPrint in
+                let mt = m / tile and nt = n / tile and kt = k / tile in
+                let frag kind typ layout =
+                  Printf.sprintf "nvcuda::wmma::fragment<nvcuda::wmma::%s, %d, %d, %d, %s%s>" kind
+                    tile tile tile typ
+                    (match layout with Some l -> ", nvcuda::wmma::" ^ l | None -> "")
+                in
+                let ptr_decl name typ ptr =
+                  string (Printf.sprintf "%s *%s = " typ name) ^^ ptr ^^ semi
+                in
+                let a_layout = if ta then "col_major" else "row_major" in
+                let b_layout = if tb then "col_major" else "row_major" in
+                let barrier = "__syncthreads();" in
+                let body_lines =
+                  [
+                    barrier;
+                    Printf.sprintf "%s __mma_acc[%d][%d];" (frag "accumulator" acc_typ None) mt nt;
+                    Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                    Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                    Printf.sprintf
+                      "    nvcuda::wmma::load_matrix_sync(__mma_acc[__mi][__ni], __mma_dp + __mi * \
+                       %d * %d + __ni * %d, %d, nvcuda::wmma::mem_row_major);"
+                      tile ldd tile ldd;
+                    "  }";
+                    "}";
+                    Printf.sprintf "for (int __ki = 0; __ki < %d; ++__ki) {" kt;
+                    Printf.sprintf "  %s __mma_bf[%d];" (frag "matrix_b" ab_typ (Some b_layout)) nt;
+                    Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                    (* Transposed storage ([tb]): the stored matrix is the role's transpose — index
+                       it at (col, row) and declare the fragment [col_major]; the leading dimension
+                       stays the operand's own. Same for [ta] below. *)
+                    (if tb then
+                       Printf.sprintf
+                         "    nvcuda::wmma::load_matrix_sync(__mma_bf[__ni], __mma_bp + __ni * %d \
+                          * %d + __ki * %d, %d);"
+                         tile ldb tile ldb
+                     else
+                       Printf.sprintf
+                         "    nvcuda::wmma::load_matrix_sync(__mma_bf[__ni], __mma_bp + __ki * %d \
+                          * %d + __ni * %d, %d);"
+                         tile ldb tile ldb);
+                    "  }";
+                    Printf.sprintf "  for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                    Printf.sprintf "    %s __mma_af;" (frag "matrix_a" ab_typ (Some a_layout));
+                    (if ta then
+                       Printf.sprintf
+                         "    nvcuda::wmma::load_matrix_sync(__mma_af, __mma_ap + __ki * %d * %d + \
+                          __mi * %d, %d);"
+                         tile lda tile lda
+                     else
+                       Printf.sprintf
+                         "    nvcuda::wmma::load_matrix_sync(__mma_af, __mma_ap + __mi * %d * %d + \
+                          __ki * %d, %d);"
+                         tile lda tile lda);
+                    Printf.sprintf "    for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                    "      nvcuda::wmma::mma_sync(__mma_acc[__mi][__ni], __mma_af, __mma_bf[__ni], \
+                     __mma_acc[__mi][__ni]);";
+                    "    }";
+                    "  }";
+                    "}";
+                    Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                    Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                    Printf.sprintf
+                      "    nvcuda::wmma::store_matrix_sync(__mma_dp + __mi * %d * %d + __ni * %d, \
+                       __mma_acc[__mi][__ni], %d, nvcuda::wmma::mem_row_major);"
+                      tile ldd tile ldd;
+                    "  }";
+                    "}";
+                    barrier;
+                  ]
+                in
+                let body =
+                  ptr_decl "__mma_dp" (typ_of_prec d_prec) d_ptr
+                  ^^ hardline
+                  ^^ ptr_decl "__mma_ap" ("const " ^ typ_of_prec a_prec) a_ptr
+                  ^^ hardline
+                  ^^ ptr_decl "__mma_bp" ("const " ^ typ_of_prec b_prec) b_ptr
+                  ^^ hardline
+                  ^^ separate_map hardline string body_lines
+                in
+                Some
+                  (group
+                     (string
+                        (Printf.sprintf "{ /* tile_mma %dx%dx%d (wmma%s) */" m n k
+                           (if is_bf16 then "-bf16" else ""))
+                     ^^ nest 2 (hardline ^^ body)
+                     ^^ hardline ^^ rbrace))
+            | _ -> None)
 
     let rec binop_syntax prec v =
       (* TODO: consider using binop_syntax inherited from Pure_C_config and overriding only where
@@ -1409,11 +1540,12 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
              min_over (fun (a : Cu.Device.attributes) -> a.max_threads_per_block);
            max_workgroup_memory_bytes =
              min_over (fun (a : Cu.Device.attributes) -> a.max_shared_memory_per_block);
-           (* Tensor cores via wmma (tensorize-mma T3, draft): the 32-thread warp cooperates on
-              16x16x16 tiles from sm_70 up. Precision combinations are decided per call by
-              [mma_syntax]. *)
+           (* Tensor cores (tensorize-mma T3): the 32-thread warp cooperates on 16x16x16 wmma tiles
+              from sm_70 up (fp8 [mma.sync] tiles are 16x8x32, sm_89+ — [mma_tile] is the
+              autotuner's divisibility filter and stays at the wmma shape). Precision combinations
+              are decided per call by [mma_syntax]. *)
            mma =
-             (if min_compute_capability_major () >= 7 then
+             (if min_compute_capability () >= 70 then
                 Some { Backend_intf.mma_simd_width = 32; mma_tile = (16, 16, 16) }
               else None);
          })

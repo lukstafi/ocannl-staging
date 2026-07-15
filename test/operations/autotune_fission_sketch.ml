@@ -16,7 +16,12 @@
      pipelines (unstaged and cooperatively staged [Tensorize] on backends with an mma capability;
      whole-triple and Grid-split register-tiled [Tile_mma] on the C backends); the tuned routine
      matches the serial twin, and the schedules round-trip through the saved form when a sketch
-     wins. *)
+     wins.
+   - Per-fission-segment sketches ([F_sketch]): on a fissionable chain whose consumer is a
+     matmul, the matmul's [Zero_out] fissions into its own [`Zeros] segment, so the whole-routine
+     sketches never fit the segment's (unzeroed) site — the per-segment seeds must apply instead
+     ([fiss_sketch_candidates]), get timed ([fiss_sketch_timed]), and the tuned routine matches
+     the serial twin. *)
 
 open Base
 open Ocannl
@@ -232,6 +237,57 @@ let () =
     ((not mr1.Autotune.cache_hit) && mr2.Autotune.cache_hit);
   p "matmul cache-hit values match the serial twin"
     (Array.for_all2_exn got_mm2 got_serial ~f:approx);
+
+  (* === Per-fission-segment sketches (F_sketch): qd = qa + qb (forced materialized), then the
+     matmul qe = qd * qc. The chain fissions; the matmul's [Zero_out] lands in its own [`Zeros]
+     segment, so the matmul segment's site is unzeroed — [detect_matmul] must fire per segment
+     and the sketch pipelines apply without the zero-expansion geometry. === *)
+  let q = 32 in
+  let qav = Array.init (q * q) ~f:(fun i -> Float.of_int (i % 11) *. 0.125) in
+  let qbv = Array.init (q * q) ~f:(fun i -> Float.of_int (i % 7) -. 3.) in
+  let qcv = Array.init (q * q) ~f:(fun i -> (Float.of_int (i % 5) *. 0.5) -. 1.) in
+  let qa = TDSL.ndarray qav ~label:[ "qa" ] ~input_dims:[ q ] ~output_dims:[ q ] () in
+  let qb = TDSL.ndarray qbv ~label:[ "qb" ] ~input_dims:[ q ] ~output_dims:[ q ] () in
+  let qc = TDSL.ndarray qcv ~label:[ "qc" ] ~input_dims:[ q ] ~output_dims:[ q ] () in
+  let%op qd0 = qa + qb in
+  Train.set_materialized qd0.Tensor.value;
+  let%op qe0 = qd0 * qc in
+  let fs_serial_comp = named "af_fs_serial" (Train.forward qe0) in
+  let qsctx = Context.auto () in
+  let qsctx, qsroutine =
+    Context.compile ~lowered_transform:(fun opt -> opt) qsctx fs_serial_comp Ir.Indexing.Empty
+  in
+  let qsctx = Context.run qsctx qsroutine in
+  let got_fs_serial = Context.get_values qsctx qe0.Tensor.value in
+  let%op qd1 = qa + qb in
+  Train.set_materialized qd1.Tensor.value;
+  let%op qe1 = qd1 * qc in
+  let fs_comp = named "af_fs_tuned" (Train.forward qe1) in
+  let fs_report = ref None in
+  let fsctx = Context.auto () in
+  let fsctx, fsroutine =
+    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:""
+      ~report:(fun r -> fs_report := Some r)
+      fsctx fs_comp Ir.Indexing.Empty
+  in
+  let fsctx = Context.run fsctx fsroutine in
+  let got_fs = Context.get_values fsctx qe1.Tensor.value in
+  (match !fs_report with
+  | Some r ->
+      (* For the 32x32x32 f32 segment site (unzeroed), cc seeds 2 packing + 2 hoisted-packing
+         (qc is a hoistable constant) + 2 tensorized pipelines; Metal seeds 4 blocktiling + 5
+         simdgroup pipelines; other GPU backends at least the 4 blocktiling ones. *)
+      p "per-segment sketch candidates seeded"
+        (r.Autotune.fiss_sketch_candidates
+        >= (if is_cpu then 6
+            else if String.is_substring backend_name ~substring:"metal" then 9
+            else 4));
+      p "per-segment sketch candidates timed" (r.Autotune.fiss_sketch_timed > 0)
+  | None ->
+      p "per-segment sketch candidates seeded" false;
+      p "per-segment sketch candidates timed" false);
+  p "tuned fissioned matmul matches the serial twin"
+    (Array.for_all2_exn got_fs got_fs_serial ~f:approx);
 
   (* --- timing_ctx on a different backend is rejected (Codex P2 on PR #109): candidates timed
      elsewhere do not predict the target device, and the winner would be cached under the target
