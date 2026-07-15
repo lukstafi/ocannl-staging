@@ -124,12 +124,15 @@ let rec map_code ~fidx (llc : Low_level.t) : Low_level.t =
           debug;
         }
   | Set_local (id, llsc) -> Set_local (id, map_scalar ~fidx llsc)
-  | Tile_mma { d = d_tn, d_idcs; a = a_tn, a_idcs; b = b_tn, b_idcs; m; n; k; lane; fallback } ->
+  | Tile_mma { d = d_tn, d_idcs; a = a_tn, a_idcs; b = b_tn, b_idcs; ta; tb; m; n; k; lane; fallback }
+    ->
       Tile_mma
         {
           d = (d_tn, Array.map d_idcs ~f:fidx);
           a = (a_tn, Array.map a_idcs ~f:fidx);
           b = (b_tn, Array.map b_idcs ~f:fidx);
+          ta;
+          tb;
           m;
           n;
           k;
@@ -463,17 +466,35 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
             invalid_arg
               ("Schedule.Tensorize: accumulator " ^ Tn.debug_name d_tn
              ^ " must be indexed [..., i, j] over its last two axes (unit coefficients)");
-          let a_op, b_op =
-            if role_ok x_op ~row:i ~col:k && role_ok y_op ~row:k ~col:j then (x_op, y_op)
-            else if role_ok y_op ~row:i ~col:k && role_ok x_op ~row:k ~col:j then (y_op, x_op)
-            else
-              invalid_arg
-                ("Schedule.Tensorize: operands of the product must be indexed [..., i, k] and \
-                  [..., k, j] over their last two axes (unit coefficients; transposed layouts are \
-                  not supported in v1): "
-                ^ Tn.debug_name (fst x_op)
-                ^ ", "
-                ^ Tn.debug_name (fst y_op))
+          (* Operand roles, including transposed storage: [a] is [..., i, k] ([ta = false]) or
+             [..., k, i] ([ta = true]); [b] is [..., k, j] ([tb = false]) or [..., j, k]
+             ([tb = true]). An operand matches at most one role and orientation ([role_ok]
+             requires both role symbols present at the right positions and the third absent), so
+             the assignment is unambiguous. *)
+          let a_role op =
+            if role_ok op ~row:i ~col:k then Some false
+            else if role_ok op ~row:k ~col:i then Some true
+            else None
+          in
+          let b_role op =
+            if role_ok op ~row:k ~col:j then Some false
+            else if role_ok op ~row:j ~col:k then Some true
+            else None
+          in
+          let a_op, ta, b_op, tb =
+            match (a_role x_op, b_role y_op) with
+            | Some ta, Some tb -> (x_op, ta, y_op, tb)
+            | _ -> (
+                match (a_role y_op, b_role x_op) with
+                | Some ta, Some tb -> (y_op, ta, x_op, tb)
+                | _ ->
+                    invalid_arg
+                      ("Schedule.Tensorize: operands of the product must be indexed [..., i, k] \
+                        (or transposed [..., k, i]) and [..., k, j] (or transposed [..., j, k]) \
+                        over their last two axes (unit coefficients): "
+                      ^ Tn.debug_name (fst x_op)
+                      ^ ", "
+                      ^ Tn.debug_name (fst y_op)))
           in
           let zero = { terms = []; offset = 0 } in
           let base idcs =
@@ -494,6 +515,8 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
                     d = (d_tn, base d_idcs);
                     a = (fst a_op, base (snd a_op));
                     b = (fst b_op, base (snd b_op));
+                    ta;
+                    tb;
                     m = ifc.to_ + 1;
                     n = jfc.to_ + 1;
                     k = kfc.to_ + 1;

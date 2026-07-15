@@ -580,13 +580,15 @@ module Impl = struct
        32-thread simdgroup, loaded with [simdgroup_load] straight from [device] memory or
        [threadgroup] tiles (i.e. out of [Stage]'s shared staging), accumulated with
        [simdgroup_multiply_accumulate], stored once at the end — the accumulator fragments are
-       resident across the whole [k] extent of the block statement. Declines (fallback path) on:
-       non-{f32,f16,bf16} precision, extents not multiples of 8, thread-space (stack-array)
-       operands (not loadable by [simdgroup_load]), and devices below the Apple7 family. *)
+       resident across the whole [k] extent of the block statement. Transposed-stored operands
+       ([ta]/[tb]) load with [simdgroup_load]'s [transpose_matrix] flag and swapped tile-offset
+       arithmetic. Declines (fallback path) on: non-{f32,f16,bf16} precision, extents not
+       multiples of 8, thread-space (stack-array) operands (not loadable by [simdgroup_load]),
+       and devices below the Apple7 family. *)
     let mma_syntax =
       Some
-        (fun ~d_prec ~a_prec ~b_prec ~m ~n ~k ~d:(d_ptr, ldd, d_space) ~a:(a_ptr, lda, a_space)
-             ~b:(b_ptr, ldb, b_space) ->
+        (fun ~d_prec ~a_prec ~b_prec ~ta ~tb ~m ~n ~k ~d:(d_ptr, ldd, d_space)
+             ~a:(a_ptr, lda, a_space) ~b:(b_ptr, ldb, b_space) ->
           let tile = 8 in
           (* [simdgroup_matrix] has no mixed-precision multiply-accumulate: uniform only. *)
           let frag_typ =
@@ -602,6 +604,18 @@ module Impl = struct
             | `Device -> Some "device"
             | `Shared -> Some "threadgroup"
             | `Thread -> None
+          in
+          (* Tile load at role-space block (row_i, col_i): transposed storage keeps the operand's
+             own leading dimension and indexes the STORED matrix at (col_i, row_i);
+             [simdgroup_load]'s [transpose_matrix] flag transposes the 8×8 tile in flight. *)
+          let load_line frag ptr ~row_i ~col_i ld ~transpose =
+            if transpose then
+              Printf.sprintf
+                "    simdgroup_load(%s, %s + %s * %d * %d + %s * %d, (ulong)%d, ulong2(0), true);"
+                frag ptr col_i tile ld row_i tile ld
+            else
+              Printf.sprintf "    simdgroup_load(%s, %s + %s * %d * %d + %s * %d, (ulong)%d);" frag
+                ptr row_i tile ld col_i tile ld
           in
           match (frag_typ, addr_space d_space, addr_space a_space, addr_space b_space) with
           | Some frag, Some d_as, Some a_as, Some b_as
@@ -634,17 +648,12 @@ module Impl = struct
                   Printf.sprintf "for (int __ki = 0; __ki < %d; ++__ki) {" kt;
                   Printf.sprintf "  %s __mma_bf[%d];" frag nt;
                   Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                  Printf.sprintf
-                    "    simdgroup_load(__mma_bf[__ni], __mma_bp + __ki * %d * %d + __ni * %d, \
-                     (ulong)%d);"
-                    tile ldb tile ldb;
+                  load_line "__mma_bf[__ni]" "__mma_bp" ~row_i:"__ki" ~col_i:"__ni" ldb
+                    ~transpose:tb;
                   "  }";
                   Printf.sprintf "  for (int __mi = 0; __mi < %d; ++__mi) {" mt;
                   Printf.sprintf "    %s __mma_af;" frag;
-                  Printf.sprintf
-                    "    simdgroup_load(__mma_af, __mma_ap + __mi * %d * %d + __ki * %d, \
-                     (ulong)%d);"
-                    tile lda tile lda;
+                  load_line "__mma_af" "__mma_ap" ~row_i:"__mi" ~col_i:"__ki" lda ~transpose:ta;
                   Printf.sprintf "    for (int __ni = 0; __ni < %d; ++__ni) {" nt;
                   "      simdgroup_multiply_accumulate(__mma_acc[__mi][__ni], __mma_af, \
                    __mma_bf[__ni], __mma_acc[__mi][__ni]);";

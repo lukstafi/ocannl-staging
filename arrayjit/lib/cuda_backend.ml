@@ -518,6 +518,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
         (fun ~d_prec
           ~a_prec
           ~b_prec
+          ~ta
+          ~tb
           ~m
           ~n
           ~k
@@ -563,6 +565,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               let ptr_decl name typ ptr =
                 string (Printf.sprintf "%s *%s = " typ name) ^^ ptr ^^ semi
               in
+              let a_layout = if ta then "col_major" else "row_major" in
+              let b_layout = if tb then "col_major" else "row_major" in
               let barrier = "__syncthreads();" in
               let body_lines =
                 [
@@ -577,19 +581,34 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                   "  }";
                   "}";
                   Printf.sprintf "for (int __ki = 0; __ki < %d; ++__ki) {" kt;
-                  Printf.sprintf "  %s __mma_bf[%d];" (frag "matrix_b" ab_typ (Some "row_major")) nt;
+                  Printf.sprintf "  %s __mma_bf[%d];" (frag "matrix_b" ab_typ (Some b_layout)) nt;
                   Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                  Printf.sprintf
-                    "    nvcuda::wmma::load_matrix_sync(__mma_bf[__ni], __mma_bp + __ki * %d * %d \
-                     + __ni * %d, %d);"
-                    tile ldb tile ldb;
+                  (* Transposed storage ([tb]): the stored matrix is the role's transpose — index
+                     it at (col, row) and declare the fragment [col_major]; the leading dimension
+                     stays the operand's own. Same for [ta] below. *)
+                  (if tb then
+                     Printf.sprintf
+                       "    nvcuda::wmma::load_matrix_sync(__mma_bf[__ni], __mma_bp + __ni * %d * \
+                        %d + __ki * %d, %d);"
+                       tile ldb tile ldb
+                   else
+                     Printf.sprintf
+                       "    nvcuda::wmma::load_matrix_sync(__mma_bf[__ni], __mma_bp + __ki * %d * \
+                        %d + __ni * %d, %d);"
+                       tile ldb tile ldb);
                   "  }";
                   Printf.sprintf "  for (int __mi = 0; __mi < %d; ++__mi) {" mt;
-                  Printf.sprintf "    %s __mma_af;" (frag "matrix_a" ab_typ (Some "row_major"));
-                  Printf.sprintf
-                    "    nvcuda::wmma::load_matrix_sync(__mma_af, __mma_ap + __mi * %d * %d + __ki \
-                     * %d, %d);"
-                    tile lda tile lda;
+                  Printf.sprintf "    %s __mma_af;" (frag "matrix_a" ab_typ (Some a_layout));
+                  (if ta then
+                     Printf.sprintf
+                       "    nvcuda::wmma::load_matrix_sync(__mma_af, __mma_ap + __ki * %d * %d + \
+                        __mi * %d, %d);"
+                       tile lda tile lda
+                   else
+                     Printf.sprintf
+                       "    nvcuda::wmma::load_matrix_sync(__mma_af, __mma_ap + __mi * %d * %d + \
+                        __ki * %d, %d);"
+                       tile lda tile lda);
                   Printf.sprintf "    for (int __ni = 0; __ni < %d; ++__ni) {" nt;
                   "      nvcuda::wmma::mma_sync(__mma_acc[__mi][__ni], __mma_af, __mma_bf[__ni], \
                    __mma_acc[__mi][__ni]);";
