@@ -143,18 +143,28 @@ module Make_slab (Device_types : Device_types) (Raw : No_device_buffer_and_copyi
   type device = Device_types.device
   type buffer_ptr = Raw.buffer_ptr
 
-  (* Private pool table keyed by (device_id, pool_id). *)
+  (* Private pool table keyed by (device_id, pool_id). The table is shared by every device of the
+     backend module, and with the [Multidev] scheduler its accessors run on several domains at
+     once: merge-buffer growth ([alloc_pool]) and merge-buffer resolution ([resolve_pool]) execute
+     inside device tasks on worker domains, concurrently with link-time allocation and eager
+     transfer-endpoint resolution on the main domain. A Base hashtable is not domain-safe -- a
+     lookup racing a resize can spuriously miss an existing key -- so all accesses go through
+     [pools_mutex]. *)
   let pools : (int * int, buffer_ptr) Hashtbl.Poly.t = Hashtbl.Poly.create ()
+  let pools_mutex = Stdlib.Mutex.create ()
+  let with_pools f = Stdlib.Mutex.protect pools_mutex f
 
   let alloc_pool ?mode:_ device ~pool_id ~size_in_bytes ~alignment:_ =
     let key = (device.device_id, pool_id) in
-    (* Free any prior allocation under this key before replacing it (only the reserved merge pool is
-       ever re-allocated; unique tnode pool ids never pre-exist). Backends whose [free_pool_raw] is
-       [None] rely on GC and the dropped table entry, so this is a no-op for them. *)
-    Option.iter Raw.free_pool_raw ~f:(fun memfree ->
-        Option.iter (Hashtbl.find pools key) ~f:memfree);
-    let ptr = Raw.alloc_pool_raw ~size_in_bytes in
-    Hashtbl.set pools ~key ~data:ptr
+    with_pools (fun () ->
+        (* Free any prior allocation under this key before replacing it (only the reserved merge
+           pool is ever re-allocated; unique tnode pool ids never pre-exist). Backends whose
+           [free_pool_raw] is [None] rely on GC and the dropped table entry, so this is a no-op for
+           them. *)
+        Option.iter Raw.free_pool_raw ~f:(fun memfree ->
+            Option.iter (Hashtbl.find pools key) ~f:memfree);
+        let ptr = Raw.alloc_pool_raw ~size_in_bytes in
+        Hashtbl.set pools ~key ~data:ptr)
 
   (* Always [Some]: even backends whose raw allocations are reclaimed by GC ([free_pool_raw = None])
      must drop the private table entry on finalization, otherwise [pools] keeps a strong reference
@@ -165,18 +175,20 @@ module Make_slab (Device_types : Device_types) (Raw : No_device_buffer_and_copyi
     Some
       (fun device ~pool_id ->
         let key = (device.device_id, pool_id) in
-        Option.iter (Hashtbl.find pools key) ~f:(fun ptr ->
-            Option.iter Raw.free_pool_raw ~f:(fun memfree -> memfree ptr));
-        Hashtbl.remove pools key)
+        with_pools (fun () ->
+            Option.iter (Hashtbl.find pools key) ~f:(fun ptr ->
+                Option.iter Raw.free_pool_raw ~f:(fun memfree -> memfree ptr));
+            Hashtbl.remove pools key))
 
   let memset_zero device ~pool_id ~offset ~size_in_bytes =
-    let ptr = Hashtbl.find_exn pools (device.device_id, pool_id) in
+    let ptr = with_pools (fun () -> Hashtbl.find_exn pools (device.device_id, pool_id)) in
     Raw.memset_zero_raw ptr ~offset ~size_in_bytes
 
   let resolve_pool device { pool_id; offset } =
     (* Pooled policy: many tnodes share a pool at distinct byte offsets. Resolve to the slab base
        and advance by [offset] via the backend's raw pointer arithmetic. *)
-    Raw.offset_buffer (Hashtbl.find_exn pools (device.device_id, pool_id)) ~bytes:offset
+    let base = with_pools (fun () -> Hashtbl.find_exn pools (device.device_id, pool_id)) in
+    Raw.offset_buffer base ~bytes:offset
 end
 
 let next_global_device_id : Utils.atomic_int = Atomic.make 0
