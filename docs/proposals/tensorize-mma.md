@@ -396,9 +396,28 @@ mirrors the accumulation's grid geometry with an inner Workgroup loop of extent 
 covering the lane slot (barrier-strength uniformity). Verified on Metal: all five mma sketch
 candidates of the 32×32 site compile, validate, and time (`autotune_fission_sketch.ml`).
 
-Known gap: sketches remain whole-routine seeds — heavily fissioned graphs (gpt2, multi-layer
-MLPs) tune per segment, where only menu actions apply; a per-segment `F_sketch` flavor is the
-follow-up.
+### Per-fission-segment seeding (`F_sketch`, 2026-07-15)
+
+Whole-routine seeds alone would never reach heavily fissioned graphs (gpt2, multi-layer MLPs),
+which tune per segment — so the sketches are additionally seeded per fission segment. The
+`F_sketch` fissioned flavor carries `(pre-schedule segment digest, sketch params)` pairs (keyed
+like `F_saved`): at seed time the fission segmentation is enumerated once on a hermetic copy of
+the base lowering (same pipeline settings as the fissioned preset candidates), `detect_matmul`
+runs per `` `Normal `` segment, and each keyed segment gets its sketch pipeline while the rest
+keep the default preset — so the segmentation converges with the enumeration. Two consequences
+of fission shaped the implementation:
+
+- A segment's site is **unzeroed** — the whole-node `Zero_out` fissions into its own `` `Zeros ``
+  segment — so all sketch pipelines now make the zero-expansion geometry conditional on
+  `m_zeroed`. Sound without it: `Privatize` init-loads the accumulator tile from the
+  (pre-zeroed) target, and `Tile_mma` loads the accumulator fragment before the reduction.
+- Hoisted (constant-pool) `Stage` packing used to fail at link time under fission: the packed
+  tile registered only in the segment's *filtered* traced store, while context allocation
+  enumerates the routine-level (pre-fission) store. `Backends.compile` now folds
+  segment-created traced-store entries back into the routine-level store.
+
+Verified on cc (6 per-segment candidates: 2 packing + 2 hoisted + 2 tensorized) and Metal (9:
+4 blocktiling + 5 simdgroup) — all compile and time (`autotune_fission_sketch.ml`).
 
 ## Relations
 
