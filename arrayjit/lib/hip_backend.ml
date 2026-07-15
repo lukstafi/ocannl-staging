@@ -188,15 +188,66 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     |> List.iter ~f:(fun pool_id ->
         Option.iter Slab.free_pool ~f:(fun free -> free device ~pool_id))
 
+  (* --- Cooperative tile-MMA (rocWMMA) capability, shared by [hardware_limits] and [mma_syntax].
+     Requires BOTH the RDNA3/RDNA3.5+ (gfx11/gfx12) wave32 architecture AND discoverable rocWMMA
+     headers. Gating both sites matters: [hardware_limits] keeps autotune/scheduling from selecting
+     [Tile_mma] where it cannot work, and [mma_syntax] makes a manual [Sched.tensorize] on an
+     unsupported device (CDNA gfx9 wave64, a mixed fleet) or a host without rocWMMA decline to the
+     scalar fallback rather than emit an uncompilable kernel. Memoized behind [lazy]: device
+     enumeration and filesystem probes must not run at module init. *)
+  let all_rdna_wave32 =
+    lazy
+      (let n = num_devices () in
+       n > 0
+       && Array.for_all
+            (Array.init n ~f:(fun ordinal -> H.Device.get_attributes (H.Device.get ~ordinal)))
+            ~f:(fun (a : H.Device.attributes) ->
+              (String.is_prefix a.gcn_arch_name ~prefix:"gfx11"
+              || String.is_prefix a.gcn_arch_name ~prefix:"gfx12")
+              && a.warp_size = 32))
+
+  (* The HIP SDK include dir (no-spaces junction on Windows / HIP_PATH / /opt/rocm), forward-slashed
+     for the clang command line. [None] when no SDK is found (the Linux built-in-headers path). *)
+  let hip_sdk_include_dir =
+    lazy
+      (let candidates =
+         (match Sys.getenv "LOCALAPPDATA" with Some l -> [ l ^ "/hip_path_link" ] | None -> [])
+         @ (match Sys.getenv "HIP_PATH" with Some p -> [ p ] | None -> [])
+         @ [ "/opt/rocm" ]
+       in
+       List.find_map candidates ~f:(fun p ->
+           if Stdlib.Sys.file_exists (p ^ "/include/hip/hip_fp16.h") then
+             Some (String.map ~f:(fun c -> if Char.(c = '\\') then '/' else c) (p ^ "/include"))
+           else None))
+
+  (* A directory directly containing [rocwmma/rocwmma.hpp], if any: [ROCWMMA_PATH] variants, a clone
+     under [%LOCALAPPDATA%/rocwmma], or the HIP include tree (rocWMMA installs there on Linux).
+     rocWMMA is header-only and is NOT in the ROCm Windows SDK, hence the extra search paths. *)
+  let rocwmma_include_dir =
+    lazy
+      (let candidates =
+         (match Sys.getenv "ROCWMMA_PATH" with
+          | Some p -> [ p; p ^ "/include"; p ^ "/library/include" ]
+          | None -> [])
+         @ (match Sys.getenv "LOCALAPPDATA" with
+           | Some l -> [ l ^ "/rocwmma/library/include" ]
+           | None -> [])
+         @ (match Lazy.force hip_sdk_include_dir with Some d -> [ d ] | None -> [])
+       in
+       List.find candidates ~f:(fun p -> Stdlib.Sys.file_exists (p ^ "/rocwmma/rocwmma.hpp"))
+       |> Option.map ~f:(String.map ~f:(fun c -> if Char.(c = '\\') then '/' else c)))
+
+  let mma_supported () =
+    Lazy.force all_rdna_wave32 && Option.is_some (Lazy.force rocwmma_include_dir)
+
   let%diagn2_sexp hip_to_code ~name hip_src =
     let name_hip = name ^ ".hip" in
     (* Tile-MMA kernels (emitted by [mma_syntax]) need the rocWMMA header and C++17; injected only
        when actually used, so kernels without tensor cores compile exactly as before and do not
-       require rocWMMA to be present. Mirrors the CUDA backend's <mma.h> injection. rocWMMA is
-       header-only but is NOT shipped in the ROCm 7.1 Windows SDK; [rocwmma_include_opt] below
-       discovers it (ROCWMMA_PATH, a clone under %LOCALAPPDATA%/rocwmma, or -- on Linux -- the HIP
-       include tree already added via [hip_include_opt]) and adds its [-I] only for rocWMMA-using
-       kernels. *)
+       require rocWMMA to be present. Mirrors the CUDA backend's <mma.h> injection. The header's
+       location is [rocwmma_include_dir] (the same probe that gates [mma_supported]); since
+       [mma_syntax] only emits [rocwmma::] when [mma_supported] holds, a kernel that reaches here
+       with rocWMMA in it always has a discoverable header. *)
     let uses_rocwmma = String.is_substring hip_src ~substring:"rocwmma::" in
     let hip_src =
       if uses_rocwmma then "#include <rocwmma/rocwmma.hpp>\n" ^ hip_src else hip_src
@@ -212,51 +263,17 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     (* hiprtc targets the architecture of the current default device when no [--offload-arch] is
        given. On Linux hiprtc ships built-in HIP headers; on Windows (observed with ROCm 7.1)
        [#include <hip/hip_fp16.h>] is not found without an include path, so point at the SDK's
-       include directory — via the no-spaces junction created by ocaml-hipjit (clang rejects paths
-       with spaces on the command line, see ocaml/ocaml#13917), falling back to HIP_PATH or the
-       /opt/rocm default. The -I is only added when the directory actually exists, so the Linux
-       built-in-headers path is unaffected. *)
+       include directory ([hip_sdk_include_dir]: the no-spaces junction created by ocaml-hipjit,
+       falling back to HIP_PATH or /opt/rocm). The -I is only added when the directory exists, so the
+       Linux built-in-headers path is unaffected. *)
     let hip_include_opt =
-      let candidates =
-        (match Sys.getenv "LOCALAPPDATA" with
-          | Some local_appdata -> [ local_appdata ^ "/hip_path_link" ]
-          | None -> [])
-        @ (match Sys.getenv "HIP_PATH" with Some p -> [ p ] | None -> [])
-        @ [ "/opt/rocm" ]
-      in
-      match
-        List.find candidates ~f:(fun p -> Stdlib.Sys.file_exists (p ^ "/include/hip/hip_fp16.h"))
-      with
-      | Some hip_path ->
-          let include_path =
-            String.map ~f:(fun c -> if Char.(c = '\\') then '/' else c) (hip_path ^ "/include")
-          in
-          [ "-I" ^ include_path ]
-      | None -> []
+      match Lazy.force hip_sdk_include_dir with Some d -> [ "-I" ^ d ] | None -> []
     in
-    (* rocWMMA include dir (only for tensor-core kernels): a dir directly containing
-       [rocwmma/rocwmma.hpp]. Not needed on Linux where rocWMMA installs into the HIP include tree
-       (already on the path via [hip_include_opt]); on Windows point [ROCWMMA_PATH] at an install or
-       a git clone, or drop a clone at %LOCALAPPDATA%/rocwmma (its headers live in library/include). *)
+    (* rocWMMA include dir, only for tensor-core kernels ([rocwmma_include_dir] finds the dir holding
+       [rocwmma/rocwmma.hpp]). *)
     let rocwmma_include_opt =
       if not uses_rocwmma then []
-      else
-        let candidates =
-          (match Sys.getenv "ROCWMMA_PATH" with
-            | Some p -> [ p; p ^ "/include"; p ^ "/library/include" ]
-            | None -> [])
-          @
-          match Sys.getenv "LOCALAPPDATA" with
-          | Some l -> [ l ^ "/rocwmma/library/include" ]
-          | None -> []
-        in
-        match
-          List.find candidates ~f:(fun p ->
-              Stdlib.Sys.file_exists (p ^ "/rocwmma/rocwmma.hpp"))
-        with
-        | Some inc ->
-            [ "-I" ^ String.map ~f:(fun c -> if Char.(c = '\\') then '/' else c) inc ]
-        | None -> []
+      else match Lazy.force rocwmma_include_dir with Some d -> [ "-I" ^ d ] | None -> []
     in
     let options =
       hip_include_opt @ rocwmma_include_opt
@@ -513,8 +530,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        [simdgroup_matrix], which does f32. Declines (the barrier-bracketed lane-0 fallback renders
        instead) on: other precision combinations, extents not multiples of 16, leading dimensions
        violating the 16-element-tile stride constraint, and thread-space operands (per-thread stacks
-       are not a jointly-owned tile). Arch/wave gating lives in [hardware_limits] (min over devices),
-       so reaching here already implies an all-RDNA3+/wave32 target -- no in-kernel arch guard.
+       are not a jointly-owned tile). Also declines (via [mma_supported] in the guard below) when the
+       target is not RDNA3+/wave32 or rocWMMA headers are absent: a manual [Sched.tensorize] reaches
+       this hook even where [hardware_limits.mma] is [None], so the capability check cannot live in
+       [hardware_limits] alone.
        Verified on gfx1151 (Radeon 8060S, RDNA3.5) under hiprtc via schedule_mma_matmul: the f16 ->
        f16 combination compiles and executes and matches the serial twin bitwise; the bf16 and
        f16 -> f32 combinations take the same rocWMMA template path, differing only in fragment
@@ -559,7 +578,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           in
           match combo with
           | Some (ab_typ, acc_typ, ab_ld_mult, d_ld_mult)
-            when m % tile = 0
+            when mma_supported ()
+                 && m % tile = 0
                  && n % tile = 0
                  && k % tile = 0
                  && lda % ab_ld_mult = 0
@@ -1409,19 +1429,14 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
              min_over (fun (a : H.Device.attributes) -> a.max_threads_per_block);
            max_workgroup_memory_bytes =
              min_over (fun (a : H.Device.attributes) -> a.shared_mem_per_block);
-           (* Cooperative tile-MMA via rocWMMA (tensorize-mma T3 draft): the 32-lane wavefront
-              jointly holds 16x16x16 fragments, mirroring the CUDA wmma draft. Gated to RDNA3 /
-              RDNA3.5+ (gfx11 / gfx12) wave32 devices -- CDNA (gfx9, wave64) uses MFMA with different
-              tile shapes and is left on the scalar path. [None] unless EVERY device qualifies:
+           (* Cooperative tile-MMA via rocWMMA, gated on [mma_supported]: RDNA3/RDNA3.5+ (gfx11/gfx12)
+              wave32 across ALL devices AND discoverable rocWMMA headers. CDNA (gfx9, wave64, MFMA)
+              and header-less hosts stay on the scalar path -- reporting [Some] there would let
+              autotune pick [Tile_mma] and then fail to compile. [None] unless EVERY device qualifies:
               limits are min-over-devices, so code compiled once must be valid wherever it links.
               Precision combinations are decided per call by [mma_syntax]. *)
            mma =
-             (let is_rdna_wave32 (a : H.Device.attributes) =
-                (String.is_prefix a.gcn_arch_name ~prefix:"gfx11"
-                || String.is_prefix a.gcn_arch_name ~prefix:"gfx12")
-                && a.warp_size = 32
-              in
-              if (not (Array.is_empty attrs)) && Array.for_all attrs ~f:is_rdna_wave32 then
+             (if mma_supported () then
                 Some { Backend_intf.mma_simd_width = 32; mma_tile = (16, 16, 16) }
               else None);
          })
