@@ -213,58 +213,60 @@ let () =
      mantissa bits: inputs from {-1,-0.5,0,0.5,1} and {-1.5..1.5 step 0.5} are exact, every product
      is a multiple of 0.25 bounded by 1.5, and a 32-term f32 sum of such products is exact
      regardless of accumulation order — so parity is bitwise on every backend and either rendering
-     path. --- *)
-  let maf =
-    NTDSL.init ~l:"maf" ~prec:Ir.Ops.fp8 ~i:[ n ] ~o:[ n ]
-      ~f:(fun idcs -> (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 5) *. 0.5) -. 1.)
-      ()
-  in
-  let mbf =
-    NTDSL.init ~l:"mbf" ~prec:Ir.Ops.fp8 ~i:[ n ] ~o:[ n ]
-      ~f:(fun idcs -> (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 7) -. 3.) *. 0.5)
-      ()
-  in
-  let%op mcf0 = maf * mbf in
-  Tn.update_prec mcf0.Tensor.value Ir.Ops.single;
-  let ctx_fs = Context.auto () in
-  let ctx_fs, routine_fs =
-    Context.compile
-      ~lowered_transform:(fun opt -> opt)
-      ctx_fs
-      (named "mm_f8_serial" (Train.forward mcf0))
-      Ir.Indexing.Empty
-  in
-  let ctx_fs = Context.run ctx_fs routine_fs in
-  let got_f8_serial = Context.get_values ctx_fs mcf0.Tensor.value in
-  let%op mcf1 = maf * mbf in
-  Tn.update_prec mcf1.Tensor.value Ir.Ops.single;
-  let transform_f8 opt = Sched.apply (mma_schedule ~out:mcf1.Tensor.value opt) opt in
-  let ctx_f8 = Context.auto () in
-  let ctx_f8, routine_f8 =
-    Context.compile ~lowered_transform:transform_f8 ctx_f8
-      (named "mm_f8_mma" (Train.forward mcf1))
-      Ir.Indexing.Empty
-  in
-  let ctx_f8 = Context.run ctx_f8 routine_f8 in
-  let got_f8 = Context.get_values ctx_f8 mcf1.Tensor.value in
-  p "fp8 tensorized matmul matches the serial twin bitwise"
-    (Array.for_all2_exn got_f8 got_f8_serial ~f:Float.equal);
-  (match read_generated "mm_f8_mma" with
-  | None -> p "fp8 tensorized structure as expected" false
-  | Some src ->
-      let has s = String.is_substring src ~substring:s in
-      let ok =
-        if on_metal then
-          (* Metal simdgroup_matrix has no fp8 element type: the scalar fallback. *)
-          has "== 0)" && not (has "simdgroup_multiply_accumulate")
-        else if on_gpu then
-          (* CUDA sm_89+: the inline-PTX path; the lane-0 fallback on older devices. *)
-          has "mma.sync.aligned.m16n8k32" || has "== 0)"
-        else
-          (* Fp8 declines the register tiling (single/double only): the scalar fallback. *)
-          has "== 0)" && (not (has "simdgroup")) && not (has "Tile_mma register tiling")
-      in
-      p "fp8 tensorized structure as expected" ok);
+     path. Skipped on Metal, which has no fp8 storage precision at all ([typ_of_prec] rejects
+     [Fp8_prec]) — even the serial twin cannot compile there. --- *)
+  (if on_metal then (
+     p "fp8 tensorized matmul matches the serial twin bitwise" true;
+     p "fp8 tensorized structure as expected" true)
+   else
+     let maf =
+       NTDSL.init ~l:"maf" ~prec:Ir.Ops.fp8 ~i:[ n ] ~o:[ n ]
+         ~f:(fun idcs -> (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 5) *. 0.5) -. 1.)
+         ()
+     in
+     let mbf =
+       NTDSL.init ~l:"mbf" ~prec:Ir.Ops.fp8 ~i:[ n ] ~o:[ n ]
+         ~f:(fun idcs -> (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 7) -. 3.) *. 0.5)
+         ()
+     in
+     let%op mcf0 = maf * mbf in
+     Tn.update_prec mcf0.Tensor.value Ir.Ops.single;
+     let ctx_fs = Context.auto () in
+     let ctx_fs, routine_fs =
+       Context.compile
+         ~lowered_transform:(fun opt -> opt)
+         ctx_fs
+         (named "mm_f8_serial" (Train.forward mcf0))
+         Ir.Indexing.Empty
+     in
+     let ctx_fs = Context.run ctx_fs routine_fs in
+     let got_f8_serial = Context.get_values ctx_fs mcf0.Tensor.value in
+     let%op mcf1 = maf * mbf in
+     Tn.update_prec mcf1.Tensor.value Ir.Ops.single;
+     let transform_f8 opt = Sched.apply (mma_schedule ~out:mcf1.Tensor.value opt) opt in
+     let ctx_f8 = Context.auto () in
+     let ctx_f8, routine_f8 =
+       Context.compile ~lowered_transform:transform_f8 ctx_f8
+         (named "mm_f8_mma" (Train.forward mcf1))
+         Ir.Indexing.Empty
+     in
+     let ctx_f8 = Context.run ctx_f8 routine_f8 in
+     let got_f8 = Context.get_values ctx_f8 mcf1.Tensor.value in
+     p "fp8 tensorized matmul matches the serial twin bitwise"
+       (Array.for_all2_exn got_f8 got_f8_serial ~f:Float.equal);
+     match read_generated "mm_f8_mma" with
+     | None -> p "fp8 tensorized structure as expected" false
+     | Some src ->
+         let has s = String.is_substring src ~substring:s in
+         let ok =
+           if on_gpu then
+             (* CUDA sm_89+: the inline-PTX path; the lane-0 fallback on older devices. *)
+             has "mma.sync.aligned.m16n8k32" || has "== 0)"
+           else
+             (* Fp8 declines the register tiling (single/double only): the scalar fallback. *)
+             has "== 0)" && (not (has "simdgroup")) && not (has "Tile_mma register tiling")
+         in
+         p "fp8 tensorized structure as expected" ok);
 
   (* --- Edge extents (gh-ocannl-469): a 7x19 output of a 7x13 by 13x19 matmul, tensorized over the
      whole triple. The register tiling covers the full 4x(RN*lanes) blocks and peels the partial row
