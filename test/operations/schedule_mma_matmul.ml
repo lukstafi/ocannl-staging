@@ -152,8 +152,9 @@ let () =
       in
       p "tensorized structure as expected" ok);
 
-  (* --- Half precision: [simdgroup_half8x8] on Metal, the wmma f16 path on CUDA (T3 draft), the
-     scalar fallback on the C backends. The inputs are multiples of 1/8 and 1/4 with 32-term sums
+  (* --- Half precision: [simdgroup_half8x8] on Metal, the wmma f16 path on CUDA (T3 draft),
+     rocWMMA on HIP, the scalar fallback on the C backends. The inputs are multiples of 1/8 and 1/4
+     with 32-term sums
      bounded by 12, so every product and partial sum is exactly representable in f16: the result is
      EXACT regardless of accumulation order, and parity is bitwise on every backend and either
      rendering path. --- *)
@@ -198,8 +199,11 @@ let () =
       let has s = String.is_substring src ~substring:s in
       let ok =
         if on_metal then has "simdgroup_half8x8" && not (has "== 0)")
+        else if String.is_substring backend_name ~substring:"hip" then
+          (* HIP: the rocWMMA f16 intrinsic (verified on gfx1151), no lane-0 fallback guard. *)
+          has "rocwmma::mma_sync" && not (has "== 0)")
         else if on_gpu then
-          (* CUDA: the T3 wmma draft, or the lane-0 fallback until it is verified. *)
+          (* CUDA: the wmma f16 intrinsic, or the lane-0 fallback on older devices. *)
           has "nvcuda::wmma" || has "== 0)"
         else
           (* Half precision declines the register tiling (single/double only): the scalar

@@ -188,8 +188,70 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     |> List.iter ~f:(fun pool_id ->
         Option.iter Slab.free_pool ~f:(fun free -> free device ~pool_id))
 
+  (* --- Cooperative tile-MMA (rocWMMA) capability, shared by [hardware_limits] and [mma_syntax].
+     Requires BOTH the RDNA3/RDNA3.5+ (gfx11/gfx12) wave32 architecture AND discoverable rocWMMA
+     headers. Gating both sites matters: [hardware_limits] keeps autotune/scheduling from selecting
+     [Tile_mma] where it cannot work, and [mma_syntax] makes a manual [Sched.tensorize] on an
+     unsupported device (CDNA gfx9 wave64, a mixed fleet) or a host without rocWMMA decline to the
+     scalar fallback rather than emit an uncompilable kernel. Memoized behind [lazy]: device
+     enumeration and filesystem probes must not run at module init. *)
+  let all_rdna_wave32 =
+    lazy
+      (let n = num_devices () in
+       n > 0
+       && Array.for_all
+            (Array.init n ~f:(fun ordinal -> H.Device.get_attributes (H.Device.get ~ordinal)))
+            ~f:(fun (a : H.Device.attributes) ->
+              (String.is_prefix a.gcn_arch_name ~prefix:"gfx11"
+              || String.is_prefix a.gcn_arch_name ~prefix:"gfx12")
+              && a.warp_size = 32))
+
+  (* The HIP SDK include dir (no-spaces junction on Windows / HIP_PATH / /opt/rocm), forward-slashed
+     for the clang command line. [None] when no SDK is found (the Linux built-in-headers path). *)
+  let hip_sdk_include_dir =
+    lazy
+      (let candidates =
+         (match Sys.getenv "LOCALAPPDATA" with Some l -> [ l ^ "/hip_path_link" ] | None -> [])
+         @ (match Sys.getenv "HIP_PATH" with Some p -> [ p ] | None -> [])
+         @ [ "/opt/rocm" ]
+       in
+       List.find_map candidates ~f:(fun p ->
+           if Stdlib.Sys.file_exists (p ^ "/include/hip/hip_fp16.h") then
+             Some (String.map ~f:(fun c -> if Char.(c = '\\') then '/' else c) (p ^ "/include"))
+           else None))
+
+  (* A directory directly containing [rocwmma/rocwmma.hpp], if any: [ROCWMMA_PATH] variants, a clone
+     under [%LOCALAPPDATA%/rocwmma], or the HIP include tree (rocWMMA installs there on Linux).
+     rocWMMA is header-only and is NOT in the ROCm Windows SDK, hence the extra search paths. *)
+  let rocwmma_include_dir =
+    lazy
+      (let candidates =
+         (match Sys.getenv "ROCWMMA_PATH" with
+          | Some p -> [ p; p ^ "/include"; p ^ "/library/include" ]
+          | None -> [])
+         @ (match Sys.getenv "LOCALAPPDATA" with
+           | Some l -> [ l ^ "/rocwmma/library/include" ]
+           | None -> [])
+         @ (match Lazy.force hip_sdk_include_dir with Some d -> [ d ] | None -> [])
+       in
+       List.find candidates ~f:(fun p -> Stdlib.Sys.file_exists (p ^ "/rocwmma/rocwmma.hpp"))
+       |> Option.map ~f:(String.map ~f:(fun c -> if Char.(c = '\\') then '/' else c)))
+
+  let mma_supported () =
+    Lazy.force all_rdna_wave32 && Option.is_some (Lazy.force rocwmma_include_dir)
+
   let%diagn2_sexp hip_to_code ~name hip_src =
     let name_hip = name ^ ".hip" in
+    (* Tile-MMA kernels (emitted by [mma_syntax]) need the rocWMMA header and C++17; injected only
+       when actually used, so kernels without tensor cores compile exactly as before and do not
+       require rocWMMA to be present. Mirrors the CUDA backend's <mma.h> injection. The header's
+       location is [rocwmma_include_dir] (the same probe that gates [mma_supported]); since
+       [mma_syntax] only emits [rocwmma::] when [mma_supported] holds, a kernel that reaches here
+       with rocWMMA in it always has a discoverable header. *)
+    let uses_rocwmma = String.is_substring hip_src ~substring:"rocwmma::" in
+    let hip_src =
+      if uses_rocwmma then "#include <rocwmma/rocwmma.hpp>\n" ^ hip_src else hip_src
+    in
     if Utils.settings.output_debug_files_in_build_directory then (
       let build_file = Utils.open_build_file ~base_name:name ~extension:".hip" in
       Stdio.Out_channel.output_string build_file.oc hip_src;
@@ -201,30 +263,22 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     (* hiprtc targets the architecture of the current default device when no [--offload-arch] is
        given. On Linux hiprtc ships built-in HIP headers; on Windows (observed with ROCm 7.1)
        [#include <hip/hip_fp16.h>] is not found without an include path, so point at the SDK's
-       include directory — via the no-spaces junction created by ocaml-hipjit (clang rejects paths
-       with spaces on the command line, see ocaml/ocaml#13917), falling back to HIP_PATH or the
-       /opt/rocm default. The -I is only added when the directory actually exists, so the Linux
-       built-in-headers path is unaffected. *)
+       include directory ([hip_sdk_include_dir]: the no-spaces junction created by ocaml-hipjit,
+       falling back to HIP_PATH or /opt/rocm). The -I is only added when the directory exists, so the
+       Linux built-in-headers path is unaffected. *)
     let hip_include_opt =
-      let candidates =
-        (match Sys.getenv "LOCALAPPDATA" with
-          | Some local_appdata -> [ local_appdata ^ "/hip_path_link" ]
-          | None -> [])
-        @ (match Sys.getenv "HIP_PATH" with Some p -> [ p ] | None -> [])
-        @ [ "/opt/rocm" ]
-      in
-      match
-        List.find candidates ~f:(fun p -> Stdlib.Sys.file_exists (p ^ "/include/hip/hip_fp16.h"))
-      with
-      | Some hip_path ->
-          let include_path =
-            String.map ~f:(fun c -> if Char.(c = '\\') then '/' else c) (hip_path ^ "/include")
-          in
-          [ "-I" ^ include_path ]
-      | None -> []
+      match Lazy.force hip_sdk_include_dir with Some d -> [ "-I" ^ d ] | None -> []
+    in
+    (* rocWMMA include dir, only for tensor-core kernels ([rocwmma_include_dir] finds the dir holding
+       [rocwmma/rocwmma.hpp]). *)
+    let rocwmma_include_opt =
+      if not uses_rocwmma then []
+      else match Lazy.force rocwmma_include_dir with Some d -> [ "-I" ^ d ] | None -> []
     in
     let options =
-      hip_include_opt @ ("-ffast-math" :: (if Utils.with_runtime_debug () then [ "-g" ] else []))
+      hip_include_opt @ rocwmma_include_opt
+      @ (if uses_rocwmma then [ "-std=c++17" ] else [])
+      @ ("-ffast-math" :: (if Utils.with_runtime_debug () then [ "-g" ] else []))
     in
     let code = Hiprtc.compile_to_code ~hip_src ~name:name_hip ~options ~with_debug in
     if Utils.settings.output_debug_files_in_build_directory then (
@@ -465,9 +519,161 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | _, 1 -> typ_of_prec prec
       | _ -> invalid_arg "Hip_backend.vec_typ_of_prec: invalid combination"
 
-    (* Tile-MMA cooperative emission is not implemented for HIP (rocWMMA / builtin WMMA intrinsics
-       are arch-specific); the barrier-bracketed lane-0 fallback renders instead. *)
-    let mma_syntax = None
+    (* DRAFT (tensorize-mma T3, HIP counterpart of the CUDA wmma draft): cooperative tile-MMA
+       emission for [Low_level.Tile_mma] via rocWMMA -- ROCm's header-compatible analogue of
+       nvcuda::wmma, so the fragment/load/mma/store shape mirrors cuda_backend.ml almost verbatim.
+       The extent-32 lane loop binds threadIdx.x, so the 32 consecutive .x threads reaching the
+       statement form the cooperating RDNA wavefront (wave32); 16x16x16 fragment blocks stay
+       resident across the whole [k] extent. Supported combinations on RDNA3 / RDNA3.5 WMMA: f16 x
+       f16 -> f32 (flagship), f16 x f16 -> f16, bf16 x bf16 -> f32, bf16 x bf16 -> bf16. RDNA WMMA
+       has no f32-input (tf32-like) shape, so uniform f32 stays on the scalar path -- unlike Metal
+       [simdgroup_matrix], which does f32. Declines (the barrier-bracketed lane-0 fallback renders
+       instead) on: other precision combinations, extents not multiples of 16, leading dimensions
+       violating the 16-element-tile stride constraint, and thread-space operands (per-thread stacks
+       are not a jointly-owned tile). Also declines (via [mma_supported] in the guard below) when the
+       target is not RDNA3+/wave32 or rocWMMA headers are absent: a manual [Sched.tensorize] reaches
+       this hook even where [hardware_limits.mma] is [None], so the capability check cannot live in
+       [hardware_limits] alone.
+       Verified on gfx1151 (Radeon 8060S, RDNA3.5) under hiprtc via schedule_mma_matmul: the f16 ->
+       f16 combination compiles and executes and matches the serial twin bitwise; the bf16 and
+       f16 -> f32 combinations take the same rocWMMA template path, differing only in fragment
+       element type. rocWMMA (header-only) is cloned under %LOCALAPPDATA%/rocwmma since it is not in
+       the ROCm 7.1 Windows SDK. [hip_to_code] injects the header and -std=c++17 only when a kernel
+       actually uses it, so non-tensor-core kernels are unaffected and do not require rocWMMA to be
+       present. *)
+    let mma_syntax =
+      Some
+        (fun ~d_prec
+          ~a_prec
+          ~b_prec
+          ~ta
+          ~tb
+          ~m
+          ~n
+          ~k
+          ~d:(d_ptr, ldd, d_space)
+          ~a:(a_ptr, lda, a_space)
+          ~b:(b_ptr, ldb, b_space)
+        ->
+          let tile = 16 in
+          (* (a/b fragment element type, accumulator fragment element type, ld multiple for a/b, ld
+             multiple for d). rocWMMA element types [rocwmma::float16_t] / [rocwmma::bfloat16_t] /
+             [float] need not be textually identical to the node's own C type ([__half] /
+             [__hip_bfloat16]), so the operand pointers are [reinterpret_cast] to them below. *)
+          let combo =
+            match (a_prec, b_prec, d_prec) with
+            | Ops.Half_prec _, Ops.Half_prec _, Ops.Single_prec _ ->
+                Some ("rocwmma::float16_t", "float", 8, 4)
+            | Ops.Half_prec _, Ops.Half_prec _, Ops.Half_prec _ ->
+                Some ("rocwmma::float16_t", "rocwmma::float16_t", 8, 8)
+            | Ops.Bfloat16_prec _, Ops.Bfloat16_prec _, Ops.Single_prec _ ->
+                Some ("rocwmma::bfloat16_t", "float", 8, 4)
+            | Ops.Bfloat16_prec _, Ops.Bfloat16_prec _, Ops.Bfloat16_prec _ ->
+                Some ("rocwmma::bfloat16_t", "rocwmma::bfloat16_t", 8, 8)
+            | _ -> None
+          in
+          let loadable = function
+            | `Device | `Shared -> true (* generic-address loads cover both *)
+            | `Thread -> false
+          in
+          match combo with
+          | Some (ab_typ, acc_typ, ab_ld_mult, d_ld_mult)
+            when mma_supported ()
+                 && m % tile = 0
+                 && n % tile = 0
+                 && k % tile = 0
+                 && lda % ab_ld_mult = 0
+                 && ldb % ab_ld_mult = 0
+                 && ldd % d_ld_mult = 0
+                 && loadable d_space && loadable a_space && loadable b_space ->
+              let open PPrint in
+              let mt = m / tile and nt = n / tile and kt = k / tile in
+              let frag kind typ layout =
+                Printf.sprintf "rocwmma::fragment<rocwmma::%s, %d, %d, %d, %s%s>" kind tile tile tile
+                  typ
+                  (match layout with Some l -> ", rocwmma::" ^ l | None -> "")
+              in
+              (* [reinterpret_cast] bridges the node's C element type to the rocWMMA fragment type. *)
+              let ptr_decl name typ ptr =
+                string (Printf.sprintf "%s *%s = reinterpret_cast<%s *>(" typ name typ)
+                ^^ ptr ^^ string ");"
+              in
+              let a_layout = if ta then "col_major" else "row_major" in
+              let b_layout = if tb then "col_major" else "row_major" in
+              let barrier = "__syncthreads();" in
+              let body_lines =
+                [
+                  barrier;
+                  Printf.sprintf "%s __mma_acc[%d][%d];" (frag "accumulator" acc_typ None) mt nt;
+                  Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                  Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                  Printf.sprintf
+                    "    rocwmma::load_matrix_sync(__mma_acc[__mi][__ni], __mma_dp + __mi * %d * %d \
+                     + __ni * %d, %d, rocwmma::mem_row_major);"
+                    tile ldd tile ldd;
+                  "  }";
+                  "}";
+                  Printf.sprintf "for (int __ki = 0; __ki < %d; ++__ki) {" kt;
+                  Printf.sprintf "  %s __mma_bf[%d];" (frag "matrix_b" ab_typ (Some b_layout)) nt;
+                  Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                  (* Transposed storage ([tb]): the stored matrix is the role's transpose -- index it
+                     at (col, row) and declare the fragment [col_major]; the leading dimension stays
+                     the operand's own. Same for [ta] below. *)
+                  (if tb then
+                     Printf.sprintf
+                       "    rocwmma::load_matrix_sync(__mma_bf[__ni], __mma_bp + __ni * %d * %d + \
+                        __ki * %d, %d);"
+                       tile ldb tile ldb
+                   else
+                     Printf.sprintf
+                       "    rocwmma::load_matrix_sync(__mma_bf[__ni], __mma_bp + __ki * %d * %d + \
+                        __ni * %d, %d);"
+                       tile ldb tile ldb);
+                  "  }";
+                  Printf.sprintf "  for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                  Printf.sprintf "    %s __mma_af;" (frag "matrix_a" ab_typ (Some a_layout));
+                  (if ta then
+                     Printf.sprintf
+                       "    rocwmma::load_matrix_sync(__mma_af, __mma_ap + __ki * %d * %d + __mi * \
+                        %d, %d);"
+                       tile lda tile lda
+                   else
+                     Printf.sprintf
+                       "    rocwmma::load_matrix_sync(__mma_af, __mma_ap + __mi * %d * %d + __ki * \
+                        %d, %d);"
+                       tile lda tile lda);
+                  Printf.sprintf "    for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                  "      rocwmma::mma_sync(__mma_acc[__mi][__ni], __mma_af, __mma_bf[__ni], \
+                   __mma_acc[__mi][__ni]);";
+                  "    }";
+                  "  }";
+                  "}";
+                  Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                  Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                  Printf.sprintf
+                    "    rocwmma::store_matrix_sync(__mma_dp + __mi * %d * %d + __ni * %d, \
+                     __mma_acc[__mi][__ni], %d, rocwmma::mem_row_major);"
+                    tile ldd tile ldd;
+                  "  }";
+                  "}";
+                  barrier;
+                ]
+              in
+              let body =
+                ptr_decl "__mma_dp" acc_typ d_ptr
+                ^^ hardline
+                ^^ ptr_decl "__mma_ap" ("const " ^ ab_typ) a_ptr
+                ^^ hardline
+                ^^ ptr_decl "__mma_bp" ("const " ^ ab_typ) b_ptr
+                ^^ hardline
+                ^^ separate_map hardline string body_lines
+              in
+              Some
+                (group
+                   (string (Printf.sprintf "{ /* tile_mma %dx%dx%d (rocwmma) */" m n k)
+                   ^^ nest 2 (hardline ^^ body)
+                   ^^ hardline ^^ rbrace))
+          | _ -> None)
 
     let rec binop_syntax prec v =
       let open PPrint in
@@ -1223,8 +1429,16 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
              min_over (fun (a : H.Device.attributes) -> a.max_threads_per_block);
            max_workgroup_memory_bytes =
              min_over (fun (a : H.Device.attributes) -> a.shared_mem_per_block);
-           (* No cooperative tile-MMA emission on HIP yet ([mma_syntax = None]). *)
-           mma = None;
+           (* Cooperative tile-MMA via rocWMMA, gated on [mma_supported]: RDNA3/RDNA3.5+ (gfx11/gfx12)
+              wave32 across ALL devices AND discoverable rocWMMA headers. CDNA (gfx9, wave64, MFMA)
+              and header-less hosts stay on the scalar path -- reporting [Some] there would let
+              autotune pick [Tile_mma] and then fail to compile. [None] unless EVERY device qualifies:
+              limits are min-over-devices, so code compiled once must be valid wherever it links.
+              Precision combinations are decided per call by [mma_syntax]. *)
+           mma =
+             (if mma_supported () then
+                Some { Backend_intf.mma_simd_width = 32; mma_tile = (16, 16, 16) }
+              else None);
          })
     in
     fun () -> Lazy.force limits
