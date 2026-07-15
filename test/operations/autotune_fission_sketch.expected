@@ -10,6 +10,7 @@ chain tune searches then hits the cache: true
 chain tune timed multiple candidates: true
 chain cache-hit values correct: true
 matmul sketch instantiations seeded: true
+tensorized (mma) sketch instantiations seeded: true
 tuned matmul matches the serial twin: true
 matmul tune searches then hits the cache: true
 matmul cache-hit values match the serial twin: true

@@ -32,7 +32,17 @@
     - {b Matmul sketches}: when a matmul micro-kernel is detected, parameterized instantiations
       of the composed pipelines pinned by the schedule tests — register blocktiling
       (Split + Swap + shared Stage + Privatize + materializing Unroll) on GPU backends, operand
-      packing (non-shared Stage + Privatize) on CPU backends — with dividing tile sizes.
+      packing (non-shared Stage + Privatize) on CPU backends — with dividing tile sizes. When the
+      backend reports an mma capability, additionally the {e tensorized} pipelines
+      (docs/proposals/tensorize-mma.md): Split into Grid blocks + [Tensorize] targeting
+      [simdgroup_matrix]/tensor cores, both unstaged (one full-reduction [Tile_mma] block) and
+      cooperatively staged through shared tiles (lane-aware Stage) — Stage-only by design,
+      [Privatize] would move the accumulator into thread-space the MMA loads cannot address. On
+      the C backends the tensorized whole-triple and Grid-split-row forms are seeded regardless
+      of [limits.mma] — their [Tile_mma] renders as the register-tiled vector micro-kernel.
+      Seeding matters because the beam cannot reach these compositions incrementally: a bare
+      [Tensorize] from the serial baseline loses its round and is discarded before Grid retypes
+      could join it.
     - {b Beam-round menu actions} on the incumbents: dividing serial Splits, Swaps of perfect
       serial pairs, Unrolls, Retype-Vectorized on innermost loops (explicit SIMD on CPU including
       the reduction-chains rendering of accumulations — gh-ocannl-468 — while GPU accumulations
