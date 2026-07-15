@@ -10,6 +10,8 @@ type report = {
   candidates_failed : int;
   rounds_run : int;
   sketch_candidates : int;
+  fiss_sketch_candidates : int;
+  fiss_sketch_timed : int;
   fissioned : bool;
   baseline_ms : float;
   best_ms : float;
@@ -188,6 +190,24 @@ let detect_matmul (llc : LL.t) : matmul_site option =
 
 let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner })
 
+(* Zero-geometry ops shared by the sketch pipelines: expand the whole-node [Zero_out] of the
+   output and give the resulting nest a compatible parallel geometry, via [mk_zops] on its two
+   fresh loop symbols. When the site is NOT zeroed — a fission segment's site never is, the
+   [Zero_out] lands in its own [`Zeros] segment — there is nothing to expand and the pipelines
+   are correct without it: [Privatize] init-loads the accumulator tile from the (pre-zeroed)
+   target, and [Tile_mma] loads the accumulator fragment before the reduction. *)
+let zero_geometry (site : matmul_site)
+    ~(mk_zops : zi:Idx.symbol -> zj:Idx.symbol -> Sched.schedule) : Sched.schedule =
+  if not site.m_zeroed then []
+  else (
+    if Array.length (Lazy.force site.m_d.Ir.Tnode.dims) <> 2 then
+      invalid_arg "Autotune sketch: only rank-2 outputs in v1";
+    let ez, zsyms = Sched.expand_zero ~tn:site.m_d in
+    let zi, zj =
+      match zsyms with [ zi; zj ] -> (zi, zj) | _ -> invalid_arg "Autotune sketch: non-2d zero"
+    in
+    ez :: mk_zops ~zi ~zj)
+
 (* The register-blocktiled GPU matmul (schedule_register_matmul.ml): each output dimension split
    twice (block tile -> Grid, register tile -> Workgroup), register loops sunk innermost, operands
    staged through workgroup-shared tiles at the k-block loop, output privatized, register loops
@@ -195,25 +215,22 @@ let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; i
    workgroup extents). *)
 let gpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_tm = tm; sk_tn = tn; _ }
     : Sched.schedule =
-  if not site.m_zeroed then
-    invalid_arg "Autotune sketch: no whole-node Zero_out of the matmul output";
-  if Array.length (Lazy.force site.m_d.Ir.Tnode.dims) <> 2 then
-    invalid_arg "Autotune sketch: only rank-2 outputs in v1";
-  let ez, zsyms = Sched.expand_zero ~tn:site.m_d in
-  let zi, zj =
-    match zsyms with [ zi; zj ] -> (zi, zj) | _ -> invalid_arg "Autotune sketch: non-2d zero"
+  let zops =
+    zero_geometry site ~mk_zops:(fun ~zi ~zj ->
+        let sp_zi, _, zi_i = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+        let sp_zi2, _, _ = Sched.split ~axis:zi_i ~factor:tm ~outer:LL.Workgroup ~inner:LL.Serial in
+        let sp_zj, _, zj_i = Sched.split ~axis:zj ~factor:bn ~outer:LL.Grid ~inner:LL.Serial in
+        let sp_zj2, _, _ = Sched.split ~axis:zj_i ~factor:tn ~outer:LL.Workgroup ~inner:LL.Serial in
+        [ sp_zi; sp_zi2; sp_zj; sp_zj2 ])
   in
-  let sp_zi, _, zi_i = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
-  let sp_zi2, _, _ = Sched.split ~axis:zi_i ~factor:tm ~outer:LL.Workgroup ~inner:LL.Serial in
-  let sp_zj, _, zj_i = Sched.split ~axis:zj ~factor:bn ~outer:LL.Grid ~inner:LL.Serial in
-  let sp_zj2, _, _ = Sched.split ~axis:zj_i ~factor:tn ~outer:LL.Workgroup ~inner:LL.Serial in
   let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
   let sp_i2, i_w, i_t = Sched.split ~axis:i_i ~factor:tm ~outer:LL.Workgroup ~inner:LL.Serial in
   let sp_j, j_o, j_i = Sched.split ~axis:site.m_j ~factor:bn ~outer:LL.Grid ~inner:LL.Serial in
   let sp_j2, j_w, j_t = Sched.split ~axis:j_i ~factor:tn ~outer:LL.Workgroup ~inner:LL.Serial in
   let sp_k, k_o, k_i = Sched.split ~axis:site.m_k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
   let swaps = sink i_t [ j_o; j_w; j_t; k_o; k_i ] @ sink j_t [ k_o; k_i ] in
-  [ ez; sp_zi; sp_zi2; sp_zj; sp_zj2; sp_i; sp_i2; sp_j; sp_j2; sp_k ]
+  zops
+  @ [ sp_i; sp_i2; sp_j; sp_j2; sp_k ]
   @ swaps
   @ [
       Sched.Stage
@@ -291,25 +308,22 @@ let cpu_sketch_schedule (site : matmul_site)
    the zeroing's grid blocks align with [j]'s. *)
 let gpu_mma_sketch_schedule (site : matmul_site)
     { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_simd = w; _ } : Sched.schedule =
-  if not site.m_zeroed then
-    invalid_arg "Autotune sketch: no whole-node Zero_out of the matmul output";
-  if Array.length (Lazy.force site.m_d.Ir.Tnode.dims) <> 2 then
-    invalid_arg "Autotune sketch: only rank-2 outputs in v1";
-  let ez, zsyms = Sched.expand_zero ~tn:site.m_d in
-  let zi, zj =
-    match zsyms with [ zi; zj ] -> (zi, zj) | _ -> invalid_arg "Autotune sketch: non-2d zero"
+  let zops =
+    zero_geometry site ~mk_zops:(fun ~zi ~zj ->
+        let sp_zi, _, _ = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+        let sp_zj, _, _ = Sched.split ~axis:zj ~factor:w ~outer:LL.Grid ~inner:LL.Workgroup in
+        [ sp_zi; sp_zj ])
   in
-  let sp_zi, _, _ = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
-  let sp_zj, _, _ = Sched.split ~axis:zj ~factor:w ~outer:LL.Grid ~inner:LL.Workgroup in
   let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
   let sp_j, j_o, j_i = Sched.split ~axis:site.m_j ~factor:bn ~outer:LL.Grid ~inner:LL.Serial in
   if bk = 0 then
     let tz, _lane = Sched.tensorize ~i:i_i ~j:j_i ~k:site.m_k ~simd_width:w in
-    [ ez; sp_zi; sp_zj; sp_i; sp_j ] @ sink i_i [ j_o ] @ [ tz ]
+    zops @ [ sp_i; sp_j ] @ sink i_i [ j_o ] @ [ tz ]
   else
     let sp_k, k_o, k_i = Sched.split ~axis:site.m_k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
     let tz, _lane = Sched.tensorize ~i:i_i ~j:j_i ~k:k_i ~simd_width:w in
-    [ ez; sp_zi; sp_zj; sp_i; sp_j; sp_k ]
+    zops
+    @ [ sp_i; sp_j; sp_k ]
     @ sink i_i [ j_o ]
     @ sink j_i [ k_o ]
     @ sink i_i [ k_o ]
@@ -340,23 +354,21 @@ let gpu_mma_sketch_schedule (site : matmul_site)
    lane loop renders serially on the C backends). With [sk_bm > 0] the row loops split into
    pool-parallel Grid blocks; [sk_bm = 0] keeps the single-statement form. *)
 let cpu_mma_sketch_schedule (site : matmul_site) { sk_bm = bm; _ } : Sched.schedule =
-  if not site.m_zeroed then
-    invalid_arg "Autotune sketch: no whole-node Zero_out of the matmul output";
-  if Array.length (Lazy.force site.m_d.Ir.Tnode.dims) <> 2 then
-    invalid_arg "Autotune sketch: only rank-2 outputs in v1";
-  let ez, zsyms = Sched.expand_zero ~tn:site.m_d in
-  let zi, zj =
-    match zsyms with [ zi; zj ] -> (zi, zj) | _ -> invalid_arg "Autotune sketch: non-2d zero"
+  let zops =
+    zero_geometry site ~mk_zops:(fun ~zi ~zj ->
+        let rz = Sched.Retype { axis = zj; ty = LL.Workgroup } in
+        if bm = 0 then [ rz ]
+        else
+          let sp_zi, _, _ = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+          [ sp_zi; rz ])
   in
-  let rz = Sched.Retype { axis = zj; ty = LL.Workgroup } in
   if bm = 0 then
     let tz, _lane = Sched.tensorize ~i:site.m_i ~j:site.m_j ~k:site.m_k ~simd_width:site.m_nj in
-    [ ez; rz; tz ]
+    zops @ [ tz ]
   else
-    let sp_zi, _, _ = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
     let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
     let tz, _lane = Sched.tensorize ~i:i_i ~j:site.m_j ~k:site.m_k ~simd_width:site.m_nj in
-    [ ez; sp_zi; rz; sp_i; tz ]
+    zops @ [ sp_i; tz ]
 
 let sketch_schedule ~p (opt : LL.optimized) : Sched.schedule =
   match detect_matmul opt.LL.llc with
@@ -368,7 +380,10 @@ let sketch_schedule ~p (opt : LL.optimized) : Sched.schedule =
       else cpu_sketch_schedule site p
 
 (* Sketch seed parameters compatible with the site's extents (dividing tiles: every constructed
-   guard folds, and shared staging requires them). *)
+   guard folds, and shared staging requires them). Unzeroed sites — the norm for fission
+   segments, whose [Zero_out] lives in its own [`Zeros] segment — are proposable too: the
+   pipelines skip the zero geometry (see [zero_geometry]), and a site whose kernel-mates cannot
+   share the parallel geometry merely fails its candidate compile. *)
 let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
     (opt : LL.optimized) : sketch_params list =
   match detect_matmul opt.LL.llc with
@@ -376,7 +391,7 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
   | Some site ->
       let divides c n = c <= n && n % c = 0 in
       let blocktile =
-        if is_gpu && site.m_zeroed then
+        if is_gpu then
           List.filter_map
             [
               (64, 64, 8, 4, 4); (32, 32, 8, 4, 4); (16, 16, 8, 4, 4); (32, 32, 16, 2, 2);
@@ -426,9 +441,7 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
         else []
       in
       let mma =
-        if not site.m_zeroed then []
-        else
-          match (is_gpu, limits.Ir.Backend_intf.mma) with
+        match (is_gpu, limits.Ir.Backend_intf.mma) with
           | true, Some { Ir.Backend_intf.mma_simd_width = w; mma_tile = tm_t, tn_t, tk_t } ->
               (* [bn = w] keeps the zeroing's column grid blocks aligned with [j]'s (see
                  [gpu_mma_sketch_schedule]); [bk = 0] = unstaged full-K block. *)
@@ -579,6 +592,14 @@ type fiss_flavor =
               workloads the aggressive [min_parallel:1] presets can all lose to it. *)
     }
   | F_saved of (string * SC.saved_schedule) list
+  | F_sketch of (string * sketch_params) list
+      (** Per-segment matmul sketches: for each listed segment (keyed by its pre-schedule
+          structural digest, like [F_saved]), the composed sketch pipeline instantiated with the
+          given parameters; every other segment gets the plain default preset — the same
+          pipeline the seed-time segment enumeration ran, so the segmentation converges. On a
+          key miss (segmentation drift) the candidate degrades to the plain fissioned preset
+          and dedups away by digest; unlike [F_saved] it never replays a cache entry, so no
+          loud drift guard is needed. *)
 
 type spec = Whole of whole_flavor | Fiss of fiss_flavor
 
@@ -638,6 +659,16 @@ let spec_label = function
         (if privatize then " priv" else "")
         (if config_thresholds then " cfg-thresh" else "")
   | Fiss (F_saved assoc) -> Printf.sprintf "F_saved[%d segs]" (List.length assoc)
+  | Fiss (F_sketch entries) ->
+      Printf.sprintf "F_sketch[%s]"
+        (String.concat ~sep:","
+           (List.map entries ~f:(fun (_, p) ->
+                Printf.sprintf "%s%s %dx%dx%d%s%s"
+                  (if p.sk_mma then "mma-" else "")
+                  (if p.sk_gpu then "gpu" else "cpu")
+                  p.sk_bm p.sk_bn p.sk_bk
+                  (if p.sk_mma then "" else Printf.sprintf "/%dx%d" p.sk_tm p.sk_tn)
+                  (if p.sk_hoist then " hoist" else ""))))
 
 (* Every candidate derives its CODE from the ONE base lowering ([base_opt] with [canon] its
    canonical form, captured together in [tune]) rather than from the compile's own fresh
@@ -727,6 +758,10 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu c
                 match List.Assoc.find entries ~equal:String.equal (SC.digest seg_canon) with
                 | Some saved -> fst (SC.of_saved seg_canon saved)
                 | None -> [])
+            | F_sketch entries -> (
+                match List.Assoc.find entries ~equal:String.equal (seg_key seg) with
+                | Some p -> sketch_schedule ~p seg
+                | None -> preset_sched seg)
           in
           let tuples =
             (* Match the default pipeline's placements (statement-crossing [Local]s promoted on
@@ -739,7 +774,7 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu c
              would coalesce differently and silently replay some segments unscheduled. Verify
              instead that every final [`Normal] segment found its saved schedule. *)
           (match flavor with
-          | F_preset _ -> ()
+          | F_preset _ | F_sketch _ -> ()
           | F_saved entries ->
               List.iter tuples ~f:(fun (kind, pre, _, _) ->
                   match kind with
@@ -1064,6 +1099,8 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
                   candidates_failed = 0;
                   rounds_run = 0;
                   sketch_candidates = 0;
+                  fiss_sketch_candidates = 0;
+                  fiss_sketch_timed = 0;
                   fissioned = is_fissioned c.form;
                   baseline_ms = entry.SC.baseline_ms;
                   best_ms = entry.SC.best_ms;
@@ -1131,6 +1168,58 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
         mk None :: (if is_gpu then List.map seed_block_sizes ~f:(fun bs -> mk (Some bs)) else [])
       in
       let sketch_params = sketch_seed_params ~is_gpu ~is_cpu ~limits base_opt in
+      (* Per-fission-segment sketch seeds (the [F_sketch] flavor): heavily fissioned graphs tune
+         per segment, where the whole-routine sketches never apply. Enumerate the fission
+         segmentation once, on a hermetic copy of the base lowering with the same pipeline
+         settings the candidate transform uses ([preset_sched]'s defaults), and detect a matmul
+         site per [`Normal] segment — keyed by the segment's structural pre-schedule digest,
+         like [F_saved]. *)
+      let fiss_sketch_entries =
+        if not (is_gpu || is_cpu) then []
+        else
+          let scratch =
+            {
+              base_opt with
+              LL.traced_store = Hashtbl.copy base_opt.LL.traced_store;
+              LL.optimize_ctx = LL.copy_optimize_ctx base_opt.LL.optimize_ctx;
+            }
+          in
+          let preset seg =
+            if is_gpu then Sched.default_gpu ~min_parallel:1 ~limits seg
+            else Sched.default_cpu ~min_parallel:1 seg
+          in
+          let zero_sched tns = if is_gpu then Sched.zero_expansion ~limits tns else [] in
+          match
+            Sched.fission_scheduled ~promote_locals:is_gpu ~preset ~zero_sched ~static_indices
+              scratch
+          with
+          | exception _ -> []
+          | [] | [ _ ] -> [] (* Unfissioned: the whole-routine sketches cover the site. *)
+          | tuples ->
+              List.filter_map tuples ~f:(fun (kind, pre, _, _) ->
+                  match kind with
+                  | `Zeros | `Solo -> None
+                  | `Normal -> (
+                      match sketch_seed_params ~is_gpu ~is_cpu ~limits pre with
+                      | [] -> None
+                      | params ->
+                          Some
+                            ( SC.digest (SC.canonicalize ~static_indices ~with_placements:false pre),
+                              params )))
+      in
+      let fiss_sketch_specs =
+        (* Index pairing: the n-th spec applies each keyed segment's n-th compatible parameter
+           set (its first, when it has fewer) — every parameter set of every segment gets
+           proposed while the other segments stay pinned to their preferred tiling. *)
+        let n =
+          List.fold fiss_sketch_entries ~init:0 ~f:(fun acc (_, ps) -> max acc (List.length ps))
+        in
+        List.init n ~f:(fun idx ->
+            Fiss
+              (F_sketch
+                 (List.map fiss_sketch_entries ~f:(fun (key, ps) ->
+                      (key, Option.value (List.nth ps idx) ~default:(List.hd_exn ps))))))
+      in
       let seed_specs =
         block_size_presets (fun block_size -> Whole (W_preset { block_size }))
         @ (if is_gpu || is_cpu then
@@ -1145,9 +1234,19 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
                         Fiss (F_preset { block_size; privatize; config_thresholds = false })))
            else [])
         @ List.map sketch_params ~f:(fun p -> Whole (W_sketch p))
+        @ fiss_sketch_specs
       in
       let by_time (_, a) (_, b) = Float.compare a b in
-      let pool = (baseline, baseline_ms) :: List.filter_map seed_specs ~f:try_spec in
+      let n_fiss_sketch_timed = ref 0 in
+      let pool =
+        (baseline, baseline_ms)
+        :: List.filter_map seed_specs ~f:(fun spec ->
+               let result = try_spec spec in
+               (match (spec, result) with
+               | Fiss (F_sketch _), Some _ -> Int.incr n_fiss_sketch_timed
+               | _ -> ());
+               result)
+      in
       let beam = ref (List.take (List.sort pool ~compare:by_time) beam_width) in
       let best = ref (List.hd_exn !beam) in
       let rounds_run = ref 0 in
@@ -1205,6 +1304,8 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
           candidates_failed = !n_failed;
           rounds_run = !rounds_run;
           sketch_candidates = List.length sketch_params;
+          fiss_sketch_candidates = List.length fiss_sketch_specs;
+          fiss_sketch_timed = !n_fiss_sketch_timed;
           fissioned = is_fissioned best_c.form;
           baseline_ms;
           best_ms;
