@@ -42,7 +42,14 @@
       of [limits.mma] — their [Tile_mma] renders as the register-tiled vector micro-kernel.
       Seeding matters because the beam cannot reach these compositions incrementally: a bare
       [Tensorize] from the serial baseline loses its round and is discarded before Grid retypes
-      could join it.
+      could join it. The sketches are seeded whole-routine {e and} per fission segment: on a
+      fissionable computation, the fission segmentation is enumerated once and the sketch
+      pipelines are instantiated for each segment where a matmul site is detected (keyed by the
+      segment's pre-schedule digest), the remaining segments keeping the default preset. A
+      segment's site has its [Zero_out] in a separate [`Zeros] segment, so the pipelines skip
+      the zero-expansion geometry there — sound because [Privatize] init-loads the accumulator
+      tile from the (pre-zeroed) target and [Tile_mma] loads the accumulator fragment before
+      the reduction.
     - {b Beam-round menu actions} on the incumbents: dividing serial Splits, Swaps of perfect
       serial pairs, Unrolls, Retype-Vectorized on innermost loops (explicit SIMD on CPU including
       the reduction-chains rendering of accumulations — gh-ocannl-468 — while GPU accumulations
@@ -82,8 +89,17 @@ type report = {
       (** Candidates rejected by op preconditions, hardware limits, or backend compilation. *)
   rounds_run : int;  (** Beam-expansion rounds actually executed (0 = seeds only). *)
   sketch_candidates : int;
-      (** Matmul-sketch instantiations seeded (0 when no matmul micro-kernel was detected or no
-          tile sizes divide the extents). Deterministic given the computation and backend. *)
+      (** Whole-routine matmul-sketch instantiations seeded (0 when no matmul micro-kernel was
+          detected or no tile sizes divide the extents). Deterministic given the computation and
+          backend. *)
+  fiss_sketch_candidates : int;
+      (** Per-fission-segment sketch candidates seeded (0 when the computation does not fission,
+          or no segment contains a compatible matmul site). Deterministic given the computation
+          and backend. *)
+  fiss_sketch_timed : int;
+      (** Of the seeded per-fission-segment sketch candidates, those that compiled and were
+          actually timed (not rejected by op preconditions or hardware limits, not deduplicated
+          by digest). *)
   fissioned : bool;  (** The winning candidate compiles as multiple fissioned kernels. *)
   baseline_ms : float;
   best_ms : float;
