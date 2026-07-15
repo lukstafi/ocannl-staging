@@ -119,6 +119,8 @@ type t =
       d : Tn.t * Indexing.axis_index array;  (** Accumulator block base. *)
       a : Tn.t * Indexing.axis_index array;
       b : Tn.t * Indexing.axis_index array;
+      ta : bool;  (** [a] is stored transposed: its last two axes are [k, i] rather than [i, k]. *)
+      tb : bool;  (** [b] is stored transposed: its last two axes are [j, k] rather than [k, j]. *)
       m : int;
       n : int;
       k : int;  (** Covered block extents (multiples of the backend's intrinsic tile). *)
@@ -131,7 +133,10 @@ type t =
           [simdgroup_matrix]). The per-lane ownership of tile elements is architecture-defined and
           deliberately opaque — the [lane] index must not occur in the base indices. Each operand's
           tile spans its tnode's last two axes (row-major, minor axis stride 1); strides come from
-          the tnode dims. Backends without an MMA hook render [fallback] once per simdgroup, under
+          the tnode dims. With [ta] (resp. [tb]) the stored layout of [a] (resp. [b]) is the
+          transpose of its role — emissions load tiles with the hardware transpose flag
+          ([simdgroup_load]'s [transpose_matrix], wmma's [col_major]) and swap the tile-offset
+          arithmetic; the scalar [fallback] carries the original indexing and is unaffected. Backends without an MMA hook render [fallback] once per simdgroup, under
           an [if (lane == 0)] guard — the renderer's obligation, keyed off [lane]. The statement
           validates like {!Workgroup_barrier} (it is one for code-motion and divergence purposes)
           plus a write of [d] for the coverage rule. *)
@@ -3738,16 +3743,19 @@ let to_doc_cstyle ?name ?static_indices () llc =
         let body_doc = nest 2 (break 1 ^^ doc_of_code body) in
         group (header ^^ body_doc ^^ break 1 ^^ string "}")
     | Workgroup_barrier -> string "workgroup_barrier;"
-    | Tile_mma { d = d_tn, d_idcs; a = a_tn, a_idcs; b = b_tn, b_idcs; m; n; k; lane; fallback } ->
+    | Tile_mma
+        { d = d_tn, d_idcs; a = a_tn, a_idcs; b = b_tn, b_idcs; ta; tb; m; n; k; lane; fallback }
+      ->
+        let transposed t = if t then string "^T" else empty in
         let header =
           string (Printf.sprintf "tile_mma<%dx%dx%d>@" m n k)
           ^^ pp_symbol lane ^^ string " " ^^ doc_ident d_tn
           ^^ brackets (pp_indices d_idcs)
           ^^ string " += " ^^ doc_ident a_tn
           ^^ brackets (pp_indices a_idcs)
-          ^^ string " * " ^^ doc_ident b_tn
+          ^^ transposed ta ^^ string " * " ^^ doc_ident b_tn
           ^^ brackets (pp_indices b_idcs)
-          ^^ string " fallback {"
+          ^^ transposed tb ^^ string " fallback {"
         in
         group (header ^^ nest 2 (break 1 ^^ doc_of_code fallback) ^^ break 1 ^^ string "}")
     | If { cond = c, cprec; body } ->
@@ -3877,16 +3885,19 @@ let to_doc ?name ?static_indices () llc =
         let body_doc = nest 2 (break 1 ^^ doc_of_code body) in
         group (header ^^ body_doc ^^ break 1 ^^ string "}")
     | Workgroup_barrier -> string "workgroup_barrier;"
-    | Tile_mma { d = d_tn, d_idcs; a = a_tn, a_idcs; b = b_tn, b_idcs; m; n; k; lane; fallback } ->
+    | Tile_mma
+        { d = d_tn, d_idcs; a = a_tn, a_idcs; b = b_tn, b_idcs; ta; tb; m; n; k; lane; fallback }
+      ->
+        let transposed t = if t then string "^T" else empty in
         let header =
           string (Printf.sprintf "tile_mma<%dx%dx%d>@" m n k)
           ^^ pp_symbol lane ^^ string " " ^^ doc_ident d_tn
           ^^ brackets (pp_indices d_idcs)
           ^^ string " += " ^^ doc_ident a_tn
           ^^ brackets (pp_indices a_idcs)
-          ^^ string " * " ^^ doc_ident b_tn
+          ^^ transposed ta ^^ string " * " ^^ doc_ident b_tn
           ^^ brackets (pp_indices b_idcs)
-          ^^ string " fallback {"
+          ^^ transposed tb ^^ string " fallback {"
         in
         group (header ^^ nest 2 (break 1 ^^ doc_of_code fallback) ^^ break 1 ^^ string "}")
     | If { cond = c, _; body } ->

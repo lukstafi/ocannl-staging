@@ -173,6 +173,8 @@ module type C_syntax_config = sig
     (d_prec:Ops.prec ->
     a_prec:Ops.prec ->
     b_prec:Ops.prec ->
+    ta:bool ->
+    tb:bool ->
     m:int ->
     n:int ->
     k:int ->
@@ -184,7 +186,9 @@ module type C_syntax_config = sig
   (** Cooperative tile-MMA emission for [Low_level.Tile_mma]
       (docs/proposals/tensorize-mma.md §4): given the per-operand precisions (the backend decides
       which combinations its units support — Metal [simdgroup_matrix] is uniform-precision only,
-      CUDA wmma's flagship combination is mixed f16×f16→f32), the covered block extents
+      CUDA wmma's flagship combination is mixed f16×f16→f32), the transposed-storage flags
+      [ta]/[tb] (the operand's stored layout is the transpose of its role — load tiles with the
+      hardware transpose flag and swapped offset arithmetic), the covered block extents
       [m]/[n]/[k], and per operand a pointer expression to the tile base (already offset), its
       leading-dimension stride in elements, and its address space, emit the intrinsic sequence
       (fragment declarations / loads / mma steps / stores) executed by every lane of the enclosing
@@ -2118,7 +2122,7 @@ module C_syntax (B : C_syntax_config) = struct
             invalid_arg
               "C_syntax.pp_ll: Workgroup_barrier not supported by this backend (serialization \
                cannot implement a barrier)")
-    | Tile_mma { d; a; b; m; n; k; lane; fallback } -> (
+    | Tile_mma { d; a; b; ta; tb; m; n; k; lane; fallback } -> (
         (* Cooperative tile-MMA (docs/proposals/tensorize-mma.md §4). Backends with an [mma_syntax]
            hook emit the intrinsic sequence on every lane; everywhere else (including per-call
            declines and logged runs, which must stay serial and deterministic) the scalar fallback
@@ -2175,7 +2179,10 @@ module C_syntax (B : C_syntax_config) = struct
             no_test
               ((match B.vector_style with `Vec_extensions -> false | `Packed_struct -> true)
               || B.vector_bytes < 8
-              || Utils.debug_log_from_routines ())
+              || Utils.debug_log_from_routines ()
+              (* Transposed operand layouts: the tiling's pointer arithmetic assumes
+                 [a[i*lda+l]] / [b[l*ldb+j]] — the scalar fallback handles them. *)
+              || ta || tb)
           in
           let d_tn = fst d in
           let prec = Lazy.force d_tn.Tn.prec in
@@ -2341,7 +2348,7 @@ module C_syntax (B : C_syntax_config) = struct
             let d_prec, d_op = operand d in
             let a_prec, a_op = operand a in
             let b_prec, b_op = operand b in
-            match emit ~d_prec ~a_prec ~b_prec ~m ~n ~k ~d:d_op ~a:a_op ~b:b_op with
+            match emit ~d_prec ~a_prec ~b_prec ~ta ~tb ~m ~n ~k ~d:d_op ~a:a_op ~b:b_op with
             | Some doc -> doc
             | None -> fallback_or_tiled ()))
     | If { cond = c, cprec; body } ->

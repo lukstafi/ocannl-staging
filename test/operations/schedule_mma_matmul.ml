@@ -353,6 +353,61 @@ let () =
     | None -> p "staged+tensorized matmul parity (GPU) or clean rejection (CPU)" false);
     p "staged+tensorized structure as expected" true);
 
+  (* --- Transposed operand layouts (the gradient-GEMM access patterns):
+     [d[i,j] += at[k,i] * b[k,j]] (a stored transposed) and [d[i,j] += a[i,k] * bt[j,k]] (b
+     stored transposed). Tensorize infers the orientation from the index discipline and sets
+     [Tile_mma.ta]/[tb]; on Metal the tiles load via [simdgroup_load]'s [transpose_matrix] flag
+     with swapped offset arithmetic (no operand copy, tolerance parity — the tile reduction
+     reassociates); the C backends decline the register tiling on transposed layouts, so the
+     scalar fallback keeps parity BITWISE. CUDA's wmma draft declines uniform f32 regardless. --- *)
+  let mtav = Array.init (n * n) ~f:(fun x -> Float.of_int (x % 7) *. 0.5) in
+  let mtbv = Array.init (n * n) ~f:(fun x -> Float.of_int (x % 11) -. 5.) in
+  let mta = TDSL.ndarray mtav ~label:[ "mta" ] ~output_dims:[ n; n ] () in
+  let mtb = TDSL.ndarray mtbv ~label:[ "mtb" ] ~output_dims:[ n; n ] () in
+  let check_transposed ~tag ~serial ~tensorized =
+    let serial_comp = named ("mm_" ^ tag ^ "_serial") (Train.forward serial) in
+    let ctx0 = Context.auto () in
+    let ctx0, routine0 =
+      Context.compile ~lowered_transform:(fun opt -> opt) ctx0 serial_comp Ir.Indexing.Empty
+    in
+    let ctx0 = Context.run ctx0 routine0 in
+    let want = Context.get_values ctx0 serial.Tensor.value in
+    let mma_comp = named ("mm_" ^ tag ^ "_mma") (Train.forward tensorized) in
+    let transform opt = Sched.apply (mma_schedule ~out:tensorized.Tensor.value opt) opt in
+    let ctx1 = Context.auto () in
+    let ctx1, routine1 =
+      Context.compile ~lowered_transform:transform ctx1 mma_comp Ir.Indexing.Empty
+    in
+    let ctx1 = Context.run ctx1 routine1 in
+    let got = Context.get_values ctx1 tensorized.Tensor.value in
+    p
+      (Printf.sprintf "%s tensorized matmul matches the serial twin" tag)
+      (Array.for_all2_exn got want ~f:approx);
+    p
+      (Printf.sprintf "%s C-backend fallback matches bitwise" tag)
+      (on_gpu || Array.for_all2_exn got want ~f:Float.equal);
+    match read_generated ("mm_" ^ tag ^ "_mma") with
+    | None -> p (Printf.sprintf "%s tensorized structure as expected" tag) false
+    | Some src ->
+        let has s = String.is_substring src ~substring:s in
+        let ok =
+          if on_metal then
+            (* The intrinsic path with the transposing load; no lane-0 fallback guard. *)
+            has "ulong2(0), true)" && has "simdgroup_multiply_accumulate" && not (has "== 0)")
+          else
+            (* CUDA (uniform f32) and the C backends (transposed layouts) both decline to the
+               scalar fallback; the register tiling must not fire on transposed layouts. *)
+            has "== 0)" && not (has "Tile_mma register tiling")
+        in
+        p (Printf.sprintf "%s tensorized structure as expected" tag) ok
+  in
+  let%op tc0 = mta +* "ki;kj=>ij" mtb in
+  let%op tc1 = mta +* "ki;kj=>ij" mtb in
+  check_transposed ~tag:"ta" ~serial:tc0 ~tensorized:tc1;
+  let%op td0 = mta +* "ik;jk=>ij" mtb in
+  let%op td1 = mta +* "ik;jk=>ij" mtb in
+  check_transposed ~tag:"tb" ~serial:td0 ~tensorized:td1;
+
   (* --- Pattern discipline: Tensorize on a non-micro-kernel nest is a targeted error --- *)
   let%op mc2 = ma * mb in
   let bad_transform (opt : LL.optimized) : LL.optimized =

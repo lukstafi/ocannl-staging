@@ -12,9 +12,11 @@
    - [Autotune.tune] on a fissionable computation searches whole-routine and fissioned candidates
      and returns correct values; the second call hits the cache.
    - The matmul sketch generator detects a 32x32 matmul and seeds tile-size instantiations of the
-     register-blocktiling (GPU) / operand-packing (CPU) pipelines ([sketch_candidates > 0]); the
-     tuned routine matches the serial twin, and Stage/Privatize round-trip through the saved form
-     when a sketch wins. *)
+     register-blocktiling (GPU) / operand-packing (CPU) pipelines, plus the tensorized (tile-MMA)
+     pipelines (unstaged and cooperatively staged [Tensorize] on backends with an mma capability;
+     whole-triple and Grid-split register-tiled [Tile_mma] on the C backends); the tuned routine
+     matches the serial twin, and the schedules round-trip through the saved form when a sketch
+     wins. *)
 
 open Base
 open Ocannl
@@ -216,6 +218,15 @@ let () =
     match !mm_reports with [ r2; r1 ] -> (r2, r1) | _ -> failwith "expected two mm reports"
   in
   p "matmul sketch instantiations seeded" (mr1.Autotune.sketch_candidates > 0);
+  (* Tensorized (tile-MMA) sketch families ride along the blocktiling/packing ones: for the
+     32x32x32 f32 site, cc seeds 2 packing + 2 hoisted-packing + 2 whole-triple/Grid-split
+     [Tensorize] pipelines; Metal seeds 4 blocktiling + 5 simdgroup pipelines (2 unstaged full-K
+     + 3 cooperatively staged); other GPU backends seed at least the 4 blocktiling ones (plus 5
+     wmma pipelines when the device reports an mma capability). *)
+  p "tensorized (mma) sketch instantiations seeded"
+    (mr1.Autotune.sketch_candidates
+    >= (if is_cpu then 6 else if String.is_substring backend_name ~substring:"metal" then 9 else 4)
+    );
   p "tuned matmul matches the serial twin" (Array.for_all2_exn got_mm1 got_serial ~f:approx);
   p "matmul tune searches then hits the cache"
     ((not mr1.Autotune.cache_hit) && mr2.Autotune.cache_hit);

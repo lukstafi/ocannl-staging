@@ -9,4 +9,10 @@ edge-extent tensorized matmul matches the serial twin bitwise: true
 edge-extent register tiling with peeled edges: true
 staged+tensorized matmul parity (GPU) or clean rejection (CPU): true
 staged+tensorized structure as expected: true
+ta tensorized matmul matches the serial twin: true
+ta C-backend fallback matches bitwise: true
+ta tensorized structure as expected: true
+tb tensorized matmul matches the serial twin: true
+tb C-backend fallback matches bitwise: true
+tb tensorized structure as expected: true
 misassigned roles are rejected with a targeted error: true

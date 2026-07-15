@@ -229,7 +229,13 @@ than rewritten into the sections above.
   `Schedule.tensorize` helper mints `lane`). It requires the perfectly nested serial `i×j×k`
   micro-kernel with the single accumulation body (`d[...,i,j] += a[...,i,k] * b[...,k,j]`,
   plain-add or FMA form as `optimize`'s simplify leaves it; unit coefficients on the last two
-  axes, transposed layouts rejected). Divisibility by the intrinsic tile is *not* checked by the
+  axes; since 2026-07-15 transposed layouts are accepted — the recognition infers per-operand
+  orientation ([a] as [..., i, k] or [..., k, i], [b] as [..., k, j] or [..., j, k]) and records
+  it as `Tile_mma.ta`/`tb`, which Metal renders via [simdgroup_load]'s [transpose_matrix] flag
+  and the CUDA draft as wmma [col_major] fragments, both with swapped tile-offset arithmetic;
+  the cc register tiling declines transposed layouts to the scalar fallback. This covers the
+  gradient GEMMs ([dA = g·Bᵀ], [dB = Aᵀ·g]) without operand copies. Divisibility by the
+  intrinsic tile is *not* checked by the
   transform — the schedule layer is backend-agnostic; `mma_syntax` declines per call and the
   fallback runs, so the op is always semantics-preserving.
 - **The `mma_syntax` hook** receives the three operand precisions (`d_prec`/`a_prec`/`b_prec` —
@@ -311,6 +317,38 @@ Landed scope matched the estimate: ~100 lines in `apply_stage` plus the `coopera
 IR changes; no `validate_parallel` changes. One addition the sketch missed: the staging-point
 workgroup-slot coverage check counts slot 0 as covered by construction in cooperative mode (the
 fresh lane loop binds it; extent agreement is enforced downstream by the uniformity rule).
+
+## Autotune sketch seeding (2026-07-15)
+
+The benchmark caches showed no tuned schedule ever contained a `Tensorize`: the greedy beam
+(default width 2, rounds 2) cannot reach the composition — a bare `Tensorize` from the serial
+baseline leaves every outer loop serial (one simdgroup total), loses round 1, and is discarded
+before Grid retypes could join it; candidates seeded from the default schedule have no serial
+triples left, so `Tensorize` never enters their menu. The fix seeds the composed pipelines
+directly as whole-routine sketch candidates (`Autotune.sketch_seed_params`, gated on
+`hardware_limits.mma` for GPU):
+
+- **GPU unstaged** (`bk = 0`): Split `i`/`j` into Grid blocks (`bn` pinned to the lane width so
+  the zeroing's column grid blocks align), sink `i_i`, `Tensorize` the inner triple over the
+  full reduction — one `Tile_mma` block statement, `d` traffic fully amortized.
+- **GPU staged**: additionally Split `k`, sink to `i_o { j_o { k_o { i_i { j_i { k_i }}}}}`,
+  cooperative shared `Stage` of both operands at `k_o`, `Tensorize` — the pinned
+  staged+tensorized pipeline of `schedule_mma_matmul.ml`.
+- **CPU** (seeded regardless of `limits.mma`): the whole-triple `Tensorize`
+  (`bin/schedule_bench.ml`'s tensorize variant, rendered register-tiled per gh-ocannl-469) plus
+  Grid-split row-block variants for pool parallelism.
+
+Stage-only composition, deliberately no `Privatize`: it would relocate the accumulator into
+thread-local scratch, which `simdgroup_load` cannot address (`mma_syntax` declines thread-space
+operands and the whole statement silently falls back to scalar); `Tile_mma`'s block semantics
+already keep accumulator fragments register-resident across the reduction. The zeroing nest
+mirrors the accumulation's grid geometry with an inner Workgroup loop of extent `simd_width`
+covering the lane slot (barrier-strength uniformity). Verified on Metal: all five mma sketch
+candidates of the 32×32 site compile, validate, and time (`autotune_fission_sketch.ml`).
+
+Known gap: sketches remain whole-routine seeds — heavily fissioned graphs (gpt2, multi-layer
+MLPs) tune per segment, where only menu actions apply; a per-segment `F_sketch` flavor is the
+follow-up.
 
 ## Relations
 

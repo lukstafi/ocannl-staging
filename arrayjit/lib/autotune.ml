@@ -82,9 +82,18 @@ let time_routine ~repeats cctx routine =
 
 type sketch_params = {
   sk_gpu : bool;  (** Register blocktiling with shared staging vs. CPU operand packing. *)
+  sk_mma : bool;
+      (** Tensorized (tile-MMA) pipeline instead of the scalar blocktiling/packing one: on GPU,
+          Split → (optional cooperative shared Stage) → Tensorize targeting [simdgroup_matrix] /
+          tensor cores; on cc, the whole-triple [Tile_mma] rendered register-tiled
+          (gh-ocannl-469), optionally Grid-parallel over row blocks. Seeded directly because the
+          greedy menu cannot reach the composition: a bare [Tensorize] from the serial baseline
+          (one simdgroup, everything else serial) loses round 1 and the beam discards it before
+          Grid retypes could join it. *)
+  sk_simd : int;  (** MMA lane width ([hardware_limits.mma_simd_width]); 0 when [not sk_mma]. *)
   sk_bm : int;
   sk_bn : int;
-  sk_bk : int;
+  sk_bk : int;  (** For GPU MMA sketches, [sk_bk = 0] = unstaged (one full-K [Tile_mma] block). *)
   sk_tm : int;  (** Register-tile factors; unused on CPU. *)
   sk_tn : int;
   sk_hoist : bool;
@@ -266,62 +275,207 @@ let cpu_sketch_schedule (site : matmul_site)
       Sched.Privatize { target = site.m_d; over = k_o };
     ]
 
+(* Tensorized (tile-MMA) GPU matmul (docs/proposals/tensorize-mma.md; the pinned pipelines of
+   schedule_mma_matmul.ml): Split the output dims into Grid blocks, then [Tensorize] the inner
+   micro-kernel into a [Tile_mma] block statement. Stage-only composition — [Privatize] must NOT
+   join it: it would relocate the accumulator into thread-local scratch, which the MMA loads
+   cannot address ([mma_syntax] declines thread-space operands, silently costing the whole
+   tensorization), and [Tile_mma]'s block semantics already keep the accumulator fragments
+   register-resident across the reduction. With [sk_bk = 0] the single block statement spans the
+   full reduction, streaming operand tiles from device memory and amortizing [d] traffic
+   entirely; with [sk_bk > 0] both operands are staged through cooperative shared tiles at the
+   k-block loop (lane-aware Stage), costing one [d] fragment load/store per k-block. The zeroing
+   nest mirrors the accumulation's grid geometry, with an inner Workgroup loop of extent
+   [sk_simd] covering the lane slot (barrier-strength uniformity: every workgroup extent must
+   equal the lane width once a [Tile_mma] is present) — the seeds constrain [sk_bn = sk_simd] so
+   the zeroing's grid blocks align with [j]'s. *)
+let gpu_mma_sketch_schedule (site : matmul_site)
+    { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_simd = w; _ } : Sched.schedule =
+  if not site.m_zeroed then
+    invalid_arg "Autotune sketch: no whole-node Zero_out of the matmul output";
+  if Array.length (Lazy.force site.m_d.Ir.Tnode.dims) <> 2 then
+    invalid_arg "Autotune sketch: only rank-2 outputs in v1";
+  let ez, zsyms = Sched.expand_zero ~tn:site.m_d in
+  let zi, zj =
+    match zsyms with [ zi; zj ] -> (zi, zj) | _ -> invalid_arg "Autotune sketch: non-2d zero"
+  in
+  let sp_zi, _, _ = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+  let sp_zj, _, _ = Sched.split ~axis:zj ~factor:w ~outer:LL.Grid ~inner:LL.Workgroup in
+  let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+  let sp_j, j_o, j_i = Sched.split ~axis:site.m_j ~factor:bn ~outer:LL.Grid ~inner:LL.Serial in
+  if bk = 0 then
+    let tz, _lane = Sched.tensorize ~i:i_i ~j:j_i ~k:site.m_k ~simd_width:w in
+    [ ez; sp_zi; sp_zj; sp_i; sp_j ] @ sink i_i [ j_o ] @ [ tz ]
+  else
+    let sp_k, k_o, k_i = Sched.split ~axis:site.m_k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
+    let tz, _lane = Sched.tensorize ~i:i_i ~j:j_i ~k:k_i ~simd_width:w in
+    [ ez; sp_zi; sp_zj; sp_i; sp_j; sp_k ]
+    @ sink i_i [ j_o ]
+    @ sink j_i [ k_o ]
+    @ sink i_i [ k_o ]
+    @ [
+        Sched.Stage
+          {
+            source = site.m_a;
+            tile_loops = [ i_i; k_i ];
+            shared = true;
+            cooperative = Some w;
+            hoisted = false;
+          };
+        Sched.Stage
+          {
+            source = site.m_b;
+            tile_loops = [ k_i; j_i ];
+            shared = true;
+            cooperative = Some w;
+            hoisted = false;
+          };
+        tz;
+      ]
+
+(* Whole-triple tensorized CPU matmul (gh-ocannl-469; bin/schedule_bench.ml's [tensorize]
+   variant): one [Tile_mma] statement the C backends render tinyBLAS-style — the C-tile in an
+   RM×RN grid of vector registers held across the k-loop, edges peeled. The zeroing's column
+   loop becomes the Workgroup axis with the lane width matching its extent (coverage rule; the
+   lane loop renders serially on the C backends). With [sk_bm > 0] the row loops split into
+   pool-parallel Grid blocks; [sk_bm = 0] keeps the single-statement form. *)
+let cpu_mma_sketch_schedule (site : matmul_site) { sk_bm = bm; _ } : Sched.schedule =
+  if not site.m_zeroed then
+    invalid_arg "Autotune sketch: no whole-node Zero_out of the matmul output";
+  if Array.length (Lazy.force site.m_d.Ir.Tnode.dims) <> 2 then
+    invalid_arg "Autotune sketch: only rank-2 outputs in v1";
+  let ez, zsyms = Sched.expand_zero ~tn:site.m_d in
+  let zi, zj =
+    match zsyms with [ zi; zj ] -> (zi, zj) | _ -> invalid_arg "Autotune sketch: non-2d zero"
+  in
+  let rz = Sched.Retype { axis = zj; ty = LL.Workgroup } in
+  if bm = 0 then
+    let tz, _lane = Sched.tensorize ~i:site.m_i ~j:site.m_j ~k:site.m_k ~simd_width:site.m_nj in
+    [ ez; rz; tz ]
+  else
+    let sp_zi, _, _ = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+    let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+    let tz, _lane = Sched.tensorize ~i:i_i ~j:site.m_j ~k:site.m_k ~simd_width:site.m_nj in
+    [ ez; sp_zi; rz; sp_i; tz ]
+
 let sketch_schedule ~p (opt : LL.optimized) : Sched.schedule =
   match detect_matmul opt.LL.llc with
   | None -> invalid_arg "Autotune sketch: no matmul micro-kernel detected"
-  | Some site -> if p.sk_gpu then gpu_sketch_schedule site p else cpu_sketch_schedule site p
+  | Some site ->
+      if p.sk_mma then
+        if p.sk_gpu then gpu_mma_sketch_schedule site p else cpu_mma_sketch_schedule site p
+      else if p.sk_gpu then gpu_sketch_schedule site p
+      else cpu_sketch_schedule site p
 
 (* Sketch seed parameters compatible with the site's extents (dividing tiles: every constructed
    guard folds, and shared staging requires them). *)
-let sketch_seed_params ~is_gpu ~is_cpu (opt : LL.optimized) : sketch_params list =
+let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
+    (opt : LL.optimized) : sketch_params list =
   match detect_matmul opt.LL.llc with
   | None -> []
   | Some site ->
       let divides c n = c <= n && n % c = 0 in
-      if is_gpu && site.m_zeroed then
-        List.filter_map
-          [
-            (64, 64, 8, 4, 4); (32, 32, 8, 4, 4); (16, 16, 8, 4, 4); (32, 32, 16, 2, 2);
-            (16, 16, 8, 2, 2);
-          ]
-          ~f:(fun (bm, bn, bk, tm, tn) ->
-            if
-              divides bm site.m_ni && divides bn site.m_nj && divides bk site.m_nk
-              && divides tm bm && divides tn bn
-            then
-              Some
-                {
-                  sk_gpu = true;
-                  sk_bm = bm;
-                  sk_bn = bn;
-                  sk_bk = bk;
-                  sk_tm = tm;
-                  sk_tn = tn;
-                  sk_hoist = false;
-                }
-            else None)
-      else if is_cpu then
-        let base =
-          List.filter_map [ 16; 8 ] ~f:(fun b ->
-              if divides b site.m_ni && divides b site.m_nj && divides b site.m_nk then
+      let blocktile =
+        if is_gpu && site.m_zeroed then
+          List.filter_map
+            [
+              (64, 64, 8, 4, 4); (32, 32, 8, 4, 4); (16, 16, 8, 4, 4); (32, 32, 16, 2, 2);
+              (16, 16, 8, 2, 2);
+            ]
+            ~f:(fun (bm, bn, bk, tm, tn) ->
+              if
+                divides bm site.m_ni && divides bn site.m_nj && divides bk site.m_nk
+                && divides tm bm && divides tn bn
+              then
                 Some
                   {
-                    sk_gpu = false;
-                    sk_bm = b;
-                    sk_bn = b;
-                    sk_bk = b;
-                    sk_tm = 0;
-                    sk_tn = 0;
+                    sk_gpu = true;
+                    sk_mma = false;
+                    sk_simd = 0;
+                    sk_bm = bm;
+                    sk_bn = bn;
+                    sk_bk = bk;
+                    sk_tm = tm;
+                    sk_tn = tn;
                     sk_hoist = false;
                   }
               else None)
-        in
-        (* Hoisted vs in-kernel packing stays a measured choice (gh-ocannl-470): when a constant
-           operand can be packed at link time, propose each tiling in both flavors. *)
-        if hoistable site.m_a || hoistable site.m_b then
-          base @ List.map base ~f:(fun p -> { p with sk_hoist = true })
-        else base
-      else []
+        else if is_cpu then
+          let base =
+            List.filter_map [ 16; 8 ] ~f:(fun b ->
+                if divides b site.m_ni && divides b site.m_nj && divides b site.m_nk then
+                  Some
+                    {
+                      sk_gpu = false;
+                      sk_mma = false;
+                      sk_simd = 0;
+                      sk_bm = b;
+                      sk_bn = b;
+                      sk_bk = b;
+                      sk_tm = 0;
+                      sk_tn = 0;
+                      sk_hoist = false;
+                    }
+                else None)
+          in
+          (* Hoisted vs in-kernel packing stays a measured choice (gh-ocannl-470): when a constant
+             operand can be packed at link time, propose each tiling in both flavors. *)
+          if hoistable site.m_a || hoistable site.m_b then
+            base @ List.map base ~f:(fun p -> { p with sk_hoist = true })
+          else base
+        else []
+      in
+      let mma =
+        if not site.m_zeroed then []
+        else
+          match (is_gpu, limits.Ir.Backend_intf.mma) with
+          | true, Some { Ir.Backend_intf.mma_simd_width = w; mma_tile = tm_t, tn_t, tk_t } ->
+              (* [bn = w] keeps the zeroing's column grid blocks aligned with [j]'s (see
+                 [gpu_mma_sketch_schedule]); [bk = 0] = unstaged full-K block. *)
+              List.filter_map
+                [ (16, w, 0); (32, w, 0); (16, w, 32); (32, w, 32); (32, w, 16) ]
+                ~f:(fun (bm, bn, bk) ->
+                  if
+                    divides bm site.m_ni && divides bn site.m_nj
+                    && (bk = 0 || (divides bk site.m_nk && bk % tk_t = 0))
+                    && bm % tm_t = 0 && bn % tn_t = 0 && site.m_nk % tk_t = 0
+                  then
+                    Some
+                      {
+                        sk_gpu = true;
+                        sk_mma = true;
+                        sk_simd = w;
+                        sk_bm = bm;
+                        sk_bn = bn;
+                        sk_bk = bk;
+                        sk_tm = 0;
+                        sk_tn = 0;
+                        sk_hoist = false;
+                      }
+                  else None)
+          | _ when is_cpu ->
+              (* The register-tiled [Tile_mma] rendering needs no MMA units ([limits.mma] is
+                 [None] on cc): seed the whole-triple form plus Grid-parallel row-block splits.
+                 Ineligible statements (non-f32/f64, transposed) render the scalar fallback —
+                 correct, merely timing like the baseline. *)
+              List.filter_map [ 0; 64; 16 ] ~f:(fun bm ->
+                  if bm = 0 || divides bm site.m_ni then
+                    Some
+                      {
+                        sk_gpu = false;
+                        sk_mma = true;
+                        sk_simd = 0;
+                        sk_bm = bm;
+                        sk_bn = 0;
+                        sk_bk = 0;
+                        sk_tm = 0;
+                        sk_tn = 0;
+                        sk_hoist = false;
+                      }
+                  else None)
+          | _ -> []
+      in
+      blocktile @ mma
 
 (** {2 The privatized fission flavor}
 
@@ -469,6 +623,11 @@ let bs_label = function None -> "cfg" | Some b -> Int.to_string b
 let spec_label = function
   | Whole (W_saved s) -> Printf.sprintf "W_saved[%d ops]" (List.length s)
   | Whole (W_preset { block_size }) -> Printf.sprintf "W_preset[bs=%s]" (bs_label block_size)
+  | Whole (W_sketch p) when p.sk_mma ->
+      Printf.sprintf "W_sketch[mma-%s %dx%dx%d%s]"
+        (if p.sk_gpu then "gpu" else "cpu")
+        p.sk_bm p.sk_bn p.sk_bk
+        (if p.sk_gpu && p.sk_bk > 0 then " staged" else "")
   | Whole (W_sketch p) ->
       Printf.sprintf "W_sketch[%s %dx%dx%d/%dx%d%s]"
         (if p.sk_gpu then "gpu" else "cpu")
@@ -971,7 +1130,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
       let block_size_presets mk =
         mk None :: (if is_gpu then List.map seed_block_sizes ~f:(fun bs -> mk (Some bs)) else [])
       in
-      let sketch_params = sketch_seed_params ~is_gpu ~is_cpu base_opt in
+      let sketch_params = sketch_seed_params ~is_gpu ~is_cpu ~limits base_opt in
       let seed_specs =
         block_size_presets (fun block_size -> Whole (W_preset { block_size }))
         @ (if is_gpu || is_cpu then
