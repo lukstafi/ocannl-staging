@@ -1,0 +1,19 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+planner: disjoint same-prec share bytes: true
+planner: overlapping spans get disjoint bytes: true
+planner: cross-precision never shares: true
+planner: always-live conflicts with all: true
+planner: greedy-by-size packs small pair into one gap: true
+planner: over-cap layout falls back: true
+gate-off: read h1: ok
+gate-off: read h4: ok
+gate-off: read out: ok
+gate-on: read h1: raises buffer-aliased
+gate-on: read h4: raises buffer-aliased
+gate-on: read out: ok
+chain: result parity across buffer_aliasing: true
+chain: footprint reduced: true
+train: loss trajectory parity across buffer_aliasing: PASS
+train: loss decreased: true
+train: footprint not increased: true

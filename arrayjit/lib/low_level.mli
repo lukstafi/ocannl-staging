@@ -301,6 +301,12 @@ type optimize_ctx = {
           (docs/proposals/context-scoped-memory-modes.md): the pipeline's placement decisions
           (Virtual / Local / On_device) land here, seeded by and never written back to the tnodes'
           declared intent ({!Tnode.field-memory_mode}). *)
+  alias_candidates : Hash_set.M(Tnode).t;
+      (** gh-ocannl-489 liveness-based buffer aliasing: nodes the memory planner may place at
+          overlapping byte ranges within the routine's working pool (decided per compile, before
+          codegen). Codegen must not emit the [restrict] qualifier for these parameters — whether a
+          candidate pair actually shares bytes is settled only at link time, and an aliased
+          [restrict] pair is a miscompile. *)
 }
 [@@deriving sexp_of]
 
@@ -381,6 +387,16 @@ val input_and_output_nodes : optimized -> (Set.M(Tnode).t * Set.M(Tnode).t) * Tn
     non-merge nodes. They are inputs in a broad sense, as they could be recurrent nodes or
     parameters. Outputs are all the materialized nodes written-to by the code. The last returned
     component is the input merge node, if used in the code. *)
+
+val buffer_access_spans : stmt_serial:bool -> t list -> (Tnode.t, int * int) Base.Hashtbl.t option
+(** gh-ocannl-489 liveness-based buffer aliasing: per-tnode access span over the final
+    (post-schedule, post-fission) code of a routine, as a closed interval of positions; the input is
+    the routine's kernels in execution order (a singleton when not fissioned). With
+    [stmt_serial:true] every top-level statement gets its own position — sound only for backends
+    where consecutive top-level statements of one compiled procedure are fully synchronized (the C
+    backends); with [stmt_serial:false] all statements of a segment share one position, since GPU
+    kernels have no grid-wide synchronization between top-level statements. Returns [None] when the
+    code contains [Staged_compilation] (opaque accesses: no aliasing plan can be trusted). *)
 
 (** {2 Printing} *)
 

@@ -3080,7 +3080,16 @@ module C_syntax (B : C_syntax_config) = struct
                 ("C_syntax.compile_proc: alias view " ^ Tn.debug_name tn
                ^ " as a kernel parameter: accesses must be rewritten to the buffer-owning parent \
                   (aliased parameters would falsify the restrict qualifier)");
-            let restrict_ = match B.restrict_keyword with Some kw -> kw ^ " " | None -> "" in
+            (* gh-ocannl-489: an aliasing candidate may be placed at bytes overlapping another
+               parameter's by the link-time liveness planner, so its pointer must not promise
+               [restrict] -- whether a candidate pair actually shares bytes is unknowable at
+               codegen time. *)
+            let restrict_ =
+              match B.restrict_keyword with
+              | Some kw when not (Hash_set.mem optimize_ctx.Low_level.alias_candidates tn) ->
+                  kw ^ " "
+              | _ -> ""
+            in
             (B.typ_of_prec (Lazy.force tn.Tn.prec) ^ " *" ^ restrict_ ^ get_ident tn, tn) :: acc)
           else acc)
     in
@@ -3207,7 +3216,10 @@ module C_syntax (B : C_syntax_config) = struct
         let defs =
           (* The derived per-node pointers address disjoint slab sub-ranges, and the kernel body
              accesses nodes only through them (never through the pool bases), which is all the
-             restrict qualifier asserts (gh-ocannl-164). *)
+             restrict qualifier asserts (gh-ocannl-164). The liveness planner (gh-ocannl-489)
+             preserves the disjointness for pooled backends: they use segment-granularity liveness,
+             under which any two nodes accessed by ONE kernel have overlapping live spans and are
+             therefore never placed at overlapping offsets. *)
           let restrict_ = match B.restrict_keyword with Some kw -> kw ^ " " | None -> "" in
           List.mapi ptr_params ~f:(fun k (_decl, tn) ->
               let typ = B.typ_of_prec (Lazy.force tn.Tn.prec) in

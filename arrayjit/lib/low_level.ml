@@ -287,18 +287,33 @@ type optimize_ctx = {
           (docs/proposals/context-scoped-memory-modes.md): decisions land here, not on the tnode.
           Copied per backend [compile] (see {!copy_optimize_ctx}) so sibling compiles are hermetic.
       *)
+  alias_candidates : Hash_set.M(Tnode).t;
+      (** gh-ocannl-489 liveness-based buffer aliasing: nodes the memory planner may place at
+          overlapping byte ranges within the routine's working pool (decided per compile, before
+          codegen). Codegen must not emit the [restrict] qualifier for these parameters — whether a
+          candidate pair actually shares bytes is settled only at link time ([allocate_delta]), and
+          an aliased [restrict] pair is a miscompile. Another per-compilation-lineage decision kind,
+          same species as {!field-placements}. *)
 }
 [@@deriving sexp_of]
 
 let empty_optimize_ctx () =
-  { computations = Hashtbl.create (module Tnode); placements = Tnode.Placements.create () }
+  {
+    computations = Hashtbl.create (module Tnode);
+    placements = Tnode.Placements.create ();
+    alias_candidates = Hash_set.create (module Tnode);
+  }
 
 (** A shallow-copy fork of the lineage state: the copy sees everything decided so far, and neither
     the original nor sibling copies observe its later mutations. Backend [compile] forks the
     incoming context's [optimize_ctx] through this, which is what makes sibling candidate compiles
     from one frontier hermetic. *)
-let copy_optimize_ctx { computations; placements } =
-  { computations = Hashtbl.copy computations; placements = Tnode.Placements.copy placements }
+let copy_optimize_ctx { computations; placements; alias_candidates } =
+  {
+    computations = Hashtbl.copy computations;
+    placements = Tnode.Placements.copy placements;
+    alias_candidates = Hash_set.copy alias_candidates;
+  }
 
 type traced_store = (Tn.t, traced_array) Base.Hashtbl.t [@@deriving sexp_of]
 
@@ -3163,6 +3178,85 @@ let input_and_output_nodes optimized =
         in
         (inputs, outputs)),
     optimized.merge_node )
+
+(** gh-ocannl-489 liveness-based buffer aliasing: per-tnode access span over the final (post-
+    schedule, post-fission) code of a routine, as a closed interval of positions. [segments] are the
+    routine's kernels in execution order (a singleton list when the routine was not fissioned).
+
+    Position granularity is the soundness crux. With [stmt_serial:true] every top-level statement of
+    every segment gets its own position: valid only for backends where consecutive top-level
+    statements of one compiled procedure are fully synchronized (the C backends — parallel [Grid]
+    dispatches join before the next statement). With [stmt_serial:false] all statements of a segment
+    share one position: on GPU backends a kernel's top-level statements have no grid-wide
+    synchronization between them (that lack is exactly where fission cuts), so only segment
+    boundaries — device-ordered by the fissioned routine's event chain — separate lifetimes.
+
+    Returns [None] when the code contains [Staged_compilation]: its accesses are opaque to this
+    fold, so no aliasing plan can be trusted. Scope-local reads/writes ([Get_local]/[Set_local])
+    own no buffer and are skipped; [Local_scope] bodies are descended into, since inlined virtual
+    computations read materialized nodes. *)
+let buffer_access_spans ~stmt_serial (segments : t list) :
+    (Tn.t, int * int) Base.Hashtbl.t option =
+  let spans = Hashtbl.create (module Tn) in
+  let opaque = ref false in
+  let pos = ref 0 in
+  let touch tn =
+    Hashtbl.update spans tn ~f:(function None -> (!pos, !pos) | Some (lo, _) -> (lo, !pos))
+  in
+  let rec scal (sc : scalar_t) : unit =
+    match sc with
+    | Local_scope { body; id = _; orig_indices = _ } -> stmt body
+    | Get_local _ -> ()
+    | Get (tn, _) -> touch tn
+    | Get_dynamic { tn; dyn_value = dv, _; idcs = _; dyn_axis = _ } ->
+        touch tn;
+        scal dv
+    | Get_merge_buffer (_, _) -> (* Reads the merge buffer, not the node's context buffer. *) ()
+    | Ternop (_, (a, _), (b, _), (c, _)) ->
+        scal a;
+        scal b;
+        scal c
+    | Binop (_, (a, _), (b, _)) ->
+        scal a;
+        scal b
+    | Unop (_, (a, _)) -> scal a
+    | Constant _ | Constant_bits _ | Embed_index _ -> ()
+  and stmt (c : t) : unit =
+    match c with
+    | Noop | Comment _ -> ()
+    | Staged_compilation _ -> opaque := true
+    | Seq (t1, t2) ->
+        stmt t1;
+        stmt t2
+    | For_loop { body; _ } -> stmt body
+    | Zero_out tn -> touch tn
+    | Set { tn; llsc; idcs = _; debug = _ } ->
+        touch tn;
+        scal llsc
+    | Set_dynamic { tn; dyn_value = dv, _; llsc; idcs = _; dyn_axis = _; debug = _ } ->
+        touch tn;
+        scal dv;
+        scal llsc
+    | Set_from_vec { tn; arg = a, _; idcs = _; length = _; vec_unop = _; debug = _ } ->
+        touch tn;
+        scal a
+    | Set_local (_, sc) -> scal sc
+    | Declare_local _ | Workgroup_barrier -> ()
+    | If { cond = cond, _; body } ->
+        scal cond;
+        stmt body
+    | Tile_mma { d = d, _; a = a, _; b = b, _; fallback; _ } ->
+        touch d;
+        touch a;
+        touch b;
+        stmt fallback
+  in
+  List.iter segments ~f:(fun seg ->
+      List.iter (flat_lines [ seg ]) ~f:(fun line ->
+          stmt line;
+          if stmt_serial then Int.incr pos);
+      if not stmt_serial then Int.incr pos);
+  if !opaque then None else Some spans
 
 (* gh-343: recognize the in-range guard's reduction body. Matches the two semantically-equivalent
    one-hot selectors over loop variable [k]: - [Where (Cmpeq (Embed_index (Iterator k), index_expr),

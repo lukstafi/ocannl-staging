@@ -543,6 +543,19 @@ let points_2d ?from_axis ~xdim ~ydim ctx (tn : Tn.t) =
 let is_initialized ctx node = Set.mem ctx.initialized_nodes node
 let device_id ctx = ctx.device_id
 
+let get_used_memory ctx =
+  Backends.query ctx.wrapped
+    {
+      q =
+        (fun (type dev runner event)
+          (module Backend : BI.Backend
+            with type dev = dev
+             and type runner = runner
+             and type event = event)
+          c
+        -> Backend.get_used_memory c.BI.device);
+    }
+
 let placements ctx =
   Backends.query ctx.wrapped { q = (fun _ c -> c.BI.optimize_ctx.Ir.Low_level.placements) }
 
