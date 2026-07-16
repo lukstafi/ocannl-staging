@@ -41,11 +41,23 @@ type hardware_limits = {
   mma : mma_capability option;
       (** Tile-MMA units ([simdgroup_matrix] / tensor cores); [None] when the backend has none wired
           — [Tile_mma] statements then render their scalar fallback. *)
+  simd_vector_bytes : int;
+      (** Vector register width in bytes used by the C backends' explicit vector-extension
+          renderings ([Vectorized] loops, the register-tiled [Tile_mma] micro-kernel); [0] when the
+          backend does no such rendering (GPU backends bind hardware axes instead). Carried here so
+          schedule construction (autotune's seeding pre-filter, gh-ocannl-479) can statically rule
+          out candidates the renderer must decline, e.g. a micro-kernel column extent below one
+          vector's lane count. *)
 }
 [@@deriving sexp, compare, equal]
 
 let no_hardware_limits =
-  { max_threads_per_workgroup = None; max_workgroup_memory_bytes = None; mma = None }
+  {
+    max_threads_per_workgroup = None;
+    max_workgroup_memory_bytes = None;
+    mma = None;
+    simd_vector_bytes = 0;
+  }
 
 (** The backend slab allocator, replacing the per-tnode [Alloc_buffer] interface. The shared
     allocator seam (see {!Backends}) mints deterministic per-device [pool_id]s and calls these
