@@ -40,6 +40,8 @@ opam install hipjit   # for AMD HIP backend
 
 **Working from a Claude Code worktree**: worktrees under `.claude/worktrees/` are nested inside the parent repo, so dune resolves the PARENT checkout as the project root — pass `--root .` to every dune command run from a worktree. `dune promote` rejects `--root`; run `dune promotion apply` from the worktree root instead.
 
+**Formatting**: the repo is not fully ocamlformat-clean, and CI does not enforce formatting — do NOT run `dune fmt` as part of feature work (it reformats the entire repo and pollutes the diff; recover from an accidental sweep with `git restore .`). Match the surrounding style by hand; to check just your own lines, diff against `_build/default/<dir>/.formatted/<file>`. Formatting-state updates land as standalone formatting commits, paired with updating `.ocamlformat-ignore` — ppx-expectation files (`test/ppx/*_expected.ml`, compared against pretty-printed ppx output) must stay unformatted, so add new ones to that list.
+
 ## Architecture Overview
 
 ### Core Directory Structure
@@ -102,7 +104,9 @@ opam install hipjit   # for AMD HIP backend
 **Running Tests**:
 - `dune runtest` - runs all tests including inline tests and cram-style tests, EXCEPT the slow training runs (see below)
 - `dune runtest test/operations/` - runs all tests in operations directory
-- `dune exec test/operations/test_name.exe` - ONLY works for standalone tests with `test` stanza and `.expected` files
+- Avoid `dune exec test/.../test_name.exe` for standalone tests: `dune exec` keeps the invocation cwd, the config search walks UP from cwd (`Utils.config_file_args`), and the root `ocannl_config` is deliberately gitignored (personal dev settings) — so fresh clones, CI, and worktrees find no config and the test dies partway, or `Context.auto` silently picks metal→cuda→cc (a "cc" run quietly executes on the GPU). Tests only find their config under `dune runtest`/build rules because dune sets their cwd to `_build/default/<test dir>` where `(copy_files ../config/ocannl_config)` materialized it
+- Instead, build the output-capturing rule: `dune build test/operations/<name>.exe.output`, inspect `_build/default/<dir>/<name>.exe.output`, then `dune runtest <dir>` to register the `.expected` diff and promote. For `bin/` executables (same trap), pin `OCANNL_BACKEND=...` explicitly
+- Never judge `dune runtest` through a pipe: `... 2>&1 | tail -3 && echo OK` reports the status of `tail`, not dune (no pipefail), and promotion-diff failures look like normal chatter. Run `dune runtest --root . > /tmp/suite.log 2>&1; echo "exit: $?"` and grep the log for `^File .*expected` to list diffs; when this runs as a background task, read the recorded `exit: N` line — the task's own exit code is the trailing `echo`, always 0
 - Inline tests (like those in `test_threefry4x32.ml`) are part of library modules and run via `dune runtest`, not `dune exec`
 
 **Slow training tests (the `slow` alias)**:
@@ -115,6 +119,8 @@ opam install hipjit   # for AMD HIP backend
 - **Inline tests**: Files included in library `modules` field with `inline_tests` stanza (e.g., `test_threefry4x32.ml` in `operations_tutorials` library)
 - **Standalone tests**: Files with dedicated `test` stanza and corresponding `.expected` files (e.g., `threefry4x32_demo`)
 - Use `dune promote` to accept test output changes
+- A few `%expect_test` blocks capture exception backtraces that hard-code `file:line` (e.g. `test/operations/primitive_ops.ml` embeds `context.ml` line numbers). Any edit that shifts lines in such a file forces a line-number-only re-promote — benign noise, not a behavior change; promote it in the same shell as the failing run (the `.ml.corrected` can vanish between runs)
+- For optimizer passes that change *what value a cell holds* (virtualization guards, index solving, accumulation/init elision), a structural test on the emitted op tree is necessary but NOT sufficient — also assert on executed output vs. a materialized/reference run (`Context.compile`/`run`/`get_values`); a pass has shipped green structural checks while computing all zeros
 - Backend codegen snapshots (e.g. `.cu.expected` files, `test_cuda_pool_offset.expected`) go stale when codegen changes land without that backend's hardware available to re-record them — expect to re-promote such snapshots when the hardware next runs the suite
 - **Test Placement Guidelines**:
   * Always add tests under one of the test subdirectories
@@ -145,10 +151,17 @@ opam install hipjit   # for AMD HIP backend
 - Tensor printing in expect tests: `Tensor.print ~here:[%here] ~force:false ~with_code:false ~with_grad:false \`Inline tensor`
 - For simple test executables, use `(libraries base ocannl stdio)` in dune file
 
+### Pull Requests
+
+- Prefer a series of 3-4 topical commits (one per coherent sub-feature) plus follow-up fixing commits, merged with a merge commit that preserves the series — not one big squashed commit. The series documents the design decomposition and keeps each piece independently reviewable and bisectable
+- Each commit should at least compile: loop `git checkout <rev> && dune build --root . @check` over `git rev-list --reverse master..HEAD` (interactive rebase is unavailable in this harness)
+- Test-expectation promotions that mix topics can land in a final tests/promotions commit
+
 ### Configuration
 
 - See `ocannl_config.reference` for documentation of all settings
 - Key configs: backend selection, debug logging, optimization levels
+- **Adding a config key touches three places**, enforced by `test/operations/test_config_consistency`: document it in `ocannl_config.reference`, register it in `Utils.known_config_keys`, and if a new `.ml` file gains `get_global_arg` call sites, add that file to the consistency test's source-scan list
 
 **Configuration Methods** (in order of precedence):
 1. Command-line flags: `--ocannl_<option>=<value>` (e.g., `--ocannl_backend=cuda`)
