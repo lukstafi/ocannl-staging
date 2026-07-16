@@ -10,14 +10,22 @@
 
    On the C backends the shared schedules are rejected and the CPU variants run instead: cpupack (S4
    cache tiling + operand packing, all-Serial), tensorize (whole-triple register-tiled Tile_mma,
-   gh-ocannl-469), packmma (Tile_mma composed with cache tiling + packing, all-Serial GEBP), and
+   gh-ocannl-469), packmma (Tile_mma composed with cache tiling + packing, all-Serial GEBP),
    packmma_par (the same composition with pool-parallel Grid row blocks and per-chunk privatized A~
-   tiles).
+   tiles; the B~ pack at k_o re-enters the parallel construct once per k-block), and the three
+   grid-outermost flavors — one dispatch spanning the whole GEBP triple (gh-ocannl-473 /
+   gh-ocannl-475): pm_hoist (hoisted constant-pool B~ panel, A read in place; autotune's
+   sk_grid && sk_hoist seed), pm_mixed (hoisted B~ plus an in-kernel per-chunk A~ pack; the
+   sk_pack_rest seed), and pm_bpk (both operands packed in-kernel, each chunk re-packing its own
+   B~ panel — needs the panel under the per-chunk privatization cap, config
+   cc_grid_private_bytes_cap, or it silently declines to serial: check with
+   --ocannl_schedule_log_declines=true).
 
-   Usage: dune exec bin/schedule_bench.exe -- [n] [repeats] (defaults 256 and 20; n must be a
-   multiple of 64). Run with OCANNL_BACKEND=metal (or cuda); the C backends reject the shared
-   schedules. Timing includes kernel executions and one device-to-host transfer per variant (runs
-   queue on the stream; get_values synchronizes). *)
+   Usage: dune exec bin/schedule_bench.exe -- [n] [repeats] [m] [k] (defaults 256, 20, n, n; all
+   dims must be multiples of 64; the output is m x n, the reduction depth k — deep-K gradient-GEMM
+   geometries are m,n << k). Run with OCANNL_BACKEND=metal (or cuda); the C backends reject the
+   shared schedules. Timing includes kernel executions and one device-to-host transfer per variant
+   (runs queue on the stream; get_values synchronizes). *)
 
 open Base
 open Ocannl
@@ -44,16 +52,23 @@ let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
 let () =
-  let n = if Array.length (Sys.get_argv ()) > 1 then Int.of_string (Sys.get_argv ()).(1) else 256 in
-  let repeats =
-    if Array.length (Sys.get_argv ()) > 2 then Int.of_string (Sys.get_argv ()).(2) else 20
+  (* Positional integer args only — --ocannl_* config flags share the argv. *)
+  let pos_args =
+    Array.to_list (Sys.get_argv ())
+    |> List.tl_exn
+    |> List.filter ~f:(fun s -> not (String.is_prefix s ~prefix:"-"))
   in
-  assert (n % 64 = 0);
-  let mav = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 13) *. 0.25) in
-  let mbv = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 17) -. 8.) in
-  let ma = TDSL.ndarray mav ~label:[ "ma" ] ~input_dims:[ n ] ~output_dims:[ n ] () in
-  let mb = TDSL.ndarray mbv ~label:[ "mb" ] ~input_dims:[ n ] ~output_dims:[ n ] () in
-  let flops = 2.0 *. Float.of_int n *. Float.of_int n *. Float.of_int n in
+  let arg i default = match List.nth pos_args i with Some s -> Int.of_string s | None -> default in
+  let n = arg 0 256 in
+  let repeats = arg 1 20 in
+  let m = arg 2 n in
+  let k = arg 3 n in
+  assert (n % 64 = 0 && m % 64 = 0 && k % 64 = 0);
+  let mav = Array.init (m * k) ~f:(fun i -> Float.of_int (i % 13) *. 0.25) in
+  let mbv = Array.init (k * n) ~f:(fun i -> Float.of_int (i % 17) -. 8.) in
+  let ma = TDSL.ndarray mav ~label:[ "ma" ] ~input_dims:[ k ] ~output_dims:[ m ] () in
+  let mb = TDSL.ndarray mbv ~label:[ "mb" ] ~input_dims:[ n ] ~output_dims:[ k ] () in
+  let flops = 2.0 *. Float.of_int m *. Float.of_int n *. Float.of_int k in
 
   let accum_syms opt =
     let paths = nest_paths opt.LL.llc in
@@ -243,6 +258,35 @@ let () =
     @ [ stage mb.Tensor.value [ k_i; j ]; stage ma.Tensor.value [ i_i; k_i ]; tz ]
   in
 
+  (* Grid-outermost flavors (one dispatch spanning the whole GEBP triple; gh-ocannl-473 /
+     gh-ocannl-475): the row-block Grid loop stays outermost — no [sink i_o [k_o]] — so anything
+     packed at [k_o] lands inside the Grid body. [pack_b = `Hoist] packs the (constant) B~ panel at
+     link time into the constant pool; [`Chunk] packs it in-kernel, each chunk re-packing its own
+     panel (redundant work, but no dispatch-per-k-block; the panel must fit the per-chunk
+     privatization cap). [pack_a] toggles the in-kernel per-chunk A~ pack vs. reading A in
+     place. *)
+  let packmma_outer_schedule ~pack_a ~pack_b ~mc opt =
+    let bm, bk = (64, 64) in
+    let i, j, k = accum_syms opt in
+    let ez, zsyms = Sched.expand_zero ~tn:mc in
+    let zi = match zsyms with [ zi; _ ] -> zi | _ -> assert false in
+    let sp_zi, _, _ = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+    let sp_i, _, i_i = Sched.split ~axis:i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+    let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
+    let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner }) in
+    let stage ~hoisted source tile_loops =
+      Sched.Stage { source; tile_loops; shared = false; cooperative = None; hoisted }
+    in
+    let stage_b =
+      match pack_b with
+      | `Hoist -> [ stage ~hoisted:true mb.Tensor.value [ k_i; j ] ]
+      | `Chunk -> [ stage ~hoisted:false mb.Tensor.value [ k_i; j ] ]
+    in
+    let stage_a = if pack_a then [ stage ~hoisted:false ma.Tensor.value [ i_i; k_i ] ] else [] in
+    let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1 in
+    [ ez; sp_zi; sp_i; sp_k ] @ sink j [ k_o ] @ sink i_i [ k_o ] @ stage_b @ stage_a @ [ tz ]
+  in
+
   let bench ~variant ~schedule =
     let%op mc = ma * mb in
     let comp = named ("mm_" ^ variant) (Train.forward mc) in
@@ -268,7 +312,7 @@ let () =
       values.(n + 1);
     secs
   in
-  p "matmul %dx%dx%d, %d repeats, backend from config/OCANNL_BACKEND\n" n n n repeats;
+  p "matmul m=%d n=%d k=%d, %d repeats, backend from config/OCANNL_BACKEND\n" m n k repeats;
   let backend = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc") in
   let has_shared =
     String.is_substring backend ~substring:"metal" || String.is_substring backend ~substring:"cuda"
@@ -285,5 +329,19 @@ let () =
     let t_tmma = bench ~variant:"tensorize" ~schedule:(Some tensorize_schedule) in
     let t_pmma = bench ~variant:"packmma" ~schedule:(Some packmma_schedule) in
     let t_pmmap = bench ~variant:"packmma_par" ~schedule:(Some packmma_par_schedule) in
-    p "speedups vs naive: cpupack %.1fx, tensorize %.1fx, packmma %.1fx, packmma_par %.1fx\n"
+    let t_hoist =
+      bench ~variant:"pm_hoist"
+        ~schedule:(Some (packmma_outer_schedule ~pack_a:false ~pack_b:`Hoist))
+    in
+    let t_mixed =
+      bench ~variant:"pm_mixed"
+        ~schedule:(Some (packmma_outer_schedule ~pack_a:true ~pack_b:`Hoist))
+    in
+    let t_bpk =
+      bench ~variant:"pm_bpk" ~schedule:(Some (packmma_outer_schedule ~pack_a:true ~pack_b:`Chunk))
+    in
+    p
+      "speedups vs naive: cpupack %.1fx, tensorize %.1fx, packmma %.1fx, packmma_par %.1fx, \
+       pm_hoist %.1fx, pm_mixed %.1fx, pm_bpk %.1fx\n"
       (t_naive /. t_pack) (t_naive /. t_tmma) (t_naive /. t_pmma) (t_naive /. t_pmmap)
+      (t_naive /. t_hoist) (t_naive /. t_mixed) (t_naive /. t_bpk)

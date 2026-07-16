@@ -36,6 +36,13 @@
    forms the whole-node [Zero_out] is expanded with matching Grid coverage (the unit-lane Workgroup
    axis stays inactive).
 
+   The mixed grid-outermost form pins autotune's [sk_pack_rest] seed variant (gh-ocannl-473): same
+   loop structure as the hoisted-pack form, hoisted B~ panel and all, but the non-hoistable A
+   operand gets an in-kernel packing Stage instead of being read in place — its [bm x bk] tile
+   lands inside the Grid body and the renderer privatizes it to per-chunk block-scope storage
+   ([parallel_grid_safe]'s privatization rule), recovering the A~ pack the hoisted-only shape
+   forfeits while keeping the single outermost dispatch.
+
    On GPU backends the packing schedules apply without the [Tensorize] step (all-serial packing is
    legal everywhere; a unit-lane [Tile_mma] must not reach hardware simdgroup intrinsics) and the
    Grid case skips its transform; every printed boolean holds on every backend. *)
@@ -335,4 +342,87 @@ let () =
         (if on_cpu then
            has_parallel_construct src && has "Tile_mma register tiling" && has "packed_gb"
            && not (has "float tile_")
+         else not (has "tmma_"))
+
+(* === Mixed grid-outermost composition (autotune's [sk_pack_rest] seeds, gh-ocannl-473): the
+   hoisted-pack shape with the non-hoistable A operand packed in-kernel — Grid row blocks stay
+   outermost (one dispatch spanning the GEBP triple), the B~ panel packs at link time into the
+   constant pool, and the per-row-block A~ tile packs inside the Grid body where the renderer
+   privatizes it per chunk. A is a values-backed trainable param, so it is genuinely non-hoistable
+   — the inference-GEMM case the seed targets (activations x constant weights). CPU-only schedule;
+   identity transform elsewhere. === *)
+let () =
+  let gav = Array.init (n * n) ~f:(fun x -> Float.of_int (x % 19) *. 0.125 -. 1.) in
+  let gbv = Array.init (n * n) ~f:(fun x -> Float.of_int (x % 23) -. 11.) in
+  let gb = TDSL.ndarray gbv ~label:[ "mgb" ] ~input_dims:[ n ] ~output_dims:[ n ] () in
+  let xa0 = TDSL.param ~values:gav "xa0" ~input_dims:[ n ] ~output_dims:[ n ] () in
+  let%op mx0 = xa0 * gb in
+  let want = run_serial ~name:"pmm_mixed_serial" mx0 in
+  let xa1 = TDSL.param ~values:gav "xa1" ~input_dims:[ n ] ~output_dims:[ n ] () in
+  let%op mx1 = xa1 * gb in
+  let mixed_schedule (opt : LL.optimized) : Sched.schedule =
+    let paths = nest_paths opt.LL.llc in
+    let i, j, k =
+      match List.find_exn paths ~f:(fun p -> List.length p = 3) with
+      | [ i; j; k ] -> (i, j, k)
+      | _ -> assert false
+    in
+    let ez, zsyms = Sched.expand_zero ~tn:mx1.Tensor.value in
+    let zi = match zsyms with [ zi; _zj ] -> zi | _ -> assert false in
+    let sp_zi, _, _ = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+    let sp_i, _, i_i = Sched.split ~axis:i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+    let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
+    let tz, _ = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1 in
+    [ ez; sp_zi; sp_i; sp_k ] @ sink j [ k_o ] @ sink i_i [ k_o ]
+    @ [
+        Sched.Stage
+          {
+            source = gb.Tensor.value;
+            tile_loops = [ k_i; j ];
+            shared = false;
+            cooperative = None;
+            hoisted = true;
+          };
+        Sched.Stage
+          {
+            source = xa1.Tensor.value;
+            tile_loops = [ i_i; k_i ];
+            shared = false;
+            cooperative = None;
+            hoisted = false;
+          };
+        tz;
+      ]
+  in
+  let transform opt = if on_cpu then Sched.apply (mixed_schedule opt) opt else opt in
+  let ctx = Context.auto () in
+  let ctx, routine =
+    Context.compile ~lowered_transform:transform ctx
+      (named "pmm_mixed" (Train.forward mx1))
+      Ir.Indexing.Empty
+  in
+  let ctx = Context.run ctx routine in
+  let got = Context.get_values ctx mx1.Tensor.value in
+  p "mixed grid-outermost matmul matches the serial twin bitwise"
+    (Array.for_all2_exn got want ~f:Float.equal);
+  match read_generated "pmm_mixed" with
+  | None -> p "mixed shape: hoisted B~ panel plus per-chunk in-kernel A~ tile" false
+  | Some src ->
+      let has s = String.is_substring src ~substring:s in
+      p "mixed shape: hoisted B~ panel plus per-chunk in-kernel A~ tile"
+        (if on_cpu then
+           has_parallel_construct src && has "Tile_mma register tiling" && has "packed_mgb"
+           &&
+           (* Exactly one in-kernel tile (A~), declared per chunk inside the parallel construct. *)
+           let tile_positions =
+             String.substr_index_all src ~may_overlap:false ~pattern:"float tile_"
+           in
+           let par_pos =
+             Option.value_exn
+               (Option.first_some
+                  (String.substr_index src ~pattern:"dispatch_apply")
+                  (String.substr_index src ~pattern:"#pragma omp parallel for"))
+           in
+           List.length tile_positions = 1
+           && List.for_all tile_positions ~f:(fun pos -> pos > par_pos)
          else not (has "tmma_"))

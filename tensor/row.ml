@@ -2296,11 +2296,16 @@ let add_rank_edge ~rows v w k =
 
 (* Equate two rows, no broadcasting. Does not resolve inequalities. *)
 let%debug5_sexp rec unify_row ~stage origin (eq : t * t) env : constraint_ list * _ =
-  let rec solve (ineqs, env) : constraint_ -> constraint_ list * _ = function
+  let solve (ineqs, env) : constraint_ -> constraint_ list * _ = function
     | Dim_eq { d1; d2; origin = eq_origin } ->
         let origin = merge_origins eq_origin origin in
         let more_ineqs, env = unify_dim ~stage origin (d1, d2) env in
-        List.fold ~init:(ineqs, env) more_ineqs ~f:solve
+        (* [unify_dim] solves everything it can eagerly (recursing internally); any [Dim_eq] it
+           RETURNS is a deferral that cannot progress in the current env (e.g. a conv axis whose
+           kernel dimension is still a variable, or a concat residual). Deferrals are idempotent, so
+           re-solving them here would loop forever (gh-496) — accumulate them for the driver's next
+           pass instead. *)
+        (more_ineqs @ ineqs, env)
     | Row_eq { r1; r2; origin = eq_origin } ->
         let origin = merge_origins eq_origin origin in
         let more_ineqs, env = unify_row ~stage origin (r1, r2) env in

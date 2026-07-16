@@ -164,6 +164,16 @@ buffer_aliasing=false
 # footprint report accompanying buffer_aliasing. Debugging aid, schedule_log_launches-style.
 log_buffer_aliasing=false
 
+# If true, code generation logs one stderr line per declined rendering, naming the kernel, the
+# construct, and the rule that failed: a Grid loop that fails pool-parallel eligibility (an
+# ineligible local and which of the shared/privatization rules it broke, or the per-chunk
+# footprint cap), and a Tile_mma statement that falls back from the intrinsic or register-tiled
+# rendering (the failed rule plus the statement's precisions, extents, transposition flags and
+# operand address spaces). Declines are silent by design — the fallback is correct — but
+# indistinguishable from the intended rendering in timings; this is the "why did my schedule
+# render serial/scalar" switch for hand schedules and autotune runs.
+schedule_log_declines=false
+
 # How the C backend renders eligible outermost Grid loops (pool-backed Grid rendering,
 # docs/proposals/gh-ocannl-164.md): "dispatch" uses libdispatch's dispatch_apply (macOS),
 # "openmp" uses `#pragma omp parallel for` (adds -fopenmp to the kernel compile), "none" keeps
@@ -177,6 +187,16 @@ cc_parallel_grid=auto
 # Target chunk count for parallel Grid rendering; the actual count is capped by the loop extent.
 # 0 (default) means automatic: 4 x the recommended domain count (core count).
 cc_parallel_chunks=0
+
+# Byte cap on the combined footprint of the per-chunk privatized tiles of one pool-parallel Grid
+# loop (block-scope arrays living on the pool workers' stacks; see the privatization rule in
+# c_syntax.ml's parallel_grid_safe). A loop whose privatized locals exceed the cap renders serial
+# instead (log with schedule_log_declines). The default, 262144 (256KB), leaves headroom under
+# libdispatch's default 512KB worker stacks; raise it when the pool's worker stacks are known
+# larger (e.g. under OMP_STACKSIZE with the OpenMP rendering) — for instance to let a
+# grid-outermost packed GEMM re-pack a whole B~ panel per chunk. Values <= 0 fall back to the
+# default.
+cc_grid_private_bytes_cap=262144
 
 # Vector register width in bytes for explicit SIMD rendering of Vectorized-typed loops in the C
 # backends (GCC/Clang vector extensions): eligible loop bodies emit vector loads/arithmetic/stores

@@ -14,9 +14,15 @@ let _get_local_debug_runtime = Utils.get_local_debug_runtime
    [Tile_mma] as the register-tiled vector micro-kernel ([C_syntax]'s [try_register_tile]), so the
    autotune menu may propose [Tensorize] over CPU serial triples. The register renderer peels edge
    tiles, so any block extents are legal (intrinsic tile 1×1×1); the lane loop renders serially, so
-   a single lane suffices. *)
-let cpu_mma_limits =
-  { no_hardware_limits with mma = Some { mma_simd_width = 1; mma_tile = (1, 1, 1) } }
+   a single lane suffices. [simd_vector_bytes] reports the register-tiling's vector width
+   (gh-ocannl-479: autotune's seeding pre-filter checks micro-kernel extents against the lane
+   count); the only CPU backend is cc, so its setting is authoritative here. *)
+let cpu_mma_limits () =
+  {
+    no_hardware_limits with
+    simd_vector_bytes = Cc_backend.vector_bytes_setting ();
+    mma = Some { mma_simd_width = 1; mma_tile = (1, 1, 1) };
+  }
 
 module Multidev (Backend : For_add_scheduler) :
   With_scheduler with type buffer_ptr = Backend.buffer_ptr = struct
@@ -220,7 +226,7 @@ module Multidev (Backend : For_add_scheduler) :
         Sexp.List [ Sexp.Atom "num_devices"; [%sexp_of: int] (num_devices ()) ];
       ]
 
-  let hardware_limits () = cpu_mma_limits
+  let hardware_limits () = cpu_mma_limits ()
   let get_global_debug_info () = Sexp.message "global_debug" []
   let get_debug_info (device : device) = sexp_of_runner device.runner
 end
@@ -280,7 +286,7 @@ module Sync (Backend : For_add_scheduler) = struct
           ];
       ]
 
-  let hardware_limits () = cpu_mma_limits
+  let hardware_limits () = cpu_mma_limits ()
 
   (* let global_run_no = ref 0 *)
   let schedule_task _device task = Ir.Task.run task

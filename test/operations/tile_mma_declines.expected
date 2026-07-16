@@ -1,0 +1,13 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+census: standard layout renders register-tiled: true
+census: transposed-B layout falls back to the lane-0 scalar rendering: true
+per-chunk B~ re-pack matches the serial twin bitwise: true
+per-chunk B~ re-pack under the cap pool-parallelizes: true
+per-chunk B~ re-pack over the cap declines to serial: true
+seeds: standard, both hoistable: total=13 whole=3 packed=6 hoist=5 grid=2 packrest=0
+seeds: transposed B, hoistable: total=10 whole=0 packed=6 hoist=5 grid=2 packrest=0
+seeds: computed A x hoistable B: total=14 whole=3 packed=7 hoist=6 grid=3 packrest=1
+seeds: hoistable A x computed transposed B: total=10 whole=0 packed=6 hoist=5 grid=2 packrest=1
+seeds: no hoistable operand: total=9 whole=3 packed=4 hoist=0 grid=2 packrest=1
+seeds: narrow columns (nj < lanes): total=0 whole=0 packed=0 hoist=0 grid=0 packrest=0

@@ -1,0 +1,11 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+HERE: test/einsum/test_conv_output_only.ml:15:21
+┌───────────────────────────────┐
+│[2]: *._result shape 0:4       │
+│┌┬────────────────────────────┐│
+│││axis 0                      ││
+│├┼────────────────────────────┤│
+│││ -1.00  -1.00  -1.00  -1.00 ││
+│└┴────────────────────────────┘│
+└───────────────────────────────┘
