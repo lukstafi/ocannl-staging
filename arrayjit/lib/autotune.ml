@@ -10,6 +10,7 @@ type report = {
   candidates_failed : int;
   rounds_run : int;
   sketch_candidates : int;
+  epilogue_sketch_candidates : int;
   fiss_sketch_candidates : int;
   fiss_sketch_timed : int;
   fissioned : bool;
@@ -139,6 +140,15 @@ type sketch_params = {
           dispatch spanning the GEBP triple) and every operand packs inside the Grid body. No
           effect on the serial flavors or the hoisted-only Grid flavor, whose stages are already
           determined. *)
+  sk_epilogue : bool;
+      (** Epilogue fusion (gh-ocannl-486): append [Sched.Fuse_epilogue] on the site's output, so
+          the sole-consumer elementwise tail (bias add / activation / residual) folds into the
+          store-back and the whole routine is one kernel — the fused competitor to the fissioned
+          two-kernel form. Seeded only when [Sched.can_fuse_epilogue] holds on the base code; a
+          candidate whose scheduled form no longer admits the fusion (e.g. materializing unrolls
+          duplicating the store-back) fails its compile and is skipped like any other invalid
+          candidate. On GPU the accumulator moves to workgroup-shared memory (the [shared] flag)
+          so the Metal fragment intrinsics keep firing after placement makes it routine-local. *)
 }
 
 type matmul_site = {
@@ -518,12 +528,17 @@ let sketch_schedule ~p (opt : LL.optimized) : Sched.schedule =
   match detect_matmul opt.LL.llc with
   | None -> invalid_arg "Autotune sketch: no matmul micro-kernel detected"
   | Some site ->
-      if p.sk_mma then
-        if p.sk_gpu then gpu_mma_sketch_schedule site p
-        else if p.sk_bk > 0 then cpu_mma_pack_sketch_schedule site p
-        else cpu_mma_sketch_schedule site p
-      else if p.sk_gpu then gpu_sketch_schedule site p
-      else cpu_sketch_schedule site p
+      let sched =
+        if p.sk_mma then
+          if p.sk_gpu then gpu_mma_sketch_schedule site p
+          else if p.sk_bk > 0 then cpu_mma_pack_sketch_schedule site p
+          else cpu_mma_sketch_schedule site p
+        else if p.sk_gpu then gpu_sketch_schedule site p
+        else cpu_sketch_schedule site p
+      in
+      if p.sk_epilogue then
+        sched @ [ Sched.Fuse_epilogue { target = site.m_d; shared = p.sk_gpu } ]
+      else sched
 
 (* Sketch seed parameters compatible with the site's extents (dividing tiles: every constructed
    guard folds, and shared staging requires them). Unzeroed sites — the norm for fission segments,
@@ -564,6 +579,7 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                     sk_hoist = false;
                     sk_grid = false;
                     sk_pack_rest = false;
+                    sk_epilogue = false;
                   }
               else None)
         else if is_cpu then
@@ -583,6 +599,7 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                       sk_hoist = false;
                       sk_grid = false;
                       sk_pack_rest = false;
+                      sk_epilogue = false;
                     }
                 else None)
           in
@@ -621,6 +638,7 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                       sk_hoist = false;
                       sk_grid = false;
                       sk_pack_rest = false;
+                      sk_epilogue = false;
                     }
                 else None)
         | _ when is_cpu ->
@@ -676,6 +694,7 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                         sk_hoist = false;
                         sk_grid = false;
                         sk_pack_rest = false;
+                        sk_epilogue = false;
                       }
                   else None)
             in
@@ -711,6 +730,7 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                         sk_hoist = false;
                         sk_grid = false;
                         sk_pack_rest = false;
+                        sk_epilogue = false;
                       }
                   else None)
             in
@@ -784,7 +804,15 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
             whole @ packed
         | _ -> []
       in
-      blocktile @ mma
+      let seeds = blocktile @ mma in
+      (* Fused-epilogue variants (gh-ocannl-486): when the site's output feeds an eligible
+         elementwise tail, every seed gets a fused twin — the tuner measures fused (one kernel)
+         vs. unfused (the fissioned two-kernel form). The check runs on the base code where the
+         plain accumulation-nest fusion site applies; seeds whose scheduled form no longer admits
+         the fusion fail their candidate compile and are skipped. *)
+      if Sched.can_fuse_epilogue ~target:site.m_d opt then
+        seeds @ List.map seeds ~f:(fun p -> { p with sk_epilogue = true })
+      else seeds
 
 (** {2 The privatized fission flavor}
 
@@ -953,18 +981,20 @@ let spec_label = function
   | Whole (W_saved s) -> Printf.sprintf "W_saved[%d ops]" (List.length s)
   | Whole (W_preset { block_size }) -> Printf.sprintf "W_preset[bs=%s]" (bs_label block_size)
   | Whole (W_sketch p) when p.sk_mma ->
-      Printf.sprintf "W_sketch[mma-%s %dx%dx%d%s%s%s%s]"
+      Printf.sprintf "W_sketch[mma-%s %dx%dx%d%s%s%s%s%s]"
         (if p.sk_gpu then "gpu" else "cpu")
         p.sk_bm p.sk_bn p.sk_bk
         (if p.sk_bk > 0 then if p.sk_gpu then " staged" else " pack" else "")
         (if p.sk_hoist then " hoist" else "")
         (if p.sk_grid then " grid" else "")
         (if p.sk_pack_rest then " packrest" else "")
+        (if p.sk_epilogue then " ep" else "")
   | Whole (W_sketch p) ->
-      Printf.sprintf "W_sketch[%s %dx%dx%d/%dx%d%s]"
+      Printf.sprintf "W_sketch[%s %dx%dx%d/%dx%d%s%s]"
         (if p.sk_gpu then "gpu" else "cpu")
         p.sk_bm p.sk_bn p.sk_bk p.sk_tm p.sk_tn
         (if p.sk_hoist then " hoist" else "")
+        (if p.sk_epilogue then " ep" else "")
   | Fiss (F_preset { block_size; privatize; config_thresholds }) ->
       Printf.sprintf "F_preset[bs=%s%s%s]" (bs_label block_size)
         (if privatize then " priv" else "")
@@ -974,14 +1004,15 @@ let spec_label = function
       Printf.sprintf "F_sketch[%s]"
         (String.concat ~sep:","
            (List.map entries ~f:(fun (_, p) ->
-                Printf.sprintf "%s%s %dx%dx%d%s%s%s%s"
+                Printf.sprintf "%s%s %dx%dx%d%s%s%s%s%s"
                   (if p.sk_mma then "mma-" else "")
                   (if p.sk_gpu then "gpu" else "cpu")
                   p.sk_bm p.sk_bn p.sk_bk
                   (if p.sk_mma then "" else Printf.sprintf "/%dx%d" p.sk_tm p.sk_tn)
                   (if p.sk_hoist then " hoist" else "")
                   (if p.sk_grid then " grid" else "")
-                  (if p.sk_pack_rest then " packrest" else ""))))
+                  (if p.sk_pack_rest then " packrest" else "")
+                  (if p.sk_epilogue then " ep" else ""))))
 
 (* Every candidate derives its CODE from the ONE base lowering ([base_opt] with [canon] its
    canonical form, captured together in [tune]) rather than from the compile's own fresh lowering,
@@ -1413,6 +1444,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
                   candidates_failed = 0;
                   rounds_run = 0;
                   sketch_candidates = 0;
+                  epilogue_sketch_candidates = 0;
                   fiss_sketch_candidates = 0;
                   fiss_sketch_timed = 0;
                   fissioned = is_fissioned c.form;
@@ -1628,6 +1660,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
           candidates_failed = !n_failed;
           rounds_run = !rounds_run;
           sketch_candidates = List.length sketch_params;
+          epilogue_sketch_candidates = List.count sketch_params ~f:(fun p -> p.sk_epilogue);
           fiss_sketch_candidates = List.length fiss_sketch_specs;
           fiss_sketch_timed = !n_fiss_sketch_timed;
           fissioned = is_fissioned best_c.form;
