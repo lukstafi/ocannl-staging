@@ -23,13 +23,18 @@
    Grid row-block loop over a Tile_mma with materialized operands renders as chunked parallel
    loops on the native pool ([dispatch_apply] / OpenMP).
 
-   The Grid + hoisted-pack form pins autotune's [sk_grid] seed variant (the typical inference
-   GEMM: activations x constant weights): pool-parallel Grid row blocks over the cache-blocked
-   packed pipeline, with ONLY the hoistable B operand packed — at link time, into the constant
-   pool (gh-ocannl-470) — and A read in place (standard layout, [ta = false]). The kernel body
-   then has no in-kernel tile writes at all, so [parallel_grid_safe] accepts the Grid split; the
-   whole-node [Zero_out] is expanded with matching Grid coverage (the unit-lane Workgroup axis
-   stays inactive).
+   The parallel packed form is the fully parallel packed GEMM (in-kernel packing under Grid row
+   blocks): the per-row-block A~ tile is privatized to per-chunk block-scope storage by the
+   renderer ([parallel_grid_safe]'s privatization rule) while the B~ panel packed at [k_o]
+   outside the Grid is read-only inside (behind a pointer alias under the blocks extension).
+
+   The Grid + hoisted-pack form pins autotune's [sk_grid && sk_hoist] seed variant (the typical
+   inference GEMM: activations x constant weights): pool-parallel Grid row blocks over the
+   cache-blocked packed pipeline, with ONLY the hoistable B operand packed — at link time, into
+   the constant pool (gh-ocannl-470) — and A read in place (standard layout, [ta = false]). The
+   kernel body then has no in-kernel tile writes at all, so the Grid split stays outermost. In
+   both Grid forms the whole-node [Zero_out] is expanded with matching Grid coverage (the
+   unit-lane Workgroup axis stays inactive).
 
    On GPU backends the packing schedules apply without the [Tensorize] step (all-serial packing is
    legal everywhere; a unit-lane [Tile_mma] must not reach hardware simdgroup intrinsics) and the
@@ -203,19 +208,87 @@ let () =
   let got_g = Context.get_values ctx gc1.Tensor.value in
   p "grid-blocked tensorized matmul matches the serial twin bitwise"
     (Array.for_all2_exn got_g want_g ~f:Float.equal);
-  match read_generated "pmm_grid_mma" with
+  (match read_generated "pmm_grid_mma" with
   | None -> p "grid-blocked Tile_mma renders pool-parallel" false
   | Some src ->
       p "grid-blocked Tile_mma renders pool-parallel"
         (if on_cpu then
            has_parallel_construct src
            && String.is_substring src ~substring:"Tile_mma register tiling"
-         else not (String.is_substring src ~substring:"tmma_"))
+         else not (String.is_substring src ~substring:"tmma_")));
 
-(* === Grid + hoisted-pack composition (autotune's [sk_grid] seeds, [bn = 0]): Grid row blocks
-   over the packed pipeline with only the hoistable B operand packed (link-time constant-pool
-   panel) and A read in place — no in-kernel tile writes, so the Grid split pool-parallelizes.
-   CPU-only schedule; identity transform elsewhere. === *)
+  (* === Parallel packed composition (the fully parallel packed GEMM, gh-ocannl-469): the row-block
+     loop is Grid-typed and pool-parallelizes. The per-row-block A~ packing Stage sits inside the
+     Grid body — its tile has all accesses in the body and the pack nest fully rewrites it before
+     the micro-kernel reads it, so the renderer privatizes it to per-chunk block-scope storage
+     ([C_syntax.parallel_grid_safe]'s privatization rule). The B~ panel packs at [k_o] outside and
+     is read-only inside (function-scope; behind a pointer alias under the blocks extension, which
+     cannot capture arrays). The whole-node [Zero_out] is no longer legal beside a
+     hardware-annotated loop, so it expands into a nest whose row loop Grid-splits with the same
+     [bm] geometry. CPU-only schedule; identity transform elsewhere. === *)
+  let%op pp0 = ma * mb in
+  let want_pp = run_serial ~name:"pmm_par_serial" pp0 in
+  let%op pp1 = ma * mb in
+  let par_packed_schedule (opt : LL.optimized) : Sched.schedule =
+    let paths = nest_paths opt.LL.llc in
+    let i, j, k =
+      match List.find_exn paths ~f:(fun p -> List.length p = 3) with
+      | [ i; j; k ] -> (i, j, k)
+      | _ -> assert false
+    in
+    let ez, zsyms = Sched.expand_zero ~tn:pp1.Tensor.value in
+    let zi = match zsyms with [ zi; _ ] -> zi | _ -> assert false in
+    let sp_zi, _, _ = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+    let sp_i, i_o, i_i = Sched.split ~axis:i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+    let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
+    let stage source tile_loops =
+      Sched.Stage { source; tile_loops; shared = false; cooperative = None; hoisted = false }
+    in
+    let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1 in
+    [ ez; sp_zi; sp_i; sp_k ]
+    @ sink j [ k_o ]
+    @ sink i_i [ k_o ]
+    @ sink i_o [ k_o ]
+    @ [ stage mb.Tensor.value [ k_i; j ]; stage ma.Tensor.value [ i_i; k_i ]; tz ]
+  in
+  let transform opt = if on_cpu then Sched.apply (par_packed_schedule opt) opt else opt in
+  let ctx = Context.auto () in
+  let ctx, routine =
+    Context.compile ~lowered_transform:transform ctx
+      (named "pmm_par_packed" (Train.forward pp1))
+      Ir.Indexing.Empty
+  in
+  let ctx = Context.run ctx routine in
+  let got_pp = Context.get_values ctx pp1.Tensor.value in
+  p "parallel packed matmul matches the serial twin bitwise"
+    (Array.for_all2_exn got_pp want_pp ~f:Float.equal);
+  match read_generated "pmm_par_packed" with
+  | None -> p "parallel packed composition renders pool-parallel with per-chunk tiles" false
+  | Some src ->
+      let has s = String.is_substring src ~substring:s in
+      p "parallel packed composition renders pool-parallel with per-chunk tiles"
+        (if on_cpu then
+           has_parallel_construct src
+           && has "Pool-backed Grid rendering"
+           && has "Tile_mma register tiling"
+           &&
+           (* The A~ tile is declared per chunk, inside the parallel construct. *)
+           let par_pos =
+             Option.value_exn
+               (Option.first_some
+                  (String.substr_index src ~pattern:"dispatch_apply")
+                  (String.substr_index src ~pattern:"#pragma omp parallel for"))
+           in
+           List.exists
+             (String.substr_index_all src ~may_overlap:false ~pattern:"float tile_")
+             ~f:(fun pos -> pos > par_pos)
+         else not (has "tmma_"))
+
+(* === Grid + hoisted-pack composition (autotune's [sk_grid && sk_hoist] seeds, [bn = 0]): Grid
+   row blocks over the packed pipeline with only the hoistable B operand packed (link-time
+   constant-pool panel) and A read in place — no in-kernel tile writes, so the Grid split
+   pool-parallelizes with the Grid loop outermost. CPU-only schedule; identity transform
+   elsewhere. === *)
 let () =
   let gav = Array.init (n * n) ~f:(fun x -> Float.of_int (x % 19) *. 0.125) in
   let gbv = Array.init (n * n) ~f:(fun x -> Float.of_int (x % 23) -. 11.) in
