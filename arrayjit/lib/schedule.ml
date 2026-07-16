@@ -568,7 +568,13 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
     reads of [source] to use one index vector (v1). Each source axis's index is decomposed into a
     tile part (terms over [tile_loops], positive coefficients) and an outer part; source axes with
     a nonempty tile part become tile axes, sized by the tile part's range over the tile loops'
-    extents. The load nest is inserted at the deepest loop that must stay outside the tile — the
+    extents. The tile's axes follow the {e tile_loops} order (the position of each axis's first
+    tile-part symbol in the list; ties keep source order), not the source's: a packing Stage over a
+    transposed operand normalizes its layout — [tile_loops = [k; j]] on a [j, k]-stored source
+    packs a [k]-major tile — which is what lets packed tiles feed [Tensorize]'s register-tiled
+    micro-kernel with [ta = tb = false] (gh-ocannl-469). Every in-tree pipeline before this passed
+    [tile_loops] in source order, where the two orders coincide. The load nest is inserted at the
+    deepest loop that must stay outside the tile — the
     innermost loop carrying an outer-part symbol or a reused [Workgroup] tile axis — by replacing
     that loop's body with [loads; barrier; body-with-reads-remapped; barrier] ([shared]) or
     [loads; remapped body] (packing). Cooperative loads reuse [Workgroup]-typed tile loops as the
@@ -803,11 +809,28 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted (opt : Low_lev
     let fl = floop_of_exn s in
     fl.to_ - fl.from_ + 1
   in
-  (* Tile axes: source axes with a nonempty tile part; dim = the tile part's range. *)
+  (* Tile axes: source axes with a nonempty tile part; dim = the tile part's range. Ordered by the
+     position in [tile_loops] of each axis's first tile-part symbol (stable within source order),
+     so the caller's [tile_loops] order picks the packed layout (see the section comment). *)
   let tile_axes =
     Array.filter_mapi decomp ~f:(fun a (tp, _, _) ->
         if List.is_empty tp then None
         else Some (a, List.fold tp ~init:1 ~f:(fun acc (c, s) -> acc + (c * (extent s - 1)))))
+  in
+  let tile_loop_pos s =
+    match List.findi tile_loops ~f:(fun _ s' -> Indexing.equal_symbol s s') with
+    | Some (p, _) -> p
+    | None -> List.length tile_loops
+  in
+  let tile_axes =
+    Array.sorted_copy tile_axes ~compare:(fun (a1, _) (a2, _) ->
+        let key a =
+          let tp, _, _ = decomp.(a) in
+          List.map tp ~f:(fun (_, s) -> tile_loop_pos s)
+          |> List.min_elt ~compare:Int.compare
+          |> Option.value ~default:(List.length tile_loops)
+        in
+        match Int.compare (key a1) (key a2) with 0 -> Int.compare a1 a2 | c -> c)
   in
   (* Classify tile loops: Workgroup-typed loops are reused as cooperating thread indices in the
      load nest; Serial ones are iterated under fresh symbols. *)
