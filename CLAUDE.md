@@ -38,7 +38,7 @@ opam install cudajit  # for CUDA backend
 opam install hipjit   # for AMD HIP backend
 ```
 
-**Working from a Claude Code worktree**: worktrees under `.claude/worktrees/` are nested inside the parent repo, so dune resolves the PARENT checkout as the project root — pass `--root .` to every dune command run from a worktree. `dune promote` rejects `--root`; run `dune promotion apply` from the worktree root instead.
+**Worktrees**: place new ones outside the repo — they need none of what follows. A worktree nested inside the repo (`.claude/worktrees/`, the Claude Code default) makes dune silently resolve the PARENT checkout as the project root: from those, pass `--root .` to dune commands run from the worktree root, and promote with `dune promotion apply` (`dune promote` rejects `--root`).
 
 **Formatting**: the repo is not fully ocamlformat-clean, and CI does not enforce formatting — do NOT run `dune fmt` as part of feature work (it reformats the entire repo and pollutes the diff; recover from an accidental sweep with `git restore .`). Match the surrounding style by hand; to check just your own lines, diff against `_build/default/<dir>/.formatted/<file>`. Formatting-state updates land as standalone formatting commits, paired with updating `.ocamlformat-ignore` — ppx-expectation files (`test/ppx/*_expected.ml`, compared against pretty-printed ppx output) must stay unformatted, so add new ones to that list.
 
@@ -106,7 +106,7 @@ opam install hipjit   # for AMD HIP backend
 - `dune runtest test/operations/` - runs all tests in operations directory
 - Avoid `dune exec test/.../test_name.exe` for standalone tests: `dune exec` keeps the invocation cwd, the config search walks UP from cwd (`Utils.config_file_args`), and the root `ocannl_config` is deliberately gitignored (personal dev settings) — so fresh clones, CI, and worktrees find no config and the test dies partway, or `Context.auto` silently picks metal→cuda→cc (a "cc" run quietly executes on the GPU). Tests only find their config under `dune runtest`/build rules because dune sets their cwd to `_build/default/<test dir>` where `(copy_files ../config/ocannl_config)` materialized it
 - Instead, build the output-capturing rule: `dune build test/operations/<name>.exe.output`, inspect `_build/default/<dir>/<name>.exe.output`, then `dune runtest <dir>` to register the `.expected` diff and promote. For `bin/` executables (same trap), pin `OCANNL_BACKEND=...` explicitly
-- Never judge `dune runtest` through a pipe: `... 2>&1 | tail -3 && echo OK` reports the status of `tail`, not dune (no pipefail), and promotion-diff failures look like normal chatter. Run `dune runtest --root . > /tmp/suite.log 2>&1; echo "exit: $?"` and grep the log for `^File .*expected` to list diffs; when this runs as a background task, read the recorded `exit: N` line — the task's own exit code is the trailing `echo`, always 0
+- Never judge `dune runtest` through a pipe: `... 2>&1 | tail -3 && echo OK` reports the status of `tail`, not dune (no pipefail), and promotion-diff failures look like normal chatter. Run `dune runtest > /tmp/suite.log 2>&1; echo "exit: $?"` and grep the log for `^File .*expected` to list diffs; when this runs as a background task, read the recorded `exit: N` line — the task's own exit code is the trailing `echo`, always 0
 - Inline tests (like those in `test_threefry4x32.ml`) are part of library modules and run via `dune runtest`, not `dune exec`
 
 **Slow training tests (the `slow` alias)**:
@@ -154,7 +154,7 @@ opam install hipjit   # for AMD HIP backend
 ### Pull Requests
 
 - Prefer a series of 3-4 topical commits (one per coherent sub-feature) plus follow-up fixing commits, merged with a merge commit that preserves the series — not one big squashed commit. The series documents the design decomposition and keeps each piece independently reviewable and bisectable
-- Each commit should at least compile: loop `git checkout <rev> && dune build --root . @check` over `git rev-list --reverse master..HEAD` (interactive rebase is unavailable in this harness)
+- Each commit should at least compile: loop `git checkout <rev> && dune build @check` over `git rev-list --reverse master..HEAD` (interactive rebase is unavailable in this harness)
 - Test-expectation promotions that mix topics can land in a final tests/promotions commit
 
 ### Configuration
