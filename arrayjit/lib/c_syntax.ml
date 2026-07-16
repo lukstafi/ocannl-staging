@@ -24,6 +24,26 @@ type t = PPrint.document
 let pool_slot_is_64 () = Utils.settings.large_models
 let pool_slot_msl_typ () = if pool_slot_is_64 () then "ulong" else "uint"
 
+(* Opt-in rendering-decline diagnostics (config [schedule_log_declines]; gh-ocannl-474 /
+   gh-ocannl-479): one stderr line per decline, naming the kernel, the construct, and the rule that
+   failed — when a [Grid] loop fails pool-parallel eligibility ([parallel_grid_safe]) or a
+   [Tile_mma] statement falls back from the intrinsic / register-tiled rendering. Complements
+   [schedule_log_launches]: that one says what geometry a compile launched, this one says why a
+   requested rendering was NOT used (declines are silent by design — the fallback is correct — but
+   indistinguishable from the fast path in timings, which already cost one wrong conclusion:
+   docs/proposals/tensorize-mma.md's unverified-T3 episode). *)
+let log_declines = lazy (Utils.get_global_flag ~default:false ~arg_name:"schedule_log_declines")
+
+(* Census of [Tile_mma] statement renderings, collected during codegen while [mma_census_enabled]
+   (gh-ocannl-479): [Autotune] flips it around candidate compiles, because "the tensorized candidate
+   lost" and "the tensorized candidate never ran tensorized" must be distinguishable in tuning logs.
+   Entries are (kernel name, rendering), most recent first; tests assert on it directly. *)
+type mma_rendering = Mma_intrinsics | Mma_register_tiled | Mma_scalar_fallback
+[@@deriving sexp, compare, equal]
+
+let mma_census_enabled = ref false
+let mma_census : (string * mma_rendering) list ref = ref []
+
 module type C_syntax_config = sig
   val procs : Low_level.optimized array
   (** The low-level prcedure to compile, and the arrays of the context it will be linked to if not
@@ -695,10 +715,33 @@ module C_syntax (B : C_syntax_config) = struct
      Always empty for [`Openmp]/[`None]. *)
   let current_local_ptr_alias : Set.M(Tn).t ref = ref (Set.empty (module Tn))
 
+  (* Set by [compile_proc] before any analysis or rendering: the kernel name, for the decline
+     diagnostics ([log_declines]) and the [mma_census]. *)
+  let current_kernel_name = ref ""
+
+  let declinef fmt =
+    Printf.ksprintf
+      (fun s ->
+        if Lazy.force log_declines then
+          Stdlib.Printf.eprintf "declined: %s: %s\n%!" !current_kernel_name s)
+      fmt
+
   (* Per-chunk private tiles live on the pool workers' stacks; libdispatch workers get 512KB by
-     default, so cap their combined footprint per Grid loop (declining just keeps the loop
-     serial). *)
-  let per_chunk_private_bytes_cap = 256 * 1024
+     default, so cap their combined footprint per Grid loop (declining just keeps the loop serial).
+     Config [cc_grid_private_bytes_cap] (gh-ocannl-474): raise it when the pool's worker
+     stacks are known larger (e.g. under [OMP_STACKSIZE]) — for instance to let a grid-outermost
+     packed GEMM privatize a whole B~ panel per chunk (gh-ocannl-475). *)
+  let per_chunk_private_bytes_cap =
+    lazy
+      (match
+         Int.of_string
+           (String.strip
+              (Utils.get_global_arg ~arg_name:"cc_grid_private_bytes_cap"
+                 ~default:"262144"))
+       with
+      | n when n > 0 -> n
+      | _ -> 256 * 1024
+      | exception _ -> 256 * 1024)
 
   (* Shared traversal for the pool-parallel Grid analyses below: fires [access] for every
      tensor-node access event in program order (a [Set]'s right-hand side fires before its write).
@@ -892,9 +935,12 @@ module C_syntax (B : C_syntax_config) = struct
           List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
       | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
     in
+    let loop_ident = Indexing.symbol_ident sym in
     let locals : grid_local_info Hashtbl.M(Int).t = Hashtbl.create (module Int) in
     let declared_scopes = Hash_set.create (module Int) in
     let ok = ref true in
+    let opaque = ref false in
+    let escaped_scope = ref false in
     let access ~write tn idcs =
       if is_local tn then (
         let info =
@@ -906,10 +952,24 @@ module C_syntax (B : C_syntax_config) = struct
         info.gl_accs <- idcs :: info.gl_accs)
     in
     iter_local_accesses body ~access ~on_stmt:(function
-      | `Opaque -> ok := false
+      | `Opaque ->
+          ok := false;
+          opaque := true
       | `Declare_local id -> Hash_set.add declared_scopes id
-      | `Set_local id -> if not (Hash_set.mem declared_scopes id) then ok := false);
-    if not !ok then None
+      | `Set_local id ->
+          if not (Hash_set.mem declared_scopes id) then (
+            ok := false;
+            escaped_scope := true));
+    if not !ok then (
+      if !opaque then
+        declinef "Grid loop %s stays serial: opaque statement or barrier under the loop body"
+          loop_ident;
+      if !escaped_scope then
+        declinef
+          "Grid loop %s stays serial: a scope local is set under the loop but declared outside it \
+           (function-scope storage would race across chunks)"
+          loop_ident;
+      None)
     else
       let privatized = ref [] and ptr_aliased = ref [] in
       let private_bytes = ref 0 in
@@ -952,13 +1012,31 @@ module C_syntax (B : C_syntax_config) = struct
                 | Some total -> total = info.gl_count
                 | None -> false
               in
-              if all_inside && first_access_standalone_covering info.gl_tn body then (
+              if not all_inside then (
+                declinef
+                  "Grid loop %s stays serial: local %s is written grid-variantly (fails the shared \
+                   rule) and is also accessed outside the loop body (fails the privatization rule)"
+                  loop_ident (Tn.debug_name info.gl_tn);
+                false)
+              else if not (first_access_standalone_covering info.gl_tn body) then (
+                declinef
+                  "Grid loop %s stays serial: local %s fails the shared rule, and its first access \
+                   per iteration is not a standalone covering write (fails the privatization rule)"
+                  loop_ident (Tn.debug_name info.gl_tn);
+                false)
+              else (
                 private_bytes :=
                   !private_bytes
                   + (Tn.num_elems info.gl_tn * Ops.prec_in_bytes (Lazy.force info.gl_tn.Tn.prec));
                 privatized := info.gl_tn :: !privatized;
-                !private_bytes <= per_chunk_private_bytes_cap)
-              else false)
+                let fits = !private_bytes <= Lazy.force per_chunk_private_bytes_cap in
+                if not fits then
+                  declinef
+                    "Grid loop %s stays serial: privatizing local %s brings the combined per-chunk \
+                     tile footprint to %d bytes, over cc_grid_private_bytes_cap = %d"
+                    loop_ident (Tn.debug_name info.gl_tn) !private_bytes
+                    (Lazy.force per_chunk_private_bytes_cap);
+                fits))
       in
       if feasible then Some (!privatized, !ptr_aliased) else None
 
@@ -2362,7 +2440,26 @@ module C_syntax (B : C_syntax_config) = struct
           | Some s -> string s ^^ hardline ^^ guarded ^^ hardline ^^ string s
           | None -> guarded
         in
-        let fallback_doc () = lane0_guarded (pp_ll ~log_set_locals ~in_loop:true fallback) in
+        let record rendering =
+          if !mma_census_enabled then
+            mma_census := (!current_kernel_name, rendering) :: !mma_census
+        in
+        (* Shape facts for the decline diagnostics: enough to identify the statement and check every
+           statically-checkable emission rule by eye. *)
+        let describe () =
+          let space_str = function `Shared -> "shared" | `Device -> "device" | `Thread -> "thread" in
+          let op_str role (tn, idcs) =
+            let prec, (_, ld, space) = operand (tn, idcs) in
+            Printf.sprintf "%s=%s:%s[ld=%d,%s]" role (Tn.debug_name tn) (Ops.prec_string prec) ld
+              (space_str space)
+          in
+          Printf.sprintf "%dx%dx%d ta=%b tb=%b %s %s %s" m n k ta tb (op_str "d" d) (op_str "a" a)
+            (op_str "b" b)
+        in
+        let fallback_doc () =
+          record Mma_scalar_fallback;
+          lane0_guarded (pp_ll ~log_set_locals ~in_loop:true fallback)
+        in
         (* Register-tiled CPU rendering (gh-ocannl-469; tinyBLAS/llamafile's [mnpack] and the S4
            micro-kernel shape): the C-tile lives in an RM×RN grid of vector-extension registers
            across the ENTIRE k-loop — per k step: RN B-row vector loads, RM A-element splats, and
@@ -2377,26 +2474,43 @@ module C_syntax (B : C_syntax_config) = struct
            same lane-0 guard as the fallback ([`Vec_extensions] backends render the lane loop
            serially; GPU backends never take this path). *)
         let try_register_tile () : PPrint.document option =
-          let no_test cond = if cond then None else Some () in
+          (* [cond] names a rule violation: decline (with the per-rule diagnostic, gh-ocannl-479)
+             when it holds. *)
+          let no_test ~reason cond =
+            if cond then (
+              declinef "Tile_mma register tiling declined (%s): %s" reason (describe ());
+              None)
+            else Some ()
+          in
           let ( let* ) o f = Option.bind o ~f in
           let* () =
-            no_test
-              ((match B.vector_style with `Vec_extensions -> false | `Packed_struct -> true)
-              || B.vector_bytes < 8 || Utils.debug_log_from_routines ()
-              (* A transposed B ([tb]: [b[j*ldb+l]]) would turn the per-k row vector loads into
-                 stride-[ldb] gathers — decline it (the scalar fallback handles it; a packing
-                 [Stage] with [tile_loops] in micro-kernel order normalizes the layout instead). A
-                 transposed A ([ta]: [a[l*lda+i]]) costs nothing — the A feeds are scalar element
-                 loads (splats) either way — so only the index arithmetic swaps. *)
-              || tb)
+            no_test ~reason:"packed-struct vector style"
+              (match B.vector_style with `Vec_extensions -> false | `Packed_struct -> true)
           in
+          let* () =
+            no_test
+              ~reason:(Printf.sprintf "vector_bytes = %d < 8" B.vector_bytes)
+              (B.vector_bytes < 8)
+          in
+          let* () =
+            no_test ~reason:"debug_log_from_routines (logged runs stay serial and deterministic)"
+              (Utils.debug_log_from_routines ())
+          in
+          (* A transposed B ([tb]: [b[j*ldb+l]]) would turn the per-k row vector loads into
+             stride-[ldb] gathers — decline it (the scalar fallback handles it; a packing [Stage]
+             with [tile_loops] in micro-kernel order normalizes the layout instead). A transposed A
+             ([ta]: [a[l*lda+i]]) costs nothing — the A feeds are scalar element loads (splats)
+             either way — so only the index arithmetic swaps. *)
+          let* () = no_test ~reason:"transposed B storage (tb)" tb in
           let d_tn = fst d in
           let prec = Lazy.force d_tn.Tn.prec in
           let* () =
-            no_test (match prec with Ops.Single_prec _ | Ops.Double_prec _ -> false | _ -> true)
+            no_test
+              ~reason:(Printf.sprintf "output precision %s is not f32/f64" (Ops.prec_string prec))
+              (match prec with Ops.Single_prec _ | Ops.Double_prec _ -> false | _ -> true)
           in
           let* () =
-            no_test
+            no_test ~reason:"mixed operand precisions"
               (not
                  (Ops.equal_prec (Lazy.force (fst a).Tn.prec) prec
                  && Ops.equal_prec (Lazy.force (fst b).Tn.prec) prec))
@@ -2411,14 +2525,18 @@ module C_syntax (B : C_syntax_config) = struct
             | _ -> None
           in
           let* () =
-            no_test
+            no_test ~reason:"accumulation is not in fused (FMA) form"
               (match innermost_set fallback with
               | Some (tn, Low_level.Ternop (Ops.FMA, _, _, (Low_level.Get (tn2, _), _))) ->
                   not (Tn.equal tn d_tn && Tn.equal tn2 d_tn)
               | _ -> true)
           in
           let lanes = B.vector_bytes / Ops.prec_in_bytes prec in
-          let* () = no_test (lanes < 2 || n < lanes) in
+          let* () =
+            no_test
+              ~reason:(Printf.sprintf "n = %d below the vector width (lanes = %d)" n lanes)
+              (lanes < 2 || n < lanes)
+          in
           let rm = min 4 m in
           let rn = min (if B.vector_bytes = 32 then 3 else 6) (n / lanes) in
           let bw = rn * lanes in
@@ -2547,18 +2665,33 @@ module C_syntax (B : C_syntax_config) = struct
             ^^ hardline ^^ string "}")
         in
         let fallback_or_tiled () =
-          match try_register_tile () with Some doc -> lane0_guarded doc | None -> fallback_doc ()
+          match try_register_tile () with
+          | Some doc ->
+              record Mma_register_tiled;
+              lane0_guarded doc
+          | None ->
+              declinef "Tile_mma renders the lane-0 scalar fallback: %s" (describe ());
+              fallback_doc ()
         in
         match B.mma_syntax with
         | None -> fallback_or_tiled ()
-        | Some _ when Utils.debug_log_from_routines () -> fallback_doc ()
+        | Some _ when Utils.debug_log_from_routines () ->
+            declinef
+              "Tile_mma intrinsics skipped (debug_log_from_routines: logged runs stay serial and \
+               deterministic): %s"
+              (describe ());
+            fallback_doc ()
         | Some emit -> (
             let d_prec, d_op = operand d in
             let a_prec, a_op = operand a in
             let b_prec, b_op = operand b in
             match emit ~d_prec ~a_prec ~b_prec ~ta ~tb ~m ~n ~k ~d:d_op ~a:a_op ~b:b_op with
-            | Some doc -> doc
-            | None -> fallback_or_tiled ()))
+            | Some doc ->
+                record Mma_intrinsics;
+                doc
+            | None ->
+                declinef "Tile_mma intrinsics declined by the backend hook: %s" (describe ());
+                fallback_or_tiled ()))
     | If { cond = c, cprec; body } ->
         (* Guarded statement (axis-types proposal §2): [body] executes iff [cond] is nonzero -- C's
            [if] tests exactly that. *)
@@ -2902,6 +3035,7 @@ module C_syntax (B : C_syntax_config) = struct
               per-thread stack arrays -- wrong sharing semantics. *)
            invalid_arg
              "C_syntax.compile_proc: workgroup-shared placement not supported by this backend");
+    current_kernel_name := name;
     current_placements := Some optimize_ctx.Low_level.placements;
     Low_level.validate_parallel optimize_ctx.Low_level.placements llc;
     (* Launch-extent guards (construct-then-fold, axis-types proposal §2), only for kinds this

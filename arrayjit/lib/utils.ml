@@ -122,8 +122,10 @@ let known_config_keys =
       "cpu_schedule_min_parallel";
       "schedule_fission";
       "schedule_log_launches";
+      "schedule_log_declines";
       "cc_parallel_grid";
       "cc_parallel_chunks";
+      "cc_grid_private_bytes_cap";
       "cc_vector_bytes";
       (* Autotuning (Autotune.tune) *)
       "autotune_beam_width";
