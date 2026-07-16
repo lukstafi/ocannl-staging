@@ -836,10 +836,24 @@ let conv_seed_params ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) (opt : 
         let lanes =
           limits.Ir.Backend_intf.simd_vector_bytes / max 1 (Ir.Ops.prec_in_bytes prec)
         in
+        (* The row axis must be unit-stride: [Stage] packs by index range, so a strided row would
+           pack a dilated tile read at [stride*row] — which [Tensorize]'s unit-coefficient index
+           discipline rejects (a compacting Stage is a follow-up). And every axis must be
+           offset-free (valid convolution): padded convs read the halo of a physically padded
+           source, and [Stage]'s edge guards clip tile loads against the logical dims — halo
+           positions would silently pack garbage (Codex P1 on PR #168; halo-aware staging is a
+           follow-up). Candidates are timed, not value-checked, so unsound seeds must not be
+           proposed at all. *)
+        let row_unit_stride =
+          List.exists site.c_axes ~f:(fun cx ->
+              Idx.equal_symbol cx.cx_o site.c_row && cx.cx_stride = 1)
+        in
+        let offset_free = List.for_all site.c_axes ~f:(fun cx -> cx.cx_offset = 0) in
         if
           not
             (limits.Ir.Backend_intf.simd_vector_bytes >= 8
-            && lanes >= 2 && uniform_f32_64 && site.c_fma && site.c_noc >= lanes)
+            && lanes >= 2 && uniform_f32_64 && site.c_fma && site.c_noc >= lanes
+            && row_unit_stride && offset_free)
         then None
         else
           let base =

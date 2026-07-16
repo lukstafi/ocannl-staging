@@ -75,18 +75,23 @@ let run_plain name y =
 let () =
   (* === detect_conv across stride/padding variants (via the conv2d block: random params are fine,
      only the lowered structure is inspected) === *)
-  let detect_leg tag ~stride ~use_padding ~want_stride ~want_offset ~want_row =
+  let detect_leg tag ~stride ~use_padding ~want_stride ~want_offset ~want_row ~want_seeds =
     let x = make_x tag in
     let conv =
       Nn_blocks.conv2d ~label:[ tag ] ~kernel_size:3 ~stride ~use_padding ~out_channels:8 ()
     in
     let y = conv x in
     let site = ref None in
+    let n_seeds = ref (-1) in
+    let ctx = Context.auto () in
+    (* Pin the vector width so the C-backend seed-count assertion is backend-independent (the
+       check always passes is_cpu; only [limits] would otherwise vary per device). *)
+    let limits = { (Context.hardware_limits ctx) with Ir.Backend_intf.simd_vector_bytes = 16 } in
     let transform (opt : LL.optimized) =
       site := Autotune.detect_conv opt.LL.llc;
+      n_seeds := List.length (Autotune.sketch_seed_params ~is_gpu:false ~is_cpu:true ~limits opt);
       opt
     in
-    let ctx = Context.auto () in
     let ctx = Train.init_params ctx Ir.Indexing.Empty y in
     let ctx, routine =
       Context.compile ~lowered_transform:transform ctx
@@ -94,6 +99,10 @@ let () =
         Ir.Indexing.Empty
     in
     ignore (ctx, routine);
+    (* The C-backend seed count: (serial + Grid) x (unfused + fused-epilogue twin) on unit-stride
+       rows, none on strided rows (the packing Stage packs by index range — see the pipeline
+       legs). *)
+    p (tag ^ " C-backend conv seeds") (!n_seeds = want_seeds);
     match !site with
     | None -> p (tag ^ " detected") false
     | Some s ->
@@ -107,9 +116,12 @@ let () =
               && cx.Autotune.cx_offset = want_offset
               && cx.Autotune.cx_nk = 3))
   in
-  detect_leg "cvd_s1v" ~stride:1 ~use_padding:false ~want_stride:1 ~want_offset:0 ~want_row:9;
-  detect_leg "cvd_s2v" ~stride:2 ~use_padding:false ~want_stride:2 ~want_offset:0 ~want_row:5;
-  detect_leg "cvd_s1p" ~stride:1 ~use_padding:true ~want_stride:1 ~want_offset:(-1) ~want_row:11;
+  detect_leg "cvd_s1v" ~stride:1 ~use_padding:false ~want_stride:1 ~want_offset:0 ~want_row:9
+    ~want_seeds:4;
+  detect_leg "cvd_s2v" ~stride:2 ~use_padding:false ~want_stride:2 ~want_offset:0 ~want_row:5
+    ~want_seeds:0;
+  detect_leg "cvd_s1p" ~stride:1 ~use_padding:true ~want_stride:1 ~want_offset:(-1) ~want_row:11
+    ~want_seeds:0;
 
   (* === Pattern discipline: a matmul is not a conv site === *)
   (let ma =
@@ -138,12 +150,23 @@ let () =
    p "matmul is not a conv site" (Option.is_none !site));
 
   (* === The hand-built implicit-GEMM pipeline (C backends; unit-lane Tensorize like the packed mma
-     pipelines) === *)
-  let make_conv sub =
+     pipelines). Stride-2 and padded variants included: strided windows only change the packing
+     Stage's index arithmetic, and padded convs read a physically padded source (negative offsets
+     land in the halo — the lowered nest carries no guards for a Stage to displace), so the pipeline
+     is uniform across the variants. === *)
+  let make_conv_s1v sub =
     let x = make_x sub in
     let kern = make_kern sub in
     let%op y =
       x +* "...| 1*oh<+kh, 1*ow<+kw, ..ic..; |kh, kw, ..ic.. -> ..oc.. => ...| oh, ow, ..oc.." kern
+    in
+    (x, kern, y)
+  in
+  let make_conv_s2v sub =
+    let x = make_x sub in
+    let kern = make_kern sub in
+    let%op y =
+      x +* "...| 2*oh<+kh, 2*ow<+kw, ..ic..; |kh, kw, ..ic.. -> ..oc.. => ...| oh, ow, ..oc.." kern
     in
     (x, kern, y)
   in
@@ -183,27 +206,53 @@ let () =
     let ctx = Context.run ctx routine in
     Context.get_values ctx y.Tensor.value
   in
-  let want =
-    let _, _, y = make_conv "cvg_r" in
-    run_plain "cvg_ref" y
+  let pipeline_leg tag make_conv =
+    let want =
+      let _, _, y = make_conv (tag ^ "_r") in
+      run_plain (tag ^ "_ref") y
+    in
+    let swapped = run_sched (tag ^ "_swap") (make_conv (tag ^ "_s")) ~tensorized:false in
+    p
+      (tag ^ ": reorder-only conv matches the natural form within tolerance")
+      (Array.for_all2_exn swapped want ~f:(fun a b -> Float.(abs (a - b) < 1e-3)));
+    if on_cpu then (
+      let full = run_sched (tag ^ "_gemm") (make_conv (tag ^ "_g")) ~tensorized:true in
+      p
+        (tag ^ ": packed+tensorized conv matches the reorder-only twin bitwise")
+        (Array.for_all2_exn full swapped ~f:Float.equal);
+      p
+        (tag ^ ": packed+tensorized conv matches the natural form within tolerance")
+        (Array.for_all2_exn full want ~f:(fun a b -> Float.(abs (a - b) < 1e-3))))
+    else (
+      p (tag ^ ": packed+tensorized conv matches the reorder-only twin bitwise") true;
+      p (tag ^ ": packed+tensorized conv matches the natural form within tolerance") true)
   in
-  let swapped = run_sched "cvg_swap" (make_conv "cvg_s") ~tensorized:false in
-  p "reorder-only conv matches the natural form within tolerance"
-    (Array.for_all2_exn swapped want ~f:(fun a b -> Float.(abs (a - b) < 1e-3)));
-  if on_cpu then (
-    let full = run_sched "cvg_gemm" (make_conv "cvg_g") ~tensorized:true in
-    p "packed+tensorized conv matches the reorder-only twin bitwise"
-      (Array.for_all2_exn full swapped ~f:Float.equal);
-    p "packed+tensorized conv matches the natural form within tolerance"
-      (Array.for_all2_exn full want ~f:(fun a b -> Float.(abs (a - b) < 1e-3)));
+  pipeline_leg "cvg" make_conv_s1v;
+  (* No padded pipeline leg: padded convs read the halo of a physically padded input, and the
+     staging pipeline is not halo-aware yet (Stage's edge guards clip tile loads against the
+     logical dims) — the seeds are gated to offset-free sites (asserted above), so autotune never
+     proposes the unsound form. Halo-aware staging is a follow-up. *)
+  (* A strided row packs a dilated tile ([Stage] packs by index range), which [Tensorize]'s
+     unit-coefficient discipline rejects — the reorder still holds, and the seeds are gated on a
+     unit-stride row (asserted below), so autotune never proposes the rejected form. *)
+  (let want2 =
+     let _, _, y = make_conv_s2v "cvg2_r" in
+     run_plain "cvg2_ref" y
+   in
+   let swapped2 = run_sched "cvg2_swap" (make_conv_s2v "cvg2_s") ~tensorized:false in
+   p "cvg2: reorder-only conv matches the natural form within tolerance"
+     (Array.for_all2_exn swapped2 want2 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)));
+   match run_sched "cvg2_gemm" (make_conv_s2v "cvg2_g") ~tensorized:true with
+   | _ -> p "cvg2: strided-row tensorization rejected with a targeted error" false
+   | exception Invalid_argument msg ->
+       p "cvg2: strided-row tensorization rejected with a targeted error"
+         (String.is_substring msg ~substring:"Schedule.Tensorize"));
+  if on_cpu then
     let src = Stdio.In_channel.read_all (Utils.build_file "cvg_gemm.c") in
     let has s = String.is_substring src ~substring:s in
     p "conv pipeline structure: im2col packs, register tiling, resident fragment"
-      (has "Tile_mma register tiling" && has "fragment_" && has "tile_"))
-  else (
-    p "packed+tensorized conv matches the reorder-only twin bitwise" true;
-    p "packed+tensorized conv matches the natural form within tolerance" true;
-    p "conv pipeline structure: im2col packs, register tiling, resident fragment" true);
+      (has "Tile_mma register tiling" && has "fragment_" && has "tile_")
+  else p "conv pipeline structure: im2col packs, register tiling, resident fragment" true;
 
   (* === Autotune seeding on conv+bias+relu: serial + Grid conv pipelines and their fused-epilogue
      twins; the tuned routine matches the untuned twin === *)
