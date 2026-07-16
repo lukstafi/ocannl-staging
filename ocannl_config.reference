@@ -147,6 +147,23 @@ schedule_fission=true
 # identical code actually emit. Debugging aid; independent of the ppx_minidebug log levels.
 schedule_log_launches=false
 
+# Liveness-based buffer aliasing (the memory planner, gh-ocannl-489). If true, a routine's
+# working (non-constant, freshly allocated) tensor-node buffers are laid out in one arena where
+# nodes with disjoint live ranges — computed over the routine's final kernel sequence — may share
+# bytes, shrinking the routine's device-memory footprint. Only unobservable intermediates that the
+# routine writes before reading are eligible; parameters, host-initialized, recurrent, constant
+# and observable nodes always keep dedicated bytes. Contract: an aliased node's values are NOT
+# preserved past its last read within the routine — reading one from the host or from a
+# later-compiled routine raises a User_error (mark the node observable before compiling, or
+# disable this setting). Most effective when the whole training step compiles as one routine
+# (e.g. Train.grad_update + sgd_update sequenced into a single compilation).
+buffer_aliasing=false
+
+# If true, linking a liveness-planned routine logs one stderr line with the working pool's arena
+# size vs. the dedicated (bump-packed) size and how many nodes were liveness-planned — the
+# footprint report accompanying buffer_aliasing. Debugging aid, schedule_log_launches-style.
+log_buffer_aliasing=false
+
 # How the C backend renders eligible outermost Grid loops (pool-backed Grid rendering,
 # docs/proposals/gh-ocannl-164.md): "dispatch" uses libdispatch's dispatch_apply (macOS),
 # "openmp" uses `#pragma omp parallel for` (adds -fopenmp to the kernel compile), "none" keeps

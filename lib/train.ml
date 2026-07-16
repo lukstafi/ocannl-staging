@@ -73,6 +73,10 @@ let loss_accumulator ?(label = "loss_accum") () =
     scheduling. *)
 let grad_update ?(setup_for_parallel = false) ?accum_loss loss =
   set_materialized loss.Tensor.value;
+  (* Training loops read the loss from the host; declare the intent so the liveness memory planner
+     (config [buffer_aliasing], gh-ocannl-489) never aliases the loss buffer -- like param
+     gradients' observation intent declared in [Tensor.param]. *)
+  Tn.set_observable loss.Tensor.value;
   if setup_for_parallel then
     Set.iter loss.Tensor.params ~f:(fun p ->
         set_materialized (Option.value_exn ~here:[%here] p.diff).grad);

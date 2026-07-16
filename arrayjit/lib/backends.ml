@@ -50,6 +50,89 @@ let plan_pool_segments ~(cap : int) ~(what : string) ~(debug_name : int -> strin
   let segment_sizes = if List.is_empty items then [] else List.rev (!bump :: !closed) in
   (assignments, segment_sizes)
 
+(* gh-ocannl-489 liveness-based buffer aliasing: the config gates. Read per call (not cached in a
+   lazy) so tests can flip them via the environment between compilation sections of one process. *)
+let buffer_aliasing () = Utils.get_global_flag ~default:false ~arg_name:"buffer_aliasing"
+let log_buffer_aliasing () = Utils.get_global_flag ~default:false ~arg_name:"log_buffer_aliasing"
+
+(* gh-ocannl-489: liveness-aware companion of [plan_pool_segments] -- lays out a sequence of
+   [(size, alignment, precision_class, live_span)] allocations into ONE pool where two allocations
+   may occupy overlapping byte ranges iff both have a live span (planner-eligible), the spans are
+   disjoint as closed intervals, and the precision classes are equal (sharing bytes across effective
+   types would be C strict-aliasing UB in the single-procedure CPU backends). A [None] span means
+   always-live: the node conflicts with everything, including other always-live nodes. Placement is
+   greedy by decreasing size (ties broken by input order, keeping the layout deterministic): each
+   item lands at the lowest suitably-aligned offset that avoids all conflicting placed items.
+   Returns per-item byte offsets in input order plus the pool's total size, or [None] when the
+   layout exceeds [cap] (the caller falls back to [plan_pool_segments]' bump packing, which
+   segments at the cap). Pure, so the coloring is unit testable with synthetic sizes. *)
+let plan_arena_offsets ~(cap : int) (items : (int * int * string * (int * int) option) list) :
+    (int list * int) option =
+  let arr = Array.of_list items in
+  let n = Array.length arr in
+  let order =
+    List.sort (List.init n ~f:Fn.id) ~compare:(fun i j ->
+        let si, _, _, _ = arr.(i) and sj, _, _, _ = arr.(j) in
+        match compare_int sj si with 0 -> compare_int i j | c -> c)
+  in
+  let conflicts i j =
+    let _, _, ci, spi = arr.(i) and _, _, cj, spj = arr.(j) in
+    match (spi, spj) with
+    | Some (lo1, hi1), Some (lo2, hi2) when String.equal ci cj -> not (hi1 < lo2 || hi2 < lo1)
+    | _ -> true
+  in
+  let offsets = Array.create ~len:n 0 in
+  let placed = ref [] in
+  let total = ref 0 in
+  List.iter order ~f:(fun i ->
+      let size, align, _, _ = arr.(i) in
+      let align_up off = if align <= 1 then off else (off + align - 1) / align * align in
+      let ranges =
+        List.filter_map !placed ~f:(fun j ->
+            if conflicts i j then
+              let sj, _, _, _ = arr.(j) in
+              Some (offsets.(j), offsets.(j) + sj)
+            else None)
+        |> List.sort ~compare:(fun (a, _) (b, _) -> compare_int a b)
+      in
+      let off =
+        List.fold ranges ~init:(align_up 0) ~f:(fun off (lo, hi) ->
+            if off + size <= lo then off else max off (align_up hi))
+      in
+      offsets.(i) <- off;
+      placed := i :: !placed;
+      total := max !total (off + size));
+  if !total > cap then None else Some (Array.to_list offsets, !total)
+
+let size_in_bytes_of (key : Tn.t) =
+  let prec = Lazy.force key.Tn.prec in
+  Array.fold (Lazy.force key.Tn.dims) ~init:1 ~f:( * ) * Ops.prec_in_bytes prec
+
+(* gh-ocannl-489: whether [tn]'s buffer shares bytes with another node's in [ctx_buffers] -- i.e.
+   the liveness planner ([plan_arena_offsets] via [allocate_delta]) placed it at an overlapping
+   range. Exact and layout-derived: bump-packed tenants of one pool have disjoint ranges and never
+   trigger this. Used by the read guards: an aliased node's values are not preserved past its last
+   in-routine read, so host reads, cross-device reads and later-routine inputs must fail loudly. *)
+let buffer_overlaps (ctx_buffers : Backend_intf.ctx_buffers) tn (loc : Backend_intf.buffer_loc) :
+    bool =
+  let size = size_in_bytes_of tn in
+  Map.existsi ctx_buffers ~f:(fun ~key ~data:(l : Backend_intf.buffer_loc) ->
+      (not (Tn.equal key tn))
+      && l.pool_id = loc.pool_id
+      && l.offset < loc.offset + size
+      && loc.offset < l.offset + size_in_bytes_of key)
+
+let aliased_read_error ~what tn =
+  raise
+  @@ Utils.User_error
+       (Printf.sprintf
+          "%s: tensor node %s was buffer-aliased by the liveness memory planner (config \
+           buffer_aliasing): its buffer is shared with other nodes and its values are not \
+           preserved past its last read within the routine that computes it. Mark it as observable \
+           or materialized-and-read (e.g. via Tnode.set_observable) before compiling that routine, \
+           or disable buffer_aliasing."
+          what (Tnode.debug_name tn))
+
 (* Dynamic backstop for merge-buffer verification: runs as the first work of a consumer's schedule
    and checks the node most recently scheduled into the stream's merge buffer. The primary check is
    now the static [check_merge_buffer_static] performed at link time (gh-ocannl-288); this remains
@@ -113,6 +196,7 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
   let%track3_sexp to_host (ctx : Backend.context) (tn : Tn.t) (hosted : Ndarray.t) =
     match Map.find ctx.ctx_buffers tn with
     | Some loc ->
+        if buffer_overlaps ctx.ctx_buffers tn loc then aliased_read_error ~what:"reading to host" tn;
         [%log "copying", Tn.debug_name tn, "at", (loc : Backend_intf.buffer_loc), "to host"];
         (* No cross-stream writer synchronization needed: multi-streaming was removed
            (gh-ocannl-341). Only one stream exists per device, so there are no concurrent
@@ -133,6 +217,10 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
   let%track3_sexp from_host (ctx : Backend.context) (tn : Tn.t) (hosted : Ndarray.t) =
     match Map.find ctx.ctx_buffers tn with
     | Some dst ->
+        (* A host write to an aliased buffer would be clobbered by the next run of the aliasing
+           routine (and would clobber co-tenants meanwhile) -- surely a mistake; fail loudly. *)
+        if buffer_overlaps ctx.ctx_buffers tn dst then
+          aliased_read_error ~what:"writing from host" tn;
         (* No cross-stream reader synchronization needed: multi-streaming was removed
            (gh-ocannl-341). Only one stream exists per device, so there are no concurrent
            cross-stream readers to wait for before this host-to-device upload. *)
@@ -167,6 +255,8 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
     match Map.find src.ctx_buffers tn with
     | None -> None
     | Some s_loc -> (
+        if buffer_overlaps src.ctx_buffers tn s_loc then
+          aliased_read_error ~what:"device_to_device source" tn;
         match into_merge_buffer with
         | No -> (
             match Map.find dst.ctx_buffers tn with
@@ -480,6 +570,12 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
         (** [First]: a single kernel, as before fission. [Second]: the segment kernels of one
             routine, compiled as a batch and launched back-to-back on the routine's stream. *)
     expected_merge_node : Tnode.t option;
+    alias_spans : (Tnode.t, int * int) Base.Hashtbl.t option;
+        (** gh-ocannl-489: the liveness planner's per-compile facts -- live spans of the
+            aliasing-eligible nodes over the final segment sequence (see
+            {!Low_level.buffer_access_spans}). Consumed by [allocate_delta] at link time to lay the
+            working pool out with overlapping offsets ([plan_arena_offsets]). [None] when the
+            [buffer_aliasing] config is off or the code is opaque to the liveness fold. *)
   }
   [@@deriving sexp_of]
 
@@ -534,6 +630,59 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
              "schedule: %s seg %d/%d grid=[%d;%d;%d] block=[%d;%d;%d] stmts=%d\n%!" name i n_segs
              d.grid.(0) d.grid.(1) d.grid.(2) d.block.(0) d.block.(1) d.block.(2)
              (List.length (Low_level.flat_lines [ seg.Low_level.llc ]))));
+    (* gh-ocannl-489 liveness-based buffer aliasing, the per-compile planning half: live spans over
+       the FINAL segment sequence (post-schedule, post-fission -- cross-nest merges and kernel cuts
+       change which accesses can interleave, so pre-schedule spans would be unsound), filtered down
+       to the aliasing-eligible nodes. Eligible = in-context working nodes that the routine writes
+       before any read: not read-only, not read-before-write (excludes recurrent nodes and reliance
+       on alloc-time zeros), not observable (host reads must stay valid), not host-initialized (live
+       before the program), not constants, not the merge node. Runs BEFORE [Device.compile] below:
+       the candidates registered on [optimize_ctx.alias_candidates] make codegen drop the [restrict]
+       qualifier on their kernel parameters (an actually-aliased [restrict] pair is a miscompile).
+       Position granularity: statements on backends that synchronize between top-level statements
+       (the C backends -- no hardware workgroup binding, parallel dispatches join), segments
+       otherwise (GPU kernels lack grid-wide sync between statements). *)
+    let alias_spans : (Tn.t, int * int) Base.Hashtbl.t option =
+      if not (buffer_aliasing ()) then None
+      else
+        let stmt_serial = Option.is_none limits.max_threads_per_workgroup in
+        match
+          Low_level.buffer_access_spans ~stmt_serial
+            (List.map lowereds ~f:(fun seg -> seg.Low_level.llc))
+        with
+        | None -> None
+        | Some spans ->
+            let plc = lowered.Low_level.optimize_ctx.placements in
+            Hashtbl.filter_keys_inplace spans ~f:(fun tn ->
+                match Hashtbl.find lowered.Low_level.traced_store tn with
+                | None -> false
+                | Some node ->
+                    Tn.Placements.is_in_context_force plc tn 45
+                    && (not node.Low_level.read_only)
+                    && (not node.Low_level.read_before_write)
+                    && (node.Low_level.zeroed_out
+                       || not (Hash_set.is_empty node.Low_level.assignments))
+                    (* Written but never consumed in-routine means the write is an EXPORT for
+                       later routines (parameter initialization is the ubiquitous case) -- its
+                       lifetime extends past this routine, so it must keep dedicated bytes. *)
+                    && node.Low_level.read_by_other
+                    && (not (Tn.is_observable tn))
+                    && (not (Host_inits.mem tn))
+                    && (not (Tn.Placements.known_constant plc tn))
+                    && not (Option.exists lowered.Low_level.merge_node ~f:(Tn.equal tn)));
+            if Hashtbl.is_empty spans then None
+            else (
+              Hashtbl.iter_keys spans
+                ~f:(Hash_set.add lowered.Low_level.optimize_ctx.alias_candidates);
+              if log_buffer_aliasing () then
+                List.iter
+                  (Hashtbl.to_alist spans
+                  |> List.sort ~compare:(fun (_, (a, _)) (_, (b, _)) -> compare_int a b))
+                  ~f:(fun (tn, (lo, hi)) ->
+                    Stdlib.Printf.eprintf "buffer aliasing: %s: candidate %s live [%d, %d]\n%!"
+                      name (Tn.debug_name tn) lo hi);
+              Some spans)
+    in
     let (proc : (Device.code, fissioned) Either.t), (lowered : Low_level.optimized) =
       match lowereds with
       | [] -> assert false
@@ -571,7 +720,14 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
         (Assignments.context_nodes ~plc:lowered.Low_level.optimize_ctx.placements comp.asgns)
         comp.embedded_nodes
     in
-    { from_prior_context; name; lowered; proc; expected_merge_node = lowered.Low_level.merge_node }
+    {
+      from_prior_context;
+      name;
+      lowered;
+      proc;
+      expected_merge_node = lowered.Low_level.merge_node;
+      alias_spans;
+    }
 
   let%debug3_sexp compile_batch optim_ctx ?names ?occupancy bindings
       (comps : Assignments.comp array) : code_batch =
@@ -613,10 +769,6 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
             Option.(join @@ map lowered ~f:(fun optim -> optim.Low_level.merge_node)));
     }
 
-  let size_in_bytes_of (key : Tn.t) =
-    let prec = Lazy.force key.Tn.prec in
-    Array.fold (Lazy.force key.Tn.dims) ~init:1 ~f:( * ) * Ops.prec_in_bytes prec
-
   (* gh-ocannl-344 Phase B/C: allocate a context's delta -- the in-context tnodes not already
      present in [context.ctx_buffers]. Working (non-constant) and constant/read-only nodes are EACH
      packed into pools sized to their group and bump-assigned increasing byte offsets, replacing the
@@ -625,7 +777,9 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
      (freed at device teardown). Enumeration follows [traced_store] order so pool ids and offsets
      stay deterministic across runs. The per-pool 4 GB cap (uint32 offsets unless large_models) is
      enforced by {!Backend_utils.plan_pool_segments}. *)
-  let%track3_sexp allocate_delta (context : context) (lowered : Low_level.optimized) : ctx_buffers =
+  let%track3_sexp allocate_delta (context : context) ~name
+      ~(alias_spans : (Tn.t, int * int) Base.Hashtbl.t option) (lowered : Low_level.optimized) :
+      ctx_buffers =
     let traced_store = lowered.Low_level.traced_store in
     let device = context.device in
     let cap = if Utils.settings.large_models then Int.max_value else 0x1_0000_0000 in
@@ -651,7 +805,27 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
        how the resulting [buffer_loc] is recorded (directly into [ctx_buffers] for working nodes, or
        deduped through [constant_buffer_cache] for constants). [base_pool_id] of each segment is a
        freshly minted [next_pool_id]; offsets and pool sizes come from the pure planner. *)
-    let pack (group : (Tn.t * Low_level.traced_array) list)
+    let place (key, node) ~pool_id ~offset ~register =
+      let size_in_bytes = size_in_bytes_of key in
+      let alloc () : buffer_loc =
+        let host_init = Host_inits.find key in
+        (* Zero-initialize unless the node will be copied from host immediately, or the lowered
+           code already zero-initializes it. *)
+        let zero_init = not (Option.is_some host_init || node.Low_level.zero_initialized_by_code) in
+        if zero_init then memset_zero device ~pool_id ~offset ~size_in_bytes;
+        let loc = { pool_id; offset } in
+        Option.iter host_init ~f:(fun nd ->
+            let nd = Lazy.force nd in
+            (* Interval analysis, Phase B: [Host_inits] uploads are host writes; propose the
+               scanned bounds lazily -- here, where the buffer is forced at link/upload time -- so
+               [Reshape] inits wait for shape and padding inference as designed. *)
+            Tnode.propose_bounds_from_host key nd;
+            Device.from_host ~dst:context ~dst_loc:loc nd);
+        loc
+      in
+      register key ~alloc
+    in
+    let pack ?arena (group : (Tn.t * Low_level.traced_array) list)
         ~(register : Tn.t -> alloc:(unit -> buffer_loc) -> unit) : unit =
       if not (List.is_empty group) then begin
         let items =
@@ -662,53 +836,79 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
               ( size_in_bytes_of key,
                 max (Ops.prec_in_bytes (Lazy.force key.Tn.prec)) Ops.buffer_alignment ))
         in
-        let assignments, segment_sizes =
-          plan_pool_segments ~cap ~what:"Backends.allocate_delta"
-            ~debug_name:(fun i -> Tn.debug_name (fst (List.nth_exn group i)))
-            items
+        (* gh-ocannl-489: with a liveness plan (the working group under [buffer_aliasing]), lay the
+           group out as one arena where liveness-disjoint same-precision nodes overlap. Falls back
+           to bump packing when the arena would exceed the per-pool cap. *)
+        let arena_layout =
+          Option.bind arena ~f:(fun spans ->
+              plan_arena_offsets ~cap
+                (List.map2_exn group items ~f:(fun (key, _) (size, align) ->
+                     ( size,
+                       align,
+                       Ops.prec_string (Lazy.force key.Tn.prec),
+                       Hashtbl.find spans key ))))
         in
-        (* Mint a pool id per segment up front, sized from the planner. *)
-        let seg_pool_ids =
-          List.map segment_sizes ~f:(fun size_in_bytes ->
-              let pool_id = device.next_pool_id in
-              device.next_pool_id <- pool_id + 1;
-              (pool_id, size_in_bytes))
-          |> Array.of_list
-        in
-        (* Allocate each segment's slab, padding alignment to the max element precision it holds. *)
-        let seg_align = Array.map seg_pool_ids ~f:(fun _ -> ref 1) in
-        List.iter2_exn group assignments ~f:(fun (key, _) (seg, _) ->
-            let a = Ops.prec_in_bytes (Lazy.force key.Tn.prec) in
-            if a > !(seg_align.(seg)) then seg_align.(seg) := a);
-        Array.iteri seg_pool_ids ~f:(fun seg (pool_id, size_in_bytes) ->
-            alloc_pool device ~pool_id ~size_in_bytes ~alignment:!(seg_align.(seg)));
-        (* Place each node at its planned (segment, offset). *)
-        List.iter2_exn group assignments ~f:(fun (key, node) (seg, offset) ->
-            let pool_id, _ = seg_pool_ids.(seg) in
-            let size_in_bytes = size_in_bytes_of key in
-            let alloc () : buffer_loc =
-              let host_init = Host_inits.find key in
-              (* Zero-initialize unless the node will be copied from host immediately, or the
-                 lowered code already zero-initializes it. *)
-              let zero_init =
-                not (Option.is_some host_init || node.Low_level.zero_initialized_by_code)
-              in
-              if zero_init then memset_zero device ~pool_id ~offset ~size_in_bytes;
-              let loc = { pool_id; offset } in
-              Option.iter host_init ~f:(fun nd ->
-                  let nd = Lazy.force nd in
-                  (* Interval analysis, Phase B: [Host_inits] uploads are host writes; propose the
-                     scanned bounds lazily -- here, where the buffer is forced at link/upload time
-                     -- so [Reshape] inits wait for shape and padding inference as designed. *)
-                  Tnode.propose_bounds_from_host key nd;
-                  Device.from_host ~dst:context ~dst_loc:loc nd);
-              loc
+        match arena_layout with
+        | Some (offsets, total) ->
+            let pool_id = device.next_pool_id in
+            device.next_pool_id <- pool_id + 1;
+            let alignment =
+              List.fold group ~init:1 ~f:(fun a (key, _) ->
+                  max a (Ops.prec_in_bytes (Lazy.force key.Tn.prec)))
             in
-            register key ~alloc)
+            alloc_pool device ~pool_id ~size_in_bytes:total ~alignment;
+            List.iter2_exn group offsets ~f:(fun entry offset ->
+                place entry ~pool_id ~offset ~register);
+            if log_buffer_aliasing () then (
+              let _, bump_sizes =
+                plan_pool_segments ~cap ~what:"Backends.allocate_delta"
+                  ~debug_name:(fun i -> Tn.debug_name (fst (List.nth_exn group i)))
+                  items
+              in
+              let dedicated = List.fold bump_sizes ~init:0 ~f:( + ) in
+              let planned =
+                Option.value_map arena ~default:0 ~f:(fun spans ->
+                    List.count group ~f:(fun (key, _) -> Hashtbl.mem spans key))
+              in
+              Stdlib.Printf.eprintf
+                "buffer aliasing: %s: working pool %d bytes, dedicated packing %d bytes (%.1f%% \
+                 saved; %d/%d nodes liveness-planned)\n\
+                 %!"
+                name total dedicated
+                (100. *. Float.of_int (dedicated - total) /. Float.of_int (max 1 dedicated))
+                planned (List.length group))
+        | None ->
+            let assignments, segment_sizes =
+              plan_pool_segments ~cap ~what:"Backends.allocate_delta"
+                ~debug_name:(fun i -> Tn.debug_name (fst (List.nth_exn group i)))
+                items
+            in
+            (* Mint a pool id per segment up front, sized from the planner. *)
+            let seg_pool_ids =
+              List.map segment_sizes ~f:(fun size_in_bytes ->
+                  let pool_id = device.next_pool_id in
+                  device.next_pool_id <- pool_id + 1;
+                  (pool_id, size_in_bytes))
+              |> Array.of_list
+            in
+            (* Allocate each segment's slab, padding alignment to the max element precision it
+               holds. *)
+            let seg_align = Array.map seg_pool_ids ~f:(fun _ -> ref 1) in
+            List.iter2_exn group assignments ~f:(fun (key, _) (seg, _) ->
+                let a = Ops.prec_in_bytes (Lazy.force key.Tn.prec) in
+                if a > !(seg_align.(seg)) then seg_align.(seg) := a);
+            Array.iteri seg_pool_ids ~f:(fun seg (pool_id, size_in_bytes) ->
+                alloc_pool device ~pool_id ~size_in_bytes ~alignment:!(seg_align.(seg)));
+            (* Place each node at its planned (segment, offset). *)
+            List.iter2_exn group assignments ~f:(fun entry (seg, offset) ->
+                let pool_id, _ = seg_pool_ids.(seg) in
+                place entry ~pool_id ~offset ~register)
       end
     in
-    (* Pass 2a: working delta -> context-owned pool(s), recorded directly. *)
-    pack working ~register:(fun key ~alloc ->
+    (* Pass 2a: working delta -> context-owned pool(s), recorded directly. Only this group is
+       liveness-planned (gh-ocannl-489): constants are deduped per-device and outlive the context,
+       so their lifetimes are not routine intervals. *)
+    pack ?arena:alias_spans working ~register:(fun key ~alloc ->
         ctx_buffers := Map.add_exn !ctx_buffers ~key ~data:(alloc ()));
     (* Pass 2b: constants / read-only -> per-device constant pool(s). Constants already allocated on
        this device (a hit in [constant_buffer_cache], possibly from another context tree) resolve
@@ -735,7 +935,18 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     check_merge_buffer_static ~merge_buffer_node:context.merge_buffer_node
       ~code_node:code.expected_merge_node;
     let (inputs, outputs), merge_buffer_input = Low_level.input_and_output_nodes code.lowered in
-    let ctx_buffers = allocate_delta context code.lowered in
+    let ctx_buffers =
+      allocate_delta context ~name:code.name ~alias_spans:code.alias_spans code.lowered
+    in
+    (* gh-ocannl-489: a routine reading a node whose buffer an earlier routine of this lineage
+       aliased would read clobbered values -- fail at link time, before any schedule runs. Writes
+       (outputs) are allowed: the aliasing routine rewrites everything it reads on each run. This
+       code's own aliased nodes are never its inputs (aliasing-eligible nodes are not
+       read-before-write), so the check only fires on genuinely cross-routine reads. *)
+    Set.iter inputs ~f:(fun tn ->
+        Option.iter (Map.find ctx_buffers tn) ~f:(fun loc ->
+            if buffer_overlaps ctx_buffers tn loc then
+              aliased_read_error ~what:("linking " ^ code.name ^ ", input") tn));
     let optimize_ctx = code.lowered.Low_level.optimize_ctx in
     let bindings, schedule =
       match code.proc with
@@ -787,7 +998,12 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     verify_prior_context ~plc:(get_optimize_ctx_batch code_batch).Low_level.placements
       ~ctx_arrays:context.ctx_buffers ~from_prior_context:code_batch.from_prior_context;
     let ctx_buffers =
-      Array.map code_batch.lowereds ~f:(Option.map ~f:(fun l -> allocate_delta context l))
+      Array.mapi code_batch.lowereds ~f:(fun i ->
+          Option.map ~f:(fun l ->
+              let name = Option.value code_batch.names.(i) ~default:"<unnamed>" in
+              (* Batch compiles are not liveness-planned in v1 (they do not go through the
+                 fission/schedule seam of [compile]); [alias_spans:None] keeps bump packing. *)
+              allocate_delta context ~name ~alias_spans:None l))
     in
     let bindings, schedules = link_batch context code_batch.code_batch ctx_buffers in
     Array.fold_mapi schedules ~init:context ~f:(fun i context -> function
@@ -804,6 +1020,11 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
           let (inputs, outputs), merge_buffer_input =
             Low_level.input_and_output_nodes @@ Option.value_exn code_batch.lowereds.(i)
           in
+          (* gh-ocannl-489: same cross-routine read guard as in [link]. *)
+          Set.iter inputs ~f:(fun tn ->
+              Option.iter (Map.find ctx_buffers tn) ~f:(fun loc ->
+                  if buffer_overlaps ctx_buffers tn loc then
+                    aliased_read_error ~what:"linking batch member, input" tn));
           let schedule =
             Task.prepend schedule ~work:(fun () ->
                 check_merge_buffer context.device ~code_node:expected_merge_node)

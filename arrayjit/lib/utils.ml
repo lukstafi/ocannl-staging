@@ -104,6 +104,8 @@ let known_config_keys =
       "cuda_printf_fifo_size";
       "hip_printf_fifo_size";
       "multidev_num_devices";
+      "buffer_aliasing";
+      "log_buffer_aliasing";
       (* Low-level / optimization *)
       "virtualize_max_visits";
       "virtualize_max_inline_reduction";

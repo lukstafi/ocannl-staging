@@ -16,6 +16,15 @@ val plan_pool_segments :
     item exceeds [cap]. Exposed for unit testing the segmenting/cap behavior with synthetic sizes.
 *)
 
+val plan_arena_offsets : cap:int -> (int * int * string * (int * int) option) list -> (int list * int) option
+(** gh-ocannl-489 liveness-aware pool layout: lays out [(size, alignment, precision_class,
+    live_span)] allocations into ONE pool where two allocations may overlap iff both carry a live
+    span, the spans are disjoint (closed intervals) and the precision classes are equal. A [None]
+    span means always-live (conflicts with everything). Greedy by decreasing size, deterministic.
+    Returns per-item byte offsets (in input order) and the pool's total size, or [None] when the
+    layout exceeds [cap] (callers fall back to {!plan_pool_segments}). Exposed for unit testing the
+    coloring with synthetic sizes. *)
+
 val finalize :
   'dev 'runner 'event.
   (module Ir.Backend_intf.Backend
