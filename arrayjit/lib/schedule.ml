@@ -1524,6 +1524,9 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
     persistent simdgroup fragments; unsupported backend calls keep the local-array fallback. *)
 let contract_tensorized_accumulator ~lane (opt : Low_level.optimized) : Low_level.optimized =
   let open Low_level in
+  (* [Tensorize] currently identifies one micro-kernel site per scheduled routine. Keep contraction
+     single-shot to avoid conflating independent accumulator lifetimes if multi-site tensorization
+     is introduced; that extension should promote and mark each site explicitly. *)
   let promoted = ref None in
   let mentions sym idx =
     match terms_of_index idx with

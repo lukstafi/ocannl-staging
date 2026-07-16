@@ -768,7 +768,7 @@ module C_syntax (B : C_syntax_config) = struct
     lazy
       (match
          Int.of_string
-           (String.strip
+            (String.strip
               (Utils.get_global_arg ~arg_name:"cc_grid_private_bytes_cap"
                  ~default:"262144"))
        with
@@ -1189,14 +1189,22 @@ module C_syntax (B : C_syntax_config) = struct
 
      The marker on [optimized] makes this structural, not a proof over arbitrary user IR. A backend
      hook may replace the region; declining leaves the ordinary local-array rendering untouched. *)
-  let try_mma_fragment_scope ~render (c : Low_level.t) : PPrint.document option =
+  let render_mma_fragment_scope ~render (c : Low_level.t) : PPrint.document option =
     let open Low_level in
     let open PPrint in
     let nonempty =
       List.filter (flat_lines [ c ]) ~f:(function Noop | Comment _ -> false | _ -> true)
     in
+    let is_lane0_guard lane = function
+      | Binop (Ops.Cmpeq, (Embed_index (Indexing.Iterator guard_lane), _), (Constant zero, _))
+      | Binop (Ops.Cmpeq, (Constant zero, _), (Embed_index (Indexing.Iterator guard_lane), _)) ->
+          Indexing.equal_symbol lane guard_lane && Float.equal zero 0.
+      | _ -> false
+    in
     let unwrap_transfer ~into_fragment = function
-      | For_loop { index = lane; from_ = 0; to_; axis = Workgroup; body = If { body; _ }; _ } ->
+      | For_loop
+          { index = lane; from_ = 0; to_; axis = Workgroup; body = If { cond = cond, _; body }; _ }
+        when is_lane0_guard lane cond ->
           let rec descend syms = function
             | For_loop { index; axis = Serial; body; _ } -> descend (index :: syms) body
             | Set { tn = fragment; llsc = Get (target, target_idcs); _ } when into_fragment ->
@@ -1310,6 +1318,9 @@ module C_syntax (B : C_syntax_config) = struct
             | _ -> None)
         | _ -> None)
     | _ -> None
+
+  let try_mma_fragment_scope ~render c =
+    if Set.is_empty !current_simdgroup_fragments then None else render_mma_fragment_scope ~render c
 
   let rec pp_ll ?(log_set_locals = true) ?(in_loop = false) (c : Low_level.t) : PPrint.document =
     let open PPrint in
@@ -2580,6 +2591,18 @@ module C_syntax (B : C_syntax_config) = struct
            declines and logged runs, which must stay serial and deterministic) the scalar fallback
            runs once per simdgroup, guarded on lane 0 — the lane loop still supplies the launch's
            threads. *)
+        let d_tn = fst d in
+        let fragment_is_active =
+          match !active_mma_accumulator with
+          | Some (Active_fragment (fragment, _)) | Some (Active_target (fragment, _)) ->
+              Tn.equal d_tn fragment
+          | None -> false
+        in
+        if Set.mem !current_simdgroup_fragments d_tn && not fragment_is_active then
+          declinef
+            "marked simdgroup fragment %s rendered outside its recognized fragment scope; falling \
+             back from the intended persistent intrinsic path"
+            (Tn.debug_name d_tn);
         let operand (tn, idcs) =
           let dims = Lazy.force tn.Tn.dims in
           let prec = Lazy.force tn.Tn.prec in

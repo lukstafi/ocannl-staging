@@ -421,8 +421,19 @@ let () =
               | Some load, Some beg, Some fin, Some store
                 when load < beg && beg < fin && fin < store ->
                   let reduction_body = String.sub src ~pos:beg ~len:(fin - beg) in
+                  let update = "/* tile_mma fragment update" in
+                  let barrier = "threadgroup_barrier(mem_flags::mem_threadgroup);" in
+                  let update_has_trailing_barrier =
+                    match String.substr_index reduction_body ~pattern:update with
+                    | Some update_pos ->
+                        String.is_substring
+                          (String.drop_prefix reduction_body update_pos)
+                          ~substring:barrier
+                    | None -> false
+                  in
                   (not (String.is_substring reduction_body ~substring:fragment_load))
-                  && not (String.is_substring reduction_body ~substring:fragment_store)
+                  && (not (String.is_substring reduction_body ~substring:fragment_store))
+                  && update_has_trailing_barrier
               | _ -> false
             in
             count_sub "threadgroup float tile_" = 2

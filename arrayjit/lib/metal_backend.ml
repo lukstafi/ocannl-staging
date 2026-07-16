@@ -669,6 +669,8 @@ module Impl = struct
                 (group
                    (string (Printf.sprintf "{ /* tile_mma fragment update %dx%dx%d */" m n k)
                    ^^ nest 2 (hardline ^^ body)
+                   ^^ hardline
+                   ^^ string "threadgroup_barrier(mem_flags::mem_threadgroup);"
                    ^^ hardline ^^ rbrace))
           | _ -> (
               match (frag_typ, addr_space d_space, addr_space a_space, addr_space b_space) with
