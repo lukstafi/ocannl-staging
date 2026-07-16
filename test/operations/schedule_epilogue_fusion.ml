@@ -1,23 +1,21 @@
-(* Epilogue fusion (gh-ocannl-486): [Sched.Fuse_epilogue] folds the sole-consumer elementwise
-   tail — here relu(prod + bias) after [prod = ma * mb] — into prod's store-back site, executed
-   against the unfused two-kernel form on every backend.
+(* Epilogue fusion (gh-ocannl-486): [Sched.Fuse_epilogue] folds the sole-consumer elementwise tail —
+   here relu(prod + bias) after [prod = ma * mb] — into prod's store-back site, executed against the
+   unfused two-kernel form on every backend.
 
-   Three fusion sites are exercised:
-   - the plain accumulation nest (the tail slides inside the output loops after the serial k
-     loop — classic loop fusion);
-   - the [Privatize] tile store-back of the S4 packed pipeline (per-element, after the final
-     write; all-Serial, legal on every backend);
-   - the lane-0 fragment store-back synthesized by [Tensorize]'s accumulator contraction (the
-     tail becomes a fourth, lane-0-guarded statement of the marked region; with [shared] the
-     accumulator moves to workgroup-shared memory so Metal's simdgroup fragment intrinsics keep
-     firing — the epilogue then renders after the intrinsic block's trailing barrier).
+   Three fusion sites are exercised: - the plain accumulation nest (the tail slides inside the
+   output loops after the serial k loop — classic loop fusion); - the [Privatize] tile store-back of
+   the S4 packed pipeline (per-element, after the final write; all-Serial, legal on every backend);
+   - the lane-0 fragment store-back synthesized by [Tensorize]'s accumulator contraction (the tail
+   becomes a fourth, lane-0-guarded statement of the marked region; with [shared] the accumulator
+   moves to workgroup-shared memory so Metal's simdgroup fragment intrinsics keep firing — the
+   epilogue then renders after the intrinsic block's trailing barrier).
 
    Elementwise epilogues never reorder the reduction, so on the C backends every fused form must
    match the two-kernel form BITWISE; GPU fragment paths stay under the usual tolerance (the tile
    reduction reassociates). The negative checks pin the op's pattern discipline. Note that on
-   hardware-parallel schedules the UNFUSED whole-routine form is not even expressible as one
-   kernel (the tail write is not covered by the hardware axes — [validate_parallel] rejects it);
-   fusion is what makes whole-routine sketches apply to matmul+tail graphs at all. *)
+   hardware-parallel schedules the UNFUSED whole-routine form is not even expressible as one kernel
+   (the tail write is not covered by the hardware axes — [validate_parallel] rejects it); fusion is
+   what makes whole-routine sketches apply to matmul+tail graphs at all. *)
 
 open Base
 open Ocannl
@@ -49,8 +47,7 @@ let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~d
 let on_metal = String.is_substring backend_name ~substring:"metal"
 
 let on_gpu =
-  List.exists [ "metal"; "cuda"; "hip" ] ~f:(fun s ->
-      String.is_substring backend_name ~substring:s)
+  List.exists [ "metal"; "cuda"; "hip" ] ~f:(fun s -> String.is_substring backend_name ~substring:s)
 
 let read_generated base_name =
   let ext =
@@ -82,7 +79,8 @@ let make_graph () =
 let run_with name transform (mc : Tensor.t) =
   let ctx = Context.auto () in
   let ctx, routine =
-    Context.compile ~lowered_transform:transform ctx (named name (Train.forward mc))
+    Context.compile ~lowered_transform:transform ctx
+      (named name (Train.forward mc))
       Ir.Indexing.Empty
   in
   let ctx = Context.run ctx routine in
@@ -110,8 +108,7 @@ let () =
   in
   let got1 = run_with "epf_plain" transform1 mc1 in
   p "plain-nest fusion leaves a single nest (tail merged)" (!fused_count = 1);
-  p "plain-nest fused values match two-kernel bitwise"
-    (Array.for_all2_exn got1 want ~f:Float.equal);
+  p "plain-nest fused values match two-kernel bitwise" (Array.for_all2_exn got1 want ~f:Float.equal);
 
   (* --- Site 2: the S4 packed pipeline's Privatize store-back (all-Serial, every backend) --- *)
   let ma2, mb2, prod2, mc2 = make_graph () in
@@ -210,8 +207,7 @@ let () =
           scan b;
           let b1 = match b with LL.Seq (b1, _) -> b1 | b -> b in
           if
-            is_lane_wg a && is_lane_wg b1
-            && writes prod3.Tensor.value a
+            is_lane_wg a && is_lane_wg b1 && writes prod3.Tensor.value a
             && writes mc3.Tensor.value b1
           then has_epilogue_sibling := true
       | LL.For_loop { body; _ } | LL.If { body; _ } -> scan body
@@ -224,8 +220,7 @@ let () =
   p "staged fused: epilogue is a sibling of the fragment store-back" !has_epilogue_sibling;
   p "staged fused values match two-kernel"
     (Array.for_all2_exn got3 want ~f:(fun a b -> Float.(abs (a - b) < 1e-2)));
-  p "staged fused bitwise on C backends"
-    (on_gpu || Array.for_all2_exn got3 want ~f:Float.equal);
+  p "staged fused bitwise on C backends" (on_gpu || Array.for_all2_exn got3 want ~f:Float.equal);
   (match read_generated "epf_mma" with
   | None -> p "staged fused structure as expected" false
   | Some src ->
@@ -247,8 +242,8 @@ let () =
              into the same kernel. *)
           has "== 0)" && has "relu_mc["
         else
-          (* cc: the register tiling fires on the fragment array; the fused epilogue is in the
-             same routine. *)
+          (* cc: the register tiling fires on the fragment array; the fused epilogue is in the same
+             routine. *)
           has "Tile_mma register tiling" && has "relu_mc["
       in
       p "staged fused structure as expected" ok);
@@ -297,7 +292,8 @@ let () =
       with Invalid_argument msg -> Some msg
     with
     | Some msg ->
-        p (name ^ " rejected with a targeted error")
+        p
+          (name ^ " rejected with a targeted error")
           (String.is_substring msg ~substring:"Schedule.Fuse_epilogue")
     | None -> p (name ^ " rejected with a targeted error") false
   in

@@ -1734,40 +1734,40 @@ let apply_tensorize op (opt : Low_level.optimized) : Low_level.optimized =
       contract_tensorized_accumulator ~lane opt
   | _ -> assert false
 
-(** Epilogue fusion (gh-ocannl-486): fold the sole-consumer, index-space-compatible elementwise
-    tail that re-reads [target] — the typical bias add / activation / residual after a reduction —
-    into [target]'s store-back site, so the tail's separate memory pass over the output disappears
-    and the fused routine is a single kernel/segment. Three fusion sites are recognized, in order:
+(** Epilogue fusion (gh-ocannl-486): fold the sole-consumer, index-space-compatible elementwise tail
+    that re-reads [target] — the typical bias add / activation / residual after a reduction — into
+    [target]'s store-back site, so the tail's separate memory pass over the output disappears and
+    the fused routine is a single kernel/segment. Three fusion sites are recognized, in order:
 
     - the lane-0 fragment store-back synthesized by [contract_tensorized_accumulator] (the tail
       becomes a fourth, lane-0-guarded statement of the marked region — the region stays
       structurally recognizable by [C_syntax.try_mma_fragment_scope], which renders the extra
       statements after the backend's intrinsic block);
     - the [Privatize] tile store-back (per-element, right after the final write);
-    - the plain accumulation nest (the tail slides inside the parallel/output loops, right after
-      the serial reduction loop — the classic loop fusion).
+    - the plain accumulation nest (the tail slides inside the parallel/output loops, right after the
+      serial reduction loop — the classic loop fusion).
 
-    Elementwise tails never reorder the reduction, so on the C backends the fused values are
-    BITWISE equal to the two-kernel form. The store-back of [target] itself is kept (v1): [target]
-    may be observable, and eliding it is a separate dead-store concern.
+    Elementwise tails never reorder the reduction, so on the C backends the fused values are BITWISE
+    equal to the two-kernel form. The store-back of [target] itself is kept (v1): [target] may be
+    observable, and eliding it is a separate dead-store concern.
 
     Preconditions (checked, [Invalid_argument] otherwise): the tail is the first real statement
     after the last statement writing [target]; it is a perfect Serial nest over exactly [target]'s
     dims whose leaf assigns a different node at the identity index tuple; every read of [target] in
-    the tail uses that same tuple; the tail is elementwise (no local scopes, dynamic or
-    merge-buffer reads); no later statement mentions [target] (sole consumer); the tail's other
-    operands are not written by the reduction statement; and the store-back tiles cover [target]'s
-    index space bijectively (so the relocated tail writes each output element exactly once). Nodes
-    related by buffer aliasing ([Tnode.alias_of]) are not analyzed — sole-consumption is judged by
-    node identity. *)
+    the tail uses that same tuple; the tail is elementwise (no local scopes, dynamic or merge-buffer
+    reads); no later statement mentions [target] (sole consumer); the tail's other operands are not
+    written by the reduction statement; and the store-back tiles cover [target]'s index space
+    bijectively (so the relocated tail writes each output element exactly once). Nodes related by
+    buffer aliasing ([Tnode.alias_of]) are not analyzed — sole-consumption is judged by node
+    identity. *)
 let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.optimized =
   let open Low_level in
   let fail msg = invalid_arg ("Schedule.Fuse_epilogue: " ^ msg) in
   (* Earlier ops in the same schedule leave constructed-then-folded guards ([Split] remainders,
-     [Stage] edge guards) that [apply]'s trailing simplify has not erased yet; fold them now so
-     the recognition below sees the guard-free structure it targets (transforms fold their own
-     guards, schedule-ir-optops §2). Static-index extents are not needed: the relevant guards
-     compare schedule-minted affine forms against loop extents. *)
+     [Stage] edge guards) that [apply]'s trailing simplify has not erased yet; fold them now so the
+     recognition below sees the guard-free structure it targets (transforms fold their own guards,
+     schedule-ir-optops §2). Static-index extents are not needed: the relevant guards compare
+     schedule-minted affine forms against loop extents. *)
   let opt = { opt with llc = simplify_llc [] opt.llc } in
   let dims = Lazy.force target.Tn.dims in
   let rank = Array.length dims in
@@ -1783,8 +1783,7 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
     | Tile_mma { d = t, _; fallback; _ } -> Tn.equal t tn || writes_tn tn fallback
     | Seq (a, b) -> writes_tn tn a || writes_tn tn b
     | For_loop { body; _ } | If { body; _ } -> writes_tn tn body
-    | Noop | Comment _ | Staged_compilation _ | Declare_local _ | Workgroup_barrier | Set_local _
-      ->
+    | Noop | Comment _ | Staged_compilation _ | Declare_local _ | Workgroup_barrier | Set_local _ ->
         false
   in
   let rec mentions_tn tn = function
@@ -1808,13 +1807,12 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
     | Binop (_, (a, _), (b, _)) -> scalar_mentions tn a || scalar_mentions tn b
     | Unop (_, (a, _)) -> scalar_mentions tn a
   in
-  (* --- Statement-level layout: the last top-level statement writing [target] (the reduction),
-     the tail immediately after it. --- *)
+  (* --- Statement-level layout: the last top-level statement writing [target] (the reduction), the
+     tail immediately after it. --- *)
   let stmts = flat_lines [ opt.llc ] in
   let is_real = function Noop | Comment _ -> false | _ -> true in
   let writer_idcs =
-    List.filter_mapi stmts ~f:(fun i s ->
-        if is_real s && writes_tn target s then Some i else None)
+    List.filter_mapi stmts ~f:(fun i s -> if is_real s && writes_tn target s then Some i else None)
   in
   let r =
     match List.last writer_idcs with
@@ -1826,9 +1824,7 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
   | Zero_out _ -> fail ("the last write of " ^ Tn.debug_name target ^ " is a whole-node Zero_out")
   | _ -> ());
   let t_idx =
-    match
-      List.findi stmts ~f:(fun i s -> i > r && is_real s)
-    with
+    match List.findi stmts ~f:(fun i s -> i > r && is_real s) with
     | Some (i, _) -> i
     | None -> fail ("no statement follows the reduction over " ^ Tn.debug_name target)
   in
@@ -1836,10 +1832,9 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
   List.iteri stmts ~f:(fun i s ->
       if i > t_idx && mentions_tn target s then
         fail
-          ("the tail is not the sole consumer: a later statement mentions "
-         ^ Tn.debug_name target));
-  (* --- Parse and vet the tail: a perfect Serial nest over [target]'s dims, leaf assigning [out]
-     at the identity tuple, elementwise, all reads of [target] at that same tuple. --- *)
+          ("the tail is not the sole consumer: a later statement mentions " ^ Tn.debug_name target));
+  (* --- Parse and vet the tail: a perfect Serial nest over [target]'s dims, leaf assigning [out] at
+     the identity tuple, elementwise, all reads of [target] at that same tuple. --- *)
   let rec parse_tail loops = function
     | For_loop { index; from_ = 0; to_; axis = Serial; body; _ } -> (
         match List.filter (flat_lines [ body ]) ~f:is_real with
@@ -1848,8 +1843,8 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
     | Set { tn; idcs; llsc; debug } -> (List.rev loops, tn, idcs, llsc, debug)
     | _ ->
         fail
-          "the statement after the reduction is not an elementwise tail (expected a perfect \
-           Serial nest ending in a single assignment)"
+          "the statement after the reduction is not an elementwise tail (expected a perfect Serial \
+           nest ending in a single assignment)"
   in
   let tail_loops, out, tail_idcs, tail_llsc, tail_debug = parse_tail [] tail_stmt in
   if Tn.equal out target then fail "the tail assigns the reduction output itself";
@@ -1893,8 +1888,8 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
       if writes_tn tn red_stmt then
         fail ("tail operand " ^ Tn.debug_name tn ^ " is written by the reduction statement"));
   (* --- The relocated tail: substitute each tail symbol by the store-back site's index for that
-     axis. Site indices never mention the (fresh, distinct) tail symbols, so per-symbol
-     substitution composes. --- *)
+     axis. Site indices never mention the (fresh, distinct) tail symbols, so per-symbol substitution
+     composes. --- *)
   let subst_tail ~(site_idcs : Indexing.axis_index array) : Low_level.t =
     let stmt = Set { tn = out; idcs = tail_idcs; llsc = tail_llsc; debug = tail_debug } in
     Array.foldi site_idcs ~init:stmt ~f:(fun ax stmt idx ->
@@ -1903,38 +1898,35 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
             map_code ~fidx:(subst_axis_index ~sym:tail_syms.(ax) ~by:{ terms; offset }) stmt
         | None -> fail "the store-back site's indices must be affine")
   in
-  (* Does [idcs], with symbols ranging over [env] extents (zero-based loops), cover [target]'s
-     index space bijectively over all enclosing iterations? Per axis: offset 0 and the (coefficient,
+  (* Does [idcs], with symbols ranging over [env] extents (zero-based loops), cover [target]'s index
+     space bijectively over all enclosing iterations? Per axis: offset 0 and the (coefficient,
      extent) pairs form an exact mixed radix for the dimension — so the relocated tail writes each
      output element exactly once. *)
   let covers_bijectively ~env (idcs : Indexing.axis_index array) : bool =
     Array.length idcs = rank
     && Array.for_alli idcs ~f:(fun ax idx ->
-           match terms_of_index idx with
-           | None -> false
-           | Some (terms, offset) ->
-               offset = 0
-               &&
-               let ces =
-                 Option.all
-                   (List.map terms ~f:(fun (c, s) ->
-                        if c <= 0 then None
-                        else
-                          Option.map
-                            (List.Assoc.find env ~equal:Indexing.equal_symbol s)
-                            ~f:(fun e -> (c, e))))
-               in
-               (match ces with
-               | None -> false
-               | Some ces ->
-                   let sorted =
-                     List.sort ces ~compare:(fun (c1, _) (c2, _) -> Int.compare c1 c2)
-                   in
-                   let rec radix expected = function
-                     | [] -> expected = dims.(ax)
-                     | (c, e) :: tl -> c = expected && radix (c * e) tl
-                   in
-                   radix 1 sorted))
+        match terms_of_index idx with
+        | None -> false
+        | Some (terms, offset) -> (
+            offset = 0
+            &&
+            let ces =
+              Option.all
+                (List.map terms ~f:(fun (c, s) ->
+                     if c <= 0 then None
+                     else
+                       Option.map (List.Assoc.find env ~equal:Indexing.equal_symbol s) ~f:(fun e ->
+                           (c, e))))
+            in
+            match ces with
+            | None -> false
+            | Some ces ->
+                let sorted = List.sort ces ~compare:(fun (c1, _) (c2, _) -> Int.compare c1 c2) in
+                let rec radix expected = function
+                  | [] -> expected = dims.(ax)
+                  | (c, e) :: tl -> c = expected && radix (c * e) tl
+                in
+                radix 1 sorted))
   in
   let iprec = Ops.index_prec () in
   let lane0 ~lane ~width body =
@@ -1959,18 +1951,11 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
   in
   (* --- Site 1: the lane-0 fragment store-back marked by [contract_tensorized_accumulator]. The
      epilogue becomes a sibling lane-0 statement re-iterating the store-back's tile loops (the same
-     symbols — sibling transfer nests already share them), so the marked three-part region keeps
-     its shape and the fragment recognizer renders the extra statement after the intrinsics. --- *)
+     symbols — sibling transfer nests already share them), so the marked three-part region keeps its
+     shape and the fragment recognizer renders the extra statement after the intrinsics. --- *)
   let match_storeback = function
     | For_loop
-        {
-          index = lane;
-          from_ = 0;
-          to_;
-          axis = Workgroup;
-          body = If { cond = cond, _; body };
-          _;
-        }
+        { index = lane; from_ = 0; to_; axis = Workgroup; body = If { cond = cond, _; body }; _ }
       when is_lane0_guard lane cond ->
         let rec descend loops = function
           | For_loop { index; from_ = 0; to_; axis = Serial; body; _ } ->
@@ -1999,9 +1984,7 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
                 fail "the fragment store-back tiles do not cover the output space bijectively";
               fused := true;
               let body =
-                List.fold_right loops
-                  ~init:(subst_tail ~site_idcs:st_idcs)
-                  ~f:(fun (s, e) body ->
+                List.fold_right loops ~init:(subst_tail ~site_idcs:st_idcs) ~f:(fun (s, e) body ->
                     For_loop
                       { index = s; from_ = 0; to_ = e - 1; body; trace_it = false; axis = Serial })
               in
@@ -2040,13 +2023,14 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
         | For_loop { index; from_; to_; body; trace_it; axis } ->
             find_write ({ index; from_; to_; body = Noop; trace_it; axis } :: path) body
         | If { body; _ } ->
-            if writes_tn target body then fail "guarded writes of the reduction output are unsupported"
+            if writes_tn target body then
+              fail "guarded writes of the reduction output are unsupported"
             else None
         | _ -> None
       in
       match find_write [] red_stmt with
       | None -> fail ("no plain write site of " ^ Tn.debug_name target ^ " found")
-      | Some (path, w_idcs) ->
+      | Some (path, w_idcs) -> (
           let needed s = Array.exists w_idcs ~f:(idx_mentions s) in
           let rec split_path above = function
             | [] -> `Leaf (List.rev above)
@@ -2061,12 +2045,13 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
                 split_path (fc :: above) below
             | (fc : floop) :: below ->
                 if not (equal_axis_type fc.axis Serial) then
-                  fail
-                    ("reduction loop " ^ Indexing.symbol_ident fc.index ^ " must be Serial");
+                  fail ("reduction loop " ^ Indexing.symbol_ident fc.index ^ " must be Serial");
                 `After (List.rev above, fc, below)
           in
-          let env_of loops = List.map loops ~f:(fun (fc : floop) -> (fc.index, fc.to_ - fc.from_ + 1)) in
-          (match split_path [] path with
+          let env_of loops =
+            List.map loops ~f:(fun (fc : floop) -> (fc.index, fc.to_ - fc.from_ + 1))
+          in
+          match split_path [] path with
           | `Leaf above ->
               if not (covers_bijectively ~env:(env_of above) w_idcs) then
                 fail "the store-back writes do not cover the output space bijectively";
@@ -2086,9 +2071,7 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
               assert !seen;
               res
           | `After (above, red_loop, below) ->
-              let rebuild =
-                List.filter below ~f:(fun (fc : floop) -> needed fc.index)
-              in
+              let rebuild = List.filter below ~f:(fun (fc : floop) -> needed fc.index) in
               List.iter rebuild ~f:(fun (fc : floop) ->
                   if not (equal_axis_type fc.axis Serial) then
                     fail
@@ -2099,8 +2082,7 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
               if not (covers_bijectively ~env w_idcs) then
                 fail "the accumulation writes do not cover the output space bijectively";
               let epilogue =
-                List.fold_right rebuild
-                  ~init:(subst_tail ~site_idcs:w_idcs)
+                List.fold_right rebuild ~init:(subst_tail ~site_idcs:w_idcs)
                   ~f:(fun (fc : floop) body ->
                     For_loop
                       {
@@ -2138,15 +2120,16 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
   let opt = { opt with llc } in
   if not shared then opt
   else if not !fused then
-    fail "shared accumulator placement requires the fragment store-back site (apply after \
-          Tensorize's contraction)"
+    fail
+      "shared accumulator placement requires the fragment store-back site (apply after Tensorize's \
+       contraction)"
   else
     (* GPU quality knob: the fused tail is often [target]'s last consumer, so placement makes
-       [target] routine-local — a per-thread array the fragment hooks cannot [simdgroup_load]
-       from. Place it in workgroup-shared memory instead (like [Stage]'s shared tiles), so the
-       intrinsic fragment path fires against threadgroup memory. Nodes already settled on-device
-       are left alone (device pointers are loadable as-is). CPU backends reject shared placement,
-       so CPU schedules must not set [shared]. *)
+       [target] routine-local — a per-thread array the fragment hooks cannot [simdgroup_load] from.
+       Place it in workgroup-shared memory instead (like [Stage]'s shared tiles), so the intrinsic
+       fragment path fires against threadgroup memory. Nodes already settled on-device are left
+       alone (device pointers are loadable as-is). CPU backends reject shared placement, so CPU
+       schedules must not set [shared]. *)
     match Tn.Placements.get opt.optimize_ctx.placements target with
     | Some (Tn.On_device, _) -> opt
     | _ ->
