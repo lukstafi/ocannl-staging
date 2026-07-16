@@ -90,7 +90,8 @@ type sketch_params = {
           tensor cores; on cc, the whole-triple [Tile_mma] rendered register-tiled
           (gh-ocannl-469), optionally Grid-parallel over row blocks — or, with [sk_bk > 0], the
           cache-blocked packed composition (packing Stages feeding the register-tiled kernel;
-          [cpu_mma_pack_sketch_schedule]). Seeded directly because the greedy menu cannot reach
+          [cpu_mma_pack_sketch_schedule]), itself optionally Grid-parallel when the packing is
+          hoisted-only ([sk_grid]). Seeded directly because the greedy menu cannot reach
           the composition: a bare [Tensorize] from the serial baseline (one simdgroup, everything
           else serial) loses round 1 and the beam discards it before Grid retypes could join
           it. *)
@@ -105,6 +106,13 @@ type sketch_params = {
           per-device constant pool (gh-ocannl-470). Proposed alongside the in-kernel packing
           variant so the choice stays measured; applied per operand, only to hoistable
           (known-constant, host-init-backed) sources. *)
+  sk_grid : bool;
+      (** CPU packed composition only ([sk_mma] with [sk_bk > 0]): split [i] into pool-parallel
+          [Grid] row blocks instead of Serial ones. Requires hoisted-only packing: in-kernel packs
+          write function-scope stack tiles that would race under the pool chunks (c_syntax.ml
+          [parallel_grid_safe] declines them), while hoisted packing emits no in-kernel writes at
+          all — so only hoistable operands are packed (hoisted) and the rest are read in place,
+          leaving the kernel body all-materialized and Grid-parallelizable. *)
 }
 
 type matmul_site = {
@@ -384,33 +392,54 @@ let cpu_mma_sketch_schedule (site : matmul_site) { sk_bm = bm; _ } : Sched.sched
    kernel single-threaded so a whole-node [Zero_out] of the output needs no expansion — Serial
    is also load-bearing for the in-kernel packs, whose function-scope tiles would race under
    pool-parallel Grid blocks ([parallel_grid_safe] declines them). Hoisted packing (constant
-   operands, gh-ocannl-470) is proposed per operand like the scalar S4 pipeline. *)
+   operands, gh-ocannl-470) is proposed per operand like the scalar S4 pipeline.
+
+   With [sk_grid], the row-block loop [i_o] becomes a pool-parallel [Grid] loop kept outermost
+   (one dispatch spanning the whole GEBP triple) and the packing goes hoisted-only: hoistable
+   operands are packed at link time into the constant pool, the rest are read in place, so the
+   kernel body touches only materialized buffers and [parallel_grid_safe] accepts the Grid
+   split. The typical inference GEMM: activations (in place) x constant weights (hoisted-packed
+   panel). The Grid split makes the kernel multi-threaded, so the whole-node [Zero_out] must be
+   expanded with matching Grid coverage ([zero_geometry]; the unit-lane Workgroup axis has
+   extent 1, stays inactive, and needs no coverage from the zeroing nest). *)
 let cpu_mma_pack_sketch_schedule (site : matmul_site)
-    { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_hoist; _ } : Sched.schedule =
-  let sp_i, i_o, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Serial ~inner:LL.Serial in
+    { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_hoist; sk_grid; _ } : Sched.schedule =
+  let outer_i = if sk_grid then LL.Grid else LL.Serial in
+  let sp_i, i_o, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:outer_i ~inner:LL.Serial in
   let sp_k, k_o, k_i = Sched.split ~axis:site.m_k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
   let splits, j_col, j_swaps =
     if bn = 0 then ([ sp_i; sp_k ], site.m_j, [])
     else
       let sp_j, j_o, j_i = Sched.split ~axis:site.m_j ~factor:bn ~outer:LL.Serial ~inner:LL.Serial in
-      ([ sp_i; sp_j; sp_k ], j_i, sink i_i [ j_o ] @ sink i_o [ j_o ])
+      ([ sp_i; sp_j; sp_k ], j_i, sink i_i [ j_o ] @ if sk_grid then [] else sink i_o [ j_o ])
   in
-  let stage source tile_loops =
-    Sched.Stage
-      {
-        source;
-        tile_loops;
-        shared = false;
-        cooperative = None;
-        hoisted = sk_hoist && hoistable source;
-      }
+  let stage ~hoisted source tile_loops =
+    Sched.Stage { source; tile_loops; shared = false; cooperative = None; hoisted }
+  in
+  let stages =
+    if sk_grid then
+      List.filter_map
+        [ (site.m_b, [ k_i; j_col ]); (site.m_a, [ i_i; k_i ]) ]
+        ~f:(fun (src, tls) -> if hoistable src then Some (stage ~hoisted:true src tls) else None)
+    else
+      [
+        stage ~hoisted:(sk_hoist && hoistable site.m_b) site.m_b [ k_i; j_col ];
+        stage ~hoisted:(sk_hoist && hoistable site.m_a) site.m_a [ i_i; k_i ];
+      ]
+  in
+  let zops =
+    if not sk_grid then []
+    else
+      zero_geometry site ~mk_zops:(fun ~zi ~zj:_ ->
+          let sp_zi, _, _ = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+          [ sp_zi ])
   in
   let tz, _lane = Sched.tensorize ~i:i_i ~j:j_col ~k:k_i ~simd_width:1 in
-  splits @ j_swaps
+  zops @ splits @ j_swaps
   @ sink j_col [ k_o ]
   @ sink i_i [ k_o ]
-  @ sink i_o [ k_o ]
-  @ [ stage site.m_b [ k_i; j_col ]; stage site.m_a [ i_i; k_i ]; tz ]
+  @ (if sk_grid then [] else sink i_o [ k_o ])
+  @ stages @ [ tz ]
 
 let sketch_schedule ~p (opt : LL.optimized) : Sched.schedule =
   match detect_matmul opt.LL.llc with
@@ -457,6 +486,7 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                     sk_tm = tm;
                     sk_tn = tn;
                     sk_hoist = false;
+                    sk_grid = false;
                   }
               else None)
         else if is_cpu then
@@ -474,6 +504,7 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                       sk_tm = 0;
                       sk_tn = 0;
                       sk_hoist = false;
+                      sk_grid = false;
                     }
                 else None)
           in
@@ -508,6 +539,7 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                         sk_tm = 0;
                         sk_tn = 0;
                         sk_hoist = false;
+                        sk_grid = false;
                       }
                   else None)
           | _ when is_cpu ->
@@ -529,6 +561,7 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                           sk_tm = 0;
                           sk_tn = 0;
                           sk_hoist = false;
+                          sk_grid = false;
                         }
                     else None)
               in
@@ -560,14 +593,25 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                           sk_tm = 0;
                           sk_tn = 0;
                           sk_hoist = false;
+                          sk_grid = false;
                         }
                     else None)
               in
               (* Hoisted (link-time) packing stays a measured choice for constant operands, like
-                 the scalar S4 pipeline (gh-ocannl-470). *)
+                 the scalar S4 pipeline (gh-ocannl-470). And when a hoistable operand exists, the
+                 packed composition can pool-parallelize ([sk_grid]): hoisted packing emits no
+                 in-kernel pack writes, so a Grid split over the row blocks is race-free — pack
+                 only the hoistable operand(s), read the rest in place
+                 ([cpu_mma_pack_sketch_schedule]). Grid seeds need at least two row blocks
+                 (c_syntax.ml [collect_parallel_grid] wants extent >= 2). *)
               let packed =
                 if hoistable site.m_a || hoistable site.m_b then
-                  packed @ List.map packed ~f:(fun p -> { p with sk_hoist = true })
+                  packed
+                  @ List.map packed ~f:(fun p -> { p with sk_hoist = true })
+                  @ List.filter_map packed ~f:(fun p ->
+                        if site.m_ni / p.sk_bm >= 2 then
+                          Some { p with sk_hoist = true; sk_grid = true }
+                        else None)
                 else packed
               in
               whole @ packed
@@ -730,11 +774,12 @@ let spec_label = function
   | Whole (W_saved s) -> Printf.sprintf "W_saved[%d ops]" (List.length s)
   | Whole (W_preset { block_size }) -> Printf.sprintf "W_preset[bs=%s]" (bs_label block_size)
   | Whole (W_sketch p) when p.sk_mma ->
-      Printf.sprintf "W_sketch[mma-%s %dx%dx%d%s%s]"
+      Printf.sprintf "W_sketch[mma-%s %dx%dx%d%s%s%s]"
         (if p.sk_gpu then "gpu" else "cpu")
         p.sk_bm p.sk_bn p.sk_bk
         (if p.sk_bk > 0 then if p.sk_gpu then " staged" else " pack" else "")
         (if p.sk_hoist then " hoist" else "")
+        (if p.sk_grid then " grid" else "")
   | Whole (W_sketch p) ->
       Printf.sprintf "W_sketch[%s %dx%dx%d/%dx%d%s]"
         (if p.sk_gpu then "gpu" else "cpu")
@@ -749,12 +794,13 @@ let spec_label = function
       Printf.sprintf "F_sketch[%s]"
         (String.concat ~sep:","
            (List.map entries ~f:(fun (_, p) ->
-                Printf.sprintf "%s%s %dx%dx%d%s%s"
+                Printf.sprintf "%s%s %dx%dx%d%s%s%s"
                   (if p.sk_mma then "mma-" else "")
                   (if p.sk_gpu then "gpu" else "cpu")
                   p.sk_bm p.sk_bn p.sk_bk
                   (if p.sk_mma then "" else Printf.sprintf "/%dx%d" p.sk_tm p.sk_tn)
-                  (if p.sk_hoist then " hoist" else ""))))
+                  (if p.sk_hoist then " hoist" else "")
+                  (if p.sk_grid then " grid" else ""))))
 
 (* Every candidate derives its CODE from the ONE base lowering ([base_opt] with [canon] its
    canonical form, captured together in [tune]) rather than from the compile's own fresh

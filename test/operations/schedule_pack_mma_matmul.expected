@@ -6,3 +6,5 @@ packed transposed-B matmul matches the serial twin bitwise: true
 packing normalizes the transposed-B layout for the register tiling: true
 grid-blocked tensorized matmul matches the serial twin bitwise: true
 grid-blocked Tile_mma renders pool-parallel: true
+grid + hoisted-pack matmul matches the serial twin bitwise: true
+grid + hoisted-pack renders pool-parallel with no in-kernel tile writes: true

@@ -23,6 +23,14 @@
    Grid row-block loop over a Tile_mma with materialized operands renders as chunked parallel
    loops on the native pool ([dispatch_apply] / OpenMP).
 
+   The Grid + hoisted-pack form pins autotune's [sk_grid] seed variant (the typical inference
+   GEMM: activations x constant weights): pool-parallel Grid row blocks over the cache-blocked
+   packed pipeline, with ONLY the hoistable B operand packed — at link time, into the constant
+   pool (gh-ocannl-470) — and A read in place (standard layout, [ta = false]). The kernel body
+   then has no in-kernel tile writes at all, so [parallel_grid_safe] accepts the Grid split; the
+   whole-node [Zero_out] is expanded with matching Grid coverage (the unit-lane Workgroup axis
+   stays inactive).
+
    On GPU backends the packing schedules apply without the [Tensorize] step (all-serial packing is
    legal everywhere; a unit-lane [Tile_mma] must not reach hardware simdgroup intrinsics) and the
    Grid case skips its transform; every printed boolean holds on every backend. *)
@@ -203,3 +211,65 @@ let () =
            has_parallel_construct src
            && String.is_substring src ~substring:"Tile_mma register tiling"
          else not (String.is_substring src ~substring:"tmma_"))
+
+(* === Grid + hoisted-pack composition (autotune's [sk_grid] seeds, [bn = 0]): Grid row blocks
+   over the packed pipeline with only the hoistable B operand packed (link-time constant-pool
+   panel) and A read in place — no in-kernel tile writes, so the Grid split pool-parallelizes.
+   CPU-only schedule; identity transform elsewhere. === *)
+let () =
+  let gav = Array.init (n * n) ~f:(fun x -> Float.of_int (x % 19) *. 0.125) in
+  let gbv = Array.init (n * n) ~f:(fun x -> Float.of_int (x % 23) -. 11.) in
+  let ga = TDSL.ndarray gav ~label:[ "ga" ] ~input_dims:[ n ] ~output_dims:[ n ] () in
+  let gb = TDSL.ndarray gbv ~label:[ "gb" ] ~input_dims:[ n ] ~output_dims:[ n ] () in
+  let%op hc0 = ga * gb in
+  let want = run_serial ~name:"pmm_gridpack_serial" hc0 in
+  let%op hc1 = ga * gb in
+  let gridpack_schedule (opt : LL.optimized) : Sched.schedule =
+    let paths = nest_paths opt.LL.llc in
+    let i, j, k =
+      match List.find_exn paths ~f:(fun p -> List.length p = 3) with
+      | [ i; j; k ] -> (i, j, k)
+      | _ -> assert false
+    in
+    let ez, zsyms = Sched.expand_zero ~tn:hc1.Tensor.value in
+    let zi = match zsyms with [ zi; _zj ] -> zi | _ -> assert false in
+    let sp_zi, _, _ = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+    let sp_i, _, i_i = Sched.split ~axis:i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+    let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
+    let tz, _ = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1 in
+    [ ez; sp_zi; sp_i; sp_k ]
+    @ sink j [ k_o ]
+    @ sink i_i [ k_o ]
+    @ [
+        Sched.Stage
+          {
+            source = gb.Tensor.value;
+            tile_loops = [ k_i; j ];
+            shared = false;
+            cooperative = None;
+            hoisted = true;
+          };
+        tz;
+      ]
+  in
+  let transform opt = if on_cpu then Sched.apply (gridpack_schedule opt) opt else opt in
+  let ctx = Context.auto () in
+  let ctx, routine =
+    Context.compile ~lowered_transform:transform ctx
+      (named "pmm_gridpack" (Train.forward hc1))
+      Ir.Indexing.Empty
+  in
+  let ctx = Context.run ctx routine in
+  let got = Context.get_values ctx hc1.Tensor.value in
+  p "grid + hoisted-pack matmul matches the serial twin bitwise"
+    (Array.for_all2_exn got want ~f:Float.equal);
+  match read_generated "pmm_gridpack" with
+  | None -> p "grid + hoisted-pack renders pool-parallel with no in-kernel tile writes" false
+  | Some src ->
+      let has s = String.is_substring src ~substring:s in
+      p "grid + hoisted-pack renders pool-parallel with no in-kernel tile writes"
+        (if on_cpu then
+           has_parallel_construct src
+           && has "Tile_mma register tiling" && has "packed_gb"
+           && not (has "float tile_")
+         else not (has "tmma_"))
