@@ -571,7 +571,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           in
           let loadable = function
             | `Device | `Shared -> true (* generic-address loads cover both *)
-            | `Thread -> false
+            | `Thread | `Fragment _ -> false
           in
           match combo with
           | Some (ab_typ, acc_typ, ab_ld_mult, d_ld_mult)
@@ -671,6 +671,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                    ^^ nest 2 (hardline ^^ body)
                    ^^ hardline ^^ rbrace))
           | _ -> None)
+
+    let mma_fragment_syntax = None
 
     let rec binop_syntax prec v =
       let open PPrint in

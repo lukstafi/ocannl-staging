@@ -404,10 +404,42 @@ let () =
         let ok =
           if on_metal then
             (* Two shared tiles cooperatively loaded, the mma reading them from threadgroup memory;
-               the ma tile's partial-width load keeps its [lane < 8] guard. *)
+               the ma tile's partial-width load keeps its [lane < 8] guard. The marked accumulator
+               fragment is loaded before the serial [k_o] body and stored after it; the body itself
+               contains update-only MMA calls (gh-ocannl-480). *)
+            let body_begin = "/* simdgroup fragment reduction body begins */" in
+            let body_end = "/* simdgroup fragment reduction body ends */" in
+            let fragment_load = "simdgroup_load(__mma_fragment_" in
+            let fragment_store = "simdgroup_store(__mma_fragment_" in
+            let resident =
+              match
+                ( String.substr_index src ~pattern:fragment_load,
+                  String.substr_index src ~pattern:body_begin,
+                  String.substr_index src ~pattern:body_end,
+                  String.substr_index src ~pattern:fragment_store )
+              with
+              | Some load, Some beg, Some fin, Some store
+                when load < beg && beg < fin && fin < store ->
+                  let reduction_body = String.sub src ~pos:beg ~len:(fin - beg) in
+                  let update = "/* tile_mma fragment update" in
+                  let barrier = "threadgroup_barrier(mem_flags::mem_threadgroup);" in
+                  let update_has_trailing_barrier =
+                    match String.substr_index reduction_body ~pattern:update with
+                    | Some update_pos ->
+                        String.is_substring
+                          (String.drop_prefix reduction_body update_pos)
+                          ~substring:barrier
+                    | None -> false
+                  in
+                  (not (String.is_substring reduction_body ~substring:fragment_load))
+                  && (not (String.is_substring reduction_body ~substring:fragment_store))
+                  && update_has_trailing_barrier
+              | _ -> false
+            in
             count_sub "threadgroup float tile_" = 2
             && has "simdgroup_multiply_accumulate"
-            && has "threadgroup_barrier"
+            && has "threadgroup_barrier" && has "tile_mma fragment update" && resident
+            && not (has "float fragment_")
           else
             (* CUDA: shared tiles; the wmma draft declines f32, so the lane-0 fallback guard. *)
             count_sub "__shared__ float tile_" = 2 && has "__syncthreads()"

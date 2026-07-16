@@ -566,7 +566,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           in
           let loadable = function
             | `Device | `Shared -> true (* generic-address loads cover both *)
-            | `Thread -> false
+            | `Thread | `Fragment _ -> false
           in
           let is_fp8_combo =
             match (a_prec, b_prec, d_prec) with
@@ -774,6 +774,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                      ^^ nest 2 (hardline ^^ body)
                      ^^ hardline ^^ rbrace))
             | _ -> None)
+
+    let mma_fragment_syntax = None
 
     let rec binop_syntax prec v =
       (* TODO: consider using binop_syntax inherited from Pure_C_config and overriding only where

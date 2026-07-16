@@ -24,6 +24,7 @@ let make_optimized llc =
       llc;
       merge_node = None;
       workgroup_shared = Base.Set.empty (module Tn);
+      simdgroup_fragments = Base.Set.empty (module Tn);
     }
 
 let pp llc =

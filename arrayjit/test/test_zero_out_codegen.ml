@@ -70,6 +70,7 @@ let () =
       llc;
       merge_node = None;
       workgroup_shared = Base.Set.empty (module Tn);
+      simdgroup_fragments = Base.Set.empty (module Tn);
     }
   in
   let module Syntax = Ir.C_syntax.C_syntax (Ir.C_syntax.Pure_C_config (struct

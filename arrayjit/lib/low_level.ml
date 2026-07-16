@@ -326,6 +326,10 @@ type optimized = {
       (** [Local]-memory-mode nodes to be placed in workgroup-shared memory ([__shared__] /
           [threadgroup]) instead of kernel-local arrays. Populated by schedule transforms; empty for
           unscheduled code. See docs/proposals/axis-types-for-loops.md. *)
+  simdgroup_fragments : Set.M(Tnode).t;
+      (** Per-simdgroup accumulator tiles synthesized by [Schedule.Tensorize] when it contracts an
+          enclosing serial reduction. Metal renders their marked lifetime as persistent
+          [simdgroup_matrix] fragments; scalar fallback backends retain the local-array meaning. *)
 }
 [@@deriving sexp_of]
 
@@ -3708,7 +3712,14 @@ let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
   in
   let merge_node = !merge_node_ref in
   let optimize_ctx = input_ctx in
-  { traced_store; optimize_ctx; llc; merge_node; workgroup_shared = Set.empty (module Tnode) }
+  {
+    traced_store;
+    optimize_ctx;
+    llc;
+    merge_node;
+    workgroup_shared = Set.empty (module Tnode);
+    simdgroup_fragments = Set.empty (module Tnode);
+  }
 
 let code_hum_margin = ref 100
 

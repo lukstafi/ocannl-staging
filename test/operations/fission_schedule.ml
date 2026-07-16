@@ -154,6 +154,7 @@ let hand_built ~stmts ~tns_on_device ~tns_local =
     llc;
     merge_node = None;
     workgroup_shared = Set.empty (module Tn);
+    simdgroup_fragments = Set.empty (module Tn);
   }
 
 let () =

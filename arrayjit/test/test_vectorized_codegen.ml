@@ -28,6 +28,7 @@ let make_optimized llc tns : LL.optimized =
     llc;
     merge_node = None;
     workgroup_shared = Base.Set.empty (module Tn);
+    simdgroup_fragments = Base.Set.empty (module Tn);
   }
 
 let make_on_device id label =

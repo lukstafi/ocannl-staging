@@ -308,6 +308,10 @@ let canonicalize ?(static_indices = []) ?(with_placements = true) (opt : LL.opti
   Set.iter opt.LL.workgroup_shared ~f:(fun tn ->
       emit_tn tn;
       add ",");
+  add "];fragments:[";
+  Set.iter opt.LL.simdgroup_fragments ~f:(fun tn ->
+      emit_tn tn;
+      add ",");
   add "];merge:";
   (match opt.LL.merge_node with None -> add "-" | Some tn -> emit_tn tn);
   add ";";

@@ -198,9 +198,9 @@ module type C_syntax_config = sig
     m:int ->
     n:int ->
     k:int ->
-    d:PPrint.document * int * [ `Device | `Shared | `Thread ] ->
-    a:PPrint.document * int * [ `Device | `Shared | `Thread ] ->
-    b:PPrint.document * int * [ `Device | `Shared | `Thread ] ->
+    d:PPrint.document * int * [ `Device | `Shared | `Thread | `Fragment of string ] ->
+    a:PPrint.document * int * [ `Device | `Shared | `Thread | `Fragment of string ] ->
+    b:PPrint.document * int * [ `Device | `Shared | `Thread | `Fragment of string ] ->
     PPrint.document option)
     option
   (** Cooperative tile-MMA emission for [Low_level.Tile_mma] (docs/proposals/tensorize-mma.md §4):
@@ -215,6 +215,26 @@ module type C_syntax_config = sig
       (unsupported precision combination, extents not multiples of the intrinsic tile, thread-space
       operand) — the caller then renders the scalar [fallback] under an [if (lane == 0)] guard,
       which is also the path when the whole hook is [None] (cc, and any backend until wired). *)
+
+  val mma_fragment_syntax :
+    (d_prec:Ops.prec ->
+    a_prec:Ops.prec ->
+    b_prec:Ops.prec ->
+    m:int ->
+    n:int ->
+    k:int ->
+    fragment:string ->
+    target:PPrint.document * int * [ `Device | `Shared | `Thread | `Fragment of string ] ->
+    a:PPrint.document * int * [ `Device | `Shared | `Thread | `Fragment of string ] ->
+    b:PPrint.document * int * [ `Device | `Shared | `Thread | `Fragment of string ] ->
+    body:(unit -> PPrint.document) ->
+    PPrint.document option)
+    option
+  (** Rendering of a marked cross-reduction accumulator lifetime. The callback receives the backing
+      target and one representative [Tile_mma]'s operands/shape, so it can decline before forcing
+      [body]. When accepted, forcing [body] renders its [Tile_mma] with [d] identified as
+      [`Fragment fragment], allowing the backend to emit update-only MMA steps between one outer
+      fragment load and store. *)
 
   val kernel_log_param : (string * string) option
   (** Kernel parameter for logging, if any. E.g., (Some ("int", "log_id")) or (Some ("const char*",
@@ -295,6 +315,7 @@ struct
   (* No tile-MMA units on plain C backends: [Tile_mma] renders its scalar fallback under the [lane
      == 0] guard. *)
   let mma_syntax = None
+  let mma_fragment_syntax = None
   let float_log_style = if Input.full_printf_support then "%g" else "%de-3"
 
   let styled_log_arg doc =
@@ -695,6 +716,18 @@ module C_syntax (B : C_syntax_config) = struct
      their [Zero_out] is never elided. *)
   let current_workgroup_shared : Set.M(Tn).t ref = ref (Set.empty (module Tn))
 
+  (* Marked local accumulator tiles and the one currently being rendered by a backend fragment
+     scope. Outside such a scope they retain ordinary local-array semantics. *)
+  let current_simdgroup_fragments : Set.M(Tn).t ref = ref (Set.empty (module Tn))
+  let rendered_simdgroup_fragments : Set.M(Tn).t ref = ref (Set.empty (module Tn))
+
+  type active_mma_accumulator =
+    | Active_fragment of Tn.t * string
+    | Active_target of
+        Tn.t * (PPrint.document * int * [ `Device | `Shared | `Thread | `Fragment of string ])
+
+  let active_mma_accumulator : active_mma_accumulator option ref = ref None
+
   (* Set by [compile_proc]: outermost [Grid] loops eligible for pool-backed parallel rendering
      (docs/proposals/gh-ocannl-164.md), identified by index symbol. Empty unless
      [B.parallel_grid_syntax] renders in parallel. *)
@@ -735,7 +768,7 @@ module C_syntax (B : C_syntax_config) = struct
     lazy
       (match
          Int.of_string
-           (String.strip
+            (String.strip
               (Utils.get_global_arg ~arg_name:"cc_grid_private_bytes_cap"
                  ~default:"262144"))
        with
@@ -1148,15 +1181,163 @@ module C_syntax (B : C_syntax_config) = struct
      rule. *)
   let serial_loop_stack : Indexing.symbol list ref = ref []
 
+  (* Recognize the exact scalar fallback region synthesized by
+     [Schedule.contract_tensorized_accumulator]:
+
+     lane { if lane==0 { fragment <- target } }; for k_o { ... Tile_mma(d=fragment) ... }; lane { if
+     lane==0 { target <- fragment } }.
+
+     The marker on [optimized] makes this structural, not a proof over arbitrary user IR. A backend
+     hook may replace the region; declining leaves the ordinary local-array rendering untouched. *)
+  let render_mma_fragment_scope ~render (c : Low_level.t) : PPrint.document option =
+    let open Low_level in
+    let open PPrint in
+    let nonempty =
+      List.filter (flat_lines [ c ]) ~f:(function Noop | Comment _ -> false | _ -> true)
+    in
+    let is_lane0_guard lane = function
+      | Binop (Ops.Cmpeq, (Embed_index (Indexing.Iterator guard_lane), _), (Constant zero, _))
+      | Binop (Ops.Cmpeq, (Constant zero, _), (Embed_index (Indexing.Iterator guard_lane), _)) ->
+          Indexing.equal_symbol lane guard_lane && Float.equal zero 0.
+      | _ -> false
+    in
+    let unwrap_transfer ~into_fragment = function
+      | For_loop
+          { index = lane; from_ = 0; to_; axis = Workgroup; body = If { cond = cond, _; body }; _ }
+        when is_lane0_guard lane cond ->
+          let rec descend syms = function
+            | For_loop { index; axis = Serial; body; _ } -> descend (index :: syms) body
+            | Set { tn = fragment; llsc = Get (target, target_idcs); _ } when into_fragment ->
+                Some (lane, to_ + 1, fragment, target, target_idcs, syms)
+            | Set { tn = target; llsc = Get (fragment, _); idcs = target_idcs; _ }
+              when not into_fragment ->
+                Some (lane, to_ + 1, fragment, target, target_idcs, syms)
+            | _ -> None
+          in
+          descend [] body
+      | _ -> None
+    in
+    let rec collect_fragment_tiles fragment acc = function
+      | Tile_mma { d = d, _; _ } as tm when Tn.equal d fragment -> tm :: acc
+      | Seq (a, b) -> collect_fragment_tiles fragment (collect_fragment_tiles fragment acc a) b
+      | For_loop { body; _ } | If { body; _ } -> collect_fragment_tiles fragment acc body
+      | _ -> acc
+    in
+    let zero_symbols syms idx =
+      let bound s = List.mem syms s ~equal:Indexing.equal_symbol in
+      match idx with
+      | Indexing.Iterator s when bound s -> Indexing.Fixed_idx 0
+      | Indexing.Affine { symbols; offset } -> (
+          let symbols = List.filter symbols ~f:(fun (_, s) -> not (bound s)) in
+          match (symbols, offset) with
+          | [], k -> Indexing.Fixed_idx k
+          | [ (1, s) ], 0 -> Indexing.Iterator s
+          | _ -> Indexing.Affine { symbols; offset })
+      | other -> other
+    in
+    let operand (tn, idcs) =
+      let dims = Lazy.force tn.Tn.dims in
+      let prec = Lazy.force tn.Tn.prec in
+      let rank = Array.length dims in
+      let ld = if rank >= 1 then dims.(rank - 1) else 1 in
+      let space =
+        if Set.mem !current_workgroup_shared tn then `Shared
+        else if Tn.Placements.is_materialized_force (placements ()) tn 441 then `Device
+        else `Thread
+      in
+      let ptr = parens (string (get_ident tn) ^^ string " + " ^^ pp_array_offset (idcs, dims)) in
+      (prec, (ptr, ld, space))
+    in
+    match nonempty with
+    | [ init; reduction; store ] -> (
+        match
+          (unwrap_transfer ~into_fragment:true init, unwrap_transfer ~into_fragment:false store)
+        with
+        | ( Some (lane1, width1, fragment, target, init_idcs, init_syms),
+            Some (lane2, width2, fragment2, target2, store_idcs, _) )
+          when Set.mem !current_simdgroup_fragments fragment
+               && Tn.equal fragment fragment2 && Tn.equal target target2 && width1 = width2
+               && Indexing.equal_symbol lane1 lane2
+               && Array.equal Indexing.equal_axis_index init_idcs store_idcs -> (
+            match collect_fragment_tiles fragment [] reduction with
+            | [ Tile_mma { a; b; ta; tb; m; n; k; _ } ] -> (
+                let target_base = Array.map init_idcs ~f:(zero_symbols init_syms) in
+                let d_prec, target_op = operand (target, target_base) in
+                let a_prec, a_op = operand a in
+                let b_prec, b_op = operand b in
+                let fragment_name = Printf.sprintf "__mma_fragment_%d" fragment.Tn.uid in
+                let render_with active =
+                  let old = !active_mma_accumulator in
+                  active_mma_accumulator := Some active;
+                  Exn.protect
+                    ~f:(fun () -> render reduction)
+                    ~finally:(fun () -> active_mma_accumulator := old)
+                in
+                let fragment_doc =
+                  if Utils.debug_log_from_routines () then None
+                  else
+                    Option.bind B.mma_fragment_syntax ~f:(fun emit ->
+                        emit ~d_prec ~a_prec ~b_prec ~m ~n ~k ~fragment:fragment_name
+                          ~target:target_op ~a:a_op ~b:b_op ~body:(fun () ->
+                            render_with (Active_fragment (fragment, fragment_name))))
+                in
+                let rendered =
+                  match fragment_doc with
+                  | Some _ as doc -> doc
+                  | None when Utils.debug_log_from_routines () -> None
+                  | None ->
+                      Option.bind B.mma_syntax ~f:(fun emit ->
+                          (* Until CUDA/HIP grow their own persistent-fragment mapping, preserve
+                             their existing per-[k_o] intrinsic path by aliasing the marked local
+                             back to the original target when that exact MMA call is supported.
+                             Unsupported calls retain the explicit lane-0 local-array fallback. *)
+                          match
+                            emit ~d_prec ~a_prec ~b_prec ~ta ~tb ~m ~n ~k ~d:target_op ~a:a_op
+                              ~b:b_op
+                          with
+                          | Some _ -> Some (render_with (Active_target (fragment, target_op)))
+                          | None -> None)
+                in
+                match rendered with
+                | Some doc ->
+                    rendered_simdgroup_fragments := Set.add !rendered_simdgroup_fragments fragment;
+                    Some doc
+                | None ->
+                    (* Scalar/local fallback: lane 0 performs the synthesized transfers. Hardware
+                       backends need the same outer visibility barriers as the ordinary Tile_mma
+                       load/store path, so the init observes sibling zeroing and later statements
+                       observe the final store. Serial C renderers need no barriers. *)
+                    let body_doc =
+                      separate hardline [ render init; render reduction; render store ]
+                    in
+                    Some
+                      (match B.barrier_syntax with
+                      | Some barrier ->
+                          string barrier ^^ hardline ^^ body_doc ^^ hardline ^^ string barrier
+                      | None -> body_doc))
+            | _ -> None)
+        | _ -> None)
+    | _ -> None
+
+  let try_mma_fragment_scope ~render c =
+    if Set.is_empty !current_simdgroup_fragments then None else render_mma_fragment_scope ~render c
+
   let rec pp_ll ?(log_set_locals = true) ?(in_loop = false) (c : Low_level.t) : PPrint.document =
     let open PPrint in
     match c with
     | Low_level.Noop -> empty
-    | Seq (c1, c2) ->
-        let d1 = pp_ll ~log_set_locals ~in_loop c1 in
-        let d2 = pp_ll ~log_set_locals ~in_loop c2 in
-        (* Avoid extra hardlines if one side is empty *)
-        if PPrint.is_empty d1 then d2 else if PPrint.is_empty d2 then d1 else d1 ^^ hardline ^^ d2
+    | Seq (c1, c2) -> (
+        match
+          try_mma_fragment_scope ~render:(fun body -> pp_ll ~log_set_locals ~in_loop body) c
+        with
+        | Some doc -> doc
+        | None ->
+            let d1 = pp_ll ~log_set_locals ~in_loop c1 in
+            let d2 = pp_ll ~log_set_locals ~in_loop c2 in
+            (* Avoid extra hardlines if one side is empty *)
+            if PPrint.is_empty d1 then d2
+            else if PPrint.is_empty d2 then d1
+            else d1 ^^ hardline ^^ d2)
     | For_loop { index = i; from_; to_; body; trace_it = _; axis } -> (
         (* Rendering phase of docs/proposals/axis-types-for-loops.md (§5): [Serial] loops render as
            C [for] statements; [Grid]/[Workgroup]/[Workgroup_reduce] loops bind their index to the
@@ -2410,18 +2591,38 @@ module C_syntax (B : C_syntax_config) = struct
            declines and logged runs, which must stay serial and deterministic) the scalar fallback
            runs once per simdgroup, guarded on lane 0 — the lane loop still supplies the launch's
            threads. *)
+        let d_tn = fst d in
+        let fragment_is_active =
+          match !active_mma_accumulator with
+          | Some (Active_fragment (fragment, _)) | Some (Active_target (fragment, _)) ->
+              Tn.equal d_tn fragment
+          | None -> false
+        in
+        if Set.mem !current_simdgroup_fragments d_tn && not fragment_is_active then
+          declinef
+            "marked simdgroup fragment %s rendered outside its recognized fragment scope; falling \
+             back from the intended persistent intrinsic path"
+            (Tn.debug_name d_tn);
         let operand (tn, idcs) =
           let dims = Lazy.force tn.Tn.dims in
           let prec = Lazy.force tn.Tn.prec in
           let rank = Array.length dims in
           let ld = if rank >= 1 then dims.(rank - 1) else 1 in
-          let space =
-            if Set.mem !current_workgroup_shared tn then `Shared
-            else if Tn.Placements.is_materialized_force (placements ()) tn 440 then `Device
-            else `Thread
-          in
-          let ptr_doc =
-            parens (string (get_ident tn) ^^ string " + " ^^ pp_array_offset (idcs, dims))
+          let ptr_doc, ld, space =
+            match !active_mma_accumulator with
+            | Some (Active_fragment (fragment, name)) when Tn.equal tn fragment ->
+                (string name, ld, `Fragment name)
+            | Some (Active_target (fragment, (ptr, target_ld, space))) when Tn.equal tn fragment ->
+                (ptr, target_ld, space)
+            | _ ->
+                let space =
+                  if Set.mem !current_workgroup_shared tn then `Shared
+                  else if Tn.Placements.is_materialized_force (placements ()) tn 440 then `Device
+                  else `Thread
+                in
+                ( parens (string (get_ident tn) ^^ string " + " ^^ pp_array_offset (idcs, dims)),
+                  ld,
+                  space )
           in
           (prec, (ptr_doc, ld, space))
         in
@@ -2447,7 +2648,12 @@ module C_syntax (B : C_syntax_config) = struct
         (* Shape facts for the decline diagnostics: enough to identify the statement and check every
            statically-checkable emission rule by eye. *)
         let describe () =
-          let space_str = function `Shared -> "shared" | `Device -> "device" | `Thread -> "thread" in
+          let space_str = function
+            | `Shared -> "shared"
+            | `Device -> "device"
+            | `Thread -> "thread"
+            | `Fragment _ -> "fragment"
+          in
           let op_str role (tn, idcs) =
             let prec, (_, ld, space) = operand (tn, idcs) in
             Printf.sprintf "%s=%s:%s[ld=%d,%s]" role (Tn.debug_name tn) (Ops.prec_string prec) ld
@@ -3024,7 +3230,8 @@ module C_syntax (B : C_syntax_config) = struct
   let compile_main llc : PPrint.document = pp_ll llc
 
   let compile_proc ~name idx_params
-      Low_level.{ traced_store; llc; merge_node; optimize_ctx; workgroup_shared } :
+      Low_level.
+        { traced_store; llc; merge_node; optimize_ctx; workgroup_shared; simdgroup_fragments } :
       (string * kparam_source) list * PPrint.document * Low_level.launch_dims =
     let open PPrint in
     (if not (Set.is_empty workgroup_shared) then
@@ -3052,6 +3259,8 @@ module C_syntax (B : C_syntax_config) = struct
      current_grid_private := grid_private;
      current_local_ptr_alias := local_ptr_alias);
     current_workgroup_shared := workgroup_shared;
+    current_simdgroup_fragments := simdgroup_fragments;
+    rendered_simdgroup_fragments := Set.empty (module Tn);
     current_traced_store := Some traced_store;
     Hash_set.clear zero_out_seen;
     (* The materialized in-context nodes, in deterministic [traced_store] order, with their
@@ -3235,6 +3444,9 @@ module C_syntax (B : C_syntax_config) = struct
           ^^ hardline
     | `Pooled _ -> ());
 
+    (* Render before declarations so accepted marked-fragment regions can suppress their otherwise
+       dead scalar local arrays. Declining/debug paths leave the set empty and keep the arrays. *)
+    let main_logic_doc = compile_main llc in
     let grid_privatized =
       Map.fold !current_grid_private
         ~init:(Set.empty (module Tn))
@@ -3252,7 +3464,8 @@ module C_syntax (B : C_syntax_config) = struct
                   || Tn.Placements.is_materialized_force plc tn 336))
                (* Privatized to a pool-parallel [Grid] loop: declared per chunk inside that loop's
                   body instead (see [parallel_grid_loop]). *)
-               && not (Set.mem grid_privatized tn)
+               && (not (Set.mem grid_privatized tn))
+               && not (Set.mem !rendered_simdgroup_fragments tn)
              then
                let is_shared = Set.mem workgroup_shared tn in
                if is_shared then
@@ -3277,7 +3490,7 @@ module C_syntax (B : C_syntax_config) = struct
     in
     body := !body ^^ local_decls ^^ hardline;
 
-    let main_logic = string "/* Main logic. */" ^^ hardline ^^ compile_main llc in
+    let main_logic = string "/* Main logic. */" ^^ hardline ^^ main_logic_doc in
     body := !body ^^ main_logic;
 
     if Utils.debug_log_from_routines () && B.log_involves_file_management then

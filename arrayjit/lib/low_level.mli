@@ -327,6 +327,11 @@ type optimized = {
       (** [Local]-memory-mode nodes to be placed in workgroup-shared memory ([__shared__] /
           [threadgroup]) instead of kernel-local arrays. Populated by schedule transforms; empty for
           unscheduled code. See docs/proposals/axis-types-for-loops.md. *)
+  simdgroup_fragments : Set.M(Tnode).t;
+      (** [Local]-memory-mode accumulator tiles whose init-load, serial reduction and store-back
+          form one per-simdgroup fragment lifetime. Backends without a fragment rendering ignore the
+          marking and use the ordinary local-array code; Metal maps the marked region to a
+          persistent [simdgroup_matrix] array. *)
 }
 [@@deriving sexp_of]
 

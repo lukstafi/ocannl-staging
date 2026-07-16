@@ -1517,12 +1517,229 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
         ])
   |> fun llc -> { opt with llc }
 
+(** After [Tensorize] has replaced the inner micro-kernel, contract the nearest enclosing serial
+    reduction that carries the operands but not the accumulator. The synthesized local tile has
+    ordinary scalar semantics: lane 0 initializes it, each per-[k_o] [Tile_mma] accumulates into it,
+    and lane 0 stores it back. Metal recognizes the marked three-part region and maps the tile to
+    persistent simdgroup fragments; unsupported backend calls keep the local-array fallback. *)
+let contract_tensorized_accumulator ~lane (opt : Low_level.optimized) : Low_level.optimized =
+  let open Low_level in
+  (* [Tensorize] currently identifies one micro-kernel site per scheduled routine. Keep contraction
+     single-shot to avoid conflating independent accumulator lifetimes if multi-site tensorization
+     is introduced; that extension should promote and mark each site explicitly. *)
+  let promoted = ref None in
+  let mentions sym idx =
+    match terms_of_index idx with
+    | Some (terms, _) -> List.exists terms ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
+    | None -> false
+  in
+  let idcs_mention sym = Array.exists ~f:(mentions sym) in
+  let same_lane s = Indexing.equal_symbol s lane in
+  let rec matching_tiles acc = function
+    | Tile_mma { lane = l; _ } as tm when same_lane l -> tm :: acc
+    | Seq (a, b) -> matching_tiles (matching_tiles acc a) b
+    | For_loop { body; _ } | If { body; _ } -> matching_tiles acc body
+    | _ -> acc
+  in
+  let rec touches_outside_tile target = function
+    | Tile_mma { d = tn, _; lane = l; fallback; _ } ->
+        if Tn.equal tn target && same_lane l then false else touches_outside_tile target fallback
+    | Zero_out tn -> Tn.equal tn target
+    | Set { tn; llsc; _ } -> Tn.equal tn target || scalar_touches target llsc
+    | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
+        Tn.equal tn target || scalar_touches target v || scalar_touches target llsc
+    | Set_from_vec { tn; arg = a, _; _ } -> Tn.equal tn target || scalar_touches target a
+    | Set_local (_, llsc) -> scalar_touches target llsc
+    | Seq (a, b) -> touches_outside_tile target a || touches_outside_tile target b
+    | For_loop { body; _ } | If { body; _ } -> touches_outside_tile target body
+    | Noop | Comment _ | Staged_compilation _ | Declare_local _ | Workgroup_barrier -> false
+  and scalar_touches target = function
+    | Get (tn, _) | Get_dynamic { tn; _ } -> Tn.equal tn target
+    | Local_scope { body; _ } -> touches_outside_tile target body
+    | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> false
+    | Ternop (_, (a, _), (b, _), (c, _)) ->
+        scalar_touches target a || scalar_touches target b || scalar_touches target c
+    | Binop (_, (a, _), (b, _)) -> scalar_touches target a || scalar_touches target b
+    | Unop (_, (a, _)) -> scalar_touches target a
+  in
+  let rec lane_extent = function
+    | For_loop { index; from_; to_; axis = Workgroup; _ } when same_lane index ->
+        Some (to_ - from_ + 1)
+    | Seq (a, b) -> Option.first_some (lane_extent a) (lane_extent b)
+    | For_loop { body; _ } | If { body; _ } -> lane_extent body
+    | _ -> None
+  in
+  let rec bound_symbols acc = function
+    | For_loop { index; body; _ } -> bound_symbols (index :: acc) body
+    | Seq (a, b) -> bound_symbols (bound_symbols acc a) b
+    | If { body; _ } -> bound_symbols acc body
+    | _ -> acc
+  in
+  let fallback_indices target fallback =
+    let rec find = function
+      | Set { tn; idcs; _ } when Tn.equal tn target -> Some idcs
+      | Seq (a, b) -> Option.first_some (find a) (find b)
+      | For_loop { body; _ } | If { body; _ } -> find body
+      | _ -> None
+    in
+    find fallback
+  in
+  let fallback_axes fallback =
+    match fallback with
+    | For_loop { index = i; body; _ } -> (
+        match
+          List.filter (flat_lines [ body ]) ~f:(function Noop | Comment _ -> false | _ -> true)
+        with
+        | [ For_loop { index = j; _ } ] -> Some (i, j)
+        | _ -> None)
+    | _ -> None
+  in
+  let add_symbol idx s =
+    match terms_of_index idx with
+    | Some (terms, offset) -> normalize_affine ~terms:((1, s) :: terms) ~offset
+    | None -> invalid_arg "Schedule.Tensorize: Concat accumulator indices are unsupported"
+  in
+  let lane0 p body =
+    let iprec = Ops.index_prec () in
+    let cond =
+      Binop (Ops.Cmpeq, (Embed_index (Indexing.Iterator lane), iprec), (Constant 0., iprec))
+    in
+    For_loop
+      {
+        index = lane;
+        from_ = 0;
+        to_ = p - 1;
+        body = If { cond = (cond, iprec); body };
+        trace_it = false;
+        axis = Workgroup;
+      }
+  in
+  let rec rewrite llc =
+    let llc =
+      match llc with
+      | Seq (a, b) -> Seq (rewrite a, rewrite b)
+      | For_loop fc -> For_loop { fc with body = rewrite fc.body }
+      | If ({ body; _ } as i) -> If { i with body = rewrite body }
+      | other -> other
+    in
+    match (llc, !promoted) with
+    | For_loop fc, None when equal_axis_type fc.axis Serial && fc.to_ > fc.from_ -> (
+        match matching_tiles [] fc.body with
+        | [ Tile_mma { d = target, d_base; a = a, _; b = b, _; m; n; fallback; _ } ]
+          when (not (idcs_mention fc.index d_base))
+               && (not (Tn.equal target a))
+               && (not (Tn.equal target b))
+               && List.for_all (bound_symbols [] fc.body) ~f:(fun s -> not (idcs_mention s d_base))
+               && not (touches_outside_tile target fc.body) -> (
+            match
+              (fallback_indices target fallback, fallback_axes fallback, lane_extent fc.body)
+            with
+            | Some original_d_idcs, Some (i, j), Some simd_width ->
+                let prec = Lazy.force target.Tn.prec in
+                let fragment =
+                  Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
+                    ~label:("fragment" :: target.Tn.label)
+                    ~unpadded_dims:(lazy [| m; n |])
+                    ~padding:(lazy None)
+                    ()
+                in
+                Tn.Placements.update opt.optimize_ctx.placements fragment Tn.Local 178;
+                ignore (get_node opt.traced_store fragment : traced_array);
+                let fragment_idcs = [| Indexing.Iterator i; Indexing.Iterator j |] in
+                let fragment_base = [| Indexing.Fixed_idx 0; Indexing.Fixed_idx 0 |] in
+                let fallback =
+                  remap_reads ~writes:true ~source:target ~from_idcs:original_d_idcs ~tile:fragment
+                    ~tile_idcs:fragment_idcs fallback
+                in
+                let replaced = ref false in
+                let rec replace = function
+                  | Tile_mma ({ lane = l; _ } as tm') when same_lane l ->
+                      replaced := true;
+                      Tile_mma { tm' with d = (fragment, fragment_base); fallback }
+                  | Seq (a, b) -> Seq (replace a, replace b)
+                  | For_loop f -> For_loop { f with body = replace f.body }
+                  | If ({ body; _ } as x) -> If { x with body = replace body }
+                  | other -> other
+                in
+                let body = replace fc.body in
+                assert !replaced;
+                let fi = Indexing.get_symbol () and fj = Indexing.get_symbol () in
+                let target_idcs = Array.copy d_base in
+                let rank = Array.length target_idcs in
+                if rank < 2 then
+                  invalid_arg "Schedule.Tensorize: accumulator rank must be at least 2";
+                target_idcs.(rank - 2) <- add_symbol target_idcs.(rank - 2) fi;
+                target_idcs.(rank - 1) <- add_symbol target_idcs.(rank - 1) fj;
+                let local_idcs = [| Indexing.Iterator fi; Indexing.Iterator fj |] in
+                let transfer ~into_fragment =
+                  let stmt =
+                    if into_fragment then
+                      Set
+                        {
+                          tn = fragment;
+                          idcs = local_idcs;
+                          llsc = Get (target, target_idcs);
+                          debug = "";
+                        }
+                    else
+                      Set
+                        {
+                          tn = target;
+                          idcs = target_idcs;
+                          llsc = Get (fragment, local_idcs);
+                          debug = "";
+                        }
+                  in
+                  For_loop
+                    {
+                      index = fi;
+                      from_ = 0;
+                      to_ = m - 1;
+                      trace_it = false;
+                      axis = Serial;
+                      body =
+                        For_loop
+                          {
+                            index = fj;
+                            from_ = 0;
+                            to_ = n - 1;
+                            trace_it = false;
+                            axis = Serial;
+                            body = stmt;
+                          };
+                    }
+                in
+                promoted := Some fragment;
+                unflat_lines
+                  [
+                    lane0 simd_width (transfer ~into_fragment:true);
+                    For_loop { fc with body };
+                    lane0 simd_width (transfer ~into_fragment:false);
+                  ]
+            | _ -> llc)
+        | _ -> llc)
+    | _ -> llc
+  in
+  let llc = rewrite opt.llc in
+  match !promoted with
+  | None -> { opt with llc }
+  | Some fragment ->
+      { opt with llc; simdgroup_fragments = Set.add opt.simdgroup_fragments fragment }
+
+let apply_tensorize op (opt : Low_level.optimized) : Low_level.optimized =
+  match op with
+  | Tensorize { lane; _ } ->
+      let opt = { opt with llc = apply_op opt.llc op } in
+      contract_tensorized_accumulator ~lane opt
+  | _ -> assert false
+
 let apply_opt_op (opt : Low_level.optimized) (op : optop) : Low_level.optimized =
   match op with
   | Stage { source; tile_loops; shared; cooperative; hoisted } ->
       apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted opt
   | Privatize { target; over } -> apply_privatize ~target ~over opt
-  | (Split _ | Swap _ | Retype _ | Unroll _ | Expand_zero _ | Tensorize _) as op ->
+  | Tensorize _ -> apply_tensorize op opt
+  | (Split _ | Swap _ | Retype _ | Unroll _ | Expand_zero _) as op ->
       { opt with llc = apply_op opt.Low_level.llc op }
 
 let apply ?(static_indices = []) (sched : schedule) (opt : Low_level.optimized) :
@@ -2443,6 +2660,7 @@ let segment_optimized (full : Low_level.optimized) (llc : Low_level.t) : Low_lev
     llc;
     merge_node = (if reads_merge then full.Low_level.merge_node else None);
     workgroup_shared = Set.filter full.Low_level.workgroup_shared ~f:(Set.mem tns);
+    simdgroup_fragments = Set.filter full.Low_level.simdgroup_fragments ~f:(Set.mem tns);
   }
 
 (* Expand-and-annotate schedule for a segment of materialized whole-node [Zero_out]s (GPU): the
