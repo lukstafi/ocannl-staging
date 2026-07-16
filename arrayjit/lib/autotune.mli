@@ -79,11 +79,50 @@ type sketch_params = {
   sk_hoist : bool;
   sk_grid : bool;
   sk_pack_rest : bool;
+  sk_conv : bool;
   sk_epilogue : bool;
 }
 (** Parameters of one matmul-sketch seed candidate; see the implementation's field docs. Exposed for
     tests (the seeding pre-filter of gh-ocannl-479 and the mixed grid-outermost shape of
     gh-ocannl-473 are asserted on directly). *)
+
+type conv_axis = {
+  cx_o : Ir.Indexing.symbol;  (** Output spatial symbol (a plain iterator of the output). *)
+  cx_no : int;
+  cx_k : Ir.Indexing.symbol;  (** Kernel-window symbol (read by the kernel, not the output). *)
+  cx_nk : int;
+  cx_stride : int;
+  cx_dilation : int;
+  cx_offset : int;  (** Padding offset on the input access ([<= 0] for padded convs). *)
+}
+
+type conv_site = {
+  c_loops : Ir.Indexing.symbol list;
+  c_outer : (Ir.Indexing.symbol * int) list;
+  c_kernel : Ir.Indexing.symbol list;
+  c_axes : conv_axis list;
+  c_row : Ir.Indexing.symbol;
+  c_nrow : int;
+  c_oc : Ir.Indexing.symbol;
+  c_noc : int;
+  c_red : Ir.Indexing.symbol;
+  c_nred : int;
+  c_d : Ir.Tnode.t;
+  c_a : Ir.Tnode.t;
+  c_b : Ir.Tnode.t;
+  c_zeroed : bool;
+  c_fma : bool;
+}
+(** A recognized convolution accumulation site (gh-ocannl-493); see the implementation's field docs.
+    Exposed for tests. *)
+
+val detect_conv : Ir.Low_level.t -> conv_site option
+(** Recognize a convolution accumulation nest: the output written at plain distinct iterators, one
+    operand carrying affine components that mix an output symbol with a kernel-window symbol (the
+    projections carry the strides, dilations, and padding offsets), the other operand reading the
+    kernel window, exactly one out-channel and one reduction-channel symbol, with the out-channel at
+    the output's last axis and a conv axis at its second-to-last (the implicit-GEMM row). Exposed
+    for tests. *)
 
 val sketch_seed_params :
   is_gpu:bool ->
