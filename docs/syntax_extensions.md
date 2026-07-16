@@ -606,6 +606,35 @@ resp. `concat`. The bound objects can later be used with `Operation.embed_dim` o
 into a tensor expression. For a row variable, the number will be the product of the dimensions it
 resolved into.
 
+### Einsum gotchas and idioms
+
+Recurring stumbling points, each verified against the sources:
+
+- **Unary sum-reduction is `++` (einsum1), not `+++`.** `+++` is the *binary* `outer_sum`
+  (add-reduce with add); writing `a +++ "i => 0"` where `a ++ "i => 0"` was meant is a common
+  error, including in older docs and proposals. The operator table lives in
+  `tensor/ppx_shared.ml`.
+- **`einsum1` extracts diagonals and traces**: `m ++ "ii => i"` is a working `diag`, and
+  `"i => ii"` embeds a vector on the diagonal (see `Operation.einsum1`'s docstring and
+  `test/einsum/surjectivity.ml`).
+- **Comparisons in the `%op`/`%cd` operator scope are `<`, `=`, and `<>` only** (plus `not` and
+  `where`). Derive the rest: `a > b` is `b < a`; `a <= b` is `not (b < a)`; `a >= b` is
+  `not (a < b)`.
+- **A number in an einsum axis spec is a fixed-index placement** (an axis of size `k+1` with the
+  value placed at slot `k`), *not* a reference to "axis N". This gives a per-axis index-grid
+  idiom: `range n ++ "i => i0"` yields shape `[n, 1]` and `range n ++ "j => 0j"` yields `[1, n]`;
+  comparing them broadcasts to an `[n, n]` grid — the building block for `eye`, `triu`, and
+  similar masks. Note `range_of_shape` gives row-major *flattened* offsets, not per-axis indices.
+- **Only numeric literals auto-lift to tensors in `%op`.** A `let`-bound float needs explicit
+  embedding: `r *. !.step`, not `r *. step`.
+- **Inline-declaration initializers resolve at the unit parameter.** In
+  `let%op f x = ... { w = kaiming normal1 () } ...`, the lifted binding for `w` lands at the
+  enclosing unit parameter `()`; with no unit parameter in scope the binding lands outside any
+  `open TDSL.O` and identifiers like `normal1` fail with "Unbound value". Write
+  `let%op mk_f () x = ...` and apply `mk_f ()`. A labeled argument inside the initializer
+  (`kaiming ~scale_sq:2.0 normal1 ()`) breaks the lifting the same way — bind a specialized
+  helper outside `%op` instead.
+
 ## Further features of the syntax extension %cd
 
 ### Referencing arrays: tensor value, tensor gradient, merge buffer of a tensor node
