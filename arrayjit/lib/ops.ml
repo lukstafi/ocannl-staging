@@ -62,15 +62,14 @@ let double = Double_prec Double
 
 (** Returns the precision to use for indexing arithmetic: {b signed} int32, or int64 under the
     [large_models] setting (docs/proposals/signed-index-precision.md). Signedness makes machine
-    index arithmetic agree with mathematical integers (no wrap traps for negative intermediates
-    such as convolution [offset = -padding] forms), and is friendlier to C compilers than
-    defined-wrap unsigned. Unsigned precisions remain for {e data} domains only (uint4x32 RNG
-    state, uint8/uint32 stored values such as class IDs). Int32 overflow is excluded by contract,
-    not by widening: every per-node (padded) element count must fit int32 unless 64-bit indices
-    are in use -- enforced once per node by {!Tnode.create} forcing dims. [large_models] still
-    selects the 64-bit width here pending the tnode-granular, interval-driven codegen resolution
-    (which also needs a separate resolution for the Metal pool-slot width before the flag can be
-    retired). *)
+    index arithmetic agree with mathematical integers (no wrap traps for negative intermediates such
+    as convolution [offset = -padding] forms), and is friendlier to C compilers than defined-wrap
+    unsigned. Unsigned precisions remain for {e data} domains only (uint4x32 RNG state, uint8/uint32
+    stored values such as class IDs). Int32 overflow is excluded by contract, not by widening: every
+    per-node (padded) element count must fit int32 unless 64-bit indices are in use -- enforced once
+    per node by {!Tnode.create} forcing dims. [large_models] still selects the 64-bit width here
+    pending the tnode-granular, interval-driven codegen resolution (which also needs a separate
+    resolution for the Metal pool-slot width before the flag can be retired). *)
 let index_prec () = if Utils.settings.large_models then int64 else int32
 
 let is_up_to_fp16 = function
@@ -231,8 +230,8 @@ let prec_in_bytes = function
   | Single_prec _ -> 4
   | Double_prec _ -> 8
 
-(* Byte alignment of tensor buffers: pool bases and per-node offsets within multi-tenant pools.
-   32 suffices for AVX/AVX2 and NEON vector loads; AVX-512 would need 64 — raise it here
+(* Byte alignment of tensor buffers: pool bases and per-node offsets within multi-tenant pools. 32
+   suffices for AVX/AVX2 and NEON vector loads; AVX-512 would need 64 — raise it here
    (gh-ocannl-164; every consumer parameterizes on this constant, nothing hardcodes 32). *)
 let buffer_alignment = 32
 

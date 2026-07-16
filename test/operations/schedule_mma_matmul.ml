@@ -152,12 +152,11 @@ let () =
       in
       p "tensorized structure as expected" ok);
 
-  (* --- Half precision: [simdgroup_half8x8] on Metal, the wmma f16 path on CUDA (T3 draft),
-     rocWMMA on HIP, the scalar fallback on the C backends. The inputs are multiples of 1/8 and 1/4
-     with 32-term sums
-     bounded by 12, so every product and partial sum is exactly representable in f16: the result is
-     EXACT regardless of accumulation order, and parity is bitwise on every backend and either
-     rendering path. --- *)
+  (* --- Half precision: [simdgroup_half8x8] on Metal, the wmma f16 path on CUDA (T3 draft), rocWMMA
+     on HIP, the scalar fallback on the C backends. The inputs are multiples of 1/8 and 1/4 with
+     32-term sums bounded by 12, so every product and partial sum is exactly representable in f16:
+     the result is EXACT regardless of accumulation order, and parity is bitwise on every backend
+     and either rendering path. --- *)
   let mah =
     NTDSL.init ~l:"mah" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ n ]
       ~f:(fun idcs -> Float.of_int (((idcs.(0) * n) + idcs.(1)) % 5) *. 0.125)
@@ -436,10 +435,10 @@ let () =
      operand copy, tolerance parity — the tile reduction reassociates). On the C backends a
      transposed A costs nothing (the A feeds are scalar element splats either way), so the register
      tiling fires with swapped index arithmetic and parity stays BITWISE; a transposed B would turn
-     the per-k row vector loads into strided gathers, so the register tiling declines and the
-     scalar fallback keeps parity bitwise (a packing [Stage] with [tile_loops] in micro-kernel
-     order normalizes the layout instead — see schedule_pack_mma_matmul.ml). CUDA's wmma draft
-     declines uniform f32 regardless. --- *)
+     the per-k row vector loads into strided gathers, so the register tiling declines and the scalar
+     fallback keeps parity bitwise (a packing [Stage] with [tile_loops] in micro-kernel order
+     normalizes the layout instead — see schedule_pack_mma_matmul.ml). CUDA's wmma draft declines
+     uniform f32 regardless. --- *)
   let mtav = Array.init (n * n) ~f:(fun x -> Float.of_int (x % 7) *. 0.5) in
   let mtbv = Array.init (n * n) ~f:(fun x -> Float.of_int (x % 11) -. 5.) in
   let mta = TDSL.ndarray mtav ~label:[ "mta" ] ~output_dims:[ n; n ] () in
@@ -478,8 +477,8 @@ let () =
             (* CUDA/HIP decline uniform f32 to the scalar fallback. *)
             has "== 0)" && not (has "Tile_mma register tiling")
           else if c_tiled then
-            (* C backends, transposed A: the register tiling fires (lane-0 guarded) with the A
-               index arithmetic swapped. *)
+            (* C backends, transposed A: the register tiling fires (lane-0 guarded) with the A index
+               arithmetic swapped. *)
             has "== 0)" && has "Tile_mma register tiling"
           else
             (* C backends, transposed B: the register tiling declines to the scalar fallback. *)

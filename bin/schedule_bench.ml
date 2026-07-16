@@ -2,23 +2,22 @@
    acceptance): times the naive 1x1-launch kernel against three hand-written schedules on the
    configured backend --
 
-   - parallel: one thread per output element (Split i / Split j into Grid x Workgroup; the S1
-     shape, Boehm kernel 1 equivalent);
-   - smem: + Split k, operands staged through workgroup-shared tiles, the output accumulator
-     privatized to a per-thread scalar (S2 + Privatize, Boehm kernel 3);
-   - regtile: + second-level splits with materialized-unroll TM x TN register tiles accumulating
-     into a privatized per-thread tile (S3 + Privatize, Boehm kernel 4/5 shape).
+   - parallel: one thread per output element (Split i / Split j into Grid x Workgroup; the S1 shape,
+   Boehm kernel 1 equivalent); - smem: + Split k, operands staged through workgroup-shared tiles,
+   the output accumulator privatized to a per-thread scalar (S2 + Privatize, Boehm kernel 3); -
+   regtile: + second-level splits with materialized-unroll TM x TN register tiles accumulating into
+   a privatized per-thread tile (S3 + Privatize, Boehm kernel 4/5 shape).
 
-   On the C backends the shared schedules are rejected and the CPU variants run instead:
-   cpupack (S4 cache tiling + operand packing, all-Serial), tensorize (whole-triple register-tiled
-   Tile_mma, gh-ocannl-469), packmma (Tile_mma composed with cache tiling + packing, all-Serial
-   GEBP), and packmma_par (the same composition with pool-parallel Grid row blocks and per-chunk
-   privatized A~ tiles).
+   On the C backends the shared schedules are rejected and the CPU variants run instead: cpupack (S4
+   cache tiling + operand packing, all-Serial), tensorize (whole-triple register-tiled Tile_mma,
+   gh-ocannl-469), packmma (Tile_mma composed with cache tiling + packing, all-Serial GEBP), and
+   packmma_par (the same composition with pool-parallel Grid row blocks and per-chunk privatized A~
+   tiles).
 
    Usage: dune exec bin/schedule_bench.exe -- [n] [repeats] (defaults 256 and 20; n must be a
    multiple of 64). Run with OCANNL_BACKEND=metal (or cuda); the C backends reject the shared
-   schedules. Timing includes kernel executions and one device-to-host transfer per variant
-   (runs queue on the stream; get_values synchronizes). *)
+   schedules. Timing includes kernel executions and one device-to-host transfer per variant (runs
+   queue on the stream; get_values synchronizes). *)
 
 open Base
 open Ocannl
@@ -30,13 +29,11 @@ module Asgns = Ir.Assignments
 let p = Stdio.printf
 
 let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
-  let strip stmts =
-    List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true)
-  in
+  let strip stmts = List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true) in
   let rec path (llc : LL.t) : Ir.Indexing.symbol list =
     match llc with
-    | LL.For_loop { index; body; _ } -> (
-        index :: (match strip (LL.flat_lines [ body ]) with [ single ] -> path single | _ -> []))
+    | LL.For_loop { index; body; _ } ->
+        index :: (match strip (LL.flat_lines [ body ]) with [ single ] -> path single | _ -> [])
     | LL.If { body; _ } -> path body
     | _ -> []
   in
@@ -90,9 +87,28 @@ let () =
     let sp_j, _, j_i = Sched.split ~axis:j ~factor:bn ~outer:LL.Grid ~inner:LL.Workgroup in
     let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
     [
-      ez; sp_zi; sp_zj; sp_i; sp_j; sp_k;
-      Sched.Stage { source = ma.Tensor.value; tile_loops = [ i_i; k_i ]; shared = true; cooperative = None; hoisted = false };
-      Sched.Stage { source = mb.Tensor.value; tile_loops = [ k_i; j_i ]; shared = true; cooperative = None; hoisted = false };
+      ez;
+      sp_zi;
+      sp_zj;
+      sp_i;
+      sp_j;
+      sp_k;
+      Sched.Stage
+        {
+          source = ma.Tensor.value;
+          tile_loops = [ i_i; k_i ];
+          shared = true;
+          cooperative = None;
+          hoisted = false;
+        };
+      Sched.Stage
+        {
+          source = mb.Tensor.value;
+          tile_loops = [ k_i; j_i ];
+          shared = true;
+          cooperative = None;
+          hoisted = false;
+        };
       Sched.Privatize { target = mc; over = k_o };
     ]
   in
@@ -109,8 +125,22 @@ let () =
     @ sink i_i [ j_o; j_i; k_o; k_i ]
     @ sink j_i [ k_o; k_i; i_i ]
     @ [
-        Sched.Stage { source = ma.Tensor.value; tile_loops = [ i_i; k_i ]; shared = false; cooperative = None; hoisted = false };
-        Sched.Stage { source = mb.Tensor.value; tile_loops = [ k_i; j_i ]; shared = false; cooperative = None; hoisted = false };
+        Sched.Stage
+          {
+            source = ma.Tensor.value;
+            tile_loops = [ i_i; k_i ];
+            shared = false;
+            cooperative = None;
+            hoisted = false;
+          };
+        Sched.Stage
+          {
+            source = mb.Tensor.value;
+            tile_loops = [ k_i; j_i ];
+            shared = false;
+            cooperative = None;
+            hoisted = false;
+          };
         Sched.Privatize { target = mc; over = k_o };
       ]
   in
@@ -135,8 +165,22 @@ let () =
     @ sink i_t [ j_o; j_w; j_t; k_o; k_i ]
     @ sink j_t [ k_o; k_i ]
     @ [
-        Sched.Stage { source = ma.Tensor.value; tile_loops = [ i_w; i_t; k_i ]; shared = true; cooperative = None; hoisted = false };
-        Sched.Stage { source = mb.Tensor.value; tile_loops = [ k_i; j_w; j_t ]; shared = true; cooperative = None; hoisted = false };
+        Sched.Stage
+          {
+            source = ma.Tensor.value;
+            tile_loops = [ i_w; i_t; k_i ];
+            shared = true;
+            cooperative = None;
+            hoisted = false;
+          };
+        Sched.Stage
+          {
+            source = mb.Tensor.value;
+            tile_loops = [ k_i; j_w; j_t ];
+            shared = true;
+            cooperative = None;
+            hoisted = false;
+          };
         Sched.Privatize { target = mc; over = k_o };
         Sched.Unroll { axis = i_t; materialize = true };
         Sched.Unroll { axis = j_t; materialize = true };
@@ -144,11 +188,11 @@ let () =
   in
 
   (* Register-tiled Tile_mma micro-kernel (gh-ocannl-469): the whole i x j x k triple becomes one
-     Tile_mma statement, which the C backends render tinyBLAS-style — the C-tile held in an RM x
-     RN grid of vector registers across the entire k-loop, edges peeled. The zeroing must cover
-     the lane slot (validate_parallel's coverage rule), so its column loop becomes the Workgroup
-     axis and the lane width matches its extent (the lane loop renders serially on the C
-     backends, executing the guarded statement once). *)
+     Tile_mma statement, which the C backends render tinyBLAS-style — the C-tile held in an RM x RN
+     grid of vector registers across the entire k-loop, edges peeled. The zeroing must cover the
+     lane slot (validate_parallel's coverage rule), so its column loop becomes the Workgroup axis
+     and the lane width matches its extent (the lane loop renders serially on the C backends,
+     executing the guarded statement once). *)
   let tensorize_schedule ~mc opt =
     let i, j, k = accum_syms opt in
     let ez, zsyms = Sched.expand_zero ~tn:mc in
@@ -160,9 +204,9 @@ let () =
 
   (* Tile_mma composed with cache tiling + operand packing (the GEBP shape; the closing piece of
      gh-ocannl-469, autotune's [cpu_mma_pack_sketch_schedule]): pack the B panel [bk x n] at k_o
-     (reused across all row blocks) and the A tile [bm x bk] at i_o, then tensorize the inner
-     triple — the register-tiled micro-kernel streams the contiguous packed tiles. All-Serial
-     with a unit lane, so the whole-node zeroing stays legal. *)
+     (reused across all row blocks) and the A tile [bm x bk] at i_o, then tensorize the inner triple
+     — the register-tiled micro-kernel streams the contiguous packed tiles. All-Serial with a unit
+     lane, so the whole-node zeroing stays legal. *)
   let packmma_schedule ~mc:_ opt =
     let bm, bk = (64, 64) in
     let i, j, k = accum_syms opt in
@@ -173,18 +217,15 @@ let () =
       Sched.Stage { source; tile_loops; shared = false; cooperative = None; hoisted = false }
     in
     let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1 in
-    [ sp_i; sp_k ]
-    @ sink j [ k_o ]
-    @ sink i_i [ k_o ]
-    @ sink i_o [ k_o ]
+    [ sp_i; sp_k ] @ sink j [ k_o ] @ sink i_i [ k_o ] @ sink i_o [ k_o ]
     @ [ stage mb.Tensor.value [ k_i; j ]; stage ma.Tensor.value [ i_i; k_i ]; tz ]
   in
 
-  (* The fully parallel packed GEMM (gh-ocannl-469 follow-up): the row-block loop is Grid-typed
-     and pool-parallelizes — the per-row-block A~ tile is privatized to per-chunk block-scope
-     storage by the renderer, the B~ panel packed at k_o is read-only inside the Grid body
-     (behind a pointer alias under the blocks extension). The whole-node zeroing is no longer
-     legal beside a hardware-annotated loop, so it expands with the same Grid row geometry. *)
+  (* The fully parallel packed GEMM (gh-ocannl-469 follow-up): the row-block loop is Grid-typed and
+     pool-parallelizes — the per-row-block A~ tile is privatized to per-chunk block-scope storage by
+     the renderer, the B~ panel packed at k_o is read-only inside the Grid body (behind a pointer
+     alias under the blocks extension). The whole-node zeroing is no longer legal beside a
+     hardware-annotated loop, so it expands with the same Grid row geometry. *)
   let packmma_par_schedule ~mc opt =
     let bm, bk = (64, 64) in
     let i, j, k = accum_syms opt in
@@ -198,10 +239,7 @@ let () =
       Sched.Stage { source; tile_loops; shared = false; cooperative = None; hoisted = false }
     in
     let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1 in
-    [ ez; sp_zi; sp_i; sp_k ]
-    @ sink j [ k_o ]
-    @ sink i_i [ k_o ]
-    @ sink i_o [ k_o ]
+    [ ez; sp_zi; sp_i; sp_k ] @ sink j [ k_o ] @ sink i_i [ k_o ] @ sink i_o [ k_o ]
     @ [ stage mb.Tensor.value [ k_i; j ]; stage ma.Tensor.value [ i_i; k_i ]; tz ]
   in
 
@@ -217,8 +255,11 @@ let () =
     let ctx = Context.run ctx routine in
     let _ = Context.get_values ctx mc.Tensor.value in
     let start = Time_now.nanoseconds_since_unix_epoch () in
-    let ctx = Stdlib.Array.fold_left (fun ctx () -> Context.run ctx routine) ctx
-        (Stdlib.Array.make repeats ()) in
+    let ctx =
+      Stdlib.Array.fold_left
+        (fun ctx () -> Context.run ctx routine)
+        ctx (Stdlib.Array.make repeats ())
+    in
     let values = Context.get_values ctx mc.Tensor.value in
     let stop = Time_now.nanoseconds_since_unix_epoch () in
     let secs = Float.of_int63 Int63.(stop - start) /. 1e9 /. Float.of_int repeats in
@@ -233,12 +274,12 @@ let () =
     String.is_substring backend ~substring:"metal" || String.is_substring backend ~substring:"cuda"
   in
   let t_naive = bench ~variant:"naive" ~schedule:None in
-  if has_shared then (
+  if has_shared then
     let t_par = bench ~variant:"parallel" ~schedule:(Some parallel_schedule) in
     let t_smem = bench ~variant:"smem" ~schedule:(Some smem_schedule) in
     let t_reg = bench ~variant:"regtile" ~schedule:(Some regtile_schedule) in
     p "speedups vs naive: parallel %.1fx, smem %.1fx, regtile %.1fx\n" (t_naive /. t_par)
-      (t_naive /. t_smem) (t_naive /. t_reg))
+      (t_naive /. t_smem) (t_naive /. t_reg)
   else
     let t_pack = bench ~variant:"cpupack" ~schedule:(Some cpupack_schedule) in
     let t_tmma = bench ~variant:"tensorize" ~schedule:(Some tensorize_schedule) in

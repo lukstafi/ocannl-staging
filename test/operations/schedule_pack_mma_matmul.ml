@@ -1,40 +1,40 @@
-(* Tile_mma composed with cache tiling / operand packing on the CPU backends (the remaining piece
-   of gh-ocannl-469): packed Stage tiles feeding the register-tiled Tile_mma micro-kernel, the
+(* Tile_mma composed with cache tiling / operand packing on the CPU backends (the remaining piece of
+   gh-ocannl-469): packed Stage tiles feeding the register-tiled Tile_mma micro-kernel, the
    compiler-BLAS (GEBP) structure.
 
-   The composed pipeline, all-Serial: split i by [bm] and k by [bk] (j stays the full column
-   panel), sink to [k_o { i_o { i_i { j { k_i }}}}], pack the B panel [bk x n] at [k_o] (once per
-   k-block, reused across every row block) and the A tile [bm x bk] at [i_o] via non-shared
-   [Stage]s with [tile_loops] in micro-kernel order, then [Tensorize { i = i_i; j; k = k_i }] with
-   a unit lane width — the C backends render the lane loop serially, and a unit lane keeps the
-   kernel single-threaded so the whole-node [Zero_out] needs no expansion. The [Tile_mma] block
-   statement then streams the contiguous, cache-resident tiles ([lda = bk], [ldb = n]) through the
+   The composed pipeline, all-Serial: split i by [bm] and k by [bk] (j stays the full column panel),
+   sink to [k_o { i_o { i_i { j { k_i }}}}], pack the B panel [bk x n] at [k_o] (once per k-block,
+   reused across every row block) and the A tile [bm x bk] at [i_o] via non-shared [Stage]s with
+   [tile_loops] in micro-kernel order, then [Tensorize { i = i_i; j; k = k_i }] with a unit lane
+   width — the C backends render the lane loop serially, and a unit lane keeps the kernel
+   single-threaded so the whole-node [Zero_out] needs no expansion. The [Tile_mma] block statement
+   then streams the contiguous, cache-resident tiles ([lda = bk], [ldb = n]) through the
    register-tiled rendering; per output element the k-chain keeps the serial order and fused
    rounding, so values match the serial twin BITWISE on the C backends.
 
-   The transposed-B case ([d[i,j] += a[i,k] * bt[j,k]], the gradient-GEMM layout the register
-   tiling declines whole-triple) is the pack-normalization headline: [Stage] orders the tile's
-   axes by [tile_loops] ([k_i; j]), so the packed B~ tile is k-major regardless of the source
-   layout and [Tensorize] sees [tb = false] — the register tiling fires on a layout it could not
-   handle in place.
+   The transposed-B case ([d[i,j] += a[i,k] * bt[j,k]], the gradient-GEMM layout the register tiling
+   declines whole-triple) is the pack-normalization headline: [Stage] orders the tile's axes by
+   [tile_loops] ([k_i; j]), so the packed B~ tile is k-major regardless of the source layout and
+   [Tensorize] sees [tb = false] — the register tiling fires on a layout it could not handle in
+   place.
 
    The Grid-blocked whole-triple form checks the pool-parallel composition: [parallel_grid_safe]
    analyzes [Tile_mma] through its scalar fallback (the statement's true access footprint), so a
-   Grid row-block loop over a Tile_mma with materialized operands renders as chunked parallel
-   loops on the native pool ([dispatch_apply] / OpenMP).
+   Grid row-block loop over a Tile_mma with materialized operands renders as chunked parallel loops
+   on the native pool ([dispatch_apply] / OpenMP).
 
    The parallel packed form is the fully parallel packed GEMM (in-kernel packing under Grid row
-   blocks): the per-row-block A~ tile is privatized to per-chunk block-scope storage by the
-   renderer ([parallel_grid_safe]'s privatization rule) while the B~ panel packed at [k_o]
-   outside the Grid is read-only inside (behind a pointer alias under the blocks extension).
+   blocks): the per-row-block A~ tile is privatized to per-chunk block-scope storage by the renderer
+   ([parallel_grid_safe]'s privatization rule) while the B~ panel packed at [k_o] outside the Grid
+   is read-only inside (behind a pointer alias under the blocks extension).
 
    The Grid + hoisted-pack form pins autotune's [sk_grid && sk_hoist] seed variant (the typical
    inference GEMM: activations x constant weights): pool-parallel Grid row blocks over the
-   cache-blocked packed pipeline, with ONLY the hoistable B operand packed — at link time, into
-   the constant pool (gh-ocannl-470) — and A read in place (standard layout, [ta = false]). The
-   kernel body then has no in-kernel tile writes at all, so the Grid split stays outermost. In
-   both Grid forms the whole-node [Zero_out] is expanded with matching Grid coverage (the
-   unit-lane Workgroup axis stays inactive).
+   cache-blocked packed pipeline, with ONLY the hoistable B operand packed — at link time, into the
+   constant pool (gh-ocannl-470) — and A read in place (standard layout, [ta = false]). The kernel
+   body then has no in-kernel tile writes at all, so the Grid split stays outermost. In both Grid
+   forms the whole-node [Zero_out] is expanded with matching Grid coverage (the unit-lane Workgroup
+   axis stays inactive).
 
    On GPU backends the packing schedules apply without the [Tensorize] step (all-serial packing is
    legal everywhere; a unit-lane [Tile_mma] must not reach hardware simdgroup intrinsics) and the
@@ -72,8 +72,8 @@ let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
   let strip stmts = List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true) in
   let rec path (llc : LL.t) : Ir.Indexing.symbol list =
     match llc with
-    | LL.For_loop { index; body; _ } -> (
-        index :: (match strip (LL.flat_lines [ body ]) with [ single ] -> path single | _ -> []))
+    | LL.For_loop { index; body; _ } ->
+        index :: (match strip (LL.flat_lines [ body ]) with [ single ] -> path single | _ -> [])
     | LL.If { body; _ } -> path body
     | _ -> []
   in
@@ -102,11 +102,9 @@ let composed_schedule ~a ~b (opt : LL.optimized) : Sched.schedule =
   [ sp_i; sp_k ]
   (* i_o i_i j k_o k_i -> k_o i_o i_i j k_i (B~ packs at k_o, outside the row blocks). *)
   @ sink j [ k_o ]
-  @ sink i_i [ k_o ]
-  @ sink i_o [ k_o ]
+  @ sink i_i [ k_o ] @ sink i_o [ k_o ]
   @ [ stage b [ k_i; j ]; stage a [ i_i; k_i ] ]
-  @
-  if on_cpu then [ fst (Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1) ] else []
+  @ if on_cpu then [ fst (Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1) ] else []
 
 let run_composed ~name ~a ~b (out : Tensor.t) =
   let comp = named name (Train.forward out) in
@@ -145,21 +143,22 @@ let () =
       let count_sub sub =
         String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
       in
-      (* Two plain local tile arrays; on the C backends both operand pointers of the register
-         tiling point into them (the accumulator streams from the real output). *)
+      (* Two plain local tile arrays; on the C backends both operand pointers of the register tiling
+         point into them (the accumulator streams from the real output). *)
       p "packed tiles feed the register-tiled micro-kernel"
         (count_sub "float tile_" = 2
         && (not (has "threadgroup float tile_"))
         && (not (has "__shared__"))
         &&
         if on_cpu then
-          has "Tile_mma register tiling" && count_sub "__ = (tile_" = 2
+          has "Tile_mma register tiling"
+          && count_sub "__ = (tile_" = 2
           && not (has "Tile_mma register tiling: 0x0")
         else not (has "tmma_")));
 
-  (* === Transposed B (the layout the register tiling declines whole-triple): the packing
-     normalizes it — [tile_loops = [k_i; j]] packs B~ k-major, so [Tensorize] sees [tb = false]
-     and the register tiling fires. === *)
+  (* === Transposed B (the layout the register tiling declines whole-triple): the packing normalizes
+     it — [tile_loops = [k_i; j]] packs B~ k-major, so [Tensorize] sees [tb = false] and the
+     register tiling fires. === *)
   let mtav = Array.init (n * n) ~f:(fun x -> Float.of_int (x % 7) *. 0.5) in
   let mtbv = Array.init (n * n) ~f:(fun x -> Float.of_int (x % 11) -. 5.) in
   let mta = TDSL.ndarray mtav ~label:[ "mta" ] ~output_dims:[ n; n ] () in
@@ -245,10 +244,7 @@ let () =
       Sched.Stage { source; tile_loops; shared = false; cooperative = None; hoisted = false }
     in
     let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1 in
-    [ ez; sp_zi; sp_i; sp_k ]
-    @ sink j [ k_o ]
-    @ sink i_i [ k_o ]
-    @ sink i_o [ k_o ]
+    [ ez; sp_zi; sp_i; sp_k ] @ sink j [ k_o ] @ sink i_i [ k_o ] @ sink i_o [ k_o ]
     @ [ stage mb.Tensor.value [ k_i; j ]; stage ma.Tensor.value [ i_i; k_i ]; tz ]
   in
   let transform opt = if on_cpu then Sched.apply (par_packed_schedule opt) opt else opt in
@@ -268,8 +264,7 @@ let () =
       let has s = String.is_substring src ~substring:s in
       p "parallel packed composition renders pool-parallel with per-chunk tiles"
         (if on_cpu then
-           has_parallel_construct src
-           && has "Pool-backed Grid rendering"
+           has_parallel_construct src && has "Pool-backed Grid rendering"
            && has "Tile_mma register tiling"
            &&
            (* The A~ tile is declared per chunk, inside the parallel construct. *)
@@ -279,16 +274,14 @@ let () =
                   (String.substr_index src ~pattern:"dispatch_apply")
                   (String.substr_index src ~pattern:"#pragma omp parallel for"))
            in
-           List.exists
-             (String.substr_index_all src ~may_overlap:false ~pattern:"float tile_")
+           List.exists (String.substr_index_all src ~may_overlap:false ~pattern:"float tile_")
              ~f:(fun pos -> pos > par_pos)
          else not (has "tmma_"))
 
-(* === Grid + hoisted-pack composition (autotune's [sk_grid && sk_hoist] seeds, [bn = 0]): Grid
-   row blocks over the packed pipeline with only the hoistable B operand packed (link-time
-   constant-pool panel) and A read in place — no in-kernel tile writes, so the Grid split
-   pool-parallelizes with the Grid loop outermost. CPU-only schedule; identity transform
-   elsewhere. === *)
+(* === Grid + hoisted-pack composition (autotune's [sk_grid && sk_hoist] seeds, [bn = 0]): Grid row
+   blocks over the packed pipeline with only the hoistable B operand packed (link-time constant-pool
+   panel) and A read in place — no in-kernel tile writes, so the Grid split pool-parallelizes with
+   the Grid loop outermost. CPU-only schedule; identity transform elsewhere. === *)
 let () =
   let gav = Array.init (n * n) ~f:(fun x -> Float.of_int (x % 19) *. 0.125) in
   let gbv = Array.init (n * n) ~f:(fun x -> Float.of_int (x % 23) -. 11.) in
@@ -310,9 +303,7 @@ let () =
     let sp_i, _, i_i = Sched.split ~axis:i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
     let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
     let tz, _ = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1 in
-    [ ez; sp_zi; sp_i; sp_k ]
-    @ sink j [ k_o ]
-    @ sink i_i [ k_o ]
+    [ ez; sp_zi; sp_i; sp_k ] @ sink j [ k_o ] @ sink i_i [ k_o ]
     @ [
         Sched.Stage
           {
@@ -342,7 +333,6 @@ let () =
       let has s = String.is_substring src ~substring:s in
       p "grid + hoisted-pack renders pool-parallel with no in-kernel tile writes"
         (if on_cpu then
-           has_parallel_construct src
-           && has "Tile_mma register tiling" && has "packed_gb"
+           has_parallel_construct src && has "Tile_mma register tiling" && has "packed_gb"
            && not (has "float tile_")
          else not (has "tmma_"))

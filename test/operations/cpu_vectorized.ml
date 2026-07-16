@@ -2,18 +2,17 @@
    docs/proposals/watch-ocannl-README-md-347818d3.md): executed parity of vector-rendered kernels
    against their serial twins, plus structural checks on the generated source.
 
-   Covered here:
-   - A plain [Retype ~ty:Vectorized] of the innermost loop of an elementwise mul-add kernel, with
-     an extent that is not a lane multiple (517), so the serial remainder loop executes.
+   Covered here: - A plain [Retype ~ty:Vectorized] of the innermost loop of an elementwise mul-add
+   kernel, with an extent that is not a lane multiple (517), so the serial remainder loop executes.
    - [Split] then [Retype] of the inner loop: the store/load index vectors carry an [Affine] last
-     component (factor * outer + inner), exercising the coefficient-1 contiguity rule.
+   component (factor * outer + inner), exercising the coefficient-1 contiguity rule.
 
    On GPU backends (gh-ocannl-463) eligible loops render as 128-bit packed loads/stores
-   ([reinterpret_cast] of the aligned pack structs, llm.c's Packed128) instead of vector
-   extensions. The 517-column case is ineligible there — a 517-wide last dimension breaks the
-   lane-alignment guarantee — and renders serially, while the split 512-column case is eligible
-   (the [Affine] coefficient 8 and last dimension 512 are lane multiples). Every printed boolean
-   holds on every backend. *)
+   ([reinterpret_cast] of the aligned pack structs, llm.c's Packed128) instead of vector extensions.
+   The 517-column case is ineligible there — a 517-wide last dimension breaks the lane-alignment
+   guarantee — and renders serially, while the split 512-column case is eligible (the [Affine]
+   coefficient 8 and last dimension 512 are lane multiples). Every printed boolean holds on every
+   backend. *)
 
 open Base
 open Ocannl
@@ -42,8 +41,7 @@ let named name (comp : Asgns.comp) : Asgns.comp =
 let rec innermost_loop (llc : LL.t) : Ir.Indexing.symbol option =
   let strip stmts = List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true) in
   match llc with
-  | LL.Seq (a, b) -> (
-      match innermost_loop a with Some r -> Some r | None -> innermost_loop b)
+  | LL.Seq (a, b) -> ( match innermost_loop a with Some r -> Some r | None -> innermost_loop b)
   | LL.For_loop { index; body; _ } -> (
       match strip (LL.flat_lines [ body ]) with
       | [ single ] -> ( match innermost_loop single with Some r -> Some r | None -> Some index)

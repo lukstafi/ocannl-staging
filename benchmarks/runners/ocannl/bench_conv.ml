@@ -1,7 +1,7 @@
-(* OCANNL conv runner: LeNet-5 with valid convolutions, built from the idiomatic nn_blocks
-   pieces (conv2d ~use_padding:false, max_pool2d, mlp_layer). Fixture weights are injected
-   into the block-created inline params via Context.set_values, matched by debug-name tokens
-   (see Bench_harness.inject). Layouts documented in gen_fixtures.py build_conv. *)
+(* OCANNL conv runner: LeNet-5 with valid convolutions, built from the idiomatic nn_blocks pieces
+   (conv2d ~use_padding:false, max_pool2d, mlp_layer). Fixture weights are injected into the
+   block-created inline params via Context.set_values, matched by debug-name tokens (see
+   Bench_harness.inject). Layouts documented in gen_fixtures.py build_conv. *)
 
 open Base
 open Ocannl
@@ -82,8 +82,8 @@ let () =
   let ctx, routine =
     if tune then
       let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
-      (* Placement A/B: tune the default (virtual + promotion) graph and the materialize-all
-         graph, keep the measured winner. *)
+      (* Placement A/B: tune the default (virtual + promotion) graph and the materialize-all graph,
+         keep the measured winner. *)
       Train.tune_placements ~rounds:0 ~timing_ctx:scratch ctx batch_loss step_comp bindings
     else Context.compile ctx step_comp bindings
   in

@@ -1,10 +1,9 @@
 (* OCANNL runner for the cross-framework benchmark suite (see benchmarks/README.md).
 
-   Reads a self-describing safetensors fixture (initial weights, dataset, and hyperparameters in
-   the metadata map), builds an n-layer relu MLP with softmax cross-entropy loss, and trains with
-   plain SGD. Prints a single JSON result line on stdout: parity losses for the first
-   [parity_steps] steps, then steady-state per-step wall times (per-step synced percentiles and
-   queued mean).
+   Reads a self-describing safetensors fixture (initial weights, dataset, and hyperparameters in the
+   metadata map), builds an n-layer relu MLP with softmax cross-entropy loss, and trains with plain
+   SGD. Prints a single JSON result line on stdout: parity losses for the first [parity_steps]
+   steps, then steady-state per-step wall times (per-step synced percentiles and queued mean).
 
    The backend is selected the usual OCANNL way (e.g. [--ocannl_backend=metal]). Environment:
    BENCH_FIXTURE is the fixture path; BENCH_TUNE=1 enables the autotuned variant
@@ -80,8 +79,8 @@ let () =
         let last = Int.equal idx (n_layers - 1) in
         let open TDSL.O in
         let z = b + (w * acc) in
-        (* Explicit variant: store pre-activations for the backward pass (what the other
-           frameworks do) instead of the default fully-Virtual recompute-in-backward. *)
+        (* Explicit variant: store pre-activations for the backward pass (what the other frameworks
+           do) instead of the default fully-Virtual recompute-in-backward. *)
         if materialize then Train.set_materialized z.Tensor.value;
         if last then z else relu z)
   in
@@ -108,21 +107,18 @@ let () =
               "tune arm: cache_hit=%b timed=%d failed=%d rounds=%d sketch=%d fissioned=%b \
                baseline_ms=%.4f best_ms=%.4f\n\
                %!"
-              r.cache_hit r.candidates_timed r.candidates_failed r.rounds_run
-              r.sketch_candidates r.fissioned r.baseline_ms r.best_ms)
+              r.cache_hit r.candidates_timed r.candidates_failed r.rounds_run r.sketch_candidates
+              r.fissioned r.baseline_ms r.best_ms)
     | _ -> None
   in
   let ctx, routine =
     if tune then
       let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
-      Train.tune_placements ?report ~rounds:0 ~timing_ctx:scratch ctx batch_loss step_comp
-        bindings
+      Train.tune_placements ?report ~rounds:0 ~timing_ctx:scratch ctx batch_loss step_comp bindings
     else Context.compile ctx step_comp bindings
   in
   let compile_s = Unix.gettimeofday () -. t0 in
-  let batch_ref =
-    Option.map batch_n ~f:(fun bn -> IDX.find_exn (Context.bindings routine) bn)
-  in
+  let batch_ref = Option.map batch_n ~f:(fun bn -> IDX.find_exn (Context.bindings routine) bn) in
   let step_count = ref 0 in
   let run_step () =
     Option.iter batch_ref ~f:(fun r -> r := !step_count % n_batches);
@@ -130,21 +126,21 @@ let () =
     Int.incr step_count
   in
   let open Operation.At in
-  (if debug then (
-     run_step ();
-     List.iteri params ~f:(fun idx (_w, b) ->
-         let dout = (Ir.Ndarray.dims (St.to_ndarray st (Printf.sprintf "b%d" (idx + 1)))).(0) in
-         let k = min dout 4 in
-         Stdio.printf "b%d grad:" (idx + 1);
-         for j = 0 to k - 1 do
-           Stdio.printf " %.9g" (ctx, b).@%[j]
-         done;
-         Stdio.printf "  value after 1 step:";
-         for j = 0 to k - 1 do
-           Stdio.printf " %.9g" (ctx, b).@[j]
-         done;
-         Stdio.printf "\n");
-     Stdlib.exit 0));
+  if debug then (
+    run_step ();
+    List.iteri params ~f:(fun idx (_w, b) ->
+        let dout = (Ir.Ndarray.dims (St.to_ndarray st (Printf.sprintf "b%d" (idx + 1)))).(0) in
+        let k = min dout 4 in
+        Stdio.printf "b%d grad:" (idx + 1);
+        for j = 0 to k - 1 do
+          Stdio.printf " %.9g" (ctx, b).@%[j]
+        done;
+        Stdio.printf "  value after 1 step:";
+        for j = 0 to k - 1 do
+          Stdio.printf " %.9g" (ctx, b).@[j]
+        done;
+        Stdio.printf "\n");
+    Stdlib.exit 0);
   let losses =
     Array.init parity_steps ~f:(fun _ ->
         run_step ();
@@ -154,8 +150,8 @@ let () =
     run_step ()
   done;
   Context.sync ctx;
-  (* Monotonic high-resolution clock (not [Unix.gettimeofday]): on Windows the latter ticks at
-     ~1 ms, which floors sub-millisecond step times to 0 (see bench_harness.ml). *)
+  (* Monotonic high-resolution clock (not [Unix.gettimeofday]): on Windows the latter ticks at ~1
+     ms, which floors sub-millisecond step times to 0 (see bench_harness.ml). *)
   let elapsed_ms c0 = Mtime.Span.to_float_ns (Mtime_clock.count c0) /. 1e6 in
   let synced =
     Array.init timed_steps ~f:(fun _ ->

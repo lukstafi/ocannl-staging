@@ -34,19 +34,18 @@ let get_scope =
     an ordinary for-loop. [Grid] / [Workgroup] bind the loop index to a GPU grid / workgroup (block,
     threadgroup) hardware index instead of looping; [Workgroup_reduce] is a [Workgroup] axis
     participating in a workgroup-cooperative reduction (see the contract below). [Unrolled] is
-    emitted as the repeated body with
-    substituted constants. [Vectorized] renders as a serial loop annotated with the backend's
-    vectorization pragmas when it provides them (gh-ocannl-164; a plain serial loop otherwise) —
-    like the hardware kinds, the annotating pass asserts iteration independence. Hardware slots are
-    positional: among a kernel's loops of one kind, the innermost binds [.x], then [.y], [.z].
-    Annotated loops must have [from_ = 0] and iterations with no cross-iteration dependencies.
-    [Workgroup_reduce] is the labelled exception; its body must either stage its communication
-    explicitly through workgroup-shared nodes and barriers (rendered by binding the index like
-    [Workgroup]), or be a single accumulation statement [acc = op(acc, contrib)] over an
-    associative-commutative [op] with the accumulator's indices free of the loop index — the
-    renderer then owns the communication: warp/simdgroup shuffles on GPU backends
-    (gh-ocannl-462), the plain serial loop on CPU backends. Like [Vectorized], the annotation
-    licenses reassociating the (floating-point) reduction. *)
+    emitted as the repeated body with substituted constants. [Vectorized] renders as a serial loop
+    annotated with the backend's vectorization pragmas when it provides them (gh-ocannl-164; a plain
+    serial loop otherwise) — like the hardware kinds, the annotating pass asserts iteration
+    independence. Hardware slots are positional: among a kernel's loops of one kind, the innermost
+    binds [.x], then [.y], [.z]. Annotated loops must have [from_ = 0] and iterations with no
+    cross-iteration dependencies. [Workgroup_reduce] is the labelled exception; its body must either
+    stage its communication explicitly through workgroup-shared nodes and barriers (rendered by
+    binding the index like [Workgroup]), or be a single accumulation statement
+    [acc = op(acc, contrib)] over an associative-commutative [op] with the accumulator's indices
+    free of the loop index — the renderer then owns the communication: warp/simdgroup shuffles on
+    GPU backends (gh-ocannl-462), the plain serial loop on CPU backends. Like [Vectorized], the
+    annotation licenses reassociating the (floating-point) reduction. *)
 type axis_type = Serial | Grid | Workgroup | Workgroup_reduce | Unrolled | Vectorized
 [@@deriving sexp, compare, equal]
 
@@ -136,8 +135,9 @@ type t =
           the tnode dims. With [ta] (resp. [tb]) the stored layout of [a] (resp. [b]) is the
           transpose of its role — emissions load tiles with the hardware transpose flag
           ([simdgroup_load]'s [transpose_matrix], wmma's [col_major]) and swap the tile-offset
-          arithmetic; the scalar [fallback] carries the original indexing and is unaffected. Backends without an MMA hook render [fallback] once per simdgroup, under
-          an [if (lane == 0)] guard — the renderer's obligation, keyed off [lane]. The statement
+          arithmetic; the scalar [fallback] carries the original indexing and is unaffected.
+          Backends without an MMA hook render [fallback] once per simdgroup, under an
+          [if (lane == 0)] guard — the renderer's obligation, keyed off [lane]. The statement
           validates like {!Workgroup_barrier} (it is one for code-motion and divergence purposes)
           plus a write of [d] for the coverage rule. *)
 [@@deriving sexp_of, equal]
@@ -267,16 +267,16 @@ type traced_array = {
   mutable has_non_one_hot_setter : bool;
   mutable is_range_producer : bool;
   mutable inline_reduction_extent : int;
-      (** The largest product of trip counts of loops that enclose one of the node's setters
-          without appearing in its indices (i.e. reduction loops). Inlining the computation
-          replays these loops at every read site, so large extents make virtualization
-          pathological; see [virtualize_max_inline_reduction]. *)
+      (** The largest product of trip counts of loops that enclose one of the node's setters without
+          appearing in its indices (i.e. reduction loops). Inlining the computation replays these
+          loops at every read site, so large extents make virtualization pathological; see
+          [virtualize_max_inline_reduction]. *)
   mutable read_by_other : bool;
       (** True when some statement other than the node's own setters reads the node. Unlike
           [accesses], same-cell reads count (they are exempt from the visit cap), while a setter's
-          own read-modify-write does not. A node never read in the routine has no inlining cost,
-          so the recompute-cost guard must not materialize it (it may instead be dropped as a
-          committed virtual computation, or inlined by a later routine in the lineage). *)
+          own read-modify-write does not. A node never read in the routine has no inlining cost, so
+          the recompute-cost guard must not materialize it (it may instead be dropped as a committed
+          virtual computation, or inlined by a later routine in the lineage). *)
 }
 [@@deriving sexp_of]
 
@@ -537,9 +537,9 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits llc 
             "BUG: Concat index encountered during virtualization - should have been eliminated \
              during lowering")
   in
-  (* [loop_ranges] maps each enclosing loop's index symbol to its full trip count; at a setter,
-     the product over symbols absent from the LHS indices is the recompute cost (per read site)
-     of inlining that setter's computation. *)
+  (* [loop_ranges] maps each enclosing loop's index symbol to its full trip count; at a setter, the
+     product over symbols absent from the LHS indices is the recompute cost (per read site) of
+     inlining that setter's computation. *)
   let reduction_extent loop_ranges idcs =
     Map.fold loop_ranges ~init:1 ~f:(fun ~key ~data acc ->
         if Array.exists idcs ~f:(axis_index_mentions_symbol key) then acc else acc * data)
@@ -698,20 +698,21 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits llc 
         loop llv2
     | Unop (_, (llsc, _)) -> loop llsc
   in
-  loop_proc ~first_visit:true ~loop_ranges:(Map.empty (module Indexing.Symbol)) Indexing.empty_env
-    llc;
+  loop_proc ~first_visit:true
+    ~loop_ranges:(Map.empty (module Indexing.Symbol))
+    Indexing.empty_env llc;
   Hashtbl.iter traced_store ~f:(fun traced ->
       let tn = traced.tn in
       if
         virtualize_settings.inline_scalar_constexprs && traced.is_scalar_constexpr
         && not (Tn.Placements.known_non_virtual plc tn)
       then Tn.Placements.update plc tn Virtual 40;
-      (* Recompute-cost guard: inlining a computation replays its reduction loops (loops enclosing
-         a setter without appearing in its indices) at every read site, and the cost multiplies
+      (* Recompute-cost guard: inlining a computation replays its reduction loops (loops enclosing a
+         setter without appearing in its indices) at every read site, and the cost multiplies
          through chains of virtual consumers -- reads of the consumers replay the producer's
-         reduction too. Cap the tolerated extent. One-hot selector producers are exempt like for
-         the visit cap: they must stay virtual so [rewrite_one_hot_reductions] can fire (the
-         rewrite itself removes the recompute cost). *)
+         reduction too. Cap the tolerated extent. One-hot selector producers are exempt like for the
+         visit cap: they must stay virtual so [rewrite_one_hot_reductions] can fire (the rewrite
+         itself removes the recompute cost). *)
       if
         virtualize_settings.max_inline_reduction >= 0
         && traced.inline_reduction_extent > virtualize_settings.max_inline_reduction
@@ -1726,12 +1727,11 @@ and substitute_proc ~var ~value llc =
 
     Phase A of docs/proposals/interval-analysis-scalar-t.md: [interval_of] computes machine-value
     bounds of a scalar expression as consumed at a given precision, threading a total symbol
-    environment (every in-scope symbol comes from a [For_loop] or a static binding) -- the
-    abstract twin of [visit_llc]'s concrete [symbol -> int] env. Results carry the set of tensor
-    nodes whose {e proposed} (unsettled) bounds candidates were consulted; any rewrite that
-    consumes a result must settle those sources ({!Tnode.settle_bounds}, binding constraint 2) --
-    facts derived purely from precisions and loop extents have no sources and need no settlement.
-*)
+    environment (every in-scope symbol comes from a [For_loop] or a static binding) -- the abstract
+    twin of [visit_llc]'s concrete [symbol -> int] env. Results carry the set of tensor nodes whose
+    {e proposed} (unsettled) bounds candidates were consulted; any rewrite that consumes a result
+    must settle those sources ({!Tnode.settle_bounds}, binding constraint 2) -- facts derived purely
+    from precisions and loop extents have no sources and need no settlement. *)
 
 type interval_result = { ival : Interval.t; srcs : Set.M(Tn).t }
 
@@ -1740,8 +1740,8 @@ let no_srcs = Set.empty (module Tn)
 (* Physical-identity memo keyed per expression node ([Stdlib.Hashtbl.hash] is total, including on
    the closures inside [Tnode.t]; physically equal keys are structurally equal, so the hash is
    consistent). One table per symbol-environment scope, shared across queries within the scope
-   (binding constraint 8); the same subtree can be physically shared under different loop nests
-   with different intervals, so the memo must not outlive its scope. *)
+   (binding constraint 8); the same subtree can be physically shared under different loop nests with
+   different intervals, so the memo must not outlive its scope. *)
 module Phys_memo = Stdlib.Hashtbl.Make (struct
   type t = scalar_t
 
@@ -1785,24 +1785,21 @@ let ienv_extend ienv sym ~from_ ~to_ =
   }
 
 (* Exact integral intervals of index expressions; machine validity (the unsigned index precision,
-   binding constraint 7's crosses-zero widening) is applied by [interval_of] via
-   [Interval.at_prec (Ops.index_prec ())] at the [Embed_index] boundary. *)
+   binding constraint 7's crosses-zero widening) is applied by [interval_of] via [Interval.at_prec
+   (Ops.index_prec ())] at the [Embed_index] boundary. *)
 let interval_of_index ienv (idx : Indexing.axis_index) : Interval.t =
   match idx with
   | Indexing.Fixed_idx i -> Interval.of_int i
   | Iterator s -> interval_of_symbol ienv s
   | Sub_axis -> Interval.of_int 0
   | Affine { symbols; offset } ->
-      List.fold symbols
-        ~init:(Interval.of_int offset)
-        ~f:(fun acc (coeff, s) ->
+      List.fold symbols ~init:(Interval.of_int offset) ~f:(fun acc (coeff, s) ->
           Interval.add acc (Interval.mul (Interval.of_int coeff) (interval_of_symbol ienv s)))
   | Concat _ -> Interval.top (* Eliminated during lowering; conservative if ever reached. *)
 
-(* Bounds of a tensor-node read: the machine range of the stored precision, narrowed by the
-   node's bounds candidate when one exists. The node becomes a source only when the candidate
-   actually narrows -- folds justified by the dtype range alone are static facts requiring no
-   settlement. *)
+(* Bounds of a tensor-node read: the machine range of the stored precision, narrowed by the node's
+   bounds candidate when one exists. The node becomes a source only when the candidate actually
+   narrows -- folds justified by the dtype range alone are static facts requiring no settlement. *)
 let interval_of_node ~prec (tn : Tn.t) : interval_result =
   let stored_prec = Lazy.force tn.Tn.prec in
   let dtype = Interval.dtype_range stored_prec in
@@ -1816,13 +1813,13 @@ let interval_of_node ~prec (tn : Tn.t) : interval_result =
   in
   { ival = Interval.at_prec prec ival; srcs }
 
-(** [interval_of ~ienv ~prec llsc] bounds the machine value of [llsc] evaluated at (converted
-    into) precision [prec] -- matching [C_syntax.pp_scalar]'s convention that homogeneous
-    operations evaluate their arguments at the consumer's precision, while [Where] conditions
-    keep their annotation precision. Every rule pipes its real-arithmetic result through
-    [Interval.at_prec prec], accounting for wrapping/rounding of the precision actually computed
-    in (binding constraint 5). Currently-unhandled operations return top explicitly (exhaustive
-    match: adding an op to [Ops] forces a conscious interval-rule decision). *)
+(** [interval_of ~ienv ~prec llsc] bounds the machine value of [llsc] evaluated at (converted into)
+    precision [prec] -- matching [C_syntax.pp_scalar]'s convention that homogeneous operations
+    evaluate their arguments at the consumer's precision, while [Where] conditions keep their
+    annotation precision. Every rule pipes its real-arithmetic result through
+    [Interval.at_prec prec], accounting for wrapping/rounding of the precision actually computed in
+    (binding constraint 5). Currently-unhandled operations return top explicitly (exhaustive match:
+    adding an op to [Ops] forces a conscious interval-rule decision). *)
 let rec interval_of ~ienv ~(prec : Ops.prec) (llsc : scalar_t) : interval_result =
   let cached =
     match Phys_memo.find_opt ienv.memo llsc with
@@ -1881,8 +1878,7 @@ and interval_of_uncached ~ienv ~(prec : Ops.prec) (llsc : scalar_t) : interval_r
           { ival = at (Interval.join Interval.false_ b.ival); srcs = b.srcs }
       | Ops.Cmplt -> cmp Interval.cmplt_decides
       | Ops.Cmpeq -> cmp Interval.cmpeq_decides
-      | Ops.Cmpne ->
-          cmp (fun a b -> Option.map (Interval.cmpeq_decides a b) ~f:not)
+      | Ops.Cmpne -> cmp (fun a b -> Option.map (Interval.cmpeq_decides a b) ~f:not)
       | Ops.And ->
           let a = r1 () and b = r2 () in
           if Interval.definitely_false a.ival then decided ~srcs:a.srcs false
@@ -1901,8 +1897,8 @@ and interval_of_uncached ~ienv ~(prec : Ops.prec) (llsc : scalar_t) : interval_r
   | Ternop (op, ((v1, p1) as _a1), (v2, _), (v3, _)) -> (
       match op with
       | Ops.Where ->
-          (* Heterogeneous: the condition is evaluated at its annotation precision. Branch
-             selection propagates the condition's sources (binding constraint 2). *)
+          (* Heterogeneous: the condition is evaluated at its annotation precision. Branch selection
+             propagates the condition's sources (binding constraint 2). *)
           let c = interval_of ~ienv ~prec:p1 v1 in
           if Interval.definitely_true c.ival then
             let t = interval_of ~ienv ~prec v2 in
@@ -1971,9 +1967,9 @@ let try_interval_fold ~ienv ~prec (llsc : scalar_t) : scalar_t option =
   | _ -> None
 
 let simplify_llc static_indices llc =
-  (* Implements top-down rewriting. The interval environment [ienv] tracks every in-scope
-     symbol's bounds (seeded from the static indices, extended per [For_loop]) for the
-     interval-driven comparison folds. *)
+  (* Implements top-down rewriting. The interval environment [ienv] tracks every in-scope symbol's
+     bounds (seeded from the static indices, extended per [For_loop]) for the interval-driven
+     comparison folds. *)
   let rec loop_proc ~ienv (llc : t) : t =
     let loop = loop_proc ~ienv in
     let loop_scalar = loop_scalar ~ienv in
@@ -2015,8 +2011,8 @@ let simplify_llc static_indices llc =
     | Comment _ -> llc
     | Staged_compilation _ -> llc
     | Workgroup_barrier -> llc
-    (* The base indices and block extents are already static; only the scalar fallback benefits
-       from simplification. The statement itself is never folded. *)
+    (* The base indices and block extents are already static; only the scalar fallback benefits from
+       simplification. The statement itself is never folded. *)
     | Tile_mma ({ fallback; _ } as tm) -> Tile_mma { tm with fallback = loop fallback }
     | If { cond = c, cprec; body } -> (
         (* Construct-then-fold (axis-types proposal §2): a guard whose condition the interval
@@ -2166,7 +2162,7 @@ let simplify_llc static_indices llc =
     | Binop (Add, llv3, (Binop (Mul, llv1, llv2), prec12)) ->
         (* TODO: this is tentative. *)
         loop_scalar @@ (Ternop (FMA, llv1, llv2, llv3), Ops.promote_prec prec12 prec)
-    | Binop (op, llv1, llv2) -> (
+    | Binop (op, llv1, llv2) ->
         let v1 = loop_scalar llv1 in
         let v2 = loop_scalar llv2 in
         let result = (Binop (op, v1, v2), prec) in
@@ -2175,13 +2171,13 @@ let simplify_llc static_indices llc =
           match try_interval_fold ~ienv ~prec (fst result) with
           | Some c -> (c, prec)
           | None -> result
-        else loop_scalar result)
+        else loop_scalar result
     | Ternop (Where, (Binop (Cmpeq, (Embed_index a, _), (Embed_index b, _)), _), then_, _)
       when Indexing.equal_axis_index a b ->
         (* gh-133 Stage A: a repeated-symbol equality guard whose two embedded indices are
            syntactically identical is always taken; fold it to its then-branch. *)
         loop_scalar then_
-    | Ternop (op, llv1, llv2, llv3) -> (
+    | Ternop (op, llv1, llv2, llv3) ->
         let v1 = loop_scalar llv1 in
         let v2 = loop_scalar llv2 in
         let v3 = loop_scalar llv3 in
@@ -2200,7 +2196,7 @@ let simplify_llc static_indices llc =
                 loop_scalar v3)
               else result
           | _ -> result
-        else loop_scalar result)
+        else loop_scalar result
     | Unop (Identity, llsc) -> loop_scalar llsc
     | Unop (op, (Constant c, _)) -> (Constant (Ops.interpret_unop op c), prec)
     | Unop (op, llsc) ->
@@ -2301,8 +2297,7 @@ let cse_equal_scalar s1 s2 =
     | None ->
         (* Free scope id: no renaming -- requires the identical id, which must not be claimed as a
            bound id of the other tree. *)
-        (not (Hashtbl.mem scope_renaming_rev id2.scope_id))
-        && Int.equal id1.scope_id id2.scope_id
+        (not (Hashtbl.mem scope_renaming_rev id2.scope_id)) && Int.equal id1.scope_id id2.scope_id
   in
   let sym_bind (s1 : Indexing.symbol) (s2 : Indexing.symbol) =
     match (Hashtbl.find sym_renaming s1, Hashtbl.find sym_renaming_rev s2) with
@@ -2333,7 +2328,7 @@ let cse_equal_scalar s1 s2 =
   let orig_sym_equal (s1 : Indexing.symbol) (s2 : Indexing.symbol) =
     match Hashtbl.find sym_renaming s1 with
     | Some mapped -> Indexing.equal_symbol mapped s2
-    | None ->
+    | None -> (
         (not (Hashtbl.mem sym_renaming_rev s2))
         &&
         match (Hashtbl.find orig_sym_renaming s1, Hashtbl.find orig_sym_renaming_rev s2) with
@@ -2342,7 +2337,7 @@ let cse_equal_scalar s1 s2 =
         | None, None ->
             Hashtbl.set orig_sym_renaming ~key:s1 ~data:s2;
             Hashtbl.set orig_sym_renaming_rev ~key:s2 ~data:s1;
-            true
+            true)
   in
   let idx_equal_gen sym_equal (i1 : Indexing.axis_index) (i2 : Indexing.axis_index) =
     match (i1, i2) with
@@ -2688,8 +2683,10 @@ let reads_scope_before_set (target : scope_id) (body : t) : bool =
         | `Written -> if from_ <= to_ then `Written else `Neither
         | `Neither -> `Neither)
     | If { cond = c, _; body } -> (
-        (* A guarded write is never a definite write. *)
-        if scalar_has_read c then `Read
+        if
+          (* A guarded write is never a definite write. *)
+          scalar_has_read c
+        then `Read
         else match scan body with `Read -> `Read | `Written | `Neither -> `Neither)
   in
   match scan body with `Written -> false | `Read | `Neither -> true
@@ -2838,16 +2835,16 @@ let slot_max_extent axes kind slot =
   List.fold axes ~init:1 ~f:(fun m a ->
       if Poly.equal a.ha_kind kind && a.ha_slot = slot then max m a.ha_extent else m)
 
-(** Launch dimensions: per-slot maximum extents over the kernel's annotated loops ([.x], [.y],
-    [.z]; all-1s for all-[Serial] code). Smaller-extent sibling bindings are wrapped in [If] guards
-    by {!guard_annotated_extents}. *)
+(** Launch dimensions: per-slot maximum extents over the kernel's annotated loops ([.x], [.y], [.z];
+    all-1s for all-[Serial] code). Smaller-extent sibling bindings are wrapped in [If] guards by
+    {!guard_annotated_extents}. *)
 let launch_dims (llc : t) : launch_dims =
   let axes = hardware_axes llc in
   let grid = [| 1; 1; 1 |] and block = [| 1; 1; 1 |] in
   List.iter axes ~f:(fun a ->
-      if a.ha_slot < 3 then (
+      if a.ha_slot < 3 then
         let arr = match a.ha_kind with `Grid -> grid | `Workgroup -> block in
-        arr.(a.ha_slot) <- max arr.(a.ha_slot) a.ha_extent));
+        arr.(a.ha_slot) <- max arr.(a.ha_slot) a.ha_extent);
   { grid; block }
 
 (* Whether any [Local_scope] body within [llc]'s scalars contains a hardware-annotated loop. *)
@@ -2880,11 +2877,11 @@ let rec scalar_scopes_have_annotated (llc : t) : bool =
 (** Backend-independent well-formedness of hardware annotations (axis-types proposal §2). A no-op
     for all-[Serial] code. Raises [Invalid_argument] on: annotated loops with [from_ <> 0]; more
     than 3 slots of one kind; annotated loops inside [Local_scope] bodies; a kernel containing
-    barriers whose same-slot workgroup extents differ (a barrier under divergent control flow is
-    UB) or with a barrier lexically under an [If] guard; and writes to materialized tensor nodes
-    lexically outside all annotated loops (every hardware thread would execute them, racing with
-    the annotated writes — there is no grid-wide synchronization). Cannot prove iteration
-    independence; that is the annotating pass's obligation. *)
+    barriers whose same-slot workgroup extents differ (a barrier under divergent control flow is UB)
+    or with a barrier lexically under an [If] guard; and writes to materialized tensor nodes
+    lexically outside all annotated loops (every hardware thread would execute them, racing with the
+    annotated writes — there is no grid-wide synchronization). Cannot prove iteration independence;
+    that is the annotating pass's obligation. *)
 let validate_parallel plc (llc : t) : unit =
   let axes = hardware_axes llc in
   if not (List.is_empty axes) then (
@@ -2909,8 +2906,8 @@ let validate_parallel plc (llc : t) : unit =
                 invalid_arg
                   ("Low_level.validate_parallel: kernel contains barriers but workgroup extents \
                     differ at slot " ^ Int.to_string a.ha_slot
-                 ^ " (a barrier under divergent control flow is UB): "
-                  ^ Int.to_string a.ha_extent ^ " vs " ^ Int.to_string m)
+                 ^ " (a barrier under divergent control flow is UB): " ^ Int.to_string a.ha_extent
+                 ^ " vs " ^ Int.to_string m)
           | `Grid -> ());
       let rec no_guarded_barrier llc =
         match llc with
@@ -2930,13 +2927,12 @@ let validate_parallel plc (llc : t) : unit =
        annotated loops covering EVERY active (non-unit) hardware dimension -- a statement covering
        only some of them executes once per hardware index of each uncovered dimension, racing or
        repeating read-modify-write updates (PR #89 review). A whole-node [Zero_out] is never
-       distributed across threads by nesting, so in a multi-threaded kernel it is rejected
-       outright; distribute zeroing as ordinary per-element [Set]s instead. *)
+       distributed across threads by nesting, so in a multi-threaded kernel it is rejected outright;
+       distribute zeroing as ordinary per-element [Set]s instead. *)
     let pair_equal (k1, s1) (k2, s2) = Poly.equal k1 k2 && s1 = s2 in
     let active =
       List.filter_map axes ~f:(fun a ->
-          if slot_max_extent axes a.ha_kind a.ha_slot > 1 then Some (a.ha_kind, a.ha_slot)
-          else None)
+          if slot_max_extent axes a.ha_kind a.ha_slot > 1 then Some (a.ha_kind, a.ha_slot) else None)
       |> List.dedup_and_sort ~compare:Poly.compare
     in
     let slot_of_index = List.map axes ~f:(fun a -> (a.ha_index, (a.ha_kind, a.ha_slot))) in
@@ -2946,8 +2942,7 @@ let validate_parallel plc (llc : t) : unit =
       if (not (List.is_empty missing)) && Tn.Placements.is_materialized_force plc tn 160 then
         invalid_arg
           ("Low_level.validate_parallel: write to materialized node " ^ Tn.debug_name tn
-         ^ " is not nested under annotated loops covering all active hardware dimensions \
-            (missing: "
+         ^ " is not nested under annotated loops covering all active hardware dimensions (missing: "
           ^ String.concat ~sep:", " (List.map missing ~f:describe_pair)
           ^ "): every hardware index of an uncovered dimension executes it, racing or repeating \
              the update")
@@ -3003,9 +2998,9 @@ let validate_parallel plc (llc : t) : unit =
 
 (** Wraps the body of each hardware-annotated loop whose extent is smaller than its slot's launch
     dimension in an [If (index < extent)] guard, for the kinds [should_guard] selects (backends
-    binding the axis in hardware; the serial fallback iterates the true extent and needs no
-    guard). Construct-then-fold: extents are non-negative ints at the signed index width, so every
-    emitted conjunct is correct unfolded; the common equal-extent case emits nothing. *)
+    binding the axis in hardware; the serial fallback iterates the true extent and needs no guard).
+    Construct-then-fold: extents are non-negative ints at the signed index width, so every emitted
+    conjunct is correct unfolded; the common equal-extent case emits nothing. *)
 let guard_annotated_extents ~(should_guard : [ `Grid | `Workgroup ] -> bool) (llc : t) : t =
   let axes = hardware_axes llc in
   let iprec = Ops.index_prec () in
@@ -3549,14 +3544,14 @@ let rewrite_one_hot_reductions ?(static_indices = []) (llc : t) : t =
   in
   loop_proc ~ienv:(ienv_of_static_indices static_indices) llc
 
-(* Phase B v1 execution anchoring (interval-analysis proposal, binding constraint 3): every
-   tensor node written by compiled code has its bounds candidate pinned to top at lowering time,
-   BEFORE any interval consultation, so guard folds only ever rely on host-initialized,
-   never-device-written data -- sidestepping the writer-runs-never/-later/-repeatedly hazards and
-   read-modify-write cycles wholesale. Pinning a node whose bounds a previously-compiled reader
-   already settled (to a non-top interval) raises, as required: that reader's generated code
-   discharged an in-range guard the new writer could invalidate. Walks the unoptimized code so
-   writes that later become virtual are included (conservative). *)
+(* Phase B v1 execution anchoring (interval-analysis proposal, binding constraint 3): every tensor
+   node written by compiled code has its bounds candidate pinned to top at lowering time, BEFORE any
+   interval consultation, so guard folds only ever rely on host-initialized, never-device-written
+   data -- sidestepping the writer-runs-never/-later/-repeatedly hazards and read-modify-write
+   cycles wholesale. Pinning a node whose bounds a previously-compiled reader already settled (to a
+   non-top interval) raises, as required: that reader's generated code discharged an in-range guard
+   the new writer could invalidate. Walks the unoptimized code so writes that later become virtual
+   are included (conservative). *)
 let rec pin_device_written_bounds (llc : t) : unit =
   let pin tn = Tn.pin_bounds_top ~what:"compiled device write" tn in
   match llc with
@@ -3744,8 +3739,7 @@ let to_doc_cstyle ?name ?static_indices () llc =
         group (header ^^ body_doc ^^ break 1 ^^ string "}")
     | Workgroup_barrier -> string "workgroup_barrier;"
     | Tile_mma
-        { d = d_tn, d_idcs; a = a_tn, a_idcs; b = b_tn, b_idcs; ta; tb; m; n; k; lane; fallback }
-      ->
+        { d = d_tn, d_idcs; a = a_tn, a_idcs; b = b_tn, b_idcs; ta; tb; m; n; k; lane; fallback } ->
         let transposed t = if t then string "^T" else empty in
         let header =
           string (Printf.sprintf "tile_mma<%dx%dx%d>@" m n k)
@@ -3886,8 +3880,7 @@ let to_doc ?name ?static_indices () llc =
         group (header ^^ body_doc ^^ break 1 ^^ string "}")
     | Workgroup_barrier -> string "workgroup_barrier;"
     | Tile_mma
-        { d = d_tn, d_idcs; a = a_tn, a_idcs; b = b_tn, b_idcs; ta; tb; m; n; k; lane; fallback }
-      ->
+        { d = d_tn, d_idcs; a = a_tn, a_idcs; b = b_tn, b_idcs; ta; tb; m; n; k; lane; fallback } ->
         let transposed t = if t then string "^T" else empty in
         let header =
           string (Printf.sprintf "tile_mma<%dx%dx%d>@" m n k)

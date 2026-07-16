@@ -2,17 +2,17 @@
    scope): cache-sized tiling + operand packing for the C backends, built from Split / Swap /
    non-shared Stage optops and executed against the naive twin.
 
-   [mc = ma * mb] (32x32 times 32x32, 8x8x8 tiles): split each of i, j, k by 8 (all Serial —
-   nothing hardware-bound, so this schedule is legal on every backend and the Zero_out needs no
-   expansion), sink the intra-tile loops into the classic tiled i_o j_o k_o k_i i_i j_i order
-   (contiguous row-major access to mb and mc in the innermost loop), then pack both operand tiles
-   into contiguous stack scratch via [Stage ~shared:false] — Boehm's operand packing: a serial
-   copy nest at k_o, no barriers, tiles declared as plain per-routine local arrays. Tile sizes
-   divide the extents so the packing edge guards all fold away.
+   [mc = ma * mb] (32x32 times 32x32, 8x8x8 tiles): split each of i, j, k by 8 (all Serial — nothing
+   hardware-bound, so this schedule is legal on every backend and the Zero_out needs no expansion),
+   sink the intra-tile loops into the classic tiled i_o j_o k_o k_i i_i j_i order (contiguous
+   row-major access to mb and mc in the innermost loop), then pack both operand tiles into
+   contiguous stack scratch via [Stage ~shared:false] — Boehm's operand packing: a serial copy nest
+   at k_o, no barriers, tiles declared as plain per-routine local arrays. Tile sizes divide the
+   extents so the packing edge guards all fold away.
 
-   Runs on every backend (on GPUs it is just a 1x1 serial kernel); the structural expectations
-   below hold everywhere: two packed tile declarations without any shared-memory prefix, no
-   barriers, no guards. *)
+   Runs on every backend (on GPUs it is just a 1x1 serial kernel); the structural expectations below
+   hold everywhere: two packed tile declarations without any shared-memory prefix, no barriers, no
+   guards. *)
 
 open Base
 open Ocannl
@@ -25,7 +25,6 @@ module Asgns = Ir.Assignments
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p name b = Stdio.printf "%s: %b\n" name b
 let approx a b = Float.(abs (a - b) < 1e-3)
-
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
 let read_generated base_name =
@@ -36,13 +35,11 @@ let read_generated base_name =
   if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
 
 let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
-  let strip stmts =
-    List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true)
-  in
+  let strip stmts = List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true) in
   let rec path (llc : LL.t) : Ir.Indexing.symbol list =
     match llc with
-    | LL.For_loop { index; body; _ } -> (
-        index :: (match strip (LL.flat_lines [ body ]) with [ single ] -> path single | _ -> []))
+    | LL.For_loop { index; body; _ } ->
+        index :: (match strip (LL.flat_lines [ body ]) with [ single ] -> path single | _ -> [])
     | LL.If { body; _ } -> path body
     | _ -> []
   in
@@ -86,8 +83,22 @@ let () =
     @ sink i_i [ j_o; j_i; k_o; k_i ]
     @ sink j_i [ k_o; k_i; i_i ]
     @ [
-        Sched.Stage { source = ma.Tensor.value; tile_loops = [ i_i; k_i ]; shared = false; cooperative = None; hoisted = false };
-        Sched.Stage { source = mb.Tensor.value; tile_loops = [ k_i; j_i ]; shared = false; cooperative = None; hoisted = false };
+        Sched.Stage
+          {
+            source = ma.Tensor.value;
+            tile_loops = [ i_i; k_i ];
+            shared = false;
+            cooperative = None;
+            hoisted = false;
+          };
+        Sched.Stage
+          {
+            source = mb.Tensor.value;
+            tile_loops = [ k_i; j_i ];
+            shared = false;
+            cooperative = None;
+            hoisted = false;
+          };
         Sched.Privatize { target = mc1.Tensor.value; over = k_o };
       ]
   in
@@ -99,8 +110,7 @@ let () =
   in
   let ctx_a = Context.run ctx_a routine_a in
   let got_packed = Context.get_values ctx_a mc1.Tensor.value in
-  p "packed tiled matmul matches the naive twin"
-    (Array.for_all2_exn got_packed got_naive ~f:approx);
+  p "packed tiled matmul matches the naive twin" (Array.for_all2_exn got_packed got_naive ~f:approx);
   match read_generated "mmp_packed" with
   | None -> p "packed tiles are plain local arrays, no barriers, no guards" false
   | Some src ->

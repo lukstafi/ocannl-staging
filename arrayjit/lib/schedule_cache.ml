@@ -57,8 +57,7 @@ let tn_of_ref c i =
          (Array.length c.ref_tns))
   else c.ref_tns.(i)
 
-let canonicalize ?(static_indices = []) ?(with_placements = true) (opt : LL.optimized) :
-    canonical =
+let canonicalize ?(static_indices = []) ?(with_placements = true) (opt : LL.optimized) : canonical =
   let buf = Buffer.create 4096 in
   let add = Buffer.add_string buf in
   let complete = ref true in
@@ -78,10 +77,10 @@ let canonicalize ?(static_indices = []) ?(with_placements = true) (opt : LL.opti
     let id = !base_count in
     Int.incr base_count;
     let tok = "b" ^ Int.to_string id in
-    (if Hashtbl.mem first_bind s then (
-       Hash_set.add dup_binders s;
-       complete := false)
-     else Hashtbl.set first_bind ~key:s ~data:(Base id));
+    if Hashtbl.mem first_bind s then (
+      Hash_set.add dup_binders s;
+      complete := false)
+    else Hashtbl.set first_bind ~key:s ~data:(Base id);
     Hashtbl.set tokens ~key:s ~data:tok;
     tok
   in
@@ -101,25 +100,25 @@ let canonicalize ?(static_indices = []) ?(with_placements = true) (opt : LL.opti
         Hashtbl.set tn_refs ~key:tn ~data:i;
         rev_tns := tn :: !rev_tns;
         let dims = Lazy.force tn.Tn.dims in
-        (* Hoistability enters the digest alongside dims and precision (gh-ocannl-470, Codex P2
-           on PR #123): a hoisted-[Stage] winner is only valid against constant operands, and a
-           non-hoisted winner cached for a same-shape non-constant program must not mask a
-           constant program's hoisted candidates — so such programs must not share cache keys. *)
+        (* Hoistability enters the digest alongside dims and precision (gh-ocannl-470, Codex P2 on
+           PR #123): a hoisted-[Stage] winner is only valid against constant operands, and a
+           non-hoisted winner cached for a same-shape non-constant program must not mask a constant
+           program's hoisted candidates — so such programs must not share cache keys. *)
         let hc = if Schedule.hoistable_constant tn then ";const" else "" in
-        (* The effective placement class enters the digest too (Codex P1 on PR #140): the
-           optimized code can be identical while placements differ — [Local] scratch vs an
-           [On_device] buffer — and the generated backend code then differs in kind and
-           performance, so such programs must not share cache keys. In particular the
-           placement-A/B arms of [Train.tune_placements] would otherwise cache-hit each other's
-           entries whenever their code diverges only in placements, skipping the second arm's
-           measurement. Placements of nodes reaching the optimized code are settled by the end
-           of the pipeline; render an undecided node defensively rather than assert. *)
+        (* The effective placement class enters the digest too (Codex P1 on PR #140): the optimized
+           code can be identical while placements differ — [Local] scratch vs an [On_device] buffer
+           — and the generated backend code then differs in kind and performance, so such programs
+           must not share cache keys. In particular the placement-A/B arms of
+           [Train.tune_placements] would otherwise cache-hit each other's entries whenever their
+           code diverges only in placements, skipping the second arm's measurement. Placements of
+           nodes reaching the optimized code are settled by the end of the pipeline; render an
+           undecided node defensively rather than assert. *)
         let pc =
-          (* [with_placements = false] gives the structural identity: placement classes can
-             render differently across compilation lineages on byte-identical code (decided in
-             one, undecided in the other), so per-segment schedule matching in fissioned replays
-             keys on structure only, while disk-cache keys and post-schedule dedup keep the
-             placement-aware form. *)
+          (* [with_placements = false] gives the structural identity: placement classes can render
+             differently across compilation lineages on byte-identical code (decided in one,
+             undecided in the other), so per-segment schedule matching in fissioned replays keys on
+             structure only, while disk-cache keys and post-schedule dedup keep the placement-aware
+             form. *)
           if not with_placements then ""
           else
             match Tn.Placements.get plc tn with
@@ -310,9 +309,7 @@ let canonicalize ?(static_indices = []) ?(with_placements = true) (opt : LL.opti
       emit_tn tn;
       add ",");
   add "];merge:";
-  (match opt.LL.merge_node with
-  | None -> add "-"
-  | Some tn -> emit_tn tn);
+  (match opt.LL.merge_node with None -> add "-" | Some tn -> emit_tn tn);
   add ";";
   let base_syms =
     Hashtbl.fold first_bind
@@ -325,8 +322,9 @@ let canonicalize ?(static_indices = []) ?(with_placements = true) (opt : LL.opti
     complete = !complete;
     base_syms;
     tn_refs =
-      Hashtbl.fold tn_refs ~init:(Map.empty (module Tn)) ~f:(fun ~key ~data acc ->
-          Map.set acc ~key ~data);
+      Hashtbl.fold tn_refs
+        ~init:(Map.empty (module Tn))
+        ~f:(fun ~key ~data acc -> Map.set acc ~key ~data);
     ref_tns = Array.of_list_rev !rev_tns;
   }
 
@@ -424,7 +422,9 @@ let to_saved r (sched : Schedule.schedule) : saved_schedule * registry =
 
 let of_saved canonical (saved : saved_schedule) : Schedule.schedule * registry =
   let r, rev_sched =
-    List.fold saved ~init:(base_registry canonical, []) ~f:(fun (r, acc) saved_op ->
+    List.fold saved
+      ~init:(base_registry canonical, [])
+      ~f:(fun (r, acc) saved_op ->
         let idx = r.n_ops in
         let r, op =
           match saved_op with

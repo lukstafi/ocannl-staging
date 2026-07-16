@@ -55,9 +55,9 @@ let forward t =
   let label = Tn.debug_name t.value in
   { fwd with asgns = Asgns.Block_comment (label ^ " fwd", fwd.asgns) }
 
-(** A scalar non-differentiable accumulator for {!grad_update}'s [?accum_loss]: zero-initialized
-    at allocation and materialized. Read it with [Context.get_values] (which awaits the device)
-    and reset it with [Context.set_values ctx t.value [| 0. |]] — e.g. once per epoch. *)
+(** A scalar non-differentiable accumulator for {!grad_update}'s [?accum_loss]: zero-initialized at
+    allocation and materialized. Read it with [Context.get_values] (which awaits the device) and
+    reset it with [Context.set_values ctx t.value [| 0. |]] — e.g. once per epoch. *)
 let loss_accumulator ?(label = "loss_accum") () =
   let t = NTDSL.init ~l:label ~prec:Ir.Ops.single ~o:[ 1 ] ~f:(fun _ -> 0.) () in
   set_materialized t.Tensor.value;
@@ -65,12 +65,12 @@ let loss_accumulator ?(label = "loss_accum") () =
 
 (** Returns the tensor's forward, zeroing gradients, and backprop code wrapped with label-derived
     comments. Sets the tensor's value as materialized. If [setup_for_parallel] is true (false by
-    default), sets the parameters and their gradients as "non-local" (on-device). When
-    [accum_loss] is given (see {!loss_accumulator}), the update also accumulates the loss value
-    into it ([accum_loss =+ loss]): training loops can then read the loss sum once per epoch
-    instead of once per step — on GPU backends a per-step [Context.get_values] awaits the whole
-    device, serializing the stream, while steps that only accumulate on device queue up and
-    overlap with host-side scheduling. *)
+    default), sets the parameters and their gradients as "non-local" (on-device). When [accum_loss]
+    is given (see {!loss_accumulator}), the update also accumulates the loss value into it
+    ([accum_loss =+ loss]): training loops can then read the loss sum once per epoch instead of once
+    per step — on GPU backends a per-step [Context.get_values] awaits the whole device, serializing
+    the stream, while steps that only accumulate on device queue up and overlap with host-side
+    scheduling. *)
 let grad_update ?(setup_for_parallel = false) ?accum_loss loss =
   set_materialized loss.Tensor.value;
   if setup_for_parallel then
@@ -81,7 +81,9 @@ let grad_update ?(setup_for_parallel = false) ?accum_loss loss =
     ~~(loss "forward and gradient update";
        (* In the accumulating branch, referencing [loss] embeds its forward code (the single
           consumption of it), so the one statement computes the loss and accumulates it. *)
-       (match accum_loss with Some acc -> acc =+ loss | None -> loss.forward);
+       (match accum_loss with
+       | Some acc -> acc =+ loss
+       | None -> loss.forward);
        ~~(loss "zero grads and backprop";
           loss.zero_grads;
           loss.grad =: 1;
@@ -132,19 +134,19 @@ let every_non_literal_materialized =
 (** Placement A/B autotuning: {!Autotune.tune} on [comp] under the graph's current (default)
     placements — virtual intermediates plus the compiler's promotions — and again with every
     embedded node of [loss] materialized, keeping the measured winner (the arms' [best_ms] are
-    min-of-N timings on the same device, so directly comparable). By construction the result is
-    at least as fast as the better of the default and materialize-all placements, whichever the
-    search would find; this generalizes the old "materialize everything before tuning" recipe
-    instead of replacing one fixed placement policy with another. Respecting the two-level
-    memory-mode split (docs/proposals/context-scoped-memory-modes.md) — tnode-level [memory_mode]
-    is declared, semantics-bearing intent, while placement {e decisions} are context-level and
-    functional — the B arm does not touch intent: it tunes from
-    {!Context.decide_materialized} siblings of [ctx] (and of [timing_ctx]), so the arms are
-    hermetic and [tune_placements] leaves no trace on the graph or on the caller's contexts
-    beyond the returned winner. See test/operations/materialize_after_compile.ml.
-    [report], when given, observes both arms' reports in order. Other arguments are forwarded to
-    {!Autotune.tune}; the same caveats apply (notably [timing_ctx] and non-idempotent routines —
-    both arms share [timing_ctx]'s device for their searches). *)
+    min-of-N timings on the same device, so directly comparable). By construction the result is at
+    least as fast as the better of the default and materialize-all placements, whichever the search
+    would find; this generalizes the old "materialize everything before tuning" recipe instead of
+    replacing one fixed placement policy with another. Respecting the two-level memory-mode split
+    (docs/proposals/context-scoped-memory-modes.md) — tnode-level [memory_mode] is declared,
+    semantics-bearing intent, while placement {e decisions} are context-level and functional — the B
+    arm does not touch intent: it tunes from {!Context.decide_materialized} siblings of [ctx] (and
+    of [timing_ctx]), so the arms are hermetic and [tune_placements] leaves no trace on the graph or
+    on the caller's contexts beyond the returned winner. See
+    test/operations/materialize_after_compile.ml. [report], when given, observes both arms' reports
+    in order. Other arguments are forwarded to {!Autotune.tune}; the same caveats apply (notably
+    [timing_ctx] and non-idempotent routines — both arms share [timing_ctx]'s device for their
+    searches). *)
 let tune_placements ?beam_width ?rounds ?repeats ?timing_ctx ?report ctx loss comp bindings =
   (* Arm attribution on the same stderr trace as Autotune's config [autotune_log] — winner-arm
      ambiguity misdirected the CUDA benchmark debugging on PR #140. *)
@@ -157,9 +159,7 @@ let tune_placements ?beam_width ?rounds ?repeats ?timing_ctx ?report ctx loss co
     | _ -> false
   in
   let logf fmt =
-    Stdlib.Printf.ksprintf
-      (fun s -> if log_arms then Stdio.eprintf "tune_placements: %s\n%!" s)
-      fmt
+    Stdlib.Printf.ksprintf (fun s -> if log_arms then Stdio.eprintf "tune_placements: %s\n%!" s) fmt
   in
   let best_ms = ref Float.infinity in
   let capture r =
@@ -182,9 +182,12 @@ let tune_placements ?beam_width ?rounds ?repeats ?timing_ctx ?report ctx loss co
      declared-virtual), mirroring [every_non_literal_materialized]'s guards at the decision
      level. *)
   let materialize c = Context.decide_materialized c !embedded in
-  let b, b_ms = tune "B (materialize-all)" (materialize ctx) (Option.map timing_ctx ~f:materialize) in
-  logf "winner: arm %s (A %.4f ms vs B %.4f ms)" (if Float.( <= ) a_ms b_ms then "A" else "B") a_ms
-    b_ms;
+  let b, b_ms =
+    tune "B (materialize-all)" (materialize ctx) (Option.map timing_ctx ~f:materialize)
+  in
+  logf "winner: arm %s (A %.4f ms vs B %.4f ms)"
+    (if Float.( <= ) a_ms b_ms then "A" else "B")
+    a_ms b_ms;
   if Float.( <= ) a_ms b_ms then a else b
 
 module Lazy = Utils.Lazy

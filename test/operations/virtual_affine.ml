@@ -54,7 +54,6 @@ let optimize llc : LL.optimized =
   let ctx : LL.optimize_ctx = LL.empty_optimize_ctx () in
   LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name:"virtual_affine" [] llc
 
-
 (* Post-optimization placement probes: decisions live on the optimize_ctx's placements
    (context-scoped memory modes), not on the tnode (which now holds only declared intent). *)
 let known_virtual (o : LL.optimized) tn = Tn.Placements.known_virtual o.optimize_ctx.placements tn

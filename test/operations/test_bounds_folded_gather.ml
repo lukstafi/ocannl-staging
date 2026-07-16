@@ -1,23 +1,21 @@
-(* Interval analysis, Phase B v1 (docs/proposals/interval-analysis-scalar-t.md): executed parity
-   of a kernel whose gather guard folded away against [Tnode] bounds (binding constraint 10).
+(* Interval analysis, Phase B v1 (docs/proposals/interval-analysis-scalar-t.md): executed parity of
+   a kernel whose gather guard folded away against [Tnode] bounds (binding constraint 10).
 
    The gh-343 embedding gather [emb[b,o] = C[o, ids[b]]] carries an in-range guard on the dynamic
-   index. When [ids] is a host-initialized, never-device-written uint32 tensor, its upload scans
-   and proposes value bounds; a reader compiled AFTER the upload proves the whole guard (the
-   unsigned precision proves the lower bound and integrality; the proposed [0, max_id] bounds
-   prove the upper bound), settles the bounds, and emits a bare gather.
+   index. When [ids] is a host-initialized, never-device-written uint32 tensor, its upload scans and
+   proposes value bounds; a reader compiled AFTER the upload proves the whole guard (the unsigned
+   precision proves the lower bound and integrality; the proposed [0, max_id] bounds prove the upper
+   bound), settles the bounds, and emits a bare gather.
 
-   Pinned invariants:
-   - Baseline: a reader compiled BEFORE any upload of [ids] keeps the upper-bound guard (its
-     generated C contains the guard ternary).
-   - Fold: a reader compiled AFTER the upload emits no guard at all (no [Where], no [Trunc] in the
-     re-lowered IR; no ternary in its generated C), and the ids bounds are settled.
-   - Executed parity: BOTH kernels run, and both match the direct table gather -- a fold that
-     produced wrong values fails here, not just structurally.
-   - Post-settlement widening: uploading an id above the settled range raises (the compiled
-     guard-free kernel would read out of bounds).
-   - Execution anchoring: a device-written ids tensor (bounds pinned to top at lowering) does NOT
-     fold its guard, even though its runtime values are in range. *)
+   Pinned invariants: - Baseline: a reader compiled BEFORE any upload of [ids] keeps the upper-bound
+   guard (its generated C contains the guard ternary). - Fold: a reader compiled AFTER the upload
+   emits no guard at all (no [Where], no [Trunc] in the re-lowered IR; no ternary in its generated
+   C), and the ids bounds are settled. - Executed parity: BOTH kernels run, and both match the
+   direct table gather -- a fold that produced wrong values fails here, not just structurally. -
+   Post-settlement widening: uploading an id above the settled range raises (the compiled guard-free
+   kernel would read out of bounds). - Execution anchoring: a device-written ids tensor (bounds
+   pinned to top at lowering) does NOT fold its guard, even though its runtime values are in
+   range. *)
 
 open Base
 open Ocannl
@@ -87,8 +85,8 @@ let inspect (t : Tensor.t) : int * int * int =
   (!dyn, !wheres, !truncs)
 
 let () =
-  (* Shared uint32 ids tensor. Its host-init data is scanned and proposed as bounds the first
-     time a routine using it is linked (the [Host_inits] upload). *)
+  (* Shared uint32 ids tensor. Its host-init data is scanned and proposed as bounds the first time a
+     routine using it is linked (the [Host_inits] upload). *)
   let ids = Nn_blocks.class_ids_of_int_list id_ints in
 
   (* --- Baseline: reader compiled BEFORE any upload of [ids] --- *)
@@ -99,7 +97,8 @@ let () =
      proposing bounds [0, 5]), and runs. *)
   let ctx_a = Train.forward_once ctx_a guarded_emb in
   let got_a = Context.get_values ctx_a guarded_emb.Tensor.value in
-  p "guarded baseline executes the direct table gather" (Array.for_all2_exn got_a expected ~f:approx);
+  p "guarded baseline executes the direct table gather"
+    (Array.for_all2_exn got_a expected ~f:approx);
   let has_guard_ternary c =
     (* [Where] renders as [(cond != 0 ? ... : ...)] (or [!= 0.0] at float guard precisions). *)
     String.is_substring c ~substring:"!= 0 ?" || String.is_substring c ~substring:"!= 0.0 ?"

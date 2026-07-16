@@ -1,6 +1,6 @@
 (* Diagnostic for the lenet training step's default schedule: prints the fission segment census
-   (kinds, launch geometry, per-nest loop extents and written nodes) on the configured backend,
-   then times a few individual steps. Clone of bench_conv.ml's model; not part of the benchmark
+   (kinds, launch geometry, per-nest loop extents and written nodes) on the configured backend, then
+   times a few individual steps. Clone of bench_conv.ml's model; not part of the benchmark
    protocol. *)
 
 open Base
@@ -97,9 +97,9 @@ let () =
   let late_inject = H.env_flag "BENCH_LATE_INJECT" in
   let ctx = if late_inject then ctx else H.inject ctx st batch_loss mapping in
   show ctx "after-inject";
-  (* First compile only stashes the lowered code for the census (an explicit transform replaces
-     the default pipeline, so this routine is discarded); the timed routine is compiled with the
-     regular default pipeline below. *)
+  (* First compile only stashes the lowered code for the census (an explicit transform replaces the
+     default pipeline, so this routine is discarded); the timed routine is compiled with the regular
+     default pipeline below. *)
   let stash = ref None in
   let _census_ctx, _census_routine =
     Context.compile
@@ -160,7 +160,6 @@ let () =
     Base.Set.iter batch_loss.Tensor.params ~f:(fun p ->
         let tn = p.Tensor.value in
         let vs = Context.get_values ctx tn in
-        Stdio.printf "param %s sum: %.6g first: %.6g\n"
-          (Ir.Tnode.debug_name tn)
+        Stdio.printf "param %s sum: %.6g first: %.6g\n" (Ir.Tnode.debug_name tn)
           (Array.fold vs ~init:0. ~f:( +. ))
           vs.(0)))

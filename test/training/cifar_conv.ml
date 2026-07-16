@@ -35,8 +35,8 @@ let () =
   Utils.settings.fixed_state_for_init <- Some seed;
   Tensor.unsafe_reinitialize ();
 
-  (* He-normal init (fan-in-scaled): standard for relu convnets; CIFAR data is centered to
-     [-0.5, 0.5] in Conv_data.cifar_images_to_float32. Earlier revisions used an all-positive
+  (* He-normal init (fan-in-scaled): standard for relu convnets; CIFAR data is centered to [-0.5,
+     0.5] in Conv_data.cifar_images_to_float32. Earlier revisions used an all-positive
      xavier-uniform1 ~scale_sq:0.06 init that relied on the (since fixed) full-feature-map conv
      biases for early learning. *)
   TDSL.default_param_init := NTDSL.kaiming ~scale_sq:2.0 TDSL.O.normal1;
@@ -145,8 +145,8 @@ let () =
         epoch_loss := !epoch_loss +. (ctx, batch_loss).@[0];
         Int.incr step_ref);
     if epoch % 10 = 0 then
-      (* 1 decimal only: the exact trajectory digits depend on FP reduction order, which varies
-         with platform, SIMD width and worker count — 2 decimals is not portable. *)
+      (* 1 decimal only: the exact trajectory digits depend on FP reduction order, which varies with
+         platform, SIMD width and worker count — 2 decimals is not portable. *)
       printf "Epoch %d: avg loss = %.1f\n%!" epoch (!epoch_loss /. Float.of_int n_batches)
   done;
 
@@ -167,8 +167,8 @@ let () =
   (* Reuse the trained lenet function -- shares parameters with training graph *)
   let%op eval_logits = model ~train_step:None eval_batch_images in
 
-  (* Test loss: cross-entropy on held-out data. Accuracy uses argmax over the logits directly
-     (same argmax as over softmax probabilities). *)
+  (* Test loss: cross-entropy on held-out data. Accuracy uses argmax over the logits directly (same
+     argmax as over softmax probabilities). *)
   let%op eval_batch_loss =
     cross_entropy_loss ~spec:"...|v" () ~logits:eval_logits ~targets:_eval_batch_labels
     /. !..batch_size
@@ -211,10 +211,9 @@ let () =
       Int.incr batch_idx);
   let avg_test_loss = !test_loss /. Float.of_int n_test_batches in
   let accuracy = Float.of_int !correct /. Float.of_int num_test *. 100. in
-  (* Exact test metrics go to stderr: per-sample counts after 2000 training steps are not
-     portable (accumulated FP drift flips borderline samples across platforms/SIMD/worker
-     counts), so they stay out of the .expected golden; the threshold gates below are the
-     portable stdout record. *)
+  (* Exact test metrics go to stderr: per-sample counts after 2000 training steps are not portable
+     (accumulated FP drift flips borderline samples across platforms/SIMD/worker counts), so they
+     stay out of the .expected golden; the threshold gates below are the portable stdout record. *)
   Stdio.eprintf "Test loss = %.2f\n%!" avg_test_loss;
   Stdio.eprintf "Test accuracy = %.1f%% (%d/%d)\n%!" accuracy !correct num_test;
   (* Regression-mode threshold checks (conservative, must pass on small subsets). CIFAR-10 is harder

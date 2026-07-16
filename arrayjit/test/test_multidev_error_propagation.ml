@@ -1,13 +1,12 @@
-(* Regression test for the Multidev scheduler's error propagation (PR #107 review): a stopped
-   worker must not be mistaken for completion. When a task raises, the worker records the error
-   and stops spinning, so an event whose "tick" task was queued behind the failure never
-   completes; [sync] on that event (and [await] on the device) must re-raise the device error --
-   otherwise a consumer waiting on a producer device would proceed with stale or uninitialized
-   source data.
+(* Regression test for the Multidev scheduler's error propagation (PR #107 review): a stopped worker
+   must not be mistaken for completion. When a task raises, the worker records the error and stops
+   spinning, so an event whose "tick" task was queued behind the failure never completes; [sync] on
+   that event (and [await] on the device) must re-raise the device error -- otherwise a consumer
+   waiting on a producer device would proceed with stale or uninitialized source data.
 
-   Uses a mock raw backend (no real memory), mirroring [test_slab_free_on_grow]. Depending on
-   worker timing, the error surfaces either from [sync] or already from [all_work]'s
-   [schedule_task]; both re-raise the original exception, so the check is timing-robust. *)
+   Uses a mock raw backend (no real memory), mirroring [test_slab_free_on_grow]. Depending on worker
+   timing, the error surfaces either from [sync] or already from [all_work]'s [schedule_task]; both
+   re-raise the original exception, so the check is timing-robust. *)
 
 open Base
 open Stdio

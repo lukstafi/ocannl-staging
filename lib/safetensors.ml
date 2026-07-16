@@ -95,14 +95,14 @@ let read path =
                 failwith [%string "Safetensors.read %{path}: duplicate tensor name %{name}"]);
             order := name :: !order
           end);
-      (* The safetensors invariant: the payload ranges tile the byte buffer exactly -- no
-         overlaps, holes, or trailing bytes. Checking each range independently would accept
-         corrupted or adversarial headers where distinct tensors alias the same bytes. *)
+      (* The safetensors invariant: the payload ranges tile the byte buffer exactly -- no overlaps,
+         holes, or trailing bytes. Checking each range independently would accept corrupted or
+         adversarial headers where distinct tensors alias the same bytes. *)
       let ranges =
         Hashtbl.fold tensors ~init:[] ~f:(fun ~key ~data acc ->
             (data.offset, data.offset + data.nbytes, key) :: acc)
         |> List.sort ~compare:(fun (s1, e1, _) (s2, e2, _) ->
-               match Int.compare s1 s2 with 0 -> Int.compare e1 e2 | c -> c)
+            match Int.compare s1 s2 with 0 -> Int.compare e1 e2 | c -> c)
       in
       let final =
         List.fold ranges ~init:0 ~f:(fun cursor (start, stop, name) ->
@@ -130,8 +130,7 @@ let to_float32 t name =
   if not (String.equal dtype "F32") then
     failwith
       [%string
-        "Safetensors.to_float32 %{t.path}: tensor %{name} has dtype %{dtype}, only F32 is \
-         supported"];
+        "Safetensors.to_float32 %{t.path}: tensor %{name} has dtype %{dtype}, only F32 is supported"];
   let payload = Bytes.create nbytes in
   In_channel.with_file t.path ~binary:true ~f:(fun ic ->
       In_channel.seek ic (Int64.of_int (t.buffer_start + offset));

@@ -321,8 +321,8 @@ let lower_batch_assignments optim_ctx ?names ?occupancy bindings asgns_l =
         )
       else (None, None))
 
-let%debug3_sexp verify_prior_context ~(plc : Tn.Placements.t) ~ctx_arrays ~from_prior_context :
-    unit =
+let%debug3_sexp verify_prior_context ~(plc : Tn.Placements.t) ~ctx_arrays ~from_prior_context : unit
+    =
   Set.iter from_prior_context ~f:(fun tn ->
       if
         Tn.Placements.is_in_context_force plc tn 42
@@ -393,8 +393,8 @@ struct
     let resolve = resolve_pool context.device in
     (* One shared bindings assoc for the whole batch (mirroring the CUDA/Metal backends): the
        batch's procedures — in particular the segment kernels of one fissioned routine — must see
-       the same static-index refs, or setting a binding through the routine would reach only one
-       of them. *)
+       the same static-index refs, or setting a binding through the routine would reach only one of
+       them. *)
     let lowered_bindings : Indexing.lowered_bindings =
       List.map (Indexing.bound_symbols code_batch.bindings) ~f:(fun s -> (s, ref 0))
     in
@@ -521,12 +521,11 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
              the routine into several kernels at cross-workgroup dependency edges; they run
              back-to-back on the routine's stream (see [link]). *)
           Schedule.maybe_default_schedules ~backend_name:Device.name ~limits
-            ~static_indices:(Indexing.bound_symbols bindings)
-            lowered
+            ~static_indices:(Indexing.bound_symbols bindings) lowered
     in
-    (* Per-compile launch-geometry trace (config [schedule_log_launches]): one line per segment
-       with its grid/block dims — for diffing what two compiles of nominally identical code
-       actually emit (PR #140 round 6). *)
+    (* Per-compile launch-geometry trace (config [schedule_log_launches]): one line per segment with
+       its grid/block dims — for diffing what two compiles of nominally identical code actually emit
+       (PR #140 round 6). *)
     (if Lazy.force Schedule.log_launches then
        let n_segs = List.length lowereds in
        List.iteri lowereds ~f:(fun i seg ->
@@ -551,14 +550,14 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
               bindings
               (Array.of_list_map segments ~f:Option.some)
           in
-          (* Keep the whole-routine (pre-fission) lowered code: context allocation and I/O
-             analysis need the union footprint, and each segment's [optimized] carries only its
-             filtered slice of the traced store. Schedule ops applied per segment can CREATE
-             tnodes the pre-fission store has never seen — a hoisted [Stage] registers its
-             packed-constant tile in the segment's filtered store (its placement lands in the
-             shared lineage fork, but [allocate_delta] enumerates the traced store) — so fold
-             segment-added entries back in. Pre-existing keys are shared mutable records
-             (filtered slices alias them), so only genuinely new keys need copying. *)
+          (* Keep the whole-routine (pre-fission) lowered code: context allocation and I/O analysis
+             need the union footprint, and each segment's [optimized] carries only its filtered
+             slice of the traced store. Schedule ops applied per segment can CREATE tnodes the
+             pre-fission store has never seen — a hoisted [Stage] registers its packed-constant tile
+             in the segment's filtered store (its placement lands in the shared lineage fork, but
+             [allocate_delta] enumerates the traced store) — so fold segment-added entries back in.
+             Pre-existing keys are shared mutable records (filtered slices alias them), so only
+             genuinely new keys need copying. *)
           List.iter segments ~f:(fun seg ->
               Hashtbl.iteri seg.Low_level.traced_store ~f:(fun ~key ~data ->
                   if not (Hashtbl.mem lowered.Low_level.traced_store key) then
@@ -626,8 +625,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
      (freed at device teardown). Enumeration follows [traced_store] order so pool ids and offsets
      stay deterministic across runs. The per-pool 4 GB cap (uint32 offsets unless large_models) is
      enforced by {!Backend_utils.plan_pool_segments}. *)
-  let%track3_sexp allocate_delta (context : context) (lowered : Low_level.optimized) :
-      ctx_buffers =
+  let%track3_sexp allocate_delta (context : context) (lowered : Low_level.optimized) : ctx_buffers =
     let traced_store = lowered.Low_level.traced_store in
     let device = context.device in
     let cap = if Utils.settings.large_models then Int.max_value else 0x1_0000_0000 in
@@ -645,8 +643,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
           if
             node.Low_level.read_only
             || Tn.Placements.known_constant lowered.Low_level.optimize_ctx.placements key
-          then
-            constants := (key, node) :: !constants
+          then constants := (key, node) :: !constants
           else working := (key, node) :: !working);
     let working = List.rev !working and constants = List.rev !constants in
     let ctx_buffers = ref context.ctx_buffers in
@@ -658,9 +655,9 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
         ~(register : Tn.t -> alloc:(unit -> buffer_loc) -> unit) : unit =
       if not (List.is_empty group) then begin
         let items =
-          (* Within-pool offsets are padded to [Ops.buffer_alignment] (not just the element size)
-             so that every node's buffer — not only each pool's base — is SIMD-aligned
-             (gh-ocannl-164); ≤31 bytes of padding per node. *)
+          (* Within-pool offsets are padded to [Ops.buffer_alignment] (not just the element size) so
+             that every node's buffer — not only each pool's base — is SIMD-aligned (gh-ocannl-164);
+             ≤31 bytes of padding per node. *)
           List.map group ~f:(fun (key, _) ->
               ( size_in_bytes_of key,
                 max (Ops.prec_in_bytes (Lazy.force key.Tn.prec)) Ops.buffer_alignment ))
@@ -747,20 +744,20 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
           (* Fissioned routine: every segment kernel links against the routine's one ctx_buffers
              delta and shares the one bindings assoc; the combined task launches the segments in
              order on the routine's stream, whose FIFO ordering supplies the grid-wide
-             synchronization at each segment boundary (the same contract consecutive routines on
-             one stream already rely on). *)
+             synchronization at each segment boundary (the same contract consecutive routines on one
+             stream already rely on). *)
           let bindings, tasks =
             link_batch context batch (Array.create ~len:count (Some ctx_buffers))
           in
           let tasks = Array.to_list (Array.filter_opt tasks) in
           assert (List.length tasks = count);
           (* Device-side ordering at each segment boundary: the cut is where the kernel-internal
-             code lacks grid-wide synchronization, so the stream must provide it. Queue FIFO
-             alone is not enough on Metal — command buffers over untracked resources may overlap
-             in execution (caught by test_random_histograms). Backends that can order the batch
-             device-side more cheaply (one Metal command buffer with a serial compute pass)
-             provide [sequence_segments]; the fallback chains an event per boundary: schedule
-             each next segment to wait for all work enqueued so far. No host blocking. *)
+             code lacks grid-wide synchronization, so the stream must provide it. Queue FIFO alone
+             is not enough on Metal — command buffers over untracked resources may overlap in
+             execution (caught by test_random_histograms). Backends that can order the batch
+             device-side more cheaply (one Metal command buffer with a serial compute pass) provide
+             [sequence_segments]; the fallback chains an event per boundary: schedule each next
+             segment to wait for all work enqueued so far. No host blocking. *)
           let schedule =
             match sequence_segments context ~name:code.name tasks with
             | Some fused -> fused
@@ -787,12 +784,10 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
       { context; schedule; bindings; name = code.name; inputs; merge_buffer_input; outputs }
 
   let%debug3_sexp link_batch context code_batch =
-    verify_prior_context
-      ~plc:(get_optimize_ctx_batch code_batch).Low_level.placements
+    verify_prior_context ~plc:(get_optimize_ctx_batch code_batch).Low_level.placements
       ~ctx_arrays:context.ctx_buffers ~from_prior_context:code_batch.from_prior_context;
     let ctx_buffers =
-      Array.map code_batch.lowereds
-        ~f:(Option.map ~f:(fun l -> allocate_delta context l))
+      Array.map code_batch.lowereds ~f:(Option.map ~f:(fun l -> allocate_delta context l))
     in
     let bindings, schedules = link_batch context code_batch.code_batch ctx_buffers in
     Array.fold_mapi schedules ~init:context ~f:(fun i context -> function
@@ -845,24 +840,24 @@ let finalize (type dev runner event)
 (* {2 The implemented backends, as singletons}
 
    One instantiation per backend for the whole process, so backend context types are nameable
-   ([Cc_b.context], ...) and two independently-created contexts on the same backend unify --
-   the precondition for [Context.copy] dispatching to backend-specific [device_to_device] via
+   ([Cc_b.context], ...) and two independently-created contexts on the same backend unify -- the
+   precondition for [Context.copy] dispatching to backend-specific [device_to_device] via
    {!wrapped_context}. The retired [fresh_backend] applied these functors per call to isolate
    tnode-keyed backend caches between tests (reinitialization reuses tnode ids); tnode identity is
    now the never-reused [Tnode.uid], so stale cache entries cannot alias fresh nodes and the
    isolation is unnecessary. Instantiating a module here must not touch any driver or hardware:
-   device backends keep discovery/driver-init lazy, forced at first device use (cudajit is a
-   depopt -- the library being installed does not imply a usable driver -- and a CPU-only run
-   must not depend on GPU runtimes). On platforms without the corresponding library the dune
-   [select]ed [Lowered_backend_missing] stub is instantiated instead, likewise harmless at init
-   and raising on use. Either failure mode surfaces at [get_device], where [Context.auto]'s
-   fallback catches it per call, as with the retired per-call instantiation. *)
+   device backends keep discovery/driver-init lazy, forced at first device use (cudajit is a depopt
+   -- the library being installed does not imply a usable driver -- and a CPU-only run must not
+   depend on GPU runtimes). On platforms without the corresponding library the dune [select]ed
+   [Lowered_backend_missing] stub is instantiated instead, likewise harmless at init and raising on
+   use. Either failure mode surfaces at [get_device], where [Context.auto]'s fallback catches it per
+   call, as with the retired per-call instantiation. *)
 
 module Cc_b : Backend = Make_device_backend_from_lowered (Schedulers.Sync) (Cc_backend)
 module Multidev_cc_b : Backend = Make_device_backend_from_lowered (Schedulers.Multidev) (Cc_backend)
-module Cuda_b : Backend = Raise_backend ((Cuda_backend_impl.Impl : Lowered_backend))
-module Hip_b : Backend = Raise_backend ((Hip_backend_impl.Impl : Lowered_backend))
-module Metal_b : Backend = Raise_backend ((Metal_backend_impl.Impl : Lowered_backend))
+module Cuda_b : Backend = Raise_backend (Cuda_backend_impl.Impl : Lowered_backend)
+module Hip_b : Backend = Raise_backend (Hip_backend_impl.Impl : Lowered_backend)
+module Metal_b : Backend = Raise_backend (Metal_backend_impl.Impl : Lowered_backend)
 
 type backend = Cc | Multidev_cc | Cuda | Hip | Metal [@@deriving sexp, equal]
 

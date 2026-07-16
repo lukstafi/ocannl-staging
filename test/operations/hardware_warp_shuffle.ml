@@ -5,11 +5,11 @@
    Unlike test/operations/hardware_workgroup_reduce.ml, which stages the tree reduction explicitly
    (shared tile + barriers), here the [?lowered_transform] replaces the lowered serial reduction
    with a single [Workgroup_reduce]-typed loop whose body stays the plain accumulation statement
-   [acc = op(acc, contrib(i))] — the renderer owns the communication. On GPU backends
-   (Metal locally, CUDA in CI) that renders as the two-phase warp-shuffle pattern
-   ([ocannl_shfl_xor] tree within each warp, one shared slot per warp, barrier, first-warp
-   combine); on the C backends the same body legally renders as the ordinary serial loop, so every
-   printed boolean holds on every backend.
+   [acc = op(acc, contrib(i))] — the renderer owns the communication. On GPU backends (Metal
+   locally, CUDA in CI) that renders as the two-phase warp-shuffle pattern ([ocannl_shfl_xor] tree
+   within each warp, one shared slot per warp, barrier, first-warp combine); on the C backends the
+   same body legally renders as the ordinary serial loop, so every printed boolean holds on every
+   backend.
 
    Covered: a 4-warp sum (two-phase, with the shared per-warp staging), a single-warp FMA
    dot-product (pure shuffles, no staging), a 2-warp max-reduce (non-Add combine), and the clean
@@ -48,8 +48,8 @@ let named name (comp : Asgns.comp) : Asgns.comp =
 
 (* Replace the lowered serial reduction with a single [Workgroup_reduce] accumulation loop over a
    fresh index; the renderer owns the communication. The transform drops the lowered [Zero_out] of
-   the accumulator, so un-mark [zero_initialized_by_code]: allocation then zeroes the buffer,
-   giving the accumulation the same all-zeros starting point as the serial lowering. *)
+   the accumulator, so un-mark [zero_initialized_by_code]: allocation then zeroes the buffer, giving
+   the accumulation the same all-zeros starting point as the serial lowering. *)
 let reduce_transform ~n ~body_of (s : Tn.t) (opt : LL.optimized) : LL.optimized =
   (LL.get_node opt.traced_store s).LL.zero_initialized_by_code <- false;
   let i = Idx.get_symbol () in
@@ -57,7 +57,14 @@ let reduce_transform ~n ~body_of (s : Tn.t) (opt : LL.optimized) : LL.optimized 
     opt with
     llc =
       LL.For_loop
-        { index = i; from_ = 0; to_ = n - 1; body = body_of i; trace_it = false; axis = Workgroup_reduce };
+        {
+          index = i;
+          from_ = 0;
+          to_ = n - 1;
+          body = body_of i;
+          trace_it = false;
+          axis = Workgroup_reduce;
+        };
   }
 
 let run ~name ~transform t =
@@ -148,7 +155,7 @@ let () =
   (* --- 2-warp max-reduce: a non-Add combine. The max is positive, so the allocation-zeroed
      accumulator start does not affect the result. --- *)
   let q = 64 in
-  let wv = Array.init q ~f:(fun k -> Float.of_int ((k * 13) % 29) -. 5.) in
+  let wv = Array.init q ~f:(fun k -> Float.of_int (k * 13 % 29) -. 5.) in
   let expected_max = Array.fold wv ~init:Float.neg_infinity ~f:Float.max in
   let w = TDSL.ndarray wv ~label:[ "w" ] ~output_dims:[ q ] () in
   let%op x1 = w @^^ "i=>0" in
@@ -192,26 +199,26 @@ let () =
             debug = "";
           })
   in
-  (if on_gpu then
-     match
-       try
-         ignore (run ~name:"odd_extent_wshfl" ~transform y1 : float);
-         None
-       with Invalid_argument msg -> Some msg
-     with
-     | Some msg ->
-         p "non-warp-multiple extent rejected (GPU) or runs serially (CPU)"
-           (String.is_substring msg ~substring:"multiple of the warp size")
-     | None -> p "non-warp-multiple extent rejected (GPU) or runs serially (CPU)" false
-   else
-     p "non-warp-multiple extent rejected (GPU) or runs serially (CPU)"
-       (approx (run ~name:"odd_extent_wshfl" ~transform y1) expected_u));
+  if on_gpu then
+    match
+      try
+        ignore (run ~name:"odd_extent_wshfl" ~transform y1 : float);
+        None
+      with Invalid_argument msg -> Some msg
+    with
+    | Some msg ->
+        p "non-warp-multiple extent rejected (GPU) or runs serially (CPU)"
+          (String.is_substring msg ~substring:"multiple of the warp size")
+    | None -> p "non-warp-multiple extent rejected (GPU) or runs serially (CPU)" false
+  else
+    p "non-warp-multiple extent rejected (GPU) or runs serially (CPU)"
+      (approx (run ~name:"odd_extent_wshfl" ~transform y1) expected_u);
 
   (* --- A recognized accumulation sharing workgroup slot 0 with a LARGER sibling extent: on GPU
      [guard_annotated_extents] wraps the reduce body in the synthetic [If (i < 64)] launch guard,
      and the renderer must still see through it and reject (a plain binding would race the
-     accumulator; PR #119 review). The sibling nest is a benign self-copy of the input, so on the
-     C backends the whole kernel runs serially with a partial (first-64) sum. --- *)
+     accumulator; PR #119 review). The sibling nest is a benign self-copy of the input, so on the C
+     backends the whole kernel runs serially with a partial (first-64) sum. --- *)
   let t = 128 in
   let tv = Array.init t ~f:(fun k -> (Float.of_int (k % 17) *. 0.5) -. 3.) in
   let expected_partial = Array.fold (Array.sub tv ~pos:0 ~len:64) ~init:0. ~f:( +. ) in
@@ -231,8 +238,12 @@ let () =
           axis = Workgroup;
           body =
             LL.Set
-              { tn = tt.Tensor.value; idcs = [| it j |]; llsc = Get (tt.Tensor.value, [| it j |]);
-                debug = "" };
+              {
+                tn = tt.Tensor.value;
+                idcs = [| it j |];
+                llsc = Get (tt.Tensor.value, [| it j |]);
+                debug = "";
+              };
         }
     in
     let reduce_nest =

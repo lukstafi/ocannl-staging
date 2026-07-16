@@ -1,22 +1,21 @@
-(* Schedule IR, Phase S2 (docs/proposals/schedule-ir-optops.md §5): the hand-written
-   shared-memory matmul schedule, built from Split/Retype/Stage optops and executed against the
-   serial twin.
+(* Schedule IR, Phase S2 (docs/proposals/schedule-ir-optops.md §5): the hand-written shared-memory
+   matmul schedule, built from Split/Retype/Stage optops and executed against the serial twin.
 
-   [mc = ma * mb] (32x32 times 32x32) lowers to a zeroing nest (2 loops) plus the naive triple
-   loop. The schedule: split the zeroing nest's loops into Grid x Workgroup pairs (whole-node
-   Zero_out is not distributed across threads, so the zeroing writes must cover the same hardware
-   dimensions as the accumulation); split i and j of the accumulation by 8 into Grid x Workgroup,
-   split k by 8 into Serial x Serial; then [Stage ma [i_i; k_i] ~shared] and
-   [Stage mb [k_i; j_i] ~shared]. Stage inserts cooperative loads (reusing the Workgroup axis of
-   each tile, iterating the serial k_i under a fresh symbol, restricting the redundant workgroup
-   axis to thread 0) and barriers inside k_o; the 8x8 tiles become [threadgroup] / [__shared__]
-   declarations via [optimized.workgroup_shared]. Tile sizes divide the extents, so Split's
-   remainder guards and Stage's edge guards all fold away -- required: surviving whole-body
-   guards would place the barriers under divergent control flow ([validate_parallel] rejects).
+   [mc = ma * mb] (32x32 times 32x32) lowers to a zeroing nest (2 loops) plus the naive triple loop.
+   The schedule: split the zeroing nest's loops into Grid x Workgroup pairs (whole-node Zero_out is
+   not distributed across threads, so the zeroing writes must cover the same hardware dimensions as
+   the accumulation); split i and j of the accumulation by 8 into Grid x Workgroup, split k by 8
+   into Serial x Serial; then [Stage ma [i_i; k_i] ~shared] and [Stage mb [k_i; j_i] ~shared]. Stage
+   inserts cooperative loads (reusing the Workgroup axis of each tile, iterating the serial k_i
+   under a fresh symbol, restricting the redundant workgroup axis to thread 0) and barriers inside
+   k_o; the 8x8 tiles become [threadgroup] / [__shared__] declarations via
+   [optimized.workgroup_shared]. Tile sizes divide the extents, so Split's remainder guards and
+   Stage's edge guards all fold away -- required: surviving whole-body guards would place the
+   barriers under divergent control flow ([validate_parallel] rejects).
 
-   On GPU backends (Metal locally, CUDA in CI) the kernel executes with a 4x4 grid of 8x8
-   workgroups and must match the serial twin. The C backends cannot express shared placement;
-   they must reject cleanly -- that rejection is what this test pins there. *)
+   On GPU backends (Metal locally, CUDA in CI) the kernel executes with a 4x4 grid of 8x8 workgroups
+   and must match the serial twin. The C backends cannot express shared placement; they must reject
+   cleanly -- that rejection is what this test pins there. *)
 
 open Base
 open Ocannl
@@ -29,7 +28,6 @@ module Asgns = Ir.Assignments
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p name b = Stdio.printf "%s: %b\n" name b
 let approx a b = Float.(abs (a - b) < 1e-3)
-
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
 let has_shared =
@@ -45,13 +43,11 @@ let read_generated base_name =
 
 (* The maximal single-child chains of statement-level loops: one symbol list per top-level nest. *)
 let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
-  let strip stmts =
-    List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true)
-  in
+  let strip stmts = List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true) in
   let rec path (llc : LL.t) : Ir.Indexing.symbol list =
     match llc with
-    | LL.For_loop { index; body; _ } -> (
-        index :: (match strip (LL.flat_lines [ body ]) with [ single ] -> path single | _ -> []))
+    | LL.For_loop { index; body; _ } ->
+        index :: (match strip (LL.flat_lines [ body ]) with [ single ] -> path single | _ -> [])
     | LL.If { body; _ } -> path body
     | _ -> []
   in
@@ -102,8 +98,22 @@ let () =
       sp_i;
       sp_j;
       sp_k;
-      Sched.Stage { source = ma.Tensor.value; tile_loops = [ i_i; k_i ]; shared = true; cooperative = None; hoisted = false };
-      Sched.Stage { source = mb.Tensor.value; tile_loops = [ k_i; j_i ]; shared = true; cooperative = None; hoisted = false };
+      Sched.Stage
+        {
+          source = ma.Tensor.value;
+          tile_loops = [ i_i; k_i ];
+          shared = true;
+          cooperative = None;
+          hoisted = false;
+        };
+      Sched.Stage
+        {
+          source = mb.Tensor.value;
+          tile_loops = [ k_i; j_i ];
+          shared = true;
+          cooperative = None;
+          hoisted = false;
+        };
       Sched.Privatize { target = mc1.Tensor.value; over = k_o };
     ]
   in
@@ -122,16 +132,18 @@ let () =
     | None -> p "shared tiles, barriers, no edge guards (GPU) or rejected (CPU)" false
     | Some src ->
         let has sub = String.is_substring src ~substring:sub in
-        let count_sub sub = String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length in
+        let count_sub sub =
+          String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
+        in
         let shared_ok =
           if String.is_substring backend_name ~substring:"metal" then
             count_sub "threadgroup float tile_" = 2 && has "threadgroup_barrier"
           else count_sub "__shared__ float tile_" = 2 && has "__syncthreads()"
         in
-        (* All tile sizes divide the extents: Split remainder guards and Stage/Privatize edge
-           guards fold; the only Ifs left are the two thread-0 load restrictions. The k loop
-           accumulates into the privatized scalar [acc_mc1] instead of round-tripping mc1
-           through global memory. *)
+        (* All tile sizes divide the extents: Split remainder guards and Stage/Privatize edge guards
+           fold; the only Ifs left are the two thread-0 load restrictions. The k loop accumulates
+           into the privatized scalar [acc_mc1] instead of round-tripping mc1 through global
+           memory. *)
         p "shared tiles, barriers, no edge guards (GPU) or rejected (CPU)"
           (shared_ok && count_sub "if (" = 2 && has "acc_mc1"))
   else (
@@ -149,12 +161,12 @@ let () =
     | None -> p "SMEM matmul parity (GPU) or clean rejection (CPU)" false);
     p "shared tiles, barriers, no edge guards (GPU) or rejected (CPU)" true);
 
-  (* --- Broadcast-vector staging (PR #90 review regression): a shared Stage with no anchor —
-     the source access has no outer-part symbols and no reused workgroup axis. The load nest
-     must NOT go to the routine top level (every hardware thread executes top-level statements,
-     and no workgroup index symbol is bound there to restrict the writers): Stage wraps the
-     outermost tile loop instead, where the enclosing Workgroup axis guards the cooperative
-     load down to one representative thread. --- *)
+  (* --- Broadcast-vector staging (PR #90 review regression): a shared Stage with no anchor — the
+     source access has no outer-part symbols and no reused workgroup axis. The load nest must NOT go
+     to the routine top level (every hardware thread executes top-level statements, and no workgroup
+     index symbol is bound there to restrict the writers): Stage wraps the outermost tile loop
+     instead, where the enclosing Workgroup axis guards the cooperative load down to one
+     representative thread. --- *)
   let a2v = Array.init (n * 32) ~f:(fun idx -> Float.of_int (idx % 19) *. 0.5) in
   let vv = Array.init 32 ~f:(fun idx -> Float.of_int idx -. 15.5) in
   let a2 = TDSL.ndarray a2v ~label:[ "a2" ] ~output_dims:[ n; 32 ] () in
@@ -171,7 +183,17 @@ let () =
     in
     let sp_i, _, _ = Sched.split ~axis:i ~factor:bm ~outer:LL.Grid ~inner:LL.Workgroup in
     Sched.apply
-      [ sp_i; Sched.Stage { source = v.Tensor.value; tile_loops = [ j ]; shared = true; cooperative = None; hoisted = false } ]
+      [
+        sp_i;
+        Sched.Stage
+          {
+            source = v.Tensor.value;
+            tile_loops = [ j ];
+            shared = true;
+            cooperative = None;
+            hoisted = false;
+          };
+      ]
       opt
   in
   let ctx_b = Context.auto () in
@@ -189,9 +211,9 @@ let () =
         let count_sub sub =
           String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
         in
-        (* One shared tile; the single If is the thread-0 restriction of the cooperative load —
-           its presence is exactly what the review fix guarantees (previously the load sat
-           unguarded at routine top level). *)
+        (* One shared tile; the single If is the thread-0 restriction of the cooperative load — its
+           presence is exactly what the review fix guarantees (previously the load sat unguarded at
+           routine top level). *)
         p "broadcast load is thread-0 guarded under the workgroup axis"
           (count_sub "if (" = 1
           &&

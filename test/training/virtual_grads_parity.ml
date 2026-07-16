@@ -1,16 +1,16 @@
-(* Regression test for the backward stale-local inlining bug (cross-framework parity finding):
-   with a linear layer whose pre-activation (logits = b + w*x) stays Virtual, the executed
-   backward pass of Nn_blocks.cross_entropy_loss computed wrong parameter gradients. The
-   per-statement CSE pass ([Low_level.eliminate_common_subexpressions]) judged an inner-loop
-   recomputation of a virtual node alpha-equivalent to the enclosing iteration's recomputation
-   (free loop symbols were renamed as if bound), replacing it with a [Get_local] of the outer
-   scope's local — so the backward's exp-sum used one class's logit for every class.
+(* Regression test for the backward stale-local inlining bug (cross-framework parity finding): with
+   a linear layer whose pre-activation (logits = b + w*x) stays Virtual, the executed backward pass
+   of Nn_blocks.cross_entropy_loss computed wrong parameter gradients. The per-statement CSE pass
+   ([Low_level.eliminate_common_subexpressions]) judged an inner-loop recomputation of a virtual
+   node alpha-equivalent to the enclosing iteration's recomputation (free loop symbols were renamed
+   as if bound), replacing it with a [Get_local] of the outer scope's local — so the backward's
+   exp-sum used one class's logit for every class.
 
-   Checks parameter gradients (w.grad, b.grad) against a double-precision softmax-CE oracle:
-   dlogits = (softmax(logits) - targets) / batch; dw[c,d] = sum_b dlogits[b,c] * x[b,d];
-   db[c] = sum_b dlogits[b,c]. Also checks the same gradients through the standalone
-   Nn_blocks.softmax formulation neg((targets *. log(softmax logits)) ++ ...), whose max-shift
-   contribution cancels mathematically, so it must produce the same parameter gradients. *)
+   Checks parameter gradients (w.grad, b.grad) against a double-precision softmax-CE oracle: dlogits
+   = (softmax(logits) - targets) / batch; dw[c,d] = sum_b dlogits[b,c] * x[b,d]; db[c] = sum_b
+   dlogits[b,c]. Also checks the same gradients through the standalone Nn_blocks.softmax formulation
+   neg((targets *. log(softmax logits)) ++ ...), whose max-shift contribution cancels
+   mathematically, so it must produce the same parameter gradients. *)
 
 open Base
 open Ocannl
@@ -22,16 +22,17 @@ let batch = 64
 let din = 2
 let classes = 2
 
-(* Fixed pseudo-random but hand-picked-scale data: moderate values so both the log-sum-exp and
-   the naive log(softmax) formulations are finite and well-conditioned. *)
+(* Fixed pseudo-random but hand-picked-scale data: moderate values so both the log-sum-exp and the
+   naive log(softmax) formulations are finite and well-conditioned. *)
 let x_val b d = (Float.of_int (((b * 13) + (d * 7)) % 11) /. 5.5) -. 1.0
 let target_idx b = ((b * 5) + 2) % classes
 let w_val c d = (Float.of_int (((c * 17) + (d * 29)) % 13) /. 6.5) -. 1.0
-let b_val c = (Float.of_int ((c * 7) % 5) /. 5.0) -. 0.4
+let b_val c = (Float.of_int (c * 7 % 5) /. 5.0) -. 0.4
 
 (* Double-precision oracle. *)
 let logit b c =
-  b_val c +. Array.fold (Array.init din ~f:Fn.id) ~init:0. ~f:(fun acc d -> acc +. (w_val c d *. x_val b d))
+  b_val c
+  +. Array.fold (Array.init din ~f:Fn.id) ~init:0. ~f:(fun acc d -> acc +. (w_val c d *. x_val b d))
 
 let probs b =
   let row = Array.init classes ~f:(logit b) in
@@ -40,7 +41,7 @@ let probs b =
   let s = Array.fold e ~init:0. ~f:( +. ) in
   Array.map e ~f:(fun v -> v /. s)
 
-let dlogit b c = ((probs b).(c) -. (if c = target_idx b then 1. else 0.)) /. Float.of_int batch
+let dlogit b c = ((probs b).(c) -. if c = target_idx b then 1. else 0.) /. Float.of_int batch
 
 let expected_db c =
   Array.fold (Array.init batch ~f:Fn.id) ~init:0. ~f:(fun acc b -> acc +. dlogit b c)
@@ -73,7 +74,7 @@ let run_case ~label make_loss =
   in
   let targets =
     NTDSL.init ~l:"targets" ~prec:Ir.Ops.single ~b:[ batch ] ~o:[ classes ]
-      ~f:(function [| b; c |] -> (if c = target_idx b then 1. else 0.) | _ -> assert false)
+      ~f:(function [| b; c |] -> if c = target_idx b then 1. else 0. | _ -> assert false)
       ()
   in
   let w =

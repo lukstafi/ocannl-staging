@@ -58,10 +58,10 @@ let () =
   (* When using as a tutorial, try both with the following source line included and commented out.
      Run with the option --ocannl_output_debug_files_in_build_directory=true and check the
      build_files/ directory for the generated code. Materializing the intermediates lets kernel
-     fission cut the step at every dependency edge, so each nest gets its own launch geometry —
-     the autotuner then makes this ~9x faster than the whole-routine default on Metal. (The
-     historical FIXME(#344) Metal buffer-argument limit no longer applies: buffers bind through
-     the pooled slot table.) *)
+     fission cut the step at every dependency edge, so each nest gets its own launch geometry — the
+     autotuner then makes this ~9x faster than the whole-routine default on Metal. (The historical
+     FIXME(#344) Metal buffer-argument limit no longer applies: buffers bind through the pooled slot
+     table.) *)
   Train.every_non_literal_materialized batch_loss;
   let update = Train.grad_update batch_loss in
   let%op learning_rate = 1 in
@@ -69,11 +69,11 @@ let () =
 
   let ctx = Context.auto () in
   let ctx = Train.init_params ctx bindings batch_loss in
-  (* Tune the step schedule empirically. [rounds:0] keeps only the preset seed candidates,
-     which all preserve reduction order — the trained values are schedule-invariant, so this
-     file's expected output stays deterministic no matter which seed wins. [timing_ctx] gives the
-     tuner a scratch lineage (with its own freshly initialized parameter buffers) to time
-     candidates against, so the timing runs cannot perturb the real training state. *)
+  (* Tune the step schedule empirically. [rounds:0] keeps only the preset seed candidates, which all
+     preserve reduction order — the trained values are schedule-invariant, so this file's expected
+     output stays deterministic no matter which seed wins. [timing_ctx] gives the tuner a scratch
+     lineage (with its own freshly initialized parameter buffers) to time candidates against, so the
+     timing runs cannot perturb the real training state. *)
   let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
   let ctx, sgd_step =
     Autotune.tune ~rounds:0 ~timing_ctx:scratch ctx (Asgns.sequence [ update; sgd ]) bindings

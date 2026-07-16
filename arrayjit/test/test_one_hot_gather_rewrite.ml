@@ -185,9 +185,9 @@ let count_scatters (llc : LL.t) : int * int =
   proc llc;
   (!scatters, !loops)
 
-(* Build the transposed reduction [for k in bounds: d_table[d, k] += (k == ids[b]) * g] where [g]
-   is the incoming-gradient scalar. [fma] selects the fused accumulator shape; otherwise
-   [Add (acc, Where (cmpeq, g, 0))]. *)
+(* Build the transposed reduction [for k in bounds: d_table[d, k] += (k == ids[b]) * g] where [g] is
+   the incoming-gradient scalar. [fma] selects the fused accumulator shape; otherwise [Add (acc,
+   Where (cmpeq, g, 0))]. *)
 let make_transposed_loop ~d_table ~ids ~g ~lhs_idcs ~bounds ~fma =
   let b = Idx.get_symbol () and d = Idx.get_symbol () and k = Idx.get_symbol () in
   let lhs_idcs = lhs_idcs k d in
@@ -231,7 +231,8 @@ let () =
 
   (* Positive: fused FMA accumulator (the shape actual lowering produces). *)
   let pos_fma =
-    make_transposed_loop ~d_table ~ids ~g:g_demb ~lhs_idcs:plain_lhs ~bounds:(0, vocab - 1)
+    make_transposed_loop ~d_table ~ids ~g:g_demb ~lhs_idcs:plain_lhs
+      ~bounds:(0, vocab - 1)
       ~fma:true
   in
   let scatters, loops = count_scatters (LL.rewrite_one_hot_reductions pos_fma) in
@@ -240,18 +241,21 @@ let () =
 
   (* Positive: Add-of-Where accumulator. *)
   let pos_where =
-    make_transposed_loop ~d_table ~ids ~g:g_demb ~lhs_idcs:plain_lhs ~bounds:(0, vocab - 1)
+    make_transposed_loop ~d_table ~ids ~g:g_demb ~lhs_idcs:plain_lhs
+      ~bounds:(0, vocab - 1)
       ~fma:false
   in
   let scatters, loops = count_scatters (LL.rewrite_one_hot_reductions pos_where) in
   p "transposed Add-of-Where form rewrites to Set_dynamic" (scatters = 1 && loops = 0);
 
-  (* Negative: the contribution reads the scattered tensor itself — dropping the per-row
-     iterations could change what it observes. *)
+  (* Negative: the contribution reads the scattered tensor itself — dropping the per-row iterations
+     could change what it observes. *)
   let neg_reads_target =
     make_transposed_loop ~d_table ~ids
       ~g:(fun ~b:_ ~d ~k:_ -> LL.Get (d_table, [| Idx.Iterator d; Idx.Fixed_idx 0 |]))
-      ~lhs_idcs:plain_lhs ~bounds:(0, vocab - 1) ~fma:true
+      ~lhs_idcs:plain_lhs
+      ~bounds:(0, vocab - 1)
+      ~fma:true
   in
   let scatters, loops = count_scatters (LL.rewrite_one_hot_reductions neg_reads_target) in
   p "contribution reading the scattered tensor is not rewritten" (scatters = 0 && loops = 1);
@@ -260,14 +264,17 @@ let () =
   let neg_g_mentions_k =
     make_transposed_loop ~d_table ~ids
       ~g:(fun ~b ~d:_ ~k -> LL.Get (demb, [| Idx.Iterator b; Idx.Iterator k |]))
-      ~lhs_idcs:plain_lhs ~bounds:(0, vocab - 1) ~fma:true
+      ~lhs_idcs:plain_lhs
+      ~bounds:(0, vocab - 1)
+      ~fma:true
   in
   let scatters, loops = count_scatters (LL.rewrite_one_hot_reductions neg_g_mentions_k) in
   p "contribution mentioning the loop var is not rewritten" (scatters = 0 && loops = 1);
 
   (* Negative: partial loop bounds (does not span the full written axis). *)
   let neg_partial =
-    make_transposed_loop ~d_table ~ids ~g:g_demb ~lhs_idcs:plain_lhs ~bounds:(0, vocab - 2)
+    make_transposed_loop ~d_table ~ids ~g:g_demb ~lhs_idcs:plain_lhs
+      ~bounds:(0, vocab - 2)
       ~fma:true
   in
   let scatters, loops = count_scatters (LL.rewrite_one_hot_reductions neg_partial) in
@@ -279,7 +286,8 @@ let () =
       ~d_table:(mk ~dims:[| vocab; vocab |] "dCsq")
       ~ids ~g:g_demb
       ~lhs_idcs:(fun k _d -> [| Idx.Iterator k; Idx.Iterator k |])
-      ~bounds:(0, vocab - 1) ~fma:true
+      ~bounds:(0, vocab - 1)
+      ~fma:true
   in
   let scatters, loops = count_scatters (LL.rewrite_one_hot_reductions neg_twice) in
   p "double-use of loop var in the written indices is not rewritten" (scatters = 0 && loops = 1)

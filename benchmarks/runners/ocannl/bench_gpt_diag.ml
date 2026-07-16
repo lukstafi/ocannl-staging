@@ -1,6 +1,6 @@
-(* Diagnostic for the gpt2_mini forward step's default schedule: prints the fission segment
-   census (kinds, launch geometry, statement counts) on the configured backend, then times a
-   few individual steps. Not part of the benchmark protocol; run manually. *)
+(* Diagnostic for the gpt2_mini forward step's default schedule: prints the fission segment census
+   (kinds, launch geometry, statement counts) on the configured backend, then times a few individual
+   steps. Not part of the benchmark protocol; run manually. *)
 
 open Base
 open Ocannl
@@ -62,8 +62,7 @@ let () =
         let name fmt = Printf.sprintf fmt i in
         let lbl = Printf.sprintf "l%d" i in
         let mha =
-          Nn_blocks.multi_head_attention ~label:[ lbl ] ~num_heads:n_head ~d_k:d_head
-            ~d_v:d_head ()
+          Nn_blocks.multi_head_attention ~label:[ lbl ] ~num_heads:n_head ~d_k:d_head ~d_v:d_head ()
         in
         let ln1 = Nn_blocks.layer_norm ~label:[ "ln1"; lbl ] () in
         let ln2 = Nn_blocks.layer_norm ~label:[ "ln2"; lbl ] () in
@@ -91,9 +90,9 @@ let () =
   let backend = Context.backend_name ctx in
   let limits = Context.hardware_limits ctx in
   let ctx = Train.init_params ctx bindings batch_loss in
-  (* First compile only stashes the lowered code for the census (an explicit transform replaces
-     the default pipeline, so this routine is discarded); the timed routine is compiled with the
-     regular default pipeline below. *)
+  (* First compile only stashes the lowered code for the census (an explicit transform replaces the
+     default pipeline, so this routine is discarded); the timed routine is compiled with the regular
+     default pipeline below. *)
   let stash = ref None in
   let _census_ctx, _census_routine =
     Context.compile

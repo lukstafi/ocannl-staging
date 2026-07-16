@@ -332,8 +332,8 @@ let clean_filename fname =
 
 (* Concurrently running programs (e.g. dune tests) share the working directory, so a flat
    [build_files/] (or [log_files/]) would race on same-named artifacts. Unless overridden by
-   [build_files_prefix], every process gets its own subdirectory derived from the executable
-   name; the sentinel value "." restores the flat legacy layout. *)
+   [build_files_prefix], every process gets its own subdirectory derived from the executable name;
+   the sentinel value "." restores the flat legacy layout. *)
 let artifacts_subdir () =
   match get_global_arg ~default:"" ~arg_name:"build_files_prefix" with
   | "" ->
@@ -347,12 +347,11 @@ let artifacts_subdir () =
 let ensure_artifacts_dir base subdir =
   let dir = match subdir with None -> base | Some p -> filename_concat base p in
   (try assert (Stdlib.Sys.is_directory dir)
-   with Stdlib.Sys_error _ | Assert_failure _ ->
+   with Stdlib.Sys_error _ | Assert_failure _ -> (
      (try assert (Stdlib.Sys.is_directory base)
       with Stdlib.Sys_error _ | Assert_failure _ -> (
         try Stdlib.Sys.mkdir base 0o777 with Stdlib.Sys_error _ -> ()));
-     if Option.is_some subdir then
-       try Stdlib.Sys.mkdir dir 0o777 with Stdlib.Sys_error _ -> ());
+     if Option.is_some subdir then try Stdlib.Sys.mkdir dir 0o777 with Stdlib.Sys_error _ -> ()));
   dir
 
 (** The directory generated-code debug files are written to (created if missing):
@@ -397,10 +396,10 @@ let () =
           Stdio.eprintf "Failed to delete %s (expected a directory): %s\n%!" dirname
             (Exn.to_string exn))
   in
-  (* Cleanup is scoped to this process's own subdirectory (see [artifacts_subdir]), so a
-     starting test cannot delete the in-flight artifacts of a concurrently running one. If the
-     artifact root itself is a symlink, skip the scoped cleanup rather than follow it: appending
-     the subdirectory would resolve through the link, deleting files outside the working tree. *)
+  (* Cleanup is scoped to this process's own subdirectory (see [artifacts_subdir]), so a starting
+     test cannot delete the in-flight artifacts of a concurrently running one. If the artifact root
+     itself is a symlink, skip the scoped cleanup rather than follow it: appending the subdirectory
+     would resolve through the link, deleting files outside the working tree. *)
   let remove_scoped_dir base =
     match artifacts_subdir () with
     | None -> remove_dir_if_exists base

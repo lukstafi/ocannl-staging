@@ -22,24 +22,23 @@ val get_scope : Tnode.t -> scope_id
     an ordinary for-loop. [Grid] / [Workgroup] bind the loop index to a GPU grid / workgroup (block,
     threadgroup) hardware index instead of looping; [Workgroup_reduce] is a [Workgroup] axis
     participating in a workgroup-cooperative reduction (see the contract below). [Unrolled] is
-    emitted as the repeated body with
-    substituted constants. [Vectorized] renders eligible bodies as explicit SIMD code — elementwise
-    statements via vector extensions / packed loads (gh-ocannl-164 / gh-ocannl-463), a single
-    recognized accumulation as independent accumulator chains with a horizontal reduce at exit on
-    CPU backends (gh-ocannl-468) — and everything else as a serial loop annotated with the
-    backend's vectorization pragmas when it provides them (a plain, un-annotated serial loop for
-    accumulating bodies, whose loop-carried dependency the pragmas would deny) — like the hardware
-    kinds, the annotating pass asserts iteration independence or, for a recognized accumulation,
-    licenses reassociating it. Hardware slots are positional: among a kernel's loops of one kind,
-    the innermost binds [.x], then [.y], [.z]. Annotated loops must have [from_ = 0] and
-    iterations with no cross-iteration dependencies ([Vectorized] accumulations again excepted).
+    emitted as the repeated body with substituted constants. [Vectorized] renders eligible bodies as
+    explicit SIMD code — elementwise statements via vector extensions / packed loads (gh-ocannl-164
+    / gh-ocannl-463), a single recognized accumulation as independent accumulator chains with a
+    horizontal reduce at exit on CPU backends (gh-ocannl-468) — and everything else as a serial loop
+    annotated with the backend's vectorization pragmas when it provides them (a plain, un-annotated
+    serial loop for accumulating bodies, whose loop-carried dependency the pragmas would deny) —
+    like the hardware kinds, the annotating pass asserts iteration independence or, for a recognized
+    accumulation, licenses reassociating it. Hardware slots are positional: among a kernel's loops
+    of one kind, the innermost binds [.x], then [.y], [.z]. Annotated loops must have [from_ = 0]
+    and iterations with no cross-iteration dependencies ([Vectorized] accumulations again excepted).
     [Workgroup_reduce] is the labelled exception; its body must either stage its communication
     explicitly through workgroup-shared nodes and barriers (rendered by binding the index like
     [Workgroup]), or be a single accumulation statement [acc = op(acc, contrib)] over an
     associative-commutative [op] with the accumulator's indices free of the loop index — the
-    renderer then owns the communication: warp/simdgroup shuffles on GPU backends
-    (gh-ocannl-462), the plain serial loop on CPU backends. Like [Vectorized], the annotation
-    licenses reassociating the (floating-point) reduction. *)
+    renderer then owns the communication: warp/simdgroup shuffles on GPU backends (gh-ocannl-462),
+    the plain serial loop on CPU backends. Like [Vectorized], the annotation licenses reassociating
+    the (floating-point) reduction. *)
 type axis_type = Serial | Grid | Workgroup | Workgroup_reduce | Unrolled | Vectorized
 [@@deriving sexp, compare, equal]
 
@@ -100,10 +99,10 @@ type t =
           synchronization is deliberately not representable. *)
   | If of { cond : scalar_arg; body : t }
       (** Guarded statement: [body] executes iff [cond] is nonzero (renders as
-          [if (cond != 0) { body }]). Introduced by launch-extent guards on hardware-annotated
-          loops (docs/proposals/axis-types-for-loops.md §2); [simplify_llc] erases a guard whose
-          condition an interval proves. A conditional write is never a definite write;
-          virtualization treats guarded computations as non-inlineable in v1. *)
+          [if (cond != 0) { body }]). Introduced by launch-extent guards on hardware-annotated loops
+          (docs/proposals/axis-types-for-loops.md §2); [simplify_llc] erases a guard whose condition
+          an interval proves. A conditional write is never a definite write; virtualization treats
+          guarded computations as non-inlineable in v1. *)
   | Tile_mma of {
       d : Tnode.t * Indexing.axis_index array;  (** Accumulator block base. *)
       a : Tnode.t * Indexing.axis_index array;
@@ -119,14 +118,13 @@ type t =
       (** Cooperative tile multiply-accumulate (docs/proposals/tensorize-mma.md):
           [d[i,j] += Σ_{l<k} a[i,l] * b[l,j]] for [i < m], [j < n], relative to the operands' base
           index vectors, executed jointly by the threads of the [lane] axis (tensor cores /
-          [simdgroup_matrix]). Each operand's tile spans its tnode's last two axes (row-major;
-          with [ta]/[tb] the stored layout is the role's transpose and emissions use the hardware
+          [simdgroup_matrix]). Each operand's tile spans its tnode's last two axes (row-major; with
+          [ta]/[tb] the stored layout is the role's transpose and emissions use the hardware
           transpose flag); the base indices must not mention [lane]. Constructed by schedule
-          transforms only
-          ({!Schedule.optop.Tensorize}), after the optimization pipeline. Backends without an MMA
-          hook render [fallback] under an [if (lane == 0)] guard. Validates like
-          {!Workgroup_barrier} plus a write of [d] for the coverage rule; see
-          {!validate_parallel}. *)
+          transforms only ({!Schedule.optop.Tensorize}), after the optimization pipeline. Backends
+          without an MMA hook render [fallback] under an [if (lane == 0)] guard. Validates like
+          {!Workgroup_barrier} plus a write of [d] for the coverage rule; see {!validate_parallel}.
+      *)
 [@@deriving sexp_of, equal]
 
 and scalar_t =
@@ -168,12 +166,12 @@ val loop_over_padding_region :
     middle region continues recursing to find padding in other dimensions. *)
 
 val has_accumulation : t -> bool
-(** Whether the tree carries a read-modify-write accumulation: some [Set] (resp. [Set_local])
-    reads its own target — a loop-carried dependency through memory when the written cell does
-    not vary with an enclosing loop. Conservative: [Local_scope] contents count as reading
-    anything, and [Tile_mma] and (gh-466) [Set_dynamic] accumulate by construction. Used by the
-    autotune menu and by codegen fallbacks that must not assert iteration independence (e.g.
-    vectorization pragmas) over an accumulating body (gh-ocannl-468). *)
+(** Whether the tree carries a read-modify-write accumulation: some [Set] (resp. [Set_local]) reads
+    its own target — a loop-carried dependency through memory when the written cell does not vary
+    with an enclosing loop. Conservative: [Local_scope] contents count as reading anything, and
+    [Tile_mma] and (gh-466) [Set_dynamic] accumulate by construction. Used by the autotune menu and
+    by codegen fallbacks that must not assert iteration independence (e.g. vectorization pragmas)
+    over an accumulating body (gh-ocannl-468). *)
 
 (** {2 Hardware axis analyses}
 
@@ -201,14 +199,13 @@ val launch_dims : t -> launch_dims
 
 val validate_parallel : Tnode.Placements.t -> t -> unit
 (** Backend-independent well-formedness of hardware annotations (axis-types proposal §2); a no-op
-    for all-[Serial] code. Raises [Invalid_argument] on structural violations: nonzero [from_],
-    more than 3 slots per kind, annotated loops inside [Local_scope] bodies, barriers under
-    divergent extents or [If] guards, writes to materialized nodes not nested under annotated
-    loops covering {e every} active (non-unit) hardware dimension — launch dimensions are global
-    to the kernel, so an uncovered dimension executes the write once per hardware index — and
-    whole-node [Zero_out] of materialized nodes in multi-threaded kernels (nesting never
-    distributes it). Cannot prove iteration independence — that is the annotating pass's
-    obligation. *)
+    for all-[Serial] code. Raises [Invalid_argument] on structural violations: nonzero [from_], more
+    than 3 slots per kind, annotated loops inside [Local_scope] bodies, barriers under divergent
+    extents or [If] guards, writes to materialized nodes not nested under annotated loops covering
+    {e every} active (non-unit) hardware dimension — launch dimensions are global to the kernel, so
+    an uncovered dimension executes the write once per hardware index — and whole-node [Zero_out] of
+    materialized nodes in multi-threaded kernels (nesting never distributes it). Cannot prove
+    iteration independence — that is the annotating pass's obligation. *)
 
 val guard_annotated_extents : should_guard:([ `Grid | `Workgroup ] -> bool) -> t -> t
 (** Wraps bodies of annotated loops whose extent is below their slot's launch dimension in
@@ -275,15 +272,14 @@ type traced_array = {
           [is_one_hot_selector_assignment] to prove that a [Get(rtn, [k])] will inline to
           [Embed_index k] rather than arbitrary values (task-73617488). *)
   mutable inline_reduction_extent : int;
-      (** The largest product of trip counts of loops that enclose one of the node's setters
-          without appearing in its indices (i.e. reduction loops). Inlining the computation
-          replays these loops at every read site; compared against
-          [virtualize_settings.max_inline_reduction]. *)
+      (** The largest product of trip counts of loops that enclose one of the node's setters without
+          appearing in its indices (i.e. reduction loops). Inlining the computation replays these
+          loops at every read site; compared against [virtualize_settings.max_inline_reduction]. *)
   mutable read_by_other : bool;
       (** True when some statement other than the node's own setters reads the node. Unlike
-          [accesses], same-cell reads count, while a setter's own read-modify-write does not.
-          Gates the recompute-cost guard: a node never read in the routine has no inlining cost,
-          so it must stay eligible for virtual dead-code elimination. *)
+          [accesses], same-cell reads count, while a setter's own read-modify-write does not. Gates
+          the recompute-cost guard: a node never read in the routine has no inlining cost, so it
+          must stay eligible for virtual dead-code elimination. *)
 }
 [@@deriving sexp_of]
 
@@ -311,10 +307,10 @@ type optimize_ctx = {
 val empty_optimize_ctx : unit -> optimize_ctx
 
 val copy_optimize_ctx : optimize_ctx -> optimize_ctx
-(** A shallow-copy fork of the lineage state ([computations] and [placements] tables): the copy
-    sees everything decided so far; its later mutations are invisible to the original and to
-    sibling copies. Backend [compile] forks the incoming context's [optimize_ctx] through this, so
-    sibling candidate compiles from one frontier are hermetic. *)
+(** A shallow-copy fork of the lineage state ([computations] and [placements] tables): the copy sees
+    everything decided so far; its later mutations are invisible to the original and to sibling
+    copies. Backend [compile] forks the incoming context's [optimize_ctx] through this, so sibling
+    candidate compiles from one frontier are hermetic. *)
 
 type optimized = {
   traced_store : traced_store;
@@ -359,15 +355,15 @@ val rewrite_one_hot_reductions : ?static_indices:Indexing.static_symbol list -> 
     per-tensor bounds ({!Tnode.bounds_state}).
 
     gh-466: also rewrites the {e transposed} one-hot pattern -- the embedding-table gradient
-    [for k in \[0, V): tn\[.., k, ..\] += (k == index_expr) * g] where the loop variable indexes
-    the written tensor itself -- into a guarded dynamic scatter-accumulate ({!Set_dynamic}):
-    [if in_range(index_expr): tn\[.., index_expr, ..\] += g], dropping the O(V) per-position work
+    [for k in \[0, V): tn[.., k, ..] += (k == index_expr) * g] where the loop variable indexes the
+    written tensor itself -- into a guarded dynamic scatter-accumulate ({!Set_dynamic}):
+    [if in_range(index_expr): tn[.., index_expr, ..] += g], dropping the O(V) per-position work
     (llm.c's deterministic encoder backward, docs/research/llmc-lessons.md B5). The enclosing
-    position loops keep their original serial order and the schedule analyses never parallelize
-    over a dynamically-written node, preserving determinism without atomics.
+    position loops keep their original serial order and the schedule analyses never parallelize over
+    a dynamically-written node, preserving determinism without atomics.
 
-    Unmatched or unsupported reductions are left unchanged. Called internally by [optimize]
-    between [simplify_llc] and [eliminate_common_subexpressions]; exposed for testing. *)
+    Unmatched or unsupported reductions are left unchanged. Called internally by [optimize] between
+    [simplify_llc] and [eliminate_common_subexpressions]; exposed for testing. *)
 
 val eliminate_common_subexpressions : t -> t
 (** Eliminates common subexpressions within each statement's scalar expression tree. Replaces

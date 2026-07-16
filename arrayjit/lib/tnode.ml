@@ -14,23 +14,22 @@ type memory_mode =
   | Virtual
       (** The tensor node's computations are inlined on a per-scalar basis. The node has no buffer
           in any context; its defining computation is tracked (in [Low_level.optimize_ctx]), so it
-          remains observable: its value can be recomputed on demand, including by later routines
-          and for printing. Observability is inductive, not intrinsic: recomputation requires the
-          nodes the tracked computation reads to be observable themselves, so a [Virtual] node
-          that depends -- directly or transitively through other [Virtual] nodes -- on a [Local]
-          node inherits its unobservability (the recompilation raises the same [User_error]). *)
+          remains observable: its value can be recomputed on demand, including by later routines and
+          for printing. Observability is inductive, not intrinsic: recomputation requires the nodes
+          the tracked computation reads to be observable themselves, so a [Virtual] node that
+          depends -- directly or transitively through other [Virtual] nodes -- on a [Local] node
+          inherits its unobservability (the recompilation raises the same [User_error]). *)
   | Never_virtual  (** An as-yet-unresolved request; resolves to [Local] or [On_device]. *)
   | Local
-      (** Routine-scoped scratch: the tensor node exists only for the duration of a single call to
-          a compiled function, stored to whatever degree the optimizer decides on (e.g. a stack
-          array), and is not persisted across calls. It is not materialized (owns no context
-          buffer) and is not available for merging across devices. Unlike [Virtual] -- which stays
+      (** Routine-scoped scratch: the tensor node exists only for the duration of a single call to a
+          compiled function, stored to whatever degree the optimizer decides on (e.g. a stack
+          array), and is not persisted across calls. It is not materialized (owns no context buffer)
+          and is not available for merging across devices. Unlike [Virtual] -- which stays
           observable via recomputation -- [Local] is {b unobservable}, and the sole source of
-          unobservability: its computation is not tracked, and compiling a later routine that
-          reads it raises a [User_error] directing to mark it as materialized before its first
-          use. This mode is only ever assigned by the
-          compiler (never requested), reserving the freedom to optimize placement of nodes whose
-          lifetime is confined to one routine. *)
+          unobservability: its computation is not tracked, and compiling a later routine that reads
+          it raises a [User_error] directing to mark it as materialized before its first use. This
+          mode is only ever assigned by the compiler (never requested), reserving the freedom to
+          optimize placement of nodes whose lifetime is confined to one routine. *)
   | On_device
       (** The tensor node is stored on the devices that compute with it and persisted across
           function calls. It is available for merging across devices (for devices that support
@@ -46,8 +45,8 @@ type delayed_prec = Default of Ops.prec | Inferred of Ops.prec Lazy.t | Specifie
     propose/settle lifecycle. Writers {e propose} bounds (joined, like [Inferred] promotion); a
     reader that discharges a guard against the candidate {e settles} it (like forcing the prec
     lazy); a post-settlement proposal that does not fit the settled interval is an error (like
-    {!update_prec} on a settled precision) -- otherwise already-generated code that folded a
-    bounds guard away would become unsound.
+    {!update_prec} on a settled precision) -- otherwise already-generated code that folded a bounds
+    guard away would become unsound.
 
     Phase B v1 execution anchoring (binding constraint 3): every compiled device write of a node
     proposes [Interval.top] at lowering time (see [Low_level.optimize_proc]), so a candidate can
@@ -63,19 +62,18 @@ type bounds_state =
 
 let default_namespace = "ocannl"
 
-(** Namespaces must be legal C-family identifiers so they can prefix generated-code identifiers
-    and debug names verbatim (rendered as [ns__n42]); see docs/proposals gh-ocannl-372. *)
+(** Namespaces must be legal C-family identifiers so they can prefix generated-code identifiers and
+    debug names verbatim (rendered as [ns__n42]); see docs/proposals gh-ocannl-372. *)
 let validate_namespace ns =
   let ok_first c = Char.is_alpha c || Char.equal c '_' in
   let ok c = Char.is_alphanum c || Char.equal c '_' in
   if String.is_empty ns || not (ok_first ns.[0] && String.for_all ns ~f:ok) then
     invalid_arg
-      [%string
-        "Tnode: invalid namespace %{String.escaped ns}: must match [A-Za-z_][A-Za-z0-9_]*"]
+      [%string "Tnode: invalid namespace %{String.escaped ns}: must match [A-Za-z_][A-Za-z0-9_]*"]
 
 (* The ambient namespace stamped on newly created tnodes. Only [Tensor.unsafe_reinitialize
-   ~namespace] is meant to change it (via {!set_current_namespace}); explicitly-namespaced
-   creation ([Persistence.load ~prefix_namespace], schedule-internal tile nodes) bypasses it. *)
+   ~namespace] is meant to change it (via {!set_current_namespace}); explicitly-namespaced creation
+   ([Persistence.load ~prefix_namespace], schedule-internal tile nodes) bypasses it. *)
 let current_namespace = ref default_namespace
 
 let set_current_namespace ns =
@@ -104,12 +102,12 @@ type t = {
           schedule-internal nodes). Grads share their value node's session namespace. Elided from
           sexps and renderings when it is {!default_namespace}. *)
   uid : (int[@sexp_drop_if fun _ -> true]);
-      (** Process-unique identity, from a counter that {b no} reinitialization ever resets --
-          unlike {!field-id}, which restarts at 0 on [Tensor.unsafe_reinitialize] for
-          deterministic printing. All comparison/hashing (hence every tnode-keyed map, set and
-          cache in the process) uses [uid], so a stale entry surviving a reinitialization can
-          never alias a fresh tnode that reuses its [id]. Excluded from sexps to keep debug
-          output reinitialization-deterministic. *)
+      (** Process-unique identity, from a counter that {b no} reinitialization ever resets -- unlike
+          {!field-id}, which restarts at 0 on [Tensor.unsafe_reinitialize] for deterministic
+          printing. All comparison/hashing (hence every tnode-keyed map, set and cache in the
+          process) uses [uid], so a stale entry surviving a reinitialization can never alias a fresh
+          tnode that reuses its [id]. Excluded from sexps to keep debug output
+          reinitialization-deterministic. *)
   label : string list;
       (** Display information. It is better if the last element of the list is the most narrow or
           alphanumeric, e.g. an identifier. *)
@@ -118,9 +116,9 @@ type t = {
   mutable bounds : bounds_state;
       (** Scalar value bounds summary; see {!bounds_state} for the lifecycle. *)
   mutable memory_mode : (memory_mode * int) option;
-      (** The tnode's {e declared intent} -- requests made at graph-construction time (parameter
-          and constant marking, [Train.set_materialized], op-support [Never_virtual]), paired with
-          a provenance identifier. Since the context-scoped memory-modes split
+      (** The tnode's {e declared intent} -- requests made at graph-construction time (parameter and
+          constant marking, [Train.set_materialized], op-support [Never_virtual]), paired with a
+          provenance identifier. Since the context-scoped memory-modes split
           (docs/proposals/context-scoped-memory-modes.md) this is monotone, side-effect free to
           read, and never written by the compilation pipeline: placement {e decisions} are
           per-compilation-lineage, recorded in {!module-Placements} tables riding
@@ -128,19 +126,19 @@ type t = {
   mutable observable : bool;
       (** Declared host-observation intent (docs/proposals/context-scoped-memory-modes.md category
           2): someone intends to read this node's values (printing, persistence, inspection).
-          Monotone-upward (set, never cleared) and side-effect free to read. Observation does {b
-          not} require materialization -- a [Virtual] resolution stays observable via recomputation
-          -- so the only constraint this imposes on placement is: do not resolve the node into the
-          [Local]-dependent unobservable class ({!Placements.default_to_most_local} resolves
-          [Never_virtual] to [On_device] rather than [Local] for observable nodes). *)
+          Monotone-upward (set, never cleared) and side-effect free to read. Observation does
+          {b not} require materialization -- a [Virtual] resolution stays observable via
+          recomputation -- so the only constraint this imposes on placement is: do not resolve the
+          node into the [Local]-dependent unobservable class ({!Placements.default_to_most_local}
+          resolves [Never_virtual] to [On_device] rather than [Local] for observable nodes). *)
   mutable host_constant : bool;
-      (** Declared value-constancy: the node's values are fixed at construction and always equal
-          its registered host-init data (an ndarray-backed literal). Set by [Tensor.ndarray] (and
-          eligible loaders), never cleared. This carries the constancy that
-          [Effectively_constant] intent cannot: ndarray-backed nodes are minted [On_device]
-          (provenance 49), so the memory-mode lattice has no room left for the constant marking.
-          Consumed by [Schedule.Stage]'s hoisted packing (gh-ocannl-470) to justify materializing
-          a repacked copy once per device. *)
+      (** Declared value-constancy: the node's values are fixed at construction and always equal its
+          registered host-init data (an ndarray-backed literal). Set by [Tensor.ndarray] (and
+          eligible loaders), never cleared. This carries the constancy that [Effectively_constant]
+          intent cannot: ndarray-backed nodes are minted [On_device] (provenance 49), so the
+          memory-mode lattice has no room left for the constant marking. Consumed by
+          [Schedule.Stage]'s hoisted packing (gh-ocannl-470) to justify materializing a repacked
+          copy once per device. *)
   mutable alias_of : ((t * Indexing.static_symbol) option[@sexp.opaque]);
       (** When [Some (parent, batch_idx)], this node is a zero-copy slice-alias *view* of [parent]:
           it owns no buffer of its own, and every read/write of it is redirected (during lowering)
@@ -310,8 +308,8 @@ let known_constant tn =
     [On_device]-minting ndarray-backed path). *)
 let known_host_constant tn = tn.host_constant || known_constant tn
 
-(** Declares that [tn]'s values are fixed at construction (host-init-backed literal). Monotone:
-    set, never cleared. *)
+(** Declares that [tn]'s values are fixed at construction (host-init-backed literal). Monotone: set,
+    never cleared. *)
 let set_host_constant tn = tn.host_constant <- true
 
 let known_non_virtual tn =
@@ -455,10 +453,10 @@ let get_specified_prec tn =
 
 (** {2 Value-bounds lifecycle} (see {!bounds_state}) *)
 
-(** Joins [iv] into the node's candidate bounds. Post-settlement, instead validates that [iv]
-    fits the settled interval and raises {!Utils.User_error} otherwise -- a wider write after a
-    reader already folded a guard against the bounds would leave compiled code unsound. [what]
-    names the proposing write for the error message. *)
+(** Joins [iv] into the node's candidate bounds. Post-settlement, instead validates that [iv] fits
+    the settled interval and raises {!Utils.User_error} otherwise -- a wider write after a reader
+    already folded a guard against the bounds would leave compiled code unsound. [what] names the
+    proposing write for the error message. *)
 let propose_bounds ~what tn iv =
   match tn.bounds with
   | Bounds_unknown -> tn.bounds <- Bounds_proposed iv
@@ -478,23 +476,21 @@ let propose_bounds ~what tn iv =
                   " that do not fit the settled bounds ";
                   Sexp.to_string_hum (Interval.sexp_of_t s);
                   " -- already-compiled code discharged an in-range guard against the settled \
-                   bounds; write the wider data before compiling readers, or avoid narrowing \
-                   host initializations";
+                   bounds; write the wider data before compiling readers, or avoid narrowing host \
+                   initializations";
                 ])
 
-(** Pins the candidate to [Interval.top]: Phase B v1 execution anchoring for compiled device
-    writes. Post-settlement (of non-top bounds) this raises like any non-fitting proposal. *)
+(** Pins the candidate to [Interval.top]: Phase B v1 execution anchoring for compiled device writes.
+    Post-settlement (of non-top bounds) this raises like any non-fitting proposal. *)
 let pin_bounds_top ~what tn = propose_bounds ~what tn Interval.top
 
 (** The current candidate (or settled) bounds, if any proposal was made. Readers should intersect
     with the precision's machine range themselves. *)
 let bounds_candidate tn =
-  match tn.bounds with
-  | Bounds_unknown -> None
-  | Bounds_proposed iv | Bounds_settled iv -> Some iv
+  match tn.bounds with Bounds_unknown -> None | Bounds_proposed iv | Bounds_settled iv -> Some iv
 
-(** Marks the candidate as consumed by a guard fold. Idempotent; raises if nothing was ever
-    proposed (folds must only consume existing candidates). *)
+(** Marks the candidate as consumed by a guard fold. Idempotent; raises if nothing was ever proposed
+    (folds must only consume existing candidates). *)
 let settle_bounds tn =
   match tn.bounds with
   | Bounds_settled _ -> ()
@@ -503,9 +499,8 @@ let settle_bounds tn =
       invalid_arg @@ "Tnode.settle_bounds: no bounds were proposed for " ^ debug_name tn
 
 (** Whether host-upload scans can profit for this precision: integer storage only -- the current
-    consumers (gather-guard discharge, index-width selection) act on integer-valued facts, and
-    the Phase A folding policy ignores float bounds (binding constraint 8: gate the O(n) scans).
-*)
+    consumers (gather-guard discharge, index-width selection) act on integer-valued facts, and the
+    Phase A folding policy ignores float bounds (binding constraint 8: gate the O(n) scans). *)
 let bounds_scan_worthwhile (prec : Ops.prec) =
   match prec with
   | Ops.Byte_prec _ | Ops.Uint16_prec _ | Ops.Int32_prec _ | Ops.Uint32_prec _ | Ops.Int64_prec _
@@ -515,13 +510,13 @@ let bounds_scan_worthwhile (prec : Ops.prec) =
   | Ops.Single_prec _ | Ops.Double_prec _ ->
       false
 
-(* Single pass directly over the bigarray (binding constraint 8), whole buffer including any
-   padding margins -- the upload copies the margins too, so the halo fill participates in the
-   node's value domain automatically (binding constraint 4). The float view of unsigned storage
-   reinterprets the sign bit ([Nd.fold_as_float] reads uint32/uint64 through
-   [Int32.to_float]/[Int64.to_float]), so map negative readings back to the unsigned value.
-   Endpoints at or above 2^53 are inexact (strict cutoff, binding constraint 6) and nudged
-   outward, covering both the int64-to-float conversion error and the unsigned fixup rounding. *)
+(* Single pass directly over the bigarray (binding constraint 8), whole buffer including any padding
+   margins -- the upload copies the margins too, so the halo fill participates in the node's value
+   domain automatically (binding constraint 4). The float view of unsigned storage reinterprets the
+   sign bit ([Nd.fold_as_float] reads uint32/uint64 through [Int32.to_float]/[Int64.to_float]), so
+   map negative readings back to the unsigned value. Endpoints at or above 2^53 are inexact (strict
+   cutoff, binding constraint 6) and nudged outward, covering both the int64-to-float conversion
+   error and the unsigned fixup rounding. *)
 let scan_host_bounds (prec : Ops.prec) (nd : Nd.t) : Interval.t =
   let fixup =
     match prec with
@@ -536,7 +531,7 @@ let scan_host_bounds (prec : Ops.prec) (nd : Nd.t) : Interval.t =
       if Float.(v < !lo) then lo := v;
       if Float.(v > !hi) then hi := v;
       if not (Float.is_integer v) then integral := false;
-      if not (Float.(abs v < Interval.exact_int_cutoff)) then exact := false);
+      if not Float.(abs v < Interval.exact_int_cutoff) then exact := false);
   if Float.(!lo > !hi) then (* no elements *) Interval.top
   else
     let iv = { Interval.lo = !lo; hi = !hi; integral = !integral; exact = !exact } in
@@ -575,17 +570,17 @@ end
 (** {2 Per-context placement resolution}
 
     The context-scoped side of the memory-mode split
-    (docs/proposals/context-scoped-memory-modes.md): {!field-memory_mode} on the tnode is
-    *declared intent* -- requests made at graph-construction time (user [set_materialized],
-    parameter/constant marking, op-support [Never_virtual]) -- while the *decisions* (resolving to
-    [Virtual] / [Local] / [On_device]) are recorded here, per compilation lineage. A [Placements]
-    table rides [Low_level.optimize_ctx]: it is copied at the start of each backend [compile], so
-    sibling compiles from the same context are hermetic (a candidate compile cannot poison
-    another's placement resolution), while child contexts inherit the lineage's decisions.
+    (docs/proposals/context-scoped-memory-modes.md): {!field-memory_mode} on the tnode is *declared
+    intent* -- requests made at graph-construction time (user [set_materialized], parameter/constant
+    marking, op-support [Never_virtual]) -- while the *decisions* (resolving to [Virtual] / [Local]
+    / [On_device]) are recorded here, per compilation lineage. A [Placements] table rides
+    [Low_level.optimize_ctx]: it is copied at the start of each backend [compile], so sibling
+    compiles from the same context are hermetic (a candidate compile cannot poison another's
+    placement resolution), while child contexts inherit the lineage's decisions.
 
-    Lookups fall back to the tnode's intent when the lineage has not yet decided; updates apply
-    the same lattice as {!update_memory_mode} but never write the tnode. Intent strengthened after
-    a lineage compiled does not invalidate that lineage. *)
+    Lookups fall back to the tnode's intent when the lineage has not yet decided; updates apply the
+    same lattice as {!update_memory_mode} but never write the tnode. Intent strengthened after a
+    lineage compiled does not invalidate that lineage. *)
 module Placements = struct
   open struct
     type tn = t
@@ -621,12 +616,11 @@ module Placements = struct
   (** Kernel-fission escape hatch: strengthen a routine-scoped [Local] decision to [On_device].
       [Local] is only ever a compiler decision (never declared intent), premised on the node's
       lifetime being confined to one kernel launch; when the schedule layer splits a routine into
-      multiple kernels at a point where the node's live range crosses, that premise is withdrawn
-      and the node must own a context buffer. The {!update} lattice deliberately rejects
-      [Local] -> [On_device] (decisions are final within a lineage); this is the one sanctioned
-      override, sound exactly because fission runs between optimization and code generation —
-      before any consumer of the decision (codegen parameter lists, context allocation) has read
-      it. *)
+      multiple kernels at a point where the node's live range crosses, that premise is withdrawn and
+      the node must own a context buffer. The {!update} lattice deliberately rejects [Local] ->
+      [On_device] (decisions are final within a lineage); this is the one sanctioned override, sound
+      exactly because fission runs between optimization and code generation — before any consumer of
+      the decision (codegen parameter lists, context allocation) has read it. *)
   let promote_local_to_device p tn provenance =
     match get p tn with
     | Some (On_device, _) -> ()
@@ -651,11 +645,11 @@ module Placements = struct
 
   let debug p tn = debug_memory_mode (get p tn)
 
-  (** Mirrors the retired tnode-level [default_to_most_local], resolving into the placements
-      table, with two observation guards (docs/proposals/context-scoped-memory-modes.md):
+  (** Mirrors the retired tnode-level [default_to_most_local], resolving into the placements table,
+      with two observation guards (docs/proposals/context-scoped-memory-modes.md):
 
-      - An observable node never defaults to [Local]: [Local] is the unobservable class, and
-        unlike [Virtual] it cannot be served by recomputation.
+      - An observable node never defaults to [Local]: [Local] is the unobservable class, and unlike
+        [Virtual] it cannot be served by recomputation.
       - An observable node still undecided ([None]) at a forcing point materializes instead of
         defaulting to [Virtual]: a node that stayed undecided through optimization has no tracked
         computation (the virtualizer commits every stored candidate at cleanup), so a [Virtual]
@@ -715,9 +709,9 @@ module Placements = struct
     | Some ((Virtual | Local), _) -> false
     | Some (On_device, _) -> true
     | Some (Effectively_constant, _) -> false
-    | Some (Never_virtual, _) ->
+    | Some (Never_virtual, _) -> (
         is_observable tn
-        || (match most_local_materialized_mode tn with On_device -> true | _ -> false)
+        || match most_local_materialized_mode tn with On_device -> true | _ -> false)
 
   let known_not_materialized p tn =
     match get p tn with Some ((Virtual | Local), _) -> true | _ -> false
@@ -840,13 +834,13 @@ let registry = Registry.create 16
 let prec_of_dalayed tn =
   match tn.delayed_prec_unsafe with Default prec | Specified prec | Inferred (lazy prec) -> prec
 
-(* docs/proposals/signed-index-precision.md: index arithmetic is signed int32 unless
-   [large_models] selects int64. Int32 overflow is excluded by contract, not by widening: every
-   index intermediate is bounded by some node's extent by projection construction (axis indices
-   by their dims, conv affine forms by the padded input dim, flat offsets by numel), so
-   validating the padded element count once per node -- here, where dims are forced -- makes
-   every consumer inherit the guarantee. Violation is a hard error naming the node: auto-setting
-   the global flag would be inconsistent across already-compiled routines. *)
+(* docs/proposals/signed-index-precision.md: index arithmetic is signed int32 unless [large_models]
+   selects int64. Int32 overflow is excluded by contract, not by widening: every index intermediate
+   is bounded by some node's extent by projection construction (axis indices by their dims, conv
+   affine forms by the padded input dim, flat offsets by numel), so validating the padded element
+   count once per node -- here, where dims are forced -- makes every consumer inherit the guarantee.
+   Violation is a hard error naming the node: auto-setting the global flag would be inconsistent
+   across already-compiled routines. *)
 let validate_padded_numel_contract ~id ~label (dims : int array) =
   if not Utils.settings.large_models then
     let n = Array.fold dims ~init:1 ~f:( * ) in
@@ -873,8 +867,7 @@ let create ?namespace delayed_prec ~id ~label ~unpadded_dims ~padding () =
          match Lazy.force padding with
          | None -> unpadded
          | Some (padding_arr, _) ->
-             Array.map2_exn unpadded padding_arr ~f:(fun d Ops.{ left; right } ->
-                 d + left + right)
+             Array.map2_exn unpadded padding_arr ~f:(fun d Ops.{ left; right } -> d + left + right)
        in
        validate_padded_numel_contract ~id ~label padded;
        padded)
@@ -963,8 +956,7 @@ let create_with_reshape ~id ~label ~base_ndarray ~unpadded_dims ~padding ~from_p
          match Lazy.force padding with
          | None -> unpadded
          | Some (padding_arr, _) ->
-             Array.map2_exn unpadded padding_arr ~f:(fun d Ops.{ left; right } ->
-                 d + left + right)
+             Array.map2_exn unpadded padding_arr ~f:(fun d Ops.{ left; right } -> d + left + right)
        in
        validate_padded_numel_contract ~id ~label padded;
        padded)
@@ -1067,8 +1059,8 @@ let find_namespaced =
   in
   (* Caveat: ([namespace], [id]) pairs are reused across a [Tensor.unsafe_reinitialize] into the
      same namespace, so if a pre-reinitialization node with this pair is still reachable, lookups
-     may return it instead of the current session's node. Debug-resolution only;
-     identity-sensitive code must hold the tnode itself. *)
+     may return it instead of the current session's node. Debug-resolution only; identity-sensitive
+     code must hold the tnode itself. *)
   fun ~namespace ~id -> Registry.find_opt registry { mock with id; namespace }
 
 (* Session-internal resolution: the ambient {!current_namespace} is what these callers mean. *)

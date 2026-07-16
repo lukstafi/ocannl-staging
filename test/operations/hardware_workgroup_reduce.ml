@@ -1,6 +1,5 @@
 (* Axis-type annotations, Phase C (docs/proposals/axis-types-for-loops.md §3): an executed
-   shared-memory workgroup reduction (tinygrad's GROUP_REDUCE pattern) against the serial
-   reduction.
+   shared-memory workgroup reduction (tinygrad's GROUP_REDUCE pattern) against the serial reduction.
 
    The surrogate computation [s = sum v] (64 elements) is compiled twice: once as lowered
    (all-Serial), and once with its lowered body REPLACED via [?lowered_transform] by a hand-built
@@ -11,8 +10,8 @@
    ([threadgroup] / [__shared__]) instead of a per-thread stack array.
 
    On GPU backends (Metal locally, CUDA in CI) the kernel runs with a 64-thread workgroup and its
-   result must match the serial sum. The C backends cannot implement barriers or shared placement
-   by serialization; they must reject the kernel with a clear [Invalid_argument] -- that clean
+   result must match the serial sum. The C backends cannot implement barriers or shared placement by
+   serialization; they must reject the kernel with a clear [Invalid_argument] -- that clean
    rejection is what this test pins there, so every printed boolean holds on every backend. *)
 
 open Base
@@ -29,7 +28,6 @@ let n = 64
 let vv = Array.init n ~f:(fun i -> (Float.of_int i *. 0.5) -. 7.)
 let expected_sum = Array.fold vv ~init:0. ~f:( +. )
 let approx a b = Float.(abs (a - b) < 1e-3)
-
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
 let has_barriers =
@@ -61,7 +59,14 @@ let group_reduce ~(v : Tn.t) ~(s : Tn.t) (opt : LL.optimized) : LL.optimized =
   let wg body_f : LL.t =
     let i = Idx.get_symbol () in
     LL.For_loop
-      { index = i; from_ = 0; to_ = n - 1; body = body_f i; trace_it = false; axis = Workgroup_reduce }
+      {
+        index = i;
+        from_ = 0;
+        to_ = n - 1;
+        body = body_f i;
+        trace_it = false;
+        axis = Workgroup_reduce;
+      }
   in
   let load =
     wg (fun i -> LL.Set { tn = partial; idcs = [| it i |]; llsc = Get (v, [| it i |]); debug = "" })
@@ -85,8 +90,8 @@ let group_reduce ~(v : Tn.t) ~(s : Tn.t) (opt : LL.optimized) : LL.optimized =
                     Binop
                       ( Ir.Ops.Add,
                         (Get (partial, [| it i |]), single),
-                        (Get (partial, [| Idx.Affine { symbols = [ (1, i) ]; offset = stride } |]),
-                         single) );
+                        ( Get (partial, [| Idx.Affine { symbols = [ (1, i) ]; offset = stride } |]),
+                          single ) );
                   debug = "";
                 };
           })
@@ -96,26 +101,25 @@ let group_reduce ~(v : Tn.t) ~(s : Tn.t) (opt : LL.optimized) : LL.optimized =
         LL.If
           {
             cond =
-              ( LL.Binop
-                  (Ir.Ops.Cmpeq, (LL.Embed_index (it i), iprec), (LL.Constant 0., iprec)),
+              ( LL.Binop (Ir.Ops.Cmpeq, (LL.Embed_index (it i), iprec), (LL.Constant 0., iprec)),
                 iprec );
             body =
               LL.Set
-                { tn = s; idcs = [| Idx.Fixed_idx 0 |]; llsc = Get (partial, [| Idx.Fixed_idx 0 |]);
-                  debug = "" };
+                {
+                  tn = s;
+                  idcs = [| Idx.Fixed_idx 0 |];
+                  llsc = Get (partial, [| Idx.Fixed_idx 0 |]);
+                  debug = "";
+                };
           })
   in
   let strides = [ 32; 16; 8; 4; 2; 1 ] in
   let stmts =
-    (load :: LL.Workgroup_barrier
-    :: List.concat_map strides ~f:(fun st -> [ stage st; LL.Workgroup_barrier ]))
+    load :: LL.Workgroup_barrier
+    :: List.concat_map strides ~f:(fun st -> [ stage st; LL.Workgroup_barrier ])
     @ [ write_out ]
   in
-  {
-    opt with
-    llc = LL.unflat_lines stmts;
-    workgroup_shared = Set.add opt.workgroup_shared partial;
-  }
+  { opt with llc = LL.unflat_lines stmts; workgroup_shared = Set.add opt.workgroup_shared partial }
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }

@@ -19,12 +19,12 @@ let train_once ~seed () : run_result =
   Utils.settings.fixed_state_for_init <- Some seed;
   Tensor.unsafe_reinitialize ();
   (* The global default param init is a centered, scaled uniform [-0.25, 0.25) with low signal
-     energy. This relu-MLP hinge-loss recipe needs |f(x)| ~ 1 to separate the half-moons, so we pin a
-     higher-energy fan-scaled init locally (mirroring the conv training tests, which likewise override
-     the global default). The classic Glorot bound sqrt(6/(fan_in+fan_out)): with the actual fans of
-     the 16-wide hidden layers (the fan products used to silently resolve to 1), the previous
-     scale_sq 2.0 left the scalar output too small for the hinge loss to separate within the epoch
-     budget. *)
+     energy. This relu-MLP hinge-loss recipe needs |f(x)| ~ 1 to separate the half-moons, so we pin
+     a higher-energy fan-scaled init locally (mirroring the conv training tests, which likewise
+     override the global default). The classic Glorot bound sqrt(6/(fan_in+fan_out)): with the
+     actual fans of the 16-wide hidden layers (the fan products used to silently resolve to 1), the
+     previous scale_sq 2.0 left the scalar output too small for the hinge loss to separate within
+     the epoch budget. *)
   TDSL.default_param_init := NTDSL.xavier ~scale_sq:6.0 TDSL.O.uniform1;
   let ctx = Context.auto () in
   let open Operation.At in

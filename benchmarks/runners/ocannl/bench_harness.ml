@@ -1,7 +1,7 @@
-(* Shared scaffolding for the OCANNL benchmark runners: fixture metadata access, weight
-   injection into block-created params by debug-name tokens, the measurement protocol
-   (parity losses, warmup, per-step-synced percentiles, queued mean), and JSON emission.
-   See benchmarks/README.md for the protocol. *)
+(* Shared scaffolding for the OCANNL benchmark runners: fixture metadata access, weight injection
+   into block-created params by debug-name tokens, the measurement protocol (parity losses, warmup,
+   per-step-synced percentiles, queued mean), and JSON emission. See benchmarks/README.md for the
+   protocol. *)
 
 open Base
 open Ocannl
@@ -10,9 +10,7 @@ module Tn = Ir.Tnode
 
 let get_meta st k = List.Assoc.find_exn (St.metadata st) ~equal:String.equal k
 let meta_int st k = Int.of_string (get_meta st k)
-
-let env_flag name =
-  match Stdlib.Sys.getenv_opt name with Some "1" -> true | _ -> false
+let env_flag name = match Stdlib.Sys.getenv_opt name with Some "1" -> true | _ -> false
 
 let percentile sorted p =
   let n = Array.length sorted in
@@ -24,8 +22,8 @@ let floats_of_gen g =
   let a1 = Bigarray.reshape_1 g n in
   Array.init n ~f:(Bigarray.Array1.get a1)
 
-(* Debug-name token matching: a param matches a fixture key when every required token appears
-   among the underscore-separated tokens of its debug name. *)
+(* Debug-name token matching: a param matches a fixture key when every required token appears among
+   the underscore-separated tokens of its debug name. *)
 let tokens_of dn = String.split dn ~on:'_' |> List.filter ~f:(Fn.non String.is_empty)
 
 let matches ~required dn =
@@ -33,9 +31,9 @@ let matches ~required dn =
   List.for_all required ~f:(fun t -> List.mem toks t ~equal:String.equal)
 
 (** [inject ctx st loss mapping] overwrites each param of [loss] with the fixture tensor whose
-    required tokens all appear in the param's debug name. [mapping]: (fixture_key, required
-    tokens). Every param must match exactly one mapping entry (and sizes must agree). Params
-    matching no entry are left at their initialization (pass them deliberately!). *)
+    required tokens all appear in the param's debug name. [mapping]: (fixture_key, required tokens).
+    Every param must match exactly one mapping entry (and sizes must agree). Params matching no
+    entry are left at their initialization (pass them deliberately!). *)
 let inject ctx st loss mapping =
   Set.fold loss.Tensor.params ~init:ctx ~f:(fun ctx p ->
       let tn = p.Tensor.value in
@@ -62,10 +60,10 @@ let dump_params loss =
         (String.concat ~sep:";"
            (Array.to_list (Array.map (Lazy.force tn.Tn.dims) ~f:Int.to_string))))
 
-(** Diagnostic: prints the default fission-pipeline segment census for the captured lowered
-    routine — per segment its kind, launch geometry and schedule size, and per top-level nest
-    the loop extents (with axis-type letters) and written tensor nodes ([!] materialized, [~]
-    routine-local). Used by the [bench_*_diag] runners; not part of the benchmark protocol. *)
+(** Diagnostic: prints the default fission-pipeline segment census for the captured lowered routine
+    — per segment its kind, launch geometry and schedule size, and per top-level nest the loop
+    extents (with axis-type letters) and written tensor nodes ([!] materialized, [~] routine-local).
+    Used by the [bench_*_diag] runners; not part of the benchmark protocol. *)
 let print_census ?promote_locals ~backend ~limits ~static_indices opt =
   let module LL = Ir.Low_level in
   let module Sched = Ir.Schedule in
@@ -73,8 +71,8 @@ let print_census ?promote_locals ~backend ~limits ~static_indices opt =
     let loops = ref [] and writes = ref [] and zeros = ref [] in
     let rec code (llc : LL.t) =
       match llc with
-      | LL.Noop | LL.Comment _ | LL.Declare_local _ | LL.Staged_compilation _
-      | LL.Workgroup_barrier | LL.Tile_mma _ ->
+      | LL.Noop | LL.Comment _ | LL.Declare_local _ | LL.Staged_compilation _ | LL.Workgroup_barrier
+      | LL.Tile_mma _ ->
           ()
       | LL.Seq (a, b) ->
           code a;
@@ -128,23 +126,21 @@ let print_census ?promote_locals ~backend ~limits ~static_indices opt =
         dims.block.(2) (List.length sched) stmts;
       let plc = pre.LL.optimize_ctx.LL.placements in
       List.iter (LL.flat_lines [ pre.LL.llc ]) ~f:(fun stmt ->
-          match stmt_detail plc stmt with
-          | Some s -> Stdio.printf "        %s\n" s
-          | None -> ()));
+          match stmt_detail plc stmt with Some s -> Stdio.printf "        %s\n" s | None -> ()));
   Stdio.Out_channel.flush Stdio.stdout
 
-(** Runs the measurement protocol and prints the JSON result line. [run_step] advances the
-    batch binding and enqueues one step; [read_loss] returns the current loss value (awaits
-    the device); [sync] awaits all queued work. *)
-let measure_and_emit ~st ~backend ~variant ~compile_s ?tokens_per_step ~run_step ~read_loss
-    ~sync () =
+(** Runs the measurement protocol and prints the JSON result line. [run_step] advances the batch
+    binding and enqueues one step; [read_loss] returns the current loss value (awaits the device);
+    [sync] awaits all queued work. *)
+let measure_and_emit ~st ~backend ~variant ~compile_s ?tokens_per_step ~run_step ~read_loss ~sync ()
+    =
   let workload = get_meta st "name" in
   let parity_steps = meta_int st "parity_steps" in
   let warmup_steps = meta_int st "warmup_steps" in
   let timed_steps = meta_int st "timed_steps" in
   Stdio.eprintf "bench: compiled in %.1fs, starting %d parity steps\n%!" compile_s parity_steps;
-  (* Monotonic high-resolution clock (not [Unix.gettimeofday]): on Windows the latter ticks at
-     ~1 ms, which floors sub-millisecond step times to 0. *)
+  (* Monotonic high-resolution clock (not [Unix.gettimeofday]): on Windows the latter ticks at ~1
+     ms, which floors sub-millisecond step times to 0. *)
   let elapsed_ms c0 = Mtime.Span.to_float_ns (Mtime_clock.count c0) /. 1e6 in
   let losses =
     Array.init parity_steps ~f:(fun i ->
@@ -176,12 +172,10 @@ let measure_and_emit ~st ~backend ~variant ~compile_s ?tokens_per_step ~run_step
     String.concat ~sep:"," (Array.to_list (Array.map arr ~f:(Printf.sprintf "%.9g")))
   in
   let tokens_field =
-    match tokens_per_step with
-    | Some t -> Printf.sprintf {|"tokens_per_step":%d,|} t
-    | None -> ""
+    match tokens_per_step with Some t -> Printf.sprintf {|"tokens_per_step":%d,|} t | None -> ""
   in
   Stdio.printf
     {|{"framework":"ocannl","backend":"%s","variant":"%s","workload":"%s","compile_s":%.3f,%s"step_ms":{"p10":%.6g,"p50":%.6g,"p90":%.6g},"queued_step_ms":%.6g,"timed_steps":%d,"losses":[%s]}|}
-    backend variant workload compile_s tokens_field (percentile synced 10.)
-    (percentile synced 50.) (percentile synced 90.) queued_ms timed_steps (json_floats losses);
+    backend variant workload compile_s tokens_field (percentile synced 10.) (percentile synced 50.)
+    (percentile synced 90.) queued_ms timed_steps (json_floats losses);
   Stdio.printf "\n"

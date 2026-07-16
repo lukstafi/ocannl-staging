@@ -2,12 +2,12 @@
    privatized fission-candidate flavor: detection of a materialized read-modify-write accumulator
    and executed parity of the privatized schedule.
 
-   [mc = ma * mb] with a materialized output lowers to [Zero_out mc] plus a serial nest
-   accumulating [mc[i,j] += ma[i,k] * mb[k,j]]. The extension over the backend's default preset
-   (which may well be empty here — the whole-routine annotator bails on the materialized
-   [Zero_out]; the fission pipeline separates zeros into their own segments) must append exactly
-   one [Privatize] targeting [mc] over the serial reduction loop, and applying the extended
-   schedule must compute the same values as the identity-transform twin. *)
+   [mc = ma * mb] with a materialized output lowers to [Zero_out mc] plus a serial nest accumulating
+   [mc[i,j] += ma[i,k] * mb[k,j]]. The extension over the backend's default preset (which may well
+   be empty here — the whole-routine annotator bails on the materialized [Zero_out]; the fission
+   pipeline separates zeros into their own segments) must append exactly one [Privatize] targeting
+   [mc] over the serial reduction loop, and applying the extended schedule must compute the same
+   values as the identity-transform twin. *)
 
 open Base
 open Ocannl
@@ -69,5 +69,4 @@ let () =
   let ctx_a = Context.run ctx_a routine_a in
   let got_priv = Context.get_values ctx_a mc1.Tensor.value in
   p "extension appends exactly one Privatize targeting the accumulator" (!n_privatize = 1);
-  p "privatized preset matches the identity twin"
-    (Array.for_all2_exn got_priv got_naive ~f:approx)
+  p "privatized preset matches the identity twin" (Array.for_all2_exn got_priv got_naive ~f:approx)

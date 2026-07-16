@@ -13,15 +13,14 @@ open Base
       operation").
     - {b NaN-freedom}: a non-[top] interval asserts the value cannot be NaN. Any rule whose result
       may be NaN returns [top]. [lo = nan] never occurs.
-    - [integral] asserts every possible {e machine} value is a mathematical integer (note that
-      every float of magnitude >= 2^53 is an integer, so integrality survives float rounding).
+    - [integral] asserts every possible {e machine} value is a mathematical integer (note that every
+      float of magnitude >= 2^53 is an integer, so integrality survives float rounding).
     - [exact] asserts the endpoints represent the true bounds exactly; in particular
-      [abs endpoint < 2^53] when [integral] (strict: 2^53 + 1 rounds {e to} 2^53, binding
-      constraint 6). Equality/singleton folds additionally require [exact]: two distinct integers
-      above 2^53 may round to the same float. *)
+      [abs endpoint < 2^53] when [integral] (strict: 2^53 + 1 rounds {e to} 2^53, binding constraint
+      6). Equality/singleton folds additionally require [exact]: two distinct integers above 2^53
+      may round to the same float. *)
 
-type t = { lo : float; hi : float; integral : bool; exact : bool }
-[@@deriving sexp, compare, equal]
+type t = { lo : float; hi : float; integral : bool; exact : bool } [@@deriving sexp, compare, equal]
 
 let top = { lo = Float.neg_infinity; hi = Float.infinity; integral = false; exact = false }
 let is_top { lo; hi; _ } = Float.(lo = neg_infinity) && Float.(hi = infinity)
@@ -32,8 +31,8 @@ let exact_int_cutoff = 9007199254740992.0
 
 let endpoint_exact v = Float.is_finite v && Float.(abs v < exact_int_cutoff)
 
-(** Constructs the singleton interval of a float value. NaN gives [top]; infinities give
-    non-[exact] singletons (they never participate in folds). *)
+(** Constructs the singleton interval of a float value. NaN gives [top]; infinities give non-[exact]
+    singletons (they never participate in folds). *)
 let point v =
   if Float.is_nan v then top
   else { lo = v; hi = v; integral = Float.is_integer v; exact = Float.is_finite v }
@@ -49,14 +48,11 @@ let of_int_range lo hi =
   let flo = Float.of_int lo and fhi = Float.of_int hi in
   { lo = flo; hi = fhi; integral = true; exact = endpoint_exact flo && endpoint_exact fhi }
 
-(** Nudges endpoints outward by two ulps to absorb the round-to-nearest error of endpoint
-    arithmetic (one ulp would do for a single operation; two is safety margin). Used whenever an
-    arithmetic rule cannot guarantee exactly-representable endpoints, preserving the outwardness
-    invariant. *)
+(** Nudges endpoints outward by two ulps to absorb the round-to-nearest error of endpoint arithmetic
+    (one ulp would do for a single operation; two is safety margin). Used whenever an arithmetic
+    rule cannot guarantee exactly-representable endpoints, preserving the outwardness invariant. *)
 let round_out iv =
-  let down v =
-    if Float.is_finite v then Float.one_ulp `Down (Float.one_ulp `Down v) else v
-  in
+  let down v = if Float.is_finite v then Float.one_ulp `Down (Float.one_ulp `Down v) else v in
   let up v = if Float.is_finite v then Float.one_ulp `Up (Float.one_ulp `Up v) else v in
   { iv with lo = down iv.lo; hi = up iv.hi; exact = false }
 
@@ -80,9 +76,9 @@ let inter a b =
     exact = a.exact && b.exact;
   }
 
-(** Value-set containment: every value admitted by [inner] is admitted by [outer]. Used to
-    validate proposals against settled bounds. Conservative: outward-rounded [inner] endpoints can
-    only cause false rejections, never false acceptance. *)
+(** Value-set containment: every value admitted by [inner] is admitted by [outer]. Used to validate
+    proposals against settled bounds. Conservative: outward-rounded [inner] endpoints can only cause
+    false rejections, never false acceptance. *)
 let is_within ~outer inner =
   Float.(inner.lo >= outer.lo)
   && Float.(inner.hi <= outer.hi)
@@ -126,9 +122,9 @@ let dtype_range (prec : Ops.prec) =
   | Ops.Single_prec _ | Ops.Double_prec _ ->
       top
 
-(** The largest magnitude up to which a float precision represents every integer exactly.
-    bfloat16 has 7 mantissa bits, hence 256 -- not fp16's 2048 (binding constraint 5; witness:
-    257 is unrepresentable in bfloat16). fp8 is conservatively 8 (covers both e4m3 and e5m2). *)
+(** The largest magnitude up to which a float precision represents every integer exactly. bfloat16
+    has 7 mantissa bits, hence 256 -- not fp16's 2048 (binding constraint 5; witness: 257 is
+    unrepresentable in bfloat16). fp8 is conservatively 8 (covers both e4m3 and e5m2). *)
 let float_exact_int_limit (prec : Ops.prec) =
   match prec with
   | Ops.Fp8_prec _ -> Some 8.
@@ -143,8 +139,8 @@ let float_exact_int_limit (prec : Ops.prec) =
 (** [at_prec prec iv] makes [iv] valid for the machine value of an expression computed at (or
     converted into) precision [prec].
 
-    - Integer precisions: a provably-in-range exact integral interval passes through; anything
-      else falls back to {!dtype_range} -- out-of-range casts wrap (binding constraint 5), and in
+    - Integer precisions: a provably-in-range exact integral interval passes through; anything else
+      falls back to {!dtype_range} -- out-of-range casts wrap (binding constraint 5), and in
       particular a lower bound that could cross zero at an unsigned precision widens to the full
       unsigned range rather than being trusted (binding constraint 7: the "crosses zero" rule,
       implemented as widening instead of an assert so it stays sound if an emitter ever produces
@@ -162,8 +158,8 @@ let at_prec (prec : Ops.prec) iv =
   | Ops.Uint64_prec _ ->
       let r = dtype_range prec in
       if iv.integral && iv.exact && Float.(iv.lo >= r.lo) && Float.(iv.hi <= r.hi) then iv else r
-  | Ops.Half_prec _ | Ops.Bfloat16_prec _ | Ops.Fp8_prec _ | Ops.Single_prec _
-  | Ops.Double_prec _ -> (
+  | Ops.Half_prec _ | Ops.Bfloat16_prec _ | Ops.Fp8_prec _ | Ops.Single_prec _ | Ops.Double_prec _
+    -> (
       match float_exact_int_limit prec with
       | Some lim
         when iv.integral && iv.exact && Float.(abs iv.lo <= lim) && Float.(abs iv.hi <= lim) ->
@@ -173,15 +169,15 @@ let at_prec (prec : Ops.prec) iv =
 (** {2 Endpoint arithmetic}
 
     All rules take machine-valid operand intervals and return the {e real-arithmetic} result
-    interval; callers apply {!at_prec} to account for the precision the operation actually
-    computes in. Rules requiring finite endpoints return [top] otherwise (this also excludes
-    operands that may be NaN, per the NaN-freedom invariant: [top] in, [top] out). *)
+    interval; callers apply {!at_prec} to account for the precision the operation actually computes
+    in. Rules requiring finite endpoints return [top] otherwise (this also excludes operands that
+    may be NaN, per the NaN-freedom invariant: [top] in, [top] out). *)
 
 let all_finite l = List.for_all l ~f:Float.is_finite
 
-(* Exactness of add/sub/mul results: both operands exact and integral and the result endpoints
-   below the cutoff -- integer arithmetic representable exactly in float. Otherwise nudge outward
-   to absorb round-to-nearest (outwardness invariant). *)
+(* Exactness of add/sub/mul results: both operands exact and integral and the result endpoints below
+   the cutoff -- integer arithmetic representable exactly in float. Otherwise nudge outward to
+   absorb round-to-nearest (outwardness invariant). *)
 let arith_result a b lo hi =
   let integral = a.integral && b.integral in
   let exact = a.exact && b.exact && integral && endpoint_exact lo && endpoint_exact hi in
@@ -197,11 +193,11 @@ let sub a b =
   else top
 
 let mul a b =
-  if all_finite [ a.lo; a.hi; b.lo; b.hi ] then (
+  if all_finite [ a.lo; a.hi; b.lo; b.hi ] then
     let products = [ a.lo *. b.lo; a.lo *. b.hi; a.hi *. b.lo; a.hi *. b.hi ] in
     let lo = List.reduce_exn products ~f:Float.min in
     let hi = List.reduce_exn products ~f:Float.max in
-    arith_result a b lo hi)
+    arith_result a b lo hi
   else top
 
 (** Division: [top] when the divisor interval contains 0 (or anything is unbounded); real-endpoint
@@ -212,16 +208,16 @@ let div a b =
   if
     all_finite [ a.lo; a.hi; b.lo; b.hi ]
     && ((Float.(b.lo > 0.) && Float.(b.hi > 0.)) || (Float.(b.lo < 0.) && Float.(b.hi < 0.)))
-  then (
+  then
     let quotients = [ a.lo /. b.lo; a.lo /. b.hi; a.hi /. b.lo; a.hi /. b.hi ] in
     let lo = List.reduce_exn quotients ~f:Float.min in
     let hi = List.reduce_exn quotients ~f:Float.max in
-    round_out { lo; hi; integral = false; exact = false })
+    round_out { lo; hi; integral = false; exact = false }
   else top
 
 (** Modulo, proposal rule: divisor an exact positive integral singleton [c] and a non-negative
-    integral argument give [[0, min (hi, c-1)]]; anything else is [top] (avoids the C remainder
-    sign traps). *)
+    integral argument give [[0, min (hi, c-1)]]; anything else is [top] (avoids the C remainder sign
+    traps). *)
 let mod_ a b =
   if
     is_singleton b && b.integral
@@ -234,8 +230,8 @@ let mod_ a b =
     { lo = 0.; hi; integral = true; exact = endpoint_exact hi }
   else top
 
-(* Max/Min: endpoint selection, no arithmetic error. [top] operands are rejected wholesale
-   because the OCaml interpreter's [Float.max] and C's [fmax] disagree on NaN. *)
+(* Max/Min: endpoint selection, no arithmetic error. [top] operands are rejected wholesale because
+   the OCaml interpreter's [Float.max] and C's [fmax] disagree on NaN. *)
 let max_ a b =
   if is_top a || is_top b then top
   else
@@ -256,8 +252,8 @@ let min_ a b =
       exact = a.exact && b.exact;
     }
 
-(** ReLU: [fmax(0, x)] maps NaN to 0 in C, and [Ops.interpret_unop] agrees, so even a [top]
-    argument yields a genuine lower bound of 0. *)
+(** ReLU: [fmax(0, x)] maps NaN to 0 in C, and [Ops.interpret_unop] agrees, so even a [top] argument
+    yields a genuine lower bound of 0. *)
 let relu a =
   {
     lo = Float.max 0. a.lo;
@@ -273,7 +269,12 @@ let trunc a =
   if is_top a then top
   else
     let t v = Float.round_towards_zero v in
-    { lo = t a.lo; hi = t a.hi; integral = true; exact = a.exact && endpoint_exact (t a.lo) && endpoint_exact (t a.hi) }
+    {
+      lo = t a.lo;
+      hi = t a.hi;
+      integral = true;
+      exact = a.exact && endpoint_exact (t a.lo) && endpoint_exact (t a.hi);
+    }
 
 (** Saturation to [[0, 1]]: monotone clamping. [top] arguments stay [top]: the OCaml interpreter
     returns NaN for NaN (C's [fmax]/[fmin] chain would give a number), so a possibly-NaN argument
@@ -290,11 +291,9 @@ let exp_like a =
 
 (** Codomain bound for [Sin]/[Cos]/[Tanh_approx]: [[-1, 1]] (libm and the GPU intrinsics respect
     it); NaN maps to NaN, so [top] stays [top]. *)
-let abs_le_1 a =
-  if is_top a then top else { lo = -1.; hi = 1.; integral = false; exact = false }
+let abs_le_1 a = if is_top a then top else { lo = -1.; hi = 1.; integral = false; exact = false }
 
-(** Codomain bound for [Sqrt]: requires a provably non-negative argument (else NaN is possible).
-*)
+(** Codomain bound for [Sqrt]: requires a provably non-negative argument (else NaN is possible). *)
 let sqrt_ a =
   if (not (is_top a)) && Float.(a.lo >= 0.) then
     { lo = 0.; hi = Float.infinity; integral = false; exact = false }
@@ -311,9 +310,9 @@ let false_ = { lo = 0.; hi = 0.; integral = true; exact = true }
 
     Decisions rely on the outwardness invariant; equality-true additionally requires exact
     singletons (binding constraint 6). NaN safety: a possibly-NaN operand implies a [top] interval
-    whose infinite endpoints never satisfy the strict inequalities, so a fold-to-true never fires
-    on possibly-NaN operands; fold-to-false agrees with NaN comparison semantics (false) in both C
-    and the OCaml interpreter. *)
+    whose infinite endpoints never satisfy the strict inequalities, so a fold-to-true never fires on
+    possibly-NaN operands; fold-to-false agrees with NaN comparison semantics (false) in both C and
+    the OCaml interpreter. *)
 
 (** Whether [a < b] is decided: [Some true]/[Some false]/[None]. *)
 let cmplt_decides a b =

@@ -14,9 +14,9 @@ let _get_local_debug_runtime = Utils.get_local_debug_runtime
 
 open Backend_intf
 
-(* The backend's concrete buffer-pointer type lives here, in the implementation-facing layer --
-   NOT in the shared {!Backend_intf}, which only ever speaks {!Backend_intf.buffer_loc}. It is
-   used by the raw allocator and the backend-private pool tables. *)
+(* The backend's concrete buffer-pointer type lives here, in the implementation-facing layer -- NOT
+   in the shared {!Backend_intf}, which only ever speaks {!Backend_intf.buffer_loc}. It is used by
+   the raw allocator and the backend-private pool tables. *)
 module type Buffer = sig
   type buffer_ptr [@@deriving sexp_of]
 end
@@ -58,10 +58,9 @@ module No_device_buffer_and_copying () :
       ignore (Atomic.fetch_and_add used_memory ~-size_in_bytes : int)
     in
     (* Over-allocate and advance to the next [Ops.buffer_alignment] boundary: [Ctypes.allocate_n]
-       (calloc) only guarantees the ABI's ~16 bytes, short of AVX/NEON vector loads
-       (gh-ocannl-164). Ctypes pointer arithmetic preserves the managed root, so the zeroed
-       allocation and GC lifetime semantics (derived pointers keep the buffer alive) are exactly
-       as before. *)
+       (calloc) only guarantees the ABI's ~16 bytes, short of AVX/NEON vector loads (gh-ocannl-164).
+       Ctypes pointer arithmetic preserves the managed root, so the zeroed allocation and GC
+       lifetime semantics (derived pointers keep the buffer alive) are exactly as before. *)
     let align = Ops.buffer_alignment in
     let count = max 1 size_in_bytes + align - 1 in
     let base = Ctypes.(allocate_n int8_t ~count) in
@@ -144,9 +143,9 @@ module Make_slab (Device_types : Device_types) (Raw : No_device_buffer_and_copyi
   type buffer_ptr = Raw.buffer_ptr
 
   (* Private pool table keyed by (device_id, pool_id). The table is shared by every device of the
-     backend module, and with the [Multidev] scheduler its accessors run on several domains at
-     once: merge-buffer growth ([alloc_pool]) and merge-buffer resolution ([resolve_pool]) execute
-     inside device tasks on worker domains, concurrently with link-time allocation and eager
+     backend module, and with the [Multidev] scheduler its accessors run on several domains at once:
+     merge-buffer growth ([alloc_pool]) and merge-buffer resolution ([resolve_pool]) execute inside
+     device tasks on worker domains, concurrently with link-time allocation and eager
      transfer-endpoint resolution on the main domain. A Base hashtable is not domain-safe -- a
      lookup racing a resize can spuriously miss an existing key -- so all accesses go through
      [pools_mutex]. *)
@@ -364,10 +363,10 @@ module type Lowered_backend = sig
       contexts. Returns the schedule tasks for the procedures included in the code batch. *)
 
   val sequence_segments : context -> name:string -> Task.t list -> Task.t option
-  (** When the backend can run an ordered batch of same-stream kernel tasks — the segment
-      schedules of one fissioned routine, all from this backend's [link_batch] on [context]'s
-      device — with device-side ordering cheaper than per-boundary events, returns the combined
-      task. E.g. the Metal backend encodes every segment's dispatch into one command buffer whose
-      serial compute pass executes them in encoding order, replacing two event command buffers
-      per boundary. [None] falls back to the generic event chain of [Raise_backend.link]. *)
+  (** When the backend can run an ordered batch of same-stream kernel tasks — the segment schedules
+      of one fissioned routine, all from this backend's [link_batch] on [context]'s device — with
+      device-side ordering cheaper than per-boundary events, returns the combined task. E.g. the
+      Metal backend encodes every segment's dispatch into one command buffer whose serial compute
+      pass executes them in encoding order, replacing two event command buffers per boundary. [None]
+      falls back to the generic event chain of [Raise_backend.link]. *)
 end

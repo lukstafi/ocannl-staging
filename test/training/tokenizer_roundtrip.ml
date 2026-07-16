@@ -3,10 +3,9 @@
 
    Hermetic: instead of [Dataprep.Bpe.from_pretrained] (which downloads from HuggingFace), the test
    writes a minimal GPT-2-style byte-level BPE tokenizer.json and loads it with [Dataprep.Bpe.load].
-   It then encodes text, bridges the token IDs to OCANNL tensors via
-   [Nn_blocks.token_ids_of_array] / [token_ids_of_batch] (with padding and truncation), reads the
-   values back through a device roundtrip, and checks composition with the one-hot
-   embedding-lookup path. *)
+   It then encodes text, bridges the token IDs to OCANNL tensors via [Nn_blocks.token_ids_of_array]
+   / [token_ids_of_batch] (with padding and truncation), reads the values back through a device
+   roundtrip, and checks composition with the one-hot embedding-lookup path. *)
 
 open Base
 open Ocannl
@@ -27,7 +26,6 @@ let tokenizer_json =
 
 (* The ID of the lone-space token "Ġ": used as the padding token below. *)
 let pad_id = 4
-
 let ints_str ids = String.concat ~sep:"; " (Array.to_list (Array.map ids ~f:Int.to_string))
 let vals_str vals = ints_str (Array.map vals ~f:Float.to_int)
 

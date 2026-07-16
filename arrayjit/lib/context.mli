@@ -42,26 +42,26 @@ val compile :
   t * routine
 (** Compile assignments into an executable routine. Returns updated context and the compiled
     routine. The returned context carries the updated compilation frontier for dependency tracking;
-    the input context is unchanged (see {!section:execution_deps}). [lowered_transform] rewrites
-    the optimized lowered code before backend compilation — the seam for schedule transforms and
-    for hand-annotating hardware axis types in tests
-    (docs/proposals/axis-types-for-loops.md). [lowered_transforms] is the plural seam for
-    transforms that split the routine into several kernels (fission): the returned segments run
-    back-to-back on the routine's stream with device-side events at the boundaries, like
-    {!Ir.Schedule.maybe_default_schedules}' segments. Pass at most one of the two. *)
+    the input context is unchanged (see {!section:execution_deps}). [lowered_transform] rewrites the
+    optimized lowered code before backend compilation — the seam for schedule transforms and for
+    hand-annotating hardware axis types in tests (docs/proposals/axis-types-for-loops.md).
+    [lowered_transforms] is the plural seam for transforms that split the routine into several
+    kernels (fission): the returned segments run back-to-back on the routine's stream with
+    device-side events at the boundaries, like {!Ir.Schedule.maybe_default_schedules}' segments.
+    Pass at most one of the two. *)
 
 val run : t -> routine -> t
 (** Execute a compiled routine. Mutates buffers in-place. Returns updated context with newly
     initialized nodes tracked. Raises [Failure] if execution dependencies are not satisfied. *)
 
 val sync : t -> unit
-(** Blocks until the context's device is idle. Host reads ({!to_host}, {!get_values}) synchronize
-    on their own; explicit [sync] is for timing runs (e.g. the autotuner) and for fencing against
+(** Blocks until the context's device is idle. Host reads ({!to_host}, {!get_values}) synchronize on
+    their own; explicit [sync] is for timing runs (e.g. the autotuner) and for fencing against
     out-of-band observation. *)
 
 val hardware_limits : t -> Ir.Backend_intf.hardware_limits
-(** The backend's conservative per-workgroup device limits (all-[None] on backends that do not
-    bind hardware axes). Chiefly for schedule transforms and the autotuner. *)
+(** The backend's conservative per-workgroup device limits (all-[None] on backends that do not bind
+    hardware axes). Chiefly for schedule transforms and the autotuner. *)
 
 (** {2 Execution dependency tracking}
 
@@ -93,16 +93,15 @@ val can_run : t -> routine -> bool
 (** Note: These operations work with backend-specific buffer types hidden behind the context
     abstraction. *)
 
-val copy :
-  ?into_merge_buffer:Ir.Backend_intf.merge_buffer_use -> src:t -> dst:t -> Ir.Tnode.t -> t
-(** Copies the node's device buffer from [src] into [dst] (default [~into_merge_buffer:No]), or
-    into [dst]'s stream's merge buffer for [~into_merge_buffer:Copy], returning the updated
-    destination context. When both contexts come from the same backend the copy stays on-device
-    via the backend's [device_to_device] transfer machinery (for [Copy], the returned context
-    carries the merge-buffer node against which the next [compile] of merge-consuming code is
-    statically verified); a cross-backend copy falls back to a host round-trip ([Copy] raises).
-    Nodes absent from [src]'s device buffers fall back to the host round-trip as well, serving
-    host-init literals and for-print proxies. *)
+val copy : ?into_merge_buffer:Ir.Backend_intf.merge_buffer_use -> src:t -> dst:t -> Ir.Tnode.t -> t
+(** Copies the node's device buffer from [src] into [dst] (default [~into_merge_buffer:No]), or into
+    [dst]'s stream's merge buffer for [~into_merge_buffer:Copy], returning the updated destination
+    context. When both contexts come from the same backend the copy stays on-device via the
+    backend's [device_to_device] transfer machinery (for [Copy], the returned context carries the
+    merge-buffer node against which the next [compile] of merge-consuming code is statically
+    verified); a cross-backend copy falls back to a host round-trip ([Copy] raises). Nodes absent
+    from [src]'s device buffers fall back to the host round-trip as well, serving host-init literals
+    and for-print proxies. *)
 
 (** {2 On-demand host access}
 
@@ -116,17 +115,16 @@ val copy :
     - [On_device] (materialized) nodes have a context buffer; {!to_host}/{!get_values} read it
       directly.
     - [Virtual] nodes have no buffer anywhere, but they remain observable: their defining
-      computation is tracked, so their value can be recomputed on demand — [Train.printf] does
-      this via the for-print proxy mechanism ({!register_for_print}); raw {!to_host} on them
-      raises unless a proxy or host-init data exists. Observability is inductive: it holds only
-      when every node the tracked computation reads is itself observable — a [Virtual] node
-      depending (even transitively through other [Virtual] nodes) on a [Local] node inherits its
-      unobservability.
+      computation is tracked, so their value can be recomputed on demand — [Train.printf] does this
+      via the for-print proxy mechanism ({!register_for_print}); raw {!to_host} on them raises
+      unless a proxy or host-init data exists. Observability is inductive: it holds only when every
+      node the tracked computation reads is itself observable — a [Virtual] node depending (even
+      transitively through other [Virtual] nodes) on a [Local] node inherits its unobservability.
     - [Local] nodes are routine-scoped scratch and {b unobservable}: their computation is not
       tracked, and they are stored (to whatever degree the optimizer decides on) only within a
-      single routine invocation. This is a deliberate opt-out from the observability guarantee
-      that licenses backend optimizations (e.g. stack allocation). The mode is only ever assigned
-      by the compiler, to nodes never read outside their defining routine; to prevent it, request
+      single routine invocation. This is a deliberate opt-out from the observability guarantee that
+      licenses backend optimizations (e.g. stack allocation). The mode is only ever assigned by the
+      compiler, to nodes never read outside their defining routine; to prevent it, request
       materialization (e.g. [Train.set_materialized]) before the first routine using the node is
       compiled. *)
 
@@ -191,7 +189,7 @@ val decide_materialized : t -> Ir.Tnode.t list -> t
     given nodes: subsequent compiles from the returned context materialize them. This is the
     functional, context-scoped counterpart of strengthening tnode-level intent
     ([Train.set_materialized]) — the nodes' declared intent is untouched and the argument context
-    (with its other descendants) is unaffected, so a default-placement sibling and a
-    materialize-all sibling can coexist (e.g. the placement-A/B arms of [Train.tune_placements]).
-    Nodes the lineage or intent already constrains away from plain materialization ([Virtual],
-    [Local], or constant) are skipped. *)
+    (with its other descendants) is unaffected, so a default-placement sibling and a materialize-all
+    sibling can coexist (e.g. the placement-A/B arms of [Train.tune_placements]). Nodes the lineage
+    or intent already constrains away from plain materialization ([Virtual], [Local], or constant)
+    are skipped. *)

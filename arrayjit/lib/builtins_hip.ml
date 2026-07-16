@@ -34,8 +34,8 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
     ("uint16x8_t", {|typedef struct { unsigned short v[8]; } uint16x8_t;|}, []);
     ("uint8x16_t", {|typedef struct { unsigned char v[16]; } uint8x16_t;|}, []);
     (* Elements are the class type [__hip_fp8_e5m2] (not a plain integer): the [Set_from_vec]
-       emission assigns vector elements to the fp8 array cells without a cast, and
-       [__hip_fp8_e5m2] has no assignment from integer types. *)
+       emission assigns vector elements to the fp8 array cells without a cast, and [__hip_fp8_e5m2]
+       has no assignment from integer types. *)
     ("fp8x16_t", {|typedef struct __align__(16) { __hip_fp8_e5m2 v[16]; } fp8x16_t;|}, []);
     ("half8_t", {|typedef struct { __half v[8]; } half8_t;|}, []);
     ( "htanh_approx",
@@ -64,8 +64,8 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
       (* Combine the lanes as an integer and convert NUMERICALLY before scaling (mirroring
          builtins.c); bit-casting the lanes to a double (via [__longlong_as_double]) would yield
          NaN/Inf/huge values instead of [0, 1). Only the top 53 bits are used so the conversion is
-         exact and the result stays below 1.0 (all 64 bits could round up to 2^64, yielding
-         exactly 1.0). *)
+         exact and the result stays below 1.0 (all 64 bits could round up to 2^64, yielding exactly
+         1.0). *)
       {|__device__ double uint4x32_to_double_uniform(uint4x32_t x) {
   unsigned long long combined = ((unsigned long long)x.v[1] << 32) | x.v[0];
   return (double)(combined >> 11) * (1.0 / 9007199254740992.0);

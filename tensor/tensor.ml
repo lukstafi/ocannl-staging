@@ -97,7 +97,10 @@ let session_state =
 let bump_next_id id = session_state.next_id <- max session_state.next_id (id + 1)
 let get_next_id () = session_state.next_id
 let is_fwd_root t = Map.mem session_state.forward_roots t.value.id
-let remove_fwd_root t = session_state.forward_roots <- Map.remove session_state.forward_roots t.value.id
+
+let remove_fwd_root t =
+  session_state.forward_roots <- Map.remove session_state.forward_roots t.value.id
+
 let is_bprop_root t = Map.mem session_state.backprop_roots t.value.id
 
 let remove_bprop_root t =
@@ -280,12 +283,14 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
         raise
         @@ Session_error
              ( [%string
-                 "Tensor #%{t.value.id#Int} %{Tn.debug_name t.value} has an id greater than the last id \
-                  #%{session_state.next_id - 1#Int} -- check your uses of \
+                 "Tensor #%{t.value.id#Int} %{Tn.debug_name t.value} has an id greater than the \
+                  last id #%{session_state.next_id - 1#Int} -- check your uses of \
                   Tensor.unsafe_reinitialize, if all your uses are valid, report this as a bug."],
                Some t ));
   (* The code needs to be included in the order it was computed due to potential non-tree DAGs. *)
-  let ordered_ts = List.dedup_and_sort orig_ts ~compare:(fun t1 t2 -> Int.ascending t1.value.id t2.value.id) in
+  let ordered_ts =
+    List.dedup_and_sort orig_ts ~compare:(fun t1 t2 -> Int.ascending t1.value.id t2.value.id)
+  in
   (* Id-ascending order does not suffice to avoid computed-after-use bugs across sibling forward
      fragments: the code of a shared subtensor is embedded in the forward of its first-constructed
      consumer, while siblings are constructed in the application order of the current operation
@@ -294,9 +299,9 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
      topologically: a fragment embedding a node must precede fragments that read it. Non-root
      children keep their positions -- their forward code is owned elsewhere, so their (stale)
      embedded_nodes must not contribute dependency edges. The backprop code below includes the
-     backprop fragments via [List.rev ordered_ts], so it inherits the mirrored owner-last order
-     (for children that are backprop roots but not forward roots, this still degenerates to the
-     id order, see gh-461). *)
+     backprop fragments via [List.rev ordered_ts], so it inherits the mirrored owner-last order (for
+     children that are backprop roots but not forward roots, this still degenerates to the id order,
+     see gh-461). *)
   let ordered_ts =
     match List.filter ordered_ts ~f:is_fwd_root with
     | [] | [ _ ] -> ordered_ts
@@ -330,14 +335,14 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
                 (* A fragment-level dependency cycle would need statement-level interleaving to
                    schedule correctly, which is not supported: any whole-fragment order would read
                    some values before they are computed. Raise rather than risk silently wrong
-                   results; restructure the program so that shared subexpressions are first
-                   consumed in a consistent order across the conflicting operands. *)
+                   results; restructure the program so that shared subexpressions are first consumed
+                   in a consistent order across the conflicting operands. *)
                 List.iter remaining ~f:(fun (ti, requires, _) ->
                     let blockers =
                       List.concat_map remaining ~f:(fun (other, _, other_defines) ->
                           Set.inter requires other_defines |> Set.to_list
                           |> List.map ~f:(fun tn ->
-                                 [%string "%{Tn.debug_name tn} (in #%{other.value.id#Int})"]))
+                              [%string "%{Tn.debug_name tn} (in #%{other.value.id#Int})"]))
                     in
                     Stdlib.Printf.eprintf "  fragment #%d %s waits for: %s\n%!" ti.value.id
                       (Tn.debug_name ti.value)
@@ -474,15 +479,7 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
     { projections_debug; projections = lazy (Shape.get_projections preliminary_shape_update) }
   in
   let t =
-    {
-      params;
-      forward = Asgns.empty_comp;
-      diff = None;
-      value = v;
-      top_down_prec;
-      shape;
-      children;
-    }
+    { params; forward = Asgns.empty_comp; diff = None; value = v; top_down_prec; shape; children }
   in
   let fwds =
     List.filter_map ordered_ts ~f:(fun ti -> if is_fwd_root ti then Some ti.forward else None)
@@ -554,19 +551,18 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
           else None)
     in
     (* Mirror of the forward-fragment ordering above (gh-461), with the edge reversed: a fragment
-       accumulating into a node's gradient must precede the fragment that embeds the node's
-       backprop code. The reversed [ordered_ts] already handles this whenever backprop ownership
-       coincides with forward ownership (both belong to the first-constructed consumer); this pass
-       also covers children whose forward root was consumed separately (e.g. by a
-       non-differentiable operation), for which the forward ordering gives no constraint. *)
+       accumulating into a node's gradient must precede the fragment that embeds the node's backprop
+       code. The reversed [ordered_ts] already handles this whenever backprop ownership coincides
+       with forward ownership (both belong to the first-constructed consumer); this pass also covers
+       children whose forward root was consumed separately (e.g. by a non-differentiable operation),
+       for which the forward ordering gives no constraint. *)
     let bcks =
       match bcks with
       | [] | [ _ ] -> bcks
       | _ ->
           let tagged =
             List.map bcks ~f:(fun c ->
-                ( c,
-                  Set.diff (Asgns.collect_written c.Asgns.asgns) c.Asgns.embedded_nodes ))
+                (c, Set.diff (Asgns.collect_written c.Asgns.asgns) c.Asgns.embedded_nodes))
           in
           let rec order acc remaining =
             match remaining with
@@ -579,9 +575,9 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
                 let ready, blocked = List.partition_tf remaining ~f:(Fn.non blocked_by) in
                 if List.is_empty ready then
                   (* A fragment-level dependency cycle would need statement-level interleaving to
-                     schedule correctly, which is not supported: any whole-fragment order would
-                     read some gradients before all their contributions are accumulated. Raise
-                     rather than risk silently wrong results. *)
+                     schedule correctly, which is not supported: any whole-fragment order would read
+                     some gradients before all their contributions are accumulated. Raise rather
+                     than risk silently wrong results. *)
                   raise
                   @@ Session_error
                        ( [%string
@@ -771,9 +767,9 @@ let ndarray ?(grad_spec = Prohibit_grad) values ?(label = []) ?top_down_prec ?ba
       ?output_dims ?input_axes ?output_axes ?deduced ()
   in
   Tn.update_memory_mode t.value Effectively_constant 24;
-  (* The ndarray-backed path mints the node [On_device] (provenance 49), so the update above
-     cannot stick as [Effectively_constant] there; the explicit marker carries the constancy
-     (consumed by hoisted operand packing, gh-ocannl-470). *)
+  (* The ndarray-backed path mints the node [On_device] (provenance 49), so the update above cannot
+     stick as [Effectively_constant] there; the explicit marker carries the constancy (consumed by
+     hoisted operand packing, gh-ocannl-470). *)
   Tn.set_host_constant t.value;
   let max_abs = Array.fold values ~init:0. ~f:(fun acc v -> Float.(max acc @@ abs v)) in
   Ir.Ops.(
@@ -820,12 +816,14 @@ let%debug7_sexp param ?(require_grad = true) ~t (name : string) ?(more_label = [
      the context (gh-ocannl-333). *)
   Tn.update_memory_mode v On_device 241;
   (* Never_virtual audit resolution (context-scoped memory modes): parameter gradients carry
-     observation intent, not a materialization requirement -- users print and inspect them, and
-     the optimizer step's read is an ordinary cross-routine use the lineage can serve (a fused
-     forward+backprop+update block may still inline them entirely). [set_observable] only
-     forbids resolving them into the [Local] unobservable class; [Virtual] stays available via
+     observation intent, not a materialization requirement -- users print and inspect them, and the
+     optimizer step's read is an ordinary cross-routine use the lineage can serve (a fused
+     forward+backprop+update block may still inline them entirely). [set_observable] only forbids
+     resolving them into the [Local] unobservable class; [Virtual] stays available via
      recomputation. *)
-  (match t.diff with Some diff -> Tn.set_observable diff.grad | None -> ());
+  (match t.diff with
+  | Some diff -> Tn.set_observable diff.grad
+  | None -> ());
   Shape.set_terminal ~is_param:(Option.is_some t.diff) t.shape;
   remove_fwd_root t;
   { t with params = Set.singleton (module T) t }

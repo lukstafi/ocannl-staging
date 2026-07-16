@@ -2,22 +2,20 @@
    ggml_vec_dot_f32 idiom): executed parity of chain-rendered reductions against serial twins /
    OCaml-computed references, plus structural checks on the generated source.
 
-   A [Vectorized] retype of a loop whose body is a single accumulation statement
-   [acc = op(acc, contrib(i))] renders on the CPU backends as independent vector accumulator
-   chains updated in a fused main loop, folded register- and lane-wise at exit, plus a serial
-   tail — the strict-FP reassociation the retype licenses, so values are compared with a
-   tolerance. On GPU backends the vector style is packed loads, which has no reduction form: the
-   accumulation renders as a plain serial loop, and every printed boolean holds on every backend.
+   A [Vectorized] retype of a loop whose body is a single accumulation statement [acc = op(acc,
+   contrib(i))] renders on the CPU backends as independent vector accumulator chains updated in a
+   fused main loop, folded register- and lane-wise at exit, plus a serial tail — the strict-FP
+   reassociation the retype licenses, so values are compared with a tolerance. On GPU backends the
+   vector style is packed loads, which has no reduction form: the accumulation renders as a plain
+   serial loop, and every printed boolean holds on every backend.
 
-   Covered:
-   - [Sched.Retype ~ty:Vectorized] of the innermost loop of a real lowered sum (extent 517: not a
-     block multiple, so the serial tail executes).
-   - A hand-built FMA-form dot-product accumulation loop (the recognizer's Ternop form).
-   - A hand-built max-reduce: a non-Add combine with no identity constant (chains initialize from
-     the first blocks of contributions).
-   - A hand-built strided (non-contiguous) accumulation: ineligible for the chain rendering, it
-     must fall back to a plain serial loop with NO vectorization pragma — the pragma would assert
-     iteration independence that the loop-carried accumulation does not satisfy. *)
+   Covered: - [Sched.Retype ~ty:Vectorized] of the innermost loop of a real lowered sum (extent 517:
+   not a block multiple, so the serial tail executes). - A hand-built FMA-form dot-product
+   accumulation loop (the recognizer's Ternop form). - A hand-built max-reduce: a non-Add combine
+   with no identity constant (chains initialize from the first blocks of contributions). - A
+   hand-built strided (non-contiguous) accumulation: ineligible for the chain rendering, it must
+   fall back to a plain serial loop with NO vectorization pragma — the pragma would assert iteration
+   independence that the loop-carried accumulation does not satisfy. *)
 
 open Base
 open Ocannl
@@ -49,8 +47,7 @@ let named name (comp : Asgns.comp) : Asgns.comp =
 let rec innermost_loop (llc : LL.t) : Idx.symbol option =
   let strip stmts = List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true) in
   match llc with
-  | LL.Seq (a, b) -> (
-      match innermost_loop a with Some r -> Some r | None -> innermost_loop b)
+  | LL.Seq (a, b) -> ( match innermost_loop a with Some r -> Some r | None -> innermost_loop b)
   | LL.For_loop { index; body; _ } -> (
       match strip (LL.flat_lines [ body ]) with
       | [ single ] -> ( match innermost_loop single with Some r -> Some r | None -> Some index)
@@ -60,8 +57,8 @@ let rec innermost_loop (llc : LL.t) : Idx.symbol option =
 
 (* Replace the lowered serial reduction with a single [Vectorized] accumulation loop over a fresh
    index; the renderer owns the chains. The transform drops the lowered [Zero_out] of the
-   accumulator, so un-mark [zero_initialized_by_code]: allocation then zeroes the buffer, giving
-   the accumulation the same all-zeros starting point as the serial lowering. *)
+   accumulator, so un-mark [zero_initialized_by_code]: allocation then zeroes the buffer, giving the
+   accumulation the same all-zeros starting point as the serial lowering. *)
 let reduce_transform ~n ~body_of (s : Tn.t) (opt : LL.optimized) : LL.optimized =
   (LL.get_node opt.traced_store s).LL.zero_initialized_by_code <- false;
   let i = Idx.get_symbol () in
@@ -142,10 +139,10 @@ let () =
   p "dot renders as accumulator chains (CPU) or serially (GPU)"
     (check_generated ~expect_chains:true "red_dot_simd");
 
-  (* --- Max-reduce, extent 40: non-Add combine, chains initialize from the first blocks. The max
-     is positive, so the allocation-zeroed accumulator start does not affect the result. --- *)
+  (* --- Max-reduce, extent 40: non-Add combine, chains initialize from the first blocks. The max is
+     positive, so the allocation-zeroed accumulator start does not affect the result. --- *)
   let q = 40 in
-  let wv = Array.init q ~f:(fun k -> Float.of_int ((k * 13) % 29) -. 5.) in
+  let wv = Array.init q ~f:(fun k -> Float.of_int (k * 13 % 29) -. 5.) in
   let expected_max = Array.fold wv ~init:Float.neg_infinity ~f:Float.max in
   let w = TDSL.ndarray wv ~label:[ "w" ] ~output_dims:[ q ] () in
   let%op x1 = w @^^ "i=>0" in
@@ -191,8 +188,8 @@ let () =
                    Binop
                      ( Ir.Ops.Add,
                        (Get (y1.Tensor.value, [| f0 |]), single),
-                       (Get (u.Tensor.value, [| Idx.Affine { symbols = [ (2, i) ]; offset = 0 } |]),
-                         single) );
+                       ( Get (u.Tensor.value, [| Idx.Affine { symbols = [ (2, i) ]; offset = 0 } |]),
+                         single ) );
                  debug = "";
                }))
       y1

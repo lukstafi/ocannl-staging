@@ -1,5 +1,5 @@
-(* Numeric check for Nn_blocks.gelu (tanh-approximate GeLU, the GPT-2 activation) against
-   reference values computed with float64: gelu(x) = 0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3))). *)
+(* Numeric check for Nn_blocks.gelu (tanh-approximate GeLU, the GPT-2 activation) against reference
+   values computed with float64: gelu(x) = 0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3))). *)
 
 open Base
 open Ocannl
