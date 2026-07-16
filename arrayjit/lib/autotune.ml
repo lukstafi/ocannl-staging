@@ -537,7 +537,11 @@ let sketch_schedule ~p (opt : LL.optimized) : Sched.schedule =
         else cpu_sketch_schedule site p
       in
       if p.sk_epilogue then
-        sched @ [ Sched.Fuse_epilogue { target = site.m_d; shared = p.sk_gpu } ]
+        (* [shared] is the fragment-site knob: only the GPU MMA sketches store through the
+           contracted fragment; the block-tiling pipeline stores through [Privatize], where
+           [Fuse_epilogue] rejects [shared] outright and the twin would fail for the wrong
+           reason. *)
+        sched @ [ Sched.Fuse_epilogue { target = site.m_d; shared = p.sk_gpu && p.sk_mma } ]
       else sched
 
 (* Sketch seed parameters compatible with the site's extents (dividing tiles: every constructed
