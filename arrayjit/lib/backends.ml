@@ -328,6 +328,11 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
              ("init_from_device: tensor node " ^ Tn.debug_name tn ^ " is not in input context "
             ^ Backend.get_name src.device ^ ", for device " ^ Backend.get_name dst.device)
     | Some s_loc -> (
+        (* gh-ocannl-489: same source-read guard as [device_to_device] -- an aliased node's bytes
+           are clobbered, so copying them into a fresh context would silently preserve the wrong
+           value. *)
+        if buffer_overlaps src.ctx_buffers tn s_loc then
+          aliased_read_error ~what:"init_from_device source" tn;
         wait_for_ready ~dst ~src tn;
         match Map.find dst.ctx_buffers tn with
         | Some _ ->
