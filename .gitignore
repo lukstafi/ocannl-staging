@@ -43,18 +43,22 @@ log_files/
 build_files/
 
 # Autotune schedule caches: the default cache dir (autotune_cache_dir) plus the
-# per-test dirs used by test/operations/autotune_{smoke,fission_sketch}.ml
-autotune_cache/
-autotune_cache_test/
-autotune_fission_cache/
-autotune_fission_cache2/
-autotune_sketch_cache/
+# per-test dirs used by test/operations/autotune_{smoke,fission_sketch}.ml.
+# Root-anchored: same-named dirs under test/config/ hold tracked fixtures, and an
+# unanchored pattern would silently ignore a fixture regenerated under a new digest.
+/autotune_cache/
+/autotune_cache_test/
+/autotune_fission_cache/
+/autotune_fission_cache2/
+/autotune_sketch_cache/
 
 # Test artifacts written to the working directory
 # (test/operations/test_safetensors.ml, test/training/tokenizer_roundtrip.ml).
-# Model checkpoints are always generated or downloaded, never committed.
+/mini_tokenizer.json
+
+# Model checkpoints are always generated or downloaded, never committed
+# (benchmarks/.gitignore likewise excludes the generated fixtures/ dir).
 *.safetensors
-mini_tokenizer.json
 
 # LaTeX build artifacts
 *.aux
