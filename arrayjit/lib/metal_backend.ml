@@ -612,7 +612,7 @@ module Impl = struct
           let addr_space = function
             | `Device -> Some "device"
             | `Shared -> Some "threadgroup"
-            | `Thread -> None
+            | `Thread | `Fragment _ -> None
           in
           (* Tile load at role-space block (row_i, col_i): transposed storage keeps the operand's
              own leading dimension and indexes the STORED matrix at (col_i, row_i);
@@ -626,8 +626,8 @@ module Impl = struct
               Printf.sprintf "    simdgroup_load(%s, %s + %s * %d * %d + %s * %d, (ulong)%d);" frag
                 ptr row_i tile ld col_i tile ld
           in
-          match (frag_typ, addr_space d_space, addr_space a_space, addr_space b_space) with
-          | Some frag, Some d_as, Some a_as, Some b_as
+          match (frag_typ, d_space, addr_space a_space, addr_space b_space) with
+          | Some frag, `Fragment fragment, Some a_as, Some b_as
             when m % tile = 0
                  && n % tile = 0
                  && k % tile = 0
@@ -637,25 +637,8 @@ module Impl = struct
               let ptr_decl name aspace ptr =
                 string (Printf.sprintf "%s %s *%s = " aspace elem name) ^^ ptr ^^ semi
               in
-              (* Bracketing barriers: sibling statements (zeroing of [d], cooperative staging)
-                 execute lane-partitioned, so the fragment loads must observe the other lanes'
-                 writes, and later statements the stores. Uniform per the barrier-strength
-                 validation. *)
-              let barrier =
-                "threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);"
-              in
               let body_lines =
                 [
-                  barrier;
-                  Printf.sprintf "%s __mma_acc[%d][%d];" frag mt nt;
-                  Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
-                  Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                  Printf.sprintf
-                    "    simdgroup_load(__mma_acc[__mi][__ni], __mma_dp + __mi * %d * %d + __ni * \
-                     %d, (ulong)%d);"
-                    tile ldd tile ldd;
-                  "  }";
-                  "}";
                   Printf.sprintf "for (int __ki = 0; __ki < %d; ++__ki) {" kt;
                   Printf.sprintf "  %s __mma_bf[%d];" frag nt;
                   Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
@@ -666,25 +649,17 @@ module Impl = struct
                   Printf.sprintf "    %s __mma_af;" frag;
                   load_line "__mma_af" "__mma_ap" ~row_i:"__mi" ~col_i:"__ki" lda ~transpose:ta;
                   Printf.sprintf "    for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                  "      simdgroup_multiply_accumulate(__mma_acc[__mi][__ni], __mma_af, \
-                   __mma_bf[__ni], __mma_acc[__mi][__ni]);";
+                  Printf.sprintf
+                    "      simdgroup_multiply_accumulate(%s[__mi][__ni], __mma_af, __mma_bf[__ni], \
+                     %s[__mi][__ni]);"
+                    fragment fragment;
                   "    }";
                   "  }";
                   "}";
-                  Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
-                  Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                  Printf.sprintf
-                    "    simdgroup_store(__mma_acc[__mi][__ni], __mma_dp + __mi * %d * %d + __ni * \
-                     %d, (ulong)%d);"
-                    tile ldd tile ldd;
-                  "  }";
-                  "}";
-                  barrier;
                 ]
               in
               let body =
-                ptr_decl "__mma_dp" d_as d_ptr ^^ hardline
-                ^^ ptr_decl "__mma_ap" (Printf.sprintf "const %s" a_as) a_ptr
+                ptr_decl "__mma_ap" (Printf.sprintf "const %s" a_as) a_ptr
                 ^^ hardline
                 ^^ ptr_decl "__mma_bp" (Printf.sprintf "const %s" b_as) b_ptr
                 ^^ hardline
@@ -692,8 +667,167 @@ module Impl = struct
               in
               Some
                 (group
-                   (string (Printf.sprintf "{ /* tile_mma %dx%dx%d */" m n k)
+                   (string (Printf.sprintf "{ /* tile_mma fragment update %dx%dx%d */" m n k)
                    ^^ nest 2 (hardline ^^ body)
+                   ^^ hardline ^^ rbrace))
+          | _ -> (
+              match (frag_typ, addr_space d_space, addr_space a_space, addr_space b_space) with
+              | Some frag, Some d_as, Some a_as, Some b_as
+                when m % tile = 0
+                     && n % tile = 0
+                     && k % tile = 0
+                     && Option.is_some (hardware_limits ()).Backend_intf.mma ->
+                  let mt = m / tile and nt = n / tile and kt = k / tile in
+                  let elem = typ_of_prec d_prec in
+                  let ptr_decl name aspace ptr =
+                    string (Printf.sprintf "%s %s *%s = " aspace elem name) ^^ ptr ^^ semi
+                  in
+                  (* Bracketing barriers: sibling statements (zeroing of [d], cooperative staging)
+                     execute lane-partitioned, so the fragment loads must observe the other lanes'
+                     writes, and later statements the stores. Uniform per the barrier-strength
+                     validation. *)
+                  let barrier =
+                    "threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);"
+                  in
+                  let body_lines =
+                    [
+                      barrier;
+                      Printf.sprintf "%s __mma_acc[%d][%d];" frag mt nt;
+                      Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                      Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                      Printf.sprintf
+                        "    simdgroup_load(__mma_acc[__mi][__ni], __mma_dp + __mi * %d * %d + \
+                         __ni * %d, (ulong)%d);"
+                        tile ldd tile ldd;
+                      "  }";
+                      "}";
+                      Printf.sprintf "for (int __ki = 0; __ki < %d; ++__ki) {" kt;
+                      Printf.sprintf "  %s __mma_bf[%d];" frag nt;
+                      Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                      load_line "__mma_bf[__ni]" "__mma_bp" ~row_i:"__ki" ~col_i:"__ni" ldb
+                        ~transpose:tb;
+                      "  }";
+                      Printf.sprintf "  for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                      Printf.sprintf "    %s __mma_af;" frag;
+                      load_line "__mma_af" "__mma_ap" ~row_i:"__mi" ~col_i:"__ki" lda ~transpose:ta;
+                      Printf.sprintf "    for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                      "      simdgroup_multiply_accumulate(__mma_acc[__mi][__ni], __mma_af, \
+                       __mma_bf[__ni], __mma_acc[__mi][__ni]);";
+                      "    }";
+                      "  }";
+                      "}";
+                      Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                      Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                      Printf.sprintf
+                        "    simdgroup_store(__mma_acc[__mi][__ni], __mma_dp + __mi * %d * %d + \
+                         __ni * %d, (ulong)%d);"
+                        tile ldd tile ldd;
+                      "  }";
+                      "}";
+                      barrier;
+                    ]
+                  in
+                  let body =
+                    ptr_decl "__mma_dp" d_as d_ptr ^^ hardline
+                    ^^ ptr_decl "__mma_ap" (Printf.sprintf "const %s" a_as) a_ptr
+                    ^^ hardline
+                    ^^ ptr_decl "__mma_bp" (Printf.sprintf "const %s" b_as) b_ptr
+                    ^^ hardline
+                    ^^ separate_map hardline string body_lines
+                  in
+                  Some
+                    (group
+                       (string (Printf.sprintf "{ /* tile_mma %dx%dx%d */" m n k)
+                       ^^ nest 2 (hardline ^^ body)
+                       ^^ hardline ^^ rbrace))
+              | _ -> None))
+
+    (* Cross-[k_o] accumulator residency (gh-ocannl-480): one marked local tile becomes a
+       simdgroup-fragment array whose load/store bracket the whole serial reduction. The nested
+       [Tile_mma] calls see [`Fragment fragment] and therefore emit update-only MMA steps. *)
+    let mma_fragment_syntax =
+      Some
+        (fun ~d_prec
+          ~a_prec
+          ~b_prec
+          ~m
+          ~n
+          ~k
+          ~fragment
+          ~target:(d_ptr, ldd, d_space)
+          ~a:(_, _, a_space)
+          ~b:(_, _, b_space)
+          ~body
+        ->
+          let tile = 8 in
+          let frag_typ =
+            if not (Ops.equal_prec d_prec a_prec && Ops.equal_prec d_prec b_prec) then None
+            else
+              match d_prec with
+              | Ops.Single_prec _ -> Some "simdgroup_float8x8"
+              | Ops.Half_prec _ -> Some "simdgroup_half8x8"
+              | Ops.Bfloat16_prec _ -> Some "simdgroup_bfloat8x8"
+              | _ -> None
+          in
+          let loadable = function `Device | `Shared -> true | `Thread | `Fragment _ -> false in
+          match frag_typ with
+          | Some frag
+            when m % tile = 0
+                 && n % tile = 0
+                 && k % tile = 0
+                 && loadable d_space && loadable a_space && loadable b_space
+                 && Option.is_some (hardware_limits ()).Backend_intf.mma ->
+              let mt = m / tile and nt = n / tile in
+              let elem = typ_of_prec d_prec in
+              let d_as =
+                match d_space with
+                | `Device -> "device"
+                | `Shared -> "threadgroup"
+                | _ -> assert false
+              in
+              let barrier =
+                "threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);"
+              in
+              let lines_before =
+                [
+                  barrier;
+                  Printf.sprintf "%s %s[%d][%d];" frag fragment mt nt;
+                  Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                  Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                  Printf.sprintf
+                    "    simdgroup_load(%s[__mi][__ni], __mma_dp + __mi * %d * %d + __ni * %d, \
+                     (ulong)%d);"
+                    fragment tile ldd tile ldd;
+                  "  }";
+                  "}";
+                  "/* simdgroup fragment reduction body begins */";
+                ]
+              in
+              let lines_after =
+                [
+                  "/* simdgroup fragment reduction body ends */";
+                  Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                  Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                  Printf.sprintf
+                    "    simdgroup_store(%s[__mi][__ni], __mma_dp + __mi * %d * %d + __ni * %d, \
+                     (ulong)%d);"
+                    fragment tile ldd tile ldd;
+                  "  }";
+                  "}";
+                  barrier;
+                ]
+              in
+              let d_decl =
+                string (Printf.sprintf "%s %s *__mma_dp = " d_as elem) ^^ d_ptr ^^ semi
+              in
+              Some
+                (group
+                   (string (Printf.sprintf "{ /* simdgroup fragment %dx%d across k_o */" m n)
+                   ^^ nest 2
+                        (hardline ^^ d_decl ^^ hardline
+                        ^^ separate_map hardline string lines_before
+                        ^^ hardline ^^ body () ^^ hardline
+                        ^^ separate_map hardline string lines_after)
                    ^^ hardline ^^ rbrace))
           | _ -> None)
 
