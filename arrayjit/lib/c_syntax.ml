@@ -686,57 +686,39 @@ module C_syntax (B : C_syntax_config) = struct
   let current_parallel_grid : Set.M(Indexing.Symbol).t ref =
     ref (Set.empty (module Indexing.Symbol))
 
-  (* Whether the body of an outermost [Grid] loop over [sym] tolerates its iterations being
-     partitioned into chunks that execute on parallel CPU threads sharing the kernel's
-     function-scope state. Materialized accesses are already safe: [validate_parallel] requires
-     every materialized write to cover [sym], so chunks write disjoint elements, and nests execute
-     as separate parallel loops with a join in between (stronger than the GPU's single launch).
-     The hazards are the function-scope stack arrays declared by [local_decls]: on GPU each thread
-     gets a private copy, so a GPU-valid kernel may legally write them grid-invariantly (identical
-     values per iteration) -- under one shared array that is a data race. Hence, for a local
-     written under the loop: every access to it (read or write) must mention [sym], and all
-     accesses must agree on every index component that mentions [sym] -- the same agreement rule
-     as the default annotator's hazard analysis; mere mention is not enough, e.g. a stencil write
-     [tmp[i]] + read [tmp[i-1]] both mention [sym] but reach across iterations. [Set_local] scope
-     locals must have their declaration within the loop body (block scope = per-chunk storage).
-     Opaque statements and barriers disqualify. *)
-  let parallel_grid_safe ~sym (body : Low_level.t) : bool =
-    let plc = placements () in
-    let is_local tn =
-      (not (Tn.Placements.is_virtual_force plc tn 431))
-      && not (Tn.Placements.is_materialized_force plc tn 432)
-    in
-    let mentions_comp (idx : Indexing.axis_index) =
-      match idx with
-      | Indexing.Iterator s -> Indexing.equal_symbol s sym
-      | Indexing.Affine { symbols; _ } ->
-          List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
-      | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
-    in
-    (* Per accessed function-scope local: (written under the loop, access index vectors). *)
-    let locals : (bool * Indexing.axis_index array list) Hashtbl.M(Int).t =
-      Hashtbl.create (module Int)
-    in
-    let declared_scopes = Hash_set.create (module Int) in
-    let ok = ref true in
-    let access tn idcs ~write =
-      if is_local tn then
-        Hashtbl.update locals tn.Tn.uid ~f:(fun st ->
-            let written, accs = Option.value st ~default:(false, []) in
-            (written || write, idcs :: accs))
-    in
+  (* Set by [compile_proc] alongside [current_parallel_grid]: per eligible [Grid] loop, the
+     [Local]-placement tnodes privatized to per-chunk block-scope declarations inside that loop's
+     chunk body (gh-ocannl-469: in-kernel packed operand tiles under a pool-parallel Grid). These
+     are excluded from [compile_proc]'s function-scope [local_decls]. *)
+  let current_grid_private : Tn.t list Map.M(Indexing.Symbol).t ref =
+    ref (Map.empty (module Indexing.Symbol))
+
+  (* Set by [compile_proc] alongside [current_parallel_grid]: [Local]-placement tnodes kept at
+     function scope but accessed inside a pool-parallel Grid loop rendered as a blocks-extension
+     [dispatch_apply] ([`Dispatch]). Blocks cannot refer to a declaration with an array type, but
+     they capture pointers by value, so [local_decls] declares these behind a [const] pointer
+     alias. Always empty for [`Openmp]/[`None]. *)
+  let current_local_ptr_alias : Set.M(Tn).t ref = ref (Set.empty (module Tn))
+
+  (* Per-chunk private tiles live on the pool workers' stacks; libdispatch workers get 512KB by
+     default, so cap their combined footprint per Grid loop (declining just keeps the loop
+     serial). *)
+  let per_chunk_private_bytes_cap = 256 * 1024
+
+  (* Shared traversal for the pool-parallel Grid analyses below: fires [access] for every
+     tensor-node access event in program order (a [Set]'s right-hand side fires before its write).
+     [Tile_mma] is traversed through its scalar [fallback]: every rendering of the statement
+     (intrinsics, register tiling, lane-0 fallback) touches exactly the fallback's tensors over
+     the fallback's index ranges, so the fallback IS the statement's access footprint. [on_stmt]
+     observes the statement-level events the locals analysis keys on (opaque statements, scope
+     declarations). [Set_dynamic]/[Get_dynamic] slots are data-dependent, so they fire with empty
+     indices (conservatively a miss). *)
+  let iter_local_accesses ~access ~on_stmt (root : Low_level.t) : unit =
     let rec go (llc : Low_level.t) =
       match llc with
       | Low_level.Noop | Comment _ -> ()
-      | Staged_compilation _ | Workgroup_barrier -> ok := false
-      | Tile_mma { fallback; _ } ->
-          (* Every rendering of the statement (intrinsics, register tiling, lane-0 fallback)
-             touches exactly the fallback's tensors over the fallback's index ranges, so the
-             fallback IS the statement's access footprint — analyze it instead of bailing. This is
-             what lets [Grid]-blocked [Tile_mma] matmuls (gh-ocannl-469) pool-parallelize:
-             materialized operands pass trivially, while function-scope packed tiles written under
-             the loop (their pack indices never mention the grid symbol) correctly decline. *)
-          go fallback
+      | Staged_compilation _ | Workgroup_barrier -> on_stmt `Opaque
+      | Tile_mma { fallback; _ } -> go fallback
       | Seq (a, b) ->
           go a;
           go b
@@ -744,32 +726,30 @@ module C_syntax (B : C_syntax_config) = struct
       | If { cond = c, _; body } ->
           go_sc c;
           go body
-      | Zero_out tn -> access tn [||] ~write:true
+      | Zero_out tn -> access ~write:true tn [||]
       | Set { tn; idcs; llsc; _ } ->
-          access tn idcs ~write:true;
-          go_sc llsc
+          go_sc llsc;
+          access ~write:true tn idcs
       | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
-          (* The dynamic slot's effective index is data-dependent: conservatively a miss. *)
-          access tn [||] ~write:true;
           go_sc v;
-          go_sc llsc
+          go_sc llsc;
+          access ~write:true tn [||]
       | Set_from_vec { tn; idcs; arg = a, _; _ } ->
-          access tn idcs ~write:true;
-          go_sc a
+          go_sc a;
+          access ~write:true tn idcs
       | Set_local (id, llsc) ->
-          if not (Hash_set.mem declared_scopes id.Low_level.scope_id) then ok := false;
+          on_stmt (`Set_local id.Low_level.scope_id);
           go_sc llsc
-      | Declare_local { id; _ } -> Hash_set.add declared_scopes id.Low_level.scope_id
+      | Declare_local { id; _ } -> on_stmt (`Declare_local id.Low_level.scope_id)
     and go_sc (llsc : Low_level.scalar_t) =
       match llsc with
       | Local_scope { id; body; _ } ->
-          Hash_set.add declared_scopes id.Low_level.scope_id;
+          on_stmt (`Declare_local id.Low_level.scope_id);
           go body
       | Get_local _ -> ()
-      | Get (tn, idcs) -> access tn idcs ~write:false
+      | Get (tn, idcs) -> access ~write:false tn idcs
       | Get_dynamic { tn; dyn_value = v, _; _ } ->
-          (* The dynamic slot's effective index is data-dependent: conservatively a miss. *)
-          access tn [||] ~write:false;
+          access ~write:false tn [||];
           go_sc v
       | Get_merge_buffer _ -> ()
       | Ternop (_, (a, _), (b, _), (c, _)) ->
@@ -782,54 +762,257 @@ module C_syntax (B : C_syntax_config) = struct
       | Unop (_, (a, _)) -> go_sc a
       | Constant _ | Constant_bits _ | Embed_index _ -> ()
     in
-    go body;
-    !ok
-    && Hashtbl.for_all locals ~f:(fun (written, accs) ->
-           (* The blocks extension ([`Dispatch]) cannot capture function-scope arrays at all:
-              even a read-only reference fails to compile ("cannot refer to declaration with an
-              array type inside block"). Fissioned segments hit this with serially-precomputed
-              local scratch read under a Grid loop (e.g. softmax gradients in the backward
-              segments of the training tests); OpenMP has no such restriction and keeps the
-              finer written-under-the-loop analysis below. *)
-           (match B.parallel_grid_syntax with `Dispatch -> false | `Openmp | `None -> true)
-           && ((not written)
+    go root
+
+  (* Per-local access info under a candidate pool-parallel Grid loop's body. *)
+  type grid_local_info = {
+    gl_tn : Tn.t;
+    mutable gl_written : bool;
+    mutable gl_accs : Indexing.axis_index array list;
+    mutable gl_count : int;
+  }
+
+  (* The privatization rule's write-dominance check: whether [tn]'s FIRST access (program order)
+     under [body] is a standalone covering write — a [Zero_out], or an unguarded [Set] nest that
+     rewrites the whole array and COMPLETES before any other access to [tn] executes. The
+     completion requirement is structural (Codex P2 on PR #159): the covering [Set]'s per-axis
+     coverage may only use loops that enclose NO other access to [tn] — descending from the body
+     root, a loop stays usable while every access to [tn] in scope sits inside one child
+     statement, and once siblings share the level (e.g. the pack nest followed by its consumer),
+     the loops collected so far are discarded and coverage must come from the write's own nest.
+     A write like [for x { tmp[x] = ..; use tmp[y] }] therefore declines: its only coverage loop
+     [x] also interleaves the reads, which under per-chunk storage would observe missing prior
+     iterations at chunk boundaries. Coverage per axis: a fresh usable-loop symbol of matching
+     extent, or a mixed-radix affine combination of such symbols, each symbol used once across
+     the index vector — the nest then enumerates every cell. Extra enclosing usable loops merely
+     repeat the covering nest (required non-degenerate, or the write never executes). *)
+  let first_access_standalone_covering (tn : Tn.t) (body : Low_level.t) : bool =
+    let count_accesses (llc : Low_level.t) =
+      let c = ref 0 in
+      iter_local_accesses llc
+        ~access:(fun ~write:_ tn2 _ -> if tn2.Tn.uid = tn.Tn.uid then Int.incr c)
+        ~on_stmt:(fun _ -> ());
+      !c
+    in
+    let touches llc = count_accesses llc > 0 in
+    let dims = Lazy.force tn.Tn.dims in
+    let covering ~loops (idcs : Indexing.axis_index array) =
+      Array.length idcs = Array.length dims
+      &&
+      let extent_of s =
+        List.find_map loops ~f:(fun (s', from_, to_) ->
+            if Indexing.equal_symbol s s' && from_ = 0 then Some (to_ + 1) else None)
+      in
+      let used = ref [] in
+      let fresh s =
+        if List.mem !used s ~equal:Indexing.equal_symbol then false
+        else (
+          used := s :: !used;
+          true)
+      in
+      Array.for_alli idcs ~f:(fun a idx ->
+          let dim = dims.(a) in
+          match idx with
+          | Indexing.Fixed_idx 0 -> dim = 1
+          | Indexing.Iterator s -> (
+              fresh s && match extent_of s with Some e -> e = dim | None -> false)
+          | Indexing.Affine { symbols; offset = 0 } ->
+              let sorted =
+                List.sort symbols ~compare:(fun (c1, _) (c2, _) -> Int.compare c1 c2)
+              in
+              let rec radix r = function
+                | [] -> r = dim
+                | (c, s) :: tl -> (
+                    c = r && fresh s
+                    && match extent_of s with Some e -> radix (r * e) tl | None -> false)
+              in
+              radix 1 sorted
+          | Indexing.Fixed_idx _ | Indexing.Affine _ | Indexing.Sub_axis | Indexing.Concat _ ->
+              false)
+    in
+    let rec stmt (llc : Low_level.t) ~loops =
+      match llc with
+      | Low_level.Seq _ -> level (Low_level.flat_lines [ llc ]) ~loops
+      | For_loop { index; from_; to_; body; _ } ->
+          to_ >= from_ && level (Low_level.flat_lines [ body ]) ~loops:((index, from_, to_) :: loops)
+      | Zero_out tn2 -> tn2.Tn.uid = tn.Tn.uid
+      | Set { tn = tn2; idcs; _ } ->
+          (* [count_accesses = 1]: the write itself, so the right-hand side does not read [tn]
+             (a read-modify-write is not a covering first access). *)
+          tn2.Tn.uid = tn.Tn.uid && count_accesses llc = 1 && covering ~loops idcs
+      (* [If] = guarded (partial coverage); dynamic/vector writes and [Tile_mma] operand traffic
+         are conservatively never covering. *)
+      | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | If _ | Set_dynamic _
+      | Set_from_vec _ | Set_local _ | Declare_local _ | Tile_mma _ ->
+          false
+    and level stmts ~loops =
+      match List.filter stmts ~f:touches with
+      | [] -> false
+      | [ only ] -> stmt only ~loops
+      | first :: _ :: _ ->
+          (* Later siblings access [tn] too: they run after [first] completes, but the loops
+             collected so far re-run them interleaved with [first] — coverage must come from
+             [first]'s own nest. *)
+          stmt first ~loops:[]
+    in
+    level (Low_level.flat_lines [ body ]) ~loops:[]
+
+  (* Whether the body of an outermost [Grid] loop over [sym] tolerates its iterations being
+     partitioned into chunks that execute on parallel CPU threads. Materialized accesses are
+     already safe: [validate_parallel] requires every materialized write to cover [sym], so chunks
+     write disjoint elements, and nests execute as separate parallel loops with a join in between
+     (stronger than the GPU's single launch). The hazards are the stack arrays of
+     [Local]-placement nodes: on GPU each thread gets a private copy, so a GPU-valid kernel may
+     legally write them grid-invariantly (identical values per iteration) -- under one shared
+     function-scope array that is a data race. A local written under the loop must satisfy one of:
+
+     - Shared rule: every access to it (read or write) mentions [sym], and all accesses agree on
+       every index component that mentions [sym] -- the same agreement rule as the default
+       annotator's hazard analysis (mere mention is not enough, e.g. a stencil write [tmp[i]] +
+       read [tmp[i-1]] both mention [sym] but reach across iterations). Distinct iterations then
+       touch disjoint cells of one function-scope array.
+     - Privatization rule: ALL of the node's accesses in the kernel sit inside this loop's body,
+       and its first access per iteration is a standalone covering write -- a whole-array rewrite
+       that completes before any other access to it executes (the write-dominance check of
+       [first_access_standalone_covering]) -- so no value flows between iterations and each chunk
+       can own a block-scope copy. This is what in-kernel packing [Stage] tiles satisfy
+       (gh-ocannl-469): the pack nest fully rewrites the tile before the micro-kernel reads it.
+       The combined per-chunk footprint is capped by [per_chunk_private_bytes_cap] (pool worker
+       stacks).
+
+     Under [`Dispatch] (the blocks extension), a block cannot refer to a declaration with an array
+     type at all -- even read-only -- but it captures pointers by value, so every non-privatized
+     local accessed under the loop is recorded for a pointer-alias declaration
+     ([current_local_ptr_alias]). [Set_local] scope locals must have their declaration within the
+     loop body (block scope = per-chunk storage). Opaque statements and barriers disqualify.
+
+     Returns [Some (privatized, ptr_aliased)] when the loop can render in parallel. *)
+  let parallel_grid_safe ~sym ~(global_counts : int Hashtbl.M(Int).t) (body : Low_level.t) :
+      (Tn.t list * Tn.t list) option =
+    let plc = placements () in
+    let is_local tn =
+      (not (Tn.Placements.is_virtual_force plc tn 431))
+      && not (Tn.Placements.is_materialized_force plc tn 432)
+    in
+    let mentions_comp (idx : Indexing.axis_index) =
+      match idx with
+      | Indexing.Iterator s -> Indexing.equal_symbol s sym
+      | Indexing.Affine { symbols; _ } ->
+          List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
+      | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
+    in
+    let locals : grid_local_info Hashtbl.M(Int).t = Hashtbl.create (module Int) in
+    let declared_scopes = Hash_set.create (module Int) in
+    let ok = ref true in
+    let access ~write tn idcs =
+      if is_local tn then (
+        let info =
+          Hashtbl.find_or_add locals tn.Tn.uid ~default:(fun () ->
+              { gl_tn = tn; gl_written = false; gl_accs = []; gl_count = 0 })
+        in
+        info.gl_count <- info.gl_count + 1;
+        info.gl_written <- info.gl_written || write;
+        info.gl_accs <- idcs :: info.gl_accs)
+    in
+    iter_local_accesses body ~access ~on_stmt:(function
+      | `Opaque -> ok := false
+      | `Declare_local id -> Hash_set.add declared_scopes id
+      | `Set_local id -> if not (Hash_set.mem declared_scopes id) then ok := false);
+    if not !ok then None
+    else
+      let privatized = ref [] and ptr_aliased = ref [] in
+      let private_bytes = ref 0 in
+      let feasible =
+        Hashtbl.for_all locals ~f:(fun info ->
+            let shared_ok =
+              (not info.gl_written)
               || (* Distinct grid iterations must touch disjoint elements: every access mentions
                     [sym]... *)
-              List.for_all accs ~f:(fun idcs -> Array.exists idcs ~f:mentions_comp)
-           &&
-           (* ...and all accesses agree on every component that mentions [sym], so within one
-              iteration reads hit exactly the cells that iteration writes. *)
-           let rank = List.fold accs ~init:0 ~f:(fun m a -> max m (Array.length a)) in
-           let agree = ref true in
-           for p = 0 to rank - 1 do
-             let comps =
-               List.map accs ~f:(fun a ->
-                   if p < Array.length a then a.(p) else Indexing.Fixed_idx 0)
-             in
-             if List.exists comps ~f:mentions_comp then
-               match comps with
-               | [] -> ()
-               | c0 :: rest ->
-                   if not (List.for_all rest ~f:(Indexing.equal_axis_index c0)) then agree := false
-           done;
-           !agree))
+              List.for_all info.gl_accs ~f:(fun idcs -> Array.exists idcs ~f:mentions_comp)
+              &&
+              (* ...and all accesses agree on every component that mentions [sym], so within one
+                 iteration reads hit exactly the cells that iteration writes. *)
+              let accs = info.gl_accs in
+              let rank = List.fold accs ~init:0 ~f:(fun m a -> max m (Array.length a)) in
+              let agree = ref true in
+              for p = 0 to rank - 1 do
+                let comps =
+                  List.map accs ~f:(fun a ->
+                      if p < Array.length a then a.(p) else Indexing.Fixed_idx 0)
+                in
+                if List.exists comps ~f:mentions_comp then
+                  match comps with
+                  | [] -> ()
+                  | c0 :: rest ->
+                      if not (List.for_all rest ~f:(Indexing.equal_axis_index c0)) then
+                        agree := false
+              done;
+              !agree
+            in
+            if shared_ok then (
+              (match B.parallel_grid_syntax with
+              | `Dispatch -> ptr_aliased := info.gl_tn :: !ptr_aliased
+              | `Openmp | `None -> ());
+              true)
+            else
+              let all_inside =
+                match Hashtbl.find global_counts info.gl_tn.Tn.uid with
+                | Some total -> total = info.gl_count
+                | None -> false
+              in
+              if all_inside && first_access_standalone_covering info.gl_tn body then (
+                private_bytes :=
+                  !private_bytes
+                  + (Tn.num_elems info.gl_tn
+                    * Ops.prec_in_bytes (Lazy.force info.gl_tn.Tn.prec));
+                privatized := info.gl_tn :: !privatized;
+                !private_bytes <= per_chunk_private_bytes_cap)
+              else false)
+      in
+      if feasible then Some (!privatized, !ptr_aliased) else None
 
-  (* The outermost [Grid] loops safe to render in parallel. Nested [Grid] loops render serially
-     inside a chunk (still correct: write coverage holds per grid index). Runtime kernel logging
-     writes to a shared FILE, so parallel rendering is skipped under [debug_log_from_routines]. *)
-  let collect_parallel_grid (llc : Low_level.t) : Set.M(Indexing.Symbol).t =
+  (* The outermost [Grid] loops safe to render in parallel, with each loop's privatized locals
+     and (under [`Dispatch]) the pointer-aliased function-scope locals. Nested [Grid] loops render
+     serially inside a chunk (still correct: write coverage holds per grid index). Runtime kernel
+     logging writes to a shared FILE, so parallel rendering is skipped under
+     [debug_log_from_routines]. *)
+  let collect_parallel_grid (llc : Low_level.t) :
+      Set.M(Indexing.Symbol).t * Tn.t list Map.M(Indexing.Symbol).t * Set.M(Tn).t =
+    let empty =
+      (Set.empty (module Indexing.Symbol), Map.empty (module Indexing.Symbol), Set.empty (module Tn))
+    in
     if
       Poly.equal B.parallel_grid_syntax `None
       || B.parallel_grid_chunks <= 1
       || Utils.debug_log_from_routines ()
-    then Set.empty (module Indexing.Symbol)
+    then empty
     else
-      let acc = ref (Set.empty (module Indexing.Symbol)) in
+      let plc = placements () in
+      let is_local tn =
+        (not (Tn.Placements.is_virtual_force plc tn 431))
+        && not (Tn.Placements.is_materialized_force plc tn 432)
+      in
+      (* Whole-kernel access counts per local, so [parallel_grid_safe] can tell when a local's
+         accesses all sit inside one loop's body (the privatization rule). Same traversal, so the
+         counts are comparable by construction. *)
+      let global_counts : int Hashtbl.M(Int).t = Hashtbl.create (module Int) in
+      iter_local_accesses llc
+        ~access:(fun ~write:_ tn _ -> if is_local tn then Hashtbl.incr global_counts tn.Tn.uid)
+        ~on_stmt:(fun _ -> ());
+      let syms = ref (Set.empty (module Indexing.Symbol)) in
+      let privs = ref (Map.empty (module Indexing.Symbol)) in
+      let aliases = ref (Set.empty (module Tn)) in
       let rec go (llc : Low_level.t) =
         match llc with
         | Low_level.For_loop { axis = Grid; index; from_; to_; body; _ } ->
-            if from_ = 0 && to_ >= 1 && parallel_grid_safe ~sym:index body then
-              acc := Set.add !acc index
+            if from_ = 0 && to_ >= 1 then (
+              match parallel_grid_safe ~sym:index ~global_counts body with
+              | Some (privatized, ptr_aliased) ->
+                  syms := Set.add !syms index;
+                  if not (List.is_empty privatized) then
+                    privs := Map.set !privs ~key:index ~data:privatized;
+                  aliases := List.fold ptr_aliased ~init:!aliases ~f:Set.add
+              | None -> ())
         | For_loop { body; _ } -> go body
         | If { body; _ } -> go body
         | Seq (a, b) ->
@@ -838,7 +1021,31 @@ module C_syntax (B : C_syntax_config) = struct
         | _ -> ()
       in
       go llc;
-      !acc
+      (!syms, !privs, !aliases)
+
+  (* Renders a [Local]-placement (routine-scope scratch) array declaration; shared by
+     [compile_proc]'s function-scope [local_decls] and the per-chunk declarations of pool-parallel
+     [Grid] loops. With [alias_ptr], the array gets a mangled name and a [const] pointer alias
+     under the node's ident: [`Dispatch] blocks cannot refer to array declarations but capture
+     pointers by value, and array indexing syntax is unchanged through the pointer. *)
+  let local_array_decl ?(alias_ptr = false) ~zero_init (tn : Tn.t) : PPrint.document =
+    let open PPrint in
+    let typ = B.typ_of_prec @@ Lazy.force tn.Tn.prec in
+    let ident = get_ident tn in
+    let arr_name = if alias_ptr then ident ^ "_mem__" else ident in
+    let align_doc =
+      (* SIMD alignment for plain stack arrays (gh-ocannl-164). *)
+      match B.aligned_local_attr with Some attr -> string (" " ^ attr) | None -> empty
+    in
+    let init_doc = if zero_init then string " = {0}" else empty in
+    let decl =
+      string typ ^^ space ^^ string arr_name
+      ^^ brackets (OCaml.int (Tn.num_elems tn))
+      ^^ align_doc ^^ init_doc ^^ semi
+    in
+    if alias_ptr then
+      decl ^^ hardline ^^ string (Printf.sprintf "%s * const %s = %s;" typ ident arr_name)
+    else decl
 
   (* A [Zero_out] loop is redundant when the array's declaration already initializes it with [=
      {0}]. That happens for local (non-virtual, non-materialized) declarations whose traced node has
@@ -962,6 +1169,24 @@ module C_syntax (B : C_syntax_config) = struct
             ^^ string
                  (Printf.sprintf "const %s%s = %s + %d <= %d ? %s + %d : %d;" it hi lo grain extent
                     lo grain extent)
+          in
+          (* Locals privatized to this loop (see [parallel_grid_safe]): block-scope arrays inside
+             the chunk body, one copy per chunk -- iterations rewrite them wholly before reading,
+             so per-chunk storage matches the serial semantics. *)
+          let decls =
+            match Map.find !current_grid_private i with
+            | None | Some [] -> decls
+            | Some tns ->
+                let zero_init tn =
+                  match !current_traced_store with
+                  | Some ts ->
+                      Hashtbl.find ts tn
+                      |> Option.value_map ~default:false ~f:(fun node ->
+                             node.Low_level.zero_initialized_by_code)
+                  | None -> false
+                in
+                List.fold tns ~init:decls ~f:(fun acc tn ->
+                    acc ^^ hardline ^^ local_array_decl ~zero_init:(zero_init tn) tn)
           in
           let inner =
             string (Printf.sprintf "for (%s%s = %s; %s < %s; ++%s)" it ident lo ident hi ident)
@@ -2720,7 +2945,10 @@ module C_syntax (B : C_syntax_config) = struct
     in
     let launch = Low_level.launch_dims llc in
     current_hardware_axes := Low_level.hardware_axes llc;
-    current_parallel_grid := collect_parallel_grid llc;
+    (let parallel_grid, grid_private, local_ptr_alias = collect_parallel_grid llc in
+     current_parallel_grid := parallel_grid;
+     current_grid_private := grid_private;
+     current_local_ptr_alias := local_ptr_alias);
     current_workgroup_shared := workgroup_shared;
     current_traced_store := Some traced_store;
     Hash_set.clear zero_out_seen;
@@ -2895,6 +3123,11 @@ module C_syntax (B : C_syntax_config) = struct
           ^^ hardline
     | `Pooled _ -> ());
 
+    let grid_privatized =
+      Map.fold !current_grid_private
+        ~init:(Set.empty (module Tn))
+        ~f:(fun ~key:_ ~data acc -> List.fold data ~init:acc ~f:Set.add)
+    in
     let local_decls =
       string "/* Local declarations and initialization. */"
       ^^ hardline
@@ -2902,36 +3135,31 @@ module C_syntax (B : C_syntax_config) = struct
            (fun (tn, node) ->
              let plc = placements () in
              if
-               not
-                 (Tn.Placements.is_virtual_force plc tn 333
-                 || Tn.Placements.is_materialized_force plc tn 336)
+               (not
+                  (Tn.Placements.is_virtual_force plc tn 333
+                  || Tn.Placements.is_materialized_force plc tn 336))
+               (* Privatized to a pool-parallel [Grid] loop: declared per chunk inside that
+                  loop's body instead (see [parallel_grid_loop]). *)
+               && not (Set.mem grid_privatized tn)
              then
-               let typ_doc = string (B.typ_of_prec @@ Lazy.force tn.prec) in
-               let ident_doc = string (get_ident tn) in
-               let num_elems = Tn.num_elems tn in
-               let size_doc = OCaml.int num_elems in
                let is_shared = Set.mem workgroup_shared tn in
-               let prefix_doc =
+               if is_shared then
                  (* Workgroup-shared placement (axis-types proposal §3): one tile per workgroup
                     instead of one per thread. [= {0}] is not allowed for shared declarations, so
                     zero-initialization stays as explicit [Zero_out] code (never elided for shared
-                    nodes; see [zero_out_loop_redundant]). *)
-                 if is_shared then string (Option.value_exn ~here:[%here] B.shared_decl_prefix)
-                 else empty
-               in
-               let init_doc =
-                 if node.Low_level.zero_initialized_by_code && not is_shared then string " = {0}"
-                 else empty
-               in
-               let align_doc =
-                 (* SIMD alignment for plain stack arrays only (gh-ocannl-164); shared placements
-                    keep the backend's default layout. *)
-                 match B.aligned_local_attr with
-                 | Some attr when not is_shared -> string (" " ^ attr)
-                 | _ -> empty
-               in
-               prefix_doc ^^ typ_doc ^^ space ^^ ident_doc ^^ brackets size_doc ^^ align_doc
-               ^^ init_doc ^^ semi ^^ hardline
+                    nodes; see [zero_out_loop_redundant]); shared placements also keep the
+                    backend's default layout (no [aligned_local_attr]). *)
+                 string (Option.value_exn ~here:[%here] B.shared_decl_prefix)
+                 ^^ string (B.typ_of_prec @@ Lazy.force tn.prec)
+                 ^^ space
+                 ^^ string (get_ident tn)
+                 ^^ brackets (OCaml.int (Tn.num_elems tn))
+                 ^^ semi ^^ hardline
+               else
+                 local_array_decl
+                   ~alias_ptr:(Set.mem !current_local_ptr_alias tn)
+                   ~zero_init:node.Low_level.zero_initialized_by_code tn
+                 ^^ hardline
              else empty)
            (Hashtbl.to_alist traced_store)
     in

@@ -9,6 +9,12 @@
    - regtile: + second-level splits with materialized-unroll TM x TN register tiles accumulating
      into a privatized per-thread tile (S3 + Privatize, Boehm kernel 4/5 shape).
 
+   On the C backends the shared schedules are rejected and the CPU variants run instead:
+   cpupack (S4 cache tiling + operand packing, all-Serial), tensorize (whole-triple register-tiled
+   Tile_mma, gh-ocannl-469), packmma (Tile_mma composed with cache tiling + packing, all-Serial
+   GEBP), and packmma_par (the same composition with pool-parallel Grid row blocks and per-chunk
+   privatized A~ tiles).
+
    Usage: dune exec bin/schedule_bench.exe -- [n] [repeats] (defaults 256 and 20; n must be a
    multiple of 64). Run with OCANNL_BACKEND=metal (or cuda); the C backends reject the shared
    schedules. Timing includes kernel executions and one device-to-host transfer per variant
@@ -174,6 +180,31 @@ let () =
     @ [ stage mb.Tensor.value [ k_i; j ]; stage ma.Tensor.value [ i_i; k_i ]; tz ]
   in
 
+  (* The fully parallel packed GEMM (gh-ocannl-469 follow-up): the row-block loop is Grid-typed
+     and pool-parallelizes — the per-row-block A~ tile is privatized to per-chunk block-scope
+     storage by the renderer, the B~ panel packed at k_o is read-only inside the Grid body
+     (behind a pointer alias under the blocks extension). The whole-node zeroing is no longer
+     legal beside a hardware-annotated loop, so it expands with the same Grid row geometry. *)
+  let packmma_par_schedule ~mc opt =
+    let bm, bk = (64, 64) in
+    let i, j, k = accum_syms opt in
+    let ez, zsyms = Sched.expand_zero ~tn:mc in
+    let zi = match zsyms with [ zi; _ ] -> zi | _ -> assert false in
+    let sp_zi, _, _ = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+    let sp_i, i_o, i_i = Sched.split ~axis:i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+    let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
+    let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner }) in
+    let stage source tile_loops =
+      Sched.Stage { source; tile_loops; shared = false; cooperative = None; hoisted = false }
+    in
+    let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1 in
+    [ ez; sp_zi; sp_i; sp_k ]
+    @ sink j [ k_o ]
+    @ sink i_i [ k_o ]
+    @ sink i_o [ k_o ]
+    @ [ stage mb.Tensor.value [ k_i; j ]; stage ma.Tensor.value [ i_i; k_i ]; tz ]
+  in
+
   let bench ~variant ~schedule =
     let%op mc = ma * mb in
     let comp = named ("mm_" ^ variant) (Train.forward mc) in
@@ -212,5 +243,6 @@ let () =
     let t_pack = bench ~variant:"cpupack" ~schedule:(Some cpupack_schedule) in
     let t_tmma = bench ~variant:"tensorize" ~schedule:(Some tensorize_schedule) in
     let t_pmma = bench ~variant:"packmma" ~schedule:(Some packmma_schedule) in
-    p "speedups vs naive: cpupack %.1fx, tensorize %.1fx, packmma %.1fx\n" (t_naive /. t_pack)
-      (t_naive /. t_tmma) (t_naive /. t_pmma)
+    let t_pmmap = bench ~variant:"packmma_par" ~schedule:(Some packmma_par_schedule) in
+    p "speedups vs naive: cpupack %.1fx, tensorize %.1fx, packmma %.1fx, packmma_par %.1fx\n"
+      (t_naive /. t_pack) (t_naive /. t_tmma) (t_naive /. t_pmma) (t_naive /. t_pmmap)

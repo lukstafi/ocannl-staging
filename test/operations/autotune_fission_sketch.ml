@@ -225,8 +225,9 @@ let () =
   p "matmul sketch instantiations seeded" (mr1.Autotune.sketch_candidates > 0);
   (* Tensorized (tile-MMA) sketch families ride along the blocktiling/packing ones: for the
      32x32x32 f32 site, cc seeds 2 packing + 2 hoisted-packing + 2 whole-triple/Grid-split
-     [Tensorize] pipelines + 1 cache-blocked packed [Tile_mma] composition, its hoisted variant,
-     and its Grid-parallel hoisted-only variant (gh-ocannl-469/470); Metal seeds 4 blocktiling +
+     [Tensorize] pipelines + 1 cache-blocked packed [Tile_mma] composition, its hoisted,
+     Grid-parallel hoisted-only, and Grid-parallel in-kernel variants (gh-ocannl-469/470);
+     Metal seeds 4 blocktiling +
      5 simdgroup pipelines (2 unstaged full-K + 3 cooperatively staged); other GPU backends seed
      at least the 4 blocktiling ones (plus 5 wmma pipelines when the device reports an mma
      capability). *)
@@ -278,8 +279,9 @@ let () =
   | Some r ->
       (* For the 32x32x32 f32 segment site (unzeroed), cc seeds 2 packing + 2 hoisted-packing
          (qc is a hoistable constant) + 2 whole-triple tensorized pipelines + 1 packed
-         [Tile_mma] composition, its hoisted variant, and its Grid-parallel hoisted-only variant
-         (qd in place x hoisted-packed qc — the inference-GEMM shape); Metal seeds 4 blocktiling
+         [Tile_mma] composition, its hoisted, Grid-parallel hoisted-only (qd in place x
+         hoisted-packed qc — the inference-GEMM shape), and Grid-parallel in-kernel variants;
+         Metal seeds 4 blocktiling
          + 5 simdgroup pipelines; other GPU backends at least the 4 blocktiling ones. *)
       p "per-segment sketch candidates seeded"
         (r.Autotune.fiss_sketch_candidates

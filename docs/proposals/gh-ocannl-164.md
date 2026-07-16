@@ -86,10 +86,15 @@ outermost `Grid` loops render as contiguous chunks over `dispatch_apply` (macOS)
 `#pragma omp parallel for` (elsewhere; config `cc_parallel_grid`, "auto" probes the
 compiler) — both process-global pools, so no pool state lives in the kernel `.so` and
 the OCaml runtime is never involved. Eligibility (`C_syntax.collect_parallel_grid`)
-keeps a loop serial when a kernel-scope local (per-thread on GPU, shared under the C
-serialization) is written without mentioning the grid index — this is what makes
-GPU-valid hand schedules (e.g. `Privatize` accumulators) safe rather than racy —
-and under barriers, opaque statements, or runtime kernel logging. The new
+keeps a loop serial under barriers, opaque statements, or runtime kernel logging, and
+analyzes kernel-scope locals (per-thread on GPU, shared under the C serialization):
+a local written under the loop must either touch disjoint cells per iteration (every
+access mentions the grid index, with agreement on the mentioning components) or be
+privatizable to per-chunk block-scope storage (all accesses inside the body and each
+iteration's first access a covering write — `Privatize` accumulators and gh-ocannl-469
+packed tiles; combined footprint capped for the pool workers' stacks). Under
+`dispatch_apply`, blocks cannot capture array declarations, so non-privatized locals
+accessed in the body are declared behind a `const` pointer alias. The new
 `Schedule.default_cpu` preset (config `automatic_cpu_schedule`,
 `cpu_schedule_min_parallel`) reuses the GPU annotator's analysis and just retypes each
 nest's outermost chain loop to `Grid`. Workgroup loops stay serial inside a chunk;

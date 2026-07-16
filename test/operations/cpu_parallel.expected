@@ -6,4 +6,6 @@ large kernel rendered in parallel: true
 small kernel values correct: true
 small kernel stays serial: true
 privatized matmul values match the twin: true
-unsafe local keeps the accumulation grid loop serial: true
+privatized accumulator gets per-chunk storage, both nests parallel: true
+interleaved-write hazard values correct: true
+interleaved covering write keeps the grid loop serial: true

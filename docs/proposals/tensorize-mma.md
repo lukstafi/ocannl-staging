@@ -396,14 +396,27 @@ directly as whole-routine sketch candidates (`Autotune.sketch_seed_params`, gate
   gradient-GEMM layouts it declines in place (it now also accepts `ta` directly: A feeds are
   scalar splats either way). The B panel packs at `k_o`, outside the row blocks, and is reused
   across all of them; `lda = bk`, `ldb = bn` stream contiguous cache-resident tiles. The lane
-  width is 1 (the C backends render the lane loop serially; single-threadedness keeps the
-  whole-node `Zero_out` legal, and is required anyway — the function-scope packed tiles would
-  race under pool-parallel Grid chunks). Hoisted (constant-pool) packing is proposed per
-  operand like the scalar S4 pipeline. Separately, `parallel_grid_safe` now analyzes `Tile_mma`
-  through its scalar fallback (the statement's true access footprint) instead of bailing, so
-  the Grid-split whole-triple variants genuinely pool-parallelize (materialized operands pass;
-  local packed tiles correctly decline). Pinned by `schedule_pack_mma_matmul.ml` (bitwise
-  parity, pack normalization of transposed B, pool-parallel grid rendering).
+  width is 1 (the C backends render the lane loop serially). Hoisted (constant-pool) packing is
+  proposed per operand like the scalar S4 pipeline. Separately, `parallel_grid_safe` now
+  analyzes `Tile_mma` through its scalar fallback (the statement's true access footprint)
+  instead of bailing, so the Grid-split whole-triple variants genuinely pool-parallelize.
+- **CPU packed parallel** (`sk_grid`; 2026-07-16 follow-up): the same composition with the
+  row-block loop `i_o` Grid-typed — the fully parallel packed GEMM. The renderer's
+  `parallel_grid_safe` privatizes the per-row-block A~ tile to per-chunk block-scope storage
+  (all its accesses sit inside the Grid body and the pack nest fully rewrites it before the
+  micro-kernel reads it — the privatization rule; combined per-chunk footprint capped at 256KB
+  for the pool workers' 512KB default stacks), while the B~ panel packed at `k_o` stays
+  function-scope and read-only inside the body — under the blocks extension (`dispatch_apply`),
+  which cannot capture array declarations at all, it is declared behind a `const` pointer
+  alias. The whole-node `Zero_out` is no longer legal beside a hardware-annotated loop, so it
+  expands into a nest whose row loop Grid-splits with the same `bm` geometry. A second shape,
+  `sk_grid && sk_hoist` (landed independently as PR #158, gh-ocannl-470), goes hoisted-only:
+  hoistable operands are packed at link time into the constant pool, the rest are read in
+  place, so the kernel body touches only materialized buffers and the Grid loop stays
+  outermost (one dispatch spanning the whole GEBP triple) — the typical inference GEMM,
+  activations x constant weights. All flavors stay measured choices against the serial ones.
+  Pinned by `schedule_pack_mma_matmul.ml` (bitwise parity, pack normalization of transposed B,
+  pool-parallel grid rendering, per-chunk privatized tiles, hoisted-only grid).
 
 Stage-only composition, deliberately no `Privatize`: it would relocate the accumulator into
 thread-local scratch, which `simdgroup_load` cannot address (`mma_syntax` declines thread-space

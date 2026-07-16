@@ -90,8 +90,9 @@ type sketch_params = {
           tensor cores; on cc, the whole-triple [Tile_mma] rendered register-tiled
           (gh-ocannl-469), optionally Grid-parallel over row blocks — or, with [sk_bk > 0], the
           cache-blocked packed composition (packing Stages feeding the register-tiled kernel;
-          [cpu_mma_pack_sketch_schedule]), itself optionally Grid-parallel when the packing is
-          hoisted-only ([sk_grid]). Seeded directly because the greedy menu cannot reach
+          [cpu_mma_pack_sketch_schedule]), itself optionally Grid-parallel ([sk_grid]: hoisted
+          packing runs Grid-outermost; in-kernel packing relies on the renderer's per-chunk tile
+          privatization). Seeded directly because the greedy menu cannot reach
           the composition: a bare [Tensorize] from the serial baseline (one simdgroup, everything
           else serial) loses round 1 and the beam discards it before Grid retypes could join
           it. *)
@@ -108,11 +109,19 @@ type sketch_params = {
           (known-constant, host-init-backed) sources. *)
   sk_grid : bool;
       (** CPU packed composition only ([sk_mma] with [sk_bk > 0]): split [i] into pool-parallel
-          [Grid] row blocks instead of Serial ones. Requires hoisted-only packing: in-kernel packs
-          write function-scope stack tiles that would race under the pool chunks (c_syntax.ml
-          [parallel_grid_safe] declines them), while hoisted packing emits no in-kernel writes at
-          all — so only hoistable operands are packed (hoisted) and the rest are read in place,
-          leaving the kernel body all-materialized and Grid-parallelizable. *)
+          [Grid] row blocks instead of Serial ones. Two shapes, keyed by [sk_hoist]:
+
+          - With [sk_hoist], hoisted-only packing: only hoistable operands are packed (at link
+            time, into the constant pool) and the rest are read in place, leaving the kernel body
+            all-materialized; the Grid loop stays outermost (one dispatch spanning the whole GEBP
+            triple). The typical inference GEMM: activations (in place) x constant weights.
+          - Without [sk_hoist], in-kernel packing: the per-row-block A~ packing Stage lands
+            inside the Grid body — its tile is privatized to per-chunk block-scope storage by the
+            renderer ([C_syntax.parallel_grid_safe]'s privatization rule) — while the B~ panel
+            packs at the k-block loop outside the Grid and is read-only inside (shared across the
+            row-block chunks, behind a pointer alias under the blocks extension).
+
+          Proposed alongside the serial flavors so the choice stays measured. *)
 }
 
 type matmul_site = {
@@ -389,35 +398,42 @@ let cpu_mma_sketch_schedule (site : matmul_site) { sk_bm = bm; _ } : Sched.sched
    so a transposed source packs into the normalized layout and [Tensorize] sees
    [ta = tb = false]. [sk_bn = 0] leaves [j] unsplit (one B~ row panel of [bk x nj] per k-block).
    The lane width is 1: the C backends render the lane loop serially, and a unit lane keeps the
-   kernel single-threaded so a whole-node [Zero_out] of the output needs no expansion — Serial
-   is also load-bearing for the in-kernel packs, whose function-scope tiles would race under
-   pool-parallel Grid blocks ([parallel_grid_safe] declines them). Hoisted packing (constant
-   operands, gh-ocannl-470) is proposed per operand like the scalar S4 pipeline.
+   kernel's parallel geometry trivial. Hoisted packing (constant operands, gh-ocannl-470) is
+   proposed per operand like the scalar S4 pipeline.
 
-   With [sk_grid], the row-block loop [i_o] becomes a pool-parallel [Grid] loop kept outermost
-   (one dispatch spanning the whole GEBP triple) and the packing goes hoisted-only: hoistable
-   operands are packed at link time into the constant pool, the rest are read in place, so the
-   kernel body touches only materialized buffers and [parallel_grid_safe] accepts the Grid
-   split. The typical inference GEMM: activations (in place) x constant weights (hoisted-packed
-   panel). The Grid split makes the kernel multi-threaded, so the whole-node [Zero_out] must be
-   expanded with matching Grid coverage ([zero_geometry]; the unit-lane Workgroup axis has
-   extent 1, stays inactive, and needs no coverage from the zeroing nest). *)
+   With [sk_grid], the row-block loop [i_o] is [Grid]-typed and pool-parallelizes; the whole-node
+   [Zero_out] of the output — no longer legal beside a hardware-annotated loop
+   ([validate_parallel]) — expands into a nest whose row loop Grid-splits with the same [bm]
+   geometry ([zero_geometry]; the unit-lane Workgroup axis has extent 1, stays inactive, and
+   needs no coverage from the zeroing nest). Two shapes (see [sk_grid]):
+
+   - [sk_hoist]: hoisted-only packing — hoistable operands are packed at link time into the
+     constant pool, the rest are read in place, so the kernel body touches only materialized
+     buffers; the Grid loop stays outermost (one dispatch spanning the whole GEBP triple). The
+     typical inference GEMM: activations (in place) x constant weights (hoisted-packed panel).
+   - Otherwise, in-kernel packing: [i_o] sinks under [j_o]/[k_o] exactly as in the serial shape,
+     so the B~ panel packs outside the Grid body (read-only inside, shared across the row-block
+     chunks) while the per-row-block A~ tile is privatized to per-chunk block-scope storage by
+     the renderer ([C_syntax.parallel_grid_safe]'s privatization rule). *)
 let cpu_mma_pack_sketch_schedule (site : matmul_site)
     { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_hoist; sk_grid; _ } : Sched.schedule =
   let outer_i = if sk_grid then LL.Grid else LL.Serial in
+  let grid_outermost = sk_grid && sk_hoist in
   let sp_i, i_o, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:outer_i ~inner:LL.Serial in
   let sp_k, k_o, k_i = Sched.split ~axis:site.m_k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
   let splits, j_col, j_swaps =
     if bn = 0 then ([ sp_i; sp_k ], site.m_j, [])
     else
       let sp_j, j_o, j_i = Sched.split ~axis:site.m_j ~factor:bn ~outer:LL.Serial ~inner:LL.Serial in
-      ([ sp_i; sp_j; sp_k ], j_i, sink i_i [ j_o ] @ if sk_grid then [] else sink i_o [ j_o ])
+      ( [ sp_i; sp_j; sp_k ],
+        j_i,
+        sink i_i [ j_o ] @ if grid_outermost then [] else sink i_o [ j_o ] )
   in
   let stage ~hoisted source tile_loops =
     Sched.Stage { source; tile_loops; shared = false; cooperative = None; hoisted }
   in
   let stages =
-    if sk_grid then
+    if grid_outermost then
       List.filter_map
         [ (site.m_b, [ k_i; j_col ]); (site.m_a, [ i_i; k_i ]) ]
         ~f:(fun (src, tls) -> if hoistable src then Some (stage ~hoisted:true src tls) else None)
@@ -438,7 +454,7 @@ let cpu_mma_pack_sketch_schedule (site : matmul_site)
   zops @ splits @ j_swaps
   @ sink j_col [ k_o ]
   @ sink i_i [ k_o ]
-  @ (if sk_grid then [] else sink i_o [ k_o ])
+  @ (if grid_outermost then [] else sink i_o [ k_o ])
   @ stages @ [ tz ]
 
 let sketch_schedule ~p (opt : LL.optimized) : Sched.schedule =
@@ -599,20 +615,30 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
               in
               (* Hoisted (link-time) packing stays a measured choice for constant operands, like
                  the scalar S4 pipeline (gh-ocannl-470). And when a hoistable operand exists, the
-                 packed composition can pool-parallelize ([sk_grid]): hoisted packing emits no
-                 in-kernel pack writes, so a Grid split over the row blocks is race-free — pack
-                 only the hoistable operand(s), read the rest in place
-                 ([cpu_mma_pack_sketch_schedule]). Grid seeds need at least two row blocks
-                 (c_syntax.ml [collect_parallel_grid] wants extent >= 2). *)
+                 hoisted-only composition pool-parallelizes ([sk_grid && sk_hoist]): hoisted
+                 packing emits no in-kernel pack writes, so an outermost Grid split over the row
+                 blocks is trivially race-free — pack only the hoistable operand(s), read the
+                 rest in place ([cpu_mma_pack_sketch_schedule]). Grid seeds need at least two row
+                 blocks (c_syntax.ml [collect_parallel_grid] wants extent >= 2). *)
+              let base = packed in
               let packed =
                 if hoistable site.m_a || hoistable site.m_b then
                   packed
-                  @ List.map packed ~f:(fun p -> { p with sk_hoist = true })
-                  @ List.filter_map packed ~f:(fun p ->
+                  @ List.map base ~f:(fun p -> { p with sk_hoist = true })
+                  @ List.filter_map base ~f:(fun p ->
                         if site.m_ni / p.sk_bm >= 2 then
                           Some { p with sk_hoist = true; sk_grid = true }
                         else None)
                 else packed
+              in
+              (* Pool-parallel Grid over the in-kernel packed composition: the renderer
+                 privatizes the per-row-block A~ tile to per-chunk storage and shares the
+                 read-only B~ panel ([C_syntax.parallel_grid_safe]). A measured choice against
+                 the all-Serial and hoisted-only Grid flavors. *)
+              let packed =
+                packed
+                @ List.filter_map base ~f:(fun p ->
+                      if site.m_ni / p.sk_bm >= 2 then Some { p with sk_grid = true } else None)
               in
               whole @ packed
           | _ -> []
