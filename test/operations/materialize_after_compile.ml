@@ -1,18 +1,17 @@
-(* The load-bearing properties of [Train.tune_placements] (placement A/B), pinned
-   deterministically via the two-level memory-mode split: tnode-level [memory_mode] is declared,
-   semantics-bearing intent; placement decisions are context-level and functional
-   ([Context.decide_materialized] returns a child context, leaving the argument context and the
-   declared intent untouched). So the A/B arms are hermetic siblings and no virtual-to-
-   materialized conversion (which the intent lattice rejects) is ever requested:
+(* The load-bearing properties of [Train.tune_placements] (placement A/B), pinned deterministically
+   via the two-level memory-mode split: tnode-level [memory_mode] is declared, semantics-bearing
+   intent; placement decisions are context-level and functional ([Context.decide_materialized]
+   returns a child context, leaving the argument context and the declared intent untouched). So the
+   A/B arms are hermetic siblings and no virtual-to- materialized conversion (which the intent
+   lattice rejects) is ever requested:
 
-   1. A default-placement compile decides the intermediate Virtual only in its own lineage —
-      the tnode's declared intent stays unspecified.
-   2. A compile from a [decide_materialized] sibling materializes the intermediate for real,
-      still without touching intent.
-   3. The default-placement routine remains valid alongside it and computes the same values.
-   4. [Train.every_non_literal_materialized] (the intent-level strengthening used by the
-      benchmark's "materialized" variant) stays legal after all of the above: it only
-      strengthens unspecified intent. *)
+   1. A default-placement compile decides the intermediate Virtual only in its own lineage — the
+   tnode's declared intent stays unspecified. 2. A compile from a [decide_materialized] sibling
+   materializes the intermediate for real, still without touching intent. 3. The default-placement
+   routine remains valid alongside it and computes the same values. 4.
+   [Train.every_non_literal_materialized] (the intent-level strengthening used by the benchmark's
+   "materialized" variant) stays legal after all of the above: it only strengthens unspecified
+   intent. *)
 
 open Base
 open Ocannl
@@ -67,22 +66,19 @@ let () =
   let got_a = Context.get_values ctx_a t2.Tensor.value in
   let ctx_b = Context.run ctx_b routine_b in
   let got_b = Context.get_values ctx_b t2.Tensor.value in
-  p "A-arm and B-arm routines compute the same values"
-    (Array.for_all2_exn got_a got_b ~f:approx);
-  (* The autotune-cache identity must distinguish placements (Codex P1 on PR #140): optimized
-     code can be identical while placements differ (Local scratch vs On_device buffer), and the
-     A/B arms must not cache-hit each other's entries in that case. Pin the mechanism directly:
-     flipping one node's placement class in a copied optimize_ctx changes the canonical
-     digest. *)
+  p "A-arm and B-arm routines compute the same values" (Array.for_all2_exn got_a got_b ~f:approx);
+  (* The autotune-cache identity must distinguish placements (Codex P1 on PR #140): optimized code
+     can be identical while placements differ (Local scratch vs On_device buffer), and the A/B arms
+     must not cache-hit each other's entries in that case. Pin the mechanism directly: flipping one
+     node's placement class in a copied optimize_ctx changes the canonical digest. *)
   let opt = Option.value_exn !opt_a in
   let d1 = SC.digest (SC.canonicalize opt) in
   let flipped_ctx = LL.copy_optimize_ctx opt.LL.optimize_ctx in
-  Tn.Placements.unsafe_restore flipped_ctx.LL.placements mc.Tensor.value
-    (Some (Tn.On_device, 999));
+  Tn.Placements.unsafe_restore flipped_ctx.LL.placements mc.Tensor.value (Some (Tn.On_device, 999));
   let d2 = SC.digest (SC.canonicalize { opt with LL.optimize_ctx = flipped_ctx }) in
   p "canonical digest distinguishes placement classes" (not (String.equal d1 d2));
-  (* Intent-level strengthening (the "materialized" benchmark variant) stays legal afterwards:
-     it only touches unspecified intent, never requesting virtual-to-materialized. *)
+  (* Intent-level strengthening (the "materialized" benchmark variant) stays legal afterwards: it
+     only touches unspecified intent, never requesting virtual-to-materialized. *)
   let strengthened =
     match Train.every_non_literal_materialized t2 with () -> true | exception _ -> false
   in

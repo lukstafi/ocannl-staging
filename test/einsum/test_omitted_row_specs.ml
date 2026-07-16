@@ -1,12 +1,12 @@
-(* Omitted row specs read as the context ellipsis: [x] is equivalent to [...|...->x].
-   Writing a kind separator with an empty row spec ([| ->x]) denotes explicitly empty
-   (closed) rows, preserving the pre-2026-07 reading of omitted rows. *)
+(* Omitted row specs read as the context ellipsis: [x] is equivalent to [...|...->x]. Writing a kind
+   separator with an empty row spec ([| ->x]) denotes explicitly empty (closed) rows, preserving the
+   pre-2026-07 reading of omitted rows. *)
 open Ocannl
 open Nn_blocks.DSL_modules
 
 let shape_case name f =
-  (* Shape inference constraint state is global: reinitialize so a failed case does not
-     poison subsequent ones. *)
+  (* Shape inference constraint state is global: reinitialize so a failed case does not poison
+     subsequent ones. *)
   Tensor.unsafe_reinitialize ();
   (try
      let ctx = Context.auto () in

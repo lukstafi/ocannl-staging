@@ -9,8 +9,8 @@
 open Bigarray
 
 (** Convert MNIST [int8_unsigned] images [[N; 28; 28]] to zero-mean [float32] [[N; 28; 28; 1]]
-    (pixel value / 255 minus the MNIST mean 0.1307). Adds a trailing singleton channel dimension
-    for [conv2d] compatibility.
+    (pixel value / 255 minus the MNIST mean 0.1307). Adds a trailing singleton channel dimension for
+    [conv2d] compatibility.
 
     Data centering is critical (see {!cifar_images_to_float32}): with all-positive inputs, relu +
     max-pooling amplify the positive mean through the network, saturating the logits at any weight
@@ -90,8 +90,8 @@ let ensure_cifar10_binary () =
   if not (Sys.file_exists check_file) then begin
     let tar_path = cache_dir ^ "cifar-10-binary.tar.gz" in
     let url = "https://www.cs.toronto.edu/~kriz/cifar-10-binary.tar.gz" in
-    (* Create cache dir natively: `mkdir -p` via Unix.system goes through cmd.exe on Windows,
-       which has no -p flag. *)
+    (* Create cache dir natively: `mkdir -p` via Unix.system goes through cmd.exe on Windows, which
+       has no -p flag. *)
     let rec mkdir_p dir =
       if not (Sys.file_exists dir) then begin
         mkdir_p (Filename.dirname dir);

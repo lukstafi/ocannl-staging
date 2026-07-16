@@ -1466,8 +1466,8 @@ let%track5_sexp rec apply_rows_constraint ~depth ~stage origin (rows : row list)
                       | _ ->
                           Option.map ~f:(fun (_, (v, _)) -> v)
                           @@ List.findi (List.rev row_vars) ~f:(fun _ (_, prov) ->
-                                 List.exists prov ~f:(fun (o : provenance_origin) ->
-                                     equal_kind o.kind `Output))
+                              List.exists prov ~f:(fun (o : provenance_origin) ->
+                                  equal_kind o.kind `Output))
                   in
                   let row_constrs =
                     List.map row_vars ~f:(fun (v, id) ->
@@ -1480,8 +1480,7 @@ let%track5_sexp rec apply_rows_constraint ~depth ~stage origin (rows : row list)
                                   numerator = Num_elems 1;
                                   divided_by = [];
                                   keep_axis =
-                                    Option.value_map keep_var ~default:false
-                                      ~f:(equal_row_var v);
+                                    Option.value_map keep_var ~default:false ~f:(equal_row_var v);
                                 };
                             origin;
                           })
@@ -3647,9 +3646,9 @@ and eliminate_row_constraint ~depth stage origin ~terminal ~(glb : row option) (
           match (numerator, divided_by, glb) with
           | Num_elems 1, [], (None | Some { beg_dims = []; dims = []; _ })
             when keep_axis && is_stage5_up stage ->
-              (* Identity-reshape preference (gh-460): a 1-element data terminal whose rows
-                 received no other shape information keeps a single dim-1 axis instead of
-                 collapsing to a scalar. *)
+              (* Identity-reshape preference (gh-460): a 1-element data terminal whose rows received
+                 no other shape information keeps a single dim-1 axis instead of collapsing to a
+                 scalar. *)
               ( [
                   Row_eq
                     {

@@ -1,6 +1,6 @@
-(* Minimal repro attempt for the fused-segment cross-entropy corruption seen in
-   bench_conv_diag on metal: replicate the CE cluster (logits matmul + bias, running max,
-   log-sum-exp, scalar sum, normalization) without the conv tower. Scratch diagnostic. *)
+(* Minimal repro attempt for the fused-segment cross-entropy corruption seen in bench_conv_diag on
+   metal: replicate the CE cluster (logits matmul + bias, running max, log-sum-exp, scalar sum,
+   normalization) without the conv tower. Scratch diagnostic. *)
 
 open Base
 open Ocannl

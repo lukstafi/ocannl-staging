@@ -264,16 +264,15 @@ let with_stdout_to_devnull f =
 let ac_debug_guard () =
   Utils.set_log_level 2;
   (* ROCm services device-side printf from a host worker thread that caches the process stdout
-     handle when the runtime initializes (at the first kernel launch, before this section), so
-     the fd-level redirection of [with_stdout_to_devnull] cannot divert the routine-log spew — it
-     would land verbatim in the middle of the deterministic test output. Keep the parity run,
-     skip the value-logging under hip (cf. the analogous per-backend skips in
-     micrograd_demo_logging.ml). *)
-  (if
-     not
-       (String.is_substring ~substring:"hip"
-          (String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")))
-   then Utils.settings.debug_log_from_routines <- true);
+     handle when the runtime initializes (at the first kernel launch, before this section), so the
+     fd-level redirection of [with_stdout_to_devnull] cannot divert the routine-log spew — it would
+     land verbatim in the middle of the deterministic test output. Keep the parity run, skip the
+     value-logging under hip (cf. the analogous per-backend skips in micrograd_demo_logging.ml). *)
+  if
+    not
+      (String.is_substring ~substring:"hip"
+         (String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")))
+  then Utils.settings.debug_log_from_routines <- true;
   Utils.settings.output_debug_files_in_build_directory <- true;
   let out, dst_virtual =
     with_stdout_to_devnull (fun () -> run_scatter_then_copy ~materialize_dst:false)

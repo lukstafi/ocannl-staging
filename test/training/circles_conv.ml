@@ -45,10 +45,10 @@ let () =
       { image_size; max_radius = 4; min_radius = 2; max_circles; seed = Some seed }
   in
 
-  (* Generate training data. Batch 32 over the same 160 images (5 batches instead of 20) keeps
-     GPU wall time bounded: the fissioned sgd step has a near-constant per-step dispatch cost, so
-     fewer, larger steps at the same samples-per-epoch are strictly Metal-friendlier (20k steps
-     at batch 8 -> 5k steps at batch 32). *)
+  (* Generate training data. Batch 32 over the same 160 images (5 batches instead of 20) keeps GPU
+     wall time bounded: the fissioned sgd step has a near-constant per-step dispatch cost, so fewer,
+     larger steps at the same samples-per-epoch are strictly Metal-friendlier (20k steps at batch 8
+     -> 5k steps at batch 32). *)
   let batch_size = 32 in
   let total_samples = batch_size * 5 in
   let n_batches = total_samples / batch_size in
@@ -95,8 +95,8 @@ let () =
   let epochs = 1000 in
   let total_steps = epochs * n_batches in
   Train.every_non_literal_materialized batch_loss;
-  (* Accumulate the loss on device so the training loop syncs on the host only once per epoch:
-     a per-step [Context.get_values] awaits the whole device, serializing the stream. *)
+  (* Accumulate the loss on device so the training loop syncs on the host only once per epoch: a
+     per-step [Context.get_values] awaits the whole device, serializing the stream. *)
   let loss_accum = Train.loss_accumulator () in
   let update = Train.grad_update ~accum_loss:loss_accum batch_loss in
   (* Mild lr scaling for the larger batch (0.01 at batch 8 -> 0.015 at batch 32), partially
@@ -111,14 +111,16 @@ let () =
 
   let ctx = Context.auto () in
   let ctx = Train.init_params ctx bindings batch_loss in
-  (* Tune the step schedule empirically. [rounds:0] keeps only the preset seed candidates,
-     which all preserve reduction order — the trained values are schedule-invariant, so this
-     file's expected output stays deterministic no matter which seed wins. [timing_ctx] gives the
-     tuner a scratch lineage (with its own freshly initialized parameter buffers) to time
-     candidates against, so the timing runs cannot perturb the real training state (a step timed
-     on all-zero data inputs poisons parameters with inf/NaN through log 0). *)
+  (* Tune the step schedule empirically. [rounds:0] keeps only the preset seed candidates, which all
+     preserve reduction order — the trained values are schedule-invariant, so this file's expected
+     output stays deterministic no matter which seed wins. [timing_ctx] gives the tuner a scratch
+     lineage (with its own freshly initialized parameter buffers) to time candidates against, so the
+     timing runs cannot perturb the real training state (a step timed on all-zero data inputs
+     poisons parameters with inf/NaN through log 0). *)
   let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
-  let ctx, sgd_routine = Autotune.tune ~rounds:0 ~timing_ctx:scratch ctx (Asgns.sequence [ update; sgd ]) bindings in
+  let ctx, sgd_routine =
+    Autotune.tune ~rounds:0 ~timing_ctx:scratch ctx (Asgns.sequence [ update; sgd ]) bindings
+  in
   let step_ref = IDX.find_exn (Context.bindings sgd_routine) step_n in
   step_ref := 0;
 
@@ -131,9 +133,9 @@ let () =
     (* The only device sync of the epoch: read the accumulated loss sum, then reset it. *)
     let epoch_loss = ref (Context.get_values ctx loss_accum.Tensor.value).(0) in
     ignore (Context.set_values ctx loss_accum.Tensor.value [| 0. |] : Context.t);
-    (* One decimal: cross-backend float drift over thousands of steps can flip the second
-       decimal at a rounding boundary (cc vs metal differed at 0.215+-drift), and the expected
-       output must stay byte-identical across backends. *)
+    (* One decimal: cross-backend float drift over thousands of steps can flip the second decimal at
+       a rounding boundary (cc vs metal differed at 0.215+-drift), and the expected output must stay
+       byte-identical across backends. *)
     if epoch % 10 = 0 && (epoch <= 100 || epochs - epoch <= 100) then
       printf "Epoch %d: avg loss = %.1f\n%!" epoch (!epoch_loss /. Float.of_int n_batches);
     if epoch = epochs then

@@ -4,14 +4,13 @@
    Covered here, backend-independent (all printed booleans hold on every backend):
 
    - Canonical digests are process-stable across sibling compiles of the same computation (each
-     backend [compile] re-lowers with fresh symbols), and distinguish different computations.
-   - A schedule serialized against one compile ([Schedule_cache.to_saved]) replays against another
-     ([of_saved]) with structural fidelity: the replayed transform produces code with the same
-     canonical digest as the original transform, and the executed values match the unscheduled
-     twin.
-   - [Autotune.tune] returns a working routine whose values match the unscheduled twin, reports a
-     cache miss on the first call and a cache hit on the second (same computation, fresh context),
-     and the cached winner replays to correct values. *)
+   backend [compile] re-lowers with fresh symbols), and distinguish different computations. - A
+   schedule serialized against one compile ([Schedule_cache.to_saved]) replays against another
+   ([of_saved]) with structural fidelity: the replayed transform produces code with the same
+   canonical digest as the original transform, and the executed values match the unscheduled twin. -
+   [Autotune.tune] returns a working routine whose values match the unscheduled twin, reports a
+   cache miss on the first call and a cache hit on the second (same computation, fresh context), and
+   the cached winner replays to correct values. *)
 
 open Base
 open Ocannl
@@ -86,9 +85,9 @@ let () =
   p "different computations have different digests"
     (not (String.equal (SC.digest canon1) (SC.digest (SC.canonicalize mm_opt))));
 
-  (* --- Local scope ids are alpha-numbered in the digest (Codex P2 on PR #103): [get_scope]
-     draws from a process-global counter, so the same schedule applied in two compiles consumes
-     different raw ids. [Privatize] introduces [Declare_local]/[Set_local]/[Get_local]: without
+  (* --- Local scope ids are alpha-numbered in the digest (Codex P2 on PR #103): [get_scope] draws
+     from a process-global counter, so the same schedule applied in two compiles consumes different
+     raw ids. [Privatize] introduces [Declare_local]/[Set_local]/[Get_local]: without
      alpha-numbering, the digest of a fresh compile's replay could never match the digest of the
      direct application. --- *)
   let mm_expected = Array.create ~len:24 0. in
@@ -175,7 +174,9 @@ let () =
   (* --- to_saved / of_saved roundtrip: serialize a split+swap schedule built against compile #1,
      replay it inside a fresh compile, check executed values and structural (digest) parity --- *)
   let sym1, _ = first_loop_exn opt1.LL.llc in
-  let split_op, _outer, inner = Sched.split ~axis:sym1 ~factor:2 ~outer:LL.Serial ~inner:LL.Serial in
+  let split_op, _outer, inner =
+    Sched.split ~axis:sym1 ~factor:2 ~outer:LL.Serial ~inner:LL.Serial
+  in
   let sched1 = [ split_op; Sched.Unroll { axis = inner; materialize = true } ] in
   let saved, _reg = SC.to_saved (SC.base_registry canon1) sched1 in
   let direct = Sched.apply sched1 opt1 in
@@ -199,24 +200,21 @@ let () =
   p "replayed schedule structurally equals the direct application"
     (String.equal !replay_digest direct_digest);
   p "saved schedule roundtrips through sexp"
-    (SC.equal_saved_schedule saved
-       (SC.saved_schedule_of_sexp (SC.sexp_of_saved_schedule saved)));
+    (SC.equal_saved_schedule saved (SC.saved_schedule_of_sexp (SC.sexp_of_saved_schedule saved)));
 
-  (* --- End-to-end tune on a combo computation (an elementwise nest and a matmul nest): first
-     call searches (cache miss), second call (same computation, fresh context) hits the cache;
-     both return routines computing correct values --- *)
+  (* --- End-to-end tune on a combo computation (an elementwise nest and a matmul nest): first call
+     searches (cache miss), second call (same computation, fresh context) hits the cache; both
+     return routines computing correct values --- *)
   let%op tc1 = a + b in
   let%op tc2 = ma * mb in
-  let tune_comp =
-    named "tune_combo" (Asgns.sequence [ Train.forward tc1; Train.forward tc2 ])
-  in
+  let tune_comp = named "tune_combo" (Asgns.sequence [ Train.forward tc1; Train.forward tc2 ]) in
   let cache_dir = "autotune_cache_test" in
   (* The dune sandbox persists across runs: a stale entry written by an older binary (digest
-     ingredients and the saved-schedule format evolve) breaks the miss-then-hit assertions
-     below, so start from a clean cache. *)
-  (if Stdlib.Sys.file_exists cache_dir && Stdlib.Sys.is_directory cache_dir then
-     Array.iter (Stdlib.Sys.readdir cache_dir) ~f:(fun f ->
-         Stdlib.Sys.remove (Stdlib.Filename.concat cache_dir f)));
+     ingredients and the saved-schedule format evolve) breaks the miss-then-hit assertions below, so
+     start from a clean cache. *)
+  if Stdlib.Sys.file_exists cache_dir && Stdlib.Sys.is_directory cache_dir then
+    Array.iter (Stdlib.Sys.readdir cache_dir) ~f:(fun f ->
+        Stdlib.Sys.remove (Stdlib.Filename.concat cache_dir f));
   let reports = ref [] in
   let tune_once () =
     let ctx = Context.auto () in
@@ -226,8 +224,7 @@ let () =
         ctx tune_comp Ir.Indexing.Empty
     in
     let ctx = Context.run ctx routine in
-    ( Context.get_values ctx tc1.Tensor.value,
-      Context.get_values ctx tc2.Tensor.value )
+    (Context.get_values ctx tc1.Tensor.value, Context.get_values ctx tc2.Tensor.value)
   in
   let got1, got_mm1 = tune_once () in
   let got2, got_mm2 = tune_once () in

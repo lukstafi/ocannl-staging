@@ -1,19 +1,18 @@
-(* The autotuner's config-threshold fission candidate must reproduce the untuned default
-   pipeline exactly (PR #140: "tuned >= untuned by construction" rests on it). Three layers of
-   the property, on a computation replicating the benchmark suite's mlp workload — batch
-   slicing over a static index, an MLP with relu, the softmax cross-entropy loss (whose
-   intermediate chain was implicated by the CUDA round-5 segment diff), gradient update + SGD:
+(* The autotuner's config-threshold fission candidate must reproduce the untuned default pipeline
+   exactly (PR #140: "tuned >= untuned by construction" rests on it). Three layers of the property,
+   on a computation replicating the benchmark suite's mlp workload — batch slicing over a static
+   index, an MLP with relu, the softmax cross-entropy loss (whose intermediate chain was implicated
+   by the CUDA round-5 segment diff), gradient update + SGD:
 
-   1. Base lowerings agree across sibling root contexts: the tuned cell captures its base from
-      a scratch context (the [timing_ctx] of [Train.tune_placements]) while the untuned cell
-      compiles from its own context — both roots initialized the same way must lower the step
-      identically.
-   2. Given one captured lowering, [Sched.maybe_default_schedules] (the untuned pipeline) and
-      the autotuner's candidate pipeline ([Sched.fission_scheduled] with config-default presets,
-      mirroring [Autotune.compile_candidate]'s [F_preset { block_size = None;
-      config_thresholds = true; privatize = false }]) produce the same segments.
-   3. End to end: the candidate pipeline on the scratch capture equals the untuned pipeline on
-      the target-context capture — the actual arm-A-candidate vs untuned-cell comparison. *)
+   1. Base lowerings agree across sibling root contexts: the tuned cell captures its base from a
+   scratch context (the [timing_ctx] of [Train.tune_placements]) while the untuned cell compiles
+   from its own context — both roots initialized the same way must lower the step identically. 2.
+   Given one captured lowering, [Sched.maybe_default_schedules] (the untuned pipeline) and the
+   autotuner's candidate pipeline ([Sched.fission_scheduled] with config-default presets, mirroring
+   [Autotune.compile_candidate]'s [F_preset { block_size = None; config_thresholds = true; privatize
+   = false }]) produce the same segments. 3. End to end: the candidate pipeline on the scratch
+   capture equals the untuned pipeline on the target-context capture — the actual arm-A-candidate vs
+   untuned-cell comparison. *)
 
 open Base
 open Ocannl
@@ -82,7 +81,8 @@ let () =
      [timing_ctx] recipe of the benchmark runners). *)
   let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
   let opt_scratch, canon_scratch = capture scratch in
-  p "base lowerings agree across sibling roots" (String.equal (SC.digest canon_ctx) (SC.digest canon_scratch));
+  p "base lowerings agree across sibling roots"
+    (String.equal (SC.digest canon_ctx) (SC.digest canon_scratch));
   let limits = Context.hardware_limits ctx in
   let copy (opt : LL.optimized) =
     {
@@ -97,25 +97,22 @@ let () =
   let is_gpu = Sched.backend_is_gpu backend_name in
   let is_cpu = Sched.backend_is_cpu backend_name in
   let candidate opt =
-    (* Mirrors Autotune.compile_candidate's preset for
-       [F_preset { block_size = None; privatize = false; config_thresholds = true }]. *)
+    (* Mirrors Autotune.compile_candidate's preset for [F_preset { block_size = None; privatize =
+       false; config_thresholds = true }]. *)
     let preset seg =
-      if is_gpu then Sched.default_gpu ~limits seg
-      else if is_cpu then Sched.default_cpu seg
-      else []
+      if is_gpu then Sched.default_gpu ~limits seg else if is_cpu then Sched.default_cpu seg else []
     in
     let zero_sched tns = if is_gpu then Sched.zero_expansion ~limits tns else [] in
     List.map
-      (Sched.fission_scheduled ~promote_locals:is_gpu ~preset ~zero_sched ~static_indices
-         (copy opt))
+      (Sched.fission_scheduled ~promote_locals:is_gpu ~preset ~zero_sched ~static_indices (copy opt))
       ~f:(fun (_, _, _, post) -> post)
   in
   let digests posts =
     List.map posts ~f:(fun post -> SC.digest (SC.canonicalize ~static_indices post))
   in
   let report name a b =
-    (* Counts are backend-dependent (cc: single serial segment; GPU backends fission), so print
-       them only on divergence to keep the expected output backend-stable. *)
+    (* Counts are backend-dependent (cc: single serial segment; GPU backends fission), so print them
+       only on divergence to keep the expected output backend-stable. *)
     if List.length a <> List.length b then
       Stdio.printf "DIVERGENCE at %s — %d segments vs %d segments\n" name (List.length a)
         (List.length b);
@@ -123,5 +120,4 @@ let () =
     p (name ^ ": per-segment digests agree") (List.equal String.equal (digests a) (digests b))
   in
   report "same capture" (untuned opt_ctx) (candidate opt_ctx);
-  report "cross capture (arm-A candidate vs untuned cell)" (untuned opt_ctx)
-    (candidate opt_scratch)
+  report "cross capture (arm-A candidate vs untuned cell)" (untuned opt_ctx) (candidate opt_scratch)

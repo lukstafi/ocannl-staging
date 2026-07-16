@@ -200,9 +200,9 @@ let axes_spec_to_dims_bio ~sh_id ~row_var_env ~dim_var_env:_ ~f labels =
     Option.value_map v ~default:(Row.Broadcastable, beg_dims) ~f:(fun vname ->
         let v = Hashtbl.find_or_add row_var_env vname ~default:(fun () -> Row.get_row_var ()) in
         Row.add_used_in_spec_or_compose v;
-        (* A row omitted together with its kind separator reads as the context ellipsis, but
-           unlike an explicit ellipsis it may be silently closed to an empty row (even on
-           parameters) when nothing else constrains it. *)
+        (* A row omitted together with its kind separator reads as the context ellipsis, but unlike
+           an explicit ellipsis it may be silently closed to an empty row (even on parameters) when
+           nothing else constrains it. *)
         if implicit then Row.add_safe_to_guess v;
         (Row.Row_var v, beg_dims))
   in

@@ -3,19 +3,19 @@
    generated source read from [build_files/] (as-compiled structure; re-lowering reflects mutated
    global state).
 
-   The same computation -- two elementwise nests, [c1 = a + b] over 4x8 and [c2 = e *. f] over
-   6x8, combined into one routine -- is compiled twice: once as lowered (all-Serial), and once
-   with the outer loops annotated [Grid] and the inner loops [Workgroup] via the
-   [?lowered_transform] seam of [Context.compile]. The Grid extents differ (4 vs 6), so the launch
-   takes the per-slot max (6) and the smaller nest's body gets an [If (i < 4)] launch-extent guard
-   (construct-then-fold; here it must survive, the extents genuinely differ).
+   The same computation -- two elementwise nests, [c1 = a + b] over 4x8 and [c2 = e *. f] over 6x8,
+   combined into one routine -- is compiled twice: once as lowered (all-Serial), and once with the
+   outer loops annotated [Grid] and the inner loops [Workgroup] via the [?lowered_transform] seam of
+   [Context.compile]. The Grid extents differ (4 vs 6), so the launch takes the per-slot max (6) and
+   the smaller nest's body gets an [If (i < 4)] launch-extent guard (construct-then-fold; here it
+   must survive, the extents genuinely differ).
 
    On GPU backends (Metal locally, CUDA in CI) the annotated kernel executes with real grid /
-   threadgroup dimensions; on the C backends the annotated loops legally fall back to serial
-   [for] loops (no barriers involved). Every printed boolean holds on every backend -- the
-   structural expectations are dispatched on the configured backend. A third variant exercises
-   [Unrolled]: the inner loop of a 4x8 nest emits 8 repeated blocks with the index bound as a
-   per-block constant (backend-independent rendering). *)
+   threadgroup dimensions; on the C backends the annotated loops legally fall back to serial [for]
+   loops (no barriers involved). Every printed boolean holds on every backend -- the structural
+   expectations are dispatched on the configured backend. A third variant exercises [Unrolled]: the
+   inner loop of a 4x8 nest emits 8 repeated blocks with the index bound as a per-block constant
+   (backend-independent rendering). *)
 
 open Base
 open Ocannl
@@ -27,9 +27,7 @@ module Asgns = Ir.Assignments
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p name b = Stdio.printf "%s: %b\n" name b
 let approx a b = Float.(abs (a - b) < 1e-5)
-
-let backend_name =
-  String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
+let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
 let read_generated base_name =
   let ext = if String.is_substring backend_name ~substring:"metal" then ".metal" else ".c" in
@@ -38,8 +36,8 @@ let read_generated base_name =
   let path = Utils.build_file (base_name ^ ext) in
   if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
 
-(* Annotate every top-level loop nest of the optimized code: the outermost loop gets
-   [outer_axis], the immediately nested loop [inner_axis]; deeper loops stay [Serial]. *)
+(* Annotate every top-level loop nest of the optimized code: the outermost loop gets [outer_axis],
+   the immediately nested loop [inner_axis]; deeper loops stay [Serial]. *)
 let annotate ~outer_axis ~inner_axis (opt : LL.optimized) : LL.optimized =
   let rec map_inner (llc : LL.t) : LL.t =
     match llc with
@@ -73,7 +71,9 @@ let () =
   (* --- Serial twin --- *)
   let%op c1s = a + b in
   let%op c2s = e *. f in
-  let serial_comp = named "combo_serial" (Asgns.sequence [ Train.forward c1s; Train.forward c2s ]) in
+  let serial_comp =
+    named "combo_serial" (Asgns.sequence [ Train.forward c1s; Train.forward c2s ])
+  in
   let ctx_s = Context.auto () in
   let ctx_s, routine_s = Context.compile ctx_s serial_comp Ir.Indexing.Empty in
   let ctx_s = Context.run ctx_s routine_s in

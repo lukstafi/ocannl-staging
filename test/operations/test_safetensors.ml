@@ -1,6 +1,6 @@
-(* Roundtrip test for the Safetensors reader: writes a small file in the safetensors format
-   (8-byte LE header length, JSON header, little-endian payloads), reads it back, and pushes one
-   tensor through a device roundtrip via TDSL.wrap. *)
+(* Roundtrip test for the Safetensors reader: writes a small file in the safetensors format (8-byte
+   LE header length, JSON header, little-endian payloads), reads it back, and pushes one tensor
+   through a device roundtrip via TDSL.wrap. *)
 
 open Base
 open Ocannl
@@ -37,8 +37,7 @@ let () =
   | None -> printf "a: missing!\n");
   let a = Safetensors.to_float32 st "a" in
   let a_ok =
-    Array.for_alli a_vals ~f:(fun i v ->
-        Float.equal (Bigarray.Genarray.get a [| i / 3; i % 3 |]) v)
+    Array.for_alli a_vals ~f:(fun i v -> Float.equal (Bigarray.Genarray.get a [| i / 3; i % 3 |]) v)
   in
   printf "a roundtrips (2x3): %b\n" a_ok;
 
@@ -50,9 +49,9 @@ let () =
     (String.concat ~sep:"; " (Array.to_list (Array.map got ~f:(fun v -> Printf.sprintf "%.0f" v))));
 
   (* Error paths. *)
-  (match Safetensors.to_float32 st "missing" with
+  match Safetensors.to_float32 st "missing" with
   | exception Failure msg -> printf "missing tensor: %s\n" msg
-  | _ -> printf "missing tensor: unexpectedly succeeded\n")
+  | _ -> printf "missing tensor: unexpectedly succeeded\n"
 
 (* The payload ranges must tile the byte buffer exactly (safetensors invariant): overlapping or
    non-contiguous data_offsets, and trailing uncovered bytes, are rejected. *)

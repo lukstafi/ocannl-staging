@@ -74,8 +74,8 @@ module type C_syntax_config = sig
   (** The hardware register expression an annotated loop's index binds to (e.g. ["blockIdx.x"],
       ["gid.y"]), or [None] when the backend cannot bind this axis in hardware — the loop then
       renders as a serial [for] (a legal implementation absent barriers; see
-      docs/proposals/axis-types-for-loops.md §2/§5). Slots are positional: 0 = [.x], 1 = [.y],
-      2 = [.z]. *)
+      docs/proposals/axis-types-for-loops.md §2/§5). Slots are positional: 0 = [.x], 1 = [.y], 2 =
+      [.z]. *)
 
   val barrier_syntax : string option
   (** Workgroup barrier statement ([__syncthreads();] / [threadgroup_barrier(...);]); [None] makes
@@ -86,9 +86,9 @@ module type C_syntax_config = sig
       outermost [Grid] loop when [hardware_index] does not bind it. [`Dispatch] emits libdispatch's
       [dispatch_apply] over contiguous chunks (macOS; blocks extension), [`Openmp] a
       [#pragma omp parallel for] over the chunk loop; both runtimes own a single process-global
-      thread pool, so no pool state lives in the compiled kernel. [`None] keeps the serial
-      fallback. Eligibility is decided per loop by [compile_proc] (see [parallel_grid_safe]);
-      [Workgroup] loops always stay serial inside a chunk. *)
+      thread pool, so no pool state lives in the compiled kernel. [`None] keeps the serial fallback.
+      Eligibility is decided per loop by [compile_proc] (see [parallel_grid_safe]); [Workgroup]
+      loops always stay serial inside a chunk. *)
 
   val parallel_grid_chunks : int
   (** Target chunk count for [parallel_grid_syntax] (e.g. a small multiple of the core count); the
@@ -102,17 +102,17 @@ module type C_syntax_config = sig
   (** Workaround for a Metal shader-compiler miscompilation (observed on macOS 15/Metal 3.1-3.2,
       reproduced standalone in [benchmarks/runners/ocannl/bench_metal_bug.ml]): a serial loop
       accumulating into a loop-invariant address of a kernel-parameter-derived pointer —
-      [acc[k] = acc[k] + f(i)] with [k] free of [i] — can execute as if the load were hoisted
-      above the loop and the store sunk below it {e without} carrying the accumulation, leaving
-      only the last iteration's contribution (scalar losses collapsed to the last sample's CE;
-      [w.grad] accumulated only the last batch element). The trigger involves pointers derived
-      from dynamically-loaded offsets (the pooled-parameter slot table) but is otherwise
-      capricious — plain-FMA and inlined-recompute statements alike miscompiled in some kernels
-      and compiled fine in byte-alike others — so the rule keys on the pass's precondition: when
-      [true], [Set] statements that read the written node at an index invariant across at least
-      one enclosing serial [for] loop render both accesses through a [volatile]-qualified shadow
-      pointer, pinning the per-iteration read-modify-write. This covers reduction accumulators
-      (address invariant across the reduction loop); pointwise updates stay unqualified. *)
+      [acc[k] = acc[k] + f(i)] with [k] free of [i] — can execute as if the load were hoisted above
+      the loop and the store sunk below it {e without} carrying the accumulation, leaving only the
+      last iteration's contribution (scalar losses collapsed to the last sample's CE; [w.grad]
+      accumulated only the last batch element). The trigger involves pointers derived from
+      dynamically-loaded offsets (the pooled-parameter slot table) but is otherwise capricious —
+      plain-FMA and inlined-recompute statements alike miscompiled in some kernels and compiled fine
+      in byte-alike others — so the rule keys on the pass's precondition: when [true], [Set]
+      statements that read the written node at an index invariant across at least one enclosing
+      serial [for] loop render both accesses through a [volatile]-qualified shadow pointer, pinning
+      the per-iteration read-modify-write. This covers reduction accumulators (address invariant
+      across the reduction loop); pointwise updates stay unqualified. *)
 
   val restrict_keyword : string option
   (** No-alias qualifier for kernel pointer parameters and, in the pooled style, for the derived
@@ -130,15 +130,15 @@ module type C_syntax_config = sig
       the loop body is ineligible for it. *)
 
   val vector_bytes : int
-  (** Vector register width in bytes for explicit SIMD rendering of [Vectorized] loops via
-      GCC/Clang vector extensions (the [Vectorized] codegen follow-up of gh-ocannl-164 /
+  (** Vector register width in bytes for explicit SIMD rendering of [Vectorized] loops via GCC/Clang
+      vector extensions (the [Vectorized] codegen follow-up of gh-ocannl-164 /
       docs/proposals/watch-ocannl-README-md-347818d3.md): eligible loop bodies emit vector-typed
       loads, arithmetic and stores in [lanes = vector_bytes / element size] chunks plus a serial
       remainder loop, instead of relying on the compiler's auto-vectorizer (which e.g. cannot
       reassociate strict-FP reductions — the [Vectorized] retype carries that permission, like
       [Swap]). A recognized accumulation body renders as independent accumulator chains with a
-      horizontal reduce at loop exit (gh-ocannl-468; [`Vec_extensions] only). [0] disables
-      explicit emission ([vectorize_pragma] fallback). *)
+      horizontal reduce at loop exit (gh-ocannl-468; [`Vec_extensions] only). [0] disables explicit
+      emission ([vectorize_pragma] fallback). *)
 
   val vector_style : [ `Vec_extensions | `Packed_struct ]
   (** How eligible [Vectorized] loops emit explicit vector code when [vector_bytes > 0].
@@ -147,12 +147,12 @@ module type C_syntax_config = sig
       [Packed128], llmc/cuda_utils.cuh): the backend's [vec_typ_of_prec] aggregate is loaded and
       stored through [reinterpret_cast] at guaranteed-aligned offsets — the 128-bit LDG/STS
       transactions that bandwidth-bound kernels need — while the arithmetic stays scalar in a
-      per-lane loop over the pack's [.v] payload (on GPU the payoff is memory transactions, not
-      SIMD ALUs; per-lane [fmaf]/[fma] also matches the serial path's rounding exactly).
-      [`Packed_struct] eligibility additionally requires every vector-accessed node to be
-      materialized (device buffers and pool offsets are [Ops.buffer_alignment]-aligned, stack and
-      workgroup-shared arrays only element-aligned) and every access's non-loop offset
-      contribution to be a lane multiple. *)
+      per-lane loop over the pack's [.v] payload (on GPU the payoff is memory transactions, not SIMD
+      ALUs; per-lane [fmaf]/[fma] also matches the serial path's rounding exactly). [`Packed_struct]
+      eligibility additionally requires every vector-accessed node to be materialized (device
+      buffers and pool offsets are [Ops.buffer_alignment]-aligned, stack and workgroup-shared arrays
+      only element-aligned) and every access's non-loop offset contribution to be a lane multiple.
+  *)
 
   val aligned_local_attr : string option
   (** Declaration suffix aligning stack-allocated local arrays for SIMD access, e.g.
@@ -161,13 +161,13 @@ module type C_syntax_config = sig
 
   val warp_size : int
   (** SIMD-group (warp) width for the warp-shuffle rendering of [Workgroup_reduce] accumulation
-      loops (gh-ocannl-462; llm.c's [warpReduceSum]/[blockReduce] idiom). Backends setting this to
-      a nonzero power of two must define [ocannl_shfl_xor(value, lane_mask)] overloads in their
+      loops (gh-ocannl-462; llm.c's [warpReduceSum]/[blockReduce] idiom). Backends setting this to a
+      nonzero power of two must define [ocannl_shfl_xor(value, lane_mask)] overloads in their
       builtins for the supported accumulator precisions (single, and double where it exists), bind
       workgroup slot 0 in [hardware_index], and provide [barrier_syntax] plus [shared_decl_prefix]
       (needed by the two-phase multi-warp form). [0] disables the rendering: [Workgroup_reduce]
-      loops render like [Workgroup] — hardware binding, or the serial fallback (which is the
-      correct meaning of a recognized accumulation body on CPU backends). *)
+      loops render like [Workgroup] — hardware binding, or the serial fallback (which is the correct
+      meaning of a recognized accumulation body on CPU backends). *)
 
   val mma_syntax :
     (d_prec:Ops.prec ->
@@ -183,19 +183,18 @@ module type C_syntax_config = sig
     b:PPrint.document * int * [ `Device | `Shared | `Thread ] ->
     PPrint.document option)
     option
-  (** Cooperative tile-MMA emission for [Low_level.Tile_mma]
-      (docs/proposals/tensorize-mma.md §4): given the per-operand precisions (the backend decides
-      which combinations its units support — Metal [simdgroup_matrix] is uniform-precision only,
-      CUDA wmma's flagship combination is mixed f16×f16→f32), the transposed-storage flags
-      [ta]/[tb] (the operand's stored layout is the transpose of its role — load tiles with the
-      hardware transpose flag and swapped offset arithmetic), the covered block extents
-      [m]/[n]/[k], and per operand a pointer expression to the tile base (already offset), its
-      leading-dimension stride in elements, and its address space, emit the intrinsic sequence
-      (fragment declarations / loads / mma steps / stores) executed by every lane of the enclosing
-      lane loop. Return [None] to decline a particular call (unsupported precision combination,
-      extents not multiples of the intrinsic tile, thread-space operand) — the caller then renders
-      the scalar [fallback] under an [if (lane == 0)] guard, which is also the path when the whole
-      hook is [None] (cc, and any backend until wired). *)
+  (** Cooperative tile-MMA emission for [Low_level.Tile_mma] (docs/proposals/tensorize-mma.md §4):
+      given the per-operand precisions (the backend decides which combinations its units support —
+      Metal [simdgroup_matrix] is uniform-precision only, CUDA wmma's flagship combination is mixed
+      f16×f16→f32), the transposed-storage flags [ta]/[tb] (the operand's stored layout is the
+      transpose of its role — load tiles with the hardware transpose flag and swapped offset
+      arithmetic), the covered block extents [m]/[n]/[k], and per operand a pointer expression to
+      the tile base (already offset), its leading-dimension stride in elements, and its address
+      space, emit the intrinsic sequence (fragment declarations / loads / mma steps / stores)
+      executed by every lane of the enclosing lane loop. Return [None] to decline a particular call
+      (unsupported precision combination, extents not multiples of the intrinsic tile, thread-space
+      operand) — the caller then renders the scalar [fallback] under an [if (lane == 0)] guard,
+      which is also the path when the whole hook is [None] (cc, and any backend until wired). *)
 
   val kernel_log_param : (string * string) option
   (** Kernel parameter for logging, if any. E.g., (Some ("int", "log_id")) or (Some ("const char*",
@@ -235,6 +234,7 @@ struct
   let kernel_prep_line = ""
   let buffer_prefix = ""
   let buffer_suffix = fun ~pos:_ -> ""
+
   (* Signed index arithmetic (docs/proposals/signed-index-precision.md); the width tracks
      [Ops.index_prec ()]. *)
   let arg_int_prefix = if Utils.settings.large_models then "const int64_t " else "const int32_t "
@@ -244,8 +244,8 @@ struct
   let vec_typ_of_prec = Ops.c_vec_typ_of_prec
   let ptr_param_style = `Per_param
 
-  (* Plain C backends bind no hardware axes: annotated loops fall back to serial [for] loops
-     (sound absent barriers), and barriers / shared placements are compile-time errors. *)
+  (* Plain C backends bind no hardware axes: annotated loops fall back to serial [for] loops (sound
+     absent barriers), and barriers / shared placements are compile-time errors. *)
   let hardware_index ~kind:_ ~slot:_ = None
   let barrier_syntax = None
   let parallel_grid_syntax = `None
@@ -266,15 +266,14 @@ struct
       "#endif";
     ]
 
-  let aligned_local_attr =
-    Some (Printf.sprintf "__attribute__((aligned(%d)))" Ops.buffer_alignment)
+  let aligned_local_attr = Some (Printf.sprintf "__attribute__((aligned(%d)))" Ops.buffer_alignment)
 
   (* No shuffle intrinsics on plain C backends: a [Workgroup_reduce] accumulation loop renders as
      the serial fallback, which is exactly its serial meaning. *)
   let warp_size = 0
 
-  (* No tile-MMA units on plain C backends: [Tile_mma] renders its scalar fallback under the
-     [lane == 0] guard. *)
+  (* No tile-MMA units on plain C backends: [Tile_mma] renders its scalar fallback under the [lane
+     == 0] guard. *)
   let mma_syntax = None
   let float_log_style = if Input.full_printf_support then "%g" else "%de-3"
 
@@ -585,23 +584,21 @@ module C_syntax (B : C_syntax_config) = struct
 
   (* {3 Vector-extension accumulator grids (gh-ocannl-468 / gh-ocannl-469)}
 
-     Emission helpers for grids of vector-register accumulators in the [`Vec_extensions] style.
-     The SIMD reduction rendering of [Vectorized] accumulation loops (gh-ocannl-468; ggml's
+     Emission helpers for grids of vector-register accumulators in the [`Vec_extensions] style. The
+     SIMD reduction rendering of [Vectorized] accumulation loops (gh-ocannl-468; ggml's
      [ggml_vec_dot_f32] pattern) uses a 1×N grid — N independent accumulator chains folded at loop
      exit — and the register-tiled [Tile_mma] micro-kernel (gh-ocannl-469) will hold its C-tile as
      an RM×RN grid of vector registers across the fused k-loop. *)
 
-  (* The vector-extension typedef shared by the explicit-SIMD renderings: [lanes] elements of
-     [prec] (single or double). *)
+  (* The vector-extension typedef shared by the explicit-SIMD renderings: [lanes] elements of [prec]
+     (single or double). *)
   let vec_ext_typ ~prec ~lanes =
     let vtyp =
-      Printf.sprintf "ocannl_vec%d%s" lanes
-        (match prec with Ops.Double_prec _ -> "d" | _ -> "f")
+      Printf.sprintf "ocannl_vec%d%s" lanes (match prec with Ops.Double_prec _ -> "d" | _ -> "f")
     in
     ( vtyp,
       PPrint.string
-        (Printf.sprintf "typedef %s %s __attribute__((vector_size(%d)));" (B.typ_of_prec prec)
-           vtyp
+        (Printf.sprintf "typedef %s %s __attribute__((vector_size(%d)));" (B.typ_of_prec prec) vtyp
            (lanes * Ops.prec_in_bytes prec)) )
 
   (* The names of a [rows]×[cols] grid of vector accumulator registers. *)
@@ -609,17 +606,15 @@ module C_syntax (B : C_syntax_config) = struct
     Array.init rows ~f:(fun r ->
         Array.init cols ~f:(fun c -> Printf.sprintf "%s_%d_%d__" prefix r c))
 
-  (* [dst = op(dst, src)] on whole vector registers ([src] must also name a register): vector
-     infix arithmetic for the ring operators, a fixed-trip per-lane loop for [Max]/[Min] (which
-     have no vector infix; keeps the scalar path's [fmaxf]/[fminf] NaN semantics and
-     SLP-vectorizes under -O2 like the per-lane FMA fallback). *)
+  (* [dst = op(dst, src)] on whole vector registers ([src] must also name a register): vector infix
+     arithmetic for the ring operators, a fixed-trip per-lane loop for [Max]/[Min] (which have no
+     vector infix; keeps the scalar path's [fmaxf]/[fminf] NaN semantics and SLP-vectorizes under
+     -O2 like the per-lane FMA fallback). *)
   let vec_acc_combine ~prec ~lanes ~op ~dst ~src =
     let open PPrint in
     match op with
     | Ops.Add | Ops.Sub | Ops.Mul | Ops.Div ->
-        let inf =
-          match op with Ops.Add -> " + " | Sub -> " - " | Mul -> " * " | _ -> " / "
-        in
+        let inf = match op with Ops.Add -> " + " | Sub -> " - " | Mul -> " * " | _ -> " / " in
         string (Printf.sprintf "%s = %s%s%s;" dst dst inf src)
     | Ops.Max | Ops.Min ->
         let lane v = string (v ^ "[ocannl_l__]") in
@@ -631,8 +626,8 @@ module C_syntax (B : C_syntax_config) = struct
     | _ -> invalid_arg "C_syntax.vec_acc_combine: not an accumulation operator"
 
   (* [dst = fma(a, b, dst)] elementwise-fused on vector registers (single rounding, matching the
-     scalar path's [fmaf]/[fma]): clang's [__builtin_elementwise_fma] where available, otherwise
-     the per-lane fused loop. *)
+     scalar path's [fmaf]/[fma]): clang's [__builtin_elementwise_fma] where available, otherwise the
+     per-lane fused loop. *)
   let vec_acc_fma ~prec ~lanes ~dst ~a ~b =
     let open PPrint in
     let fma_fn = match prec with Ops.Double_prec _ -> "fma" | _ -> "fmaf" in
@@ -655,16 +650,16 @@ module C_syntax (B : C_syntax_config) = struct
     |> List.filter ~f:(fun s -> not (String.equal s dst))
     |> List.map ~f:(fun src -> vec_acc_combine ~prec ~lanes ~op ~dst ~src)
 
-  (* Horizontal reduction of one vector register into the fresh scalar [out] (a statement list):
-     a linear lane chain through the scalar combine — per-element semantics identical to the
-     serial loop's. *)
+  (* Horizontal reduction of one vector register into the fresh scalar [out] (a statement list): a
+     linear lane chain through the scalar combine — per-element semantics identical to the serial
+     loop's. *)
   let vec_acc_lane_fold ~prec ~lanes ~op ~vname ~out : PPrint.document list =
     let open PPrint in
     string (Printf.sprintf "%s %s = %s[0];" (B.typ_of_prec prec) out vname)
     :: List.init (lanes - 1) ~f:(fun l ->
-           string (out ^ " = ")
-           ^^ B.binop_syntax prec op (string out) (string (Printf.sprintf "%s[%d]" vname (l + 1)))
-           ^^ semi)
+        string (out ^ " = ")
+        ^^ B.binop_syntax prec op (string out) (string (Printf.sprintf "%s[%d]" vname (l + 1)))
+        ^^ semi)
 
   (* Set by [compile_proc] so that [pp_ll] can consult per-node tracing info (e.g. to elide a
      [Zero_out] loop that the declaration's [= {0}] already covers). *)
@@ -696,8 +691,8 @@ module C_syntax (B : C_syntax_config) = struct
   (* Set by [compile_proc] alongside [current_parallel_grid]: [Local]-placement tnodes kept at
      function scope but accessed inside a pool-parallel Grid loop rendered as a blocks-extension
      [dispatch_apply] ([`Dispatch]). Blocks cannot refer to a declaration with an array type, but
-     they capture pointers by value, so [local_decls] declares these behind a [const] pointer
-     alias. Always empty for [`Openmp]/[`None]. *)
+     they capture pointers by value, so [local_decls] declares these behind a [const] pointer alias.
+     Always empty for [`Openmp]/[`None]. *)
   let current_local_ptr_alias : Set.M(Tn).t ref = ref (Set.empty (module Tn))
 
   (* Per-chunk private tiles live on the pool workers' stacks; libdispatch workers get 512KB by
@@ -708,8 +703,8 @@ module C_syntax (B : C_syntax_config) = struct
   (* Shared traversal for the pool-parallel Grid analyses below: fires [access] for every
      tensor-node access event in program order (a [Set]'s right-hand side fires before its write).
      [Tile_mma] is traversed through its scalar [fallback]: every rendering of the statement
-     (intrinsics, register tiling, lane-0 fallback) touches exactly the fallback's tensors over
-     the fallback's index ranges, so the fallback IS the statement's access footprint. [on_stmt]
+     (intrinsics, register tiling, lane-0 fallback) touches exactly the fallback's tensors over the
+     fallback's index ranges, so the fallback IS the statement's access footprint. [on_stmt]
      observes the statement-level events the locals analysis keys on (opaque statements, scope
      declarations). [Set_dynamic]/[Get_dynamic] slots are data-dependent, so they fire with empty
      indices (conservatively a miss). *)
@@ -774,18 +769,18 @@ module C_syntax (B : C_syntax_config) = struct
 
   (* The privatization rule's write-dominance check: whether [tn]'s FIRST access (program order)
      under [body] is a standalone covering write — a [Zero_out], or an unguarded [Set] nest that
-     rewrites the whole array and COMPLETES before any other access to [tn] executes. The
-     completion requirement is structural (Codex P2 on PR #159): the covering [Set]'s per-axis
-     coverage may only use loops that enclose NO other access to [tn] — descending from the body
-     root, a loop stays usable while every access to [tn] in scope sits inside one child
-     statement, and once siblings share the level (e.g. the pack nest followed by its consumer),
-     the loops collected so far are discarded and coverage must come from the write's own nest.
-     A write like [for x { tmp[x] = ..; use tmp[y] }] therefore declines: its only coverage loop
-     [x] also interleaves the reads, which under per-chunk storage would observe missing prior
-     iterations at chunk boundaries. Coverage per axis: a fresh usable-loop symbol of matching
-     extent, or a mixed-radix affine combination of such symbols, each symbol used once across
-     the index vector — the nest then enumerates every cell. Extra enclosing usable loops merely
-     repeat the covering nest (required non-degenerate, or the write never executes). *)
+     rewrites the whole array and COMPLETES before any other access to [tn] executes. The completion
+     requirement is structural (Codex P2 on PR #159): the covering [Set]'s per-axis coverage may
+     only use loops that enclose NO other access to [tn] — descending from the body root, a loop
+     stays usable while every access to [tn] in scope sits inside one child statement, and once
+     siblings share the level (e.g. the pack nest followed by its consumer), the loops collected so
+     far are discarded and coverage must come from the write's own nest. A write like [for x {
+     tmp[x] = ..; use tmp[y] }] therefore declines: its only coverage loop [x] also interleaves the
+     reads, which under per-chunk storage would observe missing prior iterations at chunk
+     boundaries. Coverage per axis: a fresh usable-loop symbol of matching extent, or a mixed-radix
+     affine combination of such symbols, each symbol used once across the index vector — the nest
+     then enumerates every cell. Extra enclosing usable loops merely repeat the covering nest
+     (required non-degenerate, or the write never executes). *)
   let first_access_standalone_covering (tn : Tn.t) (body : Low_level.t) : bool =
     let count_accesses (llc : Low_level.t) =
       let c = ref 0 in
@@ -817,9 +812,7 @@ module C_syntax (B : C_syntax_config) = struct
           | Indexing.Iterator s -> (
               fresh s && match extent_of s with Some e -> e = dim | None -> false)
           | Indexing.Affine { symbols; offset = 0 } ->
-              let sorted =
-                List.sort symbols ~compare:(fun (c1, _) (c2, _) -> Int.compare c1 c2)
-              in
+              let sorted = List.sort symbols ~compare:(fun (c1, _) (c2, _) -> Int.compare c1 c2) in
               let rec radix r = function
                 | [] -> r = dim
                 | (c, s) :: tl -> (
@@ -837,11 +830,11 @@ module C_syntax (B : C_syntax_config) = struct
           to_ >= from_ && level (Low_level.flat_lines [ body ]) ~loops:((index, from_, to_) :: loops)
       | Zero_out tn2 -> tn2.Tn.uid = tn.Tn.uid
       | Set { tn = tn2; idcs; _ } ->
-          (* [count_accesses = 1]: the write itself, so the right-hand side does not read [tn]
-             (a read-modify-write is not a covering first access). *)
+          (* [count_accesses = 1]: the write itself, so the right-hand side does not read [tn] (a
+             read-modify-write is not a covering first access). *)
           tn2.Tn.uid = tn.Tn.uid && count_accesses llc = 1 && covering ~loops idcs
-      (* [If] = guarded (partial coverage); dynamic/vector writes and [Tile_mma] operand traffic
-         are conservatively never covering. *)
+      (* [If] = guarded (partial coverage); dynamic/vector writes and [Tile_mma] operand traffic are
+         conservatively never covering. *)
       | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | If _ | Set_dynamic _
       | Set_from_vec _ | Set_local _ | Declare_local _ | Tile_mma _ ->
           false
@@ -858,27 +851,25 @@ module C_syntax (B : C_syntax_config) = struct
     level (Low_level.flat_lines [ body ]) ~loops:[]
 
   (* Whether the body of an outermost [Grid] loop over [sym] tolerates its iterations being
-     partitioned into chunks that execute on parallel CPU threads. Materialized accesses are
-     already safe: [validate_parallel] requires every materialized write to cover [sym], so chunks
-     write disjoint elements, and nests execute as separate parallel loops with a join in between
-     (stronger than the GPU's single launch). The hazards are the stack arrays of
-     [Local]-placement nodes: on GPU each thread gets a private copy, so a GPU-valid kernel may
-     legally write them grid-invariantly (identical values per iteration) -- under one shared
-     function-scope array that is a data race. A local written under the loop must satisfy one of:
+     partitioned into chunks that execute on parallel CPU threads. Materialized accesses are already
+     safe: [validate_parallel] requires every materialized write to cover [sym], so chunks write
+     disjoint elements, and nests execute as separate parallel loops with a join in between
+     (stronger than the GPU's single launch). The hazards are the stack arrays of [Local]-placement
+     nodes: on GPU each thread gets a private copy, so a GPU-valid kernel may legally write them
+     grid-invariantly (identical values per iteration) -- under one shared function-scope array that
+     is a data race. A local written under the loop must satisfy one of:
 
      - Shared rule: every access to it (read or write) mentions [sym], and all accesses agree on
-       every index component that mentions [sym] -- the same agreement rule as the default
-       annotator's hazard analysis (mere mention is not enough, e.g. a stencil write [tmp[i]] +
-       read [tmp[i-1]] both mention [sym] but reach across iterations). Distinct iterations then
-       touch disjoint cells of one function-scope array.
-     - Privatization rule: ALL of the node's accesses in the kernel sit inside this loop's body,
-       and its first access per iteration is a standalone covering write -- a whole-array rewrite
-       that completes before any other access to it executes (the write-dominance check of
-       [first_access_standalone_covering]) -- so no value flows between iterations and each chunk
-       can own a block-scope copy. This is what in-kernel packing [Stage] tiles satisfy
-       (gh-ocannl-469): the pack nest fully rewrites the tile before the micro-kernel reads it.
-       The combined per-chunk footprint is capped by [per_chunk_private_bytes_cap] (pool worker
-       stacks).
+     every index component that mentions [sym] -- the same agreement rule as the default annotator's
+     hazard analysis (mere mention is not enough, e.g. a stencil write [tmp[i]] + read [tmp[i-1]]
+     both mention [sym] but reach across iterations). Distinct iterations then touch disjoint cells
+     of one function-scope array. - Privatization rule: ALL of the node's accesses in the kernel sit
+     inside this loop's body, and its first access per iteration is a standalone covering write -- a
+     whole-array rewrite that completes before any other access to it executes (the write-dominance
+     check of [first_access_standalone_covering]) -- so no value flows between iterations and each
+     chunk can own a block-scope copy. This is what in-kernel packing [Stage] tiles satisfy
+     (gh-ocannl-469): the pack nest fully rewrites the tile before the micro-kernel reads it. The
+     combined per-chunk footprint is capped by [per_chunk_private_bytes_cap] (pool worker stacks).
 
      Under [`Dispatch] (the blocks extension), a block cannot refer to a declaration with an array
      type at all -- even read-only -- but it captures pointers by value, so every non-privatized
@@ -926,8 +917,9 @@ module C_syntax (B : C_syntax_config) = struct
         Hashtbl.for_all locals ~f:(fun info ->
             let shared_ok =
               (not info.gl_written)
-              || (* Distinct grid iterations must touch disjoint elements: every access mentions
-                    [sym]... *)
+              ||
+              (* Distinct grid iterations must touch disjoint elements: every access mentions
+                 [sym]... *)
               List.for_all info.gl_accs ~f:(fun idcs -> Array.exists idcs ~f:mentions_comp)
               &&
               (* ...and all accesses agree on every component that mentions [sym], so within one
@@ -963,16 +955,15 @@ module C_syntax (B : C_syntax_config) = struct
               if all_inside && first_access_standalone_covering info.gl_tn body then (
                 private_bytes :=
                   !private_bytes
-                  + (Tn.num_elems info.gl_tn
-                    * Ops.prec_in_bytes (Lazy.force info.gl_tn.Tn.prec));
+                  + (Tn.num_elems info.gl_tn * Ops.prec_in_bytes (Lazy.force info.gl_tn.Tn.prec));
                 privatized := info.gl_tn :: !privatized;
                 !private_bytes <= per_chunk_private_bytes_cap)
               else false)
       in
       if feasible then Some (!privatized, !ptr_aliased) else None
 
-  (* The outermost [Grid] loops safe to render in parallel, with each loop's privatized locals
-     and (under [`Dispatch]) the pointer-aliased function-scope locals. Nested [Grid] loops render
+  (* The outermost [Grid] loops safe to render in parallel, with each loop's privatized locals and
+     (under [`Dispatch]) the pointer-aliased function-scope locals. Nested [Grid] loops render
      serially inside a chunk (still correct: write coverage holds per grid index). Runtime kernel
      logging writes to a shared FILE, so parallel rendering is skipped under
      [debug_log_from_routines]. *)
@@ -983,8 +974,7 @@ module C_syntax (B : C_syntax_config) = struct
     in
     if
       Poly.equal B.parallel_grid_syntax `None
-      || B.parallel_grid_chunks <= 1
-      || Utils.debug_log_from_routines ()
+      || B.parallel_grid_chunks <= 1 || Utils.debug_log_from_routines ()
     then empty
     else
       let plc = placements () in
@@ -1004,8 +994,8 @@ module C_syntax (B : C_syntax_config) = struct
       let aliases = ref (Set.empty (module Tn)) in
       let rec go (llc : Low_level.t) =
         match llc with
-        | Low_level.For_loop { axis = Grid; index; from_; to_; body; _ } ->
-            if from_ = 0 && to_ >= 1 then (
+        | Low_level.For_loop { axis = Grid; index; from_; to_; body; _ } -> (
+            if from_ = 0 && to_ >= 1 then
               match parallel_grid_safe ~sym:index ~global_counts body with
               | Some (privatized, ptr_aliased) ->
                   syms := Set.add !syms index;
@@ -1025,9 +1015,9 @@ module C_syntax (B : C_syntax_config) = struct
 
   (* Renders a [Local]-placement (routine-scope scratch) array declaration; shared by
      [compile_proc]'s function-scope [local_decls] and the per-chunk declarations of pool-parallel
-     [Grid] loops. With [alias_ptr], the array gets a mangled name and a [const] pointer alias
-     under the node's ident: [`Dispatch] blocks cannot refer to array declarations but capture
-     pointers by value, and array indexing syntax is unchanged through the pointer. *)
+     [Grid] loops. With [alias_ptr], the array gets a mangled name and a [const] pointer alias under
+     the node's ident: [`Dispatch] blocks cannot refer to array declarations but capture pointers by
+     value, and array indexing syntax is unchanged through the pointer. *)
   let local_array_decl ?(alias_ptr = false) ~zero_init (tn : Tn.t) : PPrint.document =
     let open PPrint in
     let typ = B.typ_of_prec @@ Lazy.force tn.Tn.prec in
@@ -1035,7 +1025,9 @@ module C_syntax (B : C_syntax_config) = struct
     let arr_name = if alias_ptr then ident ^ "_mem__" else ident in
     let align_doc =
       (* SIMD alignment for plain stack arrays (gh-ocannl-164). *)
-      match B.aligned_local_attr with Some attr -> string (" " ^ attr) | None -> empty
+      match B.aligned_local_attr with
+      | Some attr -> string (" " ^ attr)
+      | None -> empty
     in
     let init_doc = if zero_init then string " = {0}" else empty in
     let decl =
@@ -1074,8 +1066,8 @@ module C_syntax (B : C_syntax_config) = struct
   let zero_out_seen : int Hash_set.t = Hash_set.create (module Int)
 
   (* Symbols of the serial [for] loops enclosing the current [pp_ll] rendering point (innermost
-     first): maintained by [serial_loop] below, consulted by the [Set] case's
-     [volatile_scalar_rmw] rule. *)
+     first): maintained by [serial_loop] below, consulted by the [Set] case's [volatile_scalar_rmw]
+     rule. *)
   let serial_loop_stack : Indexing.symbol list ref = ref []
 
   let rec pp_ll ?(log_set_locals = true) ?(in_loop = false) (c : Low_level.t) : PPrint.document =
@@ -1090,9 +1082,9 @@ module C_syntax (B : C_syntax_config) = struct
     | For_loop { index = i; from_; to_; body; trace_it = _; axis } -> (
         (* Rendering phase of docs/proposals/axis-types-for-loops.md (§5): [Serial] loops render as
            C [for] statements; [Grid]/[Workgroup]/[Workgroup_reduce] loops bind their index to the
-           backend's hardware register (at the signed [loop_index_type] width, with an explicit
-           cast from the unsigned register) when [B.hardware_index] provides one, and fall back to
-           a serial loop otherwise (legal absent barriers); [Vectorized] loops render serially,
+           backend's hardware register (at the signed [loop_index_type] width, with an explicit cast
+           from the unsigned register) when [B.hardware_index] provides one, and fall back to a
+           serial loop otherwise (legal absent barriers); [Vectorized] loops render serially,
            prefixed with [B.vectorize_pragma] when non-empty; [Unrolled] loops emit the repeated
            body with the index bound as a per-block constant. *)
         let body_doc () =
@@ -1153,8 +1145,8 @@ module C_syntax (B : C_syntax_config) = struct
         let parallel_grid_loop () =
           (* Pool-backed Grid rendering (gh-ocannl-164): contiguous chunks of the grid extent
              execute on the process-global native pool ([dispatch_apply] / OpenMP); [Workgroup]
-             loops and nested [Grid] loops stay serial inside a chunk. Eligibility (including
-             [from_ = 0]) was established by [collect_parallel_grid]. *)
+             loops and nested [Grid] loops stay serial inside a chunk. Eligibility (including [from_
+             = 0]) was established by [collect_parallel_grid]. *)
           let extent = to_ + 1 in
           let target = min B.parallel_grid_chunks extent in
           let grain = (extent + target - 1) / target in
@@ -1171,8 +1163,8 @@ module C_syntax (B : C_syntax_config) = struct
                     lo grain extent)
           in
           (* Locals privatized to this loop (see [parallel_grid_safe]): block-scope arrays inside
-             the chunk body, one copy per chunk -- iterations rewrite them wholly before reading,
-             so per-chunk storage matches the serial semantics. *)
+             the chunk body, one copy per chunk -- iterations rewrite them wholly before reading, so
+             per-chunk storage matches the serial semantics. *)
           let decls =
             match Map.find !current_grid_private i with
             | None | Some [] -> decls
@@ -1182,7 +1174,7 @@ module C_syntax (B : C_syntax_config) = struct
                   | Some ts ->
                       Hashtbl.find ts tn
                       |> Option.value_map ~default:false ~f:(fun node ->
-                             node.Low_level.zero_initialized_by_code)
+                          node.Low_level.zero_initialized_by_code)
                   | None -> false
                 in
                 List.fold tns ~init:decls ~f:(fun acc tn ->
@@ -1259,12 +1251,11 @@ module C_syntax (B : C_syntax_config) = struct
             | Low_level.Noop | Comment _ -> false
             | _ -> true)
         in
-        (* A body that is a single accumulation statement [acc[idcs] = op(acc[idcs], contrib)]
-           (or its FMA form [acc = FMA(a, b, acc)]) where [idcs] does not mention the loop index
-           and [op] is an associative-commutative reduction — such a body IS the loop's serial
-           meaning. Recognized by the warp-shuffle rendering of [Workgroup_reduce] loops
-           (gh-ocannl-462) and by the SIMD reduction rendering of [Vectorized] loops
-           (gh-ocannl-468). *)
+        (* A body that is a single accumulation statement [acc[idcs] = op(acc[idcs], contrib)] (or
+           its FMA form [acc = FMA(a, b, acc)]) where [idcs] does not mention the loop index and
+           [op] is an associative-commutative reduction — such a body IS the loop's serial meaning.
+           Recognized by the warp-shuffle rendering of [Workgroup_reduce] loops (gh-ocannl-462) and
+           by the SIMD reduction rendering of [Vectorized] loops (gh-ocannl-468). *)
         let recognize_accumulation stmts =
           match stmts with
           | [ Low_level.Set { tn; idcs; llsc; _ } ] when not (Array.exists idcs ~f:mentions_comp)
@@ -1275,11 +1266,9 @@ module C_syntax (B : C_syntax_config) = struct
                 | _ -> false
               in
               match llsc with
-              | Binop (op, (a, _), (b, _)) when reduce_op op && is_acc a && not (touches_tn tn b)
-                ->
+              | Binop (op, (a, _), (b, _)) when reduce_op op && is_acc a && not (touches_tn tn b) ->
                   Some (tn, idcs, op, b)
-              | Binop (op, (a, _), (b, _)) when reduce_op op && is_acc b && not (touches_tn tn a)
-                ->
+              | Binop (op, (a, _), (b, _)) when reduce_op op && is_acc b && not (touches_tn tn a) ->
                   Some (tn, idcs, op, a)
               | Ternop (Ops.FMA, (a, pa), (b, pb), (c, _))
                 when is_acc c && (not (touches_tn tn a)) && not (touches_tn tn b) ->
@@ -1340,20 +1329,19 @@ module C_syntax (B : C_syntax_config) = struct
           | Unop (_, (a, _)) -> no_written_reads ~written a
         in
         let uniform_scalar ~written prec llsc =
-          (* Uniform across lanes: a read of a stored node cannot equal its (index-mentioning)
-             store vector, so reject those; then render as a plain scalar (vector-scalar
-             arithmetic splats; in the packed style the scalar participates per lane). *)
+          (* Uniform across lanes: a read of a stored node cannot equal its (index-mentioning) store
+             vector, so reject those; then render as a plain scalar (vector-scalar arithmetic
+             splats; in the packed style the scalar participates per lane). *)
           no_written_reads ~written llsc;
           let local_defs, sdoc = pp_scalar prec llsc in
           if not (List.is_empty local_defs) then raise Bail;
           parens sdoc
         in
-        (* The [`Vec_extensions] expression renderer shared by the elementwise ([try_vectorize])
-           and reduction ([try_vectorize_reduce]) renderings. Emitted binding statements
-           accumulate through [emit]; [written] maps written nodes to their store index vectors —
-           every read of a written node must use that exact vector (vector semantics evaluates
-           all lanes' loads before the store, so cross-lane flow would reorder against the serial
-           loop). *)
+        (* The [`Vec_extensions] expression renderer shared by the elementwise ([try_vectorize]) and
+           reduction ([try_vectorize_reduce]) renderings. Emitted binding statements accumulate
+           through [emit]; [written] maps written nodes to their store index vectors — every read of
+           a written node must use that exact vector (vector semantics evaluates all lanes' loads
+           before the store, so cross-lane flow would reorder against the serial loop). *)
         let vec_ext_machinery ~prec ~lanes ~vtyp ~written ~emit ~fresh =
           let vload tn idcs =
             if not (contiguous idcs) then raise Bail;
@@ -1364,7 +1352,8 @@ module C_syntax (B : C_syntax_config) = struct
               (string (vtyp ^ " " ^ name ^ ";")
               ^^ hardline
               ^^ string ("__builtin_memcpy(&" ^ name ^ ", &")
-              ^^ string (get_ident tn) ^^ brackets offset
+              ^^ string (get_ident tn)
+              ^^ brackets offset
               ^^ string (", sizeof(" ^ name ^ "));"));
             string name
           in
@@ -1387,12 +1376,11 @@ module C_syntax (B : C_syntax_config) = struct
                   in
                   parens (vec_expr a pa ^^ string inf ^^ vec_expr b pb)
               | Ternop (Ops.FMA, (a, pa), (b, pb), (c, pc)) ->
-                  (* Fused, matching the scalar path's [fmaf]/[fma] single rounding (the
-                     simplifier synthesizes [FMA] from mul-add trees, so this is the hot case). A
-                     plain [a * b + c] would be only maybe-contracted, so vector lanes could
-                     differ from the serial remainder loop and twin. Operands bind to vector
-                     temps (lane-uniform ones splat explicitly: vector = scalar init is
-                     invalid). *)
+                  (* Fused, matching the scalar path's [fmaf]/[fma] single rounding (the simplifier
+                     synthesizes [FMA] from mul-add trees, so this is the hot case). A plain [a * b
+                     + c] would be only maybe-contracted, so vector lanes could differ from the
+                     serial remainder loop and twin. Operands bind to vector temps (lane-uniform
+                     ones splat explicitly: vector = scalar init is invalid). *)
                   let bind llsc p =
                     let name = fresh "vfop" in
                     emit (string (vtyp ^ " " ^ name ^ " = ") ^^ vec_operand llsc p ^^ semi);
@@ -1408,31 +1396,29 @@ module C_syntax (B : C_syntax_config) = struct
               | _ -> raise Bail
           and vec_operand (llsc : Low_level.scalar_t) (p : Ops.prec) : PPrint.document =
             (* A vector-typed rendering even for lane-uniform values: initializers and builtin
-               arguments need a vector, where the implicit vector-scalar splat of binary
-               operators does not apply. *)
+               arguments need a vector, where the implicit vector-scalar splat of binary operators
+               does not apply. *)
             if scalar_mentions llsc then vec_expr llsc p
             else string ("((" ^ vtyp ^ "){0} + ") ^^ uniform_scalar ~written prec llsc ^^ string ")"
           in
           (vec_expr, vec_operand)
         in
-        (* Explicit SIMD rendering of a [Vectorized] loop via GCC/Clang vector extensions
-           (portable across gcc/clang and AVX2/NEON; the [Vectorized]-codegen follow-up of
-           gh-ocannl-164). The loop must start at 0 and its body must be a sequence of plain [Set]
-           statements over one floating precision, with every access that mentions the loop index
-           contiguous in it (the index appears only in the last component, with coefficient 1 —
-           the flat offset then advances by exactly 1 per iteration). Index-free subexpressions
-           render as scalars (vector-scalar arithmetic splats across lanes); vector subexpressions
-           allow [Add]/[Sub]/[Mul]/[Div]/[Neg] and fused [FMA] (matching the scalar path's
-           [fmaf]/[fma] rounding; see the note in [vec_expr]). At most one store per node, and
-           every read
-           of a stored node must use the store's exact index vector — vector semantics evaluates
-           all lanes' loads before the store, so cross-lane flow would reorder against the serial
-           loop. The main loop advances by [lanes]; a serial remainder loop reuses [body_doc].
-           Anything else falls back to [vectorize_pragma] / serial. *)
+        (* Explicit SIMD rendering of a [Vectorized] loop via GCC/Clang vector extensions (portable
+           across gcc/clang and AVX2/NEON; the [Vectorized]-codegen follow-up of gh-ocannl-164). The
+           loop must start at 0 and its body must be a sequence of plain [Set] statements over one
+           floating precision, with every access that mentions the loop index contiguous in it (the
+           index appears only in the last component, with coefficient 1 — the flat offset then
+           advances by exactly 1 per iteration). Index-free subexpressions render as scalars
+           (vector-scalar arithmetic splats across lanes); vector subexpressions allow
+           [Add]/[Sub]/[Mul]/[Div]/[Neg] and fused [FMA] (matching the scalar path's [fmaf]/[fma]
+           rounding; see the note in [vec_expr]). At most one store per node, and every read of a
+           stored node must use the store's exact index vector — vector semantics evaluates all
+           lanes' loads before the store, so cross-lane flow would reorder against the serial loop.
+           The main loop advances by [lanes]; a serial remainder loop reuses [body_doc]. Anything
+           else falls back to [vectorize_pragma] / serial. *)
         let try_vectorize () : PPrint.document option =
           try
-            if B.vector_bytes < 8 || from_ <> 0 || Utils.debug_log_from_routines () then
-              raise Bail;
+            if B.vector_bytes < 8 || from_ <> 0 || Utils.debug_log_from_routines () then raise Bail;
             let extent = to_ + 1 in
             let stmts = nonempty_stmts body in
             let sets =
@@ -1475,16 +1461,17 @@ module C_syntax (B : C_syntax_config) = struct
                       let vname = fresh "vset" in
                       emit (string (vtyp ^ " " ^ vname ^ " = ") ^^ rhs ^^ semi);
                       emit
-                        (string "__builtin_memcpy(&" ^^ string (get_ident tn)
+                        (string "__builtin_memcpy(&"
+                        ^^ string (get_ident tn)
                         ^^ brackets (pp_array_offset (idcs, Lazy.force tn.Tn.dims))
                         ^^ string (", &" ^ vname ^ ", sizeof(" ^ vname ^ "));")));
                   typedef_doc ^^ hardline
               | `Packed_struct ->
                   (* GPU 128-bit packed loads/stores (gh-ocannl-463; llm.c's Packed128): the
-                     backend's aligned pack aggregate is loaded/stored via [reinterpret_cast] —
-                     one 128-bit memory transaction — while the arithmetic stays scalar in a
-                     per-lane loop over the pack's [.v] payload (per-lane [fmaf]/[fma] keeps the
-                     serial path's rounding). Sound only at provably lane-aligned offsets of
+                     backend's aligned pack aggregate is loaded/stored via [reinterpret_cast] — one
+                     128-bit memory transaction — while the arithmetic stays scalar in a per-lane
+                     loop over the pack's [.v] payload (per-lane [fmaf]/[fma] keeps the serial
+                     path's rounding). Sound only at provably lane-aligned offsets of
                      device-resident buffers, hence the extra eligibility checks. *)
                   let vtyp =
                     match B.vec_typ_of_prec ~length:lanes prec with
@@ -1493,8 +1480,8 @@ module C_syntax (B : C_syntax_config) = struct
                   in
                   (* The flat offset must stay a lane multiple whenever the loop index is one:
                      components before the last contribute stride multiples of [dims.(n - 1)], so
-                     the last dimension must be a lane multiple (unless the access is 1-D), and
-                     the last component's constant offset and non-index coefficients must be lane
+                     the last dimension must be a lane multiple (unless the access is 1-D), and the
+                     last component's constant offset and non-index coefficients must be lane
                      multiples. Buffer bases and pool offsets are [Ops.buffer_alignment >= 16]
                      aligned, so lane-multiple element offsets are 16-byte-aligned addresses. *)
                   let lane_aligned tn idcs =
@@ -1508,7 +1495,7 @@ module C_syntax (B : C_syntax_config) = struct
                     | Indexing.Affine { symbols; offset } ->
                         offset % lanes = 0
                         && List.for_all symbols ~f:(fun (c, s) ->
-                               Indexing.equal_symbol s i || c % lanes = 0)
+                            Indexing.equal_symbol s i || c % lanes = 0)
                     | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
                   in
                   let eligible tn idcs =
@@ -1523,8 +1510,8 @@ module C_syntax (B : C_syntax_config) = struct
                     let name = fresh "vget" in
                     emit
                       (string
-                         (Printf.sprintf "const %s %s = *reinterpret_cast<%sconst %s*>(&" vtyp
-                            name B.buffer_prefix vtyp)
+                         (Printf.sprintf "const %s %s = *reinterpret_cast<%sconst %s*>(&" vtyp name
+                            B.buffer_prefix vtyp)
                       ^^ string (get_ident tn)
                       ^^ brackets (pp_array_offset (idcs, Lazy.force tn.Tn.dims))
                       ^^ string ");");
@@ -1539,8 +1526,7 @@ module C_syntax (B : C_syntax_config) = struct
                       | Low_level.Get (tn, idcs) ->
                           if not (Ops.equal_prec (Lazy.force tn.Tn.prec) prec) then raise Bail;
                           string (vload tn idcs ^ ".v[" ^ lane_var ^ "]")
-                      | Binop (((Ops.Add | Ops.Sub | Ops.Mul | Ops.Div) as op), (a, pa), (b, pb))
-                        ->
+                      | Binop (((Ops.Add | Ops.Sub | Ops.Mul | Ops.Div) as op), (a, pa), (b, pb)) ->
                           B.binop_syntax prec op (lane_expr a pa) (lane_expr b pb)
                       | Ternop (Ops.FMA, (a, pa), (b, pb), (c, pc)) ->
                           B.ternop_syntax prec Ops.FMA (lane_expr a pa) (lane_expr b pb)
@@ -1556,8 +1542,8 @@ module C_syntax (B : C_syntax_config) = struct
                       emit (string (vtyp ^ " " ^ vname ^ ";"));
                       emit
                         (string
-                           (Printf.sprintf "for (int %s = 0; %s < %d; ++%s) { %s.v[%s] = "
-                              lane_var lane_var lanes lane_var vname lane_var)
+                           (Printf.sprintf "for (int %s = 0; %s < %d; ++%s) { %s.v[%s] = " lane_var
+                              lane_var lanes lane_var vname lane_var)
                         ^^ rhs ^^ string "; }");
                       emit
                         (string (Printf.sprintf "*reinterpret_cast<%s%s*>(&" B.buffer_prefix vtyp)
@@ -1591,23 +1577,22 @@ module C_syntax (B : C_syntax_config) = struct
         (* SIMD reduction rendering of a [Vectorized] accumulation loop (gh-ocannl-468; ggml's
            [ggml_vec_dot_f32] pattern, ggml/src/ggml-cpu/vec.h). A recognized accumulation body
            [acc[idcs] = op(acc[idcs], contrib(i))] renders as a 1×[chains] grid of independent
-           vector accumulator registers — splitting the loop-carried dependency into
-           [chains * lanes] independent chains is exactly the strict-FP reassociation the
-           [Vectorized] retype licenses — updated in a fused main loop advancing by
-           [chains * lanes], then folded register-wise, lane-wise, and finally into the
-           accumulator cell; a serial tail loop reuses the scalar body. [chains] defaults to 4
-           (ggml's [GGML_F32_ARR]: enough independent chains to cover the FMA latency-throughput
-           gap), halved until the first-block initialization fits the extent. Initializing the
-           chains from the first [chains] blocks of contributions avoids needing an identity
-           constant, so [Max]/[Min] reductions work unchanged. [`Vec_extensions] only: on GPU
-           backends reductions parallelize via [Workgroup_reduce] warp shuffles instead, and a
-           bailed-out accumulation falls back to a plain serial loop (never to
-           [vectorize_pragma], which would assert iteration independence). *)
+           vector accumulator registers — splitting the loop-carried dependency into [chains *
+           lanes] independent chains is exactly the strict-FP reassociation the [Vectorized] retype
+           licenses — updated in a fused main loop advancing by [chains * lanes], then folded
+           register-wise, lane-wise, and finally into the accumulator cell; a serial tail loop
+           reuses the scalar body. [chains] defaults to 4 (ggml's [GGML_F32_ARR]: enough independent
+           chains to cover the FMA latency-throughput gap), halved until the first-block
+           initialization fits the extent. Initializing the chains from the first [chains] blocks of
+           contributions avoids needing an identity constant, so [Max]/[Min] reductions work
+           unchanged. [`Vec_extensions] only: on GPU backends reductions parallelize via
+           [Workgroup_reduce] warp shuffles instead, and a bailed-out accumulation falls back to a
+           plain serial loop (never to [vectorize_pragma], which would assert iteration
+           independence). *)
         let try_vectorize_reduce () : PPrint.document option =
           try
             (match B.vector_style with `Vec_extensions -> () | `Packed_struct -> raise Bail);
-            if B.vector_bytes < 8 || from_ <> 0 || Utils.debug_log_from_routines () then
-              raise Bail;
+            if B.vector_bytes < 8 || from_ <> 0 || Utils.debug_log_from_routines () then raise Bail;
             let acc_tn, acc_idcs, op, contrib =
               match recognize_accumulation (nonempty_stmts body) with
               | Some r -> r
@@ -1620,13 +1605,11 @@ module C_syntax (B : C_syntax_config) = struct
             let lanes = B.vector_bytes / Ops.prec_in_bytes prec in
             let extent = to_ + 1 in
             if lanes < 2 || extent < lanes then raise Bail;
-            let chains =
-              if 4 * lanes <= extent then 4 else if 2 * lanes <= extent then 2 else 1
-            in
+            let chains = if 4 * lanes <= extent then 4 else if 2 * lanes <= extent then 2 else 1 in
             let step = chains * lanes in
             let vtyp, typedef_doc = vec_ext_typ ~prec ~lanes in
-            (* The accumulator is not vector-loaded ([contrib] cannot touch it, per the
-               recognizer), so nothing is [written] from the vector expressions' viewpoint. *)
+            (* The accumulator is not vector-loaded ([contrib] cannot touch it, per the recognizer),
+               so nothing is [written] from the vector expressions' viewpoint. *)
             let written = Hashtbl.create (module Int) in
             let stmts_docs = ref [] in
             let emit d = stmts_docs := d :: !stmts_docs in
@@ -1660,10 +1643,8 @@ module C_syntax (B : C_syntax_config) = struct
               if by = 0 then llsc
               else
                 match llsc with
-                | Low_level.Get (tn, idcs) ->
-                    Low_level.Get (tn, Array.map idcs ~f:(shift_idx ~by))
-                | Binop (op, (a, pa), (b, pb)) ->
-                    Binop (op, (shift ~by a, pa), (shift ~by b, pb))
+                | Low_level.Get (tn, idcs) -> Low_level.Get (tn, Array.map idcs ~f:(shift_idx ~by))
+                | Binop (op, (a, pa), (b, pb)) -> Binop (op, (shift ~by a, pa), (shift ~by b, pb))
                 | Ternop (op, (a, pa), (b, pb), (c, pc)) ->
                     Ternop (op, (shift ~by a, pa), (shift ~by b, pb), (shift ~by c, pc))
                 | Unop (op, (a, pa)) -> Unop (op, (shift ~by a, pa))
@@ -1721,45 +1702,41 @@ module C_syntax (B : C_syntax_config) = struct
             Some
               (string
                  (Printf.sprintf
-                    "{ /* Vectorized reduction rendering: %d chain(s) of %d lanes of %s. */"
-                    chains lanes (B.typ_of_prec prec))
+                    "{ /* Vectorized reduction rendering: %d chain(s) of %d lanes of %s. */" chains
+                    lanes (B.typ_of_prec prec))
               ^^ nest 2
                    (hardline ^^ typedef_doc ^^ hardline
                    ^^ string (Printf.sprintf "%s%s = 0;" it ivar)
-                   ^^ hardline
-                   ^^ separate hardline init_docs
-                   ^^ hardline
+                   ^^ hardline ^^ separate hardline init_docs ^^ hardline
                    ^^ string
                         (Printf.sprintf "for (%s = %d; %s + %d <= %d; %s += %d) {" ivar step ivar
                            step extent ivar step)
                    ^^ nest 2 (hardline ^^ separate hardline update_docs)
-                   ^^ hardline ^^ string "}" ^^ hardline
-                   ^^ separate hardline epilogue
-                   ^^ hardline
+                   ^^ hardline ^^ string "}" ^^ hardline ^^ separate hardline epilogue ^^ hardline
                    ^^ string (Printf.sprintf "for (; %s <= %d; ++%s) {" ivar to_ ivar)
                    ^^ nest 2 (hardline ^^ body_doc ())
                    ^^ hardline ^^ string "}")
               ^^ hardline ^^ string "}")
           with Bail -> None
         in
-        (* Warp-shuffle rendering of a [Workgroup_reduce] accumulation loop (gh-ocannl-462;
-           llm.c's [warpReduceSum] / [blockReduce] idiom, llmc/cuda_utils.cuh). Recognizes a body
-           that is a single accumulation statement [acc[idcs] = op(acc[idcs], contrib)] (or its
-           FMA form [acc = FMA(a, b, acc)]) where [idcs] does not mention the loop index and [op]
-           is an associative-commutative reduction — such a body IS the loop's serial meaning, so
-           backends without shuffle support ([warp_size = 0]) render it with the ordinary
-           fallbacks. With shuffle support the loop renders as: every thread computes its
-           contribution, a log2(warp) [ocannl_shfl_xor] tree reduces within each warp, then (for
-           multi-warp extents) lane 0 of each warp stages one value in a workgroup-shared slot, a
-           barrier, and the first warp shuffle-reduces the per-warp partials — thread 0 finally
-           folds the total into the accumulator (reassociation is the annotation's license, like
-           [Vectorized]). This halves the shared-memory traffic and barrier count of the
-           explicitly staged tree, which remains supported: unrecognized bodies keep the
-           [Workgroup]-style hardware binding and their own staging and barriers.
+        (* Warp-shuffle rendering of a [Workgroup_reduce] accumulation loop (gh-ocannl-462; llm.c's
+           [warpReduceSum] / [blockReduce] idiom, llmc/cuda_utils.cuh). Recognizes a body that is a
+           single accumulation statement [acc[idcs] = op(acc[idcs], contrib)] (or its FMA form [acc
+           = FMA(a, b, acc)]) where [idcs] does not mention the loop index and [op] is an
+           associative-commutative reduction — such a body IS the loop's serial meaning, so backends
+           without shuffle support ([warp_size = 0]) render it with the ordinary fallbacks. With
+           shuffle support the loop renders as: every thread computes its contribution, a log2(warp)
+           [ocannl_shfl_xor] tree reduces within each warp, then (for multi-warp extents) lane 0 of
+           each warp stages one value in a workgroup-shared slot, a barrier, and the first warp
+           shuffle-reduces the per-warp partials — thread 0 finally folds the total into the
+           accumulator (reassociation is the annotation's license, like [Vectorized]). This halves
+           the shared-memory traffic and barrier count of the explicitly staged tree, which remains
+           supported: unrecognized bodies keep the [Workgroup]-style hardware binding and their own
+           staging and barriers.
 
-           The multi-warp phase needs no identity constant: [num_warps] must be a power of two,
-           and XOR with offsets [< num_warps] maps lanes [< num_warps] onto themselves, so the
-           garbage held by lanes [>= num_warps] never mixes into the reduced prefix.
+           The multi-warp phase needs no identity constant: [num_warps] must be a power of two, and
+           XOR with offsets [< num_warps] maps lanes [< num_warps] onto themselves, so the garbage
+           held by lanes [>= num_warps] never mixes into the reduced prefix.
 
            A recognized accumulation that cannot be rendered (extent not covering whole warps,
            reduce axis not at workgroup slot 0, ...) raises: binding the index like a plain
@@ -1769,25 +1746,22 @@ module C_syntax (B : C_syntax_config) = struct
           else
             let stmts = nonempty_stmts body in
             (* When this loop's extent is smaller than its slot's launch dimension,
-               [guard_annotated_extents] has already wrapped the body in the synthetic launch
-               guard [If (i < extent)]. Strip exactly that shape — it is vacuous with respect to
-               the loop's own iteration space — so a guarded accumulation is still recognized,
-               and then rejected by the extent-coverage check below, instead of silently racing
-               under the hardware-binding fallback (PR #119 review). *)
+               [guard_annotated_extents] has already wrapped the body in the synthetic launch guard
+               [If (i < extent)]. Strip exactly that shape — it is vacuous with respect to the
+               loop's own iteration space — so a guarded accumulation is still recognized, and then
+               rejected by the extent-coverage check below, instead of silently racing under the
+               hardware-binding fallback (PR #119 review). *)
             let stmts =
               match stmts with
               | [
                Low_level.If
                  {
                    cond =
-                     ( Binop
-                         (Ops.Cmplt, (Embed_index (Indexing.Iterator s), _), (Constant c, _)),
-                       _ );
+                     Binop (Ops.Cmplt, (Embed_index (Indexing.Iterator s), _), (Constant c, _)), _;
                    body = guarded;
                  };
               ]
-                when Indexing.equal_symbol s i
-                     && Float.equal c (Float.of_int (to_ - from_ + 1)) ->
+                when Indexing.equal_symbol s i && Float.equal c (Float.of_int (to_ - from_ + 1)) ->
                   nonempty_stmts guarded
               | _ -> stmts
             in
@@ -1797,8 +1771,8 @@ module C_syntax (B : C_syntax_config) = struct
                 let fail msg =
                   invalid_arg
                     ("C_syntax.pp_ll: Workgroup_reduce loop " ^ symbol_ident i
-                   ^ " is a recognized accumulation, but the warp-shuffle rendering requires "
-                   ^ msg ^ " (a plain hardware binding would race the accumulator update)")
+                   ^ " is a recognized accumulation, but the warp-shuffle rendering requires " ^ msg
+                   ^ " (a plain hardware binding would race the accumulator update)")
                 in
                 let warp = B.warp_size in
                 assert (warp > 1 && Int.is_pow2 warp);
@@ -1811,8 +1785,8 @@ module C_syntax (B : C_syntax_config) = struct
                   fail "debug_log_from_routines to be disabled";
                 if extent % warp <> 0 then
                   fail
-                    (Printf.sprintf "the extent (%d) to be a multiple of the warp size (%d)"
-                       extent warp);
+                    (Printf.sprintf "the extent (%d) to be a multiple of the warp size (%d)" extent
+                       warp);
                 let num_warps = extent / warp in
                 let axes = !current_hardware_axes in
                 (match
@@ -1821,8 +1795,7 @@ module C_syntax (B : C_syntax_config) = struct
                 | Some a when a.Low_level.ha_slot = 0 -> ()
                 | Some _ ->
                     fail
-                      "the reduce axis at workgroup slot 0 (warp lanes are consecutive .x \
-                       threads)"
+                      "the reduce axis at workgroup slot 0 (warp lanes are consecutive .x threads)"
                 | None ->
                     invalid_arg
                       ("C_syntax.pp_ll: hardware-annotated loop " ^ symbol_ident i
@@ -1856,8 +1829,8 @@ module C_syntax (B : C_syntax_config) = struct
                         | `Grid -> false)
                   then
                     fail
-                      "the reduce axis to be the only workgroup axis (the per-warp staging \
-                       slots are not replicated per sibling workgroup thread)");
+                      "the reduce axis to be the only workgroup axis (the per-warp staging slots \
+                       are not replicated per sibling workgroup thread)");
                 let ident = symbol_ident i in
                 let ctyp = B.typ_of_prec prec in
                 let cast = "(" ^ String.strip B.loop_index_type ^ ")" in
@@ -1902,8 +1875,8 @@ module C_syntax (B : C_syntax_config) = struct
                          ^^ nest 2
                               (hardline
                               ^^ string
-                                   (Printf.sprintf "if (%s < %d) { %s = %s[%s]; }" ident
-                                      num_warps vname pname ident)
+                                   (Printf.sprintf "if (%s < %d) { %s = %s[%s]; }" ident num_warps
+                                      vname pname ident)
                               ^^ hardline
                               ^^ separate hardline
                                    (List.map (halvings (num_warps / 2)) ~f:shuffle_stage)
@@ -1921,13 +1894,12 @@ module C_syntax (B : C_syntax_config) = struct
                 Some
                   (string
                      (Printf.sprintf
-                        "{ /* Workgroup_reduce warp-shuffle rendering: extent %d = %d \
-                         simdgroup(s) of %d. */"
+                        "{ /* Workgroup_reduce warp-shuffle rendering: extent %d = %d simdgroup(s) \
+                         of %d. */"
                         extent num_warps warp)
                   ^^ nest 2
                        (hardline ^^ binding ^^ hardline
-                       ^^ (if PPrint.is_empty local_defs then empty
-                           else local_defs ^^ hardline)
+                       ^^ (if PPrint.is_empty local_defs then empty else local_defs ^^ hardline)
                        ^^ string (ctyp ^ " " ^ vname ^ " = ")
                        ^^ contrib_doc ^^ semi ^^ hardline
                        ^^ separate hardline (List.map (halvings (warp / 2)) ~f:shuffle_stage)
@@ -1940,29 +1912,28 @@ module C_syntax (B : C_syntax_config) = struct
         | Grid -> hardware_binding `Grid
         | Workgroup -> hardware_binding `Workgroup
         | Workgroup_reduce -> (
-            match try_warp_reduce () with
-            | Some doc -> doc
-            | None -> hardware_binding `Workgroup)
+            match try_warp_reduce () with Some doc -> doc | None -> hardware_binding `Workgroup)
         | Vectorized -> (
             match try_vectorize_reduce () with
             | Some doc -> doc
             | None -> (
                 match try_vectorize () with
                 | Some doc -> doc
-                | None ->
-                    (* gh-ocannl-164: a serial loop annotated with the backend's vectorization
-                       pragmas; without them the plain serial loop is the legal fallback (same
-                       discipline as unbound [Grid]/[Workgroup] axes). The pragmas assert
-                       iteration independence, which a loop-carried accumulation does not
-                       satisfy — an accumulating body that no explicit rendering accepted always
-                       falls back to the plain serial loop (gh-ocannl-468: this is what lets the
-                       autotune menu propose Retype-[Vectorized] over reductions). *)
-                    if Low_level.has_accumulation body then serial_loop ()
-                    else (
+                | None -> (
+                    if
+                      (* gh-ocannl-164: a serial loop annotated with the backend's vectorization
+                         pragmas; without them the plain serial loop is the legal fallback (same
+                         discipline as unbound [Grid]/[Workgroup] axes). The pragmas assert
+                         iteration independence, which a loop-carried accumulation does not satisfy
+                         — an accumulating body that no explicit rendering accepted always falls
+                         back to the plain serial loop (gh-ocannl-468: this is what lets the
+                         autotune menu propose Retype-[Vectorized] over reductions). *)
+                      Low_level.has_accumulation body
+                    then serial_loop ()
+                    else
                       match B.vectorize_pragma with
                       | [] -> serial_loop ()
-                      | lines ->
-                          separate_map hardline string lines ^^ hardline ^^ serial_loop ())))
+                      | lines -> separate_map hardline string lines ^^ hardline ^^ serial_loop ())))
         | Unrolled ->
             separate hardline
             @@ List.init
@@ -2000,12 +1971,12 @@ module C_syntax (B : C_syntax_config) = struct
            loop-invariant-address accumulators by shadowing the node's pointer with a
            volatile-qualified alias for the whole statement (the shadow also covers reads inside
            [local_defs]). The rule keys on the miscompiling pass's precondition — a
-           read-modify-write whose address is invariant across at least one enclosing serial
-           [for] loop (a scalar loss reduction's constant index, a gradient accumulated over an
-           outer batch loop, a matmul/conv accumulator indexed only by loops outside its
-           reduction) — because no finer syntactic discriminator survived the observed cases:
-           plain-FMA and Local-scope-bearing statements both miscompiled in some kernels while
-           byte-alike statements in others compiled fine. *)
+           read-modify-write whose address is invariant across at least one enclosing serial [for]
+           loop (a scalar loss reduction's constant index, a gradient accumulated over an outer
+           batch loop, a matmul/conv accumulator indexed only by loops outside its reduction) —
+           because no finer syntactic discriminator survived the observed cases: plain-FMA and
+           Local-scope-bearing statements both miscompiled in some kernels while byte-alike
+           statements in others compiled fine. *)
         let mentions_sym s (idx : Indexing.axis_index) =
           match idx with
           | Indexing.Iterator s2 -> Indexing.equal_symbol s s2
@@ -2016,9 +1987,9 @@ module C_syntax (B : C_syntax_config) = struct
         let rmw_volatile =
           B.volatile_scalar_rmw
           && List.exists !serial_loop_stack ~f:(fun s ->
-                 not (Array.exists idcs ~f:(mentions_sym s)))
-          (* Only kernel-parameter-derived device pointers: routine-local scratch is declared as
-             a plain local array (not address-castable, and compiler-visible anyway). *)
+              not (Array.exists idcs ~f:(mentions_sym s)))
+          (* Only kernel-parameter-derived device pointers: routine-local scratch is declared as a
+             plain local array (not address-castable, and compiler-visible anyway). *)
           && Tn.Placements.is_materialized_force (placements ()) tn 433
           &&
           let rec reads_tn (llsc : Low_level.scalar_t) =
@@ -2056,7 +2027,7 @@ module C_syntax (B : C_syntax_config) = struct
             lbrace
             ^^ nest 2
                  (hardline ^^ vol_ptr ^^ space ^^ tmp ^^ string " = " ^^ ident_doc ^^ semi
-                 ^^ hardline ^^ lbrace
+                ^^ hardline ^^ lbrace
                  ^^ nest 2
                       (hardline ^^ vol_ptr ^^ space ^^ ident_doc ^^ string " = " ^^ tmp ^^ semi
                      ^^ hardline ^^ stmt_doc)
@@ -2395,13 +2366,13 @@ module C_syntax (B : C_syntax_config) = struct
         (* Register-tiled CPU rendering (gh-ocannl-469; tinyBLAS/llamafile's [mnpack] and the S4
            micro-kernel shape): the C-tile lives in an RM×RN grid of vector-extension registers
            across the ENTIRE k-loop — per k step: RN B-row vector loads, RM A-element splats, and
-           RM×RN fused-FMA updates — loaded from [d] at block entry (the statement's [+=]
-           semantics) and stored back at block exit. RM = 4 rows; RN = 3 vector columns on
-           AVX2-class 16-register files ([vector_bytes = 32]), 6 on NEON/AVX-512-class 32-register
-           files — RM×RN + RM + RN live registers, tinyBLAS's budget. Edge tiles are peeled into
-           scalar loops, not masked. For each output element the k-chain runs in serial order with
-           the same fused rounding, so the rendering is BITWISE equal to the scalar fallback; the
-           plain-add (non-FMA) fallback form is declined — its [a * b + c] arithmetic is only
+           RM×RN fused-FMA updates — loaded from [d] at block entry (the statement's [+=] semantics)
+           and stored back at block exit. RM = 4 rows; RN = 3 vector columns on AVX2-class
+           16-register files ([vector_bytes = 32]), 6 on NEON/AVX-512-class 32-register files —
+           RM×RN + RM + RN live registers, tinyBLAS's budget. Edge tiles are peeled into scalar
+           loops, not masked. For each output element the k-chain runs in serial order with the same
+           fused rounding, so the rendering is BITWISE equal to the scalar fallback; the plain-add
+           (non-FMA) fallback form is declined — its [a * b + c] arithmetic is only
            maybe-contracted, so a vector twin could not promise that equality. Emitted under the
            same lane-0 guard as the fallback ([`Vec_extensions] backends render the lane loop
            serially; GPU backends never take this path). *)
@@ -2411,13 +2382,12 @@ module C_syntax (B : C_syntax_config) = struct
           let* () =
             no_test
               ((match B.vector_style with `Vec_extensions -> false | `Packed_struct -> true)
-              || B.vector_bytes < 8
-              || Utils.debug_log_from_routines ()
+              || B.vector_bytes < 8 || Utils.debug_log_from_routines ()
               (* A transposed B ([tb]: [b[j*ldb+l]]) would turn the per-k row vector loads into
                  stride-[ldb] gathers — decline it (the scalar fallback handles it; a packing
-                 [Stage] with [tile_loops] in micro-kernel order normalizes the layout instead).
-                 A transposed A ([ta]: [a[l*lda+i]]) costs nothing — the A feeds are scalar
-                 element loads (splats) either way — so only the index arithmetic swaps. *)
+                 [Stage] with [tile_loops] in micro-kernel order normalizes the layout instead). A
+                 transposed A ([ta]: [a[l*lda+i]]) costs nothing — the A feeds are scalar element
+                 loads (splats) either way — so only the index arithmetic swaps. *)
               || tb)
           in
           let d_tn = fst d in
@@ -2480,19 +2450,19 @@ module C_syntax (B : C_syntax_config) = struct
                 ^^ nest 2
                      (hardline
                      ^^ string
-                          (Printf.sprintf "%s tmma_acc__ = tmma_d__[tmma_i__ * %d + tmma_j__];"
-                             ctyp ldd)
+                          (Printf.sprintf "%s tmma_acc__ = tmma_d__[tmma_i__ * %d + tmma_j__];" ctyp
+                             ldd)
                      ^^ hardline
                      ^^ string
                           (Printf.sprintf
-                             "for (%stmma_l__ = 0; tmma_l__ < %d; ++tmma_l__) tmma_acc__ = \
-                              %s(%s, tmma_b__[tmma_l__ * %d + tmma_j__], tmma_acc__);"
+                             "for (%stmma_l__ = 0; tmma_l__ < %d; ++tmma_l__) tmma_acc__ = %s(%s, \
+                              tmma_b__[tmma_l__ * %d + tmma_j__], tmma_acc__);"
                              it k fma_fn
                              (a_at ~row:"tmma_i__" ~l:"tmma_l__")
                              ldb)
                      ^^ hardline
-                     ^^ string (Printf.sprintf "tmma_d__[tmma_i__ * %d + tmma_j__] = tmma_acc__;" ldd)
-                     )
+                     ^^ string
+                          (Printf.sprintf "tmma_d__[tmma_i__ * %d + tmma_j__] = tmma_acc__;" ldd))
                 ^^ hardline ^^ string "} }";
               ]
           in
@@ -2503,8 +2473,7 @@ module C_syntax (B : C_syntax_config) = struct
             in
             let reg = "&" ^ grid.(r).(c) in
             let src, dst = if load then (mem, reg) else (reg, mem) in
-            string
-              (Printf.sprintf "__builtin_memcpy(%s, %s, sizeof(%s));" dst src grid.(r).(c))
+            string (Printf.sprintf "__builtin_memcpy(%s, %s, sizeof(%s));" dst src grid.(r).(c))
           in
           let full_blocks =
             if m_full = 0 || n_full = 0 then []
@@ -2513,8 +2482,8 @@ module C_syntax (B : C_syntax_config) = struct
                 List.init rn ~f:(fun c ->
                     string
                       (Printf.sprintf
-                         "%s tmma_b_%d__; __builtin_memcpy(&tmma_b_%d__, &tmma_b__[tmma_l__ * %d \
-                          + tmma_j__ + %d], sizeof(tmma_b_%d__));"
+                         "%s tmma_b_%d__; __builtin_memcpy(&tmma_b_%d__, &tmma_b__[tmma_l__ * %d + \
+                          tmma_j__ + %d], sizeof(tmma_b_%d__));"
                          vtyp c c ldb (c * lanes) c))
                 @ List.concat
                     (List.init rm ~f:(fun r ->
@@ -2522,9 +2491,10 @@ module C_syntax (B : C_syntax_config) = struct
                            (Printf.sprintf "%s tmma_a_%d__ = ((%s){0} + %s);" vtyp r vtyp
                               (a_at ~row:(Printf.sprintf "(tmma_i__ + %d)" r) ~l:"tmma_l__"))
                          :: List.init rn ~f:(fun c ->
-                                vec_acc_fma ~prec ~lanes ~dst:grid.(r).(c)
-                                  ~a:(Printf.sprintf "tmma_a_%d__" r)
-                                  ~b:(Printf.sprintf "tmma_b_%d__" c))))
+                             vec_acc_fma ~prec ~lanes
+                               ~dst:grid.(r).(c)
+                               ~a:(Printf.sprintf "tmma_a_%d__" r)
+                               ~b:(Printf.sprintf "tmma_b_%d__" c))))
               in
               let per_cell f =
                 List.concat (List.init rm ~f:(fun r -> List.init rn ~f:(fun c -> f r c)))
@@ -2577,9 +2547,7 @@ module C_syntax (B : C_syntax_config) = struct
             ^^ hardline ^^ string "}")
         in
         let fallback_or_tiled () =
-          match try_register_tile () with
-          | Some doc -> lane0_guarded doc
-          | None -> fallback_doc ()
+          match try_register_tile () with Some doc -> lane0_guarded doc | None -> fallback_doc ()
         in
         match B.mma_syntax with
         | None -> fallback_or_tiled ()
@@ -2592,8 +2560,8 @@ module C_syntax (B : C_syntax_config) = struct
             | Some doc -> doc
             | None -> fallback_or_tiled ()))
     | If { cond = c, cprec; body } ->
-        (* Guarded statement (axis-types proposal §2): [body] executes iff [cond] is nonzero --
-           C's [if] tests exactly that. *)
+        (* Guarded statement (axis-types proposal §2): [body] executes iff [cond] is nonzero -- C's
+           [if] tests exactly that. *)
         let local_defs, cond_doc = pp_scalar cprec c in
         let local_defs = pp_local_defs local_defs in
         let body_doc = pp_ll ~log_set_locals ~in_loop:true body in
@@ -2978,9 +2946,7 @@ module C_syntax (B : C_syntax_config) = struct
                 ("C_syntax.compile_proc: alias view " ^ Tn.debug_name tn
                ^ " as a kernel parameter: accesses must be rewritten to the buffer-owning parent \
                   (aliased parameters would falsify the restrict qualifier)");
-            let restrict_ =
-              match B.restrict_keyword with Some kw -> kw ^ " " | None -> ""
-            in
+            let restrict_ = match B.restrict_keyword with Some kw -> kw ^ " " | None -> "" in
             (B.typ_of_prec (Lazy.force tn.Tn.prec) ^ " *" ^ restrict_ ^ get_ident tn, tn) :: acc)
           else acc)
     in
@@ -3138,8 +3104,8 @@ module C_syntax (B : C_syntax_config) = struct
                (not
                   (Tn.Placements.is_virtual_force plc tn 333
                   || Tn.Placements.is_materialized_force plc tn 336))
-               (* Privatized to a pool-parallel [Grid] loop: declared per chunk inside that
-                  loop's body instead (see [parallel_grid_loop]). *)
+               (* Privatized to a pool-parallel [Grid] loop: declared per chunk inside that loop's
+                  body instead (see [parallel_grid_loop]). *)
                && not (Set.mem grid_privatized tn)
              then
                let is_shared = Set.mem workgroup_shared tn in
@@ -3147,8 +3113,8 @@ module C_syntax (B : C_syntax_config) = struct
                  (* Workgroup-shared placement (axis-types proposal §3): one tile per workgroup
                     instead of one per thread. [= {0}] is not allowed for shared declarations, so
                     zero-initialization stays as explicit [Zero_out] code (never elided for shared
-                    nodes; see [zero_out_loop_redundant]); shared placements also keep the
-                    backend's default layout (no [aligned_local_attr]). *)
+                    nodes; see [zero_out_loop_redundant]); shared placements also keep the backend's
+                    default layout (no [aligned_local_attr]). *)
                  string (Option.value_exn ~here:[%here] B.shared_decl_prefix)
                  ^^ string (B.typ_of_prec @@ Lazy.force tn.prec)
                  ^^ space

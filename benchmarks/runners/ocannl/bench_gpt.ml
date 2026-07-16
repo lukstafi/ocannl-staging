@@ -1,10 +1,9 @@
-(* OCANNL GPT-2-style inference runner: pre-LN decoder blocks built from the idiomatic
-   nn_blocks pieces (multi_head_attention, layer_norm — fixture weights injected by name)
-   and a tanh-gelu FFN from fixture-wrapped weight tensors. Token embedding is the logical
-   one-hot gather (gh-343); the lm_head is tied to wte via an einsum that reads it
-   transposed. Forward-only: the parity metric is softmax-CE of the logits against fixture
-   target ids, recorded per batch with no updates. Layouts documented in gen_fixtures.py
-   build_gpt. *)
+(* OCANNL GPT-2-style inference runner: pre-LN decoder blocks built from the idiomatic nn_blocks
+   pieces (multi_head_attention, layer_norm — fixture weights injected by name) and a tanh-gelu FFN
+   from fixture-wrapped weight tensors. Token embedding is the logical one-hot gather (gh-343); the
+   lm_head is tied to wte via an einsum that reads it transposed. Forward-only: the parity metric is
+   softmax-CE of the logits against fixture target ids, recorded per batch with no updates. Layouts
+   documented in gen_fixtures.py build_gpt. *)
 
 open Base
 open Ocannl
@@ -19,11 +18,10 @@ let gelu = Nn_blocks.gelu
 let ids_of_gen g =
   let dims = Bigarray.Genarray.dims g in
   Array.init dims.(0) ~f:(fun s ->
-      Array.init dims.(1) ~f:(fun i ->
-          Int.of_float (Bigarray.Genarray.get g [| s; i |])))
+      Array.init dims.(1) ~f:(fun i -> Int.of_float (Bigarray.Genarray.get g [| s; i |])))
 
-(* Token ids as a uint32 tensor with explicit [n_batches; batch_size; seq] batch dims, so that
-   [@| batch_n] indexes the leading batch axis. *)
+(* Token ids as a uint32 tensor with explicit [n_batches; batch_size; seq] batch dims, so that [@|
+   batch_n] indexes the leading batch axis. *)
 let ids_tensor ~label ints ~n_batches ~batch_size ~seq =
   let open Bigarray in
   let g = Genarray.create Int32 c_layout [| n_batches; batch_size; seq |] in
@@ -71,8 +69,7 @@ let () =
         let name fmt = Printf.sprintf fmt i in
         let lbl = Printf.sprintf "l%d" i in
         let mha =
-          Nn_blocks.multi_head_attention ~label:[ lbl ] ~num_heads:n_head ~d_k:d_head
-            ~d_v:d_head ()
+          Nn_blocks.multi_head_attention ~label:[ lbl ] ~num_heads:n_head ~d_k:d_head ~d_v:d_head ()
         in
         let ln1 = Nn_blocks.layer_norm ~label:[ "ln1"; lbl ] () in
         let ln2 = Nn_blocks.layer_norm ~label:[ "ln2"; lbl ] () in
@@ -103,27 +100,28 @@ let () =
     H.dump_params batch_loss;
     Stdlib.exit 0);
   let mapping =
-    (("lnf_g", [ "gamma"; "lnf" ]) :: ("lnf_b", [ "beta"; "lnf" ])
+    ("lnf_g", [ "gamma"; "lnf" ])
+    :: ("lnf_b", [ "beta"; "lnf" ])
     :: List.concat_map (List.range 0 n_layer) ~f:(fun i ->
-           let l = Printf.sprintf "l%d" i in
-           [
-             (Printf.sprintf "l%d_wq" i, [ l; "w"; "q" ]);
-             (Printf.sprintf "l%d_wk" i, [ l; "w"; "k" ]);
-             (Printf.sprintf "l%d_wv" i, [ l; "w"; "v" ]);
-             (Printf.sprintf "l%d_wo" i, [ l; "w"; "o" ]);
-             (Printf.sprintf "l%d_ln1_g" i, [ l; "gamma"; "ln1" ]);
-             (Printf.sprintf "l%d_ln1_b" i, [ l; "beta"; "ln1" ]);
-             (Printf.sprintf "l%d_ln2_g" i, [ l; "gamma"; "ln2" ]);
-             (Printf.sprintf "l%d_ln2_b" i, [ l; "beta"; "ln2" ]);
-           ]))
+        let l = Printf.sprintf "l%d" i in
+        [
+          (Printf.sprintf "l%d_wq" i, [ l; "w"; "q" ]);
+          (Printf.sprintf "l%d_wk" i, [ l; "w"; "k" ]);
+          (Printf.sprintf "l%d_wv" i, [ l; "w"; "v" ]);
+          (Printf.sprintf "l%d_wo" i, [ l; "w"; "o" ]);
+          (Printf.sprintf "l%d_ln1_g" i, [ l; "gamma"; "ln1" ]);
+          (Printf.sprintf "l%d_ln1_b" i, [ l; "beta"; "ln1" ]);
+          (Printf.sprintf "l%d_ln2_g" i, [ l; "gamma"; "ln2" ]);
+          (Printf.sprintf "l%d_ln2_b" i, [ l; "beta"; "ln2" ]);
+        ])
   in
   let ctx = H.inject ctx st batch_loss mapping in
   let t0 = Unix.gettimeofday () in
   let ctx, routine =
     if tune then
       let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
-      (* Placement A/B: tune the default (virtual + promotion) graph and the materialize-all
-         graph, keep the measured winner. *)
+      (* Placement A/B: tune the default (virtual + promotion) graph and the materialize-all graph,
+         keep the measured winner. *)
       Train.tune_placements ~rounds:0 ~timing_ctx:scratch ctx batch_loss fwd bindings
     else Context.compile ctx fwd bindings
   in

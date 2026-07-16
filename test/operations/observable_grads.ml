@@ -1,19 +1,19 @@
-(* Gradients carry observation intent ([Tnode.set_observable]) instead of a [Never_virtual]
-   request (docs/proposals/context-scoped-memory-modes.md, Never_virtual audit). This pins the
-   per-lineage placement a parameter gradient gets in the archetypal flows:
+(* Gradients carry observation intent ([Tnode.set_observable]) instead of a [Never_virtual] request
+   (docs/proposals/context-scoped-memory-modes.md, Never_virtual audit). This pins the per-lineage
+   placement a parameter gradient gets in the archetypal flows:
 
    1. Fused fwd+bwd+sgd compiled as ONE routine: the gradient is written and consumed within the
-      routine, so the lineage is free to virtualize it. (Under the retired global settlement,
-      Never_virtual forced it [Local] -- the UNOBSERVABLE class -- despite gradients being the
-      canonical thing users inspect; that was the "forcing a bad memory mode" spot.)
+   routine, so the lineage is free to virtualize it. (Under the retired global settlement,
+   Never_virtual forced it [Local] -- the UNOBSERVABLE class -- despite gradients being the
+   canonical thing users inspect; that was the "forcing a bad memory mode" spot.)
 
    2. Split flow compiled with raw [Context.compile] (no [Train.to_routine] output-guessing): the
-      grad_update routine has no in-routine reader of the gradient, so this exposes what the
-      resolver does for a cross-routine gradient without any materialization hint.
+   grad_update routine has no in-routine reader of the gradient, so this exposes what the resolver
+   does for a cross-routine gradient without any materialization hint.
 
    3. Split flow via [Train.to_routine]: written-not-read nodes are guessed as outputs and get
-      [set_materialized], so the gradient is [On_device] by declared intent and readable across
-      routines and from the host. *)
+   [set_materialized], so the gradient is [On_device] by declared intent and readable across
+   routines and from the host. *)
 
 open Base
 open Stdio

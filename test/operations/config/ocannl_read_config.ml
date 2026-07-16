@@ -50,8 +50,9 @@ let () =
   | Some "backend" ->
       (* Normalize to the canonical backend name, mirroring [Backends.get_backend]'s deprecated
          aliases: stream/log file names use the canonical name (e.g.
-         [log_files/micrograd_demo_logging/cc-0-0.log], [micrograd_demo_logging-cc-0-0.log.expected]), so an alias-based
-         run (OCANNL_BACKEND=sync_cc) must not leak the raw string into dune's log paths. *)
+         [log_files/micrograd_demo_logging/cc-0-0.log],
+         [micrograd_demo_logging-cc-0-0.log.expected]), so an alias-based run
+         (OCANNL_BACKEND=sync_cc) must not leak the raw string into dune's log paths. *)
       let backend =
         match String.lowercase (Utils.get_global_arg ~default:"" ~arg_name:"backend") with
         | "sync_cc" -> "cc"

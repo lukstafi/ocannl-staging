@@ -1,27 +1,24 @@
-(* Kernel fission at cross-workgroup edges (docs/proposals/schedule-ir-optops.md §7): routines
-   whose top-level statements form materialized producer/consumer pairs split into segment kernels
+(* Kernel fission at cross-workgroup edges (docs/proposals/schedule-ir-optops.md §7): routines whose
+   top-level statements form materialized producer/consumer pairs split into segment kernels
    launched back-to-back on the routine's stream, each with its own default schedule.
 
    Covered here:
 
    - Executed: a two-nest chain with a forced-materialized intermediate — before fission the whole
-     routine ran 1×1; the aligned cross-nest rule now keeps both nests in a {e single} parallel
-     kernel (values checked, source checked for the absence of [__seg] splits and for per-backend
-     parallel constructs).
-   - Executed: a backward pass ([Train.grad_update]) — the [Zero_out] of the gradient and the
-     bare/reduction statements segment away from the accumulation nest (gradient values checked).
-   - Structural, backend-independent (analysis run for [backend_name:"metal"] on captured lowered
-     code): segment count, hardware annotation, traced stores, identity on backends without
-     automatic scheduling.
-   - Structural, hand-built [Low_level.t]: replication of hoisted scope-locals into consuming
-     segments (option (b) v2), the merge-back fallback when a write between the definition and the
-     consumer invalidates replication, and promotion of [Local] scratch stranded across a cut.
-     These need genuinely racy (misaligned) cross-nest edges to force cuts, hence the [Fixed_idx]
-     reads below.
-   - Structural, hand-built: the aligned cross-nest rule itself — aligned pairs merge into one
-     annotated kernel (including aligned [Local] scratch, which then needs no promotion), while
-     extent mismatches, transposed accesses, and alignment trims that would lose a nest's
-     parallelism all still cut. *)
+   routine ran 1×1; the aligned cross-nest rule now keeps both nests in a {e single} parallel kernel
+   (values checked, source checked for the absence of [__seg] splits and for per-backend parallel
+   constructs). - Executed: a backward pass ([Train.grad_update]) — the [Zero_out] of the gradient
+   and the bare/reduction statements segment away from the accumulation nest (gradient values
+   checked). - Structural, backend-independent (analysis run for [backend_name:"metal"] on captured
+   lowered code): segment count, hardware annotation, traced stores, identity on backends without
+   automatic scheduling. - Structural, hand-built [Low_level.t]: replication of hoisted scope-locals
+   into consuming segments (option (b) v2), the merge-back fallback when a write between the
+   definition and the consumer invalidates replication, and promotion of [Local] scratch stranded
+   across a cut. These need genuinely racy (misaligned) cross-nest edges to force cuts, hence the
+   [Fixed_idx] reads below. - Structural, hand-built: the aligned cross-nest rule itself — aligned
+   pairs merge into one annotated kernel (including aligned [Local] scratch, which then needs no
+   promotion), while extent mismatches, transposed accesses, and alignment trims that would lose a
+   nest's parallelism all still cut. *)
 
 open Base
 open Ocannl
@@ -53,8 +50,7 @@ let has_parallel_construct src =
   String.is_substring src ~substring:"dispatch_apply"
   || String.is_substring src ~substring:"#pragma omp parallel for"
 
-let count_substr src pattern =
-  List.length (String.substr_index_all src ~may_overlap:false ~pattern)
+let count_substr src pattern = List.length (String.substr_index_all src ~may_overlap:false ~pattern)
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
@@ -96,9 +92,7 @@ let () =
   | None -> p "chain stays a single aligned kernel" false
   | Some src ->
       p "chain stays a single aligned kernel" (count_substr src "__seg0" = 0);
-      let parallel_ok =
-        if on_cpu then has_parallel_construct src else has_hardware_regs src
-      in
+      let parallel_ok = if on_cpu then has_parallel_construct src else has_hardware_regs src in
       p "the merged chain kernel parallelizes" parallel_ok);
 
   (* --- 2. Structural: the same chain analyzed for the metal backend, on captured lowered code
@@ -136,7 +130,9 @@ let fresh_tn =
   fun label dims ->
     Int.incr c;
     Tn.create (Tn.Specified Ir.Ops.single) ~id:!c ~label:[ label ]
-      ~unpadded_dims:(lazy dims) ~padding:(lazy None) ()
+      ~unpadded_dims:(lazy dims)
+      ~padding:(lazy None)
+      ()
 
 let sp = Ir.Ops.single
 
@@ -162,8 +158,8 @@ let hand_built ~stmts ~tns_on_device ~tns_local =
 
 let () =
   (* Shared hoisted scope-local [v]: two nests over a materialized producer/consumer edge, both
-     reading [v]. The consumer segment must receive a replica of the definition. The consumer
-     reads the intermediate at [Fixed_idx 0] — a misaligned (genuinely racy) edge, so the aligned
+     reading [v]. The consumer segment must receive a replica of the definition. The consumer reads
+     the intermediate at [Fixed_idx 0] — a misaligned (genuinely racy) edge, so the aligned
      cross-nest rule cannot merge the pair and the cut is forced. *)
   let a = fresh_tn "ha" [| 4096 |] in
   let m1 = fresh_tn "hm1" [| 4096 |] in
@@ -172,10 +168,7 @@ let () =
   let v = LL.get_scope vtn in
   let get tn idx = LL.Get (tn, [| idx |]) in
   let def_stmts =
-    [
-      LL.Declare_local { id = v; needs_init = false };
-      LL.Set_local (v, get a (Idx.Fixed_idx 0));
-    ]
+    [ LL.Declare_local { id = v; needs_init = false }; LL.Set_local (v, get a (Idx.Fixed_idx 0)) ]
   in
   let i = Idx.get_symbol () and j = Idx.get_symbol () in
   let nest1 =
@@ -193,16 +186,15 @@ let () =
       if read_a then
         LL.Binop
           ( Ir.Ops.Add,
-            (LL.Binop (Ir.Ops.Add, (get m1 (Idx.Fixed_idx 0), sp), (get a (Idx.Fixed_idx 0), sp)), sp),
+            ( LL.Binop (Ir.Ops.Add, (get m1 (Idx.Fixed_idx 0), sp), (get a (Idx.Fixed_idx 0), sp)),
+              sp ),
             (LL.Get_local v, sp) )
       else LL.Binop (Ir.Ops.Add, (get m1 (Idx.Fixed_idx 0), sp), (LL.Get_local v, sp))
     in
     for_over j (LL.Set { tn = m2; idcs = [| Idx.Iterator j |]; llsc = rhs; debug = "" })
   in
   let opt =
-    hand_built
-      ~stmts:(def_stmts @ [ nest1; nest2 () ])
-      ~tns_on_device:[ a; m1; m2 ] ~tns_local:[]
+    hand_built ~stmts:(def_stmts @ [ nest1; nest2 () ]) ~tns_on_device:[ a; m1; m2 ] ~tns_local:[]
   in
   let segs = Sched.maybe_default_schedules ~backend_name:"metal" ~static_indices:[] opt in
   p "replication: two segments" (List.length segs = 2);
@@ -210,9 +202,9 @@ let () =
   p "replication: consumer segment carries a replica of the local's definition"
     (match segs with [ _; seg1 ] -> has_declare_local seg1.LL.llc | _ -> false);
 
-  (* Invalid replication: a write to [a] (the definition's read) sits between the definition and
-     the consumer, in its own forced segment. The consumer range merges back and runs serially,
-     still carrying a valid replica computed before the offending write. *)
+  (* Invalid replication: a write to [a] (the definition's read) sits between the definition and the
+     consumer, in its own forced segment. The consumer range merges back and runs serially, still
+     carrying a valid replica computed before the offending write. *)
   let k = Idx.get_symbol () in
   let a_writer =
     for_over k (LL.Set { tn = a; idcs = [| Idx.Iterator k |]; llsc = LL.Constant 1.; debug = "" })
@@ -317,20 +309,24 @@ let () =
   let nt1 =
     for_over ~extent:64 i1
       (for_over ~extent:64 i2
-         (set mt1 [| Idx.Iterator i1; Idx.Iterator i2 |] (get a2 [| Idx.Iterator i1; Idx.Iterator i2 |])))
+         (set mt1
+            [| Idx.Iterator i1; Idx.Iterator i2 |]
+            (get a2 [| Idx.Iterator i1; Idx.Iterator i2 |])))
   in
   let nt2 =
     for_over ~extent:64 j1
       (for_over ~extent:64 j2
-         (set mt2 [| Idx.Iterator j1; Idx.Iterator j2 |] (get mt1 [| Idx.Iterator j2; Idx.Iterator j1 |])))
+         (set mt2
+            [| Idx.Iterator j1; Idx.Iterator j2 |]
+            (get mt1 [| Idx.Iterator j2; Idx.Iterator j1 |])))
   in
   let _, segs = segs_of ~stmts:[ nt1; nt2 ] ~tns_on_device:[ a2; mt1; mt2 ] ~tns_local:[] in
   p "aligned: transposed read still cuts, both segments annotated"
     (match segs with [ s0; s1 ] -> annotated s0 && annotated s1 | _ -> false);
 
   (* Parallelism switch: a batch-parallel producer feeding a consumer that reduces over the batch
-     (its own chain is the inner loop) can never align — cut, and the consumer parallelizes on
-     its inner loop in its own kernel. *)
+     (its own chain is the inner loop) can never align — cut, and the consumer parallelizes on its
+     inner loop in its own kernel. *)
   let mr = fresh_tn "pmr" [| 4096 |] in
   let mo = fresh_tn "pmo" [| 4096 |] in
   let b = Idx.get_symbol () and b2 = Idx.get_symbol () and o = Idx.get_symbol () in
@@ -346,31 +342,33 @@ let () =
   p "aligned: parallelism switch still cuts, both segments annotated"
     (match segs with [ s0; s1 ] -> annotated s0 && annotated s1 | _ -> false);
 
-  (* Alignment by trimming would shrink the producer's parallelism (2-D chain to 1-D): the
-     lossless guard prefers the cut. The consumer's own kernel is annotated as well (64 parallel
-     iterations, at the default [gpu_schedule_min_parallel] = 64 — real parallelism beats the
-     serial 1x1 fallback). *)
+  (* Alignment by trimming would shrink the producer's parallelism (2-D chain to 1-D): the lossless
+     guard prefers the cut. The consumer's own kernel is annotated as well (64 parallel iterations,
+     at the default [gpu_schedule_min_parallel] = 64 — real parallelism beats the serial 1x1
+     fallback). *)
   let mp = fresh_tn "pmp" [| 64; 64 |] in
   let mq = fresh_tn "pmq" [| 64 |] in
   let k1 = Idx.get_symbol () and k2 = Idx.get_symbol () and q = Idx.get_symbol () in
   let np =
     for_over ~extent:64 k1
       (for_over ~extent:64 k2
-         (set mp [| Idx.Iterator k1; Idx.Iterator k2 |] (get a2 [| Idx.Iterator k1; Idx.Iterator k2 |])))
+         (set mp
+            [| Idx.Iterator k1; Idx.Iterator k2 |]
+            (get a2 [| Idx.Iterator k1; Idx.Iterator k2 |])))
   in
   let nq =
-    for_over ~extent:64 q (set mq [| Idx.Iterator q |] (get mp [| Idx.Iterator q; Idx.Fixed_idx 5 |]))
+    for_over ~extent:64 q
+      (set mq [| Idx.Iterator q |] (get mp [| Idx.Iterator q; Idx.Fixed_idx 5 |]))
   in
   let _, segs = segs_of ~stmts:[ np; nq ] ~tns_on_device:[ a2; mp; mq ] ~tns_local:[] in
   p "aligned: lossy trim still cuts, producer keeps its 2-D parallelism"
     (match segs with
-    | [ s0; s1 ] ->
-        annotated s0 && List.length (LL.hardware_axes s0.LL.llc) = 2 && annotated s1
+    | [ s0; s1 ] -> annotated s0 && List.length (LL.hardware_axes s0.LL.llc) = 2 && annotated s1
     | _ -> false);
 
-  (* Aligned [Local] scratch: the pair shares one kernel — each thread reads back the slice of
-     its private copy it wrote — so the scratch needs no promotion, unlike the stranded case of
-     section 3. *)
+  (* Aligned [Local] scratch: the pair shares one kernel — each thread reads back the slice of its
+     private copy it wrote — so the scratch needs no promotion, unlike the stranded case of section
+     3. *)
   let tmp = fresh_tn "ptmp" [| 4096 |] in
   let mm1 = fresh_tn "pmm1" [| 4096 |] in
   let mm2 = fresh_tn "pmm2" [| 4096 |] in
@@ -384,7 +382,8 @@ let () =
   let nw =
     for_over w
       (set mm2 [| Idx.Iterator w |]
-         (LL.Binop (Ir.Ops.Add, (get tmp [| Idx.Iterator w |], sp), (get mm1 [| Idx.Iterator w |], sp))))
+         (LL.Binop
+            (Ir.Ops.Add, (get tmp [| Idx.Iterator w |], sp), (get mm1 [| Idx.Iterator w |], sp))))
   in
   let opt, segs = segs_of ~stmts:[ nu; nw ] ~tns_on_device:[ a; mm1; mm2 ] ~tns_local:[ tmp ] in
   let plc = opt.LL.optimize_ctx.LL.placements in
@@ -392,8 +391,8 @@ let () =
     (match segs with [ seg ] -> annotated seg && grid_axes seg = 2 | _ -> false);
   p "aligned: the scratch is not promoted" (not (Tn.Placements.is_materialized_peek plc tmp))
 
-(* --- 4. Executed: backward pass — Zero_out and reduction statements segment away from the
-   gradient accumulation nest. --- *)
+(* --- 4. Executed: backward pass — Zero_out and reduction statements segment away from the gradient
+   accumulation nest. --- *)
 let () =
   let n = 192 in
   let xv = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 29) *. 0.125) in

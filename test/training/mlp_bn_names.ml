@@ -145,8 +145,8 @@ let () =
   let bn1 = Nn_blocks.batch_norm1d ~label:[ "bn1" ] () in
   let%op embed input = { c; o = [ embed_dim ] } * input in
   (* Part 3 uses Kaiming init on the hidden weight w1: standard-normal samples scaled by sqrt(6 /
-     fan_in) (the default scale_sq = 6). Note this is in the spirit of, but NOT equal to,
-     Karpathy's kaiming_normal with tanh gain: (5/3)/sqrt(fan_in) ~ 1.67/sqrt(fan_in) vs our
+     fan_in) (the default scale_sq = 6). Note this is in the spirit of, but NOT equal to, Karpathy's
+     kaiming_normal with tanh gain: (5/3)/sqrt(fan_in) ~ 1.67/sqrt(fan_in) vs our
      sqrt(6)/sqrt(fan_in) ~ 2.45/sqrt(fan_in) — sqrt(6) is the gain of the kaiming UNIFORM bound.
      Realized stds are measured in test/operations/test_default_init_std.ml. *)
   let%op mk_hidden () ~train_step x =

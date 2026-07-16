@@ -4,17 +4,14 @@
    multidev_cc, always available) so the output is deterministic regardless of the configured
    default backend.
 
-   Scenarios:
-   1. On-device copy into a context lacking the node (the init_from_device path: allocate + copy).
-   2. On-device copy when both contexts hold the node (the transfer-routine path), overwriting the
-      destination's values.
-   3. Fallback for a node with no device buffer in the source: host-init literal data reaches the
-      destination via the host round-trip.
-   4. Cross-backend (cc -> multidev_cc) host round-trip.
-   5. ~into_merge_buffer:Copy plus a %cd consumer of [t.merge]: the copy returns a context carrying
-      the merge-buffer node, against which compiling the consumer statically verifies
-      (gh-ocannl-288); compiling the same consumer against a context with no prior transfer fails
-      the static check. *)
+   Scenarios: 1. On-device copy into a context lacking the node (the init_from_device path: allocate
+   + copy). 2. On-device copy when both contexts hold the node (the transfer-routine path),
+   overwriting the destination's values. 3. Fallback for a node with no device buffer in the source:
+   host-init literal data reaches the destination via the host round-trip. 4. Cross-backend (cc ->
+   multidev_cc) host round-trip. 5. ~into_merge_buffer:Copy plus a %cd consumer of [t.merge]: the
+   copy returns a context carrying the merge-buffer node, against which compiling the consumer
+   statically verifies (gh-ocannl-288); compiling the same consumer against a context with no prior
+   transfer fails the static check. *)
 
 open Base
 open Stdio
@@ -63,8 +60,8 @@ let scenario_cross_backend () =
   printf "=== 4. Cross-backend copy (cc -> multidev_cc) ===\n";
   Tensor.unsafe_reinitialize ();
   let ctx = Context.cpu () in
-  (* 0.4 rather than 0.25: 2.25 is a representable %.1f tie, which glibc rounds to even ("2.2")
-     but the Windows CRT rounds away from zero ("2.3"), making the output platform-dependent. *)
+  (* 0.4 rather than 0.25: 2.25 is a representable %.1f tie, which glibc rounds to even ("2.2") but
+     the Windows CRT rounds away from zero ("2.3"), making the output platform-dependent. *)
   let%op t = [ 1.; 2. ] + [ 0.5; 0.4 ] in
   let src = Train.forward_once ctx t in
   let dst = Context.cpu ~threads:4 () in
@@ -84,7 +81,9 @@ let scenario_merge_buffer () =
   let ctx_a = Context.set_values ctx_a t.Tensor.value [| 1.; 1.; 1. |] in
   (* Consuming the merge buffer without a prior transfer must fail the static check. *)
   let consumer = [%cd t =+ t.merge] in
-  let consumer = { consumer with asgns = Ir.Assignments.Block_comment ("merge_consume", consumer.asgns) } in
+  let consumer =
+    { consumer with asgns = Ir.Assignments.Block_comment ("merge_consume", consumer.asgns) }
+  in
   (try
      let (_ : Context.t * Context.routine) = Context.compile ctx_b consumer IDX.empty in
      printf "UNEXPECTED: consumer compiled without a merge-buffer transfer\n"

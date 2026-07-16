@@ -3,25 +3,22 @@
    Covered here, backend-independent (all printed booleans hold on every backend):
 
    - [Schedule.fission_scheduled] (the exposed fission pipeline with caller-supplied per-segment
-     schedules) splits the canonical two-nest chain with a forced-materialized intermediate into
-     two [`Normal] segments; compiling them through the plural [?lowered_transforms] seam executes
-     correctly.
-   - A hand-crafted fissioned cache entry (per-segment schedules keyed by pre-schedule segment
-     digests) replays through [Autotune.tune]'s cache-hit path: the report says [fissioned], and
-     the values are correct — exercising [F_saved] rebinding of per-segment saved schedules.
-   - [Autotune.tune] on a fissionable computation searches whole-routine and fissioned candidates
-     and returns correct values; the second call hits the cache.
-   - The matmul sketch generator detects a 32x32 matmul and seeds tile-size instantiations of the
-     register-blocktiling (GPU) / operand-packing (CPU) pipelines, plus the tensorized (tile-MMA)
-     pipelines (unstaged and cooperatively staged [Tensorize] on backends with an mma capability;
-     whole-triple and Grid-split register-tiled [Tile_mma] on the C backends); the tuned routine
-     matches the serial twin, and the schedules round-trip through the saved form when a sketch
-     wins.
-   - Per-fission-segment sketches ([F_sketch]): on a fissionable chain whose consumer is a
-     matmul, the matmul's [Zero_out] fissions into its own [`Zeros] segment, so the whole-routine
-     sketches never fit the segment's (unzeroed) site — the per-segment seeds must apply instead
-     ([fiss_sketch_candidates]), get timed ([fiss_sketch_timed]), and the tuned routine matches
-     the serial twin. *)
+   schedules) splits the canonical two-nest chain with a forced-materialized intermediate into two
+   [`Normal] segments; compiling them through the plural [?lowered_transforms] seam executes
+   correctly. - A hand-crafted fissioned cache entry (per-segment schedules keyed by pre-schedule
+   segment digests) replays through [Autotune.tune]'s cache-hit path: the report says [fissioned],
+   and the values are correct — exercising [F_saved] rebinding of per-segment saved schedules. -
+   [Autotune.tune] on a fissionable computation searches whole-routine and fissioned candidates and
+   returns correct values; the second call hits the cache. - The matmul sketch generator detects a
+   32x32 matmul and seeds tile-size instantiations of the register-blocktiling (GPU) /
+   operand-packing (CPU) pipelines, plus the tensorized (tile-MMA) pipelines (unstaged and
+   cooperatively staged [Tensorize] on backends with an mma capability; whole-triple and Grid-split
+   register-tiled [Tile_mma] on the C backends); the tuned routine matches the serial twin, and the
+   schedules round-trip through the saved form when a sketch wins. - Per-fission-segment sketches
+   ([F_sketch]): on a fissionable chain whose consumer is a matmul, the matmul's [Zero_out] fissions
+   into its own [`Zeros] segment, so the whole-routine sketches never fit the segment's (unzeroed)
+   site — the per-segment seeds must apply instead ([fiss_sketch_candidates]), get timed
+   ([fiss_sketch_timed]), and the tuned routine matches the serial twin. *)
 
 open Base
 open Ocannl
@@ -49,11 +46,12 @@ let clean_cache dir =
         Stdlib.Sys.remove (Stdlib.Filename.concat dir f))
 
 let () =
-  List.iter [ "autotune_fission_cache"; "autotune_fission_cache2"; "autotune_sketch_cache" ]
+  List.iter
+    [ "autotune_fission_cache"; "autotune_fission_cache2"; "autotune_sketch_cache" ]
     ~f:clean_cache;
-  (* === The fissionable chain: d = a + b (forced materialized), e = d *. d^T. The transposed
-     read keeps the cross-nest edge misaligned, so the aligned cross-nest rule cannot merge the
-     pair and the chain still fissions (a plain pointwise consumer would now stay one kernel). === *)
+  (* === The fissionable chain: d = a + b (forced materialized), e = d *. d^T. The transposed read
+     keeps the cross-nest edge misaligned, so the aligned cross-nest rule cannot merge the pair and
+     the chain still fissions (a plain pointwise consumer would now stay one kernel). === *)
   let n = 16 in
   let av = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 7) *. 0.5) in
   let bv = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 5) -. 2.) in
@@ -223,18 +221,16 @@ let () =
     match !mm_reports with [ r2; r1 ] -> (r2, r1) | _ -> failwith "expected two mm reports"
   in
   p "matmul sketch instantiations seeded" (mr1.Autotune.sketch_candidates > 0);
-  (* Tensorized (tile-MMA) sketch families ride along the blocktiling/packing ones: for the
-     32x32x32 f32 site, cc seeds 2 packing + 2 hoisted-packing + 2 whole-triple/Grid-split
-     [Tensorize] pipelines + 1 cache-blocked packed [Tile_mma] composition, its hoisted,
-     Grid-parallel hoisted-only, and Grid-parallel in-kernel variants (gh-ocannl-469/470);
-     Metal seeds 4 blocktiling +
-     5 simdgroup pipelines (2 unstaged full-K + 3 cooperatively staged); other GPU backends seed
-     at least the 4 blocktiling ones (plus 5 wmma pipelines when the device reports an mma
-     capability). *)
+  (* Tensorized (tile-MMA) sketch families ride along the blocktiling/packing ones: for the 32x32x32
+     f32 site, cc seeds 2 packing + 2 hoisted-packing + 2 whole-triple/Grid-split [Tensorize]
+     pipelines + 1 cache-blocked packed [Tile_mma] composition, its hoisted, Grid-parallel
+     hoisted-only, and Grid-parallel in-kernel variants (gh-ocannl-469/470); Metal seeds 4
+     blocktiling + 5 simdgroup pipelines (2 unstaged full-K + 3 cooperatively staged); other GPU
+     backends seed at least the 4 blocktiling ones (plus 5 wmma pipelines when the device reports an
+     mma capability). *)
   p "tensorized (mma) sketch instantiations seeded"
     (mr1.Autotune.sketch_candidates
-    >= (if is_cpu then 6 else if String.is_substring backend_name ~substring:"metal" then 9 else 4)
-    );
+    >= if is_cpu then 6 else if String.is_substring backend_name ~substring:"metal" then 9 else 4);
   p "tuned matmul matches the serial twin" (Array.for_all2_exn got_mm1 got_serial ~f:approx);
   p "matmul tune searches then hits the cache"
     ((not mr1.Autotune.cache_hit) && mr2.Autotune.cache_hit);
@@ -243,8 +239,8 @@ let () =
 
   (* === Per-fission-segment sketches (F_sketch): qd = qa + qb (forced materialized), then the
      matmul qe = qd * qc. The chain fissions; the matmul's [Zero_out] lands in its own [`Zeros]
-     segment, so the matmul segment's site is unzeroed — [detect_matmul] must fire per segment
-     and the sketch pipelines apply without the zero-expansion geometry. === *)
+     segment, so the matmul segment's site is unzeroed — [detect_matmul] must fire per segment and
+     the sketch pipelines apply without the zero-expansion geometry. === *)
   let q = 32 in
   let qav = Array.init (q * q) ~f:(fun i -> Float.of_int (i % 11) *. 0.125) in
   let qbv = Array.init (q * q) ~f:(fun i -> Float.of_int (i % 7) -. 3.) in
@@ -277,17 +273,15 @@ let () =
   let got_fs = Context.get_values fsctx qe1.Tensor.value in
   (match !fs_report with
   | Some r ->
-      (* For the 32x32x32 f32 segment site (unzeroed), cc seeds 2 packing + 2 hoisted-packing
-         (qc is a hoistable constant) + 2 whole-triple tensorized pipelines + 1 packed
-         [Tile_mma] composition, its hoisted, Grid-parallel hoisted-only (qd in place x
-         hoisted-packed qc — the inference-GEMM shape), and Grid-parallel in-kernel variants;
-         Metal seeds 4 blocktiling
-         + 5 simdgroup pipelines; other GPU backends at least the 4 blocktiling ones. *)
+      (* For the 32x32x32 f32 segment site (unzeroed), cc seeds 2 packing + 2 hoisted-packing (qc is
+         a hoistable constant) + 2 whole-triple tensorized pipelines + 1 packed [Tile_mma]
+         composition, its hoisted, Grid-parallel hoisted-only (qd in place x hoisted-packed qc — the
+         inference-GEMM shape), and Grid-parallel in-kernel variants; Metal seeds 4 blocktiling + 5
+         simdgroup pipelines; other GPU backends at least the 4 blocktiling ones. *)
       p "per-segment sketch candidates seeded"
         (r.Autotune.fiss_sketch_candidates
-        >= (if is_cpu then 6
-            else if String.is_substring backend_name ~substring:"metal" then 9
-            else 4));
+        >=
+        if is_cpu then 6 else if String.is_substring backend_name ~substring:"metal" then 9 else 4);
       p "per-segment sketch candidates timed" (r.Autotune.fiss_sketch_timed > 0)
   | None ->
       p "per-segment sketch candidates seeded" false;
@@ -301,8 +295,7 @@ let () =
      available. --- *)
   p "timing_ctx on a different backend rejected"
     (match
-       Autotune.tune ~rounds:0 ~repeats:1 ~cache_dir:""
-         ~timing_ctx:(Context.cpu ~threads:4 ())
+       Autotune.tune ~rounds:0 ~repeats:1 ~cache_dir:"" ~timing_ctx:(Context.cpu ~threads:4 ())
          (Context.cpu ()) mm_comp Ir.Indexing.Empty
      with
     | _ -> false

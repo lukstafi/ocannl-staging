@@ -1,15 +1,15 @@
-(* Schedule IR, Phase S3 (docs/proposals/schedule-ir-optops.md §4): the register-blocktiled
-   matmul schedule -- Split + Swap + Stage + materializing Unroll -- executed against the serial
-   twin. "Register blocktiling is not a bespoke transform": each output dimension is split twice
-   (block tile BM/BN = Grid, then register tile TM/TN), the register loops are sunk innermost by
+(* Schedule IR, Phase S3 (docs/proposals/schedule-ir-optops.md §4): the register-blocktiled matmul
+   schedule -- Split + Swap + Stage + materializing Unroll -- executed against the serial twin.
+   "Register blocktiling is not a bespoke transform": each output dimension is split twice (block
+   tile BM/BN = Grid, then register tile TM/TN), the register loops are sunk innermost by
    perfect-nesting Swaps, the operands are staged through workgroup-shared tiles at k_o, and the
    register loops are unrolled in the IR (materialize = true) so the trailing simplify folds the
    Affine indices of the TM x TN copies into constants.
 
    Kernel geometry: 64x64 times 64x64, BM = BN = 16, BK = 8, TM = TN = 4 -- a 4x4 grid of 4x4
-   workgroups, each thread computing a 4x4 register tile of outputs; the unrolled body carries
-   TM * TN = 16 fma statements. All tile sizes divide the extents so every constructed guard
-   folds; the only surviving Ifs are the two thread-0 load restrictions.
+   workgroups, each thread computing a 4x4 register tile of outputs; the unrolled body carries TM *
+   TN = 16 fma statements. All tile sizes divide the extents so every constructed guard folds; the
+   only surviving Ifs are the two thread-0 load restrictions.
 
    On the C backends shared placement is rejected cleanly (as in schedule_smem_matmul). *)
 
@@ -24,7 +24,6 @@ module Asgns = Ir.Assignments
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p name b = Stdio.printf "%s: %b\n" name b
 let approx a b = Float.(abs (a - b) < 1e-2)
-
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
 let has_shared =
@@ -39,13 +38,11 @@ let read_generated base_name =
   if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
 
 let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
-  let strip stmts =
-    List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true)
-  in
+  let strip stmts = List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true) in
   let rec path (llc : LL.t) : Ir.Indexing.symbol list =
     match llc with
-    | LL.For_loop { index; body; _ } -> (
-        index :: (match strip (LL.flat_lines [ body ]) with [ single ] -> path single | _ -> []))
+    | LL.For_loop { index; body; _ } ->
+        index :: (match strip (LL.flat_lines [ body ]) with [ single ] -> path single | _ -> [])
     | LL.If { body; _ } -> path body
     | _ -> []
   in
@@ -102,8 +99,22 @@ let () =
     [ ez; sp_zi; sp_zi2; sp_zj; sp_zj2; sp_i; sp_i2; sp_j; sp_j2; sp_k ]
     @ swaps
     @ [
-        Sched.Stage { source = ma.Tensor.value; tile_loops = [ i_w; i_t; k_i ]; shared = true; cooperative = None; hoisted = false };
-        Sched.Stage { source = mb.Tensor.value; tile_loops = [ k_i; j_w; j_t ]; shared = true; cooperative = None; hoisted = false };
+        Sched.Stage
+          {
+            source = ma.Tensor.value;
+            tile_loops = [ i_w; i_t; k_i ];
+            shared = true;
+            cooperative = None;
+            hoisted = false;
+          };
+        Sched.Stage
+          {
+            source = mb.Tensor.value;
+            tile_loops = [ k_i; j_w; j_t ];
+            shared = true;
+            cooperative = None;
+            hoisted = false;
+          };
         Sched.Privatize { target = mc1.Tensor.value; over = k_o };
         Sched.Unroll { axis = i_t; materialize = true };
         Sched.Unroll { axis = j_t; materialize = true };
@@ -126,9 +137,9 @@ let () =
         let count_sub sub =
           String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
         in
-        (* TM * TN fma statements from the materialized unrolls, two shared tiles, and only the
-           two thread-0 load guards survive. Metal spells single-precision FMA [fma(], CUDA
-           [fmaf(]; the patterns are disjoint so the counts add. *)
+        (* TM * TN fma statements from the materialized unrolls, two shared tiles, and only the two
+           thread-0 load guards survive. Metal spells single-precision FMA [fma(], CUDA [fmaf(]; the
+           patterns are disjoint so the counts add. *)
         p "unrolled register tile structure (GPU) or rejected (CPU)"
           (count_sub "fma(" + count_sub "fmaf(" = tm * tn
           && count_sub "if (" = 2

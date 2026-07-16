@@ -42,8 +42,8 @@ let run ~n_shards : float array =
     let w = TDSL.param ~values:[| 0.5 |] "w" ~output_dims:[ 1 ] () in
     [%op (((w *. x) - y) *. ((w *. x) - y)) ++ "...|... => |->0"]
   in
-  Parallel.data_parallel ~backend_name:"cc" ~reduction:Parallel.Sum ~n_shards
-    ~bindings:IDX.empty ~learning_rate ~inputs:(inputs ()) ~targets:(targets ()) ~loss_of
+  Parallel.data_parallel ~backend_name:"cc" ~reduction:Parallel.Sum ~n_shards ~bindings:IDX.empty
+    ~learning_rate ~inputs:(inputs ()) ~targets:(targets ()) ~loss_of
     ~f:(fun h ->
       h.Parallel.step ();
       Stdio.printf "n_shards=%d: loss=%.4f\n" n_shards (h.Parallel.owner_loss_value ());

@@ -20,8 +20,8 @@ val load :
     with the loaded set (gh-ocannl-333).
 
     Raises if any loaded tensor's (namespace, id) pair clashes with an existing tnode in the
-    registry. After loading, bumps the session ID floor so that subsequently created tensors get
-    IDs strictly above any loaded ID that landed in the ambient namespace.
+    registry. After loading, bumps the session ID floor so that subsequently created tensors get IDs
+    strictly above any loaded ID that landed in the ambient namespace.
 
     [?prefix_namespace] (gh-ocannl-372) rewrites each loaded tensor's namespace to
     [prefix ^ "__" ^ file_namespace], preserving the file's internal namespace structure and the
@@ -33,10 +33,9 @@ val restore : ctx:Context.t -> Ocannl_tensor.Tensor.tn_set -> string -> Context.
 (** [restore ~ctx t_set path] updates existing tensor device buffers from a checkpoint file,
     returning the updated context.
 
-    For each tnode in [t_set], finds its data in the file by (namespace, id) — file entries with
-    the legacy [""] namespace match the default namespace — reads it into a temporary host
-    buffer, and uploads it into the node's device buffer in [ctx] via {!Context.from_host}
-    (gh-ocannl-333).
+    For each tnode in [t_set], finds its data in the file by (namespace, id) — file entries with the
+    legacy [""] namespace match the default namespace — reads it into a temporary host buffer, and
+    uploads it into the node's device buffer in [ctx] via {!Context.from_host} (gh-ocannl-333).
 
     Raises if:
     - A tensor in [t_set] is missing from the file

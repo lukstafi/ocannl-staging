@@ -1,22 +1,21 @@
-(* Hoisted (out-of-routine) operand packing for compile-time constants (gh-ocannl-470): a
-   [Stage ~shared:false ~hoisted:true] of a known-constant, host-init-backed operand emits no
-   in-kernel load nest at all — the packed layout covers the whole source and is materialized once
-   into the per-device constant pool at link time (the compiler-native analog of ggml's
-   [CPU_REPACK] [set_tensor] hook).
+(* Hoisted (out-of-routine) operand packing for compile-time constants (gh-ocannl-470): a [Stage
+   ~shared:false ~hoisted:true] of a known-constant, host-init-backed operand emits no in-kernel
+   load nest at all — the packed layout covers the whole source and is materialized once into the
+   per-device constant pool at link time (the compiler-native analog of ggml's [CPU_REPACK]
+   [set_tensor] hook).
 
    Three checks against [mc = ma * mb] with constant [ma], [mb]:
 
-   1. Both operands hoisted, tile sizes dividing the extents (32x32, 8x8x8 tiles): values match
-      the naive twin, and the generated code has no scratch tile arrays and no packing copy nests
-      — the kernel reads the packed constants directly (they appear as ordinary buffer
-      parameters).
+   1. Both operands hoisted, tile sizes dividing the extents (32x32, 8x8x8 tiles): values match the
+   naive twin, and the generated code has no scratch tile arrays and no packing copy nests — the
+   kernel reads the packed constants directly (they appear as ordinary buffer parameters).
 
    2. Mixed flavors on non-dividing extents (20x20, 8x8x8 tiles): [ma] hoisted, [mb] packed
-      in-kernel. Values still match: hoisted edge tiles are zero-filled on the host and the
-      consumer keeps its own remainder guards.
+   in-kernel. Values still match: hoisted edge tiles are zero-filled on the host and the consumer
+   keeps its own remainder guards.
 
    3. A non-constant source (the output of an upstream matmul) is rejected with
-      [Invalid_argument]. *)
+   [Invalid_argument]. *)
 
 open Base
 open Ocannl
@@ -28,7 +27,6 @@ module Asgns = Ir.Assignments
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p name b = Stdio.printf "%s: %b\n" name b
 let approx a b = Float.(abs (a - b) < 1e-3)
-
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
 let read_generated base_name =
@@ -42,8 +40,8 @@ let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
   let strip stmts = List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true) in
   let rec path (llc : LL.t) : Ir.Indexing.symbol list =
     match llc with
-    | LL.For_loop { index; body; _ } -> (
-        index :: (match strip (LL.flat_lines [ body ]) with [ single ] -> path single | _ -> []))
+    | LL.For_loop { index; body; _ } ->
+        index :: (match strip (LL.flat_lines [ body ]) with [ single ] -> path single | _ -> [])
     | LL.If { body; _ } -> path body
     | _ -> []
   in
@@ -55,10 +53,10 @@ let named name (comp : Asgns.comp) : Asgns.comp =
 
 let bm, bn, bk = (8, 8, 8)
 
-(* The classic tiled i_o j_o k_o k_i i_i j_i order of schedule_cpu_pack_matmul.ml, with
-   per-operand staging flavor. [reorder = false] skips the Swaps and the Privatize (Swap needs
-   perfect nesting and Privatize an iteration-invariant guard chain — both broken by the
-   remainder guards of non-dividing splits), leaving splits + stages only. *)
+(* The classic tiled i_o j_o k_o k_i i_i j_i order of schedule_cpu_pack_matmul.ml, with per-operand
+   staging flavor. [reorder = false] skips the Swaps and the Privatize (Swap needs perfect nesting
+   and Privatize an iteration-invariant guard chain — both broken by the remainder guards of
+   non-dividing splits), leaving splits + stages only. *)
 let tiled_schedule ?(reorder = true) ~ma ~mb ~mc ~hoist_a ~hoist_b (opt : LL.optimized) :
     Sched.schedule =
   let paths = nest_paths opt.LL.llc in
@@ -157,8 +155,8 @@ let () =
 let () =
   let n = 32 in
   let ma, _mb = make_pair n in
-  (* A values-backed parameter: host-init data is registered (so packing input exists), but the
-     node is trainable, not a compile-time constant — hoisting must refuse it. *)
+  (* A values-backed parameter: host-init data is registered (so packing input exists), but the node
+     is trainable, not a compile-time constant — hoisting must refuse it. *)
   let wv = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 7) *. 0.5) in
   let w = TDSL.param ~values:wv "w" ~input_dims:[ n ] ~output_dims:[ n ] () in
   let%op mc1 = ma * w in
@@ -192,7 +190,9 @@ let () =
       d := Ir.Schedule_cache.digest (Ir.Schedule_cache.canonicalize opt);
       opt
     in
-    let (_ : Context.t * _) = Context.compile ~lowered_transform:transform (Context.auto ()) comp Ir.Indexing.Empty in
+    let (_ : Context.t * _) =
+      Context.compile ~lowered_transform:transform (Context.auto ()) comp Ir.Indexing.Empty
+    in
     !d
   in
   let d_const = digest (named "mmd_const" (Train.forward mc0)) in

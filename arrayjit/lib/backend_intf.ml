@@ -1,9 +1,9 @@
 (** {1 The interface types for backends}
 
-    The shared backend-interface types: the user-facing API ({!Backend}, {!routine},
-    {!buffer_loc}) together with the interface pieces the implementation layers assemble from
-    (marked implementation-facing where applicable). Implementation-only components live in
-    {!Backend_impl}. *)
+    The shared backend-interface types: the user-facing API ({!Backend}, {!routine}, {!buffer_loc})
+    together with the interface pieces the implementation layers assemble from (marked
+    implementation-facing where applicable). Implementation-only components live in {!Backend_impl}.
+*)
 
 open Base
 
@@ -26,9 +26,9 @@ type mma_capability = {
           CUDA wmma); a {!Low_level.t.Tile_mma}'s block extents must be multiples of it. *)
 }
 [@@deriving sexp, compare, equal]
-(** Tensor-core capability descriptor (docs/proposals/tensorize-mma.md §6). Which operand
-    precisions are supported is decided per call by the backend's [mma_syntax] hook (the emission
-    is the source of truth); this record carries what schedule construction needs. *)
+(** Tensor-core capability descriptor (docs/proposals/tensorize-mma.md §6). Which operand precisions
+    are supported is decided per call by the backend's [mma_syntax] hook (the emission is the source
+    of truth); this record carries what schedule construction needs. *)
 
 type hardware_limits = {
   max_threads_per_workgroup : int option;
@@ -39,8 +39,8 @@ type hardware_limits = {
       (** Capacity in bytes of the workgroup-shared memory (CUDA [__shared__] / Metal
           [threadgroup]); [None] when the backend imposes no limit. *)
   mma : mma_capability option;
-      (** Tile-MMA units ([simdgroup_matrix] / tensor cores); [None] when the backend has none
-          wired — [Tile_mma] statements then render their scalar fallback. *)
+      (** Tile-MMA units ([simdgroup_matrix] / tensor cores); [None] when the backend has none wired
+          — [Tile_mma] statements then render their scalar fallback. *)
 }
 [@@deriving sexp, compare, equal]
 
@@ -70,10 +70,9 @@ end
 
 type merge_buffer_use = No | Copy [@@deriving sexp_of]
 
-(** Kernel-parameter sources: the codegen <-> backend contract for a compiled routine's
-    parameters. Implementation-facing (consumed by {!C_syntax} and the backends' link steps); it
-    lives in this file because the shared {!Backend_impl.Lowered_no_device_backend} signature
-    mentions it. *)
+(** Kernel-parameter sources: the codegen <-> backend contract for a compiled routine's parameters.
+    Implementation-facing (consumed by {!C_syntax} and the backends' link steps); it lives in this
+    file because the shared {!Backend_impl.Lowered_no_device_backend} signature mentions it. *)
 type kparam_source =
   | Log_file_name
   | Merge_buffer
@@ -145,8 +144,8 @@ type ('dev, 'runner, 'event) device = {
       (** Deterministic per-device pool-id counter, advanced by the shared allocator seam in tnode
           iteration order. Pool id 0 is reserved for the merge buffer; tnode pools start at 1. *)
 }
-(** A device bundles its single compute [runner] with the associated buffer and event tracking:
-    the [merge_buffer], the [updating_for] writer events (used for cross-device coherence by
+(** A device bundles its single compute [runner] with the associated buffer and event tracking: the
+    [merge_buffer], the [updating_for] writer events (used for cross-device coherence by
     {!Backend.device_to_device}), and the deterministic pool-id counter. The design is
     forward-compatible with a future fixed-role prefetch/transfer runner. *)
 
@@ -239,8 +238,8 @@ module type Backend_device_common = sig
   val static_properties : unit -> Sexp.t
   (** Returns a sexp description of the properties of all devices. A function so that computing it
       (device enumeration) does not run at backend-module initialization: singleton backends
-      instantiate eagerly at program startup, where touching a driver could fail runs that never
-      use the backend. *)
+      instantiate eagerly at program startup, where touching a driver could fail runs that never use
+      the backend. *)
 
   val hardware_limits : unit -> hardware_limits
   (** Conservative per-workgroup device limits: on multi-device backends the minimum across the
@@ -346,10 +345,10 @@ module type Backend = sig
       rewrite loops with hardware axis types, barriers and shared placements
       (docs/proposals/axis-types-for-loops.md). [lowered_transforms] is the plural variant for
       transforms that split the routine into several kernels (fission,
-      {!Schedule.fission_scheduled}): the returned segments compile as one fissioned routine and
-      run back-to-back on the routine's stream with a device-side event chained at each boundary,
-      exactly as {!Schedule.maybe_default_schedules}' segments do. It must return a non-empty
-      list; passing both transforms raises [Invalid_argument]. *)
+      {!Schedule.fission_scheduled}): the returned segments compile as one fissioned routine and run
+      back-to-back on the routine's stream with a device-side event chained at each boundary,
+      exactly as {!Schedule.maybe_default_schedules}' segments do. It must return a non-empty list;
+      passing both transforms raises [Invalid_argument]. *)
 
   val compile_batch :
     Low_level.optimize_ctx ->

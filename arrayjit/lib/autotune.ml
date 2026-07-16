@@ -32,34 +32,30 @@ let set_test_bindings routine =
       match ss.Idx.static_range with Some range when range > 0 -> r := range / 2 | _ -> ())
 
 (* Fast routines get extra timed runs beyond [repeats], until this much total measured time (or
-   [max_timing_runs]): on sub-millisecond kernels a min-of-3 is dominated by launch jitter, and
-   the winner selection becomes a lottery — a heavier candidate can be crowned by one lucky
-   sample while the true winner's few samples all landed under contention. Noise only ever adds
-   time, so min-of-N converges monotonically to the true best case and more samples strictly
-   reduce mis-selection; for routines slower than [min_timing_ms / repeats] per run nothing
-   changes. *)
+   [max_timing_runs]): on sub-millisecond kernels a min-of-3 is dominated by launch jitter, and the
+   winner selection becomes a lottery — a heavier candidate can be crowned by one lucky sample while
+   the true winner's few samples all landed under contention. Noise only ever adds time, so min-of-N
+   converges monotonically to the true best case and more samples strictly reduce mis-selection; for
+   routines slower than [min_timing_ms / repeats] per run nothing changes. *)
 let min_timing_ms = 25.
 let max_timing_runs = 64
 
-(* [Context.bindings] exposes the routine's live binding refs — restore them after timing
-   (Codex P2 on PR #103), or the returned winner would stay bound to the tuner's midpoint test
-   values. *)
+(* [Context.bindings] exposes the routine's live binding refs — restore them after timing (Codex P2
+   on PR #103), or the returned winner would stay bound to the tuner's midpoint test values. *)
 let time_routine ~repeats cctx routine =
   let saved_bindings = List.map (Context.bindings routine) ~f:(fun (_ss, r) -> (r, !r)) in
   Exn.protect
     ~finally:(fun () -> List.iter saved_bindings ~f:(fun (r, v) -> r := v))
     ~f:(fun () ->
       set_test_bindings routine;
-      (* Warmup run: absorbs lazy initialization and fills caches like a steady-state
-         iteration. *)
+      (* Warmup run: absorbs lazy initialization and fills caches like a steady-state iteration. *)
       let ctx = ref (Context.run cctx routine) in
       Context.sync !ctx;
       let best = ref Float.infinity in
       let total = ref 0. in
       let count = ref 0 in
       while
-        !count < max 1 repeats
-        || (Float.(!total < min_timing_ms) && !count < max_timing_runs)
+        !count < max 1 repeats || (Float.(!total < min_timing_ms) && !count < max_timing_runs)
       do
         (* Monotonic high-resolution clock: on Windows, [Unix.gettimeofday] ticks at ~1 ms, which
            makes sub-millisecond candidates indistinguishable (they all measure 0). *)
@@ -77,9 +73,9 @@ let time_routine ~repeats cctx routine =
 
     Sketch candidates instantiate the composed matmul pipelines pinned by
     test/operations/schedule_register_matmul.ml (GPU register blocktiling: Split + Swap + shared
-    Stage + Privatize + materializing Unroll) and schedule_cpu_pack_matmul.ml (CPU operand
-    packing: Split + Swap + non-shared Stage + Privatize), parameterized by tile sizes. Detection
-    is permissive — a mis-detected site fails its candidate compile (op preconditions,
+    Stage + Privatize + materializing Unroll) and schedule_cpu_pack_matmul.ml (CPU operand packing:
+    Split + Swap + non-shared Stage + Privatize), parameterized by tile sizes. Detection is
+    permissive — a mis-detected site fails its candidate compile (op preconditions,
     [validate_parallel], hardware limits) and is skipped like any other invalid candidate. *)
 
 type sketch_params = {
@@ -87,15 +83,14 @@ type sketch_params = {
   sk_mma : bool;
       (** Tensorized (tile-MMA) pipeline instead of the scalar blocktiling/packing one: on GPU,
           Split → (optional cooperative shared Stage) → Tensorize targeting [simdgroup_matrix] /
-          tensor cores; on cc, the whole-triple [Tile_mma] rendered register-tiled
-          (gh-ocannl-469), optionally Grid-parallel over row blocks — or, with [sk_bk > 0], the
-          cache-blocked packed composition (packing Stages feeding the register-tiled kernel;
+          tensor cores; on cc, the whole-triple [Tile_mma] rendered register-tiled (gh-ocannl-469),
+          optionally Grid-parallel over row blocks — or, with [sk_bk > 0], the cache-blocked packed
+          composition (packing Stages feeding the register-tiled kernel;
           [cpu_mma_pack_sketch_schedule]), itself optionally Grid-parallel ([sk_grid]: hoisted
           packing runs Grid-outermost; in-kernel packing relies on the renderer's per-chunk tile
-          privatization). Seeded directly because the greedy menu cannot reach
-          the composition: a bare [Tensorize] from the serial baseline (one simdgroup, everything
-          else serial) loses round 1 and the beam discards it before Grid retypes could join
-          it. *)
+          privatization). Seeded directly because the greedy menu cannot reach the composition: a
+          bare [Tensorize] from the serial baseline (one simdgroup, everything else serial) loses
+          round 1 and the beam discards it before Grid retypes could join it. *)
   sk_simd : int;  (** MMA lane width ([hardware_limits.mma_simd_width]); 0 when [not sk_mma]. *)
   sk_bm : int;
   sk_bn : int;
@@ -104,22 +99,22 @@ type sketch_params = {
   sk_tn : int;
   sk_hoist : bool;
       (** CPU packing only: pack compile-time-constant operands out of the routine, into the
-          per-device constant pool (gh-ocannl-470). Proposed alongside the in-kernel packing
-          variant so the choice stays measured; applied per operand, only to hoistable
-          (known-constant, host-init-backed) sources. *)
+          per-device constant pool (gh-ocannl-470). Proposed alongside the in-kernel packing variant
+          so the choice stays measured; applied per operand, only to hoistable (known-constant,
+          host-init-backed) sources. *)
   sk_grid : bool;
       (** CPU packed composition only ([sk_mma] with [sk_bk > 0]): split [i] into pool-parallel
           [Grid] row blocks instead of Serial ones. Two shapes, keyed by [sk_hoist]:
 
-          - With [sk_hoist], hoisted-only packing: only hoistable operands are packed (at link
-            time, into the constant pool) and the rest are read in place, leaving the kernel body
+          - With [sk_hoist], hoisted-only packing: only hoistable operands are packed (at link time,
+            into the constant pool) and the rest are read in place, leaving the kernel body
             all-materialized; the Grid loop stays outermost (one dispatch spanning the whole GEBP
             triple). The typical inference GEMM: activations (in place) x constant weights.
-          - Without [sk_hoist], in-kernel packing: the per-row-block A~ packing Stage lands
-            inside the Grid body — its tile is privatized to per-chunk block-scope storage by the
-            renderer ([C_syntax.parallel_grid_safe]'s privatization rule) — while the B~ panel
-            packs at the k-block loop outside the Grid and is read-only inside (shared across the
-            row-block chunks, behind a pointer alias under the blocks extension).
+          - Without [sk_hoist], in-kernel packing: the per-row-block A~ packing Stage lands inside
+            the Grid body — its tile is privatized to per-chunk block-scope storage by the renderer
+            ([C_syntax.parallel_grid_safe]'s privatization rule) — while the B~ panel packs at the
+            k-block loop outside the Grid and is read-only inside (shared across the row-block
+            chunks, behind a pointer alias under the blocks extension).
 
           Proposed alongside the serial flavors so the choice stays measured. *)
 }
@@ -209,14 +204,14 @@ let detect_matmul (llc : LL.t) : matmul_site option =
 
 let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner })
 
-(* Zero-geometry ops shared by the sketch pipelines: expand the whole-node [Zero_out] of the
-   output and give the resulting nest a compatible parallel geometry, via [mk_zops] on its two
-   fresh loop symbols. When the site is NOT zeroed — a fission segment's site never is, the
-   [Zero_out] lands in its own [`Zeros] segment — there is nothing to expand and the pipelines
-   are correct without it: [Privatize] init-loads the accumulator tile from the (pre-zeroed)
-   target, and [Tile_mma] loads the accumulator fragment before the reduction. *)
-let zero_geometry (site : matmul_site)
-    ~(mk_zops : zi:Idx.symbol -> zj:Idx.symbol -> Sched.schedule) : Sched.schedule =
+(* Zero-geometry ops shared by the sketch pipelines: expand the whole-node [Zero_out] of the output
+   and give the resulting nest a compatible parallel geometry, via [mk_zops] on its two fresh loop
+   symbols. When the site is NOT zeroed — a fission segment's site never is, the [Zero_out] lands in
+   its own [`Zeros] segment — there is nothing to expand and the pipelines are correct without it:
+   [Privatize] init-loads the accumulator tile from the (pre-zeroed) target, and [Tile_mma] loads
+   the accumulator fragment before the reduction. *)
+let zero_geometry (site : matmul_site) ~(mk_zops : zi:Idx.symbol -> zj:Idx.symbol -> Sched.schedule)
+    : Sched.schedule =
   if not site.m_zeroed then []
   else (
     if Array.length (Lazy.force site.m_d.Ir.Tnode.dims) <> 2 then
@@ -232,8 +227,8 @@ let zero_geometry (site : matmul_site)
    staged through workgroup-shared tiles at the k-block loop, output privatized, register loops
    materially unrolled. The zeroing nest gets the same geometry (barriers need slot-uniform
    workgroup extents). *)
-let gpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_tm = tm; sk_tn = tn; _ }
-    : Sched.schedule =
+let gpu_sketch_schedule (site : matmul_site)
+    { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_tm = tm; sk_tn = tn; _ } : Sched.schedule =
   let zops =
     zero_geometry site ~mk_zops:(fun ~zi ~zj ->
         let sp_zi, _, zi_i = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
@@ -274,17 +269,17 @@ let gpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = b
     ]
 
 (* A constant operand eligible for hoisted (out-of-routine) packing (gh-ocannl-470). The same
-   predicate enters the canonical digest ([Schedule_cache.canonicalize]), so a cached winner for
-   a same-shape program of different operand constancy never replays here — hoisted candidates
-   are always measured for constant sites. *)
+   predicate enters the canonical digest ([Schedule_cache.canonicalize]), so a cached winner for a
+   same-shape program of different operand constancy never replays here — hoisted candidates are
+   always measured for constant sites. *)
 let hoistable = Sched.hoistable_constant
 
 (* The CPU operand-packing matmul (schedule_cpu_pack_matmul.ml): all-serial tiling with the tile
    loops sunk to [i_o j_o k_o k_i i_i j_i], operands packed into contiguous stack scratch, output
-   privatized across the k-block loop. With [sk_hoist], constant operands are instead packed once
-   at link time into the per-device constant pool. *)
-let cpu_sketch_schedule (site : matmul_site)
-    { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_hoist; _ } : Sched.schedule =
+   privatized across the k-block loop. With [sk_hoist], constant operands are instead packed once at
+   link time into the per-device constant pool. *)
+let cpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_hoist; _ } :
+    Sched.schedule =
   let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Serial ~inner:LL.Serial in
   let sp_j, j_o, j_i = Sched.split ~axis:site.m_j ~factor:bn ~outer:LL.Serial ~inner:LL.Serial in
   let sp_k, k_o, k_i = Sched.split ~axis:site.m_k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
@@ -314,17 +309,17 @@ let cpu_sketch_schedule (site : matmul_site)
 (* Tensorized (tile-MMA) GPU matmul (docs/proposals/tensorize-mma.md; the pinned pipelines of
    schedule_mma_matmul.ml): Split the output dims into Grid blocks, then [Tensorize] the inner
    micro-kernel into a [Tile_mma] block statement. Stage-only composition — [Privatize] must NOT
-   join it: it would relocate the accumulator into thread-local scratch, which the MMA loads
-   cannot address ([mma_syntax] declines thread-space operands, silently costing the whole
-   tensorization), and [Tile_mma]'s block semantics already keep the accumulator fragments
-   register-resident across the reduction. With [sk_bk = 0] the single block statement spans the
-   full reduction, streaming operand tiles from device memory and amortizing [d] traffic
-   entirely; with [sk_bk > 0] both operands are staged through cooperative shared tiles at the
-   k-block loop (lane-aware Stage), costing one [d] fragment load/store per k-block. The zeroing
-   nest mirrors the accumulation's grid geometry, with an inner Workgroup loop of extent
-   [sk_simd] covering the lane slot (barrier-strength uniformity: every workgroup extent must
-   equal the lane width once a [Tile_mma] is present) — the seeds constrain [sk_bn = sk_simd] so
-   the zeroing's grid blocks align with [j]'s. *)
+   join it: it would relocate the accumulator into thread-local scratch, which the MMA loads cannot
+   address ([mma_syntax] declines thread-space operands, silently costing the whole tensorization),
+   and [Tile_mma]'s block semantics already keep the accumulator fragments register-resident across
+   the reduction. With [sk_bk = 0] the single block statement spans the full reduction, streaming
+   operand tiles from device memory and amortizing [d] traffic entirely; with [sk_bk > 0] both
+   operands are staged through cooperative shared tiles at the k-block loop (lane-aware Stage),
+   costing one [d] fragment load/store per k-block. The zeroing nest mirrors the accumulation's grid
+   geometry, with an inner Workgroup loop of extent [sk_simd] covering the lane slot
+   (barrier-strength uniformity: every workgroup extent must equal the lane width once a [Tile_mma]
+   is present) — the seeds constrain [sk_bn = sk_simd] so the zeroing's grid blocks align with
+   [j]'s. *)
 let gpu_mma_sketch_schedule (site : matmul_site)
     { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_simd = w; _ } : Sched.schedule =
   let zops =
@@ -341,11 +336,7 @@ let gpu_mma_sketch_schedule (site : matmul_site)
   else
     let sp_k, k_o, k_i = Sched.split ~axis:site.m_k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
     let tz, _lane = Sched.tensorize ~i:i_i ~j:j_i ~k:k_i ~simd_width:w in
-    zops
-    @ [ sp_i; sp_j; sp_k ]
-    @ sink i_i [ j_o ]
-    @ sink j_i [ k_o ]
-    @ sink i_i [ k_o ]
+    zops @ [ sp_i; sp_j; sp_k ] @ sink i_i [ j_o ] @ sink j_i [ k_o ] @ sink i_i [ k_o ]
     @ [
         Sched.Stage
           {
@@ -366,12 +357,12 @@ let gpu_mma_sketch_schedule (site : matmul_site)
         tz;
       ]
 
-(* Whole-triple tensorized CPU matmul (gh-ocannl-469; bin/schedule_bench.ml's [tensorize]
-   variant): one [Tile_mma] statement the C backends render tinyBLAS-style — the C-tile in an
-   RM×RN grid of vector registers held across the k-loop, edges peeled. The zeroing's column
-   loop becomes the Workgroup axis with the lane width matching its extent (coverage rule; the
-   lane loop renders serially on the C backends). With [sk_bm > 0] the row loops split into
-   pool-parallel Grid blocks; [sk_bm = 0] keeps the single-statement form. *)
+(* Whole-triple tensorized CPU matmul (gh-ocannl-469; bin/schedule_bench.ml's [tensorize] variant):
+   one [Tile_mma] statement the C backends render tinyBLAS-style — the C-tile in an RM×RN grid of
+   vector registers held across the k-loop, edges peeled. The zeroing's column loop becomes the
+   Workgroup axis with the lane width matching its extent (coverage rule; the lane loop renders
+   serially on the C backends). With [sk_bm > 0] the row loops split into pool-parallel Grid blocks;
+   [sk_bm = 0] keeps the single-statement form. *)
 let cpu_mma_sketch_schedule (site : matmul_site) { sk_bm = bm; _ } : Sched.schedule =
   let zops =
     zero_geometry site ~mk_zops:(fun ~zi ~zj ->
@@ -390,31 +381,30 @@ let cpu_mma_sketch_schedule (site : matmul_site) { sk_bm = bm; _ } : Sched.sched
     zops @ [ sp_i; tz ]
 
 (* Cache-blocked, operand-packed tensorized CPU matmul: [Tile_mma] composed with the S4 packing
-   pipeline (the remaining piece of gh-ocannl-469). GEBP loop structure, all-Serial:
-   [j_o? { k_o { pack B~[bk x bn]; i_o { pack A~[bm x bk]; Tile_mma(bm, bn, bk) } } }] — the
-   packing [Stage]s land at their own anchors (B~ at [k_o], once per (j_o, k_o) block; A~ at
-   [i_o]) and the register-tiled micro-kernel streams the contiguous, cache-resident tiles
-   ([lda = bk], [ldb = bn]). [tile_loops] are passed in micro-kernel order ([k_i; j_i] for B),
-   so a transposed source packs into the normalized layout and [Tensorize] sees
-   [ta = tb = false]. [sk_bn = 0] leaves [j] unsplit (one B~ row panel of [bk x nj] per k-block).
-   The lane width is 1: the C backends render the lane loop serially, and a unit lane keeps the
-   kernel's parallel geometry trivial. Hoisted packing (constant operands, gh-ocannl-470) is
-   proposed per operand like the scalar S4 pipeline.
+   pipeline (the remaining piece of gh-ocannl-469). GEBP loop structure, all-Serial: [j_o? { k_o {
+   pack B~[bk x bn]; i_o { pack A~[bm x bk]; Tile_mma(bm, bn, bk) } } }] — the packing [Stage]s land
+   at their own anchors (B~ at [k_o], once per (j_o, k_o) block; A~ at [i_o]) and the register-tiled
+   micro-kernel streams the contiguous, cache-resident tiles ([lda = bk], [ldb = bn]). [tile_loops]
+   are passed in micro-kernel order ([k_i; j_i] for B), so a transposed source packs into the
+   normalized layout and [Tensorize] sees [ta = tb = false]. [sk_bn = 0] leaves [j] unsplit (one B~
+   row panel of [bk x nj] per k-block). The lane width is 1: the C backends render the lane loop
+   serially, and a unit lane keeps the kernel's parallel geometry trivial. Hoisted packing (constant
+   operands, gh-ocannl-470) is proposed per operand like the scalar S4 pipeline.
 
    With [sk_grid], the row-block loop [i_o] is [Grid]-typed and pool-parallelizes; the whole-node
-   [Zero_out] of the output — no longer legal beside a hardware-annotated loop
-   ([validate_parallel]) — expands into a nest whose row loop Grid-splits with the same [bm]
-   geometry ([zero_geometry]; the unit-lane Workgroup axis has extent 1, stays inactive, and
-   needs no coverage from the zeroing nest). Two shapes (see [sk_grid]):
+   [Zero_out] of the output — no longer legal beside a hardware-annotated loop ([validate_parallel])
+   — expands into a nest whose row loop Grid-splits with the same [bm] geometry ([zero_geometry];
+   the unit-lane Workgroup axis has extent 1, stays inactive, and needs no coverage from the zeroing
+   nest). Two shapes (see [sk_grid]):
 
-   - [sk_hoist]: hoisted-only packing — hoistable operands are packed at link time into the
-     constant pool, the rest are read in place, so the kernel body touches only materialized
-     buffers; the Grid loop stays outermost (one dispatch spanning the whole GEBP triple). The
-     typical inference GEMM: activations (in place) x constant weights (hoisted-packed panel).
-   - Otherwise, in-kernel packing: [i_o] sinks under [j_o]/[k_o] exactly as in the serial shape,
-     so the B~ panel packs outside the Grid body (read-only inside, shared across the row-block
-     chunks) while the per-row-block A~ tile is privatized to per-chunk block-scope storage by
-     the renderer ([C_syntax.parallel_grid_safe]'s privatization rule). *)
+   - [sk_hoist]: hoisted-only packing — hoistable operands are packed at link time into the constant
+   pool, the rest are read in place, so the kernel body touches only materialized buffers; the Grid
+   loop stays outermost (one dispatch spanning the whole GEBP triple). The typical inference GEMM:
+   activations (in place) x constant weights (hoisted-packed panel). - Otherwise, in-kernel packing:
+   [i_o] sinks under [j_o]/[k_o] exactly as in the serial shape, so the B~ panel packs outside the
+   Grid body (read-only inside, shared across the row-block chunks) while the per-row-block A~ tile
+   is privatized to per-chunk block-scope storage by the renderer ([C_syntax.parallel_grid_safe]'s
+   privatization rule). *)
 let cpu_mma_pack_sketch_schedule (site : matmul_site)
     { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_hoist; sk_grid; _ } : Sched.schedule =
   let outer_i = if sk_grid then LL.Grid else LL.Serial in
@@ -424,10 +414,10 @@ let cpu_mma_pack_sketch_schedule (site : matmul_site)
   let splits, j_col, j_swaps =
     if bn = 0 then ([ sp_i; sp_k ], site.m_j, [])
     else
-      let sp_j, j_o, j_i = Sched.split ~axis:site.m_j ~factor:bn ~outer:LL.Serial ~inner:LL.Serial in
-      ( [ sp_i; sp_j; sp_k ],
-        j_i,
-        sink i_i [ j_o ] @ if grid_outermost then [] else sink i_o [ j_o ] )
+      let sp_j, j_o, j_i =
+        Sched.split ~axis:site.m_j ~factor:bn ~outer:LL.Serial ~inner:LL.Serial
+      in
+      ([ sp_i; sp_j; sp_k ], j_i, sink i_i [ j_o ] @ if grid_outermost then [] else sink i_o [ j_o ])
   in
   let stage ~hoisted source tile_loops =
     Sched.Stage { source; tile_loops; shared = false; cooperative = None; hoisted }
@@ -451,9 +441,7 @@ let cpu_mma_pack_sketch_schedule (site : matmul_site)
           [ sp_zi ])
   in
   let tz, _lane = Sched.tensorize ~i:i_i ~j:j_col ~k:k_i ~simd_width:1 in
-  zops @ splits @ j_swaps
-  @ sink j_col [ k_o ]
-  @ sink i_i [ k_o ]
+  zops @ splits @ j_swaps @ sink j_col [ k_o ] @ sink i_i [ k_o ]
   @ (if grid_outermost then [] else sink i_o [ k_o ])
   @ stages @ [ tz ]
 
@@ -469,10 +457,10 @@ let sketch_schedule ~p (opt : LL.optimized) : Sched.schedule =
       else cpu_sketch_schedule site p
 
 (* Sketch seed parameters compatible with the site's extents (dividing tiles: every constructed
-   guard folds, and shared staging requires them). Unzeroed sites — the norm for fission
-   segments, whose [Zero_out] lives in its own [`Zeros] segment — are proposable too: the
-   pipelines skip the zero geometry (see [zero_geometry]), and a site whose kernel-mates cannot
-   share the parallel geometry merely fails its candidate compile. *)
+   guard folds, and shared staging requires them). Unzeroed sites — the norm for fission segments,
+   whose [Zero_out] lives in its own [`Zeros] segment — are proposable too: the pipelines skip the
+   zero geometry (see [zero_geometry]), and a site whose kernel-mates cannot share the parallel
+   geometry merely fails its candidate compile. *)
 let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
     (opt : LL.optimized) : sketch_params list =
   match detect_matmul opt.LL.llc with
@@ -483,7 +471,10 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
         if is_gpu then
           List.filter_map
             [
-              (64, 64, 8, 4, 4); (32, 32, 8, 4, 4); (16, 16, 8, 4, 4); (32, 32, 16, 2, 2);
+              (64, 64, 8, 4, 4);
+              (32, 32, 8, 4, 4);
+              (16, 16, 8, 4, 4);
+              (32, 32, 16, 2, 2);
               (16, 16, 8, 2, 2);
             ]
             ~f:(fun (bm, bn, bk, tm, tn) ->
@@ -533,22 +524,78 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
       in
       let mma =
         match (is_gpu, limits.Ir.Backend_intf.mma) with
-          | true, Some { Ir.Backend_intf.mma_simd_width = w; mma_tile = tm_t, tn_t, tk_t } ->
-              (* [bn = w] keeps the zeroing's column grid blocks aligned with [j]'s (see
-                 [gpu_mma_sketch_schedule]); [bk = 0] = unstaged full-K block. *)
+        | true, Some { Ir.Backend_intf.mma_simd_width = w; mma_tile = tm_t, tn_t, tk_t } ->
+            (* [bn = w] keeps the zeroing's column grid blocks aligned with [j]'s (see
+               [gpu_mma_sketch_schedule]); [bk = 0] = unstaged full-K block. *)
+            List.filter_map
+              [ (16, w, 0); (32, w, 0); (16, w, 32); (32, w, 32); (32, w, 16) ]
+              ~f:(fun (bm, bn, bk) ->
+                if
+                  divides bm site.m_ni && divides bn site.m_nj
+                  && (bk = 0 || (divides bk site.m_nk && bk % tk_t = 0))
+                  && bm % tm_t = 0
+                  && bn % tn_t = 0
+                  && site.m_nk % tk_t = 0
+                then
+                  Some
+                    {
+                      sk_gpu = true;
+                      sk_mma = true;
+                      sk_simd = w;
+                      sk_bm = bm;
+                      sk_bn = bn;
+                      sk_bk = bk;
+                      sk_tm = 0;
+                      sk_tn = 0;
+                      sk_hoist = false;
+                      sk_grid = false;
+                    }
+                else None)
+        | _ when is_cpu ->
+            (* The register-tiled [Tile_mma] rendering needs no MMA units ([limits.mma] is [None] on
+               cc): seed the whole-triple form plus Grid-parallel row-block splits. Ineligible
+               statements (non-f32/f64, transposed B) render the scalar fallback — correct, merely
+               timing like the baseline. *)
+            let whole =
+              List.filter_map [ 0; 64; 16 ] ~f:(fun bm ->
+                  if bm = 0 || divides bm site.m_ni then
+                    Some
+                      {
+                        sk_gpu = false;
+                        sk_mma = true;
+                        sk_simd = 0;
+                        sk_bm = bm;
+                        sk_bn = 0;
+                        sk_bk = 0;
+                        sk_tm = 0;
+                        sk_tn = 0;
+                        sk_hoist = false;
+                        sk_grid = false;
+                      }
+                  else None)
+            in
+            (* Cache-blocked packed composition ([cpu_mma_pack_sketch_schedule]; [bk > 0] selects
+               it): [bn = 0] = unsplit column panel. The packed tiles are function-scope stack
+               arrays, so cap their combined footprint — which is also roughly the L2 residency the
+               blocking aims for. *)
+            let prec_bytes = Ir.Ops.prec_in_bytes (Lazy.force site.m_a.Ir.Tnode.prec) in
+            let tile_bytes_cap = 256 * 1024 in
+            let packed =
               List.filter_map
-                [ (16, w, 0); (32, w, 0); (16, w, 32); (32, w, 32); (32, w, 16) ]
+                [ (64, 0, 64); (64, 0, 256); (128, 128, 128); (64, 128, 256); (16, 0, 16) ]
                 ~f:(fun (bm, bn, bk) ->
+                  let bn_eff = if bn = 0 then site.m_nj else bn in
                   if
-                    divides bm site.m_ni && divides bn site.m_nj
-                    && (bk = 0 || (divides bk site.m_nk && bk % tk_t = 0))
-                    && bm % tm_t = 0 && bn % tn_t = 0 && site.m_nk % tk_t = 0
+                    divides bm site.m_ni
+                    && (bn = 0 || divides bn site.m_nj)
+                    && divides bk site.m_nk
+                    && ((bm * bk) + (bk * bn_eff)) * prec_bytes <= tile_bytes_cap
                   then
                     Some
                       {
-                        sk_gpu = true;
+                        sk_gpu = false;
                         sk_mma = true;
-                        sk_simd = w;
+                        sk_simd = 0;
                         sk_bm = bm;
                         sk_bn = bn;
                         sk_bk = bk;
@@ -558,102 +605,47 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                         sk_grid = false;
                       }
                   else None)
-          | _ when is_cpu ->
-              (* The register-tiled [Tile_mma] rendering needs no MMA units ([limits.mma] is
-                 [None] on cc): seed the whole-triple form plus Grid-parallel row-block splits.
-                 Ineligible statements (non-f32/f64, transposed B) render the scalar fallback —
-                 correct, merely timing like the baseline. *)
-              let whole =
-                List.filter_map [ 0; 64; 16 ] ~f:(fun bm ->
-                    if bm = 0 || divides bm site.m_ni then
-                      Some
-                        {
-                          sk_gpu = false;
-                          sk_mma = true;
-                          sk_simd = 0;
-                          sk_bm = bm;
-                          sk_bn = 0;
-                          sk_bk = 0;
-                          sk_tm = 0;
-                          sk_tn = 0;
-                          sk_hoist = false;
-                          sk_grid = false;
-                        }
-                    else None)
-              in
-              (* Cache-blocked packed composition ([cpu_mma_pack_sketch_schedule]; [bk > 0]
-                 selects it): [bn = 0] = unsplit column panel. The packed tiles are function-scope
-                 stack arrays, so cap their combined footprint — which is also roughly the L2
-                 residency the blocking aims for. *)
-              let prec_bytes = Ir.Ops.prec_in_bytes (Lazy.force site.m_a.Ir.Tnode.prec) in
-              let tile_bytes_cap = 256 * 1024 in
-              let packed =
-                List.filter_map
-                  [ (64, 0, 64); (64, 0, 256); (128, 128, 128); (64, 128, 256); (16, 0, 16) ]
-                  ~f:(fun (bm, bn, bk) ->
-                    let bn_eff = if bn = 0 then site.m_nj else bn in
-                    if
-                      divides bm site.m_ni
-                      && (bn = 0 || divides bn site.m_nj)
-                      && divides bk site.m_nk
-                      && ((bm * bk) + (bk * bn_eff)) * prec_bytes <= tile_bytes_cap
-                    then
-                      Some
-                        {
-                          sk_gpu = false;
-                          sk_mma = true;
-                          sk_simd = 0;
-                          sk_bm = bm;
-                          sk_bn = bn;
-                          sk_bk = bk;
-                          sk_tm = 0;
-                          sk_tn = 0;
-                          sk_hoist = false;
-                          sk_grid = false;
-                        }
-                    else None)
-              in
-              (* Hoisted (link-time) packing stays a measured choice for constant operands, like
-                 the scalar S4 pipeline (gh-ocannl-470). And when a hoistable operand exists, the
-                 hoisted-only composition pool-parallelizes ([sk_grid && sk_hoist]): hoisted
-                 packing emits no in-kernel pack writes, so an outermost Grid split over the row
-                 blocks is trivially race-free — pack only the hoistable operand(s), read the
-                 rest in place ([cpu_mma_pack_sketch_schedule]). Grid seeds need at least two row
-                 blocks (c_syntax.ml [collect_parallel_grid] wants extent >= 2). *)
-              let base = packed in
-              let packed =
-                if hoistable site.m_a || hoistable site.m_b then
-                  packed
-                  @ List.map base ~f:(fun p -> { p with sk_hoist = true })
-                  @ List.filter_map base ~f:(fun p ->
-                        if site.m_ni / p.sk_bm >= 2 then
-                          Some { p with sk_hoist = true; sk_grid = true }
-                        else None)
-                else packed
-              in
-              (* Pool-parallel Grid over the in-kernel packed composition: the renderer
-                 privatizes the per-row-block A~ tile to per-chunk storage and shares the
-                 read-only B~ panel ([C_syntax.parallel_grid_safe]). A measured choice against
-                 the all-Serial and hoisted-only Grid flavors. *)
-              let packed =
+            in
+            (* Hoisted (link-time) packing stays a measured choice for constant operands, like the
+               scalar S4 pipeline (gh-ocannl-470). And when a hoistable operand exists, the
+               hoisted-only composition pool-parallelizes ([sk_grid && sk_hoist]): hoisted packing
+               emits no in-kernel pack writes, so an outermost Grid split over the row blocks is
+               trivially race-free — pack only the hoistable operand(s), read the rest in place
+               ([cpu_mma_pack_sketch_schedule]). Grid seeds need at least two row blocks
+               (c_syntax.ml [collect_parallel_grid] wants extent >= 2). *)
+            let base = packed in
+            let packed =
+              if hoistable site.m_a || hoistable site.m_b then
                 packed
+                @ List.map base ~f:(fun p -> { p with sk_hoist = true })
                 @ List.filter_map base ~f:(fun p ->
-                      if site.m_ni / p.sk_bm >= 2 then Some { p with sk_grid = true } else None)
-              in
-              whole @ packed
-          | _ -> []
+                    if site.m_ni / p.sk_bm >= 2 then Some { p with sk_hoist = true; sk_grid = true }
+                    else None)
+              else packed
+            in
+            (* Pool-parallel Grid over the in-kernel packed composition: the renderer privatizes the
+               per-row-block A~ tile to per-chunk storage and shares the read-only B~ panel
+               ([C_syntax.parallel_grid_safe]). A measured choice against the all-Serial and
+               hoisted-only Grid flavors. *)
+            let packed =
+              packed
+              @ List.filter_map base ~f:(fun p ->
+                  if site.m_ni / p.sk_bm >= 2 then Some { p with sk_grid = true } else None)
+            in
+            whole @ packed
+        | _ -> []
       in
       blocktile @ mma
 
 (** {2 The privatized fission flavor}
 
     A variant of the per-segment preset that contracts each materialized read-modify-write
-    accumulator into a per-thread register tile ({!Sched.optop.Privatize}) over its serial
-    reduction loop. A routine-local accumulator beats a device-memory RMW on every backend, and
-    on Metal it additionally sidesteps the volatile-RMW miscompile workaround tax
-    (c_syntax.ml [volatile_scalar_rmw]). Detection is permissive: each proposal is validated by
-    try-applying against the segment (Privatize's own preconditions — single index vector,
-    uniform iteration-invariant guards, etc.), and dropped rather than failing the candidate. *)
+    accumulator into a per-thread register tile ({!Sched.optop.Privatize}) over its serial reduction
+    loop. A routine-local accumulator beats a device-memory RMW on every backend, and on Metal it
+    additionally sidesteps the volatile-RMW miscompile workaround tax (c_syntax.ml
+    [volatile_scalar_rmw]). Detection is permissive: each proposal is validated by try-applying
+    against the segment (Privatize's own preconditions — single index vector, uniform
+    iteration-invariant guards, etc.), and dropped rather than failing the candidate. *)
 
 let rec subtree_has_hardware_loop (llc : LL.t) =
   match llc with
@@ -663,11 +655,11 @@ let rec subtree_has_hardware_loop (llc : LL.t) =
   | LL.If { body; _ } -> subtree_has_hardware_loop body
   | _ -> false
 
-(* Materialized RMW accumulation sites of the (post-preset) scheduled segment, each paired with
-   the outermost enclosing Serial loop eligible to privatize over: the access vector must not
-   mention its symbol (so the accumulation is carried across it), and no hardware-typed loop may
-   sit inside its subtree (the private tile is per-thread; spanning other threads' iterations
-   would store back their elements). *)
+(* Materialized RMW accumulation sites of the (post-preset) scheduled segment, each paired with the
+   outermost enclosing Serial loop eligible to privatize over: the access vector must not mention
+   its symbol (so the accumulation is carried across it), and no hardware-typed loop may sit inside
+   its subtree (the private tile is per-thread; spanning other threads' iterations would store back
+   their elements). *)
 let privatize_proposals (post : LL.optimized) : (Ir.Tnode.t * Idx.symbol) list =
   let plc = post.LL.optimize_ctx.LL.placements in
   let proposals = ref [] in
@@ -681,29 +673,28 @@ let privatize_proposals (post : LL.optimized) : (Ir.Tnode.t * Idx.symbol) list =
     | LL.Set { tn; idcs; llsc; _ }
       when Ir.Tnode.Placements.is_materialized_peek plc tn
            && List.exists (collect_gets llsc) ~f:(fun (t, i) ->
-                  phys_equal t tn && Array.equal Idx.equal_axis_index i idcs) ->
+               phys_equal t tn && Array.equal Idx.equal_axis_index i idcs) ->
         List.find (List.rev stack) ~f:(fun (index, from_, axis, body) ->
-            LL.equal_axis_type axis LL.Serial
-            && from_ = 0
+            LL.equal_axis_type axis LL.Serial && from_ = 0
             && (not (idcs_mention idcs index))
             && not (subtree_has_hardware_loop body))
         |> Option.iter ~f:(fun (index, _, _, _) ->
-               if
-                 not
-                   (List.exists !proposals ~f:(fun (t, s) ->
-                        Ir.Tnode.equal t tn && Idx.equal_symbol s index))
-               then proposals := (tn, index) :: !proposals)
+            if
+              not
+                (List.exists !proposals ~f:(fun (t, s) ->
+                     Ir.Tnode.equal t tn && Idx.equal_symbol s index))
+            then proposals := (tn, index) :: !proposals)
     | _ -> ()
   in
   walk [] post.LL.llc;
   List.rev !proposals
 
-(** The preset schedule extended with a [Privatize] per detected accumulator. Proposals are
-    detected on the preset-scheduled segment and validated one at a time by re-applying the
-    growing schedule; a proposal violating an op precondition is dropped. The exploratory applies
-    run against a hermetic copy of the segment: [Privatize] registers its (fresh) tile in the
-    traced store and placements, and abandoned tiles would otherwise be emitted as dead local
-    declarations when the caller applies the returned schedule to the real segment. *)
+(** The preset schedule extended with a [Privatize] per detected accumulator. Proposals are detected
+    on the preset-scheduled segment and validated one at a time by re-applying the growing schedule;
+    a proposal violating an op precondition is dropped. The exploratory applies run against a
+    hermetic copy of the segment: [Privatize] registers its (fresh) tile in the traced store and
+    placements, and abandoned tiles would otherwise be emitted as dead local declarations when the
+    caller applies the returned schedule to the real segment. *)
 let extend_with_privatize ~static_indices sched (seg : LL.optimized) : Sched.schedule =
   let scratch () =
     {
@@ -724,11 +715,11 @@ let extend_with_privatize ~static_indices sched (seg : LL.optimized) : Sched.sch
 (** {2 Candidate compilation}
 
     A candidate is a recipe producing schedules against a {e fresh} lowering: backend [compile]
-    re-lowers (with fresh symbols) on every call, so schedules are rebound structurally inside
-    the transform closure, after checking the fresh code's canonical digest against the base
-    compile's. Whole-routine candidates go through the singular [?lowered_transform] seam;
-    fissioned candidates through the plural [?lowered_transforms] seam, with per-segment
-    schedules keyed by the pre-schedule segment's canonical digest. *)
+    re-lowers (with fresh symbols) on every call, so schedules are rebound structurally inside the
+    transform closure, after checking the fresh code's canonical digest against the base compile's.
+    Whole-routine candidates go through the singular [?lowered_transform] seam; fissioned candidates
+    through the plural [?lowered_transforms] seam, with per-segment schedules keyed by the
+    pre-schedule segment's canonical digest. *)
 
 type whole_flavor =
   | W_saved of SC.saved_schedule
@@ -743,18 +734,18 @@ type fiss_flavor =
           (** Use the config-default [min_parallel] thresholds instead of the search's
               [min_parallel:1] — with [block_size = None] this reproduces the untuned default
               pipeline ({!Sched.maybe_default_schedules}) exactly, so the candidate pool always
-              contains the behavior the user gets without tuning: on launch-overhead-bound
-              workloads the aggressive [min_parallel:1] presets can all lose to it. *)
+              contains the behavior the user gets without tuning: on launch-overhead-bound workloads
+              the aggressive [min_parallel:1] presets can all lose to it. *)
     }
   | F_saved of (string * SC.saved_schedule) list
   | F_sketch of (string * sketch_params) list
-      (** Per-segment matmul sketches: for each listed segment (keyed by its pre-schedule
-          structural digest, like [F_saved]), the composed sketch pipeline instantiated with the
-          given parameters; every other segment gets the plain default preset — the same
-          pipeline the seed-time segment enumeration ran, so the segmentation converges. On a
-          key miss (segmentation drift) the candidate degrades to the plain fissioned preset
-          and dedups away by digest; unlike [F_saved] it never replays a cache entry, so no
-          loud drift guard is needed. *)
+      (** Per-segment matmul sketches: for each listed segment (keyed by its pre-schedule structural
+          digest, like [F_saved]), the composed sketch pipeline instantiated with the given
+          parameters; every other segment gets the plain default preset — the same pipeline the
+          seed-time segment enumeration ran, so the segmentation converges. On a key miss
+          (segmentation drift) the candidate degrades to the plain fissioned preset and dedups away
+          by digest; unlike [F_saved] it never replays a cache entry, so no loud drift guard is
+          needed. *)
 
 type spec = Whole of whole_flavor | Fiss of fiss_flavor
 
@@ -792,7 +783,8 @@ let logf fmt =
 (* Log tag for a (possibly '+'-concatenated, fissioned) digest: a plain prefix only reflects the
    first segment — two fissioned programs identical in segment 1 would read as "the same digest"
    (misled the CUDA round-4 analysis on PR #140) — so fold the whole string into the tag. *)
-let dshort d = String.prefix d 8 ^ "/" ^ String.prefix (Stdlib.Digest.to_hex (Stdlib.Digest.string d)) 8
+let dshort d =
+  String.prefix d 8 ^ "/" ^ String.prefix (Stdlib.Digest.to_hex (Stdlib.Digest.string d)) 8
 
 let bs_label = function None -> "cfg" | Some b -> Int.to_string b
 
@@ -829,22 +821,22 @@ let spec_label = function
                   (if p.sk_grid then " grid" else ""))))
 
 (* Every candidate derives its CODE from the ONE base lowering ([base_opt] with [canon] its
-   canonical form, captured together in [tune]) rather than from the compile's own fresh
-   lowering, whose llc the transform ignores. Re-lowering per candidate was subtly unsound:
-   timing runs settle tensor-node value bounds, so later fresh lowerings can fold guards (and
-   even re-segment fission) differently from the base — failing digest checks at best (the CUDA
-   rounds on PR #140: whole arms degenerating to their serial baselines) and silently replaying
-   the winner with empty per-segment schedules at worst (a 296 ms winner returning as a 2614 ms
-   routine). Deriving from the base makes candidates and the winner replay drift-immune and
-   byte-comparable by construction; the fresh-lowering digest check survives only in spirit via
-   the disk cache's [source_digest] guard (cross-process compatibility).
+   canonical form, captured together in [tune]) rather than from the compile's own fresh lowering,
+   whose llc the transform ignores. Re-lowering per candidate was subtly unsound: timing runs settle
+   tensor-node value bounds, so later fresh lowerings can fold guards (and even re-segment fission)
+   differently from the base — failing digest checks at best (the CUDA rounds on PR #140: whole arms
+   degenerating to their serial baselines) and silently replaying the winner with empty per-segment
+   schedules at worst (a 296 ms winner returning as a 2614 ms routine). Deriving from the base makes
+   candidates and the winner replay drift-immune and byte-comparable by construction; the
+   fresh-lowering digest check survives only in spirit via the disk cache's [source_digest] guard
+   (cross-process compatibility).
 
    The rebased code keeps the fresh compile's OWN [optimize_ctx] (the per-compile fork of the
    context's lineage): link-time buffer allocation consults that fork, so placement mutations by
-   schedule ops — fission's Local promotions above all — must land there or the allocator would
-   miss buffers the kernels reference. Candidate hermeticity is unchanged: each compile forks
-   the lineage table anew. The traced store is copied from the base (schedule ops register their
-   tiles in it). *)
+   schedule ops — fission's Local promotions above all — must land there or the allocator would miss
+   buffers the kernels reference. Candidate hermeticity is unchanged: each compile forks the lineage
+   table anew. The traced store is copied from the base (schedule ops register their tiles in
+   it). *)
 let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ctx comp bindings
     spec : (compiled, string) Result.t =
   let rebase (fresh : LL.optimized) =
@@ -895,24 +887,23 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu c
           let opt = rebase fresh in
           let zero_sched tns = if is_gpu then Sched.zero_expansion ~limits tns else [] in
           (* Per-segment schedule matching keys on the STRUCTURAL canon ([with_placements:false]):
-             placement classes can render differently across compilation lineages on
-             byte-identical segments (decided in one, undecided in the other — e.g. tuning with
-             [timing_ctx]), which used to fail winner replays wholesale. A lookup miss returns
-             the empty schedule: [fission_scheduled] probes {e fine} (pre-coalescing) segments
-             through this closure, and only the empty-on-miss answer lets coalescing re-converge
-             to the saved segmentation, where every final [`Normal] segment's digest hits (the
-             verification after fission below catches genuine drift loudly instead of silently
-             replaying unscheduled segments). *)
-          let seg_key seg = SC.digest (SC.canonicalize ~static_indices ~with_placements:false seg) in
+             placement classes can render differently across compilation lineages on byte-identical
+             segments (decided in one, undecided in the other — e.g. tuning with [timing_ctx]),
+             which used to fail winner replays wholesale. A lookup miss returns the empty schedule:
+             [fission_scheduled] probes {e fine} (pre-coalescing) segments through this closure, and
+             only the empty-on-miss answer lets coalescing re-converge to the saved segmentation,
+             where every final [`Normal] segment's digest hits (the verification after fission below
+             catches genuine drift loudly instead of silently replaying unscheduled segments). *)
+          let seg_key seg =
+            SC.digest (SC.canonicalize ~static_indices ~with_placements:false seg)
+          in
           let preset seg =
             match flavor with
             | F_preset { block_size; privatize; config_thresholds } ->
                 let sched = preset_sched ?block_size ~config_thresholds seg in
                 if privatize then extend_with_privatize ~static_indices sched seg else sched
             | F_saved entries -> (
-                let seg_canon =
-                  SC.canonicalize ~static_indices ~with_placements:false seg
-                in
+                let seg_canon = SC.canonicalize ~static_indices ~with_placements:false seg in
                 match List.Assoc.find entries ~equal:String.equal (SC.digest seg_canon) with
                 | Some saved -> fst (SC.of_saved seg_canon saved)
                 | None -> [])
@@ -924,13 +915,12 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu c
           let tuples =
             (* Match the default pipeline's placements (statement-crossing [Local]s promoted on
                GPU), so fissioned candidates and the untuned baseline schedule the same code. *)
-            Sched.fission_scheduled ~promote_locals:is_gpu ~preset ~zero_sched ~static_indices
-              opt
+            Sched.fission_scheduled ~promote_locals:is_gpu ~preset ~zero_sched ~static_indices opt
           in
           (* Genuine-drift guard for saved replays (cross-process cache entries): with the
-             empty-on-miss closure above, a saved winner whose segmentation no longer matches
-             would coalesce differently and silently replay some segments unscheduled. Verify
-             instead that every final [`Normal] segment found its saved schedule. *)
+             empty-on-miss closure above, a saved winner whose segmentation no longer matches would
+             coalesce differently and silently replay some segments unscheduled. Verify instead that
+             every final [`Normal] segment found its saved schedule. *)
           (match flavor with
           | F_preset _ | F_sketch _ -> ()
           | F_saved entries ->
@@ -951,9 +941,7 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu c
                     (* The structural canon: [u_key] must match the replay closure's lookup, and
                        [of_saved] at replay resolves against the same (placement-independent)
                        binder/tnode numbering. *)
-                    let pre_canon =
-                      SC.canonicalize ~static_indices ~with_placements:false pre
-                    in
+                    let pre_canon = SC.canonicalize ~static_indices ~with_placements:false pre in
                     let saved, registry = SC.to_saved (SC.base_registry pre_canon) sched in
                     Some
                       {
@@ -965,8 +953,7 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu c
           in
           let assoc =
             (* One entry per [`Normal] segment in segment order; structurally identical segments
-               share a key and their saved forms are interchangeable, so duplicates are
-               harmless. *)
+               share a key and their saved forms are interchangeable, so duplicates are harmless. *)
             List.map units ~f:(fun u -> (Option.value_exn u.u_key, u.u_saved))
           in
           let digest_after =
@@ -1003,9 +990,9 @@ let rec contains_loop = function
   | _ -> false
 
 (* Loops proposable for schedule ops: the statement-level nest structure (we do not descend into
-   [Local_scope] bodies or [Tile_mma] fallbacks — transforming those is never profitable and
-   often invalid), restricted to loops whose binder the registry can name (Stage-internal copy
-   loops cannot be referenced by a persisted schedule). *)
+   [Local_scope] bodies or [Tile_mma] fallbacks — transforming those is never profitable and often
+   invalid), restricted to loops whose binder the registry can name (Stage-internal copy loops
+   cannot be referenced by a persisted schedule). *)
 let collect_loops registry llc =
   let acc = ref [] in
   let rec walk = function
@@ -1060,8 +1047,7 @@ let collect_serial_triples registry llc =
             }
           when not (contains_loop b3) -> (
             match (SC.resolve registry i, SC.resolve registry j, SC.resolve registry k) with
-            | Some ri, Some rj, Some rk ->
-                acc := ((ri, ti + 1), (rj, tj + 1), (rk, tk + 1)) :: !acc
+            | Some ri, Some rj, Some rk -> acc := ((ri, ti + 1), (rj, tj + 1), (rk, tk + 1)) :: !acc
             | _ -> ())
         | _ -> ());
         walk body
@@ -1106,10 +1092,10 @@ let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) (u : unit_g
        backends render them as 128-bit packed loads/stores (gh-ocannl-463). Ineligible candidates
        fall back to plain serial loops, so a proposal that fails codegen eligibility merely times
        like the baseline. Accumulating bodies are proposable on CPU (gh-ocannl-468): the renderer
-       either emits the reduction-chains rendering or falls back to a plain serial loop — never
-       to a vectorization pragma, which would assert iteration independence the loop-carried
-       accumulation does not satisfy. On GPU the reduction rendering does not exist (reductions
-       parallelize via [Workgroup_reduce] instead), so accumulations stay excluded. *)
+       either emits the reduction-chains rendering or falls back to a plain serial loop — never to a
+       vectorization pragma, which would assert iteration independence the loop-carried accumulation
+       does not satisfy. On GPU the reduction rendering does not exist (reductions parallelize via
+       [Workgroup_reduce] instead), so accumulations stay excluded. *)
     if not (is_cpu || is_gpu) then []
     else
       List.filter_map loops ~f:(fun ld ->
@@ -1146,10 +1132,10 @@ let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) (u : unit_g
   in
   List.take (tensorizes @ splits @ swaps @ unrolls @ vectorizes) max_actions_per_unit
 
-(* Extend one unit of a compiled candidate with a menu action. The fissioned entries stay in
-   segment order (the positional replay fallback relies on it); extending by key updates every
-   structurally identical segment — they carry interchangeable saved forms, so extending them
-   uniformly keeps the digest lookup and the positional entries consistent. *)
+(* Extend one unit of a compiled candidate with a menu action. The fissioned entries stay in segment
+   order (the positional replay fallback relies on it); extending by key updates every structurally
+   identical segment — they carry interchangeable saved forms, so extending them uniformly keeps the
+   digest lookup and the positional entries consistent. *)
 let extend_spec (elem : compiled) (u : unit_gen) (op : SC.saved_optop) : spec option =
   match (elem.form, u.u_key) with
   | Whole_saved _, None -> Some (Whole (W_saved (u.u_saved @ [ op ])))
@@ -1179,14 +1165,14 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
   let backend = Context.backend_name ctx in
   let is_gpu = Sched.backend_is_gpu backend and is_cpu = Sched.backend_is_cpu backend in
   let limits = Context.hardware_limits ctx in
-  (* With [timing_ctx], the search (candidate compiles and timing runs) happens against that
-     scratch lineage's buffers, and only the winner is compiled from [ctx] — so the timing runs
-     never mutate the caller's live state (parameters, accumulators). The scratch context must
-     contain the nodes the computation requires from a prior context (e.g. initialized
-     parameters), typically by repeating the caller's initialization on a fresh root context. It
-     must live on the same backend and device as [ctx] (Codex P2 on PR #109): candidates timed
-     elsewhere do not predict this device, and the winner would be cached under this backend's
-     key without ever having been timed on it. *)
+  (* With [timing_ctx], the search (candidate compiles and timing runs) happens against that scratch
+     lineage's buffers, and only the winner is compiled from [ctx] — so the timing runs never mutate
+     the caller's live state (parameters, accumulators). The scratch context must contain the nodes
+     the computation requires from a prior context (e.g. initialized parameters), typically by
+     repeating the caller's initialization on a fresh root context. It must live on the same backend
+     and device as [ctx] (Codex P2 on PR #109): candidates timed elsewhere do not predict this
+     device, and the winner would be cached under this backend's key without ever having been timed
+     on it. *)
   Option.iter timing_ctx ~f:(fun tctx ->
       if
         (not (String.equal (Context.backend_name tctx) backend))
@@ -1198,13 +1184,12 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
               context (timing: %s device %d, target: %s device %d)"
              (Context.backend_name tctx) (Context.device_id tctx) backend (Context.device_id ctx)));
   let search_ctx = Option.value timing_ctx ~default:ctx in
-  (* The base compile: identity transform (= the serial baseline candidate), capturing the
-     optimized code every candidate derives from (see [compile_candidate]) and its canonical
-     form. Canonicalize INSIDE the transform: after the transform returns, codegen forces the
-     remaining undecided placements into the very placements table the captured [opt]
-     references, and placement classes enter the digest (Schedule_cache.canonicalize) — the
-     disk-cache key must be the deterministic transform-time form so that storing and
-     replaying processes agree. *)
+  (* The base compile: identity transform (= the serial baseline candidate), capturing the optimized
+     code every candidate derives from (see [compile_candidate]) and its canonical form.
+     Canonicalize INSIDE the transform: after the transform returns, codegen forces the remaining
+     undecided placements into the very placements table the captured [opt] references, and
+     placement classes enter the digest (Schedule_cache.canonicalize) — the disk-cache key must be
+     the deterministic transform-time form so that storing and replaying processes agree. *)
   let base_capture = ref None in
   let bctx, broutine =
     Context.compile
@@ -1225,8 +1210,8 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
     compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu search_ctx comp
       bindings
   in
-  (* Winner (and cache-hit) compiles target the caller's context; they replay against the same
-     base lowering as the search's candidates. *)
+  (* Winner (and cache-hit) compiles target the caller's context; they replay against the same base
+     lowering as the search's candidates. *)
   let compile_spec_real =
     compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ctx comp bindings
   in
@@ -1235,8 +1220,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
     | Whole_saved saved -> saved
     | Fiss_saved assoc -> List.concat_map assoc ~f:snd
   in
-  let is_fissioned = function Whole_saved _ -> false | Fiss_saved _ -> true
-  in
+  let is_fissioned = function Whole_saved _ -> false | Fiss_saved _ -> true in
   let cached =
     if use_cache then
       match SC.lookup ~dir:cache_dir ~key with
@@ -1274,11 +1258,11 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
   in
   match cached with
   | Some result -> result
-  | None ->
+  | None -> (
       let seen = Hash_set.create (module String) in
       Hash_set.add seen base_digest;
-      (* Baseline timing runs uncaught: its failures (e.g. uninitialized inputs) are the user's
-         bug, with the same message [Context.run] would give. *)
+      (* Baseline timing runs uncaught: its failures (e.g. uninitialized inputs) are the user's bug,
+         with the same message [Context.run] would give. *)
       let baseline_ms = time_routine ~repeats bctx broutine in
       logf "baseline: %.4f ms (digest %s)" baseline_ms (dshort base_digest);
       let baseline =
@@ -1288,12 +1272,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
           routine = broutine;
           units =
             [
-              {
-                u_key = None;
-                u_saved = [];
-                u_registry = SC.base_registry canon;
-                u_opt = base_opt;
-              };
+              { u_key = None; u_saved = []; u_registry = SC.base_registry canon; u_opt = base_opt };
             ];
           digest_after = base_digest;
         }
@@ -1314,8 +1293,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
               match time_routine ~repeats c.cctx c.routine with
               | ms ->
                   Int.incr n_timed;
-                  logf "%s: %.4f ms (digest %s)" (spec_label spec) ms
-                    (dshort c.digest_after);
+                  logf "%s: %.4f ms (digest %s)" (spec_label spec) ms (dshort c.digest_after);
                   Some (c, ms)
               | exception exn ->
                   Int.incr n_failed;
@@ -1326,12 +1304,11 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
         mk None :: (if is_gpu then List.map seed_block_sizes ~f:(fun bs -> mk (Some bs)) else [])
       in
       let sketch_params = sketch_seed_params ~is_gpu ~is_cpu ~limits base_opt in
-      (* Per-fission-segment sketch seeds (the [F_sketch] flavor): heavily fissioned graphs tune
-         per segment, where the whole-routine sketches never apply. Enumerate the fission
-         segmentation once, on a hermetic copy of the base lowering with the same pipeline
-         settings the candidate transform uses ([preset_sched]'s defaults), and detect a matmul
-         site per [`Normal] segment — keyed by the segment's structural pre-schedule digest,
-         like [F_saved]. *)
+      (* Per-fission-segment sketch seeds (the [F_sketch] flavor): heavily fissioned graphs tune per
+         segment, where the whole-routine sketches never apply. Enumerate the fission segmentation
+         once, on a hermetic copy of the base lowering with the same pipeline settings the candidate
+         transform uses ([preset_sched]'s defaults), and detect a matmul site per [`Normal] segment
+         — keyed by the segment's structural pre-schedule digest, like [F_saved]. *)
       let fiss_sketch_entries =
         if not (is_gpu || is_cpu) then []
         else
@@ -1366,9 +1343,9 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
                               params )))
       in
       let fiss_sketch_specs =
-        (* Index pairing: the n-th spec applies each keyed segment's n-th compatible parameter
-           set (its first, when it has fewer) — every parameter set of every segment gets
-           proposed while the other segments stay pinned to their preferred tiling. *)
+        (* Index pairing: the n-th spec applies each keyed segment's n-th compatible parameter set
+           (its first, when it has fewer) — every parameter set of every segment gets proposed while
+           the other segments stay pinned to their preferred tiling. *)
         let n =
           List.fold fiss_sketch_entries ~init:0 ~f:(fun acc (_, ps) -> max acc (List.length ps))
         in
@@ -1382,14 +1359,14 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
         block_size_presets (fun block_size -> Whole (W_preset { block_size }))
         @ (if is_gpu || is_cpu then
              (* Each fissioned preset is seeded plain and privatized (the latter dedups away by
-                digest when no accumulator is eligible). The [config_thresholds] seeds reproduce
-                the untuned default pipeline exactly (plus its privatized variant), so the
-                winner is never worse than not tuning — the aggressive [min_parallel:1] presets
-                can all lose to it on launch-overhead-bound workloads. *)
+                digest when no accumulator is eligible). The [config_thresholds] seeds reproduce the
+                untuned default pipeline exactly (plus its privatized variant), so the winner is
+                never worse than not tuning — the aggressive [min_parallel:1] presets can all lose
+                to it on launch-overhead-bound workloads. *)
              List.concat_map [ false; true ] ~f:(fun privatize ->
                  Fiss (F_preset { block_size = None; privatize; config_thresholds = true })
                  :: block_size_presets (fun block_size ->
-                        Fiss (F_preset { block_size; privatize; config_thresholds = false })))
+                     Fiss (F_preset { block_size; privatize; config_thresholds = false })))
            else [])
         @ List.map sketch_params ~f:(fun p -> Whole (W_sketch p))
         @ fiss_sketch_specs
@@ -1399,11 +1376,11 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
       let pool =
         (baseline, baseline_ms)
         :: List.filter_map seed_specs ~f:(fun spec ->
-               let result = try_spec spec in
-               (match (spec, result) with
-               | Fiss (F_sketch _), Some _ -> Int.incr n_fiss_sketch_timed
-               | _ -> ());
-               result)
+            let result = try_spec spec in
+            (match (spec, result) with
+            | Fiss (F_sketch _), Some _ -> Int.incr n_fiss_sketch_timed
+            | _ -> ());
+            result)
       in
       let beam = ref (List.take (List.sort pool ~compare:by_time) beam_width) in
       let best = ref (List.hd_exn !beam) in
@@ -1443,11 +1420,11 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
              best_ms;
              baseline_ms;
            });
-      (* Diagnostic control (config [autotune_log]): compile and time the UNTUNED default
-         pipeline in this very process, on the search context — discriminates a genuinely slow
-         winner from process-state effects when the winner's code nominally equals the untuned
-         program yet a separately-run untuned process measures faster (PR #140 round 6: same
-         digest, 3.4x runtime difference across processes on cuda). *)
+      (* Diagnostic control (config [autotune_log]): compile and time the UNTUNED default pipeline
+         in this very process, on the search context — discriminates a genuinely slow winner from
+         process-state effects when the winner's code nominally equals the untuned program yet a
+         separately-run untuned process measures faster (PR #140 round 6: same digest, 3.4x runtime
+         difference across processes on cuda). *)
       (if Lazy.force log_enabled then
          match Context.compile search_ctx comp bindings with
          | cctx, croutine -> (
@@ -1471,9 +1448,9 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
         };
       if Option.is_none timing_ctx then (best_c.cctx, best_c.routine)
       else
-        (* The search ran against the scratch lineage; compile the winner from the caller's
-           context (like the cache-hit path). Digest mismatch or replay failure falls back to the
-           production default schedule. *)
+        (* The search ran against the scratch lineage; compile the winner from the caller's context
+           (like the cache-hit path). Digest mismatch or replay failure falls back to the production
+           default schedule. *)
         let spec =
           match best_c.form with
           | Whole_saved saved -> Whole (W_saved saved)
@@ -1486,4 +1463,4 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
         | Error msg ->
             logf "winner replay FAILED (%s), falling back to the default compile: %s"
               (spec_label spec) msg;
-            Context.compile ctx comp bindings
+            Context.compile ctx comp bindings)

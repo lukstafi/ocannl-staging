@@ -41,7 +41,8 @@ let () =
     NTDSL.init ~l:"y" ~prec:Ir.Ops.single ~b:[ 2 ] ~i:[] ~o:[ 4 ]
       ~f:(function
         | [| b; o |] -> Float.of_int ((b * 4) + o + 1)
-        | idcs -> failwith @@ "unexpected indices " ^ Sexp.to_string_hum ([%sexp_of: int array] idcs))
+        | idcs ->
+            failwith @@ "unexpected indices " ^ Sexp.to_string_hum ([%sexp_of: int array] idcs))
       ()
   in
   let normed = ln3 y in

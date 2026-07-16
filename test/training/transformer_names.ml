@@ -15,9 +15,10 @@ let d_k = 8
 let d_v = 8
 let d_ff = 32
 let vocab_size = Dataprep.Names.dict_size
+
 (* Batch 128 keeps GPU wall time bounded: the fissioned sgd step has a near-constant per-step
-   dispatch cost, so fewer, larger steps at the same samples-per-epoch are strictly
-   Metal-friendlier (10k steps at batch 32 -> 2.5k steps at batch 128). *)
+   dispatch cost, so fewer, larger steps at the same samples-per-epoch are strictly Metal-friendlier
+   (10k steps at batch 32 -> 2.5k steps at batch 128). *)
 let batch_size = 128
 let epochs = 10
 let pad_char = ' '
@@ -54,9 +55,9 @@ let prepare_dataset () =
   (inputs, targets, num_examples)
 
 (* The whole dataset as a one-hot device tensor (num_examples x eff_seq_len x vocab, ~54 MB in
-   single precision): batches are selected on device via [@| batch_n], so the training loop does
-   no per-step host transfers — a [Context.set_values] awaits the whole device, serializing the
-   stream (see [Train.grad_update]'s [?accum_loss] doc). *)
+   single precision): batches are selected on device via [@| batch_n], so the training loop does no
+   per-step host transfers — a [Context.set_values] awaits the whole device, serializing the stream
+   (see [Train.grad_update]'s [?accum_loss] doc). *)
 let full_one_hot ~label (seqs : int array array) ~num_examples ~n_batches =
   let open Bigarray in
   let ga = Genarray.create Float32 c_layout [| num_examples; eff_seq_len; vocab_size |] in
@@ -70,8 +71,8 @@ let full_one_hot ~label (seqs : int array array) ~num_examples ~n_batches =
   (* The leading batch axis is declared pre-split into [n_batches; batch_size] (same row-major
      layout), so [@| batch_n] can slice off the batch-count axis. *)
   Tensor.term ~init_data:(Reshape nd) ~grad_spec:If_needed ~label:[ label ]
-    ~batch_dims:[ n_batches; batch_size; eff_seq_len ] ~input_dims:[] ~output_dims:[ vocab_size ]
-    ()
+    ~batch_dims:[ n_batches; batch_size; eff_seq_len ]
+    ~input_dims:[] ~output_dims:[ vocab_size ] ()
 
 (* === Main === *)
 
@@ -168,12 +169,12 @@ let () =
   Set.iter
     (snd @@ Asgns.collect_nodes_guess_output train_comp.Asgns.asgns)
     ~f:Train.set_materialized;
-  (* Tune the step schedule empirically. [rounds:0] keeps only the preset seed candidates,
-     which all preserve reduction order — the trained values are schedule-invariant, so this
-     file's expected output stays deterministic no matter which seed wins. [timing_ctx] gives the
-     tuner a scratch lineage (with its own freshly initialized parameter buffers) to time
-     candidates against, so the timing runs cannot perturb the real training state (a step timed
-     on all-zero data inputs poisons parameters with inf/NaN through log 0). *)
+  (* Tune the step schedule empirically. [rounds:0] keeps only the preset seed candidates, which all
+     preserve reduction order — the trained values are schedule-invariant, so this file's expected
+     output stays deterministic no matter which seed wins. [timing_ctx] gives the tuner a scratch
+     lineage (with its own freshly initialized parameter buffers) to time candidates against, so the
+     timing runs cannot perturb the real training state (a step timed on all-zero data inputs
+     poisons parameters with inf/NaN through log 0). *)
   let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
   let ctx, sgd_step = Autotune.tune ~rounds:0 ~timing_ctx:scratch ctx train_comp bindings in
 

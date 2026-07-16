@@ -5,11 +5,10 @@
    forward-fragment ordering gives no constraint and the id-order fallback can run the owner's
    fragment first (siblings combined right-to-left get smaller subtree ids).
 
-   Here [l]'s forward is owned by the no-grad [s = l *. l], its backprop by [q]'s subtree; in
-   [(qsum + ksum) *. ssum] the reduce of [k] is constructed before the reduce of [q], so without
-   the backprop ordering pass [l]'s backprop (inside [qsum]'s fragment) ran before [ksum]'s
-   contribution to [l]'s gradient, losing the [k] path: w.grad came out as wq*c*S instead of
-   (wq + wk)*c*S. *)
+   Here [l]'s forward is owned by the no-grad [s = l *. l], its backprop by [q]'s subtree; in [(qsum
+   + ksum) *. ssum] the reduce of [k] is constructed before the reduce of [q], so without the
+   backprop ordering pass [l]'s backprop (inside [qsum]'s fragment) ran before [ksum]'s contribution
+   to [l]'s gradient, losing the [k] path: w.grad came out as wq*c*S instead of (wq + wk)*c*S. *)
 
 open Base
 open Ocannl
@@ -27,7 +26,7 @@ let () =
   let s = NTDSL.O.( *. ) l l in
   let%op q = wq *. l in
   let%op k = wk *. l in
-  let%op loss = ((q ++ "... => 0") + (k ++ "... => 0")) *. (s ++ "... => 0") in
+  let%op loss = (q ++ "... => 0" + (k ++ "... => 0")) *. (s ++ "... => 0") in
   let grad = (Option.value_exn w.Tensor.diff).Tensor.grad in
   Train.set_materialized grad;
   let ctx = Train.update_once (Context.auto ()) loss in

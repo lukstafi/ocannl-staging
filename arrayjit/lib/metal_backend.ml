@@ -43,12 +43,10 @@ module Device_config = struct
     queue : Me.CommandQueue.t;
     event : Me.SharedEvent.t; (* Use SharedEvent for signalling *)
     mutable counter : ullong; (* Next value to signal *)
-    mutable fused : (Me.CommandBuffer.t * Me.ComputeCommandEncoder.t) option;
-        [@sexp.opaque]
+    mutable fused : (Me.CommandBuffer.t * Me.ComputeCommandEncoder.t) option; [@sexp.opaque]
         (* While [Some], kernel launches encode into this open serial compute pass instead of
-           committing their own command buffer — set for the span of one fissioned routine's
-           segment batch by [sequence_segments]. Only the task running on this queue touches
-           it. *)
+           committing their own command buffer — set for the span of one fissioned routine's segment
+           batch by [sequence_segments]. Only the task running on this queue touches it. *)
   }
   [@@deriving sexp_of]
 
@@ -144,8 +142,8 @@ module Impl = struct
   (* Global state for Metal devices. Device discovery is lazy: the singleton [Impl] module
      initializes at program startup (Backends instantiates it eagerly for nameable types), and
      enumerating devices there would make runs that never use Metal depend on the Metal runtime
-     (e.g. headless machines). Forced at first device use, where [Context.auto] can catch a
-     failure per call. *)
+     (e.g. headless machines). Forced at first device use, where [Context.auto] can catch a failure
+     per call. *)
   let metal_devices : Me.Device.t array Lazy.t =
     lazy
       (let devices = Me.Device.copy_all_devices () in
@@ -487,8 +485,8 @@ module Impl = struct
       ]
 
     (* Hardware axis bindings (docs/proposals/axis-types-for-loops.md §5): [Grid] loops bind
-       threadgroup positions, [Workgroup] loops thread-in-threadgroup positions, both already
-       passed via [extra_args]. The binding site casts to the signed [loop_index_type]. *)
+       threadgroup positions, [Workgroup] loops thread-in-threadgroup positions, both already passed
+       via [extra_args]. The binding site casts to the signed [loop_index_type]. *)
     let hardware_index ~kind ~slot =
       let reg = match kind with `Grid -> "gid" | `Workgroup -> "lid" in
       match slot with
@@ -501,8 +499,8 @@ module Impl = struct
     let shared_decl_prefix = Some "threadgroup "
 
     (* Warp-shuffle rendering of [Workgroup_reduce] accumulation loops (gh-ocannl-462):
-       [ocannl_shfl_xor] wraps [simd_shuffle_xor] (builtins_metal.ml). Apple-silicon simdgroups
-       are 32 threads wide (the same width [mma_syntax] relies on). *)
+       [ocannl_shfl_xor] wraps [simd_shuffle_xor] (builtins_metal.ml). Apple-silicon simdgroups are
+       32 threads wide (the same width [mma_syntax] relies on). *)
     let warp_size = 32
 
     (* MSL is Clang-based C++: [__restrict] applies to the pooled per-node pointers, which address
@@ -582,13 +580,23 @@ module Impl = struct
        [simdgroup_multiply_accumulate], stored once at the end — the accumulator fragments are
        resident across the whole [k] extent of the block statement. Transposed-stored operands
        ([ta]/[tb]) load with [simdgroup_load]'s [transpose_matrix] flag and swapped tile-offset
-       arithmetic. Declines (fallback path) on: non-{f32,f16,bf16} precision, extents not
-       multiples of 8, thread-space (stack-array) operands (not loadable by [simdgroup_load]),
-       and devices below the Apple7 family. *)
+       arithmetic. Declines (fallback path) on: non-{f32,f16,bf16} precision, extents not multiples
+       of 8, thread-space (stack-array) operands (not loadable by [simdgroup_load]), and devices
+       below the Apple7 family. *)
     let mma_syntax =
       Some
-        (fun ~d_prec ~a_prec ~b_prec ~ta ~tb ~m ~n ~k ~d:(d_ptr, ldd, d_space)
-             ~a:(a_ptr, lda, a_space) ~b:(b_ptr, ldb, b_space) ->
+        (fun ~d_prec
+          ~a_prec
+          ~b_prec
+          ~ta
+          ~tb
+          ~m
+          ~n
+          ~k
+          ~d:(d_ptr, ldd, d_space)
+          ~a:(a_ptr, lda, a_space)
+          ~b:(b_ptr, ldb, b_space)
+        ->
           let tile = 8 in
           (* [simdgroup_matrix] has no mixed-precision multiply-accumulate: uniform only. *)
           let frag_typ =
@@ -619,7 +627,9 @@ module Impl = struct
           in
           match (frag_typ, addr_space d_space, addr_space a_space, addr_space b_space) with
           | Some frag, Some d_as, Some a_as, Some b_as
-            when m % tile = 0 && n % tile = 0 && k % tile = 0
+            when m % tile = 0
+                 && n % tile = 0
+                 && k % tile = 0
                  && Option.is_some (hardware_limits ()).Backend_intf.mma ->
               let mt = m / tile and nt = n / tile and kt = k / tile in
               let elem = typ_of_prec d_prec in
@@ -663,8 +673,8 @@ module Impl = struct
                   Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
                   Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
                   Printf.sprintf
-                    "    simdgroup_store(__mma_acc[__mi][__ni], __mma_dp + __mi * %d * %d + __ni \
-                     * %d, (ulong)%d);"
+                    "    simdgroup_store(__mma_acc[__mi][__ni], __mma_dp + __mi * %d * %d + __ni * \
+                     %d, (ulong)%d);"
                     tile ldd tile ldd;
                   "  }";
                   "}";
@@ -672,8 +682,7 @@ module Impl = struct
                 ]
               in
               let body =
-                ptr_decl "__mma_dp" d_as d_ptr
-                ^^ hardline
+                ptr_decl "__mma_dp" d_as d_ptr ^^ hardline
                 ^^ ptr_decl "__mma_ap" (Printf.sprintf "const %s" a_as) a_ptr
                 ^^ hardline
                 ^^ ptr_decl "__mma_bp" (Printf.sprintf "const %s" b_as) b_ptr
@@ -843,9 +852,9 @@ module Impl = struct
          declared double buffer/local still fails instead of being silently degraded. This
          conversion case is only for scalar expression casts emitted by the shared lowering;
          currently the guarded dynamic gather uses [double] as a signed guard precision for
-         float-precision ids, and Metal renders that scalar guard as [float] (exact only below
-         2^24 -- prefer integer-precision ids, e.g. [Nn_blocks.class_ids_of_int_list], whose guard
-         runs in native integer comparisons instead). *)
+         float-precision ids, and Metal renders that scalar guard as [float] (exact only below 2^24
+         -- prefer integer-precision ids, e.g. [Nn_blocks.class_ids_of_int_list], whose guard runs
+         in native integer comparisons instead). *)
       | _, Ops.Double_prec _ -> ("(float)(", ")")
       (* Default case for all other conversions *)
       | _ -> ("(" ^ typ_of_prec to_ ^ ")(", ")")
@@ -902,11 +911,10 @@ module Impl = struct
       failwith error_msg
 
   (* The simdgroup-matrix types and functions are declared in <metal_simdgroup_matrix>.
-     <metal_stdlib> is the umbrella header and pulls them in on current toolchains (the
-     tensorized parity tests compile and run against it alone), but the dedicated header is the
-     documented home, so inject it into kernels that emit the intrinsics — and only those, keeping
-     every other kernel's source byte-identical (PR #101 review; mirrors [cuda_to_ptx]'s <mma.h>
-     injection). *)
+     <metal_stdlib> is the umbrella header and pulls them in on current toolchains (the tensorized
+     parity tests compile and run against it alone), but the dedicated header is the documented
+     home, so inject it into kernels that emit the intrinsics — and only those, keeping every other
+     kernel's source byte-identical (PR #101 review; mirrors [cuda_to_ptx]'s <mma.h> injection). *)
   let maybe_include_simdgroup_matrix source =
     if String.is_substring source ~substring:"simdgroup_load" then
       "#include <metal_simdgroup_matrix>\n" ^ source
@@ -1026,12 +1034,12 @@ using namespace metal;|} in
      (untracked resources), and a routine's task only waits for the input events captured at link
      time — so back-to-back runs of one routine (e.g. training steps that read the loss only once
      per epoch, via [Train.grad_update ?accum_loss]) would race with themselves. Encode a wait for
-     the latest all-work signal into the launch's own command buffer: every routine run is
-     followed by an [all_work] signal ([Raise_backend.sync_routine]), so this orders the launch
-     after all previously enqueued routine work at no extra command buffer — the FIFO-execution
-     semantics CUDA streams have natively. No-op on a fresh queue: [all_work] signals
-     [counter + 1] and stores it, so the latest signaled value is the current counter, and
-     counter = 1 means no signal was issued yet. *)
+     the latest all-work signal into the launch's own command buffer: every routine run is followed
+     by an [all_work] signal ([Raise_backend.sync_routine]), so this orders the launch after all
+     previously enqueued routine work at no extra command buffer — the FIFO-execution semantics CUDA
+     streams have natively. No-op on a fresh queue: [all_work] signals [counter + 1] and stores it,
+     so the latest signaled value is the current counter, and counter = 1 means no signal was issued
+     yet. *)
   let encode_wait_for_enqueued dev command_buffer =
     let counter = dev.runner.counter in
     if Unsigned.ULLong.compare counter Unsigned.ULLong.one > 0 then
@@ -1040,8 +1048,8 @@ using namespace metal;|} in
         counter
 
   let%debug4_sexp link_proc ~prior_context ~library ~func_name
-      ~(kparams : (string * kparam_source) list) ~(launch : Low_level.launch_dims)
-      ~lowered_bindings ~(ctx_buffers : ctx_buffers) : Task.t =
+      ~(kparams : (string * kparam_source) list) ~(launch : Low_level.launch_dims) ~lowered_bindings
+      ~(ctx_buffers : ctx_buffers) : Task.t =
     let dev = prior_context.device in
     let metal_device = dev.dev in
     let queue = dev.runner.queue in
@@ -1142,11 +1150,11 @@ using namespace metal;|} in
           ~threads_per_threadgroup:
             { width = launch.block.(0); height = launch.block.(1); depth = launch.block.(2) };
 
-        (match fused with
+        match fused with
         | Some _ -> () (* [sequence_segments] ends the pass and commits once, after all segments. *)
         | None ->
             Me.ComputeCommandEncoder.end_encoding encoder;
-            Me.CommandBuffer.commit command_buffer)
+            Me.CommandBuffer.commit command_buffer
         (* Make execution synchronous for debugging/simplicity, remove later *)
         (* Me.CommandBuffer.wait_until_completed command_buffer; *)
       with exn ->
@@ -1202,13 +1210,13 @@ using namespace metal;|} in
     (lowered_bindings, tasks)
 
   (* One command buffer for a fissioned routine's whole segment batch: a [Serial]-dispatch compute
-     pass executes its dispatches in encoding order — MTLDispatchType.serial semantics,
-     independent of resource hazard tracking — which is exactly the grid-wide synchronization each
-     fission boundary needs. This replaces per-segment command buffers plus two event command
-     buffers per boundary (the dominant per-step cost of fissioned training steps; each command
-     buffer costs ~0.2-0.5 ms of pipeline latency). The tasks are this backend's [link_batch]
-     kernel launches: while [runner.fused] is set, [link_proc]'s work encodes into the open pass
-     instead of committing its own buffer. *)
+     pass executes its dispatches in encoding order — MTLDispatchType.serial semantics, independent
+     of resource hazard tracking — which is exactly the grid-wide synchronization each fission
+     boundary needs. This replaces per-segment command buffers plus two event command buffers per
+     boundary (the dominant per-step cost of fissioned training steps; each command buffer costs
+     ~0.2-0.5 ms of pipeline latency). The tasks are this backend's [link_batch] kernel launches:
+     while [runner.fused] is set, [link_proc]'s work encodes into the open pass instead of
+     committing its own buffer. *)
   let sequence_segments (context : context) ~name (tasks : Task.t list) : Task.t option =
     let dev = context.device in
     Some

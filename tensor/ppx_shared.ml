@@ -237,10 +237,10 @@ let substitute_identifiers_in_einsum_spec ~loc str_input =
     let output_segments =
       row_to_segments ~kind:"output" parsed.bcast_output parsed.given_beg_output parsed.given_output
     in
-    (* Minimal-form rendering: a row parsed as implicit (omitted together with its kind
-       separator) is rendered as omitted again — reparsing restores it. Any explicitly written
-       row, including a closed (empty) one and an explicit ellipsis, must keep its separator so
-       that the reconstructed string preserves the closed-vs-implicit distinction. *)
+    (* Minimal-form rendering: a row parsed as implicit (omitted together with its kind separator)
+       is rendered as omitted again — reparsing restores it. Any explicitly written row, including a
+       closed (empty) one and an explicit ellipsis, must keep its separator so that the
+       reconstructed string preserves the closed-vs-implicit distinction. *)
     (if parsed.implicit_batch then [] else batch_segments @ [ estring ~loc "|" ])
     @ (if parsed.implicit_input then [] else input_segments @ [ estring ~loc "->" ])
     @ output_segments

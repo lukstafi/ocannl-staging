@@ -1,14 +1,13 @@
-(* Recompute-cost guard for virtualization ([virtualize_max_inline_reduction]): a node whose
-   setter is enclosed by reduction loops (loops not appearing in the setter's indices) with a
-   large total trip count must not be virtualized -- inlining it replays the whole reduction at
-   every read site, and the cost multiplies through chains of virtual consumers. This is what
-   made untuned transformer/MLP graphs pathologically slow: with all reads at the assigned cell
-   (exempt from the visit cap under [inline_complex_computations]), attention out-projections
-   and FFN matmuls stayed virtual and were recomputed per consumer element.
+(* Recompute-cost guard for virtualization ([virtualize_max_inline_reduction]): a node whose setter
+   is enclosed by reduction loops (loops not appearing in the setter's indices) with a large total
+   trip count must not be virtualized -- inlining it replays the whole reduction at every read site,
+   and the cost multiplies through chains of virtual consumers. This is what made untuned
+   transformer/MLP graphs pathologically slow: with all reads at the assigned cell (exempt from the
+   visit cap under [inline_complex_computations]), attention out-projections and FFN matmuls stayed
+   virtual and were recomputed per consumer element.
 
-   A small reduction (K=4, under the default cap of 16) stays virtual and inlines into its
-   same-cell consumer; a large one (K=64) is forced non-virtual. Both execute and match
-   hand-computed sums. *)
+   A small reduction (K=4, under the default cap of 16) stays virtual and inlines into its same-cell
+   consumer; a large one (K=64) is forced non-virtual. Both execute and match hand-computed sums. *)
 
 open Base
 module Idx = Ir.Indexing
@@ -51,8 +50,8 @@ let reduce_asgn ~dst ~src proj =
       projections_debug = "row_sum";
     }
 
-(* Same-cell consumer: out[i] = prod[i]. Reading only the assigned cell keeps the producer under
-   the visit cap, so before the recompute-cost guard it was always virtualized. *)
+(* Same-cell consumer: out[i] = prod[i]. Reading only the assigned cell keeps the producer under the
+   visit cap, so before the recompute-cost guard it was always virtualized. *)
 let copy_proj t ~n : Idx.projections =
   {
     product_space = [| [ n ] |];
@@ -77,8 +76,8 @@ let copy_asgn ~dst ~src proj =
 
 let n = 2
 
-(* A large reduction that nothing reads must NOT be materialized by the recompute-cost guard:
-   with no read site there is no inlining cost, and forcing it non-virtual would turn dead
+(* A large reduction that nothing reads must NOT be materialized by the recompute-cost guard: with
+   no read site there is no inlining cost, and forcing it non-virtual would turn dead
    virtual-eligible work into executed work. It stays a committed virtual computation. *)
 let run_dead ~kdim =
   let i = Idx.get_symbol () and k = Idx.get_symbol () in
@@ -113,11 +112,11 @@ let run ~kdim =
   let ctx, routine = Context.compile ctx comp Idx.Empty in
   let ctx = Context.run ctx routine in
   let plc = Context.placements ctx in
-  (Context.get_values ctx out, Tn.Placements.known_virtual plc prod,
-   Tn.Placements.known_non_virtual plc prod)
+  ( Context.get_values ctx out,
+    Tn.Placements.known_virtual plc prod,
+    Tn.Placements.known_non_virtual plc prod )
 
-let show vals =
-  String.concat ~sep:"; " (Array.to_list (Array.map vals ~f:(Printf.sprintf "%g")))
+let show vals = String.concat ~sep:"; " (Array.to_list (Array.map vals ~f:(Printf.sprintf "%g")))
 
 let () =
   let expected ~kdim =
@@ -125,8 +124,7 @@ let () =
   in
   let out_small, virt_small, nonvirt_small = run ~kdim:4 in
   Stdio.printf "small reduction (K=4): virtual=%b non-virtual=%b\n" virt_small nonvirt_small;
-  Stdio.printf "small reduction (K=4): out=[%s] expected=[%s]\n" (show out_small)
-    (expected ~kdim:4);
+  Stdio.printf "small reduction (K=4): out=[%s] expected=[%s]\n" (show out_small) (expected ~kdim:4);
   let out_large, virt_large, nonvirt_large = run ~kdim:64 in
   Stdio.printf "large reduction (K=64): virtual=%b non-virtual=%b\n" virt_large nonvirt_large;
   Stdio.printf "large reduction (K=64): out=[%s] expected=[%s]\n" (show out_large)

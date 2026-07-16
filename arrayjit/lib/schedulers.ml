@@ -11,10 +11,10 @@ let _get_local_debug_runtime = Utils.get_local_debug_runtime
 [%%global_debug_log_level_from_env_var "OCANNL_LOG_LEVEL_SCHEDULERS"]
 
 (* The CPU "tile-MMA capability" (gh-ocannl-469): no tensor cores, but the C backends render
-   [Tile_mma] as the register-tiled vector micro-kernel ([C_syntax]'s [try_register_tile]), so
-   the autotune menu may propose [Tensorize] over CPU serial triples. The register renderer peels
-   edge tiles, so any block extents are legal (intrinsic tile 1×1×1); the lane loop renders
-   serially, so a single lane suffices. *)
+   [Tile_mma] as the register-tiled vector micro-kernel ([C_syntax]'s [try_register_tile]), so the
+   autotune menu may propose [Tensorize] over CPU serial triples. The register renderer peels edge
+   tiles, so any block extents are legal (intrinsic tile 1×1×1); the lane loop renders serially, so
+   a single lane suffices. *)
 let cpu_mma_limits =
   { no_hardware_limits with mma = Some { mma_simd_width = 1; mma_tile = (1, 1, 1) } }
 
@@ -28,12 +28,12 @@ module Multidev (Backend : For_add_scheduler) :
     type dev = CPU [@@deriving sexp_of]
 
     (* One worker domain with a plain mutex-protected FIFO queue per device. [multidev_cc] exists
-       for debugging multi-device parallel workflows on any development machine, so the queue
-       favors simplicity over throughput (the retired [Multicore] scheduler used a lock-free SPSC
-       queue with idle/ready handshakes; kernel-level CPU parallelism does not come from the
-       scheduler anymore, it comes from pool-rendered Grid loops in the cc codegen). [progress] is
-       broadcast by the worker after every completed task and when it idles; [await] and event
-       [sync] both wait on it. *)
+       for debugging multi-device parallel workflows on any development machine, so the queue favors
+       simplicity over throughput (the retired [Multicore] scheduler used a lock-free SPSC queue
+       with idle/ready handshakes; kernel-level CPU parallelism does not come from the scheduler
+       anymore, it comes from pool-rendered Grid loops in the cc codegen). [progress] is broadcast
+       by the worker after every completed task and when it idles; [await] and event [sync] both
+       wait on it. *)
     type device_state = {
       mutable keep_spinning : bool;
       mutable dev_error : exn option;
@@ -67,9 +67,8 @@ module Multidev (Backend : For_add_scheduler) :
     done;
     (* A stopped worker is not completion: if the device died before the event's tick ran, surface
        its error to the waiter -- a cross-device consumer would otherwise proceed with stale or
-       uninitialized source data. When this runs on a waiting device's worker (via
-       [will_wait_for]), the re-raise fails that worker's task, propagating the failure to the
-       waiting device. *)
+       uninitialized source data. When this runs on a waiting device's worker (via [will_wait_for]),
+       the re-raise fails that worker's task, propagating the failure to the waiting device. *)
     let err = if Atomic.get is_done then None else dev_state.dev_error in
     Mut.unlock dev_state.mut;
     Option.iter err ~f:(fun e ->
@@ -108,7 +107,8 @@ module Multidev (Backend : For_add_scheduler) :
       Ir.Task.Task
         {
           context_lifetime = ();
-          description = [%string "wait on %{get_name ctx.device} for device %{dev_state.ordinal#Int}"];
+          description =
+            [%string "wait on %{get_name ctx.device} for device %{dev_state.ordinal#Int}"];
           work;
         }
     in
@@ -181,8 +181,8 @@ module Multidev (Backend : For_add_scheduler) :
     Domain.join r.domain
 
   (* The device count is fixed at first use: [multidev_num_devices] if configured positive,
-     otherwise the domain count recommended for this machine. Worker domains spin up lazily, one
-     per device ordinal, on first [get_device] -- runs that never use multidev_cc pay nothing. *)
+     otherwise the domain count recommended for this machine. Worker domains spin up lazily, one per
+     device ordinal, on first [get_device] -- runs that never use multidev_cc pay nothing. *)
   let num_devices =
     let n =
       lazy

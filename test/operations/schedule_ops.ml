@@ -1,10 +1,10 @@
 (* Schedule IR, Phase S1 (docs/proposals/schedule-ir-optops.md): executed parity of scheduled
-   kernels against their unscheduled twins, plus structural checks on the generated source read
-   from [build_files/].
+   kernels against their unscheduled twins, plus structural checks on the generated source read from
+   [build_files/].
 
    Covered here: [Split] with a dividing factor (the remainder guard folds away), [Split] with a
-   non-dividing factor (the guard survives on every backend -- it is part of the loop structure,
-   not launch guarding), [Swap] of a perfectly nested pair, and the default GPU annotator preset
+   non-dividing factor (the guard survives on every backend -- it is part of the loop structure, not
+   launch guarding), [Swap] of a perfectly nested pair, and the default GPU annotator preset
    ([Schedule.default_gpu]) on a two-nest elementwise kernel (unequal Grid extents => launch-extent
    guard on GPU backends) and on a matmul (reduction; whatever the conservative analysis decides,
    the values must match the unscheduled twin).
@@ -24,10 +24,11 @@ module Asgns = Ir.Assignments
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p name b = Stdio.printf "%s: %b\n" name b
 let approx a b = Float.(abs (a - b) < 1e-4)
-
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let on_gpu = String.is_substring backend_name ~substring:"metal"
-             || String.is_substring backend_name ~substring:"cuda"
+
+let on_gpu =
+  String.is_substring backend_name ~substring:"metal"
+  || String.is_substring backend_name ~substring:"cuda"
   || String.is_substring backend_name ~substring:"hip"
 
 let read_generated base_name =
@@ -81,8 +82,8 @@ let () =
       let has s = String.is_substring src ~substring:s in
       let ok =
         if on_gpu then
-          (* Hardware bindings for the split pair, the inner elementwise loop stays serial, and
-             no guard: 2 divides 4 (fold) and extents are slot-uniform (no launch guard). *)
+          (* Hardware bindings for the split pair, the inner elementwise loop stays serial, and no
+             guard: 2 divides 4 (fold) and extents are slot-uniform (no launch guard). *)
           has_hardware_regs src && has "for (" && not (has "if (")
         else (not (has_hardware_regs src)) && has "for (" && not (has "if (")
       in
@@ -117,9 +118,9 @@ let () =
       p "swap reorders the loop bounds"
         (match (idx7, idx3) with Some i7, Some i3 -> i7 < i3 | _ -> false));
 
-  (* --- Retype to Vectorized (gh-ocannl-164): a pragma-annotated serial loop on the C backends,
-     a plain serial loop on GPU backends (empty [vectorize_pragma]); values must match either way,
-     and on cc the pragma-annotated source must actually compile under the real C compiler. --- *)
+  (* --- Retype to Vectorized (gh-ocannl-164): a pragma-annotated serial loop on the C backends, a
+     plain serial loop on GPU backends (empty [vectorize_pragma]); values must match either way, and
+     on cc the pragma-annotated source must actually compile under the real C compiler. --- *)
   let got_vec =
     run_variant ~name:"vec_inner" ~transform:(fun opt ->
         let _, body = first_loop_exn opt.LL.llc in
@@ -179,8 +180,8 @@ let () =
       in
       p "default annotator structure as expected" ok);
 
-  (* --- The default GPU annotator on a matmul: values must match the unscheduled twin whatever
-     the conservative analysis decides (reduction loops stay serial in the preset) --- *)
+  (* --- The default GPU annotator on a matmul: values must match the unscheduled twin whatever the
+     conservative analysis decides (reduction loops stay serial in the preset) --- *)
   let mav = Array.init 20 ~f:(fun i -> Float.of_int (i % 7) *. 0.5) in
   let mbv = Array.init 30 ~f:(fun i -> Float.of_int (i % 11) -. 4.) in
   let ma = TDSL.ndarray mav ~label:[ "ma" ] ~input_dims:[ 5 ] ~output_dims:[ 4 ] () in
@@ -201,11 +202,11 @@ let () =
   p "default annotator matmul values match the serial twin"
     (Array.for_all2_exn mm_sched mm_serial ~f:approx);
 
-  (* --- Privatize under If guards (PR #91 review): a lane-guarded accumulation
-     [if (w == 0) c += va[k]] must carry the guard onto the synthesized init-load and
-     store-back (stale lanes would otherwise clobber the result); a per-iteration guard
-     (mentioning a symbol bound inside the accumulation loop) must be rejected. Structural
-     checks on hand-built IR, backend-independent. --- *)
+  (* --- Privatize under If guards (PR #91 review): a lane-guarded accumulation [if (w == 0) c +=
+     va[k]] must carry the guard onto the synthesized init-load and store-back (stale lanes would
+     otherwise clobber the result); a per-iteration guard (mentioning a symbol bound inside the
+     accumulation loop) must be rejected. Structural checks on hand-built IR, backend-independent.
+     --- *)
   let cacc = TDSL.ndarray [| 0. |] ~label:[ "cacc" ] ~output_dims:[ 1 ] () in
   let va = TDSL.ndarray [| 1.; 2.; 3.; 4. |] ~label:[ "va" ] ~output_dims:[ 4 ] () in
   let single = Ir.Ops.single in
@@ -264,23 +265,21 @@ let () =
   let lane_llc, lane_k =
     guarded_accum ~cond_of:(fun ~w ~k:_ ->
         LL.Binop
-          ( Ir.Ops.Cmpeq,
-            (LL.Embed_index (Ir.Indexing.Iterator w), iprec),
-            (LL.Constant 0., iprec) ))
+          (Ir.Ops.Cmpeq, (LL.Embed_index (Ir.Indexing.Iterator w), iprec), (LL.Constant 0., iprec)))
   in
   let lane_res =
     Sched.apply [ Sched.Privatize { target = cacc.Tensor.value; over = lane_k } ] (fake lane_llc)
   in
   let lane_src = doc_to_str (LL.to_doc () lane_res.LL.llc) in
-  let count_sub sub = String.substr_index_all lane_src ~may_overlap:false ~pattern:sub |> List.length in
+  let count_sub sub =
+    String.substr_index_all lane_src ~may_overlap:false ~pattern:sub |> List.length
+  in
   p "lane-guarded privatize gates init and store-back"
     (count_sub "if " = 3 && String.is_substring lane_src ~substring:"acc_");
   let iter_llc, iter_k =
     guarded_accum ~cond_of:(fun ~w:_ ~k ->
         LL.Binop
-          ( Ir.Ops.Cmplt,
-            (LL.Embed_index (Ir.Indexing.Iterator k), iprec),
-            (LL.Constant 3., iprec) ))
+          (Ir.Ops.Cmplt, (LL.Embed_index (Ir.Indexing.Iterator k), iprec), (LL.Constant 3., iprec)))
   in
   p "per-iteration guard rejected by privatize"
     (match
@@ -340,7 +339,9 @@ let () =
     | Some msg -> String.is_substring msg ~substring:"threads per workgroup"
     | None -> false);
   (* [a] is 4x8 single precision = 128 shared bytes when staged. *)
-  let shared_opt = { (fake LL.Noop) with LL.workgroup_shared = Set.singleton (module Ir.Tnode) a.Tensor.value } in
+  let shared_opt =
+    { (fake LL.Noop) with LL.workgroup_shared = Set.singleton (module Ir.Tnode) a.Tensor.value }
+  in
   let smem_limits bytes =
     {
       Ir.Backend_intf.max_threads_per_workgroup = None;

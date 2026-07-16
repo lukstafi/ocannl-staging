@@ -3,8 +3,8 @@
    The embedding backward [d_C[o,v] += Σ_pos (v == ids[pos]) * d_emb[pos,o]] lowers as a dense
    one-hot reduction — a loop over the vocabulary inside the position loops, O(V·positions) work.
    [rewrite_one_hot_reductions] now recognizes this transposed one-hot pattern and replaces the
-   vocabulary loop with a guarded scatter-accumulate ([Set_dynamic]) at the dynamic row [ids[pos]]
-   — O(positions) work, llm.c's deterministic no-atomics encoder backward (llmc-lessons.md B5).
+   vocabulary loop with a guarded scatter-accumulate ([Set_dynamic]) at the dynamic row [ids[pos]] —
+   O(positions) work, llm.c's deterministic no-atomics encoder backward (llmc-lessons.md B5).
    Positions accumulate in their original serial order (the scheduler treats the dynamic write as
    never-parallelizable), so results match the dense form.
 
@@ -25,9 +25,9 @@ module IDX = Train.IDX
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 
-(* Distinct extents so the vocabulary loop bound is recognizable: positions -> [<= 2], embed ->
-   [<= 3], vocab -> [<= 4]. [embed * vocab] must be divisible by 4 for the [uniform ()] table
-   init (uint4x32 yields 4 values per draw). *)
+(* Distinct extents so the vocabulary loop bound is recognizable: positions -> [<= 2], embed -> [<=
+   3], vocab -> [<= 4]. [embed * vocab] must be divisible by 4 for the [uniform ()] table init
+   (uint4x32 yields 4 values per draw). *)
 let vocab = 5
 let embed = 4
 let positions = 3
@@ -52,8 +52,8 @@ let param_by_label l name =
 let inspect (update : Asgns.comp) : int * int * int =
   let optim_ctx = LL.empty_optimize_ctx () in
   let opt =
-    Asgns.lower optim_ctx ~unoptim_ll_source:None ~ll_source:None ~cd_source:None ~name:"onehot_bwd_probe" []
-      update.Asgns.asgns
+    Asgns.lower optim_ctx ~unoptim_ll_source:None ~ll_source:None ~cd_source:None
+      ~name:"onehot_bwd_probe" [] update.Asgns.asgns
   in
   let dyn = ref 0 and vocab_loops = ref 0 and guard_truncs = ref 0 in
   let rec truncs_of (s : LL.scalar_t) =
@@ -146,9 +146,7 @@ let run_backward ?name ids =
 let () =
   (* --- Float ids, all in range --- *)
   let id_values = [| 1.; 3.; 0. |] in
-  let ids =
-    TDSL.ndarray id_values ~label:[ "ids" ] ~batch_dims:[ positions ] ~output_dims:[] ()
-  in
+  let ids = TDSL.ndarray id_values ~label:[ "ids" ] ~batch_dims:[ positions ] ~output_dims:[] () in
   let grads, update = run_backward ~name:"onehot_scatter_bwd" ids in
   p "float ids: table gradient equals the dense one-hot gradient"
     (Array.for_all2_exn grads (expected_grads id_values) ~f:approx);
@@ -185,8 +183,8 @@ let () =
   let id_ints = [ 1; 3; vocab (* out of [0, vocab) *) ] in
   let ids_int = Nn_blocks.class_ids_of_int_list ~label:"ids_int" id_ints in
   let ids_int_oh = Nn_blocks.one_hot_of_ids ~num_classes:vocab ids_int in
-  (* Explicit float table values: with a [uniform ()] init, top-down precision inference would
-     join the table with the uint32 one-hot and make the param integer-precision. *)
+  (* Explicit float table values: with a [uniform ()] init, top-down precision inference would join
+     the table with the uint32 one-hot and make the param integer-precision. *)
   let c_int =
     TDSL.param
       ~values:(Array.init (embed * vocab) ~f:Float.of_int)

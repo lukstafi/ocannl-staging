@@ -36,8 +36,7 @@ let () =
   in
   let labels_array = Bigarray.array2_of_genarray labels_data in
   let labels_list =
-    List.init total_samples ~f:(fun i ->
-        Int.of_float (Bigarray.Array2.get labels_array i 0) - 1)
+    List.init total_samples ~f:(fun i -> Int.of_float (Bigarray.Array2.get labels_array i 0) - 1)
   in
   let images_ndarray = Ir.Ndarray.as_array Ir.Ops.Single images_data in
   let labels_one_hot = Nn_blocks.dense_one_hot_of_int_list ~num_classes labels_list in
@@ -80,9 +79,7 @@ let () =
     printf "%s: %d segments\n" name (List.length segs);
     List.iteri segs ~f:(fun i seg ->
         let dims = LL.launch_dims seg.LL.llc in
-        let np =
-          Array.fold dims.grid ~init:1 ~f:( * ) * Array.fold dims.block ~init:1 ~f:( * )
-        in
+        let np = Array.fold dims.grid ~init:1 ~f:( * ) * Array.fold dims.block ~init:1 ~f:( * ) in
         let stmts = List.length (LL.flat_lines [ seg.LL.llc ]) in
         printf "  seg%-2d threads=%-6d grid=[%d;%d;%d] block=[%d;%d;%d] stmts=%d\n" i np
           dims.grid.(0) dims.grid.(1) dims.grid.(2) dims.block.(0) dims.block.(1) dims.block.(2)
@@ -95,16 +92,16 @@ let () =
   let preset o = Sched.default_gpu ~min_parallel:1 ~limits o in
   let zero_sched tns = Sched.zero_expansion ~limits tns in
   census "autotune preset (min_parallel=1)"
-    (List.map
-       (Sched.fission_scheduled ~preset ~zero_sched ~static_indices opt)
+    (List.map (Sched.fission_scheduled ~preset ~zero_sched ~static_indices opt)
        ~f:(fun (_, _, _, post) -> post));
 
   (* --- Autotune (same call shape as circles_conv) with the report printed. --- *)
   let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
   let report = ref None in
   let ctx, sgd_routine =
-    Autotune.tune ~rounds:0 ~timing_ctx:scratch ~report:(fun r -> report := Some r) ctx step_comp
-      bindings
+    Autotune.tune ~rounds:0 ~timing_ctx:scratch
+      ~report:(fun r -> report := Some r)
+      ctx step_comp bindings
   in
   (match !report with
   | Some r ->
@@ -135,12 +132,11 @@ let () =
   in
   let with_rb = time_steps ~readback:true 200 in
   let without_rb = time_steps ~readback:false 200 in
-  printf "steady-state per step: %.3f ms with loss readback, %.3f ms sync-only\n" with_rb
-    without_rb;
+  printf "steady-state per step: %.3f ms with loss readback, %.3f ms sync-only\n" with_rb without_rb;
 
-  (* --- Per-segment-boundary cost: a chain of K transposes (every edge misaligned, so fission
-     cuts at each), each a trivial 64x64 copy. Slope of routine time over K isolates the
-     launch + event-chain overhead per boundary. --- *)
+  (* --- Per-segment-boundary cost: a chain of K transposes (every edge misaligned, so fission cuts
+     at each), each a trivial 64x64 copy. Slope of routine time over K isolates the launch +
+     event-chain overhead per boundary. --- *)
   let bench_k k =
     let n = 64 in
     let xv = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 13)) in

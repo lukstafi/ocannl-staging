@@ -2,18 +2,16 @@
    through the actual backend codegen path ([C_syntax.compile_proc]).
 
    - A [Vectorized] loop renders as the backend's vectorization pragmas followed by a plain serial
-     [for] under [Pure_C_config] (whose [vector_bytes = 0] disables explicit SIMD); with
-     [vectorize_pragma = []] (the GPU configs' choice) it renders as the plain serial loop — the
-     legal fallback.
-   - With [vector_bytes > 0] (the cc backend's default), an eligible [Vectorized] body renders via
-     GCC/Clang vector extensions: typedef + vector loads/arithmetic/stores in lanes-sized chunks,
-     a splat for lane-uniform stores, and a serial remainder loop; ineligible bodies (e.g. a
-     non-contiguous access) keep the pragma rendering.
-   - Materialized kernel parameters carry the [restrict] qualifier; local stack arrays carry the
-     SIMD alignment attribute.
-   - A slice-alias tnode reaching the parameter list is rejected loudly: with [restrict] an
-     aliased parent+view parameter pair would be a miscompile, not just a redundant pointer.
-     Assignments lowering never produces one, but hand-built IR (schedule layer, tests) could. *)
+   [for] under [Pure_C_config] (whose [vector_bytes = 0] disables explicit SIMD); with
+   [vectorize_pragma = []] (the GPU configs' choice) it renders as the plain serial loop — the legal
+   fallback. - With [vector_bytes > 0] (the cc backend's default), an eligible [Vectorized] body
+   renders via GCC/Clang vector extensions: typedef + vector loads/arithmetic/stores in lanes-sized
+   chunks, a splat for lane-uniform stores, and a serial remainder loop; ineligible bodies (e.g. a
+   non-contiguous access) keep the pragma rendering. - Materialized kernel parameters carry the
+   [restrict] qualifier; local stack arrays carry the SIMD alignment attribute. - A slice-alias
+   tnode reaching the parameter list is rejected loudly: with [restrict] an aliased parent+view
+   parameter pair would be a miscompile, not just a redundant pointer. Assignments lowering never
+   produces one, but hand-built IR (schedule layer, tests) could. *)
 
 open Base
 module Tn = Ir.Tnode
@@ -68,7 +66,10 @@ let compile_with_pure_config ~name optimized =
 let () =
   (* --- [Vectorized] under the C config: pragmas + serial loop; restrict on the parameter. --- *)
   let out = make_on_device 1 "out" in
-  let doc = compile_with_pure_config ~name:"vec_kernel" (make_optimized (vec_loop ~axis:LL.Vectorized out) [ out ]) in
+  let doc =
+    compile_with_pure_config ~name:"vec_kernel"
+      (make_optimized (vec_loop ~axis:LL.Vectorized out) [ out ])
+  in
   PPrint.ToChannel.pretty 0.9 100 Stdio.stdout doc;
   Stdio.printf "\n";
 
@@ -84,9 +85,10 @@ let () =
     end)
 
     let vectorize_pragma = []
-  end)
+  end) in
+  let _kparams, doc2, _launch =
+    Fallback_syntax.compile_proc ~name:"vec_fallback_kernel" [] optimized2
   in
-  let _kparams, doc2, _launch = Fallback_syntax.compile_proc ~name:"vec_fallback_kernel" [] optimized2 in
   PPrint.ToChannel.pretty 0.9 100 Stdio.stdout doc2;
   Stdio.printf "\n";
 
@@ -123,12 +125,14 @@ let () =
                 } );
       }
   in
-  let doc3 = compile_with_pure_config ~name:"aligned_local_kernel" (make_optimized llc3 [ local; out3 ]) in
+  let doc3 =
+    compile_with_pure_config ~name:"aligned_local_kernel" (make_optimized llc3 [ local; out3 ])
+  in
   PPrint.ToChannel.pretty 0.9 100 Stdio.stdout doc3;
   Stdio.printf "\n";
 
-  (* --- Explicit SIMD emission with [vector_bytes = 32]: an eligible elementwise body renders
-     as vector-extension code (8 float lanes); the lane-uniform constant store splats. --- *)
+  (* --- Explicit SIMD emission with [vector_bytes = 32]: an eligible elementwise body renders as
+     vector-extension code (8 float lanes); the lane-uniform constant store splats. --- *)
   let compile_with_vector_config ~name optimized =
     let module Syntax = Ir.C_syntax.C_syntax (struct
       include Ir.C_syntax.Pure_C_config (struct
@@ -139,8 +143,7 @@ let () =
       end)
 
       let vector_bytes = 32
-    end)
-    in
+    end) in
     let _kparams, doc, _launch = Syntax.compile_proc ~name [] optimized in
     doc
   in
@@ -173,14 +176,13 @@ let () =
       }
   in
   let doc4 =
-    compile_with_vector_config ~name:"vec_simd_kernel"
-      (make_optimized elementwise [ inp; out4 ])
+    compile_with_vector_config ~name:"vec_simd_kernel" (make_optimized elementwise [ inp; out4 ])
   in
   PPrint.ToChannel.pretty 0.9 100 Stdio.stdout doc4;
   Stdio.printf "\n";
 
-  (* --- Ineligible for explicit SIMD (non-contiguous: coefficient 2 on the loop index): the
-     pragma rendering remains. --- *)
+  (* --- Ineligible for explicit SIMD (non-contiguous: coefficient 2 on the loop index): the pragma
+     rendering remains. --- *)
   let inp2 = make_on_device 9 "inp2" in
   let out5 = make_on_device 10 "out5" in
   let i = Idx.get_symbol () in
@@ -244,10 +246,10 @@ let () =
   PPrint.ToChannel.pretty 0.9 100 Stdio.stdout doc6;
   Stdio.printf "\n";
 
-  (* --- SIMD reduction rendering (gh-ocannl-468): an FMA-form dot-product accumulation renders
-     as 4 independent accumulator chains (ggml's ggml_vec_dot_f32 pattern) initialized from the
-     first 4 blocks, a fused main loop advancing by 32, a register + lane fold into the
-     accumulator, and a serial tail. --- *)
+  (* --- SIMD reduction rendering (gh-ocannl-468): an FMA-form dot-product accumulation renders as 4
+     independent accumulator chains (ggml's ggml_vec_dot_f32 pattern) initialized from the first 4
+     blocks, a fused main loop advancing by 32, a register + lane fold into the accumulator, and a
+     serial tail. --- *)
   let make_sized id label dims =
     let tn =
       Tn.create (Tn.Default Ops.single) ~id ~label:[ label ]
@@ -320,16 +322,15 @@ let () =
       }
   in
   let doc8 =
-    compile_with_vector_config ~name:"vec_max_reduce_kernel"
-      (make_optimized max_red [ ma; macc ])
+    compile_with_vector_config ~name:"vec_max_reduce_kernel" (make_optimized max_red [ ma; macc ])
   in
   PPrint.ToChannel.pretty 0.9 100 Stdio.stdout doc8;
   Stdio.printf "\n";
 
-  (* --- An accumulating body the explicit renderings decline (strided, non-contiguous contrib)
-     must fall back to a plain serial loop with NO vectorization pragma: the pragma would assert
-     iteration independence that the loop-carried accumulation does not satisfy. Under
-     Pure_C_config the pragmas are otherwise emitted (see the first kernel above). --- *)
+  (* --- An accumulating body the explicit renderings decline (strided, non-contiguous contrib) must
+     fall back to a plain serial loop with NO vectorization pragma: the pragma would assert
+     iteration independence that the loop-carried accumulation does not satisfy. Under Pure_C_config
+     the pragmas are otherwise emitted (see the first kernel above). --- *)
   let sa = make_sized 19 "sa" [| 16 |] in
   let sacc = make_sized 20 "sacc" [| 1 |] in
   let i = Idx.get_symbol () in
@@ -363,11 +364,11 @@ let () =
   PPrint.ToChannel.pretty 0.9 100 Stdio.stdout doc9;
   Stdio.printf "\n";
 
-  (* --- Register-tiled Tile_mma rendering (gh-ocannl-469, tinyBLAS's mnpack): a hand-built
-     Tile_mma with an FMA-form fallback over awkward extents (6x29x5) renders the 4x3 C-tile of
-     8-lane vectors (AVX2-class register budget at vector_bytes = 32) held across the k-loop,
-     with the row and column edges peeled into scalar fmaf loops — all under the same lane-0
-     guard as the fallback. --- *)
+  (* --- Register-tiled Tile_mma rendering (gh-ocannl-469, tinyBLAS's mnpack): a hand-built Tile_mma
+     with an FMA-form fallback over awkward extents (6x29x5) renders the 4x3 C-tile of 8-lane
+     vectors (AVX2-class register budget at vector_bytes = 32) held across the k-loop, with the row
+     and column edges peeled into scalar fmaf loops — all under the same lane-0 guard as the
+     fallback. --- *)
   let tile_operands () =
     let td = make_sized 21 "td" [| 6; 29 |] in
     let ta = make_sized 22 "ta" [| 6; 5 |] in
@@ -430,9 +431,9 @@ let () =
   PPrint.ToChannel.pretty 0.9 100 Stdio.stdout doc10;
   Stdio.printf "\n";
 
-  (* --- The plain-add (non-FMA) fallback form is declined: its maybe-contracted [a * b + c]
-     could not promise bitwise equality with a fused vector twin, so the scalar fallback renders
-     under the lane-0 guard instead. --- *)
+  (* --- The plain-add (non-FMA) fallback form is declined: its maybe-contracted [a * b + c] could
+     not promise bitwise equality with a fused vector twin, so the scalar fallback renders under the
+     lane-0 guard instead. --- *)
   let td2 = make_sized 24 "td2" [| 6; 29 |] in
   let ta2 = make_sized 25 "ta2" [| 6; 5 |] in
   let tb2 = make_sized 26 "tb2" [| 5; 29 |] in
@@ -458,7 +459,6 @@ let () =
      with Invalid_argument msg -> Some msg
    with
   | Some msg ->
-      Stdio.printf "alias parameter rejected: %b\n"
-        (String.is_substring msg ~substring:"restrict")
+      Stdio.printf "alias parameter rejected: %b\n" (String.is_substring msg ~substring:"restrict")
   | None -> Stdio.printf "alias parameter rejected: false\n");
   Stdio.printf "%!"

@@ -1,6 +1,6 @@
 (* Standalone Metal check for the serial RMW-accumulation miscompile in the fissioned CE kernel:
-   verbatim seg4 source from bench_min_repro build_files (b=64), buffers filled with the same
-   values as the OCANNL run. Expected ~5.02; the bug prints ~0.029 (last sample only). *)
+   verbatim seg4 source from bench_min_repro build_files (b=64), buffers filled with the same values
+   as the OCANNL run. Expected ~5.02; the bug prints ~0.029 (last sample only). *)
 
 module Me = Metal
 
@@ -77,7 +77,8 @@ let () =
     let acc = ref 0. in
     for k = 0 to d - 1 do
       acc :=
-        !acc +. (0.1 *. Float.cos (Float.of_int ((c * d) + k)) *. Float.sin (Float.of_int ((s * d) + k)))
+        !acc
+        +. (0.1 *. Float.cos (Float.of_int ((c * d) + k)) *. Float.sin (Float.of_int ((s * d) + k)))
     done;
     !acc
   in
@@ -95,7 +96,7 @@ let () =
     done;
     fp +@ (256 + s) <-@ log !sum;
     for c = 0 to v - 1 do
-      fp +@ (512 + (s * v) + c) <-@ (if c = s mod v then 1.0 else 0.0)
+      fp +@ (512 + (s * v) + c) <-@ if c = s mod v then 1.0 else 0.0
     done
   done;
   fp <-@ 0.0;
@@ -130,6 +131,4 @@ let () =
   Me.ComputeCommandEncoder.end_encoding enc;
   Me.CommandBuffer.commit cb;
   Me.CommandBuffer.wait_until_completed cb;
-  Printf.printf "loss: %.6f  ce: %.6f (expected loss ~5.0198; bug ~0.029263)\n"
-    !@fp
-    !@(fp +@ 64)
+  Printf.printf "loss: %.6f  ce: %.6f (expected loss ~5.0198; bug ~0.029263)\n" !@fp !@(fp +@ 64)

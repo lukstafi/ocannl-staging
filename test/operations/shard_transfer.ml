@@ -14,9 +14,8 @@ module Tn = Ir.Tnode
 
    Part 2 exercises the raw-backend merge-buffer all-reduce that [Parallel.grad_sync] is built on:
    two context trees hold distinct values of the same tnode; a [device_to_device
-   ~into_merge_buffer:Copy] transfer routine plus an accumulating consumer ([g =+ g.merge]) must
-   sum them into the owner context. This is the cross-context channel that survived
-   gh-ocannl-341. *)
+   ~into_merge_buffer:Copy] transfer routine plus an accumulating consumer ([g =+ g.merge]) must sum
+   them into the owner context. This is the cross-context channel that survived gh-ocannl-341. *)
 
 let make_batch label vals =
   (* A batch-major tensor of shape [n] along the batch axis, values from [vals]. *)
@@ -90,15 +89,15 @@ let () =
     Ir.Ndarray.set_flat_values nd vals;
     nd
   in
-  (* Owner (ctx0) starts at [1 2]; source (ctx1) holds [3 4] -- two independent context trees on
-     the same device. *)
+  (* Owner (ctx0) starts at [1 2]; source (ctx1) holds [3 4] -- two independent context trees on the
+     same device. *)
   let ctx1 = Backend.make_context ~optimize_ctx:(Backend.empty_optimize_ctx ()) device in
   let ctx1 = Backend.init_from_host ctx1 owner_g.Tensor.value (host_vec [| 3.; 4. |]) in
   let ctx0 = Backend.make_context ~optimize_ctx:(Backend.empty_optimize_ctx ()) device in
   let ctx0 = Backend.init_from_host ctx0 owner_g.Tensor.value (host_vec [| 1.; 2. |]) in
-  (* All-reduce ctx1's value into ctx0 via the merge buffer: owner = [1 2] + [3 4] = [4 6].
-     The merge buffer is array-level (no shape inference), so it is copied into a pre-shaped temp
-     [tmp] and then accumulated into the owner. *)
+  (* All-reduce ctx1's value into ctx0 via the merge buffer: owner = [1 2] + [3 4] = [4 6]. The
+     merge buffer is array-level (no shape inference), so it is copied into a pre-shaped temp [tmp]
+     and then accumulated into the owner. *)
   let%cd copy_merge = tmp =: owner_g.merge in
   let%cd add_temp = owner_g =+ tmp in
   let copy_code = Backend.compile (Backend.empty_optimize_ctx ()) Idx.Empty copy_merge in

@@ -1,9 +1,9 @@
-(* Numeric regression test for Nn_blocks.layer_norm: checks the output and the input gradient
-   for small fixed vectors against hand-computed double-precision LayerNorm oracles. Guards
-   against the historical bug where [++] add-reduction results were used as if they were means
-   (mean = sum(x), centered = (x - sum)/d instead of x - sum/d, variance never divided by d) —
-   a shape-only test cannot catch that. gamma/beta initialize to 1/0, so the forward output must
-   equal the plain normalization. *)
+(* Numeric regression test for Nn_blocks.layer_norm: checks the output and the input gradient for
+   small fixed vectors against hand-computed double-precision LayerNorm oracles. Guards against the
+   historical bug where [++] add-reduction results were used as if they were means (mean = sum(x),
+   centered = (x - sum)/d instead of x - sum/d, variance never divided by d) — a shape-only test
+   cannot catch that. gamma/beta initialize to 1/0, so the forward output must equal the plain
+   normalization. *)
 
 open! Base
 open Ocannl.Nn_blocks.DSL_modules
@@ -14,9 +14,9 @@ let batch = 2
 let d = 4
 let epsilon = 1e-5
 
-(* Row 0 is deliberately asymmetric around its mean; for the buggy centering (x - sum)/d the
-   result is not even proportional to the true one, so any per-row affine (gamma, beta) cannot
-   mask the error. *)
+(* Row 0 is deliberately asymmetric around its mean; for the buggy centering (x - sum)/d the result
+   is not even proportional to the true one, so any per-row affine (gamma, beta) cannot mask the
+   error. *)
 let x_val = [| [| 1.; 2.; 3.; 4. |]; [| -1.; 0.; 2.; 7. |] |]
 
 (* Upstream gradients: loss = sum (layer_norm x *. w). *)
@@ -42,7 +42,7 @@ let grad_oracle b i =
   let mean_gy =
     Array.foldi g ~init:0. ~f:(fun j acc gj -> acc +. (gj *. y_hat b j)) /. Float.of_int d
   in
-  (g.(i) -. mean_g -. (y_hat b i *. mean_gy)) /. sigma (x_val.(b))
+  (g.(i) -. mean_g -. (y_hat b i *. mean_gy)) /. sigma x_val.(b)
 
 (* [tol_label] instead of printf %g: Windows printf renders 1e-05 as "1e-005". *)
 let report ~what ~tol ~tol_label max_err =

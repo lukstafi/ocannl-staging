@@ -79,11 +79,10 @@ type parsed_axis_labels = {
     whether additional leading/middle axes are allowed (corresponding to the dot-ellipsis syntax for
     broadcasting). The string can be used to identify a row variable; parsing ["..."] yields the
     reserved per-kind names ["...batch"], ["...input"], ["...output"], which cannot collide with
-    user-written identifiers. The [implicit_] fields record that the
-    row was omitted together with its kind separator, in which case it reads as the context ellipsis
-    but its row variable may be silently closed to an empty row (even on parameters) when nothing
-    else constrains it — unlike an explicitly written ellipsis. The [given_] fields are lists of
-    axis specs of the corresponding kind in [labels] where [from_end=true], [given_beg_] where
-    [from_end=false]. *)
+    user-written identifiers. The [implicit_] fields record that the row was omitted together with
+    its kind separator, in which case it reads as the context ellipsis but its row variable may be
+    silently closed to an empty row (even on parameters) when nothing else constrains it — unlike an
+    explicitly written ellipsis. The [given_] fields are lists of axis specs of the corresponding
+    kind in [labels] where [from_end=true], [given_beg_] where [from_end=false]. *)
 
 let axis_labels parsed = parsed.labels

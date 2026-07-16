@@ -6,10 +6,10 @@ module Idx = Ir.Indexing
 module BI = Ir.Backend_intf
 module Backends_deprecated = Backends
 
-(* The backend context rides in [Backends.wrapped_context] -- a closed disjunction over the
-   backend singletons' context types (no existential): [Backends.query]/[Backends.with_backend]
-   dispatch generic operations, and [copy] pair-matches the constructors to recover type equality
-   for same-backend transfers. *)
+(* The backend context rides in [Backends.wrapped_context] -- a closed disjunction over the backend
+   singletons' context types (no existential): [Backends.query]/[Backends.with_backend] dispatch
+   generic operations, and [copy] pair-matches the constructors to recover type equality for
+   same-backend transfers. *)
 
 type compile_frontier = {
   last_writer : int Map.M(Tn).t;
@@ -116,10 +116,12 @@ let compile ?lowered_transform ?lowered_transforms ctx comp bindings =
       {
         f =
           (fun (type dev runner event)
-               (module Backend : BI.Backend
-                 with type dev = dev
-                  and type runner = runner
-                  and type event = event) bctx ->
+            (module Backend : BI.Backend
+              with type dev = dev
+               and type runner = runner
+               and type event = event)
+            bctx
+          ->
             let code =
               Backend.compile ?lowered_transform ?lowered_transforms bctx.BI.optimize_ctx bindings
                 comp
@@ -265,10 +267,12 @@ let sync ctx =
     {
       q =
         (fun (type dev runner event)
-             (module Backend : BI.Backend
-               with type dev = dev
-                and type runner = runner
-                and type event = event) c -> Backend.await c.BI.device);
+          (module Backend : BI.Backend
+            with type dev = dev
+             and type runner = runner
+             and type event = event)
+          c
+        -> Backend.await c.BI.device);
     }
 
 let hardware_limits ctx =
@@ -276,10 +280,12 @@ let hardware_limits ctx =
     {
       q =
         (fun (type dev runner event)
-             (module Backend : BI.Backend
-               with type dev = dev
-                and type runner = runner
-                and type event = event) _c -> Backend.hardware_limits ());
+          (module Backend : BI.Backend
+            with type dev = dev
+             and type runner = runner
+             and type event = event)
+          _c
+        -> Backend.hardware_limits ());
     }
 
 (* Internal helper - not exposed in interface to maintain invariants *)
@@ -308,8 +314,8 @@ let mem ctx (tn : Tn.t) : bool =
    as a proxy for the source node, so {!to_host} can read the source's value through the copy. The
    table is keyed by the source node and holds the proxy node; it is read-only from [to_host]'s
    point of view and is for printing only — never a general host cache. (Keyed by the tnode, whose
-   identity is the never-reused [uid]: an id-keyed table here would resolve stale proxies for
-   reused ids after [Tensor.unsafe_reinitialize].) *)
+   identity is the never-reused [uid]: an id-keyed table here would resolve stale proxies for reused
+   ids after [Tensor.unsafe_reinitialize].) *)
 let for_print_proxies : Tn.t Hashtbl.M(Tn).t = Hashtbl.create (module Tn)
 
 let register_for_print ~(src : Tn.t) ~(proxy : Tn.t) =
@@ -347,17 +353,19 @@ let to_host ctx (tn : Tn.t) : Nd.t =
               (Tn.debug_name tn) (Tn.debug_name parent))
   | None -> ());
   let nd = host_buffer tn in
-  (* [transfer] awaits pending device writes feeding the node, attempts the device-to-host copy,
-     and awaits its completion before the host buffer is read. *)
+  (* [transfer] awaits pending device writes feeding the node, attempts the device-to-host copy, and
+     awaits its completion before the host buffer is read. *)
   let transfer node =
     Backends.query ctx.wrapped
       {
         q =
           (fun (type dev runner event)
-               (module Backend : BI.Backend
-                 with type dev = dev
-                  and type runner = runner
-                  and type event = event) c ->
+            (module Backend : BI.Backend
+              with type dev = dev
+               and type runner = runner
+               and type event = event)
+            c
+          ->
             Backend.await c.BI.device;
             if Backend.to_host c node nd then (
               Backend.await c.BI.device;
@@ -400,8 +408,8 @@ let from_host ctx (tn : Tn.t) (nd : Nd.t) : t =
               "Context.from_host: node %s is an @| slice view; write its parent %s instead"
               (Tn.debug_name tn) (Tn.debug_name parent))
   | None -> ());
-  (* Interval analysis, Phase B: a host write acts as a writer around the bounds-settlement point
-     -- pre-settlement it proposes the scanned [min, max] into the node's bounds candidate,
+  (* Interval analysis, Phase B: a host write acts as a writer around the bounds-settlement point --
+     pre-settlement it proposes the scanned [min, max] into the node's bounds candidate,
      post-settlement it validates against the settled bounds (or raises). See
      [Tnode.bounds_state]. *)
   Tn.propose_bounds_from_host tn nd;
@@ -410,15 +418,17 @@ let from_host ctx (tn : Tn.t) (nd : Nd.t) : t =
       {
         f =
           (fun (type dev runner event)
-               (module Backend : BI.Backend
-                 with type dev = dev
-                  and type runner = runner
-                  and type event = event) c ->
+            (module Backend : BI.Backend
+              with type dev = dev
+               and type runner = runner
+               and type event = event)
+            c
+          ->
             (* Await pending device work BEFORE the upload, mirroring [to_host]: backends with
                host-visible (Shared) buffers implement [from_host] as a direct CPU memcpy, which
-               already-queued kernels writing [tn] (e.g. a just-scheduled parameter
-               initialization) would otherwise execute after and overwrite — [set_values] right
-               after [Train.init_params] silently lost its writes on Metal. *)
+               already-queued kernels writing [tn] (e.g. a just-scheduled parameter initialization)
+               would otherwise execute after and overwrite — [set_values] right after
+               [Train.init_params] silently lost its writes on Metal. *)
             Backend.await c.BI.device;
             let c = if Backend.from_host c tn nd then c else Backend.init_from_host c tn nd in
             Backend.await c.BI.device;
@@ -429,9 +439,9 @@ let from_host ctx (tn : Tn.t) (nd : Nd.t) : t =
 
 (** Copies [tn]'s device buffer from [src] into [dst] (or into [dst]'s stream's merge buffer for
     [~into_merge_buffer:Copy]), returning the updated destination context. When both contexts come
-    from the same backend, the pair match on {!Backends.wrapped_context} recovers type equality
-    and the copy dispatches to the backend's [device_to_device] transfer machinery; otherwise it
-    falls back to a host round-trip. *)
+    from the same backend, the pair match on {!Backends.wrapped_context} recovers type equality and
+    the copy dispatches to the backend's [device_to_device] transfer machinery; otherwise it falls
+    back to a host round-trip. *)
 let copy ?(into_merge_buffer = BI.No) ~src ~dst tn =
   (* The fallback also serves nodes with no device buffer in [src]: [to_host] reads host-init
      literals and for-print proxies. A merge buffer cannot be filled host-side, so [Copy] raises
@@ -453,14 +463,13 @@ let copy ?(into_merge_buffer = BI.No) ~src ~dst tn =
       ~(rewrap : (dev, runner, event) BI.context -> Backends.wrapped_context)
       (sctx : (dev, runner, event) BI.context) (dctx : (dev, runner, event) BI.context) =
     match Backend.device_to_device tn ~into_merge_buffer ~dst:dctx ~src:sctx with
-    | Some r ->
-        (* The transfer routine's schedule is ordered on [dst]'s stream; host reads await the
-           device as usual. For [Copy], the rewrapped [r.context] is what carries
-           [merge_buffer_node = Some tn] into the next [compile]'s static merge-node check
-           (gh-ocannl-288). *)
+    | Some r -> (
+        (* The transfer routine's schedule is ordered on [dst]'s stream; host reads await the device
+           as usual. For [Copy], the rewrapped [r.context] is what carries [merge_buffer_node = Some
+           tn] into the next [compile]'s static merge-node check (gh-ocannl-288). *)
         Ir.Task.run r.BI.schedule;
         let dst = { dst with wrapped = rewrap r.BI.context } in
-        (match into_merge_buffer with
+        match into_merge_buffer with
         | BI.No -> mark_initialized dst (Set.singleton (module Tn) tn)
         | BI.Copy -> dst)
     | None ->
@@ -535,8 +544,7 @@ let is_initialized ctx node = Set.mem ctx.initialized_nodes node
 let device_id ctx = ctx.device_id
 
 let placements ctx =
-  Backends.query ctx.wrapped
-    { q = (fun _ c -> c.BI.optimize_ctx.Ir.Low_level.placements) }
+  Backends.query ctx.wrapped { q = (fun _ c -> c.BI.optimize_ctx.Ir.Low_level.placements) }
 
 let decide_materialized ctx tns =
   let wrapped, () =
@@ -544,12 +552,14 @@ let decide_materialized ctx tns =
       {
         f =
           (fun (type dev runner event)
-               (module Backend : BI.Backend
-                 with type dev = dev
-                  and type runner = runner
-                  and type event = event) bctx ->
-            (* Fork the lineage state exactly like a compile would, then record the decisions in
-               the fork: the argument context and its other descendants are unaffected. *)
+            (module Backend : BI.Backend
+              with type dev = dev
+               and type runner = runner
+               and type event = event)
+            bctx
+          ->
+            (* Fork the lineage state exactly like a compile would, then record the decisions in the
+               fork: the argument context and its other descendants are unaffected. *)
             let optimize_ctx = Ir.Low_level.copy_optimize_ctx bctx.BI.optimize_ctx in
             let plc = optimize_ctx.Ir.Low_level.placements in
             List.iter tns ~f:(fun tn ->

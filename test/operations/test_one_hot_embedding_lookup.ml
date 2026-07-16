@@ -35,9 +35,9 @@ let read_generated_c base_name =
 let cvals = Array.init (embed * vocab) ~f:Float.of_int
 let approx a b = Float.(abs (a - b) < 1e-4)
 
-(* Lower the (shape-forced) forward comp and report (#Get_dynamic, #For_loop,
-   index-tensor-is-input, #Trunc). The [Trunc] count distinguishes the guard flavors: float-prec
-   ids need the integrality check [idx == trunc(idx)]; integer-prec ids must not emit it. *)
+(* Lower the (shape-forced) forward comp and report (#Get_dynamic, #For_loop, index-tensor-is-input,
+   #Trunc). The [Trunc] count distinguishes the guard flavors: float-prec ids need the integrality
+   check [idx == trunc(idx)]; integer-prec ids must not emit it. *)
 let inspect (t : Tensor.t) (index_tn : Ir.Tnode.t) : int * int * bool * int =
   let comp = t.Tensor.forward in
   let optim_ctx = LL.empty_optimize_ctx () in
@@ -153,7 +153,8 @@ let () =
   | Some c ->
       (* The cast is to Ops.index_prec () = int (default) or long long (large_models). *)
       let has_index_prec_cast =
-        String.is_substring c ~substring:"((int)(" || String.is_substring c ~substring:"((long long)("
+        String.is_substring c ~substring:"((int)("
+        || String.is_substring c ~substring:"((long long)("
       in
       p "generated C contains a guarded dynamic table read"
         (has_index_prec_cast && String.is_substring c ~substring:"?");
@@ -221,10 +222,10 @@ let () =
     && Array.for_all2_exn cid_vals (Array.of_list id_list) ~f:(fun v i -> approx v (Float.of_int i))
     );
 
-  (* --- Integer-precision ids: [class_ids_of_int_list] stores uint32 IDs and [one_hot_of_ids]
-     flows the integer precision into the gather (threefry-style backward precision). The guard
-     then needs no integrality check ([Trunc]) -- integer values cannot be fractional -- and, being
-     unsigned, no lower bound. Out-of-range must still yield a zero row via the upper bound. --- *)
+  (* --- Integer-precision ids: [class_ids_of_int_list] stores uint32 IDs and [one_hot_of_ids] flows
+     the integer precision into the gather (threefry-style backward precision). The guard then needs
+     no integrality check ([Trunc]) -- integer values cannot be fractional -- and, being unsigned,
+     no lower bound. Out-of-range must still yield a zero row via the upper bound. --- *)
   let ids_int = Nn_blocks.class_ids_of_int_list [ 1; 3; 0; vocab (* out of [0, vocab) *) ] in
   let c_int =
     TDSL.ndarray cvals ~label:[ "C_int" ] ~input_dims:[ vocab ] ~output_dims:[ embed ] ()
@@ -304,12 +305,11 @@ let () =
    (docs/proposals/signed-index-precision.md). An out-of-range id never reaches the cast: the
    in-range guard's ternary short-circuits (here 2_200_000_000 >= vocab, so the row is zero), and
    tables genuinely needing indices past 2^31 require [large_models] by the per-node element-count
-   contract enforced in [Tnode.create]. Mutation evidence: (1) fails if
-   [Tensor.default_value_prec] is left at single/float32 (ids_wide.value.prec = single → iprec =
-   single → inner cast is (float) not (double)). Note: a 1-element IDs array is always inlined as a
-   [Constant] literal by [low_level.scalar_precision], whose [Constant] arm defaults to [single].
-   We use 2 elements so [ids_wide] has backing storage and [Get(ids_tn)] carries its declared
-   [double] prec. *)
+   contract enforced in [Tnode.create]. Mutation evidence: (1) fails if [Tensor.default_value_prec]
+   is left at single/float32 (ids_wide.value.prec = single → iprec = single → inner cast is (float)
+   not (double)). Note: a 1-element IDs array is always inlined as a [Constant] literal by
+   [low_level.scalar_precision], whose [Constant] arm defaults to [single]. We use 2 elements so
+   [ids_wide] has backing storage and [Get(ids_tn)] carries its declared [double] prec. *)
 let () =
   (* Temporarily widen the default tensor precision so [ids_wide] is stored as double. *)
   let saved_prec = !Tensor.default_value_prec in
@@ -372,15 +372,16 @@ let () =
   scan_ll opt_wide.LL.llc;
   p "large-index (IR): Get_dynamic.dyn_value iprec is double, not float32"
     (match !found_iprec with Some prec -> Ir.Ops.equal_prec prec Ir.Ops.double | None -> false);
-  (* (2) C-level inspection: emb_wide kernel is [emb_wide_fwd.c]. The dynamic-index cast must
-     track [Ops.index_prec ()] (signed since docs/proposals/signed-index-precision.md), not some
-     hardcoded type: under large_models the same arm renders [((long long)(]. *)
+  (* (2) C-level inspection: emb_wide kernel is [emb_wide_fwd.c]. The dynamic-index cast must track
+     [Ops.index_prec ()] (signed since docs/proposals/signed-index-precision.md), not some hardcoded
+     type: under large_models the same arm renders [((long long)(]. *)
   match read_generated_c "emb_wide_fwd" with
   | None -> p "large-index (C): double *ids_wide and index-prec cast (skipped: non-C backend)" true
   | Some c ->
       p "large-index (C): ids_wide parameter declared as double*"
         (String.is_substring c ~substring:"double *restrict ids_wide");
       let has_index_prec_cast =
-        String.is_substring c ~substring:"((int)(" || String.is_substring c ~substring:"((long long)("
+        String.is_substring c ~substring:"((int)("
+        || String.is_substring c ~substring:"((long long)("
       in
       p "large-index (C): dynamic index cast tracks the index precision" has_index_prec_cast

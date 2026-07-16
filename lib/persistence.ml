@@ -170,11 +170,9 @@ let read_header ic =
   let sexp = Sexplib.Sexp.of_string header_str in
   checkpoint_header_of_sexp sexp
 
-(* Pre-namespace checkpoints wrote namespace = "". The namespace charset excludes ':', so this
-   key encoding is injective. *)
-let meta_namespace m =
-  if String.is_empty m.namespace then Tn.default_namespace else m.namespace
-
+(* Pre-namespace checkpoints wrote namespace = "". The namespace charset excludes ':', so this key
+   encoding is injective. *)
+let meta_namespace m = if String.is_empty m.namespace then Tn.default_namespace else m.namespace
 let meta_key m = meta_namespace m ^ ":" ^ Int.to_string m.id
 let meta_name m = Tn.ident_prefix (meta_namespace m) ^ Int.to_string m.id
 
@@ -209,8 +207,7 @@ let save ~ctx ~appending t_set path =
   let host_of = Hashtbl.create (module Int) in
   List.iter tn_list ~f:(fun tn ->
       match try Some (Context.to_host ctx tn) with _ -> None with
-      | None ->
-          failwith ("save: tensor " ^ Tn.id tn ^ " is not present in the given context")
+      | None -> failwith ("save: tensor " ^ Tn.id tn ^ " is not present in the given context")
       | Some nd -> Hashtbl.set host_of ~key:tn.Tn.uid ~data:nd);
   (* Collect current tensor data *)
   let new_entries =
@@ -333,8 +330,9 @@ let load ~ctx ?prefix_namespace path =
           match Tn.find_namespaced ~namespace:(target_namespace meta) ~id:meta.id with
           | Some _ ->
               failwith
-                ("load: tensor with id " ^ Tn.ident_prefix (target_namespace meta)
-               ^ Int.to_string meta.id ^ " already exists in registry")
+                ("load: tensor with id "
+                ^ Tn.ident_prefix (target_namespace meta)
+                ^ Int.to_string meta.id ^ " already exists in registry")
           | None -> ());
       let max_id = ref (-1) in
       let loaded =
@@ -350,12 +348,14 @@ let load ~ctx ?prefix_namespace path =
             (* Create the tnode (no host data is stored on it); register the loaded buffer so it is
                uploaded into the context below (gh-ocannl-333). *)
             let tn, init =
-              Tn.create_from_padded ~namespace:(target_namespace meta) ~id:meta.id
-                ~label:meta.label ~ndarray:nd ~padding:meta.padding ()
+              Tn.create_from_padded ~namespace:(target_namespace meta) ~id:meta.id ~label:meta.label
+                ~ndarray:nd ~padding:meta.padding ()
             in
             Ir.Host_inits.register tn init;
             (* Only nodes landing in the ambient namespace can collide with future session ids. *)
-            if String.equal (target_namespace meta) (Tn.get_current_namespace ()) && meta.id > !max_id
+            if
+              String.equal (target_namespace meta) (Tn.get_current_namespace ())
+              && meta.id > !max_id
             then max_id := meta.id;
             (tn, nd))
       in
@@ -408,8 +408,7 @@ let restore ~ctx t_set path =
                     Array.equal Ops.equal_axis_padding p1 p2 && Option.equal Float.equal v1 v2
                 | _ -> false
               in
-              if not padding_equal then
-                failwith ("restore: padding mismatch for tensor " ^ Tn.id tn);
+              if not padding_equal then failwith ("restore: padding mismatch for tensor " ^ Tn.id tn);
               (* Read the payload into a fresh host buffer and upload it into the context's device
                  buffer (gh-ocannl-333). *)
               let nd =

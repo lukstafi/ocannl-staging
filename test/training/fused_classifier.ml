@@ -1,10 +1,9 @@
-(* Fused cross-entropy classifier (gh-464): checks that Nn_blocks.cross_entropy_loss
-   1. is numerically stable on extreme logits (log-sum-exp; naive log(softmax) is non-finite),
-   2. produces dlogits = softmax(logits) - targets directly against the logits gradient,
-   3. keeps all softmax-probabilities intermediates Virtual: no [batch, vocab]-sized node other
-      than the logits value, the logits gradient, and the targets is materialized in the
-      forward+backprop routine,
-   4. splits into few kernel-fission segments (structural analysis, backend-independent). *)
+(* Fused cross-entropy classifier (gh-464): checks that Nn_blocks.cross_entropy_loss 1. is
+   numerically stable on extreme logits (log-sum-exp; naive log(softmax) is non-finite), 2. produces
+   dlogits = softmax(logits) - targets directly against the logits gradient, 3. keeps all
+   softmax-probabilities intermediates Virtual: no [batch, vocab]-sized node other than the logits
+   value, the logits gradient, and the targets is materialized in the forward+backprop routine, 4.
+   splits into few kernel-fission segments (structural analysis, backend-independent). *)
 
 open Base
 open Ocannl
@@ -21,9 +20,9 @@ let () =
   (* Sizes large enough that the fission analysis annotates the nests as parallel (the segment
      census below would degenerate to a single coalesced serial segment on tiny tensors). *)
   let batch = 2048 and vocab = 512 in
-  (* Row 1: huge positive outlier with the target on a tiny-probability class (naive
-     log(softmax) gives 0 * -inf = nan here). Row 2: all large negative. Row 3: mixed extremes.
-     All other rows: moderate pseudo-random logits. *)
+  (* Row 1: huge positive outlier with the target on a tiny-probability class (naive log(softmax)
+     gives 0 * -inf = nan here). Row 2: all large negative. Row 3: mixed extremes. All other rows:
+     moderate pseudo-random logits. *)
   let logit b v =
     if b = 1 then if v = 0 then 500. else Float.of_int v /. 100.
     else if b = 2 then -500. -. Float.of_int (v * 13 % 7)
@@ -76,23 +75,25 @@ let () =
   let max_abs_err = ref 0. in
   List.iter [ 0; 1; 2; 3; 17; 1000 ] ~f:(fun b ->
       for v = 0 to vocab - 1 do
-        let expected = prob b v -. (if v = target_idx b then 1. else 0.) in
+        let expected = prob b v -. if v = target_idx b then 1. else 0. in
         let actual = (ctx, logits).@%{[| b; v |]} in
         max_abs_err := Float.max !max_abs_err (Float.abs (actual -. expected))
       done);
   printf "dlogits = softmax - targets (max abs err < 1e-4): %b\n" Float.(!max_abs_err < 1e-4);
 
-  (* 3. Virtualness census over the whole forward+backprop routine: every [batch, vocab]-sized
-     node except the logits value, the logits gradient, and the targets must stay Virtual. *)
+  (* 3. Virtualness census over the whole forward+backprop routine: every [batch, vocab]-sized node
+     except the logits value, the logits gradient, and the targets must stay Virtual. *)
   let opt = Option.value_exn ~here:[%here] !stash in
   let plc = Context.placements ctx in
   let allowed =
-    [ logits.Tensor.value; (Option.value_exn ~here:[%here] logits.Tensor.diff).grad;
-      targets.Tensor.value ]
+    [
+      logits.Tensor.value;
+      (Option.value_exn ~here:[%here] logits.Tensor.diff).grad;
+      targets.Tensor.value;
+    ]
   in
   let big_nodes =
-    Hashtbl.keys opt.LL.traced_store
-    |> List.filter ~f:(fun tn -> Tn.num_elems tn >= batch * vocab)
+    Hashtbl.keys opt.LL.traced_store |> List.filter ~f:(fun tn -> Tn.num_elems tn >= batch * vocab)
   in
   let big_non_virtual =
     List.filter big_nodes ~f:(fun tn -> not (Tn.Placements.known_virtual plc tn))
@@ -107,8 +108,8 @@ let () =
   printf "logits value and gradient are materialized: %b\n"
     (List.for_all allowed ~f:(fun tn -> not (Tn.Placements.known_virtual plc tn)));
 
-  (* 4. Kernel-fission segment census (structural, using the metal analysis on the captured
-     lowered code; runs identically under every configured backend). *)
+  (* 4. Kernel-fission segment census (structural, using the metal analysis on the captured lowered
+     code; runs identically under every configured backend). *)
   let segs = Sched.maybe_default_schedules ~backend_name:"metal" ~static_indices:[] opt in
   printf "fission segments of forward+backprop: %d\n" (List.length segs);
 
@@ -117,7 +118,7 @@ let () =
   let keep b = b % 4 <> 2 in
   let mask =
     NTDSL.init ~l:"mask" ~prec:Ir.Ops.single ~b:[ batch ] ~o:[ 1 ]
-      ~f:(function [| b; _ |] -> (if keep b then 1. else 0.) | _ -> assert false)
+      ~f:(function [| b; _ |] -> if keep b then 1. else 0. | _ -> assert false)
       ()
   in
   let kept = List.count (List.init batch ~f:Fn.id) ~f:keep in
@@ -128,8 +129,7 @@ let () =
   let ctx2 = Train.forward_once (Context.auto ()) masked_loss_t in
   let masked_loss = (ctx2, masked_loss_t).@[0] in
   let expected_masked =
-    (List.init batch ~f:Fn.id
-    |> List.filter ~f:keep
+    (List.init batch ~f:Fn.id |> List.filter ~f:keep
     |> List.fold ~init:0. ~f:(fun acc b -> acc +. row_loss b))
     /. Float.of_int kept
   in
@@ -140,9 +140,7 @@ let () =
      the final reduction must still produce the scalar loss. *)
   let batch_in = 8 and vocab_in = 16 in
   let target_in b = if b = 1 then 1 else ((b * 7) + 3) % vocab_in in
-  let row_loss_in b =
-    lse (Array.init vocab_in ~f:(logit b)) -. logit b (target_in b)
-  in
+  let row_loss_in b = lse (Array.init vocab_in ~f:(logit b)) -. logit b (target_in b) in
   let logits_in =
     NTDSL.init ~l:"logits_in" ~prec:Ir.Ops.single ~b:[ batch_in ] ~i:[ vocab_in ] ~o:[]
       ~f:(function [| b; v |] -> logit b v | _ -> assert false)
@@ -158,9 +156,7 @@ let () =
   in
   let ctx4 = Train.forward_once (Context.auto ()) loss_in in
   let input_axis_loss = (ctx4, loss_in).@[0] in
-  let expected_in =
-    List.init batch_in ~f:row_loss_in |> List.fold ~init:0. ~f:( +. )
-  in
+  let expected_in = List.init batch_in ~f:row_loss_in |> List.fold ~init:0. ~f:( +. ) in
   let rel_err3 = Float.(abs (input_axis_loss - expected_in) / abs expected_in) in
   printf "input-axis spec (attention convention) matches oracle (rel err < 1e-4): %b\n"
     Float.(rel_err3 < 1e-4);

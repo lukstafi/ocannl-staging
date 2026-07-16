@@ -1,7 +1,7 @@
 (* Dry run of the full GPT-2 124M architecture with deterministic host-generated random weights:
    builds the 12-layer graph at real dimensions (vocab 50257, d_model 768), runs one forward pass
-   over a short token sequence, and checks shapes and numeric sanity. This exercises shape
-   inference and the compilation pipeline at real-model scale without any network access; the
+   over a short token sequence, and checks shapes and numeric sanity. This exercises shape inference
+   and the compilation pipeline at real-model scale without any network access; the
    pretrained-weights path is the gpt2_generate tutorial executable. *)
 
 open Base

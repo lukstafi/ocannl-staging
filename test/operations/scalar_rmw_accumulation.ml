@@ -2,8 +2,8 @@
    read-modify-write accumulations (the [volatile_scalar_rmw] workaround in c_syntax.ml; the raw
    compiler bug is reproduced standalone in benchmarks/runners/ocannl/bench_metal_bug.ml): a
    cross-entropy-style loss — per-sample log-sum-exp reduced into a scalar — must match the host
-   oracle. Before the workaround, under the default GPU schedule the fissioned Metal kernel's
-   [ce[0] = ce[0] + f(s)] loop kept only the last sample's contribution. *)
+   oracle. Before the workaround, under the default GPU schedule the fissioned Metal kernel's [ce[0]
+   = ce[0] + f(s)] loop kept only the last sample's contribution. *)
 
 open Base
 open Ocannl
@@ -48,8 +48,7 @@ let () =
     done;
     !total /. Float.of_int b
   in
-  Stdio.printf "scalar rmw accumulation matches oracle: %b\n"
-    Float.(abs (got - expected) < 1e-4);
+  Stdio.printf "scalar rmw accumulation matches oracle: %b\n" Float.(abs (got - expected) < 1e-4);
   (* Rerun: the re-zeroed accumulator must not drift. *)
   let ctx = Context.run ctx routine in
   let got2 = (Context.get_values ctx batch_loss.Tensor.value).(0) in
