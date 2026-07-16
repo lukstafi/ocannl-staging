@@ -152,6 +152,28 @@ let () =
     [ ez; rz; tz ]
   in
 
+  (* Tile_mma composed with cache tiling + operand packing (the GEBP shape; the closing piece of
+     gh-ocannl-469, autotune's [cpu_mma_pack_sketch_schedule]): pack the B panel [bk x n] at k_o
+     (reused across all row blocks) and the A tile [bm x bk] at i_o, then tensorize the inner
+     triple — the register-tiled micro-kernel streams the contiguous packed tiles. All-Serial
+     with a unit lane, so the whole-node zeroing stays legal. *)
+  let packmma_schedule ~mc:_ opt =
+    let bm, bk = (64, 64) in
+    let i, j, k = accum_syms opt in
+    let sp_i, i_o, i_i = Sched.split ~axis:i ~factor:bm ~outer:LL.Serial ~inner:LL.Serial in
+    let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
+    let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner }) in
+    let stage source tile_loops =
+      Sched.Stage { source; tile_loops; shared = false; cooperative = None; hoisted = false }
+    in
+    let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1 in
+    [ sp_i; sp_k ]
+    @ sink j [ k_o ]
+    @ sink i_i [ k_o ]
+    @ sink i_o [ k_o ]
+    @ [ stage mb.Tensor.value [ k_i; j ]; stage ma.Tensor.value [ i_i; k_i ]; tz ]
+  in
+
   let bench ~variant ~schedule =
     let%op mc = ma * mb in
     let comp = named ("mm_" ^ variant) (Train.forward mc) in
@@ -189,5 +211,6 @@ let () =
   else
     let t_pack = bench ~variant:"cpupack" ~schedule:(Some cpupack_schedule) in
     let t_tmma = bench ~variant:"tensorize" ~schedule:(Some tensorize_schedule) in
-    p "speedups vs naive: cpupack %.1fx, tensorize %.1fx\n" (t_naive /. t_pack)
-      (t_naive /. t_tmma)
+    let t_pmma = bench ~variant:"packmma" ~schedule:(Some packmma_schedule) in
+    p "speedups vs naive: cpupack %.1fx, tensorize %.1fx, packmma %.1fx\n" (t_naive /. t_pack)
+      (t_naive /. t_tmma) (t_naive /. t_pmma)

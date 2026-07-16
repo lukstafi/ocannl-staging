@@ -88,10 +88,12 @@ type sketch_params = {
       (** Tensorized (tile-MMA) pipeline instead of the scalar blocktiling/packing one: on GPU,
           Split → (optional cooperative shared Stage) → Tensorize targeting [simdgroup_matrix] /
           tensor cores; on cc, the whole-triple [Tile_mma] rendered register-tiled
-          (gh-ocannl-469), optionally Grid-parallel over row blocks. Seeded directly because the
-          greedy menu cannot reach the composition: a bare [Tensorize] from the serial baseline
-          (one simdgroup, everything else serial) loses round 1 and the beam discards it before
-          Grid retypes could join it. *)
+          (gh-ocannl-469), optionally Grid-parallel over row blocks — or, with [sk_bk > 0], the
+          cache-blocked packed composition (packing Stages feeding the register-tiled kernel;
+          [cpu_mma_pack_sketch_schedule]). Seeded directly because the greedy menu cannot reach
+          the composition: a bare [Tensorize] from the serial baseline (one simdgroup, everything
+          else serial) loses round 1 and the beam discards it before Grid retypes could join
+          it. *)
   sk_simd : int;  (** MMA lane width ([hardware_limits.mma_simd_width]); 0 when [not sk_mma]. *)
   sk_bm : int;
   sk_bn : int;
@@ -370,12 +372,54 @@ let cpu_mma_sketch_schedule (site : matmul_site) { sk_bm = bm; _ } : Sched.sched
     let tz, _lane = Sched.tensorize ~i:i_i ~j:site.m_j ~k:site.m_k ~simd_width:site.m_nj in
     zops @ [ sp_i; tz ]
 
+(* Cache-blocked, operand-packed tensorized CPU matmul: [Tile_mma] composed with the S4 packing
+   pipeline (the remaining piece of gh-ocannl-469). GEBP loop structure, all-Serial:
+   [j_o? { k_o { pack B~[bk x bn]; i_o { pack A~[bm x bk]; Tile_mma(bm, bn, bk) } } }] — the
+   packing [Stage]s land at their own anchors (B~ at [k_o], once per (j_o, k_o) block; A~ at
+   [i_o]) and the register-tiled micro-kernel streams the contiguous, cache-resident tiles
+   ([lda = bk], [ldb = bn]). [tile_loops] are passed in micro-kernel order ([k_i; j_i] for B),
+   so a transposed source packs into the normalized layout and [Tensorize] sees
+   [ta = tb = false]. [sk_bn = 0] leaves [j] unsplit (one B~ row panel of [bk x nj] per k-block).
+   The lane width is 1: the C backends render the lane loop serially, and a unit lane keeps the
+   kernel single-threaded so a whole-node [Zero_out] of the output needs no expansion — Serial
+   is also load-bearing for the in-kernel packs, whose function-scope tiles would race under
+   pool-parallel Grid blocks ([parallel_grid_safe] declines them). Hoisted packing (constant
+   operands, gh-ocannl-470) is proposed per operand like the scalar S4 pipeline. *)
+let cpu_mma_pack_sketch_schedule (site : matmul_site)
+    { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_hoist; _ } : Sched.schedule =
+  let sp_i, i_o, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Serial ~inner:LL.Serial in
+  let sp_k, k_o, k_i = Sched.split ~axis:site.m_k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
+  let splits, j_col, j_swaps =
+    if bn = 0 then ([ sp_i; sp_k ], site.m_j, [])
+    else
+      let sp_j, j_o, j_i = Sched.split ~axis:site.m_j ~factor:bn ~outer:LL.Serial ~inner:LL.Serial in
+      ([ sp_i; sp_j; sp_k ], j_i, sink i_i [ j_o ] @ sink i_o [ j_o ])
+  in
+  let stage source tile_loops =
+    Sched.Stage
+      {
+        source;
+        tile_loops;
+        shared = false;
+        cooperative = None;
+        hoisted = sk_hoist && hoistable source;
+      }
+  in
+  let tz, _lane = Sched.tensorize ~i:i_i ~j:j_col ~k:k_i ~simd_width:1 in
+  splits @ j_swaps
+  @ sink j_col [ k_o ]
+  @ sink i_i [ k_o ]
+  @ sink i_o [ k_o ]
+  @ [ stage site.m_b [ k_i; j_col ]; stage site.m_a [ i_i; k_i ]; tz ]
+
 let sketch_schedule ~p (opt : LL.optimized) : Sched.schedule =
   match detect_matmul opt.LL.llc with
   | None -> invalid_arg "Autotune sketch: no matmul micro-kernel detected"
   | Some site ->
       if p.sk_mma then
-        if p.sk_gpu then gpu_mma_sketch_schedule site p else cpu_mma_sketch_schedule site p
+        if p.sk_gpu then gpu_mma_sketch_schedule site p
+        else if p.sk_bk > 0 then cpu_mma_pack_sketch_schedule site p
+        else cpu_mma_sketch_schedule site p
       else if p.sk_gpu then gpu_sketch_schedule site p
       else cpu_sketch_schedule site p
 
@@ -469,23 +513,64 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
           | _ when is_cpu ->
               (* The register-tiled [Tile_mma] rendering needs no MMA units ([limits.mma] is
                  [None] on cc): seed the whole-triple form plus Grid-parallel row-block splits.
-                 Ineligible statements (non-f32/f64, transposed) render the scalar fallback —
+                 Ineligible statements (non-f32/f64, transposed B) render the scalar fallback —
                  correct, merely timing like the baseline. *)
-              List.filter_map [ 0; 64; 16 ] ~f:(fun bm ->
-                  if bm = 0 || divides bm site.m_ni then
-                    Some
-                      {
-                        sk_gpu = false;
-                        sk_mma = true;
-                        sk_simd = 0;
-                        sk_bm = bm;
-                        sk_bn = 0;
-                        sk_bk = 0;
-                        sk_tm = 0;
-                        sk_tn = 0;
-                        sk_hoist = false;
-                      }
-                  else None)
+              let whole =
+                List.filter_map [ 0; 64; 16 ] ~f:(fun bm ->
+                    if bm = 0 || divides bm site.m_ni then
+                      Some
+                        {
+                          sk_gpu = false;
+                          sk_mma = true;
+                          sk_simd = 0;
+                          sk_bm = bm;
+                          sk_bn = 0;
+                          sk_bk = 0;
+                          sk_tm = 0;
+                          sk_tn = 0;
+                          sk_hoist = false;
+                        }
+                    else None)
+              in
+              (* Cache-blocked packed composition ([cpu_mma_pack_sketch_schedule]; [bk > 0]
+                 selects it): [bn = 0] = unsplit column panel. The packed tiles are function-scope
+                 stack arrays, so cap their combined footprint — which is also roughly the L2
+                 residency the blocking aims for. *)
+              let prec_bytes = Ir.Ops.prec_in_bytes (Lazy.force site.m_a.Ir.Tnode.prec) in
+              let tile_bytes_cap = 256 * 1024 in
+              let packed =
+                List.filter_map
+                  [ (64, 0, 64); (64, 0, 256); (128, 128, 128); (64, 128, 256); (16, 0, 16) ]
+                  ~f:(fun (bm, bn, bk) ->
+                    let bn_eff = if bn = 0 then site.m_nj else bn in
+                    if
+                      divides bm site.m_ni
+                      && (bn = 0 || divides bn site.m_nj)
+                      && divides bk site.m_nk
+                      && ((bm * bk) + (bk * bn_eff)) * prec_bytes <= tile_bytes_cap
+                    then
+                      Some
+                        {
+                          sk_gpu = false;
+                          sk_mma = true;
+                          sk_simd = 0;
+                          sk_bm = bm;
+                          sk_bn = bn;
+                          sk_bk = bk;
+                          sk_tm = 0;
+                          sk_tn = 0;
+                          sk_hoist = false;
+                        }
+                    else None)
+              in
+              (* Hoisted (link-time) packing stays a measured choice for constant operands, like
+                 the scalar S4 pipeline (gh-ocannl-470). *)
+              let packed =
+                if hoistable site.m_a || hoistable site.m_b then
+                  packed @ List.map packed ~f:(fun p -> { p with sk_hoist = true })
+                else packed
+              in
+              whole @ packed
           | _ -> []
       in
       blocktile @ mma
@@ -645,10 +730,11 @@ let spec_label = function
   | Whole (W_saved s) -> Printf.sprintf "W_saved[%d ops]" (List.length s)
   | Whole (W_preset { block_size }) -> Printf.sprintf "W_preset[bs=%s]" (bs_label block_size)
   | Whole (W_sketch p) when p.sk_mma ->
-      Printf.sprintf "W_sketch[mma-%s %dx%dx%d%s]"
+      Printf.sprintf "W_sketch[mma-%s %dx%dx%d%s%s]"
         (if p.sk_gpu then "gpu" else "cpu")
         p.sk_bm p.sk_bn p.sk_bk
-        (if p.sk_gpu && p.sk_bk > 0 then " staged" else "")
+        (if p.sk_bk > 0 then if p.sk_gpu then " staged" else " pack" else "")
+        (if p.sk_hoist then " hoist" else "")
   | Whole (W_sketch p) ->
       Printf.sprintf "W_sketch[%s %dx%dx%d/%dx%d%s]"
         (if p.sk_gpu then "gpu" else "cpu")
