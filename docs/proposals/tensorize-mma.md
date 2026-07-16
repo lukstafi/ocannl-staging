@@ -363,6 +363,26 @@ guard. Design as sketched:
 5. **`Workgroup_lane` only if needed.** A distinguished axis flavor becomes worthwhile only when
    some transform must *recognize* lane loops structurally; extent-matching suffices for v1.
 
+### Cross-`k_o` accumulator fragments (2026-07-16, gh-ocannl-480 Metal side)
+
+The deferred cost in item 4 is recovered with the IR-level variant from §3.4. After `Tensorize`
+builds the inner `Tile_mma`, it recognizes the nearest serial loop whose body contains exactly that
+one accumulator tile and whose `d` base is invariant across the loop and every loop nested inside
+it. It then contracts the lifetime to a fresh `Local [m;n]` node recorded in
+`optimized.simdgroup_fragments`: lane 0 initializes the local before the serial reduction, each
+`Tile_mma` targets the local, and lane 0 stores it back afterward. That explicit scalar structure is
+the fallback semantics on CC and for unsupported GPU calls. Until CUDA/HIP gain their own persistent
+fragment mapping, supported calls alias the marked local back to the original device target and
+retain their previous per-`k_o` intrinsic load/store behavior, avoiding a performance regression.
+The transform therefore remains backend-agnostic and correct throughout the Metal-first rollout.
+
+Metal recognizes only this marked three-part region. For a supported uniform f32/f16/bf16 8×8
+shape it emits one outer `simdgroup_matrix` fragment-array load, renders every `Tile_mma` under the
+serial `k_o` as an update-only operand-load/MMA step, and emits one outer store. Unsupported calls
+decline before entering the fragment rendering and retain the scalar local-array form. The staged
+leg of `schedule_mma_matmul.ml` pins the source ordering and verifies that no accumulator fragment
+load/store remains inside the marked reduction body, in addition to numerical parity on Metal.
+
 Landed scope matched the estimate: ~100 lines in `apply_stage` plus the `cooperative` field; no
 IR changes; no `validate_parallel` changes. One addition the sketch missed: the staging-point
 workgroup-slot coverage check counts slot 0 as covered by construction in cooperative mode (the
