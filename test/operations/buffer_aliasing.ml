@@ -1,8 +1,13 @@
-(* gh-ocannl-489 liveness-based buffer aliasing (the memory planner). Three layers:
+(* gh-ocannl-489 liveness-based buffer aliasing (the memory planner). Four layers:
 
    1. Unit checks of the pure arena planner [Backends.plan_arena_offsets]: liveness-disjoint
    same-precision items share bytes; overlapping spans, cross-precision pairs and always-live items
    never do; layouts over the cap fall back (return [None]).
+
+   1b. Unit checks of [Low_level.sink_zero_outs] (the planner-gated pass that un-pins gradient live
+   spans from [Train.grad_update]'s up-front zero-grads block): a [Zero_out] sinks to just before
+   the first later statement accessing its node, stops at a [Workgroup_barrier], and stays in place
+   when its node is never re-accessed in-routine.
 
    2. A forward chain of materialized unobservable intermediates: under [buffer_aliasing] the
    liveness-disjoint links share bytes (footprint shrinks), post-hoc host reads of the aliased
@@ -67,6 +72,42 @@ let () =
   with
   | None -> p "planner: over-cap layout falls back" true
   | Some _ -> p "planner: over-cap layout falls back" false
+
+(* Layer 1b: [Low_level.sink_zero_outs] on hand-built statement lists. Executed coverage of the
+   sunk code is the train phase below: with the planner on, the whole-step routine runs with its
+   zero-grads block sunk, and the loss trajectory must match the planner-off run bitwise. *)
+let () =
+  let module LL = Ir.Low_level in
+  let tnode l = (NTDSL.init ~l ~prec:Ir.Ops.single ~o:[ 1 ] ~f:(fun _ -> 0.) ()).Tensor.value in
+  let a = tnode "sink_a" and b = tnode "sink_b" and c = tnode "sink_c" in
+  let idcs = [| Ir.Indexing.Fixed_idx 0 |] in
+  let set t v = LL.Set { tn = t; idcs; llsc = v; debug = "" } in
+  let get t = LL.Get (t, idcs) in
+  let sunk lines = LL.flat_lines [ LL.sink_zero_outs (LL.unflat_lines lines) ] in
+  (let result =
+     sunk [ LL.Zero_out a; LL.Zero_out b; set c (LL.Constant 1.); set a (get c); set b (get a) ]
+   in
+   p "sink: zeros sink to their first access"
+     (match result with
+     | [
+         LL.Set { tn = c1; _ };
+         LL.Zero_out a1;
+         LL.Set { tn = a2; _ };
+         LL.Zero_out b1;
+         LL.Set { tn = b2; _ };
+       ] ->
+         Tn.equal c1 c && Tn.equal a1 a && Tn.equal a2 a && Tn.equal b1 b && Tn.equal b2 b
+     | _ -> false));
+  (let result =
+     sunk [ LL.Zero_out a; set c (LL.Constant 1.); LL.Workgroup_barrier; set a (get c) ]
+   in
+   p "sink: barrier blocks sinking"
+     (match result with
+     | [ LL.Set _; LL.Zero_out a1; LL.Workgroup_barrier; LL.Set _ ] -> Tn.equal a1 a
+     | _ -> false));
+  let result = sunk [ LL.Zero_out a; set c (LL.Constant 1.); set b (get c) ] in
+  p "sink: never-reaccessed zero stays in place"
+    (match result with LL.Zero_out a1 :: _ -> Tn.equal a1 a | _ -> false)
 
 (* A chain of materialized unobservable intermediates: h1 dies once h2 is computed, so h1/h3 (and
    h2/h4) can share bytes under the planner. The links are matmuls, not elementwise maps, on
@@ -178,8 +219,8 @@ let () =
   printf "train: loss trajectory parity across buffer_aliasing: %s\n"
     (if List.equal Float.equal losses_off losses_on then "PASS" else "FAIL");
   p "train: loss decreased" Float.(List.last_exn losses_off < List.hd_exn losses_off);
-  (* The step's zero-grads block currently pins all gradient spans to a common start
-     (their liveness begins at the up-front Zero_out), so statement-level sharing within this
-     step is marginal — the strict reduction assertion lives in the chain phase; here we pin
-     "aliasing never costs memory". *)
-  p "train: footprint not increased" (train_mem_on <= train_mem_off)
+  (* Under the planner, [Low_level.sink_zero_outs] moves each gradient's Zero_out from the up-front
+     zero-grads block to its first accumulation, so the backprop chain's live spans stagger: chain
+     links two apart are liveness-disjoint and share bytes on both the statement-granularity (CPU)
+     and segment-granularity (GPU) planners. *)
+  p "train: footprint reduced" (train_mem_on < train_mem_off)

@@ -6,6 +6,9 @@ planner: cross-precision never shares: true
 planner: always-live conflicts with all: true
 planner: greedy-by-size packs small pair into one gap: true
 planner: over-cap layout falls back: true
+sink: zeros sink to their first access: true
+sink: barrier blocks sinking: true
+sink: never-reaccessed zero stays in place: true
 gate-off: read h1: ok
 gate-off: read h4: ok
 gate-off: read out: ok
@@ -16,4 +19,4 @@ chain: result parity across buffer_aliasing: true
 chain: footprint reduced: true
 train: loss trajectory parity across buffer_aliasing: PASS
 train: loss decreased: true
-train: footprint not increased: true
+train: footprint reduced: true
