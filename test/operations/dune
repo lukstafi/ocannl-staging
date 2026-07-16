@@ -1358,3 +1358,14 @@
  (libraries base ocannl stdio)
  (preprocess
   (pps ppx_here ppx_ocannl)))
+
+(test
+ (name buffer_aliasing)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules buffer_aliasing)
+ (libraries base ocannl stdio unix)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
