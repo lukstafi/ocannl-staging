@@ -1,0 +1,13 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+plain-nest fusion leaves a single nest (tail merged): true
+plain-nest fused values match two-kernel bitwise: true
+packed+privatized fused values match two-kernel bitwise: true
+staged fused: epilogue is a sibling of the fragment store-back: true
+staged fused values match two-kernel: true
+staged fused bitwise on C backends: true
+staged fused structure as expected: true
+fused-epilogue sketch twins seeded: true
+tuned matmul+tail matches two-kernel: true
+epf_bad_input rejected with a targeted error: true
+epf_bad_transpose rejected with a targeted error: true
