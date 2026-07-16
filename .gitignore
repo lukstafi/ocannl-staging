@@ -27,7 +27,6 @@ setup.log
 
 # Local OPAM switch
 _opam/
-.ocamlformat
 .vscode/settings.json
 
 # Local configuration
