@@ -1249,7 +1249,11 @@ module C_syntax (B : C_syntax_config) = struct
       (prec, (ptr, ld, space))
     in
     match nonempty with
-    | [ init; reduction; store ] -> (
+    | init :: reduction :: store :: rest -> (
+        (* [rest] is any statements following the marked region in the same body — in particular
+           the lane-0 epilogue statement fused by [Schedule.Fuse_epilogue] (gh-ocannl-486). They
+           render after the region's rendering: the backend hooks end with the visibility barrier
+           that the epilogue's re-reads of the just-stored target need. *)
         match
           (unwrap_transfer ~into_fragment:true init, unwrap_transfer ~into_fragment:false store)
         with
@@ -1301,14 +1305,15 @@ module C_syntax (B : C_syntax_config) = struct
                 match rendered with
                 | Some doc ->
                     rendered_simdgroup_fragments := Set.add !rendered_simdgroup_fragments fragment;
-                    Some doc
+                    Some (separate hardline (doc :: List.map rest ~f:render))
                 | None ->
                     (* Scalar/local fallback: lane 0 performs the synthesized transfers. Hardware
                        backends need the same outer visibility barriers as the ordinary Tile_mma
                        load/store path, so the init observes sibling zeroing and later statements
                        observe the final store. Serial C renderers need no barriers. *)
                     let body_doc =
-                      separate hardline [ render init; render reduction; render store ]
+                      separate hardline
+                        (List.map (init :: reduction :: store :: rest) ~f:render)
                     in
                     Some
                       (match B.barrier_syntax with

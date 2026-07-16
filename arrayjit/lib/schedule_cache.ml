@@ -33,6 +33,7 @@ type saved_optop =
   | Privatize of { target : int; over : sym_ref }
   | Expand_zero of { tn : int }
   | Tensorize of { i : sym_ref; j : sym_ref; k : sym_ref; simd_width : int }
+  | Fuse_epilogue of { target : int; shared : bool }
 [@@deriving sexp, compare, equal]
 
 type saved_schedule = saved_optop list [@@deriving sexp, compare, equal]
@@ -419,6 +420,8 @@ let to_saved r (sched : Schedule.schedule) : saved_schedule * registry =
                   { i = resolve_exn r i; j = resolve_exn r j; k = resolve_exn r k; simd_width }
               in
               (record r lane (Minted (idx, Tensorize_lane)), saved)
+          | Schedule.Fuse_epilogue { target; shared } ->
+              (r, Fuse_epilogue { target = resolve_tn_exn r target; shared })
         in
         ({ r with n_ops = idx + 1 }, saved :: acc))
   in
@@ -471,6 +474,8 @@ let of_saved canonical (saved : saved_schedule) : Schedule.schedule * registry =
                   ~k:(unresolve_exn r k) ~simd_width
               in
               (record r lane (Minted (idx, Tensorize_lane)), op)
+          | Fuse_epilogue { target; shared } ->
+              (r, Schedule.Fuse_epilogue { target = tn_of_ref canonical target; shared })
         in
         ({ r with n_ops = idx + 1 }, op :: acc))
   in

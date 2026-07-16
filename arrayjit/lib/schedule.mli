@@ -143,6 +143,27 @@ type optop =
           is always semantics-preserving. Apply after [Split]s and [Stage]s; [Stage]/[Privatize]
           must come before it. Divisibility by the intrinsic tile (8 on Metal) is a per-call
           emission concern, not checked here. *)
+  | Fuse_epilogue of { target : Tn.t; shared : bool }
+      (** Epilogue fusion (gh-ocannl-486): fold the sole-consumer, index-space-compatible
+          elementwise tail that re-reads [target] — the typical bias add / activation / residual
+          after a reduction — into [target]'s store-back site, eliminating the tail's separate
+          memory pass and keeping the fused routine a single kernel/segment. Recognized sites: the
+          lane-0 fragment store-back synthesized by [Tensorize]'s accumulator contraction (the tail
+          becomes a fourth, lane-0-guarded statement of the marked region, rendered after the
+          backend's intrinsic block), the [Privatize] tile store-back (per-element), and the plain
+          accumulation nest (the tail slides inside the output loops after the serial reduction
+          loop). The tail must be the first real statement after the last statement writing
+          [target]: a perfect Serial nest over exactly [target]'s dims, assigning a different node
+          at the identity index tuple, elementwise, with every read of [target] at that tuple, and
+          no later statement mentioning [target]. The store-back of [target] itself is kept.
+          Elementwise tails never reorder the reduction, so on the C backends the fused values are
+          bitwise equal to the two-kernel form. Apply after [Tensorize]/[Privatize].
+
+          [shared] (GPU only, requires the fragment site): the fused tail is often [target]'s last
+          consumer, so placement makes [target] routine-local — a per-thread array the fragment
+          hooks cannot [simdgroup_load] from. With [shared], [target] is placed in workgroup-shared
+          memory (like [Stage]'s shared tiles) unless already settled on-device, so the intrinsic
+          fragment path fires against threadgroup memory. CPU backends reject shared placement. *)
 [@@deriving sexp_of]
 
 type schedule = optop list [@@deriving sexp_of]
@@ -170,6 +191,12 @@ val tensorize :
   optop * Indexing.symbol
 (** Builds a {!constructor-Tensorize} with a fresh lane symbol (via [Indexing.get_symbol]) and
     returns it. *)
+
+val can_fuse_epilogue : target:Tn.t -> Low_level.optimized -> bool
+(** Whether {!constructor-Fuse_epilogue} on [target] would succeed on this code — i.e. an eligible
+    elementwise tail immediately follows the reduction over [target]. Used by the autotune seeding
+    to propose fused-epilogue sketch variants (the check runs on the pre-schedule code, where the
+    plain accumulation-nest site applies). *)
 
 val hoistable_constant : Tn.t -> bool
 (** Whether the node is eligible as a [hoisted] {!constructor-Stage} source: declared value-constant
