@@ -354,6 +354,7 @@ module Impl = struct
                     Me.Device.supports_family d Me.Device.GPUFamily.Apple7)
               then Some { Backend_intf.mma_simd_width = 32; mma_tile = (8, 8, 8) }
               else None);
+           simd_vector_bytes = 0;
          })
     in
     fun () -> Lazy.force limits

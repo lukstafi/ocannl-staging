@@ -67,6 +67,36 @@
       candidate. Static indices are bound to the midpoint of their declared ranges during timing and
       restored afterwards. *)
 
+type sketch_params = {
+  sk_gpu : bool;
+  sk_mma : bool;
+  sk_simd : int;
+  sk_bm : int;
+  sk_bn : int;
+  sk_bk : int;
+  sk_tm : int;
+  sk_tn : int;
+  sk_hoist : bool;
+  sk_grid : bool;
+  sk_pack_rest : bool;
+}
+(** Parameters of one matmul-sketch seed candidate; see the implementation's field docs. Exposed for
+    tests (the seeding pre-filter of gh-ocannl-479 and the mixed grid-outermost shape of
+    gh-ocannl-473 are asserted on directly). *)
+
+val sketch_seed_params :
+  is_gpu:bool ->
+  is_cpu:bool ->
+  limits:Ir.Backend_intf.hardware_limits ->
+  Ir.Low_level.optimized ->
+  sketch_params list
+(** The matmul-sketch seeds proposed for the given lowering: parameterized instantiations of the
+    composed pipelines with dividing tile sizes, pre-filtered against rules that statically imply a
+    declined rendering (gh-ocannl-479) — on the C backends: operand-precision uniformity (f32/f64),
+    the fused accumulation form, micro-kernel column extent at least one vector of lanes
+    ([limits.simd_vector_bytes]), and transposed-B storage for shapes that read B in place. Exposed
+    for tests. *)
+
 val extend_with_privatize :
   static_indices:Ir.Indexing.static_symbol list ->
   Ir.Schedule.schedule ->

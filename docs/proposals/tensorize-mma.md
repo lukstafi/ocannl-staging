@@ -417,6 +417,22 @@ directly as whole-routine sketch candidates (`Autotune.sketch_seed_params`, gate
   activations x constant weights. All flavors stay measured choices against the serial ones.
   Pinned by `schedule_pack_mma_matmul.ml` (bitwise parity, pack normalization of transposed B,
   pool-parallel grid rendering, per-chunk privatized tiles, hoisted-only grid).
+- **Grid-outermost pack variants + decline visibility** (2026-07-16, gh-ocannl-473/474/475/479):
+  two more grid-outermost shapes via `sk_pack_rest` — the *mixed* shape (with `sk_hoist`;
+  gh-ocannl-473) packs the non-hoistable operand in-kernel (per-chunk privatized) next to the
+  hoisted panel, and the *per-chunk B~ re-packing* shape (without `sk_hoist`; gh-ocannl-475)
+  packs both operands inside the Grid body, trading redundant per-chunk B~ copies for a single
+  dispatch instead of one per k-block. Measured (bin/schedule_bench.ml `pm_hoist`/`pm_mixed`/
+  `pm_bpk` vs `packmma_par`, Apple Silicon): grid-outermost wins on every geometry tried —
+  1024³: 152-153 vs 140 GFLOP/s; deep-K 256×256×4096: 122 (bpk) / ~174 (hoist, mixed) vs 102;
+  small-M 128×1024×1024: 70-95 vs 59 — so `pm_bpk` is seeded for zero-hoistable sites whenever
+  the tiles fit the per-chunk cap (now config `cc_grid_private_bytes_cap`; heap/static scratch
+  for oversized panels remains open). The forensic procedure above ("suspect a declined
+  emission") is now automated: `C_syntax.mma_census` records how each `Tile_mma` actually
+  rendered, autotune annotates candidate timings with scalar-fallback counts, statically-certain
+  declines (cc precision/uniformity/FMA-form/`n ≥ lanes`/in-place transposed B) are filtered out
+  of the sketch seeds, and config `schedule_log_declines` names every declined rendering — both
+  `Tile_mma` rules and `parallel_grid_safe`'s per-local grid-privatization rules — on stderr.
 
 Stage-only composition, deliberately no `Privatize`: it would relocate the accumulator into
 thread-local scratch, which `simdgroup_load` cannot address (`mma_syntax` declines thread-space

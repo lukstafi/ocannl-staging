@@ -10,3 +10,5 @@ parallel packed matmul matches the serial twin bitwise: true
 parallel packed composition renders pool-parallel with per-chunk tiles: true
 grid + hoisted-pack matmul matches the serial twin bitwise: true
 grid + hoisted-pack renders pool-parallel with no in-kernel tile writes: true
+mixed grid-outermost matmul matches the serial twin bitwise: true
+mixed shape: hoisted B~ panel plus per-chunk in-kernel A~ tile: true

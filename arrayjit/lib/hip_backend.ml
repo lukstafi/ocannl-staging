@@ -1436,6 +1436,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
              (if mma_supported () then
                 Some { Backend_intf.mma_simd_width = 32; mma_tile = (16, 16, 16) }
               else None);
+           simd_vector_bytes = 0;
          })
     in
     fun () -> Lazy.force limits

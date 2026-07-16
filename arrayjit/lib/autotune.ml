@@ -104,19 +104,41 @@ type sketch_params = {
           host-init-backed) sources. *)
   sk_grid : bool;
       (** CPU packed composition only ([sk_mma] with [sk_bk > 0]): split [i] into pool-parallel
-          [Grid] row blocks instead of Serial ones. Two shapes, keyed by [sk_hoist]:
+          [Grid] row blocks instead of Serial ones. Four shapes, keyed by [sk_hoist] and
+          [sk_pack_rest]:
 
-          - With [sk_hoist], hoisted-only packing: only hoistable operands are packed (at link time,
-            into the constant pool) and the rest are read in place, leaving the kernel body
-            all-materialized; the Grid loop stays outermost (one dispatch spanning the whole GEBP
-            triple). The typical inference GEMM: activations (in place) x constant weights.
-          - Without [sk_hoist], in-kernel packing: the per-row-block A~ packing Stage lands inside
-            the Grid body — its tile is privatized to per-chunk block-scope storage by the renderer
-            ([C_syntax.parallel_grid_safe]'s privatization rule) — while the B~ panel packs at the
-            k-block loop outside the Grid and is read-only inside (shared across the row-block
-            chunks, behind a pointer alias under the blocks extension).
+          - With [sk_hoist] alone, hoisted-only packing: only hoistable operands are packed (at
+            link time, into the constant pool) and the rest are read in place, leaving the kernel
+            body all-materialized; the Grid loop stays outermost (one dispatch spanning the whole
+            GEBP triple). The typical inference GEMM: activations (in place) x constant weights.
+          - With [sk_hoist] and [sk_pack_rest], the mixed grid-outermost shape (gh-ocannl-473):
+            hoistable operands still pack at link time, but a non-hoistable operand gets an
+            in-kernel packing Stage instead of being read in place — its tile lands inside the
+            Grid body and is privatized to per-chunk block-scope storage by the renderer. For the
+            inference GEMM this recovers the A~ pack the hoisted-only shape forfeits (a per-chunk
+            [bm x bk] tile) while keeping the single outermost dispatch.
+          - With [sk_pack_rest] alone, grid-outermost in-kernel packing (gh-ocannl-475): both
+            operands pack inside the Grid body and privatize per chunk — each chunk re-packs its
+            own B~ panel (redundant copies, but one dispatch instead of one per k-block). Needs
+            the tiles under the renderer's per-chunk privatization cap (config
+            [cc_grid_private_bytes_cap]).
+          - Without [sk_hoist] or [sk_pack_rest], in-kernel packing: the per-row-block A~ packing
+            Stage lands inside the Grid body — its tile is privatized to per-chunk block-scope
+            storage by the renderer ([C_syntax.parallel_grid_safe]'s privatization rule) — while
+            the B~ panel packs at the k-block loop outside the Grid and is read-only inside
+            (shared across the row-block chunks, behind a pointer alias under the blocks
+            extension), re-entering the parallel construct once per k-block.
 
           Proposed alongside the serial flavors so the choice stays measured. *)
+  sk_pack_rest : bool;
+      (** Grid-outermost packed compositions only (with [sk_grid]): give non-hoistable operands a
+          non-hoisted in-kernel packing Stage instead of reading them in place, relying on the
+          renderer's per-chunk tile privatization. With [sk_hoist], the mixed shape of
+          gh-ocannl-473 (hoisted constant panel + per-chunk pack of the rest); without [sk_hoist],
+          the per-chunk B~ re-packing shape of gh-ocannl-475 — the Grid loop stays outermost (one
+          dispatch spanning the GEBP triple) and every operand packs inside the Grid body. No
+          effect on the serial flavors or the hoisted-only Grid flavor, whose stages are already
+          determined. *)
 }
 
 type matmul_site = {
@@ -130,6 +152,18 @@ type matmul_site = {
   m_a : Ir.Tnode.t;
   m_b : Ir.Tnode.t;
   m_zeroed : bool;  (** A whole-node [Zero_out] of [m_d] is present (needed by [expand_zero]). *)
+  m_tb : bool option;
+      (** [m_b]'s stored layout: [Some false] = [..., k, j] over its last two axes, [Some true] =
+          transposed ([..., j, k]), [None] = neither cleanly (the candidate then fails [Tensorize]'s
+          own role check at compile). Feeds the seeding pre-filter (gh-ocannl-479): a rendering that
+          reads B {e in place} inherits this orientation — which the register tiling declines when
+          transposed — while a packing [Stage] normalizes it. A transposed A never declines (its
+          feeds are scalar splats either way), so it is not tracked. *)
+  m_fma : bool;
+      (** The accumulation is in fused ([Ops.FMA]) form, as [optimize]'s simplify leaves it — the
+          form the register-tiled [Tile_mma] rendering requires (its vector twin promises bitwise
+          equality only for fused rounding). Candidate schedules rewrite operand reads but never the
+          accumulation form, so this is decidable at seeding time. *)
 }
 
 let idcs_mention idcs s =
@@ -165,6 +199,24 @@ let rec collect_gets (sc : LL.scalar_t) : (Ir.Tnode.t * Idx.axis_index array) li
   | LL.Embed_index _ ->
       []
 
+(* The stored orientation of an operand's last two axes w.r.t. its role symbols: [Some false] when
+   [row] has unit coefficient in component [rank-2] and [col] in [rank-1], [Some true] when swapped
+   (transposed storage), [None] otherwise. A permissive mirror of [Schedule.Tensorize]'s role
+   assignment (which additionally checks that the symbols appear nowhere else). *)
+let stored_orientation (idcs : Idx.axis_index array) ~row ~col : bool option =
+  let coeff sym (idx : Idx.axis_index) =
+    match idx with
+    | Idx.Iterator s when Idx.equal_symbol s sym -> 1
+    | Idx.Affine { symbols; _ } ->
+        List.sum (module Int) symbols ~f:(fun (c, s) -> if Idx.equal_symbol s sym then c else 0)
+    | _ -> 0
+  in
+  let rank = Array.length idcs in
+  if rank < 2 then None
+  else if coeff row idcs.(rank - 2) = 1 && coeff col idcs.(rank - 1) = 1 then Some false
+  else if coeff col idcs.(rank - 2) = 1 && coeff row idcs.(rank - 1) = 1 then Some true
+  else None
+
 let detect_matmul (llc : LL.t) : matmul_site option =
   let stmts = strip_stmts (LL.flat_lines [ llc ]) in
   let zeroed = List.filter_map stmts ~f:(function LL.Zero_out tn -> Some tn | _ -> None) in
@@ -172,21 +224,27 @@ let detect_matmul (llc : LL.t) : matmul_site option =
       match serial_nest_of stmt with
       | [ (i, ni); (j, nj); (k, nk) ], LL.Set { tn = d; idcs = di; llsc; _ } -> (
           let gets = collect_gets llsc in
-          let d_reads, others =
-            List.partition_tf gets ~f:(fun (tn, idcs) ->
-                phys_equal tn d && Array.equal Idx.equal_axis_index idcs di)
+          let is_d_read (tn, idcs) =
+            phys_equal tn d && Array.equal Idx.equal_axis_index idcs di
           in
+          let d_reads, others = List.partition_tf gets ~f:is_d_read in
           match (d_reads, others) with
-          | _ :: _, [ (t1, i1); (t2, i2) ]
+          | _ :: _, [ ((_, i1) as o1); ((_, i2) as o2) ]
             when idcs_mention di i && idcs_mention di j && not (idcs_mention di k) ->
               let role_a (idcs : Idx.axis_index array) = idcs_mention idcs i && idcs_mention idcs k
               and role_b idcs = idcs_mention idcs k && idcs_mention idcs j in
               let assign =
-                if role_a i1 && role_b i2 then Some (t1, t2)
-                else if role_a i2 && role_b i1 then Some (t2, t1)
+                if role_a i1 && role_b i2 then Some (o1, o2)
+                else if role_a i2 && role_b i1 then Some (o2, o1)
                 else None
               in
-              Option.map assign ~f:(fun (m_a, m_b) ->
+              Option.map assign ~f:(fun ((m_a, _ia), (m_b, ib)) ->
+                  let m_fma =
+                    match llsc with
+                    | LL.Ternop (Ir.Ops.FMA, _, _, (LL.Get (tn, idcs), _)) ->
+                        is_d_read (tn, idcs)
+                    | _ -> false
+                  in
                   {
                     m_i = i;
                     m_j = j;
@@ -198,6 +256,8 @@ let detect_matmul (llc : LL.t) : matmul_site option =
                     m_a;
                     m_b;
                     m_zeroed = List.exists zeroed ~f:(phys_equal d);
+                    m_tb = stored_orientation ib ~row:k ~col:j;
+                    m_fma;
                   })
           | _ -> None)
       | _ -> None)
@@ -395,20 +455,26 @@ let cpu_mma_sketch_schedule (site : matmul_site) { sk_bm = bm; _ } : Sched.sched
    [Zero_out] of the output — no longer legal beside a hardware-annotated loop ([validate_parallel])
    — expands into a nest whose row loop Grid-splits with the same [bm] geometry ([zero_geometry];
    the unit-lane Workgroup axis has extent 1, stays inactive, and needs no coverage from the zeroing
-   nest). Two shapes (see [sk_grid]):
+   nest). Four shapes (see [sk_grid]):
 
    - [sk_hoist]: hoisted-only packing — hoistable operands are packed at link time into the constant
    pool, the rest are read in place, so the kernel body touches only materialized buffers; the Grid
    loop stays outermost (one dispatch spanning the whole GEBP triple). The typical inference GEMM:
-   activations (in place) x constant weights (hoisted-packed panel). - Otherwise, in-kernel packing:
-   [i_o] sinks under [j_o]/[k_o] exactly as in the serial shape, so the B~ panel packs outside the
-   Grid body (read-only inside, shared across the row-block chunks) while the per-row-block A~ tile
-   is privatized to per-chunk block-scope storage by the renderer ([C_syntax.parallel_grid_safe]'s
-   privatization rule). *)
+   activations (in place) x constant weights (hoisted-packed panel). - [sk_hoist] with
+   [sk_pack_rest]: the mixed grid-outermost shape (gh-ocannl-473) — same loop structure, but
+   non-hoistable operands get a non-hoisted in-kernel Stage; their tiles land inside the Grid body
+   and rely on the renderer's per-chunk privatization (an in-place read forfeits the pack entirely;
+   an A~ tile is [bm x bk], comfortably per-chunk). - [sk_pack_rest] alone: grid-outermost
+   in-kernel packing (gh-ocannl-475) — both operands pack inside the Grid body, each chunk
+   re-packing its own B~ panel; one dispatch, tiles under the renderer's per-chunk cap. -
+   Otherwise, in-kernel packing: [i_o] sinks under [j_o]/[k_o] exactly as in the serial shape, so
+   the B~ panel packs outside the Grid body (read-only inside, shared across the row-block chunks)
+   while the per-row-block A~ tile is privatized to per-chunk block-scope storage by the renderer
+   ([C_syntax.parallel_grid_safe]'s privatization rule). *)
 let cpu_mma_pack_sketch_schedule (site : matmul_site)
-    { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_hoist; sk_grid; _ } : Sched.schedule =
+    { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_hoist; sk_grid; sk_pack_rest; _ } : Sched.schedule =
   let outer_i = if sk_grid then LL.Grid else LL.Serial in
-  let grid_outermost = sk_grid && sk_hoist in
+  let grid_outermost = sk_grid && (sk_hoist || sk_pack_rest) in
   let sp_i, i_o, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:outer_i ~inner:LL.Serial in
   let sp_k, k_o, k_i = Sched.split ~axis:site.m_k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
   let splits, j_col, j_swaps =
@@ -426,7 +492,10 @@ let cpu_mma_pack_sketch_schedule (site : matmul_site)
     if grid_outermost then
       List.filter_map
         [ (site.m_b, [ k_i; j_col ]); (site.m_a, [ i_i; k_i ]) ]
-        ~f:(fun (src, tls) -> if hoistable src then Some (stage ~hoisted:true src tls) else None)
+        ~f:(fun (src, tls) ->
+          if hoistable src then Some (stage ~hoisted:true src tls)
+          else if sk_pack_rest then Some (stage ~hoisted:false src tls)
+          else None)
     else
       [
         stage ~hoisted:(sk_hoist && hoistable site.m_b) site.m_b [ k_i; j_col ];
@@ -494,6 +563,7 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                     sk_tn = tn;
                     sk_hoist = false;
                     sk_grid = false;
+                    sk_pack_rest = false;
                   }
               else None)
         else if is_cpu then
@@ -512,6 +582,7 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                       sk_tn = 0;
                       sk_hoist = false;
                       sk_grid = false;
+                      sk_pack_rest = false;
                     }
                 else None)
           in
@@ -549,16 +620,49 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                       sk_tn = 0;
                       sk_hoist = false;
                       sk_grid = false;
+                      sk_pack_rest = false;
                     }
                 else None)
         | _ when is_cpu ->
-            (* The register-tiled [Tile_mma] rendering needs no MMA units ([limits.mma] is [None] on
-               cc): seed the whole-triple form plus Grid-parallel row-block splits. Ineligible
-               statements (non-f32/f64, transposed B) render the scalar fallback — correct, merely
-               timing like the baseline. *)
+            (* The register-tiled [Tile_mma] rendering needs no MMA units (cc's [limits.mma] is a
+               token 1x1x1 capability): seed the whole-triple form plus Grid-parallel row-block
+               splits, and the cache-blocked packed compositions. Statement rules the renderer
+               checks per emission ([C_syntax.try_register_tile]) that are already decidable here
+               pre-filter the seeds (gh-ocannl-479): a candidate that statically must render the
+               scalar fallback would otherwise be timed — and possibly crowned, and cached — under
+               a tensorized label, making "the tensorized candidate lost" indistinguishable from
+               "it never ran tensorized". Statically decidable: operand-precision uniformity
+               (f32/f64 only), the fused accumulation form (candidate schedules rewrite operand
+               reads, never the accumulation form), the micro-kernel column extent vs. the vector
+               lane count, and transposed-B storage for renderings that read B {e in place} (a
+               packing Stage normalizes the layout, so the packed flavors are exempt). What is only
+               knowable at emission (address spaces, footprint interactions with other locals) is
+               covered by the decline diagnostics and the [C_syntax.mma_census]. *)
+            let prec = Lazy.force site.m_d.Ir.Tnode.prec in
+            let uniform_f32_64 =
+              (match prec with Ir.Ops.Single_prec _ | Ir.Ops.Double_prec _ -> true | _ -> false)
+              && Ir.Ops.equal_prec (Lazy.force site.m_a.Ir.Tnode.prec) prec
+              && Ir.Ops.equal_prec (Lazy.force site.m_b.Ir.Tnode.prec) prec
+            in
+            let lanes =
+              limits.Ir.Backend_intf.simd_vector_bytes / max 1 (Ir.Ops.prec_in_bytes prec)
+            in
+            let regtile_static_ok =
+              limits.Ir.Backend_intf.simd_vector_bytes >= 8
+              && lanes >= 2 && uniform_f32_64 && site.m_fma
+            in
+            let tb_in_place = Option.value site.m_tb ~default:false in
+            if not regtile_static_ok then []
+            else
             let whole =
               List.filter_map [ 0; 64; 16 ] ~f:(fun bm ->
-                  if bm = 0 || divides bm site.m_ni then
+                  if
+                    (* Whole-triple [Tile_mma] reads both operands in place over the full column
+                       extent: the stored B orientation and [n = m_nj] reach the renderer as-is. *)
+                    (not tb_in_place)
+                    && site.m_nj >= lanes
+                    && (bm = 0 || divides bm site.m_ni)
+                  then
                     Some
                       {
                         sk_gpu = false;
@@ -571,6 +675,7 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                         sk_tn = 0;
                         sk_hoist = false;
                         sk_grid = false;
+                        sk_pack_rest = false;
                       }
                   else None)
             in
@@ -589,6 +694,8 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                     divides bm site.m_ni
                     && (bn = 0 || divides bn site.m_nj)
                     && divides bk site.m_nk
+                    (* The packed micro-kernel's column extent is the B~ panel width. *)
+                    && bn_eff >= lanes
                     && ((bm * bk) + (bk * bn_eff)) * prec_bytes <= tile_bytes_cap
                   then
                     Some
@@ -603,6 +710,7 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                         sk_tn = 0;
                         sk_hoist = false;
                         sk_grid = false;
+                        sk_pack_rest = false;
                       }
                   else None)
             in
@@ -611,17 +719,58 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                hoisted-only composition pool-parallelizes ([sk_grid && sk_hoist]): hoisted packing
                emits no in-kernel pack writes, so an outermost Grid split over the row blocks is
                trivially race-free — pack only the hoistable operand(s), read the rest in place
-               ([cpu_mma_pack_sketch_schedule]). Grid seeds need at least two row blocks
-               (c_syntax.ml [collect_parallel_grid] wants extent >= 2). *)
+               ([cpu_mma_pack_sketch_schedule]) — except that an in-place read of a transposed
+               non-hoistable B statically declines the register tiling, so those seeds are
+               skipped. Grid seeds need at least two row blocks (c_syntax.ml
+               [collect_parallel_grid] wants extent >= 2). When exactly one operand is hoistable —
+               the typical inference GEMM — additionally seed the mixed grid-outermost shape
+               (gh-ocannl-473, [sk_pack_rest]): the non-hoistable operand gets an in-kernel packing
+               Stage (privatized per chunk by the renderer) instead of being read in place, which
+               both recovers its pack and normalizes its layout. *)
             let base = packed in
+            let grid_ok p = site.m_ni / p.sk_bm >= 2 in
             let packed =
               if hoistable site.m_a || hoistable site.m_b then
                 packed
                 @ List.map base ~f:(fun p -> { p with sk_hoist = true })
+                @ (if tb_in_place && not (hoistable site.m_b) then []
+                   else
+                     List.filter_map base ~f:(fun p ->
+                         if grid_ok p then Some { p with sk_hoist = true; sk_grid = true }
+                         else None))
+                @
+                if Bool.( <> ) (hoistable site.m_a) (hoistable site.m_b) then
+                  List.filter_map base ~f:(fun p ->
+                      if grid_ok p then
+                        Some { p with sk_hoist = true; sk_grid = true; sk_pack_rest = true }
+                      else None)
+                else []
+              else
+                (* No hoistable operand: grid-outermost with per-chunk B~ re-packing
+                   ([sk_pack_rest] without [sk_hoist], gh-ocannl-475) is the only one-dispatch
+                   shape available — measured to beat the dispatch-per-k-block shape across
+                   geometries (bin/schedule_bench.ml, pm_bpk vs packmma_par) whenever the tiles
+                   fit the renderer's per-chunk privatization cap, so propose it whenever they
+                   statically do (other per-chunk locals can still trip the cap at render; the
+                   census and decline diagnostics cover that). *)
+                let chunk_cap =
+                  match
+                    Int.of_string
+                      (String.strip
+                         (Utils.get_global_arg ~arg_name:"cc_grid_private_bytes_cap"
+                            ~default:"262144"))
+                  with
+                  | c when c > 0 -> c
+                  | _ -> 256 * 1024
+                  | exception _ -> 256 * 1024
+                in
+                packed
                 @ List.filter_map base ~f:(fun p ->
-                    if site.m_ni / p.sk_bm >= 2 then Some { p with sk_hoist = true; sk_grid = true }
+                    let bn_eff = if p.sk_bn = 0 then site.m_nj else p.sk_bn in
+                    let tiles_bytes = ((p.sk_bm * p.sk_bk) + (p.sk_bk * bn_eff)) * prec_bytes in
+                    if grid_ok p && tiles_bytes <= chunk_cap then
+                      Some { p with sk_grid = true; sk_pack_rest = true }
                     else None)
-              else packed
             in
             (* Pool-parallel Grid over the in-kernel packed composition: the renderer privatizes the
                per-row-block A~ tile to per-chunk storage and shares the read-only B~ panel
@@ -765,6 +914,11 @@ type compiled = {
   routine : Context.routine;
   units : unit_gen list;
   digest_after : string;
+  mma_renders : (string * Ir.C_syntax.mma_rendering) list;
+      (** The [Ir.C_syntax.mma_census] of this candidate's compile: how each [Tile_mma] statement
+          actually rendered (gh-ocannl-479) — a tensorized candidate whose statements all fell back
+          to the scalar path never ran tensorized, and the tuning log must say so next to the
+          timing. *)
 }
 
 (* Per-candidate search diagnostics on stderr, gated by config [autotune_log]. *)
@@ -788,16 +942,24 @@ let dshort d =
 
 let bs_label = function None -> "cfg" | Some b -> Int.to_string b
 
+(* Whether the spec's label promises a tensorized pipeline — used to flag "no Tile_mma emitted"
+   census anomalies (gh-ocannl-479). *)
+let spec_expects_mma = function
+  | Whole (W_sketch p) -> p.sk_mma
+  | Fiss (F_sketch entries) -> List.exists entries ~f:(fun (_, p) -> p.sk_mma)
+  | _ -> false
+
 let spec_label = function
   | Whole (W_saved s) -> Printf.sprintf "W_saved[%d ops]" (List.length s)
   | Whole (W_preset { block_size }) -> Printf.sprintf "W_preset[bs=%s]" (bs_label block_size)
   | Whole (W_sketch p) when p.sk_mma ->
-      Printf.sprintf "W_sketch[mma-%s %dx%dx%d%s%s%s]"
+      Printf.sprintf "W_sketch[mma-%s %dx%dx%d%s%s%s%s]"
         (if p.sk_gpu then "gpu" else "cpu")
         p.sk_bm p.sk_bn p.sk_bk
         (if p.sk_bk > 0 then if p.sk_gpu then " staged" else " pack" else "")
         (if p.sk_hoist then " hoist" else "")
         (if p.sk_grid then " grid" else "")
+        (if p.sk_pack_rest then " packrest" else "")
   | Whole (W_sketch p) ->
       Printf.sprintf "W_sketch[%s %dx%dx%d/%dx%d%s]"
         (if p.sk_gpu then "gpu" else "cpu")
@@ -812,13 +974,14 @@ let spec_label = function
       Printf.sprintf "F_sketch[%s]"
         (String.concat ~sep:","
            (List.map entries ~f:(fun (_, p) ->
-                Printf.sprintf "%s%s %dx%dx%d%s%s%s"
+                Printf.sprintf "%s%s %dx%dx%d%s%s%s%s"
                   (if p.sk_mma then "mma-" else "")
                   (if p.sk_gpu then "gpu" else "cpu")
                   p.sk_bm p.sk_bn p.sk_bk
                   (if p.sk_mma then "" else Printf.sprintf "/%dx%d" p.sk_tm p.sk_tn)
                   (if p.sk_hoist then " hoist" else "")
-                  (if p.sk_grid then " grid" else ""))))
+                  (if p.sk_grid then " grid" else "")
+                  (if p.sk_pack_rest then " packrest" else ""))))
 
 (* Every candidate derives its CODE from the ONE base lowering ([base_opt] with [canon] its
    canonical form, captured together in [tune]) rather than from the compile's own fresh lowering,
@@ -966,9 +1129,18 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu c
         Context.compile ~lowered_transforms:transforms ctx comp bindings
   in
   try
-    let cctx, routine = compile_ctx () in
+    (* Collect the Tile_mma rendering census across this candidate's kernel compiles (fissioned
+       segments included); [mma_census_enabled] keeps the census from growing in non-tuning
+       processes. Compiles are sequential on the main domain, so save-and-restore suffices. *)
+    Ir.C_syntax.mma_census := [];
+    Ir.C_syntax.mma_census_enabled := true;
+    let cctx, routine =
+      Exn.protect ~f:compile_ctx ~finally:(fun () -> Ir.C_syntax.mma_census_enabled := false)
+    in
+    let mma_renders = !Ir.C_syntax.mma_census in
     match !captured with
-    | Some (form, units, digest_after) -> Ok { form; cctx; routine; units; digest_after }
+    | Some (form, units, digest_after) ->
+        Ok { form; cctx; routine; units; digest_after; mma_renders }
     | None -> Error "Autotune: the transform was not invoked"
   with exn -> Error (Exn.to_string exn)
 
@@ -1275,6 +1447,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
               { u_key = None; u_saved = []; u_registry = SC.base_registry canon; u_opt = base_opt };
             ];
           digest_after = base_digest;
+          mma_renders = [];
         }
       in
       let n_timed = ref 1 and n_failed = ref 0 in
@@ -1294,6 +1467,22 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
               | ms ->
                   Int.incr n_timed;
                   logf "%s: %.4f ms (digest %s)" (spec_label spec) ms (dshort c.digest_after);
+                  (* The rendering census next to the timing (gh-ocannl-479): a candidate labeled
+                     tensorized whose [Tile_mma] statements all declined at emission timed the
+                     scalar fallback — report it, or every number off this tuning run inherits the
+                     ambiguity. *)
+                  let scalar =
+                    List.count c.mma_renders ~f:(fun (_, r) ->
+                        Ir.C_syntax.equal_mma_rendering r Ir.C_syntax.Mma_scalar_fallback)
+                  in
+                  let total = List.length c.mma_renders in
+                  if scalar > 0 then
+                    logf
+                      "%s: NOTE %d/%d Tile_mma statement(s) rendered as the lane-0 scalar fallback                        (config schedule_log_declines=true names the failed rule)"
+                      (spec_label spec) scalar total
+                  else if total = 0 && spec_expects_mma spec then
+                    logf "%s: NOTE tensorized candidate emitted no Tile_mma statement"
+                      (spec_label spec);
                   Some (c, ms)
               | exception exn ->
                   Int.incr n_failed;
