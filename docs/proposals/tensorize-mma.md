@@ -387,6 +387,23 @@ directly as whole-routine sketch candidates (`Autotune.sketch_seed_params`, gate
 - **CPU** (seeded regardless of `limits.mma`): the whole-triple `Tensorize`
   (`bin/schedule_bench.ml`'s tensorize variant, rendered register-tiled per gh-ocannl-469) plus
   Grid-split row-block variants for pool parallelism.
+- **CPU packed** (`bk > 0`; 2026-07-16, closing gh-ocannl-469): `Tile_mma` composed with cache
+  tiling and operand packing — the compiler-BLAS (GEBP) structure. All-Serial
+  `j_o? { k_o { pack B~[bk × bn]; i_o { pack A~[bm × bk]; Tile_mma(bm, bn, bk) }}}` with
+  non-shared `Stage`s whose `tile_loops` are passed in micro-kernel order (`[k_i; j_i]` for B):
+  `Stage` orders the packed tile's axes by `tile_loops`, so a transposed source packs into the
+  normalized layout and `Tensorize` sees `ta = tb = false` — the register tiling fires on the
+  gradient-GEMM layouts it declines in place (it now also accepts `ta` directly: A feeds are
+  scalar splats either way). The B panel packs at `k_o`, outside the row blocks, and is reused
+  across all of them; `lda = bk`, `ldb = bn` stream contiguous cache-resident tiles. The lane
+  width is 1 (the C backends render the lane loop serially; single-threadedness keeps the
+  whole-node `Zero_out` legal, and is required anyway — the function-scope packed tiles would
+  race under pool-parallel Grid chunks). Hoisted (constant-pool) packing is proposed per
+  operand like the scalar S4 pipeline. Separately, `parallel_grid_safe` now analyzes `Tile_mma`
+  through its scalar fallback (the statement's true access footprint) instead of bailing, so
+  the Grid-split whole-triple variants genuinely pool-parallelize (materialized operands pass;
+  local packed tiles correctly decline). Pinned by `schedule_pack_mma_matmul.ml` (bitwise
+  parity, pack normalization of transposed B, pool-parallel grid rendering).
 
 Stage-only composition, deliberately no `Privatize`: it would relocate the accumulator into
 thread-local scratch, which `simdgroup_load` cannot address (`mma_syntax` declines thread-space
