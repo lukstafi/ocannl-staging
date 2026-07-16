@@ -165,4 +165,67 @@ let () =
       in
       p "privatized accumulator gets per-chunk storage, both nests parallel"
         (if on_cpu then count = 2 else count = 0);
+
+      (* --- Privatization write-dominance edge (Codex P2 on PR #159): a local whose covering
+         write shares its loop with a read of the local, [for x { tmp[x] = ..; use tmp[0] }] —
+         the write nest never completes before the reads execute, so per-chunk storage is not
+         provably equivalent and the grid loop must stay serial. Hand-built body through the
+         transform seam (no in-tree transform emits this shape); on GPU the Grid axis binds in
+         hardware, where per-thread locals make it trivially legal. --- *)
+      phase "interleaved hazard";
+      let%op hz = ma + ma in
+      let hazard_transform (opt : LL.optimized) : LL.optimized =
+        let out_tn = hz.Tensor.value in
+        let scratch =
+          Ir.Tnode.create ~namespace:"cptest"
+            (Ir.Tnode.Specified (Lazy.force out_tn.Ir.Tnode.prec))
+            ~id:0 ~label:[ "hazard"; "scratch" ]
+            ~unpadded_dims:(lazy [| k |])
+            ~padding:(lazy None) ()
+        in
+        Ir.Tnode.Placements.update opt.LL.optimize_ctx.LL.placements scratch Ir.Tnode.Local 999;
+        ignore (LL.get_node opt.LL.traced_store scratch : LL.traced_array);
+        let i = Ir.Indexing.get_symbol () and x = Ir.Indexing.get_symbol () in
+        let body =
+          LL.Seq
+            ( LL.Set
+                {
+                  tn = scratch;
+                  idcs = [| Ir.Indexing.Iterator x |];
+                  llsc = LL.Get (ma.Tensor.value, [| Ir.Indexing.Iterator i; Ir.Indexing.Iterator x |]);
+                  debug = "";
+                },
+              LL.Set
+                {
+                  tn = out_tn;
+                  idcs = [| Ir.Indexing.Iterator i; Ir.Indexing.Iterator x |];
+                  llsc = LL.Get (scratch, [| Ir.Indexing.Fixed_idx 0 |]);
+                  debug = "";
+                } )
+        in
+        let llc =
+          LL.For_loop
+            {
+              index = i;
+              from_ = 0;
+              to_ = k - 1;
+              axis = LL.Grid;
+              trace_it = false;
+              body =
+                LL.For_loop
+                  { index = x; from_ = 0; to_ = k - 1; axis = LL.Serial; trace_it = false; body };
+            }
+        in
+        { opt with llc }
+      in
+      let got_hz = run_mm ~name:"cpu_par_hazard" ~transform:hazard_transform hz in
+      (* Per (i, x): scratch[x] := ma[i, x] then out[i, x] := scratch[0], so every row of the
+         output holds its ma row's first element (scratch[0] is rewritten at x = 0 before any
+         read of it in the same grid iteration). *)
+      let want_hz = Array.init (k * k) ~f:(fun idx -> mav.(idx / k * k)) in
+      p "interleaved-write hazard values correct" (Array.for_all2_exn got_hz want_hz ~f:approx);
+      (match read_generated "cpu_par_hazard" with
+      | None -> p "interleaved covering write keeps the grid loop serial" false
+      | Some src -> p "interleaved covering write keeps the grid loop serial"
+            (not (has_parallel_construct src)));
       phase "done"

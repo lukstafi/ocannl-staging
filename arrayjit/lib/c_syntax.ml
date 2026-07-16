@@ -706,66 +706,63 @@ module C_syntax (B : C_syntax_config) = struct
   let per_chunk_private_bytes_cap = 256 * 1024
 
   (* Shared traversal for the pool-parallel Grid analyses below: fires [access] for every
-     tensor-node access event in program order (a [Set]'s right-hand side fires before its write),
-     tracking the loops and [If] guards enclosing the event relative to the traversal root.
+     tensor-node access event in program order (a [Set]'s right-hand side fires before its write).
      [Tile_mma] is traversed through its scalar [fallback]: every rendering of the statement
      (intrinsics, register tiling, lane-0 fallback) touches exactly the fallback's tensors over
      the fallback's index ranges, so the fallback IS the statement's access footprint. [on_stmt]
      observes the statement-level events the locals analysis keys on (opaque statements, scope
-     declarations). [whole] marks a write known to cover the entire node ([Zero_out]);
-     [Set_dynamic]/[Get_dynamic] slots are data-dependent, so they fire with empty indices and
-     [whole:false] (conservatively a miss). *)
+     declarations). [Set_dynamic]/[Get_dynamic] slots are data-dependent, so they fire with empty
+     indices (conservatively a miss). *)
   let iter_local_accesses ~access ~on_stmt (root : Low_level.t) : unit =
-    let rec go ~loops ~guarded (llc : Low_level.t) =
+    let rec go (llc : Low_level.t) =
       match llc with
       | Low_level.Noop | Comment _ -> ()
       | Staged_compilation _ | Workgroup_barrier -> on_stmt `Opaque
-      | Tile_mma { fallback; _ } -> go ~loops ~guarded fallback
+      | Tile_mma { fallback; _ } -> go fallback
       | Seq (a, b) ->
-          go ~loops ~guarded a;
-          go ~loops ~guarded b
-      | For_loop { index; from_; to_; body; _ } ->
-          go ~loops:((index, from_, to_) :: loops) ~guarded body
+          go a;
+          go b
+      | For_loop { body; _ } -> go body
       | If { cond = c, _; body } ->
-          go_sc ~loops ~guarded c;
-          go ~loops ~guarded:true body
-      | Zero_out tn -> access ~loops ~guarded ~write:true ~whole:true tn [||]
+          go_sc c;
+          go body
+      | Zero_out tn -> access ~write:true tn [||]
       | Set { tn; idcs; llsc; _ } ->
-          go_sc ~loops ~guarded llsc;
-          access ~loops ~guarded ~write:true ~whole:false tn idcs
+          go_sc llsc;
+          access ~write:true tn idcs
       | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
-          go_sc ~loops ~guarded v;
-          go_sc ~loops ~guarded llsc;
-          access ~loops ~guarded ~write:true ~whole:false tn [||]
+          go_sc v;
+          go_sc llsc;
+          access ~write:true tn [||]
       | Set_from_vec { tn; idcs; arg = a, _; _ } ->
-          go_sc ~loops ~guarded a;
-          access ~loops ~guarded ~write:true ~whole:false tn idcs
+          go_sc a;
+          access ~write:true tn idcs
       | Set_local (id, llsc) ->
           on_stmt (`Set_local id.Low_level.scope_id);
-          go_sc ~loops ~guarded llsc
+          go_sc llsc
       | Declare_local { id; _ } -> on_stmt (`Declare_local id.Low_level.scope_id)
-    and go_sc ~loops ~guarded (llsc : Low_level.scalar_t) =
+    and go_sc (llsc : Low_level.scalar_t) =
       match llsc with
       | Local_scope { id; body; _ } ->
           on_stmt (`Declare_local id.Low_level.scope_id);
-          go ~loops ~guarded body
+          go body
       | Get_local _ -> ()
-      | Get (tn, idcs) -> access ~loops ~guarded ~write:false ~whole:false tn idcs
+      | Get (tn, idcs) -> access ~write:false tn idcs
       | Get_dynamic { tn; dyn_value = v, _; _ } ->
-          access ~loops ~guarded ~write:false ~whole:false tn [||];
-          go_sc ~loops ~guarded v
+          access ~write:false tn [||];
+          go_sc v
       | Get_merge_buffer _ -> ()
       | Ternop (_, (a, _), (b, _), (c, _)) ->
-          go_sc ~loops ~guarded a;
-          go_sc ~loops ~guarded b;
-          go_sc ~loops ~guarded c
+          go_sc a;
+          go_sc b;
+          go_sc c
       | Binop (_, (a, _), (b, _)) ->
-          go_sc ~loops ~guarded a;
-          go_sc ~loops ~guarded b
-      | Unop (_, (a, _)) -> go_sc ~loops ~guarded a
+          go_sc a;
+          go_sc b
+      | Unop (_, (a, _)) -> go_sc a
       | Constant _ | Constant_bits _ | Embed_index _ -> ()
     in
-    go ~loops:[] ~guarded:false root
+    go root
 
   (* Per-local access info under a candidate pool-parallel Grid loop's body. *)
   type grid_local_info = {
@@ -773,9 +770,92 @@ module C_syntax (B : C_syntax_config) = struct
     mutable gl_written : bool;
     mutable gl_accs : Indexing.axis_index array list;
     mutable gl_count : int;
-    mutable gl_first_covers : bool;
-        (* The first access (program order) is an unguarded write covering the whole array. *)
   }
+
+  (* The privatization rule's write-dominance check: whether [tn]'s FIRST access (program order)
+     under [body] is a standalone covering write — a [Zero_out], or an unguarded [Set] nest that
+     rewrites the whole array and COMPLETES before any other access to [tn] executes. The
+     completion requirement is structural (Codex P2 on PR #159): the covering [Set]'s per-axis
+     coverage may only use loops that enclose NO other access to [tn] — descending from the body
+     root, a loop stays usable while every access to [tn] in scope sits inside one child
+     statement, and once siblings share the level (e.g. the pack nest followed by its consumer),
+     the loops collected so far are discarded and coverage must come from the write's own nest.
+     A write like [for x { tmp[x] = ..; use tmp[y] }] therefore declines: its only coverage loop
+     [x] also interleaves the reads, which under per-chunk storage would observe missing prior
+     iterations at chunk boundaries. Coverage per axis: a fresh usable-loop symbol of matching
+     extent, or a mixed-radix affine combination of such symbols, each symbol used once across
+     the index vector — the nest then enumerates every cell. Extra enclosing usable loops merely
+     repeat the covering nest (required non-degenerate, or the write never executes). *)
+  let first_access_standalone_covering (tn : Tn.t) (body : Low_level.t) : bool =
+    let count_accesses (llc : Low_level.t) =
+      let c = ref 0 in
+      iter_local_accesses llc
+        ~access:(fun ~write:_ tn2 _ -> if tn2.Tn.uid = tn.Tn.uid then Int.incr c)
+        ~on_stmt:(fun _ -> ());
+      !c
+    in
+    let touches llc = count_accesses llc > 0 in
+    let dims = Lazy.force tn.Tn.dims in
+    let covering ~loops (idcs : Indexing.axis_index array) =
+      Array.length idcs = Array.length dims
+      &&
+      let extent_of s =
+        List.find_map loops ~f:(fun (s', from_, to_) ->
+            if Indexing.equal_symbol s s' && from_ = 0 then Some (to_ + 1) else None)
+      in
+      let used = ref [] in
+      let fresh s =
+        if List.mem !used s ~equal:Indexing.equal_symbol then false
+        else (
+          used := s :: !used;
+          true)
+      in
+      Array.for_alli idcs ~f:(fun a idx ->
+          let dim = dims.(a) in
+          match idx with
+          | Indexing.Fixed_idx 0 -> dim = 1
+          | Indexing.Iterator s -> (
+              fresh s && match extent_of s with Some e -> e = dim | None -> false)
+          | Indexing.Affine { symbols; offset = 0 } ->
+              let sorted =
+                List.sort symbols ~compare:(fun (c1, _) (c2, _) -> Int.compare c1 c2)
+              in
+              let rec radix r = function
+                | [] -> r = dim
+                | (c, s) :: tl -> (
+                    c = r && fresh s
+                    && match extent_of s with Some e -> radix (r * e) tl | None -> false)
+              in
+              radix 1 sorted
+          | Indexing.Fixed_idx _ | Indexing.Affine _ | Indexing.Sub_axis | Indexing.Concat _ ->
+              false)
+    in
+    let rec stmt (llc : Low_level.t) ~loops =
+      match llc with
+      | Low_level.Seq _ -> level (Low_level.flat_lines [ llc ]) ~loops
+      | For_loop { index; from_; to_; body; _ } ->
+          to_ >= from_ && level (Low_level.flat_lines [ body ]) ~loops:((index, from_, to_) :: loops)
+      | Zero_out tn2 -> tn2.Tn.uid = tn.Tn.uid
+      | Set { tn = tn2; idcs; _ } ->
+          (* [count_accesses = 1]: the write itself, so the right-hand side does not read [tn]
+             (a read-modify-write is not a covering first access). *)
+          tn2.Tn.uid = tn.Tn.uid && count_accesses llc = 1 && covering ~loops idcs
+      (* [If] = guarded (partial coverage); dynamic/vector writes and [Tile_mma] operand traffic
+         are conservatively never covering. *)
+      | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | If _ | Set_dynamic _
+      | Set_from_vec _ | Set_local _ | Declare_local _ | Tile_mma _ ->
+          false
+    and level stmts ~loops =
+      match List.filter stmts ~f:touches with
+      | [] -> false
+      | [ only ] -> stmt only ~loops
+      | first :: _ :: _ ->
+          (* Later siblings access [tn] too: they run after [first] completes, but the loops
+             collected so far re-run them interleaved with [first] — coverage must come from
+             [first]'s own nest. *)
+          stmt first ~loops:[]
+    in
+    level (Low_level.flat_lines [ body ]) ~loops:[]
 
   (* Whether the body of an outermost [Grid] loop over [sym] tolerates its iterations being
      partitioned into chunks that execute on parallel CPU threads. Materialized accesses are
@@ -792,12 +872,13 @@ module C_syntax (B : C_syntax_config) = struct
        read [tmp[i-1]] both mention [sym] but reach across iterations). Distinct iterations then
        touch disjoint cells of one function-scope array.
      - Privatization rule: ALL of the node's accesses in the kernel sit inside this loop's body,
-       and the first access per iteration is an unguarded write covering the whole array (a
-       [Zero_out], or a [Set] whose enclosing in-body loops enumerate every cell exactly in the
-       mixed-radix sense) -- so no value flows between iterations and each chunk can own a
-       block-scope copy. This is what in-kernel packing [Stage] tiles satisfy (gh-ocannl-469): the
-       pack nest fully rewrites the tile before the micro-kernel reads it. The combined
-       per-chunk footprint is capped by [per_chunk_private_bytes_cap] (pool worker stacks).
+       and its first access per iteration is a standalone covering write -- a whole-array rewrite
+       that completes before any other access to it executes (the write-dominance check of
+       [first_access_standalone_covering]) -- so no value flows between iterations and each chunk
+       can own a block-scope copy. This is what in-kernel packing [Stage] tiles satisfy
+       (gh-ocannl-469): the pack nest fully rewrites the tile before the micro-kernel reads it.
+       The combined per-chunk footprint is capped by [per_chunk_private_bytes_cap] (pool worker
+       stacks).
 
      Under [`Dispatch] (the blocks extension), a block cannot refer to a declaration with an array
      type at all -- even read-only -- but it captures pointers by value, so every non-privatized
@@ -820,62 +901,15 @@ module C_syntax (B : C_syntax_config) = struct
           List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
       | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
     in
-    (* An unguarded write statement covering the whole array each iteration: per axis, the index
-       is a fresh in-body loop symbol of matching extent (or a mixed-radix affine combination of
-       such symbols), with each symbol used once across the vector -- the enclosing loops then
-       enumerate every cell. Extra enclosing loops merely repeat the covering nest (they must be
-       non-degenerate, or the write never executes). *)
-    let covering_write ~loops ~guarded ~whole tn (idcs : Indexing.axis_index array) =
-      (not guarded)
-      && List.for_all loops ~f:(fun (_, from_, to_) -> to_ >= from_)
-      && (whole
-         ||
-         let dims = Lazy.force tn.Tn.dims in
-         Array.length idcs = Array.length dims
-         &&
-         let extent_of s =
-           List.find_map loops ~f:(fun (s', from_, to_) ->
-               if Indexing.equal_symbol s s' && from_ = 0 then Some (to_ + 1) else None)
-         in
-         let used = ref [] in
-         let fresh s =
-           if List.mem !used s ~equal:Indexing.equal_symbol then false
-           else (
-             used := s :: !used;
-             true)
-         in
-         Array.for_alli idcs ~f:(fun a idx ->
-             let dim = dims.(a) in
-             match idx with
-             | Indexing.Fixed_idx 0 -> dim = 1
-             | Indexing.Iterator s -> (
-                 fresh s && match extent_of s with Some e -> e = dim | None -> false)
-             | Indexing.Affine { symbols; offset = 0 } ->
-                 let sorted =
-                   List.sort symbols ~compare:(fun (c1, _) (c2, _) -> Int.compare c1 c2)
-                 in
-                 let rec radix r = function
-                   | [] -> r = dim
-                   | (c, s) :: tl -> (
-                       c = r && fresh s
-                       && match extent_of s with Some e -> radix (r * e) tl | None -> false)
-                 in
-                 radix 1 sorted
-             | Indexing.Fixed_idx _ | Indexing.Affine _ | Indexing.Sub_axis | Indexing.Concat _
-               ->
-                 false))
-    in
     let locals : grid_local_info Hashtbl.M(Int).t = Hashtbl.create (module Int) in
     let declared_scopes = Hash_set.create (module Int) in
     let ok = ref true in
-    let access ~loops ~guarded ~write ~whole tn idcs =
+    let access ~write tn idcs =
       if is_local tn then (
         let info =
           Hashtbl.find_or_add locals tn.Tn.uid ~default:(fun () ->
-              { gl_tn = tn; gl_written = false; gl_accs = []; gl_count = 0; gl_first_covers = false })
+              { gl_tn = tn; gl_written = false; gl_accs = []; gl_count = 0 })
         in
-        if info.gl_count = 0 then
-          info.gl_first_covers <- write && covering_write ~loops ~guarded ~whole tn idcs;
         info.gl_count <- info.gl_count + 1;
         info.gl_written <- info.gl_written || write;
         info.gl_accs <- idcs :: info.gl_accs)
@@ -926,7 +960,7 @@ module C_syntax (B : C_syntax_config) = struct
                 | Some total -> total = info.gl_count
                 | None -> false
               in
-              if all_inside && info.gl_first_covers then (
+              if all_inside && first_access_standalone_covering info.gl_tn body then (
                 private_bytes :=
                   !private_bytes
                   + (Tn.num_elems info.gl_tn
@@ -963,8 +997,7 @@ module C_syntax (B : C_syntax_config) = struct
          counts are comparable by construction. *)
       let global_counts : int Hashtbl.M(Int).t = Hashtbl.create (module Int) in
       iter_local_accesses llc
-        ~access:(fun ~loops:_ ~guarded:_ ~write:_ ~whole:_ tn _ ->
-          if is_local tn then Hashtbl.incr global_counts tn.Tn.uid)
+        ~access:(fun ~write:_ tn _ -> if is_local tn then Hashtbl.incr global_counts tn.Tn.uid)
         ~on_stmt:(fun _ -> ());
       let syms = ref (Set.empty (module Indexing.Symbol)) in
       let privs = ref (Map.empty (module Indexing.Symbol)) in
