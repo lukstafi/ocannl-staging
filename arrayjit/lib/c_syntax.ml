@@ -728,7 +728,15 @@ module C_syntax (B : C_syntax_config) = struct
     let rec go (llc : Low_level.t) =
       match llc with
       | Low_level.Noop | Comment _ -> ()
-      | Staged_compilation _ | Workgroup_barrier | Tile_mma _ -> ok := false
+      | Staged_compilation _ | Workgroup_barrier -> ok := false
+      | Tile_mma { fallback; _ } ->
+          (* Every rendering of the statement (intrinsics, register tiling, lane-0 fallback)
+             touches exactly the fallback's tensors over the fallback's index ranges, so the
+             fallback IS the statement's access footprint — analyze it instead of bailing. This is
+             what lets [Grid]-blocked [Tile_mma] matmuls (gh-ocannl-469) pool-parallelize:
+             materialized operands pass trivially, while function-scope packed tiles written under
+             the loop (their pack indices never mention the grid symbol) correctly decline. *)
+          go fallback
       | Seq (a, b) ->
           go a;
           go b
@@ -2180,9 +2188,12 @@ module C_syntax (B : C_syntax_config) = struct
               ((match B.vector_style with `Vec_extensions -> false | `Packed_struct -> true)
               || B.vector_bytes < 8
               || Utils.debug_log_from_routines ()
-              (* Transposed operand layouts: the tiling's pointer arithmetic assumes
-                 [a[i*lda+l]] / [b[l*ldb+j]] — the scalar fallback handles them. *)
-              || ta || tb)
+              (* A transposed B ([tb]: [b[j*ldb+l]]) would turn the per-k row vector loads into
+                 stride-[ldb] gathers — decline it (the scalar fallback handles it; a packing
+                 [Stage] with [tile_loops] in micro-kernel order normalizes the layout instead).
+                 A transposed A ([ta]: [a[l*lda+i]]) costs nothing — the A feeds are scalar
+                 element loads (splats) either way — so only the index arithmetic swaps. *)
+              || tb)
           in
           let d_tn = fst d in
           let prec = Lazy.force d_tn.Tn.prec in
@@ -2225,6 +2236,11 @@ module C_syntax (B : C_syntax_config) = struct
           let _, (d_ptr, ldd, _) = operand d in
           let _, (a_ptr, lda, _) = operand a in
           let _, (b_ptr, ldb, _) = operand b in
+          (* The A element at (row expression, k expression), honoring [ta]'s storage order. *)
+          let a_at ~row ~l =
+            if ta then Printf.sprintf "tmma_a__[%s * %d + %s]" l lda row
+            else Printf.sprintf "tmma_a__[%s * %d + %s]" row lda l
+          in
           let stmts = separate hardline in
           (* Scalar peel of rows [i_lo, i_hi) × cols [j_lo, j_hi): same fmaf chain per element. *)
           let scalar_peel ~i_lo ~i_hi ~j_lo ~j_hi =
@@ -2245,9 +2261,10 @@ module C_syntax (B : C_syntax_config) = struct
                      ^^ string
                           (Printf.sprintf
                              "for (%stmma_l__ = 0; tmma_l__ < %d; ++tmma_l__) tmma_acc__ = \
-                              %s(tmma_a__[tmma_i__ * %d + tmma_l__], tmma_b__[tmma_l__ * %d + \
-                              tmma_j__], tmma_acc__);"
-                             it k fma_fn lda ldb)
+                              %s(%s, tmma_b__[tmma_l__ * %d + tmma_j__], tmma_acc__);"
+                             it k fma_fn
+                             (a_at ~row:"tmma_i__" ~l:"tmma_l__")
+                             ldb)
                      ^^ hardline
                      ^^ string (Printf.sprintf "tmma_d__[tmma_i__ * %d + tmma_j__] = tmma_acc__;" ldd)
                      )
@@ -2277,10 +2294,8 @@ module C_syntax (B : C_syntax_config) = struct
                 @ List.concat
                     (List.init rm ~f:(fun r ->
                          string
-                           (Printf.sprintf
-                              "%s tmma_a_%d__ = ((%s){0} + tmma_a__[(tmma_i__ + %d) * %d + \
-                               tmma_l__]);"
-                              vtyp r vtyp r lda)
+                           (Printf.sprintf "%s tmma_a_%d__ = ((%s){0} + %s);" vtyp r vtyp
+                              (a_at ~row:(Printf.sprintf "(tmma_i__ + %d)" r) ~l:"tmma_l__"))
                          :: List.init rn ~f:(fun c ->
                                 vec_acc_fma ~prec ~lanes ~dst:grid.(r).(c)
                                   ~a:(Printf.sprintf "tmma_a_%d__" r)
