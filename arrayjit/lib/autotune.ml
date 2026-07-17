@@ -140,6 +140,12 @@ type sketch_params = {
           dispatch spanning the GEBP triple) and every operand packs inside the Grid body. No
           effect on the serial flavors or the hoisted-only Grid flavor, whose stages are already
           determined. *)
+  sk_conv : bool;
+      (** Convolution site (gh-ocannl-493): the seed instantiates the implicit-GEMM conv pipeline
+          ([cpu_conv_sketch_schedule] via [detect_conv]) instead of a matmul one. The packing
+          [Stage] serves as im2col and the micro-kernel is the ordinary register-tiled [Tile_mma]
+          ([sk_mma] is set so the census expectations apply); [sk_grid] pool-parallelizes the
+          outermost batch/spatial loop. CPU (cc) route in v1. *)
   sk_epilogue : bool;
       (** Epilogue fusion (gh-ocannl-486): append [Sched.Fuse_epilogue] on the site's output, so
           the sole-consumer elementwise tail (bias add / activation / residual) folds into the
@@ -273,6 +279,197 @@ let detect_matmul (llc : LL.t) : matmul_site option =
       | _ -> None)
 
 let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner })
+
+(** {2 Convolution detection and the implicit-GEMM sketch (gh-ocannl-493)}
+
+    A convolution is a matmul over a virtual im2col operand. Conv einsums lower to affine-indexed
+    accumulation nests — [d[b.., oh.., oc] += a[b.., s*oh + t*kh + off.., ic] * w[perm(oc, kh..,
+    ic)]] — so the implicit-GEMM mapping is a re-association of loops that already exist: reorder
+    to [outer..; kernel..; row; oc; ic], pack the strided-window [row × ic] slice of [a] (the
+    packing [Stage] {e is} im2col — same copy nest, conv index arithmetic) and the [ic × oc] slice
+    of [w] (normalizing any stored layout) at the kernel-window anchor, then [Tensorize (row, oc,
+    ic)] exactly as for matmuls: the register tiling / tensor cores and the accumulator
+    contraction (gh-ocannl-480, resident across the innermost kernel loop) apply unchanged.
+
+    Unlike the matmul pipelines, the reorder moves the [ic] reduction inside the kernel loops, so
+    the per-element reduction order changes: conv sketch candidates match the unscheduled form
+    within float-reassociation tolerance (like the GPU fragment paths), while the tensorized
+    pipeline stays bitwise against the reorder-only form on the C backends. *)
+
+type conv_axis = {
+  cx_o : Idx.symbol;  (** Output spatial symbol (appears in [d] as a plain iterator). *)
+  cx_no : int;
+  cx_k : Idx.symbol;  (** Kernel-window symbol (appears in [w], not in [d]). *)
+  cx_nk : int;
+  cx_stride : int;
+  cx_dilation : int;
+  cx_offset : int;  (** Padding offset on the input access ([<= 0] for padded convs). *)
+}
+
+type conv_site = {
+  c_loops : Idx.symbol list;  (** The accumulation nest's loops, outermost first. *)
+  c_outer : (Idx.symbol * int) list;
+      (** Loops kept outer, in nest order: batch axes and the non-row output spatial axes. *)
+  c_kernel : Idx.symbol list;  (** Kernel-window symbols in nest order (the [k_o] tier). *)
+  c_axes : conv_axis list;
+  c_row : Idx.symbol;  (** The GEMM row: the conv axis at [d]'s rank-2 position. *)
+  c_nrow : int;
+  c_oc : Idx.symbol;  (** The GEMM column: [d]'s rank-1 symbol, read by [w] only. *)
+  c_noc : int;
+  c_red : Idx.symbol;  (** The GEMM reduction: the channel symbol read by both operands. *)
+  c_nred : int;
+  c_d : Ir.Tnode.t;
+  c_a : Ir.Tnode.t;
+  c_b : Ir.Tnode.t;
+  c_zeroed : bool;
+  c_fma : bool;
+}
+
+let detect_conv (llc : LL.t) : conv_site option =
+  let stmts = strip_stmts (LL.flat_lines [ llc ]) in
+  let zeroed = List.filter_map stmts ~f:(function LL.Zero_out tn -> Some tn | _ -> None) in
+  List.find_map stmts ~f:(fun stmt ->
+      let loops, leaf = serial_nest_of stmt in
+      match leaf with
+      | LL.Set { tn = d; idcs = di; llsc; _ } when List.length loops >= 4 -> (
+          let extent s =
+            List.Assoc.find loops s ~equal:Idx.equal_symbol
+          in
+          let gets = collect_gets llsc in
+          let is_d_read (tn, idcs) =
+            phys_equal tn d && Array.equal Idx.equal_axis_index idcs di
+          in
+          let d_reads, others = List.partition_tf gets ~f:is_d_read in
+          match (d_reads, others) with
+          | _ :: _, [ o1; o2 ] -> (
+              (* [d] written at plain, distinct iterators — its symbols are the GEMM output space. *)
+              let d_syms =
+                Array.to_list di
+                |> List.map ~f:(function Idx.Iterator s -> Some s | _ -> None)
+                |> Option.all
+              in
+              match d_syms with
+              | Some d_syms
+                when List.length d_syms = Array.length di
+                     && not (List.contains_dup d_syms ~compare:Idx.compare_symbol)
+                     && List.length d_syms >= 2 -> (
+                  let is_out s = List.mem d_syms s ~equal:Idx.equal_symbol in
+                  (* The input operand carries the conv fingerprint: an affine component mixing an
+                     output symbol with a kernel symbol. *)
+                  let conv_component (idx : Idx.axis_index) =
+                    match idx with
+                    | Idx.Affine { symbols = [ (c1, s1); (c2, s2) ]; offset } -> (
+                        match (is_out s1, is_out s2) with
+                        | true, false ->
+                            Some
+                              { cx_o = s1; cx_no = 0; cx_k = s2; cx_nk = 0; cx_stride = c1;
+                                cx_dilation = c2; cx_offset = offset }
+                        | false, true ->
+                            Some
+                              { cx_o = s2; cx_no = 0; cx_k = s1; cx_stride = c2;
+                                cx_dilation = c1; cx_offset = offset; cx_nk = 0 }
+                        | _ -> None)
+                    | _ -> None
+                  in
+                  let classify (tn, idcs) =
+                    let axes = Array.to_list idcs |> List.filter_map ~f:conv_component in
+                    (tn, idcs, axes)
+                  in
+                  let (a, a_idcs, a_axes), (b, b_idcs, b_axes) =
+                    let c1 = classify o1 and c2 = classify o2 in
+                    match (c1, c2) with
+                    | (_, _, _ :: _), (_, _, []) -> (c1, c2)
+                    | (_, _, []), (_, _, _ :: _) -> (c2, c1)
+                    | _ -> (c1, c1)
+                    (* Both-or-neither convolutional: rejected below (b_axes <> []). *)
+                  in
+                  let b_plain =
+                    Array.to_list b_idcs
+                    |> List.map ~f:(function Idx.Iterator s -> Some s | _ -> None)
+                    |> Option.all
+                  in
+                  match b_plain with
+                  | Some b_syms when List.is_empty b_axes && not (phys_equal a b) -> (
+                      let kernel_syms = List.map a_axes ~f:(fun cx -> cx.cx_k) in
+                      let in_b s = List.mem b_syms s ~equal:Idx.equal_symbol in
+                      let oc_candidates = List.filter d_syms ~f:in_b in
+                      (* Reduction symbols: read by both operands, not output, not kernel. *)
+                      let a_plain_syms =
+                        Array.to_list a_idcs
+                        |> List.filter_map ~f:(function Idx.Iterator s -> Some s | _ -> None)
+                      in
+                      let red_candidates =
+                        List.filter a_plain_syms ~f:(fun s -> in_b s && not (is_out s))
+                      in
+                      let rank = Array.length di in
+                      match (oc_candidates, red_candidates, extent (List.last_exn d_syms)) with
+                      | [ oc ], [ red ], Some noc
+                        when Idx.equal_symbol oc (List.last_exn d_syms)
+                             && (not (List.exists a_plain_syms ~f:(Idx.equal_symbol oc)))
+                             && List.for_all kernel_syms ~f:(fun k ->
+                                    in_b k && not (is_out k))
+                             && List.for_all b_syms ~f:(fun s ->
+                                    Idx.equal_symbol s oc || Idx.equal_symbol s red
+                                    || List.mem kernel_syms s ~equal:Idx.equal_symbol) -> (
+                          (* The GEMM row: the conv axis sitting at [d]'s rank-2 position. *)
+                          let row_sym =
+                            match di.(rank - 2) with Idx.Iterator s -> s | _ -> assert false
+                          in
+                          match
+                            ( List.find a_axes ~f:(fun cx -> Idx.equal_symbol cx.cx_o row_sym),
+                              extent row_sym,
+                              extent red )
+                          with
+                          | Some _, Some nrow, Some nred ->
+                              let with_extents cx =
+                                match (extent cx.cx_o, extent cx.cx_k) with
+                                | Some no, Some nk -> Some { cx with cx_no = no; cx_nk = nk }
+                                | _ -> None
+                              in
+                              let axes = Option.all (List.map a_axes ~f:with_extents) in
+                              let loop_syms = List.map loops ~f:fst in
+                              let m_fma =
+                                match llsc with
+                                | LL.Ternop (Ir.Ops.FMA, _, _, (LL.Get (tn, idcs), _)) ->
+                                    is_d_read (tn, idcs)
+                                | _ -> false
+                              in
+                              let is_kernel s =
+                                List.mem kernel_syms s ~equal:Idx.equal_symbol
+                              in
+                              let outer =
+                                List.filter loops ~f:(fun (s, _) ->
+                                    is_out s
+                                    && (not (Idx.equal_symbol s row_sym))
+                                    && not (Idx.equal_symbol s oc))
+                              in
+                              let kernel_order =
+                                List.filter loop_syms ~f:is_kernel
+                              in
+                              Option.map axes ~f:(fun axes ->
+                                  {
+                                    c_loops = loop_syms;
+                                    c_outer = outer;
+                                    c_kernel = kernel_order;
+                                    c_axes = axes;
+                                    c_row = row_sym;
+                                    c_nrow = nrow;
+                                    c_oc = oc;
+                                    c_noc = noc;
+                                    c_red = red;
+                                    c_nred = nred;
+                                    c_d = d;
+                                    c_a = a;
+                                    c_b = b;
+                                    c_zeroed = List.exists zeroed ~f:(phys_equal d);
+                                    c_fma = m_fma;
+                                  })
+                          | _ -> None)
+                      | _ -> None)
+                  | _ -> None)
+              | _ -> None)
+          | _ -> None)
+      | _ -> None)
 
 (* Zero-geometry ops shared by the sketch pipelines: expand the whole-node [Zero_out] of the output
    and give the resulting nest a compatible parallel geometry, via [mk_zops] on its two fresh loop
@@ -524,36 +721,181 @@ let cpu_mma_pack_sketch_schedule (site : matmul_site)
   @ (if grid_outermost then [] else sink i_o [ k_o ])
   @ stages @ [ tz ]
 
+(* Adjacent-transposition reorder of a perfect serial nest: [Swap]s that turn [current] (nest
+   order, outermost first) into [target]. Selection sort — for each target position, bubble the
+   wanted loop outward one level at a time (each [Swap] exchanges a directly-nested pair). *)
+let reorder_swaps ~current ~target : Sched.schedule =
+  let cur = Array.of_list current in
+  let swaps = ref [] in
+  List.iteri target ~f:(fun p want ->
+      match Array.findi cur ~f:(fun _ s -> Idx.equal_symbol s want) with
+      | None | Some (0, _) when p > 0 -> invalid_arg "Autotune.reorder_swaps: not a permutation"
+      | None -> invalid_arg "Autotune.reorder_swaps: not a permutation"
+      | Some (q, _) ->
+          if q < p then invalid_arg "Autotune.reorder_swaps: not a permutation";
+          for r = q downto p + 1 do
+            swaps := Sched.Swap { outer = cur.(r - 1); inner = cur.(r) } :: !swaps;
+            let tmp = cur.(r - 1) in
+            cur.(r - 1) <- cur.(r);
+            cur.(r) <- tmp
+          done);
+  List.rev !swaps
+
+(* The implicit-GEMM conv pipeline (gh-ocannl-493), CPU route: reorder the accumulation nest to
+   [outer..; kernel..; row; oc; ic], pack the input's [row × ic] strided-window slice and the
+   kernel's [ic × oc] slice (both anchor under the innermost kernel-window loop; the packing IS
+   im2col, one window slice at a time, and normalizes the kernel's stored layout), then
+   [Tensorize (row, oc, ic)] — the register-tiled [Tile_mma] micro-kernel, with the accumulator
+   contracted to a fragment resident across the innermost kernel loop (gh-ocannl-480). With
+   [sk_grid], the outermost output loop is [Grid]-typed and pool-parallelizes; a whole-node
+   [Zero_out] of the output then expands with the matching geometry. *)
+let cpu_conv_sketch_schedule (site : conv_site) { sk_grid; _ } : Sched.schedule =
+  let loop_syms =
+    List.map site.c_outer ~f:fst @ site.c_kernel @ [ site.c_row; site.c_oc; site.c_red ]
+  in
+  let stage source tile_loops =
+    Sched.Stage { source; tile_loops; shared = false; cooperative = None; hoisted = false }
+  in
+  let tz, _lane =
+    Sched.tensorize ~i:site.c_row ~j:site.c_oc ~k:site.c_red ~simd_width:1
+  in
+  let zops, grid_ops =
+    if not sk_grid then ([], [])
+    else
+      match site.c_outer with
+      | [] -> invalid_arg "Autotune conv sketch: no outer loop to Grid-parallelize"
+      | (outermost, _) :: _ ->
+          let zops =
+            if not site.c_zeroed then []
+            else
+              let ez, zsyms = Sched.expand_zero ~tn:site.c_d in
+              match zsyms with
+              | z0 :: _ -> [ ez; Sched.Retype { axis = z0; ty = LL.Grid } ]
+              | [] -> [ ez ]
+          in
+          (zops, [ Sched.Retype { axis = outermost; ty = LL.Grid } ])
+  in
+  zops @ grid_ops
+  @ reorder_swaps ~current:site.c_loops ~target:loop_syms
+  @ [
+      stage site.c_a [ site.c_row; site.c_red ];
+      stage site.c_b [ site.c_red; site.c_oc ];
+      tz;
+    ]
+
 let sketch_schedule ~p (opt : LL.optimized) : Sched.schedule =
-  match detect_matmul opt.LL.llc with
-  | None -> invalid_arg "Autotune sketch: no matmul micro-kernel detected"
-  | Some site ->
-      let sched =
-        if p.sk_mma then
-          if p.sk_gpu then gpu_mma_sketch_schedule site p
-          else if p.sk_bk > 0 then cpu_mma_pack_sketch_schedule site p
-          else cpu_mma_sketch_schedule site p
-        else if p.sk_gpu then gpu_sketch_schedule site p
-        else cpu_sketch_schedule site p
-      in
-      if p.sk_epilogue then
-        (* [shared] is the fragment-site knob: only the GPU MMA sketches store through the
-           contracted fragment; the block-tiling pipeline stores through [Privatize], where
-           [Fuse_epilogue] rejects [shared] outright and the twin would fail for the wrong
-           reason. *)
-        sched @ [ Sched.Fuse_epilogue { target = site.m_d; shared = p.sk_gpu && p.sk_mma } ]
-      else sched
+  let sched, d =
+    if p.sk_conv then
+      match detect_conv opt.LL.llc with
+      | None -> invalid_arg "Autotune sketch: no convolution site detected"
+      | Some site -> (cpu_conv_sketch_schedule site p, site.c_d)
+    else
+      match detect_matmul opt.LL.llc with
+      | None -> invalid_arg "Autotune sketch: no matmul micro-kernel detected"
+      | Some site ->
+          let sched =
+            if p.sk_mma then
+              if p.sk_gpu then gpu_mma_sketch_schedule site p
+              else if p.sk_bk > 0 then cpu_mma_pack_sketch_schedule site p
+              else cpu_mma_sketch_schedule site p
+            else if p.sk_gpu then gpu_sketch_schedule site p
+            else cpu_sketch_schedule site p
+          in
+          (sched, site.m_d)
+  in
+  if p.sk_epilogue then
+    (* [shared] is the fragment-site knob: only the GPU MMA sketches store through the contracted
+       fragment; the block-tiling pipeline stores through [Privatize], where [Fuse_epilogue]
+       rejects [shared] outright and the twin would fail for the wrong reason. *)
+    sched @ [ Sched.Fuse_epilogue { target = d; shared = p.sk_gpu && p.sk_mma } ]
+  else sched
 
 (* Sketch seed parameters compatible with the site's extents (dividing tiles: every constructed
    guard folds, and shared staging requires them). Unzeroed sites — the norm for fission segments,
    whose [Zero_out] lives in its own [`Zeros] segment — are proposable too: the pipelines skip the
    zero geometry (see [zero_geometry]), and a site whose kernel-mates cannot share the parallel
    geometry merely fails its candidate compile. *)
-let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
-    (opt : LL.optimized) : sketch_params list =
-  match detect_matmul opt.LL.llc with
-  | None -> []
-  | Some site ->
+(* CPU conv seeds (gh-ocannl-493): the serial implicit-GEMM pipeline plus its Grid-parallel
+   variant, pre-filtered by the register tiling's statically decidable rules like the matmul
+   seeds (gh-ocannl-479): uniform f32/f64, fused accumulation form, and the micro-kernel column
+   extent (the out-channel count) at least one vector of lanes. Layout orientation needs no
+   pre-filter: both operands are packed, which normalizes any stored layout. *)
+let conv_seed_params ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) (opt : LL.optimized) :
+    (sketch_params list * Ir.Tnode.t) option =
+  if not is_cpu then None
+  else
+    match detect_conv opt.LL.llc with
+    | None -> None
+    | Some site ->
+        let prec = Lazy.force site.c_d.Ir.Tnode.prec in
+        let uniform_f32_64 =
+          (match prec with Ir.Ops.Single_prec _ | Ir.Ops.Double_prec _ -> true | _ -> false)
+          && Ir.Ops.equal_prec (Lazy.force site.c_a.Ir.Tnode.prec) prec
+          && Ir.Ops.equal_prec (Lazy.force site.c_b.Ir.Tnode.prec) prec
+        in
+        let lanes =
+          limits.Ir.Backend_intf.simd_vector_bytes / max 1 (Ir.Ops.prec_in_bytes prec)
+        in
+        (* The row axis must be unit-stride: [Stage] packs by index range, so a strided row would
+           pack a dilated tile read at [stride*row] — which [Tensorize]'s unit-coefficient index
+           discipline rejects (a compacting Stage is a follow-up). And every axis must be
+           offset-free (valid convolution): padded convs read the halo of a physically padded
+           source, and [Stage]'s edge guards clip tile loads against the logical dims — halo
+           positions would silently pack garbage (Codex P1 on PR #168; halo-aware staging is a
+           follow-up). Candidates are timed, not value-checked, so unsound seeds must not be
+           proposed at all. *)
+        let row_unit_stride =
+          List.exists site.c_axes ~f:(fun cx ->
+              Idx.equal_symbol cx.cx_o site.c_row && cx.cx_stride = 1)
+        in
+        let offset_free = List.for_all site.c_axes ~f:(fun cx -> cx.cx_offset = 0) in
+        if
+          not
+            (limits.Ir.Backend_intf.simd_vector_bytes >= 8
+            && lanes >= 2 && uniform_f32_64 && site.c_fma && site.c_noc >= lanes
+            && row_unit_stride && offset_free)
+        then None
+        else
+          let base =
+            {
+              sk_gpu = false;
+              sk_mma = true;
+              sk_simd = 0;
+              sk_bm = 0;
+              sk_bn = 0;
+              sk_bk = 0;
+              sk_tm = 0;
+              sk_tn = 0;
+              sk_hoist = false;
+              sk_grid = false;
+              sk_pack_rest = false;
+              sk_conv = true;
+              sk_epilogue = false;
+            }
+          in
+          (* Grid flavors need every materialized write in the routine covered by the Grid axis
+             ([validate_parallel]), and the conv pipeline only annotates the conv nest itself: seed
+             them when the conv statement is alone — or has exactly one companion statement, the
+             would-be epilogue tail, whose fused twin ([sk_grid] with [sk_epilogue]) relocates the
+             tail write under the Grid loop (the unfused [sk_grid] candidate then fails validation
+             and is skipped). Segments with more companions (e.g. an aligned-merged pooling nest)
+             would need the whole-segment alignment machinery of the default preset — a
+             follow-up. *)
+          let real_stmts =
+            List.filter (LL.flat_lines [ opt.LL.llc ]) ~f:(function
+              | LL.Noop | LL.Comment _ -> false
+              | LL.Zero_out tn -> not (Ir.Tnode.equal tn site.c_d)
+              | _ -> true)
+          in
+          let grid_ok =
+            (match site.c_outer with (_, n) :: _ -> n >= 2 | [] -> false)
+            && List.length real_stmts <= 2
+          in
+          let seeds = base :: (if grid_ok then [ { base with sk_grid = true } ] else []) in
+          Some (seeds, site.c_d)
+
+let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) site :
+    sketch_params list =
       let divides c n = c <= n && n % c = 0 in
       let blocktile =
         if is_gpu then
@@ -583,6 +925,7 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                     sk_hoist = false;
                     sk_grid = false;
                     sk_pack_rest = false;
+                    sk_conv = false;
                     sk_epilogue = false;
                   }
               else None)
@@ -603,6 +946,7 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                       sk_hoist = false;
                       sk_grid = false;
                       sk_pack_rest = false;
+                      sk_conv = false;
                       sk_epilogue = false;
                     }
                 else None)
@@ -642,6 +986,7 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                       sk_hoist = false;
                       sk_grid = false;
                       sk_pack_rest = false;
+                      sk_conv = false;
                       sk_epilogue = false;
                     }
                 else None)
@@ -698,6 +1043,7 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                         sk_hoist = false;
                         sk_grid = false;
                         sk_pack_rest = false;
+                        sk_conv = false;
                         sk_epilogue = false;
                       }
                   else None)
@@ -734,6 +1080,7 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                         sk_hoist = false;
                         sk_grid = false;
                         sk_pack_rest = false;
+                        sk_conv = false;
                         sk_epilogue = false;
                       }
                   else None)
@@ -808,15 +1155,28 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
             whole @ packed
         | _ -> []
       in
-      let seeds = blocktile @ mma in
+      blocktile @ mma
+
+let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
+    (opt : LL.optimized) : sketch_params list =
+  let seeds, fuse_target =
+    match detect_matmul opt.LL.llc with
+    | None -> (
+        match conv_seed_params ~is_cpu ~limits opt with
+        | Some (seeds, d) -> (seeds, Some d)
+        | None -> ([], None))
+    | Some site -> (matmul_seed_params ~is_gpu ~is_cpu ~limits site, Some site.m_d)
+  in
+  match (seeds, fuse_target) with
+  | [], _ -> []
+  | seeds, Some d when Sched.can_fuse_epilogue ~target:d opt ->
       (* Fused-epilogue variants (gh-ocannl-486): when the site's output feeds an eligible
          elementwise tail, every seed gets a fused twin — the tuner measures fused (one kernel)
          vs. unfused (the fissioned two-kernel form). The check runs on the base code where the
          plain accumulation-nest fusion site applies; seeds whose scheduled form no longer admits
          the fusion fail their candidate compile and are skipped. *)
-      if Sched.can_fuse_epilogue ~target:site.m_d opt then
-        seeds @ List.map seeds ~f:(fun p -> { p with sk_epilogue = true })
-      else seeds
+      seeds @ List.map seeds ~f:(fun p -> { p with sk_epilogue = true })
+  | seeds, _ -> seeds
 
 (** {2 The privatized fission flavor}
 
@@ -985,7 +1345,8 @@ let spec_label = function
   | Whole (W_saved s) -> Printf.sprintf "W_saved[%d ops]" (List.length s)
   | Whole (W_preset { block_size }) -> Printf.sprintf "W_preset[bs=%s]" (bs_label block_size)
   | Whole (W_sketch p) when p.sk_mma ->
-      Printf.sprintf "W_sketch[mma-%s %dx%dx%d%s%s%s%s%s]"
+      Printf.sprintf "W_sketch[%smma-%s %dx%dx%d%s%s%s%s%s]"
+        (if p.sk_conv then "conv-" else "")
         (if p.sk_gpu then "gpu" else "cpu")
         p.sk_bm p.sk_bn p.sk_bk
         (if p.sk_bk > 0 then if p.sk_gpu then " staged" else " pack" else "")
@@ -1008,7 +1369,8 @@ let spec_label = function
       Printf.sprintf "F_sketch[%s]"
         (String.concat ~sep:","
            (List.map entries ~f:(fun (_, p) ->
-                Printf.sprintf "%s%s %dx%dx%d%s%s%s%s%s"
+                Printf.sprintf "%s%s%s %dx%dx%d%s%s%s%s%s"
+                  (if p.sk_conv then "conv-" else "")
                   (if p.sk_mma then "mma-" else "")
                   (if p.sk_gpu then "gpu" else "cpu")
                   p.sk_bm p.sk_bn p.sk_bk
