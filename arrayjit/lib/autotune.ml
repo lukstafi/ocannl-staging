@@ -745,6 +745,38 @@ let reorder_swaps ~current ~target : Sched.schedule =
           done);
   List.rev !swaps
 
+(* The segment's real top-level statements as the conv seeding counts them: glue excluded, and the
+   conv site's own [Zero_out] excluded (the pipeline's zero geometry handles it); every other
+   statement is a companion nest. *)
+let conv_real_stmts (site : conv_site) (opt : LL.optimized) : LL.t list =
+  List.filter (LL.flat_lines [ opt.LL.llc ]) ~f:(function
+    | LL.Noop | LL.Comment _ -> false
+    | LL.Zero_out tn -> not (Ir.Tnode.equal tn site.c_d)
+    | _ -> true)
+
+(* Whole-segment Grid alignment for the conv pipeline on merged segments (gh-ocannl-493): the
+   pipeline's own [Retype] covers only the conv nest, so on an aligned-merged segment (lenet's
+   conv+bias/relu+pooling) the companions' materialized writes would fail [validate_parallel].
+   Reuse the default CPU preset's aligned cross-nest analysis instead of re-proving alignment: a
+   non-empty [Sched.default_cpu] schedule Grid-retypes the outermost qualifying loop of {e every}
+   materialized-writing nest, with the equal-extent common-prefix trims applied — exactly the
+   whole-segment geometry the fissioned default runs. Accept it as the conv sketch's grid ops when
+   it covers the conv nest at its outermost loop (which must be an outer output loop of extent >=
+   2, so the pipeline's reorder keeps it outermost and pool chunking has work to split). *)
+let conv_aligned_grid (site : conv_site) (opt : LL.optimized) : Sched.schedule option =
+  match (site.c_outer, site.c_loops) with
+  | (outermost, n) :: _, first :: _ when n >= 2 && Idx.equal_symbol outermost first -> (
+      match Sched.default_cpu ~min_parallel:1 opt with
+      | [] -> None
+      | sched ->
+          if
+            List.exists sched ~f:(function
+              | Sched.Retype { axis; ty = LL.Grid } -> Idx.equal_symbol axis outermost
+              | _ -> false)
+          then Some sched
+          else None)
+  | _ -> None
+
 (* The implicit-GEMM conv pipeline (gh-ocannl-493), CPU route: reorder the accumulation nest to
    [outer..; kernel..; row; oc; ic], pack the input's [row × ic] strided-window slice and the
    kernel's [ic × oc] slice (both anchor under the innermost kernel-window loop; the packing IS
@@ -752,8 +784,12 @@ let reorder_swaps ~current ~target : Sched.schedule =
    [Tensorize (row, oc, ic)] — the register-tiled [Tile_mma] micro-kernel, with the accumulator
    contracted to a fragment resident across the innermost kernel loop (gh-ocannl-480). With
    [sk_grid], the outermost output loop is [Grid]-typed and pool-parallelizes; a whole-node
-   [Zero_out] of the output then expands with the matching geometry. *)
-let cpu_conv_sketch_schedule (site : conv_site) { sk_grid; _ } : Sched.schedule =
+   [Zero_out] of the output then expands with the matching geometry. On a segment with more than
+   one companion statement the grid ops come from [conv_aligned_grid] instead, so every companion
+   nest is annotated with the aligned whole-segment geometry (such segments carry no [Zero_out] —
+   the preset's analysis bails on those, and the seeds gate accordingly). *)
+let cpu_conv_sketch_schedule ~(opt : LL.optimized) (site : conv_site) { sk_grid; _ } :
+    Sched.schedule =
   let loop_syms =
     List.map site.c_outer ~f:fst @ site.c_kernel @ [ site.c_row; site.c_oc; site.c_red ]
   in
@@ -765,6 +801,10 @@ let cpu_conv_sketch_schedule (site : conv_site) { sk_grid; _ } : Sched.schedule 
   in
   let zops, grid_ops =
     if not sk_grid then ([], [])
+    else if List.length (conv_real_stmts site opt) > 2 then
+      match conv_aligned_grid site opt with
+      | Some sched -> ([], sched)
+      | None -> invalid_arg "Autotune conv sketch: companion nests do not align for Grid"
     else
       match site.c_outer with
       | [] -> invalid_arg "Autotune conv sketch: no outer loop to Grid-parallelize"
@@ -792,7 +832,7 @@ let sketch_schedule ~p (opt : LL.optimized) : Sched.schedule =
     if p.sk_conv then
       match detect_conv opt.LL.llc with
       | None -> invalid_arg "Autotune sketch: no convolution site detected"
-      | Some site -> (cpu_conv_sketch_schedule site p, site.c_d)
+      | Some site -> (cpu_conv_sketch_schedule ~opt site p, site.c_d)
     else
       match detect_matmul opt.LL.llc with
       | None -> invalid_arg "Autotune sketch: no matmul micro-kernel detected"
@@ -880,24 +920,22 @@ let conv_seed_params ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) (opt : 
             }
           in
           (* Grid flavors need every materialized write in the routine covered by the Grid axis
-             ([validate_parallel]), and the conv pipeline only annotates the conv nest itself: seed
-             them when the conv statement is alone — or has exactly one companion statement, the
-             would-be epilogue tail, whose fused twin ([sk_grid] with [sk_epilogue]) relocates the
-             tail write under the Grid loop (the unfused [sk_grid] candidate then fails validation
-             and is skipped; on multi-window convs the twin itself is gated — see [fuse_ok] below —
-             so both Grid candidates are skipped there). Segments with more companions (e.g. an
-             aligned-merged pooling nest)
-             would need the whole-segment alignment machinery of the default preset — a
-             follow-up. *)
-          let real_stmts =
-            List.filter (LL.flat_lines [ opt.LL.llc ]) ~f:(function
-              | LL.Noop | LL.Comment _ -> false
-              | LL.Zero_out tn -> not (Ir.Tnode.equal tn site.c_d)
-              | _ -> true)
-          in
+             ([validate_parallel]), and the conv pipeline's own [Retype] only annotates the conv
+             nest: seed them when the conv statement is alone — or has exactly one companion
+             statement, the would-be epilogue tail, whose fused twin ([sk_grid] with
+             [sk_epilogue]) relocates the tail write under the Grid loop (the unfused [sk_grid]
+             candidate then fails validation and is skipped; on multi-window convs the twin
+             itself is gated — see [fuse_ok] below — so both Grid candidates are skipped there).
+             Segments with more companions (an aligned-merged segment, e.g. lenet's
+             conv+bias/relu+pooling) are seeded when the default preset's aligned cross-nest
+             analysis Grid-annotates the whole segment ([conv_aligned_grid]) — the pipeline then
+             adopts that whole-segment geometry. The fused twin of an aligned-grid seed fails
+             its candidate compile ([Fuse_epilogue] rejects the Grid-retyped tail nest) and is
+             skipped; fusing before annotating is a recorded follow-up. *)
+          let real_stmts = conv_real_stmts site opt in
           let grid_ok =
             (match site.c_outer with (_, n) :: _ -> n >= 2 | [] -> false)
-            && List.length real_stmts <= 2
+            && (List.length real_stmts <= 2 || Option.is_some (conv_aligned_grid site opt))
           in
           let seeds = base :: (if grid_ok then [ { base with sk_grid = true } ] else []) in
           (* Fused-epilogue twins only when the store-back provably lands after the whole kernel
