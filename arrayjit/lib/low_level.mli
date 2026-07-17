@@ -403,6 +403,14 @@ val buffer_access_spans : stmt_serial:bool -> t list -> (Tnode.t, int * int) Bas
     kernels have no grid-wide synchronization between top-level statements. Returns [None] when the
     code contains [Staged_compilation] (opaque accesses: no aliasing plan can be trusted). *)
 
+val sink_zero_outs : t -> t
+(** gh-ocannl-489 follow-up: sinks each top-level [Zero_out] to just before the first later
+    top-level statement accessing the zeroed node ([Train.grad_update]'s up-front [zero_grads]
+    block otherwise starts every gradient's live span at that block, nesting the backprop chain's
+    intervals and defeating the arena planner). Sound: a [Zero_out] commutes with statements not
+    accessing the node; it never crosses such an access, a [Staged_compilation], or a
+    [Workgroup_barrier]. Apply to whole-routine code BEFORE scheduling/fission. *)
+
 (** {2 Printing} *)
 
 val code_hum_margin : int ref

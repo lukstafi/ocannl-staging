@@ -605,6 +605,16 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     let (name : string), (lowered : Low_level.optimized) =
       lower_assignments optim_ctx ?name bindings comp.asgns
     in
+    (* gh-ocannl-489 follow-up: with the liveness planner on, sink whole-node initializations
+       toward their first use so live spans start there instead of at an up-front zeroing block
+       (which nests the backprop gradient chain's intervals and defeats [plan_arena_offsets]).
+       Reordering only -- values are unchanged; gated to keep the planner-off pipeline
+       byte-identical. Before scheduling: segment cuts and cross-nest merges see the sunk order. *)
+    let lowered =
+      if buffer_aliasing () then
+        { lowered with Low_level.llc = Low_level.sink_zero_outs lowered.Low_level.llc }
+      else lowered
+    in
     let limits = Device.hardware_limits () in
     let lowereds =
       match (lowered_transform, lowered_transforms) with
