@@ -156,7 +156,10 @@ schedule_log_launches=false
 # preserved past its last read within the routine — reading one from the host or from a
 # later-compiled routine raises a User_error (mark the node observable before compiling, or
 # disable this setting). Most effective when the whole training step compiles as one routine
-# (e.g. Train.grad_update + sgd_update sequenced into a single compilation).
+# (e.g. Train.grad_update + sgd_update sequenced into a single compilation). Also sinks each
+# whole-node zeroing to just before the node's first update (values unchanged), so the gradients
+# zeroed up-front by Train.grad_update get liveness-disjoint spans across the backprop chain
+# instead of all starting at the zero-grads block.
 buffer_aliasing=false
 
 # If true, linking a liveness-planned routine logs one stderr line with the working pool's arena

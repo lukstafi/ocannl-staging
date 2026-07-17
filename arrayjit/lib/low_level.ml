@@ -3183,30 +3183,13 @@ let input_and_output_nodes optimized =
         (inputs, outputs)),
     optimized.merge_node )
 
-(** gh-ocannl-489 liveness-based buffer aliasing: per-tnode access span over the final (post-
-    schedule, post-fission) code of a routine, as a closed interval of positions. [segments] are the
-    routine's kernels in execution order (a singleton list when the routine was not fissioned).
-
-    Position granularity is the soundness crux. With [stmt_serial:true] every top-level statement of
-    every segment gets its own position: valid only for backends where consecutive top-level
-    statements of one compiled procedure are fully synchronized (the C backends — parallel [Grid]
-    dispatches join before the next statement). With [stmt_serial:false] all statements of a segment
-    share one position: on GPU backends a kernel's top-level statements have no grid-wide
-    synchronization between them (that lack is exactly where fission cuts), so only segment
-    boundaries — device-ordered by the fissioned routine's event chain — separate lifetimes.
-
-    Returns [None] when the code contains [Staged_compilation]: its accesses are opaque to this
-    fold, so no aliasing plan can be trusted. Scope-local reads/writes ([Get_local]/[Set_local])
-    own no buffer and are skipped; [Local_scope] bodies are descended into, since inlined virtual
-    computations read materialized nodes. *)
-let buffer_access_spans ~stmt_serial (segments : t list) :
-    (Tn.t, int * int) Base.Hashtbl.t option =
-  let spans = Hashtbl.create (module Tn) in
-  let opaque = ref false in
-  let pos = ref 0 in
-  let touch tn =
-    Hashtbl.update spans tn ~f:(function None -> (!pos, !pos) | Some (lo, _) -> (lo, !pos))
-  in
+(** Calls [touch] on every tnode whose context buffer the statement reads or writes, [on_opaque]
+    on [Staged_compilation] (its accesses cannot be enumerated). Scope-local reads/writes
+    ([Get_local]/[Set_local]) own no buffer and are skipped; [Local_scope] bodies are descended
+    into, since inlined virtual computations read materialized nodes; [Get_merge_buffer] reads the
+    merge buffer, not the node's context buffer. The single source of buffer-access truth for the
+    gh-ocannl-489 liveness passes ({!buffer_access_spans}, {!sink_zero_outs}). *)
+let iter_buffer_accesses ~(touch : Tn.t -> unit) ~(on_opaque : unit -> unit) (c : t) : unit =
   let rec scal (sc : scalar_t) : unit =
     match sc with
     | Local_scope { body; id = _; orig_indices = _ } -> stmt body
@@ -3228,7 +3211,7 @@ let buffer_access_spans ~stmt_serial (segments : t list) :
   and stmt (c : t) : unit =
     match c with
     | Noop | Comment _ -> ()
-    | Staged_compilation _ -> opaque := true
+    | Staged_compilation _ -> on_opaque ()
     | Seq (t1, t2) ->
         stmt t1;
         stmt t2
@@ -3255,12 +3238,88 @@ let buffer_access_spans ~stmt_serial (segments : t list) :
         touch b;
         stmt fallback
   in
+  stmt c
+
+(** gh-ocannl-489 liveness-based buffer aliasing: per-tnode access span over the final (post-
+    schedule, post-fission) code of a routine, as a closed interval of positions. [segments] are the
+    routine's kernels in execution order (a singleton list when the routine was not fissioned).
+
+    Position granularity is the soundness crux. With [stmt_serial:true] every top-level statement of
+    every segment gets its own position: valid only for backends where consecutive top-level
+    statements of one compiled procedure are fully synchronized (the C backends — parallel [Grid]
+    dispatches join before the next statement). With [stmt_serial:false] all statements of a segment
+    share one position: on GPU backends a kernel's top-level statements have no grid-wide
+    synchronization between them (that lack is exactly where fission cuts), so only segment
+    boundaries — device-ordered by the fissioned routine's event chain — separate lifetimes.
+
+    Returns [None] when the code contains [Staged_compilation]: its accesses are opaque to
+    {!iter_buffer_accesses}, so no aliasing plan can be trusted. *)
+let buffer_access_spans ~stmt_serial (segments : t list) :
+    (Tn.t, int * int) Base.Hashtbl.t option =
+  let spans = Hashtbl.create (module Tn) in
+  let opaque = ref false in
+  let pos = ref 0 in
+  let touch tn =
+    Hashtbl.update spans tn ~f:(function None -> (!pos, !pos) | Some (lo, _) -> (lo, !pos))
+  in
   List.iter segments ~f:(fun seg ->
       List.iter (flat_lines [ seg ]) ~f:(fun line ->
-          stmt line;
+          iter_buffer_accesses ~touch ~on_opaque:(fun () -> opaque := true) line;
           if stmt_serial then Int.incr pos);
       if not stmt_serial then Int.incr pos);
   if !opaque then None else Some spans
+
+(** gh-ocannl-489 follow-up: sink each top-level [Zero_out] to just before the first later
+    top-level statement that accesses the zeroed node. [Train.grad_update] emits every gradient's
+    [Zero_out] in one up-front block ([loss.zero_grads]), which starts all the gradients' live
+    spans at that block, so the backprop chain's intervals nest instead of being disjoint and
+    {!buffer_access_spans} finds nothing for the arena planner to overlay; after sinking, a
+    gradient's span starts at its first accumulation.
+
+    Reordering soundness: a [Zero_out] commutes with any statement that does not access the zeroed
+    node's buffer (per {!iter_buffer_accesses}, the same fold the liveness planner trusts). It
+    never moves past an access of the node, a [Staged_compilation] (opaque accesses), or a
+    [Workgroup_barrier] (cross-workgroup ordering). A [Zero_out] never re-accessed in-routine (an
+    export initializing the node for later routines) stays in place. Runs on the whole-routine
+    code BEFORE scheduling/fission, so segment cuts and cross-nest merges see the sunk order. *)
+let sink_zero_outs (llc : t) : t =
+  let lines = Array.of_list (flat_lines [ llc ]) in
+  let n = Array.length lines in
+  let accesses =
+    Array.map lines ~f:(fun line ->
+        let s = ref (Set.empty (module Tn)) in
+        let opaque = ref false in
+        iter_buffer_accesses line
+          ~touch:(fun tn -> s := Set.add !s tn)
+          ~on_opaque:(fun () -> opaque := true);
+        (!s, !opaque))
+  in
+  let barrier i =
+    snd accesses.(i) || (match lines.(i) with Workgroup_barrier -> true | _ -> false)
+  in
+  (* [inserts.(j)]: sunk [Zero_out] lines re-emitted just before line [j], in original order. *)
+  let inserts = Array.create ~len:(n + 1) [] in
+  let moved = Array.create ~len:n false in
+  Array.iteri lines ~f:(fun i line ->
+      match line with
+      | Zero_out tn ->
+          let rec find j =
+            if j >= n then None
+            else if Set.mem (fst accesses.(j)) tn || barrier j then Some j
+            else find (j + 1)
+          in
+          (match find (i + 1) with
+          | Some j when j > i + 1 ->
+              moved.(i) <- true;
+              inserts.(j) <- line :: inserts.(j)
+          | _ -> ())
+      | _ -> ());
+  if not (Array.exists moved ~f:Fn.id) then llc
+  else
+    unflat_lines
+      (List.concat
+         (List.init (n + 1) ~f:(fun j ->
+              List.rev inserts.(j) @ if j < n && not moved.(j) then [ lines.(j) ] else [])))
 
 (* gh-343: recognize the in-range guard's reduction body. Matches the two semantically-equivalent
    one-hot selectors over loop variable [k]: - [Where (Cmpeq (Embed_index (Iterator k), index_expr),
