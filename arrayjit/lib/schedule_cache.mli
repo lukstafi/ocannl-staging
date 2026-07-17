@@ -59,6 +59,7 @@ type saved_optop =
   | Privatize of { target : int; over : sym_ref }
   | Expand_zero of { tn : int }
   | Tensorize of { i : sym_ref; j : sym_ref; k : sym_ref; simd_width : int }
+  | Fuse_epilogue of { target : int; shared : bool }
 [@@deriving sexp, compare, equal]
 
 type saved_schedule = saved_optop list [@@deriving sexp, compare, equal]

@@ -79,6 +79,7 @@ type sketch_params = {
   sk_hoist : bool;
   sk_grid : bool;
   sk_pack_rest : bool;
+  sk_epilogue : bool;
 }
 (** Parameters of one matmul-sketch seed candidate; see the implementation's field docs. Exposed for
     tests (the seeding pre-filter of gh-ocannl-479 and the mixed grid-outermost shape of
@@ -120,6 +121,11 @@ type report = {
       (** Whole-routine matmul-sketch instantiations seeded (0 when no matmul micro-kernel was
           detected or no tile sizes divide the extents). Deterministic given the computation and
           backend. *)
+  epilogue_sketch_candidates : int;
+      (** Of [sketch_candidates], the fused-epilogue twins (gh-ocannl-486): seeded when the site's
+          output feeds an eligible elementwise tail ([Schedule.can_fuse_epilogue]) — each sketch is
+          then proposed both unfused and with [Schedule.Fuse_epilogue] appended, so the tuner
+          measures the one-kernel fused form against the fissioned two-kernel form. *)
   fiss_sketch_candidates : int;
       (** Per-fission-segment sketch candidates seeded (0 when the computation does not fission, or
           no segment contains a compatible matmul site). Deterministic given the computation and
