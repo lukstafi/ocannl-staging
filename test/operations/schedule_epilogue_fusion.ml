@@ -310,4 +310,50 @@ let () =
     (fun opt ->
       Sched.apply [ Sched.Fuse_epilogue { target = prod5.Tensor.value; shared = false } ] opt)
     mc5;
+  (* A fragment store-back left inside a surplus serial loop — the shape of a multi-window conv,
+     where the contraction covers only the innermost window loop — must be rejected: the relocated
+     tail would read partial accumulations. Reproduced on the matmul graph by splitting k twice so
+     the contraction runs across [k_oi], leaving the store-back inside [k_oo]. *)
+  let _, _, prod6, mc6 = make_graph () in
+  (let transform6 (opt : LL.optimized) =
+     let paths = nest_paths opt.LL.llc in
+     let i, j, k =
+       match List.find_exn paths ~f:(fun p -> List.length p = 3) with
+       | [ i; j; k ] -> (i, j, k)
+       | _ -> assert false
+     in
+     let sp_i, _, i_i = Sched.split ~axis:i ~factor:bm ~outer:LL.Serial ~inner:LL.Serial in
+     let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:8 ~outer:LL.Serial ~inner:LL.Serial in
+     let sp_ko, k_oo, k_oi = Sched.split ~axis:k_o ~factor:2 ~outer:LL.Serial ~inner:LL.Serial in
+     let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width in
+     let sched =
+       [
+         sp_i;
+         sp_k;
+         sp_ko;
+         Sched.Swap { outer = j; inner = k_oo };
+         Sched.Swap { outer = j; inner = k_oi };
+         Sched.Swap { outer = i_i; inner = k_oo };
+         Sched.Swap { outer = i_i; inner = k_oi };
+         tz;
+         Sched.Fuse_epilogue { target = prod6.Tensor.value; shared = false };
+       ]
+     in
+     Sched.apply sched opt
+   in
+   match
+     try
+       ignore
+         (Context.compile ~lowered_transform:transform6 (Context.auto ())
+            (named "epf_partial_storeback" (Train.forward mc6))
+            Ir.Indexing.Empty
+           : Context.t * Context.routine);
+       None
+     with Invalid_argument msg -> Some msg
+   with
+   | Some msg ->
+       p "epf_partial_storeback rejected with a targeted error"
+         (String.is_substring msg ~substring:"Schedule.Fuse_epilogue"
+         && String.is_substring msg ~substring:"does not index it")
+   | None -> p "epf_partial_storeback rejected with a targeted error" false);
   ignore prod4

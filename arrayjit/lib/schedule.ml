@@ -1757,7 +1757,9 @@ let apply_tensorize op (opt : Low_level.optimized) : Low_level.optimized =
     the tail uses that same tuple; the tail is elementwise (no local scopes, dynamic or merge-buffer
     reads); no later statement mentions [target] (sole consumer); the tail's other operands are not
     written by the reduction statement; and the store-back tiles cover [target]'s index space
-    bijectively (so the relocated tail writes each output element exactly once). Nodes related by
+    bijectively, with no surplus enclosing loop (extent > 1, not indexing the site) re-executing
+    the store-back per iteration (so the relocated tail writes each output element exactly once,
+    from the completed accumulation). Nodes related by
     buffer aliasing ([Tnode.alias_of]) are not analyzed — sole-consumption is judged by node
     identity. *)
 let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.optimized =
@@ -1980,6 +1982,18 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
           match match_storeback (For_loop fc) with
           | Some (lane, width, loops, st_idcs) ->
               let env' = loops @ env in
+              (* Exactly-once discipline: an enclosing loop that does not index the store-back
+                 (e.g. the outer kernel-window loop of a multi-window conv, when the contraction
+                 covers only the innermost window loop) re-executes the site per iteration with
+                 partial accumulations — the relocated tail must not run there (Codex P1 on the
+                 gh-ocannl-493 re-land). Relocating the tail after the surplus loop instead is a
+                 recorded follow-up. *)
+              List.iter env' ~f:(fun (s, e) ->
+                  if e > 1 && not (Array.exists st_idcs ~f:(idx_mentions s)) then
+                    fail
+                      ("the fragment store-back executes once per iteration of enclosing loop "
+                      ^ Indexing.symbol_ident s
+                      ^ " which does not index it — the tail would read partial accumulations"));
               if not (covers_bijectively ~env:env' st_idcs) then
                 fail "the fragment store-back tiles do not cover the output space bijectively";
               fused := true;

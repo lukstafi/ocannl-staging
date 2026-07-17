@@ -14,10 +14,12 @@
    the natural form within float-reassociation tolerance (moving [ic] inside the kernel loops
    reorders each element's reduction — conv sketches are tolerance-tier against unscheduled code,
    like the GPU fragment paths). - Autotune seeding: on the C backends a conv+bias+relu graph seeds
-   the serial and Grid-parallel conv pipelines plus their fused-epilogue twins (gh-ocannl-486), the
-   tuned routine matches the untuned twin, and the winning schedule round-trips through the saved
-   form. GPU conv seeds are a follow-up: seeding is CPU-gated, GPU backends assert zero conv
-   candidates. - detect_conv's pattern discipline: a plain matmul is not a conv site. *)
+   the serial and Grid-parallel conv pipelines; fused-epilogue twins (gh-ocannl-486) are gated off
+   on multi-window convs — the fragment store-back sits inside the outer kernel-window loop, so
+   [Fuse_epilogue]'s exactly-once check rejects the relocation (single-window convs keep their
+   twins; relocating the tail after the window loops is a recorded follow-up). The tuned routine
+   matches the untuned twin, and the winning schedule round-trips through the saved form. GPU conv
+   seeds are a follow-up: seeding is CPU-gated, GPU backends assert zero conv candidates. - detect_conv's pattern discipline: a plain matmul is not a conv site. *)
 
 open Base
 open Ocannl
@@ -99,9 +101,9 @@ let () =
         Ir.Indexing.Empty
     in
     ignore (ctx, routine);
-    (* The C-backend seed count: (serial + Grid) x (unfused + fused-epilogue twin) on unit-stride
-       rows, none on strided rows (the packing Stage packs by index range — see the pipeline
-       legs). *)
+    (* The C-backend seed count: serial + Grid on unit-stride rows (no fused-epilogue twins — a
+       3x3 conv has two kernel-window loops, so the twins are gated), none on strided rows (the
+       packing Stage packs by index range — see the pipeline legs). *)
     p (tag ^ " C-backend conv seeds") (!n_seeds = want_seeds);
     match !site with
     | None -> p (tag ^ " detected") false
@@ -117,7 +119,7 @@ let () =
               && cx.Autotune.cx_nk = 3))
   in
   detect_leg "cvd_s1v" ~stride:1 ~use_padding:false ~want_stride:1 ~want_offset:0 ~want_row:9
-    ~want_seeds:4;
+    ~want_seeds:2;
   detect_leg "cvd_s2v" ~stride:2 ~use_padding:false ~want_stride:2 ~want_offset:0 ~want_row:5
     ~want_seeds:0;
   detect_leg "cvd_s1p" ~stride:1 ~use_padding:true ~want_stride:1 ~want_offset:(-1) ~want_row:11
@@ -254,8 +256,8 @@ let () =
       (has "Tile_mma register tiling" && has "fragment_" && has "tile_")
   else p "conv pipeline structure: im2col packs, register tiling, resident fragment" true;
 
-  (* === Autotune seeding on conv+bias+relu: serial + Grid conv pipelines and their fused-epilogue
-     twins; the tuned routine matches the untuned twin === *)
+  (* === Autotune seeding on conv+bias+relu: serial + Grid conv pipelines (fused-epilogue twins
+     gated off — 3x3 is multi-window); the tuned routine matches the untuned twin === *)
   let clean_cache dir =
     if Stdlib.Sys.file_exists dir && Stdlib.Sys.is_directory dir then
       Array.iter (Stdlib.Sys.readdir dir) ~f:(fun f ->
@@ -292,10 +294,10 @@ let () =
   let got_t = Context.get_values ctx y.Tensor.value in
   (match !reports with
   | [ r ] ->
-      p "conv sketches seeded (serial+grid, with fused-epilogue twins)"
+      p "conv sketches seeded (serial+grid; twins gated on multi-window)"
         (if on_cpu then
-           r.Autotune.sketch_candidates = 4 && r.Autotune.epilogue_sketch_candidates = 2
+           r.Autotune.sketch_candidates = 2 && r.Autotune.epilogue_sketch_candidates = 0
          else r.Autotune.sketch_candidates = 0)
-  | _ -> p "conv sketches seeded (serial+grid, with fused-epilogue twins)" false);
+  | _ -> p "conv sketches seeded (serial+grid; twins gated on multi-window)" false);
   p "tuned conv+tail matches the untuned twin within tolerance"
     (Array.for_all2_exn got_t want_t ~f:(fun a b -> Float.(abs (a - b) < 1e-3)))

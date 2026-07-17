@@ -821,7 +821,7 @@ let sketch_schedule ~p (opt : LL.optimized) : Sched.schedule =
    extent (the out-channel count) at least one vector of lanes. Layout orientation needs no
    pre-filter: both operands are packed, which normalizes any stored layout. *)
 let conv_seed_params ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) (opt : LL.optimized) :
-    (sketch_params list * Ir.Tnode.t) option =
+    (sketch_params list * Ir.Tnode.t * bool) option =
   if not is_cpu then None
   else
     match detect_conv opt.LL.llc with
@@ -878,7 +878,9 @@ let conv_seed_params ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) (opt : 
              them when the conv statement is alone — or has exactly one companion statement, the
              would-be epilogue tail, whose fused twin ([sk_grid] with [sk_epilogue]) relocates the
              tail write under the Grid loop (the unfused [sk_grid] candidate then fails validation
-             and is skipped). Segments with more companions (e.g. an aligned-merged pooling nest)
+             and is skipped; on multi-window convs the twin itself is gated — see [fuse_ok] below —
+             so both Grid candidates are skipped there). Segments with more companions (e.g. an
+             aligned-merged pooling nest)
              would need the whole-segment alignment machinery of the default preset — a
              follow-up. *)
           let real_stmts =
@@ -892,7 +894,14 @@ let conv_seed_params ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) (opt : 
             && List.length real_stmts <= 2
           in
           let seeds = base :: (if grid_ok then [ { base with sk_grid = true } ] else []) in
-          Some (seeds, site.c_d)
+          (* Fused-epilogue twins only when the store-back provably lands after the whole kernel
+             window: [contract_tensorized_accumulator] contracts across the innermost window loop
+             only, so with more than one window axis of extent > 1 the fragment store-back sits
+             inside the outer window loop(s) and [Fuse_epilogue]'s exactly-once check rejects the
+             relocation (the tail would read partial accumulations). Relocating the tail after the
+             surplus window loops — regaining fusion for 2-D convs — is a recorded follow-up. *)
+          let fuse_ok = List.count site.c_axes ~f:(fun cx -> cx.cx_nk > 1) <= 1 in
+          Some (seeds, site.c_d, fuse_ok)
 
 let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) site :
     sketch_params list =
@@ -1163,7 +1172,7 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
     match detect_matmul opt.LL.llc with
     | None -> (
         match conv_seed_params ~is_cpu ~limits opt with
-        | Some (seeds, d) -> (seeds, Some d)
+        | Some (seeds, d, fuse_ok) -> (seeds, Option.some_if fuse_ok d)
         | None -> ([], None))
     | Some site -> (matmul_seed_params ~is_gpu ~is_cpu ~limits site, Some site.m_d)
   in

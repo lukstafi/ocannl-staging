@@ -11,3 +11,4 @@ fused-epilogue sketch twins seeded: true
 tuned matmul+tail matches two-kernel: true
 epf_bad_input rejected with a targeted error: true
 epf_bad_transpose rejected with a targeted error: true
+epf_partial_storeback rejected with a targeted error: true

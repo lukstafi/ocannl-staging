@@ -13,5 +13,5 @@ cvg: packed+tensorized conv matches the natural form within tolerance: true
 cvg2: reorder-only conv matches the natural form within tolerance: true
 cvg2: strided-row tensorization rejected with a targeted error: true
 conv pipeline structure: im2col packs, register tiling, resident fragment: true
-conv sketches seeded (serial+grid, with fused-epilogue twins): true
+conv sketches seeded (serial+grid; twins gated on multi-window): true
 tuned conv+tail matches the untuned twin within tolerance: true
