@@ -1,0 +1,38 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+=== pair_conflict: named cases ===
+iterator agreement                 query Same_thread  oracle same-thread 
+stencil read p-1                   query Cross_thread oracle cross-thread
+strided disjoint 2p vs 2p+1        query Disjoint     oracle disjoint    
+non-injective match p+q            query Cross_thread oracle cross-thread
+mixed radix s+4t (fits)            query Same_thread  oracle same-thread 
+mixed radix s+4t (overlaps)        query Cross_thread oracle cross-thread
+fixed disjoint slices              query Disjoint     oracle disjoint    
+transposed access                  query Cross_thread oracle cross-thread
+read row 0                         query Cross_thread oracle cross-thread
+offset loop bounds [2,5]           query Same_thread  oracle same-thread 
+rank padding                       query Same_thread  oracle same-thread 
+sub_axis is opaque                 query Same_thread  oracle opaque      
+shared static symbol               query Same_thread  oracle same-thread 
+cross-nest aligned                 query Same_thread  oracle same-thread 
+cross-nest chain-position swap     query Cross_thread oracle cross-thread
+
+=== pair_conflict: exhaustive sweep (same-nest, pairs=[p]) ===
+Cross_thread/cross-thread    50
+Cross_thread/same-thread     4
+Disjoint/disjoint            6
+Same_thread/same-thread      4
+
+=== covers_box ===
+iterators cover box                query true         oracle true        
+iterator wrong extent              query false        oracle false       
+mixed radix a+3b                   query true         oracle true        
+mixed radix wrong product          query false        oracle false       
+repeated symbol (diagonal)         query false        oracle false       
+offset misses zero                 query false        oracle false       
+stride gap 2i                      query false        oracle false       
+fixed on unit axis                 query true         oracle true        
+fixed on wide axis                 query false        oracle false       
+non-zero-based loop                query false        oracle false       
+
+unsound cases: 0
