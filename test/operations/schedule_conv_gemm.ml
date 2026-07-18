@@ -583,6 +583,85 @@ let () =
   p "cvb: tuned blocked conv matches the untuned twin within tolerance"
     (Array.for_all2_exn got_b want16 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)));
 
+  (* === Blocked flavor on an aligned-merged segment (gh-ocannl-500): the realistic convnet shape,
+     conv + materialized companions. The whole-segment Grid geometry comes from the aligned
+     cross-nest analysis ([Sched.default_cpu]) and the row is blocked SERIALLY for cache residency
+     within each pool chunk — so the block flavor fires on fused conv+bias/relu/pool segments, not
+     only conv-alone. Row = 16 (two 8-row panels). The GPU staged conv leg is gated off on
+     multi-companion segments, so this leg is cc-only. === *)
+  let make_merged16 sub =
+    let x = make_x16 sub in
+    let kern = make_kern8 sub in
+    let%op pr =
+      x +* "...| 1*oh<+kh, 1*ow<+kw, ..ic..; |kh, kw, ..ic.. -> ..oc.. => ...| oh, ow, ..oc.." kern
+    in
+    Ir.Tnode.update_memory_mode pr.Tensor.value Ir.Tnode.On_device 99;
+    let%op y2 = relu pr in
+    Ir.Tnode.update_memory_mode y2.Tensor.value Ir.Tnode.On_device 99;
+    let%op y3 = y2 *. 0.5 in
+    (x, kern, y3)
+  in
+  let want_mb =
+    let _, _, y = make_merged16 "cvmb_r" in
+    run_plain "cvmb_ref" y
+  in
+  (if on_cpu then (
+     let x, kern, y = make_merged16 "cvmb_g" in
+     let conv_sched (site : Autotune.conv_site) seg =
+       let sp_row, row_o, row_i =
+         Sched.split ~axis:site.Autotune.c_row ~factor:bm ~outer:LL.Serial ~inner:LL.Serial
+       in
+       let current =
+         List.concat_map site.Autotune.c_loops ~f:(fun s ->
+             if Ir.Indexing.equal_symbol s site.Autotune.c_row then [ row_o; row_i ] else [ s ])
+       in
+       let target =
+         List.map site.Autotune.c_outer ~f:fst
+         @ [ row_o ] @ site.Autotune.c_kernel
+         @ [ row_i; site.Autotune.c_oc; site.Autotune.c_red ]
+       in
+       let stage source tile_loops =
+         Sched.Stage { source; tile_loops; shared = false; cooperative = None; hoisted = false }
+       in
+       let tz, _lane =
+         Sched.tensorize ~i:row_i ~j:site.Autotune.c_oc ~k:site.Autotune.c_red ~simd_width:1
+       in
+       Sched.default_cpu ~min_parallel:1 seg
+       @ (sp_row :: reorder_swaps ~current ~target)
+       @ [ stage x.Tensor.value [ row_i; site.Autotune.c_red ];
+           stage kern.Tensor.value [ site.Autotune.c_red; site.Autotune.c_oc ]; tz ]
+     in
+     let got = run_fiss_sched "cvmb_cpu" y ~conv_sched in
+     p "cvmb: merged-segment blocked conv pipeline matches the natural form within tolerance"
+       (Array.for_all2_exn got want_mb ~f:(fun a b -> Float.(abs (a - b) < 1e-3))))
+   else p "cvmb: merged-segment blocked conv pipeline matches the natural form within tolerance" true);
+  clean_cache "conv_tune_cache_merged_blocked";
+  let _, _, y = make_merged16 "cvmb_t" in
+  let reports = ref [] in
+  let ctx = Context.auto () in
+  let ctx, routine =
+    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"conv_tune_cache_merged_blocked"
+      ~timing_ctx:(Context.auto ())
+      ~report:(fun r -> reports := r :: !reports)
+      ctx
+      (named "cvmb_tuned" (Train.forward y))
+      Ir.Indexing.Empty
+  in
+  let ctx = Context.run ctx routine in
+  let got_mb = Context.get_values ctx y.Tensor.value in
+  (match !reports with
+  | [ r ] ->
+      (* cc merged fission segment: serial + aligned-grid + one serial row-block panel = 3 (the
+         block flavor now seeds on merged segments, not only conv-alone). metal: GPU conv seeds gated
+         off on multi-companion segments. *)
+      p "cvmb: blocked flavor seeded on the merged fission segment"
+        (if on_cpu then r.Autotune.fiss_sketch_candidates = 3
+         else if on_metal then r.Autotune.fiss_sketch_candidates = 0
+         else true)
+  | _ -> p "cvmb: blocked flavor seeded on the merged fission segment" false);
+  p "cvmb: tuned merged-blocked conv matches the untuned twin within tolerance"
+    (Array.for_all2_exn got_mb want_mb ~f:(fun a b -> Float.(abs (a - b) < 1e-3)));
+
   (* --- The aligned-merged Grid flavor: conv + two materialized elementwise companions form one
      aligned-merged segment; the Grid conv seed adopts the default preset's whole-segment geometry
      ([Sched.default_cpu]'s aligned cross-nest analysis Grid-retypes every companion nest). --- *)

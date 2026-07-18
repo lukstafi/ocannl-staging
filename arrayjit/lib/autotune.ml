@@ -801,13 +801,17 @@ let conv_split_row_current (site : conv_site) ~row_o ~row_i : Idx.symbol list =
    nest is annotated with the aligned whole-segment geometry (such segments carry no [Zero_out] —
    the preset's analysis bails on those, and the seeds gate accordingly).
 
-   With [sk_bm > 0] (gh-ocannl-500) the GEMM row is split into pool-parallel [Grid] panels of
-   [sk_bm] rows before the reorder — cache-blocked GEBP-style panels, the conv analog of
-   [cpu_mma_sketch_schedule]'s row-block split — and the in-panel [row_i × oc] micro-kernel is
-   tensorized (the register tiling peels its own sub-tile edges). [sk_bm] must divide [c_nrow] so the
-   split stays guard-free (a remainder guard would break the reorder's perfect nesting) and is
-   proposed only on unzeroed segments (the seeds gate accordingly), so no zero geometry is needed —
-   the [Zero_out] lives in its own [`Zeros] segment. *)
+   With [sk_bm > 0] (gh-ocannl-500) the GEMM row is split into panels of [sk_bm] rows before the
+   reorder — cache-blocked GEBP-style panels, the conv analog of [cpu_mma_sketch_schedule]'s
+   row-block split — and the in-panel [row_i × oc] micro-kernel is tensorized (the register tiling
+   peels its own sub-tile edges). [sk_bm] must divide [c_nrow] so the split stays guard-free (a
+   remainder guard would break the reorder's perfect nesting). The panel loop's parallelism source
+   depends on the segment: on a conv-alone segment the panel loop is [Grid]-typed directly (one pool
+   chunk per row-block); on an aligned-merged segment (conv + materialized companions, e.g. lenet's
+   conv+bias/relu+pooling) the whole-segment [Grid] geometry comes from [conv_aligned_grid] as for
+   the unblocked flavor and the panel loop stays [Serial] — pure cache blocking within each pool
+   chunk. Both cases are unzeroed (the seeds gate accordingly): the [Zero_out] lives in its own
+   [`Zeros] segment, so no zero geometry is needed. *)
 let cpu_conv_sketch_schedule ~(opt : LL.optimized) (site : conv_site) { sk_grid; sk_bm; _ } :
     Sched.schedule =
   let stage source tile_loops =
@@ -816,8 +820,17 @@ let cpu_conv_sketch_schedule ~(opt : LL.optimized) (site : conv_site) { sk_grid;
   if sk_bm > 0 then (
     if site.c_nrow % sk_bm <> 0 then
       invalid_arg "Autotune conv sketch: row block must divide the row extent";
+    (* On a merged segment the aligned whole-segment [Grid] annotation parallelizes; the panel loop
+       is a serial cache block. On a conv-alone segment the panel loop is the parallel [Grid]. *)
+    let grid_ops, panel_axis =
+      if List.length (conv_real_stmts site opt) > 2 then
+        match conv_aligned_grid site opt with
+        | Some sched -> (sched, LL.Serial)
+        | None -> invalid_arg "Autotune conv sketch: companion nests do not align for Grid"
+      else ([], LL.Grid)
+    in
     let sp_row, row_o, row_i =
-      Sched.split ~axis:site.c_row ~factor:sk_bm ~outer:LL.Grid ~inner:LL.Serial
+      Sched.split ~axis:site.c_row ~factor:sk_bm ~outer:panel_axis ~inner:LL.Serial
     in
     let current = conv_split_row_current site ~row_o ~row_i in
     let target =
@@ -825,7 +838,8 @@ let cpu_conv_sketch_schedule ~(opt : LL.optimized) (site : conv_site) { sk_grid;
       @ [ row_i; site.c_oc; site.c_red ]
     in
     let tz, _lane = Sched.tensorize ~i:row_i ~j:site.c_oc ~k:site.c_red ~simd_width:1 in
-    (sp_row :: reorder_swaps ~current ~target)
+    grid_ops
+    @ (sp_row :: reorder_swaps ~current ~target)
     @ [ stage site.c_a [ row_i; site.c_red ]; stage site.c_b [ site.c_red; site.c_oc ]; tz ])
   else
     let loop_syms =
@@ -1031,13 +1045,18 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
               (match site.c_outer with (_, n) :: _ -> n >= 2 | [] -> false)
               && (List.length real_stmts <= 2 || Option.is_some (conv_aligned_grid site opt))
             in
-            (* Cache-blocked row-panel flavors (gh-ocannl-500): split the GEMM row into pool-parallel
-               [Grid] panels of [sk_bm] rows ([cpu_conv_sketch_schedule]'s [sk_bm] leg). Dividing
-               blocks only — the split must stay guard-free so the reorder's [Swap]s are well-formed
-               — and at least two panels, so the pool has work to partition. Proposed on the unzeroed
-               conv-alone segment (the pipeline Grid-annotates only the conv nest, and carries no zero
-               geometry): the whole-routine zeroed graph keeps the serial/aligned flavors above. *)
-            let block_ok = (not site.c_zeroed) && List.length real_stmts <= 1 in
+            (* Cache-blocked row-panel flavors (gh-ocannl-500): split the GEMM row into panels of
+               [sk_bm] rows ([cpu_conv_sketch_schedule]'s [sk_bm] leg). Dividing blocks only — the
+               split must stay guard-free so the reorder's [Swap]s are well-formed — and at least two
+               panels. Proposed on any unzeroed segment: a conv-alone segment [Grid]-parallelizes the
+               panel loop, an aligned-merged segment adopts the whole-segment [Grid] geometry
+               ([conv_aligned_grid]) and blocks the row serially for cache residency. The
+               whole-routine zeroed graph keeps the serial/aligned flavors above (its [Zero_out] is
+               in the routine, so the aligned analysis bails and the block flavor is not seeded). *)
+            let block_ok =
+              (not site.c_zeroed)
+              && (List.length real_stmts <= 1 || Option.is_some (conv_aligned_grid site opt))
+            in
             let row_blocks =
               if not block_ok then []
               else
