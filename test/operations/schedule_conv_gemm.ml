@@ -473,6 +473,116 @@ let () =
   p "cvu: tuned conv matches the untuned twin within tolerance"
     (Array.for_all2_exn got_u want8 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)));
 
+  (* === Blocked tile flavors (gh-ocannl-500): the GEMM row is split into [Grid] panels before the
+     reorder — cache-blocked pool panels on the C backends, extra threadgroups per row-block on GPU —
+     and the in-panel micro-kernel is tensorized. Row = 16 so an 8-row block gives two panels; oc =
+     16 and ic = 8 keep the whole-extent intrinsic-tile gates on the tensorized column/reduction.
+     Dividing blocks only: the split stays guard-free, so the reorder's [Swap]s and (GPU)
+     cooperative-load barriers are well-formed. === *)
+  let make_x16 tag =
+    NTDSL.init ~l:(tag ^ "x") ~prec:Ir.Ops.single ~b:[ 2 ] ~o:[ 18; 18; 8 ]
+      ~f:(fun idcs -> Float.of_int ((idcs.(0) + idcs.(1) + (2 * idcs.(2)) + (3 * idcs.(3))) % 7))
+      ()
+  in
+  let make_conv16 sub =
+    let x = make_x16 sub in
+    let kern = make_kern8 sub in
+    let%op y =
+      x +* "...| 1*oh<+kh, 1*ow<+kw, ..ic..; |kh, kw, ..ic.. -> ..oc.. => ...| oh, ow, ..oc.." kern
+    in
+    (x, kern, y)
+  in
+  let want16 =
+    let _, _, y = make_conv16 "cvb_r" in
+    run_plain "cvb_ref" y
+  in
+  let bm = 8 in
+  (* --- Hand-built blocked pipeline through the fission seam: split the row into [Grid] panels of
+     [bm], reorder to [outer..; row_o; kernel..; row_i; oc; ic], stage the in-panel slices, and
+     tensorize (row_i, oc, ic). On the C backends the panels are non-shared packing Stages and the
+     panel loop pool-parallelizes; on metal they are cooperative shared tiles and each panel is a
+     threadgroup. --- *)
+  let blocked_sched ~shared ~simd_width (x, kern) (site : Autotune.conv_site) _seg =
+    let sp_row, row_o, row_i =
+      Sched.split ~axis:site.Autotune.c_row ~factor:bm ~outer:LL.Grid ~inner:LL.Serial
+    in
+    let current =
+      List.concat_map site.Autotune.c_loops ~f:(fun s ->
+          if Ir.Indexing.equal_symbol s site.Autotune.c_row then [ row_o; row_i ] else [ s ])
+    in
+    let target =
+      List.map site.Autotune.c_outer ~f:fst
+      @ [ row_o ] @ site.Autotune.c_kernel
+      @ [ row_i; site.Autotune.c_oc; site.Autotune.c_red ]
+    in
+    let cooperative = if shared then Some simd_width else None in
+    let stage source tile_loops = Sched.Stage { source; tile_loops; shared; cooperative; hoisted = false } in
+    let outer_grid =
+      if not shared then []
+      else List.map site.Autotune.c_outer ~f:(fun (s, _) -> Sched.Retype { axis = s; ty = LL.Grid })
+    in
+    let tz, _lane =
+      Sched.tensorize ~i:row_i ~j:site.Autotune.c_oc ~k:site.Autotune.c_red ~simd_width
+    in
+    (outer_grid @ [ sp_row ])
+    @ reorder_swaps ~current ~target
+    @ [ stage x.Tensor.value [ row_i; site.Autotune.c_red ];
+        stage kern.Tensor.value [ site.Autotune.c_red; site.Autotune.c_oc ]; tz ]
+  in
+  (* Constant label across backends (the [.expected] is backend-neutral): the CPU leg uses
+     non-shared packing panels, the metal leg cooperative shared tiles at the backend lane width. *)
+  let blocked_ok =
+    if on_cpu then (
+      let x, kern, y = make_conv16 "cvb_c" in
+      let got =
+        run_fiss_sched "cvb_cpu" y
+          ~conv_sched:(blocked_sched ~shared:false ~simd_width:1 (x, kern))
+      in
+      Array.for_all2_exn got want16 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)))
+    else if on_metal then (
+      let w =
+        match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
+        | Some m -> m.Ir.Backend_intf.mma_simd_width
+        | None -> 32
+      in
+      let x, kern, y = make_conv16 "cvb_g" in
+      let got =
+        run_fiss_sched "cvb_gpu" y ~conv_sched:(blocked_sched ~shared:true ~simd_width:w (x, kern))
+      in
+      Array.for_all2_exn got want16 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)))
+    else true
+  in
+  p "cvb: blocked (row-panel) conv pipeline matches the natural form within tolerance" blocked_ok;
+
+  (* --- Seeding: the fission segment now proposes the row-block flavors alongside the whole-extent
+     ones — an extra CPU cache-panel seed (bm=8, two panels) and an extra GPU threadgroup-block seed
+     — and the tuned routine still matches the untuned twin. --- *)
+  clean_cache "conv_tune_cache_blocked";
+  let _, _, y = make_conv16 "cvb_t" in
+  let reports = ref [] in
+  let ctx = Context.auto () in
+  let ctx, routine =
+    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"conv_tune_cache_blocked"
+      ~timing_ctx:(Context.auto ())
+      ~report:(fun r -> reports := r :: !reports)
+      ctx
+      (named "cvb_tuned" (Train.forward y))
+      Ir.Indexing.Empty
+  in
+  let ctx = Context.run ctx routine in
+  let got_b = Context.get_values ctx y.Tensor.value in
+  (match !reports with
+  | [ r ] ->
+      (* cc per-segment: serial + grid + one row-block panel (bm=8, 16/8=2 panels) = 3.
+         metal per-segment: whole-extent staged + one threadgroup-block (bm=8) = 2. *)
+      p "cvb: blocked flavors seeded per fission segment"
+        (if on_metal then r.Autotune.fiss_sketch_candidates = 2
+         else if on_cpu then r.Autotune.fiss_sketch_candidates = 3
+         else true)
+  | _ -> p "cvb: blocked flavors seeded per fission segment" false);
+  p "cvb: tuned blocked conv matches the untuned twin within tolerance"
+    (Array.for_all2_exn got_b want16 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)));
+
   (* --- The aligned-merged Grid flavor: conv + two materialized elementwise companions form one
      aligned-merged segment; the Grid conv seed adopts the default preset's whole-segment geometry
      ([Sched.default_cpu]'s aligned cross-nest analysis Grid-retypes every companion nest). --- *)
