@@ -181,3 +181,18 @@ let () =
   let rho1 = Row.get_row_var () and rho2 = Row.get_row_var () in
   check_list "eq, mirror cross surpluses then rho2 ~ [] (flat-satisfiable, accepted)"
     [ mirror_cross_pair ~sh_id:29 rho1 rho2; pin_empty ~sh_id:31 rho2 ]
+
+(* Balanced flanks with conflicting rigid dims: [3].<rho1> ~ <rho2>.[5]. The empty close (k = 0)
+   is refuted (3 <> 5), but the overlap-shifted principal family is satisfiable: rho2 = [3].<m>,
+   rho1 = <m>.[5] (least member rho2 = [3], rho1 = [5]). The stage-6/7 close must pick the least
+   non-refuted overlap rather than unconditionally closing rho2 to empty. *)
+let balanced_conflict_pair ~sh_id rho1 rho2 =
+  let r1 = Row.get_row_for_var (Row.provenance ~sh_id ~kind:`Output) rho1 in
+  let r2 = Row.get_row_for_var (Row.provenance ~sh_id:(sh_id + 1) ~kind:`Output) rho2 in
+  Row.Row_eq
+    { r1 = { r1 with beg_dims = [ dim 3 ] }; r2 = { r2 with dims = [ dim 5 ] }; origin }
+
+let () =
+  let rho1 = Row.get_row_var () and rho2 = Row.get_row_var () in
+  check_list "eq, balanced conflicting flanks (family solution, accepted)"
+    [ balanced_conflict_pair ~sh_id:33 rho1 rho2 ]

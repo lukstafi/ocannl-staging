@@ -2680,22 +2680,40 @@ let%debug5_sexp rec unify_row ~stage origin (eq : t * t) env : constraint_ list 
                 solve (solve ([], env) binding) residual
               else if is_stage6_up stage then
                 (* Balanced flanks (s = t): the rank stays ambiguous, so earlier stages defer
-                   (the residual reproduces itself verbatim). Stage 6 closes the least-material
-                   disjunct: rank collapses to s + t - s = t, i.e. [v2] closes to empty, after
-                   which the re-emitted equation resolves against a closed row. Emission order as
-                   in the shifted-splits case above: the closing binding comes second to be
-                   processed first next round. *)
-                let closing_var = match r2.bcast with Row_var v2 -> v2 | Broadcastable -> v in
-                ( [
-                    residual;
-                    Row_eq
-                      {
-                        r1 = row_of_var closing_var prov;
-                        r2 = { beg_dims = []; dims = []; bcast = Broadcastable; prov };
-                        origin;
-                      };
-                  ],
-                  env )
+                   (the residual reproduces itself verbatim). A solution exists at every overlap
+                   k in 0..s whose overlap equations begS[k+i] = dimsR[i] (i < s - k) hold: k = 0
+                   is the empty close (rank s), k = s the always-satisfiable principal family
+                   v2 = begS.<m>, v = <m>.dimsR. Stage 6 commits the least-material disjunct not
+                   definitely refuted: the smallest k whose overlap pairs no two rigid unequal
+                   dims (an unconditional empty close would reject satisfiable stores like
+                   [3].<v> = <v2>.[5], whose least solution is v2 = [3], v = [5]). Binding [v2]
+                   and re-solving the residual eagerly derives the overlap equations and [v]'s
+                   value through the closed-row arm in the same pass. *)
+                let v2 =
+                  match r2.bcast with Row_var v2 -> v2 | Broadcastable -> assert false
+                in
+                let begS = List.drop beg_dims1 beg_dims_l in
+                let definitely_conflicting d1 d2 =
+                  match (d1, d2) with
+                  | Dim { d = a; _ }, Dim { d = b; _ } -> a <> b && a <> 1 && b <> 1
+                  | _ -> false
+                in
+                let rec least_k k =
+                  if k >= s then s
+                  else if
+                    List.exists2_exn (List.drop begS k) (List.take r2.dims (s - k))
+                      ~f:definitely_conflicting
+                  then least_k (k + 1)
+                  else k
+                in
+                let k = least_k 0 in
+                let value : row =
+                  if k = s then
+                    { beg_dims = begS; dims = []; bcast = Row_var (get_row_var ()); prov }
+                  else { beg_dims = []; dims = List.take begS k; bcast = Broadcastable; prov }
+                in
+                let binding = Row_eq { r1 = row_of_var v2 prov; r2 = value; origin } in
+                solve (solve ([], env) binding) residual
               else ([ residual ], env)
           in
           List.fold ~init:(unsolved, env) ~f:solve !ineqs
