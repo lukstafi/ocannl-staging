@@ -56,6 +56,17 @@ let make_x tag =
     ~f:(fun idcs -> Float.of_int ((idcs.(0) + idcs.(1) + (2 * idcs.(2)) + (3 * idcs.(3))) % 7))
     ()
 
+(* Same values as {!make_x}, but through the padding-aware [reshape] constructor: the buffer is
+   created at the node's first compilation with the inferred padding (data copied into the
+   interior), so a padded conv's halo demand is satisfiable — [init] commits an unpadded layout at
+   creation, and a padded conv on it is rejected. *)
+let make_x_fresh tag =
+  let ndarray =
+    Ir.Ndarray.init_array ~debug:(tag ^ "x") Ir.Ops.single ~dims:[| 2; 11; 11; 4 |] ~padding:None
+      ~f:(fun idcs -> Float.of_int ((idcs.(0) + idcs.(1) + (2 * idcs.(2)) + (3 * idcs.(3))) % 7))
+  in
+  NTDSL.reshape ~l:(tag ^ "x") ~b:[ 2 ] ~o:[ 11; 11; 4 ] ndarray ()
+
 let make_kern tag =
   NTDSL.init ~l:(tag ^ "k") ~prec:Ir.Ops.single ~i:[ 3; 3; 4 ] ~o:[ 8 ]
     ~f:(fun idcs ->
@@ -78,7 +89,10 @@ let () =
   (* === detect_conv across stride/padding variants (via the conv2d block: random params are fine,
      only the lowered structure is inspected) === *)
   let detect_leg tag ~stride ~use_padding ~want_stride ~want_offset ~want_row ~want_seeds =
-    let x = make_x tag in
+    (* The padded leg's input goes through the padding-aware constructor: its layout commits at
+       first compilation WITH the conv's halo, and the lowered access is then offset-free in
+       buffer space — a valid conv over the physically padded buffer. *)
+    let x = if use_padding then make_x_fresh tag else make_x tag in
     let conv =
       Nn_blocks.conv2d ~label:[ tag ] ~kernel_size:3 ~stride ~use_padding ~out_channels:8 ()
     in
@@ -122,8 +136,8 @@ let () =
     ~want_seeds:2;
   detect_leg "cvd_s2v" ~stride:2 ~use_padding:false ~want_stride:2 ~want_offset:0 ~want_row:5
     ~want_seeds:0;
-  detect_leg "cvd_s1p" ~stride:1 ~use_padding:true ~want_stride:1 ~want_offset:(-1) ~want_row:11
-    ~want_seeds:0;
+  detect_leg "cvd_s1p" ~stride:1 ~use_padding:true ~want_stride:1 ~want_offset:0 ~want_row:11
+    ~want_seeds:2;
 
   (* === Pattern discipline: a matmul is not a conv site === *)
   (let ma =
@@ -153,14 +167,25 @@ let () =
 
   (* === The hand-built implicit-GEMM pipeline (C backends; unit-lane Tensorize like the packed mma
      pipelines). Stride-2 and padded variants included: strided windows only change the packing
-     Stage's index arithmetic, and padded convs read a physically padded source (negative offsets
-     land in the halo — the lowered nest carries no guards for a Stage to displace), so the pipeline
-     is uniform across the variants. === *)
+     Stage's index arithmetic, and a padded conv reads a physically padded source whose halo is
+     part of the buffer — the lowered nest is offset-free in buffer space (a valid conv over the
+     padded dims), so [Stage]'s edge guards and the tensorization apply unchanged. === *)
   let make_conv_s1v sub =
     let x = make_x sub in
     let kern = make_kern sub in
     let%op y =
       x +* "...| 1*oh<+kh, 1*ow<+kw, ..ic..; |kh, kw, ..ic.. -> ..oc.. => ...| oh, ow, ..oc.." kern
+    in
+    (x, kern, y)
+  in
+  let make_conv_s1p sub =
+    (* The conv input goes through the padding-aware constructor ([init] would commit an unpadded
+       layout at creation, and the padded conv on it would be rejected); it is a host-init like
+       the other legs' inputs, so it is not written in the routine and the packing Stage applies. *)
+    let x = make_x_fresh sub in
+    let kern = make_kern sub in
+    let%op y =
+      x +* "...| 1*oh=+kh, 1*ow=+kw, ..ic..; |kh, kw, ..ic.. -> ..oc.. => ...| oh, ow, ..oc.." kern
     in
     (x, kern, y)
   in
@@ -230,10 +255,10 @@ let () =
       p (tag ^ ": packed+tensorized conv matches the natural form within tolerance") true)
   in
   pipeline_leg "cvg" make_conv_s1v;
-  (* No padded pipeline leg: padded convs read the halo of a physically padded input, and the
-     staging pipeline is not halo-aware yet (Stage's edge guards clip tile loads against the
-     logical dims) — the seeds are gated to offset-free sites (asserted above), so autotune never
-     proposes the unsound form. Halo-aware staging is a follow-up. *)
+  (* The padded pipeline leg: the packing Stage's tile loads iterate the padded buffer (its edge
+     guards compare against the padded dims, [Tn.dims]), so the halo values participate in the
+     packed tile exactly as in the natural form — staging padded convs is sound. *)
+  pipeline_leg "cvp" make_conv_s1p;
   (* A strided row packs a dilated tile ([Stage] packs by index range), which [Tensorize]'s
      unit-coefficient discipline rejects — the reorder still holds, and the seeds are gated on a
      unit-stride row (asserted below), so autotune never proposes the rejected form. *)

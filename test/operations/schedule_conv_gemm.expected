@@ -10,6 +10,9 @@ matmul is not a conv site: true
 cvg: reorder-only conv matches the natural form within tolerance: true
 cvg: packed+tensorized conv matches the reorder-only twin bitwise: true
 cvg: packed+tensorized conv matches the natural form within tolerance: true
+cvp: reorder-only conv matches the natural form within tolerance: true
+cvp: packed+tensorized conv matches the reorder-only twin bitwise: true
+cvp: packed+tensorized conv matches the natural form within tolerance: true
 cvg2: reorder-only conv matches the natural form within tolerance: true
 cvg2: strided-row tensorization rejected with a targeted error: true
 conv pipeline structure: im2col packs, register tiling, resident fragment: true

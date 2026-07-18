@@ -1,0 +1,11 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+locked: layout committed at creation: true
+locked: REJECTED: Operation padding (left=1, right=2) exceeds resolved padding
+---
+fresh: intermediate starts unforced: true
+fresh: committed padding = [0/0; 1/2; 1/2; 0/0] elem=0.
+fresh: buffer dims = [2; 14; 14; 4]
+fresh: lowered conv is offset-free in buffer space: true
+fresh: window and stride detected: true
+fresh_again: same-geometry padded conv on committed operand accepted: true
