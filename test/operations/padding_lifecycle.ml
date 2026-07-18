@@ -90,8 +90,48 @@ let () =
         (List.for_all s.Autotune.c_axes ~f:(fun cx ->
              cx.Autotune.cx_stride = 1 && cx.Autotune.cx_nk = 3)));
   (* === Compatible late demand on the now-committed operand is accepted === *)
-  match compile_conv ~ctx "fresh_again" x2 with
+  (match compile_conv ~ctx "fresh_again" x2 with
   | exception Row.Shape_error (msg, _) ->
       pr "fresh_again: unexpected rejection: %s\n" (String.prefix msg 60)
   | (_ : Context.t * Autotune.conv_site option) ->
-      p "fresh_again: same-geometry padded conv on committed operand accepted" true
+      p "fresh_again: same-geometry padded conv on committed operand accepted" true);
+  pr "---\n";
+  (* === Wrapped-padded data: the creation-committed neutral element is enforced === *)
+  (* [wrap_padded] commits both the margins and the [padded_value] at creation. A padded conv
+     (neutral 0) reading margins committed to 1 must be rejected — without the reconciliation it
+     would silently sum the 1s from the halo (Codex P1 on PR #173). *)
+  let make_wrapped tag ~padded_value =
+    let ndarray =
+      Ir.Ndarray.init_array ~debug:(tag ^ "x") Ir.Ops.single ~dims:[| 2; 14; 14; 4 |] ~padding:None
+        ~f:(fun _ -> padded_value)
+    in
+    Operation.wrap_padded ~grad_spec:Tensor.Prohibit_grad ~l:(tag ^ "x") ~b:[ 2 ]
+      ~o:[ 11; 11; 4 ]
+      ~padding:
+        Ir.Ops.
+          [|
+            { left = 0; right = 0 };
+            { left = 1; right = 2 };
+            { left = 1; right = 2 };
+            { left = 0; right = 0 };
+          |]
+      ~padded_value ndarray ()
+  in
+  Tensor.unsafe_reinitialize ();
+  let xw1 = make_wrapped "wrapped_one" ~padded_value:1.0 in
+  (match compile_conv "wrapped_one" xw1 with
+  | exception Row.Shape_error (msg, _) ->
+      pr "wrapped_one: REJECTED: %s\n" (String.prefix msg 42)
+  | (_ : Context.t * Autotune.conv_site option) ->
+      p "wrapped_one: conv's 0 neutral vs margins committed to 1 rejected" false);
+  Tensor.unsafe_reinitialize ();
+  let xw0 = make_wrapped "wrapped_zero" ~padded_value:0.0 in
+  match compile_conv "wrapped_zero" xw0 with
+  | exception Row.Shape_error (msg, _) ->
+      pr "wrapped_zero: unexpected rejection: %s\n" (String.prefix msg 60)
+  | _, site ->
+      p "wrapped_zero: conv on matching committed neutral accepted" true;
+      p "wrapped_zero: offset-free in buffer space"
+        (match site with
+        | Some s -> List.for_all s.Autotune.c_axes ~f:(fun cx -> cx.Autotune.cx_offset = 0)
+        | None -> false)

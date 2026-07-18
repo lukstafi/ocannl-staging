@@ -9,3 +9,7 @@ fresh: buffer dims = [2; 14; 14; 4]
 fresh: lowered conv is offset-free in buffer space: true
 fresh: window and stride detected: true
 fresh_again: same-geometry padded conv on committed operand accepted: true
+---
+wrapped_one: REJECTED: Conflicting padding neutral elements: an o
+wrapped_zero: conv on matching committed neutral accepted: true
+wrapped_zero: offset-free in buffer space: true

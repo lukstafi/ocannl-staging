@@ -643,8 +643,7 @@ let%debug4_sexp get_inequalities ?(for_projections = false)
            ])
         @ mark_terminal ~is_param )
   | Terminal { is_param; logic = Data (Padded { data; padding; padded_value }) } ->
-      (* FIXME: constrain padding. *)
-      ignore (padding, padded_value);
+      ignore padded_value;
       ( dim_map_empty,
         dim_var_set_empty,
         (if for_projections then []
@@ -655,8 +654,18 @@ let%debug4_sexp get_inequalities ?(for_projections = false)
                  r = [ cur_sh.batch; cur_sh.output; cur_sh.input ];
                  constr =
                    Exact
+                     (* The ndarray is padded as given: the shape's (logical) dims exclude the
+                        margins. The committed widths and neutral element themselves are enforced
+                        against later demands via the tnode's forced padding lazy (see
+                        [fresh_proj_ids]). *)
                      (Ir.Ndarray.dims data
-                     |> Array.map ~f:(fun d -> get_default_dim ~d ())
+                     |> Array.mapi ~f:(fun i d ->
+                         let d =
+                           if i < Array.length padding then
+                             d - padding.(i).Ir.Ops.left - padding.(i).Ir.Ops.right
+                           else d
+                         in
+                         get_default_dim ~d ())
                      |> Array.to_list);
                  origin =
                    [
@@ -1675,7 +1684,31 @@ let fresh_proj_ids update =
           (* [Lazy.is_val] can be true for a lazy currently being forced (forcing it raises
              [Lazy.Undefined]) — mid-force means this very derivation is part of committing the
              tnode's layout, so the padding is not settled yet: treat as not locked. *)
-          try Some (Option.map ~f:fst (Lazy.force tn.Ir.Tnode.padding))
+          try
+            let p = Lazy.force tn.Ir.Tnode.padding in
+            (* Reconcile the committed neutral element into the shape: nodes created with an
+               already-padded layout (e.g. [wrap_padded]) commit their [padded_value] at creation
+               while the shape's [padding_elem] starts unknown — without this, a later
+               margin-reading consumer with a different neutral would commit its own neutral at
+               the shape level unchecked and silently read the buffer's halo values (Codex P1 on
+               PR #173). [update_padding_elem] then rejects conflicting consumers. *)
+            (match p with
+            | Some (_, (Some v as elem)) -> (
+                match sh.padding_elem with
+                | None -> sh.padding_elem <- Some elem
+                | Some (Some v1) when Float.( = ) v1 v -> ()
+                | Some None -> ()
+                | Some (Some v1) ->
+                    raise
+                    @@ Row.Shape_error
+                         ( [%string
+                             "Conflicting padding neutral elements: the tensor's buffer committed \
+                              margins holding %{v#Float}, but %{v1#Float} was inferred for its \
+                              shape. Materialize a separate copy of the tensor for the \
+                              conflicting padded consumers"],
+                           [ Shape_mismatch [ sh ] ] ))
+            | _ -> ());
+            Some (Option.map ~f:fst p)
           with Lazy.Undefined -> None)
       | _ -> None
     in
