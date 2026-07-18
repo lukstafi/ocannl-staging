@@ -87,8 +87,12 @@ type t = {
   dims : int array Lazy.t;
   padding : (Ops.axis_padding array * float option) option Lazy.t;
       (** If the tensor node is pre-padded, this is the pair of (left padding, right padding) per
-          axis and the padding/neutral value. The inner [float option] is [None] when the tensor is
-          used by operations with different neutral elements, requiring margin resets before each
+          axis and the padding/neutral value. Both the margins and the neutral value are part of
+          the node's identity: they commit when this lazy is forced (the node's first
+          compilation), the margins permanently hold the neutral value, and later conflicting
+          demands — more padding, or margin-reading operations expecting a different neutral — are
+          rejected at shape-inference time. The inner [float option] is [None] only in the legacy
+          "undetermined neutral" state, which triggers defensive margin resets before each
           operation. *)
   size_in_bytes : int Lazy.t;
   id : int;

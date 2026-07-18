@@ -1633,27 +1633,55 @@ let all_rows_w_origin update_step =
 let fresh_proj_ids update =
   let resolved_padding = ref [] in
   let inferred_padding = ref [] in
-  let fetch_padding ~id row row_padding =
-    let tn_opt = Ir.Tnode.find ~id in
-    let is_resolved = match tn_opt with Some tn -> Lazy.is_val tn.padding | None -> false in
-    Option.iter row_padding ~f:(fun padding ->
-        Array.iter2_exn
-          (Array.of_list (row.Row.beg_dims @ row.Row.dims))
-          padding
-          ~f:(fun d p ->
+  let no_padding = Ir.Ops.{ left = 0; right = 0 } in
+  (* [locked = None]: the tensor node's layout is not committed yet — register the shape's padding
+     (if any) as inferred. [locked = Some arr_opt]: the tnode's padding lazy is forced, so the
+     buffer layout is committed — register the TNODE's padding (zeros when unpadded) as resolved
+     for every axis, so that [Row.solve_proj_equations] rejects later demands exceeding it (a
+     forced-at-[None] node used to register nothing, silently losing the halo; see
+     [check_and_update_padding]). [offset] is the axis position within the tnode's padding array
+     (axis order batch;output;input, cf. {!to_padding}). Returns the offset advanced past this
+     row. *)
+  let fetch_padding ~locked row row_padding ~offset =
+    let dims = Array.of_list (row.Row.beg_dims @ row.Row.dims) in
+    (match locked with
+    | None ->
+        Option.iter row_padding ~f:(fun padding ->
+            Array.iter2_exn dims padding ~f:(fun d p ->
+                match d with
+                | Row.Dim { proj_id = Some proj_id; _ } ->
+                    inferred_padding := (proj_id, p) :: !inferred_padding
+                | _ -> ()))
+    | Some locked_arr ->
+        Array.iteri dims ~f:(fun i d ->
+            let p =
+              match locked_arr with
+              | Some arr when offset + i < Array.length arr -> arr.(offset + i)
+              | _ -> no_padding
+            in
             match d with
             | Row.Dim { proj_id = Some proj_id; _ } ->
-                if is_resolved then resolved_padding := (proj_id, p) :: !resolved_padding
-                else inferred_padding := (proj_id, p) :: !inferred_padding
-            | _ -> ()))
+                resolved_padding := (proj_id, p) :: !resolved_padding
+            | _ -> ()));
+    offset + Array.length dims
   in
   let fresh_shape (sh : t) =
     sh.batch <- Row.fresh_row_proj sh.batch;
     sh.input <- Row.fresh_row_proj sh.input;
     sh.output <- Row.fresh_row_proj sh.output;
-    fetch_padding ~id:sh.id sh.batch sh.batch_padding;
-    fetch_padding ~id:sh.id sh.input sh.input_padding;
-    fetch_padding ~id:sh.id sh.output sh.output_padding
+    let locked =
+      match Ir.Tnode.find ~id:sh.id with
+      | Some tn when Lazy.is_val tn.Ir.Tnode.padding -> (
+          (* [Lazy.is_val] can be true for a lazy currently being forced (forcing it raises
+             [Lazy.Undefined]) — mid-force means this very derivation is part of committing the
+             tnode's layout, so the padding is not settled yet: treat as not locked. *)
+          try Some (Option.map ~f:fst (Lazy.force tn.Ir.Tnode.padding))
+          with Lazy.Undefined -> None)
+      | _ -> None
+    in
+    let offset = fetch_padding ~locked sh.batch sh.batch_padding ~offset:0 in
+    let offset = fetch_padding ~locked sh.output sh.output_padding ~offset in
+    ignore (fetch_padding ~locked sh.input sh.input_padding ~offset : int)
   in
   fresh_shape update.shape;
   (match update.logic with
@@ -1926,21 +1954,37 @@ let%debug4_sexp derive_projections (update_step : update_step) : unit =
         sh.output_padding <- Some p);
     Option.iter (padding_of_row sh.input_padding sh.input) ~f:(fun p -> sh.input_padding <- Some p)
   in
+  (* Whether THIS step demands nonzero padding on [sh] — i.e. actually reads the margins.
+     [Row.get_dim_padding] only reports the current operation's inferred padding. *)
+  let step_reads_margins (sh : t) : bool =
+    List.exists [ sh.batch; sh.output; sh.input ] ~f:(fun row ->
+        List.exists (row.Row.beg_dims @ row.Row.dims) ~f:(fun d ->
+            match Row.get_dim_padding proj_env d with
+            | Some Ir.Ops.{ left; right } -> left > 0 || right > 0
+            | None -> false))
+  in
   let update_padding_elem (sh : t) : unit =
-    (* Update padding_elem based on the neutral element from the update step. None means unknown,
-       Some (Some v) means consistent, Some None means conflicting. *)
-    let has_padding =
-      Option.is_some sh.batch_padding || Option.is_some sh.output_padding
-      || Option.is_some sh.input_padding
-    in
-    if has_padding then
+    (* The padding neutral element commits like the rest of the tensor's identity: the margins of
+       a padded buffer permanently hold a single neutral value. Only operations that actually read
+       the margins (demand nonzero padding on [sh] in this step) participate — a valid-window
+       reader never sees the margins, so its accumulation neutral is irrelevant. A genuine
+       conflict is rejected: the remedy is a materialized copy per neutral. *)
+    if step_reads_margins sh then
       sh.padding_elem <-
         (match (sh.padding_elem, update_step.neutral_elem) with
         | None, None -> None (* Both unknown *)
         | None, Some v -> Some (Some v) (* First operation sets the value *)
         | Some (Some v1), Some v2 when Float.( = ) v1 v2 -> sh.padding_elem (* Consistent *)
-        | Some (Some _), Some _ -> Some None (* Conflicting - different neutral elements *)
-        | Some None, _ -> Some None (* Already conflicting, stays conflicting *)
+        | Some (Some v1), Some v2 ->
+            raise
+            @@ Row.Shape_error
+                 ( [%string
+                     "Conflicting padding neutral elements: an operation reads the tensor's \
+                      margins expecting %{v2#Float}, but they are committed to %{v1#Float} \
+                      (demanded by an earlier operation). Materialize a separate copy of the \
+                      tensor for one of the padded consumers"],
+                   [ Shape_mismatch [ sh ] ] )
+        | Some None, _ -> Some None (* Legacy conflicting state, stays conflicting *)
         | Some _, None -> sh.padding_elem)
     (* Operation has no neutral elem, keep current *)
   in

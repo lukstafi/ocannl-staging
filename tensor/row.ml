@@ -4482,7 +4482,11 @@ let%track7_sexp get_proj_index (proj_env : proj_env) (proj : proj) : Idx.axis_in
                         ( [%string
                             "Operation padding (left=%{operation_padding.left#Int}, \
                              right=%{operation_padding.right#Int}) exceeds resolved padding \
-                             (left=%{resolved_pad.left#Int}, right=%{resolved_pad.right#Int})"],
+                             (left=%{resolved_pad.left#Int}, right=%{resolved_pad.right#Int}): \
+                             the operand's buffer layout is already committed with insufficient \
+                             margins. Compose the padded consumer before the operand's first \
+                             compilation, create the data via a padding-aware constructor (e.g. \
+                             wrap_padded), or read through a materialized copy of the operand"],
                           [ Projection_mismatch [ proj ] ] )
                | _ -> (
                    (* Update inferred padding to be sufficient for this operation, even if resolved
@@ -4794,7 +4798,14 @@ let%debug4_sexp solve_proj_equations (eqs : proj_equation list)
 
   (* Process p_conv_input to populate projs and compute padding *)
   let resolved_padding =
-    Map.of_alist_exn (module Proj_id)
+    (* Since locked (layout-committed) tensors register resolved padding for every axis, several
+       axes of a class can carry entries; a padding demand routed through the class must fit every
+       locked buffer read through it, so merge duplicates with the elementwise minimum (the
+       strictest lock). *)
+    Map.of_alist_reduce
+      (module Proj_id)
+      ~f:(fun p1 p2 ->
+        Ir.Ops.{ left = Int.min p1.left p2.left; right = Int.min p1.right p2.right })
     @@ List.map resolved_padding ~f:(fun (p, pad) ->
         (fst @@ Utils.union_find ~equal:Proj_id.equal !proj_classes ~key:p ~rank:0, pad))
   in
