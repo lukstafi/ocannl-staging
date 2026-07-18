@@ -6,3 +6,7 @@ extent=4: total=4.0 (expected 4.0), y valid prefix all 1.0: true
 extent=1: total=1.0 (expected 1.0), y valid prefix all 1.0: true
 extent=0: total=0.0 (expected 0.0), y valid prefix all 1.0: true
 extent=7 rejected: Indexing: bound value 7 for symbolic extent i1 exceeds its declared maximum 6
+timing measurement binds the extent at its upper bound: 6
+tuned routine at extent=6: total=6.0
+tuned routine at extent=3: total=3.0
+second tune hits the extent-value-independent cache entry: true
