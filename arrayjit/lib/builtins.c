@@ -1059,7 +1059,22 @@ CAMLprim value arrayjit_copy_with_padding(value v_source, value v_target, value 
   void *source_data = Caml_ba_data_val(v_source);
   void *target_data = Caml_ba_data_val(v_target);
 
-  size_t elem_size = caml_ba_byte_size(source_ba);
+  if ((source_ba->flags & CAML_BA_KIND_MASK) != (target_ba->flags & CAML_BA_KIND_MASK))
+  {
+    caml_failwith("Source and target must have the same element kind");
+  }
+  /* Per-element byte size: caml_ba_byte_size is the WHOLE array's size, so divide by the element
+     count. */
+  uintnat source_elems = 1;
+  for (int d = 0; d < ndim; d++)
+  {
+    source_elems *= source_ba->dim[d];
+  }
+  if (source_elems == 0)
+  {
+    CAMLreturn(Val_unit);
+  }
+  size_t elem_size = caml_ba_byte_size(source_ba) / source_elems;
 
   // Use source dimensions directly from bigarray
   intnat *source_shape = source_ba->dim;
