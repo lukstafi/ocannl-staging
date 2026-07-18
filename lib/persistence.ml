@@ -13,7 +13,7 @@ type tensor_meta = {
   label : string list;
   prec : Ops.prec;
   dims : int array;  (** Padded (buffer) dimensions. *)
-  padding : (Ops.axis_padding array * float option) option;
+  padding : (Ops.axis_padding array * float) option;
   offset : int;  (** Byte offset in the data section. *)
   byte_length : int;  (** Bytes in the data section for this tensor. *)
 }
@@ -49,9 +49,7 @@ let sexp_of_tensor_meta m =
                        (Array.map padding_arr ~f:(fun Ops.{ left; right } ->
                             Sexp.List
                               [ Sexp.Atom (Int.to_string left); Sexp.Atom (Int.to_string right) ])));
-                  (match pad_val with
-                  | None -> Sexp.Atom "none"
-                  | Some v -> Sexp.Atom (Float.to_string v));
+                  Sexp.Atom (Float.to_string pad_val);
                 ]);
         ];
       Sexp.List [ Sexp.Atom "offset"; Sexp.Atom (Int.to_string m.offset) ];
@@ -101,8 +99,13 @@ let tensor_meta_of_sexp sexp =
         in
         let pad_val =
           match pad_val_sexp with
-          | Sexp.Atom "none" -> None
-          | Sexp.Atom s -> Some (Float.of_string s)
+          | Sexp.Atom "none" ->
+              (* Pre-neutral-commit files: the margins' neutral was undetermined (managed by
+                 per-operation resets, which no longer exist). *)
+              failwith
+                "tensor_meta_of_sexp: legacy padding without a committed neutral element; re-save \
+                 the checkpoint"
+          | Sexp.Atom s -> Float.of_string s
           | _ -> failwith "bad padding value"
         in
         Some (padding_arr, pad_val)
@@ -405,7 +408,7 @@ let restore ~ctx t_set path =
                 match (tn_padding, meta.padding) with
                 | None, None -> true
                 | Some (p1, v1), Some (p2, v2) ->
-                    Array.equal Ops.equal_axis_padding p1 p2 && Option.equal Float.equal v1 v2
+                    Array.equal Ops.equal_axis_padding p1 p2 && Float.equal v1 v2
                 | _ -> false
               in
               if not padding_equal then failwith ("restore: padding mismatch for tensor " ^ Tn.id tn);

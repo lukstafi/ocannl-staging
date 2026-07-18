@@ -321,7 +321,7 @@ let%track4_sexp to_low_level code =
   in
   let default_padding_before array llc =
     let padding_loops =
-      match Tn.get_padding array with Some (_, Some v) -> reset_padding_regions array v | _ -> []
+      match Tn.get_padding array with Some (_, v) -> reset_padding_regions array v | None -> []
     in
     Low_level.unflat_lines @@ padding_loops @ [ llc ]
   in
@@ -483,29 +483,17 @@ let%track4_sexp to_low_level code =
       initialize_neutral
       && not (Indexing.is_surjective projections && Indexing.is_injective projections)
     in
-    (* The padding neutral element is part of a padded tensor's identity: margins permanently hold
-       the committed value (conflicting margin-reading demands are rejected at shape-inference
-       time, and valid-window readers never see the margins), so a committed-elem operand needs no
-       reset here — and resetting it to this operation's neutral would clobber the margins for
-       other consumers. Only the legacy "undetermined neutral" state still resets defensively. *)
+    (* The padding neutral element is part of a padded tensor's identity: margins permanently
+       hold the committed value (conflicting margin-touching demands are rejected at
+       shape-inference time, and valid-window readers never see the margins), so operands need no
+       resets here. Establish the committed neutral element in the lhs margins: only hosted /
+       host-initialized buffers are creation-filled, device buffers are allocated raw — so the
+       (idempotent) fill accompanies every writer of a padded node. *)
     let neutral_value = Ops.neutral_elem accum in
     let padding_resets =
-      Array.filter_map rhses ~f:(fun buf ->
-          let tn = match buf with Node tn | Merge_buffer tn -> tn in
-          match Lazy.force tn.padding with
-          | Some (_, None) -> Some (reset_padding_regions tn neutral_value)
-          | _ -> None)
-      |> Array.to_list |> List.concat
-    in
-    (* Establish the committed neutral element in the lhs margins: only hosted / host-initialized
-       buffers are creation-filled, device buffers are allocated raw — so the (idempotent) fill
-       accompanies every writer of a padded node. *)
-    let padding_resets =
-      padding_resets
-      @
       match Lazy.force lhs.padding with
-      | Some (_, Some v) -> reset_padding_regions lhs v
-      | _ -> []
+      | Some (_, v) -> reset_padding_regions lhs v
+      | None -> []
     in
     let for_loops_with_resets =
       if List.is_empty padding_resets then for_loops
@@ -671,11 +659,10 @@ let%track4_sexp to_low_level code =
     in
     let neutral_value = Ops.neutral_elem accum in
     (* Establish the committed neutral element in the lhs margins (device buffers are allocated
-       raw); the legacy "undetermined neutral" state resets to the operation's neutral. *)
+       raw). *)
     let padding_resets =
       match Lazy.force lhs.padding with
-      | Some (_, None) -> reset_padding_regions lhs neutral_value
-      | Some (_, Some v) -> reset_padding_regions lhs v
+      | Some (_, v) -> reset_padding_regions lhs v
       | None -> []
     in
     let for_loops_with_resets =
@@ -805,7 +792,7 @@ let%track4_sexp to_low_level code =
            neutral element must be re-established after it (a zero neutral is already correct). *)
         let padding_after =
           match Tn.get_padding array with
-          | Some (_, Some v) when Float.( <> ) v 0.0 -> reset_padding_regions array v
+          | Some (_, v) when Float.( <> ) v 0.0 -> reset_padding_regions array v
           | _ -> []
         in
         Low_level.unflat_lines (Low_level.Zero_out array :: padding_after)

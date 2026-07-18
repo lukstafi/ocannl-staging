@@ -298,7 +298,7 @@ type update_step = {
 val to_dims : t -> int array
 (** Uses the matrix convention of putting the input axes last. *)
 
-val to_padding : t -> (Ir.Ops.axis_padding array * float option) option
+val to_padding : t -> (Ir.Ops.axis_padding array * float) option
 (** Returns the padding of the shape, if any. The inner [float option] is the padded value: [Some v]
     when all operations use the same neutral element, [None] when different operations require
     different neutral elements (margin must be reset before each operation). Uses the matrix

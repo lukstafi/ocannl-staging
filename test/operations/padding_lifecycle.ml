@@ -39,7 +39,7 @@ let padding_to_string (tn : Ir.Tnode.t) =
           (String.concat ~sep:"; "
              (Array.to_list arr
              |> List.map ~f:(fun Ir.Ops.{ left; right } -> Printf.sprintf "%d/%d" left right)))
-          (match elem with None -> "None" | Some v -> Float.to_string v)
+          (Float.to_string elem)
 
 let compile_conv ?ctx tag x =
   let conv =

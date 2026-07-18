@@ -1693,21 +1693,20 @@ let fresh_proj_ids update =
                the shape level unchecked and silently read the buffer's halo values (Codex P1 on
                PR #173). [update_padding_elem] then rejects conflicting consumers. *)
             (match p with
-            | Some (_, (Some v as elem)) -> (
+            | Some (_, v) -> (
                 match sh.padding_elem with
-                | None -> sh.padding_elem <- Some elem
+                | None -> sh.padding_elem <- Some (Some v)
                 | Some (Some v1) when Float.( = ) v1 v -> ()
-                | Some None -> ()
-                | Some (Some v1) ->
+                | Some _ ->
                     raise
                     @@ Row.Shape_error
                          ( [%string
                              "Conflicting padding neutral elements: the tensor's buffer committed \
-                              margins holding %{v#Float}, but %{v1#Float} was inferred for its \
-                              shape. Materialize a separate copy of the tensor for the \
+                              margins holding %{v#Float}, but a different neutral was inferred \
+                              for its shape. Materialize a separate copy of the tensor for the \
                               conflicting padded consumers"],
                            [ Shape_mismatch [ sh ] ] ))
-            | _ -> ());
+            | None -> ());
             Some (Option.map ~f:fst p)
           with Lazy.Undefined -> None)
       | _ -> None
@@ -1987,9 +1986,10 @@ let%debug4_sexp derive_projections (update_step : update_step) : unit =
         sh.output_padding <- Some p);
     Option.iter (padding_of_row sh.input_padding sh.input) ~f:(fun p -> sh.input_padding <- Some p)
   in
-  (* Whether THIS step demands nonzero padding on [sh] — i.e. actually reads the margins.
-     [Row.get_dim_padding] only reports the current operation's inferred padding. *)
-  let step_reads_margins (sh : t) : bool =
+  (* Whether THIS step demands nonzero padding on [sh] — i.e. actually reads (rhs) or writes
+     (lhs) the margins. [Row.get_dim_padding] only reports the current operation's inferred
+     padding. *)
+  let step_touches_margins (sh : t) : bool =
     List.exists [ sh.batch; sh.output; sh.input ] ~f:(fun row ->
         List.exists (row.Row.beg_dims @ row.Row.dims) ~f:(fun d ->
             match Row.get_dim_padding proj_env d with
@@ -2002,7 +2002,7 @@ let%debug4_sexp derive_projections (update_step : update_step) : unit =
        the margins (demand nonzero padding on [sh] in this step) participate — a valid-window
        reader never sees the margins, so its accumulation neutral is irrelevant. A genuine
        conflict is rejected: the remedy is a materialized copy per neutral. *)
-    if step_reads_margins sh then
+    if step_touches_margins sh then
       sh.padding_elem <-
         (match (sh.padding_elem, update_step.neutral_elem) with
         | None, None -> None (* Both unknown *)
@@ -2012,12 +2012,12 @@ let%debug4_sexp derive_projections (update_step : update_step) : unit =
             raise
             @@ Row.Shape_error
                  ( [%string
-                     "Conflicting padding neutral elements: an operation reads the tensor's \
+                     "Conflicting padding neutral elements: an operation touches the tensor's \
                       margins expecting %{v2#Float}, but they are committed to %{v1#Float} \
                       (demanded by an earlier operation). Materialize a separate copy of the \
                       tensor for one of the padded consumers"],
                    [ Shape_mismatch [ sh ] ] )
-        | Some None, _ -> Some None (* Legacy conflicting state, stays conflicting *)
+        | Some None, _ -> Some None (* Unreachable: conflicts raise instead. *)
         | Some _, None -> sh.padding_elem)
     (* Operation has no neutral elem, keep current *)
   in
@@ -2025,7 +2025,11 @@ let%debug4_sexp derive_projections (update_step : update_step) : unit =
   else (
     set_padding lhs;
     List.iter rhs ~f:set_padding;
-    (* Update padding_elem for RHS shapes based on the operation's neutral element *)
+    (* Update padding_elem based on the operation's neutral element: for rhs shapes the operation
+       reads the margins; for the lhs, a padded write projection (scatter-style [=] output specs)
+       commits the accumulation's neutral just the same — this keeps "padded implies a known
+       neutral element" an invariant (cf. [to_padding]). *)
+    update_padding_elem lhs;
     List.iter rhs ~f:update_padding_elem;
     let project_lhs = indices_of_sh lhs in
     let project_rhs = Array.of_list_map ~f:indices_of_sh rhs in
@@ -2189,7 +2193,7 @@ let to_dims sh =
   finish_inference ();
   to_dims_impl sh
 
-let%track4_sexp to_padding (sh : t) : (Ir.Ops.axis_padding array * float option) option =
+let%track4_sexp to_padding (sh : t) : (Ir.Ops.axis_padding array * float) option =
   finish_inference ();
   try
     (* If any row has padding, we need to return padding for all dimensions. Use zero padding for
@@ -2209,10 +2213,20 @@ let%track4_sexp to_padding (sh : t) : (Ir.Ops.axis_padding array * float option)
       let batch : Row.axis_padding array = get_padding_array sh.batch_padding sh.batch in
       let output : Row.axis_padding array = get_padding_array sh.output_padding sh.output in
       let input : Row.axis_padding array = get_padding_array sh.input_padding sh.input in
-      (* The padded value comes from padding_elem: Some (Some v) means all operations use v, Some
-         None means different operations need different neutral elements (reset before each), None
-         means unknown (default to needing reset). *)
-      let padded_value = match sh.padding_elem with Some v -> v | None -> None in
+      (* Padded implies a known neutral element: padding only arises from margin-touching
+         accumulation projections, and [update_padding_elem] commits their neutral (conflicts are
+         rejected there). *)
+      let padded_value =
+        match sh.padding_elem with
+        | Some (Some v) -> v
+        | Some None | None ->
+            raise
+            @@ Row.Shape_error
+                 ( "Internal invariant violation: shape has committed padding but no neutral \
+                    element; padding should only arise from accumulation projections that carry \
+                    one",
+                   [ Shape_mismatch [ sh ] ] )
+      in
       Some (Array.concat [ batch; output; input ], padded_value)
   with Row.Shape_error (s, trace) -> raise @@ Row.Shape_error (s, Shape_mismatch [ sh ] :: trace)
 

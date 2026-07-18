@@ -187,7 +187,7 @@ let () =
   Stdio.printf "=== Test 10: Padding mismatch on restore ===\n";
   Tensor.unsafe_reinitialize ();
   let ctx = Context.cpu () in
-  let padding1 = Some ([| Ops.{ left = 1; right = 1 } |], None) in
+  let padding1 = Some ([| Ops.{ left = 1; right = 1 } |], 0.0) in
   let ctx, tn_padded =
     make_tn ctx ~id:0 ~label:[ "p" ] ~padding:padding1 Ops.single [| 4 |] [| 1.0; 2.0 |]
   in
@@ -197,7 +197,7 @@ let () =
   (* Create a tnode with same dims but different padding *)
   Tensor.unsafe_reinitialize ();
   let ctx = Context.cpu () in
-  let padding2 = Some ([| Ops.{ left = 0; right = 2 } |], None) in
+  let padding2 = Some ([| Ops.{ left = 0; right = 2 } |], 0.0) in
   let ctx, tn_diff_pad =
     make_tn ctx ~id:0 ~label:[ "p" ] ~padding:padding2 Ops.single [| 4 |] [| 1.0; 2.0 |]
   in
