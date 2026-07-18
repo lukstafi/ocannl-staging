@@ -149,6 +149,9 @@ let get_sym_dim ?(basis = default_basis) ?proj_id sym =
              dimensions require a positive maximum extent"
             (Ir.Indexing.symbol_ident sym.Ir.Indexing.static_symbol)
             extent);
+  (* The bound value of an extent symbol is a size in [0, range] (inclusive), not an index in
+     [0, range): switch the symbol's bind-time validation accordingly. *)
+  sym.Ir.Indexing.used_as_extent <- true;
   Sym sdim
 
 (* The reserved tags ([default], [bcast_if_1]) carry no naming claim. *)

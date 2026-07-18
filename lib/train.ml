@@ -111,12 +111,14 @@ let sgd_update ~learning_rate ?momentum ?weight_decay ?nesterov loss =
   { comp with asgns = Asgns.Block_comment ("sgd_update", comp.asgns) }
 
 (** All and only bindings with associated ranges are iterated, with the binding's initial value
-    lost. Bindings without ranges remain at their initial values. *)
+    lost. Bindings without ranges remain at their initial values, as do symbolic extents (gh-490):
+    an extent is a size set once by the user, not an index to iterate. *)
 let%track3_sexp sequential_loop ~f lowered_bindings =
   let rec loop = function
     | [] -> f ()
-    | ({ Idx.static_range = None; static_symbol = _ }, _) :: more -> loop more
-    | ({ Idx.static_range = Some range; static_symbol = _ }, idx) :: more ->
+    | ({ Idx.static_range = None; static_symbol = _; _ }, _) :: more -> loop more
+    | ({ Idx.used_as_extent = true; _ }, _) :: more -> loop more
+    | ({ Idx.static_range = Some range; static_symbol = _; _ }, idx) :: more ->
         let old_idx = !idx in
         for i = 0 to range - 1 do
           idx := i;

@@ -38,6 +38,7 @@ let scatter_proj s1 s2 ~n1 ~n2 ~c1 ~c2 ~lhs_dim : Idx.projections =
     product_iterators = [| [ s1 ]; [ s2 ] |];
     project_lhs = [| Idx.Affine { symbols = [ (c1, s1); (c2, s2) ]; offset = 0 } |];
     project_rhs = [| [| Idx.Iterator s1; Idx.Iterator s2 |] |];
+    extent_syms = [];
     debug_info = dbg;
   }
 
@@ -132,6 +133,7 @@ let copy_proj t ~n : Idx.projections =
     product_iterators = [| [ t ] |];
     project_lhs = [| Idx.Iterator t |];
     project_rhs = [| [| Idx.Iterator t |] |];
+    extent_syms = [];
     debug_info = dbg;
   }
 
@@ -181,6 +183,7 @@ let tri_scatter_proj s1 s2 : Idx.projections =
     product_iterators = [| [ s1 ]; [ s2 ] |];
     project_lhs = [| Idx.Iterator s1; Idx.Affine { symbols = [ (1, s1); (1, s2) ]; offset = 0 } |];
     project_rhs = [| [| Idx.Iterator s1; Idx.Iterator s2 |] |];
+    extent_syms = [];
     debug_info = dbg;
   }
 
@@ -192,6 +195,7 @@ let tri_copy_proj a b : Idx.projections =
     product_iterators = [| [ a ]; [ b ] |];
     project_lhs = [| Idx.Iterator a; Idx.Iterator b |];
     project_rhs = [| [| Idx.Iterator a; Idx.Iterator b |] |];
+    extent_syms = [];
     debug_info = dbg;
   }
 

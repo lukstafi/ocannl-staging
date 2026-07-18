@@ -25,6 +25,7 @@ let mk_proj ?(lhs_dims = [||]) product_axes project_lhs : Idx.projections =
     product_iterators = Array.of_list_map product_axes ~f:(fun (s, _) -> [ s ]);
     project_lhs;
     project_rhs = [| project_lhs |];
+    extent_syms = [];
     debug_info = { Idx.spec = ""; derived_for = Sexp.Atom ""; trace = [] };
   }
 

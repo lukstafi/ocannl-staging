@@ -598,6 +598,7 @@ let translate ?ident_label (expr : expression) : result =
                      {
                        product_space = p.product_space;
                        product_iterators = p.product_iterators;
+                       extent_syms = p.extent_syms;
                        lhs_dims = [%e lhs_dims];
                        rhs_dims = [| [%e rhs1_dims]; [%e rhs2_dims]; [%e rhs3_dims] |];
                        project_lhs = [%e project_lhs];
@@ -675,6 +676,7 @@ let translate ?ident_label (expr : expression) : result =
                      {
                        product_space = p.product_space;
                        product_iterators = p.product_iterators;
+                       extent_syms = p.extent_syms;
                        lhs_dims = [%e lhs_dims];
                        rhs_dims = [| [%e rhs1_dims]; [%e rhs2_dims] |];
                        project_lhs = [%e project_lhs];
@@ -747,6 +749,7 @@ let translate ?ident_label (expr : expression) : result =
                      {
                        product_space = p.product_space;
                        product_iterators = p.product_iterators;
+                       extent_syms = p.extent_syms;
                        lhs_dims = [%e lhs_dims];
                        rhs_dims = [| [%e rhs1_dims] |];
                        project_lhs = [%e project_lhs];
@@ -814,6 +817,7 @@ let translate ?ident_label (expr : expression) : result =
                      {
                        product_space = p.product_space;
                        product_iterators = p.product_iterators;
+                       extent_syms = p.extent_syms;
                        lhs_dims = [%e lhs_dims];
                        rhs_dims = [| [%e rhs1_dims] |];
                        project_lhs = [%e project_lhs];

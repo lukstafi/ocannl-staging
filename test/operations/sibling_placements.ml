@@ -39,6 +39,7 @@ let elementwise i ~n ~num_rhs ~rhs2_fixed0 : Idx.projections =
     project_rhs =
       Array.init num_rhs ~f:(fun k ->
           if rhs2_fixed0 && k = 1 then [| Idx.Fixed_idx 0 |] else [| Idx.Iterator i |]);
+    extent_syms = [];
     debug_info = dbg;
   }
 

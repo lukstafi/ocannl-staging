@@ -36,6 +36,7 @@ let reduce_proj i k ~n ~kdim : Idx.projections =
     product_iterators = [| [ i ]; [ k ] |];
     project_lhs = [| Idx.Iterator i |];
     project_rhs = [| [| Idx.Iterator i; Idx.Iterator k |] |];
+    extent_syms = [];
     debug_info = dbg;
   }
 
@@ -60,6 +61,7 @@ let copy_proj t ~n : Idx.projections =
     product_iterators = [| [ t ] |];
     project_lhs = [| Idx.Iterator t |];
     project_rhs = [| [| Idx.Iterator t |] |];
+    extent_syms = [];
     debug_info = dbg;
   }
 
