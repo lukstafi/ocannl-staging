@@ -781,6 +781,14 @@ let conv_aligned_grid (site : conv_site) (opt : LL.optimized) : Sched.schedule o
           else None)
   | _ -> None
 
+(* The current nest order after a [Split] of the GEMM row into [row_o { row_i }] (in place, as
+   [rewrite_loop] produces it), for feeding [reorder_swaps]. A dividing block factor keeps the split
+   guard-free (see [Schedule.apply_op]'s [Split]), so the nest stays a perfect serial nest and the
+   subsequent [Swap]s are well-formed. *)
+let conv_split_row_current (site : conv_site) ~row_o ~row_i : Idx.symbol list =
+  List.concat_map site.c_loops ~f:(fun s ->
+      if Idx.equal_symbol s site.c_row then [ row_o; row_i ] else [ s ])
+
 (* The implicit-GEMM conv pipeline (gh-ocannl-493), CPU route: reorder the accumulation nest to
    [outer..; kernel..; row; oc; ic], pack the input's [row × ic] strided-window slice and the
    kernel's [ic × oc] slice (both anchor under the innermost kernel-window loop; the packing IS
@@ -791,45 +799,80 @@ let conv_aligned_grid (site : conv_site) (opt : LL.optimized) : Sched.schedule o
    [Zero_out] of the output then expands with the matching geometry. On a segment with more than
    one companion statement the grid ops come from [conv_aligned_grid] instead, so every companion
    nest is annotated with the aligned whole-segment geometry (such segments carry no [Zero_out] —
-   the preset's analysis bails on those, and the seeds gate accordingly). *)
-let cpu_conv_sketch_schedule ~(opt : LL.optimized) (site : conv_site) { sk_grid; _ } :
+   the preset's analysis bails on those, and the seeds gate accordingly).
+
+   With [sk_bm > 0] (gh-ocannl-500) the GEMM row is split into panels of [sk_bm] rows before the
+   reorder — cache-blocked GEBP-style panels, the conv analog of [cpu_mma_sketch_schedule]'s
+   row-block split — and the in-panel [row_i × oc] micro-kernel is tensorized (the register tiling
+   peels its own sub-tile edges). [sk_bm] must divide [c_nrow] so the split stays guard-free (a
+   remainder guard would break the reorder's perfect nesting). The panel loop's parallelism source
+   depends on the segment: on a conv-alone segment the panel loop is [Grid]-typed directly (one pool
+   chunk per row-block); on an aligned-merged segment (conv + materialized companions, e.g. lenet's
+   conv+bias/relu+pooling) the whole-segment [Grid] geometry comes from [conv_aligned_grid] as for
+   the unblocked flavor and the panel loop stays [Serial] — pure cache blocking within each pool
+   chunk. Both cases are unzeroed (the seeds gate accordingly): the [Zero_out] lives in its own
+   [`Zeros] segment, so no zero geometry is needed. *)
+let cpu_conv_sketch_schedule ~(opt : LL.optimized) (site : conv_site) { sk_grid; sk_bm; _ } :
     Sched.schedule =
-  let loop_syms =
-    List.map site.c_outer ~f:fst @ site.c_kernel @ [ site.c_row; site.c_oc; site.c_red ]
-  in
   let stage source tile_loops =
     Sched.Stage { source; tile_loops; shared = false; cooperative = None; hoisted = false }
   in
-  let tz, _lane =
-    Sched.tensorize ~i:site.c_row ~j:site.c_oc ~k:site.c_red ~simd_width:1
-  in
-  let zops, grid_ops =
-    if not sk_grid then ([], [])
-    else if List.length (conv_real_stmts site opt) > 2 then
-      match conv_aligned_grid site opt with
-      | Some sched -> ([], sched)
-      | None -> invalid_arg "Autotune conv sketch: companion nests do not align for Grid"
-    else
-      match site.c_outer with
-      | [] -> invalid_arg "Autotune conv sketch: no outer loop to Grid-parallelize"
-      | (outermost, _) :: _ ->
-          let zops =
-            if not site.c_zeroed then []
-            else
-              let ez, zsyms = Sched.expand_zero ~tn:site.c_d in
-              match zsyms with
-              | z0 :: _ -> [ ez; Sched.Retype { axis = z0; ty = LL.Grid } ]
-              | [] -> [ ez ]
-          in
-          (zops, [ Sched.Retype { axis = outermost; ty = LL.Grid } ])
-  in
-  zops @ grid_ops
-  @ reorder_swaps ~current:site.c_loops ~target:loop_syms
-  @ [
-      stage site.c_a [ site.c_row; site.c_red ];
-      stage site.c_b [ site.c_red; site.c_oc ];
-      tz;
-    ]
+  if sk_bm > 0 then (
+    if site.c_nrow % sk_bm <> 0 then
+      invalid_arg "Autotune conv sketch: row block must divide the row extent";
+    (* On a merged segment the aligned whole-segment [Grid] annotation parallelizes; the panel loop
+       is a serial cache block. On a conv-alone segment the panel loop is the parallel [Grid]. *)
+    let grid_ops, panel_axis =
+      if List.length (conv_real_stmts site opt) > 2 then
+        match conv_aligned_grid site opt with
+        | Some sched -> (sched, LL.Serial)
+        | None -> invalid_arg "Autotune conv sketch: companion nests do not align for Grid"
+      else ([], LL.Grid)
+    in
+    let sp_row, row_o, row_i =
+      Sched.split ~axis:site.c_row ~factor:sk_bm ~outer:panel_axis ~inner:LL.Serial
+    in
+    let current = conv_split_row_current site ~row_o ~row_i in
+    let target =
+      List.map site.c_outer ~f:fst @ [ row_o ] @ site.c_kernel
+      @ [ row_i; site.c_oc; site.c_red ]
+    in
+    let tz, _lane = Sched.tensorize ~i:row_i ~j:site.c_oc ~k:site.c_red ~simd_width:1 in
+    grid_ops
+    @ (sp_row :: reorder_swaps ~current ~target)
+    @ [ stage site.c_a [ row_i; site.c_red ]; stage site.c_b [ site.c_red; site.c_oc ]; tz ])
+  else
+    let loop_syms =
+      List.map site.c_outer ~f:fst @ site.c_kernel @ [ site.c_row; site.c_oc; site.c_red ]
+    in
+    let tz, _lane = Sched.tensorize ~i:site.c_row ~j:site.c_oc ~k:site.c_red ~simd_width:1 in
+    let zops, grid_ops =
+      if not sk_grid then ([], [])
+      else if List.length (conv_real_stmts site opt) > 2 then
+        match conv_aligned_grid site opt with
+        | Some sched -> ([], sched)
+        | None -> invalid_arg "Autotune conv sketch: companion nests do not align for Grid"
+      else
+        match site.c_outer with
+        | [] -> invalid_arg "Autotune conv sketch: no outer loop to Grid-parallelize"
+        | (outermost, _) :: _ ->
+            let zops =
+              if not site.c_zeroed then []
+              else
+                let ez, zsyms = Sched.expand_zero ~tn:site.c_d in
+                match zsyms with
+                | z0 :: _ -> [ ez; Sched.Retype { axis = z0; ty = LL.Grid } ]
+                | [] -> [ ez ]
+            in
+            (zops, [ Sched.Retype { axis = outermost; ty = LL.Grid } ])
+    in
+    zops @ grid_ops
+    @ reorder_swaps ~current:site.c_loops ~target:loop_syms
+    @ [
+        stage site.c_a [ site.c_row; site.c_red ];
+        stage site.c_b [ site.c_red; site.c_oc ];
+        tz;
+      ]
 
 (* The GPU staged leg of the implicit-GEMM conv pipeline (gh-ocannl-493): the same loop
    re-association as the CPU route, with the outer output loops [Grid]-typed (one threadgroup per
@@ -839,22 +882,50 @@ let cpu_conv_sketch_schedule ~(opt : LL.optimized) (site : conv_site) { sk_grid;
    accumulator contraction (gh-ocannl-480) unchanged: the [row × oc] fragment stays resident
    across the innermost kernel-window loop, on Metal in simdgroup registers. Zeroed sites are
    gated off at the seeds — the GPU leg targets fission segments, whose [Zero_out] lives in its
-   own [`Zeros] segment. *)
-let gpu_conv_sketch_schedule (site : conv_site) { sk_simd = w; _ } : Sched.schedule =
-  let loop_syms =
-    List.map site.c_outer ~f:fst @ site.c_kernel @ [ site.c_row; site.c_oc; site.c_red ]
-  in
+   own [`Zeros] segment.
+
+   With [sk_bm > 0] (gh-ocannl-500) the GEMM row is additionally split into [Grid] blocks of
+   [sk_bm] rows: one threadgroup per (outer.., row-block) coordinate instead of one per outer
+   coordinate, so small-spatial sites fill the device better. [sk_bm] must divide [c_nrow] (a
+   remainder guard would push the cooperative-load barriers under divergent control flow, rejected by
+   [validate_parallel]). Only the row is blocked — a 2-D conv already binds two outer [Grid] loops
+   (batch, the non-row output spatial axis), so a second [Grid] block on [oc] would exceed the
+   three-slot budget; [oc] stays the tensorized column extent. The block loop [row_o] carries no
+   companion nest here (unzeroed segments), so no cross-nest zero geometry is needed. *)
+let gpu_conv_sketch_schedule (site : conv_site) { sk_simd = w; sk_bm; _ } : Sched.schedule =
   let stage source tile_loops =
     Sched.Stage { source; tile_loops; shared = true; cooperative = Some w; hoisted = false }
   in
-  let tz, _lane = Sched.tensorize ~i:site.c_row ~j:site.c_oc ~k:site.c_red ~simd_width:w in
-  List.map site.c_outer ~f:(fun (s, _) -> Sched.Retype { axis = s; ty = LL.Grid })
-  @ reorder_swaps ~current:site.c_loops ~target:loop_syms
-  @ [
-      stage site.c_a [ site.c_row; site.c_red ];
-      stage site.c_b [ site.c_red; site.c_oc ];
-      tz;
-    ]
+  let outer_grid =
+    List.map site.c_outer ~f:(fun (s, _) -> Sched.Retype { axis = s; ty = LL.Grid })
+  in
+  if sk_bm > 0 then (
+    if site.c_nrow % sk_bm <> 0 then
+      invalid_arg "Autotune conv sketch: row block must divide the row extent";
+    let sp_row, row_o, row_i =
+      Sched.split ~axis:site.c_row ~factor:sk_bm ~outer:LL.Grid ~inner:LL.Serial
+    in
+    let current = conv_split_row_current site ~row_o ~row_i in
+    let target =
+      List.map site.c_outer ~f:fst @ [ row_o ] @ site.c_kernel
+      @ [ row_i; site.c_oc; site.c_red ]
+    in
+    let tz, _lane = Sched.tensorize ~i:row_i ~j:site.c_oc ~k:site.c_red ~simd_width:w in
+    (outer_grid @ [ sp_row ])
+    @ reorder_swaps ~current ~target
+    @ [ stage site.c_a [ row_i; site.c_red ]; stage site.c_b [ site.c_red; site.c_oc ]; tz ])
+  else
+    let loop_syms =
+      List.map site.c_outer ~f:fst @ site.c_kernel @ [ site.c_row; site.c_oc; site.c_red ]
+    in
+    let tz, _lane = Sched.tensorize ~i:site.c_row ~j:site.c_oc ~k:site.c_red ~simd_width:w in
+    outer_grid
+    @ reorder_swaps ~current:site.c_loops ~target:loop_syms
+    @ [
+        stage site.c_a [ site.c_row; site.c_red ];
+        stage site.c_b [ site.c_red; site.c_oc ];
+        tz;
+      ]
 
 let sketch_schedule ~p (opt : LL.optimized) : Sched.schedule =
   let sched, d =
@@ -974,7 +1045,28 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
               (match site.c_outer with (_, n) :: _ -> n >= 2 | [] -> false)
               && (List.length real_stmts <= 2 || Option.is_some (conv_aligned_grid site opt))
             in
-            base :: (if grid_ok then [ { base with sk_grid = true } ] else [])
+            (* Cache-blocked row-panel flavors (gh-ocannl-500): split the GEMM row into panels of
+               [sk_bm] rows ([cpu_conv_sketch_schedule]'s [sk_bm] leg). Dividing blocks only — the
+               split must stay guard-free so the reorder's [Swap]s are well-formed — and at least two
+               panels. Proposed on any unzeroed segment: a conv-alone segment [Grid]-parallelizes the
+               panel loop, an aligned-merged segment adopts the whole-segment [Grid] geometry
+               ([conv_aligned_grid]) and blocks the row serially for cache residency. The
+               whole-routine zeroed graph keeps the serial/aligned flavors above (its [Zero_out] is
+               in the routine, so the aligned analysis bails and the block flavor is not seeded). *)
+            let block_ok =
+              (not site.c_zeroed)
+              && (List.length real_stmts <= 1 || Option.is_some (conv_aligned_grid site opt))
+            in
+            let row_blocks =
+              if not block_ok then []
+              else
+                List.filter_map [ 8; 16; 32 ] ~f:(fun bm ->
+                    if site.c_nrow % bm = 0 && site.c_nrow / bm >= 2 then
+                      Some { base with sk_bm = bm }
+                    else None)
+            in
+            (base :: (if grid_ok then [ { base with sk_grid = true } ] else []))
+            @ row_blocks
       in
       let gpu_seeds =
         match (is_gpu, limits.Ir.Backend_intf.mma) with
@@ -985,25 +1077,48 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
                gating mirrors the CPU grid flavors: on GPU there is no all-serial fallback, so any
                uncovered companion write fails [validate_parallel] — the one-companion seed only
                survives through its fused twin. *)
-            let shared_bytes =
-              ((site.c_nrow * site.c_nred) + (site.c_nred * site.c_noc))
-              * Ir.Ops.prec_in_bytes prec
+            (* The intrinsic-tile divisibility is now a PER-BLOCK property (gh-ocannl-500): the
+               tensorized micro-kernel row is [sk_bm] (the block), not the whole [c_nrow], so a
+               staged block flavor is proposable whenever [sk_bm] — a multiple of the intrinsic row
+               tile that divides [c_nrow] — exists, and the whole-extent flavor ([sk_bm = 0]) only
+               when [c_nrow] itself is a multiple. (Column and reduction stay whole-extent tensorized,
+               so [c_noc] / [c_nred] keep their intrinsic-tile gates; blocking those would exceed the
+               three-[Grid]-slot budget on 2-D convs — a follow-up.) A dividing block that is a
+               multiple of the tile implies whole divisibility, so on ordinary shapes the block
+               flavors add [Grid] device-fill splits rather than waking new sites; genuine edge
+               peeling of the cooperative micro-kernel — a tensorized bulk beside a scalar remainder,
+               which [Stage]'s single-index-vector rule blocks in v1 — is a recorded follow-up. *)
+            let shared_bytes rows =
+              ((rows * site.c_nred) + (site.c_nred * site.c_noc)) * Ir.Ops.prec_in_bytes prec
             in
-            let shared_fits =
+            let shared_fits rows =
               match limits.Ir.Backend_intf.max_workgroup_memory_bytes with
-              | Some cap -> shared_bytes <= cap
+              | Some cap -> shared_bytes rows <= cap
               | None -> true
             in
-            if
+            let base_ok =
               row_unit_stride && offset_free
               && (not site.c_zeroed)
-              && site.c_nrow % tm_t = 0
               && site.c_noc % tn_t = 0
               && site.c_nred % tk_t = 0
               && List.length real_stmts <= 2
-              && shared_fits
-            then [ { base with sk_gpu = true; sk_simd = w } ]
-            else []
+            in
+            if not base_ok then []
+            else
+              let whole =
+                if site.c_nrow % tm_t = 0 && shared_fits site.c_nrow then
+                  [ { base with sk_gpu = true; sk_simd = w } ]
+                else []
+              in
+              let blocked =
+                List.filter_map [ 8; 16; 32 ] ~f:(fun bm ->
+                    if
+                      bm % tm_t = 0 && site.c_nrow % bm = 0 && site.c_nrow / bm >= 2
+                      && shared_fits bm
+                    then Some { base with sk_gpu = true; sk_simd = w; sk_bm = bm }
+                    else None)
+              in
+              whole @ blocked
         | _ -> []
       in
       let seeds = cpu_seeds @ gpu_seeds in

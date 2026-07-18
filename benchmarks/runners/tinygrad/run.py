@@ -80,10 +80,14 @@ def build_conv(meta, data):
     bl = param(data["b_logits"])
     flat = [w1, b1, w2, b2, wf1, bf1, wf2, bf2, wl, bl]
 
+    # Same-padding (cifar-scale workload) vs valid (LeNet); odd kernel keeps the spatial extent.
+    k = int(meta.get("kernel_size", "5"))
+    pad = (k - 1) // 2 if meta.get("use_padding", "false") == "true" else 0
+
     def forward(xb):
-        z = xb.conv2d(w1, b1)  # valid convolution
+        z = xb.conv2d(w1, b1, padding=pad)
         z = z.relu().max_pool2d(kernel_size=(2, 2))
-        z = z.conv2d(w2, b2)
+        z = z.conv2d(w2, b2, padding=pad)
         z = z.relu().max_pool2d(kernel_size=(2, 2))
         h = z.permute(0, 2, 3, 1).reshape(z.shape[0], -1)
         h = h.linear(wf1.T, bf1).relu()

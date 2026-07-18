@@ -66,16 +66,28 @@ def build_mlp(spec, rng, tensors, meta):
 
 
 def build_conv(spec, rng, tensors, meta):
-    """LeNet-5 with valid convolutions. Weight layouts follow OCANNL's axis order
-    (output axes then input axes, channels-last images):
-    conv kernel [oc, kh, kw, ic]; fc1 weight [hid, oh, ow, oc] (input axes = the conv
-    feature map); images [total, h, w, c]. The Python runners permute to NCHW."""
+    """A two-conv classifier. Weight layouts follow OCANNL's axis order (output axes then
+    input axes, channels-last images): conv kernel [oc, kh, kw, ic]; fc1 weight
+    [hid, oh, ow, oc] (input axes = the conv feature map); images [total, h, w, c]. The
+    Python runners permute to NCHW.
+
+    Two shapes drive the same builder: LeNet-5 (1-channel, valid convs, small channels) and
+    the cifar-scale variant (gh-ocannl-500: 3-channel 44x44, valid 5x5 convs so both conv
+    GEMM rows land on multiples of 8 — 40 and 16 — and channels multiples of 8, so the
+    blocked conv sketch legs' per-block tile gates fire). [in_channels] defaults to 1 and
+    [use_padding] to false, keeping the LeNet fixture bit-identical."""
     total = spec["batch_size"] * spec["n_batches"]
     img, classes = spec["image_size"], spec["classes"]
     c1, c2, k = spec["channels1"], spec["channels2"], spec["kernel_size"]
-    fm = (((img - k + 1) // 2) - k + 1) // 2  # after conv5-valid, pool2, conv5-valid, pool2
+    ic = spec.get("in_channels", 1)
+    use_padding = spec.get("use_padding", False)
+    if use_padding:
+        # Same-padding keeps the spatial extent; two 2x pools halve it twice.
+        fm = img // 2 // 2
+    else:
+        fm = (((img - k + 1) // 2) - k + 1) // 2  # conv-valid, pool2, conv-valid, pool2
     fc1, fc2 = spec["fc1"], spec["fc2"]
-    tensors["conv1_kernel"] = uniform(rng, k * k * 1, (c1, k, k, 1))
+    tensors["conv1_kernel"] = uniform(rng, k * k * ic, (c1, k, k, ic))
     tensors["conv1_bias"] = np.zeros(c1, np.float32)
     tensors["conv2_kernel"] = uniform(rng, k * k * c1, (c2, k, k, c1))
     tensors["conv2_bias"] = np.zeros(c2, np.float32)
@@ -85,10 +97,12 @@ def build_conv(spec, rng, tensors, meta):
     tensors["fc2_b"] = np.zeros(fc2, np.float32)
     tensors["w_logits"] = uniform(rng, fc2, (classes, fc2))
     tensors["b_logits"] = np.zeros(classes, np.float32)
-    tensors["x"] = rng.normal(0.0, 1.0, (total, img, img, 1)).astype(np.float32)
+    tensors["x"] = rng.normal(0.0, 1.0, (total, img, img, ic)).astype(np.float32)
     tensors["y"] = one_hot(rng.integers(0, classes, total), classes)
     for key in ("image_size", "classes", "channels1", "channels2", "kernel_size", "fc1", "fc2"):
         meta[key] = str(spec[key])
+    meta["in_channels"] = str(ic)
+    meta["use_padding"] = "true" if use_padding else "false"
 
 
 def build_gpt(spec, rng, tensors, meta):

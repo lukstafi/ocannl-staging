@@ -21,6 +21,12 @@ tuned conv+tail matches the untuned twin within tolerance: true
 cvu: GPU staged conv pipeline matches the natural form within tolerance: true
 cvu: conv seeds per fission segment (GPU staged on metal; serial+grid on cc): true
 cvu: tuned conv matches the untuned twin within tolerance: true
+cvb: blocked (row-panel) conv pipeline matches the natural form within tolerance: true
+cvb: blocked flavors seeded per fission segment: true
+cvb: tuned blocked conv matches the untuned twin within tolerance: true
+cvmb: merged-segment blocked conv pipeline matches the natural form within tolerance: true
+cvmb: blocked flavor seeded on the merged fission segment: true
+cvmb: tuned merged-blocked conv matches the untuned twin within tolerance: true
 cva: aligned-grid conv pipeline on a merged segment matches within tolerance: true
 cva: aligned-grid conv seeded and timed on the merged fission segment: true
 cva: tuned merged conv graph matches the untuned twin within tolerance: true
