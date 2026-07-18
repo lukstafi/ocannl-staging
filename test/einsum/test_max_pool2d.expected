@@ -195,5 +195,8 @@ HERE: test/einsum/test_max_pool2d.ml:174:21
 │└──────┴──────┘          │
 └─────────────────────────┘
 grad_x <not-in-context>
+Testing max_pool2d with use_padding=true (stride=2, window=3)...
+padded pooled = [-11 -9; -3 -1]
+padded max-pool values correct (margins -inf): true
 
 All max_pool2d tests completed!

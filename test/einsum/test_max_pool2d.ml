@@ -173,10 +173,41 @@ let test_max_pool2d_backprop () =
   Train.printf ~here:[%here] ~with_code:false ctx loss;
   Train.printf ~here:[%here] ~with_code:false ~with_grad:true ctx input
 
+(** Test max_pool2d with use_padding=true ("same" pooling): output spatial dims = input/stride.
+    The block routes the -inf margin demand through a private materialized copy (the padding
+    neutral element is part of a buffer's committed identity). All-negative inputs expose wrong
+    margins: 0-margins would make the edge maxima 0. *)
+let test_max_pool2d_padded () =
+  printf "Testing max_pool2d with use_padding=true (stride=2, window=3)...\n%!";
+  Tensor.unsafe_reinitialize ();
+
+  (* 4x4 input with values -16..-1, as a data node (closed row; the -inf margin demand lands on
+     the block's private copy, so a layout-committed input is fine). *)
+  let input =
+    TDSL.init ~l:"input" ~prec:Ir.Ops.single ~o:[ 4; 4; 1 ]
+      ~f:(fun idcs -> Float.of_int ((4 * idcs.(0)) + idcs.(1)) -. 16.)
+      ()
+  in
+  let%op output = max_pool2d ~stride:2 ~window_size:3 ~use_padding:true () input in
+
+  let ctx = Context.auto () in
+  Train.set_materialized input.value;
+  Train.set_materialized output.value;
+  let ctx = Train.forward_once ctx output in
+  (* Window at output (oh, ow) covers input rows 2*oh-1 .. 2*oh+1 (margins: left 1, right 2),
+     clipped to the valid range by the -inf margins:
+     out[0,0] = max rows{0,1} cols{0,1} = -11;  out[0,1] = max rows{0,1} cols{1..3} = -9;
+     out[1,0] = max rows{1..3} cols{0,1} = -3;  out[1,1] = max rows{1..3} cols{1..3} = -1. *)
+  let v = Context.get_values ctx output.value in
+  printf "padded pooled = [%g %g; %g %g]\n%!" v.(0) v.(1) v.(2) v.(3);
+  printf "padded max-pool values correct (margins -inf): %b\n%!"
+    Float.(v.(0) = -11. && v.(1) = -9. && v.(2) = -3. && v.(3) = -1.)
+
 let () =
   test_max_pool2d_basic ();
   test_max_pool2d_window3 ();
   test_max_pool2d_output_dim_1 ();
   test_max_pool2d_channels ();
   test_max_pool2d_backprop ();
+  test_max_pool2d_padded ();
   printf "\nAll max_pool2d tests completed!\n%!"
