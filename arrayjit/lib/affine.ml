@@ -184,7 +184,13 @@ let pair_conflict ~range ~dup_left ~dup_right ~(pairs : (Idx.symbol * Idx.symbol
           Option.value_map eq ~default:[] ~f:(forced_pairs ~range))
     in
     let pair_forced (p, p') =
-      List.exists forced ~f:(fun (a, b) -> Idx.equal_symbol a p && Idx.equal_symbol b p')
+      (* A width-1 parallel symbol has a single thread coordinate, so equality across threads holds
+         by definition — necessary because {!terms_of} substitutes width-1 symbols away before the
+         equation-level forcing can see them. *)
+      (match (range p, range p') with
+      | Some (lo, hi), Some (lo', hi') -> lo = hi && lo' = hi' && lo = lo'
+      | _ -> false)
+      || List.exists forced ~f:(fun (a, b) -> Idx.equal_symbol a p && Idx.equal_symbol b p')
     in
     if (not (List.is_empty pairs)) && List.for_all pairs ~f:pair_forced then Same_thread
     else

@@ -184,6 +184,13 @@ let () =
     [| Idx.Fixed_idx 0; Idx.Iterator j |];
   same_nest ~name:"offset loop bounds [2,5]" ~syms:[ p ] ~ranges:[ (p, (2, 5)) ] ~pairs:[ p ]
     [| Idx.Iterator p |] [| Idx.Iterator p |];
+  (* A width-1 parallel symbol is substituted away before equation-level forcing; its thread
+     equality holds by definition (single coordinate). *)
+  same_nest ~name:"width-1 parallel symbol" ~syms:[ p; j ]
+    ~ranges:[ (p, (0, 0)); (j, (0, 2)) ]
+    ~pairs:[ p; j ]
+    [| Idx.Iterator p; Idx.Iterator j |]
+    [| Idx.Iterator p; Idx.Iterator j |];
   same_nest ~name:"rank padding" ~syms:[ p; j ] ~pairs:[ p ]
     [| Idx.Iterator p; Idx.Fixed_idx 0 |]
     [| Idx.Iterator p |];

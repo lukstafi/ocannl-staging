@@ -11,6 +11,7 @@ fixed disjoint slices              query Disjoint     oracle disjoint
 transposed access                  query Cross_thread oracle cross-thread
 read row 0                         query Cross_thread oracle cross-thread
 offset loop bounds [2,5]           query Same_thread  oracle same-thread 
+width-1 parallel symbol            query Same_thread  oracle same-thread 
 rank padding                       query Same_thread  oracle same-thread 
 sub_axis is opaque                 query Same_thread  oracle opaque      
 shared static symbol               query Same_thread  oracle same-thread 
