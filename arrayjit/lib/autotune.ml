@@ -30,7 +30,15 @@ let min_progress = 0.01
 
 let set_test_bindings routine =
   List.iter (Context.bindings routine) ~f:(fun (ss, r) ->
-      match ss.Idx.static_range with Some range when range > 0 -> r := range / 2 | _ -> ())
+      match ss.Idx.static_range with
+      | Some range when range > 0 && ss.Idx.used_as_extent ->
+          (* gh-490 symbolic extents: tune at the upper bound. The schedule digest is
+             extent-value-independent (the extent is a kernel parameter), so one tuned entry serves
+             every extent; measuring at the maximum makes the tuned schedule's cost model
+             conservative for smaller runtime extents. *)
+          r := range
+      | Some range when range > 0 -> r := range / 2
+      | _ -> ())
 
 (* Fast routines get extra timed runs beyond [repeats], until this much total measured time (or
    [max_timing_runs]): on sub-millisecond kernels a min-of-3 is dominated by launch jitter, and the
