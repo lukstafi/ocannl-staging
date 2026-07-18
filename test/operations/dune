@@ -421,9 +421,14 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; Disabled on Metal: the test forces materialized FP8 tensors, and the Metal backend rejects
+; Ops.Fp8_prec in typ_of_prec. Re-enable once Metal FP8 support exists.
+
 (test
  (name test_fp8_roundtrip)
  (package neural_nets_lib)
+ (enabled_if
+  (<> %{env:OCANNL_BACKEND=cc} metal))
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
