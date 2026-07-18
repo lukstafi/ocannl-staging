@@ -29,12 +29,14 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   conventional per-channel `[oc]` (the `conv2d` block pins its inline bias to the channel
   row); the Python runners pass them as the conv's own bias argument.
 - **cifar_conv** (`model: conv`, training): a cifar-scale two-conv classifier — 3-channel
-  34×34 images, *valid* 3×3 convs into 32 then 64 channels (gh-ocannl-500). The deep conv
-  (`conv2`) has spatial row 16, out-channels 64, and reduction 32 — all multiples of the GPU
-  intrinsic 8×8×8 tile — so the blocked implicit-GEMM conv sketch flavors engage: the CPU
-  cache-panel and the GPU row-block staged legs. Image size 34 (not 32) makes `conv2`'s row
-  land on 16 after the first conv+pool, so an 8-row block divides it evenly. Same builder as
-  `lenet` (channel count, kernel, padding, and input channels are all spec-driven).
+  44×44 images, *valid* 5×5 convs (the classic LeNet kernels) into 32 then 64 channels
+  (gh-ocannl-500). Both conv GEMM rows are 8-row-block eligible: `conv1`'s output row is 40
+  and `conv2`'s is 16; `conv2` additionally has out-channels 64 and reduction 32, so its
+  row/oc/red are all multiples of the GPU intrinsic 8×8×8 tile and the GPU row-block staged
+  leg is proposable alongside the CPU cache-panel leg. The 5×5/44 geometry is deliberate:
+  with valid 3×3 convs and 2×2 pooling the deep conv's row is always ≡ 2 (mod 4), never
+  divisible by 8. Same builder as `lenet` (channel count, kernel, padding, and input
+  channels are all spec-driven).
 - **gpt2_mini** (`model: gpt`, `mode: infer`): pre-LN GPT-2-style decoder (4 layers, d=256,
   8 heads, seq 128, vocab 1024, tanh-gelu, learned positional embeddings, tied lm_head,
   causal mask filled with -1e9), forward-only. The parity metric is softmax-CE of the

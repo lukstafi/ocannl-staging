@@ -72,10 +72,10 @@ def build_conv(spec, rng, tensors, meta):
     Python runners permute to NCHW.
 
     Two shapes drive the same builder: LeNet-5 (1-channel, valid convs, small channels) and
-    the cifar-scale variant (gh-ocannl-500: 3-channel 32x32, same-padding so the spatial
-    extent stays a divisor of the intrinsic tile, channels multiples of 8 so the GPU staged
-    conv leg's per-block tile gates fire). [in_channels] defaults to 1 and [use_padding] to
-    false, keeping the LeNet fixture bit-identical."""
+    the cifar-scale variant (gh-ocannl-500: 3-channel 44x44, valid 5x5 convs so both conv
+    GEMM rows land on multiples of 8 — 40 and 16 — and channels multiples of 8, so the
+    blocked conv sketch legs' per-block tile gates fire). [in_channels] defaults to 1 and
+    [use_padding] to false, keeping the LeNet fixture bit-identical."""
     total = spec["batch_size"] * spec["n_batches"]
     img, classes = spec["image_size"], spec["classes"]
     c1, c2, k = spec["channels1"], spec["channels2"], spec["kernel_size"]
