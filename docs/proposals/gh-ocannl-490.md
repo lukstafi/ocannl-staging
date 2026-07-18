@@ -122,15 +122,31 @@ for (int32_t i7 = 0; i7 <= 5; ++i7) { if (i7 < i1) { ... } }   // i1: const int3
   6/4/1/0 with exact prefix results (the extent=4 total of 4.0, not 6.0, proves the guard), and
   extent=7 is rejected at bind validation.
 
-Possible codegen refinement: a peephole fusing `for (i ...) { if (i < n) ... }` into
-`for (i = 0; i < min(max, n); ...)` for serial CPU loops; on GPU grids the guard is already the
-canonical form.
+## Stage 3: autotune at the upper bound + serial guard fusion (landed)
+
+- **Autotune identity comes for free from stage 2**: the extent is a kernel parameter, not part of
+  the lowered program, so the schedule digest (`Schedule_cache.canonicalize`, which does emit the
+  `If` guard including the symbol) is identical for every extent value — one compile *and* one
+  tune-cache entry per architecture, the gh-490 payoff. What remained was the tuning-size policy:
+  `Autotune.set_test_bindings` (now exported) binds a symbolic extent at its **upper bound**
+  `range` during timing (plain ranged indices keep `range / 2`), making the tuned schedule's cost
+  model conservative for smaller runtime extents. Bucketing by representative sizes remains
+  available as a future refinement if measurements diverge.
+- **Serial-loop guard fusion peephole** (`C_syntax` `serial_loop`): a body-wrapping
+  `if (i < s)` extent guard — with `s` a kernel parameter, not an enclosing loop index — hoists
+  into the loop header as `for (i = 0; i <= max && i < s; ++i)`. The iteration variable is
+  monotone, so once the guard fails it stays false: exiting equals skipping. This removes the
+  per-iteration guard overhead on CPU serial loops (including GPU serial-fallback loops); grid
+  loops keep the guard, which is the canonical GPU form. Pure codegen: `Low_level` and digests
+  are unchanged.
+- Test (`symbolic_extent_launch`, extended): the fused loops compute exact prefixes at extents
+  6/4/1/0; timing measurement observably binds the extent at 6 (not `range/2 = 3`); a tuned
+  routine serves extents 6 and 3; and a second `Autotune.tune` of the same program hits the
+  extent-value-independent cache entry.
 
 ## Follow-ups (rest of gh-490)
 
-1. Autotune cache identity `(digest, tuning-size)` with bucketing; schedule transforms
-   (Grid/Split/Tensorize) interacting with guarded loops — currently they see max-extent loops
-   with an inner guard, which is correct but untuned.
+1. Schedule transforms (Grid/Split/Tensorize) interacting with guarded loops — currently they see
+   max-extent loops with an inner guard, which is correct but untuned; tuning-size bucketing.
 2. RNG init over symbolic axes via materialized numel; capturing `solved_sym`; possibly `Sym`
    support in `Total_elems` (`Sym_denom`).
-3. Serial-loop bound fusion peephole (above); Metal/CUDA-specific validation of guarded grids.
