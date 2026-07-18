@@ -26,8 +26,9 @@ let () =
   let k = H.meta_int st "kernel_size" in
   let fc1_dim = H.meta_int st "fc1" in
   let fc2_dim = H.meta_int st "fc2" in
-  (* Same-padding (gh-ocannl-500 cifar-scale workload) keeps the spatial extent divisible; valid
-     convs (LeNet) shrink it. Defaults to valid so pre-existing fixtures are unchanged. *)
+  (* Same-padding keeps the spatial extent divisible; valid convs (LeNet) shrink it. The flag
+     applies to BOTH convs — gen_fixtures sizes fc1_w as if both preserve extent, and the Python
+     runners pad both. Defaults to valid so pre-existing fixtures are unchanged. *)
   let use_padding =
     match List.Assoc.find (St.metadata st) ~equal:String.equal "use_padding" with
     | Some "true" -> true
@@ -46,7 +47,7 @@ let () =
     Nn_blocks.conv2d ~label:[ "conv1" ] ~kernel_size:k ~use_padding ~out_channels:c1 ()
   in
   let conv2 =
-    Nn_blocks.conv2d ~label:[ "conv2" ] ~kernel_size:k ~use_padding:false ~out_channels:c2 ()
+    Nn_blocks.conv2d ~label:[ "conv2" ] ~kernel_size:k ~use_padding ~out_channels:c2 ()
   in
   let pool1 = Nn_blocks.max_pool2d ~stride:2 ~window_size:2 () in
   let pool2 = Nn_blocks.max_pool2d ~stride:2 ~window_size:2 () in
