@@ -1658,7 +1658,8 @@ let fresh_proj_ids update =
         Option.iter row_padding ~f:(fun padding ->
             Array.iter2_exn dims padding ~f:(fun d p ->
                 match d with
-                | Row.Dim { proj_id = Some proj_id; _ } ->
+                | Row.Dim { proj_id = Some proj_id; _ } | Row.Sym { sym_proj_id = Some proj_id; _ }
+                  ->
                     inferred_padding := (proj_id, p) :: !inferred_padding
                 | _ -> ()))
     | Some locked_arr ->
@@ -1669,7 +1670,7 @@ let fresh_proj_ids update =
               | _ -> no_padding
             in
             match d with
-            | Row.Dim { proj_id = Some proj_id; _ } ->
+            | Row.Dim { proj_id = Some proj_id; _ } | Row.Sym { sym_proj_id = Some proj_id; _ } ->
                 resolved_padding := (proj_id, p) :: !resolved_padding
             | _ -> ()));
     offset + Array.length dims
@@ -1737,6 +1738,10 @@ let%debug4_sexp row_to_dims (row : Row.t) : int array =
   let open Row in
   let rec f = function
     | Dim { d; _ } -> d
+    | Sym s ->
+        (* Reconciliation with Tnode dims: a symbolic axis materializes at its maximum extent (the
+           declared range of its static symbol), which sizes allocations and host transfers. *)
+        sym_dim_extent_exn s
     | Var v ->
         raise
         @@ Row.Shape_error
@@ -2072,6 +2077,7 @@ let compute_row_product env (row : Row.t) : int option =
         let dim_val =
           match dim with
           | Row.Dim { d; _ } -> Some d
+          | Row.Sym _ -> None (* Symbolic dims don't participate in row-product arithmetic. *)
           | Row.Var v -> Row.get_dim_val env v
           | Row.Affine _ -> None (* TODO: handle affine/convolution input dimensions *)
           | Row.Concat dims ->

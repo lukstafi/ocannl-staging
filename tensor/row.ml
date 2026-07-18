@@ -78,14 +78,20 @@ type convolution = { dilation : int; kernel : dim; use_padding : bool }
 and dim =
   | Var of dim_var
   | Dim of solved_dim
+  | Sym of sym_dim
   | Affine of { stride : int; over : dim; conv : convolution option; stride_offset : int }
   | Concat of dim list
+
+and sym_dim = { sym : Ir.Indexing.static_symbol; sym_basis : string; sym_proj_id : proj_id option }
 [@@deriving equal, hash, compare, sexp]
 
 let equal_dim d1 d2 =
   match (d1, d2) with
   | Dim { d = d1; basis = b1; proj_id = _ }, Dim { d = d2; basis = b2; proj_id = _ } ->
       d1 = d2 && String.equal b1 b2
+  | ( Sym { sym = s1; sym_basis = b1; sym_proj_id = _ },
+      Sym { sym = s2; sym_basis = b2; sym_proj_id = _ } ) ->
+      Ir.Indexing.equal_static_symbol s1 s2 && String.equal b1 b2
   | _ -> equal_dim d1 d2
 
 let uid = ref 0
@@ -107,6 +113,43 @@ let get_bcast_dim ~d ?proj_id () = get_dim ~d ~basis:bcast_if_1 ?proj_id ()
 
 (* Mint an unannotated user/derived atom. *)
 let get_default_dim ~d ?proj_id () = get_dim ~d ~basis:default_basis ?proj_id ()
+
+(* The maximum extent of a symbolic dimension: the declared range of its static symbol. Symbolic
+   dimensions are materialized at this extent (Tnode dims, projections product space) until
+   launch-time extent binding lands (gh-490 backend tasks). *)
+let sym_dim_extent_exn { sym; _ } =
+  match sym.Ir.Indexing.static_range with
+  | Some range -> range
+  | None ->
+      raise
+      @@ Utils.User_error
+           (Printf.sprintf
+              "Row: static index %s used as a symbolic dimension has no declared range; symbolic \
+               dimensions require ~static_range (it is the maximum extent, used for allocation \
+               sizing)"
+              (Ir.Indexing.symbol_ident sym.Ir.Indexing.static_symbol))
+
+(* Materialize a symbolic dimension as a solved dimension at its maximum extent. Used at the
+   projection / Tnode boundary: until launch-time extent binding lands, symbolic axes iterate and
+   allocate at their declared range. *)
+let solved_dim_of_sym ({ sym = _; sym_basis; sym_proj_id } as sdim) =
+  { d = sym_dim_extent_exn sdim; basis = sym_basis; proj_id = sym_proj_id }
+
+(* Mint a symbolic dimension from a static-indexing symbol: a rigid constant equal only to itself
+   during shape inference. Requires a declared [static_range >= 1] (checked eagerly). *)
+let get_sym_dim ?(basis = default_basis) ?proj_id sym =
+  let proj_id = Option.map ~f:(fun p -> Proj_id.Proj_id p) proj_id in
+  let sdim = { sym; sym_basis = basis; sym_proj_id = proj_id } in
+  let extent = sym_dim_extent_exn sdim in
+  if extent < 1 then
+    raise
+    @@ Utils.User_error
+         (Printf.sprintf
+            "Row: static index %s used as a symbolic dimension has declared range %d; symbolic \
+             dimensions require a positive maximum extent"
+            (Ir.Indexing.symbol_ident sym.Ir.Indexing.static_symbol)
+            extent);
+  Sym sdim
 
 (* The reserved tags ([default], [bcast_if_1]) carry no naming claim. *)
 let is_reserved_basis b = String.equal b default_basis || String.equal b bcast_if_1
@@ -153,8 +196,23 @@ let solved_dim_to_string style { d; basis; proj_id } =
       let proj_part = match proj_id with None -> "" | Some pid -> "p" ^ Proj_id.to_string pid in
       basis_size_prefix basis ^ size_part ^ proj_part
 
+let sym_dim_to_string style { sym; sym_basis; sym_proj_id } =
+  let ident = Ir.Indexing.symbol_ident sym.Ir.Indexing.static_symbol in
+  let range =
+    match sym.Ir.Indexing.static_range with Some r -> Int.to_string r | None -> "?"
+  in
+  match style with
+  | Only_bases -> sym_basis
+  | Axis_size | Axis_number_and_size -> [%string "%{basis_size_prefix sym_basis}%{ident}<=%{range}"]
+  | Projection_and_size ->
+      let proj_part =
+        match sym_proj_id with None -> "" | Some pid -> "p" ^ Proj_id.to_string pid
+      in
+      [%string "%{basis_size_prefix sym_basis}%{ident}<=%{range}%{proj_part}"]
+
 let rec dim_to_string style = function
   | Dim solved_dim -> solved_dim_to_string style solved_dim
+  | Sym sym_dim -> sym_dim_to_string style sym_dim
   | Var { id; name = Some n } -> [%string "$%{id#Int}:%{n}"]
   | Var { id; name = None } -> "$" ^ Int.to_string id
   | Affine { stride; over; conv; stride_offset } -> (
@@ -407,6 +465,7 @@ let merge_origins o1 o2 =
 
 let rec dim_to_int_exn = function
   | Dim { d; _ } -> d
+  | Sym s -> sym_dim_extent_exn s
   | Var _ -> invalid_arg "dim_to_int: dim still unknown"
   | Affine _ -> invalid_arg "dim_to_int: affine dimension cannot be converted to single int"
   | Concat dims -> List.sum (module Int) dims ~f:dim_to_int_exn
@@ -492,7 +551,7 @@ let rec s_dim_one ?(keep_affine = false) v ~value ~in_ =
             in
             Dim { d = total_d; basis; proj_id = None }
           else Concat dims)
-  | Dim _ | Var _ -> in_
+  | Dim _ | Sym _ | Var _ -> in_
 
 (* Helper functions for total_elems operations *)
 let total_elems_to_string = function
@@ -956,6 +1015,14 @@ let%track5_sexp rec apply_dim_constraint ~(source : source) ~(stage : stage) (di
             (* If source is [Res], then [constr] (target) is [Opnd]. *)
             | Res, (Unconstrained_dim | At_least_dim 1) -> ([], constr)
             | _ -> Option.value ~default:([], constr) @@ dim_conjunction constr bounds.constr))
+    | Sym s, At_least_dim d_min ->
+        (* The materialized extent of a symbolic dimension is its declared range. *)
+        if sym_dim_extent_exn s < d_min then
+          raise
+          @@ Shape_error
+               ( "At_least_dim constraint failed, expected " ^ Int.to_string d_min,
+                 [ Dim_mismatch [ dim ] ] )
+        else ([], constr)
     | Concat _dims, At_least_dim _d_min ->
         (* FIXME: reconsider if we can make progress *)
         (* For concatenation, the constraint applies to the sum of component dimensions. We don't
@@ -1001,12 +1068,32 @@ let mark_total_elems_vars (constr : row_constraint) env : environment =
       | Some (Solved_dim _) -> env)
   | _ -> env
 
+let rec dim_contains_sym = function
+  | Sym _ -> true
+  | Dim _ | Var _ -> false
+  | Affine { over; conv = None; _ } -> dim_contains_sym over
+  | Affine { over; conv = Some { kernel; _ }; _ } ->
+      dim_contains_sym over || dim_contains_sym kernel
+  | Concat dims -> List.exists dims ~f:dim_contains_sym
+
+(* gh-490 v1: symbolic dimensions do not participate in total-elements arithmetic; fail fast
+   instead of silently dropping (or forever deferring) the constraint. *)
+let fail_if_total_elems_over_sym (dims : dim list) =
+  match List.find dims ~f:dim_contains_sym with
+  | Some d ->
+      raise
+      @@ Shape_error
+           ( "Total_elems constraints are not supported with symbolic dimensions",
+             [ Dim_mismatch [ d ] ] )
+  | None -> ()
+
 let reduce_row_constraint (constr : row_constraint) ~(beg_dims : dim list) ~(dims : dim list) :
     row_constraint =
   match constr with
   | Unconstrained -> Unconstrained
   | Total_elems { numerator; divided_by; keep_axis } -> (
       try
+        fail_if_total_elems_over_sym (beg_dims @ dims);
         let d, vars =
           match collect_factors (beg_dims @ dims) with
           | Some (d, vars) -> (d, vars)
@@ -1049,6 +1136,7 @@ let _lift_row_constraint (constr : row_constraint) ~(beg_dims : dim list) ~(dims
         List.partition_map (beg_dims @ dims) ~f:(function
           | Dim { d; _ } -> Either.First d
           | Var v -> Either.Second v
+          | Sym _ -> failwith "NOT IMPLEMENTED YET"
           | Affine _ -> failwith "NOT IMPLEMENTED YET"
           | Concat _ -> failwith "NOT IMPLEMENTED YET")
       in
@@ -1224,6 +1312,7 @@ let reapply_rows_constr = ref false
 let subst_row_constraint_impl ~subst_in_dim ~get_dim_val stage constr =
   let subst_total_elems_divided_by numerator divided_by ~keep_axis =
     let substituted_divided_by = List.map divided_by ~f:(fun v -> subst_in_dim (Var v)) in
+    fail_if_total_elems_over_sym substituted_divided_by;
     match collect_factors substituted_divided_by with
     | Some (known_product, residual_vars) ->
         reapply_rows_constr := true;
@@ -1272,6 +1361,12 @@ let subst_row_constraint_impl ~subst_in_dim ~get_dim_val stage constr =
           Total_elems { numerator = Strided_var { coeff; var; denom }; divided_by; keep_axis }
       | Var v' ->
           Total_elems { numerator = Strided_var { coeff; var = v'; denom }; divided_by; keep_axis }
+      | Sym _ as value ->
+          (* gh-490 v1: symbolic dimensions do not participate in total-elements arithmetic. *)
+          raise
+          @@ Shape_error
+               ( "Total_elems constraints are not supported with symbolic dimensions",
+                 [ Dim_mismatch [ value ] ] )
       | Affine _ ->
           (* FIXME: NOT IMPLEMENTED YET *)
           failwith "NOT IMPLEMENTED YET"
@@ -1313,7 +1408,7 @@ let s_dim_one_in_row_entry stage v ~value ~key ~data =
   result
 
 let rec vars_of_dim = function
-  | Dim _ -> Set.empty (module Dim_var)
+  | Dim _ | Sym _ -> Set.empty (module Dim_var)
   | Var v -> Set.singleton (module Dim_var) v
   | Affine { over; conv = None; _ } -> vars_of_dim over
   | Affine { over; conv = Some { kernel; _ }; _ } ->
@@ -1435,6 +1530,7 @@ let%track5_sexp rec apply_rows_constraint ~depth ~stage origin (rows : row list)
             (dim_eqs @ row_eqs, env)
         | Total_elems { numerator = Num_elems n; divided_by; keep_axis } -> (
             (* Case 3: Total_elems with known numerator *)
+            fail_if_total_elems_over_sym all_dims;
             match collect_factors all_dims with
             | None ->
                 ([ Rows_constr { r = rows; constr; origin } ], env) (* Give up on complex cases *)
@@ -1625,6 +1721,7 @@ and apply_row_constraint ~depth stage origin (r : row) (constr : row_constraint)
     | { dims; bcast = Broadcastable; _ }, Total_elems { numerator; divided_by; _ }
       when List.length divided_by <= 1 -> (
         try
+          fail_if_total_elems_over_sym dims;
           let d, vars =
             match collect_factors dims with Some (d, vars) -> (d, vars) | None -> raise Given_up
           in
@@ -1732,7 +1829,7 @@ and apply_row_constraint ~depth stage origin (r : row) (constr : row_constraint)
 let rec dim_var_occurs_in_dim (v : dim_var) (d : dim) : bool =
   match d with
   | Var v' -> equal_dim_var v v'
-  | Dim _ -> false
+  | Dim _ | Sym _ -> false
   | Affine { over; conv = None; _ } -> dim_var_occurs_in_dim v over
   | Affine { over; conv = Some { kernel; _ }; _ } ->
       dim_var_occurs_in_dim v over || dim_var_occurs_in_dim v kernel
@@ -1792,6 +1889,16 @@ let%track6_sexp rec unify_dim ~stage origin (eq : dim * dim) env : constraint_ l
          propagate a basis onto, so the old upgrade-var pass is gone — variable solving records the
          already-total [Dim] exactly. *)
       ([], env)
+  | Sym { sym = s1; sym_basis = b1; _ }, Sym { sym = s2; sym_basis = b2; _ }
+    when Ir.Indexing.equal_static_symbol s1 s2 ->
+      (* A symbolic dimension is a rigid constant: equal only to itself (and, mirroring [Dim],
+         requiring equal basis tags). Distinct symbols and [Sym] vs. concrete [Dim] fall through to
+         the final mismatch arm. *)
+      if String.equal b1 b2 then ([], env)
+      else
+        raise
+        @@ Shape_error
+             ("solved dimensions for axis: different bases", [ Dim_mismatch [ dim1; dim2 ] ])
   | Var v1, Var v2 when equal_dim_var v1 v2 -> ([], env)
   | ( Affine { stride = 1; over; conv = Some { use_padding = true; _ } | None; stride_offset = _ },
       dim )
@@ -2232,6 +2339,14 @@ let%track6_sexp rec unify_dim ~stage origin (eq : dim * dim) env : constraint_ l
               Dim_eq { d1 = Concat rest; d2 = get_dim ~d:residual ~basis:residual_basis (); origin };
             ],
             env ))
+  | Concat _, Sym _ | Sym _, Concat _ ->
+      (* gh-490 v1: reconciling a concatenation's component sum with a symbolic extent requires
+         symbolic arithmetic; fail fast rather than defer forever. (A concat whose components cancel
+         structurally against another concat's [Sym] components is already handled above.) *)
+      raise
+      @@ Shape_error
+           ( "concat axis cannot be equated with a symbolic dimension",
+             [ Dim_mismatch [ dim1; dim2 ] ] )
   | Concat _, _ | _, Concat _ ->
       (* Concat against a not-yet-reducible dimension (e.g. an unresolved affine): defer rather than
          reject, so a later substitution can make progress. *)
@@ -2540,7 +2655,7 @@ let%track5_sexp solve_dim_ineq ~(stage : stage) origin ~(res : dim) ~(opnd : dim
         equal_dim_var opnd_v res_v
         ||
         match find_dim env.dim_env res_v with
-        | None | Some (Solved_dim (Dim _)) -> false
+        | None | Some (Solved_dim (Dim _)) | Some (Solved_dim (Sym _)) -> false
         | Some (Solved_dim (Var v)) -> equal_dim_var opnd_v v
         | Some (Solved_dim (Affine _)) -> false (* Affine dimensions can't be cyclic *)
         | Some (Solved_dim (Concat _)) -> false (* Concat dimensions can't be cyclic *)
@@ -2884,10 +2999,17 @@ let%track5_sexp solve_dim_ineq ~(stage : stage) origin ~(res : dim) ~(opnd : dim
               (* Same size and same tag: keep the existing bound. (Basis is total now, so there is
                  no wildcard "one side unspecified, prefer the other" case to handle here.) *)
               commit ~glb:res ~extra:[] env
+          | Sym _, Sym _ when equal_dim res glb2 ->
+              (* Same symbolic dimension: keep the existing bound. *)
+              commit ~glb:res ~extra:[] env
           | Dim _, Dim _ (* different size or different basis *) ->
               (* Intentional broadcast semantics: conflicting bases (or different sizes) demote to
                  the broadcast top 1_(bcast_if_1), meaning these axes are incompatible and should be
                  broadcast. This is NOT a bug — do not tighten to raise Shape_error. *)
+              demote ()
+          | Sym _, Sym _ | Sym _, Dim _ | Dim _, Sym _ ->
+              (* A symbolic dimension is a rigid atom: incompatible with a different rigid bound, so
+                 these axes broadcast (mirroring the differing-[Dim] arm). *)
               demote ()
           | Var _, _ | _, Var _ -> assert false
           | Affine _, _ | _, Affine _ | Concat _, _ | _, Concat _ -> merge_by_equality ())
@@ -2923,7 +3045,8 @@ let%track5_sexp solve_dim_ineq ~(stage : stage) origin ~(res : dim) ~(opnd : dim
                          origin;
                        });
             } ))
-  | Var _, Dim _ (* when d2 > 1 or based *) -> ([ Dim_eq { d1 = res; d2 = opnd; origin } ], env)
+  | Var _, (Dim _ | Sym _) (* when d2 > 1 or based *) ->
+      ([ Dim_eq { d1 = res; d2 = opnd; origin } ], env)
   | Concat dims1, Concat dims2 when List.length dims1 = List.length dims2 ->
       (* AC2: do not force pointwise element equalities (which over-constrains positionally). Emit a
          single [Concat = Concat] equation so [unify_dim]'s [Concat = Concat] branch handles it via
@@ -2938,7 +3061,9 @@ let%track5_sexp solve_dim_ineq ~(stage : stage) origin ~(res : dim) ~(opnd : dim
   | Concat _, _ | _, Concat _ ->
       (* Defer to dimension equality for concat with non-concat *)
       ([ Dim_eq { d1 = res; d2 = opnd; origin } ], env)
-  | Dim _, Dim _ ->
+  | (Dim _ | Sym _), (Dim _ | Sym _) ->
+      (* Includes symbolic dimensions vs. concrete ones, and two distinct symbolic dimensions: a
+         [Sym] is a rigid atom equal only to itself. *)
       raise
       @@ Shape_error ("dimension comparison for axis: mismatch", [ Dim_mismatch [ res; opnd ] ])
 
@@ -3387,6 +3512,12 @@ let%debug5_sexp solve_row_ineq ~(stage : stage) origin ~(res : t) ~(opnd : t) en
                    <> (stride2 * (s2.d - 1))
                       + effective_kernel_span ~dilation:dilation2 ~kernel_size:k2.d ->
                 get_bcast_dim ~d:1 ~proj_id:52 ()
+            | Sym _, Sym _ when equal_dim d1 d2 -> d1
+            | Sym _, Sym _ | Sym _, Dim _ | Dim _, Sym _ ->
+                (* A symbolic dimension is a rigid atom: incompatible with a different rigid bound,
+                   so the join generalizes to the broadcast top (mirroring the differing-[Dim]
+                   arms). [Sym] vs. [Affine]/[Concat] falls to the deferring wildcards below. *)
+                get_bcast_dim ~d:1 ~proj_id:64 ()
             | Var _, _ -> d1
             | _, Var _ -> d2
             | _, Dim _ -> d2
@@ -3489,7 +3620,7 @@ let can_guess_dim_to_one env has_uniq_constr_unless =
 let%debug5_sexp rec close_dim_terminal ~(stage : stage) ~is_param origin env (dim : dim) :
     constraint_ list =
   match dim with
-  | Dim _ -> []
+  | Dim _ | Sym _ -> []
   | Var v -> (
       match find_dim env.dim_env v with
       | Some (Solved_dim _) -> assert false
@@ -3873,7 +4004,7 @@ let%track5_sexp process_shape_row ~(stage : stage) origin env
     ({ beg_dims; dims; bcast; prov } as r : row) : constraint_ list * _ =
   let final = is_stage7 stage in
   let rec finalize_dim_bounds = function
-    | Dim _ -> []
+    | Dim _ | Sym _ -> []
     | Affine { over; conv = None; _ } -> finalize_dim_bounds over
     | Affine { over; conv = Some { kernel; _ }; _ } ->
         finalize_dim_bounds over @ finalize_dim_bounds kernel
@@ -3899,7 +4030,7 @@ let%track5_sexp process_shape_row ~(stage : stage) origin env
         | _ -> [])
   in
   let rec has_dim_var = function
-    | Dim _ -> false
+    | Dim _ | Sym _ -> false
     | Affine { over; conv = None; _ } -> has_dim_var over
     | Affine { over; conv = Some { kernel; _ }; _ } -> has_dim_var over || has_dim_var kernel
     | Concat dims -> List.exists dims ~f:has_dim_var
@@ -4047,7 +4178,7 @@ let%debug4_sexp solve_inequalities ~(stage : stage)
           let extras, constr = apply_dim_constraint ~source:Direct ~stage d constr env in
           let env =
             match (constr, d) with
-            | Unconstrained_dim, _ | _, Dim _ | _, Affine _ | _, Concat _ -> env
+            | Unconstrained_dim, _ | _, Dim _ | _, Sym _ | _, Affine _ | _, Concat _ -> env
             | _, Var v ->
                 let data =
                   match find_dim env.dim_env v with
@@ -4119,6 +4250,7 @@ let rec row_to_bases env =
     (* Basis is total: return the actual tag (including [default] and [bcast_if_1]) so the
        provenance split is visible to callers. *)
     | Dim { basis = b; _ } -> b
+    | Sym { sym_basis = b; _ } -> b
     | Var v -> (
         match find_dim env.dim_env v with
         | None | Some (Bounds_dim _) -> Option.value v.name ~default:""
@@ -4139,6 +4271,7 @@ let rec row_to_bases env =
 let fresh_row_proj r =
   let rec fresh_dim = function
     | Dim { d; basis; proj_id = _ } -> Dim { d; basis; proj_id = Some (Proj_id.fresh ()) }
+    | Sym s -> Sym { s with sym_proj_id = Some (Proj_id.fresh ()) }
     | Var _ as d -> d
     | Affine { stride; over; conv; stride_offset } ->
         let conv =
@@ -4153,7 +4286,8 @@ let fresh_row_proj r =
 let populate_dim_proj_in_solved env =
   let rec fresh_dim = function
     | Dim { d; basis; proj_id = None } -> Dim { d; basis; proj_id = Some (Proj_id.fresh ()) }
-    | (Dim _ | Var _) as d -> d
+    | Sym ({ sym_proj_id = None; _ } as s) -> Sym { s with sym_proj_id = Some (Proj_id.fresh ()) }
+    | (Dim _ | Sym _ | Var _) as d -> d
     | Affine { stride; over; conv; stride_offset } ->
         let conv =
           Option.map conv ~f:(fun { dilation; kernel; use_padding } ->
@@ -4233,6 +4367,12 @@ let%track4_sexp get_proj_equations (inequalities : constraint_ list) proj_axis_e
         raise
         @@ Shape_error
              ("to_proj: Dim without proj_id (d=" ^ Int.to_string d ^ ", basis=" ^ basis ^ ")", [])
+    | Sym ({ sym_proj_id = Some proj_id; _ } as s) ->
+        (* Symbolic axes iterate at their maximum extent until launch-time binding lands. *)
+        Proj (proj_id, solved_dim_of_sym s)
+    | Sym ({ sym_proj_id = None; _ } as s) ->
+        raise
+        @@ Shape_error ("to_proj: Sym without proj_id", [ Dim_mismatch [ Sym s ] ])
     | Affine { stride; over; conv = None; stride_offset } ->
         (* Strided iteration: no convolution *)
         Conv_input { stride; over = to_proj over; conv = None; stride_offset; target_id = None }
@@ -4246,6 +4386,12 @@ let%track4_sexp get_proj_equations (inequalities : constraint_ list) proj_axis_e
                      ^ Sexp.to_string_hum ([%sexp_of: dim_var] v),
                      [ Dim_mismatch [ dim ] ] )
           | Dim { d; _ } -> d
+          | Sym _ as dim ->
+              raise
+              @@ Shape_error
+                   ( "projection_of_solved_dims: symbolic dimension not supported as convolution \
+                      kernel",
+                     [ Dim_mismatch [ dim ] ] )
           | Affine _ as dim ->
               raise
               @@ Shape_error
@@ -4277,6 +4423,10 @@ let%track4_sexp get_proj_equations (inequalities : constraint_ list) proj_axis_e
                  ( "to_proj (subst): Dim without proj_id (d=" ^ Int.to_string d ^ ", basis=" ^ basis
                    ^ ")",
                    [] )
+        | Sym ({ sym_proj_id = Some proj_id; _ } as s) -> Proj (proj_id, solved_dim_of_sym s)
+        | Sym ({ sym_proj_id = None; _ } as s) ->
+            raise
+            @@ Shape_error ("to_proj (subst): Sym without proj_id", [ Dim_mismatch [ Sym s ] ])
         | Var v when Map.mem proj_axis_env v -> Solved (Map.find_exn proj_axis_env v)
         | Var v -> Var v
         | Affine _ as affine -> to_proj affine
@@ -4288,6 +4438,11 @@ let%track4_sexp get_proj_equations (inequalities : constraint_ list) proj_axis_e
                   | Dim { d; basis; proj_id = None } ->
                       let proj_id = Proj_id.fresh () in
                       (proj_id, { d; basis; proj_id = Some proj_id })
+                  | Sym ({ sym_proj_id = Some proj_id; _ } as s) ->
+                      (proj_id, solved_dim_of_sym s)
+                  | Sym ({ sym_proj_id = None; _ } as s) ->
+                      let proj_id = Proj_id.fresh () in
+                      (proj_id, { (solved_dim_of_sym s) with proj_id = Some proj_id })
                   | _ ->
                       raise
                       @@ Shape_error
@@ -4562,6 +4717,8 @@ let rec dim_to_proj _proj_env : dim -> proj = function
   | Var v -> Var v
   | Dim ({ proj_id = Some proj_id; _ } as solved_dim) -> Proj (proj_id, solved_dim)
   | Dim s -> Proj (Proj_id.fresh (), s)
+  | Sym ({ sym_proj_id = Some proj_id; _ } as s) -> Proj (proj_id, solved_dim_of_sym s)
+  | Sym s -> Proj (Proj_id.fresh (), solved_dim_of_sym s)
   | Affine { stride; over; conv = None; stride_offset } ->
       Conv_input
         { stride; over = dim_to_proj _proj_env over; conv = None; stride_offset; target_id = None }
@@ -4584,12 +4741,19 @@ let rec dim_to_proj _proj_env : dim -> proj = function
             | Dim { d; basis; proj_id = None } ->
                 let proj_id = Proj_id.fresh () in
                 (proj_id, { d; basis; proj_id = Some proj_id })
+            | Sym ({ sym_proj_id = Some proj_id; _ } as s) -> (proj_id, solved_dim_of_sym s)
+            | Sym ({ sym_proj_id = None; _ } as s) ->
+                let proj_id = Proj_id.fresh () in
+                (proj_id, { (solved_dim_of_sym s) with proj_id = Some proj_id })
             | _ -> failwith "dim_to_proj: Concat component not a solved dim")
       in
       Concat proj_dims
 
 let get_dim_index proj_env =
-  let loop = function
+  let rec loop = function
+    | Sym s ->
+        (* Symbolic axes index like their materialized (maximum-extent) dimension. *)
+        loop (Dim (solved_dim_of_sym s))
     | Dim { d; _ } when not @@ Idx.iterated d -> Idx.Fixed_idx 0
     | Dim { proj_id = None; _ } -> assert false
     | Var v when Hashtbl.mem proj_env.v_env v ->
@@ -4912,8 +5076,9 @@ let%debug4_sexp solve_proj_equations (eqs : proj_equation list)
 let proj_repr proj_env p =
   fst @@ Utils.union_find ~equal:Proj_id.equal proj_env.proj_classes ~key:p ~rank:0
 
-let get_product_proj proj_env dim =
+let rec get_product_proj proj_env dim =
   match dim with
+  | Sym s -> get_product_proj proj_env (Dim (solved_dim_of_sym s))
   | Dim { proj_id = Some proj_id; d; _ } -> (
       let repr = proj_repr proj_env proj_id in
       if not (Map.mem proj_env.product_dim repr) then None
@@ -4933,7 +5098,7 @@ let get_product_proj proj_env dim =
 
 let%debug6_sexp get_dim_padding (proj_env : proj_env) (dim : dim) : axis_padding option =
   match dim with
-  | Dim { proj_id = Some proj_id; _ } ->
+  | Dim { proj_id = Some proj_id; _ } | Sym { sym_proj_id = Some proj_id; _ } ->
       let repr = proj_repr proj_env proj_id in
       Hashtbl.find proj_env.inferred_padding repr
   | _ -> assert false
