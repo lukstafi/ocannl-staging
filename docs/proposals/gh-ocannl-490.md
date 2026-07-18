@@ -88,10 +88,49 @@ whole-buffer forward and reduction executed on the default backend, same-symbol 
 tensors, scalar broadcast) and error paths (missing range, set_dim/set_sym_dim conflicts,
 symbolic-vs-concrete solver mismatch, distinct symbols, row-var rejection, Total_elems fail-fast).
 
+## Stage 2: launch-time-bound extents via body guards (landed)
+
+Instead of a symbolic `For_loop` bound (which would ripple through every bounds-reading analysis —
+virtualization tracing, interval simplification, schedule transforms, digests, launch geometry),
+stage 2 keeps every loop at its **maximum extent** and guards the loop *body*:
+
+```c
+for (int32_t i7 = 0; i7 <= 5; ++i7) { if (i7 < i1) { ... } }   // i1: const int32_t kernel param
+```
+
+- `Indexing.projections` gains `extent_syms : (symbol * static_symbol) list` (product iterator →
+  extent symbol), populated by `Shape.derive_projections` from `Row.Sym` axes; `product_space`
+  keeps the max. The `%cd` inline-projections records in `ppx_cd` carry the field through.
+- `Assignments.to_low_level` wraps each loop body iterating a symbolic axis in
+  `If (iterator < Embed_index (Iterator sym))` — **only when the extent symbol is among the
+  routine's bindings** (`static_indices`). An unbound extent keeps stage-1 max semantics, so
+  `forward_once`-style flows (no bindings) are unchanged. The kernel parameter, launch binding,
+  and per-backend application reuse the existing static-index machinery unchanged.
+- Soundness of existing analyses: every bounds-reading pass sees the max loop (a superset of the
+  runtime range — sound for interval/guard discharge, allocation, launch geometry, digests). The
+  `If` guard makes guarded computations non-virtual (`Non_virtual 142`), which conservatively
+  blocks value-semantics folds (inlining/unrolled reductions) over symbolic loops. The interval
+  env seeds an extent symbol's value as `[0, range]` (inclusive).
+- Bind validation: `static_symbol` gains `used_as_extent` (set by `Row.get_sym_dim`); an extent
+  binds a **size** in `[0, range]` (inclusive; buffers are sized `range`), while plain static
+  indices keep the strict `[0, range)` check. `Train.sequential_loop` skips extent symbols (an
+  extent is set once, not iterated).
+- Semantics: elements beyond the bound extent are **undefined** (not computed); reductions and
+  consumers only touch the valid region (their loops are guarded by the same symbol). Read the
+  valid prefix on the host.
+- Test `test/operations/symbolic_extent_launch.ml`: one compiled cc routine runs at extents
+  6/4/1/0 with exact prefix results (the extent=4 total of 4.0, not 6.0, proves the guard), and
+  extent=7 is rejected at bind validation.
+
+Possible codegen refinement: a peephole fusing `for (i ...) { if (i < n) ... }` into
+`for (i = 0; i < min(max, n); ...)` for serial CPU loops; on GPU grids the guard is already the
+canonical form.
+
 ## Follow-ups (rest of gh-490)
 
-1. Keep `Sym` through `Low_level`: bounded-symbol loop extents, simplifier guards.
-2. Backend param plumbing + launch binding (cc/Metal first), extent-range validation (`v <= range`).
-3. Autotune cache identity `(digest, tuning-size)` with bucketing.
-4. RNG init over symbolic axes via materialized numel; capturing `solved_sym`; possibly `Sym`
+1. Autotune cache identity `(digest, tuning-size)` with bucketing; schedule transforms
+   (Grid/Split/Tensorize) interacting with guarded loops — currently they see max-extent loops
+   with an inner guard, which is correct but untuned.
+2. RNG init over symbolic axes via materialized numel; capturing `solved_sym`; possibly `Sym`
    support in `Total_elems` (`Sym_denom`).
+3. Serial-loop bound fusion peephole (above); Metal/CUDA-specific validation of guarded grids.
