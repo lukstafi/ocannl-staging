@@ -4734,7 +4734,8 @@ let%track7_sexp get_proj_index (proj_env : proj_env) (proj : proj) : Idx.axis_in
                              the operand's buffer layout is already committed with insufficient \
                              margins. Compose the padded consumer before the operand's first \
                              compilation, create the data via a padding-aware constructor (e.g. \
-                             wrap_padded), or read through a materialized copy of the operand"],
+                             wrap_padded), or read through a materialized copy of the operand \
+                             (for a padded max-pool, Nn_blocks.max_pool2d_copy)"],
                           [ Projection_mismatch [ proj ] ] )
                | _ -> (
                    (* Update inferred padding to be sufficient for this operation, even if resolved
