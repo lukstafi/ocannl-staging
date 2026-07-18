@@ -53,7 +53,9 @@ GPU_DEVICES = {
 # Local scratch at fission, and working around a Metal compiler miscompilation of scalar
 # read-modify-write accumulation (see arrayjit/lib/c_syntax.ml volatile_scalar_rmw and
 # benchmarks/runners/ocannl/bench_metal_bug.ml).
-SKIP_CELLS = set()
+# cifar_conv metal/tuned: the search completes but the post-tune re-init hangs the process
+# (Metal reinit-after-tune race, PR #109/#174); the materialized variant covers the metal column.
+SKIP_CELLS = {("cifar_conv", "metal", "tuned")}
 
 sys.path.insert(0, str(HERE / "runners"))
 from bench_common import read_st_metadata  # noqa: E402
