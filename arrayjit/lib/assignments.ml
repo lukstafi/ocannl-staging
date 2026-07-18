@@ -216,8 +216,27 @@ let collect_neutral_elem (asgns : t) : float option =
   in
   match loop None asgns with None -> None | Some v -> v
 
-let%track4_sexp to_low_level code =
+let%track4_sexp to_low_level ?(static_indices = []) code =
   let open Indexing in
+  (* gh-490 symbolic extents: wrap a loop body in [index < value] when the loop iterates a
+     symbolic-extent axis AND the extent's symbol is among the routine's bindings (so the value is
+     a kernel parameter). An unbound extent symbol keeps the maximum-extent semantics: the loop
+     covers the whole (max-sized) buffer, exactly as if the extent were written concretely. *)
+  let extent_guard ~(projections : Indexing.projections) ~index ~iter body =
+    match
+      List.Assoc.find projections.extent_syms ~equal:Indexing.equal_symbol iter
+    with
+    | Some sym when List.mem static_indices sym ~equal:Indexing.equal_static_symbol ->
+        let iprec = Ops.index_prec () in
+        let cond =
+          Low_level.Binop
+            ( Ops.Cmplt,
+              (Low_level.Embed_index (Indexing.Iterator index), iprec),
+              (Low_level.Embed_index (Indexing.Iterator sym.Indexing.static_symbol), iprec) )
+        in
+        Low_level.If { cond = (cond, iprec); body }
+    | _ -> body
+  in
   (* Apply left padding offsets to convert from semantic to buffer indices. Semantic indices can be
      negative (e.g., -1 for convolution padding), but buffer indices must be non-negative. Adding
      left_padding converts semantic to buffer space. *)
@@ -465,7 +484,9 @@ let%track4_sexp to_low_level code =
                   index;
                   from_ = 0;
                   to_ = d - 1;
-                  body = for_loop (iter :: block_iters) (index :: rev_iters) product;
+                  body =
+                    extent_guard ~projections ~index ~iter
+                      (for_loop (iter :: block_iters) (index :: rev_iters) product);
                   trace_it = true;
                   axis = Serial;
                 })
@@ -648,7 +669,9 @@ let%track4_sexp to_low_level code =
                   index;
                   from_ = 0;
                   to_ = d - 1;
-                  body = for_loop (iter :: block_iters) (index :: rev_iters) product;
+                  body =
+                    extent_guard ~projections ~index ~iter
+                      (for_loop (iter :: block_iters) (index :: rev_iters) product);
                   trace_it = true;
                   axis = Serial;
                 })
@@ -984,7 +1007,7 @@ let to_doc ?name ?static_indices () c =
     | Range_over_offsets -> string "range_over_offsets()"
     | Slice { batch_idx; sliced } ->
         string (ident sliced ^ " @| " ^ Indexing.symbol_ident batch_idx.static_symbol)
-    | Embed_symbol { static_symbol; static_range = _ } ->
+    | Embed_symbol { static_symbol; static_range = _; used_as_extent = _; used_as_slice = _ } ->
         string ("!@" ^ Indexing.symbol_ident static_symbol)
     | Embed_self_id -> string "self_id()"
     | Embed_dim { ref_label; _ } -> string ("(dim " ^ ref_label ^ ")")
@@ -1127,5 +1150,5 @@ let%track6_sexp lower optim_ctx ~unoptim_ll_source ~ll_source ~cd_source ~name s
   (match cd_source with
   | None -> ()
   | Some callback -> callback (to_doc ~name ~static_indices () proc));
-  let llc : Low_level.t = to_low_level proc in
+  let llc : Low_level.t = to_low_level ~static_indices proc in
   Low_level.optimize optim_ctx ~unoptim_ll_source ~ll_source ~name static_indices llc

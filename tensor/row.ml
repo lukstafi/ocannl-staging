@@ -149,6 +149,17 @@ let get_sym_dim ?(basis = default_basis) ?proj_id sym =
              dimensions require a positive maximum extent"
             (Ir.Indexing.symbol_ident sym.Ir.Indexing.static_symbol)
             extent);
+  (* The bound value of an extent symbol is a size in [0, range] (inclusive), not an index in
+     [0, range): switch the symbol's bind-time validation accordingly. A slice index validates
+     strictly, so a binding cannot be used as both. *)
+  if sym.Ir.Indexing.used_as_slice then
+    raise
+    @@ Utils.User_error
+         (Printf.sprintf
+            "Row: static index %s already slices a batch axis and cannot also be used as a \
+             symbolic dimension extent"
+            (Ir.Indexing.symbol_ident sym.Ir.Indexing.static_symbol));
+  sym.Ir.Indexing.used_as_extent <- true;
   Sym sdim
 
 (* The reserved tags ([default], [bcast_if_1]) carry no naming claim. *)
@@ -1309,7 +1320,7 @@ let s_dim_one_in_row v ~value in_ =
 
 let reapply_rows_constr = ref false
 
-let subst_row_constraint_impl ~subst_in_dim ~get_dim_val stage constr =
+let subst_row_constraint_unprotected ~subst_in_dim ~get_dim_val stage constr =
   let subst_total_elems_divided_by numerator divided_by ~keep_axis =
     let substituted_divided_by = List.map divided_by ~f:(fun v -> subst_in_dim (Var v)) in
     fail_if_total_elems_over_sym substituted_divided_by;
@@ -1379,6 +1390,16 @@ let subst_row_constraint_impl ~subst_in_dim ~get_dim_val stage constr =
       (* The constraint update does not affect its applicability, so we don't need to reapply it. *)
       Exact (List.map dims ~f:subst_in_dim)
   | Unconstrained -> constr
+
+(* All the [reapply_rows_constr := true] sites live in [subst_row_constraint_unprotected]; an
+   exception escaping after one of them (e.g. the Total_elems-over-symbolic-dimension rejection)
+   must not leave the global flag dirty for a subsequent solver call (the [s_dim_one_in_row_entry]
+   assert), notably when the caller catches the [Shape_error] and continues. *)
+let subst_row_constraint_impl ~subst_in_dim ~get_dim_val stage constr =
+  try subst_row_constraint_unprotected ~subst_in_dim ~get_dim_val stage constr
+  with e ->
+    reapply_rows_constr := false;
+    raise e
 
 let s_dim_one_in_row_constr stage v ~value constr =
   let get_dim_val v' =
