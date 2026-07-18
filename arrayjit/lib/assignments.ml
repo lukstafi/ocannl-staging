@@ -823,9 +823,21 @@ let%track4_sexp to_low_level code =
             set array idcs @@ Constant_bits (Int64.of_int array.id))
     | Fetch { array; fetch_op = Embed_dim variable_ref; dims } ->
         (* Note: we are guaranteed all shape inference is forced before we access variable_ref. *)
+        let dim_value =
+          match (variable_ref.Indexing.solved_dim, variable_ref.Indexing.solved_sym) with
+          | Some d, _ -> d
+          | None, Some { Indexing.static_range = Some range; _ } ->
+              (* A symbolic extent (gh-490) materializes at its declared maximum. *)
+              range
+          | None, Some { Indexing.static_range = None; _ } | None, None ->
+              raise
+              @@ Utils.User_error
+                   ("Embed_dim: variable reference " ^ variable_ref.Indexing.ref_label
+                  ^ " has no solved dimension")
+        in
         default_padding_before array
         @@ Low_level.loop_over_dims (Lazy.force dims) ~body:(fun idcs ->
-            set array idcs @@ Constant (Float.of_int @@ Option.value_exn variable_ref.solved_dim))
+            set array idcs @@ Constant (Float.of_int dim_value))
     | Fetch { array; fetch_op = Range_over_offsets; dims = (lazy dims) } ->
         default_padding_before array
         @@ Low_level.loop_over_dims dims ~body:(fun idcs ->

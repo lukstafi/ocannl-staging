@@ -121,6 +121,15 @@ val set_dim : delayed_var_ref -> int -> unit
     For row variables, this means the product of the dimensions, via the [Total_elems] constraint.
 *)
 
+val set_sym_dim : delayed_var_ref -> Ir.Indexing.static_symbol -> unit
+(** Sets the dim variable reference to a symbolic extent (gh-490): during shape inference the axis
+    is a rigid constant equal only to itself, and it is materialized at its declared maximum extent
+    ([static_range], which is required and must be positive) for Tnode dims and projections.
+
+    Row variables are not supported: a symbolic total-elements constraint would require symbolic
+    arithmetic (raises [Row.Shape_error]). Conflicts with a prior {!set_dim}, or a different symbol
+    set on the same reference, also raise [Row.Shape_error]. *)
+
 val set_equal : delayed_var_ref -> delayed_var_ref -> unit
 (** Sets the two variable references to be equal (in some sense). This will propagate through shape
     inference.

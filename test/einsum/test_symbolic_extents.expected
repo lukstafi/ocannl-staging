@@ -1,0 +1,27 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+=== Symbolic axis: capture, solve, materialize at range ===
+Captured dim s solved_dim: none (symbolic)
+Captured dim s solved_sym: i1
+y dims: 6
+x dims: 6
+y shape: i1<=6
+y values: 1.00 1.00 1.00 1.00 1.00 1.00
+sum over symbolic axis: 6.00
+embedded dim s (materialized range): 6.0
+
+=== Same symbol on two tensors unifies; scalars broadcast to it ===
+c dims: 4
+c values (a + b + 1 = 1.75 each): 1.75 1.75 1.75 1.75
+
+=== Error cases ===
+set_sym_dim without static_range: correctly raised: Row: static index i23 used as a symbolic dimension has no declared range; symbolic dimensions require ~static_range (it is the maximum extent, used for allocation sizing)
+set_sym_dim after set_dim: correctly raised: Cannot set symbolic dimension for variable reference with label ref2: already set to a concrete dimension
+set_dim after set_sym_dim: correctly raised: Cannot set a concrete dimension for variable reference with label ref3: already set to a symbolic dimension
+set_sym_dim with a different symbol: correctly raised: Cannot set symbolic dimension for variable reference with label ref3: already set to a different symbolic dimension
+set_sym_dim with the same symbol again: OK
+set_sym_dim on an axis already solved concrete: correctly raised: Cannot set symbolic dimension for variable reference with label s: already set to a concrete dimension
+symbolic vs concrete axis: correctly raised: dimension comparison for axis: mismatch
+two distinct symbols must not unify: correctly raised: dimension comparison for axis: mismatch
+set_sym_dim on a row variable: correctly raised: Cannot set symbolic dimension for variable reference with label r: it is bound to a row variable (set_sym_dim does not support row variables)
+Total_elems over a symbolic dimension: correctly raised: Total_elems constraints are not supported with symbolic dimensions

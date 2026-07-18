@@ -49,11 +49,19 @@ type convolution = { dilation : int; kernel : dim; use_padding : bool }
 and dim =
   | Var of dim_var
   | Dim of solved_dim
+  | Sym of sym_dim
+      (** A symbolic dimension: a launch-time-bound extent (gh-490). During shape inference it is a
+          rigid constant -- equal only to a [Sym] with the same static symbol; it never unifies with
+          a concrete [Dim] (but the broadcast top [1_(bcast_if_1)] broadcasts to it). It is
+          materialized at its declared maximum extent ([static_range]) for Tnode dims and
+          projections. *)
   | Affine of { stride : int; over : dim; conv : convolution option; stride_offset : int }
       (** An affine transformation of a dimension. When [conv] is [None], this is a simple strided
           dimension. When [conv] is [Some], this includes convolution parameters. Invariants:
           [stride > 0], [dilation > 0] (when present), [0 <= stride_offset < stride]. *)
   | Concat of dim list  (** Concatenation of multiple dimensions into a single axis. *)
+
+and sym_dim = { sym : Ir.Indexing.static_symbol; sym_basis : string; sym_proj_id : proj_id option }
 [@@deriving equal, hash, compare, sexp]
 
 val get_dim : d:int -> basis:string -> ?proj_id:int -> unit -> dim
@@ -65,6 +73,14 @@ val get_bcast_dim : d:int -> ?proj_id:int -> unit -> dim
 
 val get_default_dim : d:int -> ?proj_id:int -> unit -> dim
 (** Mint an unannotated user/derived atom [d_(default)]. *)
+
+val get_sym_dim : ?basis:string -> ?proj_id:int -> Ir.Indexing.static_symbol -> dim
+(** Mint a symbolic dimension from a static-indexing symbol. The symbol must have a declared
+    [static_range] (raises {!Utils.User_error} otherwise): the range is the maximum extent, used to
+    size allocations and projections until launch-time extent binding lands. *)
+
+val sym_dim_extent_exn : sym_dim -> int
+(** The maximum extent of a symbolic dimension: the declared range of its static symbol. *)
 
 val dim_to_int_exn : dim -> int
 val vars_of_dim : dim -> dim_var_set
