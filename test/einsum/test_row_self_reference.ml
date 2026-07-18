@@ -132,10 +132,11 @@ let () =
    We pin the orientation [5].<rho1> ~ <rho2>.[5,3] (family: x2 = [5].w, x1 = w.[5,3]; sporadic: x2
    = [], x1 = [3]). All three cases succeed: the deferral finds the sporadic solution whether rho2 ~
    [] arrives before or after the cross equality. The mirror orientation <rho1>.[5] ~ [3,5].<rho2>
-   pins the OTHER conservative deviation: once rho2 is pinned empty, the closed side's material sits
-   entirely in beg_dims, and the asymmetric trailing guard (open trailing flank longer than the
-   closed side's structural trailing flank) rejects a flat-satisfiable store — a placement-sensitive
-   policy rejection. *)
+   used to pin the OTHER conservative deviation: once rho2 is pinned empty, the closed side's
+   material sits entirely in beg_dims, and the former asymmetric trailing guard (open trailing
+   flank longer than the closed side's structural TRAILING flank only) rejected this
+   flat-satisfiable store. Closed rows are now guarded by total axis count (structural flanks of a
+   closed row are equivalent under flat semantics), so the store is accepted. *)
 
 let check_list name constrs =
   match
@@ -178,5 +179,5 @@ let mirror_cross_pair ~sh_id rho1 rho2 =
 
 let () =
   let rho1 = Row.get_row_var () and rho2 = Row.get_row_var () in
-  check_list "eq, mirror cross surpluses then rho2 ~ [] (trailing guard rejects)"
+  check_list "eq, mirror cross surpluses then rho2 ~ [] (flat-satisfiable, accepted)"
     [ mirror_cross_pair ~sh_id:29 rho1 rho2; pin_empty ~sh_id:31 rho2 ]
