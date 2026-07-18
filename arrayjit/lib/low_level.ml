@@ -1785,7 +1785,7 @@ let ienv_of_static_indices (static_indices : Indexing.static_symbol list) =
   let sym_env =
     List.fold static_indices
       ~init:(Map.empty (module Indexing.Symbol))
-      ~f:(fun env { Indexing.static_symbol; static_range; used_as_extent } ->
+      ~f:(fun env { Indexing.static_symbol; static_range; used_as_extent; used_as_slice = _ } ->
         (* [static_range] is a declared-bounds slot ([None] = unbounded, hence top); see
            docs/proposals/signed-index-precision.md on bind-time validation. A symbolic extent
            (gh-490) is a size, bind-validated inclusively: its value ranges over [0, range]. *)

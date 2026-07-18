@@ -1303,19 +1303,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               S.Tensor_at (H.Deviceptr.offset base ~bytes:loc.offset)
           | _name, Static_idx s ->
               let i = Indexing.find_exn lowered_bindings s in
-              if !i < 0 then
-                raise
-                @@ Utils.User_error
-                     [%string
-                       "hip: static index %{Indexing.symbol_ident s.static_symbol} is negative: \
-                        %{!i#Int}"];
-              Option.iter s.static_range ~f:(fun upto ->
-                  if !i >= upto then
-                    raise
-                    @@ Utils.User_error
-                         [%string
-                           "hip: static index %{Indexing.symbol_ident s.static_symbol} is too big: \
-                            %{upto#Int}"]);
+              (* Shared bind-time validation: negativity, range -- inclusive [0, range] for
+                 symbolic extents (gh-490), strict [0, range) for indices -- and index width. *)
+              Indexing.validate_bound_value ~width64:Utils.settings.large_models s !i;
               S.Int !i
           | _name, (Kparam_pool_slab _ | Kparam_pool_slots _) ->
               (* The HIP backend uses per-tnode pointer params ([`Per_param] codegen); only the

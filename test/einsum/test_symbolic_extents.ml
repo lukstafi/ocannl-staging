@@ -140,7 +140,23 @@ let test_error_cases () =
          variable to a symbolic dimension: the constraint's substitution fails fast. *)
       Shape.set_equal z s;
       Shape.set_sym_dim s sym6;
-      ignore (Train.forward_once ctx w2))
+      ignore (Train.forward_once ctx w2));
+  (* Mixed slice-index / extent uses of one binding are rejected in both orders: a slice index
+     validates strictly in [0, range) while an extent validates inclusively in [0, range]. *)
+  let slice_sym, _bindings = Idx.get_static_symbol ~static_range:2 Idx.Empty in
+  let mb = TDSL.range_of_shape ~label:[ "mb" ] ~batch_dims:[ 2 ] ~output_dims:[ 3 ] () in
+  let%op _sl = mb @| slice_sym in
+  let%op wa = { wa = 0.5 } in
+  let%op _wa2 = wa ++ "u=>u" [ "u" ] in
+  expect_shape_error "extent after slice use" (fun () -> Shape.set_sym_dim u slice_sym);
+  let mixed_sym, _bindings = Idx.get_static_symbol ~static_range:2 Idx.Empty in
+  let%op wb = { wb = 0.5 } in
+  let%op _wb2 = wb ++ "u=>u" [ "u" ] in
+  Shape.set_sym_dim u mixed_sym;
+  let mc = TDSL.range_of_shape ~label:[ "mc" ] ~batch_dims:[ 2 ] ~output_dims:[ 3 ] () in
+  expect_shape_error "slice after extent use" (fun () ->
+      let%op _sl2 = mc @| mixed_sym in
+      ())
 
 let () =
   test_symbolic_axis_forward ();

@@ -36,6 +36,11 @@ type static_symbol = {
       (** The symbol is used as a symbolic dimension (gh-490): its bound value is a size in
           [\[0, static_range\]] (inclusive -- buffers are sized [static_range]), rather than an
           index in [\[0, static_range)]. Set by [Row.get_sym_dim]. *)
+  mutable used_as_slice : bool; [@compare.ignore] [@equal.ignore] [@hash.ignore] [@sexp.bool]
+      (** The symbol is used as a batch-slice index ([@|]): its bound value indexes an axis of size
+          [static_range], so the strict [\[0, static_range)] validation must apply. Set by the
+          [Batch_slice] shape logic; mutually exclusive with [used_as_extent] (a single binding
+          cannot be validated both inclusively and strictly). *)
 }
 [@@deriving compare, equal, sexp, hash]
 
@@ -93,7 +98,9 @@ let lowered_bindings bs vs =
 let find_exn (bs : lowered_bindings) = List.Assoc.find_exn ~equal:equal_static_symbol bs
 
 let get_static_symbol ?static_range bindings =
-  let s = { static_symbol = get_symbol (); static_range; used_as_extent = false } in
+  let s =
+    { static_symbol = get_symbol (); static_range; used_as_extent = false; used_as_slice = false }
+  in
   (s, Bind (s, bindings))
 
 (** Validates a launch-parameter value against its declared range (minimum 0 is implicit) and, when
@@ -103,7 +110,8 @@ let get_static_symbol ?static_range bindings =
     (step counters) take runtime values unrelated to any touched node's extent -- so narrowing an
     unbounded parameter requires declaring (and thereby bind-validating) a range. *)
 let validate_bound_value ?(width64 = false)
-    ({ static_symbol; static_range; used_as_extent } : static_symbol) (v : int) =
+    ({ static_symbol; static_range; used_as_extent; used_as_slice = _ } : static_symbol) (v : int)
+    =
   let ident = symbol_ident static_symbol in
   if v < 0 then
     raise
@@ -502,7 +510,7 @@ module Doc_helpers = struct
   let pp_comma () = comma_sep
   let pp_symbol sym = PPrint.string @@ symbol_ident sym
 
-  let pp_static_symbol { static_symbol; static_range; used_as_extent = _ } =
+  let pp_static_symbol { static_symbol; static_range; used_as_extent = _; used_as_slice = _ } =
     match static_range with
     | None -> pp_symbol static_symbol
     | Some range ->

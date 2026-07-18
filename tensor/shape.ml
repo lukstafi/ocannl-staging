@@ -1012,7 +1012,16 @@ let%debug4_sexp get_inequalities ?(for_projections = false)
   | Transpose (Defined_by_cd_logic, _)
   | Broadcast_tern (Defined_by_cd_logic, _, _, _) ->
       defaults @@ []
-  | Transpose (Batch_slice { static_range; static_symbol; used_as_extent = _ }, sh) ->
+  | Transpose (Batch_slice ({ static_range; static_symbol; _ } as slice_sym), sh) ->
+      (* A slice index and a symbolic extent (gh-490) validate incompatibly (strict [0, range) vs.
+         inclusive [0, range]): reject a binding used as both. *)
+      if slice_sym.Idx.used_as_extent then
+        raise
+        @@ Row.Shape_error
+             ( "Static index " ^ Idx.symbol_ident static_symbol
+               ^ " is used as a symbolic dimension extent and cannot also slice a batch axis",
+               [] );
+      slice_sym.Idx.used_as_slice <- true;
       Hash_set.remove unused_shapes sh.id;
       let slice_v = get_var () in
       let slice_var = Var slice_v in
