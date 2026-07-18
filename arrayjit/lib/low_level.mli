@@ -393,6 +393,14 @@ val input_and_output_nodes : optimized -> (Set.M(Tnode).t * Set.M(Tnode).t) * Tn
     parameters. Outputs are all the materialized nodes written-to by the code. The last returned
     component is the input merge node, if used in the code. *)
 
+val affine_accesses : t -> Tnode.t Affine.access list
+(** gh-494 waypoint 1: the routine's tensor-node accesses as explicit affine relations
+    ({!Affine.access}), extracted from (typically optimized) code, in program order (a statement's
+    right-hand-side reads precede its write; [Local_scope] bodies are descended into at their use
+    site; [Tile_mma] is traversed through its scalar [fallback]). Not represented: scope-locals,
+    merge-buffer reads, and opaque [Staged_compilation] — callers needing exhaustiveness must check
+    for the latter separately. *)
+
 val buffer_access_spans : stmt_serial:bool -> t list -> (Tnode.t, int * int) Base.Hashtbl.t option
 (** gh-ocannl-489 liveness-based buffer aliasing: per-tnode access span over the final
     (post-schedule, post-fission) code of a routine, as a closed interval of positions; the input is

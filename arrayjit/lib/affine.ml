@@ -243,3 +243,36 @@ let covers_box ~range ~(dims : int array) (idcs : Idx.axis_index array) : bool =
           in
           radix 1 sorted
       | Idx.Fixed_idx _ | Idx.Affine _ | Idx.Sub_axis | Idx.Concat _ -> false)
+
+(** {2 Access records}
+
+    The extraction target for [Low_level.affine_accesses] (gh-494 waypoint 1): each tensor-node
+    access as an explicit affine relation — the enclosing loop box, the index map into the node's
+    cells, and the program placement. ['tn] abstracts the tensor-node type to keep this module
+    below [Tnode] in the dependency order. *)
+
+type 'tn access = {
+  a_tn : 'tn;
+  a_map : Idx.axis_index array;
+      (** The affine map from the loop box into the node's cells. Empty and standing for every cell
+          when [a_whole]. *)
+  a_write : bool;
+  a_dynamic : bool;
+      (** The effective cell is not statically known (dynamic gather/scatter): the map has a
+          placeholder component, so queries must not interpret it. *)
+  a_whole : bool;  (** A whole-node access ([Zero_out]). *)
+  a_vec_last : bool;
+      (** A vectorized write ([Set_from_vec]): the last map component is the base of a run along
+          the minor axis, not a single cell — queries must treat that component as opaque. *)
+  a_guarded : bool;  (** Under an [If] guard: executes conditionally, never a definite write. *)
+  a_rmw : bool;
+      (** The statement also reads [a_tn] on its right-hand side (an accumulation): the write
+          carries a reduction dependence — an order-sensitive legality dimension (the determinism
+          contract): a loop carrying only reduction edges may be reassociated (vectorized) under an
+          explicit license, but never parallelized. *)
+  a_loops : (Idx.symbol * (int * int)) list;
+      (** Enclosing loops, outermost first, with inclusive iteration bounds. *)
+  a_path : int list;
+      (** Lexicographic program-order position: statement indices per [Seq] nesting level. *)
+}
+[@@deriving sexp_of]

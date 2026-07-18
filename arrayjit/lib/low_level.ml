@@ -3183,6 +3183,101 @@ let input_and_output_nodes optimized =
         (inputs, outputs)),
     optimized.merge_node )
 
+(** gh-494 waypoint 1: the routine's tensor-node accesses as explicit affine relations
+    ({!Affine.access}), extracted from (typically optimized) code — the queryable artifact behind
+    the affine legality queries. Fires in program order: a statement's right-hand-side reads
+    precede its write, [Local_scope] bodies are descended into at their use site. [Tile_mma] is
+    traversed through its scalar [fallback] (the fallback is the statement's access footprint, as
+    in [C_syntax.iter_local_accesses]). Not represented: scope-locals ([Get_local]/[Set_local]
+    carry no index map), merge-buffer reads (a separate read-only input buffer), and
+    [Staged_compilation] (opaque) — callers needing exhaustiveness must check for the latter
+    separately. *)
+let affine_accesses (llc : t) : Tn.t Affine.access list =
+  let rec reads_tn uid (llsc : scalar_t) =
+    match llsc with
+    | Get (tn, _) -> tn.Tn.uid = uid
+    | Get_dynamic { tn; dyn_value = v, _; _ } -> tn.Tn.uid = uid || reads_tn uid v
+    | Get_merge_buffer _ | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ -> false
+    | Local_scope { body; _ } -> body_reads uid body
+    | Ternop (_, (a, _), (b, _), (c, _)) -> reads_tn uid a || reads_tn uid b || reads_tn uid c
+    | Binop (_, (a, _), (b, _)) -> reads_tn uid a || reads_tn uid b
+    | Unop (_, (a, _)) -> reads_tn uid a
+  and body_reads uid (llc : t) =
+    match llc with
+    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
+        false
+    | Seq (a, b) -> body_reads uid a || body_reads uid b
+    | For_loop { body; _ } -> body_reads uid body
+    | If { cond = c, _; body } -> reads_tn uid c || body_reads uid body
+    | Set { llsc; _ } | Set_local (_, llsc) -> reads_tn uid llsc
+    | Set_dynamic { dyn_value = v, _; llsc; _ } -> reads_tn uid v || reads_tn uid llsc
+    | Set_from_vec { arg = a, _; _ } -> reads_tn uid a
+    | Tile_mma { fallback; _ } -> body_reads uid fallback
+  in
+  let acc = ref [] in
+  let add ~loops ~path ~guarded ?(dynamic = false) ?(whole = false) ?(vec_last = false)
+      ?(rmw = false) ~write tn map =
+    acc :=
+      {
+        Affine.a_tn = tn;
+        a_map = map;
+        a_write = write;
+        a_dynamic = dynamic;
+        a_whole = whole;
+        a_vec_last = vec_last;
+        a_guarded = guarded;
+        a_rmw = rmw;
+        a_loops = List.rev loops;
+        a_path = List.rev path;
+      }
+      :: !acc
+  in
+  let rec code ~loops ~path ~guarded (llc : t) =
+    match llc with
+    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ -> ()
+    | Seq _ ->
+        List.iteri (flat_lines [ llc ]) ~f:(fun k stmt ->
+            code ~loops ~path:(k :: path) ~guarded stmt)
+    | For_loop { index; from_; to_; body; _ } ->
+        code ~loops:((index, (from_, to_)) :: loops) ~path ~guarded body
+    | If { cond = c, _; body } ->
+        scalar ~loops ~path ~guarded c;
+        code ~loops ~path ~guarded:true body
+    | Zero_out tn -> add ~loops ~path ~guarded ~whole:true ~write:true tn [||]
+    | Set { tn; idcs; llsc; _ } ->
+        scalar ~loops ~path ~guarded llsc;
+        add ~loops ~path ~guarded ~rmw:(reads_tn tn.Tn.uid llsc) ~write:true tn idcs
+    | Set_dynamic { tn; idcs; dyn_value = v, _; llsc; _ } ->
+        scalar ~loops ~path ~guarded v;
+        scalar ~loops ~path ~guarded llsc;
+        add ~loops ~path ~guarded ~dynamic:true
+          ~rmw:(reads_tn tn.Tn.uid llsc || reads_tn tn.Tn.uid v)
+          ~write:true tn idcs
+    | Set_from_vec { tn; idcs; arg = a, _; _ } ->
+        scalar ~loops ~path ~guarded a;
+        add ~loops ~path ~guarded ~vec_last:true ~rmw:(reads_tn tn.Tn.uid a) ~write:true tn idcs
+    | Set_local (_, llsc) -> scalar ~loops ~path ~guarded llsc
+    | Tile_mma { fallback; _ } -> code ~loops ~path ~guarded fallback
+  and scalar ~loops ~path ~guarded (llsc : scalar_t) =
+    match llsc with
+    | Local_scope { body; _ } -> code ~loops ~path ~guarded body
+    | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
+    | Get (tn, idcs) -> add ~loops ~path ~guarded ~write:false tn idcs
+    | Get_dynamic { tn; idcs; dyn_value = v, _; _ } ->
+        add ~loops ~path ~guarded ~dynamic:true ~write:false tn idcs;
+        scalar ~loops ~path ~guarded v
+    | Ternop (_, (a, _), (b, _), (c, _)) ->
+        scalar ~loops ~path ~guarded a;
+        scalar ~loops ~path ~guarded b;
+        scalar ~loops ~path ~guarded c
+    | Binop (_, (a, _), (b, _)) ->
+        scalar ~loops ~path ~guarded a;
+        scalar ~loops ~path ~guarded b
+    | Unop (_, (a, _)) -> scalar ~loops ~path ~guarded a
+  in
+  code ~loops:[] ~path:[] ~guarded:false llc;
+  List.rev !acc
+
 (** Calls [touch] on every tnode whose context buffer the statement reads or writes, [on_opaque]
     on [Staged_compilation] (its accesses cannot be enumerated). Scope-local reads/writes
     ([Get_local]/[Set_local]) own no buffer and are skipped; [Local_scope] bodies are descended
