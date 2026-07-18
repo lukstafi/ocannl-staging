@@ -303,7 +303,11 @@ type conv_axis = {
   cx_nk : int;
   cx_stride : int;
   cx_dilation : int;
-  cx_offset : int;  (** Padding offset on the input access ([<= 0] for padded convs). *)
+  cx_offset : int;
+      (** Padding offset on the input access. Healthy graphs lower padded convs offset-free: the
+          source is physically padded and buffer indices absorb the halo shift, while halo-lost
+          operands (layout committed before the padded consumer) are rejected at shape-inference
+          time. A nonzero offset can still reach detection from hand-built [Low_level] code. *)
 }
 
 type conv_site = {
@@ -839,11 +843,13 @@ let conv_seed_params ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) (opt : 
         (* The row axis must be unit-stride: [Stage] packs by index range, so a strided row would
            pack a dilated tile read at [stride*row] — which [Tensorize]'s unit-coefficient index
            discipline rejects (a compacting Stage is a follow-up). And every axis must be
-           offset-free (valid convolution): padded convs read the halo of a physically padded
-           source, and [Stage]'s edge guards clip tile loads against the logical dims — halo
-           positions would silently pack garbage (Codex P1 on PR #168; halo-aware staging is a
-           follow-up). Candidates are timed, not value-checked, so unsound seeds must not be
-           proposed at all. *)
+           offset-free — which padded convs from the tensor front end now are: the halo is part of
+           the physically padded buffer, buffer indices absorb the shift, and [Stage]'s edge
+           guards compare against the padded [Tn.dims], so staging padded convs is sound (pinned
+           by the cvp pipeline leg of schedule_conv_gemm). The gate is retained as
+           defense-in-depth against hand-built [Low_level] sites with genuine offsets, where the
+           packing anchor would mispack (Codex P1 on PR #168). Candidates are timed, not
+           value-checked, so unsound seeds must not be proposed at all. *)
         let row_unit_stride =
           List.exists site.c_axes ~f:(fun cx ->
               Idx.equal_symbol cx.cx_o site.c_row && cx.cx_stride = 1)

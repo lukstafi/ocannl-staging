@@ -420,7 +420,7 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
         Ir.Host_inits.register tn init;
         tn
     | Some (Shape.Data (Asgns.Padded { data; padding = padding_spec; padded_value })) ->
-        let padding = Some (padding_spec, Some padded_value) in
+        let padding = Some (padding_spec, padded_value) in
         let tn, init = Tn.create_from_padded ~id ~label ~ndarray:data ~padding () in
         Ir.Host_inits.register tn init;
         tn

@@ -726,7 +726,7 @@ let pack_constant_tile ~debug ~(src_nd : Ndarray.t) ~(src_dims : int array) ~(pr
   if not (Array.equal Int.equal (Ndarray.dims src_nd) src_dims) then
     invalid_arg ("Schedule.Stage: hoisted staging: host-init dims mismatch for " ^ debug);
   (* Zero-filled at creation: pad slots of edge tiles (never written below) must read as zeros. *)
-  let dst = Ndarray.create_array ~debug prec ~dims:packed_dims ~padding:(Some ([||], Some 0.0)) in
+  let dst = Ndarray.create_array ~debug prec ~dims:packed_dims ~padding:(Some ([||], 0.0)) in
   let n_syms = Array.length sym_extents in
   let vals = Array.create ~len:n_syms 0 in
   let eval (terms, off) = Array.fold terms ~init:off ~f:(fun acc (c, p) -> acc + (c * vals.(p))) in

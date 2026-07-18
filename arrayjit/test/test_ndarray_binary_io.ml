@@ -31,7 +31,7 @@ let test_round_trip_prec prec_name prec init_f =
 
 let test_padded () =
   let prec = Ops.single in
-  let padding = Some ([| Ops.{ left = 1; right = 1 }; Ops.{ left = 0; right = 2 } |], Some 0.0) in
+  let padding = Some ([| Ops.{ left = 1; right = 1 }; Ops.{ left = 0; right = 2 } |], 0.0) in
   (* Padded dims: 2+1+1=4 x 3+0+2=5, logical: 2x3 *)
   let dims = [| 4; 5 |] in
   let nd1 = Nd.create_array ~debug:"padded" prec ~dims ~padding in

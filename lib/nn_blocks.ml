@@ -553,7 +553,7 @@ let%op depthwise_separable_conv2d ~label ?(kernel_size = 3) ?(stride = 1) ?(use_
     [(input_size - window_size) / stride + 1].
 
     Note: The [<] in the einsum spec indicates no-padding mode (indices stay within bounds). *)
-let%op max_pool2d ?(stride = 2) ?(window_size = 2) () x =
+let%op max_pool2d ?(stride = 2) ?(window_size = 2) ?(use_padding = false) () x =
   Shape.set_dim wh window_size;
   Shape.set_dim ww window_size;
   (* NOTE: projections inference runs per-assignment in a distinct phase from shape inference, so
@@ -561,9 +561,25 @@ let%op max_pool2d ?(stride = 2) ?(window_size = 2) () x =
      use a trick to create a shape-inferred constant tensor, equivalently we could write "NTDSL.term
      ~fetch_op:(Constant 0.0) ()" but that's less concise. See:
      https://github.com/ahrefs/ocannl/discussions/381 *)
-  x
-  @^+ "... | stride*oh< + wh, stride*ow< + ww, ..c..; |wh, ww => ... | oh, ow, ..c.." [ "wh"; "ww" ]
-        (0.0 + 0.0)
+  Shape.set_dim pwh window_size;
+  Shape.set_dim pww window_size;
+  if use_padding then
+    (* A padded max-pool demands -inf margins on its operand, and the padding neutral element is
+       part of a tensor's committed identity — the operand is typically also read by 0-neutral
+       consumers (padded convs), and its layout may already be committed. Route the demand onto a
+       private materialized copy, so each buffer commits a single neutral. Clamped-window lowering
+       (no margin demand at all) is the planned replacement. *)
+    (* Note: the copy's beg-anchored row composes with beg-anchored producers (einsum outputs
+       like conv2d's [oh, ow, ..oc..]) and closed rows (data nodes); an open trailing-dims row
+       (e.g. a plain broadcast result) hits a known solver alignment corner. *)
+    let x_pool = x ++ "... | h, w, ..c.. => ... | h, w, ..c.." in
+    x_pool
+    @^+ "... | stride*oh= + pwh, stride*ow= + pww, ..c..; |pwh, pww => ... | oh, ow, ..c.."
+          [ "pwh"; "pww" ] (0.0 + 0.0)
+  else
+    x
+    @^+ "... | stride*oh< + wh, stride*ow< + ww, ..c..; |wh, ww => ... | oh, ow, ..c.."
+          [ "wh"; "ww" ] (0.0 + 0.0)
 
 (** Average pooling for 2D spatial data - reduces spatial dimensions by averaging values.
 

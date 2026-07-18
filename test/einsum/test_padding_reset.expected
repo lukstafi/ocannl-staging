@@ -1,73 +1,27 @@
 Retrieving commandline, environment, or config file variable ocannl_log_level
 Found 0, in the config file
-Testing padding margin initialization and reset...
+Testing conflicting margin-reading neutrals are rejected...
+REJECTED: Conflicting padding neutral elements: an opera
 
-=== Forward pass (both operations in sequence) ===
+Conflict rejection test completed!
 
-Input (4x4 logical, with padding margins shown):
-HERE: test/einsum/test_padding_reset.ml:67:21
-[2]: -_input shape 0:4,1:4  <no-context>
+Testing the remedy: a materialized copy per neutral...
+committed neutrals: pool operand -inf, conv operand 0
+pooled[0,0]=-11 pooled[1,1]=-6 pooled[3,3]=-1
+conv[0,0]=-54 conv[1,1]=-99
+pooled values correct (margins -inf): true
+conv values correct (margins 0): true
+second pass identical: true
 
-Pooled - max of 3x3 windows of INPUT (padding should be -inf for max):
-HERE: test/einsum/test_padding_reset.ml:70:21
-[8]: @^=>+_pooled shape 0:4,1:4  <no-context>
-
-Conv - sum of 3x3 windows of INPUT (padding should be 0 for sum):
-HERE: test/einsum/test_padding_reset.ml:73:21
-[12]: *._conv_out shape 0:4,1:4  <no-context>
-
-=== Second forward pass (checking reset across iterations) ===
-
-Pooled after second pass:
-HERE: test/einsum/test_padding_reset.ml:80:21
-[8]: @^=>+_pooled shape 0:4,1:4  <no-context>
-
-Conv after second pass:
-HERE: test/einsum/test_padding_reset.ml:83:21
-[12]: *._conv_out shape 0:4,1:4  <no-context>
-
-=== Expected Behavior Analysis ===
-Input values: -16 to -1 (all negative)
-
-For MAX-POOL (padding should be -infinity):
-  pooled[0,0] = -11 (max of 4 valid cells with -inf padding elsewhere)
-  pooled[1,1] = -6 (max of 9-cell window fully inside input)
-  With pad=0 (BUG): corners would show 0 because max(0, negative) = 0
-
-For CONV/SUM (padding should be 0):
-  conv[0,0] = sum of 4 values (corner) = -16-15-12-11 = -54
-  conv[1,1] = sum of 9 values (center) = -16-15-14-12-11-10-8-7-6 = -99
-
-If conv shows -inf at edges, the padding reset failed.
-
-Padding reset test completed!
+Separate-copies remedy test completed!
 
 
 ========================================
 Testing single-operation padding (max-pool only)...
 
 === First forward pass (single max-pool operation) ===
-
-Input (4x4 logical, with padding margins shown):
-HERE: test/einsum/test_padding_reset.ml:144:21
-[2]: -_input shape 0:4,1:4  <no-context>
-
-Pooled - max of 3x3 windows (padding should be -inf for max):
-HERE: test/einsum/test_padding_reset.ml:147:21
-[8]: @^=>+_pooled shape 0:4,1:4  <no-context>
-
-=== Second forward pass ===
-
-Pooled after second pass (should be identical):
-HERE: test/einsum/test_padding_reset.ml:154:21
-[8]: @^=>+_pooled shape 0:4,1:4  <no-context>
-
-=== Expected Behavior ===
-With single operation, padding can be initialized once to -infinity.
-Expected pooled values (with padding=-inf):
-  pooled[0,0] = -11 (max of 4 valid cells, rest are -inf padding)
-  pooled[1,1] = -6 (max of 9-cell window fully inside input)
-  pooled[3,3] = -1 (max of 4 valid cells in bottom-right corner)
-With pad=0 (BUG): corners would show 0 instead of correct negative max.
+pooled[0,0]=-11 pooled[1,1]=-6 pooled[3,3]=-1
+pooled values correct (margins initialized once to -inf): true
+second pass identical: true
 
 Single-operation padding test completed!
