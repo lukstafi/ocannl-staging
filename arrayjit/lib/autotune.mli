@@ -48,6 +48,14 @@
       segment's site has its [Zero_out] in a separate [`Zeros] segment, so the pipelines skip the
       zero-expansion geometry there — sound because [Privatize] init-loads the accumulator tile from
       the (pre-zeroed) target and [Tile_mma] loads the accumulator fragment before the reduction.
+    - {b Convolution sketches} (gh-ocannl-493): when a convolution accumulation site is detected
+      ({!detect_conv}), the implicit-GEMM pipeline — the packing [Stage] serving as im2col, the
+      micro-kernel the ordinary [Tile_mma]. On the C backends: serial and Grid-parallel flavors,
+      the latter adopting the default preset's aligned whole-segment Grid geometry on merged
+      segments (lenet's conv+bias/relu+pooling). On GPU backends with an mma capability: the
+      staged flavor — outer output loops Grid-typed, both slices staged through cooperative
+      shared tiles at the kernel-window anchor, the accumulator fragment resident across the
+      window (gh-ocannl-480).
     - {b Beam-round menu actions} on the incumbents: dividing serial Splits, Swaps of perfect serial
       pairs, Unrolls, Retype-Vectorized on innermost loops (explicit SIMD on CPU including the
       reduction-chains rendering of accumulations — gh-ocannl-468 — while GPU accumulations stay
