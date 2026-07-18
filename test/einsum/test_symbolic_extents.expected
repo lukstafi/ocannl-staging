@@ -8,6 +8,7 @@ x dims: 6
 y shape: i1<=6
 y values: 1.00 1.00 1.00 1.00 1.00 1.00
 sum over symbolic axis: 6.00
+embedded dim s (materialized range): 6.0
 
 === Same symbol on two tensors unifies; scalars broadcast to it ===
 c dims: 4

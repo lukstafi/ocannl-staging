@@ -23,7 +23,7 @@ let test_symbolic_axis_forward () =
   Stdio.printf "Captured dim s solved_dim: %s\n"
     (match s.var_ref.solved_dim with Some d -> Int.to_string d | None -> "none (symbolic)");
   Stdio.printf "Captured dim s solved_sym: %s\n"
-    (match s.solved_sym with
+    (match s.var_ref.solved_sym with
     | Some { Idx.static_symbol; _ } -> Idx.symbol_ident static_symbol
     | None -> "none");
   Stdio.printf "y dims: %s\n" (dims_to_string y.Tensor.value);
@@ -37,7 +37,12 @@ let test_symbolic_axis_forward () =
   let%op total = y ++ "... => 0" in
   let ctx = Train.forward_once ctx total in
   let total_v = (Context.get_values ctx total.Tensor.value).(0) in
-  Stdio.printf "sum over symbolic axis: %.2f\n" total_v
+  Stdio.printf "sum over symbolic axis: %.2f\n" total_v;
+  (* Embedding the captured dimension as a scalar value materializes the declared range. *)
+  let%op sdim = dim s in
+  let ctx = Train.forward_once ctx sdim in
+  Stdio.printf "embedded dim s (materialized range): %.1f\n"
+    (Context.get_values ctx sdim.Tensor.value).(0)
 
 let test_broadcast_and_reuse () =
   let open Nn_blocks.DSL_modules in

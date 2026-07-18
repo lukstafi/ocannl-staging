@@ -44,12 +44,11 @@ type deduce_within_shape = Not_constrained | Input_equals_output
 type delayed_var_ref = {
   var_ref : Ir.Indexing.variable_ref;
   mutable var : [ `Row of Row.row_var | `Dim of Row.dim_var | `Not_set_yet ];
-  mutable solved_sym : Ir.Indexing.static_symbol option;
 }
 [@@deriving equal, sexp_of]
 
 let get_variable_ref ref_label =
-  { var_ref = Ir.Indexing.{ ref_label; solved_dim = None }; var = `Not_set_yet; solved_sym = None }
+  { var_ref = Ir.Indexing.{ ref_label; solved_dim = None; solved_sym = None }; var = `Not_set_yet }
 
 type compose_type =
   | Pointwise_bin
@@ -328,7 +327,7 @@ let bind_delayed_vars_to_envs ~for_projections ~spec ~dim_var_env ~row_var_env ~
               };
             ]
           in
-          match (delayed_ref.solved_sym, delayed_ref.var_ref.solved_dim) with
+          match (delayed_ref.var_ref.solved_sym, delayed_ref.var_ref.solved_dim) with
           | _ when for_projections -> None
           | Some sym, _ ->
               Some (Row.Dim_eq { d1 = Row.Var var; d2 = Row.get_sym_dim sym; origin })
@@ -340,7 +339,7 @@ let bind_delayed_vars_to_envs ~for_projections ~spec ~dim_var_env ~row_var_env ~
           match Hashtbl.find row_var_env label with
           | Some var ->
               delayed_ref.var <- `Row var;
-              if Option.is_some delayed_ref.solved_sym then
+              if Option.is_some delayed_ref.var_ref.solved_sym then
                 raise
                 @@ Row.Shape_error
                      ( "Variable " ^ label
@@ -1351,7 +1350,7 @@ let infer_equal (sh1 : t) (sh2 : t) =
     creates a [Total_elems] constraint that will be reconciled during [finish_inference]. *)
 let%track7_sexp set_dim (delayed_var_ref : delayed_var_ref) (dim : int) : unit =
   match delayed_var_ref with
-  | { solved_sym = Some _; var_ref = { ref_label; _ }; _ } ->
+  | { var_ref = { solved_sym = Some _; ref_label; _ }; _ } ->
       raise
       @@ Row.Shape_error
            ( "Cannot set a concrete dimension for variable reference with label " ^ ref_label
@@ -1426,8 +1425,10 @@ let%track7_sexp set_sym_dim (delayed_var_ref : delayed_var_ref) (sym : Ir.Indexi
     ]
   in
   match delayed_var_ref with
-  | { solved_sym = Some sym2; _ } when Ir.Indexing.equal_static_symbol sym2 sym -> ()
-  | { solved_sym = Some sym2; var_ref = { ref_label; _ }; _ } ->
+  | { var_ref = { solved_sym = Some sym2; _ }; _ } when Ir.Indexing.equal_static_symbol sym2 sym
+    ->
+      ()
+  | { var_ref = { solved_sym = Some sym2; ref_label; _ }; _ } ->
       raise
       @@ Row.Shape_error
            ( "Cannot set symbolic dimension for variable reference with label " ^ ref_label
@@ -1440,9 +1441,9 @@ let%track7_sexp set_sym_dim (delayed_var_ref : delayed_var_ref) (sym : Ir.Indexi
              ^ ": already set to a concrete dimension",
              [ Row.Dim_mismatch [ Row.get_default_dim ~d:dim2 (); sym_dim ] ] )
   | { var_ref = { solved_dim = None; _ }; var = `Not_set_yet; _ } ->
-      delayed_var_ref.solved_sym <- Some sym
+      delayed_var_ref.var_ref.solved_sym <- Some sym
   | { var_ref = { solved_dim = None; _ }; var = `Dim dim_var; _ } ->
-      delayed_var_ref.solved_sym <- Some sym;
+      delayed_var_ref.var_ref.solved_sym <- Some sym;
       active_constraints :=
         Row.Dim_eq { d1 = Row.Var dim_var; d2 = sym_dim; origin } :: !active_constraints
   | { var_ref = { solved_dim = None; ref_label; _ }; var = `Row _; _ } ->
@@ -1455,7 +1456,8 @@ let%track7_sexp set_sym_dim (delayed_var_ref : delayed_var_ref) (sym : Ir.Indexi
 let set_equal delayed_ref1 delayed_ref2 =
   (* TODO: use provenance from the row variables once we have it there. *)
   match (delayed_ref1, delayed_ref2) with
-  | { solved_sym = Some sym1; _ }, { solved_sym = Some sym2; _ } ->
+  | { var_ref = { solved_sym = Some sym1; _ }; _ }, { var_ref = { solved_sym = Some sym2; _ }; _ }
+    ->
       if Ir.Indexing.equal_static_symbol sym1 sym2 then ()
       else
         raise
@@ -1463,11 +1465,11 @@ let set_equal delayed_ref1 delayed_ref2 =
              ( "Cannot set equal dimensions for variable references bound to different symbolic \
                 dimensions",
                [ Row.Dim_mismatch [ Row.get_sym_dim sym1; Row.get_sym_dim sym2 ] ] )
-  | { solved_sym = Some sym; _ }, delayed_ref2 ->
+  | { var_ref = { solved_sym = Some sym; _ }; _ }, delayed_ref2 ->
       (* First is symbolic, second is not - set the second to match the first (raises if the second
          is already solved to a concrete dimension). *)
       set_sym_dim delayed_ref2 sym
-  | delayed_ref1, { solved_sym = Some sym; _ } -> set_sym_dim delayed_ref1 sym
+  | delayed_ref1, { var_ref = { solved_sym = Some sym; _ }; _ } -> set_sym_dim delayed_ref1 sym
   | { var_ref = { solved_dim = Some dim1; _ }; _ }, { var_ref = { solved_dim = Some dim2; _ }; _ }
     ->
       if dim1 = dim2 then ()
@@ -1581,7 +1583,9 @@ let set_scale ~factor delayed_ref_large delayed_ref_small =
              [] )
   | _ -> ());
   (* gh-490 v1: scaling relations over symbolic dimensions would require symbolic arithmetic. *)
-  if Option.is_some delayed_ref_large.solved_sym || Option.is_some delayed_ref_small.solved_sym
+  if
+    Option.is_some delayed_ref_large.var_ref.solved_sym
+    || Option.is_some delayed_ref_small.var_ref.solved_sym
   then
     raise
     @@ Row.Shape_error

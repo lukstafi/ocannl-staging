@@ -108,9 +108,6 @@ val infer_equal : t -> t -> unit
 type delayed_var_ref = {
   var_ref : Ir.Indexing.variable_ref;
   mutable var : [ `Row of Row.row_var | `Dim of Row.dim_var | `Not_set_yet ];
-  mutable solved_sym : Ir.Indexing.static_symbol option;
-      (** Set by {!set_sym_dim}: the dimension is a symbolic extent (gh-490) rather than a concrete
-          integer. *)
 }
 [@@deriving equal, sexp_of]
 

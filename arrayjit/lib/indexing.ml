@@ -467,7 +467,14 @@ let reflect_projection ~(dims : int array) ~(projection : axis_index array) =
           (stride * dim, concat_symbols @ symbols, offset))
   |> fun (_, symbols, offset) -> Affine { symbols; offset }
 
-type variable_ref = { ref_label : string; mutable solved_dim : int option }
+type variable_ref = {
+  ref_label : string;
+  mutable solved_dim : int option;
+  mutable solved_sym : static_symbol option;
+      (** The dimension is a symbolic extent (gh-490) rather than a concrete integer; where a
+          concrete value is required (e.g. [Embed_dim]), it materializes at the symbol's declared
+          range (the maximum extent). At most one of [solved_dim], [solved_sym] is set. *)
+}
 [@@deriving sexp_of, equal]
 
 module Doc_helpers = struct
