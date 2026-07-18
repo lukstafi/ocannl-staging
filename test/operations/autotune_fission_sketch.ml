@@ -290,12 +290,15 @@ let () =
     (Array.for_all2_exn got_fs got_fs_serial ~f:approx);
 
   (* === Multi-site F_sketch enumeration: two matmul segments with different geometries in one
-     fissioned chain. Seeds must be proposed one-at-a-time — the combined candidate count is
-     [site_a + site_b - 1]: the all-preferred combo, plus each further parameter set of each site
-     alone with the other site pinned to its preferred (first) set. Index pairing (n-th combo =
-     every segment's n-th set) gives [max site_a site_b] instead, and lets one segment's failing
-     n-th seed mask the n-th seed of every other segment (observed on cifar_conv, PR #174: the fc
-     matmul's invalid packrest-grid seed masked the conv segments' row-block seed). === *)
+     fissioned chain. Each parameter set of each site must be proposed ALONE (the other segment
+     falling back to its default preset), so the combined candidate count is [site_a + site_b] —
+     no site's seed can mask another site's seeds from being timed. Zipped combos fail this: index
+     pairing (n-th combo = every segment's n-th set) gives [max site_a site_b], and pinning the
+     others to their first set adds masking through an invalid first seed (observed on cifar_conv,
+     PR #174: the fc matmul's invalid packrest-grid seed masked the conv segments' row-block
+     seed). Cross-segment combination is recovered by one extra composite candidate that applies
+     each site's best-timed single simultaneously — counted in [fiss_sketch_timed] but not in the
+     seeded [fiss_sketch_candidates]. === *)
   let q2 = 16 in
   let qc16v = Array.init (q2 * q) ~f:(fun i -> (Float.of_int (i % 9) *. 0.25) -. 1.) in
   let qc16 = TDSL.ndarray qc16v ~label:[ "qc16" ] ~input_dims:[ q ] ~output_dims:[ q2 ] () in
@@ -309,22 +312,24 @@ let () =
     in
     let ctx = Context.run ctx routine in
     let got = Context.get_values ctx y.Tensor.value in
-    ((match !report with Some r -> r.Autotune.fiss_sketch_candidates | None -> -1), got)
+    match !report with
+    | Some r -> ((r.Autotune.fiss_sketch_candidates, r.Autotune.fiss_sketch_timed), got)
+    | None -> ((-1, -1), got)
   in
   let%op qd2 = qa + qb in
   Train.set_materialized qd2.Tensor.value;
   let%op qe2 = qd2 * qc in
-  let cand_a, _ = tune_candidates "af_ms_a" (Train.forward qe2) qe2 in
+  let (cand_a, _), _ = tune_candidates "af_ms_a" (Train.forward qe2) qe2 in
   let%op qd3 = qa + qb in
   Train.set_materialized qd3.Tensor.value;
   let%op qf3 = qc16 * qd3 in
-  let cand_b, _ = tune_candidates "af_ms_b" (Train.forward qf3) qf3 in
+  let (cand_b, _), _ = tune_candidates "af_ms_b" (Train.forward qf3) qf3 in
   let%op qd4 = qa + qb in
   Train.set_materialized qd4.Tensor.value;
   let%op qe4 = qd4 * qc in
   Train.set_materialized qe4.Tensor.value;
   let%op qg4 = qc16 * qe4 in
-  let cand_ab, got_ms = tune_candidates "af_ms_ab" (Train.forward qg4) qg4 in
+  let (cand_ab, timed_ab), got_ms = tune_candidates "af_ms_ab" (Train.forward qg4) qg4 in
   let%op qd5 = qa + qb in
   Train.set_materialized qd5.Tensor.value;
   let%op qe5 = qd5 * qc in
@@ -338,7 +343,11 @@ let () =
   let msctx = Context.run msctx msroutine in
   let got_ms_serial = Context.get_values msctx qg5.Tensor.value in
   p "multi-site: both sites seed per-segment sketches" (cand_a > 1 && cand_b > 1);
-  p "multi-site: one-at-a-time combo count (a + b - 1)" (cand_ab = cand_a + cand_b - 1);
+  p "multi-site: unmasked singles combo count (a + b)" (cand_ab = cand_a + cand_b);
+  p "multi-site: best-timed singles recombined into a composite candidate"
+    (* On cc every single compiles and times, so the composite is exactly one extra timing; on
+       backends where some singles fail validation only the looser bound is stable. *)
+    (if is_cpu then timed_ab = cand_ab + 1 else timed_ab > 0);
   p "multi-site: tuned two-matmul chain matches the serial twin"
     (Array.for_all2_exn got_ms got_ms_serial ~f:approx);
 
