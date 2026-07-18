@@ -2169,17 +2169,23 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
                               params )))
       in
       let fiss_sketch_specs =
-        (* Index pairing: the n-th spec applies each keyed segment's n-th compatible parameter set
-           (its first, when it has fewer) — every parameter set of every segment gets proposed while
-           the other segments stay pinned to their preferred tiling. *)
-        let n =
-          List.fold fiss_sketch_entries ~init:0 ~f:(fun acc (_, ps) -> max acc (List.length ps))
-        in
-        List.init n ~f:(fun idx ->
-            Fiss
-              (F_sketch
-                 (List.map fiss_sketch_entries ~f:(fun (key, ps) ->
-                      (key, Option.value (List.nth ps idx) ~default:(List.hd_exn ps))))))
+        (* One-at-a-time enumeration: the all-preferred combo, then each further parameter set of
+           each keyed segment proposed alone while the other segments stay pinned to their preferred
+           tiling. Index pairing (the n-th spec applies each segment's n-th set) looks equivalent but
+           is not: one segment's failing n-th seed poisons the n-th seed of EVERY segment — observed
+           on cifar_conv, where the fc matmul's invalid packrest-grid seed masked the conv segments'
+           row-block seed from ever being timed. *)
+        match fiss_sketch_entries with
+        | [] -> []
+        | entries ->
+            let firsts = List.map entries ~f:(fun (key, ps) -> (key, List.hd_exn ps)) in
+            let variations =
+              List.concat_mapi entries ~f:(fun i (_, ps) ->
+                  List.map (List.drop ps 1) ~f:(fun p ->
+                      List.mapi firsts ~f:(fun j ((key, _) as kf) ->
+                          if i = j then (key, p) else kf)))
+            in
+            List.map (firsts :: variations) ~f:(fun combo -> Fiss (F_sketch combo))
       in
       let seed_specs =
         block_size_presets (fun block_size -> Whole (W_preset { block_size }))

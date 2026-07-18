@@ -17,4 +17,7 @@ matmul cache-hit values match the serial twin: true
 per-segment sketch candidates seeded: true
 per-segment sketch candidates timed: true
 tuned fissioned matmul matches the serial twin: true
+multi-site: both sites seed per-segment sketches: true
+multi-site: one-at-a-time combo count (a + b - 1): true
+multi-site: tuned two-matmul chain matches the serial twin: true
 timing_ctx on a different backend rejected: true
