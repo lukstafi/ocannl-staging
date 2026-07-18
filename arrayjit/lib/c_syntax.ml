@@ -782,8 +782,10 @@ module C_syntax (B : C_syntax_config) = struct
      (intrinsics, register tiling, lane-0 fallback) touches exactly the fallback's tensors over the
      fallback's index ranges, so the fallback IS the statement's access footprint. [on_stmt]
      observes the statement-level events the locals analysis keys on (opaque statements, scope
-     declarations). [Set_dynamic]/[Get_dynamic] slots are data-dependent, so they fire with empty
-     indices (conservatively a miss). *)
+     declarations). [kind] tells the affine queries how to interpret the index vector: [`Whole] for
+     accesses whose cells are not statically known ([Zero_out]'s every-cell write, data-dependent
+     [Set_dynamic]/[Get_dynamic] slots, fired with empty indices), [`Vec] for vectorized writes
+     whose last component is the base of a minor-axis run. *)
   let iter_local_accesses ~access ~on_stmt (root : Low_level.t) : unit =
     let rec go (llc : Low_level.t) =
       match llc with
@@ -797,17 +799,17 @@ module C_syntax (B : C_syntax_config) = struct
       | If { cond = c, _; body } ->
           go_sc c;
           go body
-      | Zero_out tn -> access ~write:true tn [||]
+      | Zero_out tn -> access ~write:true ~kind:`Whole tn [||]
       | Set { tn; idcs; llsc; _ } ->
           go_sc llsc;
-          access ~write:true tn idcs
+          access ~write:true ~kind:`Exact tn idcs
       | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
           go_sc v;
           go_sc llsc;
-          access ~write:true tn [||]
+          access ~write:true ~kind:`Whole tn [||]
       | Set_from_vec { tn; idcs; arg = a, _; _ } ->
           go_sc a;
-          access ~write:true tn idcs
+          access ~write:true ~kind:`Vec tn idcs
       | Set_local (id, llsc) ->
           on_stmt (`Set_local id.Low_level.scope_id);
           go_sc llsc
@@ -818,9 +820,9 @@ module C_syntax (B : C_syntax_config) = struct
           on_stmt (`Declare_local id.Low_level.scope_id);
           go body
       | Get_local _ -> ()
-      | Get (tn, idcs) -> access ~write:false tn idcs
+      | Get (tn, idcs) -> access ~write:false ~kind:`Exact tn idcs
       | Get_dynamic { tn; dyn_value = v, _; _ } ->
-          access ~write:false tn [||];
+          access ~write:false ~kind:`Whole tn [||];
           go_sc v
       | Get_merge_buffer _ -> ()
       | Ternop (_, (a, _), (b, _), (c, _)) ->
@@ -839,7 +841,7 @@ module C_syntax (B : C_syntax_config) = struct
   type grid_local_info = {
     gl_tn : Tn.t;
     mutable gl_written : bool;
-    mutable gl_accs : Indexing.axis_index array list;
+    mutable gl_accs : (bool * [ `Exact | `Whole | `Vec ] * Indexing.axis_index array) list;
     mutable gl_count : int;
   }
 
@@ -861,7 +863,7 @@ module C_syntax (B : C_syntax_config) = struct
     let count_accesses (llc : Low_level.t) =
       let c = ref 0 in
       iter_local_accesses llc
-        ~access:(fun ~write:_ tn2 _ -> if tn2.Tn.uid = tn.Tn.uid then Int.incr c)
+        ~access:(fun ~write:_ ~kind:_ tn2 _ -> if tn2.Tn.uid = tn.Tn.uid then Int.incr c)
         ~on_stmt:(fun _ -> ());
       !c
     in
@@ -954,8 +956,8 @@ module C_syntax (B : C_syntax_config) = struct
      loop body (block scope = per-chunk storage). Opaque statements and barriers disqualify.
 
      Returns [Some (privatized, ptr_aliased)] when the loop can render in parallel. *)
-  let parallel_grid_safe ~sym ~(global_counts : int Hashtbl.M(Int).t) (body : Low_level.t) :
-      (Tn.t list * Tn.t list) option =
+  let parallel_grid_safe ~sym ~grid_range ~(global_counts : int Hashtbl.M(Int).t)
+      (body : Low_level.t) : (Tn.t list * Tn.t list) option =
     let plc = placements () in
     let is_local tn =
       (not (Tn.Placements.is_virtual_force plc tn 431))
@@ -974,7 +976,7 @@ module C_syntax (B : C_syntax_config) = struct
     let ok = ref true in
     let opaque = ref false in
     let escaped_scope = ref false in
-    let access ~write tn idcs =
+    let access ~write ~kind tn idcs =
       if is_local tn then (
         let info =
           Hashtbl.find_or_add locals tn.Tn.uid ~default:(fun () ->
@@ -982,7 +984,7 @@ module C_syntax (B : C_syntax_config) = struct
         in
         info.gl_count <- info.gl_count + 1;
         info.gl_written <- info.gl_written || write;
-        info.gl_accs <- idcs :: info.gl_accs)
+        info.gl_accs <- (write, kind, idcs) :: info.gl_accs)
     in
     iter_local_accesses body ~access ~on_stmt:(function
       | `Opaque ->
@@ -1006,23 +1008,28 @@ module C_syntax (B : C_syntax_config) = struct
     else
       let privatized = ref [] and ptr_aliased = ref [] in
       let private_bytes = ref 0 in
+      (* The box environment for the affine conflict query: the Grid loop itself plus every loop
+         bound under its body. Loops enclosing the Grid loop are shared across chunks (chunks of
+         one dispatch execute under the same outer-iteration values, with a join before the next),
+         which is exactly the query's treatment of unlisted symbols. *)
+      let env = (sym, grid_range) :: Low_level.loop_bounds body in
+      let range s = List.Assoc.find env s ~equal:Indexing.equal_symbol in
+      let dup s = List.Assoc.mem env s ~equal:Indexing.equal_symbol in
       let feasible =
         Hashtbl.for_all locals ~f:(fun info ->
-            let shared_ok =
+            (* The legacy procedural shared rule (every access mentions [sym] and all accesses
+               agree on every mentioning component), kept for [legality_crosscheck]. *)
+            let procedural_shared_ok () =
               (not info.gl_written)
               ||
-              (* Distinct grid iterations must touch disjoint elements: every access mentions
-                 [sym]... *)
-              List.for_all info.gl_accs ~f:(fun idcs -> Array.exists idcs ~f:mentions_comp)
+              let maps = List.map info.gl_accs ~f:(fun (_, _, m) -> m) in
+              List.for_all maps ~f:(fun idcs -> Array.exists idcs ~f:mentions_comp)
               &&
-              (* ...and all accesses agree on every component that mentions [sym], so within one
-                 iteration reads hit exactly the cells that iteration writes. *)
-              let accs = info.gl_accs in
-              let rank = List.fold accs ~init:0 ~f:(fun m a -> max m (Array.length a)) in
+              let rank = List.fold maps ~init:0 ~f:(fun m a -> max m (Array.length a)) in
               let agree = ref true in
               for p = 0 to rank - 1 do
                 let comps =
-                  List.map accs ~f:(fun a ->
+                  List.map maps ~f:(fun a ->
                       if p < Array.length a then a.(p) else Indexing.Fixed_idx 0)
                 in
                 if List.exists comps ~f:mentions_comp then
@@ -1033,6 +1040,49 @@ module C_syntax (B : C_syntax_config) = struct
                         agree := false
               done;
               !agree
+            in
+            (* Shared rule by affine query: chunks share one function-scope array, so every access
+               pair involving a write must have its conflicts confined to a single chunk of [sym]
+               ([Same_thread]) or be disjoint outright — which also admits patterns the agreement
+               rule could only decline (constant-offset or strided-disjoint cells). *)
+            let shared_ok =
+              (not info.gl_written)
+              ||
+              let interp (kind, idcs) =
+                match kind with
+                | `Whole -> None
+                | `Exact -> Some idcs
+                | `Vec ->
+                    if Array.is_empty idcs then None
+                    else (
+                      let m = Array.copy idcs in
+                      m.(Array.length m - 1) <- Indexing.Sub_axis;
+                      Some m)
+              in
+              let witness = ref "" in
+              let q =
+                List.for_all info.gl_accs ~f:(fun (wx, kx, mx) ->
+                    List.for_all info.gl_accs ~f:(fun (wy, ky, my) ->
+                        (not (wx || wy))
+                        ||
+                        match (interp (kx, mx), interp (ky, my)) with
+                        | Some l, Some r -> (
+                            match
+                              Affine.pair_conflict ~range ~dup_left:dup ~dup_right:dup
+                                ~pairs:[ (sym, sym) ] ~left:l ~right:r
+                            with
+                            | Affine.Disjoint | Affine.Same_thread -> true
+                            | Affine.Cross_thread wit ->
+                                witness := wit;
+                                false)
+                        | _ ->
+                            witness := "statically unknown cells (whole-node or dynamic access)";
+                            false))
+              in
+              Affine.crosscheck ~site:"cc pool-parallel shared rule"
+                ~context:(Tn.debug_name info.gl_tn ^ " under Grid loop " ^ loop_ident)
+                ~procedural_safe:procedural_shared_ok ~query_safe:q ~witness:!witness;
+              q
             in
             if shared_ok then (
               (match B.parallel_grid_syntax with
@@ -1098,7 +1148,7 @@ module C_syntax (B : C_syntax_config) = struct
          counts are comparable by construction. *)
       let global_counts : int Hashtbl.M(Int).t = Hashtbl.create (module Int) in
       iter_local_accesses llc
-        ~access:(fun ~write:_ tn _ -> if is_local tn then Hashtbl.incr global_counts tn.Tn.uid)
+        ~access:(fun ~write:_ ~kind:_ tn _ -> if is_local tn then Hashtbl.incr global_counts tn.Tn.uid)
         ~on_stmt:(fun _ -> ());
       let syms = ref (Set.empty (module Indexing.Symbol)) in
       let privs = ref (Map.empty (module Indexing.Symbol)) in
@@ -1107,7 +1157,7 @@ module C_syntax (B : C_syntax_config) = struct
         match llc with
         | Low_level.For_loop { axis = Grid; index; from_; to_; body; _ } -> (
             if from_ = 0 && to_ >= 1 then
-              match parallel_grid_safe ~sym:index ~global_counts body with
+              match parallel_grid_safe ~sym:index ~grid_range:(from_, to_) ~global_counts body with
               | Some (privatized, ptr_aliased) ->
                   syms := Set.add !syms index;
                   if not (List.is_empty privatized) then

@@ -276,3 +276,28 @@ type 'tn access = {
       (** Lexicographic program-order position: statement indices per [Seq] nesting level. *)
 }
 [@@deriving sexp_of]
+
+(** {2 Crosscheck}
+
+    Config [legality_crosscheck]: when enabled, the call sites swapped onto the queries also run
+    the legacy procedural analysis and compare. A query stricter than the procedural answer raises
+    — either a query precision regression or a latent unsoundness of the procedural rule, both
+    needing eyes. A query more permissive than the procedural answer is the expected precision
+    gain, logged to stderr for review. *)
+
+let crosscheck_enabled = lazy (Utils.get_global_flag ~default:false ~arg_name:"legality_crosscheck")
+
+let crosscheck ~site ~context ~(procedural_safe : unit -> bool) ~query_safe ~witness =
+  if Lazy.force crosscheck_enabled && Bool.(procedural_safe () <> query_safe) then
+    if not query_safe then
+      invalid_arg
+        (Printf.sprintf
+           "Affine.crosscheck %s: the procedural analysis accepts but the affine query declines \
+            (%s) — query precision regression or latent procedural unsoundness; context: %s"
+           site witness context)
+    else
+      Stdio.eprintf
+        "[legality_crosscheck] %s: the affine query accepts where the procedural analysis \
+         declined; context: %s\n\
+         %!"
+        site context

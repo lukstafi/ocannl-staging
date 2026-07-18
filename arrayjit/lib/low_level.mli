@@ -393,6 +393,10 @@ val input_and_output_nodes : optimized -> (Set.M(Tnode).t * Set.M(Tnode).t) * Tn
     parameters. Outputs are all the materialized nodes written-to by the code. The last returned
     component is the input merge node, if used in the code. *)
 
+val loop_bounds : t -> (Indexing.symbol * (int * int)) list
+(** All [For_loop] bindings within the code (loop symbols are unique within a routine), with
+    inclusive iteration bounds — the box environment for {!Affine} queries. *)
+
 val affine_accesses : t -> Tnode.t Affine.access list
 (** gh-494 waypoint 1: the routine's tensor-node accesses as explicit affine relations
     ({!Affine.access}), extracted from (typically optimized) code, in program order (a statement's

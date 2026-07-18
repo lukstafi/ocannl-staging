@@ -3183,6 +3183,44 @@ let input_and_output_nodes optimized =
         (inputs, outputs)),
     optimized.merge_node )
 
+(** All [For_loop] bindings within [llc] (loop symbols are unique within a routine), with inclusive
+    iteration bounds — the box environment for {!Affine} queries over the routine's accesses. *)
+let loop_bounds (llc : t) : (Indexing.symbol * (int * int)) list =
+  let acc = ref [] in
+  let rec go = function
+    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
+        ()
+    | Seq (a, b) ->
+        go a;
+        go b
+    | For_loop { index; from_; to_; body; _ } ->
+        acc := (index, (from_, to_)) :: !acc;
+        go body
+    | If { cond = c, _; body } ->
+        go_sc c;
+        go body
+    | Tile_mma { fallback; _ } -> go fallback
+    | Set { llsc; _ } | Set_local (_, llsc) -> go_sc llsc
+    | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+        go_sc v;
+        go_sc llsc
+    | Set_from_vec { arg = a, _; _ } -> go_sc a
+  and go_sc = function
+    | Local_scope { body; _ } -> go body
+    | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
+    | Get_dynamic { dyn_value = v, _; _ } -> go_sc v
+    | Ternop (_, (a, _), (b, _), (c, _)) ->
+        go_sc a;
+        go_sc b;
+        go_sc c
+    | Binop (_, (a, _), (b, _)) ->
+        go_sc a;
+        go_sc b
+    | Unop (_, (a, _)) -> go_sc a
+  in
+  go llc;
+  List.rev !acc
+
 (** gh-494 waypoint 1: the routine's tensor-node accesses as explicit affine relations
     ({!Affine.access}), extracted from (typically optimized) code — the queryable artifact behind
     the affine legality queries. Fires in program order: a statement's right-hand-side reads
