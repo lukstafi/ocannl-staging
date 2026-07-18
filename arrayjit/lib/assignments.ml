@@ -96,11 +96,11 @@ let to_comp asgns = { asgns; embedded_nodes = Set.empty (module Tnode) }
 let empty_comp = to_comp Noop
 
 let is_total ~initialize_neutral ~projections =
-  initialize_neutral && Indexing.is_surjective projections
+  initialize_neutral && Affine.is_surjective projections
 
 let can_skip_accumulation ~projections =
   (* We can skip accumulation (use = instead of +=) only if the projection is injective *)
-  Indexing.is_injective projections
+  Affine.is_injective projections
 
 (** Returns materialized nodes in the sense of {!Tnode.Placements.is_in_context_force}, resolved
     against the given compilation lineage's placements. NOTE: it must be called after compilation
@@ -481,7 +481,7 @@ let%track4_sexp to_low_level code =
        Not injective: accumulation needed (need init for first += operation) *)
     let needs_init =
       initialize_neutral
-      && not (Indexing.is_surjective projections && Indexing.is_injective projections)
+      && not (Affine.is_surjective projections && Affine.is_injective projections)
     in
     (* The padding neutral element is part of a padded tensor's identity: margins permanently
        hold the committed value (conflicting margin-touching demands are rejected at
@@ -521,7 +521,7 @@ let%track4_sexp to_low_level code =
     in
     let target_needs_init =
       Array.map target_projections ~f:(fun proj ->
-          initialize_neutral && not (Indexing.is_surjective proj && Indexing.is_injective proj))
+          initialize_neutral && not (Affine.is_surjective proj && Affine.is_injective proj))
     in
     let iter_sizes =
       Array.fold2_exn projections.product_space projections.product_iterators

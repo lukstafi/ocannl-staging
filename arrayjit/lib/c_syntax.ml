@@ -869,37 +869,16 @@ module C_syntax (B : C_syntax_config) = struct
     in
     let touches llc = count_accesses llc > 0 in
     let dims = Lazy.force tn.Tn.dims in
+    (* Coverage by affine query ({!Affine.covers_box}): the nest enumerates every cell exactly
+       once. Only the usable [loops] participate as the box environment — coverage through a loop
+       that interleaves other accesses to [tn] must not count (see the completion requirement
+       above). *)
     let covering ~loops (idcs : Indexing.axis_index array) =
-      Array.length idcs = Array.length dims
-      &&
-      let extent_of s =
+      let range s =
         List.find_map loops ~f:(fun (s', from_, to_) ->
-            if Indexing.equal_symbol s s' && from_ = 0 then Some (to_ + 1) else None)
+            if Indexing.equal_symbol s s' then Some (from_, to_) else None)
       in
-      let used = ref [] in
-      let fresh s =
-        if List.mem !used s ~equal:Indexing.equal_symbol then false
-        else (
-          used := s :: !used;
-          true)
-      in
-      Array.for_alli idcs ~f:(fun a idx ->
-          let dim = dims.(a) in
-          match idx with
-          | Indexing.Fixed_idx 0 -> dim = 1
-          | Indexing.Iterator s -> (
-              fresh s && match extent_of s with Some e -> e = dim | None -> false)
-          | Indexing.Affine { symbols; offset = 0 } ->
-              let sorted = List.sort symbols ~compare:(fun (c1, _) (c2, _) -> Int.compare c1 c2) in
-              let rec radix r = function
-                | [] -> r = dim
-                | (c, s) :: tl -> (
-                    c = r && fresh s
-                    && match extent_of s with Some e -> radix (r * e) tl | None -> false)
-              in
-              radix 1 sorted
-          | Indexing.Fixed_idx _ | Indexing.Affine _ | Indexing.Sub_axis | Indexing.Concat _ ->
-              false)
+      Affine.covers_box ~range ~dims idcs
     in
     let rec stmt (llc : Low_level.t) ~loops =
       match llc with
