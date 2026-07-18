@@ -2168,18 +2168,25 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
                             ( SC.digest (SC.canonicalize ~static_indices ~with_placements:false pre),
                               params )))
       in
+      let fiss_sketch_entries =
+        (* Structurally identical segments share a digest — and thus, at apply time, a schedule —
+           so keep one entry per digest. *)
+        List.fold fiss_sketch_entries ~init:[] ~f:(fun acc ((key, _) as e) ->
+            if List.Assoc.mem acc ~equal:String.equal key then acc else e :: acc)
+        |> List.rev
+      in
       let fiss_sketch_specs =
-        (* Index pairing: the n-th spec applies each keyed segment's n-th compatible parameter set
-           (its first, when it has fewer) — every parameter set of every segment gets proposed while
-           the other segments stay pinned to their preferred tiling. *)
-        let n =
-          List.fold fiss_sketch_entries ~init:0 ~f:(fun acc (_, ps) -> max acc (List.length ps))
-        in
-        List.init n ~f:(fun idx ->
-            Fiss
-              (F_sketch
-                 (List.map fiss_sketch_entries ~f:(fun (key, ps) ->
-                      (key, Option.value (List.nth ps idx) ~default:(List.hd_exn ps))))))
+        (* Single-segment specs: each parameter set of each keyed segment is proposed alone, every
+           other segment falling back to its default preset (an absent key degrades to the preset
+           in the transform closure). Any zipping of segments' seeds into shared combos — index
+           pairing, or pinning the other segments to their first set — lets one segment's invalid
+           seed mask another segment's seeds from ever being timed (observed on cifar_conv: the fc
+           matmul's invalid packrest-grid seed masked the conv segments' row-block seed; and a
+           segment's FIRST seed can itself be the invalid one, e.g. GPU conv seeds with a companion
+           tail). Cross-segment combination is recovered below by recombining each segment's
+           best-timed single into one composite candidate. *)
+        List.concat_map fiss_sketch_entries ~f:(fun (key, ps) ->
+            List.map ps ~f:(fun p -> Fiss (F_sketch [ (key, p) ])))
       in
       let seed_specs =
         block_size_presets (fun block_size -> Whole (W_preset { block_size }))
@@ -2199,14 +2206,37 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
       in
       let by_time (_, a) (_, b) = Float.compare a b in
       let n_fiss_sketch_timed = ref 0 in
+      let fiss_single_results = ref [] in
       let pool =
         (baseline, baseline_ms)
         :: List.filter_map seed_specs ~f:(fun spec ->
             let result = try_spec spec in
             (match (spec, result) with
+            | Fiss (F_sketch [ (key, p) ]), Some (_, ms) ->
+                Int.incr n_fiss_sketch_timed;
+                fiss_single_results := (key, (p, ms)) :: !fiss_single_results
             | Fiss (F_sketch _), Some _ -> Int.incr n_fiss_sketch_timed
             | _ -> ());
             result)
+      in
+      let pool =
+        (* Cross-segment recombination: the singles time every parameter set unmasked, but the best
+           full routine may sketch several segments at once. One extra composite candidate applies
+           each keyed segment's best-timed single simultaneously — informed by the singles' own
+           timings, where the full cartesian product would be exponential. *)
+        let recombined =
+          List.filter_map fiss_sketch_entries ~f:(fun (key, _) ->
+              List.filter !fiss_single_results ~f:(fun (k, _) -> String.equal k key)
+              |> List.min_elt ~compare:(fun (_, (_, a)) (_, (_, b)) -> Float.compare a b)
+              |> Option.map ~f:(fun (_, (p, _)) -> (key, p)))
+        in
+        if List.length recombined < 2 then pool
+        else
+          match try_spec (Fiss (F_sketch recombined)) with
+          | Some timed ->
+              Int.incr n_fiss_sketch_timed;
+              timed :: pool
+          | None -> pool
       in
       let beam = ref (List.take (List.sort pool ~compare:by_time) beam_width) in
       let best = ref (List.hd_exn !beam) in
