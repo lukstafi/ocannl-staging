@@ -328,6 +328,38 @@ Possible follow-ups, in profile-completeness order: e4m3 if/when OCANNL grows th
 format; tf32 for uniform f32 behind a numerics-policy config; `ldmatrix`-based fragment loads
 from swizzled shared tiles and Blackwell's block-scaled `kind::mxf8f6f4` (the T4 ceiling chase).
 
+## Swizzled staging (implemented 2026-07-19)
+
+The first slice of the T4 layout work: `Stage { …; swizzle = true }` stores the shared tile in an
+XOR-swizzled layout. Design decisions:
+
+- **A codegen-level layout mark, not an IR term.** XOR is not in the affine index algebra and does
+  not need to be: the swizzle is a per-row bijection of the tile's minor axis, applied uniformly to
+  every element access of the marked node, so the IR-level semantics are untouched — `optimized`
+  grew a third node-mark set, `swizzled` (sibling to `workgroup_shared` and
+  `simdgroup_fragments`), and `C_syntax`'s offset rendering (`pp_tn_offset`) remaps
+  `P*C + col` to `P*C + (col ^ (P & (C-1)))` for marked nodes (`P` the linearized row prefix, `C`
+  the minor dim). Validation, interpretation, and every transform stay oblivious. `Stage` requires
+  `shared = true`, a tile of ≥ 2 axes, and a power-of-two minor dim > 1.
+- **Element-level XOR, not 16-byte-vector XOR.** The staged loads and micro-kernel reads are
+  scalar today, so `col ^ (P & (C-1))` spreads same-column accesses of consecutive rows across
+  banks at element granularity (fully conflict-free for f32 when `C >= 32`, `C/32`-fold reduced
+  below). The CUTLASS-style vector-unit swizzle becomes relevant with `ldmatrix`/vectorized loads
+  — that is the remaining T4 chase, not this slice.
+- **Row-major renderings decline swizzled nodes.** The `Tile_mma` intrinsic hook, the fragment
+  scope, and the register-tiled path all consume pointer+stride operands, so swizzled operands
+  decline (visible via `schedule_log_declines` / `mma_census`) into the lane-0 scalar fallback,
+  which reads elementwise through the swizzle-aware offsets and stays correct. Likewise the
+  contiguous vector load/store renderings bail. Consequently `swizzle` currently benefits the
+  scalar/blocktiled staged GPU kernels (the S2 shape); combining it with `Tensorize` is correct
+  but forfeits the intrinsics until swizzle-aware (`ldmatrix`-based) fragment loads exist.
+- Exercised by `test/operations/schedule_swizzle_matmul.ml`: GPU parity of the swizzled S2 matmul
+  and of the swizzled staged+tensorized pipeline against the serial twin (verified on the RTX
+  5070), structural XOR-in-source checks, the intrinsic-decline check, and the three `Stage`
+  validation errors (uniform on all backends). Autotune sketch seeds deliberately do not set
+  `swizzle` yet: the staged sketches feed `Tensorize`, where a swizzled tile would trade the
+  intrinsics for a bank-conflict fix — a bad bargain until the fragment loads are swizzle-aware.
+
 ## Lane-aware Stage (implemented 2026-07-07)
 
 Composes shared-memory staging with `Tensorize`, dissolving the deferral above:
