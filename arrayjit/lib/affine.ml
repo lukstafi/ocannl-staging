@@ -265,7 +265,11 @@ let fiber_cardinality ~(domain : (Idx.symbol * int) list) (idcs : Idx.axis_index
   let mentions s =
     Array.exists idcs ~f:(function
       | Idx.Iterator s' -> Idx.equal_symbol s s'
-      | Idx.Affine { symbols; _ } -> List.exists symbols ~f:(fun (_, s') -> Idx.equal_symbol s s')
+      | Idx.Affine { symbols; _ } ->
+          (* Coalesced, so that zero or cancelling terms do not count as mentions —
+             [Indexing.affine_injective] coalesces too, and a symbol it never sees must contribute
+             its width to the fiber (Codex P2 on PR #181). *)
+          List.exists (Idx.coalesce_affine_terms symbols) ~f:(fun (_, s') -> Idx.equal_symbol s s')
       | Idx.Concat syms -> List.exists syms ~f:(Idx.equal_symbol s)
       | Idx.Fixed_idx _ | Idx.Sub_axis -> false)
   in

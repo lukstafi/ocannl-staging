@@ -306,5 +306,7 @@ let () =
   check_fiber ~name:"constant cell" ~domain:[ (f1, 3) ] [| Idx.Fixed_idx 0 |];
   check_fiber ~name:"non-injective f1+f2" ~domain:[ (f1, 3); (f2, 3) ]
     [| aff [ (1, f1); (1, f2) ] 0 |];
+  (* Cancelling terms are not mentions: the map is constant in f1, whose width must count. *)
+  check_fiber ~name:"cancelled term f1-f1" ~domain:[ (f1, 3) ] [| aff [ (1, f1); (-1, f1) ] 0 |];
 
   Stdio.printf "\nunsound cases: %d\n" !unsound_count
