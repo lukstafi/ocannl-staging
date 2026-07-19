@@ -131,7 +131,7 @@ autotuning is per-backend *measurement* over a shared candidate *language*. No
 mainstream framework spans a laptop's SIMD register file and a datacenter GPU's matrix
 units with one schedule vocabulary.
 
-## 6. The aspirational core: constraint solving for schedules *(aspirational)*
+## 6. The aspirational core: constraint solving for schedules *(in progress)*
 
 The frontend solves shapes and projections with a constraint system — row variables,
 dimension inequalities, staged solving. The scheduler, meanwhile, re-derives affine
@@ -168,14 +168,50 @@ Positioning against the research landscape:
 Rough waypoints:
 
 1. Express projections as explicit affine relations (presburger-style sets/maps) rather
-   than only as index-expression emitters.
+   than only as index-expression emitters. *(Landed: `Ir.Affine` and
+   `Low_level.affine_accesses` — access maps with loop boxes, program-order paths, and
+   reduction-dependence markers.)*
 2. Re-express the procedural checks (`validate_parallel`, `parallel_grid_safe`,
    micro-kernel recognition) as emptiness/subset queries over those relations —
-   equivalence with the procedural answers is the regression suite.
+   equivalence with the procedural answers is the regression suite. *(Landed for the
+   shared-memory rules; the per-thread-scratch rule is order-sensitive — "reads hit
+   exactly the cells the same thread writes" — and awaits a containment query.)*
 3. A legality *oracle* for schedule ops: given a schedule, decide validity by query
    instead of by construction-then-validation.
 4. Inference: search in constraint space rather than op-list space — the autotuner
    proposes shapes of schedules, the solver prunes cheaply before anything compiles.
+
+Status, mid-2026: waypoints 1–2 landed as the `Ir.Affine` query engine — pair-conflict
+(disjointness by gcd/interval infeasibility, thread-confinement by forced equalities
+under the mixed-radix injectivity criterion), covering, and counting (fiber
+cardinality), each verified against brute-force enumeration oracles and soaked under
+the permanent `legality_crosscheck` flag, which runs the legacy procedural analyses
+alongside the queries and makes any disagreement loud. The crosscheck's first runs
+already earned it: one engine gap caught on real kernels, two precision gains where
+queries merge kernels the procedural rules could only cut, and oracle confirmation
+that a syntactically-agreeing but non-injective access pair the old rules accept is a
+genuine race. The tooling question resolved against isl: `axis_index` is structurally
+linear — no divisions, no quantifier alternation — so every query form so far decides
+with native linear reasoning; revisit only if waypoint-4 inference needs genuine
+existential elimination.
+
+Waypoint 4 extends naturally to an *optimizer*: with the analytic cost model (gh-491)
+as the objective, schedule search becomes branch-and-bound over partial schedule
+shapes. Legality queries fathom infeasible subtrees wholesale — a reduction edge
+refutes "parallelize k" for every completion, before any tile size is named — and
+peak-envelope roofline bounds are admissible by construction: max(FLOPs / peak
+compute, compulsory bytes / peak bandwidth) lower-bounds every completion's runtime,
+model omissions only weaken pruning, and only overstated "peak" constants can
+mis-prune, so the envelope numbers must be honest peaks. Two regimes keep the model
+advisory: the untuned-default path takes the model-argmin exactly and cheaply; the
+tuned path prunes only in the admissible direction against measured incumbents and
+returns top-K leaves for measurement. The step past beam search comes when tile
+parameters go symbolic (gh-490): footprint and occupancy become monotone functions of
+tile sizes, so whole boxes of the divisor lattice bound by interval arithmetic.
+Telamon (Beaugnon et al.) is the precedent for exactly this architecture — candidates
+as sets of open choices, optimistic analytic bounds, branch-and-bound to the leaves —
+and its acknowledged weak point, a hand-modeled legality constraint set, is the part
+OCANNL gets natively.
 
 ## 7. Deliberately boring *(and proudly so)*
 
