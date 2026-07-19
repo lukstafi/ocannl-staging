@@ -32,6 +32,15 @@ let empty_env : 'a environment = Map.empty (module Symbol)
 type static_symbol = {
   static_symbol : symbol;
   mutable static_range : int option; [@compare.ignore] [@equal.ignore] [@hash.ignore]
+  mutable used_as_extent : bool; [@compare.ignore] [@equal.ignore] [@hash.ignore] [@sexp.bool]
+      (** The symbol is used as a symbolic dimension (gh-490): its bound value is a size in
+          [\[0, static_range\]] (inclusive -- buffers are sized [static_range]), rather than an
+          index in [\[0, static_range)]. Set by [Row.get_sym_dim]. *)
+  mutable used_as_slice : bool; [@compare.ignore] [@equal.ignore] [@hash.ignore] [@sexp.bool]
+      (** The symbol is used as a batch-slice index ([@|]): its bound value indexes an axis of size
+          [static_range], so the strict [\[0, static_range)] validation must apply. Set by the
+          [Batch_slice] shape logic; mutually exclusive with [used_as_extent] (a single binding
+          cannot be validated both inclusively and strictly). *)
 }
 [@@deriving compare, equal, sexp, hash]
 
@@ -89,7 +98,9 @@ let lowered_bindings bs vs =
 let find_exn (bs : lowered_bindings) = List.Assoc.find_exn ~equal:equal_static_symbol bs
 
 let get_static_symbol ?static_range bindings =
-  let s = { static_symbol = get_symbol (); static_range } in
+  let s =
+    { static_symbol = get_symbol (); static_range; used_as_extent = false; used_as_slice = false }
+  in
   (s, Bind (s, bindings))
 
 (** Validates a launch-parameter value against its declared range (minimum 0 is implicit) and, when
@@ -98,8 +109,9 @@ let get_static_symbol ?static_range bindings =
     per-routine node-extent contract is NOT sound for launch parameters -- value-embedded parameters
     (step counters) take runtime values unrelated to any touched node's extent -- so narrowing an
     unbounded parameter requires declaring (and thereby bind-validating) a range. *)
-let validate_bound_value ?(width64 = false) ({ static_symbol; static_range } : static_symbol)
-    (v : int) =
+let validate_bound_value ?(width64 = false)
+    ({ static_symbol; static_range; used_as_extent; used_as_slice = _ } : static_symbol) (v : int)
+    =
   let ident = symbol_ident static_symbol in
   if v < 0 then
     raise
@@ -115,7 +127,14 @@ let validate_bound_value ?(width64 = false) ({ static_symbol; static_range } : s
              large_models for 64-bit indices"
             v ident);
   match static_range with
-  | Some range when v >= range ->
+  | Some range when used_as_extent && v > range ->
+      (* An extent (gh-490 symbolic dimension) is a size: the full range is a legal value. *)
+      raise
+      @@ Utils.User_error
+           (Printf.sprintf
+              "Indexing: bound value %d for symbolic extent %s exceeds its declared maximum %d" v
+              ident range)
+  | Some range when (not used_as_extent) && v >= range ->
       raise
       @@ Utils.User_error
            (Printf.sprintf
@@ -186,6 +205,11 @@ type projections = {
           result of an operation. *)
   project_rhs : axis_index array array;
       (** [project_rhs.(i)] Produces an index into the [i+1]th argument of an operation. *)
+  extent_syms : (symbol * static_symbol) list;
+      (** gh-490 symbolic extents: maps a product iterator to the static symbol whose bound value
+          is the axis's runtime extent. The corresponding [product_space] entry is the maximum
+          extent (the symbol's declared range); lowering guards the loop body with
+          [iterator < value] when the symbol is among the routine's bindings. *)
   debug_info : (projections_debug[@sexp.ignore] [@compare.ignore] [@equal.ignore]);
 }
 [@@deriving compare, equal, sexp]
@@ -310,6 +334,7 @@ let identity_projections ?debug_info ?derived_for ~lhs_dims () =
     product_iterators;
     project_lhs;
     project_rhs = [| project_lhs |];
+    extent_syms = [];
     debug_info;
   }
 
@@ -350,7 +375,7 @@ module Doc_helpers = struct
   let pp_comma () = comma_sep
   let pp_symbol sym = PPrint.string @@ symbol_ident sym
 
-  let pp_static_symbol { static_symbol; static_range } =
+  let pp_static_symbol { static_symbol; static_range; used_as_extent = _; used_as_slice = _ } =
     match static_range with
     | None -> pp_symbol static_symbol
     | Some range ->

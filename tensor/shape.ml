@@ -1012,7 +1012,16 @@ let%debug4_sexp get_inequalities ?(for_projections = false)
   | Transpose (Defined_by_cd_logic, _)
   | Broadcast_tern (Defined_by_cd_logic, _, _, _) ->
       defaults @@ []
-  | Transpose (Batch_slice { static_range; static_symbol }, sh) ->
+  | Transpose (Batch_slice ({ static_range; static_symbol; _ } as slice_sym), sh) ->
+      (* A slice index and a symbolic extent (gh-490) validate incompatibly (strict [0, range) vs.
+         inclusive [0, range]): reject a binding used as both. *)
+      if slice_sym.Idx.used_as_extent then
+        raise
+        @@ Row.Shape_error
+             ( "Static index " ^ Idx.symbol_ident static_symbol
+               ^ " is used as a symbolic dimension extent and cannot also slice a batch axis",
+               [] );
+      slice_sym.Idx.used_as_slice <- true;
       Hash_set.remove unused_shapes sh.id;
       let slice_v = get_var () in
       let slice_var = Var slice_v in
@@ -1939,6 +1948,32 @@ let%debug4_sexp derive_projections (update_step : update_step) : unit =
       ~equal:(fun (_, _, s1) (_, _, s2) -> Idx.equal_symbol s1 s2)
       all_product_projs_with_iters
   in
+  (* gh-490 symbolic extents: map each product iterator that iterates a symbolic axis to the axis's
+     static symbol. The product-space entry is the maximum extent; lowering guards loop bodies with
+     [iterator < value] when the symbol is bound. Distinct symbols sharing an iterator cannot arise
+     (a [Sym] unifies only with itself), but check defensively. *)
+  let extent_syms : (Idx.symbol * Idx.static_symbol) list =
+    let all =
+      List.filter_map all_dims ~f:(fun dim ->
+          match dim with
+          | Row.Sym { sym; _ } -> (
+              match Row.get_product_proj proj_env dim with
+              | Some (p, _) -> (
+                  try Some (Row.proj_to_iterator_exn proj_env p, sym)
+                  with Invalid_argument _ -> None)
+              | None -> None)
+          | _ -> None)
+      |> List.dedup_and_sort ~compare:[%compare: Idx.symbol * Idx.static_symbol]
+    in
+    List.iter all ~f:(fun (it, sym) ->
+        List.iter all ~f:(fun (it2, sym2) ->
+            if Idx.equal_symbol it it2 && not (Idx.equal_static_symbol sym sym2) then
+              raise
+              @@ Row.Shape_error
+                   ( "derive_projections: distinct symbolic extents share a product iterator",
+                     [ Shape_mismatch (lhs :: rhs) ] )));
+    all
+  in
   (* Ensure concat component iterators are present even when their dim is 1. *)
   let symbol_to_proj =
     Map.of_alist_exn
@@ -2133,6 +2168,7 @@ let%debug4_sexp derive_projections (update_step : update_step) : unit =
             product_iterators;
             project_lhs;
             project_rhs;
+            extent_syms;
             debug_info =
               {
                 spec = logic_to_spec update_step.logic;

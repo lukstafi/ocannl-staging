@@ -449,7 +449,13 @@ let () =
   let parent = make_on_device 5 "parent" in
   let view = make_on_device 6 "view" in
   Tn.set_alias_of view ~parent
-    ~batch_idx:{ Idx.static_symbol = Idx.get_symbol (); static_range = Some 1 };
+    ~batch_idx:
+      {
+        Idx.static_symbol = Idx.get_symbol ();
+        static_range = Some 1;
+        used_as_extent = false;
+        used_as_slice = false;
+      };
   (match
      try
        ignore

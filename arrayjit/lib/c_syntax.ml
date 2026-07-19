@@ -1380,7 +1380,7 @@ module C_syntax (B : C_syntax_config) = struct
            serial loop otherwise (legal absent barriers); [Vectorized] loops render serially,
            prefixed with [B.vectorize_pragma] when non-empty; [Unrolled] loops emit the repeated
            body with the index bound as a per-block constant. *)
-        let body_doc () =
+        let body_doc ?(body = body) () =
           let doc = ref (pp_ll ~log_set_locals ~in_loop:true body) in
           (if Utils.debug_log_from_routines () then
              let log_doc =
@@ -1396,16 +1396,43 @@ module C_syntax (B : C_syntax_config) = struct
           !doc
         in
         let serial_loop () =
+          (* gh-490 guard-fusion peephole: a body-wrapping symbolic-extent guard [if (i < s)] (with
+             [s] a kernel parameter, not an enclosing loop index) hoists into the loop header as
+             [i <= to_ && i < s]. The iteration variable is monotone, so once the guard fails it
+             stays false: exiting the loop is equivalent to skipping the remaining iterations. *)
+          let fused =
+            match body with
+            | If
+                {
+                  cond =
+                    ( Binop
+                        ( Ops.Cmplt,
+                          (Embed_index (Indexing.Iterator i'), _),
+                          (Embed_index (Indexing.Iterator s), _) ),
+                      _ );
+                  body = inner;
+                }
+              when Indexing.equal_symbol i' i
+                   && not (List.mem !serial_loop_stack s ~equal:Indexing.equal_symbol) ->
+                Some (s, inner)
+            | _ -> None
+          in
+          let guard_doc =
+            match fused with
+            | None -> empty
+            | Some (s, _) -> string " && " ^^ pp_symbol i ^^ string " < " ^^ pp_symbol s
+          in
           let header =
             string ("for (" ^ B.loop_index_type)
             ^^ pp_symbol i ^^ string " = " ^^ PPrint.OCaml.int from_ ^^ semi ^^ space ^^ pp_symbol i
-            ^^ string " <= " ^^ PPrint.OCaml.int to_ ^^ semi ^^ space ^^ string "++" ^^ pp_symbol i
-            ^^ string ")"
+            ^^ string " <= " ^^ PPrint.OCaml.int to_ ^^ guard_doc ^^ semi ^^ space ^^ string "++"
+            ^^ pp_symbol i ^^ string ")"
           in
           serial_loop_stack := i :: !serial_loop_stack;
           let body =
-            Exn.protect ~f:body_doc ~finally:(fun () ->
-                serial_loop_stack := List.tl_exn !serial_loop_stack)
+            Exn.protect
+              ~f:(fun () -> body_doc ?body:(Option.map fused ~f:snd) ())
+              ~finally:(fun () -> serial_loop_stack := List.tl_exn !serial_loop_stack)
           in
           group (header ^^ space ^^ lbrace ^^ nest 2 (hardline ^^ body) ^^ hardline ^^ rbrace)
         in

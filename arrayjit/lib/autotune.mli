@@ -189,6 +189,12 @@ type report = {
           schedules (informational). *)
 }
 
+val set_test_bindings : Context.routine -> unit
+(** Binds representative values for timing runs: ranged static indices at [range / 2], and gh-490
+    symbolic extents at their upper bound [range] (the schedule-cache identity is
+    extent-value-independent, so the single tuned entry is measured at the maximum). Unranged
+    bindings are left at their current values. Exposed for tests and custom timing harnesses. *)
+
 val tune :
   ?beam_width:int ->
   (* Default from config [autotune_beam_width] (2). *)
