@@ -173,35 +173,145 @@ let test_max_pool2d_backprop () =
   Train.printf ~here:[%here] ~with_code:false ctx loss;
   Train.printf ~here:[%here] ~with_code:false ~with_grad:true ctx input
 
+(* 4x4 input with values -16..-1. All-negative inputs expose wrong margins: 0-margins would make
+   the edge maxima 0 instead of the valid-range maxima. *)
+let make_negative_input () =
+  TDSL.init ~l:"input" ~prec:Ir.Ops.single ~o:[ 4; 4; 1 ]
+    ~f:(fun idcs -> Float.of_int ((4 * idcs.(0)) + idcs.(1)) -. 16.)
+    ()
+
+let padding_to_string (tn : Ir.Tnode.t) =
+  if not (Lazy.is_val tn.Ir.Tnode.padding) then "UNFORCED"
+  else
+    match Lazy.force tn.Ir.Tnode.padding with
+    | None -> "None"
+    | Some (arr, elem) ->
+        Printf.sprintf "[%s] elem=%s"
+          (String.concat ~sep:"; "
+             (Array.to_list arr
+             |> List.map ~f:(fun Ir.Ops.{ left; right } -> Printf.sprintf "%d/%d" left right)))
+          (Float.to_string elem)
+
+(* Expected padded pooling of [make_negative_input] at stride=2, window=3: the window at output
+   (oh, ow) covers input rows 2*oh-1 .. 2*oh+1 (margins: left 1, right 2), clipped to the valid
+   range by the -inf margins:
+   out[0,0] = max rows{0,1} cols{0,1} = -11;  out[0,1] = max rows{0,1} cols{1..3} = -9;
+   out[1,0] = max rows{1..3} cols{0,1} = -3;  out[1,1] = max rows{1..3} cols{1..3} = -1. *)
+let check_padded_values ctx output =
+  let v = Context.get_values ctx output.Tensor.value in
+  printf "padded pooled = [%g %g; %g %g]\n%!" v.(0) v.(1) v.(2) v.(3);
+  printf "padded max-pool values correct (margins -inf): %b\n%!"
+    Float.(v.(0) = -11. && v.(1) = -9. && v.(2) = -3. && v.(3) = -1.)
+
 (** Test max_pool2d with use_padding=true ("same" pooling): output spatial dims = input/stride.
-    The block routes the -inf margin demand through a private materialized copy (the padding
-    neutral element is part of a buffer's committed identity). All-negative inputs expose wrong
-    margins: 0-margins would make the edge maxima 0. *)
+    The pool demands -inf margins directly on its operand: a tensor node's padding is committed
+    only when its padding lazy forces at compilation, after every consumer's margin demand is
+    registered, so a single-consumer intermediate needs no copy. The operand here is a plain
+    broadcast result (open trailing-dims row), exercising the mixed-anchoring row unification. *)
 let test_max_pool2d_padded () =
   printf "Testing max_pool2d with use_padding=true (stride=2, window=3)...\n%!";
   Tensor.unsafe_reinitialize ();
 
-  (* 4x4 input with values -16..-1, as a data node (closed row; the -inf margin demand lands on
-     the block's private copy, so a layout-committed input is fine). *)
-  let input =
-    TDSL.init ~l:"input" ~prec:Ir.Ops.single ~o:[ 4; 4; 1 ]
-      ~f:(fun idcs -> Float.of_int ((4 * idcs.(0)) + idcs.(1)) -. 16.)
-      ()
-  in
-  let%op output = max_pool2d ~stride:2 ~window_size:3 ~use_padding:true () input in
+  let input = make_negative_input () in
+  let%op pre = input *. 1.0 in
+  let%op output = max_pool2d ~stride:2 ~window_size:3 ~use_padding:true () pre in
 
+  (* No private copy: the pool tensor reads [pre] as a direct child. *)
+  printf "pool reads its operand directly (no copy): %b\n%!"
+    (List.exists output.Tensor.children ~f:(fun ch -> phys_equal ch.Tensor.subtensor pre));
+  printf "operand padding unforced before compilation: %b\n%!"
+    (not (Lazy.is_val pre.value.Ir.Tnode.padding));
+  let ctx = Context.auto () in
+  Train.set_materialized pre.value;
+  Train.set_materialized output.value;
+  let ctx = Train.forward_once ctx output in
+  (* The pool's -inf neutral is committed on the operand's own buffer. *)
+  printf "operand committed padding = %s\n%!" (padding_to_string pre.value);
+  check_padded_values ctx output
+
+(** A data node created via [TDSL.init] wraps an eagerly allocated array: its unpadded layout is
+    committed at creation, so a padded max-pool demanding -inf margins on it is rejected at
+    lowering; [max_pool2d_copy] routes the demand onto a private materialized copy instead. *)
+let test_max_pool2d_padded_locked_data () =
+  printf "Testing max_pool2d use_padding=true on an init data node (locked layout)...\n%!";
+  Tensor.unsafe_reinitialize ();
+
+  let input = make_negative_input () in
+  printf "data node layout committed at creation: %b\n%!" (Lazy.is_val input.value.Ir.Tnode.padding);
+  let%op output = max_pool2d ~stride:2 ~window_size:3 ~use_padding:true () input in
+  let ctx = Context.auto () in
+  Train.set_materialized input.value;
+  Train.set_materialized output.value;
+  (match Train.forward_once ctx output with
+  | exception Row.Shape_error (msg, _) -> printf "REJECTED: %s\n%!" (String.prefix msg 76)
+  | (_ : Context.t) -> printf "unexpectedly accepted\n%!");
+
+  (* The remedy: the copy takes the -inf margin demand, the data node stays unpadded. *)
+  Tensor.unsafe_reinitialize ();
+  let input = make_negative_input () in
+  let%op output = Nn_blocks.max_pool2d_copy ~stride:2 ~window_size:3 ~use_padding:true () input in
   let ctx = Context.auto () in
   Train.set_materialized input.value;
   Train.set_materialized output.value;
   let ctx = Train.forward_once ctx output in
-  (* Window at output (oh, ow) covers input rows 2*oh-1 .. 2*oh+1 (margins: left 1, right 2),
-     clipped to the valid range by the -inf margins:
-     out[0,0] = max rows{0,1} cols{0,1} = -11;  out[0,1] = max rows{0,1} cols{1..3} = -9;
-     out[1,0] = max rows{1..3} cols{0,1} = -3;  out[1,1] = max rows{1..3} cols{1..3} = -1. *)
-  let v = Context.get_values ctx output.value in
-  printf "padded pooled = [%g %g; %g %g]\n%!" v.(0) v.(1) v.(2) v.(3);
-  printf "padded max-pool values correct (margins -inf): %b\n%!"
-    Float.(v.(0) = -11. && v.(1) = -9. && v.(2) = -3. && v.(3) = -1.)
+  printf "max_pool2d_copy: data node stays unpadded: %b\n%!"
+    (match Lazy.force input.value.Ir.Tnode.padding with None -> true | Some _ -> false);
+  check_padded_values ctx output
+
+(** Inception-style sharing: one tensor feeding both a padded 0-neutral conv and a padded
+    max-pool. The two margin-touching consumers demand different neutral elements on the same
+    buffer, so plain [max_pool2d] is rejected; [max_pool2d_copy] gives the pool a private copy to
+    commit -inf on, while the shared tensor keeps the conv's 0 neutral. *)
+let test_max_pool2d_conflicting_consumers () =
+  printf "Testing Inception-style sharing: padded conv + padded max-pool...\n%!";
+  Tensor.unsafe_reinitialize ();
+
+  let make_graph pool_block =
+    let input = TDSL.range_of_shape ~output_dims:[ 4; 4; 2 ] () in
+    let%op shared = input *. 1.0 in
+    let conv =
+      Nn_blocks.conv2d ~label:[ "incp" ] ~kernel_size:3 ~stride:1 ~use_padding:true ~out_channels:2
+        ()
+    in
+    let conv_branch = conv shared in
+    let pool_branch = pool_block shared in
+    (shared, conv_branch, pool_branch)
+  in
+  let _, conv_branch, pool_branch =
+    make_graph (fun x -> max_pool2d ~stride:2 ~window_size:3 ~use_padding:true () x)
+  in
+  let ctx = Context.auto () in
+  Train.set_materialized conv_branch.Tensor.value;
+  Train.set_materialized pool_branch.Tensor.value;
+  (* Shape inference completes over the whole graph at the first compilation, so the conflict
+     between the conv's 0 neutral and the pool's -inf neutral on [shared] surfaces here. *)
+  (match Train.forward_once ctx conv_branch with
+  | exception Row.Shape_error (msg, _) -> printf "REJECTED: %s\n%!" (String.prefix msg 145)
+  | (_ : Context.t) -> printf "unexpectedly accepted\n%!");
+
+  Tensor.unsafe_reinitialize ();
+  let shared, conv_branch, pool_branch =
+    make_graph (fun x ->
+        Nn_blocks.max_pool2d_copy ~stride:2 ~window_size:3 ~use_padding:true () x)
+  in
+  let ctx = Context.auto () in
+  Train.set_materialized shared.Tensor.value;
+  Train.set_materialized conv_branch.Tensor.value;
+  Train.set_materialized pool_branch.Tensor.value;
+  (* [conv_branch] embeds [shared]'s computation, so it compiles (and runs) first. *)
+  let ctx = Train.forward_once ctx conv_branch in
+  let ctx = Train.forward_once ctx pool_branch in
+  printf "max_pool2d_copy: shared tensor keeps the conv's neutral: %s\n%!"
+    (padding_to_string shared.Tensor.value);
+  (* shared(h, w, c) = 8h + 2w + c; padded max windows per output cell (see
+     [check_padded_values] for window coverage): out(oh, ow, c) row-major. *)
+  let v = Context.get_values ctx pool_branch.Tensor.value in
+  printf "pooled shared = [%g %g %g %g %g %g %g %g]\n%!" v.(0) v.(1) v.(2) v.(3) v.(4) v.(5) v.(6)
+    v.(7);
+  printf "pooled shared values correct: %b\n%!"
+    (Array.for_all
+       (Array.zip_exn v [| 10.; 11.; 14.; 15.; 26.; 27.; 30.; 31. |])
+       ~f:(fun (a, b) -> Float.(a = b)))
 
 let () =
   test_max_pool2d_basic ();
@@ -210,4 +320,6 @@ let () =
   test_max_pool2d_channels ();
   test_max_pool2d_backprop ();
   test_max_pool2d_padded ();
+  test_max_pool2d_padded_locked_data ();
+  test_max_pool2d_conflicting_consumers ();
   printf "\nAll max_pool2d tests completed!\n%!"

@@ -12,4 +12,5 @@ ineq, same-var shifted, matching dims (satisfiable): no error
 eq, cross surpluses alone (satisfiable, family binding): no error
 eq, cross surpluses then rho2 ~ [] (satisfiable only sporadically): no error
 eq, rho2 ~ [] then cross surpluses (same store, pinned first): no error
-eq, mirror cross surpluses then rho2 ~ [] (trailing guard rejects): Shape_error: Number of axes mismatch
+eq, mirror cross surpluses then rho2 ~ [] (flat-satisfiable, accepted): no error
+eq, balanced conflicting flanks (family solution, accepted): no error

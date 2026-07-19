@@ -196,7 +196,21 @@ HERE: test/einsum/test_max_pool2d.ml:174:21
 └─────────────────────────┘
 grad_x <not-in-context>
 Testing max_pool2d with use_padding=true (stride=2, window=3)...
+pool reads its operand directly (no copy): true
+operand padding unforced before compilation: true
+operand committed padding = [1/2; 1/2; 0/0] elem=-inf
 padded pooled = [-11 -9; -3 -1]
 padded max-pool values correct (margins -inf): true
+Testing max_pool2d use_padding=true on an init data node (locked layout)...
+data node layout committed at creation: true
+REJECTED: Operation padding (left=1, right=2) exceeds resolved padding (left=0, right=
+max_pool2d_copy: data node stays unpadded: true
+padded pooled = [-11 -9; -3 -1]
+padded max-pool values correct (margins -inf): true
+Testing Inception-style sharing: padded conv + padded max-pool...
+REJECTED: Conflicting padding neutral elements: an operation touches the tensor's margins expecting 0., but they are committed to -inf (demanded by an earl
+max_pool2d_copy: shared tensor keeps the conv's neutral: [1/2; 1/2; 0/0] elem=0.
+pooled shared = [10 11 14 15 26 27 30 31]
+pooled shared values correct: true
 
 All max_pool2d tests completed!

@@ -132,10 +132,11 @@ let () =
    We pin the orientation [5].<rho1> ~ <rho2>.[5,3] (family: x2 = [5].w, x1 = w.[5,3]; sporadic: x2
    = [], x1 = [3]). All three cases succeed: the deferral finds the sporadic solution whether rho2 ~
    [] arrives before or after the cross equality. The mirror orientation <rho1>.[5] ~ [3,5].<rho2>
-   pins the OTHER conservative deviation: once rho2 is pinned empty, the closed side's material sits
-   entirely in beg_dims, and the asymmetric trailing guard (open trailing flank longer than the
-   closed side's structural trailing flank) rejects a flat-satisfiable store — a placement-sensitive
-   policy rejection. *)
+   used to pin the OTHER conservative deviation: once rho2 is pinned empty, the closed side's
+   material sits entirely in beg_dims, and the former asymmetric trailing guard (open trailing
+   flank longer than the closed side's structural TRAILING flank only) rejected this
+   flat-satisfiable store. Closed rows are now guarded by total axis count (structural flanks of a
+   closed row are equivalent under flat semantics), so the store is accepted. *)
 
 let check_list name constrs =
   match
@@ -178,5 +179,20 @@ let mirror_cross_pair ~sh_id rho1 rho2 =
 
 let () =
   let rho1 = Row.get_row_var () and rho2 = Row.get_row_var () in
-  check_list "eq, mirror cross surpluses then rho2 ~ [] (trailing guard rejects)"
+  check_list "eq, mirror cross surpluses then rho2 ~ [] (flat-satisfiable, accepted)"
     [ mirror_cross_pair ~sh_id:29 rho1 rho2; pin_empty ~sh_id:31 rho2 ]
+
+(* Balanced flanks with conflicting rigid dims: [3].<rho1> ~ <rho2>.[5]. The empty close (k = 0)
+   is refuted (3 <> 5), but the overlap-shifted principal family is satisfiable: rho2 = [3].<m>,
+   rho1 = <m>.[5] (least member rho2 = [3], rho1 = [5]). The stage-6/7 close must pick the least
+   non-refuted overlap rather than unconditionally closing rho2 to empty. *)
+let balanced_conflict_pair ~sh_id rho1 rho2 =
+  let r1 = Row.get_row_for_var (Row.provenance ~sh_id ~kind:`Output) rho1 in
+  let r2 = Row.get_row_for_var (Row.provenance ~sh_id:(sh_id + 1) ~kind:`Output) rho2 in
+  Row.Row_eq
+    { r1 = { r1 with beg_dims = [ dim 3 ] }; r2 = { r2 with dims = [ dim 5 ] }; origin }
+
+let () =
+  let rho1 = Row.get_row_var () and rho2 = Row.get_row_var () in
+  check_list "eq, balanced conflicting flanks (family solution, accepted)"
+    [ balanced_conflict_pair ~sh_id:33 rho1 rho2 ]

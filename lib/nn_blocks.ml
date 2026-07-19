@@ -548,11 +548,24 @@ let%op depthwise_separable_conv2d ~label ?(kernel_size = 3) ?(stride = 1) ?(use_
 
 (** Max pooling for 2D spatial data - reduces spatial dimensions by taking maximum values.
 
-    The input spatial dimensions must satisfy: [(input_size - window_size) mod stride = 0],
-    otherwise shape inference will fail. The output size is
-    [(input_size - window_size) / stride + 1].
+    Without padding ([use_padding=false], the default), the input spatial dimensions must satisfy:
+    [(input_size - window_size) mod stride = 0], otherwise shape inference will fail. The output
+    size is [(input_size - window_size) / stride + 1]. The [<] in the einsum spec indicates
+    no-padding mode (indices stay within bounds).
 
-    Note: The [<] in the einsum spec indicates no-padding mode (indices stay within bounds). *)
+    With [use_padding=true] ("same" pooling, output size [input_size / stride]), the pool demands
+    [-inf] margins directly on its operand: a tensor node's padding — margin widths and their
+    neutral element — is committed only when the node's padding lazy is forced at compilation,
+    after graph construction has registered every consumer's margin demand, so in a
+    single-compilation flow a single-consumer operand (e.g. a ResNet-style stem: conv -> relu ->
+    padded max-pool) commits the pool's neutral without any extra buffer. Shape inference rejects
+    the demand when the operand's margins are committed otherwise: an operand shared with
+    0-neutral margin-touching consumers such as padded convs ("Conflicting padding neutral
+    elements"), an operand created from an eagerly allocated array (e.g. [TDSL.init] data nodes),
+    or an operand already lowered in an earlier compilation of a staged-compilation flow (both
+    "Operation padding exceeds resolved padding"). Use {!max_pool2d_copy} in those cases.
+    Clamped-window lowering (gh-504) is the planned replacement that will remove the margin demand
+    altogether. *)
 let%op max_pool2d ?(stride = 2) ?(window_size = 2) ?(use_padding = false) () x =
   Shape.set_dim wh window_size;
   Shape.set_dim ww window_size;
@@ -564,14 +577,38 @@ let%op max_pool2d ?(stride = 2) ?(window_size = 2) ?(use_padding = false) () x =
   Shape.set_dim pwh window_size;
   Shape.set_dim pww window_size;
   if use_padding then
-    (* A padded max-pool demands -inf margins on its operand, and the padding neutral element is
-       part of a tensor's committed identity — the operand is typically also read by 0-neutral
-       consumers (padded convs), and its layout may already be committed. Route the demand onto a
-       private materialized copy, so each buffer commits a single neutral. Clamped-window lowering
-       (no margin demand at all) is the planned replacement. *)
-    (* Note: the copy's beg-anchored row composes with beg-anchored producers (einsum outputs
-       like conv2d's [oh, ow, ..oc..]) and closed rows (data nodes); an open trailing-dims row
-       (e.g. a plain broadcast result) hits a known solver alignment corner. *)
+    x
+    @^+ "... | stride*oh= + pwh, stride*ow= + pww, ..c..; |pwh, pww => ... | oh, ow, ..c.."
+          [ "pwh"; "pww" ] (0.0 + 0.0)
+  else
+    x
+    @^+ "... | stride*oh< + wh, stride*ow< + ww, ..c..; |wh, ww => ... | oh, ow, ..c.."
+          [ "wh"; "ww" ] (0.0 + 0.0)
+
+(** Like {!max_pool2d}, but with [use_padding=true] the [-inf] margin demand is routed onto a
+    private materialized copy of the operand instead of the operand itself. The copy is the remedy
+    when {!max_pool2d} is rejected because the operand's margins are committed to a different
+    neutral element or its buffer layout is already locked:
+
+    - genuinely conflicting multi-consumer patterns (Inception-style: one tensor feeding both
+      padded 0-neutral convs and a padded max-pool) — each buffer can commit only a single
+      neutral, so one of the consumers must read through a copy;
+    - operands whose buffer layout is committed at construction, e.g. data nodes wrapping eagerly
+      allocated arrays ([TDSL.init]);
+    - staged-compilation ordering: the operand was already lowered in an earlier routine, so its
+      layout is locked before the pool's demand is registered.
+
+    Prefer {!max_pool2d} whenever the operand is private to the pool within a single compilation:
+    it commits the pool's neutral on the operand directly, without the extra buffer and copy. *)
+let%op max_pool2d_copy ?(stride = 2) ?(window_size = 2) ?(use_padding = false) () x =
+  Shape.set_dim wh window_size;
+  Shape.set_dim ww window_size;
+  Shape.set_dim pwh window_size;
+  Shape.set_dim pww window_size;
+  if use_padding then
+    (* Note: the copy's beg-anchored row composes with beg-anchored producers (einsum outputs like
+       conv2d's [oh, ow, ..oc..]), closed rows (data nodes), and — since the mixed-anchoring
+       stage-6 closing in [Row.unify_row] — open trailing-dims rows (plain broadcast results). *)
     let x_pool = x ++ "... | h, w, ..c.. => ... | h, w, ..c.." in
     x_pool
     @^+ "... | stride*oh= + pwh, stride*ow= + pww, ..c..; |pwh, pww => ... | oh, ow, ..c.."

@@ -2513,9 +2513,15 @@ let%debug5_sexp rec unify_row ~stage origin (eq : t * t) env : constraint_ list 
       let beg_dims2_l : int = l r2.beg_dims in
       let prov = merge_provenance r1.prov r2.prov in
       let beg_dims_l = min beg_dims1_l beg_dims2_l in
-      if dims1_l > dims2_l || (dims1_l = dims2_l && beg_dims1_l > beg_dims2_l) then
-        if is_row_var r2.bcast then unify_row ~stage origin (r2, r1) env
-        else raise @@ Shape_error ("Number of axes mismatch", [ Row_mismatch [ r1; r2 ] ])
+      if
+        is_row_var r2.bcast
+        && (dims1_l > dims2_l || (dims1_l = dims2_l && beg_dims1_l > beg_dims2_l))
+      then unify_row ~stage origin (r2, r1) env
+      else if (not (is_row_var r2.bcast)) && dims1_l + beg_dims1_l > dims2_l + beg_dims2_l then
+        (* A closed r2 is flat: only the total axis count can rule the equation out (the
+           [Broadcastable] arm below aligns r1's flanks against the flat axis list, so e.g.
+           r1.dims may exceed r2.dims by matching into r2.beg_dims). *)
+        raise @@ Shape_error ("Number of axes mismatch", [ Row_mismatch [ r1; r2 ] ])
       else
         let orig_rows = [ r1; r2 ] in
         let (beg_handled : bool), (ineqs, env), (value : row) =
@@ -2610,21 +2616,105 @@ let%debug5_sexp rec unify_row ~stage origin (eq : t * t) env : constraint_ list 
               in
               (constr, { env with row_env = add_row row_env ~key:v ~data:(Solved_row value) }))
             else
-              ( [
-                  Row_eq
-                    {
-                      r1 =
-                        {
-                          beg_dims = List.drop beg_dims1 beg_dims_l;
-                          dims = [];
-                          bcast = Row_var v;
-                          prov;
-                        };
-                      r2;
-                      origin;
-                    };
-                ],
-                env )
+              let residual =
+                Row_eq
+                  {
+                    r1 =
+                      {
+                        beg_dims = List.drop beg_dims1 beg_dims_l;
+                        dims = [];
+                        bcast = Row_var v;
+                        prov;
+                      };
+                    r2;
+                    origin;
+                  }
+              in
+              (* Mixed anchoring with a leading-flank surplus: begS.<v> = <v2>.dimsR (with
+                 s = |begS| >= 1 and t = |dimsR|) is a word equation whose residue depends on the
+                 eventual rank: s + |v| = |v2| + t. *)
+              let s = beg_dims1_l - beg_dims_l and t = List.length r2.dims in
+              if s <> t then
+                (* Sound eager alignment, valid at any stage: when t > s, |v| = |v2| + t - s >=
+                   t - s, so the last t - s axes of [v] provably lie within dimsR's coverage --
+                   bind v := <fresh>.tail(dimsR, t - s); symmetrically when s > t the first s - t
+                   axes of [v2] come from begS. Solving the binding eagerly (rather than emitting
+                   it) lets the re-solved residual reduce to the balanced s = t form in the same
+                   pass, so the aligned dims reach e.g. param terminals before any stage-4
+                   guessing closes their row variables. *)
+                let fresh = get_row_var () in
+                let binding =
+                  if t > s then
+                    Row_eq
+                      {
+                        r1 = row_of_var v prov;
+                        r2 =
+                          {
+                            beg_dims = [];
+                            dims = take_from_end r2.dims (t - s);
+                            bcast = Row_var fresh;
+                            prov;
+                          };
+                        origin;
+                      }
+                  else
+                    match r2.bcast with
+                    | Row_var v2 ->
+                        Row_eq
+                          {
+                            r1 = row_of_var v2 prov;
+                            r2 =
+                              {
+                                beg_dims = List.take (List.drop beg_dims1 beg_dims_l) (s - t);
+                                dims = [];
+                                bcast = Row_var fresh;
+                                prov;
+                              };
+                            origin;
+                          }
+                    | Broadcastable ->
+                        (* Unreachable: a closed r2 is handled by the [Broadcastable] arm above
+                           with [beg_handled = true]. *)
+                        assert false
+                in
+                solve (solve ([], env) binding) residual
+              else if is_stage6_up stage then
+                (* Balanced flanks (s = t): the rank stays ambiguous, so earlier stages defer
+                   (the residual reproduces itself verbatim). A solution exists at every overlap
+                   k in 0..s whose overlap equations begS[k+i] = dimsR[i] (i < s - k) hold: k = 0
+                   is the empty close (rank s), k = s the always-satisfiable principal family
+                   v2 = begS.<m>, v = <m>.dimsR. Stage 6 commits the least-material disjunct not
+                   definitely refuted: the smallest k whose overlap pairs no two rigid unequal
+                   dims (an unconditional empty close would reject satisfiable stores like
+                   [3].<v> = <v2>.[5], whose least solution is v2 = [3], v = [5]). Binding [v2]
+                   and re-solving the residual eagerly derives the overlap equations and [v]'s
+                   value through the closed-row arm in the same pass. *)
+                let v2 =
+                  match r2.bcast with Row_var v2 -> v2 | Broadcastable -> assert false
+                in
+                let begS = List.drop beg_dims1 beg_dims_l in
+                let definitely_conflicting d1 d2 =
+                  match (d1, d2) with
+                  | Dim { d = a; _ }, Dim { d = b; _ } -> a <> b && a <> 1 && b <> 1
+                  | _ -> false
+                in
+                let rec least_k k =
+                  if k >= s then s
+                  else if
+                    List.exists2_exn (List.drop begS k) (List.take r2.dims (s - k))
+                      ~f:definitely_conflicting
+                  then least_k (k + 1)
+                  else k
+                in
+                let k = least_k 0 in
+                let value : row =
+                  if k = s then
+                    { beg_dims = begS; dims = []; bcast = Row_var (get_row_var ()); prov }
+                  else { beg_dims = []; dims = List.take begS k; bcast = Broadcastable; prov }
+                in
+                let binding = Row_eq { r1 = row_of_var v2 prov; r2 = value; origin } in
+                solve (solve ([], env) binding) residual
+              else ([ residual ], env)
           in
           List.fold ~init:(unsolved, env) ~f:solve !ineqs
         in
@@ -4662,7 +4752,8 @@ let%track7_sexp get_proj_index (proj_env : proj_env) (proj : proj) : Idx.axis_in
                              the operand's buffer layout is already committed with insufficient \
                              margins. Compose the padded consumer before the operand's first \
                              compilation, create the data via a padding-aware constructor (e.g. \
-                             wrap_padded), or read through a materialized copy of the operand"],
+                             wrap_padded), or read through a materialized copy of the operand \
+                             (for a padded max-pool, Nn_blocks.max_pool2d_copy)"],
                           [ Projection_mismatch [ proj ] ] )
                | _ -> (
                    (* Update inferred padding to be sufficient for this operation, even if resolved

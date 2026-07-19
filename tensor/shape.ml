@@ -1799,7 +1799,8 @@ let fresh_proj_ids update =
                              "Conflicting padding neutral elements: the tensor's buffer committed \
                               margins holding %{v#Float}, but a different neutral was inferred \
                               for its shape. Materialize a separate copy of the tensor for the \
-                              conflicting padded consumers"],
+                              conflicting padded consumers (for a padded max-pool, \
+                              Nn_blocks.max_pool2d_copy)"],
                            [ Shape_mismatch [ sh ] ] ))
             | None -> ());
             Some (Option.map ~f:fst p)
@@ -2140,7 +2141,8 @@ let%debug4_sexp derive_projections (update_step : update_step) : unit =
                      "Conflicting padding neutral elements: an operation touches the tensor's \
                       margins expecting %{v2#Float}, but they are committed to %{v1#Float} \
                       (demanded by an earlier operation). Materialize a separate copy of the \
-                      tensor for one of the padded consumers"],
+                      tensor for one of the padded consumers (for a padded max-pool, \
+                      Nn_blocks.max_pool2d_copy)"],
                    [ Shape_mismatch [ sh ] ] )
         | Some None, _ -> Some None (* Unreachable: conflicts raise instead. *)
         | Some _, None -> sh.padding_elem)
