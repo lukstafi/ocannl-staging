@@ -539,7 +539,7 @@ let is_one_hot_selector_assignment traced_store ~(idcs : Indexing.axis_index arr
         | _ -> false)
     | _ -> false)
 
-let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits llc =
+let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits ~reads_covered llc =
   let is_too_many = function Visits i -> i > max_visits | Recurrent -> true in
   (* FIXME: migrate hashtable to use offsets instead of indices *)
   let lookup env indices =
@@ -772,9 +772,19 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits llc 
         else if Tn.Placements.known_non_virtual plc tn then Tn.Placements.update plc tn On_device 35);
       (* We allow sharing virtual nodes across routines. *)
       if Hashtbl.exists traced.accesses ~f:is_recurrent && not (Tn.Placements.known_virtual plc tn)
-      then (
-        traced.read_before_write <- true;
-        Tn.Placements.update plc tn On_device 36))
+      then
+        (* gh-494 waypoint 2 follow-up: the tracer truncates loops at [max_tracing_dim], so its
+           recurrent classification has false positives (e.g. padded-conv intermediates read at
+           affine offsets past the traced write range). The affine containment query is exact:
+           when it proves every read covered by prior in-routine writes, skip the recurrent
+           pessimization. The override is one-directional — a query decline never introduces a
+           recurrence the tracer did not find — and the query is only forced (and only consulted)
+           for nodes the tracer actually flags. *)
+        match (Lazy.force reads_covered) tn with
+        | `Covered -> ()
+        | `Unknown _ ->
+            traced.read_before_write <- true;
+            Tn.Placements.update plc tn On_device 36)
 
 let%diagn2_sexp check_and_store_virtual (optim_ctx : optimize_ctx) traced static_indices top_llc =
   let exception Non_virtual of int in
@@ -3995,66 +4005,77 @@ and pin_scalar_written_bounds (llsc : scalar_t) : unit =
   | Unop (_, (v, _)) -> pin_scalar_written_bounds v
 
 (* gh-494 waypoint 2: the read-before-write fact of [visit_llc] (its [Recurrent] classification),
-   recomputed as containment queries — every read covered by prior writes — and compared under
-   [legality_crosscheck]. The tracer's semantics is mirrored: [If] guards are taken (guarded
-   writes count as assignments, as the tracer traces [If] bodies unconditionally); a read whose
-   position coincides with the enclosing statement's write position at every iteration is exempt
-   when [inline_complex_computations] (the tracer skips same-position reads, whichever node they
-   read, and it pins static symbols to 0), mirrored here as per-axis affine-form equality with
-   statics zeroed; and static symbols are universalized over their declared ranges — the query is
-   exact where the tracer approximates (loops truncated at [max_tracing_dim], statics at 0), so a
-   disagreement in the stricter direction may also surface a genuine tracer blind spot. *)
-let crosscheck_read_before_write traced_store (static_indices : Indexing.static_symbol list) llc =
-  let accs = affine_accesses llc in
-  let by_tn = Hashtbl.create (module Tn) in
-  List.iter accs ~f:(fun a -> Hashtbl.add_multi by_tn ~key:a.Affine.a_tn ~data:a);
-  let all_writes =
-    List.filter_map accs ~f:(fun a ->
-        if a.Affine.a_write && not a.a_whole then Some (a.a_path, a.a_map) else None)
-  in
-  let statics_set =
-    Set.of_list (module Indexing.Symbol)
-      (List.map static_indices ~f:(fun s -> s.Indexing.static_symbol))
-  in
-  let static_range s =
-    List.find_map static_indices ~f:(fun ss ->
-        if Indexing.equal_symbol ss.Indexing.static_symbol s then
-          Option.map ss.static_range ~f:(fun r -> (0, r))
-        else None)
-  in
-  (* The affine form of a position component as the tracer evaluates it: statics contribute 0. *)
-  let norm_comp (idx : Indexing.axis_index) =
-    let drop_statics symbols =
-      List.filter (Indexing.coalesce_affine_terms symbols) ~f:(fun (_, s) ->
-          not (Set.mem statics_set s))
-      |> List.sort ~compare:[%compare: int * Indexing.symbol]
+   recomputed as containment queries — every read covered by prior writes. The tracer's semantics
+   is mirrored: [If] guards are taken (guarded writes count as assignments, as the tracer traces
+   [If] bodies unconditionally); a read whose position coincides with the enclosing statement's
+   write position at every iteration is exempt when [inline_complex_computations] (the tracer
+   skips same-position reads, whichever node they read, and it pins static symbols to 0), mirrored
+   here as per-axis affine-form equality with statics zeroed; and static symbols are universalized
+   over their declared ranges — the query is exact where the tracer approximates (loops truncated
+   at [max_tracing_dim], statics at 0).
+
+   The result decides [visit_llc]'s recurrent pessimization, overriding the tracer in the safe
+   direction only (see the call site in [optimize_proc]): a coverage proof cancels a spurious
+   recurrent flag; an [`Unknown] never introduces a recurrence the tracer did not find.
+   [affine_accesses] is not exhaustive on [Staged_compilation], so its presence declines every
+   proof. A node without affine accesses is vacuously covered ([affine_accesses] and the tracer
+   walk the same tree, so such a node has no traced reads either). *)
+let reads_covered_query (static_indices : Indexing.static_symbol list) llc :
+    Tn.t -> [ `Covered | `Unknown of string ] =
+  let opaque = ref false in
+  iter_buffer_accesses ~touch:(fun _ -> ()) ~on_opaque:(fun () -> opaque := true) llc;
+  if !opaque then fun _ -> `Unknown "opaque Staged_compilation"
+  else
+    let accs = affine_accesses llc in
+    let by_tn = Hashtbl.create (module Tn) in
+    List.iter accs ~f:(fun a -> Hashtbl.add_multi by_tn ~key:a.Affine.a_tn ~data:a);
+    let all_writes =
+      List.filter_map accs ~f:(fun a ->
+          if a.Affine.a_write && not a.a_whole then Some (a.a_path, a.a_map) else None)
     in
-    match idx with
-    | Indexing.Fixed_idx c -> Some ([], c)
-    | Indexing.Iterator s -> Some (drop_statics [ (1, s) ], 0)
-    | Indexing.Affine { symbols; offset } -> Some (drop_statics symbols, offset)
-    | Indexing.Sub_axis | Indexing.Concat _ -> None
-  in
-  let same_pos (m : Indexing.axis_index array) (m' : Indexing.axis_index array) =
-    Array.length m = Array.length m'
-    && Array.for_all2_exn m m' ~f:(fun a b ->
-           match (norm_comp a, norm_comp b) with
-           | Some fa, Some fb -> [%equal: (int * Indexing.symbol) list * int] fa fb
-           | _ -> false)
-  in
-  let exempt (r : _ Affine.access) =
-    virtualize_settings.inline_complex_computations
-    && List.exists all_writes ~f:(fun (p, m) ->
-           [%equal: int list] p r.Affine.a_path && same_pos m r.a_map)
-  in
-  Hashtbl.iteri by_tn ~f:(fun ~key:tn ~data:accs ->
-      match Hashtbl.find traced_store tn with
-      | None -> ()
-      | Some traced ->
+    let statics_set =
+      Set.of_list (module Indexing.Symbol)
+        (List.map static_indices ~f:(fun s -> s.Indexing.static_symbol))
+    in
+    let static_range s =
+      List.find_map static_indices ~f:(fun ss ->
+          if Indexing.equal_symbol ss.Indexing.static_symbol s then
+            Option.map ss.static_range ~f:(fun r -> (0, r))
+          else None)
+    in
+    (* The affine form of a position component as the tracer evaluates it: statics contribute 0. *)
+    let norm_comp (idx : Indexing.axis_index) =
+      let drop_statics symbols =
+        List.filter (Indexing.coalesce_affine_terms symbols) ~f:(fun (_, s) ->
+            not (Set.mem statics_set s))
+        |> List.sort ~compare:[%compare: int * Indexing.symbol]
+      in
+      match idx with
+      | Indexing.Fixed_idx c -> Some ([], c)
+      | Indexing.Iterator s -> Some (drop_statics [ (1, s) ], 0)
+      | Indexing.Affine { symbols; offset } -> Some (drop_statics symbols, offset)
+      | Indexing.Sub_axis | Indexing.Concat _ -> None
+    in
+    let same_pos (m : Indexing.axis_index array) (m' : Indexing.axis_index array) =
+      Array.length m = Array.length m'
+      && Array.for_all2_exn m m' ~f:(fun a b ->
+             match (norm_comp a, norm_comp b) with
+             | Some fa, Some fb -> [%equal: (int * Indexing.symbol) list * int] fa fb
+             | _ -> false)
+    in
+    let exempt (r : _ Affine.access) =
+      virtualize_settings.inline_complex_computations
+      && List.exists all_writes ~f:(fun (p, m) ->
+             [%equal: int list] p r.Affine.a_path && same_pos m r.a_map)
+    in
+    fun tn ->
+      match Hashtbl.find by_tn tn with
+      | None -> `Covered
+      | Some accs ->
           let accs = List.rev accs in
           let writes = List.filter accs ~f:(fun a -> a.Affine.a_write) in
           let witness = ref "" in
-          let query_safe =
+          let covered =
             List.for_all accs ~f:(fun r ->
                 r.Affine.a_write || exempt r
                 ||
@@ -4064,9 +4085,20 @@ let crosscheck_read_before_write traced_store (static_indices : Indexing.static_
                     witness := w;
                     false)
           in
-          Affine.crosscheck ~site:"visit read-before-write" ~context:(Tn.debug_name tn)
-            ~procedural_safe:(fun () -> not (Hashtbl.exists traced.accesses ~f:is_recurrent))
-            ~query_safe ~witness:!witness)
+          if covered then `Covered else `Unknown !witness
+
+(* Under [legality_crosscheck], compares the tracer's raw [Recurrent] verdict against the query
+   for every traced node. [procedural_safe] is the tracer's classification BEFORE the decider
+   flip's override, so the stderr precision-gain lines enumerate exactly the overrides applied by
+   [visit_llc]; a disagreement in the stricter direction still raises. *)
+let crosscheck_read_before_write traced_store reads_covered =
+  Hashtbl.iter traced_store ~f:(fun traced ->
+      let query_safe, witness =
+        match reads_covered traced.tn with `Covered -> (true, "") | `Unknown w -> (false, w)
+      in
+      Affine.crosscheck ~site:"visit read-before-write" ~context:(Tn.debug_name traced.tn)
+        ~procedural_safe:(fun () -> not (Hashtbl.exists traced.accesses ~f:is_recurrent))
+        ~query_safe ~witness)
 
 let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
   let traced_store = Hashtbl.create (module Tnode) in
@@ -4075,10 +4107,11 @@ let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
   [%log "tracing"];
   pin_device_written_bounds llc;
   let merge_node_ref = ref None in
+  let reads_covered = lazy (reads_covered_query static_indices llc) in
   visit_llc input_ctx.placements traced_store ~merge_node_ref reverse_node_map
-    ~max_visits:virtualize_settings.max_visits llc;
+    ~max_visits:virtualize_settings.max_visits ~reads_covered llc;
   if Lazy.force Affine.crosscheck_enabled then
-    crosscheck_read_before_write traced_store static_indices llc;
+    crosscheck_read_before_write traced_store (Lazy.force reads_covered);
   [%log "optimizing"];
   let virtual_llc_result = virtual_llc input_ctx traced_store reverse_node_map static_indices llc in
   let llc =
