@@ -1,11 +1,11 @@
 Retrieving commandline, environment, or config file variable ocannl_log_level
 Found 0, in the config file
-gelu(-3.0) = -0.003637, reference -0.003637, ok: true
-gelu(-2.0) = -0.045402, reference -0.045402, ok: true
-gelu(-1.0) = -0.158808, reference -0.158808, ok: true
-gelu(-0.5) = -0.154286, reference -0.154286, ok: true
-gelu(+0.0) = +0.000000, reference +0.000000, ok: true
-gelu(+0.5) = +0.345714, reference +0.345714, ok: true
-gelu(+1.0) = +0.841192, reference +0.841192, ok: true
-gelu(+2.0) = +1.954598, reference +1.954598, ok: true
-gelu(+3.0) = +2.996363, reference +2.996363, ok: true
+gelu(-3.0) ~ reference -0.003637, ok: true
+gelu(-2.0) ~ reference -0.045402, ok: true
+gelu(-1.0) ~ reference -0.158808, ok: true
+gelu(-0.5) ~ reference -0.154286, ok: true
+gelu(+0.0) ~ reference +0.000000, ok: true
+gelu(+0.5) ~ reference +0.345714, ok: true
+gelu(+1.0) ~ reference +0.841192, ok: true
+gelu(+2.0) ~ reference +1.954598, ok: true
+gelu(+3.0) ~ reference +2.996363, ok: true
