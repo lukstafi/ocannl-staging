@@ -72,7 +72,8 @@ module Slab = struct
        equivalent to the pre-refactor path. Unique tnode pool ids never pre-exist; this only fires
        on the reserved merge pool growing in place. *)
     Option.iter (Hashtbl.find pools key) ~f:(fun (ptr, _) -> Cu.Deviceptr.mem_free ptr);
-    let ptr = Cu.Deviceptr.mem_alloc ~size_in_bytes:(max 1 size_in_bytes) in
+    let size_in_bytes = max 1 size_in_bytes in
+    let ptr = Cu.Deviceptr.mem_alloc ~size_in_bytes in
     Hashtbl.set pools ~key ~data:(ptr, size_in_bytes)
 
   let free_pool =
