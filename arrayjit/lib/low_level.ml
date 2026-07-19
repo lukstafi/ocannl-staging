@@ -782,7 +782,7 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits ~rea
            for nodes the tracer actually flags. *)
         match (Lazy.force reads_covered) tn with
         | `Covered -> ()
-        | `Unknown _ ->
+        | `Unknown _ | `Opaque ->
             traced.read_before_write <- true;
             Tn.Placements.update plc tn On_device 36)
 
@@ -4017,14 +4017,16 @@ and pin_scalar_written_bounds (llsc : scalar_t) : unit =
    The result decides [visit_llc]'s recurrent pessimization, overriding the tracer in the safe
    direction only (see the call site in [optimize_proc]): a coverage proof cancels a spurious
    recurrent flag; an [`Unknown] never introduces a recurrence the tracer did not find.
-   [affine_accesses] is not exhaustive on [Staged_compilation], so its presence declines every
-   proof. A node without affine accesses is vacuously covered ([affine_accesses] and the tracer
-   walk the same tree, so such a node has no traced reads either). *)
+   [affine_accesses] is not exhaustive on [Staged_compilation], so its presence makes coverage
+   unknowable: [`Opaque] — no override, and no tracer-vs-query comparison either (the tracer is
+   equally blind to staged accesses, so a disagreement would be meaningless). A node without
+   affine accesses is vacuously covered ([affine_accesses] and the tracer walk the same tree, so
+   such a node has no traced reads either). *)
 let reads_covered_query (static_indices : Indexing.static_symbol list) llc :
-    Tn.t -> [ `Covered | `Unknown of string ] =
+    Tn.t -> [ `Covered | `Unknown of string | `Opaque ] =
   let opaque = ref false in
   iter_buffer_accesses ~touch:(fun _ -> ()) ~on_opaque:(fun () -> opaque := true) llc;
-  if !opaque then fun _ -> `Unknown "opaque Staged_compilation"
+  if !opaque then fun _ -> `Opaque
   else
     let accs = affine_accesses llc in
     let by_tn = Hashtbl.create (module Tn) in
@@ -4090,15 +4092,19 @@ let reads_covered_query (static_indices : Indexing.static_symbol list) llc :
 (* Under [legality_crosscheck], compares the tracer's raw [Recurrent] verdict against the query
    for every traced node. [procedural_safe] is the tracer's classification BEFORE the decider
    flip's override, so the stderr precision-gain lines enumerate exactly the overrides applied by
-   [visit_llc]; a disagreement in the stricter direction still raises. *)
+   [visit_llc]; a disagreement in the stricter direction still raises. [`Opaque] (staged code) is
+   incomparable — both sides are blind to staged accesses — so it is skipped, not compared. *)
 let crosscheck_read_before_write traced_store reads_covered =
   Hashtbl.iter traced_store ~f:(fun traced ->
-      let query_safe, witness =
-        match reads_covered traced.tn with `Covered -> (true, "") | `Unknown w -> (false, w)
-      in
-      Affine.crosscheck ~site:"visit read-before-write" ~context:(Tn.debug_name traced.tn)
-        ~procedural_safe:(fun () -> not (Hashtbl.exists traced.accesses ~f:is_recurrent))
-        ~query_safe ~witness)
+      match reads_covered traced.tn with
+      | `Opaque -> ()
+      | (`Covered | `Unknown _) as verdict ->
+          let query_safe, witness =
+            match verdict with `Covered -> (true, "") | `Unknown w -> (false, w)
+          in
+          Affine.crosscheck ~site:"visit read-before-write" ~context:(Tn.debug_name traced.tn)
+            ~procedural_safe:(fun () -> not (Hashtbl.exists traced.accesses ~f:is_recurrent))
+            ~query_safe ~witness)
 
 let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
   let traced_store = Hashtbl.create (module Tnode) in
