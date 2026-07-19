@@ -20,6 +20,19 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; gpt2_tiny_dry_run runs the same architecture at tiny dimensions, fast enough for `dune runtest`.
+; It guards the Embed_dim lowering-order regression (a deep model lowers a `dim d` fetch first,
+; before anything else has forced shape inference).
+
+(test
+ (name gpt2_tiny_dry_run)
+ (package neural_nets_lib)
+ (modules gpt2_tiny_dry_run)
+ (deps ocannl_config (env_var OCANNL_BACKEND))
+ (libraries base ocannl stdio gpt2_model)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
 (rule
  (alias slow)
  (package neural_nets_lib)
