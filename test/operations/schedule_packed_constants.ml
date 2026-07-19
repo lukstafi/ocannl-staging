@@ -75,6 +75,7 @@ let tiled_schedule ?(reorder = true) ~ma ~mb ~mc ~hoist_a ~hoist_b (opt : LL.opt
           shared = false;
           cooperative = None;
           hoisted = hoist_a;
+          swizzle = false;
         };
       Sched.Stage
         {
@@ -83,6 +84,7 @@ let tiled_schedule ?(reorder = true) ~ma ~mb ~mc ~hoist_a ~hoist_b (opt : LL.opt
           shared = false;
           cooperative = None;
           hoisted = hoist_b;
+          swizzle = false;
         };
     ]
   in

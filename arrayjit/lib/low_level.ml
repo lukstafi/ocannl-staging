@@ -330,6 +330,15 @@ type optimized = {
       (** Per-simdgroup accumulator tiles synthesized by [Schedule.Tensorize] when it contracts an
           enclosing serial reduction. Metal renders their marked lifetime as persistent
           [simdgroup_matrix] fragments; scalar fallback backends retain the local-array meaning. *)
+  swizzled : Set.M(Tnode).t;
+      (** Nodes stored in an XOR-swizzled layout (docs/proposals/tensorize-mma.md, "Swizzled
+          staging"): codegen remaps every element access [flat = P*C + col] (with [C] the minor
+          dim, [P] the linearized prefix) to [P*C + (col lxor (P land (C-1)))] — a bijection on the
+          buffer, so the IR-level semantics are unchanged; only the physical layout differs,
+          spreading same-column accesses across shared-memory banks. Populated by
+          [Schedule.Stage ~swizzle:true]; requires at least 2 axes and a power-of-two minor dim.
+          Renderings that assume a row-major layout (vectorized/contiguous multi-element accesses,
+          tile-MMA intrinsic and register-tiled paths) must decline swizzled nodes. *)
 }
 [@@deriving sexp_of]
 
@@ -4097,6 +4106,7 @@ let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
     merge_node;
     workgroup_shared = Set.empty (module Tnode);
     simdgroup_fragments = Set.empty (module Tnode);
+    swizzled = Set.empty (module Tnode);
   }
 
 let code_hum_margin = ref 100

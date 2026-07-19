@@ -222,7 +222,8 @@ let () =
         @ sink oc [ ow ]
       in
       let stage source tile_loops =
-        Sched.Stage { source; tile_loops; shared = false; cooperative = None; hoisted = false }
+        Sched.Stage
+           { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = false }
       in
       let sched =
         if not tensorized then reorder
@@ -422,7 +423,8 @@ let () =
          | None -> 32
        in
        let stage source tile_loops =
-         Sched.Stage { source; tile_loops; shared = true; cooperative = Some w; hoisted = false }
+         Sched.Stage
+           { source; tile_loops; shared = true; cooperative = Some w; hoisted = false; swizzle = false }
        in
        let tz, _lane =
          Sched.tensorize ~i:site.Autotune.c_row ~j:site.Autotune.c_oc ~k:site.Autotune.c_red
@@ -516,7 +518,9 @@ let () =
       @ [ row_i; site.Autotune.c_oc; site.Autotune.c_red ]
     in
     let cooperative = if shared then Some simd_width else None in
-    let stage source tile_loops = Sched.Stage { source; tile_loops; shared; cooperative; hoisted = false } in
+    let stage source tile_loops =
+      Sched.Stage { source; tile_loops; shared; cooperative; hoisted = false; swizzle = false }
+    in
     let outer_grid =
       if not shared then []
       else List.map site.Autotune.c_outer ~f:(fun (s, _) -> Sched.Retype { axis = s; ty = LL.Grid })
@@ -621,7 +625,8 @@ let () =
          @ [ row_i; site.Autotune.c_oc; site.Autotune.c_red ]
        in
        let stage source tile_loops =
-         Sched.Stage { source; tile_loops; shared = false; cooperative = None; hoisted = false }
+         Sched.Stage
+           { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = false }
        in
        let tz, _lane =
          Sched.tensorize ~i:row_i ~j:site.Autotune.c_oc ~k:site.Autotune.c_red ~simd_width:1
@@ -688,7 +693,8 @@ let () =
      let x, kern, y = make_merged "cva_g" in
      let conv_sched (site : Autotune.conv_site) seg =
        let stage source tile_loops =
-         Sched.Stage { source; tile_loops; shared = false; cooperative = None; hoisted = false }
+         Sched.Stage
+           { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = false }
        in
        let tz, _lane =
          Sched.tensorize ~i:site.Autotune.c_row ~j:site.Autotune.c_oc ~k:site.Autotune.c_red
