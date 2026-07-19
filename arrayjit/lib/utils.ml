@@ -125,6 +125,7 @@ let known_config_keys =
       "schedule_fission";
       "schedule_log_launches";
       "schedule_log_declines";
+      "legality_crosscheck";
       "cc_parallel_grid";
       "cc_parallel_chunks";
       "cc_grid_private_bytes_cap";

@@ -8,6 +8,7 @@
 
 open Base
 module Idx = Ir.Indexing
+module Aff = Ir.Affine
 
 let sym () = Idx.get_symbol ()
 let aff terms offset = Idx.Affine { symbols = terms; offset }
@@ -82,19 +83,19 @@ let () =
   (* Accept through is_injective: same 2*oh+wh, both symbols are product iterators on the LHS. *)
   let oh3 = sym () and wh3 = sym () in
   p "is_injective 2*oh+wh"
-    (Idx.is_injective (mk_proj [ (oh3, 4); (wh3, 2) ] [| aff [ (2, oh3); (1, wh3) ] 0 |]));
+    (Aff.is_injective (mk_proj [ (oh3, 4); (wh3, 2) ] [| aff [ (2, oh3); (1, wh3) ] 0 |]));
 
   (* Reject through is_injective: non-injective i+j. *)
   let a3 = sym () and b3 = sym () in
   p "is_injective i+j"
-    (Idx.is_injective (mk_proj [ (a3, 3); (b3, 3) ] [| aff [ (1, a3); (1, b3) ] 0 |]));
+    (Aff.is_injective (mk_proj [ (a3, 3); (b3, 3) ] [| aff [ (1, a3); (1, b3) ] 0 |]));
 
   (* Reject through is_injective: a contraction symbol [c] is a product iterator but never appears
      on the LHS, so multiple product points collapse to one cell. The affine analysis alone would
      accept [Iterator i], but coverage must reject the whole map. *)
   let i4 = sym () and c4 = sym () in
   p "is_injective with uncovered contraction symbol"
-    (Idx.is_injective (mk_proj [ (i4, 4); (c4, 3) ] [| Idx.Iterator i4 |]));
+    (Aff.is_injective (mk_proj [ (i4, 4); (c4, 3) ] [| Idx.Iterator i4 |]));
 
   Stdio.printf "=== lowering payoff: injective + surjective scatter skips neutral init ===\n";
 
@@ -105,9 +106,9 @@ let () =
   let pool_back =
     mk_proj ~lhs_dims:[| 6 |] [ (oh5, 3); (wh5, 2) ] [| aff [ (2, oh5); (1, wh5) ] 0 |]
   in
-  p "pool-backward scatter injective" (Idx.is_injective pool_back);
-  p "pool-backward scatter surjective" (Idx.is_surjective pool_back);
+  p "pool-backward scatter injective" (Aff.is_injective pool_back);
+  p "pool-backward scatter surjective" (Aff.is_surjective pool_back);
   p "pool-backward scatter skips neutral-init (surjective && injective)"
-    (Idx.is_surjective pool_back && Idx.is_injective pool_back);
+    (Aff.is_surjective pool_back && Aff.is_injective pool_back);
 
   Stdio.printf "%!"

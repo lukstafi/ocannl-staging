@@ -50,6 +50,7 @@
   interval
   ndarray
   indexing
+  affine
   tnode
   host_inits
   low_level

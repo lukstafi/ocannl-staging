@@ -2222,6 +2222,9 @@ type access = {
   a_idcs : Indexing.axis_index array;
   a_write : bool;
   a_dynamic : bool;  (** [Get_dynamic]: the effective index is not statically known. *)
+  a_vec : bool;
+      (** [Set_from_vec]: [a_idcs] is the base of a length-run along the minor axis, not a single
+          cell — affine queries must treat the last component as opaque ({!query_map}). *)
 }
 
 exception Bail
@@ -2232,8 +2235,8 @@ exception Bail
 let scan_accesses plc (llc : Low_level.t) : access list =
   let open Low_level in
   let acc = ref [] in
-  let add ~depth:_ ~write ~dynamic tn idcs =
-    acc := { a_tn = tn; a_idcs = idcs; a_write = write; a_dynamic = dynamic } :: !acc
+  let add ~depth:_ ~write ~dynamic ?(vec = false) tn idcs =
+    acc := { a_tn = tn; a_idcs = idcs; a_write = write; a_dynamic = dynamic; a_vec = vec } :: !acc
   in
   let rec code ~depth llc =
     match llc with
@@ -2266,7 +2269,7 @@ let scan_accesses plc (llc : Low_level.t) : access list =
         scalar ~depth llsc
     | Set_from_vec { tn; idcs; arg = a, _; _ } ->
         if depth > 0 && Tn.Placements.is_materialized_peek plc tn then raise Bail;
-        add ~depth ~write:true ~dynamic:false tn idcs;
+        add ~depth ~write:true ~dynamic:false ~vec:true tn idcs;
         scalar ~depth a
     | Set_local (_, llsc) -> scalar ~depth llsc
     | If { cond = c, _; body } ->
@@ -2318,6 +2321,16 @@ let mentions_sym syms (idx : Indexing.axis_index) =
   | Indexing.Affine { symbols; _ } ->
       List.exists symbols ~f:(fun (_, s) -> List.mem syms s ~equal:Indexing.equal_symbol)
   | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
+
+(* The affine-query view of an access's index map: a vectorized write's last (minor-axis run)
+   component is the base of a run, so it is masked to an opaque [Sub_axis] — the engine then draws
+   no (possibly wrong) disjointness or confinement conclusion from it. *)
+let query_map (a : access) : Indexing.axis_index array =
+  if (not a.a_vec) || Array.is_empty a.a_idcs then a.a_idcs
+  else (
+    let m = Array.copy a.a_idcs in
+    m.(Array.length m - 1) <- Indexing.Sub_axis;
+    m)
 
 (* The single-child chain of [For_loop]s from the top of a nest, descending through [If] wrappers
    and comments; stops at the first branching ([Seq] with more than one non-comment statement). *)
@@ -2389,6 +2402,11 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
         Array.of_list
           (List.filter_map c ~f:(function For_loop fc -> Some (fc.to_ + 1) | _ -> None)))
   in
+  (* Per-group loop-bound environments (the bare pseudo-group binds no loops): the box domains for
+     the affine conflict queries below. *)
+  let env_arr =
+    Array.of_list (List.map nests ~f:(fun n -> Low_level.loop_bounds n.n_loops) @ [ [] ])
+  in
   (* Cross-group dependency edges (module comment, aligned cross-nest parallelism): a node written
      in one group and touched in another must have all its write/access pairs aligned — unless it is
      per-thread scratch whose writes never mention the writer's parallel symbols (every thread then
@@ -2430,8 +2448,12 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
         if ri <> rj then parent.(ri) <- rj);
     (* One write/access pair at trim depth [l]: statically-known indices; per axis position,
        parallel symbols are mentioned on both sides or neither; where both, plain [Iterator]s at the
-       same chain position (extents are equal by the [l_max] prefix rule below). *)
-    let pair_aligned ~l gi gj (a : access) (b : access) =
+       same chain position (extents are equal by the [l_max] prefix rule below). For materialized
+       nodes this is the legacy (procedural) special case of the affine conflict query and is kept
+       for [legality_crosscheck]; for non-materialized (per-thread copy) scratch it IS the rule —
+       "reads hit exactly the cells the same thread writes" is an order-sensitive per-thread-copy
+       fact, not a shared-memory conflict, so it is not subsumed by [Affine.pair_conflict]. *)
+    let pair_aligned_procedural ~l gi gj (a : access) (b : access) =
       (not a.a_dynamic) && (not b.a_dynamic)
       &&
       let syms_i = List.take full_syms.(gi) l and syms_j = List.take full_syms.(gj) l in
@@ -2455,9 +2477,40 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
       in
       List.for_all (List.init rank ~f:Fn.id) ~f:aligned_at
     in
+    (* Materialized edges: the affine conflict query decides — conflicts between the two nests'
+       accesses must be confined to a single hardware thread (the paired trimmed-chain symbols) or
+       be disjoint outright (which also admits pairs the procedural rule could only decline, e.g.
+       constant-offset or strided-disjoint slices). *)
+    let pair_aligned_query ~l gi gj (a : access) (b : access) =
+      (not a.a_dynamic) && (not b.a_dynamic)
+      &&
+      let range s =
+        match List.Assoc.find env_arr.(gi) s ~equal:Indexing.equal_symbol with
+        | Some _ as r -> r
+        | None -> List.Assoc.find env_arr.(gj) s ~equal:Indexing.equal_symbol
+      in
+      let dup g s = List.Assoc.mem env_arr.(g) s ~equal:Indexing.equal_symbol in
+      let pairs = List.zip_exn (List.take full_syms.(gi) l) (List.take full_syms.(gj) l) in
+      let verdict =
+        Affine.pair_conflict ~range ~dup_left:(dup gi) ~dup_right:(dup gj) ~pairs
+          ~left:(query_map a) ~right:(query_map b)
+      in
+      let query_safe = match verdict with Affine.Cross_thread _ -> false | _ -> true in
+      Affine.crosscheck ~site:"schedule cross-nest alignment"
+        ~context:(Tn.debug_name a.a_tn)
+        ~procedural_safe:(fun () -> pair_aligned_procedural ~l gi gj a b)
+        ~query_safe
+        ~witness:(match verdict with Affine.Cross_thread w -> w | _ -> "");
+      query_safe
+    in
     let edge_aligned ~l (i, j, uid) =
       let accs_i = Hashtbl.find_multi group_tbls.(i) uid
       and accs_j = Hashtbl.find_multi group_tbls.(j) uid in
+      let pair_aligned =
+        match accs_i with
+        | a :: _ when Tn.Placements.is_materialized_peek plc a.a_tn -> pair_aligned_query
+        | _ -> pair_aligned_procedural
+      in
       List.for_all accs_i ~f:(fun a ->
           List.for_all accs_j ~f:(fun b ->
               (not (a.a_write || b.a_write)) || pair_aligned ~l i j a b))
@@ -2493,6 +2546,30 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
      comment for the safety argument). *)
   List.iter2_exn nests chains ~f:(fun n chain ->
       let syms = chain_syms chain in
+      let env = Low_level.loop_bounds n.n_loops in
+      let range s = List.Assoc.find env s ~equal:Indexing.equal_symbol in
+      let dup s = List.Assoc.mem env s ~equal:Indexing.equal_symbol in
+      let pairs = List.map syms ~f:(fun s -> (s, s)) in
+      (* The agreement rule: all accesses agree on every component that mentions a parallel
+         symbol. For materialized nodes it is the legacy (procedural) special case of the affine
+         conflict query, kept for [legality_crosscheck]; for non-materialized (per-thread copy)
+         scratch it IS the rule (see [pair_aligned_procedural]'s note). *)
+      let agreement_ok accs =
+        let rank = List.fold accs ~init:0 ~f:(fun m a -> max m (Array.length a.a_idcs)) in
+        let ok = ref true in
+        for p = 0 to rank - 1 do
+          let comps =
+            List.map accs ~f:(fun a ->
+                if p < Array.length a.a_idcs then a.a_idcs.(p) else Indexing.Fixed_idx 0)
+          in
+          if List.exists comps ~f:(mentions_sym syms) then
+            match comps with
+            | [] -> ()
+            | c0 :: rest ->
+                if not (List.for_all rest ~f:(Indexing.equal_axis_index c0)) then ok := false
+        done;
+        !ok
+      in
       let by_tn = Hashtbl.create (module Int) in
       List.iter n.n_accesses ~f:(fun a -> Hashtbl.add_multi by_tn ~key:a.a_tn.Tn.uid ~data:a);
       Hashtbl.iter by_tn ~f:(fun accs ->
@@ -2504,19 +2581,30 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
             in
             if is_mat || chain_relevant then (
               if List.exists accs ~f:(fun a -> a.a_dynamic) then raise Bail;
-              (* All accesses must agree on every component that mentions a parallel symbol. *)
-              let rank = List.fold accs ~init:0 ~f:(fun m a -> max m (Array.length a.a_idcs)) in
-              for p = 0 to rank - 1 do
-                let comps =
-                  List.map accs ~f:(fun a ->
-                      if p < Array.length a.a_idcs then a.a_idcs.(p) else Indexing.Fixed_idx 0)
+              if is_mat then (
+                (* Materialized: genuine shared memory — the affine conflict query decides. Every
+                   pair involving a write must have its conflicts confined to one thread of the
+                   chain tuple, or be disjoint outright. *)
+                let witness = ref "" in
+                let query_safe =
+                  List.for_all accs ~f:(fun w ->
+                      (not w.a_write)
+                      || List.for_all accs ~f:(fun x ->
+                             match
+                               Affine.pair_conflict ~range ~dup_left:dup ~dup_right:dup ~pairs
+                                 ~left:(query_map w) ~right:(query_map x)
+                             with
+                             | Affine.Disjoint | Affine.Same_thread -> true
+                             | Affine.Cross_thread wit ->
+                                 witness := wit;
+                                 false))
                 in
-                if List.exists comps ~f:(mentions_sym syms) then
-                  match comps with
-                  | [] -> ()
-                  | c0 :: rest ->
-                      if not (List.for_all rest ~f:(Indexing.equal_axis_index c0)) then raise Bail
-              done)));
+                Affine.crosscheck ~site:"schedule per-nest hazard"
+                  ~context:(Tn.debug_name (List.hd_exn accs).a_tn)
+                  ~procedural_safe:(fun () -> agreement_ok accs)
+                  ~query_safe ~witness:!witness;
+                if not query_safe then raise Bail)
+              else if not (agreement_ok accs) then raise Bail)));
   chains
 
 (* Parallel iterations a chain covers. *)

@@ -177,6 +177,13 @@ log_buffer_aliasing=false
 # render serial/scalar" switch for hand schedules and autotune runs.
 schedule_log_declines=false
 
+# gh-494: run the legacy procedural schedule-legality analyses alongside the affine conflict
+# queries (arrayjit/lib/affine.ml) that replaced them, and compare. A query stricter than the
+# procedural answer raises (a query precision regression, or a latent unsoundness of the procedural
+# rule); a query more permissive than the procedural answer is the expected precision gain, logged
+# to stderr. A debugging/soak switch: off by default, no effect on behavior beyond the comparison.
+legality_crosscheck=false
+
 # How the C backend renders eligible outermost Grid loops (pool-backed Grid rendering,
 # docs/proposals/gh-ocannl-164.md): "dispatch" uses libdispatch's dispatch_apply (macOS),
 # "openmp" uses `#pragma omp parallel for` (adds -fopenmp to the kernel compile), "none" keeps
