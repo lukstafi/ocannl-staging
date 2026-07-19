@@ -274,4 +274,37 @@ let () =
     ~oracle_ranges:[ (i, (1, 3)) ]
     ~dims:[| 3 |] [| Idx.Iterator i |];
 
+  Stdio.printf "\n=== fiber_cardinality ===\n";
+  (* Oracle: enumerate the domain box, count hits per image cell; [`Exact n] requires every image
+     cell to be hit exactly [n] times, [`At_least n] requires at least [n]. *)
+  let check_fiber ~name ~domain idcs =
+    let counts = Hashtbl.create (module String) in
+    let syms = List.map domain ~f:fst in
+    let ranges = List.map domain ~f:(fun (s, w) -> (s, (0, w - 1))) in
+    List.iter (envs ranges syms) ~f:(fun env ->
+        match eval_vec env idcs (Array.length idcs) with
+        | Some v -> Hashtbl.incr counts (String.concat ~sep:"," (List.map v ~f:Int.to_string))
+        | None -> ());
+    let counts = Hashtbl.data counts in
+    let query = Aff.fiber_cardinality ~domain idcs in
+    let ok, shown =
+      match query with
+      | `Exact n -> (List.for_all counts ~f:(fun c -> c = n), Printf.sprintf "Exact %d" n)
+      | `At_least n -> (List.for_all counts ~f:(fun c -> c >= n), Printf.sprintf "At_least %d" n)
+    in
+    if not ok then Int.incr unsound_count;
+    Stdio.printf "%-34s query %-12s oracle fibers %d..%d%s\n" name shown
+      (Option.value ~default:0 (List.min_elt counts ~compare:Int.compare))
+      (Option.value ~default:0 (List.max_elt counts ~compare:Int.compare))
+      (if ok then "" else "  UNSOUND")
+  in
+  let f1 = sym () and f2 = sym () in
+  check_fiber ~name:"absent symbol product" ~domain:[ (f1, 3); (f2, 4) ] [| Idx.Iterator f1 |];
+  check_fiber ~name:"all pinned (mixed radix)" ~domain:[ (f1, 4); (f2, 3) ]
+    [| aff [ (1, f1); (4, f2) ] 0 |];
+  check_fiber ~name:"strided (image cells only)" ~domain:[ (f1, 3) ] [| aff [ (2, f1) ] 0 |];
+  check_fiber ~name:"constant cell" ~domain:[ (f1, 3) ] [| Idx.Fixed_idx 0 |];
+  check_fiber ~name:"non-injective f1+f2" ~domain:[ (f1, 3); (f2, 3) ]
+    [| aff [ (1, f1); (1, f2) ] 0 |];
+
   Stdio.printf "\nunsound cases: %d\n" !unsound_count
