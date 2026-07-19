@@ -64,7 +64,9 @@ let hardware_syms (sched : Sched.schedule) : Idx.symbol list =
 
 (* Two nests sharing a [Local] scratch [tmp]: nest 1 rewrites [tmp] under its chain and also makes
    a materialized write qualifying the chain; nest 2 reads [tmp]. [~variant] selects whether the
-   scratch value depends on nest 1's inner chain symbol [s1]. *)
+   scratch value depends on nest 1's inner chain symbol [s1]; [`Via_local] routes that dependence
+   through a scalar scope-local ([Set_local] then [Get_local]) — the value scan must resolve it
+   (Codex P1 on the direct-only scan). *)
 let build ~variant =
   let x = fresh_tn "x" [| 64; 4 |] in
   let out1 = fresh_tn "out1" [| 64; 64 |] in
@@ -72,9 +74,18 @@ let build ~variant =
   let tmp = fresh_tn "tmp" [| 4 |] in
   let s0 = Idx.get_symbol () and s1 = Idx.get_symbol () and u = Idx.get_symbol () in
   let t0 = Idx.get_symbol () and t1 = Idx.get_symbol () in
-  let tmp_value =
-    if variant then LL.Get (x, [| Idx.Iterator s1; Idx.Iterator u |])
-    else LL.Get (x, [| Idx.Fixed_idx 0; Idx.Iterator u |])
+  let vtn = fresh_tn "v" [| 1 |] in
+  let v = LL.get_scope vtn in
+  let pre_stmts, tmp_value =
+    match variant with
+    | `No -> ([], LL.Get (x, [| Idx.Fixed_idx 0; Idx.Iterator u |]))
+    | `Direct -> ([], LL.Get (x, [| Idx.Iterator s1; Idx.Iterator u |]))
+    | `Via_local ->
+        ( [
+            LL.Declare_local { id = v; needs_init = false };
+            LL.Set_local (v, LL.Get (x, [| Idx.Iterator s1; Idx.Iterator u |]));
+          ],
+          LL.Get_local v )
   in
   let nest1 =
     for_over s0
@@ -82,7 +93,12 @@ let build ~variant =
          (LL.unflat_lines
             [
               for_over ~extent:4 u
-                (LL.Set { tn = tmp; idcs = [| Idx.Iterator u |]; llsc = tmp_value; debug = "" });
+                (LL.unflat_lines
+                   (pre_stmts
+                   @ [
+                       LL.Set
+                         { tn = tmp; idcs = [| Idx.Iterator u |]; llsc = tmp_value; debug = "" };
+                     ]));
               LL.Set
                 {
                   tn = out1;
@@ -107,18 +123,20 @@ let build ~variant =
   (opt, [ s0; t0 ], [ s1; t1 ])
 
 let () =
-  let opt, outer, inner = build ~variant:true in
-  let sched = Sched.default_gpu ~min_parallel:4 opt in
-  let hw = hardware_syms sched in
-  let mem s = List.mem hw s ~equal:Idx.equal_symbol in
-  p "variant scratch: schedule is nonempty" (not (List.is_empty sched));
-  p "variant scratch: outer chain loops stay parallel" (List.for_all outer ~f:mem);
-  p "variant scratch: value-feeding chain loops are serialized"
-    (List.for_all inner ~f:(fun s -> not (mem s)));
-  let opt, outer, inner = build ~variant:false in
-  let sched = Sched.default_gpu ~min_parallel:4 opt in
-  let hw = hardware_syms sched in
-  let mem s = List.mem hw s ~equal:Idx.equal_symbol in
-  p "invariant scratch: full two-loop chains kept"
-    (List.for_all (outer @ inner) ~f:mem);
+  let check name variant ~expect_serial =
+    let opt, outer, inner = build ~variant in
+    let sched = Sched.default_gpu ~min_parallel:4 opt in
+    let hw = hardware_syms sched in
+    let mem s = List.mem hw s ~equal:Idx.equal_symbol in
+    p (name ^ ": schedule is nonempty") (not (List.is_empty sched));
+    p (name ^ ": outer chain loops stay parallel") (List.for_all outer ~f:mem);
+    if expect_serial then
+      p
+        (name ^ ": value-feeding chain loops are serialized")
+        (List.for_all inner ~f:(fun s -> not (mem s)))
+    else p (name ^ ": full two-loop chains kept") (List.for_all inner ~f:mem)
+  in
+  check "variant scratch" `Direct ~expect_serial:true;
+  check "variant via scalar local" `Via_local ~expect_serial:true;
+  check "invariant scratch" `No ~expect_serial:false;
   ignore sp

@@ -2236,7 +2236,7 @@ exception Bail
 (* Collects accesses of tensor nodes (not scalar scope-locals) in [llc]. Raises [Bail] on opaque or
    clearly unschedulable constructs. [depth] counts enclosing [Local_scope] bodies: materialized
    writes there are invisible to [validate_parallel]'s coverage check, so bail. *)
-let scan_accesses plc (llc : Low_level.t) : access list =
+let scan_accesses plc ~local_syms (llc : Low_level.t) : access list =
   let open Low_level in
   let acc = ref [] in
   let add ~depth:_ ~write ~dynamic ?(vec = false) ?(val_syms = []) tn idcs =
@@ -2251,37 +2251,9 @@ let scan_accesses plc (llc : Low_level.t) : access list =
       }
       :: !acc
   in
-  (* Symbols the value of a setter depends on, syntactically. *)
-  let rec scalar_syms (llsc : scalar_t) : Indexing.symbol list =
-    let idx_syms (idx : Indexing.axis_index) =
-      match idx with
-      | Indexing.Iterator s -> [ s ]
-      | Indexing.Affine { symbols; _ } -> List.map symbols ~f:snd
-      | Indexing.Concat syms -> syms
-      | Indexing.Fixed_idx _ | Indexing.Sub_axis -> []
-    in
-    match llsc with
-    | Local_scope { body; _ } -> body_syms body
-    | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ -> []
-    | Embed_index idx -> idx_syms idx
-    | Get (_, idcs) -> List.concat_map (Array.to_list idcs) ~f:idx_syms
-    | Get_dynamic { idcs; dyn_value = v, _; _ } ->
-        List.concat_map (Array.to_list idcs) ~f:idx_syms @ scalar_syms v
-    | Ternop (_, (a, _), (b, _), (c, _)) -> scalar_syms a @ scalar_syms b @ scalar_syms c
-    | Binop (_, (a, _), (b, _)) -> scalar_syms a @ scalar_syms b
-    | Unop (_, (a, _)) -> scalar_syms a
-  and body_syms (llc : t) : Indexing.symbol list =
-    match llc with
-    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
-        []
-    | Seq (a, b) -> body_syms a @ body_syms b
-    | For_loop { body; _ } -> body_syms body
-    | If { cond = c, _; body } -> scalar_syms c @ body_syms body
-    | Set { llsc; _ } | Set_local (_, llsc) -> scalar_syms llsc
-    | Set_dynamic { dyn_value = v, _; llsc; _ } -> scalar_syms v @ scalar_syms llsc
-    | Set_from_vec { arg = a, _; _ } -> scalar_syms a
-    | Tile_mma { fallback; _ } -> body_syms fallback
-  in
+  (* Symbols the value of a setter depends on, syntactically; scope-locals resolve through the
+     whole-kernel [local_syms] (a local may be assigned in another top-level statement). *)
+  let scalar_syms = Low_level.scalar_value_syms ~locals:local_syms in
   let rec code ~depth llc =
     match llc with
     | Noop | Comment _ | Declare_local _ -> ()
@@ -2352,10 +2324,12 @@ let split_nests plc (llc : Low_level.t) : nest_info list * access list =
   let open Low_level in
   let rec is_nest = function For_loop _ -> true | If { body; _ } -> is_nest body | _ -> false in
   let stmts = flat_lines [ llc ] in
+  let local_syms = Low_level.scope_value_syms llc in
   let nests, bare =
     List.partition_map stmts ~f:(fun stmt ->
-        if is_nest stmt then First { n_loops = stmt; n_accesses = scan_accesses plc stmt }
-        else Second (scan_accesses plc stmt))
+        if is_nest stmt then
+          First { n_loops = stmt; n_accesses = scan_accesses plc ~local_syms stmt }
+        else Second (scan_accesses plc ~local_syms stmt))
   in
   (nests, List.concat bare)
 

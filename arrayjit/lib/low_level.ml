@@ -3225,6 +3225,100 @@ let loop_bounds (llc : t) : (Indexing.symbol * (int * int)) list =
   go llc;
   List.rev !acc
 
+(* Loop symbols a scalar expression's value depends on, syntactically, resolving scalar
+   scope-locals through [locals] — accumulated per-scope-id assignment symbols (see
+   {!scope_value_syms}). *)
+let rec scalar_value_syms ~(locals : (int, Indexing.symbol list) Hashtbl.t) (llsc : scalar_t) :
+    Indexing.symbol list =
+  let idx_syms (idx : Indexing.axis_index) =
+    match idx with
+    | Indexing.Iterator s -> [ s ]
+    | Indexing.Affine { symbols; _ } -> List.map symbols ~f:snd
+    | Indexing.Concat syms -> syms
+    | Indexing.Fixed_idx _ | Indexing.Sub_axis -> []
+  in
+  let scalar_syms = scalar_value_syms ~locals in
+  match llsc with
+  | Local_scope { body; _ } -> body_value_syms ~locals body
+  | Get_local id -> Hashtbl.find locals id.scope_id |> Option.value ~default:[]
+  | Get_merge_buffer _ | Constant _ | Constant_bits _ -> []
+  | Embed_index idx -> idx_syms idx
+  | Get (_, idcs) -> List.concat_map (Array.to_list idcs) ~f:idx_syms
+  | Get_dynamic { idcs; dyn_value = v, _; _ } ->
+      List.concat_map (Array.to_list idcs) ~f:idx_syms @ scalar_syms v
+  | Ternop (_, (a, _), (b, _), (c, _)) -> scalar_syms a @ scalar_syms b @ scalar_syms c
+  | Binop (_, (a, _), (b, _)) -> scalar_syms a @ scalar_syms b
+  | Unop (_, (a, _)) -> scalar_syms a
+
+and body_value_syms ~locals (llc : t) : Indexing.symbol list =
+  let scalar_syms = scalar_value_syms ~locals in
+  match llc with
+  | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
+      []
+  | Seq (a, b) -> body_value_syms ~locals a @ body_value_syms ~locals b
+  | For_loop { body; _ } -> body_value_syms ~locals body
+  | If { cond = c, _; body } -> scalar_syms c @ body_value_syms ~locals body
+  | Set { llsc; _ } | Set_local (_, llsc) -> scalar_syms llsc
+  | Set_dynamic { dyn_value = v, _; llsc; _ } -> scalar_syms v @ scalar_syms llsc
+  | Set_from_vec { arg = a, _; _ } -> scalar_syms a
+  | Tile_mma { fallback; _ } -> body_value_syms ~locals fallback
+
+(** The value-dependence symbols of scalar scope-locals, whole-code: per scope id, the union of
+    the symbols its assignments depend on, transitively through [Get_local] references (a scalar
+    local may be assigned in one statement and read in another). Fixpoint; consumed by the value
+    scans of [affine_accesses] and [Schedule.scan_accesses] so that a value routed through a
+    scope-local is not laundered of its symbols (gh-494 per-thread value-variance). *)
+let scope_value_syms (llc : t) : (int, Indexing.symbol list) Hashtbl.t =
+  let locals = Hashtbl.create (module Int) in
+  let changed = ref true in
+  let record id llsc =
+    let s = scalar_value_syms ~locals llsc in
+    let old = Hashtbl.find locals id.scope_id |> Option.value ~default:[] in
+    let merged = List.dedup_and_sort ~compare:Indexing.compare_symbol (s @ old) in
+    if List.length merged > List.length old then (
+      Hashtbl.set locals ~key:id.scope_id ~data:merged;
+      changed := true)
+  in
+  let rec stmt (llc : t) =
+    match llc with
+    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
+        ()
+    | Seq (a, b) ->
+        stmt a;
+        stmt b
+    | For_loop { body; _ } -> stmt body
+    | If { cond = c, _; body } ->
+        scalar c;
+        stmt body
+    | Set_local (id, llsc) ->
+        record id llsc;
+        scalar llsc
+    | Set { llsc; _ } -> scalar llsc
+    | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+        scalar v;
+        scalar llsc
+    | Set_from_vec { arg = a, _; _ } -> scalar a
+    | Tile_mma { fallback; _ } -> stmt fallback
+  and scalar (llsc : scalar_t) =
+    match llsc with
+    | Local_scope { body; _ } -> stmt body
+    | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ | Get _ -> ()
+    | Get_dynamic { dyn_value = v, _; _ } -> scalar v
+    | Ternop (_, (a, _), (b, _), (c, _)) ->
+        scalar a;
+        scalar b;
+        scalar c
+    | Binop (_, (a, _), (b, _)) ->
+        scalar a;
+        scalar b
+    | Unop (_, (a, _)) -> scalar a
+  in
+  while !changed do
+    changed := false;
+    stmt llc
+  done;
+  locals
+
 (** gh-494 waypoint 1: the routine's tensor-node accesses as explicit affine relations
     ({!Affine.access}), extracted from (typically optimized) code — the queryable artifact behind
     the affine legality queries. Fires in program order: a statement's right-hand-side reads
@@ -3276,37 +3370,8 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
       }
       :: !acc
   in
-  (* Loop symbols a setter's value depends on, syntactically. *)
-  let rec scalar_syms (llsc : scalar_t) : Indexing.symbol list =
-    let idx_syms (idx : Indexing.axis_index) =
-      match idx with
-      | Indexing.Iterator s -> [ s ]
-      | Indexing.Affine { symbols; _ } -> List.map symbols ~f:snd
-      | Indexing.Concat syms -> syms
-      | Indexing.Fixed_idx _ | Indexing.Sub_axis -> []
-    in
-    match llsc with
-    | Local_scope { body; _ } -> body_syms body
-    | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ -> []
-    | Embed_index idx -> idx_syms idx
-    | Get (_, idcs) -> List.concat_map (Array.to_list idcs) ~f:idx_syms
-    | Get_dynamic { idcs; dyn_value = v, _; _ } ->
-        List.concat_map (Array.to_list idcs) ~f:idx_syms @ scalar_syms v
-    | Ternop (_, (a, _), (b, _), (c, _)) -> scalar_syms a @ scalar_syms b @ scalar_syms c
-    | Binop (_, (a, _), (b, _)) -> scalar_syms a @ scalar_syms b
-    | Unop (_, (a, _)) -> scalar_syms a
-  and body_syms (llc : t) : Indexing.symbol list =
-    match llc with
-    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
-        []
-    | Seq (a, b) -> body_syms a @ body_syms b
-    | For_loop { body; _ } -> body_syms body
-    | If { cond = c, _; body } -> scalar_syms c @ body_syms body
-    | Set { llsc; _ } | Set_local (_, llsc) -> scalar_syms llsc
-    | Set_dynamic { dyn_value = v, _; llsc; _ } -> scalar_syms v @ scalar_syms llsc
-    | Set_from_vec { arg = a, _; _ } -> scalar_syms a
-    | Tile_mma { fallback; _ } -> body_syms fallback
-  in
+  let local_syms = scope_value_syms llc in
+  let scalar_syms = scalar_value_syms ~locals:local_syms in
   let rec code ~loops ~path ~guarded (llc : t) =
     match llc with
     | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ -> ()
