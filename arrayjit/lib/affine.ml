@@ -250,6 +250,35 @@ let covers_box ~range ~(dims : int array) (idcs : Idx.axis_index array) : bool =
           radix 1 sorted
       | Idx.Fixed_idx _ | Idx.Affine _ | Idx.Sub_axis | Idx.Concat _ -> false)
 
+(** {2 Counting}
+
+    [fiber_cardinality ~domain idcs]: how many points of the loop box [domain] (symbol, width
+    pairs) map to one given cell in the image of the access map [idcs] — the per-cell visit count
+    of a read access, and the recompute cost per read site of inlining a setter
+    ([Low_level.visit_llc]'s reduction extent, [virtualize_max_inline_reduction]'s subject).
+    Domain symbols absent from the map contribute the product of their widths; when the map is
+    injective on its mentioned symbols ({!Indexing.affine_injective}) that product is the exact
+    fiber size of every image cell (cells outside the image have zero), otherwise it is a lower
+    bound. *)
+let fiber_cardinality ~(domain : (Idx.symbol * int) list) (idcs : Idx.axis_index array) :
+    [ `Exact of int | `At_least of int ] =
+  let mentions s =
+    Array.exists idcs ~f:(function
+      | Idx.Iterator s' -> Idx.equal_symbol s s'
+      | Idx.Affine { symbols; _ } ->
+          (* Coalesced, so that zero or cancelling terms do not count as mentions —
+             [Indexing.affine_injective] coalesces too, and a symbol it never sees must contribute
+             its width to the fiber (Codex P2 on PR #181). *)
+          List.exists (Idx.coalesce_affine_terms symbols) ~f:(fun (_, s') -> Idx.equal_symbol s s')
+      | Idx.Concat syms -> List.exists syms ~f:(Idx.equal_symbol s)
+      | Idx.Fixed_idx _ | Idx.Sub_axis -> false)
+  in
+  let base = List.fold domain ~init:1 ~f:(fun acc (s, w) -> if mentions s then acc else acc * w) in
+  let symbol_range s =
+    List.Assoc.find domain s ~equal:Idx.equal_symbol |> Option.value ~default:1
+  in
+  if Idx.affine_injective ~symbol_range idcs then `Exact base else `At_least base
+
 (** {2 Projection-level predicates}
 
     Moved from [Indexing] (they are queries about the affine LHS map of a projection, this module's
