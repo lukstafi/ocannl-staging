@@ -3257,8 +3257,8 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
     | Tile_mma { fallback; _ } -> body_reads uid fallback
   in
   let acc = ref [] in
-  let add ~loops ~path ~guarded ?(dynamic = false) ?(whole = false) ?(vec_last = false)
-      ?(rmw = false) ~write tn map =
+  let add ~loops ~path ~guarded ?(dynamic = false) ?(whole = false) ?(vec_len = 0) ?(rmw = false)
+      ~write tn map =
     acc :=
       {
         Affine.a_tn = tn;
@@ -3266,7 +3266,8 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
         a_write = write;
         a_dynamic = dynamic;
         a_whole = whole;
-        a_vec_last = vec_last;
+        a_vec_last = vec_len > 0;
+        a_vec_len = vec_len;
         a_guarded = guarded;
         a_rmw = rmw;
         a_loops = List.rev loops;
@@ -3295,9 +3296,9 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
         add ~loops ~path ~guarded ~dynamic:true
           ~rmw:(reads_tn tn.Tn.uid llsc || reads_tn tn.Tn.uid v)
           ~write:true tn idcs
-    | Set_from_vec { tn; idcs; arg = a, _; _ } ->
+    | Set_from_vec { tn; idcs; length; arg = a, _; _ } ->
         scalar ~loops ~path ~guarded a;
-        add ~loops ~path ~guarded ~vec_last:true ~rmw:(reads_tn tn.Tn.uid a) ~write:true tn idcs
+        add ~loops ~path ~guarded ~vec_len:length ~rmw:(reads_tn tn.Tn.uid a) ~write:true tn idcs
     | Set_local (_, llsc) -> scalar ~loops ~path ~guarded llsc
     | Tile_mma { fallback; _ } -> code ~loops ~path ~guarded fallback
   and scalar ~loops ~path ~guarded (llsc : scalar_t) =

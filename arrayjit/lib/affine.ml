@@ -441,6 +441,8 @@ type 'tn access = {
   a_vec_last : bool;
       (** A vectorized write ([Set_from_vec]): the last map component is the base of a run along
           the minor axis, not a single cell — queries must treat that component as opaque. *)
+  a_vec_len : int;
+      (** The run length of a vectorized write along the minor axis; [0] unless [a_vec_last]. *)
   a_guarded : bool;  (** Under an [If] guard: executes conditionally, never a definite write. *)
   a_rmw : bool;
       (** The statement also reads [a_tn] on its right-hand side (an accumulation): the write
@@ -453,6 +455,313 @@ type 'tn access = {
       (** Lexicographic program-order position: statement indices per [Seq] nesting level. *)
 }
 [@@deriving sexp_of]
+
+(** {2 The containment query}
+
+    [read_covered_before ~read ~writes ()]: is every cell the [read] access can touch necessarily
+    written before the read executes — the dominance side of dependence analysis, and the fifth
+    decision procedure (gh-494 waypoint 2). Unlike the ∃-flavored {!pair_conflict} (negated to
+    prove disjointness), containment is a ∀∃ query — for every read instance there must exist a
+    covering write instance — so the variable treatment differs: the read's own loop symbols are
+    universal, a write's own loop symbols (below the loops common with the read) are existential,
+    and symbols shared by both sides (common enclosing loops, thread identity under [?thread],
+    static indices) are parameters that must cancel per axis. A residual parameter on the write
+    side declines that write (it would pin the write to one parameter value, or — for a common
+    loop — refer to other iterations of that loop); a residual common-loop or static parameter on
+    the read side is soundly universalized over its range; a residual thread parameter on the read
+    side declines (the thread reads a cell another thread wrote).
+
+    Visibility is same-common-iteration program order: a write is usable when its statement path
+    is lexicographically before the read's, and coverage is proven within the current iteration of
+    the common enclosing loops (the write's whole subtree, including its own inner loops, has then
+    executed). Loop-carried coverage — a read covered only by earlier iterations of a shared loop —
+    is declined, conservatively.
+
+    With [?thread] naming the parallel (thread-identity) symbols, [`Covered] proves the
+    per-thread-copy transform correct for this read: the thread reads only cells it wrote itself,
+    earlier in its own serial chunk, so the value read equals the serial value (the thread's own
+    write is also the serial last-writer, chunks being contiguous in the serial order).
+
+    Guarded writes are the caller's choice: include them to mirror guards-taken analyses
+    ([Low_level.visit_llc] traces [If] bodies unconditionally), pre-filter [a_guarded] for
+    execution-accurate coverage. [writes] must be accesses of the same node as [read]. *)
+
+(* Value set of one axis component, abstracted as an arithmetic progression
+   {ap_lo, ap_lo + ap_step, ..., ap_hi} (ap_step = 0 iff singleton). For the write (superset) side
+   the form must be dense — actually attaining every progression point — for the read (subset)
+   side a hull suffices (superset of the actual set, sound on the left of ⊆). *)
+type ap = { ap_lo : int; ap_hi : int; ap_step : int } [@@deriving sexp_of]
+
+let floor_div a b = if a >= 0 then a / b else -((-a + b - 1) / b)
+let ceil_div a b = if a >= 0 then (a + b - 1) / b else -(-a / b)
+
+(* [terms]: [(coeff, (lo, hi))] with nonzero coeffs and nondegenerate ranges (width-1 symbols are
+   folded into the offset by the caller). *)
+let ap_of_form ~exact terms offset : ap option =
+  match terms with
+  | [] -> Some { ap_lo = offset; ap_hi = offset; ap_step = 0 }
+  | _ ->
+      let lo, hi =
+        List.fold terms ~init:(offset, offset) ~f:(fun (lo, hi) (c, (vlo, vhi)) ->
+            (lo + min (c * vlo) (c * vhi), hi + max (c * vlo) (c * vhi)))
+      in
+      let g = List.fold terms ~init:0 ~f:(fun g (c, _) -> gcd g c) in
+      let dense =
+        (* Sorted by ascending magnitude, each coefficient must not out-jump the span already
+           reachable plus one step: then every multiple of [g] in [lo, hi] is attained. *)
+        let sorted =
+          List.sort (List.map terms ~f:(fun (c, (vlo, vhi)) -> (abs c, vhi - vlo)))
+            ~compare:(fun (c1, _) (c2, _) -> Int.compare c1 c2)
+        in
+        let rec go span = function
+          | [] -> true
+          | (c, w) :: tl -> c <= g + span && go (span + (c * w)) tl
+        in
+        go 0 sorted
+      in
+      if exact && not dense then None else Some { ap_lo = lo; ap_hi = hi; ap_step = g }
+
+(* r ⊆ w, where w is dense. *)
+let ap_subset r w =
+  r.ap_lo >= w.ap_lo && r.ap_hi <= w.ap_hi
+  &&
+  if w.ap_step = 0 then r.ap_lo = r.ap_hi
+  else (r.ap_lo - w.ap_lo) % w.ap_step = 0 && r.ap_step % w.ap_step = 0
+
+(* The contiguous run of r's lattice indices k (cell [r.ap_lo + k * r.ap_step]) that dense w
+   covers; [None] when w's lattice does not include r's points wholesale. *)
+let ap_covered_chunk r w : (int * int) option =
+  let k_max = if r.ap_step = 0 then 0 else (r.ap_hi - r.ap_lo) / r.ap_step in
+  let k_of v = if r.ap_step = 0 then 0 else (v - r.ap_lo) / r.ap_step in
+  if w.ap_step = 0 then
+    if
+      w.ap_lo >= r.ap_lo && w.ap_lo <= r.ap_hi
+      && (r.ap_step = 0 || (w.ap_lo - r.ap_lo) % r.ap_step = 0)
+    then
+      let k = k_of w.ap_lo in
+      Some (k, k)
+    else None
+  else if (r.ap_lo - w.ap_lo) % w.ap_step = 0 && r.ap_step % w.ap_step = 0 then
+    let k_lo =
+      if r.ap_step = 0 then if w.ap_lo <= r.ap_lo then 0 else 1
+      else max 0 (ceil_div (w.ap_lo - r.ap_lo) r.ap_step)
+    and k_hi =
+      if r.ap_step = 0 then if w.ap_hi >= r.ap_lo then 0 else -1
+      else min k_max (floor_div (w.ap_hi - r.ap_lo) r.ap_step)
+    in
+    if k_lo <= k_hi then Some (k_lo, k_hi) else None
+  else None
+
+(* Linear view of one axis component: terms plus offset, [None] for uninterpretable ones. *)
+let linear_terms (idx : Idx.axis_index) : ((int * Idx.symbol) list * int) option =
+  match idx with
+  | Idx.Fixed_idx c -> Some ([], c)
+  | Idx.Iterator s -> Some ([ (1, s) ], 0)
+  | Idx.Affine { symbols; offset } -> Some (Idx.coalesce_affine_terms symbols, offset)
+  | Idx.Sub_axis | Idx.Concat _ -> None
+
+let read_covered_before ?(thread = fun _ -> false) ?(static_range = fun _ -> None)
+    ~(read : 'tn access) ~(writes : 'tn access list) () : [ `Covered | `Unknown of string ] =
+  let exception Fail of string in
+  let path_before p q =
+    (* Distinct statements never have prefix-related paths (a [Seq] child is always a leaf
+       statement of that level), so plain lexicographic order is statement order. *)
+    List.compare Int.compare p q < 0
+  in
+  let has_opaque m =
+    Array.exists m ~f:(function Idx.Sub_axis | Idx.Concat _ -> true | _ -> false)
+  in
+  try
+    if read.a_dynamic then raise (Fail "dynamic read");
+    if read.a_whole || read.a_vec_last then raise (Fail "uninterpretable read kind");
+    if has_opaque read.a_map then raise (Fail "opaque read component");
+    let usable =
+      List.filter writes ~f:(fun w ->
+          w.a_write && (not w.a_dynamic) && path_before w.a_path read.a_path)
+    in
+    if List.is_empty usable then raise (Fail "no prior writes");
+    if List.exists usable ~f:(fun w -> w.a_whole) then `Covered
+    else begin
+      let read_range s = List.Assoc.find read.a_loops s ~equal:Idx.equal_symbol in
+      let rank =
+        List.fold usable ~init:(Array.length read.a_map) ~f:(fun m w ->
+            max m (Array.length w.a_map))
+      in
+      let comp m p = if p < Array.length m then m.(p) else Idx.Fixed_idx 0 in
+      (* Per write: per-axis relation to the read's cells, in the residual coordinate frame left
+         by parameter cancellation. [None] = this write proves nothing. *)
+      let analyze (w : 'tn access) :
+          (string * ap array * [ `Full | `Chunk of int * int | `Nope ] array) option =
+        let exception Skip in
+        try
+          if has_opaque w.a_map && not w.a_vec_last then raise Skip;
+          let c_len =
+            let rec go n rl wl =
+              match (rl, wl) with
+              | (s1, b1) :: rt, (s2, b2) :: wt
+                when Idx.equal_symbol s1 s2 && [%equal: int * int] b1 b2 ->
+                  go (n + 1) rt wt
+              | _ -> n
+            in
+            go 0 read.a_loops w.a_loops
+          in
+          let common = List.map (List.take read.a_loops c_len) ~f:fst in
+          let is_common s = List.mem common s ~equal:Idx.equal_symbol in
+          let w_own_loops = List.drop w.a_loops c_len in
+          let w_own_range s = List.Assoc.find w_own_loops s ~equal:Idx.equal_symbol in
+          (* Existential symbols used so far, per write: a symbol tying two axes of the write
+             makes the per-axis image factorization an overapproximation of the written set —
+             unsound on the superset side — so reuse declines the write. *)
+          let used_exist = ref [] in
+          let sig_parts = ref [] in
+          let vec_axis = if w.a_vec_last then Array.length w.a_map - 1 else -1 in
+          let r_aps = Array.create ~len:rank { ap_lo = 0; ap_hi = 0; ap_step = 0 } in
+          let rels =
+            Array.init rank ~f:(fun p ->
+                match (linear_terms (comp read.a_map p), linear_terms (comp w.a_map p)) with
+                | None, _ | _, None -> raise Skip
+                | Some (rts, ro), Some (wts, wo) -> (
+                    (* Split each side into shared-parameter terms and own terms. *)
+                    let shared_of side_own_range (c, s) =
+                      if thread s || is_common s || Option.is_none (side_own_range s) then
+                        Either.First (c, s)
+                      else Either.Second (c, s)
+                    in
+                    let r_shared, r_own = List.partition_map rts ~f:(shared_of read_range) in
+                    (* A read-own symbol is one of the read's loops below the common prefix. *)
+                    let r_own =
+                      List.map r_own ~f:(fun (c, s) ->
+                          match read_range s with
+                          | Some b -> (c, b)
+                          | None -> raise Skip (* cannot happen: partition used read_range *))
+                    in
+                    let w_shared, w_own = List.partition_map wts ~f:(shared_of w_own_range) in
+                    let w_own =
+                      List.map w_own ~f:(fun (c, s) ->
+                          match w_own_range s with
+                          | Some b ->
+                              if List.mem !used_exist s ~equal:Idx.equal_symbol then raise Skip;
+                              used_exist := s :: !used_exist;
+                              (c, s, b)
+                          | None -> raise Skip)
+                    in
+                    (* Cancel parameters matched by coefficient; residuals: write side declines,
+                       read side universalizes over its range when one is known. *)
+                    let w_par = ref w_shared in
+                    let r_resid =
+                      List.filter_map r_shared ~f:(fun (c, s) ->
+                          match
+                            List.findi !w_par ~f:(fun _ (c', s') ->
+                                Idx.equal_symbol s s' && c = c')
+                          with
+                          | Some (i, _) ->
+                              w_par := List.filteri !w_par ~f:(fun j _ -> j <> i);
+                              None
+                          | None -> Some (c, s))
+                    in
+                    if not (List.is_empty !w_par) then raise Skip;
+                    let r_univ =
+                      List.map r_resid ~f:(fun (c, s) ->
+                          if thread s then raise Skip;
+                          match if is_common s then read_range s else static_range s with
+                          | Some b -> (c, b)
+                          | None -> raise Skip)
+                    in
+                    (* Fold width-1 ranges into offsets; drop zero-width... widths >= 1 always. *)
+                    let fold_const terms off =
+                      List.fold terms ~init:([], off) ~f:(fun (ts, off) (c, (lo, hi)) ->
+                          if lo = hi then (ts, off + (c * lo)) else ((c, (lo, hi)) :: ts, off))
+                    in
+                    let r_terms, r_off = fold_const (r_own @ r_univ) ro in
+                    let w_terms, w_off =
+                      fold_const (List.map w_own ~f:(fun (c, _, b) -> (c, b))) wo
+                    in
+                    sig_parts :=
+                      (p, List.sort r_resid ~compare:[%compare: int * Idx.symbol]) :: !sig_parts;
+                    let r_ap =
+                      Option.value_exn (ap_of_form ~exact:false r_terms r_off)
+                    in
+                    r_aps.(p) <- r_ap;
+                    let w_ap =
+                      match ap_of_form ~exact:true w_terms w_off with
+                      | None -> None
+                      | Some w_ap when p = vec_axis ->
+                          (* The vectorized run extends the base progression along the minor
+                             axis; contiguous only when runs at least abut. *)
+                          let len = w.a_vec_len in
+                          if w_ap.ap_step = 0 then
+                            Some { ap_lo = w_ap.ap_lo; ap_hi = w_ap.ap_lo + len - 1; ap_step = 1 }
+                          else if w_ap.ap_step <= len then
+                            Some { ap_lo = w_ap.ap_lo; ap_hi = w_ap.ap_hi + len - 1; ap_step = 1 }
+                          else None
+                      | some -> some
+                    in
+                    match w_ap with
+                    | None -> `Nope
+                    | Some w_ap ->
+                        if ap_subset r_ap w_ap then `Full
+                        else (
+                          match ap_covered_chunk r_ap w_ap with
+                          | Some (kl, kh) -> `Chunk (kl, kh)
+                          | None -> `Nope)))
+          in
+          (* The residual coordinate frame: which parameters were cancelled vs. universalized
+             shifts what the chunk indices mean, so unionable writes must agree on both the
+             residual parameter lists and the resulting read-side progressions. *)
+          let signature =
+            Sexp.to_string
+              ([%sexp_of: (int * (int * Idx.symbol) list) list * ap array]
+                 (List.sort !sig_parts ~compare:(fun (p, _) (q, _) -> Int.compare p q), r_aps))
+          in
+          Some (signature, r_aps, rels)
+        with Skip -> None
+      in
+      let analyzed = List.filter_map usable ~f:analyze in
+      if
+        List.exists analyzed ~f:(fun (_, _, rels) ->
+            Array.for_all rels ~f:(function `Full -> true | _ -> false))
+      then `Covered
+      else begin
+        (* Union rule: writes sharing a residual frame, each covering all axes but one, may
+           jointly cover that axis by abutting or overlapping chunks. *)
+        let by_sig = Hashtbl.create (module String) in
+        List.iter analyzed ~f:(fun ((s, _, _) as a) -> Hashtbl.add_multi by_sig ~key:s ~data:a);
+        let union_covers group =
+          match group with
+          | [] -> false
+          | (_, r_aps, _) :: _ ->
+              List.existsi (Array.to_list r_aps) ~f:(fun a r_ap ->
+                  let k_max = if r_ap.ap_step = 0 then 0 else (r_ap.ap_hi - r_ap.ap_lo) / r_ap.ap_step in
+                  let chunks =
+                    List.filter_map group ~f:(fun (_, _, rels) ->
+                        let others_full =
+                          Array.for_alli rels ~f:(fun p rel ->
+                              p = a || match rel with `Full -> true | _ -> false)
+                        in
+                        if not others_full then None
+                        else
+                          match rels.(a) with
+                          | `Full -> Some (0, k_max)
+                          | `Chunk (kl, kh) -> Some (kl, kh)
+                          | `Nope -> None)
+                  in
+                  let sorted = List.sort chunks ~compare:[%compare: int * int] in
+                  let reach =
+                    List.fold sorted ~init:(-1) ~f:(fun reach (kl, kh) ->
+                        if kl <= reach + 1 then max reach kh else reach)
+                  in
+                  reach >= k_max)
+        in
+        if Hashtbl.exists by_sig ~f:union_covers then `Covered
+        else
+          raise
+            (Fail
+               (Printf.sprintf "read cells not covered by prior writes (read %s)"
+                  (String.concat_array ~sep:","
+                     (Array.map read.a_map ~f:axis_index_to_string))))
+      end
+    end
+  with Fail witness -> `Unknown witness
 
 (** {2 Crosscheck}
 

@@ -309,4 +309,222 @@ let () =
   (* Cancelling terms are not mentions: the map is constant in f1, whose width must count. *)
   check_fiber ~name:"cancelled term f1-f1" ~domain:[ (f1, 3) ] [| aff [ (1, f1); (-1, f1) ] 0 |];
 
+  Stdio.printf "\n=== read_covered_before ===\n";
+  (* Access records over a dummy node; only maps, loops, paths, and kind flags matter here. *)
+  let acc ?(write = true) ?(whole = false) ?(vec_len = 0) ~loops ~path map =
+    {
+      Aff.a_tn = "x";
+      a_map = map;
+      a_write = write;
+      a_dynamic = false;
+      a_whole = whole;
+      a_vec_last = vec_len > 0;
+      a_vec_len = vec_len;
+      a_guarded = false;
+      a_rmw = false;
+      a_loops = loops;
+      a_path = path;
+    }
+  in
+  (* Oracle: enumerate the static parameters and the read's loop box; each read cell must be
+     written by some write instance visible to it — same common-loop iteration with an earlier
+     statement path, or a lexicographically earlier common-loop iteration (the oracle's visibility
+     is the true program order, deliberately wider than the procedure's same-iteration-only claim,
+     so loop-carried coverage shows up as a precision gap, never as unsoundness). Thread symbols
+     must agree wherever both sides bind them. *)
+  let oracle_covered ~static_ranges ~thread ~(read : _ Aff.access) ~writes =
+    let statics = List.map static_ranges ~f:fst in
+    let rank =
+      List.fold writes
+        ~init:(Array.length read.Aff.a_map)
+        ~f:(fun m (w : _ Aff.access) -> max m (Array.length w.Aff.a_map))
+    in
+    let lookup env s = List.Assoc.find_exn env s ~equal:Idx.equal_symbol in
+    let opaque = ref false and all_covered = ref true in
+    List.iter (envs static_ranges statics) ~f:(fun senv ->
+        List.iter (envs read.a_loops (List.map read.a_loops ~f:fst)) ~f:(fun renv ->
+            match eval_vec (renv @ senv) read.a_map rank with
+            | None -> opaque := true
+            | Some cell ->
+                let covered_by (w : _ Aff.access) =
+                  if not w.Aff.a_write then false
+                  else
+                    let rec common rl wl =
+                      match (rl, wl) with
+                      | (s1, (lo1, hi1)) :: rt, (s2, (lo2, hi2)) :: wt
+                        when Idx.equal_symbol s1 s2 && lo1 = lo2 && hi1 = hi2 ->
+                          s1 :: common rt wt
+                      | _ -> []
+                    in
+                    let cw = common read.a_loops w.a_loops in
+                    List.exists (envs w.a_loops (List.map w.a_loops ~f:fst)) ~f:(fun wenv ->
+                        let thread_ok =
+                          List.for_all w.a_loops ~f:(fun (s, _) ->
+                              (not (thread s))
+                              || (not (List.Assoc.mem renv s ~equal:Idx.equal_symbol))
+                              || lookup wenv s = lookup renv s)
+                        in
+                        let ct_w = List.map cw ~f:(lookup wenv)
+                        and ct_r = List.map cw ~f:(lookup renv) in
+                        let cmp = List.compare Int.compare ct_w ct_r in
+                        thread_ok
+                        && (cmp < 0
+                           || cmp = 0 && List.compare Int.compare w.a_path read.a_path < 0)
+                        &&
+                        if w.a_whole then true
+                        else
+                          match eval_vec (wenv @ senv) w.a_map rank with
+                          | None -> false
+                          | Some wcell ->
+                              if w.a_vec_last then
+                                let va = Array.length w.a_map - 1 in
+                                List.for_alli cell ~f:(fun p c ->
+                                    let wc = List.nth_exn wcell p in
+                                    if p = va then c >= wc && c < wc + w.a_vec_len else c = wc)
+                              else List.equal Int.equal wcell cell)
+                in
+                if not (List.exists writes ~f:covered_by) then all_covered := false));
+    if !opaque then `Opaque else if !all_covered then `Covered else `Uncovered
+  in
+  let check_containment ~name ?(static_ranges = []) ?(thread = fun _ -> false) ~read ~writes () =
+    let static_range s = find_range static_ranges s in
+    let query = Aff.read_covered_before ~thread ~static_range ~read ~writes () in
+    let oracle = oracle_covered ~static_ranges ~thread ~read ~writes in
+    let qs = match query with `Covered -> "Covered" | `Unknown _ -> "Unknown" in
+    let os =
+      match oracle with `Covered -> "covered" | `Uncovered -> "uncovered" | `Opaque -> "opaque"
+    in
+    let ok = match (query, oracle) with `Covered, `Uncovered -> false | _ -> true in
+    if not ok then Int.incr unsound_count;
+    Stdio.printf "%-34s query %-12s oracle %-12s%s\n" name qs os (if ok then "" else "  UNSOUND")
+  in
+  let i1 = sym () and k1 = sym () and u1 = sym () and st = sym () in
+  let l8 s = (s, (0, 7)) in
+  (* Sequential statements: full overwrite then read. *)
+  check_containment ~name:"overwrite covers read"
+    ~read:(acc ~write:false ~loops:[ l8 u1 ] ~path:[ 1 ] [| Idx.Iterator u1 |])
+    ~writes:[ acc ~loops:[ l8 i1 ] ~path:[ 0 ] [| Idx.Iterator i1 |] ]
+    ();
+  check_containment ~name:"read wider than write"
+    ~read:(acc ~write:false ~loops:[ (u1, (0, 8)) ] ~path:[ 1 ] [| Idx.Iterator u1 |])
+    ~writes:[ acc ~loops:[ l8 i1 ] ~path:[ 0 ] [| Idx.Iterator i1 |] ]
+    ();
+  check_containment ~name:"strided write, strided read"
+    ~read:(acc ~write:false ~loops:[ (u1, (0, 3)) ] ~path:[ 1 ] [| aff [ (2, u1) ] 0 |])
+    ~writes:[ acc ~loops:[ (i1, (0, 3)) ] ~path:[ 0 ] [| aff [ (2, i1) ] 0 |] ]
+    ();
+  check_containment ~name:"strided write, dense read"
+    ~read:(acc ~write:false ~loops:[ l8 u1 ] ~path:[ 1 ] [| Idx.Iterator u1 |])
+    ~writes:[ acc ~loops:[ (i1, (0, 3)) ] ~path:[ 0 ] [| aff [ (2, i1) ] 0 |] ]
+    ();
+  (* Union along one axis: an init cell plus a shifted loop write jointly cover. *)
+  check_containment ~name:"union init + shifted write"
+    ~read:(acc ~write:false ~loops:[ l8 u1 ] ~path:[ 2 ] [| Idx.Iterator u1 |])
+    ~writes:
+      [
+        acc ~loops:[] ~path:[ 0 ] [| Idx.Fixed_idx 0 |];
+        acc ~loops:[ (i1, (0, 6)) ] ~path:[ 1 ] [| aff [ (1, i1) ] 1 |];
+      ]
+    ();
+  check_containment ~name:"union with gap"
+    ~read:(acc ~write:false ~loops:[ l8 u1 ] ~path:[ 2 ] [| Idx.Iterator u1 |])
+    ~writes:
+      [
+        acc ~loops:[] ~path:[ 0 ] [| Idx.Fixed_idx 0 |];
+        acc ~loops:[ (i1, (0, 5)) ] ~path:[ 1 ] [| aff [ (1, i1) ] 2 |];
+      ]
+    ();
+  (* Same statement (equal path): never a prior write. *)
+  check_containment ~name:"same-statement write unusable"
+    ~read:(acc ~write:false ~loops:[ l8 u1 ] ~path:[ 0 ] [| Idx.Iterator u1 |])
+    ~writes:[ acc ~loops:[ l8 u1 ] ~path:[ 0 ] [| Idx.Iterator u1 |] ]
+    ();
+  (* Common enclosing loop cancels on both sides. *)
+  check_containment ~name:"common loop cancels"
+    ~read:
+      (acc ~write:false
+         ~loops:[ (i1, (0, 2)); (u1, (0, 2)) ]
+         ~path:[ 0; 1 ]
+         [| Idx.Iterator i1; Idx.Iterator u1 |])
+    ~writes:
+      [
+        acc
+          ~loops:[ (i1, (0, 2)); (k1, (0, 3)) ]
+          ~path:[ 0; 0 ]
+          [| Idx.Iterator i1; Idx.Iterator k1 |];
+      ]
+    ();
+  (* Write-side residual common-loop symbol: declined (future iterations), though the true program
+     order covers it — a documented precision gap. *)
+  check_containment ~name:"write-side residual common sym"
+    ~read:(acc ~write:false ~loops:[ (i1, (0, 2)) ] ~path:[ 0; 1 ] [| Idx.Fixed_idx 0 |])
+    ~writes:[ acc ~loops:[ (i1, (0, 2)) ] ~path:[ 0; 0 ] [| Idx.Iterator i1 |] ]
+    ();
+  (* Loop-carried coverage (read x[i-1] under the writing loop): declined, oracle covers. *)
+  check_containment ~name:"loop-carried shift declined"
+    ~read:(acc ~write:false ~loops:[ (i1, (1, 3)) ] ~path:[ 0; 1 ] [| aff [ (1, i1) ] (-1) |])
+    ~writes:
+      [
+        acc ~loops:[] ~path:[ 0 ] [| Idx.Fixed_idx 0 |];
+        acc ~loops:[ (i1, (1, 3)) ] ~path:[ 0; 0 ] [| Idx.Iterator i1 |];
+      ]
+    ();
+  (* Whole-node write (Zero_out). *)
+  check_containment ~name:"whole-node write covers"
+    ~read:(acc ~write:false ~loops:[ l8 u1 ] ~path:[ 1 ] [| Idx.Iterator u1; Idx.Iterator u1 |])
+    ~writes:[ acc ~whole:true ~loops:[] ~path:[ 0 ] [||] ]
+    ();
+  (* Vectorized write: strided bases with abutting runs are dense. *)
+  check_containment ~name:"vec write abutting runs"
+    ~read:(acc ~write:false ~loops:[ l8 u1 ] ~path:[ 1 ] [| Idx.Iterator u1 |])
+    ~writes:[ acc ~vec_len:4 ~loops:[ (i1, (0, 1)) ] ~path:[ 0 ] [| aff [ (4, i1) ] 0 |] ]
+    ();
+  (* Thread-identity symbols: per-thread coverage. *)
+  let thr = List.mem [ i1 ] ~equal:Idx.equal_symbol in
+  check_containment ~name:"thread cancels (own cells)" ~thread:thr
+    ~read:
+      (acc ~write:false
+         ~loops:[ (i1, (0, 2)); (u1, (0, 3)) ]
+         ~path:[ 0; 1 ]
+         [| Idx.Iterator i1; Idx.Iterator u1 |])
+    ~writes:
+      [
+        acc
+          ~loops:[ (i1, (0, 2)); (k1, (0, 3)) ]
+          ~path:[ 0; 0 ]
+          [| Idx.Iterator i1; Idx.Iterator k1 |];
+      ]
+    ();
+  check_containment ~name:"thread reads foreign cell" ~thread:thr
+    ~read:(acc ~write:false ~loops:[ (i1, (0, 2)) ] ~path:[ 0; 1 ] [| Idx.Iterator i1 |])
+    ~writes:[ acc ~loops:[ (i1, (0, 2)) ] ~path:[ 0; 0 ] [| Idx.Fixed_idx 0 |] ]
+    ();
+  (* Static parameters: cancelled when matched, universalized on the read side when ranged. *)
+  check_containment ~name:"static cancels"
+    ~static_ranges:[ (st, (0, 5)) ]
+    ~read:(acc ~write:false ~loops:[] ~path:[ 1 ] [| Idx.Iterator st |])
+    ~writes:[ acc ~loops:[] ~path:[ 0 ] [| Idx.Iterator st |] ]
+    ();
+  check_containment ~name:"static read over full write"
+    ~static_ranges:[ (st, (0, 5)) ]
+    ~read:(acc ~write:false ~loops:[] ~path:[ 1 ] [| Idx.Iterator st |])
+    ~writes:[ acc ~loops:[ l8 i1 ] ~path:[ 0 ] [| Idx.Iterator i1 |] ]
+    ();
+  check_containment ~name:"static read over fixed write"
+    ~static_ranges:[ (st, (0, 5)) ]
+    ~read:(acc ~write:false ~loops:[] ~path:[ 1 ] [| Idx.Iterator st |])
+    ~writes:[ acc ~loops:[] ~path:[ 0 ] [| Idx.Fixed_idx 0 |] ]
+    ();
+  (* Multi-symbol dense vs gapped write images. *)
+  check_containment ~name:"mixed-radix write dense"
+    ~read:(acc ~write:false ~loops:[ l8 u1 ] ~path:[ 1 ] [| Idx.Iterator u1 |])
+    ~writes:
+      [ acc ~loops:[ (i1, (0, 1)); (k1, (0, 3)) ] ~path:[ 0 ] [| aff [ (4, i1); (1, k1) ] 0 |] ]
+    ();
+  check_containment ~name:"mixed-radix write gapped"
+    ~read:(acc ~write:false ~loops:[ (u1, (0, 6)) ] ~path:[ 1 ] [| Idx.Iterator u1 |])
+    ~writes:
+      [ acc ~loops:[ (i1, (0, 1)); (k1, (0, 2)) ] ~path:[ 0 ] [| aff [ (4, i1); (1, k1) ] 0 |] ]
+    ();
+
   Stdio.printf "\nunsound cases: %d\n" !unsound_count
