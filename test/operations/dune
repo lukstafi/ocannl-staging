@@ -1245,6 +1245,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name op_legality)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules op_legality)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name scratch_value_variance)
  (package neural_nets_lib)
  (deps

@@ -1800,11 +1800,12 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu c
 
 type loop_desc = {
   ld_ref : SC.sym_ref;
+  ld_sym : Idx.symbol;  (** The raw binder, for consulting {!Sched.op_legality}. *)
   ld_extent : int;
   ld_axis : LL.axis_type;
   ld_innermost : bool;
   ld_accumulating : bool;
-  ld_perfect_child : (SC.sym_ref * LL.axis_type) option;
+  ld_perfect_child : (SC.sym_ref * Idx.symbol * LL.axis_type) option;
 }
 
 let rec contains_loop = function
@@ -1830,12 +1831,13 @@ let collect_loops registry llc =
             let ld_perfect_child =
               match body with
               | LL.For_loop { index = ci; from_ = 0; axis = cax; _ } ->
-                  Option.map (SC.resolve registry ci) ~f:(fun r -> (r, cax))
+                  Option.map (SC.resolve registry ci) ~f:(fun r -> (r, ci, cax))
               | _ -> None
             in
             acc :=
               {
                 ld_ref;
+                ld_sym = index;
                 ld_extent = to_ + 1;
                 ld_axis = axis;
                 ld_innermost = not (contains_loop body);
@@ -1887,28 +1889,47 @@ let max_actions_per_unit = 48
 let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) (u : unit_gen) :
     SC.saved_optop list =
   let loops = collect_loops u.u_registry u.u_opt.LL.llc in
+  (* Menu proposals carry their raw-symbol counterpart so the op-legality oracle (gh-494 waypoint
+     3) can veto proven-illegal ones before they cost a candidate compile; [Op_unknown] proposals
+     proceed to compile-and-time exactly as before (the oracle's Unknown is never a rejection). *)
+  let gate (saved, raw) =
+    match Sched.op_legality u.u_opt raw with
+    | Sched.Op_illegal witness ->
+        logf "menu prune (illegal): %s" witness;
+        None
+    | Sched.Op_legal | Sched.Op_unknown _ -> Some saved
+  in
   let splits =
     List.concat_map loops ~f:(fun ld ->
         if not (LL.equal_axis_type ld.ld_axis LL.Serial) then []
         else
           List.filter_map split_factors ~f:(fun factor ->
               if factor < ld.ld_extent && ld.ld_extent % factor = 0 then
-                Some (SC.Split { axis = ld.ld_ref; factor; outer = LL.Serial; inner = LL.Serial })
+                let raw, _, _ =
+                  Sched.split ~axis:ld.ld_sym ~factor ~outer:LL.Serial ~inner:LL.Serial
+                in
+                gate
+                  (SC.Split { axis = ld.ld_ref; factor; outer = LL.Serial; inner = LL.Serial }, raw)
               else None))
   in
   let swaps =
     List.filter_map loops ~f:(fun ld ->
         match (ld.ld_axis, ld.ld_perfect_child) with
-        | LL.Serial, Some (child, LL.Serial) -> Some (SC.Swap { outer = ld.ld_ref; inner = child })
+        | LL.Serial, Some (child, child_sym, LL.Serial) ->
+            gate
+              ( SC.Swap { outer = ld.ld_ref; inner = child },
+                Sched.Swap { outer = ld.ld_sym; inner = child_sym } )
         | _ -> None)
   in
   let unrolls =
     List.concat_map loops ~f:(fun ld ->
         if LL.equal_axis_type ld.ld_axis LL.Serial && ld.ld_extent <= 8 then
-          [
-            SC.Unroll { axis = ld.ld_ref; materialize = true };
-            SC.Unroll { axis = ld.ld_ref; materialize = false };
-          ]
+          List.filter_map
+            [ true; false ]
+            ~f:(fun materialize ->
+              gate
+                ( SC.Unroll { axis = ld.ld_ref; materialize },
+                  Sched.Unroll { axis = ld.ld_sym; materialize } ))
         else [])
   in
   let vectorizes =
@@ -1927,7 +1948,10 @@ let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) (u : unit_g
             LL.equal_axis_type ld.ld_axis LL.Serial
             && ld.ld_innermost
             && ((not ld.ld_accumulating) || is_cpu)
-          then Some (SC.Retype { axis = ld.ld_ref; ty = LL.Vectorized })
+          then
+            gate
+              ( SC.Retype { axis = ld.ld_ref; ty = LL.Vectorized },
+                Sched.Retype { axis = ld.ld_sym; ty = LL.Vectorized } )
           else None)
   in
   let tensorizes =

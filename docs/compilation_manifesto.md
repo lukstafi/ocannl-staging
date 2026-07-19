@@ -173,11 +173,22 @@ Rough waypoints:
    reduction-dependence markers.)*
 2. Re-express the procedural checks (`validate_parallel`, `parallel_grid_safe`,
    micro-kernel recognition) as emptiness/subset queries over those relations —
-   equivalence with the procedural answers is the regression suite. *(Landed for the
-   shared-memory rules; the per-thread-scratch rule is order-sensitive — "reads hit
-   exactly the cells the same thread writes" — and awaits a containment query.)*
+   equivalence with the procedural answers is the regression suite. *(Landed for
+   the legality checks: the shared-memory rules as pair-conflict queries, and the
+   order-sensitive per-thread-scratch rule via the containment query
+   (`Affine.read_covered_before`) — a ∀∃ procedure with box-union coverage, whose
+   crosschecking exposed and fixed a real annotator gap: scratch whose written
+   value depends on a chain symbol without pinning the cell diverged from serial
+   semantics under per-thread copies. Micro-kernel recognition —
+   `detect_matmul`/`detect_conv` in the autotuner — remains a procedural
+   structural matcher and has not been migrated to relation queries.)*
 3. A legality *oracle* for schedule ops: given a schedule, decide validity by query
-   instead of by construction-then-validation.
+   instead of by construction-then-validation. *(First slice landed:
+   `Schedule.op_legality` — three-valued verdicts sound in both proven directions,
+   with the reduction-reassociation license — and the autotuner prunes
+   proven-illegal menu proposals before compiling them. Remaining: modeling the
+   staging/tensorization ops, and re-deriving the default annotators as
+   search-plus-oracle.)*
 4. Inference: search in constraint space rather than op-list space — the autotuner
    proposes shapes of schedules, the solver prunes cheaply before anything compiles.
 
