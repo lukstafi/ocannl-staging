@@ -3263,11 +3263,16 @@ and body_value_syms ~locals (llc : t) : Indexing.symbol list =
   | Set_from_vec { arg = a, _; _ } -> scalar_syms a
   | Tile_mma { fallback; _ } -> body_value_syms ~locals fallback
 
-(** The value-dependence symbols of scalar scope-locals, whole-code: per scope id, the union of
-    the symbols its assignments depend on, transitively through [Get_local] references (a scalar
-    local may be assigned in one statement and read in another). Fixpoint; consumed by the value
-    scans of [affine_accesses] and [Schedule.scan_accesses] so that a value routed through a
-    scope-local is not laundered of its symbols (gh-494 per-thread value-variance). *)
+(** The value-dependence symbols of statement-level scalar scope-locals, whole-code: per scope id,
+    the union of the symbols its statement-level assignments depend on, transitively through
+    [Get_local] references (such a local may be assigned in one statement and read in another —
+    the shared-definition / CSE-hoisted pattern). Fixpoint; consumed by the value scans of
+    [affine_accesses] and [Schedule.scan_accesses] so that a value routed through a scope-local is
+    not laundered of its symbols (gh-494 per-thread value-variance). Assignments inside
+    [Local_scope] bodies are deliberately NOT recorded: a scope id is re-instantiated at every use
+    site with per-site loop symbols, so a global union would import foreign statements' symbols
+    into unrelated setters; scope-internal flow is covered lexically instead — the value of a
+    [Local_scope] is over-approximated by the union of all its body setters' symbols. *)
 let scope_value_syms (llc : t) : (int, Indexing.symbol list) Hashtbl.t =
   let locals = Hashtbl.create (module Int) in
   let changed = ref true in
@@ -3279,43 +3284,43 @@ let scope_value_syms (llc : t) : (int, Indexing.symbol list) Hashtbl.t =
       Hashtbl.set locals ~key:id.scope_id ~data:merged;
       changed := true)
   in
-  let rec stmt (llc : t) =
+  let rec stmt ~depth (llc : t) =
     match llc with
     | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
         ()
     | Seq (a, b) ->
-        stmt a;
-        stmt b
-    | For_loop { body; _ } -> stmt body
+        stmt ~depth a;
+        stmt ~depth b
+    | For_loop { body; _ } -> stmt ~depth body
     | If { cond = c, _; body } ->
-        scalar c;
-        stmt body
+        scalar ~depth c;
+        stmt ~depth body
     | Set_local (id, llsc) ->
-        record id llsc;
-        scalar llsc
-    | Set { llsc; _ } -> scalar llsc
+        if depth = 0 then record id llsc;
+        scalar ~depth llsc
+    | Set { llsc; _ } -> scalar ~depth llsc
     | Set_dynamic { dyn_value = v, _; llsc; _ } ->
-        scalar v;
-        scalar llsc
-    | Set_from_vec { arg = a, _; _ } -> scalar a
-    | Tile_mma { fallback; _ } -> stmt fallback
-  and scalar (llsc : scalar_t) =
+        scalar ~depth v;
+        scalar ~depth llsc
+    | Set_from_vec { arg = a, _; _ } -> scalar ~depth a
+    | Tile_mma { fallback; _ } -> stmt ~depth fallback
+  and scalar ~depth (llsc : scalar_t) =
     match llsc with
-    | Local_scope { body; _ } -> stmt body
+    | Local_scope { body; _ } -> stmt ~depth:(depth + 1) body
     | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ | Get _ -> ()
-    | Get_dynamic { dyn_value = v, _; _ } -> scalar v
+    | Get_dynamic { dyn_value = v, _; _ } -> scalar ~depth v
     | Ternop (_, (a, _), (b, _), (c, _)) ->
-        scalar a;
-        scalar b;
-        scalar c
+        scalar ~depth a;
+        scalar ~depth b;
+        scalar ~depth c
     | Binop (_, (a, _), (b, _)) ->
-        scalar a;
-        scalar b
-    | Unop (_, (a, _)) -> scalar a
+        scalar ~depth a;
+        scalar ~depth b
+    | Unop (_, (a, _)) -> scalar ~depth a
   in
   while !changed do
     changed := false;
-    stmt llc
+    stmt ~depth:0 llc
   done;
   locals
 

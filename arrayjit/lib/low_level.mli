@@ -398,11 +398,13 @@ val loop_bounds : t -> (Indexing.symbol * (int * int)) list
     inclusive iteration bounds — the box environment for {!Affine} queries. *)
 
 val scope_value_syms : t -> (int, Indexing.symbol list) Base.Hashtbl.t
-(** The value-dependence symbols of scalar scope-locals, whole-code: per scope id, the union of
-    the symbols its assignments depend on, transitively through [Get_local] references (a scalar
-    local may be assigned in one statement and read in another). Consumed by the setter value
-    scans so a value routed through a scope-local is not laundered of its symbols (gh-494
-    per-thread value-variance). *)
+(** The value-dependence symbols of statement-level scalar scope-locals, whole-code: per scope id,
+    the union of the symbols its statement-level assignments depend on, transitively through
+    [Get_local] references (such a local may be assigned in one statement and read in another).
+    Assignments inside [Local_scope] bodies are not recorded — a scope id is re-instantiated at
+    every use site with per-site loop symbols, and scope-internal flow is covered lexically by the
+    value scans. Consumed by the setter value scans so a value routed through a scope-local is not
+    laundered of its symbols (gh-494 per-thread value-variance). *)
 
 val scalar_value_syms :
   locals:(int, Indexing.symbol list) Base.Hashtbl.t -> scalar_t -> Indexing.symbol list
