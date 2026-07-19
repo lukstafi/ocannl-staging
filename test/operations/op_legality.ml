@@ -115,16 +115,37 @@ let () =
   (let op, _, _ = Sched.split ~axis:k ~factor:4 ~outer:LL.Serial ~inner:LL.Serial in
    check "split reduction serial/serial" op);
   check "unroll reduction" (Sched.Unroll { axis = k; materialize = false });
-  check "stage is not modeled"
-    (Sched.Stage
-       {
-         source = a;
-         tile_loops = [ k ];
-         shared = false;
-         cooperative = None;
-         hoisted = false;
-         swizzle = false;
-       });
+
+  (* Stage: apply's precondition surface is probed hermetically (a raising apply is a proven
+     Illegal), then the containment query [Affine.read_covered_before] proves the staged tile
+     covers the remapped reads — a covered serial packing stage is Legal; shared staging stays
+     Unknown (barriers and launch geometry are validated downstream). *)
+  let stage ?(source = a) ?(tile_loops = [ k ]) ?(shared = false) ?(cooperative = None)
+      ?(hoisted = false) ?(swizzle = false) () =
+    Sched.Stage { source; tile_loops; shared; cooperative; hoisted; swizzle }
+  in
+  check "stage packing proves coverage" (stage ());
+  check "stage packing two tile loops" (stage ~tile_loops:[ i2; k ] ());
+  check "stage of a written source" (stage ~source:c ~tile_loops:[ i2; j2 ] ());
+  check "stage tile loop absent from the read" (stage ~tile_loops:[ j2 ] ());
+  check "stage shared stays unknown" (stage ~shared:true ());
+  check "stage hoisted without host-init data" (stage ~hoisted:true ());
+  check "stage cooperative requires shared" (stage ~cooperative:(Some 32) ());
+
+  (* Tensorize: role-assignment validity is decided by probing apply's micro-kernel recognition —
+     the k role must be the (only) rmw-carrying loop and i/j the output dims, so of the 6 role
+     permutations of the [i2 x j2 x k] accumulation only the identity assignment survives; the
+     affine queries then prove i/j iteration independence (reduction reassociation licensed). *)
+  let tz ~i ~j ~k name ck =
+    ck name (fst (Sched.tensorize ~i ~j ~k ~simd_width:32))
+  in
+  tz ~i:i2 ~j:j2 ~k "tensorize valid roles" check;
+  tz ~i:j2 ~j:i2 ~k "tensorize i/j roles swapped" check;
+  tz ~i:i2 ~j:k ~k:j2 "tensorize j role on the reduction" check;
+  tz ~i:k ~j:j2 ~k:i2 "tensorize i role on the reduction" check;
+  tz ~i:j2 ~j:k ~k:i2 "tensorize rotated roles (j k i)" check;
+  tz ~i:k ~j:i2 ~k:j2 "tensorize rotated roles (k i j)" check;
+  tz ~i:i2 ~j:j2 ~k "tensorize with cross-statement sharing" check2;
 
   (* A genuinely order-sensitive serial loop: lagged self-reference. *)
   let x = fresh_tn "x" [| 9 |] in

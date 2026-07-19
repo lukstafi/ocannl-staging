@@ -249,7 +249,19 @@ val op_legality : Low_level.optimized -> optop -> op_verdict
     statement boundary (with a write on either side) reports [Op_unknown]: such pairs need the
     default annotator's aligned-mapping analysis, which the single-op oracle does not model.
     [Vectorized] retypes and [Swap]s only reorder within the nest and keep the intra-nest scope.
-    [Stage]/[Privatize]/[Expand_zero]/[Tensorize]/[Fuse_epilogue] report [Op_unknown]; their own
+
+    [Tensorize]'s role assignment is decided: the micro-kernel recognition of apply (a pure
+    function of the code) is probed, so an invalid role permutation — e.g. the reduction loop
+    assigned to [i]/[j], violating the discipline that the [k] role is the only rmw-carrying loop
+    of the accumulation — is a proven [Op_illegal]; on structural success the affine queries
+    decide [i]/[j] iteration independence under the reduction-reassociation license (the intrinsic
+    reassociates [k]), with the hardware-lane cross-statement downgrade to [Op_unknown] as above.
+    [Stage] is likewise probed hermetically (a raising apply is [Op_illegal]), then its implicit
+    contract — the staged tile covers the reads it replaces within the staging scope — is the
+    containment query [Affine.read_covered_before] over the fresh tile's accesses: a covered
+    non-shared (packing) stage is [Op_legal]; shared staging (barrier placement and launch
+    geometry are validated downstream) and hoisted staging (link-time host-side packing) report
+    [Op_unknown]. [Privatize]/[Expand_zero]/[Fuse_epilogue] report [Op_unknown]; their own
     apply-time preconditions remain in force. *)
 
 val schedule_legality : Low_level.optimized -> schedule -> (optop * op_verdict) list

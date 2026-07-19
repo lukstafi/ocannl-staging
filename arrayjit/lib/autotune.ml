@@ -1873,7 +1873,8 @@ let collect_serial_triples registry llc =
             }
           when not (contains_loop b3) -> (
             match (SC.resolve registry i, SC.resolve registry j, SC.resolve registry k) with
-            | Some ri, Some rj, Some rk -> acc := ((ri, ti + 1), (rj, tj + 1), (rk, tk + 1)) :: !acc
+            | Some ri, Some rj, Some rk ->
+                acc := ((ri, i, ti + 1), (rj, j, tj + 1), (rk, k, tk + 1)) :: !acc
             | _ -> ())
         | _ -> ());
         walk body
@@ -1959,23 +1960,21 @@ let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) (u : unit_g
     | None -> []
     | Some { Ir.Backend_intf.mma_simd_width; mma_tile = tm, tn, tk } ->
         (* The nesting order need not match the (i, j, k) roles — the roles are fixed by the
-           accumulation pattern, which [Schedule.apply] validates (invalid permutations fail the
-           candidate compile and are skipped). Propose role assignments compatible with the
-           intrinsic tile's divisibility per role. *)
+           accumulation pattern. The op-legality oracle decides role-assignment validity (gh-494
+           waypoint 3 follow-up): invalid permutations — most of the 6 per triple — are proven
+           [Op_illegal] by the probe of apply's micro-kernel recognition and pruned before they
+           cost a candidate compile, instead of failing at compile time. Propose role assignments
+           compatible with the intrinsic tile's divisibility per role. *)
         List.concat_map (collect_serial_triples u.u_registry u.u_opt.LL.llc)
-          ~f:(fun ((r1, e1), (r2, e2), (r3, e3)) ->
+          ~f:(fun (t1, t2, t3) ->
             List.filter_map
-              [
-                (r1, e1, r2, e2, r3, e3);
-                (r1, e1, r3, e3, r2, e2);
-                (r2, e2, r1, e1, r3, e3);
-                (r2, e2, r3, e3, r1, e1);
-                (r3, e3, r1, e1, r2, e2);
-                (r3, e3, r2, e2, r1, e1);
-              ]
-              ~f:(fun (i, ei, j, ej, k, ek) ->
+              [ (t1, t2, t3); (t1, t3, t2); (t2, t1, t3); (t2, t3, t1); (t3, t1, t2); (t3, t2, t1) ]
+              ~f:(fun ((i, si, ei), (j, sj, ej), (k, sk, ek)) ->
                 if ei % tm = 0 && ej % tn = 0 && ek % tk = 0 then
-                  Some (SC.Tensorize { i; j; k; simd_width = mma_simd_width })
+                  let raw, _lane =
+                    Sched.tensorize ~i:si ~j:sj ~k:sk ~simd_width:mma_simd_width
+                  in
+                  gate (SC.Tensorize { i; j; k; simd_width = mma_simd_width }, raw)
                 else None))
   in
   List.take (tensorizes @ splits @ swaps @ unrolls @ vectorizes) max_actions_per_unit
