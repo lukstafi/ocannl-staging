@@ -173,13 +173,15 @@ Rough waypoints:
    reduction-dependence markers.)*
 2. Re-express the procedural checks (`validate_parallel`, `parallel_grid_safe`,
    micro-kernel recognition) as emptiness/subset queries over those relations —
-   equivalence with the procedural answers is the regression suite. *(Landed: the
-   shared-memory rules as pair-conflict queries, and the order-sensitive
-   per-thread-scratch rule via the containment query
+   equivalence with the procedural answers is the regression suite. *(Landed for
+   the legality checks: the shared-memory rules as pair-conflict queries, and the
+   order-sensitive per-thread-scratch rule via the containment query
    (`Affine.read_covered_before`) — a ∀∃ procedure with box-union coverage, whose
    crosschecking exposed and fixed a real annotator gap: scratch whose written
    value depends on a chain symbol without pinning the cell diverged from serial
-   semantics under per-thread copies.)*
+   semantics under per-thread copies. Micro-kernel recognition —
+   `detect_matmul`/`detect_conv` in the autotuner — remains a procedural
+   structural matcher and has not been migrated to relation queries.)*
 3. A legality *oracle* for schedule ops: given a schedule, decide validity by query
    instead of by construction-then-validation. *(First slice landed:
    `Schedule.op_legality` — three-valued verdicts sound in both proven directions,
