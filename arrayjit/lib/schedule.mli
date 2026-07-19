@@ -217,6 +217,27 @@ val apply :
     point in the schedule, or violates an op precondition (see {!optop}). An empty schedule is the
     identity. *)
 
+type op_verdict = Op_legal | Op_illegal of string | Op_unknown of string
+[@@deriving sexp_of, equal]
+
+val op_legality : Low_level.optimized -> optop -> op_verdict
+(** gh-494 waypoint 3: the op-legality oracle. A schedule op is a thread-pairing transform over
+    the routine's access relations; its obligation is decided by the {!Affine} queries — pairing
+    the op's loop symbol(s) as thread identity must leave every write-involving access pair of
+    every written node [Disjoint] or [Same_thread] (with the reduction reassociation license for
+    [Vectorized] retypes and [Swap]s of accumulations). Three-valued and sound in both proven
+    directions: [Op_legal] proves the annotation race-free; [Op_illegal] proves a violation (e.g.
+    a materialized node's unguarded write provably independent of the retyped axis); [Op_unknown]
+    means "compile and see" — the op may be valid under semantics the queries do not model
+    (per-thread scratch copies, renderer fallbacks) — and must never be treated as a rejection.
+    [Stage]/[Privatize]/[Expand_zero]/[Tensorize]/[Fuse_epilogue] report [Op_unknown]; their own
+    apply-time preconditions remain in force. *)
+
+val schedule_legality : Low_level.optimized -> schedule -> (optop * op_verdict) list
+(** Per-op verdicts, each against the code with the preceding ops applied (on a hermetic copy —
+    checking never mutates the argument). Stops after a proven-illegal op or a failing
+    application; an op that fails to apply reports [Op_illegal] with the exception. *)
+
 val default_gpu :
   ?block_size:int ->
   ?min_parallel:int ->

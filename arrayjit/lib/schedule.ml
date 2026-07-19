@@ -2182,6 +2182,187 @@ let apply ?(static_indices = []) (sched : schedule) (opt : Low_level.optimized) 
     in
     { opt with llc }
 
+(** {2 The op-legality oracle}
+
+    gh-494 waypoint 3: schedule ops consult the affine engine instead of every transform (and
+    every candidate compile) embedding its own analysis. A schedule op is a thread-pairing
+    transform over the routine's access relations, so its obligation is a query: does pairing the
+    op's loop symbol(s) as thread identity leave every write-involving access pair of every
+    written node [Disjoint] or [Same_thread]?
+
+    Verdicts are three-valued and both proven directions are sound: [Op_legal] means the queries
+    prove the annotation race-free; [Op_illegal] means a definite violation is proven (e.g. a
+    materialized node's unguarded write provably independent of the retyped axis — every iteration
+    rewrites the same cells); everything else is [Op_unknown] — the op may still be valid under
+    semantics the queries do not model (per-thread copies of scratch, renderer fallbacks), so
+    consumers must treat [Op_unknown] as "compile and see", never as a rejection. The autotuner
+    prunes [Op_illegal] menu proposals before compiling them. *)
+
+type op_verdict = Op_legal | Op_illegal of string | Op_unknown of string
+[@@deriving sexp_of, equal]
+
+(* Worst-of combination: Illegal > Unknown > Legal. *)
+let combine_verdicts v1 v2 =
+  match (v1, v2) with
+  | (Op_illegal _ as v), _ | _, (Op_illegal _ as v) -> v
+  | (Op_unknown _ as v), _ | _, (Op_unknown _ as v) -> v
+  | Op_legal, Op_legal -> Op_legal
+
+let rec find_loop axis (llc : Low_level.t) : Low_level.t option =
+  let open Low_level in
+  match llc with
+  | For_loop { index; _ } when Indexing.equal_symbol index axis -> Some llc
+  | For_loop { body; _ } -> find_loop axis body
+  | Seq (a, b) -> ( match find_loop axis a with Some _ as r -> r | None -> find_loop axis b)
+  | If { body; _ } -> find_loop axis body
+  | _ -> None
+
+let mentions_axis axis (idx : Indexing.axis_index) =
+  match idx with
+  | Indexing.Iterator s -> Indexing.equal_symbol s axis
+  | Indexing.Affine { symbols; _ } ->
+      List.exists (Indexing.coalesce_affine_terms symbols) ~f:(fun (_, s) ->
+          Indexing.equal_symbol s axis)
+  | Indexing.Concat syms -> List.exists syms ~f:(Indexing.equal_symbol axis)
+  | Indexing.Fixed_idx _ | Indexing.Sub_axis -> false
+
+let acc_interpretable (a : _ Affine.access) =
+  (not a.Affine.a_dynamic)
+  && (not a.a_whole) && (not a.a_vec_last)
+  && not (Array.exists a.a_map ~f:(function Indexing.Sub_axis | Indexing.Concat _ -> true | _ -> false))
+
+(* Iteration independence of the loop bound by [pairs]'s symbols (all paired with themselves:
+   same-nest thread identity). [licensed w x] exempts a conflicting pair from the obligation
+   (reduction reassociation under an explicit license). *)
+let loops_independent (opt : Low_level.optimized) ~(syms : Indexing.symbol list) ~licensed :
+    op_verdict =
+  let open Low_level in
+  let plc = opt.optimize_ctx.placements in
+  match find_loop (List.hd_exn syms) opt.llc with
+  | None ->
+      Op_unknown
+        ("no statement-level loop binds " ^ Indexing.symbol_ident (List.hd_exn syms))
+  | Some loop ->
+      let accs = Low_level.affine_accesses loop in
+      let env = Low_level.loop_bounds loop in
+      let range s = List.Assoc.find env s ~equal:Indexing.equal_symbol in
+      let dup s = List.Assoc.mem env s ~equal:Indexing.equal_symbol in
+      let pairs = List.map syms ~f:(fun s -> (s, s)) in
+      let extent s = match range s with Some (lo, hi) -> hi - lo + 1 | None -> 1 in
+      let by_tn = Hashtbl.create (module Int) in
+      List.iter accs ~f:(fun a -> Hashtbl.add_multi by_tn ~key:a.Affine.a_tn.Tn.uid ~data:a);
+      Hashtbl.fold by_tn ~init:Op_legal ~f:(fun ~key:_ ~data:accs v ->
+          let tn = (List.hd_exn accs).Affine.a_tn in
+          let writes = List.filter accs ~f:(fun a -> a.Affine.a_write) in
+          if List.is_empty writes then v
+          else
+            let is_mat = Tn.Placements.is_materialized_peek plc tn in
+            (* Proven violation: an unguarded, interpretable write of a materialized node whose
+               map provably avoids some parallel symbol of extent > 1 — every iteration of that
+               loop rewrites the same cells of genuinely shared memory. *)
+            let illegal =
+              is_mat
+              && List.find writes ~f:(fun w ->
+                     acc_interpretable w && (not w.a_guarded)
+                     && (not (licensed w w))
+                     && List.exists syms ~f:(fun s ->
+                            extent s > 1
+                            && not (Array.exists w.a_map ~f:(mentions_axis s))))
+                 |> Option.is_some
+            in
+            if illegal then
+              combine_verdicts v
+                (Op_illegal
+                   (Tn.debug_name tn
+                  ^ ": a write provably independent of a parallelized loop rewrites the same \
+                     cells on every iteration"))
+            else if not (List.for_all accs ~f:acc_interpretable) then
+              combine_verdicts v
+                (Op_unknown (Tn.debug_name tn ^ ": statically unknown access under the loop"))
+            else
+              let node_v =
+                List.fold writes ~init:Op_legal ~f:(fun nv w ->
+                    List.fold accs ~init:nv ~f:(fun nv x ->
+                        if licensed w x then nv
+                        else
+                          match
+                            Affine.pair_conflict ~range ~dup_left:dup ~dup_right:dup ~pairs
+                              ~left:w.Affine.a_map ~right:x.Affine.a_map
+                          with
+                          | Affine.Disjoint | Affine.Same_thread -> nv
+                          | Affine.Cross_thread wit ->
+                              combine_verdicts nv
+                                (Op_unknown (Tn.debug_name tn ^ ": " ^ wit))))
+              in
+              combine_verdicts v node_v)
+
+let op_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
+  let open Low_level in
+  let hardware = function Grid | Workgroup -> true | _ -> false in
+  let vectorized = function Vectorized -> true | _ -> false in
+  (* Under the reassociation license (Vectorized retypes; Swap's accumulation contract), a
+     read-modify-write's conflicts with itself and with its own same-cell read are the reduction
+     dependence the license permits. *)
+  let rmw_license (w : _ Affine.access) (x : _ Affine.access) =
+    w.Affine.a_rmw
+    && (phys_equal w x
+       || (not x.Affine.a_write)
+          && [%equal: int list] w.a_path x.Affine.a_path
+          && [%equal: Indexing.axis_index array] w.a_map x.a_map)
+  in
+  let none _ _ = false in
+  match op with
+  | Retype { axis; ty } ->
+      if hardware ty then loops_independent opt ~syms:[ axis ] ~licensed:none
+      else if vectorized ty then loops_independent opt ~syms:[ axis ] ~licensed:rmw_license
+      else if equal_axis_type ty Workgroup_reduce then
+        Op_unknown "Workgroup_reduce is the tensorization pipeline's domain"
+      else Op_legal
+  | Split { axis; outer; inner; _ } ->
+      if hardware outer || hardware inner then loops_independent opt ~syms:[ axis ] ~licensed:none
+      else if vectorized outer || vectorized inner then
+        loops_independent opt ~syms:[ axis ] ~licensed:rmw_license
+      else Op_legal
+  | Unroll _ -> Op_legal
+  | Swap { outer; inner } -> (
+      (* Interchange reorders iterations; the optop contract licenses it for the
+         associative-commutative accumulation patterns lowering emits (the rmw self-pairs). Beyond
+         that license, prove that no write-involving pair can touch a common cell across
+         different (outer, inner) iterations at all — then any order computes the same values. *)
+      match find_loop outer opt.llc with
+      | Some (For_loop { body = For_loop { index; _ }; _ }) when Indexing.equal_symbol index inner
+        ->
+          loops_independent opt ~syms:[ outer; inner ] ~licensed:rmw_license
+      | Some _ -> Op_unknown "loops are not perfectly nested"
+      | None -> Op_unknown ("no statement-level loop binds " ^ Indexing.symbol_ident outer))
+  | Stage _ | Privatize _ | Expand_zero _ | Tensorize _ | Fuse_epilogue _ ->
+      Op_unknown "not modeled by the oracle (the op's own preconditions apply)"
+
+(** [schedule_legality opt sched]: per-op verdicts, each against the code with the preceding ops
+    applied (on a hermetic copy — checking never mutates [opt]). Stops after a proven-illegal op
+    or a failing application; an op that fails to apply reports [Op_illegal] with the exception. *)
+let schedule_legality (opt : Low_level.optimized) (sched : schedule) : (optop * op_verdict) list =
+  let opt =
+    {
+      opt with
+      Low_level.traced_store = Hashtbl.copy opt.Low_level.traced_store;
+      optimize_ctx = Low_level.copy_optimize_ctx opt.Low_level.optimize_ctx;
+    }
+  in
+  let rec go opt acc = function
+    | [] -> List.rev acc
+    | op :: tl -> (
+        let v = op_legality opt op in
+        match v with
+        | Op_illegal _ -> List.rev ((op, v) :: acc)
+        | _ -> (
+            match apply_opt_op opt op with
+            | opt' -> go opt' ((op, v) :: acc) tl
+            | exception exn ->
+                List.rev ((op, Op_illegal ("apply failed: " ^ Exn.to_string exn)) :: acc)))
+  in
+  go opt [] sched
+
 (** {2 The default GPU annotator}
 
     [default_gpu] computes a schedule that makes elementwise / outer-parallel kernels launch with
