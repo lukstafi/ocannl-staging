@@ -2225,6 +2225,10 @@ type access = {
   a_vec : bool;
       (** [Set_from_vec]: [a_idcs] is the base of a length-run along the minor axis, not a single
           cell — affine queries must treat the last component as opaque ({!query_map}). *)
+  a_val_syms : Indexing.symbol list;
+      (** Writes only: loop symbols the written value depends on syntactically (index symbols of
+          rhs reads, embedded indices, dynamic-index sub-expressions). Direct dependence only — a
+          chain through another scratch node is not tracked. *)
 }
 
 exception Bail
@@ -2235,8 +2239,48 @@ exception Bail
 let scan_accesses plc (llc : Low_level.t) : access list =
   let open Low_level in
   let acc = ref [] in
-  let add ~depth:_ ~write ~dynamic ?(vec = false) tn idcs =
-    acc := { a_tn = tn; a_idcs = idcs; a_write = write; a_dynamic = dynamic; a_vec = vec } :: !acc
+  let add ~depth:_ ~write ~dynamic ?(vec = false) ?(val_syms = []) tn idcs =
+    acc :=
+      {
+        a_tn = tn;
+        a_idcs = idcs;
+        a_write = write;
+        a_dynamic = dynamic;
+        a_vec = vec;
+        a_val_syms = val_syms;
+      }
+      :: !acc
+  in
+  (* Symbols the value of a setter depends on, syntactically. *)
+  let rec scalar_syms (llsc : scalar_t) : Indexing.symbol list =
+    let idx_syms (idx : Indexing.axis_index) =
+      match idx with
+      | Indexing.Iterator s -> [ s ]
+      | Indexing.Affine { symbols; _ } -> List.map symbols ~f:snd
+      | Indexing.Concat syms -> syms
+      | Indexing.Fixed_idx _ | Indexing.Sub_axis -> []
+    in
+    match llsc with
+    | Local_scope { body; _ } -> body_syms body
+    | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ -> []
+    | Embed_index idx -> idx_syms idx
+    | Get (_, idcs) -> List.concat_map (Array.to_list idcs) ~f:idx_syms
+    | Get_dynamic { idcs; dyn_value = v, _; _ } ->
+        List.concat_map (Array.to_list idcs) ~f:idx_syms @ scalar_syms v
+    | Ternop (_, (a, _), (b, _), (c, _)) -> scalar_syms a @ scalar_syms b @ scalar_syms c
+    | Binop (_, (a, _), (b, _)) -> scalar_syms a @ scalar_syms b
+    | Unop (_, (a, _)) -> scalar_syms a
+  and body_syms (llc : t) : Indexing.symbol list =
+    match llc with
+    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
+        []
+    | Seq (a, b) -> body_syms a @ body_syms b
+    | For_loop { body; _ } -> body_syms body
+    | If { cond = c, _; body } -> scalar_syms c @ body_syms body
+    | Set { llsc; _ } | Set_local (_, llsc) -> scalar_syms llsc
+    | Set_dynamic { dyn_value = v, _; llsc; _ } -> scalar_syms v @ scalar_syms llsc
+    | Set_from_vec { arg = a, _; _ } -> scalar_syms a
+    | Tile_mma { fallback; _ } -> body_syms fallback
   in
   let rec code ~depth llc =
     match llc with
@@ -2256,7 +2300,7 @@ let scan_accesses plc (llc : Low_level.t) : access list =
           (* Zeroing per-thread scratch is safe: each thread zeroes its own copy. *)
     | Set { tn; idcs; llsc; _ } ->
         if depth > 0 && Tn.Placements.is_materialized_peek plc tn then raise Bail;
-        add ~depth ~write:true ~dynamic:false tn idcs;
+        add ~depth ~write:true ~dynamic:false ~val_syms:(scalar_syms llsc) tn idcs;
         scalar ~depth llsc
     | Set_dynamic { tn; idcs; dyn_value = v, _; llsc; _ } ->
         (* gh-466: the scatter's effective write index is not statically known. Registering it
@@ -2264,12 +2308,12 @@ let scan_accesses plc (llc : Low_level.t) : access list =
            written node and the cross-nest alignment reject it — the deterministic no-atomics
            invariant: loops driving the dynamic index stay serial. *)
         if depth > 0 && Tn.Placements.is_materialized_peek plc tn then raise Bail;
-        add ~depth ~write:true ~dynamic:true tn idcs;
+        add ~depth ~write:true ~dynamic:true ~val_syms:(scalar_syms v @ scalar_syms llsc) tn idcs;
         scalar ~depth v;
         scalar ~depth llsc
     | Set_from_vec { tn; idcs; arg = a, _; _ } ->
         if depth > 0 && Tn.Placements.is_materialized_peek plc tn then raise Bail;
-        add ~depth ~write:true ~dynamic:false ~vec:true tn idcs;
+        add ~depth ~write:true ~dynamic:false ~vec:true ~val_syms:(scalar_syms a) tn idcs;
         scalar ~depth a
     | Set_local (_, llsc) -> scalar ~depth llsc
     | If { cond = c, _; body } ->
@@ -2420,8 +2464,16 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
           | None -> ()
           | Some accs_j ->
               let writes_mention accs syms =
+                (* Cell mention, or unpinned value mention: a per-thread copy written with a value
+                   depending on a chain symbol that does not also pin the cell diverges from the
+                   serial last-writer (see [value_invariant_ok] below), so such scratch cannot be
+                   exempt from the cross-nest edge either. *)
                 List.exists accs ~f:(fun a ->
-                    a.a_write && Array.exists a.a_idcs ~f:(mentions_sym syms))
+                    a.a_write
+                    && (Array.exists a.a_idcs ~f:(mentions_sym syms)
+                       || List.exists a.a_val_syms ~f:(fun s ->
+                              List.mem syms s ~equal:Indexing.equal_symbol
+                              && not (Array.exists a.a_idcs ~f:(mentions_sym [ s ])))))
               in
               if
                 (List.exists accs_i ~f:(fun a -> a.a_write)
@@ -2506,14 +2558,28 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
     let edge_aligned ~l (i, j, uid) =
       let accs_i = Hashtbl.find_multi group_tbls.(i) uid
       and accs_j = Hashtbl.find_multi group_tbls.(j) uid in
-      let pair_aligned =
-        match accs_i with
-        | a :: _ when Tn.Placements.is_materialized_peek plc a.a_tn -> pair_aligned_query
-        | _ -> pair_aligned_procedural
+      let is_mat = Tn.Placements.is_materialized_peek plc (List.hd_exn accs_i).a_tn in
+      let pair_aligned = if is_mat then pair_aligned_query else pair_aligned_procedural in
+      (* Per-thread copies of statement-crossing scratch: a consumer thread's copy holds its own
+         chunk's last value, while the serial reference holds the last chunk's — they coincide
+         only when the written value cannot vary across the chunks writing the same cell. At trim
+         level [l], every write's value symbols must avoid the writer's parallel symbols unless
+         they also pin the written cell (then only the reader's own thread wrote it). The search
+         over [l] serializes the offending chain loop. Syntactic, direct dependence only. *)
+      let value_invariant_ok =
+        is_mat
+        || List.for_all [ (accs_i, i); (accs_j, j) ] ~f:(fun (accs, g) ->
+               let syms = List.take full_syms.(g) l in
+               List.for_all accs ~f:(fun a ->
+                   (not a.a_write)
+                   || List.for_all a.a_val_syms ~f:(fun s ->
+                          (not (List.mem syms s ~equal:Indexing.equal_symbol))
+                          || Array.exists a.a_idcs ~f:(mentions_sym [ s ]))))
       in
-      List.for_all accs_i ~f:(fun a ->
-          List.for_all accs_j ~f:(fun b ->
-              (not (a.a_write || b.a_write)) || pair_aligned ~l i j a b))
+      value_invariant_ok
+      && List.for_all accs_i ~f:(fun a ->
+             List.for_all accs_j ~f:(fun b ->
+                 (not (a.a_write || b.a_write)) || pair_aligned ~l i j a b))
     in
     let comps = Hashtbl.create (module Int) in
     Array.iteri parent ~f:(fun g _ -> Hashtbl.add_multi comps ~key:(find g) ~data:g);
@@ -2668,6 +2734,7 @@ let crosscheck_scratch_containment (opt : Low_level.optimized) (chains : Low_lev
                     a with
                     Affine.a_map = Array.map a.Affine.a_map ~f:(rename_idx m);
                     a_loops = List.map a.a_loops ~f:(fun (s, b) -> (rename_sym m s, b));
+                    a_val_syms = List.map a.a_val_syms ~f:(rename_sym m);
                   })
           | [] -> a)
     in
@@ -2685,16 +2752,41 @@ let crosscheck_scratch_containment (opt : Low_level.optimized) (chains : Low_lev
           && not (List.exists accs ~f:(fun a -> a.Affine.a_dynamic))
         then
           let writes = List.filter accs ~f:(fun a -> a.Affine.a_write) in
+          let head p = List.hd p |> Option.value ~default:(-1) in
           let witness = ref "" in
-          let query_safe =
-            List.for_all accs ~f:(fun r ->
-                r.Affine.a_write
+          (* The value side of the per-thread-copy semantics (see [read_covered_before]'s doc): a
+             write covering reads in other top-level statements must have every thread symbol that
+             feeds its value also pin the written cell. *)
+          let value_ok =
+            List.for_all writes ~f:(fun w ->
+                let crossing =
+                  List.exists accs ~f:(fun r ->
+                      (not r.Affine.a_write) && head r.a_path <> head w.Affine.a_path)
+                in
+                (not crossing)
+                || List.for_all w.Affine.a_val_syms ~f:(fun s ->
+                       (not (thread s))
+                       || Array.exists w.a_map ~f:(fun idx ->
+                              match idx with
+                              | Indexing.Iterator s' -> Indexing.equal_symbol s s'
+                              | Indexing.Affine { symbols; _ } ->
+                                  List.exists symbols ~f:(fun (_, s') ->
+                                      Indexing.equal_symbol s s')
+                              | _ -> false))
                 ||
-                match Affine.read_covered_before ~thread ~read:r ~writes () with
-                | `Covered -> true
-                | `Unknown w ->
-                    witness := w;
-                    false)
+                (witness := "thread-variant value in statement-crossing scratch write";
+                 false))
+          in
+          let query_safe =
+            value_ok
+            && List.for_all accs ~f:(fun r ->
+                   r.Affine.a_write
+                   ||
+                   match Affine.read_covered_before ~thread ~read:r ~writes () with
+                   | `Covered -> true
+                   | `Unknown w ->
+                       witness := w;
+                       false)
           in
           Affine.crosscheck ~site:"schedule per-thread scratch containment"
             ~context:(Tn.debug_name tn)

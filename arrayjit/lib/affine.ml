@@ -449,6 +449,10 @@ type 'tn access = {
           carries a reduction dependence — an order-sensitive legality dimension (the determinism
           contract): a loop carrying only reduction edges may be reassociated (vectorized) under an
           explicit license, but never parallelized. *)
+  a_val_syms : Idx.symbol list;
+      (** Writes only: loop symbols the written value depends on syntactically (index symbols of
+          rhs reads, embedded indices, dynamic-index sub-expressions). Direct dependence only — a
+          chain through another node's cells is not tracked. *)
   a_loops : (Idx.symbol * (int * int)) list;
       (** Enclosing loops, outermost first, with inclusive iteration bounds. *)
   a_path : int list;
@@ -479,10 +483,15 @@ type 'tn access = {
     executed). Loop-carried coverage — a read covered only by earlier iterations of a shared loop —
     is declined, conservatively.
 
-    With [?thread] naming the parallel (thread-identity) symbols, [`Covered] proves the
-    per-thread-copy transform correct for this read: the thread reads only cells it wrote itself,
-    earlier in its own serial chunk, so the value read equals the serial value (the thread's own
-    write is also the serial last-writer, chunks being contiguous in the serial order).
+    With [?thread] naming the parallel (thread-identity) symbols, [`Covered] proves the cell side
+    of the per-thread-copy transform: the thread reads only cells it wrote itself, earlier in its
+    own serial chunk. For reads covered within the same top-level statement that also proves the
+    VALUE correct — chunks are serially contiguous there, so the thread's own write is the serial
+    last-writer. A cross-statement covering write needs a side condition the caller must supply:
+    other chunks of the writing statement run serially after the reader's own chunk, so the values
+    coincide only when the written value cannot vary across the chunks writing the same cell —
+    every thread symbol feeding the value ([a_val_syms]) must also pin the written cell (appear in
+    the write's map).
 
     Guarded writes are the caller's choice: include them to mirror guards-taken analyses
     ([Low_level.visit_llc] traces [If] bodies unconditionally), pre-filter [a_guarded] for

@@ -238,6 +238,11 @@ val default_gpu :
     prefix — identical annotation geometry, so each hardware thread covers the same index slice in
     every linked nest — and per axis position the paired accesses either both use plain [Iterator]s
     of same-chain-position parallel symbols or neither mentions one; otherwise the analysis bails.
+    For non-materialized (per-thread copy) scratch the edge additionally requires value
+    thread-invariance at the chosen trim: a chain symbol feeding a scratch write's value without
+    pinning the written cell would leave each consumer thread's copy holding its own chunk's last
+    value where the serial reference holds the last chunk's, so the trim search serializes that
+    loop (gh-494; direct syntactic dependence only).
     Returns the empty schedule when any check fails or when the largest parallelizable nest has
     fewer than [min_parallel] iterations (default from config [gpu_schedule_min_parallel] = 64: a
     kernel launches either way, so any real parallelism beats the serial 1x1 fallback — a single GPU

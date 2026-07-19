@@ -3258,7 +3258,7 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
   in
   let acc = ref [] in
   let add ~loops ~path ~guarded ?(dynamic = false) ?(whole = false) ?(vec_len = 0) ?(rmw = false)
-      ~write tn map =
+      ?(val_syms = []) ~write tn map =
     acc :=
       {
         Affine.a_tn = tn;
@@ -3270,10 +3270,42 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
         a_vec_len = vec_len;
         a_guarded = guarded;
         a_rmw = rmw;
+        a_val_syms = val_syms;
         a_loops = List.rev loops;
         a_path = List.rev path;
       }
       :: !acc
+  in
+  (* Loop symbols a setter's value depends on, syntactically. *)
+  let rec scalar_syms (llsc : scalar_t) : Indexing.symbol list =
+    let idx_syms (idx : Indexing.axis_index) =
+      match idx with
+      | Indexing.Iterator s -> [ s ]
+      | Indexing.Affine { symbols; _ } -> List.map symbols ~f:snd
+      | Indexing.Concat syms -> syms
+      | Indexing.Fixed_idx _ | Indexing.Sub_axis -> []
+    in
+    match llsc with
+    | Local_scope { body; _ } -> body_syms body
+    | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ -> []
+    | Embed_index idx -> idx_syms idx
+    | Get (_, idcs) -> List.concat_map (Array.to_list idcs) ~f:idx_syms
+    | Get_dynamic { idcs; dyn_value = v, _; _ } ->
+        List.concat_map (Array.to_list idcs) ~f:idx_syms @ scalar_syms v
+    | Ternop (_, (a, _), (b, _), (c, _)) -> scalar_syms a @ scalar_syms b @ scalar_syms c
+    | Binop (_, (a, _), (b, _)) -> scalar_syms a @ scalar_syms b
+    | Unop (_, (a, _)) -> scalar_syms a
+  and body_syms (llc : t) : Indexing.symbol list =
+    match llc with
+    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
+        []
+    | Seq (a, b) -> body_syms a @ body_syms b
+    | For_loop { body; _ } -> body_syms body
+    | If { cond = c, _; body } -> scalar_syms c @ body_syms body
+    | Set { llsc; _ } | Set_local (_, llsc) -> scalar_syms llsc
+    | Set_dynamic { dyn_value = v, _; llsc; _ } -> scalar_syms v @ scalar_syms llsc
+    | Set_from_vec { arg = a, _; _ } -> scalar_syms a
+    | Tile_mma { fallback; _ } -> body_syms fallback
   in
   let rec code ~loops ~path ~guarded (llc : t) =
     match llc with
@@ -3289,16 +3321,19 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
     | Zero_out tn -> add ~loops ~path ~guarded ~whole:true ~write:true tn [||]
     | Set { tn; idcs; llsc; _ } ->
         scalar ~loops ~path ~guarded llsc;
-        add ~loops ~path ~guarded ~rmw:(reads_tn tn.Tn.uid llsc) ~write:true tn idcs
+        add ~loops ~path ~guarded ~rmw:(reads_tn tn.Tn.uid llsc) ~val_syms:(scalar_syms llsc)
+          ~write:true tn idcs
     | Set_dynamic { tn; idcs; dyn_value = v, _; llsc; _ } ->
         scalar ~loops ~path ~guarded v;
         scalar ~loops ~path ~guarded llsc;
         add ~loops ~path ~guarded ~dynamic:true
           ~rmw:(reads_tn tn.Tn.uid llsc || reads_tn tn.Tn.uid v)
+          ~val_syms:(scalar_syms v @ scalar_syms llsc)
           ~write:true tn idcs
     | Set_from_vec { tn; idcs; length; arg = a, _; _ } ->
         scalar ~loops ~path ~guarded a;
-        add ~loops ~path ~guarded ~vec_len:length ~rmw:(reads_tn tn.Tn.uid a) ~write:true tn idcs
+        add ~loops ~path ~guarded ~vec_len:length ~rmw:(reads_tn tn.Tn.uid a)
+          ~val_syms:(scalar_syms a) ~write:true tn idcs
     | Set_local (_, llsc) -> scalar ~loops ~path ~guarded llsc
     | Tile_mma { fallback; _ } -> code ~loops ~path ~guarded fallback
   and scalar ~loops ~path ~guarded (llsc : scalar_t) =

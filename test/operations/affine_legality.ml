@@ -322,6 +322,7 @@ let () =
       a_vec_len = vec_len;
       a_guarded = false;
       a_rmw = false;
+      a_val_syms = [];
       a_loops = loops;
       a_path = path;
     }
