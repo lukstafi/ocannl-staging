@@ -303,10 +303,8 @@ let () =
      capacity. Backend-independent: limits are passed explicitly. --- *)
   let tight_limits =
     {
+      Ir.Backend_intf.no_hardware_limits with
       Ir.Backend_intf.max_threads_per_workgroup = Some 4;
-      max_workgroup_memory_bytes = None;
-      mma = None;
-      simd_vector_bytes = 0;
     }
   in
   let clamp_sched = ref [] in
@@ -330,10 +328,8 @@ let () =
            (Sched.check_hardware_limits ~name:"limit_threads"
               ~limits:
                 {
+                  Ir.Backend_intf.no_hardware_limits with
                   Ir.Backend_intf.max_threads_per_workgroup = Some 2;
-                  max_workgroup_memory_bytes = None;
-                  mma = None;
-                  simd_vector_bytes = 0;
                 }
               (fake lane_llc)
              : unit);
@@ -348,10 +344,8 @@ let () =
   in
   let smem_limits bytes =
     {
-      Ir.Backend_intf.max_threads_per_workgroup = None;
-      max_workgroup_memory_bytes = Some bytes;
-      mma = None;
-      simd_vector_bytes = 0;
+      Ir.Backend_intf.no_hardware_limits with
+      Ir.Backend_intf.max_workgroup_memory_bytes = Some bytes;
     }
   in
   p "shared tiles within the memory limit accepted"

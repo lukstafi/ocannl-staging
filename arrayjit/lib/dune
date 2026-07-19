@@ -54,6 +54,7 @@
   tnode
   host_inits
   low_level
+  cost_model
   schedule
   schedule_cache
   assignments
