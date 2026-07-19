@@ -845,7 +845,10 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
         @@ Low_level.loop_over_dims (Lazy.force dims) ~body:(fun idcs ->
             set array idcs @@ Constant_bits (Int64.of_int array.id))
     | Fetch { array; fetch_op = Embed_dim variable_ref; dims } ->
-        (* Note: we are guaranteed all shape inference is forced before we access variable_ref. *)
+        (* Forcing [dims] first forces shape inference to complete, which is what fills in
+           [variable_ref]: it must happen before reading the solved dimension (this fetch may be
+           the first statement lowered in the routine). *)
+        let dims = Lazy.force dims in
         let dim_value =
           match (variable_ref.Indexing.solved_dim, variable_ref.Indexing.solved_sym) with
           | Some d, _ -> d
@@ -859,7 +862,7 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
                   ^ " has no solved dimension")
         in
         default_padding_before array
-        @@ Low_level.loop_over_dims (Lazy.force dims) ~body:(fun idcs ->
+        @@ Low_level.loop_over_dims dims ~body:(fun idcs ->
             set array idcs @@ Constant (Float.of_int dim_value))
     | Fetch { array; fetch_op = Range_over_offsets; dims = (lazy dims) } ->
         default_padding_before array
