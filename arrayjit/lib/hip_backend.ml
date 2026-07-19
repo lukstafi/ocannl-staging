@@ -59,7 +59,11 @@ module Slab = struct
   type device = Device_stream.device
   type buffer_ptr = H.Deviceptr.t
 
-  let pools : (int * int, buffer_ptr) Hashtbl.Poly.t = Hashtbl.Poly.create ()
+  (* Requested sizes are tracked alongside the pointers so [get_used_memory] can report the bytes
+     OCANNL allocated on the device (gh-ocannl-289): the driver's [get_free_and_total_mem] moves in
+     allocation granules, which hides sub-granule effects such as the liveness planner's arena
+     savings (gh-ocannl-489) and counts other processes' memory. *)
+  let pools : (int * int, buffer_ptr * int) Hashtbl.Poly.t = Hashtbl.Poly.create ()
 
   let alloc_pool ?mode:_ (device : device) ~pool_id ~size_in_bytes ~alignment:_ =
     set_ctx device.dev.primary_context;
@@ -67,21 +71,25 @@ module Slab = struct
     (* Free any prior allocation under this key before replacing it, so device memory stays
        equivalent to the pre-refactor path. Unique tnode pool ids never pre-exist; this only fires
        on the reserved merge pool growing in place. *)
-    Option.iter (Hashtbl.find pools key) ~f:H.Deviceptr.mem_free;
+    Option.iter (Hashtbl.find pools key) ~f:(fun (ptr, _) -> H.Deviceptr.mem_free ptr);
     let ptr = H.Deviceptr.mem_alloc ~size_in_bytes:(max 1 size_in_bytes) in
-    Hashtbl.set pools ~key ~data:ptr
+    Hashtbl.set pools ~key ~data:(ptr, size_in_bytes)
 
   let free_pool =
     Some
       (fun (device : device) ~pool_id ->
         let key = (device.device_id, pool_id) in
-        Option.iter (Hashtbl.find pools key) ~f:H.Deviceptr.mem_free;
+        Option.iter (Hashtbl.find pools key) ~f:(fun (ptr, _) -> H.Deviceptr.mem_free ptr);
         Hashtbl.remove pools key)
 
   let resolve_pool (device : device) { pool_id; offset = _ } : buffer_ptr =
     (* Return the slab base. The byte offset is NOT folded into the handle here; callers apply it
        via the hipjit ?offset / ?dst_offset / ?src_offset params or via H.Deviceptr.offset. *)
-    Hashtbl.find_exn pools (device.device_id, pool_id)
+    fst (Hashtbl.find_exn pools (device.device_id, pool_id))
+
+  let used_memory (device : device) =
+    Hashtbl.fold pools ~init:0 ~f:(fun ~key:(dev_id, _) ~data:(_, size) acc ->
+        if dev_id = device.device_id then acc + size else acc)
 
   let memset_zero (device : device) ~pool_id ~offset ~size_in_bytes =
     let base = resolve_pool device { pool_id; offset } in
@@ -163,10 +171,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
   (* [devices] is mutable to support plugging in new devices. *)
   let devices = lazy (ref @@ Array.create ~len:(num_devices ()) None)
 
-  let get_used_memory (device : device) =
-    set_ctx device.dev.primary_context;
-    let free, total = H.Device.get_free_and_total_mem () in
-    total - free
+  (* Bytes OCANNL has allocated on this device via [Slab], exact rather than the driver's
+     granule-quantized [total - free] (gh-ocannl-289). Device-wide across contexts, matching the
+     [Context.get_used_memory] contract. *)
+  let get_used_memory (device : device) = Slab.used_memory device
 
   (* The merge buffer is the device's reserved single-tenant pool (id [merge_buffer_pool_id]); grow
      it in place when a larger node arrives ([Slab.alloc_pool] overwrites the reserved entry). *)
