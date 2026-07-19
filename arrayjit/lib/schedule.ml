@@ -2231,11 +2231,70 @@ let acc_interpretable (a : _ Affine.access) =
   && (not a.a_whole) && (not a.a_vec_last)
   && not (Array.exists a.a_map ~f:(function Indexing.Sub_axis | Indexing.Concat _ -> true | _ -> false))
 
+(* Node accesses outside a given subtree: uid -> written-outside flag. Hardware annotations
+   interleave sibling statements' threads with no grid-wide synchronization, so any node shared
+   across the subtree boundary (with a write on either side) carries a cross-nest alignment
+   obligation the single-op oracle does not model. *)
+let accesses_outside (llc : Low_level.t) ~(skip : Low_level.t) : (int, bool) Hashtbl.t =
+  let open Low_level in
+  let outside = Hashtbl.create (module Int) in
+  let note ~write (tn : Tn.t) =
+    Hashtbl.update outside tn.Tn.uid ~f:(function None -> write | Some w -> w || write)
+  in
+  let rec stmt (llc : Low_level.t) =
+    if phys_equal llc skip then ()
+    else
+      match llc with
+      | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ -> ()
+      | Seq (a, b) ->
+          stmt a;
+          stmt b
+      | For_loop { body; _ } -> stmt body
+      | If { cond = c, _; body } ->
+          scalar c;
+          stmt body
+      | Zero_out tn -> note ~write:true tn
+      | Set { tn; llsc; _ } ->
+          note ~write:true tn;
+          scalar llsc
+      | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
+          note ~write:true tn;
+          scalar v;
+          scalar llsc
+      | Set_from_vec { tn; arg = a, _; _ } ->
+          note ~write:true tn;
+          scalar a
+      | Set_local (_, llsc) -> scalar llsc
+      | Tile_mma { fallback; _ } -> stmt fallback
+  and scalar (llsc : scalar_t) =
+    match llsc with
+    | Local_scope { body; _ } -> stmt body
+    | Get (tn, _) -> note ~write:false tn
+    | Get_dynamic { tn; dyn_value = v, _; _ } ->
+        note ~write:false tn;
+        scalar v
+    | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
+    | Ternop (_, (a, _), (b, _), (c, _)) ->
+        scalar a;
+        scalar b;
+        scalar c
+    | Binop (_, (a, _), (b, _)) ->
+        scalar a;
+        scalar b
+    | Unop (_, (a, _)) -> scalar a
+  in
+  stmt llc;
+  outside
+
 (* Iteration independence of the loop bound by [pairs]'s symbols (all paired with themselves:
    same-nest thread identity). [licensed w x] exempts a conflicting pair from the obligation
-   (reduction reassociation under an explicit license). *)
-let loops_independent (opt : Low_level.optimized) ~(syms : Indexing.symbol list) ~licensed :
-    op_verdict =
+   (reduction reassociation under an explicit license). With [cross_nest] (hardware annotations,
+   which interleave sibling statements' threads), a node shared across the loop's statement
+   boundary with a write on either side downgrades the proof to [Op_unknown]: such pairs need the
+   aligned-mapping analysis of the default annotator, which the single-op oracle does not model.
+   Proven intra-nest violations stay [Op_illegal] regardless. *)
+let loops_independent (opt : Low_level.optimized) ~(syms : Indexing.symbol list) ~cross_nest
+    ~licensed : op_verdict =
   let open Low_level in
   let plc = opt.optimize_ctx.placements in
   match find_loop (List.hd_exn syms) opt.llc with
@@ -2249,12 +2308,23 @@ let loops_independent (opt : Low_level.optimized) ~(syms : Indexing.symbol list)
       let dup s = List.Assoc.mem env s ~equal:Indexing.equal_symbol in
       let pairs = List.map syms ~f:(fun s -> (s, s)) in
       let extent s = match range s with Some (lo, hi) -> hi - lo + 1 | None -> 1 in
+      let outside =
+        if cross_nest then accesses_outside opt.llc ~skip:loop else Hashtbl.create (module Int)
+      in
       let by_tn = Hashtbl.create (module Int) in
       List.iter accs ~f:(fun a -> Hashtbl.add_multi by_tn ~key:a.Affine.a_tn.Tn.uid ~data:a);
-      Hashtbl.fold by_tn ~init:Op_legal ~f:(fun ~key:_ ~data:accs v ->
+      Hashtbl.fold by_tn ~init:Op_legal ~f:(fun ~key:uid ~data:accs v ->
           let tn = (List.hd_exn accs).Affine.a_tn in
           let writes = List.filter accs ~f:(fun a -> a.Affine.a_write) in
-          if List.is_empty writes then v
+          let written_outside = Option.value (Hashtbl.find outside uid) ~default:false in
+          if List.is_empty writes then
+            if written_outside then
+              combine_verdicts v
+                (Op_unknown
+                   (Tn.debug_name tn
+                  ^ ": written outside the parallelized statement (cross-nest alignment not \
+                     modeled)"))
+            else v
           else
             let is_mat = Tn.Placements.is_materialized_peek plc tn in
             (* Proven violation: an unguarded, interpretable write of a materialized node whose
@@ -2294,6 +2364,14 @@ let loops_independent (opt : Low_level.optimized) ~(syms : Indexing.symbol list)
                               combine_verdicts nv
                                 (Op_unknown (Tn.debug_name tn ^ ": " ^ wit))))
               in
+              let node_v =
+                if equal_op_verdict node_v Op_legal && Hashtbl.mem outside uid then
+                  Op_unknown
+                    (Tn.debug_name tn
+                   ^ ": also accessed outside the parallelized statement (cross-nest alignment \
+                      not modeled)")
+                else node_v
+              in
               combine_verdicts v node_v)
 
 let op_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
@@ -2313,15 +2391,19 @@ let op_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
   let none _ _ = false in
   match op with
   | Retype { axis; ty } ->
-      if hardware ty then loops_independent opt ~syms:[ axis ] ~licensed:none
-      else if vectorized ty then loops_independent opt ~syms:[ axis ] ~licensed:rmw_license
+      if hardware ty then loops_independent opt ~syms:[ axis ] ~cross_nest:true ~licensed:none
+      else if vectorized ty then
+        (* Vectorized (like Swap below) only reorders within the nest; sibling statements still
+           execute in serial program order, so the intra-nest scope is the whole obligation. *)
+        loops_independent opt ~syms:[ axis ] ~cross_nest:false ~licensed:rmw_license
       else if equal_axis_type ty Workgroup_reduce then
         Op_unknown "Workgroup_reduce is the tensorization pipeline's domain"
       else Op_legal
   | Split { axis; outer; inner; _ } ->
-      if hardware outer || hardware inner then loops_independent opt ~syms:[ axis ] ~licensed:none
+      if hardware outer || hardware inner then
+        loops_independent opt ~syms:[ axis ] ~cross_nest:true ~licensed:none
       else if vectorized outer || vectorized inner then
-        loops_independent opt ~syms:[ axis ] ~licensed:rmw_license
+        loops_independent opt ~syms:[ axis ] ~cross_nest:false ~licensed:rmw_license
       else Op_legal
   | Unroll _ -> Op_legal
   | Swap { outer; inner } -> (
@@ -2332,7 +2414,7 @@ let op_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
       match find_loop outer opt.llc with
       | Some (For_loop { body = For_loop { index; _ }; _ }) when Indexing.equal_symbol index inner
         ->
-          loops_independent opt ~syms:[ outer; inner ] ~licensed:rmw_license
+          loops_independent opt ~syms:[ outer; inner ] ~cross_nest:false ~licensed:rmw_license
       | Some _ -> Op_unknown "loops are not perfectly nested"
       | None -> Op_unknown ("no statement-level loop binds " ^ Indexing.symbol_ident outer))
   | Stage _ | Privatize _ | Expand_zero _ | Tensorize _ | Fuse_epilogue _ ->

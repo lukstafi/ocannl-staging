@@ -84,13 +84,24 @@ let () =
                  debug = "";
                })))
   in
-  let opt = hand_built ~stmts:[ zero_nest; acc_nest ] ~tns_on_device:[ a; b; c ] ~tns_local:[] in
+  (* Self-contained kernel: the accumulation nest alone (its rmw serves as the init-carrying
+     form); every node is accessed only under this statement, so the intra-nest proof is the whole
+     obligation for hardware retypes too. *)
+  let opt = hand_built ~stmts:[ acc_nest ] ~tns_on_device:[ a; b; c ] ~tns_local:[] in
+  (* Two sibling statements sharing [c]: hardware annotations interleave their threads with no
+     grid-wide synchronization, so hardware retypes must downgrade to Unknown (Codex P1) while
+     within-nest reorderings (Vectorized, Swap) keep their intra-nest verdicts. *)
+  let opt2 = hand_built ~stmts:[ zero_nest; acc_nest ] ~tns_on_device:[ a; b; c ] ~tns_local:[] in
   let check name op = p name (Sched.op_legality opt op) in
+  let check2 name op = p name (Sched.op_legality opt2 op) in
   check "retype outer parallel loop to Grid" (Sched.Retype { axis = i2; ty = LL.Grid });
   check "retype inner parallel loop to Workgroup" (Sched.Retype { axis = j2; ty = LL.Workgroup });
   check "retype reduction loop to Grid" (Sched.Retype { axis = k; ty = LL.Grid });
   check "retype reduction loop to Vectorized" (Sched.Retype { axis = k; ty = LL.Vectorized });
-  check "retype zero-init loop to Grid" (Sched.Retype { axis = i; ty = LL.Grid });
+  check2 "cross-statement retype to Grid" (Sched.Retype { axis = i2; ty = LL.Grid });
+  check2 "cross-statement zero-init loop to Grid" (Sched.Retype { axis = i; ty = LL.Grid });
+  check2 "cross-statement Vectorized keeps scope" (Sched.Retype { axis = k; ty = LL.Vectorized });
+  check2 "cross-statement swap keeps scope" (Sched.Swap { outer = i2; inner = j2 });
   check "swap parallel pair" (Sched.Swap { outer = i2; inner = j2 });
   check "swap parallel with reduction" (Sched.Swap { outer = j2; inner = k });
   check "swap non-nested loops" (Sched.Swap { outer = i2; inner = k });

@@ -4,7 +4,10 @@ retype outer parallel loop to Grid           Legal
 retype inner parallel loop to Workgroup      Legal
 retype reduction loop to Grid                Illegal
 retype reduction loop to Vectorized          Legal
-retype zero-init loop to Grid                Legal
+cross-statement retype to Grid               Unknown
+cross-statement zero-init loop to Grid       Unknown
+cross-statement Vectorized keeps scope       Legal
+cross-statement swap keeps scope             Legal
 swap parallel pair                           Legal
 swap parallel with reduction                 Legal
 swap non-nested loops                        Unknown

@@ -230,6 +230,11 @@ val op_legality : Low_level.optimized -> optop -> op_verdict
     a materialized node's unguarded write provably independent of the retyped axis); [Op_unknown]
     means "compile and see" — the op may be valid under semantics the queries do not model
     (per-thread scratch copies, renderer fallbacks) — and must never be treated as a rejection.
+    Hardware annotations interleave sibling statements' threads with no grid-wide
+    synchronization, so a hardware retype/split of a loop sharing an accessed node across its
+    statement boundary (with a write on either side) reports [Op_unknown]: such pairs need the
+    default annotator's aligned-mapping analysis, which the single-op oracle does not model.
+    [Vectorized] retypes and [Swap]s only reorder within the nest and keep the intra-nest scope.
     [Stage]/[Privatize]/[Expand_zero]/[Tensorize]/[Fuse_epilogue] report [Op_unknown]; their own
     apply-time preconditions remain in force. *)
 
