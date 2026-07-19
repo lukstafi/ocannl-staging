@@ -2607,6 +2607,100 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
               else if not (agreement_ok accs) then raise Bail)));
   chains
 
+(* gh-494 waypoint 2: the per-thread-copy scratch rule, recomputed as same-thread containment
+   queries over a whole kernel's code and compared under [legality_crosscheck]. Each nest's final
+   (trimmed) chain symbols are renamed to canonical thread symbols — positional pairing, which is
+   the annotator's thread identity across aligned nests — turning "each thread reads only cells it
+   wrote itself, earlier in its own serial chunk" into exactly the engine's shared-parameter
+   cancellation plus statement-order visibility (an unaligned nest's chain loops keep distinct
+   bounds, fail the common-prefix test, and decline as residual thread parameters). Called from
+   the default annotators after {!analyze_parallel_chains} accepted the kernel (not from its
+   partial per-statement invocations, whose code excludes cross-step writes), so the procedural
+   side is a constant accept: a raise means an accepted schedule contains a read of per-thread
+   scratch not provably covered by the same thread's earlier writes. Nodes with dynamic accesses
+   are skipped (scatter into scratch: statically unknown cells). *)
+let crosscheck_scratch_containment (opt : Low_level.optimized) (chains : Low_level.t list list) :
+    unit =
+  if Lazy.force Affine.crosscheck_enabled then (
+    let open Low_level in
+    let plc = opt.optimize_ctx.placements in
+    let nests, _bare = split_nests plc opt.llc in
+    let stmts = flat_lines [ opt.llc ] in
+    let chain_syms chain =
+      List.filter_map chain ~f:(function For_loop fc -> Some fc.index | _ -> None)
+    in
+    (* Canonical thread symbols: per chain position, the first nest's symbol (no fresh symbols —
+       allocating here would drift symbol numbering when the crosscheck is enabled). Symbols are
+       unique per loop construct, so a canonical symbol cannot occur in another nest already. *)
+    let canon = [| None; None |] in
+    List.iter chains ~f:(fun chain ->
+        List.iteri (chain_syms chain) ~f:(fun k s ->
+            if k < 2 && Option.is_none canon.(k) then canon.(k) <- Some s));
+    let renames =
+      List.map2_exn nests chains ~f:(fun n chain ->
+          let idx, _ =
+            Option.value_exn (List.findi stmts ~f:(fun _ s -> phys_equal s n.n_loops))
+          in
+          ( idx,
+            List.mapi (chain_syms chain) ~f:(fun k s ->
+                (s, Option.value_exn (canon.(k)))) ))
+    in
+    let rename_sym m s =
+      List.Assoc.find m s ~equal:Indexing.equal_symbol |> Option.value ~default:s
+    in
+    let rename_idx m (idx : Indexing.axis_index) =
+      match idx with
+      | Indexing.Iterator s -> Indexing.Iterator (rename_sym m s)
+      | Indexing.Affine { symbols; offset } ->
+          Indexing.Affine
+            { symbols = List.map symbols ~f:(fun (c, s) -> (c, rename_sym m s)); offset }
+      | Indexing.Fixed_idx _ | Indexing.Sub_axis -> idx
+      | Indexing.Concat syms -> Indexing.Concat (List.map syms ~f:(rename_sym m))
+    in
+    let accs =
+      List.map (Low_level.affine_accesses opt.llc) ~f:(fun a ->
+          match a.Affine.a_path with
+          | g :: _ -> (
+              match List.Assoc.find renames g ~equal:Int.equal with
+              | None -> a
+              | Some m ->
+                  {
+                    a with
+                    Affine.a_map = Array.map a.Affine.a_map ~f:(rename_idx m);
+                    a_loops = List.map a.a_loops ~f:(fun (s, b) -> (rename_sym m s, b));
+                  })
+          | [] -> a)
+    in
+    let thread s =
+      Array.exists canon ~f:(function Some c -> Indexing.equal_symbol c s | None -> false)
+    in
+    let by_tn = Hashtbl.create (module Int) in
+    List.iter accs ~f:(fun a -> Hashtbl.add_multi by_tn ~key:a.Affine.a_tn.Tn.uid ~data:a);
+    Hashtbl.iter by_tn ~f:(fun accs ->
+        let accs = List.rev accs in
+        let tn = (List.hd_exn accs).Affine.a_tn in
+        if
+          (not (Tn.Placements.is_materialized_peek plc tn))
+          && List.exists accs ~f:(fun a -> a.Affine.a_write)
+          && not (List.exists accs ~f:(fun a -> a.Affine.a_dynamic))
+        then
+          let writes = List.filter accs ~f:(fun a -> a.Affine.a_write) in
+          let witness = ref "" in
+          let query_safe =
+            List.for_all accs ~f:(fun r ->
+                r.Affine.a_write
+                ||
+                match Affine.read_covered_before ~thread ~read:r ~writes () with
+                | `Covered -> true
+                | `Unknown w ->
+                    witness := w;
+                    false)
+          in
+          Affine.crosscheck ~site:"schedule per-thread scratch containment"
+            ~context:(Tn.debug_name tn)
+            ~procedural_safe:(fun () -> true)
+            ~query_safe ~witness:!witness))
+
 (* Parallel iterations a chain covers. *)
 let chain_size chain =
   List.fold chain ~init:1 ~f:(fun sz -> function
@@ -2644,6 +2738,7 @@ let default_gpu ?block_size ?min_parallel ?(limits = Backend_intf.no_hardware_li
   in
   try
     let chains = analyze_parallel_chains opt in
+    crosscheck_scratch_containment opt chains;
     if max_parallel_size chains < min_parallel then []
     else
       (* Emit per-nest ops. Every annotated nest contributes exactly one Grid and one Workgroup
@@ -2682,6 +2777,7 @@ let default_cpu ?min_parallel (opt : Low_level.optimized) : schedule =
   in
   try
     let chains = analyze_parallel_chains opt in
+    crosscheck_scratch_containment opt chains;
     if max_parallel_size chains < min_parallel then []
     else
       (* Retype the outermost chain loop to [Grid], nothing else: pool-backed Grid rendering

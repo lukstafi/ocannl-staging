@@ -59,6 +59,7 @@ whole-node write covers            query Covered      oracle covered
 vec write abutting runs            query Covered      oracle covered     
 thread cancels (own cells)         query Covered      oracle covered     
 thread reads foreign cell          query Unknown      oracle uncovered   
+thread read over bare write        query Covered      oracle covered     
 static cancels                     query Covered      oracle covered     
 static read over full write        query Covered      oracle covered     
 static read over fixed write       query Unknown      oracle uncovered   

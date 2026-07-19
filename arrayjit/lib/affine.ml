@@ -469,7 +469,9 @@ type 'tn access = {
     side declines that write (it would pin the write to one parameter value, or — for a common
     loop — refer to other iterations of that loop); a residual common-loop or static parameter on
     the read side is soundly universalized over its range; a residual thread parameter on the read
-    side declines (the thread reads a cell another thread wrote).
+    side declines against a thread-bound write (the thread would read a cell another thread
+    wrote), but universalizes against a write not under that thread loop — such a write executes
+    redundantly on every thread, so each thread's copy receives it.
 
     Visibility is same-common-iteration program order: a write is usable when its statement path
     is lexicographically before the read's, and coverage is proven within the current iteration of
@@ -564,9 +566,10 @@ let read_covered_before ?(thread = fun _ -> false) ?(static_range = fun _ -> Non
     ~(read : 'tn access) ~(writes : 'tn access list) () : [ `Covered | `Unknown of string ] =
   let exception Fail of string in
   let path_before p q =
-    (* Distinct statements never have prefix-related paths (a [Seq] child is always a leaf
-       statement of that level), so plain lexicographic order is statement order. *)
-    List.compare Int.compare p q < 0
+    (* Lexicographic statement order, except that a prefix path is an ENCLOSING statement
+       ([Local_scope] bodies extend the enclosing statement's path): the enclosing write happens
+       after its rhs body executes, so it is not prior to reads inside the body. *)
+    List.compare Int.compare p q < 0 && not (List.is_prefix q ~prefix:p ~equal:Int.equal)
   in
   let has_opaque m =
     Array.exists m ~f:(function Idx.Sub_axis | Idx.Concat _ -> true | _ -> false)
@@ -662,8 +665,15 @@ let read_covered_before ?(thread = fun _ -> false) ?(static_range = fun _ -> Non
                     if not (List.is_empty !w_par) then raise Skip;
                     let r_univ =
                       List.map r_resid ~f:(fun (c, s) ->
-                          if thread s then raise Skip;
-                          match if is_common s then read_range s else static_range s with
+                          (* A residual thread parameter declines only against a thread-bound
+                             write (the thread would read a cell another thread wrote); a write
+                             not under the thread loop executes redundantly on every thread —
+                             each thread's copy receives it — so the read side universalizes. *)
+                          if thread s && List.Assoc.mem w.a_loops s ~equal:Idx.equal_symbol then
+                            raise Skip;
+                          match
+                            if is_common s || thread s then read_range s else static_range s
+                          with
                           | Some b -> (c, b)
                           | None -> raise Skip)
                     in

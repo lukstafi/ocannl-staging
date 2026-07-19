@@ -499,6 +499,12 @@ let () =
     ~read:(acc ~write:false ~loops:[ (i1, (0, 2)) ] ~path:[ 0; 1 ] [| Idx.Iterator i1 |])
     ~writes:[ acc ~loops:[ (i1, (0, 2)) ] ~path:[ 0; 0 ] [| Idx.Fixed_idx 0 |] ]
     ();
+  (* A write not under the thread loop executes redundantly on every thread (bare statement):
+     each thread's copy receives all its cells. *)
+  check_containment ~name:"thread read over bare write" ~thread:thr
+    ~read:(acc ~write:false ~loops:[ (i1, (0, 2)) ] ~path:[ 1 ] [| Idx.Iterator i1 |])
+    ~writes:[ acc ~loops:[ (k1, (0, 3)) ] ~path:[ 0 ] [| Idx.Iterator k1 |] ]
+    ();
   (* Static parameters: cancelled when matched, universalized on the read side when ranged. *)
   check_containment ~name:"static cancels"
     ~static_ranges:[ (st, (0, 5)) ]
