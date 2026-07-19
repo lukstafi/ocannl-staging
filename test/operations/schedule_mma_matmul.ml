@@ -342,14 +342,14 @@ let () =
      the serial twin; the C backends cannot express shared placement and must reject cleanly (same
      pinning as the SMEM matmul test). --- *)
   let%op mc3 = ma * mb in
-  let staged_schedule (opt : LL.optimized) : Sched.schedule =
+  let staged_schedule ~out ~src_a ~src_b (opt : LL.optimized) : Sched.schedule =
     let paths = nest_paths opt.LL.llc in
     let i, j, k =
       match List.find_exn paths ~f:(fun p -> List.length p = 3) with
       | [ i; j; k ] -> (i, j, k)
       | _ -> assert false
     in
-    let ez, zsyms = Sched.expand_zero ~tn:mc3.Tensor.value in
+    let ez, zsyms = Sched.expand_zero ~tn:out in
     let zi, zj = match zsyms with [ zi; zj ] -> (zi, zj) | _ -> assert false in
     let sp_zi, _, _ = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
     let rz = Sched.Retype { axis = zj; ty = LL.Workgroup } in
@@ -366,7 +366,7 @@ let () =
       Sched.Swap { outer = i_i; inner = k_o };
       Sched.Stage
         {
-          source = ma.Tensor.value;
+          source = src_a;
           tile_loops = [ i_i; k_i ];
           shared = true;
           cooperative = Some simd_width;
@@ -374,7 +374,7 @@ let () =
         };
       Sched.Stage
         {
-          source = mb.Tensor.value;
+          source = src_b;
           tile_loops = [ k_i; j ];
           shared = true;
           cooperative = Some simd_width;
@@ -384,7 +384,11 @@ let () =
     ]
   in
   let staged_comp = named "mm_staged_mma" (Train.forward mc3) in
-  let staged_transform opt = Sched.apply (staged_schedule opt) opt in
+  let staged_transform opt =
+    Sched.apply
+      (staged_schedule ~out:mc3.Tensor.value ~src_a:ma.Tensor.value ~src_b:mb.Tensor.value opt)
+      opt
+  in
   let ctx_c = Context.auto () in
   if on_gpu then (
     let ctx_c, routine_c =
@@ -459,6 +463,96 @@ let () =
           (String.is_substring msg ~substring:"not supported")
     | None -> p "staged+tensorized matmul parity (GPU) or clean rejection (CPU)" false);
     p "staged+tensorized structure as expected" true);
+
+  (* --- The staged + tensorized composition at half precision, accumulated in f32: the leg that
+     pins the cross-[k_o] accumulator residency (gh-ocannl-480) on the tensor-core backends. The
+     f32 staged leg above cannot see it on CUDA/HIP (wmma has no uniform-f32 combination, so it
+     declines to the scalar fallback); with f16 operands the marked accumulator renders as a
+     fragment array loaded from [d] once before the serial [k_o] body and stored once after it,
+     the body containing update-only MMA steps — Metal through [simdgroup_half8x8], CUDA through
+     wmma accumulator fragments. The inputs are the exact-in-f16 values of the mm_h case, and
+     every partial sum is also exact in f32, so parity with the half serial twin is bitwise on
+     every backend and either rendering path. --- *)
+  let%op mchs = mah * mbh in
+  Tn.update_prec mchs.Tensor.value Ir.Ops.single;
+  (if on_gpu then (
+     let transform_hs opt =
+       Sched.apply
+         (staged_schedule ~out:mchs.Tensor.value ~src_a:mah.Tensor.value ~src_b:mbh.Tensor.value
+            opt)
+         opt
+     in
+     let ctx_d = Context.auto () in
+     let ctx_d, routine_d =
+       Context.compile ~lowered_transform:transform_hs ctx_d
+         (named "mm_h_staged_mma" (Train.forward mchs))
+         Ir.Indexing.Empty
+     in
+     let ctx_d = Context.run ctx_d routine_d in
+     let got_h_staged = Context.get_values ctx_d mchs.Tensor.value in
+     p "staged+tensorized half matmul matches the serial twin bitwise"
+       (Array.for_all2_exn got_h_staged got_h_serial ~f:Float.equal);
+     match read_generated "mm_h_staged_mma" with
+     | None -> p "staged+tensorized half fragment residency" false
+     | Some src ->
+         let has s = String.is_substring src ~substring:s in
+         (* The accumulator fragment is loaded before the serial [k_o] body and stored after it;
+            the body contains update-only MMA steps (with the trailing barrier that releases the
+            staged tiles) and no fragment-array load/store of its own. *)
+         let resident ~frag_load ~body_begin ~body_end ~frag_store ~barrier =
+           match
+             ( String.substr_index src ~pattern:frag_load,
+               String.substr_index src ~pattern:body_begin,
+               String.substr_index src ~pattern:body_end,
+               String.substr_index src ~pattern:frag_store )
+           with
+           | Some load, Some beg, Some fin, Some store when load < beg && beg < fin && fin < store
+             ->
+               let reduction_body = String.sub src ~pos:beg ~len:(fin - beg) in
+               let update_has_trailing_barrier =
+                 match
+                   String.substr_index reduction_body ~pattern:"/* tile_mma fragment update"
+                 with
+                 | Some update_pos ->
+                     String.is_substring
+                       (String.drop_prefix reduction_body update_pos)
+                       ~substring:barrier
+                 | None -> false
+               in
+               (not (String.is_substring reduction_body ~substring:frag_load))
+               && (not (String.is_substring reduction_body ~substring:frag_store))
+               && update_has_trailing_barrier
+           | _ -> false
+         in
+         let ok =
+           if on_metal then
+             resident ~frag_load:"simdgroup_load(__mma_fragment_"
+               ~body_begin:"/* simdgroup fragment reduction body begins */"
+               ~body_end:"/* simdgroup fragment reduction body ends */"
+               ~frag_store:"simdgroup_store(__mma_fragment_"
+               ~barrier:"threadgroup_barrier(mem_flags::mem_threadgroup);"
+             && has "simdgroup_half8x8"
+             && not (has "== 0)")
+           else if String.is_substring backend_name ~substring:"hip" then
+             (* HIP's persistent-fragment mapping lands with its own gh-ocannl-480 work: accept
+                either the resident rendering or the current per-[k_o] rocWMMA path (tighten to
+                the [resident] pin once it does). *)
+             has "__shared__" && has "__syncthreads()"
+           else
+             (* CUDA: wmma accumulator fragments; on pre-sm_70 devices the whole statement falls
+                back to the lane-0 guard instead. *)
+             resident ~frag_load:"nvcuda::wmma::load_matrix_sync(__mma_fragment_"
+               ~body_begin:"/* wmma fragment reduction body begins */"
+               ~body_end:"/* wmma fragment reduction body ends */"
+               ~frag_store:"nvcuda::wmma::store_matrix_sync(__mma_dp"
+               ~barrier:"__syncthreads();"
+             && (not (has "== 0)"))
+             || has "== 0)"
+         in
+         p "staged+tensorized half fragment residency" ok)
+   else (
+     p "staged+tensorized half matmul matches the serial twin bitwise" true;
+     p "staged+tensorized half fragment residency" true));
 
   (* --- Transposed operand layouts (the gradient-GEMM access patterns): [d[i,j] += at[k,i] *
      b[k,j]] (a stored transposed) and [d[i,j] += a[i,k] * bt[j,k]] (b stored transposed). Tensorize

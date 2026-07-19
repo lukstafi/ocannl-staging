@@ -523,6 +523,20 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | _, 1 -> typ_of_prec prec
       | _ -> invalid_arg "Cuda_backend.vec_typ_of_prec: invalid combination"
 
+    (* The wmma-supported precision combinations (tensorize-mma T3): (a/b fragment element type,
+       accumulator element type, ld multiple for a/b, ld multiple for d, min compute capability,
+       bf16 marker). Shared by [mma_syntax] and [mma_fragment_syntax] so a fragment scope accepts
+       exactly when its nested update-only MMA calls would. *)
+    let wmma_combo ~a_prec ~b_prec ~d_prec =
+      match (a_prec, b_prec, d_prec) with
+      | Ops.Half_prec _, Ops.Half_prec _, Ops.Single_prec _ ->
+          Some ("__half", "float", 8, 4, 70, false)
+      | Ops.Half_prec _, Ops.Half_prec _, Ops.Half_prec _ ->
+          Some ("__half", "__half", 8, 8, 70, false)
+      | Ops.Bfloat16_prec _, Ops.Bfloat16_prec _, Ops.Single_prec _ ->
+          Some ("__nv_bfloat16", "float", 8, 4, 80, true)
+      | _ -> None
+
     (* Tensorize-mma T3: cooperative tile-MMA emission for [Low_level.Tile_mma]. Two renderings:
 
        - The CUDA wmma C++ API for the 16-bit combinations: f16 x f16 -> f32 (the flagship), f16 x
@@ -560,19 +574,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           ~b:(b_ptr, ldb, b_space)
         ->
           let tile = 16 in
-          (* (a/b fragment element type, ld multiple for a/b, ld multiple for d, min compute
-             capability, bf16 marker). Pointer declarations use [typ_of_prec] of the operand's own
-             precision, which coincides with the fragment element types below. *)
-          let combo =
-            match (a_prec, b_prec, d_prec) with
-            | Ops.Half_prec _, Ops.Half_prec _, Ops.Single_prec _ ->
-                Some ("__half", "float", 8, 4, 70, false)
-            | Ops.Half_prec _, Ops.Half_prec _, Ops.Half_prec _ ->
-                Some ("__half", "__half", 8, 8, 70, false)
-            | Ops.Bfloat16_prec _, Ops.Bfloat16_prec _, Ops.Single_prec _ ->
-                Some ("__nv_bfloat16", "float", 8, 4, 80, true)
-            | _ -> None
-          in
+          (* Pointer declarations use [typ_of_prec] of the operand's own precision, which coincides
+             with [wmma_combo]'s fragment element types. *)
+          let combo = wmma_combo ~a_prec ~b_prec ~d_prec in
           let loadable = function
             | `Device | `Shared -> true (* generic-address loads cover both *)
             | `Thread | `Fragment _ -> false
@@ -685,29 +689,96 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                  ^^ nest 2 (hardline ^^ body)
                  ^^ hardline ^^ rbrace))
           else
-            match combo with
-            | Some (ab_typ, acc_typ, ab_ld_mult, d_ld_mult, min_cc, is_bf16)
-              when m % tile = 0
-                   && n % tile = 0
-                   && k % tile = 0
-                   && lda % ab_ld_mult = 0
-                   && ldb % ab_ld_mult = 0
-                   && ldd % d_ld_mult = 0
-                   && loadable d_space && loadable a_space && loadable b_space
-                   && min_compute_capability () >= min_cc ->
-                let open PPrint in
-                let mt = m / tile and nt = n / tile and kt = k / tile in
-                let frag kind typ layout =
-                  Printf.sprintf "nvcuda::wmma::fragment<nvcuda::wmma::%s, %d, %d, %d, %s%s>" kind
-                    tile tile tile typ
-                    (match layout with Some l -> ", nvcuda::wmma::" ^ l | None -> "")
+            let open PPrint in
+            let mt = m / tile and nt = n / tile and kt = k / tile in
+            let frag kind typ layout =
+              Printf.sprintf "nvcuda::wmma::fragment<nvcuda::wmma::%s, %d, %d, %d, %s%s>" kind tile
+                tile tile typ
+                (match layout with Some l -> ", nvcuda::wmma::" ^ l | None -> "")
+            in
+            let ptr_decl name typ ptr =
+              string (Printf.sprintf "%s *%s = " typ name) ^^ ptr ^^ semi
+            in
+            let a_layout = if ta then "col_major" else "row_major" in
+            let b_layout = if tb then "col_major" else "row_major" in
+            let barrier = "__syncthreads();" in
+            (* The serial [k] extent of one block statement: per step, the B-row fragment loads, the
+               A fragment loads, and the mma updates of the accumulator array [acc]. Shared between
+               the self-contained rendering ([acc] = the block-local [__mma_acc]) and the
+               update-only rendering against a resident fragment array (gh-ocannl-480). *)
+            let k_loop_lines ~ab_typ ~acc =
+              [
+                Printf.sprintf "for (int __ki = 0; __ki < %d; ++__ki) {" kt;
+                Printf.sprintf "  %s __mma_bf[%d];" (frag "matrix_b" ab_typ (Some b_layout)) nt;
+                Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                (* Transposed storage ([tb]): the stored matrix is the role's transpose — index it
+                   at (col, row) and declare the fragment [col_major]; the leading dimension stays
+                   the operand's own. Same for [ta] below. *)
+                (if tb then
+                   Printf.sprintf
+                     "    nvcuda::wmma::load_matrix_sync(__mma_bf[__ni], __mma_bp + __ni * %d * %d \
+                      + __ki * %d, %d);"
+                     tile ldb tile ldb
+                 else
+                   Printf.sprintf
+                     "    nvcuda::wmma::load_matrix_sync(__mma_bf[__ni], __mma_bp + __ki * %d * %d \
+                      + __ni * %d, %d);"
+                     tile ldb tile ldb);
+                "  }";
+                Printf.sprintf "  for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                Printf.sprintf "    %s __mma_af;" (frag "matrix_a" ab_typ (Some a_layout));
+                (if ta then
+                   Printf.sprintf
+                     "    nvcuda::wmma::load_matrix_sync(__mma_af, __mma_ap + __ki * %d * %d + \
+                      __mi * %d, %d);"
+                     tile lda tile lda
+                 else
+                   Printf.sprintf
+                     "    nvcuda::wmma::load_matrix_sync(__mma_af, __mma_ap + __mi * %d * %d + \
+                      __ki * %d, %d);"
+                     tile lda tile lda);
+                Printf.sprintf "    for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                Printf.sprintf
+                  "      nvcuda::wmma::mma_sync(%s[__mi][__ni], __mma_af, __mma_bf[__ni], \
+                   %s[__mi][__ni]);"
+                  acc acc;
+                "    }";
+                "  }";
+                "}";
+              ]
+            in
+            let ab_ok ~ab_ld_mult ~min_cc =
+              m % tile = 0
+              && n % tile = 0
+              && k % tile = 0
+              && lda % ab_ld_mult = 0
+              && ldb % ab_ld_mult = 0
+              && loadable a_space && loadable b_space
+              && min_compute_capability () >= min_cc
+            in
+            match (combo, d_space) with
+            | Some (ab_typ, _acc_typ, ab_ld_mult, _d_ld_mult, min_cc, is_bf16), `Fragment fragment
+              when ab_ok ~ab_ld_mult ~min_cc ->
+                (* Update-only steps against the accumulator-fragment array [fragment] declared by
+                   the enclosing [mma_fragment_syntax] scope (gh-ocannl-480): no per-statement
+                   load/store of [d]. The trailing barrier releases the staged shared tiles for the
+                   next serial iteration's cooperative loads. *)
+                let body =
+                  ptr_decl "__mma_ap" ("const " ^ typ_of_prec a_prec) a_ptr
+                  ^^ hardline
+                  ^^ ptr_decl "__mma_bp" ("const " ^ typ_of_prec b_prec) b_ptr
+                  ^^ hardline
+                  ^^ separate_map hardline string (k_loop_lines ~ab_typ ~acc:fragment @ [ barrier ])
                 in
-                let ptr_decl name typ ptr =
-                  string (Printf.sprintf "%s *%s = " typ name) ^^ ptr ^^ semi
-                in
-                let a_layout = if ta then "col_major" else "row_major" in
-                let b_layout = if tb then "col_major" else "row_major" in
-                let barrier = "__syncthreads();" in
+                Some
+                  (group
+                     (string
+                        (Printf.sprintf "{ /* tile_mma fragment update %dx%dx%d (wmma%s) */" m n k
+                           (if is_bf16 then "-bf16" else ""))
+                     ^^ nest 2 (hardline ^^ body)
+                     ^^ hardline ^^ rbrace))
+            | Some (ab_typ, acc_typ, ab_ld_mult, d_ld_mult, min_cc, is_bf16), _
+              when ab_ok ~ab_ld_mult ~min_cc && ldd % d_ld_mult = 0 && loadable d_space ->
                 let body_lines =
                   [
                     barrier;
@@ -720,51 +791,19 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                       tile ldd tile ldd;
                     "  }";
                     "}";
-                    Printf.sprintf "for (int __ki = 0; __ki < %d; ++__ki) {" kt;
-                    Printf.sprintf "  %s __mma_bf[%d];" (frag "matrix_b" ab_typ (Some b_layout)) nt;
-                    Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                    (* Transposed storage ([tb]): the stored matrix is the role's transpose — index
-                       it at (col, row) and declare the fragment [col_major]; the leading dimension
-                       stays the operand's own. Same for [ta] below. *)
-                    (if tb then
-                       Printf.sprintf
-                         "    nvcuda::wmma::load_matrix_sync(__mma_bf[__ni], __mma_bp + __ni * %d \
-                          * %d + __ki * %d, %d);"
-                         tile ldb tile ldb
-                     else
-                       Printf.sprintf
-                         "    nvcuda::wmma::load_matrix_sync(__mma_bf[__ni], __mma_bp + __ki * %d \
-                          * %d + __ni * %d, %d);"
-                         tile ldb tile ldb);
-                    "  }";
-                    Printf.sprintf "  for (int __mi = 0; __mi < %d; ++__mi) {" mt;
-                    Printf.sprintf "    %s __mma_af;" (frag "matrix_a" ab_typ (Some a_layout));
-                    (if ta then
-                       Printf.sprintf
-                         "    nvcuda::wmma::load_matrix_sync(__mma_af, __mma_ap + __ki * %d * %d + \
-                          __mi * %d, %d);"
-                         tile lda tile lda
-                     else
-                       Printf.sprintf
-                         "    nvcuda::wmma::load_matrix_sync(__mma_af, __mma_ap + __mi * %d * %d + \
-                          __ki * %d, %d);"
-                         tile lda tile lda);
-                    Printf.sprintf "    for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                    "      nvcuda::wmma::mma_sync(__mma_acc[__mi][__ni], __mma_af, __mma_bf[__ni], \
-                     __mma_acc[__mi][__ni]);";
-                    "    }";
-                    "  }";
-                    "}";
-                    Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
-                    Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                    Printf.sprintf
-                      "    nvcuda::wmma::store_matrix_sync(__mma_dp + __mi * %d * %d + __ni * %d, \
-                       __mma_acc[__mi][__ni], %d, nvcuda::wmma::mem_row_major);"
-                      tile ldd tile ldd;
-                    "  }";
-                    "}";
-                    barrier;
                   ]
+                  @ k_loop_lines ~ab_typ ~acc:"__mma_acc"
+                  @ [
+                      Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                      Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                      Printf.sprintf
+                        "    nvcuda::wmma::store_matrix_sync(__mma_dp + __mi * %d * %d + __ni * \
+                         %d, __mma_acc[__mi][__ni], %d, nvcuda::wmma::mem_row_major);"
+                        tile ldd tile ldd;
+                      "  }";
+                      "}";
+                      barrier;
+                    ]
                 in
                 let body =
                   ptr_decl "__mma_dp" (typ_of_prec d_prec) d_ptr
@@ -784,7 +823,95 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                      ^^ hardline ^^ rbrace))
             | _ -> None)
 
-    let mma_fragment_syntax = None
+    (* Cross-[k_o] accumulator residency (gh-ocannl-480), following the Metal emission: the marked
+       local tile becomes a wmma accumulator-fragment array declared once, loaded from the backing
+       target before the serial reduction body and stored after it; the nested [Tile_mma] sees
+       [`Fragment] and emits update-only mma steps. The acceptance conditions mirror [mma_syntax]'s
+       wmma arm exactly (via [wmma_combo] and the same extent/stride/space/arch checks), so an
+       accepted scope never strands its inner call. The fp8 inline-PTX combination declines: its
+       accumulator lives in per-lane f32 registers with the m16n8k32 layout, not wmma fragments, so
+       it keeps the per-[k_o] rendering through the caller's target-aliasing path. *)
+    let mma_fragment_syntax =
+      Some
+        (fun ~d_prec
+          ~a_prec
+          ~b_prec
+          ~m
+          ~n
+          ~k
+          ~fragment
+          ~target:(d_ptr, ldd, d_space)
+          ~a:(_, lda, a_space)
+          ~b:(_, ldb, b_space)
+          ~body
+        ->
+          let tile = 16 in
+          let loadable = function
+            | `Device | `Shared -> true (* generic-address loads cover both *)
+            | `Thread | `Fragment _ -> false
+          in
+          match wmma_combo ~a_prec ~b_prec ~d_prec with
+          | Some (_ab_typ, acc_typ, ab_ld_mult, d_ld_mult, min_cc, _is_bf16)
+            when m % tile = 0
+                 && n % tile = 0
+                 && k % tile = 0
+                 && lda % ab_ld_mult = 0
+                 && ldb % ab_ld_mult = 0
+                 && ldd % d_ld_mult = 0
+                 && loadable d_space && loadable a_space && loadable b_space
+                 && min_compute_capability () >= min_cc ->
+              let open PPrint in
+              let mt = m / tile and nt = n / tile in
+              let barrier = "__syncthreads();" in
+              let acc_frag =
+                Printf.sprintf "nvcuda::wmma::fragment<nvcuda::wmma::accumulator, %d, %d, %d, %s>"
+                  tile tile tile acc_typ
+              in
+              (* Bracketing barriers: sibling statements (the zeroing of [d], cooperative staging)
+                 execute lane-partitioned, so the fragment loads must observe the other lanes'
+                 writes, and later statements the stores. *)
+              let lines_before =
+                [
+                  barrier;
+                  Printf.sprintf "%s %s[%d][%d];" acc_frag fragment mt nt;
+                  Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                  Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                  Printf.sprintf
+                    "    nvcuda::wmma::load_matrix_sync(%s[__mi][__ni], __mma_dp + __mi * %d * %d \
+                     + __ni * %d, %d, nvcuda::wmma::mem_row_major);"
+                    fragment tile ldd tile ldd;
+                  "  }";
+                  "}";
+                  "/* wmma fragment reduction body begins */";
+                ]
+              in
+              let lines_after =
+                [
+                  "/* wmma fragment reduction body ends */";
+                  Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                  Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                  Printf.sprintf
+                    "    nvcuda::wmma::store_matrix_sync(__mma_dp + __mi * %d * %d + __ni * %d, \
+                     %s[__mi][__ni], %d, nvcuda::wmma::mem_row_major);"
+                    tile ldd tile fragment ldd;
+                  "  }";
+                  "}";
+                  barrier;
+                ]
+              in
+              let d_decl =
+                string (Printf.sprintf "%s *__mma_dp = " (typ_of_prec d_prec)) ^^ d_ptr ^^ semi
+              in
+              Some
+                (group
+                   (string (Printf.sprintf "{ /* wmma fragment %dx%d across k_o */" m n)
+                   ^^ nest 2
+                        (hardline ^^ d_decl ^^ hardline
+                        ^^ separate_map hardline string lines_before
+                        ^^ hardline ^^ body () ^^ hardline
+                        ^^ separate_map hardline string lines_after)
+                   ^^ hardline ^^ rbrace))
+          | _ -> None)
 
     let rec binop_syntax prec v =
       (* TODO: consider using binop_syntax inherited from Pure_C_config and overriding only where

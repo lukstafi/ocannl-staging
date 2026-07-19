@@ -371,10 +371,11 @@ one accumulator tile and whose `d` base is invariant across the loop and every l
 it. It then contracts the lifetime to a fresh `Local [m;n]` node recorded in
 `optimized.simdgroup_fragments`: lane 0 initializes the local before the serial reduction, each
 `Tile_mma` targets the local, and lane 0 stores it back afterward. That explicit scalar structure is
-the fallback semantics on CC and for unsupported GPU calls. Until CUDA/HIP gain their own persistent
-fragment mapping, supported calls alias the marked local back to the original device target and
-retain their previous per-`k_o` intrinsic load/store behavior, avoiding a performance regression.
-The transform therefore remains backend-agnostic and correct throughout the Metal-first rollout.
+the fallback semantics on CC and for unsupported GPU calls. Where a backend's persistent fragment
+mapping is missing (HIP, pending) or declines the call (CUDA's fp8 combination), supported calls
+alias the marked local back to the original device target and retain their previous per-`k_o`
+intrinsic load/store behavior, avoiding a performance regression. The transform therefore remains
+backend-agnostic and correct throughout the Metal-first rollout.
 
 Metal recognizes only this marked three-part region. For a supported uniform f32/f16/bf16 8×8
 shape it emits one outer `simdgroup_matrix` fragment-array load, renders every `Tile_mma` under the
@@ -382,6 +383,18 @@ serial `k_o` as an update-only operand-load/MMA step, and emits one outer store.
 decline before entering the fragment rendering and retain the scalar local-array form. The staged
 leg of `schedule_mma_matmul.ml` pins the source ordering and verifies that no accumulator fragment
 load/store remains inside the marked reduction body, in addition to numerical parity on Metal.
+
+The CUDA side (2026-07-19, hardware-verified on sm_120) mirrors the Metal structure for the wmma
+combinations (f16×f16→f32, f16×f16→f16, bf16×bf16→f32): `mma_fragment_syntax` declares the
+`(m/16)×(n/16)` `nvcuda::wmma::accumulator` fragment array, brackets the serial body with one
+`load_matrix_sync`/`store_matrix_sync` pass over `d` (plus `__syncthreads()` on both sides), and
+the nested `Tile_mma` renders update-only `mma_sync` steps with a trailing barrier that releases
+the staged shared tiles. Its acceptance conditions are exactly `mma_syntax`'s wmma conditions
+(shared `wmma_combo` table, same extent/stride/space/arch checks), so an accepted scope never
+strands its inner call on the fallback. The fp8 `mma.sync` path declines residency for now — its
+accumulator is per-lane f32 registers in the m16n8k32 layout, not a wmma fragment; persisting
+those registers across `k_o` is the natural extension. The half-precision staged leg of
+`schedule_mma_matmul.ml` pins the CUDA rendering the same way the f32 staged leg pins Metal's.
 
 Landed scope matched the estimate: ~100 lines in `apply_stage` plus the `cooperative` field; no
 IR changes; no `validate_parallel` changes. One addition the sketch missed: the staging-point

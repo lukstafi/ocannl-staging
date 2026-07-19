@@ -1320,10 +1320,12 @@ module C_syntax (B : C_syntax_config) = struct
                   | None when Utils.debug_log_from_routines () -> None
                   | None ->
                       Option.bind B.mma_syntax ~f:(fun emit ->
-                          (* Until CUDA/HIP grow their own persistent-fragment mapping, preserve
-                             their existing per-[k_o] intrinsic path by aliasing the marked local
-                             back to the original target when that exact MMA call is supported.
-                             Unsupported calls retain the explicit lane-0 local-array fallback. *)
+                          (* When the fragment hook declined this call (HIP until its
+                             persistent-fragment mapping lands, CUDA's fp8 combination, unsupported
+                             precisions), preserve the existing per-[k_o] intrinsic path by aliasing
+                             the marked local back to the original target when that exact MMA call
+                             is supported. Unsupported calls retain the explicit lane-0 local-array
+                             fallback. *)
                           match
                             emit ~d_prec ~a_prec ~b_prec ~ta ~tb ~m ~n ~k ~d:target_op ~a:a_op
                               ~b:b_op
