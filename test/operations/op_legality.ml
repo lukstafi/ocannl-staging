@@ -167,6 +167,80 @@ let () =
   let opt_lag = hand_built ~stmts:[ lag_nest ] ~tns_on_device:[ x ] ~tns_local:[] in
   p "retype lagged recurrence to Grid" (Sched.op_legality opt_lag (Sched.Retype { axis = t; ty = LL.Grid }));
 
+  (* The autotuner's menu contract on a REAL lowered matmul (not hand-built): the menu proposes
+     all role permutations of a serial accumulation triple, and the oracle gates them. Pruning
+     must remove exactly the proposals whose [Schedule.apply] raises (the candidate compile would
+     fail) and never a viable candidate — assert the equivalence per permutation. *)
+  let open Ocannl.Operation.DSL_modules in
+  let m = 8 in
+  let mav = Array.init (m * m) ~f:(fun q -> Float.of_int (q % 5) *. 0.5) in
+  let mbv = Array.init (m * m) ~f:(fun q -> Float.of_int (q % 7) -. 3.) in
+  let ma = TDSL.ndarray mav ~label:[ "olma" ] ~input_dims:[ m ] ~output_dims:[ m ] () in
+  let mb = TDSL.ndarray mbv ~label:[ "olmb" ] ~input_dims:[ m ] ~output_dims:[ m ] () in
+  let%op olmc = ma * mb in
+  let mm_comp = Ocannl.Train.forward olmc in
+  let captured = ref None in
+  let ctx = Context.auto () in
+  let _ctx, _routine =
+    Context.compile
+      ~lowered_transform:(fun o ->
+        captured := Some o;
+        o)
+      ctx mm_comp Idx.Empty
+  in
+  let mm_opt = Option.value_exn !captured in
+  (* The serial accumulation triple, as the menu's [collect_serial_triples] sees it. *)
+  let strip stmts =
+    List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true)
+  in
+  let rec find_triple (llc : LL.t) : (Idx.symbol * Idx.symbol * Idx.symbol) option =
+    match llc with
+    | LL.Seq (a, b) -> ( match find_triple a with Some _ as r -> r | None -> find_triple b)
+    | LL.If { body; _ } -> find_triple body
+    | LL.For_loop { index = ti; axis = LL.Serial; from_ = 0; body; _ } -> (
+        match strip (LL.flat_lines [ body ]) with
+        | [ LL.For_loop { index = tj; axis = LL.Serial; from_ = 0; body = jb; _ } ] -> (
+            match strip (LL.flat_lines [ jb ]) with
+            | [ LL.For_loop { index = tk; axis = LL.Serial; from_ = 0; body = kb; _ } ] -> (
+                match strip (LL.flat_lines [ kb ]) with
+                | [ LL.Set _ ] -> Some (ti, tj, tk)
+                | _ -> None)
+            | _ -> None)
+        | _ -> None)
+    | LL.For_loop { body; _ } -> find_triple body
+    | _ -> None
+  in
+  let ti, tj, tk = Option.value_exn (find_triple mm_opt.LL.llc) in
+  let perms =
+    [
+      ("i j k", ti, tj, tk); ("i k j", ti, tk, tj); ("j i k", tj, ti, tk);
+      ("j k i", tj, tk, ti); ("k i j", tk, ti, tj); ("k j i", tk, tj, ti);
+    ]
+  in
+  let viable = ref 0 in
+  List.iter perms ~f:(fun (label, i, j, k) ->
+      let op = fst (Sched.tensorize ~i ~j ~k ~simd_width:1) in
+      let verdict = Sched.op_legality mm_opt op in
+      let hermetic =
+        {
+          mm_opt with
+          LL.traced_store = Hashtbl.copy mm_opt.LL.traced_store;
+          optimize_ctx = LL.copy_optimize_ctx mm_opt.LL.optimize_ctx;
+        }
+      in
+      let applies =
+        match Sched.apply [ op ] hermetic with
+        | (_ : LL.optimized) -> true
+        | exception Invalid_argument _ -> false
+      in
+      if applies then Int.incr viable;
+      let pruned = match verdict with Sched.Op_illegal _ -> true | _ -> false in
+      Stdio.printf "menu tensorize roles (%s): %-8s apply %s  pruning %s\n" label (show verdict)
+        (if applies then "succeeds" else "raises")
+        (if Bool.( = ) pruned (not applies) then "sound" else "UNSOUND"));
+  Stdio.printf "viable tensorize permutations survive the gate: %s\n"
+    (if !viable > 0 then "yes" else "NO");
+
   (* Sequential checking: verdicts against progressively applied code, stopping at illegal. *)
   let sched =
     [

@@ -30,6 +30,13 @@ tensorize rotated roles (j k i)              Illegal
 tensorize rotated roles (k i j)              Illegal
 tensorize with cross-statement sharing       Unknown
 retype lagged recurrence to Grid             Unknown
+menu tensorize roles (i j k): Unknown  apply succeeds  pruning sound
+menu tensorize roles (i k j): Illegal  apply raises  pruning sound
+menu tensorize roles (j i k): Illegal  apply raises  pruning sound
+menu tensorize roles (j k i): Illegal  apply raises  pruning sound
+menu tensorize roles (k i j): Illegal  apply raises  pruning sound
+menu tensorize roles (k j i): Illegal  apply raises  pruning sound
+viable tensorize permutations survive the gate: yes
 schedule_legality stops at the illegal op:
   Retype i3 Grid                             Legal
   Retype i5 Workgroup                        Illegal
