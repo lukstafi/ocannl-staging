@@ -245,7 +245,7 @@ let stored_orientation (idcs : Idx.axis_index array) ~row ~col : bool option =
   else if coeff col idcs.(rank - 2) = 1 && coeff row idcs.(rank - 1) = 1 then Some true
   else None
 
-let detect_matmul (llc : LL.t) : matmul_site option =
+let detect_matmul_procedural (llc : LL.t) : matmul_site option =
   let stmts = strip_stmts (LL.flat_lines [ llc ]) in
   let zeroed = List.filter_map stmts ~f:(function LL.Zero_out tn -> Some tn | _ -> None) in
   List.find_map stmts ~f:(fun stmt ->
@@ -289,6 +289,148 @@ let detect_matmul (llc : LL.t) : matmul_site option =
                   })
           | _ -> None)
       | _ -> None)
+
+(** {2 Relation-based micro-kernel recognition (gh-494 waypoint-2 remainder)}
+
+    Detection reads off the same extracted artifact the op-legality oracle consumes —
+    [LL.affine_accesses]: the rmw markers, index maps, loop boxes and program paths — instead of
+    re-walking the code with a procedural structural matcher, so detection and legality share one
+    source of access truth. The procedural matchers above are kept for the [legality_crosscheck]
+    soak, which raises on any divergence (detection feeds sketch seeding, so changes must be
+    behavior-preserving). Known corners where the relations see more than the old walkers (an [If]
+    guard whose condition reads a tensor node; an interior statement with no tensor accesses):
+    optimized code does not produce them, and the crosscheck guards the claim. *)
+
+module A = Ir.Affine
+
+(* Axis types by loop binder — the one nest discipline the access records do not carry (their
+   [a_loops] carry the bounds). Statement-level loops only: an access whose enclosing loops are
+   not all found here is inside a [Local_scope] body or [Tile_mma] fallback, which the recognizers
+   reject anyway. *)
+let rec loop_axis_types acc (llc : LL.t) =
+  match llc with
+  | LL.Seq (a, b) -> loop_axis_types (loop_axis_types acc a) b
+  | LL.For_loop { index; axis; body; _ } -> loop_axis_types ((index, axis) :: acc) body
+  | LL.If { body; _ } -> loop_axis_types acc body
+  | _ -> acc
+
+let path_head p = match p with [] -> -1 | h :: _ -> h
+
+(* Access records per top-level statement, in program order (the extraction fires in program
+   order and top-level statement indices are nondecreasing). *)
+let accesses_by_statement (accs : Ir.Tnode.t A.access list) =
+  List.group accs ~break:(fun a b -> path_head a.A.a_path <> path_head b.A.a_path)
+
+(* The accumulation form (fused [Ops.FMA] vs add-of-product) is scalar structure the access
+   records do not carry; probe the recognized statement's leaf assignment directly. *)
+let fma_form (llc : LL.t) ~stmt_path ~d ~(di : Idx.axis_index array) : bool =
+  let stmt =
+    match path_head stmt_path with
+    | -1 -> llc
+    | h -> List.nth_exn (LL.flat_lines [ llc ]) h
+  in
+  let is_d_read tn idcs = phys_equal tn d && Array.equal Idx.equal_axis_index idcs di in
+  let rec find = function
+    | LL.Seq (a, b) -> ( match find a with Some _ as r -> r | None -> find b)
+    | LL.For_loop { body; _ } | LL.If { body; _ } -> find body
+    | LL.Set { tn; idcs; llsc; _ } when is_d_read tn idcs -> Some llsc
+    | _ -> None
+  in
+  match find stmt with
+  | Some (LL.Ternop (Ir.Ops.FMA, _, _, (LL.Get (tn, idcs), _))) -> is_d_read tn idcs
+  | _ -> false
+
+(* The perfect all-serial from-0 accumulation statement, as the relations express it: a single
+   interpretable write whose enclosing statement's accesses all share its path and loop box (a
+   sibling statement inside the nest, or a read under extra [Local_scope] loops, breaks the
+   agreement). Returns the write and the non-write accesses split into the write's own same-cell
+   reads (the rmw carrier) and the operand reads, in program order. *)
+let serial_kernel_of axes (g : Ir.Tnode.t A.access list) =
+  let writes = List.filter g ~f:(fun a -> a.A.a_write) in
+  match writes with
+  | [ w ] when (not w.A.a_whole) && (not w.A.a_dynamic) && not w.A.a_vec_last ->
+      let serial0 (s, (lo, _)) =
+        lo = 0
+        &&
+        match List.Assoc.find axes s ~equal:Idx.equal_symbol with
+        | Some LL.Serial -> true
+        | Some _ | None -> false
+      in
+      let loops_equal =
+        List.equal (fun (s1, (l1, h1)) (s2, (l2, h2)) ->
+            Idx.equal_symbol s1 s2 && l1 = l2 && h1 = h2)
+      in
+      if
+        List.for_all w.A.a_loops ~f:serial0
+        && List.for_all g ~f:(fun a ->
+               List.equal Int.equal a.A.a_path w.A.a_path
+               && loops_equal a.A.a_loops w.A.a_loops)
+      then
+        let same_d a =
+          phys_equal a.A.a_tn w.A.a_tn && Array.equal Idx.equal_axis_index a.A.a_map w.A.a_map
+        in
+        let reads = List.filter g ~f:(fun a -> not a.A.a_write) in
+        let d_reads, others = List.partition_tf reads ~f:same_d in
+        Some (w, d_reads, others)
+      else None
+  | _ -> None
+
+let detect_matmul_affine (llc : LL.t) : matmul_site option =
+  let accs = LL.affine_accesses llc in
+  let axes = loop_axis_types [] llc in
+  let zeroed = List.filter accs ~f:(fun a -> a.A.a_write && a.A.a_whole) in
+  List.find_map (accesses_by_statement accs) ~f:(fun g ->
+      match serial_kernel_of axes g with
+      | Some (w, (_ :: _ as _d_reads), [ o1; o2 ]) -> (
+          match w.A.a_loops with
+          | [ (i, (_, ti)); (j, (_, tj)); (k, (_, tk)) ]
+            when idcs_mention w.A.a_map i && idcs_mention w.A.a_map j
+                 && not (idcs_mention w.A.a_map k) ->
+              let role_a idcs = idcs_mention idcs i && idcs_mention idcs k
+              and role_b idcs = idcs_mention idcs k && idcs_mention idcs j in
+              let assign =
+                if role_a o1.A.a_map && role_b o2.A.a_map then Some (o1, o2)
+                else if role_a o2.A.a_map && role_b o1.A.a_map then Some (o2, o1)
+                else None
+              in
+              Option.map assign ~f:(fun (oa, ob) ->
+                  {
+                    m_i = i;
+                    m_j = j;
+                    m_k = k;
+                    m_ni = ti + 1;
+                    m_nj = tj + 1;
+                    m_nk = tk + 1;
+                    m_d = w.A.a_tn;
+                    m_a = oa.A.a_tn;
+                    m_b = ob.A.a_tn;
+                    m_zeroed = List.exists zeroed ~f:(fun z -> phys_equal z.A.a_tn w.A.a_tn);
+                    m_tb = stored_orientation ob.A.a_map ~row:k ~col:j;
+                    m_fma = fma_form llc ~stmt_path:w.A.a_path ~d:w.A.a_tn ~di:w.A.a_map;
+                  })
+          | _ -> None)
+      | _ -> None)
+
+let matmul_site_equal (x : matmul_site) (y : matmul_site) =
+  Idx.equal_symbol x.m_i y.m_i && Idx.equal_symbol x.m_j y.m_j && Idx.equal_symbol x.m_k y.m_k
+  && x.m_ni = y.m_ni && x.m_nj = y.m_nj && x.m_nk = y.m_nk && phys_equal x.m_d y.m_d
+  && phys_equal x.m_a y.m_a && phys_equal x.m_b y.m_b
+  && Bool.equal x.m_zeroed y.m_zeroed
+  && Option.equal Bool.equal x.m_tb y.m_tb
+  && Bool.equal x.m_fma y.m_fma
+
+let detect_matmul (llc : LL.t) : matmul_site option =
+  let site = detect_matmul_affine llc in
+  (if Lazy.force A.crosscheck_enabled then
+     let procedural = detect_matmul_procedural llc in
+     match (procedural, site) with
+     | None, None -> ()
+     | Some p, Some n when matmul_site_equal p n -> ()
+     | _ ->
+         invalid_arg
+           "Autotune.detect_matmul crosscheck: the relation-based and procedural matchers \
+            diverge — detection must be behavior-preserving");
+  site
 
 let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner })
 
@@ -341,7 +483,7 @@ type conv_site = {
   c_fma : bool;
 }
 
-let detect_conv (llc : LL.t) : conv_site option =
+let detect_conv_procedural (llc : LL.t) : conv_site option =
   let stmts = strip_stmts (LL.flat_lines [ llc ]) in
   let zeroed = List.filter_map stmts ~f:(function LL.Zero_out tn -> Some tn | _ -> None) in
   List.find_map stmts ~f:(fun stmt ->
@@ -486,6 +628,162 @@ let detect_conv (llc : LL.t) : conv_site option =
               | _ -> None)
           | _ -> None)
       | _ -> None)
+
+let detect_conv_affine (llc : LL.t) : conv_site option =
+  let accs = LL.affine_accesses llc in
+  let axes = loop_axis_types [] llc in
+  let zeroed = List.filter accs ~f:(fun a -> a.A.a_write && a.A.a_whole) in
+  List.find_map (accesses_by_statement accs) ~f:(fun g ->
+      match serial_kernel_of axes g with
+      | Some (w, _ :: _, [ ro1; ro2 ]) when List.length w.A.a_loops >= 4 -> (
+          let loops = List.map w.A.a_loops ~f:(fun (s, (_, hi)) -> (s, hi + 1)) in
+          let extent s = List.Assoc.find loops s ~equal:Idx.equal_symbol in
+          let d = w.A.a_tn and di = w.A.a_map in
+          let o1 = (ro1.A.a_tn, ro1.A.a_map) and o2 = (ro2.A.a_tn, ro2.A.a_map) in
+          (* From here on, the classification is the same role logic as the procedural matcher,
+             fed from the extracted maps. *)
+          let d_syms =
+            Array.to_list di
+            |> List.map ~f:(function Idx.Iterator s -> Some s | _ -> None)
+            |> Option.all
+          in
+          match d_syms with
+          | Some d_syms
+            when List.length d_syms = Array.length di
+                 && (not (List.contains_dup d_syms ~compare:Idx.compare_symbol))
+                 && List.length d_syms >= 2 -> (
+              let is_out s = List.mem d_syms s ~equal:Idx.equal_symbol in
+              let conv_component (idx : Idx.axis_index) =
+                match idx with
+                | Idx.Affine { symbols = [ (c1, s1); (c2, s2) ]; offset } -> (
+                    match (is_out s1, is_out s2) with
+                    | true, false ->
+                        Some
+                          { cx_o = s1; cx_no = 0; cx_k = s2; cx_nk = 0; cx_stride = c1;
+                            cx_dilation = c2; cx_offset = offset }
+                    | false, true ->
+                        Some
+                          { cx_o = s2; cx_no = 0; cx_k = s1; cx_stride = c2;
+                            cx_dilation = c1; cx_offset = offset; cx_nk = 0 }
+                    | _ -> None)
+                | _ -> None
+              in
+              let classify (tn, idcs) =
+                let axes = Array.to_list idcs |> List.filter_map ~f:conv_component in
+                (tn, idcs, axes)
+              in
+              let (a, a_idcs, a_axes), (b, b_idcs, b_axes) =
+                let c1 = classify o1 and c2 = classify o2 in
+                match (c1, c2) with
+                | (_, _, _ :: _), (_, _, []) -> (c1, c2)
+                | (_, _, []), (_, _, _ :: _) -> (c2, c1)
+                | _ -> (c1, c1)
+                (* Both-or-neither convolutional: rejected below (b_axes <> []). *)
+              in
+              let b_plain =
+                Array.to_list b_idcs
+                |> List.map ~f:(function Idx.Iterator s -> Some s | _ -> None)
+                |> Option.all
+              in
+              match b_plain with
+              | Some b_syms when List.is_empty b_axes && not (phys_equal a b) -> (
+                  let kernel_syms = List.map a_axes ~f:(fun cx -> cx.cx_k) in
+                  let in_b s = List.mem b_syms s ~equal:Idx.equal_symbol in
+                  let oc_candidates = List.filter d_syms ~f:in_b in
+                  let a_plain_syms =
+                    Array.to_list a_idcs
+                    |> List.filter_map ~f:(function Idx.Iterator s -> Some s | _ -> None)
+                  in
+                  let red_candidates =
+                    List.filter a_plain_syms ~f:(fun s -> in_b s && not (is_out s))
+                  in
+                  let rank = Array.length di in
+                  match (oc_candidates, red_candidates, extent (List.last_exn d_syms)) with
+                  | [ oc ], [ red ], Some noc
+                    when Idx.equal_symbol oc (List.last_exn d_syms)
+                         && (not (List.exists a_plain_syms ~f:(Idx.equal_symbol oc)))
+                         && List.for_all kernel_syms ~f:(fun k -> in_b k && not (is_out k))
+                         && List.for_all b_syms ~f:(fun s ->
+                                Idx.equal_symbol s oc || Idx.equal_symbol s red
+                                || List.mem kernel_syms s ~equal:Idx.equal_symbol) -> (
+                      let row_sym =
+                        match di.(rank - 2) with Idx.Iterator s -> s | _ -> assert false
+                      in
+                      match
+                        ( List.find a_axes ~f:(fun cx -> Idx.equal_symbol cx.cx_o row_sym),
+                          extent row_sym,
+                          extent red )
+                      with
+                      | Some _, Some nrow, Some nred ->
+                          let with_extents cx =
+                            match (extent cx.cx_o, extent cx.cx_k) with
+                            | Some no, Some nk -> Some { cx with cx_no = no; cx_nk = nk }
+                            | _ -> None
+                          in
+                          let caxes = Option.all (List.map a_axes ~f:with_extents) in
+                          let loop_syms = List.map loops ~f:fst in
+                          let is_kernel s = List.mem kernel_syms s ~equal:Idx.equal_symbol in
+                          let outer =
+                            List.filter loops ~f:(fun (s, _) ->
+                                is_out s
+                                && (not (Idx.equal_symbol s row_sym))
+                                && not (Idx.equal_symbol s oc))
+                          in
+                          let kernel_order = List.filter loop_syms ~f:is_kernel in
+                          Option.map caxes ~f:(fun caxes ->
+                              {
+                                c_loops = loop_syms;
+                                c_outer = outer;
+                                c_kernel = kernel_order;
+                                c_axes = caxes;
+                                c_row = row_sym;
+                                c_nrow = nrow;
+                                c_oc = oc;
+                                c_noc = noc;
+                                c_red = red;
+                                c_nred = nred;
+                                c_d = d;
+                                c_a = a;
+                                c_b = b;
+                                c_zeroed = List.exists zeroed ~f:(fun z -> phys_equal z.A.a_tn d);
+                                c_fma = fma_form llc ~stmt_path:w.A.a_path ~d ~di;
+                              })
+                      | _ -> None)
+                  | _ -> None)
+              | _ -> None)
+          | _ -> None)
+      | _ -> None)
+
+let conv_axis_equal (x : conv_axis) (y : conv_axis) =
+  Idx.equal_symbol x.cx_o y.cx_o && x.cx_no = y.cx_no && Idx.equal_symbol x.cx_k y.cx_k
+  && x.cx_nk = y.cx_nk && x.cx_stride = y.cx_stride && x.cx_dilation = y.cx_dilation
+  && x.cx_offset = y.cx_offset
+
+let conv_site_equal (x : conv_site) (y : conv_site) =
+  List.equal Idx.equal_symbol x.c_loops y.c_loops
+  && List.equal
+       (fun (s1, n1) (s2, n2) -> Idx.equal_symbol s1 s2 && n1 = n2)
+       x.c_outer y.c_outer
+  && List.equal Idx.equal_symbol x.c_kernel y.c_kernel
+  && List.equal conv_axis_equal x.c_axes y.c_axes
+  && Idx.equal_symbol x.c_row y.c_row && x.c_nrow = y.c_nrow
+  && Idx.equal_symbol x.c_oc y.c_oc && x.c_noc = y.c_noc
+  && Idx.equal_symbol x.c_red y.c_red && x.c_nred = y.c_nred
+  && phys_equal x.c_d y.c_d && phys_equal x.c_a y.c_a && phys_equal x.c_b y.c_b
+  && Bool.equal x.c_zeroed y.c_zeroed && Bool.equal x.c_fma y.c_fma
+
+let detect_conv (llc : LL.t) : conv_site option =
+  let site = detect_conv_affine llc in
+  (if Lazy.force A.crosscheck_enabled then
+     let procedural = detect_conv_procedural llc in
+     match (procedural, site) with
+     | None, None -> ()
+     | Some p, Some n when conv_site_equal p n -> ()
+     | _ ->
+         invalid_arg
+           "Autotune.detect_conv crosscheck: the relation-based and procedural matchers diverge \
+            — detection must be behavior-preserving");
+  site
 
 (* Zero-geometry ops shared by the sketch pipelines: expand the whole-node [Zero_out] of the output
    and give the resulting nest a compatible parallel geometry, via [mk_zops] on its two fresh loop
@@ -1955,6 +2253,7 @@ let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) (u : unit_g
                 Sched.Retype { axis = ld.ld_sym; ty = LL.Vectorized } )
           else None)
   in
+  let triples = collect_serial_triples u.u_registry u.u_opt.LL.llc in
   let tensorizes =
     match limits.Ir.Backend_intf.mma with
     | None -> []
@@ -1965,8 +2264,7 @@ let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) (u : unit_g
            [Op_illegal] by the probe of apply's micro-kernel recognition and pruned before they
            cost a candidate compile, instead of failing at compile time. Propose role assignments
            compatible with the intrinsic tile's divisibility per role. *)
-        List.concat_map (collect_serial_triples u.u_registry u.u_opt.LL.llc)
-          ~f:(fun (t1, t2, t3) ->
+        List.concat_map triples ~f:(fun (t1, t2, t3) ->
             List.filter_map
               [ (t1, t2, t3); (t1, t3, t2); (t2, t1, t3); (t2, t3, t1); (t3, t1, t2); (t3, t2, t1) ]
               ~f:(fun ((i, si, ei), (j, sj, ej), (k, sk, ek)) ->
@@ -1977,6 +2275,10 @@ let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) (u : unit_g
                   gate (SC.Tensorize { i; j; k; simd_width = mma_simd_width }, raw)
                 else None))
   in
+  logf "menu: %d serial triple(s) -> %d tensorize proposal(s); %d split, %d swap, %d unroll, %d \
+        vectorize"
+    (List.length triples) (List.length tensorizes) (List.length splits) (List.length swaps)
+    (List.length unrolls) (List.length vectorizes);
   List.take (tensorizes @ splits @ swaps @ unrolls @ vectorizes) max_actions_per_unit
 
 (* Extend one unit of a compiled candidate with a menu action. The fissioned entries stay in segment
