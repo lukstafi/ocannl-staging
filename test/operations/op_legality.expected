@@ -15,8 +15,28 @@ split reduction with Workgroup inner         Illegal
 split parallel with Workgroup inner          Legal
 split reduction serial/serial                Legal
 unroll reduction                             Legal
-stage is not modeled                         Unknown
+stage packing proves coverage                Legal
+stage packing two tile loops                 Legal
+stage of a written source                    Illegal
+stage tile loop absent from the read         Illegal
+stage shared stays unknown                   Unknown
+stage hoisted without host-init data         Illegal
+stage cooperative requires shared            Illegal
+tensorize valid roles                        Legal
+tensorize i/j roles swapped                  Illegal
+tensorize j role on the reduction            Illegal
+tensorize i role on the reduction            Illegal
+tensorize rotated roles (j k i)              Illegal
+tensorize rotated roles (k i j)              Illegal
+tensorize with cross-statement sharing       Unknown
 retype lagged recurrence to Grid             Unknown
+menu tensorize roles (i j k): Unknown  apply succeeds  pruning sound
+menu tensorize roles (i k j): Illegal  apply raises  pruning sound
+menu tensorize roles (j i k): Illegal  apply raises  pruning sound
+menu tensorize roles (j k i): Illegal  apply raises  pruning sound
+menu tensorize roles (k i j): Illegal  apply raises  pruning sound
+menu tensorize roles (k j i): Illegal  apply raises  pruning sound
+viable tensorize permutations survive the gate: yes
 schedule_legality stops at the illegal op:
   Retype i3 Grid                             Legal
   Retype i5 Workgroup                        Illegal

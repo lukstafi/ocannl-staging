@@ -2390,7 +2390,76 @@ let loops_independent (opt : Low_level.optimized) ~(syms : Indexing.symbol list)
               in
               combine_verdicts v node_v)
 
+(* [Stage] legality: apply the op on a hermetic copy — [apply_stage]'s precondition surface
+   (source unwritten and statically read through one index vector, tile loops enclosing/occurring
+   with positive coefficients, the shared-mode workgroup-slot coverage rule, the
+   hoisted/cooperative/swizzle contracts) is deterministic on the code, so a raising probe proves
+   the candidate compile's apply raises too: [Op_illegal] with no transcription drift. The minted
+   tile and its (key-weak) [Host_inits] entry become unreachable with the discarded copy.
+
+   On success, the op's implicit contract — the staged tile covers the reads it replaces within
+   the staging scope — is the containment query: every remapped read of the fresh tile must be
+   covered by the load nest's prior writes ([Affine.read_covered_before]; edge-guarded loads
+   included, mirroring guards-taken analyses). The loads copy a source the routine never writes
+   (checked by apply) through the same per-axis index decomposition the reads use, so a covering
+   write holds exactly the source cell the original read fetched — cell coverage implies value
+   correctness here. A covered non-shared (packing) stage only inserts a serial per-thread copy
+   nest over a [Local] tile: [Op_legal]. Shared staging additionally relies on barrier placement
+   and launch-geometry uniformity validated downstream by [Low_level.validate_parallel], and
+   hoisted staging on the link-time host-side packing program — neither is modeled by the
+   queries, so those report [Op_unknown] (never a rejection). *)
+let stage_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
+  let shared, hoisted =
+    match op with
+    | Stage { shared; hoisted; _ } -> (shared, hoisted)
+    | _ -> assert false
+  in
+  let hermetic =
+    {
+      opt with
+      Low_level.traced_store = Hashtbl.copy opt.Low_level.traced_store;
+      optimize_ctx = Low_level.copy_optimize_ctx opt.Low_level.optimize_ctx;
+    }
+  in
+  match apply_opt_op hermetic op with
+  | exception Invalid_argument msg -> Op_illegal msg
+  | staged -> (
+      if hoisted then
+        Op_unknown "hoisted packing's link-time host-side program is not modeled by the queries"
+      else
+        (* The fresh tile is the node apply added to the (copied) traced store. *)
+        let tile =
+          Hashtbl.keys staged.Low_level.traced_store
+          |> List.find ~f:(fun tn -> not (Hashtbl.mem opt.Low_level.traced_store tn))
+        in
+        match tile with
+        | None -> Op_unknown "staged tile not found in the probe (oracle limitation)"
+        | Some tile -> (
+            let accs = Low_level.affine_accesses staged.Low_level.llc in
+            let tile_accs = List.filter accs ~f:(fun a -> Tn.equal a.Affine.a_tn tile) in
+            let writes = List.filter tile_accs ~f:(fun a -> a.Affine.a_write) in
+            let reads = List.filter tile_accs ~f:(fun a -> not a.Affine.a_write) in
+            let uncovered =
+              List.find_map reads ~f:(fun read ->
+                  match Affine.read_covered_before ~read ~writes () with
+                  | `Covered -> None
+                  | `Unknown witness -> Some witness)
+            in
+            match uncovered with
+            | Some witness ->
+                Op_unknown
+                  (Tn.debug_name tile ^ ": a staged read is not proven covered by the loads: "
+                 ^ witness)
+            | None ->
+                if shared then
+                  Op_unknown
+                    "shared staging's barrier placement and launch-geometry uniformity are \
+                     validated downstream (validate_parallel)"
+                else Op_legal))
+
 let op_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
+  (* [Low_level] also exports an [apply_op]; keep a handle on the schedule transform. *)
+  let apply_sched_op = apply_op in
   let open Low_level in
   let hardware = function Grid | Workgroup -> true | _ -> false in
   let vectorized = function Vectorized -> true | _ -> false in
@@ -2433,7 +2502,28 @@ let op_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
           loops_independent opt ~syms:[ outer; inner ] ~cross_nest:false ~licensed:rmw_license
       | Some _ -> Op_unknown "loops are not perfectly nested"
       | None -> Op_unknown ("no statement-level loop binds " ^ Indexing.symbol_ident outer))
-  | Stage _ | Privatize _ | Expand_zero _ | Tensorize _ | Fuse_epilogue _ ->
+  | Tensorize { i; j; _ } -> (
+      (* Role-assignment validity first: the micro-kernel recognition in [apply_op]'s Tensorize
+         branch is a pure function of the code, so probing it decides exactly whether the
+         candidate compile's apply would raise — a proven [Op_illegal] with no transcription
+         drift. This is the valuable pruner: of the role permutations the autotuner proposes per
+         serial triple, the ones assigning the reduction loop to [i]/[j] (or an output loop to
+         [k]) fail the accumulator/operand index discipline here — the [a_rmw]-carrying write
+         must be indexed [..., i, j] with the [k] role absent, i.e. [k] is the only loop carrying
+         the reduction dependence. *)
+      match apply_sched_op opt.llc op with
+      | exception Invalid_argument msg -> Op_illegal msg
+      | (_ : Low_level.t) ->
+          (* Structure proven; the legality dimension is the affine query: the [Tile_mma] block
+             distributes the [i x j] tile across the fresh hardware lane loop (whatever fragment
+             mapping the intrinsic picks) and reassociates the [k] reduction — the same license as
+             [Vectorized] retypes, discharged by the accumulator's rmw self-pairs. Pairing [i]/[j]
+             as thread identity must leave every write-involving pair Disjoint or Same_thread, and
+             the lane is a hardware axis, so cross-statement node sharing downgrades to
+             [Op_unknown] exactly as for hardware retypes. *)
+          loops_independent opt ~syms:[ i; j ] ~cross_nest:true ~licensed:rmw_license)
+  | Stage _ -> stage_legality opt op
+  | Privatize _ | Expand_zero _ | Fuse_epilogue _ ->
       Op_unknown "not modeled by the oracle (the op's own preconditions apply)"
 
 (** [schedule_legality opt sched]: per-op verdicts, each against the code with the preceding ops

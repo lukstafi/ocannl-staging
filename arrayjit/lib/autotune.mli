@@ -129,8 +129,10 @@ val detect_conv : Ir.Low_level.t -> conv_site option
     operand carrying affine components that mix an output symbol with a kernel-window symbol (the
     projections carry the strides, dilations, and padding offsets), the other operand reading the
     kernel window, exactly one out-channel and one reduction-channel symbol, with the out-channel at
-    the output's last axis and a conv axis at its second-to-last (the implicit-GEMM row). Exposed
-    for tests. *)
+    the output's last axis and a conv axis at its second-to-last (the implicit-GEMM row). Reads off
+    the extracted access relations ([Ir.Low_level.affine_accesses] — the gh-494 artifact the
+    op-legality oracle also consumes); under config [legality_crosscheck] the retained procedural
+    matcher runs alongside and any divergence raises. Exposed for tests. *)
 
 val sketch_seed_params :
   is_gpu:bool ->

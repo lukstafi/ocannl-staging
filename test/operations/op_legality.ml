@@ -115,16 +115,37 @@ let () =
   (let op, _, _ = Sched.split ~axis:k ~factor:4 ~outer:LL.Serial ~inner:LL.Serial in
    check "split reduction serial/serial" op);
   check "unroll reduction" (Sched.Unroll { axis = k; materialize = false });
-  check "stage is not modeled"
-    (Sched.Stage
-       {
-         source = a;
-         tile_loops = [ k ];
-         shared = false;
-         cooperative = None;
-         hoisted = false;
-         swizzle = false;
-       });
+
+  (* Stage: apply's precondition surface is probed hermetically (a raising apply is a proven
+     Illegal), then the containment query [Affine.read_covered_before] proves the staged tile
+     covers the remapped reads — a covered serial packing stage is Legal; shared staging stays
+     Unknown (barriers and launch geometry are validated downstream). *)
+  let stage ?(source = a) ?(tile_loops = [ k ]) ?(shared = false) ?(cooperative = None)
+      ?(hoisted = false) ?(swizzle = false) () =
+    Sched.Stage { source; tile_loops; shared; cooperative; hoisted; swizzle }
+  in
+  check "stage packing proves coverage" (stage ());
+  check "stage packing two tile loops" (stage ~tile_loops:[ i2; k ] ());
+  check "stage of a written source" (stage ~source:c ~tile_loops:[ i2; j2 ] ());
+  check "stage tile loop absent from the read" (stage ~tile_loops:[ j2 ] ());
+  check "stage shared stays unknown" (stage ~shared:true ());
+  check "stage hoisted without host-init data" (stage ~hoisted:true ());
+  check "stage cooperative requires shared" (stage ~cooperative:(Some 32) ());
+
+  (* Tensorize: role-assignment validity is decided by probing apply's micro-kernel recognition —
+     the k role must be the (only) rmw-carrying loop and i/j the output dims, so of the 6 role
+     permutations of the [i2 x j2 x k] accumulation only the identity assignment survives; the
+     affine queries then prove i/j iteration independence (reduction reassociation licensed). *)
+  let tz ~i ~j ~k name ck =
+    ck name (fst (Sched.tensorize ~i ~j ~k ~simd_width:32))
+  in
+  tz ~i:i2 ~j:j2 ~k "tensorize valid roles" check;
+  tz ~i:j2 ~j:i2 ~k "tensorize i/j roles swapped" check;
+  tz ~i:i2 ~j:k ~k:j2 "tensorize j role on the reduction" check;
+  tz ~i:k ~j:j2 ~k:i2 "tensorize i role on the reduction" check;
+  tz ~i:j2 ~j:k ~k:i2 "tensorize rotated roles (j k i)" check;
+  tz ~i:k ~j:i2 ~k:j2 "tensorize rotated roles (k i j)" check;
+  tz ~i:i2 ~j:j2 ~k "tensorize with cross-statement sharing" check2;
 
   (* A genuinely order-sensitive serial loop: lagged self-reference. *)
   let x = fresh_tn "x" [| 9 |] in
@@ -145,6 +166,80 @@ let () =
   in
   let opt_lag = hand_built ~stmts:[ lag_nest ] ~tns_on_device:[ x ] ~tns_local:[] in
   p "retype lagged recurrence to Grid" (Sched.op_legality opt_lag (Sched.Retype { axis = t; ty = LL.Grid }));
+
+  (* The autotuner's menu contract on a REAL lowered matmul (not hand-built): the menu proposes
+     all role permutations of a serial accumulation triple, and the oracle gates them. Pruning
+     must remove exactly the proposals whose [Schedule.apply] raises (the candidate compile would
+     fail) and never a viable candidate — assert the equivalence per permutation. *)
+  let open Ocannl.Operation.DSL_modules in
+  let m = 8 in
+  let mav = Array.init (m * m) ~f:(fun q -> Float.of_int (q % 5) *. 0.5) in
+  let mbv = Array.init (m * m) ~f:(fun q -> Float.of_int (q % 7) -. 3.) in
+  let ma = TDSL.ndarray mav ~label:[ "olma" ] ~input_dims:[ m ] ~output_dims:[ m ] () in
+  let mb = TDSL.ndarray mbv ~label:[ "olmb" ] ~input_dims:[ m ] ~output_dims:[ m ] () in
+  let%op olmc = ma * mb in
+  let mm_comp = Ocannl.Train.forward olmc in
+  let captured = ref None in
+  let ctx = Context.auto () in
+  let _ctx, _routine =
+    Context.compile
+      ~lowered_transform:(fun o ->
+        captured := Some o;
+        o)
+      ctx mm_comp Idx.Empty
+  in
+  let mm_opt = Option.value_exn !captured in
+  (* The serial accumulation triple, as the menu's [collect_serial_triples] sees it. *)
+  let strip stmts =
+    List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true)
+  in
+  let rec find_triple (llc : LL.t) : (Idx.symbol * Idx.symbol * Idx.symbol) option =
+    match llc with
+    | LL.Seq (a, b) -> ( match find_triple a with Some _ as r -> r | None -> find_triple b)
+    | LL.If { body; _ } -> find_triple body
+    | LL.For_loop { index = ti; axis = LL.Serial; from_ = 0; body; _ } -> (
+        match strip (LL.flat_lines [ body ]) with
+        | [ LL.For_loop { index = tj; axis = LL.Serial; from_ = 0; body = jb; _ } ] -> (
+            match strip (LL.flat_lines [ jb ]) with
+            | [ LL.For_loop { index = tk; axis = LL.Serial; from_ = 0; body = kb; _ } ] -> (
+                match strip (LL.flat_lines [ kb ]) with
+                | [ LL.Set _ ] -> Some (ti, tj, tk)
+                | _ -> None)
+            | _ -> None)
+        | _ -> None)
+    | LL.For_loop { body; _ } -> find_triple body
+    | _ -> None
+  in
+  let ti, tj, tk = Option.value_exn (find_triple mm_opt.LL.llc) in
+  let perms =
+    [
+      ("i j k", ti, tj, tk); ("i k j", ti, tk, tj); ("j i k", tj, ti, tk);
+      ("j k i", tj, tk, ti); ("k i j", tk, ti, tj); ("k j i", tk, tj, ti);
+    ]
+  in
+  let viable = ref 0 in
+  List.iter perms ~f:(fun (label, i, j, k) ->
+      let op = fst (Sched.tensorize ~i ~j ~k ~simd_width:1) in
+      let verdict = Sched.op_legality mm_opt op in
+      let hermetic =
+        {
+          mm_opt with
+          LL.traced_store = Hashtbl.copy mm_opt.LL.traced_store;
+          optimize_ctx = LL.copy_optimize_ctx mm_opt.LL.optimize_ctx;
+        }
+      in
+      let applies =
+        match Sched.apply [ op ] hermetic with
+        | (_ : LL.optimized) -> true
+        | exception Invalid_argument _ -> false
+      in
+      if applies then Int.incr viable;
+      let pruned = match verdict with Sched.Op_illegal _ -> true | _ -> false in
+      Stdio.printf "menu tensorize roles (%s): %-8s apply %s  pruning %s\n" label (show verdict)
+        (if applies then "succeeds" else "raises")
+        (if Bool.( = ) pruned (not applies) then "sound" else "UNSOUND"));
+  Stdio.printf "viable tensorize permutations survive the gate: %s\n"
+    (if !viable > 0 then "yes" else "NO");
 
   (* Sequential checking: verdicts against progressively applied code, stopping at illegal. *)
   let sched =
