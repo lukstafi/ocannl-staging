@@ -66,6 +66,54 @@ let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
+(* The cross-[k_o] accumulator-residency structural pin (gh-ocannl-480), shared by every staged
+   half leg and backend: the accumulator fragment is loaded once before the serial [k_o] body
+   (bracketed by [body_begin]/[body_end] marker comments) and stored once after it, and the body in
+   between carries update-only MMA steps (with the trailing [barrier] that releases the staged
+   tiles) and no fragment-array load/store of its own. Parity alone cannot see the difference — both
+   the resident and the per-[k_o] forms are correct — so the pin is on the emitted source. *)
+let residency_holds src ~frag_load ~body_begin ~body_end ~frag_store ~barrier =
+  match
+    ( String.substr_index src ~pattern:frag_load,
+      String.substr_index src ~pattern:body_begin,
+      String.substr_index src ~pattern:body_end,
+      String.substr_index src ~pattern:frag_store )
+  with
+  | Some load, Some beg, Some fin, Some store when load < beg && beg < fin && fin < store ->
+      let reduction_body = String.sub src ~pos:beg ~len:(fin - beg) in
+      let update_has_trailing_barrier =
+        match String.substr_index reduction_body ~pattern:"/* tile_mma fragment update" with
+        | Some update_pos ->
+            String.is_substring (String.drop_prefix reduction_body update_pos) ~substring:barrier
+        | None -> false
+      in
+      (not (String.is_substring reduction_body ~substring:frag_load))
+      && (not (String.is_substring reduction_body ~substring:frag_store))
+      && update_has_trailing_barrier
+  | _ -> false
+
+(* The per-backend marker sets for [residency_holds] on a staged half leg. The fragment scope emits
+   the same anchor comments regardless of accumulator element type, so both the uniform-f16 and the
+   f16->f32 legs share these. Metal keeps the fragment first in its store; the wmma backends put the
+   destination pointer first. *)
+let staged_half_resident src =
+  if on_metal then
+    residency_holds src ~frag_load:"simdgroup_load(__mma_fragment_"
+      ~body_begin:"/* simdgroup fragment reduction body begins */"
+      ~body_end:"/* simdgroup fragment reduction body ends */"
+      ~frag_store:"simdgroup_store(__mma_fragment_"
+      ~barrier:"threadgroup_barrier(mem_flags::mem_threadgroup);"
+  else if String.is_substring backend_name ~substring:"hip" then
+    residency_holds src ~frag_load:"rocwmma::load_matrix_sync(__mma_fragment_"
+      ~body_begin:"/* rocwmma fragment reduction body begins */"
+      ~body_end:"/* rocwmma fragment reduction body ends */"
+      ~frag_store:"rocwmma::store_matrix_sync(__mma_dp" ~barrier:"__syncthreads();"
+  else
+    residency_holds src ~frag_load:"nvcuda::wmma::load_matrix_sync(__mma_fragment_"
+      ~body_begin:"/* wmma fragment reduction body begins */"
+      ~body_end:"/* wmma fragment reduction body ends */"
+      ~frag_store:"nvcuda::wmma::store_matrix_sync(__mma_dp" ~barrier:"__syncthreads();"
+
 let n = 32
 
 (* The row-block factor must keep the [Tile_mma] block extents multiples of every backend's
@@ -490,69 +538,76 @@ let () =
      in
      let ctx_d = Context.run ctx_d routine_d in
      let got_h_staged = Context.get_values ctx_d mchs.Tensor.value in
-     p "staged+tensorized half matmul matches the serial twin bitwise"
-       (Array.for_all2_exn got_h_staged got_h_serial ~f:Float.equal);
+     (* Parity is bitwise on CUDA (wmma computes the exactly-rounded dot product for these
+        f16-exact inputs) and on Metal (this mixed f16->f32 combination declines to the exact
+        scalar fallback). On HIP it is only within f32 tolerance: RDNA3's
+        [v_wmma_f32_16x16x16_f16] does not produce the exactly-rounded result (observed max abs
+        diff ~1.3e-7), so the f32 accumulator differs from the f16 serial twin by rounding. The
+        uniform-f16 leg below stays bitwise on every backend. *)
+     let h32_eq =
+       if String.is_substring backend_name ~substring:"hip" then approx else Float.equal
+     in
+     p "staged+tensorized half matmul matches the serial twin"
+       (Array.for_all2_exn got_h_staged got_h_serial ~f:h32_eq);
      match read_generated "mm_h_staged_mma" with
      | None -> p "staged+tensorized half fragment residency" false
      | Some src ->
          let has s = String.is_substring src ~substring:s in
-         (* The accumulator fragment is loaded before the serial [k_o] body and stored after it;
-            the body contains update-only MMA steps (with the trailing barrier that releases the
-            staged tiles) and no fragment-array load/store of its own. *)
-         let resident ~frag_load ~body_begin ~body_end ~frag_store ~barrier =
-           match
-             ( String.substr_index src ~pattern:frag_load,
-               String.substr_index src ~pattern:body_begin,
-               String.substr_index src ~pattern:body_end,
-               String.substr_index src ~pattern:frag_store )
-           with
-           | Some load, Some beg, Some fin, Some store when load < beg && beg < fin && fin < store
-             ->
-               let reduction_body = String.sub src ~pos:beg ~len:(fin - beg) in
-               let update_has_trailing_barrier =
-                 match
-                   String.substr_index reduction_body ~pattern:"/* tile_mma fragment update"
-                 with
-                 | Some update_pos ->
-                     String.is_substring
-                       (String.drop_prefix reduction_body update_pos)
-                       ~substring:barrier
-                 | None -> false
-               in
-               (not (String.is_substring reduction_body ~substring:frag_load))
-               && (not (String.is_substring reduction_body ~substring:frag_store))
-               && update_has_trailing_barrier
-           | _ -> false
-         in
+         (* f16 operands with an f32 accumulator: the wmma backends (HIP rocWMMA, CUDA wmma) render
+            the marked accumulator as an f32 fragment array resident across [k_o]. Metal's
+            [simdgroup_matrix] is uniform-precision only, so this mixed combination declines there
+            to the scalar fallback — the uniform-f16 leg below is the one that exercises Metal's
+            fragment path. HIP is verified on gfx1151, so its pin is strict; CUDA also accepts the
+            pre-sm_70 lane-0 fallback. *)
          let ok =
-           if on_metal then
-             resident ~frag_load:"simdgroup_load(__mma_fragment_"
-               ~body_begin:"/* simdgroup fragment reduction body begins */"
-               ~body_end:"/* simdgroup fragment reduction body ends */"
-               ~frag_store:"simdgroup_store(__mma_fragment_"
-               ~barrier:"threadgroup_barrier(mem_flags::mem_threadgroup);"
-             && has "simdgroup_half8x8"
-             && not (has "== 0)")
-           else if String.is_substring backend_name ~substring:"hip" then
-             (* HIP's persistent-fragment mapping lands with its own gh-ocannl-480 work: accept
-                either the resident rendering or the current per-[k_o] rocWMMA path (tighten to
-                the [resident] pin once it does). *)
-             has "__shared__" && has "__syncthreads()"
-           else
-             (* CUDA: wmma accumulator fragments; on pre-sm_70 devices the whole statement falls
-                back to the lane-0 guard instead. *)
-             resident ~frag_load:"nvcuda::wmma::load_matrix_sync(__mma_fragment_"
-               ~body_begin:"/* wmma fragment reduction body begins */"
-               ~body_end:"/* wmma fragment reduction body ends */"
-               ~frag_store:"nvcuda::wmma::store_matrix_sync(__mma_dp"
-               ~barrier:"__syncthreads();"
-             && (not (has "== 0)"))
-             || has "== 0)"
+           if on_metal then has "== 0)"
+           else if String.is_substring backend_name ~substring:"hip" then staged_half_resident src
+           else staged_half_resident src || has "== 0)"
          in
          p "staged+tensorized half fragment residency" ok)
    else (
-     p "staged+tensorized half matmul matches the serial twin bitwise" true;
+     p "staged+tensorized half matmul matches the serial twin" true;
      p "staged+tensorized half fragment residency" true));
+
+  (* --- The same staged half composition with a uniform-f16 accumulator (gh-ocannl-480): the leg
+     that exercises the same-type accumulator fragment element (half, not f32) on every tensor-core
+     backend — including Metal's [simdgroup_half8x8], which the mixed f16->f32 leg above cannot
+     reach ([simdgroup_matrix] is uniform-precision only). Same f16-exact inputs, so parity with the
+     half serial twin stays bitwise. --- *)
+  let%op mchu = mah * mbh in
+  Tn.update_prec mchu.Tensor.value Ir.Ops.half;
+  (if on_gpu then (
+     let transform_hu opt =
+       Sched.apply
+         (staged_schedule ~out:mchu.Tensor.value ~src_a:mah.Tensor.value ~src_b:mbh.Tensor.value
+            opt)
+         opt
+     in
+     let ctx_u = Context.auto () in
+     let ctx_u, routine_u =
+       Context.compile ~lowered_transform:transform_hu ctx_u
+         (named "mm_hu_staged_mma" (Train.forward mchu))
+         Ir.Indexing.Empty
+     in
+     let ctx_u = Context.run ctx_u routine_u in
+     let got_hu = Context.get_values ctx_u mchu.Tensor.value in
+     p "staged+tensorized uniform-f16 matmul matches the serial twin bitwise"
+       (Array.for_all2_exn got_hu got_h_serial ~f:Float.equal);
+     match read_generated "mm_hu_staged_mma" with
+     | None -> p "staged+tensorized uniform-f16 fragment residency" false
+     | Some src ->
+         let has s = String.is_substring src ~substring:s in
+         (* Uniform f16->f16 is a valid combination on all three tensor-core backends, so the
+            accumulator fragment stays resident across [k_o] on each. HIP strict (verified on
+            gfx1151); Metal/CUDA also accept the pre-Apple7 / pre-sm_70 lane-0 fallback. *)
+         let ok =
+           if String.is_substring backend_name ~substring:"hip" then staged_half_resident src
+           else staged_half_resident src || has "== 0)"
+         in
+         p "staged+tensorized uniform-f16 fragment residency" ok)
+   else (
+     p "staged+tensorized uniform-f16 matmul matches the serial twin bitwise" true;
+     p "staged+tensorized uniform-f16 fragment residency" true));
 
   (* --- Transposed operand layouts (the gradient-GEMM access patterns): [d[i,j] += at[k,i] *
      b[k,j]] (a stored transposed) and [d[i,j] += a[i,k] * bt[j,k]] (b stored transposed). Tensorize
