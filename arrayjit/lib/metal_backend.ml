@@ -355,6 +355,12 @@ module Impl = struct
               then Some { Backend_intf.mma_simd_width = 32; mma_tile = (8, 8, 8) }
               else None);
            simd_vector_bytes = 0;
+           (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the
+              Apple-silicon class ([Device.attributes] exposes no throughput numbers — mid-range
+              M-series: ~5 fp32 TFLOP/s, ~200 GB/s unified memory). The model only ranks, so
+              class-level numbers suffice. *)
+           peak_flops = Some 5.0e12;
+           peak_memory_bandwidth = Some 2.0e11;
          })
     in
     fun () -> Lazy.force limits

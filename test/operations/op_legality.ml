@@ -41,6 +41,7 @@ let hand_built ~stmts ~tns_on_device ~tns_local =
     merge_node = None;
     workgroup_shared = Set.empty (module Tn);
     simdgroup_fragments = Set.empty (module Tn);
+    swizzled = Set.empty (module Tn);
   }
 
 let show = function
@@ -116,7 +117,14 @@ let () =
   check "unroll reduction" (Sched.Unroll { axis = k; materialize = false });
   check "stage is not modeled"
     (Sched.Stage
-       { source = a; tile_loops = [ k ]; shared = false; cooperative = None; hoisted = false });
+       {
+         source = a;
+         tile_loops = [ k ];
+         shared = false;
+         cooperative = None;
+         hoisted = false;
+         swizzle = false;
+       });
 
   (* A genuinely order-sensitive serial loop: lagged self-reference. *)
   let x = fresh_tn "x" [| 9 |] in

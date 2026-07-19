@@ -125,6 +125,7 @@ let () =
         merge_node = None;
         workgroup_shared = Set.empty (module Ir.Tnode);
         simdgroup_fragments = Set.empty (module Ir.Tnode);
+        swizzled = Set.empty (module Ir.Tnode);
       }
     in
     fake

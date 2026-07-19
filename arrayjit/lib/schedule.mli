@@ -50,6 +50,7 @@ type optop =
       shared : bool;
       cooperative : int option;
       hoisted : bool;
+      swizzle : bool;
     }
       (** Stage reads of [source] through a tile: a fresh [Local]-mode node registered in the traced
           store, its dims derived per source axis from the range of the index terms over
@@ -82,6 +83,19 @@ type optop =
           [w] iterates [extent / w] chunks at [w*step + lane]; otherwise the whole nest is
           restricted to lane 0 (division is not expressible in affine indices). The lane loop covers
           workgroup slot 0 for the staging-point coverage rule by construction.
+
+          [swizzle = true] stores the tile in an XOR-swizzled layout (the bank-conflict-avoidance
+          follow-up of docs/proposals/tensorize-mma.md): the tile node is added to the [optimized]
+          record's {!field:Low_level.swizzled} set and codegen remaps every element access
+          [P*C + col] to [P*C + (col lxor (P land (C-1)))] — a per-row bijection of the minor axis,
+          so semantics are unchanged while same-column accesses (the classic strided read of a
+          staged tile) spread across shared-memory banks. Requires [shared = true], a tile with at
+          least two axes, and a power-of-two minor tile dim [> 1]. Renderings that assume row-major
+          storage decline swizzled operands: [Tile_mma] intrinsic/register-tiled paths fall back to
+          the scalar micro-kernel (which reads elementwise and stays correct), so do not combine
+          [swizzle] with {!constructor-Tensorize} when the intrinsics are the goal — the swizzled
+          tile is for scalar/register-blocktiled staged kernels until [ldmatrix]-style
+          swizzle-aware fragment loads exist.
 
           [hoisted = true] packs a compile-time-constant operand once, out of the routine
           (gh-ocannl-470, the compiler-native analog of ggml's [CPU_REPACK] [set_tensor] hook):

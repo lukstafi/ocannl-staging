@@ -59,11 +59,7 @@ module Slab = struct
   type device = Device_stream.device
   type buffer_ptr = H.Deviceptr.t
 
-  (* Requested sizes are tracked alongside the pointers so [get_used_memory] can report the bytes
-     OCANNL allocated on the device (gh-ocannl-289): the driver's [get_free_and_total_mem] moves in
-     allocation granules, which hides sub-granule effects such as the liveness planner's arena
-     savings (gh-ocannl-489) and counts other processes' memory. *)
-  let pools : (int * int, buffer_ptr * int) Hashtbl.Poly.t = Hashtbl.Poly.create ()
+  let pools : (int * int, buffer_ptr) Hashtbl.Poly.t = Hashtbl.Poly.create ()
 
   let alloc_pool ?mode:_ (device : device) ~pool_id ~size_in_bytes ~alignment:_ =
     set_ctx device.dev.primary_context;
@@ -71,26 +67,21 @@ module Slab = struct
     (* Free any prior allocation under this key before replacing it, so device memory stays
        equivalent to the pre-refactor path. Unique tnode pool ids never pre-exist; this only fires
        on the reserved merge pool growing in place. *)
-    Option.iter (Hashtbl.find pools key) ~f:(fun (ptr, _) -> H.Deviceptr.mem_free ptr);
-    let size_in_bytes = max 1 size_in_bytes in
-    let ptr = H.Deviceptr.mem_alloc ~size_in_bytes in
-    Hashtbl.set pools ~key ~data:(ptr, size_in_bytes)
+    Option.iter (Hashtbl.find pools key) ~f:H.Deviceptr.mem_free;
+    let ptr = H.Deviceptr.mem_alloc ~size_in_bytes:(max 1 size_in_bytes) in
+    Hashtbl.set pools ~key ~data:ptr
 
   let free_pool =
     Some
       (fun (device : device) ~pool_id ->
         let key = (device.device_id, pool_id) in
-        Option.iter (Hashtbl.find pools key) ~f:(fun (ptr, _) -> H.Deviceptr.mem_free ptr);
+        Option.iter (Hashtbl.find pools key) ~f:H.Deviceptr.mem_free;
         Hashtbl.remove pools key)
 
   let resolve_pool (device : device) { pool_id; offset = _ } : buffer_ptr =
     (* Return the slab base. The byte offset is NOT folded into the handle here; callers apply it
        via the hipjit ?offset / ?dst_offset / ?src_offset params or via H.Deviceptr.offset. *)
-    fst (Hashtbl.find_exn pools (device.device_id, pool_id))
-
-  let used_memory (device : device) =
-    Hashtbl.fold pools ~init:0 ~f:(fun ~key:(dev_id, _) ~data:(_, size) acc ->
-        if dev_id = device.device_id then acc + size else acc)
+    Hashtbl.find_exn pools (device.device_id, pool_id)
 
   let memset_zero (device : device) ~pool_id ~offset ~size_in_bytes =
     let base = resolve_pool device { pool_id; offset } in
@@ -172,10 +163,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
   (* [devices] is mutable to support plugging in new devices. *)
   let devices = lazy (ref @@ Array.create ~len:(num_devices ()) None)
 
-  (* Bytes OCANNL has allocated on this device via [Slab], exact rather than the driver's
-     granule-quantized [total - free] (gh-ocannl-289). Device-wide across contexts, matching the
-     [Context.get_used_memory] contract. *)
-  let get_used_memory (device : device) = Slab.used_memory device
+  let get_used_memory (device : device) =
+    set_ctx device.dev.primary_context;
+    let free, total = H.Device.get_free_and_total_mem () in
+    total - free
 
   (* The merge buffer is the device's reserved single-tenant pool (id [merge_buffer_pool_id]); grow
      it in place when a larger node arrives ([Slab.alloc_pool] overwrites the reserved entry). *)
@@ -582,6 +573,93 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
             | `Device | `Shared -> true (* generic-address loads cover both *)
             | `Thread | `Fragment _ -> false
           in
+          match d_space with
+          | `Fragment fragment -> (
+              (* gh-ocannl-480 (cross-[k_o] accumulator residency): the accumulator fragment array
+                 [fragment] was declared and loaded once by [mma_fragment_syntax]. Here each
+                 [Tile_mma] at a serial [k_o] emits update-only mma steps into it -- no per-[k_o]
+                 load or store of [d]. The trailing barrier keeps the next k-block's cooperative
+                 staging from overwriting the shared tiles still being read. The acceptance guard
+                 matches [mma_fragment_syntax]'s (both see the same [lda]/[ldb]), so whenever the
+                 fragment scope accepts this branch does too. *)
+              let open PPrint in
+              match combo with
+              | Some (ab_typ, _acc_typ, ab_ld_mult, _d_ld_mult)
+                when mma_supported ()
+                     && m % tile = 0
+                     && n % tile = 0
+                     && k % tile = 0
+                     && lda % ab_ld_mult = 0
+                     && ldb % ab_ld_mult = 0
+                     && loadable a_space && loadable b_space ->
+                  let mt = m / tile and nt = n / tile and kt = k / tile in
+                  let frag kind typ layout =
+                    Printf.sprintf "rocwmma::fragment<rocwmma::%s, %d, %d, %d, %s%s>" kind tile tile
+                      tile typ
+                      (match layout with Some l -> ", rocwmma::" ^ l | None -> "")
+                  in
+                  let ptr_decl name typ ptr =
+                    string (Printf.sprintf "%s *%s = reinterpret_cast<%s *>(" typ name typ)
+                    ^^ ptr ^^ string ");"
+                  in
+                  let a_layout = if ta then "col_major" else "row_major" in
+                  let b_layout = if tb then "col_major" else "row_major" in
+                  let barrier = "__syncthreads();" in
+                  let body_lines =
+                    [
+                      Printf.sprintf "for (int __ki = 0; __ki < %d; ++__ki) {" kt;
+                      Printf.sprintf "  %s __mma_bf[%d];" (frag "matrix_b" ab_typ (Some b_layout)) nt;
+                      Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                      (if tb then
+                         Printf.sprintf
+                           "    rocwmma::load_matrix_sync(__mma_bf[__ni], __mma_bp + __ni * %d * %d \
+                            + __ki * %d, %d);"
+                           tile ldb tile ldb
+                       else
+                         Printf.sprintf
+                           "    rocwmma::load_matrix_sync(__mma_bf[__ni], __mma_bp + __ki * %d * %d \
+                            + __ni * %d, %d);"
+                           tile ldb tile ldb);
+                      "  }";
+                      Printf.sprintf "  for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                      Printf.sprintf "    %s __mma_af;" (frag "matrix_a" ab_typ (Some a_layout));
+                      (if ta then
+                         Printf.sprintf
+                           "    rocwmma::load_matrix_sync(__mma_af, __mma_ap + __ki * %d * %d + __mi \
+                            * %d, %d);"
+                           tile lda tile lda
+                       else
+                         Printf.sprintf
+                           "    rocwmma::load_matrix_sync(__mma_af, __mma_ap + __mi * %d * %d + __ki \
+                            * %d, %d);"
+                           tile lda tile lda);
+                      Printf.sprintf "    for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                      Printf.sprintf
+                        "      rocwmma::mma_sync(%s[__mi][__ni], __mma_af, __mma_bf[__ni], \
+                         %s[__mi][__ni]);"
+                        fragment fragment;
+                      "    }";
+                      "  }";
+                      "}";
+                      barrier;
+                    ]
+                  in
+                  let body =
+                    ptr_decl "__mma_ap" ("const " ^ ab_typ) a_ptr
+                    ^^ hardline
+                    ^^ ptr_decl "__mma_bp" ("const " ^ ab_typ) b_ptr
+                    ^^ hardline
+                    ^^ separate_map hardline string body_lines
+                  in
+                  Some
+                    (group
+                       (string
+                          (Printf.sprintf "{ /* tile_mma fragment update %dx%dx%d (rocwmma) */" m n
+                             k)
+                       ^^ nest 2 (hardline ^^ body)
+                       ^^ hardline ^^ rbrace))
+              | _ -> None)
+          | `Device | `Shared | `Thread -> (
           match combo with
           | Some (ab_typ, acc_typ, ab_ld_mult, d_ld_mult)
             when mma_supported ()
@@ -679,9 +757,107 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                    (string (Printf.sprintf "{ /* tile_mma %dx%dx%d (rocwmma) */" m n k)
                    ^^ nest 2 (hardline ^^ body)
                    ^^ hardline ^^ rbrace))
-          | _ -> None)
+          | _ -> None))
 
-    let mma_fragment_syntax = None
+    (* Cross-[k_o] accumulator residency (gh-ocannl-480): the marked local accumulator tile becomes
+       a persistent rocWMMA accumulator-fragment array whose load/store bracket the whole serial
+       reduction. Loaded once from [target] before the [k_o] loop, updated in place by the nested
+       [Tile_mma]s (which see [`Fragment fragment] and take the update-only branch of [mma_syntax]),
+       stored once after. Mirrors the Metal [simdgroup_matrix] rendering; the guard matches the
+       [`Fragment] branch of [mma_syntax] so both accept together. *)
+    let mma_fragment_syntax =
+      Some
+        (fun ~d_prec
+          ~a_prec
+          ~b_prec
+          ~m
+          ~n
+          ~k
+          ~fragment
+          ~target:(d_ptr, ldd, d_space)
+          ~a:(_, lda, a_space)
+          ~b:(_, ldb, b_space)
+          ~body
+        ->
+          let tile = 16 in
+          let combo =
+            match (a_prec, b_prec, d_prec) with
+            | Ops.Half_prec _, Ops.Half_prec _, Ops.Single_prec _ ->
+                Some ("rocwmma::float16_t", "float", 8, 4)
+            | Ops.Half_prec _, Ops.Half_prec _, Ops.Half_prec _ ->
+                Some ("rocwmma::float16_t", "rocwmma::float16_t", 8, 8)
+            | Ops.Bfloat16_prec _, Ops.Bfloat16_prec _, Ops.Single_prec _ ->
+                Some ("rocwmma::bfloat16_t", "float", 8, 4)
+            | Ops.Bfloat16_prec _, Ops.Bfloat16_prec _, Ops.Bfloat16_prec _ ->
+                Some ("rocwmma::bfloat16_t", "rocwmma::bfloat16_t", 8, 8)
+            | _ -> None
+          in
+          let loadable = function
+            | `Device | `Shared -> true
+            | `Thread | `Fragment _ -> false
+          in
+          match combo with
+          | Some (_ab_typ, acc_typ, ab_ld_mult, d_ld_mult)
+            when mma_supported ()
+                 && m % tile = 0
+                 && n % tile = 0
+                 && k % tile = 0
+                 && lda % ab_ld_mult = 0
+                 && ldb % ab_ld_mult = 0
+                 && ldd % d_ld_mult = 0
+                 && loadable d_space && loadable a_space && loadable b_space ->
+              let open PPrint in
+              let mt = m / tile and nt = n / tile in
+              let frag kind typ layout =
+                Printf.sprintf "rocwmma::fragment<rocwmma::%s, %d, %d, %d, %s%s>" kind tile tile tile
+                  typ
+                  (match layout with Some l -> ", rocwmma::" ^ l | None -> "")
+              in
+              let ptr_decl name typ ptr =
+                string (Printf.sprintf "%s *%s = reinterpret_cast<%s *>(" typ name typ)
+                ^^ ptr ^^ string ");"
+              in
+              let barrier = "__syncthreads();" in
+              let lines_before =
+                [
+                  barrier;
+                  Printf.sprintf "%s %s[%d][%d];" (frag "accumulator" acc_typ None) fragment mt nt;
+                  Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                  Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                  Printf.sprintf
+                    "    rocwmma::load_matrix_sync(%s[__mi][__ni], __mma_dp + __mi * %d * %d + __ni \
+                     * %d, %d, rocwmma::mem_row_major);"
+                    fragment tile ldd tile ldd;
+                  "  }";
+                  "}";
+                  "/* rocwmma fragment reduction body begins */";
+                ]
+              in
+              let lines_after =
+                [
+                  "/* rocwmma fragment reduction body ends */";
+                  Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                  Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                  Printf.sprintf
+                    "    rocwmma::store_matrix_sync(__mma_dp + __mi * %d * %d + __ni * %d, \
+                     %s[__mi][__ni], %d, rocwmma::mem_row_major);"
+                    tile ldd tile fragment ldd;
+                  "  }";
+                  "}";
+                  barrier;
+                ]
+              in
+              let d_decl = ptr_decl "__mma_dp" acc_typ d_ptr in
+              Some
+                (group
+                   (string (Printf.sprintf "{ /* rocwmma fragment %dx%d across k_o */" m n)
+                   ^^ nest 2
+                        (hardline ^^ d_decl ^^ hardline
+                        ^^ separate_map hardline string lines_before
+                        ^^ hardline ^^ body () ^^ hardline
+                        ^^ separate_map hardline string lines_after)
+                   ^^ hardline ^^ rbrace))
+          | _ -> None)
 
     let rec binop_syntax prec v =
       let open PPrint in
@@ -1438,6 +1614,12 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                 Some { Backend_intf.mma_simd_width = 32; mma_tile = (16, 16, 16) }
               else None);
            simd_vector_bytes = 0;
+           (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the
+              RDNA3-class targets this backend is exercised on (dGPU/APU: ~10 fp32 TFLOP/s,
+              ~250 GB/s — Strix-Halo-class LPDDR5X). Per-device queries are calibration
+              follow-up work; the model only ranks, so class-level numbers suffice. *)
+           peak_flops = Some 1.0e13;
+           peak_memory_bandwidth = Some 2.5e11;
          })
     in
     fun () -> Lazy.force limits
