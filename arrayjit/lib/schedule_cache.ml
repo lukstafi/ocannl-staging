@@ -29,6 +29,7 @@ type saved_optop =
       shared : bool;
       cooperative : int option;
       hoisted : bool;
+      swizzle : bool; [@sexp.bool]
     }
   | Privatize of { target : int; over : sym_ref }
   | Expand_zero of { tn : int }
@@ -313,6 +314,13 @@ let canonicalize ?(static_indices = []) ?(with_placements = true) (opt : LL.opti
   Set.iter opt.LL.simdgroup_fragments ~f:(fun tn ->
       emit_tn tn;
       add ",");
+  (* Emitted only when non-empty so pre-swizzle canonical digests (and their caches) stay valid. *)
+  if not (Set.is_empty opt.LL.swizzled) then begin
+    add "];swizzled:[";
+    Set.iter opt.LL.swizzled ~f:(fun tn ->
+        emit_tn tn;
+        add ",")
+  end;
   add "];merge:";
   (match opt.LL.merge_node with None -> add "-" | Some tn -> emit_tn tn);
   add ";";
@@ -396,7 +404,7 @@ let to_saved r (sched : Schedule.schedule) : saved_schedule * registry =
           | Schedule.Retype { axis; ty } -> (r, Retype { axis = resolve_exn r axis; ty })
           | Schedule.Unroll { axis; materialize } ->
               (r, Unroll { axis = resolve_exn r axis; materialize })
-          | Schedule.Stage { source; tile_loops; shared; cooperative; hoisted } ->
+          | Schedule.Stage { source; tile_loops; shared; cooperative; hoisted; swizzle } ->
               ( r,
                 Stage
                   {
@@ -405,6 +413,7 @@ let to_saved r (sched : Schedule.schedule) : saved_schedule * registry =
                     shared;
                     cooperative;
                     hoisted;
+                    swizzle;
                   } )
           | Schedule.Privatize { target; over } ->
               (r, Privatize { target = resolve_tn_exn r target; over = resolve_exn r over })
@@ -447,7 +456,7 @@ let of_saved canonical (saved : saved_schedule) : Schedule.schedule * registry =
           | Retype { axis; ty } -> (r, Schedule.Retype { axis = unresolve_exn r axis; ty })
           | Unroll { axis; materialize } ->
               (r, Schedule.Unroll { axis = unresolve_exn r axis; materialize })
-          | Stage { source; tile_loops; shared; cooperative; hoisted } ->
+          | Stage { source; tile_loops; shared; cooperative; hoisted; swizzle } ->
               ( r,
                 Schedule.Stage
                   {
@@ -456,6 +465,7 @@ let of_saved canonical (saved : saved_schedule) : Schedule.schedule * registry =
                     shared;
                     cooperative;
                     hoisted;
+                    swizzle;
                   } )
           | Privatize { target; over } ->
               ( r,

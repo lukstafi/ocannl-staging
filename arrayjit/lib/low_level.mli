@@ -332,6 +332,14 @@ type optimized = {
           form one per-simdgroup fragment lifetime. Backends without a fragment rendering ignore the
           marking and use the ordinary local-array code; Metal maps the marked region to a
           persistent [simdgroup_matrix] array. *)
+  swizzled : Set.M(Tnode).t;
+      (** Nodes stored in an XOR-swizzled layout (docs/proposals/tensorize-mma.md, "Swizzled
+          staging"): codegen remaps every element access [flat = P*C + col] (with [C] the minor
+          dim, [P] the linearized prefix) to [P*C + (col lxor (P land (C-1)))] — a bijection on the
+          buffer, so the IR-level semantics are unchanged; only the physical layout differs,
+          spreading same-column accesses across shared-memory banks. Populated by
+          [Schedule.Stage ~swizzle:true]. Renderings that assume a row-major layout must decline
+          swizzled nodes. *)
 }
 [@@deriving sexp_of]
 

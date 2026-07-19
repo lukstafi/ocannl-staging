@@ -537,6 +537,7 @@ let gpu_sketch_schedule (site : matmul_site)
           shared = true;
           cooperative = None;
           hoisted = false;
+          swizzle = false;
         };
       Sched.Stage
         {
@@ -545,6 +546,7 @@ let gpu_sketch_schedule (site : matmul_site)
           shared = true;
           cooperative = None;
           hoisted = false;
+          swizzle = false;
         };
       Sched.Privatize { target = site.m_d; over = k_o };
       Sched.Unroll { axis = i_t; materialize = true };
@@ -577,6 +579,7 @@ let cpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = b
           shared = false;
           cooperative = None;
           hoisted = sk_hoist && hoistable site.m_a;
+          swizzle = false;
         };
       Sched.Stage
         {
@@ -585,6 +588,7 @@ let cpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = b
           shared = false;
           cooperative = None;
           hoisted = sk_hoist && hoistable site.m_b;
+          swizzle = false;
         };
       Sched.Privatize { target = site.m_d; over = k_o };
     ]
@@ -628,6 +632,7 @@ let gpu_mma_sketch_schedule (site : matmul_site)
             shared = true;
             cooperative = Some w;
             hoisted = false;
+            swizzle = false;
           };
         Sched.Stage
           {
@@ -636,6 +641,7 @@ let gpu_mma_sketch_schedule (site : matmul_site)
             shared = true;
             cooperative = Some w;
             hoisted = false;
+            swizzle = false;
           };
         tz;
       ]
@@ -709,7 +715,7 @@ let cpu_mma_pack_sketch_schedule (site : matmul_site)
       ([ sp_i; sp_j; sp_k ], j_i, sink i_i [ j_o ] @ if grid_outermost then [] else sink i_o [ j_o ])
   in
   let stage ~hoisted source tile_loops =
-    Sched.Stage { source; tile_loops; shared = false; cooperative = None; hoisted }
+    Sched.Stage { source; tile_loops; shared = false; cooperative = None; hoisted; swizzle = false }
   in
   let stages =
     if grid_outermost then
@@ -823,7 +829,8 @@ let conv_split_row_current (site : conv_site) ~row_o ~row_i : Idx.symbol list =
 let cpu_conv_sketch_schedule ~(opt : LL.optimized) (site : conv_site) { sk_grid; sk_bm; _ } :
     Sched.schedule =
   let stage source tile_loops =
-    Sched.Stage { source; tile_loops; shared = false; cooperative = None; hoisted = false }
+    Sched.Stage
+      { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = false }
   in
   if sk_bm > 0 then (
     if site.c_nrow % sk_bm <> 0 then
@@ -902,7 +909,8 @@ let cpu_conv_sketch_schedule ~(opt : LL.optimized) (site : conv_site) { sk_grid;
    companion nest here (unzeroed segments), so no cross-nest zero geometry is needed. *)
 let gpu_conv_sketch_schedule (site : conv_site) { sk_simd = w; sk_bm; _ } : Sched.schedule =
   let stage source tile_loops =
-    Sched.Stage { source; tile_loops; shared = true; cooperative = Some w; hoisted = false }
+    Sched.Stage
+      { source; tile_loops; shared = true; cooperative = Some w; hoisted = false; swizzle = false }
   in
   let outer_grid =
     List.map site.c_outer ~f:(fun (s, _) -> Sched.Retype { axis = s; ty = LL.Grid })

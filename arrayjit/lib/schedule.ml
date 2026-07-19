@@ -25,6 +25,7 @@ type optop =
       shared : bool;
       cooperative : int option;
       hoisted : bool;
+      swizzle : bool;
     }
   | Privatize of { target : Tn.t; over : Indexing.symbol }
   | Expand_zero of { tn : Tn.t; indices : Indexing.symbol list }
@@ -751,8 +752,8 @@ let pack_constant_tile ~debug ~(src_nd : Ndarray.t) ~(src_dims : int array) ~(pr
   Ndarray.apply2 { f2 } src_nd dst;
   dst
 
-let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted (opt : Low_level.optimized) :
-    Low_level.optimized =
+let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
+    (opt : Low_level.optimized) : Low_level.optimized =
   let open Low_level in
   if List.is_empty tile_loops then invalid_arg "Schedule.Stage: empty tile_loops";
   Option.iter cooperative ~f:(fun w ->
@@ -760,6 +761,9 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted (opt : Low_lev
       if w <= 0 then invalid_arg "Schedule.Stage: cooperative simd width must be positive");
   if hoisted && shared then
     invalid_arg "Schedule.Stage: hoisted staging requires shared = false (it emits no load nest)";
+  if swizzle && not shared then
+    invalid_arg
+      "Schedule.Stage: swizzle is a shared-memory bank-conflict layout, it requires shared = true";
   let accesses = collect_source_accesses ~source opt.llc in
   let idcs0, stack0 =
     match accesses with
@@ -1002,6 +1006,17 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted (opt : Low_lev
     (* Mint the tile. *)
     let prec = Lazy.force source.Tn.prec in
     let tile_dims = Array.map tile_axes ~f:snd in
+    (if swizzle then
+       let n = Array.length tile_dims in
+       if n < 2 then
+         invalid_arg
+           "Schedule.Stage: swizzle requires a tile with at least two axes (the minor axis is \
+            XORed against the row prefix)";
+       let c = tile_dims.(n - 1) in
+       if c < 2 || c land (c - 1) <> 0 then
+         invalid_arg
+           (Printf.sprintf
+              "Schedule.Stage: swizzle requires a power-of-two minor tile dim > 1, got %d" c));
     let tile =
       Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
         ~label:("tile" :: source.Tn.label)
@@ -1228,6 +1243,7 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted (opt : Low_lev
       llc;
       workgroup_shared =
         (if shared then Set.add opt.workgroup_shared tile else opt.workgroup_shared);
+      swizzled = (if swizzle then Set.add opt.swizzled tile else opt.swizzled);
     }
 
 (** {2 [Privatize]: accumulator privatization}
@@ -2158,8 +2174,8 @@ let can_fuse_epilogue ~target (opt : Low_level.optimized) : bool =
 
 let apply_opt_op (opt : Low_level.optimized) (op : optop) : Low_level.optimized =
   match op with
-  | Stage { source; tile_loops; shared; cooperative; hoisted } ->
-      apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted opt
+  | Stage { source; tile_loops; shared; cooperative; hoisted; swizzle } ->
+      apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle opt
   | Privatize { target; over } -> apply_privatize ~target ~over opt
   | Tensorize _ -> apply_tensorize op opt
   | Fuse_epilogue { target; shared } -> apply_fuse_epilogue ~target ~shared opt
@@ -3173,6 +3189,7 @@ let segment_optimized (full : Low_level.optimized) (llc : Low_level.t) : Low_lev
     merge_node = (if reads_merge then full.Low_level.merge_node else None);
     workgroup_shared = Set.filter full.Low_level.workgroup_shared ~f:(Set.mem tns);
     simdgroup_fragments = Set.filter full.Low_level.simdgroup_fragments ~f:(Set.mem tns);
+    swizzled = Set.filter full.Low_level.swizzled ~f:(Set.mem tns);
   }
 
 (* Expand-and-annotate schedule for a segment of materialized whole-node [Zero_out]s (GPU): the

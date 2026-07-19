@@ -721,6 +721,39 @@ module C_syntax (B : C_syntax_config) = struct
   let current_simdgroup_fragments : Set.M(Tn).t ref = ref (Set.empty (module Tn))
   let rendered_simdgroup_fragments : Set.M(Tn).t ref = ref (Set.empty (module Tn))
 
+  (* Set by [compile_proc]: nodes stored XOR-swizzled ([Schedule.Stage ~swizzle], see
+     {!Low_level.optimized.swizzled}). Scalar element accesses go through [pp_tn_offset] below;
+     renderings that assume row-major storage (contiguous vector loads/stores, [Tile_mma]
+     intrinsic / register-tiled / fragment paths) must decline these nodes. *)
+  let current_swizzled : Set.M(Tn).t ref = ref (Set.empty (module Tn))
+  let is_swizzled tn = Set.mem !current_swizzled tn
+
+  (* The flat-offset rendering for an element access of [tn]'s buffer: row-major
+     [pp_array_offset], except for swizzled nodes, where the minor-axis index is XORed with the low
+     bits of the linearized row prefix — [P*C + col] becomes [P*C + (col ^ (P & (C-1)))], [C] the
+     (power-of-two, checked by [Schedule.Stage]) minor dim. A bijection per row, so all-element
+     traversals (zeroing) and matched read/write pairs are unaffected; same-column accesses from
+     consecutive rows land in distinct shared-memory banks. The prefix expression is emitted twice;
+     downstream C compilers CSE it. *)
+  let pp_tn_offset tn (idcs, dims) =
+    let open PPrint in
+    let n = Array.length idcs in
+    if (not (is_swizzled tn)) || n < 2 then pp_array_offset (idcs, dims)
+    else
+      let c = dims.(n - 1) in
+      let prefix_doc =
+        pp_array_offset (Array.sub idcs ~pos:0 ~len:(n - 1), Array.sub dims ~pos:0 ~len:(n - 1))
+      in
+      let col_doc = pp_axis_index idcs.(n - 1) in
+      let col_doc = if PPrint.is_empty col_doc then string "0" else col_doc in
+      if PPrint.is_empty prefix_doc then col_doc
+      else
+        parens prefix_doc
+        ^^ string (" * " ^ Int.to_string c ^ " + ")
+        ^^ parens
+             (parens col_doc ^^ string " ^ "
+             ^^ parens (parens prefix_doc ^^ string (" & " ^ Int.to_string (c - 1))))
+
   type active_mma_accumulator =
     | Active_fragment of Tn.t * string
     | Active_target of
@@ -1293,7 +1326,11 @@ module C_syntax (B : C_syntax_config) = struct
                && Indexing.equal_symbol lane1 lane2
                && Array.equal Indexing.equal_axis_index init_idcs store_idcs -> (
             match collect_fragment_tiles fragment [] reduction with
-            | [ Tile_mma { a; b; ta; tb; m; n; k; _ } ] -> (
+            (* Swizzled operands decline the fragment hooks (row-major pointer+stride contract);
+               falling through to [None] keeps the ordinary rendering, whose [Tile_mma]s decline
+               to the swizzle-aware scalar fallback. *)
+            | [ Tile_mma { a; b; ta; tb; m; n; k; _ } ]
+              when not (List.exists [ target; fst a; fst b ] ~f:is_swizzled) -> (
                 let target_base = Array.map init_idcs ~f:(zero_symbols init_syms) in
                 let d_prec, target_op = operand (target, target_base) in
                 let a_prec, a_op = operand a in
@@ -1664,6 +1701,8 @@ module C_syntax (B : C_syntax_config) = struct
            before the store, so cross-lane flow would reorder against the serial loop). *)
         let vec_ext_machinery ~prec ~lanes ~vtyp ~written ~emit ~fresh =
           let vload tn idcs =
+            (* A swizzled layout breaks row-major contiguity within a row. *)
+            if is_swizzled tn then raise Bail;
             if not (contiguous idcs) then raise Bail;
             check_read ~written tn idcs;
             let name = fresh "vget" in
@@ -1776,6 +1815,7 @@ module C_syntax (B : C_syntax_config) = struct
                     vec_ext_machinery ~prec ~lanes ~vtyp ~written ~emit ~fresh
                   in
                   List.iter sets ~f:(fun (tn, idcs, llsc) ->
+                      if is_swizzled tn then raise Bail;
                       if not (contiguous idcs) then raise Bail;
                       let rhs = vec_operand llsc prec in
                       let vname = fresh "vset" in
@@ -1823,6 +1863,7 @@ module C_syntax (B : C_syntax_config) = struct
                     && Tn.Placements.is_materialized_force (placements ()) tn 463
                     (* Stack and workgroup-shared arrays are only element-aligned. *)
                     && not (Set.mem !current_workgroup_shared tn)
+                    && not (is_swizzled tn)
                   in
                   let vload tn idcs =
                     if not (eligible tn idcs) then raise Bail;
@@ -2286,7 +2327,7 @@ module C_syntax (B : C_syntax_config) = struct
         let prec = Lazy.force tn.prec in
         let local_defs, val_doc = pp_scalar prec llsc in
         let local_defs = pp_local_defs local_defs in
-        let offset_doc = pp_array_offset (idcs, dims) in
+        let offset_doc = pp_tn_offset tn (idcs, dims) in
         (* See {!C_syntax_config.volatile_scalar_rmw}: pin the per-iteration read-modify-write of
            loop-invariant-address accumulators by shadowing the node's pointer with a
            volatile-qualified alias for the whole statement (the shadow also covers reads inside
@@ -2412,6 +2453,10 @@ module C_syntax (B : C_syntax_config) = struct
            the runtime index (cast to [Ops.index_prec ()], mirroring the gather) at [dyn_axis]. The
            enclosing [If] guard (when interval analysis has not discharged it) guarantees the index
            is in range before this statement executes. *)
+        if is_swizzled tn then
+          invalid_arg
+            ("C_syntax: Set_dynamic targets swizzled node " ^ Tn.debug_name tn
+           ^ " (dynamic offsets are not swizzle-remapped)");
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
         let prec = Lazy.force tn.prec in
@@ -2483,6 +2528,13 @@ module C_syntax (B : C_syntax_config) = struct
         else string "/* " ^^ string message ^^ string " */"
     | Staged_compilation callback -> callback ()
     | Set_from_vec { tn; idcs; length; vec_unop; arg = arg, arg_prec; debug } ->
+        (* Multi-element consecutive-offset write: incompatible with a swizzled layout, and staged
+           tiles are only ever written by the Stage-minted scalar load nest — fail loudly rather
+           than miscompile if that invariant is ever broken. *)
+        if is_swizzled tn then
+          invalid_arg
+            ("C_syntax: Set_from_vec targets swizzled node " ^ Tn.debug_name tn
+           ^ " (row-major multi-element write into an XOR-swizzled layout)");
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
         let prec = Lazy.force tn.prec in
@@ -2769,6 +2821,12 @@ module C_syntax (B : C_syntax_config) = struct
              ([ta]: [a[l*lda+i]]) costs nothing — the A feeds are scalar element loads (splats)
              either way — so only the index arithmetic swaps. *)
           let* () = no_test ~reason:"transposed B storage (tb)" tb in
+          (* The C-tile pointers stream rows at the raw leading-dimension stride; a swizzled
+             operand's elements are not where row-major arithmetic expects them. *)
+          let* () =
+            no_test ~reason:"swizzled operand layout"
+              (List.exists [ fst d; fst a; fst b ] ~f:is_swizzled)
+          in
           let d_tn = fst d in
           let prec = Lazy.force d_tn.Tn.prec in
           let* () =
@@ -2948,6 +3006,11 @@ module C_syntax (B : C_syntax_config) = struct
                deterministic): %s"
               (describe ());
             fallback_doc ()
+        | Some _ when List.exists [ fst d; fst a; fst b ] ~f:is_swizzled ->
+            (* The intrinsic loads assume row-major pointer+stride operands; the scalar fallback
+               reads elementwise through the swizzle-aware offsets and stays correct. *)
+            declinef "Tile_mma intrinsics declined (swizzled operand layout): %s" (describe ());
+            fallback_or_tiled ()
         | Some emit -> (
             let d_prec, d_op = operand d in
             let a_prec, a_op = operand a in
@@ -3018,7 +3081,7 @@ module C_syntax (B : C_syntax_config) = struct
         let dims = Lazy.force tn.dims in
         let from_prec = Lazy.force tn.prec in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
-        let offset_doc = pp_array_offset (idcs, dims) in
+        let offset_doc = pp_tn_offset tn (idcs, dims) in
         let expr = string prefix ^^ ident_doc ^^ brackets offset_doc ^^ string postfix in
         ([], expr)
     | Get_dynamic { tn; idcs; dyn_axis; dyn_value = iv, iprec } ->
@@ -3028,6 +3091,10 @@ module C_syntax (B : C_syntax_config) = struct
            evaluated (C ternary short-circuits). Cast to [Ops.index_prec ()] so the index tracks the
            same width as loop counters (signed int32 normally, int64 under large_models), preventing
            truncation for very large table/vocabulary axes. *)
+        if is_swizzled tn then
+          invalid_arg
+            ("C_syntax: Get_dynamic reads swizzled node " ^ Tn.debug_name tn
+           ^ " (dynamic offsets are not swizzle-remapped)");
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
         let from_prec = Lazy.force tn.prec in
@@ -3175,7 +3242,7 @@ module C_syntax (B : C_syntax_config) = struct
         let dims = Lazy.force tn.dims in
         let from_prec = Lazy.force tn.prec in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
-        let offset_doc = pp_array_offset (idcs, dims) in
+        let offset_doc = pp_tn_offset tn (idcs, dims) in
         let access_doc = string prefix ^^ ident_doc ^^ brackets offset_doc ^^ string postfix in
         let expr_doc =
           string prefix ^^ ident_doc
@@ -3292,8 +3359,15 @@ module C_syntax (B : C_syntax_config) = struct
 
   let compile_proc ~name idx_params
       Low_level.
-        { traced_store; llc; merge_node; optimize_ctx; workgroup_shared; simdgroup_fragments } :
-      (string * kparam_source) list * PPrint.document * Low_level.launch_dims =
+        {
+          traced_store;
+          llc;
+          merge_node;
+          optimize_ctx;
+          workgroup_shared;
+          simdgroup_fragments;
+          swizzled;
+        } : (string * kparam_source) list * PPrint.document * Low_level.launch_dims =
     let open PPrint in
     (if not (Set.is_empty workgroup_shared) then
        match B.shared_decl_prefix with
@@ -3321,6 +3395,7 @@ module C_syntax (B : C_syntax_config) = struct
      current_local_ptr_alias := local_ptr_alias);
     current_workgroup_shared := workgroup_shared;
     current_simdgroup_fragments := simdgroup_fragments;
+    current_swizzled := swizzled;
     rendered_simdgroup_fragments := Set.empty (module Tn);
     current_traced_store := Some traced_store;
     Hash_set.clear zero_out_seen;

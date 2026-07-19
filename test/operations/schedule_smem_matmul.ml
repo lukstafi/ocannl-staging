@@ -105,6 +105,7 @@ let () =
           shared = true;
           cooperative = None;
           hoisted = false;
+          swizzle = false;
         };
       Sched.Stage
         {
@@ -113,6 +114,7 @@ let () =
           shared = true;
           cooperative = None;
           hoisted = false;
+          swizzle = false;
         };
       Sched.Privatize { target = mc1.Tensor.value; over = k_o };
     ]
@@ -192,6 +194,7 @@ let () =
             shared = true;
             cooperative = None;
             hoisted = false;
+            swizzle = false;
           };
       ]
       opt
