@@ -557,11 +557,13 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits llc 
              during lowering")
   in
   (* [loop_ranges] maps each enclosing loop's index symbol to its full trip count; at a setter, the
-     product over symbols absent from the LHS indices is the recompute cost (per read site) of
-     inlining that setter's computation. *)
+     fiber cardinality of the LHS map over that box — the product over symbols absent from the LHS
+     indices — is the recompute cost (per read site) of inlining that setter's computation
+     (gh-494: {!Affine.fiber_cardinality}; the exact-vs-lower-bound distinction is not needed here,
+     the absent-symbol product is the cost either way). *)
   let reduction_extent loop_ranges idcs =
-    Map.fold loop_ranges ~init:1 ~f:(fun ~key ~data acc ->
-        if Array.exists idcs ~f:(axis_index_mentions_symbol key) then acc else acc * data)
+    match Affine.fiber_cardinality ~domain:(Map.to_alist loop_ranges) idcs with
+    | `Exact n | `At_least n -> n
   in
   let rec loop_proc ~first_visit ~loop_ranges env llc =
     let loop = loop_proc ~first_visit ~loop_ranges env in
