@@ -3225,6 +3225,105 @@ let loop_bounds (llc : t) : (Indexing.symbol * (int * int)) list =
   go llc;
   List.rev !acc
 
+(* Loop symbols a scalar expression's value depends on, syntactically, resolving scalar
+   scope-locals through [locals] — accumulated per-scope-id assignment symbols (see
+   {!scope_value_syms}). *)
+let rec scalar_value_syms ~(locals : (int, Indexing.symbol list) Hashtbl.t) (llsc : scalar_t) :
+    Indexing.symbol list =
+  let idx_syms (idx : Indexing.axis_index) =
+    match idx with
+    | Indexing.Iterator s -> [ s ]
+    | Indexing.Affine { symbols; _ } -> List.map symbols ~f:snd
+    | Indexing.Concat syms -> syms
+    | Indexing.Fixed_idx _ | Indexing.Sub_axis -> []
+  in
+  let scalar_syms = scalar_value_syms ~locals in
+  match llsc with
+  | Local_scope { body; _ } -> body_value_syms ~locals body
+  | Get_local id -> Hashtbl.find locals id.scope_id |> Option.value ~default:[]
+  | Get_merge_buffer _ | Constant _ | Constant_bits _ -> []
+  | Embed_index idx -> idx_syms idx
+  | Get (_, idcs) -> List.concat_map (Array.to_list idcs) ~f:idx_syms
+  | Get_dynamic { idcs; dyn_value = v, _; _ } ->
+      List.concat_map (Array.to_list idcs) ~f:idx_syms @ scalar_syms v
+  | Ternop (_, (a, _), (b, _), (c, _)) -> scalar_syms a @ scalar_syms b @ scalar_syms c
+  | Binop (_, (a, _), (b, _)) -> scalar_syms a @ scalar_syms b
+  | Unop (_, (a, _)) -> scalar_syms a
+
+and body_value_syms ~locals (llc : t) : Indexing.symbol list =
+  let scalar_syms = scalar_value_syms ~locals in
+  match llc with
+  | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
+      []
+  | Seq (a, b) -> body_value_syms ~locals a @ body_value_syms ~locals b
+  | For_loop { body; _ } -> body_value_syms ~locals body
+  | If { cond = c, _; body } -> scalar_syms c @ body_value_syms ~locals body
+  | Set { llsc; _ } | Set_local (_, llsc) -> scalar_syms llsc
+  | Set_dynamic { dyn_value = v, _; llsc; _ } -> scalar_syms v @ scalar_syms llsc
+  | Set_from_vec { arg = a, _; _ } -> scalar_syms a
+  | Tile_mma { fallback; _ } -> body_value_syms ~locals fallback
+
+(** The value-dependence symbols of statement-level scalar scope-locals, whole-code: per scope id,
+    the union of the symbols its statement-level assignments depend on, transitively through
+    [Get_local] references (such a local may be assigned in one statement and read in another —
+    the shared-definition / CSE-hoisted pattern). Fixpoint; consumed by the value scans of
+    [affine_accesses] and [Schedule.scan_accesses] so that a value routed through a scope-local is
+    not laundered of its symbols (gh-494 per-thread value-variance). Assignments inside
+    [Local_scope] bodies are deliberately NOT recorded: a scope id is re-instantiated at every use
+    site with per-site loop symbols, so a global union would import foreign statements' symbols
+    into unrelated setters; scope-internal flow is covered lexically instead — the value of a
+    [Local_scope] is over-approximated by the union of all its body setters' symbols. *)
+let scope_value_syms (llc : t) : (int, Indexing.symbol list) Hashtbl.t =
+  let locals = Hashtbl.create (module Int) in
+  let changed = ref true in
+  let record id llsc =
+    let s = scalar_value_syms ~locals llsc in
+    let old = Hashtbl.find locals id.scope_id |> Option.value ~default:[] in
+    let merged = List.dedup_and_sort ~compare:Indexing.compare_symbol (s @ old) in
+    if List.length merged > List.length old then (
+      Hashtbl.set locals ~key:id.scope_id ~data:merged;
+      changed := true)
+  in
+  let rec stmt ~depth (llc : t) =
+    match llc with
+    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
+        ()
+    | Seq (a, b) ->
+        stmt ~depth a;
+        stmt ~depth b
+    | For_loop { body; _ } -> stmt ~depth body
+    | If { cond = c, _; body } ->
+        scalar ~depth c;
+        stmt ~depth body
+    | Set_local (id, llsc) ->
+        if depth = 0 then record id llsc;
+        scalar ~depth llsc
+    | Set { llsc; _ } -> scalar ~depth llsc
+    | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+        scalar ~depth v;
+        scalar ~depth llsc
+    | Set_from_vec { arg = a, _; _ } -> scalar ~depth a
+    | Tile_mma { fallback; _ } -> stmt ~depth fallback
+  and scalar ~depth (llsc : scalar_t) =
+    match llsc with
+    | Local_scope { body; _ } -> stmt ~depth:(depth + 1) body
+    | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ | Get _ -> ()
+    | Get_dynamic { dyn_value = v, _; _ } -> scalar ~depth v
+    | Ternop (_, (a, _), (b, _), (c, _)) ->
+        scalar ~depth a;
+        scalar ~depth b;
+        scalar ~depth c
+    | Binop (_, (a, _), (b, _)) ->
+        scalar ~depth a;
+        scalar ~depth b
+    | Unop (_, (a, _)) -> scalar ~depth a
+  in
+  while !changed do
+    changed := false;
+    stmt ~depth:0 llc
+  done;
+  locals
+
 (** gh-494 waypoint 1: the routine's tensor-node accesses as explicit affine relations
     ({!Affine.access}), extracted from (typically optimized) code — the queryable artifact behind
     the affine legality queries. Fires in program order: a statement's right-hand-side reads
@@ -3257,8 +3356,8 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
     | Tile_mma { fallback; _ } -> body_reads uid fallback
   in
   let acc = ref [] in
-  let add ~loops ~path ~guarded ?(dynamic = false) ?(whole = false) ?(vec_last = false)
-      ?(rmw = false) ~write tn map =
+  let add ~loops ~path ~guarded ?(dynamic = false) ?(whole = false) ?(vec_len = 0) ?(rmw = false)
+      ?(val_syms = []) ~write tn map =
     acc :=
       {
         Affine.a_tn = tn;
@@ -3266,14 +3365,18 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
         a_write = write;
         a_dynamic = dynamic;
         a_whole = whole;
-        a_vec_last = vec_last;
+        a_vec_last = vec_len > 0;
+        a_vec_len = vec_len;
         a_guarded = guarded;
         a_rmw = rmw;
+        a_val_syms = val_syms;
         a_loops = List.rev loops;
         a_path = List.rev path;
       }
       :: !acc
   in
+  let local_syms = scope_value_syms llc in
+  let scalar_syms = scalar_value_syms ~locals:local_syms in
   let rec code ~loops ~path ~guarded (llc : t) =
     match llc with
     | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ -> ()
@@ -3288,16 +3391,19 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
     | Zero_out tn -> add ~loops ~path ~guarded ~whole:true ~write:true tn [||]
     | Set { tn; idcs; llsc; _ } ->
         scalar ~loops ~path ~guarded llsc;
-        add ~loops ~path ~guarded ~rmw:(reads_tn tn.Tn.uid llsc) ~write:true tn idcs
+        add ~loops ~path ~guarded ~rmw:(reads_tn tn.Tn.uid llsc) ~val_syms:(scalar_syms llsc)
+          ~write:true tn idcs
     | Set_dynamic { tn; idcs; dyn_value = v, _; llsc; _ } ->
         scalar ~loops ~path ~guarded v;
         scalar ~loops ~path ~guarded llsc;
         add ~loops ~path ~guarded ~dynamic:true
           ~rmw:(reads_tn tn.Tn.uid llsc || reads_tn tn.Tn.uid v)
+          ~val_syms:(scalar_syms v @ scalar_syms llsc)
           ~write:true tn idcs
-    | Set_from_vec { tn; idcs; arg = a, _; _ } ->
+    | Set_from_vec { tn; idcs; length; arg = a, _; _ } ->
         scalar ~loops ~path ~guarded a;
-        add ~loops ~path ~guarded ~vec_last:true ~rmw:(reads_tn tn.Tn.uid a) ~write:true tn idcs
+        add ~loops ~path ~guarded ~vec_len:length ~rmw:(reads_tn tn.Tn.uid a)
+          ~val_syms:(scalar_syms a) ~write:true tn idcs
     | Set_local (_, llsc) -> scalar ~loops ~path ~guarded llsc
     | Tile_mma { fallback; _ } -> code ~loops ~path ~guarded fallback
   and scalar ~loops ~path ~guarded (llsc : scalar_t) =
@@ -3888,6 +3994,80 @@ and pin_scalar_written_bounds (llsc : scalar_t) : unit =
       pin_scalar_written_bounds v2
   | Unop (_, (v, _)) -> pin_scalar_written_bounds v
 
+(* gh-494 waypoint 2: the read-before-write fact of [visit_llc] (its [Recurrent] classification),
+   recomputed as containment queries — every read covered by prior writes — and compared under
+   [legality_crosscheck]. The tracer's semantics is mirrored: [If] guards are taken (guarded
+   writes count as assignments, as the tracer traces [If] bodies unconditionally); a read whose
+   position coincides with the enclosing statement's write position at every iteration is exempt
+   when [inline_complex_computations] (the tracer skips same-position reads, whichever node they
+   read, and it pins static symbols to 0), mirrored here as per-axis affine-form equality with
+   statics zeroed; and static symbols are universalized over their declared ranges — the query is
+   exact where the tracer approximates (loops truncated at [max_tracing_dim], statics at 0), so a
+   disagreement in the stricter direction may also surface a genuine tracer blind spot. *)
+let crosscheck_read_before_write traced_store (static_indices : Indexing.static_symbol list) llc =
+  let accs = affine_accesses llc in
+  let by_tn = Hashtbl.create (module Tn) in
+  List.iter accs ~f:(fun a -> Hashtbl.add_multi by_tn ~key:a.Affine.a_tn ~data:a);
+  let all_writes =
+    List.filter_map accs ~f:(fun a ->
+        if a.Affine.a_write && not a.a_whole then Some (a.a_path, a.a_map) else None)
+  in
+  let statics_set =
+    Set.of_list (module Indexing.Symbol)
+      (List.map static_indices ~f:(fun s -> s.Indexing.static_symbol))
+  in
+  let static_range s =
+    List.find_map static_indices ~f:(fun ss ->
+        if Indexing.equal_symbol ss.Indexing.static_symbol s then
+          Option.map ss.static_range ~f:(fun r -> (0, r))
+        else None)
+  in
+  (* The affine form of a position component as the tracer evaluates it: statics contribute 0. *)
+  let norm_comp (idx : Indexing.axis_index) =
+    let drop_statics symbols =
+      List.filter (Indexing.coalesce_affine_terms symbols) ~f:(fun (_, s) ->
+          not (Set.mem statics_set s))
+      |> List.sort ~compare:[%compare: int * Indexing.symbol]
+    in
+    match idx with
+    | Indexing.Fixed_idx c -> Some ([], c)
+    | Indexing.Iterator s -> Some (drop_statics [ (1, s) ], 0)
+    | Indexing.Affine { symbols; offset } -> Some (drop_statics symbols, offset)
+    | Indexing.Sub_axis | Indexing.Concat _ -> None
+  in
+  let same_pos (m : Indexing.axis_index array) (m' : Indexing.axis_index array) =
+    Array.length m = Array.length m'
+    && Array.for_all2_exn m m' ~f:(fun a b ->
+           match (norm_comp a, norm_comp b) with
+           | Some fa, Some fb -> [%equal: (int * Indexing.symbol) list * int] fa fb
+           | _ -> false)
+  in
+  let exempt (r : _ Affine.access) =
+    virtualize_settings.inline_complex_computations
+    && List.exists all_writes ~f:(fun (p, m) ->
+           [%equal: int list] p r.Affine.a_path && same_pos m r.a_map)
+  in
+  Hashtbl.iteri by_tn ~f:(fun ~key:tn ~data:accs ->
+      match Hashtbl.find traced_store tn with
+      | None -> ()
+      | Some traced ->
+          let accs = List.rev accs in
+          let writes = List.filter accs ~f:(fun a -> a.Affine.a_write) in
+          let witness = ref "" in
+          let query_safe =
+            List.for_all accs ~f:(fun r ->
+                r.Affine.a_write || exempt r
+                ||
+                match Affine.read_covered_before ~static_range ~read:r ~writes () with
+                | `Covered -> true
+                | `Unknown w ->
+                    witness := w;
+                    false)
+          in
+          Affine.crosscheck ~site:"visit read-before-write" ~context:(Tn.debug_name tn)
+            ~procedural_safe:(fun () -> not (Hashtbl.exists traced.accesses ~f:is_recurrent))
+            ~query_safe ~witness:!witness)
+
 let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
   let traced_store = Hashtbl.create (module Tnode) in
   (* Identifies the computations that the code block associated with the symbol belongs to. *)
@@ -3897,6 +4077,8 @@ let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
   let merge_node_ref = ref None in
   visit_llc input_ctx.placements traced_store ~merge_node_ref reverse_node_map
     ~max_visits:virtualize_settings.max_visits llc;
+  if Lazy.force Affine.crosscheck_enabled then
+    crosscheck_read_before_write traced_store static_indices llc;
   [%log "optimizing"];
   let virtual_llc_result = virtual_llc input_ctx traced_store reverse_node_map static_indices llc in
   let llc =
