@@ -1496,3 +1496,14 @@
  (libraries base ocannl stdio)
  (preprocess
   (pps ppx_here ppx_ocannl)))
+
+(test
+ (name read_before_write_flip)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules read_before_write_flip)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))

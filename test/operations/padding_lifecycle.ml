@@ -75,6 +75,11 @@ let () =
   Tensor.unsafe_reinitialize ();
   let x2_src = make_x "fresh" in
   let x2 = NTDSL.O.einsum1 "... | h, w, c => ... | h, w, c" x2_src in
+  (* The "fresh_again" section below re-reads [x2] from a second routine. Cross-routine reuse
+     requires explicit materialization; before the gh-494 read-before-write decider flip this
+     worked accidentally (the tracer's truncation spuriously flagged the padded operand recurrent,
+     forcing it on-device). *)
+  Train.set_materialized x2.Tensor.value;
   p "fresh: intermediate starts unforced" (not (Lazy.is_val x2.Tensor.value.Ir.Tnode.padding));
   let ctx, site = compile_conv "fresh" x2 in
   pr "fresh: committed padding = %s\n" (padding_to_string x2.Tensor.value);
