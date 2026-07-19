@@ -526,5 +526,61 @@ let () =
     ~writes:
       [ acc ~loops:[ (i1, (0, 1)); (k1, (0, 2)) ] ~path:[ 0 ] [| aff [ (4, i1); (1, k1) ] 0 |] ]
     ();
+  (* Multi-axis box union: padded-margin strips plus the interior tile the read box. *)
+  let v1 = sym () in
+  check_containment ~name:"2-D margins + interior tile"
+    ~read:
+      (acc ~write:false
+         ~loops:[ (u1, (0, 4)); (v1, (0, 4)) ]
+         ~path:[ 5 ]
+         [| Idx.Iterator u1; Idx.Iterator v1 |])
+    ~writes:
+      [
+        acc ~loops:[ (i1, (0, 5)) ] ~path:[ 0 ] [| Idx.Fixed_idx 0; Idx.Iterator i1 |];
+        acc ~loops:[ (i1, (1, 3)) ] ~path:[ 1 ] [| Idx.Iterator i1; Idx.Fixed_idx 0 |];
+        acc ~loops:[ (i1, (1, 3)); (k1, (4, 5)) ] ~path:[ 2 ]
+          [| Idx.Iterator i1; Idx.Iterator k1 |];
+        acc
+          ~loops:[ (i1, (4, 5)); (k1, (0, 5)) ]
+          ~path:[ 3 ]
+          [| Idx.Iterator i1; Idx.Iterator k1 |];
+        acc
+          ~loops:[ (i1, (0, 2)); (k1, (0, 2)) ]
+          ~path:[ 4 ]
+          [| aff [ (1, i1) ] 1; aff [ (1, k1) ] 1 |];
+      ]
+    ();
+  check_containment ~name:"2-D margins with hole"
+    ~read:
+      (acc ~write:false
+         ~loops:[ (u1, (0, 4)); (v1, (0, 4)) ]
+         ~path:[ 5 ]
+         [| Idx.Iterator u1; Idx.Iterator v1 |])
+    ~writes:
+      [
+        acc ~loops:[ (i1, (0, 5)) ] ~path:[ 0 ] [| Idx.Fixed_idx 0; Idx.Iterator i1 |];
+        acc ~loops:[ (i1, (1, 3)) ] ~path:[ 1 ] [| Idx.Iterator i1; Idx.Fixed_idx 0 |];
+        acc
+          ~loops:[ (i1, (4, 5)); (k1, (0, 5)) ]
+          ~path:[ 2 ]
+          [| Idx.Iterator i1; Idx.Iterator k1 |];
+        acc
+          ~loops:[ (i1, (0, 2)); (k1, (0, 2)) ]
+          ~path:[ 3 ]
+          [| aff [ (1, i1) ] 1; aff [ (1, k1) ] 1 |];
+      ]
+    ();
+  (* Pointwise literal initialization tiles the box. *)
+  check_containment ~name:"pointwise writes tile the box"
+    ~read:
+      (acc ~write:false
+         ~loops:[ (u1, (0, 1)); (v1, (0, 1)) ]
+         ~path:[ 4 ]
+         [| Idx.Iterator u1; Idx.Iterator v1 |])
+    ~writes:
+      (List.concat_map [ 0; 1 ] ~f:(fun a ->
+           List.map [ 0; 1 ] ~f:(fun b ->
+               acc ~loops:[] ~path:[ (2 * a) + b ] [| Idx.Fixed_idx a; Idx.Fixed_idx b |])))
+    ();
 
   Stdio.printf "\nunsound cases: %d\n" !unsound_count

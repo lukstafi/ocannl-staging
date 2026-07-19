@@ -722,35 +722,54 @@ let read_covered_before ?(thread = fun _ -> false) ?(static_range = fun _ -> Non
             Array.for_all rels ~f:(function `Full -> true | _ -> false))
       then `Covered
       else begin
-        (* Union rule: writes sharing a residual frame, each covering all axes but one, may
-           jointly cover that axis by abutting or overlapping chunks. *)
+        (* Union rule: writes sharing a residual frame contribute product boxes of per-axis
+           chunks (sound: per-axis independence of each write's existentials makes its image the
+           product of its per-axis sets); exact box-union coverage of the read's lattice box by
+           coordinate-compression sweep — the first axis is cut at every box boundary, boxes
+           spanning an elementary strip recurse on the remaining axes. This is what covers padded
+           tensors (margin strips plus the interior tile the box) and literal initializations
+           (pointwise writes tile it). *)
         let by_sig = Hashtbl.create (module String) in
         List.iter analyzed ~f:(fun ((s, _, _) as a) -> Hashtbl.add_multi by_sig ~key:s ~data:a);
+        let rec boxes_cover (target : (int * int) list) (boxes : (int * int) list list) =
+          match target with
+          | [] -> not (List.is_empty boxes)
+          | (lo, hi) :: rest_t ->
+              if lo > hi then true
+              else
+                let cuts =
+                  lo
+                  :: List.concat_map boxes ~f:(function
+                       | (bl, bh) :: _ -> [ bl; bh + 1 ]
+                       | [] -> [])
+                  |> List.filter ~f:(fun x -> x >= lo && x <= hi)
+                  |> List.dedup_and_sort ~compare:Int.compare
+                in
+                List.for_all cuts ~f:(fun x ->
+                    let spanning =
+                      List.filter_map boxes ~f:(function
+                        | (bl, bh) :: rest when bl <= x && x <= bh -> Some rest
+                        | _ -> None)
+                    in
+                    boxes_cover rest_t spanning)
+        in
         let union_covers group =
           match group with
           | [] -> false
           | (_, r_aps, _) :: _ ->
-              List.existsi (Array.to_list r_aps) ~f:(fun a r_ap ->
-                  let k_max = if r_ap.ap_step = 0 then 0 else (r_ap.ap_hi - r_ap.ap_lo) / r_ap.ap_step in
-                  let chunks =
-                    List.filter_map group ~f:(fun (_, _, rels) ->
-                        let others_full =
-                          Array.for_alli rels ~f:(fun p rel ->
-                              p = a || match rel with `Full -> true | _ -> false)
-                        in
-                        if not others_full then None
-                        else
-                          match rels.(a) with
-                          | `Full -> Some (0, k_max)
-                          | `Chunk (kl, kh) -> Some (kl, kh)
-                          | `Nope -> None)
-                  in
-                  let sorted = List.sort chunks ~compare:[%compare: int * int] in
-                  let reach =
-                    List.fold sorted ~init:(-1) ~f:(fun reach (kl, kh) ->
-                        if kl <= reach + 1 then max reach kh else reach)
-                  in
-                  reach >= k_max)
+              let k_max r = if r.ap_step = 0 then 0 else (r.ap_hi - r.ap_lo) / r.ap_step in
+              let target = Array.to_list (Array.map r_aps ~f:(fun r -> (0, k_max r))) in
+              let boxes =
+                List.filter_map group ~f:(fun (_, r_aps', rels) ->
+                    Array.to_list
+                      (Array.mapi rels ~f:(fun p rel ->
+                           match rel with
+                           | `Full -> Some (0, k_max r_aps'.(p))
+                           | `Chunk (kl, kh) -> Some (kl, kh)
+                           | `Nope -> None))
+                    |> Option.all)
+              in
+              boxes_cover target boxes
         in
         if Hashtbl.exists by_sig ~f:union_covers then `Covered
         else

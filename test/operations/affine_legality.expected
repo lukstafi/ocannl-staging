@@ -64,5 +64,8 @@ static read over full write        query Covered      oracle covered
 static read over fixed write       query Unknown      oracle uncovered   
 mixed-radix write dense            query Covered      oracle covered     
 mixed-radix write gapped           query Unknown      oracle uncovered   
+2-D margins + interior tile        query Covered      oracle covered     
+2-D margins with hole              query Unknown      oracle uncovered   
+pointwise writes tile the box      query Covered      oracle covered     
 
 unsound cases: 0

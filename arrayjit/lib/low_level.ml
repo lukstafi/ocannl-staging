@@ -3889,6 +3889,80 @@ and pin_scalar_written_bounds (llsc : scalar_t) : unit =
       pin_scalar_written_bounds v2
   | Unop (_, (v, _)) -> pin_scalar_written_bounds v
 
+(* gh-494 waypoint 2: the read-before-write fact of [visit_llc] (its [Recurrent] classification),
+   recomputed as containment queries — every read covered by prior writes — and compared under
+   [legality_crosscheck]. The tracer's semantics is mirrored: [If] guards are taken (guarded
+   writes count as assignments, as the tracer traces [If] bodies unconditionally); a read whose
+   position coincides with the enclosing statement's write position at every iteration is exempt
+   when [inline_complex_computations] (the tracer skips same-position reads, whichever node they
+   read, and it pins static symbols to 0), mirrored here as per-axis affine-form equality with
+   statics zeroed; and static symbols are universalized over their declared ranges — the query is
+   exact where the tracer approximates (loops truncated at [max_tracing_dim], statics at 0), so a
+   disagreement in the stricter direction may also surface a genuine tracer blind spot. *)
+let crosscheck_read_before_write traced_store (static_indices : Indexing.static_symbol list) llc =
+  let accs = affine_accesses llc in
+  let by_tn = Hashtbl.create (module Tn) in
+  List.iter accs ~f:(fun a -> Hashtbl.add_multi by_tn ~key:a.Affine.a_tn ~data:a);
+  let all_writes =
+    List.filter_map accs ~f:(fun a ->
+        if a.Affine.a_write && not a.a_whole then Some (a.a_path, a.a_map) else None)
+  in
+  let statics_set =
+    Set.of_list (module Indexing.Symbol)
+      (List.map static_indices ~f:(fun s -> s.Indexing.static_symbol))
+  in
+  let static_range s =
+    List.find_map static_indices ~f:(fun ss ->
+        if Indexing.equal_symbol ss.Indexing.static_symbol s then
+          Option.map ss.static_range ~f:(fun r -> (0, r))
+        else None)
+  in
+  (* The affine form of a position component as the tracer evaluates it: statics contribute 0. *)
+  let norm_comp (idx : Indexing.axis_index) =
+    let drop_statics symbols =
+      List.filter (Indexing.coalesce_affine_terms symbols) ~f:(fun (_, s) ->
+          not (Set.mem statics_set s))
+      |> List.sort ~compare:[%compare: int * Indexing.symbol]
+    in
+    match idx with
+    | Indexing.Fixed_idx c -> Some ([], c)
+    | Indexing.Iterator s -> Some (drop_statics [ (1, s) ], 0)
+    | Indexing.Affine { symbols; offset } -> Some (drop_statics symbols, offset)
+    | Indexing.Sub_axis | Indexing.Concat _ -> None
+  in
+  let same_pos (m : Indexing.axis_index array) (m' : Indexing.axis_index array) =
+    Array.length m = Array.length m'
+    && Array.for_all2_exn m m' ~f:(fun a b ->
+           match (norm_comp a, norm_comp b) with
+           | Some fa, Some fb -> [%equal: (int * Indexing.symbol) list * int] fa fb
+           | _ -> false)
+  in
+  let exempt (r : _ Affine.access) =
+    virtualize_settings.inline_complex_computations
+    && List.exists all_writes ~f:(fun (p, m) ->
+           [%equal: int list] p r.Affine.a_path && same_pos m r.a_map)
+  in
+  Hashtbl.iteri by_tn ~f:(fun ~key:tn ~data:accs ->
+      match Hashtbl.find traced_store tn with
+      | None -> ()
+      | Some traced ->
+          let accs = List.rev accs in
+          let writes = List.filter accs ~f:(fun a -> a.Affine.a_write) in
+          let witness = ref "" in
+          let query_safe =
+            List.for_all accs ~f:(fun r ->
+                r.Affine.a_write || exempt r
+                ||
+                match Affine.read_covered_before ~static_range ~read:r ~writes () with
+                | `Covered -> true
+                | `Unknown w ->
+                    witness := w;
+                    false)
+          in
+          Affine.crosscheck ~site:"visit read-before-write" ~context:(Tn.debug_name tn)
+            ~procedural_safe:(fun () -> not (Hashtbl.exists traced.accesses ~f:is_recurrent))
+            ~query_safe ~witness:!witness)
+
 let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
   let traced_store = Hashtbl.create (module Tnode) in
   (* Identifies the computations that the code block associated with the symbol belongs to. *)
@@ -3898,6 +3972,8 @@ let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
   let merge_node_ref = ref None in
   visit_llc input_ctx.placements traced_store ~merge_node_ref reverse_node_map
     ~max_visits:virtualize_settings.max_visits llc;
+  if Lazy.force Affine.crosscheck_enabled then
+    crosscheck_read_before_write traced_store static_indices llc;
   [%log "optimizing"];
   let virtual_llc_result = virtual_llc input_ctx traced_store reverse_node_map static_indices llc in
   let llc =
