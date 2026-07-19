@@ -1,0 +1,42 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+== elementwise map 4x5 ==
+  A   rd=80   wr=0    rmw=0    exact
+  B   rd=20   wr=0    rmw=0    exact
+  C   rd=0    wr=80   rmw=0    exact
+  flops=20 read=100 write=80 intensity=0.111
+== matmul 4x3x5 ==
+  Dm  rd=48   wr=48   rmw=48   exact
+  Am  rd=80   wr=0    rmw=0    exact
+  Bm  rd=60   wr=0    rmw=0    exact
+  flops=120 read=188 write=48 intensity=0.508
+== strided copy-scale over half the cells ==
+  A8  rd=16   wr=0    rmw=0    exact
+  R8  rd=0    wr=16   rmw=0    exact
+  flops=4 read=16 write=16 intensity=0.125
+== rmw reduction 4x5 ==
+  S   rd=16   wr=16   rmw=16   exact
+  A   rd=80   wr=0    rmw=0    exact
+  flops=20 read=96 write=16 intensity=0.179
+== guarded write ==
+  G   rd=4    wr=0    rmw=0    approx
+  D1  rd=0    wr=4    rmw=0    approx
+  flops=1~ read=4 write=4 intensity=0.125
+== dynamic gather (whole-node fallback) ==
+  A   rd=80   wr=0    rmw=0    approx
+  I   rd=16   wr=0    rmw=0    exact
+  E   rd=0    wr=16   rmw=0    exact
+  flops=0 read=96 write=16 intensity=0.000
+== zero-out then overwrite (union bound capped) ==
+  S2  rd=0    wr=16   rmw=0    approx
+  flops=0 read=0 write=16 intensity=0.000
+
+== roofline over the matmul (flops=120, bytes=236) ==
+  no envelope                  no bound
+  1 GFLOP/s only               120.0 ns
+  1 GB/s only                  236.0 ns
+  1 GFLOP/s, 1 GB/s            236.0 ns
+  2 GFLOP/s, 1 GB/s            236.0 ns
+  1 GFLOP/s, 2 GB/s            120.0 ns
+  2 GFLOP/s, 2 GB/s            118.0 ns
+  monotone in the envelope constants: true
