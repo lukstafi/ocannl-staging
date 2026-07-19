@@ -44,4 +44,29 @@ constant cell                      query Exact 3      oracle fibers 3..3
 non-injective f1+f2                query At_least 1   oracle fibers 1..3
 cancelled term f1-f1               query Exact 3      oracle fibers 3..3
 
+=== read_covered_before ===
+overwrite covers read              query Covered      oracle covered     
+read wider than write              query Unknown      oracle uncovered   
+strided write, strided read        query Covered      oracle covered     
+strided write, dense read          query Unknown      oracle uncovered   
+union init + shifted write         query Covered      oracle covered     
+union with gap                     query Unknown      oracle uncovered   
+same-statement write unusable      query Unknown      oracle uncovered   
+common loop cancels                query Covered      oracle covered     
+write-side residual common sym     query Unknown      oracle covered     
+loop-carried shift declined        query Unknown      oracle covered     
+whole-node write covers            query Covered      oracle covered     
+vec write abutting runs            query Covered      oracle covered     
+thread cancels (own cells)         query Covered      oracle covered     
+thread reads foreign cell          query Unknown      oracle uncovered   
+thread read over bare write        query Covered      oracle covered     
+static cancels                     query Covered      oracle covered     
+static read over full write        query Covered      oracle covered     
+static read over fixed write       query Unknown      oracle uncovered   
+mixed-radix write dense            query Covered      oracle covered     
+mixed-radix write gapped           query Unknown      oracle uncovered   
+2-D margins + interior tile        query Covered      oracle covered     
+2-D margins with hole              query Unknown      oracle uncovered   
+pointwise writes tile the box      query Covered      oracle covered     
+
 unsound cases: 0

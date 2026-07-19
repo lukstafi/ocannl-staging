@@ -405,6 +405,21 @@ val loop_bounds : t -> (Indexing.symbol * (int * int)) list
 (** All [For_loop] bindings within the code (loop symbols are unique within a routine), with
     inclusive iteration bounds — the box environment for {!Affine} queries. *)
 
+val scope_value_syms : t -> (int, Indexing.symbol list) Base.Hashtbl.t
+(** The value-dependence symbols of statement-level scalar scope-locals, whole-code: per scope id,
+    the union of the symbols its statement-level assignments depend on, transitively through
+    [Get_local] references (such a local may be assigned in one statement and read in another).
+    Assignments inside [Local_scope] bodies are not recorded — a scope id is re-instantiated at
+    every use site with per-site loop symbols, and scope-internal flow is covered lexically by the
+    value scans. Consumed by the setter value scans so a value routed through a scope-local is not
+    laundered of its symbols (gh-494 per-thread value-variance). *)
+
+val scalar_value_syms :
+  locals:(int, Indexing.symbol list) Base.Hashtbl.t -> scalar_t -> Indexing.symbol list
+(** Loop symbols a scalar expression's value depends on syntactically — index symbols of reads,
+    embedded indices, dynamic-index sub-expressions — resolving scope-locals through [locals]
+    (from {!scope_value_syms}). *)
+
 val affine_accesses : t -> Tnode.t Affine.access list
 (** gh-494 waypoint 1: the routine's tensor-node accesses as explicit affine relations
     ({!Affine.access}), extracted from (typically optimized) code, in program order (a statement's
