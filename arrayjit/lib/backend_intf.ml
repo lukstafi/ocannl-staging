@@ -48,6 +48,16 @@ type hardware_limits = {
           schedule construction (autotune's seeding pre-filter, gh-ocannl-479) can statically rule
           out candidates the renderer must decline, e.g. a micro-kernel column extent below one
           vector's lane count. *)
+  peak_flops : float option;
+      (** Advisory peak arithmetic throughput in FLOP/s (single-precision, FMA counted as two), the
+          hardware envelope of the analytic cost model (gh-ocannl-491): rough documented constants
+          or cheap device queries — the model ranks candidate schedules, it does not predict
+          runtimes. Never gates compilation and never overrides a measured timing; [None] when the
+          backend offers no estimate. *)
+  peak_memory_bandwidth : float option;
+      (** Advisory peak main-memory bandwidth in bytes/s, the other leg of the roofline envelope
+          (gh-ocannl-491). Same contract as [peak_flops]: advisory, rough, never load-bearing for
+          correctness; [None] when the backend offers no estimate. *)
 }
 [@@deriving sexp, compare, equal]
 
@@ -57,6 +67,8 @@ let no_hardware_limits =
     max_workgroup_memory_bytes = None;
     mma = None;
     simd_vector_bytes = 0;
+    peak_flops = None;
+    peak_memory_bandwidth = None;
   }
 
 (** The backend slab allocator, replacing the per-tnode [Alloc_buffer] interface. The shared

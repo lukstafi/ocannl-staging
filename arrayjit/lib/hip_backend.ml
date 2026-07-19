@@ -1614,6 +1614,12 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                 Some { Backend_intf.mma_simd_width = 32; mma_tile = (16, 16, 16) }
               else None);
            simd_vector_bytes = 0;
+           (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the
+              RDNA3-class targets this backend is exercised on (dGPU/APU: ~10 fp32 TFLOP/s,
+              ~250 GB/s — Strix-Halo-class LPDDR5X). Per-device queries are calibration
+              follow-up work; the model only ranks, so class-level numbers suffice. *)
+           peak_flops = Some 1.0e13;
+           peak_memory_bandwidth = Some 2.5e11;
          })
     in
     fun () -> Lazy.force limits
