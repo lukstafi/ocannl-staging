@@ -92,6 +92,27 @@ let () =
   let mm = CM.analyze matmul in
   show_summary "matmul 4x3x5" mm;
 
+  (* The same matmul in FMA form: D[i][j] = FMA(A[i][k], B2[k][j], D[i][j]) — an FMA counts as two
+     operations, so the score is identical to the mul+add form. *)
+  let matmul_fma =
+    for_over i
+      (for_over ~extent:3 j
+         (for_over ~extent:5 k
+            (LL.Set
+               {
+                 tn = d_mn;
+                 idcs = [| it i; it j |];
+                 llsc =
+                   LL.Ternop
+                     ( Ops.FMA,
+                       (get a_mk [| it i; it k |], sp),
+                       (get b_kn [| it k; it j |], sp),
+                       (get d_mn [| it i; it j |], sp) );
+                 debug = "";
+               })))
+  in
+  show_summary "matmul 4x3x5, FMA form" (CM.analyze matmul_fma);
+
   (* Strided/gapped, size-8 nodes: for i: R[2*i] = A8[2*i] * 2 — touches 4 of 8 cells each. *)
   let a8 = fresh_tn "A8" [| 8 |] in
   let r8 = fresh_tn "R8" [| 8 |] in

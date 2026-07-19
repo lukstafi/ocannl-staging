@@ -120,7 +120,11 @@ let analyze (code : Low_level.t) : summary =
         opaque := true;
         0
     | Get_dynamic { dyn_value = dv, _; _ } -> sc_flops dv
-    | Ternop (_, a1, a2, a3) -> 1 + arg a1 + arg a2 + arg a3
+    | Ternop ((Ops.FMA | Ops.Mul3), a1, a2, a3) ->
+        (* Two arithmetic operations each — matching [peak_flops]' FMA-counted-as-two convention,
+           so an FMA-form kernel scores the same compute leg as its mul+add form. *)
+        2 + arg a1 + arg a2 + arg a3
+    | Ternop (Ops.Where, a1, a2, a3) -> 1 + arg a1 + arg a2 + arg a3
     | Binop ((Ops.Arg1 | Ops.Arg2), a1, a2) -> arg a1 + arg a2
     | Binop (_, a1, a2) -> 1 + arg a1 + arg a2
     | Unop (Ops.Identity, a1) -> arg a1

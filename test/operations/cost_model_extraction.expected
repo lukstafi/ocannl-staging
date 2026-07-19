@@ -10,6 +10,11 @@ Found 0, in the config file
   Am  rd=80   wr=0    rmw=0    exact
   Bm  rd=60   wr=0    rmw=0    exact
   flops=120 read=188 write=48 intensity=0.508
+== matmul 4x3x5, FMA form ==
+  Am  rd=80   wr=0    rmw=0    exact
+  Bm  rd=60   wr=0    rmw=0    exact
+  Dm  rd=48   wr=48   rmw=48   exact
+  flops=120 read=188 write=48 intensity=0.508
 == strided copy-scale over half the cells ==
   A8  rd=16   wr=0    rmw=0    exact
   R8  rd=0    wr=16   rmw=0    exact

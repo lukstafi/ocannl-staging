@@ -17,9 +17,11 @@
       only over-count, as does summing multiple same-direction accesses of one node (a union bound,
       capped by the node's size). [fp_approx] is [false] only when the count is exact.
     - The op count is an upper bound in the same guards-taken sense, and counts every scalar
-      [Unop]/[Binop]/[Ternop] evaluation as one "FLOP" regardless of precision or integerness
-      (selection ops [Arg1]/[Arg2]/[Identity] count zero; [Tile_mma] counts its [2*m*n*k]
-      multiply-adds once per tile, not per cooperating lane).
+      [Unop]/[Binop]/[Ternop] evaluation as one "FLOP" regardless of precision or integerness —
+      except the two-operation ternaries [FMA]/[Mul3], which count two (matching [peak_flops]'
+      FMA-counted-as-two convention, so an FMA-form kernel scores the same as its mul+add form);
+      selection ops [Arg1]/[Arg2]/[Identity] count zero; [Tile_mma] counts its [2*m*n*k]
+      multiply-adds once per tile, not per cooperating lane.
     - The one under-counting escape hatch is opaque code — [Staged_compilation] statements and
       merge-buffer reads are invisible to the analysis — and it is flagged: when [opaque] is set,
       the upper-bound reading of the byte and op counts no longer holds. *)
