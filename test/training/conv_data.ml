@@ -99,24 +99,39 @@ let ensure_cifar10_binary () =
       end
     in
     mkdir_p (Filename.dirname (cache_dir ^ "."));
-    (* Download if needed *)
+    (* Download if needed. To a [.part] name renamed on success: a killed process must not leave
+       a partial tarball that a later run mistakes for a completed download (the extraction then
+       fails on a "truncated tar archive" until the cache is cleaned by hand). [-f] makes HTTP
+       errors fail the command instead of saving the error page; on Windows, prefer the System32
+       curl (Schannel, OS certificate store) and tolerate offline revocation servers, and build
+       the command with [Filename.quote_command] — [cmd /c] strips a leading hand-quoted pair. *)
     if not (Sys.file_exists tar_path) then begin
       Printf.printf "Downloading CIFAR-10 binary dataset...\n%!";
-      match
-        Unix.system
-          (Printf.sprintf "curl -L -o %s %s" (Filename.quote tar_path) (Filename.quote url))
-      with
-      | Unix.WEXITED 0 -> ()
-      | _ -> failwith "Failed to download CIFAR-10 binary dataset"
+      let part_path = tar_path ^ ".part" in
+      let curl_exe =
+        if Sys.win32 then
+          let sys32 = "C:\\Windows\\System32\\curl.exe" in
+          if Sys.file_exists sys32 then sys32 else "curl"
+        else "curl"
+      in
+      let revoke_args = if Sys.win32 then [ "--ssl-revoke-best-effort" ] else [] in
+      (match
+         Unix.system
+           (Filename.quote_command curl_exe ([ "-fL"; "-o"; part_path ] @ revoke_args @ [ url ]))
+       with
+      | Unix.WEXITED 0 -> Sys.rename part_path tar_path
+      | _ ->
+          (try Sys.remove part_path with Sys_error _ -> ());
+          failwith "Failed to download CIFAR-10 binary dataset")
     end;
-    (* Extract *)
+    (* Extract; a failure invalidates the cached tarball, so the next run re-downloads instead of
+       failing forever on a corrupt archive. *)
     Printf.printf "Extracting CIFAR-10...\n%!";
-    (match
-       Unix.system
-         (Printf.sprintf "tar xzf %s -C %s" (Filename.quote tar_path) (Filename.quote cache_dir))
-     with
+    (match Unix.system (Filename.quote_command "tar" [ "xzf"; tar_path; "-C"; cache_dir ]) with
     | Unix.WEXITED 0 -> ()
-    | _ -> failwith "Failed to extract CIFAR-10 archive");
+    | _ ->
+        (try Sys.remove tar_path with Sys_error _ -> ());
+        failwith "Failed to extract CIFAR-10 archive (cached tarball removed; rerun to re-download)");
     if not (Sys.file_exists check_file) then
       failwith ("Extraction succeeded but check file not found: " ^ check_file)
   end
