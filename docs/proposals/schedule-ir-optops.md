@@ -195,6 +195,50 @@ legal for the accumulation patterns lowering emits (associative-commutative accu
 bitwise-reproducibility caveats belong to the search harness, which compares against
 the unscheduled twin).
 
+### 3b. `Partition`: index-set splitting at static breakpoints (gh-ocannl-508)
+
+`For_loop {index=i; from_; to_; body}` (required `Serial`) with breakpoints
+`b_1 < … < b_m` (each strictly inside the range) becomes the sequence of segment
+loops
+
+```
+For_loop {index=s_0; from_=from_; to_=b_1-1; body=subst(body, i := s_0)};
+For_loop {index=s_1; from_=b_1;   to_=b_2-1; body=subst(body, i := s_1)};
+...
+For_loop {index=s_m; from_=b_m;   to_=to_;   body=subst(body, i := s_m)}
+```
+
+Segment ranges stay **absolute** — no rebasing to 0 — so the substitution is a pure
+rename and no index arithmetic changes; iteration order is preserved exactly, hence
+the op is unconditionally legal (`op_legality`: `Op_legal`). Sibling segments
+duplicate the body, so scalar-local scope ids are refreshed per copy (the
+materializing-`Unroll` discipline) and `apply` runs CSE + hoisting after a schedule
+containing a `Partition`. The fresh segment symbols are returned by the smart
+constructor, making each segment individually addressable by subsequent ops
+(per-segment scheduling/tensorization).
+
+Specialization needs no logic of its own: each segment's narrowed range feeds the
+interval environment, so `apply`'s trailing simplify folds every guard the segment
+decides — statement `If`s and scalar `Where` range guards alike. This replaces the
+two in-loop-guard workarounds:
+
+- **Split remainders**: partition at the last tile-multiple first, then `Split` the
+  (now dividing) main segment — clean main nest + serial epilogue, no `If` anywhere,
+  instead of the construct-then-fold remainder guard.
+- **Inlined concatenation** (the virtualizer's per-component `Where` range guards,
+  gh-ocannl-134): partition the consumer loop at the component boundaries and every
+  `Where` folds — converging the inlined rendering with the sequential per-component
+  segment nests that materialized concatenation already lowers to
+  (`assignments.ml`'s Concat product entries).
+
+`Schedule.partition_breakpoints` derives the breakpoints from the guards already
+present in the loop body: comparisons whose two sides differ by `k*axis + off` with
+everything else constant flip truth value at one point of the axis range; the
+collected in-range flip points are exactly the partition that makes every such guard
+segment-decided. Downstream consumers: gh-ocannl-504's clamped-window interior
+specialization, gh-ocannl-485's PADTO valid-vs-fringe masking, gh-ocannl-500's edge
+peeling.
+
 ### 4. `Unroll`: annotation flavor vs. IR flavor
 
 The landed `Unrolled` axis type repeats the body at *codegen* time
