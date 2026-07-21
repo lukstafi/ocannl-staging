@@ -1,9 +1,84 @@
+## [0.9] -- Unreleased
+
+> Release note: theme — program search and optimization. Since 0.8, the schedule system has
+> gained hardware tensor-core paths, native affine legality and cost analyses, symbolic runtime
+> extents, convolution sketch families, and a liveness-based memory planner. The remaining 0.9
+> intended scope is summarized in [ROADMAP.md](ROADMAP.md), although its statement that full
+> beam search remains future work is stale: multi-round search over schedule compositions is
+> already implemented. End-to-end benchmark validation and cost-model-guided default/beam
+> selection are not yet complete.
+
+### Added
+
+- **Hardware matrix units and packed microkernels** (gh-ocannl-412): CUDA now renders
+  `Tile_mma` through WMMA for f16/bf16 and inline PTX for fp8/e5m2; HIP renders it through
+  rocWMMA on RDNA wave32 devices. CPU schedules compose register-tiled `Tile_mma` with
+  cache-blocked operand packing and pool-parallel `Grid` panels. Autotune seeds these forms both
+  for whole routines and individual fission segments.
+- **Persistent staged tensor-core accumulators** (gh-ocannl-480): Metal, CUDA, and HIP keep MMA
+  accumulator fragments resident across the serial outer reduction, loading once before `k_o`
+  and storing once afterward. Structural regressions pin the fragment scope, not only numeric
+  parity.
+- **Convolution schedule families** (gh-ocannl-493, gh-ocannl-500): `detect_conv` recognizes
+  lowered affine convolution sites and seeds implicit-GEMM schedules using `Stage` as virtual
+  im2col, `Tile_mma`, aligned-segment `Grid` geometry, and cache-blocked row panels. A
+  cross-framework `cifar_conv` workload exercises realistic channel counts and loss parity.
+- **Epilogue fusion**: `Schedule.Fuse_epilogue` folds eligible elementwise consumers into a
+  register/tensor-core tile's store-back, with exactly-once and dependency validation.
+- **Launch-time symbolic extents** (gh-ocannl-490): bounded symbolic shape axes lower to runtime
+  extent parameters, so one compiled routine and schedule-cache entry can serve multiple batch
+  or sequence lengths. Allocation and analysis use the declared maximum; autotuning measures at
+  that upper bound; serial extent guards fuse into loop headers.
+- **Liveness-based buffer aliasing** (gh-ocannl-489): the pool planner derives access spans and
+  reuses non-overlapping working-buffer slots. `Zero_out` sinking exposes further training-step
+  reuse while preserving observable, merge-buffer, and cross-stream exclusions.
+- **Native affine program analysis** (gh-ocannl-494): `Ir.Affine` and
+  `Low_level.affine_accesses` expose loop boxes and tensor access relations. Conflict, coverage,
+  fiber-cardinality, and read-before-write queries now drive shared-memory safety, fission,
+  scratch validation, and a `Schedule.op_legality` oracle that prunes proven-illegal autotune
+  proposals, including invalid `Stage` and `Tensorize` roles.
+- **Analytic cost-model foundation** (gh-ocannl-491): reusable footprint/FLOP extraction,
+  arithmetic-intensity and roofline lower bounds, plus advisory per-backend compute/bandwidth
+  envelopes. Selection of untuned defaults and beam pre-filtering remain follow-up work.
+- **Swizzled shared staging**: `Stage ~swizzle:true` marks XOR-swizzled shared-memory tiles, with
+  validation and explicit intrinsic-decline behavior until swizzle-aware fragment loads land.
+
+### Changed
+
+- Padding layout and neutral values are committed as tensor-node identity. Padded convolutions
+  consequently lower offset-free and can be staged safely; incompatible later padding demands
+  fail during shape inference instead of silently reinterpreting an existing buffer.
+- Per-fission `F_sketch` candidates are enumerated one segment at a time instead of pairing each
+  segment's nth seed, so an invalid seed on one segment no longer masks viable schedules on
+  another.
+- CUDA and HIP slab allocators report exact allocated bytes rather than inferred pool capacity.
+- Development pins now follow their upstream branch heads; release packaging still requires
+  released dependency versions because opam-repository packages do not preserve `pin-depends`.
+
+### Fixed
+
+- CUDA random generation no longer bit-casts random bits directly to `double`, and vector helper
+  names no longer exceed CUDA identifier limits. fp8 conversion, arithmetic, and uniform
+  generation were corrected across C, CUDA, HIP, and Metal paths.
+- The process-global slab-pool table is synchronized across `multidev` worker domains, fixing a
+  race between pool growth and lookup.
+- Shape inference no longer hangs on valid-convolution specs with output-only axes; `Embed_dim`
+  lowering forces the solved dimension before reading it.
+- Padded max-pooling commits `-infinity` margins on its private copy, and mixed-anchoring row
+  unification no longer loses compatible bounds.
+- The affine read-before-write proof cancels false `Recurrent` classifications caused by bounded
+  tracing on padded convolution/pooling chains, avoiding unnecessary materialization.
+- CIFAR dataset downloads are atomic, fail on HTTP errors, tolerate Windows Schannel behavior,
+  and self-heal incomplete archives; Windows documentation now calls out PowerShell's unquoted
+  Dune-alias splatting trap.
+
 ## [0.8] -- 2026-07-13
 
 > Release note: theme — parallel schedules and autotuning; AMD HIP backend. Scope changes
 > vs. the original plan: **tensor cores are pushed out to v0.9**; conversely **autotuning**
-> (measured schedule search) was not on the original roadmap and lands here, with full
-> beam search still scheduled for v0.9. See [ROADMAP.md](ROADMAP.md).
+> was not on the original roadmap and lands here as multi-round, execution-measured beam search
+> over schedule compositions. See [ROADMAP.md](ROADMAP.md), whose older single-step/full-beam
+> distinction is superseded by the implementation described below.
 
 ### Added
 
