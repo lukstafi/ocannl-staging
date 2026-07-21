@@ -1,0 +1,31 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+=== single: 4 lanes per block ===
+reference (size 12) first values: 4.4999e-1 4.5137e-1 1.4952e-1 8.9940e-1 3.9591e-1
+n=1: count true, range ok true, prefix-stable true
+n=2: count true, range ok true, prefix-stable true
+n=3: count true, range ok true, prefix-stable true
+n=5: count true, range ok true, prefix-stable true
+n=7: count true, range ok true, prefix-stable true
+n=10: count true, range ok true, prefix-stable true
+=== half: 8 lanes per block ===
+reference (size 16) first values: 9.4335e-1 4.4995e-1 1.6186e-1 4.5141e-1 1.2829e-1
+n=1: count true, range ok true, prefix-stable true
+n=3: count true, range ok true, prefix-stable true
+n=9: count true, range ok true, prefix-stable true
+n=12: count true, range ok true, prefix-stable true
+=== double: 2 lanes per block ===
+reference (size 4) first values: 4.5137e-1 8.9940e-1 1.4126e-2 1.3295e-2
+n=1: count true, range ok true, prefix-stable true
+n=3: count true, range ok true, prefix-stable true
+=== fp8: 16 lanes per block ===
+reference (size 48) first values: 1.2288e+4 -1.0240e+4 1.8750e-1 1.4336e+4 1.4336e+4
+n=1: count true, range ok true, prefix-stable true
+n=7: count true, range ok true, prefix-stable true
+n=15: count true, range ok true, prefix-stable true
+n=17: count true, range ok true, prefix-stable true
+n=33: count true, range ok true, prefix-stable true
+=== single precision, multi-axis 5->3 (15 elements) ===
+got 15 elements
+count true, in [0,1) true, prefix-stable true
+values: 4.4999e-1 4.5137e-1 1.4952e-1 8.9940e-1 3.9591e-1 1.4126e-2 9.0758e-1 1.3295e-2 6.9485e-1 9.6834e-1 5.1685e-1 8.0186e-1 6.4083e-1 7.0010e-1 2.7435e-1

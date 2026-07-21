@@ -1518,3 +1518,19 @@
  (libraries base ocannl stdio)
  (preprocess
   (pps ppx_here ppx_ocannl)))
+
+; Disabled on Metal: the fp8 stress case (16 lanes per block) forces a materialized FP8 tensor,
+; and the Metal backend rejects Ops.Fp8_prec in typ_of_prec. Re-enable once Metal FP8 exists.
+
+(test
+ (name test_uniform_odd_sizes)
+ (package neural_nets_lib)
+ (enabled_if
+  (<> %{env:OCANNL_BACKEND=cc} metal))
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules test_uniform_odd_sizes)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))

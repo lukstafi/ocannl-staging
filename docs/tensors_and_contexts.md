@@ -482,7 +482,7 @@ OCANNL provides several random operations in the DSL modules:
 
 | Function | Description | Notes |
 |----------|-------------|-------|
-| `uniform ()` | Uniform [0,1) using global seed | Efficient, requires shape divisibility |
+| `uniform ()` | Uniform [0,1) using global seed | Efficient, works with any shape |
 | `uniform1 ()` | Uniform [0,1), pointwise | Works with any shape, less efficient |
 | `uniform_at counter` | Uniform using explicit counter | For training-time randomness |
 | `uniform_at1 counter` | Pointwise uniform with counter | For training-time, any shape |
@@ -506,7 +506,7 @@ let%op dropout ~rate () ~train_step x =
   | _ -> x
 ```
 
-**Note on shape constraints**: The `uniform` function (without `1`) requires the total number of elements to be appropriately divisible, e.g. by 4 for single precision (due to `uint4x32` efficiency). Use `uniform1` for arbitrary shapes at the cost of some efficiency.
+**Note on shapes**: The packed `uniform` function (without `1`) is total over shapes: element `i` of the result is lane `i mod k` of the 128-bit random block `i / k`, where `k = 16 / bytes-per-element` (4 for single precision). When the total element count is not a multiple of `k`, the final block is consumed partially, so growing a tensor keeps the existing prefix of its value stream unchanged. `uniform1` remains available as a pointwise variant (one value per 128-bit block).
 
 ### Kaiming and Xavier Scaling Operations
 
