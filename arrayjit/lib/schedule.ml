@@ -1581,11 +1581,15 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
         ])
   |> fun llc -> { opt with llc }
 
-(** After [Tensorize] has replaced the inner micro-kernel, contract the nearest enclosing serial
-    reduction that carries the operands but not the accumulator. The synthesized local tile has
-    ordinary scalar semantics: lane 0 initializes it, each per-[k_o] [Tile_mma] accumulates into it,
-    and lane 0 stores it back. Metal recognizes the marked three-part region and maps the tile to
-    persistent simdgroup fragments; unsupported backend calls keep the local-array fallback. *)
+(** After [Tensorize] has replaced the inner micro-kernel, contract the enclosing chain of serial
+    loops that carry the operands but not the accumulator — for a multi-window conv the whole
+    kernel-window nest [kh; kw], not just the innermost loop (gh-ocannl-501). The search is
+    outermost-first: the transfers land around the outermost qualifying loop, so the fragment stays
+    resident across the entire chain and the store-back executes exactly once per output tile (which
+    is what lets [Fuse_epilogue] relocate an elementwise tail there). The synthesized local tile has
+    ordinary scalar semantics: lane 0 initializes it, each per-iteration [Tile_mma] accumulates into
+    it, and lane 0 stores it back. Metal recognizes the marked three-part region and maps the tile
+    to persistent simdgroup fragments; unsupported backend calls keep the local-array fallback. *)
 let contract_tensorized_accumulator ~lane (opt : Low_level.optimized) : Low_level.optimized =
   let open Low_level in
   (* [Tensorize] currently identifies one micro-kernel site per scheduled routine. Keep contraction
@@ -1678,111 +1682,118 @@ let contract_tensorized_accumulator ~lane (opt : Low_level.optimized) : Low_leve
         axis = Workgroup;
       }
   in
+  (* Outermost-first: attempt the contraction at each serial loop before descending, so the
+     transfers land around the outermost loop of the qualifying chain (an inner qualifying loop is
+     then part of the contracted region and is never visited). A loop that fails the conditions —
+     typically because its index appears in the accumulator's base indices, i.e. it is an output
+     loop — recurses into its body. *)
   let rec rewrite llc =
-    let llc =
-      match llc with
-      | Seq (a, b) -> Seq (rewrite a, rewrite b)
-      | For_loop fc -> For_loop { fc with body = rewrite fc.body }
-      | If ({ body; _ } as i) -> If { i with body = rewrite body }
-      | other -> other
-    in
-    match (llc, !promoted) with
-    | For_loop fc, None when equal_axis_type fc.axis Serial && fc.to_ > fc.from_ -> (
-        match matching_tiles [] fc.body with
-        | [ Tile_mma { d = target, d_base; a = a, _; b = b, _; m; n; fallback; _ } ]
-          when (not (idcs_mention fc.index d_base))
-               && (not (Tn.equal target a))
-               && (not (Tn.equal target b))
-               && List.for_all (bound_symbols [] fc.body) ~f:(fun s -> not (idcs_mention s d_base))
-               && not (touches_outside_tile target fc.body) -> (
-            match
-              (fallback_indices target fallback, fallback_axes fallback, lane_extent fc.body)
-            with
-            | Some original_d_idcs, Some (i, j), Some simd_width ->
-                let prec = Lazy.force target.Tn.prec in
-                let fragment =
-                  Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
-                    ~label:("fragment" :: target.Tn.label)
-                    ~unpadded_dims:(lazy [| m; n |])
-                    ~padding:(lazy None)
-                    ()
-                in
-                Tn.Placements.update opt.optimize_ctx.placements fragment Tn.Local 178;
-                ignore (get_node opt.traced_store fragment : traced_array);
-                let fragment_idcs = [| Indexing.Iterator i; Indexing.Iterator j |] in
-                let fragment_base = [| Indexing.Fixed_idx 0; Indexing.Fixed_idx 0 |] in
-                let fallback =
-                  remap_reads ~writes:true ~source:target ~from_idcs:original_d_idcs ~tile:fragment
-                    ~tile_idcs:fragment_idcs fallback
-                in
-                let replaced = ref false in
-                let rec replace = function
-                  | Tile_mma ({ lane = l; _ } as tm') when same_lane l ->
-                      replaced := true;
-                      Tile_mma { tm' with d = (fragment, fragment_base); fallback }
-                  | Seq (a, b) -> Seq (replace a, replace b)
-                  | For_loop f -> For_loop { f with body = replace f.body }
-                  | If ({ body; _ } as x) -> If { x with body = replace body }
-                  | other -> other
-                in
-                let body = replace fc.body in
-                assert !replaced;
-                let fi = Indexing.get_symbol () and fj = Indexing.get_symbol () in
-                let target_idcs = Array.copy d_base in
-                let rank = Array.length target_idcs in
-                if rank < 2 then
-                  invalid_arg "Schedule.Tensorize: accumulator rank must be at least 2";
-                target_idcs.(rank - 2) <- add_symbol target_idcs.(rank - 2) fi;
-                target_idcs.(rank - 1) <- add_symbol target_idcs.(rank - 1) fj;
-                let local_idcs = [| Indexing.Iterator fi; Indexing.Iterator fj |] in
-                let transfer ~into_fragment =
-                  let stmt =
-                    if into_fragment then
-                      Set
-                        {
-                          tn = fragment;
-                          idcs = local_idcs;
-                          llsc = Get (target, target_idcs);
-                          debug = "";
-                        }
-                    else
-                      Set
-                        {
-                          tn = target;
-                          idcs = target_idcs;
-                          llsc = Get (fragment, local_idcs);
-                          debug = "";
-                        }
-                  in
-                  For_loop
+    match llc with
+    | For_loop { index; from_; to_; body; trace_it; axis }
+      when Option.is_none !promoted && equal_axis_type axis Serial && to_ > from_ -> (
+        let fc : floop = { index; from_; to_; body; trace_it; axis } in
+        match try_contract fc with
+        | Some replaced -> replaced
+        | None -> for_loop { fc with body = rewrite fc.body })
+    | Seq (a, b) ->
+        let a = rewrite a in
+        Seq (a, rewrite b)
+    | For_loop fc -> For_loop { fc with body = rewrite fc.body }
+    | If ({ body; _ } as i) -> If { i with body = rewrite body }
+    | other -> other
+  and try_contract (fc : floop) =
+    match matching_tiles [] fc.body with
+    | [ Tile_mma { d = target, d_base; a = a, _; b = b, _; m; n; fallback; _ } ]
+      when (not (idcs_mention fc.index d_base))
+           && (not (Tn.equal target a))
+           && (not (Tn.equal target b))
+           && List.for_all (bound_symbols [] fc.body) ~f:(fun s -> not (idcs_mention s d_base))
+           && not (touches_outside_tile target fc.body) -> (
+        match (fallback_indices target fallback, fallback_axes fallback, lane_extent fc.body) with
+        | Some original_d_idcs, Some (i, j), Some simd_width ->
+            let prec = Lazy.force target.Tn.prec in
+            let fragment =
+              Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
+                ~label:("fragment" :: target.Tn.label)
+                ~unpadded_dims:(lazy [| m; n |])
+                ~padding:(lazy None)
+                ()
+            in
+            Tn.Placements.update opt.optimize_ctx.placements fragment Tn.Local 178;
+            ignore (get_node opt.traced_store fragment : traced_array);
+            let fragment_idcs = [| Indexing.Iterator i; Indexing.Iterator j |] in
+            let fragment_base = [| Indexing.Fixed_idx 0; Indexing.Fixed_idx 0 |] in
+            let fallback =
+              remap_reads ~writes:true ~source:target ~from_idcs:original_d_idcs ~tile:fragment
+                ~tile_idcs:fragment_idcs fallback
+            in
+            let replaced = ref false in
+            let rec replace = function
+              | Tile_mma ({ lane = l; _ } as tm') when same_lane l ->
+                  replaced := true;
+                  Tile_mma { tm' with d = (fragment, fragment_base); fallback }
+              | Seq (a, b) -> Seq (replace a, replace b)
+              | For_loop f -> For_loop { f with body = replace f.body }
+              | If ({ body; _ } as x) -> If { x with body = replace body }
+              | other -> other
+            in
+            let body = replace fc.body in
+            assert !replaced;
+            let fi = Indexing.get_symbol () and fj = Indexing.get_symbol () in
+            let target_idcs = Array.copy d_base in
+            let rank = Array.length target_idcs in
+            if rank < 2 then invalid_arg "Schedule.Tensorize: accumulator rank must be at least 2";
+            target_idcs.(rank - 2) <- add_symbol target_idcs.(rank - 2) fi;
+            target_idcs.(rank - 1) <- add_symbol target_idcs.(rank - 1) fj;
+            let local_idcs = [| Indexing.Iterator fi; Indexing.Iterator fj |] in
+            let transfer ~into_fragment =
+              let stmt =
+                if into_fragment then
+                  Set
                     {
-                      index = fi;
-                      from_ = 0;
-                      to_ = m - 1;
-                      trace_it = false;
-                      axis = Serial;
-                      body =
-                        For_loop
-                          {
-                            index = fj;
-                            from_ = 0;
-                            to_ = n - 1;
-                            trace_it = false;
-                            axis = Serial;
-                            body = stmt;
-                          };
+                      tn = fragment;
+                      idcs = local_idcs;
+                      llsc = Get (target, target_idcs);
+                      debug = "";
                     }
-                in
-                promoted := Some fragment;
-                unflat_lines
-                  [
-                    lane0 simd_width (transfer ~into_fragment:true);
-                    For_loop { fc with body };
-                    lane0 simd_width (transfer ~into_fragment:false);
-                  ]
-            | _ -> llc)
-        | _ -> llc)
-    | _ -> llc
+                else
+                  Set
+                    {
+                      tn = target;
+                      idcs = target_idcs;
+                      llsc = Get (fragment, local_idcs);
+                      debug = "";
+                    }
+              in
+              For_loop
+                {
+                  index = fi;
+                  from_ = 0;
+                  to_ = m - 1;
+                  trace_it = false;
+                  axis = Serial;
+                  body =
+                    For_loop
+                      {
+                        index = fj;
+                        from_ = 0;
+                        to_ = n - 1;
+                        trace_it = false;
+                        axis = Serial;
+                        body = stmt;
+                      };
+                }
+            in
+            promoted := Some fragment;
+            Some
+              (unflat_lines
+                 [
+                   lane0 simd_width (transfer ~into_fragment:true);
+                   for_loop { fc with body };
+                   lane0 simd_width (transfer ~into_fragment:false);
+                 ])
+        | _ -> None)
+    | _ -> None
   in
   let llc = rewrite opt.llc in
   match !promoted with
@@ -2019,9 +2030,15 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
      symbols — sibling transfer nests already share them), so the marked three-part region keeps its
      shape and the fragment recognizer renders the extra statement after the intrinsics. --- *)
   let match_storeback = function
-    | For_loop
-        { index = lane; from_ = 0; to_; axis = Workgroup; body = If { cond = cond, _; body }; _ }
-      when is_lane0_guard lane cond ->
+    | For_loop { index = lane; from_ = 0; to_; axis = Workgroup; body; _ } -> (
+        (* The lane-0 guard survives on real lane widths; on the CPU pipelines' width-1 lane the
+           simplifier folds the vacuous [if lane == 0], leaving the bare transfer nest. *)
+        let guarded =
+          match body with
+          | If { cond = cond, _; body } when is_lane0_guard lane cond -> Some body
+          | body when to_ = 0 -> Some body
+          | _ -> None
+        in
         let rec descend loops = function
           | For_loop { index; from_ = 0; to_; axis = Serial; body; _ } ->
               descend ((index, to_ + 1) :: loops) body
@@ -2030,7 +2047,9 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
               Some (List.rev loops, idcs)
           | _ -> None
         in
-        Option.map (descend [] body) ~f:(fun (loops, st_idcs) -> (lane, to_ + 1, loops, st_idcs))
+        match Option.bind guarded ~f:(descend []) with
+        | Some (loops, st_idcs) -> Some (lane, to_ + 1, loops, st_idcs)
+        | None -> None)
     | _ -> None
   in
   let fused = ref false in
@@ -2046,11 +2065,11 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
           | Some (lane, width, loops, st_idcs) ->
               let env' = loops @ env in
               (* Exactly-once discipline: an enclosing loop that does not index the store-back
-                 (e.g. the outer kernel-window loop of a multi-window conv, when the contraction
-                 covers only the innermost window loop) re-executes the site per iteration with
-                 partial accumulations — the relocated tail must not run there (Codex P1 on the
-                 gh-ocannl-493 re-land). Relocating the tail after the surplus loop instead is a
-                 recorded follow-up. *)
+                 re-executes the site per iteration with partial accumulations — the relocated tail
+                 must not run there (Codex P1 on the gh-ocannl-493 re-land). Since
+                 [contract_tensorized_accumulator] contracts across the whole qualifying chain
+                 (gh-ocannl-501), a surplus loop here means a hand-built schedule left the
+                 store-back genuinely partial; the check stays as the safety net. *)
               List.iter env' ~f:(fun (s, e) ->
                   if e > 1 && not (Array.exists st_idcs ~f:(idx_mentions s)) then
                     fail
