@@ -13,6 +13,8 @@ type report = {
   epilogue_sketch_candidates : int;
   fiss_sketch_candidates : int;
   fiss_sketch_timed : int;
+  model_scored : int;
+  model_pruned : int;
   fissioned : bool;
   baseline_ms : float;
   best_ms : float;
@@ -22,6 +24,10 @@ type report = {
 let int_arg ~arg_name ~default =
   let s = Utils.get_global_arg ~arg_name ~default:(Int.to_string default) in
   try Int.of_string (String.strip s) with _ -> default
+
+let float_arg ~arg_name ~default =
+  let s = Utils.get_global_arg ~arg_name ~default:(Float.to_string default) in
+  try Float.of_string (String.strip s) with _ -> default
 
 (* A candidate round-improvement below this fraction of the incumbent ends the search. *)
 let min_progress = 0.01
@@ -1806,6 +1812,79 @@ let extend_with_privatize ~static_indices sched (seg : LL.optimized) : Sched.sch
           | (_ : LL.optimized) -> acc'
           | exception _ -> acc)
 
+(** {2 Analytic cost-model scoring (gh-ocannl-491, the selection half)}
+
+    The extraction half lives in {!Ir.Cost_model}; here it is consumed for ranking candidate
+    schedules — the beam pre-filter of {!tune} and the untuned-default selection of
+    {!model_default}. The model is advisory throughout: a candidate class without model coverage
+    (opaque code, a schedule the model cannot apply, missing envelope constants) is never dropped,
+    only measured — consistent with never overriding a measured result, and keeping the search
+    independent of enumeration order. *)
+
+module CM = Ir.Cost_model
+
+let scratch_of (opt : LL.optimized) =
+  {
+    opt with
+    LL.traced_store = Hashtbl.copy opt.LL.traced_store;
+    LL.optimize_ctx = LL.copy_optimize_ctx opt.LL.optimize_ctx;
+  }
+
+(* Per-machine calibrated envelope constants from the config beat the backend's class-level
+   advisory constants ([Backend_intf.hardware_limits]'s [peak_flops] / [peak_memory_bandwidth]) —
+   fitting them from [autotune_calibration_file] data is the intended workflow. *)
+let peak_override ~arg_name =
+  lazy
+    (let s = String.strip (Utils.get_global_arg ~arg_name ~default:"") in
+     if String.is_empty s then None
+     else
+       match Float.of_string s with
+       | f when Float.(f > 0.) -> Some f
+       | _ -> None
+       | exception _ -> None)
+
+let peak_flops_override = peak_override ~arg_name:"model_peak_flops"
+let peak_bandwidth_override = peak_override ~arg_name:"model_peak_memory_bandwidth"
+
+let envelope ~(limits : Ir.Backend_intf.hardware_limits) =
+  ( Option.first_some (Lazy.force peak_flops_override) limits.Ir.Backend_intf.peak_flops,
+    Option.first_some
+      (Lazy.force peak_bandwidth_override)
+      limits.Ir.Backend_intf.peak_memory_bandwidth )
+
+(* The roofline lower bound summed over a candidate's kernels; [None] — no model coverage — when
+   any kernel is opaque (its counts may UNDER-estimate, so ranking on them could prune the true
+   winner) or when no envelope constant is present. *)
+let summaries_roofline ~peak_flops ~peak_memory_bandwidth (summaries : CM.summary list) :
+    float option =
+  if List.exists summaries ~f:(fun s -> s.CM.opaque) then None
+  else
+    let flops = List.sum (module Int) summaries ~f:(fun s -> s.CM.flops) in
+    let bytes = List.sum (module Int) summaries ~f:CM.total_bytes in
+    CM.roofline_seconds ?peak_flops ?peak_memory_bandwidth ~flops ~bytes ()
+
+let model_score ~static_indices ~limits (opt : LL.optimized) (sched : Sched.schedule) :
+    float option =
+  let peak_flops, peak_memory_bandwidth = envelope ~limits in
+  match Sched.apply ~static_indices sched (scratch_of opt) with
+  | exception _ -> None
+  | post -> summaries_roofline ~peak_flops ~peak_memory_bandwidth [ CM.analyze post.LL.llc ]
+
+let model_prefilter ~keep_fraction (scored : ('a * float option) list) : ('a * float option) list =
+  let scores = List.filter_map scored ~f:snd in
+  let n = List.length scores in
+  if Float.(keep_fraction >= 1.) || n <= 1 then scored
+  else
+    let n_keep =
+      Int.min n (Int.max 1 (Int.of_float (Float.round_up (keep_fraction *. Float.of_int n))))
+    in
+    let cutoff = List.nth_exn (List.sort scores ~compare:Float.compare) (n_keep - 1) in
+    (* Ties at the cutoff are all kept: which of two equal-scored candidates survives must not
+       depend on enumeration order. Unscored candidates ([None]) always pass — the no-coverage
+       exemption. *)
+    List.filter scored ~f:(fun (_, s) ->
+        match s with None -> true | Some v -> Float.(v <= cutoff))
+
 (** {2 Candidate compilation}
 
     A candidate is a recipe producing schedules against a {e fresh} lowering: backend [compile]
@@ -1858,6 +1937,9 @@ type compiled = {
   cctx : Context.t;
   routine : Context.routine;
   units : unit_gen list;
+  all_opts : LL.optimized list;
+      (** Every compiled segment ([`Zeros] and [`Solo] segments included, unlike [units]) — the
+          code the timing runs actually execute, for calibration analysis. *)
   digest_after : string;
   mma_renders : (string * Ir.C_syntax.mma_rendering) list;
       (** The [Ir.C_syntax.mma_census] of this candidate's compile: how each [Tile_mma] statement
@@ -1886,6 +1968,41 @@ let dshort d =
   String.prefix d 8 ^ "/" ^ String.prefix (Stdlib.Digest.to_hex (Stdlib.Digest.string d)) 8
 
 let bs_label = function None -> "cfg" | Some b -> Int.to_string b
+
+(* Calibration output (gh-ocannl-491 task 4): the model score next to the measured time — every
+   tuning run is free calibration data for the envelope constants. Human-readable stderr lines
+   under config [autotune_log]; durable tab-separated rows appended under config
+   [autotune_calibration_file]. The analysis runs on the candidate's actual compiled segments
+   ([compiled.all_opts]), so a calibration row prices exactly the code that was timed. *)
+let calibration_file =
+  lazy (String.strip (Utils.get_global_arg ~arg_name:"autotune_calibration_file" ~default:""))
+
+let emit_calibration ~backend ~limits ~label ~digest ~measured_ms (opts : LL.optimized list) =
+  let file = Lazy.force calibration_file in
+  if Lazy.force log_enabled || not (String.is_empty file) then (
+    let summaries = List.map opts ~f:(fun o -> CM.analyze o.LL.llc) in
+    let flops = List.sum (module Int) summaries ~f:(fun s -> s.CM.flops) in
+    let bytes = List.sum (module Int) summaries ~f:CM.total_bytes in
+    let opaque = List.exists summaries ~f:(fun s -> s.CM.opaque) in
+    let peak_flops, peak_memory_bandwidth = envelope ~limits in
+    let model_ms =
+      Option.map (summaries_roofline ~peak_flops ~peak_memory_bandwidth summaries) ~f:(fun s ->
+          s *. 1e3)
+    in
+    let model_str = function Some m -> Printf.sprintf "%.6f" m | None -> "" in
+    logf "calibration: %s measured %.4f ms, model %s, flops %d, bytes %d%s" label measured_ms
+      (match model_ms with Some m -> Printf.sprintf "%.6f ms" m | None -> "n/a")
+      flops bytes
+      (if opaque then " (opaque: counts may under-estimate)" else "");
+    if not (String.is_empty file) then
+      let line =
+        Printf.sprintf "%s\t%s\t%s\t%.6f\t%s\t%d\t%d\t%b\n" backend (dshort digest) label
+          measured_ms (model_str model_ms) flops bytes opaque
+      in
+      try
+        Stdio.Out_channel.with_file file ~append:true ~f:(fun oc ->
+            Stdio.Out_channel.output_string oc line)
+      with _ -> logf "calibration: cannot append to %s" file)
 
 (* Whether the spec's label promises a tensorized pipeline — used to flag "no Tile_mma emitted"
    census anomalies (gh-ocannl-479). *)
@@ -1991,6 +2108,7 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu c
             Some
               ( Whole_saved saved,
                 [ { u_key = None; u_saved = saved; u_registry = registry; u_opt = opt' } ],
+                [ opt' ],
                 digest_after );
           opt'
         in
@@ -2073,7 +2191,7 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu c
             String.concat ~sep:"+"
               (List.map posts ~f:(fun post -> SC.digest (SC.canonicalize ~static_indices post)))
           in
-          captured := Some (Fiss_saved assoc, units, digest_after);
+          captured := Some (Fiss_saved assoc, units, posts, digest_after);
           posts
         in
         Context.compile ~lowered_transforms:transforms ctx comp bindings
@@ -2089,8 +2207,8 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu c
     in
     let mma_renders = !Ir.C_syntax.mma_census in
     match !captured with
-    | Some (form, units, digest_after) ->
-        Ok { form; cctx; routine; units; digest_after; mma_renders }
+    | Some (form, units, all_opts, digest_after) ->
+        Ok { form; cctx; routine; units; all_opts; digest_after; mma_renders }
     | None -> Error "Autotune: the transform was not invoked"
   with exn -> Error (Exn.to_string exn)
 
@@ -2298,8 +2416,8 @@ let extend_spec (elem : compiled) (u : unit_gen) (op : SC.saved_optop) : spec op
 
 (** {2 The search} *)
 
-let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?report ctx comp
-    bindings =
+let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fraction ?timing_ctx
+    ?report ctx comp bindings =
   let beam_width =
     max 1 (Option.value beam_width ~default:(int_arg ~arg_name:"autotune_beam_width" ~default:2))
   in
@@ -2309,6 +2427,9 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
   let cache_dir =
     Option.value cache_dir
       ~default:(Utils.get_global_arg ~arg_name:"autotune_cache_dir" ~default:"autotune_cache")
+  in
+  let keep_fraction =
+    Option.value keep_fraction ~default:(float_arg ~arg_name:"autotune_keep_fraction" ~default:1.)
   in
   let static_indices = Idx.bound_symbols bindings in
   let backend = Context.backend_name ctx in
@@ -2393,6 +2514,8 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
                   epilogue_sketch_candidates = 0;
                   fiss_sketch_candidates = 0;
                   fiss_sketch_timed = 0;
+                  model_scored = 0;
+                  model_pruned = 0;
                   fissioned = is_fissioned c.form;
                   baseline_ms = entry.SC.baseline_ms;
                   best_ms = entry.SC.best_ms;
@@ -2415,6 +2538,8 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
          with the same message [Context.run] would give. *)
       let baseline_ms = time_routine ~repeats bctx broutine in
       logf "baseline: %.4f ms (digest %s)" baseline_ms (dshort base_digest);
+      emit_calibration ~backend ~limits ~label:"baseline" ~digest:base_digest
+        ~measured_ms:baseline_ms [ base_opt ];
       let baseline =
         {
           form = Whole_saved [];
@@ -2424,6 +2549,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
             [
               { u_key = None; u_saved = []; u_registry = SC.base_registry canon; u_opt = base_opt };
             ];
+          all_opts = [ base_opt ];
           digest_after = base_digest;
           mma_renders = [];
         }
@@ -2445,6 +2571,8 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
               | ms ->
                   Int.incr n_timed;
                   logf "%s: %.4f ms (digest %s)" (spec_label spec) ms (dshort c.digest_after);
+                  emit_calibration ~backend ~limits ~label:(spec_label spec)
+                    ~digest:c.digest_after ~measured_ms:ms c.all_opts;
                   (* The rendering census next to the timing (gh-ocannl-479): a candidate labeled
                      tensorized whose [Tile_mma] statements all declined at emission timed the
                      scalar fallback — report it, or every number off this tuning run inherits the
@@ -2470,7 +2598,40 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
       let block_size_presets mk =
         mk None :: (if is_gpu then List.map seed_block_sizes ~f:(fun bs -> mk (Some bs)) else [])
       in
-      let sketch_params = sketch_seed_params ~is_gpu ~is_cpu ~limits base_opt in
+      let n_model_scored = ref 0 and n_model_pruned = ref 0 in
+      (* The model pre-filter of the sketch seeding (gh-ocannl-491 task 3): rank each candidate
+         family (the whole-routine sketches; each fission segment's sketches) with the roofline
+         model and keep the best [keep_fraction] of the scored candidates before any compilation
+         or timing. Only candidates the model fully covers are droppable — a candidate without
+         model coverage (opaque code, a schedule the model cannot apply, missing envelope
+         constants) is always kept, only measured — so the pre-filter never precludes a measured
+         result and its outcome is independent of enumeration order. Presets, saved schedules and
+         the baseline are never pruned. *)
+      let model_prefilter_params ~seg_opt ~family params =
+        if Float.(keep_fraction >= 1.) || List.length params <= 1 then params
+        else (
+          let scored =
+            List.map params ~f:(fun p ->
+                let score =
+                  try model_score ~static_indices ~limits seg_opt (sketch_schedule ~p seg_opt)
+                  with _ -> None
+                in
+                (p, score))
+          in
+          n_model_scored := !n_model_scored + List.count scored ~f:(fun (_, s) -> Option.is_some s);
+          let kept = model_prefilter ~keep_fraction scored in
+          List.iter scored ~f:(fun ((p, s) as entry) ->
+              if not (List.mem kept entry ~equal:phys_equal) then (
+                Int.incr n_model_pruned;
+                logf "model prune (%s, keep %.2f): %s scored %.3e s" family keep_fraction
+                  (spec_label (Whole (W_sketch p)))
+                  (Option.value_exn s)));
+          List.map kept ~f:fst)
+      in
+      let sketch_params =
+        model_prefilter_params ~seg_opt:base_opt ~family:"whole-routine"
+          (sketch_seed_params ~is_gpu ~is_cpu ~limits base_opt)
+      in
       (* Per-fission-segment sketch seeds (the [F_sketch] flavor): heavily fissioned graphs tune per
          segment, where the whole-routine sketches never apply. Enumerate the fission segmentation
          once, on a hermetic copy of the base lowering with the same pipeline settings the candidate
@@ -2507,14 +2668,22 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
                       | params ->
                           Some
                             ( SC.digest (SC.canonicalize ~static_indices ~with_placements:false pre),
+                              pre,
                               params )))
       in
       let fiss_sketch_entries =
         (* Structurally identical segments share a digest — and thus, at apply time, a schedule —
            so keep one entry per digest. *)
-        List.fold fiss_sketch_entries ~init:[] ~f:(fun acc ((key, _) as e) ->
-            if List.Assoc.mem acc ~equal:String.equal key then acc else e :: acc)
+        List.fold fiss_sketch_entries ~init:[] ~f:(fun acc ((key, _, _) as e) ->
+            if List.exists acc ~f:(fun (k, _, _) -> String.equal k key) then acc else e :: acc)
         |> List.rev
+      in
+      let fiss_sketch_entries =
+        (* Per-segment pre-filtering: each segment's sketches are their own family — cross-segment
+           scores are incomparable (different code volumes), and the singles below are also ranked
+           per segment by the recombination step. *)
+        List.map fiss_sketch_entries ~f:(fun (key, pre, ps) ->
+            (key, model_prefilter_params ~seg_opt:pre ~family:("segment " ^ dshort key) ps))
       in
       let fiss_sketch_specs =
         (* Single-segment specs: each parameter set of each keyed segment is proposed alone, every
@@ -2639,6 +2808,8 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?timing_ctx ?
           epilogue_sketch_candidates = List.count sketch_params ~f:(fun p -> p.sk_epilogue);
           fiss_sketch_candidates = List.length fiss_sketch_specs;
           fiss_sketch_timed = !n_fiss_sketch_timed;
+          model_scored = !n_model_scored;
+          model_pruned = !n_model_pruned;
           fissioned = is_fissioned best_c.form;
           baseline_ms;
           best_ms;

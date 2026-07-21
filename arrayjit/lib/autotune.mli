@@ -168,8 +168,9 @@ type report = {
   rounds_run : int;  (** Beam-expansion rounds actually executed (0 = seeds only). *)
   sketch_candidates : int;
       (** Whole-routine matmul-sketch instantiations seeded (0 when no matmul micro-kernel was
-          detected or no tile sizes divide the extents). Deterministic given the computation and
-          backend. *)
+          detected or no tile sizes divide the extents), after the model pre-filter when one is
+          active ([keep_fraction < 1]). Deterministic given the computation, backend, and
+          configuration. *)
   epilogue_sketch_candidates : int;
       (** Of [sketch_candidates], the fused-epilogue twins (gh-ocannl-486): seeded when the site's
           output feeds an eligible elementwise tail ([Schedule.can_fuse_epilogue]) — each sketch is
@@ -183,6 +184,13 @@ type report = {
       (** Of the seeded per-fission-segment sketch candidates, those that compiled and were actually
           timed (not rejected by op preconditions or hardware limits, not deduplicated by digest).
       *)
+  model_scored : int;
+      (** Sketch candidates the analytic cost model scored during the seed pre-filter
+          (gh-ocannl-491); [0] when the pre-filter is off ([keep_fraction >= 1]) or nothing was
+          scoreable (e.g. no envelope constants). *)
+  model_pruned : int;
+      (** Of [model_scored], the candidates dropped before compilation and timing. Candidates
+          without model coverage are never counted here — they are always kept. *)
   fissioned : bool;  (** The winning candidate compiles as multiple fissioned kernels. *)
   baseline_ms : float;
   best_ms : float;
@@ -190,6 +198,29 @@ type report = {
       (** The winner's schedule; for a fissioned winner, the concatenation of the per-segment
           schedules (informational). *)
 }
+
+val model_score :
+  static_indices:Ir.Indexing.static_symbol list ->
+  limits:Ir.Backend_intf.hardware_limits ->
+  Ir.Low_level.optimized ->
+  Ir.Schedule.schedule ->
+  float option
+(** The analytic cost model's ranking score of a candidate schedule (gh-ocannl-491, the selection
+    half): {!Ir.Schedule.apply} on a hermetic copy, {!Ir.Cost_model.analyze}, then the roofline
+    lower-bound seconds under the envelope constants — [limits]' advisory [peak_flops] /
+    [peak_memory_bandwidth], each overridable by config [model_peak_flops] /
+    [model_peak_memory_bandwidth] (calibrated per-machine values beat the class constants). [None]
+    — no model coverage — when the schedule fails to apply, the code is opaque to the extraction
+    (its counts may under-estimate, so ranking on them could prune the true winner), or no envelope
+    constant is present. A ranking score, not a runtime prediction. Exposed for tests. *)
+
+val model_prefilter :
+  keep_fraction:float -> ('a * float option) list -> ('a * float option) list
+(** The order-preserving pre-filter over model-scored candidates: keeps every unscored ([None])
+    candidate — the no-coverage exemption: never dropped, only measured — plus the best
+    [ceil (keep_fraction * n)] of the [n] scored ones (at least one; ties at the cutoff are all
+    kept, so the outcome is independent of enumeration order). The identity when
+    [keep_fraction >= 1]. Exposed for tests. *)
 
 val set_test_bindings : Context.routine -> unit
 (** Binds representative values for timing runs: ranged static indices at [range / 2], and gh-490
@@ -213,6 +244,14 @@ val tune :
   ?cache_dir:string ->
   (* Directory of the schedule disk cache; [""] disables caching. Default from config
      [autotune_cache_dir] ([autotune_cache]). *)
+  ?keep_fraction:float ->
+  (* The model pre-filter of the sketch seeding (gh-ocannl-491): per candidate family (the
+     whole-routine sketches; each fission segment's sketches), rank with {!model_score} and keep
+     the best [keep_fraction] of the scored candidates before compiling or timing anything.
+     Default from config [autotune_keep_fraction] (1 = pre-filter off). Candidates without model
+     coverage are always kept — never dropped, only measured — so the pre-filter never overrides
+     (or precludes) a measured result; presets, saved schedules and the baseline are never
+     pruned. *)
   ?timing_ctx:Context.t ->
   (* A scratch context lineage against which candidates are compiled and timed, so the timing runs
      never mutate [ctx]'s live buffers (parameters, accumulators — running a training step on
