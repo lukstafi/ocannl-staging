@@ -443,7 +443,8 @@ let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; i
     packing [Stage] {e is} im2col — same copy nest, conv index arithmetic) and the [ic × oc] slice
     of [w] (normalizing any stored layout) at the kernel-window anchor, then [Tensorize (row, oc,
     ic)] exactly as for matmuls: the register tiling / tensor cores and the accumulator
-    contraction (gh-ocannl-480, resident across the innermost kernel loop) apply unchanged.
+    contraction (gh-ocannl-480; resident across the whole kernel-window chain since
+    gh-ocannl-501) apply unchanged.
 
     Unlike the matmul pipelines, the reorder moves the [ic] reduction inside the kernel loops, so
     the per-element reduction order changes: conv sketch candidates match the unscheduled form
@@ -1070,6 +1071,39 @@ let conv_real_stmts (site : conv_site) (opt : LL.optimized) : LL.t list =
     | LL.Zero_out tn -> not (Ir.Tnode.equal tn site.c_d)
     | _ -> true)
 
+(* The would-be epilogue tail's loop symbols: the first real statement after the last statement
+   writing the conv output — the nest [Sched.Fuse_epilogue] consumes (its perfect-Serial-nest and
+   sole-consumer vetting happens in the op itself). Used by the fused twins on aligned-merged
+   segments to omit the preset's [Retype] on that nest (fuse-before-annotate, gh-ocannl-501):
+   [sketch_schedule] appends the fusion op last, by which point a whole-segment preset would have
+   Grid-retyped the tail nest and [Fuse_epilogue] — which requires a perfect Serial tail — would
+   reject it. The relocated tail write lands under the conv nest's own Grid geometry instead, so
+   [validate_parallel]'s coverage is preserved without the dropped [Retype]. *)
+let conv_tail_loop_syms (site : conv_site) (opt : LL.optimized) : Idx.symbol list =
+  let stmts =
+    List.filter (LL.flat_lines [ opt.LL.llc ]) ~f:(function
+      | LL.Noop | LL.Comment _ -> false
+      | _ -> true)
+  in
+  let rec writes_d = function
+    | LL.Set { tn; _ } | LL.Zero_out tn | LL.Set_dynamic { tn; _ } | LL.Set_from_vec { tn; _ } ->
+        Ir.Tnode.equal tn site.c_d
+    | LL.Tile_mma { d = tn, _; _ } -> Ir.Tnode.equal tn site.c_d
+    | LL.Seq (a, b) -> writes_d a || writes_d b
+    | LL.For_loop { body; _ } | LL.If { body; _ } -> writes_d body
+    | _ -> false
+  in
+  let rec loop_syms acc = function
+    | LL.For_loop { index; body; _ } -> loop_syms (index :: acc) body
+    | LL.Seq (a, b) -> loop_syms (loop_syms acc a) b
+    | LL.If { body; _ } -> loop_syms acc body
+    | _ -> acc
+  in
+  match List.filter_mapi stmts ~f:(fun i s -> Option.some_if (writes_d s) i) |> List.last with
+  | None -> []
+  | Some r -> (
+      match List.nth stmts (r + 1) with Some tail -> loop_syms [] tail | None -> [])
+
 (* Whole-segment Grid alignment for the conv pipeline on merged segments (gh-ocannl-493): the
    pipeline's own [Retype] covers only the conv nest, so on an aligned-merged segment (lenet's
    conv+bias/relu+pooling) the companions' materialized writes would fail [validate_parallel].
@@ -1106,7 +1140,8 @@ let conv_split_row_current (site : conv_site) ~row_o ~row_i : Idx.symbol list =
    kernel's [ic × oc] slice (both anchor under the innermost kernel-window loop; the packing IS
    im2col, one window slice at a time, and normalizes the kernel's stored layout), then
    [Tensorize (row, oc, ic)] — the register-tiled [Tile_mma] micro-kernel, with the accumulator
-   contracted to a fragment resident across the innermost kernel loop (gh-ocannl-480). With
+   contracted to a fragment resident across the whole kernel-window chain (gh-ocannl-480,
+   gh-ocannl-501: one fragment init/store per output tile). With
    [sk_grid], the outermost output loop is [Grid]-typed and pool-parallelizes; a whole-node
    [Zero_out] of the output then expands with the matching geometry. On a segment with more than
    one companion statement the grid ops come from [conv_aligned_grid] instead, so every companion
@@ -1124,11 +1159,21 @@ let conv_split_row_current (site : conv_site) ~row_o ~row_i : Idx.symbol list =
    the unblocked flavor and the panel loop stays [Serial] — pure cache blocking within each pool
    chunk. Both cases are unzeroed (the seeds gate accordingly): the [Zero_out] lives in its own
    [`Zeros] segment, so no zero geometry is needed. *)
-let cpu_conv_sketch_schedule ~(opt : LL.optimized) (site : conv_site) { sk_grid; sk_bm; _ } :
-    Sched.schedule =
+let cpu_conv_sketch_schedule ~(opt : LL.optimized) (site : conv_site)
+    { sk_grid; sk_bm; sk_epilogue; _ } : Sched.schedule =
   let stage source tile_loops =
     Sched.Stage
       { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = false }
+  in
+  (* Fuse-before-annotate (gh-ocannl-501): the fused twin of an aligned-merged seed omits the
+     preset [Retype] on the tail nest [Fuse_epilogue] consumes — see [conv_tail_loop_syms]. *)
+  let drop_tail_retypes sched =
+    if not sk_epilogue then sched
+    else
+      let tail_syms = conv_tail_loop_syms site opt in
+      List.filter sched ~f:(function
+        | Sched.Retype { axis; _ } -> not (List.mem tail_syms axis ~equal:Idx.equal_symbol)
+        | _ -> true)
   in
   if sk_bm > 0 then (
     if site.c_nrow % sk_bm <> 0 then
@@ -1138,7 +1183,7 @@ let cpu_conv_sketch_schedule ~(opt : LL.optimized) (site : conv_site) { sk_grid;
     let grid_ops, panel_axis =
       if List.length (conv_real_stmts site opt) > 2 then
         match conv_aligned_grid site opt with
-        | Some sched -> (sched, LL.Serial)
+        | Some sched -> (drop_tail_retypes sched, LL.Serial)
         | None -> invalid_arg "Autotune conv sketch: companion nests do not align for Grid"
       else ([], LL.Grid)
     in
@@ -1163,7 +1208,7 @@ let cpu_conv_sketch_schedule ~(opt : LL.optimized) (site : conv_site) { sk_grid;
       if not sk_grid then ([], [])
       else if List.length (conv_real_stmts site opt) > 2 then
         match conv_aligned_grid site opt with
-        | Some sched -> ([], sched)
+        | Some sched -> ([], drop_tail_retypes sched)
         | None -> invalid_arg "Autotune conv sketch: companion nests do not align for Grid"
       else
         match site.c_outer with
@@ -1193,7 +1238,8 @@ let cpu_conv_sketch_schedule ~(opt : LL.optimized) (site : conv_site) { sk_grid;
    cooperative workgroup-shared tiles at the kernel-window anchor (lane-aware [Stage], the lane
    width matching [Tensorize]'s — barrier-strength uniformity). Reusing [Tensorize] inherits the
    accumulator contraction (gh-ocannl-480) unchanged: the [row × oc] fragment stays resident
-   across the innermost kernel-window loop, on Metal in simdgroup registers. Zeroed sites are
+   across the whole kernel-window chain (gh-ocannl-501), on Metal in simdgroup registers. Zeroed
+   sites are
    gated off at the seeds — the GPU leg targets fission segments, whose [Zero_out] lives in its
    own [`Zeros] segment.
 
@@ -1285,7 +1331,7 @@ let sketch_schedule ~p (opt : LL.optimized) : Sched.schedule =
    intrinsic-tile divisibility of the micro-kernel extents (like the mma matmul seeds) and the
    shared-tile footprint against the workgroup-memory limit. *)
 let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
-    (opt : LL.optimized) : (sketch_params list * Ir.Tnode.t * bool) option =
+    (opt : LL.optimized) : (sketch_params list * Ir.Tnode.t) option =
   match detect_conv opt.LL.llc with
   | None -> None
   | Some site ->
@@ -1347,14 +1393,16 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
                nest: seed them when the conv statement is alone — or has exactly one companion
                statement, the would-be epilogue tail, whose fused twin ([sk_grid] with
                [sk_epilogue]) relocates the tail write under the Grid loop (the unfused [sk_grid]
-               candidate then fails validation and is skipped; on multi-window convs the twin
-               itself is gated — see [fuse_ok] below — so both Grid candidates are skipped there).
+               candidate then fails validation and is skipped; the twin carries the Grid flavor —
+               multi-window convs included, since the whole-window contraction, gh-ocannl-501,
+               lands the store-back after the full kernel window).
                Segments with more companions (an aligned-merged segment, e.g. lenet's
                conv+bias/relu+pooling) are seeded when the default preset's aligned cross-nest
                analysis Grid-annotates the whole segment ([conv_aligned_grid]) — the pipeline then
-               adopts that whole-segment geometry. The fused twin of an aligned-grid seed fails
-               its candidate compile ([Fuse_epilogue] rejects the Grid-retyped tail nest) and is
-               skipped; fusing before annotating is a recorded follow-up. *)
+               adopts that whole-segment geometry. The fused twin of an aligned-grid seed omits
+               the preset [Retype] on the tail nest the fusion consumes (fuse-before-annotate,
+               gh-ocannl-501; see [conv_tail_loop_syms]), so the twin compiles on merged segments
+               too. *)
             let grid_ok =
               (match site.c_outer with (_, n) :: _ -> n >= 2 | [] -> false)
               && (List.length real_stmts <= 2 || Option.is_some (conv_aligned_grid site opt))
@@ -1438,14 +1486,12 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
       let seeds = cpu_seeds @ gpu_seeds in
       if List.is_empty seeds then None
       else
-        (* Fused-epilogue twins only when the store-back provably lands after the whole kernel
-           window: [contract_tensorized_accumulator] contracts across the innermost window loop
-           only, so with more than one window axis of extent > 1 the fragment store-back sits
-           inside the outer window loop(s) and [Fuse_epilogue]'s exactly-once check rejects the
-           relocation (the tail would read partial accumulations). Relocating the tail after the
-           surplus window loops — regaining fusion for 2-D convs — is a recorded follow-up. *)
-        let fuse_ok = List.count site.c_axes ~f:(fun cx -> cx.cx_nk > 1) <= 1 in
-        Some (seeds, site.c_d, fuse_ok)
+        (* Fused-epilogue twins are proposed for every conv seed (gh-ocannl-501):
+           [contract_tensorized_accumulator] contracts across the whole kernel-window chain, so
+           the fragment store-back lands after the full window unconditionally and
+           [Fuse_epilogue]'s exactly-once check passes by construction — multi-window (2-D) convs
+           included. *)
+        Some (seeds, site.c_d)
 
 let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) site :
     sketch_params list =
@@ -1716,7 +1762,7 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
     match detect_matmul opt.LL.llc with
     | None -> (
         match conv_seed_params ~is_gpu ~is_cpu ~limits opt with
-        | Some (seeds, d, fuse_ok) -> (seeds, Option.some_if fuse_ok d)
+        | Some (seeds, d) -> (seeds, Some d)
         | None -> ([], None))
     | Some site -> (matmul_seed_params ~is_gpu ~is_cpu ~limits site, Some site.m_d)
   in
