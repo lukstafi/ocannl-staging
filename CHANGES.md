@@ -32,6 +32,11 @@
   cross-framework `cifar_conv` workload exercises realistic channel counts and loss parity.
 - **Epilogue fusion**: `Schedule.Fuse_epilogue` folds eligible elementwise consumers into a
   register/tensor-core tile's store-back, with exactly-once and dependency validation.
+- **Conv epilogue twins** (gh-ocannl-501): the tensorized accumulator contraction spans the
+  whole kernel-window chain (one fragment init/store per output tile instead of per outer-window
+  iteration), so the fused-epilogue twins of the conv sketches apply to 2-D convs; on
+  aligned-merged segments the twin omits the preset `Grid` retype on the tail nest it consumes
+  (fuse-before-annotate), extending the twins to conv+multi-companion segments.
 - **Launch-time symbolic extents** (gh-ocannl-490): bounded symbolic shape axes lower to runtime
   extent parameters, so one compiled routine and schedule-cache entry can serve multiple batch
   or sequence lengths. Allocation and analysis use the declared maximum; autotuning measures at
