@@ -19,6 +19,13 @@ type optop =
   | Swap of { outer : Indexing.symbol; inner : Indexing.symbol }
   | Retype of { axis : Indexing.symbol; ty : Low_level.axis_type }
   | Unroll of { axis : Indexing.symbol; materialize : bool }
+  | Partition of {
+      axis : Indexing.symbol;  (** The loop to partition, identified by its index symbol. *)
+      breakpoints : int list;
+          (** Strictly increasing segment starts, each strictly inside the loop range. *)
+      segment_indices : Indexing.symbol list;
+          (** Fresh symbols, one per segment ([length breakpoints + 1]); see {!partition}. *)
+    }
   | Stage of {
       source : Tn.t;
       tile_loops : Indexing.symbol list;
@@ -44,6 +51,12 @@ type schedule = optop list [@@deriving sexp_of]
 let split ~axis ~factor ~outer ~inner =
   let outer_index = Indexing.get_symbol () and inner_index = Indexing.get_symbol () in
   (Split { axis; factor; outer; inner; outer_index; inner_index }, outer_index, inner_index)
+
+let partition ~axis ~breakpoints =
+  let segment_indices =
+    List.init (List.length breakpoints + 1) ~f:(fun _ -> Indexing.get_symbol ())
+  in
+  (Partition { axis; breakpoints; segment_indices }, segment_indices)
 
 let tensorize ~i ~j ~k ~simd_width =
   let lane = Indexing.get_symbol () in
@@ -362,6 +375,40 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
                  @@ map_code
                       ~fidx:(subst_axis_index ~sym:axis ~by:{ terms = []; offset = v })
                       fc.body)))
+  | Partition { axis; breakpoints; segment_indices } ->
+      (* gh-ocannl-508: index-set splitting. Segment ranges stay absolute (no rebasing to 0), so the
+         substitution is a pure rename of the loop symbol and no index arithmetic changes; each
+         segment's narrowed range then lets [apply]'s trailing [simplify_llc] interval-fold the
+         guards it decides — statement [If]s and scalar [Where] range guards alike — giving
+         guard-free specialized segment nests without any specialization logic here. *)
+      rewrite_loop ~what:"Schedule.Partition" ~sym:axis llc ~f:(fun fc ->
+          if not (equal_axis_type fc.axis Serial) then
+            invalid_arg
+              ("Schedule.Partition: loop " ^ Indexing.symbol_ident axis ^ " must be Serial");
+          if List.is_empty breakpoints then
+            invalid_arg "Schedule.Partition: breakpoints must be non-empty";
+          if List.length segment_indices <> List.length breakpoints + 1 then
+            invalid_arg "Schedule.Partition: needs one segment index per segment (see {!partition})";
+          let starts = fc.from_ :: breakpoints in
+          let stops = List.map breakpoints ~f:(fun b -> b - 1) @ [ fc.to_ ] in
+          if not (List.for_all2_exn starts stops ~f:(fun lo hi -> lo <= hi)) then
+            invalid_arg
+              (Printf.sprintf
+                 "Schedule.Partition: breakpoints must be strictly increasing and strictly inside \
+                  the loop range [%d, %d]"
+                 fc.from_ fc.to_);
+          unflat_lines
+            (List.map3_exn segment_indices starts stops ~f:(fun s lo hi ->
+                 (* Sibling segments duplicate the body: refresh scalar-local scope ids exactly as
+                    materializing [Unroll] does, so copies do not redeclare the same scope id. *)
+                 let body =
+                   refresh_scopes
+                   @@ map_code
+                        ~fidx:(subst_axis_index ~sym:axis ~by:{ terms = [ (1, s) ]; offset = 0 })
+                        fc.body
+                 in
+                 For_loop
+                   { index = s; from_ = lo; to_ = hi; body; trace_it = fc.trace_it; axis = Serial })))
   | Tensorize { i; j; k; lane; simd_width } ->
       (* docs/proposals/tensorize-mma.md §3: replace the innermost serial [i × j × k] matmul
          micro-kernel — whose body is a single accumulation [d[...] += a[...] * b[...]] (plain-add
@@ -2179,7 +2226,7 @@ let apply_opt_op (opt : Low_level.optimized) (op : optop) : Low_level.optimized 
   | Privatize { target; over } -> apply_privatize ~target ~over opt
   | Tensorize _ -> apply_tensorize op opt
   | Fuse_epilogue { target; shared } -> apply_fuse_epilogue ~target ~shared opt
-  | (Split _ | Swap _ | Retype _ | Unroll _ | Expand_zero _) as op ->
+  | (Split _ | Swap _ | Retype _ | Unroll _ | Partition _ | Expand_zero _) as op ->
       { opt with llc = apply_op opt.Low_level.llc op }
 
 let apply ?(static_indices = []) (sched : schedule) (opt : Low_level.optimized) :
@@ -2192,7 +2239,10 @@ let apply ?(static_indices = []) (sched : schedule) (opt : Low_level.optimized) 
        ran, so re-run it here; and when a transform duplicated code, re-run CSE + hoisting too. *)
     let llc = Low_level.simplify_llc static_indices llc in
     let llc =
-      if List.exists sched ~f:(function Unroll { materialize = true; _ } -> true | _ -> false)
+      if
+        List.exists sched ~f:(function
+          | Unroll { materialize = true; _ } | Partition _ -> true
+          | _ -> false)
       then Low_level.hoist_cross_statement_cse @@ Low_level.eliminate_common_subexpressions llc
       else llc
     in
@@ -2241,6 +2291,109 @@ let mentions_axis axis (idx : Indexing.axis_index) =
           Indexing.equal_symbol s axis)
   | Indexing.Concat syms -> List.exists syms ~f:(Indexing.equal_symbol axis)
   | Indexing.Fixed_idx _ | Indexing.Sub_axis -> false
+
+(* gh-ocannl-508: derive the static affine breakpoints of the [axis] loop from the guards already
+   present in its body — statement [If] conditions and scalar [Where] conditions (the virtualizer's
+   per-component range guards of an inlined concatenation, [Split]'s remainder guard, symbolic
+   extent guards with the extent already substituted). A comparison whose two sides differ by
+   [k*axis + off] with everything else constant flips truth value at exactly one point of the axis
+   range; partitioning at the collected points makes every such guard interval-decided within each
+   segment, so [apply]'s trailing simplify erases them. *)
+let partition_breakpoints ~axis (llc : Low_level.t) : int list =
+  let open Low_level in
+  match find_loop axis llc with
+  | Some (For_loop { from_; to_; body; _ }) ->
+      let points = ref [] in
+      (* Affine view [Some (k, off)] of a comparison operand as [k*axis + off]; [None] when the
+         operand mentions other symbols or is not integer-affine. *)
+      let affine_view (sc : scalar_t) : (int * int) option =
+        let of_terms symbols offset =
+          let symbols = Indexing.coalesce_affine_terms symbols in
+          if List.for_all symbols ~f:(fun (_, s) -> Indexing.equal_symbol s axis) then
+            Some (List.sum (module Int) symbols ~f:fst, offset)
+          else None
+        in
+        match sc with
+        | Embed_index (Indexing.Iterator s) when Indexing.equal_symbol s axis -> Some (1, 0)
+        | Embed_index (Indexing.Fixed_idx i) -> Some (0, i)
+        | Embed_index (Indexing.Affine { symbols; offset }) -> of_terms symbols offset
+        | Constant c when Float.is_integer c -> Some (0, Float.to_int c)
+        | _ -> None
+      in
+      (* Division rounding towards -inf resp. +inf; [b > 0]. *)
+      let fdiv a b = if a >= 0 then a / b else -((-a + b - 1) / b) in
+      let cdiv a b = if a >= 0 then (a + b - 1) / b else -(-a / b) in
+      let rec cond (sc : scalar_t) =
+        match sc with
+        | Binop ((Ops.And | Ops.Or), (a, _), (b, _)) ->
+            cond a;
+            cond b
+        | Binop (Ops.Cmplt, (a, _), (b, _)) -> (
+            match Option.both (affine_view a) (affine_view b) with
+            | Some ((ka, oa), (kb, ob)) ->
+                (* [a < b] iff [k*axis + off < 0]. *)
+                let k = ka - kb and off = oa - ob in
+                if k > 0 then (* True iff [axis < -off/k]: record the first false point. *)
+                  points := cdiv (-off) k :: !points
+                else if k < 0 then (* True iff [axis > off/(-k)]: record the first true point. *)
+                  points := (fdiv off (-k) + 1) :: !points
+            | None -> ())
+        | Binop ((Ops.Cmpeq | Ops.Cmpne), (a, _), (b, _)) -> (
+            match Option.both (affine_view a) (affine_view b) with
+            | Some ((ka, oa), (kb, ob)) ->
+                let k = ka - kb and off = oa - ob in
+                (* Equality holds at a single point (when [k] divides [off]): both edges. *)
+                if k <> 0 && off % abs k = 0 then
+                  let q = -off / k in
+                  points := q :: (q + 1) :: !points
+            | None -> ())
+        | _ -> ()
+      in
+      let rec go (llc : t) =
+        match llc with
+        | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier
+          ->
+            ()
+        | Seq (a, b) ->
+            go a;
+            go b
+        | For_loop { body; _ } -> go body
+        | If { cond = c, _; body } ->
+            cond c;
+            go body
+        | Tile_mma { fallback; _ } -> go fallback
+        | Set { llsc; _ } | Set_local (_, llsc) -> scan_scalar llsc
+        | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+            scan_scalar v;
+            scan_scalar llsc
+        | Set_from_vec { arg = a, _; _ } -> scan_scalar a
+      and scan_scalar (sc : scalar_t) =
+        match sc with
+        | Ternop (Ops.Where, (c, _), (t, _), (e, _)) ->
+            cond c;
+            scan_scalar t;
+            scan_scalar e
+        | Ternop (_, (a, _), (b, _), (c, _)) ->
+            scan_scalar a;
+            scan_scalar b;
+            scan_scalar c
+        | Binop (_, (a, _), (b, _)) ->
+            scan_scalar a;
+            scan_scalar b
+        | Unop (_, (a, _)) -> scan_scalar a
+        | Local_scope { body; _ } -> go body
+        | Get_dynamic { dyn_value = v, _; _ } -> scan_scalar v
+        | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ ->
+            ()
+      in
+      go body;
+      List.filter !points ~f:(fun b -> from_ < b && b <= to_)
+      |> List.dedup_and_sort ~compare:Int.compare
+  | Some _ -> assert false (* [find_loop] only returns [For_loop]s. *)
+  | None ->
+      invalid_arg
+        ("Schedule.partition_breakpoints: no statement-level For_loop with index "
+       ^ Indexing.symbol_ident axis)
 
 let acc_interpretable (a : _ Affine.access) =
   (not a.Affine.a_dynamic)
@@ -2491,6 +2644,10 @@ let op_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
         loops_independent opt ~syms:[ axis ] ~cross_nest:false ~licensed:rmw_license
       else Op_legal
   | Unroll _ -> Op_legal
+  | Partition _ ->
+      (* Pure index-set reindexing: the segments run in the original order over the same points,
+         with no hardware annotation and no reordering. *)
+      Op_legal
   | Swap { outer; inner } -> (
       (* Interchange reorders iterations; the optop contract licenses it for the
          associative-commutative accumulation patterns lowering emits (the rmw self-pairs). Beyond
