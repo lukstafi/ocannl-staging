@@ -38,7 +38,9 @@ opam install cudajit  # for CUDA backend
 opam install hipjit   # for AMD HIP backend
 ```
 
-**Worktrees**: place new ones outside the repo — they need none of what follows. A worktree nested inside the repo (`.claude/worktrees/`, the Claude Code default) makes dune silently resolve the PARENT checkout as the project root: from those, pass `--root .` to dune commands run from the worktree root, and promote with `dune promotion apply` (`dune promote` rejects `--root`).
+**Worktrees**: place new ones outside the repo — they need none of what follows. A worktree nested inside the repo (`.claude/worktrees/`, the Claude Code default) makes dune silently resolve the PARENT checkout as the project root: from those, pass `--root .` to dune commands run from the worktree root, and promote with `dune promotion apply` (`dune promote` rejects `--root`) — or just use `tools/promote.sh`, which does both.
+
+**Windows shells**: `opam env --shell=sh` emits cygwin-style paths that break under Git Bash (MSYS), so a Git Bash session without a primed environment gets a half-working toolchain (dune found but linking fails with `cygpath: error converting ... -lpthread`). Source `tools/opam-env.sh` first — it rewrites the paths for MSYS and works from any POSIX shell. On Windows, link steps also flood stderr with benign binutils warnings (`Warning: corrupt .drectve at end of def file`, from MSVC-produced import libraries like ROCm's/CUDA's); `tools/dune-quiet.sh <dune args>` runs dune with exactly those lines filtered, preserving the exit status.
 
 **Formatting**: the repo is not fully ocamlformat-clean, and CI does not enforce formatting — do NOT run `dune fmt` as part of feature work (it reformats the entire repo and pollutes the diff; recover from an accidental sweep with `git restore .`). Match the surrounding style by hand; to check just your own lines, diff against `_build/default/<dir>/.formatted/<file>`. Formatting-state updates land as standalone formatting commits, paired with updating `.ocamlformat-ignore` — ppx-expectation files (`test/ppx/*_expected.ml`, compared against pretty-printed ppx output) must stay unformatted, so add new ones to that list.
 
@@ -119,7 +121,7 @@ opam install hipjit   # for AMD HIP backend
 **Test Types**:
 - **Inline tests**: Files included in library `modules` field with `inline_tests` stanza (e.g., `test_threefry4x32.ml` in `operations_tutorials` library)
 - **Standalone tests**: Files with dedicated `test` stanza and corresponding `.expected` files (e.g., `threefry4x32_demo`)
-- Use `dune promote` to accept test output changes
+- Use `dune promote` to accept test output changes (on Windows or in a nested worktree, prefer `tools/promote.sh` — it applies the promotion with the right root and strips CRLF from promoted goldens)
 - A few `%expect_test` blocks capture exception backtraces that hard-code `file:line` (e.g. `test/operations/primitive_ops.ml` embeds `context.ml` line numbers). Any edit that shifts lines in such a file forces a line-number-only re-promote — benign noise, not a behavior change; promote it in the same shell as the failing run (the `.ml.corrected` can vanish between runs)
 - For optimizer passes that change *what value a cell holds* (virtualization guards, index solving, accumulation/init elision), a structural test on the emitted op tree is necessary but NOT sufficient — also assert on executed output vs. a materialized/reference run (`Context.compile`/`run`/`get_values`); a pass has shipped green structural checks while computing all zeros
 - Backend codegen snapshots (e.g. `.cu.expected` files, `test_cuda_pool_offset.expected`) go stale when codegen changes land without that backend's hardware available to re-record them — expect to re-promote such snapshots when the hardware next runs the suite
@@ -133,9 +135,10 @@ opam install hipjit   # for AMD HIP backend
   * Tests that enable `output_debug_files_in_build_directory` in one directory all execute from the same `_build` directory and share `build_files/`, and dune runs them concurrently — always give kernels/tensors a test-unique name prefix (like the existing `af_`, `ops_`, `smem_` conventions), otherwise same-named generated sources get torn by concurrent writers
 
 **Windows portability for `.expected` tests**:
-- `dune promote` on Windows writes CRLF line endings into `.expected` files (the test exe's stdout is text-mode); after promoting, normalize with `sed -i 's/\r$//' <file>`. PowerShell `Set-Content`/`Out-File` also write CRLF — edit `.expected` files with bash tools instead
+- `dune promote` on Windows writes CRLF line endings into `.expected` files (the test exe's stdout is text-mode). `.gitattributes` pins `*.expected` (and `test/ppx/*_expected.ml`) to LF, so git normalizes them on commit and promote-introduced CRs stay out of diffs; promoting via `tools/promote.sh` strips them from the working tree too. PowerShell `Set-Content`/`Out-File` also write CRLF — edit `.expected` files with bash tools instead
 - The Windows C runtime prints 3-digit float exponents (`e+018` where Linux prints `e+18`) — format floats destined for `.expected` files with `Ir.Ndarray.concise_float ~prec` (normalizes exponents portably) instead of `%g`/`%e`
 - The Windows C runtime rounds representable decimal ties away from zero while glibc rounds to even (`%.1f` of `2.25` prints `2.3` on Windows, `2.2` on Linux) — avoid tie values in test data, or print with OCaml's `%h` hex-float format, which sidesteps decimal rounding entirely
+- The `test_utils` library (`test/support/test_utils.ml`) packages these rules as portable-by-construction printers (`print_float`/`print_floats`/`hex_float`, plus `set_binary_stdout` for stubs that echo a golden file byte-for-byte) — add `test_utils` to a new test's `(libraries ...)` instead of re-deriving them
 
 **Module Paths and Common APIs**:
 
