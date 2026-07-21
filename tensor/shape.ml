@@ -1233,7 +1233,10 @@ let%debug4_sexp get_inequalities ?(for_projections = false)
                constr =
                  Total_elems
                    {
-                     numerator = Row.Strided_var { coeff; var; denom = 1 };
+                     (* [round_up]: the result total need not be a multiple of [coeff]; the counter
+                        gets [ceil(total / coeff)] blocks and the last block is consumed partially
+                        (tail-peeled in [Assignments] lowering). *)
+                     numerator = Row.Strided_var { coeff; var; denom = 1; round_up = true };
                      divided_by = [];
                      keep_axis = false;
                    };
@@ -1558,6 +1561,7 @@ let set_equal delayed_ref1 delayed_ref2 =
                         coeff = Utils.safe_lazy "set_equal_dim_row" (fun () -> 1);
                         var = dim_var;
                         denom = 1;
+                        round_up = false;
                       };
                   divided_by = [];
                   keep_axis = false;

@@ -134,8 +134,17 @@ type dim_constraint = Unconstrained_dim | At_least_dim of int
 
 type total_elems =
   | Num_elems of int
-  | Strided_var of { coeff : int Utils.safe_lazy; var : dim_var; denom : int }
-      (** The total number of elements is (coefficient * variable) / denominator. *)
+  | Range_elems of { lo : int; hi : int }
+      (** The total is any value in the inclusive range [lo..hi]. Arises only from substituting the
+          solved variable of a round-up [Strided_var] (the leftover slack window); when the total is
+          otherwise unconstrained, late stages prefer [hi]. *)
+  | Strided_var of { coeff : int Utils.safe_lazy; var : dim_var; denom : int; round_up : bool }
+      (** The total number of elements is (coefficient * variable) / denominator. When [round_up],
+          the variable is instead the ceiling of the division: solving for the variable from a known
+          total [n] gives [var = ceil(n * denom / coeff)], i.e. the constraint tolerates a final
+          partial block ([coeff * (var - 1) < n * denom <= coeff * var]). Minted only by the
+          [Uint4x32_to_prec] constraint, where the last 128-bit random block may be consumed
+          partially. *)
 [@@deriving equal, hash, compare, sexp_of]
 
 type row_constraint =

@@ -259,11 +259,17 @@ output's total elements by a precision-dependent coefficient. It emits:
 
 ```text
 Rows_constr([A_B, A_O, A_I], Exact [v])
-Rows_constr([C_B, C_O, C_I], Total_elems(Strided_var(coeff, v, denom=1)))
+Rows_constr([C_B, C_O, C_I], Total_elems(Strided_var(coeff, v, denom=1, round_up)))
 ```
 
 The coefficient may be forced only in a later stage, which is why
-`Strided_var` stores a lazy coefficient.
+`Strided_var` stores a lazy coefficient. The `round_up` mode (minted only
+here) makes the constraint total over shapes: solving for `v` from a known
+output total `N` gives `v = ceil(N / coeff)` instead of failing when `N` is
+not divisible; once `v` is solved, the residual constraint on the output rows
+becomes a `Range_elems` slack window `coeff*(v-1) < N <= coeff*v` (with `hi`
+preferred when the total is otherwise unconstrained). Lowering peels the last
+counter iteration into a shorter `Set_from_vec` store for the partial block.
 
 ### 3.3 Binary and Ternary Broadcast Operations
 
