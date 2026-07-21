@@ -198,6 +198,14 @@ let tune_placements ?beam_width ?rounds ?repeats ?timing_ctx ?report ctx loss co
 
 module Lazy = Utils.Lazy
 
+(* The untuned compile of the recipes, behind the gh-ocannl-491 config gate: with
+   [model_default_schedule=true], the default schedule is picked by the analytic cost model
+   ({!Autotune.model_default} — zero timing runs, advisory, falls back to the ordinary default
+   pipeline); otherwise plain [Context.compile]. *)
+let compile_with_model_gate ctx comp bindings =
+  if Lazy.force Autotune.model_default_enabled then Autotune.model_default ctx comp bindings
+  else Context.compile ctx comp bindings
+
 let%track7_sexp to_routine (ctx : Context.t) ?(output_cd_file = false) bindings comp =
   if output_cd_file then (
     let name = Asgns.get_name_exn comp.Asgns.asgns in
@@ -214,7 +222,7 @@ let%track7_sexp to_routine (ctx : Context.t) ?(output_cd_file = false) bindings 
   (* Materialize the guessed output nodes so they persist across calls and are inspectable on demand
      via the context (gh-ocannl-333). *)
   Set.iter (snd @@ Asgns.collect_nodes_guess_output comp.Asgns.asgns) ~f:set_materialized;
-  let _ctx, routine = Context.compile ctx comp bindings in
+  let _ctx, routine = compile_with_model_gate ctx comp bindings in
   (* Return just the routine for backward compatibility - ctx is discarded here *)
   routine
 
@@ -282,7 +290,7 @@ let%track3_sexp run_once ?(output_cd_file = false) ?(skip_init = false) ?reinit_
   let ctx =
     if skip_init || Set.is_empty t.params then ctx else init_params ?reinit_all ctx bindings t
   in
-  let ctx, routine = Context.compile ctx update bindings in
+  let ctx, routine = compile_with_model_gate ctx update bindings in
   Context.run ctx routine
 
 (** Context-based versions of training functions for the new simplified API *)

@@ -263,6 +263,15 @@ autotune_keep_fraction=1
 # calibration lines also go to stderr, human-readable.
 autotune_calibration_file=
 
+# If true, untuned compiles issued by the recipes (`Train.to_routine`, `Train.run_once` and its
+# wrappers, the benchmark runners' untuned arms) pick the default schedule with the analytic
+# cost model (`Autotune.model_default`, gh-ocannl-491): the untuned default pipeline and the
+# sketch families are scored with the roofline model and the best is applied — zero timing runs,
+# one backend compile. Advisory: requires envelope constants (the backend's advisory values or
+# the model_peak_* overrides below), ties go to the default pipeline, and any scoring or
+# application failure falls back to it.
+model_default_schedule=false
+
 # Overrides the backend's advisory peak arithmetic throughput, in FLOP/s (single precision, FMA
 # counted as two operations), used as the compute leg of the analytic cost model's roofline
 # envelope. Calibrated per-machine values (fit from autotune_calibration_file data) beat the

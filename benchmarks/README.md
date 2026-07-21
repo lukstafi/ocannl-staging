@@ -130,6 +130,14 @@ tinygrad's CPU device JIT-compiles kernels with `clang`; on a machine without cl
   whose `compile_s` should reflect a from-scratch search.
 - Timing on a laptop: prefer the p50 of the per-step synced times; rerun and compare rounds
   if thermals are suspect. Keep timing out of CI; the parity gate is the CI-worthy part.
+- Untuned-default before/after (gh-ocannl-491): the model-picked default is config-gated, so
+  the comparison is the same untuned benchmark run twice — once as-is (the ordinary default
+  pipeline) and once with `--ocannl_model_default_schedule=true` (the analytic cost model
+  scores the default pipeline and the sketch families inside the compile and applies the
+  argmin; zero timing runs, so `compile_s` stays a compile cost). Both runs are untuned in the
+  tuned-vs-untuned sense above — do not mix them into a `BENCH_TUNE=1` comparison cell. On
+  backends without advisory envelope constants (the C backends), set `--ocannl_model_peak_flops`
+  / `--ocannl_model_peak_memory_bandwidth` or the gate falls back to the ordinary default.
 
 ## Debugging a parity failure
 

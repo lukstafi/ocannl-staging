@@ -93,6 +93,9 @@ let () =
       (* Placement A/B: tune the default (virtual + promotion) graph and the materialize-all graph,
          keep the measured winner. *)
       Train.tune_placements ~rounds:0 ~timing_ctx:scratch ctx batch_loss step_comp bindings
+    else if Lazy.force Autotune.model_default_enabled then
+      (* gh-ocannl-491: the model-picked untuned default (config [model_default_schedule=true]). *)
+      Autotune.model_default ctx step_comp bindings
     else Context.compile ctx step_comp bindings
   in
   let compile_s = Unix.gettimeofday () -. t0 in

@@ -139,6 +139,7 @@ let known_config_keys =
       (* Analytic cost model (gh-ocannl-491) *)
       "autotune_keep_fraction";
       "autotune_calibration_file";
+      "model_default_schedule";
       "model_peak_flops";
       "model_peak_memory_bandwidth";
       (* Identifiers and other *)

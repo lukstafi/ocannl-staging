@@ -222,6 +222,38 @@ val model_prefilter :
     kept, so the outcome is independent of enumeration order). The identity when
     [keep_fraction >= 1]. Exposed for tests. *)
 
+type model_choice = {
+  mc_label : string;
+      (** ["default"], or the winning candidate's spec label (matching the [autotune_log] labels).
+      *)
+  mc_model_ms : float option;
+      (** The winner's roofline lower bound in ms — a ranking score, not a runtime prediction;
+          [None] when selection did not run. *)
+  mc_scored : int;  (** Candidates with model coverage (the default pipeline included). *)
+  mc_skipped : int;  (** Candidates without model coverage, excluded from the ranking. *)
+}
+
+val model_default_enabled : bool Lazy.t
+(** Config [model_default_schedule]: recipe-level untuned compiles ({!Train.to_routine},
+    {!Train.run_once}, the benchmark runners) route through {!model_default} instead of
+    {!Context.compile}. *)
+
+val model_default :
+  ?report:(model_choice -> unit) ->
+  Context.t ->
+  Ir.Assignments.comp ->
+  Ir.Indexing.unit_bindings ->
+  Context.t * Context.routine
+(** A drop-in for {!Context.compile} that raises the untuned floor (gh-ocannl-491 task 3): inside
+    the compile's own transform seam, the untuned default pipeline and the sketch families
+    (whole-routine, and per-fission-segment substitutions when the default fissions) are scored
+    with the roofline model, and the model-argmin schedule is applied — zero measurement, one
+    backend compile. Advisory by construction: a candidate without model coverage is never picked
+    over the default, ties go to the default, and missing envelope constants, a disabled default
+    annotator ({!Ir.Schedule.automatic_schedule_active}), or any scoring/application failure fall
+    back to the ordinary default pipeline. Unlike {!tune}, nothing is executed and no cache is
+    involved — results depend only on the computation, backend, and envelope constants. *)
+
 val set_test_bindings : Context.routine -> unit
 (** Binds representative values for timing runs: ranged static indices at [range / 2], and gh-490
     symbolic extents at their upper bound [range] (the schedule-cache identity is

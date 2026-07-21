@@ -2414,6 +2414,201 @@ let extend_spec (elem : compiled) (u : unit_gen) (op : SC.saved_optop) : spec op
                    if String.equal k key then (k, u.u_saved @ [ op ]) else (k, s)))))
   | _ -> None
 
+(** {2 Model-picked untuned defaults (gh-ocannl-491 task 3)}
+
+    A drop-in for [Context.compile] that raises the untuned floor: with no measurement at all, the
+    default pipeline and the sketch families are scored with the roofline model inside the compile's
+    own transform seam, and the model-argmin schedule is applied. Advisory by construction — a
+    candidate without model coverage is never picked over the default, ties go to the default, and
+    any scoring or application failure falls back to the ordinary default pipeline. *)
+
+type model_choice = {
+  mc_label : string;
+      (** ["default"] or the winning candidate's spec label (matching {!tune}'s [autotune_log]
+          labels). *)
+  mc_model_ms : float option;
+      (** The winner's roofline lower bound in ms — a ranking score, not a runtime prediction;
+          [None] when selection did not run (no envelope constants, automatic scheduling disabled,
+          or the default itself had no model coverage). *)
+  mc_scored : int;  (** Candidates with model coverage (the default pipeline included). *)
+  mc_skipped : int;  (** Candidates without model coverage, excluded from ranking. *)
+}
+
+let model_default_enabled =
+  lazy (Utils.get_global_flag ~default:false ~arg_name:"model_default_schedule")
+
+let model_default ?report ctx comp bindings =
+  let backend = Context.backend_name ctx in
+  let is_gpu = Sched.backend_is_gpu backend and is_cpu = Sched.backend_is_cpu backend in
+  let limits = Context.hardware_limits ctx in
+  let static_indices = Idx.bound_symbols bindings in
+  let peak_flops, peak_memory_bandwidth = envelope ~limits in
+  let emit r = Option.iter report ~f:(fun f -> f r) in
+  let no_selection = { mc_label = "default"; mc_model_ms = None; mc_scored = 0; mc_skipped = 0 } in
+  if
+    (Option.is_none peak_flops && Option.is_none peak_memory_bandwidth)
+    || not (Sched.automatic_schedule_active ~backend_name:backend)
+  then (
+    emit no_selection;
+    Context.compile ctx comp bindings)
+  else (
+    let choice = ref no_selection in
+    let transforms (opt : LL.optimized) : LL.optimized list =
+      let n_scored = ref 0 and n_skipped = ref 0 in
+      let score opts =
+        match
+          summaries_roofline ~peak_flops ~peak_memory_bandwidth
+            (List.map opts ~f:(fun o -> CM.analyze o.LL.llc))
+        with
+        | Some s ->
+            Int.incr n_scored;
+            Some s
+        | None ->
+            Int.incr n_skipped;
+            None
+      in
+      let default_segs () =
+        Sched.maybe_default_schedules ~backend_name:backend ~limits ~static_indices opt
+      in
+      let preset seg = if is_gpu then Sched.default_gpu ~limits seg else Sched.default_cpu seg in
+      let zero_sched tns = if is_gpu then Sched.zero_expansion ~limits tns else [] in
+      let seg_key seg = SC.digest (SC.canonicalize ~static_indices ~with_placements:false seg) in
+      let label, model_s, action =
+        try
+          (* The untuned default pipeline, scored on a hermetic copy — it is both the anchor
+             candidate and the fallback. *)
+          let default_scratch =
+            Sched.maybe_default_schedules ~backend_name:backend ~limits ~static_indices
+              (scratch_of opt)
+          in
+          let default_score = score default_scratch in
+          match default_score with
+          | None ->
+              (* No coverage of the default itself: nothing to honestly compare against. *)
+              ("default", None, `Default)
+          | Some ds ->
+              (* Whole-routine sketch candidates. A candidate without coverage is skipped — it is
+                 never picked over the default without a measured run ({!tune} covers that). *)
+              let whole =
+                List.filter_map (sketch_seed_params ~is_gpu ~is_cpu ~limits opt) ~f:(fun p ->
+                    match Sched.apply ~static_indices (sketch_schedule ~p opt) (scratch_of opt) with
+                    | exception _ -> None
+                    | post -> Option.map (score [ post ]) ~f:(fun s -> (p, s)))
+              in
+              let contenders =
+                List.map whole ~f:(fun (p, s) ->
+                    (spec_label (Whole (W_sketch p)), s, `Whole p))
+              in
+              (* Per-segment sketch substitution over the default fission segmentation (only when
+                 the default actually fissioned; otherwise the whole-routine sketches cover the
+                 site). Mirrors [tune]'s [F_sketch] flavor: segments keyed by their structural
+                 pre-schedule digest, a key miss degrading to the default preset. *)
+              let fiss =
+                if List.length default_scratch <= 1 then None
+                else
+                  match
+                    Sched.fission_scheduled ~promote_locals:is_gpu ~preset ~zero_sched
+                      ~static_indices (scratch_of opt)
+                  with
+                  | exception _ -> None
+                  | tuples ->
+                      let entries =
+                        List.filter_map tuples ~f:(fun (kind, pre, _sched, post) ->
+                            match kind with
+                            | `Zeros | `Solo -> None
+                            | `Normal -> (
+                                let base_score = score [ post ] in
+                                let best_sketch =
+                                  List.filter_map (sketch_seed_params ~is_gpu ~is_cpu ~limits pre)
+                                    ~f:(fun p ->
+                                      match
+                                        Sched.apply ~static_indices (sketch_schedule ~p pre)
+                                          (scratch_of pre)
+                                      with
+                                      | exception _ -> None
+                                      | sp -> Option.map (score [ sp ]) ~f:(fun s -> (p, s)))
+                                  |> List.min_elt ~compare:(fun (_, a) (_, b) -> Float.compare a b)
+                                in
+                                match (base_score, best_sketch) with
+                                | Some bs, Some (p, s) when Float.(s < bs) -> Some (seg_key pre, p)
+                                | _ -> None))
+                      in
+                      if List.is_empty entries then None
+                      else
+                        let subst_preset seg =
+                          match List.Assoc.find entries ~equal:String.equal (seg_key seg) with
+                          | Some p -> sketch_schedule ~p seg
+                          | None -> preset seg
+                        in
+                        (* Score the substituted pipeline whole, so it competes on the same
+                           footing as the other candidates. *)
+                        (match
+                           Sched.fission_scheduled ~promote_locals:is_gpu ~preset:subst_preset
+                             ~zero_sched ~static_indices (scratch_of opt)
+                         with
+                        | exception _ -> None
+                        | tuples2 ->
+                            let posts = List.map tuples2 ~f:(fun (_, _, _, post) -> post) in
+                            Option.map (score posts) ~f:(fun s -> (entries, s)))
+              in
+              let contenders =
+                contenders
+                @
+                match fiss with
+                | Some (entries, s) -> [ (spec_label (Fiss (F_sketch entries)), s, `Fiss entries) ]
+                | None -> []
+              in
+              (* Argmin with ties to the default: the model only displaces the honest default on a
+                 strict improvement. *)
+              let best =
+                List.min_elt contenders ~compare:(fun (_, a, _) (_, b, _) -> Float.compare a b)
+              in
+              (match best with
+              | Some (lbl, s, act) when Float.(s < ds) -> (lbl, Some s, act)
+              | _ -> ("default", Some ds, `Default))
+        with exn ->
+          logf "model_default: scoring failed (%s); using the default pipeline"
+            (Exn.to_string exn);
+          ("default", None, `Default)
+      in
+      choice :=
+        {
+          mc_label = label;
+          mc_model_ms = Option.map model_s ~f:(fun s -> s *. 1e3);
+          mc_scored = !n_scored;
+          mc_skipped = !n_skipped;
+        };
+      let apply_action () =
+        match action with
+        | `Default -> default_segs ()
+        | `Whole p -> [ Sched.apply ~static_indices (sketch_schedule ~p opt) opt ]
+        | `Fiss entries ->
+            let subst_preset seg =
+              match List.Assoc.find entries ~equal:String.equal (seg_key seg) with
+              | Some p -> sketch_schedule ~p seg
+              | None -> preset seg
+            in
+            List.map
+              (Sched.fission_scheduled ~promote_locals:is_gpu ~preset:subst_preset ~zero_sched
+                 ~static_indices opt)
+              ~f:(fun (_, _, _, post) -> post)
+      in
+      match apply_action () with
+      | segs ->
+          logf "model_default: chose %s (model %s; %d scored, %d without coverage)" label
+            (match model_s with Some s -> Printf.sprintf "%.6f ms" (s *. 1e3) | None -> "n/a")
+            !n_scored !n_skipped;
+          segs
+      | exception exn ->
+          logf "model_default: winner %s FAILED to apply (%s); using the default pipeline" label
+            (Exn.to_string exn);
+          choice := { no_selection with mc_scored = !n_scored; mc_skipped = !n_skipped };
+          default_segs ()
+    in
+    let result = Context.compile ~lowered_transforms:transforms ctx comp bindings in
+    emit !choice;
+    result)
+
 (** {2 The search} *)
 
 let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fraction ?timing_ctx
