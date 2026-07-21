@@ -694,7 +694,7 @@ that:</p>
 <tr>
 <td><code>uniform ()</code></td>
 <td>Uniform [0,1) using global seed</td>
-<td>Efficient, requires shape divisibility</td>
+<td>Efficient, works with any shape</td>
 </tr>
 <tr>
 <td><code>uniform1 ()</code></td>
@@ -741,11 +741,15 @@ shaped tensors) 2. <strong>Explicit dimensions</strong> via
 <span id="cb21-6"><a href="#cb21-6" aria-hidden="true" tabindex="-1"></a>      <span class="co">(* Shape is inferred from pointwise comparison with x *)</span></span>
 <span id="cb21-7"><a href="#cb21-7" aria-hidden="true" tabindex="-1"></a>      x *. (!.rate &lt; uniform_at !@train_step) /. (<span class="fl">1.0</span> - !.rate)</span>
 <span id="cb21-8"><a href="#cb21-8" aria-hidden="true" tabindex="-1"></a>  | _ -&gt; x</span></code></pre></div>
-<p><strong>Note on shape constraints</strong>: The <code>uniform</code>
-function (without <code>1</code>) requires the total number of elements
-to be appropriately divisible, e.g. by 4 for single precision (due to
-<code>uint4x32</code> efficiency). Use <code>uniform1</code> for
-arbitrary shapes at the cost of some efficiency.</p>
+<p><strong>Note on shapes</strong>: The packed <code>uniform</code>
+function (without <code>1</code>) is total over shapes: element
+<code>i</code> of the result is lane <code>i mod k</code> of the 128-bit
+random block <code>i / k</code>, where
+<code>k = 16 / bytes-per-element</code> (4 for single precision). When
+the total element count is not a multiple of <code>k</code>, the final
+block is consumed partially, so growing a tensor keeps the existing
+prefix of its value stream unchanged. <code>uniform1</code> remains
+available as a pointwise variant (one value per 128-bit block).</p>
 <h3 id="kaiming-and-xavier-scaling-operations">Kaiming and Xavier
 Scaling Operations</h3>
 <p>For weight matrices, OCANNL provides scaled initialization functions
