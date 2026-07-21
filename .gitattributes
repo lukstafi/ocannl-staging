@@ -5,3 +5,7 @@
 # keeps promote-introduced CRs out of `git diff`/`git add`.
 *.expected text eol=lf
 test/ppx/*_expected.ml text eol=lf
+
+# Shell scripts must check out with LF: bash chokes on CR under
+# core.autocrlf=true checkouts (the default on Windows installs).
+*.sh text eol=lf
