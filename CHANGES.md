@@ -5,8 +5,8 @@
 > extents, convolution sketch families, and a liveness-based memory planner. The remaining 0.9
 > intended scope is summarized in [ROADMAP.md](ROADMAP.md), although its statement that full
 > beam search remains future work is stale: multi-round search over schedule compositions is
-> already implemented. End-to-end benchmark validation and cost-model-guided default/beam
-> selection are not yet complete.
+> already implemented. Cost-model-guided default and beam selection are in (config-gated,
+> advisory); end-to-end benchmark validation is not yet complete.
 
 ### Added
 
@@ -39,7 +39,17 @@
   proposals, including invalid `Stage` and `Tensorize` roles.
 - **Analytic cost-model foundation** (gh-ocannl-491): reusable footprint/FLOP extraction,
   arithmetic-intensity and roofline lower bounds, plus advisory per-backend compute/bandwidth
-  envelopes. Selection of untuned defaults and beam pre-filtering remain follow-up work.
+  envelopes.
+- **Cost-model-guided selection** (gh-ocannl-491): `Autotune.model_default` picks the untuned
+  default schedule by scoring the default pipeline and the sketch families with the roofline
+  model — zero timing runs — behind config `model_default_schedule` (routed through
+  `Train.to_routine`/`run_once` and the benchmark runners); `Autotune.tune` gains a model
+  pre-filter over sketch seeds with configurable keep-fraction (`autotune_keep_fraction`).
+  Candidates without model coverage are always kept — never dropped, only measured — so the
+  model never overrides or precludes a measured result. Calibration logging pairs model scores
+  with measured times (`autotune_calibration_file`, plus `autotune_log` lines), and
+  `model_peak_flops`/`model_peak_memory_bandwidth` accept per-machine calibrated envelope
+  constants that also enable scoring on backends without advisory values.
 - **Swizzled shared staging**: `Stage ~swizzle:true` marks XOR-swizzled shared-memory tiles, with
   validation and explicit intrinsic-decline behavior until swizzle-aware fragment loads land.
 

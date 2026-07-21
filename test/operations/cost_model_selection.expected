@@ -1,0 +1,20 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+prefilter keeps unscored candidates (no-coverage exemption): true
+prefilter keeps ceil(0.5 * 3) = 2 scored candidates, dropping the worst: true
+prefilter preserves candidate order: true
+keep_fraction 1 keeps everything: true
+ties at the cutoff are all kept (order-independence): true
+at least one scored candidate always survives: true
+empty schedule scoreable under the override envelope: true
+pure loop restructuring (Split) leaves the score unchanged: true
+an inapplicable schedule has no score (kept, only measured): true
+keep_fraction 1 turns the pre-filter off: true
+pre-filter scored the sketch candidates: true
+pre-filter pruned the worse-scored sketches before timing: true
+pruned search timed fewer candidates than the full search: true
+baseline still timed under aggressive pruning: true
+tuned values correct with and without the pre-filter: true
+model_default returns a working routine with correct values: true
+model_default scored candidates (default pipeline included): true
+model_default reports a choice with its model score: true
