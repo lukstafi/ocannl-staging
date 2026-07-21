@@ -5,7 +5,7 @@
    oc] slice at the kernel-window anchor (the packing Stage IS im2col — same copy nest, conv index
    arithmetic — and normalizes the kernel's stored layout), then Tensorize (row, oc, ic): the
    register-tiled Tile_mma micro-kernel with the accumulator contracted to a fragment resident
-   across the innermost kernel loop (gh-ocannl-480).
+   across the whole kernel-window chain (gh-ocannl-480, gh-ocannl-501).
 
    Pinned here: - [Autotune.detect_conv] recognizes the conv accumulation across stride/padding
    variants, with strides, dilations, and padding offsets read off the projections. - The hand-built
@@ -14,11 +14,11 @@
    the natural form within float-reassociation tolerance (moving [ic] inside the kernel loops
    reorders each element's reduction — conv sketches are tolerance-tier against unscheduled code,
    like the GPU fragment paths). - Autotune seeding: on the C backends a conv+bias+relu graph seeds
-   the serial and Grid-parallel conv pipelines; fused-epilogue twins (gh-ocannl-486) are gated off
-   on multi-window convs — the fragment store-back sits inside the outer kernel-window loop, so
-   [Fuse_epilogue]'s exactly-once check rejects the relocation (single-window convs keep their
-   twins; relocating the tail after the window loops is a recorded follow-up). The tuned routine
-   matches the untuned twin, and the winning schedule round-trips through the saved form. - The GPU
+   the serial and Grid-parallel conv pipelines, each with its fused-epilogue twin (gh-ocannl-486):
+   the whole-window accumulator contraction (gh-ocannl-501) lands the fragment store-back after the
+   full kernel window, so [Fuse_epilogue]'s exactly-once check passes on multi-window (2-D) convs
+   too. The tuned routine matches the untuned twin, and the winning schedule round-trips through
+   the saved form. - The GPU
    staged leg: the same re-association with Grid-typed outer loops, cooperative shared staging at
    the kernel-window anchor, and [Tensorize] at the backend lane width — value-pinned on metal
    against the natural form (tolerance tier), and seeded per fission segment on backends with an
@@ -123,9 +123,10 @@ let () =
         Ir.Indexing.Empty
     in
     ignore (ctx, routine);
-    (* The C-backend seed count: serial + Grid on unit-stride rows (no fused-epilogue twins — a
-       3x3 conv has two kernel-window loops, so the twins are gated), none on strided rows (the
-       packing Stage packs by index range — see the pipeline legs). *)
+    (* The C-backend seed count: serial + Grid on unit-stride rows, each with its fused-epilogue
+       twin (the 3x3 conv's two kernel-window loops are no obstacle since the whole-window
+       contraction, gh-ocannl-501); none on strided rows (the packing Stage packs by index range —
+       see the pipeline legs). *)
     p (tag ^ " C-backend conv seeds") (!n_seeds = want_seeds);
     match !site with
     | None -> p (tag ^ " detected") false
@@ -141,11 +142,11 @@ let () =
               && cx.Autotune.cx_nk = 3))
   in
   detect_leg "cvd_s1v" ~stride:1 ~use_padding:false ~want_stride:1 ~want_offset:0 ~want_row:9
-    ~want_seeds:2;
+    ~want_seeds:4;
   detect_leg "cvd_s2v" ~stride:2 ~use_padding:false ~want_stride:2 ~want_offset:0 ~want_row:5
     ~want_seeds:0;
   detect_leg "cvd_s1p" ~stride:1 ~use_padding:true ~want_stride:1 ~want_offset:0 ~want_row:11
-    ~want_seeds:2;
+    ~want_seeds:4;
 
   (* === Pattern discipline: a matmul is not a conv site === *)
   (let ma =
@@ -290,8 +291,10 @@ let () =
       (has "Tile_mma register tiling" && has "fragment_" && has "tile_")
   else p "conv pipeline structure: im2col packs, register tiling, resident fragment" true;
 
-  (* === Autotune seeding on conv+bias+relu: serial + Grid conv pipelines (fused-epilogue twins
-     gated off — 3x3 is multi-window); the tuned routine matches the untuned twin === *)
+  (* === Autotune seeding on conv+bias+relu: serial + Grid conv pipelines, each with its
+     fused-epilogue twin (2-D convs fuse since the whole-window contraction, gh-ocannl-501; the
+     unfused Grid candidate fails validation — the tail write is uncovered — and only its twin
+     survives); the tuned routine matches the untuned twin === *)
   let clean_cache dir =
     if Stdlib.Sys.file_exists dir && Stdlib.Sys.is_directory dir then
       Array.iter (Stdlib.Sys.readdir dir) ~f:(fun f ->
@@ -310,10 +313,13 @@ let () =
       x +* "...| 1*oh<+kh, 1*ow<+kw, ..ic..; |kh, kw, ..ic.. -> ..oc.. => ...| oh, ow, ..oc.." kern
     in
     let%op y = relu (pr + bias) in
-    y
+    (x, kern, pr, y)
   in
-  let want_t = run_plain "cvt_ref" (make_tail "cvt_r") in
-  let y = make_tail "cvt_t" in
+  let want_t =
+    let _, _, _, y = make_tail "cvt_r" in
+    run_plain "cvt_ref" y
+  in
+  let _, _, _, y = make_tail "cvt_t" in
   let reports = ref [] in
   let ctx = Context.auto () in
   let ctx, routine =
@@ -328,13 +334,81 @@ let () =
   let got_t = Context.get_values ctx y.Tensor.value in
   (match !reports with
   | [ r ] ->
-      p "conv sketches seeded (serial+grid; twins gated on multi-window)"
+      p "conv sketches seeded (serial+grid, with fused-epilogue twins)"
         (if on_cpu then
-           r.Autotune.sketch_candidates = 2 && r.Autotune.epilogue_sketch_candidates = 0
+           r.Autotune.sketch_candidates = 4 && r.Autotune.epilogue_sketch_candidates = 2
          else r.Autotune.sketch_candidates = 0)
-  | _ -> p "conv sketches seeded (serial+grid; twins gated on multi-window)" false);
+  | _ -> p "conv sketches seeded (serial+grid, with fused-epilogue twins)" false);
   p "tuned conv+tail matches the untuned twin within tolerance"
     (Array.for_all2_exn got_t want_t ~f:(fun a b -> Float.(abs (a - b) < 1e-3)));
+
+  (* === The fused conv twin, hand-built (deterministic — independent of which candidate the tuner
+     crowns): the serial implicit-GEMM pipeline plus [Fuse_epilogue] on the conv output. A
+     successful compile IS the whole-window pin (gh-ocannl-501): [Fuse_epilogue] raises when the
+     fragment store-back sits inside a surplus kernel-window loop, so fusing a 3x3 conv requires
+     the contraction to have landed the store-back after the full window. The fused routine merges
+     the tail into the conv nest (one real statement beside the [Zero_out]), and elementwise tails
+     never reorder the reduction — fused values match the unfused pipeline BITWISE on the C
+     backends. === *)
+  (if on_cpu then (
+     let run_tail_sched name (x, kern, pr, y) ~fused =
+       let n_real = ref (-1) in
+       let transform (opt : LL.optimized) =
+         let paths = nest_paths opt.LL.llc in
+         let _b, _oh, ow, oc, ic, kh, kw =
+           match List.find_exn paths ~f:(fun q -> List.length q = 7) with
+           | [ b; oh; ow; oc; ic; kh; kw ] -> (b, oh, ow, oc, ic, kh, kw)
+           | _ -> assert false
+         in
+         let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner }) in
+         let reorder =
+           sink ow [ oc; ic; kh; kw ]
+           @ sink oc [ ic; kh; kw ]
+           @ sink ic [ kh; kw ]
+           @ sink ic [ oc; ow ]
+           @ sink oc [ ow ]
+         in
+         let stage source tile_loops =
+           Sched.Stage
+             { source; tile_loops; shared = false; cooperative = None; hoisted = false;
+               swizzle = false }
+         in
+         let tz, _lane = Sched.tensorize ~i:ow ~j:oc ~k:ic ~simd_width:1 in
+         let sched =
+           reorder
+           @ [ stage x.Tensor.value [ ow; ic ]; stage kern.Tensor.value [ ic; oc ]; tz ]
+           @
+           if fused then [ Sched.Fuse_epilogue { target = pr.Tensor.value; shared = false } ]
+           else []
+         in
+         let opt = Sched.apply sched opt in
+         n_real :=
+           List.length
+             (List.filter (LL.flat_lines [ opt.LL.llc ]) ~f:(function
+               | LL.Noop | LL.Comment _ | LL.Zero_out _ -> false
+               | _ -> true));
+         opt
+       in
+       let ctx = Context.auto () in
+       let ctx, routine =
+         Context.compile ~lowered_transform:transform ctx
+           (named name (Train.forward y))
+           Ir.Indexing.Empty
+       in
+       let ctx = Context.run ctx routine in
+       (Context.get_values ctx y.Tensor.value, !n_real)
+     in
+     let unfused, n_unfused = run_tail_sched "cvf_unfused" (make_tail "cvf_u") ~fused:false in
+     let fused, n_fused = run_tail_sched "cvf_fused" (make_tail "cvf_f") ~fused:true in
+     p "cvf: fusion merges the tail into the conv nest" (n_unfused = 2 && n_fused = 1);
+     p "cvf: fused conv twin matches the unfused pipeline bitwise"
+       (Array.for_all2_exn fused unfused ~f:Float.equal);
+     p "cvf: fused conv twin matches the natural form within tolerance"
+       (Array.for_all2_exn fused want_t ~f:(fun a b -> Float.(abs (a - b) < 1e-3))))
+   else (
+     p "cvf: fusion merges the tail into the conv nest" true;
+     p "cvf: fused conv twin matches the unfused pipeline bitwise" true;
+     p "cvf: fused conv twin matches the natural form within tolerance" true));
 
   (* === The GPU staged leg and the aligned-merged Grid flavor (gh-ocannl-493 follow-ups). Both
      legs use micro-kernel extents divisible by Metal's 8x8x8 intrinsic tile: row = 8, oc = 16,
@@ -412,7 +486,7 @@ let () =
   in
   (* --- The GPU staged pipeline, hand-built: Grid outer loops, cooperative shared staging at the
      kernel-window anchor, Tensorize at the backend lane width (the accumulator fragment stays
-     resident across the innermost window loop, gh-ocannl-480). Tolerance tier: the reorder and
+     resident across the whole kernel window, gh-ocannl-480/501). Tolerance tier: the reorder and
      the fragment arithmetic reassociate each element's reduction. --- *)
   (if on_metal then
      let x, kern, y = make_conv8 "cvu_g" in
@@ -656,11 +730,13 @@ let () =
   let got_mb = Context.get_values ctx y.Tensor.value in
   (match !reports with
   | [ r ] ->
-      (* cc merged fission segment: serial + aligned-grid + one serial row-block panel = 3 (the
-         block flavor now seeds on merged segments, not only conv-alone). metal: GPU conv seeds gated
-         off on multi-companion segments. *)
+      (* cc merged fission segment: serial + aligned-grid + one serial row-block panel, each with
+         its fused-epilogue twin (gh-ocannl-501) = 6, all compiling (the aligned twins omit the
+         preset [Retype] on the consumed tail nest — fuse-before-annotate). metal: GPU conv seeds
+         gated off on multi-companion segments. *)
       p "cvmb: blocked flavor seeded on the merged fission segment"
-        (if on_cpu then r.Autotune.fiss_sketch_candidates = 3
+        (if on_cpu then
+           r.Autotune.fiss_sketch_candidates = 6 && r.Autotune.fiss_sketch_timed = 6
          else if on_metal then r.Autotune.fiss_sketch_candidates = 0
          else true)
   | _ -> p "cvmb: blocked flavor seeded on the merged fission segment" false);
@@ -728,14 +804,17 @@ let () =
   let got_m = Context.get_values ctx y.Tensor.value in
   (match !reports with
   | [ r ] ->
-      (* cc: whole-routine seeds only the serial flavor (the routine carries the conv's [Zero_out],
-         so the aligned analysis bails there); per fission segment serial + aligned-grid, both
-         timed. metal: the merged segment has more than one companion — GPU seeds are gated. *)
+      (* cc: the whole routine seeds the serial flavor and its fused twin (the routine carries the
+         conv's [Zero_out], so the aligned analysis bails there and no Grid flavor is seeded); per
+         fission segment serial + aligned-grid, each with its fused-epilogue twin, all four timed
+         (the aligned twin compiles by fuse-before-annotate, gh-ocannl-501). metal: the merged
+         segment has more than one companion — GPU seeds are gated. *)
       p "cva: aligned-grid conv seeded and timed on the merged fission segment"
         (if on_cpu then
-           r.Autotune.sketch_candidates = 1
-           && r.Autotune.fiss_sketch_candidates = 2
-           && r.Autotune.fiss_sketch_timed = 2
+           r.Autotune.sketch_candidates = 2
+           && r.Autotune.epilogue_sketch_candidates = 1
+           && r.Autotune.fiss_sketch_candidates = 4
+           && r.Autotune.fiss_sketch_timed = 4
          else
            r.Autotune.sketch_candidates = 0 && r.Autotune.fiss_sketch_candidates = 0)
   | _ -> p "cva: aligned-grid conv seeded and timed on the merged fission segment" false);
