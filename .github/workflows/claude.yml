@@ -34,7 +34,7 @@ jobs:
         with:
           ocaml-compiler: 5.4.x
           dune-cache: true
-          allow-prerelease-opam: true
+          allow-prerelease-opam: false
 
       - name: Setup project
         run: |
