@@ -324,6 +324,13 @@ val backend_is_cpu : string -> bool
 (** Whether the named backend renders [Grid] loops on the CPU pool (currently: name contains
     ["cc"]). *)
 
+val automatic_schedule_active : backend_name:string -> bool
+(** Whether {!maybe_default_schedule} (and {!maybe_default_schedules}) would apply a default preset
+    on this backend rather than the identity: the backend binds Grid loops, the corresponding config
+    gate ([automatic_gpu_schedule] / [automatic_cpu_schedule]) is on, and runtime kernel logging
+    ([debug_log_from_routines]) is off. Callers that substitute their own default-schedule choice
+    (e.g. the cost-model default selection of gh-ocannl-491) must respect this gate. *)
+
 val maybe_default_schedule :
   backend_name:string ->
   ?limits:Backend_intf.hardware_limits ->

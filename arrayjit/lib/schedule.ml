@@ -3904,6 +3904,11 @@ let schedule_fission = lazy (Utils.get_global_flag ~default:true ~arg_name:"sche
 (* Per-compile launch-geometry trace on stderr; consumed by backend [compile]. *)
 let log_launches = lazy (Utils.get_global_flag ~default:false ~arg_name:"schedule_log_launches")
 
+let automatic_schedule_active ~backend_name =
+  (not (Utils.debug_log_from_routines ()))
+  && ((backend_is_gpu backend_name && Lazy.force automatic_gpu_schedule)
+     || (backend_is_cpu backend_name && Lazy.force automatic_cpu_schedule))
+
 let maybe_default_schedule ~backend_name ?(limits = Backend_intf.no_hardware_limits) ~static_indices
     (opt : Low_level.optimized) : Low_level.optimized =
   (* Runtime kernel logging is line-interleaved under parallel execution; keep logged runs serial so
