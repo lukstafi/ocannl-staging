@@ -10,6 +10,13 @@
 
 ### Added
 
+- **Partition / index-set-splitting transform** (gh-ocannl-508): `Schedule.Partition` splits a
+  Serial loop's range at static affine breakpoints into separate, individually specialized (and
+  individually schedulable) segment nests; per-segment interval folding then erases the guards
+  each segment decides. Replaces in-loop guards for `Split` remainders (partition-then-split =
+  guard-free main nest + epilogue) and for inlined concatenations' per-component `Where` range
+  guards, with `Schedule.partition_breakpoints` deriving the breakpoints from the guards
+  themselves.
 - **Hardware matrix units and packed microkernels** (gh-ocannl-412): CUDA now renders
   `Tile_mma` through WMMA for f16/bf16 and inline PTX for fp8/e5m2; HIP renders it through
   rocWMMA on RDNA wave32 devices. CPU schedules compose register-tiled `Tile_mma` with

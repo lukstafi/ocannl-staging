@@ -1,0 +1,21 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+plain non-dividing split keeps a remainder guard: true
+guarded split matches reference: true
+partition+split is guard-free: true
+partition+split has main outer+inner and tail loops: true
+partition+split matches reference: true
+inlined concat consumer carries Where range guards: true
+concat values are sin of the concatenation: true
+breakpoints derived from the guards are the component boundary: true
+partitioned concat consumer is guard-free: true
+partitioned concat consumer has one nest per component: true
+partitioned concat matches reference: true
+tail-unrolled partition is guard-free: true
+only the main segment remains a loop: true
+tail-unrolled partition matches reference: true
+sp_err_out_of_range rejected with a targeted error: true
+sp_err_not_increasing rejected with a targeted error: true
+sp_err_no_such_loop rejected with a targeted error: true
+
+Done.

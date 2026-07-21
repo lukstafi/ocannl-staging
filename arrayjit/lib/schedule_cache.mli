@@ -28,6 +28,7 @@ type mint_role =
   | Split_inner
   | Expand_axis of int  (** The [i]-th fresh symbol of an [Expand_zero]. *)
   | Tensorize_lane
+  | Partition_seg of int  (** The [i]-th segment symbol of a [Partition]. *)
 [@@deriving sexp, compare, equal]
 
 (** A process-independent name for a symbol occurring in a schedule. [Base i] is the [i]-th
@@ -49,6 +50,7 @@ type saved_optop =
   | Swap of { outer : sym_ref; inner : sym_ref }
   | Retype of { axis : sym_ref; ty : Low_level.axis_type }
   | Unroll of { axis : sym_ref; materialize : bool }
+  | Partition of { axis : sym_ref; breakpoints : int list }
   | Stage of {
       source : int;
       tile_loops : sym_ref list;

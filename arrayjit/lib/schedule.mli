@@ -44,6 +44,28 @@ type optop =
           so that {!apply}'s trailing simplify + CSE see the copies — constant-folding [Affine]
           indices and deduplicating repeated loads. Register blocktiling is [Split] + materializing
           [Unroll] + the existing CSE (schedule-ir-optops §4). *)
+  | Partition of {
+      axis : Indexing.symbol;  (** The loop to partition, identified by its index symbol. *)
+      breakpoints : int list;
+          (** Segment starts: strictly increasing, each strictly inside the loop range
+              ([from_ < b <= to_], so every segment is non-empty). *)
+      segment_indices : Indexing.symbol list;
+          (** Fresh symbols, one per segment ([length breakpoints + 1]); see {!partition}. *)
+    }
+      (** Index-set splitting (gh-ocannl-508): replace the [Serial] loop
+          [For_loop axis in [from_, to_]] by consecutive segment loops
+          [s_0 in [from_, b_1) ; s_1 in [b_1, b_2) ; ... ; s_m in [b_m, to_]], each binding a fresh
+          symbol substituted for [axis] in a copy of the body (scalar-local scope ids refreshed per
+          copy, as for materializing [Unroll]). Segment ranges stay absolute — no index arithmetic
+          changes, iteration order is preserved exactly — and each segment's narrowed range lets
+          {!apply}'s trailing simplify interval-fold the guards it decides (statement [If]s and
+          scalar [Where] range guards alike). This is the segmented-rendering replacement for
+          in-loop range guards: an inlined concatenation's per-component guards (partition the
+          consumer at the component boundaries, e.g. from {!partition_breakpoints}) and [Split]'s
+          construct-then-fold remainder guard (partition at the last tile-multiple first, then
+          [Split] the dividing main segment — clean main nest plus epilogue) both specialize into
+          guard-free segment nests, and the fresh symbols make each segment individually
+          addressable by subsequent ops (per-segment scheduling). *)
   | Stage of {
       source : Tn.t;
       tile_loops : Indexing.symbol list;
@@ -192,6 +214,22 @@ val split :
 (** Builds a {!constructor-Split} with fresh outer and inner index symbols (via
     [Indexing.get_symbol]) and returns them, so subsequent ops in a programmatically built schedule
     can reference the new loops. *)
+
+val partition : axis:Indexing.symbol -> breakpoints:int list -> optop * Indexing.symbol list
+(** Builds a {!constructor-Partition} with one fresh index symbol per segment (via
+    [Indexing.get_symbol]) and returns them in segment order, so subsequent ops in a
+    programmatically built schedule can address individual segments. *)
+
+val partition_breakpoints : axis:Indexing.symbol -> Low_level.t -> int list
+(** Derives candidate {!constructor-Partition} breakpoints of the [axis] loop from the guards
+    already present in its body: statement [If] conditions and scalar [Where] conditions (e.g. the
+    virtualizer's per-component range guards of an inlined concatenation, or [Split]'s remainder
+    guard) are scanned for comparisons whose two sides differ by [k*axis + off] with everything else
+    constant — each flips truth value at one point of the axis range. Returns the collected flip
+    points that fall strictly inside the loop range, sorted and deduplicated (possibly empty — e.g.
+    when every guard is already interval-decided); partitioning at them makes every such guard
+    interval-decided within each segment, so {!apply}'s trailing simplify erases them. Raises
+    [Invalid_argument] when no statement-level loop binds [axis]. *)
 
 val expand_zero : tn:Tn.t -> optop * Indexing.symbol list
 (** Builds an {!constructor-Expand_zero} with one fresh symbol per axis of [tn] (forcing [tn]'s

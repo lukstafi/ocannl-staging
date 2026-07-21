@@ -3,7 +3,12 @@ module Tn = Tnode
 module Idx = Indexing
 module LL = Low_level
 
-type mint_role = Split_outer | Split_inner | Expand_axis of int | Tensorize_lane
+type mint_role =
+  | Split_outer
+  | Split_inner
+  | Expand_axis of int
+  | Tensorize_lane
+  | Partition_seg of int
 [@@deriving sexp, compare, equal, hash]
 
 type sym_ref = Base of int | Static of int | Minted of int * mint_role
@@ -23,6 +28,7 @@ type saved_optop =
   | Swap of { outer : sym_ref; inner : sym_ref }
   | Retype of { axis : sym_ref; ty : LL.axis_type }
   | Unroll of { axis : sym_ref; materialize : bool }
+  | Partition of { axis : sym_ref; breakpoints : int list }
   | Stage of {
       source : int;
       tile_loops : sym_ref list;
@@ -404,6 +410,13 @@ let to_saved r (sched : Schedule.schedule) : saved_schedule * registry =
           | Schedule.Retype { axis; ty } -> (r, Retype { axis = resolve_exn r axis; ty })
           | Schedule.Unroll { axis; materialize } ->
               (r, Unroll { axis = resolve_exn r axis; materialize })
+          | Schedule.Partition { axis; breakpoints; segment_indices } ->
+              let saved = Partition { axis = resolve_exn r axis; breakpoints } in
+              let r =
+                List.foldi segment_indices ~init:r ~f:(fun j r s ->
+                    record r s (Minted (idx, Partition_seg j)))
+              in
+              (r, saved)
           | Schedule.Stage { source; tile_loops; shared; cooperative; hoisted; swizzle } ->
               ( r,
                 Stage
@@ -456,6 +469,15 @@ let of_saved canonical (saved : saved_schedule) : Schedule.schedule * registry =
           | Retype { axis; ty } -> (r, Schedule.Retype { axis = unresolve_exn r axis; ty })
           | Unroll { axis; materialize } ->
               (r, Schedule.Unroll { axis = unresolve_exn r axis; materialize })
+          | Partition { axis; breakpoints } ->
+              let op, segment_indices =
+                Schedule.partition ~axis:(unresolve_exn r axis) ~breakpoints
+              in
+              let r =
+                List.foldi segment_indices ~init:r ~f:(fun j r s ->
+                    record r s (Minted (idx, Partition_seg j)))
+              in
+              (r, op)
           | Stage { source; tile_loops; shared; cooperative; hoisted; swizzle } ->
               ( r,
                 Schedule.Stage
