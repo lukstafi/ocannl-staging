@@ -1,0 +1,7 @@
+# Golden test outputs are byte-compared by dune and must stay LF everywhere:
+# `dune promote` on Windows writes CRLF (text-mode stdout), and CRLF checkouts
+# break `.missing.ml` stubs that echo goldens byte-for-byte. eol=lf makes git
+# store and check out these files with LF regardless of core.autocrlf, and
+# keeps promote-introduced CRs out of `git diff`/`git add`.
+*.expected text eol=lf
+test/ppx/*_expected.ml text eol=lf
