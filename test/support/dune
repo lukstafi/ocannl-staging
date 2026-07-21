@@ -1,0 +1,4 @@
+(library
+ (name test_utils)
+ (package neural_nets_lib)
+ (libraries base stdio arrayjit.ir))
