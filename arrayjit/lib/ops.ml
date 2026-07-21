@@ -350,6 +350,14 @@ let c_typ_of_prec = function
   | Double_prec _ -> "double"
   | Void_prec -> "void"
 
+(* Number of lanes a [vec_unop] application computes: the full 128-bit block width at the given
+   result precision. A [Set_from_vec] may store fewer lanes (a peeled tail store), but the vector
+   temporary always has the full width. *)
+let vec_unop_lanes prec =
+  match prec with
+  | Void_prec -> invalid_arg "Ops.vec_unop_lanes: void precision"
+  | _ -> 16 / prec_in_bytes prec
+
 let c_vec_typ_of_prec ~length prec =
   match (prec, length) with
   | Single_prec _, 4 -> "float4_t"

@@ -57,6 +57,17 @@
 
 ### Changed
 
+- **Packed `uniform` is total over shapes** (gh-ocannl-509, tasks 1-3): the result's element
+  count no longer needs to be a multiple of the 128-bit block width (`16 / bytes-per-element`).
+  Shape inference gives the counter `ceil(total / lanes)` blocks via a round-up mode of the
+  `Strided_var` total-elements constraint (with a `Range_elems` slack window once the counter is
+  solved), and lowering peels the final counter iteration into a shorter `Set_from_vec` store.
+  The value stream depends only on the element index, so growing a tensor preserves its prefix
+  bitwise, and divisible shapes keep their previous streams unchanged. `Set_from_vec` into a
+  padded (halo) target is now rejected explicitly at lowering with a materialize-through-copy
+  remedy (it previously assumed dense flat offsets without checking). Lane-extract
+  virtualization (task 4) and the `default_param_init` flip away from `uniform1` (task 5)
+  remain follow-ups.
 - Padding layout and neutral values are committed as tensor-node identity. Padded convolutions
   consequently lower offset-free and can be staged safely; incompatible later padding demands
   fail during shape inference instead of silently reinterpreting an existing buffer.

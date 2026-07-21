@@ -304,7 +304,15 @@ type dim_constraint = Unconstrained_dim | At_least_dim of int
 
 type total_elems =
   | Num_elems of int
-  | Strided_var of { coeff : int Utils.safe_lazy; var : dim_var; denom : int }
+  | Range_elems of { lo : int; hi : int }
+      (** The total is any value in the inclusive range [lo..hi]. Arises only from substituting the
+          solved variable of a round-up [Strided_var]: the leftover slack window. When the total is
+          otherwise unconstrained, late stages prefer [hi] (all blocks fully consumed). *)
+  | Strided_var of { coeff : int Utils.safe_lazy; var : dim_var; denom : int; round_up : bool }
+      (** The total is [(coeff * var) / denom]. With [round_up], solving for [var] from a known
+          total rounds up instead of failing on non-divisibility: [coeff * (var - 1) < total * denom
+          <= coeff * var]. Minted only by the [Uint4x32_to_prec] constraint (packed [uniform]),
+          whose last 128-bit block may be consumed partially. *)
 [@@deriving equal, hash, compare, sexp_of]
 
 type row_constraint =
@@ -567,13 +575,17 @@ let rec s_dim_one ?(keep_affine = false) v ~value ~in_ =
 (* Helper functions for total_elems operations *)
 let total_elems_to_string = function
   | Num_elems n -> Int.to_string n
-  | Strided_var { coeff; var; denom } ->
+  | Range_elems { lo; hi } -> [%string "%{lo#Int}..%{hi#Int}"]
+  | Strided_var { coeff; var; denom; round_up } ->
       let coeff_string =
         if Utils.is_safe_val coeff then Int.to_string (Utils.safe_force coeff) else coeff.unique_id
       in
       let var_str = match var.name with Some n -> n | None -> "$" ^ Int.to_string var.id in
-      if denom = 1 then [%string "%{coeff_string}*%{var_str}"]
-      else [%string "(%{coeff_string}*%{var_str})/%{denom#Int}"]
+      let s =
+        if denom = 1 then [%string "%{coeff_string}*%{var_str}"]
+        else [%string "(%{coeff_string}*%{var_str})/%{denom#Int}"]
+      in
+      if round_up then s ^ " (round-up)" else s
 
 let total_elems_divide t d =
   if d <= 0 then raise @@ Shape_error ([%string "Division by non-positive number: %{d#Int}"], [])
@@ -584,17 +596,38 @@ let total_elems_divide t d =
         else
           raise
           @@ Shape_error ([%string "Total_elems constraint: %{n#Int} not divisible by %{d#Int}"], [])
-    | Strided_var { coeff; var; denom } -> Strided_var { coeff; var; denom = denom * d }
+    | Range_elems { lo; hi } ->
+        let lo' = (lo + d - 1) / d and hi' = hi / d in
+        if lo' > hi' then
+          raise
+          @@ Shape_error
+               ( [%string
+                   "Total_elems range constraint: no total in %{lo#Int}..%{hi#Int} is a multiple \
+                    of %{d#Int}"],
+                 [] )
+        else Range_elems { lo = lo'; hi = hi' }
+    | Strided_var sv -> Strided_var { sv with denom = sv.denom * d }
 
 let safe_multiply coeff d = Utils.safe_map ~upd:[%string "*%{d#Int}"] ~f:(( * ) d) coeff
 
 let total_elems_multiply t d =
   match t with
   | Num_elems n -> Num_elems (n * d)
-  | Strided_var { coeff; var; denom } -> Strided_var { coeff = safe_multiply coeff d; var; denom }
+  | Range_elems { lo; hi } -> Range_elems { lo = lo * d; hi = hi * d }
+  | Strided_var sv -> Strided_var { sv with coeff = safe_multiply sv.coeff d }
+
+(* Solve [coeff * var / denom = n] for [var]: exact division normally, ceiling division under
+   [round_up]. Returns [None] when the exact division does not divide evenly (the caller reports the
+   mismatch), or when the round-up solution would be non-positive. *)
+let solve_strided_var ~coeff_val ~denom ~round_up n =
+  let num = n * denom in
+  if round_up then if num <= 0 then None else Some ((num + coeff_val - 1) / coeff_val)
+  else if num % coeff_val = 0 then Some (num / coeff_val)
+  else None
 
 let total_elems_known_zero = function
   | Num_elems n -> n <= 0
+  | Range_elems { hi; _ } -> hi <= 0
   | Strided_var { coeff; denom; _ } -> (
       denom <= 0 || match coeff.value with `Callback _ -> false | `Value v -> v <= 0)
 
@@ -649,24 +682,51 @@ let rec row_conjunction ~prov ~origin stage constr1 constr2 =
       | Num_elems _, Num_elems _ ->
           (* Both are solved and different - this is a mismatch *)
           elems_mismatch n1 n2
-      | Num_elems n, Strided_var { coeff; var; denom }
-      | Strided_var { coeff; var; denom }, Num_elems n
-        when late ->
+      | Num_elems n, Range_elems { lo; hi } | Range_elems { lo; hi }, Num_elems n ->
+          (* The exact total must fall within the slack window; keep the exact side. *)
+          if lo <= n && n <= hi then
+            Some ([], Total_elems { numerator = Num_elems n; divided_by = vars2; keep_axis = ka1 && ka2 })
+          else elems_mismatch n1 n2
+      | Range_elems { lo = lo1; hi = hi1 }, Range_elems { lo = lo2; hi = hi2 } ->
+          let lo = Int.max lo1 lo2 and hi = Int.min hi1 hi2 in
+          if lo <= hi then
+            Some
+              ( [],
+                Total_elems
+                  { numerator = Range_elems { lo; hi }; divided_by = vars2; keep_axis = ka1 && ka2 }
+              )
+          else elems_mismatch n1 n2
+      | Range_elems _, Strided_var _ | Strided_var _, Range_elems _ ->
+          (* Cannot arise from user specs; wait for one side to close. *)
+          None
+      | Num_elems n, Strided_var { coeff; var; denom; round_up }
+      | Strided_var { coeff; var; denom; round_up }, Num_elems n
+        when late -> (
           (* One is solved, one is not - we can derive an equation *)
           let coeff_val = Utils.safe_force coeff in
           (* The actual value represented is coeff * var / denom = n *)
-          (* So var = n * denom / coeff *)
-          if n * denom % coeff_val = 0 then
-            Some
-              ( [
-                  Dim_eq { d1 = Var var; d2 = get_default_dim ~d:(n * denom / coeff_val) (); origin };
-                ],
-                constr1 )
-          else
-            (* n * denom is not divisible by coeff - this is a mismatch *)
-            elems_mismatch n1 n2
-      | ( Strided_var { coeff = c1; var = v1; denom = d1 },
-          Strided_var { coeff = c2; var = v2; denom = d2 } )
+          (* So var = n * denom / coeff (rounded up for a round-up constraint) *)
+          match solve_strided_var ~coeff_val ~denom ~round_up n with
+          | Some d ->
+              (* Under round-up the solved [var] no longer determines the total exactly, so keep
+                 the [Num_elems] side; the exact case keeps [constr1] as before. *)
+              let kept =
+                if round_up then
+                  Total_elems { numerator = Num_elems n; divided_by = vars2; keep_axis = ka1 && ka2 }
+                else constr1
+              in
+              Some ([ Dim_eq { d1 = Var var; d2 = get_default_dim ~d (); origin } ], kept)
+          | None ->
+              (* n * denom is not divisible by coeff - this is a mismatch *)
+              elems_mismatch n1 n2)
+      | Strided_var { round_up = true; _ }, Strided_var _
+      | Strided_var _, Strided_var { round_up = true; _ } ->
+          (* Round-up constraints only relate the variable to the total by an inequality window;
+             deriving exact equations between two strided variables is unsound here. Cannot arise
+             from user specs; stay conservative and wait for the totals to close. *)
+          None
+      | ( Strided_var { coeff = c1; var = v1; denom = d1; round_up = false },
+          Strided_var { coeff = c2; var = v2; denom = d2; round_up = false } )
         when late ->
           if equal_dim_var v1 v2 then
             (* Same variable but different coefficients/denominators - check if they're equal *)
@@ -717,7 +777,7 @@ let rec row_conjunction ~prov ~origin stage constr1 constr2 =
           (* We don't want to force delayed values - keep both constraints *)
           None)
   | ( Total_elems
-        { numerator = Strided_var { coeff = c1; var = v1; denom = _ }; divided_by = vars1; _ },
+        { numerator = Strided_var { coeff = c1; var = v1; round_up = false; _ }; divided_by = vars1; _ },
       constr2 )
     when List.mem vars1 v1 ~equal:equal_dim_var && late ->
       (* Variable appears in both numerator and denominator, they cancel out *)
@@ -729,7 +789,7 @@ let rec row_conjunction ~prov ~origin stage constr1 constr2 =
         constr2
   | ( constr2,
       Total_elems
-        { numerator = Strided_var { coeff = c1; var = v1; denom = _ }; divided_by = vars1; _ } )
+        { numerator = Strided_var { coeff = c1; var = v1; round_up = false; _ }; divided_by = vars1; _ } )
     when List.mem vars1 v1 ~equal:equal_dim_var && late ->
       let vars1' = remove_var v1 vars1 in
       row_conjunction ~prov ~origin stage
@@ -787,7 +847,7 @@ let rec row_conjunction ~prov ~origin stage constr1 constr2 =
               | None -> Num_elems quotient
               | Some var ->
                   let coeff = Utils.{ value = `Value n_big; unique_id = Int.to_string n_big } in
-                  Strided_var { coeff; var; denom = n_small }
+                  Strided_var { coeff; var; denom = n_small; round_up = false }
             in
             [
               Rows_constr
@@ -798,7 +858,7 @@ let rec row_conjunction ~prov ~origin stage constr1 constr2 =
                 };
             ]
       in
-      let lazy_extras ~keep_constr1 ~num_var ?(extra_var = []) ~coeff ~denom () =
+      let lazy_extras ~keep_constr1 ~num_var ?(extra_var = []) ~coeff ~denom ~round_up () =
         (* If we keep constr1, then it has fewer divided_by, i.e. vars1 ⊂ vars2. n1 / (product of
            vars1) = n2 / (product of vars2) Since vars1 ⊂ vars2, we have vars2 = vars1 ∪ vars2_only
            So: n1 / (product of vars1) = n2 / (product of vars1 × product of vars2_only) Thus: n1 =
@@ -816,7 +876,9 @@ let rec row_conjunction ~prov ~origin stage constr1 constr2 =
         let constr =
           Total_elems
             {
-              numerator = Strided_var { coeff; var = num_var; denom };
+              (* Propagating [round_up] is sound: the derived relation [product(diff_vars) =
+                 coeff * num_var / denom] inherits the same inequality window. *)
+              numerator = Strided_var { coeff; var = num_var; denom; round_up };
               divided_by = [];
               keep_axis = false;
             }
@@ -826,8 +888,8 @@ let rec row_conjunction ~prov ~origin stage constr1 constr2 =
       let extras ~keep_constr1 : _ option =
         match (n1, n2) with
         | Num_elems n1_val, Num_elems n2_val -> Some (extras ~keep_constr1 ~n1_val ~n2_val ())
-        | ( Strided_var { coeff = c1; var = v1; denom = d1 },
-            Strided_var { coeff = c2; var = v2; denom = d2 } )
+        | ( Strided_var { coeff = c1; var = v1; denom = d1; round_up = false },
+            Strided_var { coeff = c2; var = v2; denom = d2; round_up = false } )
           when equal_dim_var v1 v2 ->
             (* c1*v1/d1 = c2*v2/d2, and v1 = v2, so c1/d1 = c2/d2 *)
             if late then
@@ -837,22 +899,24 @@ let rec row_conjunction ~prov ~origin stage constr1 constr2 =
                    ~n2_val:(Utils.safe_force c2 * d1)
                    ())
             else None
-        | Strided_var { coeff = c1; var = v1; denom = d1 }, Num_elems n2_val ->
+        | Strided_var { coeff = c1; var = v1; denom = d1; round_up }, Num_elems n2_val ->
             (* v1 from the numerator joins vars from the denominator. *)
             (* c1*v1/d1 = n2_val, so c1 = n2_val*d1/v1 *)
-            if late then
+            if late && not round_up then
               Some (extras ~keep_constr1 ~v1 ~n1_val:(Utils.safe_force c1) ~n2_val:(n2_val * d1) ())
             else if not keep_constr1 then
-              Some (lazy_extras ~keep_constr1 ~num_var:v1 ~coeff:c1 ~denom:(n2_val * d1) ())
+              Some
+                (lazy_extras ~keep_constr1 ~num_var:v1 ~coeff:c1 ~denom:(n2_val * d1) ~round_up ())
             else None
-        | Num_elems n1_val, Strided_var { coeff = c2; var = v2; denom = d2 } ->
-            if late then
+        | Num_elems n1_val, Strided_var { coeff = c2; var = v2; denom = d2; round_up } ->
+            if late && not round_up then
               Some (extras ~keep_constr1 ~v2 ~n1_val:(n1_val * d2) ~n2_val:(Utils.safe_force c2) ())
             else if keep_constr1 then
-              Some (lazy_extras ~keep_constr1 ~num_var:v2 ~coeff:c2 ~denom:(n1_val * d2) ())
+              Some
+                (lazy_extras ~keep_constr1 ~num_var:v2 ~coeff:c2 ~denom:(n1_val * d2) ~round_up ())
             else None
-        | ( Strided_var { coeff = c1; var = v1; denom = d1 },
-            Strided_var { coeff = c2; var = v2; denom = d2 } ) ->
+        | ( Strided_var { coeff = c1; var = v1; denom = d1; round_up = false },
+            Strided_var { coeff = c2; var = v2; denom = d2; round_up = false } ) ->
             if late then
               Some
                 (extras ~keep_constr1 ~v1 ~v2
@@ -860,6 +924,14 @@ let rec row_conjunction ~prov ~origin stage constr1 constr2 =
                    ~n2_val:(Utils.safe_force c2 * d1)
                    ())
             else None
+        | Strided_var { round_up = true; _ }, Strided_var _
+        | Strided_var _, Strided_var { round_up = true; _ } ->
+            (* Exact cross-variable derivations are unsound under a round-up window; cannot arise
+               from user specs. Wait for the totals to close. *)
+            None
+        | Range_elems _, _ | _, Range_elems _ ->
+            (* Slack windows with differing [divided_by]: conservative, wait. *)
+            None
       in
       if List.is_empty vars2_only then
         Option.map ~f:(fun x -> (x, constr2)) (extras ~keep_constr1:false)
@@ -926,17 +998,29 @@ let rec row_conjunction ~prov ~origin stage constr1 constr2 =
                     ( [ Dim_eq { d1 = Var v; d2 = get_default_dim ~d:reminder (); origin } ],
                       Exact dims )
                 else None
-          | Strided_var { coeff; var; denom } ->
+          | Range_elems { lo; hi } ->
               if known_product = 0 then
                 raise @@ Shape_error ("Exact constraint has zero dimension", [])
-              else if late && List.is_empty vars && List.is_empty divided_by then
-                (* Exact dims contain only known dimensions and divided_by is empty *)
-                (* coeff * var / denom = known_product, so var = known_product * denom / coeff *)
-                let coeff_val = Utils.safe_force coeff in
-                if known_product * denom % coeff_val = 0 then
-                  let d = known_product * denom / coeff_val in
-                  Some ([ Dim_eq { d1 = Var var; d2 = get_default_dim ~d (); origin } ], Exact dims)
+              else if List.is_empty vars && List.is_empty divided_by then
+                if lo <= known_product && known_product <= hi then Some ([], Exact dims)
                 else elems_mismatch numerator (Num_elems known_product)
+              else None
+          | Strided_var { coeff; var; denom; round_up } ->
+              if known_product = 0 then
+                raise @@ Shape_error ("Exact constraint has zero dimension", [])
+              else if late && List.is_empty vars && List.is_empty divided_by then (
+                (* Exact dims contain only known dimensions and divided_by is empty *)
+                (* coeff * var / denom = known_product, so var = known_product * denom / coeff
+                   (rounded up for a round-up constraint) *)
+                let coeff_val = Utils.safe_force coeff in
+                match solve_strided_var ~coeff_val ~denom ~round_up known_product with
+                | Some d ->
+                    Some
+                      ([ Dim_eq { d1 = Var var; d2 = get_default_dim ~d (); origin } ], Exact dims)
+                | None -> elems_mismatch numerator (Num_elems known_product))
+              else if round_up then
+                (* Remaining derivations assume the exact relation; conservative under round-up. *)
+                None
               else if
                 late
                 && List.mem vars var ~equal:equal_dim_var
@@ -1338,12 +1422,19 @@ let subst_row_constraint_unprotected ~subst_in_dim ~get_dim_val stage constr =
         Total_elems { numerator; divided_by; keep_axis }
   in
   match constr with
-  | Total_elems { numerator = Strided_var { coeff; var; denom }; divided_by; keep_axis }
+  | Total_elems { numerator = Strided_var { coeff; var; denom; round_up }; divided_by; keep_axis }
     when is_stage2_up stage && Option.is_some (get_dim_val var) ->
       let dim = Option.value_exn (get_dim_val var) in
-      let tot = Utils.safe_force coeff * dim in
+      let coeff_val = Utils.safe_force coeff in
+      let tot = coeff_val * dim in
       reapply_rows_constr := true;
-      if tot % denom = 0 then
+      if round_up then
+        (* The solved variable determines the total only up to the slack window
+           [coeff*(var-1) < total*denom <= coeff*var]; an otherwise-unconstrained total defaults
+           to [hi] (all blocks fully consumed) at late stages. *)
+        let lo = (coeff_val * (dim - 1) / denom) + 1 and hi = tot / denom in
+        subst_total_elems_divided_by (Range_elems { lo; hi }) divided_by ~keep_axis
+      else if tot % denom = 0 then
         subst_total_elems_divided_by (Num_elems (tot / denom)) divided_by ~keep_axis
       else
         raise
@@ -1352,14 +1443,18 @@ let subst_row_constraint_unprotected ~subst_in_dim ~get_dim_val stage constr =
                  "Total_elems constraint: shape cannot be strided, %{tot#Int} not divisible by \
                   %{denom#Int}"],
                [ Rows_constr_failed { constr } ] )
-  | Total_elems { numerator = Strided_var { coeff; var; denom }; divided_by; keep_axis }
+  | Total_elems { numerator = Strided_var { coeff; var; denom; round_up }; divided_by; keep_axis }
     when not (equal_dim (Var var) (subst_in_dim (Var var))) -> (
       reapply_rows_constr := true;
       match subst_in_dim (Var var) with
       | Dim { d; _ } as value when is_stage2_up stage ->
           (* Stage 2+: Replace (coeff * v / denom) with (coeff * d / denom) *)
-          let new_num = Utils.safe_force coeff * d in
-          if new_num % denom = 0 then
+          let coeff_val = Utils.safe_force coeff in
+          let new_num = coeff_val * d in
+          if round_up then
+            let lo = (coeff_val * (d - 1) / denom) + 1 and hi = new_num / denom in
+            Total_elems { numerator = Range_elems { lo; hi }; divided_by; keep_axis }
+          else if new_num % denom = 0 then
             Total_elems { numerator = Num_elems (new_num / denom); divided_by; keep_axis }
           else
             raise
@@ -1369,9 +1464,11 @@ let subst_row_constraint_unprotected ~subst_in_dim ~get_dim_val stage constr =
                    [ Dim_mismatch [ value ] ] )
       | Dim _ ->
           (* Stage 1: Don't force coeff yet, keep the constraint as-is *)
-          Total_elems { numerator = Strided_var { coeff; var; denom }; divided_by; keep_axis }
+          Total_elems
+            { numerator = Strided_var { coeff; var; denom; round_up }; divided_by; keep_axis }
       | Var v' ->
-          Total_elems { numerator = Strided_var { coeff; var = v'; denom }; divided_by; keep_axis }
+          Total_elems
+            { numerator = Strided_var { coeff; var = v'; denom; round_up }; divided_by; keep_axis }
       | Sym _ as value ->
           (* gh-490 v1: symbolic dimensions do not participate in total-elements arithmetic. *)
           raise
@@ -1717,28 +1814,35 @@ and apply_row_constraint ~depth stage origin (r : row) (constr : row_constraint)
     match (r, constr) with
     | _ when stored && not updated -> (extras, env)
     | _, Unconstrained -> assert false
-    | _, Total_elems { numerator = Strided_var { coeff; var; denom }; divided_by = []; _ }
+    | _, Total_elems { numerator = Strided_var { coeff; var; denom; round_up }; divided_by = []; _ }
       when is_stage2_up stage && Option.is_some (get_dim_val env var) ->
-        let tot = Option.value_exn (get_dim_val env var) in
-        let tot = Utils.safe_force coeff * tot / denom in
+        (* The variable is already solved: under round-up the total is only determined up to the
+           slack window, otherwise it is exactly [coeff * var / denom]. *)
+        let v = Option.value_exn (get_dim_val env var) in
+        let coeff_val = Utils.safe_force coeff in
+        let numerator =
+          if round_up then
+            Range_elems { lo = (coeff_val * (v - 1) / denom) + 1; hi = coeff_val * v / denom }
+          else Num_elems (coeff_val * v / denom)
+        in
         apply_row_constraint ~depth:(depth + 1) stage origin r
-          (Total_elems { numerator = Num_elems tot; divided_by = []; keep_axis = false })
+          (Total_elems { numerator; divided_by = []; keep_axis = false })
           env
     | ( { dims; bcast = Broadcastable; _ },
-        Total_elems { numerator = Strided_var { coeff; var; denom }; divided_by = []; _ } )
-      when is_stage2_up stage && known_dims_product dims ->
+        Total_elems { numerator = Strided_var { coeff; var; denom; round_up }; divided_by = []; _ } )
+      when is_stage2_up stage && known_dims_product dims -> (
         let (d : int), _ = Option.value_exn (collect_factors dims) in
         let coeff : int = Utils.safe_force coeff in
-        if denom * d % coeff = 0 then
-          ( Dim_eq { d1 = Var var; d2 = get_default_dim ~d:(denom * d / coeff) (); origin } :: extras,
-            env )
-        else
-          raise
-          @@ Shape_error
-               ( [%string
-                   "apply_row_constraint: Total_elems constraint failed: %{denom*d#Int} not \
-                    divisible by %{coeff#Int}"],
-                 [ Row_mismatch [ r ] ] )
+        match solve_strided_var ~coeff_val:coeff ~denom ~round_up d with
+        | Some v ->
+            (Dim_eq { d1 = Var var; d2 = get_default_dim ~d:v (); origin } :: extras, env)
+        | None ->
+            raise
+            @@ Shape_error
+                 ( [%string
+                     "apply_row_constraint: Total_elems constraint failed: %{denom*d#Int} not \
+                      divisible by %{coeff#Int}"],
+                   [ Row_mismatch [ r ] ] ))
     | { dims; bcast = Broadcastable; _ }, Total_elems { numerator; divided_by; _ }
       when List.length divided_by <= 1 -> (
         try
@@ -1759,6 +1863,17 @@ and apply_row_constraint ~depth stage origin (r : row) (constr : row_constraint)
               @@ Shape_error
                    ( "apply_row_constraint: Total_elems constraint failed, shape is too small",
                      [ Row_mismatch [ r ] ] )
+          | Range_elems { lo; hi }, [], [] ->
+              (* Slack window: after dividing by the closed rows' product, the remaining total is 1
+                 iff the actual total falls within the window. *)
+              if lo <= 1 && 1 <= hi then (extras, env)
+              else
+                let size = if hi < 1 then "big" else "small" in
+                raise
+                @@ Shape_error
+                     ( "apply_row_constraint: Total_elems slack window failed, shape is too "
+                       ^ size,
+                       [ Row_mismatch [ r ] ] )
           | Num_elems n, [ v ], [] | Num_elems n, [], [ v ] ->
               (Dim_eq { d1 = Var v; d2 = get_default_dim ~d:n (); origin } :: extras, env)
           | Num_elems 1, vs1, vs2 ->
@@ -1768,7 +1883,7 @@ and apply_row_constraint ~depth stage origin (r : row) (constr : row_constraint)
                   (vs1 @ vs2)
                 @ extras,
                 env )
-          | Strided_var { coeff; var; denom }, [], [ v ]
+          | Strided_var { coeff; var; denom; round_up = false }, [], [ v ]
             when equal_dim_var var v && (Utils.is_safe_val coeff || is_stage2_up stage) ->
               (* Total = (coeff * v / denom) / v = coeff / denom *)
               if Utils.safe_force coeff % denom = 0 then
@@ -1813,7 +1928,7 @@ and apply_row_constraint ~depth stage origin (r : row) (constr : row_constraint)
           @ extras,
           env )
     | ( { bcast = Row_var v; _ },
-        Total_elems { numerator = Strided_var { coeff; var = _; denom }; divided_by = []; _ } )
+        Total_elems { numerator = Strided_var { coeff; var = _; denom; _ }; divided_by = []; _ } )
       when is_stage2_up stage -> (
         (* Check if we have a GLB and if it meets our conditions *)
         match find_row env.row_env v with
@@ -3890,6 +4005,13 @@ and eliminate_row_constraint ~depth stage origin ~terminal ~(glb : row option) (
       match reduce_row_constraint constr ~beg_dims ~dims with
       | Total_elems { numerator; divided_by; keep_axis } -> (
           let _divided_by : dim_var list = divided_by in
+          (* Row-variable elimination runs at late stages only: an open total under a round-up
+             slack window resolves to the window's top (all counter blocks fully consumed),
+             matching the exact behavior of divisible shapes. The window's tolerance is only
+             needed when re-checking against already-closed rows (in [apply_row_constraint]). *)
+          let numerator =
+            match numerator with Range_elems { hi; _ } -> Num_elems hi | n -> n
+          in
           match (numerator, divided_by, glb) with
           | Num_elems 1, [], (None | Some { beg_dims = []; dims = []; _ })
             when keep_axis && is_stage5_up stage ->
@@ -3965,7 +4087,16 @@ and eliminate_row_constraint ~depth stage origin ~terminal ~(glb : row option) (
                 else Row_eq { r1; r2; origin }
               in
               (row_eq :: [ Dim_eq { d1 = Var v; d2 = get_default_dim ~d:(d / d2) (); origin } ], env)
-          | Strided_var { coeff; var; denom }, [], None
+          | Strided_var { coeff; var; denom; round_up = true }, [], None
+            when is_stage5_up stage && denom > 1 && denom % Utils.safe_force coeff <> 0 ->
+              (* Round-up totality: the known-axes product [denom] is not a multiple of [coeff];
+                 instead of inventing an extra axis (the legacy arm below), close the leftover row
+                 variable empty and give the counter [ceil(denom / coeff)] blocks -- the last block
+                 is consumed partially. *)
+              let coeff = Utils.safe_force coeff in
+              let d2 = get_default_dim ~d:((denom + coeff - 1) / coeff) () in
+              ([ Dim_eq { d1 = Var var; d2; origin }; no_further_axes ~guess:false () ], env)
+          | Strided_var { coeff; var; denom; _ }, [], None
             when is_stage5_up stage
                  && (Utils.safe_force coeff > denom || denom % Utils.safe_force coeff <> 0) ->
               let coeff = Utils.safe_force coeff in
@@ -3984,7 +4115,7 @@ and eliminate_row_constraint ~depth stage origin ~terminal ~(glb : row option) (
                     };
                 ],
                 env )
-          | Strided_var { coeff; var; denom }, [], _
+          | Strided_var { coeff; var; denom; _ }, [], _
             when is_stage6_up stage && denom % Utils.safe_force coeff = 0 ->
               let d2 = get_default_dim ~d:(denom / Utils.safe_force coeff) () in
               if dim_var_is_in_param var env then
@@ -3993,22 +4124,26 @@ and eliminate_row_constraint ~depth stage origin ~terminal ~(glb : row option) (
                      ( "You forgot to specify the hidden dimension(s) 3",
                        [ Dim_mismatch [ Var var ] ] )
               else ([ Dim_eq { d1 = Var var; d2; origin }; no_further_axes ~guess:true () ], env)
-          | ( Strided_var { coeff; var; denom },
+          | ( Strided_var { coeff; var; denom; round_up },
               [],
               Some ({ beg_dims = glb_beg; dims = glb_dims; bcast = _; prov = glb_prov } as glb) )
             when is_stage5_up stage && Utils.safe_force coeff > denom -> (
               (* Check if coeff > denom * product of known dimensions of the GLB. The constraint is:
                  coeff * var / denom = total_elements(row). So: var = total_elements * denom /
-                 coeff. *)
+                 coeff (rounded up for a round-up constraint). *)
               match collect_factors (glb_beg @ glb_dims) with
               | Some (known_product, []) ->
                   let coeff_val = Utils.safe_force coeff in
-                  if coeff_val > denom * known_product then
+                  if (not round_up) && coeff_val > denom * known_product then
                     ([ Row_eq { r1; r2 = glb; origin } ], env)
                   else
                     (* Equate the row variable to the dimensions of the GLB, and compute var from
                        the total elements *)
-                    let var_value = known_product * denom / coeff_val in
+                    let var_value =
+                      match solve_strided_var ~coeff_val ~denom ~round_up known_product with
+                      | Some v -> v
+                      | None -> known_product * denom / coeff_val
+                    in
                     ( [
                         Row_eq
                           {
@@ -4026,7 +4161,7 @@ and eliminate_row_constraint ~depth stage origin ~terminal ~(glb : row option) (
                       ],
                       env )
               | _ -> keep_constr ())
-          | Strided_var { coeff; var; denom }, _, _ when is_stage5_up stage ->
+          | Strided_var { coeff; var; denom; _ }, _, _ when is_stage5_up stage ->
               let _var : dim_var = var in
               let _coeff : int = Utils.safe_force coeff in
               let _denom : int = denom in
@@ -4604,7 +4739,7 @@ let%track4_sexp get_proj_equations (inequalities : constraint_ list) proj_axis_e
     | Rows_constr
         {
           r;
-          constr = Total_elems { numerator = Strided_var { coeff; var; denom }; divided_by; _ };
+          constr = Total_elems { numerator = Strided_var { coeff; var; denom; _ }; divided_by; _ };
           origin = _;
         } -> (
         let divided_by =
