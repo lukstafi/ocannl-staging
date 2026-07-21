@@ -726,7 +726,32 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
     | Set_vec_unop { op; lhs; rhs; projections; _ } ->
         (* Handle vector unary operations *)
         let projections = Lazy.force projections in
-        let basecase rev_iters =
+        let full_length =
+          match op with
+          | Ops.Uint4x32_to_prec_uniform ->
+              (* Prevent over-eager guard against forcing precision. *)
+              ignore (Lazy.force lhs.dims);
+              Ops.vec_unop_lanes (Lazy.force lhs.prec)
+        in
+        (* [Set_from_vec] stores [length] lanes at flat consecutive offsets; a padded (halo) target
+           breaks that assumption across rows, and would make the random stream layout-dependent.
+           Reject explicitly with a remedy. *)
+        (match Tn.get_padding lhs with
+        | None -> ()
+        | Some (pads, _) when Array.for_all pads ~f:(fun p -> p.Ops.left = 0 && p.Ops.right = 0) ->
+            ()
+        | Some _ ->
+            raise
+            @@ Utils.User_error
+                 [%string
+                   "Set_vec_unop (packed uniform): target %{Tn.debug_name lhs} is padded; \
+                    materialize the random tensor into an unpadded node and copy it into the \
+                    padded one instead"]);
+        (* Tail peel: when the target's total element count is not a multiple of [full_length], the
+           final counter iteration stores only the remaining lanes of its 128-bit block. *)
+        let total_elems = Tn.num_elems lhs in
+        let rem = total_elems % full_length in
+        let basecase ~length rev_iters =
           let subst_map =
             let loop_iters = Array.of_list_rev rev_iters in
             Array.map2_exn loop_iters projections.product_iterators ~f:(fun loop_iter prod_iter ->
@@ -758,20 +783,6 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
           let rhs_idcs = Array.map projections.project_rhs.(0) ~f:subst_index in
           let open Low_level in
           let rhs_ll = get rhs rhs_idcs in
-          let length =
-            match op with
-            | Ops.Uint4x32_to_prec_uniform -> (
-                (* Prevent over-eager guard against forcing precision. *)
-                ignore (Lazy.force lhs.dims);
-                let target_prec = Lazy.force lhs.prec in
-                match target_prec with
-                | Ops.Byte_prec _ | Ops.Fp8_prec _ -> 16 (* 8-bit values *)
-                | Ops.Uint16_prec _ | Ops.Half_prec _ | Ops.Bfloat16_prec _ -> 8 (* 16-bit values *)
-                | Ops.Int32_prec _ | Ops.Uint32_prec _ | Ops.Single_prec _ -> 4 (* 32-bit values *)
-                | Ops.Double_prec _ | Ops.Int64_prec _ | Ops.Uint64_prec _ -> 2 (* 64-bit values *)
-                | Ops.Uint4x32_prec _ -> 1 (* 128-bit value *)
-                | Ops.Void_prec -> failwith "Cannot use vector operation with void precision")
-          in
           (* Redirect a vector store through a slice-alias view to the parent, mirroring [set] for
              scalar stores (gh-ocannl-293 293a). Without this the alias [lhs] -- which owns no
              buffer and is excluded from [ctx_buffers] -- would be a write target the backend cannot
@@ -788,22 +799,91 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
               debug = "";
             }
         in
-        let rec for_loop rev_iters = function
-          | [] -> basecase rev_iters
-          | [ d ] :: product ->
+        let peel_axis =
+          if rem = 0 then -1
+          else if total_elems <= full_length then
+            (* A single (partial) block: the counter axis is dim-1 and typically has no iterator in
+               the projections; every store is the tail store (handled by starting in tail mode
+               below). *)
+            -1
+          else begin
+            (* The counter operand is a single axis: exactly one product axis drives the argument's
+               projection, and it is the one to peel. *)
+            let rhs_symbols =
+              Array.to_list projections.project_rhs.(0)
+              |> List.concat_map ~f:(function
+                   | Indexing.Iterator s -> [ s ]
+                   | Indexing.Affine { symbols; _ } -> List.map symbols ~f:snd
+                   | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> [])
+            in
+            let driving =
+              Array.filter_mapi projections.product_iterators ~f:(fun i prod_iter ->
+                  match prod_iter with
+                  | [ s ] when List.mem rhs_symbols s ~equal:Indexing.Symbol.equal -> Some i
+                  | _ -> None)
+            in
+            match Array.to_list driving with
+            | [ i ] ->
+                (* The peel below assumes the flat store offset is driven solely by the peeled
+                   counter axis: every other product axis must be degenerate. *)
+                let others_product =
+                  Array.foldi projections.product_space ~init:1 ~f:(fun j acc d ->
+                      if j = i then acc else List.fold d ~init:acc ~f:( * ))
+                in
+                if others_product <> 1 then
+                  raise
+                  @@ Utils.User_error
+                       [%string
+                         "Set_vec_unop (packed uniform): non-divisible target size \
+                          %{total_elems#Int} (lanes per block: %{full_length#Int}) requires a 1-D \
+                          counter iteration"]
+                else i
+            | _ ->
+                raise
+                @@ Utils.User_error
+                     [%string
+                       "Set_vec_unop (packed uniform): non-divisible target size \
+                        %{total_elems#Int} (lanes per block: %{full_length#Int}) but could not \
+                        identify the counter axis to peel"]
+          end
+        in
+        let rec for_loop ~tail rev_iters = function
+          | [] -> basecase ~length:(if tail then rem else full_length) rev_iters
+          | (i, [ d ]) :: product when i = peel_axis ->
+              (* Peel the final counter iteration: interior stores stay full-width and guard-free,
+                 the last store writes the [rem] remaining lanes. *)
+              let make ~tail ~from_ ~to_ =
+                let index = Indexing.get_symbol () in
+                Low_level.For_loop
+                  {
+                    index;
+                    from_;
+                    to_;
+                    body = for_loop ~tail (index :: rev_iters) product;
+                    trace_it = true;
+                    axis = Serial;
+                  }
+              in
+              let tail_loop = make ~tail:true ~from_:(d - 1) ~to_:(d - 1) in
+              if d = 1 then tail_loop
+              else Low_level.Seq (make ~tail:false ~from_:0 ~to_:(d - 2), tail_loop)
+          | (_, [ d ]) :: product ->
               let index = Indexing.get_symbol () in
               Low_level.For_loop
                 {
                   index;
                   from_ = 0;
                   to_ = d - 1;
-                  body = for_loop (index :: rev_iters) product;
+                  body = for_loop ~tail (index :: rev_iters) product;
                   trace_it = true;
                   axis = Serial;
                 }
           | _ -> raise @@ Utils.User_error "Concat indexing not supported in Set_vec_unop"
         in
-        for_loop [] (Array.to_list projections.product_space)
+        for_loop
+          ~tail:(rem <> 0 && total_elems <= full_length)
+          []
+          (List.mapi ~f:(fun i d -> (i, d)) (Array.to_list projections.product_space))
     | Noop -> Low_level.Noop
     | Block_comment (s, c) -> Low_level.unflat_lines [ Comment s; loop c; Comment "end" ]
     | Seq (c1, c2) ->

@@ -2550,10 +2550,13 @@ module C_syntax (B : C_syntax_config) = struct
         let local_defs = pp_local_defs local_defs in
         (* Generate the function call *)
         let result_doc = B.vec_unop_syntax prec vec_unop arg_doc in
+        (* The vector temporary always has the full 128-bit block width: a tail store ([length] <
+           block lanes) stores only the leading lanes of the fully computed block. *)
+        let block_lanes = Ops.vec_unop_lanes prec in
         (* Generate assignments for each output element *)
         let open PPrint in
         let vec_var = string "vec_result" in
-        let vec_typ = string (B.vec_typ_of_prec ~length prec) in
+        let vec_typ = string (B.vec_typ_of_prec ~length:block_lanes prec) in
         let vec_decl = vec_typ ^^ space ^^ vec_var ^^ string " = " ^^ result_doc ^^ semi in
         let assignments =
           let elem_assigns =
@@ -2570,11 +2573,11 @@ module C_syntax (B : C_syntax_config) = struct
                       pp_array_offset (idcs, dims) ^^ string (" + " ^ Int.to_string i)
                 in
                 let value_doc =
-                  if length = 1 then
-                    (* When length=1, vec_typ_of_prec returns a scalar type, so no .v[] access *)
+                  if block_lanes = 1 then
+                    (* A single-lane block has a scalar type, so no .v[] access *)
                     vec_var
                   else
-                    (* When length>1, access the vector element *)
+                    (* When the block has multiple lanes, access the vector element *)
                     vec_var ^^ string (".v[" ^ Int.to_string i ^ "]")
                 in
                 ident_doc ^^ brackets offset_doc ^^ string " = " ^^ value_doc ^^ semi)
