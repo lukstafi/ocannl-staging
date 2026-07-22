@@ -3911,23 +3911,18 @@ let automatic_schedule_active ~backend_name =
 
 let maybe_default_schedule ~backend_name ?(limits = Backend_intf.no_hardware_limits) ~static_indices
     (opt : Low_level.optimized) : Low_level.optimized =
-  (* Runtime kernel logging is line-interleaved under parallel execution; keep logged runs serial so
-     the logs stay deterministic and readable. *)
-  if Utils.debug_log_from_routines () then opt
-  else if backend_is_gpu backend_name && Lazy.force automatic_gpu_schedule then
-    apply ~static_indices (default_gpu ~limits opt) opt
-  else if backend_is_cpu backend_name && Lazy.force automatic_cpu_schedule then
-    apply ~static_indices (default_cpu opt) opt
-  else opt
+  (* [automatic_schedule_active] keeps logged runs serial: runtime kernel logging is
+     line-interleaved under parallel execution, and serial logs stay deterministic and readable. *)
+  if not (automatic_schedule_active ~backend_name) then opt
+  else if backend_is_gpu backend_name then apply ~static_indices (default_gpu ~limits opt) opt
+  else apply ~static_indices (default_cpu opt) opt
 
 let maybe_default_schedules ~backend_name ?(limits = Backend_intf.no_hardware_limits)
     ~static_indices (opt : Low_level.optimized) : Low_level.optimized list =
-  if Utils.debug_log_from_routines () then [ opt ]
+  if not (automatic_schedule_active ~backend_name) then [ opt ]
   else
-    let gpu = backend_is_gpu backend_name && Lazy.force automatic_gpu_schedule in
-    let cpu = backend_is_cpu backend_name && Lazy.force automatic_cpu_schedule in
-    if not (gpu || cpu) then [ opt ]
-    else if not (Lazy.force schedule_fission) then
+    let gpu = backend_is_gpu backend_name in
+    if not (Lazy.force schedule_fission) then
       [ maybe_default_schedule ~backend_name ~limits ~static_indices opt ]
     else
       let preset o = if gpu then default_gpu ~limits o else default_cpu o in
