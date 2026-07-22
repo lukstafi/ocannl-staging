@@ -1,5 +1,11 @@
 Retrieving commandline, environment, or config file variable ocannl_log_level
 Found 0, in the config file
+tf32 policy-off matmul matches the serial twin bitwise: true
+tf32 policy-off renders and records the scalar fallback: true
+tf32 policy-on matmul matches the serial twin within tolerance: true
+tf32 policy-on renders and records wmma tf32: true
+tf32 k=24 divergent tile matches and emits: true
+tf32 transposed-A matmul matches and emits: true
 tensorized matmul values match the serial twin: true
 C-backend fallback matches bitwise: true
 tensorized structure as expected: true

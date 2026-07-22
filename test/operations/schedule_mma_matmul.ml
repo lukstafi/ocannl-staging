@@ -28,10 +28,13 @@ module Tn = Ir.Tnode
 module LL = Ir.Low_level
 module Sched = Ir.Schedule
 module Asgns = Ir.Assignments
+module Numerics = Ir.Numerics
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
+let () = Numerics.set_policy { tf32_matmuls = false }
 let p name b = Stdio.printf "%s: %b\n" name b
 let approx a b = Float.(abs (a - b) < 1e-2)
+let approx_rel a b = Float.(abs (a - b) <= 1e-2 * max 1. (abs b))
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_metal = String.is_substring backend_name ~substring:"metal"
 
@@ -162,6 +165,128 @@ let () =
     let tz, _lane = Sched.tensorize ~i:i_i ~j ~k ~simd_width in
     [ ez; sp_zi; rz; sp_i; tz ]
   in
+
+  (* --- CUDA tf32 policy (gh-ocannl-478): positive and negative execution pins. The policy-off leg
+     is compiled first and must retain the lane-0 scalar fallback with bitwise parity. The policy-on
+     legs must both execute within tf32 tolerance and structurally render wmma tf32; [mma_census] is
+     checked as well so a loosened numeric comparison cannot hide a decline. The k=24 leg is
+     deliberately divisible by tf32's k=8 tile but not the f16/bf16 k=16 tile. The transposed-A leg
+     covers the col-major fragment form retained by [wmma_combo]. --- *)
+  let compile_mma_with_census ~name tensor =
+    Ir.C_syntax.mma_census := [];
+    Ir.C_syntax.mma_census_enabled := true;
+    let ctx, routine =
+      Exn.protect
+        ~f:(fun () ->
+          let transform opt = Sched.apply (mma_schedule ~out:tensor.Tensor.value opt) opt in
+          Context.compile ~lowered_transform:transform (Context.auto ())
+            (named name (Train.forward tensor))
+            Ir.Indexing.Empty)
+        ~finally:(fun () -> Ir.C_syntax.mma_census_enabled := false)
+    in
+    let census = List.rev_map !Ir.C_syntax.mma_census ~f:snd in
+    let ctx = Context.run ctx routine in
+    (Context.get_values ctx tensor.Tensor.value, census)
+  in
+  let compile_serial ~name tensor =
+    let ctx, routine =
+      Context.compile
+        ~lowered_transform:(fun opt -> opt)
+        (Context.auto ())
+        (named name (Train.forward tensor))
+        Ir.Indexing.Empty
+    in
+    let ctx = Context.run ctx routine in
+    Context.get_values ctx tensor.Tensor.value
+  in
+  let tf32_inputs ~tag ~k =
+    let av =
+      Array.init (n * k) ~f:(fun x ->
+          ((Float.of_int (x % 23) -. 11.) *. 0.03125) +. (Float.of_int (x % 3) *. 0.0007))
+    in
+    let bv =
+      Array.init (k * n) ~f:(fun x ->
+          ((Float.of_int (x % 19) -. 9.) *. 0.046875) -. (Float.of_int (x % 5) *. 0.0003))
+    in
+    ( TDSL.ndarray av ~label:[ tag ^ "a" ] ~input_dims:[ k ] ~output_dims:[ n ] (),
+      TDSL.ndarray bv ~label:[ tag ^ "b" ] ~input_dims:[ n ] ~output_dims:[ k ] () )
+  in
+  if String.is_substring backend_name ~substring:"cuda" then (
+    let a_off, b_off = tf32_inputs ~tag:"tf32_off_" ~k:n in
+    let%op c_off_serial = a_off * b_off in
+    let%op c_off_mma = a_off * b_off in
+    Numerics.set_policy { tf32_matmuls = false };
+    let want_off = compile_serial ~name:"mm_tf32_off_serial" c_off_serial in
+    let got_off, census_off = compile_mma_with_census ~name:"mm_tf32_off_mma" c_off_mma in
+    let src_off = read_generated "mm_tf32_off_mma" in
+    p "tf32 policy-off matmul matches the serial twin bitwise"
+      (Array.for_all2_exn got_off want_off ~f:Float.equal);
+    p "tf32 policy-off renders and records the scalar fallback"
+      (List.for_all census_off ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_scalar_fallback)
+      && (not (List.is_empty census_off))
+      && Option.value_map src_off ~default:false ~f:(fun src ->
+          String.is_substring src ~substring:"== 0)"
+          && (not (String.is_substring src ~substring:"(wmma-tf32)"))
+          && not (String.is_substring src ~substring:"precision::tf32")));
+
+    Numerics.set_policy { tf32_matmuls = true };
+    let a_on, b_on = tf32_inputs ~tag:"tf32_on_" ~k:n in
+    let%op c_on_serial = a_on * b_on in
+    let%op c_on_mma = a_on * b_on in
+    let want_on = compile_serial ~name:"mm_tf32_on_serial" c_on_serial in
+    let got_on, census_on = compile_mma_with_census ~name:"mm_tf32_on_mma" c_on_mma in
+    let src_on = read_generated "mm_tf32_on_mma" in
+    p "tf32 policy-on matmul matches the serial twin within tolerance"
+      (Array.for_all2_exn got_on want_on ~f:approx_rel);
+    p "tf32 policy-on renders and records wmma tf32"
+      (List.for_all census_on ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
+      && (not (List.is_empty census_on))
+      && Option.value_map src_on ~default:false ~f:(fun src ->
+          String.is_substring src ~substring:"(wmma-tf32)"
+          && String.is_substring src ~substring:"precision::tf32"
+          && String.is_substring src ~substring:"__float_to_tf32"));
+
+    let a_k24, b_k24 = tf32_inputs ~tag:"tf32_k24_" ~k:24 in
+    let%op c_k24_serial = a_k24 * b_k24 in
+    let%op c_k24_mma = a_k24 * b_k24 in
+    let want_k24 = compile_serial ~name:"mm_tf32_k24_serial" c_k24_serial in
+    let got_k24, census_k24 = compile_mma_with_census ~name:"mm_tf32_k24_mma" c_k24_mma in
+    p "tf32 k=24 divergent tile matches and emits"
+      (Array.for_all2_exn got_k24 want_k24 ~f:approx_rel
+      && List.exists census_k24 ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
+      && Option.value_map (read_generated "mm_tf32_k24_mma") ~default:false ~f:(fun src ->
+          String.is_substring src ~substring:"tile_mma 16x32x24 (wmma-tf32)"));
+
+    let atv =
+      Array.init (n * n) ~f:(fun x ->
+          ((Float.of_int (x % 17) -. 8.) *. 0.0625) +. (Float.of_int (x % 7) *. 0.0002))
+    in
+    let btv =
+      Array.init (n * n) ~f:(fun x ->
+          ((Float.of_int (x % 13) -. 6.) *. 0.078125) -. (Float.of_int (x % 3) *. 0.0004))
+    in
+    let at = TDSL.ndarray atv ~label:[ "tf32_at" ] ~output_dims:[ n; n ] () in
+    let bt = TDSL.ndarray btv ~label:[ "tf32_bt" ] ~output_dims:[ n; n ] () in
+    let%op ct_serial = at +* "ki;kj=>ij" bt in
+    let%op ct_mma = at +* "ki;kj=>ij" bt in
+    let want_t = compile_serial ~name:"mm_tf32_ta_serial" ct_serial in
+    let got_t, census_t = compile_mma_with_census ~name:"mm_tf32_ta_mma" ct_mma in
+    p "tf32 transposed-A matmul matches and emits"
+      (Array.for_all2_exn got_t want_t ~f:approx_rel
+      && List.exists census_t ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
+      && Option.value_map (read_generated "mm_tf32_ta_mma") ~default:false ~f:(fun src ->
+          String.is_substring src ~substring:"matrix_a, 16, 16, 8"
+          && String.is_substring src ~substring:"col_major"
+          && String.is_substring src ~substring:"(wmma-tf32)"));
+    Numerics.set_policy { tf32_matmuls = false })
+  else (
+    p "tf32 policy-off matmul matches the serial twin bitwise" true;
+    p "tf32 policy-off renders and records the scalar fallback" true;
+    p "tf32 policy-on matmul matches the serial twin within tolerance" true;
+    p "tf32 policy-on renders and records wmma tf32" true;
+    p "tf32 k=24 divergent tile matches and emits" true;
+    p "tf32 transposed-A matmul matches and emits" true);
+
   let%op mc1 = ma * mb in
   let mma_comp = named "mm_mma" (Train.forward mc1) in
   let transform opt = Sched.apply (mma_schedule ~out:mc1.Tensor.value opt) opt in
