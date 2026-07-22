@@ -182,8 +182,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        (nvrtc's default is below sm_70). Injected only when used, so kernels without tensor cores
        compile exactly as before even where the toolkit headers are absent. The [(wmma-bf16)] and
        [(wmma-tf32)] markers are emitted by [mma_syntax] for bf16 resp. tf32 fragments (both
-       sm_80+); the [(mma-fp8)] marker for the
-       inline-PTX fp8 [mma.sync] path (sm_89+, no header needed). *)
+       sm_80+); the [(mma-fp8)] marker for the inline-PTX fp8 [mma.sync] path (sm_89+, no header
+       needed). *)
     let uses_wmma = String.is_substring cu_src ~substring:"nvcuda::wmma" in
     let cu_src = if uses_wmma then "#include <mma.h>\n" ^ cu_src else cu_src in
     (* Half/bf16 ARITHMETIC intrinsics (unlike the conversions, which cuda_fp16.h/cuda_bf16.h
@@ -523,7 +523,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       (* Fp8 needs [__nv_fp8_e5m2] elements: [Set_from_vec] assigns them to the fp8 array cells
          without a cast, and [__nv_fp8_e5m2] has no assignment from integer types. *)
       | Ops.Fp8_prec _, 16 -> "fp8x16_t"
-      | (Ops.Uint16_prec _ | Ops.Bfloat16_prec _), 8 -> "uint16x8_t"
+      | Ops.Uint16_prec _, 8 -> "uint16x8_t"
+      | Ops.Bfloat16_prec _, 8 -> "bfloat16x8_t"
       | Ops.Half_prec _, 8 -> "half8_t"
       | _, 1 -> typ_of_prec prec
       | _ -> invalid_arg "Cuda_backend.vec_typ_of_prec: invalid combination"
@@ -609,8 +610,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        renders instead) on: other precision combinations, extents not multiples of the intrinsic
        tile, leading dimensions violating wmma's stride constraint (a multiple of 8 elements for
        16-bit types, 4 for f32; the fp8 path loads per-lane bytes and has no stride constraint),
-       thread-space operands (per-thread stacks are not a jointly-owned tile), and devices below
-       the arch floor. *)
+       thread-space operands (per-thread stacks are not a jointly-owned tile), and devices below the
+       arch floor. *)
     let mma_syntax =
       Some
         (fun ~d_prec
@@ -782,19 +783,18 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                     ]
                   else []
                 in
-                (* The serial [k] extent of one block statement: per step, the B-row fragment
-                   loads, the A fragment loads, and the mma updates of the accumulator array [acc].
-                   Shared between the self-contained rendering ([acc] = the block-local
-                   [__mma_acc]) and the update-only rendering against a resident fragment array
-                   (gh-ocannl-480). *)
+                (* The serial [k] extent of one block statement: per step, the B-row fragment loads,
+                   the A fragment loads, and the mma updates of the accumulator array [acc]. Shared
+                   between the self-contained rendering ([acc] = the block-local [__mma_acc]) and
+                   the update-only rendering against a resident fragment array (gh-ocannl-480). *)
                 let k_loop_lines ~ab_typ ~acc =
                   [
                     Printf.sprintf "for (int __ki = 0; __ki < %d; ++__ki) {" kt;
                     Printf.sprintf "  %s __mma_bf[%d];" (frag "matrix_b" ab_typ (Some b_layout)) nt;
                     Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
-                    (* Transposed storage ([tb]): the stored matrix is the role's transpose —
-                       index it at (col, row) and declare the fragment [col_major]; the leading
-                       dimension stays the operand's own. Same for [ta] below. *)
+                    (* Transposed storage ([tb]): the stored matrix is the role's transpose — index
+                       it at (col, row) and declare the fragment [col_major]; the leading dimension
+                       stays the operand's own. Same for [ta] below. *)
                     (if tb then
                        Printf.sprintf
                          "    nvcuda::wmma::load_matrix_sync(__mma_bf[__ni], __mma_bp + __ni * %d \
@@ -813,13 +813,13 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                       Printf.sprintf "    %s __mma_af;" (frag "matrix_a" ab_typ (Some a_layout));
                       (if ta then
                          Printf.sprintf
-                           "    nvcuda::wmma::load_matrix_sync(__mma_af, __mma_ap + __ki * %d * \
-                            %d + __mi * %d, %d);"
+                           "    nvcuda::wmma::load_matrix_sync(__mma_af, __mma_ap + __ki * %d * %d \
+                            + __mi * %d, %d);"
                            wc_tk lda wc_tm lda
                        else
                          Printf.sprintf
-                           "    nvcuda::wmma::load_matrix_sync(__mma_af, __mma_ap + __mi * %d * \
-                            %d + __ki * %d, %d);"
+                           "    nvcuda::wmma::load_matrix_sync(__mma_af, __mma_ap + __mi * %d * %d \
+                            + __ki * %d, %d);"
                            wc_tm lda wc_tk lda);
                     ]
                   @ cvt_lines "__mma_af"
@@ -860,8 +860,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                     Some
                       (group
                          (string
-                            (Printf.sprintf "{ /* tile_mma fragment update %dx%dx%d (wmma%s) */" m
-                               n k marker)
+                            (Printf.sprintf "{ /* tile_mma fragment update %dx%dx%d (wmma%s) */" m n
+                               k marker)
                          ^^ nest 2 (hardline ^^ body)
                          ^^ hardline ^^ rbrace))
                 | _ when ab_ok && ldd % d_ld_mult = 0 && loadable d_space ->
@@ -903,8 +903,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                     in
                     Some
                       (group
-                         (string
-                            (Printf.sprintf "{ /* tile_mma %dx%dx%d (wmma%s) */" m n k marker)
+                         (string (Printf.sprintf "{ /* tile_mma %dx%dx%d (wmma%s) */" m n k marker)
                          ^^ nest 2 (hardline ^^ body)
                          ^^ hardline ^^ rbrace))
                 | _ -> None))
@@ -1056,6 +1055,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Sub, Half_prec _ -> func "__hsub"
       | Mul, Half_prec _ -> func "__hmul"
       | Div, Half_prec _ -> func "__hdiv"
+      | Add, Bfloat16_prec _ -> func "__hadd"
+      | Sub, Bfloat16_prec _ -> func "__hsub"
+      | Mul, Bfloat16_prec _ -> func "__hmul"
+      | Div, Bfloat16_prec _ -> func "__hdiv"
       | Add, _ -> f "+"
       | Sub, _ -> f "-"
       | Mul, _ -> f "*"
@@ -1364,6 +1367,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               ^^ parens (unop_syntax Ops.single v (string "(float)" ^^ parens expr)))
       | Relu, Ops.Single_prec _ -> f "fmaxf(0.0, " ")"
       | Relu, Ops.Half_prec _ -> f "__hmax_nan(__ushort_as_half((unsigned short)0x0000U), " ")"
+      | Relu, Ops.Bfloat16_prec _ ->
+          f "__hmax_nan(__ushort_as_bfloat16((unsigned short)0x0000U), " ")"
       | Relu, Ops.Byte_prec _ -> f "fmax(0, " ")"
       | Relu, _ -> f "fmax(0.0, " ")"
       | Satur01, Byte_prec _ -> f "fmax(0, fmin(1, " "))"
@@ -1447,6 +1452,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
              [Ops.ternop_c_syntax] and Metal emits a fully-bracketed [select(...)] call. *)
           fun v1 v2 v3 -> group (parens (parens v1 ^^ string " ? " ^^ v2 ^^ string " : " ^^ v3))
       | FMA, Ops.Half_prec _ -> func "__hfma"
+      | FMA, Ops.Bfloat16_prec _ -> func "__hfma"
       | FMA, Ops.Single_prec _ -> func "fmaf"
       | FMA, _ -> func "fma"
       | Mul3, _ -> fun v1 v2 v3 -> group (parens (v1 ^^ string " * " ^^ v2 ^^ string " * " ^^ v3))
@@ -1472,6 +1478,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Single_prec _, Uint4x32_prec _ -> ("single_to_uint4x32(", ")")
       (* __nv_fp8_e5m2's constructors are all explicit, so the [.v[0]] arm below would not
          implicitly convert on assignment; spell out the (numeric) constructor call. *)
+      | Uint4x32_prec _, Bfloat16_prec _ -> ("__ushort_as_bfloat16((unsigned short)((", ").v[0]))")
       | Uint4x32_prec _, Fp8_prec _ -> ("(__nv_fp8_e5m2)((", ").v[0])")
       | Uint4x32_prec _, _ -> ("", ".v[0]")
       | Byte_prec _, Uint4x32_prec _ -> ("byte_to_uint4x32(", ")")
