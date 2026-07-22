@@ -2690,7 +2690,12 @@ module C_syntax (B : C_syntax_config) = struct
         let scope_prec = Lazy.force prec in
         let num_typ = string (B.typ_of_prec scope_prec) in
         let init_zero =
-          if needs_init then
+          (* Runtime instrumentation prints both the old and new values for [Set_local]. Even when
+             the computation itself writes this local before reading it ([needs_init = false]), the
+             debug print therefore observes the declaration's value first. Initialize in debug
+             builds so instrumentation does not introduce an undefined read (and backend-specific
+             garbage) into an otherwise well-defined computation. *)
+          if needs_init || Utils.debug_log_from_routines () then
             let prefix, postfix = B.convert_precision ~from:Ops.int32 ~to_:scope_prec in
             string " = " ^^ string prefix ^^ string "0" ^^ string postfix
           else empty

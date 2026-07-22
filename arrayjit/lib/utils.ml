@@ -978,6 +978,7 @@ let add_log_processor ~prefix process_logs =
     { log_processor_prefix = prefix; process_logs } :: !captured_log_processors
 
 external input_scan_line : Stdlib.in_channel -> int = "caml_ml_input_scan_line"
+external flush_c_streams : unit -> unit = "ocannl_flush_c_streams"
 
 let input_line chan =
   let n = input_scan_line chan in
@@ -990,6 +991,7 @@ let capture_stdout_logs arg =
   if never_capture_stdout () || not (debug_log_from_routines ()) then arg ()
   else (
     Stdlib.flush Stdlib.stdout;
+    flush_c_streams ();
     (* Ensure previous stdout is flushed *)
     let original_stdout_fd = Unix.dup Unix.stdout in
 
@@ -1036,6 +1038,7 @@ let capture_stdout_logs arg =
       with exn ->
         (* Ensure cleanup even if arg() fails *)
         Stdlib.flush Stdlib.stdout;
+        flush_c_streams ();
         (* Flush to pipe_write_fd *)
         Unix.close pipe_write_fd;
         (* Signal EOF to reader domain *)
@@ -1068,6 +1071,7 @@ let capture_stdout_logs arg =
 
     (* Normal path: arg() completed successfully *)
     Stdlib.flush Stdlib.stdout;
+    flush_c_streams ();
     (* Flush to pipe_write_fd *)
     Unix.close pipe_write_fd;
 

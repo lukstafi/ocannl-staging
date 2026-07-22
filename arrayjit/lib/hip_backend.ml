@@ -342,7 +342,11 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
 
   let await (device : device) : unit =
     set_ctx device.dev.primary_context;
-    H.Stream.synchronize device.runner
+    (* Device-side [printf] is buffered outside the stream. On ROCm, stream synchronization can
+       return while the printf FIFO is still being copied to host stdout; use device synchronization
+       while routine logging is enabled so callers may safely close or restore stdout afterward. *)
+    if Utils.debug_log_from_routines () then H.Context.synchronize ()
+    else H.Stream.synchronize device.runner
 
   let is_idle (device : device) = H.Stream.is_ready device.runner
 

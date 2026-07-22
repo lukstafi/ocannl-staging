@@ -350,7 +350,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
 
   let await (device : device) : unit =
     set_ctx device.dev.primary_context;
-    Cu.Stream.synchronize device.runner
+    (* Match the HIP logging contract: device-side [printf] must be fully drained before a caller
+       closes or restores captured stdout. The stronger synchronization is debug-only. *)
+    if Utils.debug_log_from_routines () then Cu.Context.synchronize ()
+    else Cu.Stream.synchronize device.runner
 
   let is_idle (device : device) = Cu.Stream.is_ready device.runner
 
