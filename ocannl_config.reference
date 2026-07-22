@@ -257,8 +257,11 @@ autotune_keep_fraction=1
 
 # When non-empty, `Autotune.tune` appends one tab-separated calibration row per timed candidate
 # to this file: backend, digest tag, candidate label, measured ms, model-roofline ms (empty when
-# the model cannot score the candidate), flops, bytes, opaque flag. Every tuning run is free
-# model-vs-measured divergence data for fitting the envelope constants (see model_peak_flops).
+# the model cannot score the candidate), kernel count, flops, bytes, opaque flag. The flops and
+# bytes columns aggregate over the candidate's kernels while the model column sums per-kernel
+# roofline bounds, so fitting the envelope constants from aggregates is exact only for rows with
+# kernel count 1. Every tuning run is free model-vs-measured divergence data for fitting the
+# envelope constants (see model_peak_flops).
 # Relative paths resolve against the working directory. With autotune_log=true the same
 # calibration lines also go to stderr, human-readable.
 autotune_calibration_file=

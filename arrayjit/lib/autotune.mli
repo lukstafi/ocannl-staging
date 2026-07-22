@@ -229,8 +229,10 @@ type model_choice = {
   mc_model_ms : float option;
       (** The winner's roofline lower bound in ms — a ranking score, not a runtime prediction;
           [None] when selection did not run. *)
-  mc_scored : int;  (** Candidates with model coverage (the default pipeline included). *)
-  mc_skipped : int;  (** Candidates without model coverage, excluded from the ranking. *)
+  mc_scored : int;
+      (** Model evaluations that produced a score (the default pipeline included; the fissioned
+          flow also scores per segment). *)
+  mc_skipped : int;  (** Model evaluations without coverage, excluded from the ranking. *)
 }
 
 val model_default_enabled : bool Lazy.t

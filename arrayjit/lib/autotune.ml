@@ -1854,14 +1854,22 @@ let envelope ~(limits : Ir.Backend_intf.hardware_limits) =
 
 (* The roofline lower bound summed over a candidate's kernels; [None] — no model coverage — when
    any kernel is opaque (its counts may UNDER-estimate, so ranking on them could prune the true
-   winner) or when no envelope constant is present. *)
+   winner) or when no envelope constant is present. The kernels run sequentially, so the bound is
+   per-kernel max-of-legs, summed — aggregating flops/bytes first and applying the roofline once
+   would under-price a compute-bound + bandwidth-bound mix to roughly its larger leg. *)
 let summaries_roofline ~peak_flops ~peak_memory_bandwidth (summaries : CM.summary list) :
     float option =
   if List.exists summaries ~f:(fun s -> s.CM.opaque) then None
   else
-    let flops = List.sum (module Int) summaries ~f:(fun s -> s.CM.flops) in
-    let bytes = List.sum (module Int) summaries ~f:CM.total_bytes in
-    CM.roofline_seconds ?peak_flops ?peak_memory_bandwidth ~flops ~bytes ()
+    (* [roofline_seconds] is [None] exactly when no envelope constant is given, uniformly across
+       the folds — the [~flops:0 ~bytes:0] seed keeps that contract for the empty list. *)
+    List.fold summaries
+      ~init:(CM.roofline_seconds ?peak_flops ?peak_memory_bandwidth ~flops:0 ~bytes:0 ())
+      ~f:(fun acc s ->
+        Option.both acc
+          (CM.roofline_seconds ?peak_flops ?peak_memory_bandwidth ~flops:s.CM.flops
+             ~bytes:(CM.total_bytes s) ())
+        |> Option.map ~f:(fun (a, b) -> a +. b))
 
 let model_score ~static_indices ~limits (opt : LL.optimized) (sched : Sched.schedule) :
     float option =
@@ -1990,14 +1998,18 @@ let emit_calibration ~backend ~limits ~label ~digest ~measured_ms (opts : LL.opt
           s *. 1e3)
     in
     let model_str = function Some m -> Printf.sprintf "%.6f" m | None -> "" in
-    logf "calibration: %s measured %.4f ms, model %s, flops %d, bytes %d%s" label measured_ms
+    let n_kernels = List.length summaries in
+    logf "calibration: %s measured %.4f ms, model %s, %d kernel%s, flops %d, bytes %d%s" label
+      measured_ms
       (match model_ms with Some m -> Printf.sprintf "%.6f ms" m | None -> "n/a")
+      n_kernels
+      (if n_kernels = 1 then "" else "s")
       flops bytes
       (if opaque then " (opaque: counts may under-estimate)" else "");
     if not (String.is_empty file) then
       let line =
-        Printf.sprintf "%s\t%s\t%s\t%.6f\t%s\t%d\t%d\t%b\n" backend (dshort digest) label
-          measured_ms (model_str model_ms) flops bytes opaque
+        Printf.sprintf "%s\t%s\t%s\t%.6f\t%s\t%d\t%d\t%d\t%b\n" backend (dshort digest) label
+          measured_ms (model_str model_ms) n_kernels flops bytes opaque
       in
       try
         Stdio.Out_channel.with_file file ~append:true ~f:(fun oc ->
@@ -2430,8 +2442,10 @@ type model_choice = {
       (** The winner's roofline lower bound in ms — a ranking score, not a runtime prediction;
           [None] when selection did not run (no envelope constants, automatic scheduling disabled,
           or the default itself had no model coverage). *)
-  mc_scored : int;  (** Candidates with model coverage (the default pipeline included). *)
-  mc_skipped : int;  (** Candidates without model coverage, excluded from ranking. *)
+  mc_scored : int;
+      (** Model evaluations that produced a score (the default pipeline included; the fissioned
+          flow also scores per segment). *)
+  mc_skipped : int;  (** Model evaluations without coverage, excluded from ranking. *)
 }
 
 let model_default_enabled =
