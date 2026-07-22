@@ -90,9 +90,11 @@ opam install hipjit   # for AMD HIP backend
    - Operations in `Operation`, `TDSL`, `NTDSL` return functions with `Tensor.op_fun` type, so that shapes can be specified at call sites if needed
    -  Operations in `TDSL.O` (opened for `%op`), `NTDSL.O` (opened for `%cd`) hide this so that shapes have to be inferred
    
-3. **Backend Architecture**: Unified interface supporting CPU (multicore), CUDA, and Metal backends
+3. **Backend Architecture**: Unified interface supporting CPU (multicore), CUDA, HIP, and Metal backends
 
-4. **Memory Management**: Sophisticated tensor node memory modes (Virtual, Local, On_device, Hosted) with automatic host transfers
+4. **Memory Management**: Tensor node memory modes are `Virtual`, `Local`, and `On_device`.
+   CPU-side reads and writes are explicit, context-mediated operations
+   (`Context.to_host`/`from_host`, `get_values`/`set_values`).
 
 ## Development Workflow
 
