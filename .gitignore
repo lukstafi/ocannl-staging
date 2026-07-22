@@ -42,7 +42,9 @@ log_files/
 build_files/
 
 # Autotune schedule caches: the default cache dir (autotune_cache_dir) plus the
-# per-test dirs used by test/operations/autotune_{smoke,fission_sketch}.ml.
+# per-test dirs named at the tests' Autotune.tune ~cache_dir call sites (they appear
+# here only when a test exe is run from the repo root by hand; under dune runtest the
+# cwd is inside _build/).
 # Root-anchored: same-named dirs under test/config/ hold tracked fixtures, and an
 # unanchored pattern would silently ignore a fixture regenerated under a new digest.
 /autotune_cache/
@@ -50,6 +52,13 @@ build_files/
 /autotune_fission_cache/
 /autotune_fission_cache2/
 /autotune_sketch_cache/
+/conv_tune_cache/
+/conv_tune_cache_aligned/
+/conv_tune_cache_blocked/
+/conv_tune_cache_gpu/
+/conv_tune_cache_merged_blocked/
+/epilogue_tune_cache/
+/symbolic_extent_tune_cache/
 
 # Test artifacts written to the working directory
 # (test/operations/test_safetensors.ml, test/training/tokenizer_roundtrip.ml).
