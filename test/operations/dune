@@ -979,6 +979,7 @@
     %{dep:../../ocannl_config.reference}
     %{dep:../../arrayjit/lib/utils.ml}
     %{dep:../../arrayjit/lib/affine.ml}
+    %{dep:../../arrayjit/lib/numerics.ml}
     %{dep:../../arrayjit/lib/backends.ml}
     %{dep:../../arrayjit/lib/c_syntax.ml}
     %{dep:../../arrayjit/lib/cc_backend.ml}

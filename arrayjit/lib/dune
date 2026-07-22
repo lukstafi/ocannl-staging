@@ -51,6 +51,7 @@
  (modules
   ops
   interval
+  numerics
   ndarray
   indexing
   affine

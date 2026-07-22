@@ -455,6 +455,13 @@ prefer_backend_uniformity=false
 # gradients can be changed separately via the `Tensor` API.
 default_prec=single
 
+# Numerics policy: allow tensor-core matmuls over uniform-f32 operands to compute in tf32
+# (f32's exponent range, 10-bit mantissa, f32 accumulation) on backends with a tf32 tile shape
+# (CUDA sm_80+). Off by default because enabling it silently changes numerics (PyTorch-style
+# opt-in). Metal (genuine f32 simdgroup tiles) and HIP (no tf32-like shape) are unaffected.
+# Programmatic override: `Ir.Numerics.set_policy`.
+tf32_matmuls=false
+
 # Limit on the allowed size of unrolled constant tensor nodes
 # (where the initialization code sets the values).
 limit_constant_fill_size=16
