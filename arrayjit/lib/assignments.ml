@@ -724,7 +724,7 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
           | Ops.Uint4x32_to_prec_uniform ->
               (* Prevent over-eager guard against forcing precision. *)
               ignore (Lazy.force lhs.dims);
-              Ops.vec_unop_lanes (Lazy.force lhs.prec)
+              Ops.vec_unop_lanes (Lazy.force lhs.storage_prec)
         in
         (* [Set_from_vec] stores [length] lanes at flat consecutive offsets; a padded (halo) target
            breaks that assumption across rows, and would make the random stream layout-dependent.
@@ -780,7 +780,7 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
              scalar stores (gh-ocannl-293 293a). Without this the alias [lhs] -- which owns no
              buffer and is excluded from [ctx_buffers] -- would be a write target the backend cannot
              link. The parent is unpadded by alias eligibility, and its precision matches the
-             slice's, so [length] (computed from [lhs.prec] above) stays correct. *)
+             slice's, so [length] (computed from [lhs.storage_prec] above) stays correct. *)
           let lhs, lhs_idcs = resolve_alias lhs lhs_idcs in
           Set_from_vec
             {
@@ -973,7 +973,7 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
     let pdims = Lazy.force sliced.Tn.dims and cdims = Lazy.force array.Tn.dims in
     Array.length pdims = Array.length cdims + 1
     && Array.equal Int.equal (Array.subo pdims ~pos:1) cdims
-    && Ops.equal_prec (Lazy.force array.Tn.prec) (Lazy.force sliced.Tn.prec)
+    && Ops.equal_prec (Lazy.force array.Tn.storage_prec) (Lazy.force sliced.Tn.storage_prec)
     (* Alias-ness is a semantic fact settled deterministically at assignments lowering, BEFORE
        per-lineage placement decisions diverge (context-scoped memory modes, category 1). So
        eligibility may consult only lineage-independent facts -- shapes, precision, padding, and the

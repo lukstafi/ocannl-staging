@@ -142,6 +142,8 @@ let known_config_keys =
       "model_default_schedule";
       "model_peak_flops";
       "model_peak_memory_bandwidth";
+      (* Numerics policy (gh-ocannl-478) *)
+      "tf32_matmuls";
       (* Identifiers and other *)
       "ll_ident_style";
       "cd_ident_style";

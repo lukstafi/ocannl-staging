@@ -352,7 +352,18 @@ module Impl = struct
              (if
                 Array.for_all (Lazy.force metal_devices) ~f:(fun d ->
                     Me.Device.supports_family d Me.Device.GPUFamily.Apple7)
-              then Some { Backend_intf.mma_simd_width = 32; mma_tile = (8, 8, 8) }
+              then
+                Some
+                  {
+                    Backend_intf.mma_simd_width = 32;
+                    mma_tile = (8, 8, 8);
+                    mma_format_tiles =
+                      [
+                        ((Backend_intf.Mma_f32, Backend_intf.Mma_f32), (8, 8, 8));
+                        ((Backend_intf.Mma_f16, Backend_intf.Mma_f16), (8, 8, 8));
+                        ((Backend_intf.Mma_bf16, Backend_intf.Mma_bf16), (8, 8, 8));
+                      ];
+                  }
               else None);
            simd_vector_bytes = 0;
            (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the
@@ -432,7 +443,9 @@ module Impl = struct
     | No, Some dst_loc ->
         memcpy ~dst_ptr:(Slab.resolve_pool dst.device dst_loc) ~dst_offset:dst_loc.offset
     | Copy, _ ->
-        opt_alloc_merge_buffer ?mode:(Option.map tn.Tn.memory_mode ~f:fst) ~size_in_bytes dst.device;
+        opt_alloc_merge_buffer
+          ?mode:(Option.map tn.Tn.memory_mode_intent ~f:fst)
+          ~size_in_bytes dst.device;
         let loc = Option.value_exn ~here:[%here] !(dst.device.merge_buffer) in
         memcpy ~dst_ptr:(Slab.resolve_pool dst.device loc) ~dst_offset:loc.offset
 

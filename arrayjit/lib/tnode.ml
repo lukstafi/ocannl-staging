@@ -83,7 +83,7 @@ let set_current_namespace ns =
 let get_current_namespace () = !current_namespace
 
 type t = {
-  prec : Ops.prec Lazy.t;
+  storage_prec : Ops.prec Lazy.t;
   dims : int array Lazy.t;
   padding : (Ops.axis_padding array * float) option Lazy.t;
       (** If the tensor node is pre-padded, this is the pair of (left padding, right padding) per
@@ -114,10 +114,10 @@ type t = {
       (** Display information. It is better if the last element of the list is the most narrow or
           alphanumeric, e.g. an identifier. *)
   mutable delayed_prec_unsafe : delayed_prec;
-      (** Participates in the computation of {!field-prec}. *)
+      (** Participates in the computation of {!field-storage_prec}. *)
   mutable bounds : bounds_state;
       (** Scalar value bounds summary; see {!bounds_state} for the lifecycle. *)
-  mutable memory_mode : (memory_mode * int) option;
+  mutable memory_mode_intent : (memory_mode * int) option;
       (** The tnode's {e declared intent} -- requests made at graph-construction time (parameter and
           constant marking, [Train.set_materialized], op-support [Never_virtual]), paired with a
           provenance identifier. Since the context-scoped memory-modes split
@@ -145,7 +145,7 @@ type t = {
       (** When [Some (parent, batch_idx)], this node is a zero-copy slice-alias *view* of [parent]:
           it owns no buffer of its own, and every read/write of it is redirected (during lowering)
           to [parent] with [batch_idx] prepended as the leading index. Set by {!Assignments.lower}
-          for alias-eligible [Fetch.Slice]s; orthogonal to {!field-memory_mode}. The strong
+          for alias-eligible [Fetch.Slice]s; orthogonal to {!field-memory_mode_intent}. The strong
           reference to [parent] also keeps it reachable for as long as the alias is. *)
   mutable slice_of : ((t * Indexing.static_symbol) option[@sexp.opaque]);
       (** When [Some (parent, batch_idx)], this node is an [\@|] sub-tensor slice of [parent]. Set
@@ -252,7 +252,7 @@ let log_debug_info ~from_log_level tn =
         "label:",
         (tn.label : string list),
         "mem:",
-        debug_memory_mode tn.memory_mode,
+        debug_memory_mode tn.memory_mode_intent,
         "backends:",
         (tn.backend_info : Sexp.t)]]]
 
@@ -264,14 +264,14 @@ let most_local_materialized_mode tn =
   in
   if
     stack_threshold_in_bytes > 0
-    && num_elems tn > stack_threshold_in_bytes / (Ops.prec_in_bytes @@ Lazy.force tn.prec)
+    && num_elems tn > stack_threshold_in_bytes / (Ops.prec_in_bytes @@ Lazy.force tn.storage_prec)
   then On_device
   else Local
 
 (* Note (context-scoped memory modes): the tnode-level forcing family ([is_virtual_force],
    [is_materialized_force], [is_in_context_force], [default_to_most_local], [is_materialized_peek])
-   was removed -- {!field-memory_mode} now holds only declared intent, side-effect free to read.
-   Settlement lives in {!module-Placements}, per compilation lineage. *)
+   was removed -- {!field-memory_mode_intent} now holds only declared intent, side-effect free to
+   read. Settlement lives in {!module-Placements}, per compilation lineage. *)
 
 let is_observable tn = tn.observable
 
@@ -299,10 +299,10 @@ let slice_of tn = tn.slice_of
 let set_slice_of tn ~parent ~batch_idx = tn.slice_of <- Some (parent, batch_idx)
 
 let known_not_materialized tn =
-  match tn.memory_mode with Some ((Virtual | Local), _) -> true | _ -> false
+  match tn.memory_mode_intent with Some ((Virtual | Local), _) -> true | _ -> false
 
 let known_constant tn =
-  match tn.memory_mode with Some (Effectively_constant, _) -> true | _ -> false
+  match tn.memory_mode_intent with Some (Effectively_constant, _) -> true | _ -> false
 
 (** Whether [tn]'s values are declared fixed at construction, forever equal to its registered
     host-init data (see {!field-host_constant}). Includes [known_constant] intent: small constants
@@ -315,12 +315,14 @@ let known_host_constant tn = tn.host_constant || known_constant tn
 let set_host_constant tn = tn.host_constant <- true
 
 let known_non_virtual tn =
-  match tn.memory_mode with None | Some ((Virtual | Effectively_constant), _) -> false | _ -> true
+  match tn.memory_mode_intent with
+  | None | Some ((Virtual | Effectively_constant), _) -> false
+  | _ -> true
 
-let known_virtual tn = match tn.memory_mode with Some (Virtual, _) -> true | _ -> false
+let known_virtual tn = match tn.memory_mode_intent with Some (Virtual, _) -> true | _ -> false
 
 let mode_is_unspecified tn =
-  match tn.memory_mode with
+  match tn.memory_mode_intent with
   | None | Some ((Never_virtual | Effectively_constant), _) -> true
   | _ -> false
 
@@ -360,8 +362,8 @@ let transition_memory_mode ~debug_name:name current mode provenance =
            %{name}"]
 
 let update_memory_mode tn mode provenance =
-  tn.memory_mode <-
-    Some (transition_memory_mode ~debug_name:(debug_name tn) tn.memory_mode mode provenance)
+  tn.memory_mode_intent <-
+    Some (transition_memory_mode ~debug_name:(debug_name tn) tn.memory_mode_intent mode provenance)
 
 let update_prec ?only_if tn prec =
   let do_update =
@@ -375,8 +377,8 @@ let update_prec ?only_if tn prec =
         | _ -> true)
   in
   if do_update then
-    if Lazy.is_val tn.prec then (
-      if not @@ Ops.equal_prec (Lazy.force tn.prec) prec then
+    if Lazy.is_val tn.storage_prec then (
+      if not @@ Ops.equal_prec (Lazy.force tn.storage_prec) prec then
         raise
         @@ Utils.User_error
              (String.concat
@@ -386,7 +388,7 @@ let update_prec ?only_if tn prec =
                   " for ";
                   debug_name tn;
                   " but the settled precision is ";
-                  Ops.prec_string (Lazy.force tn.prec);
+                  Ops.prec_string (Lazy.force tn.storage_prec);
                 ]))
     else
       match (tn.delayed_prec_unsafe, only_if) with
@@ -400,7 +402,7 @@ let update_prec ?only_if tn prec =
                     " for ";
                     debug_name tn;
                     ", but the precision is already set to ";
-                    Ops.prec_string (Lazy.force tn.prec);
+                    Ops.prec_string (Lazy.force tn.storage_prec);
                   ])
       | Inferred old_prec, Some cond ->
           tn.delayed_prec_unsafe <-
@@ -424,7 +426,7 @@ let update_infer_prec ?only_if tn delayed_prec =
         | _ -> true)
   in
   if do_update then
-    if Lazy.is_val tn.prec then
+    if Lazy.is_val tn.storage_prec then
       raise
       @@ Utils.User_error
            (String.concat
@@ -544,7 +546,7 @@ let scan_host_bounds (prec : Ops.prec) (nd : Nd.t) : Interval.t =
     ([Context.from_host]-mediated writes and link-time [Host_inits] uploads). No-op for float and
     opaque precisions, and when the candidate is already pinned to [top]. *)
 let propose_bounds_from_host tn (nd : Nd.t) =
-  let prec = Lazy.force tn.prec in
+  let prec = Lazy.force tn.storage_prec in
   if bounds_scan_worthwhile prec then
     match tn.bounds with
     | (Bounds_proposed iv | Bounds_settled iv) when Interval.is_top iv ->
@@ -572,12 +574,12 @@ end
 (** {2 Per-context placement resolution}
 
     The context-scoped side of the memory-mode split
-    (docs/proposals/context-scoped-memory-modes.md): {!field-memory_mode} on the tnode is *declared
-    intent* -- requests made at graph-construction time (user [set_materialized], parameter/constant
-    marking, op-support [Never_virtual]) -- while the *decisions* (resolving to [Virtual] / [Local]
-    / [On_device]) are recorded here, per compilation lineage. A [Placements] table rides
-    [Low_level.optimize_ctx]: it is copied at the start of each backend [compile], so sibling
-    compiles from the same context are hermetic (a candidate compile cannot poison another's
+    (docs/proposals/context-scoped-memory-modes.md): {!field-memory_mode_intent} on the tnode is
+    *declared intent* -- requests made at graph-construction time (user [set_materialized],
+    parameter/constant marking, op-support [Never_virtual]) -- while the *decisions* (resolving to
+    [Virtual] / [Local] / [On_device]) are recorded here, per compilation lineage. A [Placements]
+    table rides [Low_level.optimize_ctx]: it is copied at the start of each backend [compile], so
+    sibling compiles from the same context are hermetic (a candidate compile cannot poison another's
     placement resolution), while child contexts inherit the lineage's decisions.
 
     Lookups fall back to the tnode's intent when the lineage has not yet decided; updates apply the
@@ -609,7 +611,8 @@ module Placements = struct
 
   (** The effective placement state: the lineage's decision if any, otherwise the tnode's declared
       intent. Side-effect free. *)
-  let get p tn = match Hashtbl.find p.table tn with Some e -> Some e | None -> tn.memory_mode
+  let get p tn =
+    match Hashtbl.find p.table tn with Some e -> Some e | None -> tn.memory_mode_intent
 
   let update p tn mode provenance =
     Hashtbl.set p.table ~key:tn
@@ -749,7 +752,7 @@ let dims_to_string ?(with_axis_numbers = false) arr =
       Nd.int_dims_to_string ~with_axis_numbers ?padding @@ Lazy.force arr.dims
     else "<not-in-yet>"
   in
-  Ops.prec_string (Lazy.force arr.prec) ^ " prec " ^ dims_s
+  Ops.prec_string (Lazy.force arr.storage_prec) ^ " prec " ^ dims_s
 
 let no_grad_ident_label tn =
   let components = List.filter tn.label ~f:(fun i -> is_alphanum_ i) in
@@ -818,7 +821,7 @@ let header tn =
   [%string
     {|%{id tn} %{label tn} as %{
       styled_ident ~repeating_nograd_idents ~repeating_grad_idents (`Heuristic_ocannl `Dot_grad) tn
-    }: %{debug_memory_mode tn.memory_mode}; %{dims_to_string tn}; mem in bytes: %{mem_size}%{
+    }: %{debug_memory_mode tn.memory_mode_intent}; %{dims_to_string tn}; mem in bytes: %{mem_size}%{
     if debug then "; debug: " ^ Sexp.to_string_hum tn.backend_info else ""}|}]
 
 module Registry = Stdlib.Weak.Make (struct
@@ -877,12 +880,12 @@ let create ?namespace delayed_prec ~id ~label ~unpadded_dims ~padding () =
   let rec size_in_bytes =
     lazy
       (let n = num_elems tn in
-       n * Ops.prec_in_bytes (Lazy.force tn.prec))
+       n * Ops.prec_in_bytes (Lazy.force tn.storage_prec))
   and tn =
     {
       delayed_prec_unsafe = delayed_prec;
       bounds = Bounds_unknown;
-      prec = lazy (prec_of_dalayed tn);
+      storage_prec = lazy (prec_of_dalayed tn);
       dims;
       padding;
       size_in_bytes;
@@ -890,7 +893,7 @@ let create ?namespace delayed_prec ~id ~label ~unpadded_dims ~padding () =
       namespace;
       uid = fresh_uid ();
       label;
-      memory_mode = None;
+      memory_mode_intent = None;
       observable = false;
       host_constant = false;
       alias_of = None;
@@ -926,7 +929,7 @@ let create_from_padded ?namespace ~id ~label ~ndarray ~padding () =
     {
       delayed_prec_unsafe = Specified prec_val;
       bounds = Bounds_unknown;
-      prec = lazy (prec_of_dalayed tn);
+      storage_prec = lazy (prec_of_dalayed tn);
       dims = lazy dims_val;
       padding = lazy padding;
       size_in_bytes;
@@ -934,7 +937,7 @@ let create_from_padded ?namespace ~id ~label ~ndarray ~padding () =
       namespace;
       uid = fresh_uid ();
       label;
-      memory_mode = Some (On_device, 49);
+      memory_mode_intent = Some (On_device, 49);
       observable = false;
       host_constant = false;
       alias_of = None;
@@ -1009,12 +1012,12 @@ let create_with_reshape ~id ~label ~base_ndarray ~unpadded_dims ~padding ~from_p
   and size_in_bytes =
     lazy
       (let n = num_elems tn in
-       n * Ops.prec_in_bytes (Lazy.force tn.prec))
+       n * Ops.prec_in_bytes (Lazy.force tn.storage_prec))
   and tn =
     {
       delayed_prec_unsafe = Specified prec_val;
       bounds = Bounds_unknown;
-      prec = lazy (prec_of_dalayed tn);
+      storage_prec = lazy (prec_of_dalayed tn);
       dims;
       padding;
       size_in_bytes;
@@ -1022,7 +1025,7 @@ let create_with_reshape ~id ~label ~base_ndarray ~unpadded_dims ~padding ~from_p
       namespace;
       uid = fresh_uid ();
       label;
-      memory_mode = Some (On_device, 49);
+      memory_mode_intent = Some (On_device, 49);
       observable = false;
       host_constant = false;
       alias_of = None;
@@ -1040,7 +1043,7 @@ let initial_default_prec =
 let find_namespaced =
   let mock =
     {
-      prec = lazy initial_default_prec;
+      storage_prec = lazy initial_default_prec;
       delayed_prec_unsafe = Specified initial_default_prec;
       bounds = Bounds_unknown;
       dims = lazy [||];
@@ -1050,7 +1053,7 @@ let find_namespaced =
       namespace = default_namespace;
       uid = -1;
       label = [];
-      memory_mode = None;
+      memory_mode_intent = None;
       observable = false;
       host_constant = false;
       alias_of = None;

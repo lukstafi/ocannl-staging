@@ -75,8 +75,8 @@ let make_local_scope_reduction ~table ~ids ~result ~table_idcs ~vocab ~bounds ~r
   let b = Idx.get_symbol () and d = Idx.get_symbol () and k = Idx.get_symbol () in
   let table_idcs = table_idcs k d in
   let from_, to_ = bounds in
-  let iprec = Lazy.force ids.Tn.prec in
-  let vprec = Lazy.force table.Tn.prec in
+  let iprec = Lazy.force ids.Tn.storage_prec in
+  let vprec = Lazy.force table.Tn.storage_prec in
   let cmpeq =
     let kside = (LL.Embed_index (Idx.Iterator k), iprec) in
     let idside = (LL.Get (ids, [| Idx.Iterator b |]), iprec) in
@@ -192,8 +192,8 @@ let make_transposed_loop ~d_table ~ids ~g ~lhs_idcs ~bounds ~fma =
   let b = Idx.get_symbol () and d = Idx.get_symbol () and k = Idx.get_symbol () in
   let lhs_idcs = lhs_idcs k d in
   let from_, to_ = bounds in
-  let iprec = Lazy.force ids.Tn.prec in
-  let vprec = Lazy.force d_table.Tn.prec in
+  let iprec = Lazy.force ids.Tn.storage_prec in
+  let vprec = Lazy.force d_table.Tn.storage_prec in
   let cmpeq =
     LL.Binop
       ( Ops.Cmpeq,

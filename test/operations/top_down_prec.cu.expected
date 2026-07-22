@@ -19,6 +19,6 @@ extern "C" __global__ void d_fwd(
 
   /* Main logic. */
   /* d fwd */
-  d[0] = (((__nv_bfloat16)(a[0]) + (__nv_bfloat16)(b[0])) * c[0]);
+  d[0] = __hmul(__hadd((__nv_bfloat16)(a[0]), (__nv_bfloat16)(b[0])), c[0]);
   /* end */
 }

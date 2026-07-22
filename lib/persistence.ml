@@ -215,7 +215,7 @@ let save ~ctx ~appending t_set path =
   (* Collect current tensor data *)
   let new_entries =
     List.map tn_list ~f:(fun tn ->
-        let prec = Lazy.force tn.Tn.prec in
+        let prec = Lazy.force tn.Tn.storage_prec in
         let dims = Lazy.force tn.Tn.dims in
         let padding = Lazy.force tn.Tn.padding in
         let byte_length = compute_byte_length prec dims padding in
@@ -395,7 +395,7 @@ let restore ~ctx t_set path =
           | None -> failwith ("restore: tensor " ^ Tn.id tn ^ " not found in checkpoint")
           | Some meta ->
               (* Verify precision matches *)
-              let tn_prec = Lazy.force tn.Tn.prec in
+              let tn_prec = Lazy.force tn.Tn.storage_prec in
               if not (Ops.equal_prec tn_prec meta.prec) then
                 failwith ("restore: precision mismatch for tensor " ^ Tn.id tn);
               (* Verify padded dims match *)

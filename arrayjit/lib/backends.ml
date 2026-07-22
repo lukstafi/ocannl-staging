@@ -105,7 +105,7 @@ let plan_arena_offsets ~(cap : int) (items : (int * int * string * (int * int) o
   if !total > cap then None else Some (Array.to_list offsets, !total)
 
 let size_in_bytes_of (key : Tn.t) =
-  let prec = Lazy.force key.Tn.prec in
+  let prec = Lazy.force key.Tn.storage_prec in
   Array.fold (Lazy.force key.Tn.dims) ~init:1 ~f:( * ) * Ops.prec_in_bytes prec
 
 (* gh-ocannl-489: whether [tn]'s buffer shares bytes with another node's in [ctx_buffers] -- i.e.
@@ -182,13 +182,13 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
   let allocate (device : _ Backend_intf.device) (tn : Tn.t) ~zero_init : Backend_intf.buffer_loc =
     let pool_id = device.next_pool_id in
     device.next_pool_id <- pool_id + 1;
-    let prec = Lazy.force tn.Tn.prec in
+    let prec = Lazy.force tn.Tn.storage_prec in
     (* Compute the byte size from dims*prec rather than forcing [tn.size_in_bytes], to keep the
        node's debug printout (and lazy-forcing behavior) byte-for-byte as before. *)
     let size_in_bytes =
       Array.fold (Lazy.force tn.Tn.dims) ~init:1 ~f:( * ) * Ops.prec_in_bytes prec
     in
-    let mode = Option.map tn.Tn.memory_mode ~f:fst in
+    let mode = Option.map tn.Tn.memory_mode_intent ~f:fst in
     Backend.alloc_pool ?mode device ~pool_id ~size_in_bytes ~alignment:(Ops.prec_in_bytes prec);
     if zero_init then Backend.memset_zero device ~pool_id ~offset:0 ~size_in_bytes;
     { pool_id; offset = 0 }
@@ -544,9 +544,9 @@ struct
                larger node arrives ([alloc_pool] overwrites the reserved pool-id entry). *)
             if s.merge_buffer_capacity < size_in_bytes then (
               alloc_pool
-                ?mode:(Option.map tn.Tnode.memory_mode ~f:fst)
+                ?mode:(Option.map tn.Tnode.memory_mode_intent ~f:fst)
                 s ~pool_id:merge_buffer_pool_id ~size_in_bytes
-                ~alignment:(Ops.prec_in_bytes (Lazy.force tn.Tnode.prec));
+                ~alignment:(Ops.prec_in_bytes (Lazy.force tn.Tnode.storage_prec));
               s.merge_buffer_capacity <- size_in_bytes);
             let loc = { pool_id = merge_buffer_pool_id; offset = 0 } in
             s.merge_buffer := Some loc;
@@ -849,7 +849,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
              ≤31 bytes of padding per node. *)
           List.map group ~f:(fun (key, _) ->
               ( size_in_bytes_of key,
-                max (Ops.prec_in_bytes (Lazy.force key.Tn.prec)) Ops.buffer_alignment ))
+                max (Ops.prec_in_bytes (Lazy.force key.Tn.storage_prec)) Ops.buffer_alignment ))
         in
         (* gh-ocannl-489: with a liveness plan (the working group under [buffer_aliasing]), lay the
            group out as one arena where liveness-disjoint same-precision nodes overlap. Falls back
@@ -858,7 +858,10 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
           Option.bind arena ~f:(fun spans ->
               plan_arena_offsets ~cap
                 (List.map2_exn group items ~f:(fun (key, _) (size, align) ->
-                     (size, align, Ops.prec_string (Lazy.force key.Tn.prec), Hashtbl.find spans key))))
+                     ( size,
+                       align,
+                       Ops.prec_string (Lazy.force key.Tn.storage_prec),
+                       Hashtbl.find spans key ))))
         in
         match arena_layout with
         | Some (offsets, total) ->
@@ -866,7 +869,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
             device.next_pool_id <- pool_id + 1;
             let alignment =
               List.fold group ~init:1 ~f:(fun a (key, _) ->
-                  max a (Ops.prec_in_bytes (Lazy.force key.Tn.prec)))
+                  max a (Ops.prec_in_bytes (Lazy.force key.Tn.storage_prec)))
             in
             alloc_pool device ~pool_id ~size_in_bytes:total ~alignment;
             List.iter2_exn group offsets ~f:(fun entry offset ->
@@ -907,7 +910,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
                holds. *)
             let seg_align = Array.map seg_pool_ids ~f:(fun _ -> ref 1) in
             List.iter2_exn group assignments ~f:(fun (key, _) (seg, _) ->
-                let a = Ops.prec_in_bytes (Lazy.force key.Tn.prec) in
+                let a = Ops.prec_in_bytes (Lazy.force key.Tn.storage_prec) in
                 if a > !(seg_align.(seg)) then seg_align.(seg) := a);
             Array.iteri seg_pool_ids ~f:(fun seg (pool_id, size_in_bytes) ->
                 alloc_pool device ~pool_id ~size_in_bytes ~alignment:!(seg_align.(seg)));

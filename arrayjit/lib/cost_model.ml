@@ -76,7 +76,7 @@ let footprints (accesses : Tn.t Affine.access list) : (Tn.t * node_footprint) li
       Hashtbl.set tbl ~key:a.a_tn ~data:next);
   List.rev_map !order ~f:(fun tn ->
       let reads, writes, rmws, nreads, nwrites, apx = Hashtbl.find_exn tbl tn in
-      let width = Ops.prec_in_bytes (Lazy.force tn.Tn.prec) in
+      let width = Ops.prec_in_bytes (Lazy.force tn.Tn.storage_prec) in
       let node_bytes = Tn.num_elems tn * width in
       let cap n = min node_bytes (n * width) in
       ( tn,

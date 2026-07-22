@@ -12,4 +12,5 @@ module Train = Train
 module Parallel = Parallel
 module Nn_blocks = Nn_blocks
 module Persistence = Persistence
+module Precision_policy = Precision_policy
 module Safetensors = Safetensors
