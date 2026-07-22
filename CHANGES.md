@@ -10,6 +10,23 @@
 
 ### Added
 
+- **Numerics policy with tf32 matmuls** (gh-ocannl-478): `Ir.Numerics` is a record of
+  compute-precision decisions — user-chosen, never optimizer-chosen, identical across sibling
+  autotune candidates. Its first field, the opt-in `tf32_matmuls` config key (default false,
+  PyTorch-style), routes CUDA uniform-f32 GEMMs through wmma `precision::tf32` (m16n16k8,
+  sm_80+) instead of the scalar fallback; off keeps full f32 numerics. Compute precisions like
+  tf32 have no byte layout and never appear as a tensor node's storage precision.
+- **Precision-assignment policy over a model** (gh-ocannl-492 task 1):
+  `Ocannl.Precision_policy.apply` assigns storage precisions across a tensor graph by structural
+  class (params / activations / gradients) instead of hand-annotating every tensor.
+  User-specified precisions win; integer and uint4x32 (RNG) chains are protected; the `except`
+  predicate pins matched nodes at the session default (a skip would be undone by top-down
+  precision inference). Verified by an executed f32-vs-bf16 parity test, not only settled-
+  precision pins.
+- **Tensor-core input-format vocabulary** (gh-ocannl-481 groundwork):
+  `Backend_intf.mma_input_format` (f32, tf32, f16, bf16, fp8-e5m2) with per-(a, b)-operand-pair
+  intrinsic tile shapes in `mma_capability.mma_format_tiles`; a future e4m3 (and mixed
+  e5m2×e4m3) needs only a constructor and descriptor entries.
 - **Partition / index-set-splitting transform** (gh-ocannl-508): `Schedule.Partition` splits a
   Serial loop's range at static affine breakpoints into separate, individually specialized (and
   individually schedulable) segment nests; per-segment interval folding then erases the guards
@@ -67,6 +84,9 @@
 
 ### Changed
 
+- **`Tnode.t` field renames**: `memory_mode` is now `memory_mode_intent` (it has been intent-only
+  since the context-scoped `Placements` migration) and `prec` is now `storage_prec` (the settled
+  bytes-in-buffers precision, as opposed to the compute precisions the numerics policy governs).
 - **Packed `uniform` is total over shapes** (gh-ocannl-509, tasks 1-3): the result's element
   count no longer needs to be a multiple of the 128-bit block width (`16 / bytes-per-element`).
   Shape inference gives the counter `ceil(total / lanes)` blocks via a round-up mode of the
