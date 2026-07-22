@@ -1508,6 +1508,36 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; Run by a rule (not a test stanza) so the backend and the model_peak_* envelope overrides are
+; pinned on the command line: the C backends carry no advisory envelope constants, and pinning
+; makes the roofline-scoring output deterministic across the backend test matrix.
+
+(executable
+ (name cost_model_selection)
+ (modules cost_model_selection)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(rule
+ (target cost_model_selection.actual)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (action
+  (with-stdout-to
+   %{target}
+   (run
+    %{dep:cost_model_selection.exe}
+    "--ocannl_backend=cc"
+    "--ocannl_model_peak_flops=1e12"
+    "--ocannl_model_peak_memory_bandwidth=1e6"))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff cost_model_selection.expected cost_model_selection.actual)))
+
 (test
  (name read_before_write_flip)
  (package neural_nets_lib)

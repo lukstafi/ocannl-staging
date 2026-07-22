@@ -245,6 +245,47 @@ autotune_cache_dir=autotune_cache
 # quality; independent of the ppx_minidebug log levels.
 autotune_log=false
 
+# The analytic-cost-model pre-filter of `Autotune.tune`'s sketch seeding (gh-ocannl-491): per
+# candidate family (the whole-routine sketches; each fission segment's sketches), candidates are
+# ranked by the roofline model and only the best `autotune_keep_fraction` of the model-scored
+# ones are compiled and timed. 1 disables the pre-filter. Candidates without model coverage —
+# opaque code, a schedule the model cannot apply, missing envelope constants — are never
+# dropped, only measured, so the model never overrides (or precludes) a measured result and the
+# outcome is independent of enumeration order. Presets, saved schedules and the serial baseline
+# are never pruned.
+autotune_keep_fraction=1
+
+# When non-empty, `Autotune.tune` appends one tab-separated calibration row per timed candidate
+# to this file: backend, digest tag, candidate label, measured ms, model-roofline ms (empty when
+# the model cannot score the candidate), kernel count, flops, bytes, opaque flag. The flops and
+# bytes columns aggregate over the candidate's kernels while the model column sums per-kernel
+# roofline bounds, so fitting the envelope constants from aggregates is exact only for rows with
+# kernel count 1. Every tuning run is free model-vs-measured divergence data for fitting the
+# envelope constants (see model_peak_flops).
+# Relative paths resolve against the working directory. With autotune_log=true the same
+# calibration lines also go to stderr, human-readable.
+autotune_calibration_file=
+
+# If true, untuned compiles issued by the recipes (`Train.to_routine`, `Train.run_once` and its
+# wrappers, the benchmark runners' untuned arms) pick the default schedule with the analytic
+# cost model (`Autotune.model_default`, gh-ocannl-491): the untuned default pipeline and the
+# sketch families are scored with the roofline model and the best is applied — zero timing runs,
+# one backend compile. Advisory: requires envelope constants (the backend's advisory values or
+# the model_peak_* overrides below), ties go to the default pipeline, and any scoring or
+# application failure falls back to it.
+model_default_schedule=false
+
+# Overrides the backend's advisory peak arithmetic throughput, in FLOP/s (single precision, FMA
+# counted as two operations), used as the compute leg of the analytic cost model's roofline
+# envelope. Calibrated per-machine values (fit from autotune_calibration_file data) beat the
+# backends' class-level constants; unset/empty uses the backend's value (the C backends provide
+# none, so scoring on them requires setting this and/or model_peak_memory_bandwidth).
+model_peak_flops=
+
+# Overrides the backend's advisory peak main-memory bandwidth, in bytes/s — the memory leg of
+# the roofline envelope. Same contract as model_peak_flops.
+model_peak_memory_bandwidth=
+
 # If true, stdout capturing is disabled, so some logs meant for the ppx_minidebug log files
 # (in particular CUDA logs) remain on the stdout.
 #

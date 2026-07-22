@@ -115,6 +115,10 @@ let () =
     if tune then
       let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
       Train.tune_placements ?report ~rounds:0 ~timing_ctx:scratch ctx batch_loss step_comp bindings
+    else if Lazy.force Autotune.model_default_enabled then
+      (* gh-ocannl-491: the model-picked untuned default (config [model_default_schedule=true]) —
+         run the same benchmark with the gate off vs on for the before/after comparison. *)
+      Autotune.model_default ctx step_comp bindings
     else Context.compile ctx step_comp bindings
   in
   let compile_s = Unix.gettimeofday () -. t0 in

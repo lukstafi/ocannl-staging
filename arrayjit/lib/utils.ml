@@ -136,6 +136,12 @@ let known_config_keys =
       "autotune_repeats";
       "autotune_cache_dir";
       "autotune_log";
+      (* Analytic cost model (gh-ocannl-491) *)
+      "autotune_keep_fraction";
+      "autotune_calibration_file";
+      "model_default_schedule";
+      "model_peak_flops";
+      "model_peak_memory_bandwidth";
       (* Identifiers and other *)
       "ll_ident_style";
       "cd_ident_style";
