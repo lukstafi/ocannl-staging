@@ -432,7 +432,7 @@ module Impl = struct
     | No, Some dst_loc ->
         memcpy ~dst_ptr:(Slab.resolve_pool dst.device dst_loc) ~dst_offset:dst_loc.offset
     | Copy, _ ->
-        opt_alloc_merge_buffer ?mode:(Option.map tn.Tn.memory_mode ~f:fst) ~size_in_bytes dst.device;
+        opt_alloc_merge_buffer ?mode:(Option.map tn.Tn.memory_mode_intent ~f:fst) ~size_in_bytes dst.device;
         let loc = Option.value_exn ~here:[%here] !(dst.device.merge_buffer) in
         memcpy ~dst_ptr:(Slab.resolve_pool dst.device loc) ~dst_offset:loc.offset
 

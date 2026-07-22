@@ -984,7 +984,7 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
              let tp, _, _ = decomp.(a) in
              normalize_affine ~terms:tp ~offset:0))
     in
-    let prec = Lazy.force source.Tn.prec in
+    let prec = Lazy.force source.Tn.storage_prec in
     let tile =
       Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
         ~label:("packed" :: source.Tn.label)
@@ -1051,7 +1051,7 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
     (* Serial tile loops may sit above or below L*: the load nest iterates them under fresh symbols,
      so only outer-part symbols and reused workgroup axes pin the staging point. *)
     (* Mint the tile. *)
-    let prec = Lazy.force source.Tn.prec in
+    let prec = Lazy.force source.Tn.storage_prec in
     let tile_dims = Array.map tile_axes ~f:snd in
     if swizzle then (
       let n = Array.length tile_dims in
@@ -1505,7 +1505,7 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
       in
       let scalar_acc = Array.is_empty tile_axes in
       let tile_dims = if scalar_acc then [| 1 |] else Array.map tile_axes ~f:snd in
-      let prec = Lazy.force target.Tn.prec in
+      let prec = Lazy.force target.Tn.storage_prec in
       let tile =
         Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
           ~label:("acc" :: target.Tn.label)
@@ -1711,7 +1711,7 @@ let contract_tensorized_accumulator ~lane (opt : Low_level.optimized) : Low_leve
            && not (touches_outside_tile target fc.body) -> (
         match (fallback_indices target fallback, fallback_axes fallback, lane_extent fc.body) with
         | Some original_d_idcs, Some (i, j), Some simd_width ->
-            let prec = Lazy.force target.Tn.prec in
+            let prec = Lazy.force target.Tn.storage_prec in
             let fragment =
               Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
                 ~label:("fragment" :: target.Tn.label)

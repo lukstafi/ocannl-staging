@@ -168,11 +168,11 @@ and scalar_arg = scalar_t * Ops.prec [@@deriving sexp_of, equal, compare]
 
 (** Extract the precision from a scalar value by examining its origin tensor node *)
 let scalar_precision = function
-  | Get (tn, _) -> Lazy.force tn.Tn.prec
-  | Get_dynamic { tn; _ } -> Lazy.force tn.Tn.prec
-  | Get_merge_buffer (tn, _) -> Lazy.force tn.Tn.prec
-  | Get_local { tn; _ } -> Lazy.force tn.Tn.prec
-  | Local_scope { id; _ } -> Lazy.force id.tn.Tn.prec
+  | Get (tn, _) -> Lazy.force tn.Tn.storage_prec
+  | Get_dynamic { tn; _ } -> Lazy.force tn.Tn.storage_prec
+  | Get_merge_buffer (tn, _) -> Lazy.force tn.Tn.storage_prec
+  | Get_local { tn; _ } -> Lazy.force tn.Tn.storage_prec
+  | Local_scope { id; _ } -> Lazy.force id.tn.Tn.storage_prec
   | Constant _ ->
       (* Single is the most widely supported precision, so we use it as the default. *)
       Ops.single
@@ -1253,7 +1253,7 @@ let%track7_sexp inline_computation ~id (optim_ctx : optimize_ctx) (traced : trac
       | Set { tn; idcs; llsc; debug = _ } when Tn.equal tn traced.tn ->
           assert ([%equal: Indexing.axis_index array option] (Some idcs) def_args);
           let inlined = loop_scalar env llsc in
-          let value_prec = Lazy.force traced.tn.Tn.prec in
+          let value_prec = Lazy.force traced.tn.Tn.storage_prec in
           let index_prec = Ops.index_prec () in
           (* gh-133 Stage A: consistency (equality) guards for repeated / covered single-symbol
              affine positions -- the substituted producer index must equal the call-site index.
@@ -1843,7 +1843,7 @@ let interval_of_index ienv (idx : Indexing.axis_index) : Interval.t =
    bounds candidate when one exists. The node becomes a source only when the candidate actually
    narrows -- folds justified by the dtype range alone are static facts requiring no settlement. *)
 let interval_of_node ~prec (tn : Tn.t) : interval_result =
-  let stored_prec = Lazy.force tn.Tn.prec in
+  let stored_prec = Lazy.force tn.Tn.storage_prec in
   let dtype = Interval.dtype_range stored_prec in
   let ival, srcs =
     match Tn.bounds_candidate tn with
@@ -2033,7 +2033,7 @@ let simplify_llc static_indices llc =
           }
     | Zero_out _ -> llc
     | Set { tn; idcs; llsc; debug } ->
-        Set { tn; idcs; llsc = fst (loop_scalar (llsc, Lazy.force tn.Tn.prec)); debug }
+        Set { tn; idcs; llsc = fst (loop_scalar (llsc, Lazy.force tn.Tn.storage_prec)); debug }
     | Set_dynamic { tn; idcs; dyn_axis; dyn_value; llsc; debug } ->
         (* gh-466: reached via [Schedule.apply]'s simplify of post-rewrite code. The scatter itself
            is never folded; its index value and RHS are. *)
@@ -2043,12 +2043,12 @@ let simplify_llc static_indices llc =
             idcs;
             dyn_axis;
             dyn_value = loop_scalar dyn_value;
-            llsc = fst (loop_scalar (llsc, Lazy.force tn.Tn.prec));
+            llsc = fst (loop_scalar (llsc, Lazy.force tn.Tn.storage_prec));
             debug;
           }
     | Set_from_vec { tn; idcs; length; vec_unop; arg; debug } ->
         Set_from_vec { tn; idcs; length; vec_unop; arg = loop_scalar arg; debug }
-    | Set_local (id, llsc) -> Set_local (id, fst (loop_scalar (llsc, Lazy.force id.tn.Tn.prec)))
+    | Set_local (id, llsc) -> Set_local (id, fst (loop_scalar (llsc, Lazy.force id.tn.Tn.storage_prec)))
     | Declare_local _ -> llc
     | Comment _ -> llc
     | Staged_compilation _ -> llc
@@ -2085,25 +2085,25 @@ let simplify_llc static_indices llc =
     match llsc' with
     | Constant _ -> (llsc, prec)
     | Constant_bits _ -> (llsc, prec)
-    | Get (tn, _indices) -> (llsc, Lazy.force tn.Tn.prec)
+    | Get (tn, _indices) -> (llsc, Lazy.force tn.Tn.storage_prec)
     | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, vprec } ->
         (* gh-343: defensive -- simplify runs before the one-hot rewrite, so this is unreachable in
            practice; still simplify the dynamic index sub-expression and never fold to a
            constant. *)
         let v', vprec' = loop_scalar (v, vprec) in
-        (Get_dynamic { tn; idcs; dyn_axis; dyn_value = (v', vprec') }, Lazy.force tn.Tn.prec)
+        (Get_dynamic { tn; idcs; dyn_axis; dyn_value = (v', vprec') }, Lazy.force tn.Tn.storage_prec)
     | Local_scope { id; body = Set_local (id2, v); _ } when equal_scope_id id id2 ->
         ignore (Lazy.force id.tn.Tn.dims);
-        loop_scalar (v, Lazy.force id.tn.Tn.prec)
+        loop_scalar (v, Lazy.force id.tn.Tn.storage_prec)
     | Local_scope { id; body = Seq (Set_local (id1, v1), Set_local (id2, v2)); _ }
       when equal_scope_id id id1 && equal_scope_id id id2 ->
         ignore (Lazy.force id.tn.Tn.dims);
         let result = substitute_float ~var:(Get_local id) ~value:v1 v2 in
-        loop_scalar (result, Lazy.force id.tn.Tn.prec)
+        loop_scalar (result, Lazy.force id.tn.Tn.storage_prec)
     | Local_scope opts ->
-        (Local_scope { opts with body = loop_proc local_scope_body }, Lazy.force opts.id.tn.Tn.prec)
-    | Get_local id -> (llsc, Lazy.force id.tn.Tn.prec)
-    | Get_merge_buffer (tn, _) -> (llsc, Lazy.force tn.Tn.prec)
+        (Local_scope { opts with body = loop_proc local_scope_body }, Lazy.force opts.id.tn.Tn.storage_prec)
+    | Get_local id -> (llsc, Lazy.force id.tn.Tn.storage_prec)
+    | Get_merge_buffer (tn, _) -> (llsc, Lazy.force tn.Tn.storage_prec)
     | Embed_index (Fixed_idx i) -> (Constant (Float.of_int i), prec)
     | Embed_index Sub_axis -> (Constant 0., prec)
     | Embed_index (Iterator _) -> (llsc, prec)
@@ -2249,7 +2249,7 @@ let simplify_llc static_indices llc =
   let check_constant tn c =
     (* Prevent triggering over-eager guard against forcing precision. *)
     ignore (Lazy.force tn.Tn.dims);
-    if Ops.exceeds_fp16_cutoff c && Ops.is_up_to_fp16 (Lazy.force tn.Tn.prec) then
+    if Ops.exceeds_fp16_cutoff c && Ops.is_up_to_fp16 (Lazy.force tn.Tn.storage_prec) then
       raise
       @@ Utils.User_error
            ("Constant " ^ Float.to_string c
@@ -3725,7 +3725,7 @@ let build_guarded_gather ~ienv ~table ~table_idcs ~dyn_axis ~(index_expr : scala
    is omitted. *)
 let build_guarded_scatter ~ienv ~tn ~idcs ~dyn_axis ~(index_expr : scalar_arg)
     ~(grad_arg : scalar_arg) ~class_count ~debug : t =
-  let value_prec = Lazy.force tn.Tn.prec in
+  let value_prec = Lazy.force tn.Tn.storage_prec in
   let gather = Get_dynamic { tn; idcs; dyn_axis; dyn_value = index_expr } in
   let scatter =
     Set_dynamic
@@ -3778,7 +3778,7 @@ let gather_of_reduction ~ienv ~(k : Indexing.symbol) ~from_ ~to_ (contribution :
           if (not (from_ = 0)) || to_ <> class_count - 1 then None
           else if scalar_mentions_symbol k (fst index_expr) then None
           else
-            let value_prec = Lazy.force table.Tn.prec in
+            let value_prec = Lazy.force table.Tn.storage_prec in
             (* Neutralize the now-dead loop symbol at the dynamic axis. *)
             let table_idcs = Array.copy table_idcs in
             table_idcs.(dyn_axis) <- Indexing.Fixed_idx 0;
@@ -4245,7 +4245,7 @@ let to_doc_cstyle ?name ?static_indices () llc =
   let doc_ident la =
     let base = string (ident_label la) in
     if Utils.get_global_flag ~default:false ~arg_name:"output_prec_in_ll_files" then
-      let prec_str = Ops.prec_string (Lazy.force la.prec) in
+      let prec_str = Ops.prec_string (Lazy.force la.storage_prec) in
       base ^^ string ("<" ^ prec_str ^ ">")
     else base
   in
@@ -4286,7 +4286,7 @@ let to_doc_cstyle ?name ?static_indices () llc =
         group (header ^^ nest 2 (break 1 ^^ doc_of_code body) ^^ break 1 ^^ string "}")
     | Zero_out tn -> string "zero_out " ^^ doc_ident tn ^^ string ";"
     | Set p ->
-        let prec = Lazy.force p.tn.prec in
+        let prec = Lazy.force p.tn.storage_prec in
         let result =
           group
             (doc_ident p.tn
@@ -4299,7 +4299,7 @@ let to_doc_cstyle ?name ?static_indices () llc =
           p.debug <- Buffer.contents b);
         result
     | Set_dynamic p ->
-        let prec = Lazy.force p.tn.prec in
+        let prec = Lazy.force p.tn.storage_prec in
         let v, vprec = p.dyn_value in
         let result =
           group
@@ -4315,7 +4315,7 @@ let to_doc_cstyle ?name ?static_indices () llc =
           p.debug <- Buffer.contents b);
         result
     | Set_from_vec p ->
-        let prec = Lazy.force p.tn.prec in
+        let prec = Lazy.force p.tn.storage_prec in
         let prefix, postfix = Ops.vec_unop_c_syntax prec p.vec_unop in
         (* TODO: this assumes argument is generated from the high-level code, which means it is
            either Get or Local_scope -- they don't need precision. *)
@@ -4336,7 +4336,7 @@ let to_doc_cstyle ?name ?static_indices () llc =
     | Comment message -> string ("/* " ^ message ^ " */")
     | Staged_compilation callback -> callback ()
     | Set_local (id, llsc) ->
-        let prec = Lazy.force id.tn.prec in
+        let prec = Lazy.force id.tn.storage_prec in
         group (doc_local id ^^ string " := " ^^ doc_of_float prec llsc ^^ string ";")
     | Declare_local { id; _ } -> group (string "declare " ^^ doc_local id ^^ string ";")
   and doc_of_float prec value =
@@ -4386,7 +4386,7 @@ let to_doc ?name ?static_indices () llc =
   let doc_ident la =
     let base = string (ident_label la) in
     if Utils.get_global_flag ~default:false ~arg_name:"output_prec_in_ll_files" then
-      let prec_str = Ops.prec_string (Lazy.force la.prec) in
+      let prec_str = Ops.prec_string (Lazy.force la.storage_prec) in
       base ^^ string ("<" ^ prec_str ^ ">")
     else base
   in

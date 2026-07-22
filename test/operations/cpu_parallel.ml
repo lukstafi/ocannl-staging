@@ -177,7 +177,7 @@ let () =
         let out_tn = hz.Tensor.value in
         let scratch =
           Ir.Tnode.create ~namespace:"cptest"
-            (Ir.Tnode.Specified (Lazy.force out_tn.Ir.Tnode.prec))
+            (Ir.Tnode.Specified (Lazy.force out_tn.Ir.Tnode.storage_prec))
             ~id:0 ~label:[ "hazard"; "scratch" ]
             ~unpadded_dims:(lazy [| k |])
             ~padding:(lazy None)

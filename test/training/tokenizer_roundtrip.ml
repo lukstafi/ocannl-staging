@@ -33,7 +33,7 @@ let dims_str t =
   String.concat ~sep:"x"
     (Array.to_list (Array.map (Lazy.force t.Tensor.value.Tn.dims) ~f:Int.to_string))
 
-let prec_str t = Ir.Ops.prec_string (Lazy.force t.Tensor.value.Tn.prec)
+let prec_str t = Ir.Ops.prec_string (Lazy.force t.Tensor.value.Tn.storage_prec)
 
 let () =
   Out_channel.write_all "mini_tokenizer.json" ~data:tokenizer_json;

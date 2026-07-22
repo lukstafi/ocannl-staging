@@ -64,7 +64,7 @@ let shard_along ~axis ~n_shards (t : Tensor.t) : Tensor.t array =
       (Printf.sprintf "Parallel.shard_along: batch size %d not divisible by n_shards %d" batch
          n_shards);
   let sub = batch / n_shards in
-  let prec = Lazy.force tn.Tn.prec in
+  let prec = Lazy.force tn.Tn.storage_prec in
   let get = host_get tn in
   let rest = Array.subo dims ~pos:1 in
   Array.init n_shards ~f:(fun k ->
@@ -89,7 +89,7 @@ let gather ~axis (shards : Tensor.t array) : Tensor.t =
   let n = Array.length shards in
   let tn0 = shards.(0).Tensor.value in
   let dims0 = Lazy.force tn0.Tn.dims in
-  let prec = Lazy.force tn0.Tn.prec in
+  let prec = Lazy.force tn0.Tn.storage_prec in
   let rest = Array.subo dims0 ~pos:1 in
   let sub = dims0.(0) in
   Array.iteri shards ~f:(fun i s ->
@@ -313,7 +313,7 @@ let data_parallel ?backend_name ?(reduction = Mean) ?(weight_decay = 0.0) ?(mome
   let host_buffer_of (tn : Tn.t) =
     Nd.create_array
       ~debug:("parallel host buffer for " ^ Tn.debug_name tn)
-      (Lazy.force tn.Tn.prec) ~dims:(Lazy.force tn.Tn.dims) ~padding:(Lazy.force tn.Tn.padding)
+      (Lazy.force tn.Tn.storage_prec) ~dims:(Lazy.force tn.Tn.dims) ~padding:(Lazy.force tn.Tn.padding)
   in
   let read_ctx_values ~ctx ~stream (tn : Tn.t) =
     let nd = host_buffer_of tn in

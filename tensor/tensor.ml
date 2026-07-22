@@ -384,7 +384,7 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
         List.filter_map ordered_ts ~f:(fun ti ->
             Option.map (get ti) ~f:(fun v ->
                 if ti.top_down_prec then lazy (Tn.get_specified_prec v)
-                else lazy (Some (Lazy.force v.prec))))
+                else lazy (Some (Lazy.force v.storage_prec))))
       in
       Tn.Inferred
         (lazy
@@ -432,10 +432,10 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
     if not (Lazy.is_val tn.Tn.dims) then Tn.update_infer_prec tn prec
   in
   (* Apply delayed top-down precision updates to parameter subtensors *)
-  List.iter top_down_ts ~f:(fun ti -> update_infer_prec ti.value v.Tn.prec);
+  List.iter top_down_ts ~f:(fun ti -> update_infer_prec ti.value v.Tn.storage_prec);
   let transpose_op =
     match transpose_op with
-    | Uint4x32_to_prec _ -> Shape.Uint4x32_to_prec v.Tn.prec
+    | Uint4x32_to_prec _ -> Shape.Uint4x32_to_prec v.Tn.storage_prec
     | _ -> transpose_op
   in
   let shape_logic =
@@ -516,7 +516,7 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
     in
     (* Apply delayed top-down precision updates to parameter gradient subtensors *)
     List.iter top_down_ts ~f:(fun ti ->
-        Option.iter ti.diff ~f:(fun d -> update_infer_prec d.grad g.Tn.prec));
+        Option.iter ti.diff ~f:(fun d -> update_infer_prec d.grad g.Tn.storage_prec));
     let is_bck_root ti = Map.mem session_state.backprop_roots ti.value.id in
     let zero_grads =
       let zero_g ti =
@@ -973,7 +973,7 @@ let%debug5_sexp to_dag ?(single_node = false) ?(embedded_only = false) ?entries_
     let labels =
       Array.map (Shape.to_bases t.shape) ~f:(fun l -> if Row.is_reserved_basis l then "" else l)
     in
-    let where_located a = Tn.(debug_memory_mode a.memory_mode) in
+    let where_located a = Tn.(debug_memory_mode a.memory_mode_intent) in
     let txt =
       if with_id then "#" ^ id ^ " " ^ Tn.label t.value (* ^ " DEBUG: " ^ where_located t.value *)
       else Tn.label t.value

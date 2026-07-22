@@ -578,7 +578,7 @@ let%track3_sexp link_compiled ?lowered_bindings ~merge_buffer ~resolve ~runner_l
                   @@ Utils.User_error
                        [%string
                          "Cc_backend.link_compiled: node %{Tn.debug_name tn} missing from context: \
-                          %{Tn.debug_memory_mode tn.Tn.memory_mode}"]
+                          %{Tn.debug_memory_mode tn.Tn.memory_mode_intent}"]
             in
             Param_2 (ref (Some c_ptr), link bs ps Ctypes.(ptr void @-> cs))
         | _, (Kparam_pool_slab _ | Kparam_pool_slots _) :: _ ->

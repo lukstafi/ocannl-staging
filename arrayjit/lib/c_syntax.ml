@@ -1121,7 +1121,7 @@ module C_syntax (B : C_syntax_config) = struct
               else (
                 private_bytes :=
                   !private_bytes
-                  + (Tn.num_elems info.gl_tn * Ops.prec_in_bytes (Lazy.force info.gl_tn.Tn.prec));
+                  + (Tn.num_elems info.gl_tn * Ops.prec_in_bytes (Lazy.force info.gl_tn.Tn.storage_prec));
                 privatized := info.gl_tn :: !privatized;
                 let fits = !private_bytes <= Lazy.force per_chunk_private_bytes_cap in
                 if not fits then
@@ -1193,7 +1193,7 @@ module C_syntax (B : C_syntax_config) = struct
      value, and array indexing syntax is unchanged through the pointer. *)
   let local_array_decl ?(alias_ptr = false) ~zero_init (tn : Tn.t) : PPrint.document =
     let open PPrint in
-    let typ = B.typ_of_prec @@ Lazy.force tn.Tn.prec in
+    let typ = B.typ_of_prec @@ Lazy.force tn.Tn.storage_prec in
     let ident = get_ident tn in
     let arr_name = if alias_ptr then ident ^ "_mem__" else ident in
     let align_doc =
@@ -1299,7 +1299,7 @@ module C_syntax (B : C_syntax_config) = struct
     in
     let operand (tn, idcs) =
       let dims = Lazy.force tn.Tn.dims in
-      let prec = Lazy.force tn.Tn.prec in
+      let prec = Lazy.force tn.Tn.storage_prec in
       let rank = Array.length dims in
       let ld = if rank >= 1 then dims.(rank - 1) else 1 in
       let space =
@@ -1723,7 +1723,7 @@ module C_syntax (B : C_syntax_config) = struct
             else
               match llsc with
               | Low_level.Get (tn, idcs) ->
-                  if not (Ops.equal_prec (Lazy.force tn.Tn.prec) prec) then raise Bail;
+                  if not (Ops.equal_prec (Lazy.force tn.Tn.storage_prec) prec) then raise Bail;
                   vload tn idcs
               | Binop (op, (a, pa), (b, pb)) ->
                   let inf =
@@ -1789,14 +1789,14 @@ module C_syntax (B : C_syntax_config) = struct
             if List.is_empty sets then raise Bail;
             let prec =
               let tn, _, _ = List.hd_exn sets in
-              Lazy.force tn.Tn.prec
+              Lazy.force tn.Tn.storage_prec
             in
             (match prec with Ops.Single_prec _ | Ops.Double_prec _ -> () | _ -> raise Bail);
             let lanes = B.vector_bytes / Ops.prec_in_bytes prec in
             if lanes < 2 || extent < lanes then raise Bail;
             let written = Hashtbl.create (module Int) in
             List.iter sets ~f:(fun (tn, idcs, _) ->
-                if not (Ops.equal_prec (Lazy.force tn.Tn.prec) prec) then raise Bail;
+                if not (Ops.equal_prec (Lazy.force tn.Tn.storage_prec) prec) then raise Bail;
                 match Hashtbl.add written ~key:tn.Tn.uid ~data:idcs with
                 | `Ok -> ()
                 | `Duplicate -> raise Bail);
@@ -1886,7 +1886,7 @@ module C_syntax (B : C_syntax_config) = struct
                     else
                       match llsc with
                       | Low_level.Get (tn, idcs) ->
-                          if not (Ops.equal_prec (Lazy.force tn.Tn.prec) prec) then raise Bail;
+                          if not (Ops.equal_prec (Lazy.force tn.Tn.storage_prec) prec) then raise Bail;
                           string (vload tn idcs ^ ".v[" ^ lane_var ^ "]")
                       | Binop (((Ops.Add | Ops.Sub | Ops.Mul | Ops.Div) as op), (a, pa), (b, pb)) ->
                           B.binop_syntax prec op (lane_expr a pa) (lane_expr b pb)
@@ -1960,7 +1960,7 @@ module C_syntax (B : C_syntax_config) = struct
               | Some r -> r
               | None -> raise Bail
             in
-            let prec = Lazy.force acc_tn.Tn.prec in
+            let prec = Lazy.force acc_tn.Tn.storage_prec in
             (match prec with Ops.Single_prec _ | Ops.Double_prec _ -> () | _ -> raise Bail);
             (* A loop-invariant contribution deserves strength reduction, not chains. *)
             if not (scalar_mentions contrib) then raise Bail;
@@ -2139,7 +2139,7 @@ module C_syntax (B : C_syntax_config) = struct
                 let warp = B.warp_size in
                 assert (warp > 1 && Int.is_pow2 warp);
                 let extent = to_ - from_ + 1 in
-                let prec = Lazy.force tn.Tn.prec in
+                let prec = Lazy.force tn.Tn.storage_prec in
                 (match prec with
                 | Ops.Single_prec _ | Ops.Double_prec _ -> ()
                 | _ -> fail "a single- or double-precision accumulator");
@@ -2325,7 +2325,7 @@ module C_syntax (B : C_syntax_config) = struct
     | Set { tn; idcs; llsc; debug } ->
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
-        let prec = Lazy.force tn.prec in
+        let prec = Lazy.force tn.storage_prec in
         let local_defs, val_doc = pp_scalar prec llsc in
         let local_defs = pp_local_defs local_defs in
         let offset_doc = pp_tn_offset tn (idcs, dims) in
@@ -2460,7 +2460,7 @@ module C_syntax (B : C_syntax_config) = struct
            ^ " (dynamic offsets are not swizzle-remapped)");
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
-        let prec = Lazy.force tn.prec in
+        let prec = Lazy.force tn.storage_prec in
         let dyn_defs, dyn_expr = pp_scalar iprec iv in
         let idx_typ = B.typ_of_prec (Ops.index_prec ()) in
         let dyn_idx_doc = string ("((" ^ idx_typ ^ ")(") ^^ dyn_expr ^^ string "))" in
@@ -2538,7 +2538,7 @@ module C_syntax (B : C_syntax_config) = struct
            ^ " (row-major multi-element write into an XOR-swizzled layout)");
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
-        let prec = Lazy.force tn.prec in
+        let prec = Lazy.force tn.storage_prec in
         (* Determine argument precision based on operation homogeneity *)
         let arg_prec =
           if Ops.is_homogeneous_prec_vec_unop vec_unop then prec
@@ -2634,7 +2634,7 @@ module C_syntax (B : C_syntax_config) = struct
         else
           let block_content = local_defs ^^ hardline ^^ vec_decl ^^ hardline ^^ assignments in
           lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace
-    | Set_local (({ tn = { prec; _ }; _ } as id), value) ->
+    | Set_local (({ tn = { storage_prec = prec; _ }; _ } as id), value) ->
         let prec = Lazy.force prec in
         let local_defs, value_doc = pp_scalar prec value in
         let local_defs = pp_local_defs local_defs in
@@ -2685,7 +2685,7 @@ module C_syntax (B : C_syntax_config) = struct
         else
           let block_content = local_defs ^^ hardline ^^ assignment in
           lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace
-    | Declare_local { id = { tn = { prec; _ }; _ } as id; needs_init } ->
+    | Declare_local { id = { tn = { storage_prec = prec; _ }; _ } as id; needs_init } ->
         let scope_prec = Lazy.force prec in
         let num_typ = string (B.typ_of_prec scope_prec) in
         let init_zero =
@@ -2727,7 +2727,7 @@ module C_syntax (B : C_syntax_config) = struct
             (Tn.debug_name d_tn);
         let operand (tn, idcs) =
           let dims = Lazy.force tn.Tn.dims in
-          let prec = Lazy.force tn.Tn.prec in
+          let prec = Lazy.force tn.Tn.storage_prec in
           let rank = Array.length dims in
           let ld = if rank >= 1 then dims.(rank - 1) else 1 in
           let ptr_doc, ld, space =
@@ -2836,7 +2836,7 @@ module C_syntax (B : C_syntax_config) = struct
               (List.exists [ fst d; fst a; fst b ] ~f:is_swizzled)
           in
           let d_tn = fst d in
-          let prec = Lazy.force d_tn.Tn.prec in
+          let prec = Lazy.force d_tn.Tn.storage_prec in
           let* () =
             no_test
               ~reason:(Printf.sprintf "output precision %s is not f32/f64" (Ops.prec_string prec))
@@ -2845,8 +2845,8 @@ module C_syntax (B : C_syntax_config) = struct
           let* () =
             no_test ~reason:"mixed operand precisions"
               (not
-                 (Ops.equal_prec (Lazy.force (fst a).Tn.prec) prec
-                 && Ops.equal_prec (Lazy.force (fst b).Tn.prec) prec))
+                 (Ops.equal_prec (Lazy.force (fst a).Tn.storage_prec) prec
+                 && Ops.equal_prec (Lazy.force (fst b).Tn.storage_prec) prec))
           in
           (* The fallback carries the arithmetic form; require the fused one (see above). *)
           let rec innermost_set (llc : Low_level.t) =
@@ -3050,7 +3050,8 @@ module C_syntax (B : C_syntax_config) = struct
     (* Returns (local definitions, value expression) *)
     let open PPrint in
     match vcomp with
-    | Local_scope { id = { tn = { prec = scope_prec; _ }; scope_id } as id; body; orig_indices = _ }
+    | Local_scope
+        { id = { tn = { storage_prec = scope_prec; _ }; scope_id } as id; body; orig_indices = _ }
       ->
         let scope_prec = Lazy.force scope_prec in
         let num_typ = string (B.typ_of_prec scope_prec) in
@@ -3070,14 +3071,14 @@ module C_syntax (B : C_syntax_config) = struct
         let expr = string prefix ^^ pp_scope_id id ^^ string postfix in
         ([ (scope_id, def_doc) ], expr)
     | Get_local id ->
-        let scope_prec = Lazy.force id.tn.prec in
+        let scope_prec = Lazy.force id.tn.storage_prec in
         let prefix, postfix = B.convert_precision ~from:scope_prec ~to_:prec in
         let expr = string prefix ^^ pp_scope_id id ^^ string postfix in
         ([], expr)
     | Get_merge_buffer (source, idcs) ->
         let tn = source in
         let dims = Lazy.force tn.dims in
-        let from_prec = Lazy.force tn.prec in
+        let from_prec = Lazy.force tn.storage_prec in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
         let offset_doc = pp_array_offset (idcs, dims) in
         let expr =
@@ -3087,7 +3088,7 @@ module C_syntax (B : C_syntax_config) = struct
     | Get (tn, idcs) ->
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
-        let from_prec = Lazy.force tn.prec in
+        let from_prec = Lazy.force tn.storage_prec in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
         let offset_doc = pp_tn_offset tn (idcs, dims) in
         let expr = string prefix ^^ ident_doc ^^ brackets offset_doc ^^ string postfix in
@@ -3105,7 +3106,7 @@ module C_syntax (B : C_syntax_config) = struct
            ^ " (dynamic offsets are not swizzle-remapped)");
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
-        let from_prec = Lazy.force tn.prec in
+        let from_prec = Lazy.force tn.storage_prec in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
         let dyn_defs, dyn_expr = pp_scalar iprec iv in
         let idx_typ = B.typ_of_prec (Ops.index_prec ()) in
@@ -3225,14 +3226,14 @@ module C_syntax (B : C_syntax_config) = struct
            logs. *)
         debug_float prec @@ Get_local id
     | Get_local id ->
-        let scope_prec = Lazy.force id.tn.prec in
+        let scope_prec = Lazy.force id.tn.storage_prec in
         let prefix, postfix = B.convert_precision ~from:scope_prec ~to_:prec in
         let v_doc = string prefix ^^ pp_scope_id id ^^ string postfix in
         (v_doc ^^ braces (string ("=" ^ B.float_log_style)), [ `Value v_doc ])
     | Get_merge_buffer (source, idcs) ->
         let tn = source in
         let dims = Lazy.force tn.dims in
-        let from_prec = Lazy.force tn.prec in
+        let from_prec = Lazy.force tn.storage_prec in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
         let offset_doc = pp_array_offset (idcs, dims) in
         let access_doc =
@@ -3248,7 +3249,7 @@ module C_syntax (B : C_syntax_config) = struct
     | Get (tn, idcs) ->
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
-        let from_prec = Lazy.force tn.prec in
+        let from_prec = Lazy.force tn.storage_prec in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
         let offset_doc = pp_tn_offset tn (idcs, dims) in
         let access_doc = string prefix ^^ ident_doc ^^ brackets offset_doc ^^ string postfix in
@@ -3443,7 +3444,7 @@ module C_syntax (B : C_syntax_config) = struct
                   kw ^ " "
               | _ -> ""
             in
-            (B.typ_of_prec (Lazy.force tn.Tn.prec) ^ " *" ^ restrict_ ^ get_ident tn, tn) :: acc)
+            (B.typ_of_prec (Lazy.force tn.Tn.storage_prec) ^ " *" ^ restrict_ ^ get_ident tn, tn) :: acc)
           else acc)
     in
     (* [`Per_param]: one typed pointer param per node (C/CUDA, byte-identical to before). [`Pooled
@@ -3480,7 +3481,7 @@ module C_syntax (B : C_syntax_config) = struct
       Option.(
         to_list
         @@ map merge_node ~f:(fun tn ->
-            ("const " ^ B.typ_of_prec (Lazy.force tn.prec) ^ " *merge_buffer", Merge_buffer)))
+            ("const " ^ B.typ_of_prec (Lazy.force tn.storage_prec) ^ " *merge_buffer", Merge_buffer)))
     in
     let all_params = log_file_param @ merge_param @ idx_params @ kparams in
     let sorted_params =
@@ -3575,7 +3576,7 @@ module C_syntax (B : C_syntax_config) = struct
              therefore never placed at overlapping offsets. *)
           let restrict_ = match B.restrict_keyword with Some kw -> kw ^ " " | None -> "" in
           List.mapi ptr_params ~f:(fun k (_decl, tn) ->
-              let typ = B.typ_of_prec (Lazy.force tn.Tn.prec) in
+              let typ = B.typ_of_prec (Lazy.force tn.Tn.storage_prec) in
               Printf.sprintf "%s%s* %s%s = (%s%s*)(__pools[__pool_slots[%d]] + __pool_slots[%d]);"
                 B.buffer_prefix typ restrict_ (get_ident tn) B.buffer_prefix typ (2 * k)
                 ((2 * k) + 1))
@@ -3619,7 +3620,7 @@ module C_syntax (B : C_syntax_config) = struct
                     nodes; see [zero_out_loop_redundant]); shared placements also keep the backend's
                     default layout (no [aligned_local_attr]). *)
                  string (Option.value_exn ~here:[%here] B.shared_decl_prefix)
-                 ^^ string (B.typ_of_prec @@ Lazy.force tn.prec)
+                 ^^ string (B.typ_of_prec @@ Lazy.force tn.storage_prec)
                  ^^ space
                  ^^ string (get_ident tn)
                  ^^ brackets (OCaml.int (Tn.num_elems tn))

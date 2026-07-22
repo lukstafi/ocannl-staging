@@ -1338,7 +1338,7 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
   match detect_conv opt.LL.llc with
   | None -> None
   | Some site ->
-      let prec = Lazy.force site.c_d.Ir.Tnode.prec in
+      let prec = Lazy.force site.c_d.Ir.Tnode.storage_prec in
       (* The row axis must be unit-stride: [Stage] packs by index range, so a strided row would pack
          a dilated tile read at [stride*row] — which [Tensorize]'s unit-coefficient index discipline
          rejects (a compacting Stage is a follow-up). And every axis must be offset-free — which
@@ -1378,8 +1378,8 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
         else
           let uniform_f32_64 =
             (match prec with Ir.Ops.Single_prec _ | Ir.Ops.Double_prec _ -> true | _ -> false)
-            && Ir.Ops.equal_prec (Lazy.force site.c_a.Ir.Tnode.prec) prec
-            && Ir.Ops.equal_prec (Lazy.force site.c_b.Ir.Tnode.prec) prec
+            && Ir.Ops.equal_prec (Lazy.force site.c_a.Ir.Tnode.storage_prec) prec
+            && Ir.Ops.equal_prec (Lazy.force site.c_b.Ir.Tnode.storage_prec) prec
           in
           let lanes =
             limits.Ir.Backend_intf.simd_vector_bytes / max 1 (Ir.Ops.prec_in_bytes prec)
@@ -1606,11 +1606,11 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
            flavors are exempt). What is only knowable at emission (address spaces, footprint
            interactions with other locals) is covered by the decline diagnostics and the
            [C_syntax.mma_census]. *)
-        let prec = Lazy.force site.m_d.Ir.Tnode.prec in
+        let prec = Lazy.force site.m_d.Ir.Tnode.storage_prec in
         let uniform_f32_64 =
           (match prec with Ir.Ops.Single_prec _ | Ir.Ops.Double_prec _ -> true | _ -> false)
-          && Ir.Ops.equal_prec (Lazy.force site.m_a.Ir.Tnode.prec) prec
-          && Ir.Ops.equal_prec (Lazy.force site.m_b.Ir.Tnode.prec) prec
+          && Ir.Ops.equal_prec (Lazy.force site.m_a.Ir.Tnode.storage_prec) prec
+          && Ir.Ops.equal_prec (Lazy.force site.m_b.Ir.Tnode.storage_prec) prec
         in
         let lanes = limits.Ir.Backend_intf.simd_vector_bytes / max 1 (Ir.Ops.prec_in_bytes prec) in
         let regtile_static_ok =
@@ -1649,7 +1649,7 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
              [bn = 0] = unsplit column panel. The packed tiles are function-scope stack arrays, so
              cap their combined footprint — which is also roughly the L2 residency the blocking aims
              for. *)
-          let prec_bytes = Ir.Ops.prec_in_bytes (Lazy.force site.m_a.Ir.Tnode.prec) in
+          let prec_bytes = Ir.Ops.prec_in_bytes (Lazy.force site.m_a.Ir.Tnode.storage_prec) in
           let tile_bytes_cap = 256 * 1024 in
           let packed =
             List.filter_map

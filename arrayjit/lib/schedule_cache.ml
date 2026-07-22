@@ -136,7 +136,7 @@ let canonicalize ?(static_indices = []) ?(with_placements = true) (opt : LL.opti
         add
           (Printf.sprintf "t%d=[%s;%s%s%s]" i
              (String.concat_array ~sep:"," (Array.map dims ~f:Int.to_string))
-             (Sexp.to_string (Ops.sexp_of_prec (Lazy.force tn.Tn.prec)))
+             (Sexp.to_string (Ops.sexp_of_prec (Lazy.force tn.Tn.storage_prec)))
              hc pc)
   in
   (* Local scope ids come from a process-global counter freshly on each lowering (like loop

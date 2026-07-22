@@ -94,7 +94,7 @@ let one_hot_of_ids ~num_classes ids =
      operations do with uint4x32, so the gather guard runs in native integer comparisons. This is
      soft: a tensor with an explicitly specified or already-settled precision (e.g. float IDs) is
      unaffected and keeps the double-precision guard path. *)
-  if not (Lazy.is_val ids.Tensor.value.Tn.prec) then
+  if not (Lazy.is_val ids.Tensor.value.Tn.storage_prec) then
     Tn.update_infer_prec ids.Tensor.value (lazy Ir.Ops.uint32);
   let classes = TDSL.range num_classes in
   let open TDSL.O in
