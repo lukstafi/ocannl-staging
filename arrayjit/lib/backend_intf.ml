@@ -18,12 +18,15 @@ type buffer_loc = { pool_id : int; offset : int } [@@deriving sexp, compare, equ
 
 type ctx_buffers = buffer_loc Map.M(Tnode).t [@@deriving sexp_of]
 
+(** Element formats tensor-core instructions accept for their multiplicand operands. This is
+    deliberately NOT [Ops.prec]: formats like tf32 have no byte layout of their own, so they must
+    never appear as a tensor node's storage precision. *)
 type mma_input_format =
   | Mma_f32  (** Genuine f32 multiply-accumulate (Metal [simdgroup_float8x8]). *)
   | Mma_tf32
       (** f32 storage computed with a 10-bit mantissa (CUDA wmma [precision::tf32], sm_80+). Not a
-          storage precision — data lives in memory as ordinary f32; only tensor-core loads
-          truncate. Gated by {!Numerics.t.tf32_matmuls}. *)
+          storage precision — data lives in memory as ordinary f32; only tensor-core loads truncate.
+          Gated by {!Numerics.t.tf32_matmuls}. *)
   | Mma_f16
   | Mma_bf16
   | Mma_fp8_e5m2
@@ -31,9 +34,6 @@ type mma_input_format =
           the precision exists (gh-ocannl-481 item 2); descriptor entries are keyed per operand
           pair, so mixed e5m2×e4m3 combinations need no interface change. *)
 [@@deriving sexp, compare, equal]
-(** Element formats tensor-core instructions accept for their multiplicand operands. This is
-    deliberately NOT [Ops.prec]: formats like tf32 have no byte layout of their own, so they must
-    never appear as a tensor node's storage precision. *)
 
 type mma_capability = {
   mma_simd_width : int;

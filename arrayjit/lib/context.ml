@@ -303,7 +303,8 @@ let mark_initialized ctx nodes =
 let host_buffer (tn : Tn.t) =
   Nd.create_array
     ~debug:("Context host buffer for " ^ Tn.debug_name tn)
-    (Lazy.force tn.Tn.storage_prec) ~dims:(Lazy.force tn.Tn.dims) ~padding:(Lazy.force tn.Tn.padding)
+    (Lazy.force tn.Tn.storage_prec) ~dims:(Lazy.force tn.Tn.dims)
+    ~padding:(Lazy.force tn.Tn.padding)
 
 (** Whether [tn] has a device buffer allocated in this context. *)
 let mem ctx (tn : Tn.t) : bool =

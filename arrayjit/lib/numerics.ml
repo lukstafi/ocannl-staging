@@ -8,8 +8,8 @@ open Base
     bitwise-parity discipline of the tensorized twins depends on it).
 
     The record is deliberately open-ended — later compute-precision questions (fast-math
-    transcendentals, accumulation widths, fp8 format selection per tensor class, gh-ocannl-492)
-    land here rather than growing ad-hoc booleans elsewhere. *)
+    transcendentals, accumulation widths, fp8 format selection per tensor class, gh-ocannl-492) land
+    here rather than growing ad-hoc booleans elsewhere. *)
 
 type t = {
   tf32_matmuls : bool;
@@ -21,9 +21,7 @@ type t = {
 }
 [@@deriving sexp, compare, equal]
 
-let default () =
-  { tf32_matmuls = Utils.get_global_flag ~default:false ~arg_name:"tf32_matmuls" }
-
+let default () = { tf32_matmuls = Utils.get_global_flag ~default:false ~arg_name:"tf32_matmuls" }
 let policy : t option ref = ref None
 
 (** The current policy; reads the global config on first use. *)

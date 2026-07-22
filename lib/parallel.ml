@@ -313,7 +313,8 @@ let data_parallel ?backend_name ?(reduction = Mean) ?(weight_decay = 0.0) ?(mome
   let host_buffer_of (tn : Tn.t) =
     Nd.create_array
       ~debug:("parallel host buffer for " ^ Tn.debug_name tn)
-      (Lazy.force tn.Tn.storage_prec) ~dims:(Lazy.force tn.Tn.dims) ~padding:(Lazy.force tn.Tn.padding)
+      (Lazy.force tn.Tn.storage_prec) ~dims:(Lazy.force tn.Tn.dims)
+      ~padding:(Lazy.force tn.Tn.padding)
   in
   let read_ctx_values ~ctx ~stream (tn : Tn.t) =
     let nd = host_buffer_of tn in

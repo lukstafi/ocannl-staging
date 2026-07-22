@@ -2048,7 +2048,8 @@ let simplify_llc static_indices llc =
           }
     | Set_from_vec { tn; idcs; length; vec_unop; arg; debug } ->
         Set_from_vec { tn; idcs; length; vec_unop; arg = loop_scalar arg; debug }
-    | Set_local (id, llsc) -> Set_local (id, fst (loop_scalar (llsc, Lazy.force id.tn.Tn.storage_prec)))
+    | Set_local (id, llsc) ->
+        Set_local (id, fst (loop_scalar (llsc, Lazy.force id.tn.Tn.storage_prec)))
     | Declare_local _ -> llc
     | Comment _ -> llc
     | Staged_compilation _ -> llc
@@ -2101,7 +2102,8 @@ let simplify_llc static_indices llc =
         let result = substitute_float ~var:(Get_local id) ~value:v1 v2 in
         loop_scalar (result, Lazy.force id.tn.Tn.storage_prec)
     | Local_scope opts ->
-        (Local_scope { opts with body = loop_proc local_scope_body }, Lazy.force opts.id.tn.Tn.storage_prec)
+        ( Local_scope { opts with body = loop_proc local_scope_body },
+          Lazy.force opts.id.tn.Tn.storage_prec )
     | Get_local id -> (llsc, Lazy.force id.tn.Tn.storage_prec)
     | Get_merge_buffer (tn, _) -> (llsc, Lazy.force tn.Tn.storage_prec)
     | Embed_index (Fixed_idx i) -> (Constant (Float.of_int i), prec)

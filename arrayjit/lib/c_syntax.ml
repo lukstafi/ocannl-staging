@@ -1121,7 +1121,8 @@ module C_syntax (B : C_syntax_config) = struct
               else (
                 private_bytes :=
                   !private_bytes
-                  + (Tn.num_elems info.gl_tn * Ops.prec_in_bytes (Lazy.force info.gl_tn.Tn.storage_prec));
+                  + Tn.num_elems info.gl_tn
+                    * Ops.prec_in_bytes (Lazy.force info.gl_tn.Tn.storage_prec);
                 privatized := info.gl_tn :: !privatized;
                 let fits = !private_bytes <= Lazy.force per_chunk_private_bytes_cap in
                 if not fits then
@@ -1886,7 +1887,8 @@ module C_syntax (B : C_syntax_config) = struct
                     else
                       match llsc with
                       | Low_level.Get (tn, idcs) ->
-                          if not (Ops.equal_prec (Lazy.force tn.Tn.storage_prec) prec) then raise Bail;
+                          if not (Ops.equal_prec (Lazy.force tn.Tn.storage_prec) prec) then
+                            raise Bail;
                           string (vload tn idcs ^ ".v[" ^ lane_var ^ "]")
                       | Binop (((Ops.Add | Ops.Sub | Ops.Mul | Ops.Div) as op), (a, pa), (b, pb)) ->
                           B.binop_syntax prec op (lane_expr a pa) (lane_expr b pb)
@@ -3444,7 +3446,8 @@ module C_syntax (B : C_syntax_config) = struct
                   kw ^ " "
               | _ -> ""
             in
-            (B.typ_of_prec (Lazy.force tn.Tn.storage_prec) ^ " *" ^ restrict_ ^ get_ident tn, tn) :: acc)
+            (B.typ_of_prec (Lazy.force tn.Tn.storage_prec) ^ " *" ^ restrict_ ^ get_ident tn, tn)
+            :: acc)
           else acc)
     in
     (* [`Per_param]: one typed pointer param per node (C/CUDA, byte-identical to before). [`Pooled

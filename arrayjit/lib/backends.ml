@@ -858,7 +858,10 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
           Option.bind arena ~f:(fun spans ->
               plan_arena_offsets ~cap
                 (List.map2_exn group items ~f:(fun (key, _) (size, align) ->
-                     (size, align, Ops.prec_string (Lazy.force key.Tn.storage_prec), Hashtbl.find spans key))))
+                     ( size,
+                       align,
+                       Ops.prec_string (Lazy.force key.Tn.storage_prec),
+                       Hashtbl.find spans key ))))
         in
         match arena_layout with
         | Some (offsets, total) ->

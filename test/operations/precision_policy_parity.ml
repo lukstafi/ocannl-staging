@@ -3,9 +3,9 @@
    parameter values (copied via set_values, which converts to the storage precision). A structural
    check on settled precisions alone would miss arithmetic bugs (see the repo's testing notes), so
    the parity of executed outputs is the load-bearing assertion; the precision printout pins the
-   class assignments: params and activations bf16, gradients left at single (grad_prec = None),
-   the [except]-ed param left at single, and the explicitly-single input left alone (user
-   [Specified] wins over policy).
+   class assignments: params and activations bf16, gradients left at single (grad_prec = None), the
+   [except]-ed param left at single, and the explicitly-single input left alone (user [Specified]
+   wins over policy).
 
    The uniform() default init of w1/w2 routes through uint4x32 threefry chains; the policy must
    leave those precisions untouched or compilation itself fails (threefry ops require a uint4x32
@@ -35,13 +35,14 @@ let find_param root name =
 
 let prec_str tn = Ir.Ops.prec_string (Lazy.force tn.Tn.storage_prec)
 
-(* One leg: build the model, let [prepare] see the loss root (the policy application site),
-   compile the gradient update, initialize params, optionally overwrite w1/w2 with given values,
-   run, and return what the comparisons need. *)
+(* One leg: build the model, let [prepare] see the loss root (the policy application site), compile
+   the gradient update, initialize params, optionally overwrite w1/w2 with given values, run, and
+   return what the comparisons need. *)
 let run_leg base_ctx ~input_l ~prepare ~w_vals =
   let f = make_model () in
   let x =
-    NTDSL.init ~l:input_l ~prec:Ir.Ops.single ~o:[ Array.length x_vals ]
+    NTDSL.init ~l:input_l ~prec:Ir.Ops.single
+      ~o:[ Array.length x_vals ]
       ~f:(function [| i |] -> x_vals.(i) | _ -> assert false)
       ()
   in
@@ -105,8 +106,8 @@ let () =
     (prec_str (Option.value_exn w1_b.Tensor.diff).Tensor.grad);
   Stdio.printf "input x (explicitly single): %s\n" (prec_str x_b.Tensor.value);
 
-  (* Executed parity: bf16 has ~2-3 significant decimal digits; the tolerances are loose bounds
-     on accumulated rounding over two matmuls, not tight envelopes. *)
+  (* Executed parity: bf16 has ~2-3 significant decimal digits; the tolerances are loose bounds on
+     accumulated rounding over two matmuls, not tight envelopes. *)
   let max_err =
     Array.foldi y_vals_a ~init:0. ~f:(fun i acc va ->
         Float.max acc (Float.abs (va -. y_vals_b.(i))))

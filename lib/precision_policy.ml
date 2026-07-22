@@ -13,15 +13,15 @@ module Tensor = Ocannl_tensor.Tensor
     - Only tensor nodes with no user-specified precision are touched ([Tn.get_specified_prec]
       pre-check) — explicit annotations always win, including ndarray-backed data nodes whose
       precision comes from their host array.
-    - Only nodes whose (inferred-so-far) precision is a float are re-assigned: integer index
-      tensors and uint4x32 RNG-state chains keep their precisions. For not-yet-forced inference
-      chains the float check is deferred into the lazy ([Tn.update_prec ~only_if]), so applying a
-      policy forces nothing.
+    - Only nodes whose (inferred-so-far) precision is a float are re-assigned: integer index tensors
+      and uint4x32 RNG-state chains keep their precisions. For not-yet-forced inference chains the
+      float check is deferred into the lazy ([Tn.update_prec ~only_if]), so applying a policy forces
+      nothing.
     - Assignment classes are structural: [param_prec] for [root.params] (trainable leaves),
       [activation_prec] for every other tensor's value node (op results, inputs, constants),
-      [grad_prec] for all gradient nodes. Op-kind selectivity ("softmax stays f32") is the
-      [except] predicate's job — or the training recipe's, when gh-ocannl-492 grows one; label
-      matching over [Tn.label] is the intended idiom.
+      [grad_prec] for all gradient nodes. Op-kind selectivity ("softmax stays f32") is the [except]
+      predicate's job — or the training recipe's, when gh-ocannl-492 grows one; label matching over
+      [Tn.label] is the intended idiom.
     - [except]-ed float nodes are PINNED at the session default precision for their class
       ([Tensor.default_value_prec] / [default_grad_prec]), not merely skipped: precision inference
       propagates top-down as well as bottom-up (see the [top_down_prec] test), so a skipped node
@@ -43,8 +43,8 @@ type t = {
   grad_prec : Ops.prec option;  (** For gradient nodes (of params and intermediates alike). *)
 }
 
-(** The same precision for all three classes — the "full bf16 / full f16" styles. Mixed styles
-    (e.g. reduced compute with [grad_prec = Some Ops.single]) are record literals away. *)
+(** The same precision for all three classes — the "full bf16 / full f16" styles. Mixed styles (e.g.
+    reduced compute with [grad_prec = Some Ops.single]) are record literals away. *)
 let uniform prec = { param_prec = Some prec; activation_prec = Some prec; grad_prec = Some prec }
 
 let apply ?(except = fun (_ : Tn.t) -> false) policy (root : Tensor.t) =

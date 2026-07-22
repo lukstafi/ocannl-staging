@@ -270,8 +270,8 @@ let most_local_materialized_mode tn =
 
 (* Note (context-scoped memory modes): the tnode-level forcing family ([is_virtual_force],
    [is_materialized_force], [is_in_context_force], [default_to_most_local], [is_materialized_peek])
-   was removed -- {!field-memory_mode_intent} now holds only declared intent, side-effect free to read.
-   Settlement lives in {!module-Placements}, per compilation lineage. *)
+   was removed -- {!field-memory_mode_intent} now holds only declared intent, side-effect free to
+   read. Settlement lives in {!module-Placements}, per compilation lineage. *)
 
 let is_observable tn = tn.observable
 
@@ -315,7 +315,9 @@ let known_host_constant tn = tn.host_constant || known_constant tn
 let set_host_constant tn = tn.host_constant <- true
 
 let known_non_virtual tn =
-  match tn.memory_mode_intent with None | Some ((Virtual | Effectively_constant), _) -> false | _ -> true
+  match tn.memory_mode_intent with
+  | None | Some ((Virtual | Effectively_constant), _) -> false
+  | _ -> true
 
 let known_virtual tn = match tn.memory_mode_intent with Some (Virtual, _) -> true | _ -> false
 
@@ -572,12 +574,12 @@ end
 (** {2 Per-context placement resolution}
 
     The context-scoped side of the memory-mode split
-    (docs/proposals/context-scoped-memory-modes.md): {!field-memory_mode_intent} on the tnode is *declared
-    intent* -- requests made at graph-construction time (user [set_materialized], parameter/constant
-    marking, op-support [Never_virtual]) -- while the *decisions* (resolving to [Virtual] / [Local]
-    / [On_device]) are recorded here, per compilation lineage. A [Placements] table rides
-    [Low_level.optimize_ctx]: it is copied at the start of each backend [compile], so sibling
-    compiles from the same context are hermetic (a candidate compile cannot poison another's
+    (docs/proposals/context-scoped-memory-modes.md): {!field-memory_mode_intent} on the tnode is
+    *declared intent* -- requests made at graph-construction time (user [set_materialized],
+    parameter/constant marking, op-support [Never_virtual]) -- while the *decisions* (resolving to
+    [Virtual] / [Local] / [On_device]) are recorded here, per compilation lineage. A [Placements]
+    table rides [Low_level.optimize_ctx]: it is copied at the start of each backend [compile], so
+    sibling compiles from the same context are hermetic (a candidate compile cannot poison another's
     placement resolution), while child contexts inherit the lineage's decisions.
 
     Lookups fall back to the tnode's intent when the lineage has not yet decided; updates apply the
@@ -609,7 +611,8 @@ module Placements = struct
 
   (** The effective placement state: the lineage's decision if any, otherwise the tnode's declared
       intent. Side-effect free. *)
-  let get p tn = match Hashtbl.find p.table tn with Some e -> Some e | None -> tn.memory_mode_intent
+  let get p tn =
+    match Hashtbl.find p.table tn with Some e -> Some e | None -> tn.memory_mode_intent
 
   let update p tn mode provenance =
     Hashtbl.set p.table ~key:tn
