@@ -116,8 +116,8 @@ type optop =
           storage decline swizzled operands: [Tile_mma] intrinsic/register-tiled paths fall back to
           the scalar micro-kernel (which reads elementwise and stays correct), so do not combine
           [swizzle] with {!constructor-Tensorize} when the intrinsics are the goal — the swizzled
-          tile is for scalar/register-blocktiled staged kernels until [ldmatrix]-style
-          swizzle-aware fragment loads exist.
+          tile is for scalar/register-blocktiled staged kernels until [ldmatrix]-style swizzle-aware
+          fragment loads exist.
 
           [hoisted = true] packs a compile-time-constant operand once, out of the routine
           (gh-ocannl-470, the compiler-native analog of ggml's [CPU_REPACK] [set_tensor] hook):
@@ -273,39 +273,39 @@ type op_verdict = Op_legal | Op_illegal of string | Op_unknown of string
 [@@deriving sexp_of, equal]
 
 val op_legality : Low_level.optimized -> optop -> op_verdict
-(** gh-494 waypoint 3: the op-legality oracle. A schedule op is a thread-pairing transform over
-    the routine's access relations; its obligation is decided by the {!Affine} queries — pairing
-    the op's loop symbol(s) as thread identity must leave every write-involving access pair of
-    every written node [Disjoint] or [Same_thread] (with the reduction reassociation license for
+(** gh-494 waypoint 3: the op-legality oracle. A schedule op is a thread-pairing transform over the
+    routine's access relations; its obligation is decided by the {!Affine} queries — pairing the
+    op's loop symbol(s) as thread identity must leave every write-involving access pair of every
+    written node [Disjoint] or [Same_thread] (with the reduction reassociation license for
     [Vectorized] retypes and [Swap]s of accumulations). Three-valued and sound in both proven
-    directions: [Op_legal] proves the annotation race-free; [Op_illegal] proves a violation (e.g.
-    a materialized node's unguarded write provably independent of the retyped axis); [Op_unknown]
+    directions: [Op_legal] proves the annotation race-free; [Op_illegal] proves a violation (e.g. a
+    materialized node's unguarded write provably independent of the retyped axis); [Op_unknown]
     means "compile and see" — the op may be valid under semantics the queries do not model
     (per-thread scratch copies, renderer fallbacks) — and must never be treated as a rejection.
-    Hardware annotations interleave sibling statements' threads with no grid-wide
-    synchronization, so a hardware retype/split of a loop sharing an accessed node across its
-    statement boundary (with a write on either side) reports [Op_unknown]: such pairs need the
-    default annotator's aligned-mapping analysis, which the single-op oracle does not model.
-    [Vectorized] retypes and [Swap]s only reorder within the nest and keep the intra-nest scope.
+    Hardware annotations interleave sibling statements' threads with no grid-wide synchronization,
+    so a hardware retype/split of a loop sharing an accessed node across its statement boundary
+    (with a write on either side) reports [Op_unknown]: such pairs need the default annotator's
+    aligned-mapping analysis, which the single-op oracle does not model. [Vectorized] retypes and
+    [Swap]s only reorder within the nest and keep the intra-nest scope.
 
-    [Tensorize]'s role assignment is decided: the micro-kernel recognition of apply (a pure
-    function of the code) is probed, so an invalid role permutation — e.g. the reduction loop
-    assigned to [i]/[j], violating the discipline that the [k] role is the only rmw-carrying loop
-    of the accumulation — is a proven [Op_illegal]; on structural success the affine queries
-    decide [i]/[j] iteration independence under the reduction-reassociation license (the intrinsic
-    reassociates [k]), with the hardware-lane cross-statement downgrade to [Op_unknown] as above.
-    [Stage] is likewise probed hermetically (a raising apply is [Op_illegal]), then its implicit
-    contract — the staged tile covers the reads it replaces within the staging scope — is the
-    containment query [Affine.read_covered_before] over the fresh tile's accesses: a covered
-    non-shared (packing) stage is [Op_legal]; shared staging (barrier placement and launch
-    geometry are validated downstream) and hoisted staging (link-time host-side packing) report
-    [Op_unknown]. [Privatize]/[Expand_zero]/[Fuse_epilogue] report [Op_unknown]; their own
-    apply-time preconditions remain in force. *)
+    [Tensorize]'s role assignment is decided: the micro-kernel recognition of apply (a pure function
+    of the code) is probed, so an invalid role permutation — e.g. the reduction loop assigned to
+    [i]/[j], violating the discipline that the [k] role is the only rmw-carrying loop of the
+    accumulation — is a proven [Op_illegal]; on structural success the affine queries decide [i]/[j]
+    iteration independence under the reduction-reassociation license (the intrinsic reassociates
+    [k]), with the hardware-lane cross-statement downgrade to [Op_unknown] as above. [Stage] is
+    likewise probed hermetically (a raising apply is [Op_illegal]), then its implicit contract — the
+    staged tile covers the reads it replaces within the staging scope — is the containment query
+    [Affine.read_covered_before] over the fresh tile's accesses: a covered non-shared (packing)
+    stage is [Op_legal]; shared staging (barrier placement and launch geometry are validated
+    downstream) and hoisted staging (link-time host-side packing) report [Op_unknown].
+    [Privatize]/[Expand_zero]/[Fuse_epilogue] report [Op_unknown]; their own apply-time
+    preconditions remain in force. *)
 
 val schedule_legality : Low_level.optimized -> schedule -> (optop * op_verdict) list
 (** Per-op verdicts, each against the code with the preceding ops applied (on a hermetic copy —
-    checking never mutates the argument). Stops after a proven-illegal op or a failing
-    application; an op that fails to apply reports [Op_illegal] with the exception. *)
+    checking never mutates the argument). Stops after a proven-illegal op or a failing application;
+    an op that fails to apply reports [Op_illegal] with the exception. *)
 
 val default_gpu :
   ?block_size:int ->
@@ -331,14 +331,13 @@ val default_gpu :
     For non-materialized (per-thread copy) scratch the edge additionally requires value
     thread-invariance at the chosen trim: a chain symbol feeding a scratch write's value without
     pinning the written cell would leave each consumer thread's copy holding its own chunk's last
-    value where the serial reference holds the last chunk's, so the trim search serializes that
-    loop (gh-494; direct syntactic dependence only).
-    Returns the empty schedule when any check fails or when the largest parallelizable nest has
-    fewer than [min_parallel] iterations (default from config [gpu_schedule_min_parallel] = 64: a
-    kernel launches either way, so any real parallelism beats the serial 1x1 fallback — a single GPU
-    thread is 1-2 orders of magnitude slower than a CPU core; the remaining small threshold keeps
-    sub-simdgroup-scale programs fully serial so their segments coalesce and placements stay
-    unchanged). *)
+    value where the serial reference holds the last chunk's, so the trim search serializes that loop
+    (gh-494; direct syntactic dependence only). Returns the empty schedule when any check fails or
+    when the largest parallelizable nest has fewer than [min_parallel] iterations (default from
+    config [gpu_schedule_min_parallel] = 64: a kernel launches either way, so any real parallelism
+    beats the serial 1x1 fallback — a single GPU thread is 1-2 orders of magnitude slower than a CPU
+    core; the remaining small threshold keeps sub-simdgroup-scale programs fully serial so their
+    segments coalesce and placements stay unchanged). *)
 
 val default_cpu : ?min_parallel:int -> Low_level.optimized -> schedule
 (** The default CPU annotator preset: the same conservative analysis as {!default_gpu}, but each

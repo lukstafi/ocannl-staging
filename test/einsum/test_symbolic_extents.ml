@@ -80,8 +80,7 @@ let test_error_cases () =
   (* Missing range. *)
   let no_range, _bindings = Idx.get_static_symbol Idx.Empty in
   let ref1 = Shape.get_variable_ref "ref1" in
-  expect_shape_error "set_sym_dim without static_range" (fun () ->
-      Shape.set_sym_dim ref1 no_range);
+  expect_shape_error "set_sym_dim without static_range" (fun () -> Shape.set_sym_dim ref1 no_range);
   (* Conflicts between concrete and symbolic settings on the same reference. *)
   let sym4, _bindings = Idx.get_static_symbol ~static_range:4 Idx.Empty in
   let sym8, _bindings = Idx.get_static_symbol ~static_range:8 Idx.Empty in
@@ -101,8 +100,8 @@ let test_error_cases () =
   let%op _v = u ++ "s=>s" [ "s" ] in
   expect_shape_error "set_sym_dim on an axis already solved concrete" (fun () ->
       Shape.set_sym_dim s seq);
-  (* Solver-level mismatch: a rigid symbolic dimension never unifies with a concrete dimension,
-     even one equal to its range. *)
+  (* Solver-level mismatch: a rigid symbolic dimension never unifies with a concrete dimension, even
+     one equal to its range. *)
   let%op u2 = { u2 = 0.5 } in
   let%op v2 = u2 ++ "s=>s" [ "s" ] in
   let%op k = { k = 1.0; o = [ 3 ] } in

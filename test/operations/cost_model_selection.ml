@@ -5,9 +5,9 @@
    ([Autotune.model_default]).
 
    Run by a dune rule (not a test stanza) with --ocannl_backend=cc and the model_peak_* envelope
-   overrides pinned on the command line: the C backends carry no advisory envelope constants, so
-   the overrides are what make roofline scoring live here — deterministically, on every entry of
-   the backend test matrix. The override values are chosen bandwidth-dominant (peak_flops huge,
+   overrides pinned on the command line: the C backends carry no advisory envelope constants, so the
+   overrides are what make roofline scoring live here — deterministically, on every entry of the
+   backend test matrix. The override values are chosen bandwidth-dominant (peak_flops huge,
    peak_memory_bandwidth tiny), so candidate ranking is decided by the byte counts, which differ
    across tile geometries. All printed values are booleans that hold regardless of the machine's
    SIMD width (which changes which sketch seeds exist, but not the properties asserted). *)
@@ -73,7 +73,8 @@ let () =
     (List.length (Autotune.model_prefilter ~keep_fraction:1. items) = 5);
   let ties = [ (1, Some 2.); (2, Some 1.); (3, Some 1.) ] in
   p "ties at the cutoff are all kept (order-independence)"
-    (List.equal Int.equal (List.map (Autotune.model_prefilter ~keep_fraction:0.34 ties) ~f:fst)
+    (List.equal Int.equal
+       (List.map (Autotune.model_prefilter ~keep_fraction:0.34 ties) ~f:fst)
        [ 2; 3 ]);
   p "at least one scored candidate always survives"
     (List.length (Autotune.model_prefilter ~keep_fraction:0.0001 ties) >= 1)
@@ -125,8 +126,7 @@ let () =
     (r_all.Autotune.model_scored = 0 && r_all.Autotune.model_pruned = 0);
   p "pre-filter scored the sketch candidates" (r_cut.Autotune.model_scored >= 2);
   p "pre-filter pruned the worse-scored sketches before timing"
-    (r_cut.Autotune.model_pruned >= 1
-    && r_cut.Autotune.model_pruned < r_cut.Autotune.model_scored);
+    (r_cut.Autotune.model_pruned >= 1 && r_cut.Autotune.model_pruned < r_cut.Autotune.model_scored);
   p "pruned search timed fewer candidates than the full search"
     (r_cut.Autotune.candidates_timed <= r_all.Autotune.candidates_timed);
   p "baseline still timed under aggressive pruning" (r_cut.Autotune.candidates_timed >= 1);

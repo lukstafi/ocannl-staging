@@ -1556,8 +1556,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               S.Tensor_at (Cu.Deviceptr.offset base ~bytes:loc.offset)
           | _name, Static_idx s ->
               let i = Indexing.find_exn lowered_bindings s in
-              (* Shared bind-time validation: negativity, range -- inclusive [0, range] for
-                 symbolic extents (gh-490), strict [0, range) for indices -- and index width. *)
+              (* Shared bind-time validation: negativity, range -- inclusive [0, range] for symbolic
+                 extents (gh-490), strict [0, range) for indices -- and index width. *)
               Indexing.validate_bound_value ~width64:Utils.settings.large_models s !i;
               S.Int !i
           | _name, (Kparam_pool_slab _ | Kparam_pool_slots _) ->
@@ -1680,10 +1680,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                 Some { Backend_intf.mma_simd_width = 32; mma_tile = (16, 16, 16) }
               else None);
            simd_vector_bytes = 0;
-           (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the
-              sm_70+ discrete-GPU class (RTX-30/40 mid-range: ~15 fp32 TFLOP/s, ~450 GB/s).
-              Per-device queries (SM count x clock, memory clock x bus width) are calibration
-              follow-up work; the model only ranks, so class-level numbers suffice. *)
+           (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the sm_70+
+              discrete-GPU class (RTX-30/40 mid-range: ~15 fp32 TFLOP/s, ~450 GB/s). Per-device
+              queries (SM count x clock, memory clock x bus width) are calibration follow-up work;
+              the model only ranks, so class-level numbers suffice. *)
            peak_flops = Some 1.5e13;
            peak_memory_bandwidth = Some 4.5e11;
          })

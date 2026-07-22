@@ -173,8 +173,8 @@ let test_max_pool2d_backprop () =
   Train.printf ~here:[%here] ~with_code:false ctx loss;
   Train.printf ~here:[%here] ~with_code:false ~with_grad:true ctx input
 
-(* 4x4 input with values -16..-1. All-negative inputs expose wrong margins: 0-margins would make
-   the edge maxima 0 instead of the valid-range maxima. *)
+(* 4x4 input with values -16..-1. All-negative inputs expose wrong margins: 0-margins would make the
+   edge maxima 0 instead of the valid-range maxima. *)
 let make_negative_input () =
   TDSL.init ~l:"input" ~prec:Ir.Ops.single ~o:[ 4; 4; 1 ]
     ~f:(fun idcs -> Float.of_int ((4 * idcs.(0)) + idcs.(1)) -. 16.)
@@ -192,22 +192,21 @@ let padding_to_string (tn : Ir.Tnode.t) =
              |> List.map ~f:(fun Ir.Ops.{ left; right } -> Printf.sprintf "%d/%d" left right)))
           (Float.to_string elem)
 
-(* Expected padded pooling of [make_negative_input] at stride=2, window=3: the window at output
-   (oh, ow) covers input rows 2*oh-1 .. 2*oh+1 (margins: left 1, right 2), clipped to the valid
-   range by the -inf margins:
-   out[0,0] = max rows{0,1} cols{0,1} = -11;  out[0,1] = max rows{0,1} cols{1..3} = -9;
-   out[1,0] = max rows{1..3} cols{0,1} = -3;  out[1,1] = max rows{1..3} cols{1..3} = -1. *)
+(* Expected padded pooling of [make_negative_input] at stride=2, window=3: the window at output (oh,
+   ow) covers input rows 2*oh-1 .. 2*oh+1 (margins: left 1, right 2), clipped to the valid range by
+   the -inf margins: out[0,0] = max rows{0,1} cols{0,1} = -11; out[0,1] = max rows{0,1} cols{1..3} =
+   -9; out[1,0] = max rows{1..3} cols{0,1} = -3; out[1,1] = max rows{1..3} cols{1..3} = -1. *)
 let check_padded_values ctx output =
   let v = Context.get_values ctx output.Tensor.value in
   printf "padded pooled = [%g %g; %g %g]\n%!" v.(0) v.(1) v.(2) v.(3);
   printf "padded max-pool values correct (margins -inf): %b\n%!"
     Float.(v.(0) = -11. && v.(1) = -9. && v.(2) = -3. && v.(3) = -1.)
 
-(** Test max_pool2d with use_padding=true ("same" pooling): output spatial dims = input/stride.
-    The pool demands -inf margins directly on its operand: a tensor node's padding is committed
-    only when its padding lazy forces at compilation, after every consumer's margin demand is
-    registered, so a single-consumer intermediate needs no copy. The operand here is a plain
-    broadcast result (open trailing-dims row), exercising the mixed-anchoring row unification. *)
+(** Test max_pool2d with use_padding=true ("same" pooling): output spatial dims = input/stride. The
+    pool demands -inf margins directly on its operand: a tensor node's padding is committed only
+    when its padding lazy forces at compilation, after every consumer's margin demand is registered,
+    so a single-consumer intermediate needs no copy. The operand here is a plain broadcast result
+    (open trailing-dims row), exercising the mixed-anchoring row unification. *)
 let test_max_pool2d_padded () =
   printf "Testing max_pool2d with use_padding=true (stride=2, window=3)...\n%!";
   Tensor.unsafe_reinitialize ();
@@ -258,10 +257,10 @@ let test_max_pool2d_padded_locked_data () =
     (match Lazy.force input.value.Ir.Tnode.padding with None -> true | Some _ -> false);
   check_padded_values ctx output
 
-(** Inception-style sharing: one tensor feeding both a padded 0-neutral conv and a padded
-    max-pool. The two margin-touching consumers demand different neutral elements on the same
-    buffer, so plain [max_pool2d] is rejected; [max_pool2d_copy] gives the pool a private copy to
-    commit -inf on, while the shared tensor keeps the conv's 0 neutral. *)
+(** Inception-style sharing: one tensor feeding both a padded 0-neutral conv and a padded max-pool.
+    The two margin-touching consumers demand different neutral elements on the same buffer, so plain
+    [max_pool2d] is rejected; [max_pool2d_copy] gives the pool a private copy to commit -inf on,
+    while the shared tensor keeps the conv's 0 neutral. *)
 let test_max_pool2d_conflicting_consumers () =
   printf "Testing Inception-style sharing: padded conv + padded max-pool...\n%!";
   Tensor.unsafe_reinitialize ();
@@ -291,8 +290,7 @@ let test_max_pool2d_conflicting_consumers () =
 
   Tensor.unsafe_reinitialize ();
   let shared, conv_branch, pool_branch =
-    make_graph (fun x ->
-        Nn_blocks.max_pool2d_copy ~stride:2 ~window_size:3 ~use_padding:true () x)
+    make_graph (fun x -> Nn_blocks.max_pool2d_copy ~stride:2 ~window_size:3 ~use_padding:true () x)
   in
   let ctx = Context.auto () in
   Train.set_materialized shared.Tensor.value;
@@ -303,8 +301,8 @@ let test_max_pool2d_conflicting_consumers () =
   let ctx = Train.forward_once ctx pool_branch in
   printf "max_pool2d_copy: shared tensor keeps the conv's neutral: %s\n%!"
     (padding_to_string shared.Tensor.value);
-  (* shared(h, w, c) = 8h + 2w + c; padded max windows per output cell (see
-     [check_padded_values] for window coverage): out(oh, ow, c) row-major. *)
+  (* shared(h, w, c) = 8h + 2w + c; padded max windows per output cell (see [check_padded_values]
+     for window coverage): out(oh, ow, c) row-major. *)
   let v = Context.get_values ctx pool_branch.Tensor.value in
   printf "pooled shared = [%g %g %g %g %g %g %g %g]\n%!" v.(0) v.(1) v.(2) v.(3) v.(4) v.(5) v.(6)
     v.(7);

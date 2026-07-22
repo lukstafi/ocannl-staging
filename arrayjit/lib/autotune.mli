@@ -50,12 +50,11 @@
       the (pre-zeroed) target and [Tile_mma] loads the accumulator fragment before the reduction.
     - {b Convolution sketches} (gh-ocannl-493): when a convolution accumulation site is detected
       ({!detect_conv}), the implicit-GEMM pipeline — the packing [Stage] serving as im2col, the
-      micro-kernel the ordinary [Tile_mma]. On the C backends: serial and Grid-parallel flavors,
-      the latter adopting the default preset's aligned whole-segment Grid geometry on merged
-      segments (lenet's conv+bias/relu+pooling). On GPU backends with an mma capability: the
-      staged flavor — outer output loops Grid-typed, both slices staged through cooperative
-      shared tiles at the kernel-window anchor, the accumulator fragment resident across the
-      window (gh-ocannl-480).
+      micro-kernel the ordinary [Tile_mma]. On the C backends: serial and Grid-parallel flavors, the
+      latter adopting the default preset's aligned whole-segment Grid geometry on merged segments
+      (lenet's conv+bias/relu+pooling). On GPU backends with an mma capability: the staged flavor —
+      outer output loops Grid-typed, both slices staged through cooperative shared tiles at the
+      kernel-window anchor, the accumulator fragment resident across the window (gh-ocannl-480).
     - {b Beam-round menu actions} on the incumbents: dividing serial Splits, Swaps of perfect serial
       pairs, Unrolls, Retype-Vectorized on innermost loops (explicit SIMD on CPU including the
       reduction-chains rendering of accumulations — gh-ocannl-468 — while GPU accumulations stay
@@ -209,13 +208,12 @@ val model_score :
     half): {!Ir.Schedule.apply} on a hermetic copy, {!Ir.Cost_model.analyze}, then the roofline
     lower-bound seconds under the envelope constants — [limits]' advisory [peak_flops] /
     [peak_memory_bandwidth], each overridable by config [model_peak_flops] /
-    [model_peak_memory_bandwidth] (calibrated per-machine values beat the class constants). [None]
-    — no model coverage — when the schedule fails to apply, the code is opaque to the extraction
-    (its counts may under-estimate, so ranking on them could prune the true winner), or no envelope
+    [model_peak_memory_bandwidth] (calibrated per-machine values beat the class constants). [None] —
+    no model coverage — when the schedule fails to apply, the code is opaque to the extraction (its
+    counts may under-estimate, so ranking on them could prune the true winner), or no envelope
     constant is present. A ranking score, not a runtime prediction. Exposed for tests. *)
 
-val model_prefilter :
-  keep_fraction:float -> ('a * float option) list -> ('a * float option) list
+val model_prefilter : keep_fraction:float -> ('a * float option) list -> ('a * float option) list
 (** The order-preserving pre-filter over model-scored candidates: keeps every unscored ([None])
     candidate — the no-coverage exemption: never dropped, only measured — plus the best
     [ceil (keep_fraction * n)] of the [n] scored ones (at least one; ties at the cutoff are all
@@ -230,8 +228,8 @@ type model_choice = {
       (** The winner's roofline lower bound in ms — a ranking score, not a runtime prediction;
           [None] when selection did not run. *)
   mc_scored : int;
-      (** Model evaluations that produced a score (the default pipeline included; the fissioned
-          flow also scores per segment). *)
+      (** Model evaluations that produced a score (the default pipeline included; the fissioned flow
+          also scores per segment). *)
   mc_skipped : int;  (** Model evaluations without coverage, excluded from the ranking. *)
 }
 
@@ -248,13 +246,13 @@ val model_default :
   Context.t * Context.routine
 (** A drop-in for {!Context.compile} that raises the untuned floor (gh-ocannl-491 task 3): inside
     the compile's own transform seam, the untuned default pipeline and the sketch families
-    (whole-routine, and per-fission-segment substitutions when the default fissions) are scored
-    with the roofline model, and the model-argmin schedule is applied — zero measurement, one
-    backend compile. Advisory by construction: a candidate without model coverage is never picked
-    over the default, ties go to the default, and missing envelope constants, a disabled default
-    annotator ({!Ir.Schedule.automatic_schedule_active}), or any scoring/application failure fall
-    back to the ordinary default pipeline. Unlike {!tune}, nothing is executed and no cache is
-    involved — results depend only on the computation, backend, and envelope constants. *)
+    (whole-routine, and per-fission-segment substitutions when the default fissions) are scored with
+    the roofline model, and the model-argmin schedule is applied — zero measurement, one backend
+    compile. Advisory by construction: a candidate without model coverage is never picked over the
+    default, ties go to the default, and missing envelope constants, a disabled default annotator
+    ({!Ir.Schedule.automatic_schedule_active}), or any scoring/application failure fall back to the
+    ordinary default pipeline. Unlike {!tune}, nothing is executed and no cache is involved —
+    results depend only on the computation, backend, and envelope constants. *)
 
 val set_test_bindings : Context.routine -> unit
 (** Binds representative values for timing runs: ranged static indices at [range / 2], and gh-490
@@ -280,12 +278,11 @@ val tune :
      [autotune_cache_dir] ([autotune_cache]). *)
   ?keep_fraction:float ->
   (* The model pre-filter of the sketch seeding (gh-ocannl-491): per candidate family (the
-     whole-routine sketches; each fission segment's sketches), rank with {!model_score} and keep
-     the best [keep_fraction] of the scored candidates before compiling or timing anything.
-     Default from config [autotune_keep_fraction] (1 = pre-filter off). Candidates without model
-     coverage are always kept — never dropped, only measured — so the pre-filter never overrides
-     (or precludes) a measured result; presets, saved schedules and the baseline are never
-     pruned. *)
+     whole-routine sketches; each fission segment's sketches), rank with {!model_score} and keep the
+     best [keep_fraction] of the scored candidates before compiling or timing anything. Default from
+     config [autotune_keep_fraction] (1 = pre-filter off). Candidates without model coverage are
+     always kept — never dropped, only measured — so the pre-filter never overrides (or precludes) a
+     measured result; presets, saved schedules and the baseline are never pruned. *)
   ?timing_ctx:Context.t ->
   (* A scratch context lineage against which candidates are compiled and timed, so the timing runs
      never mutate [ctx]'s live buffers (parameters, accumulators — running a training step on

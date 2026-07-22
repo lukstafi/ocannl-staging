@@ -1053,17 +1053,17 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
     (* Mint the tile. *)
     let prec = Lazy.force source.Tn.prec in
     let tile_dims = Array.map tile_axes ~f:snd in
-    (if swizzle then
-       let n = Array.length tile_dims in
-       if n < 2 then
-         invalid_arg
-           "Schedule.Stage: swizzle requires a tile with at least two axes (the minor axis is \
-            XORed against the row prefix)";
-       let c = tile_dims.(n - 1) in
-       if c < 2 || c land (c - 1) <> 0 then
-         invalid_arg
-           (Printf.sprintf
-              "Schedule.Stage: swizzle requires a power-of-two minor tile dim > 1, got %d" c));
+    if swizzle then (
+      let n = Array.length tile_dims in
+      if n < 2 then
+        invalid_arg
+          "Schedule.Stage: swizzle requires a tile with at least two axes (the minor axis is XORed \
+           against the row prefix)";
+      let c = tile_dims.(n - 1) in
+      if c < 2 || c land (c - 1) <> 0 then
+        invalid_arg
+          (Printf.sprintf
+             "Schedule.Stage: swizzle requires a power-of-two minor tile dim > 1, got %d" c));
     let tile =
       Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
         ~label:("tile" :: source.Tn.label)
@@ -1831,11 +1831,10 @@ let apply_tensorize op (opt : Low_level.optimized) : Low_level.optimized =
     the tail uses that same tuple; the tail is elementwise (no local scopes, dynamic or merge-buffer
     reads); no later statement mentions [target] (sole consumer); the tail's other operands are not
     written by the reduction statement; and the store-back tiles cover [target]'s index space
-    bijectively, with no surplus enclosing loop (extent > 1, not indexing the site) re-executing
-    the store-back per iteration (so the relocated tail writes each output element exactly once,
-    from the completed accumulation). Nodes related by
-    buffer aliasing ([Tnode.alias_of]) are not analyzed — sole-consumption is judged by node
-    identity. *)
+    bijectively, with no surplus enclosing loop (extent > 1, not indexing the site) re-executing the
+    store-back per iteration (so the relocated tail writes each output element exactly once, from
+    the completed accumulation). Nodes related by buffer aliasing ([Tnode.alias_of]) are not
+    analyzed — sole-consumption is judged by node identity. *)
 let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.optimized =
   let open Low_level in
   let fail msg = invalid_arg ("Schedule.Fuse_epilogue: " ^ msg) in
@@ -2074,8 +2073,8 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
                   if e > 1 && not (Array.exists st_idcs ~f:(idx_mentions s)) then
                     fail
                       ("the fragment store-back executes once per iteration of enclosing loop "
-                      ^ Indexing.symbol_ident s
-                      ^ " which does not index it — the tail would read partial accumulations"));
+                     ^ Indexing.symbol_ident s
+                     ^ " which does not index it — the tail would read partial accumulations"));
               if not (covers_bijectively ~env:env' st_idcs) then
                 fail "the fragment store-back tiles do not cover the output space bijectively";
               fused := true;
@@ -2269,11 +2268,11 @@ let apply ?(static_indices = []) (sched : schedule) (opt : Low_level.optimized) 
 
 (** {2 The op-legality oracle}
 
-    gh-494 waypoint 3: schedule ops consult the affine engine instead of every transform (and
-    every candidate compile) embedding its own analysis. A schedule op is a thread-pairing
-    transform over the routine's access relations, so its obligation is a query: does pairing the
-    op's loop symbol(s) as thread identity leave every write-involving access pair of every
-    written node [Disjoint] or [Same_thread]?
+    gh-494 waypoint 3: schedule ops consult the affine engine instead of every transform (and every
+    candidate compile) embedding its own analysis. A schedule op is a thread-pairing transform over
+    the routine's access relations, so its obligation is a query: does pairing the op's loop
+    symbol(s) as thread identity leave every write-involving access pair of every written node
+    [Disjoint] or [Same_thread]?
 
     Verdicts are three-valued and both proven directions are sound: [Op_legal] means the queries
     prove the annotation race-free; [Op_illegal] means a definite violation is proven (e.g. a
@@ -2415,9 +2414,11 @@ let partition_breakpoints ~axis (llc : Low_level.t) : int list =
        ^ Indexing.symbol_ident axis)
 
 let acc_interpretable (a : _ Affine.access) =
-  (not a.Affine.a_dynamic)
-  && (not a.a_whole) && (not a.a_vec_last)
-  && not (Array.exists a.a_map ~f:(function Indexing.Sub_axis | Indexing.Concat _ -> true | _ -> false))
+  (not a.Affine.a_dynamic) && (not a.a_whole) && (not a.a_vec_last)
+  && not
+       (Array.exists a.a_map ~f:(function
+         | Indexing.Sub_axis | Indexing.Concat _ -> true
+         | _ -> false))
 
 (* Node accesses outside a given subtree: uid -> written-outside flag. Hardware annotations
    interleave sibling statements' threads with no grid-wide synchronization, so any node shared
@@ -2477,8 +2478,8 @@ let accesses_outside (llc : Low_level.t) ~(skip : Low_level.t) : (int, bool) Has
 (* Iteration independence of the loop bound by [pairs]'s symbols (all paired with themselves:
    same-nest thread identity). [licensed w x] exempts a conflicting pair from the obligation
    (reduction reassociation under an explicit license). With [cross_nest] (hardware annotations,
-   which interleave sibling statements' threads), a node shared across the loop's statement
-   boundary with a write on either side downgrades the proof to [Op_unknown]: such pairs need the
+   which interleave sibling statements' threads), a node shared across the loop's statement boundary
+   with a write on either side downgrades the proof to [Op_unknown]: such pairs need the
    aligned-mapping analysis of the default annotator, which the single-op oracle does not model.
    Proven intra-nest violations stay [Op_illegal] regardless. *)
 let loops_independent (opt : Low_level.optimized) ~(syms : Indexing.symbol list) ~cross_nest
@@ -2486,9 +2487,7 @@ let loops_independent (opt : Low_level.optimized) ~(syms : Indexing.symbol list)
   let open Low_level in
   let plc = opt.optimize_ctx.placements in
   match find_loop (List.hd_exn syms) opt.llc with
-  | None ->
-      Op_unknown
-        ("no statement-level loop binds " ^ Indexing.symbol_ident (List.hd_exn syms))
+  | None -> Op_unknown ("no statement-level loop binds " ^ Indexing.symbol_ident (List.hd_exn syms))
   | Some loop ->
       let accs = Low_level.affine_accesses loop in
       let env = Low_level.loop_bounds loop in
@@ -2515,25 +2514,24 @@ let loops_independent (opt : Low_level.optimized) ~(syms : Indexing.symbol list)
             else v
           else
             let is_mat = Tn.Placements.is_materialized_peek plc tn in
-            (* Proven violation: an unguarded, interpretable write of a materialized node whose
-               map provably avoids some parallel symbol of extent > 1 — every iteration of that
-               loop rewrites the same cells of genuinely shared memory. *)
+            (* Proven violation: an unguarded, interpretable write of a materialized node whose map
+               provably avoids some parallel symbol of extent > 1 — every iteration of that loop
+               rewrites the same cells of genuinely shared memory. *)
             let illegal =
               is_mat
               && List.find writes ~f:(fun w ->
                      acc_interpretable w && (not w.a_guarded)
                      && (not (licensed w w))
                      && List.exists syms ~f:(fun s ->
-                            extent s > 1
-                            && not (Array.exists w.a_map ~f:(mentions_axis s))))
+                         extent s > 1 && not (Array.exists w.a_map ~f:(mentions_axis s))))
                  |> Option.is_some
             in
             if illegal then
               combine_verdicts v
                 (Op_illegal
                    (Tn.debug_name tn
-                  ^ ": a write provably independent of a parallelized loop rewrites the same \
-                     cells on every iteration"))
+                  ^ ": a write provably independent of a parallelized loop rewrites the same cells \
+                     on every iteration"))
             else if not (List.for_all accs ~f:acc_interpretable) then
               combine_verdicts v
                 (Op_unknown (Tn.debug_name tn ^ ": statically unknown access under the loop"))
@@ -2549,42 +2547,39 @@ let loops_independent (opt : Low_level.optimized) ~(syms : Indexing.symbol list)
                           with
                           | Affine.Disjoint | Affine.Same_thread -> nv
                           | Affine.Cross_thread wit ->
-                              combine_verdicts nv
-                                (Op_unknown (Tn.debug_name tn ^ ": " ^ wit))))
+                              combine_verdicts nv (Op_unknown (Tn.debug_name tn ^ ": " ^ wit))))
               in
               let node_v =
                 if equal_op_verdict node_v Op_legal && Hashtbl.mem outside uid then
                   Op_unknown
                     (Tn.debug_name tn
-                   ^ ": also accessed outside the parallelized statement (cross-nest alignment \
-                      not modeled)")
+                   ^ ": also accessed outside the parallelized statement (cross-nest alignment not \
+                      modeled)")
                 else node_v
               in
               combine_verdicts v node_v)
 
-(* [Stage] legality: apply the op on a hermetic copy — [apply_stage]'s precondition surface
-   (source unwritten and statically read through one index vector, tile loops enclosing/occurring
-   with positive coefficients, the shared-mode workgroup-slot coverage rule, the
+(* [Stage] legality: apply the op on a hermetic copy — [apply_stage]'s precondition surface (source
+   unwritten and statically read through one index vector, tile loops enclosing/occurring with
+   positive coefficients, the shared-mode workgroup-slot coverage rule, the
    hoisted/cooperative/swizzle contracts) is deterministic on the code, so a raising probe proves
    the candidate compile's apply raises too: [Op_illegal] with no transcription drift. The minted
    tile and its (key-weak) [Host_inits] entry become unreachable with the discarded copy.
 
-   On success, the op's implicit contract — the staged tile covers the reads it replaces within
-   the staging scope — is the containment query: every remapped read of the fresh tile must be
-   covered by the load nest's prior writes ([Affine.read_covered_before]; edge-guarded loads
-   included, mirroring guards-taken analyses). The loads copy a source the routine never writes
-   (checked by apply) through the same per-axis index decomposition the reads use, so a covering
-   write holds exactly the source cell the original read fetched — cell coverage implies value
-   correctness here. A covered non-shared (packing) stage only inserts a serial per-thread copy
-   nest over a [Local] tile: [Op_legal]. Shared staging additionally relies on barrier placement
-   and launch-geometry uniformity validated downstream by [Low_level.validate_parallel], and
-   hoisted staging on the link-time host-side packing program — neither is modeled by the
-   queries, so those report [Op_unknown] (never a rejection). *)
+   On success, the op's implicit contract — the staged tile covers the reads it replaces within the
+   staging scope — is the containment query: every remapped read of the fresh tile must be covered
+   by the load nest's prior writes ([Affine.read_covered_before]; edge-guarded loads included,
+   mirroring guards-taken analyses). The loads copy a source the routine never writes (checked by
+   apply) through the same per-axis index decomposition the reads use, so a covering write holds
+   exactly the source cell the original read fetched — cell coverage implies value correctness here.
+   A covered non-shared (packing) stage only inserts a serial per-thread copy nest over a [Local]
+   tile: [Op_legal]. Shared staging additionally relies on barrier placement and launch-geometry
+   uniformity validated downstream by [Low_level.validate_parallel], and hoisted staging on the
+   link-time host-side packing program — neither is modeled by the queries, so those report
+   [Op_unknown] (never a rejection). *)
 let stage_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
   let shared, hoisted =
-    match op with
-    | Stage { shared; hoisted; _ } -> (shared, hoisted)
-    | _ -> assert false
+    match op with Stage { shared; hoisted; _ } -> (shared, hoisted) | _ -> assert false
   in
   let hermetic =
     {
@@ -2670,8 +2665,8 @@ let op_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
   | Swap { outer; inner } -> (
       (* Interchange reorders iterations; the optop contract licenses it for the
          associative-commutative accumulation patterns lowering emits (the rmw self-pairs). Beyond
-         that license, prove that no write-involving pair can touch a common cell across
-         different (outer, inner) iterations at all — then any order computes the same values. *)
+         that license, prove that no write-involving pair can touch a common cell across different
+         (outer, inner) iterations at all — then any order computes the same values. *)
       match find_loop outer opt.llc with
       | Some (For_loop { body = For_loop { index; _ }; _ }) when Indexing.equal_symbol index inner
         ->
@@ -2680,13 +2675,13 @@ let op_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
       | None -> Op_unknown ("no statement-level loop binds " ^ Indexing.symbol_ident outer))
   | Tensorize { i; j; _ } -> (
       (* Role-assignment validity first: the micro-kernel recognition in [apply_op]'s Tensorize
-         branch is a pure function of the code, so probing it decides exactly whether the
-         candidate compile's apply would raise — a proven [Op_illegal] with no transcription
-         drift. This is the valuable pruner: of the role permutations the autotuner proposes per
-         serial triple, the ones assigning the reduction loop to [i]/[j] (or an output loop to
-         [k]) fail the accumulator/operand index discipline here — the [a_rmw]-carrying write
-         must be indexed [..., i, j] with the [k] role absent, i.e. [k] is the only loop carrying
-         the reduction dependence. *)
+         branch is a pure function of the code, so probing it decides exactly whether the candidate
+         compile's apply would raise — a proven [Op_illegal] with no transcription drift. This is
+         the valuable pruner: of the role permutations the autotuner proposes per serial triple, the
+         ones assigning the reduction loop to [i]/[j] (or an output loop to [k]) fail the
+         accumulator/operand index discipline here — the [a_rmw]-carrying write must be indexed
+         [..., i, j] with the [k] role absent, i.e. [k] is the only loop carrying the reduction
+         dependence. *)
       match apply_sched_op opt.llc op with
       | exception Invalid_argument msg -> Op_illegal msg
       | (_ : Low_level.t) ->
@@ -2695,16 +2690,16 @@ let op_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
              mapping the intrinsic picks) and reassociates the [k] reduction — the same license as
              [Vectorized] retypes, discharged by the accumulator's rmw self-pairs. Pairing [i]/[j]
              as thread identity must leave every write-involving pair Disjoint or Same_thread, and
-             the lane is a hardware axis, so cross-statement node sharing downgrades to
-             [Op_unknown] exactly as for hardware retypes. *)
+             the lane is a hardware axis, so cross-statement node sharing downgrades to [Op_unknown]
+             exactly as for hardware retypes. *)
           loops_independent opt ~syms:[ i; j ] ~cross_nest:true ~licensed:rmw_license)
   | Stage _ -> stage_legality opt op
   | Privatize _ | Expand_zero _ | Fuse_epilogue _ ->
       Op_unknown "not modeled by the oracle (the op's own preconditions apply)"
 
 (** [schedule_legality opt sched]: per-op verdicts, each against the code with the preceding ops
-    applied (on a hermetic copy — checking never mutates [opt]). Stops after a proven-illegal op
-    or a failing application; an op that fails to apply reports [Op_illegal] with the exception. *)
+    applied (on a hermetic copy — checking never mutates [opt]). Stops after a proven-illegal op or
+    a failing application; an op that fails to apply reports [Op_illegal] with the exception. *)
 let schedule_legality (opt : Low_level.optimized) (sched : schedule) : (optop * op_verdict) list =
   let opt =
     {
@@ -2771,9 +2766,9 @@ type access = {
       (** [Set_from_vec]: [a_idcs] is the base of a length-run along the minor axis, not a single
           cell — affine queries must treat the last component as opaque ({!query_map}). *)
   a_val_syms : Indexing.symbol list;
-      (** Writes only: loop symbols the written value depends on syntactically (index symbols of
-          rhs reads, embedded indices, dynamic-index sub-expressions). Direct dependence only — a
-          chain through another scratch node is not tracked. *)
+      (** Writes only: loop symbols the written value depends on syntactically (index symbols of rhs
+          reads, embedded indices, dynamic-index sub-expressions). Direct dependence only — a chain
+          through another scratch node is not tracked. *)
 }
 
 exception Bail
@@ -2890,10 +2885,10 @@ let mentions_sym syms (idx : Indexing.axis_index) =
    no (possibly wrong) disjointness or confinement conclusion from it. *)
 let query_map (a : access) : Indexing.axis_index array =
   if (not a.a_vec) || Array.is_empty a.a_idcs then a.a_idcs
-  else (
+  else
     let m = Array.copy a.a_idcs in
     m.(Array.length m - 1) <- Indexing.Sub_axis;
-    m)
+    m
 
 (* The single-child chain of [For_loop]s from the top of a nest, descending through [If] wrappers
    and comments; stops at the first branching ([Seq] with more than one non-comment statement). *)
@@ -2991,8 +2986,8 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
                     a.a_write
                     && (Array.exists a.a_idcs ~f:(mentions_sym syms)
                        || List.exists a.a_val_syms ~f:(fun s ->
-                              List.mem syms s ~equal:Indexing.equal_symbol
-                              && not (Array.exists a.a_idcs ~f:(mentions_sym [ s ])))))
+                           List.mem syms s ~equal:Indexing.equal_symbol
+                           && not (Array.exists a.a_idcs ~f:(mentions_sym [ s ])))))
               in
               if
                 (List.exists accs_i ~f:(fun a -> a.a_write)
@@ -3067,8 +3062,7 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
           ~left:(query_map a) ~right:(query_map b)
       in
       let query_safe = match verdict with Affine.Cross_thread _ -> false | _ -> true in
-      Affine.crosscheck ~site:"schedule cross-nest alignment"
-        ~context:(Tn.debug_name a.a_tn)
+      Affine.crosscheck ~site:"schedule cross-nest alignment" ~context:(Tn.debug_name a.a_tn)
         ~procedural_safe:(fun () -> pair_aligned_procedural ~l gi gj a b)
         ~query_safe
         ~witness:(match verdict with Affine.Cross_thread w -> w | _ -> "");
@@ -3080,25 +3074,27 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
       let is_mat = Tn.Placements.is_materialized_peek plc (List.hd_exn accs_i).a_tn in
       let pair_aligned = if is_mat then pair_aligned_query else pair_aligned_procedural in
       (* Per-thread copies of statement-crossing scratch: a consumer thread's copy holds its own
-         chunk's last value, while the serial reference holds the last chunk's — they coincide
-         only when the written value cannot vary across the chunks writing the same cell. At trim
-         level [l], every write's value symbols must avoid the writer's parallel symbols unless
-         they also pin the written cell (then only the reader's own thread wrote it). The search
-         over [l] serializes the offending chain loop. Syntactic, direct dependence only. *)
+         chunk's last value, while the serial reference holds the last chunk's — they coincide only
+         when the written value cannot vary across the chunks writing the same cell. At trim level
+         [l], every write's value symbols must avoid the writer's parallel symbols unless they also
+         pin the written cell (then only the reader's own thread wrote it). The search over [l]
+         serializes the offending chain loop. Syntactic, direct dependence only. *)
       let value_invariant_ok =
         is_mat
-        || List.for_all [ (accs_i, i); (accs_j, j) ] ~f:(fun (accs, g) ->
+        || List.for_all
+             [ (accs_i, i); (accs_j, j) ]
+             ~f:(fun (accs, g) ->
                let syms = List.take full_syms.(g) l in
                List.for_all accs ~f:(fun a ->
                    (not a.a_write)
                    || List.for_all a.a_val_syms ~f:(fun s ->
-                          (not (List.mem syms s ~equal:Indexing.equal_symbol))
-                          || Array.exists a.a_idcs ~f:(mentions_sym [ s ]))))
+                       (not (List.mem syms s ~equal:Indexing.equal_symbol))
+                       || Array.exists a.a_idcs ~f:(mentions_sym [ s ]))))
       in
       value_invariant_ok
       && List.for_all accs_i ~f:(fun a ->
-             List.for_all accs_j ~f:(fun b ->
-                 (not (a.a_write || b.a_write)) || pair_aligned ~l i j a b))
+          List.for_all accs_j ~f:(fun b ->
+              (not (a.a_write || b.a_write)) || pair_aligned ~l i j a b))
     in
     let comps = Hashtbl.create (module Int) in
     Array.iteri parent ~f:(fun g _ -> Hashtbl.add_multi comps ~key:(find g) ~data:g);
@@ -3135,10 +3131,10 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
       let range s = List.Assoc.find env s ~equal:Indexing.equal_symbol in
       let dup s = List.Assoc.mem env s ~equal:Indexing.equal_symbol in
       let pairs = List.map syms ~f:(fun s -> (s, s)) in
-      (* The agreement rule: all accesses agree on every component that mentions a parallel
-         symbol. For materialized nodes it is the legacy (procedural) special case of the affine
-         conflict query, kept for [legality_crosscheck]; for non-materialized (per-thread copy)
-         scratch it IS the rule (see [pair_aligned_procedural]'s note). *)
+      (* The agreement rule: all accesses agree on every component that mentions a parallel symbol.
+         For materialized nodes it is the legacy (procedural) special case of the affine conflict
+         query, kept for [legality_crosscheck]; for non-materialized (per-thread copy) scratch it IS
+         the rule (see [pair_aligned_procedural]'s note). *)
       let agreement_ok accs =
         let rank = List.fold accs ~init:0 ~f:(fun m a -> max m (Array.length a.a_idcs)) in
         let ok = ref true in
@@ -3175,14 +3171,14 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
                   List.for_all accs ~f:(fun w ->
                       (not w.a_write)
                       || List.for_all accs ~f:(fun x ->
-                             match
-                               Affine.pair_conflict ~range ~dup_left:dup ~dup_right:dup ~pairs
-                                 ~left:(query_map w) ~right:(query_map x)
-                             with
-                             | Affine.Disjoint | Affine.Same_thread -> true
-                             | Affine.Cross_thread wit ->
-                                 witness := wit;
-                                 false))
+                          match
+                            Affine.pair_conflict ~range ~dup_left:dup ~dup_right:dup ~pairs
+                              ~left:(query_map w) ~right:(query_map x)
+                          with
+                          | Affine.Disjoint | Affine.Same_thread -> true
+                          | Affine.Cross_thread wit ->
+                              witness := wit;
+                              false))
                 in
                 Affine.crosscheck ~site:"schedule per-nest hazard"
                   ~context:(Tn.debug_name (List.hd_exn accs).a_tn)
@@ -3198,12 +3194,12 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
    the annotator's thread identity across aligned nests — turning "each thread reads only cells it
    wrote itself, earlier in its own serial chunk" into exactly the engine's shared-parameter
    cancellation plus statement-order visibility (an unaligned nest's chain loops keep distinct
-   bounds, fail the common-prefix test, and decline as residual thread parameters). Called from
-   the default annotators after {!analyze_parallel_chains} accepted the kernel (not from its
-   partial per-statement invocations, whose code excludes cross-step writes), so the procedural
-   side is a constant accept: a raise means an accepted schedule contains a read of per-thread
-   scratch not provably covered by the same thread's earlier writes. Nodes with dynamic accesses
-   are skipped (scatter into scratch: statically unknown cells). *)
+   bounds, fail the common-prefix test, and decline as residual thread parameters). Called from the
+   default annotators after {!analyze_parallel_chains} accepted the kernel (not from its partial
+   per-statement invocations, whose code excludes cross-step writes), so the procedural side is a
+   constant accept: a raise means an accepted schedule contains a read of per-thread scratch not
+   provably covered by the same thread's earlier writes. Nodes with dynamic accesses are skipped
+   (scatter into scratch: statically unknown cells). *)
 let crosscheck_scratch_containment (opt : Low_level.optimized) (chains : Low_level.t list list) :
     unit =
   if Lazy.force Affine.crosscheck_enabled then (
@@ -3223,12 +3219,8 @@ let crosscheck_scratch_containment (opt : Low_level.optimized) (chains : Low_lev
             if k < 2 && Option.is_none canon.(k) then canon.(k) <- Some s));
     let renames =
       List.map2_exn nests chains ~f:(fun n chain ->
-          let idx, _ =
-            Option.value_exn (List.findi stmts ~f:(fun _ s -> phys_equal s n.n_loops))
-          in
-          ( idx,
-            List.mapi (chain_syms chain) ~f:(fun k s ->
-                (s, Option.value_exn (canon.(k)))) ))
+          let idx, _ = Option.value_exn (List.findi stmts ~f:(fun _ s -> phys_equal s n.n_loops)) in
+          (idx, List.mapi (chain_syms chain) ~f:(fun k s -> (s, Option.value_exn canon.(k)))))
     in
     let rename_sym m s =
       List.Assoc.find m s ~equal:Indexing.equal_symbol |> Option.value ~default:s
@@ -3284,14 +3276,13 @@ let crosscheck_scratch_containment (opt : Low_level.optimized) (chains : Low_lev
                 in
                 (not crossing)
                 || List.for_all w.Affine.a_val_syms ~f:(fun s ->
-                       (not (thread s))
-                       || Array.exists w.a_map ~f:(fun idx ->
-                              match idx with
-                              | Indexing.Iterator s' -> Indexing.equal_symbol s s'
-                              | Indexing.Affine { symbols; _ } ->
-                                  List.exists symbols ~f:(fun (_, s') ->
-                                      Indexing.equal_symbol s s')
-                              | _ -> false))
+                    (not (thread s))
+                    || Array.exists w.a_map ~f:(fun idx ->
+                        match idx with
+                        | Indexing.Iterator s' -> Indexing.equal_symbol s s'
+                        | Indexing.Affine { symbols; _ } ->
+                            List.exists symbols ~f:(fun (_, s') -> Indexing.equal_symbol s s')
+                        | _ -> false))
                 ||
                 (witness := "thread-variant value in statement-crossing scratch write";
                  false))
@@ -3299,13 +3290,13 @@ let crosscheck_scratch_containment (opt : Low_level.optimized) (chains : Low_lev
           let query_safe =
             value_ok
             && List.for_all accs ~f:(fun r ->
-                   r.Affine.a_write
-                   ||
-                   match Affine.read_covered_before ~thread ~read:r ~writes () with
-                   | `Covered -> true
-                   | `Unknown w ->
-                       witness := w;
-                       false)
+                r.Affine.a_write
+                ||
+                match Affine.read_covered_before ~thread ~read:r ~writes () with
+                | `Covered -> true
+                | `Unknown w ->
+                    witness := w;
+                    false)
           in
           Affine.crosscheck ~site:"schedule per-thread scratch containment"
             ~context:(Tn.debug_name tn)

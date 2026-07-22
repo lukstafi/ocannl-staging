@@ -329,8 +329,7 @@ let bind_delayed_vars_to_envs ~for_projections ~spec ~dim_var_env ~row_var_env ~
           in
           match (delayed_ref.var_ref.solved_sym, delayed_ref.var_ref.solved_dim) with
           | _ when for_projections -> None
-          | Some sym, _ ->
-              Some (Row.Dim_eq { d1 = Row.Var var; d2 = Row.get_sym_dim sym; origin })
+          | Some sym, _ -> Some (Row.Dim_eq { d1 = Row.Var var; d2 = Row.get_sym_dim sym; origin })
           | None, Some solved_dim ->
               Some
                 (Row.Dim_eq { d1 = Row.Var var; d2 = Row.get_default_dim ~d:solved_dim (); origin })
@@ -1437,8 +1436,7 @@ let%track7_sexp set_sym_dim (delayed_var_ref : delayed_var_ref) (sym : Ir.Indexi
     ]
   in
   match delayed_var_ref with
-  | { var_ref = { solved_sym = Some sym2; _ }; _ } when Ir.Indexing.equal_static_symbol sym2 sym
-    ->
+  | { var_ref = { solved_sym = Some sym2; _ }; _ } when Ir.Indexing.equal_static_symbol sym2 sym ->
       ()
   | { var_ref = { solved_sym = Some sym2; ref_label; _ }; _ } ->
       raise
@@ -1743,8 +1741,8 @@ let fresh_proj_ids update =
   let no_padding = Ir.Ops.{ left = 0; right = 0 } in
   (* [locked = None]: the tensor node's layout is not committed yet — register the shape's padding
      (if any) as inferred. [locked = Some arr_opt]: the tnode's padding lazy is forced, so the
-     buffer layout is committed — register the TNODE's padding (zeros when unpadded) as resolved
-     for every axis, so that [Row.solve_proj_equations] rejects later demands exceeding it (a
+     buffer layout is committed — register the TNODE's padding (zeros when unpadded) as resolved for
+     every axis, so that [Row.solve_proj_equations] rejects later demands exceeding it (a
      forced-at-[None] node used to register nothing, silently losing the halo; see
      [check_and_update_padding]). [offset] is the axis position within the tnode's padding array
      (axis order batch;output;input, cf. {!to_padding}). Returns the offset advanced past this
@@ -1788,9 +1786,9 @@ let fresh_proj_ids update =
             (* Reconcile the committed neutral element into the shape: nodes created with an
                already-padded layout (e.g. [wrap_padded]) commit their [padded_value] at creation
                while the shape's [padding_elem] starts unknown — without this, a later
-               margin-reading consumer with a different neutral would commit its own neutral at
-               the shape level unchecked and silently read the buffer's halo values (Codex P1 on
-               PR #173). [update_padding_elem] then rejects conflicting consumers. *)
+               margin-reading consumer with a different neutral would commit its own neutral at the
+               shape level unchecked and silently read the buffer's halo values (Codex P1 on PR
+               #173). [update_padding_elem] then rejects conflicting consumers. *)
             (match p with
             | Some (_, v) -> (
                 match sh.padding_elem with
@@ -1801,8 +1799,8 @@ let fresh_proj_ids update =
                     @@ Row.Shape_error
                          ( [%string
                              "Conflicting padding neutral elements: the tensor's buffer committed \
-                              margins holding %{v#Float}, but a different neutral was inferred \
-                              for its shape. Materialize a separate copy of the tensor for the \
+                              margins holding %{v#Float}, but a different neutral was inferred for \
+                              its shape. Materialize a separate copy of the tensor for the \
                               conflicting padded consumers (for a padded max-pool, \
                               Nn_blocks.max_pool2d_copy)"],
                            [ Shape_mismatch [ sh ] ] ))
@@ -2116,9 +2114,8 @@ let%debug4_sexp derive_projections (update_step : update_step) : unit =
         sh.output_padding <- Some p);
     Option.iter (padding_of_row sh.input_padding sh.input) ~f:(fun p -> sh.input_padding <- Some p)
   in
-  (* Whether THIS step demands nonzero padding on [sh] — i.e. actually reads (rhs) or writes
-     (lhs) the margins. [Row.get_dim_padding] only reports the current operation's inferred
-     padding. *)
+  (* Whether THIS step demands nonzero padding on [sh] — i.e. actually reads (rhs) or writes (lhs)
+     the margins. [Row.get_dim_padding] only reports the current operation's inferred padding. *)
   let step_touches_margins (sh : t) : bool =
     List.exists [ sh.batch; sh.output; sh.input ] ~f:(fun row ->
         List.exists (row.Row.beg_dims @ row.Row.dims) ~f:(fun d ->
@@ -2127,11 +2124,11 @@ let%debug4_sexp derive_projections (update_step : update_step) : unit =
             | None -> false))
   in
   let update_padding_elem (sh : t) : unit =
-    (* The padding neutral element commits like the rest of the tensor's identity: the margins of
-       a padded buffer permanently hold a single neutral value. Only operations that actually read
-       the margins (demand nonzero padding on [sh] in this step) participate — a valid-window
-       reader never sees the margins, so its accumulation neutral is irrelevant. A genuine
-       conflict is rejected: the remedy is a materialized copy per neutral. *)
+    (* The padding neutral element commits like the rest of the tensor's identity: the margins of a
+       padded buffer permanently hold a single neutral value. Only operations that actually read the
+       margins (demand nonzero padding on [sh] in this step) participate — a valid-window reader
+       never sees the margins, so its accumulation neutral is irrelevant. A genuine conflict is
+       rejected: the remedy is a materialized copy per neutral. *)
     if step_touches_margins sh then
       sh.padding_elem <-
         (match (sh.padding_elem, update_step.neutral_elem) with
@@ -2158,8 +2155,8 @@ let%debug4_sexp derive_projections (update_step : update_step) : unit =
     List.iter rhs ~f:set_padding;
     (* Update padding_elem based on the operation's neutral element: for rhs shapes the operation
        reads the margins; for the lhs, a padded write projection (scatter-style [=] output specs)
-       commits the accumulation's neutral just the same — this keeps "padded implies a known
-       neutral element" an invariant (cf. [to_padding]). *)
+       commits the accumulation's neutral just the same — this keeps "padded implies a known neutral
+       element" an invariant (cf. [to_padding]). *)
     update_padding_elem lhs;
     List.iter rhs ~f:update_padding_elem;
     let project_lhs = indices_of_sh lhs in

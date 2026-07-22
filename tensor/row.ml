@@ -149,9 +149,9 @@ let get_sym_dim ?(basis = default_basis) ?proj_id sym =
              dimensions require a positive maximum extent"
             (Ir.Indexing.symbol_ident sym.Ir.Indexing.static_symbol)
             extent);
-  (* The bound value of an extent symbol is a size in [0, range] (inclusive), not an index in
-     [0, range): switch the symbol's bind-time validation accordingly. A slice index validates
-     strictly, so a binding cannot be used as both. *)
+  (* The bound value of an extent symbol is a size in [0, range] (inclusive), not an index in [0,
+     range): switch the symbol's bind-time validation accordingly. A slice index validates strictly,
+     so a binding cannot be used as both. *)
   if sym.Ir.Indexing.used_as_slice then
     raise
     @@ Utils.User_error
@@ -209,9 +209,7 @@ let solved_dim_to_string style { d; basis; proj_id } =
 
 let sym_dim_to_string style { sym; sym_basis; sym_proj_id } =
   let ident = Ir.Indexing.symbol_ident sym.Ir.Indexing.static_symbol in
-  let range =
-    match sym.Ir.Indexing.static_range with Some r -> Int.to_string r | None -> "?"
-  in
+  let range = match sym.Ir.Indexing.static_range with Some r -> Int.to_string r | None -> "?" in
   match style with
   | Only_bases -> sym_basis
   | Axis_size | Axis_number_and_size -> [%string "%{basis_size_prefix sym_basis}%{ident}<=%{range}"]
@@ -310,9 +308,9 @@ type total_elems =
           otherwise unconstrained, late stages prefer [hi] (all blocks fully consumed). *)
   | Strided_var of { coeff : int Utils.safe_lazy; var : dim_var; denom : int; round_up : bool }
       (** The total is [(coeff * var) / denom]. With [round_up], solving for [var] from a known
-          total rounds up instead of failing on non-divisibility: [coeff * (var - 1) < total * denom
-          <= coeff * var]. Minted only by the [Uint4x32_to_prec] constraint (packed [uniform]),
-          whose last 128-bit block may be consumed partially. *)
+          total rounds up instead of failing on non-divisibility:
+          [coeff * (var - 1) < total * denom <= coeff * var]. Minted only by the [Uint4x32_to_prec]
+          constraint (packed [uniform]), whose last 128-bit block may be consumed partially. *)
 [@@deriving equal, hash, compare, sexp_of]
 
 type row_constraint =
@@ -685,7 +683,10 @@ let rec row_conjunction ~prov ~origin stage constr1 constr2 =
       | Num_elems n, Range_elems { lo; hi } | Range_elems { lo; hi }, Num_elems n ->
           (* The exact total must fall within the slack window; keep the exact side. *)
           if lo <= n && n <= hi then
-            Some ([], Total_elems { numerator = Num_elems n; divided_by = vars2; keep_axis = ka1 && ka2 })
+            Some
+              ( [],
+                Total_elems { numerator = Num_elems n; divided_by = vars2; keep_axis = ka1 && ka2 }
+              )
           else elems_mismatch n1 n2
       | Range_elems { lo = lo1; hi = hi1 }, Range_elems { lo = lo2; hi = hi2 } ->
           let lo = Int.max lo1 lo2 and hi = Int.min hi1 hi2 in
@@ -708,11 +709,12 @@ let rec row_conjunction ~prov ~origin stage constr1 constr2 =
           (* So var = n * denom / coeff (rounded up for a round-up constraint) *)
           match solve_strided_var ~coeff_val ~denom ~round_up n with
           | Some d ->
-              (* Under round-up the solved [var] no longer determines the total exactly, so keep
-                 the [Num_elems] side; the exact case keeps [constr1] as before. *)
+              (* Under round-up the solved [var] no longer determines the total exactly, so keep the
+                 [Num_elems] side; the exact case keeps [constr1] as before. *)
               let kept =
                 if round_up then
-                  Total_elems { numerator = Num_elems n; divided_by = vars2; keep_axis = ka1 && ka2 }
+                  Total_elems
+                    { numerator = Num_elems n; divided_by = vars2; keep_axis = ka1 && ka2 }
                 else constr1
               in
               Some ([ Dim_eq { d1 = Var var; d2 = get_default_dim ~d (); origin } ], kept)
@@ -777,7 +779,11 @@ let rec row_conjunction ~prov ~origin stage constr1 constr2 =
           (* We don't want to force delayed values - keep both constraints *)
           None)
   | ( Total_elems
-        { numerator = Strided_var { coeff = c1; var = v1; round_up = false; _ }; divided_by = vars1; _ },
+        {
+          numerator = Strided_var { coeff = c1; var = v1; round_up = false; _ };
+          divided_by = vars1;
+          _;
+        },
       constr2 )
     when List.mem vars1 v1 ~equal:equal_dim_var && late ->
       (* Variable appears in both numerator and denominator, they cancel out *)
@@ -789,7 +795,11 @@ let rec row_conjunction ~prov ~origin stage constr1 constr2 =
         constr2
   | ( constr2,
       Total_elems
-        { numerator = Strided_var { coeff = c1; var = v1; round_up = false; _ }; divided_by = vars1; _ } )
+        {
+          numerator = Strided_var { coeff = c1; var = v1; round_up = false; _ };
+          divided_by = vars1;
+          _;
+        } )
     when List.mem vars1 v1 ~equal:equal_dim_var && late ->
       let vars1' = remove_var v1 vars1 in
       row_conjunction ~prov ~origin stage
@@ -876,8 +886,8 @@ let rec row_conjunction ~prov ~origin stage constr1 constr2 =
         let constr =
           Total_elems
             {
-              (* Propagating [round_up] is sound: the derived relation [product(diff_vars) =
-                 coeff * num_var / denom] inherits the same inequality window. *)
+              (* Propagating [round_up] is sound: the derived relation [product(diff_vars) = coeff *
+                 num_var / denom] inherits the same inequality window. *)
               numerator = Strided_var { coeff; var = num_var; denom; round_up };
               divided_by = [];
               keep_axis = false;
@@ -1008,7 +1018,7 @@ let rec row_conjunction ~prov ~origin stage constr1 constr2 =
           | Strided_var { coeff; var; denom; round_up } ->
               if known_product = 0 then
                 raise @@ Shape_error ("Exact constraint has zero dimension", [])
-              else if late && List.is_empty vars && List.is_empty divided_by then (
+              else if late && List.is_empty vars && List.is_empty divided_by then
                 (* Exact dims contain only known dimensions and divided_by is empty *)
                 (* coeff * var / denom = known_product, so var = known_product * denom / coeff
                    (rounded up for a round-up constraint) *)
@@ -1017,7 +1027,7 @@ let rec row_conjunction ~prov ~origin stage constr1 constr2 =
                 | Some d ->
                     Some
                       ([ Dim_eq { d1 = Var var; d2 = get_default_dim ~d (); origin } ], Exact dims)
-                | None -> elems_mismatch numerator (Num_elems known_product))
+                | None -> elems_mismatch numerator (Num_elems known_product)
               else if round_up then
                 (* Remaining derivations assume the exact relation; conservative under round-up. *)
                 None
@@ -1171,8 +1181,8 @@ let rec dim_contains_sym = function
       dim_contains_sym over || dim_contains_sym kernel
   | Concat dims -> List.exists dims ~f:dim_contains_sym
 
-(* gh-490 v1: symbolic dimensions do not participate in total-elements arithmetic; fail fast
-   instead of silently dropping (or forever deferring) the constraint. *)
+(* gh-490 v1: symbolic dimensions do not participate in total-elements arithmetic; fail fast instead
+   of silently dropping (or forever deferring) the constraint. *)
 let fail_if_total_elems_over_sym (dims : dim list) =
   match List.find dims ~f:dim_contains_sym with
   | Some d ->
@@ -1429,9 +1439,9 @@ let subst_row_constraint_unprotected ~subst_in_dim ~get_dim_val stage constr =
       let tot = coeff_val * dim in
       reapply_rows_constr := true;
       if round_up then
-        (* The solved variable determines the total only up to the slack window
-           [coeff*(var-1) < total*denom <= coeff*var]; an otherwise-unconstrained total defaults
-           to [hi] (all blocks fully consumed) at late stages. *)
+        (* The solved variable determines the total only up to the slack window [coeff*(var-1) <
+           total*denom <= coeff*var]; an otherwise-unconstrained total defaults to [hi] (all blocks
+           fully consumed) at late stages. *)
         let lo = (coeff_val * (dim - 1) / denom) + 1 and hi = tot / denom in
         subst_total_elems_divided_by (Range_elems { lo; hi }) divided_by ~keep_axis
       else if tot % denom = 0 then
@@ -1829,13 +1839,13 @@ and apply_row_constraint ~depth stage origin (r : row) (constr : row_constraint)
           (Total_elems { numerator; divided_by = []; keep_axis = false })
           env
     | ( { dims; bcast = Broadcastable; _ },
-        Total_elems { numerator = Strided_var { coeff; var; denom; round_up }; divided_by = []; _ } )
+        Total_elems { numerator = Strided_var { coeff; var; denom; round_up }; divided_by = []; _ }
+      )
       when is_stage2_up stage && known_dims_product dims -> (
         let (d : int), _ = Option.value_exn (collect_factors dims) in
         let coeff : int = Utils.safe_force coeff in
         match solve_strided_var ~coeff_val:coeff ~denom ~round_up d with
-        | Some v ->
-            (Dim_eq { d1 = Var var; d2 = get_default_dim ~d:v (); origin } :: extras, env)
+        | Some v -> (Dim_eq { d1 = Var var; d2 = get_default_dim ~d:v (); origin } :: extras, env)
         | None ->
             raise
             @@ Shape_error
@@ -1871,8 +1881,7 @@ and apply_row_constraint ~depth stage origin (r : row) (constr : row_constraint)
                 let size = if hi < 1 then "big" else "small" in
                 raise
                 @@ Shape_error
-                     ( "apply_row_constraint: Total_elems slack window failed, shape is too "
-                       ^ size,
+                     ( "apply_row_constraint: Total_elems slack window failed, shape is too " ^ size,
                        [ Row_mismatch [ r ] ] )
           | Num_elems n, [ v ], [] | Num_elems n, [], [ v ] ->
               (Dim_eq { d1 = Var v; d2 = get_default_dim ~d:n (); origin } :: extras, env)
@@ -2634,8 +2643,8 @@ let%debug5_sexp rec unify_row ~stage origin (eq : t * t) env : constraint_ list 
       then unify_row ~stage origin (r2, r1) env
       else if (not (is_row_var r2.bcast)) && dims1_l + beg_dims1_l > dims2_l + beg_dims2_l then
         (* A closed r2 is flat: only the total axis count can rule the equation out (the
-           [Broadcastable] arm below aligns r1's flanks against the flat axis list, so e.g.
-           r1.dims may exceed r2.dims by matching into r2.beg_dims). *)
+           [Broadcastable] arm below aligns r1's flanks against the flat axis list, so e.g. r1.dims
+           may exceed r2.dims by matching into r2.beg_dims). *)
         raise @@ Shape_error ("Number of axes mismatch", [ Row_mismatch [ r1; r2 ] ])
       else
         let orig_rows = [ r1; r2 ] in
@@ -2745,18 +2754,18 @@ let%debug5_sexp rec unify_row ~stage origin (eq : t * t) env : constraint_ list 
                     origin;
                   }
               in
-              (* Mixed anchoring with a leading-flank surplus: begS.<v> = <v2>.dimsR (with
-                 s = |begS| >= 1 and t = |dimsR|) is a word equation whose residue depends on the
+              (* Mixed anchoring with a leading-flank surplus: begS.<v> = <v2>.dimsR (with s =
+                 |begS| >= 1 and t = |dimsR|) is a word equation whose residue depends on the
                  eventual rank: s + |v| = |v2| + t. *)
               let s = beg_dims1_l - beg_dims_l and t = List.length r2.dims in
               if s <> t then
-                (* Sound eager alignment, valid at any stage: when t > s, |v| = |v2| + t - s >=
-                   t - s, so the last t - s axes of [v] provably lie within dimsR's coverage --
-                   bind v := <fresh>.tail(dimsR, t - s); symmetrically when s > t the first s - t
-                   axes of [v2] come from begS. Solving the binding eagerly (rather than emitting
-                   it) lets the re-solved residual reduce to the balanced s = t form in the same
-                   pass, so the aligned dims reach e.g. param terminals before any stage-4
-                   guessing closes their row variables. *)
+                (* Sound eager alignment, valid at any stage: when t > s, |v| = |v2| + t - s >= t -
+                   s, so the last t - s axes of [v] provably lie within dimsR's coverage -- bind v
+                   := <fresh>.tail(dimsR, t - s); symmetrically when s > t the first s - t axes of
+                   [v2] come from begS. Solving the binding eagerly (rather than emitting it) lets
+                   the re-solved residual reduce to the balanced s = t form in the same pass, so the
+                   aligned dims reach e.g. param terminals before any stage-4 guessing closes their
+                   row variables. *)
                 let fresh = get_row_var () in
                 let binding =
                   if t > s then
@@ -2788,25 +2797,23 @@ let%debug5_sexp rec unify_row ~stage origin (eq : t * t) env : constraint_ list 
                             origin;
                           }
                     | Broadcastable ->
-                        (* Unreachable: a closed r2 is handled by the [Broadcastable] arm above
-                           with [beg_handled = true]. *)
+                        (* Unreachable: a closed r2 is handled by the [Broadcastable] arm above with
+                           [beg_handled = true]. *)
                         assert false
                 in
                 solve (solve ([], env) binding) residual
               else if is_stage6_up stage then
-                (* Balanced flanks (s = t): the rank stays ambiguous, so earlier stages defer
-                   (the residual reproduces itself verbatim). A solution exists at every overlap
-                   k in 0..s whose overlap equations begS[k+i] = dimsR[i] (i < s - k) hold: k = 0
-                   is the empty close (rank s), k = s the always-satisfiable principal family
-                   v2 = begS.<m>, v = <m>.dimsR. Stage 6 commits the least-material disjunct not
-                   definitely refuted: the smallest k whose overlap pairs no two rigid unequal
-                   dims (an unconditional empty close would reject satisfiable stores like
-                   [3].<v> = <v2>.[5], whose least solution is v2 = [3], v = [5]). Binding [v2]
-                   and re-solving the residual eagerly derives the overlap equations and [v]'s
-                   value through the closed-row arm in the same pass. *)
-                let v2 =
-                  match r2.bcast with Row_var v2 -> v2 | Broadcastable -> assert false
-                in
+                (* Balanced flanks (s = t): the rank stays ambiguous, so earlier stages defer (the
+                   residual reproduces itself verbatim). A solution exists at every overlap k in
+                   0..s whose overlap equations begS[k+i] = dimsR[i] (i < s - k) hold: k = 0 is the
+                   empty close (rank s), k = s the always-satisfiable principal family v2 =
+                   begS.<m>, v = <m>.dimsR. Stage 6 commits the least-material disjunct not
+                   definitely refuted: the smallest k whose overlap pairs no two rigid unequal dims
+                   (an unconditional empty close would reject satisfiable stores like [3].<v> =
+                   <v2>.[5], whose least solution is v2 = [3], v = [5]). Binding [v2] and re-solving
+                   the residual eagerly derives the overlap equations and [v]'s value through the
+                   closed-row arm in the same pass. *)
+                let v2 = match r2.bcast with Row_var v2 -> v2 | Broadcastable -> assert false in
                 let begS = List.drop beg_dims1 beg_dims_l in
                 let definitely_conflicting d1 d2 =
                   match (d1, d2) with
@@ -2816,7 +2823,8 @@ let%debug5_sexp rec unify_row ~stage origin (eq : t * t) env : constraint_ list 
                 let rec least_k k =
                   if k >= s then s
                   else if
-                    List.exists2_exn (List.drop begS k) (List.take r2.dims (s - k))
+                    List.exists2_exn (List.drop begS k)
+                      (List.take r2.dims (s - k))
                       ~f:definitely_conflicting
                   then least_k (k + 1)
                   else k
@@ -4005,13 +4013,11 @@ and eliminate_row_constraint ~depth stage origin ~terminal ~(glb : row option) (
       match reduce_row_constraint constr ~beg_dims ~dims with
       | Total_elems { numerator; divided_by; keep_axis } -> (
           let _divided_by : dim_var list = divided_by in
-          (* Row-variable elimination runs at late stages only: an open total under a round-up
-             slack window resolves to the window's top (all counter blocks fully consumed),
-             matching the exact behavior of divisible shapes. The window's tolerance is only
-             needed when re-checking against already-closed rows (in [apply_row_constraint]). *)
-          let numerator =
-            match numerator with Range_elems { hi; _ } -> Num_elems hi | n -> n
-          in
+          (* Row-variable elimination runs at late stages only: an open total under a round-up slack
+             window resolves to the window's top (all counter blocks fully consumed), matching the
+             exact behavior of divisible shapes. The window's tolerance is only needed when
+             re-checking against already-closed rows (in [apply_row_constraint]). *)
+          let numerator = match numerator with Range_elems { hi; _ } -> Num_elems hi | n -> n in
           match (numerator, divided_by, glb) with
           | Num_elems 1, [], (None | Some { beg_dims = []; dims = []; _ })
             when keep_axis && is_stage5_up stage ->
@@ -4129,8 +4135,8 @@ and eliminate_row_constraint ~depth stage origin ~terminal ~(glb : row option) (
               Some ({ beg_dims = glb_beg; dims = glb_dims; bcast = _; prov = glb_prov } as glb) )
             when is_stage5_up stage && Utils.safe_force coeff > denom -> (
               (* Check if coeff > denom * product of known dimensions of the GLB. The constraint is:
-                 coeff * var / denom = total_elements(row). So: var = total_elements * denom /
-                 coeff (rounded up for a round-up constraint). *)
+                 coeff * var / denom = total_elements(row). So: var = total_elements * denom / coeff
+                 (rounded up for a round-up constraint). *)
               match collect_factors (glb_beg @ glb_dims) with
               | Some (known_product, []) ->
                   let coeff_val = Utils.safe_force coeff in
@@ -4617,8 +4623,7 @@ let%track4_sexp get_proj_equations (inequalities : constraint_ list) proj_axis_e
         (* Symbolic axes iterate at their maximum extent until launch-time binding lands. *)
         Proj (proj_id, solved_dim_of_sym s)
     | Sym ({ sym_proj_id = None; _ } as s) ->
-        raise
-        @@ Shape_error ("to_proj: Sym without proj_id", [ Dim_mismatch [ Sym s ] ])
+        raise @@ Shape_error ("to_proj: Sym without proj_id", [ Dim_mismatch [ Sym s ] ])
     | Affine { stride; over; conv = None; stride_offset } ->
         (* Strided iteration: no convolution *)
         Conv_input { stride; over = to_proj over; conv = None; stride_offset; target_id = None }
@@ -4671,8 +4676,7 @@ let%track4_sexp get_proj_equations (inequalities : constraint_ list) proj_axis_e
                    [] )
         | Sym ({ sym_proj_id = Some proj_id; _ } as s) -> Proj (proj_id, solved_dim_of_sym s)
         | Sym ({ sym_proj_id = None; _ } as s) ->
-            raise
-            @@ Shape_error ("to_proj (subst): Sym without proj_id", [ Dim_mismatch [ Sym s ] ])
+            raise @@ Shape_error ("to_proj (subst): Sym without proj_id", [ Dim_mismatch [ Sym s ] ])
         | Var v when Map.mem proj_axis_env v -> Solved (Map.find_exn proj_axis_env v)
         | Var v -> Var v
         | Affine _ as affine -> to_proj affine
@@ -4684,8 +4688,7 @@ let%track4_sexp get_proj_equations (inequalities : constraint_ list) proj_axis_e
                   | Dim { d; basis; proj_id = None } ->
                       let proj_id = Proj_id.fresh () in
                       (proj_id, { d; basis; proj_id = Some proj_id })
-                  | Sym ({ sym_proj_id = Some proj_id; _ } as s) ->
-                      (proj_id, solved_dim_of_sym s)
+                  | Sym ({ sym_proj_id = Some proj_id; _ } as s) -> (proj_id, solved_dim_of_sym s)
                   | Sym ({ sym_proj_id = None; _ } as s) ->
                       let proj_id = Proj_id.fresh () in
                       (proj_id, { (solved_dim_of_sym s) with proj_id = Some proj_id })
@@ -4883,12 +4886,12 @@ let%track7_sexp get_proj_index (proj_env : proj_env) (proj : proj) : Idx.axis_in
                         ( [%string
                             "Operation padding (left=%{operation_padding.left#Int}, \
                              right=%{operation_padding.right#Int}) exceeds resolved padding \
-                             (left=%{resolved_pad.left#Int}, right=%{resolved_pad.right#Int}): \
-                             the operand's buffer layout is already committed with insufficient \
+                             (left=%{resolved_pad.left#Int}, right=%{resolved_pad.right#Int}): the \
+                             operand's buffer layout is already committed with insufficient \
                              margins. Compose the padded consumer before the operand's first \
                              compilation, create the data via a padding-aware constructor (e.g. \
-                             wrap_padded), or read through a materialized copy of the operand \
-                             (for a padded max-pool, Nn_blocks.max_pool2d_copy)"],
+                             wrap_padded), or read through a materialized copy of the operand (for \
+                             a padded max-pool, Nn_blocks.max_pool2d_copy)"],
                           [ Projection_mismatch [ proj ] ] )
                | _ -> (
                    (* Update inferred padding to be sufficient for this operation, even if resolved
@@ -5215,8 +5218,7 @@ let%debug4_sexp solve_proj_equations (eqs : proj_equation list)
        strictest lock). *)
     Map.of_alist_reduce
       (module Proj_id)
-      ~f:(fun p1 p2 ->
-        Ir.Ops.{ left = Int.min p1.left p2.left; right = Int.min p1.right p2.right })
+      ~f:(fun p1 p2 -> Ir.Ops.{ left = Int.min p1.left p2.left; right = Int.min p1.right p2.right })
     @@ List.map resolved_padding ~f:(fun (p, pad) ->
         (fst @@ Utils.union_find ~equal:Proj_id.equal !proj_classes ~key:p ~rank:0, pad))
   in

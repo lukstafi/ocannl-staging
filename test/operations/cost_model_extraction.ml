@@ -1,14 +1,12 @@
 (* gh-ocannl-491 task 1: [Ir.Cost_model] — footprint/FLOPs extraction and the roofline bound over
    hand-built programs where every number is checkable by hand (single precision, 4 bytes/cell):
 
-   - elementwise map: bytes = the three operand footprints, one op per cell;
-   - matmul: FLOPs = 2*M*N*K, bytes = (MK + KN + 2*MN) * 4 (the rmw accumulator charged once per
-     direction);
-   - strided/gapped access: the image cardinality counts the touched cells, not the node size;
-   - rmw reduction: the accumulator's read/write/rmw split;
-   - guarded write: guards-taken op count ([flops_approx]) and a never-definite write;
-   - dynamic gather: the uninterpretable-component fallback to whole-node bytes;
-   - overlapping writes: the union bound capped by the node's size.
+   - elementwise map: bytes = the three operand footprints, one op per cell; - matmul: FLOPs =
+   2*M*N*K, bytes = (MK + KN + 2*MN) * 4 (the rmw accumulator charged once per direction); -
+   strided/gapped access: the image cardinality counts the touched cells, not the node size; - rmw
+   reduction: the accumulator's read/write/rmw split; - guarded write: guards-taken op count
+   ([flops_approx]) and a never-definite write; - dynamic gather: the uninterpretable-component
+   fallback to whole-node bytes; - overlapping writes: the union bound capped by the node's size.
 
    The tail asserts the roofline bound is monotone in the envelope constants. *)
 
@@ -49,8 +47,8 @@ let show_summary name (s : CM.summary) =
 
 let () =
   let i = Idx.get_symbol () and j = Idx.get_symbol () and k = Idx.get_symbol () in
-  (* Elementwise map, 4x5: for i: for j: C[i][j] = A[i][j] + B[j].
-     A rd 20 cells = 80 B, B rd 5 cells = 20 B, C wr 20 cells = 80 B; 1 add x 20 iters. *)
+  (* Elementwise map, 4x5: for i: for j: C[i][j] = A[i][j] + B[j]. A rd 20 cells = 80 B, B rd 5
+     cells = 20 B, C wr 20 cells = 80 B; 1 add x 20 iters. *)
   let a = fresh_tn "A" [| 4; 5 |] in
   let b = fresh_tn "B" [| 5 |] in
   let c = fresh_tn "C" [| 4; 5 |] in
@@ -67,8 +65,8 @@ let () =
   in
   show_summary "elementwise map 4x5" (CM.analyze pointwise);
 
-  (* Matmul M=4, N=3, K=5: for i: for j: for k: D[i][j] = D[i][j] + A[i][k] * B2[k][j].
-     FLOPs = 2*M*N*K = 120; A rd MK=20 cells, B2 rd KN=15, D rd MN=12 + wr 12 (rmw). *)
+  (* Matmul M=4, N=3, K=5: for i: for j: for k: D[i][j] = D[i][j] + A[i][k] * B2[k][j]. FLOPs =
+     2*M*N*K = 120; A rd MK=20 cells, B2 rd KN=15, D rd MN=12 + wr 12 (rmw). *)
   let a_mk = fresh_tn "Am" [| 4; 5 |] in
   let b_kn = fresh_tn "Bm" [| 5; 3 |] in
   let d_mn = fresh_tn "Dm" [| 4; 3 |] in
@@ -84,7 +82,10 @@ let () =
                    LL.Binop
                      ( Ops.Add,
                        (get d_mn [| it i; it j |], sp),
-                       ( LL.Binop (Ops.Mul, (get a_mk [| it i; it k |], sp), (get b_kn [| it k; it j |], sp)),
+                       ( LL.Binop
+                           ( Ops.Mul,
+                             (get a_mk [| it i; it k |], sp),
+                             (get b_kn [| it k; it j |], sp) ),
                          sp ) );
                  debug = "";
                })))
@@ -185,15 +186,14 @@ let () =
   in
   show_summary "dynamic gather (whole-node fallback)" (CM.analyze gather);
 
-  (* Overlapping writes: Zero_out S2 then a covering pointwise write — the per-direction sum
-     (16 + 16 B) is a union bound, capped by the node's 16 bytes and flagged approximate. *)
+  (* Overlapping writes: Zero_out S2 then a covering pointwise write — the per-direction sum (16 +
+     16 B) is a union bound, capped by the node's 16 bytes and flagged approximate. *)
   let s2 = fresh_tn "S2" [| 4 |] in
   let overlap =
     LL.unflat_lines
       [
         LL.Zero_out s2;
-        for_over i
-          (LL.Set { tn = s2; idcs = [| it i |]; llsc = LL.Constant 0.5; debug = "" });
+        for_over i (LL.Set { tn = s2; idcs = [| it i |]; llsc = LL.Constant 0.5; debug = "" });
       ]
   in
   show_summary "zero-out then overwrite (union bound capped)" (CM.analyze overlap);

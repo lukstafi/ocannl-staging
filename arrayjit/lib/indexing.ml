@@ -34,8 +34,8 @@ type static_symbol = {
   mutable static_range : int option; [@compare.ignore] [@equal.ignore] [@hash.ignore]
   mutable used_as_extent : bool; [@compare.ignore] [@equal.ignore] [@hash.ignore] [@sexp.bool]
       (** The symbol is used as a symbolic dimension (gh-490): its bound value is a size in
-          [\[0, static_range\]] (inclusive -- buffers are sized [static_range]), rather than an
-          index in [\[0, static_range)]. Set by [Row.get_sym_dim]. *)
+          [[0, static_range]] (inclusive -- buffers are sized [static_range]), rather than an index
+          in [\[0, static_range)]. Set by [Row.get_sym_dim]. *)
   mutable used_as_slice : bool; [@compare.ignore] [@equal.ignore] [@hash.ignore] [@sexp.bool]
       (** The symbol is used as a batch-slice index ([@|]): its bound value indexes an axis of size
           [static_range], so the strict [\[0, static_range)] validation must apply. Set by the
@@ -110,8 +110,7 @@ let get_static_symbol ?static_range bindings =
     (step counters) take runtime values unrelated to any touched node's extent -- so narrowing an
     unbounded parameter requires declaring (and thereby bind-validating) a range. *)
 let validate_bound_value ?(width64 = false)
-    ({ static_symbol; static_range; used_as_extent; used_as_slice = _ } : static_symbol) (v : int)
-    =
+    ({ static_symbol; static_range; used_as_extent; used_as_slice = _ } : static_symbol) (v : int) =
   let ident = symbol_ident static_symbol in
   if v < 0 then
     raise
@@ -206,10 +205,10 @@ type projections = {
   project_rhs : axis_index array array;
       (** [project_rhs.(i)] Produces an index into the [i+1]th argument of an operation. *)
   extent_syms : (symbol * static_symbol) list;
-      (** gh-490 symbolic extents: maps a product iterator to the static symbol whose bound value
-          is the axis's runtime extent. The corresponding [product_space] entry is the maximum
-          extent (the symbol's declared range); lowering guards the loop body with
-          [iterator < value] when the symbol is among the routine's bindings. *)
+      (** gh-490 symbolic extents: maps a product iterator to the static symbol whose bound value is
+          the axis's runtime extent. The corresponding [product_space] entry is the maximum extent
+          (the symbol's declared range); lowering guards the loop body with [iterator < value] when
+          the symbol is among the routine's bindings. *)
   debug_info : (projections_debug[@sexp.ignore] [@compare.ignore] [@equal.ignore]);
 }
 [@@deriving compare, equal, sexp]

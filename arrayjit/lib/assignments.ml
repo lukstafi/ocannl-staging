@@ -219,13 +219,11 @@ let collect_neutral_elem (asgns : t) : float option =
 let%track4_sexp to_low_level ?(static_indices = []) code =
   let open Indexing in
   (* gh-490 symbolic extents: wrap a loop body in [index < value] when the loop iterates a
-     symbolic-extent axis AND the extent's symbol is among the routine's bindings (so the value is
-     a kernel parameter). An unbound extent symbol keeps the maximum-extent semantics: the loop
-     covers the whole (max-sized) buffer, exactly as if the extent were written concretely. *)
+     symbolic-extent axis AND the extent's symbol is among the routine's bindings (so the value is a
+     kernel parameter). An unbound extent symbol keeps the maximum-extent semantics: the loop covers
+     the whole (max-sized) buffer, exactly as if the extent were written concretely. *)
   let extent_guard ~(projections : Indexing.projections) ~index ~iter body =
-    match
-      List.Assoc.find projections.extent_syms ~equal:Indexing.equal_symbol iter
-    with
+    match List.Assoc.find projections.extent_syms ~equal:Indexing.equal_symbol iter with
     | Some sym when List.mem static_indices sym ~equal:Indexing.equal_static_symbol ->
         let iprec = Ops.index_prec () in
         let cond =
@@ -501,20 +499,17 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
 
        Not injective: accumulation needed (need init for first += operation) *)
     let needs_init =
-      initialize_neutral
-      && not (Affine.is_surjective projections && Affine.is_injective projections)
+      initialize_neutral && not (Affine.is_surjective projections && Affine.is_injective projections)
     in
-    (* The padding neutral element is part of a padded tensor's identity: margins permanently
-       hold the committed value (conflicting margin-touching demands are rejected at
-       shape-inference time, and valid-window readers never see the margins), so operands need no
-       resets here. Establish the committed neutral element in the lhs margins: only hosted /
-       host-initialized buffers are creation-filled, device buffers are allocated raw — so the
-       (idempotent) fill accompanies every writer of a padded node. *)
+    (* The padding neutral element is part of a padded tensor's identity: margins permanently hold
+       the committed value (conflicting margin-touching demands are rejected at shape-inference
+       time, and valid-window readers never see the margins), so operands need no resets here.
+       Establish the committed neutral element in the lhs margins: only hosted / host-initialized
+       buffers are creation-filled, device buffers are allocated raw — so the (idempotent) fill
+       accompanies every writer of a padded node. *)
     let neutral_value = Ops.neutral_elem accum in
     let padding_resets =
-      match Lazy.force lhs.padding with
-      | Some (_, v) -> reset_padding_regions lhs v
-      | None -> []
+      match Lazy.force lhs.padding with Some (_, v) -> reset_padding_regions lhs v | None -> []
     in
     let for_loops_with_resets =
       if List.is_empty padding_resets then for_loops
@@ -684,9 +679,7 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
     (* Establish the committed neutral element in the lhs margins (device buffers are allocated
        raw). *)
     let padding_resets =
-      match Lazy.force lhs.padding with
-      | Some (_, v) -> reset_padding_regions lhs v
-      | None -> []
+      match Lazy.force lhs.padding with Some (_, v) -> reset_padding_regions lhs v | None -> []
     in
     let for_loops_with_resets =
       if List.is_empty padding_resets then for_loops
@@ -812,9 +805,9 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
             let rhs_symbols =
               Array.to_list projections.project_rhs.(0)
               |> List.concat_map ~f:(function
-                   | Indexing.Iterator s -> [ s ]
-                   | Indexing.Affine { symbols; _ } -> List.map symbols ~f:snd
-                   | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> [])
+                | Indexing.Iterator s -> [ s ]
+                | Indexing.Affine { symbols; _ } -> List.map symbols ~f:snd
+                | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> [])
             in
             let driving =
               Array.filter_mapi projections.product_iterators ~f:(fun i prod_iter ->
@@ -891,8 +884,8 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
         let c2 = loop c2 in
         Low_level.Seq (c1, c2)
     | Fetch { array; fetch_op = Constant 0.0; dims = _ } ->
-        (* [Zero_out] covers the whole buffer including the margins, so a nonzero committed
-           neutral element must be re-established after it (a zero neutral is already correct). *)
+        (* [Zero_out] covers the whole buffer including the margins, so a nonzero committed neutral
+           element must be re-established after it (a zero neutral is already correct). *)
         let padding_after =
           match Tn.get_padding array with
           | Some (_, v) when Float.( <> ) v 0.0 -> reset_padding_regions array v
@@ -926,8 +919,8 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
             set array idcs @@ Constant_bits (Int64.of_int array.id))
     | Fetch { array; fetch_op = Embed_dim variable_ref; dims } ->
         (* Forcing [dims] first forces shape inference to complete, which is what fills in
-           [variable_ref]: it must happen before reading the solved dimension (this fetch may be
-           the first statement lowered in the routine). *)
+           [variable_ref]: it must happen before reading the solved dimension (this fetch may be the
+           first statement lowered in the routine). *)
         let dims = Lazy.force dims in
         let dim_value =
           match (variable_ref.Indexing.solved_dim, variable_ref.Indexing.solved_sym) with

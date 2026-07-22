@@ -332,8 +332,8 @@ type optimized = {
           [simdgroup_matrix] fragments; scalar fallback backends retain the local-array meaning. *)
   swizzled : Set.M(Tnode).t;
       (** Nodes stored in an XOR-swizzled layout (docs/proposals/tensorize-mma.md, "Swizzled
-          staging"): codegen remaps every element access [flat = P*C + col] (with [C] the minor
-          dim, [P] the linearized prefix) to [P*C + (col lxor (P land (C-1)))] — a bijection on the
+          staging"): codegen remaps every element access [flat = P*C + col] (with [C] the minor dim,
+          [P] the linearized prefix) to [P*C + (col lxor (P land (C-1)))] — a bijection on the
           buffer, so the IR-level semantics are unchanged; only the physical layout differs,
           spreading same-column accesses across shared-memory banks. Populated by
           [Schedule.Stage ~swizzle:true]; requires at least 2 axes and a power-of-two minor dim.
@@ -567,9 +567,9 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits ~rea
   in
   (* [loop_ranges] maps each enclosing loop's index symbol to its full trip count; at a setter, the
      fiber cardinality of the LHS map over that box — the product over symbols absent from the LHS
-     indices — is the recompute cost (per read site) of inlining that setter's computation
-     (gh-494: {!Affine.fiber_cardinality}; the exact-vs-lower-bound distinction is not needed here,
-     the absent-symbol product is the cost either way). *)
+     indices — is the recompute cost (per read site) of inlining that setter's computation (gh-494:
+     {!Affine.fiber_cardinality}; the exact-vs-lower-bound distinction is not needed here, the
+     absent-symbol product is the cost either way). *)
   let reduction_extent loop_ranges idcs =
     match Affine.fiber_cardinality ~domain:(Map.to_alist loop_ranges) idcs with
     | `Exact n | `At_least n -> n
@@ -784,8 +784,8 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits ~rea
       then
         (* gh-494 waypoint 2 follow-up: the tracer truncates loops at [max_tracing_dim], so its
            recurrent classification has false positives (e.g. padded-conv intermediates read at
-           affine offsets past the traced write range). The affine containment query is exact:
-           when it proves every read covered by prior in-routine writes, skip the recurrent
+           affine offsets past the traced write range). The affine containment query is exact: when
+           it proves every read covered by prior in-routine writes, skip the recurrent
            pessimization. The override is one-directional — a query decline never introduces a
            recurrence the tracer did not find — and the query is only forced (and only consulted)
            for nodes the tracer actually flags. *)
@@ -3244,9 +3244,8 @@ let loop_bounds (llc : t) : (Indexing.symbol * (int * int)) list =
   go llc;
   List.rev !acc
 
-(* Loop symbols a scalar expression's value depends on, syntactically, resolving scalar
-   scope-locals through [locals] — accumulated per-scope-id assignment symbols (see
-   {!scope_value_syms}). *)
+(* Loop symbols a scalar expression's value depends on, syntactically, resolving scalar scope-locals
+   through [locals] — accumulated per-scope-id assignment symbols (see {!scope_value_syms}). *)
 let rec scalar_value_syms ~(locals : (int, Indexing.symbol list) Hashtbl.t) (llsc : scalar_t) :
     Indexing.symbol list =
   let idx_syms (idx : Indexing.axis_index) =
@@ -3272,8 +3271,7 @@ let rec scalar_value_syms ~(locals : (int, Indexing.symbol list) Hashtbl.t) (lls
 and body_value_syms ~locals (llc : t) : Indexing.symbol list =
   let scalar_syms = scalar_value_syms ~locals in
   match llc with
-  | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
-      []
+  | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ -> []
   | Seq (a, b) -> body_value_syms ~locals a @ body_value_syms ~locals b
   | For_loop { body; _ } -> body_value_syms ~locals body
   | If { cond = c, _; body } -> scalar_syms c @ body_value_syms ~locals body
@@ -3284,13 +3282,13 @@ and body_value_syms ~locals (llc : t) : Indexing.symbol list =
 
 (** The value-dependence symbols of statement-level scalar scope-locals, whole-code: per scope id,
     the union of the symbols its statement-level assignments depend on, transitively through
-    [Get_local] references (such a local may be assigned in one statement and read in another —
-    the shared-definition / CSE-hoisted pattern). Fixpoint; consumed by the value scans of
+    [Get_local] references (such a local may be assigned in one statement and read in another — the
+    shared-definition / CSE-hoisted pattern). Fixpoint; consumed by the value scans of
     [affine_accesses] and [Schedule.scan_accesses] so that a value routed through a scope-local is
     not laundered of its symbols (gh-494 per-thread value-variance). Assignments inside
     [Local_scope] bodies are deliberately NOT recorded: a scope id is re-instantiated at every use
-    site with per-site loop symbols, so a global union would import foreign statements' symbols
-    into unrelated setters; scope-internal flow is covered lexically instead — the value of a
+    site with per-site loop symbols, so a global union would import foreign statements' symbols into
+    unrelated setters; scope-internal flow is covered lexically instead — the value of a
     [Local_scope] is over-approximated by the union of all its body setters' symbols. *)
 let scope_value_syms (llc : t) : (int, Indexing.symbol list) Hashtbl.t =
   let locals = Hashtbl.create (module Int) in
@@ -3345,13 +3343,12 @@ let scope_value_syms (llc : t) : (int, Indexing.symbol list) Hashtbl.t =
 
 (** gh-494 waypoint 1: the routine's tensor-node accesses as explicit affine relations
     ({!Affine.access}), extracted from (typically optimized) code — the queryable artifact behind
-    the affine legality queries. Fires in program order: a statement's right-hand-side reads
-    precede its write, [Local_scope] bodies are descended into at their use site. [Tile_mma] is
-    traversed through its scalar [fallback] (the fallback is the statement's access footprint, as
-    in [C_syntax.iter_local_accesses]). Not represented: scope-locals ([Get_local]/[Set_local]
-    carry no index map), merge-buffer reads (a separate read-only input buffer), and
-    [Staged_compilation] (opaque) — callers needing exhaustiveness must check for the latter
-    separately. *)
+    the affine legality queries. Fires in program order: a statement's right-hand-side reads precede
+    its write, [Local_scope] bodies are descended into at their use site. [Tile_mma] is traversed
+    through its scalar [fallback] (the fallback is the statement's access footprint, as in
+    [C_syntax.iter_local_accesses]). Not represented: scope-locals ([Get_local]/[Set_local] carry no
+    index map), merge-buffer reads (a separate read-only input buffer), and [Staged_compilation]
+    (opaque) — callers needing exhaustiveness must check for the latter separately. *)
 let affine_accesses (llc : t) : Tn.t Affine.access list =
   let rec reads_tn uid (llsc : scalar_t) =
     match llsc with
@@ -3445,8 +3442,8 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
   code ~loops:[] ~path:[] ~guarded:false llc;
   List.rev !acc
 
-(** Calls [touch] on every tnode whose context buffer the statement reads or writes, [on_opaque]
-    on [Staged_compilation] (its accesses cannot be enumerated). Scope-local reads/writes
+(** Calls [touch] on every tnode whose context buffer the statement reads or writes, [on_opaque] on
+    [Staged_compilation] (its accesses cannot be enumerated). Scope-local reads/writes
     ([Get_local]/[Set_local]) own no buffer and are skipped; [Local_scope] bodies are descended
     into, since inlined virtual computations read materialized nodes; [Get_merge_buffer] reads the
     merge buffer, not the node's context buffer. The single source of buffer-access truth for the
@@ -3516,8 +3513,7 @@ let iter_buffer_accesses ~(touch : Tn.t -> unit) ~(on_opaque : unit -> unit) (c 
 
     Returns [None] when the code contains [Staged_compilation]: its accesses are opaque to
     {!iter_buffer_accesses}, so no aliasing plan can be trusted. *)
-let buffer_access_spans ~stmt_serial (segments : t list) :
-    (Tn.t, int * int) Base.Hashtbl.t option =
+let buffer_access_spans ~stmt_serial (segments : t list) : (Tn.t, int * int) Base.Hashtbl.t option =
   let spans = Hashtbl.create (module Tn) in
   let opaque = ref false in
   let pos = ref 0 in
@@ -3531,19 +3527,19 @@ let buffer_access_spans ~stmt_serial (segments : t list) :
       if not stmt_serial then Int.incr pos);
   if !opaque then None else Some spans
 
-(** gh-ocannl-489 follow-up: sink each top-level [Zero_out] to just before the first later
-    top-level statement that accesses the zeroed node. [Train.grad_update] emits every gradient's
-    [Zero_out] in one up-front block ([loss.zero_grads]), which starts all the gradients' live
-    spans at that block, so the backprop chain's intervals nest instead of being disjoint and
+(** gh-ocannl-489 follow-up: sink each top-level [Zero_out] to just before the first later top-level
+    statement that accesses the zeroed node. [Train.grad_update] emits every gradient's [Zero_out]
+    in one up-front block ([loss.zero_grads]), which starts all the gradients' live spans at that
+    block, so the backprop chain's intervals nest instead of being disjoint and
     {!buffer_access_spans} finds nothing for the arena planner to overlay; after sinking, a
     gradient's span starts at its first accumulation.
 
     Reordering soundness: a [Zero_out] commutes with any statement that does not access the zeroed
-    node's buffer (per {!iter_buffer_accesses}, the same fold the liveness planner trusts). It
-    never moves past an access of the node, a [Staged_compilation] (opaque accesses), or a
+    node's buffer (per {!iter_buffer_accesses}, the same fold the liveness planner trusts). It never
+    moves past an access of the node, a [Staged_compilation] (opaque accesses), or a
     [Workgroup_barrier] (cross-workgroup ordering). A [Zero_out] never re-accessed in-routine (an
-    export initializing the node for later routines) stays in place. Runs on the whole-routine
-    code BEFORE scheduling/fission, so segment cuts and cross-nest merges see the sunk order. *)
+    export initializing the node for later routines) stays in place. Runs on the whole-routine code
+    BEFORE scheduling/fission, so segment cuts and cross-nest merges see the sunk order. *)
 let sink_zero_outs (llc : t) : t =
   let lines = Array.of_list (flat_lines [ llc ]) in
   let n = Array.length lines in
@@ -3557,20 +3553,20 @@ let sink_zero_outs (llc : t) : t =
         (!s, !opaque))
   in
   let barrier i =
-    snd accesses.(i) || (match lines.(i) with Workgroup_barrier -> true | _ -> false)
+    snd accesses.(i) || match lines.(i) with Workgroup_barrier -> true | _ -> false
   in
   (* [inserts.(j)]: sunk [Zero_out] lines re-emitted just before line [j], in original order. *)
   let inserts = Array.create ~len:(n + 1) [] in
   let moved = Array.create ~len:n false in
   Array.iteri lines ~f:(fun i line ->
       match line with
-      | Zero_out tn ->
+      | Zero_out tn -> (
           let rec find j =
             if j >= n then None
             else if Set.mem (fst accesses.(j)) tn || barrier j then Some j
             else find (j + 1)
           in
-          (match find (i + 1) with
+          match find (i + 1) with
           | Some j when j > i + 1 ->
               moved.(i) <- true;
               inserts.(j) <- line :: inserts.(j)
@@ -4014,23 +4010,23 @@ and pin_scalar_written_bounds (llsc : scalar_t) : unit =
   | Unop (_, (v, _)) -> pin_scalar_written_bounds v
 
 (* gh-494 waypoint 2: the read-before-write fact of [visit_llc] (its [Recurrent] classification),
-   recomputed as containment queries — every read covered by prior writes. The tracer's semantics
-   is mirrored: [If] guards are taken (guarded writes count as assignments, as the tracer traces
-   [If] bodies unconditionally); a read whose position coincides with the enclosing statement's
-   write position at every iteration is exempt when [inline_complex_computations] (the tracer
-   skips same-position reads, whichever node they read, and it pins static symbols to 0), mirrored
-   here as per-axis affine-form equality with statics zeroed; and static symbols are universalized
-   over their declared ranges — the query is exact where the tracer approximates (loops truncated
-   at [max_tracing_dim], statics at 0).
+   recomputed as containment queries — every read covered by prior writes. The tracer's semantics is
+   mirrored: [If] guards are taken (guarded writes count as assignments, as the tracer traces [If]
+   bodies unconditionally); a read whose position coincides with the enclosing statement's write
+   position at every iteration is exempt when [inline_complex_computations] (the tracer skips
+   same-position reads, whichever node they read, and it pins static symbols to 0), mirrored here as
+   per-axis affine-form equality with statics zeroed; and static symbols are universalized over
+   their declared ranges — the query is exact where the tracer approximates (loops truncated at
+   [max_tracing_dim], statics at 0).
 
    The result decides [visit_llc]'s recurrent pessimization, overriding the tracer in the safe
    direction only (see the call site in [optimize_proc]): a coverage proof cancels a spurious
    recurrent flag; an [`Unknown] never introduces a recurrence the tracer did not find.
    [affine_accesses] is not exhaustive on [Staged_compilation], so its presence makes coverage
    unknowable: [`Opaque] — no override, and no tracer-vs-query comparison either (the tracer is
-   equally blind to staged accesses, so a disagreement would be meaningless). A node without
-   affine accesses is vacuously covered ([affine_accesses] and the tracer walk the same tree, so
-   such a node has no traced reads either). *)
+   equally blind to staged accesses, so a disagreement would be meaningless). A node without affine
+   accesses is vacuously covered ([affine_accesses] and the tracer walk the same tree, so such a
+   node has no traced reads either). *)
 let reads_covered_query (static_indices : Indexing.static_symbol list) llc :
     Tn.t -> [ `Covered | `Unknown of string | `Opaque ] =
   let opaque = ref false in
@@ -4045,7 +4041,8 @@ let reads_covered_query (static_indices : Indexing.static_symbol list) llc :
           if a.Affine.a_write && not a.a_whole then Some (a.a_path, a.a_map) else None)
     in
     let statics_set =
-      Set.of_list (module Indexing.Symbol)
+      Set.of_list
+        (module Indexing.Symbol)
         (List.map static_indices ~f:(fun s -> s.Indexing.static_symbol))
     in
     let static_range s =
@@ -4070,14 +4067,14 @@ let reads_covered_query (static_indices : Indexing.static_symbol list) llc :
     let same_pos (m : Indexing.axis_index array) (m' : Indexing.axis_index array) =
       Array.length m = Array.length m'
       && Array.for_all2_exn m m' ~f:(fun a b ->
-             match (norm_comp a, norm_comp b) with
-             | Some fa, Some fb -> [%equal: (int * Indexing.symbol) list * int] fa fb
-             | _ -> false)
+          match (norm_comp a, norm_comp b) with
+          | Some fa, Some fb -> [%equal: (int * Indexing.symbol) list * int] fa fb
+          | _ -> false)
     in
     let exempt (r : _ Affine.access) =
       virtualize_settings.inline_complex_computations
       && List.exists all_writes ~f:(fun (p, m) ->
-             [%equal: int list] p r.Affine.a_path && same_pos m r.a_map)
+          [%equal: int list] p r.Affine.a_path && same_pos m r.a_map)
     in
     fun tn ->
       match Hashtbl.find by_tn tn with
@@ -4098,9 +4095,9 @@ let reads_covered_query (static_indices : Indexing.static_symbol list) llc :
           in
           if covered then `Covered else `Unknown !witness
 
-(* Under [legality_crosscheck], compares the tracer's raw [Recurrent] verdict against the query
-   for every traced node. [procedural_safe] is the tracer's classification BEFORE the decider
-   flip's override, so the stderr precision-gain lines enumerate exactly the overrides applied by
+(* Under [legality_crosscheck], compares the tracer's raw [Recurrent] verdict against the query for
+   every traced node. [procedural_safe] is the tracer's classification BEFORE the decider flip's
+   override, so the stderr precision-gain lines enumerate exactly the overrides applied by
    [visit_llc]; a disagreement in the stricter direction still raises. [`Opaque] (staged code) is
    incomparable — both sides are blind to staged accesses — so it is skipped, not compared. *)
 let crosscheck_read_before_write traced_store reads_covered =

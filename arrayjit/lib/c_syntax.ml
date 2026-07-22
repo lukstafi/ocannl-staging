@@ -723,18 +723,18 @@ module C_syntax (B : C_syntax_config) = struct
 
   (* Set by [compile_proc]: nodes stored XOR-swizzled ([Schedule.Stage ~swizzle], see
      {!Low_level.optimized.swizzled}). Scalar element accesses go through [pp_tn_offset] below;
-     renderings that assume row-major storage (contiguous vector loads/stores, [Tile_mma]
-     intrinsic / register-tiled / fragment paths) must decline these nodes. *)
+     renderings that assume row-major storage (contiguous vector loads/stores, [Tile_mma] intrinsic
+     / register-tiled / fragment paths) must decline these nodes. *)
   let current_swizzled : Set.M(Tn).t ref = ref (Set.empty (module Tn))
   let is_swizzled tn = Set.mem !current_swizzled tn
 
-  (* The flat-offset rendering for an element access of [tn]'s buffer: row-major
-     [pp_array_offset], except for swizzled nodes, where the minor-axis index is XORed with the low
-     bits of the linearized row prefix — [P*C + col] becomes [P*C + (col ^ (P & (C-1)))], [C] the
-     (power-of-two, checked by [Schedule.Stage]) minor dim. A bijection per row, so all-element
-     traversals (zeroing) and matched read/write pairs are unaffected; same-column accesses from
-     consecutive rows land in distinct shared-memory banks. The prefix expression is emitted twice;
-     downstream C compilers CSE it. *)
+  (* The flat-offset rendering for an element access of [tn]'s buffer: row-major [pp_array_offset],
+     except for swizzled nodes, where the minor-axis index is XORed with the low bits of the
+     linearized row prefix — [P*C + col] becomes [P*C + (col ^ (P & (C-1)))], [C] the (power-of-two,
+     checked by [Schedule.Stage]) minor dim. A bijection per row, so all-element traversals
+     (zeroing) and matched read/write pairs are unaffected; same-column accesses from consecutive
+     rows land in distinct shared-memory banks. The prefix expression is emitted twice; downstream C
+     compilers CSE it. *)
   let pp_tn_offset tn (idcs, dims) =
     let open PPrint in
     let n = Array.length idcs in
@@ -794,16 +794,15 @@ module C_syntax (B : C_syntax_config) = struct
 
   (* Per-chunk private tiles live on the pool workers' stacks; libdispatch workers get 512KB by
      default, so cap their combined footprint per Grid loop (declining just keeps the loop serial).
-     Config [cc_grid_private_bytes_cap] (gh-ocannl-474): raise it when the pool's worker
-     stacks are known larger (e.g. under [OMP_STACKSIZE]) — for instance to let a grid-outermost
-     packed GEMM privatize a whole B~ panel per chunk (gh-ocannl-475). *)
+     Config [cc_grid_private_bytes_cap] (gh-ocannl-474): raise it when the pool's worker stacks are
+     known larger (e.g. under [OMP_STACKSIZE]) — for instance to let a grid-outermost packed GEMM
+     privatize a whole B~ panel per chunk (gh-ocannl-475). *)
   let per_chunk_private_bytes_cap =
     lazy
       (match
          Int.of_string
-            (String.strip
-              (Utils.get_global_arg ~arg_name:"cc_grid_private_bytes_cap"
-                 ~default:"262144"))
+           (String.strip
+              (Utils.get_global_arg ~arg_name:"cc_grid_private_bytes_cap" ~default:"262144"))
        with
       | n when n > 0 -> n
       | _ -> 256 * 1024
@@ -902,10 +901,9 @@ module C_syntax (B : C_syntax_config) = struct
     in
     let touches llc = count_accesses llc > 0 in
     let dims = Lazy.force tn.Tn.dims in
-    (* Coverage by affine query ({!Affine.covers_box}): the nest enumerates every cell exactly
-       once. Only the usable [loops] participate as the box environment — coverage through a loop
-       that interleaves other accesses to [tn] must not count (see the completion requirement
-       above). *)
+    (* Coverage by affine query ({!Affine.covers_box}): the nest enumerates every cell exactly once.
+       Only the usable [loops] participate as the box environment — coverage through a loop that
+       interleaves other accesses to [tn] must not count (see the completion requirement above). *)
     let covering ~loops (idcs : Indexing.axis_index array) =
       let range s =
         List.find_map loops ~f:(fun (s', from_, to_) ->
@@ -1021,16 +1019,16 @@ module C_syntax (B : C_syntax_config) = struct
       let privatized = ref [] and ptr_aliased = ref [] in
       let private_bytes = ref 0 in
       (* The box environment for the affine conflict query: the Grid loop itself plus every loop
-         bound under its body. Loops enclosing the Grid loop are shared across chunks (chunks of
-         one dispatch execute under the same outer-iteration values, with a join before the next),
-         which is exactly the query's treatment of unlisted symbols. *)
+         bound under its body. Loops enclosing the Grid loop are shared across chunks (chunks of one
+         dispatch execute under the same outer-iteration values, with a join before the next), which
+         is exactly the query's treatment of unlisted symbols. *)
       let env = (sym, grid_range) :: Low_level.loop_bounds body in
       let range s = List.Assoc.find env s ~equal:Indexing.equal_symbol in
       let dup s = List.Assoc.mem env s ~equal:Indexing.equal_symbol in
       let feasible =
         Hashtbl.for_all locals ~f:(fun info ->
-            (* The legacy procedural shared rule (every access mentions [sym] and all accesses
-               agree on every mentioning component), kept for [legality_crosscheck]. *)
+            (* The legacy procedural shared rule (every access mentions [sym] and all accesses agree
+               on every mentioning component), kept for [legality_crosscheck]. *)
             let procedural_shared_ok () =
               (not info.gl_written)
               ||
@@ -1066,10 +1064,10 @@ module C_syntax (B : C_syntax_config) = struct
                 | `Exact -> Some idcs
                 | `Vec ->
                     if Array.is_empty idcs then None
-                    else (
+                    else
                       let m = Array.copy idcs in
                       m.(Array.length m - 1) <- Indexing.Sub_axis;
-                      Some m)
+                      Some m
               in
               let witness = ref "" in
               let q =
@@ -1081,7 +1079,8 @@ module C_syntax (B : C_syntax_config) = struct
                         | Some l, Some r -> (
                             match
                               Affine.pair_conflict ~range ~dup_left:dup ~dup_right:dup
-                                ~pairs:[ (sym, sym) ] ~left:l ~right:r
+                                ~pairs:[ (sym, sym) ]
+                                ~left:l ~right:r
                             with
                             | Affine.Disjoint | Affine.Same_thread -> true
                             | Affine.Cross_thread wit ->
@@ -1160,7 +1159,8 @@ module C_syntax (B : C_syntax_config) = struct
          counts are comparable by construction. *)
       let global_counts : int Hashtbl.M(Int).t = Hashtbl.create (module Int) in
       iter_local_accesses llc
-        ~access:(fun ~write:_ ~kind:_ tn _ -> if is_local tn then Hashtbl.incr global_counts tn.Tn.uid)
+        ~access:(fun ~write:_ ~kind:_ tn _ ->
+          if is_local tn then Hashtbl.incr global_counts tn.Tn.uid)
         ~on_stmt:(fun _ -> ());
       let syms = ref (Set.empty (module Indexing.Symbol)) in
       let privs = ref (Map.empty (module Indexing.Symbol)) in
@@ -1312,10 +1312,10 @@ module C_syntax (B : C_syntax_config) = struct
     in
     match nonempty with
     | init :: reduction :: store :: rest -> (
-        (* [rest] is any statements following the marked region in the same body — in particular
-           the lane-0 epilogue statement fused by [Schedule.Fuse_epilogue] (gh-ocannl-486). They
-           render after the region's rendering: the backend hooks end with the visibility barrier
-           that the epilogue's re-reads of the just-stored target need. *)
+        (* [rest] is any statements following the marked region in the same body — in particular the
+           lane-0 epilogue statement fused by [Schedule.Fuse_epilogue] (gh-ocannl-486). They render
+           after the region's rendering: the backend hooks end with the visibility barrier that the
+           epilogue's re-reads of the just-stored target need. *)
         match
           (unwrap_transfer ~into_fragment:true init, unwrap_transfer ~into_fragment:false store)
         with
@@ -1327,8 +1327,8 @@ module C_syntax (B : C_syntax_config) = struct
                && Array.equal Indexing.equal_axis_index init_idcs store_idcs -> (
             match collect_fragment_tiles fragment [] reduction with
             (* Swizzled operands decline the fragment hooks (row-major pointer+stride contract);
-               falling through to [None] keeps the ordinary rendering, whose [Tile_mma]s decline
-               to the swizzle-aware scalar fallback. *)
+               falling through to [None] keeps the ordinary rendering, whose [Tile_mma]s decline to
+               the swizzle-aware scalar fallback. *)
             | [ Tile_mma { a; b; ta; tb; m; n; k; _ } ]
               when not (List.exists [ target; fst a; fst b ] ~f:is_swizzled) -> (
                 let target_base = Array.map init_idcs ~f:(zero_symbols init_syms) in
@@ -1380,8 +1380,7 @@ module C_syntax (B : C_syntax_config) = struct
                        load/store path, so the init observes sibling zeroing and later statements
                        observe the final store. Serial C renderers need no barriers. *)
                     let body_doc =
-                      separate hardline
-                        (List.map (init :: reduction :: store :: rest) ~f:render)
+                      separate hardline (List.map (init :: reduction :: store :: rest) ~f:render)
                     in
                     Some
                       (match B.barrier_syntax with
@@ -1436,9 +1435,9 @@ module C_syntax (B : C_syntax_config) = struct
         in
         let serial_loop () =
           (* gh-490 guard-fusion peephole: a body-wrapping symbolic-extent guard [if (i < s)] (with
-             [s] a kernel parameter, not an enclosing loop index) hoists into the loop header as
-             [i <= to_ && i < s]. The iteration variable is monotone, so once the guard fails it
-             stays false: exiting the loop is equivalent to skipping the remaining iterations. *)
+             [s] a kernel parameter, not an enclosing loop index) hoists into the loop header as [i
+             <= to_ && i < s]. The iteration variable is monotone, so once the guard fails it stays
+             false: exiting the loop is equivalent to skipping the remaining iterations. *)
           let fused =
             match body with
             | If
@@ -1864,7 +1863,7 @@ module C_syntax (B : C_syntax_config) = struct
                     contiguous idcs && lane_aligned tn idcs
                     && Tn.Placements.is_materialized_force (placements ()) tn 463
                     (* Stack and workgroup-shared arrays are only element-aligned. *)
-                    && not (Set.mem !current_workgroup_shared tn)
+                    && (not (Set.mem !current_workgroup_shared tn))
                     && not (is_swizzled tn)
                   in
                   let vload tn idcs =
@@ -2765,8 +2764,7 @@ module C_syntax (B : C_syntax_config) = struct
           | None -> guarded
         in
         let record rendering =
-          if !mma_census_enabled then
-            mma_census := (!current_kernel_name, rendering) :: !mma_census
+          if !mma_census_enabled then mma_census := (!current_kernel_name, rendering) :: !mma_census
         in
         (* Shape facts for the decline diagnostics: enough to identify the statement and check every
            statically-checkable emission rule by eye. *)
@@ -3437,8 +3435,8 @@ module C_syntax (B : C_syntax_config) = struct
                   (aliased parameters would falsify the restrict qualifier)");
             (* gh-ocannl-489: an aliasing candidate may be placed at bytes overlapping another
                parameter's by the link-time liveness planner, so its pointer must not promise
-               [restrict] -- whether a candidate pair actually shares bytes is unknowable at
-               codegen time. *)
+               [restrict] -- whether a candidate pair actually shares bytes is unknowable at codegen
+               time. *)
             let restrict_ =
               match B.restrict_keyword with
               | Some kw when not (Hash_set.mem optimize_ctx.Low_level.alias_candidates tn) ->

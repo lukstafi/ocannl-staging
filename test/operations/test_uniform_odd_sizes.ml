@@ -1,14 +1,14 @@
 open Base
 open Ocannl.Nn_blocks.DSL_modules
 
-(* gh-509: packed [uniform] is total over shapes. The result's element count no longer needs to be
-   a multiple of the 128-bit block width (16 / bytes-per-element): shape inference rounds the
-   counter extent up ([Row.Strided_var] with [round_up]) and lowering peels the last counter
-   iteration into a shorter [Set_from_vec] store. Pins:
-   - odd sizes across precisions produce exactly [n] values, all in [0, 1);
-   - prefix stability: the first [n] values are bitwise identical to those of a larger tensor built
-     identically (after [Tensor.unsafe_reinitialize] the ids, and thus the threefry keys, line up);
-   - the printed values are golden: they enforce parity of the packed stream across backends. *)
+(* gh-509: packed [uniform] is total over shapes. The result's element count no longer needs to be a
+   multiple of the 128-bit block width (16 / bytes-per-element): shape inference rounds the counter
+   extent up ([Row.Strided_var] with [round_up]) and lowering peels the last counter iteration into
+   a shorter [Set_from_vec] store. Pins: - odd sizes across precisions produce exactly [n] values,
+   all in [0, 1); - prefix stability: the first [n] values are bitwise identical to those of a
+   larger tensor built identically (after [Tensor.unsafe_reinitialize] the ids, and thus the
+   threefry keys, line up); - the printed values are golden: they enforce parity of the packed
+   stream across backends. *)
 
 let run_uniform ~prec ?input_dims output_dims =
   Tensor.unsafe_reinitialize ();

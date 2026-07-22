@@ -69,9 +69,7 @@ let terms_of ~range ~dup ~(side : Idx.symbol -> var) (idx : Idx.axis_index) :
   match idx with
   | Idx.Fixed_idx c -> Some ([], c)
   | Idx.Iterator s -> (
-      match term (1, s) with
-      | Either.First t -> Some ([ t ], 0)
-      | Either.Second c -> Some ([], c))
+      match term (1, s) with Either.First t -> Some ([ t ], 0) | Either.Second c -> Some ([], c))
   | Idx.Affine { symbols; offset } ->
       let ts, cs = List.partition_map (Idx.coalesce_affine_terms symbols) ~f:term in
       Some (ts, offset + List.fold cs ~init:0 ~f:( + ))
@@ -103,30 +101,36 @@ let range_of_var ~range = function Shared s | Left_v s | Right_v s -> range s
 let infeasible ~range (terms, rhs) =
   match terms with
   | [] -> rhs <> 0
-  | _ ->
+  | _ -> (
       let g = List.fold terms ~init:0 ~f:(fun g (c, _) -> gcd g c) in
       rhs % g <> 0
       ||
       let bounds =
-        List.fold terms ~init:(Some (0, 0)) ~f:(fun acc (c, v) ->
+        List.fold terms
+          ~init:(Some (0, 0))
+          ~f:(fun acc (c, v) ->
             match (acc, range_of_var ~range v) with
             | Some (lo, hi), Some (vlo, vhi) ->
                 Some (lo + min (c * vlo) (c * vhi), hi + max (c * vlo) (c * vhi))
             | _ -> None)
       in
-      (match bounds with Some (lo, hi) -> rhs < lo || rhs > hi | None -> false)
+      match bounds with Some (lo, hi) -> rhs < lo || rhs > hi | None -> false)
 
 (* Forced equalities: an equation [Σ_k c_k·(x_k − y_k) = 0] with [x_k] all-[Left_v], [y_k]
    all-[Right_v], matched pairwise by coefficient, forces [x_k = y_k] for every k when the linear
-   form [Σ c_k·z_k] is injective on the (per-pair combined) bounding box — the mixed-radix
-   criterion of {!Indexing.affine_injective}: sorted by ascending [abs c], every term satisfies
-   [abs c_k >= 1 + Σ_{i<k} abs c_i·(w_i − 1)]. Equal values of an injective form imply equal
-   arguments, and the forcing holds in every solution of the conjunction it is part of. *)
+   form [Σ c_k·z_k] is injective on the (per-pair combined) bounding box — the mixed-radix criterion
+   of {!Indexing.affine_injective}: sorted by ascending [abs c], every term satisfies [abs c_k >= 1
+   + Σ_{i<k} abs c_i·(w_i − 1)]. Equal values of an injective form imply equal arguments, and the
+   forcing holds in every solution of the conjunction it is part of. *)
 let forced_pairs ~range (terms, rhs) : (Idx.symbol * Idx.symbol) list =
   if rhs <> 0 then []
   else
-    let ls, rest = List.partition_tf terms ~f:(fun (_, v) -> match v with Left_v _ -> true | _ -> false) in
-    let rs, shared = List.partition_tf rest ~f:(fun (_, v) -> match v with Right_v _ -> true | _ -> false) in
+    let ls, rest =
+      List.partition_tf terms ~f:(fun (_, v) -> match v with Left_v _ -> true | _ -> false)
+    in
+    let rs, shared =
+      List.partition_tf rest ~f:(fun (_, v) -> match v with Right_v _ -> true | _ -> false)
+    in
     if (not (List.is_empty shared)) || List.length ls <> List.length rs || List.is_empty ls then []
     else
       let cmp (c1, _) (c2, _) = Int.compare c1 c2 in
@@ -135,19 +139,21 @@ let forced_pairs ~range (terms, rhs) : (Idx.symbol * Idx.symbol) list =
       let paired =
         List.zip_exn ls rs
         |> List.map ~f:(fun ((cl, vl), (cr, vr)) ->
-               let sym = function Left_v s | Right_v s | Shared s -> s in
-               if cl <> -cr then None
-               else
-                 match (range_of_var ~range vl, range_of_var ~range vr) with
-                 | Some (llo, lhi), Some (rlo, rhi) ->
-                     let w = max lhi rhi - min llo rlo + 1 in
-                     Some (abs cl, w, (sym vl, sym vr))
-                 | _ -> None)
+            let sym = function Left_v s | Right_v s | Shared s -> s in
+            if cl <> -cr then None
+            else
+              match (range_of_var ~range vl, range_of_var ~range vr) with
+              | Some (llo, lhi), Some (rlo, rhi) ->
+                  let w = max lhi rhi - min llo rlo + 1 in
+                  Some (abs cl, w, (sym vl, sym vr))
+              | _ -> None)
       in
       match Option.all paired with
       | None -> []
       | Some triples ->
-          let sorted = List.sort triples ~compare:(fun (c1, _, _) (c2, _, _) -> Int.compare c1 c2) in
+          let sorted =
+            List.sort triples ~compare:(fun (c1, _, _) (c2, _, _) -> Int.compare c1 c2)
+          in
           let rec radix acc = function
             | [] -> true
             | (c, w, _) :: tl -> c >= 1 + acc && radix (acc + (c * (w - 1))) tl
@@ -188,8 +194,8 @@ let pair_conflict ~range ~dup_left ~dup_right ~(pairs : (Idx.symbol * Idx.symbol
          by definition — necessary because {!terms_of} substitutes width-1 symbols away before the
          equation-level forcing can see them. *)
       (match (range p, range p') with
-      | Some (lo, hi), Some (lo', hi') -> lo = hi && lo' = hi' && lo = lo'
-      | _ -> false)
+        | Some (lo, hi), Some (lo', hi') -> lo = hi && lo' = hi' && lo = lo'
+        | _ -> false)
       || List.exists forced ~f:(fun (a, b) -> Idx.equal_symbol a p && Idx.equal_symbol b p')
     in
     if (not (List.is_empty pairs)) && List.for_all pairs ~f:pair_forced then Same_thread
@@ -211,14 +217,13 @@ let pair_conflict ~range ~dup_left ~dup_right ~(pairs : (Idx.symbol * Idx.symbol
 
 (** {2 The covering query} *)
 
-(** [covers_box ~range ~dims idcs]: whether the index vector [idcs], as its symbols range over
-    their (loop) bounds, enumerates every cell of the [dims] box exactly once — a bijection onto
-    the box. This is the write-dominance building block: a covering unguarded write rewrites the
-    whole array. Requirements: each symbol used at most once across the vector; per axis, a
-    zero-based full-extent iterator, a mixed-radix affine combination of zero-based symbols whose
-    radix chain exactly composes to the axis dimension, or [Fixed_idx 0] on a unit axis.
-    Generalizes (and is checked against) the procedural per-axis rule of
-    [C_syntax.first_access_standalone_covering]. *)
+(** [covers_box ~range ~dims idcs]: whether the index vector [idcs], as its symbols range over their
+    (loop) bounds, enumerates every cell of the [dims] box exactly once — a bijection onto the box.
+    This is the write-dominance building block: a covering unguarded write rewrites the whole array.
+    Requirements: each symbol used at most once across the vector; per axis, a zero-based
+    full-extent iterator, a mixed-radix affine combination of zero-based symbols whose radix chain
+    exactly composes to the axis dimension, or [Fixed_idx 0] on a unit axis. Generalizes (and is
+    checked against) the procedural per-axis rule of [C_syntax.first_access_standalone_covering]. *)
 let covers_box ~range ~(dims : int array) (idcs : Idx.axis_index array) : bool =
   Array.length idcs = Array.length dims
   &&
@@ -234,8 +239,7 @@ let covers_box ~range ~(dims : int array) (idcs : Idx.axis_index array) : bool =
       let dim = dims.(a) in
       match idx with
       | Idx.Fixed_idx 0 -> dim = 1
-      | Idx.Iterator s -> (
-          fresh s && match extent_of s with Some e -> e = dim | None -> false)
+      | Idx.Iterator s -> ( fresh s && match extent_of s with Some e -> e = dim | None -> false)
       | Idx.Affine { symbols; offset = 0 } ->
           let sorted =
             List.sort (Idx.coalesce_affine_terms symbols) ~compare:(fun (c1, _) (c2, _) ->
@@ -252,14 +256,13 @@ let covers_box ~range ~(dims : int array) (idcs : Idx.axis_index array) : bool =
 
 (** {2 Counting}
 
-    [fiber_cardinality ~domain idcs]: how many points of the loop box [domain] (symbol, width
-    pairs) map to one given cell in the image of the access map [idcs] — the per-cell visit count
-    of a read access, and the recompute cost per read site of inlining a setter
-    ([Low_level.visit_llc]'s reduction extent, [virtualize_max_inline_reduction]'s subject).
-    Domain symbols absent from the map contribute the product of their widths; when the map is
-    injective on its mentioned symbols ({!Indexing.affine_injective}) that product is the exact
-    fiber size of every image cell (cells outside the image have zero), otherwise it is a lower
-    bound. *)
+    [fiber_cardinality ~domain idcs]: how many points of the loop box [domain] (symbol, width pairs)
+    map to one given cell in the image of the access map [idcs] — the per-cell visit count of a read
+    access, and the recompute cost per read site of inlining a setter ([Low_level.visit_llc]'s
+    reduction extent, [virtualize_max_inline_reduction]'s subject). Domain symbols absent from the
+    map contribute the product of their widths; when the map is injective on its mentioned symbols
+    ({!Indexing.affine_injective}) that product is the exact fiber size of every image cell (cells
+    outside the image have zero), otherwise it is a lower bound. *)
 let fiber_cardinality ~(domain : (Idx.symbol * int) list) (idcs : Idx.axis_index array) :
     [ `Exact of int | `At_least of int ] =
   let mentions s =
@@ -425,8 +428,8 @@ let is_injective (proj : Idx.projections) =
 
     The extraction target for [Low_level.affine_accesses] (gh-494 waypoint 1): each tensor-node
     access as an explicit affine relation — the enclosing loop box, the index map into the node's
-    cells, and the program placement. ['tn] abstracts the tensor-node type to keep this module
-    below [Tnode] in the dependency order. *)
+    cells, and the program placement. ['tn] abstracts the tensor-node type to keep this module below
+    [Tnode] in the dependency order. *)
 
 type 'tn access = {
   a_tn : 'tn;
@@ -439,8 +442,8 @@ type 'tn access = {
           placeholder component, so queries must not interpret it. *)
   a_whole : bool;  (** A whole-node access ([Zero_out]). *)
   a_vec_last : bool;
-      (** A vectorized write ([Set_from_vec]): the last map component is the base of a run along
-          the minor axis, not a single cell — queries must treat that component as opaque. *)
+      (** A vectorized write ([Set_from_vec]): the last map component is the base of a run along the
+          minor axis, not a single cell — queries must treat that component as opaque. *)
   a_vec_len : int;
       (** The run length of a vectorized write along the minor axis; [0] unless [a_vec_last]. *)
   a_guarded : bool;  (** Under an [If] guard: executes conditionally, never a definite write. *)
@@ -450,9 +453,9 @@ type 'tn access = {
           contract): a loop carrying only reduction edges may be reassociated (vectorized) under an
           explicit license, but never parallelized. *)
   a_val_syms : Idx.symbol list;
-      (** Writes only: loop symbols the written value depends on syntactically (index symbols of
-          rhs reads, embedded indices, dynamic-index sub-expressions). Direct dependence only — a
-          chain through another node's cells is not tracked. *)
+      (** Writes only: loop symbols the written value depends on syntactically (index symbols of rhs
+          reads, embedded indices, dynamic-index sub-expressions). Direct dependence only — a chain
+          through another node's cells is not tracked. *)
   a_loops : (Idx.symbol * (int * int)) list;
       (** Enclosing loops, outermost first, with inclusive iteration bounds. *)
   a_path : int list;
@@ -464,43 +467,43 @@ type 'tn access = {
 
     [read_covered_before ~read ~writes ()]: is every cell the [read] access can touch necessarily
     written before the read executes — the dominance side of dependence analysis, and the fifth
-    decision procedure (gh-494 waypoint 2). Unlike the ∃-flavored {!pair_conflict} (negated to
-    prove disjointness), containment is a ∀∃ query — for every read instance there must exist a
-    covering write instance — so the variable treatment differs: the read's own loop symbols are
-    universal, a write's own loop symbols (below the loops common with the read) are existential,
-    and symbols shared by both sides (common enclosing loops, thread identity under [?thread],
-    static indices) are parameters that must cancel per axis. A residual parameter on the write
-    side declines that write (it would pin the write to one parameter value, or — for a common
-    loop — refer to other iterations of that loop); a residual common-loop or static parameter on
-    the read side is soundly universalized over its range; a residual thread parameter on the read
-    side declines against a thread-bound write (the thread would read a cell another thread
-    wrote), but universalizes against a write not under that thread loop — such a write executes
-    redundantly on every thread, so each thread's copy receives it.
+    decision procedure (gh-494 waypoint 2). Unlike the ∃-flavored {!pair_conflict} (negated to prove
+    disjointness), containment is a ∀∃ query — for every read instance there must exist a covering
+    write instance — so the variable treatment differs: the read's own loop symbols are universal, a
+    write's own loop symbols (below the loops common with the read) are existential, and symbols
+    shared by both sides (common enclosing loops, thread identity under [?thread], static indices)
+    are parameters that must cancel per axis. A residual parameter on the write side declines that
+    write (it would pin the write to one parameter value, or — for a common loop — refer to other
+    iterations of that loop); a residual common-loop or static parameter on the read side is soundly
+    universalized over its range; a residual thread parameter on the read side declines against a
+    thread-bound write (the thread would read a cell another thread wrote), but universalizes
+    against a write not under that thread loop — such a write executes redundantly on every thread,
+    so each thread's copy receives it.
 
-    Visibility is same-common-iteration program order: a write is usable when its statement path
-    is lexicographically before the read's, and coverage is proven within the current iteration of
-    the common enclosing loops (the write's whole subtree, including its own inner loops, has then
+    Visibility is same-common-iteration program order: a write is usable when its statement path is
+    lexicographically before the read's, and coverage is proven within the current iteration of the
+    common enclosing loops (the write's whole subtree, including its own inner loops, has then
     executed). Loop-carried coverage — a read covered only by earlier iterations of a shared loop —
     is declined, conservatively.
 
-    With [?thread] naming the parallel (thread-identity) symbols, [`Covered] proves the cell side
-    of the per-thread-copy transform: the thread reads only cells it wrote itself, earlier in its
-    own serial chunk. For reads covered within the same top-level statement that also proves the
-    VALUE correct — chunks are serially contiguous there, so the thread's own write is the serial
+    With [?thread] naming the parallel (thread-identity) symbols, [`Covered] proves the cell side of
+    the per-thread-copy transform: the thread reads only cells it wrote itself, earlier in its own
+    serial chunk. For reads covered within the same top-level statement that also proves the VALUE
+    correct — chunks are serially contiguous there, so the thread's own write is the serial
     last-writer. A cross-statement covering write needs a side condition the caller must supply:
     other chunks of the writing statement run serially after the reader's own chunk, so the values
-    coincide only when the written value cannot vary across the chunks writing the same cell —
-    every thread symbol feeding the value ([a_val_syms]) must also pin the written cell (appear in
-    the write's map).
+    coincide only when the written value cannot vary across the chunks writing the same cell — every
+    thread symbol feeding the value ([a_val_syms]) must also pin the written cell (appear in the
+    write's map).
 
     Guarded writes are the caller's choice: include them to mirror guards-taken analyses
     ([Low_level.visit_llc] traces [If] bodies unconditionally), pre-filter [a_guarded] for
     execution-accurate coverage. [writes] must be accesses of the same node as [read]. *)
 
-(* Value set of one axis component, abstracted as an arithmetic progression
-   {ap_lo, ap_lo + ap_step, ..., ap_hi} (ap_step = 0 iff singleton). For the write (superset) side
-   the form must be dense — actually attaining every progression point — for the read (subset)
-   side a hull suffices (superset of the actual set, sound on the left of ⊆). *)
+(* Value set of one axis component, abstracted as an arithmetic progression {ap_lo, ap_lo + ap_step,
+   ..., ap_hi} (ap_step = 0 iff singleton). For the write (superset) side the form must be dense —
+   actually attaining every progression point — for the read (subset) side a hull suffices (superset
+   of the actual set, sound on the left of ⊆). *)
 type ap = { ap_lo : int; ap_hi : int; ap_step : int } [@@deriving sexp_of]
 
 let floor_div a b = if a >= 0 then a / b else -((-a + b - 1) / b)
@@ -521,7 +524,8 @@ let ap_of_form ~exact terms offset : ap option =
         (* Sorted by ascending magnitude, each coefficient must not out-jump the span already
            reachable plus one step: then every multiple of [g] in [lo, hi] is attained. *)
         let sorted =
-          List.sort (List.map terms ~f:(fun (c, (vlo, vhi)) -> (abs c, vhi - vlo)))
+          List.sort
+            (List.map terms ~f:(fun (c, (vlo, vhi)) -> (abs c, vhi - vlo)))
             ~compare:(fun (c1, _) (c2, _) -> Int.compare c1 c2)
         in
         let rec go span = function
@@ -539,8 +543,8 @@ let ap_subset r w =
   if w.ap_step = 0 then r.ap_lo = r.ap_hi
   else (r.ap_lo - w.ap_lo) % w.ap_step = 0 && r.ap_step % w.ap_step = 0
 
-(* The contiguous run of r's lattice indices k (cell [r.ap_lo + k * r.ap_step]) that dense w
-   covers; [None] when w's lattice does not include r's points wholesale. *)
+(* The contiguous run of r's lattice indices k (cell [r.ap_lo + k * r.ap_step]) that dense w covers;
+   [None] when w's lattice does not include r's points wholesale. *)
 let ap_covered_chunk r w : (int * int) option =
   let k_max = if r.ap_step = 0 then 0 else (r.ap_hi - r.ap_lo) / r.ap_step in
   let k_of v = if r.ap_step = 0 then 0 else (v - r.ap_lo) / r.ap_step in
@@ -600,8 +604,8 @@ let read_covered_before ?(thread = fun _ -> false) ?(static_range = fun _ -> Non
             max m (Array.length w.a_map))
       in
       let comp m p = if p < Array.length m then m.(p) else Idx.Fixed_idx 0 in
-      (* Per write: per-axis relation to the read's cells, in the residual coordinate frame left
-         by parameter cancellation. [None] = this write proves nothing. *)
+      (* Per write: per-axis relation to the read's cells, in the residual coordinate frame left by
+         parameter cancellation. [None] = this write proves nothing. *)
       let analyze (w : 'tn access) :
           (string * ap array * [ `Full | `Chunk of int * int | `Nope ] array) option =
         let exception Skip in
@@ -621,9 +625,9 @@ let read_covered_before ?(thread = fun _ -> false) ?(static_range = fun _ -> Non
           let is_common s = List.mem common s ~equal:Idx.equal_symbol in
           let w_own_loops = List.drop w.a_loops c_len in
           let w_own_range s = List.Assoc.find w_own_loops s ~equal:Idx.equal_symbol in
-          (* Existential symbols used so far, per write: a symbol tying two axes of the write
-             makes the per-axis image factorization an overapproximation of the written set —
-             unsound on the superset side — so reuse declines the write. *)
+          (* Existential symbols used so far, per write: a symbol tying two axes of the write makes
+             the per-axis image factorization an overapproximation of the written set — unsound on
+             the superset side — so reuse declines the write. *)
           let used_exist = ref [] in
           let sig_parts = ref [] in
           let vec_axis = if w.a_vec_last then Array.length w.a_map - 1 else -1 in
@@ -663,8 +667,7 @@ let read_covered_before ?(thread = fun _ -> false) ?(static_range = fun _ -> Non
                     let r_resid =
                       List.filter_map r_shared ~f:(fun (c, s) ->
                           match
-                            List.findi !w_par ~f:(fun _ (c', s') ->
-                                Idx.equal_symbol s s' && c = c')
+                            List.findi !w_par ~f:(fun _ (c', s') -> Idx.equal_symbol s s' && c = c')
                           with
                           | Some (i, _) ->
                               w_par := List.filteri !w_par ~f:(fun j _ -> j <> i);
@@ -674,10 +677,10 @@ let read_covered_before ?(thread = fun _ -> false) ?(static_range = fun _ -> Non
                     if not (List.is_empty !w_par) then raise Skip;
                     let r_univ =
                       List.map r_resid ~f:(fun (c, s) ->
-                          (* A residual thread parameter declines only against a thread-bound
-                             write (the thread would read a cell another thread wrote); a write
-                             not under the thread loop executes redundantly on every thread —
-                             each thread's copy receives it — so the read side universalizes. *)
+                          (* A residual thread parameter declines only against a thread-bound write
+                             (the thread would read a cell another thread wrote); a write not under
+                             the thread loop executes redundantly on every thread — each thread's
+                             copy receives it — so the read side universalizes. *)
                           if thread s && List.Assoc.mem w.a_loops s ~equal:Idx.equal_symbol then
                             raise Skip;
                           match
@@ -697,16 +700,14 @@ let read_covered_before ?(thread = fun _ -> false) ?(static_range = fun _ -> Non
                     in
                     sig_parts :=
                       (p, List.sort r_resid ~compare:[%compare: int * Idx.symbol]) :: !sig_parts;
-                    let r_ap =
-                      Option.value_exn (ap_of_form ~exact:false r_terms r_off)
-                    in
+                    let r_ap = Option.value_exn (ap_of_form ~exact:false r_terms r_off) in
                     r_aps.(p) <- r_ap;
                     let w_ap =
                       match ap_of_form ~exact:true w_terms w_off with
                       | None -> None
                       | Some w_ap when p = vec_axis ->
-                          (* The vectorized run extends the base progression along the minor
-                             axis; contiguous only when runs at least abut. *)
+                          (* The vectorized run extends the base progression along the minor axis;
+                             contiguous only when runs at least abut. *)
                           let len = w.a_vec_len in
                           if w_ap.ap_step = 0 then
                             Some { ap_lo = w_ap.ap_lo; ap_hi = w_ap.ap_lo + len - 1; ap_step = 1 }
@@ -717,16 +718,16 @@ let read_covered_before ?(thread = fun _ -> false) ?(static_range = fun _ -> Non
                     in
                     match w_ap with
                     | None -> `Nope
-                    | Some w_ap ->
+                    | Some w_ap -> (
                         if ap_subset r_ap w_ap then `Full
-                        else (
+                        else
                           match ap_covered_chunk r_ap w_ap with
                           | Some (kl, kh) -> `Chunk (kl, kh)
                           | None -> `Nope)))
           in
-          (* The residual coordinate frame: which parameters were cancelled vs. universalized
-             shifts what the chunk indices mean, so unionable writes must agree on both the
-             residual parameter lists and the resulting read-side progressions. *)
+          (* The residual coordinate frame: which parameters were cancelled vs. universalized shifts
+             what the chunk indices mean, so unionable writes must agree on both the residual
+             parameter lists and the resulting read-side progressions. *)
           let signature =
             Sexp.to_string
               ([%sexp_of: (int * (int * Idx.symbol) list) list * ap array]
@@ -741,9 +742,9 @@ let read_covered_before ?(thread = fun _ -> false) ?(static_range = fun _ -> Non
             Array.for_all rels ~f:(function `Full -> true | _ -> false))
       then `Covered
       else begin
-        (* Union rule: writes sharing a residual frame contribute product boxes of per-axis
-           chunks (sound: per-axis independence of each write's existentials makes its image the
-           product of its per-axis sets); exact box-union coverage of the read's lattice box by
+        (* Union rule: writes sharing a residual frame contribute product boxes of per-axis chunks
+           (sound: per-axis independence of each write's existentials makes its image the product of
+           its per-axis sets); exact box-union coverage of the read's lattice box by
            coordinate-compression sweep — the first axis is cut at every box boundary, boxes
            spanning an elementary strip recurse on the remaining axes. This is what covers padded
            tensors (margin strips plus the interior tile the box) and literal initializations
@@ -759,8 +760,8 @@ let read_covered_before ?(thread = fun _ -> false) ?(static_range = fun _ -> Non
                 let cuts =
                   lo
                   :: List.concat_map boxes ~f:(function
-                       | (bl, bh) :: _ -> [ bl; bh + 1 ]
-                       | [] -> [])
+                    | (bl, bh) :: _ -> [ bl; bh + 1 ]
+                    | [] -> [])
                   |> List.filter ~f:(fun x -> x >= lo && x <= hi)
                   |> List.dedup_and_sort ~compare:Int.compare
                 in
@@ -795,19 +796,18 @@ let read_covered_before ?(thread = fun _ -> false) ?(static_range = fun _ -> Non
           raise
             (Fail
                (Printf.sprintf "read cells not covered by prior writes (read %s)"
-                  (String.concat_array ~sep:","
-                     (Array.map read.a_map ~f:axis_index_to_string))))
+                  (String.concat_array ~sep:"," (Array.map read.a_map ~f:axis_index_to_string))))
       end
     end
   with Fail witness -> `Unknown witness
 
 (** {2 Crosscheck}
 
-    Config [legality_crosscheck]: when enabled, the call sites swapped onto the queries also run
-    the legacy procedural analysis and compare. A query stricter than the procedural answer raises
-    — either a query precision regression or a latent unsoundness of the procedural rule, both
-    needing eyes. A query more permissive than the procedural answer is the expected precision
-    gain, logged to stderr for review. *)
+    Config [legality_crosscheck]: when enabled, the call sites swapped onto the queries also run the
+    legacy procedural analysis and compare. A query stricter than the procedural answer raises —
+    either a query precision regression or a latent unsoundness of the procedural rule, both needing
+    eyes. A query more permissive than the procedural answer is the expected precision gain, logged
+    to stderr for review. *)
 
 let crosscheck_enabled = lazy (Utils.get_global_flag ~default:false ~arg_name:"legality_crosscheck")
 

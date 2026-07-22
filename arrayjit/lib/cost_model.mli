@@ -12,9 +12,9 @@
 
     - Byte counts are upper bounds on compulsory traffic (distinct cells touched, perfect-cache
       assumption): per-access image cardinalities are exact for injective interpretable maps;
-      non-injective maps, guarded ([If]) accesses (counted guards-taken), vectorized-write runs,
-      and uninterpretable components ([Sub_axis]/[Concat]/dynamic indices — whole-node fallback)
-      only over-count, as does summing multiple same-direction accesses of one node (a union bound,
+      non-injective maps, guarded ([If]) accesses (counted guards-taken), vectorized-write runs, and
+      uninterpretable components ([Sub_axis]/[Concat]/dynamic indices — whole-node fallback) only
+      over-count, as does summing multiple same-direction accesses of one node (a union bound,
       capped by the node's size). [fp_approx] is [false] only when the count is exact.
     - The op count is an upper bound in the same guards-taken sense, and counts every scalar
       [Unop]/[Binop]/[Ternop] evaluation as one "FLOP" regardless of precision or integerness —
@@ -44,8 +44,8 @@ type summary = {
   flops : int;  (** Whole-kernel arithmetic-op count (loop extents times per-statement ops). *)
   flops_approx : bool;  (** [true] when guarded ([If]) code contributed (guards-taken bound). *)
   opaque : bool;
-      (** [true] when the code contains [Staged_compilation] or merge-buffer reads: some traffic
-          and ops are invisible to the analysis, so counts may UNDER-estimate. *)
+      (** [true] when the code contains [Staged_compilation] or merge-buffer reads: some traffic and
+          ops are invisible to the analysis, so counts may UNDER-estimate. *)
 }
 [@@deriving sexp_of]
 
@@ -63,7 +63,12 @@ val arithmetic_intensity : summary -> float
 (** FLOPs per byte moved, [flops / max 1 (total_bytes)]. *)
 
 val roofline_seconds :
-  ?peak_flops:float -> ?peak_memory_bandwidth:float -> flops:int -> bytes:int -> unit -> float option
+  ?peak_flops:float ->
+  ?peak_memory_bandwidth:float ->
+  flops:int ->
+  bytes:int ->
+  unit ->
+  float option
 (** The roofline lower-bound time: [max (flops/peak_flops) (bytes/peak_memory_bandwidth)] over the
     envelope constants present ([peak_flops] in FLOP/s, [peak_memory_bandwidth] in bytes/s — the
     advisory {!Backend_intf.hardware_limits} fields); [None] when neither is given. Monotone:

@@ -53,9 +53,7 @@ let p name v = Stdio.printf "%-44s %s\n" name (show v)
 
 let () =
   (* Matmul: zero-init nest plus an accumulation nest. *)
-  let a = fresh_tn "a" [| 8; 8 |]
-  and b = fresh_tn "b" [| 8; 8 |]
-  and c = fresh_tn "c" [| 8; 8 |] in
+  let a = fresh_tn "a" [| 8; 8 |] and b = fresh_tn "b" [| 8; 8 |] and c = fresh_tn "c" [| 8; 8 |] in
   let i = Idx.get_symbol () and j = Idx.get_symbol () in
   let i2 = Idx.get_symbol () and j2 = Idx.get_symbol () and k = Idx.get_symbol () in
   let get tn idcs = LL.Get (tn, idcs) in
@@ -63,7 +61,12 @@ let () =
     for_over i
       (for_over j
          (LL.Set
-            { tn = c; idcs = [| Idx.Iterator i; Idx.Iterator j |]; llsc = LL.Constant 0.; debug = "" }))
+            {
+              tn = c;
+              idcs = [| Idx.Iterator i; Idx.Iterator j |];
+              llsc = LL.Constant 0.;
+              debug = "";
+            }))
   in
   let acc_nest =
     for_over i2
@@ -85,8 +88,8 @@ let () =
                  debug = "";
                })))
   in
-  (* Self-contained kernel: the accumulation nest alone (its rmw serves as the init-carrying
-     form); every node is accessed only under this statement, so the intra-nest proof is the whole
+  (* Self-contained kernel: the accumulation nest alone (its rmw serves as the init-carrying form);
+     every node is accessed only under this statement, so the intra-nest proof is the whole
      obligation for hardware retypes too. *)
   let opt = hand_built ~stmts:[ acc_nest ] ~tns_on_device:[ a; b; c ] ~tns_local:[] in
   (* Two sibling statements sharing [c]: hardware annotations interleave their threads with no
@@ -106,9 +109,7 @@ let () =
   check "swap parallel pair" (Sched.Swap { outer = i2; inner = j2 });
   check "swap parallel with reduction" (Sched.Swap { outer = j2; inner = k });
   check "swap non-nested loops" (Sched.Swap { outer = i2; inner = k });
-  (let op, _, _ =
-     Sched.split ~axis:k ~factor:4 ~outer:LL.Serial ~inner:LL.Workgroup
-   in
+  (let op, _, _ = Sched.split ~axis:k ~factor:4 ~outer:LL.Serial ~inner:LL.Workgroup in
    check "split reduction with Workgroup inner" op);
   (let op, _, _ = Sched.split ~axis:j2 ~factor:4 ~outer:LL.Serial ~inner:LL.Workgroup in
    check "split parallel with Workgroup inner" op);
@@ -117,9 +118,9 @@ let () =
   check "unroll reduction" (Sched.Unroll { axis = k; materialize = false });
 
   (* Stage: apply's precondition surface is probed hermetically (a raising apply is a proven
-     Illegal), then the containment query [Affine.read_covered_before] proves the staged tile
-     covers the remapped reads — a covered serial packing stage is Legal; shared staging stays
-     Unknown (barriers and launch geometry are validated downstream). *)
+     Illegal), then the containment query [Affine.read_covered_before] proves the staged tile covers
+     the remapped reads — a covered serial packing stage is Legal; shared staging stays Unknown
+     (barriers and launch geometry are validated downstream). *)
   let stage ?(source = a) ?(tile_loops = [ k ]) ?(shared = false) ?(cooperative = None)
       ?(hoisted = false) ?(swizzle = false) () =
     Sched.Stage { source; tile_loops; shared; cooperative; hoisted; swizzle }
@@ -136,9 +137,7 @@ let () =
      the k role must be the (only) rmw-carrying loop and i/j the output dims, so of the 6 role
      permutations of the [i2 x j2 x k] accumulation only the identity assignment survives; the
      affine queries then prove i/j iteration independence (reduction reassociation licensed). *)
-  let tz ~i ~j ~k name ck =
-    ck name (fst (Sched.tensorize ~i ~j ~k ~simd_width:32))
-  in
+  let tz ~i ~j ~k name ck = ck name (fst (Sched.tensorize ~i ~j ~k ~simd_width:32)) in
   tz ~i:i2 ~j:j2 ~k "tensorize valid roles" check;
   tz ~i:j2 ~j:i2 ~k "tensorize i/j roles swapped" check;
   tz ~i:i2 ~j:k ~k:j2 "tensorize j role on the reduction" check;
@@ -165,12 +164,13 @@ let () =
          })
   in
   let opt_lag = hand_built ~stmts:[ lag_nest ] ~tns_on_device:[ x ] ~tns_local:[] in
-  p "retype lagged recurrence to Grid" (Sched.op_legality opt_lag (Sched.Retype { axis = t; ty = LL.Grid }));
+  p "retype lagged recurrence to Grid"
+    (Sched.op_legality opt_lag (Sched.Retype { axis = t; ty = LL.Grid }));
 
-  (* The autotuner's menu contract on a REAL lowered matmul (not hand-built): the menu proposes
-     all role permutations of a serial accumulation triple, and the oracle gates them. Pruning
-     must remove exactly the proposals whose [Schedule.apply] raises (the candidate compile would
-     fail) and never a viable candidate — assert the equivalence per permutation. *)
+  (* The autotuner's menu contract on a REAL lowered matmul (not hand-built): the menu proposes all
+     role permutations of a serial accumulation triple, and the oracle gates them. Pruning must
+     remove exactly the proposals whose [Schedule.apply] raises (the candidate compile would fail)
+     and never a viable candidate — assert the equivalence per permutation. *)
   let open Ocannl.Operation.DSL_modules in
   let m = 8 in
   let mav = Array.init (m * m) ~f:(fun q -> Float.of_int (q % 5) *. 0.5) in
@@ -190,9 +190,7 @@ let () =
   in
   let mm_opt = Option.value_exn !captured in
   (* The serial accumulation triple, as the menu's [collect_serial_triples] sees it. *)
-  let strip stmts =
-    List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true)
-  in
+  let strip stmts = List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true) in
   let rec find_triple (llc : LL.t) : (Idx.symbol * Idx.symbol * Idx.symbol) option =
     match llc with
     | LL.Seq (a, b) -> ( match find_triple a with Some _ as r -> r | None -> find_triple b)
@@ -213,8 +211,12 @@ let () =
   let ti, tj, tk = Option.value_exn (find_triple mm_opt.LL.llc) in
   let perms =
     [
-      ("i j k", ti, tj, tk); ("i k j", ti, tk, tj); ("j i k", tj, ti, tk);
-      ("j k i", tj, tk, ti); ("k i j", tk, ti, tj); ("k j i", tk, tj, ti);
+      ("i j k", ti, tj, tk);
+      ("i k j", ti, tk, tj);
+      ("j i k", tj, ti, tk);
+      ("j k i", tj, tk, ti);
+      ("k i j", tk, ti, tj);
+      ("k j i", tk, tj, ti);
     ]
   in
   let viable = ref 0 in

@@ -3,15 +3,15 @@ open! Ocannl
 open! Ocannl.Operation.DSL_modules
 open Stdio
 
-(** The padding neutral element is part of a padded tensor's identity: the margins permanently
-    hold a single committed value, and operations that read the margins (demand nonzero padding)
-    with a different neutral are REJECTED at shape-inference time. This replaced the earlier
-    "reset margins before each operation" semantics, whose per-reader resets could clobber the
-    margins for other consumers.
+(** The padding neutral element is part of a padded tensor's identity: the margins permanently hold
+    a single committed value, and operations that read the margins (demand nonzero padding) with a
+    different neutral are REJECTED at shape-inference time. This replaced the earlier "reset margins
+    before each operation" semantics, whose per-reader resets could clobber the margins for other
+    consumers.
 
     Pinned here:
-    - Conflict rejection: a padded max-pool (neutral -inf) and a padded conv (neutral 0) reading
-      the SAME tensor's margins is an error, with a materialize-a-copy remedy.
+    - Conflict rejection: a padded max-pool (neutral -inf) and a padded conv (neutral 0) reading the
+      SAME tensor's margins is an error, with a materialize-a-copy remedy.
     - The remedy: routing one consumer through a materialized copy gives each buffer its own
       committed neutral, and both operations compute correct values (input is all-negative, so a
       0-margin max-pool would corrupt the corners, and a -inf-margin conv would produce -inf).
@@ -78,11 +78,10 @@ let test_separate_copies () =
       printf "committed neutrals: pool operand %g, conv operand %g\n%!" vi vc
   | _ -> printf "ERROR: neutrals not committed\n%!");
   let ctx = Context.run ctx routine in
-  (* Executed value checks (input is -16..-1, 3x3 windows, left/right margins 1/2):
-     pooled[0,0] = max(-16,-15,-12,-11) = -11 — a 0-margin max would wrongly give 0;
-     pooled[1,1] = -6 (window fully inside); pooled[3,3] = max(-6,-5,-2,-1) = -1;
-     conv[0,0] = -16-15-12-11 = -54; conv[1,1] = sum of the top-left 3x3 = -99 — a
-     -inf-margin conv would give -inf at the edges. *)
+  (* Executed value checks (input is -16..-1, 3x3 windows, left/right margins 1/2): pooled[0,0] =
+     max(-16,-15,-12,-11) = -11 — a 0-margin max would wrongly give 0; pooled[1,1] = -6 (window
+     fully inside); pooled[3,3] = max(-6,-5,-2,-1) = -1; conv[0,0] = -16-15-12-11 = -54; conv[1,1] =
+     sum of the top-left 3x3 = -99 — a -inf-margin conv would give -inf at the edges. *)
   let pooled_v = Context.get_values ctx pooled.value in
   let conv_v = Context.get_values ctx conv_out.value in
   printf "pooled[0,0]=%g pooled[1,1]=%g pooled[3,3]=%g\n%!" pooled_v.(0) pooled_v.(5) pooled_v.(15);
