@@ -352,7 +352,18 @@ module Impl = struct
              (if
                 Array.for_all (Lazy.force metal_devices) ~f:(fun d ->
                     Me.Device.supports_family d Me.Device.GPUFamily.Apple7)
-              then Some { Backend_intf.mma_simd_width = 32; mma_tile = (8, 8, 8) }
+              then
+                Some
+                  {
+                    Backend_intf.mma_simd_width = 32;
+                    mma_tile = (8, 8, 8);
+                    mma_format_tiles =
+                      [
+                        ((Backend_intf.Mma_f32, Backend_intf.Mma_f32), (8, 8, 8));
+                        ((Backend_intf.Mma_f16, Backend_intf.Mma_f16), (8, 8, 8));
+                        ((Backend_intf.Mma_bf16, Backend_intf.Mma_bf16), (8, 8, 8));
+                      ];
+                  }
               else None);
            simd_vector_bytes = 0;
            (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the

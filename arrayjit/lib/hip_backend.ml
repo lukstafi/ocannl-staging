@@ -1618,7 +1618,16 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               wherever it links. Precision combinations are decided per call by [mma_syntax]. *)
            mma =
              (if mma_supported () then
-                Some { Backend_intf.mma_simd_width = 32; mma_tile = (16, 16, 16) }
+                Some
+                  {
+                    Backend_intf.mma_simd_width = 32;
+                    mma_tile = (16, 16, 16);
+                    mma_format_tiles =
+                      [
+                        ((Backend_intf.Mma_f16, Backend_intf.Mma_f16), (16, 16, 16));
+                        ((Backend_intf.Mma_bf16, Backend_intf.Mma_bf16), (16, 16, 16));
+                      ];
+                  }
               else None);
            simd_vector_bytes = 0;
            (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the

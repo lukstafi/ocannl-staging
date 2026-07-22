@@ -1769,7 +1769,18 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               are decided per call by [mma_syntax]. *)
            mma =
              (if min_compute_capability () >= 70 then
-                Some { Backend_intf.mma_simd_width = 32; mma_tile = (16, 16, 16) }
+                Some
+                  {
+                    Backend_intf.mma_simd_width = 32;
+                    mma_tile = (16, 16, 16);
+                    mma_format_tiles =
+                      [
+                        ((Backend_intf.Mma_f16, Backend_intf.Mma_f16), (16, 16, 16));
+                        ((Backend_intf.Mma_bf16, Backend_intf.Mma_bf16), (16, 16, 16));
+                        ((Backend_intf.Mma_fp8_e5m2, Backend_intf.Mma_fp8_e5m2), (16, 8, 32));
+                        ((Backend_intf.Mma_tf32, Backend_intf.Mma_tf32), (16, 16, 8));
+                      ];
+                  }
               else None);
            simd_vector_bytes = 0;
            (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the sm_70+

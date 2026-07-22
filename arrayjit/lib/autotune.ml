@@ -1434,7 +1434,7 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
       in
       let gpu_seeds =
         match (is_gpu, limits.Ir.Backend_intf.mma) with
-        | true, Some { Ir.Backend_intf.mma_simd_width = w; mma_tile = tm_t, tn_t, tk_t } ->
+        | true, Some { Ir.Backend_intf.mma_simd_width = w; mma_tile = tm_t, tn_t, tk_t; _ } ->
             (* Zeroed sites are gated off: the GPU leg targets fission segments, whose [Zero_out]
                lives in its own [`Zeros] segment (a whole-routine zeroed GPU flavor would need the
                zero nest annotated with matching workgroup geometry — a follow-up). Companion
@@ -1561,7 +1561,7 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
   in
   let mma =
     match (is_gpu, limits.Ir.Backend_intf.mma) with
-    | true, Some { Ir.Backend_intf.mma_simd_width = w; mma_tile = tm_t, tn_t, tk_t } ->
+    | true, Some { Ir.Backend_intf.mma_simd_width = w; mma_tile = tm_t, tn_t, tk_t; _ } ->
         (* [bn = w] keeps the zeroing's column grid blocks aligned with [j]'s (see
            [gpu_mma_sketch_schedule]); [bk = 0] = unstaged full-K block. *)
         List.filter_map
@@ -2421,7 +2421,7 @@ let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) (u : unit_g
   let tensorizes =
     match limits.Ir.Backend_intf.mma with
     | None -> []
-    | Some { Ir.Backend_intf.mma_simd_width; mma_tile = tm, tn, tk } ->
+    | Some { Ir.Backend_intf.mma_simd_width; mma_tile = tm, tn, tk; _ } ->
         (* The nesting order need not match the (i, j, k) roles — the roles are fixed by the
            accumulation pattern. The op-legality oracle decides role-assignment validity (gh-494
            waypoint 3 follow-up): invalid permutations — most of the 6 per triple — are proven
