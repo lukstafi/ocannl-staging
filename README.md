@@ -50,11 +50,11 @@ A possible route to learning OCANNL:
    2. Shape inference details [docs/shape_inference.md](docs/shape_inference.md).
    3. Backend-independent optimizations [docs/lowering_and_inlining.md](docs/lowering_and_inlining.md) -- _lowering_ means translating (compiling) from the high-level representation (as assignments) to the low-level representation.
 
-### Using the tracing debugger with CUDA computations
+### Using the tracing debugger with CUDA and HIP computations
 
-To use debugging as provided by configuring `Utils.settings.debug_log_from_routines <- true` with the `cuda` backend, you need to wrap the code scheduling tasks and synchronizing `cuda` devices with `Utils.capture_stdout_logs`. The reason is that CUDA kernels are allowed to use `printf`, but not `fprintf` -- the driver dumps the printing buffer of a device to `stdout` at certain times (e.g. when synchronizing the device). For an example, see the implementation of `Train.example_train_loop`. Specifically, it wraps two sections: the call to `Train.parallel_update`, and the body of the returned `infer_callback`.
+To use debugging as provided by configuring `Utils.settings.debug_log_from_routines <- true` with the `cuda` or `hip` backend, wrap the code that schedules work and synchronizes the GPU with `Utils.capture_stdout_logs`. Both GPU APIs expose device-side `printf`, but not `fprintf`; the runtime drains the device printing buffer to process `stdout` around synchronization. Synchronize the context inside the capture window so all device output is available before stdout is restored.
 
-NOTE: debug logging from CUDA in complex settings is a bit tricky, it involves another thread (domain) intercepting and filtering `stdout`. If facing issues, try the setting `never_capture_stdout=true` (see [ocannl_config.reference](ocannl_config.reference)).
+NOTE: debug logging from CUDA or HIP in complex settings is a bit tricky, as it involves another thread (domain) intercepting and filtering `stdout`. If facing issues, try the setting `never_capture_stdout=true` (see [ocannl_config.reference](ocannl_config.reference)).
 
 ## Milestones
 

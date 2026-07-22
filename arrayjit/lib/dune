@@ -5,6 +5,9 @@
   (env_var OCANNL_LOG_LEVEL))
  (modules utils datatypes)
  (libraries base stdio pprint ppx_minidebug.runtime ppx_minidebug.db)
+ (foreign_stubs
+  (language c)
+  (names utils_stubs))
  (preprocess
   (pps
    ppx_compare
