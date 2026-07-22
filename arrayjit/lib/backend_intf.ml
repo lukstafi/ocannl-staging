@@ -40,14 +40,15 @@ type mma_capability = {
       (** Threads cooperating in one tile-MMA instruction (CUDA warp / Metal simdgroup width). *)
   mma_tile : int * int * int;
       (** The canonical intrinsic tile shape [(m, n, k)] (8×8×8 for Metal [simdgroup_matrix],
-          16×16×16 for CUDA wmma), autotune's divisibility filter for seeding; a
+          16×16×16 for CUDA wmma), used where schedule construction has no typed operand site; a
           {!Low_level.t.Tile_mma}'s block extents must be multiples of the tile of the format
-          actually emitted. *)
+          actually emitted. Typed matmul/conv sketch seeds use [mma_format_tiles] below. *)
   mma_format_tiles : ((mma_input_format * mma_input_format) * (int * int * int)) list;
       (** Per (a-operand, b-operand) input-format intrinsic tile shapes, for formats whose tile
           diverges from [mma_tile] as well as the ones matching it (e.g. CUDA fp8 16×8×32, tf32
-          16×16×8). Advertises capability only — whether a given call emits is decided by the
-          backend's [mma_syntax] hook plus the {!Numerics} policy. *)
+          16×16×8). Typed autotune seeds use the matching entry for divisibility; whether a given
+          call ultimately emits is still decided by the backend's [mma_syntax] hook plus the
+          {!Numerics} policy. *)
 }
 [@@deriving sexp, compare, equal]
 (** Tensor-core capability descriptor (docs/proposals/tensorize-mma.md §6). Which operand precisions

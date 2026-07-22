@@ -1771,9 +1771,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
            max_workgroup_memory_bytes =
              min_over (fun (a : Cu.Device.attributes) -> a.max_shared_memory_per_block);
            (* Tensor cores (tensorize-mma T3): the 32-thread warp cooperates on 16x16x16 wmma tiles
-              from sm_70 up (fp8 [mma.sync] tiles are 16x8x32, sm_89+ — [mma_tile] is the
-              autotuner's divisibility filter and stays at the wmma shape). Precision combinations
-              are decided per call by [mma_syntax]. *)
+              from sm_70 up; [mma_format_tiles] advertises the divergent fp8 16x8x32 and tf32
+              16x16x8 shapes to typed autotune seeds. Precision combinations are ultimately decided
+              per call by [mma_syntax]. *)
            mma =
              (if min_compute_capability () >= 70 then
                 Some

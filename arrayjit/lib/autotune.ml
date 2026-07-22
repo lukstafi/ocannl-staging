@@ -174,6 +174,31 @@ type sketch_params = {
           the Metal fragment intrinsics keep firing after placement makes it routine-local. *)
 }
 
+(* Resolve the tensor-core input format from storage precision before seeding a typed matmul/conv
+   site. Single-precision storage has two possible compute formats: prefer tf32 when the numerics
+   policy enables it and the backend advertises that pair, then fall back to genuine f32 (Metal).
+   Backends remain the emission source of truth; this only prevents the autotuner from rejecting a
+   supported divergent tile up front, or timing a format the capability does not advertise. *)
+let mma_input_formats_of_prec (prec : Ir.Ops.prec) : Ir.Backend_intf.mma_input_format list =
+  match prec with
+  | Ir.Ops.Half_prec _ -> [ Ir.Backend_intf.Mma_f16 ]
+  | Ir.Ops.Bfloat16_prec _ -> [ Ir.Backend_intf.Mma_bf16 ]
+  | Ir.Ops.Fp8_prec _ -> [ Ir.Backend_intf.Mma_fp8_e5m2 ]
+  | Ir.Ops.Single_prec _ ->
+      if (Ir.Numerics.get ()).Ir.Numerics.tf32_matmuls then
+        [ Ir.Backend_intf.Mma_tf32; Ir.Backend_intf.Mma_f32 ]
+      else [ Ir.Backend_intf.Mma_f32 ]
+  | _ -> []
+
+let mma_tile_for_precisions (mma : Ir.Backend_intf.mma_capability) ~a_prec ~b_prec =
+  let equal_pair (a1, b1) (a2, b2) =
+    Ir.Backend_intf.equal_mma_input_format a1 a2 && Ir.Backend_intf.equal_mma_input_format b1 b2
+  in
+  List.find_map (mma_input_formats_of_prec a_prec) ~f:(fun a_format ->
+      List.find_map (mma_input_formats_of_prec b_prec) ~f:(fun b_format ->
+          List.Assoc.find mma.Ir.Backend_intf.mma_format_tiles (a_format, b_format)
+            ~equal:equal_pair))
+
 type matmul_site = {
   m_i : Idx.symbol;
   m_j : Idx.symbol;
@@ -1434,14 +1459,21 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
       in
       let gpu_seeds =
         match (is_gpu, limits.Ir.Backend_intf.mma) with
-        | true, Some { Ir.Backend_intf.mma_simd_width = w; mma_tile = tm_t, tn_t, tk_t; _ } ->
-            (* Zeroed sites are gated off: the GPU leg targets fission segments, whose [Zero_out]
+        | true, Some ({ Ir.Backend_intf.mma_simd_width = w; _ } as mma) -> (
+            match
+              mma_tile_for_precisions mma
+                ~a_prec:(Lazy.force site.c_a.Ir.Tnode.storage_prec)
+                ~b_prec:(Lazy.force site.c_b.Ir.Tnode.storage_prec)
+            with
+            | None -> []
+            | Some (tm_t, tn_t, tk_t) ->
+                (* Zeroed sites are gated off: the GPU leg targets fission segments, whose [Zero_out]
                lives in its own [`Zeros] segment (a whole-routine zeroed GPU flavor would need the
                zero nest annotated with matching workgroup geometry — a follow-up). Companion
                gating mirrors the CPU grid flavors: on GPU there is no all-serial fallback, so any
                uncovered companion write fails [validate_parallel] — the one-companion seed only
                survives through its fused twin. *)
-            (* The intrinsic-tile divisibility is now a PER-BLOCK property (gh-ocannl-500): the
+                (* The intrinsic-tile divisibility is now a PER-BLOCK property (gh-ocannl-500): the
                tensorized micro-kernel row is [sk_bm] (the block), not the whole [c_nrow], so a
                staged block flavor is proposable whenever [sk_bm] — a multiple of the intrinsic row
                tile that divides [c_nrow] — exists, and the whole-extent flavor ([sk_bm = 0]) only
@@ -1452,38 +1484,38 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
                flavors add [Grid] device-fill splits rather than waking new sites; genuine edge
                peeling of the cooperative micro-kernel — a tensorized bulk beside a scalar remainder,
                which [Stage]'s single-index-vector rule blocks in v1 — is a recorded follow-up. *)
-            let shared_bytes rows =
-              ((rows * site.c_nred) + (site.c_nred * site.c_noc)) * Ir.Ops.prec_in_bytes prec
-            in
-            let shared_fits rows =
-              match limits.Ir.Backend_intf.max_workgroup_memory_bytes with
-              | Some cap -> shared_bytes rows <= cap
-              | None -> true
-            in
-            let base_ok =
-              row_unit_stride && offset_free && (not site.c_zeroed)
-              && site.c_noc % tn_t = 0
-              && site.c_nred % tk_t = 0
-              && List.length real_stmts <= 2
-            in
-            if not base_ok then []
-            else
-              let whole =
-                if site.c_nrow % tm_t = 0 && shared_fits site.c_nrow then
-                  [ { base with sk_gpu = true; sk_simd = w } ]
-                else []
-              in
-              let blocked =
-                List.filter_map [ 8; 16; 32 ] ~f:(fun bm ->
-                    if
-                      bm % tm_t = 0
-                      && site.c_nrow % bm = 0
-                      && site.c_nrow / bm >= 2
-                      && shared_fits bm
-                    then Some { base with sk_gpu = true; sk_simd = w; sk_bm = bm }
-                    else None)
-              in
-              whole @ blocked
+                let shared_bytes rows =
+                  ((rows * site.c_nred) + (site.c_nred * site.c_noc)) * Ir.Ops.prec_in_bytes prec
+                in
+                let shared_fits rows =
+                  match limits.Ir.Backend_intf.max_workgroup_memory_bytes with
+                  | Some cap -> shared_bytes rows <= cap
+                  | None -> true
+                in
+                let base_ok =
+                  row_unit_stride && offset_free && (not site.c_zeroed)
+                  && site.c_noc % tn_t = 0
+                  && site.c_nred % tk_t = 0
+                  && List.length real_stmts <= 2
+                in
+                if not base_ok then []
+                else
+                  let whole =
+                    if site.c_nrow % tm_t = 0 && shared_fits site.c_nrow then
+                      [ { base with sk_gpu = true; sk_simd = w } ]
+                    else []
+                  in
+                  let blocked =
+                    List.filter_map [ 8; 16; 32 ] ~f:(fun bm ->
+                        if
+                          bm % tm_t = 0
+                          && site.c_nrow % bm = 0
+                          && site.c_nrow / bm >= 2
+                          && shared_fits bm
+                        then Some { base with sk_gpu = true; sk_simd = w; sk_bm = bm }
+                        else None)
+                  in
+                  whole @ blocked)
         | _ -> []
       in
       let seeds = cpu_seeds @ gpu_seeds in
@@ -1561,36 +1593,43 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
   in
   let mma =
     match (is_gpu, limits.Ir.Backend_intf.mma) with
-    | true, Some { Ir.Backend_intf.mma_simd_width = w; mma_tile = tm_t, tn_t, tk_t; _ } ->
-        (* [bn = w] keeps the zeroing's column grid blocks aligned with [j]'s (see
-           [gpu_mma_sketch_schedule]); [bk = 0] = unstaged full-K block. *)
-        List.filter_map
-          [ (16, w, 0); (32, w, 0); (16, w, 32); (32, w, 32); (32, w, 16) ]
-          ~f:(fun (bm, bn, bk) ->
-            if
-              divides bm site.m_ni && divides bn site.m_nj
-              && (bk = 0 || (divides bk site.m_nk && bk % tk_t = 0))
-              && bm % tm_t = 0
-              && bn % tn_t = 0
-              && site.m_nk % tk_t = 0
-            then
-              Some
-                {
-                  sk_gpu = true;
-                  sk_mma = true;
-                  sk_simd = w;
-                  sk_bm = bm;
-                  sk_bn = bn;
-                  sk_bk = bk;
-                  sk_tm = 0;
-                  sk_tn = 0;
-                  sk_hoist = false;
-                  sk_grid = false;
-                  sk_pack_rest = false;
-                  sk_conv = false;
-                  sk_epilogue = false;
-                }
-            else None)
+    | true, Some ({ Ir.Backend_intf.mma_simd_width = w; _ } as mma) -> (
+        match
+          mma_tile_for_precisions mma
+            ~a_prec:(Lazy.force site.m_a.Ir.Tnode.storage_prec)
+            ~b_prec:(Lazy.force site.m_b.Ir.Tnode.storage_prec)
+        with
+        | None -> []
+        | Some (tm_t, tn_t, tk_t) ->
+            (* [bn = w] keeps the zeroing's column grid blocks aligned with [j]'s (see
+               [gpu_mma_sketch_schedule]); [bk = 0] = unstaged full-K block. *)
+            List.filter_map
+              [ (16, w, 0); (32, w, 0); (16, w, 32); (32, w, 32); (32, w, 16) ]
+              ~f:(fun (bm, bn, bk) ->
+                if
+                  divides bm site.m_ni && divides bn site.m_nj
+                  && (bk = 0 || (divides bk site.m_nk && bk % tk_t = 0))
+                  && bm % tm_t = 0
+                  && bn % tn_t = 0
+                  && site.m_nk % tk_t = 0
+                then
+                  Some
+                    {
+                      sk_gpu = true;
+                      sk_mma = true;
+                      sk_simd = w;
+                      sk_bm = bm;
+                      sk_bn = bn;
+                      sk_bk = bk;
+                      sk_tm = 0;
+                      sk_tn = 0;
+                      sk_hoist = false;
+                      sk_grid = false;
+                      sk_pack_rest = false;
+                      sk_conv = false;
+                      sk_epilogue = false;
+                    }
+                else None))
     | _ when is_cpu ->
         (* The register-tiled [Tile_mma] rendering needs no MMA units (cc's [limits.mma] is a token
            1x1x1 capability): seed the whole-triple form plus Grid-parallel row-block splits, and
