@@ -176,8 +176,11 @@ the retained procedural analyses alongside the affine engine and raises on diver
 - **Cost model** (gh-ocannl-491): `Ir.Cost_model` computes a per-kernel roofline estimate from
   byte/op footprints and a calibrated device envelope — used to *rank, not predict*: the
   `autotune_keep_fraction` pre-filter trims the candidate pool, and `model_default_schedule`
-  optionally picks the default-schedule flavor by model. Counts are deliberately conservative
-  upper bounds; exactness is tracked per kernel.
+  lets recipe-level untuned compiles (`Train`'s wrappers such as `to_routine`/`run_once`, and
+  the benchmark runners, via `Autotune.model_default` — not direct `Context.compile` calls,
+  which always use the ordinary presets) pick the default-schedule flavor by model, with zero
+  timing runs. Counts are deliberately conservative upper bounds; exactness is tracked per
+  kernel.
 - **Caching**: winners persist in `autotune_cache_dir`, keyed by `Schedule_cache.canonicalize` —
   an alpha-renamed structural digest of the optimized code including dims, precisions, operand
   hoistability, and placement classes. Cached schedules rebind their symbols onto the fresh
