@@ -1,0 +1,31 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+dividing split-reduce is guard-free: true
+pass 1 accumulates into partials and the combine folds all blocks: true
+the routine gains the combine as a separate top-level nest: true
+split-reduce on an accumulation is Op_legal: true
+split-reduce on a read-only operand is Op_illegal: true
+schedule-cache round-trip re-mints an applicable Split_reduce: true
+split-schedule serial twin approximates the unsplit reference: true
+fission annotates the pass-1 segment: true
+fission gives the combine its own segment: true
+parallel split-reduce matches its serial twin bitwise (fixed schedule pins numerics): true
+non-dividing split-reduce keeps the remainder guard: true
+non-dividing serial twin approximates the reference: true
+non-dividing parallel split-reduce matches its serial twin bitwise: true
+split max-reduce matches the reference bitwise: true
+parallel split max-reduce matches the serial twin bitwise: true
+serial scatter gradient equals the analytic dense gradient bitwise: true
+default preset annotates the un-split scatter segment (gh-466 unbail): true
+annotated un-split scatter matches the serial gradient bitwise: true
+the scatter is redirected into the per-block partials: true
+partials are zeroed, scattered into, and tree-combined: true
+split-scatter serial twin equals the analytic gradient bitwise: true
+default preset annotates the split-scatter pass-1 segment: true
+parallel split-scatter equals the analytic gradient bitwise: true
+sr_err_no_such_loop rejected with a targeted error: true
+sr_err_not_accumulated rejected with a targeted error: true
+sr_err_num_blocks rejected with a targeted error: true
+sr_err_output_axis rejected with a targeted error: true
+
+Done.
