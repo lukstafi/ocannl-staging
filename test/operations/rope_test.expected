@@ -38,7 +38,7 @@ RoPE attention output shape: ((batch
  (id 126) (debug_name out))
 
 === Test 5: Gradient flow ===
-Loss: 1987.46
+Loss: 1983.79
 freqs has grad: false (expect false)
 positions has grad: false (expect false)
 learnable params: 4, with grad: 4 (expect >0)
