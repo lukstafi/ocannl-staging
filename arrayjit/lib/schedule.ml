@@ -3530,6 +3530,10 @@ type access = {
   a_idcs : Indexing.axis_index array;
   a_write : bool;
   a_dynamic : bool;  (** [Get_dynamic]: the effective index is not statically known. *)
+  a_dyn_axis : int option;
+      (** The data-dependent component of a dynamic access ([Set_dynamic]/[Get_dynamic]'s
+          [dyn_axis]; [a_idcs] holds a placeholder there) — affine queries must treat that
+          component as opaque ({!query_map}). *)
   a_vec : bool;
       (** [Set_from_vec]: [a_idcs] is the base of a length-run along the minor axis, not a single
           cell — affine queries must treat the last component as opaque ({!query_map}). *)
@@ -3547,13 +3551,14 @@ exception Bail
 let scan_accesses plc ~local_syms (llc : Low_level.t) : access list =
   let open Low_level in
   let acc = ref [] in
-  let add ~depth:_ ~write ~dynamic ?(vec = false) ?(val_syms = []) tn idcs =
+  let add ~depth:_ ~write ~dynamic ?dyn_axis ?(vec = false) ?(val_syms = []) tn idcs =
     acc :=
       {
         a_tn = tn;
         a_idcs = idcs;
         a_write = write;
         a_dynamic = dynamic;
+        a_dyn_axis = dyn_axis;
         a_vec = vec;
         a_val_syms = val_syms;
       }
@@ -3582,13 +3587,17 @@ let scan_accesses plc ~local_syms (llc : Low_level.t) : access list =
         if depth > 0 && Tn.Placements.is_materialized_peek plc tn then raise Bail;
         add ~depth ~write:true ~dynamic:false ~val_syms:(scalar_syms llsc) tn idcs;
         scalar ~depth llsc
-    | Set_dynamic { tn; idcs; dyn_value = v, _; llsc; _ } ->
+    | Set_dynamic { tn; idcs; dyn_axis; dyn_value = v, _; llsc; _ } ->
         (* gh-466: the scatter's effective write index is not statically known. Registering it
-           [~dynamic:true] makes the per-nest hazard analysis bail on any parallelization over the
-           written node and the cross-nest alignment reject it — the deterministic no-atomics
-           invariant: loops driving the dynamic index stay serial. *)
+           [~dynamic:true] makes the cross-nest alignment reject it, and the per-nest hazard
+           analysis mask the dynamic component from the affine queries ([query_map]) — the
+           deterministic no-atomics invariant: loops driving the dynamic index are never forced
+           equal across threads, so they stay serial, while statically-pinning components (gh-484
+           task 2: the per-block partials row of [Split_reduce], the embedding-dim column) may
+           parallelize. *)
         if depth > 0 && Tn.Placements.is_materialized_peek plc tn then raise Bail;
-        add ~depth ~write:true ~dynamic:true ~val_syms:(scalar_syms v @ scalar_syms llsc) tn idcs;
+        add ~depth ~write:true ~dynamic:true ~dyn_axis
+          ~val_syms:(scalar_syms v @ scalar_syms llsc) tn idcs;
         scalar ~depth v;
         scalar ~depth llsc
     | Set_from_vec { tn; idcs; arg = a, _; _ } ->
@@ -3604,8 +3613,8 @@ let scan_accesses plc ~local_syms (llc : Low_level.t) : access list =
     | Local_scope { body; _ } -> code ~depth:(depth + 1) body
     | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
     | Get (tn, idcs) -> add ~depth ~write:false ~dynamic:false tn idcs
-    | Get_dynamic { tn; idcs; dyn_value = v, _; _ } ->
-        add ~depth ~write:false ~dynamic:true tn idcs;
+    | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, _; _ } ->
+        add ~depth ~write:false ~dynamic:true ~dyn_axis tn idcs;
         scalar ~depth v
     | Get_merge_buffer (_, _) -> () (* The merge buffer is a separate read-only input buffer. *)
     | Ternop (_, (a, _), (b, _), (c, _)) ->
@@ -3649,14 +3658,17 @@ let mentions_sym syms (idx : Indexing.axis_index) =
   | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
 
 (* The affine-query view of an access's index map: a vectorized write's last (minor-axis run)
-   component is the base of a run, so it is masked to an opaque [Sub_axis] — the engine then draws
-   no (possibly wrong) disjointness or confinement conclusion from it. *)
+   component is the base of a run, and a dynamic access's [dyn_axis] component is a data-dependent
+   row (the vector holds a placeholder there) — both are masked to an opaque [Sub_axis], so the
+   engine draws no (possibly wrong) disjointness or confinement conclusion from them. *)
 let query_map (a : access) : Indexing.axis_index array =
-  if (not a.a_vec) || Array.is_empty a.a_idcs then a.a_idcs
-  else
+  if ((not a.a_vec) && Option.is_none a.a_dyn_axis) || Array.is_empty a.a_idcs then a.a_idcs
+  else begin
     let m = Array.copy a.a_idcs in
-    m.(Array.length m - 1) <- Indexing.Sub_axis;
+    if a.a_vec then m.(Array.length m - 1) <- Indexing.Sub_axis;
+    Option.iter a.a_dyn_axis ~f:(fun ax -> if ax < Array.length m then m.(ax) <- Indexing.Sub_axis);
     m
+  end
 
 (* The single-child chain of [For_loop]s from the top of a nest, descending through [If] wrappers
    and comments; stops at the first branching ([Seq] with more than one non-comment statement). *)
@@ -3929,7 +3941,17 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
               List.exists accs ~f:(fun a -> Array.exists a.a_idcs ~f:(mentions_sym syms))
             in
             if is_mat || chain_relevant then (
-              if List.exists accs ~f:(fun a -> a.a_dynamic) then raise Bail;
+              let has_dynamic = List.exists accs ~f:(fun a -> a.a_dynamic) in
+              (* gh-484 (task 2, unbailing the gh-466 scatter): dynamic accesses of a materialized
+                 node no longer bail wholesale. The dynamic component is masked to [Sub_axis] in
+                 [query_map], so the conflict query decides from the statically-known components: a
+                 chain symbol pinning a same-position plain component of every access confines
+                 conflicts to its own thread (the per-block partials row of [Split_reduce], the
+                 embedding-dim column of the scatter), while loops driving the dynamic index are
+                 never forced equal across threads and stay serial. Per-thread (non-materialized)
+                 scratch keeps bailing: its containment rule ("reads hit exactly the cells the same
+                 thread wrote") is order-sensitive and unknowable under data-dependent rows. *)
+              if has_dynamic && not is_mat then raise Bail;
               if is_mat then (
                 (* Materialized: genuine shared memory — the affine conflict query decides. Every
                    pair involving a write must have its conflicts confined to one thread of the
@@ -3948,10 +3970,13 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
                               witness := wit;
                               false))
                 in
-                Affine.crosscheck ~site:"schedule per-nest hazard"
-                  ~context:(Tn.debug_name (List.hd_exn accs).a_tn)
-                  ~procedural_safe:(fun () -> agreement_ok accs)
-                  ~query_safe ~witness:!witness;
+                (* The procedural agreement rule does not model dynamic accesses (it never ran on
+                   them — they used to bail first), so the crosscheck compares only static nodes. *)
+                if not has_dynamic then
+                  Affine.crosscheck ~site:"schedule per-nest hazard"
+                    ~context:(Tn.debug_name (List.hd_exn accs).a_tn)
+                    ~procedural_safe:(fun () -> agreement_ok accs)
+                    ~query_safe ~witness:!witness;
                 if not query_safe then raise Bail)
               else if not (agreement_ok accs) then raise Bail)));
   chains
