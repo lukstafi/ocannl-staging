@@ -246,13 +246,20 @@ val partition : axis:Indexing.symbol -> breakpoints:int list -> optop * Indexing
 val partition_breakpoints : axis:Indexing.symbol -> Low_level.t -> int list
 (** Derives candidate {!constructor-Partition} breakpoints of the [axis] loop from the guards
     already present in its body: statement [If] conditions and scalar [Where] conditions (e.g. the
-    virtualizer's per-component range guards of an inlined concatenation, or [Split]'s remainder
-    guard) are scanned for comparisons whose two sides differ by [k*axis + off] with everything else
-    constant — each flips truth value at one point of the axis range. Returns the collected flip
+    virtualizer's per-component range guards of an inlined concatenation, [Split]'s remainder
+    guard, or a clamped window's range guards, gh-ocannl-504) are scanned for comparisons whose two
+    sides differ by [k*axis + off]. With everything besides [axis] constant, such a comparison
+    flips truth value at one point of the axis range. Non-axis symbols bound by other
+    statement-level loops (inside the [axis] loop — e.g. the window symbol of a clamped-window
+    guard — or enclosing it) are bounded by their loop ranges, putting [off] in an interval: the
+    comparison is then always-true / mixed / always-false
+    over the axis range, and both transition points are recorded — the mixed (boundary) segments
+    are exactly delimited while the decided segments fold their guards. Returns the collected flip
     points that fall strictly inside the loop range, sorted and deduplicated (possibly empty — e.g.
     when every guard is already interval-decided); partitioning at them makes every such guard
-    interval-decided within each segment, so {!apply}'s trailing simplify erases them. Raises
-    [Invalid_argument] when no statement-level loop binds [axis]. *)
+    interval-decided within each segment (for interval-ranged comparisons: outside the mixed
+    segments), so {!apply}'s trailing simplify erases them. Raises [Invalid_argument] when no
+    statement-level loop binds [axis]. *)
 
 val expand_zero : tn:Tn.t -> optop * Indexing.symbol list
 (** Builds an {!constructor-Expand_zero} with one fresh symbol per axis of [tn] (forcing [tn]'s

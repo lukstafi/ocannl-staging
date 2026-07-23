@@ -2570,98 +2570,136 @@ let mentions_axis axis (idx : Indexing.axis_index) =
 (* gh-ocannl-508: derive the static affine breakpoints of the [axis] loop from the guards already
    present in its body — statement [If] conditions and scalar [Where] conditions (the virtualizer's
    per-component range guards of an inlined concatenation, [Split]'s remainder guard, symbolic
-   extent guards with the extent already substituted). A comparison whose two sides differ by
-   [k*axis + off] with everything else constant flips truth value at exactly one point of the axis
-   range; partitioning at the collected points makes every such guard interval-decided within each
-   segment, so [apply]'s trailing simplify erases them. *)
+   extent guards with the extent already substituted, gh-504's clamped-window range guards). A
+   comparison whose two sides differ by [k*axis + off] with everything else constant flips truth
+   value at exactly one point of the axis range; partitioning at the collected points makes every
+   such guard interval-decided within each segment, so [apply]'s trailing simplify erases them.
+   Non-axis symbols bound by loops inside the [axis] loop (e.g. the window symbol of a clamped
+   window guard, gh-504) are bounded by their loop ranges: the comparison then reads
+   [k*axis + off] with [off] in an interval, giving an always-true / mixed / always-false
+   trichotomy of the axis range — both transition points are recorded, so the mixed (boundary)
+   segments are exactly delimited and the decided segments fold their guards. *)
 let partition_breakpoints ~axis (llc : Low_level.t) : int list =
   let open Low_level in
+  (* Ranges of the statement-level loops enclosing the [axis] loop (same traversal as
+     [find_loop]): an inner axis's guards may mention enclosing-loop symbols. *)
+  let enclosing_ranges =
+    let rec collect env (llc : Low_level.t) =
+      match llc with
+      | For_loop { index; _ } when Indexing.equal_symbol index axis -> Some env
+      | For_loop { index; from_; to_; body; _ } ->
+          collect (Map.set env ~key:index ~data:(from_, to_)) body
+      | Seq (a, b) -> ( match collect env a with Some _ as r -> r | None -> collect env b)
+      | If { body; _ } -> collect env body
+      | _ -> None
+    in
+    Option.value ~default:(Map.empty (module Indexing.Symbol))
+    @@ collect (Map.empty (module Indexing.Symbol)) llc
+  in
   match find_loop axis llc with
   | Some (For_loop { from_; to_; body; _ }) ->
       let points = ref [] in
-      (* Affine view [Some (k, off)] of a comparison operand as [k*axis + off]; [None] when the
-         operand mentions other symbols or is not integer-affine. *)
-      let affine_view (sc : scalar_t) : (int * int) option =
+      (* Affine view [Some (k, off_lo, off_hi)] of a comparison operand as [k*axis + off] with
+         [off] ranging over [off_lo, off_hi]: non-axis symbols with a known enclosing-loop range
+         (from [ranges]) contribute their extremes to the offset interval. [None] when the operand
+         mentions a symbol of unknown range or is not integer-affine. *)
+      let affine_view ~ranges (sc : scalar_t) : (int * int * int) option =
         let of_terms symbols offset =
           let symbols = Indexing.coalesce_affine_terms symbols in
-          if List.for_all symbols ~f:(fun (_, s) -> Indexing.equal_symbol s axis) then
-            Some (List.sum (module Int) symbols ~f:fst, offset)
-          else None
+          List.fold symbols ~init:(Some (0, offset, offset)) ~f:(fun acc (c, s) ->
+              match acc with
+              | None -> None
+              | Some (k, lo, hi) ->
+                  if Indexing.equal_symbol s axis then Some (k + c, lo, hi)
+                  else (
+                    match Map.find ranges s with
+                    | Some (s_lo, s_hi) ->
+                        if c >= 0 then Some (k, lo + (c * s_lo), hi + (c * s_hi))
+                        else Some (k, lo + (c * s_hi), hi + (c * s_lo))
+                    | None -> None))
         in
         match sc with
-        | Embed_index (Indexing.Iterator s) when Indexing.equal_symbol s axis -> Some (1, 0)
-        | Embed_index (Indexing.Fixed_idx i) -> Some (0, i)
+        | Embed_index (Indexing.Iterator s) when Indexing.equal_symbol s axis -> Some (1, 0, 0)
+        | Embed_index (Indexing.Iterator s) -> (
+            match Map.find ranges s with Some (lo, hi) -> Some (0, lo, hi) | None -> None)
+        | Embed_index (Indexing.Fixed_idx i) -> Some (0, i, i)
         | Embed_index (Indexing.Affine { symbols; offset }) -> of_terms symbols offset
-        | Constant c when Float.is_integer c -> Some (0, Float.to_int c)
+        | Constant c when Float.is_integer c -> Some (0, Float.to_int c, Float.to_int c)
         | _ -> None
       in
       (* Division rounding towards -inf resp. +inf; [b > 0]. *)
       let fdiv a b = if a >= 0 then a / b else -((-a + b - 1) / b) in
       let cdiv a b = if a >= 0 then (a + b - 1) / b else -(-a / b) in
-      let rec cond (sc : scalar_t) =
+      let rec cond ~ranges (sc : scalar_t) =
         match sc with
         | Binop ((Ops.And | Ops.Or), (a, _), (b, _)) ->
-            cond a;
-            cond b
+            cond ~ranges a;
+            cond ~ranges b
         | Binop (Ops.Cmplt, (a, _), (b, _)) -> (
-            match Option.both (affine_view a) (affine_view b) with
-            | Some ((ka, oa), (kb, ob)) ->
-                (* [a < b] iff [k*axis + off < 0]. *)
-                let k = ka - kb and off = oa - ob in
-                if k > 0 then (* True iff [axis < -off/k]: record the first false point. *)
-                  points := cdiv (-off) k :: !points
-                else if k < 0 then (* True iff [axis > off/(-k)]: record the first true point. *)
-                  points := (fdiv off (-k) + 1) :: !points
+            match Option.both (affine_view ~ranges a) (affine_view ~ranges b) with
+            | Some ((ka, la, ha), (kb, lb, hb)) ->
+                (* [a < b] iff [k*axis + off < 0], [off] in [off_lo, off_hi]. Always-true while
+                   [k*axis + off_hi < 0], always-false once [k*axis + off_lo >= 0]: record both
+                   transition points (equal when the offset is a single value). *)
+                let k = ka - kb and off_lo = la - hb and off_hi = ha - lb in
+                if k > 0 then points := cdiv (-off_hi) k :: cdiv (-off_lo) k :: !points
+                else if k < 0 then
+                  points := (fdiv off_hi (-k) + 1) :: (fdiv off_lo (-k) + 1) :: !points
             | None -> ())
         | Binop ((Ops.Cmpeq | Ops.Cmpne), (a, _), (b, _)) -> (
-            match Option.both (affine_view a) (affine_view b) with
-            | Some ((ka, oa), (kb, ob)) ->
-                let k = ka - kb and off = oa - ob in
-                (* Equality holds at a single point (when [k] divides [off]): both edges. *)
-                if k <> 0 && off % abs k = 0 then
-                  let q = -off / k in
-                  points := q :: (q + 1) :: !points
+            match Option.both (affine_view ~ranges a) (affine_view ~ranges b) with
+            | Some ((ka, la, ha), (kb, lb, hb)) ->
+                let k = ka - kb and off_lo = la - hb and off_hi = ha - lb in
+                (* Equality is possible while [k*axis] meets [-off_hi, -off_lo]: both edges of the
+                   possibly-equal axis range (a single point [q, q+1] when the offset is a single
+                   value that [k] divides — no points when it does not). *)
+                if k <> 0 then (
+                  let neg_lo, neg_hi = (-off_hi, -off_lo) in
+                  let q_lo = if k > 0 then cdiv neg_lo k else cdiv neg_hi k
+                  and q_hi = if k > 0 then fdiv neg_hi k else fdiv neg_lo k in
+                  if q_lo <= q_hi then points := q_lo :: (q_hi + 1) :: !points)
             | None -> ())
         | _ -> ()
       in
-      let rec go (llc : t) =
+      let rec go ~ranges (llc : t) =
         match llc with
         | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier
           ->
             ()
         | Seq (a, b) ->
-            go a;
-            go b
-        | For_loop { body; _ } -> go body
+            go ~ranges a;
+            go ~ranges b
+        | For_loop { index; from_; to_; body; _ } ->
+            go ~ranges:(Map.set ranges ~key:index ~data:(from_, to_)) body
         | If { cond = c, _; body } ->
-            cond c;
-            go body
-        | Tile_mma { fallback; _ } -> go fallback
-        | Set { llsc; _ } | Set_local (_, llsc) -> scan_scalar llsc
+            cond ~ranges c;
+            go ~ranges body
+        | Tile_mma { fallback; _ } -> go ~ranges fallback
+        | Set { llsc; _ } | Set_local (_, llsc) -> scan_scalar ~ranges llsc
         | Set_dynamic { dyn_value = v, _; llsc; _ } ->
-            scan_scalar v;
-            scan_scalar llsc
-        | Set_from_vec { arg = a, _; _ } -> scan_scalar a
-      and scan_scalar (sc : scalar_t) =
+            scan_scalar ~ranges v;
+            scan_scalar ~ranges llsc
+        | Set_from_vec { arg = a, _; _ } -> scan_scalar ~ranges a
+      and scan_scalar ~ranges (sc : scalar_t) =
         match sc with
         | Ternop (Ops.Where, (c, _), (t, _), (e, _)) ->
-            cond c;
-            scan_scalar t;
-            scan_scalar e
+            cond ~ranges c;
+            scan_scalar ~ranges t;
+            scan_scalar ~ranges e
         | Ternop (_, (a, _), (b, _), (c, _)) ->
-            scan_scalar a;
-            scan_scalar b;
-            scan_scalar c
+            scan_scalar ~ranges a;
+            scan_scalar ~ranges b;
+            scan_scalar ~ranges c
         | Binop (_, (a, _), (b, _)) ->
-            scan_scalar a;
-            scan_scalar b
-        | Unop (_, (a, _)) -> scan_scalar a
-        | Local_scope { body; _ } -> go body
-        | Get_dynamic { dyn_value = v, _; _ } -> scan_scalar v
+            scan_scalar ~ranges a;
+            scan_scalar ~ranges b
+        | Unop (_, (a, _)) -> scan_scalar ~ranges a
+        | Local_scope { body; _ } -> go ~ranges body
+        | Get_dynamic { dyn_value = v, _; _ } -> scan_scalar ~ranges v
         | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ ->
             ()
       in
-      go body;
+      go ~ranges:enclosing_ranges body;
       List.filter !points ~f:(fun b -> from_ < b && b <= to_)
       |> List.dedup_and_sort ~compare:Int.compare
   | Some _ -> assert false (* [find_loop] only returns [For_loop]s. *)
