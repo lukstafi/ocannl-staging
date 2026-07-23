@@ -1153,7 +1153,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Min, Int64_prec _ -> func "min"
       | Min, Uint4x32_prec _ -> func "min"
       | Min, Bfloat16_prec _ -> func "__hmin"
-      | Mod, Byte_prec _ -> f "%"
+      | ( Mod,
+          ( Byte_prec _ | Uint16_prec _ | Int32_prec _ | Uint32_prec _ | Int64_prec _
+          | Uint64_prec _ ) ) ->
+          f "%"
       | Mod, _ -> func "fmod"
       | Cmplt, _ -> f "<"
       | Cmpne, _ -> f "!="

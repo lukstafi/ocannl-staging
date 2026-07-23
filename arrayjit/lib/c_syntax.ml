@@ -576,6 +576,14 @@ module C_syntax (B : C_syntax_config) = struct
   open Indexing
   open Doc_helpers
 
+  (* An embedded index that renders as a sum (more than one term) must be parenthesized when
+     spliced into an operator context; single-term indices bind at least as tightly as [/], [%]
+     and friends. *)
+  let affine_needs_parens = function
+    | Indexing.Affine { symbols; offset } ->
+        List.length symbols + (if offset = 0 then 0 else 1) > 1
+    | _ -> false
+
   let pp_array_offset (idcs, dims) =
     let open PPrint in
     if Array.is_empty idcs then string "0"
@@ -3142,6 +3150,10 @@ module C_syntax (B : C_syntax_config) = struct
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
         let idx_doc = pp_axis_index idx in
         let idx_doc = if PPrint.is_empty idx_doc then string "0" else idx_doc in
+        (* A multi-term affine renders as an unparenthesized sum; parenthesize so embedding into an
+           operator context (e.g. the [/] and [%] of the gh-509 lane-extract form) cannot rebind
+           terms via C precedence. *)
+        let idx_doc = if affine_needs_parens idx then parens idx_doc else idx_doc in
         let expr = string prefix ^^ idx_doc ^^ string postfix in
         ([], expr)
     | Binop (Arg1, (v1, _), _v2) -> pp_scalar prec v1
@@ -3291,7 +3303,9 @@ module C_syntax (B : C_syntax_config) = struct
         (expr, [])
     | Embed_index idx ->
         let idx_doc = pp_axis_index idx in
-        ((if PPrint.is_empty idx_doc then string "0" else idx_doc), [])
+        let idx_doc = if PPrint.is_empty idx_doc then string "0" else idx_doc in
+        (* Parenthesize multi-term affines, mirroring [pp_scalar]. *)
+        ((if affine_needs_parens idx then parens idx_doc else idx_doc), [])
     | Binop (Arg1, (v1, _), _v2) -> debug_float ?guard prec v1
     | Binop (Arg2, _v1, (v2, _)) -> debug_float ?guard prec v2
     | Ternop (op, (v1, v1_prec), (v2, v2_prec), (v3, v3_prec)) ->

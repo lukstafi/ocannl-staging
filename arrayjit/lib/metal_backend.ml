@@ -893,6 +893,10 @@ module Impl = struct
       | Sub, _ -> f "-"
       | Mul, _ -> f "*"
       | Div, _ -> f "/"
+      | ( Mod,
+          ( Ops.Byte_prec _ | Ops.Uint16_prec _ | Ops.Int32_prec _ | Ops.Uint32_prec _
+          | Ops.Int64_prec _ | Ops.Uint64_prec _ ) ) ->
+          f "%"
       | Mod, _ -> func "fmod"
       | Max, _ -> func "fmax"
       | Min, _ -> func "fmin"
