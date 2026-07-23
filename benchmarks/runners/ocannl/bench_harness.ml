@@ -136,6 +136,63 @@ let print_census ?promote_locals ~backend ~limits ~static_indices opt =
           match stmt_detail plc stmt with Some s -> Stdio.printf "        %s\n" s | None -> ()));
   Stdio.Out_channel.flush Stdio.stdout
 
+(** Diagnostic: per-segment (approximately per-layer) wall times of the default fission pipeline.
+    Each segment's post-schedule code is compiled as its own routine through the
+    [lowered_transform] seam (hermetic, autotune-style: the compile's fresh lowering of [comp] is
+    discarded and the stashed segment substituted), then timed min-of-[repeats] with a device sync
+    per run — so each number is one kernel's wall time including launch overhead. Run the full step
+    once before calling so segment inputs are populated; timing mutates segment outputs (and
+    re-accumulates accumulators), so restore any state that matters afterwards. [bind] binds the
+    routine's static indices (e.g. the batch index). Used by the [bench_*_diag] runners; not part
+    of the benchmark protocol. *)
+let time_segments ?promote_locals ?(repeats = 20) ~backend ~limits ~static_indices ~ctx ~comp
+    ~bindings ~bind opt =
+  let module LL = Ir.Low_level in
+  let module Sched = Ir.Schedule in
+  let gpu = Sched.backend_is_gpu backend in
+  let promote_locals = Option.value promote_locals ~default:gpu in
+  let preset o = if gpu then Sched.default_gpu ~limits o else Sched.default_cpu o in
+  let zero_sched tns = if gpu then Sched.zero_expansion ~limits tns else [] in
+  let segs = Sched.fission_scheduled ~promote_locals ~preset ~zero_sched ~static_indices opt in
+  let elapsed_ms c0 = Mtime.Span.to_float_ns (Mtime_clock.count c0) /. 1e6 in
+  let writes_of llc =
+    let writes = ref [] in
+    let rec code (l : LL.t) =
+      match l with
+      | LL.Noop | LL.Comment _ | LL.Declare_local _ | LL.Staged_compilation _
+      | LL.Workgroup_barrier | LL.Tile_mma _ | LL.Set_local _ ->
+          ()
+      | LL.Seq (a, b) ->
+          code a;
+          code b
+      | LL.For_loop { body; _ } | LL.If { body; _ } -> code body
+      | LL.Zero_out tn | LL.Set { tn; _ } | LL.Set_dynamic { tn; _ } | LL.Set_from_vec { tn; _ } ->
+          writes := tn :: !writes
+    in
+    code llc;
+    List.dedup_and_sort ~compare:Tn.compare !writes
+  in
+  Stdio.printf "segment times (min of %d runs, ms):\n" repeats;
+  let total = ref 0. in
+  List.iteri segs ~f:(fun i (kind, pre, _sched, post) ->
+      let _ctx', routine = Context.compile ~lowered_transform:(fun _ -> post) ctx comp bindings in
+      bind routine;
+      Train.run ctx routine;
+      Context.sync ctx;
+      let best = ref Float.infinity in
+      for _ = 1 to repeats do
+        let c0 = Mtime_clock.counter () in
+        Train.run ctx routine;
+        Context.sync ctx;
+        best := Float.min !best (elapsed_ms c0)
+      done;
+      total := !total +. !best;
+      let kind_s = match kind with `Normal -> "N" | `Zeros -> "Z" | `Solo -> "S" in
+      let ws = String.concat ~sep:" " (List.map (writes_of pre.LL.llc) ~f:Tn.debug_name) in
+      Stdio.printf "  seg%-3d %s %8.4f ms  w:%s\n" i kind_s !best ws);
+  Stdio.printf "  total (sum of per-segment minima): %.4f ms\n" !total;
+  Stdio.Out_channel.flush Stdio.stdout
+
 (** Runs the measurement protocol and prints the JSON result line. [run_step] advances the batch
     binding and enqueues one step; [read_loss] returns the current loss value (awaits the device);
     [sync] awaits all queued work. *)

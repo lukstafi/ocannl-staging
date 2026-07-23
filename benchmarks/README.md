@@ -94,6 +94,11 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   materialization markers) for the gpt2_mini / lenet graphs, then optionally time steps
   (`BENCH_STEPS=1`) or dump tensor values (`BENCH_PROBE=1`, `BENCH_DUMP=1`; `BENCH_FWD=1`
   compiles forward-only, `BENCH_PROMOTE=0` disables fission's Local promotion in the census).
+  `BENCH_SEG_TIMES=1` adds per-segment (≈ per-layer) wall times: each fission segment is
+  compiled as its own routine (hermetic substitution through the `lowered_transform` seam)
+  and timed min-of-N with a sync per run, labeled by the nodes it writes — the per-layer
+  breakdown that identifies which conv sites dominate a step, diffable across schedule
+  changes (the acceptance instrument for the gh-500 blocking decision).
 - `runners/ocannl/bench_metal_bug.ml` — standalone (no OCANNL) repro of an Apple Metal
   shader-compiler miscompilation: a serial `acc[0] = acc[0] + f(i)` loop over
   slot-table-derived pool pointers keeps only the last iteration's contribution. OCANNL works

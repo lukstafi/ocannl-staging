@@ -123,6 +123,17 @@ let () =
   let ctx = if late_inject then H.inject ctx st batch_loss mapping else ctx in
   show ctx "after-compile";
   Stdio.printf "backend: %s  compile_s: %.3f\n" backend compile_s;
+  (* Per-segment (per-layer) times: populate intermediates with one full step, then time each
+     fission segment as its own routine. *)
+  (if H.env_flag "BENCH_SEG_TIMES" then (
+     let batch_ref = IDX.find_exn (Context.bindings routine) batch_n in
+     batch_ref := 0;
+     Train.run ctx routine;
+     Context.sync ctx;
+     H.time_segments ?promote_locals ~backend ~limits ~static_indices:[ batch_n ] ~ctx
+       ~comp:step_comp ~bindings
+       ~bind:(fun r -> IDX.find_exn (Context.bindings r) batch_n := 0)
+       opt));
   (if H.env_flag "BENCH_STEPS" then
      let batch_ref = IDX.find_exn (Context.bindings routine) batch_n in
      for step = 0 to 2 do
