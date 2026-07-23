@@ -1,0 +1,22 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+clamped pool = [-14 -12 -10 -9]
+clamped values match the -inf-margins semantics: true
+operand stays unpadded: true
+result stays unpadded: true
+clamp is a single Where range guard, no statement If: true
+breakpoints delimit the left- and right-truncated boundary segments: true
+interior segment is guard-free (one Where per boundary segment): true
+partitioned pool matches reference: true
+pool input gradient = [1 0 1 0 1 0]
+gradient lands on each clipped window's argmax: true
+backward scatter writes are If-guarded: true
+differentiable operand stays unpadded: true
+shared operand carries the conv's committed margins: true
+shared pooled = [-15 -13 -11 -9]
+shared conv = [-31 -45 -42 -39 -36 -33 -30 -19]
+pool never reads the 0-margins: true
+conv sums with 0-margins: true
+padded add-family window still commits margins: true
+
+Done.

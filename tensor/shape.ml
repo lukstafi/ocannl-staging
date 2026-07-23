@@ -1924,8 +1924,17 @@ let%debug4_sexp derive_projections (update_step : update_step) : unit =
   (* resolved_padding is passed for verification only - to check that operation padding doesn't
      exceed already-locked padding. It won't be used to set padding on shapes (get_dim_padding only
      returns inferred_padding of proj_env, which is for the current operation only). *)
+  (* gh-504: a max/tropical-family accumulation (non-finite identity) lowers its padded ([=]-mode)
+     window projections with clamped window bounds instead of demanding margins on the operand —
+     skipping an out-of-range window position contributes the accumulation identity exactly. With
+     no demand registered, [step_touches_margins] stays false for this step, so no neutral element
+     is committed either: the operand composes freely with 0-neutral margin-touching consumers
+     (padded convs — the Inception-block pattern). *)
+  let clamp_padded =
+    match update_step.neutral_elem with Some v -> not (Float.is_finite v) | None -> false
+  in
   let proj_env : Row.proj_env =
-    Row.solve_proj_equations ~resolved_padding ~inferred_padding:[] proj_eqs
+    Row.solve_proj_equations ~clamp_padded ~resolved_padding ~inferred_padding:[] proj_eqs
   in
   let dims_of (sh : t) =
     sh.batch.beg_dims @ sh.batch.dims @ sh.output.beg_dims @ sh.output.dims @ sh.input.beg_dims

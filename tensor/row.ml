@@ -4642,6 +4642,13 @@ type proj_env = {
   inferred_padding : axis_padding Hashtbl.M(Proj_id).t;
   proj_classes : proj_classes;
   product_dim : int Map.M(Proj_id).t;
+  clamp_padded : bool;
+      (** gh-504: the operation's accumulation identity is non-finite (max/tropical family), so its
+          padded ([=]-mode) window projections lower with clamped window bounds instead of margin
+          demands: [get_proj_index] skips padding registration (and the exceeds-resolved check) for
+          them, and the lowering guards the accumulation to the operand's valid range — an
+          out-of-range position contributes the accumulation identity, which is the same as not
+          visiting it. *)
 }
 [@@deriving sexp_of]
 
@@ -4968,9 +4975,14 @@ let%track7_sexp get_proj_index (proj_env : proj_env) (proj : proj) : Idx.axis_in
                    | None -> Hashtbl.set proj_env.inferred_padding ~key:repr ~data:operation_padding
                    | Some _ -> (* Existing inferred padding is sufficient *) ())
              in
-             match target_id with
-             | Some proj_id -> check_and_update_padding proj_id
-             | None -> () (* No target projection ID available to check *));
+             (* gh-504: a clamp-lowered window (max/tropical family) demands no margins — the
+                lowering guards the window to the operand's valid range instead — so neither the
+                registration nor the exceeds-resolved check applies. *)
+             if proj_env.clamp_padded then ()
+             else
+               match target_id with
+               | Some proj_id -> check_and_update_padding proj_id
+               | None -> () (* No target projection ID available to check *));
 
             !offset - left_padding)
           else !offset
@@ -5084,7 +5096,7 @@ let get_dim_index proj_env =
   in
   loop
 
-let%debug4_sexp solve_proj_equations (eqs : proj_equation list)
+let%debug4_sexp solve_proj_equations ?(clamp_padded = false) (eqs : proj_equation list)
     ~(resolved_padding : (proj_id, axis_padding) List.Assoc.t)
     ~(inferred_padding : (proj_id, axis_padding) List.Assoc.t) : proj_env =
   let v_env = dim_hashtbl () in
@@ -5293,6 +5305,7 @@ let%debug4_sexp solve_proj_equations (eqs : proj_equation list)
       inferred_padding;
       resolved_padding;
       product_dim = !product_dim;
+      clamp_padded;
     }
   in
   (* Process postponed Conv_input equations *)
@@ -5377,6 +5390,7 @@ let%debug4_sexp solve_proj_equations (eqs : proj_equation list)
     inferred_padding;
     resolved_padding;
     product_dim = !product_dim;
+    clamp_padded;
   }
 
 let proj_repr proj_env p =

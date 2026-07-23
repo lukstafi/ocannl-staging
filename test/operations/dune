@@ -1466,6 +1466,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name clamped_window_pool)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules clamped_window_pool)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name schedule_conv_gemm)
  (package neural_nets_lib)
  (deps
