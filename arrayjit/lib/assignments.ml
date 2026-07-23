@@ -257,6 +257,88 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
                 | Concat _ -> assert false)
   in
   let is_padded tn = Option.is_some (Tn.get_padding tn) in
+  (* gh-504 clamped windows: a padded ([=]-mode) max-family window spec registers no margin demand
+     (see [Row.solve_proj_equations]'s [clamp_padded]), so its semantic indices can escape the
+     operand's valid region; the clamp is rendered here as a range guard on the accumulation
+     statement — an out-of-range position contributes the accumulation identity, which is the same
+     as not visiting it. [index_interval] bounds a semantic index over the loop ranges of its
+     symbols; [None] when a symbol's range is unknown (e.g. a static routine binding), leaving the
+     access unguarded (conservative: such accesses are in-range by construction). *)
+  let index_interval ~sizes (idx : Indexing.axis_index) : (int * int) option =
+    match idx with
+    | Indexing.Fixed_idx i -> Some (i, i)
+    | Indexing.Iterator s -> Option.map (Map.find sizes s) ~f:(fun d -> (0, d - 1))
+    | Indexing.Affine { symbols; offset } ->
+        List.fold
+          (Indexing.coalesce_affine_terms symbols)
+          ~init:(Some (offset, offset))
+          ~f:(fun acc (c, s) ->
+            match (acc, Map.find sizes s) with
+            | Some (lo, hi), Some d ->
+                if c >= 0 then Some (lo, hi + (c * (d - 1))) else Some (lo + (c * (d - 1)), hi)
+            | _ -> None)
+    | Indexing.Sub_axis | Indexing.Concat _ -> None
+  in
+  let index_plus k (idx : Indexing.axis_index) : Indexing.axis_index =
+    match idx with
+    | Indexing.Fixed_idx i -> Indexing.Fixed_idx (i + k)
+    | Indexing.Iterator s -> Indexing.Affine { symbols = [ (1, s) ]; offset = k }
+    | Indexing.Affine { symbols; offset } -> Indexing.Affine { symbols; offset = offset + k }
+    | Indexing.Sub_axis | Indexing.Concat _ -> assert false
+  in
+  (* Range-guard conditions for the axes of an access at (semantic, pre-padding-shift) [idcs] that
+     can escape the operand's valid region [0, N) — unless the escape is covered by committed
+     margins holding this accumulation's neutral element (the physical-halo mechanism: covered
+     reads/writes of the margins are intentional). *)
+  let clamp_conds ~accum ~sizes (tn : Tn.t) (idcs : Indexing.axis_index array) :
+      Low_level.scalar_arg list =
+    let padding = Tn.get_padding tn in
+    let sem_dims = Tn.dims_without_padding tn in
+    let iprec = Ops.index_prec () in
+    let embed idx = (Low_level.Embed_index idx, iprec) in
+    Array.to_list
+    @@ Array.filter_mapi idcs ~f:(fun i idx ->
+        if i >= Array.length sem_dims then None
+        else
+          match index_interval ~sizes idx with
+          | None -> None
+          | Some (lo, hi) ->
+              let n = sem_dims.(i) in
+              if lo >= 0 && hi < n then None
+              else
+                let covered =
+                  match padding with
+                  | Some (pads, v) ->
+                      i < Array.length pads
+                      && Float.(v = Ops.neutral_elem accum)
+                      && lo >= -pads.(i).Ops.left
+                      && hi < n + pads.(i).Ops.right
+                  | None -> false
+                in
+                if covered then None
+                else
+                  (* [0 <= idx] as [0 < idx + 1] (cf. the virtualizer's range guards). *)
+                  let lower =
+                    if lo < 0 then
+                      Some
+                        (Low_level.Binop
+                           (Ops.Cmplt, embed (Indexing.Fixed_idx 0), embed (index_plus 1 idx)))
+                    else None
+                  in
+                  let upper =
+                    if hi >= n then
+                      Some (Low_level.Binop (Ops.Cmplt, embed idx, embed (Indexing.Fixed_idx n)))
+                    else None
+                  in
+                  (match (lower, upper) with
+                  | Some l, Some u ->
+                      Some (Low_level.Binop (Ops.And, (l, iprec), (u, iprec)), iprec)
+                  | Some c, None | None, Some c -> Some (c, iprec)
+                  | None, None -> None))
+  in
+  let and_all (conds : Low_level.scalar_arg list) : Low_level.scalar_arg =
+    List.reduce_exn conds ~f:(fun a b -> (Low_level.Binop (Ops.And, a, b), Ops.index_prec ()))
+  in
   (* Redirect a slice-alias view to its parent: a read/write of the alias at [idcs] becomes a
      read/write of the parent at [batch_idx :: idcs] -- exactly the index the materializing copy
      loop used to build for its RHS. Recursive to cover (currently impossible) alias chains. The
@@ -269,7 +351,9 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
         resolve_alias parent (Array.append [| Iterator static_symbol |] idcs)
     | None -> (tn, idcs)
   in
-  let get (buffer : buffer) (idcs : Indexing.axis_index array) : Low_level.scalar_t =
+  (* [clamp] (gh-504): when [Some (accum, sizes, conds)], prepend to [conds] the clamp range
+     guards of this access, computed on the semantic (pre-padding-shift) indices. *)
+  let get ?clamp (buffer : buffer) (idcs : Indexing.axis_index array) : Low_level.scalar_t =
     (* Only [Node] buffers can be slice-alias views; [Merge_buffer] is never redirected. *)
     let buffer, idcs =
       match buffer with
@@ -292,13 +376,16 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
               "Assignments.to_low_level: indexing mismatch for %{Tn.debug_name tn}: shape %{dims} \
                vs. %{idcs}"]
     in
+    Option.iter clamp ~f:(fun (accum, sizes, conds) ->
+        conds := clamp_conds ~accum ~sizes tn idcs @ !conds);
     (* The same projection can be used to access a padded or a non-padded tensor. *)
     let idcs = if is_padded tn then apply_padding_offset tn idcs else idcs in
     match buffer with
     | Node tn -> Low_level.Get (tn, idcs)
     | Merge_buffer tn -> Low_level.Get_merge_buffer (tn, idcs)
   in
-  let set (tn : Tn.t) (idcs : Indexing.axis_index array) (llsc : Low_level.scalar_t) : Low_level.t =
+  let set ?clamp (tn : Tn.t) (idcs : Indexing.axis_index array) (llsc : Low_level.scalar_t) :
+      Low_level.t =
     (* Write-through a slice-alias view goes to the parent buffer (gh-ocannl-293 293a). *)
     let tn, idcs = resolve_alias tn idcs in
     let idcs =
@@ -314,6 +401,8 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
               "Assignments.to_low_level: indexing mismatch for %{Tn.debug_name tn}: shape %{dims} \
                vs. %{idcs}"]
     in
+    Option.iter clamp ~f:(fun (accum, sizes, conds) ->
+        conds := clamp_conds ~accum ~sizes tn idcs @ !conds);
     let idcs = if is_padded tn then apply_padding_offset tn idcs else idcs in
     Low_level.Set { tn; idcs; llsc; debug = "" }
   in
@@ -449,6 +538,17 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
           Array.map projections.project_lhs ~f:subst_index
         in
         let open Low_level in
+        (* gh-504 clamped windows: ranges of the fresh loop symbols, for bounding the semantic
+           indices of each access. *)
+        let fresh_sizes =
+          Map.fold subst_map
+            ~init:(Map.empty (module Indexing.Symbol))
+            ~f:(fun ~key ~data acc ->
+              match (data, Map.find iter_sizes key) with
+              | Indexing.Iterator s', Some d -> Map.set acc ~key:s' ~data:d
+              | _ -> acc)
+        in
+        let lhs_conds = ref [] and rhs_conds = ref [] in
         let lhs_ll = get (Node lhs) lhs_idcs in
         let rhses_ll =
           Array.filter_mapi projections.project_rhs ~f:(fun i rhs_idcs ->
@@ -456,7 +556,7 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
                 if not (is_allowed_by_concat ~concat_syms_opt ~block_iters i) then None
                 else
                   let rhs_idcs = Array.map ~f:subst_index rhs_idcs in
-                  Some (get rhses.(i) rhs_idcs)
+                  Some (get ~clamp:(accum, fresh_sizes, rhs_conds) rhses.(i) rhs_idcs)
               with Empty_block -> None)
         in
         if Array.is_empty rhses_ll then raise Empty_block;
@@ -467,8 +567,26 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
             @@ Utils.User_error
                  "Ambiguous indices in concatenation: multiple blocks viable for same position"
         in
-        if initialize_neutral && can_skip_accumulation ~projections then set lhs lhs_idcs rhs2
-        else set lhs lhs_idcs @@ apply_op (Ops.Binop accum) [| lhs_ll; rhs2 |]
+        (* Out-of-range reads contribute the accumulation identity: exactly the semantics of a
+           padded window spec, so clamping is semantically exact (gh-504). *)
+        let rhs2 =
+          match !rhs_conds with
+          | [] -> rhs2
+          | conds ->
+              let cond, _ = and_all conds in
+              apply_op (Ops.Ternop Ops.Where) [| cond; rhs2; Constant (Ops.neutral_elem accum) |]
+        in
+        let clamp = (accum, fresh_sizes, lhs_conds) in
+        let stmt =
+          if initialize_neutral && can_skip_accumulation ~projections then
+            set ~clamp lhs lhs_idcs rhs2
+          else set ~clamp lhs lhs_idcs @@ apply_op (Ops.Binop accum) [| lhs_ll; rhs2 |]
+        in
+        (* An out-of-range write target (the transposed clamp of a backward scatter) skips the
+           whole statement. *)
+        match !lhs_conds with
+        | [] -> stmt
+        | conds -> Low_level.If { cond = and_all conds; body = stmt }
       with Empty_block -> Low_level.Noop
     in
     let rec for_loop block_iters rev_iters = function
@@ -630,7 +748,17 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
           Array.map projections.project_lhs ~f:subst_index
         in
         let open Low_level in
-        let rhs_ll = get (Node lhs) rhs_idcs in
+        (* gh-504 clamped windows: see [loop_accum]'s basecase. *)
+        let fresh_sizes =
+          Map.fold subst_map
+            ~init:(Map.empty (module Indexing.Symbol))
+            ~f:(fun ~key ~data acc ->
+              match (data, Map.find iter_sizes key) with
+              | Indexing.Iterator s', Some d -> Map.set acc ~key:s' ~data:d
+              | _ -> acc)
+        in
+        let lhs_conds = ref [] and rhs_conds = ref [] in
+        let rhs_ll = get ~clamp:(accum, fresh_sizes, rhs_conds) (Node lhs) rhs_idcs in
         let targets =
           Array.filter_mapi projections.project_rhs ~f:(fun i lhs_idcs ->
               try
@@ -647,10 +775,24 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
                "Ambiguous indices in concatenation: multiple blocks viable for same position";
         let i, target_buf, lhs_idcs = targets.(0) in
         let rhs2 = apply_op op [| rhs_ll |] in
+        let rhs2 =
+          match !rhs_conds with
+          | [] -> rhs2
+          | conds ->
+              let cond, _ = and_all conds in
+              apply_op (Ops.Ternop Ops.Where) [| cond; rhs2; Constant (Ops.neutral_elem accum) |]
+        in
         let target_tn = target_tn_exn target_buf in
-        if initialize_neutral && target_can_skip.(i) then set target_tn lhs_idcs rhs2
-        else
-          set target_tn lhs_idcs @@ apply_op (Ops.Binop accum) [| get target_buf lhs_idcs; rhs2 |]
+        let clamp = (accum, fresh_sizes, lhs_conds) in
+        let stmt =
+          if initialize_neutral && target_can_skip.(i) then set ~clamp target_tn lhs_idcs rhs2
+          else
+            set ~clamp target_tn lhs_idcs
+            @@ apply_op (Ops.Binop accum) [| get target_buf lhs_idcs; rhs2 |]
+        in
+        match !lhs_conds with
+        | [] -> stmt
+        | conds -> Low_level.If { cond = and_all conds; body = stmt }
       with Empty_block -> Low_level.Noop
     in
     let rec for_loop block_iters rev_iters = function
