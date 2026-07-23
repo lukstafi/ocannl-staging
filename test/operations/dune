@@ -1576,6 +1576,19 @@
 ; and the Metal backend rejects Ops.Fp8_prec in typ_of_prec. Re-enable once Metal FP8 exists.
 
 (test
+ (name test_uniform_virtual_lane)
+ (package neural_nets_lib)
+ (enabled_if
+  (<> %{env:OCANNL_BACKEND=cc} metal))
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules test_uniform_virtual_lane)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name test_uniform_odd_sizes)
  (package neural_nets_lib)
  (enabled_if

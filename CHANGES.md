@@ -10,6 +10,16 @@
 
 ### Added
 
+- **Virtual packed uniform via lane extraction** (gh-ocannl-509 task 4): packed `uniform`
+  results can now be virtual (inlined). A read cell inlines as
+  `vec_convert(counter[flat / lanes]).v[flat mod lanes]` through the new IR-internal
+  `Uint4x32_to_prec_uniform_lane` binop, whose per-backend builtins index the same converted
+  block as the vectorized stores — virtual and materialized runs agree bitwise on every backend
+  (pinned by `test_uniform_virtual_lane` across odd/divisible sizes, multi-axis shapes, and
+  single/half/double/fp8). Trade-off: the counter tensor of a virtualized uniform is read at a
+  runtime block index, so it stays materialized (typically as routine-local scratch, 16 bytes
+  per 128-bit block) — dropout-mask-style virtual uses keep working after `uniform1` retires,
+  with the conversion recomputed per cell but the threefry chain evaluated once per block.
 - **Numerics policy with tf32 matmuls** (gh-ocannl-478): `Ir.Numerics` is a record of
   compute-precision decisions — user-chosen, never optimizer-chosen, identical across sibling
   autotune candidates. Its first field, the opt-in `tf32_matmuls` config key (default false,
@@ -125,6 +135,9 @@
 
 ### Fixed
 
+- Scalar-embedded multi-term affine indices are parenthesized in generated C-family code (an
+  unparenthesized `5*i+j / 4` divided only `j`), and integer-precision `Mod` renders the `%`
+  operator on Metal/CUDA/HIP instead of the float-only (and on Metal ambiguous) `fmod`.
 - CUDA random generation no longer bit-casts random bits directly to `double`, and vector helper
   names no longer exceed CUDA identifier limits. fp8 conversion, arithmetic, and uniform
   generation were corrected across C, CUDA, HIP, and Metal paths.

@@ -508,6 +508,8 @@ let%op dropout ~rate () ~train_step x =
 
 **Note on shapes**: The packed `uniform` function (without `1`) is total over shapes: element `i` of the result is lane `i mod k` of the 128-bit random block `i / k`, where `k = 16 / bytes-per-element` (4 for single precision). When the total element count is not a multiple of `k`, the final block is consumed partially, so growing a tensor keeps the existing prefix of its value stream unchanged. `uniform1` remains available as a pointwise variant (one value per 128-bit block).
 
+**Virtual (inlined) uniforms**: a packed `uniform` result does not need to be materialized — when the optimizer virtualizes it (e.g. a dropout mask read once by an elementwise consumer), each read cell inlines as lane `i mod k` of the conversion of counter block `i / k`, which is bitwise-identical to the materialized value stream. The uniform's internal counter tensor then stays materialized (usually as routine-local scratch) because it is read at a runtime-computed block index; the conversion is recomputed per cell, but the threefry chain still runs once per 128-bit block.
+
 ### Kaiming and Xavier Scaling Operations
 
 For weight matrices, OCANNL provides scaled initialization functions that use shape inference to determine the scaling factor:
