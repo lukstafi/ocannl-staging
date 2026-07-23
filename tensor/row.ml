@@ -4759,13 +4759,27 @@ let%track4_sexp get_proj_equations (inequalities : constraint_ list) proj_axis_e
               match rows_to_row_or_vars @@ List.map ~f:(subst_row env) r with
               | Second _ -> assert false
               | Either.First { dims; _ } -> (
-                  match List.rev dims with
-                  | [] ->
-                      [
-                        (let output = subst_dim ~keep_affine:true env (Var var) in
-                         Iterated (to_proj output));
-                      ]
-                  | inner :: other_dims ->
+                  (* The strided projection [stride * counter] carries the whole flat offset: it
+                     must pair with the innermost axis of dimension > 1, because dim-1 axes'
+                     projections are pinned to [Fixed_idx 0] elsewhere -- pairing with a trailing
+                     dim-1 axis (e.g. a conv kernel's single input channel) would silently
+                     collapse the stride and make every block store at offset 0. All other axes
+                     map to [Sub_axis]; in the row-major flat offset trailing dim-1 axes then
+                     multiply the accumulated offset by 1, so the store offsets are unchanged. *)
+                  let rec split_at_inner rev_dims =
+                    match rev_dims with
+                    | [] -> (None, [])
+                    | (Dim { d = 1; _ } as d1) :: rest ->
+                        let inner, others = split_at_inner rest in
+                        (inner, d1 :: others)
+                    | inner :: rest -> (Some inner, rest)
+                  in
+                  match split_at_inner (List.rev dims) with
+                  | None, all_ones ->
+                      let output = subst_dim ~keep_affine:true env (Var var) in
+                      Iterated (to_proj output)
+                      :: List.map all_ones ~f:(fun d -> Proj_eq (to_proj d, Solved Sub_axis))
+                  | Some inner, other_dims ->
                       let output = subst_dim ~keep_affine:true env (Var var) in
                       let input = to_proj inner in
                       Iterated (to_proj output)

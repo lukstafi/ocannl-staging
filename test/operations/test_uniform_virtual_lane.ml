@@ -70,7 +70,13 @@ let () =
   check ~name:"single n=5 (tail peel)" ~prec:Ir.Ops.single [ 5 ];
   check ~name:"single n=8 (divisible)" ~prec:Ir.Ops.single [ 8 ];
   check ~name:"single 5->3 (multi-axis, 15 elements)" ~prec:Ir.Ops.single ~input_dims:[ 5 ] [ 3 ];
+  (* Trailing dim-1 axis (e.g. a conv kernel's single input channel): the strided store
+     projection must pair with the innermost non-unit axis -- pairing with the dim-1 axis
+     collapsed the stride and left all cells beyond the first block uninitialized. *)
+  check ~name:"single 9->1 (trailing dim-1 axis)" ~prec:Ir.Ops.single ~input_dims:[ 1 ] [ 9 ];
   check ~name:"half n=9" ~prec:Ir.Ops.half [ 9 ];
+  (* uint32 exercises the unsigned vec/lane builtins (full-range bit patterns). *)
+  check ~name:"uint32 n=5" ~prec:Ir.Ops.uint32 [ 5 ];
   check ~name:"double n=3" ~prec:Ir.Ops.double [ 3 ];
   (* fp8 is the stress case: 16 lanes per block, and random bit patterns include NaNs (compared by
      bits, not value). *)
