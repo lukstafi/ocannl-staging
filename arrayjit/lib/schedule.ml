@@ -1037,7 +1037,9 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
          pack_constant_tile ~debug ~src_nd ~src_dims ~prec ~packed_dims ~sym_extents ~src_prog
            ~packed_prog));
     let llc = remap_reads ~source ~from_idcs:idcs0 ~tile ~tile_idcs:packed_read_idcs opt.llc in
-    { opt with llc })
+    (* [pack_constant_tile] zero-fills pad slots of edge tiles, so the packed buffer satisfies the
+       [zero_fringe] contract over its whole index space. *)
+    { opt with llc; zero_fringe = Set.add opt.zero_fringe tile })
   else
     (* The insertion point L*: the deepest loop that must stay outside the tile — carrying an
        outer-part symbol or a reused workgroup tile axis. *)
@@ -1095,21 +1097,25 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
     in
     let iprec = Ops.index_prec () in
     let src_dims = Lazy.force source.Tn.dims in
-    let load_stmt =
-      Set { tn = tile; idcs = tile_store_idcs; llsc = Get (source, load_src_idcs); debug = "" }
-    in
     (* Edge guards per tile axis (construct-then-fold: [apply]'s trailing simplify erases the ones
-       the loop extents prove, i.e. whenever the tile sizes divide the source extents). *)
-    let load_stmt =
-      Array.fold tile_axes ~init:load_stmt ~f:(fun stmt (a, _) ->
+       the loop extents prove, i.e. whenever the tile sizes divide the source extents). The guards
+       are [Where]-form rather than statement [If]s: an out-of-range slot stores 0 — the add-reduce
+       accumulation identity — instead of staying uninitialized, so edge tiles of a non-dividing or
+       padded staging (gh-ocannl-485) are safe to read over their whole index space. The tile is
+       recorded in {!Low_level.optimized.zero_fringe} accordingly. *)
+    let guarded_get =
+      Array.fold tile_axes
+        ~init:(Get (source, load_src_idcs))
+        ~f:(fun rhs (a, _) ->
           let cond =
             Binop
               ( Ops.Cmplt,
                 (Embed_index load_src_idcs.(a), iprec),
                 (Constant (Float.of_int src_dims.(a)), iprec) )
           in
-          If { cond = (cond, iprec); body = stmt })
+          Ternop (Ops.Where, (cond, iprec), (rhs, prec), (Constant 0., prec)))
     in
+    let load_stmt = Set { tn = tile; idcs = tile_store_idcs; llsc = guarded_get; debug = "" } in
     (* Lane-aware cooperative staging (docs/proposals/tensorize-mma.md, "Lane-aware Stage"): a fresh
        extent-[w] [Workgroup] lane loop will wrap the load nest, so the loads are partitioned (or
        restricted) along the same hardware slot the tensorized micro-kernel's lane loop binds —
@@ -1291,6 +1297,7 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
       workgroup_shared =
         (if shared then Set.add opt.workgroup_shared tile else opt.workgroup_shared);
       swizzled = (if swizzle then Set.add opt.swizzled tile else opt.swizzled);
+      zero_fringe = Set.add opt.zero_fringe tile;
     }
 
 (** {2 [Privatize]: accumulator privatization}
@@ -3872,6 +3879,7 @@ let segment_optimized (full : Low_level.optimized) (llc : Low_level.t) : Low_lev
     workgroup_shared = Set.filter full.Low_level.workgroup_shared ~f:(Set.mem tns);
     simdgroup_fragments = Set.filter full.Low_level.simdgroup_fragments ~f:(Set.mem tns);
     swizzled = Set.filter full.Low_level.swizzled ~f:(Set.mem tns);
+    zero_fringe = Set.filter full.Low_level.zero_fringe ~f:(Set.mem tns);
   }
 
 (* Expand-and-annotate schedule for a segment of materialized whole-node [Zero_out]s (GPU): the

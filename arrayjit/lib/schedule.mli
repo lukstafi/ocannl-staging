@@ -81,9 +81,12 @@ type optop =
           terms. With [shared = true] the tile is added to [workgroup_shared] and a cooperative-load
           nest plus barriers are inserted at the deepest loop carrying an outer-part symbol or a
           reused [Workgroup] tile axis: [Workgroup]-typed tile loops are reused as the cooperating
-          thread indices, [Serial] tile loops are iterated under fresh symbols, per-axis edge guards
-          are constructed then folded, and redundant loading along non-participating workgroup axes
-          is restricted to one representative thread. A shared stage with no anchor (no outer-part
+          thread indices, [Serial] tile loops are iterated under fresh symbols, per-axis edge
+          guards are constructed then folded — in [Where] form storing 0 (the add-reduce
+          accumulation identity) to out-of-range slots, so edge tiles of a non-dividing or padded
+          staging are safe to read over their whole index space; every minted tile is recorded in
+          {!Low_level.optimized.zero_fringe} accordingly (gh-ocannl-485) — and redundant loading
+          along non-participating workgroup axes is restricted to one representative thread. A shared stage with no anchor (no outer-part
           symbol, no reused workgroup axis — e.g. staging a broadcast vector) wraps the outermost
           tile loop instead of the routine root, so enclosing workgroup axes can guard the loads;
           every workgroup slot active in the kernel's launch must be reused or bound by a loop
