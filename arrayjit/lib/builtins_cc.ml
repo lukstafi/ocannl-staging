@@ -462,6 +462,12 @@ typedef struct { uint16_t v[8]; } uint16x8_t;
     ("uint8x16_t", {|
 typedef struct { uint8_t v[16]; } uint8x16_t;
 |}, []);
+    ("uint32x4_t", {|
+typedef struct { uint32_t v[4]; } uint32x4_t;
+|}, []);
+    ("uint64x2_t", {|
+typedef struct { uint64_t v[2]; } uint64x2_t;
+|}, []);
     (* Basic conversion functions *)
     ( "uint32_to_single_uniform",
       {|
@@ -993,6 +999,29 @@ int8x16_t uint4x32_to_fp8_uniform_vec(uint4x32_t x) {
 }
 |},
       [ "uint4x32_t"; "int8x16_t" ] );
+    ( "uint4x32_to_uint32_uniform_vec",
+      {|
+/* Convert uint4x32 to 4 uint32s - full range */
+uint32x4_t uint4x32_to_uint32_uniform_vec(uint4x32_t x) {
+    uint32x4_t result;
+    for (int i = 0; i < 4; i++) {
+        result.v[i] = x.v[i];
+    }
+    return result;
+}
+|},
+      [ "uint4x32_t"; "uint32x4_t" ] );
+    ( "uint4x32_to_uint64_uniform_vec",
+      {|
+/* Convert uint4x32 to 2 uint64s - full range */
+uint64x2_t uint4x32_to_uint64_uniform_vec(uint4x32_t x) {
+    uint64x2_t result;
+    result.v[0] = ((uint64_t)x.v[1] << 32) | x.v[0];
+    result.v[1] = ((uint64_t)x.v[3] << 32) | x.v[2];
+    return result;
+}
+|},
+      [ "uint4x32_t"; "uint64x2_t" ] );
     (* Lane extraction from the packed uniform conversion (gh-509 task 4): minted by the
        virtualizer to inline packed-uniform results per cell. Implemented via the _vec builtins so
        the value stream is bitwise-identical to the vectorized stores by construction. *)
@@ -1068,6 +1097,22 @@ int8_t uint4x32_to_fp8_uniform_lane(uint4x32_t x, int32_t lane) {
 }
 |},
       [ "uint4x32_t"; "uint4x32_to_fp8_uniform_vec" ] );
+    ( "uint4x32_to_uint32_uniform_lane",
+      {|
+/* Lane of the packed uint32 uniform conversion. */
+uint32_t uint4x32_to_uint32_uniform_lane(uint4x32_t x, int32_t lane) {
+    return uint4x32_to_uint32_uniform_vec(x).v[lane];
+}
+|},
+      [ "uint4x32_t"; "uint4x32_to_uint32_uniform_vec" ] );
+    ( "uint4x32_to_uint64_uniform_lane",
+      {|
+/* Lane of the packed uint64 uniform conversion. */
+uint64_t uint4x32_to_uint64_uniform_lane(uint4x32_t x, int32_t lane) {
+    return uint4x32_to_uint64_uniform_vec(x).v[lane];
+}
+|},
+      [ "uint4x32_t"; "uint4x32_to_uint64_uniform_vec" ] );
   ]
 
 let source = includes ^ String.concat "" (List.map (fun (_, def, _) -> def) builtins)

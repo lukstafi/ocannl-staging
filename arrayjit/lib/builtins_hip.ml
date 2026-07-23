@@ -33,6 +33,8 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
     ("int8x16_t", {|typedef struct { signed char v[16]; } int8x16_t;|}, []);
     ("uint16x8_t", {|typedef struct { unsigned short v[8]; } uint16x8_t;|}, []);
     ("uint8x16_t", {|typedef struct { unsigned char v[16]; } uint8x16_t;|}, []);
+    ("uint32x4_t", {|typedef struct { unsigned int v[4]; } uint32x4_t;|}, []);
+    ("uint64x2_t", {|typedef struct { unsigned long long v[2]; } uint64x2_t;|}, []);
     (* Elements are the class type [__hip_fp8_e5m2] (not a plain integer): the [Set_from_vec]
        emission assigns vector elements to the fp8 array cells without a cast, and [__hip_fp8_e5m2]
        has no assignment from integer types. *)
@@ -281,6 +283,24 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
   return result;
 }|},
       [ "uint4x32_t"; "uint8x16_t" ] );
+    ( "uint4x32_to_uint32_uniform_vec",
+      {|__device__ uint32x4_t uint4x32_to_uint32_uniform_vec(uint4x32_t x) {
+  uint32x4_t result;
+  #pragma unroll
+  for (int i = 0; i < 4; i++) {
+    result.v[i] = x.v[i];
+  }
+  return result;
+}|},
+      [ "uint4x32_t"; "uint32x4_t" ] );
+    ( "uint4x32_to_uint64_uniform_vec",
+      {|__device__ uint64x2_t uint4x32_to_uint64_uniform_vec(uint4x32_t x) {
+  uint64x2_t result;
+  result.v[0] = ((unsigned long long)x.v[1] << 32) | x.v[0];
+  result.v[1] = ((unsigned long long)x.v[3] << 32) | x.v[2];
+  return result;
+}|},
+      [ "uint4x32_t"; "uint64x2_t" ] );
     (* Lane extraction from the packed uniform conversion (gh-509 task 4): minted by the
        virtualizer to inline packed-uniform results per cell. Implemented via the _vec builtins so
        the value stream is bitwise-identical to the vectorized stores by construction. *)
@@ -329,6 +349,16 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
   return uint4x32_to_fp8_uniform_vec(x).v[lane];
 }|},
       [ "uint4x32_t"; "uint4x32_to_fp8_uniform_vec" ] );
+    ( "uint4x32_to_uint32_uniform_lane",
+      {|__device__ unsigned int uint4x32_to_uint32_uniform_lane(uint4x32_t x, int lane) {
+  return uint4x32_to_uint32_uniform_vec(x).v[lane];
+}|},
+      [ "uint4x32_t"; "uint4x32_to_uint32_uniform_vec" ] );
+    ( "uint4x32_to_uint64_uniform_lane",
+      {|__device__ unsigned long long uint4x32_to_uint64_uniform_lane(uint4x32_t x, int lane) {
+  return uint4x32_to_uint64_uniform_vec(x).v[lane];
+}|},
+      [ "uint4x32_t"; "uint4x32_to_uint64_uniform_vec" ] );
     ( "single_to_uint4x32",
       {|__device__ uint4x32_t single_to_uint4x32(float x) {
   unsigned int bits = __float_as_uint(x);
