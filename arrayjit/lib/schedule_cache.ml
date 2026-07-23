@@ -9,6 +9,9 @@ type mint_role =
   | Expand_axis of int
   | Tensorize_lane
   | Partition_seg of int
+  | Split_reduce_block
+  | Split_reduce_inner
+  | Split_reduce_combine of int
 [@@deriving sexp, compare, equal, hash]
 
 type sym_ref = Base of int | Static of int | Minted of int * mint_role
@@ -42,6 +45,7 @@ type saved_optop =
   | Expand_zero of { tn : int }
   | Tensorize of { i : sym_ref; j : sym_ref; k : sym_ref; simd_width : int }
   | Fuse_epilogue of { target : int; shared : bool }
+  | Split_reduce of { axis : sym_ref; target : int; num_blocks : int }
 [@@deriving sexp, compare, equal]
 
 type saved_schedule = saved_optop list [@@deriving sexp, compare, equal]
@@ -447,6 +451,19 @@ let to_saved r (sched : Schedule.schedule) : saved_schedule * registry =
               (record r lane (Minted (idx, Tensorize_lane)), saved)
           | Schedule.Fuse_epilogue { target; shared } ->
               (r, Fuse_epilogue { target = resolve_tn_exn r target; shared })
+          | Schedule.Split_reduce
+              { axis; target; num_blocks; block_index; inner_index; combine_indices } ->
+              let saved =
+                Split_reduce
+                  { axis = resolve_exn r axis; target = resolve_tn_exn r target; num_blocks }
+              in
+              let r = record r block_index (Minted (idx, Split_reduce_block)) in
+              let r = record r inner_index (Minted (idx, Split_reduce_inner)) in
+              let r =
+                List.foldi combine_indices ~init:r ~f:(fun j r s ->
+                    record r s (Minted (idx, Split_reduce_combine j)))
+              in
+              (r, saved)
         in
         ({ r with n_ops = idx + 1 }, saved :: acc))
   in
@@ -513,6 +530,18 @@ let of_saved canonical (saved : saved_schedule) : Schedule.schedule * registry =
               (record r lane (Minted (idx, Tensorize_lane)), op)
           | Fuse_epilogue { target; shared } ->
               (r, Schedule.Fuse_epilogue { target = tn_of_ref canonical target; shared })
+          | Split_reduce { axis; target; num_blocks } ->
+              let op, block_index, inner_index, combine_indices =
+                Schedule.split_reduce ~axis:(unresolve_exn r axis)
+                  ~target:(tn_of_ref canonical target) ~num_blocks
+              in
+              let r = record r block_index (Minted (idx, Split_reduce_block)) in
+              let r = record r inner_index (Minted (idx, Split_reduce_inner)) in
+              let r =
+                List.foldi combine_indices ~init:r ~f:(fun j r s ->
+                    record r s (Minted (idx, Split_reduce_combine j)))
+              in
+              (r, op)
         in
         ({ r with n_ops = idx + 1 }, op :: acc))
   in

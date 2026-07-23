@@ -85,6 +85,19 @@ Code-synthesizing transforms:
   activation, residual) into `target`'s store-back site — the fragment store-back, the
   `Privatize` store-back, or the plain accumulation nest — eliminating the tail's separate
   memory pass (gh-ocannl-486).
+- **`Split_reduce { axis; target; num_blocks }`** — deterministic two-pass split reduction
+  (gh-ocannl-484): parallel reductions without atomics. The Serial reduction loop splits into
+  `num_blocks` chunks, each accumulating into its own row of a fresh
+  `[num_blocks, target-dims..]` on-device partials node (tile namespace, traced-store
+  registered), and a synthesized combine statement folds the partials into `target` in a fixed
+  balanced-tree order. The block loop is freely annotatable — its index pins the partials row —
+  and the partials producer/consumer pair is exactly the materialized cross-nest edge kernel
+  fission cuts at, so under the fissioning flows the two passes (plus, for the scatter form, a
+  partials-zeroing pass) compile as separate kernels with the event chain supplying the
+  grid-wide synchronization the combine needs. Handles the plain rmw accumulation
+  (`⊕ ∈ {Add, Max, Min, Mul}`, FMA) and the gh-ocannl-466 embedding-backward `Set_dynamic`
+  scatter (per-block partial gradient rows; within a block, colliding rows stay serial — llm.c's
+  deterministic encoder backward, but parallel over blocks).
 
 Rendering of `Tile_mma` is a per-call backend decision with a decline ladder: hardware
 intrinsics (Metal `simdgroup` 8×8×8; CUDA wmma 16×16×16, tf32 16×16×8 under the numerics
@@ -127,6 +140,15 @@ what the autotuner's sketch seeds parameterize:
   `partition_breakpoints` bounds it by its loop range and returns both transition points:
   partitioning the output loop there folds the guards everywhere except the truncated boundary
   segments — guard-free full-window interiors, specialized edges.
+- **Two-pass split reduction** (gh-ocannl-484): `Split_reduce` on the reduction loop, then the
+  fission pipeline (`fission_scheduled` with the default presets, or
+  `Context.compile ~lowered_transforms`) — the partials edge cuts, pass 1 parallelizes over the
+  block loop (and any output loops), the combine parallelizes over the target's elements. Serves
+  large single-axis reductions (losses, norms, softmax denominators), the embedding-backward
+  scatter, and — as a planned sketch family (task 3 of gh-ocannl-484) — split-K GEMMs. The
+  parity discipline: for a fixed schedule the parallel execution is bitwise-equal to the serial
+  execution of the same schedule (the combine tree is a function of the schedule, not of thread
+  timing); exercised by `test/operations/schedule_split_reduce.ml`.
 
 ## The default schedules and kernel fission
 
@@ -136,7 +158,13 @@ With no explicit transform, backend `compile` applies `Schedule.maybe_default_sc
   code alone (every materialized write covered by the loop's index; conservative race analysis),
   annotate one `Grid` and one `Workgroup` loop, splitting by `gpu_schedule_block_size`
   (default 256, clamped to the device's `max_threads_per_workgroup`). Reduction loops stay
-  serial. Below `gpu_schedule_min_parallel` (default 64) the nest stays serial.
+  serial. Below `gpu_schedule_min_parallel` (default 64) the nest stays serial. Dynamic
+  (`Set_dynamic`/`Get_dynamic`) accesses of a materialized node no longer serialize the whole
+  nest (gh-ocannl-484 task 2): the data-dependent component is masked from the affine conflict
+  queries, so loops whose index pins a same-position static component of every access
+  parallelize (the embedding-dim column of the gh-ocannl-466 scatter, `Split_reduce`'s block
+  loop over partials rows), while loops driving the dynamic index are never proven confined and
+  stay serial — the deterministic no-atomics invariant, now per-loop instead of per-nest.
 - **CPU preset** (`default_cpu`): the same analysis; the outermost parallelizable loop is
   retyped `Grid`, which the C backend renders on a process-global thread pool
   (`dispatch_apply` / OpenMP). Threshold `cpu_schedule_min_parallel` (default 16384).
@@ -191,7 +219,13 @@ the retained procedural analyses alongside the affine engine and raises on diver
 - **Caching**: winners persist in `autotune_cache_dir`, keyed by `Schedule_cache.canonicalize` —
   an alpha-renamed structural digest of the optimized code including dims, precisions, operand
   hoistability, and placement classes. Cached schedules rebind their symbols onto the fresh
-  lowering at each compile; a digest guard rejects stale entries.
+  lowering at each compile; a digest guard rejects stale entries. **Schedule identity pins
+  numerics** (gh-ocannl-484): a reduction-reassociating op (`Split_reduce`, `Swap`/`Vectorized`
+  over accumulations, `Tensorize`) makes the computed values a function of the schedule — e.g.
+  `Split_reduce`'s combine tree is fixed by `num_blocks` — so results are bitwise-reproducible
+  as long as the cached schedule replays, but retuning (or clearing the cache, or a digest
+  change) may select a different tree and change low-order bits. Pin the cache directory (and
+  back it up) where bitwise reproducibility across environments matters.
 - **Diagnostics**: `schedule_log_declines` explains why a rendering declined;
   `C_syntax.mma_census` distinguishes "the tensorized candidate lost" from "it never ran
   tensorized"; `schedule_log_launches` prints each compiled segment's launch geometry.
