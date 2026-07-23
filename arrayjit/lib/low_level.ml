@@ -1008,6 +1008,129 @@ let%track7_sexp inline_computation ~id (optim_ctx : optimize_ctx) (traced : trac
                "Stale optimize_ctx: No computations found for #%{traced.tn.Tn.id#Int}: \
                 %{Tn.debug_name traced.tn}"])
   in
+  (* gh-509 task 4: a packed-uniform producer ([Set_from_vec]) is inlined via the lane-extract
+     scalar form [vec_convert(counter[flat / lanes]).v[flat mod lanes]], where [flat] is the read
+     cell's flat offset -- bitwise-identical to the vectorized stores (the lane builtins index the
+     same converted block). The value stream depends only on the element index, so a single
+     builder serves every peeled computation (interior and tail write the same stream). The
+     counter is read at a runtime-computed block index ([Get_dynamic]), so it is committed to a
+     materialized placement; its own (inlineable) chain stays virtual inside its setter. *)
+  let set_from_vec_def =
+    List.find_map computations ~f:(fun (_, def) ->
+        let rec find = function
+          | Set_from_vec { tn; idcs; length = _; vec_unop; arg = arg_scalar, _; debug = _ }
+            when Tn.equal tn traced.tn ->
+              Some (idcs, vec_unop, arg_scalar)
+          | For_loop { body; _ } -> find body
+          | Seq (a, b) -> ( match find a with Some _ as r -> r | None -> find b)
+          | _ -> None
+        in
+        find def)
+  in
+  let lane_extract_body (idcs, vec_unop, arg_scalar) : t =
+    (* [Set_from_vec] assumes an unpadded dense target; lowering rejects padded targets, re-check
+       defensively (the flat-offset arithmetic below would be wrong under padding). *)
+    (match Tn.get_padding traced.tn with
+    | None -> ()
+    | Some (pads, _) when Array.for_all pads ~f:(fun p -> p.Ops.left = 0 && p.Ops.right = 0) -> ()
+    | Some _ -> raise @@ Non_virtual 145);
+    let prec = Lazy.force traced.tn.Tn.storage_prec in
+    let lanes = Ops.vec_unop_lanes prec in
+    let dims = Lazy.force traced.tn.Tn.dims in
+    (* Flat row-major offset of an index vector over [dims], as affine terms plus a constant. *)
+    let flat_of arr =
+      if Array.length arr <> Array.length dims then raise @@ Non_virtual 145;
+      let terms = ref [] and offset = ref 0 and stride = ref 1 in
+      for i = Array.length arr - 1 downto 0 do
+        (match arr.(i) with
+        | Indexing.Fixed_idx k -> offset := !offset + (k * !stride)
+        | Indexing.Sub_axis -> ()
+        | Indexing.Iterator s -> terms := (!stride, s) :: !terms
+        | Indexing.Affine { symbols; offset = o } ->
+            offset := !offset + (o * !stride);
+            List.iter symbols ~f:(fun (c, s) -> terms := (c * !stride, s) :: !terms)
+        | Indexing.Concat _ -> raise @@ Non_virtual 145);
+        stride := !stride * dims.(i)
+      done;
+      (Indexing.coalesce_affine_terms !terms, !offset)
+    in
+    (* The producer's flat store offset must be [lanes * counter_iterator] (a single-block target
+       collapses to a constant 0: its dim-1 counter axis has no iterator in the projections). *)
+    let ctr_sym =
+      match flat_of idcs with
+      | [], 0 -> None
+      | [ (c, s) ], 0 when c = lanes -> Some s
+      | _ -> raise @@ Non_virtual 145
+    in
+    let flat_idx =
+      match flat_of call_args with
+      | [], offset -> Indexing.Fixed_idx offset
+      | terms, offset -> Indexing.Affine { symbols = terms; offset }
+    in
+    let iprec = Ops.index_prec () in
+    let flat_sc = Embed_index flat_idx in
+    let lanes_sc = Embed_index (Indexing.Fixed_idx lanes) in
+    let mentions_nonstatic = function
+      | Indexing.Iterator s -> not (Set.mem static_indices s)
+      | Indexing.Affine { symbols; _ } ->
+          List.exists symbols ~f:(fun (_, s) -> not (Set.mem static_indices s))
+      | Indexing.Fixed_idx _ | Indexing.Sub_axis -> false
+      | Indexing.Concat syms -> List.exists syms ~f:(fun s -> not (Set.mem static_indices s))
+    in
+    let ctr_read =
+      match arg_scalar with
+      | Get (ctr, ctr_idcs) ->
+          (* The counter is about to gain a dynamically-indexed read, which recomputation cannot
+             serve: it must stay materialized. Bail out (keeping the uniform result materialized,
+             as before gh-509 task 4) if the counter's placement is already committed the other
+             way. *)
+          (match Tn.Placements.get optim_ctx.placements ctr with
+          | Some ((Virtual | Effectively_constant), _) -> raise @@ Non_virtual 146
+          | _ -> ());
+          let ctr_read =
+            match ctr_sym with
+            | None ->
+                (* Single-block target: the counter read is at static indices; keep the plain
+                   [Get] (cleanup commits the surviving read to [Never_virtual]). *)
+                if Array.exists ctr_idcs ~f:mentions_nonstatic then raise @@ Non_virtual 146;
+                Get (ctr, ctr_idcs)
+            | Some c ->
+                let dyn_positions =
+                  Array.filter_mapi ctr_idcs ~f:(fun i idx ->
+                      match idx with
+                      | Indexing.Iterator s when Indexing.equal_symbol s c -> Some i
+                      | idx when mentions_nonstatic idx -> Some (-1)
+                      | _ -> None)
+                in
+                let dyn_axis =
+                  match Array.to_list dyn_positions with
+                  | [ i ] when i >= 0 -> i
+                  | _ -> raise @@ Non_virtual 146
+                in
+                let idcs' =
+                  Array.mapi ctr_idcs ~f:(fun i idx ->
+                      if i = dyn_axis then Indexing.Fixed_idx 0 else idx)
+                in
+                let block_sc = Binop (Ops.Div, (flat_sc, iprec), (lanes_sc, iprec)) in
+                Get_dynamic { tn = ctr; idcs = idcs'; dyn_axis; dyn_value = (block_sc, iprec) }
+          in
+          Tn.Placements.update optim_ctx.placements ctr Never_virtual 146;
+          ctr_read
+      | _ ->
+          (* Argument is not a plain counter read (e.g. the counter chain was materialized away or
+             the computation is exotic); keep the vector store materialized. *)
+          raise @@ Non_virtual 140
+    in
+    let lane_sc =
+      match ctr_sym with
+      | None -> flat_sc (* Single block: [flat < lanes] already. *)
+      | Some _ -> Binop (Ops.Mod, (flat_sc, iprec), (lanes_sc, iprec))
+    in
+    let lane_op =
+      match vec_unop with Ops.Uint4x32_to_prec_uniform -> Ops.Uint4x32_to_prec_uniform_lane
+    in
+    Set_local (id, Binop (lane_op, (ctr_read, scalar_precision ctr_read), (lane_sc, iprec)))
+  in
   (* gh-133 Stage A: a guard's else-branch reads [Get_local id] -- the zero/init local produced by a
      [Zero_out] computation. If the producer has no [Zero_out] (e.g. a surjective producer that was
      previously materialized), that local is never initialized, so we must NOT emit a guard; such
@@ -1325,7 +1448,8 @@ let%track7_sexp inline_computation ~id (optim_ctx : optimize_ctx) (traced : trac
       | Set_from_vec { tn; idcs; length = _; vec_unop = _; arg = _; debug = _ }
         when Tn.equal tn traced.tn ->
           assert ([%equal: Indexing.axis_index array option] (Some idcs) def_args);
-          (* For vector operations, we cannot inline them as scalar operations *)
+          (* Unreachable since gh-509 task 4: computations containing a [Set_from_vec] setter of
+             this node are diverted to [lane_extract_body] before the generic path. *)
           raise @@ Non_virtual 140
       | Zero_out _ -> None
       | Set _ -> None
@@ -1380,18 +1504,22 @@ let%track7_sexp inline_computation ~id (optim_ctx : optimize_ctx) (traced : trac
     | None -> None
   in
   try
-    let body = List.rev_filter_map ~f:loop_proc computations in
-    if List.is_empty body then raise @@ Non_virtual 14
-    else
-      (* Prepend a single init local when any component computation has guards but the producer has
-         no [Zero_out] to supply the initial value. For multi-computation nodes (Block/Concat) this
-         emits exactly one reset rather than one per component, so each component's guarded update
-         sees the preceding component's value via [Get_local id] rather than 0. *)
-      let body =
-        if !global_needs_init && not has_zero_init then Set_local (id, Constant 0.0) :: body
-        else body
-      in
-      Some (unflat_lines body)
+    match set_from_vec_def with
+    | Some def -> Some (lane_extract_body def)
+    | None ->
+        let body = List.rev_filter_map ~f:loop_proc computations in
+        if List.is_empty body then raise @@ Non_virtual 14
+        else
+          (* Prepend a single init local when any component computation has guards but the producer
+             has no [Zero_out] to supply the initial value. For multi-computation nodes
+             (Block/Concat) this emits exactly one reset rather than one per component, so each
+             component's guarded update sees the preceding component's value via [Get_local id]
+             rather than 0. *)
+          let body =
+            if !global_needs_init && not has_zero_init then Set_local (id, Constant 0.0) :: body
+            else body
+          in
+          Some (unflat_lines body)
   with Non_virtual i ->
     Tn.Placements.update optim_ctx.placements traced.tn Never_virtual i;
     None
@@ -1408,6 +1536,19 @@ let rec unroll_pow ~(base : scalar_t) ~(exp : int) : scalar_t =
     Fn.apply_n_times ~n:(exp - 1)
       (fun accu -> Binop (Mul, (base, scalar_precision base), (accu, scalar_precision accu)))
       base
+
+(* gh-509 task 4: packed-uniform ([Set_from_vec]) producers are stored RAW -- without the phase-1
+   rewriting that inlines virtual providers into the argument -- so that [inline_computation]'s
+   lane-extract builder sees the argument as a plain [Get] of the counter tensor (which it turns
+   into a dynamically-indexed read of block [flat / lanes]). The stored computation of such a node
+   is consumed exclusively by the lane-extract builder, so skipping the rewrite loses nothing; the
+   phase-2 emitted statement (used when the node stays materialized) is rewritten as before. *)
+let rec proc_contains_set_from_vec tn = function
+  | Set_from_vec { tn = tn2; _ } -> Tn.equal tn tn2
+  | For_loop { body; _ } -> proc_contains_set_from_vec tn body
+  | Seq (a, b) -> proc_contains_set_from_vec tn a || proc_contains_set_from_vec tn b
+  | If { body; _ } -> proc_contains_set_from_vec tn body
+  | _ -> false
 
 let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_indices (llc : t) :
     t =
@@ -1462,12 +1603,16 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
                   let node : traced_array = get_node traced_store tn in
                   let store_pf = List.fold (List.drop candidates k) ~init:process_for ~f:Set.add in
                   let stored =
-                    For_loop
-                      {
-                        for_config with
-                        body =
-                          loop_proc ~process_for:store_pf ~owned:owned' ~in_storage_pass:true body;
-                      }
+                    (* gh-509 task 4: vector-store producers are stored raw, see
+                       [proc_contains_set_from_vec]. *)
+                    if proc_contains_set_from_vec tn body then For_loop { for_config with body }
+                    else
+                      For_loop
+                        {
+                          for_config with
+                          body =
+                            loop_proc ~process_for:store_pf ~owned:owned' ~in_storage_pass:true body;
+                        }
                   in
                   check_and_store_virtual optim_ctx node static_indices stored);
               (* Phase 2 -- emit. Candidates are NOT in [process_for], so surviving readers
@@ -1524,7 +1669,10 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
           (not @@ Set.mem process_for tn)
           && (not @@ Set.mem owned tn)
           && (not @@ Tn.Placements.known_non_virtual plc traced.tn)
-        then check_and_store_virtual optim_ctx traced static_indices result;
+        then
+          (* gh-509 task 4: store the raw statement (argument not rewritten), see
+             [proc_contains_set_from_vec]. The emitted statement remains [result]. *)
+          check_and_store_virtual optim_ctx traced static_indices llc;
         result
     | Set_local (id, llsc) -> Set_local (id, loop_scalar ~process_for ~owned ~in_storage_pass llsc)
     | Declare_local _ -> llc
