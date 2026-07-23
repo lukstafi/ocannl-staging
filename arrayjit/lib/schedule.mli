@@ -2,10 +2,12 @@
 
     Halide-style schedules over the lowered, optimized IR: a list of {!optop}s applied as a pure
     [Low_level.optimized -> Low_level.optimized] pass at the [?lowered_transform] seam of backend
-    [compile]. See docs/proposals/schedule-ir-optops.md for the design, including the normative
-    pass-ordering contract (§2): schedules run after the whole [optimize_proc] pipeline (so they see
-    fused code), {!apply} folds freshly constructed guards by re-running [simplify_llc] (plus CSE
-    and hoisting when a transform duplicated code), and there is no re-virtualization. *)
+    [compile]. See docs/schedules_and_autotuning.md for the system view (composition recipes,
+    default presets, fission, autotuning) and docs/proposals/schedule-ir-optops.md for the design
+    rationale, including the pass-ordering contract (§2): schedules run after the whole
+    [optimize_proc] pipeline (so they see fused code), {!apply} folds freshly constructed guards by
+    re-running [simplify_llc] (plus CSE and hoisting when a transform duplicated code), and there
+    is no re-virtualization. *)
 
 open Base
 module Tn = Tnode
