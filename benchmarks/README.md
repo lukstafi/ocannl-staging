@@ -37,6 +37,15 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   with valid 3×3 convs and 2×2 pooling the deep conv's row is always ≡ 2 (mod 4), never
   divisible by 8. Same builder as `lenet` (channel count, kernel, padding, and input
   channels are all spec-driven).
+- **cifar_stride** (`model: conv`, training): the stride-2-stem sibling of `cifar_conv`
+  (gh-ocannl-502): 3-channel 51×51 images, `conv1` a *valid* 5×5 conv at **stride 2** (the
+  strided downsampling site the compacting Stage targets), `conv2` a valid 5×5 at stride 1,
+  into 32 then 64 channels. The geometry keeps both conv GEMM rows multiples of 8 (24 and
+  8), so once the seeding wave admits compacting-eligible strided sites the same
+  blocked/staged legs are proposable here as on `cifar_conv`. Until then the strided conv
+  exercises only the reorder-serial and default-fissioned paths — recorded as the baseline
+  the compacting-Stage seeding is measured against. Strides are spec-driven
+  (`stride1`/`stride2`, default 1, valid-only) through the same builder as `lenet`.
 - **gpt2_mini** (`model: gpt`, `mode: infer`): pre-LN GPT-2-style decoder (4 layers, d=256,
   8 heads, seq 128, vocab 1024, tanh-gelu, learned positional embeddings, tied lm_head,
   causal mask filled with -1e9), forward-only. The parity metric is softmax-CE of the
@@ -76,15 +85,21 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   PyTorch presents HIP as its `cuda` device, tinygrad as `AMD`); on Windows neither framework
   reaches an AMD GPU, so OCANNL alone populates the GPU column while the CPU parity
   reference still runs. See [example-report.md](example-report.md) (macOS/Metal),
-  [example-report-cuda.md](example-report-cuda.md) (Linux/CUDA) and
-  [report-hip.md](report-hip.md) (Windows/HIP on gfx1151, `--only ocannl pytorch`) for
-  checked-in example output (full `--tuned --materialized` matrices; `results/` itself is
-  gitignored).
+  [example-report-cuda.md](example-report-cuda.md) (Linux/CUDA),
+  [report-hip.md](report-hip.md) (Windows/HIP on gfx1151, `--only ocannl pytorch`) and
+  [report-cifar-cuda.md](report-cifar-cuda.md) (Linux/CUDA, the cifar-scale conv baseline
+  for gh-ocannl-500/502 with a per-layer breakdown) for checked-in example output
+  (`results/` itself is gitignored).
 - `runners/ocannl/bench_{gpt,conv}_diag.ml` — schedule diagnostics: print the default
   fission-pipeline segment census (launch geometry, per-nest loop extents, written nodes with
   materialization markers) for the gpt2_mini / lenet graphs, then optionally time steps
   (`BENCH_STEPS=1`) or dump tensor values (`BENCH_PROBE=1`, `BENCH_DUMP=1`; `BENCH_FWD=1`
   compiles forward-only, `BENCH_PROMOTE=0` disables fission's Local promotion in the census).
+  `BENCH_SEG_TIMES=1` adds per-segment (≈ per-layer) wall times: each fission segment is
+  compiled as its own routine (hermetic substitution through the `lowered_transform` seam)
+  and timed min-of-N with a sync per run, labeled by the nodes it writes — the per-layer
+  breakdown that identifies which conv sites dominate a step, diffable across schedule
+  changes (the acceptance instrument for the gh-500 blocking decision).
 - `runners/ocannl/bench_metal_bug.ml` — standalone (no OCANNL) repro of an Apple Metal
   shader-compiler miscompilation: a serial `acc[0] = acc[0] + f(i)` loop over
   slot-table-derived pool pointers keeps only the last iteration's contribution. OCANNL works
@@ -104,6 +119,11 @@ benchmarks/.venv/bin/python benchmarks/orchestrate.py
 tinygrad's CPU device JIT-compiles kernels with `clang`; on a machine without clang, point
 `CC` at a substitute (a `zig cc` wrapper script from `pip install ziglang` works — translate
 `--target=x86_64-none-unknown-elf` to `--target=x86_64-freestanding-none` and add `-g0`).
+tinygrad's CUDA device compiles through the system nvrtc; when the CUDA toolkit is newer
+than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it with
+`LD_LIBRARY_PATH` pointing at torch's bundled nvrtc
+(`.venv/lib/python*/site-packages/nvidia/cu*/lib`) and wipe `~/.cache/tinygrad` once
+(compiled PTX is cached by source hash, so a stale-toolkit artifact survives the switch).
 
 ## Methodology notes / fairness pitfalls
 

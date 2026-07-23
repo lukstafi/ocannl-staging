@@ -33,11 +33,15 @@ let () =
   let batch_n, bindings = IDX.get_static_symbol ~static_range:n_batches IDX.empty in
   let%op batch_x = xs @| batch_n in
   let%op batch_y = ys @| batch_n in
+  let s1 = H.meta_int_default st "stride1" ~default:1 in
+  let s2 = H.meta_int_default st "stride2" ~default:1 in
   let conv1 =
-    Nn_blocks.conv2d ~label:[ "conv1" ] ~kernel_size:k ~use_padding:false ~out_channels:c1 ()
+    Nn_blocks.conv2d ~label:[ "conv1" ] ~kernel_size:k ~stride:s1 ~use_padding:false
+      ~out_channels:c1 ()
   in
   let conv2 =
-    Nn_blocks.conv2d ~label:[ "conv2" ] ~kernel_size:k ~use_padding:false ~out_channels:c2 ()
+    Nn_blocks.conv2d ~label:[ "conv2" ] ~kernel_size:k ~stride:s2 ~use_padding:false
+      ~out_channels:c2 ()
   in
   let pool1 = Nn_blocks.max_pool2d ~stride:2 ~window_size:2 () in
   let pool2 = Nn_blocks.max_pool2d ~stride:2 ~window_size:2 () in
@@ -119,6 +123,17 @@ let () =
   let ctx = if late_inject then H.inject ctx st batch_loss mapping else ctx in
   show ctx "after-compile";
   Stdio.printf "backend: %s  compile_s: %.3f\n" backend compile_s;
+  (* Per-segment (per-layer) times: populate intermediates with one full step, then time each
+     fission segment as its own routine. *)
+  (if H.env_flag "BENCH_SEG_TIMES" then (
+     let batch_ref = IDX.find_exn (Context.bindings routine) batch_n in
+     batch_ref := 0;
+     Train.run ctx routine;
+     Context.sync ctx;
+     H.time_segments ?promote_locals ~backend ~limits ~static_indices:[ batch_n ] ~ctx
+       ~comp:step_comp ~bindings
+       ~bind:(fun r -> IDX.find_exn (Context.bindings r) batch_n := 0)
+       opt));
   (if H.env_flag "BENCH_STEPS" then
      let batch_ref = IDX.find_exn (Context.bindings routine) batch_n in
      for step = 0 to 2 do

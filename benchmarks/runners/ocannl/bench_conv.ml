@@ -34,6 +34,10 @@ let () =
     | Some "true" -> true
     | _ -> false
   in
+  (* Per-conv strides (cifar_stride's stride-2 stem, gh-ocannl-502); valid-only, see
+     gen_fixtures. Absent on pre-existing fixtures. *)
+  let s1 = H.meta_int_default st "stride1" ~default:1 in
+  let s2 = H.meta_int_default st "stride2" ~default:1 in
   let x_nd = St.to_ndarray st "x" in
   let y_nd = St.to_ndarray st "y" in
   let total = (Ir.Ndarray.dims x_nd).(0) in
@@ -43,8 +47,12 @@ let () =
   let batch_n, bindings = IDX.get_static_symbol ~static_range:n_batches IDX.empty in
   let%op batch_x = xs @| batch_n in
   let%op batch_y = ys @| batch_n in
-  let conv1 = Nn_blocks.conv2d ~label:[ "conv1" ] ~kernel_size:k ~use_padding ~out_channels:c1 () in
-  let conv2 = Nn_blocks.conv2d ~label:[ "conv2" ] ~kernel_size:k ~use_padding ~out_channels:c2 () in
+  let conv1 =
+    Nn_blocks.conv2d ~label:[ "conv1" ] ~kernel_size:k ~stride:s1 ~use_padding ~out_channels:c1 ()
+  in
+  let conv2 =
+    Nn_blocks.conv2d ~label:[ "conv2" ] ~kernel_size:k ~stride:s2 ~use_padding ~out_channels:c2 ()
+  in
   let pool1 = Nn_blocks.max_pool2d ~stride:2 ~window_size:2 () in
   let pool2 = Nn_blocks.max_pool2d ~stride:2 ~window_size:2 () in
   let fc1 = Nn_blocks.mlp_layer ~label:[ "fc1" ] ~hid_dim:fc1_dim () in
