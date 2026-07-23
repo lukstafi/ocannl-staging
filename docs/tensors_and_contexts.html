@@ -750,6 +750,16 @@ the total element count is not a multiple of <code>k</code>, the final
 block is consumed partially, so growing a tensor keeps the existing
 prefix of its value stream unchanged. <code>uniform1</code> remains
 available as a pointwise variant (one value per 128-bit block).</p>
+<p><strong>Virtual (inlined) uniforms</strong>: a packed
+<code>uniform</code> result does not need to be materialized — when the
+optimizer virtualizes it (e.g. a dropout mask read once by an
+elementwise consumer), each read cell inlines as lane
+<code>i mod k</code> of the conversion of counter block
+<code>i / k</code>, which is bitwise-identical to the materialized value
+stream. The uniform’s internal counter tensor then stays materialized
+(usually as routine-local scratch) because it is read at a
+runtime-computed block index; the conversion is recomputed per cell, but
+the threefry chain still runs once per 128-bit block.</p>
 <h3 id="kaiming-and-xavier-scaling-operations">Kaiming and Xavier
 Scaling Operations</h3>
 <p>For weight matrices, OCANNL provides scaled initialization functions
