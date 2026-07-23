@@ -14,9 +14,6 @@ import time
 from importlib.metadata import version as pkg_version
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from bench_common import emit, percentiles, read_st_metadata
-
 ap = argparse.ArgumentParser()
 ap.add_argument("--fixture", required=True)
 # AMD is tinygrad's Linux ROCm device; CL (OpenCL) reaches AMD GPUs on Windows
@@ -35,6 +32,13 @@ import numpy as np
 from safetensors.numpy import load_file
 from tinygrad import Tensor, TinyJit
 from tinygrad.nn.optim import SGD
+
+# After the tinygrad import: this directory is runners/tinygrad, so with runners/ on
+# sys.path an `import tinygrad` scan would first hit it as a namespace-package portion —
+# which shadows editable (finder-based) tinygrad installs, whose MetaPath finder is only
+# consulted when the path scan finds nothing.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from bench_common import emit, percentiles, read_st_metadata
 
 
 def param(arr):
@@ -225,7 +229,15 @@ def main():
 
         Device[Device.DEFAULT].synchronize()
 
-    with Tensor.train(mode == "train"):
+    # Tensor.train was replaced on tinygrad master by the TRAINING context var (the optimizer
+    # refuses to step outside it).
+    if hasattr(Tensor, "train"):
+        train_ctx = Tensor.train(mode == "train")
+    else:
+        from tinygrad.helpers import Context
+
+        train_ctx = Context(TRAINING=int(mode == "train"))
+    with train_ctx:
         k = 0
         losses = []
         t0 = time.perf_counter()

@@ -118,6 +118,11 @@ benchmarks/.venv/bin/python benchmarks/orchestrate.py
 tinygrad's CPU device JIT-compiles kernels with `clang`; on a machine without clang, point
 `CC` at a substitute (a `zig cc` wrapper script from `pip install ziglang` works — translate
 `--target=x86_64-none-unknown-elf` to `--target=x86_64-freestanding-none` and add `-g0`).
+tinygrad's CUDA device compiles through the system nvrtc; when the CUDA toolkit is newer
+than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it with
+`LD_LIBRARY_PATH` pointing at torch's bundled nvrtc
+(`.venv/lib/python*/site-packages/nvidia/cu*/lib`) and wipe `~/.cache/tinygrad` once
+(compiled PTX is cached by source hash, so a stale-toolkit artifact survives the switch).
 
 ## Methodology notes / fairness pitfalls
 
