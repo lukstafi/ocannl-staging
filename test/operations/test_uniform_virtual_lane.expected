@@ -1,0 +1,9 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+single n=1 (lone partial block): 1 values, bitwise parity true | materialized: vec store true, lane false | virtual: lane true, vec store false
+single n=5 (tail peel): 5 values, bitwise parity true | materialized: vec store true, lane false | virtual: lane true, vec store false
+single n=8 (divisible): 8 values, bitwise parity true | materialized: vec store true, lane false | virtual: lane true, vec store false
+single 5->3 (multi-axis, 15 elements): 15 values, bitwise parity true | materialized: vec store true, lane false | virtual: lane true, vec store false
+half n=9: 9 values, bitwise parity true | materialized: vec store true, lane false | virtual: lane true, vec store false
+double n=3: 3 values, bitwise parity true | materialized: vec store true, lane false | virtual: lane true, vec store false
+fp8 n=17: 17 values, bitwise parity true | materialized: vec store true, lane false | virtual: lane true, vec store false
