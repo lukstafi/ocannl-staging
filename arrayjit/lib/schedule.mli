@@ -223,6 +223,62 @@ type optop =
           hooks cannot [simdgroup_load] from. With [shared], [target] is placed in workgroup-shared
           memory (like [Stage]'s shared tiles) unless already settled on-device, so the intrinsic
           fragment path fires against threadgroup memory. CPU backends reject shared placement. *)
+  | Split_reduce of {
+      axis : Indexing.symbol;  (** The Serial reduction loop to split, by its index symbol. *)
+      target : Tn.t;  (** The accumulated node whose reduction over [axis] is split. *)
+      num_blocks : int;  (** Number of per-block partials (the new block loop's extent). *)
+      block_index : Indexing.symbol;  (** Fresh symbol for the block loop; see {!split_reduce}. *)
+      inner_index : Indexing.symbol;
+          (** Fresh symbol for the in-block chunk loop; see {!split_reduce}. *)
+      combine_indices : Indexing.symbol list;
+          (** Fresh symbols, one per [target] axis, binding the combine nest's loops; see
+              {!split_reduce}. *)
+    }
+      (** Deterministic two-pass split reduction (gh-ocannl-484): parallel reductions without
+          atomics. The [Serial] loop [axis in [0, N)] — carrying the single accumulation of
+          [target] in its subtree — becomes
+          [block in [0, num_blocks) { inner in [0, ceil(N/num_blocks)) }] with
+          [axis := ceil(N/num_blocks)*block + inner] substituted and a construct-then-fold
+          remainder guard as for {!constructor-Split}; the accumulation is redirected into a fresh
+          scratch node [partials] of dims [num_blocks x target-dims] (tile namespace, placed
+          [On_device], registered in the traced store) at the original cell prefixed by [block];
+          and a synthesized combine statement, inserted right after the enclosing top-level
+          statement, folds the partials into [target] in a {e fixed balanced-tree order} over
+          [combine_indices]-bound loops: [target[c..] := target[c..] ⊕ tree(partials[0..B-1][c..])].
+          The block loop is freely annotatable afterwards ([Retype]/the default presets): its index
+          pins the partials row, so parallelizing it is race-free by construction, and the
+          [partials] producer/consumer pair is exactly the materialized cross-nest edge kernel
+          fission cuts at — under [fission_scheduled]/[maybe_default_schedules] the two passes (and
+          the scatter form's zeroing) compile as separate kernels with the event chain supplying
+          the grid-wide synchronization the combine needs. Never annotate the block loop to a
+          hardware axis while compiling both passes into one kernel.
+
+          Recognized accumulation forms (the [axis] subtree must contain no other access of
+          [target], and the rest of the statement must not touch [target] — its combined value
+          exists only after the combine statement):
+
+          - Static: a single rmw [Set], [target[idcs] := target[idcs] ⊕ e] with
+            [⊕ ∈ {Add, Max, Min, Mul}] (FMA counts as [Add]), [idcs] free of [axis]. Every loop
+            enclosing [axis] within the statement must pin exactly one component of [idcs]
+            (injectively: at most one symbol per component), so distinct enclosing iterations use
+            distinct partial cells and the combine re-iterates exactly the written cells. Each
+            block initializes its partial cell to the accumulation identity in-nest (no separate
+            zeroing pass).
+          - Dynamic (the gh-466 embedding-backward scatter): a single [Set_dynamic]
+            add-accumulation of its own row (the [Get_dynamic] rmw form built by
+            [rewrite_one_hot_reductions]), possibly under guards. The scatter is redirected to
+            [partials] with the block index prepended (dynamic axis shifted by one): within a block
+            colliding rows stay serial, across blocks rows land in disjoint partials slices — the
+            block loop parallelizes what the scatter alone cannot. Rows are data-dependent, so
+            [partials] is zeroed by a preceding whole-node [Zero_out] statement (its own fission
+            segment) and the combine covers all of [target].
+
+          Within each chunk the original serial order and rounding are preserved; across chunks the
+          reduction is reassociated (the same license as {!constructor-Swap} of accumulations). The
+          result is deterministic {e per schedule} — bitwise-reproducible run to run and across
+          serial/parallel renderings of the same schedule — but not bitwise-equal to the unsplit
+          serial reduction: schedule identity pins numerics (retuning may change [num_blocks] and
+          hence the combine tree). *)
 [@@deriving sexp_of]
 
 type schedule = optop list [@@deriving sexp_of]
@@ -257,6 +313,16 @@ val partition_breakpoints : axis:Indexing.symbol -> Low_level.t -> int list
 val expand_zero : tn:Tn.t -> optop * Indexing.symbol list
 (** Builds an {!constructor-Expand_zero} with one fresh symbol per axis of [tn] (forcing [tn]'s
     dims) and returns the symbols for subsequent [Split]/[Retype] ops. *)
+
+val split_reduce :
+  axis:Indexing.symbol ->
+  target:Tn.t ->
+  num_blocks:int ->
+  optop * Indexing.symbol * Indexing.symbol * Indexing.symbol list
+(** Builds a {!constructor-Split_reduce} with fresh block and inner index symbols plus one fresh
+    combine symbol per axis of [target] (forcing [target]'s dims), and returns them
+    ([op, block, inner, combine]) so subsequent ops can annotate the pass-1 block loop and the
+    combine nest's loops. *)
 
 val tensorize :
   i:Indexing.symbol ->
