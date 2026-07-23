@@ -1838,11 +1838,12 @@ and apply_row_constraint ~depth stage origin (r : row) (constr : row_constraint)
         apply_row_constraint ~depth:(depth + 1) stage origin r
           (Total_elems { numerator; divided_by = []; keep_axis = false })
           env
-    | ( { dims; bcast = Broadcastable; _ },
+    | ( { beg_dims; dims; bcast = Broadcastable; _ },
         Total_elems { numerator = Strided_var { coeff; var; denom; round_up }; divided_by = []; _ }
       )
-      when is_stage2_up stage && known_dims_product dims -> (
-        let (d : int), _ = Option.value_exn (collect_factors dims) in
+      when is_stage2_up stage && known_dims_product (beg_dims @ dims) -> (
+        (* [beg_dims] participate in the total: block/stack rows carry leading dims there. *)
+        let (d : int), _ = Option.value_exn (collect_factors (beg_dims @ dims)) in
         let coeff : int = Utils.safe_force coeff in
         match solve_strided_var ~coeff_val:coeff ~denom ~round_up d with
         | Some v -> (Dim_eq { d1 = Var var; d2 = get_default_dim ~d:v (); origin } :: extras, env)
@@ -1853,12 +1854,18 @@ and apply_row_constraint ~depth stage origin (r : row) (constr : row_constraint)
                      "apply_row_constraint: Total_elems constraint failed: %{denom*d#Int} not \
                       divisible by %{coeff#Int}"],
                    [ Row_mismatch [ r ] ] ))
-    | { dims; bcast = Broadcastable; _ }, Total_elems { numerator; divided_by; _ }
+    | { beg_dims; dims; bcast = Broadcastable; _ }, Total_elems { numerator; divided_by; _ }
       when List.length divided_by <= 1 -> (
         try
-          fail_if_total_elems_over_sym dims;
+          (* [beg_dims] participate in the total: block/stack rows carry leading dims there
+             (gh-509: a slack-window re-check against a block row must divide by the full
+             product). *)
+          let all_dims = beg_dims @ dims in
+          fail_if_total_elems_over_sym all_dims;
           let d, vars =
-            match collect_factors dims with Some (d, vars) -> (d, vars) | None -> raise Given_up
+            match collect_factors all_dims with
+            | Some (d, vars) -> (d, vars)
+            | None -> raise Given_up
           in
           let numerator = total_elems_divide numerator d in
           if total_elems_known_zero numerator then
@@ -3923,21 +3930,33 @@ let%track5_sexp rec eliminate_rows_constraint ~depth stage origin ~glb (rows : r
         with
         | Total_elems _, Some (idx, (v, _id)) when is_stage3_up stage ->
             (* TODO: in stage 3, consider restricting to a strided dimension variable case. *)
+            (* gh-509 task 5: a round-up total (packed uniform) whose result shape is inferred
+               gets its rows' bounds only once the surrounding shapes settle. Closing sibling rows
+               empty on stage progression alone would discard axes that are still arriving (the
+               result would silently repeat random values along them), so for round-up numerators
+               a sibling with any pending bounds keeps the constraint deferred until stage 7. *)
+            let round_up_numerator =
+              match constr with
+              | Total_elems { numerator = Strided_var { round_up = true; _ }; _ } -> true
+              | _ -> false
+            in
+            let unconditional_close =
+              if round_up_numerator then is_stage7 stage else is_stage5_up stage
+            in
             let other_vars : (row_var * provenance) list =
               List.filteri rev_row_vars ~f:(fun i _ -> i <> idx)
             in
+            let closeable (v, _prov) =
+              match find_row env.row_env v with
+              | None
+              | Some (Bounds_row { is_in_param = false; glb = None; _ })
+              | Some (Bounds_row { glb = Some { dims = []; bcast = Broadcastable; _ }; _ }) ->
+                  true
+              | _ -> false
+            in
             let other_eqs : constraint_ list =
-              List.concat_map other_vars ~f:(fun (v, prov) ->
-                  if
-                    is_stage5_up stage
-                    ||
-                    match find_row env.row_env v with
-                    | None
-                    | Some (Bounds_row { is_in_param = false; glb = None; _ })
-                    | Some (Bounds_row { glb = Some { dims = []; bcast = Broadcastable; _ }; _ }) ->
-                        true
-                    | _ -> false
-                  then
+              List.concat_map other_vars ~f:(fun ((v, prov) as vp) ->
+                  if unconditional_close || closeable vp then
                     let r1 = row_of_var v prov in
                     [
                       Row_eq
@@ -3949,7 +3968,12 @@ let%track5_sexp rec eliminate_rows_constraint ~depth stage origin ~glb (rows : r
                     ]
                   else [])
             in
-            if is_stage5_up stage then
+            let flatten_now =
+              if round_up_numerator then
+                is_stage7 stage || (is_stage5_up stage && List.for_all other_vars ~f:closeable)
+              else is_stage5_up stage
+            in
+            if flatten_now then
               let rows =
                 List.map rows ~f:(function
                   | { bcast = Row_var v'; _ } as r when equal_row_var v' v -> r
@@ -3984,9 +4008,9 @@ and eliminate_row_constraint ~depth stage origin ~terminal ~(glb : row option) (
          otherwise be available until Stage 6. However, we only use the environment GLB if it has
          fully resolved dimensions (no dimension variables), as partially resolved GLBs can prevent
          proper constraint resolution. *)
-      let glb =
+      let glb, glb_pending =
         match glb with
-        | Some _ -> glb
+        | Some _ -> (glb, false)
         | None -> (
             match find_row env.row_env v with
             | Some (Bounds_row { glb = Some env_glb; _ }) -> (
@@ -3994,9 +4018,14 @@ and eliminate_row_constraint ~depth stage origin ~terminal ~(glb : row option) (
                    resolved *)
                 let env_glb = subst_row env env_glb in
                 match collect_factors (env_glb.beg_dims @ env_glb.dims) with
-                | Some (_, []) -> Some env_glb (* All dims are known constants after substitution *)
-                | _ -> None (* GLB has unresolved dimension variables or collect_factors failed *))
-            | _ -> None)
+                | Some (_, []) ->
+                    (Some env_glb, false) (* All dims are known constants after substitution *)
+                | _ ->
+                    (* GLB has unresolved dimension variables or collect_factors failed: bounds
+                       exist but are still pending (gh-509 task 5) -- round-up guesses below must
+                       wait for them to resolve rather than committing prematurely. *)
+                    (None, true))
+            | _ -> (None, false))
       in
       let opt_row_error () =
         if row_var_is_in_param v env && not (is_safe_to_guess v) then
@@ -4093,6 +4122,16 @@ and eliminate_row_constraint ~depth stage origin ~terminal ~(glb : row option) (
                 else Row_eq { r1; r2; origin }
               in
               (row_eq :: [ Dim_eq { d1 = Var v; d2 = get_default_dim ~d:(d / d2) (); origin } ], env)
+          | Strided_var { round_up = true; _ }, [], None
+            when glb_pending && not (is_stage7 stage) ->
+              (* gh-509 task 5: the row variable has registered bounds that have not resolved yet
+                 (e.g. a composite parameter initializer over an inferred shape, where the bounds
+                 settle only once the surrounding shapes do). Guessing the counter now would
+                 commit the result prematurely; defer through the stored-constraint path (which
+                 dedups, so the per-stage solver loop still terminates). At stage 7 the arms below
+                 fire regardless: bounds that never resolved will not, and every constraint must
+                 be consumed by the final stage. *)
+              keep_constr ()
           | Strided_var { coeff; var; denom; round_up = true }, [], None
             when is_stage5_up stage && denom > 1 && denom % Utils.safe_force coeff <> 0 ->
               (* Round-up totality: the known-axes product [denom] is not a multiple of [coeff];
@@ -4133,7 +4172,11 @@ and eliminate_row_constraint ~depth stage origin ~terminal ~(glb : row option) (
           | ( Strided_var { coeff; var; denom; round_up },
               [],
               Some ({ beg_dims = glb_beg; dims = glb_dims; bcast = _; prov = glb_prov } as glb) )
-            when is_stage5_up stage && Utils.safe_force coeff > denom -> (
+            when is_stage5_up stage && (Utils.safe_force coeff > denom || round_up) -> (
+              (* gh-509 task 5: under round-up this arm must also fire with [coeff <= denom]:
+                 already-closed axes fold into [denom] (e.g. denom 10 from a 10-row parameter with
+                 coeff 4), and no other arm consumes a Strided_var against a resolved GLB, so the
+                 constraint would sit stored forever, leaving the counter variable unsolved. *)
               (* Check if coeff > denom * product of known dimensions of the GLB. The constraint is:
                  coeff * var / denom = total_elements(row). So: var = total_elements * denom / coeff
                  (rounded up for a round-up constraint). *)
