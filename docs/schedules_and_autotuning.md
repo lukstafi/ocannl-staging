@@ -120,6 +120,13 @@ what the autotuner's sketch seeds parameterize:
   inlined concatenations with segmented rendering. Pad masks are `partition_breakpoints` flip
   points, so partitioning an enclosing block loop at the last fully valid block specializes the
   interior segments guard-free (the pad-vs-peel frame).
+- **Clamped windows** (gh-ocannl-504): a padded (`=`-mode) max/tropical-family window spec
+  demands no margins — the assignments lowering range-guards the window to the operand's valid
+  region (out-of-range positions contribute the accumulation identity, i.e. are skipped; the
+  backward argmax scatter gets `If`-guarded writes). The guards mention the window symbol, so
+  `partition_breakpoints` bounds it by its loop range and returns both transition points:
+  partitioning the output loop there folds the guards everywhere except the truncated boundary
+  segments — guard-free full-window interiors, specialized edges.
 
 ## The default schedules and kernel fission
 
