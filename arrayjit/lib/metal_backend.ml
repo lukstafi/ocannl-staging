@@ -868,11 +868,19 @@ module Impl = struct
       | Ops.Uint64_prec _ -> "ul"
       | Ops.Void_prec -> ""
 
-    let ternop_syntax _prec op =
+    let ternop_syntax prec op =
       match op with
       | Ops.Where ->
           fun v1 v2 v3 -> group (string "select(" ^^ separate comma_sep [ v3; v2; v1 ] ^^ rparen)
-      | FMA -> fun v1 v2 v3 -> group (string "fma(" ^^ separate comma_sep [ v1; v2; v3 ] ^^ rparen)
+      | FMA -> (
+          match prec with
+          | Ops.Bfloat16_prec _ ->
+              (* MSL's math library has no bfloat [fma] overload: bfloat operands promote to float
+                 and the result cannot be assigned back to a bfloat destination. *)
+              fun v1 v2 v3 ->
+                group (string "(bfloat)fma(" ^^ separate comma_sep [ v1; v2; v3 ] ^^ rparen)
+          | _ ->
+              fun v1 v2 v3 -> group (string "fma(" ^^ separate comma_sep [ v1; v2; v3 ] ^^ rparen))
       | Mul3 -> fun v1 v2 v3 -> group (parens (v1 ^^ string " * " ^^ v2 ^^ string " * " ^^ v3))
 
     let infix_binop op v1 v2 = parens (infix 2 1 (string op) v1 v2)
