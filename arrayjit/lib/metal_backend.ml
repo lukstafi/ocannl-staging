@@ -871,17 +871,12 @@ module Impl = struct
     let ternop_syntax prec op =
       match op with
       | Ops.Where ->
-          (* MSL's [select] overloads on the x/y argument types: cast both branches to the result
-             precision and the condition to [bool], otherwise mixed branch types are ambiguous
-             (e.g. a comparison then-branch, [bool] in MSL, against a float constant else-branch —
-             the clamped-window guards of gh-504 produce exactly this shape). *)
-          let cast = string ("(" ^ typ_of_prec prec ^ ")") in
-          fun v1 v2 v3 ->
-            group
-              (string "select("
-              ^^ separate comma_sep
-                   [ cast ^^ parens v3; cast ^^ parens v2; string "(bool)" ^^ parens v1 ]
-              ^^ rparen)
+          (* A short-circuiting ternary, exactly as on the C/CUDA/HIP backends — NOT [select]:
+             MSL's [select] is a function call that evaluates both branches, so a range guard
+             (an inlined concatenation's component guards, gh-504's clamped-window guards) would
+             still evaluate its guarded out-of-range buffer read. The whole conditional is
+             parenthesized (cf. the CUDA rendering's precedence note). *)
+          fun v1 v2 v3 -> group (parens (parens v1 ^^ string " ? " ^^ v2 ^^ string " : " ^^ v3))
       | FMA -> (
           match prec with
           | Ops.Bfloat16_prec _ ->
