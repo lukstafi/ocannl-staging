@@ -734,9 +734,12 @@ let uniform_at ?grad_spec counter =
           ~label:[ "range_over_offsets" ] ())
        ())
 
-(** A wasteful variant of {!uniform} that produces a single value from each 4x32 random bits. The
-    bit-spreading in int32_to_uint4x32/uint32_to_uint4x32 ensures good entropy even with the 2-round
-    "light" threefry variant. *)
+(** DEPRECATED (gh-ocannl-509): a wasteful variant of {!uniform} that produces a single value from
+    each 4x32 random bits. The packed {!uniform} is now total over shapes (round-up counter
+    inference, tail-peeled lowering) and virtualizes via lane extraction, so this shape-safety
+    fallback is no longer needed; it remains as the IR-internal substrate and for reproducing
+    pre-0.9 random streams. The bit-spreading in int32_to_uint4x32/uint32_to_uint4x32 ensures good
+    entropy even with the 2-round "light" threefry variant. *)
 let uniform1 ?grad_spec () =
   uint4x32_to_prec_uniform1 ?grad_spec
     (threefry4x32 ~spec:pin_counter_spec
@@ -745,9 +748,24 @@ let uniform1 ?grad_spec () =
           ~label:[ "range_over_offsets" ] ())
        ())
 
-(** A centered uniform distribution over [[-scale/2, scale/2)] built from {!uniform1}. With the
-    default [scale = 0.5] this is the default parameter initialization (see
+(** A centered uniform distribution over [[-scale/2, scale/2)] built from the packed {!uniform}.
+    With the default [scale = 0.5] this is the default parameter initialization (see
     {!Make_DSL.default_param_init}). *)
+let centered_uniform_param_init ?(scale = 0.5) () ?label ?top_down_prec ?batch_dims ?batch_axes
+    ?input_dims ?output_dims ?input_axes ?output_axes ?deduced () =
+  let number = Tensor.number ~grad_spec:Prohibit_grad in
+  let u =
+    uniform ~grad_spec:Prohibit_grad () ?top_down_prec ?batch_dims ?batch_axes ?input_dims
+      ?output_dims ?input_axes ?output_axes ?deduced ()
+  in
+  let centered = sub ~grad_spec:Prohibit_grad u (number 0.5) () in
+  pointmul ~grad_spec:Prohibit_grad (number scale) centered ?label ?top_down_prec ?batch_dims
+    ?batch_axes ?input_dims ?output_dims ?input_axes ?output_axes ?deduced ()
+
+let default_uniform_param_init = centered_uniform_param_init ?scale:None
+
+(** DEPRECATED (gh-ocannl-509): use {!centered_uniform_param_init}. Kept for reproducing pre-0.9
+    random streams. *)
 let centered_uniform1_param_init ?(scale = 0.5) () ?label ?top_down_prec ?batch_dims ?batch_axes
     ?input_dims ?output_dims ?input_axes ?output_axes ?deduced () =
   let number = Tensor.number ~grad_spec:Prohibit_grad in
@@ -759,6 +777,7 @@ let centered_uniform1_param_init ?(scale = 0.5) () ?label ?top_down_prec ?batch_
   pointmul ~grad_spec:Prohibit_grad (number scale) centered ?label ?top_down_prec ?batch_dims
     ?batch_axes ?input_dims ?output_dims ?input_axes ?output_axes ?deduced ()
 
+(** DEPRECATED (gh-ocannl-509): use {!default_uniform_param_init}. *)
 let default_uniform1_param_init = centered_uniform1_param_init ?scale:None
 
 (** A wasteful variant of {!uniform_at} that produces a single value from each 4x32 random bits. The
@@ -828,12 +847,13 @@ struct
 
   (** The default initialization operation for {!param} calls.
 
-      To avoid user surprises, this defaults to a centered, scaled {!uniform1} distribution from
-      -0.25 inclusive to 0.25 exclusive. This keeps the non-vectorized arbitrary-shape behavior of
-      {!uniform1}; for efficiency, consider setting this to [uniform] or [normal] instead when
-      shapes allow. Initialization expressions are forward-only; {!param} adds the final parameter
-      gradient when needed. *)
-  let default_param_init = ref default_uniform1_param_init
+      Defaults to a centered, scaled packed {!uniform} distribution from -0.25 inclusive to 0.25
+      exclusive. Since gh-ocannl-509 the packed [uniform] is total over shapes (the counter extent
+      rounds up and the last 128-bit block is consumed partially), so the pointwise {!uniform1}
+      fallback is no longer needed; set this to [default_uniform1_param_init] to reproduce pre-0.9
+      random streams. Initialization expressions are forward-only; {!param} adds the final
+      parameter gradient when needed. *)
+  let default_param_init = ref default_uniform_param_init
   (* Useful for debugging: *)
   (* let default_param_init =
     ref (fun () -> Tensor.term ~grad_spec:Require_grad ?init_data:None ~fetch_op:(Constant 0.)) *)

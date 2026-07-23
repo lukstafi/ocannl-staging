@@ -120,9 +120,22 @@
   The value stream depends only on the element index, so growing a tensor preserves its prefix
   bitwise, and divisible shapes keep their previous streams unchanged. `Set_from_vec` into a
   padded (halo) target is now rejected explicitly at lowering with a materialize-through-copy
-  remedy (it previously assumed dense flat offsets without checking). Lane-extract
-  virtualization (task 4) and the `default_param_init` flip away from `uniform1` (task 5)
-  remain follow-ups.
+  remedy (it previously assumed dense flat offsets without checking).
+- **Default parameter initialization uses the packed `uniform`** (gh-ocannl-509 task 5):
+  `default_param_init` now defaults to `default_uniform_param_init` (a centered, scaled packed
+  `uniform` over `[-0.25, 0.25)`). Since the packed conversion became total over shapes, the
+  pointwise `uniform1` fallback is no longer needed: `uniform1`,
+  `centered_uniform1_param_init` and `default_uniform1_param_init` are deprecated (kept for
+  reproducing pre-0.9 random streams; `uniform_at`/`uniform_at1` — pointwise mapping of a user
+  counter — remain first-class). This changes every default-initialized random stream:
+  expectation files were re-promoted suite-wide. Composite initializers over inferred-shape
+  parameters exposed premature round-up eliminations in the row solver: the counter was guessed
+  at one block while the result rows' broadcast bounds were still arriving. Round-up
+  `Total_elems` eliminations are now bounds-aware — a row variable with registered-but-pending
+  bounds defers through the stored-constraint path, sibling rows are only closed empty before
+  the final stage when they carry no bounds at all, and the resolved-bound consumption arm also
+  fires when closed axes folded into the constraint's denominator (previously such a constraint
+  sat stored forever, leaving the counter variable unsolved).
 - Padding layout and neutral values are committed as tensor-node identity. Padded convolutions
   consequently lower offset-free and can be staged safely; incompatible later padding demands
   fail during shape inference instead of silently reinterpreting an existing buffer.
@@ -138,6 +151,9 @@
 - Scalar-embedded multi-term affine indices are parenthesized in generated C-family code (an
   unparenthesized `5*i+j / 4` divided only `j`), and integer-precision `Mod` renders the `%`
   operator on Metal/CUDA/HIP instead of the float-only (and on Metal ambiguous) `fmod`.
+- `Total_elems` application against a closed row includes the row's `beg_dims` in the known
+  product (block/stack rows carry leading dims there); previously a total constraint meeting a
+  block row divided by the trailing dims only.
 - CUDA random generation no longer bit-casts random bits directly to `double`, and vector helper
   names no longer exceed CUDA identifier limits. fp8 conversion, arithmetic, and uniform
   generation were corrected across C, CUDA, HIP, and Metal paths.

@@ -121,9 +121,8 @@ later lectures.
 
 ### Weight initialization
 
-OCANNL's default parameter initializer is a centered, scaled `uniform1`
-distribution over `[-0.25, 0.25)`. It keeps the arbitrary-shape behavior of the
-non-vectorized `uniform1` path while avoiding all-positive weights. For an MLP
+OCANNL's default parameter initializer is a centered, scaled packed `uniform`
+distribution over `[-0.25, 0.25)`; centering avoids all-positive weights. For an MLP
 with `tanh`, that centered default avoids saturating the preactivation and
 trapping SGD at a high-loss plateau.
 
@@ -179,7 +178,7 @@ let hidden = mk_hidden ()
 `{ b1 }` parameters to the `()` closure scope — they are constructed *once*
 when `mk_hidden ()` is called, and shared across every subsequent invocation
 (training, dev/test eval, inference generation). The explicit Kaiming
-initializer on `w1` overrides the default centered `uniform1` initializer so
+initializer on `w1` overrides the default centered `uniform` initializer so
 Kaiming's fan-in scale is preserved; `c`, `b1`, `w2`, and `b2` use the default
 `[-0.25, 0.25)` range.
 
