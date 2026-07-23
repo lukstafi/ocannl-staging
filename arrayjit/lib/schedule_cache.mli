@@ -51,6 +51,7 @@ type saved_optop =
   | Retype of { axis : sym_ref; ty : Low_level.axis_type }
   | Unroll of { axis : sym_ref; materialize : bool }
   | Partition of { axis : sym_ref; breakpoints : int list }
+  | Pad of { axis : sym_ref; to_multiple_of : int }
   | Stage of {
       source : int;
       tile_loops : sym_ref list;

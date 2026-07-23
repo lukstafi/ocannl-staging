@@ -274,8 +274,11 @@ let () =
   let wb = TDSL.param ~values:mbv "tmd_wb" ~input_dims:[ n ] ~output_dims:[ n ] () in
   let%op yw = wa * wb in
   summarize "seeds: no hoistable operand" (seeds_of ~name:"tmd_seeds_params" (Train.forward yw));
-  (* Column extent below one vector of lanes (nj = 4 < 8): the register tiling statically declines,
-     so no tensorized candidate is seeded at all (and no scalar tiling divides nj either). *)
+  (* Column extent below one vector of lanes (nj = 4 < 8): the whole-triple form statically
+     declines and is not seeded. The packed compositions with a split column panel ([bn > 0]) now
+     survive via pad-composition seeding (gh-ocannl-485): the padded micro-kernel's column extent
+     is the panel width, so the register tiling genuinely fires — the (large) padding waste is the
+     tuner's call. Unsplit-panel flavors ([bn = 0], panel width = nj) stay filtered. *)
   let mbn = Array.init (n * 4) ~f:(fun x -> Float.of_int (x % 17) -. 8.) in
   let ma4 = TDSL.ndarray mav ~label:[ "tmd_s_a4" ] ~input_dims:[ n ] ~output_dims:[ n ] () in
   let mb4 = TDSL.ndarray mbn ~label:[ "tmd_s_b4" ] ~input_dims:[ 4 ] ~output_dims:[ n ] () in

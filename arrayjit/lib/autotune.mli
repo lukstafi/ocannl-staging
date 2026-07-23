@@ -147,6 +147,12 @@ val sketch_seed_params :
     at least one vector of lanes ([limits.simd_vector_bytes]), and transposed-B storage for shapes
     that read B in place. Exposed for tests. *)
 
+val sketch_schedule : p:sketch_params -> Ir.Low_level.optimized -> Ir.Schedule.schedule
+(** The composed pipeline a seed parameterizes, built against the given lowering (the site is
+    re-detected). Raises [Invalid_argument] when no site is detected or the parameters do not fit
+    the segment. Exposed for tests (the pad-composition seeding of gh-ocannl-485 is executed
+    directly). *)
+
 val extend_with_privatize :
   static_indices:Ir.Indexing.static_symbol list ->
   Ir.Schedule.schedule ->

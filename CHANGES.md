@@ -27,6 +27,21 @@
   `Backend_intf.mma_input_format` (f32, tf32, f16, bf16, fp8-e5m2) with per-(a, b)-operand-pair
   intrinsic tile shapes in `mma_capability.mma_format_tiles`; a future e4m3 (and mixed
   e5m2×e4m3) needs only a constructor and descriptor entries.
+- **Pad-to-tile scheduling, PADTO** (gh-ocannl-485): `Schedule.Pad { axis; to_multiple_of }`
+  extends a Serial loop to the next tile multiple with `If (axis < N)` guards on the effectful
+  leaf statements (so barriers stay uniform and downstream `Split`s divide cleanly). `Stage`'s
+  cooperative/packing edge guards became identity-filling (`Where`-form, storing 0 — the
+  add-reduce identity — to out-of-range tile slots; tiles are tracked in
+  `Low_level.optimized.zero_fringe`), and `Tensorize` recognizes pad/remainder guards around the
+  micro-kernel: row/column masks move to the accumulator contraction's transfers (0-filled
+  init-load, `If`-guarded store-back; on GPU pipelines the masked fragment is placed in
+  workgroup-shared memory so the intrinsics still fire), and reduction-axis masks are discharged
+  against zero-fringe staged operands. Tensorized paths thus cover arbitrary extents — a
+  33x65x70 matmul register-tiles on cc bitwise-exactly and runs Metal simdgroup intrinsics
+  within f32 tolerance. Autotune drops the extent-divisibility pre-filters for fully staged
+  pipelines (GPU MMA staged seeds, CPU packed compositions, conv whole/blocked GPU flavors and
+  CPU row panels), seeding `(pad, tensorize)` compositions the tuner measures against scalar
+  alternatives; in-place pipelines keep their gates.
 - **Partition / index-set-splitting transform** (gh-ocannl-508): `Schedule.Partition` splits a
   Serial loop's range at static affine breakpoints into separate, individually specialized (and
   individually schedulable) segment nests; per-segment interval folding then erases the guards

@@ -340,6 +340,12 @@ type optimized = {
           spreading same-column accesses across shared-memory banks. Populated by
           [Schedule.Stage ~swizzle:true]. Renderings that assume a row-major layout must decline
           swizzled nodes. *)
+  zero_fringe : Set.M(Tnode).t;
+      (** Schedule-minted staged tiles whose whole index space is safe to read: slots outside the
+          staged source region (edge tiles of a non-dividing or padded staging, gh-ocannl-485) hold
+          0 — the add-reduce accumulation identity — written by the load nest's [Where]-form edge
+          guards or by the host-side constant packing. [Schedule.Tensorize] consults this to
+          discharge pad guards on the intrinsic path. *)
 }
 [@@deriving sexp_of]
 

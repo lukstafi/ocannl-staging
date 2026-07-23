@@ -26,6 +26,10 @@ type optop =
       segment_indices : Indexing.symbol list;
           (** Fresh symbols, one per segment ([length breakpoints + 1]); see {!partition}. *)
     }
+  | Pad of {
+      axis : Indexing.symbol;  (** The loop to pad, identified by its index symbol. *)
+      to_multiple_of : int;  (** The padded extent is the least multiple [>=] the loop extent. *)
+    }
   | Stage of {
       source : Tn.t;
       tile_loops : Indexing.symbol list;
@@ -289,10 +293,280 @@ let refresh_scopes (llc : Low_level.t) : Low_level.t =
     in
     code llc
 
+(* gh-ocannl-485 (PADTO): a pad guard recognized around the micro-kernel's accumulation, reduced to
+   the accumulator's coordinates. The guarded index is [pm_terms + 1*role + pm_offset] where [role]
+   is the [i] ([pm_row = true]) or [j] ([pm_row = false]) micro symbol; the guard holds iff that
+   index is [< pm_bound]. [contract_tensorized_accumulator] re-emits the guard over its fresh
+   fragment symbols at the accumulator transfer sites (Where-form 0-fill on the init-load, statement
+   [If] on the store-back), so the intrinsic path computes the full padded block into scratch and
+   only the valid region round-trips through the accumulator. Reduction-axis ([k]) guards are
+   validated (both operands zero-fringe staged tiles, so the padded contributions are exact zeros)
+   and dropped, not represented. *)
+type pad_mask = {
+  pm_row : bool;
+  pm_terms : (int * Indexing.symbol) list;
+  pm_offset : int;
+  pm_bound : int;
+}
+
+(* docs/proposals/tensorize-mma.md §3: replace the innermost serial [i × j × k] matmul micro-kernel
+   — whose body is a single accumulation [d[...] += a[...] * b[...]] (plain-add or FMA form, as
+   [optimize]'s simplify leaves it), possibly under pad/remainder guards (gh-ocannl-485) — with a
+   [Tile_mma] block statement wrapped in a fresh extent-[simd_width] [Workgroup] lane loop. The
+   statement covers the whole [m×n×k] block, so fragment residency across the reduction is an
+   intra-statement codegen concern; the original (guarded) nest becomes the scalar [fallback].
+   Divisibility by the backend's intrinsic tile is checked at emission ([mma_syntax] declines per
+   call and the fallback runs), since the schedule layer is backend-agnostic. Guards around the
+   accumulation are parsed as pad masks (returned for the contraction) or rejected loudly. *)
+let tensorize_llc ~(zero_fringe : Tn.t -> bool) ~i ~j ~k ~lane ~simd_width (llc : Low_level.t) :
+    Low_level.t * pad_mask list =
+  let open Low_level in
+  let out_masks = ref [] in
+  let llc =
+    rewrite_loop ~what:"Schedule.Tensorize" ~sym:i llc ~f:(fun ifc ->
+        if simd_width <= 0 then invalid_arg "Schedule.Tensorize: simd_width must be positive";
+        let strip body =
+          List.filter (flat_lines [ body ]) ~f:(function Noop | Comment _ -> false | _ -> true)
+        in
+        (* Pad/remainder guards may wrap the inner loops or the accumulation itself; skim them off,
+           collecting the conditions for mask parsing below. *)
+        let guard_conds = ref [] in
+        let rec skim body =
+          match strip body with
+          | [ If { cond = c, _; body } ] ->
+              guard_conds := c :: !guard_conds;
+              skim body
+          | stmts -> stmts
+        in
+        let nested ~of_ sym body =
+          match skim body with
+          | [ For_loop { index; from_; to_; body; trace_it; axis } ]
+            when Indexing.equal_symbol index sym ->
+              { index; from_; to_; body; trace_it; axis }
+          | _ ->
+              invalid_arg
+                ("Schedule.Tensorize: loop " ^ Indexing.symbol_ident sym
+               ^ " must be exactly the body of loop " ^ Indexing.symbol_ident of_
+               ^ " (a perfectly nested i x j x k micro-kernel)")
+        in
+        let jfc = nested ~of_:i j ifc.body in
+        let kfc = nested ~of_:j k jfc.body in
+        List.iter
+          [ { ifc with body = Noop }; { jfc with body = Noop }; { kfc with body = Noop } ]
+          ~f:(fun fc ->
+            if (not (equal_axis_type fc.axis Serial)) || fc.from_ <> 0 then
+              invalid_arg
+                ("Schedule.Tensorize: loop " ^ Indexing.symbol_ident fc.index
+               ^ " must be Serial starting at 0"));
+        let d_tn, d_idcs, llsc =
+          match skim kfc.body with
+          | [ Set { tn; idcs; llsc; _ } ] -> (tn, idcs, llsc)
+          | _ ->
+              invalid_arg
+                "Schedule.Tensorize: the micro-kernel body must be a single accumulation Set"
+        in
+        let is_d_read (sc : Low_level.scalar_t) =
+          match sc with
+          | Get (tn, idcs) -> Tn.equal tn d_tn && Array.equal Indexing.equal_axis_index idcs d_idcs
+          | _ -> false
+        in
+        let get_operand (sc : Low_level.scalar_t) =
+          match sc with Get (tn, idcs) -> Some (tn, idcs) | _ -> None
+        in
+        let operands =
+          match llsc with
+          | Ternop (Ops.FMA, (x, _), (y, _), (acc, _)) when is_d_read acc ->
+              Option.both (get_operand x) (get_operand y)
+          | Binop (Ops.Add, (acc, _), (Binop (Ops.Mul, (x, _), (y, _)), _)) when is_d_read acc ->
+              Option.both (get_operand x) (get_operand y)
+          | Binop (Ops.Add, (Binop (Ops.Mul, (x, _), (y, _)), _), (acc, _)) when is_d_read acc ->
+              Option.both (get_operand x) (get_operand y)
+          | _ -> None
+        in
+        let x_op, y_op =
+          match operands with
+          | Some ops -> ops
+          | None ->
+              invalid_arg
+                ("Schedule.Tensorize: the micro-kernel must accumulate a product of reads into "
+               ^ Tn.debug_name d_tn ^ " (d[...] += a[...] * b[...], plain-add or FMA form)")
+        in
+        let mentions sym (idx : Indexing.axis_index) =
+          match idx with
+          | Indexing.Iterator s -> Indexing.equal_symbol s sym
+          | Indexing.Affine { symbols; _ } ->
+              List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
+          | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
+        in
+        let coeff sym (idx : Indexing.axis_index) =
+          match idx with
+          | Indexing.Iterator s when Indexing.equal_symbol s sym -> 1
+          | Indexing.Affine { symbols; _ } ->
+              List.sum
+                (module Int)
+                symbols
+                ~f:(fun (c, s) -> if Indexing.equal_symbol s sym then c else 0)
+          | _ -> 0
+        in
+        (* Index discipline: the tile spans the operand's last two axes with unit strides in the
+           micro-kernel symbols — [row] appears with coefficient 1 exactly in component [rank-2],
+           [col] in component [rank-1], and the third symbol not at all. Outer-loop terms (the
+           block base) may appear anywhere. *)
+        let role_ok (_tn, idcs) ~row ~col =
+          let rank = Array.length idcs in
+          rank >= 2
+          && coeff row idcs.(rank - 2) = 1
+          && coeff col idcs.(rank - 1) = 1
+          && List.for_all [ i; j; k ] ~f:(fun s ->
+              Array.for_alli idcs ~f:(fun p idx ->
+                  let allowed =
+                    if Indexing.equal_symbol s row then p = rank - 2
+                    else if Indexing.equal_symbol s col then p = rank - 1
+                    else false
+                  in
+                  (not (mentions s idx)) || allowed))
+        in
+        if not (role_ok (d_tn, d_idcs) ~row:i ~col:j) then
+          invalid_arg
+            ("Schedule.Tensorize: accumulator " ^ Tn.debug_name d_tn
+           ^ " must be indexed [..., i, j] over its last two axes (unit coefficients)");
+        (* Operand roles, including transposed storage: [a] is [..., i, k] ([ta = false]) or [...,
+           k, i] ([ta = true]); [b] is [..., k, j] ([tb = false]) or [..., j, k] ([tb = true]). An
+           operand matches at most one role and orientation ([role_ok] requires both role symbols
+           present at the right positions and the third absent), so the assignment is
+           unambiguous. *)
+        let a_role op =
+          if role_ok op ~row:i ~col:k then Some false
+          else if role_ok op ~row:k ~col:i then Some true
+          else None
+        in
+        let b_role op =
+          if role_ok op ~row:k ~col:j then Some false
+          else if role_ok op ~row:j ~col:k then Some true
+          else None
+        in
+        let a_op, ta, b_op, tb =
+          match (a_role x_op, b_role y_op) with
+          | Some ta, Some tb -> (x_op, ta, y_op, tb)
+          | _ -> (
+              match (a_role y_op, b_role x_op) with
+              | Some ta, Some tb -> (y_op, ta, x_op, tb)
+              | _ ->
+                  invalid_arg
+                    ("Schedule.Tensorize: operands of the product must be indexed [..., i, k] \
+                      (or transposed [..., k, i]) and [..., k, j] (or transposed [..., j, k]) \
+                      over their last two axes (unit coefficients): "
+                    ^ Tn.debug_name (fst x_op)
+                    ^ ", "
+                    ^ Tn.debug_name (fst y_op)))
+        in
+        (* Pad-mask parsing (gh-ocannl-485). Every skimmed guard must be a one-sided comparison
+           [affine < bound] whose affine part carries exactly one micro symbol with coefficient 1
+           (the shape [Pad] and [Split]'s remainder guard construct); anything else is rejected —
+           the guard would silently change meaning if dropped. Masked roles require every operand
+           mentioning the role symbol to be a zero-fringe staged tile read at the plain iterator
+           with a covering dim: the intrinsic path reads the full padded extent, so out-of-range
+           slots must exist and hold the additive identity. *)
+        let extent_of s =
+          if Indexing.equal_symbol s i then ifc.to_ + 1
+          else if Indexing.equal_symbol s j then jfc.to_ + 1
+          else kfc.to_ + 1
+        in
+        let validate_padded_operand s (tn, idcs) =
+          if Array.exists idcs ~f:(mentions s) then (
+            if not (zero_fringe tn) then
+              invalid_arg
+                ("Schedule.Tensorize: pad guard on " ^ Indexing.symbol_ident s
+               ^ " requires operand " ^ Tn.debug_name tn
+               ^ " to be a zero-fringe staged tile (Stage the operand over the padded loops \
+                  first)");
+            let dims = Lazy.force tn.Tn.dims in
+            Array.iteri idcs ~f:(fun p idx ->
+                if mentions s idx then
+                  match idx with
+                  | Indexing.Iterator _ when dims.(p) >= extent_of s -> ()
+                  | _ ->
+                      invalid_arg
+                        ("Schedule.Tensorize: pad guard on " ^ Indexing.symbol_ident s
+                       ^ " requires operand " ^ Tn.debug_name tn
+                       ^ " to read the padded axis as a plain covering iterator")))
+        in
+        let parse_mask (c : Low_level.scalar_t) =
+          let reject () =
+            invalid_arg
+              "Schedule.Tensorize: unrecognized guard around the micro-kernel (expected a pad or \
+               remainder guard [affine(one micro symbol, unit coefficient) < constant])"
+          in
+          match c with
+          | Binop (Ops.Cmplt, (Embed_index idx, _), (Constant bound, _))
+            when Float.is_integer bound -> (
+              let terms, offset =
+                match idx with
+                | Indexing.Iterator s -> ([ (1, s) ], 0)
+                | Indexing.Affine { symbols; offset } ->
+                    (Indexing.coalesce_affine_terms symbols, offset)
+                | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> reject ()
+              in
+              let is_micro s = List.exists [ i; j; k ] ~f:(Indexing.equal_symbol s) in
+              let micro_terms, outer_terms =
+                List.partition_tf terms ~f:(fun (_, s) -> is_micro s)
+              in
+              match micro_terms with
+              | [ (1, s) ] ->
+                  let bound = Float.to_int bound in
+                  validate_padded_operand s a_op;
+                  validate_padded_operand s b_op;
+                  if Indexing.equal_symbol s k then
+                    (* Both operands' padded [k] slots are exact zeros, so the extra accumulated
+                       contributions are exact zeros: the guard is discharged, not represented. *)
+                    None
+                  else
+                    Some
+                      {
+                        pm_row = Indexing.equal_symbol s i;
+                        pm_terms = outer_terms;
+                        pm_offset = offset;
+                        pm_bound = bound;
+                      }
+              | _ -> reject ())
+          | _ -> reject ()
+        in
+        out_masks := List.filter_map !guard_conds ~f:parse_mask;
+        let zero = { terms = []; offset = 0 } in
+        let base idcs =
+          Array.map idcs ~f:(fun idx ->
+              subst_axis_index ~sym:i ~by:zero
+                (subst_axis_index ~sym:j ~by:zero (subst_axis_index ~sym:k ~by:zero idx)))
+        in
+        For_loop
+          {
+            index = lane;
+            from_ = 0;
+            to_ = simd_width - 1;
+            axis = Workgroup;
+            trace_it = false;
+            body =
+              Tile_mma
+                {
+                  d = (d_tn, base d_idcs);
+                  a = (fst a_op, base (snd a_op));
+                  b = (fst b_op, base (snd b_op));
+                  ta;
+                  tb;
+                  m = ifc.to_ + 1;
+                  n = jfc.to_ + 1;
+                  k = kfc.to_ + 1;
+                  lane;
+                  fallback = for_loop ifc;
+                };
+          })
+  in
+  (llc, !out_masks)
+
 let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
   let open Low_level in
   match op with
-  | Stage _ | Privatize _ | Fuse_epilogue _ ->
+  | Stage _ | Privatize _ | Fuse_epilogue _ | Tensorize _ ->
       assert false (* Handled by [apply_opt_op]: they need the whole [optimized]. *)
   | Split { axis; factor; outer; inner; outer_index; inner_index } ->
       rewrite_loop ~what:"Schedule.Split" ~sym:axis llc ~f:(fun fc ->
@@ -375,6 +649,56 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
                  @@ map_code
                       ~fidx:(subst_axis_index ~sym:axis ~by:{ terms = []; offset = v })
                       fc.body)))
+  | Pad { axis; to_multiple_of } ->
+      (* gh-ocannl-485 (PADTO): extend the loop extent to the next multiple of [to_multiple_of] and
+         guard each effectful leaf statement of the body with [If (axis < N)] — the pad iterations
+         are no-ops, so the op is unconditionally semantics-preserving. Guards go on the leaves, not
+         around the whole body, so barriers inserted later (shared [Stage]) stay under uniform
+         control flow, and downstream [Split]s of the padded loop divide cleanly (no remainder
+         guard). [apply]'s trailing simplify interval-folds the guards wherever the narrowed
+         environment proves them (e.g. after a [Partition] of a block loop at the last fully valid
+         block); [Tensorize] recognizes them as pad masks (see {!optop}). *)
+      rewrite_loop ~what:"Schedule.Pad" ~sym:axis llc ~f:(fun fc ->
+          if to_multiple_of <= 0 then invalid_arg "Schedule.Pad: to_multiple_of must be positive";
+          if not (equal_axis_type fc.axis Serial) then
+            invalid_arg ("Schedule.Pad: loop " ^ Indexing.symbol_ident axis ^ " must be Serial");
+          if fc.from_ <> 0 then
+            invalid_arg
+              ("Schedule.Pad: loop " ^ Indexing.symbol_ident axis
+             ^ " must start at 0 (lowering guarantees this)");
+          let n = fc.to_ + 1 in
+          let m = (n + to_multiple_of - 1) / to_multiple_of * to_multiple_of in
+          if m = n then for_loop fc
+          else
+            let iprec = Ops.index_prec () in
+            let cond =
+              Binop
+                ( Ops.Cmplt,
+                  (Embed_index (Indexing.Iterator axis), iprec),
+                  (Constant (Float.of_int n), iprec) )
+            in
+            let guard body = If { cond = (cond, iprec); body } in
+            let rec mask = function
+              | Seq (a, b) -> Seq (mask a, mask b)
+              | For_loop fc' -> For_loop { fc' with body = mask fc'.body }
+              | If { cond; body } -> If { cond; body = mask body }
+              | (Set _ | Set_dynamic _ | Set_from_vec _ | Set_local _ | Zero_out _) as stmt ->
+                  guard stmt
+              | (Noop | Comment _ | Declare_local _) as stmt -> stmt
+              | Workgroup_barrier ->
+                  (* Uniformly reached with or without the guard (the padded loop is Serial), and
+                     must stay so: never guard a barrier. *)
+                  Workgroup_barrier
+              | Staged_compilation _ ->
+                  invalid_arg
+                    ("Schedule.Pad: opaque Staged_compilation in the body of "
+                    ^ Indexing.symbol_ident axis)
+              | Tile_mma _ ->
+                  invalid_arg
+                    ("Schedule.Pad: apply Pad before Tensorize (Tile_mma in the body of "
+                    ^ Indexing.symbol_ident axis ^ ")")
+            in
+            for_loop { fc with to_ = m - 1; body = mask fc.body })
   | Partition { axis; breakpoints; segment_indices } ->
       (* gh-ocannl-508: index-set splitting. Segment ranges stay absolute (no rebasing to 0), so the
          substitution is a pure rename of the loop symbol and no index arithmetic changes; each
@@ -409,171 +733,6 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
                  in
                  For_loop
                    { index = s; from_ = lo; to_ = hi; body; trace_it = fc.trace_it; axis = Serial })))
-  | Tensorize { i; j; k; lane; simd_width } ->
-      (* docs/proposals/tensorize-mma.md §3: replace the innermost serial [i × j × k] matmul
-         micro-kernel — whose body is a single accumulation [d[...] += a[...] * b[...]] (plain-add
-         or FMA form, as [optimize]'s simplify leaves it) — with a [Tile_mma] block statement
-         wrapped in a fresh extent-[simd_width] [Workgroup] lane loop. The statement covers the
-         whole [m×n×k] block, so fragment residency across the reduction is an intra-statement
-         codegen concern; the original nest becomes the scalar [fallback]. Divisibility by the
-         backend's intrinsic tile is checked at emission ([mma_syntax] declines per call and the
-         fallback runs), since the schedule layer is backend-agnostic. *)
-      rewrite_loop ~what:"Schedule.Tensorize" ~sym:i llc ~f:(fun ifc ->
-          if simd_width <= 0 then invalid_arg "Schedule.Tensorize: simd_width must be positive";
-          let strip body =
-            List.filter (flat_lines [ body ]) ~f:(function Noop | Comment _ -> false | _ -> true)
-          in
-          let nested ~of_ sym body =
-            match strip body with
-            | [ For_loop { index; from_; to_; body; trace_it; axis } ]
-              when Indexing.equal_symbol index sym ->
-                { index; from_; to_; body; trace_it; axis }
-            | _ ->
-                invalid_arg
-                  ("Schedule.Tensorize: loop " ^ Indexing.symbol_ident sym
-                 ^ " must be exactly the body of loop " ^ Indexing.symbol_ident of_
-                 ^ " (a perfectly nested i x j x k micro-kernel)")
-          in
-          let jfc = nested ~of_:i j ifc.body in
-          let kfc = nested ~of_:j k jfc.body in
-          List.iter
-            [ { ifc with body = Noop }; { jfc with body = Noop }; { kfc with body = Noop } ]
-            ~f:(fun fc ->
-              if (not (equal_axis_type fc.axis Serial)) || fc.from_ <> 0 then
-                invalid_arg
-                  ("Schedule.Tensorize: loop " ^ Indexing.symbol_ident fc.index
-                 ^ " must be Serial starting at 0"));
-          let d_tn, d_idcs, llsc =
-            match strip kfc.body with
-            | [ Set { tn; idcs; llsc; _ } ] -> (tn, idcs, llsc)
-            | _ ->
-                invalid_arg
-                  "Schedule.Tensorize: the micro-kernel body must be a single accumulation Set"
-          in
-          let is_d_read (sc : Low_level.scalar_t) =
-            match sc with
-            | Get (tn, idcs) ->
-                Tn.equal tn d_tn && Array.equal Indexing.equal_axis_index idcs d_idcs
-            | _ -> false
-          in
-          let get_operand (sc : Low_level.scalar_t) =
-            match sc with Get (tn, idcs) -> Some (tn, idcs) | _ -> None
-          in
-          let operands =
-            match llsc with
-            | Ternop (Ops.FMA, (x, _), (y, _), (acc, _)) when is_d_read acc ->
-                Option.both (get_operand x) (get_operand y)
-            | Binop (Ops.Add, (acc, _), (Binop (Ops.Mul, (x, _), (y, _)), _)) when is_d_read acc ->
-                Option.both (get_operand x) (get_operand y)
-            | Binop (Ops.Add, (Binop (Ops.Mul, (x, _), (y, _)), _), (acc, _)) when is_d_read acc ->
-                Option.both (get_operand x) (get_operand y)
-            | _ -> None
-          in
-          let x_op, y_op =
-            match operands with
-            | Some ops -> ops
-            | None ->
-                invalid_arg
-                  ("Schedule.Tensorize: the micro-kernel must accumulate a product of reads into "
-                 ^ Tn.debug_name d_tn ^ " (d[...] += a[...] * b[...], plain-add or FMA form)")
-          in
-          let mentions sym (idx : Indexing.axis_index) =
-            match idx with
-            | Indexing.Iterator s -> Indexing.equal_symbol s sym
-            | Indexing.Affine { symbols; _ } ->
-                List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
-            | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
-          in
-          let coeff sym (idx : Indexing.axis_index) =
-            match idx with
-            | Indexing.Iterator s when Indexing.equal_symbol s sym -> 1
-            | Indexing.Affine { symbols; _ } ->
-                List.sum
-                  (module Int)
-                  symbols
-                  ~f:(fun (c, s) -> if Indexing.equal_symbol s sym then c else 0)
-            | _ -> 0
-          in
-          (* Index discipline: the tile spans the operand's last two axes with unit strides in the
-             micro-kernel symbols — [row] appears with coefficient 1 exactly in component [rank-2],
-             [col] in component [rank-1], and the third symbol not at all. Outer-loop terms (the
-             block base) may appear anywhere. *)
-          let role_ok (_tn, idcs) ~row ~col =
-            let rank = Array.length idcs in
-            rank >= 2
-            && coeff row idcs.(rank - 2) = 1
-            && coeff col idcs.(rank - 1) = 1
-            && List.for_all [ i; j; k ] ~f:(fun s ->
-                Array.for_alli idcs ~f:(fun p idx ->
-                    let allowed =
-                      if Indexing.equal_symbol s row then p = rank - 2
-                      else if Indexing.equal_symbol s col then p = rank - 1
-                      else false
-                    in
-                    (not (mentions s idx)) || allowed))
-          in
-          if not (role_ok (d_tn, d_idcs) ~row:i ~col:j) then
-            invalid_arg
-              ("Schedule.Tensorize: accumulator " ^ Tn.debug_name d_tn
-             ^ " must be indexed [..., i, j] over its last two axes (unit coefficients)");
-          (* Operand roles, including transposed storage: [a] is [..., i, k] ([ta = false]) or [...,
-             k, i] ([ta = true]); [b] is [..., k, j] ([tb = false]) or [..., j, k] ([tb = true]). An
-             operand matches at most one role and orientation ([role_ok] requires both role symbols
-             present at the right positions and the third absent), so the assignment is
-             unambiguous. *)
-          let a_role op =
-            if role_ok op ~row:i ~col:k then Some false
-            else if role_ok op ~row:k ~col:i then Some true
-            else None
-          in
-          let b_role op =
-            if role_ok op ~row:k ~col:j then Some false
-            else if role_ok op ~row:j ~col:k then Some true
-            else None
-          in
-          let a_op, ta, b_op, tb =
-            match (a_role x_op, b_role y_op) with
-            | Some ta, Some tb -> (x_op, ta, y_op, tb)
-            | _ -> (
-                match (a_role y_op, b_role x_op) with
-                | Some ta, Some tb -> (y_op, ta, x_op, tb)
-                | _ ->
-                    invalid_arg
-                      ("Schedule.Tensorize: operands of the product must be indexed [..., i, k] \
-                        (or transposed [..., k, i]) and [..., k, j] (or transposed [..., j, k]) \
-                        over their last two axes (unit coefficients): "
-                      ^ Tn.debug_name (fst x_op)
-                      ^ ", "
-                      ^ Tn.debug_name (fst y_op)))
-          in
-          let zero = { terms = []; offset = 0 } in
-          let base idcs =
-            Array.map idcs ~f:(fun idx ->
-                subst_axis_index ~sym:i ~by:zero
-                  (subst_axis_index ~sym:j ~by:zero (subst_axis_index ~sym:k ~by:zero idx)))
-          in
-          For_loop
-            {
-              index = lane;
-              from_ = 0;
-              to_ = simd_width - 1;
-              axis = Workgroup;
-              trace_it = false;
-              body =
-                Tile_mma
-                  {
-                    d = (d_tn, base d_idcs);
-                    a = (fst a_op, base (snd a_op));
-                    b = (fst b_op, base (snd b_op));
-                    ta;
-                    tb;
-                    m = ifc.to_ + 1;
-                    n = jfc.to_ + 1;
-                    k = kfc.to_ + 1;
-                    lane;
-                    fallback = for_loop ifc;
-                  };
-            })
   | Expand_zero { tn; indices } ->
       (* Whole-node [Zero_out] is never distributed across hardware threads ([validate_parallel]
          rejects it in multi-threaded kernels); expand it into an ordinary loop nest — over the
@@ -1037,7 +1196,9 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
          pack_constant_tile ~debug ~src_nd ~src_dims ~prec ~packed_dims ~sym_extents ~src_prog
            ~packed_prog));
     let llc = remap_reads ~source ~from_idcs:idcs0 ~tile ~tile_idcs:packed_read_idcs opt.llc in
-    { opt with llc })
+    (* [pack_constant_tile] zero-fills pad slots of edge tiles, so the packed buffer satisfies the
+       [zero_fringe] contract over its whole index space. *)
+    { opt with llc; zero_fringe = Set.add opt.zero_fringe tile })
   else
     (* The insertion point L*: the deepest loop that must stay outside the tile — carrying an
        outer-part symbol or a reused workgroup tile axis. *)
@@ -1095,21 +1256,25 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
     in
     let iprec = Ops.index_prec () in
     let src_dims = Lazy.force source.Tn.dims in
-    let load_stmt =
-      Set { tn = tile; idcs = tile_store_idcs; llsc = Get (source, load_src_idcs); debug = "" }
-    in
     (* Edge guards per tile axis (construct-then-fold: [apply]'s trailing simplify erases the ones
-       the loop extents prove, i.e. whenever the tile sizes divide the source extents). *)
-    let load_stmt =
-      Array.fold tile_axes ~init:load_stmt ~f:(fun stmt (a, _) ->
+       the loop extents prove, i.e. whenever the tile sizes divide the source extents). The guards
+       are [Where]-form rather than statement [If]s: an out-of-range slot stores 0 — the add-reduce
+       accumulation identity — instead of staying uninitialized, so edge tiles of a non-dividing or
+       padded staging (gh-ocannl-485) are safe to read over their whole index space. The tile is
+       recorded in {!Low_level.optimized.zero_fringe} accordingly. *)
+    let guarded_get =
+      Array.fold tile_axes
+        ~init:(Get (source, load_src_idcs))
+        ~f:(fun rhs (a, _) ->
           let cond =
             Binop
               ( Ops.Cmplt,
                 (Embed_index load_src_idcs.(a), iprec),
                 (Constant (Float.of_int src_dims.(a)), iprec) )
           in
-          If { cond = (cond, iprec); body = stmt })
+          Ternop (Ops.Where, (cond, iprec), (rhs, prec), (Constant 0., prec)))
     in
+    let load_stmt = Set { tn = tile; idcs = tile_store_idcs; llsc = guarded_get; debug = "" } in
     (* Lane-aware cooperative staging (docs/proposals/tensorize-mma.md, "Lane-aware Stage"): a fresh
        extent-[w] [Workgroup] lane loop will wrap the load nest, so the loads are partitioned (or
        restricted) along the same hardware slot the tensorized micro-kernel's lane loop binds —
@@ -1291,6 +1456,7 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
       workgroup_shared =
         (if shared then Set.add opt.workgroup_shared tile else opt.workgroup_shared);
       swizzled = (if swizzle then Set.add opt.swizzled tile else opt.swizzled);
+      zero_fringe = Set.add opt.zero_fringe tile;
     }
 
 (** {2 [Privatize]: accumulator privatization}
@@ -1590,12 +1756,23 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
     ordinary scalar semantics: lane 0 initializes it, each per-iteration [Tile_mma] accumulates into
     it, and lane 0 stores it back. Metal recognizes the marked three-part region and maps the tile
     to persistent simdgroup fragments; unsupported backend calls keep the local-array fallback. *)
-let contract_tensorized_accumulator ~lane (opt : Low_level.optimized) : Low_level.optimized =
+let contract_tensorized_accumulator ~lane ~(masks : pad_mask list) (opt : Low_level.optimized) :
+    Low_level.optimized =
   let open Low_level in
   (* [Tensorize] currently identifies one micro-kernel site per scheduled routine. Keep contraction
      single-shot to avoid conflating independent accumulator lifetimes if multi-site tensorization
      is introduced; that extension should promote and mark each site explicitly. *)
   let promoted = ref None in
+  (* Pad masks (gh-ocannl-485) force the contraction: with the accumulator retargeted to a padded
+     scratch fragment, only the valid region round-trips through the target — the transfers below
+     carry the masks. On a GPU pipeline (recognized by staged workgroup-shared tiles) the masked
+     fragment is placed in workgroup-shared memory: the guarded transfers are not recognizable as a
+     fragment-resident scope, and per-thread [Local] arrays are not loadable by the simdgroup/wmma
+     intrinsics — a threadgroup-resident fragment keeps the intrinsic path firing, at the cost of a
+     per-statement load/store round-trip and a barrier pair around the reduction loop. *)
+  let masked = not (List.is_empty masks) in
+  let shared_frag = masked && not (Set.is_empty opt.workgroup_shared) in
+  let iprec = Ops.index_prec () in
   let mentions sym idx =
     match terms_of_index idx with
     | Some (terms, _) -> List.exists terms ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
@@ -1668,7 +1845,6 @@ let contract_tensorized_accumulator ~lane (opt : Low_level.optimized) : Low_leve
     | None -> invalid_arg "Schedule.Tensorize: Concat accumulator indices are unsupported"
   in
   let lane0 p body =
-    let iprec = Ops.index_prec () in
     let cond =
       Binop (Ops.Cmpeq, (Embed_index (Indexing.Iterator lane), iprec), (Constant 0., iprec))
     in
@@ -1681,6 +1857,108 @@ let contract_tensorized_accumulator ~lane (opt : Low_level.optimized) : Low_leve
         trace_it = false;
         axis = Workgroup;
       }
+  in
+  (* The shared core of the two contraction sites: mint the fragment, retarget the [Tile_mma] (and
+     its fallback's writes) inside [body] via [replace], and assemble
+     [init-load; (barrier;) reloop body'; (barrier;) store-back] — the transfers guarded by the pad
+     masks over the fresh fragment symbols: the init-load [Where]s out-of-range slots to 0 and the
+     store-back [If]s them away, so only the valid region of the padded block round-trips through
+     [target]. *)
+  let contract_around ~target ~d_base ~m ~n ~fallback ~simd_width
+      ~(reloop : Low_level.t -> Low_level.t) ~(body : Low_level.t) =
+    match (fallback_indices target fallback, fallback_axes fallback) with
+    | Some original_d_idcs, Some (i, j) ->
+        let prec = Lazy.force target.Tn.storage_prec in
+        let fragment =
+          Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
+            ~label:("fragment" :: target.Tn.label)
+            ~unpadded_dims:(lazy [| m; n |])
+            ~padding:(lazy None)
+            ()
+        in
+        Tn.Placements.update opt.optimize_ctx.placements fragment Tn.Local 178;
+        ignore (get_node opt.traced_store fragment : traced_array);
+        let fragment_idcs = [| Indexing.Iterator i; Indexing.Iterator j |] in
+        let fragment_base = [| Indexing.Fixed_idx 0; Indexing.Fixed_idx 0 |] in
+        let fallback =
+          remap_reads ~writes:true ~source:target ~from_idcs:original_d_idcs ~tile:fragment
+            ~tile_idcs:fragment_idcs fallback
+        in
+        let replaced = ref false in
+        let rec replace = function
+          | Tile_mma ({ lane = l; _ } as tm') when same_lane l ->
+              replaced := true;
+              Tile_mma { tm' with d = (fragment, fragment_base); fallback }
+          | Seq (a, b) -> Seq (replace a, replace b)
+          | For_loop f -> For_loop { f with body = replace f.body }
+          | If ({ body; _ } as x) -> If { x with body = replace body }
+          | other -> other
+        in
+        let body = replace body in
+        assert !replaced;
+        let fi = Indexing.get_symbol () and fj = Indexing.get_symbol () in
+        let target_idcs = Array.copy d_base in
+        let rank = Array.length target_idcs in
+        if rank < 2 then invalid_arg "Schedule.Tensorize: accumulator rank must be at least 2";
+        target_idcs.(rank - 2) <- add_symbol target_idcs.(rank - 2) fi;
+        target_idcs.(rank - 1) <- add_symbol target_idcs.(rank - 1) fj;
+        let local_idcs = [| Indexing.Iterator fi; Indexing.Iterator fj |] in
+        let mask_cond pm =
+          let role = if pm.pm_row then fi else fj in
+          let idx = normalize_affine ~terms:((1, role) :: pm.pm_terms) ~offset:pm.pm_offset in
+          Binop
+            (Ops.Cmplt, (Embed_index idx, iprec), (Constant (Float.of_int pm.pm_bound), iprec))
+        in
+        let transfer ~into_fragment =
+          let stmt =
+            if into_fragment then
+              let llsc =
+                List.fold masks
+                  ~init:(Get (target, target_idcs))
+                  ~f:(fun rhs pm ->
+                    Ternop (Ops.Where, (mask_cond pm, iprec), (rhs, prec), (Constant 0., prec)))
+              in
+              Set { tn = fragment; idcs = local_idcs; llsc; debug = "" }
+            else
+              List.fold masks
+                ~init:
+                  (Set
+                     {
+                       tn = target;
+                       idcs = target_idcs;
+                       llsc = Get (fragment, local_idcs);
+                       debug = "";
+                     })
+                ~f:(fun stmt pm -> If { cond = (mask_cond pm, iprec); body = stmt })
+          in
+          For_loop
+            {
+              index = fi;
+              from_ = 0;
+              to_ = m - 1;
+              trace_it = false;
+              axis = Serial;
+              body =
+                For_loop
+                  {
+                    index = fj;
+                    from_ = 0;
+                    to_ = n - 1;
+                    trace_it = false;
+                    axis = Serial;
+                    body = stmt;
+                  };
+            }
+        in
+        promoted := Some fragment;
+        Some
+          (unflat_lines
+             ([ lane0 simd_width (transfer ~into_fragment:true) ]
+             @ (if shared_frag then [ Workgroup_barrier ] else [])
+             @ [ reloop body ]
+             @ (if shared_frag then [ Workgroup_barrier ] else [])
+             @ [ lane0 simd_width (transfer ~into_fragment:false) ]))
+    | _ -> None
   in
   (* Outermost-first: attempt the contraction at each serial loop before descending, so the
      transfers land around the outermost loop of the qualifying chain (an inner qualifying loop is
@@ -1708,104 +1986,83 @@ let contract_tensorized_accumulator ~lane (opt : Low_level.optimized) : Low_leve
            && (not (Tn.equal target a))
            && (not (Tn.equal target b))
            && List.for_all (bound_symbols [] fc.body) ~f:(fun s -> not (idcs_mention s d_base))
-           && not (touches_outside_tile target fc.body) -> (
-        match (fallback_indices target fallback, fallback_axes fallback, lane_extent fc.body) with
-        | Some original_d_idcs, Some (i, j), Some simd_width ->
-            let prec = Lazy.force target.Tn.storage_prec in
-            let fragment =
-              Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
-                ~label:("fragment" :: target.Tn.label)
-                ~unpadded_dims:(lazy [| m; n |])
-                ~padding:(lazy None)
-                ()
-            in
-            Tn.Placements.update opt.optimize_ctx.placements fragment Tn.Local 178;
-            ignore (get_node opt.traced_store fragment : traced_array);
-            let fragment_idcs = [| Indexing.Iterator i; Indexing.Iterator j |] in
-            let fragment_base = [| Indexing.Fixed_idx 0; Indexing.Fixed_idx 0 |] in
-            let fallback =
-              remap_reads ~writes:true ~source:target ~from_idcs:original_d_idcs ~tile:fragment
-                ~tile_idcs:fragment_idcs fallback
-            in
-            let replaced = ref false in
-            let rec replace = function
-              | Tile_mma ({ lane = l; _ } as tm') when same_lane l ->
-                  replaced := true;
-                  Tile_mma { tm' with d = (fragment, fragment_base); fallback }
-              | Seq (a, b) -> Seq (replace a, replace b)
-              | For_loop f -> For_loop { f with body = replace f.body }
-              | If ({ body; _ } as x) -> If { x with body = replace body }
-              | other -> other
-            in
-            let body = replace fc.body in
-            assert !replaced;
-            let fi = Indexing.get_symbol () and fj = Indexing.get_symbol () in
-            let target_idcs = Array.copy d_base in
-            let rank = Array.length target_idcs in
-            if rank < 2 then invalid_arg "Schedule.Tensorize: accumulator rank must be at least 2";
-            target_idcs.(rank - 2) <- add_symbol target_idcs.(rank - 2) fi;
-            target_idcs.(rank - 1) <- add_symbol target_idcs.(rank - 1) fj;
-            let local_idcs = [| Indexing.Iterator fi; Indexing.Iterator fj |] in
-            let transfer ~into_fragment =
-              let stmt =
-                if into_fragment then
-                  Set
-                    {
-                      tn = fragment;
-                      idcs = local_idcs;
-                      llsc = Get (target, target_idcs);
-                      debug = "";
-                    }
-                else
-                  Set
-                    {
-                      tn = target;
-                      idcs = target_idcs;
-                      llsc = Get (fragment, local_idcs);
-                      debug = "";
-                    }
-              in
-              For_loop
-                {
-                  index = fi;
-                  from_ = 0;
-                  to_ = m - 1;
-                  trace_it = false;
-                  axis = Serial;
-                  body =
-                    For_loop
-                      {
-                        index = fj;
-                        from_ = 0;
-                        to_ = n - 1;
-                        trace_it = false;
-                        axis = Serial;
-                        body = stmt;
-                      };
-                }
-            in
-            promoted := Some fragment;
-            Some
-              (unflat_lines
-                 [
-                   lane0 simd_width (transfer ~into_fragment:true);
-                   for_loop { fc with body };
-                   lane0 simd_width (transfer ~into_fragment:false);
-                 ])
-        | _ -> None)
+           && (not (touches_outside_tile target fc.body))
+           && List.for_all masks ~f:(fun pm ->
+                  (* The mask guards must be expressible at the transfer site: every outer term of
+                     a guard index must still be bound there. *)
+                  List.for_all pm.pm_terms ~f:(fun (_, s) ->
+                      (not (Indexing.equal_symbol s fc.index))
+                      && not
+                           (List.mem (bound_symbols [] fc.body) s ~equal:Indexing.equal_symbol)))
+      -> (
+        match lane_extent fc.body with
+        | Some simd_width ->
+            contract_around ~target ~d_base ~m ~n ~fallback ~simd_width
+              ~reloop:(fun body -> for_loop { fc with body })
+              ~body:fc.body
+        | None -> None)
     | _ -> None
   in
   let llc = rewrite opt.llc in
+  (* Statement-site fallback for masked tensorization without a qualifying enclosing serial loop
+     (e.g. a whole-extent block with no reduction blocking, or an extent-1 block loop): the
+     transfers wrap the lane loop of the [Tile_mma] itself. *)
+  let llc =
+    if masked && Option.is_none !promoted then (
+      let rec go llc =
+        match llc with
+        | For_loop ({ index; from_; to_; body; _ } as fc)
+          when same_lane index && Option.is_none !promoted -> (
+            match matching_tiles [] body with
+            | [ Tile_mma { d = target, _; a = a, _; b = b, _; _ } ]
+              when Tn.equal target a || Tn.equal target b ->
+                invalid_arg
+                  ("Schedule.Tensorize: pad-masked accumulator " ^ Tn.debug_name target
+                 ^ " coincides with an operand")
+            | [ Tile_mma { d = target, d_base; m; n; fallback; _ } ] -> (
+                match
+                  contract_around ~target ~d_base ~m ~n ~fallback ~simd_width:(to_ - from_ + 1)
+                    ~reloop:Fn.id ~body:(For_loop fc)
+                with
+                | Some replaced -> replaced
+                | None -> For_loop fc)
+            | _ -> For_loop { fc with body = go body })
+        | Seq (a, b) ->
+            let a = go a in
+            Seq (a, go b)
+        | For_loop fc -> For_loop { fc with body = go fc.body }
+        | If ({ body; _ } as x) -> If { x with body = go body }
+        | other -> other
+      in
+      go llc)
+    else llc
+  in
+  if masked && Option.is_none !promoted then
+    invalid_arg
+      "Schedule.Tensorize: pad masks require the accumulator contraction, but no contraction site \
+       qualified (an outer term of a pad guard may be bound inside the reduction loop)";
   match !promoted with
   | None -> { opt with llc }
   | Some fragment ->
-      { opt with llc; simdgroup_fragments = Set.add opt.simdgroup_fragments fragment }
+      if masked then
+        {
+          opt with
+          llc;
+          workgroup_shared =
+            (if shared_frag then Set.add opt.workgroup_shared fragment else opt.workgroup_shared);
+        }
+      else { opt with llc; simdgroup_fragments = Set.add opt.simdgroup_fragments fragment }
 
 let apply_tensorize op (opt : Low_level.optimized) : Low_level.optimized =
   match op with
-  | Tensorize { lane; _ } ->
-      let opt = { opt with llc = apply_op opt.llc op } in
-      contract_tensorized_accumulator ~lane opt
+  | Tensorize { i; j; k; lane; simd_width } ->
+      let llc, masks =
+        tensorize_llc
+          ~zero_fringe:(Set.mem opt.Low_level.zero_fringe)
+          ~i ~j ~k ~lane ~simd_width opt.Low_level.llc
+      in
+      let opt = { opt with Low_level.llc } in
+      contract_tensorized_accumulator ~lane ~masks opt
   | _ -> assert false
 
 (** Epilogue fusion (gh-ocannl-486): fold the sole-consumer, index-space-compatible elementwise tail
@@ -2244,7 +2501,7 @@ let apply_opt_op (opt : Low_level.optimized) (op : optop) : Low_level.optimized 
   | Privatize { target; over } -> apply_privatize ~target ~over opt
   | Tensorize _ -> apply_tensorize op opt
   | Fuse_epilogue { target; shared } -> apply_fuse_epilogue ~target ~shared opt
-  | (Split _ | Swap _ | Retype _ | Unroll _ | Partition _ | Expand_zero _) as op ->
+  | (Split _ | Swap _ | Retype _ | Unroll _ | Partition _ | Pad _ | Expand_zero _) as op ->
       { opt with llc = apply_op opt.Low_level.llc op }
 
 let apply ?(static_indices = []) (sched : schedule) (opt : Low_level.optimized) :
@@ -2625,8 +2882,6 @@ let stage_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
                 else Op_legal))
 
 let op_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
-  (* [Low_level] also exports an [apply_op]; keep a handle on the schedule transform. *)
-  let apply_sched_op = apply_op in
   let open Low_level in
   let hardware = function Grid | Workgroup -> true | _ -> false in
   let vectorized = function Vectorized -> true | _ -> false in
@@ -2662,6 +2917,10 @@ let op_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
       (* Pure index-set reindexing: the segments run in the original order over the same points,
          with no hardware annotation and no reordering. *)
       Op_legal
+  | Pad _ ->
+      (* The pad iterations are no-ops (every effectful leaf statement is guarded), so the padded
+         loop runs the original iterations in the original order. *)
+      Op_legal
   | Swap { outer; inner } -> (
       (* Interchange reorders iterations; the optop contract licenses it for the
          associative-commutative accumulation patterns lowering emits (the rmw self-pairs). Beyond
@@ -2673,18 +2932,24 @@ let op_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
           loops_independent opt ~syms:[ outer; inner ] ~cross_nest:false ~licensed:rmw_license
       | Some _ -> Op_unknown "loops are not perfectly nested"
       | None -> Op_unknown ("no statement-level loop binds " ^ Indexing.symbol_ident outer))
-  | Tensorize { i; j; _ } -> (
-      (* Role-assignment validity first: the micro-kernel recognition in [apply_op]'s Tensorize
-         branch is a pure function of the code, so probing it decides exactly whether the candidate
-         compile's apply would raise — a proven [Op_illegal] with no transcription drift. This is
-         the valuable pruner: of the role permutations the autotuner proposes per serial triple, the
-         ones assigning the reduction loop to [i]/[j] (or an output loop to [k]) fail the
-         accumulator/operand index discipline here — the [a_rmw]-carrying write must be indexed
-         [..., i, j] with the [k] role absent, i.e. [k] is the only loop carrying the reduction
-         dependence. *)
-      match apply_sched_op opt.llc op with
+  | Tensorize { i; j; k; lane; simd_width } -> (
+      (* Role-assignment validity first: the micro-kernel recognition in [tensorize_llc] is a pure
+         function of the code (given the routine's zero-fringe tiles), so probing it decides
+         exactly whether the candidate compile's apply would raise — a proven [Op_illegal] with no
+         transcription drift. This is the valuable pruner: of the role permutations the autotuner
+         proposes per serial triple, the ones assigning the reduction loop to [i]/[j] (or an output
+         loop to [k]) fail the accumulator/operand index discipline here — the [a_rmw]-carrying
+         write must be indexed [..., i, j] with the [k] role absent, i.e. [k] is the only loop
+         carrying the reduction dependence. Pad-guarded micro-kernels additionally require
+         zero-fringe staged operands (gh-ocannl-485); the masked contraction's own site
+         precondition is checked at apply, not probed here. *)
+      match
+        tensorize_llc
+          ~zero_fringe:(Set.mem opt.Low_level.zero_fringe)
+          ~i ~j ~k ~lane ~simd_width opt.llc
+      with
       | exception Invalid_argument msg -> Op_illegal msg
-      | (_ : Low_level.t) ->
+      | (_ : Low_level.t * pad_mask list) ->
           (* Structure proven; the legality dimension is the affine query: the [Tile_mma] block
              distributes the [i x j] tile across the fresh hardware lane loop (whatever fragment
              mapping the intrinsic picks) and reassociates the [k] reduction — the same license as
@@ -3872,6 +4137,7 @@ let segment_optimized (full : Low_level.optimized) (llc : Low_level.t) : Low_lev
     workgroup_shared = Set.filter full.Low_level.workgroup_shared ~f:(Set.mem tns);
     simdgroup_fragments = Set.filter full.Low_level.simdgroup_fragments ~f:(Set.mem tns);
     swizzled = Set.filter full.Low_level.swizzled ~f:(Set.mem tns);
+    zero_fringe = Set.filter full.Low_level.zero_fringe ~f:(Set.mem tns);
   }
 
 (* Expand-and-annotate schedule for a segment of materialized whole-node [Zero_out]s (GPU): the

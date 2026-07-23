@@ -30,6 +30,7 @@ let make_optimized llc tns : LL.optimized =
     workgroup_shared = Base.Set.empty (module Tn);
     simdgroup_fragments = Base.Set.empty (module Tn);
     swizzled = Base.Set.empty (module Tn);
+    zero_fringe = Base.Set.empty (module Tn);
   }
 
 let make_on_device id label =

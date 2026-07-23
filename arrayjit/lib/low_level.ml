@@ -339,6 +339,12 @@ type optimized = {
           [Schedule.Stage ~swizzle:true]; requires at least 2 axes and a power-of-two minor dim.
           Renderings that assume a row-major layout (vectorized/contiguous multi-element accesses,
           tile-MMA intrinsic and register-tiled paths) must decline swizzled nodes. *)
+  zero_fringe : Set.M(Tnode).t;
+      (** Schedule-minted staged tiles whose whole index space is safe to read: slots outside the
+          staged source region (edge tiles of a non-dividing or padded staging, gh-ocannl-485) hold
+          0 — the add-reduce accumulation identity — written by the load nest's [Where]-form edge
+          guards or by the host-side constant packing. [Schedule.Tensorize] consults this to
+          discharge pad guards on the intrinsic path. *)
 }
 [@@deriving sexp_of]
 
@@ -4145,6 +4151,7 @@ let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
     workgroup_shared = Set.empty (module Tnode);
     simdgroup_fragments = Set.empty (module Tnode);
     swizzled = Set.empty (module Tnode);
+    zero_fringe = Set.empty (module Tnode);
   }
 
 let code_hum_margin = ref 100
