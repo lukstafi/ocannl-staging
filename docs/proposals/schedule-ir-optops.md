@@ -1,7 +1,10 @@
 # Schedule IR: OptOps-style loop transforms as values
 
 **Date**: 2026-06-12 (stub); elaborated 2026-07-04; implemented 2026-07-05
-**Status**: Phases S1–S4 implemented (`arrayjit/lib/schedule.ml`). Deviations and findings:
+**Status**: Phases S1–S4 implemented (`arrayjit/lib/schedule.ml`). Promoted to primary
+documentation: [docs/schedules_and_autotuning.md](../schedules_and_autotuning.md) — like all
+proposal files, this document records the design rationale and its evolution and is not kept
+current with the code. Deviations and findings:
 
 - The vocabulary gained `Expand_zero` (not in the original §1): lowering keeps `Zero_out` as an
   opaque statement, and whole-node zeroing is rejected in multi-threaded kernels, so annotated
