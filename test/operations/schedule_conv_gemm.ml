@@ -124,8 +124,9 @@ let () =
     ignore (ctx, routine);
     (* The C-backend seed count: serial + Grid on unit-stride rows, each with its fused-epilogue
        twin (the 3x3 conv's two kernel-window loops are no obstacle since the whole-window
-       contraction, gh-ocannl-501); none on strided rows (the packing Stage packs by index range —
-       see the pipeline legs). *)
+       contraction, gh-ocannl-501); none on strided rows — the seeds stay gated on a unit-stride
+       row until the seeding wave adopts the compacting Stage (gh-ocannl-502; the pipeline legs
+       exercise it through explicit transforms). *)
     p (tag ^ " C-backend conv seeds") (!n_seeds = want_seeds);
     match !site with
     | None -> p (tag ^ " detected") false
@@ -275,27 +276,59 @@ let () =
      guards compare against the padded dims, [Tn.dims]), so the halo values participate in the
      packed tile exactly as in the natural form — staging padded convs is sound. *)
   pipeline_leg "cvp" make_conv_s1p;
-  (* A strided row packs a dilated tile ([Stage] packs by index range), which [Tensorize]'s
-     unit-coefficient discipline rejects — the reorder still holds, and the seeds are gated on a
-     unit-stride row (asserted below), so autotune never proposes the rejected form. *)
-  (let want2 =
-     let _, _, y = make_conv_s2v "cvg2_r" in
-     run_plain "cvg2_ref" y
-   in
-   let swapped2 = run_sched "cvg2_swap" (make_conv_s2v "cvg2_s") ~tensorized:false in
-   p "cvg2: reorder-only conv matches the natural form within tolerance"
-     (Array.for_all2_exn swapped2 want2 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)));
-   match run_sched "cvg2_gemm" (make_conv_s2v "cvg2_g") ~tensorized:true with
-   | _ -> p "cvg2: strided-row tensorization rejected with a targeted error" false
-   | exception Invalid_argument msg ->
-       p "cvg2: strided-row tensorization rejected with a targeted error"
-         (String.is_substring msg ~substring:"Schedule.Tensorize"));
-  if on_cpu then
-    let src = Stdio.In_channel.read_all (Utils.build_file "cvg_gemm.c") in
-    let has s = String.is_substring src ~substring:s in
+  (* A strided row used to pack a dilated tile ([Stage] packed by index range), which [Tensorize]'s
+     unit-coefficient discipline rejected. The compacting Stage (gh-ocannl-502) packs the strided
+     window densely — source reads keep the stride, tile store/read use coefficient 1 — so the
+     packed+tensorized stride-2 pipeline now runs, matching its serial twins like the unit-stride
+     legs. The seeds stay gated on a unit-stride row (asserted above) until the seeding wave adopts
+     the compacting form. *)
+  pipeline_leg "cvg2" make_conv_s2v;
+  if on_cpu then (
+    let has_in file s = String.is_substring (Stdio.In_channel.read_all (Utils.build_file file)) ~substring:s in
+    let struct_pin file =
+      has_in file "Tile_mma register tiling" && has_in file "fragment_" && has_in file "tile_"
+    in
     p "conv pipeline structure: im2col packs, register tiling, resident fragment"
-      (has "Tile_mma register tiling" && has "fragment_" && has "tile_")
-  else p "conv pipeline structure: im2col packs, register tiling, resident fragment" true;
+      (struct_pin "cvg_gemm.c");
+    p "cvg2 pipeline structure: compacted im2col packs, register tiling fires on the strided row"
+      (struct_pin "cvg2_gemm.c"))
+  else (
+    p "conv pipeline structure: im2col packs, register tiling, resident fragment" true;
+    p "cvg2 pipeline structure: compacted im2col packs, register tiling fires on the strided row"
+      true);
+  (* v1 fence: hoisted (host-side) packing does not compact — a strided tile part is rejected
+     loudly rather than silently packing a dilated tile. *)
+  (let x, _kern, y = make_conv_s2v "cvg2_h" in
+   let transform (opt : LL.optimized) =
+     let paths = nest_paths opt.LL.llc in
+     let ow, ic =
+       match List.find_exn paths ~f:(fun q -> List.length q = 7) with
+       | [ _b; _oh; ow; _oc; ic; _kh; _kw ] -> (ow, ic)
+       | _ -> assert false
+     in
+     Sched.apply
+       [
+         Sched.Stage
+           {
+             source = x.Tensor.value;
+             tile_loops = [ ow; ic ];
+             shared = false;
+             cooperative = None;
+             hoisted = true;
+             swizzle = false;
+           };
+       ]
+       opt
+   in
+   match
+     Context.compile ~lowered_transform:transform (Context.auto ())
+       (named "cvg2_hoist" (Train.forward y))
+       Ir.Indexing.Empty
+   with
+   | _ -> p "cvg2: hoisted staging of a strided window rejected (no compaction in v1)" false
+   | exception Invalid_argument msg ->
+       p "cvg2: hoisted staging of a strided window rejected (no compaction in v1)"
+         (String.is_substring msg ~substring:"hoisted staging does not support compacting"));
 
   (* === Autotune seeding on conv+bias+relu: serial + Grid conv pipelines, each with its
      fused-epilogue twin (2-D convs fuse since the whole-window contraction, gh-ocannl-501; the
@@ -564,6 +597,63 @@ let () =
   | _ -> p "cvu: conv seeds per fission segment (GPU staged on metal; serial+grid on cc)" false);
   p "cvu: tuned conv matches the untuned twin within tolerance"
     (Array.for_all2_exn got_u want8 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)));
+
+  (* --- The GPU staged pipeline on a stride-2 conv (gh-ocannl-502): the compacting Stage packs the
+     strided row densely through the cooperative shared tiles — the loads keep the stride, the tile
+     store/read are unit-coefficient — so the tensorized micro-kernel applies unchanged. Input 17
+     with k=3, s=2 keeps row = 8, oc = 16, ic = 8 (the 8x8x8 intrinsic tile divides). --- *)
+  let make_conv8_s2 sub =
+    let x =
+      NTDSL.init ~l:(sub ^ "x") ~prec:Ir.Ops.single ~b:[ 2 ] ~o:[ 17; 17; 8 ]
+        ~f:(fun idcs -> Float.of_int ((idcs.(0) + idcs.(1) + (2 * idcs.(2)) + (3 * idcs.(3))) % 7))
+        ()
+    in
+    let kern = make_kern8 sub in
+    let%op y =
+      x +* "...| 2*oh<+kh, 2*ow<+kw, ..ic..; |kh, kw, ..ic.. -> ..oc.. => ...| oh, ow, ..oc.." kern
+    in
+    (x, kern, y)
+  in
+  let want8s2 =
+    let _, _, y = make_conv8_s2 "cvu2_r" in
+    run_plain "cvu2_ref" y
+  in
+  if on_metal || String.equal backend_name "cuda" then
+    let x, kern, y = make_conv8_s2 "cvu2_g" in
+    let conv_sched (site : Autotune.conv_site) _seg =
+      let w =
+        match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
+        | Some m -> m.Ir.Backend_intf.mma_simd_width
+        | None -> 32
+      in
+      let stage source tile_loops =
+        Sched.Stage
+          {
+            source;
+            tile_loops;
+            shared = true;
+            cooperative = Some w;
+            hoisted = false;
+            swizzle = false;
+          }
+      in
+      let tz, _lane =
+        Sched.tensorize ~i:site.Autotune.c_row ~j:site.Autotune.c_oc ~k:site.Autotune.c_red
+          ~simd_width:w
+      in
+      List.map site.Autotune.c_outer ~f:(fun (s, _) -> Sched.Retype { axis = s; ty = LL.Grid })
+      @ reorder_swaps ~current:site.Autotune.c_loops ~target:(conv_target site)
+      @ [
+          stage x.Tensor.value [ site.Autotune.c_row; site.Autotune.c_red ];
+          stage kern.Tensor.value [ site.Autotune.c_red; site.Autotune.c_oc ];
+          tz;
+        ]
+    in
+    let got = run_fiss_sched "cvu2_gpu" y ~conv_sched in
+    p "cvu2: GPU staged stride-2 conv (compacted) matches the natural form within tolerance"
+      (Array.for_all2_exn got want8s2 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)))
+  else
+    p "cvu2: GPU staged stride-2 conv (compacted) matches the natural form within tolerance" true;
 
   (* === Blocked tile flavors (gh-ocannl-500): the GEMM row is split into [Grid] panels before the
      reorder — cache-blocked pool panels on the C backends, extra threadgroups per row-block on GPU
