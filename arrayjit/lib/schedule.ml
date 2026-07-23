@@ -806,8 +806,13 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
     reads of [source] to use one index vector (v1). Each source axis's index is decomposed into a
     tile part (terms over [tile_loops], positive coefficients) and an outer part; source axes with a
     nonempty tile part become tile axes, sized by the tile part's range over the tile loops'
-    extents. The tile's axes follow the {e tile_loops} order (the position of each axis's first
-    tile-part symbol in the list; ties keep source order), not the source's: a packing Stage over a
+    extents — except that a single-term tile part with coefficient > 1 (a strided window, e.g. a
+    stride-2 conv's implicit-GEMM row) is {e compacted} (gh-ocannl-502): the tile axis is sized by
+    the loop extent and stored/read at coefficient 1, while the load nest's source index (and edge
+    guard) keeps the stride, so the packed tile is dense and satisfies [Tensorize]'s
+    unit-coefficient index discipline. Hoisted staging rejects compaction (v1). The tile's axes
+    follow the {e tile_loops} order (the position of each axis's first tile-part symbol in the
+    list; ties keep source order), not the source's: a packing Stage over a
     transposed operand normalizes its layout — [tile_loops = [k; j]] on a [j, k]-stored source packs
     a [k]-major tile — which is what lets packed tiles feed [Tensorize]'s register-tiled
     micro-kernel with [ta = tb = false] (gh-ocannl-469). Every in-tree pipeline before this passed
@@ -1050,13 +1055,27 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
     let fl = floop_of_exn s in
     fl.to_ - fl.from_ + 1
   in
-  (* Tile axes: source axes with a nonempty tile part; dim = the tile part's range. Ordered by the
-     position in [tile_loops] of each axis's first tile-part symbol (stable within source order), so
-     the caller's [tile_loops] order picks the packed layout (see the section comment). *)
+  (* Compacting Stage (gh-ocannl-502): a single-term tile part with coefficient [c > 1] — a strided
+     window, e.g. the implicit-GEMM row of a stride-2 conv, whose source index carries [c*row] — is
+     packed densely: the tile axis is sized by the loop extent rather than the strided range, and
+     the tile store/read indices use the symbol with coefficient 1, so downstream [Tensorize]'s
+     unit-coefficient index discipline accepts the tile. Only the load's source index (and its edge
+     guard) keeps the stride. Multi-term tile parts keep the range-sized (dilated) layout: their
+     dense remap is not injective in general. *)
+  let compacted a =
+    match decomp.(a) with [ (c, s) ], _, _ when c > 1 -> Some s | _ -> None
+  in
+  (* Tile axes: source axes with a nonempty tile part; dim = the tile part's range (the loop extent
+     when compacted). Ordered by the position in [tile_loops] of each axis's first tile-part symbol
+     (stable within source order), so the caller's [tile_loops] order picks the packed layout (see
+     the section comment). *)
   let tile_axes =
     Array.filter_mapi decomp ~f:(fun a (tp, _, _) ->
         if List.is_empty tp then None
-        else Some (a, List.fold tp ~init:1 ~f:(fun acc (c, s) -> acc + (c * (extent s - 1)))))
+        else
+          match compacted a with
+          | Some s -> Some (a, extent s)
+          | None -> Some (a, List.fold tp ~init:1 ~f:(fun acc (c, s) -> acc + (c * (extent s - 1)))))
   in
   let tile_loop_pos s =
     match List.findi tile_loops ~f:(fun _ s' -> Indexing.equal_symbol s s') with
@@ -1096,6 +1115,11 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
        tile axes — so no load nest is emitted; the reads are remapped to a fresh host-initialized
        constant whose buffer is packed on the host at link time and uploaded once per device into
        the constant pool. *)
+    Array.iteri decomp ~f:(fun a _ ->
+        if Option.is_some (compacted a) then
+          invalid_arg
+            "Schedule.Stage: hoisted staging does not support compacting a strided tile part (v1) \
+             — its blocked outer decomposition assumes the tile part addresses the source densely");
     if not (Host_inits.mem source) then
       invalid_arg
         ("Schedule.Stage: hoisted staging requires registered host-init data for "
@@ -1275,12 +1299,16 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
     let tile_store_idcs =
       Array.map tile_axes ~f:(fun (a, _) ->
           let tp, _, _ = decomp.(a) in
-          normalize_affine ~terms:(subst_terms tp) ~offset:0)
+          let terms =
+            match compacted a with Some s -> [ (1, load_sym s) ] | None -> subst_terms tp
+          in
+          normalize_affine ~terms ~offset:0)
     in
     let tile_read_idcs =
       Array.map tile_axes ~f:(fun (a, _) ->
           let tp, _, _ = decomp.(a) in
-          normalize_affine ~terms:tp ~offset:0)
+          let terms = match compacted a with Some s -> [ (1, s) ] | None -> tp in
+          normalize_affine ~terms ~offset:0)
     in
     let iprec = Ops.index_prec () in
     let src_dims = Lazy.force source.Tn.dims in
