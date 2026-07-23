@@ -74,6 +74,10 @@ opam install hipjit   # for AMD HIP backend
 - `test/`: Integration tests and tutorials
 - `bin/`: Command-line utilities
 
+**Before working on a subsystem, skim the matching section of `docs/agent-notes.md`** — distilled
+cross-session agent knowledge (solver/backend traps, known bugs with workarounds, debug recipes,
+design history) that is not derivable from the code alone.
+
 ### Key Concepts
 
 1. **Dual Syntax Extensions**:
