@@ -422,6 +422,14 @@ type binop =
   | Threefry4x32_light
       (** 4x32-bit Threefry PRNG, 2-round light version (as in JAX/XLA). Requires a 128-bit key and
           a 128-bit counter and outputs a 128-bit value (precision [Uint4x32]). *)
+  | Uint4x32_to_prec_uniform_lane
+      (** Extracts one lane of the packed uniform conversion: the first argument is a Uint4x32
+          block, the second an integer lane index in [\[0, vec_unop_lanes prec)]; the result is
+          lane [i] of {!vec_unop.Uint4x32_to_prec_uniform} applied to the block, guaranteed
+          bitwise-identical to the corresponding vectorized store. IR-internal (gh-509 task 4):
+          minted by the virtualizer to inline packed-uniform results per cell; not exposed in the
+          user-facing syntaxes. Heterogeneous: the arguments must not be converted to the result
+          precision. *)
 [@@deriving sexp, compare, equal]
 
 type unop =
@@ -481,7 +489,7 @@ let neutral_elem = function
   | And -> 1.
   | Or -> 0.
   | Arg2 | Arg1 | Mod | Cmplt | Cmpeq | Cmpne | Threefry4x32_crypto
-  | Threefry4x32_light (* | Shl | Shr *) ->
+  | Threefry4x32_light | Uint4x32_to_prec_uniform_lane (* | Shl | Shr *) ->
       0.
 
 let interpret_binop op v1 v2 =
@@ -509,6 +517,9 @@ let interpret_binop op v1 v2 =
   | And -> if v1 <> 0. && v2 <> 0. then 1. else 0.
   | Threefry4x32_crypto | Threefry4x32_light ->
       invalid_arg "Ops.interpret_binop: Threefry4x32 operations are outside the domain of float"
+  | Uint4x32_to_prec_uniform_lane ->
+      invalid_arg
+        "Ops.interpret_binop: Uint4x32_to_prec_uniform_lane argument outside the domain of float"
 
 let interpret_unop op v =
   let open Float in
@@ -570,6 +581,7 @@ let binop_cd_syntax = function
   | Min -> "@-"
   | Threefry4x32_crypto -> "^^^^"
   | Threefry4x32_light -> "^^"
+  | Uint4x32_to_prec_uniform_lane -> "^^."
 (* | Shl -> "lsl" *)
 (* | Shr -> "lsr" *)
 
@@ -595,6 +607,7 @@ let binop_cd_fallback_syntax = function
   | Min -> "min"
   | Threefry4x32_crypto -> "threefry4x32_crypto"
   | Threefry4x32_light -> "threefry4x32_light"
+  | Uint4x32_to_prec_uniform_lane -> "uint4x32_to_prec_uniform_lane"
 (* | Shl -> "shlf" *)
 (* | Shr -> "shrf" *)
 
@@ -650,9 +663,15 @@ let binop_c_syntax prec v =
       (* This corresponds to the pure C implementation in builtins.c. *)
       ("arrayjit_threefry4x32_crypto(", ",", ")")
   | Threefry4x32_light, _ -> ("arrayjit_threefry4x32_light(", ",", ")")
+  | Uint4x32_to_prec_uniform_lane, Uint4x32_prec _ ->
+      invalid_arg "Ops.binop_c_syntax: Uint4x32_to_prec_uniform_lane not supported for Uint4x32"
+  | Uint4x32_to_prec_uniform_lane, _ ->
+      ("uint4x32_to_" ^ prec_string prec ^ "_uniform_lane(", ",", ")")
 
 let is_assign_op = function
-  | Arg1 | Mod | Threefry4x32_crypto | Threefry4x32_light (* | Shl | Shr *) | Cmplt | Cmpeq | Cmpne
+  | Arg1 | Mod | Threefry4x32_crypto | Threefry4x32_light | Uint4x32_to_prec_uniform_lane
+  (* | Shl | Shr *)
+  | Cmplt | Cmpeq | Cmpne
     ->
       false
   | Add | Sub | Mul | Div | ToPowOf | Relu_gate | Satur01_gate | Arg2 | Max | Min | Or | And -> true
@@ -681,7 +700,9 @@ let assign_op_cd_syntax ~initialize_neutral = function
   | Min -> "=@-"
   | Or -> "=||"
   | And -> "=&&"
-  | Arg1 | Mod | Threefry4x32_crypto | Threefry4x32_light (* | Shl | Shr *) | Cmplt | Cmpeq | Cmpne
+  | Arg1 | Mod | Threefry4x32_crypto | Threefry4x32_light | Uint4x32_to_prec_uniform_lane
+  (* | Shl | Shr *)
+  | Cmplt | Cmpeq | Cmpne
     ->
       invalid_arg "Ops.assign_op_cd_syntax: not an assignment op"
 
@@ -987,7 +1008,9 @@ let is_homogeneous_prec_vec_unop = function
 (** Returns true if the binary operation is homogeneous in precision, meaning its arguments should
     be converted to the result precision. *)
 let is_homogeneous_prec_binop = function
-  | _ -> true (* All binary operations are currently homogeneous *)
+  | Uint4x32_to_prec_uniform_lane ->
+      false (* Heterogeneous: uint4x32 block and integer lane index *)
+  | _ -> true (* All other binary operations are homogeneous *)
 
 (** Returns true if the ternary operation is homogeneous in precision, meaning its arguments should
     be converted to the result precision. *)

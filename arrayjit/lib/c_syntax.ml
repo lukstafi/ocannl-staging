@@ -379,6 +379,7 @@ struct
               And;
               Threefry4x32_crypto;
               Threefry4x32_light;
+              Uint4x32_to_prec_uniform_lane;
             ]
           ~f:(fun op ->
             let p, _, _ =

@@ -1941,7 +1941,9 @@ and interval_of_uncached ~ienv ~(prec : Ops.prec) (llsc : scalar_t) : interval_r
           else if Interval.definitely_false a.ival && Interval.definitely_false b.ival then
             decided ~srcs:(Set.union a.srcs b.srcs) false
           else bool_undecided
-      | Ops.ToPowOf | Ops.Threefry4x32_crypto | Ops.Threefry4x32_light -> pure Interval.top)
+      | Ops.ToPowOf | Ops.Threefry4x32_crypto | Ops.Threefry4x32_light
+      | Ops.Uint4x32_to_prec_uniform_lane ->
+          pure Interval.top)
   | Ternop (op, ((v1, p1) as _a1), (v2, _), (v3, _)) -> (
       match op with
       | Ops.Where ->
@@ -2119,7 +2121,8 @@ let simplify_llc static_indices llc =
     | Embed_index (Concat _) -> (llsc, prec) (* Cannot simplify concat to constants *)
     | Binop (Arg1, (llv1, prec1), _) -> loop_scalar (llv1, prec1)
     | Binop (Arg2, _, (llv2, prec2)) -> loop_scalar (llv2, prec2)
-    | Binop ((Threefry4x32_crypto | Threefry4x32_light), _, _) -> (llsc, prec)
+    | Binop ((Threefry4x32_crypto | Threefry4x32_light | Uint4x32_to_prec_uniform_lane), _, _) ->
+        (llsc, prec)
     | Binop (op, (Constant c1, prec1), (Constant c2, prec2)) ->
         (Constant (Ops.interpret_binop op c1 c2), Ops.promote_prec prec1 prec2)
     | Binop (Add, (llsc, prec1), (Constant 0., _))

@@ -529,6 +529,46 @@ int8x16_t uint4x32_to_fp8_uniform_vec(uint4x32_t x) {
     return result;
 }
 
+/* Lane extraction from the packed uniform conversion (gh-509 task 4): used to inline
+   packed-uniform results per cell. Implemented via the _vec functions so the value stream is
+   bitwise-identical to the vectorized stores by construction. */
+
+float uint4x32_to_single_uniform_lane(uint4x32_t x, int32_t lane) {
+    return uint4x32_to_single_uniform_vec(x).v[lane];
+}
+
+double uint4x32_to_double_uniform_lane(uint4x32_t x, int32_t lane) {
+    return uint4x32_to_double_uniform_vec(x).v[lane];
+}
+
+int32_t uint4x32_to_int32_uniform_lane(uint4x32_t x, int32_t lane) {
+    return uint4x32_to_int32_uniform_vec(x).v[lane];
+}
+
+int64_t uint4x32_to_int64_uniform_lane(uint4x32_t x, int32_t lane) {
+    return uint4x32_to_int64_uniform_vec(x).v[lane];
+}
+
+int8_t uint4x32_to_byte_uniform_lane(uint4x32_t x, int32_t lane) {
+    return uint4x32_to_byte_uniform_vec(x).v[lane];
+}
+
+uint16_t uint4x32_to_uint16_uniform_lane(uint4x32_t x, int32_t lane) {
+    return uint4x32_to_uint16_uniform_vec(x).v[lane];
+}
+
+uint16_t uint4x32_to_bfloat16_uniform_lane(uint4x32_t x, int32_t lane) {
+    return uint4x32_to_bfloat16_uniform_vec(x).v[lane];
+}
+
+HALF_T uint4x32_to_half_uniform_lane(uint4x32_t x, int32_t lane) {
+    return uint4x32_to_half_uniform_vec(x).v[lane];
+}
+
+int8_t uint4x32_to_fp8_uniform_lane(uint4x32_t x, int32_t lane) {
+    return uint4x32_to_fp8_uniform_vec(x).v[lane];
+}
+
 /* Conversion functions from various precisions to uint4x32_t */
 uint4x32_t single_to_uint4x32(float x) {
     uint32_t bits;

@@ -902,6 +902,16 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                       "HIP backend: Threefry4x32_light requires target precision to be uint4x32, \
                        but got %s"
                       (Ops.prec_string prec)))
+      | Uint4x32_to_prec_uniform_lane, _ -> (
+          (* Must precede the fp8 bridge: the builtin already yields the target precision (bitwise
+             lane of the vectorized conversion). *)
+          match prec with
+          | Ops.Uint4x32_prec _ ->
+              raise
+              @@ Utils.User_error
+                   "HIP backend: Uint4x32_to_prec_uniform_lane not supported for Uint4x32 target \
+                    precision"
+          | _ -> func ("uint4x32_to_" ^ Ops.prec_string prec ^ "_uniform_lane"))
       | _, Fp8_prec _ ->
           (* __hip_fp8_e5m2 defines no arithmetic operators, and its implicit conversion operators
              (float, double, int, char, ... in amd_hip_fp8.h) make the built-in operators ambiguous,

@@ -956,6 +956,14 @@ module Impl = struct
                       "Metal backend: Threefry4x32_light requires target precision to be uint4x32, \
                        but got %s"
                       (Ops.prec_string prec)))
+      | Uint4x32_to_prec_uniform_lane, _ -> (
+          match prec with
+          | Ops.Uint4x32_prec _ ->
+              raise
+              @@ Utils.User_error
+                   "Metal backend: Uint4x32_to_prec_uniform_lane not supported for Uint4x32 target \
+                    precision"
+          | _ -> func ("uint4x32_to_" ^ Ops.prec_string prec ^ "_uniform_lane"))
       | Arg1, _ | Arg2, _ -> invalid_arg "Metal C_syntax_config: Arg1/Arg2 not operators"
 
     let unop_syntax prec op =
