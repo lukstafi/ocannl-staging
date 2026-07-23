@@ -48,6 +48,16 @@ type optop =
       simd_width : int;
     }
   | Fuse_epilogue of { target : Tn.t; shared : bool }
+  | Split_reduce of {
+      axis : Indexing.symbol;  (** The Serial reduction loop to split, by its index symbol. *)
+      target : Tn.t;  (** The accumulated node whose reduction over [axis] is split. *)
+      num_blocks : int;  (** Number of per-block partials (the new block loop's extent). *)
+      block_index : Indexing.symbol;
+      inner_index : Indexing.symbol;
+      combine_indices : Indexing.symbol list;
+          (** Fresh symbols, one per [target] axis, binding the combine nest's loops; see
+              {!split_reduce}. *)
+    }
 [@@deriving sexp_of]
 
 type schedule = optop list [@@deriving sexp_of]
@@ -70,6 +80,15 @@ let expand_zero ~tn =
   let rank = Array.length (Lazy.force tn.Tn.dims) in
   let indices = List.init rank ~f:(fun _ -> Indexing.get_symbol ()) in
   (Expand_zero { tn; indices }, indices)
+
+let split_reduce ~axis ~target ~num_blocks =
+  let block_index = Indexing.get_symbol () and inner_index = Indexing.get_symbol () in
+  let rank = Array.length (Lazy.force target.Tn.dims) in
+  let combine_indices = List.init rank ~f:(fun _ -> Indexing.get_symbol ()) in
+  ( Split_reduce { axis; target; num_blocks; block_index; inner_index; combine_indices },
+    block_index,
+    inner_index,
+    combine_indices )
 
 (** {2 Index substitution}
 
@@ -193,6 +212,15 @@ type floop = {
 
 let for_loop { index; from_; to_; body; trace_it; axis } =
   Low_level.For_loop { index; from_; to_; body; trace_it; axis }
+
+let rec find_loop axis (llc : Low_level.t) : Low_level.t option =
+  let open Low_level in
+  match llc with
+  | For_loop { index; _ } when Indexing.equal_symbol index axis -> Some llc
+  | For_loop { body; _ } -> find_loop axis body
+  | Seq (a, b) -> ( match find_loop axis a with Some _ as r -> r | None -> find_loop axis b)
+  | If { body; _ } -> find_loop axis body
+  | _ -> None
 
 (* Rewrites the unique statement-level [For_loop] whose index is [sym]. Loops inside [Local_scope]
    bodies are deliberately out of scope: annotated loops there are rejected by [validate_parallel],
@@ -566,7 +594,7 @@ let tensorize_llc ~(zero_fringe : Tn.t -> bool) ~i ~j ~k ~lane ~simd_width (llc 
 let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
   let open Low_level in
   match op with
-  | Stage _ | Privatize _ | Fuse_epilogue _ | Tensorize _ ->
+  | Stage _ | Privatize _ | Fuse_epilogue _ | Tensorize _ | Split_reduce _ ->
       assert false (* Handled by [apply_opt_op]: they need the whole [optimized]. *)
   | Split { axis; factor; outer; inner; outer_index; inner_index } ->
       rewrite_loop ~what:"Schedule.Split" ~sym:axis llc ~f:(fun fc ->
@@ -1747,6 +1775,471 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
         ])
   |> fun llc -> { opt with llc }
 
+(** {2 [Split_reduce]: deterministic two-pass split reduction (gh-ocannl-484)}
+
+    Parallel reductions without atomics. The Serial reduction loop [axis] is split into [num_blocks]
+    contiguous chunks; each chunk accumulates into its own row of a fresh scratch node [partials] of
+    dims [num_blocks x target-dims] (minted in the tile namespace, placed [On_device], registered in
+    the traced store), initialized to the accumulation identity; a synthesized combine statement then
+    folds the partials into [target] in a fixed balanced-tree order. Both passes are ordinary
+    statements of the routine: the fresh block loop is freely annotatable (its index pins the
+    partials row, so parallelizing it is race-free), the [partials] producer/consumer pair is
+    exactly the materialized cross-nest edge kernel fission cuts at, and the combine tree is a
+    function of the schedule alone — reproducible run to run, unlike atomics. Within each chunk the
+    original serial order and rounding are preserved; across chunks the reduction is reassociated
+    (the same license as [Swap] of accumulations), so results are deterministic {e per schedule},
+    not bitwise-equal to the unsplit serial reduction — schedule identity pins numerics.
+
+    Two accumulation forms are recognized in the [axis] subtree (which must contain no other access
+    of [target], and the rest of the statement must not touch [target] either — its combined value
+    exists only after the combine statement):
+
+    - Static: a single rmw [Set] — [target\[idcs\] := target\[idcs\] ⊕ e] with
+      [⊕ ∈ {Add, Max, Min, Mul}] (or FMA), [idcs] free of [axis]. Each loop enclosing [axis] in the
+      statement must pin exactly one component of [idcs] (injectively, one symbol per component):
+      distinct enclosing iterations then use distinct partial cells — no partial is re-initialized —
+      and the combine nest re-iterates exactly the written cells through per-component fresh
+      symbols. The per-block init [partials := identity] sits inside the block loop, so no separate
+      zeroing pass is needed.
+    - Dynamic (the gh-466 embedding-backward scatter): a single [Set_dynamic] add-accumulation of
+      its own row ([Get_dynamic] rmw form as built by [rewrite_one_hot_reductions]), possibly under
+      guards. The write is redirected to [partials] with the block index prepended (dynamic axis
+      shifted by one): within a block, colliding rows stay serial; across blocks, rows live in
+      disjoint partials slices — so the block loop parallelizes what the scatter alone cannot
+      (gh-484 task 2). Rows are data-dependent, so [partials] is zeroed by a preceding whole-node
+      [Zero_out] statement (its own fission segment) and the combine covers all of [target]. *)
+
+let apply_split_reduce ~axis ~target ~num_blocks ~block_index ~inner_index ~combine_indices
+    (opt : Low_level.optimized) : Low_level.optimized =
+  let open Low_level in
+  if num_blocks < 2 then invalid_arg "Schedule.Split_reduce: num_blocks must be at least 2";
+  let tgt_dims = Lazy.force target.Tn.dims in
+  let rank = Array.length tgt_dims in
+  if List.length combine_indices <> rank then
+    invalid_arg
+      (Printf.sprintf
+         "Schedule.Split_reduce: %d combine indices for a rank-%d target (mint the op with \
+          Schedule.split_reduce)"
+         (List.length combine_indices) rank);
+  let prec = Lazy.force target.Tn.storage_prec in
+  let iprec = Ops.index_prec () in
+  (* Locate the top-level statement holding the axis loop; the combine statement goes right after
+     it (and the scatter form's scratch zeroing right before it). *)
+  let stmts = flat_lines [ opt.llc ] in
+  let stmt =
+    match List.find stmts ~f:(fun s -> Option.is_some (find_loop axis s)) with
+    | Some s -> s
+    | None ->
+        invalid_arg
+          ("Schedule.Split_reduce: no statement-level For_loop with index "
+         ^ Indexing.symbol_ident axis ^ " in this routine")
+  in
+  (* [target] accesses confined to the axis subtree: the rest of the statement (checked here on the
+     statement with the subtree excised) must not touch it. *)
+  let rec touches llc =
+    match llc with
+    | Noop | Comment _ | Staged_compilation _ | Declare_local _ | Workgroup_barrier -> false
+    | Tile_mma { d = d_tn, _; a = a_tn, _; b = b_tn, _; fallback; _ } ->
+        Tn.equal d_tn target || Tn.equal a_tn target || Tn.equal b_tn target || touches fallback
+    | Zero_out tn -> Tn.equal tn target
+    | Seq (a, b) -> touches a || touches b
+    | For_loop { body; _ } -> touches body
+    | Set { tn; llsc; _ } -> Tn.equal tn target || touches_scalar llsc
+    | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
+        Tn.equal tn target || touches_scalar v || touches_scalar llsc
+    | Set_from_vec { tn; arg = a, _; _ } -> Tn.equal tn target || touches_scalar a
+    | Set_local (_, llsc) -> touches_scalar llsc
+    | If { cond = c, _; body } -> touches_scalar c || touches body
+  and touches_scalar (llsc : scalar_t) =
+    match llsc with
+    | Local_scope { body; _ } -> touches body
+    | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ | Get_merge_buffer _ -> false
+    | Get (tn, _) -> Tn.equal tn target
+    | Get_dynamic { tn; dyn_value = v, _; _ } -> Tn.equal tn target || touches_scalar v
+    | Ternop (_, (a, _), (b, _), (c, _)) ->
+        touches_scalar a || touches_scalar b || touches_scalar c
+    | Binop (_, (a, _), (b, _)) -> touches_scalar a || touches_scalar b
+    | Unop (_, (a, _)) -> touches_scalar a
+  in
+  if touches (rewrite_loop ~what:"Schedule.Split_reduce" ~sym:axis stmt ~f:(fun _ -> Noop)) then
+    invalid_arg
+      ("Schedule.Split_reduce: " ^ Tn.debug_name target
+     ^ " is accessed in the same statement outside the reduction loop — its combined value only \
+        exists after the combine statement");
+  (* Loops and If guards enclosing the axis loop within the statement. *)
+  let rec enclosing_path path guarded llc =
+    match llc with
+    | For_loop { index; _ } when Indexing.equal_symbol index axis -> Some (List.rev path, guarded)
+    | For_loop { index; from_; to_; body; trace_it; axis = ty } ->
+        enclosing_path
+          ({ index; from_; to_; body = Noop; trace_it; axis = ty } :: path)
+          guarded body
+    | Seq (a, b) -> (
+        match enclosing_path path guarded a with
+        | Some _ as r -> r
+        | None -> enclosing_path path guarded b)
+    | If { body; _ } -> enclosing_path path true body
+    | _ -> None
+  in
+  let enclosing, guarded_path =
+    match enclosing_path [] false stmt with Some r -> r | None -> assert false
+  in
+  let block_it = Indexing.Iterator block_index in
+  let mint_partials () =
+    let partials =
+      Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
+        ~label:("partials" :: target.Tn.label)
+        ~unpadded_dims:(lazy (Array.append [| num_blocks |] tgt_dims))
+        ~padding:(lazy None)
+        ()
+    in
+    Tn.Placements.update opt.Low_level.optimize_ctx.placements partials Tn.On_device 184;
+    partials
+  in
+  (* The fixed-order balanced combine tree: a pure function of the schedule ([num_blocks]), so a
+     given schedule always computes bitwise-identical results, however the passes are annotated. *)
+  let build_combine ~partials ~op ~c_idcs ~loops =
+    let rec tree lo hi =
+      if hi - lo = 1 then Get (partials, Array.append [| Indexing.Fixed_idx lo |] c_idcs)
+      else
+        let mid = lo + ((hi - lo) / 2) in
+        Binop (op, (tree lo mid, prec), (tree mid hi, prec))
+    in
+    let set =
+      Set
+        {
+          tn = target;
+          idcs = c_idcs;
+          llsc = Binop (op, (Get (target, c_idcs), prec), (tree 0 num_blocks, prec));
+          debug = "";
+        }
+    in
+    List.fold_right loops ~init:set ~f:(fun (s, lo, hi) body ->
+        For_loop { index = s; from_ = lo; to_ = hi; body; trace_it = false; axis = Serial })
+  in
+  let combine_stmt = ref Noop in
+  let zero_stmt = ref None in
+  let rewritten =
+    rewrite_loop ~what:"Schedule.Split_reduce" ~sym:axis stmt ~f:(fun fc ->
+        if not (equal_axis_type fc.axis Serial) then
+          invalid_arg "Schedule.Split_reduce: the reduction loop must be Serial";
+        if fc.from_ <> 0 then
+          invalid_arg
+            ("Schedule.Split_reduce: loop " ^ Indexing.symbol_ident axis
+           ^ " must start at 0 (lowering guarantees this)");
+        let n = fc.to_ + 1 in
+        (* Scan the subtree for the accumulation of [target]. *)
+        let writes = ref [] and dyn_writes = ref [] in
+        let reads = ref [] and dyn_reads = ref [] in
+        let rec scan llc =
+          match llc with
+          | Noop | Comment _ | Declare_local _ | Workgroup_barrier -> ()
+          | Staged_compilation _ ->
+              invalid_arg
+                "Schedule.Split_reduce: opaque Staged_compilation under the reduction loop"
+          | Tile_mma _ -> invalid_arg "Schedule.Split_reduce: apply Split_reduce before Tensorize"
+          | Zero_out tn ->
+              if Tn.equal tn target then
+                invalid_arg
+                  "Schedule.Split_reduce: Zero_out of the target inside the reduction loop"
+          | Seq (a, b) ->
+              scan a;
+              scan b
+          | For_loop { body; _ } -> scan body
+          | Set { tn; idcs; llsc; _ } ->
+              if Tn.equal tn target then writes := (idcs, llsc) :: !writes;
+              scan_scalar llsc
+          | Set_dynamic { tn; idcs; dyn_axis; dyn_value = v, _; llsc; _ } ->
+              if Tn.equal tn target then dyn_writes := (idcs, dyn_axis, v, llsc) :: !dyn_writes;
+              scan_scalar v;
+              scan_scalar llsc
+          | Set_from_vec { tn; arg = a, _; _ } ->
+              if Tn.equal tn target then
+                invalid_arg "Schedule.Split_reduce: vector writes to the target are unsupported";
+              scan_scalar a
+          | Set_local (_, llsc) -> scan_scalar llsc
+          | If { cond = c, _; body } ->
+              scan_scalar c;
+              scan body
+        and scan_scalar (llsc : scalar_t) =
+          match llsc with
+          | Local_scope { body; _ } -> scan body
+          | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ | Get_merge_buffer _ -> ()
+          | Get (tn, idcs) -> if Tn.equal tn target then reads := idcs :: !reads
+          | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, _ } ->
+              if Tn.equal tn target then dyn_reads := (idcs, dyn_axis) :: !dyn_reads;
+              scan_scalar v
+          | Ternop (_, (a, _), (b, _), (c, _)) ->
+              scan_scalar a;
+              scan_scalar b;
+              scan_scalar c
+          | Binop (_, (a, _), (b, _)) ->
+              scan_scalar a;
+              scan_scalar b
+          | Unop (_, (a, _)) -> scan_scalar a
+        in
+        scan fc.body;
+        let chunk = (n + num_blocks - 1) / num_blocks in
+        let subst body =
+          map_code
+            ~fidx:
+              (subst_axis_index ~sym:axis
+                 ~by:{ terms = [ (chunk, block_index); (1, inner_index) ]; offset = 0 })
+            body
+        in
+        (* Remainder guard, construct-then-fold exactly as for [Split]. *)
+        let guard body =
+          if chunk * num_blocks = n then body
+          else
+            let cond =
+              Binop
+                ( Ops.Cmplt,
+                  ( Embed_index
+                      (Indexing.Affine
+                         { symbols = [ (chunk, block_index); (1, inner_index) ]; offset = 0 }),
+                    iprec ),
+                  (Constant (Float.of_int n), iprec) )
+            in
+            If { cond = (cond, iprec); body }
+        in
+        let pass1 ~init body =
+          let inner =
+            For_loop
+              {
+                index = inner_index;
+                from_ = 0;
+                to_ = chunk - 1;
+                body;
+                trace_it = fc.trace_it;
+                axis = Serial;
+              }
+          in
+          For_loop
+            {
+              index = block_index;
+              from_ = 0;
+              to_ = num_blocks - 1;
+              body = (match init with Some i -> Seq (i, inner) | None -> inner);
+              trace_it = fc.trace_it;
+              axis = Serial;
+            }
+        in
+        match (!writes, !dyn_writes) with
+        | [], [] ->
+            invalid_arg
+              ("Schedule.Split_reduce: " ^ Tn.debug_name target
+             ^ " is not written under the reduction loop")
+        | [ (idcs, llsc) ], [] ->
+            (* The static form: [target[idcs] := target[idcs] ⊕ e]. *)
+            if not (List.is_empty !dyn_reads) then
+              invalid_arg
+                ("Schedule.Split_reduce: mixed static write and dynamic reads of "
+               ^ Tn.debug_name target);
+            if guarded_path then
+              invalid_arg
+                "Schedule.Split_reduce: the reduction loop sits under an If guard (v1 supports \
+                 unguarded static accumulations)";
+            let acc_is = function
+              | Get (g, gi) -> Tn.equal g target && [%equal: Indexing.axis_index array] gi idcs
+              | _ -> false
+            in
+            let op =
+              match llsc with
+              | Binop (op, (t, _), _) when acc_is t -> op
+              | Binop (op, _, (t, _)) when acc_is t -> op
+              | Ternop (Ops.FMA, _, _, (t, _)) when acc_is t -> Ops.Add
+              | _ ->
+                  invalid_arg
+                    ("Schedule.Split_reduce: the write of " ^ Tn.debug_name target
+                   ^ " is not a read-modify-write accumulation")
+            in
+            let identity =
+              match op with
+              | Ops.Add -> 0.
+              | Ops.Max -> Float.neg_infinity
+              | Ops.Min -> Float.infinity
+              | Ops.Mul -> 1.
+              | _ ->
+                  invalid_arg
+                    ("Schedule.Split_reduce: unsupported accumulation operator "
+                    ^ Sexp.to_string (Ops.sexp_of_binop op))
+            in
+            (match !reads with
+            | [ ridcs ] when [%equal: Indexing.axis_index array] ridcs idcs -> ()
+            | _ ->
+                invalid_arg
+                  ("Schedule.Split_reduce: v1 requires the only read of " ^ Tn.debug_name target
+                 ^ " under the reduction loop to be the accumulation's own running total"));
+            (* Injectivity discipline: every enclosing loop pins exactly one component of the
+               accumulation cell, each component mentions at most one symbol, and only enclosing
+               symbols occur — distinct enclosing iterations then hit distinct partial cells (the
+               per-block init runs once per cell) and the combine nest re-iterates exactly the
+               written cells. *)
+            let enclosing_syms = List.map enclosing ~f:(fun fl -> fl.index) in
+            let comp_terms =
+              Array.map idcs ~f:(fun idx ->
+                  match terms_of_index idx with
+                  | None -> invalid_arg "Schedule.Split_reduce: Concat indices are unsupported"
+                  | Some (terms, off) -> (terms, off))
+            in
+            let all_syms = Array.to_list comp_terms |> List.concat_map ~f:(fun (t, _) -> List.map t ~f:snd) in
+            if List.exists all_syms ~f:(Indexing.equal_symbol axis) then
+              invalid_arg
+                ("Schedule.Split_reduce: the accumulation cell mentions the reduction loop "
+               ^ Indexing.symbol_ident axis ^ " — not a reduction over it");
+            List.iter all_syms ~f:(fun s ->
+                if not (List.mem enclosing_syms s ~equal:Indexing.equal_symbol) then
+                  invalid_arg
+                    ("Schedule.Split_reduce: the accumulation cell mentions "
+                   ^ Indexing.symbol_ident s
+                   ^ ", which is not bound by a loop enclosing the reduction loop in this \
+                      statement"));
+            List.iter enclosing_syms ~f:(fun s ->
+                match List.count all_syms ~f:(Indexing.equal_symbol s) with
+                | 1 -> ()
+                | 0 ->
+                    invalid_arg
+                      ("Schedule.Split_reduce: enclosing loop " ^ Indexing.symbol_ident s
+                     ^ " does not index the accumulation cell — Swap it inside "
+                     ^ Indexing.symbol_ident axis ^ " (or split-reduce it) first")
+                | _ ->
+                    invalid_arg
+                      ("Schedule.Split_reduce: enclosing loop " ^ Indexing.symbol_ident s
+                     ^ " indexes the accumulation cell more than once"));
+            Array.iter comp_terms ~f:(fun (terms, _) ->
+                if List.length terms > 1 then
+                  invalid_arg
+                    "Schedule.Split_reduce: v1 requires each component of the accumulation cell \
+                     to mention at most one symbol");
+            let partials = mint_partials () in
+            ignore (get_node opt.traced_store partials : traced_array);
+            let p_idcs = Array.append [| block_it |] idcs in
+            let body =
+              remap_reads ~writes:true ~source:target ~from_idcs:idcs ~tile:partials
+                ~tile_idcs:p_idcs (subst fc.body)
+            in
+            let init =
+              Set { tn = partials; idcs = p_idcs; llsc = Constant identity; debug = "" }
+            in
+            let range_of s =
+              List.find_exn enclosing ~f:(fun fl -> Indexing.equal_symbol fl.index s)
+            in
+            let combine_loops = ref [] in
+            let c_idcs =
+              Array.mapi comp_terms ~f:(fun a (terms, off) ->
+                  let ci = List.nth_exn combine_indices a in
+                  match terms with
+                  | [] -> Indexing.Fixed_idx off
+                  | [ (c, s) ] ->
+                      let fl = range_of s in
+                      combine_loops := (ci, fl.from_, fl.to_) :: !combine_loops;
+                      normalize_affine ~terms:[ (c, ci) ] ~offset:off
+                  | _ -> assert false)
+            in
+            combine_stmt :=
+              build_combine ~partials ~op ~c_idcs ~loops:(List.rev !combine_loops);
+            pass1 ~init:(Some init) (guard body)
+        | [], [ (idcs, dyn_axis, dv_scalar, llsc) ] ->
+            (* The dynamic (scatter) form, gh-466: [target[.., e, ..] += g] with [e] data-dependent
+               (possibly under guards — a guarded pad iteration merely leaves its partials at 0). *)
+            if not (List.is_empty !reads) then
+              invalid_arg
+                ("Schedule.Split_reduce: mixed dynamic write and static reads of "
+               ^ Tn.debug_name target);
+            let acc_is = function
+              | Get_dynamic { tn = g; idcs = gi; dyn_axis = ga; dyn_value = gv, _ } ->
+                  Tn.equal g target && ga = dyn_axis
+                  && [%equal: Indexing.axis_index array] gi idcs
+                  && equal_scalar_t gv dv_scalar
+              | _ -> false
+            in
+            (match llsc with
+            | Binop (Ops.Add, (t, _), _) when acc_is t -> ()
+            | Binop (Ops.Add, _, (t, _)) when acc_is t -> ()
+            | _ ->
+                invalid_arg
+                  ("Schedule.Split_reduce: the dynamic write of " ^ Tn.debug_name target
+                 ^ " is not an add-accumulation of its own row (the gh-466 scatter form)"));
+            (match !dyn_reads with
+            | [ (ridcs, ra) ] when ra = dyn_axis && [%equal: Indexing.axis_index array] ridcs idcs
+              ->
+                ()
+            | _ ->
+                invalid_arg
+                  ("Schedule.Split_reduce: v1 requires the only read of " ^ Tn.debug_name target
+                 ^ " under the reduction loop to be the scatter's own row"));
+            let partials = mint_partials () in
+            let traced = get_node opt.traced_store partials in
+            traced.zeroed_out <- true;
+            let rec redirect llc =
+              match llc with
+              | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _
+              | Workgroup_barrier | Tile_mma _ ->
+                  llc
+              | Seq (a, b) -> Seq (redirect a, redirect b)
+              | For_loop fc' -> For_loop { fc' with body = redirect fc'.body }
+              | Set ({ llsc; _ } as s) -> Set { s with llsc = redirect_scalar llsc }
+              | Set_dynamic { tn; idcs; dyn_axis; dyn_value = v, p; llsc; debug }
+                when Tn.equal tn target ->
+                  Set_dynamic
+                    {
+                      tn = partials;
+                      idcs = Array.append [| block_it |] idcs;
+                      dyn_axis = dyn_axis + 1;
+                      dyn_value = (redirect_scalar v, p);
+                      llsc = redirect_scalar llsc;
+                      debug;
+                    }
+              | Set_dynamic ({ dyn_value = v, p; llsc; _ } as sd) ->
+                  Set_dynamic
+                    { sd with dyn_value = (redirect_scalar v, p); llsc = redirect_scalar llsc }
+              | Set_from_vec ({ arg = a, p; _ } as sv) ->
+                  Set_from_vec { sv with arg = (redirect_scalar a, p) }
+              | Set_local (id, llsc) -> Set_local (id, redirect_scalar llsc)
+              | If { cond = c, p; body } ->
+                  If { cond = (redirect_scalar c, p); body = redirect body }
+            and redirect_scalar (llsc : scalar_t) : scalar_t =
+              match llsc with
+              | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, p } when Tn.equal tn target ->
+                  Get_dynamic
+                    {
+                      tn = partials;
+                      idcs = Array.append [| block_it |] idcs;
+                      dyn_axis = dyn_axis + 1;
+                      dyn_value = (redirect_scalar v, p);
+                    }
+              | Get_dynamic ({ dyn_value = v, p; _ } as gd) ->
+                  Get_dynamic { gd with dyn_value = (redirect_scalar v, p) }
+              | Local_scope ({ body; _ } as ls) -> Local_scope { ls with body = redirect body }
+              | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _
+              | Embed_index _ ->
+                  llsc
+              | Ternop (op, (a, pa), (b, pb), (c, pc)) ->
+                  Ternop
+                    (op, (redirect_scalar a, pa), (redirect_scalar b, pb), (redirect_scalar c, pc))
+              | Binop (op, (a, pa), (b, pb)) ->
+                  Binop (op, (redirect_scalar a, pa), (redirect_scalar b, pb))
+              | Unop (op, (a, pa)) -> Unop (op, (redirect_scalar a, pa))
+            in
+            let body = redirect (subst fc.body) in
+            zero_stmt := Some (Zero_out partials);
+            let c_idcs = Array.of_list_map combine_indices ~f:(fun s -> Indexing.Iterator s) in
+            let loops = List.mapi combine_indices ~f:(fun a s -> (s, 0, tgt_dims.(a) - 1)) in
+            combine_stmt := build_combine ~partials ~op:Ops.Add ~c_idcs ~loops;
+            pass1 ~init:None (guard body)
+        | _ ->
+            invalid_arg
+              ("Schedule.Split_reduce: multiple writes of " ^ Tn.debug_name target
+             ^ " under the reduction loop (v1 supports a single accumulation)"))
+  in
+  let new_stmts =
+    List.concat_map stmts ~f:(fun s ->
+        if phys_equal s stmt then
+          (match !zero_stmt with Some z -> [ z ] | None -> []) @ [ rewritten; !combine_stmt ]
+        else [ s ])
+  in
+  { opt with llc = unflat_lines new_stmts }
+
 (** After [Tensorize] has replaced the inner micro-kernel, contract the enclosing chain of serial
     loops that carry the operands but not the accumulator — for a multi-window conv the whole
     kernel-window nest [kh; kw], not just the innermost loop (gh-ocannl-501). The search is
@@ -2501,6 +2994,8 @@ let apply_opt_op (opt : Low_level.optimized) (op : optop) : Low_level.optimized 
   | Privatize { target; over } -> apply_privatize ~target ~over opt
   | Tensorize _ -> apply_tensorize op opt
   | Fuse_epilogue { target; shared } -> apply_fuse_epilogue ~target ~shared opt
+  | Split_reduce { axis; target; num_blocks; block_index; inner_index; combine_indices } ->
+      apply_split_reduce ~axis ~target ~num_blocks ~block_index ~inner_index ~combine_indices opt
   | (Split _ | Swap _ | Retype _ | Unroll _ | Partition _ | Pad _ | Expand_zero _) as op ->
       { opt with llc = apply_op opt.Low_level.llc op }
 
@@ -2548,15 +3043,6 @@ let combine_verdicts v1 v2 =
   | (Op_illegal _ as v), _ | _, (Op_illegal _ as v) -> v
   | (Op_unknown _ as v), _ | _, (Op_unknown _ as v) -> v
   | Op_legal, Op_legal -> Op_legal
-
-let rec find_loop axis (llc : Low_level.t) : Low_level.t option =
-  let open Low_level in
-  match llc with
-  | For_loop { index; _ } when Indexing.equal_symbol index axis -> Some llc
-  | For_loop { body; _ } -> find_loop axis body
-  | Seq (a, b) -> ( match find_loop axis a with Some _ as r -> r | None -> find_loop axis b)
-  | If { body; _ } -> find_loop axis body
-  | _ -> None
 
 let mentions_axis axis (idx : Indexing.axis_index) =
   match idx with
@@ -2959,6 +3445,23 @@ let op_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
              exactly as for hardware retypes. *)
           loops_independent opt ~syms:[ i; j ] ~cross_nest:true ~licensed:rmw_license)
   | Stage _ -> stage_legality opt op
+  | Split_reduce _ -> (
+      (* Probe hermetically like [Stage]: the recognition in [apply_split_reduce] is a pure function
+         of the code, so a raising apply is a proven [Op_illegal]. On structural success the op is
+         semantics-preserving under the reduction-reassociation license (the same license as [Swap]
+         of accumulations): it mints no hardware annotation itself — the block loop's later
+         annotation is race-free by construction (its index pins the partials row) and is checked as
+         its own op — and the combine order is a fixed function of the schedule. *)
+      let hermetic =
+        {
+          opt with
+          Low_level.traced_store = Hashtbl.copy opt.Low_level.traced_store;
+          optimize_ctx = Low_level.copy_optimize_ctx opt.Low_level.optimize_ctx;
+        }
+      in
+      match apply_opt_op hermetic op with
+      | exception Invalid_argument msg -> Op_illegal msg
+      | (_ : Low_level.optimized) -> Op_legal)
   | Privatize _ | Expand_zero _ | Fuse_epilogue _ ->
       Op_unknown "not modeled by the oracle (the op's own preconditions apply)"
 
@@ -3027,6 +3530,10 @@ type access = {
   a_idcs : Indexing.axis_index array;
   a_write : bool;
   a_dynamic : bool;  (** [Get_dynamic]: the effective index is not statically known. *)
+  a_dyn_axis : int option;
+      (** The data-dependent component of a dynamic access ([Set_dynamic]/[Get_dynamic]'s
+          [dyn_axis]; [a_idcs] holds a placeholder there) — affine queries must treat that
+          component as opaque ({!query_map}). *)
   a_vec : bool;
       (** [Set_from_vec]: [a_idcs] is the base of a length-run along the minor axis, not a single
           cell — affine queries must treat the last component as opaque ({!query_map}). *)
@@ -3044,13 +3551,14 @@ exception Bail
 let scan_accesses plc ~local_syms (llc : Low_level.t) : access list =
   let open Low_level in
   let acc = ref [] in
-  let add ~depth:_ ~write ~dynamic ?(vec = false) ?(val_syms = []) tn idcs =
+  let add ~depth:_ ~write ~dynamic ?dyn_axis ?(vec = false) ?(val_syms = []) tn idcs =
     acc :=
       {
         a_tn = tn;
         a_idcs = idcs;
         a_write = write;
         a_dynamic = dynamic;
+        a_dyn_axis = dyn_axis;
         a_vec = vec;
         a_val_syms = val_syms;
       }
@@ -3079,13 +3587,17 @@ let scan_accesses plc ~local_syms (llc : Low_level.t) : access list =
         if depth > 0 && Tn.Placements.is_materialized_peek plc tn then raise Bail;
         add ~depth ~write:true ~dynamic:false ~val_syms:(scalar_syms llsc) tn idcs;
         scalar ~depth llsc
-    | Set_dynamic { tn; idcs; dyn_value = v, _; llsc; _ } ->
+    | Set_dynamic { tn; idcs; dyn_axis; dyn_value = v, _; llsc; _ } ->
         (* gh-466: the scatter's effective write index is not statically known. Registering it
-           [~dynamic:true] makes the per-nest hazard analysis bail on any parallelization over the
-           written node and the cross-nest alignment reject it — the deterministic no-atomics
-           invariant: loops driving the dynamic index stay serial. *)
+           [~dynamic:true] makes the cross-nest alignment reject it, and the per-nest hazard
+           analysis mask the dynamic component from the affine queries ([query_map]) — the
+           deterministic no-atomics invariant: loops driving the dynamic index are never forced
+           equal across threads, so they stay serial, while statically-pinning components (gh-484
+           task 2: the per-block partials row of [Split_reduce], the embedding-dim column) may
+           parallelize. *)
         if depth > 0 && Tn.Placements.is_materialized_peek plc tn then raise Bail;
-        add ~depth ~write:true ~dynamic:true ~val_syms:(scalar_syms v @ scalar_syms llsc) tn idcs;
+        add ~depth ~write:true ~dynamic:true ~dyn_axis
+          ~val_syms:(scalar_syms v @ scalar_syms llsc) tn idcs;
         scalar ~depth v;
         scalar ~depth llsc
     | Set_from_vec { tn; idcs; arg = a, _; _ } ->
@@ -3101,8 +3613,8 @@ let scan_accesses plc ~local_syms (llc : Low_level.t) : access list =
     | Local_scope { body; _ } -> code ~depth:(depth + 1) body
     | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
     | Get (tn, idcs) -> add ~depth ~write:false ~dynamic:false tn idcs
-    | Get_dynamic { tn; idcs; dyn_value = v, _; _ } ->
-        add ~depth ~write:false ~dynamic:true tn idcs;
+    | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, _; _ } ->
+        add ~depth ~write:false ~dynamic:true ~dyn_axis tn idcs;
         scalar ~depth v
     | Get_merge_buffer (_, _) -> () (* The merge buffer is a separate read-only input buffer. *)
     | Ternop (_, (a, _), (b, _), (c, _)) ->
@@ -3146,14 +3658,17 @@ let mentions_sym syms (idx : Indexing.axis_index) =
   | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
 
 (* The affine-query view of an access's index map: a vectorized write's last (minor-axis run)
-   component is the base of a run, so it is masked to an opaque [Sub_axis] — the engine then draws
-   no (possibly wrong) disjointness or confinement conclusion from it. *)
+   component is the base of a run, and a dynamic access's [dyn_axis] component is a data-dependent
+   row (the vector holds a placeholder there) — both are masked to an opaque [Sub_axis], so the
+   engine draws no (possibly wrong) disjointness or confinement conclusion from them. *)
 let query_map (a : access) : Indexing.axis_index array =
-  if (not a.a_vec) || Array.is_empty a.a_idcs then a.a_idcs
-  else
+  if ((not a.a_vec) && Option.is_none a.a_dyn_axis) || Array.is_empty a.a_idcs then a.a_idcs
+  else begin
     let m = Array.copy a.a_idcs in
-    m.(Array.length m - 1) <- Indexing.Sub_axis;
+    if a.a_vec then m.(Array.length m - 1) <- Indexing.Sub_axis;
+    Option.iter a.a_dyn_axis ~f:(fun ax -> if ax < Array.length m then m.(ax) <- Indexing.Sub_axis);
     m
+  end
 
 (* The single-child chain of [For_loop]s from the top of a nest, descending through [If] wrappers
    and comments; stops at the first branching ([Seq] with more than one non-comment statement). *)
@@ -3426,7 +3941,17 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
               List.exists accs ~f:(fun a -> Array.exists a.a_idcs ~f:(mentions_sym syms))
             in
             if is_mat || chain_relevant then (
-              if List.exists accs ~f:(fun a -> a.a_dynamic) then raise Bail;
+              let has_dynamic = List.exists accs ~f:(fun a -> a.a_dynamic) in
+              (* gh-484 (task 2, unbailing the gh-466 scatter): dynamic accesses of a materialized
+                 node no longer bail wholesale. The dynamic component is masked to [Sub_axis] in
+                 [query_map], so the conflict query decides from the statically-known components: a
+                 chain symbol pinning a same-position plain component of every access confines
+                 conflicts to its own thread (the per-block partials row of [Split_reduce], the
+                 embedding-dim column of the scatter), while loops driving the dynamic index are
+                 never forced equal across threads and stay serial. Per-thread (non-materialized)
+                 scratch keeps bailing: its containment rule ("reads hit exactly the cells the same
+                 thread wrote") is order-sensitive and unknowable under data-dependent rows. *)
+              if has_dynamic && not is_mat then raise Bail;
               if is_mat then (
                 (* Materialized: genuine shared memory — the affine conflict query decides. Every
                    pair involving a write must have its conflicts confined to one thread of the
@@ -3445,10 +3970,13 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
                               witness := wit;
                               false))
                 in
-                Affine.crosscheck ~site:"schedule per-nest hazard"
-                  ~context:(Tn.debug_name (List.hd_exn accs).a_tn)
-                  ~procedural_safe:(fun () -> agreement_ok accs)
-                  ~query_safe ~witness:!witness;
+                (* The procedural agreement rule does not model dynamic accesses (it never ran on
+                   them — they used to bail first), so the crosscheck compares only static nodes. *)
+                if not has_dynamic then
+                  Affine.crosscheck ~site:"schedule per-nest hazard"
+                    ~context:(Tn.debug_name (List.hd_exn accs).a_tn)
+                    ~procedural_safe:(fun () -> agreement_ok accs)
+                    ~query_safe ~witness:!witness;
                 if not query_safe then raise Bail)
               else if not (agreement_ok accs) then raise Bail)));
   chains
