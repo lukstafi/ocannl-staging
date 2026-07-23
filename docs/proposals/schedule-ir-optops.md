@@ -118,8 +118,9 @@ when applying).
 
 Deliberately absent from v1, mirroring the axis-types enum's restraint: `Upcast`
 (vectorize — waits on the `Set_from_vec`/`vec_unop` growth path and a `Vectorized`
-axis type), `Padto` (masking is representable today via `If` + interval discharge, but
-its profitability case is tensor-core alignment, which is far), and tensor-core ops.
+axis type) and tensor-core ops. (`Padto` — originally deferred here — landed as
+`Pad` once its profitability case, tensor-core alignment, arrived: §3c,
+gh-ocannl-485.)
 `Cpu_parallel` retyping is **retired** (decision 2026-07-05, recorded in
 [gh-ocannl-164](gh-ocannl-164.md)): within-routine CPU threading binds `Grid` axes to a
 task pool in the C backend's rendering — `Grid`'s contract is exactly the task-pool
@@ -238,6 +239,43 @@ collected in-range flip points are exactly the partition that makes every such g
 segment-decided. Downstream consumers: gh-ocannl-504's clamped-window interior
 specialization, gh-ocannl-485's PADTO valid-vs-fringe masking, gh-ocannl-500's edge
 peeling.
+
+### 3c. `Pad`: pad-to-tile with masked edges (gh-ocannl-485, PADTO)
+
+`Pad { axis; to_multiple_of }` extends a Serial loop `[0, N)` to `[0, M)` (the least
+tile multiple ≥ N) and guards every effectful **leaf statement** of the body with
+`If (axis < N)` — pad iterations are no-ops, so the op is unconditionally legal, and
+leaf placement (rather than wrapping the body) keeps later-inserted barriers (shared
+`Stage`) out of divergent control flow while leaving nests perfectly nested for
+`Swap`/reorders. Downstream `Split`s by factors of `M` divide cleanly. The masking
+then distributes across the transforms that already exist:
+
+- **Operands** stage through `Stage` tiles whose dims derive from the (padded) tile
+  loops; the edge guards are `Where`-form — out-of-range slots store 0, the
+  add-reduce identity — so the tile's whole index space is readable (tiles are
+  tracked in `optimized.zero_fringe`; hoisted constant packing already zero-fills).
+- **`Tensorize`** skims the guards off the micro-kernel and classifies each by its
+  micro symbol: `i`/`j` guards become masks re-emitted at the accumulator
+  contraction's transfers (0-filled `Where` init-load, `If`-guarded store-back — the
+  padded-scratch, valid-region-only discipline), and `k` guards are *discharged*
+  against zero-fringe operands (padded contributions are exact zeros). Masks force
+  the contraction; on GPU pipelines (recognized by staged shared tiles) the masked
+  fragment lands in workgroup-shared memory — guarded transfers are not a
+  fragment-resident scope and thread-local arrays are not simdgroup-loadable — so
+  intrinsics fire per statement, bracketed by a barrier pair. The fallback keeps the
+  guards and stays exactly semantics-preserving.
+- **Autotune** seeds `(pad, split, stage, tensorize)` compositions instead of
+  filtering non-multiple sites: the staged GPU MMA family, the CPU packed
+  compositions, and the conv whole/blocked flavors drop their extent-divisibility
+  gates (block sizes must still be intrinsic-tile multiples); pipelines that read an
+  operand in place keep theirs. `Split`'s ceil + remainder guard composes into the
+  same masked recognition, so a separate pad is only needed for unsplit axes or to
+  pick the multiple.
+
+The surviving per-element guards are exactly `partition_breakpoints` flip points: a
+later `Partition` of the enclosing block loop at the last fully valid block folds
+them in the interior segments (pad-vs-peel as measured alternatives — the peel leg
+and per-segment specialization remain follow-ups).
 
 ### 4. `Unroll`: annotation flavor vs. IR flavor
 
