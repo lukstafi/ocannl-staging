@@ -29,6 +29,7 @@ type saved_optop =
   | Retype of { axis : sym_ref; ty : LL.axis_type }
   | Unroll of { axis : sym_ref; materialize : bool }
   | Partition of { axis : sym_ref; breakpoints : int list }
+  | Pad of { axis : sym_ref; to_multiple_of : int }
   | Stage of {
       source : int;
       tile_loops : sym_ref list;
@@ -417,6 +418,8 @@ let to_saved r (sched : Schedule.schedule) : saved_schedule * registry =
                     record r s (Minted (idx, Partition_seg j)))
               in
               (r, saved)
+          | Schedule.Pad { axis; to_multiple_of } ->
+              (r, Pad { axis = resolve_exn r axis; to_multiple_of })
           | Schedule.Stage { source; tile_loops; shared; cooperative; hoisted; swizzle } ->
               ( r,
                 Stage
@@ -478,6 +481,8 @@ let of_saved canonical (saved : saved_schedule) : Schedule.schedule * registry =
                     record r s (Minted (idx, Partition_seg j)))
               in
               (r, op)
+          | Pad { axis; to_multiple_of } ->
+              (r, Schedule.Pad { axis = unresolve_exn r axis; to_multiple_of })
           | Stage { source; tile_loops; shared; cooperative; hoisted; swizzle } ->
               ( r,
                 Schedule.Stage

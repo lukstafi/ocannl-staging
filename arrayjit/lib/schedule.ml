@@ -26,6 +26,10 @@ type optop =
       segment_indices : Indexing.symbol list;
           (** Fresh symbols, one per segment ([length breakpoints + 1]); see {!partition}. *)
     }
+  | Pad of {
+      axis : Indexing.symbol;  (** The loop to pad, identified by its index symbol. *)
+      to_multiple_of : int;  (** The padded extent is the least multiple [>=] the loop extent. *)
+    }
   | Stage of {
       source : Tn.t;
       tile_loops : Indexing.symbol list;
@@ -375,6 +379,56 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
                  @@ map_code
                       ~fidx:(subst_axis_index ~sym:axis ~by:{ terms = []; offset = v })
                       fc.body)))
+  | Pad { axis; to_multiple_of } ->
+      (* gh-ocannl-485 (PADTO): extend the loop extent to the next multiple of [to_multiple_of] and
+         guard each effectful leaf statement of the body with [If (axis < N)] — the pad iterations
+         are no-ops, so the op is unconditionally semantics-preserving. Guards go on the leaves, not
+         around the whole body, so barriers inserted later (shared [Stage]) stay under uniform
+         control flow, and downstream [Split]s of the padded loop divide cleanly (no remainder
+         guard). [apply]'s trailing simplify interval-folds the guards wherever the narrowed
+         environment proves them (e.g. after a [Partition] of a block loop at the last fully valid
+         block); [Tensorize] recognizes them as pad masks (see {!optop}). *)
+      rewrite_loop ~what:"Schedule.Pad" ~sym:axis llc ~f:(fun fc ->
+          if to_multiple_of <= 0 then invalid_arg "Schedule.Pad: to_multiple_of must be positive";
+          if not (equal_axis_type fc.axis Serial) then
+            invalid_arg ("Schedule.Pad: loop " ^ Indexing.symbol_ident axis ^ " must be Serial");
+          if fc.from_ <> 0 then
+            invalid_arg
+              ("Schedule.Pad: loop " ^ Indexing.symbol_ident axis
+             ^ " must start at 0 (lowering guarantees this)");
+          let n = fc.to_ + 1 in
+          let m = (n + to_multiple_of - 1) / to_multiple_of * to_multiple_of in
+          if m = n then for_loop fc
+          else
+            let iprec = Ops.index_prec () in
+            let cond =
+              Binop
+                ( Ops.Cmplt,
+                  (Embed_index (Indexing.Iterator axis), iprec),
+                  (Constant (Float.of_int n), iprec) )
+            in
+            let guard body = If { cond = (cond, iprec); body } in
+            let rec mask = function
+              | Seq (a, b) -> Seq (mask a, mask b)
+              | For_loop fc' -> For_loop { fc' with body = mask fc'.body }
+              | If { cond; body } -> If { cond; body = mask body }
+              | (Set _ | Set_dynamic _ | Set_from_vec _ | Set_local _ | Zero_out _) as stmt ->
+                  guard stmt
+              | (Noop | Comment _ | Declare_local _) as stmt -> stmt
+              | Workgroup_barrier ->
+                  (* Uniformly reached with or without the guard (the padded loop is Serial), and
+                     must stay so: never guard a barrier. *)
+                  Workgroup_barrier
+              | Staged_compilation _ ->
+                  invalid_arg
+                    ("Schedule.Pad: opaque Staged_compilation in the body of "
+                    ^ Indexing.symbol_ident axis)
+              | Tile_mma _ ->
+                  invalid_arg
+                    ("Schedule.Pad: apply Pad before Tensorize (Tile_mma in the body of "
+                    ^ Indexing.symbol_ident axis ^ ")")
+            in
+            for_loop { fc with to_ = m - 1; body = mask fc.body })
   | Partition { axis; breakpoints; segment_indices } ->
       (* gh-ocannl-508: index-set splitting. Segment ranges stay absolute (no rebasing to 0), so the
          substitution is a pure rename of the loop symbol and no index arithmetic changes; each
@@ -2251,7 +2305,7 @@ let apply_opt_op (opt : Low_level.optimized) (op : optop) : Low_level.optimized 
   | Privatize { target; over } -> apply_privatize ~target ~over opt
   | Tensorize _ -> apply_tensorize op opt
   | Fuse_epilogue { target; shared } -> apply_fuse_epilogue ~target ~shared opt
-  | (Split _ | Swap _ | Retype _ | Unroll _ | Partition _ | Expand_zero _) as op ->
+  | (Split _ | Swap _ | Retype _ | Unroll _ | Partition _ | Pad _ | Expand_zero _) as op ->
       { opt with llc = apply_op opt.Low_level.llc op }
 
 let apply ?(static_indices = []) (sched : schedule) (opt : Low_level.optimized) :
@@ -2668,6 +2722,10 @@ let op_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
   | Partition _ ->
       (* Pure index-set reindexing: the segments run in the original order over the same points,
          with no hardware annotation and no reordering. *)
+      Op_legal
+  | Pad _ ->
+      (* The pad iterations are no-ops (every effectful leaf statement is guarded), so the padded
+         loop runs the original iterations in the original order. *)
       Op_legal
   | Swap { outer; inner } -> (
       (* Interchange reorders iterations; the optop contract licenses it for the

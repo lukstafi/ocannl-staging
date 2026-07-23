@@ -66,6 +66,24 @@ type optop =
           [Split] the dividing main segment — clean main nest plus epilogue) both specialize into
           guard-free segment nests, and the fresh symbols make each segment individually
           addressable by subsequent ops (per-segment scheduling). *)
+  | Pad of {
+      axis : Indexing.symbol;  (** The loop to pad, identified by its index symbol. *)
+      to_multiple_of : int;  (** The padded extent is the least multiple [>=] the loop extent. *)
+    }
+      (** Pad-to-tile (gh-ocannl-485, PADTO): extend the [Serial] loop
+          [For_loop axis in [0, N)] to [[0, M)] where [M] is the least multiple of [to_multiple_of]
+          with [M >= N], and guard every effectful leaf statement of the body with [If (axis < N)]
+          (leaf statements, not the whole body, so barriers inserted by a later shared {!Stage} stay
+          under uniform control flow). The pad iterations are no-ops, so the op is unconditionally
+          semantics-preserving ([op_legality]: [Op_legal]); when [to_multiple_of] already divides
+          the extent it is the identity. Purpose: downstream [Split]s by factors of [M] divide
+          cleanly (no remainder guard), {!Stage} tiles minted over the padded tile loops zero-fill
+          their fringe (see {!constructor-Stage}), and {!constructor-Tensorize} recognizes the
+          guards as pad masks — moving row/column masks to the accumulator transfers and
+          discharging reduction masks against zero-filled staged operands — so tensorized paths
+          cover arbitrary extents. The surviving guards are exactly the flip points
+          {!partition_breakpoints} detects: a later {!constructor-Partition} of an enclosing block
+          loop at the last fully valid block specializes them away in the interior segments. *)
   | Stage of {
       source : Tn.t;
       tile_loops : Indexing.symbol list;
