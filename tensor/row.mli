@@ -285,12 +285,19 @@ val get_proj_equations :
   constraint_ list -> Ir.Indexing.axis_index dim_map -> environment -> proj_equation list
 
 val solve_proj_equations :
+  ?clamp_padded:bool ->
   proj_equation list ->
   resolved_padding:(proj_id, axis_padding) List.Assoc.t ->
   inferred_padding:(proj_id, axis_padding) List.Assoc.t ->
   proj_env
 (** [resolved_padding] is used for verification only. [inferred_padding] is updated in [proj_env]
-    even if [resolved_padding] is present. *)
+    even if [resolved_padding] is present.
+
+    [clamp_padded] (default [false], gh-504): the operation's accumulation identity is non-finite
+    (max/tropical family), so its padded ([=]-mode) window projections register no margin demand
+    (and skip the exceeds-resolved check): they lower with clamped window bounds — the assignments
+    lowering guards the accumulation to the operand's valid range, an out-of-range position
+    contributing the accumulation identity, which is the same as not visiting it. *)
 
 val get_proj_index : proj_env -> proj -> Ir.Indexing.axis_index
 val get_dim_index : proj_env -> dim -> Ir.Indexing.axis_index
