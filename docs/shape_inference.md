@@ -151,6 +151,31 @@ The solution: We use the `has_uniq_constr_unless` field in `Bounds_dim` entries 
 
 This mechanism ensures that `Total_elems` constraints with stride-based numerators are fully resolved before any involved variables are closed to minimal values, preventing the "shape cannot be strided" errors that would otherwise occur.
 
+#### Bounds-aware guessing for round-up totals (gh-ocannl-509)
+
+Routing the default parameter initializer through the packed `uniform` exposed a subtler variant of
+the premature-guessing problem, worth spelling out because "has no GLB" is **ambiguous** between
+two situations that require opposite treatment:
+
+1. *Genuinely unconstrained*: the row variable has no bounds at all — guessing (e.g. the bare
+   `uniform ()` single-block default) is the intended closing policy.
+2. *Bounds still arriving*: the row variable has a **registered but unresolved** GLB (its dims
+   contain variables that solve only when the surrounding shapes do — e.g. a composite initializer
+   `scale * (uniform () - 0.5)` over a parameter whose shape is inferred from its use sites).
+   Guessing here commits an inconsistent solution: the counter gets one block and the result one
+   128-bit row, and the contradiction only surfaces later — or worse, does not surface at all and
+   the random stream silently repeats or truncates.
+
+The round-up `Total_elems` elimination arms therefore distinguish `glb_pending` (a GLB entry exists
+in the row environment but `collect_factors` fails on it after substitution) from an absent GLB.
+Pending bounds defer the guess through the stored-constraint path; genuinely absent bounds keep the
+previous stages and guesses. Sibling rows in a multi-row `Rows_constr` are closed to no-further-axes
+before the final stage only when they carry no bounds at all — closing them on stage progression
+alone would discard axes whose bounds are still arriving, silently repeating random values along
+them. Both deferrals have a final-stage escape: at Stage 7 the guesses fire regardless, because
+bounds that have not resolved by then never will, and every constraint must be consumed by the
+final stage (see the termination discipline below).
+
 ### Inference strategy
 
 The actual shape inference combines row polymorphism with (nominal) subtyping, as known in the type inference literature. The subtyping stems merely from the fact that a dimension-1-no-basis axis can be used in the context of any dimension due to per-axis broadcasting. Row polymorphism stems from broadcasting to more axes: for example, when unifying an unknown (shape) row with a known one, we cannot assume that the unknown row will have just the axes of the known one, because maybe the known row is meant to be broadcasted here to more axes. The combination of row polymorphism with nominal subtyping means that the constraints we are solving are inequalities, both inequalities between rows (the `Row.t` type, i.e. the `row` type above), and between axes/dimensions (the `Row.dim` type). We maintain the inequality ordering between variables in the environment and propagate lower bounds along it during simplification. We also maintain a greatest lower bound on the solution.
@@ -262,16 +287,32 @@ type dim_constraint = Unconstrained_dim | At_least_dim of int
 
 type total_elems =
   | Num_elems of int
-  | Strided_var of { coeff : int Lazy.t; var : dim_var }
-      (** The total number of elements is the coefficient times the number of dimensions the
-          variable represents. *)
+  | Range_elems of { lo : int; hi : int }
+      (** The total is any value in the inclusive range [lo..hi]. Arises only from substituting the
+          solved variable of a round-up [Strided_var]: the leftover slack window. When the total is
+          otherwise unconstrained, late stages prefer [hi] (all blocks fully consumed). *)
+  | Strided_var of { coeff : int Utils.safe_lazy; var : dim_var; denom : int; round_up : bool }
+      (** The total is [(coeff * var) / denom]. With [round_up], solving for [var] from a known
+          total rounds up instead of failing on non-divisibility: [coeff * (var - 1) < total * denom
+          <= coeff * var]. Minted only by the [Uint4x32_to_prec] constraint (packed [uniform]),
+          whose last 128-bit block may be consumed partially. *)
 
 type row_constraint =
   | Unconstrained
-  | Total_elems of { nominator : total_elems; divided_by : dim_var_set }
+  | Total_elems of { numerator : total_elems; divided_by : dim_var list; keep_axis : bool }
       (** The rows, inclusive of the further row spec, have this many elements. *)
   | Exact of dim list  (** The concatenated rows have these axes. *)
 ```
+
+The `denom` field accumulates already-closed axes: `reduce_row_constraint` folds the product of a
+row's known dimensions into the denominator when storing the constraint on that row's variable, so
+a stored `Strided_var { coeff = 4; denom = 10; _ }` means "the remaining open part of the row
+contributes `4 * var / 10` elements". Any arm that consumes such a constraint must therefore be
+prepared for `coeff <= denom`, not just the freshly-minted `denom = 1` form. Similarly, any arm
+that computes a row's element product must use `beg_dims @ dims`, not `dims` alone: block/stack
+rows carry leading dimensions in `beg_dims`, and an omission there does not fail loudly — it
+miscomputes the product (e.g. a slack-window re-check falsely rejecting a block row whose total was
+actually inside the window).
 
 During the solution process, the constraints are incorporated, or propagated, into the environment `constr` entry fields, and into further `constraint_` constraints, as needed. This provides sufficient scaffolding to implement the other complex constraints as the need arises.
 
@@ -280,6 +321,39 @@ During the solution process, the constraints are incorporated, or propagated, in
 The constraints are solved by: unification of the equation constraints, unification-like simplification of the inequality constraints, propagation of the complex constraints. The inequalities are like in type systems combining parametric polymorphism with structural and nominal subtyping, where the nominal subtyping relation states that dimension-1 without a basis axis is smaller than all axes, and axes of other mismatching dimensions or mismatching bases are incomparable. For rows, the subtyping is suffix-wise (shorter is smaller) and axis-wise.
 
 Simplification of an inequality, and constraint propagation, can generate more constraints, so we need to be careful to keep it terminating. The solution proceeds in stages. Currently there are 8 stages, with a fractional stage coming from splitting an earlier design.
+
+### Termination and consumption discipline
+
+Two invariants keep the staged solver both terminating and total. They are easy to violate when
+adding constraint forms or elimination arms (each was violated, and debugged back to health, while
+landing gh-ocannl-509 task 5):
+
+1. **Deferral must go through the stored-constraint path, never through re-emission.** The
+   per-stage `solve_inequalities` loop reprocesses the constraint list until it stabilizes, and the
+   stability test is structural equality of the list. An elimination arm that "defers" by returning
+   a fresh `Rows_constr` livelocks the loop: substitution and origin merging churn the constraint's
+   structure every iteration, so the list never stabilizes (the symptom is the process spinning at
+   100% CPU inside `Row.solve`/`process_constraint`). The sanctioned way to wait for more
+   information is `apply_row_constraint`/`apply_rows_constraint`, which store the (reduced)
+   constraint on the row variable's `Bounds_row` entry and return nothing on repeats (the
+   `stored`/`updated` flags). Additionally, `close_row_terminal` and `process_shape_row` consult the
+   stored `constr` — a row variable carrying a stored constraint is protected from the generic
+   final-stage close-to-empty arms, which would otherwise race the deferred consumption.
+
+2. **Every constraint form must have a consumption path that provably fires by Stage 7.**
+   `finish_inference` asserts the unsolved list is empty after Stage 7. A match-arm coverage gap —
+   for example, an arm guarded by `coeff > denom` when reduction can fold closed axes into `denom`,
+   leaving `Strided_var`-against-resolved-GLB unmatched — does not fail loudly: the constraint just
+   sits stored forever, the variables it marked via `mark_total_elems_vars` stay unguessable, their
+   `Terminal_dim`s keep being re-emitted, and the Stage 7 assertion fires far from the cause. When
+   adding a guard to an arm (e.g. to defer a premature guess), pair it with a Stage 7 escape, and
+   check the arm inventory: for each syntactic shape of the stored constraint (fresh, reduced,
+   variable-solved, GLB-resolved), which arm consumes it, and at which stage?
+
+A practical debugging note: the per-module tracing gates (`OCANNL_LOG_LEVEL_ROW=9` at preprocessing
+time, `--ocannl_log_level=9 --ocannl_debug_backend=flushing` at run time — see CLAUDE.md) remain
+the fastest way to find which arm consumed, deferred, or dropped a constraint; grepping the trace
+for the constraint's `dim_var` id reconstructs its lifecycle.
 
 ### Stage overview
 
@@ -299,7 +373,7 @@ Simplification of an inequality, and constraint propagation, can generate more c
 * **Stage 2** forces coefficients coming from precision byte sizes.
 * **Stage 3**, when solving the constraints, sets yet-unknown row variables in terminal shapes to their greatest lower bounds GLB (if any), but only if they don't have a `Total_elems 1` constraint. It substitutes row variables in terminal shapes that do not have a GLB by one axis if that's required to satisfy the variable's constraint. In `Total_elems` constraints with multiple row variables, it substitutes row variables originating from axes of non-output kind, and which do not have a GLB, by no-further-axes — otherwise these constraints can be too hard to unlock.
 * **Stage 4** sets yet-unknown dimensions with >1 upper bounds from direct accesses, or terminal ones, to their GLBs if they have any. It substitutes row variables in terminal shapes that do not have a GLB by no-further-axes. (This is generalized at Stage 6 to all variables.) At this stage, we inject `Shape_row` constraints into the inequalities, so that we can re-process the variables of interest without traversing the whole environment. After row variables are resolved to concrete axes, `Total_elems` constraints with `Num_elems` numerators become simple equations that can be solved deductively — e.g., a row variable resolved to one axis with `Total_elems { numerator = Num_elems n }` yields `dim = n` for that axis.
-* **Stage 5** guesses terminal dimension variables without a GLB to dim 1 (or dim 0 if the variable is in `discardable_vars`), **except** when the variable has `has_uniq_constr_unless` set (indicating it's in the numerator of a `Total_elems` constraint) and none of the denominator variables are also prevented from guessing — this prevents premature guessing that would make `Total_elems` constraints unsatisfiable. It also addresses `Total_elems` and `Exact` constraints with yet-unknown row variables heuristically. For `Total_elems` and a single row variable: if the constraint can be satisfied by assuming the row variable is no-further-axes, it sets the row variable to `Broadcastable`, otherwise it sets it to one axis of the required dimension. For multiple row variables, if one is of the Output kind, sets the other variables to no-further-axes, and retries. **Importantly**, when resolving `Total_elems` constraints with `Strided_var` numerators, Stage 5 now looks up the GLB from the row environment even for non-terminal shapes (if the GLB wasn't provided from context). This is critical for cases where shape information flows through intermediate operations (like `pointmul` broadcasting) — the GLB computed from `Row_ineq` constraints becomes available for constraint resolution. When a `Strided_var { coeff; var; denom }` constraint is resolved using a GLB with known total elements `n`, both the row variable and the dimension variable `var` are set: `var = n * denom / coeff`.
+* **Stage 5** guesses terminal dimension variables without a GLB to dim 1 (or dim 0 if the variable is in `discardable_vars`), **except** when the variable has `has_uniq_constr_unless` set (indicating it's in the numerator of a `Total_elems` constraint) and none of the denominator variables are also prevented from guessing — this prevents premature guessing that would make `Total_elems` constraints unsatisfiable. It also addresses `Total_elems` and `Exact` constraints with yet-unknown row variables heuristically. For `Total_elems` and a single row variable: if the constraint can be satisfied by assuming the row variable is no-further-axes, it sets the row variable to `Broadcastable`, otherwise it sets it to one axis of the required dimension. For multiple row variables, if one is of the Output kind, sets the other variables to no-further-axes, and retries. **Importantly**, when resolving `Total_elems` constraints with `Strided_var` numerators, Stage 5 now looks up the GLB from the row environment even for non-terminal shapes (if the GLB wasn't provided from context). This is critical for cases where shape information flows through intermediate operations (like `pointmul` broadcasting) — the GLB computed from `Row_ineq` constraints becomes available for constraint resolution. When a `Strided_var { coeff; var; denom }` constraint is resolved using a GLB with known total elements `n`, both the row variable and the dimension variable `var` are set: `var = n * denom / coeff` (rounded up for a `round_up` constraint; this arm fires for any `coeff`/`denom` ratio, since reduction folds closed axes into `denom`). For round-up numerators, Stage 5 guessing additionally distinguishes pending from absent bounds — see "Bounds-aware guessing for round-up totals" above.
 * **Stage 6** sets row variables in the remaining inequalities and updated shapes to no-further-axes values; it also extends GLB processing to non-terminal shapes. This can unlock further between-axis inequalities because of row variables sandwiched between leftmost axes from their side of the inequality and rightmost axes from the other side of the inequality. In row constraints, this also unlocks inference for the embedded dim variables.
 * **Stage 7** sets all dim variables remaining in updated shapes to the upper bound if they have any, otherwise to dimension-1 (or dimension-0 if the variable is in `discardable_vars`).
 
@@ -349,6 +423,26 @@ The projection inference functions.
 * `get_proj_equations inequalities proj_axis_env env` converts both equations and inequalitites to projection equations. For inequalities, it takes broadcasting into account, and equates a potentially-broadcasted dim-1 projection to `Fixed_idx 0`. `proj_axis_env` originates from the `Shape` module, holds projections from the slice operator and the einsum syntax.
 * `solve_proj_equations` unifies the projection equations, using union-find to maintain a representative for equal projections. Projections that already have an `axis_index` are `non_product` (not to be iterated over). The remaining projections have a `product_dim`, and get a fresh iterator.
 * `get_dim_index` gets an `axis_index` for a `dim` based on the representative of its `proj_id`; and `Fixed_idx 0` for dim=1.
+
+### Dim-1 projections are pinned — route load-bearing projections around them
+
+Several rules pin the projection of a dimension-1 axis to `Fixed_idx 0` (a broadcasted dim-1
+operand axis is not iterated). A consequence for anyone *emitting* projection equations: never pair
+a semantically load-bearing projection with an axis that may be dim-1, because the `Fixed_idx 0`
+pinning will win in the union-find and the projection collapses **silently** — there is no
+contradiction error, just wrong (typically constant-zero) indices in the generated code.
+
+The concrete instance (gh-ocannl-509): the packed `uniform` conversion's strided store projection
+`stride * counter` carries the entire flat offset of the result, and was paired with the innermost
+axis unconditionally. A result with a trailing dim-1 axis — a conv kernel with a single input
+channel — lost the stride: every 128-bit block stored at flat offset 0, leaving all later cells
+uninitialized (NaN-filled parameters, with no shape error anywhere). The arm now pairs the strided
+projection with the innermost axis of dimension greater than 1 and maps the skipped trailing dim-1
+axes to `Sub_axis`, which multiplies the row-major offset by 1 and leaves store offsets unchanged.
+The general lesson: a projection equation is only as strong as its weakest (most-pinnable) side,
+and misrouted projections manifest as wrong values, not as inference failures — executed-value
+tests (materialized-vs-virtual parity, distinct-value counts) are the effective guard, not
+structural checks.
 
 ### Convolutions
 
