@@ -31,6 +31,7 @@ kernel void where_fwd(
 
   /* Main logic. */
   /* where fwd */
-  where[0] = select((float)(b_else_val[0]), (float)(a_then_val[0]), cond_condition[0]);
+  where[0] =
+      select((float)((float)(b_else_val[0])), (float)((float)(a_then_val[0])), (bool)(cond_condition[0]));
   /* end */
 }

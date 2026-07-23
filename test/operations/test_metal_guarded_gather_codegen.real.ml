@@ -40,5 +40,5 @@ let () =
   let sources = read_metal_sources () in
   let has substring = List.exists sources ~f:(String.is_substring ~substring) in
   Stdio.printf "guarded gather source casts signed guard to float = %b\n"
-    (has "select((float)(0), C[" && has "(float)(ids[");
+    (has "select((float)((float)(0)), (float)(C[" && has "(float)(ids[");
   Stdio.printf "guarded gather source contains no double declarations = %b\n" (not (has "double"))
