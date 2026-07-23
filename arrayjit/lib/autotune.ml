@@ -109,8 +109,13 @@ type sketch_params = {
   sk_simd : int;  (** MMA lane width ([hardware_limits.mma_simd_width]); 0 when [not sk_mma]. *)
   sk_bm : int;
   sk_bn : int;
-  sk_bk : int;  (** For GPU MMA sketches, [sk_bk = 0] = unstaged (one full-K [Tile_mma] block). *)
-  sk_tm : int;  (** Register-tile factors; unused on CPU. *)
+  sk_bk : int;
+      (** For GPU MMA sketches, [sk_bk = 0] = unstaged (one full-K [Tile_mma] block). For conv GPU
+          seeds, [sk_bn]/[sk_bk] are re-purposed as the pad-to multiples of the column/reduction
+          extents (gh-ocannl-485; 0 = already an intrinsic-tile multiple). *)
+  sk_tm : int;
+      (** Register-tile factors; unused on CPU. For conv GPU seeds, [sk_tm] is re-purposed as the
+          row pad-to multiple of the unblocked flavor (gh-ocannl-485; 0 = no pad). *)
   sk_tn : int;
   sk_hoist : bool;
       (** CPU packing only: pack compile-time-constant operands out of the routine, into the
@@ -456,6 +461,16 @@ let detect_matmul (llc : LL.t) : matmul_site option =
   site
 
 let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner })
+
+(* gh-ocannl-485 (PADTO): pad [axis] to the next multiple of [f] when [f] does not divide its
+   [extent]. Identity pads are omitted, so divisible sites keep byte-identical schedules (and
+   schedule-cache keys). Only sound in pipelines that stage every operand the padded axis reaches
+   ([Tensorize] enforces the zero-fringe requirement at apply). *)
+let pad_to ~axis ~extent f =
+  if f > 0 && extent % f <> 0 then [ Sched.Pad { axis; to_multiple_of = f } ] else []
+
+(* Blocks of size [b] covering a possibly padded extent [n]. *)
+let blocks_of n b = (n + b - 1) / b
 
 (** {2 Convolution detection and the implicit-GEMM sketch (gh-ocannl-493)}
 
@@ -963,7 +978,15 @@ let gpu_mma_sketch_schedule (site : matmul_site)
   else
     let sp_k, k_o, k_i = Sched.split ~axis:site.m_k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
     let tz, _lane = Sched.tensorize ~i:i_i ~j:j_i ~k:k_i ~simd_width:w in
-    zops @ [ sp_i; sp_j; sp_k ] @ sink i_i [ j_o ] @ sink j_i [ k_o ] @ sink i_i [ k_o ]
+    (* Pad-composition seeding (gh-ocannl-485): with both operands staged through zero-fringe
+       cooperative tiles, non-multiple extents pad to the block sizes — the guards land on the leaf
+       accumulation, [Tensorize] moves the row/column masks to the fragment transfers and
+       discharges the reduction mask against the staged tiles. *)
+    pad_to ~axis:site.m_i ~extent:site.m_ni bm
+    @ pad_to ~axis:site.m_j ~extent:site.m_nj bn
+    @ pad_to ~axis:site.m_k ~extent:site.m_nk bk
+    @ zops
+    @ [ sp_i; sp_j; sp_k ] @ sink i_i [ j_o ] @ sink j_i [ k_o ] @ sink i_i [ k_o ]
     @ [
         Sched.Stage
           {
@@ -1078,8 +1101,20 @@ let cpu_mma_pack_sketch_schedule (site : matmul_site)
           let sp_zi, _, _ = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
           [ sp_zi ])
   in
+  (* Pad-composition seeding (gh-ocannl-485), only when both operands are staged (hoisted packing
+     zero-fills its pad slots, so it qualifies): non-multiple extents pad to the block sizes and
+     [Tensorize] masks the fragment transfers. An in-place operand read cannot absorb a pad, so the
+     grid-outermost hoisted-only shape pads only if every operand packs. *)
+  let both_staged = List.length stages = 2 in
+  let pads =
+    if not both_staged then []
+    else
+      pad_to ~axis:site.m_i ~extent:site.m_ni bm
+      @ (if bn = 0 then [] else pad_to ~axis:site.m_j ~extent:site.m_nj bn)
+      @ pad_to ~axis:site.m_k ~extent:site.m_nk bk
+  in
   let tz, _lane = Sched.tensorize ~i:i_i ~j:j_col ~k:k_i ~simd_width:1 in
-  zops @ splits @ j_swaps @ sink j_col [ k_o ] @ sink i_i [ k_o ]
+  pads @ zops @ splits @ j_swaps @ sink j_col [ k_o ] @ sink i_i [ k_o ]
   @ (if grid_outermost then [] else sink i_o [ k_o ])
   @ stages @ [ tz ]
 
@@ -1216,8 +1251,10 @@ let cpu_conv_sketch_schedule ~(opt : LL.optimized) (site : conv_site)
         | _ -> true)
   in
   if sk_bm > 0 then (
-    if site.c_nrow % sk_bm <> 0 then
-      invalid_arg "Autotune conv sketch: row block must divide the row extent";
+    (* A non-dividing row block pads the row to the block size (gh-ocannl-485): the pad's
+       leaf-statement guards keep the nest perfectly nested for the reorder's [Swap]s, and both
+       operands pack through zero-fringe tiles, so [Tensorize] masks the fragment transfers. *)
+    let row_pads = pad_to ~axis:site.c_row ~extent:site.c_nrow sk_bm in
     (* On a merged segment the aligned whole-segment [Grid] annotation parallelizes; the panel loop
        is a serial cache block. On a conv-alone segment the panel loop is the parallel [Grid]. *)
     let grid_ops, panel_axis =
@@ -1235,7 +1272,7 @@ let cpu_conv_sketch_schedule ~(opt : LL.optimized) (site : conv_site)
       List.map site.c_outer ~f:fst @ [ row_o ] @ site.c_kernel @ [ row_i; site.c_oc; site.c_red ]
     in
     let tz, _lane = Sched.tensorize ~i:row_i ~j:site.c_oc ~k:site.c_red ~simd_width:1 in
-    grid_ops
+    row_pads @ grid_ops
     @ (sp_row :: reorder_swaps ~current ~target)
     @ [ stage site.c_a [ row_i; site.c_red ]; stage site.c_b [ site.c_red; site.c_oc ]; tz ])
   else
@@ -1285,7 +1322,8 @@ let cpu_conv_sketch_schedule ~(opt : LL.optimized) (site : conv_site)
    (batch, the non-row output spatial axis), so a second [Grid] block on [oc] would exceed the
    three-slot budget; [oc] stays the tensorized column extent. The block loop [row_o] carries no
    companion nest here (unzeroed segments), so no cross-nest zero geometry is needed. *)
-let gpu_conv_sketch_schedule (site : conv_site) { sk_simd = w; sk_bm; _ } : Sched.schedule =
+let gpu_conv_sketch_schedule (site : conv_site) { sk_simd = w; sk_bm; sk_bn; sk_bk; sk_tm; _ } :
+    Sched.schedule =
   let stage source tile_loops =
     Sched.Stage
       { source; tile_loops; shared = true; cooperative = Some w; hoisted = false; swizzle = false }
@@ -1293,9 +1331,17 @@ let gpu_conv_sketch_schedule (site : conv_site) { sk_simd = w; sk_bm; _ } : Sche
   let outer_grid =
     List.map site.c_outer ~f:(fun (s, _) -> Sched.Retype { axis = s; ty = LL.Grid })
   in
+  (* Pad-composition seeding (gh-ocannl-485): the conv seeds carry the intrinsic-tile pad multiples
+     for the column ([sk_bn]) and reduction ([sk_bk]) extents, and — in the unblocked flavor — the
+     row ([sk_tm]); a non-dividing row block pads to the block size. Both operand slices stage
+     through zero-fringe cooperative tiles, so [Tensorize] masks the fragment transfers and
+     discharges the reduction mask. *)
+  let col_red_pads =
+    (if sk_bn > 0 then pad_to ~axis:site.c_oc ~extent:site.c_noc sk_bn else [])
+    @ if sk_bk > 0 then pad_to ~axis:site.c_red ~extent:site.c_nred sk_bk else []
+  in
   if sk_bm > 0 then (
-    if site.c_nrow % sk_bm <> 0 then
-      invalid_arg "Autotune conv sketch: row block must divide the row extent";
+    let pads = pad_to ~axis:site.c_row ~extent:site.c_nrow sk_bm @ col_red_pads in
     let sp_row, row_o, row_i =
       Sched.split ~axis:site.c_row ~factor:sk_bm ~outer:LL.Grid ~inner:LL.Serial
     in
@@ -1304,14 +1350,20 @@ let gpu_conv_sketch_schedule (site : conv_site) { sk_simd = w; sk_bm; _ } : Sche
       List.map site.c_outer ~f:fst @ [ row_o ] @ site.c_kernel @ [ row_i; site.c_oc; site.c_red ]
     in
     let tz, _lane = Sched.tensorize ~i:row_i ~j:site.c_oc ~k:site.c_red ~simd_width:w in
-    (outer_grid @ [ sp_row ]) @ reorder_swaps ~current ~target
+    pads
+    @ (outer_grid @ [ sp_row ])
+    @ reorder_swaps ~current ~target
     @ [ stage site.c_a [ row_i; site.c_red ]; stage site.c_b [ site.c_red; site.c_oc ]; tz ])
   else
+    let pads =
+      (if sk_tm > 0 then pad_to ~axis:site.c_row ~extent:site.c_nrow sk_tm else [])
+      @ col_red_pads
+    in
     let loop_syms =
       List.map site.c_outer ~f:fst @ site.c_kernel @ [ site.c_row; site.c_oc; site.c_red ]
     in
     let tz, _lane = Sched.tensorize ~i:site.c_row ~j:site.c_oc ~k:site.c_red ~simd_width:w in
-    outer_grid
+    pads @ outer_grid
     @ reorder_swaps ~current:site.c_loops ~target:loop_syms
     @ [ stage site.c_a [ site.c_row; site.c_red ]; stage site.c_b [ site.c_red; site.c_oc ]; tz ]
 
@@ -1345,8 +1397,10 @@ let sketch_schedule ~p (opt : LL.optimized) : Sched.schedule =
     sched @ [ Sched.Fuse_epilogue { target = d; shared = p.sk_gpu && p.sk_mma } ]
   else sched
 
-(* Sketch seed parameters compatible with the site's extents (dividing tiles: every constructed
-   guard folds, and shared staging requires them). Unzeroed sites — the norm for fission segments,
+(* Sketch seed parameters compatible with the site's extents. Fully staged tensorized pipelines no
+   longer require dividing tiles: non-multiple extents seed [(pad, tensorize)] compositions
+   (gh-ocannl-485) whose masked edges the tuner measures against scalar alternatives — pipelines
+   that read an operand in place keep their divisibility gates. Unzeroed sites — the norm for fission segments,
    whose [Zero_out] lives in its own [`Zeros] segment — are proposable too: the pipelines skip the
    zero geometry (see [zero_geometry]), and a site whose kernel-mates cannot share the parallel
    geometry merely fails its candidate compile. *)
@@ -1450,10 +1504,10 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
             let row_blocks =
               if not block_ok then []
               else
+                (* Non-dividing blocks pad the row (gh-ocannl-485, the builder emits the [Pad]);
+                   require at least two (possibly padded) panels. *)
                 List.filter_map [ 8; 16; 32 ] ~f:(fun bm ->
-                    if site.c_nrow % bm = 0 && site.c_nrow / bm >= 2 then
-                      Some { base with sk_bm = bm }
-                    else None)
+                    if blocks_of site.c_nrow bm >= 2 then Some { base with sk_bm = bm } else None)
             in
             (base :: (if grid_ok then [ { base with sk_grid = true } ] else [])) @ row_blocks
       in
@@ -1484,8 +1538,17 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
                flavors add [Grid] device-fill splits rather than waking new sites; genuine edge
                peeling of the cooperative micro-kernel — a tensorized bulk beside a scalar remainder,
                which [Stage]'s single-index-vector rule blocks in v1 — is a recorded follow-up. *)
+                (* Pad-composition seeding (gh-ocannl-485): non-multiple column/reduction/row
+                   extents no longer gate the seeds — the builder pads them to the intrinsic tile
+                   (the seed carries the multiples in [sk_bn]/[sk_bk]/[sk_tm], 0 = already a
+                   multiple) and [Tensorize] masks the edges. The shared-tile footprint is computed
+                   on the padded extents. *)
+                let noc_p = blocks_of site.c_noc tn_t * tn_t in
+                let nred_p = blocks_of site.c_nred tk_t * tk_t in
+                let pad_n = if site.c_noc % tn_t = 0 then 0 else tn_t in
+                let pad_k = if site.c_nred % tk_t = 0 then 0 else tk_t in
                 let shared_bytes rows =
-                  ((rows * site.c_nred) + (site.c_nred * site.c_noc)) * Ir.Ops.prec_in_bytes prec
+                  ((rows * nred_p) + (nred_p * noc_p)) * Ir.Ops.prec_in_bytes prec
                 in
                 let shared_fits rows =
                   match limits.Ir.Backend_intf.max_workgroup_memory_bytes with
@@ -1494,25 +1557,22 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
                 in
                 let base_ok =
                   row_unit_stride && offset_free && (not site.c_zeroed)
-                  && site.c_noc % tn_t = 0
-                  && site.c_nred % tk_t = 0
                   && List.length real_stmts <= 2
                 in
                 if not base_ok then []
                 else
                   let whole =
-                    if site.c_nrow % tm_t = 0 && shared_fits site.c_nrow then
-                      [ { base with sk_gpu = true; sk_simd = w } ]
+                    let rows_p = blocks_of site.c_nrow tm_t * tm_t in
+                    let pad_m = if site.c_nrow % tm_t = 0 then 0 else tm_t in
+                    if shared_fits rows_p then
+                      [ { base with sk_gpu = true; sk_simd = w; sk_tm = pad_m; sk_bn = pad_n; sk_bk = pad_k } ]
                     else []
                   in
                   let blocked =
                     List.filter_map [ 8; 16; 32 ] ~f:(fun bm ->
-                        if
-                          bm % tm_t = 0
-                          && site.c_nrow % bm = 0
-                          && site.c_nrow / bm >= 2
-                          && shared_fits bm
-                        then Some { base with sk_gpu = true; sk_simd = w; sk_bm = bm }
+                        if bm % tm_t = 0 && blocks_of site.c_nrow bm >= 2 && shared_fits bm then
+                          Some
+                            { base with sk_gpu = true; sk_simd = w; sk_bm = bm; sk_bn = pad_n; sk_bk = pad_k }
                         else None)
                   in
                   whole @ blocked)
@@ -1602,16 +1662,20 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
         | None -> []
         | Some (tm_t, tn_t, tk_t) ->
             (* [bn = w] keeps the zeroing's column grid blocks aligned with [j]'s (see
-               [gpu_mma_sketch_schedule]); [bk = 0] = unstaged full-K block. *)
+               [gpu_mma_sketch_schedule]); [bk = 0] = unstaged full-K block. Staged seeds
+               ([bk > 0]) no longer require the extents to be block multiples: the builder pads the
+               non-multiple axes and [Tensorize] masks the edges (gh-ocannl-485) — block sizes must
+               still be intrinsic-tile multiples. Unstaged seeds read the operands in place, so a
+               pad cannot be absorbed and the full divisibility gates remain. *)
             List.filter_map
               [ (16, w, 0); (32, w, 0); (16, w, 32); (32, w, 32); (32, w, 16) ]
               ~f:(fun (bm, bn, bk) ->
                 if
-                  divides bm site.m_ni && divides bn site.m_nj
-                  && (bk = 0 || (divides bk site.m_nk && bk % tk_t = 0))
-                  && bm % tm_t = 0
+                  bm % tm_t = 0
                   && bn % tn_t = 0
-                  && site.m_nk % tk_t = 0
+                  && (if bk = 0 then
+                        divides bm site.m_ni && divides bn site.m_nj && site.m_nk % tk_t = 0
+                      else bk % tk_t = 0)
                 then
                   Some
                     {
@@ -1690,37 +1754,47 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
              for. *)
           let prec_bytes = Ir.Ops.prec_in_bytes (Lazy.force site.m_a.Ir.Tnode.storage_prec) in
           let tile_bytes_cap = 256 * 1024 in
-          let packed =
+          (* Non-multiple extents no longer gate the packed composition (gh-ocannl-485): both
+             operands pack through zero-fringe tiles, so the builder pads the axes to the block
+             sizes and [Tensorize] masks the edges. Variants that read an operand in place (the
+             hoisted-only Grid shape below) cannot absorb a pad, so each seed carries whether the
+             extents divide outright ([full_div]) and those variants derive only from dividing
+             seeds. *)
+          let packed_div =
             List.filter_map
               [ (64, 0, 64); (64, 0, 256); (128, 128, 128); (64, 128, 256); (16, 0, 16) ]
               ~f:(fun (bm, bn, bk) ->
                 let bn_eff = if bn = 0 then site.m_nj else bn in
                 if
-                  divides bm site.m_ni
-                  && (bn = 0 || divides bn site.m_nj)
-                  && divides bk site.m_nk
                   (* The packed micro-kernel's column extent is the B~ panel width. *)
-                  && bn_eff >= lanes
+                  bn_eff >= lanes
                   && ((bm * bk) + (bk * bn_eff)) * prec_bytes <= tile_bytes_cap
                 then
+                  let full_div =
+                    divides bm site.m_ni
+                    && (bn = 0 || divides bn site.m_nj)
+                    && divides bk site.m_nk
+                  in
                   Some
-                    {
-                      sk_gpu = false;
-                      sk_mma = true;
-                      sk_simd = 0;
-                      sk_bm = bm;
-                      sk_bn = bn;
-                      sk_bk = bk;
-                      sk_tm = 0;
-                      sk_tn = 0;
-                      sk_hoist = false;
-                      sk_grid = false;
-                      sk_pack_rest = false;
-                      sk_conv = false;
-                      sk_epilogue = false;
-                    }
+                    ( {
+                        sk_gpu = false;
+                        sk_mma = true;
+                        sk_simd = 0;
+                        sk_bm = bm;
+                        sk_bn = bn;
+                        sk_bk = bk;
+                        sk_tm = 0;
+                        sk_tn = 0;
+                        sk_hoist = false;
+                        sk_grid = false;
+                        sk_pack_rest = false;
+                        sk_conv = false;
+                        sk_epilogue = false;
+                      },
+                      full_div )
                 else None)
           in
+          let packed = List.map packed_div ~f:fst in
           (* Hoisted (link-time) packing stays a measured choice for constant operands, like the
              scalar S4 pipeline (gh-ocannl-470). And when a hoistable operand exists, the
              hoisted-only composition pool-parallelizes ([sk_grid && sk_hoist]): hoisted packing
@@ -1735,14 +1809,21 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
              renderer) instead of being read in place, which both recovers its pack and normalizes
              its layout. *)
           let base = packed in
-          let grid_ok p = site.m_ni / p.sk_bm >= 2 in
+          let grid_ok p = blocks_of site.m_ni p.sk_bm >= 2 in
+          (* Hoisted-only Grid seeds read non-hoistable operands in place: no pad absorption, so
+             they derive only from fully dividing seeds — unless both operands are hoistable (both
+             then pack, zero-fringe included). *)
+          let base_hoist_grid =
+            List.filter_map packed_div ~f:(fun (p, full_div) ->
+                if full_div || (hoistable site.m_a && hoistable site.m_b) then Some p else None)
+          in
           let packed =
             if hoistable site.m_a || hoistable site.m_b then
               packed
               @ List.map base ~f:(fun p -> { p with sk_hoist = true })
               @ (if tb_in_place && not (hoistable site.m_b) then []
                  else
-                   List.filter_map base ~f:(fun p ->
+                   List.filter_map base_hoist_grid ~f:(fun p ->
                        if grid_ok p then Some { p with sk_hoist = true; sk_grid = true } else None))
               @
               if Bool.( <> ) (hoistable site.m_a) (hoistable site.m_b) then
@@ -1784,7 +1865,7 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
           let packed =
             packed
             @ List.filter_map base ~f:(fun p ->
-                if site.m_ni / p.sk_bm >= 2 then Some { p with sk_grid = true } else None)
+                if blocks_of site.m_ni p.sk_bm >= 2 then Some { p with sk_grid = true } else None)
           in
           whole @ packed
     | _ -> []
