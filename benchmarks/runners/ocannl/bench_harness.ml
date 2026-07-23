@@ -10,6 +10,13 @@ module Tn = Ir.Tnode
 
 let get_meta st k = List.Assoc.find_exn (St.metadata st) ~equal:String.equal k
 let meta_int st k = Int.of_string (get_meta st k)
+
+(* Keys added after fixtures existed (e.g. stride1/stride2) default rather than fail, so
+   pre-existing fixtures keep working. *)
+let meta_int_default st k ~default =
+  match List.Assoc.find (St.metadata st) ~equal:String.equal k with
+  | Some v -> Int.of_string v
+  | None -> default
 let env_flag name = match Stdlib.Sys.getenv_opt name with Some "1" -> true | _ -> false
 
 let percentile sorted p =

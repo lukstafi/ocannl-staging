@@ -37,6 +37,15 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   with valid 3×3 convs and 2×2 pooling the deep conv's row is always ≡ 2 (mod 4), never
   divisible by 8. Same builder as `lenet` (channel count, kernel, padding, and input
   channels are all spec-driven).
+- **cifar_stride** (`model: conv`, training): the stride-2-stem sibling of `cifar_conv`
+  (gh-ocannl-502): 3-channel 51×51 images, `conv1` a *valid* 5×5 conv at **stride 2** (the
+  strided downsampling site the compacting Stage targets), `conv2` a valid 5×5 at stride 1,
+  into 32 then 64 channels. The geometry keeps both conv GEMM rows multiples of 8 (24 and
+  8), so once the seeding wave admits compacting-eligible strided sites the same
+  blocked/staged legs are proposable here as on `cifar_conv`. Until then the strided conv
+  exercises only the reorder-serial and default-fissioned paths — recorded as the baseline
+  the compacting-Stage seeding is measured against. Strides are spec-driven
+  (`stride1`/`stride2`, default 1, valid-only) through the same builder as `lenet`.
 - **gpt2_mini** (`model: gpt`, `mode: infer`): pre-LN GPT-2-style decoder (4 layers, d=256,
   8 heads, seq 128, vocab 1024, tanh-gelu, learned positional embeddings, tied lm_head,
   causal mask filled with -1e9), forward-only. The parity metric is softmax-CE of the
