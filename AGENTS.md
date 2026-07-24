@@ -20,6 +20,8 @@ Key reference files:
 - docs/shape_inference.md (shape/projection inference pipeline)
 - arrayjit/lib/context.mli (context-based runtime API)
 - ocannl_config.reference (all configuration keys and defaults)
+- docs/agent-notes.md (distilled cross-session agent knowledge: subsystem traps, known bugs with
+  workarounds, debug recipes — skim the matching section before working on a subsystem)
 
 ## Conceptual Map (How It Fits Together)
 - Tensor expressions (%op, Tensor.t) build a graph with shape inference and backprop rules.
