@@ -86,11 +86,13 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
 ## Lowering, virtualization, indexing
 
 - `Ir.Ops.index_prec ()` is SIGNED (int32; int64 under `large_models`): negative index
-  intermediates are well-defined; emit guards in natural signed form. Internal index/range
-  guards stay canonicalized on `Cmplt` (integer `a < b+1` / `-1 < iv` idioms) BY DESIGN even
-  though the `Cmple` primitive exists (PR #216) — guard recognizers pattern-match a single
-  canonical shape; `Cmple` is a tensor-level surface op. Per-node element counts must fit int32
-  unless `large_models`; launch params are bind-validated.
+  intermediates are well-defined; emit guards in natural signed form. Guard shapes are
+  canonicalized per role: upper bounds are strict `Cmplt` (`idx < bound`, the natural operator —
+  recognizers in schedule.ml/c_syntax.ml match this shape); lower bounds still use pre-`Cmple`
+  `±1` encodings (`0 < idx+1`, `-1 < iv`), a legacy of the once-missing primitive — migration to
+  direct `Cmple(0, idx)` is pending (needs a `Cmple` arm in the breakpoints-from-guards
+  recognizer). Per-node element counts must fit int32 unless `large_models`; launch params are
+  bind-validated.
 - Value-rewriting passes need executed parity tests, not just structural pins (see CLAUDE.md).
   To exercise a virtualized affine-LHS producer end-to-end, hand-build an `Assignments.comp`
   (einsum result-side scatter specs don't parse; gradients accumulate → stay materialized): pass
