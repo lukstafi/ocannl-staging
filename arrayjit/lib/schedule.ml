@@ -3144,21 +3144,30 @@ let partition_breakpoints ~axis (llc : Low_level.t) : int list =
       (* Division rounding towards -inf resp. +inf; [b > 0]. *)
       let fdiv a b = if a >= 0 then a / b else -((-a + b - 1) / b) in
       let cdiv a b = if a >= 0 then (a + b - 1) / b else -(-a / b) in
+      (* Transition points of [k*axis + off < 0] with [off] in [off_lo, off_hi]. *)
+      let strict_lt_points ~k ~off_lo ~off_hi =
+        if k > 0 then points := cdiv (-off_hi) k :: cdiv (-off_lo) k :: !points
+        else if k < 0 then points := (fdiv off_hi (-k) + 1) :: (fdiv off_lo (-k) + 1) :: !points
+      in
       let rec cond ~ranges (sc : scalar_t) =
         match sc with
         | Binop ((Ops.And | Ops.Or), (a, _), (b, _)) ->
             cond ~ranges a;
             cond ~ranges b
+        (* [a < b] iff [k*axis + off < 0], [off] in [off_lo, off_hi]. Always-true while
+           [k*axis + off_hi < 0], always-false once [k*axis + off_lo >= 0]: record both transition
+           points (equal when the offset is a single value). *)
         | Binop (Ops.Cmplt, (a, _), (b, _)) -> (
             match Option.both (affine_view ~ranges a) (affine_view ~ranges b) with
             | Some ((ka, la, ha), (kb, lb, hb)) ->
-                (* [a < b] iff [k*axis + off < 0], [off] in [off_lo, off_hi]. Always-true while
-                   [k*axis + off_hi < 0], always-false once [k*axis + off_lo >= 0]: record both
-                   transition points (equal when the offset is a single value). *)
-                let k = ka - kb and off_lo = la - hb and off_hi = ha - lb in
-                if k > 0 then points := cdiv (-off_hi) k :: cdiv (-off_lo) k :: !points
-                else if k < 0 then
-                  points := (fdiv off_hi (-k) + 1) :: (fdiv off_lo (-k) + 1) :: !points
+                strict_lt_points ~k:(ka - kb) ~off_lo:(la - hb) ~off_hi:(ha - lb)
+            | None -> ())
+        (* Everything here is integer-affine, so [a <= b] iff [(a - b) - 1 < 0]: the same transition
+           points as the strict case with the offset interval shifted down by one. *)
+        | Binop (Ops.Cmple, (a, _), (b, _)) -> (
+            match Option.both (affine_view ~ranges a) (affine_view ~ranges b) with
+            | Some ((ka, la, ha), (kb, lb, hb)) ->
+                strict_lt_points ~k:(ka - kb) ~off_lo:(la - hb - 1) ~off_hi:(ha - lb - 1)
             | None -> ())
         | Binop ((Ops.Cmpeq | Ops.Cmpne), (a, _), (b, _)) -> (
             match Option.both (affine_view ~ranges a) (affine_view ~ranges b) with

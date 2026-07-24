@@ -116,11 +116,12 @@ let count_get (o : LL.optimized) tn =
   walk_t ~on_set:(fun _ -> ()) ~on_get:(fun t -> if t.Tn.id = tn.Tn.id then Int.incr n) o.llc;
   !n
 
-(* Count [Where] guards and [Cmplt] comparisons in the optimized form: range guards emitted by
-   unit-coefficient solving render as [Where (And (Cmplt _, Cmplt _), value, Get_local)], whereas a
+(* Count [Where] guards and the two canonical bound comparisons in the optimized form: range guards
+   emitted by unit-coefficient solving render as [Where (And (Cmple _, Cmplt _), value, Get_local)]
+   — one shape per role, a direct [Cmple] lower bound and a strict [Cmplt] upper bound — whereas a
    pure structural affine match introduces neither. *)
 let count_guard_ops (o : LL.optimized) =
-  let wh = ref 0 and lt = ref 0 in
+  let wh = ref 0 and le = ref 0 and lt = ref 0 in
   let rec t (llc : LL.t) =
     match llc with
     | LL.Seq (a, b) ->
@@ -139,7 +140,10 @@ let count_guard_ops (o : LL.optimized) =
         s b;
         s d
     | LL.Binop (op, (a, _), (b, _)) ->
-        (match op with Ops.Cmplt -> Int.incr lt | _ -> ());
+        (match op with
+        | Ops.Cmple -> Int.incr le
+        | Ops.Cmplt -> Int.incr lt
+        | _ -> ());
         s a;
         s b
     | LL.Unop (_, (a, _)) -> s a
@@ -147,7 +151,7 @@ let count_guard_ops (o : LL.optimized) =
     | _ -> ()
   in
   t o.LL.llc;
-  (!wh, !lt)
+  (!wh, !le, !lt)
 
 let p name b = Stdio.printf "%s: %b\n" name b
 
@@ -168,8 +172,8 @@ let case_structural_match () =
   p "structural-match producer setter dropped" (count_set o tgt = 0);
   p "structural-match consumer setter kept" (count_set o out = 1);
   (* Same affine structure on both sides: bound pairwise, no range/equality guard. *)
-  let wh, lt = count_guard_ops o in
-  p "structural-match has no guard ops" (wh = 0 && lt = 0)
+  let wh, le, lt = count_guard_ops o in
+  p "structural-match has no guard ops" (wh = 0 && le = 0 && lt = 0)
 
 (* === Case 2: unit-coefficient solving at a plain iterator === *)
 let case_unit_solve_plain () =
@@ -184,9 +188,10 @@ let case_unit_solve_plain () =
   p "unit-solve(plain) producer setter dropped" (count_set o tgt = 0);
   p "unit-solve(plain) consumer setter kept" (count_set o out = 1);
   (* Solving [wh = t - 2*oh] keeps the [oh] loop and range-guards [0 <= t-2*oh < 2]: a [Where] over
-     an [And] of two [Cmplt] bounds. *)
-  let wh, lt = count_guard_ops o in
-  p "unit-solve(plain) emits a range guard (Where + 2 Cmplt)" (wh >= 1 && lt >= 2)
+     an [And] of a [Cmple] lower bound and a [Cmplt] upper bound. *)
+  let wh, le, lt = count_guard_ops o in
+  p "unit-solve(plain) emits a range guard (Where + Cmple lower + Cmplt upper)"
+    (wh >= 1 && le >= 1 && lt >= 1)
 
 (* === Case 3: triangular (s1, s1 + s2), unit-coefficient solving after pinning s1 === *)
 let case_triangular () =
@@ -206,8 +211,9 @@ let case_triangular () =
   p "triangular producer inlined (no array reads survive)" (count_get o tgt = 0);
   p "triangular consumer setter kept" (count_set o out = 1);
   (* s2 = b - a is solved and range-guarded [0 <= b-a < 2]. *)
-  let wh, lt = count_guard_ops o in
-  p "triangular emits a range guard (Where + 2 Cmplt)" (wh >= 1 && lt >= 2)
+  let wh, le, lt = count_guard_ops o in
+  p "triangular emits a range guard (Where + Cmple lower + Cmplt upper)"
+    (wh >= 1 && le >= 1 && lt >= 1)
 
 (* === Case 4: non-injective i+j (both ranges > 1) stays non-virtual === *)
 let case_noninjective () =
