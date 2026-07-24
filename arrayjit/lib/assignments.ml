@@ -1360,7 +1360,7 @@ let get_name_exn asgns =
   in
   let result = loop asgns in
   if String.is_empty result then
-    invalid_arg "Assignments.get_name_exn: no comments in code: " ^ to_string asgns
+    invalid_arg ("Assignments.get_name_exn: no comments in code: " ^ to_string asgns)
   else result
 
 let%track6_sexp lower optim_ctx ~unoptim_ll_source ~ll_source ~cd_source ~name static_indices
