@@ -279,13 +279,6 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
             | _ -> None)
     | Indexing.Sub_axis | Indexing.Concat _ -> None
   in
-  let index_plus k (idx : Indexing.axis_index) : Indexing.axis_index =
-    match idx with
-    | Indexing.Fixed_idx i -> Indexing.Fixed_idx (i + k)
-    | Indexing.Iterator s -> Indexing.Affine { symbols = [ (1, s) ]; offset = k }
-    | Indexing.Affine { symbols; offset } -> Indexing.Affine { symbols; offset = offset + k }
-    | Indexing.Sub_axis | Indexing.Concat _ -> assert false
-  in
   (* Range-guard conditions for the axes of an access at (semantic, pre-padding-shift) [idcs] that
      can escape the operand's valid region [0, N) — unless the escape is covered by committed
      margins holding this accumulation's neutral element (the physical-halo mechanism: covered
@@ -317,12 +310,12 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
                 in
                 if covered then None
                 else
-                  (* [0 <= idx] as [0 < idx + 1] (cf. the virtualizer's range guards). *)
+                  (* One canonical shape per role: a lower bound is a direct [0 <= idx], an upper
+                     bound the strict [idx < n]. *)
                   let lower =
                     if lo < 0 then
                       Some
-                        (Low_level.Binop
-                           (Ops.Cmplt, embed (Indexing.Fixed_idx 0), embed (index_plus 1 idx)))
+                        (Low_level.Binop (Ops.Cmple, embed (Indexing.Fixed_idx 0), embed idx))
                     else None
                   in
                   let upper =

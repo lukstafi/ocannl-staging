@@ -1397,10 +1397,11 @@ let%track7_sexp inline_computation ~id (optim_ctx : optimize_ctx) (traced : trac
                     (Embed_index rhs_ind, index_prec) ))
           in
           (* gh-133 Stage B: range guards -- a unit-solved symbol's value must fall within its
-             producer loop range [0, range). Index precision is UNSIGNED, so the guard must never
-             form a negative intermediate: we compare [rest] and [rhs] (both non-negative) rather
-             than [rhs - rest]. uc=+1: [rest <= rhs] & [rhs < rest+range]; uc=-1: [rhs <= rest] &
-             [rest < rhs+range]. [a <= b] is encoded as [a < b+1]. *)
+             producer loop range [0, range). The guard never forms a negative intermediate: we
+             compare [rest] and [rhs] (both non-negative) rather than [rhs - rest]. uc=+1:
+             [rest <= rhs] & [rhs < rest+range]; uc=-1: [rhs <= rest] & [rest < rhs+range] -- one
+             canonical shape per role, a direct [Cmple] lower bound and a strict [Cmplt] upper
+             bound. *)
           let add_offset (idx : Indexing.axis_index) d : Indexing.axis_index =
             if d = 0 then idx
             else
@@ -1411,15 +1412,14 @@ let%track7_sexp inline_computation ~id (optim_ctx : optimize_ctx) (traced : trac
               | Indexing.Fixed_idx i -> Indexing.Fixed_idx (i + d)
               | Indexing.Sub_axis | Indexing.Concat _ -> idx
           in
-          let lt a b =
-            Binop (Ops.Cmplt, (Embed_index a, index_prec), (Embed_index b, index_prec))
-          in
+          let cmp op a b = Binop (op, (Embed_index a, index_prec), (Embed_index b, index_prec)) in
+          let le = cmp Ops.Cmple and lt = cmp Ops.Cmplt in
           let range_conds =
             List.map range_guards ~f:(fun (uc, rest_axis, rhs_axis, range) ->
                 let rest = subst env rest_axis and rhs = subst env rhs_axis in
                 let lower, upper =
-                  if uc >= 0 then (lt rest (add_offset rhs 1), lt rhs (add_offset rest range))
-                  else (lt rhs (add_offset rest 1), lt rest (add_offset rhs range))
+                  if uc >= 0 then (le rest rhs, lt rhs (add_offset rest range))
+                  else (le rhs rest, lt rest (add_offset rhs range))
                 in
                 Binop (Ops.And, (lower, index_prec), (upper, index_prec)))
           in
@@ -3804,19 +3804,17 @@ let match_transposed_one_hot_contribution (k : Indexing.symbol) (contribution : 
    (and the lower bound for signed indices), leaving a bare gather.
 
    Fail-safe construction (binding constraint 1): folding is an optimization, never a correctness
-   obligation. Every conjunct that can be emitted is correct unfolded at its guard precision; the
-   only exception -- a lower-bound compare against [-1] at the unsigned guard precision, which would
-   be C UB -- cannot be requested, because [Interval.at_prec] at an unsigned precision always yields
-   a non-negative lower bound, discharging that conjunct by construction (asserted below rather than
-   assumed).
+   obligation. Every conjunct that can be emitted is correct unfolded at its guard precision, at
+   every guard precision -- no conjunct depends on being folded away.
 
    Guard precision by index flavor (unchanged from the hand-written version): unsigned compares in
    uint64 (zero-extension is lossless; casting to int64 instead could map huge values to negatives
    and pass the upper bound); signed compares in int64 (exact and native on all backends, including
    Metal which lacks double); float compares in double (exact for the integer-valued indices in
-   scope). [0 <= idx] is encoded as [-1 < idx] (there is no [Cmple]); integrality as [idx ==
-   trunc(idx)] (the backend casts [idx] to int when gathering, so for non-integer indices, where
-   every [k == idx] is false and the reduction is 0, the gather must not fire). *)
+   scope). Guards take one canonical shape per role: the lower bound is a direct [0 <= idx], the
+   upper bound the strict [idx < class_count]; integrality is [idx == trunc(idx)] (the backend casts
+   [idx] to int when gathering, so for non-integer indices, where every [k == idx] is false and the
+   reduction is 0, the gather must not fire). *)
 let guard_conjuncts ~ienv ~(index_expr : scalar_arg) ~class_count : scalar_t list * Ops.prec =
   let iv, iprec = index_expr in
   let guard_prec, unsigned_guard, prec_proves_integral =
@@ -3836,12 +3834,12 @@ let guard_conjuncts ~ienv ~(index_expr : scalar_arg) ~class_count : scalar_t lis
   (* The gather compares against [class_count], an exact small integer. *)
   let upper_proved = Float.(ivr.ival.Interval.hi < Float.of_int class_count) in
   let integral_proved = prec_proves_integral || ivr.ival.Interval.integral in
-  (* An unsigned guard precision proves the lower bound by construction; emitting [-1 < idx] at
-     uint64 would be wrong unfolded (constraint 1), so this must never be requested. *)
+  (* An unsigned guard precision proves the lower bound by construction (its machine range starts
+     at 0), so the lower conjunct is always erased there rather than emitted vacuously. *)
   assert ((not unsigned_guard) || lower_proved);
   let lower =
     if lower_proved then None
-    else Some (Binop (Ops.Cmplt, (Constant (-1.), guard_prec), (iv, guard_prec)))
+    else Some (Binop (Ops.Cmple, (Constant 0., guard_prec), (iv, guard_prec)))
   in
   let upper =
     if upper_proved then None

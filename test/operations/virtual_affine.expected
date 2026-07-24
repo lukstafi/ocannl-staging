@@ -9,11 +9,11 @@ unit-solve(plain) producer virtual: true
 unit-solve(plain) producer inlined (no array reads survive): true
 unit-solve(plain) producer setter dropped: true
 unit-solve(plain) consumer setter kept: true
-unit-solve(plain) emits a range guard (Where + 2 Cmplt): true
+unit-solve(plain) emits a range guard (Where + Cmple lower + Cmplt upper): true
 triangular producer virtual: true
 triangular producer inlined (no array reads survive): true
 triangular consumer setter kept: true
-triangular emits a range guard (Where + 2 Cmplt): true
+triangular emits a range guard (Where + Cmple lower + Cmplt upper): true
 non-injective producer stays non-virtual: true
 non-injective producer array read preserved: true
 stage-a diagonal producer virtual: true
