@@ -11,7 +11,8 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
 
 - Operator gotchas: unary sum-reduction is `++` (einsum1, e.g. `a ++ "i => 0"`); `+++` is the
   BINARY `outer_sum`, not a reduction. `m ++ "ii => i"` extracts diagonals. The `%op` `O` scope
-  exposes only `<`, `=`, `<>` (plus `not`, `where`); derive `>`, `<=`, `>=` by swapping/negating.
+  has the full comparison set `<`, `<=`, `>`, `>=`, `=`, `<>` (plus `not`, `where`) since the
+  `Cmple` primitive (PR #216); `<=` is IEEE-exact (NaN-false), not a `not <` composite.
   A NUMBER in an axis spec is a fixed-index placement (size k+1 axis, value at slot k), not "axis
   N": per-axis index grids are `range n ++ "i=>i0"` ([n,1]) and `range n ++ "j=>0j"` ([1,n]),
   and comparing them broadcasts to an [n,n] grid; `range_of_shape` gives row-major flattened
@@ -85,9 +86,11 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
 ## Lowering, virtualization, indexing
 
 - `Ir.Ops.index_prec ()` is SIGNED (int32; int64 under `large_models`): negative index
-  intermediates are well-defined; emit guards in natural signed form. The `a <= b` as
-  `Cmplt (a, b+1)` idiom survives only because there is no `Cmple`. Per-node element counts must
-  fit int32 unless `large_models`; launch params are bind-validated.
+  intermediates are well-defined; emit guards in natural signed form. Internal index/range
+  guards stay canonicalized on `Cmplt` (integer `a < b+1` / `-1 < iv` idioms) BY DESIGN even
+  though the `Cmple` primitive exists (PR #216) — guard recognizers pattern-match a single
+  canonical shape; `Cmple` is a tensor-level surface op. Per-node element counts must fit int32
+  unless `large_models`; launch params are bind-validated.
 - Value-rewriting passes need executed parity tests, not just structural pins (see CLAUDE.md).
   To exercise a virtualized affine-LHS producer end-to-end, hand-build an `Assignments.comp`
   (einsum result-side scatter specs don't parse; gradients accumulate → stay materialized): pass
@@ -115,8 +118,11 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   command buffers overlap over untracked resources: back-to-back runs of the SAME routine need
   the FIFO wait, pipelined (no-sync) timing is unreliable, and `get_values`/`set_values` do FULL
   awaits by design.
-- Convention for parallel-codegen work: land Metal → cc → CUDA/HIP; CUDA-only codegen snapshots
-  (`.cu.expected`) go stale until that hardware next runs the suite — expect re-promotes.
+- Parallel-codegen work often lands Metal → cc → CUDA/HIP, but that is a default reflecting
+  which machine is booted first and used most (the Mac Studio), not a rule — tasks can start on
+  CUDA or HIP for load balancing across machines. The durable part: codegen snapshots for a
+  backend whose hardware isn't attached (`.cu.expected` etc.) go stale until that hardware next
+  runs the suite — expect re-promotes.
 
 ## Training and performance
 
