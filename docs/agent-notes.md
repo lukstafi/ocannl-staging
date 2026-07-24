@@ -60,10 +60,6 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   idents rely on the `open TDSL.O` scope introduced at the unit parameter. Design caveat: the
   no-unit-param form is not generative — `f` closes over ONE shared param created at definition
   time; the `()` idiom makes the construction point explicit.
-- Printing tensors whose shape has a concatenation axis (results of `stack`/`concat`) with
-  ``~style:`Inline`` crashes (`to_doc_inline` counts a concat dim as one axis); use
-  ``~style:`Default``. Nested block matrices `[[a;b];[c;d]]` don't solve; single-level `stack`
-  works.
 
 ## Graph construction and autodiff
 
