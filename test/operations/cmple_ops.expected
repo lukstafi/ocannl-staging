@@ -1,0 +1,10 @@
+Retrieving commandline, environment, or config file variable ocannl_log_level
+Found 0, in the config file
+a <  b: [1.0; 0.0; 0.0; 0.0]
+a <= b: [1.0; 1.0; 0.0; 1.0]
+a >  b: [0.0; 0.0; 1.0; 0.0]
+a >= b: [0.0; 1.0; 1.0; 1.0]
+n <= m: [0.0; 0.0; 1.0]
+m <= n: [0.0; 0.0; 1.0]
+n <  m: [0.0; 0.0; 0.0]
+n >= m: [0.0; 0.0; 1.0]

@@ -113,6 +113,7 @@ The binary primitive operations:
 | `relu_gate` | `-?/` | pointwise | `Relu_gate` | `=?/`, `=:?/` |
 | `sat01_gate` | `-?^` | pointwise | `Satur01_gate` | `=?^`, `=:?^` |
 | `lt` | `<` | pointwise | `Cmplt` | none |
+| `le` | `<=` | pointwise | `Cmple` | none |
 | `eq` | `=` | pointwise | `Cmpeq` | none |
 | `ne` | `<>` | pointwise | `Cmpne` | none |
 | `or_` | `\|\|` | pointwise | `Or` | `=\|\|`, `=:\|\|` |
@@ -172,6 +173,7 @@ let interpret_binop op v1 v2 =
   | Min -> min v1 v2
   | Mod -> v1 % v2
   | Cmplt -> if v1 < v2 then 1. else 0.
+  | Cmple -> if v1 <= v2 then 1. else 0.
   | Cmpeq -> if v1 = v2 then 1. else 0.
   | Cmpne -> if v1 <> v2 then 1. else 0.
   | Or -> if v1 <> 0. || v2 <> 0. then 1. else 0.
@@ -617,9 +619,11 @@ Recurring stumbling points, each verified against the sources:
 - **`einsum1` extracts diagonals and traces**: `m ++ "ii => i"` is a working `diag`, and
   `"i => ii"` embeds a vector on the diagonal (see `Operation.einsum1`'s docstring and
   `test/einsum/surjectivity.ml`).
-- **Comparisons in the `%op`/`%cd` operator scope are `<`, `=`, and `<>` only** (plus `not` and
-  `where`). Derive the rest: `a > b` is `b < a`; `a <= b` is `not (b < a)`; `a >= b` is
-  `not (a < b)`.
+- **The `%op` operator scope has the full comparison set**: `<`, `<=`, `>`, `>=`, `=`, `<>` (plus
+  `not` and `where`); `%cd` additionally accepts `<=`/`le` for `Cmple`. `>` and `>=` are operand
+  swaps of `<` and `<=`. Do NOT rewrite `a <= b` as `not (b < a)` — that negation is wrong for NaN
+  operands (it yields 1 where `<=` yields 0), which is why `Cmple` is a primitive. Note that `>`
+  denotes tensor comparison inside `%op`, so compare integers there with `Int.( > )`.
 - **A number in an einsum axis spec is a fixed-index placement** (an axis of size `k+1` with the
   value placed at slot `k`), *not* a reference to "axis N". This gives a per-axis index-grid
   idiom: `range n ++ "i => i0"` yields shape `[n, 1]` and `range n ++ "j => 0j"` yields `[1, n]`;

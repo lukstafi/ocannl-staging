@@ -318,6 +318,14 @@ let false_ = { lo = 0.; hi = 0.; integral = true; exact = true }
 let cmplt_decides a b =
   if Float.(a.hi < b.lo) then Some true else if Float.(a.lo >= b.hi) then Some false else None
 
+(** Whether [a <= b] is decided. Unlike [cmplt_decides], the fold-to-true condition is non-strict,
+    so infinite endpoints could satisfy it; requiring a finite endpoint on the deciding boundary
+    keeps possibly-NaN ([top]) operands from folding to true ([NaN <= x] is false). *)
+let cmple_decides a b =
+  if Float.(a.hi <= b.lo) && (Float.is_finite a.hi || Float.is_finite b.lo) then Some true
+  else if Float.(a.lo > b.hi) then Some false
+  else None
+
 (** Whether [a = b] is decided. True requires both to be the same exact singleton; false requires
     disjointness (sound outward). *)
 let cmpeq_decides a b =

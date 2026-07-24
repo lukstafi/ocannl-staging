@@ -908,6 +908,7 @@ module Impl = struct
       | Cmpeq, _ -> f "=="
       | Cmpne, _ -> f "!="
       | Cmplt, _ -> f "<"
+      | Cmple, _ -> f "<="
       | And, _ -> f "&&"
       | Or, _ -> f "||"
       | Relu_gate, Ops.Half_prec _ ->

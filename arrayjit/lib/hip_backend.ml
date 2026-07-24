@@ -1159,6 +1159,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           f "%"
       | Mod, _ -> func "fmod"
       | Cmplt, _ -> f "<"
+      | Cmple, _ -> f "<="
       | Cmpne, _ -> f "!="
       | Cmpeq, _ -> f "=="
       | Or, _ -> f "||"

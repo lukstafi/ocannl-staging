@@ -537,7 +537,7 @@ let translate ?ident_label (expr : expression) : result =
             @@ Location.error_extensionf ~loc
                  "ppx_ocannl %%cd: expected a binary operator, one of: %s"
                  "+ (Add), - (Sub), * (Mul), / (Div), **(ToPowOf), -?/ (Relu_gate), -?^ \
-                  (Satur01_gate), -/> (Arg2), <  (Cmplt), = (Cmpeq), <> (Cmpne), || (Or), && \
+                  (Satur01_gate), -/> (Arg2), <  (Cmplt), <= (Cmple), = (Cmpeq), <> (Cmpne), || (Or), && \
                   (And), % (Mod), @^(Max), @- (Min), ^^^^ (threefry4x32)" ))
     in
     let ternary_op tern_op =
