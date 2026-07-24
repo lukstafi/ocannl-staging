@@ -446,6 +446,8 @@ let binary_ops =
       ("sat01_gate", fun loc -> ([%expr Shape.Pointwise_bin], [%expr Ir.Ops.Satur01_gate]));
       ("<", fun loc -> ([%expr Shape.Pointwise_bin], [%expr Ir.Ops.Cmplt]));
       ("lt", fun loc -> ([%expr Shape.Pointwise_bin], [%expr Ir.Ops.Cmplt]));
+      ("<=", fun loc -> ([%expr Shape.Pointwise_bin], [%expr Ir.Ops.Cmple]));
+      ("le", fun loc -> ([%expr Shape.Pointwise_bin], [%expr Ir.Ops.Cmple]));
       ("=", fun loc -> ([%expr Shape.Pointwise_bin], [%expr Ir.Ops.Cmpeq]));
       ("eq", fun loc -> ([%expr Shape.Pointwise_bin], [%expr Ir.Ops.Cmpeq]));
       ("<>", fun loc -> ([%expr Shape.Pointwise_bin], [%expr Ir.Ops.Cmpne]));

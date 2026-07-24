@@ -328,6 +328,14 @@ let lt ?spec ?(capture_dims = []) =
     ~compose_op:(compose_op_of_spec ?spec ~capture_dims ())
     ~op_asn ~grad_asn
 
+let le ?spec ?(capture_dims = []) =
+  let module NTDSL = Initial_NTDSL in
+  let%cd op_asn ~t ~t1 ~t2 ~projections = v =:+ (v1 <= v2) in
+  let%cd grad_asn ~t:_ ~g:_ ~t1:_ ~t2:_ ~projections:_ = Asgns.empty_comp in
+  Tensor.binop ~op_label:"<="
+    ~compose_op:(compose_op_of_spec ?spec ~capture_dims ())
+    ~op_asn ~grad_asn
+
 let eq ?spec ?(capture_dims = []) =
   let module NTDSL = Initial_NTDSL in
   let%cd op_asn ~t ~t1 ~t2 ~projections = v =:+ (v1 = v2) in
@@ -592,6 +600,9 @@ module NDO_before_einmax1 = struct
   let where ?label t1 t2 t3 = where ?label ~grad_spec:Prohibit_grad t1 t2 t3 ()
   let not ?label t = not ?label ~grad_spec:Prohibit_grad t ()
   let ( < ) ?label t1 t2 = lt ?label ~grad_spec:Prohibit_grad t1 t2 ()
+  let ( <= ) ?label t1 t2 = le ?label ~grad_spec:Prohibit_grad t1 t2 ()
+  let ( > ) ?label t1 t2 = lt ?label ~grad_spec:Prohibit_grad t2 t1 ()
+  let ( >= ) ?label t1 t2 = le ?label ~grad_spec:Prohibit_grad t2 t1 ()
   let ( = ) ?label t1 t2 = eq ?label ~grad_spec:Prohibit_grad t1 t2 ()
 end
 
@@ -935,6 +946,7 @@ struct
   let where = where ~grad_spec
   let not ?spec ?capture_dims = not ?spec ?capture_dims ~grad_spec
   let lt ?spec ?capture_dims = lt ?spec ?capture_dims ~grad_spec
+  let le ?spec ?capture_dims = le ?spec ?capture_dims ~grad_spec
   let eq ?spec ?capture_dims = eq ?spec ?capture_dims ~grad_spec
   let ne ?spec ?capture_dims = ne ?spec ?capture_dims ~grad_spec
   let uniform_at = uniform_at ~grad_spec
@@ -978,6 +990,11 @@ struct
     let where ?label t1 t2 t3 = where ?label t1 t2 t3 ()
     let not ?label t = not ?label t ()
     let ( < ) ?label t1 t2 = lt ?label t1 t2 ()
+    let ( <= ) ?label t1 t2 = le ?label t1 t2 ()
+
+    (* [>] and [>=] are exact operand swaps of [<] and [<=] (NaN-correct, unlike negation). *)
+    let ( > ) ?label t1 t2 = lt ?label t2 t1 ()
+    let ( >= ) ?label t1 t2 = le ?label t2 t1 ()
     let ( = ) ?label t1 t2 = eq ?label t1 t2 ()
     let ( <> ) ?label t1 t2 = ne ?label t1 t2 ()
     let embed_self_id = embed_self_id

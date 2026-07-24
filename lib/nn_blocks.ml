@@ -687,7 +687,7 @@ let%op resnet_block ~label ?(stride = 1) () =
   let conv2 = conv2d ~label:("conv2" :: label) ~kernel_size:3 ~stride:1 () in
   let bn2 = batch_norm2d ~label:("bn2" :: label) () in
   let identity =
-    if stride > 1 then
+    if Int.( > ) stride 1 then
       (* Need to downsample the skip connection *)
       let downsample_conv = conv2d ~label:("downsample" :: label) ~kernel_size:1 ~stride () in
       let downsample_bn = batch_norm2d ~label:("downsample_bn" :: label) () in
