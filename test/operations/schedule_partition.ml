@@ -236,4 +236,43 @@ let () =
       Sched.apply [ op ] opt)
     (make_graph1 ());
 
+  (* === 5: Guard-shape canonicity — index guards use one canonical shape per role (upper bounds
+     strict [Cmplt], lower bounds direct [Cmple]). [partition_breakpoints] must derive the same
+     transition points from a [Cmple] guard as from the strict encoding it replaced; without a
+     [Cmple] arm the guard silently contributes nothing. === *)
+  let iprec = Ir.Ops.index_prec () in
+  let bps_of ~to_ mk =
+    let axis = Idx.get_symbol () in
+    let llc =
+      LL.For_loop
+        {
+          index = axis;
+          from_ = 0;
+          to_;
+          body = LL.If { cond = (mk axis, iprec); body = LL.Noop };
+          trace_it = false;
+          axis = LL.Serial;
+        }
+    in
+    Sched.partition_breakpoints ~axis llc
+  in
+  let ivar i = (LL.Embed_index (Idx.Iterator i), iprec) in
+  let fixed n = (LL.Embed_index (Idx.Fixed_idx n), iprec) in
+  (* [3 <= i] and [2 < i] both flip at 3; [i <= 6] and [i < 7] both flip at 7. *)
+  let le_lower = bps_of ~to_:9 (fun i -> LL.Binop (Ir.Ops.Cmple, fixed 3, ivar i)) in
+  let lt_lower = bps_of ~to_:9 (fun i -> LL.Binop (Ir.Ops.Cmplt, fixed 2, ivar i)) in
+  let le_upper = bps_of ~to_:9 (fun i -> LL.Binop (Ir.Ops.Cmple, ivar i, fixed 6)) in
+  let lt_upper = bps_of ~to_:9 (fun i -> LL.Binop (Ir.Ops.Cmplt, ivar i, fixed 7)) in
+  let is bps want = List.equal Int.equal bps want in
+  p "Cmple lower bound breaks where its Cmplt encoding did"
+    (is le_lower [ 3 ] && is lt_lower [ 3 ]);
+  p "Cmple upper bound breaks where its Cmplt encoding did"
+    (is le_upper [ 7 ] && is lt_upper [ 7 ]);
+  (* A non-unit coefficient exercises the rounding: [2i <= 5] flips at [i = 3], as does [2i < 6]. *)
+  let coef2 n = (LL.Embed_index (Idx.Affine { symbols = [ (2, n) ]; offset = 0 }), iprec) in
+  let le_scaled = bps_of ~to_:9 (fun i -> LL.Binop (Ir.Ops.Cmple, coef2 i, fixed 5)) in
+  let lt_scaled = bps_of ~to_:9 (fun i -> LL.Binop (Ir.Ops.Cmplt, coef2 i, fixed 6)) in
+  p "Cmple with a scaled axis rounds like its Cmplt encoding"
+    (is le_scaled [ 3 ] && is lt_scaled [ 3 ]);
+
   Stdio.printf "\nDone.\n%!"
