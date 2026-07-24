@@ -90,9 +90,10 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   fit int32 unless `large_models`; launch params are bind-validated.
 - Value-rewriting passes need executed parity tests, not just structural pins (see CLAUDE.md).
   To exercise a virtualized affine-LHS producer end-to-end, hand-build an `Assignments.comp`
-  (einsum result-side scatter specs don't parse; gradients accumulate → stay materialized): wrap
-  in `Asgns.Block_comment`, set `embedded_nodes`, force the output materialized, seed inputs
-  with `Context.set_values`, then compile→run→`get_values`.
+  (einsum result-side scatter specs don't parse; gradients accumulate → stay materialized): pass
+  `~name` to `Context.compile` (or wrap in `Asgns.Block_comment` for labeled debug dumps), set
+  `embedded_nodes`, force the output materialized, seed inputs with `Context.set_values`, then
+  compile→run→`get_values`.
 - Big-reduction producers are forced `Never_virtual` by `virtualize_max_inline_reduction`
   (default 16) — remember it when a structural expectation assumes inlining.
 
