@@ -505,6 +505,13 @@ it needs to pick the accumulation operation.</p>
 <td>none</td>
 </tr>
 <tr>
+<td><code>le</code></td>
+<td><code>&lt;=</code></td>
+<td>pointwise</td>
+<td><code>Cmple</code></td>
+<td>none</td>
+</tr>
+<tr>
 <td><code>eq</code></td>
 <td><code>=</code></td>
 <td>pointwise</td>
@@ -625,15 +632,16 @@ it needs to pick the accumulation operation.</p>
 <span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a>  | Min -&gt; <span class="dt">min</span> v1 v2</span>
 <span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a>  | Mod -&gt; v1 % v2</span>
 <span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a>  | Cmplt -&gt; <span class="kw">if</span> v1 &lt; v2 <span class="kw">then</span> <span class="dv">1</span>. <span class="kw">else</span> <span class="dv">0</span>.</span>
-<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a>  | Cmpeq -&gt; <span class="kw">if</span> v1 = v2 <span class="kw">then</span> <span class="dv">1</span>. <span class="kw">else</span> <span class="dv">0</span>.</span>
-<span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a>  | Cmpne -&gt; <span class="kw">if</span> v1 &lt;&gt; v2 <span class="kw">then</span> <span class="dv">1</span>. <span class="kw">else</span> <span class="dv">0</span>.</span>
-<span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a>  | Or -&gt; <span class="kw">if</span> v1 &lt;&gt; <span class="dv">0</span>. || v2 &lt;&gt; <span class="dv">0</span>. <span class="kw">then</span> <span class="dv">1</span>. <span class="kw">else</span> <span class="dv">0</span>.</span>
-<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a>  | And -&gt; <span class="kw">if</span> v1 &lt;&gt; <span class="dv">0</span>. &amp;&amp; v2 &lt;&gt; <span class="dv">0</span>. <span class="kw">then</span> <span class="dv">1</span>. <span class="kw">else</span> <span class="dv">0</span>.</span>
-<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>  | Threefry4x32 -&gt; ...</span>
-<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> interpret_ternop op v1 v2 v3 =</span>
-<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> <span class="kw">open</span> Float <span class="kw">in</span></span>
-<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a>  <span class="kw">match</span> op <span class="kw">with</span> Where -&gt; <span class="kw">if</span> v1 &lt;&gt; <span class="dv">0</span>. <span class="kw">then</span> v2 <span class="kw">else</span> v3 | FMA -&gt; (v1 * v2) + v3</span></code></pre></div>
+<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a>  | Cmple -&gt; <span class="kw">if</span> v1 &lt;= v2 <span class="kw">then</span> <span class="dv">1</span>. <span class="kw">else</span> <span class="dv">0</span>.</span>
+<span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a>  | Cmpeq -&gt; <span class="kw">if</span> v1 = v2 <span class="kw">then</span> <span class="dv">1</span>. <span class="kw">else</span> <span class="dv">0</span>.</span>
+<span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a>  | Cmpne -&gt; <span class="kw">if</span> v1 &lt;&gt; v2 <span class="kw">then</span> <span class="dv">1</span>. <span class="kw">else</span> <span class="dv">0</span>.</span>
+<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a>  | Or -&gt; <span class="kw">if</span> v1 &lt;&gt; <span class="dv">0</span>. || v2 &lt;&gt; <span class="dv">0</span>. <span class="kw">then</span> <span class="dv">1</span>. <span class="kw">else</span> <span class="dv">0</span>.</span>
+<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>  | And -&gt; <span class="kw">if</span> v1 &lt;&gt; <span class="dv">0</span>. &amp;&amp; v2 &lt;&gt; <span class="dv">0</span>. <span class="kw">then</span> <span class="dv">1</span>. <span class="kw">else</span> <span class="dv">0</span>.</span>
+<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>  | Threefry4x32 -&gt; ...</span>
+<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> interpret_ternop op v1 v2 v3 =</span>
+<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> <span class="kw">open</span> Float <span class="kw">in</span></span>
+<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a>  <span class="kw">match</span> op <span class="kw">with</span> Where -&gt; <span class="kw">if</span> v1 &lt;&gt; <span class="dv">0</span>. <span class="kw">then</span> v2 <span class="kw">else</span> v3 | FMA -&gt; (v1 * v2) + v3</span></code></pre></div>
 <h2 id="the-syntax-for-op">The syntax for %op</h2>
 <p>The <code>%op</code> syntax is simpler than the <code>%cd</code>
 syntax since it relies more on regular OCaml expressions. For example,
@@ -1505,13 +1513,18 @@ operator table lives in <code>tensor/ppx_shared.ml</code>.</li>
 <code>&quot;i =&gt; ii&quot;</code> embeds a vector on the diagonal (see
 <code>Operation.einsum1</code>’s docstring and
 <code>test/einsum/surjectivity.ml</code>).</li>
-<li><strong>Comparisons in the <code>%op</code>/<code>%cd</code>
-operator scope are <code>&lt;</code>, <code>=</code>, and
-<code>&lt;&gt;</code> only</strong> (plus <code>not</code> and
-<code>where</code>). Derive the rest: <code>a &gt; b</code> is
-<code>b &lt; a</code>; <code>a &lt;= b</code> is
-<code>not (b &lt; a)</code>; <code>a &gt;= b</code> is
-<code>not (a &lt; b)</code>.</li>
+<li><strong>The <code>%op</code> operator scope has the full comparison
+set</strong>: <code>&lt;</code>, <code>&lt;=</code>, <code>&gt;</code>,
+<code>&gt;=</code>, <code>=</code>, <code>&lt;&gt;</code> (plus
+<code>not</code> and <code>where</code>); <code>%cd</code> additionally
+accepts <code>&lt;=</code>/<code>le</code> for <code>Cmple</code>.
+<code>&gt;</code> and <code>&gt;=</code> are operand swaps of
+<code>&lt;</code> and <code>&lt;=</code>. Do NOT rewrite
+<code>a &lt;= b</code> as <code>not (b &lt; a)</code> — that negation is
+wrong for NaN operands (it yields 1 where <code>&lt;=</code> yields 0),
+which is why <code>Cmple</code> is a primitive. Note that
+<code>&gt;</code> denotes tensor comparison inside <code>%op</code>, so
+compare integers there with <code>Int.( &gt; )</code>.</li>
 <li><strong>A number in an einsum axis spec is a fixed-index
 placement</strong> (an axis of size <code>k+1</code> with the value
 placed at slot <code>k</code>), <em>not</em> a reference to “axis N”.
