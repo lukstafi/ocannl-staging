@@ -32,8 +32,9 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
 - `Shape.compute_row_product` must not latch a product while the row still ends in an open
   `Row_var` — the historical bug silently resolved xavier/kaiming fan products to 1 for every
   `{ w }` param with an inferred input row (fixed; regression `test/operations/layer_norm_1d.ml`,
-  `test_default_init_std.ml`). Fixed-index output axes (`=> ...|0`) carry `At_least_dim` and must
-  not be equated by the stage-2 singleton-bounds heuristic.
+  `test_default_init_std.ml`). Fixed-index output axes (`=> ...|0`, recognized via their
+  `At_least_dim`) must not be equated by the stage-2 singleton-bounds heuristic, so that it
+  broadcasts at stage-7.
 - Implicit (omitted) row specs are shared and safe-to-guess; an explicit `...` stays strict; row
   variables in kernel slots need the `|` prefix. Symbolic extents (`Row.Sym`, gh-490) are rigid:
   equal only to themselves, materialized at their declared maximum; `Total_elems` against them
