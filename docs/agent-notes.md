@@ -17,9 +17,12 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   and comparing them broadcasts to an [n,n] grid; `range_of_shape` gives row-major flattened
   offsets, not per-axis indices. In `%op` only numeric literals auto-lift to tensors — a
   let-bound float needs `!.x`.
-- Open bug: the 1-D valid-convolution einsum `a +* "o<+k; k => o" kernel` over output-only axes
-  hangs shape inference (no error, spins). Workaround: build a selection-operator matrix from
-  index grids and contract it.
+- Solver deferral discipline: `unify_dim` solves eagerly (recursing internally), so any
+  constraint it RETURNS is a deferral that cannot progress in the current env — e.g. a conv axis
+  whose kernel dim is still a variable. Deferrals are idempotent: re-solving one in place
+  livelocks; hand it to the driver's next pass, where substitution can make it actionable
+  (`solve_inequalities` is the pattern). Executable probe for output-only windowed specs:
+  `test/einsum/test_conv_output_only.ml`.
 - `Row.Concat` dimensions (block tensors, `^` in specs) are solved as ARITHMETIC SUMS, not
   structural lists: equality lives in `unify_dim` (single-component unwrap, `Concat=Dim`
   subtraction, cancel-common residuals, nested-`Concat` flattening), and the equal-arity
