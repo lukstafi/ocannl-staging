@@ -159,13 +159,12 @@ let run_scatter_then_copy ~materialize_dst =
   if materialize_dst then Tn.update_memory_mode dst Tn.On_device 99;
   let scatter = scatter_asgn ~dst ~src (scatter_proj oh wh ~n1:3 ~n2:2 ~c1:2 ~c2:1 ~lhs_dim:6) in
   let copy = copy_asgn ~dst:out ~src:dst (copy_proj t ~n:6) in
-  (* The backend derives the routine name from a block comment. *)
-  let asgns = Asgns.Block_comment ("affine_scatter_copy", Asgns.Seq (scatter, copy)) in
+  let asgns = Asgns.Seq (scatter, copy) in
   (* [dst] and [out] are produced by the comp (embedded); [src] is the only external input. *)
   let comp = { Asgns.asgns; embedded_nodes = Set.of_list (module Tn) [ dst; out ] } in
   let ctx = Context.auto () in
   let ctx = Context.set_values ctx src [| 10.; 11.; 12.; 13.; 14.; 15. |] in
-  let ctx, routine = Context.compile ctx comp Idx.Empty in
+  let ctx, routine = Context.compile ~name:"affine_scatter_copy" ctx comp Idx.Empty in
   let ctx = Context.run ctx routine in
   (* The virtualization decision is recorded in the compilation lineage's placements, not on the
      tnode (context-scoped memory modes). *)
@@ -209,11 +208,11 @@ let run_triangular ~materialize_dst =
   if materialize_dst then Tn.update_memory_mode dst Tn.On_device 99;
   let scatter = scatter_asgn ~dst ~src (tri_scatter_proj s1 s2) in
   let copy = copy_asgn ~dst:out ~src:dst (tri_copy_proj a b) in
-  let asgns = Asgns.Block_comment ("tri_scatter_copy", Asgns.Seq (scatter, copy)) in
+  let asgns = Asgns.Seq (scatter, copy) in
   let comp = { Asgns.asgns; embedded_nodes = Set.of_list (module Tn) [ dst; out ] } in
   let ctx = Context.auto () in
   let ctx = Context.set_values ctx src [| 0.; 1.; 2.; 3.; 4.; 5. |] in
-  let ctx, routine = Context.compile ctx comp Idx.Empty in
+  let ctx, routine = Context.compile ~name:"tri_scatter_copy" ctx comp Idx.Empty in
   let ctx = Context.run ctx routine in
   (Context.get_values ctx out, Tn.Placements.known_virtual (Context.placements ctx) dst)
 

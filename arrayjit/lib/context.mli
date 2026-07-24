@@ -34,6 +34,7 @@ val auto : unit -> t
 (** {2 Core operations} *)
 
 val compile :
+  ?name:string ->
   ?lowered_transform:(Ir.Low_level.optimized -> Ir.Low_level.optimized) ->
   ?lowered_transforms:(Ir.Low_level.optimized -> Ir.Low_level.optimized list) ->
   t ->
@@ -42,7 +43,11 @@ val compile :
   t * routine
 (** Compile assignments into an executable routine. Returns updated context and the compiled
     routine. The returned context carries the updated compilation frontier for dependency tracking;
-    the input context is unchanged (see {!section:execution_deps}). [lowered_transform] rewrites the
+    the input context is unchanged (see {!section:execution_deps}). [name] names the routine and its
+    compilation artifacts (generated source files, kernel functions); if omitted, the name is
+    derived from the comp's {!Ir.Assignments.Block_comment} labels via
+    {!Ir.Assignments.get_name_exn}, which raises if the comp contains no block comment.
+    [lowered_transform] rewrites the
     optimized lowered code before backend compilation — the seam for schedule transforms and for
     hand-annotating hardware axis types in tests (docs/proposals/axis-types-for-loops.md).
     [lowered_transforms] is the plural seam for transforms that split the routine into several
