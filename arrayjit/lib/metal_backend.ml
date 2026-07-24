@@ -891,6 +891,9 @@ module Impl = struct
     let infix_binop op v1 v2 = parens (infix 2 1 (string op) v1 v2)
 
     let binop_syntax prec op =
+      (* The match stays exhaustive over (op, prec) -- that is what catches a newly added operator
+         here -- but arms whose spelling is plain C delegate to {!C_syntax.default_binop_syntax}
+         rather than restating the token. *)
       let f = infix_binop in
       let func fn v1 v2 = group (string fn ^^ parens (v1 ^^ comma ^^ space ^^ v2)) in
       match (op, prec) with
@@ -905,12 +908,11 @@ module Impl = struct
       | Mod, _ -> func "fmod"
       | Max, _ -> func "fmax"
       | Min, _ -> func "fmin"
-      | Cmpeq, _ -> f "=="
-      | Cmpne, _ -> f "!="
-      | Cmplt, _ -> f "<"
-      | Cmple, _ -> f "<="
-      | And, _ -> f "&&"
-      | Or, _ -> f "||"
+      (* Comparisons and logical connectives are precision-independent and spelled the same in MSL
+         as in C, so they render through the shared default. The constructors stay listed to keep
+         the match exhaustiveness-checked. *)
+      | ((Cmpeq | Cmpne | Cmplt | Cmple | And | Or) as op), _ ->
+          C_syntax.default_binop_syntax prec op
       | Relu_gate, Ops.Half_prec _ ->
           fun v1 v2 ->
             group

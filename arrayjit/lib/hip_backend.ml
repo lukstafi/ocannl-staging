@@ -867,6 +867,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           | _ -> None)
 
     let rec binop_syntax prec v =
+      (* The match stays exhaustive over (op, prec) -- that is what catches a newly added operator
+         here -- but arms whose spelling is plain C delegate to {!C_syntax.default_binop_syntax}
+         rather than restating the token. *)
       let open PPrint in
       let f op_str v1 v2 =
         group
@@ -1158,12 +1161,11 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           | Uint64_prec _ ) ) ->
           f "%"
       | Mod, _ -> func "fmod"
-      | Cmplt, _ -> f "<"
-      | Cmple, _ -> f "<="
-      | Cmpne, _ -> f "!="
-      | Cmpeq, _ -> f "=="
-      | Or, _ -> f "||"
-      | And, _ -> f "&&"
+      (* Comparisons and logical connectives are precision-independent and spelled the same in HIP
+         C++ as in C, so they render through the shared default -- fp8 already bridged above. The
+         constructors stay listed to keep the match exhaustiveness-checked. *)
+      | ((Cmplt | Cmple | Cmpne | Cmpeq | Or | And) as op), _ ->
+          C_syntax.default_binop_syntax prec op
       | ToPowOf, (Uint32_prec _ | Uint64_prec _) ->
           invalid_arg "Hip_backend.binop_syntax: ToPowOf not supported for integer precisions"
       | Relu_gate, Uint32_prec _ ->

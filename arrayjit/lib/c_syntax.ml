@@ -259,6 +259,22 @@ module type C_syntax_config = sig
         captured_log_prefix) to the format string and arguments. *)
 end
 
+(** The C-family rendering of a binary operation, from {!Ops.binop_c_syntax}: prefix, first operand,
+    infix, second operand (breaking after the operator), suffix.
+
+    Outside {!Pure_C_config} because the GPU backends, which shadow [binop_syntax] wholesale (most
+    ops need target-specific intrinsics or precision bridging), delegate here for the ops that are
+    spelled the same in C, CUDA, HIP and MSL -- the comparisons and the logical connectives. Those
+    then have one spelling ({!Ops.binop_c_syntax}) and one layout (here) across all backends,
+    instead of a copy per backend. *)
+let default_binop_syntax prec op v1 v2 =
+  let op_prefix, op_infix, op_suffix = Ops.binop_c_syntax prec op in
+  let open PPrint in
+  group
+    (string op_prefix ^^ v1 ^^ string op_infix
+    ^^ ifflat (space ^^ v2) (nest 2 (break 1 ^^ v2))
+    ^^ string op_suffix)
+
 module Pure_C_config (Input : sig
   type buffer_ptr
 
@@ -475,13 +491,7 @@ struct
       ^^ ifflat (space ^^ v3) (nest 2 (break 1 ^^ v3))
       ^^ string op_suffix)
 
-  let binop_syntax prec op v1 v2 =
-    let op_prefix, op_infix, op_suffix = Ops.binop_c_syntax prec op in
-    let open PPrint in
-    group
-      (string op_prefix ^^ v1 ^^ string op_infix
-      ^^ ifflat (space ^^ v2) (nest 2 (break 1 ^^ v2))
-      ^^ string op_suffix)
+  let binop_syntax = default_binop_syntax
 
   let unop_syntax prec op v =
     let op_prefix, op_suffix = Ops.unop_c_syntax prec op in
