@@ -946,36 +946,10 @@ module Impl = struct
                  ^^ space ^^ string "?" ^^ space ^^ v2 ^^ space ^^ string ":" ^^ space
                  ^^ string ("0.0" ^ s)))
       | ToPowOf, _ -> func "pow"
-      | Threefry4x32_crypto, _ -> (
-          (* Threefry4x32_crypto must output to uint4x32 precision *)
-          match prec with
-          | Ops.Uint4x32_prec _ -> func "arrayjit_threefry4x32_crypto"
-          | _ ->
-              raise
-              @@ Utils.User_error
-                   (Printf.sprintf
-                      "Metal backend: Threefry4x32_crypto requires target precision to be \
-                       uint4x32, but got %s"
-                      (Ops.prec_string prec)))
-      | Threefry4x32_light, _ -> (
-          (* Threefry4x32_light must output to uint4x32 precision *)
-          match prec with
-          | Ops.Uint4x32_prec _ -> func "arrayjit_threefry4x32_light"
-          | _ ->
-              raise
-              @@ Utils.User_error
-                   (Printf.sprintf
-                      "Metal backend: Threefry4x32_light requires target precision to be uint4x32, \
-                       but got %s"
-                      (Ops.prec_string prec)))
-      | Uint4x32_to_prec_uniform_lane, _ -> (
-          match prec with
-          | Ops.Uint4x32_prec _ ->
-              raise
-              @@ Utils.User_error
-                   "Metal backend: Uint4x32_to_prec_uniform_lane not supported for Uint4x32 target \
-                    precision"
-          | _ -> func ("uint4x32_to_" ^ Ops.prec_string prec ^ "_uniform_lane"))
+      (* The RNG ops call the same builtins under the same precision contract on every C-family
+         backend, so they render through the shared helper. *)
+      | ((Threefry4x32_crypto | Threefry4x32_light | Uint4x32_to_prec_uniform_lane) as op), _ ->
+          C_syntax.rng_binop_syntax ~backend:"Metal" ~call:func prec op
       | Arg1, _ | Arg2, _ -> invalid_arg "Metal C_syntax_config: Arg1/Arg2 not operators"
 
     let unop_syntax prec op =

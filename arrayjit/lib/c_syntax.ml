@@ -275,6 +275,43 @@ let default_binop_syntax prec op v1 v2 =
     ^^ ifflat (space ^^ v2) (nest 2 (break 1 ^^ v2))
     ^^ string op_suffix)
 
+(** The RNG binops -- the two Threefry variants and the per-lane uniform conversion -- rendered as a
+    call to the builtin of that name. Every C-family backend provides the same three builtins
+    ([builtins.c], {!Builtins_cuda}, {!Builtins_metal}) under the same precision contract: the
+    Threefry ops produce a uint4x32 block, and the lane conversion consumes one to produce the
+    target precision, so it is the one binop that rejects uint4x32 (its builtin already yields the
+    target precision, bypassing the generic bfloat16/fp8 compute-in-single wrapping).
+
+    Backends pass their own two-argument [call] renderer -- the layouts differ in where a line break
+    may fall -- and the [backend] name for the diagnostics. [op] must be one of the three ops above.
+*)
+let rng_binop_syntax ~backend ~call prec op =
+  let uint4x32_only ~op_name ~builtin =
+    match prec with
+    | Ops.Uint4x32_prec _ -> call builtin
+    | _ ->
+        raise
+        @@ Utils.User_error
+             (Printf.sprintf "%s backend: %s requires target precision to be uint4x32, but got %s"
+                backend op_name (Ops.prec_string prec))
+  in
+  match op with
+  | Ops.Threefry4x32_crypto ->
+      uint4x32_only ~op_name:"Threefry4x32_crypto" ~builtin:"arrayjit_threefry4x32_crypto"
+  | Ops.Threefry4x32_light ->
+      uint4x32_only ~op_name:"Threefry4x32_light" ~builtin:"arrayjit_threefry4x32_light"
+  | Ops.Uint4x32_to_prec_uniform_lane -> (
+      match prec with
+      | Ops.Uint4x32_prec _ ->
+          raise
+          @@ Utils.User_error
+               (Printf.sprintf
+                  "%s backend: Uint4x32_to_prec_uniform_lane not supported for Uint4x32 target \
+                   precision"
+                  backend)
+      | _ -> call ("uint4x32_to_" ^ Ops.prec_string prec ^ "_uniform_lane"))
+  | _ -> invalid_arg "C_syntax.rng_binop_syntax: not a random number generation operator"
+
 module Pure_C_config (Input : sig
   type buffer_ptr
 
