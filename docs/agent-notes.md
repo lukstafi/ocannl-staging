@@ -54,8 +54,12 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   keep their OCaml meaning (distinct ppx arms), so `(a,b) ++^ …` is an operand pair, not a stack.
 - `%op` inline-record init expressions (`{ w = kaiming normal1 () }`) resolve identifiers at the
   lifted binding's scope, which is the enclosing UNIT parameter: a `let%op f x = ...` with no
-  `()` param fails with "Unbound value"; write `let%op mk_f () x = ...` and apply `mk_f ()`.
-  Labeled args inside the init expression break the translation the same way.
+  `()` param fails with "Unbound value" (gh-511 tracks the scoping fix) — write
+  `let%op mk_f () x = ...` and apply `mk_f ()`, or fully qualify the initializer's DSL idents
+  (`kaiming TDSL.O.normal1 ()`). Only the applied head is auto-qualified to `NTDSL.*`; argument
+  idents rely on the `open TDSL.O` scope introduced at the unit parameter. Design caveat: the
+  no-unit-param form is not generative — `f` closes over ONE shared param created at definition
+  time; the `()` idiom makes the construction point explicit.
 - Printing tensors whose shape has a concatenation axis (results of `stack`/`concat`) with
   ``~style:`Inline`` crashes (`to_doc_inline` counts a concat dim as one axis); use
   ``~style:`Default``. Nested block matrices `[[a;b];[c;d]]` don't solve; single-level `stack`
