@@ -373,6 +373,7 @@ struct
               Min;
               Mod;
               Cmplt;
+              Cmple;
               Cmpeq;
               Cmpne;
               Or;

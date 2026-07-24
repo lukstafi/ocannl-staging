@@ -409,6 +409,7 @@ type binop =
   | Min
   | Mod
   | Cmplt
+  | Cmple
   | Cmpeq
   | Cmpne
   (* Waiting till we have a use-case to see how to sensibly introduce bitwise operations. *)
@@ -488,7 +489,7 @@ let neutral_elem = function
   | Min -> Float.infinity
   | And -> 1.
   | Or -> 0.
-  | Arg2 | Arg1 | Mod | Cmplt | Cmpeq | Cmpne | Threefry4x32_crypto
+  | Arg2 | Arg1 | Mod | Cmplt | Cmple | Cmpeq | Cmpne | Threefry4x32_crypto
   | Threefry4x32_light | Uint4x32_to_prec_uniform_lane (* | Shl | Shr *) ->
       0.
 
@@ -509,6 +510,7 @@ let interpret_binop op v1 v2 =
   | Min -> min v1 v2
   | Mod -> v1 % v2
   | Cmplt -> if v1 < v2 then 1. else 0.
+  | Cmple -> if v1 <= v2 then 1. else 0.
   | Cmpeq -> if v1 = v2 then 1. else 0.
   | Cmpne -> if v1 <> v2 then 1. else 0.
   (* | Shl -> v1 * (int_pow 2. @@ to_int v2) *)
@@ -572,6 +574,7 @@ let binop_cd_syntax = function
   | Relu_gate -> "-?/"
   | Satur01_gate -> "-?^"
   | Cmplt -> "<"
+  | Cmple -> "<="
   | Cmpeq -> "="
   | Cmpne -> "<>"
   | Or -> "||"
@@ -598,6 +601,7 @@ let binop_cd_fallback_syntax = function
   | Relu_gate -> "relu_gate"
   | Satur01_gate -> "sat01_gate"
   | Cmplt -> "lt"
+  | Cmple -> "le"
   | Cmpeq -> "eq"
   | Cmpne -> "ne"
   | Or -> "or_"
@@ -651,6 +655,7 @@ let binop_c_syntax prec v =
   | Min, _ -> ("fminf(", ",", ")")
   | Mod, _ -> ("(", " %", ")")
   | Cmplt, _ -> ("(", " <", ")")
+  | Cmple, _ -> ("(", " <=", ")")
   | Cmpeq, _ -> ("(", " ==", ")")
   | Cmpne, _ -> ("(", " !=", ")")
   (* | Shl, Byte_prec _ -> ("(", " <<", ")") *)
@@ -671,7 +676,7 @@ let binop_c_syntax prec v =
 let is_assign_op = function
   | Arg1 | Mod | Threefry4x32_crypto | Threefry4x32_light | Uint4x32_to_prec_uniform_lane
   (* | Shl | Shr *)
-  | Cmplt | Cmpeq | Cmpne
+  | Cmplt | Cmple | Cmpeq | Cmpne
     ->
       false
   | Add | Sub | Mul | Div | ToPowOf | Relu_gate | Satur01_gate | Arg2 | Max | Min | Or | And -> true
@@ -702,7 +707,7 @@ let assign_op_cd_syntax ~initialize_neutral = function
   | And -> "=&&"
   | Arg1 | Mod | Threefry4x32_crypto | Threefry4x32_light | Uint4x32_to_prec_uniform_lane
   (* | Shl | Shr *)
-  | Cmplt | Cmpeq | Cmpne
+  | Cmplt | Cmple | Cmpeq | Cmpne
     ->
       invalid_arg "Ops.assign_op_cd_syntax: not an assignment op"
 

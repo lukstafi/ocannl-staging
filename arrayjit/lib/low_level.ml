@@ -2073,6 +2073,7 @@ and interval_of_uncached ~ienv ~(prec : Ops.prec) (llsc : scalar_t) : interval_r
           let b = r2 () in
           { ival = at (Interval.join Interval.false_ b.ival); srcs = b.srcs }
       | Ops.Cmplt -> cmp Interval.cmplt_decides
+      | Ops.Cmple -> cmp Interval.cmple_decides
       | Ops.Cmpeq -> cmp Interval.cmpeq_decides
       | Ops.Cmpne -> cmp (fun a b -> Option.map (Interval.cmpeq_decides a b) ~f:not)
       | Ops.And ->
@@ -2156,7 +2157,7 @@ let settle_srcs { srcs; _ } = Set.iter srcs ~f:Tn.settle_bounds
    construction. *)
 let try_interval_fold ~ienv ~prec (llsc : scalar_t) : scalar_t option =
   match llsc with
-  | Binop ((Ops.Cmplt | Ops.Cmpeq | Ops.Cmpne | Ops.And | Ops.Or), _, _) ->
+  | Binop ((Ops.Cmplt | Ops.Cmple | Ops.Cmpeq | Ops.Cmpne | Ops.And | Ops.Or), _, _) ->
       let r = interval_of ~ienv ~prec llsc in
       if Interval.is_singleton r.ival then (
         settle_srcs r;
