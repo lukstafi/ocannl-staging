@@ -1,6 +1,6 @@
 ---
 name: extending-ocannl
-description: Touch-lists for common OCANNL extension tasks — adding a primitive operation, adding or extending a backend, extending shape inference, and diagnosing output differences between backends. Use when adding an op to ops.ml, implementing a new backend, changing projection/constraint logic, or when the same computation gives different results on cc vs cuda vs metal.
+description: Touch-lists for common OCANNL extension tasks: adding a primitive operation, adding or extending a backend, extending shape inference, and diagnosing output differences between backends. Use when adding an op to ops.ml, implementing a new backend, changing projection/constraint logic, or when the same computation gives different results on cc vs cuda vs metal.
 ---
 
 # Extending OCANNL

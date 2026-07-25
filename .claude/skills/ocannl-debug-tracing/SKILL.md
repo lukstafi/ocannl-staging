@@ -1,6 +1,6 @@
 ---
 name: ocannl-debug-tracing
-description: How to get debug output out of OCANNL — kernel/routine runtime logs, generated code artifacts, and ppx_minidebug tracing of library internals such as the shape/row solver. Use when debugging a wrong-value or wrong-shape result and you need to see generated code, per-kernel logs, or the solver's decisions.
+description: How to get debug output out of OCANNL: kernel/routine runtime logs, generated code artifacts, and ppx_minidebug tracing of library internals such as the shape/row solver. Use when debugging a wrong-value or wrong-shape result and you need to see generated code, per-kernel logs, or the solver's decisions.
 ---
 
 # Debugging and Logging
