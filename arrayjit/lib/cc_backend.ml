@@ -359,34 +359,13 @@ struct
 
   let binop_syntax prec op v1 v2 =
     match op with
-    | Ops.Threefry4x32_crypto -> (
-        match prec with
-        | Ops.Uint4x32_prec _ ->
-            let open PPrint in
-            group (string "arrayjit_threefry4x32_crypto(" ^^ v1 ^^ string ", " ^^ v2 ^^ string ")")
-        | _ ->
-            invalid_arg
-              "CC_syntax_config.binop_syntax: Threefry4x32_crypto on non-uint4x32 precision")
-    | Ops.Threefry4x32_light -> (
-        match prec with
-        | Ops.Uint4x32_prec _ ->
-            let open PPrint in
-            group (string "arrayjit_threefry4x32_light(" ^^ v1 ^^ string ", " ^^ v2 ^^ string ")")
-        | _ ->
-            invalid_arg
-              "CC_syntax_config.binop_syntax: Threefry4x32_light on non-uint4x32 precision")
-    | Ops.Uint4x32_to_prec_uniform_lane -> (
-        (* The builtin already yields the target precision (bitwise lane of the vectorized
-           conversion); bypass the generic bfloat16/fp8 compute-in-single wrapping. *)
-        match prec with
-        | Ops.Uint4x32_prec _ ->
-            invalid_arg
-              "CC_syntax_config.binop_syntax: Uint4x32_to_prec_uniform_lane on uint4x32 precision"
-        | _ ->
-            let open PPrint in
-            group
-              (string ("uint4x32_to_" ^ Ops.prec_string prec ^ "_uniform_lane(")
-              ^^ v1 ^^ string ", " ^^ v2 ^^ string ")"))
+    | (Ops.Threefry4x32_crypto | Ops.Threefry4x32_light | Ops.Uint4x32_to_prec_uniform_lane) as op
+      ->
+        let call fn v1 v2 =
+          let open PPrint in
+          group (string (fn ^ "(") ^^ v1 ^^ string ", " ^^ v2 ^^ string ")")
+        in
+        C_syntax.rng_binop_syntax ~backend:"CC" ~call prec op v1 v2
     | _ -> (
         match prec with
         | Ops.Bfloat16_prec _ ->
