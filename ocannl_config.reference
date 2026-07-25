@@ -12,8 +12,9 @@
 # 4. Defaults hard-coded at use sites in the source code.
 #
 # Only one `ocannl_config` file is used per run, searched for in the current directory
-# and in ancestor directories. The source of the `log_level` config is always printed,
-# the sources of other configs are printed when the log level > 0.
+# and in ancestor directories. Unless `log_config_sourcing` is false, the source of the
+# `log_level` config is always printed, and the sources of other configs are printed
+# when the log level > 0.
 # The configuration values below are (one of) the defaults.
 #
 # Repeating fields are disallowed. If the value is an empty string, the default value
@@ -27,6 +28,13 @@ suppress_welcome_message=false
 # If true, disables reading any ocannl_config file; only commandline and environment
 # variable configuration is used.
 no_config_file=false
+
+# If true, prints where each configuration setting comes from (commandline, environment,
+# config file, or the hard-coded default): always for `log_level`, and for the remaining
+# settings when the log level > 0. Set to false to keep the output clean, e.g. in tests;
+# re-enable it (also for a single run, via `--ocannl_log_config_sourcing=true`) to debug
+# which configuration a run actually picks up.
+log_config_sourcing=true
 
 # Configurations that are stored as `Utils.settings`:
 
