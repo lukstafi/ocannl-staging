@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 clamped pool = [-14 -12 -10 -9]
 clamped values match the -inf-margins semantics: true
 operand stays unpadded: true

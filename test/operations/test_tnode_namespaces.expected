@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 === Test 1: Namespace rendering ===
 default: id=n0 debug_name=n0 namespace=ocannl
 snap1: id=snap1__n0 debug_name=snap1__n0 namespace=snap1

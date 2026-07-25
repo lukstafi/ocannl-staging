@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 Testing a clamped max-pool and a 0-margin conv sharing one operand...
 shared operand's committed neutral (the conv's): 0.
 pooled[0,0]=-11 pooled[1,1]=-6 pooled[3,3]=-1

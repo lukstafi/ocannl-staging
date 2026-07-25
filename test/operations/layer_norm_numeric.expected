@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 row 0: -1.34164 -0.44721  0.44721  1.34164
 row 1: -0.97333 -0.64889  0.00000  1.62221
 layer_norm forward matches hand-computed LayerNorm (max abs err < 1e-5): true

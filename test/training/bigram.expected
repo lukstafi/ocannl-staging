@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 bigrams: 228146
 input_size: 229000
 Epoch 0, batch 0, loss=3.381

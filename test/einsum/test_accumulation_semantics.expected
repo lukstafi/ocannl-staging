@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 
 === Testing einsum reduction (surjective but not injective) ===
 Input tensor (shape: batch=2, input=3, output=4):

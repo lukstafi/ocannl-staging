@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 swizzled SMEM matmul parity (GPU) or clean rejection (CPU): true
 tile accesses XOR-swizzled (GPU) or rejected (CPU): true
 swizzled staged+tensorized parity (GPU) or clean rejection (CPU): true

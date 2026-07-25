@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 eq, shifted flanks, conflicting dims (unsatisfiable): Shape_error: solved dimensions for axis: mismatch
 eq, shifted flanks, conjugate dims (least-material resolution): no error
 eq, aligned flanks, conflicting dims: Shape_error: solved dimensions for axis: mismatch

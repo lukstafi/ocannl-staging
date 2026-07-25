@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 independent siblings both virtual: true
 independent siblings setters dropped: true
 independent siblings inlined at use sites (no array reads survive): true

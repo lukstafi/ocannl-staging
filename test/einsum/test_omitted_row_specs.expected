@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 batch passes through omitted rows: batched ++ "i=>i0": 2|3,1
 
 explicit spelling is equivalent: batched ++ "...|...->i => ...|...->i0": 2|3,1

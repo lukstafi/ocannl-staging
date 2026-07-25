@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 conv2d params:
   bias_test_conv: single prec 4
   kernel_test_conv: single prec 4x3x3x1

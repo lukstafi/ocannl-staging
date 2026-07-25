@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 alloc_pool Local         -> Shared
 alloc_pool On_device     -> Shared
 alloc_pool Effectively_constant -> Shared

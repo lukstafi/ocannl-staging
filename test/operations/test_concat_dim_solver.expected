@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 === Concat dim-solver hardening (solver-level) ===
 AC1: GLB merge of two compatible Concat bounds (stage 4) commits (forces operand)
   PASS: operand committed to the merged size-5 GLB; no residual deferral

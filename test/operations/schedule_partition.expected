@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 plain non-dividing split keeps a remainder guard: true
 guarded split matches reference: true
 partition+split is guard-free: true

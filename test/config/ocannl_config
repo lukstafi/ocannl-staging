@@ -1,4 +1,5 @@
 suppress_welcome_message=true
+log_config_sourcing=false
 log_main_domain_to_stdout=true
 backend=cc
 log_level=0

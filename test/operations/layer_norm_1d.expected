@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 1-D layer_norm output shape:
 ((batch
   ((beg_dims ()) (dims ()) (bcast Broadcastable)

@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 
 Testing diagonal tensor initialization:
 HERE: test/einsum/test_surjectivity.ml:22:21

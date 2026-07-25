@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 === Test: concat via %op syntax ===
 concat2 id: 3
 concat3 id: 4

@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 Tnode: collecting accessible arrays...
 n0 moons_flat as moons_flat: On-dev/49; single prec 40x10x2; mem in bytes: <not-in-yet>
 n1 moons_classes as moons_classes: On-dev/49; single prec 40x10x1; mem in bytes: <not-in-yet>

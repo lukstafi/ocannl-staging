@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 Test 1: outer-left leading-flank alignment rejects size mismatch
   PASS: got Shape_error: dimension comparison for axis: mismatch
 Test 2: s_row_one composes beg_dims (closed value into open row)

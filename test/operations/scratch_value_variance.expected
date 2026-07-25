@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 variant scratch: schedule is nonempty: true
 variant scratch: outer chain loops stay parallel: true
 variant scratch: value-feeding chain loops are serialized: true

@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 === 1+2. On-device copy: fresh destination, then overwrite ===
 destination has the node before copy: false
 destination has the node after copy: true

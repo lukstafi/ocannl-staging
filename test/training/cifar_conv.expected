@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 Loading CIFAR-10 dataset...
 Training on 2000 samples, testing on 1000 samples, batch_size=50
 
