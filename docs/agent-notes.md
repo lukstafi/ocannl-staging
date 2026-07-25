@@ -195,8 +195,43 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   from updated weights. The autotune schedule cache persists across processes; compiler changes
   invalidate it by digest.
 
+## Build and test mechanics
+
+CLAUDE.md holds the workflow rules; these are the dune/OCaml mechanics behind them, narrow enough
+that they earn a lookup rather than always-loaded space.
+
+- Dune renders a cram/`.expected` failure as a `diff --git a/<test>.expected b/<test>.actual` block.
+  It does NOT print `differ`, `FAILED`, or `Error`, so grepping a runtest log for those words comes
+  back clean on a red run. Grep `^diff --git` (or `^File .*expected`) and check the exit code.
+- `dune runtest` exiting 0 can be a CACHE artifact: it may report green from a prior build without
+  re-running the test under the current tree, hiding a crash that surfaces only once a later source
+  edit forces a rebuild. Force the narrowed target before claiming a specific test passed now.
+- Don't `git stash` around a command whose termination you don't control — if it hangs, the trailing
+  `git stash pop` never runs and all uncommitted work sits stranded in the stash. Single-file
+  `git stash push -- <impl-file>` for a fast mutation test is fine; for baseline comparisons use a
+  second `git worktree`, where nothing has to be popped.
+- `(copy_files ...)` creates PASSIVE rules: they do not fire just because you build a sibling target
+  in the same directory — only when listed in that target's `(deps ...)` or requested explicitly. A
+  rule consuming copy_files output must therefore declare it. And validate a `(mode promote)` target
+  from a clean state (`dune clean && dune build @alias`): stale `_build/` intermediates can satisfy
+  an undeclared dep, so an incomplete build passes while the artifact is wrong. Assert content
+  (size, object counts), not mere existence.
+- A record with `[@@deriving sexp]` makes every `.expected` file that prints the parent a hidden
+  consumer of its FIELD NAMES, and `rg "\.field_name"` over sources is vacuous against that (sexp
+  prints `(field_name value)`, not member access). Before claiming a rename has no serialization
+  consumers, grep the sexp shape: `rg -F "(field_name " --glob '*.expected'` (the trailing space
+  disambiguates longer identifiers). Budget the resulting promote as expected work, in its own
+  commit, after diff-confirming the delta is rename-only.
+
 ## Conventions
 
 - Releases use lightweight, un-prefixed git tags (`0.8`, not `v0.8`).
+- Completeness of a vocabulary relabel is a repo-wide NEGATIVE grep minus an explicit allowlist, not
+  a clean sweep of the files you planned to touch: make it case-insensitive (the term appears
+  capitalized in prose and in constructors) and morphology-aware (`LUBs?`, not `LUB`), and let the
+  allowlist carry both false-positive substrings and phrases that are genuinely correct in their new
+  referent. Historical-record files — `CHANGES.md`, superseded `docs/proposals/*` — are excluded by
+  design: they describe what was true at a past version, and rewriting them falsifies the record.
+  Current guidance and exposition (`AGENTS.md`, `docs/*.md`, `*.tex`) do get reoriented.
 - Prefer the minimal targeted fix over speculative hardening: offer hardening separately as an
   option with its costs, don't fold it into the fix.
