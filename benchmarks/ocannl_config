@@ -1,4 +1,5 @@
 suppress_welcome_message=true
+log_config_sourcing=false
 log_level=0
 default_prec=single
 fixed_state_for_init=42
