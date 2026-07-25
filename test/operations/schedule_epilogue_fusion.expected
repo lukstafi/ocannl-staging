@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 plain-nest fusion leaves a single nest (tail merged): true
 plain-nest fused values match two-kernel bitwise: true
 packed+privatized fused values match two-kernel bitwise: true

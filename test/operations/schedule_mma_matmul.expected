@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 tf32 policy-off matmul matches the serial twin bitwise: true
 tf32 policy-off renders and records the scalar fallback: true
 tf32 policy-off autotune omits tensorized candidates: true

@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 === pair_conflict: named cases ===
 iterator agreement                 query Same_thread  oracle same-thread 
 stencil read p-1                   query Cross_thread oracle cross-thread

@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 Names loaded: 32033
 train/dev/test examples (after batch truncation): 182000/22000/22000
 Epoch 0, mean train loss=2.6295 below 5=true

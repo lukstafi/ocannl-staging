@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 === single: 4 lanes per block ===
 reference (size 12) first values: 4.4999e-1 4.5137e-1 1.4952e-1 8.9940e-1 3.9591e-1
 n=1: count true, range ok true, prefix-stable true

@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 w1 param (policy leg): bfloat16
 b2 param (excepted): single
 y activation (policy leg): bfloat16

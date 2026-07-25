@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 census: standard layout renders register-tiled: true
 census: transposed-B layout falls back to the lane-0 scalar rendering: true
 per-chunk B~ re-pack matches the serial twin bitwise: true

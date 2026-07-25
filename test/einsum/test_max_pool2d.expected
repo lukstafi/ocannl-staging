@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 Testing max_pool2d with default parameters (stride=2, window=2)...
 Input shape: 4x4x1
 Window size: 2x2

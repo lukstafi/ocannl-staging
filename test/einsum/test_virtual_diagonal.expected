@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 
 Diagonal i=>ii inlined into a generic consumer (diagonal + 1):
 HERE: test/einsum/test_virtual_diagonal.ml:27:21

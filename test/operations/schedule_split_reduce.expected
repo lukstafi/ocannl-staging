@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 dividing split-reduce is guard-free: true
 pass 1 accumulates into partials and the combine folds all blocks: true
 the routine gains the combine as a separate top-level nest: true

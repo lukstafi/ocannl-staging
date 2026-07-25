@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 padded packed matmul matches the serial twin bitwise: true
 padded 33x65x70 runs the register-tiled micro-kernel: true
 staged tiles zero-fill their fringe and the store-back is masked: true

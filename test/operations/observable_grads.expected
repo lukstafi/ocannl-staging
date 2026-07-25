@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 === 1. Fused fwd+bwd+sgd (one routine) ===
 fused grad placement: Virt/151; in context: false; observable intent: true
 param after one fused step (expect p - 0.1*xin = 1.6 2.5): 1.60 2.50

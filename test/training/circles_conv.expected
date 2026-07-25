@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 Generating 160 circle counting images (3 classes)...
 Dataset generated: images shape [160; 16; 16; 1], labels shape [160; 1]
 

@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 logits dims: 4x11
 logits count: 44
 all finite: true

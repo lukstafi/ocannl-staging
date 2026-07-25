@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 float ids: table gradient equals the dense one-hot gradient: true
 optimized IR contains a Set_dynamic scatter: true
 vocabulary loop is eliminated from the whole update: true

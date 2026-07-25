@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 === affine_injective (per-position + pinning) ===
 2*oh+wh (wh range 2) injective: true
 K*i+k (k range <= K) injective: true

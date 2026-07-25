@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 === affine_accesses dump ===
 wr S   []             loops=[] path=[0] whole 
 rd A   [i1;i2]        loops=[i1:0..3,i2:0..2] path=[1] 

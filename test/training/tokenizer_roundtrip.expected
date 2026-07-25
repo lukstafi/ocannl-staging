@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 vocab size: 5
 encode "ab ab ab" -> [2; 3; 3]
 decode roundtrip: "ab ab ab"

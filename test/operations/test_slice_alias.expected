@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 slice is an alias view: true
 slice absent from ctx_buffers (no fresh alloc): true
 parent present in ctx_buffers: true

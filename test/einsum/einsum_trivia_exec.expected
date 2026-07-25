@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 HERE: test/einsum/einsum_trivia_exec.ml:19:21
 ┌───────────────────────────────────────────────────────────────────────────┐
 │[1]: =>_ho shape 0:4|2:2->1:3                                              │
