@@ -49,19 +49,6 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   and ternary keep the `false` default (RHS before LHS, or concat rows get prematurely solved to a
   concrete dimension). If a change makes one family's tests go green and another's red, the fix is
   the per-caller flag, not flipping the default.
-- Non-termination in the fixpoint solver does not always trip a consecutive-iteration equality
-  check — it can oscillate between two states or loop one non-converging constraint. Pin it by
-  instrumenting the suspect arm with a counter that prints its operands and exits past a cap.
-  Separately, a normalization can be correct-by-spec yet have no `%op`-level "fails-without"
-  fixture: forcing enough sibling components to reach the branch makes the equation determinate, so
-  re-substitution routes it through a simpler arm first. Cover the reachable determinate sub-case
-  with a solver-level fixture and write the reachability gap down rather than contriving a vacuous
-  one (`Concat = Dim` multi-residual normalization, PRs #64/#66, is the worked case).
-- `test/einsum/test_basis_total_order.expected` prints PASS/FAIL for a battery of `d1 ⊑ d2`
-  accept/reject cases, which makes it the direct decision-set-unchanged gate for any
-  behavior-preserving relabel or order flip: if it stays all-PASS, no case crossed the boundary, so
-  a reversed comparison cannot have slipped through. Freeze it before starting such a change and
-  treat any non-wording diff as stop-and-flag.
 - Padded (`=`-mode) windows: max/tropical-family accumulations lower with clamped window bounds
   and demand NO margins (gh-504: `Row.proj_env.clamp_padded`; interval-based range guards in
   `Assignments.to_low_level`); add-family keeps physical halos committed as tensor-node identity
@@ -120,12 +107,6 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   `~name` to `Context.compile` (or wrap in `Asgns.Block_comment` for labeled debug dumps), set
   `embedded_nodes`, force the output materialized, seed inputs with `Context.set_values`, then
   compile→run→`get_values`.
-- For a codegen-SHAPE regression (this IR pattern emits this output sequence), build the
-  `Low_level.t` plus `traced_store` by hand and instantiate `C_syntax(Pure_C_config(...))` directly
-  rather than reaching the shape through `%op`/`%cd`: the DSL virtualizes intermediates and turns
-  einsums surjective, and `Tn.update_memory_mode tn Never_virtual` only partly restores control over
-  occurrence count and loop nesting. Precedents: `arrayjit/test/test_cross_cse.ml`,
-  `arrayjit/test/test_zero_out_codegen.ml`. A DSL-level fixture is a smoke test, not the regression.
 - A node-level "what happened at first touch" flag (`zero_initialized_by_code` and friends) cannot
   soundly drive a PER-OCCURRENCE codegen decision, because nothing clears it across the traversal: a
   guard keyed on it alone collapses `Zero_out; Set; Zero_out` to one zero and drops a `Zero_out`
@@ -155,18 +136,6 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   command buffers overlap over untracked resources: back-to-back runs of the SAME routine need
   the FIFO wait, pipelined (no-sync) timing is unreliable, and `get_values`/`set_values` do FULL
   awaits by design.
-- Before committing a design to a new MSL construct, settle "does it actually run?" with a
-  throwaway dune exe calling `Metal.Library.on_device` on candidate snippets and dispatching them:
-  passing the Metal compiler proves syntax and types, not the runtime contract (residency,
-  addressing model, lifetime). This is how the pooled slot-table binding was chosen over the
-  raw-`gpuAddress` table, which compiled cleanly and segfaulted at dispatch.
-- Enum and type-mapping changes in the GPU BINDING libraries (ocaml-cudajit and friends) are fully
-  verifiable without the hardware, since the conversions are pure: a `test_no_device/` target that
-  feeds the conversion well-known plus out-of-range/legacy values through a sexp diff pins the
-  behavior on any host (`test_no_device/test_computemode.ml` covers `computemode_of_int` on
-  `{0,1,2,3,42}` after a removed legacy CUDA value started raising). Reserve real devices for
-  genuinely runtime-dependent behavior. For a binding repo you have no checkout of,
-  `gh pr diff --repo <owner>/<repo>` reviews the change by inspection.
 - Parallel-codegen work often lands Metal → cc → CUDA/HIP, but that is a default reflecting
   which machine is booted first and used most (the Mac Studio), not a rule — tasks can start on
   CUDA or HIP for load balancing across machines. The durable part: codegen snapshots for a
@@ -192,16 +161,6 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
 CLAUDE.md holds the workflow rules; these are the dune/OCaml mechanics behind them, narrow enough
 that they earn a lookup rather than always-loaded space.
 
-- Dune renders a cram/`.expected` failure as a `diff --git a/<test>.expected b/<test>.actual` block.
-  It does NOT print `differ`, `FAILED`, or `Error`, so grepping a runtest log for those words comes
-  back clean on a red run. Grep `^diff --git` (or `^File .*expected`) and check the exit code.
-- `dune runtest` exiting 0 can be a CACHE artifact: it may report green from a prior build without
-  re-running the test under the current tree, hiding a crash that surfaces only once a later source
-  edit forces a rebuild. Force the narrowed target before claiming a specific test passed now.
-- Don't `git stash` around a command whose termination you don't control — if it hangs, the trailing
-  `git stash pop` never runs and all uncommitted work sits stranded in the stash. Single-file
-  `git stash push -- <impl-file>` for a fast mutation test is fine; for baseline comparisons use a
-  second `git worktree`, where nothing has to be popped.
 - `(copy_files ...)` creates PASSIVE rules: they do not fire just because you build a sibling target
   in the same directory — only when listed in that target's `(deps ...)` or requested explicitly. A
   rule consuming copy_files output must therefore declare it. And validate a `(mode promote)` target
@@ -218,12 +177,5 @@ that they earn a lookup rather than always-loaded space.
 ## Conventions
 
 - Releases use lightweight, un-prefixed git tags (`0.8`, not `v0.8`).
-- Completeness of a vocabulary relabel is a repo-wide NEGATIVE grep minus an explicit allowlist, not
-  a clean sweep of the files you planned to touch: make it case-insensitive (the term appears
-  capitalized in prose and in constructors) and morphology-aware (`LUBs?`, not `LUB`), and let the
-  allowlist carry both false-positive substrings and phrases that are genuinely correct in their new
-  referent. Historical-record files — `CHANGES.md`, superseded `docs/proposals/*` — are excluded by
-  design: they describe what was true at a past version, and rewriting them falsifies the record.
-  Current guidance and exposition (`AGENTS.md`, `docs/*.md`, `*.tex`) do get reoriented.
 - Prefer the minimal targeted fix over speculative hardening: offer hardening separately as an
   option with its costs, don't fold it into the fix.
