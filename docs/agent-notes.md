@@ -42,6 +42,13 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   fails fast, and `Total_elems` cannot resolve conv/affine dims either — give leaves explicit
   dims (e.g. `Operation.init ~o:[n] ~grad_spec:Require_grad`) instead of `Tensor.term_init` when
   the consumer is a windowed spec.
+- `einsum_n_constraints` (the shared constraint-generation helper for binary Einsum, Block/concat
+  and ternary Einsum) takes `?lhs_constraints_first` because the branches need OPPOSITE orders and
+  no global choice works: binary Einsum passes `true` (the LHS constraint must precede RHS Affine
+  constraints so a conv `over` variable resolves against an LHS-specified axis), while Block/concat
+  and ternary keep the `false` default (RHS before LHS, or concat rows get prematurely solved to a
+  concrete dimension). If a change makes one family's tests go green and another's red, the fix is
+  the per-caller flag, not flipping the default.
 - Padded (`=`-mode) windows: max/tropical-family accumulations lower with clamped window bounds
   and demand NO margins (gh-504: `Row.proj_env.clamp_padded`; interval-based range guards in
   `Assignments.to_low_level`); add-family keeps physical halos committed as tensor-node identity
@@ -100,6 +107,14 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   `~name` to `Context.compile` (or wrap in `Asgns.Block_comment` for labeled debug dumps), set
   `embedded_nodes`, force the output materialized, seed inputs with `Context.set_values`, then
   compile→run→`get_values`.
+- A node-level "what happened at first touch" flag (`zero_initialized_by_code` and friends) cannot
+  soundly drive a PER-OCCURRENCE codegen decision, because nothing clears it across the traversal: a
+  guard keyed on it alone collapses `Zero_out; Set; Zero_out` to one zero and drops a `Zero_out`
+  inside a `For_loop` on every iteration. The shape that works is per-traversal state — a `seen` set
+  cleared at the single reset point (`compile_proc`) plus a positional `~in_loop` threaded through
+  the recursion, defaulting to `true` for mutually-recursive callers that don't carry it. When a
+  codegen decision consults a `traced_array`-style boolean, ask whether it is node-level or
+  occurrence-level; they coincide only at first touch on the linear path.
 - Big-reduction producers are forced `Never_virtual` by `virtualize_max_inline_reduction`
   (default 16) — remember it when a structural expectation assumes inlining.
 
@@ -140,6 +155,24 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   doubles as a gradient oracle. tinygrad: realize the loss BEFORE `opt.step()` or it recomputes
   from updated weights. The autotune schedule cache persists across processes; compiler changes
   invalidate it by digest.
+
+## Build and test mechanics
+
+CLAUDE.md holds the workflow rules; these are the dune/OCaml mechanics behind them, narrow enough
+that they earn a lookup rather than always-loaded space.
+
+- `(copy_files ...)` creates PASSIVE rules: they do not fire just because you build a sibling target
+  in the same directory — only when listed in that target's `(deps ...)` or requested explicitly. A
+  rule consuming copy_files output must therefore declare it. And validate a `(mode promote)` target
+  from a clean state (`dune clean && dune build @alias`): stale `_build/` intermediates can satisfy
+  an undeclared dep, so an incomplete build passes while the artifact is wrong. Assert content
+  (size, object counts), not mere existence.
+- A record with `[@@deriving sexp]` makes every `.expected` file that prints the parent a hidden
+  consumer of its FIELD NAMES, and `rg "\.field_name"` over sources is vacuous against that (sexp
+  prints `(field_name value)`, not member access). Before claiming a rename has no serialization
+  consumers, grep the sexp shape: `rg -F "(field_name " --glob '*.expected'` (the trailing space
+  disambiguates longer identifiers). Budget the resulting promote as expected work, in its own
+  commit, after diff-confirming the delta is rename-only.
 
 ## Conventions
 
