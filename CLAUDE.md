@@ -46,34 +46,6 @@ opam install hipjit   # for AMD HIP backend
 
 ## Architecture Overview
 
-### Core Directory Structure
-
-- `lib/`: User-facing recipes and utilities
-  - `train.ml`: Training utilities and optimizers  
-  - `nn_blocks.ml`: Basic neural network building blocks (transformers, attention, etc.)
-  - `ocannl.ml`: Re-exports of all public modules for backward compatibility
-
-- `tensor/`: Framework internals (separate library `ocannl_tensor`)
-  - `tensor.ml/mli`: Main tensor type and operation construction
-  - `shape.ml/mli`: Shape inference system (see detailed docs there for einsum notation)
-  - `operation.ml`: Tensor operations and DSL modules
-  - `row.ml`: Row variables for shape inference
-  - `ppx_*.ml`: Syntax extension implementations (`ppx_op`, `ppx_cd`)
-  - `PrintBox_utils.ml`: Pretty-printing utilities
-
-- `arrayjit/`: Low-level array compilation framework
-  - `lib/`: Core IR and backend implementations
-    - `backend_intf.ml`: Backend interface definitions
-    - `assignments.ml`: High-level assignment-based IR
-    - `low_level.ml`: Low-level for-loop based IR
-    - `tnode.ml`: Tensor node representation (partially user-facing)
-    - `indexing.ml`: Array indexing and projections (partially user-facing)
-    - `*_backend.ml`: Device-specific backend implementations
-    - `context.ml`: runtime consistency for routines, user-facing interface
-
-- `test/`: Integration tests and tutorials
-- `bin/`: Command-line utilities
-
 **Before working on a subsystem, skim the matching section of `docs/agent-notes.md`** — distilled
 cross-session agent knowledge (solver/backend traps, known bugs with workarounds, debug recipes,
 design history) that is not derivable from the code alone.
