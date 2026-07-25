@@ -155,14 +155,6 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   command buffers overlap over untracked resources: back-to-back runs of the SAME routine need
   the FIFO wait, pipelined (no-sync) timing is unreliable, and `get_values`/`set_values` do FULL
   awaits by design.
-- An AC of the form "buffers are allocated with storage mode X" is untestable through the abstract
-  cross-backend surface (`type buffer_ptr` hides the representation, and no public operation reads
-  the property back). The unlock is a `module type of` refinement in the CONCRETE backend's `.mli` —
-  `with type buffer_ptr = Metal.Buffer.t`, sealing the `.ml` to match — which lets a test call
-  `Metal.Resource.get_storage_mode` on real `alloc_array`/`alloc_zeros` results without weakening
-  the surface other backends rely on (`test_metal_alloc.ml`). A unit test of the
-  `storage_mode_for_memory_mode` classifier alone passes whether or not the call sites thread
-  `?mode`, so it is not evidence for the integration.
 - Before committing a design to a new MSL construct, settle "does it actually run?" with a
   throwaway dune exe calling `Metal.Library.on_device` on candidate snippets and dispatching them:
   passing the Metal compiler proves syntax and types, not the runtime contract (residency,
