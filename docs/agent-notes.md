@@ -42,6 +42,26 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   fails fast, and `Total_elems` cannot resolve conv/affine dims either — give leaves explicit
   dims (e.g. `Operation.init ~o:[n] ~grad_spec:Require_grad`) instead of `Tensor.term_init` when
   the consumer is a windowed spec.
+- `einsum_n_constraints` (the shared constraint-generation helper for binary Einsum, Block/concat
+  and ternary Einsum) takes `?lhs_constraints_first` because the branches need OPPOSITE orders and
+  no global choice works: binary Einsum passes `true` (the LHS constraint must precede RHS Affine
+  constraints so a conv `over` variable resolves against an LHS-specified axis), while Block/concat
+  and ternary keep the `false` default (RHS before LHS, or concat rows get prematurely solved to a
+  concrete dimension). If a change makes one family's tests go green and another's red, the fix is
+  the per-caller flag, not flipping the default.
+- Non-termination in the fixpoint solver does not always trip a consecutive-iteration equality
+  check — it can oscillate between two states or loop one non-converging constraint. Pin it by
+  instrumenting the suspect arm with a counter that prints its operands and exits past a cap.
+  Separately, a normalization can be correct-by-spec yet have no `%op`-level "fails-without"
+  fixture: forcing enough sibling components to reach the branch makes the equation determinate, so
+  re-substitution routes it through a simpler arm first. Cover the reachable determinate sub-case
+  with a solver-level fixture and write the reachability gap down rather than contriving a vacuous
+  one (`Concat = Dim` multi-residual normalization, PRs #64/#66, is the worked case).
+- `test/einsum/test_basis_total_order.expected` prints PASS/FAIL for a battery of `d1 ⊑ d2`
+  accept/reject cases, which makes it the direct decision-set-unchanged gate for any
+  behavior-preserving relabel or order flip: if it stays all-PASS, no case crossed the boundary, so
+  a reversed comparison cannot have slipped through. Freeze it before starting such a change and
+  treat any non-wording diff as stop-and-flag.
 - Padded (`=`-mode) windows: max/tropical-family accumulations lower with clamped window bounds
   and demand NO margins (gh-504: `Row.proj_env.clamp_padded`; interval-based range guards in
   `Assignments.to_low_level`); add-family keeps physical halos committed as tensor-node identity
@@ -100,6 +120,20 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   `~name` to `Context.compile` (or wrap in `Asgns.Block_comment` for labeled debug dumps), set
   `embedded_nodes`, force the output materialized, seed inputs with `Context.set_values`, then
   compile→run→`get_values`.
+- For a codegen-SHAPE regression (this IR pattern emits this output sequence), build the
+  `Low_level.t` plus `traced_store` by hand and instantiate `C_syntax(Pure_C_config(...))` directly
+  rather than reaching the shape through `%op`/`%cd`: the DSL virtualizes intermediates and turns
+  einsums surjective, and `Tn.update_memory_mode tn Never_virtual` only partly restores control over
+  occurrence count and loop nesting. Precedents: `arrayjit/test/test_cross_cse.ml`,
+  `arrayjit/test/test_zero_out_codegen.ml`. A DSL-level fixture is a smoke test, not the regression.
+- A node-level "what happened at first touch" flag (`zero_initialized_by_code` and friends) cannot
+  soundly drive a PER-OCCURRENCE codegen decision, because nothing clears it across the traversal: a
+  guard keyed on it alone collapses `Zero_out; Set; Zero_out` to one zero and drops a `Zero_out`
+  inside a `For_loop` on every iteration. The shape that works is per-traversal state — a `seen` set
+  cleared at the single reset point (`compile_proc`) plus a positional `~in_loop` threaded through
+  the recursion, defaulting to `true` for mutually-recursive callers that don't carry it. When a
+  codegen decision consults a `traced_array`-style boolean, ask whether it is node-level or
+  occurrence-level; they coincide only at first touch on the linear path.
 - Big-reduction producers are forced `Never_virtual` by `virtualize_max_inline_reduction`
   (default 16) — remember it when a structural expectation assumes inlining.
 
@@ -121,6 +155,26 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   command buffers overlap over untracked resources: back-to-back runs of the SAME routine need
   the FIFO wait, pipelined (no-sync) timing is unreliable, and `get_values`/`set_values` do FULL
   awaits by design.
+- An AC of the form "buffers are allocated with storage mode X" is untestable through the abstract
+  cross-backend surface (`type buffer_ptr` hides the representation, and no public operation reads
+  the property back). The unlock is a `module type of` refinement in the CONCRETE backend's `.mli` —
+  `with type buffer_ptr = Metal.Buffer.t`, sealing the `.ml` to match — which lets a test call
+  `Metal.Resource.get_storage_mode` on real `alloc_array`/`alloc_zeros` results without weakening
+  the surface other backends rely on (`test_metal_alloc.ml`). A unit test of the
+  `storage_mode_for_memory_mode` classifier alone passes whether or not the call sites thread
+  `?mode`, so it is not evidence for the integration.
+- Before committing a design to a new MSL construct, settle "does it actually run?" with a
+  throwaway dune exe calling `Metal.Library.on_device` on candidate snippets and dispatching them:
+  passing the Metal compiler proves syntax and types, not the runtime contract (residency,
+  addressing model, lifetime). This is how the pooled slot-table binding was chosen over the
+  raw-`gpuAddress` table, which compiled cleanly and segfaulted at dispatch.
+- Enum and type-mapping changes in the GPU BINDING libraries (ocaml-cudajit and friends) are fully
+  verifiable without the hardware, since the conversions are pure: a `test_no_device/` target that
+  feeds the conversion well-known plus out-of-range/legacy values through a sexp diff pins the
+  behavior on any host (`test_no_device/test_computemode.ml` covers `computemode_of_int` on
+  `{0,1,2,3,42}` after a removed legacy CUDA value started raising). Reserve real devices for
+  genuinely runtime-dependent behavior. For a binding repo you have no checkout of,
+  `gh pr diff --repo <owner>/<repo>` reviews the change by inspection.
 - Parallel-codegen work often lands Metal → cc → CUDA/HIP, but that is a default reflecting
   which machine is booted first and used most (the Mac Studio), not a rule — tasks can start on
   CUDA or HIP for load balancing across machines. The durable part: codegen snapshots for a
