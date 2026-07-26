@@ -337,6 +337,43 @@ let identity_projections ?debug_info ?derived_for ~lhs_dims () =
     debug_info;
   }
 
+(** The extents of the product-space components of [p]: one entry per component, in
+    [product_space] order. A concatenation component's extent is the sum of its segment extents.
+    Non-iterated (dimension-1) axes do not appear. *)
+let prod_dims (p : projections) : int array =
+  Array.map p.product_space ~f:(List.fold ~init:0 ~f:( + ))
+
+(** The identity projection of a tensor laid out over the full product space of [p] (e.g. the
+    (output x kernel) pair space of a windowed reduction): the tensor's axes are the product
+    components in order, possibly interleaved with non-iterated (dimension-1) axes, which the
+    product space omits. [dims] is the tensor's dimensions; each dimension-1 axis maps to
+    [Fixed_idx 0] and every other axis consumes the next product component, whose extent must
+    agree — a mismatch means the product-space proxy shape (gh-512) got out of sync with the
+    derived projections, and raises rather than corrupting memory. *)
+let prod_project_for (p : projections) ~(dims : int array) : axis_index array =
+  let mismatch () =
+    raise
+    @@ Utils.User_error
+         (Printf.sprintf
+            "Indexing.prod_project_for: product-space tensor dimensions %s are inconsistent with \
+             the operation's product space %s (proxy shape vs. projections mismatch)"
+            (dims_to_string dims)
+            (Sexp.to_string_hum ([%sexp_of: int list array] p.product_space)))
+  in
+  let comps = ref (Array.to_list (Array.zip_exn (prod_dims p) p.product_iterators)) in
+  let project =
+    Array.map dims ~f:(fun d ->
+        if d = 1 then Fixed_idx 0
+        else
+          match !comps with
+          | (cd, syms) :: rest when cd = d ->
+              comps := rest;
+              (match syms with [ s ] -> Iterator s | syms -> Concat syms)
+          | _ -> mismatch ())
+  in
+  if not (List.is_empty !comps) then mismatch ();
+  project
+
 let reflect_projection ~(dims : int array) ~(projection : axis_index array) =
   (* FIXME: handle concatenation *)
   Array.zip_exn dims projection
