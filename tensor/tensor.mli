@@ -8,7 +8,14 @@ type tn_set = Set.M(Ir.Tnode).t
 type asgns = Ir.Assignments.t
 type comp = Ir.Assignments.comp
 type fetch_op = Ir.Assignments.fetch_op
-type projections = { projections_debug : string; projections : Ir.Indexing.projections Lazy.t }
+type projections = {
+  projections_debug : string;
+  projections : Ir.Indexing.projections Lazy.t;
+  product_shape : Shape.t Lazy.t;
+      (** The product-space proxy shape of the operation (gh-512), for [%cd] [*_pspace]
+          intermediates; see {!Shape.product_space_shape}. Forcing it emits shape constraints, so
+          it must be forced (if at all) while the operation's code is being built. *)
+}
 
 type diff = {
   grad : tn;

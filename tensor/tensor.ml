@@ -11,7 +11,14 @@ type tn_set = Set.M(Tn).t
 type asgns = Asgns.t
 type comp = Asgns.comp
 type fetch_op = Asgns.fetch_op
-type projections = { projections_debug : string; projections : Ir.Indexing.projections Lazy.t }
+type projections = {
+  projections_debug : string;
+  projections : Ir.Indexing.projections Lazy.t;
+  product_shape : Shape.t Lazy.t;
+      (** The product-space proxy shape of the operation (gh-512), for [%cd] [*_pspace]
+          intermediates; see {!Shape.product_space_shape}. Forcing it emits shape constraints, so
+          it must be forced (if at all) while the operation's code is being built. *)
+}
 
 let _get_local_debug_runtime = Utils.get_local_debug_runtime
 
@@ -196,7 +203,11 @@ let raw_binop ~initialize_neutral ~accum ~(t : t) ~(lhs_is_grad : bool) ~op ~(t1
   Shape.propagate_shapes local_shape_update;
   let projections_debug = Shape.logic_to_spec shape_logic in
   let projections =
-    { projections_debug; projections = lazy (Shape.get_projections local_shape_update) }
+    {
+      projections_debug;
+      projections = lazy (Shape.get_projections local_shape_update);
+      product_shape = lazy (Shape.product_space_shape local_shape_update);
+    }
   in
   let lhs = if lhs_is_grad then (Option.value_exn ~here:[%here] t.diff).grad else t.value in
   let rhs1 = if rhs1_is_grad then (Option.value_exn ~here:[%here] t1.diff).grad else t1.value in
@@ -226,7 +237,11 @@ let raw_ternop ~initialize_neutral ~accum ~(t : t) ~(lhs_is_grad : bool) ~op ~(t
   Shape.propagate_shapes local_shape_update;
   let projections_debug = Shape.logic_to_spec shape_logic in
   let projections =
-    { projections_debug; projections = lazy (Shape.get_projections local_shape_update) }
+    {
+      projections_debug;
+      projections = lazy (Shape.get_projections local_shape_update);
+      product_shape = lazy (Shape.product_space_shape local_shape_update);
+    }
   in
   let lhs = if lhs_is_grad then (Option.value_exn ~here:[%here] t.diff).grad else t.value in
   let rhs1 = if rhs1_is_grad then (Option.value_exn ~here:[%here] t1.diff).grad else t1.value in
@@ -257,7 +272,11 @@ let raw_unop ~initialize_neutral ~accum ~(t : t) ~(lhs_is_grad : bool) ~op ~(t1 
   Shape.propagate_shapes local_shape_update;
   let projections_debug = Shape.logic_to_spec shape_logic in
   let projections =
-    { projections_debug; projections = lazy (Shape.get_projections local_shape_update) }
+    {
+      projections_debug;
+      projections = lazy (Shape.get_projections local_shape_update);
+      product_shape = lazy (Shape.product_space_shape local_shape_update);
+    }
   in
   let lhs = if lhs_is_grad then (Option.value_exn ~here:[%here] t.diff).grad else t.value in
   let rhs = if rhs_is_grad then (Option.value_exn ~here:[%here] t1.diff).grad else t1.value in
@@ -476,7 +495,11 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
   Shape.propagate_shapes preliminary_shape_update;
   let projections_debug = Shape.logic_to_spec preliminary_shape_update.logic in
   let projections =
-    { projections_debug; projections = lazy (Shape.get_projections preliminary_shape_update) }
+    {
+      projections_debug;
+      projections = lazy (Shape.get_projections preliminary_shape_update);
+      product_shape = lazy (Shape.product_space_shape preliminary_shape_update);
+    }
   in
   let t =
     { params; forward = Asgns.empty_comp; diff = None; value = v; top_down_prec; shape; children }

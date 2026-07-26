@@ -215,12 +215,17 @@ let axes_spec_to_dims_bio ~sh_id ~row_var_env ~dim_var_env:_ ~f labels =
   let output = to_row `Output ~implicit:false labels.bcast_output o_dims beg_o_dims in
   (batch, input, output)
 
-let einsum_slot_spec_to_dims_bio ~original_spec ~sh_id ~row_var_env ~dim_var_env labels =
+let einsum_slot_spec_to_dims_bio ?(fixed_index = `Pin_var) ~original_spec ~sh_id ~row_var_env
+    ~dim_var_env labels =
   let proj_env_update = ref @@ Row.dim_map_empty in
   let extras = ref [] in
   let f kind = function
     | Label name ->
         Row.Var (Hashtbl.find_or_add dim_var_env name ~default:(fun () -> Row.get_var ~name ()))
+    | Fixed_index _ when Poly.equal fixed_index `Unit_dim ->
+        (* Product-space proxies (gh-512): a fixed-index axis has a pinned projection, so it is
+           never a product axis regardless of its extent — the proxy pins it to dimension 1. *)
+        Row.get_default_dim ~d:1 ()
     | Fixed_index i ->
         let var = Row.get_var () in
         let d = Row.Var var in
@@ -1357,6 +1362,225 @@ let infer_equal (sh1 : t) (sh2 : t) =
     :: Row.Row_eq { r1 = sh1.output; r2 = sh2.output; origin = get_origin `Output }
     :: !active_constraints
 
+(** The product-space proxy shape of an einsum-family operation (gh-512): the result's axes
+    followed by the reduced-over (contracted) axes, matching the product-space order of
+    [derive_projections] — result rows in [to_dims] order, then contracted axes by first
+    occurrence over the RHS slots (each walked batch, output, input; [beg_dims], row variable,
+    [dims]). Built by re-elaborating the einsum spec with fresh variables — the re-emitted operand
+    equalities tie them to the operation's own solution — and appending the contracted axes to the
+    result's input row (the last row in [to_dims] order). A [%cd] [*_pspace] intermediate's shape
+    is [infer_equal]-ed to this proxy; the identity projection over the product space is derived
+    from the projections by [Ir.Indexing.prod_project_for], which cross-checks the resulting
+    dimensions against the product space at lowering.
+
+    Raises [Row.Shape_error] when the product space is not expressible as a shape: a non-einsum
+    operation, more than one reduced-over row variable, or a reduced-over row variable combined
+    with an open result input row. *)
+let product_space_shape (update_step : update_step) : t =
+  let cur_sh = update_step.shape in
+  let invalid msg error_shapes =
+    raise @@ Row.Shape_error ("product_space_shape: " ^ msg, [ Shape_mismatch error_shapes ])
+  in
+  let spec, ls_rhs_list, ls_lhs, rhs_shapes =
+    match update_step.logic with
+    | Broadcast (Einsum (spec, _), sh1, sh2) -> (
+        match einsum_of_spec spec with
+        | [ ls1; ls2 ], ls_lhs -> (spec, [ ls1; ls2 ], ls_lhs, [ sh1; sh2 ])
+        | _ -> invalid ("invalid binary einsum spec: " ^ spec) [ cur_sh; sh1; sh2 ])
+    | Transpose (Permute (spec, _), sh1) -> (
+        match einsum_of_spec spec with
+        | [ ls1 ], ls_lhs -> (spec, [ ls1 ], ls_lhs, [ sh1 ])
+        | _ -> invalid ("invalid permutation spec: " ^ spec) [ cur_sh; sh1 ])
+    | Broadcast_tern (Einsum_tern (spec, _), sh1, sh2, sh3) -> (
+        match einsum_of_spec spec with
+        | [ ls1; ls2; ls3 ], ls_lhs -> (spec, [ ls1; ls2; ls3 ], ls_lhs, [ sh1; sh2; sh3 ])
+        | _ -> invalid ("invalid ternary einsum spec: " ^ spec) [ cur_sh; sh1; sh2; sh3 ])
+    | _ ->
+        invalid
+          "product-space intermediates (*_pspace) require an einsum-family operation (an einsum \
+           or permutation spec)"
+          [ cur_sh ]
+  in
+  let error_shapes = cur_sh :: rhs_shapes in
+  let cannot msg =
+    invalid ("cannot express the product space of " ^ spec ^ " as a shape: " ^ msg) error_shapes
+  in
+  (* Re-elaborate the spec with fresh (name-shared) variables and re-emit the operand equalities:
+     the fresh variables converge to the operation's own solution, while the operation's
+     delayed-variable bindings (Shape.set_dim targets) stay authoritative. *)
+  let row_var_env = Hashtbl.create (module String) in
+  let dim_var_env = Hashtbl.create (module String) in
+  let constraints = ref [] in
+  let elaborate ~label ls (sh : t) =
+    let extras, _proj_env, ((b, i, o) as bio) =
+      einsum_slot_spec_to_dims_bio ~original_spec:spec ~sh_id:sh.id ~row_var_env ~dim_var_env ls
+    in
+    let row_eq kind r1 r2 =
+      Row.Row_eq
+        {
+          r1;
+          r2;
+          origin =
+            [
+              {
+                Row.lhs_name = spec;
+                lhs_kind = kind;
+                rhs_name = sh.debug_name;
+                rhs_kind = kind;
+                operation = Some label;
+              };
+            ];
+        }
+    in
+    constraints :=
+      extras
+      @ [ row_eq `Batch b sh.batch; row_eq `Input i sh.input; row_eq `Output o sh.output ]
+      @ !constraints;
+    bio
+  in
+  List.iteri (List.zip_exn ls_rhs_list rhs_shapes) ~f:(fun idx (ls, sh) ->
+      ignore (elaborate ~label:(Printf.sprintf "Product-space ARGUMENT %d" (idx + 1)) ls sh));
+  ignore (elaborate ~label:"Product-space RESULT" ls_lhs cur_sh);
+  active_constraints := !constraints @ !active_constraints;
+  (* The proxy's result rows: a SEPARATE, constraint-free elaboration (shared variable
+     environments, so named variables coincide with the constrained ones) in which fixed-index
+     axes are pinned to dimension 1 ([`Unit_dim]) — their projections are pinned, so they are
+     never product axes regardless of their extent. The constrained elaboration above must not
+     use [`Unit_dim]: it would pin the operation's actual fixed-index result axes. *)
+  let _, _, (b_lhs, i_lhs, o_lhs) =
+    einsum_slot_spec_to_dims_bio ~fixed_index:`Unit_dim ~original_spec:spec ~sh_id:cur_sh.id
+      ~row_var_env ~dim_var_env ls_lhs
+  in
+  (* Contracted axes, from the parsed spec: labels (including convolution constituents and
+     concatenation elements) and row variables of the RHS slots absent from the result, in
+     first-occurrence order with each slot walked in the to_dims kind order (batch, output, input;
+     leading axes, then the row variable, then trailing axes) — the order in which
+     [derive_projections] first encounters them. Fixed-index axes are never product axes. *)
+  let items_of_slot (ls : parsed_axis_labels) =
+    let axis_items = function
+      | Label l -> [ `Lbl l ]
+      | Fixed_index _ -> []
+      | Affine_spec { over_label; conv; _ } -> (
+          `Lbl over_label
+          :: (match conv with Some { kernel_label; _ } -> [ `Lbl kernel_label ] | None -> []))
+      | Concat_spec ls -> [ `Cnc ls ]
+    in
+    let row_items beg_specs bcast specs =
+      List.concat_map beg_specs ~f:axis_items
+      @ (match bcast with Some name -> [ `Rv name ] | None -> [])
+      @ List.concat_map specs ~f:axis_items
+    in
+    row_items ls.given_beg_batch ls.bcast_batch ls.given_batch
+    @ row_items ls.given_beg_output ls.bcast_output ls.given_output
+    @ row_items ls.given_beg_input ls.bcast_input ls.given_input
+  in
+  let lhs_items = items_of_slot ls_lhs in
+  let lhs_labels =
+    Set.of_list
+      (module String)
+      (List.concat_map lhs_items ~f:(function `Lbl l -> [ l ] | `Cnc ls -> ls | `Rv _ -> []))
+  in
+  let lhs_rvars =
+    Set.of_list
+      (module String)
+      (List.filter_map lhs_items ~f:(function `Rv name -> Some name | _ -> None))
+  in
+  let lookup_var name =
+    Row.Var (Hashtbl.find_or_add dim_var_env name ~default:(fun () -> Row.get_var ~name ()))
+  in
+  let seen_labels = ref (Set.empty (module String)) in
+  let seen_rvars = ref (Set.empty (module String)) in
+  let contracted =
+    List.concat_map ls_rhs_list ~f:(fun ls ->
+        List.concat_map (items_of_slot ls) ~f:(function
+          | `Lbl l ->
+              if Set.mem lhs_labels l || Set.mem !seen_labels l then []
+              else (
+                seen_labels := Set.add !seen_labels l;
+                [ `Dim (lookup_var l) ])
+          | `Cnc ls ->
+              let is_known l = Set.mem lhs_labels l || Set.mem !seen_labels l in
+              if List.for_all ls ~f:is_known then []
+              else if List.exists ls ~f:is_known then
+                cannot
+                  ("a concatenation axis is partially reduced over: "
+                  ^ String.concat ~sep:"^" ls)
+              else (
+                seen_labels := List.fold ls ~init:!seen_labels ~f:Set.add;
+                [ `Dim (Row.Concat (List.map ls ~f:lookup_var)) ])
+          | `Rv name ->
+              if Set.mem lhs_rvars name || Set.mem !seen_rvars name then []
+              else (
+                seen_rvars := Set.add !seen_rvars name;
+                let v =
+                  Hashtbl.find_or_add row_var_env name ~default:(fun () -> Row.get_row_var ())
+                in
+                [ `Rvar v ])))
+  in
+  let contracted_dims_around idx =
+    let dim_of = function `Dim d -> Some d | `Rvar _ -> None in
+    ( List.filter_map (List.take contracted idx) ~f:dim_of,
+      List.filter_map (List.drop contracted (idx + 1)) ~f:dim_of )
+  in
+  let input_row, output_row =
+    match
+      List.findi contracted ~f:(fun _ item -> match item with `Rvar _ -> true | _ -> false)
+    with
+    | None ->
+        let extra = List.map contracted ~f:(function `Dim d -> d | `Rvar _ -> assert false) in
+        (* Appending to [dims] places the contracted axes after an open row variable's expansion,
+           so an open result input row needs no special case here. *)
+        ({ i_lhs with dims = i_lhs.dims @ extra }, o_lhs)
+    | Some (idx, `Rvar v) -> (
+        if
+          List.exists (List.drop contracted (idx + 1)) ~f:(function
+            | `Rvar _ -> true
+            | `Dim _ -> false)
+        then
+          cannot "the operation reduces over more than one row variable (unknown-rank axis groups)"
+        else
+          let before, after = contracted_dims_around idx in
+          match (i_lhs.bcast, o_lhs.bcast) with
+          | Row.Broadcastable, _ ->
+              ( {
+                  Row.beg_dims = i_lhs.beg_dims @ i_lhs.dims @ before;
+                  bcast = Row.Row_var v;
+                  dims = after;
+                  prov = i_lhs.prov;
+                },
+                o_lhs )
+          | Row.Row_var _, Row.Broadcastable when List.is_empty before && List.is_empty after ->
+              (* Lone reduced-over row variable with an open result input row: place it in the
+                 (closed) output row. The product order puts the result's input axes before the
+                 reduced axes while this layout puts them after; a consistent layout is still
+                 correct — every access goes through the same identity projection
+                 ([Indexing.prod_project_for]), which rejects an extent-sequence mismatch at
+                 lowering. *)
+              ( i_lhs,
+                {
+                  Row.beg_dims = o_lhs.beg_dims @ o_lhs.dims;
+                  bcast = Row.Row_var v;
+                  dims = [];
+                  prov = o_lhs.prov;
+                } )
+          | Row.Row_var _, _ ->
+              cannot
+                "the operation reduces over a row variable while the result's input row is open \
+                 (and the reduced axes cannot go into the result's output row instead)")
+    | Some (_, `Dim _) -> assert false
+  in
+  {
+    batch = b_lhs;
+    output = output_row;
+    input = input_row;
+    batch_padding = None;
+    input_padding = None;
+    output_padding = None;
+    padding_elem = None;
+    id = cur_sh.id;
+    debug_name = "pspace:" ^ cur_sh.debug_name;
+  }
+
 (** Sets the dimension/total-elements for a delayed variable reference. For row variables, this
     creates a [Total_elems] constraint that will be reconciled during [finish_inference]. *)
 let%track7_sexp set_dim (delayed_var_ref : delayed_var_ref) (dim : int) : unit =
@@ -2328,7 +2552,7 @@ let%debug4_sexp finish_inference (() : unit) : unit =
   (* There should not be any shape variables remaining in any inference-undergoing update steps. *)
   state := Row.empty_env
 
-let to_dims sh =
+let to_dims (sh : t) =
   finish_inference ();
   to_dims_impl sh
 
