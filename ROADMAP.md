@@ -8,7 +8,7 @@ This roadmap outlines the development plan for OCANNL from the current state to 
 >
 > - **v0.6.4 is skipped as a release.** Its scope — axis concatenation/block tensors (#49), RoPE and non-learned position embeddings (#398), the decoder-only transformer toy (#57) — is complete (the GitHub milestone is closed), but it ships inside **v0.7** rather than as a separate tagged release. The last tagged release before v0.7 was **0.6.3**.
 > - **v0.7.2 is consolidated into v0.7.** The compiler-optimization and memory-management work that was scheduled separately (loop hoisting, CSE, the universal pool allocator) is part of the single **v0.7** milestone.
-> - **v0.7.1 is dissolved.** Its two tracks were redistributed: the **AMD HIP backend (#411)** moves to **v0.8**, and the **real-world examples** (makemore #59, CNN/CIFAR #54, LSTM #60, transformer inference #377) and **tokenizer bindings** move to **v0.9**. The GitHub milestone has been deleted.
+> - **v0.7.1 was dissolved.** Its two tracks were redistributed: the **AMD HIP backend (#411)** shipped in **v0.8**, and the **real-world examples** (makemore #59, CNN/CIFAR #54, LSTM #60, transformer inference #377) and **tokenizer bindings** moved to **v0.9**. The GitHub milestone has been deleted.
 >
 > The version sequence is now: `0.7 → 0.8 → 0.9 → 1.0 → 1.1`. Milestone *scope* below tracks the GitHub milestones, which are the source of truth.
 
@@ -66,13 +66,13 @@ This release is the basis for the workshop paper examples: a clean context-based
 
 GitHub milestone scope: *"GPU tiling and related optimizations in the polyhedral style, with heuristic syntactic metrics for now. HIP backend (AMD hardware)."*
 
-> **Scope changes vs. the original plan:** **tensor cores** — the end point of the matmul-tiling track (#412) — are **pushed out to v0.9**. Conversely, **autotuning** was not on the original roadmap at all: measured schedule search was pulled in and lands in v0.8, with a **full beam search still scheduled for v0.9**. In effect the milestone traded "heuristic syntactic metrics" for execution-measured tuning one release early.
+> **Outcome vs. the original plan:** measured schedule search was pulled in one release early, and the matmul track continued through generated tensor-core instructions (#412). Full beam search over schedule compositions remains v0.9.
 
 **Parallel schedules (done):**
 - **Automatic GPU schedules** — CUDA and Metal kernels now parallelize by default (`automatic_gpu_schedule`): hardware axis types render to grid/block/thread loops with launch dimensions, barriers, and shared-memory tiles; per-backend `hardware_limits` validate block sizes, thread counts, and shared-memory use of every kernel.
 - **Kernel fission** — routines split into multiple kernels at materialized cross-nest edges, with aligned cross-nest parallelism merging equal-geometry nests losslessly; Metal encodes fissioned steps as fused command-buffer segments.
 - **CPU kernel-level parallelism** — the `cc` backend renders parallel loops through a thread pool by default; backends renamed to `cc` / `multidev_cc` (`sync_cc` / `multicore_cc` remain as deprecated aliases).
-- **Matmul tiling** (#412, partial) — register-tiled `Tile_mma` microkernels and SIMD vector-extension codegen with reduction chains (#468, #469), warp shuffles and packed vectors on the GPU backends — the Böhm-CPU-article and CUDA-worklog legs of the track; the tensor-cores conclusion moves to v0.9.
+- **Matmul tiling and tensor cores** (#412, done) — register-tiled `Tile_mma` microkernels, SIMD vector-extension codegen with reduction chains (#468, #469), shared/packed staging, warp shuffles, CUDA WMMA/inline PTX, Metal simdgroup matrices, and HIP rocWMMA.
 
 **Autotuning (done — pulled into v0.8):**
 - **Measured schedule search** — `Autotune.tune` searches canonical schedule candidates with execution-based timing: a digest-guarded schedule cache, per-segment schedules for fissioned routines, sketch seeding (e.g. matmul), and placement A/B tuning. Full beam search over schedules remains v0.9.
@@ -85,9 +85,8 @@ GitHub milestone scope: *"GPU tiling and related optimizations in the polyhedral
 - **Megakernel exploration** (#318, done as a study); **Metal private mode** (#320, done).
 
 **Deferred after v0.8:**
-- **Tensor cores** (#412 conclusion, with llm.c lessons #253) → v0.9.
-- **MSVC on the native-Windows C backend** (#313) — Windows is green via mingw-w64; MSVC support stays open.
-- **AVX/AVX2 intrinsics** (#164) — the issue drove the v0.8 CPU-parallelism and SIMD bundle (pool-backed `Grid` rendering, probed SIMD compiler flags, vector-extension codegen); explicit intrinsics remain open, to revisit only if they measurably beat the vector extensions.
+- **MSVC on the native-Windows C backend** (#313, closed as not planned) — Windows remains supported through mingw-w64.
+- **AVX/AVX2 intrinsics** (#164, done) — the delivered CPU bundle uses pool-backed `Grid` rendering, probed SIMD compiler flags, and portable compiler vector extensions rather than architecture-specific intrinsic calls.
 - Stretch / study items not taken up: `ggml` efficiency lessons (#163); restore CUDA `__constant__` arrays (#195); small-Transformer digit-addition reproduction (#427).
 
 ---
@@ -97,15 +96,16 @@ GitHub milestone scope: *"GPU tiling and related optimizations in the polyhedral
 
 A research-heavy milestone. GitHub milestone scope: *"Program search with execution-based per-backend or aggregate-of-backends cost functions; broadening code-graph rewriting rules."*
 
-- **Tensor cores** (#412 conclusion, moved from v0.8) — hardware matrix units (CUDA WMMA/mma, Metal simdgroup matrices) building on the register-tiled `Tile_mma` microkernels landed in v0.8; incorporating llm.c lessons (#253).
 - **Full beam search over schedules** — extend v0.8's measured autotuner (single-step candidate menus) to a Halide-/tinygrad-BEAM-style beam search over schedule compositions.
 - **Cost functions** — per-backend execution-based metrics and aggregate cost functions across backends.
 - **Code-graph rewriting** — a broader range of rewriting rules, augmenting the v0.8 tiling/layout mechanisms.
-- Study tracks: Tiramisu (#267), Candle (#265), superoptimizers for tensor programs (#261).
+- **Tiramisu/Telamon study** (#267, done) — see [the optimization-space and pruning notes](docs/blog/tiramisu-telamon-optimization-space-pruning.md).
+- **Superoptimizers for tensor programs** (#261, done) — see [the research notes](docs/research/superoptimizers.md).
+- **Candle study** (#265, closed as not planned).
 
 **Real-world examples and tokenization** (redistributed here from the dissolved v0.7.1):
 - **makemore progression** (#59, done) — the character-level language-model series mirroring Karpathy's *Neural Networks: Zero to Hero* (see [docs/makemore_tutorial.md](docs/makemore_tutorial.md)); includes the Bengio-style MLP and BatchNorm variants.
-- **CNN classifiers** (#54) — MNIST and CIFAR-10 training examples.
+- **CNN classifiers** (#54, done) — MNIST and CIFAR-10 training examples.
 - **LSTM example** (#60).
 - **Transformer inference demo** (#377, done) — GPT-2 124M inference with pretrained HuggingFace weights (safetensors reader, BPE tokenizer, greedy decoding), exact against a NumPy reference; `test/gpt2/gpt2_generate.ml` is the tutorial executable and `test/gpt2/gpt2_dry_run.ml` the full-scale dry run.
 - **Tokenizer bindings** (done) — developed in the spin-off [ocaml-dataprep](https://github.com/ahrefs/ocaml-dataprep) project (opam package `dataprep`); the `Dataprep.Bpe` HuggingFace-compatible BPE tokenizer is bridged to OCANNL tensors via `Nn_blocks.token_ids_of_array` / `token_ids_of_batch`, integration-tested in `test/training/tokenizer_roundtrip.ml`.
@@ -148,7 +148,7 @@ GitHub milestone scope: *"Consider introducing axis labels. Consider introducing
 | **0.7** | Jul 3, 2026 | **released** | **Frontend finalization + compiler optimizations** (consolidates 0.7.2) |
 | ~~0.7.1~~ | — | **dissolved** | AMD HIP backend → 0.8; examples + tokenizers → 0.9 |
 | **0.8** | Jul 13, 2026 | **released** | **Parallel schedules (GPU + CPU), autotuning, SIMD/`Tile_mma`, AMD HIP backend, benchmark suite** |
-| 0.9    | Aug 24, 2026 | planned | Program search: beam search, tensor cores **(ICFP week)**; examples: makemore, MNIST/CIFAR, LSTM, transformer inference, tokenizers |
+| 0.9    | Aug 24, 2026 | planned | Program search: full beam search and cost functions **(ICFP week)**; examples: makemore, MNIST/CIFAR, LSTM, transformer inference, tokenizers |
 | 1.0    | Q4 2026 | mostly de-risked | Docs, completeness, ergonomics, safety |
 | 1.1+   | post-1.0 | backlog | Shape schemes, axis labels, BERT, DisTrO |
 
