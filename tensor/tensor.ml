@@ -825,6 +825,13 @@ let strip_param_diff t =
   Option.iter t.diff ~f:(fun _ -> remove_bprop_root t);
   { t with diff = None }
 
+(** Post-processing hook applied by {!param} to each fully-constructed parameter before it is
+    returned to user code. Mixed-precision recipes install a wrapper here that returns a
+    reduced-precision "cast twin" consuming the parameter (gh-ocannl-492 master weights): the graph
+    then reads the twin while the optimizer keeps updating the master parameter, which remains the
+    sole member of the result's {!field:params}. Reset by {!unsafe_reinitialize}. *)
+let param_postprocess : (t -> t) ref = ref Fn.id
+
 let%debug7_sexp param ?(require_grad = true) ~t (name : string) ?(more_label = []) ?input_dims
     ?output_dims ?input_axes ?output_axes ?deduced () : t =
   let t =
@@ -849,7 +856,7 @@ let%debug7_sexp param ?(require_grad = true) ~t (name : string) ?(more_label = [
   | None -> ());
   Shape.set_terminal ~is_param:(Option.is_some t.diff) t.shape;
   remove_fwd_root t;
-  { t with params = Set.singleton (module T) t }
+  !param_postprocess { t with params = Set.singleton (module T) t }
 
 let debug_name t = Tn.debug_name t.value
 let debug_grad t = Tn.debug_name (Option.value_exn t.diff).grad
@@ -942,6 +949,7 @@ let%track5_sexp unsafe_reinitialize ?(namespace = Tn.default_namespace) () : uni
   session_state.next_id <- 0;
   session_state.forward_roots <- Map.empty (module Int);
   session_state.backprop_roots <- Map.empty (module Int);
+  param_postprocess := Fn.id;
   random_seed := None;
   Tn.Registry.clear Tn.registry;
   Shape.unsafe_reinitialize ()

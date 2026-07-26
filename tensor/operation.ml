@@ -281,6 +281,20 @@ let neg ?spec ?(capture_dims = []) =
     ~transpose_op:(transpose_op_of_spec ?spec ~capture_dims ())
     ~op_asn ~grad_asn
 
+(** An identity operation whose sole purpose is to give the result a tensor node distinct from the
+    argument's: the assignment-level precision conversion then happens between the two nodes when
+    their precisions differ. This is the "cast twin" primitive of the mixed-precision recipes
+    (gh-ocannl-492): pin the result at a reduced precision to make it a low-precision copy of an
+    f32 master weight; the gradient accumulates back through the cast, widening (e.g. f16 -> f32)
+    at the accumulating assignment. *)
+let cast ?spec ?(capture_dims = []) =
+  let module NTDSL = Initial_NTDSL in
+  let%cd op_asn ~t ~t1 ~projections = v =:+ id v1 in
+  let%cd grad_asn ~t:_ ~g ~t1 ~projections = g1 =+ id g in
+  Tensor.unop ~op_label:"cast"
+    ~transpose_op:(transpose_op_of_spec ?spec ~capture_dims ())
+    ~op_asn ~grad_asn
+
 let not ?spec ?(capture_dims = []) =
   let module NTDSL = Initial_NTDSL in
   let%cd op_asn ~t ~t1 ~projections = v =:+ not v1 in
@@ -952,6 +966,7 @@ struct
   let sin ?spec ?capture_dims = sin ?spec ?capture_dims ~grad_spec
   let cos ?spec ?capture_dims = cos ?spec ?capture_dims ~grad_spec
   let neg ?spec ?capture_dims = neg ?spec ?capture_dims ~grad_spec
+  let cast ?spec ?capture_dims = cast ?spec ?capture_dims ~grad_spec
   let sqrt ?spec ?capture_dims = sqrt ?spec ?capture_dims ~grad_spec
   let recip ?spec ?capture_dims = recip ?spec ?capture_dims ~grad_spec
   let recip_sqrt ?spec ?capture_dims = recip_sqrt ?spec ?capture_dims ~grad_spec
