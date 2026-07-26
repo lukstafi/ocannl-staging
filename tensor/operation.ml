@@ -606,6 +606,10 @@ module NDO_before_einmax1 = struct
   let ( = ) ?label t1 t2 = eq ?label ~grad_spec:Prohibit_grad t1 t2 ()
 end
 
+(** Max-reduction einsum. The gradient gate lives in the product space of the operation — one bit
+    per (result position, reduced position) pair — so it is exact even when reduction windows
+    overlap (e.g. convolution-style specs with stride < window). Ties gate the full upstream
+    gradient to every achieving position (duplication, not a normalized split). *)
 let einmax1 ?(capture_dims = []) spec =
   let module NTDSL = struct
     include Initial_NTDSL
@@ -613,17 +617,21 @@ let einmax1 ?(capture_dims = []) spec =
   end in
   let%cd op_asn ~t ~t1 ~projections = v =:@^ v1 in
   let%cd grad_asn ~t ~g ~t1 ~projections =
-    { cond_rhs1 } =: eq (t, t1);
-    g1 =+ where cond_rhs1 g 0
+    (* The gate statement reads t1 itself, so a clamped out-of-range access (gh-504 padded
+       windows) substitutes the whole rhs with the Arg2 neutral 0: invalid pairs gate nothing,
+       even when t is -inf. *)
+    { cond_pspace } =: eq (t, t1);
+    g1 =+ where cond_pspace g 0
   in
   Tensor.unop ~transpose_op:(Shape.Permute (spec, capture_dims)) ~op_asn ~grad_asn ~op_label:"@^=>"
 
 (** This generalizes the tropical matrix multiplication to arbitrary indices combinations.
 
-    LIMITATION: Backpropagation is only correct when the RHS1 (t1) index space includes the RHS2
-    (t2) index space. This is the case for convolution-like operations where the kernel indices are
-    contracted with strided input indices. For general tropical operations where RHS2 has
-    independent indices, the g2 gradient will be incorrect. *)
+    The gradient gate lives in the product space of the operation — one bit per (result position,
+    contracted position) pair — so both gradients are exact for arbitrary specs, including
+    overlapping reduction windows (stride < window) and RHS2 indices independent of RHS1. Ties
+    gate the full upstream gradient to every achieving pair (duplication, not a normalized
+    split). *)
 let tropical ?(capture_dims = []) spec =
   let module NTDSL = struct
     include Initial_NTDSL
@@ -631,12 +639,17 @@ let tropical ?(capture_dims = []) spec =
   end in
   let%cd op_asn ~t ~t1 ~t2 ~projections = v =:@^ v1 + v2 in
   let%cd grad_asn ~t ~g ~t1 ~t2 ~projections =
-    (* Use _rhs1 suffix for both: gives input shape (ih,iw) = (oh,ow) x (wh,ww) outer product. This
-       correctly tracks which (input position, kernel position) pair achieved argmax. *)
-    { sum_rhs1 } =:@^ add (t1, t2);
-    { cond_rhs1 } =: eq (t, sum_rhs1);
-    g1 =+ where cond_rhs1 g 0;
-    g2 =+ where cond_rhs1 g 0
+    (* [=:@^] gives pairs whose t1 access is clamped out of range (gh-504 padded windows) the
+       max-neutral -inf; that alone leaves them gated when t itself is -inf (an all-[-inf] valid
+       window — legitimate in the tropical semiring), and the g2 scatter has a valid kernel
+       projection for them, so an explicit validity mask conjoins the gate: [=:||] reads t1, and
+       an out-of-range access substitutes the Or neutral 0 where an in-range one contributes 1. *)
+    { sum_pspace } =:@^ add (t1, t2);
+    { cond_pspace } =: eq (t, sum_pspace);
+    { valid_pspace } =:|| eq (t1, t1);
+    cond_pspace =&& valid_pspace;
+    g1 =+ where cond_pspace g 0;
+    g2 =+ where cond_pspace g 0
   in
   Tensor.binop ~compose_op:(Shape.Einsum (spec, capture_dims)) ~op_asn ~grad_asn ~op_label:"@^=>+"
 

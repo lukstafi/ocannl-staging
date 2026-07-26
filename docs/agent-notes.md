@@ -79,12 +79,19 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   are topologically ordered (owner-first forward, owner-last backward) — the old id-ascending
   order silently zeroed shared paths (regressions `forward_fragment_order.ml`,
   `backprop_fragment_order.ml`).
-- The tropical einsum's gradient gate (`cond_rhs1` in `Operation.tropical`, same pattern in
-  `einmax1`) is last-write-wins per input position: exact only when windows don't overlap
-  (stride ≥ window) — `max_pool2d` with stride < window trains on silently wrong gradients
-  (gh-512: verified repro, root-cause analysis — the flat Assignments IR forces a slot-shaped
-  gate tensor — and fix routes, argmax-record being the most tractable). Write gradient oracles
-  accordingly.
+- Per-(result, reduced-position) facts in `%cd` grad code belong in a product-space intermediate
+  (`*_pspace` suffix): its shape unifies with `Shape.product_space_shape` (result rows +
+  contracted axes appended; fixed-index axes pinned to 1 — pinned projection means never a
+  product axis even at extent > 1; ≤ 1 reduced-over row variable, else Shape_error), and its
+  identity projection is `Indexing.prod_project_for`, which skips dim-1 axes and pairs the rest
+  with product components by extent (first-fit — layout order need not match product order, since
+  all accesses go through the same pure pairing); leftovers on either side raise at lowering. An operand-slot-shaped gate (`_rhs1`) is last-write-wins under
+  overlapping windows — the gh-512 wrong-gradients bug; `tropical`/`einmax1` gates are now exact
+  for stride < window and independent RHS2 indices, with an `=:|| eq (t1, t1)` validity mask for
+  clamped windows whose output is genuinely -inf (executed oracles:
+  `test/operations/overlapping_window_grads.ml`). Unary einsum specs with conv indices
+  (`@^^ "o<+k => o"`, `++` alike) fail projection solving before any of this — pre-existing
+  gh-515 — so overlap coverage goes through binary `@^+` with a zero kernel.
 - Silent numeric divergence recipe: build a minimal numpy oracle reading the same safetensors,
   probe stage-by-stage (`Train.set_materialized` intermediates BEFORE `forward_once`, then
   `Context.get_values`), shrink to a tiny `NTDSL.init` repro, and read `build_files/*.cd` —

@@ -337,6 +337,52 @@ let identity_projections ?debug_info ?derived_for ~lhs_dims () =
     debug_info;
   }
 
+(** The extents of the product-space components of [p]: one entry per component, in
+    [product_space] order. A concatenation component's extent is the sum of its segment extents.
+    Non-iterated (dimension-1) axes do not appear. *)
+let prod_dims (p : projections) : int array =
+  Array.map p.product_space ~f:(List.fold ~init:0 ~f:( + ))
+
+(** The identity projection of a tensor laid out over the full product space of [p] (e.g. the
+    (output x kernel) pair space of a windowed reduction): the tensor's axes are the product
+    components, possibly interleaved with non-iterated (dimension-1) axes, which the product space
+    omits. [dims] is the tensor's dimensions; each dimension-1 axis maps to [Fixed_idx 0] and every
+    other axis consumes the first not-yet-consumed product component of equal extent. Matching by
+    extent rather than strictly by position tolerates a proxy-shape layout whose axis order
+    deviates from the product order (e.g. a reduced-over row variable placed in the result's
+    output row while the result keeps input axes): any pairing is correct as long as it is
+    consistent, and this is a pure function of [p] and [dims], so every access to the tensor uses
+    the same pairing. A leftover on either side means the product-space proxy shape (gh-512) got
+    out of sync with the derived projections, and raises rather than corrupting memory. *)
+let prod_project_for (p : projections) ~(dims : int array) : axis_index array =
+  let mismatch () =
+    raise
+    @@ Utils.User_error
+         (Printf.sprintf
+            "Indexing.prod_project_for: product-space tensor dimensions %s are inconsistent with \
+             the operation's product space %s (proxy shape vs. projections mismatch)"
+            (dims_to_string dims)
+            (Sexp.to_string_hum ([%sexp_of: int list array] p.product_space)))
+  in
+  let comps = ref (Array.to_list (Array.zip_exn (prod_dims p) p.product_iterators)) in
+  let take_first_by_extent d =
+    let rec go acc = function
+      | [] -> mismatch ()
+      | (cd, syms) :: rest when cd = d ->
+          comps := List.rev_append acc rest;
+          syms
+      | c :: rest -> go (c :: acc) rest
+    in
+    go [] !comps
+  in
+  let project =
+    Array.map dims ~f:(fun d ->
+        if d = 1 then Fixed_idx 0
+        else match take_first_by_extent d with [ s ] -> Iterator s | syms -> Concat syms)
+  in
+  if not (List.is_empty !comps) then mismatch ();
+  project
+
 let reflect_projection ~(dims : int array) ~(projection : axis_index array) =
   (* FIXME: handle concatenation *)
   Array.zip_exn dims projection

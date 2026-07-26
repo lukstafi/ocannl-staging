@@ -21,7 +21,8 @@ type expr_type =
 
 let is_unknown = function Unknown -> true | _ -> false
 
-type projections_slot = LHS | RHS1 | RHS2 | RHS3 | Scalar | Nonslot | Undet [@@deriving variants]
+type projections_slot = LHS | RHS1 | RHS2 | RHS3 | Prod | Scalar | Nonslot | Undet
+[@@deriving variants]
 
 let equal_projections_slot a b =
   match (a, b) with
@@ -29,6 +30,7 @@ let equal_projections_slot a b =
   | RHS1, RHS1
   | RHS2, RHS2
   | RHS3, RHS3
+  | Prod, Prod
   | Scalar, Scalar
   | Nonslot, Nonslot
   | Undet, Undet ->
@@ -40,6 +42,7 @@ let slot_to_string = function
   | RHS1 -> "rhs1"
   | RHS2 -> "rhs2"
   | RHS3 -> "rhs3"
+  | Prod -> "pspace"
   | Scalar -> "scalar"
   | Nonslot -> "nonslot"
   | Undet -> "?"
@@ -197,12 +200,25 @@ let assignment ~punned ~lhs ~rhses ?body_for_lhs ?raw_body () =
     array_opt_of_code = Some lhs.array_opt;
   }
 
-let project_p_slot debug loc slot =
-  match slot with
+(* The [Prod] (product-space) slot needs the filler's tensor to read its dimensions — the
+   product-space tensor's axes interleave the product components with non-iterated (dimension-1)
+   axes of its (proxy-inferred) shape, so the identity projection is derived per-tensor by
+   [Ir.Indexing.prod_project_for]. *)
+let prod_slot_tensor_dims debug loc (setup : array_setup) =
+  match setup.tensor with
+  | Some t -> [%expr Lazy.force [%e t].Tensor.value.Ir.Tnode.dims]
+  | None ->
+      Ast_builder.Default.pexp_extension ~loc
+      @@ Location.error_extensionf ~loc
+           "ppx_ocannl %%cd: the product-space (_pspace) slot at %s requires a tensor filler" debug
+
+let project_p_slot debug loc (setup : array_setup) =
+  match setup.slot with
   | LHS -> [%expr p.project_lhs]
   | RHS1 -> [%expr p.project_rhs.(0)]
   | RHS2 -> [%expr p.project_rhs.(1)]
   | RHS3 -> [%expr p.project_rhs.(2)]
+  | Prod -> [%expr Ir.Indexing.prod_project_for p ~dims:[%e prod_slot_tensor_dims debug loc setup]]
   | Scalar -> [%expr [| Ir.Indexing.Fixed_idx 0 |]]
   | Nonslot ->
       Ast_builder.Default.pexp_extension ~loc
@@ -212,14 +228,15 @@ let project_p_slot debug loc slot =
       Ast_builder.Default.pexp_extension ~loc
       @@ Location.error_extensionf ~loc
            "ppx_ocannl %%cd: insufficient slot filler information at %s %s" debug
-           "(incorporate one of: v, v1, v2, g, g1, g2, lhs, rhs, rhs1, rhs2)"
+           "(incorporate one of: v, v1, v2, g, g1, g2, lhs, rhs, rhs1, rhs2, or a _pspace-suffixed tensor)"
 
-let project_p_dims debug loc slot =
-  match slot with
+let project_p_dims debug loc (setup : array_setup) =
+  match setup.slot with
   | LHS -> [%expr p.lhs_dims]
   | RHS1 -> [%expr p.rhs_dims.(0)]
   | RHS2 -> [%expr p.rhs_dims.(1)]
   | RHS3 -> [%expr p.rhs_dims.(2)]
+  | Prod -> prod_slot_tensor_dims debug loc setup
   | Scalar -> [%expr [| 1 |]]
   | Nonslot ->
       Ast_builder.Default.pexp_extension ~loc
@@ -229,7 +246,7 @@ let project_p_dims debug loc slot =
       Ast_builder.Default.pexp_extension ~loc
       @@ Location.error_extensionf ~loc
            "ppx_ocannl %%cd: insufficient slot filler information at %s %s" debug
-           "(incorporate one of: v, v1, v2, g, g1, g2, lhs, rhs, rhs1, rhs2)"
+           "(incorporate one of: v, v1, v2, g, g1, g2, lhs, rhs, rhs1, rhs2, or a _pspace-suffixed tensor)"
 
 let guess_pun_hint ~no_filler_label ~punned ~bad_pun_hints filler_typ filler =
   let loc = filler.pexp_loc in
@@ -352,7 +369,7 @@ let setup_array ~punned ~bad_pun_hints ~for_slot
         | RHS1 -> [%pat? nondiff__for_rhs1]
         | RHS2 -> [%pat? nondiff__for_rhs2]
         | RHS3 -> [%pat? nondiff__for_rhs3]
-        | Scalar | Nonslot | Undet -> [%pat? nondiff__tensor]
+        | Prod | Scalar | Nonslot | Undet -> [%pat? nondiff__tensor]
       in
       let t = pat2expr v in
       let vb = Some (A.Vb.mk ~loc v filler) in
@@ -558,6 +575,12 @@ let translate ?ident_label (expr : expression) : result =
           [%expr Shape.infer_equal [%e lhs.expr].Tensor.shape t2.Tensor.shape]
       | RHS3, No_grad_tensor_intro _ ->
           [%expr Shape.infer_equal [%e lhs.expr].Tensor.shape t3.Tensor.shape]
+      | Prod, No_grad_tensor_intro _ ->
+          (* Product-space intermediate (gh-512): its shape is the operation's product-space proxy
+             — result axes then contracted axes; see [Shape.product_space_shape]. *)
+          [%expr
+            Shape.infer_equal [%e lhs.expr].Tensor.shape
+              (Lazy.force projections.Tensor.product_shape)]
       | _ -> [%expr ()]
     in
     (* TODO: collapse these (code reuse) *)
@@ -582,14 +605,14 @@ let translate ?ident_label (expr : expression) : result =
         | Some prjs ->
             ([%expr [%e prjs].Tensor.projections], [%expr [%e prjs].Tensor.projections_debug])
         | None ->
-            let lhs_dims = project_p_dims "LHS" lhs.pexp_loc setup_l.slot in
-            let rhs1_dims = project_p_dims "RHS1" lhs.pexp_loc setup_r1.slot in
-            let rhs2_dims = project_p_dims "RHS2" lhs.pexp_loc setup_r2.slot in
-            let rhs3_dims = project_p_dims "RHS3" lhs.pexp_loc setup_r3.slot in
-            let project_lhs = project_p_slot "LHS" lhs.pexp_loc setup_l.slot in
-            let project_rhs1 = project_p_slot "RHS1" rhs1.pexp_loc setup_r1.slot in
-            let project_rhs2 = project_p_slot "RHS2" rhs2.pexp_loc setup_r2.slot in
-            let project_rhs3 = project_p_slot "RHS3" rhs3.pexp_loc setup_r3.slot in
+            let lhs_dims = project_p_dims "LHS" lhs.pexp_loc setup_l in
+            let rhs1_dims = project_p_dims "RHS1" lhs.pexp_loc setup_r1 in
+            let rhs2_dims = project_p_dims "RHS2" lhs.pexp_loc setup_r2 in
+            let rhs3_dims = project_p_dims "RHS3" lhs.pexp_loc setup_r3 in
+            let project_lhs = project_p_slot "LHS" lhs.pexp_loc setup_l in
+            let project_rhs1 = project_p_slot "RHS1" rhs1.pexp_loc setup_r1 in
+            let project_rhs2 = project_p_slot "RHS2" rhs2.pexp_loc setup_r2 in
+            let project_rhs3 = project_p_slot "RHS3" rhs3.pexp_loc setup_r3 in
             let proj_lazy =
               [%expr
                 lazy
@@ -662,12 +685,12 @@ let translate ?ident_label (expr : expression) : result =
         | Some prjs ->
             ([%expr [%e prjs].Tensor.projections], [%expr [%e prjs].Tensor.projections_debug])
         | None ->
-            let lhs_dims = project_p_dims "LHS" lhs.pexp_loc setup_l.slot in
-            let rhs1_dims = project_p_dims "RHS1" lhs.pexp_loc setup_r1.slot in
-            let rhs2_dims = project_p_dims "RHS2" lhs.pexp_loc setup_r2.slot in
-            let project_lhs = project_p_slot "LHS" lhs.pexp_loc setup_l.slot in
-            let project_rhs1 = project_p_slot "RHS1" rhs1.pexp_loc setup_r1.slot in
-            let project_rhs2 = project_p_slot "RHS2" rhs2.pexp_loc setup_r2.slot in
+            let lhs_dims = project_p_dims "LHS" lhs.pexp_loc setup_l in
+            let rhs1_dims = project_p_dims "RHS1" lhs.pexp_loc setup_r1 in
+            let rhs2_dims = project_p_dims "RHS2" lhs.pexp_loc setup_r2 in
+            let project_lhs = project_p_slot "LHS" lhs.pexp_loc setup_l in
+            let project_rhs1 = project_p_slot "RHS1" rhs1.pexp_loc setup_r1 in
+            let project_rhs2 = project_p_slot "RHS2" rhs2.pexp_loc setup_r2 in
             let proj_lazy =
               [%expr
                 lazy
@@ -737,10 +760,10 @@ let translate ?ident_label (expr : expression) : result =
         | Some prjs ->
             ([%expr [%e prjs].Tensor.projections], [%expr [%e prjs].Tensor.projections_debug])
         | None ->
-            let lhs_dims = project_p_dims "LHS" lhs.pexp_loc setup_l.slot in
-            let rhs1_dims = project_p_dims "RHS1" lhs.pexp_loc setup_r.slot in
-            let project_lhs = project_p_slot "LHS" lhs.pexp_loc setup_l.slot in
-            let project_rhs1 = project_p_slot "RHS1" rhs.pexp_loc setup_r.slot in
+            let lhs_dims = project_p_dims "LHS" lhs.pexp_loc setup_l in
+            let rhs1_dims = project_p_dims "RHS1" lhs.pexp_loc setup_r in
+            let project_lhs = project_p_slot "LHS" lhs.pexp_loc setup_l in
+            let project_rhs1 = project_p_slot "RHS1" rhs.pexp_loc setup_r in
             let proj_lazy =
               [%expr
                 lazy
@@ -805,10 +828,10 @@ let translate ?ident_label (expr : expression) : result =
         | Some prjs ->
             ([%expr [%e prjs].Tensor.projections], [%expr [%e prjs].Tensor.projections_debug])
         | None ->
-            let lhs_dims = project_p_dims "LHS" lhs.pexp_loc setup_l.slot in
-            let rhs1_dims = project_p_dims "RHS1" lhs.pexp_loc setup_r.slot in
-            let project_lhs = project_p_slot "LHS" lhs.pexp_loc setup_l.slot in
-            let project_rhs1 = project_p_slot "RHS1" rhs.pexp_loc setup_r.slot in
+            let lhs_dims = project_p_dims "LHS" lhs.pexp_loc setup_l in
+            let rhs1_dims = project_p_dims "RHS1" lhs.pexp_loc setup_r in
+            let project_lhs = project_p_slot "LHS" lhs.pexp_loc setup_l in
+            let project_rhs1 = project_p_slot "RHS1" rhs.pexp_loc setup_r in
             let proj_lazy =
               [%expr
                 lazy
@@ -1013,6 +1036,7 @@ let translate ?ident_label (expr : expression) : result =
               else if has_prefix "rhs2_" || has_suffix "_rhs2" then RHS2
               else if has_prefix "rhs3_" || has_suffix "_rhs3" then RHS3
               else if has_prefix "rhs_" || has_suffix "_rhs" then RHS1
+              else if has_prefix "pspace_" || has_suffix "_pspace" then Prod
               else Undet
             in
             {
@@ -1110,6 +1134,7 @@ let translate ?ident_label (expr : expression) : result =
           else if has_prefix "rhs2_" || has_suffix "_rhs2" then RHS2
           else if has_prefix "rhs3_" || has_suffix "_rhs3" then RHS3
           else if has_prefix "rhs_" || has_suffix "_rhs" then RHS1
+          else if has_prefix "pspace_" || has_suffix "_pspace" then Prod
           else Undet
         in
         { default_result with typ = (if is_undet slot then Unknown else Tensor); slot }

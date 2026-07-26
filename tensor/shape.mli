@@ -307,6 +307,17 @@ type update_step = {
 val to_dims : t -> int array
 (** Uses the matrix convention of putting the input axes last. *)
 
+val product_space_shape : update_step -> t
+(** The product-space proxy shape of an einsum-family operation (gh-512): the result's axes
+    followed by the reduced-over (contracted) axes, in the product-space order of the derived
+    projections. The proxy shares the operation's shape-inference solution (its constraints are
+    emitted on construction), so [infer_equal]-ing a [%cd] [*_pspace] intermediate against it gives
+    the intermediate the dimensions of the operation's full product space (e.g. the (output x
+    kernel) pair space of a windowed reduction). Must be called before the operation's inference
+    completes. Raises [Row.Shape_error] when the product space is not expressible as a shape: a
+    non-einsum operation, more than one reduced-over row variable, or a reduced-over row variable
+    combined with an open result input row. *)
+
 val to_padding : t -> (Ir.Ops.axis_padding array * float) option
 (** Returns the padding of the shape, if any. The inner [float option] is the padded value: [Some v]
     when all operations use the same neutral element, [None] when different operations require

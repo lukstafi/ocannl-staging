@@ -288,30 +288,33 @@ The naming convention patterns:
 | `rhs1_*` or `*_rhs1` | RHS1 | first input shape (from `t1`) |
 | `rhs2_*` or `*_rhs2` | RHS2 | second input shape (from `t2`) |
 | `rhs3_*` or `*_rhs3` | RHS3 | third input shape (from `t3`) |
+| `pspace_*` or `*_pspace` | product space | the operation's projections (see below) |
 
 This applies to:
 - **Inline tensor definitions**: `{ cond_rhs1 }` declares a tensor with slot RHS1 and shape of `t1`
 - **Identifier references**: When `sum_rhs1` is used in an expression, it's recognized as having slot RHS1
 
-**Why this matters for gradient computation**: In operations like max pooling or tropical convolution, the gradient must flow back to positions that achieved the argmax. Using an intermediate tensor with the wrong shape causes incorrect gradients. For example, in a 4×4 → 2×2 max pooling:
-- `*_lhs` suffix gives shape 2×2 (output shape) — wrong for tracking per-input-position gradients
-- `*_rhs1` suffix gives shape 4×4 (input shape) — correct for sparse gradient at argmax positions
+**The product-space slot** (`*_pspace`): the tensor is laid out over the operation's full product space — the result's axes followed by the reduced-over (contracted) axes — and is indexed by the identity projection over the product iterators. This is the index space in which per-(result, reduced position) facts live. The inline-declared tensor's shape is unified with the operation's product-space proxy shape (`Shape.product_space_shape`): the result's rows with the contracted axes appended (fixed-index axes pinned to dimension 1 — their projections are pinned, so they are never product axes). At most one whole row variable may be reduced over (it becomes the row variable of the appended flank); otherwise, or for a non-einsum operation, a shape-inference error is raised. The identity projection (`Ir.Indexing.prod_project_for`) skips dimension-1 axes and pairs the rest with product components by extent (first-fit, so the layout order may deviate from the product order); a leftover on either side raises at lowering.
+
+**Why this matters for gradient computation**: In operations like max pooling or tropical convolution, the gradient must flow back to exactly the (window, position) pairs that achieved the argmax. A gate materialized over an operand's index space is lossy whenever reduction windows overlap (stride < window): several windows write conflicting bits through a non-accumulating assignment and the last write wins, silently corrupting gradients (gh-ocannl-512). The product-space gate has one cell per (result position, reduced position) pair, where the equality check is single-writer and therefore exact.
 
 Example from the `tropical` operation's gradient computation:
 
 ```ocaml
 let%cd grad_asn ~t ~g ~t1 ~t2 ~projections =
-  (* Use _rhs1 suffix: gives input shape to track which positions achieved argmax *)
-  { sum_rhs1 } =:@^ add (t1, t2);   (* max over each input position's window *)
-  { cond_rhs1 } =: eq (t, sum_rhs1); (* true where input+kernel achieved the argmax *)
-  g1 =+ where cond_rhs1 g 0;         (* gradient flows to argmax input positions *)
-  g2 =+ where cond_rhs1 g 0          (* gradient flows to argmax kernel positions *)
+  (* Product-space intermediates: one cell per (output, kernel-position) pair. *)
+  { sum_pspace } =:@^ add (t1, t2);      (* the candidate value of each pair *)
+  { cond_pspace } =: eq (t, sum_pspace); (* true where the pair achieved the argmax *)
+  { valid_pspace } =:|| eq (t1, t1);     (* false only for clamped-out (padded) accesses *)
+  cond_pspace =&& valid_pspace;
+  g1 =+ where cond_pspace g 0;           (* gradient flows to argmax input positions *)
+  g2 =+ where cond_pspace g 0            (* gradient flows to argmax kernel positions *)
 in
 ```
 
-For convolution-like operations with einsum `"...|stride*oh<+wh, stride*ow<+ww, ..c..; wh, ww => ...|oh, ow, ..c.."`, the RHS1 index space (ih, iw) effectively encodes the outer product of output (oh, ow) and kernel (wh, ww) dimensions via `ih = stride*oh + wh`. This means using `_rhs1` for intermediate condition tensors correctly tracks which (input position, kernel position) pair achieved the argmax for each output position.
+(The initializing max-accumulation `=:@^` gives pairs whose `t1` access is clamped out of range by a padded window spec the max-neutral `-inf`; the `=:||` validity mask handles the corner where `t` itself is `-inf` — an out-of-range read substitutes the statement's accumulation neutral, which for `Or` is 0 where an in-range read contributes 1.)
 
-**Important**: The naming convention affects both projection slot assignment and shape inference. In addition to determining which projection from `~projections` to use when indexing the tensor, a shape equality constraint is generated between the inline-defined tensor and the corresponding operation tensor assumed to be in scope: `t` for `*_lhs`, `t1` for `*_rhs` and `*_rhs1`, `t2` for `*_rhs2`, etc. This means the shape from the tensor's initialization is unified with the shape of the operation component.
+**Important**: The naming convention affects both projection slot assignment and shape inference. In addition to determining which projection from `~projections` to use when indexing the tensor, a shape equality constraint is generated between the inline-defined tensor and the corresponding operation tensor assumed to be in scope: `t` for `*_lhs`, `t1` for `*_rhs` and `*_rhs1`, `t2` for `*_rhs2`, etc. This means the shape from the tensor's initialization is unified with the shape of the operation component. For `*_pspace` the unification target is the operation's product-space proxy shape instead, and the declared tensor should not be given explicit dimensions.
 
 ## Numeric and N-dimensional array literals
 
