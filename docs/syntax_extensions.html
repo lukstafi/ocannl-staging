@@ -802,6 +802,11 @@ patterns. This is essential when defining backpropagation code that
 needs intermediate tensors with specific projections and shapes.</p>
 <p>The naming convention patterns:</p>
 <table>
+<colgroup>
+<col style="width: 32%" />
+<col style="width: 34%" />
+<col style="width: 32%" />
+</colgroup>
 <thead>
 <tr>
 <th>Prefix/Suffix</th>
@@ -835,6 +840,11 @@ needs intermediate tensors with specific projections and shapes.</p>
 <td>RHS3</td>
 <td>third input shape (from <code>t3</code>)</td>
 </tr>
+<tr>
+<td><code>pspace_*</code> or <code>*_pspace</code></td>
+<td>product space</td>
+<td>the operation’s projections (see below)</td>
+</tr>
 </tbody>
 </table>
 <p>This applies to: - <strong>Inline tensor definitions</strong>:
@@ -842,31 +852,49 @@ needs intermediate tensors with specific projections and shapes.</p>
 <code>t1</code> - <strong>Identifier references</strong>: When
 <code>sum_rhs1</code> is used in an expression, it’s recognized as
 having slot RHS1</p>
+<p><strong>The product-space slot</strong> (<code>*_pspace</code>): the
+tensor is laid out over the operation’s full product space — the
+result’s axes followed by the reduced-over (contracted) axes — and is
+indexed by the identity projection over the product iterators. This is
+the index space in which per-(result, reduced position) facts live. The
+inline-declared tensor’s shape is unified with the operation’s
+product-space proxy shape (<code>Shape.product_space_shape</code>): the
+result’s rows with the contracted axes appended (fixed-index axes pinned
+to dimension 1 — their projections are pinned, so they are never product
+axes). At most one whole row variable may be reduced over (it becomes
+the row variable of the appended flank); otherwise, or for a non-einsum
+operation, a shape-inference error is raised. The identity projection
+(<code>Ir.Indexing.prod_project_for</code>) skips dimension-1 axes and
+pairs the rest with product components by extent (first-fit, so the
+layout order may deviate from the product order); a leftover on either
+side raises at lowering.</p>
 <p><strong>Why this matters for gradient computation</strong>: In
 operations like max pooling or tropical convolution, the gradient must
-flow back to positions that achieved the argmax. Using an intermediate
-tensor with the wrong shape causes incorrect gradients. For example, in
-a 4×4 → 2×2 max pooling: - <code>*_lhs</code> suffix gives shape 2×2
-(output shape) — wrong for tracking per-input-position gradients -
-<code>*_rhs1</code> suffix gives shape 4×4 (input shape) — correct for
-sparse gradient at argmax positions</p>
+flow back to exactly the (window, position) pairs that achieved the
+argmax. A gate materialized over an operand’s index space is lossy
+whenever reduction windows overlap (stride &lt; window): several windows
+write conflicting bits through a non-accumulating assignment and the
+last write wins, silently corrupting gradients (gh-ocannl-512). The
+product-space gate has one cell per (result position, reduced position)
+pair, where the equality check is single-writer and therefore exact.</p>
 <p>Example from the <code>tropical</code> operation’s gradient
 computation:</p>
 <div class="sourceCode" id="cb11"><pre class="sourceCode ocaml"><code class="sourceCode ocaml"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span>%cd grad_asn ~t ~g ~t1 ~t2 ~projections =</span>
-<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* Use _rhs1 suffix: gives input shape to track which positions achieved argmax *)</span></span>
-<span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a>  { sum_rhs1 } =:@^ add (t1, t2);   <span class="co">(* max over each input position&#39;s window *)</span></span>
-<span id="cb11-4"><a href="#cb11-4" aria-hidden="true" tabindex="-1"></a>  { cond_rhs1 } =: eq (t, sum_rhs1); <span class="co">(* true where input+kernel achieved the argmax *)</span></span>
-<span id="cb11-5"><a href="#cb11-5" aria-hidden="true" tabindex="-1"></a>  g1 =+ where cond_rhs1 g <span class="dv">0</span>;         <span class="co">(* gradient flows to argmax input positions *)</span></span>
-<span id="cb11-6"><a href="#cb11-6" aria-hidden="true" tabindex="-1"></a>  g2 =+ where cond_rhs1 g <span class="dv">0</span>          <span class="co">(* gradient flows to argmax kernel positions *)</span></span>
-<span id="cb11-7"><a href="#cb11-7" aria-hidden="true" tabindex="-1"></a><span class="kw">in</span></span></code></pre></div>
-<p>For convolution-like operations with einsum
-<code>&quot;...|stride*oh&lt;+wh, stride*ow&lt;+ww, ..c..; wh, ww =&gt; ...|oh, ow, ..c..&quot;</code>,
-the RHS1 index space (ih, iw) effectively encodes the outer product of
-output (oh, ow) and kernel (wh, ww) dimensions via
-<code>ih = stride*oh + wh</code>. This means using <code>_rhs1</code>
-for intermediate condition tensors correctly tracks which (input
-position, kernel position) pair achieved the argmax for each output
-position.</p>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a>  <span class="co">(* Product-space intermediates: one cell per (output, kernel-position) pair. *)</span></span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a>  { sum_pspace } =:@^ add (t1, t2);      <span class="co">(* the candidate value of each pair *)</span></span>
+<span id="cb11-4"><a href="#cb11-4" aria-hidden="true" tabindex="-1"></a>  { cond_pspace } =: eq (t, sum_pspace); <span class="co">(* true where the pair achieved the argmax *)</span></span>
+<span id="cb11-5"><a href="#cb11-5" aria-hidden="true" tabindex="-1"></a>  { valid_pspace } =:|| eq (t1, t1);     <span class="co">(* false only for clamped-out (padded) accesses *)</span></span>
+<span id="cb11-6"><a href="#cb11-6" aria-hidden="true" tabindex="-1"></a>  cond_pspace =&amp;&amp; valid_pspace;</span>
+<span id="cb11-7"><a href="#cb11-7" aria-hidden="true" tabindex="-1"></a>  g1 =+ where cond_pspace g <span class="dv">0</span>;           <span class="co">(* gradient flows to argmax input positions *)</span></span>
+<span id="cb11-8"><a href="#cb11-8" aria-hidden="true" tabindex="-1"></a>  g2 =+ where cond_pspace g <span class="dv">0</span>            <span class="co">(* gradient flows to argmax kernel positions *)</span></span>
+<span id="cb11-9"><a href="#cb11-9" aria-hidden="true" tabindex="-1"></a><span class="kw">in</span></span></code></pre></div>
+<p>(The initializing max-accumulation <code>=:@^</code> gives pairs
+whose <code>t1</code> access is clamped out of range by a padded window
+spec the max-neutral <code>-inf</code>; the <code>=:||</code> validity
+mask handles the corner where <code>t</code> itself is <code>-inf</code>
+— an out-of-range read substitutes the statement’s accumulation neutral,
+which for <code>Or</code> is 0 where an in-range read contributes
+1.)</p>
 <p><strong>Important</strong>: The naming convention affects both
 projection slot assignment and shape inference. In addition to
 determining which projection from <code>~projections</code> to use when
@@ -875,7 +903,10 @@ the inline-defined tensor and the corresponding operation tensor assumed
 to be in scope: <code>t</code> for <code>*_lhs</code>, <code>t1</code>
 for <code>*_rhs</code> and <code>*_rhs1</code>, <code>t2</code> for
 <code>*_rhs2</code>, etc. This means the shape from the tensor’s
-initialization is unified with the shape of the operation component.</p>
+initialization is unified with the shape of the operation component. For
+<code>*_pspace</code> the unification target is the operation’s
+product-space proxy shape instead, and the declared tensor should not be
+given explicit dimensions.</p>
 <h2 id="numeric-and-n-dimensional-array-literals">Numeric and
 N-dimensional array literals</h2>
 <p>Both <code>%cd</code> and <code>%op</code> extensions use a shared
