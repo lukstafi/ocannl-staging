@@ -33,6 +33,21 @@
   predicate pins matched nodes at the session default (a skip would be undone by top-down
   precision inference). Verified by an executed f32-vs-bf16 parity test, not only settled-
   precision pins.
+- **Mixed-precision training recipe** (gh-ocannl-492 tasks 2-4): `Ocannl.Mixed_prec` — the
+  torch-AMP recipe over OCANNL structures. Master weights: `with_master_weights` installs a
+  `Tensor.param_postprocess` hook giving every parameter a reduced-precision cast twin (the new
+  identity `Operation.cast`, whose gradient accumulates back through the widening assignment);
+  the f32 master stays the optimizer/persistence target, pinned `Specified` because the cast
+  registers a top-down `Inferred` of the twin's precision into the param. Dynamic loss scaling
+  (f16): `Train.grad_update ~loss_scale` seeds backprop with the scale, `Train.sgd_update
+  ~grad_unscale` unscales gradients in place before the optimizer math, and
+  `Train.grad_checksum` reduces every parameter gradient to one host-readable scalar (non-finite
+  iff any gradient cell is) — `Mixed_prec.scaled_step` gates the optimizer routine on it and
+  `Loss_scaler` runs the backoff/growth schedule by overwriting tiny device-resident scale
+  tensors (no recompilation). Executed-parity coverage in `test/training/mixed_prec_parity.ml`
+  (bf16 and f16 trajectories vs the f32 oracle, plus a deterministically engineered f16 overflow
+  pinning the backoff/growth cycle); benchmark legs via `BENCH_PRECISION=bf16|f16` in the mlp
+  runner and `orchestrate.py --precision`.
 - **Tensor-core input-format vocabulary** (gh-ocannl-481 groundwork):
   `Backend_intf.mma_input_format` (f32, tf32, f16, bf16, fp8-e5m2) with per-(a, b)-operand-pair
   intrinsic tile shapes in `mma_capability.mma_format_tiles`; a future e4m3 (and mixed
