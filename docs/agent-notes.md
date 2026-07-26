@@ -83,10 +83,9 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   (`*_pspace` suffix): its shape unifies with `Shape.product_space_shape` (result rows +
   contracted axes appended; fixed-index axes pinned to 1 — pinned projection means never a
   product axis even at extent > 1; ≤ 1 reduced-over row variable, else Shape_error), and its
-  identity projection is `Indexing.prod_project_for`, which skips dim-1 axes and cross-checks
-  extents against the product space at lowering. Layout order need not match product order for
-  correctness — all accesses go through the same projection — the check only rejects
-  extent-sequence mismatches. An operand-slot-shaped gate (`_rhs1`) is last-write-wins under
+  identity projection is `Indexing.prod_project_for`, which skips dim-1 axes and pairs the rest
+  with product components by extent (first-fit — layout order need not match product order, since
+  all accesses go through the same pure pairing); leftovers on either side raise at lowering. An operand-slot-shaped gate (`_rhs1`) is last-write-wins under
   overlapping windows — the gh-512 wrong-gradients bug; `tropical`/`einmax1` gates are now exact
   for stride < window and independent RHS2 indices, with an `=:|| eq (t1, t1)` validity mask for
   clamped windows whose output is genuinely -inf (executed oracles:

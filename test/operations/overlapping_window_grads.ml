@@ -212,4 +212,30 @@ let () =
   p "clamped-out pairs gate no input gradient" (close gx7 [| 2.; 3.; 3.; 2. |]);
   p "clamped-out pairs gate no kernel gradient (validity mask)" (close gk7 [| 3.; 4.; 3. |]);
 
+  (* === 8: Row-variable reduction keeping nonempty input axes — einmax1 @^^ "...|... => ...|0" on
+     a 2->3 matrix-shaped tensor. The reduced output row (extent 3) lands after the kept input row
+     (extent 2) in the proxy layout while the product order has them the other way around;
+     [Indexing.prod_project_for]'s extent-based (first-fit) pairing makes the layouts agree.
+     p8 = [[1,5,3],[9,2,4]]: per-row maxima 5 (b=1) and 9 (b=0), loss 14, gp = [[0,1,0],[1,0,0]].
+     === *)
+  Tensor.unsafe_reinitialize ();
+  let p8v = [| [| 1.; 5.; 3. |]; [| 9.; 2.; 4. |] |] in
+  let p8 =
+    Operation.init ~l:"owg_p8" ~prec:Ir.Ops.single ~b:[] ~o:[ 2; 3 ]
+      ~f:(fun idcs -> p8v.(idcs.(0)).(idcs.(1)))
+      ~grad_spec:Tensor.Require_grad ()
+  in
+  let%op x8 = p8 ++ "ab => a->b" in
+  let%op y8 = x8 @^^ "...|... => ...|0" in
+  let%op loss8 = y8 ++ "...|...->... => |->0" in
+  let ctx = Context.auto () in
+  Train.set_materialized loss8.Tensor.value;
+  Train.set_materialized (grad_of p8);
+  let ctx = Train.update_once ~output_cd_file:false ctx loss8 in
+  let lv8 = Context.get_values ctx loss8.Tensor.value in
+  let gp8 = Context.get_values ctx (grad_of p8) in
+  printf "row-var reduce with kept input axes: loss = %s, gp = [%s]\n%!" (fa lv8) (fa gp8);
+  p "row-var reduction keeping input axes has exact gradients"
+    (close lv8 [| 14. |] && close gp8 [| 0.; 1.; 0.; 1.; 0.; 0. |]);
+
   printf "\nDone.\n%!"

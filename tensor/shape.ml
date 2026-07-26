@@ -1554,8 +1554,8 @@ let product_space_shape (update_step : update_step) : t =
                  (closed) output row. The product order puts the result's input axes before the
                  reduced axes while this layout puts them after; a consistent layout is still
                  correct — every access goes through the same identity projection
-                 ([Indexing.prod_project_for]), which rejects an extent-sequence mismatch at
-                 lowering. *)
+                 ([Indexing.prod_project_for]), which pairs axes with product components by extent
+                 (first-fit), and rejects a leftover on either side at lowering. *)
               ( i_lhs,
                 {
                   Row.beg_dims = o_lhs.beg_dims @ o_lhs.dims;

@@ -20,5 +20,7 @@ overlapping max_pool2d gradient exact: true
 all -inf clamped: gx = [2 3 3 2], gk = [3 4 3]
 clamped-out pairs gate no input gradient: true
 clamped-out pairs gate no kernel gradient (validity mask): true
+row-var reduce with kept input axes: loss = 14, gp = [0 1 0 1 0 0]
+row-var reduction keeping input axes has exact gradients: true
 
 Done.
