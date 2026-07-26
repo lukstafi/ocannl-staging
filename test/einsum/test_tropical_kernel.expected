@@ -49,7 +49,7 @@ HERE: test/einsum/test_tropical_kernel.ml:70:21
 └─────────────────────┘
 HERE: test/einsum/test_tropical_kernel.ml:71:21
 ┌─────────────────────────────────────────┐
-│[5]: @^=>+_op_r4x4x1_k shape 0:2,1:2,2:1 │
+│[6]: @^=>+_op_r4x4x1_k shape 0:2,1:2,2:1 │
 │┌──────┬─────────┐                       │
 ││      │axis 2   │                       │
 │├──────┼─────────┤                       │
@@ -72,7 +72,7 @@ Expected input gradients: 1 at argmax positions, 0 elsewhere
 Expected kernel gradients: all 1s (each position is argmax once)
 
 HERE: test/einsum/test_tropical_kernel.ml:129:21
-[10]: =>_loss shape 0:1  <not-in-context>
+[11]: =>_loss shape 0:1  <not-in-context>
 grad_=>_loss <not-in-context>
 HERE: test/einsum/test_tropical_kernel.ml:130:21
 ┌─────────────────────────┐
@@ -127,7 +127,7 @@ Expected input gradients:
 Expected kernel gradients: [[0,0],[0,4]] - only (1,1) was argmax
 
 HERE: test/einsum/test_tropical_kernel.ml:188:21
-[10]: =>_loss shape 0:1  <not-in-context>
+[11]: =>_loss shape 0:1  <not-in-context>
 grad_=>_loss <not-in-context>
 HERE: test/einsum/test_tropical_kernel.ml:189:21
 ┌─────────────────────────┐
