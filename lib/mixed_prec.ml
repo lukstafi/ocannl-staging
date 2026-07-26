@@ -42,15 +42,19 @@ type twin_placement =
     gradient are pinned at [master_prec] (default [Ops.single]) — pinned, not left alone, because
     parameters are [top_down_prec]: the cast op registers an [Inferred] top-down update of the
     twin's precision into the master, and only a [Specified] precision overrides it (same finding as
-    {!Precision_policy}'s [except] semantics). *)
+    {!Precision_policy}'s [except] semantics). A master whose precision is already [Specified] —
+    e.g. a [wrap_param]/[reshape_param] over a non-f32 ndarray — keeps its own storage precision (it
+    is safe from the top-down demotion for the same reason), so [master_prec] only applies to
+    parameters whose precision is still open. *)
 let cast_param ?(placement = Twin_auto) ?(master_prec = Ops.single) ~prec (p : Tensor.t) =
   match p.Tensor.diff with
   | None -> p
   | Some diff ->
       let twin = Operation.cast ~grad_spec:Tensor.If_needed p () in
       Tn.update_prec twin.Tensor.value prec;
-      Tn.update_prec p.Tensor.value master_prec;
-      Tn.update_prec diff.grad master_prec;
+      if Option.is_none (Tn.get_specified_prec p.Tensor.value) then
+        Tn.update_prec p.Tensor.value master_prec;
+      if Option.is_none (Tn.get_specified_prec diff.grad) then Tn.update_prec diff.grad master_prec;
       (match placement with
       | Twin_auto -> ()
       | Twin_virtual -> Train.set_virtual twin.Tensor.value
