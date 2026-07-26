@@ -563,7 +563,11 @@ let%op depthwise_separable_conv2d ~label ?(kernel_size = 3) ?(stride = 1) ?(use_
     lowered in earlier compilations of a staged flow. The backward argmax scatter transposes the
     clamp (guarded writes). Interior outputs still see full windows: the guards flip truth only at
     affine breakpoints of the output axis, so [Schedule.Partition] at
-    [Schedule.partition_breakpoints] specializes guard-free interior segments (gh-508). *)
+    [Schedule.partition_breakpoints] specializes guard-free interior segments (gh-508).
+
+    Overlapping pooling ([stride < window_size], AlexNet-style) has exact gradients: the gradient
+    gate lives in the (output x window) product space (gh-512), so each position receives gradient
+    from exactly the windows it won, with ties gating every achieving pair. *)
 let%op max_pool2d ?(stride = 2) ?(window_size = 2) ?(use_padding = false) () x =
   Shape.set_dim wh window_size;
   Shape.set_dim ww window_size;
