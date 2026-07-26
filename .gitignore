@@ -85,3 +85,8 @@ docs/*.out
 docs/*.bbl
 docs/*.blg
 .DS_Store
+
+# Claude Code: share project settings and skills; everything else under .claude is local.
+/.claude/*
+!/.claude/settings.json
+!/.claude/skills/
