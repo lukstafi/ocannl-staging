@@ -48,6 +48,43 @@ jobs:
     # dataprep is an unreleased spin-off, not in opam-repository; pin to its repo so --deps-only can resolve it.
     - run: opam pin -n dataprep https://github.com/lukstafi/ocaml-dataprep.git
     - run: opam pin -n .
+    # Cache the built dependency switch. `opam install --deps-only` compiles
+    # roughly 180 packages from source — 225s on ubuntu, 730s on windows — and
+    # opam has no binary packages, so caching the result is the only lever on it.
+    # setup-ocaml's own cache covers opam and the bare compiler switch, which is
+    # why switch creation is ~70s rather than ten minutes; it does not cover these.
+    #
+    # The key must follow the three pins above: they track branch HEADs, so keying
+    # on the opam files alone would happily serve a build of stale dependencies.
+    # Resolving them here also puts the exact revisions in the log, which nothing
+    # currently records.
+    - name: Resolve pinned dependency revisions
+      id: pins
+      shell: bash
+      run: |
+        set -euo pipefail
+        shas=""
+        for repo in c-cube/printbox mmottl/pcre-ocaml lukstafi/ocaml-dataprep; do
+          sha=$(git ls-remote "https://github.com/$repo.git" HEAD | cut -f1)
+          # An empty sha would silently collapse the key onto whatever it hashed
+          # to last time, serving a cache built from different sources.
+          [ -n "$sha" ] || { echo "could not resolve HEAD of $repo" >&2; exit 1; }
+          echo "$repo -> $sha"
+          shas="$shas$sha"
+        done
+        echo "pins=$(printf %s "$shas" | sha256sum | cut -c1-12)" >>"$GITHUB_OUTPUT"
+    - name: Cache opam dependencies
+      id: opam-cache
+      uses: actions/cache@v4
+      with:
+        # On Windows the mingw system libraries live in opam's internal cygwin
+        # root, outside _opam. Without them a restored switch believes its
+        # conf-mingw-w64-* packages are present while their libraries are gone,
+        # and linking fails; caching both also carries the pkgconf repair below.
+        path: |
+          _opam
+          ${{ runner.os == 'Windows' && 'C:\.opam\.cygwin' || '' }}
+        key: opam-deps-${{ matrix.os }}-${{ matrix.ocaml-compiler }}-${{ hashFiles('*.opam') }}-${{ steps.pins.outputs.pins }}
     # FIXME: cygwin's pkgconf 3.0.4-1 (published 2026-07-26) breaks
     # `pkgconf --personality=<triplet>`, so every conf-mingw-w64-* package (gmp,
     # zlib, openssl, sqlite3, pcre2, curl, libffi) fails its existence check and
@@ -64,10 +101,10 @@ jobs:
     # Drop these three steps, restoring the plain install below for all platforms,
     # once cygwin ships a fixed pkgconf.
     - name: Install system dependencies (Windows)
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' && steps.opam-cache.outputs.cache-hit != 'true'
       run: opam install . -y --deps-only --with-test --with-doc --depext-only
     - name: Restore cygwin pkgconf 2.5.1 (Windows)
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' && steps.opam-cache.outputs.cache-hit != 'true'
       run: |
         $root = "$(opam var root)\.cygwin\root"
         $base = 'https://cygwin.mirror.constant.com/x86_64/release/pkgconf'
@@ -97,10 +134,10 @@ jobs:
           throw "pkgconf still cannot load the mingw personality: $personality"
         }
     - name: Install opam dependencies (Windows)
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' && steps.opam-cache.outputs.cache-hit != 'true'
       run: opam install . -y --deps-only --with-test --with-doc --no-depexts
     - name: Install opam dependencies
-      if: runner.os != 'Windows'
+      if: runner.os != 'Windows' && steps.opam-cache.outputs.cache-hit != 'true'
       run: opam install . -y --deps-only --with-test --with-doc
     - run: opam exec -- dune build
     - run: opam exec -- dune runtest
