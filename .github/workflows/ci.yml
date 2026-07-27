@@ -48,6 +48,68 @@ jobs:
     # dataprep is an unreleased spin-off, not in opam-repository; pin to its repo so --deps-only can resolve it.
     - run: opam pin -n dataprep https://github.com/lukstafi/ocaml-dataprep.git
     - run: opam pin -n .
+    # Cache the built dependency switch. `opam install --deps-only` compiles
+    # roughly 180 packages from source — 225s on ubuntu, 730s on windows — and
+    # opam has no binary packages, so caching the result is the only lever on it.
+    # setup-ocaml's own cache covers opam and the bare compiler switch, which is
+    # why switch creation is ~70s rather than ten minutes; it does not cover these.
+    #
+    # The key must follow every VCS pin that can move while the opam files stay
+    # byte-identical, or a hit serves stale dependency revisions indefinitely.
+    # That is the two pins above plus each branch-tracking pin-depends entry
+    # (ppx_minidebug#main, notty-community#master, dataprep#main, and the
+    # cudajit/hipjit pins) -- `opam pin -n .` honours those, so they are as live
+    # as the explicit ones. pin-depends is read out of the opam files rather than
+    # duplicated here, so the key cannot drift out of step with them; dev-repo is
+    # deliberately not matched, since it points at this project and its HEAD moves
+    # with every commit. Over-invalidating (cudajit/hipjit are not installed on
+    # these runners) costs one rebuild; under-invalidating is silent staleness.
+    # Resolving them also records the exact revisions in the log, which nothing
+    # else currently does.
+    - name: Resolve pinned dependency revisions
+      id: pins
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Deliberately flat: the macOS runners have bash 3.2, which mis-parses a
+        # `case` inside `$( )` -- the first pattern's `)` closes the substitution
+        # early and the arm's `;;` becomes a syntax error.
+        # The pins this workflow declares above...
+        specs="https://github.com/c-cube/printbox.git#HEAD https://github.com/mmottl/pcre-ocaml.git#HEAD"
+        # ...plus every pin-depends entry, read from the opam files so the two
+        # cannot drift apart. Split on whitespace by the loop below.
+        specs="$specs $(grep -hoE '\["[^"]+" *"git\+[^"]+"\]' *.opam | grep -oE 'git\+[^"]+' | sed 's/^git+//' | sort -u)"
+        shas=
+        for spec in $specs; do
+          url=${spec%%#*}
+          ref=${spec#*#}
+          [ "$ref" != "$spec" ] || ref=HEAD
+          sha=$(git ls-remote "$url" "$ref" | cut -f1 | head -1)
+          # An empty sha would silently collapse the key onto whatever it hashed
+          # to last time, serving a cache built from different sources.
+          [ -n "$sha" ] || { echo "could not resolve $ref of $url" >&2; exit 1; }
+          echo "$url#$ref -> $sha"
+          shas=$shas$sha
+        done
+        # macOS ships shasum, not sha256sum.
+        if command -v sha256sum >/dev/null 2>&1; then
+          digest=$(printf %s "$shas" | sha256sum)
+        else
+          digest=$(printf %s "$shas" | shasum -a 256)
+        fi
+        echo "pins=$(printf %s "$digest" | cut -c1-12)" >>"$GITHUB_OUTPUT"
+    - name: Cache opam dependencies
+      id: opam-cache
+      uses: actions/cache@v4
+      with:
+        # On Windows the mingw system libraries live in opam's internal cygwin
+        # root, outside _opam. Without them a restored switch believes its
+        # conf-mingw-w64-* packages are present while their libraries are gone,
+        # and linking fails; caching both also carries the pkgconf repair below.
+        path: |
+          _opam
+          ${{ runner.os == 'Windows' && 'C:\.opam\.cygwin' || '' }}
+        key: opam-deps-${{ matrix.os }}-${{ matrix.ocaml-compiler }}-${{ hashFiles('*.opam') }}-${{ steps.pins.outputs.pins }}
     # FIXME: cygwin's pkgconf 3.0.4-1 (published 2026-07-26) breaks
     # `pkgconf --personality=<triplet>`, so every conf-mingw-w64-* package (gmp,
     # zlib, openssl, sqlite3, pcre2, curl, libffi) fails its existence check and
@@ -64,10 +126,10 @@ jobs:
     # Drop these three steps, restoring the plain install below for all platforms,
     # once cygwin ships a fixed pkgconf.
     - name: Install system dependencies (Windows)
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' && steps.opam-cache.outputs.cache-hit != 'true'
       run: opam install . -y --deps-only --with-test --with-doc --depext-only
     - name: Restore cygwin pkgconf 2.5.1 (Windows)
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' && steps.opam-cache.outputs.cache-hit != 'true'
       run: |
         $root = "$(opam var root)\.cygwin\root"
         $base = 'https://cygwin.mirror.constant.com/x86_64/release/pkgconf'
@@ -97,10 +159,10 @@ jobs:
           throw "pkgconf still cannot load the mingw personality: $personality"
         }
     - name: Install opam dependencies (Windows)
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' && steps.opam-cache.outputs.cache-hit != 'true'
       run: opam install . -y --deps-only --with-test --with-doc --no-depexts
     - name: Install opam dependencies
-      if: runner.os != 'Windows'
+      if: runner.os != 'Windows' && steps.opam-cache.outputs.cache-hit != 'true'
       run: opam install . -y --deps-only --with-test --with-doc
     - run: opam exec -- dune build
     - run: opam exec -- dune runtest
