@@ -1217,8 +1217,15 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Relu, Ops.Single_prec _ -> f "fmaxf(0.0, " ")"
       | Relu, Ops.Half_prec _ -> f "__hmax_nan(__ushort_as_half((unsigned short)0x0000U), " ")"
       | Relu, Ops.Byte_prec _ -> f "fmax(0, " ")"
+      (* Mixing a [__hip_bfloat16] with a literal of another arithmetic type is ambiguous under
+         hiprtc for the same reason as [fma] on bfloat16 operands (see [ternop_syntax] below), so
+         [fmax(0.0, bf16)] does not compile. Bridge through float like the bf16 binops above, and
+         produce the result with [__float2bfloat16]. *)
+      | Relu, Ops.Bfloat16_prec _ -> f "__float2bfloat16(fmaxf(0.0f, __bfloat162float(" ")))"
       | Relu, _ -> f "fmax(0.0, " ")"
       | Satur01, Byte_prec _ -> f "fmax(0, fmin(1, " "))"
+      | Satur01, Bfloat16_prec _ ->
+          f "__float2bfloat16(fmaxf(0.0f, fminf(1.0f, __bfloat162float(" "))))"
       | Satur01, Half_prec _ ->
           f
             "__hmax_nan(__ushort_as_half((unsigned short)0x0000U), \
@@ -1252,6 +1259,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Recip, Half_prec _ -> func "hrcp"
       | Recip, Single_prec _ -> f "(1.0f / (" "))"
       | Recip, Double_prec _ -> f "(1.0 / (" "))"
+      (* [1 / bf16] is ambiguous: the int operand can pair with any of the bfloat16 conversions. *)
+      | Recip, Bfloat16_prec _ -> f "__float2bfloat16(1.0f / __bfloat162float(" "))"
       | Recip, _ -> f "(1 / (" "))"
       | Recip_sqrt, Byte_prec _ ->
           invalid_arg
@@ -1269,6 +1278,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Tanh_approx, Half_prec _ -> func "htanh_approx"
       | Tanh_approx, Single_prec _ -> func "tanhf"
       | Tanh_approx, _ -> func "tanh"
+      (* [bf16 == 0.0] is ambiguous for the same reason as [1 / bf16] above. *)
+      | Not, Bfloat16_prec _ -> f "__float2bfloat16(__bfloat162float(" ") == 0.0f ? 1.0f : 0.0f)"
       | Not, _ -> f "(" " == 0.0 ? 1.0 : 0.0)"
 
     let vec_unop_syntax prec op v =
@@ -1297,6 +1308,12 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
              from the then-branch (see the CUDA backend, task-04f97340). *)
           fun v1 v2 v3 -> group (parens (parens v1 ^^ string " ? " ^^ v2 ^^ string " : " ^^ v3))
       | FMA, Ops.Half_prec _ -> func "__hfma"
+      (* [__hip_bfloat16] has implicit conversion operators to float, __bf16, int, char, ... , so a
+         plain [fma] call on bfloat16 operands is ambiguous under hiprtc: its float, double and
+         _Float16 overloads (hiprtc_runtime.h) are reached through different conversion operators,
+         which makes their conversion sequences indistinguishable. [__hfma] from amd_hip_bf16.h
+         takes bfloat16 operands exactly, mirroring [__hmax] / [__hmin] above. *)
+      | FMA, Ops.Bfloat16_prec _ -> func "__hfma"
       | FMA, Ops.Single_prec _ -> func "fmaf"
       | FMA, _ -> func "fma"
       | Mul3, _ -> fun v1 v2 v3 -> group (parens (v1 ^^ string " * " ^^ v2 ^^ string " * " ^^ v3))
