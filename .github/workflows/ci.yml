@@ -54,24 +54,44 @@ jobs:
     # setup-ocaml's own cache covers opam and the bare compiler switch, which is
     # why switch creation is ~70s rather than ten minutes; it does not cover these.
     #
-    # The key must follow the three pins above: they track branch HEADs, so keying
-    # on the opam files alone would happily serve a build of stale dependencies.
-    # Resolving them here also puts the exact revisions in the log, which nothing
-    # currently records.
+    # The key must follow every VCS pin that can move while the opam files stay
+    # byte-identical, or a hit serves stale dependency revisions indefinitely.
+    # That is the two pins above plus each branch-tracking pin-depends entry
+    # (ppx_minidebug#main, notty-community#master, dataprep#main, and the
+    # cudajit/hipjit pins) -- `opam pin -n .` honours those, so they are as live
+    # as the explicit ones. pin-depends is read out of the opam files rather than
+    # duplicated here, so the key cannot drift out of step with them; dev-repo is
+    # deliberately not matched, since it points at this project and its HEAD moves
+    # with every commit. Over-invalidating (cudajit/hipjit are not installed on
+    # these runners) costs one rebuild; under-invalidating is silent staleness.
+    # Resolving them also records the exact revisions in the log, which nothing
+    # else currently does.
     - name: Resolve pinned dependency revisions
       id: pins
       shell: bash
       run: |
         set -euo pipefail
+        pins=$( {
+          echo "https://github.com/c-cube/printbox.git HEAD"
+          echo "https://github.com/mmottl/pcre-ocaml.git HEAD"
+          { grep -hoE '\["[^"]+" *"git\+[^"]+"\]' *.opam || true; } \
+            | grep -oE 'git\+[^"]+' | sed 's/^git+//' | sort -u \
+            | while IFS= read -r spec; do
+                case "$spec" in
+                  *'#'*) echo "${spec%%#*} ${spec##*#}" ;;
+                  *)     echo "$spec HEAD" ;;
+                esac
+              done
+        } | sort -u )
         shas=""
-        for repo in c-cube/printbox mmottl/pcre-ocaml lukstafi/ocaml-dataprep; do
-          sha=$(git ls-remote "https://github.com/$repo.git" HEAD | cut -f1)
+        while read -r url ref; do
+          sha=$(git ls-remote "$url" "$ref" | cut -f1 | head -1)
           # An empty sha would silently collapse the key onto whatever it hashed
           # to last time, serving a cache built from different sources.
-          [ -n "$sha" ] || { echo "could not resolve HEAD of $repo" >&2; exit 1; }
-          echo "$repo -> $sha"
+          [ -n "$sha" ] || { echo "could not resolve $ref of $url" >&2; exit 1; }
+          echo "$url#$ref -> $sha"
           shas="$shas$sha"
-        done
+        done <<< "$pins"
         echo "pins=$(printf %s "$shas" | sha256sum | cut -c1-12)" >>"$GITHUB_OUTPUT"
     - name: Cache opam dependencies
       id: opam-cache
