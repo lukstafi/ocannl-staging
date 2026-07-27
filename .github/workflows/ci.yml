@@ -48,6 +48,50 @@ jobs:
     # dataprep is an unreleased spin-off, not in opam-repository; pin to its repo so --deps-only can resolve it.
     - run: opam pin -n dataprep https://github.com/lukstafi/ocaml-dataprep.git
     - run: opam pin -n .
-    - run: opam install . -y --deps-only --with-test --with-doc
+    # FIXME: cygwin's pkgconf 3.0.4-1 (published 2026-07-26) breaks
+    # `pkgconf --personality=<triplet>`, so every conf-mingw-w64-* package (gmp,
+    # zlib, openssl, sqlite3, pcre2, curl, libffi) fails its existence check and
+    # `opam install` aborts. Two regressions: personality files are only looked up
+    # in /usr/lib/pkgconfig/personality.d while the cygwin package installs them
+    # to /etc/pkgconfig/personality.d, and even once loaded the personality's
+    # DefaultSearchPaths are ignored for module lookup. Setting PKG_CONFIG_PATH
+    # would make the checks pass, but then pkgconf emits the cygwin POSIX paths
+    # (-I/usr/x86_64-w64-mingw32/sys-root/mingw/include etc.) that the personality
+    # exists to elide, and mingw gcc cannot resolve those. So instead: install the
+    # system packages, put pkgconf 2.5.1-1 back, and build the opam dependencies
+    # with depext handling off so opam does not re-run cygwin's setup.exe (which
+    # passes --upgrade-also) and undo the downgrade.
+    # Drop these three steps, restoring the plain install below for all platforms,
+    # once cygwin ships a fixed pkgconf.
+    - name: Install system dependencies (Windows)
+      if: runner.os == 'Windows'
+      run: opam install . -y --deps-only --with-test --with-doc --depext-only
+    - name: Restore cygwin pkgconf 2.5.1 (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        $root = "$(opam var root)\.cygwin\root"
+        curl.exe -sSLf -o pkgconf-2.5.1.tar.zst https://cygwin.mirror.constant.com/x86_64/release/pkgconf/pkgconf-2.5.1-1-x86_64.tar.zst
+        New-Item -ItemType Directory -Force pkgconf-2.5.1 | Out-Null
+        tar.exe -xf pkgconf-2.5.1.tar.zst -C pkgconf-2.5.1
+        # Cygwin mounts /usr/bin at <root>\bin, and nothing reads a physical
+        # <root>\usr\bin, so the package payload has to be copied rather than
+        # extracted over the root verbatim.
+        Copy-Item pkgconf-2.5.1\usr\bin\* "$root\bin" -Force
+        # Out-String because -notlike/-notmatch filter string arrays instead of
+        # returning a boolean, and --dump-personality prints several lines.
+        $version = (& "$root\bin\pkgconf.exe" --version | Out-String).Trim()
+        if ($version -notlike '2.5.1*') {
+          throw "expected pkgconf 2.5.1, got '$version' (extraction failed? this needs a tar with zstd support)"
+        }
+        $personality = (& "$root\bin\pkgconf.exe" --personality=x86_64-w64-mingw32 --dump-personality | Out-String)
+        if ($personality -notmatch 'Triplet: x86_64-w64-mingw32') {
+          throw "pkgconf still cannot load the mingw personality: $personality"
+        }
+    - name: Install opam dependencies (Windows)
+      if: runner.os == 'Windows'
+      run: opam install . -y --deps-only --with-test --with-doc --no-depexts
+    - name: Install opam dependencies
+      if: runner.os != 'Windows'
+      run: opam install . -y --deps-only --with-test --with-doc
     - run: opam exec -- dune build
     - run: opam exec -- dune runtest
