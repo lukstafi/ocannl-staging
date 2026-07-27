@@ -1411,28 +1411,30 @@ let sketch_schedule ~p (opt : LL.optimized) : Sched.schedule =
    pre-filter: both operands are packed, which normalizes any stored layout. GPU (backends with an
    mma capability): the staged pipeline ([gpu_conv_sketch_schedule]), pre-filtered by the
    intrinsic-tile divisibility of the micro-kernel extents (like the mma matmul seeds) and the
-   shared-tile footprint against the workgroup-memory limit. *)
+   shared-tile footprint against the workgroup-memory limit. Strided rows (stride-2 stems and
+   downsample blocks) are seeded on both legs since the compacting [Stage] (gh-ocannl-502). *)
 let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
     (opt : LL.optimized) : (sketch_params list * Ir.Tnode.t) option =
   match detect_conv opt.LL.llc with
   | None -> None
   | Some site ->
       let prec = Lazy.force site.c_d.Ir.Tnode.storage_prec in
-      (* The row axis must be unit-stride: [Stage] packs by index range, so a strided row would pack
-         a dilated tile read at [stride*row] — which [Tensorize]'s unit-coefficient index discipline
-         rejects (a compacting Stage is a follow-up). And every axis must be offset-free — which
-         padded convs from the tensor front end now are: the halo is part of the physically padded
-         buffer, buffer indices absorb the shift, and [Stage]'s edge guards compare against the
-         padded [Tn.dims], so staging padded convs is sound (pinned by the cvp pipeline leg of
-         schedule_conv_gemm). The gate is retained as defense-in-depth against hand-built
-         [Low_level] sites with genuine offsets, where the packing anchor would mispack (Codex P1 on
-         PR #168). Candidates are timed, not value-checked, so unsound seeds must not be proposed at
-         all. Both gates apply to both legs: the GPU pipeline packs through the same [Stage]
-         decomposition. *)
-      let row_unit_stride =
-        List.exists site.c_axes ~f:(fun cx ->
-            Idx.equal_symbol cx.cx_o site.c_row && cx.cx_stride = 1)
-      in
+      (* Strided rows are seeded (gh-ocannl-502): the row's tile part in the input access is the
+         single term [stride*row] — the kernel-window symbol lands in the outer part, at the staging
+         anchor — so the compacting [Stage] packs the window densely (tile axis sized by the loop
+         extent, tile store/read at coefficient 1, only the load's source index and its edge guard
+         keeping the stride), which satisfies [Tensorize]'s unit-coefficient index discipline.
+         Stride-2 downsampling stems and blocks therefore reach the implicit-GEMM pipeline like
+         unit-stride convs.
+
+         Every axis must still be offset-free — which padded convs from the tensor front end are:
+         the halo is part of the physically padded buffer, buffer indices absorb the shift, and
+         [Stage]'s edge guards compare against the padded [Tn.dims], so staging padded convs is
+         sound (pinned by the cvp pipeline leg of schedule_conv_gemm). The gate is retained as
+         defense-in-depth against hand-built [Low_level] sites with genuine offsets, where the
+         packing anchor would mispack (Codex P1 on PR #168). Candidates are timed, not
+         value-checked, so unsound seeds must not be proposed at all. The gate applies to both legs:
+         the GPU pipeline packs through the same [Stage] decomposition. *)
       let offset_free = List.for_all site.c_axes ~f:(fun cx -> cx.cx_offset = 0) in
       let real_stmts = conv_real_stmts site opt in
       let base =
@@ -1466,8 +1468,7 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
           if
             not
               (limits.Ir.Backend_intf.simd_vector_bytes >= 8
-              && lanes >= 2 && uniform_f32_64 && site.c_fma && site.c_noc >= lanes
-              && row_unit_stride && offset_free)
+              && lanes >= 2 && uniform_f32_64 && site.c_fma && site.c_noc >= lanes && offset_free)
           then []
           else
             (* Grid flavors need every materialized write in the routine covered by the Grid axis
@@ -1555,10 +1556,7 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
                   | Some cap -> shared_bytes rows <= cap
                   | None -> true
                 in
-                let base_ok =
-                  row_unit_stride && offset_free && (not site.c_zeroed)
-                  && List.length real_stmts <= 2
-                in
+                let base_ok = offset_free && (not site.c_zeroed) && List.length real_stmts <= 2 in
                 if not base_ok then []
                 else
                   let whole =

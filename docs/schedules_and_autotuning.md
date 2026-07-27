@@ -65,7 +65,12 @@ Code-synthesizing transforms:
   constant pool (gh-ocannl-470); `swizzle` stores the tile XOR-swizzled against shared-memory
   bank conflicts. Edge guards are `Where`-form and store 0 — the add-reduce identity — to
   out-of-range slots, so every staged tile is safe to read over its whole index space
-  (tracked in `Low_level.optimized.zero_fringe`; the padding contract of PADTO).
+  (tracked in `Low_level.optimized.zero_fringe`; the padding contract of PADTO). A tile axis
+  whose source index is a single strided term `c*i` (`c > 1` — a stride-2 conv's GEMM row) is
+  *compacted* (gh-ocannl-502): the tile is sized by the loop extent and stored/read at
+  coefficient 1, only the load's source index and its edge guard keeping the stride, so the
+  packed tile is dense and satisfies `Tensorize`'s unit-coefficient index discipline. Multi-term
+  tile parts keep the range-sized layout, and hoisted staging rejects compaction (v1).
 - **`Privatize { target; over }`** — contract a materialized accumulator's read-modify-write
   across a reduction loop into per-thread `Local` scratch with one init-load and one store-back;
   recovers for materialized nodes what virtualization gives virtual accumulators.
@@ -124,6 +129,8 @@ what the autotuner's sketch seeds parameterize:
   slice (the packing *is* im2col, one window slice at a time), `Tensorize (row, oc, ic)`; the
   accumulator fragment stays resident across the whole kernel window. GPU leg: `Grid` outer
   loops with cooperative shared staging; row-block flavors for device fill (gh-ocannl-500).
+  Strided rows (stride-2 stems and downsample blocks) ride the compacting `Stage` and are seeded
+  on both legs (gh-ocannl-502) — the stride only changes the packing nest's load arithmetic.
 - **PADTO** (gh-ocannl-485): `Pad` each awkward extent to its tile multiple before the splits;
   staged tiles zero-fill the fringe, `Tensorize` masks the fragment transfers, and the whole
   padded block runs the intrinsic/register-tiled path — arbitrary extents tensorize at the cost

@@ -55,6 +55,8 @@
       (lenet's conv+bias/relu+pooling). On GPU backends with an mma capability: the staged flavor —
       outer output loops Grid-typed, both slices staged through cooperative shared tiles at the
       kernel-window anchor, the accumulator fragment resident across the window (gh-ocannl-480).
+      Strided rows (stride-2 stems and downsample blocks) are seeded on both legs since the
+      compacting [Stage] (gh-ocannl-502) packs the strided window densely.
     - {b Beam-round menu actions} on the incumbents: dividing serial Splits, Swaps of perfect serial
       pairs, Unrolls, Retype-Vectorized on innermost loops (explicit SIMD on CPU including the
       reduction-chains rendering of accumulations — gh-ocannl-468 — while GPU accumulations stay

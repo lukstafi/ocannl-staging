@@ -24,8 +24,12 @@
    on backends with an mma capability (intrinsic-tile divisibility gates, unzeroed segments only). -
    The Grid conv flavor on aligned-merged segments: with more than one companion nest the pipeline
    adopts the default preset's whole-segment Grid geometry ([Sched.default_cpu]'s aligned cross-nest
-   analysis), value-pinned on the C backends and seeded per fission segment. - detect_conv's pattern
-   discipline: a plain matmul is not a conv site. *)
+   analysis), value-pinned on the C backends and seeded per fission segment. - Strided rows
+   (gh-ocannl-502): the compacting [Stage] packs a stride-2 window densely, so the strided site
+   seeds the same flavors as a unit-stride one — pinned by the seed counts, by executing {e every}
+   proposed candidate against the natural form (candidates are timed, not value-checked), and by the
+   tuned stride-2 routine on both legs. - detect_conv's pattern discipline: a plain matmul is not a
+   conv site. *)
 
 open Base
 open Ocannl
@@ -122,11 +126,10 @@ let () =
         Ir.Indexing.Empty
     in
     ignore (ctx, routine);
-    (* The C-backend seed count: serial + Grid on unit-stride rows, each with its fused-epilogue
-       twin (the 3x3 conv's two kernel-window loops are no obstacle since the whole-window
-       contraction, gh-ocannl-501); none on strided rows — the seeds stay gated on a unit-stride
-       row until the seeding wave adopts the compacting Stage (gh-ocannl-502; the pipeline legs
-       exercise it through explicit transforms). *)
+    (* The C-backend seed count: serial + Grid, each with its fused-epilogue twin (the 3x3 conv's
+       two kernel-window loops are no obstacle since the whole-window contraction, gh-ocannl-501). A
+       strided row seeds the same four (gh-ocannl-502): the compacting [Stage] packs the strided
+       window densely, so the pipeline applies exactly as on a unit-stride row. *)
     p (tag ^ " C-backend conv seeds") (!n_seeds = want_seeds);
     match !site with
     | None -> p (tag ^ " detected") false
@@ -144,7 +147,7 @@ let () =
   detect_leg "cvd_s1v" ~stride:1 ~use_padding:false ~want_stride:1 ~want_offset:0 ~want_row:9
     ~want_seeds:4;
   detect_leg "cvd_s2v" ~stride:2 ~use_padding:false ~want_stride:2 ~want_offset:0 ~want_row:5
-    ~want_seeds:0;
+    ~want_seeds:4;
   detect_leg "cvd_s1p" ~stride:1 ~use_padding:true ~want_stride:1 ~want_offset:0 ~want_row:11
     ~want_seeds:4;
 
@@ -280,8 +283,7 @@ let () =
      unit-coefficient discipline rejected. The compacting Stage (gh-ocannl-502) packs the strided
      window densely — source reads keep the stride, tile store/read use coefficient 1 — so the
      packed+tensorized stride-2 pipeline now runs, matching its serial twins like the unit-stride
-     legs. The seeds stay gated on a unit-stride row (asserted above) until the seeding wave adopts
-     the compacting form. *)
+     legs — and the seeding wave proposes it (asserted above, executed below). *)
   pipeline_leg "cvg2" make_conv_s2v;
   if on_cpu then (
     let has_in file s = String.is_substring (Stdio.In_channel.read_all (Utils.build_file file)) ~substring:s in
@@ -329,6 +331,53 @@ let () =
    | exception Invalid_argument msg ->
        p "cvg2: hoisted staging of a strided window rejected (no compaction in v1)"
          (String.is_substring msg ~substring:"hoisted staging does not support compacting"));
+
+  (* === The seeded stride-2 candidates, executed (gh-ocannl-502). Sketch candidates are timed, not
+     value-checked, so a seed that proposes an unsound schedule would be crowned silently: each seed
+     the wave proposes on a stride-2 conv gets its own compile and is compared against the natural
+     form. The conv-alone graph carries its own [Zero_out], so the proposals are the serial pipeline
+     and its Grid twin (whose zero expansion adopts the same geometry). === *)
+  if on_cpu then (
+    let limits =
+      { (Context.hardware_limits (Context.auto ())) with Ir.Backend_intf.simd_vector_bytes = 16 }
+    in
+    let seeds = ref [] in
+    (let _, _, y = make_conv_s2v "cvs2_p" in
+     let transform (opt : LL.optimized) =
+       seeds := Autotune.sketch_seed_params ~is_gpu:false ~is_cpu:true ~limits opt;
+       opt
+     in
+     ignore
+       (Context.compile ~lowered_transform:transform (Context.auto ())
+          (named "cvs2_probe" (Train.forward y))
+          Ir.Indexing.Empty));
+    let want2 =
+      let _, _, y = make_conv_s2v "cvs2_r" in
+      run_plain "cvs2_ref" y
+    in
+    let run_seed i p_ =
+      let tag = Printf.sprintf "cvs2_%d" i in
+      let _, _, y = make_conv_s2v tag in
+      let transform (opt : LL.optimized) = Sched.apply (Autotune.sketch_schedule ~p:p_ opt) opt in
+      let ctx = Context.auto () in
+      let ctx, routine =
+        Context.compile ~lowered_transform:transform ctx
+          (named tag (Train.forward y))
+          Ir.Indexing.Empty
+      in
+      let ctx = Context.run ctx routine in
+      Array.for_all2_exn (Context.get_values ctx y.Tensor.value) want2 ~f:(fun a b ->
+          Float.(abs (a - b) < 1e-3))
+    in
+    p "cvs2: the stride-2 conv seeds are the serial pipeline and its Grid twin"
+      (List.length !seeds = 2
+      && List.for_all !seeds ~f:(fun s -> s.Autotune.sk_conv && not s.Autotune.sk_gpu)
+      && List.count !seeds ~f:(fun s -> s.Autotune.sk_grid) = 1);
+    p "cvs2: every seeded stride-2 candidate matches the natural form within tolerance"
+      (List.for_alli !seeds ~f:run_seed))
+  else (
+    p "cvs2: the stride-2 conv seeds are the serial pipeline and its Grid twin" true;
+    p "cvs2: every seeded stride-2 candidate matches the natural form within tolerance" true);
 
   (* === Autotune seeding on conv+bias+relu: serial + Grid conv pipelines, each with its
      fused-epilogue twin (2-D convs fuse since the whole-window contraction, gh-ocannl-501; the
@@ -654,6 +703,97 @@ let () =
       (Array.for_all2_exn got want8s2 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)))
   else
     p "cvu2: GPU staged stride-2 conv (compacted) matches the natural form within tolerance" true;
+
+  (* --- The same stride-2 site through the seeding wave (gh-ocannl-502): the per-segment counts
+     match the unit-stride [cvu] leg — the stride only changes the packing Stage's load arithmetic,
+     not which flavors are proposable — and the tuned routine matches the untuned twin. --- *)
+  clean_cache "conv_tune_cache_s2";
+  let _, _, y = make_conv8_s2 "cvu2_t" in
+  let reports = ref [] in
+  let ctx = Context.auto () in
+  let ctx, routine =
+    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"conv_tune_cache_s2"
+      ~timing_ctx:(Context.auto ())
+      ~report:(fun r -> reports := r :: !reports)
+      ctx
+      (named "cvu2_tuned" (Train.forward y))
+      Ir.Indexing.Empty
+  in
+  let ctx = Context.run ctx routine in
+  let got_u2 = Context.get_values ctx y.Tensor.value in
+  (match !reports with
+  | [ r ] ->
+      p "cvu2: stride-2 conv seeds per fission segment (GPU staged on metal; serial+grid on cc)"
+        (if on_metal then
+           r.Autotune.sketch_candidates = 0
+           && r.Autotune.fiss_sketch_candidates = 1
+           && r.Autotune.fiss_sketch_timed = 1
+         else if on_cpu then
+           r.Autotune.sketch_candidates = 2
+           && r.Autotune.fiss_sketch_candidates = 2
+           && r.Autotune.fiss_sketch_timed = 2
+         else true)
+  | _ ->
+      p "cvu2: stride-2 conv seeds per fission segment (GPU staged on metal; serial+grid on cc)"
+        false);
+  p "cvu2: tuned stride-2 conv matches the untuned twin within tolerance"
+    (Array.for_all2_exn got_u2 want8s2 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)));
+
+  (* --- Row-block flavors on a strided row (gh-ocannl-502 x gh-ocannl-500 x gh-ocannl-485): an
+     unzeroed fission segment proposes the cache-panel flavors too, and a row extent that does not
+     divide the panel pads the row on top of the compaction — a stride-2 row of 12 with an 8-row
+     panel. Every per-segment seed is executed against the natural form: the padded panel's fringe
+     rows read the source past its extent, where [Stage]'s Where-form edge guards must supply the
+     accumulation identity. --- *)
+  let make_conv_s2_r12 sub =
+    let x =
+      NTDSL.init ~l:(sub ^ "x") ~prec:Ir.Ops.single ~b:[ 2 ] ~o:[ 25; 25; 4 ]
+        ~f:(fun idcs -> Float.of_int ((idcs.(0) + idcs.(1) + (2 * idcs.(2)) + (3 * idcs.(3))) % 7))
+        ()
+    in
+    let kern = make_kern sub in
+    let%op y =
+      x +* "...| 2*oh<+kh, 2*ow<+kw, ..ic..; |kh, kw, ..ic.. -> ..oc.. => ...| oh, ow, ..oc.." kern
+    in
+    (x, kern, y)
+  in
+  if on_cpu then (
+    let limits =
+      { (Context.hardware_limits (Context.auto ())) with Ir.Backend_intf.simd_vector_bytes = 16 }
+    in
+    let want12 =
+      let _, _, y = make_conv_s2_r12 "cvs2b_r" in
+      run_plain "cvs2b_ref" y
+    in
+    let seeds = ref [] in
+    (* The seeding target is the unzeroed [`Normal] segment (the conv's [Zero_out] fissions into its
+       own [`Zeros] segment) — the same tuples [Autotune.tune]'s per-segment seeding consumes. A
+       preset that schedules nothing lets the segments coalesce and the preset re-run on the merged
+       whole, so the probe keys on the unzeroed site. *)
+    (let _, _, y = make_conv_s2_r12 "cvs2b_p" in
+     ignore
+       (run_fiss_sched "cvs2b_probe" y ~conv_sched:(fun site seg ->
+            if not site.Autotune.c_zeroed then
+              seeds := Autotune.sketch_seed_params ~is_gpu:false ~is_cpu:true ~limits seg;
+            [])));
+    let run_seed i p_ =
+      let tag = Printf.sprintf "cvs2b_%d" i in
+      let _, _, y = make_conv_s2_r12 tag in
+      let got =
+        run_fiss_sched tag y ~conv_sched:(fun site seg ->
+            if site.Autotune.c_zeroed then [] else Autotune.sketch_schedule ~p:p_ seg)
+      in
+      Array.for_all2_exn got want12 ~f:(fun a b -> Float.(abs (a - b) < 1e-3))
+    in
+    p "cvs2b: the strided non-dividing row seeds a padded row-panel flavor"
+      (List.exists !seeds ~f:(fun s -> s.Autotune.sk_bm = 8)
+      && List.length !seeds = 3
+      && List.for_all !seeds ~f:(fun s -> s.Autotune.sk_conv));
+    p "cvs2b: every per-segment stride-2 candidate matches the natural form within tolerance"
+      (List.for_alli !seeds ~f:run_seed))
+  else (
+    p "cvs2b: the strided non-dividing row seeds a padded row-panel flavor" true;
+    p "cvs2b: every per-segment stride-2 candidate matches the natural form within tolerance" true);
 
   (* === Blocked tile flavors (gh-ocannl-500): the GEMM row is split into [Grid] panels before the
      reorder — cache-blocked pool panels on the C backends, extra threadgroups per row-block on GPU
