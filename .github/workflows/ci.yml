@@ -71,28 +71,33 @@ jobs:
       shell: bash
       run: |
         set -euo pipefail
-        pins=$( {
-          echo "https://github.com/c-cube/printbox.git HEAD"
-          echo "https://github.com/mmottl/pcre-ocaml.git HEAD"
-          { grep -hoE '\["[^"]+" *"git\+[^"]+"\]' *.opam || true; } \
-            | grep -oE 'git\+[^"]+' | sed 's/^git+//' | sort -u \
-            | while IFS= read -r spec; do
-                case "$spec" in
-                  *'#'*) echo "${spec%%#*} ${spec##*#}" ;;
-                  *)     echo "$spec HEAD" ;;
-                esac
-              done
-        } | sort -u )
-        shas=""
-        while read -r url ref; do
+        # Deliberately flat: the macOS runners have bash 3.2, which mis-parses a
+        # `case` inside `$( )` -- the first pattern's `)` closes the substitution
+        # early and the arm's `;;` becomes a syntax error.
+        # The pins this workflow declares above...
+        specs="https://github.com/c-cube/printbox.git#HEAD https://github.com/mmottl/pcre-ocaml.git#HEAD"
+        # ...plus every pin-depends entry, read from the opam files so the two
+        # cannot drift apart. Split on whitespace by the loop below.
+        specs="$specs $(grep -hoE '\["[^"]+" *"git\+[^"]+"\]' *.opam | grep -oE 'git\+[^"]+' | sed 's/^git+//' | sort -u)"
+        shas=
+        for spec in $specs; do
+          url=${spec%%#*}
+          ref=${spec#*#}
+          [ "$ref" != "$spec" ] || ref=HEAD
           sha=$(git ls-remote "$url" "$ref" | cut -f1 | head -1)
           # An empty sha would silently collapse the key onto whatever it hashed
           # to last time, serving a cache built from different sources.
           [ -n "$sha" ] || { echo "could not resolve $ref of $url" >&2; exit 1; }
           echo "$url#$ref -> $sha"
-          shas="$shas$sha"
-        done <<< "$pins"
-        echo "pins=$(printf %s "$shas" | sha256sum | cut -c1-12)" >>"$GITHUB_OUTPUT"
+          shas=$shas$sha
+        done
+        # macOS ships shasum, not sha256sum.
+        if command -v sha256sum >/dev/null 2>&1; then
+          digest=$(printf %s "$shas" | sha256sum)
+        else
+          digest=$(printf %s "$shas" | shasum -a 256)
+        fi
+        echo "pins=$(printf %s "$digest" | cut -c1-12)" >>"$GITHUB_OUTPUT"
     - name: Cache opam dependencies
       id: opam-cache
       uses: actions/cache@v4
