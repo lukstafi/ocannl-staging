@@ -4,6 +4,8 @@ single n=8 (divisible): 8 values, bitwise parity true | materialized: vec store 
 single 5->3 (multi-axis, 15 elements): 15 values, bitwise parity true | materialized: vec store true, lane false | virtual: lane true, vec store false
 single 9->1 (trailing dim-1 axis): 9 values, bitwise parity true | materialized: vec store true, lane false | virtual: lane true, vec store false
 half n=9: 9 values, bitwise parity true | materialized: vec store true, lane false | virtual: lane true, vec store false
+bfloat16 n=9: 9 values, bitwise parity true | materialized: vec store true, lane false | virtual: lane true, vec store false
 uint32 n=5: 5 values, bitwise parity true | materialized: vec store true, lane false | virtual: lane true, vec store false
+uint64 n=3: 3 values, bitwise parity true | materialized: vec store true, lane false | virtual: lane true, vec store false
 double n=3: 3 values, bitwise parity true | materialized: vec store true, lane false | virtual: lane true, vec store false
 fp8 n=17: 17 values, bitwise parity true | materialized: vec store true, lane false | virtual: lane true, vec store false
