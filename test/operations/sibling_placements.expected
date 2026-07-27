@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 lineage A virtualized x: true
 lineage B kept x non-virtual: true
 x declared intent untouched: true

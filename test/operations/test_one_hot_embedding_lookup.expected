@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 forward equals direct gather of table rows: true
 optimized IR contains a Get_dynamic gather: true
 vocabulary reduction loop is eliminated: true

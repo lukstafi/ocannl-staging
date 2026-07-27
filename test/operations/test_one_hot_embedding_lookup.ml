@@ -306,8 +306,8 @@ let () =
    in-range guard's ternary short-circuits (here 2_200_000_000 >= vocab, so the row is zero), and
    tables genuinely needing indices past 2^31 require [large_models] by the per-node element-count
    contract enforced in [Tnode.create]. Mutation evidence: (1) fails if [Tensor.default_value_prec]
-   is left at single/float32 (ids_wide.value.prec = single → iprec = single → inner cast is (float)
-   not (double)). Note: a 1-element IDs array is always inlined as a [Constant] literal by
+   is left at single/float32 (ids_wide.value.storage_prec = single → iprec = single → inner cast is
+   (float) not (double)). Note: a 1-element IDs array is always inlined as a [Constant] literal by
    [low_level.scalar_precision], whose [Constant] arm defaults to [single]. We use 2 elements so
    [ids_wide] has backing storage and [Get(ids_tn)] carries its declared [double] prec. *)
 let () =
@@ -334,8 +334,8 @@ let () =
   (* (1) Lower and scan IR to verify Get_dynamic.dyn_value carries iprec = double. This scan uses
      [Ir.Assignments.lower] just like the [inspect] helper above, called after [forward_once] so
      memory modes are already fixed. Mutation evidence: reverting [Tensor.default_value_prec] to
-     [Ir.Ops.single] before creating [ids_wide] would change [ids_wide.value.prec] from [double] to
-     [single], making [iprec = single] here. *)
+     [Ir.Ops.single] before creating [ids_wide] would change [ids_wide.value.storage_prec] from
+     [double] to [single], making [iprec = single] here. *)
   let comp_wide = emb_wide.Tensor.forward in
   let optim_ctx_wide = LL.empty_optimize_ctx () in
   let opt_wide =

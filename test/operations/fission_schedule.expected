@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 chain values correct: true
 chain rerun deterministic: true
 chain stays a single aligned kernel: true

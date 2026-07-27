@@ -185,6 +185,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name precision_policy_parity)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules precision_policy_parity)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name merge_buffer_static_verification)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -990,6 +1001,7 @@
     %{dep:../../ocannl_config.reference}
     %{dep:../../arrayjit/lib/utils.ml}
     %{dep:../../arrayjit/lib/affine.ml}
+    %{dep:../../arrayjit/lib/numerics.ml}
     %{dep:../../arrayjit/lib/backends.ml}
     %{dep:../../arrayjit/lib/c_syntax.ml}
     %{dep:../../arrayjit/lib/cc_backend.ml}
@@ -1454,6 +1466,28 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name schedule_pad)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules schedule_pad)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
+ (name clamped_window_pool)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules clamped_window_pool)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name schedule_conv_gemm)
  (package neural_nets_lib)
  (deps
@@ -1519,6 +1553,36 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; Run by a rule (not a test stanza) so the backend and the model_peak_* envelope overrides are
+; pinned on the command line: the C backends carry no advisory envelope constants, and pinning
+; makes the roofline-scoring output deterministic across the backend test matrix.
+
+(executable
+ (name cost_model_selection)
+ (modules cost_model_selection)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(rule
+ (target cost_model_selection.actual)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (action
+  (with-stdout-to
+   %{target}
+   (run
+    %{dep:cost_model_selection.exe}
+    "--ocannl_backend=cc"
+    "--ocannl_model_peak_flops=1e12"
+    "--ocannl_model_peak_memory_bandwidth=1e6"))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff cost_model_selection.expected cost_model_selection.actual)))
+
 (test
  (name read_before_write_flip)
  (package neural_nets_lib)
@@ -1534,6 +1598,19 @@
 ; and the Metal backend rejects Ops.Fp8_prec in typ_of_prec. Re-enable once Metal FP8 exists.
 
 (test
+ (name test_uniform_virtual_lane)
+ (package neural_nets_lib)
+ (enabled_if
+  (<> %{env:OCANNL_BACKEND=cc} metal))
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules test_uniform_virtual_lane)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name test_uniform_odd_sizes)
  (package neural_nets_lib)
  (enabled_if
@@ -1542,6 +1619,39 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_uniform_odd_sizes)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
+ (name schedule_split_reduce)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules schedule_split_reduce)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
+ (name cmple_ops)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules cmple_ops)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
+ (name overlapping_window_grads)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules overlapping_window_grads)
  (libraries base ocannl stdio)
  (preprocess
   (pps ppx_here ppx_ocannl)))

@@ -23,6 +23,14 @@
    ppx_string
    ppx_ocannl
    ppx_minidebug))
- (modules train parallel nn_blocks ocannl persistence safetensors)
+ (modules
+  train
+  parallel
+  nn_blocks
+  ocannl
+  persistence
+  precision_policy
+  mixed_prec
+  safetensors)
  (modes best)
  (c_library_flags -lpthread))

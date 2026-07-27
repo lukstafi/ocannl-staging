@@ -5,11 +5,68 @@
 > extents, convolution sketch families, and a liveness-based memory planner. The remaining 0.9
 > intended scope is summarized in [ROADMAP.md](ROADMAP.md), although its statement that full
 > beam search remains future work is stale: multi-round search over schedule compositions is
-> already implemented. End-to-end benchmark validation and cost-model-guided default/beam
-> selection are not yet complete.
+> already implemented. Cost-model-guided default and beam selection are in (config-gated,
+> advisory); end-to-end benchmark validation is not yet complete.
 
 ### Added
 
+- **Virtual packed uniform via lane extraction** (gh-ocannl-509 task 4): packed `uniform`
+  results can now be virtual (inlined). A read cell inlines as
+  `vec_convert(counter[flat / lanes]).v[flat mod lanes]` through the new IR-internal
+  `Uint4x32_to_prec_uniform_lane` binop, whose per-backend builtins index the same converted
+  block as the vectorized stores — virtual and materialized runs agree bitwise on every backend
+  (pinned by `test_uniform_virtual_lane` across odd/divisible sizes, multi-axis shapes, and
+  single/half/double/fp8). Trade-off: the counter tensor of a virtualized uniform is read at a
+  runtime block index, so it stays materialized (typically as routine-local scratch, 16 bytes
+  per 128-bit block) — dropout-mask-style virtual uses keep working after `uniform1` retires,
+  with the conversion recomputed per cell but the threefry chain evaluated once per block.
+- **Numerics policy with tf32 matmuls** (gh-ocannl-478): `Ir.Numerics` is a record of
+  compute-precision decisions — user-chosen, never optimizer-chosen, identical across sibling
+  autotune candidates. Its first field, the opt-in `tf32_matmuls` config key (default false,
+  PyTorch-style), routes CUDA uniform-f32 GEMMs through wmma `precision::tf32` (m16n16k8,
+  sm_80+) instead of the scalar fallback; off keeps full f32 numerics. Compute precisions like
+  tf32 have no byte layout and never appear as a tensor node's storage precision.
+- **Precision-assignment policy over a model** (gh-ocannl-492 task 1):
+  `Ocannl.Precision_policy.apply` assigns storage precisions across a tensor graph by structural
+  class (params / activations / gradients) instead of hand-annotating every tensor.
+  User-specified precisions win; integer and uint4x32 (RNG) chains are protected; the `except`
+  predicate pins matched nodes at the session default (a skip would be undone by top-down
+  precision inference). Verified by an executed f32-vs-bf16 parity test, not only settled-
+  precision pins.
+- **Mixed-precision training recipe** (gh-ocannl-492 tasks 2-4): `Ocannl.Mixed_prec` — the
+  torch-AMP recipe over OCANNL structures. Master weights: `with_master_weights` installs a
+  `Tensor.param_postprocess` hook giving every parameter a reduced-precision cast twin (the new
+  identity `Operation.cast`, whose gradient accumulates back through the widening assignment);
+  the f32 master stays the optimizer/persistence target, pinned `Specified` because the cast
+  registers a top-down `Inferred` of the twin's precision into the param. Dynamic loss scaling
+  (f16): `Train.grad_update ~loss_scale` seeds backprop with the scale, `Train.sgd_update
+  ~grad_unscale` unscales gradients in place before the optimizer math, and
+  `Train.grad_checksum` reduces every parameter gradient to one host-readable scalar (non-finite
+  iff any gradient cell is) — `Mixed_prec.scaled_step` gates the optimizer routine on it and
+  `Loss_scaler` runs the backoff/growth schedule by overwriting tiny device-resident scale
+  tensors (no recompilation). Executed-parity coverage in `test/training/mixed_prec_parity.ml`
+  (bf16 and f16 trajectories vs the f32 oracle, plus a deterministically engineered f16 overflow
+  pinning the backoff/growth cycle); benchmark legs via `BENCH_PRECISION=bf16|f16` in the mlp
+  runner and `orchestrate.py --precision`.
+- **Tensor-core input-format vocabulary** (gh-ocannl-481 groundwork):
+  `Backend_intf.mma_input_format` (f32, tf32, f16, bf16, fp8-e5m2) with per-(a, b)-operand-pair
+  intrinsic tile shapes in `mma_capability.mma_format_tiles`; a future e4m3 (and mixed
+  e5m2×e4m3) needs only a constructor and descriptor entries.
+- **Pad-to-tile scheduling, PADTO** (gh-ocannl-485): `Schedule.Pad { axis; to_multiple_of }`
+  extends a Serial loop to the next tile multiple with `If (axis < N)` guards on the effectful
+  leaf statements (so barriers stay uniform and downstream `Split`s divide cleanly). `Stage`'s
+  cooperative/packing edge guards became identity-filling (`Where`-form, storing 0 — the
+  add-reduce identity — to out-of-range tile slots; tiles are tracked in
+  `Low_level.optimized.zero_fringe`), and `Tensorize` recognizes pad/remainder guards around the
+  micro-kernel: row/column masks move to the accumulator contraction's transfers (0-filled
+  init-load, `If`-guarded store-back; on GPU pipelines the masked fragment is placed in
+  workgroup-shared memory so the intrinsics still fire), and reduction-axis masks are discharged
+  against zero-fringe staged operands. Tensorized paths thus cover arbitrary extents — a
+  33x65x70 matmul register-tiles on cc bitwise-exactly and runs Metal simdgroup intrinsics
+  within f32 tolerance. Autotune drops the extent-divisibility pre-filters for fully staged
+  pipelines (GPU MMA staged seeds, CPU packed compositions, conv whole/blocked GPU flavors and
+  CPU row panels), seeding `(pad, tensorize)` compositions the tuner measures against scalar
+  alternatives; in-place pipelines keep their gates.
 - **Partition / index-set-splitting transform** (gh-ocannl-508): `Schedule.Partition` splits a
   Serial loop's range at static affine breakpoints into separate, individually specialized (and
   individually schedulable) segment nests; per-segment interval folding then erases the guards
@@ -51,12 +108,25 @@
   proposals, including invalid `Stage` and `Tensorize` roles.
 - **Analytic cost-model foundation** (gh-ocannl-491): reusable footprint/FLOP extraction,
   arithmetic-intensity and roofline lower bounds, plus advisory per-backend compute/bandwidth
-  envelopes. Selection of untuned defaults and beam pre-filtering remain follow-up work.
+  envelopes.
+- **Cost-model-guided selection** (gh-ocannl-491): `Autotune.model_default` picks the untuned
+  default schedule by scoring the default pipeline and the sketch families with the roofline
+  model — zero timing runs — behind config `model_default_schedule` (routed through
+  `Train.to_routine`/`run_once` and the benchmark runners); `Autotune.tune` gains a model
+  pre-filter over sketch seeds with configurable keep-fraction (`autotune_keep_fraction`).
+  Candidates without model coverage are always kept — never dropped, only measured — so the
+  model never overrides or precludes a measured result. Calibration logging pairs model scores
+  with measured times (`autotune_calibration_file`, plus `autotune_log` lines), and
+  `model_peak_flops`/`model_peak_memory_bandwidth` accept per-machine calibrated envelope
+  constants that also enable scoring on backends without advisory values.
 - **Swizzled shared staging**: `Stage ~swizzle:true` marks XOR-swizzled shared-memory tiles, with
   validation and explicit intrinsic-decline behavior until swizzle-aware fragment loads land.
 
 ### Changed
 
+- **`Tnode.t` field renames**: `memory_mode` is now `memory_mode_intent` (it has been intent-only
+  since the context-scoped `Placements` migration) and `prec` is now `storage_prec` (the settled
+  bytes-in-buffers precision, as opposed to the compute precisions the numerics policy governs).
 - **Packed `uniform` is total over shapes** (gh-ocannl-509, tasks 1-3): the result's element
   count no longer needs to be a multiple of the 128-bit block width (`16 / bytes-per-element`).
   Shape inference gives the counter `ceil(total / lanes)` blocks via a round-up mode of the
@@ -65,9 +135,22 @@
   The value stream depends only on the element index, so growing a tensor preserves its prefix
   bitwise, and divisible shapes keep their previous streams unchanged. `Set_from_vec` into a
   padded (halo) target is now rejected explicitly at lowering with a materialize-through-copy
-  remedy (it previously assumed dense flat offsets without checking). Lane-extract
-  virtualization (task 4) and the `default_param_init` flip away from `uniform1` (task 5)
-  remain follow-ups.
+  remedy (it previously assumed dense flat offsets without checking).
+- **Default parameter initialization uses the packed `uniform`** (gh-ocannl-509 task 5):
+  `default_param_init` now defaults to `default_uniform_param_init` (a centered, scaled packed
+  `uniform` over `[-0.25, 0.25)`). Since the packed conversion became total over shapes, the
+  pointwise `uniform1` fallback is no longer needed: `uniform1`,
+  `centered_uniform1_param_init` and `default_uniform1_param_init` are deprecated (kept for
+  reproducing pre-0.9 random streams; `uniform_at`/`uniform_at1` — pointwise mapping of a user
+  counter — remain first-class). This changes every default-initialized random stream:
+  expectation files were re-promoted suite-wide. Composite initializers over inferred-shape
+  parameters exposed premature round-up eliminations in the row solver: the counter was guessed
+  at one block while the result rows' broadcast bounds were still arriving. Round-up
+  `Total_elems` eliminations are now bounds-aware — a row variable with registered-but-pending
+  bounds defers through the stored-constraint path, sibling rows are only closed empty before
+  the final stage when they carry no bounds at all, and the resolved-bound consumption arm also
+  fires when closed axes folded into the constraint's denominator (previously such a constraint
+  sat stored forever, leaving the counter variable unsolved).
 - Padding layout and neutral values are committed as tensor-node identity. Padded convolutions
   consequently lower offset-free and can be staged safely; incompatible later padding demands
   fail during shape inference instead of silently reinterpreting an existing buffer.
@@ -80,6 +163,12 @@
 
 ### Fixed
 
+- Scalar-embedded multi-term affine indices are parenthesized in generated C-family code (an
+  unparenthesized `5*i+j / 4` divided only `j`), and integer-precision `Mod` renders the `%`
+  operator on Metal/CUDA/HIP instead of the float-only (and on Metal ambiguous) `fmod`.
+- `Total_elems` application against a closed row includes the row's `beg_dims` in the known
+  product (block/stack rows carry leading dims there); previously a total constraint meeting a
+  block row divided by the trailing dims only.
 - CUDA random generation no longer bit-casts random bits directly to `double`, and vector helper
   names no longer exceed CUDA identifier limits. fp8 conversion, arithmetic, and uniform
   generation were corrected across C, CUDA, HIP, and Metal paths.

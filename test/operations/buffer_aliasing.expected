@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 planner: disjoint same-prec share bytes: true
 planner: overlapping spans get disjoint bytes: true
 planner: cross-precision never shares: true

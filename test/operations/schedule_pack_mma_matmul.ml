@@ -38,8 +38,8 @@
 
    The mixed grid-outermost form pins autotune's [sk_pack_rest] seed variant (gh-ocannl-473): same
    loop structure as the hoisted-pack form, hoisted B~ panel and all, but the non-hoistable A
-   operand gets an in-kernel packing Stage instead of being read in place — its [bm x bk] tile
-   lands inside the Grid body and the renderer privatizes it to per-chunk block-scope storage
+   operand gets an in-kernel packing Stage instead of being read in place — its [bm x bk] tile lands
+   inside the Grid body and the renderer privatizes it to per-chunk block-scope storage
    ([parallel_grid_safe]'s privatization rule), recovering the A~ pack the hoisted-only shape
    forfeits while keeping the single outermost dispatch.
 
@@ -250,7 +250,7 @@ let () =
     let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
     let stage source tile_loops =
       Sched.Stage
-      { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = false }
+        { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = false }
     in
     let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1 in
     [ ez; sp_zi; sp_i; sp_k ] @ sink j [ k_o ] @ sink i_i [ k_o ] @ sink i_o [ k_o ]
@@ -351,11 +351,11 @@ let () =
    hoisted-pack shape with the non-hoistable A operand packed in-kernel — Grid row blocks stay
    outermost (one dispatch spanning the GEBP triple), the B~ panel packs at link time into the
    constant pool, and the per-row-block A~ tile packs inside the Grid body where the renderer
-   privatizes it per chunk. A is a values-backed trainable param, so it is genuinely non-hoistable
-   — the inference-GEMM case the seed targets (activations x constant weights). CPU-only schedule;
+   privatizes it per chunk. A is a values-backed trainable param, so it is genuinely non-hoistable —
+   the inference-GEMM case the seed targets (activations x constant weights). CPU-only schedule;
    identity transform elsewhere. === *)
 let () =
-  let gav = Array.init (n * n) ~f:(fun x -> Float.of_int (x % 19) *. 0.125 -. 1.) in
+  let gav = Array.init (n * n) ~f:(fun x -> (Float.of_int (x % 19) *. 0.125) -. 1.) in
   let gbv = Array.init (n * n) ~f:(fun x -> Float.of_int (x % 23) -. 11.) in
   let gb = TDSL.ndarray gbv ~label:[ "mgb" ] ~input_dims:[ n ] ~output_dims:[ n ] () in
   let xa0 = TDSL.param ~values:gav "xa0" ~input_dims:[ n ] ~output_dims:[ n ] () in

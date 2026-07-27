@@ -220,6 +220,7 @@ let () =
       workgroup_shared = Set.empty (module Ir.Tnode);
       simdgroup_fragments = Set.empty (module Ir.Tnode);
       swizzled = Set.empty (module Ir.Tnode);
+      zero_fringe = Set.empty (module Ir.Tnode);
     }
   in
   let guarded_accum ~cond_of =
@@ -302,10 +303,7 @@ let () =
      [compile] after any transform) rejects kernels exceeding the workgroup-size or shared-memory
      capacity. Backend-independent: limits are passed explicitly. --- *)
   let tight_limits =
-    {
-      Ir.Backend_intf.no_hardware_limits with
-      Ir.Backend_intf.max_threads_per_workgroup = Some 4;
-    }
+    { Ir.Backend_intf.no_hardware_limits with Ir.Backend_intf.max_threads_per_workgroup = Some 4 }
   in
   let clamp_sched = ref [] in
   let got_clamp =

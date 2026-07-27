@@ -52,8 +52,16 @@ let () =
     ~f:(Option.iter ~f:(fun diff -> Train.set_materialized diff.Tensor.grad))
     [ a.diff; b.diff ];
   (* FIXME(#351): this is a good test for common subexpression elimination. *)
-  Utils.capture_stdout_logs @@ fun () ->
-  let ctx = Train.update_once ctx g in
+  let ctx =
+    Utils.capture_stdout_logs @@ fun () ->
+    let ctx = Train.update_once ctx g in
+    (* CUDA and HIP routine logs use device-side [printf], which shares process stdout with the
+       host. Keep host tensor rendering outside the capture window and wait for the device printf
+       FIFO to drain before restoring stdout, otherwise a long log line can be interleaved with a
+       tensor table at byte granularity. *)
+    Context.sync ctx;
+    ctx
+  in
   Train.printf ~here:[%here] ~with_code:false ~with_grad:false ctx g;
   Train.printf ~here:[%here] ~with_code:false ~with_grad:true ctx a;
   Train.printf ~here:[%here] ~with_code:false ~with_grad:true ctx b;

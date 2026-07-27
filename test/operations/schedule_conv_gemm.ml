@@ -17,16 +17,19 @@
    the serial and Grid-parallel conv pipelines, each with its fused-epilogue twin (gh-ocannl-486):
    the whole-window accumulator contraction (gh-ocannl-501) lands the fragment store-back after the
    full kernel window, so [Fuse_epilogue]'s exactly-once check passes on multi-window (2-D) convs
-   too. The tuned routine matches the untuned twin, and the winning schedule round-trips through
-   the saved form. - The GPU
-   staged leg: the same re-association with Grid-typed outer loops, cooperative shared staging at
-   the kernel-window anchor, and [Tensorize] at the backend lane width — value-pinned on metal
-   against the natural form (tolerance tier), and seeded per fission segment on backends with an
-   mma capability (intrinsic-tile divisibility gates, unzeroed segments only). - The Grid conv
-   flavor on aligned-merged segments: with more than one companion nest the pipeline adopts the
-   default preset's whole-segment Grid geometry ([Sched.default_cpu]'s aligned cross-nest
-   analysis), value-pinned on the C backends and seeded per fission segment. - detect_conv's
-   pattern discipline: a plain matmul is not a conv site. *)
+   too. The tuned routine matches the untuned twin, and the winning schedule round-trips through the
+   saved form. - The GPU staged leg: the same re-association with Grid-typed outer loops,
+   cooperative shared staging at the kernel-window anchor, and [Tensorize] at the backend lane width
+   — value-pinned on metal against the natural form (tolerance tier), and seeded per fission segment
+   on backends with an mma capability (intrinsic-tile divisibility gates, unzeroed segments only). -
+   The Grid conv flavor on aligned-merged segments: with more than one companion nest the pipeline
+   adopts the default preset's whole-segment Grid geometry ([Sched.default_cpu]'s aligned cross-nest
+   analysis), value-pinned on the C backends and seeded per fission segment. - Strided rows
+   (gh-ocannl-502): the compacting [Stage] packs a stride-2 window densely, so the strided site
+   seeds the same flavors as a unit-stride one — pinned by the seed counts, by executing {e every}
+   proposed candidate against the natural form (candidates are timed, not value-checked), and by the
+   tuned stride-2 routine on both legs. - detect_conv's pattern discipline: a plain matmul is not a
+   conv site. *)
 
 open Base
 open Ocannl
@@ -98,8 +101,8 @@ let () =
      only the lowered structure is inspected) === *)
   let detect_leg tag ~stride ~use_padding ~want_stride ~want_offset ~want_row ~want_seeds =
     (* The padded leg's input goes through the padding-aware constructor: its layout commits at
-       first compilation WITH the conv's halo, and the lowered access is then offset-free in
-       buffer space — a valid conv over the physically padded buffer. *)
+       first compilation WITH the conv's halo, and the lowered access is then offset-free in buffer
+       space — a valid conv over the physically padded buffer. *)
     let x = if use_padding then make_x_fresh tag else make_x tag in
     let conv =
       Nn_blocks.conv2d ~label:[ tag ] ~kernel_size:3 ~stride ~use_padding ~out_channels:8 ()
@@ -108,8 +111,8 @@ let () =
     let site = ref None in
     let n_seeds = ref (-1) in
     let ctx = Context.auto () in
-    (* Pin the vector width so the C-backend seed-count assertion is backend-independent (the
-       check always passes is_cpu; only [limits] would otherwise vary per device). *)
+    (* Pin the vector width so the C-backend seed-count assertion is backend-independent (the check
+       always passes is_cpu; only [limits] would otherwise vary per device). *)
     let limits = { (Context.hardware_limits ctx) with Ir.Backend_intf.simd_vector_bytes = 16 } in
     let transform (opt : LL.optimized) =
       site := Autotune.detect_conv opt.LL.llc;
@@ -123,10 +126,10 @@ let () =
         Ir.Indexing.Empty
     in
     ignore (ctx, routine);
-    (* The C-backend seed count: serial + Grid on unit-stride rows, each with its fused-epilogue
-       twin (the 3x3 conv's two kernel-window loops are no obstacle since the whole-window
-       contraction, gh-ocannl-501); none on strided rows (the packing Stage packs by index range —
-       see the pipeline legs). *)
+    (* The C-backend seed count: serial + Grid, each with its fused-epilogue twin (the 3x3 conv's
+       two kernel-window loops are no obstacle since the whole-window contraction, gh-ocannl-501). A
+       strided row seeds the same four (gh-ocannl-502): the compacting [Stage] packs the strided
+       window densely, so the pipeline applies exactly as on a unit-stride row. *)
     p (tag ^ " C-backend conv seeds") (!n_seeds = want_seeds);
     match !site with
     | None -> p (tag ^ " detected") false
@@ -144,7 +147,7 @@ let () =
   detect_leg "cvd_s1v" ~stride:1 ~use_padding:false ~want_stride:1 ~want_offset:0 ~want_row:9
     ~want_seeds:4;
   detect_leg "cvd_s2v" ~stride:2 ~use_padding:false ~want_stride:2 ~want_offset:0 ~want_row:5
-    ~want_seeds:0;
+    ~want_seeds:4;
   detect_leg "cvd_s1p" ~stride:1 ~use_padding:true ~want_stride:1 ~want_offset:0 ~want_row:11
     ~want_seeds:4;
 
@@ -176,9 +179,9 @@ let () =
 
   (* === The hand-built implicit-GEMM pipeline (C backends; unit-lane Tensorize like the packed mma
      pipelines). Stride-2 and padded variants included: strided windows only change the packing
-     Stage's index arithmetic, and a padded conv reads a physically padded source whose halo is
-     part of the buffer — the lowered nest is offset-free in buffer space (a valid conv over the
-     padded dims), so [Stage]'s edge guards and the tensorization apply unchanged. === *)
+     Stage's index arithmetic, and a padded conv reads a physically padded source whose halo is part
+     of the buffer — the lowered nest is offset-free in buffer space (a valid conv over the padded
+     dims), so [Stage]'s edge guards and the tensorization apply unchanged. === *)
   let make_conv_s1v sub =
     let x = make_x sub in
     let kern = make_kern sub in
@@ -189,8 +192,8 @@ let () =
   in
   let make_conv_s1p sub =
     (* The conv input goes through the padding-aware constructor ([init] would commit an unpadded
-       layout at creation, and the padded conv on it would be rejected); it is a host-init like
-       the other legs' inputs, so it is not written in the routine and the packing Stage applies. *)
+       layout at creation, and the padded conv on it would be rejected); it is a host-init like the
+       other legs' inputs, so it is not written in the routine and the packing Stage applies. *)
     let x = make_x_fresh sub in
     let kern = make_kern sub in
     let%op y =
@@ -224,7 +227,14 @@ let () =
       in
       let stage source tile_loops =
         Sched.Stage
-           { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = false }
+          {
+            source;
+            tile_loops;
+            shared = false;
+            cooperative = None;
+            hoisted = false;
+            swizzle = false;
+          }
       in
       let sched =
         if not tensorized then reorder
@@ -269,27 +279,105 @@ let () =
      guards compare against the padded dims, [Tn.dims]), so the halo values participate in the
      packed tile exactly as in the natural form — staging padded convs is sound. *)
   pipeline_leg "cvp" make_conv_s1p;
-  (* A strided row packs a dilated tile ([Stage] packs by index range), which [Tensorize]'s
-     unit-coefficient discipline rejects — the reorder still holds, and the seeds are gated on a
-     unit-stride row (asserted below), so autotune never proposes the rejected form. *)
-  (let want2 =
-     let _, _, y = make_conv_s2v "cvg2_r" in
-     run_plain "cvg2_ref" y
-   in
-   let swapped2 = run_sched "cvg2_swap" (make_conv_s2v "cvg2_s") ~tensorized:false in
-   p "cvg2: reorder-only conv matches the natural form within tolerance"
-     (Array.for_all2_exn swapped2 want2 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)));
-   match run_sched "cvg2_gemm" (make_conv_s2v "cvg2_g") ~tensorized:true with
-   | _ -> p "cvg2: strided-row tensorization rejected with a targeted error" false
-   | exception Invalid_argument msg ->
-       p "cvg2: strided-row tensorization rejected with a targeted error"
-         (String.is_substring msg ~substring:"Schedule.Tensorize"));
-  if on_cpu then
-    let src = Stdio.In_channel.read_all (Utils.build_file "cvg_gemm.c") in
-    let has s = String.is_substring src ~substring:s in
+  (* A strided row used to pack a dilated tile ([Stage] packed by index range), which [Tensorize]'s
+     unit-coefficient discipline rejected. The compacting Stage (gh-ocannl-502) packs the strided
+     window densely — source reads keep the stride, tile store/read use coefficient 1 — so the
+     packed+tensorized stride-2 pipeline now runs, matching its serial twins like the unit-stride
+     legs — and the seeding wave proposes it (asserted above, executed below). *)
+  pipeline_leg "cvg2" make_conv_s2v;
+  if on_cpu then (
+    let has_in file s = String.is_substring (Stdio.In_channel.read_all (Utils.build_file file)) ~substring:s in
+    let struct_pin file =
+      has_in file "Tile_mma register tiling" && has_in file "fragment_" && has_in file "tile_"
+    in
     p "conv pipeline structure: im2col packs, register tiling, resident fragment"
-      (has "Tile_mma register tiling" && has "fragment_" && has "tile_")
-  else p "conv pipeline structure: im2col packs, register tiling, resident fragment" true;
+      (struct_pin "cvg_gemm.c");
+    p "cvg2 pipeline structure: compacted im2col packs, register tiling fires on the strided row"
+      (struct_pin "cvg2_gemm.c"))
+  else (
+    p "conv pipeline structure: im2col packs, register tiling, resident fragment" true;
+    p "cvg2 pipeline structure: compacted im2col packs, register tiling fires on the strided row"
+      true);
+  (* v1 fence: hoisted (host-side) packing does not compact — a strided tile part is rejected
+     loudly rather than silently packing a dilated tile. *)
+  (let x, _kern, y = make_conv_s2v "cvg2_h" in
+   let transform (opt : LL.optimized) =
+     let paths = nest_paths opt.LL.llc in
+     let ow, ic =
+       match List.find_exn paths ~f:(fun q -> List.length q = 7) with
+       | [ _b; _oh; ow; _oc; ic; _kh; _kw ] -> (ow, ic)
+       | _ -> assert false
+     in
+     Sched.apply
+       [
+         Sched.Stage
+           {
+             source = x.Tensor.value;
+             tile_loops = [ ow; ic ];
+             shared = false;
+             cooperative = None;
+             hoisted = true;
+             swizzle = false;
+           };
+       ]
+       opt
+   in
+   match
+     Context.compile ~lowered_transform:transform (Context.auto ())
+       (named "cvg2_hoist" (Train.forward y))
+       Ir.Indexing.Empty
+   with
+   | _ -> p "cvg2: hoisted staging of a strided window rejected (no compaction in v1)" false
+   | exception Invalid_argument msg ->
+       p "cvg2: hoisted staging of a strided window rejected (no compaction in v1)"
+         (String.is_substring msg ~substring:"hoisted staging does not support compacting"));
+
+  (* === The seeded stride-2 candidates, executed (gh-ocannl-502). Sketch candidates are timed, not
+     value-checked, so a seed that proposes an unsound schedule would be crowned silently: each seed
+     the wave proposes on a stride-2 conv gets its own compile and is compared against the natural
+     form. The conv-alone graph carries its own [Zero_out], so the proposals are the serial pipeline
+     and its Grid twin (whose zero expansion adopts the same geometry). === *)
+  if on_cpu then (
+    let limits =
+      { (Context.hardware_limits (Context.auto ())) with Ir.Backend_intf.simd_vector_bytes = 16 }
+    in
+    let seeds = ref [] in
+    (let _, _, y = make_conv_s2v "cvs2_p" in
+     let transform (opt : LL.optimized) =
+       seeds := Autotune.sketch_seed_params ~is_gpu:false ~is_cpu:true ~limits opt;
+       opt
+     in
+     ignore
+       (Context.compile ~lowered_transform:transform (Context.auto ())
+          (named "cvs2_probe" (Train.forward y))
+          Ir.Indexing.Empty));
+    let want2 =
+      let _, _, y = make_conv_s2v "cvs2_r" in
+      run_plain "cvs2_ref" y
+    in
+    let run_seed i p_ =
+      let tag = Printf.sprintf "cvs2_%d" i in
+      let _, _, y = make_conv_s2v tag in
+      let transform (opt : LL.optimized) = Sched.apply (Autotune.sketch_schedule ~p:p_ opt) opt in
+      let ctx = Context.auto () in
+      let ctx, routine =
+        Context.compile ~lowered_transform:transform ctx
+          (named tag (Train.forward y))
+          Ir.Indexing.Empty
+      in
+      let ctx = Context.run ctx routine in
+      Array.for_all2_exn (Context.get_values ctx y.Tensor.value) want2 ~f:(fun a b ->
+          Float.(abs (a - b) < 1e-3))
+    in
+    p "cvs2: the stride-2 conv seeds are the serial pipeline and its Grid twin"
+      (List.length !seeds = 2
+      && List.for_all !seeds ~f:(fun s -> s.Autotune.sk_conv && not s.Autotune.sk_gpu)
+      && List.count !seeds ~f:(fun s -> s.Autotune.sk_grid) = 1);
+    p "cvs2: every seeded stride-2 candidate matches the natural form within tolerance"
+      (List.for_alli !seeds ~f:run_seed))
+  else (
+    p "cvs2: the stride-2 conv seeds are the serial pipeline and its Grid twin" true;
+    p "cvs2: every seeded stride-2 candidate matches the natural form within tolerance" true);
 
   (* === Autotune seeding on conv+bias+relu: serial + Grid conv pipelines, each with its
      fused-epilogue twin (2-D convs fuse since the whole-window contraction, gh-ocannl-501; the
@@ -345,76 +433,81 @@ let () =
   (* === The fused conv twin, hand-built (deterministic — independent of which candidate the tuner
      crowns): the serial implicit-GEMM pipeline plus [Fuse_epilogue] on the conv output. A
      successful compile IS the whole-window pin (gh-ocannl-501): [Fuse_epilogue] raises when the
-     fragment store-back sits inside a surplus kernel-window loop, so fusing a 3x3 conv requires
-     the contraction to have landed the store-back after the full window. The fused routine merges
-     the tail into the conv nest (one real statement beside the [Zero_out]), and elementwise tails
-     never reorder the reduction — fused values match the unfused pipeline BITWISE on the C
-     backends. === *)
-  (if on_cpu then (
-     let run_tail_sched name (x, kern, pr, y) ~fused =
-       let n_real = ref (-1) in
-       let transform (opt : LL.optimized) =
-         let paths = nest_paths opt.LL.llc in
-         let _b, _oh, ow, oc, ic, kh, kw =
-           match List.find_exn paths ~f:(fun q -> List.length q = 7) with
-           | [ b; oh; ow; oc; ic; kh; kw ] -> (b, oh, ow, oc, ic, kh, kw)
-           | _ -> assert false
-         in
-         let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner }) in
-         let reorder =
-           sink ow [ oc; ic; kh; kw ]
-           @ sink oc [ ic; kh; kw ]
-           @ sink ic [ kh; kw ]
-           @ sink ic [ oc; ow ]
-           @ sink oc [ ow ]
-         in
-         let stage source tile_loops =
-           Sched.Stage
-             { source; tile_loops; shared = false; cooperative = None; hoisted = false;
-               swizzle = false }
-         in
-         let tz, _lane = Sched.tensorize ~i:ow ~j:oc ~k:ic ~simd_width:1 in
-         let sched =
-           reorder
-           @ [ stage x.Tensor.value [ ow; ic ]; stage kern.Tensor.value [ ic; oc ]; tz ]
-           @
-           if fused then [ Sched.Fuse_epilogue { target = pr.Tensor.value; shared = false } ]
-           else []
-         in
-         let opt = Sched.apply sched opt in
-         n_real :=
-           List.length
-             (List.filter (LL.flat_lines [ opt.LL.llc ]) ~f:(function
-               | LL.Noop | LL.Comment _ | LL.Zero_out _ -> false
-               | _ -> true));
-         opt
-       in
-       let ctx = Context.auto () in
-       let ctx, routine =
-         Context.compile ~lowered_transform:transform ctx
-           (named name (Train.forward y))
-           Ir.Indexing.Empty
-       in
-       let ctx = Context.run ctx routine in
-       (Context.get_values ctx y.Tensor.value, !n_real)
-     in
-     let unfused, n_unfused = run_tail_sched "cvf_unfused" (make_tail "cvf_u") ~fused:false in
-     let fused, n_fused = run_tail_sched "cvf_fused" (make_tail "cvf_f") ~fused:true in
-     p "cvf: fusion merges the tail into the conv nest" (n_unfused = 2 && n_fused = 1);
-     p "cvf: fused conv twin matches the unfused pipeline bitwise"
-       (Array.for_all2_exn fused unfused ~f:Float.equal);
-     p "cvf: fused conv twin matches the natural form within tolerance"
-       (Array.for_all2_exn fused want_t ~f:(fun a b -> Float.(abs (a - b) < 1e-3))))
-   else (
-     p "cvf: fusion merges the tail into the conv nest" true;
-     p "cvf: fused conv twin matches the unfused pipeline bitwise" true;
-     p "cvf: fused conv twin matches the natural form within tolerance" true));
+     fragment store-back sits inside a surplus kernel-window loop, so fusing a 3x3 conv requires the
+     contraction to have landed the store-back after the full window. The fused routine merges the
+     tail into the conv nest (one real statement beside the [Zero_out]), and elementwise tails never
+     reorder the reduction — fused values match the unfused pipeline BITWISE on the C backends.
+     === *)
+  if on_cpu then (
+    let run_tail_sched name (x, kern, pr, y) ~fused =
+      let n_real = ref (-1) in
+      let transform (opt : LL.optimized) =
+        let paths = nest_paths opt.LL.llc in
+        let _b, _oh, ow, oc, ic, kh, kw =
+          match List.find_exn paths ~f:(fun q -> List.length q = 7) with
+          | [ b; oh; ow; oc; ic; kh; kw ] -> (b, oh, ow, oc, ic, kh, kw)
+          | _ -> assert false
+        in
+        let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner }) in
+        let reorder =
+          sink ow [ oc; ic; kh; kw ]
+          @ sink oc [ ic; kh; kw ]
+          @ sink ic [ kh; kw ]
+          @ sink ic [ oc; ow ]
+          @ sink oc [ ow ]
+        in
+        let stage source tile_loops =
+          Sched.Stage
+            {
+              source;
+              tile_loops;
+              shared = false;
+              cooperative = None;
+              hoisted = false;
+              swizzle = false;
+            }
+        in
+        let tz, _lane = Sched.tensorize ~i:ow ~j:oc ~k:ic ~simd_width:1 in
+        let sched =
+          reorder
+          @ [ stage x.Tensor.value [ ow; ic ]; stage kern.Tensor.value [ ic; oc ]; tz ]
+          @
+          if fused then [ Sched.Fuse_epilogue { target = pr.Tensor.value; shared = false } ] else []
+        in
+        let opt = Sched.apply sched opt in
+        n_real :=
+          List.length
+            (List.filter (LL.flat_lines [ opt.LL.llc ]) ~f:(function
+              | LL.Noop | LL.Comment _ | LL.Zero_out _ -> false
+              | _ -> true));
+        opt
+      in
+      let ctx = Context.auto () in
+      let ctx, routine =
+        Context.compile ~lowered_transform:transform ctx
+          (named name (Train.forward y))
+          Ir.Indexing.Empty
+      in
+      let ctx = Context.run ctx routine in
+      (Context.get_values ctx y.Tensor.value, !n_real)
+    in
+    let unfused, n_unfused = run_tail_sched "cvf_unfused" (make_tail "cvf_u") ~fused:false in
+    let fused, n_fused = run_tail_sched "cvf_fused" (make_tail "cvf_f") ~fused:true in
+    p "cvf: fusion merges the tail into the conv nest" (n_unfused = 2 && n_fused = 1);
+    p "cvf: fused conv twin matches the unfused pipeline bitwise"
+      (Array.for_all2_exn fused unfused ~f:Float.equal);
+    p "cvf: fused conv twin matches the natural form within tolerance"
+      (Array.for_all2_exn fused want_t ~f:(fun a b -> Float.(abs (a - b) < 1e-3))))
+  else (
+    p "cvf: fusion merges the tail into the conv nest" true;
+    p "cvf: fused conv twin matches the unfused pipeline bitwise" true;
+    p "cvf: fused conv twin matches the natural form within tolerance" true);
 
-  (* === The GPU staged leg and the aligned-merged Grid flavor (gh-ocannl-493 follow-ups). Both
-     legs use micro-kernel extents divisible by Metal's 8x8x8 intrinsic tile: row = 8, oc = 16,
-     ic = 8. The pipelines run through the fission seam ([Sched.fission_scheduled]) because the
-     conv's [Zero_out] must land in its own [`Zeros] segment for the annotated conv kernel to
-     validate — the same shape the autotune per-segment seeding targets. === *)
+  (* === The GPU staged leg and the aligned-merged Grid flavor (gh-ocannl-493 follow-ups). Both legs
+     use micro-kernel extents divisible by Metal's 8x8x8 intrinsic tile: row = 8, oc = 16, ic = 8.
+     The pipelines run through the fission seam ([Sched.fission_scheduled]) because the conv's
+     [Zero_out] must land in its own [`Zeros] segment for the annotated conv kernel to validate —
+     the same shape the autotune per-segment seeding targets. === *)
   let make_x8 tag =
     NTDSL.init ~l:(tag ^ "x") ~prec:Ir.Ops.single ~b:[ 2 ] ~o:[ 10; 10; 8 ]
       ~f:(fun idcs -> Float.of_int ((idcs.(0) + idcs.(1) + (2 * idcs.(2)) + (3 * idcs.(3))) % 7))
@@ -456,17 +549,15 @@ let () =
     @ site.Autotune.c_kernel
     @ [ site.Autotune.c_row; site.Autotune.c_oc; site.Autotune.c_red ]
   in
-  (* Compile+run through the fission seam, with [conv_sched] supplying the schedule for the
-     segment containing the detected conv site and every other segment staying unscheduled
-     (zero segments get the default zero expansion on GPU). *)
+  (* Compile+run through the fission seam, with [conv_sched] supplying the schedule for the segment
+     containing the detected conv site and every other segment staying unscheduled (zero segments
+     get the default zero expansion on GPU). *)
   let run_fiss_sched name y ~conv_sched =
     let ctx = Context.auto () in
     let limits = Context.hardware_limits ctx in
     let transforms (opt : LL.optimized) =
       let preset (seg : LL.optimized) =
-        match Autotune.detect_conv seg.LL.llc with
-        | Some site -> conv_sched site seg
-        | None -> []
+        match Autotune.detect_conv seg.LL.llc with Some site -> conv_sched site seg | None -> []
       in
       let zero_sched tns = if on_cpu then [] else Sched.zero_expansion ~limits tns in
       Sched.fission_scheduled ~preset ~zero_sched ~static_indices:[] opt
@@ -488,34 +579,41 @@ let () =
      kernel-window anchor, Tensorize at the backend lane width (the accumulator fragment stays
      resident across the whole kernel window, gh-ocannl-480/501). Tolerance tier: the reorder and
      the fragment arithmetic reassociate each element's reduction. --- *)
-  (if on_metal then
-     let x, kern, y = make_conv8 "cvu_g" in
-     let conv_sched (site : Autotune.conv_site) _seg =
-       let w =
-         match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
-         | Some m -> m.Ir.Backend_intf.mma_simd_width
-         | None -> 32
-       in
-       let stage source tile_loops =
-         Sched.Stage
-           { source; tile_loops; shared = true; cooperative = Some w; hoisted = false; swizzle = false }
-       in
-       let tz, _lane =
-         Sched.tensorize ~i:site.Autotune.c_row ~j:site.Autotune.c_oc ~k:site.Autotune.c_red
-           ~simd_width:w
-       in
-       List.map site.Autotune.c_outer ~f:(fun (s, _) -> Sched.Retype { axis = s; ty = LL.Grid })
-       @ reorder_swaps ~current:site.Autotune.c_loops ~target:(conv_target site)
-       @ [
-           stage x.Tensor.value [ site.Autotune.c_row; site.Autotune.c_red ];
-           stage kern.Tensor.value [ site.Autotune.c_red; site.Autotune.c_oc ];
-           tz;
-         ]
-     in
-     let got = run_fiss_sched "cvu_gpu" y ~conv_sched in
-     p "cvu: GPU staged conv pipeline matches the natural form within tolerance"
-       (Array.for_all2_exn got want8 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)))
-   else p "cvu: GPU staged conv pipeline matches the natural form within tolerance" true);
+  if on_metal then
+    let x, kern, y = make_conv8 "cvu_g" in
+    let conv_sched (site : Autotune.conv_site) _seg =
+      let w =
+        match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
+        | Some m -> m.Ir.Backend_intf.mma_simd_width
+        | None -> 32
+      in
+      let stage source tile_loops =
+        Sched.Stage
+          {
+            source;
+            tile_loops;
+            shared = true;
+            cooperative = Some w;
+            hoisted = false;
+            swizzle = false;
+          }
+      in
+      let tz, _lane =
+        Sched.tensorize ~i:site.Autotune.c_row ~j:site.Autotune.c_oc ~k:site.Autotune.c_red
+          ~simd_width:w
+      in
+      List.map site.Autotune.c_outer ~f:(fun (s, _) -> Sched.Retype { axis = s; ty = LL.Grid })
+      @ reorder_swaps ~current:site.Autotune.c_loops ~target:(conv_target site)
+      @ [
+          stage x.Tensor.value [ site.Autotune.c_row; site.Autotune.c_red ];
+          stage kern.Tensor.value [ site.Autotune.c_red; site.Autotune.c_oc ];
+          tz;
+        ]
+    in
+    let got = run_fiss_sched "cvu_gpu" y ~conv_sched in
+    p "cvu: GPU staged conv pipeline matches the natural form within tolerance"
+      (Array.for_all2_exn got want8 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)))
+  else p "cvu: GPU staged conv pipeline matches the natural form within tolerance" true;
   (* --- Seeding + tuning on the conv-alone graph: the C backends seed serial + Grid per fission
      segment (and whole-routine); metal seeds the staged GPU flavor per fission segment (the
      whole-routine site is zeroed, hence gated). --- *)
@@ -549,10 +647,158 @@ let () =
   p "cvu: tuned conv matches the untuned twin within tolerance"
     (Array.for_all2_exn got_u want8 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)));
 
+  (* --- The GPU staged pipeline on a stride-2 conv (gh-ocannl-502): the compacting Stage packs the
+     strided row densely through the cooperative shared tiles — the loads keep the stride, the tile
+     store/read are unit-coefficient — so the tensorized micro-kernel applies unchanged. Input 17
+     with k=3, s=2 keeps row = 8, oc = 16, ic = 8 (the 8x8x8 intrinsic tile divides). --- *)
+  let make_conv8_s2 sub =
+    let x =
+      NTDSL.init ~l:(sub ^ "x") ~prec:Ir.Ops.single ~b:[ 2 ] ~o:[ 17; 17; 8 ]
+        ~f:(fun idcs -> Float.of_int ((idcs.(0) + idcs.(1) + (2 * idcs.(2)) + (3 * idcs.(3))) % 7))
+        ()
+    in
+    let kern = make_kern8 sub in
+    let%op y =
+      x +* "...| 2*oh<+kh, 2*ow<+kw, ..ic..; |kh, kw, ..ic.. -> ..oc.. => ...| oh, ow, ..oc.." kern
+    in
+    (x, kern, y)
+  in
+  let want8s2 =
+    let _, _, y = make_conv8_s2 "cvu2_r" in
+    run_plain "cvu2_ref" y
+  in
+  if on_metal || String.equal backend_name "cuda" then
+    let x, kern, y = make_conv8_s2 "cvu2_g" in
+    let conv_sched (site : Autotune.conv_site) _seg =
+      let w =
+        match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
+        | Some m -> m.Ir.Backend_intf.mma_simd_width
+        | None -> 32
+      in
+      let stage source tile_loops =
+        Sched.Stage
+          {
+            source;
+            tile_loops;
+            shared = true;
+            cooperative = Some w;
+            hoisted = false;
+            swizzle = false;
+          }
+      in
+      let tz, _lane =
+        Sched.tensorize ~i:site.Autotune.c_row ~j:site.Autotune.c_oc ~k:site.Autotune.c_red
+          ~simd_width:w
+      in
+      List.map site.Autotune.c_outer ~f:(fun (s, _) -> Sched.Retype { axis = s; ty = LL.Grid })
+      @ reorder_swaps ~current:site.Autotune.c_loops ~target:(conv_target site)
+      @ [
+          stage x.Tensor.value [ site.Autotune.c_row; site.Autotune.c_red ];
+          stage kern.Tensor.value [ site.Autotune.c_red; site.Autotune.c_oc ];
+          tz;
+        ]
+    in
+    let got = run_fiss_sched "cvu2_gpu" y ~conv_sched in
+    p "cvu2: GPU staged stride-2 conv (compacted) matches the natural form within tolerance"
+      (Array.for_all2_exn got want8s2 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)))
+  else
+    p "cvu2: GPU staged stride-2 conv (compacted) matches the natural form within tolerance" true;
+
+  (* --- The same stride-2 site through the seeding wave (gh-ocannl-502): the per-segment counts
+     match the unit-stride [cvu] leg — the stride only changes the packing Stage's load arithmetic,
+     not which flavors are proposable — and the tuned routine matches the untuned twin. --- *)
+  clean_cache "conv_tune_cache_s2";
+  let _, _, y = make_conv8_s2 "cvu2_t" in
+  let reports = ref [] in
+  let ctx = Context.auto () in
+  let ctx, routine =
+    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"conv_tune_cache_s2"
+      ~timing_ctx:(Context.auto ())
+      ~report:(fun r -> reports := r :: !reports)
+      ctx
+      (named "cvu2_tuned" (Train.forward y))
+      Ir.Indexing.Empty
+  in
+  let ctx = Context.run ctx routine in
+  let got_u2 = Context.get_values ctx y.Tensor.value in
+  (match !reports with
+  | [ r ] ->
+      p "cvu2: stride-2 conv seeds per fission segment (GPU staged on metal; serial+grid on cc)"
+        (if on_metal then
+           r.Autotune.sketch_candidates = 0
+           && r.Autotune.fiss_sketch_candidates = 1
+           && r.Autotune.fiss_sketch_timed = 1
+         else if on_cpu then
+           r.Autotune.sketch_candidates = 2
+           && r.Autotune.fiss_sketch_candidates = 2
+           && r.Autotune.fiss_sketch_timed = 2
+         else true)
+  | _ ->
+      p "cvu2: stride-2 conv seeds per fission segment (GPU staged on metal; serial+grid on cc)"
+        false);
+  p "cvu2: tuned stride-2 conv matches the untuned twin within tolerance"
+    (Array.for_all2_exn got_u2 want8s2 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)));
+
+  (* --- Row-block flavors on a strided row (gh-ocannl-502 x gh-ocannl-500 x gh-ocannl-485): an
+     unzeroed fission segment proposes the cache-panel flavors too, and a row extent that does not
+     divide the panel pads the row on top of the compaction — a stride-2 row of 12 with an 8-row
+     panel. Every per-segment seed is executed against the natural form: the padded panel's fringe
+     rows read the source past its extent, where [Stage]'s Where-form edge guards must supply the
+     accumulation identity. --- *)
+  let make_conv_s2_r12 sub =
+    let x =
+      NTDSL.init ~l:(sub ^ "x") ~prec:Ir.Ops.single ~b:[ 2 ] ~o:[ 25; 25; 4 ]
+        ~f:(fun idcs -> Float.of_int ((idcs.(0) + idcs.(1) + (2 * idcs.(2)) + (3 * idcs.(3))) % 7))
+        ()
+    in
+    let kern = make_kern sub in
+    let%op y =
+      x +* "...| 2*oh<+kh, 2*ow<+kw, ..ic..; |kh, kw, ..ic.. -> ..oc.. => ...| oh, ow, ..oc.." kern
+    in
+    (x, kern, y)
+  in
+  if on_cpu then (
+    let limits =
+      { (Context.hardware_limits (Context.auto ())) with Ir.Backend_intf.simd_vector_bytes = 16 }
+    in
+    let want12 =
+      let _, _, y = make_conv_s2_r12 "cvs2b_r" in
+      run_plain "cvs2b_ref" y
+    in
+    let seeds = ref [] in
+    (* The seeding target is the unzeroed [`Normal] segment (the conv's [Zero_out] fissions into its
+       own [`Zeros] segment) — the same tuples [Autotune.tune]'s per-segment seeding consumes. A
+       preset that schedules nothing lets the segments coalesce and the preset re-run on the merged
+       whole, so the probe keys on the unzeroed site. *)
+    (let _, _, y = make_conv_s2_r12 "cvs2b_p" in
+     ignore
+       (run_fiss_sched "cvs2b_probe" y ~conv_sched:(fun site seg ->
+            if not site.Autotune.c_zeroed then
+              seeds := Autotune.sketch_seed_params ~is_gpu:false ~is_cpu:true ~limits seg;
+            [])));
+    let run_seed i p_ =
+      let tag = Printf.sprintf "cvs2b_%d" i in
+      let _, _, y = make_conv_s2_r12 tag in
+      let got =
+        run_fiss_sched tag y ~conv_sched:(fun site seg ->
+            if site.Autotune.c_zeroed then [] else Autotune.sketch_schedule ~p:p_ seg)
+      in
+      Array.for_all2_exn got want12 ~f:(fun a b -> Float.(abs (a - b) < 1e-3))
+    in
+    p "cvs2b: the strided non-dividing row seeds a padded row-panel flavor"
+      (List.exists !seeds ~f:(fun s -> s.Autotune.sk_bm = 8)
+      && List.length !seeds = 3
+      && List.for_all !seeds ~f:(fun s -> s.Autotune.sk_conv));
+    p "cvs2b: every per-segment stride-2 candidate matches the natural form within tolerance"
+      (List.for_alli !seeds ~f:run_seed))
+  else (
+    p "cvs2b: the strided non-dividing row seeds a padded row-panel flavor" true;
+    p "cvs2b: every per-segment stride-2 candidate matches the natural form within tolerance" true);
+
   (* === Blocked tile flavors (gh-ocannl-500): the GEMM row is split into [Grid] panels before the
-     reorder — cache-blocked pool panels on the C backends, extra threadgroups per row-block on GPU —
-     and the in-panel micro-kernel is tensorized. Row = 16 so an 8-row block gives two panels; oc =
-     16 and ic = 8 keep the whole-extent intrinsic-tile gates on the tensorized column/reduction.
+     reorder — cache-blocked pool panels on the C backends, extra threadgroups per row-block on GPU
+     — and the in-panel micro-kernel is tensorized. Row = 16 so an 8-row block gives two panels; oc
+     = 16 and ic = 8 keep the whole-extent intrinsic-tile gates on the tensorized column/reduction.
      Dividing blocks only: the split stays guard-free, so the reorder's [Swap]s and (GPU)
      cooperative-load barriers are well-formed. === *)
   let make_x16 tag =
@@ -602,22 +848,23 @@ let () =
     let tz, _lane =
       Sched.tensorize ~i:row_i ~j:site.Autotune.c_oc ~k:site.Autotune.c_red ~simd_width
     in
-    (outer_grid @ [ sp_row ])
-    @ reorder_swaps ~current ~target
-    @ [ stage x.Tensor.value [ row_i; site.Autotune.c_red ];
-        stage kern.Tensor.value [ site.Autotune.c_red; site.Autotune.c_oc ]; tz ]
+    (outer_grid @ [ sp_row ]) @ reorder_swaps ~current ~target
+    @ [
+        stage x.Tensor.value [ row_i; site.Autotune.c_red ];
+        stage kern.Tensor.value [ site.Autotune.c_red; site.Autotune.c_oc ];
+        tz;
+      ]
   in
   (* Constant label across backends (the [.expected] is backend-neutral): the CPU leg uses
      non-shared packing panels, the metal leg cooperative shared tiles at the backend lane width. *)
   let blocked_ok =
-    if on_cpu then (
+    if on_cpu then
       let x, kern, y = make_conv16 "cvb_c" in
       let got =
-        run_fiss_sched "cvb_cpu" y
-          ~conv_sched:(blocked_sched ~shared:false ~simd_width:1 (x, kern))
+        run_fiss_sched "cvb_cpu" y ~conv_sched:(blocked_sched ~shared:false ~simd_width:1 (x, kern))
       in
-      Array.for_all2_exn got want16 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)))
-    else if on_metal then (
+      Array.for_all2_exn got want16 ~f:(fun a b -> Float.(abs (a - b) < 1e-3))
+    else if on_metal then
       let w =
         match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
         | Some m -> m.Ir.Backend_intf.mma_simd_width
@@ -627,7 +874,7 @@ let () =
       let got =
         run_fiss_sched "cvb_gpu" y ~conv_sched:(blocked_sched ~shared:true ~simd_width:w (x, kern))
       in
-      Array.for_all2_exn got want16 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)))
+      Array.for_all2_exn got want16 ~f:(fun a b -> Float.(abs (a - b) < 1e-3))
     else true
   in
   p "cvb: blocked (row-panel) conv pipeline matches the natural form within tolerance" blocked_ok;
@@ -651,8 +898,8 @@ let () =
   let got_b = Context.get_values ctx y.Tensor.value in
   (match !reports with
   | [ r ] ->
-      (* cc per-segment: serial + grid + one row-block panel (bm=8, 16/8=2 panels) = 3.
-         metal per-segment: whole-extent staged + one threadgroup-block (bm=8) = 2. *)
+      (* cc per-segment: serial + grid + one row-block panel (bm=8, 16/8=2 panels) = 3. metal
+         per-segment: whole-extent staged + one threadgroup-block (bm=8) = 2. *)
       p "cvb: blocked flavors seeded per fission segment"
         (if on_metal then r.Autotune.fiss_sketch_candidates = 2
          else if on_cpu then r.Autotune.fiss_sketch_candidates = 3
@@ -683,37 +930,47 @@ let () =
     let _, _, y = make_merged16 "cvmb_r" in
     run_plain "cvmb_ref" y
   in
-  (if on_cpu then (
-     let x, kern, y = make_merged16 "cvmb_g" in
-     let conv_sched (site : Autotune.conv_site) seg =
-       let sp_row, row_o, row_i =
-         Sched.split ~axis:site.Autotune.c_row ~factor:bm ~outer:LL.Serial ~inner:LL.Serial
-       in
-       let current =
-         List.concat_map site.Autotune.c_loops ~f:(fun s ->
-             if Ir.Indexing.equal_symbol s site.Autotune.c_row then [ row_o; row_i ] else [ s ])
-       in
-       let target =
-         List.map site.Autotune.c_outer ~f:fst
-         @ [ row_o ] @ site.Autotune.c_kernel
-         @ [ row_i; site.Autotune.c_oc; site.Autotune.c_red ]
-       in
-       let stage source tile_loops =
-         Sched.Stage
-           { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = false }
-       in
-       let tz, _lane =
-         Sched.tensorize ~i:row_i ~j:site.Autotune.c_oc ~k:site.Autotune.c_red ~simd_width:1
-       in
-       Sched.default_cpu ~min_parallel:1 seg
-       @ (sp_row :: reorder_swaps ~current ~target)
-       @ [ stage x.Tensor.value [ row_i; site.Autotune.c_red ];
-           stage kern.Tensor.value [ site.Autotune.c_red; site.Autotune.c_oc ]; tz ]
-     in
-     let got = run_fiss_sched "cvmb_cpu" y ~conv_sched in
-     p "cvmb: merged-segment blocked conv pipeline matches the natural form within tolerance"
-       (Array.for_all2_exn got want_mb ~f:(fun a b -> Float.(abs (a - b) < 1e-3))))
-   else p "cvmb: merged-segment blocked conv pipeline matches the natural form within tolerance" true);
+  if on_cpu then
+    let x, kern, y = make_merged16 "cvmb_g" in
+    let conv_sched (site : Autotune.conv_site) seg =
+      let sp_row, row_o, row_i =
+        Sched.split ~axis:site.Autotune.c_row ~factor:bm ~outer:LL.Serial ~inner:LL.Serial
+      in
+      let current =
+        List.concat_map site.Autotune.c_loops ~f:(fun s ->
+            if Ir.Indexing.equal_symbol s site.Autotune.c_row then [ row_o; row_i ] else [ s ])
+      in
+      let target =
+        List.map site.Autotune.c_outer ~f:fst
+        @ [ row_o ] @ site.Autotune.c_kernel
+        @ [ row_i; site.Autotune.c_oc; site.Autotune.c_red ]
+      in
+      let stage source tile_loops =
+        Sched.Stage
+          {
+            source;
+            tile_loops;
+            shared = false;
+            cooperative = None;
+            hoisted = false;
+            swizzle = false;
+          }
+      in
+      let tz, _lane =
+        Sched.tensorize ~i:row_i ~j:site.Autotune.c_oc ~k:site.Autotune.c_red ~simd_width:1
+      in
+      Sched.default_cpu ~min_parallel:1 seg
+      @ (sp_row :: reorder_swaps ~current ~target)
+      @ [
+          stage x.Tensor.value [ row_i; site.Autotune.c_red ];
+          stage kern.Tensor.value [ site.Autotune.c_red; site.Autotune.c_oc ];
+          tz;
+        ]
+    in
+    let got = run_fiss_sched "cvmb_cpu" y ~conv_sched in
+    p "cvmb: merged-segment blocked conv pipeline matches the natural form within tolerance"
+      (Array.for_all2_exn got want_mb ~f:(fun a b -> Float.(abs (a - b) < 1e-3)))
+  else p "cvmb: merged-segment blocked conv pipeline matches the natural form within tolerance" true;
   clean_cache "conv_tune_cache_merged_blocked";
   let _, _, y = make_merged16 "cvmb_t" in
   let reports = ref [] in
@@ -735,8 +992,7 @@ let () =
          preset [Retype] on the consumed tail nest — fuse-before-annotate). metal: GPU conv seeds
          gated off on multi-companion segments. *)
       p "cvmb: blocked flavor seeded on the merged fission segment"
-        (if on_cpu then
-           r.Autotune.fiss_sketch_candidates = 6 && r.Autotune.fiss_sketch_timed = 6
+        (if on_cpu then r.Autotune.fiss_sketch_candidates = 6 && r.Autotune.fiss_sketch_timed = 6
          else if on_metal then r.Autotune.fiss_sketch_candidates = 0
          else true)
   | _ -> p "cvmb: blocked flavor seeded on the merged fission segment" false);
@@ -765,29 +1021,36 @@ let () =
     let _, _, y = make_merged "cva_r" in
     run_plain "cva_ref" y
   in
-  (if on_cpu then
-     let x, kern, y = make_merged "cva_g" in
-     let conv_sched (site : Autotune.conv_site) seg =
-       let stage source tile_loops =
-         Sched.Stage
-           { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = false }
-       in
-       let tz, _lane =
-         Sched.tensorize ~i:site.Autotune.c_row ~j:site.Autotune.c_oc ~k:site.Autotune.c_red
-           ~simd_width:1
-       in
-       Sched.default_cpu ~min_parallel:1 seg
-       @ reorder_swaps ~current:site.Autotune.c_loops ~target:(conv_target site)
-       @ [
-           stage x.Tensor.value [ site.Autotune.c_row; site.Autotune.c_red ];
-           stage kern.Tensor.value [ site.Autotune.c_red; site.Autotune.c_oc ];
-           tz;
-         ]
-     in
-     let got = run_fiss_sched "cva_gemm" y ~conv_sched in
-     p "cva: aligned-grid conv pipeline on a merged segment matches within tolerance"
-       (Array.for_all2_exn got want_m ~f:(fun a b -> Float.(abs (a - b) < 1e-3)))
-   else p "cva: aligned-grid conv pipeline on a merged segment matches within tolerance" true);
+  if on_cpu then
+    let x, kern, y = make_merged "cva_g" in
+    let conv_sched (site : Autotune.conv_site) seg =
+      let stage source tile_loops =
+        Sched.Stage
+          {
+            source;
+            tile_loops;
+            shared = false;
+            cooperative = None;
+            hoisted = false;
+            swizzle = false;
+          }
+      in
+      let tz, _lane =
+        Sched.tensorize ~i:site.Autotune.c_row ~j:site.Autotune.c_oc ~k:site.Autotune.c_red
+          ~simd_width:1
+      in
+      Sched.default_cpu ~min_parallel:1 seg
+      @ reorder_swaps ~current:site.Autotune.c_loops ~target:(conv_target site)
+      @ [
+          stage x.Tensor.value [ site.Autotune.c_row; site.Autotune.c_red ];
+          stage kern.Tensor.value [ site.Autotune.c_red; site.Autotune.c_oc ];
+          tz;
+        ]
+    in
+    let got = run_fiss_sched "cva_gemm" y ~conv_sched in
+    p "cva: aligned-grid conv pipeline on a merged segment matches within tolerance"
+      (Array.for_all2_exn got want_m ~f:(fun a b -> Float.(abs (a - b) < 1e-3)))
+  else p "cva: aligned-grid conv pipeline on a merged segment matches within tolerance" true;
   clean_cache "conv_tune_cache_aligned";
   let _, _, y = make_merged "cva_t" in
   let reports = ref [] in
@@ -815,8 +1078,7 @@ let () =
            && r.Autotune.epilogue_sketch_candidates = 1
            && r.Autotune.fiss_sketch_candidates = 4
            && r.Autotune.fiss_sketch_timed = 4
-         else
-           r.Autotune.sketch_candidates = 0 && r.Autotune.fiss_sketch_candidates = 0)
+         else r.Autotune.sketch_candidates = 0 && r.Autotune.fiss_sketch_candidates = 0)
   | _ -> p "cva: aligned-grid conv seeded and timed on the merged fission segment" false);
   p "cva: tuned merged conv graph matches the untuned twin within tolerance"
     (Array.for_all2_exn got_m want_m ~f:(fun a b -> Float.(abs (a - b) < 1e-3)))

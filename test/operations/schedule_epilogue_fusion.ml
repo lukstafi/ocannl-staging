@@ -315,10 +315,10 @@ let () =
   (* A fragment store-back left inside a surplus serial loop must be rejected: the relocated tail
      would read partial accumulations. [contract_tensorized_accumulator] now contracts across the
      whole chain of qualifying serial loops (gh-ocannl-501) — the double-split-k shape that used to
-     leave the store-back inside [k_oo] is contracted across, and fusion legitimately succeeds
-     there — so a genuinely partial store-back is hand-built: wrap the marked three-part region in
-     a fresh extent-2 loop the store-back does not index (the graph is never run; only the
-     rejection is pinned). *)
+     leave the store-back inside [k_oo] is contracted across, and fusion legitimately succeeds there
+     — so a genuinely partial store-back is hand-built: wrap the marked three-part region in a fresh
+     extent-2 loop the store-back does not index (the graph is never run; only the rejection is
+     pinned). *)
   let _, _, prod6, mc6 = make_graph () in
   (let transform6 (opt : LL.optimized) =
      let paths = nest_paths opt.LL.llc in
@@ -355,8 +355,8 @@ let () =
            if
              (not !wrapped)
              && List.exists parts ~f:(function
-                | LL.For_loop { axis = LL.Workgroup; _ } -> true
-                | _ -> false)
+               | LL.For_loop { axis = LL.Workgroup; _ } -> true
+               | _ -> false)
            then (
              wrapped := true;
              LL.For_loop

@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 Testing decoder_only (2-layer stack)
 Output shape:
 ((batch

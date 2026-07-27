@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 injective scatter: no neutral-init Zero_out: true
 injective scatter: plain setter (no read-modify-write): true
 non-injective scatter: emits neutral-init Zero_out: true

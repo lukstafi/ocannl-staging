@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 Test 1: chain contraction
 einsum3 = [2 1 4 3]
 binary chain = [2 1 4 3]

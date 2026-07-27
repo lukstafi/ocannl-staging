@@ -28,10 +28,13 @@ module Tn = Ir.Tnode
 module LL = Ir.Low_level
 module Sched = Ir.Schedule
 module Asgns = Ir.Assignments
+module Numerics = Ir.Numerics
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
+let () = Numerics.set_policy { tf32_matmuls = false }
 let p name b = Stdio.printf "%s: %b\n" name b
 let approx a b = Float.(abs (a - b) < 1e-2)
+let approx_rel a b = Float.(abs (a - b) <= 1e-2 * max 1. (abs b))
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_metal = String.is_substring backend_name ~substring:"metal"
 
@@ -66,12 +69,12 @@ let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
-(* The cross-[k_o] accumulator-residency structural pin (gh-ocannl-480), shared by every staged
-   half leg and backend: the accumulator fragment is loaded once before the serial [k_o] body
-   (bracketed by [body_begin]/[body_end] marker comments) and stored once after it, and the body in
-   between carries update-only MMA steps (with the trailing [barrier] that releases the staged
-   tiles) and no fragment-array load/store of its own. Parity alone cannot see the difference — both
-   the resident and the per-[k_o] forms are correct — so the pin is on the emitted source. *)
+(* The cross-[k_o] accumulator-residency structural pin (gh-ocannl-480), shared by every staged half
+   leg and backend: the accumulator fragment is loaded once before the serial [k_o] body (bracketed
+   by [body_begin]/[body_end] marker comments) and stored once after it, and the body in between
+   carries update-only MMA steps (with the trailing [barrier] that releases the staged tiles) and no
+   fragment-array load/store of its own. Parity alone cannot see the difference — both the resident
+   and the per-[k_o] forms are correct — so the pin is on the emitted source. *)
 let residency_holds src ~frag_load ~body_begin ~body_end ~frag_store ~barrier =
   match
     ( String.substr_index src ~pattern:frag_load,
@@ -162,6 +165,162 @@ let () =
     let tz, _lane = Sched.tensorize ~i:i_i ~j ~k ~simd_width in
     [ ez; sp_zi; rz; sp_i; tz ]
   in
+
+  (* --- CUDA tf32 policy (gh-ocannl-478): positive and negative execution pins. The policy-off leg
+     is compiled first and must retain the lane-0 scalar fallback with bitwise parity. The policy-on
+     legs must both execute within tf32 tolerance and structurally render wmma tf32; [mma_census] is
+     checked as well so a loosened numeric comparison cannot hide a decline. The k=24 leg is
+     deliberately divisible by tf32's k=8 tile but not the f16/bf16 k=16 tile. The transposed-A leg
+     covers the col-major fragment form retained by [wmma_combo]. --- *)
+  let compile_mma_with_census ?(inspect = fun (_ : LL.optimized) -> ()) ~name tensor =
+    Ir.C_syntax.mma_census := [];
+    Ir.C_syntax.mma_census_enabled := true;
+    let ctx, routine =
+      Exn.protect
+        ~f:(fun () ->
+          let transform opt =
+            inspect opt;
+            Sched.apply (mma_schedule ~out:tensor.Tensor.value opt) opt
+          in
+          Context.compile ~lowered_transform:transform (Context.auto ())
+            (named name (Train.forward tensor))
+            Ir.Indexing.Empty)
+        ~finally:(fun () -> Ir.C_syntax.mma_census_enabled := false)
+    in
+    let census = List.rev_map !Ir.C_syntax.mma_census ~f:snd in
+    let ctx = Context.run ctx routine in
+    (Context.get_values ctx tensor.Tensor.value, census)
+  in
+  let compile_serial ~name tensor =
+    let ctx, routine =
+      Context.compile
+        ~lowered_transform:(fun opt -> opt)
+        (Context.auto ())
+        (named name (Train.forward tensor))
+        Ir.Indexing.Empty
+    in
+    let ctx = Context.run ctx routine in
+    Context.get_values ctx tensor.Tensor.value
+  in
+  let tf32_inputs ~tag ~k =
+    let av =
+      Array.init (n * k) ~f:(fun x ->
+          ((Float.of_int (x % 23) -. 11.) *. 0.03125) +. (Float.of_int (x % 3) *. 0.0007))
+    in
+    let bv =
+      Array.init (k * n) ~f:(fun x ->
+          ((Float.of_int (x % 19) -. 9.) *. 0.046875) -. (Float.of_int (x % 5) *. 0.0003))
+    in
+    ( TDSL.ndarray av ~label:[ tag ^ "a" ] ~input_dims:[ k ] ~output_dims:[ n ] (),
+      TDSL.ndarray bv ~label:[ tag ^ "b" ] ~input_dims:[ n ] ~output_dims:[ k ] () )
+  in
+  let tf32_limits =
+    {
+      Ir.Backend_intf.no_hardware_limits with
+      mma =
+        Some
+          {
+            Ir.Backend_intf.mma_simd_width = 32;
+            mma_tile = (16, 16, 16);
+            mma_format_tiles =
+              [ ((Ir.Backend_intf.Mma_tf32, Ir.Backend_intf.Mma_tf32), (16, 16, 8)) ];
+          };
+    }
+  in
+  let tf32_mma_seeded opt =
+    List.exists (Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits:tf32_limits opt)
+      ~f:(fun p -> p.Autotune.sk_mma)
+  in
+  if String.is_substring backend_name ~substring:"cuda" then (
+    let a_off, b_off = tf32_inputs ~tag:"tf32_off_" ~k:n in
+    let%op c_off_serial = a_off * b_off in
+    let%op c_off_mma = a_off * b_off in
+    Numerics.set_policy { tf32_matmuls = false };
+    let want_off = compile_serial ~name:"mm_tf32_off_serial" c_off_serial in
+    let off_seeded = ref false in
+    let got_off, census_off =
+      compile_mma_with_census
+        ~inspect:(fun opt -> off_seeded := tf32_mma_seeded opt)
+        ~name:"mm_tf32_off_mma" c_off_mma
+    in
+    let src_off = read_generated "mm_tf32_off_mma" in
+    p "tf32 policy-off matmul matches the serial twin bitwise"
+      (Array.for_all2_exn got_off want_off ~f:Float.equal);
+    p "tf32 policy-off renders and records the scalar fallback"
+      (List.for_all census_off ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_scalar_fallback)
+      && (not (List.is_empty census_off))
+      && Option.value_map src_off ~default:false ~f:(fun src ->
+          String.is_substring src ~substring:"== 0)"
+          && (not (String.is_substring src ~substring:"(wmma-tf32)"))
+          && not (String.is_substring src ~substring:"precision::tf32")));
+    p "tf32 policy-off autotune omits tensorized candidates" (not !off_seeded);
+
+    Numerics.set_policy { tf32_matmuls = true };
+    let a_on, b_on = tf32_inputs ~tag:"tf32_on_" ~k:n in
+    let%op c_on_serial = a_on * b_on in
+    let%op c_on_mma = a_on * b_on in
+    let want_on = compile_serial ~name:"mm_tf32_on_serial" c_on_serial in
+    let got_on, census_on = compile_mma_with_census ~name:"mm_tf32_on_mma" c_on_mma in
+    let src_on = read_generated "mm_tf32_on_mma" in
+    p "tf32 policy-on matmul matches the serial twin within tolerance"
+      (Array.for_all2_exn got_on want_on ~f:approx_rel);
+    p "tf32 policy-on renders and records wmma tf32"
+      (List.for_all census_on ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
+      && (not (List.is_empty census_on))
+      && Option.value_map src_on ~default:false ~f:(fun src ->
+          String.is_substring src ~substring:"(wmma-tf32)"
+          && String.is_substring src ~substring:"precision::tf32"
+          && String.is_substring src ~substring:"__float_to_tf32"));
+
+    let a_k24, b_k24 = tf32_inputs ~tag:"tf32_k24_" ~k:24 in
+    let%op c_k24_serial = a_k24 * b_k24 in
+    let%op c_k24_mma = a_k24 * b_k24 in
+    let want_k24 = compile_serial ~name:"mm_tf32_k24_serial" c_k24_serial in
+    let k24_seeded = ref false in
+    let got_k24, census_k24 =
+      compile_mma_with_census
+        ~inspect:(fun opt -> k24_seeded := tf32_mma_seeded opt)
+        ~name:"mm_tf32_k24_mma" c_k24_mma
+    in
+    p "tf32 k=24 divergent tile matches and emits"
+      (Array.for_all2_exn got_k24 want_k24 ~f:approx_rel
+      && List.exists census_k24 ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
+      && Option.value_map (read_generated "mm_tf32_k24_mma") ~default:false ~f:(fun src ->
+          String.is_substring src ~substring:"tile_mma 16x32x24 (wmma-tf32)"));
+    p "tf32 k=24 autotune seeds tensorized candidates" !k24_seeded;
+
+    let atv =
+      Array.init (n * n) ~f:(fun x ->
+          ((Float.of_int (x % 17) -. 8.) *. 0.0625) +. (Float.of_int (x % 7) *. 0.0002))
+    in
+    let btv =
+      Array.init (n * n) ~f:(fun x ->
+          ((Float.of_int (x % 13) -. 6.) *. 0.078125) -. (Float.of_int (x % 3) *. 0.0004))
+    in
+    let at = TDSL.ndarray atv ~label:[ "tf32_at" ] ~output_dims:[ n; n ] () in
+    let bt = TDSL.ndarray btv ~label:[ "tf32_bt" ] ~output_dims:[ n; n ] () in
+    let%op ct_serial = at +* "ki;kj=>ij" bt in
+    let%op ct_mma = at +* "ki;kj=>ij" bt in
+    let want_t = compile_serial ~name:"mm_tf32_ta_serial" ct_serial in
+    let got_t, census_t = compile_mma_with_census ~name:"mm_tf32_ta_mma" ct_mma in
+    p "tf32 transposed-A matmul matches and emits"
+      (Array.for_all2_exn got_t want_t ~f:approx_rel
+      && List.exists census_t ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
+      && Option.value_map (read_generated "mm_tf32_ta_mma") ~default:false ~f:(fun src ->
+          String.is_substring src ~substring:"matrix_a, 16, 16, 8"
+          && String.is_substring src ~substring:"col_major"
+          && String.is_substring src ~substring:"(wmma-tf32)"));
+    Numerics.set_policy { tf32_matmuls = false })
+  else (
+    p "tf32 policy-off matmul matches the serial twin bitwise" true;
+    p "tf32 policy-off renders and records the scalar fallback" true;
+    p "tf32 policy-off autotune omits tensorized candidates" true;
+    p "tf32 policy-on matmul matches the serial twin within tolerance" true;
+    p "tf32 policy-on renders and records wmma tf32" true;
+    p "tf32 k=24 divergent tile matches and emits" true;
+    p "tf32 k=24 autotune seeds tensorized candidates" true;
+    p "tf32 transposed-A matmul matches and emits" true);
+
   let%op mc1 = ma * mb in
   let mma_comp = named "mm_mma" (Train.forward mc1) in
   let transform opt = Sched.apply (mma_schedule ~out:mc1.Tensor.value opt) opt in
@@ -515,61 +674,60 @@ let () =
     p "staged+tensorized structure as expected" true);
 
   (* --- The staged + tensorized composition at half precision, accumulated in f32: the leg that
-     pins the cross-[k_o] accumulator residency (gh-ocannl-480) on the tensor-core backends. The
-     f32 staged leg above cannot see it on CUDA/HIP (wmma has no uniform-f32 combination, so it
-     declines to the scalar fallback); with f16 operands the marked accumulator renders as a
-     fragment array loaded from [d] once before the serial [k_o] body and stored once after it,
-     the body containing update-only MMA steps — Metal through [simdgroup_half8x8], CUDA through
-     wmma accumulator fragments. The inputs are the exact-in-f16 values of the mm_h case, and
-     every partial sum is also exact in f32, so parity with the half serial twin is bitwise on
-     every backend and either rendering path. --- *)
+     pins the cross-[k_o] accumulator residency (gh-ocannl-480) on the tensor-core backends. The f32
+     staged leg above cannot see it on CUDA/HIP (wmma has no uniform-f32 combination, so it declines
+     to the scalar fallback); with f16 operands the marked accumulator renders as a fragment array
+     loaded from [d] once before the serial [k_o] body and stored once after it, the body containing
+     update-only MMA steps — Metal through [simdgroup_half8x8], CUDA through wmma accumulator
+     fragments. The inputs are the exact-in-f16 values of the mm_h case, and every partial sum is
+     also exact in f32, so parity with the half serial twin is bitwise on every backend and either
+     rendering path. --- *)
   let%op mchs = mah * mbh in
   Tn.update_prec mchs.Tensor.value Ir.Ops.single;
-  (if on_gpu then (
-     let transform_hs opt =
-       Sched.apply
-         (staged_schedule ~out:mchs.Tensor.value ~src_a:mah.Tensor.value ~src_b:mbh.Tensor.value
-            opt)
-         opt
-     in
-     let ctx_d = Context.auto () in
-     let ctx_d, routine_d =
-       Context.compile ~lowered_transform:transform_hs ctx_d
-         (named "mm_h_staged_mma" (Train.forward mchs))
-         Ir.Indexing.Empty
-     in
-     let ctx_d = Context.run ctx_d routine_d in
-     let got_h_staged = Context.get_values ctx_d mchs.Tensor.value in
-     (* Parity is bitwise on CUDA (wmma computes the exactly-rounded dot product for these
-        f16-exact inputs) and on Metal (this mixed f16->f32 combination declines to the exact
-        scalar fallback). On HIP it is only within f32 tolerance: RDNA3's
-        [v_wmma_f32_16x16x16_f16] does not produce the exactly-rounded result (observed max abs
-        diff ~1.3e-7), so the f32 accumulator differs from the f16 serial twin by rounding. The
-        uniform-f16 leg below stays bitwise on every backend. *)
-     let h32_eq =
-       if String.is_substring backend_name ~substring:"hip" then approx else Float.equal
-     in
-     p "staged+tensorized half matmul matches the serial twin"
-       (Array.for_all2_exn got_h_staged got_h_serial ~f:h32_eq);
-     match read_generated "mm_h_staged_mma" with
-     | None -> p "staged+tensorized half fragment residency" false
-     | Some src ->
-         let has s = String.is_substring src ~substring:s in
-         (* f16 operands with an f32 accumulator: the wmma backends (HIP rocWMMA, CUDA wmma) render
-            the marked accumulator as an f32 fragment array resident across [k_o]. Metal's
-            [simdgroup_matrix] is uniform-precision only, so this mixed combination declines there
-            to the scalar fallback — the uniform-f16 leg below is the one that exercises Metal's
-            fragment path. HIP is verified on gfx1151, so its pin is strict; CUDA also accepts the
-            pre-sm_70 lane-0 fallback. *)
-         let ok =
-           if on_metal then has "== 0)"
-           else if String.is_substring backend_name ~substring:"hip" then staged_half_resident src
-           else staged_half_resident src || has "== 0)"
-         in
-         p "staged+tensorized half fragment residency" ok)
-   else (
-     p "staged+tensorized half matmul matches the serial twin" true;
-     p "staged+tensorized half fragment residency" true));
+  if on_gpu then (
+    let transform_hs opt =
+      Sched.apply
+        (staged_schedule ~out:mchs.Tensor.value ~src_a:mah.Tensor.value ~src_b:mbh.Tensor.value opt)
+        opt
+    in
+    let ctx_d = Context.auto () in
+    let ctx_d, routine_d =
+      Context.compile ~lowered_transform:transform_hs ctx_d
+        (named "mm_h_staged_mma" (Train.forward mchs))
+        Ir.Indexing.Empty
+    in
+    let ctx_d = Context.run ctx_d routine_d in
+    let got_h_staged = Context.get_values ctx_d mchs.Tensor.value in
+    (* Parity is bitwise on CUDA (wmma computes the exactly-rounded dot product for these f16-exact
+       inputs) and on Metal (this mixed f16->f32 combination declines to the exact scalar fallback).
+       On HIP it is only within f32 tolerance: RDNA3's [v_wmma_f32_16x16x16_f16] does not produce
+       the exactly-rounded result (observed max abs diff ~1.3e-7), so the f32 accumulator differs
+       from the f16 serial twin by rounding. The uniform-f16 leg below stays bitwise on every
+       backend. *)
+    let h32_eq =
+      if String.is_substring backend_name ~substring:"hip" then approx else Float.equal
+    in
+    p "staged+tensorized half matmul matches the serial twin"
+      (Array.for_all2_exn got_h_staged got_h_serial ~f:h32_eq);
+    match read_generated "mm_h_staged_mma" with
+    | None -> p "staged+tensorized half fragment residency" false
+    | Some src ->
+        let has s = String.is_substring src ~substring:s in
+        (* f16 operands with an f32 accumulator: the wmma backends (HIP rocWMMA, CUDA wmma) render
+           the marked accumulator as an f32 fragment array resident across [k_o]. Metal's
+           [simdgroup_matrix] is uniform-precision only, so this mixed combination declines there to
+           the scalar fallback — the uniform-f16 leg below is the one that exercises Metal's
+           fragment path. HIP is verified on gfx1151, so its pin is strict; CUDA also accepts the
+           pre-sm_70 lane-0 fallback. *)
+        let ok =
+          if on_metal then has "== 0)"
+          else if String.is_substring backend_name ~substring:"hip" then staged_half_resident src
+          else staged_half_resident src || has "== 0)"
+        in
+        p "staged+tensorized half fragment residency" ok)
+  else (
+    p "staged+tensorized half matmul matches the serial twin" true;
+    p "staged+tensorized half fragment residency" true);
 
   (* --- The same staged half composition with a uniform-f16 accumulator (gh-ocannl-480): the leg
      that exercises the same-type accumulator fragment element (half, not f32) on every tensor-core
@@ -578,38 +736,37 @@ let () =
      half serial twin stays bitwise. --- *)
   let%op mchu = mah * mbh in
   Tn.update_prec mchu.Tensor.value Ir.Ops.half;
-  (if on_gpu then (
-     let transform_hu opt =
-       Sched.apply
-         (staged_schedule ~out:mchu.Tensor.value ~src_a:mah.Tensor.value ~src_b:mbh.Tensor.value
-            opt)
-         opt
-     in
-     let ctx_u = Context.auto () in
-     let ctx_u, routine_u =
-       Context.compile ~lowered_transform:transform_hu ctx_u
-         (named "mm_hu_staged_mma" (Train.forward mchu))
-         Ir.Indexing.Empty
-     in
-     let ctx_u = Context.run ctx_u routine_u in
-     let got_hu = Context.get_values ctx_u mchu.Tensor.value in
-     p "staged+tensorized uniform-f16 matmul matches the serial twin bitwise"
-       (Array.for_all2_exn got_hu got_h_serial ~f:Float.equal);
-     match read_generated "mm_hu_staged_mma" with
-     | None -> p "staged+tensorized uniform-f16 fragment residency" false
-     | Some src ->
-         let has s = String.is_substring src ~substring:s in
-         (* Uniform f16->f16 is a valid combination on all three tensor-core backends, so the
-            accumulator fragment stays resident across [k_o] on each. HIP strict (verified on
-            gfx1151); Metal/CUDA also accept the pre-Apple7 / pre-sm_70 lane-0 fallback. *)
-         let ok =
-           if String.is_substring backend_name ~substring:"hip" then staged_half_resident src
-           else staged_half_resident src || has "== 0)"
-         in
-         p "staged+tensorized uniform-f16 fragment residency" ok)
-   else (
-     p "staged+tensorized uniform-f16 matmul matches the serial twin bitwise" true;
-     p "staged+tensorized uniform-f16 fragment residency" true));
+  if on_gpu then (
+    let transform_hu opt =
+      Sched.apply
+        (staged_schedule ~out:mchu.Tensor.value ~src_a:mah.Tensor.value ~src_b:mbh.Tensor.value opt)
+        opt
+    in
+    let ctx_u = Context.auto () in
+    let ctx_u, routine_u =
+      Context.compile ~lowered_transform:transform_hu ctx_u
+        (named "mm_hu_staged_mma" (Train.forward mchu))
+        Ir.Indexing.Empty
+    in
+    let ctx_u = Context.run ctx_u routine_u in
+    let got_hu = Context.get_values ctx_u mchu.Tensor.value in
+    p "staged+tensorized uniform-f16 matmul matches the serial twin bitwise"
+      (Array.for_all2_exn got_hu got_h_serial ~f:Float.equal);
+    match read_generated "mm_hu_staged_mma" with
+    | None -> p "staged+tensorized uniform-f16 fragment residency" false
+    | Some src ->
+        let has s = String.is_substring src ~substring:s in
+        (* Uniform f16->f16 is a valid combination on all three tensor-core backends, so the
+           accumulator fragment stays resident across [k_o] on each. HIP strict (verified on
+           gfx1151); Metal/CUDA also accept the pre-Apple7 / pre-sm_70 lane-0 fallback. *)
+        let ok =
+          if String.is_substring backend_name ~substring:"hip" then staged_half_resident src
+          else staged_half_resident src || has "== 0)"
+        in
+        p "staged+tensorized uniform-f16 fragment residency" ok)
+  else (
+    p "staged+tensorized uniform-f16 matmul matches the serial twin bitwise" true;
+    p "staged+tensorized uniform-f16 fragment residency" true);
 
   (* --- Transposed operand layouts (the gradient-GEMM access patterns): [d[i,j] += at[k,i] *
      b[k,j]] (a stored transposed) and [d[i,j] += a[i,k] * bt[j,k]] (b stored transposed). Tensorize

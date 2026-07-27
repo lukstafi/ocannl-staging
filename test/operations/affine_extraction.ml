@@ -1,6 +1,6 @@
 (* gh-494 waypoint 1: [Ir.Low_level.affine_accesses] — extraction of a program's tensor-node
-   accesses as explicit affine relations, the queryable artifact behind the affine legality
-   queries. The dump covers the statement forms broadly: plain nests, whole-node [Zero_out],
+   accesses as explicit affine relations, the queryable artifact behind the affine legality queries.
+   The dump covers the statement forms broadly: plain nests, whole-node [Zero_out],
    read-modify-write accumulations (the [rmw] reduction-dependence flag), guarded statements,
    dynamic gathers/scatters, and vectorized writes. The tail composes extraction with
    [Affine.pair_conflict]: which loops of the reduction nest admit parallelization — the
@@ -35,7 +35,9 @@ let show_idx = function
   | Idx.Fixed_idx k -> Int.to_string k
   | Idx.Iterator s -> Idx.symbol_ident s
   | Idx.Affine { symbols; offset } ->
-      let terms = List.map symbols ~f:(fun (c, s) -> Printf.sprintf "%d*%s" c (Idx.symbol_ident s)) in
+      let terms =
+        List.map symbols ~f:(fun (c, s) -> Printf.sprintf "%d*%s" c (Idx.symbol_ident s))
+      in
       String.concat ~sep:"+" (terms @ if offset = 0 then [] else [ Int.to_string offset ])
   | Idx.Sub_axis -> "sub"
   | Idx.Concat _ -> "concat"
@@ -100,7 +102,11 @@ let () =
   in
   let guarded =
     (* if G[0] then D[0] = 1 — a conditional (never-definite) write *)
-    LL.If { cond = (get g [| Idx.Fixed_idx 0 |], sp); body = LL.Set { tn = d; idcs = [| Idx.Fixed_idx 0 |]; llsc = LL.Constant 1.; debug = "" } }
+    LL.If
+      {
+        cond = (get g [| Idx.Fixed_idx 0 |], sp);
+        body = LL.Set { tn = d; idcs = [| Idx.Fixed_idx 0 |]; llsc = LL.Constant 1.; debug = "" };
+      }
   in
   let gather =
     (* for i3: E[i3] = A[I[i3]][0] — dynamic gather *)
@@ -120,9 +126,7 @@ let () =
            debug = "";
          })
   in
-  let program =
-    LL.unflat_lines [ LL.Zero_out s; pointwise; reduction; guarded; gather ]
-  in
+  let program = LL.unflat_lines [ LL.Zero_out s; pointwise; reduction; guarded; gather ] in
   Stdio.printf "=== affine_accesses dump ===\n";
   let accesses = LL.affine_accesses program in
   List.iter accesses ~f:show;
@@ -145,13 +149,12 @@ let () =
           List.filter_map nest_accs ~f:(fun y ->
               if (x.Aff.a_write || y.Aff.a_write) && x.Aff.a_tn.Tn.uid = y.Aff.a_tn.Tn.uid then
                 Some
-                  (Aff.pair_conflict ~range ~dup_left:dup ~dup_right:dup ~pairs:[ (sym, sym) ]
+                  (Aff.pair_conflict ~range ~dup_left:dup ~dup_right:dup
+                     ~pairs:[ (sym, sym) ]
                      ~left:x.Aff.a_map ~right:y.Aff.a_map)
               else None))
     in
-    let safe =
-      List.for_all verdicts ~f:(function Aff.Cross_thread _ -> false | _ -> true)
-    in
+    let safe = List.for_all verdicts ~f:(function Aff.Cross_thread _ -> false | _ -> true) in
     Stdio.printf "%s %s parallelizable: %b\n" (Idx.symbol_ident sym) name safe
   in
   check_par "(map axis)" i2;

@@ -108,7 +108,7 @@ let auto () =
       try create_from_backend_name ~device_id:0 backend_name
       with _ -> invalid_arg ("Unknown backend: " ^ backend_name))
 
-let compile ?lowered_transform ?lowered_transforms ctx comp bindings =
+let compile ?name ?lowered_transform ?lowered_transforms ctx comp bindings =
   (* Compile and link on the wrapped backend context; only backend-independent routine components
      (and, via [with_backend]'s rebuilt constructor, the updated context) escape the dispatch. *)
   let wrapped, (task, lowered_bindings, name, backend_inputs, backend_outputs) =
@@ -123,8 +123,8 @@ let compile ?lowered_transform ?lowered_transforms ctx comp bindings =
             bctx
           ->
             let code =
-              Backend.compile ?lowered_transform ?lowered_transforms bctx.BI.optimize_ctx bindings
-                comp
+              Backend.compile ?name ?lowered_transform ?lowered_transforms bctx.BI.optimize_ctx
+                bindings comp
             in
             let r = Backend.link bctx code in
             (r.BI.context, (r.BI.schedule, r.BI.bindings, r.BI.name, r.BI.inputs, r.BI.outputs)));
@@ -303,7 +303,8 @@ let mark_initialized ctx nodes =
 let host_buffer (tn : Tn.t) =
   Nd.create_array
     ~debug:("Context host buffer for " ^ Tn.debug_name tn)
-    (Lazy.force tn.Tn.prec) ~dims:(Lazy.force tn.Tn.dims) ~padding:(Lazy.force tn.Tn.padding)
+    (Lazy.force tn.Tn.storage_prec) ~dims:(Lazy.force tn.Tn.dims)
+    ~padding:(Lazy.force tn.Tn.padding)
 
 (** Whether [tn] has a device buffer allocated in this context. *)
 let mem ctx (tn : Tn.t) : bool =

@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 fission_scheduled splits the chain into two normal segments: true
 fissioned segments through lowered_transforms compute correctly: true
 hand-crafted fissioned entry hits the cache: true

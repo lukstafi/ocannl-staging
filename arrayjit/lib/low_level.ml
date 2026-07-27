@@ -168,11 +168,11 @@ and scalar_arg = scalar_t * Ops.prec [@@deriving sexp_of, equal, compare]
 
 (** Extract the precision from a scalar value by examining its origin tensor node *)
 let scalar_precision = function
-  | Get (tn, _) -> Lazy.force tn.Tn.prec
-  | Get_dynamic { tn; _ } -> Lazy.force tn.Tn.prec
-  | Get_merge_buffer (tn, _) -> Lazy.force tn.Tn.prec
-  | Get_local { tn; _ } -> Lazy.force tn.Tn.prec
-  | Local_scope { id; _ } -> Lazy.force id.tn.Tn.prec
+  | Get (tn, _) -> Lazy.force tn.Tn.storage_prec
+  | Get_dynamic { tn; _ } -> Lazy.force tn.Tn.storage_prec
+  | Get_merge_buffer (tn, _) -> Lazy.force tn.Tn.storage_prec
+  | Get_local { tn; _ } -> Lazy.force tn.Tn.storage_prec
+  | Local_scope { id; _ } -> Lazy.force id.tn.Tn.storage_prec
   | Constant _ ->
       (* Single is the most widely supported precision, so we use it as the default. *)
       Ops.single
@@ -332,13 +332,19 @@ type optimized = {
           [simdgroup_matrix] fragments; scalar fallback backends retain the local-array meaning. *)
   swizzled : Set.M(Tnode).t;
       (** Nodes stored in an XOR-swizzled layout (docs/proposals/tensorize-mma.md, "Swizzled
-          staging"): codegen remaps every element access [flat = P*C + col] (with [C] the minor
-          dim, [P] the linearized prefix) to [P*C + (col lxor (P land (C-1)))] — a bijection on the
+          staging"): codegen remaps every element access [flat = P*C + col] (with [C] the minor dim,
+          [P] the linearized prefix) to [P*C + (col lxor (P land (C-1)))] — a bijection on the
           buffer, so the IR-level semantics are unchanged; only the physical layout differs,
           spreading same-column accesses across shared-memory banks. Populated by
           [Schedule.Stage ~swizzle:true]; requires at least 2 axes and a power-of-two minor dim.
           Renderings that assume a row-major layout (vectorized/contiguous multi-element accesses,
           tile-MMA intrinsic and register-tiled paths) must decline swizzled nodes. *)
+  zero_fringe : Set.M(Tnode).t;
+      (** Schedule-minted staged tiles whose whole index space is safe to read: slots outside the
+          staged source region (edge tiles of a non-dividing or padded staging, gh-ocannl-485) hold
+          0 — the add-reduce accumulation identity — written by the load nest's [Where]-form edge
+          guards or by the host-side constant packing. [Schedule.Tensorize] consults this to
+          discharge pad guards on the intrinsic path. *)
 }
 [@@deriving sexp_of]
 
@@ -567,9 +573,9 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits ~rea
   in
   (* [loop_ranges] maps each enclosing loop's index symbol to its full trip count; at a setter, the
      fiber cardinality of the LHS map over that box — the product over symbols absent from the LHS
-     indices — is the recompute cost (per read site) of inlining that setter's computation
-     (gh-494: {!Affine.fiber_cardinality}; the exact-vs-lower-bound distinction is not needed here,
-     the absent-symbol product is the cost either way). *)
+     indices — is the recompute cost (per read site) of inlining that setter's computation (gh-494:
+     {!Affine.fiber_cardinality}; the exact-vs-lower-bound distinction is not needed here, the
+     absent-symbol product is the cost either way). *)
   let reduction_extent loop_ranges idcs =
     match Affine.fiber_cardinality ~domain:(Map.to_alist loop_ranges) idcs with
     | `Exact n | `At_least n -> n
@@ -784,8 +790,8 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits ~rea
       then
         (* gh-494 waypoint 2 follow-up: the tracer truncates loops at [max_tracing_dim], so its
            recurrent classification has false positives (e.g. padded-conv intermediates read at
-           affine offsets past the traced write range). The affine containment query is exact:
-           when it proves every read covered by prior in-routine writes, skip the recurrent
+           affine offsets past the traced write range). The affine containment query is exact: when
+           it proves every read covered by prior in-routine writes, skip the recurrent
            pessimization. The override is one-directional — a query decline never introduces a
            recurrence the tracer did not find — and the query is only forced (and only consulted)
            for nodes the tracer actually flags. *)
@@ -1001,6 +1007,129 @@ let%track7_sexp inline_computation ~id (optim_ctx : optimize_ctx) (traced : trac
              [%string
                "Stale optimize_ctx: No computations found for #%{traced.tn.Tn.id#Int}: \
                 %{Tn.debug_name traced.tn}"])
+  in
+  (* gh-509 task 4: a packed-uniform producer ([Set_from_vec]) is inlined via the lane-extract
+     scalar form [vec_convert(counter[flat / lanes]).v[flat mod lanes]], where [flat] is the read
+     cell's flat offset -- bitwise-identical to the vectorized stores (the lane builtins index the
+     same converted block). The value stream depends only on the element index, so a single
+     builder serves every peeled computation (interior and tail write the same stream). The
+     counter is read at a runtime-computed block index ([Get_dynamic]), so it is committed to a
+     materialized placement; its own (inlineable) chain stays virtual inside its setter. *)
+  let set_from_vec_def =
+    List.find_map computations ~f:(fun (_, def) ->
+        let rec find = function
+          | Set_from_vec { tn; idcs; length = _; vec_unop; arg = arg_scalar, _; debug = _ }
+            when Tn.equal tn traced.tn ->
+              Some (idcs, vec_unop, arg_scalar)
+          | For_loop { body; _ } -> find body
+          | Seq (a, b) -> ( match find a with Some _ as r -> r | None -> find b)
+          | _ -> None
+        in
+        find def)
+  in
+  let lane_extract_body (idcs, vec_unop, arg_scalar) : t =
+    (* [Set_from_vec] assumes an unpadded dense target; lowering rejects padded targets, re-check
+       defensively (the flat-offset arithmetic below would be wrong under padding). *)
+    (match Tn.get_padding traced.tn with
+    | None -> ()
+    | Some (pads, _) when Array.for_all pads ~f:(fun p -> p.Ops.left = 0 && p.Ops.right = 0) -> ()
+    | Some _ -> raise @@ Non_virtual 145);
+    let prec = Lazy.force traced.tn.Tn.storage_prec in
+    let lanes = Ops.vec_unop_lanes prec in
+    let dims = Lazy.force traced.tn.Tn.dims in
+    (* Flat row-major offset of an index vector over [dims], as affine terms plus a constant. *)
+    let flat_of arr =
+      if Array.length arr <> Array.length dims then raise @@ Non_virtual 145;
+      let terms = ref [] and offset = ref 0 and stride = ref 1 in
+      for i = Array.length arr - 1 downto 0 do
+        (match arr.(i) with
+        | Indexing.Fixed_idx k -> offset := !offset + (k * !stride)
+        | Indexing.Sub_axis -> ()
+        | Indexing.Iterator s -> terms := (!stride, s) :: !terms
+        | Indexing.Affine { symbols; offset = o } ->
+            offset := !offset + (o * !stride);
+            List.iter symbols ~f:(fun (c, s) -> terms := (c * !stride, s) :: !terms)
+        | Indexing.Concat _ -> raise @@ Non_virtual 145);
+        stride := !stride * dims.(i)
+      done;
+      (Indexing.coalesce_affine_terms !terms, !offset)
+    in
+    (* The producer's flat store offset must be [lanes * counter_iterator] (a single-block target
+       collapses to a constant 0: its dim-1 counter axis has no iterator in the projections). *)
+    let ctr_sym =
+      match flat_of idcs with
+      | [], 0 -> None
+      | [ (c, s) ], 0 when c = lanes -> Some s
+      | _ -> raise @@ Non_virtual 145
+    in
+    let flat_idx =
+      match flat_of call_args with
+      | [], offset -> Indexing.Fixed_idx offset
+      | terms, offset -> Indexing.Affine { symbols = terms; offset }
+    in
+    let iprec = Ops.index_prec () in
+    let flat_sc = Embed_index flat_idx in
+    let lanes_sc = Embed_index (Indexing.Fixed_idx lanes) in
+    let mentions_nonstatic = function
+      | Indexing.Iterator s -> not (Set.mem static_indices s)
+      | Indexing.Affine { symbols; _ } ->
+          List.exists symbols ~f:(fun (_, s) -> not (Set.mem static_indices s))
+      | Indexing.Fixed_idx _ | Indexing.Sub_axis -> false
+      | Indexing.Concat syms -> List.exists syms ~f:(fun s -> not (Set.mem static_indices s))
+    in
+    let ctr_read =
+      match arg_scalar with
+      | Get (ctr, ctr_idcs) ->
+          (* The counter is about to gain a dynamically-indexed read, which recomputation cannot
+             serve: it must stay materialized. Bail out (keeping the uniform result materialized,
+             as before gh-509 task 4) if the counter's placement is already committed the other
+             way. *)
+          (match Tn.Placements.get optim_ctx.placements ctr with
+          | Some ((Virtual | Effectively_constant), _) -> raise @@ Non_virtual 146
+          | _ -> ());
+          let ctr_read =
+            match ctr_sym with
+            | None ->
+                (* Single-block target: the counter read is at static indices; keep the plain
+                   [Get] (cleanup commits the surviving read to [Never_virtual]). *)
+                if Array.exists ctr_idcs ~f:mentions_nonstatic then raise @@ Non_virtual 146;
+                Get (ctr, ctr_idcs)
+            | Some c ->
+                let dyn_positions =
+                  Array.filter_mapi ctr_idcs ~f:(fun i idx ->
+                      match idx with
+                      | Indexing.Iterator s when Indexing.equal_symbol s c -> Some i
+                      | idx when mentions_nonstatic idx -> Some (-1)
+                      | _ -> None)
+                in
+                let dyn_axis =
+                  match Array.to_list dyn_positions with
+                  | [ i ] when i >= 0 -> i
+                  | _ -> raise @@ Non_virtual 146
+                in
+                let idcs' =
+                  Array.mapi ctr_idcs ~f:(fun i idx ->
+                      if i = dyn_axis then Indexing.Fixed_idx 0 else idx)
+                in
+                let block_sc = Binop (Ops.Div, (flat_sc, iprec), (lanes_sc, iprec)) in
+                Get_dynamic { tn = ctr; idcs = idcs'; dyn_axis; dyn_value = (block_sc, iprec) }
+          in
+          Tn.Placements.update optim_ctx.placements ctr Never_virtual 146;
+          ctr_read
+      | _ ->
+          (* Argument is not a plain counter read (e.g. the counter chain was materialized away or
+             the computation is exotic); keep the vector store materialized. *)
+          raise @@ Non_virtual 140
+    in
+    let lane_sc =
+      match ctr_sym with
+      | None -> flat_sc (* Single block: [flat < lanes] already. *)
+      | Some _ -> Binop (Ops.Mod, (flat_sc, iprec), (lanes_sc, iprec))
+    in
+    let lane_op =
+      match vec_unop with Ops.Uint4x32_to_prec_uniform -> Ops.Uint4x32_to_prec_uniform_lane
+    in
+    Set_local (id, Binop (lane_op, (ctr_read, scalar_precision ctr_read), (lane_sc, iprec)))
   in
   (* gh-133 Stage A: a guard's else-branch reads [Get_local id] -- the zero/init local produced by a
      [Zero_out] computation. If the producer has no [Zero_out] (e.g. a surjective producer that was
@@ -1253,7 +1382,7 @@ let%track7_sexp inline_computation ~id (optim_ctx : optimize_ctx) (traced : trac
       | Set { tn; idcs; llsc; debug = _ } when Tn.equal tn traced.tn ->
           assert ([%equal: Indexing.axis_index array option] (Some idcs) def_args);
           let inlined = loop_scalar env llsc in
-          let value_prec = Lazy.force traced.tn.Tn.prec in
+          let value_prec = Lazy.force traced.tn.Tn.storage_prec in
           let index_prec = Ops.index_prec () in
           (* gh-133 Stage A: consistency (equality) guards for repeated / covered single-symbol
              affine positions -- the substituted producer index must equal the call-site index.
@@ -1268,10 +1397,11 @@ let%track7_sexp inline_computation ~id (optim_ctx : optimize_ctx) (traced : trac
                     (Embed_index rhs_ind, index_prec) ))
           in
           (* gh-133 Stage B: range guards -- a unit-solved symbol's value must fall within its
-             producer loop range [0, range). Index precision is UNSIGNED, so the guard must never
-             form a negative intermediate: we compare [rest] and [rhs] (both non-negative) rather
-             than [rhs - rest]. uc=+1: [rest <= rhs] & [rhs < rest+range]; uc=-1: [rhs <= rest] &
-             [rest < rhs+range]. [a <= b] is encoded as [a < b+1]. *)
+             producer loop range [0, range). The guard never forms a negative intermediate: we
+             compare [rest] and [rhs] (both non-negative) rather than [rhs - rest]. uc=+1:
+             [rest <= rhs] & [rhs < rest+range]; uc=-1: [rhs <= rest] & [rest < rhs+range] -- one
+             canonical shape per role, a direct [Cmple] lower bound and a strict [Cmplt] upper
+             bound. *)
           let add_offset (idx : Indexing.axis_index) d : Indexing.axis_index =
             if d = 0 then idx
             else
@@ -1282,15 +1412,14 @@ let%track7_sexp inline_computation ~id (optim_ctx : optimize_ctx) (traced : trac
               | Indexing.Fixed_idx i -> Indexing.Fixed_idx (i + d)
               | Indexing.Sub_axis | Indexing.Concat _ -> idx
           in
-          let lt a b =
-            Binop (Ops.Cmplt, (Embed_index a, index_prec), (Embed_index b, index_prec))
-          in
+          let cmp op a b = Binop (op, (Embed_index a, index_prec), (Embed_index b, index_prec)) in
+          let le = cmp Ops.Cmple and lt = cmp Ops.Cmplt in
           let range_conds =
             List.map range_guards ~f:(fun (uc, rest_axis, rhs_axis, range) ->
                 let rest = subst env rest_axis and rhs = subst env rhs_axis in
                 let lower, upper =
-                  if uc >= 0 then (lt rest (add_offset rhs 1), lt rhs (add_offset rest range))
-                  else (lt rhs (add_offset rest 1), lt rest (add_offset rhs range))
+                  if uc >= 0 then (le rest rhs, lt rhs (add_offset rest range))
+                  else (le rhs rest, lt rest (add_offset rhs range))
                 in
                 Binop (Ops.And, (lower, index_prec), (upper, index_prec)))
           in
@@ -1319,7 +1448,8 @@ let%track7_sexp inline_computation ~id (optim_ctx : optimize_ctx) (traced : trac
       | Set_from_vec { tn; idcs; length = _; vec_unop = _; arg = _; debug = _ }
         when Tn.equal tn traced.tn ->
           assert ([%equal: Indexing.axis_index array option] (Some idcs) def_args);
-          (* For vector operations, we cannot inline them as scalar operations *)
+          (* Unreachable since gh-509 task 4: computations containing a [Set_from_vec] setter of
+             this node are diverted to [lane_extract_body] before the generic path. *)
           raise @@ Non_virtual 140
       | Zero_out _ -> None
       | Set _ -> None
@@ -1374,18 +1504,22 @@ let%track7_sexp inline_computation ~id (optim_ctx : optimize_ctx) (traced : trac
     | None -> None
   in
   try
-    let body = List.rev_filter_map ~f:loop_proc computations in
-    if List.is_empty body then raise @@ Non_virtual 14
-    else
-      (* Prepend a single init local when any component computation has guards but the producer has
-         no [Zero_out] to supply the initial value. For multi-computation nodes (Block/Concat) this
-         emits exactly one reset rather than one per component, so each component's guarded update
-         sees the preceding component's value via [Get_local id] rather than 0. *)
-      let body =
-        if !global_needs_init && not has_zero_init then Set_local (id, Constant 0.0) :: body
-        else body
-      in
-      Some (unflat_lines body)
+    match set_from_vec_def with
+    | Some def -> Some (lane_extract_body def)
+    | None ->
+        let body = List.rev_filter_map ~f:loop_proc computations in
+        if List.is_empty body then raise @@ Non_virtual 14
+        else
+          (* Prepend a single init local when any component computation has guards but the producer
+             has no [Zero_out] to supply the initial value. For multi-computation nodes
+             (Block/Concat) this emits exactly one reset rather than one per component, so each
+             component's guarded update sees the preceding component's value via [Get_local id]
+             rather than 0. *)
+          let body =
+            if !global_needs_init && not has_zero_init then Set_local (id, Constant 0.0) :: body
+            else body
+          in
+          Some (unflat_lines body)
   with Non_virtual i ->
     Tn.Placements.update optim_ctx.placements traced.tn Never_virtual i;
     None
@@ -1402,6 +1536,19 @@ let rec unroll_pow ~(base : scalar_t) ~(exp : int) : scalar_t =
     Fn.apply_n_times ~n:(exp - 1)
       (fun accu -> Binop (Mul, (base, scalar_precision base), (accu, scalar_precision accu)))
       base
+
+(* gh-509 task 4: packed-uniform ([Set_from_vec]) producers are stored RAW -- without the phase-1
+   rewriting that inlines virtual providers into the argument -- so that [inline_computation]'s
+   lane-extract builder sees the argument as a plain [Get] of the counter tensor (which it turns
+   into a dynamically-indexed read of block [flat / lanes]). The stored computation of such a node
+   is consumed exclusively by the lane-extract builder, so skipping the rewrite loses nothing; the
+   phase-2 emitted statement (used when the node stays materialized) is rewritten as before. *)
+let rec proc_contains_set_from_vec tn = function
+  | Set_from_vec { tn = tn2; _ } -> Tn.equal tn tn2
+  | For_loop { body; _ } -> proc_contains_set_from_vec tn body
+  | Seq (a, b) -> proc_contains_set_from_vec tn a || proc_contains_set_from_vec tn b
+  | If { body; _ } -> proc_contains_set_from_vec tn body
+  | _ -> false
 
 let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_indices (llc : t) :
     t =
@@ -1456,12 +1603,16 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
                   let node : traced_array = get_node traced_store tn in
                   let store_pf = List.fold (List.drop candidates k) ~init:process_for ~f:Set.add in
                   let stored =
-                    For_loop
-                      {
-                        for_config with
-                        body =
-                          loop_proc ~process_for:store_pf ~owned:owned' ~in_storage_pass:true body;
-                      }
+                    (* gh-509 task 4: vector-store producers are stored raw, see
+                       [proc_contains_set_from_vec]. *)
+                    if proc_contains_set_from_vec tn body then For_loop { for_config with body }
+                    else
+                      For_loop
+                        {
+                          for_config with
+                          body =
+                            loop_proc ~process_for:store_pf ~owned:owned' ~in_storage_pass:true body;
+                        }
                   in
                   check_and_store_virtual optim_ctx node static_indices stored);
               (* Phase 2 -- emit. Candidates are NOT in [process_for], so surviving readers
@@ -1518,7 +1669,10 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
           (not @@ Set.mem process_for tn)
           && (not @@ Set.mem owned tn)
           && (not @@ Tn.Placements.known_non_virtual plc traced.tn)
-        then check_and_store_virtual optim_ctx traced static_indices result;
+        then
+          (* gh-509 task 4: store the raw statement (argument not rewritten), see
+             [proc_contains_set_from_vec]. The emitted statement remains [result]. *)
+          check_and_store_virtual optim_ctx traced static_indices llc;
         result
     | Set_local (id, llsc) -> Set_local (id, loop_scalar ~process_for ~owned ~in_storage_pass llsc)
     | Declare_local _ -> llc
@@ -1843,7 +1997,7 @@ let interval_of_index ienv (idx : Indexing.axis_index) : Interval.t =
    bounds candidate when one exists. The node becomes a source only when the candidate actually
    narrows -- folds justified by the dtype range alone are static facts requiring no settlement. *)
 let interval_of_node ~prec (tn : Tn.t) : interval_result =
-  let stored_prec = Lazy.force tn.Tn.prec in
+  let stored_prec = Lazy.force tn.Tn.storage_prec in
   let dtype = Interval.dtype_range stored_prec in
   let ival, srcs =
     match Tn.bounds_candidate tn with
@@ -1919,6 +2073,7 @@ and interval_of_uncached ~ienv ~(prec : Ops.prec) (llsc : scalar_t) : interval_r
           let b = r2 () in
           { ival = at (Interval.join Interval.false_ b.ival); srcs = b.srcs }
       | Ops.Cmplt -> cmp Interval.cmplt_decides
+      | Ops.Cmple -> cmp Interval.cmple_decides
       | Ops.Cmpeq -> cmp Interval.cmpeq_decides
       | Ops.Cmpne -> cmp (fun a b -> Option.map (Interval.cmpeq_decides a b) ~f:not)
       | Ops.And ->
@@ -1935,7 +2090,9 @@ and interval_of_uncached ~ienv ~(prec : Ops.prec) (llsc : scalar_t) : interval_r
           else if Interval.definitely_false a.ival && Interval.definitely_false b.ival then
             decided ~srcs:(Set.union a.srcs b.srcs) false
           else bool_undecided
-      | Ops.ToPowOf | Ops.Threefry4x32_crypto | Ops.Threefry4x32_light -> pure Interval.top)
+      | Ops.ToPowOf | Ops.Threefry4x32_crypto | Ops.Threefry4x32_light
+      | Ops.Uint4x32_to_prec_uniform_lane ->
+          pure Interval.top)
   | Ternop (op, ((v1, p1) as _a1), (v2, _), (v3, _)) -> (
       match op with
       | Ops.Where ->
@@ -2000,7 +2157,7 @@ let settle_srcs { srcs; _ } = Set.iter srcs ~f:Tn.settle_bounds
    construction. *)
 let try_interval_fold ~ienv ~prec (llsc : scalar_t) : scalar_t option =
   match llsc with
-  | Binop ((Ops.Cmplt | Ops.Cmpeq | Ops.Cmpne | Ops.And | Ops.Or), _, _) ->
+  | Binop ((Ops.Cmplt | Ops.Cmple | Ops.Cmpeq | Ops.Cmpne | Ops.And | Ops.Or), _, _) ->
       let r = interval_of ~ienv ~prec llsc in
       if Interval.is_singleton r.ival then (
         settle_srcs r;
@@ -2033,7 +2190,7 @@ let simplify_llc static_indices llc =
           }
     | Zero_out _ -> llc
     | Set { tn; idcs; llsc; debug } ->
-        Set { tn; idcs; llsc = fst (loop_scalar (llsc, Lazy.force tn.Tn.prec)); debug }
+        Set { tn; idcs; llsc = fst (loop_scalar (llsc, Lazy.force tn.Tn.storage_prec)); debug }
     | Set_dynamic { tn; idcs; dyn_axis; dyn_value; llsc; debug } ->
         (* gh-466: reached via [Schedule.apply]'s simplify of post-rewrite code. The scatter itself
            is never folded; its index value and RHS are. *)
@@ -2043,12 +2200,13 @@ let simplify_llc static_indices llc =
             idcs;
             dyn_axis;
             dyn_value = loop_scalar dyn_value;
-            llsc = fst (loop_scalar (llsc, Lazy.force tn.Tn.prec));
+            llsc = fst (loop_scalar (llsc, Lazy.force tn.Tn.storage_prec));
             debug;
           }
     | Set_from_vec { tn; idcs; length; vec_unop; arg; debug } ->
         Set_from_vec { tn; idcs; length; vec_unop; arg = loop_scalar arg; debug }
-    | Set_local (id, llsc) -> Set_local (id, fst (loop_scalar (llsc, Lazy.force id.tn.Tn.prec)))
+    | Set_local (id, llsc) ->
+        Set_local (id, fst (loop_scalar (llsc, Lazy.force id.tn.Tn.storage_prec)))
     | Declare_local _ -> llc
     | Comment _ -> llc
     | Staged_compilation _ -> llc
@@ -2085,25 +2243,26 @@ let simplify_llc static_indices llc =
     match llsc' with
     | Constant _ -> (llsc, prec)
     | Constant_bits _ -> (llsc, prec)
-    | Get (tn, _indices) -> (llsc, Lazy.force tn.Tn.prec)
+    | Get (tn, _indices) -> (llsc, Lazy.force tn.Tn.storage_prec)
     | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, vprec } ->
         (* gh-343: defensive -- simplify runs before the one-hot rewrite, so this is unreachable in
            practice; still simplify the dynamic index sub-expression and never fold to a
            constant. *)
         let v', vprec' = loop_scalar (v, vprec) in
-        (Get_dynamic { tn; idcs; dyn_axis; dyn_value = (v', vprec') }, Lazy.force tn.Tn.prec)
+        (Get_dynamic { tn; idcs; dyn_axis; dyn_value = (v', vprec') }, Lazy.force tn.Tn.storage_prec)
     | Local_scope { id; body = Set_local (id2, v); _ } when equal_scope_id id id2 ->
         ignore (Lazy.force id.tn.Tn.dims);
-        loop_scalar (v, Lazy.force id.tn.Tn.prec)
+        loop_scalar (v, Lazy.force id.tn.Tn.storage_prec)
     | Local_scope { id; body = Seq (Set_local (id1, v1), Set_local (id2, v2)); _ }
       when equal_scope_id id id1 && equal_scope_id id id2 ->
         ignore (Lazy.force id.tn.Tn.dims);
         let result = substitute_float ~var:(Get_local id) ~value:v1 v2 in
-        loop_scalar (result, Lazy.force id.tn.Tn.prec)
+        loop_scalar (result, Lazy.force id.tn.Tn.storage_prec)
     | Local_scope opts ->
-        (Local_scope { opts with body = loop_proc local_scope_body }, Lazy.force opts.id.tn.Tn.prec)
-    | Get_local id -> (llsc, Lazy.force id.tn.Tn.prec)
-    | Get_merge_buffer (tn, _) -> (llsc, Lazy.force tn.Tn.prec)
+        ( Local_scope { opts with body = loop_proc local_scope_body },
+          Lazy.force opts.id.tn.Tn.storage_prec )
+    | Get_local id -> (llsc, Lazy.force id.tn.Tn.storage_prec)
+    | Get_merge_buffer (tn, _) -> (llsc, Lazy.force tn.Tn.storage_prec)
     | Embed_index (Fixed_idx i) -> (Constant (Float.of_int i), prec)
     | Embed_index Sub_axis -> (Constant 0., prec)
     | Embed_index (Iterator _) -> (llsc, prec)
@@ -2111,7 +2270,8 @@ let simplify_llc static_indices llc =
     | Embed_index (Concat _) -> (llsc, prec) (* Cannot simplify concat to constants *)
     | Binop (Arg1, (llv1, prec1), _) -> loop_scalar (llv1, prec1)
     | Binop (Arg2, _, (llv2, prec2)) -> loop_scalar (llv2, prec2)
-    | Binop ((Threefry4x32_crypto | Threefry4x32_light), _, _) -> (llsc, prec)
+    | Binop ((Threefry4x32_crypto | Threefry4x32_light | Uint4x32_to_prec_uniform_lane), _, _) ->
+        (llsc, prec)
     | Binop (op, (Constant c1, prec1), (Constant c2, prec2)) ->
         (Constant (Ops.interpret_binop op c1 c2), Ops.promote_prec prec1 prec2)
     | Binop (Add, (llsc, prec1), (Constant 0., _))
@@ -2249,7 +2409,7 @@ let simplify_llc static_indices llc =
   let check_constant tn c =
     (* Prevent triggering over-eager guard against forcing precision. *)
     ignore (Lazy.force tn.Tn.dims);
-    if Ops.exceeds_fp16_cutoff c && Ops.is_up_to_fp16 (Lazy.force tn.Tn.prec) then
+    if Ops.exceeds_fp16_cutoff c && Ops.is_up_to_fp16 (Lazy.force tn.Tn.storage_prec) then
       raise
       @@ Utils.User_error
            ("Constant " ^ Float.to_string c
@@ -3244,9 +3404,8 @@ let loop_bounds (llc : t) : (Indexing.symbol * (int * int)) list =
   go llc;
   List.rev !acc
 
-(* Loop symbols a scalar expression's value depends on, syntactically, resolving scalar
-   scope-locals through [locals] — accumulated per-scope-id assignment symbols (see
-   {!scope_value_syms}). *)
+(* Loop symbols a scalar expression's value depends on, syntactically, resolving scalar scope-locals
+   through [locals] — accumulated per-scope-id assignment symbols (see {!scope_value_syms}). *)
 let rec scalar_value_syms ~(locals : (int, Indexing.symbol list) Hashtbl.t) (llsc : scalar_t) :
     Indexing.symbol list =
   let idx_syms (idx : Indexing.axis_index) =
@@ -3272,8 +3431,7 @@ let rec scalar_value_syms ~(locals : (int, Indexing.symbol list) Hashtbl.t) (lls
 and body_value_syms ~locals (llc : t) : Indexing.symbol list =
   let scalar_syms = scalar_value_syms ~locals in
   match llc with
-  | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
-      []
+  | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ -> []
   | Seq (a, b) -> body_value_syms ~locals a @ body_value_syms ~locals b
   | For_loop { body; _ } -> body_value_syms ~locals body
   | If { cond = c, _; body } -> scalar_syms c @ body_value_syms ~locals body
@@ -3284,13 +3442,13 @@ and body_value_syms ~locals (llc : t) : Indexing.symbol list =
 
 (** The value-dependence symbols of statement-level scalar scope-locals, whole-code: per scope id,
     the union of the symbols its statement-level assignments depend on, transitively through
-    [Get_local] references (such a local may be assigned in one statement and read in another —
-    the shared-definition / CSE-hoisted pattern). Fixpoint; consumed by the value scans of
+    [Get_local] references (such a local may be assigned in one statement and read in another — the
+    shared-definition / CSE-hoisted pattern). Fixpoint; consumed by the value scans of
     [affine_accesses] and [Schedule.scan_accesses] so that a value routed through a scope-local is
     not laundered of its symbols (gh-494 per-thread value-variance). Assignments inside
     [Local_scope] bodies are deliberately NOT recorded: a scope id is re-instantiated at every use
-    site with per-site loop symbols, so a global union would import foreign statements' symbols
-    into unrelated setters; scope-internal flow is covered lexically instead — the value of a
+    site with per-site loop symbols, so a global union would import foreign statements' symbols into
+    unrelated setters; scope-internal flow is covered lexically instead — the value of a
     [Local_scope] is over-approximated by the union of all its body setters' symbols. *)
 let scope_value_syms (llc : t) : (int, Indexing.symbol list) Hashtbl.t =
   let locals = Hashtbl.create (module Int) in
@@ -3345,13 +3503,12 @@ let scope_value_syms (llc : t) : (int, Indexing.symbol list) Hashtbl.t =
 
 (** gh-494 waypoint 1: the routine's tensor-node accesses as explicit affine relations
     ({!Affine.access}), extracted from (typically optimized) code — the queryable artifact behind
-    the affine legality queries. Fires in program order: a statement's right-hand-side reads
-    precede its write, [Local_scope] bodies are descended into at their use site. [Tile_mma] is
-    traversed through its scalar [fallback] (the fallback is the statement's access footprint, as
-    in [C_syntax.iter_local_accesses]). Not represented: scope-locals ([Get_local]/[Set_local]
-    carry no index map), merge-buffer reads (a separate read-only input buffer), and
-    [Staged_compilation] (opaque) — callers needing exhaustiveness must check for the latter
-    separately. *)
+    the affine legality queries. Fires in program order: a statement's right-hand-side reads precede
+    its write, [Local_scope] bodies are descended into at their use site. [Tile_mma] is traversed
+    through its scalar [fallback] (the fallback is the statement's access footprint, as in
+    [C_syntax.iter_local_accesses]). Not represented: scope-locals ([Get_local]/[Set_local] carry no
+    index map), merge-buffer reads (a separate read-only input buffer), and [Staged_compilation]
+    (opaque) — callers needing exhaustiveness must check for the latter separately. *)
 let affine_accesses (llc : t) : Tn.t Affine.access list =
   let rec reads_tn uid (llsc : scalar_t) =
     match llsc with
@@ -3445,8 +3602,8 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
   code ~loops:[] ~path:[] ~guarded:false llc;
   List.rev !acc
 
-(** Calls [touch] on every tnode whose context buffer the statement reads or writes, [on_opaque]
-    on [Staged_compilation] (its accesses cannot be enumerated). Scope-local reads/writes
+(** Calls [touch] on every tnode whose context buffer the statement reads or writes, [on_opaque] on
+    [Staged_compilation] (its accesses cannot be enumerated). Scope-local reads/writes
     ([Get_local]/[Set_local]) own no buffer and are skipped; [Local_scope] bodies are descended
     into, since inlined virtual computations read materialized nodes; [Get_merge_buffer] reads the
     merge buffer, not the node's context buffer. The single source of buffer-access truth for the
@@ -3516,8 +3673,7 @@ let iter_buffer_accesses ~(touch : Tn.t -> unit) ~(on_opaque : unit -> unit) (c 
 
     Returns [None] when the code contains [Staged_compilation]: its accesses are opaque to
     {!iter_buffer_accesses}, so no aliasing plan can be trusted. *)
-let buffer_access_spans ~stmt_serial (segments : t list) :
-    (Tn.t, int * int) Base.Hashtbl.t option =
+let buffer_access_spans ~stmt_serial (segments : t list) : (Tn.t, int * int) Base.Hashtbl.t option =
   let spans = Hashtbl.create (module Tn) in
   let opaque = ref false in
   let pos = ref 0 in
@@ -3531,19 +3687,19 @@ let buffer_access_spans ~stmt_serial (segments : t list) :
       if not stmt_serial then Int.incr pos);
   if !opaque then None else Some spans
 
-(** gh-ocannl-489 follow-up: sink each top-level [Zero_out] to just before the first later
-    top-level statement that accesses the zeroed node. [Train.grad_update] emits every gradient's
-    [Zero_out] in one up-front block ([loss.zero_grads]), which starts all the gradients' live
-    spans at that block, so the backprop chain's intervals nest instead of being disjoint and
+(** gh-ocannl-489 follow-up: sink each top-level [Zero_out] to just before the first later top-level
+    statement that accesses the zeroed node. [Train.grad_update] emits every gradient's [Zero_out]
+    in one up-front block ([loss.zero_grads]), which starts all the gradients' live spans at that
+    block, so the backprop chain's intervals nest instead of being disjoint and
     {!buffer_access_spans} finds nothing for the arena planner to overlay; after sinking, a
     gradient's span starts at its first accumulation.
 
     Reordering soundness: a [Zero_out] commutes with any statement that does not access the zeroed
-    node's buffer (per {!iter_buffer_accesses}, the same fold the liveness planner trusts). It
-    never moves past an access of the node, a [Staged_compilation] (opaque accesses), or a
+    node's buffer (per {!iter_buffer_accesses}, the same fold the liveness planner trusts). It never
+    moves past an access of the node, a [Staged_compilation] (opaque accesses), or a
     [Workgroup_barrier] (cross-workgroup ordering). A [Zero_out] never re-accessed in-routine (an
-    export initializing the node for later routines) stays in place. Runs on the whole-routine
-    code BEFORE scheduling/fission, so segment cuts and cross-nest merges see the sunk order. *)
+    export initializing the node for later routines) stays in place. Runs on the whole-routine code
+    BEFORE scheduling/fission, so segment cuts and cross-nest merges see the sunk order. *)
 let sink_zero_outs (llc : t) : t =
   let lines = Array.of_list (flat_lines [ llc ]) in
   let n = Array.length lines in
@@ -3557,20 +3713,20 @@ let sink_zero_outs (llc : t) : t =
         (!s, !opaque))
   in
   let barrier i =
-    snd accesses.(i) || (match lines.(i) with Workgroup_barrier -> true | _ -> false)
+    snd accesses.(i) || match lines.(i) with Workgroup_barrier -> true | _ -> false
   in
   (* [inserts.(j)]: sunk [Zero_out] lines re-emitted just before line [j], in original order. *)
   let inserts = Array.create ~len:(n + 1) [] in
   let moved = Array.create ~len:n false in
   Array.iteri lines ~f:(fun i line ->
       match line with
-      | Zero_out tn ->
+      | Zero_out tn -> (
           let rec find j =
             if j >= n then None
             else if Set.mem (fst accesses.(j)) tn || barrier j then Some j
             else find (j + 1)
           in
-          (match find (i + 1) with
+          match find (i + 1) with
           | Some j when j > i + 1 ->
               moved.(i) <- true;
               inserts.(j) <- line :: inserts.(j)
@@ -3648,19 +3804,17 @@ let match_transposed_one_hot_contribution (k : Indexing.symbol) (contribution : 
    (and the lower bound for signed indices), leaving a bare gather.
 
    Fail-safe construction (binding constraint 1): folding is an optimization, never a correctness
-   obligation. Every conjunct that can be emitted is correct unfolded at its guard precision; the
-   only exception -- a lower-bound compare against [-1] at the unsigned guard precision, which would
-   be C UB -- cannot be requested, because [Interval.at_prec] at an unsigned precision always yields
-   a non-negative lower bound, discharging that conjunct by construction (asserted below rather than
-   assumed).
+   obligation. Every conjunct that can be emitted is correct unfolded at its guard precision, at
+   every guard precision -- no conjunct depends on being folded away.
 
    Guard precision by index flavor (unchanged from the hand-written version): unsigned compares in
    uint64 (zero-extension is lossless; casting to int64 instead could map huge values to negatives
    and pass the upper bound); signed compares in int64 (exact and native on all backends, including
    Metal which lacks double); float compares in double (exact for the integer-valued indices in
-   scope). [0 <= idx] is encoded as [-1 < idx] (there is no [Cmple]); integrality as [idx ==
-   trunc(idx)] (the backend casts [idx] to int when gathering, so for non-integer indices, where
-   every [k == idx] is false and the reduction is 0, the gather must not fire). *)
+   scope). Guards take one canonical shape per role: the lower bound is a direct [0 <= idx], the
+   upper bound the strict [idx < class_count]; integrality is [idx == trunc(idx)] (the backend casts
+   [idx] to int when gathering, so for non-integer indices, where every [k == idx] is false and the
+   reduction is 0, the gather must not fire). *)
 let guard_conjuncts ~ienv ~(index_expr : scalar_arg) ~class_count : scalar_t list * Ops.prec =
   let iv, iprec = index_expr in
   let guard_prec, unsigned_guard, prec_proves_integral =
@@ -3680,12 +3834,12 @@ let guard_conjuncts ~ienv ~(index_expr : scalar_arg) ~class_count : scalar_t lis
   (* The gather compares against [class_count], an exact small integer. *)
   let upper_proved = Float.(ivr.ival.Interval.hi < Float.of_int class_count) in
   let integral_proved = prec_proves_integral || ivr.ival.Interval.integral in
-  (* An unsigned guard precision proves the lower bound by construction; emitting [-1 < idx] at
-     uint64 would be wrong unfolded (constraint 1), so this must never be requested. *)
+  (* An unsigned guard precision proves the lower bound by construction (its machine range starts
+     at 0), so the lower conjunct is always erased there rather than emitted vacuously. *)
   assert ((not unsigned_guard) || lower_proved);
   let lower =
     if lower_proved then None
-    else Some (Binop (Ops.Cmplt, (Constant (-1.), guard_prec), (iv, guard_prec)))
+    else Some (Binop (Ops.Cmple, (Constant 0., guard_prec), (iv, guard_prec)))
   in
   let upper =
     if upper_proved then None
@@ -3729,7 +3883,7 @@ let build_guarded_gather ~ienv ~table ~table_idcs ~dyn_axis ~(index_expr : scala
    is omitted. *)
 let build_guarded_scatter ~ienv ~tn ~idcs ~dyn_axis ~(index_expr : scalar_arg)
     ~(grad_arg : scalar_arg) ~class_count ~debug : t =
-  let value_prec = Lazy.force tn.Tn.prec in
+  let value_prec = Lazy.force tn.Tn.storage_prec in
   let gather = Get_dynamic { tn; idcs; dyn_axis; dyn_value = index_expr } in
   let scatter =
     Set_dynamic
@@ -3782,7 +3936,7 @@ let gather_of_reduction ~ienv ~(k : Indexing.symbol) ~from_ ~to_ (contribution :
           if (not (from_ = 0)) || to_ <> class_count - 1 then None
           else if scalar_mentions_symbol k (fst index_expr) then None
           else
-            let value_prec = Lazy.force table.Tn.prec in
+            let value_prec = Lazy.force table.Tn.storage_prec in
             (* Neutralize the now-dead loop symbol at the dynamic axis. *)
             let table_idcs = Array.copy table_idcs in
             table_idcs.(dyn_axis) <- Indexing.Fixed_idx 0;
@@ -4014,23 +4168,23 @@ and pin_scalar_written_bounds (llsc : scalar_t) : unit =
   | Unop (_, (v, _)) -> pin_scalar_written_bounds v
 
 (* gh-494 waypoint 2: the read-before-write fact of [visit_llc] (its [Recurrent] classification),
-   recomputed as containment queries — every read covered by prior writes. The tracer's semantics
-   is mirrored: [If] guards are taken (guarded writes count as assignments, as the tracer traces
-   [If] bodies unconditionally); a read whose position coincides with the enclosing statement's
-   write position at every iteration is exempt when [inline_complex_computations] (the tracer
-   skips same-position reads, whichever node they read, and it pins static symbols to 0), mirrored
-   here as per-axis affine-form equality with statics zeroed; and static symbols are universalized
-   over their declared ranges — the query is exact where the tracer approximates (loops truncated
-   at [max_tracing_dim], statics at 0).
+   recomputed as containment queries — every read covered by prior writes. The tracer's semantics is
+   mirrored: [If] guards are taken (guarded writes count as assignments, as the tracer traces [If]
+   bodies unconditionally); a read whose position coincides with the enclosing statement's write
+   position at every iteration is exempt when [inline_complex_computations] (the tracer skips
+   same-position reads, whichever node they read, and it pins static symbols to 0), mirrored here as
+   per-axis affine-form equality with statics zeroed; and static symbols are universalized over
+   their declared ranges — the query is exact where the tracer approximates (loops truncated at
+   [max_tracing_dim], statics at 0).
 
    The result decides [visit_llc]'s recurrent pessimization, overriding the tracer in the safe
    direction only (see the call site in [optimize_proc]): a coverage proof cancels a spurious
    recurrent flag; an [`Unknown] never introduces a recurrence the tracer did not find.
    [affine_accesses] is not exhaustive on [Staged_compilation], so its presence makes coverage
    unknowable: [`Opaque] — no override, and no tracer-vs-query comparison either (the tracer is
-   equally blind to staged accesses, so a disagreement would be meaningless). A node without
-   affine accesses is vacuously covered ([affine_accesses] and the tracer walk the same tree, so
-   such a node has no traced reads either). *)
+   equally blind to staged accesses, so a disagreement would be meaningless). A node without affine
+   accesses is vacuously covered ([affine_accesses] and the tracer walk the same tree, so such a
+   node has no traced reads either). *)
 let reads_covered_query (static_indices : Indexing.static_symbol list) llc :
     Tn.t -> [ `Covered | `Unknown of string | `Opaque ] =
   let opaque = ref false in
@@ -4045,7 +4199,8 @@ let reads_covered_query (static_indices : Indexing.static_symbol list) llc :
           if a.Affine.a_write && not a.a_whole then Some (a.a_path, a.a_map) else None)
     in
     let statics_set =
-      Set.of_list (module Indexing.Symbol)
+      Set.of_list
+        (module Indexing.Symbol)
         (List.map static_indices ~f:(fun s -> s.Indexing.static_symbol))
     in
     let static_range s =
@@ -4070,14 +4225,14 @@ let reads_covered_query (static_indices : Indexing.static_symbol list) llc :
     let same_pos (m : Indexing.axis_index array) (m' : Indexing.axis_index array) =
       Array.length m = Array.length m'
       && Array.for_all2_exn m m' ~f:(fun a b ->
-             match (norm_comp a, norm_comp b) with
-             | Some fa, Some fb -> [%equal: (int * Indexing.symbol) list * int] fa fb
-             | _ -> false)
+          match (norm_comp a, norm_comp b) with
+          | Some fa, Some fb -> [%equal: (int * Indexing.symbol) list * int] fa fb
+          | _ -> false)
     in
     let exempt (r : _ Affine.access) =
       virtualize_settings.inline_complex_computations
       && List.exists all_writes ~f:(fun (p, m) ->
-             [%equal: int list] p r.Affine.a_path && same_pos m r.a_map)
+          [%equal: int list] p r.Affine.a_path && same_pos m r.a_map)
     in
     fun tn ->
       match Hashtbl.find by_tn tn with
@@ -4098,9 +4253,9 @@ let reads_covered_query (static_indices : Indexing.static_symbol list) llc :
           in
           if covered then `Covered else `Unknown !witness
 
-(* Under [legality_crosscheck], compares the tracer's raw [Recurrent] verdict against the query
-   for every traced node. [procedural_safe] is the tracer's classification BEFORE the decider
-   flip's override, so the stderr precision-gain lines enumerate exactly the overrides applied by
+(* Under [legality_crosscheck], compares the tracer's raw [Recurrent] verdict against the query for
+   every traced node. [procedural_safe] is the tracer's classification BEFORE the decider flip's
+   override, so the stderr precision-gain lines enumerate exactly the overrides applied by
    [visit_llc]; a disagreement in the stricter direction still raises. [`Opaque] (staged code) is
    incomparable — both sides are blind to staged accesses — so it is skipped, not compared. *)
 let crosscheck_read_before_write traced_store reads_covered =
@@ -4146,6 +4301,7 @@ let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
     workgroup_shared = Set.empty (module Tnode);
     simdgroup_fragments = Set.empty (module Tnode);
     swizzled = Set.empty (module Tnode);
+    zero_fringe = Set.empty (module Tnode);
   }
 
 let code_hum_margin = ref 100
@@ -4248,7 +4404,7 @@ let to_doc_cstyle ?name ?static_indices () llc =
   let doc_ident la =
     let base = string (ident_label la) in
     if Utils.get_global_flag ~default:false ~arg_name:"output_prec_in_ll_files" then
-      let prec_str = Ops.prec_string (Lazy.force la.prec) in
+      let prec_str = Ops.prec_string (Lazy.force la.storage_prec) in
       base ^^ string ("<" ^ prec_str ^ ">")
     else base
   in
@@ -4289,7 +4445,7 @@ let to_doc_cstyle ?name ?static_indices () llc =
         group (header ^^ nest 2 (break 1 ^^ doc_of_code body) ^^ break 1 ^^ string "}")
     | Zero_out tn -> string "zero_out " ^^ doc_ident tn ^^ string ";"
     | Set p ->
-        let prec = Lazy.force p.tn.prec in
+        let prec = Lazy.force p.tn.storage_prec in
         let result =
           group
             (doc_ident p.tn
@@ -4302,7 +4458,7 @@ let to_doc_cstyle ?name ?static_indices () llc =
           p.debug <- Buffer.contents b);
         result
     | Set_dynamic p ->
-        let prec = Lazy.force p.tn.prec in
+        let prec = Lazy.force p.tn.storage_prec in
         let v, vprec = p.dyn_value in
         let result =
           group
@@ -4318,7 +4474,7 @@ let to_doc_cstyle ?name ?static_indices () llc =
           p.debug <- Buffer.contents b);
         result
     | Set_from_vec p ->
-        let prec = Lazy.force p.tn.prec in
+        let prec = Lazy.force p.tn.storage_prec in
         let prefix, postfix = Ops.vec_unop_c_syntax prec p.vec_unop in
         (* TODO: this assumes argument is generated from the high-level code, which means it is
            either Get or Local_scope -- they don't need precision. *)
@@ -4339,7 +4495,7 @@ let to_doc_cstyle ?name ?static_indices () llc =
     | Comment message -> string ("/* " ^ message ^ " */")
     | Staged_compilation callback -> callback ()
     | Set_local (id, llsc) ->
-        let prec = Lazy.force id.tn.prec in
+        let prec = Lazy.force id.tn.storage_prec in
         group (doc_local id ^^ string " := " ^^ doc_of_float prec llsc ^^ string ";")
     | Declare_local { id; _ } -> group (string "declare " ^^ doc_local id ^^ string ";")
   and doc_of_float prec value =
@@ -4389,7 +4545,7 @@ let to_doc ?name ?static_indices () llc =
   let doc_ident la =
     let base = string (ident_label la) in
     if Utils.get_global_flag ~default:false ~arg_name:"output_prec_in_ll_files" then
-      let prec_str = Ops.prec_string (Lazy.force la.prec) in
+      let prec_str = Ops.prec_string (Lazy.force la.storage_prec) in
       base ^^ string ("<" ^ prec_str ^ ">")
     else base
   in

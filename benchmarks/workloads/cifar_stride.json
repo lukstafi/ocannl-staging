@@ -1,0 +1,22 @@
+{
+  "name": "cifar_stride",
+  "model": "conv",
+  "image_size": 51,
+  "in_channels": 3,
+  "use_padding": false,
+  "classes": 10,
+  "channels1": 32,
+  "channels2": 64,
+  "kernel_size": 5,
+  "stride1": 2,
+  "stride2": 1,
+  "fc1": 128,
+  "fc2": 84,
+  "batch_size": 64,
+  "n_batches": 16,
+  "lr": 0.02,
+  "seed": 42,
+  "parity_steps": 24,
+  "warmup_steps": 20,
+  "timed_steps": 100
+}

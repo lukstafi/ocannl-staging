@@ -1,4 +1,2 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 register-tiled matmul parity (GPU) or clean rejection (CPU): true
 unrolled register tile structure (GPU) or rejected (CPU): true

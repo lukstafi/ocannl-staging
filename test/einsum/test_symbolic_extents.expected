@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 === Symbolic axis: capture, solve, materialize at range ===
 Captured dim s solved_dim: none (symbolic)
 Captured dim s solved_sym: i1

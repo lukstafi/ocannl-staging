@@ -8,7 +8,16 @@
    The backend is selected the usual OCANNL way (e.g. [--ocannl_backend=metal]). Environment:
    BENCH_FIXTURE is the fixture path; BENCH_TUNE=1 enables the autotuned variant
    ([Train.tune_placements]: placement A/B — the default virtual-plus-promotion graph and the
-   materialize-all graph are both tuned and the measured winner kept). *)
+   materialize-all graph are both tuned and the measured winner kept).
+
+   BENCH_PRECISION=bf16|f16 (gh-ocannl-492 task 4) trains under the mixed-precision recipe:
+   fixture weights stay f32 masters with reduced-precision cast twins feeding the graph
+   (Mixed_prec.with_master_weights), activations and gradients storage-assigned to the reduced
+   precision over the logits subtree (Precision_policy.apply — the softmax-CE loss head stays
+   f32), and — f16 only — dynamic loss scaling: the step becomes a gradient routine plus an
+   optimizer routine gated on the host-read gradient checksum, so the reported step times include
+   the per-step device sync that the inf/nan gate costs. Composing BENCH_PRECISION with BENCH_TUNE
+   or BENCH_NO_SGD is not supported. *)
 
 open Base
 open Ocannl
@@ -27,6 +36,17 @@ let percentile sorted p =
 let () =
   let fixture = Stdlib.Sys.getenv "BENCH_FIXTURE" in
   let tune = match Stdlib.Sys.getenv_opt "BENCH_TUNE" with Some "1" -> true | _ -> false in
+  let precision, mp_prec =
+    match Stdlib.Sys.getenv_opt "BENCH_PRECISION" with
+    | None | Some "" | Some "0" | Some "f32" -> ("f32", None)
+    | Some "bf16" -> ("bf16", Some Ir.Ops.bfloat16)
+    | Some "f16" -> ("f16", Some Ir.Ops.half)
+    | Some other -> failwith ("bench_mlp: unknown BENCH_PRECISION: " ^ other)
+  in
+  (* f16 needs loss scaling (its exponent range underflows on gradients); bf16 does not. *)
+  let scaled = String.equal precision "f16" in
+  if Option.is_some mp_prec && tune then
+    failwith "bench_mlp: BENCH_TUNE with BENCH_PRECISION is not supported";
   let st = St.read fixture in
   let meta = St.metadata st in
   let get k = List.Assoc.find_exn meta ~equal:String.equal k in
@@ -56,7 +76,7 @@ let () =
       let%op batch_y = ys @| batch_n in
       (batch_x, batch_y, Some batch_n, bindings)
   in
-  let params =
+  let make_params () =
     List.init n_layers ~f:(fun idx ->
         let i = idx + 1 in
         let w_name = Printf.sprintf "w%d" i in
@@ -70,6 +90,13 @@ let () =
         let w = TDSL.wrap_param ~l:w_name ~i:[ din ] ~o:[ dout ] (St.to_ndarray st w_name) () in
         let b = TDSL.wrap_param ~l:b_name ~o:[ dout ] (St.to_ndarray st b_name) () in
         (w, b))
+  in
+  (* Under a reduced precision the fixture weights stay f32 masters (the sgd targets); the graph
+     reads their cast twins. wrap_param routes through Tensor.param, so the hook applies. *)
+  let params =
+    match mp_prec with
+    | Some prec -> Mixed_prec.with_master_weights ~prec make_params
+    | None -> make_params ()
   in
   let materialize =
     match Stdlib.Sys.getenv_opt "BENCH_MATERIALIZE" with Some "1" -> true | _ -> false
@@ -87,12 +114,49 @@ let () =
   let%op batch_loss =
     cross_entropy_loss ~spec:"...|v" ~normalize_by:!..batch_size () ~logits ~targets:batch_y
   in
+  (* Storage-precision policy: activations and gradients of the MLP body (the logits subtree) go
+     reduced; the softmax-CE loss head and its gradients are PINNED at f32 via [except] — the
+     "softmax and losses stay f32" AMP default. Merely not assigning the head is not enough:
+     bottom-up precision inference would promote it to the reduced precision from the logits
+     operand (e.g. the stable-softmax max_logits, whose -inf init the f16 constant guard rejects).
+     Masters and twins already carry Specified precisions and are untouched. *)
+  Option.iter mp_prec ~f:(fun prec ->
+      let body = Hash_set.create (module Int) in
+      let rec walk t =
+        if not (Hash_set.mem body t.Tensor.value.Ir.Tnode.id) then (
+          Hash_set.add body t.Tensor.value.Ir.Tnode.id;
+          Option.iter t.Tensor.diff ~f:(fun d -> Hash_set.add body d.Tensor.grad.Ir.Tnode.id);
+          List.iter t.Tensor.children ~f:(fun c -> walk c.Tensor.subtensor))
+      in
+      walk logits;
+      let except tn = not (Hash_set.mem body tn.Ir.Tnode.id) in
+      Precision_policy.apply ~except
+        { Precision_policy.param_prec = None; activation_prec = Some prec; grad_prec = Some prec }
+        batch_loss);
   let debug = match Stdlib.Sys.getenv_opt "BENCH_DEBUG" with Some "1" -> true | _ -> false in
-  let update = Train.grad_update ~setup_for_parallel:debug batch_loss in
   let learning_rate = TDSL.O.( !. ) lr in
-  let sgd = Train.sgd_update ~learning_rate batch_loss in
   let no_sgd = match Stdlib.Sys.getenv_opt "BENCH_NO_SGD" with Some "1" -> true | _ -> false in
-  let step_comp = if no_sgd then update else Asgns.sequence [ update; sgd ] in
+  if no_sgd && Option.is_some mp_prec then
+    failwith "bench_mlp: BENCH_NO_SGD with BENCH_PRECISION is not supported";
+  (* The f16 leg's step is a gradient routine plus an optimizer routine gated on the host-read
+     gradient checksum (dynamic loss scaling); the other legs are a single fused routine. Note:
+     grad_update consumes the loss's forward code, so the two step shapes must not both be
+     built. *)
+  let scaled_parts =
+    if scaled then
+      let scaler = Mixed_prec.Loss_scaler.create () in
+      let checksum, grad_comp = Mixed_prec.scaled_grad_update scaler batch_loss in
+      let sgd_comp = Mixed_prec.scaled_sgd_update scaler ~learning_rate batch_loss in
+      Some (scaler, checksum, grad_comp, sgd_comp)
+    else None
+  in
+  let step_comp =
+    if scaled then Asgns.empty_comp
+    else
+      let update = Train.grad_update ~setup_for_parallel:debug batch_loss in
+      if no_sgd then update
+      else Asgns.sequence [ update; Train.sgd_update ~learning_rate batch_loss ]
+  in
   let ctx = Context.auto () in
   let backend = Context.backend_name ctx in
   let ctx = Train.init_params ctx bindings batch_loss in
@@ -111,18 +175,46 @@ let () =
               r.fissioned r.baseline_ms r.best_ms)
     | _ -> None
   in
-  let ctx, routine =
-    if tune then
-      let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
-      Train.tune_placements ?report ~rounds:0 ~timing_ctx:scratch ctx batch_loss step_comp bindings
-    else Context.compile ctx step_comp bindings
+  let ctx, routines =
+    match scaled_parts with
+    | Some (scaler, checksum, grad_comp, sgd_comp) ->
+        let ctx, grad_routine = Context.compile ctx grad_comp bindings in
+        let ctx, sgd_routine = Context.compile ctx sgd_comp bindings in
+        (ctx, `Scaled (scaler, checksum, grad_routine, sgd_routine))
+    | None ->
+        let ctx, routine =
+          if tune then
+            let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
+            Train.tune_placements ?report ~rounds:0 ~timing_ctx:scratch ctx batch_loss step_comp
+              bindings
+          else if Lazy.force Autotune.model_default_enabled then
+            (* gh-ocannl-491: the model-picked untuned default (config
+               [model_default_schedule=true]) — run the same benchmark with the gate off vs on for
+               the before/after comparison. *)
+            Autotune.model_default ctx step_comp bindings
+          else Context.compile ctx step_comp bindings
+        in
+        (ctx, `Plain routine)
   in
   let compile_s = Unix.gettimeofday () -. t0 in
-  let batch_ref = Option.map batch_n ~f:(fun bn -> IDX.find_exn (Context.bindings routine) bn) in
+  (* The scaled step threads the context (Loss_scaler.update overwrites the scale tensors). *)
+  let ctx_ref = ref ctx in
+  let step_bindings =
+    match routines with
+    | `Plain routine -> Context.bindings routine
+    | `Scaled (_, _, grad_routine, _) -> Context.bindings grad_routine
+  in
+  let batch_ref = Option.map batch_n ~f:(fun bn -> IDX.find_exn step_bindings bn) in
   let step_count = ref 0 in
   let run_step () =
     Option.iter batch_ref ~f:(fun r -> r := !step_count % n_batches);
-    Train.run ctx routine;
+    (match routines with
+    | `Plain routine -> Train.run !ctx_ref routine
+    | `Scaled (scaler, checksum, grad_routine, sgd_routine) ->
+        let ctx', _ran =
+          Mixed_prec.scaled_step ~scaler ~grad_routine ~sgd_routine ~checksum !ctx_ref
+        in
+        ctx_ref := ctx');
     Int.incr step_count
   in
   let open Operation.At in
@@ -133,23 +225,23 @@ let () =
         let k = min dout 4 in
         Stdio.printf "b%d grad:" (idx + 1);
         for j = 0 to k - 1 do
-          Stdio.printf " %.9g" (ctx, b).@%[j]
+          Stdio.printf " %.9g" (!ctx_ref, b).@%[j]
         done;
         Stdio.printf "  value after 1 step:";
         for j = 0 to k - 1 do
-          Stdio.printf " %.9g" (ctx, b).@[j]
+          Stdio.printf " %.9g" (!ctx_ref, b).@[j]
         done;
         Stdio.printf "\n");
     Stdlib.exit 0);
   let losses =
     Array.init parity_steps ~f:(fun _ ->
         run_step ();
-        (ctx, batch_loss).@[0])
+        (!ctx_ref, batch_loss).@[0])
   in
   for _ = 1 to warmup_steps do
     run_step ()
   done;
-  Context.sync ctx;
+  Context.sync !ctx_ref;
   (* Monotonic high-resolution clock (not [Unix.gettimeofday]): on Windows the latter ticks at ~1
      ms, which floors sub-millisecond step times to 0 (see bench_harness.ml). *)
   let elapsed_ms c0 = Mtime.Span.to_float_ns (Mtime_clock.count c0) /. 1e6 in
@@ -157,23 +249,26 @@ let () =
     Array.init timed_steps ~f:(fun _ ->
         let c0 = Mtime_clock.counter () in
         run_step ();
-        Context.sync ctx;
+        Context.sync !ctx_ref;
         elapsed_ms c0)
   in
   let c0 = Mtime_clock.counter () in
   for _ = 1 to timed_steps do
     run_step ()
   done;
-  Context.sync ctx;
+  Context.sync !ctx_ref;
   let queued_ms = elapsed_ms c0 /. Float.of_int timed_steps in
   Array.sort synced ~compare:Float.compare;
   let json_floats arr =
     String.concat ~sep:"," (Array.to_list (Array.map arr ~f:(Printf.sprintf "%.9g")))
   in
   Stdio.printf
-    {|{"framework":"ocannl","backend":"%s","variant":"%s","workload":"%s","compile_s":%.3f,"step_ms":{"p10":%.6g,"p50":%.6g,"p90":%.6g},"queued_step_ms":%.6g,"timed_steps":%d,"losses":[%s]}|}
+    {|{"framework":"ocannl","backend":"%s","variant":"%s","precision":"%s","workload":"%s","compile_s":%.3f,"step_ms":{"p10":%.6g,"p50":%.6g,"p90":%.6g},"queued_step_ms":%.6g,"timed_steps":%d,"losses":[%s]}|}
     backend
-    (if tune then "tuned" else if materialize then "materialized" else "default")
-    workload compile_s (percentile synced 10.) (percentile synced 50.) (percentile synced 90.)
+    (if tune then "tuned"
+     else if materialize then "materialized"
+     else if Option.is_some mp_prec then precision
+     else "default")
+    precision workload compile_s (percentile synced 10.) (percentile synced 50.) (percentile synced 90.)
     queued_ms timed_steps (json_floats losses);
   Stdio.printf "\n"

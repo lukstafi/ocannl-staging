@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 diagonal-generic: producer virtual: true
 diagonal-generic: read inlined (no array read of d): true
 diagonal-generic: one equality guard survives: true

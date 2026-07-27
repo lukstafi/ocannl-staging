@@ -1,10 +1,10 @@
 (* gh-494 waypoint 1-2: unit + brute-force-oracle coverage for the [Ir.Affine] query engine.
 
-   [pair_conflict] and [covers_box] are sound-and-conservative decision procedures; on small
-   extents their answers are checkable by exhaustive enumeration of the iteration boxes. Every case
-   asserts soundness (a proven verdict must agree with the enumeration) and prints both the query
-   verdict and the oracle classification, so precision gaps (query [Cross_thread] where the oracle
-   found no cross-thread conflict) are visible and reviewable rather than silent. *)
+   [pair_conflict] and [covers_box] are sound-and-conservative decision procedures; on small extents
+   their answers are checkable by exhaustive enumeration of the iteration boxes. Every case asserts
+   soundness (a proven verdict must agree with the enumeration) and prints both the query verdict
+   and the oracle classification, so precision gaps (query [Cross_thread] where the oracle found no
+   cross-thread conflict) are visible and reviewable rather than silent. *)
 
 open Base
 module Idx = Ir.Indexing
@@ -12,15 +12,13 @@ module Aff = Ir.Affine
 
 let sym = Idx.get_symbol
 let aff terms offset = Idx.Affine { symbols = terms; offset }
-
 let find_range ranges s = List.Assoc.find ranges s ~equal:Idx.equal_symbol
 
 (* Enumerate all assignments of [syms] within [ranges] (inclusive bounds). *)
 let envs ranges syms =
   List.fold syms ~init:[ [] ] ~f:(fun acc s ->
       let lo, hi = Option.value_exn (find_range ranges s) in
-      List.concat_map acc ~f:(fun env ->
-          List.init (hi - lo + 1) ~f:(fun k -> (s, lo + k) :: env)))
+      List.concat_map acc ~f:(fun env -> List.init (hi - lo + 1) ~f:(fun k -> (s, lo + k) :: env)))
 
 let eval_idx env (idx : Idx.axis_index) : int option =
   let v s = List.Assoc.find env s ~equal:Idx.equal_symbol in
@@ -44,9 +42,9 @@ let oracle_conflict ~oracle_ranges ~dup_left ~dup_right ~pairs ~left ~right =
   let mentioned idcs =
     Array.to_list idcs
     |> List.concat_map ~f:(function
-         | Idx.Iterator s -> [ s ]
-         | Idx.Affine { symbols; _ } -> List.map symbols ~f:snd
-         | _ -> [])
+      | Idx.Iterator s -> [ s ]
+      | Idx.Affine { symbols; _ } -> List.map symbols ~f:snd
+      | _ -> [])
   in
   let dedup = List.dedup_and_sort ~compare:Idx.compare_symbol in
   let lsyms = dedup (mentioned left) and rsyms = dedup (mentioned right) in
@@ -59,7 +57,8 @@ let oracle_conflict ~oracle_ranges ~dup_left ~dup_right ~pairs ~left ~right =
           List.iter (envs oracle_ranges r_only) ~f:(fun renv ->
               match (eval_vec (senv @ lenv) left rank, eval_vec (senv @ renv) right rank) with
               | Some lv, Some rv ->
-                  if List.equal Int.equal lv rv then conflicts := (senv @ lenv, senv @ renv) :: !conflicts
+                  if List.equal Int.equal lv rv then
+                    conflicts := (senv @ lenv, senv @ renv) :: !conflicts
               | _ -> opaque := true)));
   if !opaque then `Opaque
   else if List.is_empty !conflicts then `Disjoint
@@ -116,9 +115,9 @@ let oracle_covers ~oracle_ranges ~dims idcs =
   let mentioned =
     Array.to_list idcs
     |> List.concat_map ~f:(function
-         | Idx.Iterator s -> [ s ]
-         | Idx.Affine { symbols; _ } -> List.map symbols ~f:snd
-         | _ -> [])
+      | Idx.Iterator s -> [ s ]
+      | Idx.Affine { symbols; _ } -> List.map symbols ~f:snd
+      | _ -> [])
     |> List.dedup_and_sort ~compare:Idx.compare_symbol
   in
   let cells = Hashtbl.create (module String) in
@@ -139,7 +138,8 @@ let check_covers ~name ~query_ranges ~oracle_ranges ~dims idcs =
   let oracle = oracle_covers ~oracle_ranges ~dims idcs in
   let ok = (not query) || oracle in
   if not ok then Int.incr unsound_count;
-  Stdio.printf "%-34s query %-12b oracle %-12b%s\n" name query oracle (if ok then "" else "  UNSOUND")
+  Stdio.printf "%-34s query %-12b oracle %-12b%s\n" name query oracle
+    (if ok then "" else "  UNSOUND")
 
 let () =
   Stdio.printf "=== pair_conflict: named cases ===\n";
@@ -160,9 +160,11 @@ let () =
     [| Idx.Iterator p; Idx.Iterator j |];
   same_nest ~name:"stencil read p-1" ~syms:[ p ] ~pairs:[ p ] [| Idx.Iterator p |]
     [| aff [ (1, p) ] (-1) |];
-  same_nest ~name:"strided disjoint 2p vs 2p+1" ~syms:[ p ] ~pairs:[ p ] [| aff [ (2, p) ] 0 |]
+  same_nest ~name:"strided disjoint 2p vs 2p+1" ~syms:[ p ] ~pairs:[ p ]
+    [| aff [ (2, p) ] 0 |]
     [| aff [ (2, p) ] 1 |];
-  same_nest ~name:"non-injective match p+q" ~syms:[ p; q ] ~pairs:[ p ] [| aff [ (1, p); (1, q) ] 0 |]
+  same_nest ~name:"non-injective match p+q" ~syms:[ p; q ] ~pairs:[ p ]
+    [| aff [ (1, p); (1, q) ] 0 |]
     [| aff [ (1, p); (1, q) ] 0 |];
   same_nest ~name:"mixed radix s+4t (fits)" ~syms:[ s; t ]
     ~ranges:[ (s, (0, 3)); (t, (0, 2)) ]
@@ -174,7 +176,8 @@ let () =
     ~pairs:[ s; t ]
     [| aff [ (1, s); (4, t) ] 0 |]
     [| aff [ (1, s); (4, t) ] 0 |];
-  same_nest ~name:"fixed disjoint slices" ~syms:[ j ] ~pairs:[ j ] [| Idx.Fixed_idx 3; Idx.Iterator j |]
+  same_nest ~name:"fixed disjoint slices" ~syms:[ j ] ~pairs:[ j ]
+    [| Idx.Fixed_idx 3; Idx.Iterator j |]
     [| Idx.Fixed_idx 5; Idx.Iterator j |];
   same_nest ~name:"transposed access" ~syms:[ p; q ] ~pairs:[ p; q ]
     [| Idx.Iterator p; Idx.Iterator q |]
@@ -182,8 +185,9 @@ let () =
   same_nest ~name:"read row 0" ~syms:[ p; j ] ~pairs:[ p ]
     [| Idx.Iterator p; Idx.Iterator j |]
     [| Idx.Fixed_idx 0; Idx.Iterator j |];
-  same_nest ~name:"offset loop bounds [2,5]" ~syms:[ p ] ~ranges:[ (p, (2, 5)) ] ~pairs:[ p ]
-    [| Idx.Iterator p |] [| Idx.Iterator p |];
+  same_nest ~name:"offset loop bounds [2,5]" ~syms:[ p ]
+    ~ranges:[ (p, (2, 5)) ]
+    ~pairs:[ p ] [| Idx.Iterator p |] [| Idx.Iterator p |];
   (* A width-1 parallel symbol is substituted away before equation-level forcing; its thread
      equality holds by definition (single coordinate). *)
   same_nest ~name:"width-1 parallel symbol" ~syms:[ p; j ]
@@ -194,26 +198,32 @@ let () =
   same_nest ~name:"rank padding" ~syms:[ p; j ] ~pairs:[ p ]
     [| Idx.Iterator p; Idx.Fixed_idx 0 |]
     [| Idx.Iterator p |];
-  same_nest ~name:"sub_axis is opaque" ~syms:[ p ] ~pairs:[ p ] [| Idx.Sub_axis; Idx.Iterator p |]
+  same_nest ~name:"sub_axis is opaque" ~syms:[ p ] ~pairs:[ p ]
+    [| Idx.Sub_axis; Idx.Iterator p |]
     [| Idx.Sub_axis; Idx.Iterator p |];
   (* Static (shared) symbol: unknown range to the query, enumerated by the oracle. *)
   check_conflict ~name:"shared static symbol"
     ~query_ranges:[ (p, r3); (j, r3) ]
     ~oracle_ranges:[ (p, r3); (j, r3); (g, r3) ]
-    ~dup_left:(dup_of [ p; j ]) ~dup_right:(dup_of [ p; j ]) ~pairs:[ (p, p) ]
+    ~dup_left:(dup_of [ p; j ])
+    ~dup_right:(dup_of [ p; j ])
+    ~pairs:[ (p, p) ]
     ~left:[| Idx.Iterator g; Idx.Iterator p |]
     ~right:[| Idx.Iterator g; Idx.Iterator p |];
   (* Cross-nest: distinct symbol sets, thread identity via pairing. *)
   check_conflict ~name:"cross-nest aligned"
     ~query_ranges:[ (i0, r3); (j0, r3); (u, r3); (v, r3) ]
     ~oracle_ranges:[ (i0, r3); (j0, r3); (u, r3); (v, r3) ]
-    ~dup_left:(dup_of [ i0; u ]) ~dup_right:(dup_of [ j0; v ]) ~pairs:[ (i0, j0) ]
+    ~dup_left:(dup_of [ i0; u ])
+    ~dup_right:(dup_of [ j0; v ])
+    ~pairs:[ (i0, j0) ]
     ~left:[| Idx.Iterator i0; Idx.Iterator u |]
     ~right:[| Idx.Iterator j0; Idx.Iterator v |];
   check_conflict ~name:"cross-nest chain-position swap"
     ~query_ranges:[ (p, r3); (q, r3); (i0, r3); (j0, r3) ]
     ~oracle_ranges:[ (p, r3); (q, r3); (i0, r3); (j0, r3) ]
-    ~dup_left:(dup_of [ p; q ]) ~dup_right:(dup_of [ i0; j0 ])
+    ~dup_left:(dup_of [ p; q ])
+    ~dup_right:(dup_of [ i0; j0 ])
     ~pairs:[ (p, i0); (q, j0) ]
     ~left:[| Idx.Iterator p; Idx.Iterator q |]
     ~right:[| Idx.Iterator j0; Idx.Iterator i0 |];
@@ -238,11 +248,13 @@ let () =
           let range s = find_range ranges s in
           let dup = dup_of [ p; q ] in
           let verdict =
-            Aff.pair_conflict ~range ~dup_left:dup ~dup_right:dup ~pairs:[ (p, p) ] ~left:[| lc |]
-              ~right:[| rc |]
+            Aff.pair_conflict ~range ~dup_left:dup ~dup_right:dup
+              ~pairs:[ (p, p) ]
+              ~left:[| lc |] ~right:[| rc |]
           in
           let oracle =
-            oracle_conflict ~oracle_ranges:ranges ~dup_left:dup ~dup_right:dup ~pairs:[ (p, p) ]
+            oracle_conflict ~oracle_ranges:ranges ~dup_left:dup ~dup_right:dup
+              ~pairs:[ (p, p) ]
               ~left:[| lc |] ~right:[| rc |]
           in
           if not (sound verdict oracle) then (
@@ -300,11 +312,13 @@ let () =
   in
   let f1 = sym () and f2 = sym () in
   check_fiber ~name:"absent symbol product" ~domain:[ (f1, 3); (f2, 4) ] [| Idx.Iterator f1 |];
-  check_fiber ~name:"all pinned (mixed radix)" ~domain:[ (f1, 4); (f2, 3) ]
+  check_fiber ~name:"all pinned (mixed radix)"
+    ~domain:[ (f1, 4); (f2, 3) ]
     [| aff [ (1, f1); (4, f2) ] 0 |];
   check_fiber ~name:"strided (image cells only)" ~domain:[ (f1, 3) ] [| aff [ (2, f1) ] 0 |];
   check_fiber ~name:"constant cell" ~domain:[ (f1, 3) ] [| Idx.Fixed_idx 0 |];
-  check_fiber ~name:"non-injective f1+f2" ~domain:[ (f1, 3); (f2, 3) ]
+  check_fiber ~name:"non-injective f1+f2"
+    ~domain:[ (f1, 3); (f2, 3) ]
     [| aff [ (1, f1); (1, f2) ] 0 |];
   (* Cancelling terms are not mentions: the map is constant in f1, whose width must count. *)
   check_fiber ~name:"cancelled term f1-f1" ~domain:[ (f1, 3) ] [| aff [ (1, f1); (-1, f1) ] 0 |];
@@ -327,23 +341,24 @@ let () =
       a_path = path;
     }
   in
-  (* Oracle: enumerate the static parameters and the read's loop box; each read cell must be
-     written by some write instance visible to it — same common-loop iteration with an earlier
-     statement path, or a lexicographically earlier common-loop iteration (the oracle's visibility
-     is the true program order, deliberately wider than the procedure's same-iteration-only claim,
-     so loop-carried coverage shows up as a precision gap, never as unsoundness). Thread symbols
-     must agree wherever both sides bind them. *)
+  (* Oracle: enumerate the static parameters and the read's loop box; each read cell must be written
+     by some write instance visible to it — same common-loop iteration with an earlier statement
+     path, or a lexicographically earlier common-loop iteration (the oracle's visibility is the true
+     program order, deliberately wider than the procedure's same-iteration-only claim, so
+     loop-carried coverage shows up as a precision gap, never as unsoundness). Thread symbols must
+     agree wherever both sides bind them. *)
   let oracle_covered ~static_ranges ~thread ~(read : _ Aff.access) ~writes =
     let statics = List.map static_ranges ~f:fst in
     let rank =
-      List.fold writes
-        ~init:(Array.length read.Aff.a_map)
-        ~f:(fun m (w : _ Aff.access) -> max m (Array.length w.Aff.a_map))
+      List.fold writes ~init:(Array.length read.Aff.a_map) ~f:(fun m (w : _ Aff.access) ->
+          max m (Array.length w.Aff.a_map))
     in
     let lookup env s = List.Assoc.find_exn env s ~equal:Idx.equal_symbol in
     let opaque = ref false and all_covered = ref true in
     List.iter (envs static_ranges statics) ~f:(fun senv ->
-        List.iter (envs read.a_loops (List.map read.a_loops ~f:fst)) ~f:(fun renv ->
+        List.iter
+          (envs read.a_loops (List.map read.a_loops ~f:fst))
+          ~f:(fun renv ->
             match eval_vec (renv @ senv) read.a_map rank with
             | None -> opaque := true
             | Some cell ->
@@ -358,7 +373,9 @@ let () =
                       | _ -> []
                     in
                     let cw = common read.a_loops w.a_loops in
-                    List.exists (envs w.a_loops (List.map w.a_loops ~f:fst)) ~f:(fun wenv ->
+                    List.exists
+                      (envs w.a_loops (List.map w.a_loops ~f:fst))
+                      ~f:(fun wenv ->
                         let thread_ok =
                           List.for_all w.a_loops ~f:(fun (s, _) ->
                               (not (thread s))
@@ -370,7 +387,7 @@ let () =
                         let cmp = List.compare Int.compare ct_w ct_r in
                         thread_ok
                         && (cmp < 0
-                           || cmp = 0 && List.compare Int.compare w.a_path read.a_path < 0)
+                           || (cmp = 0 && List.compare Int.compare w.a_path read.a_path < 0))
                         &&
                         if w.a_whole then true
                         else
@@ -500,8 +517,8 @@ let () =
     ~read:(acc ~write:false ~loops:[ (i1, (0, 2)) ] ~path:[ 0; 1 ] [| Idx.Iterator i1 |])
     ~writes:[ acc ~loops:[ (i1, (0, 2)) ] ~path:[ 0; 0 ] [| Idx.Fixed_idx 0 |] ]
     ();
-  (* A write not under the thread loop executes redundantly on every thread (bare statement):
-     each thread's copy receives all its cells. *)
+  (* A write not under the thread loop executes redundantly on every thread (bare statement): each
+     thread's copy receives all its cells. *)
   check_containment ~name:"thread read over bare write" ~thread:thr
     ~read:(acc ~write:false ~loops:[ (i1, (0, 2)) ] ~path:[ 1 ] [| Idx.Iterator i1 |])
     ~writes:[ acc ~loops:[ (k1, (0, 3)) ] ~path:[ 0 ] [| Idx.Iterator k1 |] ]
@@ -545,12 +562,8 @@ let () =
       [
         acc ~loops:[ (i1, (0, 5)) ] ~path:[ 0 ] [| Idx.Fixed_idx 0; Idx.Iterator i1 |];
         acc ~loops:[ (i1, (1, 3)) ] ~path:[ 1 ] [| Idx.Iterator i1; Idx.Fixed_idx 0 |];
-        acc ~loops:[ (i1, (1, 3)); (k1, (4, 5)) ] ~path:[ 2 ]
-          [| Idx.Iterator i1; Idx.Iterator k1 |];
-        acc
-          ~loops:[ (i1, (4, 5)); (k1, (0, 5)) ]
-          ~path:[ 3 ]
-          [| Idx.Iterator i1; Idx.Iterator k1 |];
+        acc ~loops:[ (i1, (1, 3)); (k1, (4, 5)) ] ~path:[ 2 ] [| Idx.Iterator i1; Idx.Iterator k1 |];
+        acc ~loops:[ (i1, (4, 5)); (k1, (0, 5)) ] ~path:[ 3 ] [| Idx.Iterator i1; Idx.Iterator k1 |];
         acc
           ~loops:[ (i1, (0, 2)); (k1, (0, 2)) ]
           ~path:[ 4 ]
@@ -567,10 +580,7 @@ let () =
       [
         acc ~loops:[ (i1, (0, 5)) ] ~path:[ 0 ] [| Idx.Fixed_idx 0; Idx.Iterator i1 |];
         acc ~loops:[ (i1, (1, 3)) ] ~path:[ 1 ] [| Idx.Iterator i1; Idx.Fixed_idx 0 |];
-        acc
-          ~loops:[ (i1, (4, 5)); (k1, (0, 5)) ]
-          ~path:[ 2 ]
-          [| Idx.Iterator i1; Idx.Iterator k1 |];
+        acc ~loops:[ (i1, (4, 5)); (k1, (0, 5)) ] ~path:[ 2 ] [| Idx.Iterator i1; Idx.Iterator k1 |];
         acc
           ~loops:[ (i1, (0, 2)); (k1, (0, 2)) ]
           ~path:[ 3 ]

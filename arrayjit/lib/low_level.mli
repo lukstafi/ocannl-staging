@@ -334,12 +334,18 @@ type optimized = {
           persistent [simdgroup_matrix] array. *)
   swizzled : Set.M(Tnode).t;
       (** Nodes stored in an XOR-swizzled layout (docs/proposals/tensorize-mma.md, "Swizzled
-          staging"): codegen remaps every element access [flat = P*C + col] (with [C] the minor
-          dim, [P] the linearized prefix) to [P*C + (col lxor (P land (C-1)))] — a bijection on the
+          staging"): codegen remaps every element access [flat = P*C + col] (with [C] the minor dim,
+          [P] the linearized prefix) to [P*C + (col lxor (P land (C-1)))] — a bijection on the
           buffer, so the IR-level semantics are unchanged; only the physical layout differs,
           spreading same-column accesses across shared-memory banks. Populated by
           [Schedule.Stage ~swizzle:true]. Renderings that assume a row-major layout must decline
           swizzled nodes. *)
+  zero_fringe : Set.M(Tnode).t;
+      (** Schedule-minted staged tiles whose whole index space is safe to read: slots outside the
+          staged source region (edge tiles of a non-dividing or padded staging, gh-ocannl-485) hold
+          0 — the add-reduce accumulation identity — written by the load nest's [Where]-form edge
+          guards or by the host-side constant packing. [Schedule.Tensorize] consults this to
+          discharge pad guards on the intrinsic path. *)
 }
 [@@deriving sexp_of]
 
@@ -417,8 +423,8 @@ val scope_value_syms : t -> (int, Indexing.symbol list) Base.Hashtbl.t
 val scalar_value_syms :
   locals:(int, Indexing.symbol list) Base.Hashtbl.t -> scalar_t -> Indexing.symbol list
 (** Loop symbols a scalar expression's value depends on syntactically — index symbols of reads,
-    embedded indices, dynamic-index sub-expressions — resolving scope-locals through [locals]
-    (from {!scope_value_syms}). *)
+    embedded indices, dynamic-index sub-expressions — resolving scope-locals through [locals] (from
+    {!scope_value_syms}). *)
 
 val affine_accesses : t -> Tnode.t Affine.access list
 (** gh-494 waypoint 1: the routine's tensor-node accesses as explicit affine relations
@@ -440,8 +446,8 @@ val buffer_access_spans : stmt_serial:bool -> t list -> (Tnode.t, int * int) Bas
 
 val sink_zero_outs : t -> t
 (** gh-ocannl-489 follow-up: sinks each top-level [Zero_out] to just before the first later
-    top-level statement accessing the zeroed node ([Train.grad_update]'s up-front [zero_grads]
-    block otherwise starts every gradient's live span at that block, nesting the backprop chain's
+    top-level statement accessing the zeroed node ([Train.grad_update]'s up-front [zero_grads] block
+    otherwise starts every gradient's live span at that block, nesting the backprop chain's
     intervals and defeating the arena planner). Sound: a [Zero_out] commutes with statements not
     accessing the node; it never crosses such an access, a [Staged_compilation], or a
     [Workgroup_barrier]. Apply to whole-routine code BEFORE scheduling/fission. *)

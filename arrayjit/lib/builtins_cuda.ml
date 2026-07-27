@@ -24,7 +24,10 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
     ("int64x2_t", {|typedef struct { long long v[2]; } int64x2_t;|}, []);
     ("int8x16_t", {|typedef struct { signed char v[16]; } int8x16_t;|}, []);
     ("uint16x8_t", {|typedef struct { unsigned short v[8]; } uint16x8_t;|}, []);
+    ("bfloat16x8_t", {|typedef struct { __nv_bfloat16 v[8]; } bfloat16x8_t;|}, []);
     ("uint8x16_t", {|typedef struct { unsigned char v[16]; } uint8x16_t;|}, []);
+    ("uint32x4_t", {|typedef struct { unsigned int v[4]; } uint32x4_t;|}, []);
+    ("uint64x2_t", {|typedef struct { unsigned long long v[2]; } uint64x2_t;|}, []);
     (* Elements are the class type [__nv_fp8_e5m2] (not a plain integer): the [Set_from_vec]
        emission assigns vector elements to the fp8 array cells without a cast, and [__nv_fp8_e5m2]
        has no assignment from integer types. The 16-byte alignment supports the [Vectorized] packed
@@ -114,9 +117,9 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
 }|},
       [ "uint4x32_t"; "uint4x32_to_i64_uniform" ] );
     ( "uint4x32_to_bfloat16_uniform",
-      {|__device__ unsigned short uint4x32_to_bfloat16_uniform(uint4x32_t x) {
+      {|__device__ __nv_bfloat16 uint4x32_to_bfloat16_uniform(uint4x32_t x) {
   float f = uint32_to_single_uniform(x.v[0]);
-  return (unsigned short)(__float_as_uint(f) >> 16);
+  return __float2bfloat16(f);
 }|},
       [ "uint4x32_t"; "uint32_to_single_uniform" ] );
     ( "uint4x32_to_fp8_uniform",
@@ -198,19 +201,19 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
 }|},
       [ "uint4x32_t"; "uint16x8_t" ] );
     ( "uint4x32_to_bfloat16_uniform_vec",
-      {|__device__ uint16x8_t uint4x32_to_bfloat16_uniform_vec(uint4x32_t x) {
-  uint16x8_t result;
+      {|__device__ bfloat16x8_t uint4x32_to_bfloat16_uniform_vec(uint4x32_t x) {
+  bfloat16x8_t result;
   #pragma unroll
   for (int i = 0; i < 4; i++) {
     // Convert each uint32 to two bfloat16 values
     float f1 = __uint2float_rn((x.v[i] & 0xFFFF) >> 0) * (1.0f / 65536.0f);
     float f2 = __uint2float_rn((x.v[i] >> 16) & 0xFFFF) * (1.0f / 65536.0f);
-    result.v[i*2 + 0] = (unsigned short)(__float_as_uint(f1) >> 16);
-    result.v[i*2 + 1] = (unsigned short)(__float_as_uint(f2) >> 16);
+    result.v[i*2 + 0] = __float2bfloat16(f1);
+    result.v[i*2 + 1] = __float2bfloat16(f2);
   }
   return result;
 }|},
-      [ "uint4x32_t"; "uint16x8_t" ] );
+      [ "uint4x32_t"; "bfloat16x8_t" ] );
     ( "uint4x32_to_half_uniform_vec",
       {|__device__ half8_t uint4x32_to_half_uniform_vec(uint4x32_t x) {
   half8_t result;
@@ -271,6 +274,82 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
   return result;
 }|},
       [ "uint4x32_t"; "fp8x16_t" ] );
+    ( "uint4x32_to_uint32_uniform_vec",
+      {|__device__ uint32x4_t uint4x32_to_uint32_uniform_vec(uint4x32_t x) {
+  uint32x4_t result;
+  #pragma unroll
+  for (int i = 0; i < 4; i++) {
+    result.v[i] = x.v[i];
+  }
+  return result;
+}|},
+      [ "uint4x32_t"; "uint32x4_t" ] );
+    ( "uint4x32_to_uint64_uniform_vec",
+      {|__device__ uint64x2_t uint4x32_to_uint64_uniform_vec(uint4x32_t x) {
+  uint64x2_t result;
+  result.v[0] = ((unsigned long long)x.v[1] << 32) | x.v[0];
+  result.v[1] = ((unsigned long long)x.v[3] << 32) | x.v[2];
+  return result;
+}|},
+      [ "uint4x32_t"; "uint64x2_t" ] );
+    (* Lane extraction from the packed uniform conversion (gh-509 task 4): minted by the
+       virtualizer to inline packed-uniform results per cell. Implemented via the _vec builtins so
+       the value stream is bitwise-identical to the vectorized stores by construction. *)
+    ( "uint4x32_to_single_uniform_lane",
+      {|__device__ float uint4x32_to_single_uniform_lane(uint4x32_t x, int lane) {
+  return uint4x32_to_single_uniform_vec(x).v[lane];
+}|},
+      [ "uint4x32_t"; "uint4x32_to_single_uniform_vec" ] );
+    ( "uint4x32_to_double_uniform_lane",
+      {|__device__ double uint4x32_to_double_uniform_lane(uint4x32_t x, int lane) {
+  return uint4x32_to_double_uniform_vec(x).v[lane];
+}|},
+      [ "uint4x32_t"; "uint4x32_to_double_uniform_vec" ] );
+    ( "uint4x32_to_int32_uniform_lane",
+      {|__device__ int uint4x32_to_int32_uniform_lane(uint4x32_t x, int lane) {
+  return uint4x32_to_int32_uniform_vec(x).v[lane];
+}|},
+      [ "uint4x32_t"; "uint4x32_to_int32_uniform_vec" ] );
+    ( "uint4x32_to_int64_uniform_lane",
+      {|__device__ long long uint4x32_to_int64_uniform_lane(uint4x32_t x, int lane) {
+  return uint4x32_to_int64_uniform_vec(x).v[lane];
+}|},
+      [ "uint4x32_t"; "uint4x32_to_int64_uniform_vec" ] );
+    ( "uint4x32_to_byte_uniform_lane",
+      {|__device__ signed char uint4x32_to_byte_uniform_lane(uint4x32_t x, int lane) {
+  return uint4x32_to_byte_uniform_vec(x).v[lane];
+}|},
+      [ "uint4x32_t"; "uint4x32_to_byte_uniform_vec" ] );
+    ( "uint4x32_to_uint16_uniform_lane",
+      {|__device__ unsigned short uint4x32_to_uint16_uniform_lane(uint4x32_t x, int lane) {
+  return uint4x32_to_uint16_uniform_vec(x).v[lane];
+}|},
+      [ "uint4x32_t"; "uint4x32_to_uint16_uniform_vec" ] );
+    ( "uint4x32_to_bfloat16_uniform_lane",
+      {|__device__ __nv_bfloat16 uint4x32_to_bfloat16_uniform_lane(uint4x32_t x, int lane) {
+  return uint4x32_to_bfloat16_uniform_vec(x).v[lane];
+}|},
+      [ "uint4x32_t"; "uint4x32_to_bfloat16_uniform_vec" ] );
+    ( "uint4x32_to_half_uniform_lane",
+      {|__device__ __half uint4x32_to_half_uniform_lane(uint4x32_t x, int lane) {
+  return uint4x32_to_half_uniform_vec(x).v[lane];
+}|},
+      [ "uint4x32_t"; "uint4x32_to_half_uniform_vec" ] );
+    ( "uint4x32_to_fp8_uniform_lane",
+      {|__device__ __nv_fp8_e5m2 uint4x32_to_fp8_uniform_lane(uint4x32_t x, int lane) {
+  return uint4x32_to_fp8_uniform_vec(x).v[lane];
+}|},
+      [ "uint4x32_t"; "uint4x32_to_fp8_uniform_vec" ] );
+    ( "uint4x32_to_uint32_uniform_lane",
+      {|__device__ unsigned int uint4x32_to_uint32_uniform_lane(uint4x32_t x, int lane) {
+  return uint4x32_to_uint32_uniform_vec(x).v[lane];
+}|},
+      [ "uint4x32_t"; "uint4x32_to_uint32_uniform_vec" ] );
+    ( "uint4x32_to_uint64_uniform_lane",
+      {|__device__ unsigned long long uint4x32_to_uint64_uniform_lane(uint4x32_t x, int lane) {
+  return uint4x32_to_uint64_uniform_vec(x).v[lane];
+}|},
+      [ "uint4x32_t"; "uint4x32_to_uint64_uniform_vec" ] );
     ( "single_to_uint4x32",
       {|__device__ uint4x32_t single_to_uint4x32(float x) {
   unsigned int bits = __float_as_uint(x);
@@ -340,8 +419,8 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
 }|},
       [ "uint4x32_t" ] );
     ( "bfloat16_to_uint4x32",
-      {|__device__ uint4x32_t bfloat16_to_uint4x32(unsigned short x) {
-  uint4x32_t result = {{(unsigned int)x, 0, 0, 0}};
+      {|__device__ uint4x32_t bfloat16_to_uint4x32(__nv_bfloat16 x) {
+  uint4x32_t result = {{(unsigned int)__bfloat16_as_ushort(x), 0, 0, 0}};
   return result;
 }|},
       [ "uint4x32_t" ] );

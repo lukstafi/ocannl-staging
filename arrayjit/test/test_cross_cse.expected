@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 === Scenario B: diagonal vs off-diagonal (must NOT merge, both orders) ===
 [B.off-first] declares=0 local_scopes=2 get_locals=0 hoisted=false expected=false -> OK
 [B.diag-first] declares=0 local_scopes=2 get_locals=0 hoisted=false expected=false -> OK

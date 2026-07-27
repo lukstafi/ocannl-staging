@@ -2,13 +2,14 @@
 
 OCANNL (OCaml Compiles Algorithms for Neural Networks Learning) is a from-scratch compiled deep
 learning framework with an optimizing compiler. The repo contains two main packages:
-- arrayjit: low-level IR, lowering, and backend codegen (CPU/CUDA/Metal).
+- arrayjit: low-level IR, lowering, scheduling, and backend codegen (CPU/CUDA/HIP/Metal).
 - neural_nets_lib: high-level tensor DSL, shape inference, backprop, and user-facing blocks.
 
 ## Structure and Ownership
 - lib/: user-facing recipes (training utilities, nn blocks, re-exports).
 - tensor/: core framework internals (Tensor, Shape, Operation, ppx_%op/%cd).
-- arrayjit/: compiler + backends (IR, indexing, assignments, backends, schedulers).
+- arrayjit/: compiler + backends (assignments.ml, low_level.ml, indexing.ml, schedule.ml,
+  context.ml, and the *_backend.ml implementations).
 - bin/: runnable examples and demos.
 - test/: tutorials and tests (ppx_expect and standalone .expected tests).
 - docs/: slides and reference docs; ocannl_config.reference is the configuration source of truth.
@@ -19,38 +20,63 @@ Key reference files:
 - docs/shape_inference.md (shape/projection inference pipeline)
 - arrayjit/lib/context.mli (context-based runtime API)
 - ocannl_config.reference (all configuration keys and defaults)
+- docs/agent-notes.md (distilled cross-session agent knowledge: subsystem traps, known bugs with
+  workarounds, debug recipes — skim the matching section before working on a subsystem)
 
 ## Conceptual Map (How It Fits Together)
 - Tensor expressions (%op, Tensor.t) build a graph with shape inference and backprop rules.
 - Assignments (%cd, Assignments.comp) express low-level compute and are compiled by arrayjit.
-- Shape inference runs during construction and is finalized by finish_inference before jitting.
+- Shape inference runs during construction and is finalized by finish_inference before lowering;
+  Context.compile and Train.to_routine/run_once/forward_once force completion.
 - Projection inference is re-derived per operation to avoid cross-op contamination.
 
 ## Build, Run, Test
 - Install deps: `opam install . --deps-only` (OCaml >= 5.3).
+- Optional GPU packages: `opam install cudajit` (CUDA), `opam install hipjit` (HIP).
 - Build: `dune build` (runs cram-style tests) or `dune build @check` (compile only).
 - Run an example: `dune exec bin/hello_world.exe`.
-- Run tests: `OCANNL_BACKEND=sync_cc dune runtest` (recommended default backend).
-- Workflow note: individual tests can be run via `dune exec <test path>.exe`, or using Dune aliases
-  like `dune build @runtest-<test name>` when available.
-- Format: `dune fmt` (uses .ocamlformat, margin 100).
+- Run the regular suite: `dune runtest` (`cc` is the default backend).
+- Run regular + slow training tests: `dune build @runtest @slow`.
+- Do not run `dune fmt` during feature work: the repository is not fully ocamlformat-clean and a
+  formatting sweep pollutes the diff. Match surrounding style; formatting-state changes are
+  standalone commits paired with `.ocamlformat-ignore` updates.
+
+Worktree and shell notes:
+- Put worktrees outside the repository. From a worktree nested inside the repository, pass
+  `--root .` to Dune; use `tools/promote.sh` because `dune promote` does not accept `--root`.
+- In Windows Git Bash, source `tools/opam-env.sh` before building. Use
+  `tools/dune-quiet.sh <dune args>` to filter only the known benign linker warnings.
+- In PowerShell, quote aliases (`dune build "@runtest" "@slow"`); unquoted `@name` is splatted
+  and can turn a test run into a false-green plain build.
 
 Testing notes:
-- Inline tests use ppx_expect within library modules.
-- Standalone tests use Dune test stanzas with .expected files; use `dune promote` to accept changes.
+- Inline ppx_expect tests and standalone Dune `test` stanzas with `.expected` files are exclusive.
+  Prefer standalone tests for new compiler features; reserve tutorial `%expect` tests for
+  illustrative output.
+- Avoid `dune exec test/.../<name>.exe` for standalone tests: its working directory bypasses the
+  copied `test/config/ocannl_config`, so a test may fail or silently select another backend.
+  Build `test/<dir>/<name>.exe.output`, inspect `_build/default/test/<dir>/<name>.exe.output`,
+  then run `dune runtest test/<dir>/` and promote. Pin `OCANNL_BACKEND` for bin executables.
+- The minutes-long training tests are excluded from `dune runtest`; run `dune build @slow`.
+  They are still compiled by `dune build @check`.
+- Do not judge a Dune test through a pipe unless `pipefail` is set; otherwise the consumer's exit
+  status can hide expectation diffs.
 - `OCANNL_BACKEND` is special-cased by tests; other env vars may not retrigger tests without
   touching sources or cleaning.
 - Tests read `test/config/ocannl_config` and can emit .ll/.c/.cu/.metal into build_files/.
-- `.expected` files for standalone tests must begin with the two-line config-lookup banner
-  emitted at startup:
-  ```
-  Retrieving commandline, environment, or config file variable ocannl_log_level
-  Found 0, in the config file
-  ```
-  A hand-written `.expected` that omits these lines will fail diffing. Canonical workflow:
+- The test configs set `log_config_sourcing=false`, so `.expected` files contain no config-lookup
+  banner. Pass `--ocannl_log_config_sourcing=true` (or set it in the config file) to see where
+  each setting a run reads comes from; that output then has to be kept out of `.expected` files.
+  Canonical workflow:
   write the test, run `dune build test/<...>.exe.output`, then either
   `cp _build/default/test/<...>.exe.output test/<name>.expected` or `dune promote`. Both
   capture the banner correctly.
+- On Windows or in a nested worktree, use `tools/promote.sh`; it applies the right root and strips
+  CRLF. Use `test/support/test_utils.ml` printers for portable float output.
+- Tests sharing a generated `build_files/` directory run concurrently. Give kernels and tensors a
+  test-unique prefix so same-named generated sources are not torn by concurrent writers.
+- For optimizer passes that change cell values, emitted-IR structure is not sufficient: also
+  assert executed output against a materialized or otherwise independent reference run.
 
 ## Coding Conventions
 - Prefer small, composable functions; avoid unneeded global state.
@@ -66,7 +92,10 @@ Key points:
 - %op builds Tensor.t; %cd builds Assignments.comp.
 - %op requires TDSL in scope; %cd requires NTDSL in scope. Inline parameter init in %op is
   forward-only and uses NTDSL internally; TDSL.param adds the final parameter gradient.
-- Inline params: `{ w }` or `{ w = init }`; dims via `o`/`i`/`b` fields.
+- There is no PDSL. For a differentiable concrete leaf, pass
+  `~grad_spec:Tensor.Require_grad` explicitly to Operation.init/Tensor.term_init.
+- `%op` inline params allow `{ w }` or `{ w = init }`; `%cd` declarations are self-referential
+  `{ w }` only. Dimension shorthands are `o`/`i`/`b`.
 - `%op` uses a unit-parameter `()` boundary to lift parameter creation; bind layers at `()`
   before applying to inputs to avoid mis-scoped parameters.
 - `**.` is pointwise power with numeric exponent (specialized gradients).
@@ -87,22 +116,38 @@ Key points:
   fresh projection ids per op to avoid contamination.
 - Generalized einsum `~logic:"...=>..."` supports convolutions, striding, and concatenation `^`.
 
-## Backends, Contexts, and Transfers
-- Backends: sync_cc, multicore_cc, cuda, metal (if built).
-- Use `Backends.fresh_backend ()` in examples/tests or `Context` API (arrayjit/lib/context.mli).
-- Host access is on-demand and context-mediated (`Context.to_host`/`from_host`/`get_values`/
-  `set_values`); tensor nodes hold no host array and there are no automatic host transfers
-  (gh-ocannl-333).
+## Backends, Contexts, and Host Access
+- Backends: `cc` (default, automatically pool-parallel within kernels), `multidev_cc`
+  (multi-device debugging), `cuda`, `hip`, and `metal`. `sync_cc`/`multicore_cc` are deprecated
+  aliases of `cc`/`multidev_cc`.
+- Backends are process-wide singletons. Use `Backends.get_backend ()` or the Context API
+  (`arrayjit/lib/context.mli`); `fresh_backend` is retired.
+- CPU-side value access is explicit and context-mediated (`Context.to_host`/`from_host`/
+  `get_values`/`set_values`).
 - Merge buffers (`.merge`) support stream-to-stream reductions in %cd.
+
+## Configuration
+- Precedence is command-line `--ocannl_<key>`, environment `OCANNL_<KEY>`, then the nearest
+  `ocannl_config` in the current/ancestor directories.
+- `ocannl_config.reference` is authoritative. Adding a key requires three updates, enforced by
+  `test/operations/test_config_consistency`: document it there, register it in
+  `Utils.known_config_keys`, and add a newly participating source file to the test's scan list.
+- `dune test --force` does not reliably rerun inline expectations. For non-backend config changes,
+  edit `test/config/ocannl_config`, clean, or touch the affected test/module.
 
 ## Adding Features
 - New primitive ops: arrayjit/lib/ops.ml (+ Ir.Ops) and wire into tensor/operation.ml.
 - New tensor convenience functions: tensor/operation.ml (use %cd for forward/backprop).
 - Shape/projection changes: tensor/shape.ml, tensor/row.ml, arrayjit/lib/indexing.ml.
 - Add tests under test/ (einsum/operations/training/ppx as appropriate).
+- Prefer 3-4 coherent, independently compiling commits over one large squash; expectation-only
+  changes may be grouped in a final test/promotions commit.
 - When creating commits, include the work summary in the commit message and credit yourself as a co-author.
 
 ## Debugging & Logs
 - Enable `output_debug_files_in_build_directory=true` to emit .ll/.c/.cu/.metal.
-- Enable `debug_log_from_routines=true` for kernel logging; see ocannl_config.reference.
+- Generated artifacts live under per-executable `build_files/<exe-name>/` and
+  `log_files/<exe-name>/` directories unless `build_files_prefix` overrides this.
+- Enable `debug_log_from_routines=true` for kernel logging; use
+  `debug_log_to_stream_files=true` for per-backend/device/stream log files.
 - CUDA routine logs may require `Utils.capture_stdout_logs` (see README).

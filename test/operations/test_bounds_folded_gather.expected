@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 guarded baseline executes the direct table gather: true
 guarded baseline C contains the guard ternary: true
 bounds-folded kernel executes with values equal to the guarded baseline: true

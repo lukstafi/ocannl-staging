@@ -1,16 +1,14 @@
 (* Padding lifecycle: the halo margins and their neutral element are part of a tensor node's
    identity, committed at the node's first compilation (when its [padding] lazy forces).
 
-   Pinned here:
-   - Locked-layout rejection: a data node created via [init] ([Keep_shape_no_padding]) has its
-     layout committed at creation; a padded conv reading it is REJECTED at shape-inference time
-     (before the fix it silently lost the halo and read out of bounds at negative offsets).
-   - Fresh-operand halo: a computed intermediate gets its halo from the padded consumer, the
-     committed padding records the conv's neutral element, and the lowered conv is offset-free in
-     buffer space (a valid conv over the padded buffer) — [detect_conv] sees [cx_offset = 0], so
-     the autotune conv-seed gate admits healthy padded convs.
-   - Compatible late demand: a second same-geometry padded conv on the already-committed operand
-     is accepted (the resolved padding covers it). *)
+   Pinned here: - Locked-layout rejection: a data node created via [init] ([Keep_shape_no_padding])
+   has its layout committed at creation; a padded conv reading it is REJECTED at shape-inference
+   time (before the fix it silently lost the halo and read out of bounds at negative offsets). -
+   Fresh-operand halo: a computed intermediate gets its halo from the padded consumer, the committed
+   padding records the conv's neutral element, and the lowered conv is offset-free in buffer space
+   (a valid conv over the padded buffer) — [detect_conv] sees [cx_offset = 0], so the autotune
+   conv-seed gate admits healthy padded convs. - Compatible late demand: a second same-geometry
+   padded conv on the already-committed operand is accepted (the resolved padding covers it). *)
 
 open Base
 open Ocannl
@@ -66,8 +64,7 @@ let () =
   let x1 = make_x "locked" in
   p "locked: layout committed at creation" (Lazy.is_val x1.Tensor.value.Ir.Tnode.padding);
   (match compile_conv "locked" x1 with
-  | exception Row.Shape_error (msg, _) ->
-      pr "locked: REJECTED: %s\n" (String.prefix msg 60)
+  | exception Row.Shape_error (msg, _) -> pr "locked: REJECTED: %s\n" (String.prefix msg 60)
   | (_ : Context.t * Autotune.conv_site option) ->
       p "locked: padded conv on a committed-layout operand rejected" false);
   pr "---\n";
@@ -76,9 +73,9 @@ let () =
   let x2_src = make_x "fresh" in
   let x2 = NTDSL.O.einsum1 "... | h, w, c => ... | h, w, c" x2_src in
   (* The "fresh_again" section below re-reads [x2] from a second routine. Cross-routine reuse
-     requires explicit materialization; before the gh-494 read-before-write decider flip this
-     worked accidentally (the tracer's truncation spuriously flagged the padded operand recurrent,
-     forcing it on-device). *)
+     requires explicit materialization; before the gh-494 read-before-write decider flip this worked
+     accidentally (the tracer's truncation spuriously flagged the padded operand recurrent, forcing
+     it on-device). *)
   Train.set_materialized x2.Tensor.value;
   p "fresh: intermediate starts unforced" (not (Lazy.is_val x2.Tensor.value.Ir.Tnode.padding));
   let ctx, site = compile_conv "fresh" x2 in
@@ -110,8 +107,7 @@ let () =
       Ir.Ndarray.init_array ~debug:(tag ^ "x") Ir.Ops.single ~dims:[| 2; 14; 14; 4 |] ~padding:None
         ~f:(fun _ -> padded_value)
     in
-    Operation.wrap_padded ~grad_spec:Tensor.Prohibit_grad ~l:(tag ^ "x") ~b:[ 2 ]
-      ~o:[ 11; 11; 4 ]
+    Operation.wrap_padded ~grad_spec:Tensor.Prohibit_grad ~l:(tag ^ "x") ~b:[ 2 ] ~o:[ 11; 11; 4 ]
       ~padding:
         Ir.Ops.
           [|
@@ -125,8 +121,7 @@ let () =
   Tensor.unsafe_reinitialize ();
   let xw1 = make_wrapped "wrapped_one" ~padded_value:1.0 in
   (match compile_conv "wrapped_one" xw1 with
-  | exception Row.Shape_error (msg, _) ->
-      pr "wrapped_one: REJECTED: %s\n" (String.prefix msg 42)
+  | exception Row.Shape_error (msg, _) -> pr "wrapped_one: REJECTED: %s\n" (String.prefix msg 42)
   | (_ : Context.t * Autotune.conv_site option) ->
       p "wrapped_one: conv's 0 neutral vs margins committed to 1 rejected" false);
   Tensor.unsafe_reinitialize ();

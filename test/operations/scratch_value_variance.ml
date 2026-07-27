@@ -3,16 +3,16 @@
    A statement-crossing [Local] scratch node whose written cells mention no chain symbols used to be
    exempt from the cross-nest dependency edge ("every thread writes its whole private copy") — but
    that exemption implicitly assumed the written VALUE is thread-invariant. When the value depends
-   on a chain symbol that does not also pin the written cell (here [tmp[u] := x[s1, u]] under
-   chain [s0; s1]), a consumer thread's private copy holds its own chunk's last value while the
-   serial reference holds the last chunk's: annotating both loops as hardware axes miscompiles on
+   on a chain symbol that does not also pin the written cell (here [tmp[u] := x[s1, u]] under chain
+   [s0; s1]), a consumer thread's private copy holds its own chunk's last value while the serial
+   reference holds the last chunk's: annotating both loops as hardware axes miscompiles on
    per-thread-copy backends (GPU registers).
 
    The fix makes such writes count as chain-mentioning (the edge forms) and adds a per-edge
    value-invariance condition at each trim level, so the alignment search serializes the offending
    chain loop instead: the outer loop stays parallel, the value-feeding loop becomes serial, and
-   per-thread copies then match the serial semantics. A scratch node whose value is
-   thread-invariant keeps the full two-loop chain (regression guard). *)
+   per-thread copies then match the serial semantics. A scratch node whose value is thread-invariant
+   keeps the full two-loop chain (regression guard). *)
 
 open Base
 module Tn = Ir.Tnode
@@ -53,6 +53,7 @@ let hand_built ~stmts ~tns_on_device ~tns_local =
     workgroup_shared = Set.empty (module Tn);
     simdgroup_fragments = Set.empty (module Tn);
     swizzled = Set.empty (module Tn);
+    zero_fringe = Set.empty (module Tn);
   }
 
 let hardware_syms (sched : Sched.schedule) : Idx.symbol list =
@@ -63,8 +64,8 @@ let hardware_syms (sched : Sched.schedule) : Idx.symbol list =
         Some axis
     | _ -> None)
 
-(* Two nests sharing a [Local] scratch [tmp]: nest 1 rewrites [tmp] under its chain and also makes
-   a materialized write qualifying the chain; nest 2 reads [tmp]. [~variant] selects whether the
+(* Two nests sharing a [Local] scratch [tmp]: nest 1 rewrites [tmp] under its chain and also makes a
+   materialized write qualifying the chain; nest 2 reads [tmp]. [~variant] selects whether the
    scratch value depends on nest 1's inner chain symbol [s1]; [`Via_local] routes that dependence
    through a scalar scope-local ([Set_local] then [Get_local]) — the value scan must resolve it
    (Codex P1 on the direct-only scan). *)
@@ -120,7 +121,9 @@ let build ~variant =
               debug = "";
             }))
   in
-  let opt = hand_built ~stmts:[ nest1; nest2 ] ~tns_on_device:[ x; out1; out2 ] ~tns_local:[ tmp ] in
+  let opt =
+    hand_built ~stmts:[ nest1; nest2 ] ~tns_on_device:[ x; out1; out2 ] ~tns_local:[ tmp ]
+  in
   (opt, [ s0; t0 ], [ s1; t1 ])
 
 let () =

@@ -259,6 +259,59 @@ module type C_syntax_config = sig
         captured_log_prefix) to the format string and arguments. *)
 end
 
+(** The C-family rendering of a binary operation, from {!Ops.binop_c_syntax}: prefix, first operand,
+    infix, second operand (breaking after the operator), suffix.
+
+    Outside {!Pure_C_config} because the GPU backends, which shadow [binop_syntax] wholesale (most
+    ops need target-specific intrinsics or precision bridging), delegate here for the ops that are
+    spelled the same in C, CUDA, HIP and MSL -- the comparisons and the logical connectives. Those
+    then have one spelling ({!Ops.binop_c_syntax}) and one layout (here) across all backends,
+    instead of a copy per backend. *)
+let default_binop_syntax prec op v1 v2 =
+  let op_prefix, op_infix, op_suffix = Ops.binop_c_syntax prec op in
+  let open PPrint in
+  group
+    (string op_prefix ^^ v1 ^^ string op_infix
+    ^^ ifflat (space ^^ v2) (nest 2 (break 1 ^^ v2))
+    ^^ string op_suffix)
+
+(** The RNG binops -- the two Threefry variants and the per-lane uniform conversion -- rendered as a
+    call to the builtin of that name. Every C-family backend provides the same three builtins
+    ([builtins.c], {!Builtins_cuda}, {!Builtins_metal}) under the same precision contract: the
+    Threefry ops produce a uint4x32 block, and the lane conversion consumes one to produce the
+    target precision, so it is the one binop that rejects uint4x32 (its builtin already yields the
+    target precision, bypassing the generic bfloat16/fp8 compute-in-single wrapping).
+
+    Backends pass their own two-argument [call] renderer -- the layouts differ in where a line break
+    may fall -- and the [backend] name for the diagnostics. [op] must be one of the three ops above.
+*)
+let rng_binop_syntax ~backend ~call prec op =
+  let uint4x32_only ~op_name ~builtin =
+    match prec with
+    | Ops.Uint4x32_prec _ -> call builtin
+    | _ ->
+        raise
+        @@ Utils.User_error
+             (Printf.sprintf "%s backend: %s requires target precision to be uint4x32, but got %s"
+                backend op_name (Ops.prec_string prec))
+  in
+  match op with
+  | Ops.Threefry4x32_crypto ->
+      uint4x32_only ~op_name:"Threefry4x32_crypto" ~builtin:"arrayjit_threefry4x32_crypto"
+  | Ops.Threefry4x32_light ->
+      uint4x32_only ~op_name:"Threefry4x32_light" ~builtin:"arrayjit_threefry4x32_light"
+  | Ops.Uint4x32_to_prec_uniform_lane -> (
+      match prec with
+      | Ops.Uint4x32_prec _ ->
+          raise
+          @@ Utils.User_error
+               (Printf.sprintf
+                  "%s backend: Uint4x32_to_prec_uniform_lane not supported for Uint4x32 target \
+                   precision"
+                  backend)
+      | _ -> call ("uint4x32_to_" ^ Ops.prec_string prec ^ "_uniform_lane"))
+  | _ -> invalid_arg "C_syntax.rng_binop_syntax: not a random number generation operator"
+
 module Pure_C_config (Input : sig
   type buffer_ptr
 
@@ -373,12 +426,14 @@ struct
               Min;
               Mod;
               Cmplt;
+              Cmple;
               Cmpeq;
               Cmpne;
               Or;
               And;
               Threefry4x32_crypto;
               Threefry4x32_light;
+              Uint4x32_to_prec_uniform_lane;
             ]
           ~f:(fun op ->
             let p, _, _ =
@@ -473,13 +528,7 @@ struct
       ^^ ifflat (space ^^ v3) (nest 2 (break 1 ^^ v3))
       ^^ string op_suffix)
 
-  let binop_syntax prec op v1 v2 =
-    let op_prefix, op_infix, op_suffix = Ops.binop_c_syntax prec op in
-    let open PPrint in
-    group
-      (string op_prefix ^^ v1 ^^ string op_infix
-      ^^ ifflat (space ^^ v2) (nest 2 (break 1 ^^ v2))
-      ^^ string op_suffix)
+  let binop_syntax = default_binop_syntax
 
   let unop_syntax prec op v =
     let op_prefix, op_suffix = Ops.unop_c_syntax prec op in
@@ -574,6 +623,14 @@ module C_syntax (B : C_syntax_config) = struct
 
   open Indexing
   open Doc_helpers
+
+  (* An embedded index that renders as a sum (more than one term) must be parenthesized when
+     spliced into an operator context; single-term indices bind at least as tightly as [/], [%]
+     and friends. *)
+  let affine_needs_parens = function
+    | Indexing.Affine { symbols; offset } ->
+        List.length symbols + (if offset = 0 then 0 else 1) > 1
+    | _ -> false
 
   let pp_array_offset (idcs, dims) =
     let open PPrint in
@@ -723,18 +780,18 @@ module C_syntax (B : C_syntax_config) = struct
 
   (* Set by [compile_proc]: nodes stored XOR-swizzled ([Schedule.Stage ~swizzle], see
      {!Low_level.optimized.swizzled}). Scalar element accesses go through [pp_tn_offset] below;
-     renderings that assume row-major storage (contiguous vector loads/stores, [Tile_mma]
-     intrinsic / register-tiled / fragment paths) must decline these nodes. *)
+     renderings that assume row-major storage (contiguous vector loads/stores, [Tile_mma] intrinsic
+     / register-tiled / fragment paths) must decline these nodes. *)
   let current_swizzled : Set.M(Tn).t ref = ref (Set.empty (module Tn))
   let is_swizzled tn = Set.mem !current_swizzled tn
 
-  (* The flat-offset rendering for an element access of [tn]'s buffer: row-major
-     [pp_array_offset], except for swizzled nodes, where the minor-axis index is XORed with the low
-     bits of the linearized row prefix — [P*C + col] becomes [P*C + (col ^ (P & (C-1)))], [C] the
-     (power-of-two, checked by [Schedule.Stage]) minor dim. A bijection per row, so all-element
-     traversals (zeroing) and matched read/write pairs are unaffected; same-column accesses from
-     consecutive rows land in distinct shared-memory banks. The prefix expression is emitted twice;
-     downstream C compilers CSE it. *)
+  (* The flat-offset rendering for an element access of [tn]'s buffer: row-major [pp_array_offset],
+     except for swizzled nodes, where the minor-axis index is XORed with the low bits of the
+     linearized row prefix — [P*C + col] becomes [P*C + (col ^ (P & (C-1)))], [C] the (power-of-two,
+     checked by [Schedule.Stage]) minor dim. A bijection per row, so all-element traversals
+     (zeroing) and matched read/write pairs are unaffected; same-column accesses from consecutive
+     rows land in distinct shared-memory banks. The prefix expression is emitted twice; downstream C
+     compilers CSE it. *)
   let pp_tn_offset tn (idcs, dims) =
     let open PPrint in
     let n = Array.length idcs in
@@ -794,16 +851,15 @@ module C_syntax (B : C_syntax_config) = struct
 
   (* Per-chunk private tiles live on the pool workers' stacks; libdispatch workers get 512KB by
      default, so cap their combined footprint per Grid loop (declining just keeps the loop serial).
-     Config [cc_grid_private_bytes_cap] (gh-ocannl-474): raise it when the pool's worker
-     stacks are known larger (e.g. under [OMP_STACKSIZE]) — for instance to let a grid-outermost
-     packed GEMM privatize a whole B~ panel per chunk (gh-ocannl-475). *)
+     Config [cc_grid_private_bytes_cap] (gh-ocannl-474): raise it when the pool's worker stacks are
+     known larger (e.g. under [OMP_STACKSIZE]) — for instance to let a grid-outermost packed GEMM
+     privatize a whole B~ panel per chunk (gh-ocannl-475). *)
   let per_chunk_private_bytes_cap =
     lazy
       (match
          Int.of_string
-            (String.strip
-              (Utils.get_global_arg ~arg_name:"cc_grid_private_bytes_cap"
-                 ~default:"262144"))
+           (String.strip
+              (Utils.get_global_arg ~arg_name:"cc_grid_private_bytes_cap" ~default:"262144"))
        with
       | n when n > 0 -> n
       | _ -> 256 * 1024
@@ -902,10 +958,9 @@ module C_syntax (B : C_syntax_config) = struct
     in
     let touches llc = count_accesses llc > 0 in
     let dims = Lazy.force tn.Tn.dims in
-    (* Coverage by affine query ({!Affine.covers_box}): the nest enumerates every cell exactly
-       once. Only the usable [loops] participate as the box environment — coverage through a loop
-       that interleaves other accesses to [tn] must not count (see the completion requirement
-       above). *)
+    (* Coverage by affine query ({!Affine.covers_box}): the nest enumerates every cell exactly once.
+       Only the usable [loops] participate as the box environment — coverage through a loop that
+       interleaves other accesses to [tn] must not count (see the completion requirement above). *)
     let covering ~loops (idcs : Indexing.axis_index array) =
       let range s =
         List.find_map loops ~f:(fun (s', from_, to_) ->
@@ -1021,16 +1076,16 @@ module C_syntax (B : C_syntax_config) = struct
       let privatized = ref [] and ptr_aliased = ref [] in
       let private_bytes = ref 0 in
       (* The box environment for the affine conflict query: the Grid loop itself plus every loop
-         bound under its body. Loops enclosing the Grid loop are shared across chunks (chunks of
-         one dispatch execute under the same outer-iteration values, with a join before the next),
-         which is exactly the query's treatment of unlisted symbols. *)
+         bound under its body. Loops enclosing the Grid loop are shared across chunks (chunks of one
+         dispatch execute under the same outer-iteration values, with a join before the next), which
+         is exactly the query's treatment of unlisted symbols. *)
       let env = (sym, grid_range) :: Low_level.loop_bounds body in
       let range s = List.Assoc.find env s ~equal:Indexing.equal_symbol in
       let dup s = List.Assoc.mem env s ~equal:Indexing.equal_symbol in
       let feasible =
         Hashtbl.for_all locals ~f:(fun info ->
-            (* The legacy procedural shared rule (every access mentions [sym] and all accesses
-               agree on every mentioning component), kept for [legality_crosscheck]. *)
+            (* The legacy procedural shared rule (every access mentions [sym] and all accesses agree
+               on every mentioning component), kept for [legality_crosscheck]. *)
             let procedural_shared_ok () =
               (not info.gl_written)
               ||
@@ -1066,10 +1121,10 @@ module C_syntax (B : C_syntax_config) = struct
                 | `Exact -> Some idcs
                 | `Vec ->
                     if Array.is_empty idcs then None
-                    else (
+                    else
                       let m = Array.copy idcs in
                       m.(Array.length m - 1) <- Indexing.Sub_axis;
-                      Some m)
+                      Some m
               in
               let witness = ref "" in
               let q =
@@ -1081,7 +1136,8 @@ module C_syntax (B : C_syntax_config) = struct
                         | Some l, Some r -> (
                             match
                               Affine.pair_conflict ~range ~dup_left:dup ~dup_right:dup
-                                ~pairs:[ (sym, sym) ] ~left:l ~right:r
+                                ~pairs:[ (sym, sym) ]
+                                ~left:l ~right:r
                             with
                             | Affine.Disjoint | Affine.Same_thread -> true
                             | Affine.Cross_thread wit ->
@@ -1122,7 +1178,8 @@ module C_syntax (B : C_syntax_config) = struct
               else (
                 private_bytes :=
                   !private_bytes
-                  + (Tn.num_elems info.gl_tn * Ops.prec_in_bytes (Lazy.force info.gl_tn.Tn.prec));
+                  + Tn.num_elems info.gl_tn
+                    * Ops.prec_in_bytes (Lazy.force info.gl_tn.Tn.storage_prec);
                 privatized := info.gl_tn :: !privatized;
                 let fits = !private_bytes <= Lazy.force per_chunk_private_bytes_cap in
                 if not fits then
@@ -1160,7 +1217,8 @@ module C_syntax (B : C_syntax_config) = struct
          counts are comparable by construction. *)
       let global_counts : int Hashtbl.M(Int).t = Hashtbl.create (module Int) in
       iter_local_accesses llc
-        ~access:(fun ~write:_ ~kind:_ tn _ -> if is_local tn then Hashtbl.incr global_counts tn.Tn.uid)
+        ~access:(fun ~write:_ ~kind:_ tn _ ->
+          if is_local tn then Hashtbl.incr global_counts tn.Tn.uid)
         ~on_stmt:(fun _ -> ());
       let syms = ref (Set.empty (module Indexing.Symbol)) in
       let privs = ref (Map.empty (module Indexing.Symbol)) in
@@ -1193,7 +1251,7 @@ module C_syntax (B : C_syntax_config) = struct
      value, and array indexing syntax is unchanged through the pointer. *)
   let local_array_decl ?(alias_ptr = false) ~zero_init (tn : Tn.t) : PPrint.document =
     let open PPrint in
-    let typ = B.typ_of_prec @@ Lazy.force tn.Tn.prec in
+    let typ = B.typ_of_prec @@ Lazy.force tn.Tn.storage_prec in
     let ident = get_ident tn in
     let arr_name = if alias_ptr then ident ^ "_mem__" else ident in
     let align_doc =
@@ -1299,7 +1357,7 @@ module C_syntax (B : C_syntax_config) = struct
     in
     let operand (tn, idcs) =
       let dims = Lazy.force tn.Tn.dims in
-      let prec = Lazy.force tn.Tn.prec in
+      let prec = Lazy.force tn.Tn.storage_prec in
       let rank = Array.length dims in
       let ld = if rank >= 1 then dims.(rank - 1) else 1 in
       let space =
@@ -1312,10 +1370,10 @@ module C_syntax (B : C_syntax_config) = struct
     in
     match nonempty with
     | init :: reduction :: store :: rest -> (
-        (* [rest] is any statements following the marked region in the same body — in particular
-           the lane-0 epilogue statement fused by [Schedule.Fuse_epilogue] (gh-ocannl-486). They
-           render after the region's rendering: the backend hooks end with the visibility barrier
-           that the epilogue's re-reads of the just-stored target need. *)
+        (* [rest] is any statements following the marked region in the same body — in particular the
+           lane-0 epilogue statement fused by [Schedule.Fuse_epilogue] (gh-ocannl-486). They render
+           after the region's rendering: the backend hooks end with the visibility barrier that the
+           epilogue's re-reads of the just-stored target need. *)
         match
           (unwrap_transfer ~into_fragment:true init, unwrap_transfer ~into_fragment:false store)
         with
@@ -1327,8 +1385,8 @@ module C_syntax (B : C_syntax_config) = struct
                && Array.equal Indexing.equal_axis_index init_idcs store_idcs -> (
             match collect_fragment_tiles fragment [] reduction with
             (* Swizzled operands decline the fragment hooks (row-major pointer+stride contract);
-               falling through to [None] keeps the ordinary rendering, whose [Tile_mma]s decline
-               to the swizzle-aware scalar fallback. *)
+               falling through to [None] keeps the ordinary rendering, whose [Tile_mma]s decline to
+               the swizzle-aware scalar fallback. *)
             | [ Tile_mma { a; b; ta; tb; m; n; k; _ } ]
               when not (List.exists [ target; fst a; fst b ] ~f:is_swizzled) -> (
                 let target_base = Array.map init_idcs ~f:(zero_symbols init_syms) in
@@ -1380,8 +1438,7 @@ module C_syntax (B : C_syntax_config) = struct
                        load/store path, so the init observes sibling zeroing and later statements
                        observe the final store. Serial C renderers need no barriers. *)
                     let body_doc =
-                      separate hardline
-                        (List.map (init :: reduction :: store :: rest) ~f:render)
+                      separate hardline (List.map (init :: reduction :: store :: rest) ~f:render)
                     in
                     Some
                       (match B.barrier_syntax with
@@ -1436,9 +1493,9 @@ module C_syntax (B : C_syntax_config) = struct
         in
         let serial_loop () =
           (* gh-490 guard-fusion peephole: a body-wrapping symbolic-extent guard [if (i < s)] (with
-             [s] a kernel parameter, not an enclosing loop index) hoists into the loop header as
-             [i <= to_ && i < s]. The iteration variable is monotone, so once the guard fails it
-             stays false: exiting the loop is equivalent to skipping the remaining iterations. *)
+             [s] a kernel parameter, not an enclosing loop index) hoists into the loop header as [i
+             <= to_ && i < s]. The iteration variable is monotone, so once the guard fails it stays
+             false: exiting the loop is equivalent to skipping the remaining iterations. *)
           let fused =
             match body with
             | If
@@ -1724,7 +1781,7 @@ module C_syntax (B : C_syntax_config) = struct
             else
               match llsc with
               | Low_level.Get (tn, idcs) ->
-                  if not (Ops.equal_prec (Lazy.force tn.Tn.prec) prec) then raise Bail;
+                  if not (Ops.equal_prec (Lazy.force tn.Tn.storage_prec) prec) then raise Bail;
                   vload tn idcs
               | Binop (op, (a, pa), (b, pb)) ->
                   let inf =
@@ -1790,14 +1847,14 @@ module C_syntax (B : C_syntax_config) = struct
             if List.is_empty sets then raise Bail;
             let prec =
               let tn, _, _ = List.hd_exn sets in
-              Lazy.force tn.Tn.prec
+              Lazy.force tn.Tn.storage_prec
             in
             (match prec with Ops.Single_prec _ | Ops.Double_prec _ -> () | _ -> raise Bail);
             let lanes = B.vector_bytes / Ops.prec_in_bytes prec in
             if lanes < 2 || extent < lanes then raise Bail;
             let written = Hashtbl.create (module Int) in
             List.iter sets ~f:(fun (tn, idcs, _) ->
-                if not (Ops.equal_prec (Lazy.force tn.Tn.prec) prec) then raise Bail;
+                if not (Ops.equal_prec (Lazy.force tn.Tn.storage_prec) prec) then raise Bail;
                 match Hashtbl.add written ~key:tn.Tn.uid ~data:idcs with
                 | `Ok -> ()
                 | `Duplicate -> raise Bail);
@@ -1864,7 +1921,7 @@ module C_syntax (B : C_syntax_config) = struct
                     contiguous idcs && lane_aligned tn idcs
                     && Tn.Placements.is_materialized_force (placements ()) tn 463
                     (* Stack and workgroup-shared arrays are only element-aligned. *)
-                    && not (Set.mem !current_workgroup_shared tn)
+                    && (not (Set.mem !current_workgroup_shared tn))
                     && not (is_swizzled tn)
                   in
                   let vload tn idcs =
@@ -1887,7 +1944,8 @@ module C_syntax (B : C_syntax_config) = struct
                     else
                       match llsc with
                       | Low_level.Get (tn, idcs) ->
-                          if not (Ops.equal_prec (Lazy.force tn.Tn.prec) prec) then raise Bail;
+                          if not (Ops.equal_prec (Lazy.force tn.Tn.storage_prec) prec) then
+                            raise Bail;
                           string (vload tn idcs ^ ".v[" ^ lane_var ^ "]")
                       | Binop (((Ops.Add | Ops.Sub | Ops.Mul | Ops.Div) as op), (a, pa), (b, pb)) ->
                           B.binop_syntax prec op (lane_expr a pa) (lane_expr b pb)
@@ -1961,7 +2019,7 @@ module C_syntax (B : C_syntax_config) = struct
               | Some r -> r
               | None -> raise Bail
             in
-            let prec = Lazy.force acc_tn.Tn.prec in
+            let prec = Lazy.force acc_tn.Tn.storage_prec in
             (match prec with Ops.Single_prec _ | Ops.Double_prec _ -> () | _ -> raise Bail);
             (* A loop-invariant contribution deserves strength reduction, not chains. *)
             if not (scalar_mentions contrib) then raise Bail;
@@ -2140,7 +2198,7 @@ module C_syntax (B : C_syntax_config) = struct
                 let warp = B.warp_size in
                 assert (warp > 1 && Int.is_pow2 warp);
                 let extent = to_ - from_ + 1 in
-                let prec = Lazy.force tn.Tn.prec in
+                let prec = Lazy.force tn.Tn.storage_prec in
                 (match prec with
                 | Ops.Single_prec _ | Ops.Double_prec _ -> ()
                 | _ -> fail "a single- or double-precision accumulator");
@@ -2326,7 +2384,7 @@ module C_syntax (B : C_syntax_config) = struct
     | Set { tn; idcs; llsc; debug } ->
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
-        let prec = Lazy.force tn.prec in
+        let prec = Lazy.force tn.storage_prec in
         let local_defs, val_doc = pp_scalar prec llsc in
         let local_defs = pp_local_defs local_defs in
         let offset_doc = pp_tn_offset tn (idcs, dims) in
@@ -2461,7 +2519,7 @@ module C_syntax (B : C_syntax_config) = struct
            ^ " (dynamic offsets are not swizzle-remapped)");
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
-        let prec = Lazy.force tn.prec in
+        let prec = Lazy.force tn.storage_prec in
         let dyn_defs, dyn_expr = pp_scalar iprec iv in
         let idx_typ = B.typ_of_prec (Ops.index_prec ()) in
         let dyn_idx_doc = string ("((" ^ idx_typ ^ ")(") ^^ dyn_expr ^^ string "))" in
@@ -2539,7 +2597,7 @@ module C_syntax (B : C_syntax_config) = struct
            ^ " (row-major multi-element write into an XOR-swizzled layout)");
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
-        let prec = Lazy.force tn.prec in
+        let prec = Lazy.force tn.storage_prec in
         (* Determine argument precision based on operation homogeneity *)
         let arg_prec =
           if Ops.is_homogeneous_prec_vec_unop vec_unop then prec
@@ -2635,7 +2693,7 @@ module C_syntax (B : C_syntax_config) = struct
         else
           let block_content = local_defs ^^ hardline ^^ vec_decl ^^ hardline ^^ assignments in
           lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace
-    | Set_local (({ tn = { prec; _ }; _ } as id), value) ->
+    | Set_local (({ tn = { storage_prec = prec; _ }; _ } as id), value) ->
         let prec = Lazy.force prec in
         let local_defs, value_doc = pp_scalar prec value in
         let local_defs = pp_local_defs local_defs in
@@ -2686,11 +2744,16 @@ module C_syntax (B : C_syntax_config) = struct
         else
           let block_content = local_defs ^^ hardline ^^ assignment in
           lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace
-    | Declare_local { id = { tn = { prec; _ }; _ } as id; needs_init } ->
+    | Declare_local { id = { tn = { storage_prec = prec; _ }; _ } as id; needs_init } ->
         let scope_prec = Lazy.force prec in
         let num_typ = string (B.typ_of_prec scope_prec) in
         let init_zero =
-          if needs_init then
+          (* Runtime instrumentation prints both the old and new values for [Set_local]. Even when
+             the computation itself writes this local before reading it ([needs_init = false]), the
+             debug print therefore observes the declaration's value first. Initialize in debug
+             builds so instrumentation does not introduce an undefined read (and backend-specific
+             garbage) into an otherwise well-defined computation. *)
+          if needs_init || Utils.debug_log_from_routines () then
             let prefix, postfix = B.convert_precision ~from:Ops.int32 ~to_:scope_prec in
             string " = " ^^ string prefix ^^ string "0" ^^ string postfix
           else empty
@@ -2723,7 +2786,7 @@ module C_syntax (B : C_syntax_config) = struct
             (Tn.debug_name d_tn);
         let operand (tn, idcs) =
           let dims = Lazy.force tn.Tn.dims in
-          let prec = Lazy.force tn.Tn.prec in
+          let prec = Lazy.force tn.Tn.storage_prec in
           let rank = Array.length dims in
           let ld = if rank >= 1 then dims.(rank - 1) else 1 in
           let ptr_doc, ld, space =
@@ -2760,8 +2823,7 @@ module C_syntax (B : C_syntax_config) = struct
           | None -> guarded
         in
         let record rendering =
-          if !mma_census_enabled then
-            mma_census := (!current_kernel_name, rendering) :: !mma_census
+          if !mma_census_enabled then mma_census := (!current_kernel_name, rendering) :: !mma_census
         in
         (* Shape facts for the decline diagnostics: enough to identify the statement and check every
            statically-checkable emission rule by eye. *)
@@ -2833,7 +2895,7 @@ module C_syntax (B : C_syntax_config) = struct
               (List.exists [ fst d; fst a; fst b ] ~f:is_swizzled)
           in
           let d_tn = fst d in
-          let prec = Lazy.force d_tn.Tn.prec in
+          let prec = Lazy.force d_tn.Tn.storage_prec in
           let* () =
             no_test
               ~reason:(Printf.sprintf "output precision %s is not f32/f64" (Ops.prec_string prec))
@@ -2842,8 +2904,8 @@ module C_syntax (B : C_syntax_config) = struct
           let* () =
             no_test ~reason:"mixed operand precisions"
               (not
-                 (Ops.equal_prec (Lazy.force (fst a).Tn.prec) prec
-                 && Ops.equal_prec (Lazy.force (fst b).Tn.prec) prec))
+                 (Ops.equal_prec (Lazy.force (fst a).Tn.storage_prec) prec
+                 && Ops.equal_prec (Lazy.force (fst b).Tn.storage_prec) prec))
           in
           (* The fallback carries the arithmetic form; require the fused one (see above). *)
           let rec innermost_set (llc : Low_level.t) =
@@ -3047,7 +3109,8 @@ module C_syntax (B : C_syntax_config) = struct
     (* Returns (local definitions, value expression) *)
     let open PPrint in
     match vcomp with
-    | Local_scope { id = { tn = { prec = scope_prec; _ }; scope_id } as id; body; orig_indices = _ }
+    | Local_scope
+        { id = { tn = { storage_prec = scope_prec; _ }; scope_id } as id; body; orig_indices = _ }
       ->
         let scope_prec = Lazy.force scope_prec in
         let num_typ = string (B.typ_of_prec scope_prec) in
@@ -3067,14 +3130,14 @@ module C_syntax (B : C_syntax_config) = struct
         let expr = string prefix ^^ pp_scope_id id ^^ string postfix in
         ([ (scope_id, def_doc) ], expr)
     | Get_local id ->
-        let scope_prec = Lazy.force id.tn.prec in
+        let scope_prec = Lazy.force id.tn.storage_prec in
         let prefix, postfix = B.convert_precision ~from:scope_prec ~to_:prec in
         let expr = string prefix ^^ pp_scope_id id ^^ string postfix in
         ([], expr)
     | Get_merge_buffer (source, idcs) ->
         let tn = source in
         let dims = Lazy.force tn.dims in
-        let from_prec = Lazy.force tn.prec in
+        let from_prec = Lazy.force tn.storage_prec in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
         let offset_doc = pp_array_offset (idcs, dims) in
         let expr =
@@ -3084,7 +3147,7 @@ module C_syntax (B : C_syntax_config) = struct
     | Get (tn, idcs) ->
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
-        let from_prec = Lazy.force tn.prec in
+        let from_prec = Lazy.force tn.storage_prec in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
         let offset_doc = pp_tn_offset tn (idcs, dims) in
         let expr = string prefix ^^ ident_doc ^^ brackets offset_doc ^^ string postfix in
@@ -3102,7 +3165,7 @@ module C_syntax (B : C_syntax_config) = struct
            ^ " (dynamic offsets are not swizzle-remapped)");
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
-        let from_prec = Lazy.force tn.prec in
+        let from_prec = Lazy.force tn.storage_prec in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
         let dyn_defs, dyn_expr = pp_scalar iprec iv in
         let idx_typ = B.typ_of_prec (Ops.index_prec ()) in
@@ -3135,6 +3198,10 @@ module C_syntax (B : C_syntax_config) = struct
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
         let idx_doc = pp_axis_index idx in
         let idx_doc = if PPrint.is_empty idx_doc then string "0" else idx_doc in
+        (* A multi-term affine renders as an unparenthesized sum; parenthesize so embedding into an
+           operator context (e.g. the [/] and [%] of the gh-509 lane-extract form) cannot rebind
+           terms via C precedence. *)
+        let idx_doc = if affine_needs_parens idx then parens idx_doc else idx_doc in
         let expr = string prefix ^^ idx_doc ^^ string postfix in
         ([], expr)
     | Binop (Arg1, (v1, _), _v2) -> pp_scalar prec v1
@@ -3222,14 +3289,14 @@ module C_syntax (B : C_syntax_config) = struct
            logs. *)
         debug_float prec @@ Get_local id
     | Get_local id ->
-        let scope_prec = Lazy.force id.tn.prec in
+        let scope_prec = Lazy.force id.tn.storage_prec in
         let prefix, postfix = B.convert_precision ~from:scope_prec ~to_:prec in
         let v_doc = string prefix ^^ pp_scope_id id ^^ string postfix in
         (v_doc ^^ braces (string ("=" ^ B.float_log_style)), [ `Value v_doc ])
     | Get_merge_buffer (source, idcs) ->
         let tn = source in
         let dims = Lazy.force tn.dims in
-        let from_prec = Lazy.force tn.prec in
+        let from_prec = Lazy.force tn.storage_prec in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
         let offset_doc = pp_array_offset (idcs, dims) in
         let access_doc =
@@ -3245,7 +3312,7 @@ module C_syntax (B : C_syntax_config) = struct
     | Get (tn, idcs) ->
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
-        let from_prec = Lazy.force tn.prec in
+        let from_prec = Lazy.force tn.storage_prec in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
         let offset_doc = pp_tn_offset tn (idcs, dims) in
         let access_doc = string prefix ^^ ident_doc ^^ brackets offset_doc ^^ string postfix in
@@ -3284,7 +3351,9 @@ module C_syntax (B : C_syntax_config) = struct
         (expr, [])
     | Embed_index idx ->
         let idx_doc = pp_axis_index idx in
-        ((if PPrint.is_empty idx_doc then string "0" else idx_doc), [])
+        let idx_doc = if PPrint.is_empty idx_doc then string "0" else idx_doc in
+        (* Parenthesize multi-term affines, mirroring [pp_scalar]. *)
+        ((if affine_needs_parens idx then parens idx_doc else idx_doc), [])
     | Binop (Arg1, (v1, _), _v2) -> debug_float ?guard prec v1
     | Binop (Arg2, _v1, (v2, _)) -> debug_float ?guard prec v2
     | Ternop (op, (v1, v1_prec), (v2, v2_prec), (v3, v3_prec)) ->
@@ -3372,6 +3441,7 @@ module C_syntax (B : C_syntax_config) = struct
           workgroup_shared;
           simdgroup_fragments;
           swizzled;
+          zero_fringe = _;
         } : (string * kparam_source) list * PPrint.document * Low_level.launch_dims =
     let open PPrint in
     (if not (Set.is_empty workgroup_shared) then
@@ -3432,15 +3502,16 @@ module C_syntax (B : C_syntax_config) = struct
                   (aliased parameters would falsify the restrict qualifier)");
             (* gh-ocannl-489: an aliasing candidate may be placed at bytes overlapping another
                parameter's by the link-time liveness planner, so its pointer must not promise
-               [restrict] -- whether a candidate pair actually shares bytes is unknowable at
-               codegen time. *)
+               [restrict] -- whether a candidate pair actually shares bytes is unknowable at codegen
+               time. *)
             let restrict_ =
               match B.restrict_keyword with
               | Some kw when not (Hash_set.mem optimize_ctx.Low_level.alias_candidates tn) ->
                   kw ^ " "
               | _ -> ""
             in
-            (B.typ_of_prec (Lazy.force tn.Tn.prec) ^ " *" ^ restrict_ ^ get_ident tn, tn) :: acc)
+            (B.typ_of_prec (Lazy.force tn.Tn.storage_prec) ^ " *" ^ restrict_ ^ get_ident tn, tn)
+            :: acc)
           else acc)
     in
     (* [`Per_param]: one typed pointer param per node (C/CUDA, byte-identical to before). [`Pooled
@@ -3477,7 +3548,7 @@ module C_syntax (B : C_syntax_config) = struct
       Option.(
         to_list
         @@ map merge_node ~f:(fun tn ->
-            ("const " ^ B.typ_of_prec (Lazy.force tn.prec) ^ " *merge_buffer", Merge_buffer)))
+            ("const " ^ B.typ_of_prec (Lazy.force tn.storage_prec) ^ " *merge_buffer", Merge_buffer)))
     in
     let all_params = log_file_param @ merge_param @ idx_params @ kparams in
     let sorted_params =
@@ -3572,7 +3643,7 @@ module C_syntax (B : C_syntax_config) = struct
              therefore never placed at overlapping offsets. *)
           let restrict_ = match B.restrict_keyword with Some kw -> kw ^ " " | None -> "" in
           List.mapi ptr_params ~f:(fun k (_decl, tn) ->
-              let typ = B.typ_of_prec (Lazy.force tn.Tn.prec) in
+              let typ = B.typ_of_prec (Lazy.force tn.Tn.storage_prec) in
               Printf.sprintf "%s%s* %s%s = (%s%s*)(__pools[__pool_slots[%d]] + __pool_slots[%d]);"
                 B.buffer_prefix typ restrict_ (get_ident tn) B.buffer_prefix typ (2 * k)
                 ((2 * k) + 1))
@@ -3616,7 +3687,7 @@ module C_syntax (B : C_syntax_config) = struct
                     nodes; see [zero_out_loop_redundant]); shared placements also keep the backend's
                     default layout (no [aligned_local_attr]). *)
                  string (Option.value_exn ~here:[%here] B.shared_decl_prefix)
-                 ^^ string (B.typ_of_prec @@ Lazy.force tn.prec)
+                 ^^ string (B.typ_of_prec @@ Lazy.force tn.storage_prec)
                  ^^ space
                  ^^ string (get_ident tn)
                  ^^ brackets (OCaml.int (Tn.num_elems tn))

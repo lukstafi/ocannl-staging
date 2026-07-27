@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 reads_scope_before_set: all unit assertions passed
 === Local_scope write-before-read (no init): ===
 {

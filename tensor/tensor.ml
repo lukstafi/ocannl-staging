@@ -11,7 +11,14 @@ type tn_set = Set.M(Tn).t
 type asgns = Asgns.t
 type comp = Asgns.comp
 type fetch_op = Asgns.fetch_op
-type projections = { projections_debug : string; projections : Ir.Indexing.projections Lazy.t }
+type projections = {
+  projections_debug : string;
+  projections : Ir.Indexing.projections Lazy.t;
+  product_shape : Shape.t Lazy.t;
+      (** The product-space proxy shape of the operation (gh-512), for [%cd] [*_pspace]
+          intermediates; see {!Shape.product_space_shape}. Forcing it emits shape constraints, so
+          it must be forced (if at all) while the operation's code is being built. *)
+}
 
 let _get_local_debug_runtime = Utils.get_local_debug_runtime
 
@@ -196,7 +203,11 @@ let raw_binop ~initialize_neutral ~accum ~(t : t) ~(lhs_is_grad : bool) ~op ~(t1
   Shape.propagate_shapes local_shape_update;
   let projections_debug = Shape.logic_to_spec shape_logic in
   let projections =
-    { projections_debug; projections = lazy (Shape.get_projections local_shape_update) }
+    {
+      projections_debug;
+      projections = lazy (Shape.get_projections local_shape_update);
+      product_shape = lazy (Shape.product_space_shape local_shape_update);
+    }
   in
   let lhs = if lhs_is_grad then (Option.value_exn ~here:[%here] t.diff).grad else t.value in
   let rhs1 = if rhs1_is_grad then (Option.value_exn ~here:[%here] t1.diff).grad else t1.value in
@@ -226,7 +237,11 @@ let raw_ternop ~initialize_neutral ~accum ~(t : t) ~(lhs_is_grad : bool) ~op ~(t
   Shape.propagate_shapes local_shape_update;
   let projections_debug = Shape.logic_to_spec shape_logic in
   let projections =
-    { projections_debug; projections = lazy (Shape.get_projections local_shape_update) }
+    {
+      projections_debug;
+      projections = lazy (Shape.get_projections local_shape_update);
+      product_shape = lazy (Shape.product_space_shape local_shape_update);
+    }
   in
   let lhs = if lhs_is_grad then (Option.value_exn ~here:[%here] t.diff).grad else t.value in
   let rhs1 = if rhs1_is_grad then (Option.value_exn ~here:[%here] t1.diff).grad else t1.value in
@@ -257,7 +272,11 @@ let raw_unop ~initialize_neutral ~accum ~(t : t) ~(lhs_is_grad : bool) ~op ~(t1 
   Shape.propagate_shapes local_shape_update;
   let projections_debug = Shape.logic_to_spec shape_logic in
   let projections =
-    { projections_debug; projections = lazy (Shape.get_projections local_shape_update) }
+    {
+      projections_debug;
+      projections = lazy (Shape.get_projections local_shape_update);
+      product_shape = lazy (Shape.product_space_shape local_shape_update);
+    }
   in
   let lhs = if lhs_is_grad then (Option.value_exn ~here:[%here] t.diff).grad else t.value in
   let rhs = if rhs_is_grad then (Option.value_exn ~here:[%here] t1.diff).grad else t1.value in
@@ -384,7 +403,7 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
         List.filter_map ordered_ts ~f:(fun ti ->
             Option.map (get ti) ~f:(fun v ->
                 if ti.top_down_prec then lazy (Tn.get_specified_prec v)
-                else lazy (Some (Lazy.force v.prec))))
+                else lazy (Some (Lazy.force v.storage_prec))))
       in
       Tn.Inferred
         (lazy
@@ -432,10 +451,10 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
     if not (Lazy.is_val tn.Tn.dims) then Tn.update_infer_prec tn prec
   in
   (* Apply delayed top-down precision updates to parameter subtensors *)
-  List.iter top_down_ts ~f:(fun ti -> update_infer_prec ti.value v.Tn.prec);
+  List.iter top_down_ts ~f:(fun ti -> update_infer_prec ti.value v.Tn.storage_prec);
   let transpose_op =
     match transpose_op with
-    | Uint4x32_to_prec _ -> Shape.Uint4x32_to_prec v.Tn.prec
+    | Uint4x32_to_prec _ -> Shape.Uint4x32_to_prec v.Tn.storage_prec
     | _ -> transpose_op
   in
   let shape_logic =
@@ -476,7 +495,11 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
   Shape.propagate_shapes preliminary_shape_update;
   let projections_debug = Shape.logic_to_spec preliminary_shape_update.logic in
   let projections =
-    { projections_debug; projections = lazy (Shape.get_projections preliminary_shape_update) }
+    {
+      projections_debug;
+      projections = lazy (Shape.get_projections preliminary_shape_update);
+      product_shape = lazy (Shape.product_space_shape preliminary_shape_update);
+    }
   in
   let t =
     { params; forward = Asgns.empty_comp; diff = None; value = v; top_down_prec; shape; children }
@@ -516,7 +539,7 @@ let%track7_sexp op ~(label : string list) ?(ternary_op = Shape.Pointwise_tern)
     in
     (* Apply delayed top-down precision updates to parameter gradient subtensors *)
     List.iter top_down_ts ~f:(fun ti ->
-        Option.iter ti.diff ~f:(fun d -> update_infer_prec d.grad g.Tn.prec));
+        Option.iter ti.diff ~f:(fun d -> update_infer_prec d.grad g.Tn.storage_prec));
     let is_bck_root ti = Map.mem session_state.backprop_roots ti.value.id in
     let zero_grads =
       let zero_g ti =
@@ -802,6 +825,13 @@ let strip_param_diff t =
   Option.iter t.diff ~f:(fun _ -> remove_bprop_root t);
   { t with diff = None }
 
+(** Post-processing hook applied by {!param} to each fully-constructed parameter before it is
+    returned to user code. Mixed-precision recipes install a wrapper here that returns a
+    reduced-precision "cast twin" consuming the parameter (gh-ocannl-492 master weights): the graph
+    then reads the twin while the optimizer keeps updating the master parameter, which remains the
+    sole member of the result's {!field:params}. Reset by {!unsafe_reinitialize}. *)
+let param_postprocess : (t -> t) ref = ref Fn.id
+
 let%debug7_sexp param ?(require_grad = true) ~t (name : string) ?(more_label = []) ?input_dims
     ?output_dims ?input_axes ?output_axes ?deduced () : t =
   let t =
@@ -826,7 +856,7 @@ let%debug7_sexp param ?(require_grad = true) ~t (name : string) ?(more_label = [
   | None -> ());
   Shape.set_terminal ~is_param:(Option.is_some t.diff) t.shape;
   remove_fwd_root t;
-  { t with params = Set.singleton (module T) t }
+  !param_postprocess { t with params = Set.singleton (module T) t }
 
 let debug_name t = Tn.debug_name t.value
 let debug_grad t = Tn.debug_name (Option.value_exn t.diff).grad
@@ -919,6 +949,7 @@ let%track5_sexp unsafe_reinitialize ?(namespace = Tn.default_namespace) () : uni
   session_state.next_id <- 0;
   session_state.forward_roots <- Map.empty (module Int);
   session_state.backprop_roots <- Map.empty (module Int);
+  param_postprocess := Fn.id;
   random_seed := None;
   Tn.Registry.clear Tn.registry;
   Shape.unsafe_reinitialize ()
@@ -973,7 +1004,7 @@ let%debug5_sexp to_dag ?(single_node = false) ?(embedded_only = false) ?entries_
     let labels =
       Array.map (Shape.to_bases t.shape) ~f:(fun l -> if Row.is_reserved_basis l then "" else l)
     in
-    let where_located a = Tn.(debug_memory_mode a.memory_mode) in
+    let where_located a = Tn.(debug_memory_mode a.memory_mode_intent) in
     let txt =
       if with_id then "#" ^ id ^ " " ^ Tn.label t.value (* ^ " DEBUG: " ^ where_located t.value *)
       else Tn.label t.value

@@ -4,11 +4,11 @@
 
    [mc = ma * mb] (32x32 times 32x32) with the same schedule as schedule_smem_matmul.ml — Grid x
    Workgroup splits, [Stage ~shared ~swizzle] of both operands at 8x8 tiles, Privatize — except the
-   tiles are marked in [optimized.swizzled]: codegen remaps each tile access [P*8 + col] to
-   [P*8 + (col ^ (P & 7))], a per-row bijection of the minor axis, so the values are unchanged
-   while same-column reads (the classic strided access of the staged A tile) spread across
-   shared-memory banks. GPU backends execute and must match the serial twin; the C backends cannot
-   express shared placement and must reject cleanly (same pinning as the SMEM matmul test).
+   tiles are marked in [optimized.swizzled]: codegen remaps each tile access [P*8 + col] to [P*8 +
+   (col ^ (P & 7))], a per-row bijection of the minor axis, so the values are unchanged while
+   same-column reads (the classic strided access of the staged A tile) spread across shared-memory
+   banks. GPU backends execute and must match the serial twin; the C backends cannot express shared
+   placement and must reject cleanly (same pinning as the SMEM matmul test).
 
    The staged+tensorized composition (lane-aware Stage feeding Tensorize) with swizzled tiles pins
    the decline path: the tile-MMA intrinsic and fragment renderings assume row-major pointer+stride
@@ -170,9 +170,9 @@ let () =
 
   (* --- Swizzled tiles feeding Tensorize: the intrinsic/fragment renderings assume row-major
      pointer+stride operands, so they must decline and the lane-0 scalar fallback must run — and
-     stay correct, reading elementwise through the swizzled offsets. Same pipeline as the staged
-     leg of schedule_mma_matmul.ml, with [swizzle = true] on both stages ([bm = 16] keeps the
-     block extents intrinsic-sized, so a surviving intrinsic would fire — its absence below is the
+     stay correct, reading elementwise through the swizzled offsets. Same pipeline as the staged leg
+     of schedule_mma_matmul.ml, with [swizzle = true] on both stages ([bm = 16] keeps the block
+     extents intrinsic-sized, so a surviving intrinsic would fire — its absence below is the
      decline, not a shape accident). --- *)
   let%op mc2 = ma * mb in
   let bt = 16 in
@@ -237,15 +237,15 @@ let () =
           else count_sub "__shared__ float tile_" = 2
         in
         let no_intrinsics =
-          if on_metal then
-            (not (has "simdgroup_multiply_accumulate")) && not (has "simdgroup_load")
+          if on_metal then (not (has "simdgroup_multiply_accumulate")) && not (has "simdgroup_load")
           else not (has "wmma")
         in
         (* The ma tile is [16 x 16] (mask 15), the mb tile [16 x 32] (mask 31); each is written by
            its cooperative load and read by the fallback micro-kernel: >= 4 XOR sites total. *)
         p "swizzled operands decline the MMA intrinsics to the lane-0 fallback"
-          (shared_ok && no_intrinsics && has "== 0)" && count_sub " ^ " >= 4 && has " & 15)"
-          && has " & 31)"))
+          (shared_ok && no_intrinsics && has "== 0)"
+          && count_sub " ^ " >= 4
+          && has " & 15)" && has " & 31)"))
   else (
     (match
        try
@@ -313,8 +313,8 @@ let () =
             swizzle = true;
           };
       ]);
-  (* A 24-wide matmul: splitting k by 12 gives a [8 x 12] tile whose minor dim is not a power of
-     two (every divisor of 32 is, so the main tensors cannot produce this case). *)
+  (* A 24-wide matmul: splitting k by 12 gives a [8 x 12] tile whose minor dim is not a power of two
+     (every divisor of 32 is, so the main tensors cannot produce this case). *)
   let n2 = 24 in
   let ma2v = Array.init (n2 * n2) ~f:(fun i -> Float.of_int (i % 7) *. 0.5) in
   let mb2v = Array.init (n2 * n2) ~f:(fun i -> Float.of_int (i % 11) -. 5.) in

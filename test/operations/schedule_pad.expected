@@ -1,0 +1,10 @@
+padded packed matmul matches the serial twin bitwise: true
+padded 33x65x70 runs the register-tiled micro-kernel: true
+staged tiles zero-fill their fringe and the store-back is masked: true
+padded staged+tensorized matmul parity (GPU): true
+padded GPU intrinsics fire against the threadgroup fragment: true
+awkward site seeds staged GPU MMA pad-compositions: true
+awkward site does not seed the unstaged (in-place) GPU flavor: true
+awkward site seeds the CPU packed pad-composition: true
+seeded packed pad-composition matches the serial twin bitwise: true
+pad guard over an unstaged operand is rejected: true

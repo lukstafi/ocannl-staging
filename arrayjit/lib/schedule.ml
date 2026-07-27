@@ -26,6 +26,10 @@ type optop =
       segment_indices : Indexing.symbol list;
           (** Fresh symbols, one per segment ([length breakpoints + 1]); see {!partition}. *)
     }
+  | Pad of {
+      axis : Indexing.symbol;  (** The loop to pad, identified by its index symbol. *)
+      to_multiple_of : int;  (** The padded extent is the least multiple [>=] the loop extent. *)
+    }
   | Stage of {
       source : Tn.t;
       tile_loops : Indexing.symbol list;
@@ -44,6 +48,16 @@ type optop =
       simd_width : int;
     }
   | Fuse_epilogue of { target : Tn.t; shared : bool }
+  | Split_reduce of {
+      axis : Indexing.symbol;  (** The Serial reduction loop to split, by its index symbol. *)
+      target : Tn.t;  (** The accumulated node whose reduction over [axis] is split. *)
+      num_blocks : int;  (** Number of per-block partials (the new block loop's extent). *)
+      block_index : Indexing.symbol;
+      inner_index : Indexing.symbol;
+      combine_indices : Indexing.symbol list;
+          (** Fresh symbols, one per [target] axis, binding the combine nest's loops; see
+              {!split_reduce}. *)
+    }
 [@@deriving sexp_of]
 
 type schedule = optop list [@@deriving sexp_of]
@@ -66,6 +80,15 @@ let expand_zero ~tn =
   let rank = Array.length (Lazy.force tn.Tn.dims) in
   let indices = List.init rank ~f:(fun _ -> Indexing.get_symbol ()) in
   (Expand_zero { tn; indices }, indices)
+
+let split_reduce ~axis ~target ~num_blocks =
+  let block_index = Indexing.get_symbol () and inner_index = Indexing.get_symbol () in
+  let rank = Array.length (Lazy.force target.Tn.dims) in
+  let combine_indices = List.init rank ~f:(fun _ -> Indexing.get_symbol ()) in
+  ( Split_reduce { axis; target; num_blocks; block_index; inner_index; combine_indices },
+    block_index,
+    inner_index,
+    combine_indices )
 
 (** {2 Index substitution}
 
@@ -190,6 +213,15 @@ type floop = {
 let for_loop { index; from_; to_; body; trace_it; axis } =
   Low_level.For_loop { index; from_; to_; body; trace_it; axis }
 
+let rec find_loop axis (llc : Low_level.t) : Low_level.t option =
+  let open Low_level in
+  match llc with
+  | For_loop { index; _ } when Indexing.equal_symbol index axis -> Some llc
+  | For_loop { body; _ } -> find_loop axis body
+  | Seq (a, b) -> ( match find_loop axis a with Some _ as r -> r | None -> find_loop axis b)
+  | If { body; _ } -> find_loop axis body
+  | _ -> None
+
 (* Rewrites the unique statement-level [For_loop] whose index is [sym]. Loops inside [Local_scope]
    bodies are deliberately out of scope: annotated loops there are rejected by [validate_parallel],
    and splitting them has no v1 use case. *)
@@ -289,10 +321,280 @@ let refresh_scopes (llc : Low_level.t) : Low_level.t =
     in
     code llc
 
+(* gh-ocannl-485 (PADTO): a pad guard recognized around the micro-kernel's accumulation, reduced to
+   the accumulator's coordinates. The guarded index is [pm_terms + 1*role + pm_offset] where [role]
+   is the [i] ([pm_row = true]) or [j] ([pm_row = false]) micro symbol; the guard holds iff that
+   index is [< pm_bound]. [contract_tensorized_accumulator] re-emits the guard over its fresh
+   fragment symbols at the accumulator transfer sites (Where-form 0-fill on the init-load, statement
+   [If] on the store-back), so the intrinsic path computes the full padded block into scratch and
+   only the valid region round-trips through the accumulator. Reduction-axis ([k]) guards are
+   validated (both operands zero-fringe staged tiles, so the padded contributions are exact zeros)
+   and dropped, not represented. *)
+type pad_mask = {
+  pm_row : bool;
+  pm_terms : (int * Indexing.symbol) list;
+  pm_offset : int;
+  pm_bound : int;
+}
+
+(* docs/proposals/tensorize-mma.md §3: replace the innermost serial [i × j × k] matmul micro-kernel
+   — whose body is a single accumulation [d[...] += a[...] * b[...]] (plain-add or FMA form, as
+   [optimize]'s simplify leaves it), possibly under pad/remainder guards (gh-ocannl-485) — with a
+   [Tile_mma] block statement wrapped in a fresh extent-[simd_width] [Workgroup] lane loop. The
+   statement covers the whole [m×n×k] block, so fragment residency across the reduction is an
+   intra-statement codegen concern; the original (guarded) nest becomes the scalar [fallback].
+   Divisibility by the backend's intrinsic tile is checked at emission ([mma_syntax] declines per
+   call and the fallback runs), since the schedule layer is backend-agnostic. Guards around the
+   accumulation are parsed as pad masks (returned for the contraction) or rejected loudly. *)
+let tensorize_llc ~(zero_fringe : Tn.t -> bool) ~i ~j ~k ~lane ~simd_width (llc : Low_level.t) :
+    Low_level.t * pad_mask list =
+  let open Low_level in
+  let out_masks = ref [] in
+  let llc =
+    rewrite_loop ~what:"Schedule.Tensorize" ~sym:i llc ~f:(fun ifc ->
+        if simd_width <= 0 then invalid_arg "Schedule.Tensorize: simd_width must be positive";
+        let strip body =
+          List.filter (flat_lines [ body ]) ~f:(function Noop | Comment _ -> false | _ -> true)
+        in
+        (* Pad/remainder guards may wrap the inner loops or the accumulation itself; skim them off,
+           collecting the conditions for mask parsing below. *)
+        let guard_conds = ref [] in
+        let rec skim body =
+          match strip body with
+          | [ If { cond = c, _; body } ] ->
+              guard_conds := c :: !guard_conds;
+              skim body
+          | stmts -> stmts
+        in
+        let nested ~of_ sym body =
+          match skim body with
+          | [ For_loop { index; from_; to_; body; trace_it; axis } ]
+            when Indexing.equal_symbol index sym ->
+              { index; from_; to_; body; trace_it; axis }
+          | _ ->
+              invalid_arg
+                ("Schedule.Tensorize: loop " ^ Indexing.symbol_ident sym
+               ^ " must be exactly the body of loop " ^ Indexing.symbol_ident of_
+               ^ " (a perfectly nested i x j x k micro-kernel)")
+        in
+        let jfc = nested ~of_:i j ifc.body in
+        let kfc = nested ~of_:j k jfc.body in
+        List.iter
+          [ { ifc with body = Noop }; { jfc with body = Noop }; { kfc with body = Noop } ]
+          ~f:(fun fc ->
+            if (not (equal_axis_type fc.axis Serial)) || fc.from_ <> 0 then
+              invalid_arg
+                ("Schedule.Tensorize: loop " ^ Indexing.symbol_ident fc.index
+               ^ " must be Serial starting at 0"));
+        let d_tn, d_idcs, llsc =
+          match skim kfc.body with
+          | [ Set { tn; idcs; llsc; _ } ] -> (tn, idcs, llsc)
+          | _ ->
+              invalid_arg
+                "Schedule.Tensorize: the micro-kernel body must be a single accumulation Set"
+        in
+        let is_d_read (sc : Low_level.scalar_t) =
+          match sc with
+          | Get (tn, idcs) -> Tn.equal tn d_tn && Array.equal Indexing.equal_axis_index idcs d_idcs
+          | _ -> false
+        in
+        let get_operand (sc : Low_level.scalar_t) =
+          match sc with Get (tn, idcs) -> Some (tn, idcs) | _ -> None
+        in
+        let operands =
+          match llsc with
+          | Ternop (Ops.FMA, (x, _), (y, _), (acc, _)) when is_d_read acc ->
+              Option.both (get_operand x) (get_operand y)
+          | Binop (Ops.Add, (acc, _), (Binop (Ops.Mul, (x, _), (y, _)), _)) when is_d_read acc ->
+              Option.both (get_operand x) (get_operand y)
+          | Binop (Ops.Add, (Binop (Ops.Mul, (x, _), (y, _)), _), (acc, _)) when is_d_read acc ->
+              Option.both (get_operand x) (get_operand y)
+          | _ -> None
+        in
+        let x_op, y_op =
+          match operands with
+          | Some ops -> ops
+          | None ->
+              invalid_arg
+                ("Schedule.Tensorize: the micro-kernel must accumulate a product of reads into "
+               ^ Tn.debug_name d_tn ^ " (d[...] += a[...] * b[...], plain-add or FMA form)")
+        in
+        let mentions sym (idx : Indexing.axis_index) =
+          match idx with
+          | Indexing.Iterator s -> Indexing.equal_symbol s sym
+          | Indexing.Affine { symbols; _ } ->
+              List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
+          | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
+        in
+        let coeff sym (idx : Indexing.axis_index) =
+          match idx with
+          | Indexing.Iterator s when Indexing.equal_symbol s sym -> 1
+          | Indexing.Affine { symbols; _ } ->
+              List.sum
+                (module Int)
+                symbols
+                ~f:(fun (c, s) -> if Indexing.equal_symbol s sym then c else 0)
+          | _ -> 0
+        in
+        (* Index discipline: the tile spans the operand's last two axes with unit strides in the
+           micro-kernel symbols — [row] appears with coefficient 1 exactly in component [rank-2],
+           [col] in component [rank-1], and the third symbol not at all. Outer-loop terms (the
+           block base) may appear anywhere. *)
+        let role_ok (_tn, idcs) ~row ~col =
+          let rank = Array.length idcs in
+          rank >= 2
+          && coeff row idcs.(rank - 2) = 1
+          && coeff col idcs.(rank - 1) = 1
+          && List.for_all [ i; j; k ] ~f:(fun s ->
+              Array.for_alli idcs ~f:(fun p idx ->
+                  let allowed =
+                    if Indexing.equal_symbol s row then p = rank - 2
+                    else if Indexing.equal_symbol s col then p = rank - 1
+                    else false
+                  in
+                  (not (mentions s idx)) || allowed))
+        in
+        if not (role_ok (d_tn, d_idcs) ~row:i ~col:j) then
+          invalid_arg
+            ("Schedule.Tensorize: accumulator " ^ Tn.debug_name d_tn
+           ^ " must be indexed [..., i, j] over its last two axes (unit coefficients)");
+        (* Operand roles, including transposed storage: [a] is [..., i, k] ([ta = false]) or [...,
+           k, i] ([ta = true]); [b] is [..., k, j] ([tb = false]) or [..., j, k] ([tb = true]). An
+           operand matches at most one role and orientation ([role_ok] requires both role symbols
+           present at the right positions and the third absent), so the assignment is
+           unambiguous. *)
+        let a_role op =
+          if role_ok op ~row:i ~col:k then Some false
+          else if role_ok op ~row:k ~col:i then Some true
+          else None
+        in
+        let b_role op =
+          if role_ok op ~row:k ~col:j then Some false
+          else if role_ok op ~row:j ~col:k then Some true
+          else None
+        in
+        let a_op, ta, b_op, tb =
+          match (a_role x_op, b_role y_op) with
+          | Some ta, Some tb -> (x_op, ta, y_op, tb)
+          | _ -> (
+              match (a_role y_op, b_role x_op) with
+              | Some ta, Some tb -> (y_op, ta, x_op, tb)
+              | _ ->
+                  invalid_arg
+                    ("Schedule.Tensorize: operands of the product must be indexed [..., i, k] \
+                      (or transposed [..., k, i]) and [..., k, j] (or transposed [..., j, k]) \
+                      over their last two axes (unit coefficients): "
+                    ^ Tn.debug_name (fst x_op)
+                    ^ ", "
+                    ^ Tn.debug_name (fst y_op)))
+        in
+        (* Pad-mask parsing (gh-ocannl-485). Every skimmed guard must be a one-sided comparison
+           [affine < bound] whose affine part carries exactly one micro symbol with coefficient 1
+           (the shape [Pad] and [Split]'s remainder guard construct); anything else is rejected —
+           the guard would silently change meaning if dropped. Masked roles require every operand
+           mentioning the role symbol to be a zero-fringe staged tile read at the plain iterator
+           with a covering dim: the intrinsic path reads the full padded extent, so out-of-range
+           slots must exist and hold the additive identity. *)
+        let extent_of s =
+          if Indexing.equal_symbol s i then ifc.to_ + 1
+          else if Indexing.equal_symbol s j then jfc.to_ + 1
+          else kfc.to_ + 1
+        in
+        let validate_padded_operand s (tn, idcs) =
+          if Array.exists idcs ~f:(mentions s) then (
+            if not (zero_fringe tn) then
+              invalid_arg
+                ("Schedule.Tensorize: pad guard on " ^ Indexing.symbol_ident s
+               ^ " requires operand " ^ Tn.debug_name tn
+               ^ " to be a zero-fringe staged tile (Stage the operand over the padded loops \
+                  first)");
+            let dims = Lazy.force tn.Tn.dims in
+            Array.iteri idcs ~f:(fun p idx ->
+                if mentions s idx then
+                  match idx with
+                  | Indexing.Iterator _ when dims.(p) >= extent_of s -> ()
+                  | _ ->
+                      invalid_arg
+                        ("Schedule.Tensorize: pad guard on " ^ Indexing.symbol_ident s
+                       ^ " requires operand " ^ Tn.debug_name tn
+                       ^ " to read the padded axis as a plain covering iterator")))
+        in
+        let parse_mask (c : Low_level.scalar_t) =
+          let reject () =
+            invalid_arg
+              "Schedule.Tensorize: unrecognized guard around the micro-kernel (expected a pad or \
+               remainder guard [affine(one micro symbol, unit coefficient) < constant])"
+          in
+          match c with
+          | Binop (Ops.Cmplt, (Embed_index idx, _), (Constant bound, _))
+            when Float.is_integer bound -> (
+              let terms, offset =
+                match idx with
+                | Indexing.Iterator s -> ([ (1, s) ], 0)
+                | Indexing.Affine { symbols; offset } ->
+                    (Indexing.coalesce_affine_terms symbols, offset)
+                | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> reject ()
+              in
+              let is_micro s = List.exists [ i; j; k ] ~f:(Indexing.equal_symbol s) in
+              let micro_terms, outer_terms =
+                List.partition_tf terms ~f:(fun (_, s) -> is_micro s)
+              in
+              match micro_terms with
+              | [ (1, s) ] ->
+                  let bound = Float.to_int bound in
+                  validate_padded_operand s a_op;
+                  validate_padded_operand s b_op;
+                  if Indexing.equal_symbol s k then
+                    (* Both operands' padded [k] slots are exact zeros, so the extra accumulated
+                       contributions are exact zeros: the guard is discharged, not represented. *)
+                    None
+                  else
+                    Some
+                      {
+                        pm_row = Indexing.equal_symbol s i;
+                        pm_terms = outer_terms;
+                        pm_offset = offset;
+                        pm_bound = bound;
+                      }
+              | _ -> reject ())
+          | _ -> reject ()
+        in
+        out_masks := List.filter_map !guard_conds ~f:parse_mask;
+        let zero = { terms = []; offset = 0 } in
+        let base idcs =
+          Array.map idcs ~f:(fun idx ->
+              subst_axis_index ~sym:i ~by:zero
+                (subst_axis_index ~sym:j ~by:zero (subst_axis_index ~sym:k ~by:zero idx)))
+        in
+        For_loop
+          {
+            index = lane;
+            from_ = 0;
+            to_ = simd_width - 1;
+            axis = Workgroup;
+            trace_it = false;
+            body =
+              Tile_mma
+                {
+                  d = (d_tn, base d_idcs);
+                  a = (fst a_op, base (snd a_op));
+                  b = (fst b_op, base (snd b_op));
+                  ta;
+                  tb;
+                  m = ifc.to_ + 1;
+                  n = jfc.to_ + 1;
+                  k = kfc.to_ + 1;
+                  lane;
+                  fallback = for_loop ifc;
+                };
+          })
+  in
+  (llc, !out_masks)
+
 let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
   let open Low_level in
   match op with
-  | Stage _ | Privatize _ | Fuse_epilogue _ ->
+  | Stage _ | Privatize _ | Fuse_epilogue _ | Tensorize _ | Split_reduce _ ->
       assert false (* Handled by [apply_opt_op]: they need the whole [optimized]. *)
   | Split { axis; factor; outer; inner; outer_index; inner_index } ->
       rewrite_loop ~what:"Schedule.Split" ~sym:axis llc ~f:(fun fc ->
@@ -375,6 +677,56 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
                  @@ map_code
                       ~fidx:(subst_axis_index ~sym:axis ~by:{ terms = []; offset = v })
                       fc.body)))
+  | Pad { axis; to_multiple_of } ->
+      (* gh-ocannl-485 (PADTO): extend the loop extent to the next multiple of [to_multiple_of] and
+         guard each effectful leaf statement of the body with [If (axis < N)] — the pad iterations
+         are no-ops, so the op is unconditionally semantics-preserving. Guards go on the leaves, not
+         around the whole body, so barriers inserted later (shared [Stage]) stay under uniform
+         control flow, and downstream [Split]s of the padded loop divide cleanly (no remainder
+         guard). [apply]'s trailing simplify interval-folds the guards wherever the narrowed
+         environment proves them (e.g. after a [Partition] of a block loop at the last fully valid
+         block); [Tensorize] recognizes them as pad masks (see {!optop}). *)
+      rewrite_loop ~what:"Schedule.Pad" ~sym:axis llc ~f:(fun fc ->
+          if to_multiple_of <= 0 then invalid_arg "Schedule.Pad: to_multiple_of must be positive";
+          if not (equal_axis_type fc.axis Serial) then
+            invalid_arg ("Schedule.Pad: loop " ^ Indexing.symbol_ident axis ^ " must be Serial");
+          if fc.from_ <> 0 then
+            invalid_arg
+              ("Schedule.Pad: loop " ^ Indexing.symbol_ident axis
+             ^ " must start at 0 (lowering guarantees this)");
+          let n = fc.to_ + 1 in
+          let m = (n + to_multiple_of - 1) / to_multiple_of * to_multiple_of in
+          if m = n then for_loop fc
+          else
+            let iprec = Ops.index_prec () in
+            let cond =
+              Binop
+                ( Ops.Cmplt,
+                  (Embed_index (Indexing.Iterator axis), iprec),
+                  (Constant (Float.of_int n), iprec) )
+            in
+            let guard body = If { cond = (cond, iprec); body } in
+            let rec mask = function
+              | Seq (a, b) -> Seq (mask a, mask b)
+              | For_loop fc' -> For_loop { fc' with body = mask fc'.body }
+              | If { cond; body } -> If { cond; body = mask body }
+              | (Set _ | Set_dynamic _ | Set_from_vec _ | Set_local _ | Zero_out _) as stmt ->
+                  guard stmt
+              | (Noop | Comment _ | Declare_local _) as stmt -> stmt
+              | Workgroup_barrier ->
+                  (* Uniformly reached with or without the guard (the padded loop is Serial), and
+                     must stay so: never guard a barrier. *)
+                  Workgroup_barrier
+              | Staged_compilation _ ->
+                  invalid_arg
+                    ("Schedule.Pad: opaque Staged_compilation in the body of "
+                    ^ Indexing.symbol_ident axis)
+              | Tile_mma _ ->
+                  invalid_arg
+                    ("Schedule.Pad: apply Pad before Tensorize (Tile_mma in the body of "
+                    ^ Indexing.symbol_ident axis ^ ")")
+            in
+            for_loop { fc with to_ = m - 1; body = mask fc.body })
   | Partition { axis; breakpoints; segment_indices } ->
       (* gh-ocannl-508: index-set splitting. Segment ranges stay absolute (no rebasing to 0), so the
          substitution is a pure rename of the loop symbol and no index arithmetic changes; each
@@ -409,171 +761,6 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
                  in
                  For_loop
                    { index = s; from_ = lo; to_ = hi; body; trace_it = fc.trace_it; axis = Serial })))
-  | Tensorize { i; j; k; lane; simd_width } ->
-      (* docs/proposals/tensorize-mma.md §3: replace the innermost serial [i × j × k] matmul
-         micro-kernel — whose body is a single accumulation [d[...] += a[...] * b[...]] (plain-add
-         or FMA form, as [optimize]'s simplify leaves it) — with a [Tile_mma] block statement
-         wrapped in a fresh extent-[simd_width] [Workgroup] lane loop. The statement covers the
-         whole [m×n×k] block, so fragment residency across the reduction is an intra-statement
-         codegen concern; the original nest becomes the scalar [fallback]. Divisibility by the
-         backend's intrinsic tile is checked at emission ([mma_syntax] declines per call and the
-         fallback runs), since the schedule layer is backend-agnostic. *)
-      rewrite_loop ~what:"Schedule.Tensorize" ~sym:i llc ~f:(fun ifc ->
-          if simd_width <= 0 then invalid_arg "Schedule.Tensorize: simd_width must be positive";
-          let strip body =
-            List.filter (flat_lines [ body ]) ~f:(function Noop | Comment _ -> false | _ -> true)
-          in
-          let nested ~of_ sym body =
-            match strip body with
-            | [ For_loop { index; from_; to_; body; trace_it; axis } ]
-              when Indexing.equal_symbol index sym ->
-                { index; from_; to_; body; trace_it; axis }
-            | _ ->
-                invalid_arg
-                  ("Schedule.Tensorize: loop " ^ Indexing.symbol_ident sym
-                 ^ " must be exactly the body of loop " ^ Indexing.symbol_ident of_
-                 ^ " (a perfectly nested i x j x k micro-kernel)")
-          in
-          let jfc = nested ~of_:i j ifc.body in
-          let kfc = nested ~of_:j k jfc.body in
-          List.iter
-            [ { ifc with body = Noop }; { jfc with body = Noop }; { kfc with body = Noop } ]
-            ~f:(fun fc ->
-              if (not (equal_axis_type fc.axis Serial)) || fc.from_ <> 0 then
-                invalid_arg
-                  ("Schedule.Tensorize: loop " ^ Indexing.symbol_ident fc.index
-                 ^ " must be Serial starting at 0"));
-          let d_tn, d_idcs, llsc =
-            match strip kfc.body with
-            | [ Set { tn; idcs; llsc; _ } ] -> (tn, idcs, llsc)
-            | _ ->
-                invalid_arg
-                  "Schedule.Tensorize: the micro-kernel body must be a single accumulation Set"
-          in
-          let is_d_read (sc : Low_level.scalar_t) =
-            match sc with
-            | Get (tn, idcs) ->
-                Tn.equal tn d_tn && Array.equal Indexing.equal_axis_index idcs d_idcs
-            | _ -> false
-          in
-          let get_operand (sc : Low_level.scalar_t) =
-            match sc with Get (tn, idcs) -> Some (tn, idcs) | _ -> None
-          in
-          let operands =
-            match llsc with
-            | Ternop (Ops.FMA, (x, _), (y, _), (acc, _)) when is_d_read acc ->
-                Option.both (get_operand x) (get_operand y)
-            | Binop (Ops.Add, (acc, _), (Binop (Ops.Mul, (x, _), (y, _)), _)) when is_d_read acc ->
-                Option.both (get_operand x) (get_operand y)
-            | Binop (Ops.Add, (Binop (Ops.Mul, (x, _), (y, _)), _), (acc, _)) when is_d_read acc ->
-                Option.both (get_operand x) (get_operand y)
-            | _ -> None
-          in
-          let x_op, y_op =
-            match operands with
-            | Some ops -> ops
-            | None ->
-                invalid_arg
-                  ("Schedule.Tensorize: the micro-kernel must accumulate a product of reads into "
-                 ^ Tn.debug_name d_tn ^ " (d[...] += a[...] * b[...], plain-add or FMA form)")
-          in
-          let mentions sym (idx : Indexing.axis_index) =
-            match idx with
-            | Indexing.Iterator s -> Indexing.equal_symbol s sym
-            | Indexing.Affine { symbols; _ } ->
-                List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
-            | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
-          in
-          let coeff sym (idx : Indexing.axis_index) =
-            match idx with
-            | Indexing.Iterator s when Indexing.equal_symbol s sym -> 1
-            | Indexing.Affine { symbols; _ } ->
-                List.sum
-                  (module Int)
-                  symbols
-                  ~f:(fun (c, s) -> if Indexing.equal_symbol s sym then c else 0)
-            | _ -> 0
-          in
-          (* Index discipline: the tile spans the operand's last two axes with unit strides in the
-             micro-kernel symbols — [row] appears with coefficient 1 exactly in component [rank-2],
-             [col] in component [rank-1], and the third symbol not at all. Outer-loop terms (the
-             block base) may appear anywhere. *)
-          let role_ok (_tn, idcs) ~row ~col =
-            let rank = Array.length idcs in
-            rank >= 2
-            && coeff row idcs.(rank - 2) = 1
-            && coeff col idcs.(rank - 1) = 1
-            && List.for_all [ i; j; k ] ~f:(fun s ->
-                Array.for_alli idcs ~f:(fun p idx ->
-                    let allowed =
-                      if Indexing.equal_symbol s row then p = rank - 2
-                      else if Indexing.equal_symbol s col then p = rank - 1
-                      else false
-                    in
-                    (not (mentions s idx)) || allowed))
-          in
-          if not (role_ok (d_tn, d_idcs) ~row:i ~col:j) then
-            invalid_arg
-              ("Schedule.Tensorize: accumulator " ^ Tn.debug_name d_tn
-             ^ " must be indexed [..., i, j] over its last two axes (unit coefficients)");
-          (* Operand roles, including transposed storage: [a] is [..., i, k] ([ta = false]) or [...,
-             k, i] ([ta = true]); [b] is [..., k, j] ([tb = false]) or [..., j, k] ([tb = true]). An
-             operand matches at most one role and orientation ([role_ok] requires both role symbols
-             present at the right positions and the third absent), so the assignment is
-             unambiguous. *)
-          let a_role op =
-            if role_ok op ~row:i ~col:k then Some false
-            else if role_ok op ~row:k ~col:i then Some true
-            else None
-          in
-          let b_role op =
-            if role_ok op ~row:k ~col:j then Some false
-            else if role_ok op ~row:j ~col:k then Some true
-            else None
-          in
-          let a_op, ta, b_op, tb =
-            match (a_role x_op, b_role y_op) with
-            | Some ta, Some tb -> (x_op, ta, y_op, tb)
-            | _ -> (
-                match (a_role y_op, b_role x_op) with
-                | Some ta, Some tb -> (y_op, ta, x_op, tb)
-                | _ ->
-                    invalid_arg
-                      ("Schedule.Tensorize: operands of the product must be indexed [..., i, k] \
-                        (or transposed [..., k, i]) and [..., k, j] (or transposed [..., j, k]) \
-                        over their last two axes (unit coefficients): "
-                      ^ Tn.debug_name (fst x_op)
-                      ^ ", "
-                      ^ Tn.debug_name (fst y_op)))
-          in
-          let zero = { terms = []; offset = 0 } in
-          let base idcs =
-            Array.map idcs ~f:(fun idx ->
-                subst_axis_index ~sym:i ~by:zero
-                  (subst_axis_index ~sym:j ~by:zero (subst_axis_index ~sym:k ~by:zero idx)))
-          in
-          For_loop
-            {
-              index = lane;
-              from_ = 0;
-              to_ = simd_width - 1;
-              axis = Workgroup;
-              trace_it = false;
-              body =
-                Tile_mma
-                  {
-                    d = (d_tn, base d_idcs);
-                    a = (fst a_op, base (snd a_op));
-                    b = (fst b_op, base (snd b_op));
-                    ta;
-                    tb;
-                    m = ifc.to_ + 1;
-                    n = jfc.to_ + 1;
-                    k = kfc.to_ + 1;
-                    lane;
-                    fallback = for_loop ifc;
-                  };
-            })
   | Expand_zero { tn; indices } ->
       (* Whole-node [Zero_out] is never distributed across hardware threads ([validate_parallel]
          rejects it in multi-threaded kernels); expand it into an ordinary loop nest — over the
@@ -619,8 +806,13 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
     reads of [source] to use one index vector (v1). Each source axis's index is decomposed into a
     tile part (terms over [tile_loops], positive coefficients) and an outer part; source axes with a
     nonempty tile part become tile axes, sized by the tile part's range over the tile loops'
-    extents. The tile's axes follow the {e tile_loops} order (the position of each axis's first
-    tile-part symbol in the list; ties keep source order), not the source's: a packing Stage over a
+    extents — except that a single-term tile part with coefficient > 1 (a strided window, e.g. a
+    stride-2 conv's implicit-GEMM row) is {e compacted} (gh-ocannl-502): the tile axis is sized by
+    the loop extent and stored/read at coefficient 1, while the load nest's source index (and edge
+    guard) keeps the stride, so the packed tile is dense and satisfies [Tensorize]'s
+    unit-coefficient index discipline. Hoisted staging rejects compaction (v1). The tile's axes
+    follow the {e tile_loops} order (the position of each axis's first tile-part symbol in the
+    list; ties keep source order), not the source's: a packing Stage over a
     transposed operand normalizes its layout — [tile_loops = [k; j]] on a [j, k]-stored source packs
     a [k]-major tile — which is what lets packed tiles feed [Tensorize]'s register-tiled
     micro-kernel with [ta = tb = false] (gh-ocannl-469). Every in-tree pipeline before this passed
@@ -863,13 +1055,27 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
     let fl = floop_of_exn s in
     fl.to_ - fl.from_ + 1
   in
-  (* Tile axes: source axes with a nonempty tile part; dim = the tile part's range. Ordered by the
-     position in [tile_loops] of each axis's first tile-part symbol (stable within source order), so
-     the caller's [tile_loops] order picks the packed layout (see the section comment). *)
+  (* Compacting Stage (gh-ocannl-502): a single-term tile part with coefficient [c > 1] — a strided
+     window, e.g. the implicit-GEMM row of a stride-2 conv, whose source index carries [c*row] — is
+     packed densely: the tile axis is sized by the loop extent rather than the strided range, and
+     the tile store/read indices use the symbol with coefficient 1, so downstream [Tensorize]'s
+     unit-coefficient index discipline accepts the tile. Only the load's source index (and its edge
+     guard) keeps the stride. Multi-term tile parts keep the range-sized (dilated) layout: their
+     dense remap is not injective in general. *)
+  let compacted a =
+    match decomp.(a) with [ (c, s) ], _, _ when c > 1 -> Some s | _ -> None
+  in
+  (* Tile axes: source axes with a nonempty tile part; dim = the tile part's range (the loop extent
+     when compacted). Ordered by the position in [tile_loops] of each axis's first tile-part symbol
+     (stable within source order), so the caller's [tile_loops] order picks the packed layout (see
+     the section comment). *)
   let tile_axes =
     Array.filter_mapi decomp ~f:(fun a (tp, _, _) ->
         if List.is_empty tp then None
-        else Some (a, List.fold tp ~init:1 ~f:(fun acc (c, s) -> acc + (c * (extent s - 1)))))
+        else
+          match compacted a with
+          | Some s -> Some (a, extent s)
+          | None -> Some (a, List.fold tp ~init:1 ~f:(fun acc (c, s) -> acc + (c * (extent s - 1)))))
   in
   let tile_loop_pos s =
     match List.findi tile_loops ~f:(fun _ s' -> Indexing.equal_symbol s s') with
@@ -909,6 +1115,11 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
        tile axes — so no load nest is emitted; the reads are remapped to a fresh host-initialized
        constant whose buffer is packed on the host at link time and uploaded once per device into
        the constant pool. *)
+    Array.iteri decomp ~f:(fun a _ ->
+        if Option.is_some (compacted a) then
+          invalid_arg
+            "Schedule.Stage: hoisted staging does not support compacting a strided tile part (v1) \
+             — its blocked outer decomposition assumes the tile part addresses the source densely");
     if not (Host_inits.mem source) then
       invalid_arg
         ("Schedule.Stage: hoisted staging requires registered host-init data for "
@@ -984,7 +1195,7 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
              let tp, _, _ = decomp.(a) in
              normalize_affine ~terms:tp ~offset:0))
     in
-    let prec = Lazy.force source.Tn.prec in
+    let prec = Lazy.force source.Tn.storage_prec in
     let tile =
       Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
         ~label:("packed" :: source.Tn.label)
@@ -1037,7 +1248,9 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
          pack_constant_tile ~debug ~src_nd ~src_dims ~prec ~packed_dims ~sym_extents ~src_prog
            ~packed_prog));
     let llc = remap_reads ~source ~from_idcs:idcs0 ~tile ~tile_idcs:packed_read_idcs opt.llc in
-    { opt with llc })
+    (* [pack_constant_tile] zero-fills pad slots of edge tiles, so the packed buffer satisfies the
+       [zero_fringe] contract over its whole index space. *)
+    { opt with llc; zero_fringe = Set.add opt.zero_fringe tile })
   else
     (* The insertion point L*: the deepest loop that must stay outside the tile — carrying an
        outer-part symbol or a reused workgroup tile axis. *)
@@ -1051,19 +1264,19 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
     (* Serial tile loops may sit above or below L*: the load nest iterates them under fresh symbols,
      so only outer-part symbols and reused workgroup axes pin the staging point. *)
     (* Mint the tile. *)
-    let prec = Lazy.force source.Tn.prec in
+    let prec = Lazy.force source.Tn.storage_prec in
     let tile_dims = Array.map tile_axes ~f:snd in
-    (if swizzle then
-       let n = Array.length tile_dims in
-       if n < 2 then
-         invalid_arg
-           "Schedule.Stage: swizzle requires a tile with at least two axes (the minor axis is \
-            XORed against the row prefix)";
-       let c = tile_dims.(n - 1) in
-       if c < 2 || c land (c - 1) <> 0 then
-         invalid_arg
-           (Printf.sprintf
-              "Schedule.Stage: swizzle requires a power-of-two minor tile dim > 1, got %d" c));
+    if swizzle then (
+      let n = Array.length tile_dims in
+      if n < 2 then
+        invalid_arg
+          "Schedule.Stage: swizzle requires a tile with at least two axes (the minor axis is XORed \
+           against the row prefix)";
+      let c = tile_dims.(n - 1) in
+      if c < 2 || c land (c - 1) <> 0 then
+        invalid_arg
+          (Printf.sprintf
+             "Schedule.Stage: swizzle requires a power-of-two minor tile dim > 1, got %d" c));
     let tile =
       Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
         ~label:("tile" :: source.Tn.label)
@@ -1086,30 +1299,38 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
     let tile_store_idcs =
       Array.map tile_axes ~f:(fun (a, _) ->
           let tp, _, _ = decomp.(a) in
-          normalize_affine ~terms:(subst_terms tp) ~offset:0)
+          let terms =
+            match compacted a with Some s -> [ (1, load_sym s) ] | None -> subst_terms tp
+          in
+          normalize_affine ~terms ~offset:0)
     in
     let tile_read_idcs =
       Array.map tile_axes ~f:(fun (a, _) ->
           let tp, _, _ = decomp.(a) in
-          normalize_affine ~terms:tp ~offset:0)
+          let terms = match compacted a with Some s -> [ (1, s) ] | None -> tp in
+          normalize_affine ~terms ~offset:0)
     in
     let iprec = Ops.index_prec () in
     let src_dims = Lazy.force source.Tn.dims in
-    let load_stmt =
-      Set { tn = tile; idcs = tile_store_idcs; llsc = Get (source, load_src_idcs); debug = "" }
-    in
     (* Edge guards per tile axis (construct-then-fold: [apply]'s trailing simplify erases the ones
-       the loop extents prove, i.e. whenever the tile sizes divide the source extents). *)
-    let load_stmt =
-      Array.fold tile_axes ~init:load_stmt ~f:(fun stmt (a, _) ->
+       the loop extents prove, i.e. whenever the tile sizes divide the source extents). The guards
+       are [Where]-form rather than statement [If]s: an out-of-range slot stores 0 — the add-reduce
+       accumulation identity — instead of staying uninitialized, so edge tiles of a non-dividing or
+       padded staging (gh-ocannl-485) are safe to read over their whole index space. The tile is
+       recorded in {!Low_level.optimized.zero_fringe} accordingly. *)
+    let guarded_get =
+      Array.fold tile_axes
+        ~init:(Get (source, load_src_idcs))
+        ~f:(fun rhs (a, _) ->
           let cond =
             Binop
               ( Ops.Cmplt,
                 (Embed_index load_src_idcs.(a), iprec),
                 (Constant (Float.of_int src_dims.(a)), iprec) )
           in
-          If { cond = (cond, iprec); body = stmt })
+          Ternop (Ops.Where, (cond, iprec), (rhs, prec), (Constant 0., prec)))
     in
+    let load_stmt = Set { tn = tile; idcs = tile_store_idcs; llsc = guarded_get; debug = "" } in
     (* Lane-aware cooperative staging (docs/proposals/tensorize-mma.md, "Lane-aware Stage"): a fresh
        extent-[w] [Workgroup] lane loop will wrap the load nest, so the loads are partitioned (or
        restricted) along the same hardware slot the tensorized micro-kernel's lane loop binds —
@@ -1291,6 +1512,7 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
       workgroup_shared =
         (if shared then Set.add opt.workgroup_shared tile else opt.workgroup_shared);
       swizzled = (if swizzle then Set.add opt.swizzled tile else opt.swizzled);
+      zero_fringe = Set.add opt.zero_fringe tile;
     }
 
 (** {2 [Privatize]: accumulator privatization}
@@ -1505,7 +1727,7 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
       in
       let scalar_acc = Array.is_empty tile_axes in
       let tile_dims = if scalar_acc then [| 1 |] else Array.map tile_axes ~f:snd in
-      let prec = Lazy.force target.Tn.prec in
+      let prec = Lazy.force target.Tn.storage_prec in
       let tile =
         Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
           ~label:("acc" :: target.Tn.label)
@@ -1581,6 +1803,471 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
         ])
   |> fun llc -> { opt with llc }
 
+(** {2 [Split_reduce]: deterministic two-pass split reduction (gh-ocannl-484)}
+
+    Parallel reductions without atomics. The Serial reduction loop [axis] is split into [num_blocks]
+    contiguous chunks; each chunk accumulates into its own row of a fresh scratch node [partials] of
+    dims [num_blocks x target-dims] (minted in the tile namespace, placed [On_device], registered in
+    the traced store), initialized to the accumulation identity; a synthesized combine statement then
+    folds the partials into [target] in a fixed balanced-tree order. Both passes are ordinary
+    statements of the routine: the fresh block loop is freely annotatable (its index pins the
+    partials row, so parallelizing it is race-free), the [partials] producer/consumer pair is
+    exactly the materialized cross-nest edge kernel fission cuts at, and the combine tree is a
+    function of the schedule alone — reproducible run to run, unlike atomics. Within each chunk the
+    original serial order and rounding are preserved; across chunks the reduction is reassociated
+    (the same license as [Swap] of accumulations), so results are deterministic {e per schedule},
+    not bitwise-equal to the unsplit serial reduction — schedule identity pins numerics.
+
+    Two accumulation forms are recognized in the [axis] subtree (which must contain no other access
+    of [target], and the rest of the statement must not touch [target] either — its combined value
+    exists only after the combine statement):
+
+    - Static: a single rmw [Set] — [target\[idcs\] := target\[idcs\] ⊕ e] with
+      [⊕ ∈ {Add, Max, Min, Mul}] (or FMA), [idcs] free of [axis]. Each loop enclosing [axis] in the
+      statement must pin exactly one component of [idcs] (injectively, one symbol per component):
+      distinct enclosing iterations then use distinct partial cells — no partial is re-initialized —
+      and the combine nest re-iterates exactly the written cells through per-component fresh
+      symbols. The per-block init [partials := identity] sits inside the block loop, so no separate
+      zeroing pass is needed.
+    - Dynamic (the gh-466 embedding-backward scatter): a single [Set_dynamic] add-accumulation of
+      its own row ([Get_dynamic] rmw form as built by [rewrite_one_hot_reductions]), possibly under
+      guards. The write is redirected to [partials] with the block index prepended (dynamic axis
+      shifted by one): within a block, colliding rows stay serial; across blocks, rows live in
+      disjoint partials slices — so the block loop parallelizes what the scatter alone cannot
+      (gh-484 task 2). Rows are data-dependent, so [partials] is zeroed by a preceding whole-node
+      [Zero_out] statement (its own fission segment) and the combine covers all of [target]. *)
+
+let apply_split_reduce ~axis ~target ~num_blocks ~block_index ~inner_index ~combine_indices
+    (opt : Low_level.optimized) : Low_level.optimized =
+  let open Low_level in
+  if num_blocks < 2 then invalid_arg "Schedule.Split_reduce: num_blocks must be at least 2";
+  let tgt_dims = Lazy.force target.Tn.dims in
+  let rank = Array.length tgt_dims in
+  if List.length combine_indices <> rank then
+    invalid_arg
+      (Printf.sprintf
+         "Schedule.Split_reduce: %d combine indices for a rank-%d target (mint the op with \
+          Schedule.split_reduce)"
+         (List.length combine_indices) rank);
+  let prec = Lazy.force target.Tn.storage_prec in
+  let iprec = Ops.index_prec () in
+  (* Locate the top-level statement holding the axis loop; the combine statement goes right after
+     it (and the scatter form's scratch zeroing right before it). *)
+  let stmts = flat_lines [ opt.llc ] in
+  let stmt =
+    match List.find stmts ~f:(fun s -> Option.is_some (find_loop axis s)) with
+    | Some s -> s
+    | None ->
+        invalid_arg
+          ("Schedule.Split_reduce: no statement-level For_loop with index "
+         ^ Indexing.symbol_ident axis ^ " in this routine")
+  in
+  (* [target] accesses confined to the axis subtree: the rest of the statement (checked here on the
+     statement with the subtree excised) must not touch it. *)
+  let rec touches llc =
+    match llc with
+    | Noop | Comment _ | Staged_compilation _ | Declare_local _ | Workgroup_barrier -> false
+    | Tile_mma { d = d_tn, _; a = a_tn, _; b = b_tn, _; fallback; _ } ->
+        Tn.equal d_tn target || Tn.equal a_tn target || Tn.equal b_tn target || touches fallback
+    | Zero_out tn -> Tn.equal tn target
+    | Seq (a, b) -> touches a || touches b
+    | For_loop { body; _ } -> touches body
+    | Set { tn; llsc; _ } -> Tn.equal tn target || touches_scalar llsc
+    | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
+        Tn.equal tn target || touches_scalar v || touches_scalar llsc
+    | Set_from_vec { tn; arg = a, _; _ } -> Tn.equal tn target || touches_scalar a
+    | Set_local (_, llsc) -> touches_scalar llsc
+    | If { cond = c, _; body } -> touches_scalar c || touches body
+  and touches_scalar (llsc : scalar_t) =
+    match llsc with
+    | Local_scope { body; _ } -> touches body
+    | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ | Get_merge_buffer _ -> false
+    | Get (tn, _) -> Tn.equal tn target
+    | Get_dynamic { tn; dyn_value = v, _; _ } -> Tn.equal tn target || touches_scalar v
+    | Ternop (_, (a, _), (b, _), (c, _)) ->
+        touches_scalar a || touches_scalar b || touches_scalar c
+    | Binop (_, (a, _), (b, _)) -> touches_scalar a || touches_scalar b
+    | Unop (_, (a, _)) -> touches_scalar a
+  in
+  if touches (rewrite_loop ~what:"Schedule.Split_reduce" ~sym:axis stmt ~f:(fun _ -> Noop)) then
+    invalid_arg
+      ("Schedule.Split_reduce: " ^ Tn.debug_name target
+     ^ " is accessed in the same statement outside the reduction loop — its combined value only \
+        exists after the combine statement");
+  (* Loops and If guards enclosing the axis loop within the statement. *)
+  let rec enclosing_path path guarded llc =
+    match llc with
+    | For_loop { index; _ } when Indexing.equal_symbol index axis -> Some (List.rev path, guarded)
+    | For_loop { index; from_; to_; body; trace_it; axis = ty } ->
+        enclosing_path
+          ({ index; from_; to_; body = Noop; trace_it; axis = ty } :: path)
+          guarded body
+    | Seq (a, b) -> (
+        match enclosing_path path guarded a with
+        | Some _ as r -> r
+        | None -> enclosing_path path guarded b)
+    | If { body; _ } -> enclosing_path path true body
+    | _ -> None
+  in
+  let enclosing, guarded_path =
+    match enclosing_path [] false stmt with Some r -> r | None -> assert false
+  in
+  let block_it = Indexing.Iterator block_index in
+  let mint_partials () =
+    let partials =
+      Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
+        ~label:("partials" :: target.Tn.label)
+        ~unpadded_dims:(lazy (Array.append [| num_blocks |] tgt_dims))
+        ~padding:(lazy None)
+        ()
+    in
+    Tn.Placements.update opt.Low_level.optimize_ctx.placements partials Tn.On_device 184;
+    partials
+  in
+  (* The fixed-order balanced combine tree: a pure function of the schedule ([num_blocks]), so a
+     given schedule always computes bitwise-identical results, however the passes are annotated. *)
+  let build_combine ~partials ~op ~c_idcs ~loops =
+    let rec tree lo hi =
+      if hi - lo = 1 then Get (partials, Array.append [| Indexing.Fixed_idx lo |] c_idcs)
+      else
+        let mid = lo + ((hi - lo) / 2) in
+        Binop (op, (tree lo mid, prec), (tree mid hi, prec))
+    in
+    let set =
+      Set
+        {
+          tn = target;
+          idcs = c_idcs;
+          llsc = Binop (op, (Get (target, c_idcs), prec), (tree 0 num_blocks, prec));
+          debug = "";
+        }
+    in
+    List.fold_right loops ~init:set ~f:(fun (s, lo, hi) body ->
+        For_loop { index = s; from_ = lo; to_ = hi; body; trace_it = false; axis = Serial })
+  in
+  let combine_stmt = ref Noop in
+  let zero_stmt = ref None in
+  let rewritten =
+    rewrite_loop ~what:"Schedule.Split_reduce" ~sym:axis stmt ~f:(fun fc ->
+        if not (equal_axis_type fc.axis Serial) then
+          invalid_arg "Schedule.Split_reduce: the reduction loop must be Serial";
+        if fc.from_ <> 0 then
+          invalid_arg
+            ("Schedule.Split_reduce: loop " ^ Indexing.symbol_ident axis
+           ^ " must start at 0 (lowering guarantees this)");
+        let n = fc.to_ + 1 in
+        (* Scan the subtree for the accumulation of [target]. *)
+        let writes = ref [] and dyn_writes = ref [] in
+        let reads = ref [] and dyn_reads = ref [] in
+        let rec scan llc =
+          match llc with
+          | Noop | Comment _ | Declare_local _ | Workgroup_barrier -> ()
+          | Staged_compilation _ ->
+              invalid_arg
+                "Schedule.Split_reduce: opaque Staged_compilation under the reduction loop"
+          | Tile_mma _ -> invalid_arg "Schedule.Split_reduce: apply Split_reduce before Tensorize"
+          | Zero_out tn ->
+              if Tn.equal tn target then
+                invalid_arg
+                  "Schedule.Split_reduce: Zero_out of the target inside the reduction loop"
+          | Seq (a, b) ->
+              scan a;
+              scan b
+          | For_loop { body; _ } -> scan body
+          | Set { tn; idcs; llsc; _ } ->
+              if Tn.equal tn target then writes := (idcs, llsc) :: !writes;
+              scan_scalar llsc
+          | Set_dynamic { tn; idcs; dyn_axis; dyn_value = v, _; llsc; _ } ->
+              if Tn.equal tn target then dyn_writes := (idcs, dyn_axis, v, llsc) :: !dyn_writes;
+              scan_scalar v;
+              scan_scalar llsc
+          | Set_from_vec { tn; arg = a, _; _ } ->
+              if Tn.equal tn target then
+                invalid_arg "Schedule.Split_reduce: vector writes to the target are unsupported";
+              scan_scalar a
+          | Set_local (_, llsc) -> scan_scalar llsc
+          | If { cond = c, _; body } ->
+              scan_scalar c;
+              scan body
+        and scan_scalar (llsc : scalar_t) =
+          match llsc with
+          | Local_scope { body; _ } -> scan body
+          | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ | Get_merge_buffer _ -> ()
+          | Get (tn, idcs) -> if Tn.equal tn target then reads := idcs :: !reads
+          | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, _ } ->
+              if Tn.equal tn target then dyn_reads := (idcs, dyn_axis) :: !dyn_reads;
+              scan_scalar v
+          | Ternop (_, (a, _), (b, _), (c, _)) ->
+              scan_scalar a;
+              scan_scalar b;
+              scan_scalar c
+          | Binop (_, (a, _), (b, _)) ->
+              scan_scalar a;
+              scan_scalar b
+          | Unop (_, (a, _)) -> scan_scalar a
+        in
+        scan fc.body;
+        let chunk = (n + num_blocks - 1) / num_blocks in
+        let subst body =
+          map_code
+            ~fidx:
+              (subst_axis_index ~sym:axis
+                 ~by:{ terms = [ (chunk, block_index); (1, inner_index) ]; offset = 0 })
+            body
+        in
+        (* Remainder guard, construct-then-fold exactly as for [Split]. *)
+        let guard body =
+          if chunk * num_blocks = n then body
+          else
+            let cond =
+              Binop
+                ( Ops.Cmplt,
+                  ( Embed_index
+                      (Indexing.Affine
+                         { symbols = [ (chunk, block_index); (1, inner_index) ]; offset = 0 }),
+                    iprec ),
+                  (Constant (Float.of_int n), iprec) )
+            in
+            If { cond = (cond, iprec); body }
+        in
+        let pass1 ~init body =
+          let inner =
+            For_loop
+              {
+                index = inner_index;
+                from_ = 0;
+                to_ = chunk - 1;
+                body;
+                trace_it = fc.trace_it;
+                axis = Serial;
+              }
+          in
+          For_loop
+            {
+              index = block_index;
+              from_ = 0;
+              to_ = num_blocks - 1;
+              body = (match init with Some i -> Seq (i, inner) | None -> inner);
+              trace_it = fc.trace_it;
+              axis = Serial;
+            }
+        in
+        match (!writes, !dyn_writes) with
+        | [], [] ->
+            invalid_arg
+              ("Schedule.Split_reduce: " ^ Tn.debug_name target
+             ^ " is not written under the reduction loop")
+        | [ (idcs, llsc) ], [] ->
+            (* The static form: [target[idcs] := target[idcs] ⊕ e]. *)
+            if not (List.is_empty !dyn_reads) then
+              invalid_arg
+                ("Schedule.Split_reduce: mixed static write and dynamic reads of "
+               ^ Tn.debug_name target);
+            if guarded_path then
+              invalid_arg
+                "Schedule.Split_reduce: the reduction loop sits under an If guard (v1 supports \
+                 unguarded static accumulations)";
+            let acc_is = function
+              | Get (g, gi) -> Tn.equal g target && [%equal: Indexing.axis_index array] gi idcs
+              | _ -> false
+            in
+            let op =
+              match llsc with
+              | Binop (op, (t, _), _) when acc_is t -> op
+              | Binop (op, _, (t, _)) when acc_is t -> op
+              | Ternop (Ops.FMA, _, _, (t, _)) when acc_is t -> Ops.Add
+              | _ ->
+                  invalid_arg
+                    ("Schedule.Split_reduce: the write of " ^ Tn.debug_name target
+                   ^ " is not a read-modify-write accumulation")
+            in
+            let identity =
+              match op with
+              | Ops.Add -> 0.
+              | Ops.Max -> Float.neg_infinity
+              | Ops.Min -> Float.infinity
+              | Ops.Mul -> 1.
+              | _ ->
+                  invalid_arg
+                    ("Schedule.Split_reduce: unsupported accumulation operator "
+                    ^ Sexp.to_string (Ops.sexp_of_binop op))
+            in
+            (match !reads with
+            | [ ridcs ] when [%equal: Indexing.axis_index array] ridcs idcs -> ()
+            | _ ->
+                invalid_arg
+                  ("Schedule.Split_reduce: v1 requires the only read of " ^ Tn.debug_name target
+                 ^ " under the reduction loop to be the accumulation's own running total"));
+            (* Injectivity discipline: every enclosing loop pins exactly one component of the
+               accumulation cell, each component mentions at most one symbol, and only enclosing
+               symbols occur — distinct enclosing iterations then hit distinct partial cells (the
+               per-block init runs once per cell) and the combine nest re-iterates exactly the
+               written cells. *)
+            let enclosing_syms = List.map enclosing ~f:(fun fl -> fl.index) in
+            let comp_terms =
+              Array.map idcs ~f:(fun idx ->
+                  match terms_of_index idx with
+                  | None -> invalid_arg "Schedule.Split_reduce: Concat indices are unsupported"
+                  | Some (terms, off) -> (terms, off))
+            in
+            let all_syms = Array.to_list comp_terms |> List.concat_map ~f:(fun (t, _) -> List.map t ~f:snd) in
+            if List.exists all_syms ~f:(Indexing.equal_symbol axis) then
+              invalid_arg
+                ("Schedule.Split_reduce: the accumulation cell mentions the reduction loop "
+               ^ Indexing.symbol_ident axis ^ " — not a reduction over it");
+            List.iter all_syms ~f:(fun s ->
+                if not (List.mem enclosing_syms s ~equal:Indexing.equal_symbol) then
+                  invalid_arg
+                    ("Schedule.Split_reduce: the accumulation cell mentions "
+                   ^ Indexing.symbol_ident s
+                   ^ ", which is not bound by a loop enclosing the reduction loop in this \
+                      statement"));
+            List.iter enclosing_syms ~f:(fun s ->
+                match List.count all_syms ~f:(Indexing.equal_symbol s) with
+                | 1 -> ()
+                | 0 ->
+                    invalid_arg
+                      ("Schedule.Split_reduce: enclosing loop " ^ Indexing.symbol_ident s
+                     ^ " does not index the accumulation cell — Swap it inside "
+                     ^ Indexing.symbol_ident axis ^ " (or split-reduce it) first")
+                | _ ->
+                    invalid_arg
+                      ("Schedule.Split_reduce: enclosing loop " ^ Indexing.symbol_ident s
+                     ^ " indexes the accumulation cell more than once"));
+            Array.iter comp_terms ~f:(fun (terms, _) ->
+                if List.length terms > 1 then
+                  invalid_arg
+                    "Schedule.Split_reduce: v1 requires each component of the accumulation cell \
+                     to mention at most one symbol");
+            let partials = mint_partials () in
+            ignore (get_node opt.traced_store partials : traced_array);
+            let p_idcs = Array.append [| block_it |] idcs in
+            let body =
+              remap_reads ~writes:true ~source:target ~from_idcs:idcs ~tile:partials
+                ~tile_idcs:p_idcs (subst fc.body)
+            in
+            let init =
+              Set { tn = partials; idcs = p_idcs; llsc = Constant identity; debug = "" }
+            in
+            let range_of s =
+              List.find_exn enclosing ~f:(fun fl -> Indexing.equal_symbol fl.index s)
+            in
+            let combine_loops = ref [] in
+            let c_idcs =
+              Array.mapi comp_terms ~f:(fun a (terms, off) ->
+                  let ci = List.nth_exn combine_indices a in
+                  match terms with
+                  | [] -> Indexing.Fixed_idx off
+                  | [ (c, s) ] ->
+                      let fl = range_of s in
+                      combine_loops := (ci, fl.from_, fl.to_) :: !combine_loops;
+                      normalize_affine ~terms:[ (c, ci) ] ~offset:off
+                  | _ -> assert false)
+            in
+            combine_stmt :=
+              build_combine ~partials ~op ~c_idcs ~loops:(List.rev !combine_loops);
+            pass1 ~init:(Some init) (guard body)
+        | [], [ (idcs, dyn_axis, dv_scalar, llsc) ] ->
+            (* The dynamic (scatter) form, gh-466: [target[.., e, ..] += g] with [e] data-dependent
+               (possibly under guards — a guarded pad iteration merely leaves its partials at 0). *)
+            if not (List.is_empty !reads) then
+              invalid_arg
+                ("Schedule.Split_reduce: mixed dynamic write and static reads of "
+               ^ Tn.debug_name target);
+            let acc_is = function
+              | Get_dynamic { tn = g; idcs = gi; dyn_axis = ga; dyn_value = gv, _ } ->
+                  Tn.equal g target && ga = dyn_axis
+                  && [%equal: Indexing.axis_index array] gi idcs
+                  && equal_scalar_t gv dv_scalar
+              | _ -> false
+            in
+            (match llsc with
+            | Binop (Ops.Add, (t, _), _) when acc_is t -> ()
+            | Binop (Ops.Add, _, (t, _)) when acc_is t -> ()
+            | _ ->
+                invalid_arg
+                  ("Schedule.Split_reduce: the dynamic write of " ^ Tn.debug_name target
+                 ^ " is not an add-accumulation of its own row (the gh-466 scatter form)"));
+            (match !dyn_reads with
+            | [ (ridcs, ra) ] when ra = dyn_axis && [%equal: Indexing.axis_index array] ridcs idcs
+              ->
+                ()
+            | _ ->
+                invalid_arg
+                  ("Schedule.Split_reduce: v1 requires the only read of " ^ Tn.debug_name target
+                 ^ " under the reduction loop to be the scatter's own row"));
+            let partials = mint_partials () in
+            let traced = get_node opt.traced_store partials in
+            traced.zeroed_out <- true;
+            let rec redirect llc =
+              match llc with
+              | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _
+              | Workgroup_barrier | Tile_mma _ ->
+                  llc
+              | Seq (a, b) -> Seq (redirect a, redirect b)
+              | For_loop fc' -> For_loop { fc' with body = redirect fc'.body }
+              | Set ({ llsc; _ } as s) -> Set { s with llsc = redirect_scalar llsc }
+              | Set_dynamic { tn; idcs; dyn_axis; dyn_value = v, p; llsc; debug }
+                when Tn.equal tn target ->
+                  Set_dynamic
+                    {
+                      tn = partials;
+                      idcs = Array.append [| block_it |] idcs;
+                      dyn_axis = dyn_axis + 1;
+                      dyn_value = (redirect_scalar v, p);
+                      llsc = redirect_scalar llsc;
+                      debug;
+                    }
+              | Set_dynamic ({ dyn_value = v, p; llsc; _ } as sd) ->
+                  Set_dynamic
+                    { sd with dyn_value = (redirect_scalar v, p); llsc = redirect_scalar llsc }
+              | Set_from_vec ({ arg = a, p; _ } as sv) ->
+                  Set_from_vec { sv with arg = (redirect_scalar a, p) }
+              | Set_local (id, llsc) -> Set_local (id, redirect_scalar llsc)
+              | If { cond = c, p; body } ->
+                  If { cond = (redirect_scalar c, p); body = redirect body }
+            and redirect_scalar (llsc : scalar_t) : scalar_t =
+              match llsc with
+              | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, p } when Tn.equal tn target ->
+                  Get_dynamic
+                    {
+                      tn = partials;
+                      idcs = Array.append [| block_it |] idcs;
+                      dyn_axis = dyn_axis + 1;
+                      dyn_value = (redirect_scalar v, p);
+                    }
+              | Get_dynamic ({ dyn_value = v, p; _ } as gd) ->
+                  Get_dynamic { gd with dyn_value = (redirect_scalar v, p) }
+              | Local_scope ({ body; _ } as ls) -> Local_scope { ls with body = redirect body }
+              | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _
+              | Embed_index _ ->
+                  llsc
+              | Ternop (op, (a, pa), (b, pb), (c, pc)) ->
+                  Ternop
+                    (op, (redirect_scalar a, pa), (redirect_scalar b, pb), (redirect_scalar c, pc))
+              | Binop (op, (a, pa), (b, pb)) ->
+                  Binop (op, (redirect_scalar a, pa), (redirect_scalar b, pb))
+              | Unop (op, (a, pa)) -> Unop (op, (redirect_scalar a, pa))
+            in
+            let body = redirect (subst fc.body) in
+            zero_stmt := Some (Zero_out partials);
+            let c_idcs = Array.of_list_map combine_indices ~f:(fun s -> Indexing.Iterator s) in
+            let loops = List.mapi combine_indices ~f:(fun a s -> (s, 0, tgt_dims.(a) - 1)) in
+            combine_stmt := build_combine ~partials ~op:Ops.Add ~c_idcs ~loops;
+            pass1 ~init:None (guard body)
+        | _ ->
+            invalid_arg
+              ("Schedule.Split_reduce: multiple writes of " ^ Tn.debug_name target
+             ^ " under the reduction loop (v1 supports a single accumulation)"))
+  in
+  let new_stmts =
+    List.concat_map stmts ~f:(fun s ->
+        if phys_equal s stmt then
+          (match !zero_stmt with Some z -> [ z ] | None -> []) @ [ rewritten; !combine_stmt ]
+        else [ s ])
+  in
+  { opt with llc = unflat_lines new_stmts }
+
 (** After [Tensorize] has replaced the inner micro-kernel, contract the enclosing chain of serial
     loops that carry the operands but not the accumulator — for a multi-window conv the whole
     kernel-window nest [kh; kw], not just the innermost loop (gh-ocannl-501). The search is
@@ -1590,12 +2277,23 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
     ordinary scalar semantics: lane 0 initializes it, each per-iteration [Tile_mma] accumulates into
     it, and lane 0 stores it back. Metal recognizes the marked three-part region and maps the tile
     to persistent simdgroup fragments; unsupported backend calls keep the local-array fallback. *)
-let contract_tensorized_accumulator ~lane (opt : Low_level.optimized) : Low_level.optimized =
+let contract_tensorized_accumulator ~lane ~(masks : pad_mask list) (opt : Low_level.optimized) :
+    Low_level.optimized =
   let open Low_level in
   (* [Tensorize] currently identifies one micro-kernel site per scheduled routine. Keep contraction
      single-shot to avoid conflating independent accumulator lifetimes if multi-site tensorization
      is introduced; that extension should promote and mark each site explicitly. *)
   let promoted = ref None in
+  (* Pad masks (gh-ocannl-485) force the contraction: with the accumulator retargeted to a padded
+     scratch fragment, only the valid region round-trips through the target — the transfers below
+     carry the masks. On a GPU pipeline (recognized by staged workgroup-shared tiles) the masked
+     fragment is placed in workgroup-shared memory: the guarded transfers are not recognizable as a
+     fragment-resident scope, and per-thread [Local] arrays are not loadable by the simdgroup/wmma
+     intrinsics — a threadgroup-resident fragment keeps the intrinsic path firing, at the cost of a
+     per-statement load/store round-trip and a barrier pair around the reduction loop. *)
+  let masked = not (List.is_empty masks) in
+  let shared_frag = masked && not (Set.is_empty opt.workgroup_shared) in
+  let iprec = Ops.index_prec () in
   let mentions sym idx =
     match terms_of_index idx with
     | Some (terms, _) -> List.exists terms ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
@@ -1668,7 +2366,6 @@ let contract_tensorized_accumulator ~lane (opt : Low_level.optimized) : Low_leve
     | None -> invalid_arg "Schedule.Tensorize: Concat accumulator indices are unsupported"
   in
   let lane0 p body =
-    let iprec = Ops.index_prec () in
     let cond =
       Binop (Ops.Cmpeq, (Embed_index (Indexing.Iterator lane), iprec), (Constant 0., iprec))
     in
@@ -1681,6 +2378,108 @@ let contract_tensorized_accumulator ~lane (opt : Low_level.optimized) : Low_leve
         trace_it = false;
         axis = Workgroup;
       }
+  in
+  (* The shared core of the two contraction sites: mint the fragment, retarget the [Tile_mma] (and
+     its fallback's writes) inside [body] via [replace], and assemble
+     [init-load; (barrier;) reloop body'; (barrier;) store-back] — the transfers guarded by the pad
+     masks over the fresh fragment symbols: the init-load [Where]s out-of-range slots to 0 and the
+     store-back [If]s them away, so only the valid region of the padded block round-trips through
+     [target]. *)
+  let contract_around ~target ~d_base ~m ~n ~fallback ~simd_width
+      ~(reloop : Low_level.t -> Low_level.t) ~(body : Low_level.t) =
+    match (fallback_indices target fallback, fallback_axes fallback) with
+    | Some original_d_idcs, Some (i, j) ->
+        let prec = Lazy.force target.Tn.storage_prec in
+        let fragment =
+          Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
+            ~label:("fragment" :: target.Tn.label)
+            ~unpadded_dims:(lazy [| m; n |])
+            ~padding:(lazy None)
+            ()
+        in
+        Tn.Placements.update opt.optimize_ctx.placements fragment Tn.Local 178;
+        ignore (get_node opt.traced_store fragment : traced_array);
+        let fragment_idcs = [| Indexing.Iterator i; Indexing.Iterator j |] in
+        let fragment_base = [| Indexing.Fixed_idx 0; Indexing.Fixed_idx 0 |] in
+        let fallback =
+          remap_reads ~writes:true ~source:target ~from_idcs:original_d_idcs ~tile:fragment
+            ~tile_idcs:fragment_idcs fallback
+        in
+        let replaced = ref false in
+        let rec replace = function
+          | Tile_mma ({ lane = l; _ } as tm') when same_lane l ->
+              replaced := true;
+              Tile_mma { tm' with d = (fragment, fragment_base); fallback }
+          | Seq (a, b) -> Seq (replace a, replace b)
+          | For_loop f -> For_loop { f with body = replace f.body }
+          | If ({ body; _ } as x) -> If { x with body = replace body }
+          | other -> other
+        in
+        let body = replace body in
+        assert !replaced;
+        let fi = Indexing.get_symbol () and fj = Indexing.get_symbol () in
+        let target_idcs = Array.copy d_base in
+        let rank = Array.length target_idcs in
+        if rank < 2 then invalid_arg "Schedule.Tensorize: accumulator rank must be at least 2";
+        target_idcs.(rank - 2) <- add_symbol target_idcs.(rank - 2) fi;
+        target_idcs.(rank - 1) <- add_symbol target_idcs.(rank - 1) fj;
+        let local_idcs = [| Indexing.Iterator fi; Indexing.Iterator fj |] in
+        let mask_cond pm =
+          let role = if pm.pm_row then fi else fj in
+          let idx = normalize_affine ~terms:((1, role) :: pm.pm_terms) ~offset:pm.pm_offset in
+          Binop
+            (Ops.Cmplt, (Embed_index idx, iprec), (Constant (Float.of_int pm.pm_bound), iprec))
+        in
+        let transfer ~into_fragment =
+          let stmt =
+            if into_fragment then
+              let llsc =
+                List.fold masks
+                  ~init:(Get (target, target_idcs))
+                  ~f:(fun rhs pm ->
+                    Ternop (Ops.Where, (mask_cond pm, iprec), (rhs, prec), (Constant 0., prec)))
+              in
+              Set { tn = fragment; idcs = local_idcs; llsc; debug = "" }
+            else
+              List.fold masks
+                ~init:
+                  (Set
+                     {
+                       tn = target;
+                       idcs = target_idcs;
+                       llsc = Get (fragment, local_idcs);
+                       debug = "";
+                     })
+                ~f:(fun stmt pm -> If { cond = (mask_cond pm, iprec); body = stmt })
+          in
+          For_loop
+            {
+              index = fi;
+              from_ = 0;
+              to_ = m - 1;
+              trace_it = false;
+              axis = Serial;
+              body =
+                For_loop
+                  {
+                    index = fj;
+                    from_ = 0;
+                    to_ = n - 1;
+                    trace_it = false;
+                    axis = Serial;
+                    body = stmt;
+                  };
+            }
+        in
+        promoted := Some fragment;
+        Some
+          (unflat_lines
+             ([ lane0 simd_width (transfer ~into_fragment:true) ]
+             @ (if shared_frag then [ Workgroup_barrier ] else [])
+             @ [ reloop body ]
+             @ (if shared_frag then [ Workgroup_barrier ] else [])
+             @ [ lane0 simd_width (transfer ~into_fragment:false) ]))
+    | _ -> None
   in
   (* Outermost-first: attempt the contraction at each serial loop before descending, so the
      transfers land around the outermost loop of the qualifying chain (an inner qualifying loop is
@@ -1708,104 +2507,83 @@ let contract_tensorized_accumulator ~lane (opt : Low_level.optimized) : Low_leve
            && (not (Tn.equal target a))
            && (not (Tn.equal target b))
            && List.for_all (bound_symbols [] fc.body) ~f:(fun s -> not (idcs_mention s d_base))
-           && not (touches_outside_tile target fc.body) -> (
-        match (fallback_indices target fallback, fallback_axes fallback, lane_extent fc.body) with
-        | Some original_d_idcs, Some (i, j), Some simd_width ->
-            let prec = Lazy.force target.Tn.prec in
-            let fragment =
-              Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
-                ~label:("fragment" :: target.Tn.label)
-                ~unpadded_dims:(lazy [| m; n |])
-                ~padding:(lazy None)
-                ()
-            in
-            Tn.Placements.update opt.optimize_ctx.placements fragment Tn.Local 178;
-            ignore (get_node opt.traced_store fragment : traced_array);
-            let fragment_idcs = [| Indexing.Iterator i; Indexing.Iterator j |] in
-            let fragment_base = [| Indexing.Fixed_idx 0; Indexing.Fixed_idx 0 |] in
-            let fallback =
-              remap_reads ~writes:true ~source:target ~from_idcs:original_d_idcs ~tile:fragment
-                ~tile_idcs:fragment_idcs fallback
-            in
-            let replaced = ref false in
-            let rec replace = function
-              | Tile_mma ({ lane = l; _ } as tm') when same_lane l ->
-                  replaced := true;
-                  Tile_mma { tm' with d = (fragment, fragment_base); fallback }
-              | Seq (a, b) -> Seq (replace a, replace b)
-              | For_loop f -> For_loop { f with body = replace f.body }
-              | If ({ body; _ } as x) -> If { x with body = replace body }
-              | other -> other
-            in
-            let body = replace fc.body in
-            assert !replaced;
-            let fi = Indexing.get_symbol () and fj = Indexing.get_symbol () in
-            let target_idcs = Array.copy d_base in
-            let rank = Array.length target_idcs in
-            if rank < 2 then invalid_arg "Schedule.Tensorize: accumulator rank must be at least 2";
-            target_idcs.(rank - 2) <- add_symbol target_idcs.(rank - 2) fi;
-            target_idcs.(rank - 1) <- add_symbol target_idcs.(rank - 1) fj;
-            let local_idcs = [| Indexing.Iterator fi; Indexing.Iterator fj |] in
-            let transfer ~into_fragment =
-              let stmt =
-                if into_fragment then
-                  Set
-                    {
-                      tn = fragment;
-                      idcs = local_idcs;
-                      llsc = Get (target, target_idcs);
-                      debug = "";
-                    }
-                else
-                  Set
-                    {
-                      tn = target;
-                      idcs = target_idcs;
-                      llsc = Get (fragment, local_idcs);
-                      debug = "";
-                    }
-              in
-              For_loop
-                {
-                  index = fi;
-                  from_ = 0;
-                  to_ = m - 1;
-                  trace_it = false;
-                  axis = Serial;
-                  body =
-                    For_loop
-                      {
-                        index = fj;
-                        from_ = 0;
-                        to_ = n - 1;
-                        trace_it = false;
-                        axis = Serial;
-                        body = stmt;
-                      };
-                }
-            in
-            promoted := Some fragment;
-            Some
-              (unflat_lines
-                 [
-                   lane0 simd_width (transfer ~into_fragment:true);
-                   for_loop { fc with body };
-                   lane0 simd_width (transfer ~into_fragment:false);
-                 ])
-        | _ -> None)
+           && (not (touches_outside_tile target fc.body))
+           && List.for_all masks ~f:(fun pm ->
+                  (* The mask guards must be expressible at the transfer site: every outer term of
+                     a guard index must still be bound there. *)
+                  List.for_all pm.pm_terms ~f:(fun (_, s) ->
+                      (not (Indexing.equal_symbol s fc.index))
+                      && not
+                           (List.mem (bound_symbols [] fc.body) s ~equal:Indexing.equal_symbol)))
+      -> (
+        match lane_extent fc.body with
+        | Some simd_width ->
+            contract_around ~target ~d_base ~m ~n ~fallback ~simd_width
+              ~reloop:(fun body -> for_loop { fc with body })
+              ~body:fc.body
+        | None -> None)
     | _ -> None
   in
   let llc = rewrite opt.llc in
+  (* Statement-site fallback for masked tensorization without a qualifying enclosing serial loop
+     (e.g. a whole-extent block with no reduction blocking, or an extent-1 block loop): the
+     transfers wrap the lane loop of the [Tile_mma] itself. *)
+  let llc =
+    if masked && Option.is_none !promoted then (
+      let rec go llc =
+        match llc with
+        | For_loop ({ index; from_; to_; body; _ } as fc)
+          when same_lane index && Option.is_none !promoted -> (
+            match matching_tiles [] body with
+            | [ Tile_mma { d = target, _; a = a, _; b = b, _; _ } ]
+              when Tn.equal target a || Tn.equal target b ->
+                invalid_arg
+                  ("Schedule.Tensorize: pad-masked accumulator " ^ Tn.debug_name target
+                 ^ " coincides with an operand")
+            | [ Tile_mma { d = target, d_base; m; n; fallback; _ } ] -> (
+                match
+                  contract_around ~target ~d_base ~m ~n ~fallback ~simd_width:(to_ - from_ + 1)
+                    ~reloop:Fn.id ~body:(For_loop fc)
+                with
+                | Some replaced -> replaced
+                | None -> For_loop fc)
+            | _ -> For_loop { fc with body = go body })
+        | Seq (a, b) ->
+            let a = go a in
+            Seq (a, go b)
+        | For_loop fc -> For_loop { fc with body = go fc.body }
+        | If ({ body; _ } as x) -> If { x with body = go body }
+        | other -> other
+      in
+      go llc)
+    else llc
+  in
+  if masked && Option.is_none !promoted then
+    invalid_arg
+      "Schedule.Tensorize: pad masks require the accumulator contraction, but no contraction site \
+       qualified (an outer term of a pad guard may be bound inside the reduction loop)";
   match !promoted with
   | None -> { opt with llc }
   | Some fragment ->
-      { opt with llc; simdgroup_fragments = Set.add opt.simdgroup_fragments fragment }
+      if masked then
+        {
+          opt with
+          llc;
+          workgroup_shared =
+            (if shared_frag then Set.add opt.workgroup_shared fragment else opt.workgroup_shared);
+        }
+      else { opt with llc; simdgroup_fragments = Set.add opt.simdgroup_fragments fragment }
 
 let apply_tensorize op (opt : Low_level.optimized) : Low_level.optimized =
   match op with
-  | Tensorize { lane; _ } ->
-      let opt = { opt with llc = apply_op opt.llc op } in
-      contract_tensorized_accumulator ~lane opt
+  | Tensorize { i; j; k; lane; simd_width } ->
+      let llc, masks =
+        tensorize_llc
+          ~zero_fringe:(Set.mem opt.Low_level.zero_fringe)
+          ~i ~j ~k ~lane ~simd_width opt.Low_level.llc
+      in
+      let opt = { opt with Low_level.llc } in
+      contract_tensorized_accumulator ~lane ~masks opt
   | _ -> assert false
 
 (** Epilogue fusion (gh-ocannl-486): fold the sole-consumer, index-space-compatible elementwise tail
@@ -1831,11 +2609,10 @@ let apply_tensorize op (opt : Low_level.optimized) : Low_level.optimized =
     the tail uses that same tuple; the tail is elementwise (no local scopes, dynamic or merge-buffer
     reads); no later statement mentions [target] (sole consumer); the tail's other operands are not
     written by the reduction statement; and the store-back tiles cover [target]'s index space
-    bijectively, with no surplus enclosing loop (extent > 1, not indexing the site) re-executing
-    the store-back per iteration (so the relocated tail writes each output element exactly once,
-    from the completed accumulation). Nodes related by
-    buffer aliasing ([Tnode.alias_of]) are not analyzed — sole-consumption is judged by node
-    identity. *)
+    bijectively, with no surplus enclosing loop (extent > 1, not indexing the site) re-executing the
+    store-back per iteration (so the relocated tail writes each output element exactly once, from
+    the completed accumulation). Nodes related by buffer aliasing ([Tnode.alias_of]) are not
+    analyzed — sole-consumption is judged by node identity. *)
 let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.optimized =
   let open Low_level in
   let fail msg = invalid_arg ("Schedule.Fuse_epilogue: " ^ msg) in
@@ -2074,8 +2851,8 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
                   if e > 1 && not (Array.exists st_idcs ~f:(idx_mentions s)) then
                     fail
                       ("the fragment store-back executes once per iteration of enclosing loop "
-                      ^ Indexing.symbol_ident s
-                      ^ " which does not index it — the tail would read partial accumulations"));
+                     ^ Indexing.symbol_ident s
+                     ^ " which does not index it — the tail would read partial accumulations"));
               if not (covers_bijectively ~env:env' st_idcs) then
                 fail "the fragment store-back tiles do not cover the output space bijectively";
               fused := true;
@@ -2245,7 +3022,9 @@ let apply_opt_op (opt : Low_level.optimized) (op : optop) : Low_level.optimized 
   | Privatize { target; over } -> apply_privatize ~target ~over opt
   | Tensorize _ -> apply_tensorize op opt
   | Fuse_epilogue { target; shared } -> apply_fuse_epilogue ~target ~shared opt
-  | (Split _ | Swap _ | Retype _ | Unroll _ | Partition _ | Expand_zero _) as op ->
+  | Split_reduce { axis; target; num_blocks; block_index; inner_index; combine_indices } ->
+      apply_split_reduce ~axis ~target ~num_blocks ~block_index ~inner_index ~combine_indices opt
+  | (Split _ | Swap _ | Retype _ | Unroll _ | Partition _ | Pad _ | Expand_zero _) as op ->
       { opt with llc = apply_op opt.Low_level.llc op }
 
 let apply ?(static_indices = []) (sched : schedule) (opt : Low_level.optimized) :
@@ -2269,11 +3048,11 @@ let apply ?(static_indices = []) (sched : schedule) (opt : Low_level.optimized) 
 
 (** {2 The op-legality oracle}
 
-    gh-494 waypoint 3: schedule ops consult the affine engine instead of every transform (and
-    every candidate compile) embedding its own analysis. A schedule op is a thread-pairing
-    transform over the routine's access relations, so its obligation is a query: does pairing the
-    op's loop symbol(s) as thread identity leave every write-involving access pair of every
-    written node [Disjoint] or [Same_thread]?
+    gh-494 waypoint 3: schedule ops consult the affine engine instead of every transform (and every
+    candidate compile) embedding its own analysis. A schedule op is a thread-pairing transform over
+    the routine's access relations, so its obligation is a query: does pairing the op's loop
+    symbol(s) as thread identity leave every write-involving access pair of every written node
+    [Disjoint] or [Same_thread]?
 
     Verdicts are three-valued and both proven directions are sound: [Op_legal] means the queries
     prove the annotation race-free; [Op_illegal] means a definite violation is proven (e.g. a
@@ -2293,15 +3072,6 @@ let combine_verdicts v1 v2 =
   | (Op_unknown _ as v), _ | _, (Op_unknown _ as v) -> v
   | Op_legal, Op_legal -> Op_legal
 
-let rec find_loop axis (llc : Low_level.t) : Low_level.t option =
-  let open Low_level in
-  match llc with
-  | For_loop { index; _ } when Indexing.equal_symbol index axis -> Some llc
-  | For_loop { body; _ } -> find_loop axis body
-  | Seq (a, b) -> ( match find_loop axis a with Some _ as r -> r | None -> find_loop axis b)
-  | If { body; _ } -> find_loop axis body
-  | _ -> None
-
 let mentions_axis axis (idx : Indexing.axis_index) =
   match idx with
   | Indexing.Iterator s -> Indexing.equal_symbol s axis
@@ -2314,98 +3084,145 @@ let mentions_axis axis (idx : Indexing.axis_index) =
 (* gh-ocannl-508: derive the static affine breakpoints of the [axis] loop from the guards already
    present in its body — statement [If] conditions and scalar [Where] conditions (the virtualizer's
    per-component range guards of an inlined concatenation, [Split]'s remainder guard, symbolic
-   extent guards with the extent already substituted). A comparison whose two sides differ by
-   [k*axis + off] with everything else constant flips truth value at exactly one point of the axis
-   range; partitioning at the collected points makes every such guard interval-decided within each
-   segment, so [apply]'s trailing simplify erases them. *)
+   extent guards with the extent already substituted, gh-504's clamped-window range guards). A
+   comparison whose two sides differ by [k*axis + off] with everything else constant flips truth
+   value at exactly one point of the axis range; partitioning at the collected points makes every
+   such guard interval-decided within each segment, so [apply]'s trailing simplify erases them.
+   Non-axis symbols bound by loops inside the [axis] loop (e.g. the window symbol of a clamped
+   window guard, gh-504) are bounded by their loop ranges: the comparison then reads
+   [k*axis + off] with [off] in an interval, giving an always-true / mixed / always-false
+   trichotomy of the axis range — both transition points are recorded, so the mixed (boundary)
+   segments are exactly delimited and the decided segments fold their guards. *)
 let partition_breakpoints ~axis (llc : Low_level.t) : int list =
   let open Low_level in
+  (* Ranges of the statement-level loops enclosing the [axis] loop (same traversal as
+     [find_loop]): an inner axis's guards may mention enclosing-loop symbols. *)
+  let enclosing_ranges =
+    let rec collect env (llc : Low_level.t) =
+      match llc with
+      | For_loop { index; _ } when Indexing.equal_symbol index axis -> Some env
+      | For_loop { index; from_; to_; body; _ } ->
+          collect (Map.set env ~key:index ~data:(from_, to_)) body
+      | Seq (a, b) -> ( match collect env a with Some _ as r -> r | None -> collect env b)
+      | If { body; _ } -> collect env body
+      | _ -> None
+    in
+    Option.value ~default:(Map.empty (module Indexing.Symbol))
+    @@ collect (Map.empty (module Indexing.Symbol)) llc
+  in
   match find_loop axis llc with
   | Some (For_loop { from_; to_; body; _ }) ->
       let points = ref [] in
-      (* Affine view [Some (k, off)] of a comparison operand as [k*axis + off]; [None] when the
-         operand mentions other symbols or is not integer-affine. *)
-      let affine_view (sc : scalar_t) : (int * int) option =
+      (* Affine view [Some (k, off_lo, off_hi)] of a comparison operand as [k*axis + off] with
+         [off] ranging over [off_lo, off_hi]: non-axis symbols with a known enclosing-loop range
+         (from [ranges]) contribute their extremes to the offset interval. [None] when the operand
+         mentions a symbol of unknown range or is not integer-affine. *)
+      let affine_view ~ranges (sc : scalar_t) : (int * int * int) option =
         let of_terms symbols offset =
           let symbols = Indexing.coalesce_affine_terms symbols in
-          if List.for_all symbols ~f:(fun (_, s) -> Indexing.equal_symbol s axis) then
-            Some (List.sum (module Int) symbols ~f:fst, offset)
-          else None
+          List.fold symbols ~init:(Some (0, offset, offset)) ~f:(fun acc (c, s) ->
+              match acc with
+              | None -> None
+              | Some (k, lo, hi) ->
+                  if Indexing.equal_symbol s axis then Some (k + c, lo, hi)
+                  else (
+                    match Map.find ranges s with
+                    | Some (s_lo, s_hi) ->
+                        if c >= 0 then Some (k, lo + (c * s_lo), hi + (c * s_hi))
+                        else Some (k, lo + (c * s_hi), hi + (c * s_lo))
+                    | None -> None))
         in
         match sc with
-        | Embed_index (Indexing.Iterator s) when Indexing.equal_symbol s axis -> Some (1, 0)
-        | Embed_index (Indexing.Fixed_idx i) -> Some (0, i)
+        | Embed_index (Indexing.Iterator s) when Indexing.equal_symbol s axis -> Some (1, 0, 0)
+        | Embed_index (Indexing.Iterator s) -> (
+            match Map.find ranges s with Some (lo, hi) -> Some (0, lo, hi) | None -> None)
+        | Embed_index (Indexing.Fixed_idx i) -> Some (0, i, i)
         | Embed_index (Indexing.Affine { symbols; offset }) -> of_terms symbols offset
-        | Constant c when Float.is_integer c -> Some (0, Float.to_int c)
+        | Constant c when Float.is_integer c -> Some (0, Float.to_int c, Float.to_int c)
         | _ -> None
       in
       (* Division rounding towards -inf resp. +inf; [b > 0]. *)
       let fdiv a b = if a >= 0 then a / b else -((-a + b - 1) / b) in
       let cdiv a b = if a >= 0 then (a + b - 1) / b else -(-a / b) in
-      let rec cond (sc : scalar_t) =
+      (* Transition points of [k*axis + off < 0] with [off] in [off_lo, off_hi]. *)
+      let strict_lt_points ~k ~off_lo ~off_hi =
+        if k > 0 then points := cdiv (-off_hi) k :: cdiv (-off_lo) k :: !points
+        else if k < 0 then points := (fdiv off_hi (-k) + 1) :: (fdiv off_lo (-k) + 1) :: !points
+      in
+      let rec cond ~ranges (sc : scalar_t) =
         match sc with
         | Binop ((Ops.And | Ops.Or), (a, _), (b, _)) ->
-            cond a;
-            cond b
+            cond ~ranges a;
+            cond ~ranges b
+        (* [a < b] iff [k*axis + off < 0], [off] in [off_lo, off_hi]. Always-true while
+           [k*axis + off_hi < 0], always-false once [k*axis + off_lo >= 0]: record both transition
+           points (equal when the offset is a single value). *)
         | Binop (Ops.Cmplt, (a, _), (b, _)) -> (
-            match Option.both (affine_view a) (affine_view b) with
-            | Some ((ka, oa), (kb, ob)) ->
-                (* [a < b] iff [k*axis + off < 0]. *)
-                let k = ka - kb and off = oa - ob in
-                if k > 0 then (* True iff [axis < -off/k]: record the first false point. *)
-                  points := cdiv (-off) k :: !points
-                else if k < 0 then (* True iff [axis > off/(-k)]: record the first true point. *)
-                  points := (fdiv off (-k) + 1) :: !points
+            match Option.both (affine_view ~ranges a) (affine_view ~ranges b) with
+            | Some ((ka, la, ha), (kb, lb, hb)) ->
+                strict_lt_points ~k:(ka - kb) ~off_lo:(la - hb) ~off_hi:(ha - lb)
+            | None -> ())
+        (* Everything here is integer-affine, so [a <= b] iff [(a - b) - 1 < 0]: the same transition
+           points as the strict case with the offset interval shifted down by one. *)
+        | Binop (Ops.Cmple, (a, _), (b, _)) -> (
+            match Option.both (affine_view ~ranges a) (affine_view ~ranges b) with
+            | Some ((ka, la, ha), (kb, lb, hb)) ->
+                strict_lt_points ~k:(ka - kb) ~off_lo:(la - hb - 1) ~off_hi:(ha - lb - 1)
             | None -> ())
         | Binop ((Ops.Cmpeq | Ops.Cmpne), (a, _), (b, _)) -> (
-            match Option.both (affine_view a) (affine_view b) with
-            | Some ((ka, oa), (kb, ob)) ->
-                let k = ka - kb and off = oa - ob in
-                (* Equality holds at a single point (when [k] divides [off]): both edges. *)
-                if k <> 0 && off % abs k = 0 then
-                  let q = -off / k in
-                  points := q :: (q + 1) :: !points
+            match Option.both (affine_view ~ranges a) (affine_view ~ranges b) with
+            | Some ((ka, la, ha), (kb, lb, hb)) ->
+                let k = ka - kb and off_lo = la - hb and off_hi = ha - lb in
+                (* Equality is possible while [k*axis] meets [-off_hi, -off_lo]: both edges of the
+                   possibly-equal axis range (a single point [q, q+1] when the offset is a single
+                   value that [k] divides — no points when it does not). *)
+                if k <> 0 then (
+                  let neg_lo, neg_hi = (-off_hi, -off_lo) in
+                  let q_lo = if k > 0 then cdiv neg_lo k else cdiv neg_hi k
+                  and q_hi = if k > 0 then fdiv neg_hi k else fdiv neg_lo k in
+                  if q_lo <= q_hi then points := q_lo :: (q_hi + 1) :: !points)
             | None -> ())
         | _ -> ()
       in
-      let rec go (llc : t) =
+      let rec go ~ranges (llc : t) =
         match llc with
         | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier
           ->
             ()
         | Seq (a, b) ->
-            go a;
-            go b
-        | For_loop { body; _ } -> go body
+            go ~ranges a;
+            go ~ranges b
+        | For_loop { index; from_; to_; body; _ } ->
+            go ~ranges:(Map.set ranges ~key:index ~data:(from_, to_)) body
         | If { cond = c, _; body } ->
-            cond c;
-            go body
-        | Tile_mma { fallback; _ } -> go fallback
-        | Set { llsc; _ } | Set_local (_, llsc) -> scan_scalar llsc
+            cond ~ranges c;
+            go ~ranges body
+        | Tile_mma { fallback; _ } -> go ~ranges fallback
+        | Set { llsc; _ } | Set_local (_, llsc) -> scan_scalar ~ranges llsc
         | Set_dynamic { dyn_value = v, _; llsc; _ } ->
-            scan_scalar v;
-            scan_scalar llsc
-        | Set_from_vec { arg = a, _; _ } -> scan_scalar a
-      and scan_scalar (sc : scalar_t) =
+            scan_scalar ~ranges v;
+            scan_scalar ~ranges llsc
+        | Set_from_vec { arg = a, _; _ } -> scan_scalar ~ranges a
+      and scan_scalar ~ranges (sc : scalar_t) =
         match sc with
         | Ternop (Ops.Where, (c, _), (t, _), (e, _)) ->
-            cond c;
-            scan_scalar t;
-            scan_scalar e
+            cond ~ranges c;
+            scan_scalar ~ranges t;
+            scan_scalar ~ranges e
         | Ternop (_, (a, _), (b, _), (c, _)) ->
-            scan_scalar a;
-            scan_scalar b;
-            scan_scalar c
+            scan_scalar ~ranges a;
+            scan_scalar ~ranges b;
+            scan_scalar ~ranges c
         | Binop (_, (a, _), (b, _)) ->
-            scan_scalar a;
-            scan_scalar b
-        | Unop (_, (a, _)) -> scan_scalar a
-        | Local_scope { body; _ } -> go body
-        | Get_dynamic { dyn_value = v, _; _ } -> scan_scalar v
+            scan_scalar ~ranges a;
+            scan_scalar ~ranges b
+        | Unop (_, (a, _)) -> scan_scalar ~ranges a
+        | Local_scope { body; _ } -> go ~ranges body
+        | Get_dynamic { dyn_value = v, _; _ } -> scan_scalar ~ranges v
         | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ ->
             ()
       in
-      go body;
+      go ~ranges:enclosing_ranges body;
       List.filter !points ~f:(fun b -> from_ < b && b <= to_)
       |> List.dedup_and_sort ~compare:Int.compare
   | Some _ -> assert false (* [find_loop] only returns [For_loop]s. *)
@@ -2415,9 +3232,11 @@ let partition_breakpoints ~axis (llc : Low_level.t) : int list =
        ^ Indexing.symbol_ident axis)
 
 let acc_interpretable (a : _ Affine.access) =
-  (not a.Affine.a_dynamic)
-  && (not a.a_whole) && (not a.a_vec_last)
-  && not (Array.exists a.a_map ~f:(function Indexing.Sub_axis | Indexing.Concat _ -> true | _ -> false))
+  (not a.Affine.a_dynamic) && (not a.a_whole) && (not a.a_vec_last)
+  && not
+       (Array.exists a.a_map ~f:(function
+         | Indexing.Sub_axis | Indexing.Concat _ -> true
+         | _ -> false))
 
 (* Node accesses outside a given subtree: uid -> written-outside flag. Hardware annotations
    interleave sibling statements' threads with no grid-wide synchronization, so any node shared
@@ -2477,8 +3296,8 @@ let accesses_outside (llc : Low_level.t) ~(skip : Low_level.t) : (int, bool) Has
 (* Iteration independence of the loop bound by [pairs]'s symbols (all paired with themselves:
    same-nest thread identity). [licensed w x] exempts a conflicting pair from the obligation
    (reduction reassociation under an explicit license). With [cross_nest] (hardware annotations,
-   which interleave sibling statements' threads), a node shared across the loop's statement
-   boundary with a write on either side downgrades the proof to [Op_unknown]: such pairs need the
+   which interleave sibling statements' threads), a node shared across the loop's statement boundary
+   with a write on either side downgrades the proof to [Op_unknown]: such pairs need the
    aligned-mapping analysis of the default annotator, which the single-op oracle does not model.
    Proven intra-nest violations stay [Op_illegal] regardless. *)
 let loops_independent (opt : Low_level.optimized) ~(syms : Indexing.symbol list) ~cross_nest
@@ -2486,9 +3305,7 @@ let loops_independent (opt : Low_level.optimized) ~(syms : Indexing.symbol list)
   let open Low_level in
   let plc = opt.optimize_ctx.placements in
   match find_loop (List.hd_exn syms) opt.llc with
-  | None ->
-      Op_unknown
-        ("no statement-level loop binds " ^ Indexing.symbol_ident (List.hd_exn syms))
+  | None -> Op_unknown ("no statement-level loop binds " ^ Indexing.symbol_ident (List.hd_exn syms))
   | Some loop ->
       let accs = Low_level.affine_accesses loop in
       let env = Low_level.loop_bounds loop in
@@ -2515,25 +3332,24 @@ let loops_independent (opt : Low_level.optimized) ~(syms : Indexing.symbol list)
             else v
           else
             let is_mat = Tn.Placements.is_materialized_peek plc tn in
-            (* Proven violation: an unguarded, interpretable write of a materialized node whose
-               map provably avoids some parallel symbol of extent > 1 — every iteration of that
-               loop rewrites the same cells of genuinely shared memory. *)
+            (* Proven violation: an unguarded, interpretable write of a materialized node whose map
+               provably avoids some parallel symbol of extent > 1 — every iteration of that loop
+               rewrites the same cells of genuinely shared memory. *)
             let illegal =
               is_mat
               && List.find writes ~f:(fun w ->
                      acc_interpretable w && (not w.a_guarded)
                      && (not (licensed w w))
                      && List.exists syms ~f:(fun s ->
-                            extent s > 1
-                            && not (Array.exists w.a_map ~f:(mentions_axis s))))
+                         extent s > 1 && not (Array.exists w.a_map ~f:(mentions_axis s))))
                  |> Option.is_some
             in
             if illegal then
               combine_verdicts v
                 (Op_illegal
                    (Tn.debug_name tn
-                  ^ ": a write provably independent of a parallelized loop rewrites the same \
-                     cells on every iteration"))
+                  ^ ": a write provably independent of a parallelized loop rewrites the same cells \
+                     on every iteration"))
             else if not (List.for_all accs ~f:acc_interpretable) then
               combine_verdicts v
                 (Op_unknown (Tn.debug_name tn ^ ": statically unknown access under the loop"))
@@ -2549,42 +3365,39 @@ let loops_independent (opt : Low_level.optimized) ~(syms : Indexing.symbol list)
                           with
                           | Affine.Disjoint | Affine.Same_thread -> nv
                           | Affine.Cross_thread wit ->
-                              combine_verdicts nv
-                                (Op_unknown (Tn.debug_name tn ^ ": " ^ wit))))
+                              combine_verdicts nv (Op_unknown (Tn.debug_name tn ^ ": " ^ wit))))
               in
               let node_v =
                 if equal_op_verdict node_v Op_legal && Hashtbl.mem outside uid then
                   Op_unknown
                     (Tn.debug_name tn
-                   ^ ": also accessed outside the parallelized statement (cross-nest alignment \
-                      not modeled)")
+                   ^ ": also accessed outside the parallelized statement (cross-nest alignment not \
+                      modeled)")
                 else node_v
               in
               combine_verdicts v node_v)
 
-(* [Stage] legality: apply the op on a hermetic copy — [apply_stage]'s precondition surface
-   (source unwritten and statically read through one index vector, tile loops enclosing/occurring
-   with positive coefficients, the shared-mode workgroup-slot coverage rule, the
+(* [Stage] legality: apply the op on a hermetic copy — [apply_stage]'s precondition surface (source
+   unwritten and statically read through one index vector, tile loops enclosing/occurring with
+   positive coefficients, the shared-mode workgroup-slot coverage rule, the
    hoisted/cooperative/swizzle contracts) is deterministic on the code, so a raising probe proves
    the candidate compile's apply raises too: [Op_illegal] with no transcription drift. The minted
    tile and its (key-weak) [Host_inits] entry become unreachable with the discarded copy.
 
-   On success, the op's implicit contract — the staged tile covers the reads it replaces within
-   the staging scope — is the containment query: every remapped read of the fresh tile must be
-   covered by the load nest's prior writes ([Affine.read_covered_before]; edge-guarded loads
-   included, mirroring guards-taken analyses). The loads copy a source the routine never writes
-   (checked by apply) through the same per-axis index decomposition the reads use, so a covering
-   write holds exactly the source cell the original read fetched — cell coverage implies value
-   correctness here. A covered non-shared (packing) stage only inserts a serial per-thread copy
-   nest over a [Local] tile: [Op_legal]. Shared staging additionally relies on barrier placement
-   and launch-geometry uniformity validated downstream by [Low_level.validate_parallel], and
-   hoisted staging on the link-time host-side packing program — neither is modeled by the
-   queries, so those report [Op_unknown] (never a rejection). *)
+   On success, the op's implicit contract — the staged tile covers the reads it replaces within the
+   staging scope — is the containment query: every remapped read of the fresh tile must be covered
+   by the load nest's prior writes ([Affine.read_covered_before]; edge-guarded loads included,
+   mirroring guards-taken analyses). The loads copy a source the routine never writes (checked by
+   apply) through the same per-axis index decomposition the reads use, so a covering write holds
+   exactly the source cell the original read fetched — cell coverage implies value correctness here.
+   A covered non-shared (packing) stage only inserts a serial per-thread copy nest over a [Local]
+   tile: [Op_legal]. Shared staging additionally relies on barrier placement and launch-geometry
+   uniformity validated downstream by [Low_level.validate_parallel], and hoisted staging on the
+   link-time host-side packing program — neither is modeled by the queries, so those report
+   [Op_unknown] (never a rejection). *)
 let stage_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
   let shared, hoisted =
-    match op with
-    | Stage { shared; hoisted; _ } -> (shared, hoisted)
-    | _ -> assert false
+    match op with Stage { shared; hoisted; _ } -> (shared, hoisted) | _ -> assert false
   in
   let hermetic =
     {
@@ -2630,8 +3443,6 @@ let stage_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
                 else Op_legal))
 
 let op_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
-  (* [Low_level] also exports an [apply_op]; keep a handle on the schedule transform. *)
-  let apply_sched_op = apply_op in
   let open Low_level in
   let hardware = function Grid | Workgroup -> true | _ -> false in
   let vectorized = function Vectorized -> true | _ -> false in
@@ -2667,44 +3478,71 @@ let op_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
       (* Pure index-set reindexing: the segments run in the original order over the same points,
          with no hardware annotation and no reordering. *)
       Op_legal
+  | Pad _ ->
+      (* The pad iterations are no-ops (every effectful leaf statement is guarded), so the padded
+         loop runs the original iterations in the original order. *)
+      Op_legal
   | Swap { outer; inner } -> (
       (* Interchange reorders iterations; the optop contract licenses it for the
          associative-commutative accumulation patterns lowering emits (the rmw self-pairs). Beyond
-         that license, prove that no write-involving pair can touch a common cell across
-         different (outer, inner) iterations at all — then any order computes the same values. *)
+         that license, prove that no write-involving pair can touch a common cell across different
+         (outer, inner) iterations at all — then any order computes the same values. *)
       match find_loop outer opt.llc with
       | Some (For_loop { body = For_loop { index; _ }; _ }) when Indexing.equal_symbol index inner
         ->
           loops_independent opt ~syms:[ outer; inner ] ~cross_nest:false ~licensed:rmw_license
       | Some _ -> Op_unknown "loops are not perfectly nested"
       | None -> Op_unknown ("no statement-level loop binds " ^ Indexing.symbol_ident outer))
-  | Tensorize { i; j; _ } -> (
-      (* Role-assignment validity first: the micro-kernel recognition in [apply_op]'s Tensorize
-         branch is a pure function of the code, so probing it decides exactly whether the
-         candidate compile's apply would raise — a proven [Op_illegal] with no transcription
-         drift. This is the valuable pruner: of the role permutations the autotuner proposes per
-         serial triple, the ones assigning the reduction loop to [i]/[j] (or an output loop to
-         [k]) fail the accumulator/operand index discipline here — the [a_rmw]-carrying write
-         must be indexed [..., i, j] with the [k] role absent, i.e. [k] is the only loop carrying
-         the reduction dependence. *)
-      match apply_sched_op opt.llc op with
+  | Tensorize { i; j; k; lane; simd_width } -> (
+      (* Role-assignment validity first: the micro-kernel recognition in [tensorize_llc] is a pure
+         function of the code (given the routine's zero-fringe tiles), so probing it decides
+         exactly whether the candidate compile's apply would raise — a proven [Op_illegal] with no
+         transcription drift. This is the valuable pruner: of the role permutations the autotuner
+         proposes per serial triple, the ones assigning the reduction loop to [i]/[j] (or an output
+         loop to [k]) fail the accumulator/operand index discipline here — the [a_rmw]-carrying
+         write must be indexed [..., i, j] with the [k] role absent, i.e. [k] is the only loop
+         carrying the reduction dependence. Pad-guarded micro-kernels additionally require
+         zero-fringe staged operands (gh-ocannl-485); the masked contraction's own site
+         precondition is checked at apply, not probed here. *)
+      match
+        tensorize_llc
+          ~zero_fringe:(Set.mem opt.Low_level.zero_fringe)
+          ~i ~j ~k ~lane ~simd_width opt.llc
+      with
       | exception Invalid_argument msg -> Op_illegal msg
-      | (_ : Low_level.t) ->
+      | (_ : Low_level.t * pad_mask list) ->
           (* Structure proven; the legality dimension is the affine query: the [Tile_mma] block
              distributes the [i x j] tile across the fresh hardware lane loop (whatever fragment
              mapping the intrinsic picks) and reassociates the [k] reduction — the same license as
              [Vectorized] retypes, discharged by the accumulator's rmw self-pairs. Pairing [i]/[j]
              as thread identity must leave every write-involving pair Disjoint or Same_thread, and
-             the lane is a hardware axis, so cross-statement node sharing downgrades to
-             [Op_unknown] exactly as for hardware retypes. *)
+             the lane is a hardware axis, so cross-statement node sharing downgrades to [Op_unknown]
+             exactly as for hardware retypes. *)
           loops_independent opt ~syms:[ i; j ] ~cross_nest:true ~licensed:rmw_license)
   | Stage _ -> stage_legality opt op
+  | Split_reduce _ -> (
+      (* Probe hermetically like [Stage]: the recognition in [apply_split_reduce] is a pure function
+         of the code, so a raising apply is a proven [Op_illegal]. On structural success the op is
+         semantics-preserving under the reduction-reassociation license (the same license as [Swap]
+         of accumulations): it mints no hardware annotation itself — the block loop's later
+         annotation is race-free by construction (its index pins the partials row) and is checked as
+         its own op — and the combine order is a fixed function of the schedule. *)
+      let hermetic =
+        {
+          opt with
+          Low_level.traced_store = Hashtbl.copy opt.Low_level.traced_store;
+          optimize_ctx = Low_level.copy_optimize_ctx opt.Low_level.optimize_ctx;
+        }
+      in
+      match apply_opt_op hermetic op with
+      | exception Invalid_argument msg -> Op_illegal msg
+      | (_ : Low_level.optimized) -> Op_legal)
   | Privatize _ | Expand_zero _ | Fuse_epilogue _ ->
       Op_unknown "not modeled by the oracle (the op's own preconditions apply)"
 
 (** [schedule_legality opt sched]: per-op verdicts, each against the code with the preceding ops
-    applied (on a hermetic copy — checking never mutates [opt]). Stops after a proven-illegal op
-    or a failing application; an op that fails to apply reports [Op_illegal] with the exception. *)
+    applied (on a hermetic copy — checking never mutates [opt]). Stops after a proven-illegal op or
+    a failing application; an op that fails to apply reports [Op_illegal] with the exception. *)
 let schedule_legality (opt : Low_level.optimized) (sched : schedule) : (optop * op_verdict) list =
   let opt =
     {
@@ -2767,13 +3605,17 @@ type access = {
   a_idcs : Indexing.axis_index array;
   a_write : bool;
   a_dynamic : bool;  (** [Get_dynamic]: the effective index is not statically known. *)
+  a_dyn_axis : int option;
+      (** The data-dependent component of a dynamic access ([Set_dynamic]/[Get_dynamic]'s
+          [dyn_axis]; [a_idcs] holds a placeholder there) — affine queries must treat that
+          component as opaque ({!query_map}). *)
   a_vec : bool;
       (** [Set_from_vec]: [a_idcs] is the base of a length-run along the minor axis, not a single
           cell — affine queries must treat the last component as opaque ({!query_map}). *)
   a_val_syms : Indexing.symbol list;
-      (** Writes only: loop symbols the written value depends on syntactically (index symbols of
-          rhs reads, embedded indices, dynamic-index sub-expressions). Direct dependence only — a
-          chain through another scratch node is not tracked. *)
+      (** Writes only: loop symbols the written value depends on syntactically (index symbols of rhs
+          reads, embedded indices, dynamic-index sub-expressions). Direct dependence only — a chain
+          through another scratch node is not tracked. *)
 }
 
 exception Bail
@@ -2784,13 +3626,14 @@ exception Bail
 let scan_accesses plc ~local_syms (llc : Low_level.t) : access list =
   let open Low_level in
   let acc = ref [] in
-  let add ~depth:_ ~write ~dynamic ?(vec = false) ?(val_syms = []) tn idcs =
+  let add ~depth:_ ~write ~dynamic ?dyn_axis ?(vec = false) ?(val_syms = []) tn idcs =
     acc :=
       {
         a_tn = tn;
         a_idcs = idcs;
         a_write = write;
         a_dynamic = dynamic;
+        a_dyn_axis = dyn_axis;
         a_vec = vec;
         a_val_syms = val_syms;
       }
@@ -2819,13 +3662,17 @@ let scan_accesses plc ~local_syms (llc : Low_level.t) : access list =
         if depth > 0 && Tn.Placements.is_materialized_peek plc tn then raise Bail;
         add ~depth ~write:true ~dynamic:false ~val_syms:(scalar_syms llsc) tn idcs;
         scalar ~depth llsc
-    | Set_dynamic { tn; idcs; dyn_value = v, _; llsc; _ } ->
+    | Set_dynamic { tn; idcs; dyn_axis; dyn_value = v, _; llsc; _ } ->
         (* gh-466: the scatter's effective write index is not statically known. Registering it
-           [~dynamic:true] makes the per-nest hazard analysis bail on any parallelization over the
-           written node and the cross-nest alignment reject it — the deterministic no-atomics
-           invariant: loops driving the dynamic index stay serial. *)
+           [~dynamic:true] makes the cross-nest alignment reject it, and the per-nest hazard
+           analysis mask the dynamic component from the affine queries ([query_map]) — the
+           deterministic no-atomics invariant: loops driving the dynamic index are never forced
+           equal across threads, so they stay serial, while statically-pinning components (gh-484
+           task 2: the per-block partials row of [Split_reduce], the embedding-dim column) may
+           parallelize. *)
         if depth > 0 && Tn.Placements.is_materialized_peek plc tn then raise Bail;
-        add ~depth ~write:true ~dynamic:true ~val_syms:(scalar_syms v @ scalar_syms llsc) tn idcs;
+        add ~depth ~write:true ~dynamic:true ~dyn_axis
+          ~val_syms:(scalar_syms v @ scalar_syms llsc) tn idcs;
         scalar ~depth v;
         scalar ~depth llsc
     | Set_from_vec { tn; idcs; arg = a, _; _ } ->
@@ -2841,8 +3688,8 @@ let scan_accesses plc ~local_syms (llc : Low_level.t) : access list =
     | Local_scope { body; _ } -> code ~depth:(depth + 1) body
     | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
     | Get (tn, idcs) -> add ~depth ~write:false ~dynamic:false tn idcs
-    | Get_dynamic { tn; idcs; dyn_value = v, _; _ } ->
-        add ~depth ~write:false ~dynamic:true tn idcs;
+    | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, _; _ } ->
+        add ~depth ~write:false ~dynamic:true ~dyn_axis tn idcs;
         scalar ~depth v
     | Get_merge_buffer (_, _) -> () (* The merge buffer is a separate read-only input buffer. *)
     | Ternop (_, (a, _), (b, _), (c, _)) ->
@@ -2886,14 +3733,17 @@ let mentions_sym syms (idx : Indexing.axis_index) =
   | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
 
 (* The affine-query view of an access's index map: a vectorized write's last (minor-axis run)
-   component is the base of a run, so it is masked to an opaque [Sub_axis] — the engine then draws
-   no (possibly wrong) disjointness or confinement conclusion from it. *)
+   component is the base of a run, and a dynamic access's [dyn_axis] component is a data-dependent
+   row (the vector holds a placeholder there) — both are masked to an opaque [Sub_axis], so the
+   engine draws no (possibly wrong) disjointness or confinement conclusion from them. *)
 let query_map (a : access) : Indexing.axis_index array =
-  if (not a.a_vec) || Array.is_empty a.a_idcs then a.a_idcs
-  else (
+  if ((not a.a_vec) && Option.is_none a.a_dyn_axis) || Array.is_empty a.a_idcs then a.a_idcs
+  else begin
     let m = Array.copy a.a_idcs in
-    m.(Array.length m - 1) <- Indexing.Sub_axis;
-    m)
+    if a.a_vec then m.(Array.length m - 1) <- Indexing.Sub_axis;
+    Option.iter a.a_dyn_axis ~f:(fun ax -> if ax < Array.length m then m.(ax) <- Indexing.Sub_axis);
+    m
+  end
 
 (* The single-child chain of [For_loop]s from the top of a nest, descending through [If] wrappers
    and comments; stops at the first branching ([Seq] with more than one non-comment statement). *)
@@ -2991,8 +3841,8 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
                     a.a_write
                     && (Array.exists a.a_idcs ~f:(mentions_sym syms)
                        || List.exists a.a_val_syms ~f:(fun s ->
-                              List.mem syms s ~equal:Indexing.equal_symbol
-                              && not (Array.exists a.a_idcs ~f:(mentions_sym [ s ])))))
+                           List.mem syms s ~equal:Indexing.equal_symbol
+                           && not (Array.exists a.a_idcs ~f:(mentions_sym [ s ])))))
               in
               if
                 (List.exists accs_i ~f:(fun a -> a.a_write)
@@ -3067,8 +3917,7 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
           ~left:(query_map a) ~right:(query_map b)
       in
       let query_safe = match verdict with Affine.Cross_thread _ -> false | _ -> true in
-      Affine.crosscheck ~site:"schedule cross-nest alignment"
-        ~context:(Tn.debug_name a.a_tn)
+      Affine.crosscheck ~site:"schedule cross-nest alignment" ~context:(Tn.debug_name a.a_tn)
         ~procedural_safe:(fun () -> pair_aligned_procedural ~l gi gj a b)
         ~query_safe
         ~witness:(match verdict with Affine.Cross_thread w -> w | _ -> "");
@@ -3080,25 +3929,27 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
       let is_mat = Tn.Placements.is_materialized_peek plc (List.hd_exn accs_i).a_tn in
       let pair_aligned = if is_mat then pair_aligned_query else pair_aligned_procedural in
       (* Per-thread copies of statement-crossing scratch: a consumer thread's copy holds its own
-         chunk's last value, while the serial reference holds the last chunk's — they coincide
-         only when the written value cannot vary across the chunks writing the same cell. At trim
-         level [l], every write's value symbols must avoid the writer's parallel symbols unless
-         they also pin the written cell (then only the reader's own thread wrote it). The search
-         over [l] serializes the offending chain loop. Syntactic, direct dependence only. *)
+         chunk's last value, while the serial reference holds the last chunk's — they coincide only
+         when the written value cannot vary across the chunks writing the same cell. At trim level
+         [l], every write's value symbols must avoid the writer's parallel symbols unless they also
+         pin the written cell (then only the reader's own thread wrote it). The search over [l]
+         serializes the offending chain loop. Syntactic, direct dependence only. *)
       let value_invariant_ok =
         is_mat
-        || List.for_all [ (accs_i, i); (accs_j, j) ] ~f:(fun (accs, g) ->
+        || List.for_all
+             [ (accs_i, i); (accs_j, j) ]
+             ~f:(fun (accs, g) ->
                let syms = List.take full_syms.(g) l in
                List.for_all accs ~f:(fun a ->
                    (not a.a_write)
                    || List.for_all a.a_val_syms ~f:(fun s ->
-                          (not (List.mem syms s ~equal:Indexing.equal_symbol))
-                          || Array.exists a.a_idcs ~f:(mentions_sym [ s ]))))
+                       (not (List.mem syms s ~equal:Indexing.equal_symbol))
+                       || Array.exists a.a_idcs ~f:(mentions_sym [ s ]))))
       in
       value_invariant_ok
       && List.for_all accs_i ~f:(fun a ->
-             List.for_all accs_j ~f:(fun b ->
-                 (not (a.a_write || b.a_write)) || pair_aligned ~l i j a b))
+          List.for_all accs_j ~f:(fun b ->
+              (not (a.a_write || b.a_write)) || pair_aligned ~l i j a b))
     in
     let comps = Hashtbl.create (module Int) in
     Array.iteri parent ~f:(fun g _ -> Hashtbl.add_multi comps ~key:(find g) ~data:g);
@@ -3135,10 +3986,10 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
       let range s = List.Assoc.find env s ~equal:Indexing.equal_symbol in
       let dup s = List.Assoc.mem env s ~equal:Indexing.equal_symbol in
       let pairs = List.map syms ~f:(fun s -> (s, s)) in
-      (* The agreement rule: all accesses agree on every component that mentions a parallel
-         symbol. For materialized nodes it is the legacy (procedural) special case of the affine
-         conflict query, kept for [legality_crosscheck]; for non-materialized (per-thread copy)
-         scratch it IS the rule (see [pair_aligned_procedural]'s note). *)
+      (* The agreement rule: all accesses agree on every component that mentions a parallel symbol.
+         For materialized nodes it is the legacy (procedural) special case of the affine conflict
+         query, kept for [legality_crosscheck]; for non-materialized (per-thread copy) scratch it IS
+         the rule (see [pair_aligned_procedural]'s note). *)
       let agreement_ok accs =
         let rank = List.fold accs ~init:0 ~f:(fun m a -> max m (Array.length a.a_idcs)) in
         let ok = ref true in
@@ -3165,7 +4016,17 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
               List.exists accs ~f:(fun a -> Array.exists a.a_idcs ~f:(mentions_sym syms))
             in
             if is_mat || chain_relevant then (
-              if List.exists accs ~f:(fun a -> a.a_dynamic) then raise Bail;
+              let has_dynamic = List.exists accs ~f:(fun a -> a.a_dynamic) in
+              (* gh-484 (task 2, unbailing the gh-466 scatter): dynamic accesses of a materialized
+                 node no longer bail wholesale. The dynamic component is masked to [Sub_axis] in
+                 [query_map], so the conflict query decides from the statically-known components: a
+                 chain symbol pinning a same-position plain component of every access confines
+                 conflicts to its own thread (the per-block partials row of [Split_reduce], the
+                 embedding-dim column of the scatter), while loops driving the dynamic index are
+                 never forced equal across threads and stay serial. Per-thread (non-materialized)
+                 scratch keeps bailing: its containment rule ("reads hit exactly the cells the same
+                 thread wrote") is order-sensitive and unknowable under data-dependent rows. *)
+              if has_dynamic && not is_mat then raise Bail;
               if is_mat then (
                 (* Materialized: genuine shared memory — the affine conflict query decides. Every
                    pair involving a write must have its conflicts confined to one thread of the
@@ -3175,19 +4036,22 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
                   List.for_all accs ~f:(fun w ->
                       (not w.a_write)
                       || List.for_all accs ~f:(fun x ->
-                             match
-                               Affine.pair_conflict ~range ~dup_left:dup ~dup_right:dup ~pairs
-                                 ~left:(query_map w) ~right:(query_map x)
-                             with
-                             | Affine.Disjoint | Affine.Same_thread -> true
-                             | Affine.Cross_thread wit ->
-                                 witness := wit;
-                                 false))
+                          match
+                            Affine.pair_conflict ~range ~dup_left:dup ~dup_right:dup ~pairs
+                              ~left:(query_map w) ~right:(query_map x)
+                          with
+                          | Affine.Disjoint | Affine.Same_thread -> true
+                          | Affine.Cross_thread wit ->
+                              witness := wit;
+                              false))
                 in
-                Affine.crosscheck ~site:"schedule per-nest hazard"
-                  ~context:(Tn.debug_name (List.hd_exn accs).a_tn)
-                  ~procedural_safe:(fun () -> agreement_ok accs)
-                  ~query_safe ~witness:!witness;
+                (* The procedural agreement rule does not model dynamic accesses (it never ran on
+                   them — they used to bail first), so the crosscheck compares only static nodes. *)
+                if not has_dynamic then
+                  Affine.crosscheck ~site:"schedule per-nest hazard"
+                    ~context:(Tn.debug_name (List.hd_exn accs).a_tn)
+                    ~procedural_safe:(fun () -> agreement_ok accs)
+                    ~query_safe ~witness:!witness;
                 if not query_safe then raise Bail)
               else if not (agreement_ok accs) then raise Bail)));
   chains
@@ -3198,12 +4062,12 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
    the annotator's thread identity across aligned nests — turning "each thread reads only cells it
    wrote itself, earlier in its own serial chunk" into exactly the engine's shared-parameter
    cancellation plus statement-order visibility (an unaligned nest's chain loops keep distinct
-   bounds, fail the common-prefix test, and decline as residual thread parameters). Called from
-   the default annotators after {!analyze_parallel_chains} accepted the kernel (not from its
-   partial per-statement invocations, whose code excludes cross-step writes), so the procedural
-   side is a constant accept: a raise means an accepted schedule contains a read of per-thread
-   scratch not provably covered by the same thread's earlier writes. Nodes with dynamic accesses
-   are skipped (scatter into scratch: statically unknown cells). *)
+   bounds, fail the common-prefix test, and decline as residual thread parameters). Called from the
+   default annotators after {!analyze_parallel_chains} accepted the kernel (not from its partial
+   per-statement invocations, whose code excludes cross-step writes), so the procedural side is a
+   constant accept: a raise means an accepted schedule contains a read of per-thread scratch not
+   provably covered by the same thread's earlier writes. Nodes with dynamic accesses are skipped
+   (scatter into scratch: statically unknown cells). *)
 let crosscheck_scratch_containment (opt : Low_level.optimized) (chains : Low_level.t list list) :
     unit =
   if Lazy.force Affine.crosscheck_enabled then (
@@ -3223,12 +4087,8 @@ let crosscheck_scratch_containment (opt : Low_level.optimized) (chains : Low_lev
             if k < 2 && Option.is_none canon.(k) then canon.(k) <- Some s));
     let renames =
       List.map2_exn nests chains ~f:(fun n chain ->
-          let idx, _ =
-            Option.value_exn (List.findi stmts ~f:(fun _ s -> phys_equal s n.n_loops))
-          in
-          ( idx,
-            List.mapi (chain_syms chain) ~f:(fun k s ->
-                (s, Option.value_exn (canon.(k)))) ))
+          let idx, _ = Option.value_exn (List.findi stmts ~f:(fun _ s -> phys_equal s n.n_loops)) in
+          (idx, List.mapi (chain_syms chain) ~f:(fun k s -> (s, Option.value_exn canon.(k)))))
     in
     let rename_sym m s =
       List.Assoc.find m s ~equal:Indexing.equal_symbol |> Option.value ~default:s
@@ -3284,14 +4144,13 @@ let crosscheck_scratch_containment (opt : Low_level.optimized) (chains : Low_lev
                 in
                 (not crossing)
                 || List.for_all w.Affine.a_val_syms ~f:(fun s ->
-                       (not (thread s))
-                       || Array.exists w.a_map ~f:(fun idx ->
-                              match idx with
-                              | Indexing.Iterator s' -> Indexing.equal_symbol s s'
-                              | Indexing.Affine { symbols; _ } ->
-                                  List.exists symbols ~f:(fun (_, s') ->
-                                      Indexing.equal_symbol s s')
-                              | _ -> false))
+                    (not (thread s))
+                    || Array.exists w.a_map ~f:(fun idx ->
+                        match idx with
+                        | Indexing.Iterator s' -> Indexing.equal_symbol s s'
+                        | Indexing.Affine { symbols; _ } ->
+                            List.exists symbols ~f:(fun (_, s') -> Indexing.equal_symbol s s')
+                        | _ -> false))
                 ||
                 (witness := "thread-variant value in statement-crossing scratch write";
                  false))
@@ -3299,13 +4158,13 @@ let crosscheck_scratch_containment (opt : Low_level.optimized) (chains : Low_lev
           let query_safe =
             value_ok
             && List.for_all accs ~f:(fun r ->
-                   r.Affine.a_write
-                   ||
-                   match Affine.read_covered_before ~thread ~read:r ~writes () with
-                   | `Covered -> true
-                   | `Unknown w ->
-                       witness := w;
-                       false)
+                r.Affine.a_write
+                ||
+                match Affine.read_covered_before ~thread ~read:r ~writes () with
+                | `Covered -> true
+                | `Unknown w ->
+                    witness := w;
+                    false)
           in
           Affine.crosscheck ~site:"schedule per-thread scratch containment"
             ~context:(Tn.debug_name tn)
@@ -3881,6 +4740,7 @@ let segment_optimized (full : Low_level.optimized) (llc : Low_level.t) : Low_lev
     workgroup_shared = Set.filter full.Low_level.workgroup_shared ~f:(Set.mem tns);
     simdgroup_fragments = Set.filter full.Low_level.simdgroup_fragments ~f:(Set.mem tns);
     swizzled = Set.filter full.Low_level.swizzled ~f:(Set.mem tns);
+    zero_fringe = Set.filter full.Low_level.zero_fringe ~f:(Set.mem tns);
   }
 
 (* Expand-and-annotate schedule for a segment of materialized whole-node [Zero_out]s (GPU): the
@@ -4080,25 +4940,25 @@ let schedule_fission = lazy (Utils.get_global_flag ~default:true ~arg_name:"sche
 (* Per-compile launch-geometry trace on stderr; consumed by backend [compile]. *)
 let log_launches = lazy (Utils.get_global_flag ~default:false ~arg_name:"schedule_log_launches")
 
+let automatic_schedule_active ~backend_name =
+  (not (Utils.debug_log_from_routines ()))
+  && ((backend_is_gpu backend_name && Lazy.force automatic_gpu_schedule)
+     || (backend_is_cpu backend_name && Lazy.force automatic_cpu_schedule))
+
 let maybe_default_schedule ~backend_name ?(limits = Backend_intf.no_hardware_limits) ~static_indices
     (opt : Low_level.optimized) : Low_level.optimized =
-  (* Runtime kernel logging is line-interleaved under parallel execution; keep logged runs serial so
-     the logs stay deterministic and readable. *)
-  if Utils.debug_log_from_routines () then opt
-  else if backend_is_gpu backend_name && Lazy.force automatic_gpu_schedule then
-    apply ~static_indices (default_gpu ~limits opt) opt
-  else if backend_is_cpu backend_name && Lazy.force automatic_cpu_schedule then
-    apply ~static_indices (default_cpu opt) opt
-  else opt
+  (* [automatic_schedule_active] keeps logged runs serial: runtime kernel logging is
+     line-interleaved under parallel execution, and serial logs stay deterministic and readable. *)
+  if not (automatic_schedule_active ~backend_name) then opt
+  else if backend_is_gpu backend_name then apply ~static_indices (default_gpu ~limits opt) opt
+  else apply ~static_indices (default_cpu opt) opt
 
 let maybe_default_schedules ~backend_name ?(limits = Backend_intf.no_hardware_limits)
     ~static_indices (opt : Low_level.optimized) : Low_level.optimized list =
-  if Utils.debug_log_from_routines () then [ opt ]
+  if not (automatic_schedule_active ~backend_name) then [ opt ]
   else
-    let gpu = backend_is_gpu backend_name && Lazy.force automatic_gpu_schedule in
-    let cpu = backend_is_cpu backend_name && Lazy.force automatic_cpu_schedule in
-    if not (gpu || cpu) then [ opt ]
-    else if not (Lazy.force schedule_fission) then
+    let gpu = backend_is_gpu backend_name in
+    if not (Lazy.force schedule_fission) then
       [ maybe_default_schedule ~backend_name ~limits ~static_indices opt ]
     else
       let preset o = if gpu then default_gpu ~limits o else default_cpu o in

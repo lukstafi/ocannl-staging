@@ -291,14 +291,14 @@ let () =
 
   (* === Multi-site F_sketch enumeration: two matmul segments with different geometries in one
      fissioned chain. Each parameter set of each site must be proposed ALONE (the other segment
-     falling back to its default preset), so the combined candidate count is [site_a + site_b] —
-     no site's seed can mask another site's seeds from being timed. Zipped combos fail this: index
+     falling back to its default preset), so the combined candidate count is [site_a + site_b] — no
+     site's seed can mask another site's seeds from being timed. Zipped combos fail this: index
      pairing (n-th combo = every segment's n-th set) gives [max site_a site_b], and pinning the
      others to their first set adds masking through an invalid first seed (observed on cifar_conv,
-     PR #174: the fc matmul's invalid packrest-grid seed masked the conv segments' row-block
-     seed). Cross-segment combination is recovered by one extra composite candidate that applies
-     each site's best-timed single simultaneously — counted in [fiss_sketch_timed] but not in the
-     seeded [fiss_sketch_candidates]. === *)
+     PR #174: the fc matmul's invalid packrest-grid seed masked the conv segments' row-block seed).
+     Cross-segment combination is recovered by one extra composite candidate that applies each
+     site's best-timed single simultaneously — counted in [fiss_sketch_timed] but not in the seeded
+     [fiss_sketch_candidates]. === *)
   let q2 = 16 in
   let qc16v = Array.init (q2 * q) ~f:(fun i -> (Float.of_int (i % 9) *. 0.25) -. 1.) in
   let qc16 = TDSL.ndarray qc16v ~label:[ "qc16" ] ~input_dims:[ q ] ~output_dims:[ q2 ] () in

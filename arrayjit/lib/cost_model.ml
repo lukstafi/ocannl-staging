@@ -65,13 +65,18 @@ let footprints (accesses : Tn.t Affine.access list) : (Tn.t * node_footprint) li
       let reads, writes, rmws, nreads, nwrites, apx = cur in
       let next =
         if a.a_write then
-          (reads, writes + cells, (rmws + if a.a_rmw then cells else 0), nreads, nwrites + 1, apx || approx)
+          ( reads,
+            writes + cells,
+            (rmws + if a.a_rmw then cells else 0),
+            nreads,
+            nwrites + 1,
+            apx || approx )
         else (reads + cells, writes, rmws, nreads + 1, nwrites, apx || approx)
       in
       Hashtbl.set tbl ~key:a.a_tn ~data:next);
   List.rev_map !order ~f:(fun tn ->
       let reads, writes, rmws, nreads, nwrites, apx = Hashtbl.find_exn tbl tn in
-      let width = Ops.prec_in_bytes (Lazy.force tn.Tn.prec) in
+      let width = Ops.prec_in_bytes (Lazy.force tn.Tn.storage_prec) in
       let node_bytes = Tn.num_elems tn * width in
       let cap n = min node_bytes (n * width) in
       ( tn,
@@ -121,8 +126,8 @@ let analyze (code : Low_level.t) : summary =
         0
     | Get_dynamic { dyn_value = dv, _; _ } -> sc_flops dv
     | Ternop ((Ops.FMA | Ops.Mul3), a1, a2, a3) ->
-        (* Two arithmetic operations each — matching [peak_flops]' FMA-counted-as-two convention,
-           so an FMA-form kernel scores the same compute leg as its mul+add form. *)
+        (* Two arithmetic operations each — matching [peak_flops]' FMA-counted-as-two convention, so
+           an FMA-form kernel scores the same compute leg as its mul+add form. *)
         2 + arg a1 + arg a2 + arg a3
     | Ternop (Ops.Where, a1, a2, a3) -> 1 + arg a1 + arg a2 + arg a3
     | Binop ((Ops.Arg1 | Ops.Arg2), a1, a2) -> arg a1 + arg a2

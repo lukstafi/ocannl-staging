@@ -301,9 +301,14 @@ change, both in `cuda_backend.ml`:
   `.b32` registers, so there are no stride/alignment constraints and both `__shared__` tiles and
   device pointers load through generic addresses. Gated on min device CC ≥ 89 (Ada) and extents
   `m%16 = n%8 = k%32 = 0`; the `(mma-fp8)` source marker makes `cuda_to_ptx` target `compute_89`.
-  The `hardware_limits.mma` advisory tile stays at the wmma 16×16×16 (it is only the autotuner's
-  divisibility filter; a k-multiple-of-16-but-not-32 fp8 proposal declines at emission into the
-  fallback, which is always correct). Uniform-f32-via-tf32 remains parked on the numerics policy.
+  `hardware_limits.mma_format_tiles` advertises this divergent tile alongside the canonical wmma
+  shape, so typed autotune seeds apply the actual operand-format divisibility filter rather than
+  proposing a scalar fallback. Uniform-f32-via-tf32 landed 2026-07-22 behind the
+  `tf32_matmuls` numerics-policy key (gh-ocannl-478): wmma `precision::tf32` m16n16k8 fragments
+  with explicit `__float_to_tf32` conversion after loads, the `(wmma-tf32)` marker selecting
+  `compute_80`; policy off (the default) keeps uniform f32 on the scalar path. Verified on an RTX
+  5070 Ti Laptop (sm_120) with tolerance parity plus structural intrinsic/census pins, including
+  K=24 and a transposed-A case; policy-off remains bitwise-equal to serial (the gh-154 lesson).
 - Exercised by a new fp8 leg of `schedule_mma_matmul` (e5m2-exact inputs, f32 accumulation —
   parity bitwise on every backend and path), alongside the existing half leg.
 - **Verified on hardware (2026-07-15, RTX 5070 / sm_120, driver CUDA 13.0, toolkit 13.3)**: the
@@ -324,9 +329,10 @@ change, both in `cuda_backend.ml`:
   ocaml-cudajit checkout; the OCANNL `pin-depends` for cudajit should be bumped once those land
   upstream.
 
-Possible follow-ups, in profile-completeness order: e4m3 if/when OCANNL grows the second fp8
-format; tf32 for uniform f32 behind a numerics-policy config; `ldmatrix`-based fragment loads
-from swizzled shared tiles and Blackwell's block-scaled `kind::mxf8f6f4` (the T4 ceiling chase).
+Possible follow-ups, in profile-completeness order (tracked in gh-ocannl-481): e4m3 if/when
+OCANNL grows the second fp8 format; `ldmatrix`-based fragment loads from swizzled shared tiles
+and Blackwell's block-scaled `kind::mxf8f6f4` (the T4 ceiling chase). tf32 for uniform f32
+landed 2026-07-22 behind the `tf32_matmuls` numerics-policy key (see T3 status above).
 
 ## Swizzled staging (implemented 2026-07-19)
 

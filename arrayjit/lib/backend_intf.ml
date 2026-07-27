@@ -18,12 +18,37 @@ type buffer_loc = { pool_id : int; offset : int } [@@deriving sexp, compare, equ
 
 type ctx_buffers = buffer_loc Map.M(Tnode).t [@@deriving sexp_of]
 
+(** Element formats tensor-core instructions accept for their multiplicand operands. This is
+    deliberately NOT [Ops.prec]: formats like tf32 have no byte layout of their own, so they must
+    never appear as a tensor node's storage precision. *)
+type mma_input_format =
+  | Mma_f32  (** Genuine f32 multiply-accumulate (Metal [simdgroup_float8x8]). *)
+  | Mma_tf32
+      (** f32 storage computed with a 10-bit mantissa (CUDA wmma [precision::tf32], sm_80+). Not a
+          storage precision — data lives in memory as ordinary f32; only tensor-core loads truncate.
+          Gated by {!Numerics.t.tf32_matmuls}. *)
+  | Mma_f16
+  | Mma_bf16
+  | Mma_fp8_e5m2
+      (** OCANNL's single fp8 today ([Ops.Fp8_prec], e5m2). An e4m3 constructor slots in here when
+          the precision exists (gh-ocannl-481 item 2); descriptor entries are keyed per operand
+          pair, so mixed e5m2×e4m3 combinations need no interface change. *)
+[@@deriving sexp, compare, equal]
+
 type mma_capability = {
   mma_simd_width : int;
       (** Threads cooperating in one tile-MMA instruction (CUDA warp / Metal simdgroup width). *)
   mma_tile : int * int * int;
-      (** The intrinsic tile shape [(m, n, k)] (8×8×8 for Metal [simdgroup_matrix], 16×16×16 for
-          CUDA wmma); a {!Low_level.t.Tile_mma}'s block extents must be multiples of it. *)
+      (** The canonical intrinsic tile shape [(m, n, k)] (8×8×8 for Metal [simdgroup_matrix],
+          16×16×16 for CUDA wmma), used where schedule construction has no typed operand site; a
+          {!Low_level.t.Tile_mma}'s block extents must be multiples of the tile of the format
+          actually emitted. Typed matmul/conv sketch seeds use [mma_format_tiles] below. *)
+  mma_format_tiles : ((mma_input_format * mma_input_format) * (int * int * int)) list;
+      (** Per (a-operand, b-operand) input-format intrinsic tile shapes, for formats whose tile
+          diverges from [mma_tile] as well as the ones matching it (e.g. CUDA fp8 16×8×32, tf32
+          16×16×8). Typed autotune seeds use the matching entry for divisibility; whether a given
+          call ultimately emits is still decided by the backend's [mma_syntax] hook plus the
+          {!Numerics} policy. *)
 }
 [@@deriving sexp, compare, equal]
 (** Tensor-core capability descriptor (docs/proposals/tensorize-mma.md §6). Which operand precisions

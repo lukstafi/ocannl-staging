@@ -208,7 +208,7 @@ type op_fun =
 let scaled = pointmul x scale ~output_dims:[hidden_dim] ()
 
 (* The kaiming/xavier functions return op_fun for deferred shape binding *)
-let weights = kaiming uniform1 ~input_dims:[784] ~output_dims:[256] ()
+let weights = kaiming uniform ~input_dims:[784] ~output_dims:[256] ()
 
 (* Term creates a terminal tensor with shape *)
 let input = TDSL.term ~batch_dims:[batch_size] ~input_dims:[784] ()
@@ -483,7 +483,7 @@ OCANNL provides several random operations in the DSL modules:
 | Function | Description | Notes |
 |----------|-------------|-------|
 | `uniform ()` | Uniform [0,1) using global seed | Efficient, works with any shape |
-| `uniform1 ()` | Uniform [0,1), pointwise | Works with any shape, less efficient |
+| `uniform1 ()` | Uniform [0,1), pointwise | Deprecated (gh-ocannl-509); one value per 128-bit block |
 | `uniform_at counter` | Uniform using explicit counter | For training-time randomness |
 | `uniform_at1 counter` | Pointwise uniform with counter | For training-time, any shape |
 | `normal ()`, `normal1 ()` | Standard normal N(0,1) | Uses Box-Muller transform |
@@ -507,6 +507,8 @@ let%op dropout ~rate () ~train_step x =
 ```
 
 **Note on shapes**: The packed `uniform` function (without `1`) is total over shapes: element `i` of the result is lane `i mod k` of the 128-bit random block `i / k`, where `k = 16 / bytes-per-element` (4 for single precision). When the total element count is not a multiple of `k`, the final block is consumed partially, so growing a tensor keeps the existing prefix of its value stream unchanged. `uniform1` remains available as a pointwise variant (one value per 128-bit block).
+
+**Virtual (inlined) uniforms**: a packed `uniform` result does not need to be materialized — when the optimizer virtualizes it (e.g. a dropout mask read once by an elementwise consumer), each read cell inlines as lane `i mod k` of the conversion of counter block `i / k`, which is bitwise-identical to the materialized value stream. The uniform's internal counter tensor then stays materialized (usually as routine-local scratch) because it is read at a runtime-computed block index; the conversion is recomputed per cell, but the threefry chain still runs once per 128-bit block.
 
 ### Kaiming and Xavier Scaling Operations
 
@@ -538,17 +540,19 @@ let%op _ = w_raw ++ "...|..i.. -> ..o.. => |->0" [ "i"; "o" ] in
 
 ### Parameter Initialization
 
-By default, `%op` parameters use a centered, scaled `uniform1` initializer with
-values in `[-0.25, 0.25)`. This keeps the non-vectorized arbitrary-shape
-behavior of `uniform1` while avoiding all-positive initial weights.
+By default, `%op` parameters use a centered, scaled packed `uniform` initializer
+with values in `[-0.25, 0.25)`. The packed `uniform` is total over shapes (see
+the note above), so no pointwise fallback is needed; set
+`TDSL.default_param_init := Operation.default_uniform1_param_init` to reproduce
+pre-0.9 random streams.
 
 Usage example:
 ```ocaml
 (* Set kaiming initialization as default. Initializers are forward-only. *)
-TDSL.default_param_init := NTDSL.kaiming TDSL.O.uniform1;
+TDSL.default_param_init := NTDSL.kaiming TDSL.O.uniform;
 
 (* Or use directly in parameter definition *)
-let%op layer x = { w = kaiming uniform1 () } * x + { b = 0. }
+let%op layer x = { w = kaiming uniform () } * x + { b = 0. }
 ```
 
 When setting `default_param_init`, use `NTDSL` helpers: initialization is a one-shot forward computation. `TDSL.param` makes the final parameter tensor differentiable after the initializer has produced its value.

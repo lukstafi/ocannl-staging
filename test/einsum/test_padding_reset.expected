@@ -1,27 +1,31 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
-Testing conflicting margin-reading neutrals are rejected...
-REJECTED: Conflicting padding neutral elements: an opera
-
-Conflict rejection test completed!
-
-Testing the remedy: a materialized copy per neutral...
-committed neutrals: pool operand -inf, conv operand 0
+Testing a clamped max-pool and a 0-margin conv sharing one operand...
+shared operand's committed neutral (the conv's): 0.
 pooled[0,0]=-11 pooled[1,1]=-6 pooled[3,3]=-1
 conv[0,0]=-54 conv[1,1]=-99
-pooled values correct (margins -inf): true
+pooled values correct (windows clamped): true
+conv values correct (margins 0): true
+
+Shared-operand composition test completed!
+
+Testing the copy pattern: conv through a materialized copy...
+pool operand stays unpadded: true
+conv operand's committed neutral: 0.
+pooled[0,0]=-11 pooled[1,1]=-6 pooled[3,3]=-1
+conv[0,0]=-54 conv[1,1]=-99
+pooled values correct (windows clamped): true
 conv values correct (margins 0): true
 second pass identical: true
 
-Separate-copies remedy test completed!
+Copy-pattern test completed!
 
 
 ========================================
-Testing single-operation padding (max-pool only)...
+Testing single-operation pooling (max-pool only)...
+sole-consumer pool leaves the operand unpadded: true
 
 === First forward pass (single max-pool operation) ===
 pooled[0,0]=-11 pooled[1,1]=-6 pooled[3,3]=-1
-pooled values correct (margins initialized once to -inf): true
+pooled values correct (windows clamped): true
 second pass identical: true
 
-Single-operation padding test completed!
+Single-operation pooling test completed!

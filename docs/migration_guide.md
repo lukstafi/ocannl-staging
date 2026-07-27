@@ -685,11 +685,11 @@ The `Train` module is meant to be read, understood, and extended by users - it's
 
 OCANNL's random initialization has some important nuances:
 
-1. **Default initialization is configurable** - There is a global reference that defaults to the `uniform1` operation but can be changed to any nullary operation.
+1. **Default initialization is configurable** - There is a global reference that defaults to a centered, scaled packed `uniform` and can be changed to any nullary operation (`default_uniform1_param_init` reproduces pre-0.9 streams).
 
 2. **Packed vs. pointwise conversion** - `uniform` and `uniform1` both consume `uint4x32` 128-bit random blocks, differently:
    - `uniform()` - packed: each block yields `16 / bytes-per-element` values; works with any shape (a final partial block is consumed partially, and growing a tensor preserves the value-stream prefix)
-   - `uniform1()` - pointwise: one value per block, allows any size but wastes random bits
+   - `uniform1()` - pointwise: one value per block; deprecated since packed `uniform` became total over shapes (gh-ocannl-509)
 
 3. **Deterministic PRNG** - OCANNL uses counter-based pseudo-random generation:
    - Each `uniform()` call combines global seed with a unique tensor identifier

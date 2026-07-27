@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 hoisted-packed matmul matches the naive twin: true
 no in-kernel scratch or copy nests; packed constants are buffer params: true
 mixed hoisted + in-kernel packing on edge tiles matches the naive twin: true

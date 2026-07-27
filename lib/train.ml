@@ -70,8 +70,11 @@ let loss_accumulator ?(label = "loss_accum") () =
     ([accum_loss =+ loss]): training loops can then read the loss sum once per epoch instead of once
     per step — on GPU backends a per-step [Context.get_values] awaits the whole device, serializing
     the stream, while steps that only accumulate on device queue up and overlap with host-side
-    scheduling. *)
-let grad_update ?(setup_for_parallel = false) ?accum_loss loss =
+    scheduling. When [loss_scale] is given (see {!Mixed_prec.Loss_scaler}), the backprop is seeded
+    with the scale's value instead of 1 ([loss.grad =: loss_scale]), so all gradients come out
+    multiplied by the scale — unscale them before the optimizer update (the [grad_unscale] argument
+    of {!sgd_update}). *)
+let grad_update ?(setup_for_parallel = false) ?accum_loss ?loss_scale loss =
   set_materialized loss.Tensor.value;
   (* Training loops read the loss from the host; declare the intent so the liveness memory planner
      (config [buffer_aliasing], gh-ocannl-489) never aliases the loss buffer -- like param
@@ -90,23 +93,66 @@ let grad_update ?(setup_for_parallel = false) ?accum_loss loss =
        | None -> loss.forward);
        ~~(loss "zero grads and backprop";
           loss.zero_grads;
-          loss.grad =: 1;
+          (match loss_scale with
+          | Some scale -> loss.grad =: scale
+          | None -> loss.grad =: 1);
           loss.backprop))]
 
-(** See: https://github.com/tinygrad/tinygrad/blob/master/tinygrad/nn/optim.py *)
-let sgd_one ~learning_rate ?(momentum = 0.0) ?(weight_decay = 0.0) ?(nesterov = false) p =
+(** A scalar checksum over all parameter gradients of [loss]: returns the flag tensor and the code
+    that resets it to 0 and accumulates the sum of every gradient cell into it. The sum is
+    non-finite if and only if some gradient cell is non-finite (a finite sum cannot arise from
+    non-finite cells: same-sign infinities stay infinite, opposite-sign infinities and NaNs produce
+    NaN; a spurious overflow of large finite gradients only triggers a benign extra backoff).
+    Sequence it after {!grad_update} in the same routine, read the flag with [Context.get_values]
+    and gate the optimizer step on [Float.is_finite] — the dynamic loss scaling recipe
+    ({!Mixed_prec.step}) does exactly this. *)
+let grad_checksum loss =
+  let flag = NTDSL.init ~l:"grad_checksum" ~prec:Ir.Ops.single ~o:[ 1 ] ~f:(fun _ -> 0.) () in
+  set_materialized flag.Tensor.value;
+  Tn.set_observable flag.Tensor.value;
+  (* Settle shape inference for the parameters first: the total-reduce einsum below unifies each
+     parameter's rows with the spec's row variables, and a parameter row still unsolved at
+     settlement would then be refused the close-to-empty guess (row.ml's "You forgot to specify
+     the hidden dimension(s)" — a row variable used in an einsum spec is no longer safe to guess).
+     Forcing dims here closes e.g. a bias's inferred-empty input row before the spec touches it —
+     which is also why [grad_checksum] must be called only after the model and the loss are fully
+     constructed. *)
+  Set.iter loss.Tensor.params ~f:(fun p ->
+      ignore (Lazy.force p.Tensor.value.Tn.dims : int array));
+  let one_param p =
+    if Option.is_none p.Tensor.diff then
+      raise @@ Tensor.Session_error ("Train.grad_checksum: not differentiable", Some p);
+    [%cd flag =+ id p.grad ~logic:"...|...->... => |->0"]
+  in
+  let comps = Set.to_list loss.Tensor.params |> List.map ~f:one_param in
+  let reset = [%cd flag =: 0] in
+  let comp = Asgns.sequence (reset :: comps) in
+  (flag, { comp with asgns = Asgns.Block_comment ("grad_checksum", comp.asgns) })
+
+(** See: https://github.com/tinygrad/tinygrad/blob/master/tinygrad/nn/optim.py
+
+    When [grad_unscale] is given (the reciprocal of {!grad_update}'s [loss_scale]), the gradient is
+    first multiplied in place by it, so the optimizer math below — including the momentum buffer —
+    sees unscaled gradients, and so does any later reader of [p.grad] (e.g. gradient clipping). *)
+let sgd_one ~learning_rate ?(momentum = 0.0) ?(weight_decay = 0.0) ?(nesterov = false) ?grad_unscale
+    p =
   if Option.is_none p.Tensor.diff then
     raise @@ Tensor.Session_error ("Train.sgd_one: not differentiable", Some p);
   [%cd
     ~~(p "param sgd step";
+       (match grad_unscale with
+       (* The binary form: a unary [p.grad =* unscale] would be a Pointwise_un, which does not
+          broadcast the scalar's closed rows against parameters with input axes. *)
+       | Some unscale -> p.grad =: p.grad * unscale ~logic:"."
+       | None -> Asgns.empty_comp);
        { sgd_delta } =: p.grad + (!.weight_decay *. p);
        if Float.(momentum > 0.0) then (
          { sgd_momentum } =: (!.momentum *. sgd_momentum) + sgd_delta;
          if nesterov then sgd_delta =+ !.momentum *. sgd_momentum else sgd_delta =: sgd_momentum);
        p =- learning_rate * sgd_delta ~logic:".")]
 
-let sgd_update ~learning_rate ?momentum ?weight_decay ?nesterov loss =
-  let f = sgd_one ~learning_rate ?momentum ?weight_decay ?nesterov in
+let sgd_update ~learning_rate ?momentum ?weight_decay ?nesterov ?grad_unscale loss =
+  let f = sgd_one ~learning_rate ?momentum ?weight_decay ?nesterov ?grad_unscale in
   let comp = Set.to_list loss.Tensor.params |> List.map ~f |> Asgns.sequence in
   { comp with asgns = Asgns.Block_comment ("sgd_update", comp.asgns) }
 
@@ -198,6 +244,14 @@ let tune_placements ?beam_width ?rounds ?repeats ?timing_ctx ?report ctx loss co
 
 module Lazy = Utils.Lazy
 
+(* The untuned compile of the recipes, behind the gh-ocannl-491 config gate: with
+   [model_default_schedule=true], the default schedule is picked by the analytic cost model
+   ({!Autotune.model_default} — zero timing runs, advisory, falls back to the ordinary default
+   pipeline); otherwise plain [Context.compile]. *)
+let compile_with_model_gate ctx comp bindings =
+  if Lazy.force Autotune.model_default_enabled then Autotune.model_default ctx comp bindings
+  else Context.compile ctx comp bindings
+
 let%track7_sexp to_routine (ctx : Context.t) ?(output_cd_file = false) bindings comp =
   if output_cd_file then (
     let name = Asgns.get_name_exn comp.Asgns.asgns in
@@ -214,7 +268,7 @@ let%track7_sexp to_routine (ctx : Context.t) ?(output_cd_file = false) bindings 
   (* Materialize the guessed output nodes so they persist across calls and are inspectable on demand
      via the context (gh-ocannl-333). *)
   Set.iter (snd @@ Asgns.collect_nodes_guess_output comp.Asgns.asgns) ~f:set_materialized;
-  let _ctx, routine = Context.compile ctx comp bindings in
+  let _ctx, routine = compile_with_model_gate ctx comp bindings in
   (* Return just the routine for backward compatibility - ctx is discarded here *)
   routine
 
@@ -282,7 +336,7 @@ let%track3_sexp run_once ?(output_cd_file = false) ?(skip_init = false) ?reinit_
   let ctx =
     if skip_init || Set.is_empty t.params then ctx else init_params ?reinit_all ctx bindings t
   in
-  let ctx, routine = Context.compile ctx update bindings in
+  let ctx, routine = compile_with_model_gate ctx update bindings in
   Context.run ctx routine
 
 (** Context-based versions of training functions for the new simplified API *)

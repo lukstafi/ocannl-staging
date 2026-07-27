@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 HERE: test/operations/test_extend_dsls.ml:23:21
 [28]: relu shape 0:$92  <no-context>
 grad_relu <no-context>

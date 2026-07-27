@@ -1,19 +1,18 @@
-(* gh-494 waypoint 2 follow-up: the read-before-write decider flip. [visit_llc]'s tracer
-   truncates loops at [virtualize_settings.max_tracing_dim] (default 5), so on a padded-conv
-   intermediate the consumer's affine reads (e.g. [oh+kh]) reach positions past the traced write
-   range and are classified [Recurrent] — spuriously: every read is in fact covered by prior
-   in-routine writes. The affine containment query ([Low_level.reads_covered_query], mirroring
-   the tracer's semantics exactly) now cancels the spurious flag, skipping the [On_device]
-   pessimization; it never overrides in the other direction.
+(* gh-494 waypoint 2 follow-up: the read-before-write decider flip. [visit_llc]'s tracer truncates
+   loops at [virtualize_settings.max_tracing_dim] (default 5), so on a padded-conv intermediate the
+   consumer's affine reads (e.g. [oh+kh]) reach positions past the traced write range and are
+   classified [Recurrent] — spuriously: every read is in fact covered by prior in-routine writes.
+   The affine containment query ([Low_level.reads_covered_query], mirroring the tracer's semantics
+   exactly) now cancels the spurious flag, skipping the [On_device] pessimization; it never
+   overrides in the other direction.
 
    Pinned here, on a chain of two padded convs whose intermediate has spatial dims 9x9 (> the
-   tracing truncation):
-   - the tracer still flags the intermediate recurrent (otherwise this probe went stale);
-   - the override fires: [read_before_write] stays false, so the intermediate is no longer
-     classified as a routine input ([input_and_output_nodes]) — pre-flip it was, forcing
-     [On_device] and excluding it from buffer aliasing;
-   - executed parity: the default run's values match a run with the intermediate forced
-     materialized (the pre-flip placement) — the decider flip must not change computed values.
+   tracing truncation): - the tracer still flags the intermediate recurrent (otherwise this probe
+   went stale); - the override fires: [read_before_write] stays false, so the intermediate is no
+   longer classified as a routine input ([input_and_output_nodes]) — pre-flip it was, forcing
+   [On_device] and excluding it from buffer aliasing; - executed parity: the default run's values
+   match a run with the intermediate forced materialized (the pre-flip placement) — the decider flip
+   must not change computed values.
 
    Printed facts are booleans/PASS lines so the expected output stays backend-stable. *)
 
@@ -26,18 +25,19 @@ module Tn = Ir.Tnode
 
 let p name b = printf "%s: %b\n" name b
 
-(* Deterministic input and (via [fixed_state_for_init]) deterministic conv params, so the two
-   phases compute the same function. *)
+(* Deterministic input and (via [fixed_state_for_init]) deterministic conv params, so the two phases
+   compute the same function. *)
 let build () =
   Utils.settings.fixed_state_for_init <- Some 42;
   Tensor.unsafe_reinitialize ();
   let x_src =
     NTDSL.init ~l:"rbwf_xsrc" ~prec:Ir.Ops.single ~o:[ 9; 9; 2 ]
-      ~f:(fun idcs -> Float.of_int (((idcs.(0) * 3) + (idcs.(1) * 5) + (idcs.(2) * 7)) % 11) *. 0.125)
+      ~f:(fun idcs ->
+        Float.of_int (((idcs.(0) * 3) + (idcs.(1) * 5) + (idcs.(2) * 7)) % 11) *. 0.125)
       ()
   in
-  (* An [init] data node has its layout committed at creation; the padded conv needs a fresh
-     operand to grant the halo (see padding_lifecycle.ml). *)
+  (* An [init] data node has its layout committed at creation; the padded conv needs a fresh operand
+     to grant the halo (see padding_lifecycle.ml). *)
   let x = NTDSL.O.einsum1 "h, w, c => h, w, c" x_src in
   let conv1 =
     Nn_blocks.conv2d ~label:[ "rbwf_c1" ] ~kernel_size:3 ~use_padding:true ~out_channels:3 ()

@@ -191,6 +191,9 @@ Rough waypoints:
    search-plus-oracle.)*
 4. Inference: search in constraint space rather than op-list space — the autotuner
    proposes shapes of schedules, the solver prunes cheaply before anything compiles.
+   *(Tracked as gh-514, which carries this waypoint on its own: the first three are an
+   engineering program with a regression criterion, this one is a search architecture
+   with its own prerequisites and its own evaluation criteria.)*
 
 Status, mid-2026: waypoints 1–2 landed as the `Ir.Affine` query engine — pair-conflict
 (disjointness by gcd/interval infeasibility, thread-confinement by forced equalities
@@ -206,11 +209,11 @@ linear — no divisions, no quantifier alternation — so every query form so fa
 with native linear reasoning; revisit only if waypoint-4 inference needs genuine
 existential elimination.
 
-Waypoint 4 extends naturally to an *optimizer*: with the analytic cost model (gh-491)
-as the objective, schedule search becomes branch-and-bound over partial schedule
-shapes. Legality queries fathom infeasible subtrees wholesale — a reduction edge
-refutes "parallelize k" for every completion, before any tile size is named — and
-peak-envelope roofline bounds are admissible by construction: max(FLOPs / peak
+Waypoint 4 (gh-514) extends naturally to an *optimizer*: with the analytic cost model
+(gh-491) as the objective, schedule search becomes branch-and-bound over partial
+schedule shapes. Legality queries fathom infeasible subtrees wholesale — a reduction
+edge refutes "parallelize k" for every completion, before any tile size is named —
+and peak-envelope roofline bounds are admissible by construction: max(FLOPs / peak
 compute, compulsory bytes / peak bandwidth) lower-bounds every completion's runtime,
 model omissions only weaken pruning, and only overstated "peak" constants can
 mis-prune, so the envelope numbers must be honest peaks. Two regimes keep the model

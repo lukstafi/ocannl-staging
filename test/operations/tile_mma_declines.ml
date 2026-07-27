@@ -7,27 +7,27 @@
    three visibility mechanisms:
 
    - The [Ir.C_syntax.mma_census]: with [mma_census_enabled], each compiled [Tile_mma] statement
-     records how it actually rendered (intrinsics / register-tiled / scalar fallback). Autotune
-     reads it to annotate candidate timings; here we assert directly that a whole-triple [Tensorize]
-     over a standard layout renders register-tiled on the C backends while a transposed-B layout
-     (the gradient-GEMM shape) falls back to scalar.
+   records how it actually rendered (intrinsics / register-tiled / scalar fallback). Autotune reads
+   it to annotate candidate timings; here we assert directly that a whole-triple [Tensorize] over a
+   standard layout renders register-tiled on the C backends while a transposed-B layout (the
+   gradient-GEMM shape) falls back to scalar.
 
-   - The per-chunk privatization byte cap (config [cc_grid_private_bytes_cap], default
-     256KB): a grid-outermost packed GEMM that re-packs the B~ panel per chunk (gh-ocannl-475's
-     alternative shape) privatizes both tiles per chunk — under the default cap it fits at [n = 256]
-     (80KB) and declines at [n = 1024] (272KB), rendering serial. Compile-only; the stderr
-     diagnostics themselves are opt-in via [schedule_log_declines].
+   - The per-chunk privatization byte cap (config [cc_grid_private_bytes_cap], default 256KB): a
+   grid-outermost packed GEMM that re-packs the B~ panel per chunk (gh-ocannl-475's alternative
+   shape) privatizes both tiles per chunk — under the default cap it fits at [n = 256] (80KB) and
+   declines at [n = 1024] (272KB), rendering serial. Compile-only; the stderr diagnostics themselves
+   are opt-in via [schedule_log_declines].
 
    - The autotune seeding pre-filter ([Autotune.sketch_seed_params], gh-ocannl-479): tensorized
-     candidates that statically must render the scalar fallback are not seeded — transposed-B sites
-     lose the whole-triple family (their packed flavors normalize the layout and stay), a
-     non-hoistable transposed B additionally loses the hoisted-only Grid flavor (it would read B in
-     place), and a column extent below one vector of lanes loses everything. Exactly one hoistable
-     operand additionally seeds the mixed grid-outermost shape ([sk_pack_rest] with [sk_hoist],
-     gh-ocannl-473); no hoistable operand seeds the grid-outermost per-chunk B~ re-packing shape
-     ([sk_pack_rest] alone, gh-ocannl-475) when the tiles fit the privatization cap. Seed
-     enumeration runs on the pre-schedule lowering with synthetic limits, so the printed counts
-     are backend-independent. *)
+   candidates that statically must render the scalar fallback are not seeded — transposed-B sites
+   lose the whole-triple family (their packed flavors normalize the layout and stay), a
+   non-hoistable transposed B additionally loses the hoisted-only Grid flavor (it would read B in
+   place), and a column extent below one vector of lanes loses everything. Exactly one hoistable
+   operand additionally seeds the mixed grid-outermost shape ([sk_pack_rest] with [sk_hoist],
+   gh-ocannl-473); no hoistable operand seeds the grid-outermost per-chunk B~ re-packing shape
+   ([sk_pack_rest] alone, gh-ocannl-475) when the tiles fit the privatization cap. Seed enumeration
+   runs on the pre-schedule lowering with synthetic limits, so the printed counts are
+   backend-independent. *)
 
 open Base
 open Ocannl
@@ -52,8 +52,7 @@ let read_generated base_name =
    count constructs rather than testing presence. *)
 let count_parallel_constructs src =
   List.length (String.substr_index_all src ~may_overlap:false ~pattern:"dispatch_apply")
-  + List.length
-      (String.substr_index_all src ~may_overlap:false ~pattern:"#pragma omp parallel for")
+  + List.length (String.substr_index_all src ~may_overlap:false ~pattern:"#pragma omp parallel for")
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
@@ -166,29 +165,34 @@ let () =
     in
     let ctx = Context.auto () in
     let ctx, routine =
-      Context.compile ~lowered_transform:transform ctx (named name (Train.forward c))
+      Context.compile ~lowered_transform:transform ctx
+        (named name (Train.forward c))
         Ir.Indexing.Empty
     in
-    (* Executed parity, not just structure: per-chunk privatization rewrites where the packed
-       values live, so compare against a serial twin of the same computation. *)
-    if run_parity then (
-      let ctx = Context.run ctx routine in
-      let got = Context.get_values ctx c.Tensor.value in
-      let a2 = TDSL.ndarray av ~label:[ "tmd_bp_a2" ] ~input_dims:[ dim ] ~output_dims:[ dim ] () in
-      let b2 = TDSL.ndarray bv ~label:[ "tmd_bp_b2" ] ~input_dims:[ dim ] ~output_dims:[ dim ] () in
-      let%op c2 = a2 * b2 in
-      let sctx = Context.auto () in
-      let sctx, sroutine =
-        Context.compile
-          ~lowered_transform:(fun opt -> opt)
-          sctx
-          (named (name ^ "_serial") (Train.forward c2))
-          Ir.Indexing.Empty
-      in
-      let sctx = Context.run sctx sroutine in
-      let want = Context.get_values sctx c2.Tensor.value in
-      p "per-chunk B~ re-pack matches the serial twin bitwise"
-        (Array.for_all2_exn got want ~f:Float.equal));
+    (* Executed parity, not just structure: per-chunk privatization rewrites where the packed values
+       live, so compare against a serial twin of the same computation. *)
+    (if run_parity then
+       let ctx = Context.run ctx routine in
+       let got = Context.get_values ctx c.Tensor.value in
+       let a2 =
+         TDSL.ndarray av ~label:[ "tmd_bp_a2" ] ~input_dims:[ dim ] ~output_dims:[ dim ] ()
+       in
+       let b2 =
+         TDSL.ndarray bv ~label:[ "tmd_bp_b2" ] ~input_dims:[ dim ] ~output_dims:[ dim ] ()
+       in
+       let%op c2 = a2 * b2 in
+       let sctx = Context.auto () in
+       let sctx, sroutine =
+         Context.compile
+           ~lowered_transform:(fun opt -> opt)
+           sctx
+           (named (name ^ "_serial") (Train.forward c2))
+           Ir.Indexing.Empty
+       in
+       let sctx = Context.run sctx sroutine in
+       let want = Context.get_values sctx c2.Tensor.value in
+       p "per-chunk B~ re-pack matches the serial twin bitwise"
+         (Array.for_all2_exn got want ~f:Float.equal));
     read_generated name
   in
   (match compile_bpack ~run_parity:true ~name:"tmd_bpack_fits" ~dim:256 () with
@@ -241,9 +245,9 @@ let () =
   let mb = TDSL.ndarray mbv ~label:[ "tmd_s_b" ] ~input_dims:[ n ] ~output_dims:[ n ] () in
   let%op sc = ma * mb in
   summarize "seeds: standard, both hoistable" (seeds_of ~name:"tmd_seeds_std" (Train.forward sc));
-  (* Transposed B, both hoistable: the whole-triple family (which reads B in place) is filtered
-     out; the packed flavors normalize the layout and stay, including the hoisted Grid flavor
-     (hoisted B~ packs at link time, so nothing reads B in place). *)
+  (* Transposed B, both hoistable: the whole-triple family (which reads B in place) is filtered out;
+     the packed flavors normalize the layout and stay, including the hoisted Grid flavor (hoisted B~
+     packs at link time, so nothing reads B in place). *)
   let mta = TDSL.ndarray mav ~label:[ "tmd_s_ta" ] ~output_dims:[ n; n ] () in
   let mtb = TDSL.ndarray mbv ~label:[ "tmd_s_tb" ] ~output_dims:[ n; n ] () in
   let%op st = mta +* "ik;jk=>ij" mtb in
@@ -263,17 +267,21 @@ let () =
   let%op yt = ma3 +* "ik;jk=>ij" xb in
   summarize "seeds: hoistable A x computed transposed B"
     (seeds_of ~name:"tmd_seeds_tb_mixed" (Train.forward yt));
-  (* No hoistable operand (both trainable params): the grid-outermost per-chunk B~ re-packing
-     shape ([sk_pack_rest] without [sk_hoist], gh-ocannl-475) is the only one-dispatch flavor, and
-     is seeded whenever the packed tiles statically fit the per-chunk privatization cap. *)
+  (* No hoistable operand (both trainable params): the grid-outermost per-chunk B~ re-packing shape
+     ([sk_pack_rest] without [sk_hoist], gh-ocannl-475) is the only one-dispatch flavor, and is
+     seeded whenever the packed tiles statically fit the per-chunk privatization cap. *)
   let wa = TDSL.param ~values:mav "tmd_wa" ~input_dims:[ n ] ~output_dims:[ n ] () in
   let wb = TDSL.param ~values:mbv "tmd_wb" ~input_dims:[ n ] ~output_dims:[ n ] () in
   let%op yw = wa * wb in
   summarize "seeds: no hoistable operand" (seeds_of ~name:"tmd_seeds_params" (Train.forward yw));
-  (* Column extent below one vector of lanes (nj = 4 < 8): the register tiling statically declines,
-     so no tensorized candidate is seeded at all (and no scalar tiling divides nj either). *)
+  (* Column extent below one vector of lanes (nj = 4 < 8): the whole-triple form statically
+     declines and is not seeded. The packed compositions with a split column panel ([bn > 0]) now
+     survive via pad-composition seeding (gh-ocannl-485): the padded micro-kernel's column extent
+     is the panel width, so the register tiling genuinely fires — the (large) padding waste is the
+     tuner's call. Unsplit-panel flavors ([bn = 0], panel width = nj) stay filtered. *)
   let mbn = Array.init (n * 4) ~f:(fun x -> Float.of_int (x % 17) -. 8.) in
   let ma4 = TDSL.ndarray mav ~label:[ "tmd_s_a4" ] ~input_dims:[ n ] ~output_dims:[ n ] () in
   let mb4 = TDSL.ndarray mbn ~label:[ "tmd_s_b4" ] ~input_dims:[ 4 ] ~output_dims:[ n ] () in
   let%op yn = ma4 * mb4 in
-  summarize "seeds: narrow columns (nj < lanes)" (seeds_of ~name:"tmd_seeds_narrow" (Train.forward yn))
+  summarize "seeds: narrow columns (nj < lanes)"
+    (seeds_of ~name:"tmd_seeds_narrow" (Train.forward yn))

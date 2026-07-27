@@ -11,8 +11,8 @@
 
    2. A forward chain of materialized unobservable intermediates: under [buffer_aliasing] the
    liveness-disjoint links share bytes (footprint shrinks), post-hoc host reads of the aliased
-   intermediates raise the buffer-aliased [User_error] (the read guard), while the observable
-   result stays readable. Golden parity: the result value is identical with the planner on and off.
+   intermediates raise the buffer-aliased [User_error] (the read guard), while the observable result
+   stays readable. Golden parity: the result value is identical with the planner on and off.
 
    3. A training step (forward + backprop + SGD compiled as ONE routine, the whole-step program the
    planner targets): the loss trajectory is bitwise identical with the planner on and off (a
@@ -46,12 +46,10 @@ let () =
       p "planner: overlapping spans get disjoint bytes" (o1 <> o2 && total = 128)
   | _ -> p "planner: overlapping spans get disjoint bytes" false);
   (match f [ (64, 8, "single", Some (0, 1)); (64, 8, "int32", Some (2, 3)) ] with
-  | Some ([ o1; o2 ], total) ->
-      p "planner: cross-precision never shares" (o1 <> o2 && total = 128)
+  | Some ([ o1; o2 ], total) -> p "planner: cross-precision never shares" (o1 <> o2 && total = 128)
   | _ -> p "planner: cross-precision never shares" false);
   (match f [ (64, 8, "single", None); (64, 8, "single", Some (2, 3)) ] with
-  | Some ([ o1; o2 ], total) ->
-      p "planner: always-live conflicts with all" (o1 <> o2 && total = 128)
+  | Some ([ o1; o2 ], total) -> p "planner: always-live conflicts with all" (o1 <> o2 && total = 128)
   | _ -> p "planner: always-live conflicts with all" false);
   (* Greedy by size: the large always-live pair claims low offsets; the two small disjoint items
      tuck into the same bytes. *)
@@ -68,13 +66,14 @@ let () =
       p "planner: greedy-by-size packs small pair into one gap"
         (s1 = s2 && b1 <> b2 && total = 128 + 128 + 16)
   | _ -> p "planner: greedy-by-size packs small pair into one gap" false);
-  match Backends.plan_arena_offsets ~cap:100 [ (64, 8, "single", None); (64, 8, "single", None) ]
+  match
+    Backends.plan_arena_offsets ~cap:100 [ (64, 8, "single", None); (64, 8, "single", None) ]
   with
   | None -> p "planner: over-cap layout falls back" true
   | Some _ -> p "planner: over-cap layout falls back" false
 
-(* Layer 1b: [Low_level.sink_zero_outs] on hand-built statement lists. Executed coverage of the
-   sunk code is the train phase below: with the planner on, the whole-step routine runs with its
+(* Layer 1b: [Low_level.sink_zero_outs] on hand-built statement lists. Executed coverage of the sunk
+   code is the train phase below: with the planner on, the whole-step routine runs with its
    zero-grads block sunk, and the loss trajectory must match the planner-off run bitwise. *)
 let () =
   let module LL = Ir.Low_level in
@@ -90,12 +89,12 @@ let () =
    p "sink: zeros sink to their first access"
      (match result with
      | [
-         LL.Set { tn = c1; _ };
-         LL.Zero_out a1;
-         LL.Set { tn = a2; _ };
-         LL.Zero_out b1;
-         LL.Set { tn = b2; _ };
-       ] ->
+      LL.Set { tn = c1; _ };
+      LL.Zero_out a1;
+      LL.Set { tn = a2; _ };
+      LL.Zero_out b1;
+      LL.Set { tn = b2; _ };
+     ] ->
          Tn.equal c1 c && Tn.equal a1 a && Tn.equal a2 a && Tn.equal b1 b && Tn.equal b2 b
      | _ -> false));
   (let result =
@@ -129,7 +128,8 @@ let chain_phase ~label () =
   in
   let a_mat =
     TDSL.init ~l:"a_mat" ~prec:Ir.Ops.single ~i:[ dim ] ~o:[ dim ]
-      ~f:(fun idcs -> if idcs.(0) = idcs.(1) then 0.5 else Float.of_int ((idcs.(0) + idcs.(1)) % 3) *. 0.001)
+      ~f:(fun idcs ->
+        if idcs.(0) = idcs.(1) then 0.5 else Float.of_int ((idcs.(0) + idcs.(1)) % 3) *. 0.001)
       ()
   in
   let%op h1 = relu (a_mat * x) in
@@ -182,7 +182,8 @@ let train_phase () =
     { w4 }
     * relu
         ({ b3; o = [ d_hid ] }
-        + ({ w3 } * relu ({ b2; o = [ d_hid ] } + ({ w2 } * relu ({ b1; o = [ d_hid ] } + ({ w1 } * x))))))
+        + { w3 }
+          * relu ({ b2; o = [ d_hid ] } + ({ w2 } * relu ({ b1; o = [ d_hid ] } + ({ w1 } * x)))))
   in
   let%op err = mlp xs - ys in
   let%op scalar_loss = ((err *. err) ++ "...|... => |->0") /. !..batch in

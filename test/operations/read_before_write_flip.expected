@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 default: tracer flags the intermediate recurrent: true
 default: read_before_write overridden to false: true
 default: intermediate is not a routine input: true

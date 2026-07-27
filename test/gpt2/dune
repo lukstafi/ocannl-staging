@@ -28,7 +28,9 @@
  (name gpt2_tiny_dry_run)
  (package neural_nets_lib)
  (modules gpt2_tiny_dry_run)
- (deps ocannl_config (env_var OCANNL_BACKEND))
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
  (libraries base ocannl stdio gpt2_model)
  (preprocess
   (pps ppx_here ppx_ocannl)))

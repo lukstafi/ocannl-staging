@@ -71,21 +71,36 @@ def build_conv(spec, rng, tensors, meta):
     [hid, oh, ow, oc] (input axes = the conv feature map); images [total, h, w, c]. The
     Python runners permute to NCHW.
 
-    Two shapes drive the same builder: LeNet-5 (1-channel, valid convs, small channels) and
+    Three shapes drive the same builder: LeNet-5 (1-channel, valid convs, small channels),
     the cifar-scale variant (gh-ocannl-500: 3-channel 44x44, valid 5x5 convs so both conv
     GEMM rows land on multiples of 8 — 40 and 16 — and channels multiples of 8, so the
-    blocked conv sketch legs' per-block tile gates fire). [in_channels] defaults to 1 and
-    [use_padding] to false, keeping the LeNet fixture bit-identical."""
+    blocked conv sketch legs' per-block tile gates fire), and the stride-2-stem variant
+    (gh-ocannl-502: 3-channel 51x51, conv1 at stride 2 — the strided downsampling site the
+    compacting Stage targets — with rows 24 and 8 still multiples of 8). [in_channels]
+    defaults to 1, [use_padding] to false, and [stride1]/[stride2] to 1, keeping the LeNet
+    fixture bit-identical. Strides are only supported with valid convs: same-padding
+    output-size conventions differ across frameworks once stride > 1."""
     total = spec["batch_size"] * spec["n_batches"]
     img, classes = spec["image_size"], spec["classes"]
     c1, c2, k = spec["channels1"], spec["channels2"], spec["kernel_size"]
     ic = spec.get("in_channels", 1)
     use_padding = spec.get("use_padding", False)
+    s1, s2 = spec.get("stride1", 1), spec.get("stride2", 1)
     if use_padding:
+        assert s1 == 1 and s2 == 1, "strides require use_padding: false"
         # Same-padding keeps the spatial extent; two 2x pools halve it twice.
         fm = img // 2 // 2
     else:
-        fm = (((img - k + 1) // 2) - k + 1) // 2  # conv-valid, pool2, conv-valid, pool2
+        # conv-valid at stride, pool2, conv-valid at stride, pool2. OCANNL's valid conv
+        # (and pool) require exact divisibility — assert instead of silently flooring.
+        assert (img - k) % s1 == 0, "conv1: (image_size - kernel_size) mod stride1 != 0"
+        c1_out = (img - k) // s1 + 1
+        assert c1_out % 2 == 0, "pool1: conv1 output extent must be even"
+        p1 = c1_out // 2
+        assert (p1 - k) % s2 == 0, "conv2: (input - kernel_size) mod stride2 != 0"
+        c2_out = (p1 - k) // s2 + 1
+        assert c2_out % 2 == 0, "pool2: conv2 output extent must be even"
+        fm = c2_out // 2
     fc1, fc2 = spec["fc1"], spec["fc2"]
     tensors["conv1_kernel"] = uniform(rng, k * k * ic, (c1, k, k, ic))
     tensors["conv1_bias"] = np.zeros(c1, np.float32)
@@ -103,6 +118,8 @@ def build_conv(spec, rng, tensors, meta):
         meta[key] = str(spec[key])
     meta["in_channels"] = str(ic)
     meta["use_padding"] = "true" if use_padding else "false"
+    meta["stride1"] = str(s1)
+    meta["stride2"] = str(s2)
 
 
 def build_gpt(spec, rng, tensors, meta):

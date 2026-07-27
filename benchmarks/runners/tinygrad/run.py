@@ -14,9 +14,6 @@ import time
 from importlib.metadata import version as pkg_version
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from bench_common import emit, percentiles, read_st_metadata
-
 ap = argparse.ArgumentParser()
 ap.add_argument("--fixture", required=True)
 # AMD is tinygrad's Linux ROCm device; CL (OpenCL) reaches AMD GPUs on Windows
@@ -35,6 +32,13 @@ import numpy as np
 from safetensors.numpy import load_file
 from tinygrad import Tensor, TinyJit
 from tinygrad.nn.optim import SGD
+
+# After the tinygrad import: this directory is runners/tinygrad, so with runners/ on
+# sys.path an `import tinygrad` scan would first hit it as a namespace-package portion —
+# which shadows editable (finder-based) tinygrad installs, whose MetaPath finder is only
+# consulted when the path scan finds nothing.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from bench_common import emit, percentiles, read_st_metadata
 
 
 def param(arr):
@@ -81,13 +85,15 @@ def build_conv(meta, data):
     flat = [w1, b1, w2, b2, wf1, bf1, wf2, bf2, wl, bl]
 
     # Same-padding (cifar-scale workload) vs valid (LeNet); odd kernel keeps the spatial extent.
+    # Strides (cifar_stride's stride-2 stem, gh-ocannl-502) are valid-only — see gen_fixtures.
     k = int(meta.get("kernel_size", "5"))
     pad = (k - 1) // 2 if meta.get("use_padding", "false") == "true" else 0
+    s1, s2 = int(meta.get("stride1", "1")), int(meta.get("stride2", "1"))
 
     def forward(xb):
-        z = xb.conv2d(w1, b1, padding=pad)
+        z = xb.conv2d(w1, b1, stride=s1, padding=pad)
         z = z.relu().max_pool2d(kernel_size=(2, 2))
-        z = z.conv2d(w2, b2, padding=pad)
+        z = z.conv2d(w2, b2, stride=s2, padding=pad)
         z = z.relu().max_pool2d(kernel_size=(2, 2))
         h = z.permute(0, 2, 3, 1).reshape(z.shape[0], -1)
         h = h.linear(wf1.T, bf1).relu()
@@ -223,7 +229,15 @@ def main():
 
         Device[Device.DEFAULT].synchronize()
 
-    with Tensor.train(mode == "train"):
+    # Tensor.train was replaced on tinygrad master by the TRAINING context var (the optimizer
+    # refuses to step outside it).
+    if hasattr(Tensor, "train"):
+        train_ctx = Tensor.train(mode == "train")
+    else:
+        from tinygrad.helpers import Context
+
+        train_ctx = Context(TRAINING=int(mode == "train"))
+    with train_ctx:
         k = 0
         losses = []
         t0 = time.perf_counter()

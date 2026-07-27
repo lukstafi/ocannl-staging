@@ -18,7 +18,14 @@
     safety guarantee: a schedule saved against a digest is only ever replayed onto code with an
     equal digest, which makes the canonical numbering total and unambiguous by construction —
     nondeterministic lowering degrades to cache misses, never to a schedule applied to the wrong
-    loop. *)
+    loop.
+
+    Schedule identity pins numerics (gh-ocannl-484): ops holding the reduction-reassociation
+    license ([Split_reduce] — whose fixed combine tree is a function of [num_blocks] — [Swap] and
+    [Vectorized] retypes over accumulations, [Tensorize]) make the computed values a function of
+    the schedule. Replaying a cached schedule reproduces results bitwise; retuning, clearing the
+    cache, or a digest change may select a different schedule and change low-order bits of
+    reduction results. *)
 
 open Base
 
@@ -29,6 +36,9 @@ type mint_role =
   | Expand_axis of int  (** The [i]-th fresh symbol of an [Expand_zero]. *)
   | Tensorize_lane
   | Partition_seg of int  (** The [i]-th segment symbol of a [Partition]. *)
+  | Split_reduce_block
+  | Split_reduce_inner
+  | Split_reduce_combine of int  (** The [i]-th combine symbol of a [Split_reduce]. *)
 [@@deriving sexp, compare, equal]
 
 (** A process-independent name for a symbol occurring in a schedule. [Base i] is the [i]-th
@@ -51,6 +61,7 @@ type saved_optop =
   | Retype of { axis : sym_ref; ty : Low_level.axis_type }
   | Unroll of { axis : sym_ref; materialize : bool }
   | Partition of { axis : sym_ref; breakpoints : int list }
+  | Pad of { axis : sym_ref; to_multiple_of : int }
   | Stage of {
       source : int;
       tile_loops : sym_ref list;
@@ -64,6 +75,7 @@ type saved_optop =
   | Expand_zero of { tn : int }
   | Tensorize of { i : sym_ref; j : sym_ref; k : sym_ref; simd_width : int }
   | Fuse_epilogue of { target : int; shared : bool }
+  | Split_reduce of { axis : sym_ref; target : int; num_blocks : int }
 [@@deriving sexp, compare, equal]
 
 type saved_schedule = saved_optop list [@@deriving sexp, compare, equal]

@@ -1,3 +1,8 @@
+---
+name: slipshow
+description: Writing Slipshow presentations, a text-based engine that compiles Markdown to interactive scrolling HTML presentations. Covers pause/navigation metadata, block classes, grouping, drawing and speaker modes, the compile/serve commands, and converting traditional slide decks. Use when authoring or editing a .md file that is a Slipshow presentation.
+---
+
 # Writing Slipshow Presentations
 
 Slipshow is a text-based presentation engine that compiles Markdown to interactive HTML presentations.

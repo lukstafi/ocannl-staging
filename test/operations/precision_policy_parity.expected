@@ -1,0 +1,8 @@
+w1 param (policy leg): bfloat16
+b2 param (excepted): single
+y activation (policy leg): bfloat16
+y activation (reference leg): single
+w1 gradient (grad_prec = None): single
+input x (explicitly single): single
+forward parity within 0.05: true
+loss parity within 0.05: true

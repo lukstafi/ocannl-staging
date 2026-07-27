@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 serial sum correct: true
 warp-shuffle sum parity: true
 two-phase shuffle rendering (GPU) or serial fallback (CPU): true

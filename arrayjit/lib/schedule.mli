@@ -2,10 +2,12 @@
 
     Halide-style schedules over the lowered, optimized IR: a list of {!optop}s applied as a pure
     [Low_level.optimized -> Low_level.optimized] pass at the [?lowered_transform] seam of backend
-    [compile]. See docs/proposals/schedule-ir-optops.md for the design, including the normative
-    pass-ordering contract (§2): schedules run after the whole [optimize_proc] pipeline (so they see
-    fused code), {!apply} folds freshly constructed guards by re-running [simplify_llc] (plus CSE
-    and hoisting when a transform duplicated code), and there is no re-virtualization. *)
+    [compile]. See docs/schedules_and_autotuning.md for the system view (composition recipes,
+    default presets, fission, autotuning) and docs/proposals/schedule-ir-optops.md for the design
+    rationale, including the pass-ordering contract (§2): schedules run after the whole
+    [optimize_proc] pipeline (so they see fused code), {!apply} folds freshly constructed guards by
+    re-running [simplify_llc] (plus CSE and hoisting when a transform duplicated code), and there
+    is no re-virtualization. *)
 
 open Base
 module Tn = Tnode
@@ -66,6 +68,24 @@ type optop =
           [Split] the dividing main segment — clean main nest plus epilogue) both specialize into
           guard-free segment nests, and the fresh symbols make each segment individually
           addressable by subsequent ops (per-segment scheduling). *)
+  | Pad of {
+      axis : Indexing.symbol;  (** The loop to pad, identified by its index symbol. *)
+      to_multiple_of : int;  (** The padded extent is the least multiple [>=] the loop extent. *)
+    }
+      (** Pad-to-tile (gh-ocannl-485, PADTO): extend the [Serial] loop
+          [For_loop axis in [0, N)] to [[0, M)] where [M] is the least multiple of [to_multiple_of]
+          with [M >= N], and guard every effectful leaf statement of the body with [If (axis < N)]
+          (leaf statements, not the whole body, so barriers inserted by a later shared {!Stage} stay
+          under uniform control flow). The pad iterations are no-ops, so the op is unconditionally
+          semantics-preserving ([op_legality]: [Op_legal]); when [to_multiple_of] already divides
+          the extent it is the identity. Purpose: downstream [Split]s by factors of [M] divide
+          cleanly (no remainder guard), {!Stage} tiles minted over the padded tile loops zero-fill
+          their fringe (see {!constructor-Stage}), and {!constructor-Tensorize} recognizes the
+          guards as pad masks — moving row/column masks to the accumulator transfers and
+          discharging reduction masks against zero-filled staged operands — so tensorized paths
+          cover arbitrary extents. The surviving guards are exactly the flip points
+          {!partition_breakpoints} detects: a later {!constructor-Partition} of an enclosing block
+          loop at the last fully valid block specializes them away in the interior segments. *)
   | Stage of {
       source : Tn.t;
       tile_loops : Indexing.symbol list;
@@ -81,9 +101,12 @@ type optop =
           terms. With [shared = true] the tile is added to [workgroup_shared] and a cooperative-load
           nest plus barriers are inserted at the deepest loop carrying an outer-part symbol or a
           reused [Workgroup] tile axis: [Workgroup]-typed tile loops are reused as the cooperating
-          thread indices, [Serial] tile loops are iterated under fresh symbols, per-axis edge guards
-          are constructed then folded, and redundant loading along non-participating workgroup axes
-          is restricted to one representative thread. A shared stage with no anchor (no outer-part
+          thread indices, [Serial] tile loops are iterated under fresh symbols, per-axis edge
+          guards are constructed then folded — in [Where] form storing 0 (the add-reduce
+          accumulation identity) to out-of-range slots, so edge tiles of a non-dividing or padded
+          staging are safe to read over their whole index space; every minted tile is recorded in
+          {!Low_level.optimized.zero_fringe} accordingly (gh-ocannl-485) — and redundant loading
+          along non-participating workgroup axes is restricted to one representative thread. A shared stage with no anchor (no outer-part
           symbol, no reused workgroup axis — e.g. staging a broadcast vector) wraps the outermost
           tile loop instead of the routine root, so enclosing workgroup axes can guard the loads;
           every workgroup slot active in the kernel's launch must be reused or bound by a loop
@@ -116,8 +139,8 @@ type optop =
           storage decline swizzled operands: [Tile_mma] intrinsic/register-tiled paths fall back to
           the scalar micro-kernel (which reads elementwise and stays correct), so do not combine
           [swizzle] with {!constructor-Tensorize} when the intrinsics are the goal — the swizzled
-          tile is for scalar/register-blocktiled staged kernels until [ldmatrix]-style
-          swizzle-aware fragment loads exist.
+          tile is for scalar/register-blocktiled staged kernels until [ldmatrix]-style swizzle-aware
+          fragment loads exist.
 
           [hoisted = true] packs a compile-time-constant operand once, out of the routine
           (gh-ocannl-470, the compiler-native analog of ggml's [CPU_REPACK] [set_tensor] hook):
@@ -200,6 +223,62 @@ type optop =
           hooks cannot [simdgroup_load] from. With [shared], [target] is placed in workgroup-shared
           memory (like [Stage]'s shared tiles) unless already settled on-device, so the intrinsic
           fragment path fires against threadgroup memory. CPU backends reject shared placement. *)
+  | Split_reduce of {
+      axis : Indexing.symbol;  (** The Serial reduction loop to split, by its index symbol. *)
+      target : Tn.t;  (** The accumulated node whose reduction over [axis] is split. *)
+      num_blocks : int;  (** Number of per-block partials (the new block loop's extent). *)
+      block_index : Indexing.symbol;  (** Fresh symbol for the block loop; see {!split_reduce}. *)
+      inner_index : Indexing.symbol;
+          (** Fresh symbol for the in-block chunk loop; see {!split_reduce}. *)
+      combine_indices : Indexing.symbol list;
+          (** Fresh symbols, one per [target] axis, binding the combine nest's loops; see
+              {!split_reduce}. *)
+    }
+      (** Deterministic two-pass split reduction (gh-ocannl-484): parallel reductions without
+          atomics. The [Serial] loop [axis in [0, N)] — carrying the single accumulation of
+          [target] in its subtree — becomes
+          [block in [0, num_blocks) { inner in [0, ceil(N/num_blocks)) }] with
+          [axis := ceil(N/num_blocks)*block + inner] substituted and a construct-then-fold
+          remainder guard as for {!constructor-Split}; the accumulation is redirected into a fresh
+          scratch node [partials] of dims [num_blocks x target-dims] (tile namespace, placed
+          [On_device], registered in the traced store) at the original cell prefixed by [block];
+          and a synthesized combine statement, inserted right after the enclosing top-level
+          statement, folds the partials into [target] in a {e fixed balanced-tree order} over
+          [combine_indices]-bound loops: [target[c..] := target[c..] ⊕ tree(partials[0..B-1][c..])].
+          The block loop is freely annotatable afterwards ([Retype]/the default presets): its index
+          pins the partials row, so parallelizing it is race-free by construction, and the
+          [partials] producer/consumer pair is exactly the materialized cross-nest edge kernel
+          fission cuts at — under [fission_scheduled]/[maybe_default_schedules] the two passes (and
+          the scatter form's zeroing) compile as separate kernels with the event chain supplying
+          the grid-wide synchronization the combine needs. Never annotate the block loop to a
+          hardware axis while compiling both passes into one kernel.
+
+          Recognized accumulation forms (the [axis] subtree must contain no other access of
+          [target], and the rest of the statement must not touch [target] — its combined value
+          exists only after the combine statement):
+
+          - Static: a single rmw [Set], [target[idcs] := target[idcs] ⊕ e] with
+            [⊕ ∈ {Add, Max, Min, Mul}] (FMA counts as [Add]), [idcs] free of [axis]. Every loop
+            enclosing [axis] within the statement must pin exactly one component of [idcs]
+            (injectively: at most one symbol per component), so distinct enclosing iterations use
+            distinct partial cells and the combine re-iterates exactly the written cells. Each
+            block initializes its partial cell to the accumulation identity in-nest (no separate
+            zeroing pass).
+          - Dynamic (the gh-466 embedding-backward scatter): a single [Set_dynamic]
+            add-accumulation of its own row (the [Get_dynamic] rmw form built by
+            [rewrite_one_hot_reductions]), possibly under guards. The scatter is redirected to
+            [partials] with the block index prepended (dynamic axis shifted by one): within a block
+            colliding rows stay serial, across blocks rows land in disjoint partials slices — the
+            block loop parallelizes what the scatter alone cannot. Rows are data-dependent, so
+            [partials] is zeroed by a preceding whole-node [Zero_out] statement (its own fission
+            segment) and the combine covers all of [target].
+
+          Within each chunk the original serial order and rounding are preserved; across chunks the
+          reduction is reassociated (the same license as {!constructor-Swap} of accumulations). The
+          result is deterministic {e per schedule} — bitwise-reproducible run to run and across
+          serial/parallel renderings of the same schedule — but not bitwise-equal to the unsplit
+          serial reduction: schedule identity pins numerics (retuning may change [num_blocks] and
+          hence the combine tree). *)
 [@@deriving sexp_of]
 
 type schedule = optop list [@@deriving sexp_of]
@@ -223,17 +302,34 @@ val partition : axis:Indexing.symbol -> breakpoints:int list -> optop * Indexing
 val partition_breakpoints : axis:Indexing.symbol -> Low_level.t -> int list
 (** Derives candidate {!constructor-Partition} breakpoints of the [axis] loop from the guards
     already present in its body: statement [If] conditions and scalar [Where] conditions (e.g. the
-    virtualizer's per-component range guards of an inlined concatenation, or [Split]'s remainder
-    guard) are scanned for comparisons whose two sides differ by [k*axis + off] with everything else
-    constant — each flips truth value at one point of the axis range. Returns the collected flip
+    virtualizer's per-component range guards of an inlined concatenation, [Split]'s remainder
+    guard, or a clamped window's range guards, gh-ocannl-504) are scanned for comparisons whose two
+    sides differ by [k*axis + off]. With everything besides [axis] constant, such a comparison
+    flips truth value at one point of the axis range. Non-axis symbols bound by other
+    statement-level loops (inside the [axis] loop — e.g. the window symbol of a clamped-window
+    guard — or enclosing it) are bounded by their loop ranges, putting [off] in an interval: the
+    comparison is then always-true / mixed / always-false
+    over the axis range, and both transition points are recorded — the mixed (boundary) segments
+    are exactly delimited while the decided segments fold their guards. Returns the collected flip
     points that fall strictly inside the loop range, sorted and deduplicated (possibly empty — e.g.
     when every guard is already interval-decided); partitioning at them makes every such guard
-    interval-decided within each segment, so {!apply}'s trailing simplify erases them. Raises
-    [Invalid_argument] when no statement-level loop binds [axis]. *)
+    interval-decided within each segment (for interval-ranged comparisons: outside the mixed
+    segments), so {!apply}'s trailing simplify erases them. Raises [Invalid_argument] when no
+    statement-level loop binds [axis]. *)
 
 val expand_zero : tn:Tn.t -> optop * Indexing.symbol list
 (** Builds an {!constructor-Expand_zero} with one fresh symbol per axis of [tn] (forcing [tn]'s
     dims) and returns the symbols for subsequent [Split]/[Retype] ops. *)
+
+val split_reduce :
+  axis:Indexing.symbol ->
+  target:Tn.t ->
+  num_blocks:int ->
+  optop * Indexing.symbol * Indexing.symbol * Indexing.symbol list
+(** Builds a {!constructor-Split_reduce} with fresh block and inner index symbols plus one fresh
+    combine symbol per axis of [target] (forcing [target]'s dims), and returns them
+    ([op, block, inner, combine]) so subsequent ops can annotate the pass-1 block loop and the
+    combine nest's loops. *)
 
 val tensorize :
   i:Indexing.symbol ->
@@ -273,39 +369,39 @@ type op_verdict = Op_legal | Op_illegal of string | Op_unknown of string
 [@@deriving sexp_of, equal]
 
 val op_legality : Low_level.optimized -> optop -> op_verdict
-(** gh-494 waypoint 3: the op-legality oracle. A schedule op is a thread-pairing transform over
-    the routine's access relations; its obligation is decided by the {!Affine} queries — pairing
-    the op's loop symbol(s) as thread identity must leave every write-involving access pair of
-    every written node [Disjoint] or [Same_thread] (with the reduction reassociation license for
+(** gh-494 waypoint 3: the op-legality oracle. A schedule op is a thread-pairing transform over the
+    routine's access relations; its obligation is decided by the {!Affine} queries — pairing the
+    op's loop symbol(s) as thread identity must leave every write-involving access pair of every
+    written node [Disjoint] or [Same_thread] (with the reduction reassociation license for
     [Vectorized] retypes and [Swap]s of accumulations). Three-valued and sound in both proven
-    directions: [Op_legal] proves the annotation race-free; [Op_illegal] proves a violation (e.g.
-    a materialized node's unguarded write provably independent of the retyped axis); [Op_unknown]
+    directions: [Op_legal] proves the annotation race-free; [Op_illegal] proves a violation (e.g. a
+    materialized node's unguarded write provably independent of the retyped axis); [Op_unknown]
     means "compile and see" — the op may be valid under semantics the queries do not model
     (per-thread scratch copies, renderer fallbacks) — and must never be treated as a rejection.
-    Hardware annotations interleave sibling statements' threads with no grid-wide
-    synchronization, so a hardware retype/split of a loop sharing an accessed node across its
-    statement boundary (with a write on either side) reports [Op_unknown]: such pairs need the
-    default annotator's aligned-mapping analysis, which the single-op oracle does not model.
-    [Vectorized] retypes and [Swap]s only reorder within the nest and keep the intra-nest scope.
+    Hardware annotations interleave sibling statements' threads with no grid-wide synchronization,
+    so a hardware retype/split of a loop sharing an accessed node across its statement boundary
+    (with a write on either side) reports [Op_unknown]: such pairs need the default annotator's
+    aligned-mapping analysis, which the single-op oracle does not model. [Vectorized] retypes and
+    [Swap]s only reorder within the nest and keep the intra-nest scope.
 
-    [Tensorize]'s role assignment is decided: the micro-kernel recognition of apply (a pure
-    function of the code) is probed, so an invalid role permutation — e.g. the reduction loop
-    assigned to [i]/[j], violating the discipline that the [k] role is the only rmw-carrying loop
-    of the accumulation — is a proven [Op_illegal]; on structural success the affine queries
-    decide [i]/[j] iteration independence under the reduction-reassociation license (the intrinsic
-    reassociates [k]), with the hardware-lane cross-statement downgrade to [Op_unknown] as above.
-    [Stage] is likewise probed hermetically (a raising apply is [Op_illegal]), then its implicit
-    contract — the staged tile covers the reads it replaces within the staging scope — is the
-    containment query [Affine.read_covered_before] over the fresh tile's accesses: a covered
-    non-shared (packing) stage is [Op_legal]; shared staging (barrier placement and launch
-    geometry are validated downstream) and hoisted staging (link-time host-side packing) report
-    [Op_unknown]. [Privatize]/[Expand_zero]/[Fuse_epilogue] report [Op_unknown]; their own
-    apply-time preconditions remain in force. *)
+    [Tensorize]'s role assignment is decided: the micro-kernel recognition of apply (a pure function
+    of the code) is probed, so an invalid role permutation — e.g. the reduction loop assigned to
+    [i]/[j], violating the discipline that the [k] role is the only rmw-carrying loop of the
+    accumulation — is a proven [Op_illegal]; on structural success the affine queries decide [i]/[j]
+    iteration independence under the reduction-reassociation license (the intrinsic reassociates
+    [k]), with the hardware-lane cross-statement downgrade to [Op_unknown] as above. [Stage] is
+    likewise probed hermetically (a raising apply is [Op_illegal]), then its implicit contract — the
+    staged tile covers the reads it replaces within the staging scope — is the containment query
+    [Affine.read_covered_before] over the fresh tile's accesses: a covered non-shared (packing)
+    stage is [Op_legal]; shared staging (barrier placement and launch geometry are validated
+    downstream) and hoisted staging (link-time host-side packing) report [Op_unknown].
+    [Privatize]/[Expand_zero]/[Fuse_epilogue] report [Op_unknown]; their own apply-time
+    preconditions remain in force. *)
 
 val schedule_legality : Low_level.optimized -> schedule -> (optop * op_verdict) list
 (** Per-op verdicts, each against the code with the preceding ops applied (on a hermetic copy —
-    checking never mutates the argument). Stops after a proven-illegal op or a failing
-    application; an op that fails to apply reports [Op_illegal] with the exception. *)
+    checking never mutates the argument). Stops after a proven-illegal op or a failing application;
+    an op that fails to apply reports [Op_illegal] with the exception. *)
 
 val default_gpu :
   ?block_size:int ->
@@ -331,14 +427,13 @@ val default_gpu :
     For non-materialized (per-thread copy) scratch the edge additionally requires value
     thread-invariance at the chosen trim: a chain symbol feeding a scratch write's value without
     pinning the written cell would leave each consumer thread's copy holding its own chunk's last
-    value where the serial reference holds the last chunk's, so the trim search serializes that
-    loop (gh-494; direct syntactic dependence only).
-    Returns the empty schedule when any check fails or when the largest parallelizable nest has
-    fewer than [min_parallel] iterations (default from config [gpu_schedule_min_parallel] = 64: a
-    kernel launches either way, so any real parallelism beats the serial 1x1 fallback — a single GPU
-    thread is 1-2 orders of magnitude slower than a CPU core; the remaining small threshold keeps
-    sub-simdgroup-scale programs fully serial so their segments coalesce and placements stay
-    unchanged). *)
+    value where the serial reference holds the last chunk's, so the trim search serializes that loop
+    (gh-494; direct syntactic dependence only). Returns the empty schedule when any check fails or
+    when the largest parallelizable nest has fewer than [min_parallel] iterations (default from
+    config [gpu_schedule_min_parallel] = 64: a kernel launches either way, so any real parallelism
+    beats the serial 1x1 fallback — a single GPU thread is 1-2 orders of magnitude slower than a CPU
+    core; the remaining small threshold keeps sub-simdgroup-scale programs fully serial so their
+    segments coalesce and placements stay unchanged). *)
 
 val default_cpu : ?min_parallel:int -> Low_level.optimized -> schedule
 (** The default CPU annotator preset: the same conservative analysis as {!default_gpu}, but each
@@ -361,6 +456,13 @@ val backend_is_gpu : string -> bool
 val backend_is_cpu : string -> bool
 (** Whether the named backend renders [Grid] loops on the CPU pool (currently: name contains
     ["cc"]). *)
+
+val automatic_schedule_active : backend_name:string -> bool
+(** Whether {!maybe_default_schedule} (and {!maybe_default_schedules}) would apply a default preset
+    on this backend rather than the identity: the backend binds Grid loops, the corresponding config
+    gate ([automatic_gpu_schedule] / [automatic_cpu_schedule]) is on, and runtime kernel logging
+    ([debug_log_from_routines]) is off. Callers that substitute their own default-schedule choice
+    (e.g. the cost-model default selection of gh-ocannl-491) must respect this gate. *)
 
 val maybe_default_schedule :
   backend_name:string ->

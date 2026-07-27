@@ -352,7 +352,18 @@ module Impl = struct
              (if
                 Array.for_all (Lazy.force metal_devices) ~f:(fun d ->
                     Me.Device.supports_family d Me.Device.GPUFamily.Apple7)
-              then Some { Backend_intf.mma_simd_width = 32; mma_tile = (8, 8, 8) }
+              then
+                Some
+                  {
+                    Backend_intf.mma_simd_width = 32;
+                    mma_tile = (8, 8, 8);
+                    mma_format_tiles =
+                      [
+                        ((Backend_intf.Mma_f32, Backend_intf.Mma_f32), (8, 8, 8));
+                        ((Backend_intf.Mma_f16, Backend_intf.Mma_f16), (8, 8, 8));
+                        ((Backend_intf.Mma_bf16, Backend_intf.Mma_bf16), (8, 8, 8));
+                      ];
+                  }
               else None);
            simd_vector_bytes = 0;
            (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the
@@ -432,7 +443,9 @@ module Impl = struct
     | No, Some dst_loc ->
         memcpy ~dst_ptr:(Slab.resolve_pool dst.device dst_loc) ~dst_offset:dst_loc.offset
     | Copy, _ ->
-        opt_alloc_merge_buffer ?mode:(Option.map tn.Tn.memory_mode ~f:fst) ~size_in_bytes dst.device;
+        opt_alloc_merge_buffer
+          ?mode:(Option.map tn.Tn.memory_mode_intent ~f:fst)
+          ~size_in_bytes dst.device;
         let loc = Option.value_exn ~here:[%here] !(dst.device.merge_buffer) in
         memcpy ~dst_ptr:(Slab.resolve_pool dst.device loc) ~dst_offset:loc.offset
 
@@ -855,16 +868,32 @@ module Impl = struct
       | Ops.Uint64_prec _ -> "ul"
       | Ops.Void_prec -> ""
 
-    let ternop_syntax _prec op =
+    let ternop_syntax prec op =
       match op with
       | Ops.Where ->
-          fun v1 v2 v3 -> group (string "select(" ^^ separate comma_sep [ v3; v2; v1 ] ^^ rparen)
-      | FMA -> fun v1 v2 v3 -> group (string "fma(" ^^ separate comma_sep [ v1; v2; v3 ] ^^ rparen)
+          (* A short-circuiting ternary, exactly as on the C/CUDA/HIP backends — NOT [select]:
+             MSL's [select] is a function call that evaluates both branches, so a range guard
+             (an inlined concatenation's component guards, gh-504's clamped-window guards) would
+             still evaluate its guarded out-of-range buffer read. The whole conditional is
+             parenthesized (cf. the CUDA rendering's precedence note). *)
+          fun v1 v2 v3 -> group (parens (parens v1 ^^ string " ? " ^^ v2 ^^ string " : " ^^ v3))
+      | FMA -> (
+          match prec with
+          | Ops.Bfloat16_prec _ ->
+              (* MSL's math library has no bfloat [fma] overload: bfloat operands promote to float
+                 and the result cannot be assigned back to a bfloat destination. *)
+              fun v1 v2 v3 ->
+                group (string "(bfloat)fma(" ^^ separate comma_sep [ v1; v2; v3 ] ^^ rparen)
+          | _ ->
+              fun v1 v2 v3 -> group (string "fma(" ^^ separate comma_sep [ v1; v2; v3 ] ^^ rparen))
       | Mul3 -> fun v1 v2 v3 -> group (parens (v1 ^^ string " * " ^^ v2 ^^ string " * " ^^ v3))
 
     let infix_binop op v1 v2 = parens (infix 2 1 (string op) v1 v2)
 
     let binop_syntax prec op =
+      (* The match stays exhaustive over (op, prec) -- that is what catches a newly added operator
+         here -- but arms whose spelling is plain C delegate to {!C_syntax.default_binop_syntax}
+         rather than restating the token. *)
       let f = infix_binop in
       let func fn v1 v2 = group (string fn ^^ parens (v1 ^^ comma ^^ space ^^ v2)) in
       match (op, prec) with
@@ -872,14 +901,18 @@ module Impl = struct
       | Sub, _ -> f "-"
       | Mul, _ -> f "*"
       | Div, _ -> f "/"
+      | ( Mod,
+          ( Ops.Byte_prec _ | Ops.Uint16_prec _ | Ops.Int32_prec _ | Ops.Uint32_prec _
+          | Ops.Int64_prec _ | Ops.Uint64_prec _ ) ) ->
+          f "%"
       | Mod, _ -> func "fmod"
       | Max, _ -> func "fmax"
       | Min, _ -> func "fmin"
-      | Cmpeq, _ -> f "=="
-      | Cmpne, _ -> f "!="
-      | Cmplt, _ -> f "<"
-      | And, _ -> f "&&"
-      | Or, _ -> f "||"
+      (* Comparisons and logical connectives are precision-independent and spelled the same in MSL
+         as in C, so they render through the shared default. The constructors stay listed to keep
+         the match exhaustiveness-checked. *)
+      | ((Cmpeq | Cmpne | Cmplt | Cmple | And | Or) as op), _ ->
+          C_syntax.default_binop_syntax prec op
       | Relu_gate, Ops.Half_prec _ ->
           fun v1 v2 ->
             group
@@ -913,28 +946,10 @@ module Impl = struct
                  ^^ space ^^ string "?" ^^ space ^^ v2 ^^ space ^^ string ":" ^^ space
                  ^^ string ("0.0" ^ s)))
       | ToPowOf, _ -> func "pow"
-      | Threefry4x32_crypto, _ -> (
-          (* Threefry4x32_crypto must output to uint4x32 precision *)
-          match prec with
-          | Ops.Uint4x32_prec _ -> func "arrayjit_threefry4x32_crypto"
-          | _ ->
-              raise
-              @@ Utils.User_error
-                   (Printf.sprintf
-                      "Metal backend: Threefry4x32_crypto requires target precision to be \
-                       uint4x32, but got %s"
-                      (Ops.prec_string prec)))
-      | Threefry4x32_light, _ -> (
-          (* Threefry4x32_light must output to uint4x32 precision *)
-          match prec with
-          | Ops.Uint4x32_prec _ -> func "arrayjit_threefry4x32_light"
-          | _ ->
-              raise
-              @@ Utils.User_error
-                   (Printf.sprintf
-                      "Metal backend: Threefry4x32_light requires target precision to be uint4x32, \
-                       but got %s"
-                      (Ops.prec_string prec)))
+      (* The RNG ops call the same builtins under the same precision contract on every C-family
+         backend, so they render through the shared helper. *)
+      | ((Threefry4x32_crypto | Threefry4x32_light | Uint4x32_to_prec_uniform_lane) as op), _ ->
+          C_syntax.rng_binop_syntax ~backend:"Metal" ~call:func prec op
       | Arg1, _ | Arg2, _ -> invalid_arg "Metal C_syntax_config: Arg1/Arg2 not operators"
 
     let unop_syntax prec op =

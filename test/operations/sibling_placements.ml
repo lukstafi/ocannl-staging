@@ -2,7 +2,7 @@
    from the SAME context must be hermetic, each resolving placements in its own lineage. The same
    shared node [x] is compiled by two sibling routines: lineage A consumes it once (virtualizable),
    lineage B consumes it at two visits of the same cell (over the visit cap, so B must keep it
-   non-virtual). Under the retired global [Tnode.memory_mode] settlement this divergence was
+   non-virtual). Under the retired global [Tnode.memory_mode_intent] settlement this divergence was
    impossible: whichever sibling compiled first pinned the mode for the other. Both siblings also
    execute, pinning that the divergent placements produce correct values, and the tnode's declared
    intent stays untouched throughout. *)
@@ -93,7 +93,7 @@ let () =
   let p name b = Stdio.printf "%s: %b\n" name b in
   p "lineage A virtualized x" (Tn.Placements.known_virtual (Context.placements ctx_a) x);
   p "lineage B kept x non-virtual" (Tn.Placements.known_non_virtual (Context.placements ctx_b) x);
-  p "x declared intent untouched" (Option.is_none x.Tn.memory_mode);
+  p "x declared intent untouched" (Option.is_none x.Tn.memory_mode_intent);
   let show name values =
     Stdio.printf "%s:" name;
     Array.iter values ~f:(fun v -> Stdio.printf " %.1f" v);

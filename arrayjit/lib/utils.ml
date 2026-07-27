@@ -52,6 +52,7 @@ let known_config_keys =
       (* Bootstrap keys (read before config file via read_cmdline_or_env_var directly) *)
       "suppress_welcome_message";
       "no_config_file";
+      "log_config_sourcing";
       (* Utils.settings *)
       "log_level";
       "debug_log_from_routines";
@@ -136,6 +137,14 @@ let known_config_keys =
       "autotune_repeats";
       "autotune_cache_dir";
       "autotune_log";
+      (* Analytic cost model (gh-ocannl-491) *)
+      "autotune_keep_fraction";
+      "autotune_calibration_file";
+      "model_default_schedule";
+      "model_peak_flops";
+      "model_peak_memory_bandwidth";
+      (* Numerics policy (gh-ocannl-478) *)
+      "tf32_matmuls";
       (* Identifiers and other *)
       "ll_ident_style";
       "cd_ident_style";
@@ -144,9 +153,23 @@ let known_config_keys =
       "max_shape_error_origins";
     ]
 
+let bool_of_config_string ~arg_name s =
+  match String.lowercase @@ String.strip s with
+  | "true" | "1" -> true
+  | "false" | "0" -> false
+  | _ -> invalid_arg @@ "ocannl_" ^ arg_name ^ " setting should be a boolean; found: " ^ s
+
+(** Whether to print where each configuration setting comes from (commandline, environment, config
+    file, or the hard-coded default). It gates the logging of the config-reading functions
+    themselves, so it is bootstrapped directly rather than via {!get_global_arg}: the initial value
+    only reflects the commandline and the environment, and the config file setting is applied once
+    the config file is read. Can also be set programmatically, e.g. to trace configs a test reads. *)
+let log_config_sourcing = ref true
+
 let read_cmdline_or_env_var n =
   let with_debug =
-    (settings.log_level > 0 || equal_string n "log_level")
+    !log_config_sourcing
+    && (settings.log_level > 0 || equal_string n "log_level")
     && not (Hash_set.mem accessed_global_args n)
   in
   let n_dash = String.tr ~target:'_' ~replacement:'-' n in
@@ -195,6 +218,12 @@ let filename_parts filename =
 let filename_of_parts = function
   | [] -> invalid_arg "Utils.filename_of_parts: empty parts list"
   | root :: rest -> List.fold rest ~init:root ~f:Stdlib.Filename.concat
+
+let log_config_sourcing_arg = read_cmdline_or_env_var "log_config_sourcing"
+
+let () =
+  Option.iter log_config_sourcing_arg ~f:(fun v ->
+      log_config_sourcing := bool_of_config_string ~arg_name:"log_config_sourcing" v)
 
 let config_file_args =
   let suppress_welcome_message () =
@@ -263,11 +292,18 @@ let config_file_args =
         Stdio.printf "\nWelcome to OCANNL! Configuration defaults file is disabled.\n%!";
       Hashtbl.create (module String)
 
+let () =
+  (* The commandline and the environment take precedence, and were already applied above. *)
+  if Option.is_none log_config_sourcing_arg then
+    Option.iter (Hashtbl.find config_file_args "log_config_sourcing") ~f:(fun v ->
+        log_config_sourcing := bool_of_config_string ~arg_name:"log_config_sourcing" v)
+
 (** Retrieves [arg_name] argument from the command line or from an environment variable, returns
     [default] if none found. *)
 let get_global_arg ~default ~arg_name:n =
   let with_debug =
-    (settings.log_level > 0 || equal_string n "log_level")
+    !log_config_sourcing
+    && (settings.log_level > 0 || equal_string n "log_level")
     && not (Hash_set.mem accessed_global_args n)
   in
   if with_debug then
@@ -286,11 +322,8 @@ let get_global_arg ~default ~arg_name:n =
   result
 
 let get_global_flag ~default ~arg_name:n =
-  let s = get_global_arg ~default:(if default then "true" else "false") ~arg_name:n in
-  match String.lowercase s with
-  | "true" | "1" -> true
-  | "false" | "0" -> false
-  | _ -> invalid_arg @@ "ocannl_" ^ n ^ " setting should be a boolean; found: " ^ s
+  bool_of_config_string ~arg_name:n
+  @@ get_global_arg ~default:(if default then "true" else "false") ~arg_name:n
 
 let original_log_level =
   let log_level =
@@ -972,6 +1005,7 @@ let add_log_processor ~prefix process_logs =
     { log_processor_prefix = prefix; process_logs } :: !captured_log_processors
 
 external input_scan_line : Stdlib.in_channel -> int = "caml_ml_input_scan_line"
+external flush_c_streams : unit -> unit = "ocannl_flush_c_streams"
 
 let input_line chan =
   let n = input_scan_line chan in
@@ -984,6 +1018,7 @@ let capture_stdout_logs arg =
   if never_capture_stdout () || not (debug_log_from_routines ()) then arg ()
   else (
     Stdlib.flush Stdlib.stdout;
+    flush_c_streams ();
     (* Ensure previous stdout is flushed *)
     let original_stdout_fd = Unix.dup Unix.stdout in
 
@@ -1030,6 +1065,7 @@ let capture_stdout_logs arg =
       with exn ->
         (* Ensure cleanup even if arg() fails *)
         Stdlib.flush Stdlib.stdout;
+        flush_c_streams ();
         (* Flush to pipe_write_fd *)
         Unix.close pipe_write_fd;
         (* Signal EOF to reader domain *)
@@ -1062,6 +1098,7 @@ let capture_stdout_logs arg =
 
     (* Normal path: arg() completed successfully *)
     Stdlib.flush Stdlib.stdout;
+    flush_c_streams ();
     (* Flush to pipe_write_fd *)
     Unix.close pipe_write_fd;
 

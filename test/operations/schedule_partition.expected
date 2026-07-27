@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 plain non-dividing split keeps a remainder guard: true
 guarded split matches reference: true
 partition+split is guard-free: true
@@ -17,5 +15,8 @@ tail-unrolled partition matches reference: true
 sp_err_out_of_range rejected with a targeted error: true
 sp_err_not_increasing rejected with a targeted error: true
 sp_err_no_such_loop rejected with a targeted error: true
+Cmple lower bound breaks where its Cmplt encoding did: true
+Cmple upper bound breaks where its Cmplt encoding did: true
+Cmple with a scaled axis rounds like its Cmplt encoding: true
 
 Done.

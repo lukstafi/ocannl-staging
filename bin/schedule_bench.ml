@@ -14,12 +14,11 @@
    packmma_par (the same composition with pool-parallel Grid row blocks and per-chunk privatized A~
    tiles; the B~ pack at k_o re-enters the parallel construct once per k-block), and the three
    grid-outermost flavors — one dispatch spanning the whole GEBP triple (gh-ocannl-473 /
-   gh-ocannl-475): pm_hoist (hoisted constant-pool B~ panel, A read in place; autotune's
-   sk_grid && sk_hoist seed), pm_mixed (hoisted B~ plus an in-kernel per-chunk A~ pack; the
-   sk_pack_rest seed), and pm_bpk (both operands packed in-kernel, each chunk re-packing its own
-   B~ panel — needs the panel under the per-chunk privatization cap, config
-   cc_grid_private_bytes_cap, or it silently declines to serial: check with
-   --ocannl_schedule_log_declines=true).
+   gh-ocannl-475): pm_hoist (hoisted constant-pool B~ panel, A read in place; autotune's sk_grid &&
+   sk_hoist seed), pm_mixed (hoisted B~ plus an in-kernel per-chunk A~ pack; the sk_pack_rest seed),
+   and pm_bpk (both operands packed in-kernel, each chunk re-packing its own B~ panel — needs the
+   panel under the per-chunk privatization cap, config cc_grid_private_bytes_cap, or it silently
+   declines to serial: check with --ocannl_schedule_log_declines=true).
 
    Usage: dune exec bin/schedule_bench.exe -- [n] [repeats] [m] [k] (defaults 256, 20, n, n; all
    dims must be multiples of 64; the output is m x n, the reduction depth k — deep-K gradient-GEMM
@@ -58,7 +57,9 @@ let () =
     |> List.tl_exn
     |> List.filter ~f:(fun s -> not (String.is_prefix s ~prefix:"-"))
   in
-  let arg i default = match List.nth pos_args i with Some s -> Int.of_string s | None -> default in
+  let arg i default =
+    match List.nth pos_args i with Some s -> Int.of_string s | None -> default
+  in
   let n = arg 0 256 in
   let repeats = arg 1 20 in
   let m = arg 2 n in
@@ -271,8 +272,7 @@ let () =
      packed at [k_o] lands inside the Grid body. [pack_b = `Hoist] packs the (constant) B~ panel at
      link time into the constant pool; [`Chunk] packs it in-kernel, each chunk re-packing its own
      panel (redundant work, but no dispatch-per-k-block; the panel must fit the per-chunk
-     privatization cap). [pack_a] toggles the in-kernel per-chunk A~ pack vs. reading A in
-     place. *)
+     privatization cap). [pack_a] toggles the in-kernel per-chunk A~ pack vs. reading A in place. *)
   let packmma_outer_schedule ~pack_a ~pack_b ~mc opt =
     let bm, bk = (64, 64) in
     let i, j, k = accum_syms opt in

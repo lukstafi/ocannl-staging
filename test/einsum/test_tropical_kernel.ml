@@ -8,10 +8,10 @@ open Stdio
     This tests backpropagation for tropical operations with both input (t1/rhs1) and kernel
     (t2/rhs2) gradients.
 
-    The implementation uses `_rhs1` suffix for both input and kernel gradient paths. This gives
-    condition tensors input shape (ih,iw) which is effectively the "outer product" of output (oh,ow)
-    and kernel (wh,ww) dimensions. This correctly tracks which (input position, kernel position)
-    pair achieved the argmax for each output. *)
+    The implementation gates gradients with a product-space condition tensor (`_pspace` suffix,
+    gh-ocannl-512): one bit per ((oh,ow) output, (wh,ww) kernel position) pair, which exactly
+    tracks which pair achieved the argmax for each output — including for overlapping windows
+    (stride < window); see test/operations/overlapping_window_grads.ml for those cases. *)
 
 (** Create a tropical convolution-like operation with a learnable kernel.
 

@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 single-token ids dims: uint32 prec 1
 single-token one-hot dims: uint32 prec 1x5
 HERE: test/operations/one_element_reshape.ml:27:21

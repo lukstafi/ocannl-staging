@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 single component, no suffix: PASS (attention)
 two consecutive, suffix 2: PASS (attention2)
 three consecutive, suffix 3: PASS (attention3)

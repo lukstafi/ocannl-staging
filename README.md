@@ -49,18 +49,19 @@ A possible route to learning OCANNL:
    1. The various tests.
    2. Shape inference details [docs/shape_inference.md](docs/shape_inference.md).
    3. Backend-independent optimizations [docs/lowering_and_inlining.md](docs/lowering_and_inlining.md) -- _lowering_ means translating (compiling) from the high-level representation (as assignments) to the low-level representation.
+   4. Schedules and autotuning [docs/schedules_and_autotuning.md](docs/schedules_and_autotuning.md) -- the loop-nest transform layer (parallelization, tiling, staging, tensor cores) and the empirical search over it.
 
-### Using the tracing debugger with CUDA computations
+### Using the tracing debugger with CUDA and HIP computations
 
-To use debugging as provided by configuring `Utils.settings.debug_log_from_routines <- true` with the `cuda` backend, you need to wrap the code scheduling tasks and synchronizing `cuda` devices with `Utils.capture_stdout_logs`. The reason is that CUDA kernels are allowed to use `printf`, but not `fprintf` -- the driver dumps the printing buffer of a device to `stdout` at certain times (e.g. when synchronizing the device). For an example, see the implementation of `Train.example_train_loop`. Specifically, it wraps two sections: the call to `Train.parallel_update`, and the body of the returned `infer_callback`.
+To use debugging as provided by configuring `Utils.settings.debug_log_from_routines <- true` with the `cuda` or `hip` backend, wrap the code that schedules work and synchronizes the GPU with `Utils.capture_stdout_logs`. Both GPU APIs expose device-side `printf`, but not `fprintf`; the runtime drains the device printing buffer to process `stdout` around synchronization. Synchronize the context inside the capture window so all device output is available before stdout is restored.
 
-NOTE: debug logging from CUDA in complex settings is a bit tricky, it involves another thread (domain) intercepting and filtering `stdout`. If facing issues, try the setting `never_capture_stdout=true` (see [ocannl_config.reference](ocannl_config.reference)).
+NOTE: debug logging from CUDA or HIP in complex settings is a bit tricky, as it involves another thread (domain) intercepting and filtering `stdout`. If facing issues, try the setting `never_capture_stdout=true` (see [ocannl_config.reference](ocannl_config.reference)).
 
 ## Milestones
 
-See [ROADMAP.md](ROADMAP.md) for the detailed schedule. Headline target: **ICFP 2026 week (August 24, 2026)**.
+See [ROADMAP.md](ROADMAP.md) for the detailed schedule. GitHub issue assignments are the source of truth for release scope. Headline target: **ICFP 2026 week (August 24, 2026)**.
 
-> Note (July 2026): **v0.7 shipped on July 3, 2026** as the consolidated paper-ready release. **v0.6.4 was skipped as a release** — its work (concatenation, RoPE, transformer toy) shipped inside v0.7 — and **v0.7.2 was consolidated into v0.7**. **v0.7.1 is dissolved**: its AMD HIP backend (#411) moves to v0.8, and its real-world examples and tokenizer bindings move to v0.9. The sequence is now `0.7 → 0.8 → 0.9 → 1.0`.
+> Note (July 2026): **v0.7 shipped on July 3, 2026** as the consolidated paper-ready release. **v0.6.4 was skipped as a release** — its work (concatenation, RoPE, transformer toy) shipped inside v0.7 — and **v0.7.2 was consolidated into v0.7**. **v0.7.1 was dissolved**: its AMD HIP backend (#411) shipped in v0.8; completed examples and tokenizer work landed subsequently, while remaining work follows the current GitHub milestone assignments. The sequence is now `0.7 → 0.8 → 0.9 → 1.0 → 1.1`.
 
 * **0.7 (Jul 3, 2026, released): Frontend finalization + compiler optimizations.** The consolidated paper-ready release for workshop submissions (OCaml Workshop, FProPer). Absorbs the former v0.6.4/v0.6.5/v0.7.0 frontend work and the former v0.7.2 optimization work.
   - [x] Migrate from the "hosted tensor" idea to always requiring a context when accessing tensors and dealing with devices directly; remove the `array` field of `Tnode.t` and the hosted memory mode (#333).
@@ -71,28 +72,31 @@ See [ROADMAP.md](ROADMAP.md) for the detailed schedule. Headline target: **ICFP 
   - [x] Universal Pool Allocator across backends (#344): per-context-delta working pools, per-device constant pools, reserved merge pool, and pooled Metal bindings.
   - [x] Sharding primitives, data-parallel training driver, and zero-copy leading-axis slice views (#293).
   - [x] Workshop article, formal core technical report, and shape-constraint-generation notes.
-* **0.8 (Summer 2026): GPU-style performance -- low hanging fruit; AMD HIP backend.**
-  - [ ] First harvested from [Fast Multidimensional Matrix Multiplication on CPU from Scratch](https://siboehm.com/articles/22/Fast-MMM-on-CPU).
-  - [ ] Then harvested from [How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance: a Worklog](https://siboehm.com/articles/22/CUDA-MMM).
-  - [ ] Finally from [llm.c](https://github.com/karpathy/llm.c).
-  - [ ] These will either require splitting a routine into multiple kernels, or implementing the megakernel approach.
-  - [ ] HIP backend for AMD hardware (#411) — a major effort on par with the CUDA and Metal backends. The HIP bindings ship as an independent GitHub project and opam package (same as `cudajit` for CUDA and `metal` for Metal), usable by the community on their own; the `arrayjit` backend then depends on those bindings.
-  - [ ] MSVC on the native-Windows C backend (#313).
-* **0.9 (Aug 24, 2026 — ICFP week): Optimize performance: program search; real-world examples.**
-  - [ ] Instead of dynamic scheduling as in tinygrad, we can schedule statically by program search.
-  - [ ] We should also reproduce the search that tinygrad is doing. Inspiration: Halide.
-  - [ ] Check which optimizations are missing against the implementation of [llm.c](https://github.com/karpathy/llm.c).
-  - [x] makemore progression (bigram → MLP → BatchNorm → transformer), mirroring Karpathy's lectures (#59).
-  - [ ] Convnet examples: MNIST and CIFAR (#54); LSTM example (#60).
-  - [x] Transformer inference for a small open-weights model (one of GPT-2, LLaMA, Gemma) (#377): GPT-2 124M greedy decoding with pretrained HuggingFace weights, exact against a NumPy reference -- see `test/gpt2/gpt2_generate.ml` (tutorial executable) and `test/gpt2/gpt2_dry_run.ml`.
-  - [x] Tokenizers are developed in the spin-off project [ocaml-dataprep](https://github.com/ahrefs/ocaml-dataprep) (opam package `dataprep`): the `Dataprep.Bpe` HuggingFace-compatible BPE tokenizer is bridged to OCANNL tensors via `Nn_blocks.token_ids_of_array` / `token_ids_of_batch` (see `test/training/tokenizer_roundtrip.ml`).
-* **1.0 (End Oct 2026): Few documentation gaps, some degree of feature completeness, ergonomics, safety.**
-  - [ ] Feature completeness demonstrated by resolving / implementing a few of the $\color{green}{\text{explore}}$ issues.
-  - [ ] Concise syntax for transfers into the merge buffer since we know which tensor node is transferred and where to.
-  - [ ] Similarly to how contexts track initialization dependencies for compilation, we should also track them for execution.
-* **1.1: shape inference and safety enhancements.**
-  - [ ] Consider introducing axis labels (as opposed to the dimension basis).
-  - [ ] Consider introducing shape schemes for tensor functions.
+* **0.8 (Jul 13, 2026, released): Parallel schedules, autotuning, tensor cores, and AMD HIP.**
+  - [x] Schedule transforms and generated CPU/GPU kernels harvested from the Böhm CPU/CUDA matmul articles and llm.c (#412).
+  - [x] Kernel fission, hardware-mapped loop axes, shared staging, packed/register-tiled `Tile_mma`, and explicit SIMD codegen.
+  - [x] Measured schedule autotuning with caches, sketch seeds, and per-segment candidates.
+  - [x] CUDA WMMA/inline-PTX, Metal simdgroup-matrix, and HIP rocWMMA tensor-core paths.
+  - [x] HIP backend for AMD hardware via the independent [hipjit](https://github.com/lukstafi/ocaml-hipjit) bindings (#411).
+  - [x] Native Windows support via mingw-w64; an additional MSVC toolchain was evaluated and closed as not planned (#313).
+* **0.9 (Aug 24, 2026 — ICFP week): Schedule quality, deterministic parallelism, and convolution performance.**
+  - [ ] Cross-machine benchmark/tuning sweep, an analytic default-schedule cost model, and constraint-based schedule legality (#476, #491, #494).
+  - [ ] Deterministic split reductions, CUDA/HIP graph capture, and a mixed-precision training recipe (#484, #488, #492).
+  - [ ] Convolution schedule families and boundary handling: tiled sketches, epilogue twins, compact strided staging, and clamped windows (#500, #501, #502, #504).
+  - [ ] Fix overlapping-window tropical/einmax1 gradients (#512).
+  - [x] Tensor-core hardening delivered tf32 policy, CUDA 13 support, pad-to-tile scheduling, static partitioning, and packed-uniform tails (#478, #482, #485, #508, #509).
+  - [x] CNN classifiers (#54), GPT-2 inference (#377), and the TVM, Tiramisu, and superoptimizer studies (#242, #267, #261).
+* **1.0 (Sep 30, 2026): Release completeness, training/deployment utilities, and advanced compiler tiers.**
+  - [ ] Training and deployment: resumable checkpoints, inference binaries, experiment tracking, training-loop utilities, mmap checkpoints, and tracing design (#96, #97, #122, #465, #467, #160).
+  - [ ] User-facing library study: implications of Simply/NanoDO for `lib/` (#435).
+  - [ ] Advanced schedules and algorithms: CUDA tensor-core completeness, fused attention, software pipelining, rematerialization, remaining convolution tiers, and branch-and-bound schedule inference (#481, #483, #487, #498, #503, #505, #514).
+  - [ ] Frontend and diagnostics: `%op` inline-initializer scoping and routine-name collision policy (#511, #513).
+  - [ ] Roadmap-only ergonomics: concise merge-buffer transfer composition and execution-dependency tracking.
+* **1.1 (no target date): Shape design, model examples, integrations, and deferred backend experiments.**
+  - [ ] Shape schemes and the axis-label design direction (#404).
+  - [ ] Model surgery, LSTM and Bonsai RNN examples, digit addition, BERT/ModernBERT, and DisTrO (#33, #60, #182, #427, #297, #278).
+  - [ ] Plot polish, local `%cd` lets, Polars integration, and external-framework study (#103, #80, #219, #277).
+  - [ ] CUDA pinned/constant host-memory experiments, PoPE, and HIP CDNA tensor cores (#170, #195, #444, #477).
 
 ### Releases
 

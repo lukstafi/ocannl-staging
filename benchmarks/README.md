@@ -37,6 +37,15 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   with valid 3×3 convs and 2×2 pooling the deep conv's row is always ≡ 2 (mod 4), never
   divisible by 8. Same builder as `lenet` (channel count, kernel, padding, and input
   channels are all spec-driven).
+- **cifar_stride** (`model: conv`, training): the stride-2-stem sibling of `cifar_conv`
+  (gh-ocannl-502): 3-channel 51×51 images, `conv1` a *valid* 5×5 conv at **stride 2** (the
+  strided downsampling site the compacting Stage targets), `conv2` a valid 5×5 at stride 1,
+  into 32 then 64 channels. The geometry keeps both conv GEMM rows multiples of 8 (24 and
+  8), so once the seeding wave admits compacting-eligible strided sites the same
+  blocked/staged legs are proposable here as on `cifar_conv`. Until then the strided conv
+  exercises only the reorder-serial and default-fissioned paths — recorded as the baseline
+  the compacting-Stage seeding is measured against. Strides are spec-driven
+  (`stride1`/`stride2`, default 1, valid-only) through the same builder as `lenet`.
 - **gpt2_mini** (`model: gpt`, `mode: infer`): pre-LN GPT-2-style decoder (4 layers, d=256,
   8 heads, seq 128, vocab 1024, tanh-gelu, learned positional embeddings, tied lm_head,
   causal mask filled with -1e9), forward-only. The parity metric is softmax-CE of the
@@ -56,7 +65,12 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   (`dune build benchmarks/runners/ocannl/bench_mlp.exe` etc.). Env: `BENCH_FIXTURE` (path),
   `BENCH_TUNE=1` (`Train.tune_placements`: autotunes both the default placements graph and
   the materialize-all graph, keeping the measured winner), `BENCH_MATERIALIZE=1` (materialize
-  intermediates without tuning); backend via the usual `--ocannl_backend=cc|metal|cuda`. Debug
+  intermediates without tuning), `BENCH_PRECISION=bf16|f16` (mlp only, gh-ocannl-492: the
+  mixed-precision training recipe — f32 master weights with reduced-precision cast twins,
+  storage policy over the MLP body with the loss head kept f32, and for f16 dynamic loss
+  scaling, whose per-step host-read inf/nan gate is included in the reported step times;
+  orchestrate flag `--precision bf16 f16`, parity gated at the looser
+  `PARITY_TOL_PRECISION` envelopes); backend via the usual `--ocannl_backend=cc|metal|cuda`. Debug
   helpers: `BENCH_DEBUG=1` prints param names/dims (conv/gpt) or bias gradients (mlp) and
   exits; `BENCH_NO_SGD=1` compiles the gradient update without the SGD step (mlp);
   `BENCH_NO_SLICE=1` skips `@|` batch slicing (mlp, single-batch fixture).
@@ -76,15 +90,21 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   PyTorch presents HIP as its `cuda` device, tinygrad as `AMD`); on Windows neither framework
   reaches an AMD GPU, so OCANNL alone populates the GPU column while the CPU parity
   reference still runs. See [example-report.md](example-report.md) (macOS/Metal),
-  [example-report-cuda.md](example-report-cuda.md) (Linux/CUDA) and
-  [report-hip.md](report-hip.md) (Windows/HIP on gfx1151, `--only ocannl pytorch`) for
-  checked-in example output (full `--tuned --materialized` matrices; `results/` itself is
-  gitignored).
+  [example-report-cuda.md](example-report-cuda.md) (Linux/CUDA),
+  [report-hip.md](report-hip.md) (Windows/HIP on gfx1151, `--only ocannl pytorch`) and
+  [report-cifar-cuda.md](report-cifar-cuda.md) (Linux/CUDA, the cifar-scale conv baseline
+  for gh-ocannl-500/502 with a per-layer breakdown) for checked-in example output
+  (`results/` itself is gitignored).
 - `runners/ocannl/bench_{gpt,conv}_diag.ml` — schedule diagnostics: print the default
   fission-pipeline segment census (launch geometry, per-nest loop extents, written nodes with
   materialization markers) for the gpt2_mini / lenet graphs, then optionally time steps
   (`BENCH_STEPS=1`) or dump tensor values (`BENCH_PROBE=1`, `BENCH_DUMP=1`; `BENCH_FWD=1`
   compiles forward-only, `BENCH_PROMOTE=0` disables fission's Local promotion in the census).
+  `BENCH_SEG_TIMES=1` adds per-segment (≈ per-layer) wall times: each fission segment is
+  compiled as its own routine (hermetic substitution through the `lowered_transform` seam)
+  and timed min-of-N with a sync per run, labeled by the nodes it writes — the per-layer
+  breakdown that identifies which conv sites dominate a step, diffable across schedule
+  changes (the acceptance instrument for the gh-500 blocking decision).
 - `runners/ocannl/bench_metal_bug.ml` — standalone (no OCANNL) repro of an Apple Metal
   shader-compiler miscompilation: a serial `acc[0] = acc[0] + f(i)` loop over
   slot-table-derived pool pointers keeps only the last iteration's contribution. OCANNL works
@@ -104,6 +124,11 @@ benchmarks/.venv/bin/python benchmarks/orchestrate.py
 tinygrad's CPU device JIT-compiles kernels with `clang`; on a machine without clang, point
 `CC` at a substitute (a `zig cc` wrapper script from `pip install ziglang` works — translate
 `--target=x86_64-none-unknown-elf` to `--target=x86_64-freestanding-none` and add `-g0`).
+tinygrad's CUDA device compiles through the system nvrtc; when the CUDA toolkit is newer
+than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it with
+`LD_LIBRARY_PATH` pointing at torch's bundled nvrtc
+(`.venv/lib/python*/site-packages/nvidia/cu*/lib`) and wipe `~/.cache/tinygrad` once
+(compiled PTX is cached by source hash, so a stale-toolkit artifact survives the switch).
 
 ## Methodology notes / fairness pitfalls
 
@@ -130,6 +155,14 @@ tinygrad's CPU device JIT-compiles kernels with `clang`; on a machine without cl
   whose `compile_s` should reflect a from-scratch search.
 - Timing on a laptop: prefer the p50 of the per-step synced times; rerun and compare rounds
   if thermals are suspect. Keep timing out of CI; the parity gate is the CI-worthy part.
+- Untuned-default before/after (gh-ocannl-491): the model-picked default is config-gated, so
+  the comparison is the same untuned benchmark run twice — once as-is (the ordinary default
+  pipeline) and once with `--ocannl_model_default_schedule=true` (the analytic cost model
+  scores the default pipeline and the sketch families inside the compile and applies the
+  argmin; zero timing runs, so `compile_s` stays a compile cost). Both runs are untuned in the
+  tuned-vs-untuned sense above — do not mix them into a `BENCH_TUNE=1` comparison cell. On
+  backends without advisory envelope constants (the C backends), set `--ocannl_model_peak_flops`
+  / `--ocannl_model_peak_memory_bandwidth` or the gate falls back to the ordinary default.
 
 ## Debugging a parity failure
 

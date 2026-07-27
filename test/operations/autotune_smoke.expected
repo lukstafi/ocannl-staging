@@ -1,5 +1,3 @@
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, in the config file
 canonical digest stable across sibling compiles: true
 canonical form complete: true
 different computations have different digests: true

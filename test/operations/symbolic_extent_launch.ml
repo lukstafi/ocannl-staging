@@ -45,10 +45,10 @@ let () =
      ignore (Context.run ctx routine : Context.t);
      printf "ERROR: expected a bind-validation error for extent=7\n"
    with Utils.User_error msg -> printf "extent=7 rejected: %s\n" msg);
-  (* Autotuning an extent-parameterized routine (gh-490 stage 3): measurement binds extents at
-     their upper bound, the schedule-cache identity is extent-value-independent (the extent is a
-     kernel parameter, not part of the lowered program), so one tuned entry serves every extent --
-     a second tune of the same program hits the cache. *)
+  (* Autotuning an extent-parameterized routine (gh-490 stage 3): measurement binds extents at their
+     upper bound, the schedule-cache identity is extent-value-independent (the extent is a kernel
+     parameter, not part of the lowered program), so one tuned entry serves every extent -- a second
+     tune of the same program hits the cache. *)
   let cache_dir = "symbolic_extent_tune_cache" in
   let comp = fwd_comp in
   let report1 = ref None in
