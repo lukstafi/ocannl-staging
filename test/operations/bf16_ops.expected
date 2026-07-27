@@ -12,3 +12,4 @@
              1.60e+1             │<not-in-context>│                │                  │
 #0 a unknown    │#1 b unknown    │                │                │                  │
 <not-in-context>│<not-in-context>│                │                │                  │
+uniform bfloat16: 8 values, all in [0,1): true

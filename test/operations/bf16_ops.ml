@@ -34,4 +34,15 @@ let () =
   Train.set_materialized combined.value;
   let ctx = Train.forward_once ctx combined in
   (* dot = 16, relu (16 - 20) = 0, recip 16 = 0.0625, sat01 16 = 1, not 16 = 0. *)
-  Train.printf_tree ctx combined
+  Train.printf_tree ctx combined;
+  (* The bfloat16 uniform builtins must yield bfloat16 *values*: on the GPU backends they used to
+     return the bit pattern as an [unsigned short], which the assignment to a bfloat16 cell then
+     converted by value -- 0x3F80 arriving as 16256.0 rather than 1.0. A range check catches that
+     where a materialized-vs-virtual parity check cannot (both paths share the builtin). *)
+  let u = TDSL.uniform () ~output_dims:[ 8 ] () in
+  Tn.update_prec u.value Ir.Ops.bfloat16;
+  Train.set_materialized u.value;
+  let ctx = Train.forward_once ctx u in
+  let values = Context.get_values ctx u.value in
+  Stdio.printf "\nuniform bfloat16: %d values, all in [0,1): %b\n" (Array.length values)
+    (Array.for_all values ~f:(fun v -> Float.(v >= 0. && v < 1.)))

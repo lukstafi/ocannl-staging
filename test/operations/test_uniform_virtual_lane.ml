@@ -75,6 +75,12 @@ let () =
      collapsed the stride and left all cells beyond the first block uninitialized. *)
   check ~name:"single 9->1 (trailing dim-1 axis)" ~prec:Ir.Ops.single ~input_dims:[ 1 ] [ 9 ];
   check ~name:"half n=9" ~prec:Ir.Ops.half [ 9 ];
+  (* bfloat16 pins that the packed path exists at this precision on every backend -- a missing
+     vector block type shows up here as a compile-time refusal. It cannot police the element type
+     itself: both runs go through the same builtin, so a builtin returning raw bits (which the
+     assignment to a bfloat16 cell would convert by value) still shows parity. The value-level
+     check for that lives in bf16_ops.ml. *)
+  check ~name:"bfloat16 n=9" ~prec:Ir.Ops.bfloat16 [ 9 ];
   (* uint32 exercises the unsigned vec/lane builtins (full-range bit patterns). *)
   check ~name:"uint32 n=5" ~prec:Ir.Ops.uint32 [ 5 ];
   check ~name:"double n=3" ~prec:Ir.Ops.double [ 3 ];

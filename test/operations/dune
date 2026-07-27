@@ -180,7 +180,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules bf16_ops)
- (libraries base ocannl)
+ (libraries base ocannl stdio)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 

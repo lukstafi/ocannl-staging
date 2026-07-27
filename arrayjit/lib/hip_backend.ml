@@ -516,7 +516,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       (* Fp8 needs [__hip_fp8_e5m2] elements: [Set_from_vec] assigns them to the fp8 array cells
          without a cast, and [__hip_fp8_e5m2] has no assignment from integer types. *)
       | Ops.Fp8_prec _, 16 -> "fp8x16_t"
-      | (Ops.Uint16_prec _ | Ops.Bfloat16_prec _), 8 -> "uint16x8_t"
+      | Ops.Uint16_prec _, 8 -> "uint16x8_t"
+      (* Like fp8, bfloat16 needs [__hip_bfloat16] elements rather than raw [unsigned short] bits:
+         [Set_from_vec] assigns them to the array cells without a cast. Mirrors the CUDA backend. *)
+      | Ops.Bfloat16_prec _, 8 -> "bfloat16x8_t"
       | Ops.Half_prec _, 8 -> "half8_t"
       | _, 1 -> typ_of_prec prec
       | _ -> invalid_arg "Hip_backend.vec_typ_of_prec: invalid combination"
