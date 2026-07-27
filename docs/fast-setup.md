@@ -2,6 +2,12 @@
 
 FIXME: NOTE: **This functionality is not available yet, ignore this document.**
 
+The switch-caching machinery described here was reverted in 9cf51f51, and the
+release it downloads from no longer exists. `scripts/setup-ocaml-env.sh` — which
+this document describes as restoring a pre-built switch — no longer does that; it
+is now an idempotent environment bootstrap (`--help` explains its steps). Treat
+everything below as a record of the abandoned design.
+
 This guide explains how to use pre-built relocatable opam switches to dramatically speed up OCaml environment setup for CI, cloud development, and local installation.
 
 ## The Problem
