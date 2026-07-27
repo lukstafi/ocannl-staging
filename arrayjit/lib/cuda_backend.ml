@@ -1360,6 +1360,15 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Relu, Ops.Byte_prec _ -> f "fmax(0, " ")"
       | Relu, _ -> f "fmax(0.0, " ")"
       | Satur01, Byte_prec _ -> f "fmax(0, fmin(1, " "))"
+      (* Mixing a [__nv_bfloat16] with a literal of another arithmetic type is ambiguous under
+         nvrtc: the type has implicit conversion operators to float, int, short, ... , so the
+         [float], [double] and [_Float16] overloads of [fmin] are reached through *different*
+         conversion operators and their conversion sequences are indistinguishable. Bridge through
+         float, which additionally keeps the NaN result matching the CC reference in [builtins.c]
+         ([fmin]/[fmax] return the non-NaN operand, so [Satur01(NaN) = 1]) -- unlike the
+         [__hmax_nan]/[__hmin_nan] pair used for [Half_prec] just below, which propagates NaN. *)
+      | Satur01, Bfloat16_prec _ ->
+          f "__float2bfloat16(fmaxf(0.0f, fminf(1.0f, __bfloat162float(" "))))"
       | Satur01, Half_prec _ ->
           f
             "__hmax_nan(__ushort_as_half((unsigned short)0x0000U), \
@@ -1393,6 +1402,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Recip, Half_prec _ -> func "hrcp"
       | Recip, Single_prec _ -> f "(1.0f / (" "))"
       | Recip, Double_prec _ -> f "(1.0 / (" "))"
+      (* [1 / bf16] is ambiguous: the [int] operand can pair with any of the bfloat16 conversion
+         operators, so no candidate [operator/] is better than the rest. *)
+      | Recip, Bfloat16_prec _ -> f "__float2bfloat16(1.0f / __bfloat162float(" "))"
       | Recip, _ -> f "(1 / (" "))"
       | Recip_sqrt, Byte_prec _ ->
           invalid_arg
@@ -1410,6 +1422,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Tanh_approx, Half_prec _ -> func "htanh_approx"
       | Tanh_approx, Single_prec _ -> func "__tanhf"
       | Tanh_approx, _ -> func "tanh"
+      (* [bf16 == 0.0] is ambiguous for the same reason as [1 / bf16] above. *)
+      | Not, Bfloat16_prec _ -> f "__float2bfloat16(__bfloat162float(" ") == 0.0f ? 1.0f : 0.0f)"
       | Not, _ -> f "(" " == 0.0 ? 1.0 : 0.0)"
 
     let vec_unop_syntax prec op v =
