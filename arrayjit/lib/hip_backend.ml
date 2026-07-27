@@ -517,6 +517,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
          without a cast, and [__hip_fp8_e5m2] has no assignment from integer types. *)
       | Ops.Fp8_prec _, 16 -> "fp8x16_t"
       | Ops.Uint16_prec _, 8 -> "uint16x8_t"
+      | Ops.Uint32_prec _, 4 -> "uint32x4_t"
       (* Like fp8, bfloat16 needs [__hip_bfloat16] elements rather than raw [unsigned short] bits:
          [Set_from_vec] assigns them to the array cells without a cast. Mirrors the CUDA backend. *)
       | Ops.Bfloat16_prec _, 8 -> "bfloat16x8_t"
