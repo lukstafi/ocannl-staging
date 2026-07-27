@@ -83,6 +83,9 @@ let () =
   check ~name:"bfloat16 n=9" ~prec:Ir.Ops.bfloat16 [ 9 ];
   (* uint32 exercises the unsigned vec/lane builtins (full-range bit patterns). *)
   check ~name:"uint32 n=5" ~prec:Ir.Ops.uint32 [ 5 ];
+  (* uint64 is the 2-lanes-per-block end of the range, and pins the widest element type against a
+     missing vector block entry -- the same compile-time refusal the bfloat16 case guards above. *)
+  check ~name:"uint64 n=3" ~prec:Ir.Ops.uint64 [ 3 ];
   check ~name:"double n=3" ~prec:Ir.Ops.double [ 3 ];
   (* fp8 is the stress case: 16 lanes per block, and random bit patterns include NaNs (compared by
      bits, not value). *)
