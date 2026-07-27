@@ -251,3 +251,18 @@
  (libraries base ocannl stdio)
  (preprocess
   (pps ppx_here ppx_ocannl)))
+
+; mixed_prec_parity is the executed oracle for the gh-ocannl-492 mixed-precision recipe: master
+; weights via cast twins (bf16 and f16 legs vs. the f32 trajectory) and the dynamic loss-scaling
+; backoff/growth cycle with a deterministically engineered f16 overflow.
+
+(test
+ (name mixed_prec_parity)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules mixed_prec_parity)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))

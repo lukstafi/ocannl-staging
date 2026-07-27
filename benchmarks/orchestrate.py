@@ -31,6 +31,10 @@ VENV_PY = Path(
     )
 )
 PARITY_TOL = 2e-3
+# Accuracy-parity gates for the OCANNL mixed-precision legs (gh-ocannl-492 task 4): loose
+# envelopes on trajectory drift vs the f32 reference (bf16 has an 8-bit mantissa, f16 an 11-bit
+# one plus dynamic loss scaling), to be tightened once hardware runs record real drift.
+PARITY_TOL_PRECISION = {"bf16": 8e-2, "f16": 2e-2}
 REFERENCE = ("pytorch", "cpu", "eager")
 
 # The GPU column of the matrix, per --gpu choice: OCANNL backend, PyTorch device,
@@ -107,7 +111,8 @@ def parity_check(results):
                 for a, b in zip(r["losses"][:n], ref["losses"][:n])
             )
             r["parity_max_rel"] = max_rel
-            r["parity"] = "PASS" if max_rel < PARITY_TOL else "FAIL"
+            tol = PARITY_TOL_PRECISION.get(r.get("precision", "f32"), PARITY_TOL)
+            r["parity"] = "PASS" if max_rel < tol else "FAIL"
 
 
 def report(results, out_dir):
@@ -160,6 +165,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--workloads", nargs="*", help="workload names (default: all fixtures)")
     ap.add_argument("--tuned", action="store_true", help="add the OCANNL autotuned variant")
+    ap.add_argument(
+        "--precision",
+        nargs="*",
+        default=[],
+        choices=["bf16", "f16"],
+        help="add OCANNL mixed-precision training variants (mlp workloads only: master "
+        "weights + storage policy, f16 with dynamic loss scaling; gh-ocannl-492)",
+    )
     ap.add_argument(
         "--materialized",
         action="store_true",
@@ -248,6 +261,10 @@ def main():
                 variants.append("materialized")
             if args.tuned:
                 variants.append("tuned")
+            if model == "mlp":
+                # The mixed-precision recipe is a training-path feature; the mlp runner is its
+                # benchmark consumer (bench_mlp BENCH_PRECISION).
+                variants.extend(args.precision)
             for backend in ["cc"] + ([gpu_ocannl] if gpu_ocannl else []):
                 for variant in variants:
                     if (name, backend, variant) in SKIP_CELLS:
@@ -258,6 +275,7 @@ def main():
                         BENCH_FIXTURE=str(fx),
                         BENCH_TUNE="1" if variant == "tuned" else "0",
                         BENCH_MATERIALIZE="1" if variant == "materialized" else "0",
+                        BENCH_PRECISION=variant if variant in ("bf16", "f16") else "f32",
                     )
                     cmd = [str(ocannl_exe(model)), f"--ocannl_backend={backend}"]
                     label = f"{name} ocannl/{backend}/{variant}"

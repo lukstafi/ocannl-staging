@@ -30,6 +30,7 @@
   ocannl
   persistence
   precision_policy
+  mixed_prec
   safetensors)
  (modes best)
  (c_library_flags -lpthread))

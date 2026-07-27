@@ -65,7 +65,12 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   (`dune build benchmarks/runners/ocannl/bench_mlp.exe` etc.). Env: `BENCH_FIXTURE` (path),
   `BENCH_TUNE=1` (`Train.tune_placements`: autotunes both the default placements graph and
   the materialize-all graph, keeping the measured winner), `BENCH_MATERIALIZE=1` (materialize
-  intermediates without tuning); backend via the usual `--ocannl_backend=cc|metal|cuda`. Debug
+  intermediates without tuning), `BENCH_PRECISION=bf16|f16` (mlp only, gh-ocannl-492: the
+  mixed-precision training recipe — f32 master weights with reduced-precision cast twins,
+  storage policy over the MLP body with the loss head kept f32, and for f16 dynamic loss
+  scaling, whose per-step host-read inf/nan gate is included in the reported step times;
+  orchestrate flag `--precision bf16 f16`, parity gated at the looser
+  `PARITY_TOL_PRECISION` envelopes); backend via the usual `--ocannl_backend=cc|metal|cuda`. Debug
   helpers: `BENCH_DEBUG=1` prints param names/dims (conv/gpt) or bias gradients (mlp) and
   exits; `BENCH_NO_SGD=1` compiles the gradient update without the SGD step (mlp);
   `BENCH_NO_SLICE=1` skips `@|` batch slicing (mlp, single-batch fixture).
