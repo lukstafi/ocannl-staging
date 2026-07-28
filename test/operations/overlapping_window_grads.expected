@@ -1,6 +1,10 @@
 tropical overlap: y = [5 3 2 5], loss = 15, gx = [1 1 0 1 1]
 tropical overlap forward: true
 tropical overlap gradient exact: true
+unary conv sum: y = [8 4 3 7]
+unary conv sum forward: true
+unary einmax1 overlap: y = [5 3 2 5], gx = [1 1 0 1 1]
+unary einmax1 overlap forward and gradient exact: true
 einmax1 ties: loss = 7, gx = [1 0 1]
 einmax1 tie gradient gates every achieving position: true
 tropical matmul: t = [12 21 15 25], loss = 73

@@ -2210,13 +2210,24 @@ let%debug4_sexp derive_projections (update_step : update_step) : unit =
                      [ Shape_mismatch (lhs :: rhs) ] )));
     all
   in
-  (* Ensure concat component iterators are present even when their dim is 1. *)
+  (* Most product projections occur as top-level dimensions of the result or operands. Constituents
+     that occur only inside a compound projection do not: notably a unary convolution's kernel, and
+     concat components. Include those solver-recorded iterators after the shape-derived axes. *)
+  let all_product_dim_entries =
+    Row.product_dim_iterators proj_env
+    |> Utils.unique_keep_first ~equal:(fun (_, _, s1) (_, _, s2) -> Idx.equal_symbol s1 s2)
+  in
+  let unique_by_iterator =
+    let seen =
+      Set.of_list (module Idx.Symbol) (List.map unique_by_iterator ~f:(fun (_, _, s) -> s))
+    in
+    unique_by_iterator
+    @ List.filter all_product_dim_entries ~f:(fun (_, _, s) -> not (Set.mem seen s))
+  in
   let symbol_to_proj =
     Map.of_alist_exn
       (module Idx.Symbol)
-      (Row.product_dim_iterators proj_env
-      |> Utils.unique_keep_first ~equal:(fun (_, _, s1) (_, _, s2) -> Idx.equal_symbol s1 s2)
-      |> List.map ~f:(fun (p, d, s) -> (s, (p, d))))
+      (List.map all_product_dim_entries ~f:(fun (p, d, s) -> (s, (p, d))))
   in
   (* Build connected components from Concat indices. Symbols that appear together in a Concat must
      be iterated together. We use union-find to group symbols into connected components. Include
