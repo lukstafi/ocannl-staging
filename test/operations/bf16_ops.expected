@@ -13,3 +13,4 @@
 #0 a unknown    │#1 b unknown    │                │                │                  │
 <not-in-context>│<not-in-context>│                │                │                  │
 uniform bfloat16: 8 values, all in [0,1): true
+virtual uniform bfloat16: 9 values, all in [0,1): true
