@@ -183,6 +183,16 @@
 - CIFAR dataset downloads are atomic, fail on HTTP errors, tolerate Windows Schannel behavior,
   and self-heal incomplete archives; Windows documentation now calls out PowerShell's unquoted
   Dune-alias splatting trap.
+- The model-picked untuned default (`model_default_schedule`) now honors its advisory contract
+  against validation failures (gh-ocannl-519): its guard only covered *producing* the picked
+  segments, while `Low_level.validate_parallel` — the check that rejects most bad picks — runs
+  inside backend codegen, past the transform seam, so a rejected pick escaped the guard and
+  killed the process (reproducibly, on Metal `mlp` workloads). Picks are now validated at the
+  seam (`Autotune.validate_segments`), and the compile itself is wrapped
+  (`Autotune.compile_advisory`) so that a downstream failure of a picked schedule recompiles
+  with the ordinary default pipeline, the reported choice degrading to `"default"`. Once the
+  compile is on that pipeline there is nothing left to fall back to, so its failures propagate
+  without a duplicate attempt.
 
 ## [0.8] -- 2026-07-13
 

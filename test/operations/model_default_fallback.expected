@@ -1,0 +1,10 @@
+an unguarded compile of the rejected transform raises out of Context.compile: true
+validate_segments rejects the transform at the seam: true
+the seam-level fallback computes the unscheduled values: true
+compile_advisory falls back on a transform rejected downstream of the seam: true
+the fallback routine computes the default pipeline's values: true
+fallback_if false re-raises instead of recompiling: true
+compile_advisory does not fall back on a transform that compiles: true
+the non-fallback routine computes correct values: true
+model_default returns a working routine: true
+model_default reports a choice: true

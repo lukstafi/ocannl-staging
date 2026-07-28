@@ -1,0 +1,170 @@
+(* The advisory fallback of the model-picked untuned default (gh-ocannl-519).
+
+   [Autotune.model_default] documents its schedule pick as advisory: any failure degrades to the
+   ordinary default pipeline. The pick's own construction was guarded, but the checks that reject a
+   bad pick — [Low_level.validate_parallel] above all — run inside backend codegen, past the
+   transform seam, so a rejected pick used to escape the guard and abort the compile.
+
+   The scenario here is that escape, reproduced with an explicit transform instead of a model pick
+   (the model's picks are envelope- and backend-dependent; the failure mode is not): a kernel whose
+   first nest is Grid+Workgroup-annotated and whose second is Grid-only, so the second nest's
+   materialized write is not covered by all active hardware dimensions. The rejection is
+   backend-independent (test/operations/hardware_axes_parity.ml pins it directly).
+
+   Run by a rule (not a test stanza) with --ocannl_backend=cc and the model_peak_* envelope
+   overrides pinned, like cost_model_selection.ml: the C backends carry no advisory envelope
+   constants, so pinning them is what makes the [model_default] leg exercise live model scoring. *)
+
+open Base
+open Ocannl
+open Ocannl.Operation.DSL_modules
+module LL = Ir.Low_level
+module Asgns = Ir.Assignments
+
+let p name b = Stdio.printf "%s: %b\n" name b
+let approx a b = Float.(abs (a - b) < 1e-4)
+
+let named name (comp : Asgns.comp) : Asgns.comp =
+  { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
+
+(* Every top-level nest annotated Grid, with the FIRST one's inner loop additionally Workgroup: the
+   launch then has an active workgroup dimension that the second nest's write does not cover. *)
+let annotate_mixed (opt : LL.optimized) : LL.optimized list =
+  let first = ref true in
+  let rec map_inner (llc : LL.t) : LL.t =
+    match llc with
+    | LL.Seq (x, y) -> LL.Seq (map_inner x, map_inner y)
+    | LL.For_loop fc -> LL.For_loop { fc with axis = LL.Workgroup }
+    | other -> other
+  in
+  let rec map_outer (llc : LL.t) : LL.t =
+    match llc with
+    | LL.Seq (x, y) -> LL.Seq (map_outer x, map_outer y)
+    | LL.For_loop fc ->
+        let body = if !first then map_inner fc.body else fc.body in
+        first := false;
+        LL.For_loop { fc with axis = LL.Grid; body }
+    | other -> other
+  in
+  [ { opt with llc = map_outer opt.llc } ]
+
+let av = Array.init 32 ~f:(fun i -> Float.of_int i *. 0.5)
+let bv = Array.init 32 ~f:(fun i -> Float.of_int (i % 7) -. 3.)
+let ev = Array.init 48 ~f:(fun i -> Float.of_int i *. 0.25)
+let fv = Array.init 48 ~f:(fun i -> Float.of_int ((i % 5) + 1))
+let expected_c = Array.init 32 ~f:(fun i -> av.(i) +. bv.(i))
+let expected_d = Array.init 48 ~f:(fun i -> ev.(i) *. fv.(i))
+
+(* Two independent elementwise nests, so the annotation above has a second nest to leave uncovered.
+   A fresh tensor set per leg: each leg compiles its own routine from a fresh context. *)
+let pair tag =
+  let a = TDSL.ndarray av ~label:[ "mdf_a_" ^ tag ] ~output_dims:[ 4; 8 ] () in
+  let b = TDSL.ndarray bv ~label:[ "mdf_b_" ^ tag ] ~output_dims:[ 4; 8 ] () in
+  let e = TDSL.ndarray ev ~label:[ "mdf_e_" ^ tag ] ~output_dims:[ 6; 8 ] () in
+  let f = TDSL.ndarray fv ~label:[ "mdf_f_" ^ tag ] ~output_dims:[ 6; 8 ] () in
+  let%op c = a + b in
+  let%op d = e *. f in
+  (c, d, named ("mdf_" ^ tag) (Asgns.sequence [ Train.forward c; Train.forward d ]))
+
+let values ctx (c : Tensor.t) (d : Tensor.t) =
+  Array.for_all2_exn (Context.get_values ctx c.Tensor.value) expected_c ~f:approx
+  && Array.for_all2_exn (Context.get_values ctx d.Tensor.value) expected_d ~f:approx
+
+let () =
+  (* --- The escape: the rejection happens in codegen, past the transform seam --- *)
+  let _c, _d, comp = pair "escape" in
+  let raised =
+    try
+      ignore
+        (Context.compile ~lowered_transforms:annotate_mixed (Context.auto ()) comp Ir.Indexing.Empty
+          : Context.t * Context.routine);
+      None
+    with Invalid_argument msg -> Some msg
+  in
+  p "an unguarded compile of the rejected transform raises out of Context.compile"
+    (match raised with
+    | Some msg -> String.is_substring msg ~substring:"all active hardware dimensions"
+    | None -> false);
+
+  (* --- The seam-level check: the same rejection, raised where a fallback can see it --- *)
+  let c, d, comp = pair "seam" in
+  let seam_raised = ref None in
+  let probe (opt : LL.optimized) =
+    match Autotune.validate_segments (annotate_mixed opt) with
+    | segs -> segs
+    | exception exn ->
+        seam_raised := Some (Exn.to_string exn);
+        [ opt ]
+  in
+  let ctx, routine =
+    Context.compile ~lowered_transforms:probe (Context.auto ()) comp Ir.Indexing.Empty
+  in
+  let ctx = Context.run ctx routine in
+  p "validate_segments rejects the transform at the seam"
+    (match !seam_raised with
+    | Some msg -> String.is_substring msg ~substring:"all active hardware dimensions"
+    | None -> false);
+  p "the seam-level fallback computes the unscheduled values" (values ctx c d);
+
+  (* --- The backstop: compile_advisory falls back and still returns a working routine --- *)
+  let c, d, comp = pair "advisory" in
+  let fell_back = ref None in
+  let ctx, routine =
+    Autotune.compile_advisory
+      ~on_fallback:(fun exn -> fell_back := Some (Exn.to_string exn))
+      annotate_mixed (Context.auto ()) comp Ir.Indexing.Empty
+  in
+  let ctx = Context.run ctx routine in
+  p "compile_advisory falls back on a transform rejected downstream of the seam"
+    (match !fell_back with
+    | Some msg -> String.is_substring msg ~substring:"all active hardware dimensions"
+    | None -> false);
+  p "the fallback routine computes the default pipeline's values" (values ctx c d);
+
+  (* --- ... and not when the caller says there is nothing to fall back to (Codex P2) --- *)
+  let _c, _d, comp = pair "nogate" in
+  let fell_back = ref None in
+  let raised =
+    try
+      ignore
+        (Autotune.compile_advisory
+           ~on_fallback:(fun exn -> fell_back := Some (Exn.to_string exn))
+           ~fallback_if:(fun () -> false)
+           annotate_mixed (Context.auto ()) comp Ir.Indexing.Empty
+          : Context.t * Context.routine);
+      None
+    with Invalid_argument msg -> Some msg
+  in
+  p "fallback_if false re-raises instead of recompiling"
+    ((match raised with
+     | Some msg -> String.is_substring msg ~substring:"all active hardware dimensions"
+     | None -> false)
+    && Option.is_none !fell_back);
+
+  (* --- ... and does not fire when the transform is fine (no blanket swallowing) --- *)
+  let c, d, comp = pair "clean" in
+  let fell_back = ref None in
+  let ctx, routine =
+    Autotune.compile_advisory
+      ~on_fallback:(fun exn -> fell_back := Some (Exn.to_string exn))
+      (fun opt -> [ opt ])
+      (Context.auto ()) comp Ir.Indexing.Empty
+  in
+  let ctx = Context.run ctx routine in
+  p "compile_advisory does not fall back on a transform that compiles" (Option.is_none !fell_back);
+  p "the non-fallback routine computes correct values" (values ctx c d)
+
+let () =
+  (* --- model_default keeps working end to end (envelope overrides make scoring live) --- *)
+  let c, d, comp = pair "model" in
+  let choice = ref None in
+  let ctx, routine =
+    Autotune.model_default ~report:(fun r -> choice := Some r) (Context.auto ()) comp
+      Ir.Indexing.Empty
+  in
+  let ctx = Context.run ctx routine in
+  p "model_default returns a working routine" (values ctx c d);
+  p "model_default reports a choice"
+    (match !choice with
+    | Some r -> (not (String.is_empty r.Autotune.mc_label)) && r.Autotune.mc_scored >= 1
+    | None -> false)

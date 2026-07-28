@@ -279,8 +279,10 @@ autotune_calibration_file=
 # cost model (`Autotune.model_default`, gh-ocannl-491): the untuned default pipeline and the
 # sketch families are scored with the roofline model and the best is applied — zero timing runs,
 # one backend compile. Advisory: requires envelope constants (the backend's advisory values or
-# the model_peak_* overrides below), ties go to the default pipeline, and any scoring or
-# application failure falls back to it.
+# the model_peak_* overrides below), ties go to the default pipeline, and any scoring,
+# application, validation or compilation failure falls back to it — a pick rejected by
+# `Low_level.validate_parallel` (or by anything else downstream of the schedule seam) is
+# recompiled with the default pipeline instead of failing the compile.
 model_default_schedule=false
 
 # Overrides the backend's advisory peak arithmetic throughput, in FLOP/s (single precision, FMA

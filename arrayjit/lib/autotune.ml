@@ -2602,6 +2602,39 @@ type model_choice = {
 let model_default_enabled =
   lazy (Utils.get_global_flag ~default:false ~arg_name:"model_default_schedule")
 
+(* The eager half of the advisory contract (gh-ocannl-519): [validate_parallel] runs inside backend
+   codegen, long after the transform seam returned, so a rejected pick would escape any handler the
+   seam installs and kill the process. Running the check here — on exactly the segments and
+   placements codegen will see — turns a rejected pick into an ordinary exception at the transform
+   boundary, where the caller's fallback catches it. This is the same check [tune]'s candidate
+   compiles treat as an invalid candidate and skip. *)
+let validate_segments (segs : LL.optimized list) : LL.optimized list =
+  List.iter segs ~f:(fun (o : LL.optimized) ->
+      LL.validate_parallel o.LL.optimize_ctx.LL.placements o.LL.llc);
+  segs
+
+let compile_advisory ?on_fallback ?fallback_if lowered_transforms ctx comp bindings =
+  match Context.compile ~lowered_transforms ctx comp bindings with
+  | result -> result
+  | exception exn ->
+      let bt = Stdlib.Printexc.get_raw_backtrace () in
+      (* [fallback_if] is what keeps the retry from duplicating a genuine failure: a transform that
+         already degraded to the default pipeline has nothing to fall back TO, so recompiling would
+         just repeat the same failing compile (and, on a resource failure, aggravate it) before
+         raising the same exception. Such callers say [false] here and the original exception
+         propagates untouched, backtrace included. *)
+      if not (Option.value_map fallback_if ~default:true ~f:(fun f -> f ())) then
+        Stdlib.Printexc.raise_with_backtrace exn bt;
+      (* The backstop half (gh-ocannl-519): the transforms are advisory, so ANY failure downstream
+         of the seam — not just the pre-validated checks — degrades to the ordinary default
+         pipeline. A plain [Context.compile] is exactly that pipeline (backends.ml applies
+         [Schedule.maybe_default_schedules] when no transform is given), and recompiling from the
+         caller's context after a failed compile is the same recovery [tune]'s winner replay takes.
+         If the default pipeline fails too, its exception propagates: that is a genuine error, not
+         an advisory pick gone wrong. *)
+      Option.iter on_fallback ~f:(fun f -> f exn);
+      Context.compile ctx comp bindings
+
 let model_default ?report ctx comp bindings =
   let backend = Context.backend_name ctx in
   let is_gpu = Sched.backend_is_gpu backend and is_cpu = Sched.backend_is_cpu backend in
@@ -2618,6 +2651,10 @@ let model_default ?report ctx comp bindings =
     Context.compile ctx comp bindings)
   else
     let choice = ref no_selection in
+    (* Whether the segments the compile actually received came from a model pick rather than the
+       default pipeline — the condition for the compile-level fallback below to have anywhere to
+       fall back to. *)
+    let applied_pick = ref false in
     let transforms (opt : LL.optimized) : LL.optimized list =
       let n_scored = ref 0 and n_skipped = ref 0 in
       let score opts =
@@ -2742,32 +2779,51 @@ let model_default ?report ctx comp bindings =
           mc_skipped = !n_skipped;
         };
       let apply_action () =
+        (* Picks are validated here, not left to codegen: [validate_segments] is what makes a pick
+           the model had no way to reject fall back below instead of escaping (gh-ocannl-519). The
+           default pipeline is deliberately NOT pre-validated — it is the fallback itself, and a
+           default that fails validation is a genuine bug that must surface. *)
         match action with
         | `Default -> default_segs ()
-        | `Whole p -> [ Sched.apply ~static_indices (sketch_schedule ~p opt) opt ]
+        | `Whole p -> validate_segments [ Sched.apply ~static_indices (sketch_schedule ~p opt) opt ]
         | `Fiss entries ->
             let subst_preset seg =
               match List.Assoc.find entries ~equal:String.equal (seg_key seg) with
               | Some p -> sketch_schedule ~p seg
               | None -> preset seg
             in
-            List.map
-              (Sched.fission_scheduled ~promote_locals:is_gpu ~preset:subst_preset ~zero_sched
-                 ~static_indices opt) ~f:(fun (_, _, _, post) -> post)
+            validate_segments
+              (List.map
+                 (Sched.fission_scheduled ~promote_locals:is_gpu ~preset:subst_preset ~zero_sched
+                    ~static_indices opt) ~f:(fun (_, _, _, post) -> post))
       in
       match apply_action () with
       | segs ->
           logf "model_default: chose %s (model %s; %d scored, %d without coverage)" label
             (match model_s with Some s -> Printf.sprintf "%.6f ms" (s *. 1e3) | None -> "n/a")
             !n_scored !n_skipped;
+          applied_pick := (match action with `Default -> false | `Whole _ | `Fiss _ -> true);
           segs
       | exception exn ->
-          logf "model_default: winner %s FAILED to apply (%s); using the default pipeline" label
-            (Exn.to_string exn);
+          logf
+            "model_default: winner %s FAILED to apply or validate (%s); using the default pipeline"
+            label (Exn.to_string exn);
           choice := { no_selection with mc_scored = !n_scored; mc_skipped = !n_skipped };
+          applied_pick := false;
           default_segs ()
     in
-    let result = Context.compile ~lowered_transforms:transforms ctx comp bindings in
+    let on_fallback exn =
+      logf "model_default: compiling the pick %s FAILED (%s); recompiling the default pipeline"
+        !choice.mc_label (Exn.to_string exn);
+      choice := { !choice with mc_label = "default"; mc_model_ms = None }
+    in
+    (* With the model on the default pipeline (no sketch strictly improved on it, or the pick failed
+       validation above), the compile that just failed IS the fallback: retrying it would duplicate
+       an expensive failure and delay the honest error, so the exception propagates instead. *)
+    let result =
+      compile_advisory ~on_fallback ~fallback_if:(fun () -> !applied_pick) transforms ctx comp
+        bindings
+    in
     emit !choice;
     result
 
