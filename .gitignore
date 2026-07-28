@@ -25,6 +25,12 @@ setup.log
 # Dune generated files
 *.install
 
+# Written per worktree by scripts/setup-ocaml-env.sh, never committed: dune roots
+# at the OUTERMOST ancestor holding a dune-workspace, so a tracked copy at the repo
+# root would shadow the one each nested .claude/worktrees/ checkout needs and pin
+# every worktree's builds back to the main checkout.
+dune-workspace
+
 # Local OPAM switch
 _opam/
 .vscode/settings.json
