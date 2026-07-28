@@ -38,7 +38,7 @@ opam install cudajit  # for CUDA backend
 opam install hipjit   # for AMD HIP backend
 ```
 
-**Worktrees**: place new ones outside the repo — they need none of what follows. A worktree nested inside the repo (`.claude/worktrees/`, the Claude Code default) makes dune silently resolve the PARENT checkout as the project root: from those, pass `--root .` to dune commands run from the worktree root, and promote with `dune promotion apply` (`dune promote` rejects `--root`) — or just use `tools/promote.sh`, which does both.
+**Worktrees**: nested ones (`.claude/worktrees/`, the Claude Code default) need a `dune-workspace` at their root, or dune builds the PARENT checkout instead; the SessionStart hook writes it, so after a mid-session worktree switch run `scripts/setup-ocaml-env.sh` by hand. See docs/agent-notes.md for why.
 
 **Windows shells**: `opam env --shell=sh` emits cygwin-style paths that break under Git Bash (MSYS), so a Git Bash session without a primed environment gets a half-working toolchain (dune found but linking fails with `cygpath: error converting ... -lpthread`). Source `tools/opam-env.sh` first — it rewrites the paths for MSYS and works from any POSIX shell. On Windows, link steps also flood stderr with benign binutils warnings (`Warning: corrupt .drectve at end of def file`, from MSVC-produced import libraries like ROCm's/CUDA's); `tools/dune-quiet.sh <dune args>` runs dune with exactly those lines filtered, preserving the exit status.
 
@@ -99,7 +99,7 @@ design history) that is not derivable from the code alone.
 **Test Types**:
 - **Inline tests**: Files included in library `modules` field with `inline_tests` stanza (e.g., `test_threefry4x32.ml` in `operations_tutorials` library)
 - **Standalone tests**: Files with dedicated `test` stanza and corresponding `.expected` files (e.g., `threefry4x32_demo`)
-- Use `dune promote` to accept test output changes (on Windows or in a nested worktree, prefer `tools/promote.sh` — it applies the promotion with the right root and strips CRLF from promoted goldens)
+- Use `dune promote` to accept test output changes (on Windows prefer `tools/promote.sh` — it strips CRLF from promoted goldens)
 - A few `%expect_test` blocks capture exception backtraces that hard-code `file:line` (e.g. `test/operations/primitive_ops.ml` embeds `context.ml` line numbers). Any edit that shifts lines in such a file forces a line-number-only re-promote — benign noise, not a behavior change; promote it in the same shell as the failing run (the `.ml.corrected` can vanish between runs)
 - For optimizer passes that change *what value a cell holds* (virtualization guards, index solving, accumulation/init elision), a structural test on the emitted op tree is necessary but NOT sufficient — also assert on executed output vs. a materialized/reference run (`Context.compile`/`run`/`get_values`); a pass has shipped green structural checks while computing all zeros
 - Backend codegen snapshots (e.g. `.cu.expected` files, `test_cuda_pool_offset.expected`) go stale when codegen changes land without that backend's hardware available to re-record them — expect to re-promote such snapshots when the hardware next runs the suite

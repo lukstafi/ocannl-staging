@@ -174,6 +174,17 @@ that they earn a lookup rather than always-loaded space.
   from a clean state (`dune clean && dune build @alias`): stale `_build/` intermediates can satisfy
   an undeclared dep, so an incomplete build passes while the artifact is wrong. Assert content
   (size, object counts), not mere existence.
+- Dune roots at the OUTERMOST ancestor holding a `dune-workspace` (failing that, a `dune-project`)
+  and ignores dot-directories, so from a worktree under `.claude/worktrees/` the main checkout wins
+  and the worktree is invisible to dune: targeted commands fail with `Don't know about directory
+  .claude/worktrees/...`, while a bare `dune build`/`dune runtest` quietly builds and tests the
+  PARENT branch. `scripts/setup-ocaml-env.sh` writes a one-line `dune-workspace` at the worktree
+  root, restoring it as the root with its own `_build`. That file is generated per worktree and
+  gitignored, never committed — being the outermost, a tracked copy at the repo root would shadow
+  every worktree's and pin them all back to the parent (the script reports `FAIL` if it finds one).
+  With it in place, `--root .` and `dune promotion apply` are no longer needed from a worktree;
+  `tools/promote.sh` remains the Windows path, for the CRLF stripping. Worktrees placed outside the
+  repo need none of this, but see no `ocannl_config` on their ancestor path.
 - A record with `[@@deriving sexp]` makes every `.expected` file that prints the parent a hidden
   consumer of its FIELD NAMES, and `rg "\.field_name"` over sources is vacuous against that (sexp
   prints `(field_name value)`, not member access). Before claiming a rename has no serialization
