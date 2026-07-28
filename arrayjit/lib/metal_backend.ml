@@ -966,6 +966,16 @@ module Impl = struct
       | Sqrt, _ -> func_doc "sqrt"
       | Relu, Ops.Half_prec _ -> fun v -> func_doc "max" (separate comma_sep [ string "0.0h"; v ])
       | Relu, Ops.Single_prec _ -> fun v -> func_doc "max" (separate comma_sep [ string "0.0f"; v ])
+      | Relu, Ops.Bfloat16_prec _ ->
+          (* MSL's math library has no bfloat [max] overload (same gap as [fma] above), so the
+             operand promotes to float and the result is cast back. An untyped [0] as the other
+             operand would instead resolve to an *integer* [max] and truncate the activation to an
+             integer — with sub-unit activations that silently zeroes the whole forward pass. *)
+          fun v ->
+            group
+              (string "(bfloat)max(0.0f, (float)"
+              ^^ parens v
+              ^^ rparen)
       | Relu, Ops.Double_prec _ ->
           raise @@ Utils.User_error "Metal backend does not support double precision"
       | Relu, _ (* Byte_prec, Void_prec *) ->

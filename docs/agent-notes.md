@@ -143,6 +143,21 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   command buffers overlap over untracked resources: back-to-back runs of the SAME routine need
   the FIFO wait, pipelined (no-sync) timing is unreliable, and `get_values`/`set_values` do FULL
   awaits by design.
+- MSL's math library has no `bfloat` overloads (`max`, `fma`, ...). Render bf16 arithmetic by
+  promoting to `float` and casting back — `(bfloat)max(0.0f, (float)(v))`, as `FMA` already did.
+  The trap is that an *untyped* literal does not fail loudly: `max(0, v)` makes an integer overload
+  unambiguous, so it compiles and silently truncates every sub-unit activation to 0, whereas
+  `max((bfloat)0.0, v)` is a clean "call to 'max' is ambiguous" error. Fingerprint of the silent
+  form: loss pinned at exactly ln(#classes) with NO batch-to-batch variation (a frozen-weights bug
+  would still vary per batch; an input-independent forward does not). Found by the gh-ocannl-476
+  sweep; `Relu` at `Bfloat16_prec` had fallen through to a catch-all commented `Byte_prec,
+  Void_prec`. When adding a precision, audit every `unop_syntax`/`binop_syntax` catch-all arm.
+- `test/config/ocannl_config` pins `backend=cc`, so `dune runtest` never exercises GPU codegen —
+  a Metal/CUDA-only rendering bug passes a fully green suite. The bf16 bug above was already
+  covered by `test/training/mixed_prec_parity.ml` (its "loss trajectory parity within 0.1" check
+  would have caught a zeroed forward); it had simply never run on a GPU backend. Run
+  `OCANNL_BACKEND=metal dune runtest` (the env var is an explicit dune dependency, so it re-runs)
+  before trusting a backend-specific codegen change.
 - Parallel-codegen work often lands Metal → cc → CUDA/HIP, but that is a default reflecting
   which machine is booted first and used most (the Mac Studio), not a rule — tasks can start on
   CUDA or HIP for load balancing across machines. The durable part: codegen snapshots for a
