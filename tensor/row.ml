@@ -5132,6 +5132,10 @@ let%debug4_sexp solve_proj_equations ?(clamp_padded = false) (eqs : proj_equatio
         | Some pid when Proj_id.equal p pid -> ()
         | Some pid -> proj_classes := Utils.union_add ~equal:Proj_id.equal !proj_classes pid p
         | None -> c.target_id <- Some p);
+        (* [get_proj_index] will need indices for the compound's nested projections when this
+           equation is processed below. Register them here: in a unary einsum the convolution
+           window may have no standalone occurrence that would otherwise make it iterated. *)
+        loop (Iterated conv_input);
         (* We will substitute variables in conv_input later *)
         p_conv_input := (p, conv_input) :: !p_conv_input
     | Proj_eq (Solved idx, ((Conv_input _ | Concat _) as conv_input))

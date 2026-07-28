@@ -15,11 +15,9 @@
    - Clamped padded windows (gh-ocannl-504) with overlap: out-of-range pairs hold the max-neutral
      -inf in the product-space intermediate ([=:@^]), so they gate neither gradient.
 
-   The overlap cases go through the binary [@^+] with a zero kernel: unary conv specs (e.g. [@^^
-   "o<+k => o"]) fail projection solving — a pre-existing, forward-pass bug (gh-ocannl-515). Once
-   that is fixed, [einmax1] conv-spec gradient cases belong here too; meanwhile [einmax1] is
-   covered by a full-reduction tie case (for non-conv specs the product space coincides with the
-   RHS1 index space, so the gate change is behavior-preserving there). *)
+   Both binary [@^+] and unary [@^^] overlapping windows are covered. The unary case also pins
+   projection inference for convolution indices that occur only inside the convolution compound
+   (gh-ocannl-515). *)
 
 open Base
 open Ocannl
@@ -57,6 +55,39 @@ let () =
   printf "tropical overlap: y = [%s], loss = %s, gx = [%s]\n%!" (fa yv) (fa lv) (fa gx);
   p "tropical overlap forward" (close yv [| 5.; 3.; 2.; 5. |] && close lv [| 15. |]);
   p "tropical overlap gradient exact" (close gx [| 1.; 1.; 0.; 1.; 1. |]);
+
+  (* === 1b: Unary conv specs — [k] occurs only inside [o<+k], so projection inference must register
+     it while processing the compound. Pin both the issue's [++] repro and the [@^^] overlap
+     gradient that motivated it. === *)
+  Tensor.unsafe_reinitialize ();
+  let x1b = NTDSL.ndarray xv ~label:[ "owg_x1b" ] ~output_dims:[ 5 ] () in
+  let%op y1b = x1b ++ "o<+k => o" [ "k" ] in
+  Shape.set_dim k 2;
+  let ctx = Context.auto () in
+  Train.set_materialized y1b.Tensor.value;
+  let ctx = Train.forward_once ctx y1b in
+  let yv1b = Context.get_values ctx y1b.Tensor.value in
+  printf "unary conv sum: y = [%s]\n%!" (fa yv1b);
+  p "unary conv sum forward" (close yv1b [| 8.; 4.; 3.; 7. |]);
+
+  Tensor.unsafe_reinitialize ();
+  let x1c =
+    Operation.init ~l:"owg_x1c" ~prec:Ir.Ops.single ~b:[] ~o:[ 5 ]
+      ~f:(fun idcs -> xv.(idcs.(0)))
+      ~grad_spec:Tensor.Require_grad ()
+  in
+  let%op y1c = x1c @^^ "o<+k => o" [ "k" ] in
+  Shape.set_dim k 2;
+  let%op loss1c = y1c ++ "o => 0" in
+  let ctx = Context.auto () in
+  Train.set_materialized y1c.Tensor.value;
+  Train.set_materialized (grad_of x1c);
+  let ctx = Train.update_once ~output_cd_file:false ctx loss1c in
+  let yv1c = Context.get_values ctx y1c.Tensor.value in
+  let gx1c = Context.get_values ctx (grad_of x1c) in
+  printf "unary einmax1 overlap: y = [%s], gx = [%s]\n%!" (fa yv1c) (fa gx1c);
+  p "unary einmax1 overlap forward and gradient exact"
+    (close yv1c [| 5.; 3.; 2.; 5. |] && close gx1c [| 1.; 1.; 0.; 1.; 1. |]);
 
   (* === 2: einmax1 through the product-space gate — full reduction with ties: y = max x = 7, the
      gradient goes in full to every tying position. === *)
