@@ -247,6 +247,12 @@ val model_default_enabled : bool Lazy.t
     {!Train.run_once}, the benchmark runners) route through {!model_default} instead of
     {!Context.compile}. *)
 
+val validate_segments : Ir.Low_level.optimized list -> Ir.Low_level.optimized list
+(** {!Ir.Low_level.validate_parallel} over each segment (against its own placements), returning them
+    unchanged; raises [Invalid_argument] on the first rejection. The check codegen runs anyway,
+    pulled forward to the transform seam so that an advisory transform's rejected output surfaces
+    where a fallback can catch it instead of aborting the compile (gh-ocannl-519). *)
+
 val model_default :
   ?report:(model_choice -> unit) ->
   Context.t ->
@@ -259,9 +265,10 @@ val model_default :
     the roofline model, and the model-argmin schedule is applied — zero measurement, one backend
     compile. Advisory by construction: a candidate without model coverage is never picked over the
     default, ties go to the default, and missing envelope constants, a disabled default annotator
-    ({!Ir.Schedule.automatic_schedule_active}), or any scoring/application failure fall back to the
-    ordinary default pipeline. Unlike {!tune}, nothing is executed and no cache is involved —
-    results depend only on the computation, backend, and envelope constants. *)
+    ({!Ir.Schedule.automatic_schedule_active}), or any scoring, application or validation
+    ({!validate_segments}) failure fall back to the ordinary default pipeline. Unlike {!tune},
+    nothing is executed and no cache is involved — results depend only on the computation, backend,
+    and envelope constants. *)
 
 val set_test_bindings : Context.routine -> unit
 (** Binds representative values for timing runs: ranged static indices at [range / 2], and gh-490
