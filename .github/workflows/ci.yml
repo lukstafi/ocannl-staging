@@ -161,6 +161,18 @@ jobs:
     - name: Install opam dependencies (Windows)
       if: runner.os == 'Windows' && steps.opam-cache.outputs.cache-hit != 'true'
       run: opam install . -y --deps-only --with-test --with-doc --no-depexts
+    # Depexts are SYSTEM packages: they live on the runner, not in the cached
+    # `_opam`, so on a cache hit the install step below is skipped and they are
+    # simply absent. The restored switch then has the OCaml `curl` bindings while
+    # the runner has no libcurl to link against, and `dune build` dies with
+    # `/usr/bin/ld: cannot find -lcurl`. That is why ubuntu alternates green and
+    # red by cache state rather than by commit. Installing depexts unconditionally
+    # is cheap (it compiles no OCaml) and idempotent. Windows is exempt: it caches
+    # its cygwin system libraries alongside `_opam`, and re-running depext there
+    # would re-run cygwin's setup.exe and undo the pkgconf downgrade above.
+    - name: Install system dependencies
+      if: runner.os != 'Windows'
+      run: opam install . -y --deps-only --with-test --with-doc --depext-only
     - name: Install opam dependencies
       if: runner.os != 'Windows' && steps.opam-cache.outputs.cache-hit != 'true'
       run: opam install . -y --deps-only --with-test --with-doc
