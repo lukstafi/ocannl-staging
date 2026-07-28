@@ -588,7 +588,10 @@ module Impl = struct
       | Ops.Int64_prec _, 2 -> "int64x2_t"
       | Ops.Uint64_prec _, 2 -> "uint64x2_t"
       | (Ops.Byte_prec _ | Ops.Fp8_prec _), 16 -> "int8x16_t"
-      | (Ops.Uint16_prec _ | Ops.Bfloat16_prec _), 8 -> "uint16x8_t"
+      | Ops.Uint16_prec _, 8 -> "uint16x8_t"
+      (* [Set_from_vec] assigns elements directly, so bfloat16 blocks must contain native
+         [bfloat] values rather than raw [ushort] bit patterns. *)
+      | Ops.Bfloat16_prec _, 8 -> "bfloat16x8_t"
       | Ops.Half_prec _, 8 -> "half8_t"
       | _, 1 -> typ_of_prec prec
       | _ -> invalid_arg "Metal_backend.vec_typ_of_prec: invalid combination"
@@ -980,6 +983,13 @@ module Impl = struct
           raise @@ Utils.User_error "Metal backend does not support double precision"
       | Relu, _ (* Byte_prec, Void_prec *) ->
           fun v -> func_doc "max" (separate comma_sep [ string "0"; v ])
+      | Satur01, Ops.Bfloat16_prec _ ->
+          (* Like [Relu], MSL has no bfloat overload of the math-library operation. *)
+          fun v ->
+            group
+              (string "(bfloat)clamp((float)"
+              ^^ parens v
+              ^^ string ", 0.0f, 1.0f)")
       | Satur01, p ->
           let s = metal_prec_suffix_float p in
           fun v ->

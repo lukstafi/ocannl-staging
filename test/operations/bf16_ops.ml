@@ -45,4 +45,16 @@ let () =
   let ctx = Train.forward_once ctx u in
   let values = Context.get_values ctx u.value in
   Stdio.printf "\nuniform bfloat16: %d values, all in [0,1): %b\n" (Array.length values)
+    (Array.for_all values ~f:(fun v -> Float.(v >= 0. && v < 1.)));
+  (* Keep the uniform virtual so its consumer reads each packed block through the lane-extract
+     builtin rather than [Set_from_vec]. This covers the other route by which a raw ushort return
+     used to be converted numerically into a bfloat cell. *)
+  let virtual_u = TDSL.uniform () ~output_dims:[ 9 ] () in
+  Tn.update_prec virtual_u.value Ir.Ops.bfloat16;
+  let%op virtual_values = virtual_u *. 1. in
+  Tn.update_prec virtual_values.value Ir.Ops.bfloat16;
+  Train.set_materialized virtual_values.value;
+  let ctx = Train.forward_once ctx virtual_values in
+  let values = Context.get_values ctx virtual_values.value in
+  Stdio.printf "virtual uniform bfloat16: %d values, all in [0,1): %b\n" (Array.length values)
     (Array.for_all values ~f:(fun v -> Float.(v >= 0. && v < 1.)))

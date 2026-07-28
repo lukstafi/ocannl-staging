@@ -1,0 +1,8 @@
+(rule
+ (alias runtest)
+ (deps
+  orchestrate.py
+  test_orchestrate.py
+  runners/bench_common.py)
+ (action
+  (run python3 %{dep:test_orchestrate.py})))

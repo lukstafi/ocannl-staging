@@ -185,12 +185,17 @@ using namespace metal;|}, []);
 }|},
       [] );
     ("int32x4_t", {|struct int32x4_t { int4 v; };|}, []);
+    ("uint32x4_t", {|struct uint32x4_t { uint4 v; };|}, []);
     ("int64x2_t", {|struct int64x2_t { int64_t v[2]; };|}, []);
     ("uint64x2_t", {|struct uint64x2_t { uint64_t v[2]; };|}, []);
     ("int8x16_t", {|struct int8x16_t { int8_t v[16]; };|}, []);
     ("uint16x8_t", {|struct uint16x8_t { uint16_t v[8]; };|}, []);
     ("uint8x16_t", {|struct uint8x16_t { uint8_t v[16]; };|}, []);
     ("half8_t", {|struct half8_t { half v[8]; };|}, []);
+    (* [Set_from_vec] assigns block elements directly into the destination cells. Keep bfloat
+       elements as values rather than raw uint16 bit patterns, which would be converted
+       numerically on assignment (0x3F80 becoming 16256.0 rather than 1.0). *)
+    ("bfloat16x8_t", {|struct bfloat16x8_t { bfloat v[8]; };|}, []);
     ( "uint32_to_single_uniform",
       {|inline float uint32_to_single_uniform(uint32_t x) {
     return (x >> 8) * (1.0f / 16777216.0f);
@@ -240,9 +245,9 @@ using namespace metal;|}, []);
 }|},
       [] );
     ( "uint4x32_to_bfloat16_uniform",
-      {|uint16_t uint4x32_to_bfloat16_uniform(uint4 x) {
+      {|bfloat uint4x32_to_bfloat16_uniform(uint4 x) {
     float f = uint32_to_single_uniform(x.x);
-    return uint16_t(as_type<uint32_t>(f) >> 16);
+    return bfloat(f);
 }|},
       [ "uint32_to_single_uniform" ] );
     ( "uint4x32_to_half_uniform",
@@ -293,10 +298,12 @@ using namespace metal;|}, []);
 }|},
       [ "int64x2_t" ] );
     ( "uint4x32_to_uint32_uniform_vec",
-      {|uint4 uint4x32_to_uint32_uniform_vec(uint4 x) {
-    return x;
+      {|uint32x4_t uint4x32_to_uint32_uniform_vec(uint4 x) {
+    uint32x4_t result;
+    result.v = x;
+    return result;
 }|},
-      [] );
+      [ "uint32x4_t" ] );
     ( "uint4x32_to_uint64_uniform_vec",
       {|uint64x2_t uint4x32_to_uint64_uniform_vec(uint4 x) {
     uint64x2_t result;
@@ -332,19 +339,19 @@ using namespace metal;|}, []);
 }|},
       [ "uint16x8_t" ] );
     ( "uint4x32_to_bfloat16_uniform_vec",
-      {|uint16x8_t uint4x32_to_bfloat16_uniform_vec(uint4 x) {
-    uint16x8_t result;
+      {|bfloat16x8_t uint4x32_to_bfloat16_uniform_vec(uint4 x) {
+    bfloat16x8_t result;
     uint4 v = x;
     for (int i = 0; i < 4; i++) {
         uint32_t val = v[i];
         float f1 = float(val & 0xFFFF) * (1.0f / 65536.0f);
         float f2 = float((val >> 16) & 0xFFFF) * (1.0f / 65536.0f);
-        result.v[i*2 + 0] = uint16_t(as_type<uint32_t>(f1) >> 16);
-        result.v[i*2 + 1] = uint16_t(as_type<uint32_t>(f2) >> 16);
+        result.v[i*2 + 0] = bfloat(f1);
+        result.v[i*2 + 1] = bfloat(f2);
     }
     return result;
 }|},
-      [ "uint16x8_t" ] );
+      [ "bfloat16x8_t" ] );
     ( "uint4x32_to_half_uniform_vec",
       {|half8_t uint4x32_to_half_uniform_vec(uint4 x) {
     half8_t result;
@@ -398,7 +405,7 @@ using namespace metal;|}, []);
       [ "uint4x32_to_int64_uniform_vec" ] );
     ( "uint4x32_to_uint32_uniform_lane",
       {|uint32_t uint4x32_to_uint32_uniform_lane(uint4 x, int32_t lane) {
-    return uint4x32_to_uint32_uniform_vec(x)[lane];
+    return uint4x32_to_uint32_uniform_vec(x).v[lane];
 }|},
       [ "uint4x32_to_uint32_uniform_vec" ] );
     ( "uint4x32_to_uint64_uniform_lane",
@@ -417,7 +424,7 @@ using namespace metal;|}, []);
 }|},
       [ "uint4x32_to_uint16_uniform_vec" ] );
     ( "uint4x32_to_bfloat16_uniform_lane",
-      {|uint16_t uint4x32_to_bfloat16_uniform_lane(uint4 x, int32_t lane) {
+      {|bfloat uint4x32_to_bfloat16_uniform_lane(uint4 x, int32_t lane) {
     return uint4x32_to_bfloat16_uniform_vec(x).v[lane];
 }|},
       [ "uint4x32_to_bfloat16_uniform_vec" ] );
@@ -493,8 +500,8 @@ using namespace metal;|}, []);
 }|},
       [] );
     ( "bfloat16_to_uint4x32",
-      {|uint4 bfloat16_to_uint4x32(uint16_t x) {
-    return uint4(uint32_t(x), 0, 0, 0);
+      {|uint4 bfloat16_to_uint4x32(bfloat x) {
+    return uint4(uint32_t(as_type<uint16_t>(x)), 0, 0, 0);
 }|},
       [] );
     ( "half_to_uint4x32",

@@ -31,10 +31,12 @@ VENV_PY = Path(
     )
 )
 PARITY_TOL = 2e-3
-# Accuracy-parity gates for the OCANNL mixed-precision legs (gh-ocannl-492 task 4): loose
-# envelopes on trajectory drift vs the f32 reference (bf16 has an 8-bit mantissa, f16 an 11-bit
-# one plus dynamic loss scaling), to be tightened once hardware runs record real drift.
-PARITY_TOL_PRECISION = {"bf16": 8e-2, "f16": 2e-2}
+# Accuracy-parity gates for the OCANNL mixed-precision legs (gh-ocannl-492 task 4), with roughly
+# 10x headroom over the largest drift measured by the macOS cc/Metal sweep.
+PARITY_TOL_PRECISION = {"bf16": 4e-3, "f16": 2e-3}
+# A parity tolerance cannot reject an input-independent forward when the reference itself moves
+# slowly. Require at least one part per million of relative loss variation over the parity window.
+LOSS_MOVE_MIN_REL = 1e-6
 REFERENCE = ("pytorch", "cpu", "eager")
 
 # The GPU column of the matrix, per --gpu choice: OCANNL backend, PyTorch device,
@@ -87,6 +89,14 @@ def run_cell(label, cmd, env=None, cwd=None):
     return result
 
 
+def loss_moved(losses):
+    """Whether a loss trajectory has more than floating-point-noise-level variation."""
+    if len(losses) < 2:
+        return False
+    scale = max(max(abs(loss) for loss in losses), 1e-6)
+    return max(losses) - min(losses) > LOSS_MOVE_MIN_REL * scale
+
+
 def parity_check(results):
     """Annotate each result with parity vs the reference run of the same workload."""
     by_workload = {}
@@ -98,6 +108,7 @@ def parity_check(results):
             None,
         )
         for r in rs:
+            r["parity_loss_moved"] = loss_moved(r["losses"])
             if ref is None:
                 r["parity"] = "NO-REF"
                 continue
@@ -112,7 +123,7 @@ def parity_check(results):
             )
             r["parity_max_rel"] = max_rel
             tol = PARITY_TOL_PRECISION.get(r.get("precision", "f32"), PARITY_TOL)
-            r["parity"] = "PASS" if max_rel < tol else "FAIL"
+            r["parity"] = "PASS" if max_rel < tol and r["parity_loss_moved"] else "FAIL"
 
 
 def report(results, out_dir):
@@ -147,6 +158,8 @@ def report(results, out_dir):
             parity = r["parity"]
             if parity not in ("REF", "NO-REF"):
                 parity += f" ({r['parity_max_rel']:.1e})"
+            if not r["parity_loss_moved"]:
+                parity += " (loss stationary)"
             tokens = ""
             if with_tokens:
                 tps = r.get("tokens_per_step")
@@ -333,6 +346,17 @@ def main():
     if failed:
         ok = False
         print(f"PARITY GATE: {len(failed)} cell(s) FAILED", flush=True)
+    stationary = [r for r in results if not r["parity_loss_moved"]]
+    if stationary:
+        ok = False
+        labels = ", ".join(
+            f"{r['workload']} {r['framework']}/{r['backend']}/{r['variant']}"
+            for r in stationary
+        )
+        print(
+            f"LOSS-MOVEMENT GATE: {len(stationary)} stationary cell(s): {labels}",
+            flush=True,
+        )
     if not ok:
         sys.exit(1)
     print("PARITY GATE: all cells passed", flush=True)
