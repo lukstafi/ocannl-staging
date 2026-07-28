@@ -45,6 +45,47 @@ fail() { printf '  FAIL  %s\n' "$*" >&2; status=1; }
 
 echo "=== OCANNL environment ==="
 
+# --- worktree dune root --------------------------------------------------
+# Claude Code creates worktrees under `.claude/worktrees/`, i.e. INSIDE the
+# repository. Dune takes as its root the outermost ancestor holding a
+# `dune-workspace` (failing that, a `dune-project`) and ignores dot-directories,
+# so from such a worktree the main checkout wins and the worktree is invisible to
+# dune: targeted commands fail with "Don't know about directory
+# .claude/worktrees/...", and — the quiet one — a bare `dune build` / `dune
+# runtest` builds and tests the PARENT checkout instead of the branch you are on.
+#
+# A `dune-workspace` at the worktree root makes the worktree the root again and
+# gives it its own `_build`. That only holds while the main checkout has none
+# (outermost wins), which is why the file is generated per worktree and
+# gitignored rather than committed. This step comes before the opam section: it
+# needs no toolchain, and a missing opam exits the script early below.
+self_top="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd || true)"
+wt_top="$(git -C "${self_top:-.}" rev-parse --show-toplevel 2>/dev/null || true)"
+git_common="$(git -C "${self_top:-.}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+# <main>/.git for the main checkout and for every worktree of it; the inequality
+# confirms the suffix was really stripped before the prefix tests below.
+main_top="${git_common%/.git}"
+if [ -n "$wt_top" ] && [ -n "$main_top" ] && [ "$main_top" != "$git_common" ]; then
+  case "$wt_top" in
+    "$main_top") ;;   # the main checkout itself: dune already roots here
+    "$main_top"/*)    # a worktree nested inside the main checkout
+      if [ -e "$main_top/dune-workspace" ]; then
+        fail "dune-workspace in $main_top shadows this worktree's — dune will build the parent checkout"
+      elif [ -e "$wt_top/dune-workspace" ]; then
+        ok "worktree dune root"
+      else
+        lang="$(grep -m1 '^(lang dune ' "$wt_top/dune-project" 2>/dev/null || true)"
+        if printf '%s\n' "${lang:-(lang dune 3.18)}" >"$wt_top/dune-workspace"; then
+          fixed "worktree dune root (dune-workspace written; dune would have built the parent checkout)"
+        else
+          fail "could not write $wt_top/dune-workspace"
+        fi
+      fi
+      ;;
+    *) ;;             # worktree outside the repo: nothing shadows it
+  esac
+fi
+
 # --- opam itself ---------------------------------------------------------
 if command -v opam >/dev/null 2>&1; then
   ok "opam $(opam --version)"
