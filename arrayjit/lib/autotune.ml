@@ -2792,8 +2792,9 @@ let model_default ?report ctx comp bindings =
             !n_scored !n_skipped;
           segs
       | exception exn ->
-          logf "model_default: winner %s FAILED to apply or validate (%s); using the default \
-                pipeline" label (Exn.to_string exn);
+          logf
+            "model_default: winner %s FAILED to apply or validate (%s); using the default pipeline"
+            label (Exn.to_string exn);
           choice := { no_selection with mc_scored = !n_scored; mc_skipped = !n_skipped };
           default_segs ()
     in
