@@ -90,6 +90,14 @@ design history) that is not derivable from the code alone.
 - From PowerShell, QUOTE dune alias targets: PowerShell parses an unquoted `@word` argument as a splatting variable (undefined here → expands to nothing), so `dune build @runtest @slow` silently degrades to a plain `dune build` that exits 0 having run no tests — a false green. Use `dune build "@runtest" "@slow"` (bash/cmd are unaffected)
 - Inline tests (like those in `test_threefry4x32.ml`) are part of library modules and run via `dune runtest`, not `dune exec`
 
+**Scope test runs to the blast radius** — a full `dune runtest` is 30+ minutes of wall clock and is rarely what a change needs:
+- Run the affected directories first: `dune build @test/operations/runtest` (and `@test/einsum/runtest`, `@test/ppx/runtest`, `@arrayjit/runtest`, `@test/training/runtest`). `test/training` alone dominates the total even with the `slow` alias excluded — `circles_conv`, `transformer_names`, `fsm_transformer`, `bigram` and `mixed_prec_parity` are minutes each
+- Establish the blast radius before running, not after. For a change behind a config gate, grep whether any test or test config turns the gate on: e.g. `model_default_schedule` defaults to false and nothing enables it, so `Autotune.model_default` is reachable only from the tests that call it directly (`test/operations/cost_model_selection.ml`, `model_default_fallback.ml`) — the training suite cannot exercise it
+- CI runs the full suite on ubuntu/macos/windows in under 10 minutes per runner. Leave the exhaustive pass to it and spend local time on the directories your change reaches, plus one `dune build @check`
+- NEVER edit library sources while a `dune` run is in flight: it invalidates the build mid-run and re-runs everything expensive. Finish commit splitting first, then test once on the final tree
+- Prefer running dune in the foreground with a timeout over launching it in the background and polling — in sandboxed/WSL sessions background processes can get almost no CPU between tool calls, so polling stretches a 10-minute suite into an hour. dune caches completed rules, so a suite that outlives one foreground window resumes where it left off on the next invocation
+- A waiter like `until ! pgrep -f "dune build"; do sleep 20; done` never terminates: `pgrep -f` matches the waiting shell's own command line. Poll a sentinel in the run's log instead (`grep -q "^exit: " /tmp/suite.log`)
+
 **Slow training tests (the `slow` alias)**:
 - A handful of `test/training/` runs are minutes-long each (`cifar_conv`, `mnist_conv`, `mlp_bn_names`, `mlp_names`, `circles_conv`) and dominate total test time. They are kept out of the `runtest` alias so `dune runtest` stays fast.
 - They are still ordinary executables: `dune build @check` compiles them, so they cannot bit-rot.
