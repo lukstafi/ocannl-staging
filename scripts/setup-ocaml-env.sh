@@ -54,36 +54,49 @@ echo "=== OCANNL environment ==="
 # .claude/worktrees/...", and — the quiet one — a bare `dune build` / `dune
 # runtest` builds and tests the PARENT checkout instead of the branch you are on.
 #
-# A `dune-workspace` at the worktree root makes the worktree the root again and
-# gives it its own `_build`. That only holds while the main checkout has none
-# (outermost wins), which is why the file is generated per worktree and
-# gitignored rather than committed. This step comes before the opam section: it
-# needs no toolchain, and a missing opam exits the script early below.
+# A `dune-workspace` at this checkout's root makes it the root again and gives it
+# its own `_build`. That only holds while no ancestor has one (outermost wins),
+# which is why the file is generated per worktree and gitignored rather than
+# committed. This step comes before the opam section: it needs no toolchain, and
+# a missing opam exits the script early below.
+#
+# The test is on the ancestor DIRECTORIES, not on git topology: a checkout can be
+# nested inside another checkout that is itself a linked worktree (living
+# anywhere), in which case `--git-common-dir` names the primary checkout, which
+# is not the one dune would root at. Asking the question dune asks covers every
+# arrangement — nested worktree, worktree of a worktree, worktree outside the
+# repo — without enumerating them.
 self_top="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd || true)"
 wt_top="$(git -C "${self_top:-.}" rev-parse --show-toplevel 2>/dev/null || true)"
-git_common="$(git -C "${self_top:-.}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
-# <main>/.git for the main checkout and for every worktree of it; the inequality
-# confirms the suffix was really stripped before the prefix tests below.
-main_top="${git_common%/.git}"
-if [ -n "$wt_top" ] && [ -n "$main_top" ] && [ "$main_top" != "$git_common" ]; then
-  case "$wt_top" in
-    "$main_top") ;;   # the main checkout itself: dune already roots here
-    "$main_top"/*)    # a worktree nested inside the main checkout
-      if [ -e "$main_top/dune-workspace" ]; then
-        fail "dune-workspace in $main_top shadows this worktree's — dune will build the parent checkout"
-      elif [ -e "$wt_top/dune-workspace" ]; then
-        ok "worktree dune root"
+[ -n "$wt_top" ] || wt_top="$self_top"
+if [ -n "$wt_top" ] && [ -e "$wt_top/dune-project" ]; then
+  # Walk outwards, keeping the LAST hit, so each variable ends at the outermost
+  # ancestor holding that file — which is the one dune would pick.
+  shadow="" outer="" dir="$(dirname "$wt_top")"
+  while [ -n "$dir" ]; do
+    [ -e "$dir/dune-workspace" ] && shadow="$dir"
+    [ -e "$dir/dune-project" ] && outer="$dir"
+    next="$(dirname "$dir")"
+    [ "$next" = "$dir" ] && break
+    dir="$next"
+  done
+  if [ -n "$shadow" ]; then
+    # Outermost wins, so a dune-workspace above us cannot be overridden from here.
+    fail "dune-workspace in $shadow shadows this checkout's — dune will build $shadow instead"
+  elif [ -n "$outer" ]; then
+    # No ancestor dune-workspace, but an ancestor dune-project would take the root.
+    if [ -e "$wt_top/dune-workspace" ]; then
+      ok "worktree dune root"
+    else
+      lang="$(grep -m1 '^(lang dune ' "$wt_top/dune-project" 2>/dev/null || true)"
+      if printf '%s\n' "${lang:-(lang dune 3.18)}" >"$wt_top/dune-workspace"; then
+        fixed "worktree dune root (dune-workspace written; dune would have built $outer)"
       else
-        lang="$(grep -m1 '^(lang dune ' "$wt_top/dune-project" 2>/dev/null || true)"
-        if printf '%s\n' "${lang:-(lang dune 3.18)}" >"$wt_top/dune-workspace"; then
-          fixed "worktree dune root (dune-workspace written; dune would have built the parent checkout)"
-        else
-          fail "could not write $wt_top/dune-workspace"
-        fi
+        fail "could not write $wt_top/dune-workspace"
       fi
-      ;;
-    *) ;;             # worktree outside the repo: nothing shadows it
-  esac
+    fi
+  fi
+  # No ancestor holds either file: dune already roots at this checkout.
 fi
 
 # --- opam itself ---------------------------------------------------------

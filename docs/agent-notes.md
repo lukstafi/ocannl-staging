@@ -179,9 +179,13 @@ that they earn a lookup rather than always-loaded space.
   and the worktree is invisible to dune: targeted commands fail with `Don't know about directory
   .claude/worktrees/...`, while a bare `dune build`/`dune runtest` quietly builds and tests the
   PARENT branch. `scripts/setup-ocaml-env.sh` writes a one-line `dune-workspace` at the worktree
-  root, restoring it as the root with its own `_build`. That file is generated per worktree and
-  gitignored, never committed — being the outermost, a tracked copy at the repo root would shadow
-  every worktree's and pin them all back to the parent (the script reports `FAIL` if it finds one).
+  root, restoring it as the root with its own `_build`. The step tests the ancestor DIRECTORIES
+  rather than git topology, since a checkout can nest inside another checkout that is itself a
+  linked worktree living anywhere, and `--git-common-dir` then names the primary checkout, not the
+  one dune would root at. That file is generated per worktree and gitignored, never committed —
+  being the outermost, a tracked copy at the repo root would shadow every worktree's and pin them
+  all back to the parent (the script reports `FAIL` for a `dune-workspace` in any ancestor, which
+  it cannot override from below).
   With it in place, `--root .` and `dune promotion apply` are no longer needed from a worktree;
   `tools/promote.sh` remains the Windows path, for the CRLF stripping. Worktrees placed outside the
   repo need none of this, but see no `ocannl_config` on their ancestor path.
