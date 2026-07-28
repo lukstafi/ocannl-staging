@@ -253,6 +253,20 @@ val validate_segments : Ir.Low_level.optimized list -> Ir.Low_level.optimized li
     pulled forward to the transform seam so that an advisory transform's rejected output surfaces
     where a fallback can catch it instead of aborting the compile (gh-ocannl-519). *)
 
+val compile_advisory :
+  ?on_fallback:(exn -> unit) ->
+  (Ir.Low_level.optimized -> Ir.Low_level.optimized list) ->
+  Context.t ->
+  Ir.Assignments.comp ->
+  Ir.Indexing.unit_bindings ->
+  Context.t * Context.routine
+(** {!Context.compile} with the given [lowered_transforms], falling back to a plain
+    {!Context.compile} — the ordinary default pipeline — if the transformed compile raises anywhere,
+    including inside backend codegen ({!Ir.Low_level.validate_parallel} and the backends' own
+    preconditions run there, past the transform seam). [on_fallback] is called with the exception
+    when the fallback fires. For advisory transforms only: a failure of the default pipeline itself
+    propagates. See {!model_default} (gh-ocannl-519). *)
+
 val model_default :
   ?report:(model_choice -> unit) ->
   Context.t ->
@@ -265,10 +279,11 @@ val model_default :
     the roofline model, and the model-argmin schedule is applied — zero measurement, one backend
     compile. Advisory by construction: a candidate without model coverage is never picked over the
     default, ties go to the default, and missing envelope constants, a disabled default annotator
-    ({!Ir.Schedule.automatic_schedule_active}), or any scoring, application or validation
-    ({!validate_segments}) failure fall back to the ordinary default pipeline. Unlike {!tune},
-    nothing is executed and no cache is involved — results depend only on the computation, backend,
-    and envelope constants. *)
+    ({!Ir.Schedule.automatic_schedule_active}), or any scoring, application, validation
+    ({!validate_segments}) or compilation ({!compile_advisory}) failure fall back to the ordinary
+    default pipeline — the reported {!model_choice} then says ["default"]. Unlike {!tune}, nothing
+    is executed and no cache is involved — results depend only on the computation, backend, and
+    envelope constants. *)
 
 val set_test_bindings : Context.routine -> unit
 (** Binds representative values for timing runs: ranged static indices at [range / 2], and gh-490

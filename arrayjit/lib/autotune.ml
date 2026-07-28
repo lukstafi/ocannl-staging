@@ -2613,6 +2613,20 @@ let validate_segments (segs : LL.optimized list) : LL.optimized list =
       LL.validate_parallel o.LL.optimize_ctx.LL.placements o.LL.llc);
   segs
 
+let compile_advisory ?on_fallback lowered_transforms ctx comp bindings =
+  match Context.compile ~lowered_transforms ctx comp bindings with
+  | result -> result
+  | exception exn ->
+      (* The backstop half (gh-ocannl-519): the transforms are advisory, so ANY failure downstream
+         of the seam — not just the pre-validated checks — degrades to the ordinary default
+         pipeline. A plain [Context.compile] is exactly that pipeline (backends.ml applies
+         [Schedule.maybe_default_schedules] when no transform is given), and recompiling from the
+         caller's context after a failed compile is the same recovery [tune]'s winner replay takes.
+         If the default pipeline fails too, its exception propagates: that is a genuine error, not
+         an advisory pick gone wrong. *)
+      Option.iter on_fallback ~f:(fun f -> f exn);
+      Context.compile ctx comp bindings
+
 let model_default ?report ctx comp bindings =
   let backend = Context.backend_name ctx in
   let is_gpu = Sched.backend_is_gpu backend and is_cpu = Sched.backend_is_cpu backend in
@@ -2783,7 +2797,12 @@ let model_default ?report ctx comp bindings =
           choice := { no_selection with mc_scored = !n_scored; mc_skipped = !n_skipped };
           default_segs ()
     in
-    let result = Context.compile ~lowered_transforms:transforms ctx comp bindings in
+    let on_fallback exn =
+      logf "model_default: compiling the pick %s FAILED (%s); recompiling the default pipeline"
+        !choice.mc_label (Exn.to_string exn);
+      choice := { !choice with mc_label = "default"; mc_model_ms = None }
+    in
+    let result = compile_advisory ~on_fallback transforms ctx comp bindings in
     emit !choice;
     result
 
