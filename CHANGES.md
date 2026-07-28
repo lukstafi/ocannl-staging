@@ -189,8 +189,10 @@
   inside backend codegen, past the transform seam, so a rejected pick escaped the guard and
   killed the process (reproducibly, on Metal `mlp` workloads). Picks are now validated at the
   seam (`Autotune.validate_segments`), and the compile itself is wrapped
-  (`Autotune.compile_advisory`) so that any downstream failure recompiles with the ordinary
-  default pipeline, the reported choice degrading to `"default"`.
+  (`Autotune.compile_advisory`) so that a downstream failure of a picked schedule recompiles
+  with the ordinary default pipeline, the reported choice degrading to `"default"`. Once the
+  compile is on that pipeline there is nothing left to fall back to, so its failures propagate
+  without a duplicate attempt.
 
 ## [0.8] -- 2026-07-13
 

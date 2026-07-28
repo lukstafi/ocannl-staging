@@ -121,6 +121,26 @@ let () =
     | None -> false);
   p "the fallback routine computes the default pipeline's values" (values ctx c d);
 
+  (* --- ... and not when the caller says there is nothing to fall back to (Codex P2) --- *)
+  let _c, _d, comp = pair "nogate" in
+  let fell_back = ref None in
+  let raised =
+    try
+      ignore
+        (Autotune.compile_advisory
+           ~on_fallback:(fun exn -> fell_back := Some (Exn.to_string exn))
+           ~fallback_if:(fun () -> false)
+           annotate_mixed (Context.auto ()) comp Ir.Indexing.Empty
+          : Context.t * Context.routine);
+      None
+    with Invalid_argument msg -> Some msg
+  in
+  p "fallback_if false re-raises instead of recompiling"
+    ((match raised with
+     | Some msg -> String.is_substring msg ~substring:"all active hardware dimensions"
+     | None -> false)
+    && Option.is_none !fell_back);
+
   (* --- ... and does not fire when the transform is fine (no blanket swallowing) --- *)
   let c, d, comp = pair "clean" in
   let fell_back = ref None in

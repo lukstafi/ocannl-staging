@@ -2613,10 +2613,18 @@ let validate_segments (segs : LL.optimized list) : LL.optimized list =
       LL.validate_parallel o.LL.optimize_ctx.LL.placements o.LL.llc);
   segs
 
-let compile_advisory ?on_fallback lowered_transforms ctx comp bindings =
+let compile_advisory ?on_fallback ?fallback_if lowered_transforms ctx comp bindings =
   match Context.compile ~lowered_transforms ctx comp bindings with
   | result -> result
   | exception exn ->
+      let bt = Stdlib.Printexc.get_raw_backtrace () in
+      (* [fallback_if] is what keeps the retry from duplicating a genuine failure: a transform that
+         already degraded to the default pipeline has nothing to fall back TO, so recompiling would
+         just repeat the same failing compile (and, on a resource failure, aggravate it) before
+         raising the same exception. Such callers say [false] here and the original exception
+         propagates untouched, backtrace included. *)
+      if not (Option.value_map fallback_if ~default:true ~f:(fun f -> f ())) then
+        Stdlib.Printexc.raise_with_backtrace exn bt;
       (* The backstop half (gh-ocannl-519): the transforms are advisory, so ANY failure downstream
          of the seam — not just the pre-validated checks — degrades to the ordinary default
          pipeline. A plain [Context.compile] is exactly that pipeline (backends.ml applies
@@ -2643,6 +2651,10 @@ let model_default ?report ctx comp bindings =
     Context.compile ctx comp bindings)
   else
     let choice = ref no_selection in
+    (* Whether the segments the compile actually received came from a model pick rather than the
+       default pipeline — the condition for the compile-level fallback below to have anywhere to
+       fall back to. *)
+    let applied_pick = ref false in
     let transforms (opt : LL.optimized) : LL.optimized list =
       let n_scored = ref 0 and n_skipped = ref 0 in
       let score opts =
@@ -2790,12 +2802,14 @@ let model_default ?report ctx comp bindings =
           logf "model_default: chose %s (model %s; %d scored, %d without coverage)" label
             (match model_s with Some s -> Printf.sprintf "%.6f ms" (s *. 1e3) | None -> "n/a")
             !n_scored !n_skipped;
+          applied_pick := (match action with `Default -> false | `Whole _ | `Fiss _ -> true);
           segs
       | exception exn ->
           logf
             "model_default: winner %s FAILED to apply or validate (%s); using the default pipeline"
             label (Exn.to_string exn);
           choice := { no_selection with mc_scored = !n_scored; mc_skipped = !n_skipped };
+          applied_pick := false;
           default_segs ()
     in
     let on_fallback exn =
@@ -2803,7 +2817,13 @@ let model_default ?report ctx comp bindings =
         !choice.mc_label (Exn.to_string exn);
       choice := { !choice with mc_label = "default"; mc_model_ms = None }
     in
-    let result = compile_advisory ~on_fallback transforms ctx comp bindings in
+    (* With the model on the default pipeline (no sketch strictly improved on it, or the pick failed
+       validation above), the compile that just failed IS the fallback: retrying it would duplicate
+       an expensive failure and delay the honest error, so the exception propagates instead. *)
+    let result =
+      compile_advisory ~on_fallback ~fallback_if:(fun () -> !applied_pick) transforms ctx comp
+        bindings
+    in
     emit !choice;
     result
 

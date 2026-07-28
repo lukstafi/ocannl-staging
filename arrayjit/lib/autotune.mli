@@ -255,6 +255,7 @@ val validate_segments : Ir.Low_level.optimized list -> Ir.Low_level.optimized li
 
 val compile_advisory :
   ?on_fallback:(exn -> unit) ->
+  ?fallback_if:(unit -> bool) ->
   (Ir.Low_level.optimized -> Ir.Low_level.optimized list) ->
   Context.t ->
   Ir.Assignments.comp ->
@@ -264,8 +265,11 @@ val compile_advisory :
     {!Context.compile} — the ordinary default pipeline — if the transformed compile raises anywhere,
     including inside backend codegen ({!Ir.Low_level.validate_parallel} and the backends' own
     preconditions run there, past the transform seam). [on_fallback] is called with the exception
-    when the fallback fires. For advisory transforms only: a failure of the default pipeline itself
-    propagates. See {!model_default} (gh-ocannl-519). *)
+    when the fallback fires. [fallback_if] (default: always) is consulted first, for transforms that
+    may themselves have degraded to the default pipeline — [false] re-raises the original exception,
+    backtrace included, instead of duplicating a compile that has nothing to fall back to. For
+    advisory transforms only: a failure of the default pipeline itself propagates. See
+    {!model_default} (gh-ocannl-519). *)
 
 val model_default :
   ?report:(model_choice -> unit) ->
@@ -281,7 +285,9 @@ val model_default :
     default, ties go to the default, and missing envelope constants, a disabled default annotator
     ({!Ir.Schedule.automatic_schedule_active}), or any scoring, application, validation
     ({!validate_segments}) or compilation ({!compile_advisory}) failure fall back to the ordinary
-    default pipeline — the reported {!model_choice} then says ["default"]. Unlike {!tune}, nothing
+    default pipeline — the reported {!model_choice} then says ["default"]. Once the compile is on
+    that pipeline there is nothing left to fall back to, so its failures propagate as they would
+    from {!Context.compile}, without a duplicate attempt. Unlike {!tune}, nothing
     is executed and no cache is involved — results depend only on the computation, backend, and
     envelope constants. *)
 
