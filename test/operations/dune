@@ -1590,6 +1590,36 @@
  (action
   (diff cost_model_selection.expected cost_model_selection.actual)))
 
+; The advisory fallback of the model-picked untuned default (gh-ocannl-519). Same rule shape as
+; cost_model_selection above, and for the same reason: the backend and the model_peak_* envelope
+; overrides are pinned on the command line so the model_default leg scores on the C backends.
+
+(executable
+ (name model_default_fallback)
+ (modules model_default_fallback)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(rule
+ (target model_default_fallback.actual)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (action
+  (with-stdout-to
+   %{target}
+   (run
+    %{dep:model_default_fallback.exe}
+    "--ocannl_backend=cc"
+    "--ocannl_model_peak_flops=1e12"
+    "--ocannl_model_peak_memory_bandwidth=1e6"))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff model_default_fallback.expected model_default_fallback.actual)))
+
 (test
  (name read_before_write_flip)
  (package neural_nets_lib)
