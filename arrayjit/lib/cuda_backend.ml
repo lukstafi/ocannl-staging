@@ -1088,16 +1088,22 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                          (break 1 ^^ string "?" ^^ space ^^ v2 ^^ break 1 ^^ string ":" ^^ space
                         ^^ string "__float2bfloat16(0.0f)"))))
       | Relu_gate, Half_prec _ ->
+          (* [0.0h] is a clang extension (and valid MSL), but not CUDA C++: nvrtc rejects it with
+             "user-defined literal operator not found". Compare via [__hgt] against a bitcast zero,
+             mirroring [Satur01_gate] just below and the HIP backend. *)
           fun v1 v2 ->
             group
               (parens
-                 (group (parens (v1 ^^ string " > 0.0h"))
+                 (group
+                    (parens
+                       (string "__hgt(" ^^ v1
+                       ^^ string ", __ushort_as_half((unsigned short)0x0000U))"))
                  ^^ ifflat
                       (space ^^ string "?" ^^ space ^^ v2 ^^ space ^^ string ":" ^^ space
-                     ^^ string "0.0h")
+                      ^^ string "__ushort_as_half((unsigned short)0x0000U)")
                       (nest 2
                          (break 1 ^^ string "?" ^^ space ^^ v2 ^^ break 1 ^^ string ":" ^^ space
-                        ^^ string "0.0h"))))
+                         ^^ string "__ushort_as_half((unsigned short)0x0000U)"))))
       | Relu_gate, Single_prec _ ->
           fun v1 v2 ->
             group

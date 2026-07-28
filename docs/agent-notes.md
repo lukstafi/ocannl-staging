@@ -143,6 +143,18 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   command buffers overlap over untracked resources: back-to-back runs of the SAME routine need
   the FIFO wait, pipelined (no-sync) timing is unreliable, and `get_values`/`set_values` do FULL
   awaits by design.
+- Reduced-precision *literals* are dialect-specific and do not transpose between backends. `0.0h`
+  is a clang extension and valid MSL, but not CUDA C++ — nvrtc rejects it with "user-defined
+  literal operator not found" (gh-ocannl-518, the half `Relu_gate`). On CUDA/HIP write the zero as
+  `__ushort_as_half((unsigned short)0x0000U)` (bf16: `__ushort_as_bfloat16`), and prefer the
+  intrinsic comparisons (`__hgt`/`__hlt`) over operators: mixing a `__half`/`__nv_bfloat16` with a
+  literal of another arithmetic type is separately ambiguous under nvrtc/hiprtc, since the type's
+  implicit conversion operators make the overload sequences indistinguishable (see the bf16
+  comments in `cuda_backend.ml`/`hip_backend.ml`). Same family as the MSL `bfloat` trap below —
+  a reduced-precision literal or overload that is fine in one dialect is a hard error, or worse a
+  silent truncation, in another. Such bugs only surface with that vendor's hardware attached; the
+  executed guards are `test/operations/half_ops.ml` and `test/operations/bf16_ops.ml`, plus
+  `test/training/mixed_prec_parity.ml`.
 - MSL's math library has no `bfloat` overloads (`max`, `fma`, ...). Render bf16 arithmetic by
   promoting to `float` and casting back — `(bfloat)max(0.0f, (float)(v))`, as `FMA` already did.
   The trap is that an *untyped* literal does not fail loudly: `max(0, v)` makes an integer overload

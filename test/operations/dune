@@ -192,6 +192,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name half_ops)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules half_ops)
+ (libraries base ocannl stdio test_utils)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name precision_policy_parity)
  (package neural_nets_lib)
  (deps
