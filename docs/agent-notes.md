@@ -143,6 +143,17 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   command buffers overlap over untracked resources: back-to-back runs of the SAME routine need
   the FIFO wait, pipelined (no-sync) timing is unreliable, and `get_values`/`set_values` do FULL
   awaits by design.
+- Reduced-precision *literals* are dialect-specific and do not transpose between backends. `0.0h`
+  is a clang extension and valid MSL, but not CUDA C++ — nvrtc rejects it with "user-defined
+  literal operator not found" (gh-ocannl-518, the half `Relu_gate`). On CUDA/HIP write the zero as
+  `__ushort_as_half((unsigned short)0x0000U)` (bf16: `__ushort_as_bfloat16`), and prefer the
+  intrinsic comparisons (`__hgt`/`__hlt`) over operators: mixing a `__half`/`__nv_bfloat16` with a
+  literal of another arithmetic type is separately ambiguous under nvrtc/hiprtc, since the type's
+  implicit conversion operators make the overload sequences indistinguishable (see the bf16
+  comments in `cuda_backend.ml`/`hip_backend.ml`, guard `test/operations/bf16_ops.ml`). Such bugs
+  only surface with that vendor's hardware attached; the executed guards are
+  `test/operations/half_ops.ml` and `test/operations/bf16_ops.ml`, plus
+  `test/training/mixed_prec_parity.ml`.
 - Parallel-codegen work often lands Metal → cc → CUDA/HIP, but that is a default reflecting
   which machine is booted first and used most (the Mac Studio), not a rule — tasks can start on
   CUDA or HIP for load balancing across machines. The durable part: codegen snapshots for a
