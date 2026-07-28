@@ -282,7 +282,9 @@ autotune_calibration_file=
 # the model_peak_* overrides below), ties go to the default pipeline, and any scoring,
 # application, validation or compilation failure falls back to it — a pick rejected by
 # `Low_level.validate_parallel` (or by anything else downstream of the schedule seam) is
-# recompiled with the default pipeline instead of failing the compile.
+# recompiled with the default pipeline instead of failing the compile. Candidates whose
+# scheduled form fails that same check are excluded from the ranking, so the model chooses
+# among schedules that can actually be built.
 model_default_schedule=false
 
 # Overrides the backend's advisory peak arithmetic throughput, in FLOP/s (single precision, FMA

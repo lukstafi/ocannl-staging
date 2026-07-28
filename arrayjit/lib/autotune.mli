@@ -240,6 +240,11 @@ type model_choice = {
       (** Model evaluations that produced a score (the default pipeline included; the fissioned flow
           also scores per segment). *)
   mc_skipped : int;  (** Model evaluations without coverage, excluded from the ranking. *)
+  mc_rejected : int;
+      (** Candidates excluded from the ranking because their scheduled form fails
+          {!Ir.Low_level.validate_parallel}: the model cannot see that a schedule will not compile,
+          and rates the tensorized families best, so on a backend where those are unbuildable it
+          used to crown one and then degrade to the default (gh-ocannl-522). *)
 }
 
 val model_default_enabled : bool Lazy.t
