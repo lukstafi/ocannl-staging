@@ -64,9 +64,10 @@ Testing notes:
   then run `dune runtest test/<dir>/` and promote. Pin `OCANNL_BACKEND` for bin executables.
 - Explicit `@slow` training tests are excluded from `dune runtest`; run `dune build @slow` when
   relevant. Both regular and slow executables are compiled by `dune build @check`.
-- Training actions share the `ocannl_training_test` Dune lock, so bare `dune test` does not run
-  process-local OpenMP pools concurrently on non-macOS hosts; compilation remains parallel.
-  Preserve this lock on new regular training tests and `@slow` rules.
+- Training actions share the `ocannl_training_test` Dune lock, so they do not run their
+  process-local OpenMP pools concurrently with one another; compilation remains parallel.
+  Preserve this lock on new regular training tests and `@slow` rules. Other pool-using tests,
+  notably `test/operations/cpu_parallel`, intentionally remain unlocked as concurrency stress.
 - Keep library sources unchanged while Dune is running; edits invalidate in-flight rules and can
   repeat expensive work. For a background run, record its exact PID and exit status; do not poll
   with `pgrep -f`, which can match the waiter itself.

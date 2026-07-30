@@ -94,7 +94,7 @@ design history) that is not derivable from the code alone.
 
 **Slow training tests (the `slow` alias)**:
 - Explicit `@slow` training tests are excluded from `dune runtest`; run them only when relevant.
-- Regular and `@slow` training actions share the `ocannl_training_test` Dune lock, so bare `dune test` does not run process-local OpenMP pools concurrently on non-macOS hosts; compilation remains parallel. Preserve the lock on new regular training tests and `@slow` rules.
+- Regular and `@slow` training actions share the `ocannl_training_test` Dune lock, so they do not run their process-local OpenMP pools concurrently with one another; compilation remains parallel. Preserve the lock on new regular training tests and `@slow` rules. Other pool-using tests, notably `test/operations/cpu_parallel`, intentionally remain unlocked as concurrency stress.
 - They are still ordinary executables: `dune build @check` compiles them, so they cannot bit-rot.
 - Run them on demand with `dune build @slow` (uses their `.expected` files; `dune promote` to accept changes). Use `dune build @runtest @slow` to run the entire suite.
 - To gate a new slow test, in its `test/.../dune` replace its `(test ...)` stanza with an `(executable ...)` plus a `(rule (alias slow) ...)` that runs the exe and diffs against `<name>.expected` (see `test/training/dune` for the pattern). Wrap the rule's action in `(no-infer ...)` so the `<name>.actual` output is NOT registered as a build target — otherwise a plain `dune build` (the `@all` alias builds every file target) would run the slow exe anyway.
