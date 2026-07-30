@@ -4,8 +4,13 @@ platform: Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.43 x86_64 |
 > The HIP/ROCm leg of the gh-ocannl-476 measurement sweep, run from scratch (wiped
 > `autotune_cache`) on minix-pc: AMD Ryzen AI Max+ 395 (Strix Halo, Zen 5, 16C/32T) with the
 > Radeon 8060S iGPU (gfx1151, RDNA3.5), ROCm 7.14, **under WSL2** — the previous revision of this
-> report was recorded on native Windows at `8436e362`, so no cell here is comparable to it
-> cross-revision. 65 cells, 2 runner failures. Regenerate with
+> report was recorded on native Windows at `8436e362`, so individual cells are not comparable to it
+> cross-revision. (The *pattern* across cells still is, and is informative: see the gh-ocannl-527
+> note under per-segment attribution, where the workloads that did not regress bound the
+> environment effect.) 65 cells, 2 runner failures. torch 2.13.0+rocm7.1 (HIP 7.1.52802), tinygrad
+> 0.13.0, HIP runtime 7.14.60850. Tuned cells use the two-pass protocol (pass 1 = the search,
+> reported as `compile_s`; a fresh pass-2 process replays the cached winner for step timings).
+> Regenerate with
 > `taskset -c 0-15 benchmarks/.venv/bin/python benchmarks/orchestrate.py --tuned --materialized --precision bf16 f16 --gpu hip`
 > — the affinity wrapper is not optional here, see the next paragraph.
 >
@@ -183,10 +188,22 @@ Same segment as Metal (the first conv layer's *backward* reduction, not the forw
 even larger share (Metal: 91.0 / 82.1 / 68.8%). The census line names the mechanism outright —
 `loops[64s,28s,28s,6s] w:bias_conv1.grad!(6)`: a **fully serial** 64×28×28×6 nest, 301,056
 iterations on a single GPU thread, producing 6 output elements. Its neighbours are 2–4 orders of
-magnitude faster. This is now measured on two independent GPU backends and is the single highest-value
-target in the GPU pipeline; it sets gh-ocannl-484's priority directly. Note the default-schedule
-`hip` cells are exactly where this shows: `lenet` hip/default is 359.8 ms vs 7.2 ms materialized (50×),
-`cifar_conv` 1594 vs 68 ms (23×).
+magnitude faster. This is now measured on three independent GPU backends (Metal, CUDA, HIP) and is
+the single highest-value target in the GPU pipeline. Note the default-schedule `hip` cells are
+exactly where this shows: `lenet` hip/default is 359.8 ms vs 7.2 ms materialized (50×), `cifar_conv`
+1594 vs 68 ms (23×).
+
+**Read this section alongside gh-ocannl-527, which is probably a large part of what it measures.**
+The CUDA leg traced a 2.4× regression in this same segment to gh-ocannl-512's product-space gate on
+`max_pool2d` backward. This report's own history is a control for it: the previous revision of this
+file was recorded at `8436e362` (pre-gh-512), and comparing `ocannl/hip/default` then vs now,
+**`lenet` is 4.39× worse (82.016 → 359.769 ms) while every workload without `max_pool2d` moved only
+1.07–1.61×** (`gpt2_mini` 67.418 → 71.923, `mlp_wide` 1.809 → 2.275, `mlp_small` 0.190 → 0.306). The
+two runs also differ in OS, which is exactly what makes the non-pooling rows useful — they bound the
+environment effect, and `lenet` carries ~3–4× on top of it. So the 93–97% shares above sit on top of
+a regression, and how much of the residue is an inherent serial-reduction problem (gh-ocannl-484's
+subject) will only be clear once gh-527 is fixed and this instrument is re-run. Re-running
+`BENCH_SEG_TIMES=1` on `lenet/hip` is a cheap acceptance check for that fix.
 
 ### PyTorch ROCm is numerically broken on gfx1151 (not an OCANNL bug, not the WSL runtime swap)
 
@@ -229,7 +246,7 @@ had trained.
 
 ### Two new HIP tuning bugs
 
-- **Middle-end wedge in the tuned search** (`mlp_wide`, `cifar_conv`). The search hangs before its
+- **Middle-end wedge in the tuned search** (`mlp_wide`, `cifar_conv`) — gh-ocannl-532. The search hangs before its
   first candidate: constant ~3-thread CPU spin, **zero** `autotune_log` lines after `arm A search:`,
   and with `output_debug_files_in_build_directory=true` **zero** debug artifacts written — so it never
   reaches rendering or hiprtc, even for the serial baseline. Reproduced 3× (>65 min, >8 min bounded,
@@ -237,7 +254,7 @@ had trained.
   fine (2.3 ms/step); `mlp_wide` cc/tuned searches normally. The native-Windows report has
   `mlp_wide hip/tuned` completing at `8436e362` (compile_s 111.78 s), so this is either a regression
   since the gh-502 seeding wave or WSL-specific. Not bisected.
-- **HSA scratch abort escapes as a fatal error** (`gpt2_mini` hip/tuned). A candidate requests
+- **HSA scratch abort escapes as a fatal error** (`gpt2_mini` hip/tuned) — gh-ocannl-533. A candidate requests
   `private_seg_size=163856` per work-item; the runtime aborts the queue with
   `[UpdateScratch] scratch_size overflow!` / `HSA_STATUS_ERROR_INVALID_ARGUMENT` on kernel
   `cross_entropy_loss_fwd`, and the failure propagates out of `hip_stream_synchronize` and kills the
@@ -291,7 +308,8 @@ comparison here.
 ### Still open
 
 - The tensor-core measurement this issue exists for **has not been made on HIP** and cannot be until
-  the mixed-precision graph is tunable (item 2 above). That gap should probably be an issue of its own.
+  the mixed-precision graph is tunable (item 2 above) — gh-ocannl-529, which the CUDA leg filed and
+  which is the *sole* blocker for this column since HIP has no tf32 escape hatch.
 - `SKIP_CELLS` audit: the stale `cifar_conv metal/tuned` entry was not re-tested here (no Metal
   hardware); the new `mlp_wide hip/tuned` entry is freshly justified above.
 - The middle-end wedge is unbisected; a `git bisect` against `8436e362` on native Windows vs WSL
