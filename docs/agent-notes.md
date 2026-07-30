@@ -121,6 +121,26 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   occurrence-level; they coincide only at first touch on the linear path.
 - Big-reduction producers are forced `Never_virtual` by `virtualize_max_inline_reduction`
   (default 16) — remember it when a structural expectation assumes inlining.
+- A GPU schedule must cover EVERY materialized-writing nest of the routine, not only the one the
+  pipeline builds. Launch dimensions are kernel-global, so `Low_level.validate_parallel` rejects any
+  companion write (a bias/relu tail; the elementwise statements an aligned-merged fission segment
+  carries) not nested under loops covering every active `(kind, slot)` pair — and on GPU there is no
+  all-serial fallback, so the whole candidate fails to compile. Do not relax the rule: an uncovered
+  dimension means every hardware index executes that write. Annotate instead, from
+  `Schedule.aligned_chains` — the default annotators' cross-nest analysis exposed as data (which
+  loops may carry geometry, already trimmed so that chain position *k* denotes the same thread
+  coordinate in every linked nest), which lets a pipeline supply its own per-position geometry while
+  alignment stays `schedule.ml`'s rule. A pipeline that instead leaves companions bare and counts on
+  `Fuse_epilogue` absorbing them has NO surviving form when the fusion declines; that cascade
+  (gh-ocannl-521) had every GPU backend seeding tensorized candidates in bulk and timing none of
+  them. Residual, shared with the shipped zeroing geometry: a tensorized nest's workgroup slot is the
+  opaque `Tensorize` lane, so a per-lane companion reads cells other lanes of the same simdgroup
+  produced — safe only because the threadgroup is exactly one simd width; a cross-nest simdgroup
+  barrier is the formal fix.
+- "Seeded" is not "timed". An autotune family can be enumerated in bulk and rejected in bulk at
+  candidate compile, and a count of proposals then reads as coverage it does not have — assert on
+  the *timed* counter (`report.mma_timed`, `fiss_sketch_timed`, `split_reduce_timed`), and follow it
+  with an executed value check, since a candidate that compiles is not yet one that computes.
 
 ## Backends
 
