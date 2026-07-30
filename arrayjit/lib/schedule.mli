@@ -403,6 +403,30 @@ val schedule_legality : Low_level.optimized -> schedule -> (optop * op_verdict) 
     checking never mutates the argument). Stops after a proven-illegal op or a failing application;
     an op that fails to apply reports [Op_illegal] with the exception. *)
 
+val aligned_chains :
+  ?expanded_zeros:Tn.t list ->
+  Low_level.optimized ->
+  (Low_level.t * (Indexing.symbol * int) list) list option
+(** The cross-nest analysis behind {!default_gpu} / {!default_cpu}, as data: per top-level loop nest
+    (paired with the nest statement itself), the outermost loops that may carry hardware geometry —
+    already trimmed to the common aligned prefix each dependency component admits, so chain position
+    [k] of two linked nests denotes the same hardware thread coordinate and the two extents at
+    position [k] are equal. [None] when the analysis bails, i.e. when the kernel is not safely
+    parallelizable at all.
+
+    The presets consume this to emit their own Grid/Workgroup-per-nest geometry. A sketch pipeline
+    (autotune) consumes it to cover the nests it does {e not} build — a tensorized accumulation nest
+    binds two [Grid] slots and a [Workgroup] lane, geometry no preset emits, and its companion nests
+    must be annotated with the matching slot structure or [Low_level.validate_parallel] rejects their
+    writes (gh-ocannl-521). Callers supplying their own geometry must keep the positional pairing:
+    the alignment argument is exactly that thread [(c0, c1, ...)] covers the same index slice in
+    every linked nest.
+
+    [expanded_zeros] names nodes whose whole-node [Zero_out] the caller's schedule will turn into a
+    per-element nest ({!Expand_zero}) carrying the caller's geometry. Such a statement is skipped for
+    the query instead of bailing it as a bare materialized write — the write it stands for is not
+    bare by the time the code is validated. *)
+
 val default_gpu :
   ?block_size:int ->
   ?min_parallel:int ->

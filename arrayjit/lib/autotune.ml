@@ -15,6 +15,15 @@ type report = {
   fiss_sketch_timed : int;
   split_reduce_candidates : int;
   split_reduce_timed : int;
+  mma_candidates : int;
+      (** Candidates whose label promises a tensorized pipeline ([spec_expects_mma]) that the search
+          put through candidate compile: whole-routine and per-fission-segment seeds, the
+          cross-segment recombination composite, and beam-expansion candidates. *)
+  mma_timed : int;
+      (** How many of [mma_candidates] survived candidate compile far enough to be TIMED. A search
+          with [mma_candidates > 0] and [mma_timed = 0] never measured a tensorized pipeline at all
+          — the state gh-ocannl-521 records for every GPU backend. Dedup'd candidates do not count:
+          a duplicate digest means an identical candidate was already timed. *)
   model_scored : int;
   model_pruned : int;
   fissioned : bool;
@@ -862,21 +871,221 @@ let zero_geometry (site : matmul_site) ~(mk_zops : zi:Idx.symbol -> zj:Idx.symbo
     in
     ez :: mk_zops ~zi ~zj)
 
+(* The would-be epilogue tail's loop symbols: the first real statement after the last statement
+   writing [target] — the nest [Sched.Fuse_epilogue] consumes (its perfect-Serial-nest and
+   sole-consumer vetting happens in the op itself). Used by the fused twins to leave that nest
+   unannotated (fuse-before-annotate, gh-ocannl-501): [sketch_schedule] appends the fusion op last,
+   by which point an annotated tail nest — [Fuse_epilogue] requires a perfect Serial tail — would be
+   rejected. The relocated tail write lands under the accumulation nest's own geometry instead, so
+   coverage is preserved without the dropped annotation. *)
+let epilogue_tail_loop_syms ~(target : Ir.Tnode.t) (opt : LL.optimized) : Idx.symbol list =
+  let stmts =
+    List.filter (LL.flat_lines [ opt.LL.llc ]) ~f:(function
+      | LL.Noop | LL.Comment _ -> false
+      | _ -> true)
+  in
+  let rec writes_target = function
+    | LL.Set { tn; _ } | LL.Zero_out tn | LL.Set_dynamic { tn; _ } | LL.Set_from_vec { tn; _ } ->
+        Ir.Tnode.equal tn target
+    | LL.Tile_mma { d = tn, _; _ } -> Ir.Tnode.equal tn target
+    | LL.Seq (a, b) -> writes_target a || writes_target b
+    | LL.For_loop { body; _ } | LL.If { body; _ } -> writes_target body
+    | _ -> false
+  in
+  let rec loop_syms acc = function
+    | LL.For_loop { index; body; _ } -> loop_syms (index :: acc) body
+    | LL.Seq (a, b) -> loop_syms (loop_syms acc a) b
+    | LL.If { body; _ } -> loop_syms acc body
+    | _ -> acc
+  in
+  match List.filter_mapi stmts ~f:(fun i s -> Option.some_if (writes_target s) i) |> List.last with
+  | None -> []
+  | Some r -> ( match List.nth stmts (r + 1) with Some tail -> loop_syms [] tail | None -> [])
+
+let rec nest_loop_syms acc (llc : LL.t) =
+  match llc with
+  | LL.For_loop { index; body; _ } -> nest_loop_syms (index :: acc) body
+  | LL.Seq (a, b) -> nest_loop_syms (nest_loop_syms acc a) b
+  | LL.If { body; _ } -> nest_loop_syms acc body
+  | _ -> acc
+
+(* Companion geometry for the GPU matmul sketches (gh-ocannl-521).
+
+   A GPU sketch builds hardware geometry for the accumulation nest alone. Launch dimensions are
+   global to the kernel, so every OTHER materialized-writing nest in the same routine — the bias/relu
+   tail of a classifier head, the elementwise companions an aligned-merged fission segment carries —
+   must be nested under loops covering the same active slots, or [Low_level.validate_parallel]
+   rejects it and the whole candidate fails to compile. The GPU seeds used to leave those nests bare
+   and depend on [Sched.Fuse_epilogue] absorbing the companion into the accumulation nest; when the
+   fusion declines (a guarded reduction output, a whole-K [Tile_mma] accumulator), the seed had no
+   surviving form at all — the cascade that left every GPU backend with tensorized candidates seeded
+   in bulk and none ever timed.
+
+   The precedent is [conv_aligned_grid], which reuses the default CPU preset's aligned cross-nest
+   analysis rather than re-proving alignment. The same analysis extends to workgroup geometry: it is
+   {!Sched.aligned_chains} that decides WHICH loops may be annotated and that chain position [k]
+   means the same thread coordinate in every linked nest; only the geometry per position is the
+   sketch's own, which is what a preset cannot supply for a tensorized nest (two [Grid] slots plus a
+   [Workgroup] lane). Emitting a positionally identical geometry on each companion nest therefore
+   preserves the alignment the analysis proved, and covers the same slots the site's nest binds.
+
+   [site_syms] is the accumulation nest's chain, [annotate pos sym] the ops for chain position [pos]
+   of a companion, [skip] the loop symbols of a nest to leave alone (the fused twins' epilogue tail,
+   which the fusion relocates under the accumulation nest's geometry — annotating it would make
+   [Fuse_epilogue] reject the candidate for the wrong reason), and [expanded_zeros] the nodes whose
+   whole-node [Zero_out] the caller expands with the same geometry.
+
+   [None] when the analysis bails, when the site's own chain was trimmed below [site_syms] (the nests
+   could not be aligned at this arity — a companion annotated anyway would read cells another thread
+   wrote, with no intra-kernel synchronization to order them), or when a companion's chain does not
+   match the site's in arity and extents. A [None] must fail the candidate rather than fall back to a
+   bare companion: on GPU there is no all-serial fallback.
+
+   Residual, shared with the zeroing geometry this reuses: a tensorized nest's workgroup slot is the
+   [Tensorize] lane, whose per-lane element ownership is architecture-opaque, so a per-lane companion
+   reads cells other lanes of the same simdgroup produced. The threadgroup is exactly one simd width
+   here (a single [Workgroup] slot of extent [sk_simd]), which is what makes that safe in practice; a
+   cross-nest simdgroup barrier would be the formal fix. *)
+let companion_geometry ~(site_syms : (Idx.symbol * int) list) ~(skip : Idx.symbol list)
+    ~(expanded_zeros : Ir.Tnode.t list) ~(annotate : int -> Idx.symbol -> Sched.schedule)
+    (opt : LL.optimized) : (Sched.schedule, string) Result.t =
+  let plc = opt.LL.optimize_ctx.LL.placements in
+  let rec writes_materialized (llc : LL.t) =
+    match llc with
+    | LL.Set { tn; _ } | LL.Set_dynamic { tn; _ } | LL.Set_from_vec { tn; _ } | LL.Zero_out tn
+    | LL.Tile_mma { d = tn, _; _ } ->
+        Ir.Tnode.Placements.is_materialized_peek plc tn
+    | LL.Seq (a, b) -> writes_materialized a || writes_materialized b
+    | LL.For_loop { body; _ } | LL.If { body; _ } -> writes_materialized body
+    | _ -> false
+  in
+  let mentions syms stmt =
+    List.exists (nest_loop_syms [] stmt) ~f:(fun s -> List.mem syms s ~equal:Idx.equal_symbol)
+  in
+  let site_sym_list = List.map site_syms ~f:fst in
+  (* Only nests that write a MATERIALIZED node need covering — [validate_parallel]'s rule is about
+     shared memory, and routine-local scratch is per-thread by construction. Restricting the demand
+     this way also keeps the query out of the way of the pipelines it never needed to constrain: a
+     site with nothing to cover neither consults the analysis nor can be failed by it. *)
+  let needs =
+    List.filter (LL.flat_lines [ opt.LL.llc ]) ~f:(fun stmt ->
+        match stmt with
+        | LL.Noop | LL.Comment _ -> false
+        | LL.Zero_out tn when List.exists expanded_zeros ~f:(Ir.Tnode.equal tn) -> false
+        | _ ->
+            writes_materialized stmt
+            && (not (mentions site_sym_list stmt))
+            && not (mentions skip stmt))
+  in
+  if List.is_empty needs then Ok []
+  else
+    let shape cs = String.concat ~sep:"x" (List.map cs ~f:(fun (_, e) -> Int.to_string e)) in
+    let same_shape cs =
+      List.length cs = List.length site_syms
+      && List.for_all2_exn cs site_syms ~f:(fun (_, e) (_, e') -> e = e')
+    in
+    let written stmt =
+      let acc = ref [] in
+      let rec go (llc : LL.t) =
+        match llc with
+        | LL.Set { tn; _ } | LL.Set_dynamic { tn; _ } | LL.Set_from_vec { tn; _ } | LL.Zero_out tn
+        | LL.Tile_mma { d = tn, _; _ } ->
+            if Ir.Tnode.Placements.is_materialized_peek plc tn then
+              acc := Ir.Tnode.debug_name tn :: !acc
+        | LL.Seq (a, b) ->
+            go a;
+            go b
+        | LL.For_loop { body; _ } | LL.If { body; _ } -> go body
+        | _ -> ()
+      in
+      go stmt;
+      String.concat ~sep:"," (List.dedup_and_sort ~compare:String.compare !acc)
+    in
+    match Sched.aligned_chains ~expanded_zeros opt with
+    | None ->
+        Error
+          (Printf.sprintf
+             "the cross-nest race analysis bails on this routine, so the %d companion nest(s) (%s) \
+              cannot be given aligned geometry"
+             (List.length needs)
+             (String.concat ~sep:"; " (List.map needs ~f:written)))
+    | Some chains ->
+        (* The site's own nest must keep the analysis' full chain: a trimmed one means the nests
+           could not be aligned at this arity, and a companion annotated anyway would read cells
+           another thread wrote, with no intra-kernel synchronization to order them. *)
+        let own_ok =
+          List.exists chains ~f:(fun (_, cs) ->
+              List.equal (fun (a, _) (b, _) -> Idx.equal_symbol a b) cs site_syms && same_shape cs)
+        in
+        (* Loop symbols are unique per loop construct, so a nest is identified by its chain's
+           outermost symbol occurring among the statement's loops. *)
+        let chain_of stmt =
+          let syms = nest_loop_syms [] stmt in
+          List.find_map chains ~f:(fun (_, cs) ->
+              match cs with
+              | (s, _) :: _ when List.mem syms s ~equal:Idx.equal_symbol -> Some cs
+              | _ -> None)
+        in
+        if not own_ok then
+          Error
+            (Printf.sprintf
+               "the accumulation nest's aligned chain was trimmed below its %s geometry, so its \
+                companions cannot share it"
+               (shape site_syms))
+        else
+          List.fold_until needs ~init:[]
+            ~f:(fun acc stmt ->
+              match chain_of stmt with
+              | Some cs when same_shape cs ->
+                  Continue (acc @ List.concat (List.mapi cs ~f:(fun pos (s, _) -> annotate pos s)))
+              | Some cs ->
+                  Stop
+                    (Error
+                       (Printf.sprintf
+                          "companion nest writing %s has aligned chain %s, the accumulation nest %s"
+                          (written stmt) (shape cs) (shape site_syms)))
+              | None ->
+                  Stop
+                    (Error
+                       (Printf.sprintf
+                          "companion nest writing %s has no aligned parallel chain" (written stmt))))
+            ~finish:(fun acc -> Ok acc)
+
+(* The [(i, j)] chain the GPU matmul sketches annotate, as [companion_geometry] wants it: the
+   accumulation nest's own outer loops, which are exactly what {!Sched.aligned_chains} reports for
+   that nest when the site is parallelizable at full arity. *)
+let matmul_site_chain (site : matmul_site) = [ (site.m_i, site.m_ni); (site.m_j, site.m_nj) ]
+
 (* The register-blocktiled GPU matmul (schedule_register_matmul.ml): each output dimension split
    twice (block tile -> Grid, register tile -> Workgroup), register loops sunk innermost, operands
    staged through workgroup-shared tiles at the k-block loop, output privatized, register loops
    materially unrolled. The zeroing nest gets the same geometry (barriers need slot-uniform
-   workgroup extents). *)
-let gpu_sketch_schedule (site : matmul_site)
-    { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_tm = tm; sk_tn = tn; _ } : Sched.schedule =
-  let zops =
-    zero_geometry site ~mk_zops:(fun ~zi ~zj ->
-        let sp_zi, _, zi_i = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
-        let sp_zi2, _, _ = Sched.split ~axis:zi_i ~factor:tm ~outer:LL.Workgroup ~inner:LL.Serial in
-        let sp_zj, _, zj_i = Sched.split ~axis:zj ~factor:bn ~outer:LL.Grid ~inner:LL.Serial in
-        let sp_zj2, _, _ = Sched.split ~axis:zj_i ~factor:tn ~outer:LL.Workgroup ~inner:LL.Serial in
-        [ sp_zi; sp_zi2; sp_zj; sp_zj2 ])
+   workgroup extents), and companion nests the matching per-position split pair
+   ([companion_geometry], gh-ocannl-521). *)
+let gpu_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
+    { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_tm = tm; sk_tn = tn; sk_epilogue; _ } : Sched.schedule =
+  (* One geometry description drives the accumulation nest, the expanded zeroing nest and the
+     companion nests: per chain position, the block split (Grid) and the register split (Workgroup),
+     which is what makes their slots and workgroup extents agree by construction. *)
+  let annotate pos sym =
+    let blk, reg = if pos = 0 then (bm, tm) else (bn, tn) in
+    let sp, _, inner = Sched.split ~axis:sym ~factor:blk ~outer:LL.Grid ~inner:LL.Serial in
+    let sp2, _, _ = Sched.split ~axis:inner ~factor:reg ~outer:LL.Workgroup ~inner:LL.Serial in
+    [ sp; sp2 ]
   in
+  let cops =
+    match
+      companion_geometry ~site_syms:(matmul_site_chain site)
+        ~skip:(if sk_epilogue then epilogue_tail_loop_syms ~target:site.m_d opt else [])
+        ~expanded_zeros:(if site.m_zeroed then [ site.m_d ] else [])
+        ~annotate opt
+    with
+    | Ok ops -> ops
+    | Error why ->
+        invalid_arg ("Autotune sketch: GPU matmul companion coverage (gh-521): " ^ why)
+  in
+  let zops = zero_geometry site ~mk_zops:(fun ~zi ~zj -> annotate 0 zi @ annotate 1 zj) in
+  let zops = cops @ zops in
   let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
   let sp_i2, i_w, i_t = Sched.split ~axis:i_i ~factor:tm ~outer:LL.Workgroup ~inner:LL.Serial in
   let sp_j, j_o, j_i = Sched.split ~axis:site.m_j ~factor:bn ~outer:LL.Grid ~inner:LL.Serial in
@@ -963,15 +1172,36 @@ let cpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = b
    geometry, with an inner Workgroup loop of extent [sk_simd] covering the lane slot
    (barrier-strength uniformity: every workgroup extent must equal the lane width once a [Tile_mma]
    is present) — the seeds constrain [sk_bn = sk_simd] so the zeroing's grid blocks align with
-   [j]'s. *)
-let gpu_mma_sketch_schedule (site : matmul_site)
-    { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_simd = w; _ } : Sched.schedule =
-  let zops =
-    zero_geometry site ~mk_zops:(fun ~zi ~zj ->
-        let sp_zi, _, _ = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
-        let sp_zj, _, _ = Sched.split ~axis:zj ~factor:w ~outer:LL.Grid ~inner:LL.Workgroup in
-        [ sp_zi; sp_zj ])
+   [j]'s. Companion nests (a bias/relu tail; the elementwise statements an aligned-merged fission
+   segment carries) get the same geometry, which is what lets an UNFUSED tensorized candidate compile
+   at all (gh-ocannl-521): before, only the [Fuse_epilogue] twin could survive a companion, and when
+   the fusion declined the seed had no surviving form. *)
+let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
+    { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_simd = w; sk_epilogue; _ } : Sched.schedule =
+  (* Position 1 splits at the lane width, not at [bn]: the inner loop IS the workgroup slot the
+     [Tile_mma]'s lane occupies, and a barrier-carrying kernel requires equal extents at a slot. The
+     seeds constrain [sk_bn = sk_simd], so this is also the accumulation nest's column block. *)
+  let annotate pos sym =
+    if pos = 0 then
+      let sp, _, _ = Sched.split ~axis:sym ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+      [ sp ]
+    else
+      let sp, _, _ = Sched.split ~axis:sym ~factor:w ~outer:LL.Grid ~inner:LL.Workgroup in
+      [ sp ]
   in
+  let cops =
+    match
+      companion_geometry ~site_syms:(matmul_site_chain site)
+        ~skip:(if sk_epilogue then epilogue_tail_loop_syms ~target:site.m_d opt else [])
+        ~expanded_zeros:(if site.m_zeroed then [ site.m_d ] else [])
+        ~annotate opt
+    with
+    | Ok ops -> ops
+    | Error why ->
+        invalid_arg ("Autotune sketch: tensorized GPU matmul companion coverage (gh-521): " ^ why)
+  in
+  let zops = zero_geometry site ~mk_zops:(fun ~zi ~zj -> annotate 0 zi @ annotate 1 zj) in
+  let zops = cops @ zops in
   let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
   let sp_j, j_o, j_i = Sched.split ~axis:site.m_j ~factor:bn ~outer:LL.Grid ~inner:LL.Serial in
   if bk = 0 then
@@ -1149,37 +1379,10 @@ let conv_real_stmts (site : conv_site) (opt : LL.optimized) : LL.t list =
     | LL.Zero_out tn -> not (Ir.Tnode.equal tn site.c_d)
     | _ -> true)
 
-(* The would-be epilogue tail's loop symbols: the first real statement after the last statement
-   writing the conv output — the nest [Sched.Fuse_epilogue] consumes (its perfect-Serial-nest and
-   sole-consumer vetting happens in the op itself). Used by the fused twins on aligned-merged
-   segments to omit the preset's [Retype] on that nest (fuse-before-annotate, gh-ocannl-501):
-   [sketch_schedule] appends the fusion op last, by which point a whole-segment preset would have
-   Grid-retyped the tail nest and [Fuse_epilogue] — which requires a perfect Serial tail — would
-   reject it. The relocated tail write lands under the conv nest's own Grid geometry instead, so
-   [validate_parallel]'s coverage is preserved without the dropped [Retype]. *)
+(* The conv output's epilogue tail (see [epilogue_tail_loop_syms]): the fused twins on aligned-merged
+   segments omit the preset's [Retype] on that nest (fuse-before-annotate, gh-ocannl-501). *)
 let conv_tail_loop_syms (site : conv_site) (opt : LL.optimized) : Idx.symbol list =
-  let stmts =
-    List.filter (LL.flat_lines [ opt.LL.llc ]) ~f:(function
-      | LL.Noop | LL.Comment _ -> false
-      | _ -> true)
-  in
-  let rec writes_d = function
-    | LL.Set { tn; _ } | LL.Zero_out tn | LL.Set_dynamic { tn; _ } | LL.Set_from_vec { tn; _ } ->
-        Ir.Tnode.equal tn site.c_d
-    | LL.Tile_mma { d = tn, _; _ } -> Ir.Tnode.equal tn site.c_d
-    | LL.Seq (a, b) -> writes_d a || writes_d b
-    | LL.For_loop { body; _ } | LL.If { body; _ } -> writes_d body
-    | _ -> false
-  in
-  let rec loop_syms acc = function
-    | LL.For_loop { index; body; _ } -> loop_syms (index :: acc) body
-    | LL.Seq (a, b) -> loop_syms (loop_syms acc a) b
-    | LL.If { body; _ } -> loop_syms acc body
-    | _ -> acc
-  in
-  match List.filter_mapi stmts ~f:(fun i s -> Option.some_if (writes_d s) i) |> List.last with
-  | None -> []
-  | Some r -> ( match List.nth stmts (r + 1) with Some tail -> loop_syms [] tail | None -> [])
+  epilogue_tail_loop_syms ~target:site.c_d opt
 
 (* Whole-segment Grid alignment for the conv pipeline on merged segments (gh-ocannl-493): the
    pipeline's own [Retype] covers only the conv nest, so on an aligned-merged segment (lenet's
@@ -1384,10 +1587,10 @@ let sketch_schedule ~p (opt : LL.optimized) : Sched.schedule =
       | Some site ->
           let sched =
             if p.sk_mma then
-              if p.sk_gpu then gpu_mma_sketch_schedule site p
+              if p.sk_gpu then gpu_mma_sketch_schedule ~opt site p
               else if p.sk_bk > 0 then cpu_mma_pack_sketch_schedule site p
               else cpu_mma_sketch_schedule site p
-            else if p.sk_gpu then gpu_sketch_schedule site p
+            else if p.sk_gpu then gpu_sketch_schedule ~opt site p
             else cpu_sketch_schedule site p
           in
           (sched, site.m_d)
@@ -3110,6 +3313,8 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
                   fiss_sketch_timed = 0;
                   split_reduce_candidates = 0;
                   split_reduce_timed = 0;
+                  mma_candidates = 0;
+                  mma_timed = 0;
                   model_scored = 0;
                   model_pruned = 0;
                   fissioned = is_fissioned c.form;
@@ -3151,7 +3356,16 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
         }
       in
       let n_timed = ref 1 and n_failed = ref 0 in
+      (* gh-ocannl-521: tensorized candidates are counted where they are TIMED, not where they are
+         enumerated — a family can be seeded in bulk and rejected in bulk at candidate compile, and
+         the enumerated count alone reads as coverage it does not have. Both counters are taken HERE
+         rather than off [seed_specs], so they cover the same population by construction: the
+         cross-segment recombination composite and the beam-expansion candidates also reach
+         [try_spec] without appearing in the seed list, and counting only seeds in the denominator
+         would let [mma_timed] exceed [mma_candidates] on a multi-segment routine. *)
+      let n_mma_proposed = ref 0 and n_mma_timed = ref 0 in
       let try_spec spec =
+        if spec_expects_mma spec then Int.incr n_mma_proposed;
         match compile_spec spec with
         | Error msg ->
             Int.incr n_failed;
@@ -3166,6 +3380,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
               match time_routine ~repeats c.cctx c.routine with
               | ms ->
                   Int.incr n_timed;
+                  if spec_expects_mma spec then Int.incr n_mma_timed;
                   logf "%s: %.4f ms (digest %s)" (spec_label spec) ms (dshort c.digest_after);
                   emit_calibration ~backend ~limits ~label:(spec_label spec) ~digest:c.digest_after
                     ~measured_ms:ms c.all_opts;
@@ -3448,6 +3663,8 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
           fiss_sketch_timed = !n_fiss_sketch_timed;
           split_reduce_candidates = List.length sr_specs;
           split_reduce_timed = !n_sr_timed;
+          mma_candidates = !n_mma_proposed;
+          mma_timed = !n_mma_timed;
           model_scored = !n_model_scored;
           model_pruned = !n_model_pruned;
           fissioned = is_fissioned best_c.form;

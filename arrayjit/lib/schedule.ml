@@ -4181,6 +4181,48 @@ let chain_size chain =
    (GPU) or a task fan-out (CPU). *)
 let max_parallel_size chains = List.fold chains ~init:0 ~f:(fun m chain -> max m (chain_size chain))
 
+(* The default annotators' cross-nest analysis, exposed as data instead of as a preset schedule
+   (gh-ocannl-521). A sketch pipeline that annotates one nest by construction needs the SAME facts to
+   cover the routine's other nests — which nests exist, and which of their outermost loops may carry
+   hardware geometry aligned with the site's — but not the presets' choice of geometry, which is
+   Grid/Workgroup-per-nest and cannot express a tensorized nest's slot structure. Returning the
+   trimmed chains lets the caller supply its own geometry per chain position while the alignment
+   (positional thread identity across linked nests, equal extents within a dependency component)
+   stays this module's rule. *)
+let aligned_chains ?(expanded_zeros = []) (opt : Low_level.optimized) :
+    (Low_level.t * (Indexing.symbol * int) list) list option =
+  (* A whole-node [Zero_out] is a bare materialized write, which the analysis rejects outright — but
+     a caller that pairs this query with {!Expand_zero} turns it into a per-element nest carrying the
+     caller's own geometry before the code is validated, so it is not the bare write the rule is
+     about. Drop those statements for the query; the resulting nest writes the whole node under the
+     same geometry as the accumulation nest that overwrites it, hence is aligned by construction. *)
+  let opt =
+    if List.is_empty expanded_zeros then opt
+    else
+      let rec drop (llc : Low_level.t) =
+        match llc with
+        | Low_level.Zero_out tn when List.exists expanded_zeros ~f:(Tn.equal tn) -> Low_level.Noop
+        | Low_level.Seq (a, b) -> Low_level.Seq (drop a, drop b)
+        | _ -> llc
+      in
+      { opt with Low_level.llc = drop opt.Low_level.llc }
+  in
+  match
+    let chains = analyze_parallel_chains opt in
+    crosscheck_scratch_containment opt chains;
+    chains
+  with
+  (* Only [Bail] — the analysis declining. A [legality_crosscheck] divergence must stay loud. *)
+  | exception Bail -> None
+  | chains ->
+      let nests, _bare = split_nests opt.optimize_ctx.placements opt.llc in
+      Some
+        (List.map2_exn nests chains ~f:(fun n chain ->
+             ( n.n_loops,
+               List.filter_map chain ~f:(function
+                 | Low_level.For_loop fc -> Some (fc.index, fc.to_ + 1)
+                 | _ -> None) )))
+
 let default_gpu ?block_size ?min_parallel ?(limits = Backend_intf.no_hardware_limits)
     (opt : Low_level.optimized) : schedule =
   let open Low_level in
