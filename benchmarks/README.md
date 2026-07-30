@@ -83,15 +83,22 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   `results/report.md`. Flags: `--workloads mlp_small ...`, `--tuned`, `--materialized`,
   `--nojit` (tinygrad nojit), `--torch-compile` (pytorch compiled variant), `--beam N`
   (tinygrad BEAM=N variant; wipe tinygrad's kernel cache for from-scratch search costs),
-  `--only ocannl pytorch tinygrad`, `--skip-build`,
+  `--only ocannl pytorch tinygrad`, `--skip-build`, `--no-skip-cells` (run the `SKIP_CELLS`
+  entries too — each was observed pathological on a single machine/backend/OS, so use this to
+  retest whether an entry still applies in your environment),
   `--gpu metal|cuda|hip|none` (the GPU column of the matrix — OCANNL backend, PyTorch device,
   tinygrad device together; defaults to metal on macOS and cuda elsewhere, `none` runs a
   CPU-only matrix). With `--gpu hip`, the PyTorch/tinygrad GPU cells run only on Linux (ROCm
   PyTorch presents HIP as its `cuda` device, tinygrad as `AMD`); on Windows neither framework
   reaches an AMD GPU, so OCANNL alone populates the GPU column while the CPU parity
-  reference still runs. See [example-report.md](example-report.md) (macOS/Metal),
+  reference still runs. **Under WSL** both frameworks do reach an AMD GPU, with two caveats:
+  there is no `/dev/kfd`, so tinygrad's `AMD` device cannot open and orchestrate falls back to
+  its `HIP` device automatically; and torch's bundled `libhsa-runtime64.so` (the KFD build) must
+  be replaced with `/opt/rocm/lib/libhsa-runtime64.so.1.21.0`, with
+  `/opt/rocm/lib/rocm_sysdeps/lib` on `LD_LIBRARY_PATH`. See
+  [example-report.md](example-report.md) (macOS/Metal),
   [example-report-cuda.md](example-report-cuda.md) (Linux/CUDA),
-  [report-hip.md](report-hip.md) (Windows/HIP on gfx1151, `--only ocannl pytorch`) and
+  [report-hip.md](report-hip.md) (WSL2/HIP on gfx1151, all three frameworks) and
   [report-cifar-cuda.md](report-cifar-cuda.md) (Linux/CUDA, the cifar-scale conv baseline
   for gh-ocannl-500/502 with a per-layer breakdown) for checked-in example output
   (`results/` itself is gitignored).

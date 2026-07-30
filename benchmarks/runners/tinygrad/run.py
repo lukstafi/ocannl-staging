@@ -18,7 +18,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--fixture", required=True)
 # AMD is tinygrad's Linux ROCm device; CL (OpenCL) reaches AMD GPUs on Windows
 # (orchestrate --gpu hip maps to AMD on Linux and CL elsewhere).
-ap.add_argument("--device", default="CPU", choices=["CPU", "METAL", "CUDA", "AMD", "CL"])
+ap.add_argument("--device", default="CPU", choices=["CPU", "METAL", "CUDA", "AMD", "CL", "HIP"])
 ap.add_argument("--jit", type=int, default=1)
 ap.add_argument("--beam", type=int, default=0, help="BEAM search width (0 = off); implies --jit")
 args = ap.parse_args()
