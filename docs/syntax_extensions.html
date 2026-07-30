@@ -1569,18 +1569,15 @@ not per-axis indices.</li>
 <li><strong>Only numeric literals auto-lift to tensors in
 <code>%op</code>.</strong> A <code>let</code>-bound float needs explicit
 embedding: <code>r *. !.step</code>, not <code>r *. step</code>.</li>
-<li><strong>Inline-declaration initializers resolve at the unit
-parameter.</strong> In
-<code>let%op f x = ... { w = kaiming normal1 () } ...</code>, the lifted
-binding for <code>w</code> lands at the enclosing unit parameter
-<code>()</code>; with no unit parameter in scope the binding lands
-outside any <code>open TDSL.O</code> and identifiers like
-<code>normal1</code> fail with “Unbound value”. Write
-<code>let%op mk_f () x = ...</code> and apply <code>mk_f ()</code>. A
-labeled argument inside the initializer
-(<code>kaiming ~scale_sq:2.0 normal1 ()</code>) breaks the lifting the
-same way — bind a specialized helper outside <code>%op</code>
-instead.</li>
+<li><strong>Inline declarations without a unit parameter are
+shared.</strong> In
+<code>let%op f x = ... { w = kaiming normal1 () } ...</code>,
+<code>w</code> is created once when <code>f</code> is defined and shared
+by every application of <code>f</code>. To create a fresh parameter for
+each model instance, make the construction point explicit with
+<code>let%op mk_f () x = ...</code> and apply <code>mk_f ()</code> once
+per instance. Initializers may use labeled arguments, for example
+<code>kaiming ~scale_sq:2.0 normal1 ()</code>.</li>
 </ul>
 <h2 id="further-features-of-the-syntax-extension-cd">Further features of
 the syntax extension %cd</h2>
