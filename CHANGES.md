@@ -163,6 +163,15 @@
 
 ### Fixed
 
+- **Non-overlapping pooling gradient cost** (gh-ocannl-527): the gh-512 product-space gradient
+  gate made overlapping max windows exact but cost 1.8-2.6x on the conv benchmarks, whose
+  pooling is non-overlapping and cannot exercise the exactness. `Operation.einmax1`/`tropical`
+  take `?nonoverlapping` restoring the input-space gate on the domain where the two
+  formulations agree exactly (ties included) — each RHS1 position feeding at most one result
+  position — and `max_pool2d`/`max_pool2d_copy` dispatch on `stride >= window_size`. Bitwise
+  gradient parity between the gates on that domain is pinned by
+  `test/operations/nonoverlap_pool_grads.ml`; overlapping pooling keeps the exact
+  product-space gate.
 - Scalar-embedded multi-term affine indices are parenthesized in generated C-family code (an
   unparenthesized `5*i+j / 4` divided only `j`), and integer-precision `Mod` renders the `%`
   operator on Metal/CUDA/HIP instead of the float-only (and on Metal ambiguous) `fmod`.

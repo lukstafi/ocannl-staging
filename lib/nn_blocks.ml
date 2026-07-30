@@ -567,8 +567,15 @@ let%op depthwise_separable_conv2d ~label ?(kernel_size = 3) ?(stride = 1) ?(use_
 
     Overlapping pooling ([stride < window_size], AlexNet-style) has exact gradients: the gradient
     gate lives in the (output x window) product space (gh-512), so each position receives gradient
-    from exactly the windows it won, with ties gating every achieving pair. *)
+    from exactly the windows it won, with ties gating every achieving pair. Non-overlapping
+    pooling ([stride >= window_size], the common case) dispatches to the cheaper input-space gate
+    (gh-527) — exact on that domain, ties included, see [Operation.tropical]. *)
 let%op max_pool2d ?(stride = 2) ?(window_size = 2) ?(use_padding = false) () x =
+  (* [@^+] expands to the [tropical] in scope (TDSL.O's, unless shadowed) — dispatch the gradient
+     gate here, where the window geometry is a plain value. *)
+  let tropical ?label ?capture_dims spec t1 t2 =
+    tropical ?label ?capture_dims ~nonoverlapping:(Int.( >= ) stride window_size) spec t1 t2
+  in
   Shape.set_dim wh window_size;
   Shape.set_dim ww window_size;
   (* NOTE: projections inference runs per-assignment in a distinct phase from shape inference, so
@@ -597,6 +604,10 @@ let%op max_pool2d ?(stride = 2) ?(window_size = 2) ?(use_padding = false) () x =
 
     Prefer {!max_pool2d}: it reads the operand directly, without the extra buffer and copy. *)
 let%op max_pool2d_copy ?(stride = 2) ?(window_size = 2) ?(use_padding = false) () x =
+  (* Same gradient-gate dispatch as {!max_pool2d} (gh-527). *)
+  let tropical ?label ?capture_dims spec t1 t2 =
+    tropical ?label ?capture_dims ~nonoverlapping:(Int.( >= ) stride window_size) spec t1 t2
+  in
   Shape.set_dim wh window_size;
   Shape.set_dim ww window_size;
   Shape.set_dim pwh window_size;
