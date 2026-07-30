@@ -168,6 +168,25 @@ val extend_with_privatize :
     hermetic copy of the segment (proposals violating the op's preconditions are dropped), so the
     result always applies cleanly where the input schedule does. Exposed for tests. *)
 
+type sr_site = {
+  sr_axis : Ir.Indexing.symbol;  (** The reduction loop to split. *)
+  sr_target : Ir.Tnode.t;  (** The accumulated node. *)
+  sr_red : int;  (** The reduction loop's extent. *)
+  sr_out : int;  (** The target's cell count — the site's whole output parallelism. *)
+  sr_dynamic : bool;  (** The gh-466 scatter form ([Set_dynamic]). *)
+}
+(** A reduction-dominated accumulation site eligible for {!Ir.Schedule.constructor-Split_reduce}
+    seeding (gh-ocannl-484 task 3); see the implementation's field docs. Exposed for tests. *)
+
+val split_reduce_sites : Ir.Low_level.optimized -> sr_site list
+(** The split-reduce seeding sites of the given lowering: rmw accumulations (and gh-466
+    [Set_dynamic] scatters) whose target has at most a few thousand cells while a serial reduction
+    loop of substantial extent feeds it — little output parallelism, lots of splittable reduction
+    work. Per site the largest-extent enclosing serial loop that passes the hermetic
+    {!Ir.Schedule.op_legality} probe of the corresponding [Split_reduce] is chosen (the op's own
+    recognizer decides the pinning discipline), so every returned site is seedable as proposed.
+    Exposed for tests. *)
+
 type report = {
   cache_hit : bool;  (** The schedule came from the disk cache; no search ran. *)
   candidates_timed : int;  (** Including the serial baseline. *)

@@ -1966,6 +1966,85 @@ let extend_with_privatize ~static_indices sched (seg : LL.optimized) : Sched.sch
           | (_ : LL.optimized) -> acc'
           | exception _ -> acc)
 
+(** {2 Split-reduce site detection (gh-ocannl-484 task 3)}
+
+    Reduction-dominated sites: an accumulation whose target has few cells (little output
+    parallelism) fed by a long serial reduction loop — the bias/weight-gradient reductions of the
+    conv benchmarks, softmax denominators, and skinny (split-K) GEMMs alike. The gh-476 sweep
+    attribution: on both Metal and CUDA one such fission segment is 60-95% of the default conv
+    training step, and the tuner had no move into the split-reduction region of the schedule space —
+    [Sched.Split_reduce] existed but nothing seeded it. Detection is deliberately cheap and
+    over-approximate: any rmw [Set] (or gh-466 [Set_dynamic] scatter) qualifies structurally, and
+    each candidate axis is settled by the hermetic {!Sched.op_legality} probe — the op's own
+    recognizer decides the static-form pinning discipline, never a re-implementation here. *)
+
+type sr_site = {
+  sr_axis : Idx.symbol;  (** The reduction loop to split: the largest-extent legal candidate. *)
+  sr_target : Ir.Tnode.t;  (** The accumulated node. *)
+  sr_red : int;  (** The [sr_axis] loop's extent. *)
+  sr_out : int;  (** The target's cell count — the site's whole output parallelism. *)
+  sr_dynamic : bool;  (** The gh-466 scatter form ([Set_dynamic]). *)
+}
+
+(* Sites with more output cells than this have enough output parallelism that the default presets
+   already fill a device; splitting the reduction would only add combine traffic. *)
+let sr_out_max = 4096
+
+(* Reduction extents below this are not worth a second kernel pass (the combine reads
+   [num_blocks] partial cells per output cell). *)
+let sr_red_min = 64
+
+(* Candidate-volume cap: the most reduction-dominated sites win ties. *)
+let sr_max_sites = 4
+
+let split_reduce_sites (opt : LL.optimized) : sr_site list =
+  let acc = ref [] in
+  let consider ~enclosing ~tn ~idcs ~dynamic =
+    let out = try Ir.Tnode.num_elems tn with _ -> 0 in
+    if out >= 1 && out <= sr_out_max then
+      let candidates =
+        List.filter enclosing ~f:(fun (s, n, ty) ->
+            LL.equal_axis_type ty LL.Serial && n >= sr_red_min && not (idcs_mention idcs s))
+        (* Largest extent first: the probe stops at the first legal candidate, and loops enclosing
+           an inner reduction loop fail the pinning discipline anyway (an enclosing reduction loop
+           pins no component), so outer/larger candidates dominate. *)
+        |> List.sort ~compare:(fun (_, a, _) (_, b, _) -> Int.compare b a)
+      in
+      let legal =
+        List.find candidates ~f:(fun (s, _, _) ->
+            let op, _, _, _ = Sched.split_reduce ~axis:s ~target:tn ~num_blocks:2 in
+            match Sched.op_legality opt op with
+            | Sched.Op_legal -> true
+            | Sched.Op_illegal _ | Sched.Op_unknown _ -> false)
+      in
+      Option.iter legal ~f:(fun (s, n, _) ->
+          if not (List.exists !acc ~f:(fun site -> Idx.equal_symbol site.sr_axis s)) then
+            acc :=
+              { sr_axis = s; sr_target = tn; sr_red = n; sr_out = out; sr_dynamic = dynamic }
+              :: !acc)
+  in
+  let rec walk enclosing (llc : LL.t) =
+    match llc with
+    | LL.Seq (a, b) ->
+        walk enclosing a;
+        walk enclosing b
+    | LL.If { body; _ } -> walk enclosing body
+    | LL.For_loop { index; from_; to_; body; axis; _ } ->
+        walk (enclosing @ [ (index, to_ - from_ + 1, axis) ]) body
+    | LL.Set { tn; idcs; llsc; _ } ->
+        (* rmw accumulation: the value re-reads the written node ([op_legality] then enforces the
+           exact same-cell and operator discipline). *)
+        if List.exists (collect_gets llsc) ~f:(fun (t, _) -> Ir.Tnode.equal t tn) then
+          consider ~enclosing ~tn ~idcs ~dynamic:false
+    | LL.Set_dynamic { tn; idcs; _ } -> consider ~enclosing ~tn ~idcs ~dynamic:true
+    | _ -> ()
+  in
+  walk [] opt.LL.llc;
+  List.take
+    (List.sort (List.rev !acc) ~compare:(fun a b ->
+         Int.compare (b.sr_red / max 1 b.sr_out) (a.sr_red / max 1 a.sr_out)))
+    sr_max_sites
+
 (** {2 Analytic cost-model scoring (gh-ocannl-491, the selection half)}
 
     The extraction half lives in {!Ir.Cost_model}; here it is consumed for ranking candidate
