@@ -227,12 +227,28 @@ Its loop nest is `loops[64s,28s,28s,6s]`, i.e. **entirely Serial**: 301,056 writ
 plus a 6-element `bias_conv1.grad` reduction, driven by 1792 threads. Its neighbour seg23 does 17
 statements across 14,400 threads in 6.5 ms.
 
-Two consequences worth stating plainly. First, this confirms gh-ocannl-484's priority on a second
-backend and removes the "maybe it's a Metal scheduling quirk" reading. Second, **it is the whole
-conv story in this matrix**: materializing the intermediates sidesteps the segment entirely
-(lenet/cuda 242.6 ms default → 11.7 ms materialized, 20.7x), which is why `cuda/materialized` and
-`cuda/tuned` are within 1% of each other on every conv workload here. The tuned conv win on CUDA is
-a placement decision, not a schedule-search result.
+This confirms gh-ocannl-484's priority on a second backend and removes the "maybe it's a Metal
+scheduling quirk" reading. It is a statement about the **default schedule only**, though:
+materializing the intermediates sidesteps seg22 entirely (lenet/cuda 242.6 ms default → 11.7 ms
+materialized, 20.7x), which is why `cuda/materialized` and `cuda/tuned` are within 1% of each other
+on every conv workload here. The tuned conv win on CUDA is a placement decision, not a
+schedule-search result.
+
+Since the materialized cells are the ones the cross-framework table below compares, they need their
+own attribution — `BENCH_MATERIALIZE=1 BENCH_SEG_TIMES=1`:
+
+| workload | top segment | | 2nd | | forward convs | total |
+|---|---|---|---|---|---|---|
+| lenet/cuda | seg34 `kernel_conv1.grad` | 7.481 ms (59.7%) | seg31 `kernel_conv2.grad bias_conv2.grad` | 3.461 ms (27.6%) | 0.27 ms (2.1%) | 12.53 ms |
+| cifar_conv/cuda | seg34 `kernel_conv1.grad bias_conv1.grad` | 60.487 ms (56.2%) | seg31 `kernel_conv2.grad bias_conv2.grad` | 18.496 ms (17.2%) | 16.48 ms (15.3%) | 107.54 ms |
+| cifar_stride/cuda | seg34 `kernel_conv1.grad bias_conv1.grad` | 16.564 ms (57.9%) | seg31 `kernel_conv2.grad bias_conv2.grad` | 3.954 ms (13.8%) | 5.42 ms (18.9%) | 28.62 ms |
+
+seg22 is gone, and a **different** conv-backward segment takes over: the *weight* gradient
+(`kernel_conv1.grad`) rather than the input gradient plus bias reduction. The top two segments are
+both backward reductions and together are 71–87% of the materialized step, while the forward convs
+are 2–19%. So the shape of the problem survives materialization even though the specific segment
+does not — which is what makes gh-ocannl-484's subject matter (split reductions, two-pass tree
+combines) relevant to the *best* cells and not only to the default ones.
 
 ### A CUDA default-schedule regression since the checked-in cifar baseline
 
@@ -348,7 +364,7 @@ consistent with macOS's 5.3x and with the C backend having no native bf16 arithm
 3.2x/1.8x slower on CUDA; its step times include the per-step inf/nan sync, but as on macOS that
 constant cannot explain a penalty that scales with problem size.
 
-### Cross-framework: the conv gap is one segment, and it dwarfs the tensor-core question
+### Cross-framework: the conv gap is backward reductions, and it dwarfs the tensor-core question
 
 Best OCANNL cell vs the best competitor, this matrix:
 
@@ -368,9 +384,16 @@ Three things this changes:
    (225.2 ms, worse) moves it. It is the workload the tensor-core arc was supposed to serve and it
    has no reduced-precision leg, so it runs f32 in every column of this sweep. It remains the
    largest unexplained gap in the matrix.
-2. **The conv gap is not a kernel-quality gap, it is one segment.** OCANNL is 20-74x off both
-   frameworks on convs, on both CPU and GPU, and >90% of the CUDA default step is seg22. Tensor
-   cores are not the lever for these workloads; gh-ocannl-484 is.
+2. **The conv gap lives in the backward reductions, not in the forward GEMMs.** OCANNL is 20-74x
+   off both frameworks on convs, on both columns. Note the "OCANNL best" cells above are the
+   materialized/tuned ones, which *already* sidestep the default schedule's seg22 — so this gap is
+   emphatically **not** explained by seg22, and the default-schedule pathology (94.6% of lenet,
+   91.4% of cifar_conv, but only 61.8% of cifar_stride) is a separate problem from it. Attributing
+   the materialized cells instead (table above) puts 71-87% of the remaining step in two
+   *weight-gradient* reduction segments, against 2-19% in the forward convs. Even zeroing the
+   single largest of them would leave lenet ~8.8x off tinygrad, so no one segment closes this gap —
+   but its character is consistently reduction shape rather than GEMM quality, which is why
+   gh-ocannl-484 looks like the lever here and tensor cores do not.
 3. **The MLP cells are already competitive**, and OCANNL wins `mlp_small` outright on both columns.
    The CPU column beats tinygrad CPU on both MLPs (4.9x on `mlp_wide`) while losing to it on every
    conv — the same segment showing up on `cc`, where the graph is not fissioned and this instrument
