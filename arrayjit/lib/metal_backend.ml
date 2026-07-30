@@ -548,6 +548,13 @@ module Impl = struct
           "thread";
           "threadgroup";
           "threadgroup_imageblock";
+          (* MSL function qualifiers. [fragment] is not merely a plausible label — the accumulator
+             contraction mints it ([Schedule]'s [contract_around]), so every tensorized candidate
+             whose fragment reaches a declaration would fail MSL parsing ("expected unqualified-id")
+             rather than merely risking it. *)
+          "vertex";
+          "fragment";
+          "visible";
           (* MSL primitive types that differ from C and would shadow type declarations *)
           "half";
           "uint";
