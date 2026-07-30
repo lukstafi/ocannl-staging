@@ -623,19 +623,44 @@ end
 (** Max-reduction einsum. The gradient gate lives in the product space of the operation — one bit
     per (result position, reduced position) pair — so it is exact even when reduction windows
     overlap (e.g. convolution-style specs with stride < window). Ties gate the full upstream
-    gradient to every achieving position (duplication, not a normalized split). *)
-let einmax1 ?(capture_dims = []) spec =
+    gradient to every achieving position (duplication, not a normalized split).
+
+    [nonoverlapping] (gh-ocannl-527): the caller asserts that each RHS1 position feeds at most one
+    result position — per convolution axis, stride at least the window extent (a full reduction
+    trivially qualifies). On that domain the gate contracts to one bit per {e input} position
+    ([cond_rhs1], the pre-gh-512 formulation): every input position belongs to at most one window,
+    so no gate-bit collisions exist and the two formulations agree exactly, ties included — this is
+    a cost specialization, not a semantics choice. The product-space intermediates it avoids cost
+    1.8-2.6x on the non-overlapping conv-pooling benchmarks. Outside the asserted domain the cheap
+    gate is last-write-wins across colliding windows, i.e. wrong — the flag is a contract, not a
+    heuristic; when in doubt keep the default. *)
+let einmax1 ?(capture_dims = []) ?(nonoverlapping = false) spec =
   let module NTDSL = struct
     include Initial_NTDSL
     module O = NDO_before_einmax1
   end in
   let%cd op_asn ~t ~t1 ~projections = v =:@^ v1 in
-  let%cd grad_asn ~t ~g ~t1 ~projections =
-    (* The gate statement reads t1 itself, so a clamped out-of-range access (gh-504 padded
-       windows) substitutes the whole rhs with the Arg2 neutral 0: invalid pairs gate nothing,
-       even when t is -inf. *)
-    { cond_pspace } =: eq (t, t1);
-    g1 =+ where cond_pspace g 0
+  (* Both variants bind as [grad_asn]: the %cd binding name feeds generated labels and comments,
+     so the default path must keep producing byte-identical code to before the flag existed. *)
+  let grad_asn =
+    if nonoverlapping then (
+      let%cd grad_asn ~t ~g ~t1 ~projections =
+        (* Clamped windows (gh-504) need no validity mask here: the proxies live in t1's own index
+           space, where every cell is in range — out-of-range (result, window) iterations are
+           skipped by the clamp guards and their [cond_rhs1] cells keep the 0 initialization. *)
+        { cond_rhs1 } =: eq (t, t1);
+        g1 =+ where cond_rhs1 g 0
+      in
+      grad_asn)
+    else (
+      let%cd grad_asn ~t ~g ~t1 ~projections =
+        (* The gate statement reads t1 itself, so a clamped out-of-range access (gh-504 padded
+           windows) substitutes the whole rhs with the Arg2 neutral 0: invalid pairs gate nothing,
+           even when t is -inf. *)
+        { cond_pspace } =: eq (t, t1);
+        g1 =+ where cond_pspace g 0
+      in
+      grad_asn)
   in
   Tensor.unop ~transpose_op:(Shape.Permute (spec, capture_dims)) ~op_asn ~grad_asn ~op_label:"@^=>"
 
@@ -645,25 +670,55 @@ let einmax1 ?(capture_dims = []) spec =
     contracted position) pair — so both gradients are exact for arbitrary specs, including
     overlapping reduction windows (stride < window) and RHS2 indices independent of RHS1. Ties
     gate the full upstream gradient to every achieving pair (duplication, not a normalized
-    split). *)
-let tropical ?(capture_dims = []) spec =
+    split).
+
+    [nonoverlapping] (gh-ocannl-527): the caller asserts the {!einmax1} domain condition — each
+    RHS1 position feeds at most one result position — {e and} additionally that the (result,
+    contracted) pair is recoverable from the RHS1 position (RHS1's index space covers RHS2's, the
+    convolution-like shape: kernel indices contracted against strided input indices; the
+    pre-gh-512 g2 limitation delimits exactly this). On that domain the gate contracts to one bit
+    per input position and both gradients agree with the product-space gate exactly, ties included
+    — a cost specialization, not a semantics choice (1.8-2.6x on the non-overlapping conv-pooling
+    benchmarks). Outside it the cheap gate is wrong (last-write-wins collisions, misattributed
+    g2); when in doubt keep the default. *)
+let tropical ?(capture_dims = []) ?(nonoverlapping = false) spec =
   let module NTDSL = struct
     include Initial_NTDSL
     module O = NDO_before_einmax1
   end in
   let%cd op_asn ~t ~t1 ~t2 ~projections = v =:@^ v1 + v2 in
-  let%cd grad_asn ~t ~g ~t1 ~t2 ~projections =
-    (* [=:@^] gives pairs whose t1 access is clamped out of range (gh-504 padded windows) the
-       max-neutral -inf; that alone leaves them gated when t itself is -inf (an all-[-inf] valid
-       window — legitimate in the tropical semiring), and the g2 scatter has a valid kernel
-       projection for them, so an explicit validity mask conjoins the gate: [=:||] reads t1, and
-       an out-of-range access substitutes the Or neutral 0 where an in-range one contributes 1. *)
-    { sum_pspace } =:@^ add (t1, t2);
-    { cond_pspace } =: eq (t, sum_pspace);
-    { valid_pspace } =:|| eq (t1, t1);
-    cond_pspace =&& valid_pspace;
-    g1 =+ where cond_pspace g 0;
-    g2 =+ where cond_pspace g 0
+  (* Both variants bind as [grad_asn]: the %cd binding name feeds generated labels and comments,
+     so the default path must keep producing byte-identical code to before the flag existed. *)
+  let grad_asn =
+    if nonoverlapping then (
+      let%cd grad_asn ~t ~g ~t1 ~t2 ~projections =
+        (* The [_rhs1] proxies live in t1's index space: with non-overlapping windows each cell is
+           written by at most one (result, contracted) pair, so [=:@^] never mixes windows and the
+           gate is exact. Clamped windows (gh-504) need no validity mask: every proxy cell is in
+           range, and cells of skipped (out-of-clamp) iterations keep their neutral
+           initialization, gating nothing. *)
+        { sum_rhs1 } =:@^ add (t1, t2);
+        { cond_rhs1 } =: eq (t, sum_rhs1);
+        g1 =+ where cond_rhs1 g 0;
+        g2 =+ where cond_rhs1 g 0
+      in
+      grad_asn)
+    else (
+      let%cd grad_asn ~t ~g ~t1 ~t2 ~projections =
+        (* [=:@^] gives pairs whose t1 access is clamped out of range (gh-504 padded windows) the
+           max-neutral -inf; that alone leaves them gated when t itself is -inf (an all-[-inf]
+           valid window — legitimate in the tropical semiring), and the g2 scatter has a valid
+           kernel projection for them, so an explicit validity mask conjoins the gate: [=:||]
+           reads t1, and an out-of-range access substitutes the Or neutral 0 where an in-range one
+           contributes 1. *)
+        { sum_pspace } =:@^ add (t1, t2);
+        { cond_pspace } =: eq (t, sum_pspace);
+        { valid_pspace } =:|| eq (t1, t1);
+        cond_pspace =&& valid_pspace;
+        g1 =+ where cond_pspace g 0;
+        g2 =+ where cond_pspace g 0
+      in
+      grad_asn)
   in
   Tensor.binop ~compose_op:(Shape.Einsum (spec, capture_dims)) ~op_asn ~grad_asn ~op_label:"@^=>+"
 
@@ -1029,8 +1084,11 @@ struct
     let einsum ?label ?capture_dims spec t1 t2 = einsum ?label ?capture_dims spec t1 t2 ()
     let outer_sum ?label ?capture_dims spec t1 t2 = outer_sum ?label ?capture_dims spec t1 t2 ()
     let einsum1 ?label ?capture_dims spec t1 = einsum1 ?label ?capture_dims spec t1 ()
-    let einmax1 ?label ?capture_dims spec t1 = einmax1 ?label ?capture_dims spec t1 ()
-    let tropical ?label ?capture_dims spec t1 t2 = tropical ?label ?capture_dims spec t1 t2 ()
+    let einmax1 ?label ?capture_dims ?nonoverlapping spec t1 =
+      einmax1 ?label ?capture_dims ?nonoverlapping spec t1 ()
+
+    let tropical ?label ?capture_dims ?nonoverlapping spec t1 t2 =
+      tropical ?label ?capture_dims ?nonoverlapping spec t1 t2 ()
 
     let concat_sum ?label ?capture_dims ?negated spec rhses =
       concat_sum ?label ?capture_dims ?negated spec rhses ()
