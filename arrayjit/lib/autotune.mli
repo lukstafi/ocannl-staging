@@ -233,6 +233,15 @@ type report = {
   split_reduce_timed : int;
       (** Of the split-reduce candidates (the per-site singles and the recombined multi-site
           composite), those that compiled and were actually timed. *)
+  mma_candidates : int;
+      (** Seeded candidates whose label promises a tensorized ([Schedule.Tensorize]) pipeline —
+          whole-routine sketches and per-fission-segment sketches together. *)
+  mma_timed : int;
+      (** Of the tensorized candidates, those that compiled and were actually timed (dedup'd
+          duplicates excluded — an identical candidate was already timed). [mma_candidates > 0] with
+          [mma_timed = 0] means the search never measured a tensorized pipeline at all, the state
+          gh-ocannl-521 recorded for every GPU backend: seeds are cheap to enumerate and were being
+          rejected in bulk at candidate compile. *)
   model_scored : int;
       (** Sketch candidates the analytic cost model scored during the seed pre-filter
           (gh-ocannl-491); [0] when the pre-filter is off ([keep_fraction >= 1]) or nothing was

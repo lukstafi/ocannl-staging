@@ -15,6 +15,14 @@ type report = {
   fiss_sketch_timed : int;
   split_reduce_candidates : int;
   split_reduce_timed : int;
+  mma_candidates : int;
+      (** Seeded candidates whose label promises a tensorized pipeline ([spec_expects_mma]),
+          whole-routine and per-fission-segment together. *)
+  mma_timed : int;
+      (** How many of [mma_candidates] survived candidate compile far enough to be TIMED. A search
+          with [mma_candidates > 0] and [mma_timed = 0] never measured a tensorized pipeline at all
+          — the state gh-ocannl-521 records for every GPU backend. Dedup'd candidates do not count:
+          a duplicate digest means an identical candidate was already timed. *)
   model_scored : int;
   model_pruned : int;
   fissioned : bool;
@@ -3110,6 +3118,8 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
                   fiss_sketch_timed = 0;
                   split_reduce_candidates = 0;
                   split_reduce_timed = 0;
+                  mma_candidates = 0;
+                  mma_timed = 0;
                   model_scored = 0;
                   model_pruned = 0;
                   fissioned = is_fissioned c.form;
@@ -3151,6 +3161,10 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
         }
       in
       let n_timed = ref 1 and n_failed = ref 0 in
+      (* gh-ocannl-521: tensorized candidates are counted where they are TIMED, not where they are
+         enumerated — a family can be seeded in bulk and rejected in bulk at candidate compile, and
+         the seeded count alone reads as coverage it does not have. *)
+      let n_mma_timed = ref 0 in
       let try_spec spec =
         match compile_spec spec with
         | Error msg ->
@@ -3166,6 +3180,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
               match time_routine ~repeats c.cctx c.routine with
               | ms ->
                   Int.incr n_timed;
+                  if spec_expects_mma spec then Int.incr n_mma_timed;
                   logf "%s: %.4f ms (digest %s)" (spec_label spec) ms (dshort c.digest_after);
                   emit_calibration ~backend ~limits ~label:(spec_label spec) ~digest:c.digest_after
                     ~measured_ms:ms c.all_opts;
@@ -3448,6 +3463,8 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
           fiss_sketch_timed = !n_fiss_sketch_timed;
           split_reduce_candidates = List.length sr_specs;
           split_reduce_timed = !n_sr_timed;
+          mma_candidates = List.count seed_specs ~f:spec_expects_mma;
+          mma_timed = !n_mma_timed;
           model_scored = !n_model_scored;
           model_pruned = !n_model_pruned;
           fissioned = is_fissioned best_c.form;
