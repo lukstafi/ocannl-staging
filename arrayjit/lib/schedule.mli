@@ -209,7 +209,12 @@ type optop =
           memory pass and keeping the fused routine a single kernel/segment. Recognized sites: the
           lane-0 fragment store-back synthesized by [Tensorize]'s accumulator contraction (the tail
           becomes a fourth, lane-0-guarded statement of the marked region, rendered after the
-          backend's intrinsic block), the [Privatize] tile store-back (per-element), and the plain
+          backend's intrinsic block; a pad-masked store-back — gh-ocannl-485's range guards on a
+          non-dividing site — is recognized through its guards, which are re-imposed on the
+          relocated tail, gh-ocannl-521), the whole-K [Tile_mma] writing [target] directly (the
+          unstaged tensorized pipelines: the intrinsic block completes the accumulator's m x n
+          tile, so the tail becomes a sibling lane-0 nest over the tile at the accumulator's base
+          indices, gh-ocannl-521), the [Privatize] tile store-back (per-element), and the plain
           accumulation nest (the tail slides inside the output loops after the serial reduction
           loop). The tail must be the first real statement after the last statement writing
           [target]: a perfect Serial nest over exactly [target]'s dims, assigning a different node
