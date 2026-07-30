@@ -2753,9 +2753,13 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
   in
   (* Does [idcs], with symbols ranging over [env] extents (zero-based loops), cover [target]'s index
      space bijectively over all enclosing iterations? Per axis: offset 0 and the (coefficient,
-     extent) pairs form an exact mixed radix for the dimension — so the relocated tail writes each
-     output element exactly once. *)
-  let covers_bijectively ~env (idcs : Indexing.axis_index array) : bool =
+     extent) pairs form an exact mixed radix — so the relocated tail writes each output element
+     exactly once. A [guarded] axis (a pad-mask range guard on the store-back, gh-ocannl-485) may
+     over-cover: the exact radix then spans the padded extent and the guard trims it to the
+     dimension, still visiting each valid element exactly once; an unguarded axis must cover the
+     dimension exactly. *)
+  let covers_bijectively ?guarded ~env (idcs : Indexing.axis_index array) : bool =
+    let guarded = Option.value guarded ~default:(Array.create ~len:rank false) in
     Array.length idcs = rank
     && Array.for_alli idcs ~f:(fun ax idx ->
         match terms_of_index idx with
@@ -2776,7 +2780,7 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
             | Some ces ->
                 let sorted = List.sort ces ~compare:(fun (c1, _) (c2, _) -> Int.compare c1 c2) in
                 let rec radix expected = function
-                  | [] -> expected = dims.(ax)
+                  | [] -> if guarded.(ax) then expected >= dims.(ax) else expected = dims.(ax)
                   | (c, e) :: tl -> c = expected && radix (c * e) tl
                 in
                 radix 1 sorted))
@@ -2805,7 +2809,19 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
   (* --- Site 1: the lane-0 fragment store-back marked by [contract_tensorized_accumulator]. The
      epilogue becomes a sibling lane-0 statement re-iterating the store-back's tile loops (the same
      symbols — sibling transfer nests already share them), so the marked three-part region keeps its
-     shape and the fragment recognizer renders the extra statement after the intrinsics. --- *)
+     shape and the fragment recognizer renders the extra statement after the intrinsics. A
+     pad-masked store-back (gh-ocannl-485: the contraction's transfers [If] out-of-range slots of
+     the padded block away) is recognized through its guards, which are collected and re-imposed on
+     the relocated tail — the tail then writes exactly the valid cells the store-back writes. --- *)
+  let is_fragment frag =
+    (* Masked non-shared fragments (the CPU padded pipelines) are registered in neither the
+       [simdgroup_fragments] nor the [workgroup_shared] set; recognize them by the label
+       [contract_around] mints. *)
+    (not (Tn.equal frag target))
+    && (Set.mem opt.simdgroup_fragments frag
+       || Set.mem opt.workgroup_shared frag
+       || match frag.Tn.label with "fragment" :: _ -> true | _ -> false)
+  in
   let match_storeback = function
     | For_loop { index = lane; from_ = 0; to_; axis = Workgroup; body; _ } -> (
         (* The lane-0 guard survives on real lane widths; on the CPU pipelines' width-1 lane the
@@ -2816,18 +2832,51 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
           | body when to_ = 0 -> Some body
           | _ -> None
         in
-        let rec descend loops = function
+        let rec descend loops guards = function
           | For_loop { index; from_ = 0; to_; axis = Serial; body; _ } ->
-              descend ((index, to_ + 1) :: loops) body
-          | Set { tn; idcs; llsc = Get (frag, _); _ }
-            when Tn.equal tn target && Set.mem opt.simdgroup_fragments frag ->
-              Some (List.rev loops, idcs)
+              descend ((index, to_ + 1) :: loops) guards body
+          | If { cond = cond, _; body } -> descend loops (cond :: guards) body
+          | Set { tn; idcs; llsc = Get (frag, _); _ } when Tn.equal tn target && is_fragment frag
+            ->
+              Some (List.rev loops, List.rev guards, idcs)
           | _ -> None
         in
-        match Option.bind guarded ~f:(descend []) with
-        | Some (loops, st_idcs) -> Some (lane, to_ + 1, loops, st_idcs)
+        match Option.bind guarded ~f:(descend [] []) with
+        | Some (loops, guards, st_idcs) -> Some (lane, to_ + 1, loops, guards, st_idcs)
         | None -> None)
     | _ -> None
+  in
+  (* Which axis of the store-back a range guard trims: the pad masks compare the site's own index
+     term for one axis against that axis's unpadded dimension ([mask_cond] in
+     [contract_tensorized_accumulator] builds exactly this form). Guards in any other shape are not
+     understood and keep the fusion rejected. *)
+  let guard_axis ~(st_idcs : Indexing.axis_index array) cond : int option =
+    match cond with
+    | Binop (Ops.Cmplt, (Embed_index idx, _), (Constant bound, _)) ->
+        Array.findi st_idcs ~f:(fun ax site_idx ->
+            Indexing.equal_axis_index idx site_idx
+            && Float.equal bound (Float.of_int dims.(ax)))
+        |> Option.map ~f:fst
+    | _ -> None
+  in
+  (* --- Site 1b: the whole-K [Tile_mma] writing [target] directly (the unstaged tensorized
+     pipelines, gh-ocannl-521): there is no store-back statement — the intrinsic block itself
+     completes [target]'s m x n tile — so the epilogue becomes a sibling lane-0 nest over the tile
+     at the accumulator's base indices, exactly the shape site 1 appends after a fragment
+     store-back. --- *)
+  let match_wholek = function
+    | For_loop { index = lane; from_ = 0; to_; axis = Workgroup; body; _ } -> (
+        match body with
+        | Tile_mma { d = d, d_base; m; n; lane = l; _ }
+          when Tn.equal d target && Indexing.equal_symbol l lane ->
+            Some (lane, to_ + 1, d_base, m, n)
+        | _ -> None)
+    | _ -> None
+  in
+  let add_symbol idx s =
+    match terms_of_index idx with
+    | Some (terms, offset) -> normalize_affine ~terms:((1, s) :: terms) ~offset
+    | None -> fail "the accumulator's base indices must be affine"
   in
   let fused = ref false in
   let rec fuse_at_fragment env llc =
@@ -2839,7 +2888,7 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
           Seq (a', fuse_at_fragment env b)
       | For_loop fc -> (
           match match_storeback (For_loop fc) with
-          | Some (lane, width, loops, st_idcs) ->
+          | Some (lane, width, loops, guards, st_idcs) ->
               let env' = loops @ env in
               (* Exactly-once discipline: an enclosing loop that does not index the store-back
                  re-executes the site per iteration with partial accumulations — the relocated tail
@@ -2853,22 +2902,78 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
                       ("the fragment store-back executes once per iteration of enclosing loop "
                      ^ Indexing.symbol_ident s
                      ^ " which does not index it — the tail would read partial accumulations"));
-              if not (covers_bijectively ~env:env' st_idcs) then
+              let guarded = Array.create ~len:rank false in
+              List.iter guards ~f:(fun cond ->
+                  match guard_axis ~st_idcs cond with
+                  | Some ax -> guarded.(ax) <- true
+                  | None ->
+                      fail
+                        "the fragment store-back carries a guard that is not a per-axis range \
+                         mask of the output");
+              if not (covers_bijectively ~guarded ~env:env' st_idcs) then
                 fail "the fragment store-back tiles do not cover the output space bijectively";
               fused := true;
+              let tail_leaf =
+                (* Re-impose the store-back's own range guards: the relocated tail writes exactly
+                   the valid cells the (padded) store-back writes. *)
+                List.fold guards ~init:(subst_tail ~site_idcs:st_idcs) ~f:(fun body cond ->
+                    If { cond = (cond, iprec); body })
+              in
               let body =
-                List.fold_right loops ~init:(subst_tail ~site_idcs:st_idcs) ~f:(fun (s, e) body ->
+                List.fold_right loops ~init:tail_leaf ~f:(fun (s, e) body ->
                     For_loop
                       { index = s; from_ = 0; to_ = e - 1; body; trace_it = false; axis = Serial })
               in
               Seq (For_loop fc, lane0 ~lane ~width body)
           | None -> (
-              match fc.axis with
-              | Workgroup | Workgroup_reduce -> For_loop fc
-              | _ when fc.from_ = 0 ->
-                  For_loop
-                    { fc with body = fuse_at_fragment ((fc.index, fc.to_ + 1) :: env) fc.body }
-              | _ -> For_loop fc))
+              match match_wholek (For_loop fc) with
+              | Some (lane, width, d_base, m, n) ->
+                  if Array.length d_base <> rank || rank < 2 then
+                    fail "the whole-K Tile_mma accumulator's rank does not match the output";
+                  (* Exactly-once discipline, as for the fragment store-back: a surplus enclosing
+                     loop would re-run the intrinsic block (and hence the tail) per iteration. *)
+                  List.iter env ~f:(fun (s, e) ->
+                      if e > 1 && not (Array.exists d_base ~f:(idx_mentions s)) then
+                        fail
+                          ("the Tile_mma block executes once per iteration of enclosing loop "
+                         ^ Indexing.symbol_ident s
+                         ^ " which does not index it — the tail would read partial accumulations"));
+                  let fi = Indexing.get_symbol () and fj = Indexing.get_symbol () in
+                  let site_idcs = Array.copy d_base in
+                  site_idcs.(rank - 2) <- add_symbol site_idcs.(rank - 2) fi;
+                  site_idcs.(rank - 1) <- add_symbol site_idcs.(rank - 1) fj;
+                  let env' = ((fi, m) :: (fj, n) :: env : (Indexing.symbol * int) list) in
+                  if not (covers_bijectively ~env:env' site_idcs) then
+                    fail "the Tile_mma tiles do not cover the output space bijectively";
+                  fused := true;
+                  let body =
+                    For_loop
+                      {
+                        index = fi;
+                        from_ = 0;
+                        to_ = m - 1;
+                        trace_it = false;
+                        axis = Serial;
+                        body =
+                          For_loop
+                            {
+                              index = fj;
+                              from_ = 0;
+                              to_ = n - 1;
+                              trace_it = false;
+                              axis = Serial;
+                              body = subst_tail ~site_idcs;
+                            };
+                      }
+                  in
+                  Seq (For_loop fc, lane0 ~lane ~width body)
+              | None -> (
+                  match fc.axis with
+                  | Workgroup | Workgroup_reduce -> For_loop fc
+                  | _ when fc.from_ = 0 ->
+                      For_loop
+                        { fc with body = fuse_at_fragment ((fc.index, fc.to_ + 1) :: env) fc.body }
+                  | _ -> For_loop fc)))
       | other -> other
   in
   let red_stmt' = fuse_at_fragment [] red_stmt in

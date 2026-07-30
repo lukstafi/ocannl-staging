@@ -163,6 +163,17 @@
 
 ### Fixed
 
+- **GPU mma sketch candidates unreachable by the tuner** (gh-ocannl-521, route 1):
+  `Schedule.Fuse_epilogue` fuses at two previously rejected sites — the whole-K `Tile_mma`
+  writing the accumulator directly (the unstaged tensorized pipelines; the tail becomes a
+  sibling lane-0 nest over the completed m x n tile), and the pad-masked fragment store-back
+  (gh-485 range guards on non-dividing sites; the guards are collected and re-imposed on the
+  relocated tail, with guard-aware coverage). The GPU mma seeds' fused twins — their only
+  survival path past `validate_parallel`, since companion nests are otherwise uncovered — now
+  compile and reach timing instead of failing 100% of the time on Metal/CUDA/HIP;
+  `test/operations/epilogue_fusion_mma_seeds.ml` pins seeded → applies/validates → runs with
+  correct values against the real seed enumeration. Covering companions without fusion is the
+  complementary route 2, tracked on the issue.
 - **Non-overlapping pooling gradient cost** (gh-ocannl-527): the gh-512 product-space gradient
   gate made overlapping max windows exact but cost 1.8-2.6x on the conv benchmarks, whose
   pooling is non-overlapping and cannot exercise the exactness. `Operation.einmax1`/`tropical`
