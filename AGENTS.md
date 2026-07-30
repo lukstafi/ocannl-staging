@@ -50,6 +50,11 @@ Worktree and shell notes:
   and can turn a test run into a false-green plain build.
 
 Testing notes:
+- Scope test runs to the code and configuration paths a change can reach. Start with affected
+  directory aliases such as `dune build @test/operations/runtest`, `@test/einsum/runtest`,
+  `@test/ppx/runtest`, `@arrayjit/runtest`, or `@test/training/runtest`, then run
+  `dune build @check`. Before broad testing of a config-gated path, use `rg` to verify which tests
+  or test configs enable the gate; reserve the full regular/slow suites for cross-cutting changes.
 - Inline ppx_expect tests and standalone Dune `test` stanzas with `.expected` files are exclusive.
   Prefer standalone tests for new compiler features; reserve tutorial `%expect` tests for
   illustrative output.
@@ -57,8 +62,17 @@ Testing notes:
   copied `test/config/ocannl_config`, so a test may fail or silently select another backend.
   Build `test/<dir>/<name>.exe.output`, inspect `_build/default/test/<dir>/<name>.exe.output`,
   then run `dune runtest test/<dir>/` and promote. Pin `OCANNL_BACKEND` for bin executables.
-- The minutes-long training tests are excluded from `dune runtest`; run `dune build @slow`.
-  They are still compiled by `dune build @check`.
+- Explicit `@slow` training tests are excluded from `dune runtest`, but regular
+  `test/training/runtest` still includes costly integration runs. Run `dune build @slow` when
+  relevant; both regular and slow executables are compiled by `dune build @check`.
+- Training actions share the `ocannl_training_test` Dune lock, so bare `dune test` does not run
+  process-local OpenMP pools concurrently on non-macOS hosts; compilation remains parallel.
+  Preserve this lock on new regular training tests and `@slow` rules.
+- Keep library sources unchanged while Dune is running; edits invalidate in-flight rules and can
+  repeat expensive work. Prefer a foreground run with a bounded timeout—Dune caches completed
+  rules for the next invocation. Detached jobs are unreliable in sandboxed/WSL sessions; if one
+  is unavoidable, track its exact PID or an exit sentinel, not `pgrep -f`, which can match the
+  waiter itself.
 - Do not judge a Dune test through a pipe unless `pipefail` is set; otherwise the consumer's exit
   status can hide expectation diffs.
 - `OCANNL_BACKEND` is special-cased by tests; other env vars may not retrigger tests without
