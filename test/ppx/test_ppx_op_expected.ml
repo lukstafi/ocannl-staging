@@ -2,27 +2,27 @@ open Base
 open Ocannl
 open Nn_blocks.DSL_modules
 let y0 =
-  let hey1 =
-    (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
-       "hey1") () in
   let open! TDSL.O in
+    let hey1 =
+      (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
+         "hey1") () in
     (+) ?label:(Some ["y0"])
       (( *. ) ?label:None (TDSL.number (Float.of_int 2)) hey1)
       (TDSL.number (Float.of_int 3))
 let y1 =
-  let hey2 =
-    (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
-       "hey2") () in
   let open! TDSL.O in
+    let hey2 =
+      (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
+         "hey2") () in
     fun x ->
       (+) ?label:(Some
                     (List.concat [["y1"]; (x.Tensor.value).Ir.Tnode.label]))
         (( * ) ?label:None hey2 (TDSL.number (Float.of_int 2))) x
 let y2 =
-  let hey3 =
-    (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
-       "hey3") () in
   let open! TDSL.O in
+    let hey3 =
+      (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
+         "hey3") () in
     fun x1 x2 ->
       (+) ?label:(Some
                     (List.concat
@@ -42,10 +42,10 @@ let b =
        [|(Float.of_int 7);(Float.of_int 8);(Float.of_int 9);(Float.of_int 10)|])
       ~label:["b"] ~batch_dims:[2] ~input_dims:[] ~output_dims:[2] ()
 let y =
-  let hey4 =
-    (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
-       "hey4") () in
   let open! TDSL.O in
+    let hey4 =
+      (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
+         "hey4") () in
     (+) ?label:(Some ["y"])
       (( * ) ?label:None hey4
          (TDSL.ndarray [|2.0|] ~batch_dims:[] ~input_dims:[]
@@ -53,13 +53,13 @@ let y =
       (TDSL.ndarray [|1.0|] ~batch_dims:[] ~input_dims:[]
          ~output_axes:[("p", 1)] ())
 let z =
-  let hey5 =
-    (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
-       "hey5") () in
-  let hey6 =
-    (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
-       "hey6") () in
   let open! TDSL.O in
+    let hey5 =
+      (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
+         "hey5") () in
+    let hey6 =
+      (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
+         "hey6") () in
     (+) ?label:(Some ["z"])
       (( *. ) ?label:None
          (TDSL.ndarray [|2.0|] ~batch_dims:[] ~input_dims:[]
@@ -72,13 +72,13 @@ let stride = 2
 and dilation = 3
 and use_padding = true
 let z2 =
-  let hey7 =
-    (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
-       "hey7") () in
-  let hey8 =
-    (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
-       "hey8") () in
   let open! TDSL.O in
+    let hey7 =
+      (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
+         "hey7") () in
+    let hey8 =
+      (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
+         "hey8") () in
     einsum ?label:(Some ["z2"])
       (String.concat ~sep:""
          [Int.to_string stride;
@@ -96,13 +96,13 @@ let z2 =
 let z3 =
   let s = 2
   and d = 3 in
-  let hey9 =
-    (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
-       "hey9") () in
-  let hey10 =
-    (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
-       "hey10") () in
   let open! TDSL.O in
+    let hey9 =
+      (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
+         "hey9") () in
+    let hey10 =
+      (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
+         "hey10") () in
     einsum ?label:(Some [])
       (String.concat ~sep:""
          ["i";
@@ -124,26 +124,52 @@ let z3 =
          ", ";
          "c"]) hey9 hey10
 let concat_single =
-  let hey11 =
-    (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
-       "hey11") () in
   let open! TDSL.O in
+    let hey11 =
+      (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
+         "hey11") () in
     concat ?label:(Some ["concat_single"]) "i => i" [|hey11|]
 let concat_pair =
-  let hey12 =
-    (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
-       "hey12") () in
-  let hey13 =
-    (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
-       "hey13") () in
-  let j = Shape.get_variable_ref "j" in
-  let i = Shape.get_variable_ref "i" in
   let open! TDSL.O in
+    let hey12 =
+      (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
+         "hey12") () in
+    let hey13 =
+      (TDSL.param ?more_label:None ?value:None ?values:None ?param_init:None
+         "hey13") () in
+    let j = Shape.get_variable_ref "j" in
+    let i = Shape.get_variable_ref "i" in
     concat ?label:(Some ["concat_pair"]) ~capture_dims:[j; i] "i; j => i ^ j"
       [|hey12;hey13|]
+let initialized_no_unit =
+  let open! TDSL.O in
+    let init_w =
+      (TDSL.param ?more_label:None ?value:None ?values:None
+         ?param_init:(Some (NTDSL.kaiming ~scale_sq:2.0 normal1 ())) "init_w")
+        () in
+    fun x ->
+      relu
+        ?label:(Some
+                  (List.concat
+                     [["initialized_no_unit"];
+                     (x.Tensor.value).Ir.Tnode.label]))
+        (( * ) ?label:None init_w x)
+let initialized_expr =
+  let expr_w =
+    let open! TDSL.O in
+      (TDSL.param ?more_label:None ?value:None ?values:None
+         ?param_init:(Some (NTDSL.kaiming normal1 ())) "expr_w") () in
+  let f =
+    let open! TDSL.O in
+      fun x ->
+        relu
+          ?label:(Some (List.concat [["f"]; (x.Tensor.value).Ir.Tnode.label]))
+          (( * ) ?label:None expr_w x) in
+  f
 let () = ignore (y0, y1, y2, a, b, y)
 let () = ignore (z, z2, z3)
 let () = ignore (concat_single, concat_pair)
+let () = ignore (initialized_no_unit, initialized_expr)
 let mlp_layer =
   let open! TDSL.O in
     fun ~label ~hid_dim () ->

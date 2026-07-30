@@ -685,19 +685,45 @@ let rec translate ~dsl_name ~num_configs ~is_toplevel ?(in_block = false) ~opt_l
       (no_vbs, [%expr [%e expr] ?label:[%e opt_expr ~loc label]])
   | expr -> (no_vbs, expr)
 
-let translate ?(dsl_name = "TDSL") ?ident_label expr =
+let translate ?(dsl_name = "TDSL") ?ident_label ?(bind_vbs_under_open = true) expr =
   let vbs, expr =
     translate ~dsl_name ~num_configs:(ref 0) ~is_toplevel:true ~opt_label:None
       ~label:(opt_pat2string_list ~loc:expr.pexp_loc ident_label)
       expr
   in
   let loc = expr.pexp_loc in
-  ( vbs,
+  let wrap_in_dsl_open expr =
     match ident_label with
     | Some [%pat? _] ->
         [%expr Tensor.with_unchanged_roots ~f:(fun () -> [%e dsl_open_o ~loc dsl_name expr])]
-    | _ -> dsl_open_o ~loc dsl_name expr )
+    | _ -> dsl_open_o ~loc dsl_name expr
+  in
+  if bind_vbs_under_open then (no_vbs, wrap_in_dsl_open (let_opt ~loc vbs expr))
+  else (vbs, wrap_in_dsl_open expr)
 
 let translate_tdsl ?ident_label expr = translate ?ident_label expr
-let expr_expander ~loc ~path = expr_expander_with_punning translate_tdsl ~loc ~path
+
+let expr_expander ~loc ~path:_ payload =
+  match payload with
+  | { pexp_desc = Pexp_let (recflag, bindings, body); _ } ->
+      (* Bind captures and inline declarations around the whole let so they remain visible to its
+         body, but keep their initializer expressions within the DSL operator scope. *)
+      let vbss, bindings =
+        List.unzip
+        @@ List.map bindings ~f:(fun vb ->
+            let vbs, v =
+              translate ~bind_vbs_under_open:false ?ident_label:(Some vb.pvb_pat) vb.pvb_expr
+            in
+            (vbs, { vb with pvb_expr = v }))
+      in
+      let expr = { payload with pexp_desc = Pexp_let (recflag, bindings, body) } in
+      let vbs =
+        List.map (reduce_vbss vbss) ~f:(fun vb ->
+            { vb with pvb_expr = dsl_open_o ~loc:vb.pvb_loc "TDSL" vb.pvb_expr })
+      in
+      let_opt ~loc vbs expr
+  | expr ->
+      let vbs, expr = translate_tdsl ?ident_label:None expr in
+      let_opt ~loc vbs expr
+
 let str_expander ~loc ~path = str_expander_with_punning translate_tdsl ~loc ~path

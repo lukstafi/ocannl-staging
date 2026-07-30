@@ -22,9 +22,17 @@ let z3 =
 
 let%op concat_single = { hey11 } ++^ "i=>i"
 let%op concat_pair = ({ hey12 }, { hey13 }) ++^ "i; j => i^j" [ "i"; "j" ]
+let%op initialized_no_unit x = relu ({ init_w = kaiming ~scale_sq:2.0 normal1 () } * x)
+
+let initialized_expr =
+  [%op
+    let f x = relu ({ expr_w = kaiming normal1 () } * x) in
+    f]
+
 let () = ignore (y0, y1, y2, a, b, y)
 let () = ignore (z, z2, z3)
 let () = ignore (concat_single, concat_pair)
+let () = ignore (initialized_no_unit, initialized_expr)
 let%op mlp_layer ~label ~hid_dim () ~x = relu (({ w } * x) + { b; o = [ hid_dim ] })
 
 let%op _use_layer =

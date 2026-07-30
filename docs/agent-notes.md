@@ -60,14 +60,11 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
 - Block-tensor delimiters map array `[|…|]` → batch, list `[…]` → output, tuple `(…)` → input
   axis; canonical nesting is array ⊃ list ⊃ tuple. Function-argument and einsum-operand tuples
   keep their OCaml meaning (distinct ppx arms), so `(a,b) ++^ …` is an operand pair, not a stack.
-- `%op` inline-record init expressions (`{ w = kaiming normal1 () }`) resolve identifiers at the
-  lifted binding's scope, which is the enclosing UNIT parameter: a `let%op f x = ...` with no
-  `()` param fails with "Unbound value" (gh-511 tracks the scoping fix) — write
-  `let%op mk_f () x = ...` and apply `mk_f ()`, or fully qualify the initializer's DSL idents
-  (`kaiming TDSL.O.normal1 ()`). Only the applied head is auto-qualified to `NTDSL.*`; argument
-  idents rely on the `open TDSL.O` scope introduced at the unit parameter. Design caveat: the
-  no-unit-param form is not generative — `f` closes over ONE shared param created at definition
-  time; the `()` idiom makes the construction point explicit.
+- `%op` inline-record init expressions (`{ w = kaiming normal1 () }`) are bound under the
+  generated `open TDSL.O`, including when there is no unit parameter (gh-511). The no-unit-param
+  form is not generative: `let%op f x = ...` closes over ONE shared param created at definition
+  time. Use `let%op mk_f () x = ...` and apply `mk_f ()` when each model instance needs fresh
+  parameters; the `()` idiom makes that construction point explicit.
 
 ## Graph construction and autodiff
 

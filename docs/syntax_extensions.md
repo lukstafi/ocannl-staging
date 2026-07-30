@@ -634,13 +634,12 @@ Recurring stumbling points, each verified against the sources:
   similar masks. Note `range_of_shape` gives row-major *flattened* offsets, not per-axis indices.
 - **Only numeric literals auto-lift to tensors in `%op`.** A `let`-bound float needs explicit
   embedding: `r *. !.step`, not `r *. step`.
-- **Inline-declaration initializers resolve at the unit parameter.** In
-  `let%op f x = ... { w = kaiming normal1 () } ...`, the lifted binding for `w` lands at the
-  enclosing unit parameter `()`; with no unit parameter in scope the binding lands outside any
-  `open TDSL.O` and identifiers like `normal1` fail with "Unbound value". Write
-  `let%op mk_f () x = ...` and apply `mk_f ()`. A labeled argument inside the initializer
-  (`kaiming ~scale_sq:2.0 normal1 ()`) breaks the lifting the same way — bind a specialized
-  helper outside `%op` instead.
+- **Inline declarations without a unit parameter are shared.** In
+  `let%op f x = ... { w = kaiming normal1 () } ...`, `w` is created once when `f` is defined and
+  shared by every application of `f`. To create a fresh parameter for each model instance, make
+  the construction point explicit with `let%op mk_f () x = ...` and apply `mk_f ()` once per
+  instance. Initializers may use labeled arguments, for example
+  `kaiming ~scale_sq:2.0 normal1 ()`.
 
 ## Further features of the syntax extension %cd
 
