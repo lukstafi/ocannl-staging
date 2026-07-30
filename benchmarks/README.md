@@ -76,7 +76,7 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   `BENCH_NO_SLICE=1` skips `@|` batch slicing (mlp, single-batch fixture).
 - `runners/pytorch/run.py` — flags: `--device cpu|mps|cuda`, `--compile` (torch.compile
   variant).
-- `runners/tinygrad/run.py` — flags: `--device CPU|METAL|CUDA|AMD`, `--jit 0|1`, `--beam N`
+- `runners/tinygrad/run.py` — flags: `--device CPU|METAL|CUDA|AMD|CL|HIP`, `--jit 0|1`, `--beam N`
   (BEAM=N kernel search, implies jit; the search cost lands in `compile_s`).
 - `orchestrate.py` — runs the matrix (dispatching the OCANNL executable on the fixture's
   `model`), enforces the parity gate, writes `results/results.jsonl` and
