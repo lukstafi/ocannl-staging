@@ -16,8 +16,9 @@ type report = {
   split_reduce_candidates : int;
   split_reduce_timed : int;
   mma_candidates : int;
-      (** Seeded candidates whose label promises a tensorized pipeline ([spec_expects_mma]),
-          whole-routine and per-fission-segment together. *)
+      (** Candidates whose label promises a tensorized pipeline ([spec_expects_mma]) that the search
+          put through candidate compile: whole-routine and per-fission-segment seeds, the
+          cross-segment recombination composite, and beam-expansion candidates. *)
   mma_timed : int;
       (** How many of [mma_candidates] survived candidate compile far enough to be TIMED. A search
           with [mma_candidates > 0] and [mma_timed = 0] never measured a tensorized pipeline at all
@@ -3357,9 +3358,14 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
       let n_timed = ref 1 and n_failed = ref 0 in
       (* gh-ocannl-521: tensorized candidates are counted where they are TIMED, not where they are
          enumerated — a family can be seeded in bulk and rejected in bulk at candidate compile, and
-         the seeded count alone reads as coverage it does not have. *)
-      let n_mma_timed = ref 0 in
+         the enumerated count alone reads as coverage it does not have. Both counters are taken HERE
+         rather than off [seed_specs], so they cover the same population by construction: the
+         cross-segment recombination composite and the beam-expansion candidates also reach
+         [try_spec] without appearing in the seed list, and counting only seeds in the denominator
+         would let [mma_timed] exceed [mma_candidates] on a multi-segment routine. *)
+      let n_mma_proposed = ref 0 and n_mma_timed = ref 0 in
       let try_spec spec =
+        if spec_expects_mma spec then Int.incr n_mma_proposed;
         match compile_spec spec with
         | Error msg ->
             Int.incr n_failed;
@@ -3657,7 +3663,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
           fiss_sketch_timed = !n_fiss_sketch_timed;
           split_reduce_candidates = List.length sr_specs;
           split_reduce_timed = !n_sr_timed;
-          mma_candidates = List.count seed_specs ~f:spec_expects_mma;
+          mma_candidates = !n_mma_proposed;
           mma_timed = !n_mma_timed;
           model_scored = !n_model_scored;
           model_pruned = !n_model_pruned;
