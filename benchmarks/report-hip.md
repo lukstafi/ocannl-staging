@@ -6,7 +6,8 @@ platform: Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.43 x86_64 |
 > Radeon 8060S iGPU (gfx1151, RDNA3.5), ROCm 7.14, **under WSL2** — the previous revision of this
 > report was recorded on native Windows at `8436e362`, so no cell here is comparable to it
 > cross-revision. 65 cells, 2 runner failures. Regenerate with
-> `benchmarks/.venv/bin/python benchmarks/orchestrate.py --tuned --materialized --precision bf16 f16 --gpu hip`.
+> `taskset -c 0-15 benchmarks/.venv/bin/python benchmarks/orchestrate.py --tuned --materialized --precision bf16 f16 --gpu hip`
+> — the affinity wrapper is not optional here, see the next paragraph.
 >
 > **All cells ran under `taskset -c 0-15`** (16 physical cores, SMT halves excluded): this machine
 > hard-froze during an uncapped all-core `cc` autotune search earlier in the session (Kernel-Power
@@ -21,12 +22,14 @@ platform: Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.43 x86_64 |
 > likewise unusable, so the GPU column uses its `HIP` device (orchestrate.py falls back
 > automatically when `/dev/kfd` is absent).
 >
-> **The `pytorch/cuda(hip)` cells are numerically invalid on this hardware — do not read them as
-> measurements.** Torch ROCm's column-sum reduction returns garbage non-deterministically on
-> gfx1151 (details in Findings), which NaNs the bias gradient and stops training. The parity gate
-> caught all of them (4 as `loss stationary`, `gpt2_mini` as a 3.6e+34 drift). Their step times are
-> left in the tables for completeness but describe a computation that is not the benchmark.
-> **tinygrad/HIP is the valid GPU cross-framework reference here.**
+> **Most `pytorch/cuda(hip)` cells are numerically invalid on this hardware — check each cell's
+> parity column before reading it as a measurement.** Torch ROCm's column-sum reduction returns
+> garbage non-deterministically on gfx1151 (details in Findings), which NaNs the bias gradient and
+> stops training. The parity gate caught 5 of the 6: four as `loss stationary`, `gpt2_mini` as a
+> 3.6e+34 drift. Their step times are left in the tables for completeness but describe a computation
+> that is not the benchmark. The one exception, **`mlp_small` (PASS, 1.7e-07)**, is a valid
+> measurement — its reduction shape falls in the clean size range. **tinygrad/HIP is the GPU
+> cross-framework reference that is valid across all six workloads.**
 >
 > Three HIP tuned cells are missing, each for a different reason: `mlp_wide` is in `SKIP_CELLS`
 > (search wedges in the middle-end), `cifar_conv` was killed by a 50-minute watchdog (same wedge),
@@ -142,10 +145,13 @@ reasons stack differently, and two of them are prior to gh-ocannl-521:
 1. **At f32 there are no mma candidates to seed.** RDNA3/3.5 WMMA has only f16×f16 and bf16×bf16 at
    16×16×16, no f32-input shape, so uniform f32 stays scalar (`hip_backend.ml:531`). Every
    benchmark workload except the reduced-precision mlp legs is f32.
-2. **The bf16 route cannot be tuned at all.** `bench_mlp` fails outright on `BENCH_TUNE=1` together
-   with `BENCH_PRECISION` ("not supported"). bf16 is gfx1151's *only* tensor-core route, so **no
-   tuned HIP benchmark cell can contain a rocWMMA intrinsic regardless of the scheduling state** —
-   the sweep structurally cannot deliver the gh-152/154/155 payoff measurement on this machine.
+2. **Neither reduced-precision route can be tuned at all.** gfx1151 has two tensor-core routes, not
+   one: `hip_backend.ml` supports f16×f16 → f32 (the flagship, and the combination verified on this
+   chip via `schedule_mma_matmul`), f16×f16 → f16, bf16×bf16 → f32 and bf16×bf16 → bf16. Both are
+   reachable only through `BENCH_PRECISION`, and `bench_mlp` fails outright on `BENCH_TUNE=1`
+   together with `BENCH_PRECISION` ("not supported"). Since f32 seeds nothing (item 1), **no tuned
+   HIP benchmark cell can contain a rocWMMA intrinsic regardless of the scheduling state** — the
+   sweep structurally cannot deliver the gh-152/154/155 payoff measurement on this machine.
 3. **gh-ocannl-521 generalizes to HIP.** In the f32 searches that do complete, the GPU sketch
    candidates are seeded and every one **fails candidate compile before being timed** — zero
    declines-to-scalar, zero timed. `mlp_small` hip/tuned (39.6 s, `autotune_log=true`) censuses as:
@@ -184,8 +190,11 @@ target in the GPU pipeline; it sets gh-ocannl-484's priority directly. Note the 
 
 ### PyTorch ROCm is numerically broken on gfx1151 (not an OCANNL bug, not the WSL runtime swap)
 
-Every `pytorch/cuda(hip)` training cell fails parity — 4 as `loss stationary` (loss NaNs after step
-1), `gpt2_mini` (inference, no updates) as 3.6e+34 drift. Reduced outside the harness to a **pure
+Four of the five `pytorch/cuda(hip)` training cells fail parity as `loss stationary` (loss NaNs after
+step 1) — `cifar_conv`, `cifar_stride`, `lenet`, `mlp_wide` — and `gpt2_mini` (inference, no updates)
+fails at 3.6e+34 drift. **`mlp_small` passes** (1.7e-07, loss moving), and that exception is itself
+confirming rather than contradicting: its hidden width is 64, so its bias-gradient reduction is
+`[64,64]`, inside the clean size range of the sweep below. Reduced outside the harness to a **pure
 reduction**, no benchmark code involved:
 
 ```

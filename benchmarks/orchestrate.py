@@ -67,6 +67,9 @@ SKIP_CELLS = {
     # artifacts written, >65 min at constant 3-thread CPU spin, zero autotune_log lines past
     # "arm A search:"); mlp_small hip/tuned completes in ~40 s on the same tree. gfx1151/WSL,
     # gh-ocannl-476 ROCm leg. The default and materialized variants cover the hip column.
+    # Observed on ONE configuration only (gfx1151 under WSL) and not yet bisected, so it is
+    # unknown whether other HIP devices/OSes are affected: use --no-skip-cells to retest it
+    # (gh-ocannl-532 wants exactly that datapoint from native Linux or a CDNA part).
     ("mlp_wide", "hip", "tuned"),
 }
 
@@ -220,6 +223,12 @@ def main():
     )
     ap.add_argument("--skip-build", action="store_true")
     ap.add_argument(
+        "--no-skip-cells",
+        action="store_true",
+        help="run the SKIP_CELLS entries too. Each was observed pathological on one "
+        "machine/backend/OS; use this to retest whether the entry still applies here",
+    )
+    ap.add_argument(
         "--only",
         nargs="*",
         default=["ocannl", "pytorch", "tinygrad"],
@@ -293,8 +302,9 @@ def main():
                 variants.extend(args.precision)
             for backend in ["cc"] + ([gpu_ocannl] if gpu_ocannl else []):
                 for variant in variants:
-                    if (name, backend, variant) in SKIP_CELLS:
-                        print(f"--- {name} ocannl/{backend}/{variant}: SKIPPED (SKIP_CELLS)")
+                    if (name, backend, variant) in SKIP_CELLS and not args.no_skip_cells:
+                        print(f"--- {name} ocannl/{backend}/{variant}: SKIPPED (SKIP_CELLS; "
+                              "--no-skip-cells to run it anyway)")
                         continue
                     env = dict(
                         os.environ,
