@@ -150,9 +150,12 @@ type entry = {
   segments : (string * saved_schedule) list option; [@sexp.option]
       (** A fissioned winner (docs: per-fission-segment tuning): per-segment schedules keyed by the
           {e pre-schedule} segment's canonical digest — replay routes each of
-          {!Schedule.fission_scheduled}'s [`Normal] segments through this association ([saved] is
-          then empty; unmatched segments degrade to the empty schedule). [None] for whole-routine
-          schedules. *)
+          {!Schedule.fission_scheduled}'s [`Normal] segments through this association (unmatched
+          segments degrade to the empty schedule). [None] for whole-routine schedules. With
+          [segments] present, [saved] is empty except for a split-reduce winner (gh-ocannl-484 task
+          3), where it holds the whole-routine prelude — resolved against the {e base} canonical
+          form and applied before fission, the segment keys then addressing the {e post-prelude}
+          segmentation. *)
   best_ms : float;  (** The winning candidate's measured time, for diagnostics. *)
   baseline_ms : float;  (** The unscheduled baseline's measured time, for diagnostics. *)
 }

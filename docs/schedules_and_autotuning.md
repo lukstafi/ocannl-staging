@@ -152,10 +152,11 @@ what the autotuner's sketch seeds parameterize:
   `Context.compile ~lowered_transforms`) — the partials edge cuts, pass 1 parallelizes over the
   block loop (and any output loops), the combine parallelizes over the target's elements. Serves
   large single-axis reductions (losses, norms, softmax denominators), the embedding-backward
-  scatter, and — as a planned sketch family (task 3 of gh-ocannl-484) — split-K GEMMs. The
-  parity discipline: for a fixed schedule the parallel execution is bitwise-equal to the serial
-  execution of the same schedule (the combine tree is a function of the schedule, not of thread
-  timing); exercised by `test/operations/schedule_split_reduce.ml`.
+  scatter, and split-K GEMMs. The parity discipline: for a fixed schedule the parallel execution
+  is bitwise-equal to the serial execution of the same schedule (the combine tree is a function
+  of the schedule, not of thread timing); exercised by
+  `test/operations/schedule_split_reduce.ml`. The autotuner seeds this composition for
+  reduction-dominated sites (task 3 of gh-ocannl-484; see Autotuning below).
 
 ## The default schedules and kernel fission
 
@@ -210,6 +211,19 @@ the retained procedural analyses alongside the affine engine and raises on diver
   seed `(pad, …, tensorize)` compositions instead of being filtered, for every pipeline that
   stages all its operands. Fused-epilogue twins and per-fission-segment sketches
   (keyed by structural digest) extend the pool.
+- **Split-reduce seeds** (gh-ocannl-484 task 3): `Autotune.split_reduce_sites` detects
+  reduction-dominated accumulations — a target with at most a few thousand cells fed by a serial
+  reduction loop of substantial extent (conv bias/weight gradients, softmax denominators, skinny
+  split-K GEMMs; the gh-ocannl-476 sweep measured one such segment at 60–95% of the default conv
+  training step on both Metal and CUDA), each candidate axis settled by the hermetic
+  `op_legality` probe. Every site is seeded as the two-pass composition above with a few
+  `num_blocks` values as the tunable, applied whole-routine *before* fission so the two passes
+  land in separate kernels; per-site singles plus one composite recombining the best-timed
+  `num_blocks` per site. A split winner's cache entry stores the whole-routine prelude alongside
+  the post-prelude per-segment schedules. `model_default` deliberately does not propose the
+  family: the roofline model prices bytes and flops, not the serialization the split removes, so
+  it could only ever rank the split (strictly more traffic) below the default — the family is
+  reachable through measurement alone.
 - **Beam search**: `autotune_rounds` rounds of width `autotune_beam_width`, each round proposing
   menu actions on the frontier (loop splits, vectorized retypes, tensorization role
   permutations, privatization extensions), compiling and timing candidates

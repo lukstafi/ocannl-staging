@@ -57,6 +57,19 @@
       kernel-window anchor, the accumulator fragment resident across the window (gh-ocannl-480).
       Strided rows (stride-2 stems and downsample blocks) are seeded on both legs since the
       compacting [Stage] (gh-ocannl-502) packs the strided window densely.
+    - {b Split-reduce seeds} (gh-ocannl-484 task 3): when a reduction-dominated site is detected
+      ({!split_reduce_sites} — an rmw accumulation, or the gh-466 [Set_dynamic] scatter, whose
+      target has little output parallelism while a long serial reduction loop feeds it: bias and
+      weight gradients of convolutions, softmax denominators, skinny split-K GEMMs), the
+      deterministic two-pass split reduction ({!Ir.Schedule.constructor-Split_reduce}) with a few
+      [num_blocks] values as the tunable. The prelude applies {e whole-routine before fission}: the
+      per-block partials edge it mints is exactly the materialized cross-nest edge kernel fission
+      cuts at, so the two passes compile as separate kernels with the event chain supplying the
+      grid-wide synchronization the combine needs, and each segment then gets the default preset
+      (the block loop parallelizes pass 1). Sites are seeded as singles plus one composite
+      recombining each site's best-timed [num_blocks]. A split winner persists as prelude +
+      post-prelude per-segment schedules; note the numerics pin — the combine tree is a function of
+      the schedule, so retuning may change low bits (see the schedule-cache docs).
     - {b Beam-round menu actions} on the incumbents: dividing serial Splits, Swaps of perfect serial
       pairs, Unrolls, Retype-Vectorized on innermost loops (explicit SIMD on CPU including the
       reduction-chains rendering of accumulations — gh-ocannl-468 — while GPU accumulations stay
@@ -168,6 +181,25 @@ val extend_with_privatize :
     hermetic copy of the segment (proposals violating the op's preconditions are dropped), so the
     result always applies cleanly where the input schedule does. Exposed for tests. *)
 
+type sr_site = {
+  sr_axis : Ir.Indexing.symbol;  (** The reduction loop to split. *)
+  sr_target : Ir.Tnode.t;  (** The accumulated node. *)
+  sr_red : int;  (** The reduction loop's extent. *)
+  sr_out : int;  (** The target's cell count — the site's whole output parallelism. *)
+  sr_dynamic : bool;  (** The gh-466 scatter form ([Set_dynamic]). *)
+}
+(** A reduction-dominated accumulation site eligible for {!Ir.Schedule.constructor-Split_reduce}
+    seeding (gh-ocannl-484 task 3); see the implementation's field docs. Exposed for tests. *)
+
+val split_reduce_sites : Ir.Low_level.optimized -> sr_site list
+(** The split-reduce seeding sites of the given lowering: rmw accumulations (and gh-466
+    [Set_dynamic] scatters) whose target has at most a few thousand cells while a serial reduction
+    loop of substantial extent feeds it — little output parallelism, lots of splittable reduction
+    work. Per site the largest-extent enclosing serial loop that passes the hermetic
+    {!Ir.Schedule.op_legality} probe of the corresponding [Split_reduce] is chosen (the op's own
+    recognizer decides the pinning discipline), so every returned site is seedable as proposed.
+    Exposed for tests. *)
+
 type report = {
   cache_hit : bool;  (** The schedule came from the disk cache; no search ran. *)
   candidates_timed : int;  (** Including the serial baseline. *)
@@ -192,6 +224,15 @@ type report = {
       (** Of the seeded per-fission-segment sketch candidates, those that compiled and were actually
           timed (not rejected by op preconditions or hardware limits, not deduplicated by digest).
       *)
+  split_reduce_candidates : int;
+      (** Split-reduce seeds (gh-ocannl-484 task 3): one candidate per {!split_reduce_sites} site
+          and eligible [num_blocks] value — the two-pass deterministic split reduction applied
+          whole-routine before fission, each resulting segment getting the default preset.
+          Deterministic given the computation and backend; [0] when no reduction-dominated site is
+          detected. *)
+  split_reduce_timed : int;
+      (** Of the split-reduce candidates (the per-site singles and the recombined multi-site
+          composite), those that compiled and were actually timed. *)
   model_scored : int;
       (** Sketch candidates the analytic cost model scored during the seed pre-filter
           (gh-ocannl-491); [0] when the pre-filter is off ([keep_fraction >= 1]) or nothing was
