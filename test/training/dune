@@ -1,10 +1,15 @@
 (copy_files
  (files ../config/ocannl_config))
 
+; Training executables can each saturate the CPU through the cc backend's process-local OpenMP
+; pool. Serialize their actions by default: concurrent pools oversubscribe non-macOS hosts badly,
+; while compilation and tests outside this directory remain parallel.
+
 (test
  (name data_parallel)
  (package neural_nets_lib)
  (modules data_parallel)
+ (locks ocannl_training_test)
  (deps ocannl_config)
  (libraries base ocannl stdio arrayjit.utils)
  (preprocess
@@ -14,6 +19,7 @@
  (name fused_classifier)
  (package neural_nets_lib)
  (modules fused_classifier)
+ (locks ocannl_training_test)
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
@@ -25,6 +31,7 @@
  (name moons_demo)
  (package neural_nets_lib)
  (modules moons_demo)
+ (locks ocannl_training_test)
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
@@ -38,6 +45,7 @@
 (test
  (name bigram)
  (package neural_nets_lib)
+ (locks ocannl_training_test)
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
@@ -50,6 +58,7 @@
  (name embedding_ids)
  (package neural_nets_lib)
  (modules embedding_ids)
+ (locks ocannl_training_test)
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
@@ -69,6 +78,7 @@
 (rule
  (alias slow)
  (package neural_nets_lib)
+ (locks ocannl_training_test)
  (deps
   mlp_names.expected
   ocannl_config
@@ -95,6 +105,7 @@
 (rule
  (alias slow)
  (package neural_nets_lib)
+ (locks ocannl_training_test)
  (deps
   mlp_bn_names.expected
   ocannl_config
@@ -118,6 +129,7 @@
 (test
  (name circles_conv)
  (package neural_nets_lib)
+ (locks ocannl_training_test)
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
@@ -144,6 +156,7 @@
 (rule
  (alias slow)
  (package neural_nets_lib)
+ (locks ocannl_training_test)
  (deps
   mnist_conv.expected
   ocannl_config
@@ -171,6 +184,7 @@
 (rule
  (alias slow)
  (package neural_nets_lib)
+ (locks ocannl_training_test)
  (deps
   cifar_conv.expected
   ocannl_config
@@ -190,6 +204,7 @@
 (test
  (name fsm_transformer)
  (package neural_nets_lib)
+ (locks ocannl_training_test)
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
@@ -207,6 +222,7 @@
 (test
  (name transformer_names)
  (package neural_nets_lib)
+ (locks ocannl_training_test)
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
@@ -221,6 +237,7 @@
 (test
  (name tokenizer_roundtrip)
  (package neural_nets_lib)
+ (locks ocannl_training_test)
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
@@ -245,6 +262,7 @@
 (test
  (name virtual_grads_parity)
  (package neural_nets_lib)
+ (locks ocannl_training_test)
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
@@ -260,6 +278,7 @@
 (test
  (name mixed_prec_parity)
  (package neural_nets_lib)
+ (locks ocannl_training_test)
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))

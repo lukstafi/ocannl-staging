@@ -1190,6 +1190,8 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; Deliberately does not take the ocannl_training_test lock: overlap with another process-local
+; OpenMP pool is useful whole-suite concurrency stress. Keep this action bounded instead.
 (test
  (name cpu_parallel)
  (package neural_nets_lib)
