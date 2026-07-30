@@ -1,0 +1,11 @@
+non-overlapping pool dispatches to the input-space gate: true
+overlapping pool keeps the product-space gate: true
+pool 2/2 no-padding with ties: input-space gate matches the product-space gate bitwise: true
+pool 3/2 gapped no-padding: input-space gate matches the product-space gate bitwise: true
+pool 2/2 padded: input-space gate matches the product-space gate bitwise: true
+pool 3/3 padded (clamped edge windows): input-space gate matches the product-space gate bitwise: true
+max_pool2d_copy padded: gates match bitwise: true
+einmax1 full reduction with ties: gates match bitwise: true
+tie gradient gates every achieving position: true
+
+Done.

@@ -1689,6 +1689,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name nonoverlap_pool_grads)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules nonoverlap_pool_grads)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name overlapping_window_grads)
  (package neural_nets_lib)
  (deps
