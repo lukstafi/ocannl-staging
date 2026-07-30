@@ -1,9 +1,9 @@
 Generating 160 circle counting images (3 classes)...
 Dataset generated: images shape [160; 16; 16; 1], labels shape [160; 1]
 
-Starting training for 1000 epochs (5000 steps)...
+Starting training for 750 epochs (3750 steps)...
 Epoch 10: avg loss = 1.1
-Epoch 20: avg loss = 1.1
+Epoch 20: avg loss = 1.0
 Epoch 30: avg loss = 1.0
 Epoch 40: avg loss = 1.0
 Epoch 50: avg loss = 1.0
@@ -11,18 +11,18 @@ Epoch 60: avg loss = 1.0
 Epoch 70: avg loss = 1.0
 Epoch 80: avg loss = 1.0
 Epoch 90: avg loss = 1.0
-Epoch 100: avg loss = 1.0
-Epoch 900: avg loss = 0.3
-Epoch 910: avg loss = 0.3
-Epoch 920: avg loss = 0.3
-Epoch 930: avg loss = 0.3
-Epoch 940: avg loss = 0.3
-Epoch 950: avg loss = 0.3
-Epoch 960: avg loss = 0.2
-Epoch 970: avg loss = 0.2
-Epoch 980: avg loss = 0.2
-Epoch 990: avg loss = 0.2
-Epoch 1000: avg loss = 0.2
+Epoch 100: avg loss = 0.9
+Epoch 650: avg loss = 0.3
+Epoch 660: avg loss = 0.3
+Epoch 670: avg loss = 0.3
+Epoch 680: avg loss = 0.3
+Epoch 690: avg loss = 0.3
+Epoch 700: avg loss = 0.3
+Epoch 710: avg loss = 0.3
+Epoch 720: avg loss = 0.3
+Epoch 730: avg loss = 0.3
+Epoch 740: avg loss = 0.3
+Epoch 750: avg loss = 0.3
 Final avg loss below threshold=true
 
 Training complete!

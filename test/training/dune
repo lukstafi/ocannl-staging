@@ -110,9 +110,10 @@
 
 ; circles_conv is a training integration run: in the default runtest suite since its sgd step
 ; is autotuned (materialized intermediates + Autotune.tune), and the loss accumulates on device
-; (Train.grad_update ?accum_loss) so the loop syncs once per epoch. NOTE: ~27s on cc, ~60s on
-; the metal backend with a fresh tune cache (batch 32 / 5k steps: the remaining metal cost is
-; GPU execution of the fissioned step's ~40 serialized dispatches).
+; (Train.grad_update ?accum_loss) so the loop syncs once per epoch. NOTE: ~87s on cc, ~76s on
+; the metal backend with a cold tune search on the reference Mac (batch 32 / 3.75k steps: the
+; remaining metal cost is compilation plus GPU execution of the fissioned step's ~40 serialized
+; dispatches).
 
 (test
  (name circles_conv)

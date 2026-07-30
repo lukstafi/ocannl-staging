@@ -48,7 +48,7 @@ let () =
   (* Generate training data. Batch 32 over the same 160 images (5 batches instead of 20) keeps GPU
      wall time bounded: the fissioned sgd step has a near-constant per-step dispatch cost, so fewer,
      larger steps at the same samples-per-epoch are strictly Metal-friendlier (20k steps at batch 8
-     -> 5k steps at batch 32). *)
+     -> 3.75k steps at batch 32 with the shortened schedule below). *)
   let batch_size = 32 in
   let total_samples = batch_size * 5 in
   let n_batches = total_samples / batch_size in
@@ -92,17 +92,20 @@ let () =
   let%op batch_loss = (sample_loss ++ "...|... => |->0") /. !..batch_size in
 
   (* Training setup *)
-  let epochs = 1000 in
+  (* The original 1,000-epoch schedule continued well past the point needed by this regression.
+     Seven hundred and fifty epochs still take the same deterministic CNN from near-random loss to
+     below 0.3, while removing 1,250 expensive fissioned GPU steps. *)
+  let epochs = 750 in
   let total_steps = epochs * n_batches in
   Train.every_non_literal_materialized batch_loss;
   (* Accumulate the loss on device so the training loop syncs on the host only once per epoch: a
      per-step [Context.get_values] awaits the whole device, serializing the stream. *)
   let loss_accum = Train.loss_accumulator () in
   let update = Train.grad_update ~accum_loss:loss_accum batch_loss in
-  (* Mild lr scaling for the larger batch (0.01 at batch 8 -> 0.015 at batch 32), partially
-     compensating the 4x fewer updates; this lenet destabilizes at 0.02+ (loss collapses to the
-     uniform-prediction plateau). *)
-  let%op learning_rate = 0.015 *. ((1.2 *. !..total_steps) - !@step_n) /. !..total_steps in
+  (* Mild lr scaling for the larger batch and shorter schedule partially compensates for the 4x
+     fewer updates than the original batch-8 recipe. This lenet destabilizes at 0.02+ (loss
+     collapses to the uniform-prediction plateau). *)
+  let%op learning_rate = 0.018 *. ((1.2 *. !..total_steps) - !@step_n) /. !..total_steps in
   Train.set_materialized learning_rate.value;
   let sgd = Train.sgd_update ~learning_rate batch_loss in
 
@@ -113,13 +116,16 @@ let () =
   let ctx = Train.init_params ctx bindings batch_loss in
   (* Tune the step schedule empirically. [rounds:0] keeps only the preset seed candidates, which all
      preserve reduction order — the trained values are schedule-invariant, so this file's expected
-     output stays deterministic no matter which seed wins. [timing_ctx] gives the tuner a scratch
-     lineage (with its own freshly initialized parameter buffers) to time candidates against, so the
-     timing runs cannot perturb the real training state (a step timed on all-zero data inputs
-     poisons parameters with inf/NaN through log 0). *)
+     output stays deterministic no matter which seed wins. The fixed, launch-bound graph gains
+     nothing from also compiling the generic 64/128/256/512 GPU block-size sweep; the backend-default
+     whole/fission presets remain in the search when [seed_block_sizes] is empty. [timing_ctx] gives
+     the tuner a scratch lineage (with its own freshly initialized parameter buffers) to time
+     candidates against, so the timing runs cannot perturb the real training state (a step timed on
+     all-zero data inputs poisons parameters with inf/NaN through log 0). *)
   let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
   let ctx, sgd_routine =
-    Autotune.tune ~rounds:0 ~timing_ctx:scratch ctx (Asgns.sequence [ update; sgd ]) bindings
+    Autotune.tune ~rounds:0 ~seed_block_sizes:[] ~timing_ctx:scratch ctx
+      (Asgns.sequence [ update; sgd ]) bindings
   in
   let step_ref = IDX.find_exn (Context.bindings sgd_routine) step_n in
   step_ref := 0;
