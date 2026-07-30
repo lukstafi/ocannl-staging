@@ -154,3 +154,44 @@ let () =
   p "model_default reports a choice with its model score"
     ((not (String.is_empty r.Autotune.mc_label))
     && match r.Autotune.mc_model_ms with Some m -> Float.(m > 0.) | None -> false)
+
+let () =
+  (* --- Unbuildable candidates are excluded from the ranking (gh-ocannl-522) ---
+
+     The roofline cannot see that a schedule will not compile, and it rates the tensorized families
+     best, so it used to crown one and — once gh-ocannl-519 stopped that from killing the process —
+     degrade to the default, making the gate a no-op exactly where it looked most promising. With
+     [validate_parallel] applied to each candidate's scheduled form during scoring, the dead ones
+     drop out and the argmin is taken over what can actually be built.
+
+     A 128x128 matmul is the smallest square size at which the C backend's packed mma sketches both
+     get seeded and beat the default under this rule's bandwidth-dominant envelope. *)
+  let m = 128 in
+  let av = Array.init (m * m) ~f:(fun i -> Float.of_int (i % 7) *. 0.5) in
+  let bv = Array.init (m * m) ~f:(fun i -> Float.of_int (i % 11) -. 4.) in
+  let expected =
+    Array.init (m * m) ~f:(fun idx ->
+        let i = idx / m and j = idx % m in
+        let acc = ref 0. in
+        for k = 0 to m - 1 do
+          acc := !acc +. (av.((i * m) + k) *. bv.((k * m) + j))
+        done;
+        !acc)
+  in
+  let va = TDSL.ndarray av ~label:[ "vd_a" ] ~input_dims:[ m ] ~output_dims:[ m ] () in
+  let vb = TDSL.ndarray bv ~label:[ "vd_b" ] ~input_dims:[ m ] ~output_dims:[ m ] () in
+  let%op vc = relu (va * vb) in
+  let comp = named "model_default_valid_mm" (Train.forward vc) in
+  let choice = ref None in
+  let ctx = Context.auto () in
+  let ctx, routine =
+    Autotune.model_default ~report:(fun r -> choice := Some r) ctx comp Ir.Indexing.Empty
+  in
+  let ctx = Context.run ctx routine in
+  let got = Context.get_values ctx vc.Tensor.value in
+  let r = Option.value_exn ~here:[%here] !choice in
+  p "some candidates are excluded as unbuildable" (r.Autotune.mc_rejected >= 1);
+  p "the surviving argmin is a schedule, not the default fallback"
+    (not (String.equal r.Autotune.mc_label "default"));
+  p "the picked schedule computes correct values"
+    (Array.for_all2_exn got expected ~f:(fun a b -> Float.(abs (a - b) < 1e-2)))

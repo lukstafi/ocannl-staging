@@ -16,3 +16,6 @@ tuned values correct with and without the pre-filter: true
 model_default returns a working routine with correct values: true
 model_default scored candidates (default pipeline included): true
 model_default reports a choice with its model score: true
+some candidates are excluded as unbuildable: true
+the surviving argmin is a schedule, not the default fallback: true
+the picked schedule computes correct values: true

@@ -193,6 +193,15 @@
   with the ordinary default pipeline, the reported choice degrading to `"default"`. Once the
   compile is on that pipeline there is nothing left to fall back to, so its failures propagate
   without a duplicate attempt.
+- The cost model's untuned-default selection no longer ranks candidates it cannot build
+  (gh-ocannl-522): the roofline has no notion of compilability and rates the tensorized families
+  best, so on backends where those are unbuildable (gh-ocannl-521) it crowned one and — with the
+  fallback above — degraded straight back to the default, making the gate a no-op exactly where
+  it looked most promising. Each candidate's scheduled form is now checked with
+  `Low_level.validate_parallel` during scoring, on the hermetic copy it is already scored on, and
+  the dead ones drop out of the argmin; the count is reported as `model_choice.mc_rejected` and
+  logged under `autotune_log`. On a 128x128 matmul+relu on `cc` this changes the outcome from
+  "default" (22 of 64 candidates unbuildable) to a packed mma sketch that compiles and runs.
 
 ## [0.8] -- 2026-07-13
 

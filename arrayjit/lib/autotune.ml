@@ -2597,6 +2597,9 @@ type model_choice = {
       (** Model evaluations that produced a score (the default pipeline included; the fissioned flow
           also scores per segment). *)
   mc_skipped : int;  (** Model evaluations without coverage, excluded from ranking. *)
+  mc_rejected : int;
+      (** Candidates excluded from the ranking because their scheduled form fails
+          {!Ir.Low_level.validate_parallel} — it could not have compiled (gh-ocannl-522). *)
 }
 
 let model_default_enabled =
@@ -2642,7 +2645,9 @@ let model_default ?report ctx comp bindings =
   let static_indices = Idx.bound_symbols bindings in
   let peak_flops, peak_memory_bandwidth = envelope ~limits in
   let emit r = Option.iter report ~f:(fun f -> f r) in
-  let no_selection = { mc_label = "default"; mc_model_ms = None; mc_scored = 0; mc_skipped = 0 } in
+  let no_selection =
+    { mc_label = "default"; mc_model_ms = None; mc_scored = 0; mc_skipped = 0; mc_rejected = 0 }
+  in
   if
     (Option.is_none peak_flops && Option.is_none peak_memory_bandwidth)
     || not (Sched.automatic_schedule_active ~backend_name:backend)
@@ -2656,7 +2661,7 @@ let model_default ?report ctx comp bindings =
        fall back to. *)
     let applied_pick = ref false in
     let transforms (opt : LL.optimized) : LL.optimized list =
-      let n_scored = ref 0 and n_skipped = ref 0 in
+      let n_scored = ref 0 and n_skipped = ref 0 and n_rejected = ref 0 in
       let score opts =
         match
           summaries_roofline ~peak_flops ~peak_memory_bandwidth
@@ -2668,6 +2673,22 @@ let model_default ?report ctx comp bindings =
         | None ->
             Int.incr n_skipped;
             None
+      in
+      (* The roofline has no notion of whether a candidate compiles, and it rates tensorized code
+         best -- so on backends where the tensorized families are unbuildable (gh-ocannl-521) the
+         model confidently crowned one, and the pick could only degrade back to the default
+         (gh-ocannl-522). Validating each candidate's scheduled form here instead drops the dead
+         ones from the RANKING, so the model picks the best schedule that can actually be built. The
+         scored forms are hermetic copies ([scratch_of]), so the placements this forces are the
+         copies', not the ones the real compile will use. *)
+      let score_valid opts =
+        match validate_segments opts with
+        | exception exn ->
+            Int.incr n_rejected;
+            logf "model_default: candidate excluded, its schedule cannot compile (%s)"
+              (Exn.to_string exn);
+            None
+        | opts -> score opts
       in
       let default_segs () =
         Sched.maybe_default_schedules ~backend_name:backend ~limits ~static_indices opt
@@ -2695,7 +2716,7 @@ let model_default ?report ctx comp bindings =
                 List.filter_map (sketch_seed_params ~is_gpu ~is_cpu ~limits opt) ~f:(fun p ->
                     match Sched.apply ~static_indices (sketch_schedule ~p opt) (scratch_of opt) with
                     | exception _ -> None
-                    | post -> Option.map (score [ post ]) ~f:(fun s -> (p, s)))
+                    | post -> Option.map (score_valid [ post ]) ~f:(fun s -> (p, s)))
               in
               let contenders =
                 List.map whole ~f:(fun (p, s) -> (spec_label (Whole (W_sketch p)), s, `Whole p))
@@ -2727,7 +2748,7 @@ let model_default ?report ctx comp bindings =
                                           (scratch_of pre)
                                       with
                                       | exception _ -> None
-                                      | sp -> Option.map (score [ sp ]) ~f:(fun s -> (p, s)))
+                                      | sp -> Option.map (score_valid [ sp ]) ~f:(fun s -> (p, s)))
                                   |> List.min_elt ~compare:(fun (_, a) (_, b) -> Float.compare a b)
                                 in
                                 match (base_score, best_sketch) with
@@ -2750,7 +2771,7 @@ let model_default ?report ctx comp bindings =
                         | exception _ -> None
                         | tuples2 ->
                             let posts = List.map tuples2 ~f:(fun (_, _, _, post) -> post) in
-                            Option.map (score posts) ~f:(fun s -> (entries, s)))
+                            Option.map (score_valid posts) ~f:(fun s -> (entries, s)))
               in
               let contenders =
                 contenders
@@ -2777,6 +2798,7 @@ let model_default ?report ctx comp bindings =
           mc_model_ms = Option.map model_s ~f:(fun s -> s *. 1e3);
           mc_scored = !n_scored;
           mc_skipped = !n_skipped;
+          mc_rejected = !n_rejected;
         };
       let apply_action () =
         (* Picks are validated here, not left to codegen: [validate_segments] is what makes a pick
@@ -2799,16 +2821,23 @@ let model_default ?report ctx comp bindings =
       in
       match apply_action () with
       | segs ->
-          logf "model_default: chose %s (model %s; %d scored, %d without coverage)" label
+          logf "model_default: chose %s (model %s; %d scored, %d without coverage, %d unbuildable)"
+            label
             (match model_s with Some s -> Printf.sprintf "%.6f ms" (s *. 1e3) | None -> "n/a")
-            !n_scored !n_skipped;
-          applied_pick := (match action with `Default -> false | `Whole _ | `Fiss _ -> true);
+            !n_scored !n_skipped !n_rejected;
+          (applied_pick := match action with `Default -> false | `Whole _ | `Fiss _ -> true);
           segs
       | exception exn ->
           logf
             "model_default: winner %s FAILED to apply or validate (%s); using the default pipeline"
             label (Exn.to_string exn);
-          choice := { no_selection with mc_scored = !n_scored; mc_skipped = !n_skipped };
+          choice :=
+            {
+              no_selection with
+              mc_scored = !n_scored;
+              mc_skipped = !n_skipped;
+              mc_rejected = !n_rejected;
+            };
           applied_pick := false;
           default_segs ()
     in
