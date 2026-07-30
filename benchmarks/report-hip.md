@@ -202,8 +202,17 @@ gradient and kills training.
 Two controls establish it is torch's kernel and not this environment: **tinygrad on the same swapped
 HSA runtime is correct and bit-repeatable** on the identical shapes (54.821 across 8 runs), and every
 OCANNL `hip` cell passes the parity gate — including the conv workloads, whose bias gradients are the
-same reduction shape. Worth reporting upstream; until then torch/ROCm numbers from gfx1151 should be
-treated as suspect, and this report's torch GPU column is not a measurement.
+same reduction shape. Until this is fixed upstream, torch/ROCm numbers from gfx1151 should be treated
+as suspect, and this report's torch GPU column is not a measurement.
+
+It is not an isolated report: gfx1151 has a documented family of torch numerical failures —
+[ROCm/ROCm#6034](https://github.com/ROCm/ROCm/issues/6034) (5 bf16 bugs found across 93 training
+experiments on this exact SoC), [ROCm/TheRock#5259](https://github.com/ROCm/TheRock/issues/5259)
+(kernels aborting with `HSA_STATUS_ERROR_EXCEPTION`, with inf/nan appearing upstream of them), and
+[unslothai/unsloth#3385](https://github.com/unslothai/unsloth/issues/3385) (NaN losses from step 1).
+Stable ROCm does not ship gfx1151 kernels at all, so consumer Strix Halo runs on nightly builds. The
+case here is narrower and easier to act on than those: **f32, not bf16, and a two-line repro against
+`Tensor.sum(0)` with no model involved** — worth filing upstream on its own.
 
 This is also a second independent vindication of gh-ocannl-523's did-the-loss-move check: without it,
 four cells with NaN losses would have scored a *passing* max-rel-diff and been published as if they
