@@ -57,10 +57,26 @@ let census tag ~m ~n ~k =
       ctx fwd Ir.Indexing.Empty
   in
   let opt = Option.value_exn ~here:[%here] !capture in
-  let ep_params =
+  let mma_params =
     List.filter (Autotune.sketch_seed_params ~is_gpu ~is_cpu ~limits opt) ~f:(fun q ->
-        q.Autotune.sk_mma && q.Autotune.sk_epilogue)
+        q.Autotune.sk_mma)
   in
+  let ep_params = List.filter mma_params ~f:(fun q -> q.Autotune.sk_epilogue) in
+  (* Vacuous only where the backend advertises no mma format tile for this site's precision at all:
+     CUDA/HIP need the tf32 arm (config [tf32_matmuls]) for an f32 site, Metal's simdgroup matrices
+     take f32 directly, and cc packs its own tile. Say so on stderr — as [autotune_mma_companion]
+     does — so a vacuous pass is not mistaken for coverage, and keep the golden backend-independent
+     rather than asserting a bare [true] that no CUDA run at default config can satisfy.
+
+     Deliberately keyed on the mma family as a whole, NOT on [ep_params]: the epilogue twins are
+     what this test asserts the existence of, so excusing their absence by their own absence would
+     make every assertion below self-satisfying and would mask the regression on a backend that
+     does advertise a tile (Metal at f32, CUDA under tf32). Where the family is seeded, the twins
+     are required. *)
+  let vacuous = is_gpu && List.is_empty mma_params in
+  if vacuous then
+    Stdio.eprintf "%s: no GPU mma seed for this site on %s — the checks below are vacuous\n" tag
+      backend_name;
   (* Structural leg: the twin applies and its scheduled form passes [validate_parallel] — the only
      remaining gate before a tuner would time it is the backend compile itself. *)
   let n_ok =
@@ -100,9 +116,11 @@ let census tag ~m ~n ~k =
           Int.incr n_ran;
           if Array.for_all2_exn got want ~f:approx then Int.incr n_correct
       | exception _ -> ());
-  p (tag ^ ": mma epilogue twins are seeded") (List.length ep_params > 0);
-  p (tag ^ ": at least one epilogue twin applies and validates (reaches timing)") (n_ok >= 1);
-  p (tag ^ ": some epilogue twin compiles and runs end-to-end") (!n_ran >= 1);
+  p (tag ^ ": mma epilogue twins are seeded") (vacuous || List.length ep_params > 0);
+  p
+    (tag ^ ": at least one epilogue twin applies and validates (reaches timing)")
+    (vacuous || n_ok >= 1);
+  p (tag ^ ": some epilogue twin compiles and runs end-to-end") (vacuous || !n_ran >= 1);
   p (tag ^ ": every running twin matches the untuned reference") (!n_ran = !n_correct)
 
 let () =
