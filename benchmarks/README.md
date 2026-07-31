@@ -103,9 +103,12 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   `/opt/rocm/lib/rocm_sysdeps/lib` on `LD_LIBRARY_PATH`. See
   [example-report.md](example-report.md) (macOS/Metal),
   [example-report-cuda.md](example-report-cuda.md) (Linux/CUDA),
-  [report-hip.md](report-hip.md) (WSL2/HIP on gfx1151, all three frameworks) and
+  [report-hip.md](report-hip.md) (WSL2/HIP on gfx1151, all three frameworks),
   [report-cifar-cuda.md](report-cifar-cuda.md) (Linux/CUDA, the cifar-scale conv baseline
-  for gh-ocannl-500/502 with a per-layer breakdown) for checked-in example output
+  for gh-ocannl-500/502 with a per-layer breakdown) and
+  [report-gh484-cuda.md](report-gh484-cuda.md) (Linux/CUDA, the paired before/after A/B of
+  gh-ocannl-484 task 3's split-reduce seeding — also the reference for why only same-session
+  paired runs are trustworthy on that machine) for checked-in example output
   (`results/` itself is gitignored).
 - `runners/ocannl/bench_{gpt,conv}_diag.ml` — schedule diagnostics: print the default
   fission-pipeline segment census (launch geometry, per-nest loop extents, written nodes with
@@ -120,6 +123,12 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   same instrument attributes the transformer blocks: it is what showed gpt2_mini's step to be
   concentrated in the per-layer FFN projections and the lm_head rather than spread evenly, despite
   every segment sharing identical launch geometry (gh-ocannl-531).
+  `BENCH_SR_SITES=1` (`bench_conv_diag`) prints what `Autotune.split_reduce_sites` proposes on the
+  same graph — the gh-ocannl-484 task-3 seeding can only reach the accumulations listed there, so
+  it is the companion to the census above when asking why a seeded split-reduce family did or did
+  not move a workload (it is what showed the detector finding only the classifier head on all three
+  conv benchmarks; see [report-gh484-cuda.md](report-gh484-cuda.md)). Compile-time only, off the
+  timing path, so it composes with `BENCH_SEG_TIMES=1` and with `BENCH_MATERIALIZE=1`.
 - `runners/ocannl/bench_metal_bug.ml` — standalone (no OCANNL) repro of an Apple Metal
   shader-compiler miscompilation: a serial `acc[0] = acc[0] + f(i)` loop over
   slot-table-derived pool pointers keeps only the last iteration's contribution. OCANNL works

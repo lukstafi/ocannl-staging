@@ -117,6 +117,17 @@ let () =
     match Stdlib.Sys.getenv_opt "BENCH_PROMOTE" with Some "0" -> Some false | _ -> None
   in
   H.print_census ?promote_locals ~backend ~limits ~static_indices:[ batch_n ] opt;
+  (* Which accumulations the gh-ocannl-484 task-3 detector actually proposes on this graph — the
+     seeded family can only reach the segments listed here, so this is what says whether the
+     dominant segment of the census above is even a candidate. *)
+  (if H.env_flag "BENCH_SR_SITES" then
+     let sites = Autotune.split_reduce_sites opt in
+     Stdio.printf "split-reduce sites detected: %d\n" (List.length sites);
+     List.iter sites ~f:(fun s ->
+         Stdio.printf "  %s: reduction extent %d, target cells %d%s\n"
+           (Ir.Tnode.debug_name s.Autotune.sr_target)
+           s.Autotune.sr_red s.Autotune.sr_out
+           (if s.Autotune.sr_dynamic then " (scatter)" else "")));
   let t0 = Unix.gettimeofday () in
   let ctx, routine = Context.compile ctx step_comp bindings in
   let compile_s = Unix.gettimeofday () -. t0 in
