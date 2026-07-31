@@ -187,6 +187,12 @@ module Impl = struct
     ({ queue = actual_queue; event = shared_event_obj; counter; fused = None }, opt_log_entries_ref)
 
   let get_device ~(ordinal : int) : device =
+    (* See the note in [Cuda_backend.get_device]: no Metal device at all is the discovery failure
+       [Context.auto] falls through on; a bad ordinal is a caller error. *)
+    if num_devs () = 0 then
+      raise
+      @@ Backend_intf.Backend_unavailable
+           { backend = name; detail = "no Metal device on this system" };
     if ordinal < 0 || num_devs () <= ordinal then
       invalid_arg [%string "Metal_backend.get_device %{ordinal#Int}: invalid ordinal"];
     let devices_cache = Lazy.force devices_cache in

@@ -165,6 +165,15 @@
  (libraries base stdio arrayjit.ir))
 
 (test
+ (name test_backend_selection)
+ (package arrayjit)
+ (modules test_backend_selection)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (libraries base arrayjit.ir arrayjit.context))
+
+(test
  (name test_multidev_error_propagation)
  (package arrayjit)
  (modules test_multidev_error_propagation)

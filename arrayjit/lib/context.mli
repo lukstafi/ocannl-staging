@@ -29,7 +29,15 @@ val cpu : ?threads:int -> unit -> t
     parallelism is automatic either way. *)
 
 val auto : unit -> t
-(** Automatically select the best available backend. *)
+(** Automatically select the best available backend: the [backend] setting if configured, otherwise
+    the first of metal, cuda, hip, cc whose device discovery succeeds. Only
+    {!Ir.Backend_intf.Backend_unavailable} moves on to the next backend — a driver that is present
+    but fails to initialize, an interrupt, or an assertion failure propagates rather than silently
+    downgrading the run (gh-ocannl-536). *)
+
+val advances_to_next_backend : exn -> bool
+(** The selection policy of {!auto}, exposed so it can be pinned without a device: [true] exactly
+    for the failures that mean "this backend is not available on this machine". *)
 
 (** {2 Core operations} *)
 

@@ -18,6 +18,19 @@ type buffer_loc = { pool_id : int; offset : int } [@@deriving sexp, compare, equ
 
 type ctx_buffers = buffer_loc Map.M(Tnode).t [@@deriving sexp_of]
 
+exception Backend_unavailable of { backend : string; detail : string }
+(** Device discovery established that this backend cannot be used on this machine: its library is
+    not linked in, or the driver reports no devices. This is deliberately narrow — it is the only
+    failure {!Context.auto} treats as "try the next backend" (gh-ocannl-536 landing step 5). A
+    driver that is present but fails to initialize is {e not} this: that is a real problem with a
+    real installation, and silently selecting another backend would hide it. *)
+
+let () =
+  Stdlib.Printexc.register_printer (function
+    | Backend_unavailable { backend; detail } ->
+        Some (Printf.sprintf "Backend %s unavailable: %s" backend detail)
+    | _ -> None)
+
 (** Element formats tensor-core instructions accept for their multiplicand operands. This is
     deliberately NOT [Ops.prec]: formats like tf32 have no byte layout of their own, so they must
     never appear as a tensor node's storage precision. *)

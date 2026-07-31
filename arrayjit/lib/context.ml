@@ -91,22 +91,37 @@ let cpu ?threads () =
   let backend_name = match threads with None | Some 1 -> "cc" | Some _ -> "multidev_cc" in
   create_from_backend_name ~device_id:0 backend_name
 
+(* gh-ocannl-536 landing step 5: backend selection is not candidate compilation, so it does not use
+   the compile-phase policy — but it used to catch everything, which turned a broken driver, an
+   assertion failure, or an interrupt into a silent downgrade to another backend (and, on the
+   configured arm, into the misleading "Unknown backend"). Only {!BI.Backend_unavailable} — raised
+   by device discovery when the library is not linked in or the driver reports no devices — advances
+   to the next candidate; everything else propagates with its original backtrace. *)
+let advances_to_next_backend = function BI.Backend_unavailable _ -> true | _ -> false
+
 let auto () =
   (* First check if a backend is configured globally *)
   match Utils.get_global_arg ~arg_name:"backend" ~default:"" with
   | "" ->
       (* No global config, try backends in order of preference *)
       let backends_to_try = [ "metal"; "cuda"; "hip"; "cc" ] in
-      let rec try_backends = function
-        | [] -> failwith "No backend available"
+      let rec try_backends unavailable = function
+        | [] ->
+            failwith
+              ("Context.auto: no backend available; tried "
+              ^ String.concat ~sep:", " (List.rev unavailable))
         | name :: rest -> (
-            try create_from_backend_name ~device_id:0 name with _ -> try_backends rest)
+            match create_from_backend_name ~device_id:0 name with
+            | ctx -> ctx
+            | exception exn when advances_to_next_backend exn ->
+                try_backends (Exn.to_string exn :: unavailable) rest)
       in
-      try_backends backends_to_try
-  | backend_name -> (
-      (* Use the configured backend *)
-      try create_from_backend_name ~device_id:0 backend_name
-      with _ -> invalid_arg ("Unknown backend: " ^ backend_name))
+      try_backends [] backends_to_try
+  | backend_name ->
+      (* Use the configured backend. An unknown name already raises a message naming it
+         ([Backends.get_backend]); an unusable one keeps its own failure rather than being relabeled
+         as a spelling mistake. *)
+      create_from_backend_name ~device_id:0 backend_name
 
 let compile_outcome ?name ?lowered_transform ?lowered_transforms ~provenance ?candidate ctx comp
     bindings =

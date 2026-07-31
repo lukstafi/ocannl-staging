@@ -95,8 +95,13 @@ struct
   let is_idle _device =
     failwith @@ "Backend " ^ Config.name ^ " missing -- install the corresponding library"
 
+  (* Device acquisition is the discovery seam [Context.auto] falls through on, so it signals the
+     narrow [Backend_unavailable] rather than a generic [Failure]. The remaining stubs keep
+     [failwith]: reaching them means a caller already holds a device of a backend that has none. *)
   let get_device ~ordinal:_ =
-    failwith @@ "Backend " ^ Config.name ^ " missing -- install the corresponding library"
+    raise
+    @@ Backend_intf.Backend_unavailable
+         { backend = Config.name; detail = "missing -- install the corresponding library" }
 
   let num_devices () = 0
 
