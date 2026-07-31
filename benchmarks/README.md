@@ -112,8 +112,11 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   for gh-ocannl-500/502 with a per-layer breakdown) and
   [report-gh484-cuda.md](report-gh484-cuda.md) (Linux/CUDA, the paired before/after A/B of
   gh-ocannl-484 task 3's split-reduce seeding — also the reference for why only same-session
-  paired runs are trustworthy on that machine) for checked-in example output
-  (`results/` itself is gitignored).
+  paired runs are trustworthy on that machine) and
+  [report-gh537-cuda.md](report-gh537-cuda.md) (Linux/CUDA, its successor: the paired A/B of
+  gh-ocannl-537's `Swap` ∘ `Split_reduce` seeding, which removes ~90% of the segment gh-484 was
+  filed against — and the reference for why a segment share must name the placement it is a share
+  of) for checked-in example output (`results/` itself is gitignored).
   [RESULTS-484-532.md](RESULTS-484-532.md) is the raw extracted dataset behind `report-hip.md`'s
   post-gh-527 subsection and the gh-ocannl-532 correction (per-segment attribution, the
   split-reduce `op_legality` verdicts, and the nine variant cells) — kept because that session's
