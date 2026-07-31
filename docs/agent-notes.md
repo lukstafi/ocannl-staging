@@ -141,6 +141,18 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   candidate compile, and a count of proposals then reads as coverage it does not have — assert on
   the *timed* counter (`report.mma_timed`, `fiss_sketch_timed`, `split_reduce_timed`), and follow it
   with an executed value check, since a candidate that compiles is not yet one that computes.
+- Supplying a `?lowered_transform` bypasses the default annotator entirely (`backends.ml` `compile`
+  only calls `Schedule.maybe_default_schedules` in the `None, None` arm), so **any** code that goes
+  through that seam is the unscheduled serial form unless it schedules itself. The autotuner's base
+  compile is exactly that, which is why its baseline candidate binds no hardware dimension on GPU:
+  the whole routine in one work-item. Such a dispatch is unbounded in cost and uninterruptible on a
+  device shared with the display — measured 6.9 s/run on Metal for LeNet (winner 35.7 ms) and hours
+  on gfx1151, with driver timeouts and a lost display (gh-ocannl-532). `Autotune.tune` therefore
+  does not dispatch an unparallelized candidate on a GPU backend at all: `dispatchable` gates both
+  the baseline and every candidate, `baseline_ms` is `infinity` there, and if nothing at all gets
+  timed the search stores no cache entry and returns the untuned default compile rather than the
+  serial incumbent. On CPU backends the serial form runs at full single-core speed and is still
+  timed. When timing anything else through this seam, price the serial form before dispatching it.
 
 ## Backends
 
