@@ -695,11 +695,47 @@ the normal training lock if its setup exercises the process-local pool.
    post-link validator, and land the gated "rejected before launch, following reduction correct"
    test. Add CUDA diagnostics/validation only for API-supported limits. Keep Metal's unused static
    threadgroup-memory cross-check as a separate cleanup commit.
+   **Landed, Metal half only.** Metal's post-link `maxTotalThreadsPerThreadgroup` check raised a
+   bare `Utils.User_error`, so under strict classification one register-heavy candidate was fatal
+   rather than declined; it is now a typed `Resource_exceeded Workgroup_threads` at `Backend_link`.
+   `get_static_threadgroup_memory_length` is now called, checked against the same device limit the
+   schedule layer estimated against. The HIP private-segment quantity and the CUDA arm still need
+   their machines.
 4. Make runner replacement an explicit backend operation, implement
    `recover_after_launch_failure`, add ledger rollback/poisoning and the fake recovery-state tests,
    then tighten the launch/sync arm. Exercise HIP and CUDA recovery on their machines.
+   **Partly landed: everything except the recovery hook.** The launch/sync arm now passes the real
+   `Context.failure_classifier` instead of an always-`None` classifier — without that a backend
+   could never attribute a launch failure, and the HIP arm had nowhere to plug in.
+   `classified_cause` carries the phase it was raised at, so a report separates a link rejection
+   from a launch refusal from an asynchronous failure at sync. A contained `No_device_writes`
+   rejection rolls back `Context.run`'s optimistic execution marking; a possibly-writing rejection
+   or an unattributed fatal poisons the execution lineage, and every entrypoint on it then refuses,
+   naming the routine and the original failure.
+   `recover_after_launch_failure` is deliberately **not** implemented yet. Nothing would consult
+   it under the current policy — a contained rejection continues without needing it, and everything
+   else is fatal — and its central claim ("`Recovered` commits to a usable state") is exactly the
+   empirical question the HIP machine has to answer. Adding mutable runners and per-backend stubs
+   before then would be untested infrastructure. It becomes worth doing once step 3's HIP validator
+   exists and a launch failure can actually be attributed to a candidate.
 5. Replace `Context.auto`'s blanket catches with `Backend_unavailable` and its focused tests.
    Remove compatibility mode once supported-backend censuses contain no `Unclassified_key`.
+   **Landed.** Device discovery raises `Ir.Backend_intf.Backend_unavailable` when the backend's
+   library is not linked in or the driver reports no devices; only that advances to the next
+   backend. A bad ordinal stays a caller error, a driver-initialization failure propagates, and the
+   configured arm no longer relabels an unusable backend as an unknown name. Compatibility mode
+   stays for now.
 
 Steps 3 and 4 need hardware this machine does not have for their HIP/CUDA acceptance tests. Steps 1,
 2, and 5 are portable; Metal and `cc` cover the generic compiler/link and report paths.
+
+**Where a wall-clock budget would attach (ahrefs/ocannl#532).** #532 asks whether these typed
+outcomes should also carry a time budget on candidate execution — the same containment problem in a
+different currency. They should not carry it as a `cause`: a timeout is not evidence about the
+candidate's validity, and #532's own preferred fix is cheaper and earlier (do not time an
+unparallelized candidate on a GPU backend at all). But the seam is the one this design already
+installed: the `protect` around `time_routine` in `try_spec` is the single place where a launch is
+bounded, and a budget overrun would arrive there as a `Classified` rejection with
+`Writes_may_have_occurred` — a dispatch that was abandoned rather than completed has, by
+construction, written whatever it wrote. That already escalates rather than silently scoring the
+next candidate on the same lineage, so the two mechanisms compose without a second policy.
