@@ -65,7 +65,7 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   (`dune build benchmarks/runners/ocannl/bench_mlp.exe` etc.). Env: `BENCH_FIXTURE` (path),
   `BENCH_TUNE=1` (`Train.tune_placements`: autotunes both the default placements graph and
   the materialize-all graph, keeping the measured winner), `BENCH_MATERIALIZE=1` (materialize
-  intermediates without tuning), `BENCH_PRECISION=bf16|f16` (mlp only, gh-ocannl-492: the
+  intermediates without tuning), `BENCH_PRECISION=bf16|f16` (mlp and gpt, gh-ocannl-492: the
   mixed-precision training recipe — f32 master weights with reduced-precision cast twins,
   storage policy over the MLP body with the loss head kept f32, and for f16 dynamic loss
   scaling, whose per-step host-read inf/nan gate is included in the reported step times;
@@ -74,7 +74,11 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   only, manual): `BENCH_STATIC_SCALE=1` fixes the loss scale with no gate and no host read —
   the discriminating experiment for how much of f16's step cost is the dynamic gate;
   `BENCH_GATE_INTERVAL=N` uses the fused on-device gate with the host sampling a sticky window
-  checksum every N steps (reported precision `f16-static` / `f16-gatedN`); backend via the usual
+  checksum every N steps (reported precision `f16-static` / `f16-gatedN`). For the gpt runner
+  (forward-only), `BENCH_PRECISION` re-precisions by load-time conversion instead of cast twins
+  — data-backed weights convert at wrap (`TDSL.wrap ~prec`), attention params through the
+  storage policy with layer norms and the CE head pinned f32 (no optimizer, so no master
+  copies and no loss scaling); backend via the usual
   `--ocannl_backend=cc|metal|cuda`. Debug
   helpers: `BENCH_DEBUG=1` prints param names/dims (conv/gpt) or bias gradients (mlp) and
   exits; `BENCH_NO_SGD=1` compiles the gradient update without the SGD step (mlp);

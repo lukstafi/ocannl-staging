@@ -193,8 +193,9 @@ def main():
         nargs="*",
         default=[],
         choices=["bf16", "f16"],
-        help="add OCANNL mixed-precision training variants (mlp workloads only: master "
-        "weights + storage policy, f16 with dynamic loss scaling; gh-ocannl-492)",
+        help="add OCANNL mixed-precision variants (mlp: the training recipe with master "
+        "weights + storage policy, f16 with dynamic loss scaling; gpt: the forward-only "
+        "leg with load-time weight conversion; gh-ocannl-492)",
     )
     ap.add_argument(
         "--materialized",
@@ -296,9 +297,10 @@ def main():
                 variants.append("materialized")
             if args.tuned:
                 variants.append("tuned")
-            if model == "mlp":
-                # The mixed-precision recipe is a training-path feature; the mlp runner is its
-                # benchmark consumer (bench_mlp BENCH_PRECISION).
+            if model in ("mlp", "gpt"):
+                # The mixed-precision training recipe's benchmark consumer is bench_mlp; bench_gpt
+                # covers the forward-only leg (load-time weight conversion, no cast twins) — both
+                # via BENCH_PRECISION (gh-ocannl-492 task 4).
                 variants.extend(args.precision)
             for backend in ["cc"] + ([gpu_ocannl] if gpu_ocannl else []):
                 for variant in variants:
