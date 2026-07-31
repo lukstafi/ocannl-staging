@@ -1530,10 +1530,23 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       if granules_per_work_item <= 0 then None
       else Some (granules_per_work_item * scratch_granule_bytes)
 
+  (* Memoized per ordinal, like [_hip_properties]: this runs on EVERY link, and re-entering the
+     driver for static device properties once per routine is pure overhead — it showed up as
+     contention with several HIP processes sharing one iGPU. *)
+  let scratch_budget_of_device =
+    let cache =
+      lazy
+        (Array.init (num_devices ()) ~f:(fun ordinal ->
+             lazy
+               (let attrs = H.Device.get_attributes (H.Device.get ~ordinal) in
+                (attrs, scratch_limit_per_work_item attrs))))
+    in
+    fun (device : device) -> Lazy.force (Lazy.force cache).(device.ordinal)
+
   let validate_scratch_budget ~(device : device) ~name func =
     if Lazy.force hip_scratch_validation then
-      let attrs = H.Device.get_attributes device.dev.dev in
-      Option.iter (scratch_limit_per_work_item attrs) ~f:(fun limit ->
+      let attrs, limit = scratch_budget_of_device device in
+      Option.iter limit ~f:(fun limit ->
           let requested =
             H.Module.get_function_attribute func H.Module.HIP_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES
           in
