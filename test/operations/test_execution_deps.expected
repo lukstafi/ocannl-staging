@@ -30,3 +30,5 @@ re-running grad restores it: true
 run refused, names the routine: true, names the cause: true
 sync refused, names the routine: true, names the cause: true
 get_values refused, names the routine: true, names the cause: true
+copy out refused, names the routine: true, names the cause: true
+copy in refused, names the routine: true, names the cause: true

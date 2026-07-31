@@ -144,11 +144,12 @@ module Impl = struct
      enumerating devices there would make runs that never use Metal depend on the Metal runtime
      (e.g. headless machines). Forced at first device use, where [Context.auto] can catch a failure
      per call. *)
-  let metal_devices : Me.Device.t array Lazy.t =
-    lazy
-      (let devices = Me.Device.copy_all_devices () in
-       assert (Array.length devices > 0);
-       devices)
+  (* Deliberately NOT asserting the array is nonempty: on a Metal-linked machine with no Metal
+     device the assertion fired here, before [get_device] could report [Backend_unavailable], and an
+     [Assert_failure] is never a reason to try the next backend — so an unconfigured [Context.auto]
+     would die instead of falling through to cc (Codex P1 on PR #256). The emptiness is handled
+     where it means something; every indexing use is guarded by an ordinal check. *)
+  let metal_devices : Me.Device.t array Lazy.t = lazy (Me.Device.copy_all_devices ())
 
   (* Store for captured logs per device_id (the device is its own single compute stream). *)
   let stream_logs : (int, string list ref) Hashtbl.t = Hashtbl.create (module Int)
@@ -356,8 +357,13 @@ module Impl = struct
               precisions are decided per call by [mma_syntax] (f32/f16/bf16, uniform). *)
            mma =
              (if
-                Array.for_all (Lazy.force metal_devices) ~f:(fun d ->
-                    Me.Device.supports_family d Me.Device.GPUFamily.Apple7)
+                (* [for_all] is vacuously true on no devices, which would advertise simdgroup
+                   matrices on a machine that has no Metal device at all. Unreachable in practice
+                   (compiling needs a device), but it used to be impossible by the discovery
+                   assertion, so it is stated rather than assumed. *)
+                (not (Array.is_empty (Lazy.force metal_devices)))
+                && Array.for_all (Lazy.force metal_devices) ~f:(fun d ->
+                       Me.Device.supports_family d Me.Device.GPUFamily.Apple7)
               then
                 Some
                   {

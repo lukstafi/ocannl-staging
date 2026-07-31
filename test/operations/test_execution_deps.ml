@@ -176,7 +176,13 @@ let test_poisoned_lineage () =
   in
   refuses "run" (fun () -> ignore (Context.run ctx routine));
   refuses "sync" (fun () -> Context.sync ctx);
-  refuses "get_values" (fun () -> ignore (Context.get_values ctx l.Tensor.value))
+  refuses "get_values" (fun () -> ignore (Context.get_values ctx l.Tensor.value));
+  (* Same-backend [copy] dispatches through the backend's transfer machinery rather than [to_host],
+     so guarding the host round-trip alone would let a poisoned source export a suspect buffer into
+     a clean lineage. *)
+  let clean = Context.auto () in
+  refuses "copy out" (fun () -> ignore (Context.copy ~src:ctx ~dst:clean l.Tensor.value));
+  refuses "copy in" (fun () -> ignore (Context.copy ~src:clean ~dst:ctx l.Tensor.value))
 
 let () =
   test_raw_dependency ();

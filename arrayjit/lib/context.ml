@@ -536,6 +536,13 @@ let from_host ctx (tn : Tn.t) (nd : Nd.t) : t =
     the copy dispatches to the backend's [device_to_device] transfer machinery; otherwise it falls
     back to a host round-trip. *)
 let copy ?(into_merge_buffer = BI.No) ~src ~dst tn =
+  (* Both lineages, and BEFORE dispatch: the same-backend path runs the transfer schedule directly
+     rather than through [to_host], so checking only the host round-trip would let a poisoned source
+     export a possibly partially written buffer into a clean lineage — exactly what poisoning is for
+     (Codex P2 on PR #256). Reading from a condemned lineage and running transfer work on one are
+     both refused. *)
+  check_not_poisoned src;
+  check_not_poisoned dst;
   (* The fallback also serves nodes with no device buffer in [src]: [to_host] reads host-init
      literals and for-print proxies. A merge buffer cannot be filled host-side, so [Copy] raises
      where the fallback would engage. *)
