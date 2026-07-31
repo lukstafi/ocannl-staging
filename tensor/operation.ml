@@ -894,7 +894,15 @@ let reshape ~l ?b ?(i = []) ?o ndarray =
 (** The dimensions are taken from the provided ndarray, but the split into axis kinds still needs to
     be inferred (or provided). Assumes no padding. Input axes are not inferred (empty if omitted).
     See also: {!reshape} and {!TDSL.wrap_param}. *)
-let wrap ~l ?b ?(i = []) ?o ndarray =
+let wrap ~l ?prec ?b ?(i = []) ?o ndarray =
+  (* [prec] converts the ndarray at ingestion (gh-ocannl-492): the tensor's storage is natively
+     [prec], values converted through float, the original ndarray unchanged. This is the
+     inference-side reduced-precision path — data-backed tensors are precision-[Specified] at
+     creation, so a storage policy cannot re-assign them, and with no optimizer there is no master
+     copy for a cast twin to preserve: re-precision at load, like torch's [model.half ()]. *)
+  let ndarray =
+    match prec with Some prec -> Ir.Ndarray.convert prec ndarray | None -> ndarray
+  in
   Tensor.term ~init_data:(Asgns.Keep_shape_no_padding ndarray) ?batch_dims:b ~label:[ l ]
     ~input_dims:i ?output_dims:o
 
