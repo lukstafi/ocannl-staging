@@ -52,11 +52,21 @@ type fatal = {
   candidate : string option;
 }
 
-type classified_cause = { cause : cause; execution_effect : execution_effect }
+type classified_cause = { phase : phase; cause : cause; execution_effect : execution_effect }
 [@@deriving sexp_of, equal]
+(** [phase] is where the failure was raised, not where the enclosing {!protect} was installed: a
+    narrow tag or a preserved cause reports its own phase, and a backend classifier's answer is
+    pinned to the phase it was handed. This is what lets a report say whether a candidate died at
+    link, at launch, or at sync. *)
 
 type failure = Classified of classified_cause | Fatal of fatal
 type 'a outcome = ('a, failure) Result.t
+
+val fatal_of_classified : ?candidate:string -> classified_cause -> fatal
+(** Escalates a classified rejection that cannot be contained after all — a launch failure whose
+    execution effect is [Writes_may_have_occurred], with no API to restore the damaged lineage. The
+    cause is rendered into its public exception; the backtrace is the escalation site, since the
+    original raise was already contained. *)
 
 exception Cause_at of phase * cause
 exception Raised_at of phase * exn * Stdlib.Printexc.raw_backtrace

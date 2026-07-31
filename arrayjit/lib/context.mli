@@ -85,6 +85,28 @@ val sync : t -> unit
     their own; explicit [sync] is for timing runs (e.g. the autotuner) and for fencing against
     out-of-band observation. *)
 
+val failure_classifier :
+  t -> Ir.Schedule_outcome.phase -> exn -> Ir.Schedule_outcome.classified_cause option
+(** The backend's own failure classifier, for callers that wrap {!run} / {!sync} in
+    {!Ir.Schedule_outcome.protect}. {!compile_outcome} passes it in itself; launch and sync are
+    raising APIs, so the autotuner obtains it here. Passing a classifier that always answers [None]
+    (as the timing loop did before gh-ocannl-536) makes every launch failure fatal by phase default,
+    with no way for a backend to declare one its candidate's fault. *)
+
+val rollback_execution : t -> int -> unit
+(** Undoes {!run}'s execution marking for the given routine id. {!run} marks a routine executed
+    before the later {!sync} can report an asynchronous failure, so a contained launch/sync
+    rejection has to withdraw that claim — otherwise the next routine compiled in this lineage
+    waits on a dependency that never completed. Only sound when the failure is known not to have
+    written device buffers; otherwise use {!poison_lineage}. *)
+
+val poison_lineage : t -> routine_name:string -> exn -> unit
+(** Marks this execution lineage unusable because a failure may have left device buffers partially
+    written. Every subsequent {!run}, {!sync}, {!to_host} and {!from_host} on any context sharing
+    the lineage raises, naming the routine and the original failure. There is deliberately no
+    restore: recovering would mean rebuilding inputs and parameters, which the current
+    [timing_ctx]-shaped API cannot express (gh-ocannl-536). *)
+
 val hardware_limits : t -> Ir.Backend_intf.hardware_limits
 (** The backend's conservative per-workgroup device limits (all-[None] on backends that do not bind
     hardware axes). Chiefly for schedule transforms and the autotuner. *)

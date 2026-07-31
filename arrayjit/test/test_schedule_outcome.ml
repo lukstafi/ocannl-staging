@@ -111,6 +111,7 @@ let () =
   | _ -> failwith "expected an unclassified cache-replay assertion");
   let compiler_rejection =
     {
+      phase = Backend_compile;
       cause =
         Backend_rejected
           {
@@ -152,6 +153,8 @@ let () =
   in
   assert (equal_cause link_declined.cause link_resource);
   assert (equal_execution_effect link_declined.execution_effect No_device_writes);
+  (* The reported phase is where it was raised, not where [protect] was installed. *)
+  assert (equal_phase link_declined.phase Backend_link);
   assert (
     equal_rejection_key (key_of_cause link_declined.cause) (Resource_exceeded_key Workgroup_threads));
   (match raise_failure (Classified link_declined) with

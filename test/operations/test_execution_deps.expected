@@ -20,3 +20,13 @@ Wrong order raises Failure from Context.run: true
 
 === Test 5: Re-execution (grad -> sgd -> grad) ===
 grad -> sgd -> grad: OK
+
+=== Test 6: rollback of an execution marking ===
+can_run sgd (after grad): true
+can_run sgd (after rollback): false
+re-running grad restores it: true
+
+=== Test 7: poisoned lineage ===
+run refused, names the routine: true, names the cause: true
+sync refused, names the routine: true, names the cause: true
+get_values refused, names the routine: true, names the cause: true

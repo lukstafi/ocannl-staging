@@ -50,6 +50,11 @@ type report = {
 
 type decline_acc = { mutable da_count : int; mutable da_details : string list }
 
+(* Where the candidate died, for the per-candidate log line. Compile-side phases are already
+   apparent from the message; the launch/sync split is not, and it is the difference between "this
+   schedule could never run" and "it ran and the device complained". *)
+let phase_label (phase : Outcome.phase) = Sexp.to_string (Outcome.sexp_of_phase phase)
+
 let record_decline declines (classified : Outcome.classified_cause) =
   let key = Outcome.key_of_cause classified.cause in
   let detail = Outcome.detail_of_cause classified.cause in
@@ -3510,7 +3515,8 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
         match compile_spec spec with
         | Error (Outcome.Classified classified) ->
             record_decline declines classified;
-            logf "%s: FAILED %s" (spec_label spec)
+            logf "%s: FAILED at %s %s" (spec_label spec)
+              (phase_label classified.phase)
               (Outcome.detail_of_cause classified.cause);
             None
         | Error (Outcome.Fatal fatal) -> emit_partial_and_raise fatal
@@ -3521,7 +3527,15 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
             else (
               Hash_set.add seen c.digest_after;
               match
-                Outcome.protect ~classify_backend:(fun _ _ -> None)
+                (* The backend's own classifier decides whether a launch or sync failure is this
+                   candidate's fault: the driver error is all the evidence there is, and only the
+                   backend can read it. With the always-[None] classifier this used to pass, no
+                   backend could ever declare one, so every launch failure was fatal by phase
+                   default and there was nowhere for a backend to plug one in (gh-ocannl-536; the
+                   HIP scratch-overflow arm of gh-ocannl-533 is what fills this seam). The phase
+                   reaching the report is the tagged one inside [time_routine], so a report
+                   distinguishes a launch refusal from an asynchronous failure at sync. *)
+                Outcome.protect ~classify_backend:(Context.failure_classifier c.cctx)
                   ~provenance:Outcome.Candidate ~phase:Outcome.Launch
                   ~candidate:(spec_label spec) (fun () ->
                     time_routine ~tag_failures:true ~repeats c.cctx c.routine)
@@ -3552,12 +3566,36 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
                       (spec_label spec);
                   if Float.(ms < snd !best_so_far) then best_so_far := (c, ms);
                   Some (c, ms)
-              | Error (Outcome.Classified classified) ->
+              | Error (Outcome.Classified classified) -> (
                   record_decline declines classified;
-                  logf "%s: RUN FAILED %s" (spec_label spec)
+                  logf "%s: RUN FAILED at %s %s" (spec_label spec)
+                    (phase_label classified.phase)
                     (Outcome.detail_of_cause classified.cause);
-                  None
-              | Error (Outcome.Fatal fatal) -> emit_partial_and_raise fatal)
+                  match classified.execution_effect with
+                  | Outcome.No_device_writes ->
+                      (* [Context.run] marks a routine executed before the later [sync] can report
+                         an asynchronous failure. A rejection the backend proved wrote nothing
+                         withdraws that claim, so the next candidate compiled in this lineage does
+                         not wait on a routine that never completed. *)
+                      Context.rollback_execution c.cctx (Context.routine_id c.routine);
+                      None
+                  | Outcome.Writes_may_have_occurred ->
+                      (* Counted once as a decline (its cause is real evidence about the candidate)
+                         and then escalated: the timing lineage may hold partially written buffers,
+                         and there is no restore API to rebuild its inputs and parameters, so
+                         timing the next candidate on it would score suspect data. *)
+                      Context.poison_lineage c.cctx
+                        ~routine_name:(Context.routine_name c.routine)
+                        (Outcome.exception_of_cause classified.cause);
+                      emit_partial_and_raise
+                        (Outcome.fatal_of_classified ~candidate:(spec_label spec) classified))
+              | Error (Outcome.Fatal fatal) ->
+                  (* An unattributed launch/sync failure says nothing about what the device did, so
+                     the lineage is condemned before the exception unwinds — a caller that catches
+                     it cannot reuse a ledger claiming the failed routine completed. *)
+                  Context.poison_lineage c.cctx ~routine_name:(Context.routine_name c.routine)
+                    fatal.Outcome.exn;
+                  emit_partial_and_raise fatal)
       in
       let block_size_presets mk =
         mk None :: (if is_gpu then List.map seed_block_sizes ~f:(fun bs -> mk (Some bs)) else [])

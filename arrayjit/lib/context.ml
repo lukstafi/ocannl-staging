@@ -26,6 +26,14 @@ type execution_ledger = {
   mutable next_id : int;
   routine_names : string Hashtbl.M(Int).t;
   mutable executed : Set.M(Int).t;
+  mutable poisoned : (string * exn) option;
+      (** Set when a launch or synchronization failed in a way that may have left device buffers of
+          this lineage partially written (gh-ocannl-536). [Context.run] marks a routine executed
+          before the later [sync] can report an asynchronous failure, so the ledger would otherwise
+          claim a routine completed that did not. There is no restore API, so the lineage stays
+          unusable: every entrypoint re-raises the stored failure, naming the routine. Scratch
+          lineages ([timing_ctx]) are separate, so poisoning one does not condemn the caller's
+          context. *)
 }
 (** Shared mutable state for execution tracking, allocated once per root context. Shared by
     reference across all contexts derived from the same root. *)
@@ -33,7 +41,12 @@ type execution_ledger = {
 let empty_frontier = { last_writer = Map.empty (module Tn); last_readers = Map.empty (module Tn) }
 
 let create_ledger () =
-  { next_id = 0; routine_names = Hashtbl.create (module Int); executed = Set.empty (module Int) }
+  {
+    next_id = 0;
+    routine_names = Hashtbl.create (module Int);
+    executed = Set.empty (module Int);
+    poisoned = None;
+  }
 
 type t = {
   wrapped : (Backends.wrapped_context[@sexp.opaque]);
@@ -245,7 +258,49 @@ let compile ?name ?lowered_transform ?lowered_transforms ctx comp bindings =
   | Ok result -> result
   | Error failure -> Ir.Schedule_outcome.raise_failure failure
 
+(* {2 Failure classification at the launch/sync boundary (gh-ocannl-536)}
+
+   The compile path passes [Backend.classify_failure] into [protect] through the same first-class
+   module dispatch as compilation itself. Launch and sync need it too — that is where a driver
+   reports a candidate's kernel as unrunnable — but they are not compile-shaped: the public
+   [run]/[sync] contracts stay raising APIs, and callers that want typed outcomes (the autotuner)
+   wrap them with the classifier this accessor hands out. Without it, a backend's classifier is
+   simply never consulted for a launch failure, and every such failure is fatal by phase default. *)
+let failure_classifier ctx :
+    Ir.Schedule_outcome.phase -> exn -> Ir.Schedule_outcome.classified_cause option =
+  Backends.query ctx.wrapped
+    {
+      q =
+        (fun (type dev runner event)
+          (module Backend : BI.Backend
+            with type dev = dev
+             and type runner = runner
+             and type event = event)
+          _c
+        -> Backend.classify_failure);
+    }
+
+let poisoned_failure ctx =
+  Option.map ctx.ledger.poisoned ~f:(fun (name, exn) ->
+      Failure
+        (Printf.sprintf
+           "Context: this execution lineage was poisoned by a failure of routine %s that may have \
+            written device buffers; there is no restore API, so it cannot be reused. Original \
+            failure: %s"
+           name (Exn.to_string exn)))
+
+let check_not_poisoned ctx = Option.iter (poisoned_failure ctx) ~f:raise
+
+(** Undoes [run]'s optimistic execution marking for a routine whose failure is known not to have
+    written device buffers, so the next candidate does not inherit a dependency that never ran. *)
+let rollback_execution ctx routine_id =
+  ctx.ledger.executed <- Set.remove ctx.ledger.executed routine_id
+
+let poison_lineage ctx ~routine_name exn =
+  if Option.is_none ctx.ledger.poisoned then ctx.ledger.poisoned <- Some (routine_name, exn)
+
 let run ctx routine =
+  check_not_poisoned ctx;
   (* Check that all required inputs are initialized. A node counts as initialized if it was produced
      by a prior routine ([initialized_nodes]) or is already allocated in the running context's
      device buffers ([in_backend]): such inputs are either user-set via [set_values]/[from_host]
@@ -297,6 +352,7 @@ let run ctx routine =
   { ctx with initialized_nodes }
 
 let sync ctx =
+  check_not_poisoned ctx;
   Backends.query ctx.wrapped
     {
       q =
@@ -375,6 +431,7 @@ let copy_nd (src : Nd.t) : Nd.t =
 (** Transfers [tn]'s device buffer into a fresh host [Ndarray] and returns it. Raises if the node is
     not present in the context (and has no host-init data or for-print proxy). *)
 let to_host ctx (tn : Tn.t) : Nd.t =
+  check_not_poisoned ctx;
   (* An [\@|] slice view is addressed through its parent (gh-ocannl-293 293a): an eligible slice
      owns no buffer, and an ineligible (copy) slice's value is recomputed from the parent each run.
      Reject direct host reads uniformly -- read the parent tensor instead. [slice_of] is set eagerly
@@ -430,6 +487,7 @@ let to_host ctx (tn : Tn.t) : Nd.t =
 (** Uploads the host buffer [nd] into [tn]'s device buffer, allocating it if needed, and returns a
     context in which [tn] is marked initialized (so a subsequent {!run} reading [tn] succeeds). *)
 let from_host ctx (tn : Tn.t) (nd : Nd.t) : t =
+  check_not_poisoned ctx;
   (* Reject direct host writes to an [\@|] slice view (gh-ocannl-293 293a). Critically, [slice_of]
      is set eagerly at construction, so this fires even when the slice has not been lowered yet and
      [alias_of] is still [None] -- without it the [init_from_host] fallback below would allocate a
