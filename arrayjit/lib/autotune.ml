@@ -1117,6 +1117,25 @@ let companion_geometry ~(site_syms : (Idx.symbol * int) list) ~(skip : Idx.symbo
                           "companion nest writing %s has no aligned parallel chain" (written stmt))))
             ~finish:(fun acc -> Ok acc)
 
+(* A companion nest that cannot take the accumulation nest's aligned geometry is a limitation of the
+   generated sketch, not an arbitrary exception from a user transform — the same distinction
+   [zero_geometry] draws for non-rank-2 outputs. Raise it at the narrow site as a typed [Unsupported]
+   cause so strict candidate failure classification records a decline and keeps trying the remaining
+   seeds; a plain [invalid_arg] here aborts the whole search under the default
+   [strict_failure_classification=true]. *)
+let companion_coverage_unsupported ~tensorized why =
+  raise
+    (Outcome.Cause_at
+       ( Outcome.Transform,
+         Outcome.Unsupported
+           {
+             feature = "autotune_sketch_companion_coverage";
+             detail =
+               Printf.sprintf "Autotune sketch: %sGPU matmul companion coverage (gh-521): %s"
+                 (if tensorized then "tensorized " else "")
+                 why;
+           } ))
+
 (* The [(i, j)] chain the GPU matmul sketches annotate, as [companion_geometry] wants it: the
    accumulation nest's own outer loops, which are exactly what {!Sched.aligned_chains} reports for
    that nest when the site is parallelizable at full arity. *)
@@ -1147,8 +1166,7 @@ let gpu_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
         ~annotate opt
     with
     | Ok ops -> ops
-    | Error why ->
-        invalid_arg ("Autotune sketch: GPU matmul companion coverage (gh-521): " ^ why)
+    | Error why -> companion_coverage_unsupported ~tensorized:false why
   in
   let zops = zero_geometry site ~mk_zops:(fun ~zi ~zj -> annotate 0 zi @ annotate 1 zj) in
   let zops = cops @ zops in
@@ -1263,8 +1281,7 @@ let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
         ~annotate opt
     with
     | Ok ops -> ops
-    | Error why ->
-        invalid_arg ("Autotune sketch: tensorized GPU matmul companion coverage (gh-521): " ^ why)
+    | Error why -> companion_coverage_unsupported ~tensorized:true why
   in
   let zops = zero_geometry site ~mk_zops:(fun ~zi ~zj -> annotate 0 zi @ annotate 1 zj) in
   let zops = cops @ zops in
