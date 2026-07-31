@@ -55,6 +55,19 @@ val compile :
     device-side events at the boundaries, like {!Ir.Schedule.maybe_default_schedules}' segments.
     Pass at most one of the two. *)
 
+val compile_outcome :
+  ?name:string ->
+  ?lowered_transform:(Ir.Low_level.optimized -> Ir.Low_level.optimized) ->
+  ?lowered_transforms:(Ir.Low_level.optimized -> Ir.Low_level.optimized list) ->
+  provenance:Ir.Schedule_outcome.provenance ->
+  ?candidate:string ->
+  t ->
+  Ir.Assignments.comp ->
+  Ir.Indexing.unit_bindings ->
+  (t * routine) Ir.Schedule_outcome.outcome
+(** Internal containment-aware form of {!compile}. The caller supplies the schedule provenance;
+    public user code should continue to use {!compile}. *)
+
 val run : t -> routine -> t
 (** Execute a compiled routine. Mutates buffers in-place. Returns updated context with newly
     initialized nodes tracked. Raises [Failure] if execution dependencies are not satisfied. *)

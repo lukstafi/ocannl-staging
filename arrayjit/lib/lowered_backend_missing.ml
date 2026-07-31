@@ -81,6 +81,7 @@ struct
       ]
 
   let hardware_limits () = Backend_intf.no_hardware_limits
+  let classify_failure _phase _exn = None
 
   let get_debug_info _device =
     failwith @@ "Backend " ^ Config.name ^ " missing -- install the corresponding library"

@@ -3454,7 +3454,7 @@ module C_syntax (B : C_syntax_config) = struct
              "C_syntax.compile_proc: workgroup-shared placement not supported by this backend");
     current_kernel_name := name;
     current_placements := Some optimize_ctx.Low_level.placements;
-    Low_level.validate_parallel optimize_ctx.Low_level.placements llc;
+    Low_level.validate_parallel_classified optimize_ctx.Low_level.placements llc;
     (* Launch-extent guards (construct-then-fold, axis-types proposal §2), only for kinds this
        backend binds in hardware -- the serial fallback iterates the true extent. *)
     let llc =

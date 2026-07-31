@@ -57,6 +57,7 @@
   affine
   tnode
   host_inits
+  schedule_outcome
   low_level
   cost_model
   schedule

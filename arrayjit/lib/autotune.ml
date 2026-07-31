@@ -3,11 +3,27 @@ module SC = Ir.Schedule_cache
 module Sched = Ir.Schedule
 module LL = Ir.Low_level
 module Idx = Ir.Indexing
+module Outcome = Ir.Schedule_outcome
+
+type decline_summary = {
+  key : Outcome.rejection_key;
+  count : int;
+  sample_details : string list;
+}
+
+type terminal_failure = {
+  phase : Outcome.phase;
+  candidate : string option;
+  detail : string;
+}
 
 type report = {
   cache_hit : bool;
   candidates_timed : int;
   candidates_failed : int;
+  partial : bool;
+  declines : decline_summary list;
+  terminal_failure : terminal_failure option;
   rounds_run : int;
   sketch_candidates : int;
   epilogue_sketch_candidates : int;
@@ -31,6 +47,39 @@ type report = {
   best_ms : float;
   best_schedule : SC.saved_schedule;
 }
+
+type decline_acc = { mutable da_count : int; mutable da_details : string list }
+
+let record_decline declines (classified : Outcome.classified_cause) =
+  let key = Outcome.key_of_cause classified.cause in
+  let detail = Outcome.detail_of_cause classified.cause in
+  let first_for_key = not (Hashtbl.mem declines key) in
+  Hashtbl.update declines key ~f:(function
+    | None -> { da_count = 1; da_details = [ detail ] }
+    | Some acc ->
+        acc.da_count <- acc.da_count + 1;
+        if
+          List.length acc.da_details < 3
+          && not (List.mem acc.da_details detail ~equal:String.equal)
+        then acc.da_details <- acc.da_details @ [ detail ];
+        acc);
+  if first_for_key then
+    match classified.cause with
+    | Outcome.Unclassified _ ->
+        Stdio.eprintf
+          "autotune: WARNING: permissive failure classification contained an unclassified \
+           compiler failure (%s); strict_failure_classification=true would stop the search\n%!"
+          detail
+    | _ -> ()
+
+let decline_summaries declines =
+  Hashtbl.to_alist declines
+  |> List.sort ~compare:(fun (a, _) (b, _) -> Outcome.compare_rejection_key a b)
+  |> List.map ~f:(fun (key, acc) ->
+         { key; count = acc.da_count; sample_details = acc.da_details })
+
+let failed_count declines =
+  Hashtbl.fold declines ~init:0 ~f:(fun ~key:_ ~data:acc count -> count + acc.da_count)
 
 let int_arg ~arg_name ~default =
   let s = Utils.get_global_arg ~arg_name ~default:(Int.to_string default) in
@@ -68,15 +117,22 @@ let max_timing_runs = 64
 
 (* [Context.bindings] exposes the routine's live binding refs — restore them after timing (Codex P2
    on PR #103), or the returned winner would stay bound to the tuner's midpoint test values. *)
-let time_routine ~repeats cctx routine =
+let time_routine ?(tag_failures = false) ~repeats cctx routine =
   let saved_bindings = List.map (Context.bindings routine) ~f:(fun (_ss, r) -> (r, !r)) in
+  let run ctx =
+    if tag_failures then Outcome.tag Outcome.Launch (fun () -> Context.run ctx routine)
+    else Context.run ctx routine
+  in
+  let sync ctx =
+    if tag_failures then Outcome.tag Outcome.Sync (fun () -> Context.sync ctx) else Context.sync ctx
+  in
   Exn.protect
     ~finally:(fun () -> List.iter saved_bindings ~f:(fun (r, v) -> r := v))
     ~f:(fun () ->
       set_test_bindings routine;
       (* Warmup run: absorbs lazy initialization and fills caches like a steady-state iteration. *)
-      let ctx = ref (Context.run cctx routine) in
-      Context.sync !ctx;
+      let ctx = ref (run cctx) in
+      sync !ctx;
       let best = ref Float.infinity in
       let total = ref 0. in
       let count = ref 0 in
@@ -86,8 +142,8 @@ let time_routine ~repeats cctx routine =
         (* Monotonic high-resolution clock: on Windows, [Unix.gettimeofday] ticks at ~1 ms, which
            makes sub-millisecond candidates indistinguishable (they all measure 0). *)
         let c0 = Mtime_clock.counter () in
-        ctx := Context.run !ctx routine;
-        Context.sync !ctx;
+        ctx := run !ctx;
+        sync !ctx;
         let dt = Mtime.Span.to_float_ns (Mtime_clock.count c0) /. 1e6 in
         total := !total +. dt;
         Int.incr count;
@@ -864,7 +920,17 @@ let zero_geometry (site : matmul_site) ~(mk_zops : zi:Idx.symbol -> zj:Idx.symbo
   if not site.m_zeroed then []
   else (
     if Array.length (Lazy.force site.m_d.Ir.Tnode.dims) <> 2 then
-      invalid_arg "Autotune sketch: only rank-2 outputs in v1";
+      (* This is a known limitation of the generated sketch, not an arbitrary exception from a
+         user transform. Preserve that distinction at the narrow site so strict candidate failure
+         classification records a decline and continues trying the remaining seeds. *)
+      raise
+        (Outcome.Cause_at
+           ( Outcome.Transform,
+             Outcome.Unsupported
+               {
+                 feature = "autotune_sketch_output_rank";
+                 detail = "Autotune sketch: only rank-2 outputs in v1";
+               } ));
     let ez, zsyms = Sched.expand_zero ~tn:site.m_d in
     let zi, zj =
       match zsyms with [ zi; zj ] -> (zi, zj) | _ -> invalid_arg "Autotune sketch: non-2d zero"
@@ -2162,14 +2228,14 @@ let extend_with_privatize ~static_indices sched (seg : LL.optimized) : Sched.sch
       LL.optimize_ctx = LL.copy_optimize_ctx seg.LL.optimize_ctx;
     }
   in
-  match Sched.apply ~static_indices sched (scratch ()) with
-  | exception _ -> sched
+  match Sched.apply_classified ~static_indices sched (scratch ()) with
+  | exception Outcome.Cause_at _ -> sched
   | post ->
       List.fold (privatize_proposals post) ~init:sched ~f:(fun acc (target, over) ->
           let acc' = acc @ [ Sched.Privatize { target; over } ] in
-          match Sched.apply ~static_indices acc' (scratch ()) with
+          match Sched.apply_classified ~static_indices acc' (scratch ()) with
           | (_ : LL.optimized) -> acc'
-          | exception _ -> acc)
+          | exception Outcome.Cause_at _ -> acc)
 
 (** {2 Split-reduce site detection (gh-ocannl-484 task 3)}
 
@@ -2312,8 +2378,8 @@ let summaries_roofline ~peak_flops ~peak_memory_bandwidth (summaries : CM.summar
 let model_score ~static_indices ~limits (opt : LL.optimized) (sched : Sched.schedule) : float option
     =
   let peak_flops, peak_memory_bandwidth = envelope ~limits in
-  match Sched.apply ~static_indices sched (scratch_of opt) with
-  | exception _ -> None
+  match Sched.apply_classified ~static_indices sched (scratch_of opt) with
+  | exception Outcome.Cause_at _ -> None
   | post -> summaries_roofline ~peak_flops ~peak_memory_bandwidth [ CM.analyze post.LL.llc ]
 
 let model_prefilter ~keep_fraction (scored : ('a * float option) list) : ('a * float option) list =
@@ -2545,8 +2611,9 @@ let spec_label = function
    buffers the kernels reference. Candidate hermeticity is unchanged: each compile forks the lineage
    table anew. The traced store is copied from the base (schedule ops register their tiles in
    it). *)
-let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ctx comp bindings
-    spec : (compiled, string) Result.t =
+let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ~provenance ctx comp
+    bindings spec : compiled Outcome.outcome =
+  let candidate = spec_label spec in
   let rebase (fresh : LL.optimized) =
     {
       base_opt with
@@ -2580,7 +2647,7 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu c
                 let saved, registry = SC.to_saved (SC.base_registry canon) sched in
                 (sched, saved, registry)
           in
-          let opt' = Sched.apply ~static_indices sched opt in
+          let opt' = Sched.apply_classified ~static_indices sched opt in
           let digest_after = SC.digest (SC.canonicalize ~static_indices opt') in
           captured :=
             Some
@@ -2590,7 +2657,7 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu c
                 digest_after );
           opt'
         in
-        Context.compile ~lowered_transform:transform ctx comp bindings
+        Context.compile_outcome ~lowered_transform:transform ~provenance ~candidate ctx comp bindings
     | Fiss flavor ->
         let transforms fresh =
           let opt = rebase fresh in
@@ -2615,7 +2682,8 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu c
                 (sched, psaved)
           in
           let opt =
-            if List.is_empty prelude then opt else Sched.apply ~static_indices prelude opt
+            if List.is_empty prelude then opt
+            else Sched.apply_classified ~static_indices prelude opt
           in
           let zero_sched tns = if is_gpu then Sched.zero_expansion ~limits tns else [] in
           (* Per-segment schedule matching keys on the STRUCTURAL canon ([with_placements:false]):
@@ -2700,23 +2768,28 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu c
           captured := Some (form, units, posts, digest_after);
           posts
         in
-        Context.compile ~lowered_transforms:transforms ctx comp bindings
+        Context.compile_outcome ~lowered_transforms:transforms ~provenance ~candidate ctx comp
+          bindings
   in
-  try
-    (* Collect the Tile_mma rendering census across this candidate's kernel compiles (fissioned
-       segments included); [mma_census_enabled] keeps the census from growing in non-tuning
-       processes. Compiles are sequential on the main domain, so save-and-restore suffices. *)
-    Ir.C_syntax.mma_census := [];
-    Ir.C_syntax.mma_census_enabled := true;
-    let cctx, routine =
-      Exn.protect ~f:compile_ctx ~finally:(fun () -> Ir.C_syntax.mma_census_enabled := false)
-    in
-    let mma_renders = !Ir.C_syntax.mma_census in
-    match !captured with
-    | Some (form, units, all_opts, digest_after) ->
-        Ok { form; cctx; routine; units; all_opts; digest_after; mma_renders }
-    | None -> Error "Autotune: the transform was not invoked"
-  with exn -> Error (Exn.to_string exn)
+  (* Collect the Tile_mma rendering census across this candidate's kernel compiles (fissioned
+     segments included); [mma_census_enabled] keeps the census from growing in non-tuning
+     processes. Compiles are sequential on the main domain, so save-and-restore suffices. *)
+  Ir.C_syntax.mma_census := [];
+  Ir.C_syntax.mma_census_enabled := true;
+  let compile_result =
+    Exn.protect ~f:compile_ctx ~finally:(fun () -> Ir.C_syntax.mma_census_enabled := false)
+  in
+  match compile_result with
+  | Error failure -> Error failure
+  | Ok (cctx, routine) -> (
+      let mma_renders = !Ir.C_syntax.mma_census in
+      match !captured with
+      | Some (form, units, all_opts, digest_after) ->
+          Ok { form; cctx; routine; units; all_opts; digest_after; mma_renders }
+      | None ->
+          Outcome.protect ~classify_backend:(fun _ _ -> None) ~provenance
+            ~phase:Outcome.Transform ~candidate (fun () ->
+              failwith "Autotune: the transform was not invoked"))
 
 (** {2 The action menu} *)
 
@@ -2952,37 +3025,33 @@ type model_choice = {
 let model_default_enabled =
   lazy (Utils.get_global_flag ~default:false ~arg_name:"model_default_schedule")
 
-(* The eager half of the advisory contract (gh-ocannl-519): [validate_parallel] runs inside backend
-   codegen, long after the transform seam returned, so a rejected pick would escape any handler the
-   seam installs and kill the process. Running the check here — on exactly the segments and
-   placements codegen will see — turns a rejected pick into an ordinary exception at the transform
-   boundary, where the caller's fallback catches it. This is the same check [tune]'s candidate
-   compiles treat as an invalid candidate and skip. *)
-let validate_segments (segs : LL.optimized list) : LL.optimized list =
+(* The model ranks several scheduled forms without compiling them. Keep this eager validation in
+   that ranking loop: removing it made an invalid tensorized argmin displace a viable schedule and
+   then fall back all the way to the default. This is no longer needed for exception attribution or
+   advisory containment -- codegen carries the same typed cause -- only to preserve "best viable
+   model candidate" selection without compiling every contender. *)
+let validate_segments_for_model (segs : LL.optimized list) =
   List.iter segs ~f:(fun (o : LL.optimized) ->
-      LL.validate_parallel o.LL.optimize_ctx.LL.placements o.LL.llc);
+      LL.validate_parallel_classified o.LL.optimize_ctx.LL.placements o.LL.llc);
   segs
 
 let compile_advisory ?on_fallback ?fallback_if lowered_transforms ctx comp bindings =
-  match Context.compile ~lowered_transforms ctx comp bindings with
-  | result -> result
-  | exception exn ->
-      let bt = Stdlib.Printexc.get_raw_backtrace () in
+  match
+    Context.compile_outcome ~lowered_transforms ~provenance:Outcome.Advisory ctx comp bindings
+  with
+  | Ok result -> result
+  | Error (Outcome.Fatal _ as failure) -> Outcome.raise_failure failure
+  | Error (Outcome.Classified classified as failure) ->
       (* [fallback_if] is what keeps the retry from duplicating a genuine failure: a transform that
          already degraded to the default pipeline has nothing to fall back TO, so recompiling would
          just repeat the same failing compile (and, on a resource failure, aggravate it) before
          raising the same exception. Such callers say [false] here and the original exception
-         propagates untouched, backtrace included. *)
+         propagates through the public exception contract. *)
       if not (Option.value_map fallback_if ~default:true ~f:(fun f -> f ())) then
-        Stdlib.Printexc.raise_with_backtrace exn bt;
-      (* The backstop half (gh-ocannl-519): the transforms are advisory, so ANY failure downstream
-         of the seam — not just the pre-validated checks — degrades to the ordinary default
-         pipeline. A plain [Context.compile] is exactly that pipeline (backends.ml applies
-         [Schedule.maybe_default_schedules] when no transform is given), and recompiling from the
-         caller's context after a failed compile is the same recovery [tune]'s winner replay takes.
-         If the default pipeline fails too, its exception propagates: that is a genuine error, not
-         an advisory pick gone wrong. *)
-      Option.iter on_fallback ~f:(fun f -> f exn);
+        Outcome.raise_failure failure;
+      (* Typed compiler rejection is the advisory fallback boundary. Fatal failures are propagated
+         above without paying for a second compile. *)
+      Option.iter on_fallback ~f:(fun f -> f (Outcome.exception_of_cause classified.cause));
       Context.compile ctx comp bindings
 
 let model_default ?report ctx comp bindings =
@@ -3021,21 +3090,15 @@ let model_default ?report ctx comp bindings =
             Int.incr n_skipped;
             None
       in
-      (* The roofline has no notion of whether a candidate compiles, and it rates tensorized code
-         best -- so on backends where the tensorized families are unbuildable (gh-ocannl-521) the
-         model confidently crowned one, and the pick could only degrade back to the default
-         (gh-ocannl-522). Validating each candidate's scheduled form here instead drops the dead
-         ones from the RANKING, so the model picks the best schedule that can actually be built. The
-         scored forms are hermetic copies ([scratch_of]), so the placements this forces are the
-         copies', not the ones the real compile will use. *)
+      (* The model must rank the best viable schedule, not crown an invalid argmin and fall all the
+         way back to default. The validator is typed, so only an expected schedule rejection is
+         excluded; compiler assertions and other failures still escape. *)
       let score_valid opts =
-        match validate_segments opts with
-        | exception exn ->
-            Int.incr n_rejected;
-            logf "model_default: candidate excluded, its schedule cannot compile (%s)"
-              (Exn.to_string exn);
-            None
+        match validate_segments_for_model opts with
         | opts -> score opts
+        | exception Outcome.Cause_at _ ->
+            Int.incr n_rejected;
+            None
       in
       let default_segs () =
         Sched.maybe_default_schedules ~backend_name:backend ~limits ~static_indices opt
@@ -3061,8 +3124,13 @@ let model_default ?report ctx comp bindings =
                  never picked over the default without a measured run ({!tune} covers that). *)
               let whole =
                 List.filter_map (sketch_seed_params ~is_gpu ~is_cpu ~limits opt) ~f:(fun p ->
-                    match Sched.apply ~static_indices (sketch_schedule ~p opt) (scratch_of opt) with
-                    | exception _ -> None
+                    match
+                      Sched.apply_classified ~static_indices (sketch_schedule ~p opt)
+                        (scratch_of opt)
+                    with
+                    | exception Outcome.Cause_at _ ->
+                        Int.incr n_rejected;
+                        None
                     | post -> Option.map (score_valid [ post ]) ~f:(fun s -> (p, s)))
               in
               let contenders =
@@ -3079,7 +3147,9 @@ let model_default ?report ctx comp bindings =
                     Sched.fission_scheduled ~promote_locals:is_gpu ~preset ~zero_sched
                       ~static_indices (scratch_of opt)
                   with
-                  | exception _ -> None
+                  | exception Outcome.Cause_at _ ->
+                      Int.incr n_rejected;
+                      None
                   | tuples -> (
                       let entries =
                         List.filter_map tuples ~f:(fun (kind, pre, _sched, post) ->
@@ -3091,10 +3161,13 @@ let model_default ?report ctx comp bindings =
                                   List.filter_map (sketch_seed_params ~is_gpu ~is_cpu ~limits pre)
                                     ~f:(fun p ->
                                       match
-                                        Sched.apply ~static_indices (sketch_schedule ~p pre)
+                                        Sched.apply_classified ~static_indices
+                                          (sketch_schedule ~p pre)
                                           (scratch_of pre)
                                       with
-                                      | exception _ -> None
+                                      | exception Outcome.Cause_at _ ->
+                                          Int.incr n_rejected;
+                                          None
                                       | sp -> Option.map (score_valid [ sp ]) ~f:(fun s -> (p, s)))
                                   |> List.min_elt ~compare:(fun (_, a) (_, b) -> Float.compare a b)
                                 in
@@ -3115,7 +3188,9 @@ let model_default ?report ctx comp bindings =
                           Sched.fission_scheduled ~promote_locals:is_gpu ~preset:subst_preset
                             ~zero_sched ~static_indices (scratch_of opt)
                         with
-                        | exception _ -> None
+                        | exception Outcome.Cause_at _ ->
+                            Int.incr n_rejected;
+                            None
                         | tuples2 ->
                             let posts = List.map tuples2 ~f:(fun (_, _, _, post) -> post) in
                             Option.map (score_valid posts) ~f:(fun s -> (entries, s)))
@@ -3135,8 +3210,9 @@ let model_default ?report ctx comp bindings =
               match best with
               | Some (lbl, s, act) when Float.(s < ds) -> (lbl, Some s, act)
               | _ -> ("default", Some ds, `Default))
-        with exn ->
-          logf "model_default: scoring failed (%s); using the default pipeline" (Exn.to_string exn);
+        with Outcome.Cause_at (_, cause) ->
+          logf "model_default: scoring declined (%s); using the default pipeline"
+            (Outcome.detail_of_cause cause);
           ("default", None, `Default)
       in
       choice :=
@@ -3148,20 +3224,20 @@ let model_default ?report ctx comp bindings =
           mc_rejected = !n_rejected;
         };
       let apply_action () =
-        (* Picks are validated here, not left to codegen: [validate_segments] is what makes a pick
-           the model had no way to reject fall back below instead of escaping (gh-ocannl-519). The
-           default pipeline is deliberately NOT pre-validated — it is the fallback itself, and a
-           default that fails validation is a genuine bug that must surface. *)
+        (* Schedule application uses the typed seam. Backend validation is deliberately left to
+           [compile_advisory], which now receives its classified cause directly from codegen. *)
         match action with
         | `Default -> default_segs ()
-        | `Whole p -> validate_segments [ Sched.apply ~static_indices (sketch_schedule ~p opt) opt ]
+        | `Whole p ->
+            validate_segments_for_model
+              [ Sched.apply_classified ~static_indices (sketch_schedule ~p opt) opt ]
         | `Fiss entries ->
             let subst_preset seg =
               match List.Assoc.find entries ~equal:String.equal (seg_key seg) with
               | Some p -> sketch_schedule ~p seg
               | None -> preset seg
             in
-            validate_segments
+            validate_segments_for_model
               (List.map
                  (Sched.fission_scheduled ~promote_locals:is_gpu ~preset:subst_preset ~zero_sched
                     ~static_indices opt) ~f:(fun (_, _, _, post) -> post))
@@ -3174,10 +3250,10 @@ let model_default ?report ctx comp bindings =
             !n_scored !n_skipped !n_rejected;
           (applied_pick := match action with `Default -> false | `Whole _ | `Fiss _ -> true);
           segs
-      | exception exn ->
+      | exception Outcome.Cause_at (_, cause) ->
           logf
             "model_default: winner %s FAILED to apply or validate (%s); using the default pipeline"
-            label (Exn.to_string exn);
+            label (Outcome.detail_of_cause cause);
           choice :=
             {
               no_selection with
@@ -3266,13 +3342,14 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
   let use_cache = (not (String.is_empty cache_dir)) && SC.complete canon in
   let key = SC.cache_key canon ~backend in
   let compile_spec =
-    compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu search_ctx comp
-      bindings
+    compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu
+      ~provenance:Outcome.Candidate search_ctx comp bindings
   in
   (* Winner (and cache-hit) compiles target the caller's context; they replay against the same base
      lowering as the search's candidates. *)
-  let compile_spec_real =
-    compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ctx comp bindings
+  let compile_spec_real provenance =
+    compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ~provenance ctx comp
+      bindings
   in
   let emit_report r = Option.iter report ~f:(fun f -> f r) in
   let flat_schedule = function
@@ -3297,7 +3374,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
             | Some assoc -> Fiss (F_saved assoc)
             | None -> Whole (W_saved entry.SC.saved)
           in
-          match compile_spec_real spec with
+          match compile_spec_real Outcome.Cache_replay spec with
           | Ok c ->
               logf "cache hit: %s (best %.4f ms, baseline %.4f ms)" (spec_label spec)
                 entry.SC.best_ms entry.SC.baseline_ms;
@@ -3306,6 +3383,9 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
                   cache_hit = true;
                   candidates_timed = 0;
                   candidates_failed = 0;
+                  partial = false;
+                  declines = [];
+                  terminal_failure = None;
                   rounds_run = 0;
                   sketch_candidates = 0;
                   epilogue_sketch_candidates = 0;
@@ -3323,10 +3403,12 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
                   best_schedule = flat_schedule c.form;
                 };
               Some (c.cctx, c.routine)
-          | Error msg ->
+          | Error (Outcome.Classified classified) ->
               (* Stale or corrupt entry: fall through to a fresh search. *)
-              logf "cache entry replay FAILED, re-searching: %s" msg;
-              None)
+              logf "cache entry replay FAILED, re-searching: %s"
+                (Outcome.detail_of_cause classified.cause);
+              None
+          | Error (Outcome.Fatal _ as failure) -> Outcome.raise_failure failure)
       | _ -> None
     else None
   in
@@ -3355,7 +3437,67 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
           mma_renders = [];
         }
       in
-      let n_timed = ref 1 and n_failed = ref 0 in
+      let n_timed = ref 1 in
+      let declines : (Outcome.rejection_key, decline_acc) Hashtbl.Poly.t = Hashtbl.Poly.create () in
+      (* Live search state for an honest partial report. Each counter starts at the amount of work
+         completed so far and is updated at its ordinary accounting site below. [best_so_far] is
+         updated after every successful timing, including midway through seed enumeration. *)
+      let n_mma_proposed = ref 0 and n_mma_timed = ref 0 in
+      let n_model_scored = ref 0 and n_model_pruned = ref 0 in
+      let n_fiss_sketch_timed = ref 0 and n_sr_timed = ref 0 in
+      let rounds_run = ref 0 in
+      let n_sketch_candidates = ref 0
+      and n_epilogue_sketch_candidates = ref 0
+      and n_fiss_sketch_candidates = ref 0
+      and n_split_reduce_candidates = ref 0 in
+      let best_so_far = ref (baseline, baseline_ms) in
+      let partial_emitted = ref false in
+      let emit_partial_and_raise (fatal : Outcome.fatal) =
+        let summaries = decline_summaries declines in
+        let best_c, best_ms = !best_so_far in
+        let terminal_failure =
+          Some
+            {
+              phase = fatal.phase;
+              candidate = fatal.candidate;
+              detail = Exn.to_string fatal.exn;
+            }
+        in
+        let partial_report =
+          {
+            cache_hit = false;
+            candidates_timed = !n_timed;
+            candidates_failed = failed_count declines;
+            partial = true;
+            declines = summaries;
+            terminal_failure;
+            rounds_run = !rounds_run;
+            sketch_candidates = !n_sketch_candidates;
+            epilogue_sketch_candidates = !n_epilogue_sketch_candidates;
+            fiss_sketch_candidates = !n_fiss_sketch_candidates;
+            fiss_sketch_timed = !n_fiss_sketch_timed;
+            split_reduce_candidates = !n_split_reduce_candidates;
+            split_reduce_timed = !n_sr_timed;
+            mma_candidates = !n_mma_proposed;
+            mma_timed = !n_mma_timed;
+            model_scored = !n_model_scored;
+            model_pruned = !n_model_pruned;
+            fissioned = is_fissioned best_c.form;
+            baseline_ms;
+            best_ms;
+            best_schedule = flat_schedule best_c.form;
+          }
+        in
+        (* Reporting is best-effort on the exceptional path and must not replace the compiler
+           failure or its raw backtrace. *)
+        partial_emitted := true;
+        (try emit_report partial_report
+         with report_exn ->
+           Stdio.eprintf "autotune: partial-report callback failed: %s\n%!"
+             (Exn.to_string report_exn));
+        Outcome.raise_failure (Outcome.Fatal fatal)
+      in
+      let search () =
       (* gh-ocannl-521: tensorized candidates are counted where they are TIMED, not where they are
          enumerated — a family can be seeded in bulk and rejected in bulk at candidate compile, and
          the enumerated count alone reads as coverage it does not have. Both counters are taken HERE
@@ -3363,22 +3505,28 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
          cross-segment recombination composite and the beam-expansion candidates also reach
          [try_spec] without appearing in the seed list, and counting only seeds in the denominator
          would let [mma_timed] exceed [mma_candidates] on a multi-segment routine. *)
-      let n_mma_proposed = ref 0 and n_mma_timed = ref 0 in
       let try_spec spec =
         if spec_expects_mma spec then Int.incr n_mma_proposed;
         match compile_spec spec with
-        | Error msg ->
-            Int.incr n_failed;
-            logf "%s: FAILED %s" (spec_label spec) msg;
+        | Error (Outcome.Classified classified) ->
+            record_decline declines classified;
+            logf "%s: FAILED %s" (spec_label spec)
+              (Outcome.detail_of_cause classified.cause);
             None
+        | Error (Outcome.Fatal fatal) -> emit_partial_and_raise fatal
         | Ok c ->
             if Hash_set.mem seen c.digest_after then (
               logf "%s: dedup (digest %s)" (spec_label spec) (dshort c.digest_after);
               None)
             else (
               Hash_set.add seen c.digest_after;
-              match time_routine ~repeats c.cctx c.routine with
-              | ms ->
+              match
+                Outcome.protect ~classify_backend:(fun _ _ -> None)
+                  ~provenance:Outcome.Candidate ~phase:Outcome.Launch
+                  ~candidate:(spec_label spec) (fun () ->
+                    time_routine ~tag_failures:true ~repeats c.cctx c.routine)
+              with
+              | Ok ms ->
                   Int.incr n_timed;
                   if spec_expects_mma spec then Int.incr n_mma_timed;
                   logf "%s: %.4f ms (digest %s)" (spec_label spec) ms (dshort c.digest_after);
@@ -3402,16 +3550,18 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
                   else if total = 0 && spec_expects_mma spec then
                     logf "%s: NOTE tensorized candidate emitted no Tile_mma statement"
                       (spec_label spec);
+                  if Float.(ms < snd !best_so_far) then best_so_far := (c, ms);
                   Some (c, ms)
-              | exception exn ->
-                  Int.incr n_failed;
-                  logf "%s: RUN FAILED %s" (spec_label spec) (Exn.to_string exn);
-                  None)
+              | Error (Outcome.Classified classified) ->
+                  record_decline declines classified;
+                  logf "%s: RUN FAILED %s" (spec_label spec)
+                    (Outcome.detail_of_cause classified.cause);
+                  None
+              | Error (Outcome.Fatal fatal) -> emit_partial_and_raise fatal)
       in
       let block_size_presets mk =
         mk None :: (if is_gpu then List.map seed_block_sizes ~f:(fun bs -> mk (Some bs)) else [])
       in
-      let n_model_scored = ref 0 and n_model_pruned = ref 0 in
       (* The model pre-filter of the sketch seeding (gh-ocannl-491 task 3): rank each candidate
          family (the whole-routine sketches; each fission segment's sketches) with the roofline
          model and keep the best [keep_fraction] of the scored candidates before any compilation or
@@ -3426,8 +3576,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
           let scored =
             List.map params ~f:(fun p ->
                 let score =
-                  try model_score ~static_indices ~limits seg_opt (sketch_schedule ~p seg_opt)
-                  with _ -> None
+                  model_score ~static_indices ~limits seg_opt (sketch_schedule ~p seg_opt)
                 in
                 (p, score))
           in
@@ -3444,6 +3593,8 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
         model_prefilter_params ~seg_opt:base_opt ~family:"whole-routine"
           (sketch_seed_params ~is_gpu ~is_cpu ~limits base_opt)
       in
+      n_sketch_candidates := List.length sketch_params;
+      n_epilogue_sketch_candidates := List.count sketch_params ~f:(fun p -> p.sk_epilogue);
       (* Per-fission-segment sketch seeds (the [F_sketch] flavor): heavily fissioned graphs tune per
          segment, where the whole-routine sketches never apply. Enumerate the fission segmentation
          once, on a hermetic copy of the base lowering with the same pipeline settings the candidate
@@ -3468,7 +3619,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
             Sched.fission_scheduled ~promote_locals:is_gpu ~preset ~zero_sched ~static_indices
               scratch
           with
-          | exception _ -> []
+          | exception Outcome.Cause_at _ -> []
           | [] | [ _ ] -> [] (* Unfissioned: the whole-routine sketches cover the site. *)
           | tuples ->
               List.filter_map tuples ~f:(fun (kind, pre, _, _) ->
@@ -3510,6 +3661,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
         List.concat_map fiss_sketch_entries ~f:(fun (key, ps) ->
             List.map ps ~f:(fun p -> Fiss (F_sketch [ (key, p) ])))
       in
+      n_fiss_sketch_candidates := List.length fiss_sketch_specs;
       (* Split-reduce seeds (gh-ocannl-484 task 3), detected on the base lowering — the prelude
          applies whole-routine, so no segment enumeration is needed first — and proposed as
          single-site candidates over a few [num_blocks] values (the tunable of the family;
@@ -3524,6 +3676,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
             List.filter_map sr_num_blocks ~f:(fun b ->
                 if 2 * b <= s.sr_red then Some (Fiss (F_split { sites = [ (s, b) ] })) else None))
       in
+      n_split_reduce_candidates := List.length sr_specs;
       let seed_specs =
         block_size_presets (fun block_size -> Whole (W_preset { block_size }))
         @ (if is_gpu || is_cpu then
@@ -3541,9 +3694,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
         @ fiss_sketch_specs @ sr_specs
       in
       let by_time (_, a) (_, b) = Float.compare a b in
-      let n_fiss_sketch_timed = ref 0 in
       let fiss_single_results = ref [] in
-      let n_sr_timed = ref 0 in
       let sr_single_results = ref [] in
       let pool =
         (baseline, baseline_ms)
@@ -3602,7 +3753,6 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
       in
       let beam = ref (List.take (List.sort pool ~compare:by_time) beam_width) in
       let best = ref (List.hd_exn !beam) in
-      let rounds_run = ref 0 in
       let continue_ = ref true in
       while !continue_ && !rounds_run < rounds do
         Int.incr rounds_run;
@@ -3651,11 +3801,14 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
              | ms -> logf "untuned-default in-process control: %.4f ms" ms
              | exception exn -> logf "untuned-default control run failed: %s" (Exn.to_string exn))
          | exception exn -> logf "untuned-default control compile failed: %s" (Exn.to_string exn));
-      emit_report
+      let completed_report =
         {
           cache_hit = false;
           candidates_timed = !n_timed;
-          candidates_failed = !n_failed;
+          candidates_failed = failed_count declines;
+          partial = false;
+          declines = decline_summaries declines;
+          terminal_failure = None;
           rounds_run = !rounds_run;
           sketch_candidates = List.length sketch_params;
           epilogue_sketch_candidates = List.count sketch_params ~f:(fun p -> p.sk_epilogue);
@@ -3671,23 +3824,46 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
           baseline_ms;
           best_ms;
           best_schedule = flat_schedule best_c.form;
-        };
-      if Option.is_none timing_ctx then (best_c.cctx, best_c.routine)
-      else
-        (* The search ran against the scratch lineage; compile the winner from the caller's context
-           (like the cache-hit path). Digest mismatch or replay failure falls back to the production
-           default schedule. *)
-        let spec =
-          match best_c.form with
-          | Whole_saved saved -> Whole (W_saved saved)
-          | Fiss_saved assoc -> Fiss (F_saved assoc)
-          | Split_saved (prelude, assoc) -> Fiss (F_split_saved (prelude, assoc))
-        in
-        match compile_spec_real spec with
-        | Ok c ->
-            logf "winner replay ok: %s" (spec_label spec);
-            (c.cctx, c.routine)
-        | Error msg ->
-            logf "winner replay FAILED (%s), falling back to the default compile: %s"
-              (spec_label spec) msg;
-            Context.compile ctx comp bindings)
+        }
+      in
+      let result =
+        if Option.is_none timing_ctx then (best_c.cctx, best_c.routine)
+        else
+          (* The search ran against the scratch lineage; compile the winner from the caller's
+             context (like the cache-hit path). Digest mismatch or replay failure falls back to the
+             production default schedule. *)
+          let spec =
+            match best_c.form with
+            | Whole_saved saved -> Whole (W_saved saved)
+            | Fiss_saved assoc -> Fiss (F_saved assoc)
+            | Split_saved (prelude, assoc) -> Fiss (F_split_saved (prelude, assoc))
+          in
+          match compile_spec_real Outcome.Candidate spec with
+          | Ok c ->
+              logf "winner replay ok: %s" (spec_label spec);
+              (c.cctx, c.routine)
+          | Error (Outcome.Classified classified) ->
+              logf "winner replay FAILED (%s), falling back to the default compile: %s"
+                (spec_label spec) (Outcome.detail_of_cause classified.cause);
+              Context.compile ctx comp bindings
+          | Error (Outcome.Fatal fatal) -> emit_partial_and_raise fatal
+      in
+      (result, completed_report)
+      in
+      let result, completed_report =
+        try search () with exn ->
+          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+          if !partial_emitted then Stdlib.Printexc.raise_with_backtrace exn backtrace
+          else
+            emit_partial_and_raise
+              {
+                exn;
+                backtrace;
+                phase = Outcome.Transform;
+                candidate = None;
+              }
+      in
+      (* A callback failure on the ordinary completion path is the callback's own exception and
+         propagates normally; only fatal-path callbacks are best-effort. *)
+      emit_report completed_report;
+      result)

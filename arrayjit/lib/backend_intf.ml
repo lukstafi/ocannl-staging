@@ -297,6 +297,11 @@ module type Backend_device_common = sig
       {!static_properties}: computing it (device enumeration) must not run at backend-module
       initialization. *)
 
+  val classify_failure :
+    Schedule_outcome.phase -> exn -> Schedule_outcome.classified_cause option
+  (** Recognizes backend-owned failures at a tagged boundary. Returning [None] leaves the common
+      policy to treat the exception as unclassified. *)
+
   val get_used_memory : device -> int
   (** Returns (an upper bound of) the memory used for arrays, in bytes. *)
 

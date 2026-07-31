@@ -86,25 +86,24 @@ let () =
     | Some msg -> String.is_substring msg ~substring:"all active hardware dimensions"
     | None -> false);
 
-  (* --- The seam-level check: the same rejection, raised where a fallback can see it --- *)
-  let c, d, comp = pair "seam" in
-  let seam_raised = ref None in
-  let probe (opt : LL.optimized) =
-    match Autotune.validate_segments (annotate_mixed opt) with
-    | segs -> segs
-    | exception exn ->
-        seam_raised := Some (Exn.to_string exn);
-        [ opt ]
+  let _c, _d, comp = pair "classified" in
+  let classified =
+    Context.compile_outcome ~lowered_transforms:annotate_mixed
+      ~provenance:Ir.Schedule_outcome.Candidate ~candidate:"bad-annotation" (Context.auto ()) comp
+      Ir.Indexing.Empty
   in
-  let ctx, routine =
-    Context.compile ~lowered_transforms:probe (Context.auto ()) comp Ir.Indexing.Empty
-  in
-  let ctx = Context.run ctx routine in
-  p "validate_segments rejects the transform at the seam"
-    (match !seam_raised with
-    | Some msg -> String.is_substring msg ~substring:"all active hardware dimensions"
-    | None -> false);
-  p "the seam-level fallback computes the unscheduled values" (values ctx c d);
+  p "candidate compile retains the validation rejection key"
+    (match classified with
+    | Error
+        (Ir.Schedule_outcome.Classified
+          {
+            cause =
+              Ir.Schedule_outcome.Illegal_schedule
+                { check = "Low_level.validate_parallel"; detail = _ };
+            execution_effect = Ir.Schedule_outcome.No_device_writes;
+          }) ->
+        true
+    | Ok _ | Error (Ir.Schedule_outcome.Classified _) | Error (Ir.Schedule_outcome.Fatal _) -> false);
 
   (* --- The backstop: compile_advisory falls back and still returns a working routine --- *)
   let c, d, comp = pair "advisory" in
@@ -140,6 +139,43 @@ let () =
      | Some msg -> String.is_substring msg ~substring:"all active hardware dimensions"
      | None -> false)
     && Option.is_none !fell_back);
+
+  (* Fatal compiler failures are not advisory declines: they propagate once, with their original
+     backtrace, and never invoke the fallback callback. *)
+  Stdlib.Printexc.record_backtrace true;
+  let _c, _d, comp = pair "fatal_assert" in
+  let fell_back = ref false in
+  let assert_propagated_with_backtrace =
+    try
+      ignore
+        (Autotune.compile_advisory
+           ~on_fallback:(fun _ -> fell_back := true)
+           (fun _ -> assert false)
+           (Context.auto ()) comp Ir.Indexing.Empty
+          : Context.t * Context.routine);
+      false
+    with
+    | Assert_failure _ ->
+        Stdlib.Printexc.raw_backtrace_length (Stdlib.Printexc.get_raw_backtrace ()) > 0
+    | _ -> false
+  in
+  p "compile_advisory propagates assertions with a backtrace"
+    (assert_propagated_with_backtrace && not !fell_back);
+  let _c, _d, comp = pair "fatal_failure" in
+  let fell_back = ref false in
+  let strict_failure_propagated =
+    try
+      ignore
+        (Autotune.compile_advisory
+           ~on_fallback:(fun _ -> fell_back := true)
+           (fun _ -> failwith "advisory compiler bug")
+           (Context.auto ()) comp Ir.Indexing.Empty
+          : Context.t * Context.routine);
+      false
+    with Failure msg -> String.equal msg "advisory compiler bug"
+  in
+  p "compile_advisory propagates unclassified failures in strict mode"
+    (strict_failure_propagated && not !fell_back);
 
   (* --- ... and does not fire when the transform is fine (no blanket swallowing) --- *)
   let c, d, comp = pair "clean" in

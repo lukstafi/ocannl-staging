@@ -617,22 +617,24 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     in
     let limits = Device.hardware_limits () in
     let lowereds =
-      match (lowered_transform, lowered_transforms) with
-      | Some _, Some _ ->
-          invalid_arg "Backend.compile: pass at most one of lowered_transform, lowered_transforms"
-      | Some transform, None -> [ transform lowered ]
-      | None, Some transforms -> (
-          match transforms lowered with
-          | [] -> invalid_arg "Backend.compile: lowered_transforms returned an empty list"
-          | segments -> segments)
-      | None, None ->
-          (* No explicit schedule: the default annotator parallelizes kernels it can prove safe
-             (docs/proposals/schedule-ir-optops.md §6) -- Grid x Workgroup on GPU backends,
-             pool-rendered Grid on CPU backends; the identity otherwise. Kernel fission may split
-             the routine into several kernels at cross-workgroup dependency edges; they run
-             back-to-back on the routine's stream (see [link]). *)
-          Schedule.maybe_default_schedules ~backend_name:Device.name ~limits
-            ~static_indices:(Indexing.bound_symbols bindings) lowered
+      Schedule_outcome.tag Schedule_outcome.Transform (fun () ->
+          match (lowered_transform, lowered_transforms) with
+          | Some _, Some _ ->
+              invalid_arg
+                "Backend.compile: pass at most one of lowered_transform, lowered_transforms"
+          | Some transform, None -> [ transform lowered ]
+          | None, Some transforms -> (
+              match transforms lowered with
+              | [] -> invalid_arg "Backend.compile: lowered_transforms returned an empty list"
+              | segments -> segments)
+          | None, None ->
+              (* No explicit schedule: the default annotator parallelizes kernels it can prove safe
+                 (docs/proposals/schedule-ir-optops.md §6) -- Grid x Workgroup on GPU backends,
+                 pool-rendered Grid on CPU backends; the identity otherwise. Kernel fission may
+                 split the routine into several kernels at cross-workgroup dependency edges; they
+                 run back-to-back on the routine's stream (see [link]). *)
+              Schedule.maybe_default_schedules ~backend_name:Device.name ~limits
+                ~static_indices:(Indexing.bound_symbols bindings) lowered)
     in
     (* Per-compile launch-geometry trace (config [schedule_log_launches]): one line per segment with
        its grid/block dims — for diffing what two compiles of nominally identical code actually emit
@@ -702,17 +704,22 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
       match lowereds with
       | [] -> assert false
       | [ single ] ->
-          Schedule.check_hardware_limits ~name ~limits single;
-          (Either.First (compile ~name bindings single), single)
+          Schedule.check_hardware_limits_classified ~name ~limits single;
+          let compiled =
+            Schedule_outcome.tag Schedule_outcome.Backend_compile (fun () ->
+                compile ~name bindings single)
+          in
+          (Either.First compiled, single)
       | segments ->
           let seg_names = List.mapi segments ~f:(fun i _ -> name ^ "__seg" ^ Int.to_string i) in
           List.iter2_exn seg_names segments ~f:(fun seg_name seg ->
-              Schedule.check_hardware_limits ~name:seg_name ~limits seg);
+              Schedule.check_hardware_limits_classified ~name:seg_name ~limits seg);
           let batch =
-            compile_batch
-              ~names:(Array.of_list_map seg_names ~f:Option.some)
-              bindings
-              (Array.of_list_map segments ~f:Option.some)
+            Schedule_outcome.tag Schedule_outcome.Backend_compile (fun () ->
+                compile_batch
+                  ~names:(Array.of_list_map seg_names ~f:Option.some)
+                  bindings
+                  (Array.of_list_map segments ~f:Option.some))
           in
           (* Keep the whole-routine (pre-fission) lowered code: context allocation and I/O analysis
              need the union footprint, and each segment's [optimized] carries only its filtered
@@ -761,10 +768,13 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     in
     Array.iter2_exn names lowereds ~f:(fun name lowered ->
         Option.iter lowered ~f:(fun lowered ->
-            Schedule.check_hardware_limits
+            Schedule.check_hardware_limits_classified
               ~name:(Option.value name ~default:"<unnamed>")
               ~limits:(Device.hardware_limits ()) lowered));
-    let code_batch = compile_batch ~names bindings lowereds in
+    let code_batch =
+      Schedule_outcome.tag Schedule_outcome.Backend_compile (fun () ->
+          compile_batch ~names bindings lowereds)
+    in
     let batch_plc =
       (Array.find_map lowereds ~f:(Option.map ~f:(fun l -> l.Low_level.optimize_ctx))
       |> Option.value_or_thunk ~default:Low_level.empty_optimize_ctx)

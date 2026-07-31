@@ -3151,6 +3151,15 @@ let apply ?(static_indices = []) (sched : schedule) (opt : Low_level.optimized) 
     in
     { opt with llc }
 
+let apply_classified ?static_indices sched opt =
+  match apply ?static_indices sched opt with
+  | result -> result
+  | exception Invalid_argument detail ->
+      raise
+        (Schedule_outcome.Cause_at
+           ( Schedule_outcome.Transform,
+             Schedule_outcome.Illegal_schedule { check = "Schedule.apply"; detail } ))
+
 (** {2 The op-legality oracle}
 
     gh-494 waypoint 3: schedule ops consult the affine engine instead of every transform (and every
@@ -5061,7 +5070,7 @@ let fission_scheduled ?(promote_locals = false) ~(preset : Low_level.optimized -
             (List.filter promoted ~f:(fun (tn, _) -> not (crosses_segments final_swr tn)));
           List.map coalesced ~f:(fun (seg, replicas, sched) ->
               let pre = segment_optimized opt (seg_llc replicas seg) in
-              (seg.g_kind, pre, sched, apply ~static_indices sched pre))
+              (seg.g_kind, pre, sched, apply_classified ~static_indices sched pre))
 
 let fission_default ?promote_locals ~preset ~zero_sched ~static_indices (opt : Low_level.optimized)
     : Low_level.optimized list =
@@ -5097,8 +5106,9 @@ let maybe_default_schedule ~backend_name ?(limits = Backend_intf.no_hardware_lim
   (* [automatic_schedule_active] keeps logged runs serial: runtime kernel logging is
      line-interleaved under parallel execution, and serial logs stay deterministic and readable. *)
   if not (automatic_schedule_active ~backend_name) then opt
-  else if backend_is_gpu backend_name then apply ~static_indices (default_gpu ~limits opt) opt
-  else apply ~static_indices (default_cpu opt) opt
+  else if backend_is_gpu backend_name then
+    apply_classified ~static_indices (default_gpu ~limits opt) opt
+  else apply_classified ~static_indices (default_cpu opt) opt
 
 let maybe_default_schedules ~backend_name ?(limits = Backend_intf.no_hardware_limits)
     ~static_indices (opt : Low_level.optimized) : Low_level.optimized list =
@@ -5117,25 +5127,50 @@ let maybe_default_schedules ~backend_name ?(limits = Backend_intf.no_hardware_li
          keeping CPU placements unchanged keeps small-routine codegen stable. *)
       fission_default ~promote_locals:gpu ~preset ~zero_sched ~static_indices opt
 
-let check_hardware_limits ~name ~(limits : Backend_intf.hardware_limits) (opt : Low_level.optimized)
-    : unit =
+let check_hardware_limits_classified ~name ~(limits : Backend_intf.hardware_limits)
+    (opt : Low_level.optimized) : unit =
   Option.iter limits.max_threads_per_workgroup ~f:(fun max_threads ->
       let block = (Low_level.launch_dims opt.llc).block in
       let block_product = Array.fold block ~init:1 ~f:( * ) in
       if block_product > max_threads then
+        let detail =
+          [%string
+            "Schedule: kernel %{name} requests a workgroup of %{block_product#Int} threads, \
+             exceeding the device limit of %{max_threads#Int} threads per workgroup"]
+        in
         raise
-        @@ Utils.User_error
-             [%string
-               "Schedule: kernel %{name} requests a workgroup of %{block_product#Int} threads, \
-                exceeding the device limit of %{max_threads#Int} threads per workgroup"]);
+          (Schedule_outcome.Cause_at
+             ( Schedule_outcome.Hardware_limits,
+               Schedule_outcome.Resource_exceeded
+                 {
+                   resource = Schedule_outcome.Workgroup_threads;
+                   requested = block_product;
+                   limit = Some max_threads;
+                   detail;
+                 } )));
   Option.iter limits.max_workgroup_memory_bytes ~f:(fun max_bytes ->
       let shared_bytes =
         Set.fold opt.workgroup_shared ~init:0 ~f:(fun acc tn ->
             acc + Lazy.force tn.Tn.size_in_bytes)
       in
       if shared_bytes > max_bytes then
+        let detail =
+          [%string
+            "Schedule: kernel %{name} stages %{shared_bytes#Int} bytes of workgroup-shared \
+             tiles, exceeding the device limit of %{max_bytes#Int} bytes"]
+        in
         raise
-        @@ Utils.User_error
-             [%string
-               "Schedule: kernel %{name} stages %{shared_bytes#Int} bytes of workgroup-shared \
-                tiles, exceeding the device limit of %{max_bytes#Int} bytes"])
+          (Schedule_outcome.Cause_at
+             ( Schedule_outcome.Hardware_limits,
+               Schedule_outcome.Resource_exceeded
+                 {
+                   resource = Schedule_outcome.Workgroup_memory;
+                   requested = shared_bytes;
+                   limit = Some max_bytes;
+                   detail;
+                 } )))
+
+let check_hardware_limits ~name ~limits opt =
+  match check_hardware_limits_classified ~name ~limits opt with
+  | () -> ()
+  | exception Schedule_outcome.Cause_at (_, cause) -> Schedule_outcome.raise_cause cause

@@ -7,6 +7,7 @@ print_decimals_precision=2
 prefer_backend_uniformity=true
 default_prec=single
 fixed_state_for_init=42
+strict_failure_classification=true
 # Don't delete files as tests might be running in parallel deleting each-other's files.
 clean_up_build_files_on_startup=false
 clean_up_log_files_on_startup=false

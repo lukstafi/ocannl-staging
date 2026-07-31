@@ -3198,6 +3198,16 @@ let validate_parallel plc (llc : t) : unit =
     in
     check_writes ~covered:[] ~enclosing:[] llc)
 
+let validate_parallel_classified plc llc =
+  match validate_parallel plc llc with
+  | () -> ()
+  | exception Invalid_argument detail ->
+      raise
+        (Schedule_outcome.Cause_at
+           ( Schedule_outcome.Backend_codegen,
+             Schedule_outcome.Illegal_schedule
+               { check = "Low_level.validate_parallel"; detail } ))
+
 (** Wraps the body of each hardware-annotated loop whose extent is smaller than its slot's launch
     dimension in an [If (index < extent)] guard, for the kinds [should_guard] selects (backends
     binding the axis in hardware; the serial fallback iterates the true extent and needs no guard).

@@ -215,6 +215,7 @@ struct
     }
 
   let get_name device = [%string "%{name}:%{device.ordinal#Int}:%{device.device_id#Int}"]
+  let classify_failure _phase _exn = None
 
   let make_context ?(ctx_buffers = Map.empty (module Tnode)) ?optimize_ctx device =
     let optimize_ctx = Option.value_or_thunk optimize_ctx ~default:Low_level.empty_optimize_ctx in

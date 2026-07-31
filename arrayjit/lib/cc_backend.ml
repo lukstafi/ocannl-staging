@@ -225,14 +225,25 @@ let%track7_sexp c_compile_and_load ~f_path =
        try Stdio.In_channel.read_all temp_log with _ -> "(unable to read compiler output)"
      in
      (try Stdlib.Sys.remove temp_log with _ -> ());
-     invalid_arg
-     @@ Printf.sprintf
-          "OCANNL cc backend: generated code failed to compile (exit code %d).\n\
-           This is a bug in OCANNL. Please file an issue with the generated .c file at %s\n\
-           Compilation command: %s\n\
-           Compiler output:\n\
-           %s"
-          rc f_path cmdline compiler_output)
+     let detail =
+       Printf.sprintf
+         "OCANNL cc backend: generated code failed to compile (exit code %d).\n\
+          This is a bug in OCANNL. Please file an issue with the generated .c file at %s\n\
+          Compilation command: %s\n\
+          Compiler output:\n\
+          %s"
+         rc f_path cmdline compiler_output
+     in
+     raise
+       (Schedule_outcome.Cause_at
+          ( Schedule_outcome.Backend_compile,
+            Schedule_outcome.Backend_rejected
+              {
+                backend = name;
+                stage = "compiler";
+                severity = Schedule_outcome.Compiler_bug;
+                detail;
+              } )))
    else try Stdlib.Sys.remove temp_log with _ -> ());
   (* Wait a moment for the file to be fully written on success *)
   let start_time = Unix.gettimeofday () in

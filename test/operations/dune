@@ -1031,6 +1031,7 @@
     %{dep:../../arrayjit/lib/cuda_backend.ml}
     %{dep:../../arrayjit/lib/low_level.ml}
     %{dep:../../arrayjit/lib/schedule.ml}
+    %{dep:../../arrayjit/lib/schedule_outcome.ml}
     %{dep:../../arrayjit/lib/autotune.ml}
     %{dep:../../arrayjit/lib/tnode.ml}
     %{dep:../../arrayjit/lib/assignments.ml}

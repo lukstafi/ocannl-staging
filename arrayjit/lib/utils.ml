@@ -137,6 +137,7 @@ let known_config_keys =
       "autotune_repeats";
       "autotune_cache_dir";
       "autotune_log";
+      "strict_failure_classification";
       (* Analytic cost model (gh-ocannl-491) *)
       "autotune_keep_fraction";
       "autotune_calibration_file";

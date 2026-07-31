@@ -218,12 +218,24 @@ let () =
     | Some "1" ->
         Some
           (fun (r : Autotune.report) ->
+            let declines =
+              String.concat ~sep:","
+                (List.map r.declines ~f:(fun d ->
+                     Sexp.to_string (Ir.Schedule_outcome.sexp_of_rejection_key d.key)
+                     ^ "=" ^ Int.to_string d.count))
+            in
+            let terminal =
+              Option.value_map r.terminal_failure ~default:"none" ~f:(fun failure ->
+                  Sexp.to_string (Ir.Schedule_outcome.sexp_of_phase failure.phase)
+                  ^ Option.value_map failure.candidate ~default:""
+                      ~f:(fun candidate -> ":" ^ candidate))
+            in
             Stdlib.Printf.eprintf
-              "tune arm: cache_hit=%b timed=%d failed=%d rounds=%d sketch=%d fissioned=%b \
-               baseline_ms=%.4f best_ms=%.4f\n\
+              "tune arm: cache_hit=%b partial=%b timed=%d failed=%d declines=[%s] terminal=%s \
+               rounds=%d sketch=%d fissioned=%b baseline_ms=%.4f best_ms=%.4f\n\
                %!"
-              r.cache_hit r.candidates_timed r.candidates_failed r.rounds_run r.sketch_candidates
-              r.fissioned r.baseline_ms r.best_ms)
+              r.cache_hit r.partial r.candidates_timed r.candidates_failed declines terminal
+              r.rounds_run r.sketch_candidates r.fissioned r.baseline_ms r.best_ms)
     | _ -> None
   in
   let ctx, routines =
