@@ -10,6 +10,19 @@
 
 ### Added
 
+- **`Swap` ∘ `Split_reduce` seeding: conv-gradient accumulations become reachable**
+  (gh-ocannl-537). The gh-484 split-reduce family timed cleanly but was inert on the reduction it
+  was filed for: OCANNL lowers parameter gradients with the accumulated channel loop *innermost*
+  and the reduction loops outside it, so `Split_reduce`'s pinning discipline (every
+  accumulation-cell symbol bound by a loop *enclosing* the reduction loop) rejected every axis of
+  every parameter gradient — while that one fission segment was 89% of HIP lenet's step after
+  gh-527, and 69–95% across three backends. `Schedule.split_reduce_hoist` now reports the
+  offending symbols structurally from the recognizer's own hermetic probe, and
+  `Autotune.split_reduce_sites` hoists them outside the reduction loop with a chain of adjacent
+  `Swap`s (relative order preserved, each `Swap` confirmed `Op_legal` against the code it acts on)
+  before re-probing the split; the chain rides on the site (`sr_swaps`) and is replayed by the
+  `F_split` candidate's prelude. `BENCH_SR_SITES=1` names the interchange a site was reached
+  through, and tags a rejection `[hoistable: …]` when the interchange would remove it.
 - **Forward-only reduced precision by load-time conversion** (gh-ocannl-492, the `gpt2_mini`
   leg): data-backed tensors are precision-`Specified` at creation and inference has no
   optimizer, so there is no master copy for a cast twin to preserve — re-precision happens at

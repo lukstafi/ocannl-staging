@@ -1837,6 +1837,14 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
       (gh-484 task 2). Rows are data-dependent, so [partials] is zeroed by a preceding whole-node
       [Zero_out] statement (its own fission segment) and the combine covers all of [target]. *)
 
+(** Raised by {!apply_split_reduce}'s static-form pinning discipline when the accumulation cell
+    mentions symbols bound {e inside} the reduction loop — the one rejection cause a loop
+    interchange can remove (gh-ocannl-537). Carries the offending symbols so seeding can build the
+    enabling [Swap] chain from the recognizer's own verdict rather than from its message;
+    {!apply_opt_op} converts it to the [Invalid_argument] the [apply]/[op_legality] surface
+    documents, so this constructor never escapes to schedule application. *)
+exception Split_reduce_inner_cell of Indexing.symbol list
+
 let apply_split_reduce ~axis ~target ~num_blocks ~block_index ~inner_index ~combine_indices
     (opt : Low_level.optimized) : Low_level.optimized =
   let open Low_level in
@@ -2115,13 +2123,18 @@ let apply_split_reduce ~axis ~target ~num_blocks ~block_index ~inner_index ~comb
               invalid_arg
                 ("Schedule.Split_reduce: the accumulation cell mentions the reduction loop "
                ^ Indexing.symbol_ident axis ^ " — not a reduction over it");
-            List.iter all_syms ~f:(fun s ->
-                if not (List.mem enclosing_syms s ~equal:Indexing.equal_symbol) then
-                  invalid_arg
-                    ("Schedule.Split_reduce: the accumulation cell mentions "
-                   ^ Indexing.symbol_ident s
-                   ^ ", which is not bound by a loop enclosing the reduction loop in this \
-                      statement"));
+            (* The cause gh-ocannl-537 composes around: symbols bound INSIDE the reduction loop
+               (OCANNL lowers conv gradients with the accumulated channel loop innermost). Raised
+               structurally with the whole offending set, so seeding can ask for it by
+               {!split_reduce_hoist} instead of parsing the message; [apply_opt_op] converts it to
+               the [Invalid_argument] every other caller expects. *)
+            (match
+               List.dedup_and_sort ~compare:Indexing.compare_symbol
+                 (List.filter all_syms ~f:(fun s ->
+                      not (List.mem enclosing_syms s ~equal:Indexing.equal_symbol)))
+             with
+            | [] -> ()
+            | inner -> raise (Split_reduce_inner_cell inner));
             List.iter enclosing_syms ~f:(fun s ->
                 match List.count all_syms ~f:(Indexing.equal_symbol s) with
                 | 1 -> ()
@@ -3127,10 +3140,42 @@ let apply_opt_op (opt : Low_level.optimized) (op : optop) : Low_level.optimized 
   | Privatize { target; over } -> apply_privatize ~target ~over opt
   | Tensorize _ -> apply_tensorize op opt
   | Fuse_epilogue { target; shared } -> apply_fuse_epilogue ~target ~shared opt
-  | Split_reduce { axis; target; num_blocks; block_index; inner_index; combine_indices } ->
-      apply_split_reduce ~axis ~target ~num_blocks ~block_index ~inner_index ~combine_indices opt
+  | Split_reduce { axis; target; num_blocks; block_index; inner_index; combine_indices } -> (
+      try
+        apply_split_reduce ~axis ~target ~num_blocks ~block_index ~inner_index ~combine_indices opt
+      with Split_reduce_inner_cell syms ->
+        invalid_arg
+          ("Schedule.Split_reduce: the accumulation cell mentions "
+          ^ String.concat ~sep:", " (List.map syms ~f:Indexing.symbol_ident)
+          ^ ", which is not bound by a loop enclosing the reduction loop in this statement — Swap \
+             it outside " ^ Indexing.symbol_ident axis ^ " first"))
   | (Split _ | Swap _ | Retype _ | Unroll _ | Partition _ | Pad _ | Expand_zero _) as op ->
       { opt with llc = apply_op opt.Low_level.llc op }
+
+(* gh-ocannl-537: the recognizer's answer to "which loops would have to enclose the reduction for
+   this site to be splittable". Probed hermetically like [op_legality]'s [Split_reduce] arm — the
+   recognition is a pure function of the code, and the discipline check precedes any minting, so
+   the copy is only belt-and-braces. Empty for every other outcome (legal, or rejected for a cause
+   an interchange cannot remove), so a caller can treat a non-empty answer as "this exact
+   obstruction, and nothing else, stands in the way". *)
+let split_reduce_hoist (opt : Low_level.optimized) (op : optop) : Indexing.symbol list =
+  match op with
+  | Split_reduce { axis; target; num_blocks; block_index; inner_index; combine_indices } -> (
+      let hermetic =
+        {
+          opt with
+          Low_level.traced_store = Hashtbl.copy opt.Low_level.traced_store;
+          optimize_ctx = Low_level.copy_optimize_ctx opt.Low_level.optimize_ctx;
+        }
+      in
+      match
+        apply_split_reduce ~axis ~target ~num_blocks ~block_index ~inner_index ~combine_indices
+          hermetic
+      with
+      | (_ : Low_level.optimized) -> []
+      | exception Split_reduce_inner_cell syms -> syms
+      | exception Invalid_argument _ -> [])
+  | _ -> []
 
 let apply ?(static_indices = []) (sched : schedule) (opt : Low_level.optimized) :
     Low_level.optimized =

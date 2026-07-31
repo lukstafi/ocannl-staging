@@ -174,10 +174,20 @@ let print_split_reduce_verdicts opt =
                 let verdict =
                   match Sched.split_reduce ~axis:s ~target:tn ~num_blocks:2 with
                   | op, _, _, _ -> (
+                      (* gh-ocannl-537: distinguish the rejection an interchange removes (seeding
+                         hoists these and re-probes) from the ones that end the site. *)
+                      let hoist () =
+                        match Sched.split_reduce_hoist opt op with
+                        | [] -> ""
+                        | syms ->
+                            " [hoistable: "
+                            ^ String.concat ~sep:"," (List.map syms ~f:Idx.symbol_ident)
+                            ^ "]"
+                      in
                       match Sched.op_legality opt op with
                       | Sched.Op_legal -> "LEGAL"
-                      | Sched.Op_illegal m -> "illegal: " ^ m
-                      | Sched.Op_unknown m -> "unknown: " ^ m)
+                      | Sched.Op_illegal m -> "illegal: " ^ m ^ hoist ()
+                      | Sched.Op_unknown m -> "unknown: " ^ m ^ hoist ())
                   | exception Invalid_argument m -> "raised: " ^ m
                 in
                 Stdio.printf "      axis %s extent %d -> %s\n" (Idx.symbol_ident s) n

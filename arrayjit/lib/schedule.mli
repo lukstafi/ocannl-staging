@@ -345,6 +345,20 @@ val tensorize :
 (** Builds a {!constructor-Tensorize} with a fresh lane symbol (via [Indexing.get_symbol]) and
     returns it. *)
 
+val split_reduce_hoist : Low_level.optimized -> optop -> Indexing.symbol list
+(** The loops that would have to enclose the reduction for this {!constructor-Split_reduce} to be
+    recognized: the accumulation cell's symbols that are currently bound {e inside} the reduction
+    loop (gh-ocannl-537). This is the one rejection cause a loop interchange can remove — OCANNL
+    lowers conv bias/weight gradients with the accumulated channel loops innermost and the reduction
+    loops (batch, y, x) outside them, the exact inverse of the static form's pinning discipline — so
+    autotune seeding hoists these symbols with a {!constructor-Swap} chain and re-probes, rather than
+    dropping the site. The answer comes from the recognizer itself (a hermetic probe of its own
+    apply), not from a re-implementation of the discipline or a parse of its message.
+
+    [[]] for every other outcome: a legal op, a non-[Split_reduce] op, and any rejection an
+    interchange cannot remove (the cell mentioning the reduction loop itself, an enclosing loop that
+    pins no component, an unrecognized accumulation form). *)
+
 val can_fuse_epilogue : target:Tn.t -> Low_level.optimized -> bool
 (** Whether {!constructor-Fuse_epilogue} on [target] would succeed on this code — i.e. an eligible
     elementwise tail immediately follows the reduction over [target]. Used by the autotune seeding

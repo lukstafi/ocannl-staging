@@ -124,10 +124,20 @@ let () =
      let sites = Autotune.split_reduce_sites opt in
      Stdio.printf "split-reduce sites detected: %d\n" (List.length sites);
      List.iter sites ~f:(fun s ->
-         Stdio.printf "  %s: reduction extent %d, target cells %d%s\n"
+         Stdio.printf "  %s: reduction extent %d, target cells %d%s%s\n"
            (Ir.Tnode.debug_name s.Autotune.sr_target)
            s.Autotune.sr_red s.Autotune.sr_out
-           (if s.Autotune.sr_dynamic then " (scatter)" else "")));
+           (if s.Autotune.sr_dynamic then " (scatter)" else "")
+           (* gh-ocannl-537: the conv-gradient sites are reachable only through an enabling
+              interchange, so name it — a site listed with no swaps was splittable as lowered. *)
+           (match s.Autotune.sr_swaps with
+           | [] -> ""
+           | swaps ->
+               Printf.sprintf " (via %d swap%s: %s)" (List.length swaps)
+                 (if List.length swaps = 1 then "" else "s")
+                 (String.concat ~sep:" "
+                    (List.map swaps ~f:(fun (o, i) ->
+                         Ir.Indexing.symbol_ident i ^ "^" ^ Ir.Indexing.symbol_ident o))))));
   (* ...and, for the ones it does not propose, which rule rejected them. *)
   if H.env_flag "BENCH_SR_SITES" then H.print_split_reduce_verdicts opt;
   let t0 = Unix.gettimeofday () in
