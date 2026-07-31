@@ -1818,6 +1818,120 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     in
     fun () -> Lazy.force limits
 
+  (* {2 Failure classification (gh-ocannl-536)}
+
+     A driver error code is the only evidence a launch or sync failure leaves, and only this backend
+     can read it: [Cu.Cuda_error] and [Nvrtc.Nvrtc_error] are opaque to the common policy, which
+     therefore treats every one of them as unclassified — fatal at [Launch]/[Sync] regardless of
+     [strict_failure_classification], since {!Ir.Schedule_outcome.classify_raw} only softens
+     compile-side phases. One candidate the driver refuses ends the whole search, and takes the
+     measurements already collected with it.
+
+     Two axes, per {!Ir.Schedule_outcome}: attribution (is this candidate at fault) and damage (what
+     the device may have written). CUDA splits cleanly on the second, and that split is why this is
+     worth writing:
+
+     - Statuses the driver returns {e before any thread runs} — a launch configuration refused, an
+       allocation denied, a module that will not load — are [No_device_writes]. The tuner withdraws
+       the routine's execution claim and keeps searching. This is the containment win, and on this
+       backend it is the whole of it: [CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES], the status a
+       register-heavy or over-wide candidate actually gets, is non-sticky and write-free.
+     - The fault family (illegal address, misaligned address, device-side assert, watchdog timeout)
+       is asynchronous: the kernel was running, whatever it wrote before faulting stays written, and
+       the CUDA context is left sticky — every later call in it fails with the same code. These are
+       [Writes_may_have_occurred]: the tuner counts the decline, then escalates and poisons the
+       lineage. Classifying them does not make them survivable — nothing does until
+       [recover_after_launch_failure] lands — but it puts the driver's own verdict in the report
+       instead of an opaque [Cuda_error], and states the damage rather than leaving it to the phase
+       default.
+
+     Everything else stays [None], deliberately. An environment or toolchain fault (no JIT compiler,
+     PTX newer than the driver, no binary for this GPU, an unavailable device) fails every candidate
+     identically; absorbing it as a decline would turn a broken installation into a silent "nothing
+     worked" report instead of an error. Same for a bare [CUDA_ERROR_INVALID_VALUE] outside
+     [Launch], where it means API misuse rather than a rejected launch geometry.
+
+     {3 What is missing: the pre-launch launchability validator}
+
+     The other half of gh-ocannl-536 for this backend is a post-link check in the shape of Metal's
+     (metal_backend.ml, [link_proc]): ask the {e compiled} kernel what it can be launched with,
+     before launching it. CUDA's answer is [cuFuncGetAttribute] on the linked [CUfunction] —
+     [CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK] (which drops below the device width under register
+     pressure, exactly as Metal's [maxTotalThreadsPerThreadgroup] does),
+     [CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES], [CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES] — and cudajit binds
+     none of them: {!Cu.Module.get_function} returns an opaque handle and [Cu.Module] exposes no
+     attribute query, so there is no API-supported launchability condition to reject against here.
+     Extending the bindings is the work, and note what it does and does not buy on CUDA: a better
+     message and a [Resource_exceeded] cause with populated [requested]/[limit], not more
+     containment, because the condition it would predict is already contained above. (Per the
+     proposal's rule, a cause that cannot populate those fields is reported as [Backend_rejected]
+     rather than as a [Resource_exceeded] with invented numbers — which is why every case below is
+     [Backend_rejected].) *)
+
+  let status_name sexp_of status =
+    match sexp_of status with Sexp.Atom name -> name | sexp -> Sexp.to_string sexp
+
+  let classify_failure phase exn =
+    let reject ~stage ~severity ~execution_effect detail =
+      Some
+        {
+          Schedule_outcome.phase;
+          cause = Schedule_outcome.Backend_rejected { backend = name; stage; severity; detail };
+          execution_effect;
+        }
+    in
+    match exn with
+    | Cu.Cuda_error { status; message } -> (
+        let stage = status_name Cu.sexp_of_result status in
+        let detail = [%string "CUDA driver: %{stage} raised by %{message}"] in
+        match stage with
+        (* Refused before execution, context left usable: the block's register x width or static
+           shared-memory demand exceeds what an SM can give this kernel; the cluster or cooperative
+           launch shape is out of range; a device allocation was denied. *)
+        | "CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES" | "CUDA_ERROR_COOPERATIVE_LAUNCH_TOO_LARGE"
+        | "CUDA_ERROR_INVALID_CLUSTER_SIZE" | "CUDA_ERROR_OUT_OF_MEMORY" ->
+            reject ~stage ~severity:Schedule_outcome.Expected
+              ~execution_effect:Schedule_outcome.No_device_writes detail
+        (* Only informative where the driver is validating a launch geometry we chose. *)
+        | "CUDA_ERROR_INVALID_VALUE"
+          when Schedule_outcome.equal_phase phase Schedule_outcome.Launch ->
+            reject ~stage ~severity:Schedule_outcome.Expected
+              ~execution_effect:Schedule_outcome.No_device_writes detail
+        (* Our PTX, rejected by the driver's JIT before anything ran: a codegen bug, not the user's
+           and not the environment's. Counted and logged even though the search survives it. *)
+        | "CUDA_ERROR_INVALID_PTX" | "CUDA_ERROR_INVALID_SOURCE" | "CUDA_ERROR_INVALID_IMAGE" ->
+            reject ~stage ~severity:Schedule_outcome.Compiler_bug
+              ~execution_effect:Schedule_outcome.No_device_writes detail
+        (* Asynchronous device faults: partial writes, sticky context. *)
+        | "CUDA_ERROR_ILLEGAL_ADDRESS" | "CUDA_ERROR_MISALIGNED_ADDRESS"
+        | "CUDA_ERROR_INVALID_ADDRESS_SPACE" | "CUDA_ERROR_INVALID_PC"
+        | "CUDA_ERROR_ILLEGAL_INSTRUCTION" | "CUDA_ERROR_HARDWARE_STACK_ERROR" | "CUDA_ERROR_ASSERT"
+        | "CUDA_ERROR_LAUNCH_FAILED" ->
+            reject ~stage ~severity:Schedule_outcome.Compiler_bug
+              ~execution_effect:Schedule_outcome.Writes_may_have_occurred detail
+        (* Same damage, but the kernel was merely slower than the display driver's watchdog allows —
+           that is the candidate's shape, not a codegen bug. *)
+        | "CUDA_ERROR_LAUNCH_TIMEOUT" ->
+            reject ~stage ~severity:Schedule_outcome.Expected
+              ~execution_effect:Schedule_outcome.Writes_may_have_occurred detail
+        | _ -> None)
+    | Nvrtc.Nvrtc_error { status; message } -> (
+        let status = status_name Nvrtc.sexp_of_result status in
+        match status with
+        (* The generated CUDA C did not compile. Nothing was allocated or launched, and cudajit puts
+           nvrtc's compilation log in [message]. [stage] matches the cc backend's, so the blocker
+           census groups "our codegen does not compile" across backends. *)
+        | "NVRTC_ERROR_COMPILATION" | "NVRTC_ERROR_BUILTIN_OPERATION_FAILURE" ->
+            reject ~stage:"compiler" ~severity:Schedule_outcome.Compiler_bug
+              ~execution_effect:Schedule_outcome.No_device_writes
+              [%string
+                "OCANNL cuda backend: generated code failed to compile (%{status}).\n\
+                 This is a bug in OCANNL. Please file an issue with the generated .cu file.\n\
+                 nvrtc output:\n\
+                 %{message}"]
+        | _ -> None)
+    | _ -> None
+
   let get_debug_info (device : device) =
     let tot, unr, unf = Cu.Stream.total_unreleased_unfinished_delimited_events device.runner in
     let i2s = [%sexp_of: int] in
