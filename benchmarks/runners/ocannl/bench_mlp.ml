@@ -236,10 +236,12 @@ let () =
             in
             Stdlib.Printf.eprintf
               "tune arm: cache_hit=%b partial=%b timed=%d failed=%d declines=[%s] terminal=%s \
-               rounds=%d sketch=%d fissioned=%b baseline_ms=%.4f best_ms=%.4f\n\
+               rounds=%d sketch=%d mma_candidates=%d mma_timed=%d fissioned=%b baseline_ms=%.4f \
+               best_ms=%.4f\n\
                %!"
               r.cache_hit r.partial r.candidates_timed r.candidates_failed declines terminal
-              r.rounds_run r.sketch_candidates r.fissioned r.baseline_ms r.best_ms)
+              r.rounds_run r.sketch_candidates r.mma_candidates r.mma_timed r.fissioned
+              r.baseline_ms r.best_ms)
     | _ -> None
   in
   (* BENCH_TUNE composes with every precision leg (gh-ocannl-529). It used to be rejected outright
