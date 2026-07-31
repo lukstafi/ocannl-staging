@@ -144,14 +144,19 @@ module Loss_scaler = struct
 
   (** Like {!update}, crediting [steps] steps at once — for the fused gated recipe
       ({!gated_step}), whose host only samples the checksum every [check_interval] steps: a finite
-      sample credits the whole window toward growth, a non-finite one backs off once. *)
+      sample credits the whole window toward growth, a non-finite one backs off once. Growth
+      consumes [growth_interval] from the credited count and keeps the remainder (growing once per
+      full interval contained in it), so the average growth cadence matches the per-step schedule
+      even when the sampling interval does not divide [growth_interval]. *)
   let update_n t ctx ~grads_finite ~steps =
     if grads_finite then (
       t.good_steps <- t.good_steps + steps;
-      if t.good_steps >= t.growth_interval then (
-        t.good_steps <- 0;
-        set_scale t ctx (t.scale_val *. t.growth_factor))
-      else ctx)
+      let ctx = ref ctx in
+      while t.good_steps >= t.growth_interval do
+        t.good_steps <- t.good_steps - t.growth_interval;
+        ctx := set_scale t !ctx (t.scale_val *. t.growth_factor)
+      done;
+      !ctx)
     else (
       t.good_steps <- 0;
       set_scale t ctx (t.scale_val *. t.backoff_factor))
@@ -254,6 +259,8 @@ let gated_scaled_update ?setup_for_parallel ?accum_loss (scaler : Loss_scaler.t)
     window otherwise). Returns [(ctx, window_finite)] — [window_finite] is [true] on non-sampling
     steps. [step] is 0-based. *)
 let gated_step ~(scaler : Loss_scaler.t) ~routine ~window_checksum ~check_interval ~step ctx =
+  if check_interval <= 0 then
+    invalid_arg "Mixed_prec.gated_step: check_interval must be positive";
   let ctx = Context.run ctx routine in
   if (step + 1) % check_interval = 0 then (
     let sum = (Context.get_values ctx window_checksum.Tensor.value).(0) in

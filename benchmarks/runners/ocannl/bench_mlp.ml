@@ -63,6 +63,8 @@ let () =
   let gate_interval =
     Stdlib.Sys.getenv_opt "BENCH_GATE_INTERVAL" |> Option.map ~f:Int.of_string
   in
+  Option.iter gate_interval ~f:(fun n ->
+      if n <= 0 then failwith "bench_mlp: BENCH_GATE_INTERVAL must be a positive integer");
   if (static_scale || Option.is_some gate_interval) && not scaled then
     failwith "bench_mlp: BENCH_STATIC_SCALE / BENCH_GATE_INTERVAL require BENCH_PRECISION=f16";
   if static_scale && Option.is_some gate_interval then
