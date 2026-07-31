@@ -1247,16 +1247,39 @@ using namespace metal;|} in
     let runner_label = get_name dev in
     let func = Me.Library.new_function_with_name library func_name in
     let pso, _ = Me.ComputePipelineState.on_device_with_function metal_device func in
-    (* Device-limit check at pipeline creation (axis-types proposal §4): the threadgroup size
-       derived from Workgroup-annotated loops must fit this pipeline. *)
+    (* Post-link validation (gh-ocannl-536 landing step 3, the portable half): the pre-compile
+       [Schedule.check_hardware_limits] judges the schedule against DEVICE-wide limits, but the
+       compiled pipeline can be stricter — [maxTotalThreadsPerThreadgroup] drops below the device
+       width under register pressure — and knows its own threadgroup-memory footprint. These are
+       typed [Resource_exceeded] causes rather than a bare [Utils.User_error]: to a tuner candidate
+       they are an ordinary decline (and their key is what the blocker census tabulates), while a
+       hand-written schedule still gets the same [Utils.User_error] rendering at the public
+       [Context.compile] boundary. Untyped, strict classification would make them fatal and one
+       register-heavy candidate would end the search. *)
+    let reject resource ~requested ~limit detail =
+      raise
+      @@ Schedule_outcome.Cause_at
+           ( Schedule_outcome.Backend_link,
+             Schedule_outcome.Resource_exceeded { resource; requested; limit = Some limit; detail }
+           )
+    in
     let block_product = launch.block.(0) * launch.block.(1) * launch.block.(2) in
     let max_threads = Me.ComputePipelineState.get_max_total_threads_per_threadgroup pso in
     if block_product > max_threads then
-      raise
-      @@ Utils.User_error
-           [%string
-             "Metal: threadgroup size %{block_product#Int} for %{func_name} exceeds \
-              maxTotalThreadsPerThreadgroup %{max_threads#Int}"];
+      reject Schedule_outcome.Workgroup_threads ~requested:block_product ~limit:max_threads
+        [%string
+          "Metal: threadgroup size %{block_product#Int} for %{func_name} exceeds \
+           maxTotalThreadsPerThreadgroup %{max_threads#Int}"];
+    (* The compiled kernel's own static threadgroup allocation, which the schedule-level accounting
+       (a sum over the staged tnodes) only approximates. Checked against the same device limit the
+       schedule layer used, so this rejects exactly what could not launch. *)
+    Option.iter (hardware_limits ()).Backend_intf.max_workgroup_memory_bytes ~f:(fun max_bytes ->
+        let static_bytes = Me.ComputePipelineState.get_static_threadgroup_memory_length pso in
+        if static_bytes > max_bytes then
+          reject Schedule_outcome.Workgroup_memory ~requested:static_bytes ~limit:max_bytes
+            [%string
+              "Metal: compiled kernel %{func_name} statically allocates %{static_bytes#Int} bytes \
+               of threadgroup memory, exceeding the device limit of %{max_bytes#Int} bytes"]);
     (* Precompute the pool-index assignment + slot table once (addresses/offsets are stable after
        allocation). [Some (index_to_pool, slots_buf, arr)] iff this routine uses the pooled
        params. *)
