@@ -1478,10 +1478,92 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       if !next_id < 0 then next_id := 0;
       !next_id
 
+  (* {2 Post-link scratch validation (gh-ocannl-533)}
+
+     A kernel's private (scratch) segment is sized by the compiler and budgeted by the runtime only
+     at dispatch. When the dispatch asks for more scratch than the device can back, ROCm aborts the
+     QUEUE -- "[UpdateScratch] scratch_size overflow!" / [HSA_STATUS_ERROR_INVALID_ARGUMENT] -- and
+     what reaches OCaml out of synchronize is a bare [hipErrorInvalidValue], the same code an
+     uninitialized input yields. There is nothing to classify on, and the stream is already dead:
+     gh-ocannl-533 saw one autotune candidate take the whole benchmark process down with it.
+
+     So this is prediction, not recovery (see docs/proposals/gh-ocannl-536.md): read the linked
+     kernel's private segment size and decline an over-budget kernel BEFORE it is ever launched,
+     as a typed [Resource_exceeded Thread_scratch]. To a tuner candidate that is an ordinary
+     decline the blocker census tabulates; a hand-written schedule gets the usual
+     [Utils.User_error] rendering at the public [Context.compile] boundary.
+
+     The budget model, established experimentally on gfx1151 (Radeon 8060S, ROCm 7.14, WSL2) -- see
+     the gh-ocannl-533 writeup:
+
+     - The rejection is a function of the per-work-item size ALONE. A kernel at 98320 B/work-item
+       launches at 204800 work-items; one at 114704 B is rejected at a SINGLE work-item. So the
+       runtime backs the worst-case fully-occupied device, not the requested grid, and the check
+       needs no launch geometry.
+     - The cutoff sits where [private_seg_size] rounded up to a 64-byte granule, times the device's
+       maximum resident work-items ([max_threads_per_multiprocessor * multiprocessor_count]),
+       crosses 4 GiB. Measured boundary: 104832 B accepted, 104848 B rejected; the model reproduces
+       every one of the ~70 sampled points, including both sides of that 16-byte step.
+     - The compiler separately refuses a stack frame over 262136 B, so it never emits a kernel far
+       above this; #533's 163856 B is comfortably inside what compiles and outside what launches.
+
+     The 4 GiB cap is not a value any HIP or HSA query exposes -- the abort comes from the WSL WDDM
+     thunk ([wsl::thunk::ComputeQueue::UpdateScratch]) -- so it is a documented constant from this
+     experiment, while the multiplier is genuinely queried. Where the model is unverified the right
+     answer is silence, not a guess: [ocannl_hip_scratch_validation=false] disables the check
+     entirely, and a device that reports no usable occupancy figures is never rejected. *)
+
+  let hip_scratch_validation =
+    lazy (Utils.get_global_flag ~default:true ~arg_name:"hip_scratch_validation")
+
+  (* Total scratch the runtime backs = per-work-item size, rounded up to the allocation granule,
+     times the device's maximum resident work-items. *)
+  let scratch_granule_bytes = 64
+  let scratch_total_cap_bytes = 4 * 1024 * 1024 * 1024
+
+  let scratch_limit_per_work_item (attrs : H.Device.attributes) =
+    let resident = attrs.max_threads_per_multiprocessor * attrs.multiprocessor_count in
+    if resident <= 0 then None
+    else
+      (* Largest granule-aligned size whose full-occupancy total still fits the cap. *)
+      let granules_per_work_item = scratch_total_cap_bytes / resident / scratch_granule_bytes in
+      if granules_per_work_item <= 0 then None
+      else Some (granules_per_work_item * scratch_granule_bytes)
+
+  let validate_scratch_budget ~(device : device) ~name func =
+    if Lazy.force hip_scratch_validation then
+      let attrs = H.Device.get_attributes device.dev.dev in
+      Option.iter (scratch_limit_per_work_item attrs) ~f:(fun limit ->
+          let requested =
+            H.Module.get_function_attribute func H.Module.HIP_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES
+          in
+          let rounded =
+            (requested + scratch_granule_bytes - 1) / scratch_granule_bytes * scratch_granule_bytes
+          in
+          if rounded > limit then
+            raise
+            @@ Schedule_outcome.Cause_at
+                 ( Schedule_outcome.Backend_link,
+                   Schedule_outcome.Resource_exceeded
+                     {
+                       resource = Schedule_outcome.Thread_scratch;
+                       requested;
+                       limit = Some limit;
+                       detail =
+                         [%string
+                           "HIP: kernel %{name} needs %{requested#Int} bytes of private (scratch) \
+                            memory per work-item, above the %{limit#Int} bytes this device can \
+                            back at full occupancy (%{attrs.max_threads_per_multiprocessor#Int} \
+                            work-items x %{attrs.multiprocessor_count#Int} CUs against a \
+                            %{scratch_total_cap_bytes#Int}-byte scratch allocation). Launching it \
+                            would abort the queue rather than fail cleanly (gh-ocannl-533)"];
+                     } ))
+
   let link_proc ~prior_context ~name ~(kparams : (string * kparam_source) list)
       ~(launch : Low_level.launch_dims) ~ctx_buffers lowered_bindings run_module =
     let func = H.Module.get_function run_module ~name in
     let device = prior_context.device in
+    validate_scratch_budget ~device ~name func;
     let stream_name = get_name device in
     (* Pre-resolve slab bases to keep the owning [Deviceptr.t]'s alive for the lifetime of the task
        closure; region views ([Tensor_at]) are non-owning and must not outlive the slab base. *)

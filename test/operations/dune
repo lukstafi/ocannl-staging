@@ -1029,6 +1029,7 @@
     %{dep:../../arrayjit/lib/cc_backend.ml}
     %{dep:../../arrayjit/lib/context.ml}
     %{dep:../../arrayjit/lib/cuda_backend.ml}
+    %{dep:../../arrayjit/lib/hip_backend.ml}
     %{dep:../../arrayjit/lib/low_level.ml}
     %{dep:../../arrayjit/lib/schedule.ml}
     %{dep:../../arrayjit/lib/schedule_outcome.ml}
