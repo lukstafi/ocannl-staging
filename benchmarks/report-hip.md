@@ -27,14 +27,14 @@ platform: Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.43 x86_64 |
 > likewise unusable, so the GPU column uses its `HIP` device (orchestrate.py falls back
 > automatically when `/dev/kfd` is absent).
 >
-> **Most `pytorch/cuda(hip)` cells are numerically invalid on this hardware — check each cell's
-> parity column before reading it as a measurement.** Torch ROCm's column-sum reduction returns
-> garbage non-deterministically on gfx1151 (details in Findings), which NaNs the bias gradient and
-> stops training. The parity gate caught 5 of the 6: four as `loss stationary`, `gpt2_mini` as a
-> 3.6e+34 drift. Their step times are left in the tables for completeness but describe a computation
-> that is not the benchmark. The one exception, **`mlp_small` (PASS, 1.7e-07)**, is a valid
-> measurement — its reduction shape falls in the clean size range. **tinygrad/HIP is the GPU
-> cross-framework reference that is valid across all six workloads.**
+> **Most `pytorch/cuda(hip)` cells are invalid *for this run* — check each cell's parity column
+> before reading it as a measurement.** During the sweep, torch's GPU reductions returned
+> non-deterministic garbage, which NaNs the bias gradient and stops training; the parity gate caught
+> 5 of the 6 (four as `loss stationary`, `gpt2_mini` as a 3.6e+34 drift), with `mlp_small` (PASS,
+> 1.7e-07) the exception. **This does not reproduce on an idle machine and is not attributed to a
+> PyTorch defect** — the leading explanation is this box's instability under sustained load. See
+> Findings; an earlier revision of this report wrongly called it a PyTorch bug. **tinygrad/HIP is the
+> GPU cross-framework reference that is valid across all six workloads.**
 >
 > Three HIP tuned cells are missing, each for a different reason: `mlp_wide` is in `SKIP_CELLS`
 > (search wedges in the middle-end), `cifar_conv` was killed by a 50-minute watchdog (same wedge),
@@ -205,44 +205,62 @@ a regression, and how much of the residue is an inherent serial-reduction proble
 subject) will only be clear once gh-527 is fixed and this instrument is re-run. Re-running
 `BENCH_SEG_TIMES=1` on `lenet/hip` is a cheap acceptance check for that fix.
 
-### PyTorch ROCm is numerically broken on gfx1151 (not an OCANNL bug, not the WSL runtime swap)
+### The torch GPU cells produced garbage during this run — cause unresolved, and NOT reproducible
 
-Four of the five `pytorch/cuda(hip)` training cells fail parity as `loss stationary` (loss NaNs after
-step 1) — `cifar_conv`, `cifar_stride`, `lenet`, `mlp_wide` — and `gpt2_mini` (inference, no updates)
-fails at 3.6e+34 drift. **`mlp_small` passes** (1.7e-07, loss moving), and that exception is itself
-confirming rather than contradicting: its hidden width is 64, so its bias-gradient reduction is
-`[64,64]`, inside the clean size range of the sweep below. Reduced outside the harness to a **pure
-reduction**, no benchmark code involved:
+**Read this section as a caveat on the run, not as a finding about PyTorch.** An earlier revision of
+this report asserted a PyTorch reduction bug on gfx1151. That claim was wrong, or at least
+unsupported, and is retracted here.
+
+What was actually measured, during the sweep: four of the five `pytorch/cuda(hip)` training cells
+failed parity as `loss stationary` (loss NaNs after step 1) — `cifar_conv`, `cifar_stride`, `lenet`,
+`mlp_wide` — and `gpt2_mini` (inference, no updates) failed at 3.6e+34 drift. `mlp_small` passed
+(1.7e-07, loss moving). Immediately after the sweep, in the same session, this reduced to a pure
+reduction with no benchmark code involved:
 
 ```
 torch.randn(256,1024).cuda().sum(0)   # 10 identical runs, max|result|:
 6.425e+37, 6.425e+37, 1.283e+38, 6.425e+37, 53.82, 1.283e+38, 53.82, 1.283e+38, 53.82, 6.425e+37
 ```
 
-Non-deterministic — sometimes the correct 53.82, sometimes garbage — i.e. a race in torch's
-column-reduction kernel. It is size-dependent: `[256,1024]`, `[128,1024]`, `[64,1024]`, `[1024,1024]`
-are affected; `[32,1024]`, `[256,512]`, `[256,256]`, `[256,10]` are clean. Forward GEMMs and `dx`/`dW`
-gradients are all correct to ~2e-4; only the reduction is wrong, which is why it surfaces as the bias
-gradient and kills training.
+It looked systematic: non-deterministic on a fixed input buffer, present on the first call in a fresh
+process, affecting `sum(0)`/`sum()`/`mean(0)`/`amax(0)`/`prod(0)` but not `sum(1)`, all four float
+dtypes, and shape-dependent with a clean band at `rows<=32` (the wave32 size) widening to 8/8 failures
+at `rows>=1024`. `amax` failing ruled out floating-point reassociation. tinygrad on the same HSA
+runtime and every OCANNL `hip` cell were correct throughout.
 
-Two controls establish it is torch's kernel and not this environment: **tinygrad on the same swapped
-HSA runtime is correct and bit-repeatable** on the identical shapes (54.821 across 8 runs), and every
-OCANNL `hip` cell passes the parity gate — including the conv workloads, whose bias gradients are the
-same reduction shape. Until this is fixed upstream, torch/ROCm numbers from gfx1151 should be treated
-as suspect, and this report's torch GPU column is not a measurement.
+**The next day, on an idle machine, none of it reproduces.** A re-run of the same characterization —
+the full shape sweep including the cells that were 8/8 broken, all five ops, all four dtypes, ~200
+checks — returns **zero** wrong results. `[1024,1024].sum(0)`, which returned NaN ten times out of
+ten, is now correct every time.
 
-It is not an isolated report: gfx1151 has a documented family of torch numerical failures —
-[ROCm/ROCm#6034](https://github.com/ROCm/ROCm/issues/6034) (5 bf16 bugs found across 93 training
-experiments on this exact SoC), [ROCm/TheRock#5259](https://github.com/ROCm/TheRock/issues/5259)
-(kernels aborting with `HSA_STATUS_ERROR_EXCEPTION`, with inf/nan appearing upstream of them), and
-[unslothai/unsloth#3385](https://github.com/unslothai/unsloth/issues/3385) (NaN losses from step 1).
-Stable ROCm does not ship gfx1151 kernels at all, so consumer Strix Halo runs on nightly builds. The
-case here is narrower and easier to act on than those: **f32, not bf16, and a two-line repro against
-`Tensor.sum(0)` with no model involved** — worth filing upstream on its own.
+So the corruption was real and repeatable for the duration of that session, and absent from a clean
+one. What differs is machine state, not code. The leading explanation is **this machine's known
+instability under sustained load**: gfx1151 is an iGPU sharing power and thermals with the 16 CPU
+cores the sweep saturates, and this box hard-froze under exactly that load earlier the same day
+(Kernel-Power 41, plus a display-driver timeout and four prior `0x7F` bugchecks). A secondary
+possibility, not separable from it: several GPU processes were killed mid-kernel during the sweep (the
+50-minute watchdog, and the HSA queue abort of gh-ocannl-533), which can leave device state disturbed
+for subsequent work.
 
-This is also a second independent vindication of gh-ocannl-523's did-the-loss-move check: without it,
+Practical consequences:
+
+- **The torch GPU column in the tables below is not a measurement** — but for run-integrity reasons,
+  not because of an upstream defect. Do not cite this report as evidence of a PyTorch bug.
+- **Correctness anomalies observed on this machine under load should be re-checked idle before being
+  attributed to any codebase.** Nothing was filed upstream, deliberately.
+- The OCANNL and tinygrad cells passed the parity gate throughout the same session, so this does not
+  impugn their numbers; but it is a reason to treat this machine's *timing* figures as
+  load-environment-specific too.
+
+This does remain an independent vindication of gh-ocannl-523's did-the-loss-move check: without it,
 four cells with NaN losses would have scored a *passing* max-rel-diff and been published as if they
-had trained.
+had trained — whatever the root cause turned out to be.
+
+For context on why the wrong conclusion was tempting: gfx1151 does have a documented family of torch
+numerical failures — [ROCm/ROCm#6034](https://github.com/ROCm/ROCm/issues/6034),
+[ROCm/TheRock#5259](https://github.com/ROCm/TheRock/issues/5259),
+[unslothai/unsloth#3385](https://github.com/unslothai/unsloth/issues/3385) — and stable ROCm ships no
+gfx1151 kernels at all. A plausible prior is not evidence, and the non-reproduction outweighs it.
 
 ### Two new HIP tuning bugs
 
