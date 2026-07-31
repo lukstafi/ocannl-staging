@@ -11,7 +11,14 @@
    scale of 65536 (> 65504, the max finite f16) must produce a non-finite checksum on the first step
    — the step is skipped and the scale backs off to 32768, which is exactly representable. With
    growth_interval = 3, the scale then regrows after three good steps and overflows again, pinning
-   the whole backoff/growth cycle. *)
+   the whole backoff/growth cycle.
+
+   Leg E covers the fused gated recipe (gh-ocannl-492 task 5, [Mixed_prec.gated_scaled_update]):
+   the whole step is one routine with the inf/nan gate evaluated on device, and the host samples a
+   sticky window checksum every [check_interval] steps. Same oracle-parity discipline at a benign
+   scale, and the deterministic-overflow setup pins the on-device skip: with interval 2, the
+   overflowing steps leave the master parameters bitwise-unchanged before the host has read
+   anything, and the step-2 sample catches the sticky non-finite window and backs the scale off. *)
 
 open! Base
 open Ocannl.Nn_blocks.DSL_modules
@@ -208,4 +215,85 @@ let () =
     (String.concat ~sep:" " (List.map scales_d ~f:(fun s -> Printf.sprintf "%.0f" s)));
   Stdio.printf "dynamic leg losses on good steps finite: %b\n"
     (List.for_alli stepped_d ~f:(fun i ran -> (not ran) || Float.is_finite losses_d.(i)));
+
+  (* Leg E: the fused gated recipe (gh-ocannl-492 task 5) — one routine per step, the inf/nan gate
+     evaluated on device, the host sampling the sticky window checksum every [check_interval]
+     steps. E1 (benign scale, interval 1): the loss trajectory tracks the f32 oracle like leg C.
+     E2 (leg D's deterministic-overflow setup, interval 2): steps 1-2 overflow and self-skip on
+     device — the master parameters stay bitwise-unchanged even though the host has not read
+     anything yet — the sample at step 2 catches the sticky non-finite window and backs the scale
+     off to the representable 32768, after which steps apply and parameters move. *)
+  let run_gated ~input_l ~scaler ~check_interval =
+    let loss, _y = build_leg ~input_l ~build:build_f16 ~prepare:prepare_f16 in
+    let wflag, comp = MP.gated_scaled_update scaler ~learning_rate:(learning_rate ()) loss in
+    let ctx = Train.init_params base_ctx IDX.empty loss in
+    let routine = Train.to_routine ctx IDX.empty comp in
+    let ctx = Context.context routine in
+    let ctx = copy_weights ctx loss w_vals in
+    let w1 = find_param loss "w1" in
+    let w1_init = Context.get_values ctx w1.Tensor.value in
+    let losses = ref [] and finite_flags = ref [] and scales = ref [] and w1_moved = ref [] in
+    let ctx = ref ctx in
+    for step = 0 to steps - 1 do
+      let ctx', window_finite =
+        MP.gated_step ~scaler ~routine ~window_checksum:wflag ~check_interval ~step !ctx
+      in
+      ctx := ctx';
+      losses := (Context.get_values !ctx loss.Tensor.value).(0) :: !losses;
+      finite_flags := window_finite :: !finite_flags;
+      scales := MP.Loss_scaler.scale_value scaler :: !scales;
+      let w1_now = Context.get_values !ctx w1.Tensor.value in
+      w1_moved := (not (Array.equal Float.equal w1_now w1_init)) :: !w1_moved
+    done;
+    (Array.of_list_rev !losses, List.rev !finite_flags, List.rev !scales, List.rev !w1_moved)
+  in
+  let scaler_e1 = MP.Loss_scaler.create ~init_scale:8. ~growth_interval:100 () in
+  let losses_e1, finite_e1, _scales_e1, _moved_e1 =
+    run_gated ~input_l:"xe" ~scaler:scaler_e1 ~check_interval:1
+  in
+  Stdio.printf "gated leg all windows finite: %b\n" (List.for_all finite_e1 ~f:Fn.id);
+  Stdio.printf "gated leg loss trajectory parity within 0.1: %b\n"
+    Float.(max_abs_diff losses_a losses_e1 < 0.1);
+  let scaler_e2 =
+    MP.Loss_scaler.create ~init_scale:65536. ~growth_interval:100 ~backoff_factor:0.5 ()
+  in
+  let _losses_e2, finite_e2, scales_e2, moved_e2 =
+    run_gated ~input_l:"xf" ~scaler:scaler_e2 ~check_interval:2
+  in
+  Stdio.printf "gated overflow leg window flags: %s\n"
+    (String.concat ~sep:" " (List.map finite_e2 ~f:(fun b -> if b then "T" else "F")));
+  Stdio.printf "gated overflow leg scale after each step: %s\n"
+    (String.concat ~sep:" " (List.map scales_e2 ~f:(fun s -> Printf.sprintf "%.0f" s)));
+  Stdio.printf "gated overflow leg params on-device-skipped then applied: %s\n"
+    (String.concat ~sep:" " (List.map moved_e2 ~f:(fun b -> if b then "T" else "F")));
+
+  (* Leg F: the static-scale combination (bench_mlp's BENCH_STATIC_SCALE experiment leg) — scaled
+     backprop and unscaled optimizer as one routine with a fixed benign scale, no checksum, no
+     gate, no host read. Pins that the pieces compose in a single routine and track the oracle. *)
+  let loss_f, _y_f = build_leg ~input_l:"xg" ~build:build_f16 ~prepare:prepare_f16 in
+  let scaler_f = MP.Loss_scaler.create ~init_scale:8. () in
+  let static_comp =
+    Asgns.sequence
+      [
+        Train.grad_update ~loss_scale:scaler_f.MP.Loss_scaler.scale loss_f;
+        Train.sgd_update ~learning_rate:(learning_rate ())
+          ~grad_unscale:scaler_f.MP.Loss_scaler.unscale loss_f;
+      ]
+  in
+  let ctx_f = Train.init_params base_ctx IDX.empty loss_f in
+  let routine_f = Train.to_routine ctx_f IDX.empty static_comp in
+  let ctx_f = Context.context routine_f in
+  let ctx_f = copy_weights ctx_f loss_f w_vals in
+  let losses_f = ref [] in
+  let _ctx_f =
+    Fn.apply_n_times ~n:steps
+      (fun ctx ->
+        let ctx = Context.run ctx routine_f in
+        losses_f := (Context.get_values ctx loss_f.Tensor.value).(0) :: !losses_f;
+        ctx)
+      ctx_f
+  in
+  let losses_f = Array.of_list_rev !losses_f in
+  Stdio.printf "static-scale leg loss trajectory parity within 0.1: %b\n"
+    Float.(max_abs_diff losses_a losses_f < 0.1);
   Stdio.printf "%!"
