@@ -300,7 +300,8 @@ type report = {
           measurement and cannot win. *)
   best_ms : float;
       (** The winner's measured time, or [infinity] when nothing was timed at all — every candidate
-          failed and the baseline was not dispatched. *)
+          failed and the baseline was not dispatched. In that case no cache entry is stored and the
+          returned routine is the untuned default compile, not the serial baseline. *)
   best_schedule : Ir.Schedule_cache.saved_schedule;
       (** The winner's schedule; for a fissioned winner, the concatenation of the per-segment
           schedules (informational). *)

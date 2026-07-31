@@ -3995,23 +3995,30 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
             else continue_ := false
       done;
       let best_c, best_ms = !best in
+      (* The winner is the undispatched baseline exactly when nothing was timed: every candidate
+         failed and (on GPU) the serial baseline was never run. Nothing measured means nothing to
+         cache — a stored entry would pin future processes to a never-timed schedule. *)
+      let nothing_timed = Float.is_inf best_ms in
       (if use_cache then
-         let saved, segments =
-           match best_c.form with
-           | Whole_saved saved -> (saved, None)
-           | Fiss_saved assoc -> ([], Some assoc)
-           | Split_saved (prelude, assoc) -> (prelude, Some assoc)
-         in
-         SC.store ~dir:cache_dir ~key
-           {
-             SC.version = SC.entry_version;
-             backend;
-             source_digest = base_digest;
-             saved;
-             segments;
-             best_ms;
-             baseline_ms;
-           });
+         if nothing_timed then
+           logf "nothing was timed: storing no cache entry (gh-ocannl-532)"
+         else
+           let saved, segments =
+             match best_c.form with
+             | Whole_saved saved -> (saved, None)
+             | Fiss_saved assoc -> ([], Some assoc)
+             | Split_saved (prelude, assoc) -> (prelude, Some assoc)
+           in
+           SC.store ~dir:cache_dir ~key
+             {
+               SC.version = SC.entry_version;
+               backend;
+               source_digest = base_digest;
+               saved;
+               segments;
+               best_ms;
+               baseline_ms;
+             });
       (* Diagnostic control (config [autotune_log]): compile and time the UNTUNED default pipeline
          in this very process, on the search context — discriminates a genuinely slow winner from
          process-state effects when the winner's code nominally equals the untuned program yet a
@@ -4050,7 +4057,14 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
         }
       in
       let result =
-        if Option.is_none timing_ctx then (best_c.cctx, best_c.routine)
+        if nothing_timed then (
+          (* Returning the incumbent here would hand the caller the very serial routine this search
+             refused to dispatch (gh-ocannl-532) — slower than not tuning at all, and on GPU
+             unbounded. The untuned default pipeline is the honest fallback: the same code the
+             caller would have compiled without the tuner. *)
+          logf "nothing was timed: falling back to the untuned default compile (gh-ocannl-532)";
+          Context.compile ctx comp bindings)
+        else if Option.is_none timing_ctx then (best_c.cctx, best_c.routine)
         else
           (* The search ran against the scratch lineage; compile the winner from the caller's
              context (like the cache-hit path). Digest mismatch or replay failure falls back to the
