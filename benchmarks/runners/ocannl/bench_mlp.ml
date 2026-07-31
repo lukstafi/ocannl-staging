@@ -356,10 +356,10 @@ let () =
   Stdio.printf
     {|{"framework":"ocannl","backend":"%s","variant":"%s","precision":"%s","workload":"%s","compile_s":%.3f,"step_ms":{"p10":%.6g,"p50":%.6g,"p90":%.6g},"queued_step_ms":%.6g,"timed_steps":%d,"losses":[%s]}|}
     backend
-    (if tune then "tuned"
-     else if materialize then "materialized"
-     else if Option.is_some mp_prec then precision
-     else "default")
+    (* Scheduling variant only: the storage precision is the "precision" field's business
+       (gh-ocannl-539). They are independent axes, and folding a reduced precision into the
+       variant made a tuned bf16 cell unnameable. *)
+    (if tune then "tuned" else if materialize then "materialized" else "default")
     precision workload compile_s (percentile synced 10.) (percentile synced 50.) (percentile synced 90.)
     queued_ms timed_steps (json_floats losses);
   Stdio.printf "\n"
