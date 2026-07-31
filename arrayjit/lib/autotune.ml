@@ -2247,7 +2247,21 @@ let extend_with_privatize ~static_indices sched (seg : LL.optimized) : Sched.sch
     [Sched.Split_reduce] existed but nothing seeded it. Detection is deliberately cheap and
     over-approximate: any rmw [Set] (or gh-466 [Set_dynamic] scatter) qualifies structurally, and
     each candidate axis is settled by the hermetic {!Sched.op_legality} probe — the op's own
-    recognizer decides the static-form pinning discipline, never a re-implementation here. *)
+    recognizer decides the static-form pinning discipline, never a re-implementation here.
+
+    {3 The enabling interchange (gh-ocannl-537)}
+
+    A bare [Split_reduce] reaches none of the conv-gradient accumulations it was filed for: OCANNL
+    lowers them with the accumulated channel loop {e innermost} and the reduction loops (batch, y, x)
+    outside it, so every axis is rejected for "the accumulation cell mentions a symbol not bound by a
+    loop enclosing the reduction loop" — measured on HIP lenet, where that one segment is 89% of the
+    step. That cause, and only that cause, a loop interchange removes. So a rejected candidate is
+    re-probed after hoisting exactly the symbols {!Sched.split_reduce_hoist} names, each bubbled
+    outside the reduction loop by adjacent [Swap]s (relative order preserved); the site records the
+    chain and the [F_split] prelude replays it before the split. Every [Swap] is confirmed
+    [Op_legal] on the code it is applied to — [Swap]'s reassociation license covers the accumulation
+    it reorders, but it is checked per site, not assumed — and the [Split_reduce] is re-probed on the
+    interchanged code, so a returned site is still seedable exactly as proposed. *)
 
 type sr_site = {
   sr_axis : Idx.symbol;  (** The reduction loop to split: the largest-extent legal candidate. *)
@@ -2255,6 +2269,10 @@ type sr_site = {
   sr_red : int;  (** The [sr_axis] loop's extent. *)
   sr_out : int;  (** The target's cell count — the site's whole output parallelism. *)
   sr_dynamic : bool;  (** The gh-466 scatter form ([Set_dynamic]). *)
+  sr_swaps : (Idx.symbol * Idx.symbol) list;
+      (** The enabling interchange (gh-ocannl-537), as [(outer, inner)] pairs applied {e in order}
+          before the [Split_reduce]: each hoists an accumulation-cell loop outside [sr_axis]. Empty
+          when the site is splittable as lowered. *)
 }
 
 (* Sites with more output cells than this have enough output parallelism that the default presets
@@ -2268,11 +2286,79 @@ let sr_red_min = 64
 (* Candidate-volume cap: the most reduction-dominated sites win ties. *)
 let sr_max_sites = 4
 
-let split_reduce_sites (opt : LL.optimized) : sr_site list =
+(* The adjacent-interchange chain hoisting [needed] outside [axis] within the write's loop [path]
+   (outermost first), or [None] when some symbol is not a loop of that path — e.g. a static index —
+   and hence not hoistable. Each symbol is bubbled up one loop at a time until it encloses [axis];
+   taking them in path order leaves their relative order intact, so the resulting enclosing prefix
+   iterates the accumulation cell exactly as the original nest did. *)
+let sr_hoist_swaps ~path ~axis ~needed : (Idx.symbol * Idx.symbol) list option =
+  let pos order s = List.findi order ~f:(fun _ x -> Idx.equal_symbol x s) |> Option.map ~f:fst in
+  match
+    (pos path axis, List.map needed ~f:(fun s -> Option.map (pos path s) ~f:(fun i -> (i, s))))
+  with
+  | None, _ -> None
+  | Some _, indexed -> (
+      match Option.all indexed with
+      | None -> None
+      | Some indexed ->
+          let ordered =
+            List.sort indexed ~compare:(fun (a, _) (b, _) -> Int.compare a b) |> List.map ~f:snd
+          in
+          let order = ref path and swaps = ref [] in
+          List.iter ordered ~f:(fun h ->
+              let continue_ = ref true in
+              while !continue_ do
+                (* Both are in [order] by construction and interchange only permutes it. *)
+                let ih = Option.value_exn (pos !order h) in
+                let ia = Option.value_exn (pos !order axis) in
+                if ih <= ia then continue_ := false
+                else
+                  let parent = List.nth_exn !order (ih - 1) in
+                  swaps := (parent, h) :: !swaps;
+                  order :=
+                    List.mapi !order ~f:(fun i x ->
+                        if i = ih - 1 then h else if i = ih then parent else x)
+              done);
+          Some (List.rev !swaps))
+
+let split_reduce_sites ?(static_indices = []) (opt : LL.optimized) : sr_site list =
   let acc = ref [] in
+  let hermetic (o : LL.optimized) =
+    {
+      o with
+      LL.traced_store = Hashtbl.copy o.LL.traced_store;
+      LL.optimize_ctx = LL.copy_optimize_ctx o.LL.optimize_ctx;
+    }
+  in
+  (* The interchanged code, once every [Swap] of the chain is confirmed [Op_legal] against the code
+     it is applied to ({!Sched.schedule_legality} walks the chain exactly as application will —
+     [Swap]'s reassociation license covers accumulations, but each site is checked, not assumed).
+     Anything short of all-legal drops the site. *)
+  let apply_swaps swaps =
+    let ops = List.map swaps ~f:(fun (outer, inner) -> Sched.Swap { outer; inner }) in
+    let verdicts = Sched.schedule_legality opt ops in
+    if
+      List.length verdicts <> List.length ops
+      || not
+           (List.for_all verdicts ~f:(fun (_, v) -> Sched.equal_op_verdict v Sched.Op_legal))
+    then None
+    else
+      match Sched.apply ~static_indices ops (hermetic opt) with
+      | opt' -> Some opt'
+      | exception Invalid_argument _ -> None
+  in
+  let splittable o ~axis ~tn =
+    let op, _, _, _ = Sched.split_reduce ~axis ~target:tn ~num_blocks:2 in
+    match Sched.op_legality o op with
+    | Sched.Op_legal -> `Legal
+    | Sched.Op_illegal _ | Sched.Op_unknown _ -> (
+        (* The one rejection an interchange removes; empty for every other cause. *)
+        match Sched.split_reduce_hoist o op with [] -> `No | needed -> `Hoist needed)
+  in
   let consider ~enclosing ~tn ~idcs ~dynamic =
     let out = try Ir.Tnode.num_elems tn with _ -> 0 in
     if out >= 1 && out <= sr_out_max then
+      let path = List.map enclosing ~f:(fun (s, _, _) -> s) in
       let candidates =
         List.filter enclosing ~f:(fun (s, n, ty) ->
             LL.equal_axis_type ty LL.Serial && n >= sr_red_min && not (idcs_mention idcs s))
@@ -2282,16 +2368,34 @@ let split_reduce_sites (opt : LL.optimized) : sr_site list =
         |> List.sort ~compare:(fun (_, a, _) (_, b, _) -> Int.compare b a)
       in
       let legal =
-        List.find candidates ~f:(fun (s, _, _) ->
-            let op, _, _, _ = Sched.split_reduce ~axis:s ~target:tn ~num_blocks:2 in
-            match Sched.op_legality opt op with
-            | Sched.Op_legal -> true
-            | Sched.Op_illegal _ | Sched.Op_unknown _ -> false)
+        List.find_map candidates ~f:(fun (s, n, _) ->
+            match splittable opt ~axis:s ~tn with
+            | `Legal -> Some (s, n, [])
+            | `No -> None
+            | `Hoist needed -> (
+                (* gh-537: hoist and re-probe. Both the interchange and the split are settled on the
+                   code they act on, so the recorded chain is replayable as recorded. *)
+                match sr_hoist_swaps ~path ~axis:s ~needed with
+                | None -> None
+                | Some swaps -> (
+                    match apply_swaps swaps with
+                    | None -> None
+                    | Some swapped -> (
+                        match splittable swapped ~axis:s ~tn with
+                        | `Legal -> Some (s, n, swaps)
+                        | `No | `Hoist _ -> None))))
       in
-      Option.iter legal ~f:(fun (s, n, _) ->
+      Option.iter legal ~f:(fun (s, n, swaps) ->
           if not (List.exists !acc ~f:(fun site -> Idx.equal_symbol site.sr_axis s)) then
             acc :=
-              { sr_axis = s; sr_target = tn; sr_red = n; sr_out = out; sr_dynamic = dynamic }
+              {
+                sr_axis = s;
+                sr_target = tn;
+                sr_red = n;
+                sr_out = out;
+                sr_dynamic = dynamic;
+                sr_swaps = swaps;
+              }
               :: !acc)
   in
   let rec walk enclosing (llc : LL.t) =
@@ -2586,10 +2690,13 @@ let spec_label = function
       Printf.sprintf "F_split[%s]"
         (String.concat ~sep:","
            (List.map sites ~f:(fun (s, b) ->
-                Printf.sprintf "%s%s red%d out%d b%d"
+                Printf.sprintf "%s%s red%d out%d b%d%s"
                   (Ir.Tnode.debug_name s.sr_target)
                   (if s.sr_dynamic then " dyn" else "")
-                  s.sr_red s.sr_out b)))
+                  s.sr_red s.sr_out b
+                  (match List.length s.sr_swaps with
+                  | 0 -> ""
+                  | n -> Printf.sprintf " swap%d" n))))
   | Fiss (F_split_saved (prelude, assoc)) ->
       Printf.sprintf "F_split_saved[%d prelude ops, %d segs]" (List.length prelude)
         (List.length assoc)
@@ -2669,11 +2776,15 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ~
             | F_preset _ | F_saved _ | F_sketch _ -> ([], [])
             | F_split { sites } ->
                 let sched =
-                  List.map sites ~f:(fun (s, num_blocks) ->
+                  (* Per site: the gh-537 enabling interchange (empty for a site splittable as
+                     lowered), then the split itself. Sites are distinct statements, so their
+                     preludes compose. *)
+                  List.concat_map sites ~f:(fun (s, num_blocks) ->
                       let op, _, _, _ =
                         Sched.split_reduce ~axis:s.sr_axis ~target:s.sr_target ~num_blocks
                       in
-                      op)
+                      List.map s.sr_swaps ~f:(fun (outer, inner) -> Sched.Swap { outer; inner })
+                      @ [ op ])
                 in
                 let saved, _ = SC.to_saved (SC.base_registry canon) sched in
                 (sched, saved)
@@ -3669,7 +3780,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
          overhead). On GPU the block loop is the bulk of pass 1's launch parallelism at these
          low-output sites, so the sweep leans larger; the CPU pool saturates at core counts.
          Multi-site combination is recovered below by recombining the best-timed singles. *)
-      let sr_sites = if is_gpu || is_cpu then split_reduce_sites base_opt else [] in
+      let sr_sites = if is_gpu || is_cpu then split_reduce_sites ~static_indices base_opt else [] in
       let sr_num_blocks = if is_gpu then [ 32; 128; 512 ] else [ 8; 32; 128 ] in
       let sr_specs =
         List.concat_map sr_sites ~f:(fun s ->
