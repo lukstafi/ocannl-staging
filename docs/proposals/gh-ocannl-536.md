@@ -118,6 +118,16 @@ as "run a trivial no-op routine and synchronize; on failure, try re-creating `de
 failure again, `Lost`". That answers the question the exception cannot, costs one launch per
 failure (rare by construction), and needs no per-driver error-code table.
 
+**The probe answers the damage question and only the damage question.** `Recovered` establishes
+that the state was rebuildable; it says nothing about whose fault the failure was, and the two axes
+must not be allowed to leak into each other here of all places. So `device_health` never upgrades a
+verdict: a `Fatal` from rule 3's launch arm stays `Fatal` whatever the probe reports, and the probe
+only decides whether an already-`Rejected` outcome (one rule 2 attributed) may continue on this
+device or must escalate for lack of a device to continue on. Letting `Recovered` turn an
+unattributed launch failure into a decline would reintroduce exactly the silent degradation the
+whole design exists to remove — and would be indistinguishable, from the report's point of view,
+from today's blanket `RUN FAILED`.
+
 Re-creating the runner is a plausible `Recovered` on CUDA — `Cu.Stream.create` is called exactly
 once in the tree (cuda_backend.ml:331, one compute stream per device), so the handle has one owner.
 Whether an HSA-aborted HIP queue survives it is an empirical question for the HIP machine, and the
@@ -250,8 +260,13 @@ fatal; what changes is that it is *attributed*: the crash names the candidate an
 reason instead of surfacing as a bare `hip_stream_synchronize` backtrace. That is a real
 improvement over today and it is not containment.
 
-Containment of #533 comes from `device_health` (the abort kills the queue; if `Recovered`, the
-search continues and the candidate is a decline) and, properly, from prediction. The precedent
+Containment of #533 therefore comes from prediction, not from the probe. `device_health` only
+supplies the device to continue *on* once something else has established that the candidate was at
+fault; on its own it cannot make an unattributed HIP abort a decline, for the reason given above.
+Attribution at launch has exactly two possible sources: a HIP `classify_failure` that finds a
+narrower signal than `HIP_ERROR_INVALID_VALUE` — worth one look at whether the runtime exposes the
+aborted-queue status distinctly, but do not plan on it — or moving the failure to compile time,
+where the phase already supplies attribution for free. The precedent for the latter
 exists: Metal already re-checks the workgroup size against the compiled pipeline state at link time
 (metal_backend.ml:1243-1253) on top of the pre-compile check. The analogue:
 
@@ -290,8 +305,9 @@ re-raising. A run that dies at candidate 40 of 60 should still tell you what the
   `contain ~phase:Compile`, returning `(compiled, rejection) Result.t` — the lossy collapse to one
   string is where the census data is thrown away today. Behaviour otherwise unchanged, except that
   deny-list exceptions now propagate.
-- **`try_spec`'s timing arm** (autotune.ml:3406): `contain ~phase:Launch`, plus `device_health`
-  before the next candidate.
+- **`try_spec`'s timing arm** (autotune.ml:3406): `contain ~phase:Launch`. On a `Rejected` outcome,
+  `device_health` before the next candidate decides whether the search has a device left; on a
+  `Fatal` one it propagates regardless of what the probe would have said.
 - **Cache replay** (autotune.ml:3325): `contain ~phase:Compile ~untrusted:true`, i.e. rule 1's
   narrowed deny-list; behaviour unchanged, policy now explicit.
 - **`compile_advisory`** (autotune.ml:2966) and `model_default`'s bare `exception _` arms: keep the
@@ -341,22 +357,36 @@ without parsing prose.
 
 ### Test plan
 
-Three tests, pinning the boundary in *both* directions — the second matters as much as the first,
-since the failure this design most wants to prevent is a silently degraded tuning result. All three
-run on `cc`, so CI enforces them.
+Tests pinning the boundary in *both* directions — the second matters as much as the first, since
+the failure this design most wants to prevent is a silently degraded tuning result.
 
-- **Contained, portable**: seed a candidate through `tune`'s transform seam that violates an op
-  precondition (`Schedule.apply` raises `Invalid_argument`, device-independent). Assert the search
-  completes, the report counts one decline, and its key is `Illegal_schedule`.
-- **Not contained, portable**: a transform raising `Assert_failure` makes `tune` propagate rather
-  than log a `FAILED` line and crown a different candidate — *and* the partial report is emitted
-  before it propagates.
-- **Contained, resource, GPU**: on a backend reporting `max_threads_per_workgroup` (Metal locally;
-  the other GPU backends in later sessions on their machines), an over-budget workgroup declines
-  with key `Resource_exceeded Workgroup_threads`.
+Two run on `cc`, so CI enforces the boundary itself on every machine:
+
+- **Contained**: seed a candidate through `tune`'s transform seam that violates an op precondition
+  (`Schedule.apply` raises `Invalid_argument`, device-independent). Assert the search completes, the
+  report counts one decline, and its key is `Illegal_schedule`.
+- **Not contained**: a transform raising `Assert_failure` makes `tune` propagate rather than log a
+  `FAILED` line and crown a different candidate — *and* the partial report is emitted before it
+  propagates.
 
 Plus a unit test of the classifier over synthesized exceptions at each phase, including the cache
-replay opt-out.
+replay opt-out and each `rejection` constructor. This is where `Resource_exceeded` gets its
+portable coverage: the classifier is a pure function, so the phase-to-verdict mapping is testable
+on `cc` with a synthesized `check_hardware_limits` failure, no device limit required.
+
+One test is genuinely GPU-gated and must be marked as such rather than counted as CI coverage:
+
+- **Contained, resource, end to end**: on a backend actually reporting `max_threads_per_workgroup`,
+  an over-budget workgroup declines with key `Resource_exceeded Workgroup_threads`. `cc` cannot
+  stand in — `cpu_mma_limits` builds on `no_hardware_limits` (schedulers.ml:20-27), so
+  `max_threads_per_workgroup` is `None` and `check_hardware_limits` has nothing to reject on;
+  hardware-axis annotations render serially there by design. Metal locally; the other GPU backends
+  in later sessions on their machines.
+
+Injecting synthetic limits to make that last one portable is possible but not worth it: it would
+need a seam into `hardware_limits`, which backends supply, and what it would then test is the
+classifier — already covered above, without the seam. The GPU test's value is confirming that the
+*real* rejection path lands in the right bucket, and only real hardware limits do that.
 
 Placement: `test/operations/autotune_containment.ml` with an `.expected` file, alongside the
 existing `autotune_smoke` family.
