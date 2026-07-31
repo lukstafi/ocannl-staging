@@ -136,6 +136,57 @@ let print_census ?promote_locals ~backend ~limits ~static_indices opt =
           match stmt_detail plc stmt with Some s -> Stdio.printf "        %s\n" s | None -> ()));
   Stdio.Out_channel.flush Stdio.stdout
 
+(** Diagnostic companion to the [BENCH_SR_SITES] site listing (gh-ocannl-484 task 3): {e why} the
+    accumulations that are absent from it were rejected. [Autotune.split_reduce_sites] returns only
+    the reduction loops that clear its extent floor {e and} probe [Op_legal], and the two are
+    indistinguishable from the listing alone — which left "find out why the conv-gradient
+    accumulations are rejected" as the open question of the CUDA leg. This prints every low-output
+    write with its enclosing loop nest and, per enclosing serial loop, the
+    {!Ir.Schedule.op_legality} verdict of splitting that loop, so a missing site names the
+    recognizer rule that rejected it. Used by the [bench_*_diag] runners; not part of the benchmark
+    protocol. *)
+let print_split_reduce_verdicts opt =
+  let module LL = Ir.Low_level in
+  let module Sched = Ir.Schedule in
+  let module Idx = Ir.Indexing in
+  (* The same output-parallelism bound the detector uses, so this probe covers exactly the writes it
+     considers — a write above the bound is out of the family's scope by design, not by rejection. *)
+  let out_max = 4096 in
+  Stdio.printf "split-reduce probe (writes with <= %d cells):\n" out_max;
+  let rec walk enclosing (llc : LL.t) =
+    match llc with
+    | LL.Seq (a, b) ->
+        walk enclosing a;
+        walk enclosing b
+    | LL.If { body; _ } -> walk enclosing body
+    | LL.For_loop { index; from_; to_; body; axis; _ } ->
+        walk (enclosing @ [ (index, to_ - from_ + 1, axis) ]) body
+    | LL.Set { tn; _ } | LL.Set_dynamic { tn; _ } ->
+        let cells = try Tn.num_elems tn with _ -> 0 in
+        if cells >= 1 && cells <= out_max then (
+          Stdio.printf "  w:%s(%d) loops[%s]\n" (Tn.debug_name tn) cells
+            (String.concat ~sep:","
+               (List.map enclosing ~f:(fun (s, n, ty) ->
+                    Printf.sprintf "%s=%d%s" (Idx.symbol_ident s) n
+                      (match ty with LL.Serial -> "s" | _ -> "p"))));
+          List.iter enclosing ~f:(fun (s, n, ty) ->
+              if LL.equal_axis_type ty LL.Serial then
+                let verdict =
+                  match Sched.split_reduce ~axis:s ~target:tn ~num_blocks:2 with
+                  | op, _, _, _ -> (
+                      match Sched.op_legality opt op with
+                      | Sched.Op_legal -> "LEGAL"
+                      | Sched.Op_illegal m -> "illegal: " ^ m
+                      | Sched.Op_unknown m -> "unknown: " ^ m)
+                  | exception Invalid_argument m -> "raised: " ^ m
+                in
+                Stdio.printf "      axis %s extent %d -> %s\n" (Idx.symbol_ident s) n
+                  (String.substr_replace_all verdict ~pattern:"\n" ~with_:" ")))
+    | _ -> ()
+  in
+  walk [] opt.LL.llc;
+  Stdio.Out_channel.flush Stdio.stdout
+
 (** Diagnostic: per-segment (approximately per-layer) wall times of the default fission pipeline.
     Each segment's post-schedule code is compiled as its own routine through the
     [lowered_transform] seam (hermetic, autotune-style: the compile's fresh lowering of [comp] is

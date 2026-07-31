@@ -131,8 +131,13 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   same graph — the gh-ocannl-484 task-3 seeding can only reach the accumulations listed there, so
   it is the companion to the census above when asking why a seeded split-reduce family did or did
   not move a workload (it is what showed the detector finding only the classifier head on all three
-  conv benchmarks; see [report-gh484-cuda.md](report-gh484-cuda.md)). Compile-time only, off the
-  timing path, so it composes with `BENCH_SEG_TIMES=1` and with `BENCH_MATERIALIZE=1`.
+  conv benchmarks; see [report-gh484-cuda.md](report-gh484-cuda.md)). It then prints, for every
+  low-output write, the enclosing loop nest and the `Ir.Schedule.op_legality` verdict of splitting
+  each enclosing serial loop — the site listing says a segment was not proposed, these verdicts say
+  which rule rejected it (the extent floor and the `Split_reduce` recognizer's own preconditions are
+  indistinguishable from the listing alone). That is what attributed lenet's `bias_conv1.grad`
+  segment; see [report-hip.md](report-hip.md). Compile-time only, off the timing path, so it
+  composes with `BENCH_SEG_TIMES=1` and with `BENCH_MATERIALIZE=1`.
 - `runners/ocannl/bench_metal_bug.ml` — standalone (no OCANNL) repro of an Apple Metal
   shader-compiler miscompilation: a serial `acc[0] = acc[0] + f(i)` loop over
   slot-table-derived pool pointers keeps only the last iteration's contribution. OCANNL works
