@@ -1,8 +1,15 @@
-## Task 3 measured on HIP: the family cannot reach the site this issue was filed for
+## HIP leg: task 3 is inert here too, and here is *why* the conv gradients are rejected
 
 Measured on gfx1151 (minix, WSL2), tree `d71efc99` — i.e. **post gh-527 and post gh-521**, so the
 two known confounders are out of the way. HIP is the most sensitive detector for this: the gh-476
 sweep put the target segment at 97.5% of the lenet step there.
+
+This confirms the CUDA leg's headline independently on a second backend (the seeding is inert on
+the conv benchmarks; the detector proposes only the classifier head), and **answers that leg's #1
+open question** — *"Find out why the conv-gradient accumulations are rejected by
+`split_reduce_sites`… they pass the extent floor, so the rejection is in `Sched.op_legality` or in
+the dedup-by-axis-symbol. Pinning down which is the next step."* It is `op_legality`, and the exact
+rule is below.
 
 ### First, the confounder: gh-527 was most of it, but not all
 
@@ -29,13 +36,13 @@ survives, at a quarter of the previously quoted magnitude.
 ### Task 3 has no effect on it, for a structural reason
 
 Task 3 landed before this measurement, so the 73 ms residue is measured *with* the split-reduce
-seeding active. `BENCH_SR_SITES=1` (a probe added on the measurement branch) prints the
-`op_legality` verdict for splitting each enclosing serial loop:
+seeding active. `BENCH_SR_SITES=1` — extended on this branch to print, beyond the detected sites,
+the `op_legality` verdict for splitting each enclosing serial loop:
 
 ```
-split-reduce sites seeded: 2
-  seeded cross_entropy red=64 out=1
-  seeded n105 red=84 out=640
+split-reduce sites detected: 2
+  cross_entropy: reduction extent 64, target cells 1
+  n105: reduction extent 84, target cells 640
 
 w:bias_conv1.grad(6) loops[i527=64s,i528=28s,i529=28s,i530=6s]
     axis i527 extent 64 -> illegal: the accumulation cell mentions i530, which is not bound

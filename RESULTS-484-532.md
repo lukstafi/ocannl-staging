@@ -25,12 +25,16 @@ remains the single dominant cost of the default-placement step at 89%.
 
 ## gh-484: does task 3 reach it? No.
 
+(Independently confirms the CUDA leg's headline — `benchmarks/report-gh484-cuda.md`, merged in
+parallel — on a second backend, and answers that leg's open question #1, "why are the conv-gradient
+accumulations rejected": it is `Sched.op_legality`, not the dedup-by-axis-symbol.)
+
 `BENCH_SR_SITES=1` (this branch's new probe) on lenet, current tree:
 
 ```
-split-reduce sites seeded: 2
-  seeded cross_entropy red=64 out=1
-  seeded n105 red=84 out=640
+split-reduce sites detected: 2
+  cross_entropy: reduction extent 64, target cells 1
+  n105: reduction extent 84, target cells 640
 
 w:bias_conv1.grad(6) loops[i527=64s,i528=28s,i529=28s,i530=6s]
     axis i527 extent 64 -> illegal: the accumulation cell mentions i530, which is not bound
