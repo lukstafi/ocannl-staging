@@ -114,6 +114,10 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   gh-ocannl-484 task 3's split-reduce seeding — also the reference for why only same-session
   paired runs are trustworthy on that machine) for checked-in example output
   (`results/` itself is gitignored).
+  [RESULTS-484-532.md](RESULTS-484-532.md) is the raw extracted dataset behind `report-hip.md`'s
+  post-gh-527 subsection and the gh-ocannl-532 correction (per-segment attribution, the
+  split-reduce `op_legality` verdicts, and the nine variant cells) — kept because that session's
+  logs were lost to GPU-driver crashes and reboots, so it is the only surviving primary source.
 - `runners/ocannl/bench_{gpt,conv}_diag.ml` — schedule diagnostics: print the default
   fission-pipeline segment census (launch geometry, per-nest loop extents, written nodes with
   materialization markers) for the gpt2_mini / lenet graphs, then optionally time steps
