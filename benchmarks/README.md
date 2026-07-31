@@ -70,7 +70,12 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   storage policy over the MLP body with the loss head kept f32, and for f16 dynamic loss
   scaling, whose per-step host-read inf/nan gate is included in the reported step times;
   orchestrate flag `--precision bf16 f16`, parity gated at the looser
-  `PARITY_TOL_PRECISION` envelopes); backend via the usual `--ocannl_backend=cc|metal|cuda`. Debug
+  `PARITY_TOL_PRECISION` envelopes). The gh-ocannl-492 task-5 gate-cost experiment legs (f16
+  only, manual): `BENCH_STATIC_SCALE=1` fixes the loss scale with no gate and no host read —
+  the discriminating experiment for how much of f16's step cost is the dynamic gate;
+  `BENCH_GATE_INTERVAL=N` uses the fused on-device gate with the host sampling a sticky window
+  checksum every N steps (reported precision `f16-static` / `f16-gatedN`); backend via the usual
+  `--ocannl_backend=cc|metal|cuda`. Debug
   helpers: `BENCH_DEBUG=1` prints param names/dims (conv/gpt) or bias gradients (mlp) and
   exits; `BENCH_NO_SGD=1` compiles the gradient update without the SGD step (mlp);
   `BENCH_NO_SLICE=1` skips `@|` batch slicing (mlp, single-batch fixture).

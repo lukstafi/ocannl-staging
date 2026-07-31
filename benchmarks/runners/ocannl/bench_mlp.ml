@@ -17,7 +17,14 @@
    f32), and — f16 only — dynamic loss scaling: the step becomes a gradient routine plus an
    optimizer routine gated on the host-read gradient checksum, so the reported step times include
    the per-step device sync that the inf/nan gate costs. Composing BENCH_PRECISION with BENCH_TUNE
-   or BENCH_NO_SGD is not supported. *)
+   or BENCH_NO_SGD is not supported.
+
+   The gh-ocannl-492 task-5 gate-cost experiment legs (f16 only): BENCH_STATIC_SCALE=1 uses a
+   fixed loss scale with no gate and no host read (the discriminating experiment — if f16's
+   penalty collapses toward bf16's under it, the dynamic gate is confirmed as the GPU-side cost);
+   BENCH_GATE_INTERVAL=N uses the fused on-device gate (Mixed_prec.gated_scaled_update) with the
+   host sampling the sticky window checksum every N steps. The reported "precision" field becomes
+   f16-static / f16-gatedN respectively. *)
 
 open Base
 open Ocannl
@@ -45,6 +52,26 @@ let () =
   in
   (* f16 needs loss scaling (its exponent range underflows on gradients); bf16 does not. *)
   let scaled = String.equal precision "f16" in
+  (* The gh-ocannl-492 task-5 experiment legs, f16 only. BENCH_STATIC_SCALE=1: a fixed loss scale
+     with no inf/nan gate at all — one fused routine per step, no host read; the discriminating
+     experiment for how much of f16's step cost is the dynamic gate. BENCH_GATE_INTERVAL=N: the
+     fused gated recipe (Mixed_prec.gated_scaled_update) — the gate evaluated on device, the host
+     sampling the sticky window checksum every N steps. Default: the two-routine host-read gate. *)
+  let static_scale =
+    match Stdlib.Sys.getenv_opt "BENCH_STATIC_SCALE" with Some "1" -> true | _ -> false
+  in
+  let gate_interval =
+    Stdlib.Sys.getenv_opt "BENCH_GATE_INTERVAL" |> Option.map ~f:Int.of_string
+  in
+  if (static_scale || Option.is_some gate_interval) && not scaled then
+    failwith "bench_mlp: BENCH_STATIC_SCALE / BENCH_GATE_INTERVAL require BENCH_PRECISION=f16";
+  if static_scale && Option.is_some gate_interval then
+    failwith "bench_mlp: BENCH_STATIC_SCALE and BENCH_GATE_INTERVAL are mutually exclusive";
+  let precision =
+    if static_scale then precision ^ "-static"
+    else
+      match gate_interval with Some n -> Printf.sprintf "%s-gated%d" precision n | None -> precision
+  in
   if Option.is_some mp_prec && tune then
     failwith "bench_mlp: BENCH_TUNE with BENCH_PRECISION is not supported";
   let st = St.read fixture in
@@ -143,19 +170,41 @@ let () =
      grad_update consumes the loss's forward code, so the two step shapes must not both be
      built. *)
   let scaled_parts =
-    if scaled then
+    if scaled && not static_scale then
       let scaler = Mixed_prec.Loss_scaler.create () in
-      let checksum, grad_comp = Mixed_prec.scaled_grad_update scaler batch_loss in
-      let sgd_comp = Mixed_prec.scaled_sgd_update scaler ~learning_rate batch_loss in
-      Some (scaler, checksum, grad_comp, sgd_comp)
+      match gate_interval with
+      | Some interval ->
+          let wflag, comp =
+            Mixed_prec.gated_scaled_update ~setup_for_parallel:debug scaler ~learning_rate
+              batch_loss
+          in
+          Some (`Fused (scaler, wflag, comp, interval))
+      | None ->
+          let checksum, grad_comp =
+            Mixed_prec.scaled_grad_update ~setup_for_parallel:debug scaler batch_loss
+          in
+          let sgd_comp = Mixed_prec.scaled_sgd_update scaler ~learning_rate batch_loss in
+          Some (`HostGate (scaler, checksum, grad_comp, sgd_comp))
     else None
   in
   let step_comp =
-    if scaled then Asgns.empty_comp
-    else
-      let update = Train.grad_update ~setup_for_parallel:debug batch_loss in
-      if no_sgd then update
-      else Asgns.sequence [ update; Train.sgd_update ~learning_rate batch_loss ]
+    match scaled_parts with
+    | Some _ -> Asgns.empty_comp
+    | None when static_scale ->
+        (* The static-scale leg: scaled backprop and unscaled optimizer as ONE routine, no
+           checksum, no gate, no host read — the scale scalars are set once and never adjusted. *)
+        let scaler = Mixed_prec.Loss_scaler.create () in
+        Asgns.sequence
+          [
+            Train.grad_update ~setup_for_parallel:debug
+              ~loss_scale:scaler.Mixed_prec.Loss_scaler.scale batch_loss;
+            Train.sgd_update ~learning_rate ~grad_unscale:scaler.Mixed_prec.Loss_scaler.unscale
+              batch_loss;
+          ]
+    | None ->
+        let update = Train.grad_update ~setup_for_parallel:debug batch_loss in
+        if no_sgd then update
+        else Asgns.sequence [ update; Train.sgd_update ~learning_rate batch_loss ]
   in
   let ctx = Context.auto () in
   let backend = Context.backend_name ctx in
@@ -177,10 +226,13 @@ let () =
   in
   let ctx, routines =
     match scaled_parts with
-    | Some (scaler, checksum, grad_comp, sgd_comp) ->
+    | Some (`HostGate (scaler, checksum, grad_comp, sgd_comp)) ->
         let ctx, grad_routine = Context.compile ctx grad_comp bindings in
         let ctx, sgd_routine = Context.compile ctx sgd_comp bindings in
         (ctx, `Scaled (scaler, checksum, grad_routine, sgd_routine))
+    | Some (`Fused (scaler, wflag, comp, interval)) ->
+        let ctx, routine = Context.compile ctx comp bindings in
+        (ctx, `Fused (scaler, wflag, routine, interval))
     | None ->
         let ctx, routine =
           if tune then
@@ -203,6 +255,7 @@ let () =
     match routines with
     | `Plain routine -> Context.bindings routine
     | `Scaled (_, _, grad_routine, _) -> Context.bindings grad_routine
+    | `Fused (_, _, routine, _) -> Context.bindings routine
   in
   let batch_ref = Option.map batch_n ~f:(fun bn -> IDX.find_exn step_bindings bn) in
   let step_count = ref 0 in
@@ -213,6 +266,12 @@ let () =
     | `Scaled (scaler, checksum, grad_routine, sgd_routine) ->
         let ctx', _ran =
           Mixed_prec.scaled_step ~scaler ~grad_routine ~sgd_routine ~checksum !ctx_ref
+        in
+        ctx_ref := ctx'
+    | `Fused (scaler, wflag, routine, interval) ->
+        let ctx', _window_finite =
+          Mixed_prec.gated_step ~scaler ~routine ~window_checksum:wflag ~check_interval:interval
+            ~step:!step_count !ctx_ref
         in
         ctx_ref := ctx');
     Int.incr step_count
