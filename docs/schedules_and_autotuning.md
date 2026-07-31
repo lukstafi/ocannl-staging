@@ -220,7 +220,19 @@ the retained procedural analyses alongside the affine engine and raises on diver
   `num_blocks` values as the tunable, applied whole-routine *before* fission so the two passes
   land in separate kernels; per-site singles plus one composite recombining the best-timed
   `num_blocks` per site. A split winner's cache entry stores the whole-routine prelude alongside
-  the post-prelude per-segment schedules. `model_default` deliberately does not propose the
+  the post-prelude per-segment schedules.
+  **The enabling interchange** (gh-ocannl-537): as filed, the family reached none of the
+  conv-gradient accumulations it was aimed at. OCANNL lowers a parameter gradient with the
+  accumulated channel loop *innermost* and the reduction loops (batch, y, x) outside it — the
+  inverse of the static form's pinning discipline, which requires every accumulation-cell symbol
+  to be bound by a loop *enclosing* the reduction loop. So every axis was rejected, on every
+  parameter gradient of the network, while that one segment was 89% of HIP lenet's step. That
+  cause, and only that cause, a loop interchange removes: `Schedule.split_reduce_hoist` reports
+  the offending symbols from the recognizer's own probe (not from its message), seeding bubbles
+  each outside the reduction loop with adjacent `Swap`s — relative order preserved, every `Swap`
+  confirmed `Op_legal` against the code it acts on — and re-probes the split on the interchanged
+  code. The chain is recorded on the site and replayed by the candidate's prelude ahead of the
+  `Split_reduce`. `model_default` deliberately does not propose the
   family: the roofline model prices bytes and flops, not the serialization the split removes, so
   it could only ever rank the split (strictly more traffic) below the default — the family is
   reachable through measurement alone.

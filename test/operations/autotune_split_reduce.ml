@@ -14,7 +14,9 @@
    [segments] — replays through tune's cache-hit path ([F_split_saved]: [of_saved] re-mints the
    partials node, the per-segment lookup and drift guard pass), with correct values. - Multi-site:
    two skinny matvec accumulations in one routine seed per-site singles plus one composite
-   recombining each site's best-timed [num_blocks]. *)
+   recombining each site's best-timed [num_blocks]. - gh-ocannl-537: a bias gradient — the
+   conv-benchmark shape, accumulated channel loop innermost — is reached through the enabling
+   [Swap] chain and its candidate is TIMED, not merely seeded. *)
 
 open Base
 open Ocannl
@@ -310,5 +312,110 @@ let () =
       p "multi-site split-reduce singles seeded" false;
       p "best-timed singles recombined into a composite" false);
   p "tuned multi-site routine matches the serial reference"
-    (Array.for_all2_exn got want ~f:approx);
+    (Array.for_all2_exn got want ~f:approx)
+
+(* === Leg 6: the conv-gradient shape — the enabling interchange (gh-ocannl-537). ===
+
+   A bias gradient: the forward broadcast-adds [bias(o)] over [b,h,w,o], so the backward
+   accumulation [bias.grad[o] += y.grad[b,h,w,o]] inherits the FORWARD product space — the
+   accumulated channel loop INNERMOST, the reduction loops (b,h,w) outside it. That is how OCANNL
+   lowers every parameter gradient of the conv benchmarks, and [Split_reduce] v1 rejects every axis
+   of it: "the accumulation cell mentions <sym>, which is not bound by a loop enclosing the
+   reduction loop". The family was therefore inert on the one segment it was filed for (89% of HIP
+   lenet's step). Seeding now hoists the cell loop with a [Swap] chain and re-probes, so the site is
+   detected WITH a non-empty interchange and — the assertion that matters, the
+   seeded-but-never-timed failure mode of gh-476 — actually reaches timing. *)
+
+let cg_b = 128
+let cg_h = 4
+let cg_w = 4
+let cg_o = 6
+
+let cgv =
+  Array.init (cg_b * cg_h * cg_w * cg_o) ~f:(fun x ->
+      Float.sin (Float.of_int x) *. (10. **. Float.of_int (x % 3)))
+
+let make_bias_grad label =
+  let x =
+    TDSL.ndarray cgv ~label:[ "cg_x" ^ label ] ~output_dims:[ cg_b; cg_h; cg_w; cg_o ] ()
+  in
+  let bias =
+    TDSL.param
+      ~values:(Array.init cg_o ~f:(fun i -> Float.of_int i /. 10.))
+      ("cg_bias" ^ label) ~output_dims:[ cg_o ] ()
+  in
+  let%op y = x + bias in
+  let%op loss = y ++ "bhwo => 0" in
+  (* In the benchmarks an SGD step consumes the parameter gradient; here nothing does, so pin it
+     materialized — the accumulation must exist as an on-device rmw for the site to be a site. *)
+  Train.set_materialized (Option.value_exn ~here:[%here] bias.Tensor.diff).grad;
+  (bias, loss)
+
+let cg_grad ctx bias = Context.get_values ctx (Option.value_exn ~here:[%here] bias.Tensor.diff).grad
+
+(* The bias gradient's own site: the one whose target has [cg_o] cells (the loss reduction is a
+   second, already-splittable site — its accumulation cell is empty). *)
+let cg_site sites = List.filter sites ~f:(fun s -> s.Autotune.sr_out = cg_o)
+
+let () =
+  let _bias_p, loss_p = make_bias_grad "probe" in
+  let pctx = Context.auto () in
+  let pctx = Train.init_params pctx Train.IDX.empty loss_p in
+  let capture = ref None in
+  let _pctx, _proutine =
+    Context.compile
+      ~lowered_transform:(fun opt ->
+        capture := Some opt;
+        opt)
+      pctx
+      (named "asr_cg_probe" (Train.grad_update loss_p))
+      Ir.Indexing.Empty
+  in
+  let base_opt = Option.value_exn ~here:[%here] !capture in
+  let sites = Autotune.split_reduce_sites base_opt in
+  p "the bias gradient yields a split-reduce site"
+    (match cg_site sites with [ s ] -> s.Autotune.sr_red = cg_b | _ -> false);
+  p "the site carries an enabling interchange"
+    (match cg_site sites with [ s ] -> not (List.is_empty s.Autotune.sr_swaps) | _ -> false);
+
+  let bias0, loss0 = make_bias_grad "ref" in
+  let rctx = Context.auto () in
+  let rctx = Train.init_params rctx Train.IDX.empty loss0 in
+  let rctx, rroutine =
+    Context.compile rctx (named "asr_cg_serial" (Train.grad_update loss0)) Ir.Indexing.Empty
+  in
+  let rctx = Context.run rctx rroutine in
+  let want = cg_grad rctx bias0 in
+
+  let bias1, loss1 = make_bias_grad "tuned" in
+  let report = ref None in
+  let ctx = Context.auto () in
+  let ctx = Train.init_params ctx Train.IDX.empty loss1 in
+  let ctx, routine =
+    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:""
+      ~report:(fun r -> report := Some r)
+      ctx
+      (named "asr_cg_tuned" (Train.grad_update loss1))
+      Ir.Indexing.Empty
+  in
+  let ctx = Context.run ctx routine in
+  let got = cg_grad ctx bias1 in
+  (match !report with
+  | Some r ->
+      (* Two sites — the bias gradient (interchanged) and the loss reduction (splittable as
+         lowered) — over the [2*b <= extent] slice of each sweep: 4 singles on CPU, 2 on GPU. *)
+      p "conv-gradient split-reduce candidates seeded"
+        (if is_cpu then r.Autotune.split_reduce_candidates = 4
+         else r.Autotune.split_reduce_candidates >= 2);
+      (* The gh-537 assertion: TIMED, not merely seeded — seeded-but-never-timed is exactly the
+         failure mode gh-476 paid a sweep to discover. Sharper than [timed > 0], which the loss
+         site alone would satisfy: [candidates + 1] is every single plus the composite, and the
+         composite is only proposed when EACH site contributed a best-timed single — so it holds
+         only if the interchanged bias-gradient candidate compiled and ran. *)
+      p "the interchanged bias-gradient candidate reaches timing"
+        (r.Autotune.split_reduce_timed = r.Autotune.split_reduce_candidates + 1)
+  | None ->
+      p "conv-gradient split-reduce candidates seeded" false;
+      p "the interchanged bias-gradient candidate reaches timing" false);
+  p "tuned bias gradient matches the serial reference" (Array.for_all2_exn got want ~f:approx);
   Stdio.printf "\nDone.\n%!"
