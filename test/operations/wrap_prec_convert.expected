@@ -1,0 +1,7 @@
+wrap ~prec pins the storage precision: true
+converted values equal the host-side half rounding: true
+conversion actually rounds (data is not half-exact): true
+same-precision wrap keeps the values bitwise: true
+bf16-converted weights: forward tracks f32 within bf16 tolerance: true
+
+Done.

@@ -196,7 +196,8 @@ let time_segments ?promote_locals ?(repeats = 20) ~backend ~limits ~static_indic
 (** Runs the measurement protocol and prints the JSON result line. [run_step] advances the batch
     binding and enqueues one step; [read_loss] returns the current loss value (awaits the device);
     [sync] awaits all queued work. *)
-let measure_and_emit ~st ~backend ~variant ~compile_s ?tokens_per_step ~run_step ~read_loss ~sync ()
+let measure_and_emit ~st ~backend ~variant ?(precision = "f32") ~compile_s ?tokens_per_step ~run_step
+    ~read_loss ~sync ()
     =
   let workload = get_meta st "name" in
   let parity_steps = meta_int st "parity_steps" in
@@ -239,7 +240,7 @@ let measure_and_emit ~st ~backend ~variant ~compile_s ?tokens_per_step ~run_step
     match tokens_per_step with Some t -> Printf.sprintf {|"tokens_per_step":%d,|} t | None -> ""
   in
   Stdio.printf
-    {|{"framework":"ocannl","backend":"%s","variant":"%s","workload":"%s","compile_s":%.3f,%s"step_ms":{"p10":%.6g,"p50":%.6g,"p90":%.6g},"queued_step_ms":%.6g,"timed_steps":%d,"losses":[%s]}|}
-    backend variant workload compile_s tokens_field (percentile synced 10.) (percentile synced 50.)
+    {|{"framework":"ocannl","backend":"%s","variant":"%s","precision":"%s","workload":"%s","compile_s":%.3f,%s"step_ms":{"p10":%.6g,"p50":%.6g,"p90":%.6g},"queued_step_ms":%.6g,"timed_steps":%d,"losses":[%s]}|}
+    backend variant precision workload compile_s tokens_field (percentile synced 10.) (percentile synced 50.)
     (percentile synced 90.) queued_ms timed_steps (json_floats losses);
   Stdio.printf "\n"

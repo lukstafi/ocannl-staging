@@ -518,6 +518,14 @@ let%track7_sexp init_array ~debug:(_debug : string) (prec : Ops.prec) ~(dims : i
   let _ : int = Atomic.fetch_and_add used_memory size_in_bytes in
   result
 
+(** [convert prec src] is a fresh ndarray of precision [prec] with [src]'s dimensions and values
+    (converted through float); [src] itself when the precision already matches. Padding is not
+    carried — the source's raw dims are used as-is. Load-time conversion for data-backed tensors
+    (gh-ocannl-492): the inference-side counterpart of the training recipe's cast twins. *)
+let convert prec src =
+  if Ops.equal_prec prec (get_prec src) then src
+  else init_array ~debug:"convert" prec ~dims:(dims src) ~padding:None ~f:(get_as_float src)
+
 let get_used_memory () = Atomic.get used_memory
 
 (** {2 *** Printing ***} *)

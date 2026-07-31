@@ -37,6 +37,21 @@ let () =
   let tune = H.env_flag "BENCH_TUNE" in
   let materialize = H.env_flag "BENCH_MATERIALIZE" in
   let debug = H.env_flag "BENCH_DEBUG" in
+  (* BENCH_PRECISION=bf16|f16 (gh-ocannl-492 task 4, the forward-only leg): reduced precision
+     enters by LOAD-TIME CONVERSION, not cast twins — inference has no optimizer, so there is no
+     master copy for a twin to preserve, and keeping f32 storage would pay exactly the weight
+     bandwidth the leg measures away (torch's [model.half ()]). Data-backed weights (wte/wpe/ffn)
+     convert at wrap; the attention-projection params take the reduced precision through the
+     storage policy and [H.inject]'s [set_values] converts the f32 fixture values at load;
+     layer-norm gains/biases and the softmax-CE head stay f32 (the AMP default). No loss scaling:
+     there are no gradients. *)
+  let precision, mp_prec =
+    match Stdlib.Sys.getenv_opt "BENCH_PRECISION" with
+    | None | Some "" | Some "0" | Some "f32" -> ("f32", None)
+    | Some "bf16" -> ("bf16", Some Ir.Ops.bfloat16)
+    | Some "f16" -> ("f16", Some Ir.Ops.half)
+    | Some other -> failwith ("bench_gpt: unknown BENCH_PRECISION: " ^ other)
+  in
   let st = St.read fixture in
   let batch_size = H.meta_int st "batch_size" in
   let n_layer = H.meta_int st "n_layer" in
@@ -54,9 +69,11 @@ let () =
   let batch_n, bindings = IDX.get_static_symbol ~static_range:n_batches IDX.empty in
   let%op ids_b = ids_t @| batch_n in
   let%op tgt_b = tgt_t @| batch_n in
-  let wrap name ~i ~o = TDSL.wrap ~l:name ~b:[] ~i ~o (St.to_ndarray st name) () in
+  let wrap name ~i ~o = TDSL.wrap ~l:name ?prec:mp_prec ~b:[] ~i ~o (St.to_ndarray st name) () in
   let wte = wrap "wte" ~i:[ vocab ] ~o:[ d_model ] in
-  let wpe = TDSL.wrap ~l:"wpe" ~b:[ seq ] ~i:[] ~o:[ d_model ] (St.to_ndarray st "wpe") () in
+  let wpe =
+    TDSL.wrap ~l:"wpe" ?prec:mp_prec ~b:[ seq ] ~i:[] ~o:[ d_model ] (St.to_ndarray st "wpe") ()
+  in
   let mask =
     NTDSL.init ~l:"mask" ~prec:Ir.Ops.single ~b:[ seq ] ~i:[ seq ] ~o:[]
       ~f:(function [| s; t |] -> if s >= t then 1. else 0. | _ -> assert false)
@@ -91,6 +108,27 @@ let () =
   let%op batch_loss =
     cross_entropy_loss ~spec:"...|v" ~normalize_by:!..n_positions () ~logits ~targets
   in
+  (* Storage policy for the reduced-precision leg: the decoder body (the logits subtree) computes
+     in the reduced precision — attention-projection params included ([param_prec]; injection
+     converts the fixture values at load) — while layer-norm gains/biases and the softmax-CE head
+     are PINNED at f32 via [except] (merely not assigning them is not enough: precision inference
+     would pull them to the reduced precision from their neighbors). *)
+  Option.iter mp_prec ~f:(fun prec ->
+      let body = Hash_set.create (module Int) in
+      let rec walk t =
+        if not (Hash_set.mem body t.Tensor.value.Ir.Tnode.id) then (
+          Hash_set.add body t.Tensor.value.Ir.Tnode.id;
+          List.iter t.Tensor.children ~f:(fun c -> walk c.Tensor.subtensor))
+      in
+      walk logits;
+      let is_ln tn =
+        List.exists tn.Ir.Tnode.label ~f:(fun l ->
+            String.equal l "gamma" || String.equal l "beta")
+      in
+      let except tn = (not (Hash_set.mem body tn.Ir.Tnode.id)) || is_ln tn in
+      Precision_policy.apply ~except
+        { Precision_policy.param_prec = Some prec; activation_prec = Some prec; grad_prec = None }
+        batch_loss);
   if materialize then Train.every_non_literal_materialized batch_loss;
   let fwd = Train.forward batch_loss in
   let ctx = Context.auto () in
@@ -139,8 +177,15 @@ let () =
   in
   let open Operation.At in
   H.measure_and_emit ~st ~backend
-    ~variant:(if tune then "tuned" else if materialize then "materialized" else "default")
-    ~compile_s ~tokens_per_step:(batch_size * seq) ~run_step
+    ~variant:
+      (* Mirror bench_mlp: the precision doubles as the variant for the reduced-precision cells —
+         orchestrate's report renders the variant column, so f32/bf16/f16 rows must be
+         distinguishable there, not only in the precision field. *)
+      (if tune then "tuned"
+       else if materialize then "materialized"
+       else if Option.is_some mp_prec then precision
+       else "default")
+    ~precision ~compile_s ~tokens_per_step:(batch_size * seq) ~run_step
     ~read_loss:(fun () -> (ctx, batch_loss).@[0])
     ~sync:(fun () -> Context.sync ctx)
     ()
