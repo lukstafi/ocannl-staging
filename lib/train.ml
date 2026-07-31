@@ -133,26 +133,51 @@ let grad_checksum loss =
 
     When [grad_unscale] is given (the reciprocal of {!grad_update}'s [loss_scale]), the gradient is
     first multiplied in place by it, so the optimizer math below — including the momentum buffer —
-    sees unscaled gradients, and so does any later reader of [p.grad] (e.g. gradient clipping). *)
+    sees unscaled gradients, and so does any later reader of [p.grad] (e.g. gradient clipping).
+
+    When [update_gate] is given (a broadcastable scalar holding 1 to apply the step and 0 to skip
+    it, computed on device — see [Mixed_prec.gated_scaled_update], gh-ocannl-492 task 5), every
+    optimizer-state mutation is gated by [Where] {e selection}: on a skipped step the parameter and
+    the momentum buffer keep their previous values exactly. Selection, not multiplication — the
+    skipped steps are the ones whose gradients hold [inf]/[nan], and [0 * inf] is [nan]. *)
 let sgd_one ~learning_rate ?(momentum = 0.0) ?(weight_decay = 0.0) ?(nesterov = false) ?grad_unscale
-    p =
+    ?update_gate p =
   if Option.is_none p.Tensor.diff then
     raise @@ Tensor.Session_error ("Train.sgd_one: not differentiable", Some p);
-  [%cd
-    ~~(p "param sgd step";
-       (match grad_unscale with
-       (* The binary form: a unary [p.grad =* unscale] would be a Pointwise_un, which does not
-          broadcast the scalar's closed rows against parameters with input axes. *)
-       | Some unscale -> p.grad =: p.grad * unscale ~logic:"."
-       | None -> Asgns.empty_comp);
-       { sgd_delta } =: p.grad + (!.weight_decay *. p);
-       if Float.(momentum > 0.0) then (
-         { sgd_momentum } =: (!.momentum *. sgd_momentum) + sgd_delta;
-         if nesterov then sgd_delta =+ !.momentum *. sgd_momentum else sgd_delta =: sgd_momentum);
-       p =- learning_rate * sgd_delta ~logic:".")]
+  match update_gate with
+  | None ->
+      [%cd
+        ~~(p "param sgd step";
+           (match grad_unscale with
+           (* The binary form: a unary [p.grad =* unscale] would be a Pointwise_un, which does not
+              broadcast the scalar's closed rows against parameters with input axes. *)
+           | Some unscale -> p.grad =: p.grad * unscale ~logic:"."
+           | None -> Asgns.empty_comp);
+           { sgd_delta } =: p.grad + (!.weight_decay *. p);
+           if Float.(momentum > 0.0) then (
+             { sgd_momentum } =: (!.momentum *. sgd_momentum) + sgd_delta;
+             if nesterov then sgd_delta =+ !.momentum *. sgd_momentum
+             else sgd_delta =: sgd_momentum);
+           p =- learning_rate * sgd_delta ~logic:".")]
+  | Some gate ->
+      [%cd
+        ~~(p "param sgd step";
+           (match grad_unscale with
+           | Some unscale -> p.grad =: p.grad * unscale ~logic:"."
+           | None -> Asgns.empty_comp);
+           { sgd_delta } =: p.grad + (!.weight_decay *. p);
+           if Float.(momentum > 0.0) then (
+             { sgd_momentum } =: where gate ((!.momentum *. sgd_momentum) + sgd_delta) sgd_momentum;
+             if nesterov then sgd_delta =+ !.momentum *. sgd_momentum
+             else sgd_delta =: sgd_momentum);
+           (* The final selection covers every path: without momentum it discards the possibly
+              non-finite delta; with momentum the buffer kept its old (finite) value above, and
+              this still zeroes the step so [p] is untouched. *)
+           sgd_delta =: where gate sgd_delta 0;
+           p =- learning_rate * sgd_delta ~logic:".")]
 
-let sgd_update ~learning_rate ?momentum ?weight_decay ?nesterov ?grad_unscale loss =
-  let f = sgd_one ~learning_rate ?momentum ?weight_decay ?nesterov ?grad_unscale in
+let sgd_update ~learning_rate ?momentum ?weight_decay ?nesterov ?grad_unscale ?update_gate loss =
+  let f = sgd_one ~learning_rate ?momentum ?weight_decay ?nesterov ?grad_unscale ?update_gate in
   let comp = Set.to_list loss.Tensor.params |> List.map ~f |> Asgns.sequence in
   { comp with asgns = Asgns.Block_comment ("sgd_update", comp.asgns) }
 

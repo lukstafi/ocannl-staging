@@ -14,3 +14,9 @@ f16 leg loss trajectory parity within 0.1: true
 dynamic leg stepped flags: F T T T F T T
 dynamic leg scale after each step: 32768 32768 32768 65536 32768 32768 32768
 dynamic leg losses on good steps finite: true
+gated leg all windows finite: true
+gated leg loss trajectory parity within 0.1: true
+gated overflow leg window flags: T F T T T T T
+gated overflow leg scale after each step: 65536 32768 32768 32768 32768 32768 32768
+gated overflow leg params on-device-skipped then applied: F F T T T T T
+static-scale leg loss trajectory parity within 0.1: true

@@ -10,6 +10,20 @@
 
 ### Added
 
+- **Fused on-device loss-scaling gate** (gh-ocannl-492 task 5): the f16 recipe's per-step
+  host-read inf/nan gate (a full device await plus a routine split, on top of the checksum
+  reduction) is now optional. `Train.sgd_update ?update_gate` gates every optimizer-state
+  mutation by `Where` selection (skipped steps leave parameters and momentum buffers untouched
+  exactly — selection, not multiplication, since `0 * inf = nan`);
+  `Mixed_prec.gated_scaled_update` builds the whole dynamically-scaled step as one routine with
+  the gate computed on device (a fast-math-robust range test of the checksum), and
+  `Mixed_prec.gated_step` samples a sticky window checksum every `check_interval` steps to
+  drive backoff/growth — overflowing steps inside a window skip themselves on device, so
+  delayed sampling delays only scale adjustment, never poisons state. Bench legs
+  `BENCH_STATIC_SCALE=1` (fixed scale, no gate — the discriminating experiment for the gate's
+  share of f16's step cost, gh-ocannl-535) and `BENCH_GATE_INTERVAL=N` in `bench_mlp`. The
+  checksum reduction itself is the shape the gh-484 split-reduce seeding parallelizes under
+  tuning.
 - **Virtual packed uniform via lane extraction** (gh-ocannl-509 task 4): packed `uniform`
   results can now be virtual (inlined). A read cell inlines as
   `vec_convert(counter[flat / lanes]).v[flat mod lanes]` through the new IR-internal
