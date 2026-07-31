@@ -420,6 +420,9 @@ comparison here.
 - Whether the same unbounded-baseline signature appears on the CUDA and Metal legs has not been
   checked. `time_routine` times the serial baseline on every backend, so any workload heavy enough
   should show it; a tuned cell that "hangs" where the untuned one is fine is the tell.
-- `cifar_stride hip/tuned` has no number: it failed to complete twice on the post-gh-527 tree
-  (silent, then a silent death at ~11.5 min). Expected under the baseline mechanism above rather
-  than a new bug, but unconfirmed.
+- `cifar_stride hip/tuned` has no step-time number (three attempts: silent, then a silent death at
+  ~11.5 min, then stopped deliberately). The cause is confirmed, not assumed: a perf sample 45 s
+  into a fourth attempt — by which point a Windows driver-timeout notification had already fired —
+  is 66.63% `AsyncEventsLoop` / 33.35% `BusyWaitSignal::WaitRelaxed` with **zero OCaml frames**,
+  matching `mlp_wide` to two decimal places. Same unbounded serial baseline (gh-ocannl-532), so
+  this is a third affected workload rather than a separate defect.

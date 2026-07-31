@@ -117,10 +117,14 @@ nicety to a stability requirement.
 
 ## Open
 
-- `cifar_stride hip/tuned` never completed (twice). Under the mechanism above its serial
-  baseline should be enormous, so this is expected rather than a new bug — but it is the
-  one cell without a number, and yesterday's claim that gh-484 task 3 caused a "new wedge"
-  there has no support and should not be repeated.
+- `cifar_stride hip/tuned` has no step-time number (three attempts), but the cause is now
+  **settled rather than assumed**. A fourth attempt on the rebased tree was perf-sampled 45 s
+  in, at which point a Windows driver-timeout notification had already fired: 66.63%
+  `AsyncEventsLoop` / 33.35% `BusyWaitSignal::WaitRelaxed`, **zero OCaml frames** — identical
+  to mlp_wide to two decimal places. Same slow serial baseline, not a distinct bug. The run
+  was stopped deliberately: the diagnostic question was answered and the remaining value (one
+  step-time number) did not justify another display-driver crash. This positively refutes the
+  earlier suspicion that gh-484 task 3 introduced a new wedge here.
 - Suggested fixes for gh-532: bound or skip the baseline candidate by predicted cost (the
   roofline model already prices it); or seed the baseline from a cheap parallel preset
   rather than the unscheduled form. Both also fix the driver-stability problem.
