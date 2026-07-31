@@ -156,6 +156,27 @@ let time_routine ?(tag_failures = false) ~repeats cctx routine =
       done;
       !best)
 
+(* gh-ocannl-532: on a GPU backend, code that binds no hardware dimension runs the whole routine in
+   a single work-item — every nest a serial scalar loop, at one lane's throughput. Such a candidate
+   cannot win a search whose other candidates are parallel, so dispatching it is pure cost, and the
+   cost is unbounded: a training step of a few GFLOP is minutes to hours per run, and
+   [time_routine] does four of them (a warmup plus [autotune_repeats]). The dispatch is also
+   uninterruptible and shares the device with the display — the sessions in gh-ocannl-532 produced
+   driver-timeout reports and, once, loss of display output. So an unparallelized GPU candidate is
+   never dispatched: not timed, and not eligible to win. This covers the identity-transform serial
+   baseline, which is where it bites (the default annotator that parallelizes an untuned compile is
+   bypassed whenever a [?lowered_transform] is supplied, so the tuner's base compile is always the
+   unscheduled form). On CPU backends the serial form runs at full single-core speed and stays a
+   legitimate competitor — the rule is GPU-only. *)
+let binds_hardware_dims (opt : LL.optimized) = not (List.is_empty (LL.hardware_axes opt.LL.llc))
+
+(* A candidate is dispatchable when it is on a CPU backend, or at least one of its kernels binds a
+   hardware dimension. Whole-candidate rather than per-kernel: a fissioned candidate legitimately
+   leaves small segments serial next to parallel ones, and only an entirely serial routine has the
+   unbounded single-work-item cost. *)
+let dispatchable ~is_gpu (opts : LL.optimized list) =
+  (not is_gpu) || List.exists opts ~f:binds_hardware_dims
+
 (** {2 Matmul detection and sketch schedules}
 
     Sketch candidates instantiate the composed matmul pipelines pinned by
@@ -3567,11 +3588,24 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
       let seen = Hash_set.create (module String) in
       Hash_set.add seen base_digest;
       (* Baseline timing runs uncaught: its failures (e.g. uninitialized inputs) are the user's bug,
-         with the same message [Context.run] would give. *)
-      let baseline_ms = time_routine ~repeats bctx broutine in
-      logf "baseline: %.4f ms (digest %s)" baseline_ms (dshort base_digest);
-      emit_calibration ~backend ~limits ~label:"baseline" ~digest:base_digest
-        ~measured_ms:baseline_ms [ base_opt ];
+         with the same message [Context.run] would give. On a GPU backend the baseline is the
+         unscheduled serial form and is not dispatched at all (see [dispatchable]); [infinity] is
+         its rank, so every timed candidate beats it and the search never returns it (see the
+         fallback at the end). *)
+      let baseline_dispatched = dispatchable ~is_gpu [ base_opt ] in
+      let baseline_ms =
+        if baseline_dispatched then time_routine ~repeats bctx broutine else Float.infinity
+      in
+      if baseline_dispatched then (
+        logf "baseline: %.4f ms (digest %s)" baseline_ms (dshort base_digest);
+        emit_calibration ~backend ~limits ~label:"baseline" ~digest:base_digest
+          ~measured_ms:baseline_ms [ base_opt ])
+      else
+        (* No calibration row: the model column is only meaningful next to a measurement. *)
+        logf
+          "baseline: NOT DISPATCHED, binds no hardware dimension on %s -- the whole routine would \
+           run in one work-item (gh-ocannl-532) (digest %s)"
+          backend (dshort base_digest);
       let baseline =
         {
           form = Whole_saved [];
@@ -3586,7 +3620,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
           mma_renders = [];
         }
       in
-      let n_timed = ref 1 in
+      let n_timed = ref (if baseline_dispatched then 1 else 0) in
       let declines : (Outcome.rejection_key, decline_acc) Hashtbl.Poly.t = Hashtbl.Poly.create () in
       (* Live search state for an honest partial report. Each counter starts at the amount of work
          completed so far and is updated at its ordinary accounting site below. [best_so_far] is
@@ -3667,6 +3701,13 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
         | Ok c ->
             if Hash_set.mem seen c.digest_after then (
               logf "%s: dedup (digest %s)" (spec_label spec) (dshort c.digest_after);
+              None)
+            else if not (dispatchable ~is_gpu c.all_opts) then (
+              (* Degenerated to the serial form (gh-ocannl-532): recorded as seen, so an equivalent
+                 later candidate dedups rather than re-deriving the same skip. *)
+              Hash_set.add seen c.digest_after;
+              logf "%s: NOT DISPATCHED, binds no hardware dimension (digest %s)" (spec_label spec)
+                (dshort c.digest_after);
               None)
             else (
               Hash_set.add seen c.digest_after;

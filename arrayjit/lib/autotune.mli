@@ -16,7 +16,13 @@
     The candidate space:
 
     - {b Whole-routine presets}: the serial baseline, the default annotator, and a block-size sweep
-      through {!Ir.Schedule.default_gpu}.
+      through {!Ir.Schedule.default_gpu}. On GPU backends the serial baseline (and any candidate
+      that degenerates to it) is enumerated but never dispatched: with no hardware dimension bound
+      the whole routine runs in one work-item, which cannot win and whose cost is unbounded — hours
+      of uninterruptible dispatch on a device shared with the display (gh-ocannl-532). It keeps its
+      role as the search's starting point for menu moves and as the code every candidate derives
+      from; it just carries no measurement. On CPU backends it runs at full single-core speed and is
+      timed as before.
     - {b Fissioned candidates}: the kernel-fission pipeline ({!Ir.Schedule.fission_scheduled}) with
       per-segment schedules — the same preset sweep per segment, and beam rounds that extend
       {e one segment at a time}. Per-segment schedules are cached keyed by the pre-schedule
@@ -227,12 +233,14 @@ type terminal_failure = {
 
 type report = {
   cache_hit : bool;  (** The schedule came from the disk cache; no search ran. *)
-  candidates_timed : int;  (** Including the serial baseline. *)
+  candidates_timed : int;
+      (** Including the serial baseline where it was dispatched — on GPU backends it is not
+          (gh-ocannl-532), and neither is any other candidate that binds no hardware dimension. *)
   candidates_failed : int;
       (** Candidates rejected by op preconditions, hardware limits, or backend compilation. *)
   partial : bool;
-      (** [true] when candidate work terminated on a fatal failure after the baseline was measured.
-          Base-compile and baseline failures occur before reporting begins. *)
+      (** [true] when candidate work terminated on a fatal failure after the baseline was handled.
+          Base-compile and baseline-timing failures occur before reporting begins. *)
   declines : decline_summary list;
       (** Candidate rejections aggregated by stable cause key. Their counts sum to
           [candidates_failed]. Cache-entry replay failures are excluded. *)
@@ -286,7 +294,13 @@ type report = {
           without model coverage are never counted here — they are always kept. *)
   fissioned : bool;  (** The winning candidate compiles as multiple fissioned kernels. *)
   baseline_ms : float;
+      (** The unscheduled serial baseline's measured time, or [infinity] when it was not dispatched:
+          on a GPU backend an unparallelized candidate is never run (gh-ocannl-532 — the whole
+          routine in one work-item, unbounded in cost and uninterruptible), so it has no
+          measurement and cannot win. *)
   best_ms : float;
+      (** The winner's measured time, or [infinity] when nothing was timed at all — every candidate
+          failed and the baseline was not dispatched. *)
   best_schedule : Ir.Schedule_cache.saved_schedule;
       (** The winner's schedule; for a fissioned winner, the concatenation of the per-segment
           schedules (informational). *)
