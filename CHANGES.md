@@ -10,6 +10,14 @@
 
 ### Added
 
+- **Forward-only reduced precision by load-time conversion** (gh-ocannl-492, the `gpt2_mini`
+  leg): data-backed tensors are precision-`Specified` at creation and inference has no
+  optimizer, so there is no master copy for a cast twin to preserve — re-precision happens at
+  ingestion instead (torch's `model.half()`): `Ir.Ndarray.convert` plus `TDSL.wrap ~prec`
+  convert fixture data to the target precision, `bench_gpt` gains `BENCH_PRECISION=bf16|f16`
+  (attention params via the storage policy, injected values converted by `set_values`; layer
+  norms and the softmax-CE head pinned f32), and `orchestrate.py --precision` covers the gpt
+  workloads. Cast twins remain the training-side construct.
 - **Fused on-device loss-scaling gate** (gh-ocannl-492 task 5): the f16 recipe's per-step
   host-read inf/nan gate (a full device await plus a routine split, on top of the checksum
   reduction) is now optional. `Train.sgd_update ?update_gate` gates every optimizer-state

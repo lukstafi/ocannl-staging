@@ -196,6 +196,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name wrap_prec_convert)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules wrap_prec_convert)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name precision_policy_parity)
  (package neural_nets_lib)
  (deps
