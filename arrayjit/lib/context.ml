@@ -26,6 +26,14 @@ type execution_ledger = {
   mutable next_id : int;
   routine_names : string Hashtbl.M(Int).t;
   mutable executed : Set.M(Int).t;
+  mutable poisoned : (string * exn) option;
+      (** Set when a launch or synchronization failed in a way that may have left device buffers of
+          this lineage partially written (gh-ocannl-536). [Context.run] marks a routine executed
+          before the later [sync] can report an asynchronous failure, so the ledger would otherwise
+          claim a routine completed that did not. There is no restore API, so the lineage stays
+          unusable: every entrypoint re-raises the stored failure, naming the routine. Scratch
+          lineages ([timing_ctx]) are separate, so poisoning one does not condemn the caller's
+          context. *)
 }
 (** Shared mutable state for execution tracking, allocated once per root context. Shared by
     reference across all contexts derived from the same root. *)
@@ -33,7 +41,12 @@ type execution_ledger = {
 let empty_frontier = { last_writer = Map.empty (module Tn); last_readers = Map.empty (module Tn) }
 
 let create_ledger () =
-  { next_id = 0; routine_names = Hashtbl.create (module Int); executed = Set.empty (module Int) }
+  {
+    next_id = 0;
+    routine_names = Hashtbl.create (module Int);
+    executed = Set.empty (module Int);
+    poisoned = None;
+  }
 
 type t = {
   wrapped : (Backends.wrapped_context[@sexp.opaque]);
@@ -91,22 +104,37 @@ let cpu ?threads () =
   let backend_name = match threads with None | Some 1 -> "cc" | Some _ -> "multidev_cc" in
   create_from_backend_name ~device_id:0 backend_name
 
+(* gh-ocannl-536 landing step 5: backend selection is not candidate compilation, so it does not use
+   the compile-phase policy — but it used to catch everything, which turned a broken driver, an
+   assertion failure, or an interrupt into a silent downgrade to another backend (and, on the
+   configured arm, into the misleading "Unknown backend"). Only {!BI.Backend_unavailable} — raised
+   by device discovery when the library is not linked in or the driver reports no devices — advances
+   to the next candidate; everything else propagates with its original backtrace. *)
+let advances_to_next_backend = function BI.Backend_unavailable _ -> true | _ -> false
+
 let auto () =
   (* First check if a backend is configured globally *)
   match Utils.get_global_arg ~arg_name:"backend" ~default:"" with
   | "" ->
       (* No global config, try backends in order of preference *)
       let backends_to_try = [ "metal"; "cuda"; "hip"; "cc" ] in
-      let rec try_backends = function
-        | [] -> failwith "No backend available"
+      let rec try_backends unavailable = function
+        | [] ->
+            failwith
+              ("Context.auto: no backend available; tried "
+              ^ String.concat ~sep:", " (List.rev unavailable))
         | name :: rest -> (
-            try create_from_backend_name ~device_id:0 name with _ -> try_backends rest)
+            match create_from_backend_name ~device_id:0 name with
+            | ctx -> ctx
+            | exception exn when advances_to_next_backend exn ->
+                try_backends (Exn.to_string exn :: unavailable) rest)
       in
-      try_backends backends_to_try
-  | backend_name -> (
-      (* Use the configured backend *)
-      try create_from_backend_name ~device_id:0 backend_name
-      with _ -> invalid_arg ("Unknown backend: " ^ backend_name))
+      try_backends [] backends_to_try
+  | backend_name ->
+      (* Use the configured backend. An unknown name already raises a message naming it
+         ([Backends.get_backend]); an unusable one keeps its own failure rather than being relabeled
+         as a spelling mistake. *)
+      create_from_backend_name ~device_id:0 backend_name
 
 let compile_outcome ?name ?lowered_transform ?lowered_transforms ~provenance ?candidate ctx comp
     bindings =
@@ -230,7 +258,49 @@ let compile ?name ?lowered_transform ?lowered_transforms ctx comp bindings =
   | Ok result -> result
   | Error failure -> Ir.Schedule_outcome.raise_failure failure
 
+(* {2 Failure classification at the launch/sync boundary (gh-ocannl-536)}
+
+   The compile path passes [Backend.classify_failure] into [protect] through the same first-class
+   module dispatch as compilation itself. Launch and sync need it too — that is where a driver
+   reports a candidate's kernel as unrunnable — but they are not compile-shaped: the public
+   [run]/[sync] contracts stay raising APIs, and callers that want typed outcomes (the autotuner)
+   wrap them with the classifier this accessor hands out. Without it, a backend's classifier is
+   simply never consulted for a launch failure, and every such failure is fatal by phase default. *)
+let failure_classifier ctx :
+    Ir.Schedule_outcome.phase -> exn -> Ir.Schedule_outcome.classified_cause option =
+  Backends.query ctx.wrapped
+    {
+      q =
+        (fun (type dev runner event)
+          (module Backend : BI.Backend
+            with type dev = dev
+             and type runner = runner
+             and type event = event)
+          _c
+        -> Backend.classify_failure);
+    }
+
+let poisoned_failure ctx =
+  Option.map ctx.ledger.poisoned ~f:(fun (name, exn) ->
+      Failure
+        (Printf.sprintf
+           "Context: this execution lineage was poisoned by a failure of routine %s that may have \
+            written device buffers; there is no restore API, so it cannot be reused. Original \
+            failure: %s"
+           name (Exn.to_string exn)))
+
+let check_not_poisoned ctx = Option.iter (poisoned_failure ctx) ~f:raise
+
+(** Undoes [run]'s optimistic execution marking for a routine whose failure is known not to have
+    written device buffers, so the next candidate does not inherit a dependency that never ran. *)
+let rollback_execution ctx routine_id =
+  ctx.ledger.executed <- Set.remove ctx.ledger.executed routine_id
+
+let poison_lineage ctx ~routine_name exn =
+  if Option.is_none ctx.ledger.poisoned then ctx.ledger.poisoned <- Some (routine_name, exn)
+
 let run ctx routine =
+  check_not_poisoned ctx;
   (* Check that all required inputs are initialized. A node counts as initialized if it was produced
      by a prior routine ([initialized_nodes]) or is already allocated in the running context's
      device buffers ([in_backend]): such inputs are either user-set via [set_values]/[from_host]
@@ -282,6 +352,7 @@ let run ctx routine =
   { ctx with initialized_nodes }
 
 let sync ctx =
+  check_not_poisoned ctx;
   Backends.query ctx.wrapped
     {
       q =
@@ -360,6 +431,7 @@ let copy_nd (src : Nd.t) : Nd.t =
 (** Transfers [tn]'s device buffer into a fresh host [Ndarray] and returns it. Raises if the node is
     not present in the context (and has no host-init data or for-print proxy). *)
 let to_host ctx (tn : Tn.t) : Nd.t =
+  check_not_poisoned ctx;
   (* An [\@|] slice view is addressed through its parent (gh-ocannl-293 293a): an eligible slice
      owns no buffer, and an ineligible (copy) slice's value is recomputed from the parent each run.
      Reject direct host reads uniformly -- read the parent tensor instead. [slice_of] is set eagerly
@@ -415,6 +487,7 @@ let to_host ctx (tn : Tn.t) : Nd.t =
 (** Uploads the host buffer [nd] into [tn]'s device buffer, allocating it if needed, and returns a
     context in which [tn] is marked initialized (so a subsequent {!run} reading [tn] succeeds). *)
 let from_host ctx (tn : Tn.t) (nd : Nd.t) : t =
+  check_not_poisoned ctx;
   (* Reject direct host writes to an [\@|] slice view (gh-ocannl-293 293a). Critically, [slice_of]
      is set eagerly at construction, so this fires even when the slice has not been lowered yet and
      [alias_of] is still [None] -- without it the [init_from_host] fallback below would allocate a
@@ -463,6 +536,13 @@ let from_host ctx (tn : Tn.t) (nd : Nd.t) : t =
     the copy dispatches to the backend's [device_to_device] transfer machinery; otherwise it falls
     back to a host round-trip. *)
 let copy ?(into_merge_buffer = BI.No) ~src ~dst tn =
+  (* Both lineages, and BEFORE dispatch: the same-backend path runs the transfer schedule directly
+     rather than through [to_host], so checking only the host round-trip would let a poisoned source
+     export a possibly partially written buffer into a clean lineage — exactly what poisoning is for
+     (Codex P2 on PR #256). Reading from a condemned lineage and running transfer work on one are
+     both refused. *)
+  check_not_poisoned src;
+  check_not_poisoned dst;
   (* The fallback also serves nodes with no device buffer in [src]: [to_host] reads host-init
      literals and for-print proxies. A merge buffer cannot be filled host-side, so [Copy] raises
      where the fallback would engage. *)

@@ -311,7 +311,15 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
   let set_builtins_for_device ~primary_context:_ _kernel_module = assert !initialized
 
   let%track3_sexp get_device ~(ordinal : int) : device =
-    if num_devices () <= ordinal then
+    let n = num_devices () in
+    (* No devices at all is "this backend is not available here" ([Context.auto] moves on); asking
+       for an ordinal past an existing device is an ordinary caller error. A driver that fails to
+       initialize propagates out of [num_devices] unchanged — see {!Backend_intf.Backend_unavailable}. *)
+    if n = 0 then
+      raise
+      @@ Backend_intf.Backend_unavailable
+           { backend = name; detail = "the driver reports no CUDA devices" };
+    if n <= ordinal then
       invalid_arg [%string "Exec_as_cuda.get_device %{ordinal#Int}: not enough devices"];
     let devices = Lazy.force devices in
     (if Array.length !devices <= ordinal then

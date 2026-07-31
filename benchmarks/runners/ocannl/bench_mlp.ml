@@ -16,8 +16,14 @@
    precision over the logits subtree (Precision_policy.apply — the softmax-CE loss head stays
    f32), and — f16 only — dynamic loss scaling: the step becomes a gradient routine plus an
    optimizer routine gated on the host-read gradient checksum, so the reported step times include
-   the per-step device sync that the inf/nan gate costs. Composing BENCH_PRECISION with BENCH_TUNE
-   or BENCH_NO_SGD is not supported.
+   the per-step device sync that the inf/nan gate costs. Composing BENCH_PRECISION with BENCH_NO_SGD
+   is not supported.
+
+   BENCH_PRECISION composes with BENCH_TUNE (gh-ocannl-529): under a reduced precision it is the
+   operand storage precision that decides whether a tensorized candidate is seeded at all, and on
+   RDNA3/3.5 — whose WMMA has no f32-input shape — bf16 is the only tensor-core route there is. On
+   the dynamic-loss-scaling legs only the gradient (or fused) routine is tuned; the step shape is
+   what those legs measure, so the small optimizer routine keeps its plain compile.
 
    The gh-ocannl-492 task-5 gate-cost experiment legs (f16 only): BENCH_STATIC_SCALE=1 uses a
    fixed loss scale with no gate and no host read (the discriminating experiment — if f16's
@@ -74,8 +80,6 @@ let () =
     else
       match gate_interval with Some n -> Printf.sprintf "%s-gated%d" precision n | None -> precision
   in
-  if Option.is_some mp_prec && tune then
-    failwith "bench_mlp: BENCH_TUNE with BENCH_PRECISION is not supported";
   let st = St.read fixture in
   let meta = St.metadata st in
   let get k = List.Assoc.find_exn meta ~equal:String.equal k in
@@ -238,21 +242,35 @@ let () =
               r.rounds_run r.sketch_candidates r.fissioned r.baseline_ms r.best_ms)
     | _ -> None
   in
+  (* BENCH_TUNE composes with every precision leg (gh-ocannl-529). It used to be rejected outright
+     with BENCH_PRECISION, which made bf16 unmeasurable under autotuning — and bf16 is the ONLY
+     tensor-core route on RDNA3/3.5, whose WMMA has no f32-input shape, so whether HIP even seeds a
+     tensorized candidate could not be asked. (Which candidates are seeded depends on the operand
+     storage precision, via mma_input_formats_of_prec against the backend's mma_format_tiles.)
+
+     Each leg tunes the routine that carries the work. The dynamic-loss-scaling legs keep their
+     step SHAPE — the gate is what is being measured — so only the gradient/fused routine is tuned
+     and the tiny optimizer routine is compiled plainly, from the tuned context so the lineage's
+     compile order is unchanged. Tuning runs on a scratch lineage ([timing_ctx]), so the repeated
+     candidate executions never touch the benchmark's own weights or the host-side scaler state. *)
+  let tuned ctx comp =
+    let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
+    Train.tune_placements ?report ~rounds:0 ~timing_ctx:scratch ctx batch_loss comp bindings
+  in
   let ctx, routines =
     match scaled_parts with
     | Some (`HostGate (scaler, checksum, grad_comp, sgd_comp)) ->
-        let ctx, grad_routine = Context.compile ctx grad_comp bindings in
+        let ctx, grad_routine =
+          if tune then tuned ctx grad_comp else Context.compile ctx grad_comp bindings
+        in
         let ctx, sgd_routine = Context.compile ctx sgd_comp bindings in
         (ctx, `Scaled (scaler, checksum, grad_routine, sgd_routine))
     | Some (`Fused (scaler, wflag, comp, interval)) ->
-        let ctx, routine = Context.compile ctx comp bindings in
+        let ctx, routine = if tune then tuned ctx comp else Context.compile ctx comp bindings in
         (ctx, `Fused (scaler, wflag, routine, interval))
     | None ->
         let ctx, routine =
-          if tune then
-            let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
-            Train.tune_placements ?report ~rounds:0 ~timing_ctx:scratch ctx batch_loss step_comp
-              bindings
+          if tune then tuned ctx step_comp
           else if Lazy.force Autotune.model_default_enabled then
             (* gh-ocannl-491: the model-picked untuned default (config
                [model_default_schedule=true]) — run the same benchmark with the gate off vs on for

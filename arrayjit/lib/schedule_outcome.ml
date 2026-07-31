@@ -58,7 +58,7 @@ type fatal = {
   candidate : string option;
 }
 
-type classified_cause = { cause : cause; execution_effect : execution_effect }
+type classified_cause = { phase : phase; cause : cause; execution_effect : execution_effect }
 [@@deriving sexp_of, equal]
 
 type failure = Classified of classified_cause | Fatal of fatal
@@ -82,6 +82,7 @@ let is_compile_side = function
 
 let unclassified phase exn =
   {
+    phase;
     cause =
       Unclassified
         {
@@ -98,7 +99,9 @@ let classify_raw ~strict ~classify_backend ~provenance ~phase ~candidate exn bac
   else if is_assert_or_stack exn && not (equal_provenance provenance Cache_replay) then fatal ()
   else
     match classify_backend phase exn with
-    | Some classified -> Classified classified
+    (* The backend is handed the phase, so the phase it reports back is not independent evidence:
+       pin it to where the failure was actually raised. *)
+    | Some classified -> Classified { classified with phase }
     | None ->
         if equal_provenance provenance Cache_replay && is_assert_or_stack exn then
           Classified (unclassified phase exn)
@@ -111,8 +114,8 @@ let protect ?strict ~classify_backend ~provenance ~phase ?candidate f =
   let strict = Option.value strict ~default:(Lazy.force strict_failure_classification) in
   match f () with
   | result -> Ok result
-  | exception Cause_at (_cause_phase, cause) ->
-      Error (Classified { cause; execution_effect = No_device_writes })
+  | exception Cause_at (cause_phase, cause) ->
+      Error (Classified { phase = cause_phase; cause; execution_effect = No_device_writes })
   | exception Raised_at (raised_phase, exn, backtrace) ->
       Error
         (classify_raw ~strict ~classify_backend ~provenance ~phase:raised_phase ~candidate exn
@@ -150,6 +153,11 @@ let exception_of_cause cause =
 
 let raise_cause cause =
   raise (exception_of_cause cause)
+
+let fatal_of_classified ?candidate (classified : classified_cause) =
+  let exn = exception_of_cause classified.cause in
+  let backtrace = Stdlib.Printexc.get_callstack 16 in
+  { exn; backtrace; phase = classified.phase; candidate }
 
 let raise_failure = function
   | Classified { cause; _ } -> raise_cause cause

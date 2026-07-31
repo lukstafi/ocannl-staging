@@ -97,6 +97,7 @@ let () =
     | Error
         (Ir.Schedule_outcome.Classified
           {
+            phase = Ir.Schedule_outcome.Backend_codegen;
             cause =
               Ir.Schedule_outcome.Illegal_schedule
                 { check = "Low_level.validate_parallel"; detail = _ };

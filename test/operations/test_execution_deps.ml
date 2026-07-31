@@ -123,9 +123,72 @@ let test_reexecution () =
   let _ctx' = Context.run ctx' grad_routine in
   printf "grad -> sgd -> grad: OK\n"
 
+(* Test 6: rollback withdraws an optimistic execution marking (gh-ocannl-536). [Context.run] marks
+   a routine executed before a later [sync] can report an asynchronous failure, so a contained
+   launch/sync rejection has to undo it — otherwise the next candidate the autotuner compiles in the
+   same lineage sees a dependency satisfied by a routine that never completed. *)
+let test_rollback_execution () =
+  printf "\n=== Test 6: rollback of an execution marking ===\n";
+  Tensor.unsafe_reinitialize ();
+  let ctx = Context.auto () in
+  let%op e = { a = [ 2 ] } *. { b = [ -3 ] } in
+  let%op d = e + { c = [ 10 ] } in
+  let%op l = d *. { f = [ -2 ] } in
+  let grad = Train.grad_update ~setup_for_parallel:true l in
+  let%op learning_rate = 0.1 in
+  let sgd = Train.sgd_update ~learning_rate l in
+  let ctx = Train.init_params ctx IDX.empty l in
+  let grad_routine = Train.to_routine ctx IDX.empty grad in
+  let sgd_routine = Train.to_routine (Context.context grad_routine) IDX.empty sgd in
+  let ctx' = Context.run ctx grad_routine in
+  printf "can_run sgd (after grad): %b\n" (Context.can_run ctx' sgd_routine);
+  Context.rollback_execution ctx' (Context.routine_id grad_routine);
+  printf "can_run sgd (after rollback): %b\n" (Context.can_run ctx' sgd_routine);
+  (* The ledger is shared by reference across the lineage, so the rollback is visible from the
+     context the routine was compiled from as well. *)
+  let ctx' = Context.run ctx' grad_routine in
+  printf "re-running grad restores it: %b\n" (Context.can_run ctx' sgd_routine)
+
+(* Test 7: poisoning condemns the lineage (gh-ocannl-536). A launch or sync failure that may have
+   left device buffers partially written has no restore path, so continuing to time candidates on
+   that lineage would score suspect data. Every entrypoint refuses, naming the routine. *)
+let test_poisoned_lineage () =
+  printf "\n=== Test 7: poisoned lineage ===\n";
+  Tensor.unsafe_reinitialize ();
+  let ctx = Context.auto () in
+  let%op e = { a = [ 2 ] } *. { b = [ -3 ] } in
+  let%op l = e + { c = [ 10 ] } in
+  Train.every_non_literal_materialized l;
+  let grad = Train.grad_update l in
+  let ctx = Train.init_params ctx IDX.empty l in
+  let routine = Train.to_routine ctx IDX.empty grad in
+  let ctx = Context.run ctx routine in
+  Context.poison_lineage ctx
+    ~routine_name:(Context.routine_name routine)
+    (Failure "synthetic device failure");
+  let refuses what f =
+    match f () with
+    | _ -> printf "%s: not refused (BUG)\n" what
+    | exception Failure msg ->
+        printf "%s refused, names the routine: %b, names the cause: %b\n" what
+          (String.is_substring msg ~substring:(Context.routine_name routine))
+          (String.is_substring msg ~substring:"synthetic device failure")
+  in
+  refuses "run" (fun () -> ignore (Context.run ctx routine));
+  refuses "sync" (fun () -> Context.sync ctx);
+  refuses "get_values" (fun () -> ignore (Context.get_values ctx l.Tensor.value));
+  (* Same-backend [copy] dispatches through the backend's transfer machinery rather than [to_host],
+     so guarding the host round-trip alone would let a poisoned source export a suspect buffer into
+     a clean lineage. *)
+  let clean = Context.auto () in
+  refuses "copy out" (fun () -> ignore (Context.copy ~src:ctx ~dst:clean l.Tensor.value));
+  refuses "copy in" (fun () -> ignore (Context.copy ~src:clean ~dst:ctx l.Tensor.value))
+
 let () =
   test_raw_dependency ();
   test_disjoint ();
   test_can_run ();
   test_wrong_order_raises ();
-  test_reexecution ()
+  test_reexecution ();
+  test_rollback_execution ();
+  test_poisoned_lineage ()

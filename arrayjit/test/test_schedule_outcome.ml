@@ -111,6 +111,7 @@ let () =
   | _ -> failwith "expected an unclassified cache-replay assertion");
   let compiler_rejection =
     {
+      phase = Backend_compile;
       cause =
         Backend_rejected
           {
@@ -130,6 +131,36 @@ let () =
     |> expect_classified
   in
   assert (equal_classified_cause classified compiler_rejection);
+  (* A post-link resource rejection (Metal's per-pipeline maxTotalThreadsPerThreadgroup and static
+     threadgroup-memory checks) must be BOTH: an ordinary decline for a tuner candidate, and the
+     unchanged public [Utils.User_error] for a hand-written schedule. Untyped it would be neither —
+     strict classification makes an unrecognized link failure fatal, so one register-heavy candidate
+     would end the search. *)
+  let link_resource =
+    Resource_exceeded
+      {
+        resource = Workgroup_threads;
+        requested = 1_024;
+        limit = Some 640;
+        detail = "Metal: threadgroup size 1024 for k exceeds maxTotalThreadsPerThreadgroup 640";
+      }
+  in
+  let link_declined =
+    protect ~strict:true ~classify_backend:no_backend_classification ~provenance:Candidate
+      ~phase:Transform (fun () ->
+        tag Backend_link (fun () -> raise (Cause_at (Backend_link, link_resource))))
+    |> expect_classified
+  in
+  assert (equal_cause link_declined.cause link_resource);
+  assert (equal_execution_effect link_declined.execution_effect No_device_writes);
+  (* The reported phase is where it was raised, not where [protect] was installed. *)
+  assert (equal_phase link_declined.phase Backend_link);
+  assert (
+    equal_rejection_key (key_of_cause link_declined.cause) (Resource_exceeded_key Workgroup_threads));
+  (match raise_failure (Classified link_declined) with
+  | _ -> failwith "expected the classified cause to be rendered"
+  | exception Utils.User_error msg ->
+      assert (String.is_substring msg ~substring:"maxTotalThreadsPerThreadgroup"));
   Stdlib.Printexc.record_backtrace true;
   let tagged =
     protect ~strict:true ~classify_backend:no_backend_classification ~provenance:Candidate
