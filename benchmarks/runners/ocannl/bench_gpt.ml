@@ -177,7 +177,14 @@ let () =
   in
   let open Operation.At in
   H.measure_and_emit ~st ~backend
-    ~variant:(if tune then "tuned" else if materialize then "materialized" else "default")
+    ~variant:
+      (* Mirror bench_mlp: the precision doubles as the variant for the reduced-precision cells —
+         orchestrate's report renders the variant column, so f32/bf16/f16 rows must be
+         distinguishable there, not only in the precision field. *)
+      (if tune then "tuned"
+       else if materialize then "materialized"
+       else if Option.is_some mp_prec then precision
+       else "default")
     ~precision ~compile_s ~tokens_per_step:(batch_size * seq) ~run_step
     ~read_loss:(fun () -> (ctx, batch_loss).@[0])
     ~sync:(fun () -> Context.sync ctx)
