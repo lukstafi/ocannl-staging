@@ -140,8 +140,12 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   each enclosing serial loop — the site listing says a segment was not proposed, these verdicts say
   which rule rejected it (the extent floor and the `Split_reduce` recognizer's own preconditions are
   indistinguishable from the listing alone). That is what attributed lenet's `bias_conv1.grad`
-  segment; see [report-hip.md](report-hip.md). Compile-time only, off the timing path, so it
-  composes with `BENCH_SEG_TIMES=1` and with `BENCH_MATERIALIZE=1`.
+  segment; see [report-hip.md](report-hip.md). Since gh-ocannl-537 a listed site also names the
+  enabling loop interchange it was reached through (`via N swaps: inner^outer`, absent when the site
+  was splittable as lowered), and a rejection verdict is tagged `[hoistable: …]` when the
+  interchange would remove it — so the listing distinguishes "not reachable" from "reached by
+  composition". Compile-time only, off the timing path, so it composes with `BENCH_SEG_TIMES=1` and
+  with `BENCH_MATERIALIZE=1`.
 - `runners/ocannl/bench_metal_bug.ml` — standalone (no OCANNL) repro of an Apple Metal
   shader-compiler miscompilation: a serial `acc[0] = acc[0] + f(i)` loop over
   slot-table-derived pool pointers keeps only the last iteration's contribution. OCANNL works
