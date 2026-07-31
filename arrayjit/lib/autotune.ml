@@ -920,7 +920,17 @@ let zero_geometry (site : matmul_site) ~(mk_zops : zi:Idx.symbol -> zj:Idx.symbo
   if not site.m_zeroed then []
   else (
     if Array.length (Lazy.force site.m_d.Ir.Tnode.dims) <> 2 then
-      invalid_arg "Autotune sketch: only rank-2 outputs in v1";
+      (* This is a known limitation of the generated sketch, not an arbitrary exception from a
+         user transform. Preserve that distinction at the narrow site so strict candidate failure
+         classification records a decline and continues trying the remaining seeds. *)
+      raise
+        (Outcome.Cause_at
+           ( Outcome.Transform,
+             Outcome.Unsupported
+               {
+                 feature = "autotune_sketch_output_rank";
+                 detail = "Autotune sketch: only rank-2 outputs in v1";
+               } ));
     let ez, zsyms = Sched.expand_zero ~tn:site.m_d in
     let zi, zj =
       match zsyms with [ zi; zj ] -> (zi, zj) | _ -> invalid_arg "Autotune sketch: non-2d zero"
