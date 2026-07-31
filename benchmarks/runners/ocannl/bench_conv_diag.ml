@@ -128,6 +128,8 @@ let () =
            (Ir.Tnode.debug_name s.Autotune.sr_target)
            s.Autotune.sr_red s.Autotune.sr_out
            (if s.Autotune.sr_dynamic then " (scatter)" else "")));
+  (* ...and, for the ones it does not propose, which rule rejected them. *)
+  if H.env_flag "BENCH_SR_SITES" then H.print_split_reduce_verdicts opt;
   let t0 = Unix.gettimeofday () in
   let ctx, routine = Context.compile ctx step_comp bindings in
   let compile_s = Unix.gettimeofday () -. t0 in

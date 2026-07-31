@@ -36,9 +36,11 @@ platform: Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.43 x86_64 |
 > Findings; an earlier revision of this report wrongly called it a PyTorch bug. **tinygrad/HIP is the
 > GPU cross-framework reference that is valid across all six workloads.**
 >
-> Three HIP tuned cells are missing, each for a different reason: `mlp_wide` is in `SKIP_CELLS`
-> (search wedges in the middle-end), `cifar_conv` was killed by a 50-minute watchdog (same wedge),
-> and `gpt2_mini` died on an HSA `scratch_size overflow` abort. See Findings.
+> Three HIP tuned cells are missing, each for a different reason: `mlp_wide` is in `SKIP_CELLS` and
+> `cifar_conv` was killed by a 50-minute watchdog — both for what this report originally called a
+> middle-end wedge and which is in fact an unbounded serial baseline candidate (gh-ocannl-532,
+> diagnosis corrected under Findings) — and `gpt2_mini` died on an HSA `scratch_size overflow`
+> abort. See Findings.
 >
 > `gpt2_mini` has no reduced-precision leg (inference-only, ndarray-backed `Specified` weights need
 > forward-only cast insertion), so the matmul-dominated workload runs f32 in every column — the
@@ -205,6 +207,63 @@ a regression, and how much of the residue is an inherent serial-reduction proble
 subject) will only be clear once gh-527 is fixed and this instrument is re-run. Re-running
 `BENCH_SEG_TIMES=1` on `lenet/hip` is a cheap acceptance check for that fix.
 
+#### Re-run after gh-527 (tree `d71efc99`, same machine, HIP only)
+
+That acceptance check has now been run — gh-527 is fixed, and it was most but not all of the
+segment. Same instrument, same machine, f32, `taskset -c 0-15`:
+
+| workload | seg22 before | after | factor | share before → after | step total before → after |
+|---|---|---|---|---|---|
+| lenet/hip | 350.712 ms | **72.76 ms** | 4.8× | 97.5% → **89.3%** | 359.743 → **81.49 ms** |
+| cifar_stride/hip | 201.416 ms | **50.03 ms** | 4.0× | 93.3% → **78.7%** | 215.778 → **63.56 ms** |
+
+lenet seg22 across three consecutive runs: 73.132 / 72.773 / 72.756 ms (<0.5% spread). The
+seg-times sums cross-validate against independently measured `hip/default` step times to within
+0.25% (lenet 81.49 vs 81.56; cifar_stride 63.56 vs 63.72), so the instrument and the benchmark
+agree.
+
+**The decomposition the section above asked for**: of lenet's 350.7 ms, roughly **278 ms was
+gh-527** and **~73 ms is the inherent serial reduction** — gh-ocannl-484's actual subject. It is
+still the single dominant cost of the default-placement step at 89%, and every other segment in
+the graph is ≤ 3.6 ms. The claim that this is "the single highest-value target in the GPU
+pipeline" survives the correction, at a quarter of the previously quoted magnitude.
+
+Two caveats on the before/after columns: the "before" numbers were recorded at `bd075cd5` on the
+same machine but the tree has since also crossed gh-ocannl-521, and the `cifar_conv` row was not
+re-run. Materialized cells barely moved (`cifar_stride` 21.305 → 21.064, `lenet` 7.165 → 6.603),
+which is the expected control — gh-527's regression lived in the recompute path only.
+
+#### gh-ocannl-484 task 3 does not reach this segment
+
+Task 3 (autotune seeds `Split_reduce`) landed before this re-run, so the residue above is measured
+*with* it. It has no effect here, for a structural reason. `BENCH_SR_SITES=1` (added in this
+branch) prints the `op_legality` verdict per candidate axis:
+
+```
+w:bias_conv1.grad(6) loops[i527=64s,i528=28s,i529=28s,i530=6s]
+    axis i527 extent 64 -> illegal: the accumulation cell mentions i530, which is not bound
+                                    by a loop enclosing the reduction loop in this statement
+    axis i528 extent 28 -> illegal: (same)
+    axis i529 extent 28 -> illegal: (same)
+    axis i530 extent 6  -> illegal: the accumulation cell mentions the reduction loop i530
+                                    — not a reduction over it
+```
+
+All four axes are rejected, so the `sr_red_min = 64` extent floor is not even the operative
+filter. The same verdict hits `kernel_conv1.grad`, `bias_conv2.grad`, `b_fc1.grad`, `b_fc2.grad`,
+`w_logits.grad` and `b_logits.grad` — every parameter-gradient accumulation in the network. Only
+two sites in the whole lenet graph seed at all (`cross_entropy` out=1, `n105` red=84/out=640).
+
+`Split_reduce` v1 requires every accumulation-cell symbol to be bound by a loop *enclosing* the
+reduction loop; OCANNL lowers a conv bias gradient with the output-channel loop **innermost** and
+the reduction loops (batch, y, x) outside it — the exact inverse. End to end, on the cells that
+complete: `mlp_small` tuned 0.333 ms vs materialized 0.322 (no win, split places 4th in the
+search); `lenet` tuned 6.622 ms vs materialized 6.603 (no win — a split candidate does take **arm
+B**, the materialize-all arm, by 2.9% in-search at 6.2109 ms vs the best preset's 6.3941, but on
+site `n105`, not this segment, and the margin does not survive replay). The arm matters to the
+conclusion: arm A keeps the virtual graph and its untouched ~73 ms serial segment, and its best
+candidate is 80.6267 ms — so what removes the bottleneck is materialization, not the split.
+
 ### The torch GPU cells produced garbage during this run — cause unresolved, and NOT reproducible
 
 **Read this section as a caveat on the run, not as a finding about PyTorch.** An earlier revision of
@@ -264,14 +323,38 @@ gfx1151 kernels at all. A plausible prior is not evidence, and the non-reproduct
 
 ### Two new HIP tuning bugs
 
-- **Middle-end wedge in the tuned search** (`mlp_wide`, `cifar_conv`) — gh-ocannl-532. The search hangs before its
-  first candidate: constant ~3-thread CPU spin, **zero** `autotune_log` lines after `arm A search:`,
-  and with `output_debug_files_in_build_directory=true` **zero** debug artifacts written — so it never
-  reaches rendering or hiprtc, even for the serial baseline. Reproduced 3× (>65 min, >8 min bounded,
-  and the 50-min watchdog kill). `mlp_small` hip/tuned completes in ~40 s; `mlp_wide` hip/default is
-  fine (2.3 ms/step); `mlp_wide` cc/tuned searches normally. The native-Windows report has
-  `mlp_wide hip/tuned` completing at `8436e362` (compile_s 111.78 s), so this is either a regression
-  since the gh-502 seeding wave or WSL-specific. Not bisected.
+- **~~Middle-end wedge~~ Unbounded serial baseline candidate in the tuned search** (`mlp_wide`,
+  `cifar_conv`, `cifar_stride`) — gh-ocannl-532. **This bullet's original diagnosis was wrong and is
+  corrected here.** The observed symptom is right — constant ~3-thread CPU spin, zero `autotune_log`
+  lines after `arm A search:` — but it is not in the middle end, and two of the stated evidence
+  claims do not hold. `perf record` over the spinning process (11,890 samples) is **100%
+  `libhsa-runtime64`** — 66.6% `rocr::core::Runtime::AsyncEventsLoop`, 33.4%
+  `rocr::core::BusyWaitSignal::WaitRelaxed` — with **zero OCaml frames**, identical when re-sampled
+  85 minutes later. And "zero debug artifacts" is false: 12 artifacts including a linked `.hsaco`
+  are written within 3 s; what is zero is artifacts written *after* the search banner.
+
+  The mechanism is the serial baseline candidate that `Autotune.tune` times before any other
+  (`time_routine`, autotune.ml). The dispatched kernel contains **no `threadIdx`/`blockIdx`
+  reference at all** — every loop is a plain serial `for`, e.g. `for(i102<=255) for(i103<=1023)
+  for(i104<=1023)` = 268 M iterations — so the whole training step runs in one work-item, and it
+  runs **four** times (an untimed warmup plus `autotune_repeats=3`). The affected/unaffected split
+  is simply a per-step-compute ranking: `mlp_small` (~1.7 MFLOP) completes in 40 s, `lenet`
+  (~30 MFLOP) completes, `mlp_wide` (~2 GFLOP) and `cifar_conv` do not. A clean re-run at
+  `8436e362` was capped at 2 h with no `baseline:` line.
+
+  So WSL-vs-Windows was never the right axis, and the native-Windows 111.78 s figure is more likely
+  a search against a warm `autotune_cache` (which the README warns must be wiped for `compile_s` to
+  mean anything) than an environment difference. **The bisect this bullet asked for would have
+  chased nothing.**
+
+  Severity is higher than "slow search": these are multi-hour uninterruptible dispatches on the
+  same device that drives the display. Over one session they produced two Windows-side
+  driver-timeout reports, a transient GPU fault that made a <2-minute job hang for 30 minutes, a
+  silent death of `cifar_stride hip/tuned` at ~11.5 min, and finally loss of display output
+  requiring a reboot — none of it visible in the WSL guest's `dmesg`, which stayed clean of GPU
+  faults throughout. Bounding the baseline candidate by predicted cost (the roofline model already
+  prices it), or seeding it from a cheap parallel preset instead of the unscheduled form, is a
+  stability fix and not only a performance one.
 - **HSA scratch abort escapes as a fatal error** (`gpt2_mini` hip/tuned) — gh-ocannl-533. A candidate requests
   `private_seg_size=163856` per work-item; the runtime aborts the queue with
   `[UpdateScratch] scratch_size overflow!` / `HSA_STATUS_ERROR_INVALID_ARGUMENT` on kernel
@@ -330,5 +413,16 @@ comparison here.
   which is the *sole* blocker for this column since HIP has no tf32 escape hatch.
 - `SKIP_CELLS` audit: the stale `cifar_conv metal/tuned` entry was not re-tested here (no Metal
   hardware); the new `mlp_wide hip/tuned` entry is freshly justified above.
-- The middle-end wedge is unbisected; a `git bisect` against `8436e362` on native Windows vs WSL
-  would separate "regression" from "WSL-specific".
+- ~~The middle-end wedge is unbisected; a `git bisect` against `8436e362` on native Windows vs WSL
+  would separate "regression" from "WSL-specific".~~ **Resolved, and the premise was wrong** — see
+  the corrected gh-ocannl-532 bullet above. There is no wedge and no regression to bisect; the
+  serial baseline candidate is unbounded in cost. Do not spend a bisect on this.
+- Whether the same unbounded-baseline signature appears on the CUDA and Metal legs has not been
+  checked. `time_routine` times the serial baseline on every backend, so any workload heavy enough
+  should show it; a tuned cell that "hangs" where the untuned one is fine is the tell.
+- `cifar_stride hip/tuned` has no step-time number (three attempts: silent, then a silent death at
+  ~11.5 min, then stopped deliberately). The cause is confirmed, not assumed: a perf sample 45 s
+  into a fourth attempt — by which point a Windows driver-timeout notification had already fired —
+  is 66.63% `AsyncEventsLoop` / 33.35% `BusyWaitSignal::WaitRelaxed` with **zero OCaml frames**,
+  matching `mlp_wide` to two decimal places. Same unbounded serial baseline (gh-ocannl-532), so
+  this is a third affected workload rather than a separate defect.
