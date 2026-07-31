@@ -97,41 +97,91 @@ The issue's `Valid | Declined of reason | Fatal` is right about the shape and on
 
 1. **Attribution** — *this schedule cannot be built or run here* versus *this process is in
    trouble*. Decides whether the search may continue at all.
-2. **Damage** — what state the failure destroyed: nothing (a compile-time refusal), the
-   stream/queue, or the device context. Decides what must be rebuilt before the search *can*
+2. **Damage** — what state the failure may have destroyed: candidate-visible buffers, the
+   stream/queue, or the device context. Decides what must be restored before the search *can*
    continue.
 
 #533 is attribution=candidate, damage≠nothing, which is exactly the cell no amount of widening or
 narrowing a catch addresses.
 
-**Damage is measured, not declared.** The note's earlier form had the classifier report a `damage`
-field, which no classifier can honestly fill: the exception that surfaces from
+**Runner damage is measured; memory effects are conservative.** The note's earlier form had the
+classifier report a single `damage` field, which no classifier can honestly fill: the exception
+that surfaces from
 `H.Stream.synchronize` is `HIP_ERROR_INVALID_VALUE`, indistinguishable from a dozen benign launch
-errors, and the queue's state is not in it. Replace the declared field with a probe:
+errors, and the queue's state is not in it. Replace the declared field with a state-transition hook:
 
 ```ocaml
-val device_health : device -> [ `Healthy | `Recovered | `Lost ]
+type recovery =
+  | Healthy
+  | Recovered
+  | Lost of exn * Printexc.raw_backtrace
+
+val recover_after_launch_failure : device -> recovery
 ```
 
-which the search calls after any non-`Valid` outcome at the launch phase. A backend implements it
-as "run a trivial no-op routine and synchronize; on failure, try re-creating `device.runner`; on
-failure again, `Lost`". That answers the question the exception cannot, costs one launch per
-failure (rare by construction), and needs no per-driver error-code table.
+This is deliberately not a read-only `device_health` query. A backend implements it as "run a
+trivial no-op and synchronize; if that fails, retire the runner, create a new one, run the no-op
+again; if that also fails, mark the device lost". Returning `Recovered` commits to a usable state,
+not merely to having allocated a new stream. The no-op is a backend-owned, allocation-free driver
+probe (compiled/lazily cached independently of the candidate), so the hook needs only `device` and
+does not depend on a possibly damaged candidate routine or OCANNL buffer state.
 
-**The probe answers the damage question and only the damage question.** `Recovered` establishes
-that the state was rebuildable; it says nothing about whose fault the failure was, and the two axes
-must not be allowed to leak into each other here of all places. So `device_health` never upgrades a
-verdict: a `Fatal` from rule 3's launch arm stays `Fatal` whatever the probe reports, and the probe
-only decides whether an already-`Rejected` outcome (one rule 2 attributed) may continue on this
-device or must escalate for lack of a device to continue on. Letting `Recovered` turn an
-unattributed launch failure into a decline would reintroduce exactly the silent degradation the
-whole design exists to remove — and would be indistinguishable, from the report's point of view,
-from today's blanket `RUN FAILED`.
+That commitment requires one explicit backend-interface change. `device.runner` is immutable today
+(`backend_intf.ml:179`), while the device record also owns event tables whose values belong to that
+runner. Recovery therefore mutates the shared device in place: make `runner` mutable, replace it
+only after the new runner passes the probe, and clear `updating_for` plus
+`updating_for_merge_buffer`. Buffers, pool ids, and constant caches survive because they are
+device/context resources, not stream resources. All `Context.t` descendants refer to the same
+device record, so subsequent candidate compiles and already-linked task closures observe the new
+runner without rebuilding the scratch lineage. If a backend cannot make those guarantees, it
+returns `Lost`; manufacturing a fresh device record would strand the existing pool table under a
+new `device_id` and is not recovery.
 
-Re-creating the runner is a plausible `Recovered` on CUDA — `Cu.Stream.create` is called exactly
-once in the tree (cuda_backend.ml:331, one compute stream per device), so the handle has one owner.
-Whether an HSA-aborted HIP queue survives it is an empirical question for the HIP machine, and the
-probe is how we find out rather than something to assume.
+The old runner must be destroyed or safely retired after all driver calls against it are finished.
+The implementation must also specify what happens to driver-managed delimited events; merely
+clearing OCANNL's maps while their callbacks can still fire is not enough.
+
+**The recovery hook answers runner health and only runner health.** `Recovered` establishes that the
+runner was rebuildable; it says nothing about whose fault the failure was or whether buffers were
+written, and the axes must not leak into each other. A `Fatal` launch outcome stays `Fatal` whatever
+recovery reports. The hook is still invoked best-effort before re-raising a `Fatal`, so a caller that
+catches it cannot unknowingly reuse a poisoned device, but a failure in the hook never masks the
+original exception and backtrace.
+
+Runner recovery does **not** prove that candidate-visible buffers are intact. A failure reported
+from `sync` may follow partial kernel execution; a no-op cannot detect or undo those writes.
+Therefore every classified launch/sync rejection also carries a conservative execution effect:
+
+```ocaml
+type execution_effect = No_device_writes | Writes_may_have_occurred
+```
+
+Compile/link rejections and a backend-proven synchronous pre-dispatch launch rejection use
+`No_device_writes`. An asynchronous failure defaults to `Writes_may_have_occurred`. With the current
+`timing_ctx : Context.t` API there is no factory/checkpoint from which to restore a damaged scratch
+lineage, so `Writes_may_have_occurred` is fatal even when the runner returns `Healthy` or
+`Recovered`. A future `timing_ctx_factory` could relax that rule by rebuilding inputs and parameters,
+but silently continuing on possibly modified data is out of scope. For a `Classified
+{ execution_effect = No_device_writes; _ }` candidate failure, `Healthy` or `Recovered` lets the
+search continue and `Lost` escalates to "candidate rejected, device lost during recovery".
+
+Letting `Recovered` turn an unattributed launch failure—or a possibly-writing one—into a decline
+would reintroduce exactly the silent degradation the design exists to remove.
+
+Runner recovery is also not execution-ledger recovery. `Context.run` marks a routine executed before
+the later `Context.sync` can report an asynchronous failure (context.ml:256-259). Extend the shared
+`execution_ledger` with a poisoned marker for launch/sync failures. A classified
+`No_device_writes` failure rolls back that candidate routine id and discards the returned candidate
+context before continuing. A fatal or possibly-writing failure poisons the lineage before it
+unwinds, so a caller that catches the exception cannot reuse a ledger that claims the failed routine
+completed. When `timing_ctx` is a separate scratch lineage this poison stays there; the target
+context remains usable. Context entrypoints check the marker and raise the stored contextual failure
+until a future explicit restore API says otherwise.
+
+Re-creating the runner is plausible on CUDA — `Cu.Stream.create` is called exactly once in the tree
+(cuda_backend.ml:331, one compute stream per device) — but the record/event changes above make it
+real work rather than a one-line probe. Whether an HSA-aborted HIP queue and its surrounding primary
+context survive runner replacement is an empirical question for the HIP machine.
 
 ## Provenance: the verdict is not a property of the failure
 
@@ -146,8 +196,8 @@ This rules out the tempting design where the exception constructor carries the v
 the *caller* supplies the policy:
 
 - the candidate loop: rejection ⇒ decline, continue;
-- cache replay: any failure ⇒ discard the entry, re-search (the entry is untrusted persisted data,
-  possibly from another machine or an older tree);
+- cache replay: any non-catastrophic failure ⇒ discard the entry, re-search (the entry is untrusted
+  persisted data, possibly from another machine or an older tree);
 - `model_default` (documented advisory): rejection ⇒ fall back to the default pipeline;
 - a user's own `lowered_transform`: rejection ⇒ raise, reason rendered — today's behaviour,
   unchanged, better worded.
@@ -166,33 +216,79 @@ Two thirds of this vocabulary already exist, one layer down and one layer up:
   (c_syntax.ml:41) with its census is the *rendering-level* outcome record; declines below it are
   log-only strings (`declinef`, c_syntax.ml:845).
 
-What is missing is the boundary in between. Proposed:
+What is missing is the boundary in between. The vocabulary separates a typed *cause* from the
+caller's verdict:
 
 ```ocaml
 (* arrayjit/lib/schedule_outcome.ml — depends on Base only; below Backend_intf and Schedule. *)
+
+type phase =
+  | Transform
+  | Hardware_limits
+  | Backend_codegen
+  | Backend_compile
+  | Backend_link
+  | Launch
+  | Sync
 
 type resource =
   | Workgroup_threads
   | Workgroup_memory        (* threadgroup / __shared__ *)
   | Thread_scratch          (* private segment, local memory, spills — #533 *)
 
-type rejection =
+type severity = Expected | Compiler_bug
+type execution_effect = No_device_writes | Writes_may_have_occurred
+
+type cause =
   | Illegal_schedule of { check : string; detail : string }
       (* op preconditions in [Schedule.apply]; [Low_level.validate_parallel]. *)
   | Unsupported of { feature : string; detail : string }
       (* no mma for this precision/extent/arch; thread-space operands. *)
   | Resource_exceeded of {
       resource : resource; requested : int; limit : int option; detail : string }
-  | Backend_rejected of { stage : string; detail : string }
-      (* nvrtc / hiprtc / MSL / cc compiler diagnostics. Always also a bug report on cc. *)
-  | Unclassified of string  (* migration bucket; see the ratchet below. *)
+  | Backend_rejected of {
+      backend : string; stage : string; severity : severity; detail : string }
+      (* nvrtc / hiprtc / MSL / cc compiler diagnostics. [cc] uses [Compiler_bug]. *)
+  | Unclassified of {
+      phase : phase; exn_constructor : string; detail : string }
+      (* Temporary migration bucket; fatal in strict mode. *)
 
-type outcome = Valid | Rejected of rejection | Fatal of exn
+type rejection_key =
+  | Illegal_schedule_key of string             (* [check] *)
+  | Unsupported_key of string                  (* [feature] *)
+  | Resource_exceeded_key of resource
+  | Backend_rejected_key of string * string * severity  (* backend, stage, severity *)
+  | Unclassified_key of phase * string         (* exception constructor, not its message *)
+
+val key_of_cause : cause -> rejection_key
+
+type fatal = {
+  exn : exn;
+  backtrace : Printexc.raw_backtrace;
+  phase : phase;
+  candidate : string option;
+}
+
+type classified_cause = { cause : cause; execution_effect : execution_effect }
+type failure = Classified of classified_cause | Fatal of fatal
+type 'a outcome = ('a, failure) Result.t
+
+(* Internal transport only; never escapes the public Context/Schedule APIs. *)
+exception Cause_at of phase * cause
+exception Raised_at of phase * exn * Printexc.raw_backtrace
 ```
 
-`rejection` is deliberately coarse: it is a *census key*, not a diagnosis. The free-text `detail`
-keeps the message that exists today, so no diagnostic power is lost while the taxonomy stays small
-enough that #521's blocker table becomes a fold over the report.
+`cause` is deliberately coarse, but it is not itself the census key. `detail`, `requested`, and
+`limit` retain the diagnostic evidence and are expected to vary between candidates;
+`key_of_cause` drops those fields so #521's blocker table is a stable fold. The report keeps a
+bounded sample of details per key. Keys are sorted by the derived constructor order before they
+leave `Autotune`, so logs, JSON, and `.expected` files are deterministic. `Unclassified` obtains
+`exn_constructor` from `Printexc.exn_slot_name`, not by parsing `Exn.to_string`.
+
+`Fatal` stores the raw backtrace at the catch site. Re-raising later uses
+`Printexc.raise_with_backtrace`; `raise fatal.exn` would replace the evidence this design is meant
+to preserve. Candidate and phase context are data rather than a preceding log line, so a fatal
+result can name the candidate even when logging is disabled.
 
 Two variants from the earlier draft are deliberately absent. `Registers` has no reporting site
 anywhere. `Grid_private_bytes` — the cc pool-worker stack cap — looked like a resource rejection
@@ -205,47 +301,117 @@ Also out of scope, and worth naming so they are not swept in: the internal bail-
 (`exception Bail`, `Opaque_stmt`, `Unfissionable` in schedule.ml, `Fail` in affine.ml) are analyses
 declining inside a phase, never crossing a boundary. They stay local.
 
-## Policy: classify at the phase boundary, not at the raise site
+## Policy: preserve the cause at the narrow seam; decide at the caller boundary
 
-The phase fixes the meaning of anything that escapes it, which is what makes the change small.
-Three rules, applied in order:
+Provenance determines the verdict, but a broad compile catch arrives too late to recover the cause.
+`Backends.compile` currently invokes the user/candidate transform, `check_hardware_limits`, and the
+backend compiler at distinct sites (backends.ml:620-627 and :701-715). Preserve causes before those
+operations merge:
 
-1. **Fatal deny-list, unconditional.** `Out_of_memory`, `Stack_overflow`, `Sys.Break`,
+- add internal typed wrappers for `Schedule.apply` and `Low_level.validate_parallel`; they catch an
+  `Invalid_argument` from inside the operation and raise/return `Illegal_schedule`. Autotune's
+  generated transforms use those wrappers. Do **not** classify an arbitrary `Invalid_argument`
+  escaping the whole user-supplied transform as a schedule decline — in strict mode it remains an
+  unclassified fatal. The generic transform call only tags such an exception as
+  `Raised_at (Transform, ...)`;
+- make `Schedule.check_hardware_limits` raise/return a typed `Resource_exceeded` while it still has
+  `requested`, `limit`, and `resource` in hand, then render the same `Utils.User_error` at a public
+  hand-schedule boundary;
+- translate backend compiler and linker diagnostics inside the backend call that knows its stage.
+
+This does not rewrite 108 schedule preconditions. It adds typed entrypoints around the schedule
+operation/validation functions, changes the two hardware-limit raises, teaches Autotune's transform
+closures to use the typed entrypoints, and adds backend-local translations. `Cause_at` preserves a
+known cause and `Raised_at` preserves only phase, exception, and raw backtrace; neither carries the
+verdict. The caller still supplies that.
+
+The common catcher has an explicit signature. The backend classifier is a parameter rather than a
+global lookup: `schedule_outcome.ml` is below `Backend_intf`, so having it dispatch back upward
+would introduce a dependency cycle.
+
+```ocaml
+type provenance = Candidate | Cache_replay | Advisory | User_schedule
+
+val protect :
+  classify_backend:(phase -> exn -> classified_cause option) ->
+  provenance:provenance ->
+  phase:phase ->
+  ?candidate:string ->
+  (unit -> 'a) ->
+  'a outcome
+```
+
+Rules are applied in order:
+
+1. **Fatal deny-list, except untrusted cache replay.** `Out_of_memory`, `Stack_overflow`, `Sys.Break`,
    `Assert_failure`. Host exhaustion, user interrupt, and "the compiler is confused" are never a
    candidate's fault, at any boundary. This is the part of the change that *removes* containment
-   rather than adding it. (`Utils.User_error` deliberately does **not** join the list: as above, it
-   is what the hardware-limit declines are made of.)
+   rather than adding it. `Utils.User_error` deliberately does **not** join the deny-list, but it is
+   no longer treated as a rejection merely by constructor: the hardware-limit sites now preserve a
+   typed cause, while an unrelated raw `User_error` is unclassified and therefore fatal in strict
+   mode.
    *Exception, and it is not cosmetic:* cache replay (autotune.ml:3325) opts out of the deny-list
    for everything except `Out_of_memory` and `Sys.Break`. A cache entry is untrusted data; an
    `Assert_failure` while replaying one means the entry is incompatible with this tree, not that
    the compiler is confused, and the correct response is to discard it and re-search.
-2. **Backend override.** A new `Backend_intf` hook, `classify_failure : exn -> outcome option`,
-   lets a backend recognize its own driver errors; `None` means "not mine". `backend_intf.ml` has no
-   failure vocabulary at all today, so this is genuinely new surface: it belongs in
+2. **Typed cause, then backend translation.** A cause preserved at a narrow seam is used directly.
+   Otherwise a new `Backend_intf` hook,
+   `classify_failure : phase -> exn -> classified_cause option`, lets a backend recognize its own
+   driver
+   errors; `None` means "not mine". Passing the phase matters because the same driver error can mean
+   a compiler refusal at link and an asynchronous program failure at sync, and it lets the backend
+   conservatively distinguish a pre-dispatch refusal from a possibly-writing asynchronous failure.
+   Returning `classified_cause option` also prevents the nonsensical `Valid`-from-an-exception result
+   allowed by the earlier
+   `exn -> outcome option` shape. The hook belongs in
    `Backend_device_common` (backend_intf.ml:269), which `Backend` includes, and every implementor
    must supply it — the four real backends, `backend_impl.ml`'s functors, and the `*_missing.ml`
    stubs, with `backends.ml`/`context.ml` doing the first-class-module dispatch. Budget for that
-   breadth; the default (`fun _ -> None`) keeps each one a one-liner until it has something to say.
+   breadth; the default (`fun _phase _exn -> None`) keeps each one a one-liner until it has something
+   to say.
 3. **Phase default.**
-   - `Schedule.apply` / `check_hardware_limits` → `Rejected` (`Illegal_schedule`,
-     `Resource_exceeded`). The boundary knows these are op preconditions even though the 108 raise
-     sites do not.
-   - backend codegen, compile **and link** → `Rejected`. This covers `validate_parallel` (inside
-     codegen, past the transform seam — the geometry #519 was about), the backend compilers, and
-     Metal's post-link threadgroup check at metal_backend.ml:1243-1253, which is where the analogous
-     scratch check below will live. `Context.compile` calls `Backend.compile` then `Backend.link`
-     (context.ml:111-130); both are one phase for this purpose.
+   - a typed schedule, resource, unsupported-feature, or backend-compiler cause under
+     any provenance → `Classified` with `No_device_writes`. The consumer policy then differs:
+     candidates decline, cache entries are discarded, advisory picks fall back, and user schedules
+     raise the rendered cause;
+   - an *unclassified* transform/codegen/compile/link exception → `Fatal` in strict mode. A base
+     compile succeeding does not prove a later disk-full error, compiler crash, context loss, or
+     internal `Failure` is candidate-specific.
    - launch / sync (`Context.run`, `Context.sync`) → **`Fatal`**. A run failure is normally the
      program's bug (uninitialized inputs — the property `tune` already documents for its uncaught
-     baseline timing, autotune.ml:3338), and rule 2 is the only way a launch failure becomes
-     attributable.
+     baseline timing, autotune.ml:3338), and only a typed/backend-recognized cause makes a launch
+     failure `Classified`.
 
-Rule 3's compile arm is safe for a reason already load-bearing in the architecture: `tune`'s *base*
-compile is uncaught (autotune.ml:3253). A compile failure the computation has regardless of
-schedule — a genuine user error such as the pool-capacity one — surfaces there, before any
-candidate is proposed. What remains, by construction, is failures only some candidates have.
+`Cache_replay` is the one provenance override: a typed failure or an `Assert_failure` /
+`Stack_overflow` produced while applying persisted schedule data discards the entry and re-searches.
+`Out_of_memory` and `Sys.Break` still propagate. Replay must thread `Cache_replay` through the whole
+reconstruction/compile path rather than first classifying the failure as an ordinary live candidate.
 
-**Two behavioural tightenings, not one.** Rule 1 is the first. Rule 3's launch arm is the second:
+Causes must not leak through the public API as a new exception contract. Add an internal
+outcome-returning path:
+
+```ocaml
+val compile_outcome :
+  provenance:provenance ->
+  ?candidate:string ->
+  ... ->
+  t ->
+  Assignments.comp ->
+  Indexing.unit_bindings ->
+  (t * routine) outcome
+```
+
+It performs backend dispatch, passes `Backend.classify_failure` to `protect`, and uses the
+`Cause_at` / `Raised_at` tags installed around the existing backend pipeline calls to keep
+transform, hardware-limit, compile, and link phases distinct. Existing `Context.compile` is the
+`provenance:User_schedule` wrapper: it returns the valid value or renders a typed cause back into the
+same `Invalid_argument` / `Utils.User_error` shape users see today, and re-raises fatal exceptions
+with their stored backtraces. `Autotune` uses `compile_outcome` directly. The analogous internal
+launch/sync wrappers take a `Context.t`, obtain the backend classifier through the same dispatch,
+and return typed outcomes; the public `Context.run` / `Context.sync` contracts remain raising APIs.
+
+**Three behavioural tightenings.** Rule 1 is the first. Unclassified compile failures becoming
+fatal by default is the second. Rule 3's launch arm is the third:
 `try_spec`'s blanket `RUN FAILED` catch becomes "decline only what the backend claims, else fatal".
 That is deliberate — a candidate that produces garbage should not be quietly scored — and it is the
 arm #533 populates.
@@ -256,93 +422,162 @@ Worth stating plainly, because the earlier draft let the reader assume otherwise
 launch/sync failure is `Fatal` unless HIP's `classify_failure` attributes it, and what HIP delivers
 at that point is `HIP_ERROR_INVALID_VALUE` out of `synchronize` — the same code an uninitialized
 input yields. There is no signal to classify on. So after this design lands, #533's abort is still
-fatal; what changes is that it is *attributed*: the crash names the candidate and its rejection
-reason instead of surfacing as a bare `hip_stream_synchronize` backtrace. That is a real
+fatal; what changes is that it is *contextualized*: the crash names the candidate, phase, original
+exception, and preserved backtrace instead of surfacing as a bare `hip_stream_synchronize`
+backtrace. It has no rejection reason because it was not classified as a rejection. That is a real
 improvement over today and it is not containment.
 
-Containment of #533 therefore comes from prediction, not from the probe. `device_health` only
-supplies the device to continue *on* once something else has established that the candidate was at
-fault; on its own it cannot make an unattributed HIP abort a decline, for the reason given above.
+Containment of #533 therefore comes from prediction, not from recovery.
+`recover_after_launch_failure` only supplies the device to continue *on* once something else has
+established that the candidate was at fault; on its own it cannot make an unattributed HIP abort a
+decline, for the reason given above.
 Attribution at launch has exactly two possible sources: a HIP `classify_failure` that finds a
 narrower signal than `HIP_ERROR_INVALID_VALUE` — worth one look at whether the runtime exposes the
 aborted-queue status distinctly, but do not plan on it — or moving the failure to compile time,
-where the phase already supplies attribution for free. The precedent for the latter
-exists: Metal already re-checks the workgroup size against the compiled pipeline state at link time
-(metal_backend.ml:1243-1253) on top of the pre-compile check. The analogue:
+where a post-link validator can supply a typed resource cause before any state is damaged. The
+precedent for the latter exists: Metal already re-checks the workgroup size against the compiled
+pipeline state at link time (metal_backend.ml:1243-1253) on top of the pre-compile check.
 
-- add `max_thread_scratch_bytes : int option` to `Backend_intf.hardware_limits` (backend_intf.ml:58),
-  same `None = no limit` convention as its siblings;
-- at link, query the compiled kernel's static scratch usage (`cuFuncGetAttribute` local-size bytes,
-  the HIP equivalent) and raise on the same footing as the threads-per-workgroup check, so rule 3's
-  compile arm turns it into `Resource_exceeded Thread_scratch` with damage nothing.
+Do **not** add the earlier draft's generic `max_thread_scratch_bytes` field yet. CUDA exposes a
+function's per-thread local-memory use, but no directly corresponding `CU_DEVICE_ATTRIBUTE` is a
+portable maximum for that value. HIP exposes `localSizeBytes`, a per-thread stack limit, and on
+newer ROCm/hardware a device scratch-allocation threshold; those are related but not interchangeable.
+The `private_seg_size=163856` in #533 must first be matched experimentally to the limit that rejected
+it.
 
-If the OCaml bindings do not expose those queries, extending the bindings is the work. This is the
-design's centre of gravity: **turn failures whose damage exceeds nothing into failures that happen
-before launch.** It is also separable, and should probably land first — it fixes #533 on its own,
-whereas the classification without it only improves the message.
+The implementation seam is instead a backend-private post-link validator, run after obtaining the
+compiled function/pipeline and before returning a routine:
+
+```ocaml
+(* Conceptual; the concrete function/kernel handle stays backend-private. *)
+val validate_linked_kernel : device -> linked_kernel -> (unit, cause) Result.t
+```
+
+For HIP, extend hipjit as needed to expose the compiled function attributes and the relevant runtime
+limit. If the #533 experiment establishes that `private_seg_size` is bounded by the per-thread
+stack limit, compare those values. If it is the newer device scratch threshold, validate with its
+actual total/per-dispatch semantics instead of pretending it is per-thread. CUDA may query local
+size for diagnostics, but rejects only against an API-supported launchability condition. The
+backend returns `Resource_exceeded Thread_scratch` with requested and limit populated whenever it
+can prove the launch would fail; absence of such a proof is not a made-up `None` hardware limit.
+
+If the OCaml bindings do not expose those queries, extending the bindings is the work. This remains
+the design's centre of gravity: **turn failures whose damage exceeds nothing into failures that
+happen before launch.** It is separable and should land as soon as the HIP experiment identifies
+the right quantity; classification without it only improves the message.
 
 Two notes on how far the precedent actually reaches. Metal's link-time check is the *only* pipeline
 query the backend makes: shared memory is checked device-wide and ahead of time, from
 `limits.max_workgroup_memory_bytes` (metal_backend.ml:347) inside `check_hardware_limits`, against
 the schedule's declared usage rather than the compiled kernel's. The binding for the per-kernel
-answer already exists and is simply unused (`Metal.ComputePipelineState.get_static_threadgroup_memory_length`),
-so the same post-link pattern closes a second gap for free. And on this machine cudajit is not
-installed — `cuda_backend_impl.missing.ml` is selected — so the CUDA arm of both the query and
-`classify_failure` can be written but not exercised here; it needs a session on CUDA hardware, as
-the HIP arm needs one on minix.
+answer already exists and is simply unused
+(`Metal.ComputePipelineState.get_static_threadgroup_memory_length`), so a separate small patch can
+cross-check codegen's accounting. Do not couple that cleanup to #533's acceptance criteria. And on
+this machine cudajit is not installed — `cuda_backend_impl.missing.ml` is selected — so the CUDA
+arm of both the query and `classify_failure` can be written but not exercised here; it needs a
+session on CUDA hardware, as the HIP arm needs one on minix.
 
 ## Fatal must still emit the report
 
 The issue's complaint is that uncontained failures *delete measurements*. A `Fatal` that unwinds
 out of `tune` today takes the whole report with it, including the candidates that did time
-successfully. Since `report` is already an optional callback (autotune.ml:3277), the fix is one
-`Exn.protect`: emit the partial report — timed count, decline census, best-so-far — before
-re-raising. A run that dies at candidate 40 of 60 should still tell you what the first 39 found.
+successfully. Once the baseline has completed, initialize best-so-far to that baseline and keep the
+report state live around the candidate search. On a fatal candidate, build and emit a partial report
+before re-raising with `Printexc.raise_with_backtrace`.
+
+This is not quite "one `Exn.protect`": the callback is user code and can itself raise. The report
+callback is invoked at most once. If it raises while handling an existing fatal candidate, log the
+callback failure and re-raise the original fatal/backtrace; otherwise its exception propagates
+normally. Base compile or baseline timing failures emit no autotune report because no candidate
+measurements exist yet.
+
+The report gains:
+
+```ocaml
+type decline_summary = {
+  key : rejection_key;
+  count : int;
+  sample_details : string list;  (* bounded, e.g. first three distinct details *)
+}
+
+type terminal_failure = {
+  phase : phase;
+  candidate : string option;
+  detail : string;
+}
+
+(* Added fields. *)
+partial : bool;
+declines : decline_summary list;
+terminal_failure : terminal_failure option;
+```
+
+For a completed non-cache search, `partial = false`, `terminal_failure = None`, and
+`candidates_failed = sum declines.count`. For a fatal partial report, the terminal failure is not a
+decline and is therefore not included in `candidates_failed`. If an already-classified rejection
+escalates because recovery is `Lost` or writes may have occurred, count its cause once in
+`declines` and record the escalation separately as `terminal_failure`. A cache hit has an empty
+decline list; a stale cache entry discarded before a fresh search is logged separately and does not
+pretend to be a proposed live candidate.
 
 ## What the sites become
 
-- **`compile_candidate`** (autotune.ml:2719): `with exn -> Error (Exn.to_string exn)` becomes
-  `contain ~phase:Compile`, returning `(compiled, rejection) Result.t` — the lossy collapse to one
-  string is where the census data is thrown away today. Behaviour otherwise unchanged, except that
-  deny-list exceptions now propagate.
-- **`try_spec`'s timing arm** (autotune.ml:3406): `contain ~phase:Launch`. On a `Rejected` outcome,
-  `device_health` before the next candidate decides whether the search has a device left; on a
-  `Fatal` one it propagates regardless of what the probe would have said.
-- **Cache replay** (autotune.ml:3325): `contain ~phase:Compile ~untrusted:true`, i.e. rule 1's
-  narrowed deny-list; behaviour unchanged, policy now explicit.
+- **`compile_candidate`** (autotune.ml:2719): replace the outer string catch with
+  a provenance parameter and `Context.compile_outcome`, retaining the cause produced by the narrow
+  transform, hardware-limit, compiler, or linker seam. Live candidates pass `Candidate`; replay
+  passes `Cache_replay`. It returns a typed `'compiled outcome`; no site reparses `Exn.to_string`.
+- **`try_spec`'s timing arm** (autotune.ml:3406): protect launch and sync separately so the report
+  names the phase. On `Classified`, record a candidate decline and run
+  `recover_after_launch_failure`; continue only when recovery is
+  not `Lost` and the classified effect is `No_device_writes`. A possibly-writing rejection becomes
+  fatal because there is no scratch-lineage restore API. On `Fatal`, run recovery best-effort
+  without changing the verdict, emit the partial report, then re-raise the stored
+  exception/backtrace.
+- **Cache replay** (autotune.ml:3325): put
+  `protect ~provenance:Cache_replay` around winner reconstruction and call
+  `compile_candidate ~provenance:Cache_replay`, so persisted-data failures are never first
+  classified under ordinary live-candidate policy.
 - **`compile_advisory`** (autotune.ml:2966) and `model_default`'s bare `exception _` arms: keep the
-  fallback for `Rejected`, propagate `Fatal` immediately instead of paying for a recompile that will
-  fail the same way. `fallback_if` narrows to its real job.
+  fallback for `Classified` causes under `Advisory`, propagate `Fatal` immediately instead of paying
+  for a recompile that will fail the same way. `fallback_if` narrows to its real job.
 - **`validate_segments`** (autotune.ml:2963) can be **retired**. It exists because `validate_parallel`
   runs past the seam and the seam's handler could not see it; with the compile phase classifying
-  that failure as `Rejected`, `compile_advisory`'s backstop reaches the same fallback without
+  that failure as `Classified`, `compile_advisory`'s backstop reaches the same fallback without
   duplicating the check. Deleting it is the concrete simplification that shows the abstraction pays
   for itself. (Keep it if profiling shows the eager check meaningfully cheaper than a failed
   compile — but say so, rather than leaving both.)
-- **`Context.auto`** (context.ml:103): `try … with _ -> try_backends rest` picks the next backend on
-  *any* failure, including `Out_of_memory` and a user's Ctrl-C. Same deny-list applies; unrelated to
-  tuning, same bug.
+- **`Context.auto`** (context.ml:103 and :109): backend selection is not candidate compilation and
+  does not use the compile-phase default. Introduce/recognize a narrow `Backend_unavailable` cause
+  from backend discovery and catch only that while trying the next backend. The configured-backend
+  arm preserves the original failure unless the backend name itself is unknown; it no longer turns
+  driver initialization failures into `Invalid_argument "Unknown backend"`.
 
-One `contain` with a phase parameter, one classifier, two backend hooks.
+One `protect` with provenance and phase, typed translations at the existing narrow seams, one
+backend classifier, one post-link validator, and one recovery hook.
 
 ## Consumers
 
-`Autotune.report` gains `declines : (rejection_key * int) list` alongside `candidates_failed` —
-#521's hand-assembled census becomes a returned value, and gh-479's "did the tensorized candidate
-lose, or never run?" is answered from the same fold. Exactly one consumer needs updating today
-(benchmarks/runners/ocannl/bench_mlp.ml:225). `C_syntax.mma_census` stays: *declined rendering* and
-*declined candidate* are different events, and telling them apart is the point of that census.
-`autotune_log` keeps its per-candidate line; the census is what a benchmark runner tabulates
-without parsing prose.
+`Autotune.report` gains the fields above alongside `candidates_failed`. #521's hand-assembled census
+becomes a returned value, and gh-479's "did the tensorized candidate lose, or never run?" is
+answered from the same fold. Exactly one non-test consumer needs updating today
+(benchmarks/runners/ocannl/bench_mlp.ml:225), plus the tests that construct or print reports.
+`C_syntax.mma_census` stays: *declined rendering* and *declined candidate* are different events, and
+telling them apart is the point of that census. `autotune_log` keeps its per-candidate line; the
+census is what a benchmark runner tabulates without parsing prose.
 
 ## Migration and compatibility
 
-- **Unclassified failures stay containable by default.** Rule 3 makes an unrecognized exception at a
-  compile boundary an `Unclassified` rejection rather than a fatal, so no currently-surviving search
-  starts crashing on that account. The tightenings are rules 1 and 3-launch, both deliberate.
-- **A ratchet, not a flag day.** `Unclassified` counts show up in the census; a config key
-  `strict_failure_classification=false` flips them to `Fatal` for CI and development, so the
-  taxonomy's gaps stay visible and get closed one at a time. (Named for the classifier rather than
+- **Unclassified failures are fatal by default.** `strict_failure_classification=true` is the
+  default and is pinned explicitly in `test/config/ocannl_config`. Otherwise `Match_failure`,
+  `Division_by_zero`, arbitrary internal `Failure`, and new compiler invariants would remain
+  silently containable — the exact failure mode this design exists to remove.
+- **Compatibility mode is a temporary escape hatch, not the ratchet.** Setting
+  `strict_failure_classification=false` converts an unclassified transform/codegen/compile/link
+  failure into `Classified { cause = Unclassified ...; execution_effect = No_device_writes }`, logs a
+  prominent warning per key, and includes it in the census. It never weakens launch/sync
+  classification. Benchmark sweeps may use it while the initial taxonomy is being populated, but
+  CI and checked-in test configs do not. Once the census is empty across supported backends, remove
+  the key rather than preserving a permanent permissive mode. (Named for the classifier rather than
   `autotune_*`, because `Context.compile` and `model_default` share it.)
 - **User-facing behaviour is unchanged**: a hand-written schedule that violates a precondition still
   raises out of `Context.compile`, with a message built from the same `detail`. Nine test files
@@ -351,45 +586,81 @@ without parsing prose.
   test_threefry_precision.ml, test_bounds_folded_gather.ml, symbolic_extent_launch.ml,
   test/einsum/test_symbolic_extents.ml); they keep passing.
 - One new config key ⇒ the three-place update (`ocannl_config.reference`, `Utils.known_config_keys`,
-  the consistency test's scan list). Adding a `hardware_limits` field touches its `deriving
-  sexp, compare, equal` users — check whether it reaches the schedule-cache key before assuming
-  existing caches survive.
+  the consistency test's scan list). The revised design adds no speculative `hardware_limits`
+  field. If a proven portable limit is added later, audit its `deriving sexp, compare, equal` users
+  and whether it reaches the schedule-cache key before assuming existing caches survive.
 
 ### Test plan
 
 Tests pinning the boundary in *both* directions — the second matters as much as the first, since
 the failure this design most wants to prevent is a silently degraded tuning result.
 
-Two run on `cc`, so CI enforces the boundary itself on every machine:
+These run on `cc`, so CI enforces the boundary itself on every machine:
 
 - **Contained**: seed a candidate through `tune`'s transform seam that violates an op precondition
   (`Schedule.apply` raises `Invalid_argument`, device-independent). Assert the search completes, the
-  report counts one decline, and its key is `Illegal_schedule`.
+  report counts one decline, its key is `Illegal_schedule_key`, the detail sample is retained, and
+  `candidates_failed = sum declines.count`.
 - **Not contained**: a transform raising `Assert_failure` makes `tune` propagate rather than log a
   `FAILED` line and crown a different candidate — *and* the partial report is emitted before it
-  propagates.
+  propagates, names the candidate/phase, and the re-raised exception retains the original backtrace.
+- **Unclassified is strict**: a transform raising `Failure "compiler bug"` is fatal under the
+  checked-in config. A focused compatibility-mode test verifies that only compile-side
+  unclassified failures become `Unclassified_key`; launch/sync remains fatal.
+- **Advisory provenance**: `model_default` falls back for a typed illegal-schedule cause but
+  propagates `Assert_failure` and unclassified `Failure`. This covers the original #519 consumer,
+  not only `tune`.
 
-Plus a unit test of the classifier over synthesized exceptions at each phase, including the cache
-replay opt-out and each `rejection` constructor. This is where `Resource_exceeded` gets its
-portable coverage: the classifier is a pure function, so the phase-to-verdict mapping is testable
-on `cc` with a synthesized `check_hardware_limits` failure, no device limit required.
+Add a unit test of `protect` over synthesized exceptions/typed causes at each phase and provenance,
+including the cache replay override, fatal deny-list, strict/permissive modes, and every `cause`
+constructor. Test `key_of_cause` separately: changes to `detail`, `requested`, or `limit` must not
+change the key; backend/stage/severity must. This is where `Resource_exceeded` gets portable
+coverage: the policy is pure, so its cause-to-verdict mapping is testable on `cc`.
 
-One test is genuinely GPU-gated and must be marked as such rather than counted as CI coverage:
+Add a fake-backend or backend-implementation unit test for the recovery state machine:
+
+- the first no-op succeeds → `Healthy`, no state replacement;
+- the old runner fails and a new runner succeeds → `Recovered`, runner replaced, stale event maps
+  empty, pool/buffer identity preserved, and the next candidate uses the new runner;
+- both fail → `Lost`, the search emits a partial report and stops;
+- runner recovery succeeds but the classification says `Writes_may_have_occurred` → the current
+  API poisons the scratch ledger, emits a partial report, and stops rather than timing the next
+  candidate on suspect data;
+- a `No_device_writes` sync refusal rolls back the candidate's executed id and discards its returned
+  context before the next candidate;
+- the original outcome is `Fatal` → recovery never upgrades it and a recovery exception never
+  masks its backtrace; the affected lineage is poisoned even if the physical runner recovers.
+
+`Context.auto` gets a focused test with injectable/fake backend discovery: only
+`Backend_unavailable` advances to the next backend; `Out_of_memory`, `Sys.Break`, assertion failure,
+and driver initialization failure propagate. The configured-backend arm must not relabel the latter
+as an unknown name.
+
+Two tests are genuinely GPU-gated and must be marked as such rather than counted as portable CI
+coverage:
 
 - **Contained, resource, end to end**: on a backend actually reporting `max_threads_per_workgroup`,
-  an over-budget workgroup declines with key `Resource_exceeded Workgroup_threads`. `cc` cannot
+  an over-budget workgroup declines with key `Resource_exceeded_key Workgroup_threads`. `cc` cannot
   stand in — `cpu_mma_limits` builds on `no_hardware_limits` (schedulers.ml:20-27), so
   `max_threads_per_workgroup` is `None` and `check_hardware_limits` has nothing to reject on;
   hardware-axis annotations render serially there by design. Metal locally; the other GPU backends
   in later sessions on their machines.
+- **HIP scratch, before launch**: build a kernel whose compiled `private_seg_size` crosses the
+  experimentally established limit. Assert the post-link validator returns
+  `Resource_exceeded_key Thread_scratch`, no launch occurs, and a following reduction on the same
+  device is correct. This is the regression for #533; the workgroup-threads test is not a substitute.
 
-Injecting synthetic limits to make that last one portable is possible but not worth it: it would
-need a seam into `hardware_limits`, which backends supply, and what it would then test is the
-classifier — already covered above, without the seam. The GPU test's value is confirming that the
-*real* rejection path lands in the right bucket, and only real hardware limits do that.
+Injecting a synthetic workgroup limit to make the first GPU test portable is possible but not worth
+it: it would need a seam into `hardware_limits`, which backends supply, and what it would then test
+is the policy — already covered above, without the seam. The GPU test's value is confirming that
+the *real* rejection path lands in the right bucket, and only real hardware limits do that. The HIP
+scratch test is different: its value is validating the binding query and the experimentally
+established limit semantics, so it cannot be replaced by a synthetic limit.
 
 Placement: `test/operations/autotune_containment.ml` with an `.expected` file, alongside the
-existing `autotune_smoke` family.
+existing `autotune_smoke` family; pure policy/key tests under `arrayjit/test`; backend recovery tests
+next to the existing backend implementation tests. The HIP test is a GPU-gated standalone test with
+the normal training lock if its setup exercises the process-local pool.
 
 ## Non-goals
 
@@ -405,12 +676,24 @@ existing `autotune_smoke` family.
 ## Suggested landing order
 
 0. Establish where #533's exception actually escaped (HIP machine, one instrumented run). If it was
-   the baseline timing, step 1 is the entire fix and steps 2-4 are about the census and the deny-list.
-1. `max_thread_scratch_bytes` + the link-time query (fixes #533 on its own, no new vocabulary), plus
-   Metal's unused static-threadgroup-memory query while the pattern is open.
-2. `schedule_outcome.ml`, `contain`, rule 1, the partial report on `Fatal`.
-3. The census in `Autotune.report`, `bench_mlp` consumer, retire `validate_segments`.
-4. `classify_failure` / `device_health` per backend, rule 3's launch arm, the `Unclassified` ratchet.
+   the baseline timing, the scratch validator still prevents the damage; the partial-report path is
+   then not involved in that reproduction.
+1. `schedule_outcome.ml`: phases, causes/keys, provenance policy, fatal-with-backtrace, strict mode,
+   `Context.compile_outcome`, the default backend hook, and narrow translations at
+   schedule-apply/`validate_parallel`/hardware-limit/compiler/link seams. Land the portable
+   policy/key tests while public `Context.compile` remains behavior-compatible.
+2. Typed candidate/advisory/cache consumers, the decline census and partial report,
+   `bench_mlp`, and retirement of `validate_segments` if failed-compile cost is acceptable. Land the
+   `cc` containment/advisory/backtrace tests.
+3. On HIP, identify the actual private-segment limit, extend hipjit, add the backend-private
+   post-link validator, and land the gated "rejected before launch, following reduction correct"
+   test. Add CUDA diagnostics/validation only for API-supported limits. Keep Metal's unused static
+   threadgroup-memory cross-check as a separate cleanup commit.
+4. Make runner replacement an explicit backend operation, implement
+   `recover_after_launch_failure`, add ledger rollback/poisoning and the fake recovery-state tests,
+   then tighten the launch/sync arm. Exercise HIP and CUDA recovery on their machines.
+5. Replace `Context.auto`'s blanket catches with `Backend_unavailable` and its focused tests.
+   Remove compatibility mode once supported-backend censuses contain no `Unclassified_key`.
 
-Steps 1 and 4 are the only ones needing hardware this machine does not have (CUDA and HIP arms
-unexercisable here; Metal and cc cover the rest). Steps 2 and 3 are portable and carry the tests.
+Steps 3 and 4 need hardware this machine does not have for their HIP/CUDA acceptance tests. Steps 1,
+2, and 5 are portable; Metal and `cc` cover the generic compiler/link and report paths.
