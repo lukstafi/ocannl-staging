@@ -258,8 +258,11 @@ two sites in the whole lenet graph seed at all (`cross_entropy` out=1, `n105` re
 reduction loop; OCANNL lowers a conv bias gradient with the output-channel loop **innermost** and
 the reduction loops (batch, y, x) outside it — the exact inverse. End to end, on the cells that
 complete: `mlp_small` tuned 0.333 ms vs materialized 0.322 (no win, split places 4th in the
-search); `lenet` tuned 6.622 ms vs materialized 6.603 (no win — a split candidate does take arm A
-by 2.9% in-search, but on site `n105`, not this segment, and the margin does not survive replay).
+search); `lenet` tuned 6.622 ms vs materialized 6.603 (no win — a split candidate does take **arm
+B**, the materialize-all arm, by 2.9% in-search at 6.2109 ms vs the best preset's 6.3941, but on
+site `n105`, not this segment, and the margin does not survive replay). The arm matters to the
+conclusion: arm A keeps the virtual graph and its untouched ~73 ms serial segment, and its best
+candidate is 80.6267 ms — so what removes the bottleneck is materialization, not the split.
 
 ### The torch GPU cells produced garbage during this run — cause unresolved, and NOT reproducible
 
