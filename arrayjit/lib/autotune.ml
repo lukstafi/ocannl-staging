@@ -3429,9 +3429,22 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
       in
       let n_timed = ref 1 in
       let declines : (Outcome.rejection_key, decline_acc) Hashtbl.Poly.t = Hashtbl.Poly.create () in
+      (* Live search state for an honest partial report. Each counter starts at the amount of work
+         completed so far and is updated at its ordinary accounting site below. [best_so_far] is
+         updated after every successful timing, including midway through seed enumeration. *)
+      let n_mma_proposed = ref 0 and n_mma_timed = ref 0 in
+      let n_model_scored = ref 0 and n_model_pruned = ref 0 in
+      let n_fiss_sketch_timed = ref 0 and n_sr_timed = ref 0 in
+      let rounds_run = ref 0 in
+      let n_sketch_candidates = ref 0
+      and n_epilogue_sketch_candidates = ref 0
+      and n_fiss_sketch_candidates = ref 0
+      and n_split_reduce_candidates = ref 0 in
+      let best_so_far = ref (baseline, baseline_ms) in
       let partial_emitted = ref false in
       let emit_partial_and_raise (fatal : Outcome.fatal) =
         let summaries = decline_summaries declines in
+        let best_c, best_ms = !best_so_far in
         let terminal_failure =
           Some
             {
@@ -3448,21 +3461,21 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
             partial = true;
             declines = summaries;
             terminal_failure;
-            rounds_run = 0;
-            sketch_candidates = 0;
-            epilogue_sketch_candidates = 0;
-            fiss_sketch_candidates = 0;
-            fiss_sketch_timed = 0;
-            split_reduce_candidates = 0;
-            split_reduce_timed = 0;
-            mma_candidates = 0;
-            mma_timed = 0;
-            model_scored = 0;
-            model_pruned = 0;
-            fissioned = false;
+            rounds_run = !rounds_run;
+            sketch_candidates = !n_sketch_candidates;
+            epilogue_sketch_candidates = !n_epilogue_sketch_candidates;
+            fiss_sketch_candidates = !n_fiss_sketch_candidates;
+            fiss_sketch_timed = !n_fiss_sketch_timed;
+            split_reduce_candidates = !n_split_reduce_candidates;
+            split_reduce_timed = !n_sr_timed;
+            mma_candidates = !n_mma_proposed;
+            mma_timed = !n_mma_timed;
+            model_scored = !n_model_scored;
+            model_pruned = !n_model_pruned;
+            fissioned = is_fissioned best_c.form;
             baseline_ms;
-            best_ms = baseline_ms;
-            best_schedule = [];
+            best_ms;
+            best_schedule = flat_schedule best_c.form;
           }
         in
         (* Reporting is best-effort on the exceptional path and must not replace the compiler
@@ -3482,7 +3495,6 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
          cross-segment recombination composite and the beam-expansion candidates also reach
          [try_spec] without appearing in the seed list, and counting only seeds in the denominator
          would let [mma_timed] exceed [mma_candidates] on a multi-segment routine. *)
-      let n_mma_proposed = ref 0 and n_mma_timed = ref 0 in
       let try_spec spec =
         if spec_expects_mma spec then Int.incr n_mma_proposed;
         match compile_spec spec with
@@ -3528,6 +3540,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
                   else if total = 0 && spec_expects_mma spec then
                     logf "%s: NOTE tensorized candidate emitted no Tile_mma statement"
                       (spec_label spec);
+                  if Float.(ms < snd !best_so_far) then best_so_far := (c, ms);
                   Some (c, ms)
               | Error (Outcome.Classified classified) ->
                   record_decline declines classified;
@@ -3539,7 +3552,6 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
       let block_size_presets mk =
         mk None :: (if is_gpu then List.map seed_block_sizes ~f:(fun bs -> mk (Some bs)) else [])
       in
-      let n_model_scored = ref 0 and n_model_pruned = ref 0 in
       (* The model pre-filter of the sketch seeding (gh-ocannl-491 task 3): rank each candidate
          family (the whole-routine sketches; each fission segment's sketches) with the roofline
          model and keep the best [keep_fraction] of the scored candidates before any compilation or
@@ -3571,6 +3583,8 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
         model_prefilter_params ~seg_opt:base_opt ~family:"whole-routine"
           (sketch_seed_params ~is_gpu ~is_cpu ~limits base_opt)
       in
+      n_sketch_candidates := List.length sketch_params;
+      n_epilogue_sketch_candidates := List.count sketch_params ~f:(fun p -> p.sk_epilogue);
       (* Per-fission-segment sketch seeds (the [F_sketch] flavor): heavily fissioned graphs tune per
          segment, where the whole-routine sketches never apply. Enumerate the fission segmentation
          once, on a hermetic copy of the base lowering with the same pipeline settings the candidate
@@ -3637,6 +3651,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
         List.concat_map fiss_sketch_entries ~f:(fun (key, ps) ->
             List.map ps ~f:(fun p -> Fiss (F_sketch [ (key, p) ])))
       in
+      n_fiss_sketch_candidates := List.length fiss_sketch_specs;
       (* Split-reduce seeds (gh-ocannl-484 task 3), detected on the base lowering — the prelude
          applies whole-routine, so no segment enumeration is needed first — and proposed as
          single-site candidates over a few [num_blocks] values (the tunable of the family;
@@ -3651,6 +3666,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
             List.filter_map sr_num_blocks ~f:(fun b ->
                 if 2 * b <= s.sr_red then Some (Fiss (F_split { sites = [ (s, b) ] })) else None))
       in
+      n_split_reduce_candidates := List.length sr_specs;
       let seed_specs =
         block_size_presets (fun block_size -> Whole (W_preset { block_size }))
         @ (if is_gpu || is_cpu then
@@ -3668,9 +3684,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
         @ fiss_sketch_specs @ sr_specs
       in
       let by_time (_, a) (_, b) = Float.compare a b in
-      let n_fiss_sketch_timed = ref 0 in
       let fiss_single_results = ref [] in
-      let n_sr_timed = ref 0 in
       let sr_single_results = ref [] in
       let pool =
         (baseline, baseline_ms)
@@ -3729,7 +3743,6 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
       in
       let beam = ref (List.take (List.sort pool ~compare:by_time) beam_width) in
       let best = ref (List.hd_exn !beam) in
-      let rounds_run = ref 0 in
       let continue_ = ref true in
       while !continue_ && !rounds_run < rounds do
         Int.incr rounds_run;
@@ -3823,7 +3836,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
               logf "winner replay FAILED (%s), falling back to the default compile: %s"
                 (spec_label spec) (Outcome.detail_of_cause classified.cause);
               Context.compile ctx comp bindings
-          | Error (Outcome.Fatal _ as failure) -> Outcome.raise_failure failure
+          | Error (Outcome.Fatal fatal) -> emit_partial_and_raise fatal
       in
       (result, completed_report)
       in
