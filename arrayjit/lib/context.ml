@@ -108,10 +108,11 @@ let auto () =
       try create_from_backend_name ~device_id:0 backend_name
       with _ -> invalid_arg ("Unknown backend: " ^ backend_name))
 
-let compile ?name ?lowered_transform ?lowered_transforms ctx comp bindings =
+let compile_outcome ?name ?lowered_transform ?lowered_transforms ~provenance ?candidate ctx comp
+    bindings =
   (* Compile and link on the wrapped backend context; only backend-independent routine components
      (and, via [with_backend]'s rebuilt constructor, the updated context) escape the dispatch. *)
-  let wrapped, (task, lowered_bindings, name, backend_inputs, backend_outputs) =
+  let wrapped, backend_outcome =
     Backends.with_backend ctx.wrapped
       {
         f =
@@ -122,15 +123,25 @@ let compile ?name ?lowered_transform ?lowered_transforms ctx comp bindings =
                and type event = event)
             bctx
           ->
-            let code =
-              Backend.compile ?name ?lowered_transform ?lowered_transforms bctx.BI.optimize_ctx
-                bindings comp
-            in
-            let r = Backend.link bctx code in
-            (r.BI.context, (r.BI.schedule, r.BI.bindings, r.BI.name, r.BI.inputs, r.BI.outputs)));
+            match
+              Ir.Schedule_outcome.protect ~classify_backend:Backend.classify_failure ~provenance
+                ~phase:Ir.Schedule_outcome.Transform ?candidate (fun () ->
+                  let code =
+                    Backend.compile ?name ?lowered_transform ?lowered_transforms
+                      bctx.BI.optimize_ctx bindings comp
+                  in
+                  Ir.Schedule_outcome.tag Ir.Schedule_outcome.Backend_link (fun () ->
+                      Backend.link bctx code))
+            with
+            | Ok r ->
+                ( r.BI.context,
+                  Ok (r.BI.schedule, r.BI.bindings, r.BI.name, r.BI.inputs, r.BI.outputs) )
+            | Error failure -> (bctx, Error failure));
       }
   in
-
+  match backend_outcome with
+  | Error failure -> Error failure
+  | Ok (task, lowered_bindings, name, backend_inputs, backend_outputs) ->
   (* Allocate unique ID from shared ledger *)
   let id = ctx.ledger.next_id in
   ctx.ledger.next_id <- id + 1;
@@ -209,7 +220,15 @@ let compile ?name ?lowered_transform ?lowered_transforms ctx comp bindings =
     }
   in
 
-  (updated_ctx, routine)
+  Ok (updated_ctx, routine)
+
+let compile ?name ?lowered_transform ?lowered_transforms ctx comp bindings =
+  match
+    compile_outcome ?name ?lowered_transform ?lowered_transforms
+      ~provenance:Ir.Schedule_outcome.User_schedule ctx comp bindings
+  with
+  | Ok result -> result
+  | Error failure -> Ir.Schedule_outcome.raise_failure failure
 
 let run ctx routine =
   (* Check that all required inputs are initialized. A node counts as initialized if it was produced

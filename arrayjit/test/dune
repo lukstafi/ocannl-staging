@@ -10,6 +10,15 @@
   (pps ppx_here)))
 
 (test
+ (name test_schedule_outcome)
+ (package arrayjit)
+ (modules test_schedule_outcome)
+ (deps ocannl_config)
+ (libraries base arrayjit.ir)
+ (preprocess
+  (pps ppx_here)))
+
+(test
  (name test_ndarray_binary_io)
  (package arrayjit)
  (modules test_ndarray_binary_io)

@@ -370,6 +370,14 @@ val apply :
     point in the schedule, or violates an op precondition (see {!optop}). An empty schedule is the
     identity. *)
 
+val apply_classified :
+  ?static_indices:Indexing.static_symbol list ->
+  schedule ->
+  Low_level.optimized ->
+  Low_level.optimized
+(** Internal candidate-facing variant of {!apply}. An [Invalid_argument] raised inside schedule
+    application is transported as a typed {!Schedule_outcome.Illegal_schedule}. *)
+
 type op_verdict = Op_legal | Op_illegal of string | Op_unknown of string
 [@@deriving sexp_of, equal]
 
@@ -584,3 +592,8 @@ val check_hardware_limits :
     [compile] calls this after any [?lowered_transform] (or the default annotator, which already
     respects the limits), turning driver-level launch failures into early, named errors. A no-op for
     all-[None] limits. *)
+
+val check_hardware_limits_classified :
+  name:string -> limits:Backend_intf.hardware_limits -> Low_level.optimized -> unit
+(** Internal candidate-facing variant of {!check_hardware_limits}; transports excess thread or
+    workgroup-memory requests as typed {!Schedule_outcome.Resource_exceeded} causes. *)

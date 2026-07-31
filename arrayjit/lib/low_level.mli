@@ -207,6 +207,10 @@ val validate_parallel : Tnode.Placements.t -> t -> unit
     materialized nodes in multi-threaded kernels (nesting never distributes it). Cannot prove
     iteration independence — that is the annotating pass's obligation. *)
 
+val validate_parallel_classified : Tnode.Placements.t -> t -> unit
+(** Internal backend-facing variant of {!validate_parallel}; transports a validation
+    [Invalid_argument] as a typed {!Schedule_outcome.Illegal_schedule}. *)
+
 val guard_annotated_extents : should_guard:([ `Grid | `Workgroup ] -> bool) -> t -> t
 (** Wraps bodies of annotated loops whose extent is below their slot's launch dimension in
     [If (index < extent)] guards, for the kinds the backend binds in hardware. *)

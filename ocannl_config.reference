@@ -253,6 +253,12 @@ autotune_cache_dir=autotune_cache
 # quality; independent of the ppx_minidebug log levels.
 autotune_log=false
 
+# If true, an exception crossing a candidate transform/codegen/compile/link boundary is fatal unless
+# a narrow compiler seam or the backend classifies it. If false, unattributed compile-side failures
+# of tuner/advisory/cache work are temporarily contained as `Unclassified` declines. Launch and sync
+# failures remain fatal unless classified, and public user schedules retain their exception behavior.
+strict_failure_classification=true
+
 # The analytic-cost-model pre-filter of `Autotune.tune`'s sketch seeding (gh-ocannl-491): per
 # candidate family (the whole-routine sketches; each fission segment's sketches), candidates are
 # ranked by the roofline model and only the best `autotune_keep_fraction` of the model-scored

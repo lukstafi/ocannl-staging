@@ -1,0 +1,84 @@
+type phase =
+  | Transform
+  | Hardware_limits
+  | Backend_codegen
+  | Backend_compile
+  | Backend_link
+  | Launch
+  | Sync
+[@@deriving sexp_of, compare, equal]
+
+type resource = Workgroup_threads | Workgroup_memory | Thread_scratch
+[@@deriving sexp_of, compare, equal]
+
+type severity = Expected | Compiler_bug [@@deriving sexp_of, compare, equal]
+type execution_effect = No_device_writes | Writes_may_have_occurred
+[@@deriving sexp_of, compare, equal]
+
+type cause =
+  | Illegal_schedule of { check : string; detail : string }
+  | Unsupported of { feature : string; detail : string }
+  | Resource_exceeded of {
+      resource : resource;
+      requested : int;
+      limit : int option;
+      detail : string;
+    }
+  | Backend_rejected of {
+      backend : string;
+      stage : string;
+      severity : severity;
+      detail : string;
+    }
+  | Unclassified of { phase : phase; exn_constructor : string; detail : string }
+[@@deriving sexp_of, equal]
+
+type rejection_key =
+  | Illegal_schedule_key of string
+  | Unsupported_key of string
+  | Resource_exceeded_key of resource
+  | Backend_rejected_key of string * string * severity
+  | Unclassified_key of phase * string
+[@@deriving sexp_of, compare, equal]
+
+val key_of_cause : cause -> rejection_key
+
+type fatal = {
+  exn : exn;
+  backtrace : Stdlib.Printexc.raw_backtrace;
+  phase : phase;
+  candidate : string option;
+}
+
+type classified_cause = { cause : cause; execution_effect : execution_effect }
+[@@deriving sexp_of, equal]
+
+type failure = Classified of classified_cause | Fatal of fatal
+type 'a outcome = ('a, failure) Result.t
+
+exception Cause_at of phase * cause
+exception Raised_at of phase * exn * Stdlib.Printexc.raw_backtrace
+
+type provenance = Candidate | Cache_replay | Advisory | User_schedule
+[@@deriving sexp_of, compare, equal]
+
+val protect :
+  ?strict:bool ->
+  classify_backend:(phase -> exn -> classified_cause option) ->
+  provenance:provenance ->
+  phase:phase ->
+  ?candidate:string ->
+  (unit -> 'a) ->
+  'a outcome
+(** Runs a phase boundary while preserving typed causes and raw backtraces. [strict] is exposed for
+    policy tests; production callers should omit it and use [strict_failure_classification]. *)
+
+val tag : phase -> (unit -> 'a) -> 'a
+(** Tags an exception with the narrow phase where it was raised, preserving its raw backtrace.
+    Existing typed transport exceptions pass through unchanged. *)
+
+val raise_cause : cause -> _
+(** Renders a typed internal cause using the exception contract of the existing public APIs. *)
+
+val raise_failure : failure -> _
+(** Re-raises a fatal failure with its original backtrace, or renders a classified cause. *)
