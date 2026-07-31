@@ -682,6 +682,14 @@ the normal training lock if its setup exercises the process-local pool.
    `Context.compile_outcome`, the default backend hook, and narrow translations at
    schedule-apply/`validate_parallel`/hardware-limit/compiler/link seams. Land the portable
    policy/key tests while public `Context.compile` remains behavior-compatible.
+   **Follow-up seam found afterwards:** `Autotune.sketch_schedule` is a phase boundary of its own,
+   and the inventory above missed it. Its `invalid_arg`s are applicability preconditions ("no
+   matmul site detected"; a companion nest the family cannot cover), so untyped they were
+   unclassified and fatal, and one inapplicable GPU sketch family ended the whole search —
+   reproducible on Metal with `test/operations/autotune_fission_sketch`, invisible on `cc`. Typed at
+   the sketch construction, not around the transform closure: an arbitrary exception escaping a
+   transform must stay fatal. Worth expecting more of these wherever the tuner's own code signals
+   applicability with `invalid_arg`; the checked-in test configs only exercise `cc`.
 2. Typed candidate/advisory/cache consumers, the decline census and partial report,
    `bench_mlp`, and retirement of `validate_segments` if failed-compile cost is acceptable. Land the
    `cc` containment/advisory/backtrace tests.

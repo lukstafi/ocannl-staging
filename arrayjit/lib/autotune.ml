@@ -1643,7 +1643,15 @@ let gpu_conv_sketch_schedule (site : conv_site) { sk_simd = w; sk_bm; sk_bn; sk_
     @ reorder_swaps ~current:site.c_loops ~target:loop_syms
     @ [ stage site.c_a [ site.c_row; site.c_red ]; stage site.c_b [ site.c_red; site.c_oc ]; tz ]
 
-let sketch_schedule ~p (opt : LL.optimized) : Sched.schedule =
+(* Building a sketch is a narrow phase seam of its own (gh-ocannl-536). Every [invalid_arg] above is
+   an applicability precondition — no matmul site, a companion nest whose geometry the family cannot
+   cover — i.e. the same verdict as a [Schedule.apply] precondition: this candidate is not
+   applicable, and the search is better off recording a decline. Escaping untyped they were
+   unclassified and therefore FATAL under strict classification, so a single inapplicable GPU sketch
+   family ended the whole search (reproducible on Metal with test/operations/autotune_fission_sketch
+   before this). Typing them here rather than around the whole transform closure keeps the boundary
+   narrow, which is the point: an arbitrary exception escaping a transform stays fatal. *)
+let sketch_schedule_unchecked ~p (opt : LL.optimized) : Sched.schedule =
   let sched, d =
     if p.sk_conv then
       match detect_conv opt.LL.llc with
@@ -1672,6 +1680,14 @@ let sketch_schedule ~p (opt : LL.optimized) : Sched.schedule =
        [shared] outright and the twin would fail for the wrong reason. *)
     sched @ [ Sched.Fuse_epilogue { target = d; shared = p.sk_gpu && p.sk_mma } ]
   else sched
+
+let sketch_schedule ~p (opt : LL.optimized) : Sched.schedule =
+  match sketch_schedule_unchecked ~p opt with
+  | sched -> sched
+  | exception Invalid_argument detail ->
+      raise
+        (Outcome.Cause_at
+           (Outcome.Transform, Outcome.Illegal_schedule { check = "Autotune.sketch"; detail }))
 
 (* Sketch seed parameters compatible with the site's extents. Fully staged tensorized pipelines no
    longer require dividing tiles: non-multiple extents seed [(pad, tensorize)] compositions
