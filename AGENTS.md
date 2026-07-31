@@ -42,8 +42,10 @@ Key reference files:
   standalone commits paired with `.ocamlformat-ignore` updates.
 
 Worktree and shell notes:
-- Put worktrees outside the repository. From a worktree nested inside the repository, pass
-  `--root .` to Dune; use `tools/promote.sh` because `dune promote` does not accept `--root`.
+- Put worktrees outside the repository when possible. For a nested worktree, run
+  `scripts/setup-ocaml-env.sh` from its root to create a worktree-local `dune-workspace`;
+  otherwise Dune can silently build the parent checkout. Normal Dune commands and
+  `dune promote` then work without `--root .`; see `docs/agent-notes.md` for the mechanics.
 - In Windows Git Bash, source `tools/opam-env.sh` before building. Use
   `tools/dune-quiet.sh <dune args>` to filter only the known benign linker warnings.
 - In PowerShell, quote aliases (`dune build "@runtest" "@slow"`); unquoted `@name` is splatted
@@ -83,10 +85,12 @@ Testing notes:
   write the test, run `dune build test/<...>.exe.output`, then either
   `cp _build/default/test/<...>.exe.output test/<name>.expected` or `dune promote`. Both
   capture the banner correctly.
-- On Windows or in a nested worktree, use `tools/promote.sh`; it applies the right root and strips
-  CRLF. Use `test/support/test_utils.ml` printers for portable float output.
-- Tests sharing a generated `build_files/` directory run concurrently. Give kernels and tensors a
-  test-unique prefix so same-named generated sources are not torn by concurrent writers.
+- On Windows, use `tools/promote.sh` to strip CRLF from promoted goldens. Use
+  `test/support/test_utils.ml` printers for portable float output.
+- Debug artifacts are isolated under `build_files/<exe-name>/`, so cross-test clashes are
+  prevented unless processes explicitly share the flat legacy `build_files_prefix=.` layout.
+  Within one executable, duplicate routine names silently overwrite earlier `.cd`/`.ll`/`.c`
+  artifacts; keep routine names unique (test-specific prefixes remain useful).
 - For optimizer passes that change cell values, emitted-IR structure is not sufficient: also
   assert executed output against a materialized or otherwise independent reference run.
 
