@@ -34,6 +34,40 @@ let () =
       }
   in
   assert (equal_rejection_key (key_of_cause resource_1) (key_of_cause resource_2));
+  let unsupported_1 = Unsupported { feature = "mma"; detail = "precision f64" } in
+  let unsupported_2 = Unsupported { feature = "mma"; detail = "extent 7" } in
+  assert (equal_rejection_key (key_of_cause unsupported_1) (key_of_cause unsupported_2));
+  let backend_rejection ?(backend = "cc") ?(stage = "compiler") ?(severity = Compiler_bug)
+      detail =
+    Backend_rejected { backend; stage; severity; detail }
+  in
+  let backend_key = key_of_cause (backend_rejection "diagnostic one") in
+  assert (equal_rejection_key backend_key (key_of_cause (backend_rejection "diagnostic two")));
+  assert (
+    not
+      (equal_rejection_key backend_key
+         (key_of_cause (backend_rejection ~backend:"cuda" "diagnostic one"))));
+  assert (
+    not
+      (equal_rejection_key backend_key
+         (key_of_cause (backend_rejection ~stage:"linker" "diagnostic one"))));
+  assert (
+    not
+      (equal_rejection_key backend_key
+         (key_of_cause (backend_rejection ~severity:Expected "diagnostic one"))));
+  let unclassified_1 =
+    Unclassified { phase = Transform; exn_constructor = "Failure"; detail = "one" }
+  in
+  let unclassified_2 =
+    Unclassified { phase = Transform; exn_constructor = "Failure"; detail = "two" }
+  in
+  assert (equal_rejection_key (key_of_cause unclassified_1) (key_of_cause unclassified_2));
+  assert (
+    not
+      (equal_rejection_key (key_of_cause unclassified_1)
+         (key_of_cause
+            (Unclassified
+               { phase = Backend_compile; exn_constructor = "Failure"; detail = "one" }))));
   let typed =
     protect ~strict:true ~classify_backend:no_backend_classification ~provenance:Candidate
       ~phase:Transform (fun () -> raise (Cause_at (Transform, illegal_1)))

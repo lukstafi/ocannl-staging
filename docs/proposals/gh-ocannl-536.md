@@ -685,6 +685,12 @@ the normal training lock if its setup exercises the process-local pool.
 2. Typed candidate/advisory/cache consumers, the decline census and partial report,
    `bench_mlp`, and retirement of `validate_segments` if failed-compile cost is acceptable. Land the
    `cc` containment/advisory/backtrace tests.
+   **Implementation note:** the public/general `validate_segments` helper was retired, but a
+   model-ranking-only eager validator remains. Removing that check made an invalid tensorized
+   argmin displace a viable model candidate and then fall back all the way to the default (the
+   `cost_model_selection` regression demonstrates that the cost is semantic, not merely compile
+   time). Attribution and advisory fallback still use the typed codegen boundary; the retained
+   check exists only to rank the best viable uncompiled contender.
 3. On HIP, identify the actual private-segment limit, extend hipjit, add the backend-private
    post-link validator, and land the gated "rejected before launch, following reduction correct"
    test. Add CUDA diagnostics/validation only for API-supported limits. Keep Metal's unused static

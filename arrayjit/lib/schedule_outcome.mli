@@ -42,6 +42,8 @@ type rejection_key =
 [@@deriving sexp_of, compare, equal]
 
 val key_of_cause : cause -> rejection_key
+val detail_of_cause : cause -> string
+val exception_of_cause : cause -> exn
 
 type fatal = {
   exn : exn;

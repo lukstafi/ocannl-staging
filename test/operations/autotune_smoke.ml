@@ -239,7 +239,14 @@ let () =
     && Array.for_all2_exn got_mm1 mm_expected ~f:approx);
   p "first tune call searches (cache miss)" (not r1.Autotune.cache_hit);
   p "first tune call timed at least the baseline" (r1.Autotune.candidates_timed >= 1);
+  p "completed search report is not partial"
+    ((not r1.Autotune.partial) && Option.is_none r1.Autotune.terminal_failure);
+  p "decline census sums to candidates_failed"
+    (r1.Autotune.candidates_failed
+    = List.sum (module Int) r1.Autotune.declines ~f:(fun d -> d.Autotune.count));
   p "second tune call hits the schedule cache" r2.Autotune.cache_hit;
+  p "cache-hit report has no declines"
+    (List.is_empty r2.Autotune.declines && r2.Autotune.candidates_failed = 0);
   p "cached schedule replays to correct values"
     (Array.for_all2_exn got2 expected_c ~f:approx
     && Array.for_all2_exn got_mm2 mm_expected ~f:approx)

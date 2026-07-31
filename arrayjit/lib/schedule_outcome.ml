@@ -142,11 +142,14 @@ let detail_of_cause = function
   | Unclassified { detail; _ } ->
       detail
 
-let raise_cause cause =
+let exception_of_cause cause =
   match cause with
-  | Resource_exceeded _ -> raise (Utils.User_error (detail_of_cause cause))
+  | Resource_exceeded _ -> Utils.User_error (detail_of_cause cause)
   | Illegal_schedule _ | Unsupported _ | Backend_rejected _ | Unclassified _ ->
-      invalid_arg (detail_of_cause cause)
+      Invalid_argument (detail_of_cause cause)
+
+let raise_cause cause =
+  raise (exception_of_cause cause)
 
 let raise_failure = function
   | Classified { cause; _ } -> raise_cause cause

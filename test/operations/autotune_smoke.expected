@@ -10,5 +10,8 @@ saved schedule roundtrips through sexp: true
 tuned routine values correct: true
 first tune call searches (cache miss): true
 first tune call timed at least the baseline: true
+completed search report is not partial: true
+decline census sums to candidates_failed: true
 second tune call hits the schedule cache: true
+cache-hit report has no declines: true
 cached schedule replays to correct values: true

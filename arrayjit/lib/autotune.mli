@@ -200,11 +200,33 @@ val split_reduce_sites : Ir.Low_level.optimized -> sr_site list
     recognizer decides the pinning discipline), so every returned site is seedable as proposed.
     Exposed for tests. *)
 
+type decline_summary = {
+  key : Ir.Schedule_outcome.rejection_key;
+  count : int;
+  sample_details : string list;
+}
+(** Aggregate of candidate declines sharing one stable key. Details retain at most the first three
+    distinct diagnostics and are never part of the key. *)
+
+type terminal_failure = {
+  phase : Ir.Schedule_outcome.phase;
+  candidate : string option;
+  detail : string;
+}
+
 type report = {
   cache_hit : bool;  (** The schedule came from the disk cache; no search ran. *)
   candidates_timed : int;  (** Including the serial baseline. *)
   candidates_failed : int;
       (** Candidates rejected by op preconditions, hardware limits, or backend compilation. *)
+  partial : bool;
+      (** [true] when candidate work terminated on a fatal failure after the baseline was measured.
+          Base-compile and baseline failures occur before reporting begins. *)
+  declines : decline_summary list;
+      (** Candidate rejections aggregated by stable cause key. Their counts sum to
+          [candidates_failed]. Cache-entry replay failures are excluded. *)
+  terminal_failure : terminal_failure option;
+      (** The fatal failure that stopped a partial search; [None] on completed reports. *)
   rounds_run : int;  (** Beam-expansion rounds actually executed (0 = seeds only). *)
   sketch_candidates : int;
       (** Whole-routine matmul-sketch instantiations seeded (0 when no matmul micro-kernel was
@@ -304,12 +326,6 @@ val model_default_enabled : bool Lazy.t
     {!Train.run_once}, the benchmark runners) route through {!model_default} instead of
     {!Context.compile}. *)
 
-val validate_segments : Ir.Low_level.optimized list -> Ir.Low_level.optimized list
-(** {!Ir.Low_level.validate_parallel} over each segment (against its own placements), returning them
-    unchanged; raises [Invalid_argument] on the first rejection. The check codegen runs anyway,
-    pulled forward to the transform seam so that an advisory transform's rejected output surfaces
-    where a fallback can catch it instead of aborting the compile (gh-ocannl-519). *)
-
 val compile_advisory :
   ?on_fallback:(exn -> unit) ->
   ?fallback_if:(unit -> bool) ->
@@ -318,11 +334,11 @@ val compile_advisory :
   Ir.Assignments.comp ->
   Ir.Indexing.unit_bindings ->
   Context.t * Context.routine
-(** {!Context.compile} with the given [lowered_transforms], falling back to a plain
-    {!Context.compile} — the ordinary default pipeline — if the transformed compile raises anywhere,
-    including inside backend codegen ({!Ir.Low_level.validate_parallel} and the backends' own
-    preconditions run there, past the transform seam). [on_fallback] is called with the exception
-    when the fallback fires. [fallback_if] (default: always) is consulted first, for transforms that
+(** {!Context.compile_outcome} with advisory provenance and the given [lowered_transforms], falling
+    back to a plain {!Context.compile} — the ordinary default pipeline — for a classified compiler
+    rejection, including validation in backend codegen. Fatal failures propagate without retrying.
+    [on_fallback] is called with the public rendering of the cause when fallback fires.
+    [fallback_if] (default: always) is consulted first, for transforms that
     may themselves have degraded to the default pipeline — [false] re-raises the original exception,
     backtrace included, instead of duplicating a compile that has nothing to fall back to. For
     advisory transforms only: a failure of the default pipeline itself propagates. See
@@ -340,11 +356,11 @@ val model_default :
     the roofline model, and the model-argmin schedule is applied — zero measurement, one backend
     compile. Advisory by construction: a candidate without model coverage is never picked over the
     default, ties go to the default, and missing envelope constants, a disabled default annotator
-    ({!Ir.Schedule.automatic_schedule_active}), or any scoring, application, validation
-    ({!validate_segments}) or compilation ({!compile_advisory}) failure fall back to the ordinary
-    default pipeline — the reported {!model_choice} then says ["default"]. Once the compile is on
-    that pipeline there is nothing left to fall back to, so its failures propagate as they would
-    from {!Context.compile}, without a duplicate attempt. Unlike {!tune}, nothing
+    ({!Ir.Schedule.automatic_schedule_active}), or any classified scoring, application, backend
+    validation, or compilation failure fall back to the ordinary default pipeline — the reported
+    {!model_choice} then says ["default"]. Fatal failures propagate without retrying. Once the
+    compile is on that pipeline there is nothing left to fall back to, so its failures propagate as
+    they would from {!Context.compile}, without a duplicate attempt. Unlike {!tune}, nothing
     is executed and no cache is involved — results depend only on the computation, backend, and
     envelope constants. *)
 

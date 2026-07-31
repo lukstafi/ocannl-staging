@@ -5070,7 +5070,7 @@ let fission_scheduled ?(promote_locals = false) ~(preset : Low_level.optimized -
             (List.filter promoted ~f:(fun (tn, _) -> not (crosses_segments final_swr tn)));
           List.map coalesced ~f:(fun (seg, replicas, sched) ->
               let pre = segment_optimized opt (seg_llc replicas seg) in
-              (seg.g_kind, pre, sched, apply ~static_indices sched pre))
+              (seg.g_kind, pre, sched, apply_classified ~static_indices sched pre))
 
 let fission_default ?promote_locals ~preset ~zero_sched ~static_indices (opt : Low_level.optimized)
     : Low_level.optimized list =
@@ -5106,8 +5106,9 @@ let maybe_default_schedule ~backend_name ?(limits = Backend_intf.no_hardware_lim
   (* [automatic_schedule_active] keeps logged runs serial: runtime kernel logging is
      line-interleaved under parallel execution, and serial logs stay deterministic and readable. *)
   if not (automatic_schedule_active ~backend_name) then opt
-  else if backend_is_gpu backend_name then apply ~static_indices (default_gpu ~limits opt) opt
-  else apply ~static_indices (default_cpu opt) opt
+  else if backend_is_gpu backend_name then
+    apply_classified ~static_indices (default_gpu ~limits opt) opt
+  else apply_classified ~static_indices (default_cpu opt) opt
 
 let maybe_default_schedules ~backend_name ?(limits = Backend_intf.no_hardware_limits)
     ~static_indices (opt : Low_level.optimized) : Low_level.optimized list =
