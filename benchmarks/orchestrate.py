@@ -44,6 +44,9 @@ PARITY_TOL_PRECISION = {"bf16": 4e-3, "f16": 2e-3}
 # slowly. Require at least one part per million of relative loss variation over the parity window.
 LOSS_MOVE_MIN_REL = 1e-6
 REFERENCE = ("pytorch", "cpu", "eager")
+# Report row order within a workload: precision-major, f32 first (it is the reference's precision
+# and every non-OCANNL cell's), then the reduced precisions; p50-ascending within each group.
+PRECISION_ORDER = ["f32", "bf16", "f16"]
 # The precision axis is a property of the runner, not of OCANNL: only bench_mlp and bench_gpt
 # implement BENCH_PRECISION (the training recipe and the forward-only leg respectively), so
 # reduced-precision cells are generated for those models only.
@@ -107,6 +110,14 @@ def cell_name(variant, precision):
     unchanged; a reduced-precision cell is named by the product, e.g. `tuned/bf16`.
     """
     return variant if precision == "f32" else f"{variant}/{precision}"
+
+
+def precision_rank(precision):
+    return (
+        PRECISION_ORDER.index(precision)
+        if precision in PRECISION_ORDER
+        else len(PRECISION_ORDER)
+    )
 
 
 def ocannl_exe(model):
@@ -181,15 +192,27 @@ def report(results, out_dir):
     lines.append(
         f"platform: {platform.platform()} {platform.machine()} | "
         f"ocannl commit: {commit} | parity tol: {PARITY_TOL:g} (max rel diff over "
-        f"first parity steps vs pytorch/cpu/eager)\n"
+        f"first parity steps vs pytorch/cpu/eager; reduced precisions get their own envelope: "
+        + ", ".join(f"{p} {t:g}" for p, t in sorted(PARITY_TOL_PRECISION.items()))
+        + ")\n"
     )
     for workload in sorted({r["workload"] for r in results}):
         lines.append(f"\n## {workload}\n")
         rows = [r for r in results if r["workload"] == workload]
-        rows.sort(key=lambda r: r["step_ms"]["p50"])
+        # Precision-major, p50-ascending within a precision: scheduling variants are ranked
+        # against the others computing in the same format, and a reduced-precision block reads as
+        # its own group rather than being interleaved by a speed it owes to its storage format.
+        rows.sort(
+            key=lambda r: (precision_rank(r.get("precision", "f32")), r["step_ms"]["p50"])
+        )
+        precisions = {r.get("precision", "f32") for r in rows}
+        if len(precisions) > 1:
+            lines.append(
+                "Rows are grouped by precision (f32 first), p50-ascending within each group.\n"
+            )
         with_tokens = any(r.get("tokens_per_step") for r in rows)
-        header = "| framework | backend | variant | step p50 ms | p10 | p90 | queued ms | compile s | parity |"
-        rule = "|---|---|---|---|---|---|---|---|---|"
+        header = "| framework | backend | variant | precision | step p50 ms | p10 | p90 | queued ms | compile s | parity |"
+        rule = "|---|---|---|---|---|---|---|---|---|---|"
         if with_tokens:
             header += " tok/s |"
             rule += "---|"
@@ -208,6 +231,7 @@ def report(results, out_dir):
                 tokens = f" {tps * 1000 / s['p50']:,.0f} |" if tps else " |"
             lines.append(
                 f"| {r['framework']} | {r['backend']} | {r['variant']} "
+                f"| {r.get('precision', 'f32')} "
                 f"| {s['p50']:.3f} | {s['p10']:.3f} | {s['p90']:.3f} "
                 f"| {r['queued_step_ms']:.3f} | {r['compile_s']:.2f} | {parity} |{tokens}"
             )

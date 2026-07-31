@@ -68,7 +68,6 @@ class CellIdentityTest(unittest.TestCase):
         for entry in orchestrate.SKIP_CELLS:
             self.assertEqual(len(entry), 4, entry)
 
-
     def test_tuned_f32_and_tuned_bf16_are_distinct_cells(self):
         rows = [
             result("ocannl", "hip", "tuned", [2.3, 2.2, 2.1]),
@@ -77,6 +76,19 @@ class CellIdentityTest(unittest.TestCase):
         names = {orchestrate.cell_name(r["variant"], r["precision"]) for r in rows}
 
         self.assertEqual(names, {"tuned", "tuned/bf16"})
+
+
+class ReportGroupingTest(unittest.TestCase):
+    def test_rows_group_by_precision_f32_first(self):
+        self.assertEqual(orchestrate.precision_rank("f32"), 0)
+        self.assertLess(
+            orchestrate.precision_rank("bf16"), orchestrate.precision_rank("f16")
+        )
+        # An unknown precision (the manual f16-static / f16-gatedN legs) sorts last rather
+        # than raising.
+        self.assertGreater(
+            orchestrate.precision_rank("f16-static"), orchestrate.precision_rank("f16")
+        )
 
 
 if __name__ == "__main__":
