@@ -1,0 +1,6 @@
+the tuner's base lowering binds no hardware dimension: true
+the untuned default compile of the same code does: true
+the serial baseline is timed on CPU backends and not dispatched on GPU ones: true
+the search timed at least one candidate: true
+the winner carries a measurement: true
+tuned routine values correct: true
