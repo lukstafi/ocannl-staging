@@ -104,6 +104,7 @@ let known_config_keys =
       "output_dlls_in_build_directory";
       "cuda_printf_fifo_size";
       "hip_printf_fifo_size";
+      "hip_scratch_validation";
       "multidev_num_devices";
       "buffer_aliasing";
       "log_buffer_aliasing";

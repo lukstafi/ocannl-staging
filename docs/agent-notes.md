@@ -192,6 +192,19 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   CUDA or HIP for load balancing across machines. The durable part: codegen snapshots for a
   backend whose hardware isn't attached (`.cu.expected` etc.) go stale until that hardware next
   runs the suite — expect re-promotes.
+- HIP scratch (private segment) is budgeted **per work-item, independent of launch geometry**, and
+  a kernel over budget aborts the HSA queue instead of failing cleanly (gh-ocannl-533). The
+  post-link validator in `hip_backend.ml` (`validate_scratch_budget`) declines it first, as
+  `Resource_exceeded Thread_scratch`. Measured on gfx1151/ROCm 7.14/WSL2: the cutoff is
+  `ceil(pss/64)*64 * max_threads_per_multiprocessor * multiprocessor_count <= 4 GiB` — 104832 B
+  accepted, 104848 B rejected; #533's 163856 B is far over. Traps worth remembering: the 4 GiB cap
+  is NOT queryable (it is enforced by the WSL WDDM thunk, `wsl::thunk::ComputeQueue::UpdateScratch`),
+  `hipLimitStackSize` is 1024 and has nothing to do with it, and hipcc separately refuses frames
+  over 262136 B. Disable with `ocannl_hip_scratch_validation=false` where the model doesn't hold.
+  Guard: `test/operations/hip_scratch_budget.ml` (`slow` alias).
+- Building a test kernel that actually *has* a big scratch frame takes care: write the `Local`
+  array in one loop and read it back in REVERSE in another. A forward read in the same order lets
+  the compiler forward each store to its load and delete the array, leaving nothing to reject.
 
 ## Training and performance
 

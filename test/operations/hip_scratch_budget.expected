@@ -1,0 +1,4 @@
+scratch: the reduction is correct before the decline: true
+scratch: over-budget kernel declined as Resource_exceeded Thread_scratch at link: true
+scratch: the decline claims no device writes: true
+scratch: a reduction after the decline is still correct: true

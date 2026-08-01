@@ -322,6 +322,15 @@ cuda_printf_fifo_size=
 # If set and relevant, it's the `hipLimitPrintfFifoSize` HIP configuration.
 hip_printf_fifo_size=
 
+# If `true` (the default), the HIP backend checks a freshly linked kernel's private (scratch)
+# segment size against what the device can back at full occupancy, and declines an over-budget
+# kernel as `Resource_exceeded Thread_scratch` instead of launching it. Launching one aborts the
+# HSA queue outright (`[UpdateScratch] scratch_size overflow!`), which no handler can contain and
+# which takes down unrelated work on the stream (gh-ocannl-533). Set to `false` on a device where
+# the budget model is wrong -- it was calibrated on gfx1151/ROCm 7.14 -- if valid kernels are
+# being rejected.
+hip_scratch_validation=true
+
 # The `-O` argument to the compiler executable for the `cc` and `multidev_cc` backends.
 cc_backend_optimization_level=3
 

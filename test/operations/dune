@@ -1029,6 +1029,7 @@
     %{dep:../../arrayjit/lib/cc_backend.ml}
     %{dep:../../arrayjit/lib/context.ml}
     %{dep:../../arrayjit/lib/cuda_backend.ml}
+    %{dep:../../arrayjit/lib/hip_backend.ml}
     %{dep:../../arrayjit/lib/low_level.ml}
     %{dep:../../arrayjit/lib/schedule.ml}
     %{dep:../../arrayjit/lib/schedule_outcome.ml}
@@ -1754,3 +1755,30 @@
  (libraries base ocannl stdio)
  (preprocess
   (pps ppx_here ppx_ocannl)))
+
+; gh-ocannl-533: the HIP scratch pre-validator. Gated behind `slow`: meaningful only on HIP, and it
+; deliberately compiles a kernel with a ~128 KiB per-work-item stack frame. `no-infer` keeps the
+; .actual out of the build targets so a plain `dune build` does not run it.
+
+(executable
+ (name hip_scratch_budget)
+ (modules hip_scratch_budget)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(rule
+ (alias slow)
+ (package neural_nets_lib)
+ (locks ocannl_training_test)
+ (deps
+  hip_scratch_budget.expected
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (action
+  (no-infer
+   (progn
+    (with-stdout-to
+     hip_scratch_budget.actual
+     (run %{dep:hip_scratch_budget.exe}))
+    (diff hip_scratch_budget.expected hip_scratch_budget.actual)))))

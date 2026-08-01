@@ -442,6 +442,40 @@ Do **not** add the earlier draft's generic `max_thread_scratch_bytes` field yet.
 function's per-thread local-memory use, but no directly corresponding `CU_DEVICE_ATTRIBUTE` is a
 portable maximum for that value. HIP exposes `localSizeBytes`, a per-thread stack limit, and on
 newer ROCm/hardware a device scratch-allocation threshold; those are related but not interchangeable.
+**RESOLVED (gfx1151 / Radeon 8060S / ROCm 7.14 / WSL2).** The experiment below was run and the
+validator landed; this paragraph's caution about which quantity to compare is now answered, and the
+answer is *none of the three candidates it lists*.
+
+- The rejecting limit is **not** the per-thread stack limit. `hipDeviceGetLimit(hipLimitStackSize)`
+  reports 1024 on this device, while kernels at 104832 B/work-item launch happily — two orders of
+  magnitude above it. It is also not the compiler's ceiling: hipcc refuses a stack frame over
+  262136 B (`stack frame size (262160) exceeds limit (262136)`), and #533's 163856 B compiles fine.
+- The limit is a **total scratch allocation cap of 4 GiB**, and it is a function of the per-work-item
+  size ALONE — the runtime backs a fully-occupied device, not the requested grid. Confirmed by
+  geometry sweeps: 98320 B/work-item launches at 204800 work-items, while 114704 B is rejected at a
+  *single* work-item. So the check needs no launch dimensions, which is why it can live at link.
+- The predicate that reproduces every one of ~70 sampled points is
+  `ceil(pss / 64) * 64 * max_threads_per_multiprocessor * multiprocessor_count <= 4 GiB`.
+  Measured boundary on this device: **104832 B accepted, 104848 B rejected** (the 16-byte step is
+  the compiler's own frame granularity, so the cutoff cannot be pinned finer than that).
+- The 4 GiB cap is **not** exposed by any HIP or HSA query. The abort text
+  (`[UpdateScratch] scratch_size overflow!`) lives in `librocdxg.so`, in
+  `wsl::thunk::ComputeQueue::UpdateScratch`, next to `Device::MaxScratchSlotsPerCu` — i.e. it is
+  enforced by the WSL WDDM thunk. The multiplier is genuinely queried; the cap is a documented
+  constant from this experiment, and `ocannl_hip_scratch_validation=false` disables the check on a
+  platform where the model does not hold.
+
+One correction to the premise above, worth recording because it changes what containment costs: on
+the **driver-API path this backend actually uses** (`hipModuleLoadData` → `hipModuleGetFunction` →
+`hipModuleLaunchKernel`), the scratch abort surfaces as a returned `hipErrorInvalidValue` from
+`hipDeviceSynchronize` and the process **survives**; only the runtime-API `hipLaunchKernelGGL` path
+takes SIGSEGV. The queue is still aborted either way, so this does not make recovery possible — but
+"a driver-level process abort no OCaml handler can contain" is too strong for the path we are on.
+Whether the surrounding context is reusable after such an abort remains the open question that
+`recover_after_launch_failure` would have to answer, and it stays unbuilt.
+
+Historical statement of the task, retained for context:
+
 The `private_seg_size=163856` in #533 must first be matched experimentally to the limit that rejected
 it.
 
