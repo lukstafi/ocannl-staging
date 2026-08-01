@@ -33,6 +33,7 @@ type cause =
       detail : string;
     }
   | Unclassified of { phase : phase; exn_constructor : string; detail : string }
+  | Seed_evicted of { family : string; detail : string }
 [@@deriving sexp_of, equal]
 
 type rejection_key =
@@ -41,6 +42,7 @@ type rejection_key =
   | Resource_exceeded_key of resource
   | Backend_rejected_key of string * string * severity
   | Unclassified_key of phase * string
+  | Seed_evicted_key of string
 [@@deriving sexp_of, compare, equal]
 
 let key_of_cause = function
@@ -50,6 +52,7 @@ let key_of_cause = function
   | Backend_rejected { backend; stage; severity; _ } ->
       Backend_rejected_key (backend, stage, severity)
   | Unclassified { phase; exn_constructor; _ } -> Unclassified_key (phase, exn_constructor)
+  | Seed_evicted { family; _ } -> Seed_evicted_key family
 
 type fatal = {
   exn : exn;
@@ -142,13 +145,14 @@ let detail_of_cause = function
   | Unsupported { detail; _ }
   | Resource_exceeded { detail; _ }
   | Backend_rejected { detail; _ }
-  | Unclassified { detail; _ } ->
+  | Unclassified { detail; _ }
+  | Seed_evicted { detail; _ } ->
       detail
 
 let exception_of_cause cause =
   match cause with
   | Resource_exceeded _ -> Utils.User_error (detail_of_cause cause)
-  | Illegal_schedule _ | Unsupported _ | Backend_rejected _ | Unclassified _ ->
+  | Illegal_schedule _ | Unsupported _ | Backend_rejected _ | Unclassified _ | Seed_evicted _ ->
       Invalid_argument (detail_of_cause cause)
 
 let raise_cause cause =

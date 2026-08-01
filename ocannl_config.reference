@@ -247,6 +247,13 @@ autotune_repeats=3
 # An empty value disables the cache (every `Autotune.tune` call searches afresh).
 autotune_cache_dir=autotune_cache
 
+# Candidate-volume cap on `Autotune.tune`'s split-reduce seed family (gh-ocannl-484 task 3): the
+# top so-many detected reduction-dominated sites, ranked by estimated segment cost (the
+# accumulation's trip count), are seeded with a few `num_blocks` values each. Sites the cap
+# evicts are recorded in the report's decline census rather than dropped silently
+# (gh-ocannl-541). 0 disables the family.
+autotune_split_reduce_max_sites=8
+
 # If true, `Autotune.tune` logs each candidate to stderr: its spec, whether it failed (with the
 # error message), deduplicated against an already-seen post-schedule digest, or was timed (and
 # its time), plus the cache-hit, winner-replay and fallback outcomes. For debugging search

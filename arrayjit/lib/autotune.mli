@@ -192,6 +192,10 @@ type sr_site = {
   sr_target : Ir.Tnode.t;  (** The accumulated node. *)
   sr_red : int;  (** The reduction loop's extent. *)
   sr_out : int;  (** The target's cell count — the site's whole output parallelism. *)
+  sr_cost : int;
+      (** Estimated segment cost: the accumulation statement's trip count (the product of every
+          enclosing loop extent) — the serial work a split could recover. The ranking key
+          (gh-ocannl-541). *)
   sr_dynamic : bool;  (** The gh-466 scatter form ([Set_dynamic]). *)
   sr_swaps : (Ir.Indexing.symbol * Ir.Indexing.symbol) list;
       (** The gh-ocannl-537 enabling interchange: [(outer, inner)] [Swap]s applied {e in order}
@@ -209,6 +213,13 @@ val split_reduce_sites :
     work. Per site the largest-extent enclosing serial loop that passes the hermetic
     {!Ir.Schedule.op_legality} probe of the corresponding [Split_reduce] is chosen (the op's own
     recognizer decides the pinning discipline), so every returned site is seedable as proposed.
+
+    Every detected site is returned, ranked by descending estimated segment cost ([sr_cost], the
+    accumulation's trip count) — gh-ocannl-541: the earlier [sr_red / sr_out] integer-division
+    ratio zeroed every large-output site, and the in-detection cap then silently excluded (and,
+    once gh-537 made more sites reachable, evicted) exactly the sites carrying the most serial
+    work. The candidate-volume cap now lives in {!tune} ([max_split_reduce_sites] /
+    config [autotune_split_reduce_max_sites]), which records evicted sites in the decline census.
 
     A candidate rejected {e only} because the accumulation cell's loops sit inside the reduction
     loop — how OCANNL lowers conv bias/weight gradients, where nothing else in the schedule space
@@ -237,7 +248,10 @@ type report = {
       (** Including the serial baseline where it was dispatched — on GPU backends it is not
           (gh-ocannl-532), and neither is any other candidate that binds no hardware dimension. *)
   candidates_failed : int;
-      (** Candidates rejected by op preconditions, hardware limits, or backend compilation. *)
+      (** Candidates rejected by op preconditions, hardware limits, or backend compilation — plus
+          detected seed sites declined before proposal (split-reduce sites evicted by
+          [max_split_reduce_sites], gh-ocannl-541), which the decline census records so a
+          previously-proposed site never stops being proposed silently. *)
   partial : bool;
       (** [true] when candidate work terminated on a fatal failure after the baseline was handled.
           Base-compile and baseline-timing failures occur before reporting begins. *)
@@ -267,10 +281,11 @@ type report = {
       *)
   split_reduce_candidates : int;
       (** Split-reduce seeds (gh-ocannl-484 task 3): one candidate per {!split_reduce_sites} site
-          and eligible [num_blocks] value — the two-pass deterministic split reduction applied
-          whole-routine before fission, each resulting segment getting the default preset.
-          Deterministic given the computation and backend; [0] when no reduction-dominated site is
-          detected. *)
+          within the [max_split_reduce_sites] cap and eligible [num_blocks] value — the two-pass
+          deterministic split reduction applied whole-routine before fission, each resulting
+          segment getting the default preset. Deterministic given the computation and backend; [0]
+          when no reduction-dominated site is detected. Sites the cap evicts appear in [declines]
+          under [Seed_evicted_key "split_reduce"]. *)
   split_reduce_timed : int;
       (** Of the split-reduce candidates (the per-site singles and the recombined multi-site
           composite), those that compiled and were actually timed. *)
@@ -419,6 +434,11 @@ val tune :
      config [autotune_keep_fraction] (1 = pre-filter off). Candidates without model coverage are
      always kept — never dropped, only measured — so the pre-filter never overrides (or precludes) a
      measured result; presets, saved schedules and the baseline are never pruned. *)
+  ?max_split_reduce_sites:int ->
+  (* Candidate-volume cap on the split-reduce seed family: the top so-many {!split_reduce_sites}
+     (ranked by estimated segment cost) are seeded; evicted sites are recorded in the decline
+     census under [Seed_evicted_key "split_reduce"] (gh-ocannl-541). Default from config
+     [autotune_split_reduce_max_sites] (8); [0] disables the family. *)
   ?timing_ctx:Context.t ->
   (* A scratch context lineage against which candidates are compiled and timed, so the timing runs
      never mutate [ctx]'s live buffers (parameters, accumulators — running a training step on

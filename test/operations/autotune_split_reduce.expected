@@ -18,5 +18,10 @@ the site carries an enabling interchange: true
 conv-gradient split-reduce candidates seeded: true
 the interchanged bias-gradient candidate reaches timing: true
 tuned bias gradient matches the serial reference: true
+sites rank by estimated segment cost, inverting the old ratio-0 order: true
+only the top-cost site is seeded under the cap: true
+the two evicted sites appear in the decline census: true
+the census still sums to candidates_failed: true
+the capped tuned routine matches the serial reference: true
 
 Done.
