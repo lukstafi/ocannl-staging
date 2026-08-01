@@ -366,16 +366,31 @@ let tensorize_llc ~(zero_fringe : Tn.t -> bool) ~i ~j ~k ~lane ~simd_width (llc 
               skim body
           | stmts -> stmts
         in
+        (* What the body actually is, one line per statement — without it a decline says only
+           "not perfectly nested", which does not distinguish an intervening loop from a sibling
+           statement (a staged tile copy, an inlined cast twin) that landed inside the nest. *)
+        let describe stmts =
+          String.concat ~sep:"; "
+            (List.map stmts ~f:(function
+              | For_loop { index; from_; to_; axis; _ } ->
+                  Printf.sprintf "For_loop %s[%d..%d] %s" (Indexing.symbol_ident index) from_ to_
+                    (Low_level.axis_type_label axis)
+              | Set { tn; _ } -> "Set " ^ Tn.debug_name tn
+              | Zero_out tn -> "Zero_out " ^ Tn.debug_name tn
+              | Tile_mma { d = tn, _; _ } -> "Tile_mma " ^ Tn.debug_name tn
+              | other -> List.hd_exn (String.split ~on:' ' (Sexp.to_string (sexp_of_t other)))))
+        in
         let nested ~of_ sym body =
           match skim body with
           | [ For_loop { index; from_; to_; body; trace_it; axis } ]
             when Indexing.equal_symbol index sym ->
               { index; from_; to_; body; trace_it; axis }
-          | _ ->
+          | stmts ->
               invalid_arg
                 ("Schedule.Tensorize: loop " ^ Indexing.symbol_ident sym
                ^ " must be exactly the body of loop " ^ Indexing.symbol_ident of_
-               ^ " (a perfectly nested i x j x k micro-kernel)")
+               ^ " (a perfectly nested i x j x k micro-kernel); that body is instead: "
+               ^ describe stmts)
         in
         let jfc = nested ~of_:i j ifc.body in
         let kfc = nested ~of_:j k jfc.body in
@@ -480,13 +495,26 @@ let tensorize_llc ~(zero_fringe : Tn.t -> bool) ~i ~j ~k ~lane ~simd_width (llc 
               match (a_role y_op, b_role x_op) with
               | Some ta, Some tb -> (y_op, ta, x_op, tb)
               | _ ->
+                  (* Naming the two tnodes is not enough to act on: the discipline is about the
+                     INDEX EXPRESSIONS, so report them against the micro-kernel symbols. *)
+                  let show (tn, idcs) =
+                    let dims = Lazy.force tn.Tn.dims in
+                    Tn.debug_name tn ^ ":"
+                    ^ Sexp.to_string ([%sexp_of: int array] dims)
+                    ^ "["
+                    ^ String.concat ~sep:", "
+                        (Array.to_list idcs
+                        |> List.map ~f:(fun idx ->
+                               Sexp.to_string (Indexing.sexp_of_axis_index idx)))
+                    ^ "]"
+                  in
                   invalid_arg
                     ("Schedule.Tensorize: operands of the product must be indexed [..., i, k] \
                       (or transposed [..., k, i]) and [..., k, j] (or transposed [..., j, k]) \
-                      over their last two axes (unit coefficients): "
-                    ^ Tn.debug_name (fst x_op)
-                    ^ ", "
-                    ^ Tn.debug_name (fst y_op)))
+                      over their last two axes (unit coefficients); with i="
+                    ^ Indexing.symbol_ident i ^ " j=" ^ Indexing.symbol_ident j ^ " k="
+                    ^ Indexing.symbol_ident k ^ " the operands are " ^ show x_op ^ ", "
+                    ^ show y_op))
         in
         (* Pad-mask parsing (gh-ocannl-485). Every skimmed guard must be a one-sided comparison
            [affine < bound] whose affine part carries exactly one micro symbol with coefficient 1
