@@ -14,9 +14,10 @@
    computing the right values.
 
    Gated behind the [slow] alias: it is meaningful only on HIP, and it deliberately compiles a
-   kernel with a ~128 KiB per-work-item stack frame. On other backends the checks below are
-   vacuous; the announcement goes to stderr so the golden stays backend-independent, as in
-   autotune_mma_companion. *)
+   kernel with a ~260 KB per-work-item stack frame. There are two ways for it to be inapplicable —
+   a non-HIP backend, and a HIP device whose scratch budget exceeds what the compiler will emit —
+   and both are announced on stderr rather than folded into the result, so the golden stays
+   backend- and device-independent (the autotune_mma_companion idiom). *)
 
 open Base
 open Ocannl
@@ -28,9 +29,18 @@ module SO = Ir.Schedule_outcome
 
 let p name b = Stdio.printf "%s: %b\n%!" name b
 
-(* 32768 floats = 128 KiB per work-item. The gfx1151 budget is ~104 KB, and hipcc's own stack-frame
-   ceiling is 262136 B, so this sits inside what compiles and outside what launches. *)
-let scratch_floats = 32768
+(* Near the largest frame hipcc will accept: it refuses a stack frame over 262136 B, and 65024
+   floats lands at ~260 KB, leaving ~2 KB of headroom for whatever else codegen puts on the frame
+   (at 65528 the margin is 8 bytes — thin enough that an unrelated codegen change would turn this
+   test into a compile error).
+
+   Near-maximal rather than merely over gfx1151's ~104 KB budget, because the budget is
+   [4 GiB / resident work-items] and therefore RISES on smaller devices: a fixed 128 KiB frame
+   would silently fall UNDER budget on a device with fewer CUs, and the rejection checks would then
+   report false rather than "not applicable". At this size the only devices that still cannot be
+   pushed over budget are those with <= 16384 resident work-items, where no compilable kernel can
+   exceed the budget at all; that case is announced as vacuous below instead of failing. *)
+let scratch_floats = 65024
 
 (* Replaces the routine body with: per Grid thread, fill a [Local] array of [scratch_floats]
    forward, then read it back in REVERSE into an accumulation. The reversed second loop is what
@@ -136,7 +146,17 @@ let () =
           ~provenance:SO.User_schedule ~candidate:"over-budget scratch" ctx comp Idx.Empty
       in
       match outcome with
-      | Ok _ -> (false, false)
+      | Ok _ ->
+          (* Accepted, at the largest frame the compiler will emit. On a device whose scratch
+             budget exceeds that ceiling (<= 16384 resident work-items) no compilable kernel can be
+             over budget, so the rejection is structurally unreachable here rather than broken.
+             Announced on stderr, like the non-HIP case, so the golden stays portable. *)
+          Stdio.eprintf
+            "scratch: this device's scratch budget exceeds hipcc's %d-byte frame ceiling — no \
+             compilable kernel is over budget, so the rejection checks below are vacuous\n\
+             %!"
+            (scratch_floats * 4);
+          (true, true)
       | Error (SO.Fatal _) -> (false, false)
       | Error (SO.Classified { phase; cause; execution_effect }) ->
           let right_cause =

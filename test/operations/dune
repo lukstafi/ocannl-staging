@@ -1770,6 +1770,7 @@
 (rule
  (alias slow)
  (package neural_nets_lib)
+ (locks ocannl_training_test)
  (deps
   hip_scratch_budget.expected
   ocannl_config
