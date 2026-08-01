@@ -79,13 +79,15 @@ GPU_DEVICES = {
 # (Metal reinit-after-tune race, PR #109/#174); the materialized variant covers the metal column.
 SKIP_CELLS = {
     ("cifar_conv", "metal", "tuned", None),
-    # mlp_wide hip/tuned: the search wedges before rendering its first candidate (no debug
-    # artifacts written, >65 min at constant 3-thread CPU spin, zero autotune_log lines past
-    # "arm A search:"); mlp_small hip/tuned completes in ~40 s on the same tree. gfx1151/WSL,
-    # gh-ocannl-476 ROCm leg. The default and materialized variants cover the hip column.
-    # Observed on ONE configuration only (gfx1151 under WSL) and not yet bisected, so it is
-    # unknown whether other HIP devices/OSes are affected: use --no-skip-cells to retest it
-    # (gh-ocannl-532 wants exactly that datapoint from native Linux or a CDNA part).
+    # mlp_wide hip/tuned: the search appeared to wedge, but perf showed 100% of the time in
+    # libhsa-runtime64 busy-waiting on a dispatch — the autotuner was timing the unparallelized
+    # serial baseline, i.e. the whole training step in one work-item, four times (warmup plus
+    # autotune_repeats). Hours per run on gfx1151, with Windows-side driver timeouts and a lost
+    # display. gh-ocannl-532; the same profile hits cifar_conv and cifar_stride hip/tuned.
+    # Fixed in the tuner: an unparallelized candidate is no longer dispatched on a GPU backend
+    # (confirmed on Metal, where LeNet's baseline measured 6.9 s/run against a 35.7 ms winner).
+    # This entry stays until the fix is confirmed on the machine that produced the symptom —
+    # retest with --no-skip-cells and drop the entry if the cell completes.
     ("mlp_wide", "hip", "tuned", None),
 }
 

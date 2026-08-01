@@ -157,7 +157,9 @@ type entry = {
           form and applied before fission, the segment keys then addressing the {e post-prelude}
           segmentation. *)
   best_ms : float;  (** The winning candidate's measured time, for diagnostics. *)
-  baseline_ms : float;  (** The unscheduled baseline's measured time, for diagnostics. *)
+  baseline_ms : float;
+      (** The unscheduled baseline's measured time, for diagnostics; [infinity] on GPU backends,
+          where the unparallelized baseline is not dispatched (gh-ocannl-532). *)
 }
 [@@deriving sexp]
 

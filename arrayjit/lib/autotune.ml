@@ -156,6 +156,27 @@ let time_routine ?(tag_failures = false) ~repeats cctx routine =
       done;
       !best)
 
+(* gh-ocannl-532: on a GPU backend, code that binds no hardware dimension runs the whole routine in
+   a single work-item — every nest a serial scalar loop, at one lane's throughput. Such a candidate
+   cannot win a search whose other candidates are parallel, so dispatching it is pure cost, and the
+   cost is unbounded: a training step of a few GFLOP is minutes to hours per run, and
+   [time_routine] does four of them (a warmup plus [autotune_repeats]). The dispatch is also
+   uninterruptible and shares the device with the display — the sessions in gh-ocannl-532 produced
+   driver-timeout reports and, once, loss of display output. So an unparallelized GPU candidate is
+   never dispatched: not timed, and not eligible to win. This covers the identity-transform serial
+   baseline, which is where it bites (the default annotator that parallelizes an untuned compile is
+   bypassed whenever a [?lowered_transform] is supplied, so the tuner's base compile is always the
+   unscheduled form). On CPU backends the serial form runs at full single-core speed and stays a
+   legitimate competitor — the rule is GPU-only. *)
+let binds_hardware_dims (opt : LL.optimized) = not (List.is_empty (LL.hardware_axes opt.LL.llc))
+
+(* A candidate is dispatchable when it is on a CPU backend, or at least one of its kernels binds a
+   hardware dimension. Whole-candidate rather than per-kernel: a fissioned candidate legitimately
+   leaves small segments serial next to parallel ones, and only an entirely serial routine has the
+   unbounded single-work-item cost. *)
+let dispatchable ~is_gpu (opts : LL.optimized list) =
+  (not is_gpu) || List.exists opts ~f:binds_hardware_dims
+
 (** {2 Matmul detection and sketch schedules}
 
     Sketch candidates instantiate the composed matmul pipelines pinned by
@@ -3524,6 +3545,18 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
             | None -> Whole (W_saved entry.SC.saved)
           in
           match compile_spec_real Outcome.Cache_replay spec with
+          | Ok c when not (dispatchable ~is_gpu c.all_opts) ->
+              (* An entry written before the gh-ocannl-532 rule can name the serial baseline as the
+                 winner: it was timed then, and it won by default whenever every candidate failed to
+                 compile — the state gh-ocannl-521 recorded for every GPU backend. Replaying it
+                 would reintroduce the single-work-item dispatch through the cache, permanently and
+                 without ever timing anything. Rejected like a stale entry: the fresh search below
+                 overwrites it. Rejecting the replay (rather than bumping [entry_version]) keeps
+                 every sound entry, on this backend and on the CPU backends, where an empty schedule
+                 is a legitimate winner. *)
+              logf "cache entry replays to an unparallelized routine, re-searching: %s"
+                (spec_label spec);
+              None
           | Ok c ->
               logf "cache hit: %s (best %.4f ms, baseline %.4f ms)" (spec_label spec)
                 entry.SC.best_ms entry.SC.baseline_ms;
@@ -3567,11 +3600,24 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
       let seen = Hash_set.create (module String) in
       Hash_set.add seen base_digest;
       (* Baseline timing runs uncaught: its failures (e.g. uninitialized inputs) are the user's bug,
-         with the same message [Context.run] would give. *)
-      let baseline_ms = time_routine ~repeats bctx broutine in
-      logf "baseline: %.4f ms (digest %s)" baseline_ms (dshort base_digest);
-      emit_calibration ~backend ~limits ~label:"baseline" ~digest:base_digest
-        ~measured_ms:baseline_ms [ base_opt ];
+         with the same message [Context.run] would give. On a GPU backend the baseline is the
+         unscheduled serial form and is not dispatched at all (see [dispatchable]); [infinity] is
+         its rank, so every timed candidate beats it and the search never returns it (see the
+         fallback at the end). *)
+      let baseline_dispatched = dispatchable ~is_gpu [ base_opt ] in
+      let baseline_ms =
+        if baseline_dispatched then time_routine ~repeats bctx broutine else Float.infinity
+      in
+      if baseline_dispatched then (
+        logf "baseline: %.4f ms (digest %s)" baseline_ms (dshort base_digest);
+        emit_calibration ~backend ~limits ~label:"baseline" ~digest:base_digest
+          ~measured_ms:baseline_ms [ base_opt ])
+      else
+        (* No calibration row: the model column is only meaningful next to a measurement. *)
+        logf
+          "baseline: NOT DISPATCHED, binds no hardware dimension on %s -- the whole routine would \
+           run in one work-item (gh-ocannl-532) (digest %s)"
+          backend (dshort base_digest);
       let baseline =
         {
           form = Whole_saved [];
@@ -3586,7 +3632,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
           mma_renders = [];
         }
       in
-      let n_timed = ref 1 in
+      let n_timed = ref (if baseline_dispatched then 1 else 0) in
       let declines : (Outcome.rejection_key, decline_acc) Hashtbl.Poly.t = Hashtbl.Poly.create () in
       (* Live search state for an honest partial report. Each counter starts at the amount of work
          completed so far and is updated at its ordinary accounting site below. [best_so_far] is
@@ -3667,6 +3713,13 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
         | Ok c ->
             if Hash_set.mem seen c.digest_after then (
               logf "%s: dedup (digest %s)" (spec_label spec) (dshort c.digest_after);
+              None)
+            else if not (dispatchable ~is_gpu c.all_opts) then (
+              (* Degenerated to the serial form (gh-ocannl-532): recorded as seen, so an equivalent
+                 later candidate dedups rather than re-deriving the same skip. *)
+              Hash_set.add seen c.digest_after;
+              logf "%s: NOT DISPATCHED, binds no hardware dimension (digest %s)" (spec_label spec)
+                (dshort c.digest_after);
               None)
             else (
               Hash_set.add seen c.digest_after;
@@ -3954,23 +4007,30 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
             else continue_ := false
       done;
       let best_c, best_ms = !best in
+      (* The winner is the undispatched baseline exactly when nothing was timed: every candidate
+         failed and (on GPU) the serial baseline was never run. Nothing measured means nothing to
+         cache — a stored entry would pin future processes to a never-timed schedule. *)
+      let nothing_timed = Float.is_inf best_ms in
       (if use_cache then
-         let saved, segments =
-           match best_c.form with
-           | Whole_saved saved -> (saved, None)
-           | Fiss_saved assoc -> ([], Some assoc)
-           | Split_saved (prelude, assoc) -> (prelude, Some assoc)
-         in
-         SC.store ~dir:cache_dir ~key
-           {
-             SC.version = SC.entry_version;
-             backend;
-             source_digest = base_digest;
-             saved;
-             segments;
-             best_ms;
-             baseline_ms;
-           });
+         if nothing_timed then
+           logf "nothing was timed: storing no cache entry (gh-ocannl-532)"
+         else
+           let saved, segments =
+             match best_c.form with
+             | Whole_saved saved -> (saved, None)
+             | Fiss_saved assoc -> ([], Some assoc)
+             | Split_saved (prelude, assoc) -> (prelude, Some assoc)
+           in
+           SC.store ~dir:cache_dir ~key
+             {
+               SC.version = SC.entry_version;
+               backend;
+               source_digest = base_digest;
+               saved;
+               segments;
+               best_ms;
+               baseline_ms;
+             });
       (* Diagnostic control (config [autotune_log]): compile and time the UNTUNED default pipeline
          in this very process, on the search context — discriminates a genuinely slow winner from
          process-state effects when the winner's code nominally equals the untuned program yet a
@@ -4009,7 +4069,14 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
         }
       in
       let result =
-        if Option.is_none timing_ctx then (best_c.cctx, best_c.routine)
+        if nothing_timed then (
+          (* Returning the incumbent here would hand the caller the very serial routine this search
+             refused to dispatch (gh-ocannl-532) — slower than not tuning at all, and on GPU
+             unbounded. The untuned default pipeline is the honest fallback: the same code the
+             caller would have compiled without the tuner. *)
+          logf "nothing was timed: falling back to the untuned default compile (gh-ocannl-532)";
+          Context.compile ctx comp bindings)
+        else if Option.is_none timing_ctx then (best_c.cctx, best_c.routine)
         else
           (* The search ran against the scratch lineage; compile the winner from the caller's
              context (like the cache-hit path). Digest mismatch or replay failure falls back to the
@@ -4021,6 +4088,15 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
             | Split_saved (prelude, assoc) -> Fiss (F_split_saved (prelude, assoc))
           in
           match compile_spec_real Outcome.Candidate spec with
+          | Ok c when not (dispatchable ~is_gpu c.all_opts) ->
+              (* Completes the invariant rather than fixing an observed bug: the winner was timed,
+                 so it was dispatchable when measured, and the replay is digest-guarded. But this is
+                 the last of the three ways [tune] hands back a routine, and none of them may return
+                 an unparallelized GPU routine (gh-ocannl-532). The default compile is the same
+                 fallback a failed replay takes. *)
+              logf "winner replay produced an unparallelized routine, falling back: %s"
+                (spec_label spec);
+              Context.compile ctx comp bindings
           | Ok c ->
               logf "winner replay ok: %s" (spec_label spec);
               (c.cctx, c.routine)

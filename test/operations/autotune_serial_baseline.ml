@@ -1,0 +1,153 @@
+(* gh-ocannl-532: the autotuner never dispatches an unparallelized candidate on a GPU backend.
+
+   A kernel that binds no hardware dimension runs the whole routine in one work-item — at scalar
+   throughput, unbounded in cost (a few-GFLOP training step measured 6.9 s per run on Metal, hours
+   on HIP), uninterruptible, and sharing the device with the display. It cannot win a search whose
+   other candidates are parallel, so it is not run at all: not timed, and not eligible to win.
+
+   Printed booleans, all backend-independent:
+
+   - The tuner's base compile binds no hardware dimension. Supplying a [?lowered_transform] bypasses
+     the default annotator, so the identity-transform baseline is the unscheduled serial form on
+     every backend — the premise of the rule.
+   - The default compile of that same code does bind one wherever automatic scheduling is active, so
+     on GPU the baseline is strictly the serial twin of code the backend parallelizes for free.
+   - [Autotune.tune] times the baseline exactly where it is not a single work-item: [baseline_ms] is
+     finite on CPU backends (the serial form runs at full single-core speed and stays a legitimate
+     competitor) and [infinity] on GPU ones.
+   - Either way the search returns a working routine whose winner carries a measurement.
+   - The rule holds on the cache-replay path too: a planted entry naming the serial form as the
+     winner is rejected and re-searched on GPU, and honoured on CPU. *)
+
+open Base
+open Ocannl
+open Ocannl.Operation.DSL_modules
+module LL = Ir.Low_level
+module Sched = Ir.Schedule
+module SC = Ir.Schedule_cache
+module Asgns = Ir.Assignments
+
+let p name b = Stdio.printf "%s: %b\n" name b
+let approx a b = Float.(abs (a - b) < 1e-4)
+
+let named name (comp : Asgns.comp) : Asgns.comp =
+  { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
+
+(* Comfortably above [cpu_schedule_min_parallel] (16384) so the default annotator parallelizes on
+   CPU backends too, not only on GPU ones (where the threshold is [gpu_schedule_min_parallel] = 64).
+   Compiled, never run: this half of the test is structural. *)
+let side = 256
+
+let n = 16
+let mav = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 7) *. 0.5)
+let mbv = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 11) -. 4.)
+
+let mm_expected =
+  Array.init (n * n) ~f:(fun idx ->
+      let i = idx / n and j = idx % n in
+      let acc = ref 0. in
+      for k = 0 to n - 1 do
+        acc := !acc +. (mav.((i * n) + k) *. mbv.((k * n) + j))
+      done;
+      !acc)
+
+let () =
+  (* --- The structural premise: identity transform = the serial form; no transform = parallel --- *)
+  let av = Array.init (side * side) ~f:(fun i -> Float.of_int (i % 13) *. 0.25) in
+  let bv = Array.init (side * side) ~f:(fun i -> Float.of_int (i % 7) -. 3.) in
+  let a = TDSL.ndarray av ~label:[ "sb_a" ] ~output_dims:[ side; side ] () in
+  let b = TDSL.ndarray bv ~label:[ "sb_b" ] ~output_dims:[ side; side ] () in
+  let%op sb_sum = a + b in
+  let comp = named "sb_sum" (Train.forward sb_sum) in
+  let ctx = Context.auto () in
+  let backend = Context.backend_name ctx in
+  let limits = Context.hardware_limits ctx in
+  let captured = ref None in
+  let _ctx, _routine =
+    Context.compile
+      ~lowered_transform:(fun opt ->
+        captured := Some opt;
+        opt)
+      ctx comp Ir.Indexing.Empty
+  in
+  let base = Option.value_exn ~here:[%here] !captured in
+  p "the tuner's base lowering binds no hardware dimension"
+    (List.is_empty (LL.hardware_axes base.LL.llc));
+  let default =
+    Sched.maybe_default_schedules ~backend_name:backend ~limits ~static_indices:[] base
+  in
+  p "the untuned default compile of the same code does"
+    ((not (Sched.automatic_schedule_active ~backend_name:backend))
+    || List.exists default ~f:(fun o -> not (List.is_empty (LL.hardware_axes o.LL.llc))));
+
+  (* --- The search: the baseline is timed on CPU backends and skipped on GPU ones --- *)
+  let ma = TDSL.ndarray mav ~label:[ "sb_ma" ] ~input_dims:[ n ] ~output_dims:[ n ] () in
+  let mb = TDSL.ndarray mbv ~label:[ "sb_mb" ] ~input_dims:[ n ] ~output_dims:[ n ] () in
+  let%op mc = ma * mb in
+  let tune_comp = named "sb_matmul" (Train.forward mc) in
+  let report = ref None in
+  let ctx = Context.auto () in
+  let ctx, routine =
+    (* [cache_dir:""] disables the disk cache: this test asserts what a search does, not what a
+       previous run left behind. *)
+    Autotune.tune ~beam_width:1 ~rounds:1 ~repeats:1 ~cache_dir:""
+      ~report:(fun r -> report := Some r)
+      ctx tune_comp Ir.Indexing.Empty
+  in
+  let ctx = Context.run ctx routine in
+  let got = Context.get_values ctx mc.Tensor.value in
+  let r = Option.value_exn ~here:[%here] !report in
+  let is_gpu = Sched.backend_is_gpu backend in
+  p "the serial baseline is timed on CPU backends and not dispatched on GPU ones"
+    (Bool.equal (Float.is_finite r.Autotune.baseline_ms) (not is_gpu));
+  p "the search timed at least one candidate" (r.Autotune.candidates_timed >= 1);
+  p "the winner carries a measurement" (Float.is_finite r.Autotune.best_ms);
+  p "tuned routine values correct" (Array.for_all2_exn got mm_expected ~f:approx);
+
+  (* --- The same rule on the cache-replay path. A cache entry written before the rule can name the
+     serial baseline as the winner: it was timed then, and it wins by default whenever every
+     candidate fails to compile. Such an entry is an empty saved schedule, which replays as the
+     identity — so honouring it would reintroduce the single-work-item dispatch permanently, without
+     ever timing anything. Planted by hand here, since the tuner no longer produces one. On CPU
+     backends an empty schedule is a legitimate winner and must still hit. --- *)
+  let cache_dir = "autotune_cache_serial_baseline" in
+  if Stdlib.Sys.file_exists cache_dir && Stdlib.Sys.is_directory cache_dir then
+    Array.iter (Stdlib.Sys.readdir cache_dir) ~f:(fun f ->
+        Stdlib.Sys.remove (Stdlib.Filename.concat cache_dir f));
+  let canon = ref None in
+  let ctx = Context.auto () in
+  let _ctx, _routine =
+    Context.compile
+      ~lowered_transform:(fun opt ->
+        canon := Some (SC.canonicalize ~static_indices:[] opt);
+        opt)
+      ctx tune_comp Ir.Indexing.Empty
+  in
+  let canon = Option.value_exn ~here:[%here] !canon in
+  SC.store ~dir:cache_dir
+    ~key:(SC.cache_key canon ~backend)
+    {
+      SC.version = SC.entry_version;
+      backend;
+      source_digest = SC.digest canon;
+      saved = [];
+      segments = None;
+      best_ms = 1e-6;
+      baseline_ms = 1e-6;
+    };
+  let report = ref None in
+  let ctx = Context.auto () in
+  let ctx, routine =
+    Autotune.tune ~beam_width:1 ~rounds:1 ~repeats:1 ~cache_dir
+      ~report:(fun r -> report := Some r)
+      ctx tune_comp Ir.Indexing.Empty
+  in
+  let ctx = Context.run ctx routine in
+  let got = Context.get_values ctx mc.Tensor.value in
+  let r = Option.value_exn ~here:[%here] !report in
+  p "a serial cache entry is rejected on GPU backends and honoured on CPU ones"
+    (Bool.equal r.Autotune.cache_hit (not is_gpu));
+  p "rejecting it re-searches rather than returning the serial routine"
+    (if is_gpu then r.Autotune.candidates_timed >= 1 else r.Autotune.candidates_timed = 0);
+  p "the routine from the poisoned-cache path computes correct values"
+    (Array.for_all2_exn got mm_expected ~f:approx)
