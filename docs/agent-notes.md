@@ -54,6 +54,23 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   `Assignments.to_low_level`); add-family keeps physical halos committed as tensor-node identity
   (padded convs lower offset-free). The padded dim equation requires the input divisible by the
   stride, and a stride-2 window only clips on the right for window ≥ 5.
+- A shape-INFERRED wrapper around a parameter has its open row variables resolved by the USE SITE,
+  not by the thing it wraps. `Mixed_prec`'s cast twin (`Operation.cast`, a pointwise op) read as
+  the weight operand of a *batched* matmul broadcast the batch axis in and materialized as
+  `[batch, out, in]` — a per-batch-row copy of one weight (gh-ocannl-540; fixed by passing
+  `~batch_dims:[]`, since a parameter has no batch axes). Nothing catches this downstream: every
+  slice holds the same value, so results, gradients and loss trajectories are all correct, and the
+  only symptoms are `batch`x memory/work and the row symbol appearing in an operand index. Two
+  lessons: (1) when wrapping a parameter, PIN the axes the wrapper must not acquire rather than
+  letting inference pick; (2) a parity oracle whose model has no batch axis cannot see a
+  batch-broadcast bug — `mixed_prec_parity.ml` had covered this recipe for a whole release.
+- That spurious axis is also how a shape defect reaches the SCHEDULER, which is where it actually
+  got noticed: `Tensorize`'s role check rejects an operand mentioning the third micro symbol, and
+  `Stage`'s insertion point L\* is "the deepest loop carrying an outer-part symbol", so an operand
+  that spuriously depends on the row loop pins the cooperative load nest INSIDE it and breaks the
+  perfect nest. One shape bug, two unrelated-looking decline families, split exactly by whether the
+  seed stages operands (`sk_bk > 0`) or not. When a whole autotune family declines structurally,
+  check the operands' index expressions before suspecting the scheduler.
 
 ## Syntax extensions (%op / %cd)
 
@@ -217,6 +234,15 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
 - Building a test kernel that actually *has* a big scratch frame takes care: write the `Local`
   array in one loop and read it back in REVERSE in another. A forward read in the same order lets
   the compiler forward each store to its load and delete the array, leaving nothing to reject.
+- `Context.get_used_memory` must report OCANNL's OWN allocation (`Slab.used_memory`, or the
+  backend's atomic counter) — never the driver's `total - free`. That is device-global: it counts
+  other processes and moves in allocation granules, so it cannot see sub-granule effects like the
+  liveness planner's arena savings. gh-ocannl-289 fixed this for CUDA; HIP kept asking the driver
+  until gh-ocannl-542, where on a gfx1151 APU sharing memory with the display it made
+  `buffer_aliasing` report the planner INCREASING the footprint 106496 -> 2072576 B, against
+  1556896 -> 1425668 B once measured properly (cc: 1556640 -> 1425540). When one backend's
+  numeric assertion inverts while its parity assertions pass, suspect the measurement API before
+  the pass under test — and check whether a sibling backend already fixed the same thing.
 
 ## Training and performance
 
