@@ -219,8 +219,9 @@ BENCH_FIXTURE=fixtures/lenet.safetensors BENCH_TUNE=1 \
   --ocannl_autotune_cache_dir=/tmp/fresh --ocannl_autotune_log=true 2>&1 \
   | grep -E 'F_split\[|F_preset\[|control'
 
-# What the split has to remove, in each placement
-BENCH_FIXTURE=fixtures/lenet.safetensors BENCH_SEG_TIMES=1 [BENCH_MATERIALIZE=1] \
+# What the split has to remove, in each placement.
+# Prefix BENCH_MATERIALIZE=1 for the materialized placement (the one that ships).
+BENCH_FIXTURE=fixtures/lenet.safetensors BENCH_SEG_TIMES=1 \
   ../_build/default/benchmarks/runners/ocannl/bench_conv_diag.exe --ocannl_backend=cuda
 ```
 
