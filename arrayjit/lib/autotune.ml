@@ -2327,6 +2327,12 @@ type sr_site = {
   sr_target : Ir.Tnode.t;  (** The accumulated node. *)
   sr_red : int;  (** The [sr_axis] loop's extent. *)
   sr_out : int;  (** The target's cell count — the site's whole output parallelism. *)
+  sr_cost : int;
+      (** Estimated segment cost: the accumulation statement's trip count — the product of every
+          enclosing loop extent, i.e. how many accumulate steps the serial nest spends on this
+          site. Ranks the sites (gh-ocannl-541): the earlier [sr_red / sr_out] integer-division
+          ratio sent every large-output site to 0, silently excluding the very sites (conv weight
+          gradients) with the most serial work to recover. *)
   sr_dynamic : bool;  (** The gh-466 scatter form ([Set_dynamic]). *)
   sr_swaps : (Idx.symbol * Idx.symbol) list;
       (** The enabling interchange (gh-ocannl-537), as [(outer, inner)] pairs applied {e in order}
@@ -2341,9 +2347,6 @@ let sr_out_max = 4096
 (* Reduction extents below this are not worth a second kernel pass (the combine reads
    [num_blocks] partial cells per output cell). *)
 let sr_red_min = 64
-
-(* Candidate-volume cap: the most reduction-dominated sites win ties. *)
-let sr_max_sites = 4
 
 (* The adjacent-interchange chain hoisting [needed] outside [axis] within the write's loop [path]
    (outermost first), or [None] when some symbol is not a loop of that path — e.g. a static index —
@@ -2452,6 +2455,7 @@ let split_reduce_sites ?(static_indices = []) (opt : LL.optimized) : sr_site lis
                 sr_target = tn;
                 sr_red = n;
                 sr_out = out;
+                sr_cost = List.fold enclosing ~init:1 ~f:(fun c (_, n, _) -> c * max 1 n);
                 sr_dynamic = dynamic;
                 sr_swaps = swaps;
               }
@@ -2474,10 +2478,11 @@ let split_reduce_sites ?(static_indices = []) (opt : LL.optimized) : sr_site lis
     | _ -> ()
   in
   walk [] opt.LL.llc;
-  List.take
-    (List.sort (List.rev !acc) ~compare:(fun a b ->
-         Int.compare (b.sr_red / max 1 b.sr_out) (a.sr_red / max 1 a.sr_out)))
-    sr_max_sites
+  (* Estimated segment cost, descending — the site with the most serial work to recover ranks
+     first (gh-ocannl-541). Stable, so equal-cost sites keep detection (program) order. The
+     candidate-volume cap is NOT applied here: it belongs to the search ([tune]'s
+     [max_split_reduce_sites]), which records the sites it evicts in the decline census. *)
+  List.stable_sort (List.rev !acc) ~compare:(fun a b -> Int.compare b.sr_cost a.sr_cost)
 
 (** {2 Analytic cost-model scoring (gh-ocannl-491, the selection half)}
 
@@ -3451,13 +3456,18 @@ let model_default ?report ctx comp bindings =
 
 (** {2 The search} *)
 
-let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fraction ?timing_ctx
-    ?report ctx comp bindings =
+let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fraction
+    ?max_split_reduce_sites ?timing_ctx ?report ctx comp bindings =
   let beam_width =
     max 1 (Option.value beam_width ~default:(int_arg ~arg_name:"autotune_beam_width" ~default:2))
   in
   let rounds = Option.value rounds ~default:(int_arg ~arg_name:"autotune_rounds" ~default:2) in
   let repeats = Option.value repeats ~default:(int_arg ~arg_name:"autotune_repeats" ~default:3) in
+  let max_split_reduce_sites =
+    max 0
+      (Option.value max_split_reduce_sites
+         ~default:(int_arg ~arg_name:"autotune_split_reduce_max_sites" ~default:8))
+  in
   let seed_block_sizes = Option.value seed_block_sizes ~default:[ 64; 128; 256; 512 ] in
   let cache_dir =
     Option.value cache_dir
@@ -3904,7 +3914,30 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
          overhead). On GPU the block loop is the bulk of pass 1's launch parallelism at these
          low-output sites, so the sweep leans larger; the CPU pool saturates at core counts.
          Multi-site combination is recovered below by recombining the best-timed singles. *)
-      let sr_sites = if is_gpu || is_cpu then split_reduce_sites ~static_indices base_opt else [] in
+      let sr_ranked =
+        if is_gpu || is_cpu then split_reduce_sites ~static_indices base_opt else []
+      in
+      let sr_sites = List.take sr_ranked max_split_reduce_sites in
+      (* The candidate-volume cap binding is an eviction, not a judgement about the site: it was
+         reachable and ranked, and lost only to the cap. Record each evicted site in the decline
+         census — the gh-ocannl-541 blind spot was exactly a previously-seeded site silently
+         dropping out of the proposal set when newly-reachable sites filled the cap. *)
+      List.iter (List.drop sr_ranked max_split_reduce_sites) ~f:(fun s ->
+          let detail =
+            Printf.sprintf "site %s red%d out%d cost%d%s evicted by autotune_split_reduce_max_sites=%d"
+              (Ir.Tnode.debug_name s.sr_target) s.sr_red s.sr_out s.sr_cost
+              (match List.length s.sr_swaps with
+              | 0 -> ""
+              | n -> Printf.sprintf " swap%d" n)
+              max_split_reduce_sites
+          in
+          logf "split_reduce: %s" detail;
+          record_decline declines
+            {
+              Outcome.phase = Outcome.Transform;
+              cause = Outcome.Seed_evicted { family = "split_reduce"; detail };
+              execution_effect = Outcome.No_device_writes;
+            });
       let sr_num_blocks = if is_gpu then [ 32; 128; 512 ] else [ 8; 32; 128 ] in
       let sr_specs =
         List.concat_map sr_sites ~f:(fun s ->
