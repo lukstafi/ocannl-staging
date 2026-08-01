@@ -4,3 +4,6 @@ the serial baseline is timed on CPU backends and not dispatched on GPU ones: tru
 the search timed at least one candidate: true
 the winner carries a measurement: true
 tuned routine values correct: true
+a serial cache entry is rejected on GPU backends and honoured on CPU ones: true
+rejecting it re-searches rather than returning the serial routine: true
+the routine from the poisoned-cache path computes correct values: true

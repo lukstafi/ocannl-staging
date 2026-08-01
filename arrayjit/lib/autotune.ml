@@ -3545,6 +3545,18 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
             | None -> Whole (W_saved entry.SC.saved)
           in
           match compile_spec_real Outcome.Cache_replay spec with
+          | Ok c when not (dispatchable ~is_gpu c.all_opts) ->
+              (* An entry written before the gh-ocannl-532 rule can name the serial baseline as the
+                 winner: it was timed then, and it won by default whenever every candidate failed to
+                 compile — the state gh-ocannl-521 recorded for every GPU backend. Replaying it
+                 would reintroduce the single-work-item dispatch through the cache, permanently and
+                 without ever timing anything. Rejected like a stale entry: the fresh search below
+                 overwrites it. Rejecting the replay (rather than bumping [entry_version]) keeps
+                 every sound entry, on this backend and on the CPU backends, where an empty schedule
+                 is a legitimate winner. *)
+              logf "cache entry replays to an unparallelized routine, re-searching: %s"
+                (spec_label spec);
+              None
           | Ok c ->
               logf "cache hit: %s (best %.4f ms, baseline %.4f ms)" (spec_label spec)
                 entry.SC.best_ms entry.SC.baseline_ms;
@@ -4076,6 +4088,15 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
             | Split_saved (prelude, assoc) -> Fiss (F_split_saved (prelude, assoc))
           in
           match compile_spec_real Outcome.Candidate spec with
+          | Ok c when not (dispatchable ~is_gpu c.all_opts) ->
+              (* Completes the invariant rather than fixing an observed bug: the winner was timed,
+                 so it was dispatchable when measured, and the replay is digest-guarded. But this is
+                 the last of the three ways [tune] hands back a routine, and none of them may return
+                 an unparallelized GPU routine (gh-ocannl-532). The default compile is the same
+                 fallback a failed replay takes. *)
+              logf "winner replay produced an unparallelized routine, falling back: %s"
+                (spec_label spec);
+              Context.compile ctx comp bindings
           | Ok c ->
               logf "winner replay ok: %s" (spec_label spec);
               (c.cctx, c.routine)

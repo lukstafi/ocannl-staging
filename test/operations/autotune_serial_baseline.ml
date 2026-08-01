@@ -15,13 +15,16 @@
    - [Autotune.tune] times the baseline exactly where it is not a single work-item: [baseline_ms] is
      finite on CPU backends (the serial form runs at full single-core speed and stays a legitimate
      competitor) and [infinity] on GPU ones.
-   - Either way the search returns a working routine whose winner carries a measurement. *)
+   - Either way the search returns a working routine whose winner carries a measurement.
+   - The rule holds on the cache-replay path too: a planted entry naming the serial form as the
+     winner is rejected and re-searched on GPU, and honoured on CPU. *)
 
 open Base
 open Ocannl
 open Ocannl.Operation.DSL_modules
 module LL = Ir.Low_level
 module Sched = Ir.Schedule
+module SC = Ir.Schedule_cache
 module Asgns = Ir.Assignments
 
 let p name b = Stdio.printf "%s: %b\n" name b
@@ -99,4 +102,52 @@ let () =
     (Bool.equal (Float.is_finite r.Autotune.baseline_ms) (not is_gpu));
   p "the search timed at least one candidate" (r.Autotune.candidates_timed >= 1);
   p "the winner carries a measurement" (Float.is_finite r.Autotune.best_ms);
-  p "tuned routine values correct" (Array.for_all2_exn got mm_expected ~f:approx)
+  p "tuned routine values correct" (Array.for_all2_exn got mm_expected ~f:approx);
+
+  (* --- The same rule on the cache-replay path. A cache entry written before the rule can name the
+     serial baseline as the winner: it was timed then, and it wins by default whenever every
+     candidate fails to compile. Such an entry is an empty saved schedule, which replays as the
+     identity — so honouring it would reintroduce the single-work-item dispatch permanently, without
+     ever timing anything. Planted by hand here, since the tuner no longer produces one. On CPU
+     backends an empty schedule is a legitimate winner and must still hit. --- *)
+  let cache_dir = "autotune_cache_serial_baseline" in
+  if Stdlib.Sys.file_exists cache_dir && Stdlib.Sys.is_directory cache_dir then
+    Array.iter (Stdlib.Sys.readdir cache_dir) ~f:(fun f ->
+        Stdlib.Sys.remove (Stdlib.Filename.concat cache_dir f));
+  let canon = ref None in
+  let ctx = Context.auto () in
+  let _ctx, _routine =
+    Context.compile
+      ~lowered_transform:(fun opt ->
+        canon := Some (SC.canonicalize ~static_indices:[] opt);
+        opt)
+      ctx tune_comp Ir.Indexing.Empty
+  in
+  let canon = Option.value_exn ~here:[%here] !canon in
+  SC.store ~dir:cache_dir
+    ~key:(SC.cache_key canon ~backend)
+    {
+      SC.version = SC.entry_version;
+      backend;
+      source_digest = SC.digest canon;
+      saved = [];
+      segments = None;
+      best_ms = 1e-6;
+      baseline_ms = 1e-6;
+    };
+  let report = ref None in
+  let ctx = Context.auto () in
+  let ctx, routine =
+    Autotune.tune ~beam_width:1 ~rounds:1 ~repeats:1 ~cache_dir
+      ~report:(fun r -> report := Some r)
+      ctx tune_comp Ir.Indexing.Empty
+  in
+  let ctx = Context.run ctx routine in
+  let got = Context.get_values ctx mc.Tensor.value in
+  let r = Option.value_exn ~here:[%here] !report in
+  p "a serial cache entry is rejected on GPU backends and honoured on CPU ones"
+    (Bool.equal r.Autotune.cache_hit (not is_gpu));
+  p "rejecting it re-searches rather than returning the serial routine"
+    (if is_gpu then r.Autotune.candidates_timed >= 1 else r.Autotune.candidates_timed = 0);
+  p "the routine from the poisoned-cache path computes correct values"
+    (Array.for_all2_exn got mm_expected ~f:approx)
