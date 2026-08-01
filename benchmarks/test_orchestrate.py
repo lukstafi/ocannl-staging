@@ -54,15 +54,24 @@ class CellIdentityTest(unittest.TestCase):
         self.assertEqual(orchestrate.cell_name("default", "f16"), "default/f16")
 
     def test_skip_entries_are_precision_wildcards(self):
-        # Both current entries are scheduling pathologies, so they must exclude the cell at
-        # every precision — otherwise the bf16 column would let a known hang back in.
+        # The current entry is a scheduling pathology, so it must exclude the cell at every
+        # precision — otherwise the bf16 column would let a known hang back in.
         self.assertTrue(orchestrate.cell_skipped("cifar_conv", "metal", "tuned", "f32"))
         self.assertTrue(orchestrate.cell_skipped("cifar_conv", "metal", "tuned", "bf16"))
-        self.assertTrue(orchestrate.cell_skipped("mlp_wide", "hip", "tuned", "bf16"))
 
     def test_skip_entries_do_not_overreach(self):
         self.assertFalse(orchestrate.cell_skipped("cifar_conv", "metal", "default", "f32"))
         self.assertFalse(orchestrate.cell_skipped("cifar_conv", "cc", "tuned", "bf16"))
+
+    def test_hip_tuned_cells_are_no_longer_skipped(self):
+        # gh-ocannl-532's unparallelized-baseline dispatch is fixed in the tuner and confirmed on
+        # the gfx1151 machine that produced the symptom; all three cells complete.
+        for workload in ("mlp_wide", "cifar_conv", "cifar_stride"):
+            for precision in ("f32", "bf16"):
+                self.assertFalse(
+                    orchestrate.cell_skipped(workload, "hip", "tuned", precision),
+                    (workload, precision),
+                )
 
     def test_every_skip_entry_is_a_four_tuple(self):
         for entry in orchestrate.SKIP_CELLS:

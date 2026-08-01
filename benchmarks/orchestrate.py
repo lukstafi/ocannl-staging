@@ -67,8 +67,8 @@ GPU_DEVICES = {
 
 # Known-pathological cells excluded from the default matrix, as
 # (workload, backend, variant, precision), where precision None means "at every precision" —
-# both entries below are scheduling pathologies with no dependence on the storage precision, so
-# adding a precision axis must not let them back in through the bf16/f16 columns.
+# the entry below is a scheduling pathology with no dependence on the storage precision, so
+# adding a precision axis must not let it back in through the bf16/f16 columns.
 # Currently empty: the metal-default-schedule pathologies (gpt2_mini 81 s/step -> ~0.3 s,
 # lenet 3.2 s/step + parity FAIL -> 0.22 s exact, mlp_wide >10 s/step -> 6 ms) were fixed by
 # lowering the default GPU schedule's serial-fallback threshold, promoting statement-crossing
@@ -79,16 +79,15 @@ GPU_DEVICES = {
 # (Metal reinit-after-tune race, PR #109/#174); the materialized variant covers the metal column.
 SKIP_CELLS = {
     ("cifar_conv", "metal", "tuned", None),
-    # mlp_wide hip/tuned: the search appeared to wedge, but perf showed 100% of the time in
-    # libhsa-runtime64 busy-waiting on a dispatch — the autotuner was timing the unparallelized
-    # serial baseline, i.e. the whole training step in one work-item, four times (warmup plus
-    # autotune_repeats). Hours per run on gfx1151, with Windows-side driver timeouts and a lost
-    # display. gh-ocannl-532; the same profile hits cifar_conv and cifar_stride hip/tuned.
-    # Fixed in the tuner: an unparallelized candidate is no longer dispatched on a GPU backend
-    # (confirmed on Metal, where LeNet's baseline measured 6.9 s/run against a 35.7 ms winner).
-    # This entry stays until the fix is confirmed on the machine that produced the symptom —
-    # retest with --no-skip-cells and drop the entry if the cell completes.
-    ("mlp_wide", "hip", "tuned", None),
+    # mlp_wide/cifar_conv/cifar_stride hip/tuned USED to belong here: the search appeared to wedge,
+    # but perf showed 100% of the time in libhsa-runtime64 busy-waiting on a dispatch — the
+    # autotuner was timing the unparallelized serial baseline, i.e. the whole training step in one
+    # work-item, four times (warmup plus autotune_repeats). Hours per run on gfx1151, with
+    # Windows-side driver timeouts and a lost display (gh-ocannl-532). Fixed in the tuner: an
+    # unparallelized candidate is no longer dispatched on a GPU backend. Confirmed on the machine
+    # that produced the symptom (gfx1151 / WSL, ROCm), all three cells completing with the display
+    # intact: mlp_wide 34 s wall (search 32.1 s, 1.70 ms/step), cifar_stride 132 s (125.3 s,
+    # 18.06 ms), cifar_conv 181 s (164.6 s, 61.09 ms).
 }
 
 sys.path.insert(0, str(HERE / "runners"))
