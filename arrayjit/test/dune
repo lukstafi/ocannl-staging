@@ -148,6 +148,29 @@
    (metal arrayjit.metal_backend arrayjit.ir -> test_metal_alloc.real.ml)
    (-> test_metal_alloc.missing.ml))))
 
+; The CUDA arm of gh-ocannl-536's failure classification. Same `select` reasoning as the Metal
+; tests above: `arrayjit.cuda_backend` is `(optional)` on cudajit, and an `enabled_if` would not
+; stop dune from resolving the hidden library.
+
+(test
+ (name test_cuda_classify_failure)
+ (package arrayjit)
+ (modules test_cuda_classify_failure)
+ (deps ocannl_config test_cuda_classify_failure.expected)
+ (libraries
+  base
+  stdio
+  (select
+   test_cuda_classify_failure.ml
+   from
+   (cudajit.cuda
+    cudajit.nvrtc
+    arrayjit.cuda_backend
+    arrayjit.ir
+    ->
+    test_cuda_classify_failure.real.ml)
+   (-> test_cuda_classify_failure.missing.ml))))
+
 (test
  (name test_pool_segments)
  (package arrayjit)

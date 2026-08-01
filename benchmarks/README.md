@@ -90,14 +90,30 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
 - `orchestrate.py` — runs the matrix (dispatching the OCANNL executable on the fixture's
   `model`), enforces the parity gate, writes `results/results.jsonl` and
   `results/report.md`. Flags: `--workloads mlp_small ...`, `--tuned`, `--materialized`,
-  `--nojit` (tinygrad nojit), `--torch-compile` (pytorch compiled variant), `--beam N`
+  `--precision bf16 f16`, `--nojit` (tinygrad nojit), `--torch-compile` (pytorch compiled
+  variant), `--beam N`
   (tinygrad BEAM=N variant; wipe tinygrad's kernel cache for from-scratch search costs),
   `--only ocannl pytorch tinygrad`, `--skip-build`, `--no-skip-cells` (run the `SKIP_CELLS`
   entries too — each was observed pathological on a single machine/backend/OS, so use this to
   retest whether an entry still applies in your environment),
   `--gpu metal|cuda|hip|none` (the GPU column of the matrix — OCANNL backend, PyTorch device,
   tinygrad device together; defaults to metal on macOS and cuda elsewhere, `none` runs a
-  CPU-only matrix). With `--gpu hip`, the PyTorch/tinygrad GPU cells run only on Linux (ROCm
+  CPU-only matrix).
+
+  **An OCANNL cell is a (scheduling variant, storage precision) pair** (gh-ocannl-539). The two
+  are independent axes and the matrix is their product: `--tuned --precision bf16` measures
+  *tuned bf16*, which on RDNA3/3.5 is the only route to a tensor-core candidate at all (WMMA has
+  no f32-input shape), and which the earlier single-variant-string model could not express. In
+  the report, `variant` and `precision` are separate columns and rows are ordered
+  precision-major (f32 first), p50-ascending within each precision group; a cell's label
+  elsewhere is `variant/precision`, abbreviated to just `variant` at f32. Budget accordingly —
+  each requested precision multiplies an mlp/gpt workload's OCANNL cell count by the number of
+  variants, and each tuned cell is a two-pass search. `SKIP_CELLS` entries are
+  `(workload, backend, variant, precision)` with `None` meaning "at every precision", which is
+  what both current scheduling-pathology entries use. The conv runner has no `BENCH_PRECISION`
+  support, so conv workloads stay f32 regardless of the flag.
+
+  With `--gpu hip`, the PyTorch/tinygrad GPU cells run only on Linux (ROCm
   PyTorch presents HIP as its `cuda` device, tinygrad as `AMD`); on Windows neither framework
   reaches an AMD GPU, so OCANNL alone populates the GPU column while the CPU parity
   reference still runs. **Under WSL** both frameworks do reach an AMD GPU, with two caveats:
@@ -112,8 +128,11 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   for gh-ocannl-500/502 with a per-layer breakdown) and
   [report-gh484-cuda.md](report-gh484-cuda.md) (Linux/CUDA, the paired before/after A/B of
   gh-ocannl-484 task 3's split-reduce seeding — also the reference for why only same-session
-  paired runs are trustworthy on that machine) for checked-in example output
-  (`results/` itself is gitignored).
+  paired runs are trustworthy on that machine) and
+  [report-gh537-cuda.md](report-gh537-cuda.md) (Linux/CUDA, its successor: the paired A/B of
+  gh-ocannl-537's `Swap` ∘ `Split_reduce` seeding, which removes ~90% of the segment gh-484 was
+  filed against — and the reference for why a segment share must name the placement it is a share
+  of) for checked-in example output (`results/` itself is gitignored).
   [RESULTS-484-532.md](RESULTS-484-532.md) is the raw extracted dataset behind `report-hip.md`'s
   post-gh-527 subsection and the gh-ocannl-532 correction (per-segment attribution, the
   split-reduce `op_legality` verdicts, and the nine variant cells) — kept because that session's

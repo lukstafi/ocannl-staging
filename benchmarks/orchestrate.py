@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """Run the cross-framework benchmark matrix (OCANNL / PyTorch / tinygrad) and report.
 
-For each fixture in fixtures/, runs every (framework, backend, variant) cell, collects the
-JSON result lines, enforces the loss-trajectory parity gate against the PyTorch CPU
-reference, and writes results/results.jsonl plus a markdown report.
+For each fixture in fixtures/, runs every (framework, backend, variant, precision) cell,
+collects the JSON result lines, enforces the loss-trajectory parity gate against the PyTorch
+CPU reference, and writes results/results.jsonl plus a markdown report.
+
+Scheduling (`default` / `materialized` / `tuned`) and storage precision (`f32` / `bf16` /
+`f16`) are INDEPENDENT axes of an OCANNL cell, and the matrix is their product
+(gh-ocannl-539). Overloading one variant string made tuned reduced-precision cells
+inexpressible, which is where tensor cores would show at all on backends whose only mma route
+is a reduced input format (RDNA3/3.5 WMMA has no f32-input shape).
 
 Timing results are only comparable when the parity gate passes: a FAIL means that cell was
 not computing the same training trajectory, so its step times are flagged, not compared.
@@ -38,6 +44,13 @@ PARITY_TOL_PRECISION = {"bf16": 4e-3, "f16": 2e-3}
 # slowly. Require at least one part per million of relative loss variation over the parity window.
 LOSS_MOVE_MIN_REL = 1e-6
 REFERENCE = ("pytorch", "cpu", "eager")
+# Report row order within a workload: precision-major, f32 first (it is the reference's precision
+# and every non-OCANNL cell's), then the reduced precisions; p50-ascending within each group.
+PRECISION_ORDER = ["f32", "bf16", "f16"]
+# The precision axis is a property of the runner, not of OCANNL: only bench_mlp and bench_gpt
+# implement BENCH_PRECISION (the training recipe and the forward-only leg respectively), so
+# reduced-precision cells are generated for those models only.
+PRECISION_MODELS = ("mlp", "gpt")
 
 # The GPU column of the matrix, per --gpu choice: OCANNL backend, PyTorch device,
 # tinygrad device. The CPU column (cc / cpu / CPU) is always run.
@@ -52,7 +65,10 @@ GPU_DEVICES = {
     "none": (None, None, None),
 }
 
-# Known-pathological cells excluded from the default matrix, as (workload, backend, variant).
+# Known-pathological cells excluded from the default matrix, as
+# (workload, backend, variant, precision), where precision None means "at every precision" —
+# both entries below are scheduling pathologies with no dependence on the storage precision, so
+# adding a precision axis must not let them back in through the bf16/f16 columns.
 # Currently empty: the metal-default-schedule pathologies (gpt2_mini 81 s/step -> ~0.3 s,
 # lenet 3.2 s/step + parity FAIL -> 0.22 s exact, mlp_wide >10 s/step -> 6 ms) were fixed by
 # lowering the default GPU schedule's serial-fallback threshold, promoting statement-crossing
@@ -62,7 +78,7 @@ GPU_DEVICES = {
 # cifar_conv metal/tuned: the search completes but the post-tune re-init hangs the process
 # (Metal reinit-after-tune race, PR #109/#174); the materialized variant covers the metal column.
 SKIP_CELLS = {
-    ("cifar_conv", "metal", "tuned"),
+    ("cifar_conv", "metal", "tuned", None),
     # mlp_wide hip/tuned: the search appeared to wedge, but perf showed 100% of the time in
     # libhsa-runtime64 busy-waiting on a dispatch — the autotuner was timing the unparallelized
     # serial baseline, i.e. the whole training step in one work-item, four times (warmup plus
@@ -72,11 +88,38 @@ SKIP_CELLS = {
     # (confirmed on Metal, where LeNet's baseline measured 6.9 s/run against a 35.7 ms winner).
     # This entry stays until the fix is confirmed on the machine that produced the symptom —
     # retest with --no-skip-cells and drop the entry if the cell completes.
-    ("mlp_wide", "hip", "tuned"),
+    ("mlp_wide", "hip", "tuned", None),
 }
 
 sys.path.insert(0, str(HERE / "runners"))
 from bench_common import read_st_metadata  # noqa: E402
+
+
+def cell_skipped(workload, backend, variant, precision):
+    """Whether a cell is in SKIP_CELLS, honouring the None-precision wildcard."""
+    return (workload, backend, variant, precision) in SKIP_CELLS or (
+        workload,
+        backend,
+        variant,
+        None,
+    ) in SKIP_CELLS
+
+
+def cell_name(variant, precision):
+    """Display name of an OCANNL cell's (scheduling, precision) pair.
+
+    f32 cells keep their bare variant name, so the labels and reports of an f32-only matrix are
+    unchanged; a reduced-precision cell is named by the product, e.g. `tuned/bf16`.
+    """
+    return variant if precision == "f32" else f"{variant}/{precision}"
+
+
+def precision_rank(precision):
+    return (
+        PRECISION_ORDER.index(precision)
+        if precision in PRECISION_ORDER
+        else len(PRECISION_ORDER)
+    )
 
 
 def ocannl_exe(model):
@@ -151,15 +194,27 @@ def report(results, out_dir):
     lines.append(
         f"platform: {platform.platform()} {platform.machine()} | "
         f"ocannl commit: {commit} | parity tol: {PARITY_TOL:g} (max rel diff over "
-        f"first parity steps vs pytorch/cpu/eager)\n"
+        f"first parity steps vs pytorch/cpu/eager; reduced precisions get their own envelope: "
+        + ", ".join(f"{p} {t:g}" for p, t in sorted(PARITY_TOL_PRECISION.items()))
+        + ")\n"
     )
     for workload in sorted({r["workload"] for r in results}):
         lines.append(f"\n## {workload}\n")
         rows = [r for r in results if r["workload"] == workload]
-        rows.sort(key=lambda r: r["step_ms"]["p50"])
+        # Precision-major, p50-ascending within a precision: scheduling variants are ranked
+        # against the others computing in the same format, and a reduced-precision block reads as
+        # its own group rather than being interleaved by a speed it owes to its storage format.
+        rows.sort(
+            key=lambda r: (precision_rank(r.get("precision", "f32")), r["step_ms"]["p50"])
+        )
+        precisions = {r.get("precision", "f32") for r in rows}
+        if len(precisions) > 1:
+            lines.append(
+                "Rows are grouped by precision (f32 first), p50-ascending within each group.\n"
+            )
         with_tokens = any(r.get("tokens_per_step") for r in rows)
-        header = "| framework | backend | variant | step p50 ms | p10 | p90 | queued ms | compile s | parity |"
-        rule = "|---|---|---|---|---|---|---|---|---|"
+        header = "| framework | backend | variant | precision | step p50 ms | p10 | p90 | queued ms | compile s | parity |"
+        rule = "|---|---|---|---|---|---|---|---|---|---|"
         if with_tokens:
             header += " tok/s |"
             rule += "---|"
@@ -178,6 +233,7 @@ def report(results, out_dir):
                 tokens = f" {tps * 1000 / s['p50']:,.0f} |" if tps else " |"
             lines.append(
                 f"| {r['framework']} | {r['backend']} | {r['variant']} "
+                f"| {r.get('precision', 'f32')} "
                 f"| {s['p50']:.3f} | {s['p10']:.3f} | {s['p90']:.3f} "
                 f"| {r['queued_step_ms']:.3f} | {r['compile_s']:.2f} | {parity} |{tokens}"
             )
@@ -195,9 +251,12 @@ def main():
         nargs="*",
         default=[],
         choices=["bf16", "f16"],
-        help="add OCANNL mixed-precision variants (mlp: the training recipe with master "
+        help="add OCANNL reduced storage precisions (mlp: the training recipe with master "
         "weights + storage policy, f16 with dynamic loss scaling; gpt: the forward-only "
-        "leg with load-time weight conversion; gh-ocannl-492)",
+        "leg with load-time weight conversion; gh-ocannl-492). Precision is an axis "
+        "independent of the scheduling variant, so each one requested here is run against "
+        "every selected variant — `--tuned --precision bf16` measures tuned bf16, which is "
+        "the only tensor-core route on RDNA3/3.5 (gh-ocannl-539)",
     )
     ap.add_argument(
         "--materialized",
@@ -299,40 +358,50 @@ def main():
                 variants.append("materialized")
             if args.tuned:
                 variants.append("tuned")
-            if model in ("mlp", "gpt"):
-                # The mixed-precision training recipe's benchmark consumer is bench_mlp; bench_gpt
-                # covers the forward-only leg (load-time weight conversion, no cast twins) — both
-                # via BENCH_PRECISION (gh-ocannl-492 task 4).
-                variants.extend(args.precision)
+            # The mixed-precision training recipe's benchmark consumer is bench_mlp; bench_gpt
+            # covers the forward-only leg (load-time weight conversion, no cast twins) — both
+            # via BENCH_PRECISION (gh-ocannl-492 task 4). Every scheduling variant composes with
+            # every precision (gh-ocannl-529 lifted the runner-side guard), so the OCANNL cells
+            # of a backend are the product of the two axes.
+            precisions = ["f32"] + (
+                list(args.precision) if model in PRECISION_MODELS else []
+            )
             for backend in ["cc"] + ([gpu_ocannl] if gpu_ocannl else []):
-                for variant in variants:
-                    if (name, backend, variant) in SKIP_CELLS and not args.no_skip_cells:
-                        print(f"--- {name} ocannl/{backend}/{variant}: SKIPPED (SKIP_CELLS; "
-                              "--no-skip-cells to run it anyway)")
-                        continue
-                    env = dict(
-                        os.environ,
-                        BENCH_FIXTURE=str(fx),
-                        BENCH_TUNE="1" if variant == "tuned" else "0",
-                        BENCH_MATERIALIZE="1" if variant == "materialized" else "0",
-                        BENCH_PRECISION=variant if variant in ("bf16", "f16") else "f32",
-                    )
-                    cmd = [str(ocannl_exe(model)), f"--ocannl_backend={backend}"]
-                    label = f"{name} ocannl/{backend}/{variant}"
-                    if variant == "tuned":
-                        # Two-pass protocol: the search leaves the process slower (extra
-                        # per-launch overhead from accumulated modules/buffers — measured
-                        # 2.5-3.5x on small CUDA kernels), so pass 1 runs the search and
-                        # populates autotune_cache (its compile_s is the search cost), and a
-                        # fresh pass-2 process replays the cached winner for the step timings.
-                        pass1 = run_cell(f"{label} (search pass)", cmd, env=env, cwd=HERE)
-                        if pass1 is None:
-                            failures.append(f"{label} (search pass)")
+                for precision in precisions:
+                    for variant in variants:
+                        cell = cell_name(variant, precision)
+                        if cell_skipped(name, backend, variant, precision) and not args.no_skip_cells:
+                            print(f"--- {name} ocannl/{backend}/{cell}: SKIPPED (SKIP_CELLS; "
+                                  "--no-skip-cells to run it anyway)")
                             continue
-                        collect(label, cmd, env=env, cwd=HERE,
-                                override={"compile_s": pass1["compile_s"]})
-                    else:
-                        collect(label, cmd, env=env, cwd=HERE)
+                        env = dict(
+                            os.environ,
+                            BENCH_FIXTURE=str(fx),
+                            BENCH_TUNE="1" if variant == "tuned" else "0",
+                            BENCH_MATERIALIZE="1" if variant == "materialized" else "0",
+                            BENCH_PRECISION=precision,
+                        )
+                        cmd = [str(ocannl_exe(model)), f"--ocannl_backend={backend}"]
+                        label = f"{name} ocannl/{backend}/{cell}"
+                        # The cell's identity is what was dispatched, not what the runner chose to
+                        # call itself: stamp both axes so a report row cannot silently collapse
+                        # two cells (a runner predating gh-ocannl-539 reports a reduced-precision
+                        # cell's variant as its precision).
+                        ident = {"variant": variant, "precision": precision}
+                        if variant == "tuned":
+                            # Two-pass protocol: the search leaves the process slower (extra
+                            # per-launch overhead from accumulated modules/buffers — measured
+                            # 2.5-3.5x on small CUDA kernels), so pass 1 runs the search and
+                            # populates autotune_cache (its compile_s is the search cost), and a
+                            # fresh pass-2 process replays the cached winner for the step timings.
+                            pass1 = run_cell(f"{label} (search pass)", cmd, env=env, cwd=HERE)
+                            if pass1 is None:
+                                failures.append(f"{label} (search pass)")
+                                continue
+                            collect(label, cmd, env=env, cwd=HERE,
+                                    override={**ident, "compile_s": pass1["compile_s"]})
+                        else:
+                            collect(label, cmd, env=env, cwd=HERE, override=ident)
         if "pytorch" in args.only:
             for device in ["cpu"] + ([gpu_torch] if gpu_torch else []):
                 for compiled in [False] + ([True] if args.torch_compile else []):
@@ -377,7 +446,8 @@ def main():
     if stationary:
         ok = False
         labels = ", ".join(
-            f"{r['workload']} {r['framework']}/{r['backend']}/{r['variant']}"
+            f"{r['workload']} {r['framework']}/{r['backend']}/"
+            f"{cell_name(r['variant'], r.get('precision', 'f32'))}"
             for r in stationary
         )
         print(
