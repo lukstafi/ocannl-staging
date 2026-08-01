@@ -126,6 +126,9 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   [report-hip.md](report-hip.md) (WSL2/HIP on gfx1151, all three frameworks),
   [report-cifar-cuda.md](report-cifar-cuda.md) (Linux/CUDA, the cifar-scale conv baseline
   for gh-ocannl-500/502 with a per-layer breakdown) and
+  [report-gh537-metal.md](report-gh537-metal.md) (macOS/Metal, the paired before/after A/B of
+  gh-ocannl-537's `Swap` ∘ `Split_reduce` seeding — the Metal leg of the CUDA measurement in
+  `report-gh537-cuda.md`, replicating it),
   [report-gh484-cuda.md](report-gh484-cuda.md) (Linux/CUDA, the paired before/after A/B of
   gh-ocannl-484 task 3's split-reduce seeding — also the reference for why only same-session
   paired runs are trustworthy on that machine) and
