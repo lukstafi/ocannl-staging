@@ -257,6 +257,12 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   doubles as a gradient oracle. tinygrad: realize the loss BEFORE `opt.step()` or it recomputes
   from updated weights. The autotune schedule cache persists across processes; compiler changes
   invalidate it by digest.
+- That digest covers the compiled result, NOT the diagnostics. When re-measuring a search's
+  decline census after changing only an error message or a log line, `rm benchmarks/autotune_cache/*.sexp`
+  first — otherwise the second run reports `cache_hit=true`, `timed=0`, `declines=[]` and every
+  counter reads zero, which looks exactly like "the problem went away". Fixtures are also not in a
+  fresh checkout (`benchmarks/fixtures/*.safetensors` is generated); `gen_fixtures.py` recreates
+  them, and they are only valid while `gen_fixtures.py` and `benchmarks/workloads/` are unchanged.
 
 ## Build and test mechanics
 
