@@ -707,8 +707,33 @@ the normal training lock if its setup exercises the process-local pool.
    bare `Utils.User_error`, so under strict classification one register-heavy candidate was fatal
    rather than declined; it is now a typed `Resource_exceeded Workgroup_threads` at `Backend_link`.
    `get_static_threadgroup_memory_length` is now called, checked against the same device limit the
-   schedule layer estimated against. The HIP private-segment quantity and the CUDA arm still need
-   their machines.
+   schedule layer estimated against. The HIP private-segment quantity still needs its machine.
+   **CUDA arm landed, classification only — the validator half is blocked on the bindings.**
+   `Cuda_backend.Impl.classify_failure` maps the driver's and nvrtc's own status codes to typed
+   causes, split on the damage axis: statuses returned before any thread runs
+   (`CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES`, `..._OUT_OF_MEMORY`, `..._COOPERATIVE_LAUNCH_TOO_LARGE`,
+   `..._INVALID_CLUSTER_SIZE`, `..._INVALID_VALUE` at `Launch`, the PTX/image rejections, and
+   `NVRTC_ERROR_COMPILATION`) are `No_device_writes` contained declines; the asynchronous fault
+   family (`..._ILLEGAL_ADDRESS`, `..._MISALIGNED_ADDRESS`, `..._INVALID_ADDRESS_SPACE`,
+   `..._INVALID_PC`, `..._ILLEGAL_INSTRUCTION`, `..._HARDWARE_STACK_ERROR`, `..._ASSERT`,
+   `..._LAUNCH_FAILED`, `..._LAUNCH_TIMEOUT`) is `Writes_may_have_occurred` — counted as a decline,
+   then escalated, since those leave the CUDA context sticky. Environment and toolchain faults stay
+   unclassified on purpose: they fail every candidate identically, and absorbing them would turn a
+   broken installation into a silent "nothing worked" report. Every case is `Backend_rejected`
+   rather than `Resource_exceeded`, per this note's own rule — the classifier sees the status, not
+   the launch geometry, so it cannot populate `requested`/`limit`.
+   The pre-launch validator has **no API-supported condition to reject against on CUDA today**.
+   Its query would be `cuFuncGetAttribute` on the linked `CUfunction`
+   (`CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK`, the direct analogue of Metal's
+   `maxTotalThreadsPerThreadgroup`; `..._SHARED_SIZE_BYTES`; `..._LOCAL_SIZE_BYTES`), and cudajit
+   binds none of them — `Cu.Module.get_function` returns an opaque handle and `Cu.Module` exposes no
+   attribute query. Extending the bindings (`lukstafi/ocaml-cudajit`, already a pin) is the work.
+   Note what it buys here and what it does not: a better message and a `Resource_exceeded` with
+   populated fields, **not** more containment, because the condition it would predict —
+   `CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES` — is non-sticky and write-free and is already contained by
+   classification. CUDA's uncontainable failures are the memory-fault family, which no function
+   attribute predicts. That asymmetry with HIP (where #533's abort is uncontainable *and*
+   predictable) is why the validator is lower priority on this backend than on that one.
 4. Make runner replacement an explicit backend operation, implement
    `recover_after_launch_failure`, add ledger rollback/poisoning and the fake recovery-state tests,
    then tighten the launch/sync arm. Exercise HIP and CUDA recovery on their machines.
