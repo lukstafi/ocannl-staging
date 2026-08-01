@@ -206,6 +206,21 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; gh-ocannl-540: a mixed-precision cast twin keeps its master's shape even when the master is read
+; as the weight operand of a batched matmul (the twin's batch row must not be resolved by the use
+; site). mixed_prec_parity's model has no batch axis, so it cannot cover this.
+
+(test
+ (name mixed_prec_twin_shape)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules mixed_prec_twin_shape)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
 (test
  (name precision_policy_parity)
  (package neural_nets_lib)

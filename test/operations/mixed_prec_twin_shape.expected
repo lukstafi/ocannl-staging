@@ -1,0 +1,2 @@
+bf16: master [3x4] | twin [3x4] | equal=true
+f16: master [3x4] | twin [3x4] | equal=true
