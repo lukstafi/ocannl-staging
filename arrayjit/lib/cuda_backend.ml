@@ -1920,8 +1920,13 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
         match status with
         (* The generated CUDA C did not compile. Nothing was allocated or launched, and cudajit puts
            nvrtc's compilation log in [message]. [stage] matches the cc backend's, so the blocker
-           census groups "our codegen does not compile" across backends. *)
-        | "NVRTC_ERROR_COMPILATION" | "NVRTC_ERROR_BUILTIN_OPERATION_FAILURE" ->
+           census groups "our codegen does not compile" across backends.
+
+           This status only. [NVRTC_ERROR_BUILTIN_OPERATION_FAILURE] in particular stays
+           unclassified: it reports nvrtc failing on its own builtins, which an incomplete or
+           mismatched CUDA installation reproduces for every candidate — precisely the
+           fails-identically class this classifier must let propagate. *)
+        | "NVRTC_ERROR_COMPILATION" ->
             reject ~stage:"compiler" ~severity:Schedule_outcome.Compiler_bug
               ~execution_effect:Schedule_outcome.No_device_writes
               [%string
