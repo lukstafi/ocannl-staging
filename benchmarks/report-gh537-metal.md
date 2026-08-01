@@ -31,17 +31,24 @@ pools.
 |---|---|---|
 | sites detected (all three workloads) | 2, both in the classifier head | **4, including `bias_conv1.grad`** |
 | `bias_conv1.grad` reached via | not reached | **3 swaps** (lenet `i530^i529 i530^i528 i530^i527`) |
-| crowned schedule | `F_saved` | **`F_split_saved`, both arms** |
+| crowned schedule, lenet | `F_saved`, both arms | **`F_split_saved`, both arms** |
+| crowned schedule, cifar | `F_saved`, both arms | **`F_split_saved` in arm A**; `F_saved` (a preset) in arm B, where the 32-cell split is measured and declined |
 
 | workload | arm A (default placements) | | arm B (materialize-all — **ships**) | | shipped artifact p50 | |
 |---|---|---|---|---|---|---|
 | | OLD | NEW | OLD | NEW | OLD | NEW |
 | lenet | 249.12 / 249.13 ms | **39.86 / 39.85 ms** (6.3x) | 35.43 / 35.38 ms | **33.18 / 33.18 ms** (−6.2%) | 35.565 / 35.621 ms | **33.227 / 33.219 ms** (−6.6%) |
-| cifar_stride | 241.51 / 239.86 ms | **122.54 / 122.10 ms** (2.0x) | 95.76 / 95.73 ms | 95.46 / 95.11 ms (−0.5%) | 95.86 / 95.75 ms | 96.20 / 96.01 ms (+0.3%) |
-| cifar_conv | 1270.28 / 1269.89 ms | **369.44 / 368.96 ms** (3.4x) | 276.12 / 276.09 ms | 275.47 / 275.36 ms (−0.25%) | 276.94 / 276.64 ms | 277.44 / 277.29 ms (+0.2%) |
+| cifar_stride | 241.51 / 239.86 ms | **122.54 / 122.10 ms** (2.0x) | 95.76 / 95.73 ms | 95.46 / 95.11 ms | 95.86 / 95.75 ms | 96.20 / 96.01 ms (+0.3%, see below) |
+| cifar_conv | 1270.28 / 1269.89 ms | **369.44 / 368.96 ms** (3.4x) | 276.12 / 276.09 ms | 275.47 / 275.36 ms | 276.94 / 276.64 ms | 277.44 / 277.29 ms (+0.2%, see below) |
 
 Within-side spread on the shipped artifact is 0.16% (lenet OLD) and 0.02% (lenet NEW), so lenet's
-−6.6% is roughly 40x its noise. The cifar deltas are inside their spread: neutral, not harmful.
+−6.6% is roughly 40x its noise.
+
+The cifar shipped-artifact columns show NEW slightly *above* OLD, and at two replicates per side
+those ranges do not overlap — so they are not "within noise" on the strength of this table alone.
+They are resolved below, by identifying which schedule each side actually crowns: on cifar_conv both
+sides crown the **same** schedule, and on cifar_stride both crown a **split-free preset**. Neither
+delta is an effect of the split. See "The cifar deltas are not the split".
 
 ## The per-site attribution, in one process
 
@@ -117,8 +124,55 @@ measures it and declines:
 | `F_split[bias_conv2.grad out64 swap3]` | 327.46 |
 | untuned-default in-process control | 324.92 |
 
-That is the mechanism behaving correctly — a candidate that does not help is measured and dropped —
-so the neutral cifar cells are "no gain", not "harm". Cost: two extra candidates per arm.
+That is the mechanism behaving correctly — a candidate that does not help is measured and dropped.
+Cost: two extra candidates per arm.
+
+## The cifar deltas are not the split
+
+The headline table's cifar shipped-artifact columns have NEW marginally above OLD (+0.3% / +0.2%),
+with non-overlapping ranges at two replicates per side. That is too little data to call noise, so
+this section resolves it two ways.
+
+**First, by construction — which schedule does each side actually crown in arm B?**
+
+| workload | OLD crowned (arm B) | NEW crowned (arm B) |
+|---|---|---|
+| cifar_conv | `F_preset[bs=cfg priv cfg-thresh]` digest `316a0767/685dc7a0` | **the same** `316a0767/685dc7a0` |
+| cifar_stride | `F_preset[bs=cfg priv cfg-thresh]` digest `008c69e8/f91d4cbc` | `F_preset[bs=64 priv]` digest `008c69e8/304405b8` |
+
+On **cifar_conv the shipped artifact is the identical schedule on both sides**, so a p50 difference
+cannot be a real effect of gh-537 — there is no schedule difference to cause one. It is measurement
+noise, and its size calibrates the replay noise floor for that cell.
+
+On **cifar_stride the sides crown different presets — but neither is a split.** The two are
+near-tied and the tuner picks whichever measured faster that run:
+
+```
+OLD arm B:  F_preset[bs=cfg priv cfg-thresh]  95.7620 ms   <- crowned
+            F_preset[bs=64 priv]              95.7905 ms       (0.03% apart)
+NEW arm B:  F_preset[bs=cfg priv cfg-thresh]  95.9228 ms
+            F_preset[bs=64 priv]              95.4634 ms   <- crowned
+```
+
+So gh-537 re-rolls a coin between two split-free presets separated by less than the replay noise. The
++0.3% is that re-roll landing slightly worse on replay, not a cost of the split — no `F_split`
+candidate is crowned in arm B on either side of this workload.
+
+**Second, empirically — replay-only replicates.** Cache populated once per side, then five
+interleaved replays per side, which isolates replay variance from search variance:
+
+| workload | OLD replays (ms) | NEW replays (ms) | medians | ranges overlap |
+|---|---|---|---|---|
+| cifar_stride | 95.95 95.89 96.04 96.06 95.93 | 96.06 96.17 96.21 96.30 96.36 | 95.95 → 96.21 (+0.27%) | yes |
+| cifar_conv | 276.63 277.04 276.54 275.98 276.37 | 277.38 277.22 276.59 276.68 276.95 | 276.54 → 276.95 (+0.15%) | yes |
+
+Within-side spread is 0.18–0.38%, comparable to the deltas themselves, and the ranges do overlap at
+five replicates where they did not at two. An independent `orchestrate.py` run of the NEW tree
+measured cifar_conv metal/tuned at **276.951 ms**, inside the OLD range.
+
+**Conclusion**: cifar_conv is neutral by construction (same schedule). cifar_stride carries a
+~0.3% increase attributable to a crowning coin-flip between two split-free presets, not to the
+split. Neither cell shows the split costing anything, and neither shows it gaining anything.
 
 ### The dominant segment of the arm that ships is a *different* one
 
@@ -145,6 +199,42 @@ costs nothing here: `OLD` timed `F_split[n105 red84 out640 b32]` at 250.51 ms in
 250.51 ms control, and 36.65 ms in arm B against a 36.69 ms control. Inert on both arms, exactly as
 gh-484's leg found. But the eviction is a real consequence of the cap binding, and a workload whose
 ratio-0 site *did* pay would silently lose it.
+
+## Parity: the measured schedules compute the right thing
+
+Timings are only meaningful if the schedules producing them are correct — wrong code can be fast.
+Two checks, the second against an independent reference.
+
+**1. OLD vs NEW executed values.** Loss trajectories over all 24 parity steps, from the same runs
+the timings come from:
+
+| workload | max abs OLD−NEW | max rel | replicates within a side |
+|---|---|---|---|
+| lenet | 4.8e-07 | 2.1e-07 | bit-identical |
+| cifar_stride | **0** (bit-identical) | 0 | bit-identical |
+| cifar_conv | **0** (bit-identical) | 0 | bit-identical |
+
+The cifar workloads are bit-identical because both sides crown the same schedule family in the arm
+that runs (see above); lenet's 4.8e-07 is where the crowned schedule genuinely differs, so its
+combine order does. Same picture as the CUDA leg (bit-identical on cifar, 2.4e-07 on lenet), and
+consistent with gh-484 task 4's claim that a fixed schedule's combine tree is deterministic.
+
+**2. Against the PyTorch CPU reference, through `orchestrate.py`'s own parity gate.** OLD-vs-NEW
+agreement alone would not catch both sides being wrong, so the tuned Metal cells were also run
+through the gate that the benchmark suite applies to every reported cell:
+
+| workload | cell | step p50 | parity vs pytorch/cpu/eager |
+|---|---|---|---|
+| lenet | ocannl metal **tuned** | 33.220 ms | **PASS** (2.1e-07) |
+| lenet | ocannl metal default | 250.445 ms | PASS (2.1e-07) |
+| cifar_stride | ocannl metal **tuned** | 96.325 ms | **PASS** (3.9e-05) |
+| cifar_stride | ocannl metal default | 256.833 ms | PASS (3.9e-05) |
+| cifar_conv | ocannl metal **tuned** | 276.951 ms | **PASS** (1.2e-04) |
+| cifar_conv | ocannl metal default | 1319.910 ms | PASS (1.2e-04) |
+
+`PARITY GATE: all cells passed`, with the `cc` and `pytorch/mps` columns green as well. The tuned
+p50s reproduce the A/B table above (33.220 vs 33.22 on lenet), so the gate covers exactly the
+schedules measured here — these are not a differently-configured run that happens to pass.
 
 ## Numerics and search cost
 
@@ -179,8 +269,12 @@ BENCH_FIXTURE=fixtures/lenet.safetensors BENCH_TUNE=1 \
   --ocannl_autotune_cache_dir=/tmp/fresh --ocannl_autotune_log=true 2>&1 \
   | grep -E 'F_split\[|F_preset\[|control'
 
-# What the split has to remove, in each placement
-BENCH_FIXTURE=fixtures/lenet.safetensors BENCH_SEG_TIMES=1 [BENCH_MATERIALIZE=1] \
+# What the split has to remove -- default placement
+BENCH_FIXTURE=fixtures/lenet.safetensors BENCH_SEG_TIMES=1 \
+  ../_build/default/benchmarks/runners/ocannl/bench_conv_diag.exe --ocannl_backend=metal
+
+# ...and the materialized placement, the one that ships
+BENCH_FIXTURE=fixtures/lenet.safetensors BENCH_SEG_TIMES=1 BENCH_MATERIALIZE=1 \
   ../_build/default/benchmarks/runners/ocannl/bench_conv_diag.exe --ocannl_backend=metal
 ```
 
@@ -199,4 +293,12 @@ caps a run portably.
    segment cost would both admit the weight gradients and stop the eviction described above.
 3. **Profitability tracks output width**, confirmed on a second backend: 6 cells −6.6%, 32 cells
    declined. A cheap predictor would let seeding skip candidates it can predict will lose.
-4. **Retest the `cifar_conv metal/tuned` SKIP_CELLS entry** with `--no-skip-cells`.
+4. **Drop the `cifar_conv metal/tuned` SKIP_CELLS entry**, or retest it once more. It has now
+   completed without the post-tune re-init hang in six independent runs here — four `bench_conv`
+   searches plus an `orchestrate.py --no-skip-cells` run of the cell itself (186.69 s compile, result
+   line emitted, parity PASS). The `orchestrate` run exercises the exact cell the entry names, which
+   is the evidence the entry's own "use `--no-skip-cells` to retest it" note asks for.
+5. **cifar_stride's crowning is a coin flip between two near-tied presets** (0.03% apart in the OLD
+   search). Both are split-free, so this is not a gh-537 question — but a tuner that re-rolls a
+   ~0.3% artifact regression on re-search is worth a look on its own, and it is the mechanism behind
+   the predecessor leg's "~7% tuned-artifact instability" note on this workload.
