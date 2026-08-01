@@ -31,6 +31,11 @@ type cause =
       detail : string;
     }
   | Unclassified of { phase : phase; exn_constructor : string; detail : string }
+  | Seed_evicted of { family : string; detail : string }
+      (** A detected seed site the search declined to propose because a candidate-volume cap bound
+          (gh-ocannl-541): the site was reachable and ranked, and lost only to the cap. Recorded in
+          the decline census so a previously-proposed site that stops being proposed leaves a
+          signal instead of vanishing. [family] names the seed family (e.g. ["split_reduce"]). *)
 [@@deriving sexp_of, equal]
 
 type rejection_key =
@@ -39,6 +44,7 @@ type rejection_key =
   | Resource_exceeded_key of resource
   | Backend_rejected_key of string * string * severity
   | Unclassified_key of phase * string
+  | Seed_evicted_key of string
 [@@deriving sexp_of, compare, equal]
 
 val key_of_cause : cause -> rejection_key
