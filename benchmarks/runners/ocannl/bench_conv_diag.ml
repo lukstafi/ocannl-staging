@@ -101,18 +101,10 @@ let () =
   let late_inject = H.env_flag "BENCH_LATE_INJECT" in
   let ctx = if late_inject then ctx else H.inject ctx st batch_loss mapping in
   show ctx "after-inject";
-  (* First compile only stashes the lowered code for the census (an explicit transform replaces the
-     default pipeline, so this routine is discarded); the timed routine is compiled with the regular
-     default pipeline below. *)
-  let stash = ref None in
-  let _census_ctx, _census_routine =
-    Context.compile
-      ~lowered_transform:(fun opt ->
-        stash := Some opt;
-        opt)
-      ctx step_comp bindings
-  in
-  let opt = Option.value_exn ~here:[%here] !stash in
+  (* Only the lowering is wanted here (an explicit transform replaces the default pipeline,
+     so the routine is discarded); the timed routine is compiled with the regular default
+     pipeline below. *)
+  let opt = H.capture_lowering ctx step_comp bindings in
   let promote_locals =
     match Stdlib.Sys.getenv_opt "BENCH_PROMOTE" with Some "0" -> Some false | _ -> None
   in

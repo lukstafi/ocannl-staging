@@ -231,6 +231,21 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   `hipLimitStackSize` is 1024 and has nothing to do with it, and hipcc separately refuses frames
   over 262136 B. Disable with `ocannl_hip_scratch_validation=false` where the model doesn't hold.
   Guard: `test/operations/hip_scratch_budget.ml` (`slow` alias).
+- A typed decline is only half of gh-ocannl-533: what the issue asked for is that the SEARCH
+  survive it. The rejection fired on `Autotune.tune`'s own base compile — the identity-transform
+  capture, historically the one compile in `tune` that raised instead of returning an outcome — so
+  it bypassed `try_spec`, the decline census and the partial report, and killed the run with a
+  perfectly-classified cause. Two facts worth carrying: the baseline is the one candidate not
+  compiled *as* a candidate, and passing `?lowered_transform` bypasses the default annotator, so
+  what gets validated there is the unscheduled serial form — the worst case for per-work-item
+  scratch, and on GPU never dispatched anyway. It is now declined (`report.baseline_declined`,
+  `baseline_ms = infinity`) and the scheduled candidates carry the search; fission plus
+  `promote_locals` is what brings a large softmax/CE head back within budget, which is why
+  `gpt2_mini hip/tuned` completes while every whole-routine preset declines. In the census it
+  carries its own cause and NOT gh-ocannl-543's `Not_dispatched_key "baseline"` — a declined
+  baseline is never dispatched either, but recording both would double-count it under a reason that
+  is not the one. One refusal, one entry. Guard:
+  `test/operations/hip_scratch_tune_survives.ml` (`slow` alias).
 - Building a test kernel that actually *has* a big scratch frame takes care: write the `Local`
   array in one loop and read it back in REVERSE in another. A forward read in the same order lets
   the compiler forward each store to its load and delete the array, leaving nothing to reject.
