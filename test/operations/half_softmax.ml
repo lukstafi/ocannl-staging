@@ -85,12 +85,18 @@ let () =
   let ctx = Train.forward_once ctx probs in
   let p = Context.get_values ctx probs.Tensor.value in
   (* Row [s] has [s + 1] live positions. The masked-out entries must be exactly zero (not merely
-     small): that is what distinguishes a working sentinel from one that saturated. *)
+     small): that is what distinguishes a working sentinel from one that saturated.
+
+     The table is printed coarsely on purpose. Unlike the reduction identities above, softmax
+     outputs are [exp] results, and no choice of inputs makes those exactly representable in half —
+     so a backend whose [exp] rounds the last mantissa bit differently disagrees by an ulp (HIP
+     yields 2.1215e-1 where cc, metal and cuda yield 2.1228e-1: one ulp at 2^-13). Rather than
+     letting that decide a golden diff, the table stays above the divergence and the numeric check
+     is the tolerance comparison below, against a reference evaluated in double. *)
   Stdio.printf "\ncausal softmax at half (row s reduces over t):\n";
   for s = 0 to n - 1 do
     Stdio.printf "  s=%d:" s;
-    Test_utils.print_floats ~prec:4
-      (List.init n ~f:(fun t -> p.((s * n) + t)));
+    Test_utils.print_floats ~prec:2 (List.init n ~f:(fun t -> p.((s * n) + t)));
     Stdio.printf "\n"
   done;
   let row_sum s = List.sum (module Float) (List.init n ~f:(fun t -> p.((s * n) + t))) ~f:Fn.id in
@@ -104,5 +110,17 @@ let () =
            (List.init n ~f:Fn.id)
            ~f:(fun t -> s >= t || Float.equal p.((s * n) + t) 0.)));
   Stdio.printf "all entries finite: %b\n" (Array.for_all p ~f:Float.is_finite);
+  (* Tolerance against the same softmax evaluated in double. Half's resolution below 1 is ~1e-3, so
+     5e-4 admits the ulp of backend [exp] disagreement and nothing looser -- a saturated sentinel or
+     a lost max-subtraction moves these by far more. *)
+  let worst =
+    List.fold (List.init n ~f:Fn.id) ~init:0. ~f:(fun acc s ->
+        let live = List.init (s + 1) ~f:(fun t -> Float.of_int ((2 * s) + t) *. 0.25) in
+        let mx = List.reduce_exn live ~f:Float.max in
+        let denom = List.sum (module Float) live ~f:(fun v -> Float.exp (v -. mx)) in
+        List.foldi live ~init:acc ~f:(fun t acc v ->
+            Float.max acc (Float.abs (p.((s * n) + t) -. (Float.exp (v -. mx) /. denom)))))
+  in
+  Stdio.printf "matches a double-precision softmax within 5e-4: %b\n" Float.(worst < 5e-4);
   Stdio.printf "probs prec: %s\n"
     (Ir.Ops.prec_string (Lazy.force probs.Tensor.value.Tn.storage_prec))
