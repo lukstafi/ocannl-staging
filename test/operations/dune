@@ -1808,3 +1808,29 @@
      hip_scratch_budget.actual
      (run %{dep:hip_scratch_budget.exe}))
     (diff hip_scratch_budget.expected hip_scratch_budget.actual)))))
+
+; gh-ocannl-533, the containment half: a declined baseline must not end the search. Same gating as
+; above — HIP-meaningful, and it runs a (small) autotune search.
+
+(executable
+ (name hip_scratch_tune_survives)
+ (modules hip_scratch_tune_survives)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(rule
+ (alias slow)
+ (package neural_nets_lib)
+ (locks ocannl_training_test)
+ (deps
+  hip_scratch_tune_survives.expected
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (action
+  (no-infer
+   (progn
+    (with-stdout-to
+     hip_scratch_tune_survives.actual
+     (run %{dep:hip_scratch_tune_survives.exe}))
+    (diff hip_scratch_tune_survives.expected hip_scratch_tune_survives.actual)))))
