@@ -9,7 +9,10 @@
    segment digests) replays through [Autotune.tune]'s cache-hit path: the report says [fissioned],
    and the values are correct — exercising [F_saved] rebinding of per-segment saved schedules. -
    [Autotune.tune] on a fissionable computation searches whole-routine and fissioned candidates and
-   returns correct values; the second call hits the cache. - The matmul sketch generator detects a
+   returns correct values; the second call hits the cache; its search reaches several candidates,
+   measuring the ones the backend can dispatch and accounting for the rest in the decline census
+   (gh-ocannl-543 — on GPU backends only the fissioned preset is measured). - The matmul sketch
+   generator detects a
    32x32 matmul and seeds tile-size instantiations of the register-blocktiling (GPU) /
    operand-packing (CPU) pipelines, plus the tensorized (tile-MMA) pipelines (unstaged and
    cooperatively staged [Tensorize] on backends with an mma capability; whole-triple and Grid-split
@@ -181,7 +184,27 @@ let () =
   in
   p "tuned fissionable chain values correct" (Array.for_all2_exn got_t1 expected_e ~f:approx);
   p "chain tune searches then hits the cache" ((not r1.Autotune.cache_hit) && r2.Autotune.cache_hit);
-  p "chain tune timed multiple candidates" (r1.Autotune.candidates_timed >= 2);
+  (* gh-ocannl-543: [candidates_timed >= 2] is a cc-shaped assertion. This chain's candidate space
+     is the same on every backend, but most of it is serial forms — the whole-routine presets dedup
+     to the unscheduled base, and the beam's Split/Swap/Vectorize moves off that base cannot bind a
+     hardware dimension — so a GPU backend times exactly one candidate (the fissioned preset) and
+     refuses the rest under gh-ocannl-532, where cc times all of them at full single-core speed. The
+     portable statement is over the population the census now covers: at least one candidate was
+     measured, and the search reached several, whether measured or refused. *)
+  let not_dispatched (r : Autotune.report) =
+    List.sum
+      (module Int)
+      r.Autotune.declines
+      ~f:(fun d ->
+        match d.Autotune.key with
+        | Ir.Schedule_outcome.Not_dispatched_key _ -> d.Autotune.count
+        | _ -> 0)
+  in
+  p "chain tune timed a dispatchable candidate" (r1.Autotune.candidates_timed >= 1);
+  p "chain tune reached multiple candidates (timed, or refused as unparallelized)"
+    (r1.Autotune.candidates_timed + not_dispatched r1 >= 2);
+  p "chain tune: candidates refused as unparallelized exactly on GPU"
+    (if is_gpu then not_dispatched r1 > 0 else not_dispatched r1 = 0);
   p "chain cache-hit values correct" (Array.for_all2_exn got_t2 expected_e ~f:approx);
 
   (* === The matmul sketch: 32x32 times 32x32 === *)

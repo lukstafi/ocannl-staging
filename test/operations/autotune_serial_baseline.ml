@@ -14,7 +14,8 @@
      on GPU the baseline is strictly the serial twin of code the backend parallelizes for free.
    - [Autotune.tune] times the baseline exactly where it is not a single work-item: [baseline_ms] is
      finite on CPU backends (the serial form runs at full single-core speed and stays a legitimate
-     competitor) and [infinity] on GPU ones.
+     competitor) and [infinity] on GPU ones. Where it is refused, the refusal is recorded in the
+     report's decline census under [Not_dispatched_key "baseline"] (gh-ocannl-543).
    - Either way the search returns a working routine whose winner carries a measurement.
    - The rule holds on the cache-replay path too: a planted entry naming the serial form as the
      winner is rejected and re-searched on GPU, and honoured on CPU. *)
@@ -100,6 +101,15 @@ let () =
   let is_gpu = Sched.backend_is_gpu backend in
   p "the serial baseline is timed on CPU backends and not dispatched on GPU ones"
     (Bool.equal (Float.is_finite r.Autotune.baseline_ms) (not is_gpu));
+  (* gh-ocannl-543: the refusal is a decline like any other. Without a census entry a GPU search
+     that refused most of its candidate space reports exactly what an empty candidate space
+     reports, and the difference was only visible in the [autotune_log] stderr stream. *)
+  p "the refusal is recorded in the decline census, on GPU backends only"
+    (Bool.equal is_gpu
+       (List.exists r.Autotune.declines ~f:(fun d ->
+            match d.Autotune.key with
+            | Ir.Schedule_outcome.Not_dispatched_key origin -> String.equal origin "baseline"
+            | _ -> false)));
   p "the search timed at least one candidate" (r.Autotune.candidates_timed >= 1);
   p "the winner carries a measurement" (Float.is_finite r.Autotune.best_ms);
   p "tuned routine values correct" (Array.for_all2_exn got mm_expected ~f:approx);

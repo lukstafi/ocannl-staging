@@ -252,6 +252,16 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   scratch lineage is MANDATORY for training comps fed via `set_values` — timing on all-zero
   inputs poisons params through log(0)→NaN, and reinit-after-tune is not airtight (ledger trips,
   Metal device-side races).
+- `Autotune.report.candidates_timed` is NOT comparable across a CPU and a GPU backend, so an
+  assertion on it recorded from `cc` is a portability trap (gh-ocannl-543 —
+  `autotune_fission_sketch` timed 19 candidates on cc and 1 on HIP for the same chain). The GPU
+  rule of gh-ocannl-532 refuses every candidate that binds no hardware dimension, and on a
+  two-nest chain that is most of the space: the whole-routine presets dedup to the unscheduled
+  base, and the beam's `Split`/`Swap`/`Retype-Vectorized` moves off that base cannot introduce a
+  `Grid`/`Workgroup` loop (only `Tensorize` and placement retypes can), so the fissioned preset is
+  the only thing left to measure. The refusals now carry a typed census key,
+  `Not_dispatched_key of origin` (`baseline` | `candidate` | `beam_move`) — read it (or
+  `BENCH_TUNE_REPORT=1`) before concluding a GPU search "found nothing".
 - benchmarks/ is the cross-framework parity+timing suite (self-describing safetensors fixtures,
   one-JSON-line runners, loss-trajectory parity gate ~1e-7 fp32 vs pytorch/cpu). The gate
   doubles as a gradient oracle. tinygrad: realize the loss BEFORE `opt.step()` or it recomputes
