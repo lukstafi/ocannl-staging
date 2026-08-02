@@ -138,6 +138,18 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   occurrence-level; they coincide only at first touch on the linear path.
 - Big-reduction producers are forced `Never_virtual` by `virtualize_max_inline_reduction`
   (default 16) — remember it when a structural expectation assumes inlining.
+- `check_half_prec_constants_cutoff` (`Ops.exceeds_fp16_cutoff`, enforced from
+  `Low_level.simplify_llc.check_constant` during lowering, hence backend-independently) is a
+  HEADROOM policy, not a representability check: its default 2^14 sits far below fp16's 65504 max
+  finite, so a constant it rejects may be perfectly representable. Read "too big for FP16" twice
+  before believing it names an overflow — the one message covered two opposite defects at once
+  (gh-ocannl-547/548), and fixing either alone just moves the failure to the other. Reduction
+  identities are out of scope by construction (`Ops.neutral_elem`: `Max` → `-inf`, `Min` → `+inf`),
+  exempted via `Float.is_finite`: they are sentinels arithmetic consumes, exactly representable, and
+  every backend converts them per IEEE (`__float2half` / `__double2half` / a `(half)` cast). Attention
+  masks fill with `Nn_blocks.default_mask_fill` = `-inf` (per-call `?mask_fill` for the one case that
+  needs finite: a mask that can cover a whole row, where `-inf - -inf` would give NaN) rather than a
+  large finite magic number, so the fill needs no per-precision tuning.
 - A GPU schedule must cover EVERY materialized-writing nest of the routine, not only the one the
   pipeline builds. Launch dimensions are kernel-global, so `Low_level.validate_parallel` rejects any
   companion write (a bias/relu tail; the elementwise statements an aligned-merged fission segment
