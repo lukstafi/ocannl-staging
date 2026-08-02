@@ -177,6 +177,43 @@ let binds_hardware_dims (opt : LL.optimized) = not (List.is_empty (LL.hardware_a
 let dispatchable ~is_gpu (opts : LL.optimized list) =
   (not is_gpu) || List.exists opts ~f:binds_hardware_dims
 
+let axis_type_is_hardware = function
+  | LL.Grid | LL.Workgroup | LL.Workgroup_reduce -> true
+  | LL.Serial | LL.Unrolled | LL.Vectorized -> false
+
+(* Whether a menu move could turn a form that binds no hardware dimension into one that does. Only
+   two families can: a placement retype (or a [Split] whose halves are hardware-typed), and
+   [Tensorize], whose lane loop is a fresh [Workgroup] axis — which is exactly the move the seeding
+   comments call the beam's one path out of the serial baseline. The moves [menu] actually proposes
+   otherwise rewrite serial loops into serial loops ([Split] Serial/Serial, [Swap], [Unroll],
+   [Retype] to [Vectorized]), so extending an undispatchable incumbent with them yields another
+   undispatchable candidate — provable without compiling it (gh-ocannl-543). Families [menu] does
+   not emit answer [true]: not pruning is the conservative side, so a future menu addition is never
+   silently dropped. *)
+let optop_can_bind_hardware (op : SC.saved_optop) =
+  match op with
+  | SC.Split { outer; inner; _ } -> axis_type_is_hardware outer || axis_type_is_hardware inner
+  | SC.Retype { ty; _ } -> axis_type_is_hardware ty
+  | SC.Swap _ | SC.Unroll _ -> false
+  | SC.Tensorize _ | SC.Partition _ | SC.Pad _ | SC.Stage _ | SC.Privatize _ | SC.Expand_zero _
+  | SC.Fuse_epilogue _ | SC.Split_reduce _ ->
+      true
+
+let optop_family (op : SC.saved_optop) =
+  match op with
+  | SC.Split _ -> "Split"
+  | SC.Swap _ -> "Swap"
+  | SC.Retype _ -> "Retype"
+  | SC.Unroll _ -> "Unroll"
+  | SC.Partition _ -> "Partition"
+  | SC.Pad _ -> "Pad"
+  | SC.Stage _ -> "Stage"
+  | SC.Privatize _ -> "Privatize"
+  | SC.Expand_zero _ -> "Expand_zero"
+  | SC.Tensorize _ -> "Tensorize"
+  | SC.Fuse_epilogue _ -> "Fuse_epilogue"
+  | SC.Split_reduce _ -> "Split_reduce"
+
 (** {2 Matmul detection and sketch schedules}
 
     Sketch candidates instantiate the composed matmul pipelines pinned by
@@ -3609,6 +3646,20 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
   | None -> (
       let seen = Hash_set.create (module String) in
       Hash_set.add seen base_digest;
+      let declines : (Outcome.rejection_key, decline_acc) Hashtbl.Poly.t = Hashtbl.Poly.create () in
+      (* Every gh-ocannl-532 refusal enters the decline census (gh-ocannl-543). Without it a GPU
+         search that timed a single candidate reports [candidates_timed = 1] with an empty census —
+         the same report a computation with a one-element schedule space would give — and the
+         difference (how many candidates existed and were refused, and why) was only ever visible in
+         the [autotune_log] stderr stream. *)
+      let record_not_dispatched ~origin ~detail =
+        record_decline declines
+          {
+            Outcome.phase = Outcome.Transform;
+            cause = Outcome.Not_dispatched { origin; detail };
+            execution_effect = Outcome.No_device_writes;
+          }
+      in
       (* Baseline timing runs uncaught: its failures (e.g. uninitialized inputs) are the user's bug,
          with the same message [Context.run] would give. On a GPU backend the baseline is the
          unscheduled serial form and is not dispatched at all (see [dispatchable]); [infinity] is
@@ -3622,12 +3673,16 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
         logf "baseline: %.4f ms (digest %s)" baseline_ms (dshort base_digest);
         emit_calibration ~backend ~limits ~label:"baseline" ~digest:base_digest
           ~measured_ms:baseline_ms [ base_opt ])
-      else
+      else (
         (* No calibration row: the model column is only meaningful next to a measurement. *)
         logf
           "baseline: NOT DISPATCHED, binds no hardware dimension on %s -- the whole routine would \
            run in one work-item (gh-ocannl-532) (digest %s)"
           backend (dshort base_digest);
+        record_not_dispatched ~origin:"baseline"
+          ~detail:
+            (Printf.sprintf
+               "the serial baseline binds no hardware dimension on %s (gh-ocannl-532)" backend));
       let baseline =
         {
           form = Whole_saved [];
@@ -3643,7 +3698,6 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
         }
       in
       let n_timed = ref (if baseline_dispatched then 1 else 0) in
-      let declines : (Outcome.rejection_key, decline_acc) Hashtbl.Poly.t = Hashtbl.Poly.create () in
       (* Live search state for an honest partial report. Each counter starts at the amount of work
          completed so far and is updated at its ordinary accounting site below. [best_so_far] is
          updated after every successful timing, including midway through seed enumeration. *)
@@ -3730,6 +3784,10 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
               Hash_set.add seen c.digest_after;
               logf "%s: NOT DISPATCHED, binds no hardware dimension (digest %s)" (spec_label spec)
                 (dshort c.digest_after);
+              record_not_dispatched ~origin:"candidate"
+                ~detail:
+                  (Printf.sprintf "%s degenerated to a form binding no hardware dimension"
+                     (spec_label spec));
               None)
             else (
               Hash_set.add seen c.digest_after;
@@ -4026,8 +4084,29 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
         Int.incr rounds_run;
         let cands =
           List.concat_map !beam ~f:(fun (elem, _) ->
+              (* On a GPU backend the beam can hold an incumbent that was never dispatched — the
+                 serial baseline, whose [infinity] rank keeps it in the pool when fewer than
+                 [beam_width] candidates were timed. Expanding it is worthwhile only through the
+                 moves that can bind a hardware dimension (the [Tensorize] path the sketch comments
+                 describe); every other move provably yields another undispatchable candidate, which
+                 [try_spec]'s dispatchability skip drops after paying for its transform, codegen,
+                 compile and link (16 such compiles per round on the gh-ocannl-543 chain). Pruned
+                 moves are still counted in the census, so the refusal stays visible where it was
+                 before. *)
+              let elem_dispatchable = dispatchable ~is_gpu elem.all_opts in
               List.concat_map elem.units ~f:(fun u ->
-                  List.filter_map (menu ~is_cpu ~is_gpu ~limits u) ~f:(extend_spec elem u)))
+                  List.filter_map (menu ~is_cpu ~is_gpu ~limits u) ~f:(fun op ->
+                      if elem_dispatchable || optop_can_bind_hardware op then extend_spec elem u op
+                      else (
+                        logf "menu prune (cannot parallelize an undispatched incumbent): %s"
+                          (optop_family op);
+                        record_not_dispatched ~origin:"beam_move"
+                          ~detail:
+                            (Printf.sprintf
+                               "%s on an incumbent binding no hardware dimension cannot bind one \
+                                either"
+                               (optop_family op));
+                        None))))
         in
         let results = List.sort (List.filter_map cands ~f:try_spec) ~compare:by_time in
         match results with
