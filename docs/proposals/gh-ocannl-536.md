@@ -712,6 +712,21 @@ the normal training lock if its setup exercises the process-local pool.
 0. Establish where #533's exception actually escaped (HIP machine, one instrumented run). If it was
    the baseline timing, the scratch validator still prevents the damage; the partial-report path is
    then not involved in that reproduction.
+   **Established afterwards, and it was neither.** With the validator in place the abort became a
+   typed `Resource_exceeded Thread_scratch` at `Backend_link` — and the run still died, because the
+   compile it fired on was the tuner's own *base* compile (`Autotune.tune`'s identity-transform
+   capture), the one compile in `tune` that went through raising `Context.compile` rather than
+   `compile_outcome`. Its escape route bypassed `try_spec`, the census, and the partial report
+   entirely, so a green rejection test and a dead search were fully compatible — exactly the "clean
+   typed diagnosis that still kills the run" the gh-538 sweep reported. Two things made it invisible
+   to the design: the baseline is the one candidate not compiled *as* a candidate, and supplying a
+   `?lowered_transform` bypasses the default annotator, so the form being validated is the
+   unscheduled serial one, which is the worst case for per-work-item scratch and is never even
+   dispatched on GPU. Fixed by protecting that compile too (provenance `Candidate`); the capture
+   happens inside the transform, so the base lowering survives the rejection and the scheduled
+   candidates — whose fission and placement promotion are what bring the head back within budget —
+   still derive from it. The general lesson matches the seam note under step 1: audit for compiles
+   the tuner performs *outside* its candidate loop.
 1. `schedule_outcome.ml`: phases, causes/keys, provenance policy, fatal-with-backtrace, strict mode,
    `Context.compile_outcome`, the default backend hook, and narrow translations at
    schedule-apply/`validate_parallel`/hardware-limit/compiler/link seams. Land the portable
