@@ -255,7 +255,10 @@ type terminal_failure = {
 }
 
 type report = {
-  cache_hit : bool;  (** The schedule came from the disk cache; no search ran. *)
+  cache_hit : bool;
+      (** The schedule came from the disk cache; no search ran. The census is then empty except for
+          a declined baseline: the base compile precedes the lookup, so its rejection is real
+          information about this process on this device even though nothing was searched. *)
   candidates_timed : int;
       (** Including the serial baseline where it was dispatched — on GPU backends it is not
           (gh-ocannl-532), and neither is any other candidate that binds no hardware dimension. So

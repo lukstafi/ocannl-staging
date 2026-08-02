@@ -3601,6 +3601,18 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
     | Whole_saved _ -> false
     | Fiss_saved _ | Split_saved _ -> true
   in
+  (* The decline census outlives the cache branch: the baseline compile happens before the lookup and
+     can be declined whether or not a cached winner then replays (gh-ocannl-533), so a cache-hit
+     report has to carry that rejection too — [baseline_declined] with an empty census would be an
+     internally inconsistent diagnostic on exactly the warm-cache runs of the workload that motivated
+     the fix (Codex review, PR #271). *)
+  let declines : (Outcome.rejection_key, decline_acc) Hashtbl.Poly.t = Hashtbl.Poly.create () in
+  (* A declined baseline is an ordinary entry in the census: it is the same evidence about the same
+     device as any candidate's rejection, and dropping it would report a smaller [candidates_failed]
+     than the work actually attempted. It is recorded HERE and NOT as a [Not_dispatched] refusal
+     below — the two are mutually exclusive accounts of one baseline, and the gh-ocannl-532 refusal
+     asserts a reason ("binds no hardware dimension") that is not why this baseline did not run. *)
+  Option.iter baseline_decline ~f:(record_decline declines);
   let cached =
     if use_cache then
       match SC.lookup ~dir:cache_dir ~key with
@@ -3634,10 +3646,11 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
                 {
                   cache_hit = true;
                   candidates_timed = 0;
-                  candidates_failed = 0;
+                  (* No search ran, so the only rejection this can carry is the baseline's. *)
+                  candidates_failed = failed_count declines;
                   partial = false;
                   baseline_declined = Option.is_some baseline_decline;
-                  declines = [];
+                  declines = decline_summaries declines;
                   terminal_failure = None;
                   rounds_run = 0;
                   sketch_candidates = 0;
@@ -3670,8 +3683,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
   | None -> (
       let seen = Hash_set.create (module String) in
       Hash_set.add seen base_digest;
-      let declines : (Outcome.rejection_key, decline_acc) Hashtbl.Poly.t = Hashtbl.Poly.create () in
-      (* Every gh-ocannl-532 refusal enters the decline census (gh-ocannl-543). Without it a GPU
+      (* Every gh-ocannl-532 refusal enters the same decline census (gh-ocannl-543). Without it a GPU
          search that timed a single candidate reports [candidates_timed = 1] with an empty census —
          the same report a computation with a one-element schedule space would give — and the
          difference (how many candidates existed and were refused, and why) was only ever visible in
@@ -3684,13 +3696,6 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
             execution_effect = Outcome.No_device_writes;
           }
       in
-      (* A declined baseline is an ordinary entry in the same census (gh-ocannl-533): it is the same
-         evidence about the same device as any candidate's rejection, and a search that silently
-         dropped it would report a smaller [candidates_failed] than the work it attempted. It is
-         recorded here and NOT as a [Not_dispatched] refusal below — the two are mutually exclusive
-         accounts of one baseline, and the gh-532 refusal asserts a reason ("binds no hardware
-         dimension") that is not why this baseline did not run. *)
-      Option.iter baseline_decline ~f:(record_decline declines);
       (* [None] when the baseline compile was declined (gh-ocannl-533): there is no routine to time
          and none to return, and the search runs on the scheduled candidates alone. *)
       let baseline =

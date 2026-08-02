@@ -121,4 +121,44 @@ let () =
   let ctx = Context.run ctx routine in
   let got = Context.get_values ctx total.Tensor.value in
   p "scratch/tune: the tuned routine computes the right value"
-    (Array.length got = 1 && Float.(abs (got.(0) - expected_total) < abs expected_total *. 1e-5))
+    (Array.length got = 1 && Float.(abs (got.(0) - expected_total) < abs expected_total *. 1e-5));
+
+  (* 4. The warm-cache shape, which is what the second run of the motivating workload does (Codex
+     review, PR #271). The base compile happens BEFORE the cache lookup, so the baseline is declined
+     on a cache hit too — and the report has to say so consistently: [baseline_declined] with an
+     empty census would claim a rejection the census cannot account for. Nothing else can be in
+     there, since no search ran. *)
+  let cache_dir = "hip_scratch_tune_cache" in
+  if Stdlib.Sys.file_exists cache_dir && Stdlib.Sys.is_directory cache_dir then
+    Array.iter (Stdlib.Sys.readdir cache_dir) ~f:(fun f ->
+        Stdlib.Sys.remove (Stdlib.Filename.concat cache_dir f));
+  let tune_cached () =
+    let r = ref None in
+    let ctx, routine =
+      Autotune.tune ~beam_width:1 ~rounds:0 ~repeats:1 ~cache_dir
+        ~report:(fun rep -> r := Some rep)
+        (Context.auto ()) comp Idx.Empty
+    in
+    let ctx = Context.run ctx routine in
+    (Option.value_exn ~here:[%here] !r, Context.get_values ctx total.Tensor.value)
+  in
+  let _populate, _ = tune_cached () in
+  let hit, hit_got = tune_cached () in
+  let hit_scratch_count =
+    List.sum
+      (module Int)
+      (List.filter hit.Autotune.declines ~f:(fun d ->
+           match d.Autotune.key with
+           | SO.Resource_exceeded_key SO.Thread_scratch -> true
+           | _ -> false))
+      ~f:(fun d -> d.Autotune.count)
+  in
+  p "scratch/tune: the second run replays from the cache" hit.Autotune.cache_hit;
+  p "scratch/tune: a cache hit still reports the declined baseline"
+    (Bool.equal hit.Autotune.baseline_declined r.Autotune.baseline_declined);
+  p "scratch/tune: the cache-hit census accounts for that decline, and only it"
+    ((not hit.Autotune.baseline_declined)
+    || (hit_scratch_count = 1 && hit.Autotune.candidates_failed = 1));
+  p "scratch/tune: the cache-hit replay computes the right value"
+    (Array.length hit_got = 1
+    && Float.(abs (hit_got.(0) - expected_total) < abs expected_total *. 1e-5))
