@@ -7,9 +7,12 @@ platform: Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.43 x86_64 |
 > gh-ocannl-521, -527, -532, -537, -539, -540 and -541. `benchmarks/autotune_cache` did not exist
 > when the sweep started, so every reported search is from scratch and nothing was replayed from a
 > cache predating those changes.
-> 87 cells recorded; 9 failed to produce a result, all of them `gpt2_mini` reduced-precision or
-> tuned cells — see "Three defects in the gpt2_mini legs". The parity gate is green on every cell
-> that produced one, including all reduced-precision legs.
+> The matrix dispatched 96 cells: **87 produced a result and 9 failed**, all nine of them `gpt2_mini`
+> reduced-precision or tuned cells — see "Three defects in the gpt2_mini legs". The workload tables
+> below carry **88 rows**: those 87 plus one standalone re-measurement of `gpt2_mini ocannl/cuda/tuned`
+> (marked †), which failed inside the matrix and was re-run alone at the same commit in the same
+> session. The parity gate is green on every cell that produced a result, including all
+> reduced-precision legs.
 > Hardware: NVIDIA GeForce RTX 5070 Ti Laptop GPU (sm_120, driver 610.62 / CUDA API 13.3, toolkit
 > 13.3) under WSL2, Intel Core Ultra 9 275HX (24C/24T). torch 2.13.0+cu130, tinygrad master
 > `62273d50f` (CPU cells via the README's zig-cc clang stand-in; CUDA cells compile through the
@@ -453,9 +456,13 @@ commit it completes: arm A 185.56 ms, arm B 221.81 ms, winner arm A, 379 s searc
 replay gives the 185.910 ms cell marked † above. So this is a marginal-memory failure that appears
 under the matrix's back-to-back cell pressure, not a deterministic regression — recorded as a
 robustness problem rather than a correctness one. It is worth noting that the candidate pool this
-search now walks is larger than it was (gh-ocannl-521 lets tensorized candidates survive to compile;
-gh-ocannl-541 finds 21 split-reduce sites here where the old ranking found few), so headroom on a
-12 GB card is thinner than it was.
+search now walks is larger than it was: gh-ocannl-541 finds **21** split-reduce sites on this graph,
+of which 8 survive the cap and 13 are evicted, and 20 split-reduce candidates are timed per arm — so
+headroom on a 12 GB card is thinner than it was. gh-ocannl-521 is **not** implicated here: this cell
+runs at the default `tf32_matmuls=false` (`ocannl_config.reference:497`), at which `gpt2_mini` seeds
+0 and times 0 tensorized candidates (see the table in "Tensor cores are reached on CUDA"), so no
+tensorized candidate reaches compile in this search at all. The split-reduction expansion is the only
+supported contributor.
 
 ## Cross-framework, with per-cell caveats
 
