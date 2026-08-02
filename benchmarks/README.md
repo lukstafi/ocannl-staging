@@ -128,8 +128,9 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   be replaced with `/opt/rocm/lib/libhsa-runtime64.so.1.21.0`, with
   `/opt/rocm/lib/rocm_sysdeps/lib` on `LD_LIBRARY_PATH`. See
   [example-report.md](example-report.md) (macOS/Metal — the gh-ocannl-538 sweep: tensorized
-  candidates now compile and time on Metal but are never crowned; split reduction is worth 48-82%
-  on the default-placement arm; f16's cost is the loss-scaling gate, not f16 arithmetic),
+  candidates now compile and time on Metal, and win a search arm once, but none reaches a shipping
+  artifact; split reduction is worth 46-82% on the default-placement arm; f16's cost is the
+  loss-scaling gate, not f16 arithmetic),
   [example-report-cuda.md](example-report-cuda.md) (Linux/CUDA),
   [report-hip.md](report-hip.md) (WSL2/HIP on gfx1151, all three frameworks),
   [report-cifar-cuda.md](report-cifar-cuda.md) (Linux/CUDA, the cifar-scale conv baseline

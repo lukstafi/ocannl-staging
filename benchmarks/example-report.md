@@ -167,7 +167,7 @@ Conventions are gh-ocannl-538's reporting contract: every segment share names th
 share of; a seg-time sum is never presented as a step time; before/after claims are same-session and
 same-process; tensor-core reachability is reported as seeded *and* timed counts, never a yes/no.
 
-### Tensor cores on Metal: seeded, timed, and still never crowned
+### Tensor cores on Metal: seeded, timed, crowned once, shipped never
 
 The headline change since the gh-ocannl-476 sweep, where **zero** tensorized candidates were timed
 anywhere on Metal because every one failed at candidate compile. They now compile and time. Counts
@@ -199,8 +199,10 @@ Being timed is not being chosen. Across the whole matrix a `Tensorize` is crowne
   ep]` at 1.6484 ms — and arm A wins the placement A/B at 0.9915 ms, so it does not ship.
 
 So on Metal the gh-521 blocker is gone and the remaining gap is *ranking*, not reachability: the
-tensorized candidates compile, run, and lose. That is a different and more tractable problem than
-the one the previous sweep recorded.
+tensorized candidates compile, run, and — with that one `mlp_small` f16 exception, which wins its
+own arm but loses the placement A/B — lose. That is a different and more tractable problem than the
+one the previous sweep recorded. Note the shape of the exception: the one Metal arm a `Tensorize`
+wins is a *reduced-precision* one, which is the direction gh-ocannl-539 made expressible.
 
 The blockers behind the still-failing candidates, by count (Metal, arm B, conv workloads):
 12x `Autotune sketch: tensorized GPU matmul companion coverage (gh-521)` — the cross-nest race
@@ -409,5 +411,5 @@ valid GPU references, and the parity gate passed on all 99 cells. OCANNL remains
 this hardware — 43x behind torch/mps on `lenet` (33.668 vs 5.090 ms) after tuning, 129x on
 `cifar_conv` — and ahead of torch CPU only on `mlp_small` and `lenet` (`cc/tuned`). The GPU gap is
 the standing result; what changed this round is that the schedule search now has tensorized and
-split-reduce candidates in its pool on Metal, and the split-reduce family is worth 48–82% on the
-default-placement arm.
+split-reduce candidates in its pool on Metal, and the split-reduce family is worth 46–82% on the
+default-placement arm (48–82% on Metal alone).
