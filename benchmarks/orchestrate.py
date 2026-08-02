@@ -36,6 +36,11 @@ VENV_PY = Path(
         else HERE / ".venv/bin/python",
     )
 )
+# BENCH_CELL_LOG_DIR: keep every cell's raw combined output under this directory, one file per
+# cell label. Unset (the default) discards a successful cell's output as before.
+CELL_LOG_DIR = (
+    Path(os.environ["BENCH_CELL_LOG_DIR"]) if os.environ.get("BENCH_CELL_LOG_DIR") else None
+)
 PARITY_TOL = 2e-3
 # Accuracy-parity gates for the OCANNL mixed-precision legs (gh-ocannl-492 task 4), with roughly
 # 10x headroom over the largest drift measured by the macOS cc/Metal sweep.
@@ -66,19 +71,24 @@ GPU_DEVICES = {
 }
 
 # Known-pathological cells excluded from the default matrix, as
-# (workload, backend, variant, precision), where precision None means "at every precision" —
-# the entry below is a scheduling pathology with no dependence on the storage precision, so
-# adding a precision axis must not let it back in through the bf16/f16 columns.
+# (workload, backend, variant, precision), where precision None means "at every precision" — a
+# scheduling pathology has no dependence on the storage precision, so adding a precision axis must
+# not let one back in through the bf16/f16 columns. Written as set(), not {}, so that emptying it
+# does not silently turn it into a dict.
 # Currently empty: the metal-default-schedule pathologies (gpt2_mini 81 s/step -> ~0.3 s,
 # lenet 3.2 s/step + parity FAIL -> 0.22 s exact, mlp_wide >10 s/step -> 6 ms) were fixed by
 # lowering the default GPU schedule's serial-fallback threshold, promoting statement-crossing
 # Local scratch at fission, and working around a Metal compiler miscompilation of scalar
 # read-modify-write accumulation (see arrayjit/lib/c_syntax.ml volatile_scalar_rmw and
 # benchmarks/runners/ocannl/bench_metal_bug.ml).
-# cifar_conv metal/tuned: the search completes but the post-tune re-init hangs the process
-# (Metal reinit-after-tune race, PR #109/#174); the materialized variant covers the metal column.
-SKIP_CELLS = {
-    ("cifar_conv", "metal", "tuned", None),
+# cifar_conv metal/tuned USED to belong here: the search completed but the post-tune re-init hung
+# the process (Metal reinit-after-tune race, PR #109/#174). Retested at gh-ocannl-538 with the
+# byte-for-byte command orchestrate issues for that cell — completed in ~4 min wall, no hang,
+# search 230.3 s against the 2069 s the same standalone search took in the gh-476 sweep, and the
+# full sweep reproduced its p50 to 0.005% (277.915 vs 277.928 ms). The searches got cheap enough to
+# stop provoking it somewhere between those sweeps; gh-ocannl-532 (an unparallelized candidate is no
+# longer dispatched on a GPU backend) is the likeliest reason.
+SKIP_CELLS = set(
     # mlp_wide/cifar_conv/cifar_stride hip/tuned USED to belong here: the search appeared to wedge,
     # but perf showed 100% of the time in libhsa-runtime64 busy-waiting on a dispatch — the
     # autotuner was timing the unparallelized serial baseline, i.e. the whole training step in one
@@ -88,7 +98,7 @@ SKIP_CELLS = {
     # that produced the symptom (gfx1151 / WSL, ROCm), all three cells completing with the display
     # intact: mlp_wide 34 s wall (search 32.1 s, 1.70 ms/step), cifar_stride 132 s (125.3 s,
     # 18.06 ms), cifar_conv 181 s (164.6 s, 61.09 ms).
-}
+)
 
 sys.path.insert(0, str(HERE / "runners"))
 from bench_common import read_st_metadata  # noqa: E402
@@ -130,6 +140,15 @@ def run_cell(label, cmd, env=None, cwd=None):
     proc = subprocess.run(
         cmd, env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
     )
+    if CELL_LOG_DIR:
+        # A cell's own output is otherwise discarded on success, which throws away exactly the
+        # evidence a measurement sweep is asked to report: with autotune_log=true the search
+        # pass's candidate lines (seeded vs timed, FAILED, dedup, split-reduce evictions) live
+        # here and nowhere else, and re-running the searches to recover them costs as much as the
+        # sweep. Off unless BENCH_CELL_LOG_DIR is set, so the default run is unchanged.
+        CELL_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        safe = "".join(c if c.isalnum() or c in "-._" else "_" for c in label)
+        (CELL_LOG_DIR / f"{safe}.log").write_text(proc.stdout)
     line = next(
         (l for l in reversed(proc.stdout.splitlines()) if l.startswith("{")), None
     )
