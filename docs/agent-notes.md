@@ -150,6 +150,14 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   masks fill with `Nn_blocks.default_mask_fill` = `-inf` (per-call `?mask_fill` for the one case that
   needs finite: a mask that can cover a whole row, where `-inf - -inf` would give NaN) rather than a
   large finite magic number, so the fill needs no per-precision tuning.
+- The `bf16_ops`/`half_ops` convention of picking inputs that are exactly representable in the
+  reduced precision, so printed numbers stay backend-uniform, does NOT extend to transcendental
+  results: no choice of inputs makes an `exp` output exactly representable, and backend libm
+  implementations disagree in the last mantissa bit (HIP's `exp` gives `2.1215e-1` where cc, metal
+  and cuda give `2.1228e-1` — one ulp at 2^-13, found only by running `half_softmax` on real ROCm
+  hardware). A reduced-precision golden containing `exp`/`log`/`tanh` output must therefore print
+  coarsely enough to sit above an ulp and carry its numeric content in a tolerance comparison against
+  a double-precision reference computed in the test, not in the printed digits.
 - A GPU schedule must cover EVERY materialized-writing nest of the routine, not only the one the
   pipeline builds. Launch dimensions are kernel-global, so `Low_level.validate_parallel` rejects any
   companion write (a bias/relu tail; the elementwise statements an aligned-merged fission segment
