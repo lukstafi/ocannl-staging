@@ -36,6 +36,16 @@ type cause =
           (gh-ocannl-541): the site was reachable and ranked, and lost only to the cap. Recorded in
           the decline census so a previously-proposed site that stops being proposed leaves a
           signal instead of vanishing. [family] names the seed family (e.g. ["split_reduce"]). *)
+  | Not_dispatched of { origin : string; detail : string }
+      (** A candidate the search refused to run on a GPU backend because it binds no hardware
+          dimension (gh-ocannl-532): the whole routine would execute in one work-item. Nothing is
+          wrong with the candidate — the backend's execution model is what rejects it — but it is a
+          decline like any other, and leaving it out of the census made a GPU search that timed one
+          candidate indistinguishable from one whose candidates all failed (gh-ocannl-543).
+          [origin] names where the refusal happened: ["baseline"] (the serial baseline),
+          ["candidate"] (a compiled candidate that degenerated to a serial form), or ["beam_move"]
+          (a menu move pruned before compile because it provably cannot parallelize an already
+          unparallelized incumbent). *)
 [@@deriving sexp_of, equal]
 
 type rejection_key =
@@ -45,6 +55,7 @@ type rejection_key =
   | Backend_rejected_key of string * string * severity
   | Unclassified_key of phase * string
   | Seed_evicted_key of string
+  | Not_dispatched_key of string
 [@@deriving sexp_of, compare, equal]
 
 val key_of_cause : cause -> rejection_key
