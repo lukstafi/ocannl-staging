@@ -22,6 +22,7 @@ type report = {
   candidates_timed : int;
   candidates_failed : int;
   partial : bool;
+  baseline_declined : bool;
   declines : decline_summary list;
   terminal_failure : terminal_failure option;
   rounds_run : int;
@@ -96,6 +97,10 @@ let float_arg ~arg_name ~default =
 
 (* A candidate round-improvement below this fraction of the incumbent ends the search. *)
 let min_progress = 0.01
+
+(* The beam holds no compiled candidate exactly when nothing was timed, which every consumer of the
+   winner tests first ([nothing_timed]). *)
+let timed_winner_exists = "Autotune.tune: a finite best time without a compiled candidate"
 
 (** {2 Timing} *)
 
@@ -3541,19 +3546,37 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
      Canonicalize INSIDE the transform: after the transform returns, codegen forces the remaining
      undecided placements into the very placements table the captured [opt] references, and
      placement classes enter the digest (Schedule_cache.canonicalize) — the disk-cache key must be
-     the deterministic transform-time form so that storing and replaying processes agree. *)
+     the deterministic transform-time form so that storing and replaying processes agree.
+
+     The baseline is a candidate, so its compile is protected like every other candidate's
+     (gh-ocannl-533): a typed rejection — the HIP scratch validator declining the unscheduled serial
+     form at [Backend_link] is the case that motivated this — declines the baseline and lets the
+     search proceed with the scheduled candidates, instead of killing the run before a single
+     candidate has been tried. This is sound because the capture happens INSIDE the transform, which
+     runs before codegen and link: [base_opt] survives the rejection, so every candidate still
+     derives from the same base lowering. Only the timing of the serial form is lost, and on a GPU
+     backend it was never going to be timed anyway ([dispatchable] below). Unclassified failures
+     stay fatal: provenance [Candidate] under strict classification. *)
   let base_capture = ref None in
-  let bctx, broutine =
-    Context.compile
+  let base_outcome =
+    Context.compile_outcome
       ~lowered_transform:(fun opt ->
         base_capture := Some (opt, SC.canonicalize ~static_indices opt);
         opt)
-      search_ctx comp bindings
+      ~provenance:Outcome.Candidate ~candidate:"baseline" search_ctx comp bindings
   in
   let base_opt, canon =
-    match !base_capture with
-    | Some oc -> oc
-    | None -> failwith "Autotune.tune: backend compile did not invoke lowered_transform"
+    match (!base_capture, base_outcome) with
+    | Some oc, _ -> oc
+    (* Failed before reaching the transform: there is no base lowering, hence no search. *)
+    | None, Error failure -> Outcome.raise_failure failure
+    | None, Ok _ -> failwith "Autotune.tune: backend compile did not invoke lowered_transform"
+  in
+  let baseline_linked, baseline_decline =
+    match base_outcome with
+    | Ok (bctx, broutine) -> (Some (bctx, broutine), None)
+    | Error (Outcome.Classified classified) -> (None, Some classified)
+    | Error (Outcome.Fatal _ as failure) -> Outcome.raise_failure failure
   in
   let base_digest = SC.digest canon in
   let use_cache = (not (String.is_empty cache_dir)) && SC.complete canon in
@@ -3613,6 +3636,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
                   candidates_timed = 0;
                   candidates_failed = 0;
                   partial = false;
+                  baseline_declined = Option.is_some baseline_decline;
                   declines = [];
                   terminal_failure = None;
                   rounds_run = 0;
@@ -3660,43 +3684,66 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
             execution_effect = Outcome.No_device_writes;
           }
       in
+      (* A declined baseline is an ordinary entry in the same census (gh-ocannl-533): it is the same
+         evidence about the same device as any candidate's rejection, and a search that silently
+         dropped it would report a smaller [candidates_failed] than the work it attempted. It is
+         recorded here and NOT as a [Not_dispatched] refusal below — the two are mutually exclusive
+         accounts of one baseline, and the gh-532 refusal asserts a reason ("binds no hardware
+         dimension") that is not why this baseline did not run. *)
+      Option.iter baseline_decline ~f:(record_decline declines);
+      (* [None] when the baseline compile was declined (gh-ocannl-533): there is no routine to time
+         and none to return, and the search runs on the scheduled candidates alone. *)
+      let baseline =
+        Option.map baseline_linked ~f:(fun (bctx, broutine) ->
+            {
+              form = Whole_saved [];
+              cctx = bctx;
+              routine = broutine;
+              units =
+                [
+                  {
+                    u_key = None;
+                    u_saved = [];
+                    u_registry = SC.base_registry canon;
+                    u_opt = base_opt;
+                  };
+                ];
+              all_opts = [ base_opt ];
+              digest_after = base_digest;
+              mma_renders = [];
+            })
+      in
       (* Baseline timing runs uncaught: its failures (e.g. uninitialized inputs) are the user's bug,
          with the same message [Context.run] would give. On a GPU backend the baseline is the
          unscheduled serial form and is not dispatched at all (see [dispatchable]); [infinity] is
          its rank, so every timed candidate beats it and the search never returns it (see the
-         fallback at the end). *)
-      let baseline_dispatched = dispatchable ~is_gpu [ base_opt ] in
+         fallback at the end), and a declined baseline ranks the same way. *)
+      let baseline_dispatched = Option.is_some baseline && dispatchable ~is_gpu [ base_opt ] in
       let baseline_ms =
-        if baseline_dispatched then time_routine ~repeats bctx broutine else Float.infinity
+        match baseline with
+        | Some b when baseline_dispatched -> time_routine ~repeats b.cctx b.routine
+        | _ -> Float.infinity
       in
-      if baseline_dispatched then (
-        logf "baseline: %.4f ms (digest %s)" baseline_ms (dshort base_digest);
-        emit_calibration ~backend ~limits ~label:"baseline" ~digest:base_digest
-          ~measured_ms:baseline_ms [ base_opt ])
-      else (
-        (* No calibration row: the model column is only meaningful next to a measurement. *)
-        logf
-          "baseline: NOT DISPATCHED, binds no hardware dimension on %s -- the whole routine would \
-           run in one work-item (gh-ocannl-532) (digest %s)"
-          backend (dshort base_digest);
-        record_not_dispatched ~origin:"baseline"
-          ~detail:
-            (Printf.sprintf
-               "the serial baseline binds no hardware dimension on %s (gh-ocannl-532)" backend));
-      let baseline =
-        {
-          form = Whole_saved [];
-          cctx = bctx;
-          routine = broutine;
-          units =
-            [
-              { u_key = None; u_saved = []; u_registry = SC.base_registry canon; u_opt = base_opt };
-            ];
-          all_opts = [ base_opt ];
-          digest_after = base_digest;
-          mma_renders = [];
-        }
-      in
+      (match baseline_decline with
+      | Some classified ->
+          logf "baseline: DECLINED at %s %s"
+            (phase_label classified.phase)
+            (Outcome.detail_of_cause classified.cause)
+      | None ->
+          if baseline_dispatched then (
+            logf "baseline: %.4f ms (digest %s)" baseline_ms (dshort base_digest);
+            emit_calibration ~backend ~limits ~label:"baseline" ~digest:base_digest
+              ~measured_ms:baseline_ms [ base_opt ])
+          else (
+            (* No calibration row: the model column is only meaningful next to a measurement. *)
+            logf
+              "baseline: NOT DISPATCHED, binds no hardware dimension on %s -- the whole routine \
+               would run in one work-item (gh-ocannl-532) (digest %s)"
+              backend (dshort base_digest);
+            record_not_dispatched ~origin:"baseline"
+              ~detail:
+                (Printf.sprintf "the serial baseline binds no hardware dimension on %s (gh-ocannl-532)"
+                   backend)));
       let n_timed = ref (if baseline_dispatched then 1 else 0) in
       (* Live search state for an honest partial report. Each counter starts at the amount of work
          completed so far and is updated at its ordinary accounting site below. [best_so_far] is
@@ -3728,6 +3775,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
             candidates_timed = !n_timed;
             candidates_failed = failed_count declines;
             partial = true;
+            baseline_declined = Option.is_some baseline_decline;
             declines = summaries;
             terminal_failure;
             rounds_run = !rounds_run;
@@ -3741,10 +3789,10 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
             mma_timed = !n_mma_timed;
             model_scored = !n_model_scored;
             model_pruned = !n_model_pruned;
-            fissioned = is_fissioned best_c.form;
+            fissioned = Option.exists best_c ~f:(fun c -> is_fissioned c.form);
             baseline_ms;
             best_ms;
-            best_schedule = flat_schedule best_c.form;
+            best_schedule = Option.value_map best_c ~default:[] ~f:(fun c -> flat_schedule c.form);
           }
         in
         (* Reporting is best-effort on the exceptional path and must not replace the compiler
@@ -3829,7 +3877,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
                   else if total = 0 && spec_expects_mma spec then
                     logf "%s: NOTE tensorized candidate emitted no Tile_mma statement"
                       (spec_label spec);
-                  if Float.(ms < snd !best_so_far) then best_so_far := (c, ms);
+                  if Float.(ms < snd !best_so_far) then best_so_far := (Some c, ms);
                   Some (c, ms)
               | Error (Outcome.Classified classified) -> (
                   record_decline declines classified;
@@ -4023,8 +4071,10 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
       let fiss_single_results = ref [] in
       let sr_single_results = ref [] in
       let pool =
-        (baseline, baseline_ms)
-        :: List.filter_map seed_specs ~f:(fun spec ->
+        (* A declined baseline contributes no pool entry, so the pool — and with it the beam — can
+           be empty; every consumer below takes that as "nothing was timed" (gh-ocannl-533). *)
+        Option.to_list (Option.map baseline ~f:(fun b -> (b, baseline_ms)))
+        @ List.filter_map seed_specs ~f:(fun spec ->
             let result = try_spec spec in
             (match (spec, result) with
             | Fiss (F_sketch [ (key, p) ]), Some (_, ms) ->
@@ -4078,7 +4128,10 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
           | None -> pool
       in
       let beam = ref (List.take (List.sort pool ~compare:by_time) beam_width) in
-      let best = ref (List.hd_exn !beam) in
+      (* [None] iff the beam is empty: no candidate timed and the baseline was not eligible (an
+         undispatched GPU baseline never enters the pool with a finite rank; a declined one does not
+         enter it at all). *)
+      let best = ref (List.hd !beam) in
       let continue_ = ref true in
       while !continue_ && !rounds_run < rounds do
         Int.incr rounds_run;
@@ -4112,22 +4165,25 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
         match results with
         | [] -> continue_ := false
         | (_, round_best_ms) :: _ ->
-            let _, incumbent_ms = !best in
+            let incumbent_ms = Option.value_map !best ~default:Float.infinity ~f:snd in
             if Float.(round_best_ms < incumbent_ms *. (1. -. min_progress)) then (
               beam := List.take results beam_width;
-              best := List.hd_exn !beam)
+              best := List.hd !beam)
             else continue_ := false
       done;
-      let best_c, best_ms = !best in
-      (* The winner is the undispatched baseline exactly when nothing was timed: every candidate
-         failed and (on GPU) the serial baseline was never run. Nothing measured means nothing to
-         cache — a stored entry would pin future processes to a never-timed schedule. *)
+      let best_c, best_ms =
+        match !best with Some (c, ms) -> (Some c, ms) | None -> (None, Float.infinity)
+      in
+      (* Nothing was timed exactly when every candidate failed and (on GPU) the serial baseline was
+         never run — or, since gh-ocannl-533, was itself declined. Nothing measured means nothing to
+         cache: a stored entry would pin future processes to a never-timed schedule. *)
       let nothing_timed = Float.is_inf best_ms in
       (if use_cache then
          if nothing_timed then
            logf "nothing was timed: storing no cache entry (gh-ocannl-532)"
          else
            let saved, segments =
+             let best_c = Option.value_exn best_c ~message:timed_winner_exists in
              match best_c.form with
              | Whole_saved saved -> (saved, None)
              | Fiss_saved assoc -> ([], Some assoc)
@@ -4161,6 +4217,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
           candidates_timed = !n_timed;
           candidates_failed = failed_count declines;
           partial = false;
+          baseline_declined = Option.is_some baseline_decline;
           declines = decline_summaries declines;
           terminal_failure = None;
           rounds_run = !rounds_run;
@@ -4174,10 +4231,10 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
           mma_timed = !n_mma_timed;
           model_scored = !n_model_scored;
           model_pruned = !n_model_pruned;
-          fissioned = is_fissioned best_c.form;
+          fissioned = Option.exists best_c ~f:(fun c -> is_fissioned c.form);
           baseline_ms;
           best_ms;
-          best_schedule = flat_schedule best_c.form;
+          best_schedule = Option.value_map best_c ~default:[] ~f:(fun c -> flat_schedule c.form);
         }
       in
       let result =
@@ -4188,8 +4245,11 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
              caller would have compiled without the tuner. *)
           logf "nothing was timed: falling back to the untuned default compile (gh-ocannl-532)";
           Context.compile ctx comp bindings)
-        else if Option.is_none timing_ctx then (best_c.cctx, best_c.routine)
         else
+          (* [nothing_timed] is false, so the beam holds a timed winner. *)
+          let best_c = Option.value_exn best_c ~message:timed_winner_exists in
+          if Option.is_none timing_ctx then (best_c.cctx, best_c.routine)
+          else
           (* The search ran against the scratch lineage; compile the winner from the caller's
              context (like the cache-hit path). Digest mismatch or replay failure falls back to the
              production default schedule. *)

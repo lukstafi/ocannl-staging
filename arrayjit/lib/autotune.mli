@@ -27,7 +27,14 @@
       whose serial candidates were all refused from one whose candidate space was empty. Beam rounds
       expanding an incumbent that was never dispatched propose only the moves that can bind a
       hardware dimension ([Tensorize], placement retypes); the rest are pruned before compile and
-      counted in the same census.
+      counted in the same census. Separately, the baseline's compile is protected like any
+      candidate's (gh-ocannl-533): a typed rejection — a large softmax/cross-entropy head whose
+      unscheduled form exceeds the HIP scratch budget is the case in hand — declines the baseline
+      ([baseline_declined] in the report, and its own key in the census rather than a
+      [Not_dispatched] refusal, which would assert a reason that is not the one) and the search
+      proceeds on the scheduled candidates, which fission and placement promotion routinely bring
+      back within budget. Only the base lowering itself is indispensable: a failure before it is
+      captured has no search to run and propagates.
     - {b Fissioned candidates}: the kernel-fission pipeline ({!Ir.Schedule.fission_scheduled}) with
       per-segment schedules — the same preset sweep per segment, and beam rounds that extend
       {e one segment at a time}. Per-segment schedules are cached keyed by the pre-schedule
@@ -256,15 +263,22 @@ type report = {
           the CPU backends legitimately time is refused on GPU, and the refusals are counted in
           [declines] under [Not_dispatched_key] instead (gh-ocannl-543). *)
   candidates_failed : int;
-      (** Candidates rejected by op preconditions, hardware limits, or backend compilation — plus
-          detected seed sites declined before proposal (split-reduce sites evicted by
-          [max_split_reduce_sites], gh-ocannl-541) and candidates refused as unparallelized on a
-          GPU backend (gh-ocannl-532), which the decline census records so a previously-proposed
-          site — or a candidate space the backend's execution model empties — never stops being
-          proposed silently. *)
+      (** Candidates rejected by op preconditions, hardware limits, or backend compilation — the
+          serial baseline included (gh-ocannl-533) — plus detected seed sites declined before
+          proposal (split-reduce sites evicted by [max_split_reduce_sites], gh-ocannl-541) and
+          candidates refused as unparallelized on a GPU backend (gh-ocannl-532), which the decline
+          census records so a previously-proposed site — or a candidate space the backend's
+          execution model empties — never stops being proposed silently. *)
   partial : bool;
       (** [true] when candidate work terminated on a fatal failure after the baseline was handled.
-          Base-compile and baseline-timing failures occur before reporting begins. *)
+          A base compile that fails before the base lowering is captured, and a baseline timing
+          failure, occur before reporting begins. *)
+  baseline_declined : bool;
+      (** The serial baseline's own compile was rejected with a typed cause and the search ran on
+          the scheduled candidates alone (gh-ocannl-533): [baseline_ms] is then [infinity] and the
+          rejection is in [declines] like any candidate's. The HIP scratch validator declining the
+          unscheduled serial form of a large softmax/cross-entropy head at [Backend_link] is the
+          case this exists for — before it was contained, that one rejection ended the search. *)
   declines : decline_summary list;
       (** Candidate rejections aggregated by stable cause key. Their counts sum to
           [candidates_failed]. Cache-entry replay failures are excluded. *)
@@ -317,19 +331,22 @@ type report = {
   model_pruned : int;
       (** Of [model_scored], the candidates dropped before compilation and timing. Candidates
           without model coverage are never counted here — they are always kept. *)
-  fissioned : bool;  (** The winning candidate compiles as multiple fissioned kernels. *)
+  fissioned : bool;
+      (** The winning candidate compiles as multiple fissioned kernels; [false] when nothing was
+          timed. *)
   baseline_ms : float;
       (** The unscheduled serial baseline's measured time, or [infinity] when it was not dispatched:
           on a GPU backend an unparallelized candidate is never run (gh-ocannl-532 — the whole
           routine in one work-item, unbounded in cost and uninterruptible), so it has no
-          measurement and cannot win. *)
+          measurement and cannot win. Also [infinity] when [baseline_declined]. *)
   best_ms : float;
       (** The winner's measured time, or [infinity] when nothing was timed at all — every candidate
-          failed and the baseline was not dispatched. In that case no cache entry is stored and the
-          returned routine is the untuned default compile, not the serial baseline. *)
+          failed and the baseline was not dispatched (or was declined). In that case no cache entry
+          is stored and the returned routine is the untuned default compile, not the serial
+          baseline. *)
   best_schedule : Ir.Schedule_cache.saved_schedule;
       (** The winner's schedule; for a fissioned winner, the concatenation of the per-segment
-          schedules (informational). *)
+          schedules (informational). Empty when nothing was timed. *)
 }
 
 val model_score :
