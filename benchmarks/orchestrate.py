@@ -36,6 +36,11 @@ VENV_PY = Path(
         else HERE / ".venv/bin/python",
     )
 )
+# BENCH_CELL_LOG_DIR: keep every cell's raw combined output under this directory, one file per
+# cell label. Unset (the default) discards a successful cell's output as before.
+CELL_LOG_DIR = (
+    Path(os.environ["BENCH_CELL_LOG_DIR"]) if os.environ.get("BENCH_CELL_LOG_DIR") else None
+)
 PARITY_TOL = 2e-3
 # Accuracy-parity gates for the OCANNL mixed-precision legs (gh-ocannl-492 task 4), with roughly
 # 10x headroom over the largest drift measured by the macOS cc/Metal sweep.
@@ -130,6 +135,15 @@ def run_cell(label, cmd, env=None, cwd=None):
     proc = subprocess.run(
         cmd, env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
     )
+    if CELL_LOG_DIR:
+        # A cell's own output is otherwise discarded on success, which throws away exactly the
+        # evidence a measurement sweep is asked to report: with autotune_log=true the search
+        # pass's candidate lines (seeded vs timed, FAILED, dedup, split-reduce evictions) live
+        # here and nowhere else, and re-running the searches to recover them costs as much as the
+        # sweep. Off unless BENCH_CELL_LOG_DIR is set, so the default run is unchanged.
+        CELL_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        safe = "".join(c if c.isalnum() or c in "-._" else "_" for c in label)
+        (CELL_LOG_DIR / f"{safe}.log").write_text(proc.stdout)
     line = next(
         (l for l in reversed(proc.stdout.splitlines()) if l.startswith("{")), None
     )
