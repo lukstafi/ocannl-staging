@@ -307,8 +307,24 @@ let%op rope ~freqs ~positions x =
   let out_odd = (x_even *. sin_a) + (x_odd *. cos_a) in
   interleave out_even out_odd
 
+(** The score a masked-out attention position is filled with before the softmax:
+    [Float.neg_infinity], so that [exp (fill - max)] is exactly zero.
+
+    This is deliberately not a large finite magic number. A finite sentinel has to be chosen against
+    a storage precision — the long-standing [-1e9] is four orders of magnitude past fp16's largest
+    finite value, so it tripped [Ops.exceeds_fp16_cutoff] and made every masked attention
+    unlowerable at half precision. Negative infinity is exactly representable in every float format
+    OCANNL supports, and says what is meant: this position is below anything the format can hold.
+
+    The one behavior a finite fill bought is that a {e fully} masked row (no live position at all)
+    degrades to a uniform distribution rather than to NaN — with an all-[-inf] row the softmax's
+    max-subtraction yields [-inf - -inf = nan]. Causal masks always leave the diagonal live and are
+    unaffected; a padding mask that can mask a whole row should pass a finite [?mask_fill] (e.g.
+    [-1e4], which still underflows [exp] to zero at every precision). *)
+let default_mask_fill = Float.neg_infinity
+
 let%op multi_head_attention ~label ~num_heads ~d_k ~d_v ?temperature ?(dropout_rate = 0.0)
-    ?(pos_embed = No_pos_embed) () ~train_step ?mask x =
+    ?(mask_fill = default_mask_fill) ?(pos_embed = No_pos_embed) () ~train_step ?mask x =
   (match pos_embed with RoPE _ -> assert (Int.(d_k % 2 = 0)) | _ -> ());
   let q = { w_q } * x in
   let k = { w_k } * x in
@@ -330,7 +346,7 @@ let%op multi_head_attention ~label ~num_heads ~d_k ~d_v ?temperature ?(dropout_r
   (* We don't need to lift [softmax ~spec ()] because it doesn't introduce any new params. *)
   let attn_weights =
     softmax ~spec:" ... | t -> ..." ?temperature ()
-      (match mask with None -> scores | Some mask -> where mask scores !.(-1e9))
+      (match mask with None -> scores | Some mask -> where mask scores !.mask_fill)
   in
   let attn_weights = dropout ~rate:dropout_rate () ~train_step attn_weights in
   (* w_o output shape will automatically be set to the model dimension(s) by shape inference. *)
@@ -373,10 +389,10 @@ let%op transformer_encoder_block ~label ~num_heads ~d_k ~d_v ~d_ff ?(epsilon = 1
     {!transformer_encoder_block} but accepts a [~mask] parameter for causal masking. No
     cross-attention — suitable for autoregressive language models. *)
 let%op decoder_only_block ~label ~num_heads ~d_k ~d_v ~d_ff ?(epsilon = 1e-5) ?(dropout_rate = 0.0)
-    ?(pos_embed = No_pos_embed) () =
+    ?mask_fill ?(pos_embed = No_pos_embed) () =
   let masked_mha =
     multi_head_attention ~label:("masked_mha" :: label) ~num_heads ~d_k ~d_v ~dropout_rate
-      ~pos_embed ()
+      ?mask_fill ~pos_embed ()
   in
   let ffn = mlp ~label:("ffn" :: label) ~hid_dims:[ d_ff ] () in
   let ln1 = layer_norm ~label:("ln1" :: label) ~epsilon () in
@@ -386,13 +402,13 @@ let%op decoder_only_block ~label ~num_heads ~d_k ~d_v ~d_ff ?(epsilon = 1e-5) ?(
     ln2 (x1 + ffn x1)
 
 (** Stack of {!decoder_only_block} layers. *)
-let decoder_only ~label ~num_layers ~num_heads ~d_k ~d_v ~d_ff ?epsilon ?dropout_rate
+let decoder_only ~label ~num_layers ~num_heads ~d_k ~d_v ~d_ff ?epsilon ?dropout_rate ?mask_fill
     ?(pos_embed = No_pos_embed) () =
   let layers =
     List.init num_layers ~f:(fun i ->
         decoder_only_block
           ~label:(("layer" ^ Int.to_string i) :: label)
-          ~num_heads ~d_k ~d_v ~d_ff ?epsilon ?dropout_rate ~pos_embed ())
+          ~num_heads ~d_k ~d_v ~d_ff ?epsilon ?dropout_rate ?mask_fill ~pos_embed ())
   in
   fun ~train_step x ~mask -> List.fold layers ~init:x ~f:(fun x layer -> layer ~train_step x ~mask)
 
@@ -412,11 +428,11 @@ let%op cross_attention ~label ~num_heads ~d_k ~d_v ?temperature ?(dropout_rate =
   let attn_weights = dropout ~rate:dropout_rate () ~train_step attn_weights in
   { w_o } * (attn_weights +* v " ... s | t -> h; ... t | h e => ... s | h e" [ "e" ])
 
-let%op transformer_decoder_block ~label ~num_heads ~d_k ~d_v ~d_ff ?(epsilon = 1e-5)
+let%op transformer_decoder_block ~label ~num_heads ~d_k ~d_v ~d_ff ?(epsilon = 1e-5) ?mask_fill
     ?(pos_embed = No_pos_embed) () =
   (* RoPE is applied to self-attention only, not cross-attention. *)
   let masked_mha =
-    multi_head_attention ~label:("masked_mha" :: label) ~num_heads ~d_k ~d_v ~pos_embed ()
+    multi_head_attention ~label:("masked_mha" :: label) ~num_heads ~d_k ~d_v ?mask_fill ~pos_embed ()
   in
   let cross_mha = cross_attention ~label:("cross_mha" :: label) ~num_heads ~d_k ~d_v () in
   (* Standard 2-layer FFN: expand to d_ff then contract back to d_model *)
@@ -439,19 +455,19 @@ let transformer_encoder ~label ~num_layers ~num_heads ~d_k ~d_v ~d_ff ?(epsilon 
   in
   fun ~train_step x -> List.fold layers ~init:x ~f:(fun x layer -> layer ~train_step x)
 
-let transformer_decoder ~label ~num_layers ~num_heads ~d_k ~d_v ~d_ff ?(epsilon = 1e-5)
+let transformer_decoder ~label ~num_layers ~num_heads ~d_k ~d_v ~d_ff ?(epsilon = 1e-5) ?mask_fill
     ?(pos_embed = No_pos_embed) () =
   let layers =
     List.init num_layers ~f:(fun i ->
         transformer_decoder_block
           ~label:(("layer" ^ Int.to_string i) :: label)
-          ~num_heads ~d_k ~d_v ~d_ff ~epsilon ~pos_embed ())
+          ~num_heads ~d_k ~d_v ~d_ff ~epsilon ?mask_fill ~pos_embed ())
   in
   fun ~train_step target ~enc_output ~mask ->
     List.fold layers ~init:target ~f:(fun x layer -> layer ~train_step x ~enc_output ~mask)
 
 let%op transformer ~label ~num_encoder_layers ~num_decoder_layers ~num_heads ~d_enc ~d_dec ~d_ff
-    ?(epsilon = 1e-5) ?(pos_embed = Learned_additive) () =
+    ?(epsilon = 1e-5) ?mask_fill ?(pos_embed = Learned_additive) () =
   let enc_att = [%oc d_enc / num_heads] in
   let dec_att = [%oc d_dec / num_heads] in
   let attn_pos_embed = match pos_embed with RoPE _ as pe -> pe | _ -> No_pos_embed in
@@ -461,7 +477,7 @@ let%op transformer ~label ~num_encoder_layers ~num_decoder_layers ~num_heads ~d_
   in
   let decoder =
     transformer_decoder ~label:("decoder" :: label) ~num_layers:num_decoder_layers ~num_heads
-      ~d_k:dec_att ~d_v:dec_att ~d_ff ~epsilon ~pos_embed:attn_pos_embed ()
+      ~d_k:dec_att ~d_v:dec_att ~d_ff ~epsilon ?mask_fill ~pos_embed:attn_pos_embed ()
   in
   (* NOTE: { pos_encoding } and { pos_encoding_tgt } are learned inline params lifted by %op. They
      are created unconditionally but only used when pos_embed = Learned_additive. *)
