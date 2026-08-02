@@ -99,6 +99,17 @@ let () =
   p "scratch/tune: the decline census sums to candidates_failed"
     (r.Autotune.candidates_failed
     = List.sum (module Int) r.Autotune.declines ~f:(fun d -> d.Autotune.count));
+  (* One refusal, one census entry. gh-ocannl-543 records an unparallelized baseline as
+     [Not_dispatched_key "baseline"], and a declined baseline is also never dispatched — but its
+     reason is the rejection above, not "binds no hardware dimension", and counting it twice would
+     inflate [candidates_failed] with a claim that is not true of this baseline. *)
+  p "scratch/tune: the declined baseline is not also counted as a gh-532 refusal"
+    ((not r.Autotune.baseline_declined)
+    || not
+         (List.exists r.Autotune.declines ~f:(fun d ->
+              match d.Autotune.key with
+              | SO.Not_dispatched_key origin -> String.equal origin "baseline"
+              | _ -> false)));
 
   (* 2. The search continued to the next candidate: it completed, and timed something. This is the
      half that was broken while the diagnosis was already right. *)

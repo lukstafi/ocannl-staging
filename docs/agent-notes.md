@@ -241,7 +241,10 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   scratch, and on GPU never dispatched anyway. It is now declined (`report.baseline_declined`,
   `baseline_ms = infinity`) and the scheduled candidates carry the search; fission plus
   `promote_locals` is what brings a large softmax/CE head back within budget, which is why
-  `gpt2_mini hip/tuned` completes while every whole-routine preset declines. Guard:
+  `gpt2_mini hip/tuned` completes while every whole-routine preset declines. In the census it
+  carries its own cause and NOT gh-ocannl-543's `Not_dispatched_key "baseline"` — a declined
+  baseline is never dispatched either, but recording both would double-count it under a reason that
+  is not the one. One refusal, one entry. Guard:
   `test/operations/hip_scratch_tune_survives.ml` (`slow` alias).
 - Building a test kernel that actually *has* a big scratch frame takes care: write the `Local`
   array in one loop and read it back in REVERSE in another. A forward read in the same order lets
