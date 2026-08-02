@@ -22,7 +22,12 @@
       of uninterruptible dispatch on a device shared with the display (gh-ocannl-532). It keeps its
       role as the search's starting point for menu moves and as the code every candidate derives
       from; it just carries no measurement. On CPU backends it runs at full single-core speed and is
-      timed as before.
+      timed as before. Every such refusal enters the report's decline census under
+      [Not_dispatched_key] (gh-ocannl-543): [candidates_timed] alone cannot distinguish a GPU search
+      whose serial candidates were all refused from one whose candidate space was empty. Beam rounds
+      expanding an incumbent that was never dispatched propose only the moves that can bind a
+      hardware dimension ([Tensorize], placement retypes); the rest are pruned before compile and
+      counted in the same census.
     - {b Fissioned candidates}: the kernel-fission pipeline ({!Ir.Schedule.fission_scheduled}) with
       per-segment schedules — the same preset sweep per segment, and beam rounds that extend
       {e one segment at a time}. Per-segment schedules are cached keyed by the pre-schedule
@@ -246,12 +251,17 @@ type report = {
   cache_hit : bool;  (** The schedule came from the disk cache; no search ran. *)
   candidates_timed : int;
       (** Including the serial baseline where it was dispatched — on GPU backends it is not
-          (gh-ocannl-532), and neither is any other candidate that binds no hardware dimension. *)
+          (gh-ocannl-532), and neither is any other candidate that binds no hardware dimension. So
+          this count is not comparable across a CPU and a GPU backend: every serial-form candidate
+          the CPU backends legitimately time is refused on GPU, and the refusals are counted in
+          [declines] under [Not_dispatched_key] instead (gh-ocannl-543). *)
   candidates_failed : int;
       (** Candidates rejected by op preconditions, hardware limits, or backend compilation — plus
           detected seed sites declined before proposal (split-reduce sites evicted by
-          [max_split_reduce_sites], gh-ocannl-541), which the decline census records so a
-          previously-proposed site never stops being proposed silently. *)
+          [max_split_reduce_sites], gh-ocannl-541) and candidates refused as unparallelized on a
+          GPU backend (gh-ocannl-532), which the decline census records so a previously-proposed
+          site — or a candidate space the backend's execution model empties — never stops being
+          proposed silently. *)
   partial : bool;
       (** [true] when candidate work terminated on a fatal failure after the baseline was handled.
           Base-compile and baseline-timing failures occur before reporting begins. *)
