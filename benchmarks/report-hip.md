@@ -6,9 +6,26 @@ platform: Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.43 x86_64 |
 > RDNA3.5), ROCm 7.14, under WSL2. One commit for the whole leg — staging `e687da82`, which
 > contains gh-ocannl-521, -527, -532, -533, -537, -539, -540 and -541 — and a **wiped
 > `autotune_cache`** before the first tuned cell (contract item 7). torch 2.13.0+rocm7.1
-> (HIP 7.1.52802), tinygrad 0.13.0. 102 cells recorded, 8 cells produced no result (all of them
-> `gpt2_mini`; see Findings). Every recorded cell PASSES the parity gate and every loss trajectory
-> moved — no `FAIL`, no `loss stationary`, anywhere in this run.
+> (HIP 7.1.52802), tinygrad 0.13.0. Every recorded cell PASSES the parity gate and every loss
+> trajectory moved — no `FAIL`, no `loss stationary`, anywhere in this run.
+>
+> **Cell accounting**, so an absent row is never ambiguous between "failed" and "not attempted":
+>
+> | | full product | attempted | recorded | failed | not attempted |
+> |---|---|---|---|---|---|
+> | OCANNL f32 (6 workloads × 2 backends × 3 variants) | 36 | 36 | 35 | 1 | 0 |
+> | OCANNL reduced precision (mlp × 4 precisions, gpt × 2, × 2 backends × 3 variants) | 60 | 50 | 43 | 7 | **10** |
+> | pytorch + tinygrad (6 workloads × 2 devices × 2 frameworks) | 24 | 24 | 24 | 0 | 0 |
+> | **total** | **120** | **110** | **102** | **8** | **10** |
+>
+> All 8 failures are `gpt2_mini`, for three distinct reasons, all diagnosed under Findings. The 10
+> not-attempted cells are **every `cc/tuned` cell at a reduced precision**, dropped deliberately:
+> `cc` has no native reduced-precision arithmetic and no reduced-precision mma tile, so those
+> searches answer no question this leg asks, and they are the most expensive cells in the matrix
+> (untuned `cc` runs at 1.82 s/step on `mlp_wide`/bf16 and 20.2 s/step on `gpt2_mini`/bf16, so a
+> search that times dozens of candidates four times each is hours per cell). Their f32 siblings and
+> their untuned reduced-precision siblings are all present, so the `cc` column is complete on both
+> axes separately, just not on their product.
 >
 > Tuned cells use the two-pass protocol (pass 1 = the search, reported as `compile_s`; a fresh
 > pass-2 process replays the cached winner for the step timings).
@@ -376,12 +393,14 @@ The four variants gh-ocannl-538 asks for, on `mlp_wide`/hip (ms/step, p50):
 | materialized | 1.966 | 3.673 | 11.743 | 2.016 | 11.533 |
 | tuned | 1.758 | 1.967 | 2.367 | **1.665** | 2.097 |
 
-and the same on `cc`, as the control:
+and the same on `cc`, as the control (no `tuned` row at a reduced precision: those 10 cells were
+deliberately not attempted — see the cell accounting in the header):
 
 | variant | f32 | bf16 | f16 | f16-static | f16-gated16 |
 |---|---|---|---|---|---|
 | default | 218.825 | 1821.540 | 840.551 | 842.083 | 840.839 |
 | materialized | 217.627 | 1806.930 | 838.999 | 841.169 | 842.568 |
+| tuned | 18.252 | — | — | — | — |
 
 **Without the static leg this would have been unreadable, which is why the contract asks for it.**
 At the default placement on HIP the gate costs **9.77 ms** — 5.9× the entire f32 step — and the
@@ -453,7 +472,7 @@ tensorized schedule. The f16 constant still has room (worst 1.73e-04 against 2e-
 bf16 one should stay at 4e-3 until a tensorized bf16 cell has been characterised on more than one
 backend.
 
-### `gpt2_mini` at reduced precision: two hard blockers, found on its first fixture run
+### `gpt2_mini` at reduced precision: three distinct blockers, found on its first fixture run
 
 gh-ocannl-538 notes this leg had never run on a fixture. It now has, and 3 of 10 cells survive —
 `hip/materialized/bf16`, `cc/default/bf16`, `cc/materialized/bf16`, all of which pass parity. The
@@ -467,16 +486,28 @@ other seven fail for two distinct reasons:
   tok/s, drift 4.5e-04), while `hip/default/bf16` and `hip/tuned/bf16` both die, because only the
   fissioned graphs emit the mixed expression. The fix belongs in the HIP backend's
   `convert_precision` / binop emission, not in the workload.
-- **f16 fails a precision guard on both backends, before any codegen.**
-  `Constant -inf is too big for FP16 aka. half precision … tensor node max_vals` (softmax's
-  max-subtraction sentinel) and `Constant -1000000000. is too big for FP16 … tensor node where`
-  (the causal mask's `-1e9`). The guard is doing its job — both constants really do overflow f16 —
-  but the model has no way to express "this sentinel should be the storage format's own min". Either
-  the mask/sentinel constants become precision-aware, or `max_vals` and `where` join the layer norms
-  and the CE head in the f32 pin list.
+- **f16 trips `Low_level.check_constant` on both backends, before any codegen — on two constants
+  that are not the same problem.** The guard is `Ops.exceeds_fp16_cutoff`, a *configurable magnitude
+  cutoff* (`check_half_prec_constants_cutoff`, default 16384.0 = 2^14) and deliberately well below
+  f16's 65504 max finite, so it is a headroom guard against overflow during arithmetic rather than a
+  representability check. The two rejections it produces here need separate fixes:
+  - `Constant -1000000000. is too big for FP16 … tensor node where` — the causal mask's `-1e9`.
+    **A genuine overflow**: it is 4 orders of magnitude past f16's largest finite value, so the
+    guard is doing exactly its job. The model has no way to say "this sentinel is the storage
+    format's own min", so either the mask constant becomes precision-aware or `where` joins the
+    layer norms and the CE head in the f32 pin list.
+  - `Constant -inf is too big for FP16 … tensor node max_vals` — softmax's max-subtraction
+    sentinel. **Not an overflow.** `-inf` is exactly representable in IEEE binary16, and the code
+    generator already emits it deliberately (`c_syntax.ml` renders it as `(-INFINITY)`, and the HIP
+    backend routes it through `__float2half`). `abs (-inf) >= cutoff` is trivially true for any
+    finite cutoff, so the guard rejects an infinity it has no reason to reject. **The cutoff needs
+    an infinity exemption**; pinning `max_vals` to f32 would work around a guard defect rather than
+    fix a numerical problem.
 
-`gpt2_mini` also has **no tuned cell at any precision**: at f32 the search dies on the gh-533
-scratch pre-validator (below), at bf16 on the HIPRTC error above, at f16 on the constant guard.
+**On this backend `gpt2_mini` has no tuned cell at any precision** — at f32 the search dies on the
+gh-533 scratch pre-validator (below), at bf16 on the HIPRTC error above, at f16 on the constant
+guard. This is HIP-specific: `cc/tuned` at f32 completes normally (526.213 ms, search 507.33 s), and
+`cc` at a reduced precision was not tuned by choice (see the note on skipped cells above).
 
 ### gh-ocannl-533: the scratch abort is now a clean diagnosis, but it is still fatal
 
@@ -564,9 +595,13 @@ tinygrad/CPU is the sound CPU comparison here; against it, OCANNL `cc` tuned win
   whole-routine seed, and it is the single remaining blocker family on this backend.
 - **The bf16 parity constant must not be tightened to 1e-3** until the 2.64e-03 tensorized-bf16
   drift is understood and reproduced on a second backend.
-- **`gpt2_mini` has no tuned cell at any precision, and only one working reduced-precision `hip`
-  cell** — three separate blockers (scratch, HIPRTC overload ambiguity, f16 constant overflow), none
-  of them shared with the mlp workloads.
+- **`gpt2_mini` has no tuned `hip` cell at any precision, and only one working reduced-precision
+  `hip` cell** — three separate blockers (the gh-533 scratch validator at f32, the HIPRTC overload
+  ambiguity at bf16, the constant cutoff at f16), none of them shared with the mlp workloads and
+  none of them affecting `cc`, whose f32 tuned cell completes normally.
+- **The f16 constant cutoff should exempt infinities.** `-inf` is exactly representable in binary16
+  and the code generator emits it on purpose; rejecting it is a guard defect independent of the
+  genuine `-1e9` mask overflow beside it.
 - The gh-533 pre-validator should decline the candidate rather than raise out of the search.
 - The `grad_checksum` reduction should be parallel in the default GPU pipeline, without a search.
 - `cifar_conv`'s `cc/tuned` search is now the most expensive cell in the suite at 620.93 s (against
