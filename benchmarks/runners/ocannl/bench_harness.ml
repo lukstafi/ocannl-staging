@@ -67,6 +67,33 @@ let dump_params loss =
         (String.concat ~sep:";"
            (Array.to_list (Array.map (Lazy.force tn.Tn.dims) ~f:Int.to_string))))
 
+(** Captures [comp]'s optimized lowering, the input every diagnostic below works from. Supplying a
+    [?lowered_transform] bypasses the default annotator, so the routine this links is the unscheduled
+    serial form — for a large graph that is the whole working set in one work-item's stack frame, and
+    on HIP the gh-ocannl-533 scratch validator declines it (gpt2_mini's forward asks for 163,856 B).
+    The lowering is captured inside the transform, i.e. before codegen and link, so a typed rejection
+    costs nothing here: the routine is discarded either way. An untyped failure still propagates. *)
+let capture_lowering ctx comp bindings =
+  let stash = ref None in
+  let outcome =
+    Context.compile_outcome
+      ~lowered_transform:(fun opt ->
+        stash := Some opt;
+        opt)
+      ~provenance:Ir.Schedule_outcome.User_schedule ctx comp bindings
+  in
+  (match (outcome, !stash) with
+  | Ok _, Some _ -> ()
+  | Ok _, None -> failwith "capture_lowering: the backend did not invoke lowered_transform"
+  (* Failed before the transform ran: no lowering to keep, so nothing to continue with. *)
+  | Error failure, None -> Ir.Schedule_outcome.raise_failure failure
+  | Error (Ir.Schedule_outcome.Fatal _ as failure), Some _ ->
+      Ir.Schedule_outcome.raise_failure failure
+  | Error (Ir.Schedule_outcome.Classified classified), Some _ ->
+      Stdio.printf "note: the unscheduled whole-routine form does not link here (%s)\n%!"
+        (Ir.Schedule_outcome.detail_of_cause classified.Ir.Schedule_outcome.cause));
+  Option.value_exn ~here:[%here] !stash
+
 (** Diagnostic: prints the default fission-pipeline segment census for the captured lowered routine
     — per segment its kind, launch geometry and schedule size, and per top-level nest the loop
     extents (with axis-type letters) and written tensor nodes ([!] materialized, [~] routine-local).
@@ -235,23 +262,43 @@ let time_segments ?promote_locals ?(repeats = 20) ~backend ~limits ~static_indic
   in
   Stdio.printf "segment times (min of %d runs, ms):\n" repeats;
   let total = ref 0. in
+  let declined = ref 0 in
   List.iteri segs ~f:(fun i (kind, pre, _sched, post) ->
-      let _ctx', routine = Context.compile ~lowered_transform:(fun _ -> post) ctx comp bindings in
-      bind routine;
-      Train.run ctx routine;
-      Context.sync ctx;
-      let best = ref Float.infinity in
-      for _ = 1 to repeats do
-        let c0 = Mtime_clock.counter () in
-        Train.run ctx routine;
-        Context.sync ctx;
-        best := Float.min !best (elapsed_ms c0)
-      done;
-      total := !total +. !best;
       let kind_s = match kind with `Normal -> "N" | `Zeros -> "Z" | `Solo -> "S" in
       let ws = String.concat ~sep:" " (List.map (writes_of pre.LL.llc) ~f:Tn.debug_name) in
-      Stdio.printf "  seg%-3d %s %8.4f ms  w:%s\n" i kind_s !best ws);
-  Stdio.printf "  total (sum of per-segment minima): %.4f ms\n" !total;
+      (* A segment compiled hermetically is not the segment as the full routine runs it: alone it
+         keeps the whole per-thread working set that the full pipeline's promotions relieve, and on
+         HIP the gh-ocannl-533 scratch validator declines it (gpt2_mini's cross-entropy head asks
+         for 163,856 B per work-item). That is a limitation of this instrument, not of the workload
+         — so the segment is reported as declined and the remaining ones are still timed. An
+         untyped failure still propagates: [User_schedule] provenance keeps this diagnostic honest
+         about compiler bugs. *)
+      match
+        Context.compile_outcome ~lowered_transform:(fun _ -> post)
+          ~provenance:Ir.Schedule_outcome.User_schedule ctx comp bindings
+      with
+      | Error (Ir.Schedule_outcome.Fatal _ as failure) -> Ir.Schedule_outcome.raise_failure failure
+      | Error (Ir.Schedule_outcome.Classified classified) ->
+          Int.incr declined;
+          Stdio.printf "  seg%-3d %s DECLINED (%s)  w:%s\n" i kind_s
+            (Ir.Schedule_outcome.detail_of_cause classified.Ir.Schedule_outcome.cause)
+            ws
+      | Ok (_ctx', routine) ->
+          bind routine;
+          Train.run ctx routine;
+          Context.sync ctx;
+          let best = ref Float.infinity in
+          for _ = 1 to repeats do
+            let c0 = Mtime_clock.counter () in
+            Train.run ctx routine;
+            Context.sync ctx;
+            best := Float.min !best (elapsed_ms c0)
+          done;
+          total := !total +. !best;
+          Stdio.printf "  seg%-3d %s %8.4f ms  w:%s\n" i kind_s !best ws);
+  Stdio.printf "  total (sum of per-segment minima): %.4f ms%s\n" !total
+    (if !declined = 0 then ""
+     else Printf.sprintf " (INCOMPLETE: %d of %d segments declined)" !declined (List.length segs));
   Stdio.Out_channel.flush Stdio.stdout
 
 (** Runs the measurement protocol and prints the JSON result line. [run_step] advances the batch

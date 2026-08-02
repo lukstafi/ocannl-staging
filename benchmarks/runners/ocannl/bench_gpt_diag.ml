@@ -90,18 +90,10 @@ let () =
   let backend = Context.backend_name ctx in
   let limits = Context.hardware_limits ctx in
   let ctx = Train.init_params ctx bindings batch_loss in
-  (* First compile only stashes the lowered code for the census (an explicit transform replaces the
-     default pipeline, so this routine is discarded); the timed routine is compiled with the regular
-     default pipeline below. *)
-  let stash = ref None in
-  let _census_ctx, _census_routine =
-    Context.compile
-      ~lowered_transform:(fun opt ->
-        stash := Some opt;
-        opt)
-      ctx fwd bindings
-  in
-  let opt = Option.value_exn ~here:[%here] !stash in
+  (* Only the lowering is wanted here (an explicit transform replaces the default pipeline,
+     so the routine is discarded); the timed routine is compiled with the regular default
+     pipeline below. *)
+  let opt = H.capture_lowering ctx fwd bindings in
   let promote_locals =
     match Stdlib.Sys.getenv_opt "BENCH_PROMOTE" with Some "0" -> Some false | _ -> None
   in
