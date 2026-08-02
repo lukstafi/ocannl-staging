@@ -455,19 +455,19 @@ let transformer_encoder ~label ~num_layers ~num_heads ~d_k ~d_v ~d_ff ?(epsilon 
   in
   fun ~train_step x -> List.fold layers ~init:x ~f:(fun x layer -> layer ~train_step x)
 
-let transformer_decoder ~label ~num_layers ~num_heads ~d_k ~d_v ~d_ff ?(epsilon = 1e-5)
+let transformer_decoder ~label ~num_layers ~num_heads ~d_k ~d_v ~d_ff ?(epsilon = 1e-5) ?mask_fill
     ?(pos_embed = No_pos_embed) () =
   let layers =
     List.init num_layers ~f:(fun i ->
         transformer_decoder_block
           ~label:(("layer" ^ Int.to_string i) :: label)
-          ~num_heads ~d_k ~d_v ~d_ff ~epsilon ~pos_embed ())
+          ~num_heads ~d_k ~d_v ~d_ff ~epsilon ?mask_fill ~pos_embed ())
   in
   fun ~train_step target ~enc_output ~mask ->
     List.fold layers ~init:target ~f:(fun x layer -> layer ~train_step x ~enc_output ~mask)
 
 let%op transformer ~label ~num_encoder_layers ~num_decoder_layers ~num_heads ~d_enc ~d_dec ~d_ff
-    ?(epsilon = 1e-5) ?(pos_embed = Learned_additive) () =
+    ?(epsilon = 1e-5) ?mask_fill ?(pos_embed = Learned_additive) () =
   let enc_att = [%oc d_enc / num_heads] in
   let dec_att = [%oc d_dec / num_heads] in
   let attn_pos_embed = match pos_embed with RoPE _ as pe -> pe | _ -> No_pos_embed in
@@ -477,7 +477,7 @@ let%op transformer ~label ~num_encoder_layers ~num_decoder_layers ~num_heads ~d_
   in
   let decoder =
     transformer_decoder ~label:("decoder" :: label) ~num_layers:num_decoder_layers ~num_heads
-      ~d_k:dec_att ~d_v:dec_att ~d_ff ~epsilon ~pos_embed:attn_pos_embed ()
+      ~d_k:dec_att ~d_v:dec_att ~d_ff ~epsilon ?mask_fill ~pos_embed:attn_pos_embed ()
   in
   (* NOTE: { pos_encoding } and { pos_encoding_tgt } are learned inline params lifted by %op. They
      are created unconditionally but only used when pos_embed = Learned_additive. *)
