@@ -1,428 +1,608 @@
 # Benchmark results
 
-platform: Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.43 x86_64 | ocannl commit: bd075cd5 | parity tol: 0.002 (max rel diff over first parity steps vs pytorch/cpu/eager)
-> The HIP/ROCm leg of the gh-ocannl-476 measurement sweep, run from scratch (wiped
-> `autotune_cache`) on minix-pc: AMD Ryzen AI Max+ 395 (Strix Halo, Zen 5, 16C/32T) with the
-> Radeon 8060S iGPU (gfx1151, RDNA3.5), ROCm 7.14, **under WSL2** — the previous revision of this
-> report was recorded on native Windows at `8436e362`, so individual cells are not comparable to it
-> cross-revision. (The *pattern* across cells still is, and is informative: see the gh-ocannl-527
-> note under per-segment attribution, where the workloads that did not regress bound the
-> environment effect.) 65 cells, 2 runner failures. torch 2.13.0+rocm7.1 (HIP 7.1.52802), tinygrad
-> 0.13.0, HIP runtime 7.14.60850. Tuned cells use the two-pass protocol (pass 1 = the search,
-> reported as `compile_s`; a fresh pass-2 process replays the cached winner for step timings).
-> Regenerate with
-> `taskset -c 0-15 benchmarks/.venv/bin/python benchmarks/orchestrate.py --tuned --materialized --precision bf16 f16 --gpu hip`
-> — the affinity wrapper is not optional here, see the next paragraph.
+platform: Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.43 x86_64 | ocannl commit: e687da82 | parity tol: 0.002 (max rel diff over first parity steps vs pytorch/cpu/eager; reduced precisions get their own envelope: bf16 0.004, f16 0.002, f16-static 0.002, f16-gated16 0.002)
+> The HIP/ROCm leg of the **gh-ocannl-538** re-measurement sweep, run from scratch on minix-pc:
+> AMD Ryzen AI Max+ 395 (Strix Halo, Zen 5, 16C/32T) with the Radeon 8060S iGPU (gfx1151,
+> RDNA3.5), ROCm 7.14, under WSL2. One commit for the whole leg — staging `e687da82`, which
+> contains gh-ocannl-521, -527, -532, -533, -537, -539, -540 and -541 — and a **wiped
+> `autotune_cache`** before the first tuned cell (contract item 7). torch 2.13.0+rocm7.1
+> (HIP 7.1.52802), tinygrad 0.13.0. 102 cells recorded, 8 cells produced no result (all of them
+> `gpt2_mini`; see Findings). Every recorded cell PASSES the parity gate and every loss trajectory
+> moved — no `FAIL`, no `loss stationary`, anywhere in this run.
+>
+> Tuned cells use the two-pass protocol (pass 1 = the search, reported as `compile_s`; a fresh
+> pass-2 process replays the cached winner for the step timings).
+>
+> Regenerate with, from `benchmarks/`:
+>
+> ```bash
+> # cell 1: the f32 matrix, all workloads, all three frameworks
+> taskset -c 0-15 .venv/bin/python orchestrate.py --tuned --materialized --gpu hip
+> # cell 2: the reduced-precision legs — f16-static/f16-gatedN are bench_mlp env knobs that
+> # orchestrate's --precision axis does not cover, so they are driven per cell:
+> #   BENCH_PRECISION=bf16|f16 [BENCH_STATIC_SCALE=1 | BENCH_GATE_INTERVAL=16] BENCH_TUNE=0|1 …
+> ```
 >
 > **All cells ran under `taskset -c 0-15`** (16 physical cores, SMT halves excluded): this machine
-> hard-froze during an uncapped all-core `cc` autotune search earlier in the session (Kernel-Power
-> 41, no bugcheck; the box also has four `0x7F` double-fault dumps from 2026-07-12), and the cap is
+> hard-froze during an uncapped all-core `cc` autotune search in an earlier session, and the cap is
 > the agreed mitigation. The `cc` column therefore reflects 16 threads, not the machine's 16C/32T.
 >
-> **WSL changes what the GPU column can contain.** Both PyTorch and tinygrad reach the 8060S here,
-> which native Windows could not do — so this is the first HIP matrix with cross-framework GPU
-> cells. Two environment notes: torch's bundled `libhsa-runtime64.so` must be replaced with
-> `/opt/rocm/lib/libhsa-runtime64.so.1.21.0` (the wheel's is the KFD build; WSL has no `/dev/kfd`)
-> with `/opt/rocm/lib/rocm_sysdeps/lib` on `LD_LIBRARY_PATH`; and tinygrad's `AMD` device is
-> likewise unusable, so the GPU column uses its `HIP` device (orchestrate.py falls back
-> automatically when `/dev/kfd` is absent).
+> **Reading the numbers, per gh-ocannl-538's reporting contract.** Every segment share below names
+> the placement it is a share of; the *shipping* arm is primary and the default pipeline is the
+> tuning story. Per-segment sums are never presented as step times — the sum's error against an
+> independently measured step is stated per regime, and it ranges from −5.6% to +22.4% on this
+> machine. Tensor-core reachability is reported as seeded/timed counts per cell, never as a yes/no.
+> No before/after claim in this report is made against a different commit or a different report;
+> where a delta is quoted it is between two candidates timed **in the same process, in the same
+> search**, and it is labelled as such.
 >
-> **Most `pytorch/cuda(hip)` cells are invalid *for this run* — check each cell's parity column
-> before reading it as a measurement.** During the sweep, torch's GPU reductions returned
-> non-deterministic garbage, which NaNs the bias gradient and stops training; the parity gate caught
-> 5 of the 6 (four as `loss stationary`, `gpt2_mini` as a 3.6e+34 drift), with `mlp_small` (PASS,
-> 1.7e-07) the exception. **This does not reproduce on an idle machine and is not attributed to a
-> PyTorch defect** — the leading explanation is this box's instability under sustained load. See
-> Findings; an earlier revision of this report wrongly called it a PyTorch bug. **tinygrad/HIP is the
-> GPU cross-framework reference that is valid across all six workloads.**
+> **Headline: this is the first report in which a rocWMMA candidate is seeded, timed and crowned.**
+> `mlp_wide`/hip/bf16 crowns `F_sketch[mma-gpu 16x32x32 ep]`, −12.8% against the best scalar
+> candidate the same search timed — and it is still 12% behind the f32 artifact, and carries a 10×
+> drift increase. All three of those facts are load-bearing; see Findings.
 >
-> Three HIP tuned cells are missing, each for a different reason: `mlp_wide` is in `SKIP_CELLS` and
-> `cifar_conv` was killed by a 50-minute watchdog — both for what this report originally called a
-> middle-end wedge and which is in fact an unbounded serial baseline candidate (gh-ocannl-532,
-> diagnosis corrected under Findings) — and `gpt2_mini` died on an HSA `scratch_size overflow`
-> abort. See Findings.
->
-> `gpt2_mini` has no reduced-precision leg (inference-only, ndarray-backed `Specified` weights need
-> forward-only cast insertion), so the matmul-dominated workload runs f32 in every column — the
-> gap most relevant to this issue's stated purpose. The `f16` step times include the dynamic
-> loss-scaling gate's per-step host sync and are not methodologically comparable to the `f32` legs.
+> **`gpt2_mini` at a reduced precision barely runs** — 3 of the 10 attempted cells produce a result,
+> all of them bf16 (`hip/materialized`, `cc/default`, `cc/materialized`). The rest of the bf16 leg
+> fails HIPRTC compilation and the whole f16 leg fails a precision guard, both diagnosed under
+> Findings. This is the first time that leg has been pointed at a fixture at all, so these are new
+> findings rather than regressions.
 
 ## cifar_conv
 
-| framework | backend | variant | step p50 ms | p10 | p90 | queued ms | compile s | parity |
-|---|---|---|---|---|---|---|---|---|
-| pytorch | cuda(hip) | eager | 3.557 | 3.461 | 3.766 | 3.144 | 6.34 | FAIL (inf) (loss stationary) |
-| tinygrad | HIP | jit | 7.288 | 7.089 | 7.497 | 6.612 | 11.46 | PASS (2.1e-07) |
-| pytorch | cpu | eager | 17.034 | 14.684 | 21.126 | 18.748 | 0.39 | REF |
-| ocannl | hip | materialized | 68.424 | 67.183 | 69.822 | 68.379 | 2.79 | PASS (3.1e-07) |
-| tinygrad | CPU | jit | 75.791 | 73.471 | 80.847 | 75.984 | 3.78 | PASS (3.1e-07) |
-| ocannl | cc | tuned | 533.234 | 498.511 | 565.366 | 538.515 | 371.28 | PASS (3.1e-07) |
-| ocannl | cc | materialized | 1168.120 | 1163.330 | 1174.830 | 1174.190 | 3.44 | PASS (3.1e-07) |
-| ocannl | cc | default | 1322.210 | 1315.470 | 1331.190 | 1323.640 | 2.48 | PASS (3.1e-07) |
-| ocannl | hip | default | 1594.360 | 1592.070 | 1596.880 | 1593.860 | 2.72 | PASS (4.1e-07) |
+| framework | backend | variant | precision | step p50 ms | p10 | p90 | queued ms | compile s | parity |
+|---|---|---|---|---|---|---|---|---|---|
+| pytorch | cuda(hip) | eager | f32 | 3.690 | 3.608 | 3.864 | 3.390 | 0.35 | PASS (1.0e-07) |
+| tinygrad | HIP | jit | f32 | 6.744 | 6.526 | 7.041 | 6.226 | 1.81 | PASS (2.1e-07) |
+| ocannl | hip | tuned | f32 | 63.992 | 63.404 | 64.778 | 64.150 | 173.50 | PASS (3.1e-07) |
+| tinygrad | CPU | jit | f32 | 73.115 | 70.132 | 78.215 | 74.239 | 1.82 | PASS (3.1e-07) |
+| ocannl | hip | materialized | f32 | 96.817 | 95.839 | 97.847 | 96.766 | 2.51 | PASS (3.1e-07) |
+| ocannl | cc | tuned | f32 | 241.794 | 226.878 | 262.207 | 243.379 | 620.93 | PASS (2.8e-05) |
+| pytorch | cpu | eager | f32 | 464.006 | 463.896 | 468.009 | 465.160 | 0.96 | REF |
+| ocannl | hip | default | f32 | 756.249 | 753.133 | 760.117 | 756.236 | 2.41 | PASS (4.1e-07) |
+| ocannl | cc | materialized | f32 | 1190.750 | 1185.210 | 1200.980 | 1192.000 | 3.06 | PASS (3.1e-07) |
+| ocannl | cc | default | f32 | 1317.100 | 1311.060 | 1326.430 | 1319.200 | 2.33 | PASS (3.1e-07) |
 
 ## cifar_stride
 
-| framework | backend | variant | step p50 ms | p10 | p90 | queued ms | compile s | parity |
-|---|---|---|---|---|---|---|---|---|
-| tinygrad | HIP | jit | 1.788 | 1.737 | 1.883 | 1.560 | 6.18 | PASS (3.8e-05) |
-| pytorch | cuda(hip) | eager | 2.646 | 2.558 | 2.920 | 2.108 | 2.14 | FAIL (inf) (loss stationary) |
-| pytorch | cpu | eager | 6.164 | 4.867 | 7.814 | 5.470 | 0.18 | REF |
-| ocannl | hip | materialized | 21.305 | 21.155 | 21.458 | 21.189 | 2.55 | PASS (3.8e-05) |
-| ocannl | hip | tuned | 21.384 | 21.191 | 21.578 | 21.283 | 211.61 | PASS (3.8e-05) |
-| tinygrad | CPU | jit | 39.644 | 37.490 | 41.392 | 38.777 | 2.64 | PASS (3.7e-05) |
-| ocannl | cc | tuned | 186.753 | 162.243 | 220.347 | 186.863 | 226.33 | PASS (3.8e-05) |
-| ocannl | hip | default | 214.487 | 213.960 | 214.875 | 214.278 | 2.26 | PASS (3.8e-05) |
-| ocannl | cc | materialized | 312.064 | 311.680 | 313.510 | 311.823 | 2.97 | PASS (3.8e-05) |
-| ocannl | cc | default | 349.788 | 347.371 | 351.930 | 347.969 | 2.38 | PASS (3.8e-05) |
+| framework | backend | variant | precision | step p50 ms | p10 | p90 | queued ms | compile s | parity |
+|---|---|---|---|---|---|---|---|---|---|
+| tinygrad | HIP | jit | f32 | 1.863 | 1.819 | 1.984 | 1.605 | 1.81 | PASS (3.8e-05) |
+| pytorch | cuda(hip) | eager | f32 | 2.692 | 2.606 | 2.870 | 2.197 | 0.29 | PASS (3.2e-05) |
+| pytorch | cpu | eager | f32 | 4.045 | 3.544 | 5.310 | 4.017 | 1.09 | REF |
+| ocannl | hip | tuned | f32 | 17.739 | 17.542 | 17.927 | 17.726 | 130.22 | PASS (3.8e-05) |
+| ocannl | hip | materialized | f32 | 20.597 | 20.398 | 20.843 | 20.534 | 1.39 | PASS (3.8e-05) |
+| tinygrad | CPU | jit | f32 | 38.418 | 37.031 | 41.239 | 38.647 | 1.68 | PASS (3.7e-05) |
+| ocannl | cc | tuned | f32 | 62.574 | 58.707 | 67.935 | 71.551 | 347.25 | PASS (3.8e-05) |
+| ocannl | hip | default | f32 | 63.041 | 62.504 | 64.732 | 63.702 | 1.37 | PASS (3.8e-05) |
+| ocannl | cc | materialized | f32 | 316.270 | 314.366 | 321.159 | 316.006 | 2.57 | PASS (3.8e-05) |
+| ocannl | cc | default | f32 | 349.897 | 347.193 | 356.040 | 348.900 | 2.20 | PASS (3.8e-05) |
 
 ## gpt2_mini
 
-| framework | backend | variant | step p50 ms | p10 | p90 | queued ms | compile s | parity | tok/s |
-|---|---|---|---|---|---|---|---|---|---|
-| pytorch | cuda(hip) | eager | 5.964 | 5.863 | 6.203 | 5.842 | 0.35 | FAIL (3.6e+34) | 171,688 |
-| tinygrad | HIP | jit | 6.241 | 6.080 | 6.307 | 5.893 | 4.07 | PASS (1.3e-07) | 164,066 |
-| pytorch | cpu | eager | 27.122 | 25.430 | 28.187 | 29.686 | 0.05 | REF | 37,756 |
-| ocannl | hip | default | 71.923 | 69.999 | 73.520 | 71.556 | 2.09 | PASS (2.0e-07) | 14,237 |
-| ocannl | hip | materialized | 75.165 | 72.370 | 76.569 | 73.194 | 2.79 | PASS (8.7e-07) | 13,623 |
-| tinygrad | CPU | jit | 100.026 | 98.763 | 101.217 | 101.953 | 1.65 | PASS (8.7e-07) | 10,237 |
-| ocannl | cc | tuned | 525.591 | 518.764 | 532.349 | 530.038 | 110.00 | PASS (8.0e-07) | 1,948 |
-| ocannl | cc | default | 2301.210 | 2286.880 | 2312.040 | 2293.530 | 2.03 | PASS (8.7e-07) | 445 |
-| ocannl | cc | materialized | 2477.230 | 2470.960 | 2482.910 | 2474.930 | 6.29 | PASS (8.0e-07) | 413 |
+Rows are grouped by precision (f32 first), p50-ascending within each group.
+
+| framework | backend | variant | precision | step p50 ms | p10 | p90 | queued ms | compile s | parity | tok/s |
+|---|---|---|---|---|---|---|---|---|---|---|
+| pytorch | cuda(hip) | eager | f32 | 6.013 | 5.907 | 6.167 | 5.857 | 0.26 | PASS (6.7e-08) | 170,304 |
+| tinygrad | HIP | jit | f32 | 6.909 | 6.725 | 7.227 | 6.381 | 0.78 | PASS (1.3e-07) | 148,220 |
+| pytorch | cpu | eager | f32 | 25.143 | 23.007 | 26.529 | 35.488 | 0.03 | REF | 40,727 |
+| ocannl | hip | default | f32 | 70.342 | 68.429 | 73.193 | 72.636 | 0.43 | PASS (2.0e-07) | 14,557 |
+| ocannl | hip | materialized | f32 | 74.961 | 72.641 | 76.856 | 73.908 | 0.39 | PASS (8.7e-07) | 13,660 |
+| tinygrad | CPU | jit | f32 | 100.527 | 98.249 | 105.190 | 100.821 | 0.99 | PASS (8.7e-07) | 10,186 |
+| ocannl | cc | tuned | f32 | 526.213 | 504.756 | 566.489 | 517.726 | 507.33 | PASS (8.0e-07) | 1,946 |
+| ocannl | cc | default | f32 | 2337.780 | 2328.770 | 2349.320 | 2328.660 | 1.91 | PASS (8.7e-07) | 438 |
+| ocannl | cc | materialized | f32 | 2481.270 | 2469.310 | 2500.840 | 2485.050 | 5.97 | PASS (8.0e-07) | 413 |
+| ocannl | hip | materialized | bf16 | 92.798 | 92.299 | 93.249 | 91.945 | 3.80 | PASS (4.5e-04) | 11,035 |
+| ocannl | cc | default | bf16 | 20248.000 | 20220.600 | 20294.100 | 20278.900 | 2.20 | PASS (9.6e-04) | 51 |
+| ocannl | cc | materialized | bf16 | 21397.100 | 21361.700 | 21437.800 | 21345.600 | 4.11 | PASS (1.0e-03) | 48 |
 
 ## lenet
 
-| framework | backend | variant | step p50 ms | p10 | p90 | queued ms | compile s | parity |
-|---|---|---|---|---|---|---|---|---|
-| tinygrad | HIP | jit | 0.872 | 0.834 | 0.976 | 0.581 | 8.46 | PASS (2.1e-07) |
-| pytorch | cuda(hip) | eager | 1.721 | 1.626 | 1.904 | 1.223 | 1.19 | FAIL (1.0e-07) (loss stationary) |
-| ocannl | hip | tuned | 6.943 | 6.795 | 7.134 | 6.808 | 125.96 | PASS (3.1e-07) |
-| ocannl | hip | materialized | 7.165 | 6.872 | 7.516 | 7.113 | 2.29 | PASS (3.1e-07) |
-| ocannl | cc | materialized | 22.152 | 22.068 | 22.321 | 22.177 | 2.84 | PASS (3.1e-07) |
-| ocannl | cc | tuned | 22.340 | 22.231 | 22.506 | 22.365 | 162.63 | PASS (3.1e-07) |
-| tinygrad | CPU | jit | 24.277 | 23.872 | 25.038 | 24.575 | 3.04 | PASS (3.1e-07) |
-| ocannl | cc | default | 35.295 | 34.927 | 35.946 | 35.230 | 2.13 | PASS (3.1e-07) |
-| pytorch | cpu | eager | 339.967 | 335.939 | 344.011 | 332.080 | 0.29 | REF |
-| ocannl | hip | default | 359.769 | 359.432 | 360.211 | 359.809 | 2.21 | PASS (2.1e-07) |
+| framework | backend | variant | precision | step p50 ms | p10 | p90 | queued ms | compile s | parity |
+|---|---|---|---|---|---|---|---|---|---|
+| tinygrad | HIP | jit | f32 | 0.844 | 0.813 | 0.896 | 0.613 | 1.67 | PASS (2.1e-07) |
+| pytorch | cpu | eager | f32 | 1.469 | 1.284 | 1.852 | 1.535 | 0.56 | REF |
+| pytorch | cuda(hip) | eager | f32 | 1.781 | 1.681 | 1.943 | 1.244 | 0.27 | PASS (2.1e-07) |
+| ocannl | cc | tuned | f32 | 5.566 | 4.969 | 6.565 | 5.660 | 284.94 | PASS (2.1e-07) |
+| ocannl | hip | tuned | f32 | 6.454 | 6.288 | 6.655 | 6.429 | 130.93 | PASS (2.1e-07) |
+| ocannl | hip | materialized | f32 | 6.915 | 6.525 | 7.370 | 6.892 | 1.26 | PASS (3.1e-07) |
+| ocannl | cc | materialized | f32 | 21.810 | 21.509 | 22.672 | 22.291 | 2.50 | PASS (3.1e-07) |
+| tinygrad | CPU | jit | f32 | 24.440 | 23.953 | 25.321 | 24.687 | 1.60 | PASS (3.1e-07) |
+| ocannl | cc | default | f32 | 32.646 | 31.952 | 33.836 | 32.839 | 2.11 | PASS (3.1e-07) |
+| ocannl | hip | default | f32 | 80.991 | 80.574 | 83.171 | 81.024 | 1.26 | PASS (2.1e-07) |
 
 ## mlp_small
 
-| framework | backend | variant | step p50 ms | p10 | p90 | queued ms | compile s | parity |
-|---|---|---|---|---|---|---|---|---|
-| ocannl | cc | tuned | 0.107 | 0.105 | 0.120 | 0.112 | 21.21 | PASS (2.8e-07) |
-| ocannl | cc | materialized | 0.133 | 0.126 | 0.146 | 0.134 | 0.39 | PASS (2.8e-07) |
-| ocannl | cc | default | 0.145 | 0.140 | 0.166 | 0.150 | 0.38 | PASS (2.8e-07) |
-| ocannl | hip | tuned | 0.273 | 0.254 | 0.339 | 0.233 | 13.34 | PASS (3.0e-07) |
-| ocannl | hip | materialized | 0.281 | 0.266 | 0.354 | 0.213 | 0.42 | PASS (3.8e-07) |
-| ocannl | hip | default | 0.306 | 0.295 | 0.346 | 0.236 | 0.18 | PASS (3.0e-07) |
-| ocannl | hip | bf16 | 0.309 | 0.271 | 0.375 | 0.276 | 0.46 | PASS (6.0e-04) |
-| tinygrad | HIP | jit | 0.441 | 0.424 | 0.523 | 0.383 | 4.70 | PASS (2.0e-07) |
-| ocannl | hip | f16 | 0.581 | 0.537 | 0.682 | 0.524 | 0.78 | PASS (1.5e-04) |
-| pytorch | cuda(hip) | eager | 0.740 | 0.603 | 1.120 | 0.715 | 0.19 | PASS (1.7e-07) |
-| tinygrad | CPU | jit | 0.797 | 0.746 | 1.179 | 0.848 | 1.21 | PASS (2.4e-07) |
-| ocannl | cc | f16 | 1.121 | 1.110 | 1.159 | 1.129 | 0.71 | PASS (1.5e-04) |
-| ocannl | cc | bf16 | 3.934 | 3.913 | 3.986 | 3.968 | 0.40 | PASS (4.2e-04) |
-| pytorch | cpu | eager | 112.003 | 111.849 | 116.011 | 113.000 | 0.12 | REF |
+Rows are grouped by precision (f32 first), p50-ascending within each group.
+
+| framework | backend | variant | precision | step p50 ms | p10 | p90 | queued ms | compile s | parity |
+|---|---|---|---|---|---|---|---|---|---|
+| ocannl | cc | tuned | f32 | 0.127 | 0.123 | 0.143 | 0.158 | 46.06 | PASS (2.8e-07) |
+| ocannl | cc | materialized | f32 | 0.131 | 0.124 | 0.148 | 0.135 | 0.32 | PASS (2.8e-07) |
+| ocannl | cc | default | f32 | 0.143 | 0.138 | 0.160 | 0.148 | 0.32 | PASS (2.8e-07) |
+| ocannl | hip | materialized | f32 | 0.302 | 0.279 | 0.610 | 0.235 | 0.03 | PASS (3.8e-07) |
+| ocannl | hip | default | f32 | 0.316 | 0.280 | 0.561 | 0.227 | 0.03 | PASS (3.0e-07) |
+| ocannl | hip | tuned | f32 | 0.381 | 0.299 | 0.740 | 0.248 | 14.76 | PASS (3.0e-07) |
+| pytorch | cpu | eager | f32 | 0.446 | 0.367 | 0.581 | 0.411 | 0.77 | REF |
+| tinygrad | HIP | jit | f32 | 0.450 | 0.421 | 0.536 | 0.385 | 0.47 | PASS (2.0e-07) |
+| pytorch | cuda(hip) | eager | f32 | 0.645 | 0.581 | 1.032 | 0.595 | 0.21 | PASS (1.7e-07) |
+| tinygrad | CPU | jit | f32 | 0.782 | 0.724 | 1.002 | 0.841 | 0.43 | PASS (2.4e-07) |
+| ocannl | hip | tuned | bf16 | 0.350 | 0.305 | 0.534 | 0.257 | 42.62 | PASS (5.9e-04) |
+| ocannl | hip | materialized | bf16 | 0.372 | 0.309 | 0.589 | 0.270 | 0.30 | PASS (6.6e-04) |
+| ocannl | hip | default | bf16 | 0.379 | 0.312 | 0.798 | 0.245 | 0.32 | PASS (5.6e-04) |
+| ocannl | cc | materialized | bf16 | 4.363 | 4.303 | 4.537 | 4.398 | 0.36 | PASS (5.2e-04) |
+| ocannl | cc | default | bf16 | 4.499 | 4.450 | 4.780 | 4.601 | 0.33 | PASS (5.4e-04) |
+| ocannl | hip | tuned | f16 | 0.661 | 0.596 | 0.773 | 0.587 | 51.45 | PASS (1.5e-04) |
+| ocannl | hip | default | f16 | 0.669 | 0.603 | 0.829 | 0.669 | 0.47 | PASS (1.5e-04) |
+| ocannl | hip | materialized | f16 | 0.685 | 0.636 | 0.813 | 0.662 | 0.48 | PASS (1.4e-04) |
+| ocannl | cc | materialized | f16 | 1.235 | 1.217 | 1.275 | 1.245 | 0.56 | PASS (1.5e-04) |
+| ocannl | cc | default | f16 | 1.243 | 1.219 | 1.285 | 1.254 | 0.59 | PASS (1.4e-04) |
+| ocannl | hip | materialized | f16-static | 0.335 | 0.307 | 0.517 | 0.198 | 0.28 | PASS (1.4e-04) |
+| ocannl | hip | tuned | f16-static | 0.338 | 0.297 | 0.486 | 0.244 | 42.42 | PASS (1.7e-04) |
+| ocannl | hip | default | f16-static | 0.381 | 0.314 | 0.774 | 0.266 | 0.29 | PASS (1.5e-04) |
+| ocannl | cc | materialized | f16-static | 1.225 | 1.210 | 1.265 | 1.236 | 0.31 | PASS (1.5e-04) |
+| ocannl | cc | default | f16-static | 1.232 | 1.217 | 1.276 | 1.239 | 0.32 | PASS (1.4e-04) |
+| ocannl | hip | materialized | f16-gated16 | 0.424 | 0.369 | 1.330 | 0.351 | 0.33 | PASS (1.4e-04) |
+| ocannl | hip | tuned | f16-gated16 | 0.442 | 0.385 | 0.591 | 0.345 | 52.44 | PASS (1.5e-04) |
+| ocannl | hip | default | f16-gated16 | 0.456 | 0.387 | 1.088 | 0.384 | 0.34 | PASS (1.5e-04) |
+| ocannl | cc | materialized | f16-gated16 | 1.233 | 1.218 | 1.288 | 1.247 | 0.43 | PASS (1.5e-04) |
+| ocannl | cc | default | f16-gated16 | 1.235 | 1.217 | 1.284 | 1.259 | 0.44 | PASS (1.4e-04) |
 
 ## mlp_wide
 
-| framework | backend | variant | step p50 ms | p10 | p90 | queued ms | compile s | parity |
-|---|---|---|---|---|---|---|---|---|
-| tinygrad | HIP | jit | 1.012 | 0.967 | 1.127 | 0.781 | 4.97 | PASS (2.1e-07) |
-| pytorch | cuda(hip) | eager | 1.066 | 1.041 | 1.152 | 0.871 | 0.21 | FAIL (1.0e-07) (loss stationary) |
-| ocannl | hip | materialized | 2.213 | 2.151 | 2.295 | 2.170 | 0.53 | PASS (4.2e-07) |
-| ocannl | hip | default | 2.275 | 2.213 | 2.377 | 2.200 | 0.20 | PASS (4.2e-07) |
-| ocannl | hip | bf16 | 3.983 | 3.781 | 4.158 | 4.035 | 0.20 | PASS (2.8e-04) |
-| pytorch | cpu | eager | 6.338 | 5.147 | 13.981 | 7.236 | 0.22 | REF |
-| ocannl | hip | f16 | 12.347 | 11.981 | 12.697 | 12.296 | 0.82 | PASS (2.0e-05) |
-| ocannl | cc | tuned | 19.436 | 17.873 | 22.053 | 20.508 | 52.03 | PASS (5.2e-07) |
-| tinygrad | CPU | jit | 36.517 | 34.314 | 41.204 | 36.629 | 1.48 | PASS (6.2e-07) |
-| ocannl | cc | materialized | 217.000 | 215.334 | 223.015 | 219.494 | 0.59 | PASS (5.2e-07) |
-| ocannl | cc | default | 217.200 | 215.778 | 238.186 | 289.481 | 0.58 | PASS (5.2e-07) |
-| ocannl | cc | f16 | 815.527 | 811.772 | 823.776 | 814.919 | 0.89 | PASS (2.1e-05) |
-| ocannl | cc | bf16 | 1733.700 | 1724.690 | 1760.580 | 1733.950 | 0.54 | PASS (2.8e-04) |
+Rows are grouped by precision (f32 first), p50-ascending within each group.
+
+| framework | backend | variant | precision | step p50 ms | p10 | p90 | queued ms | compile s | parity |
+|---|---|---|---|---|---|---|---|---|---|
+| tinygrad | HIP | jit | f32 | 1.063 | 1.019 | 1.148 | 0.844 | 0.59 | PASS (2.1e-07) |
+| pytorch | cuda(hip) | eager | f32 | 1.106 | 1.068 | 1.189 | 0.917 | 0.20 | PASS (2.1e-07) |
+| ocannl | hip | tuned | f32 | 1.758 | 1.685 | 1.883 | 1.654 | 24.79 | PASS (3.1e-07) |
+| ocannl | hip | materialized | f32 | 1.966 | 1.894 | 2.075 | 1.913 | 0.05 | PASS (4.2e-07) |
+| ocannl | hip | default | f32 | 1.976 | 1.916 | 2.076 | 1.940 | 0.05 | PASS (4.2e-07) |
+| ocannl | cc | tuned | f32 | 18.252 | 16.225 | 20.559 | 19.871 | 93.50 | PASS (5.2e-07) |
+| tinygrad | CPU | jit | f32 | 37.101 | 34.582 | 41.440 | 37.280 | 0.65 | PASS (6.2e-07) |
+| ocannl | cc | materialized | f32 | 217.627 | 213.095 | 228.134 | 220.402 | 0.51 | PASS (5.2e-07) |
+| ocannl | cc | default | f32 | 218.825 | 214.206 | 231.185 | 222.417 | 0.49 | PASS (5.2e-07) |
+| pytorch | cpu | eager | f32 | 240.005 | 239.900 | 243.986 | 240.621 | 0.61 | REF |
+| ocannl | hip | tuned | bf16 | 1.967 | 1.888 | 2.138 | 1.926 | 75.69 | PASS (2.6e-03) |
+| ocannl | hip | default | bf16 | 3.645 | 3.507 | 3.819 | 3.539 | 0.41 | PASS (2.7e-04) |
+| ocannl | hip | materialized | bf16 | 3.673 | 3.549 | 3.829 | 3.583 | 0.39 | PASS (2.6e-04) |
+| ocannl | cc | materialized | bf16 | 1806.930 | 1791.330 | 1828.110 | 1809.460 | 0.47 | PASS (2.6e-04) |
+| ocannl | cc | default | bf16 | 1821.540 | 1807.300 | 1840.650 | 1822.640 | 0.47 | PASS (2.7e-04) |
+| ocannl | hip | tuned | f16 | 2.367 | 2.261 | 2.578 | 2.284 | 78.00 | PASS (2.6e-05) |
+| ocannl | hip | materialized | f16 | 11.743 | 11.348 | 12.102 | 11.783 | 0.57 | PASS (2.0e-05) |
+| ocannl | hip | default | f16 | 11.784 | 11.334 | 12.146 | 11.701 | 0.56 | PASS (2.0e-05) |
+| ocannl | cc | materialized | f16 | 838.999 | 831.477 | 851.371 | 843.665 | 0.85 | PASS (2.0e-05) |
+| ocannl | cc | default | f16 | 840.551 | 831.508 | 854.037 | 842.776 | 0.83 | PASS (2.0e-05) |
+| ocannl | hip | tuned | f16-static | 1.665 | 1.606 | 1.801 | 1.638 | 63.90 | PASS (2.0e-05) |
+| ocannl | hip | default | f16-static | 2.010 | 1.938 | 2.135 | 2.049 | 0.35 | PASS (2.0e-05) |
+| ocannl | hip | materialized | f16-static | 2.016 | 1.918 | 2.117 | 1.938 | 0.35 | PASS (2.0e-05) |
+| ocannl | cc | materialized | f16-static | 841.169 | 833.419 | 854.243 | 847.065 | 0.47 | PASS (2.0e-05) |
+| ocannl | cc | default | f16-static | 842.083 | 834.433 | 858.000 | 845.374 | 0.48 | PASS (2.0e-05) |
+| ocannl | hip | tuned | f16-gated16 | 2.097 | 1.965 | 2.312 | 2.054 | 82.03 | PASS (1.7e-05) |
+| ocannl | hip | materialized | f16-gated16 | 11.533 | 11.178 | 11.949 | 11.505 | 0.41 | PASS (2.1e-05) |
+| ocannl | hip | default | f16-gated16 | 11.553 | 11.176 | 11.948 | 11.529 | 0.39 | PASS (2.0e-05) |
+| ocannl | cc | default | f16-gated16 | 840.839 | 832.750 | 853.538 | 842.202 | 0.60 | PASS (2.0e-05) |
+| ocannl | cc | materialized | f16-gated16 | 842.568 | 833.939 | 854.763 | 844.364 | 0.62 | PASS (2.1e-05) |
 
 ## Findings
 
-### Tensor cores on HIP: still zero, and structurally unreachable
+### Tensor cores on HIP are reached, timed, and — once — crowned
 
-No tuned HIP winner in any workload contains a rocWMMA intrinsic — same headline as Metal, but the
-reasons stack differently, and two of them are prior to gh-ocannl-521:
+The previous revision of this report recorded a structural zero: no tuned HIP cell could contain a
+rocWMMA intrinsic, because f32 seeds nothing and `bench_mlp` refused `BENCH_TUNE` together with
+`BENCH_PRECISION`. gh-ocannl-529 removed the runner guard and gh-ocannl-539 made *(scheduling
+variant, precision)* a product, so the cell that was inexpressible is now measurable. Counts are per
+search, summed over both placement arms, from `BENCH_TUNE_REPORT=1` against a fresh cache dir:
 
-1. **At f32 there are no mma candidates to seed.** RDNA3/3.5 WMMA has only f16×f16 and bf16×bf16 at
-   16×16×16, no f32-input shape, so uniform f32 stays scalar (`hip_backend.ml:531`). Every
-   benchmark workload except the reduced-precision mlp legs is f32.
-2. **Neither reduced-precision route can be tuned at all.** gfx1151 has two tensor-core routes, not
-   one: `hip_backend.ml` supports f16×f16 → f32 (the flagship, and the combination verified on this
-   chip via `schedule_mma_matmul`), f16×f16 → f16, bf16×bf16 → f32 and bf16×bf16 → bf16. Both are
-   reachable only through `BENCH_PRECISION`, and `bench_mlp` fails outright on `BENCH_TUNE=1`
-   together with `BENCH_PRECISION` ("not supported"). Since f32 seeds nothing (item 1), **no tuned
-   HIP benchmark cell can contain a rocWMMA intrinsic regardless of the scheduling state** — the
-   sweep structurally cannot deliver the gh-152/154/155 payoff measurement on this machine.
-3. **gh-ocannl-521 generalizes to HIP.** In the f32 searches that do complete, the GPU sketch
-   candidates are seeded and every one **fails candidate compile before being timed** — zero
-   declines-to-scalar, zero timed. `mlp_small` hip/tuned (39.6 s, `autotune_log=true`) censuses as:
-   10× `Schedule.Fuse_epilogue: output loop … must be Serial or Grid`, 7× `Schedule.Stage: source
-   n20_relu is written in the routine`, 8× `Low_level.validate_parallel: … not nested under
-   annotated loops covering all active hardware dimensions`, plus 20 `F_sketch[gpu …]`/`ep`
-   variants under the same `Invalid_argument`s. The only timed candidates are the serial baseline,
-   two `F_preset[bs=cfg …]` and the in-process untuned control. That is Metal's #521 profile, same
-   three blocker families — **#521 is not a Metal bug; it blocks the GPU sketch arc on at least two
-   of three GPU backends.**
+| workload | backend | precision | mma **seeded** | mma **timed** | best mma candidate | crowned? |
+|---|---|---|---|---|---|---|
+| mlp_small | hip | f32 | 0 | 0 | — | — |
+| mlp_small | hip | bf16 | 29 | **17** | 0.4162 ms `F_sketch[mma-gpu 16x32x32 ep]` | no |
+| mlp_small | hip | f16 | 29 | **17** | 0.4676 ms `F_sketch[mma-gpu 16x32x32 ep]` | no |
+| mlp_wide | hip | f32 | 0 | 0 | — | — |
+| mlp_wide | hip | bf16 | 37 | **21** | 1.7849 ms `F_sketch[mma-gpu 16x32x32 ep]` | **yes** |
+| mlp_wide | hip | f16 | 37 | **21** | 10.7305 ms `F_sketch[mma-gpu 16x32x32 ep,mma-gpu 32x32x16 ep]` | no |
+| mlp_small | cc | f32 | 54 | 24 | — | no |
+| mlp_wide | cc | f32 | 112 | 21 | — | no |
 
-Positive control: `schedule_mma_matmul` under `OCANNL_BACKEND=hip` passes, so intrinsic emission and
-numerics are correct when hand-scheduled. The zero is a scheduling/seeding result, not a codegen one.
+**The 0 at f32 is the correct answer, not a failure.** RDNA3.5 WMMA has only f16×f16 and bf16×bf16
+input shapes, so at uniform f32 nothing is proposed — `mma_candidates = 0`, no declines to explain.
+That is a different state from the pre-gh-521 GPU picture, where candidates were seeded in bulk and
+none was ever timed.
 
-On `cc` the tensorized candidates *are* reachable and timed normally (`F_sketch[mma-cpu 128x128x128]`
-et al.), as on macOS — the CPU half of the arc is delivering here too.
+**17 timed on `mlp_small` at bf16** is exactly the value gh-ocannl-538 predicted. The seeded/timed
+gap is fully accounted for and has a single cause: of the 29 seeds, 6 are whole-routine
+(`W_sketch[mma-gpu …]`) and 6 are per-fission-segment (`F_sketch[mma-gpu …]`), and **all 12 decline
+at `autotune_sketch_companion_coverage`** — "the cross-nest race analysis bails on this routine, so
+the 99 companion nest(s) … cannot be given aligned geometry". The remaining 17 compile and time. So
+on this backend the tensorization arc is no longer blocked by the three gh-521 families (`Stage`,
+`Fuse_epilogue`, `validate_parallel`); what is left is one analysis that gives up on wide graphs.
 
-### One serial segment is 93–97% of the HIP step, worse than Metal
+**Contract item 4's second failure mode does not occur here.** `NOTE tensorized candidate emitted no
+Tile_mma statement` appears **zero** times across all eight censuses: every candidate carrying an
+`mma-*` label really rendered a `Tile_mma`. There are no scalar-fallback impostors in these counts.
 
-`BENCH_SEG_TIMES=1`, min of 20 runs per segment:
+**The payoff, measured in one process.** On `mlp_wide`/hip/bf16, arm B (materialize-all):
 
-| workload | seg22 (`bias_conv1.grad`/`n65.grad`) | total | share |
+| candidate | ms |
+|---|---|
+| **`F_sketch[mma-gpu 16x32x32 ep]`** (crowned, and wins the arm A/B comparison) | **1.7849** |
+| `F_sketch[mma-gpu 32x32x16 ep]` | 1.7868 |
+| `F_sketch[mma-gpu 32x32x32]` | 1.8059 |
+| best candidate carrying no `mma` label — `F_sketch[gpu 16x16x8/2x2]` | 2.0473 |
+
+**−12.8% from tensorization**, same process, same search, against the best scalar candidate the same
+search timed. This is the first quantified rocWMMA payoff in this suite.
+
+It does not yet make bf16 worth using: the replayed `mlp_wide` hip artifact is 1.967 ms at bf16
+against **1.758 ms at f32** (table above), so the format change costs more than the tensor cores
+return. And it is not free numerically — see the drift section.
+
+`cc` keeps reaching its CPU mma tiles at f32 (54 and 112 seeded, 24 and 21 timed) and crowning
+non-mma candidates; unchanged from the previous revision.
+
+### Where the step goes, in each placement
+
+`BENCH_SEG_TIMES=1` on `bench_conv_diag` / `bench_gpt_diag`, min of 20 runs per segment, two
+replicates per cell. **Shares are within a placement and are quoted with the placement named**
+(contract item 1).
+
+**The materialized placement** (`BENCH_MATERIALIZE=1`) — the arm the tuner crowns on `lenet`,
+`cifar_conv` and `gpt2_mini`. (On `cifar_stride` the tuner now crowns the *default*-placement arm
+instead; see the split-reduce section. And in all four cases the shipped artifact is this placement
+with a schedule applied on top, so these are the costs the tuner is choosing between, not the
+artifact's own segment times.)
+
+| workload | top segment | ms | share |
 |---|---|---|---|
-| lenet/hip | 350.712 ms | 359.743 ms | **97.5%** |
-| cifar_conv/hip | 1503.715 ms | 1575.987 ms | **95.4%** |
-| cifar_stride/hip | 201.416 ms | 215.778 ms | **93.3%** |
+| lenet | seg33 `kernel_conv1 kernel_conv1.grad bias_conv1 bias_conv1.grad` + SGD | 3.645 | **43.1%** of 8.464 |
+| cifar_conv | seg31 `kernel_conv2.grad bias_conv2.grad n69_relu.grad …` | 58.689 | **61.7%** of 95.138 |
+| cifar_stride | seg33 `kernel_conv1.grad bias_conv1.grad` | 7.278 | **34.0%** of 21.399 |
+| gpt2_mini | seg38 (an FFN block, one of 130 segments) | 5.413 | 7.6% of 70.796 |
 
-Same segment as Metal (the first conv layer's *backward* reduction, not the forward GEMM) and an
-even larger share (Metal: 91.0 / 82.1 / 68.8%). The census line names the mechanism outright —
-`loops[64s,28s,28s,6s] w:bias_conv1.grad!(6)`: a **fully serial** 64×28×28×6 nest, 301,056
-iterations on a single GPU thread, producing 6 output elements. Its neighbours are 2–4 orders of
-magnitude faster. This is now measured on three independent GPU backends (Metal, CUDA, HIP) and is
-the single highest-value target in the GPU pipeline. Note the default-schedule `hip` cells are
-exactly where this shows: `lenet` hip/default is 359.8 ms vs 7.2 ms materialized (50×), `cifar_conv`
-1594 vs 68 ms (23×).
+**The default pipeline** — the tuning story, not what users get:
 
-**Read this section alongside gh-ocannl-527, which is probably a large part of what it measures.**
-The CUDA leg traced a 2.4× regression in this same segment to gh-ocannl-512's product-space gate on
-`max_pool2d` backward. This report's own history is a control for it: the previous revision of this
-file was recorded at `8436e362` (pre-gh-512), and comparing `ocannl/hip/default` then vs now,
-**`lenet` is 4.39× worse (82.016 → 359.769 ms) while every workload without `max_pool2d` moved only
-1.07–1.61×** (`gpt2_mini` 67.418 → 71.923, `mlp_wide` 1.809 → 2.275, `mlp_small` 0.190 → 0.306). The
-two runs also differ in OS, which is exactly what makes the non-pooling rows useful — they bound the
-environment effect, and `lenet` carries ~3–4× on top of it. So the 93–97% shares above sit on top of
-a regression, and how much of the residue is an inherent serial-reduction problem (gh-ocannl-484's
-subject) will only be clear once gh-527 is fixed and this instrument is re-run. Re-running
-`BENCH_SEG_TIMES=1` on `lenet/hip` is a cheap acceptance check for that fix.
+| workload | top segment | ms | share |
+|---|---|---|---|
+| lenet | seg22 `bias_conv1.grad n65.grad` | 72.344 | **89.2%** of 81.137 |
+| cifar_conv | seg22 `bias_conv1.grad n65.grad` | 668.651 | **93.5%** of 715.061 |
+| cifar_stride | seg22 `bias_conv1.grad n65.grad` | 49.864 | **78.8%** of 63.245 |
 
-#### Re-run after gh-527 (tree `d71efc99`, same machine, HIP only)
+The two placements disagree about which segment matters and by an order of magnitude about how
+much, which is the whole point of contract item 1. In the default pipeline one fully serial
+64×28×28×6 nest producing 6 output cells is ~90% of the step; in the arm that ships, the
+kernel-gradient/SGD fusion is 34–62% and the bias-gradient nest is folded into it.
 
-That acceptance check has now been run — gh-527 is fixed, and it was most but not all of the
-segment. Same instrument, same machine, f32, `taskset -c 0-15`:
+**Per-segment sums are not step times** (contract item 2). The sum's error against the
+independently measured `hip` step p50 from the matrix above is regime-dependent, and on this machine
+it is *not* small everywhere:
 
-| workload | seg22 before | after | factor | share before → after | step total before → after |
+| workload | placement | Σ segment minima | measured step p50 | error |
+|---|---|---|---|---|
+| lenet | default | 81.137 ms | 80.991 ms | **+0.18%** |
+| lenet | materialized | 8.464 ms | 6.915 ms | **+22.4%** |
+| cifar_conv | default | 715.061 ms | 756.249 ms | −5.4% |
+| cifar_conv | materialized | 95.138 ms | 96.817 ms | −1.7% |
+| cifar_stride | default | 63.245 ms | 63.041 ms | +0.32% |
+| cifar_stride | materialized | 21.399 ms | 20.597 ms | +3.9% |
+| gpt2_mini | materialized | 70.796 ms | 74.961 ms | −5.6% |
+
+`lenet`/materialized at **+22.4%** reproduces the Metal leg's +21.9% on the same regime almost
+exactly — two independent backends now agree that the materialized regime is where this instrument
+is least trustworthy in absolute terms, while the default regime is sound to a few tenths of a
+percent. Replicate-to-replicate spread of the sums was 0.30% (lenet default), 0.30% (cifar_conv
+default), 0.35% (cifar_stride default), 0.44% (cifar_conv materialized), 1.0% (lenet materialized)
+and 2.9% (cifar_stride materialized) — smaller than the regime error in every case, so the error is
+systematic, not noise.
+
+`gpt2_mini`'s default placement could not be instrumented: compiling `cross_entropy_loss_fwd` as its
+own hermetic routine requests 163,856 bytes of scratch per work-item and hits the gh-ocannl-533
+pre-validator. The materialized placement instruments fine, and both ordinary benchmark cells run,
+so this is a limitation of the per-segment instrument on this device, not of the workload.
+
+### Split-reduce after gh-541: 10 sites on lenet, cap 8, two evictions — and the shipping arm can now flip
+
+`BENCH_SR_SITES=1`, and the seeding census from `--ocannl_autotune_log=true`:
+
+| workload | sites detected | seeded | evicted by `autotune_split_reduce_max_sites=8` |
+|---|---|---|---|
+| lenet | **10** | 8 | `b_logits.grad` (cost 640), `cross_entropy` (cost 64) |
+| cifar_conv | 9 | 8 | `cross_entropy` (cost 64) |
+| cifar_stride | 9 | 8 | `cross_entropy` (cost 64) |
+
+**Exactly the predicted 10 / cap 8 / two evictions on `lenet`.** The ranking is gh-541's estimated
+segment cost, and it evicts the two *cheapest* sites — the previous `sr_red / sr_out` ranking sent
+every weight gradient to ratio 0 and excluded them instead. Both weight gradients now seed on
+`lenet` (`kernel_conv2.grad` cost 15,360,000 via 12 swaps; `kernel_conv1.grad` cost 7,526,400 via 9
+swaps), which is precisely what the CUDA leg asked for and could not test.
+
+Per-workload attribution, each block one search in one process (so no cross-binary comparison is
+involved). "control" is the untuned-default in-process control the search itself times:
+
+| lenet | arm A (default placements) | arm B (materialize-all) |
+|---|---|---|
+| untuned-default control | 80.757 ms | 6.4440 ms |
+| best `F_preset` | 80.458 ms | 6.4874 ms |
+| best single split site | 10.164 ms `bias_conv1.grad swap3` | **6.2326 ms `n105`** |
+| 8-site composite | **9.6501 ms** | 7.4205 ms |
+| arm best | 9.6501 ms | 6.2326 ms |
+| winner | | **arm B at 6.2326 ms (−3.3% vs its control)** |
+
+| cifar_conv | arm A | arm B |
+|---|---|---|
+| untuned-default control | 757.111 ms | 95.747 ms |
+| best `F_preset` | 752.403 ms | 92.870 ms |
+| arm best | 95.857 ms `bias_conv1.grad out32 swap3` | **63.536 ms `bias_conv2.grad out64 swap3`** |
+| winner | | **arm B at 63.536 ms (−33.6% vs its control)** |
+
+| cifar_stride | arm A | arm B |
+|---|---|---|
+| untuned-default control | 62.667 ms | 20.755 ms |
+| best `F_preset` | 61.654 ms | 20.542 ms |
+| arm best | **17.427 ms `bias_conv1.grad out32 swap3`** | 20.344 ms |
+| winner | **arm A at 17.427 ms** | |
+
+Three things worth recording:
+
+1. **On `cifar_stride` the split-reduce candidate is now good enough to flip which arm ships.** Arm
+   A — the virtual/default-placement graph, previously hopeless at 62.7 ms — wins at 17.427 ms
+   against arm B's 20.344. The replayed artifact is 17.739 ms against 20.597 for the materialized
+   cell, so the tuner's choice survives replay. The CUDA leg reported `cifar_stride` neutral; on
+   this backend it is the biggest conv win in the sweep.
+2. **`cifar_conv` is not neutral here either**: −31.6% against the best preset in the arm that
+   ships, on `bias_conv2.grad` (64 cells) rather than `bias_conv1.grad`. The CUDA leg found the
+   32-cell `bias_conv1.grad` split *actively worse* in arm B and the tuner declining it; the same
+   candidate is timed here at 92.507 ms and also loses — to a different split site, not to a preset.
+3. **`lenet`'s shipping-arm margin is small on this backend**: −3.9% against the best preset,
+   −3.3% against the untuned control, and the site that wins is `n105` (the classifier head gh-484
+   already reached), not `bias_conv1.grad`. The 8-site composite is *worse* than the single best
+   site in arm B (7.4205 vs 6.2326) — splitting everything is not free.
+
+**No cross-commit A/B was run on this leg**, so gh-ocannl-538's "~−17.4% on lenet's shipping
+artifact against pre-#537" is neither confirmed nor refuted here. What is quoted above is the
+in-search attribution: crowned split candidate against the best non-split candidate the same
+search timed in the same process. Since before gh-537/gh-541 none of these sites was detected at
+all, the best non-split candidate is what the older tree would have crowned — but that is an
+argument, not a measurement, and it is labelled as one.
+
+### Mixed precision: the loss-scaling gate's cost is a scheduling problem, not a host-sync problem
+
+The four variants gh-ocannl-538 asks for, on `mlp_wide`/hip (ms/step, p50):
+
+| variant | f32 | bf16 | f16 (per-step host gate) | f16-static (no gate) | f16-gated16 (fused, sampled) |
 |---|---|---|---|---|---|
-| lenet/hip | 350.712 ms | **72.76 ms** | 4.8× | 97.5% → **89.3%** | 359.743 → **81.49 ms** |
-| cifar_stride/hip | 201.416 ms | **50.03 ms** | 4.0× | 93.3% → **78.7%** | 215.778 → **63.56 ms** |
+| default | 1.976 | 3.645 | **11.784** | 2.010 | **11.553** |
+| materialized | 1.966 | 3.673 | 11.743 | 2.016 | 11.533 |
+| tuned | 1.758 | 1.967 | 2.367 | **1.665** | 2.097 |
 
-lenet seg22 across three consecutive runs: 73.132 / 72.773 / 72.756 ms (<0.5% spread). The
-seg-times sums cross-validate against independently measured `hip/default` step times to within
-0.25% (lenet 81.49 vs 81.56; cifar_stride 63.56 vs 63.72), so the instrument and the benchmark
-agree.
+and the same on `cc`, as the control:
 
-**The decomposition the section above asked for**: of lenet's 350.7 ms, roughly **278 ms was
-gh-527** and **~73 ms is the inherent serial reduction** — gh-ocannl-484's actual subject. It is
-still the single dominant cost of the default-placement step at 89%, and every other segment in
-the graph is ≤ 3.6 ms. The claim that this is "the single highest-value target in the GPU
-pipeline" survives the correction, at a quarter of the previously quoted magnitude.
+| variant | f32 | bf16 | f16 | f16-static | f16-gated16 |
+|---|---|---|---|---|---|
+| default | 218.825 | 1821.540 | 840.551 | 842.083 | 840.839 |
+| materialized | 217.627 | 1806.930 | 838.999 | 841.169 | 842.568 |
 
-Two caveats on the before/after columns: the "before" numbers were recorded at `bd075cd5` on the
-same machine but the tree has since also crossed gh-ocannl-521, and the `cifar_conv` row was not
-re-run. Materialized cells barely moved (`cifar_stride` 21.305 → 21.064, `lenet` 7.165 → 6.603),
-which is the expected control — gh-527's regression lived in the recompute path only.
+**Without the static leg this would have been unreadable, which is why the contract asks for it.**
+At the default placement on HIP the gate costs **9.77 ms** — 5.9× the entire f32 step — and the
+fused on-device gate at interval 16 does not help at all (11.553 vs 11.784). On `cc` the same gate
+costs **nothing measurable** (840.6 vs 842.1, inside the spread). A per-step host sync cannot behave
+like that.
 
-#### gh-ocannl-484 task 3 does not reach this segment
-
-Task 3 (autotune seeds `Split_reduce`) landed before this re-run, so the residue above is measured
-*with* it. It has no effect here, for a structural reason. `BENCH_SR_SITES=1` (added in this
-branch) prints the `op_legality` verdict per candidate axis:
+The autotune log says what it actually is. At f16 the crowned candidate in both arms is a
+split-reduce composite whose first-named site is `grad_checksum` — the gate's whole-gradient
+inf/nan scan — and the isolated candidates price it:
 
 ```
-w:bias_conv1.grad(6) loops[i527=64s,i528=28s,i529=28s,i530=6s]
-    axis i527 extent 64 -> illegal: the accumulation cell mentions i530, which is not bound
-                                    by a loop enclosing the reduction loop in this statement
-    axis i528 extent 28 -> illegal: (same)
-    axis i529 extent 28 -> illegal: (same)
-    axis i530 extent 6  -> illegal: the accumulation cell mentions the reduction loop i530
-                                    — not a reduction over it
+F_split[grad_checksum red1024 out1 b512]:  3.6221 ms
+F_split[grad_checksum red1024 out1 b128]:  3.6941 ms
+F_split[grad_checksum red1024 out1 b32]:   4.1146 ms
+F_split[n40 …, grad_checksum red1024 out1 b512, n18_cast.grad …]:  2.0877 ms   <-- crowned
 ```
 
-All four axes are rejected, so the `sr_red_min = 64` extent floor is not even the operative
-filter. The same verdict hits `kernel_conv1.grad`, `bias_conv2.grad`, `b_fc1.grad`, `b_fc2.grad`,
-`w_logits.grad` and `b_logits.grad` — every parameter-gradient accumulation in the network. Only
-two sites in the whole lenet graph seed at all (`cross_entropy` out=1, `n105` red=84/out=640).
+So `grad_checksum` lowers to one serial reduction over the whole gradient set, the default GPU
+schedule leaves it unparallelized, and split-reduce is what removes it. `cc` never sees the problem
+because the pool parallelizes the same loop. **This is the answer to gh-ocannl-535's open question:
+f16's overhead is not the dynamic gate's host round-trip; it is one reduction that only the tuner
+currently fixes.** Two consequences: the fused on-device gate (gh-ocannl-250) buys nothing until
+that reduction is scheduled, and the default GPU pipeline should be seeding a parallel reduction
+for it without needing a search.
 
-`Split_reduce` v1 requires every accumulation-cell symbol to be bound by a loop *enclosing* the
-reduction loop; OCANNL lowers a conv bias gradient with the output-channel loop **innermost** and
-the reduction loops (batch, y, x) outside it — the exact inverse. End to end, on the cells that
-complete: `mlp_small` tuned 0.333 ms vs materialized 0.322 (no win, split places 4th in the
-search); `lenet` tuned 6.622 ms vs materialized 6.603 (no win — a split candidate does take **arm
-B**, the materialize-all arm, by 2.9% in-search at 6.2109 ms vs the best preset's 6.3941, but on
-site `n105`, not this segment, and the margin does not survive replay). The arm matters to the
-conclusion: arm A keeps the virtual graph and its untouched ~73 ms serial segment, and its best
-candidate is 80.6267 ms — so what removes the bottleneck is materialization, not the split.
+**And with the gate scheduled, reduced precision beats f32 for the first time in this suite**:
+`mlp_wide` hip tuned f16-static at **1.665 ms** against f32 tuned 1.758 ms (−5.3%) and f32 default
+1.976 ms (−15.7%). It is one cell, and it is the cell with no loss scaling at all — every gated f16
+cell and every bf16 cell is still slower than its f32 counterpart, and on `mlp_small` f32 still wins
+outright (best f32 0.302 ms vs best reduced 0.335 ms). gh-535's headline is therefore no longer
+universally true, but the qualification is large.
 
-### The torch GPU cells produced garbage during this run — cause unresolved, and NOT reproducible
+On `cc` the previous picture is unchanged and worse than before: bf16 is **8.3×** f32 on `mlp_wide`
+(1821.5 vs 218.8) and f16 **3.8×** (840.6) — the C backend has no native reduced-precision
+arithmetic, and gh-ocannl-540's cast-twin fix does not change that.
 
-**Read this section as a caveat on the run, not as a finding about PyTorch.** An earlier revision of
-this report asserted a PyTorch reduction bug on gfx1151. That claim was wrong, or at least
-unsupported, and is retracted here.
+### Reduced-precision drift, for gh-ocannl-523's constants
 
-What was actually measured, during the sweep: four of the five `pytorch/cuda(hip)` training cells
-failed parity as `loss stationary` (loss NaNs after step 1) — `cifar_conv`, `cifar_stride`, `lenet`,
-`mlp_wide` — and `gpt2_mini` (inference, no updates) failed at 3.6e+34 drift. `mlp_small` passed
-(1.7e-07, loss moving). Immediately after the sweep, in the same session, this reduced to a pure
-reduction with no benchmark code involved:
+Max relative loss deviation vs the pytorch/cpu reference over the parity window, worst variant per
+cell:
+
+| workload | backend | bf16 | f16 | f16-static | f16-gated16 |
+|---|---|---|---|---|---|
+| mlp_small | cc | 5.40e-04 | 1.54e-04 | 1.54e-04 | 1.54e-04 |
+| mlp_small | hip | 6.56e-04 | 1.53e-04 | 1.73e-04 | 1.53e-04 |
+| mlp_wide | cc | 2.67e-04 | 2.03e-05 | 2.03e-05 | 2.09e-05 |
+| mlp_wide | hip | 2.67e-04 (untuned) / **2.64e-03 (tuned)** | 2.57e-05 | 2.03e-05 | 2.14e-05 |
+| gpt2_mini | cc | 1.03e-03 | — | — | — |
+| gpt2_mini | hip | 4.54e-04 | — | — | — |
+
+Two readings.
+
+**Where no tensor core is involved, hip and cc agree to three significant figures** — `mlp_wide`
+bf16 2.67e-04 on both, f16 2.0e-05 on both — which is the same cross-backend agreement macOS and
+CUDA reported, and the signal that no backend is quietly computing something else. The gate variants
+do not move drift, as expected: static, dynamic and fused-sampled scaling all reach the same losses.
+
+**Where a tensor core *is* involved, drift jumps 10×.** `mlp_wide`/hip/**tuned**/bf16 — the one cell
+in this sweep whose search crowns a rocWMMA candidate — drifts **2.64e-03** against 2.60–2.67e-04
+for every other bf16 cell of the same workload on either backend. It passes the 4e-3 bf16 gate with
+only 1.5× headroom. Tuning by itself is not what does this, and the same workload supplies the
+control: on `mlp_wide`/hip, tuning moves drift from 4.16e-07 to 3.09e-07 at f32, from 2.02e-05 to
+2.57e-05 at f16, and from 2.02e-05 to 2.02e-05 at f16-static — none of those searches crowns an mma
+candidate. Only the one that does moves an order of magnitude. **This is a direct argument against
+the tightening the previous
+revision of this report proposed** (bf16 → 1e-3): that constant would now reject a correct
+tensorized schedule. The f16 constant still has room (worst 1.73e-04 against 2e-3, 11.5×), but the
+bf16 one should stay at 4e-3 until a tensorized bf16 cell has been characterised on more than one
+backend.
+
+### `gpt2_mini` at reduced precision: two hard blockers, found on its first fixture run
+
+gh-ocannl-538 notes this leg had never run on a fixture. It now has, and 3 of 10 cells survive —
+`hip/materialized/bf16`, `cc/default/bf16`, `cc/materialized/bf16`, all of which pass parity. The
+other seven fail for two distinct reasons:
+
+- **bf16 fails HIPRTC compilation.** `cross_entropy_loss_fwd__seg.hip:362:68: error: use of
+  overloaded operator '+' is ambiguous (with operand types '__hip_bfloat16' and 'float')`, and the
+  same for `'/'` with `('float', '__hip_bfloat16')` — 12 errors, all mixed `__hip_bfloat16`/`float`
+  binary expressions that the HIP headers give no unambiguous overload for. It is
+  **placement-dependent**: `hip/materialized/bf16` compiles and runs cleanly (92.798 ms, 11,035
+  tok/s, drift 4.5e-04), while `hip/default/bf16` and `hip/tuned/bf16` both die, because only the
+  fissioned graphs emit the mixed expression. The fix belongs in the HIP backend's
+  `convert_precision` / binop emission, not in the workload.
+- **f16 fails a precision guard on both backends, before any codegen.**
+  `Constant -inf is too big for FP16 aka. half precision … tensor node max_vals` (softmax's
+  max-subtraction sentinel) and `Constant -1000000000. is too big for FP16 … tensor node where`
+  (the causal mask's `-1e9`). The guard is doing its job — both constants really do overflow f16 —
+  but the model has no way to express "this sentinel should be the storage format's own min". Either
+  the mask/sentinel constants become precision-aware, or `max_vals` and `where` join the layer norms
+  and the CE head in the f32 pin list.
+
+`gpt2_mini` also has **no tuned cell at any precision**: at f32 the search dies on the gh-533
+scratch pre-validator (below), at bf16 on the HIPRTC error above, at f16 on the constant guard.
+
+### gh-ocannl-533: the scratch abort is now a clean diagnosis, but it is still fatal
+
+`gpt2_mini` hip/tuned f32 exits 2 with
 
 ```
-torch.randn(256,1024).cuda().sum(0)   # 10 identical runs, max|result|:
-6.425e+37, 6.425e+37, 1.283e+38, 6.425e+37, 53.82, 1.283e+38, 53.82, 1.283e+38, 53.82, 6.425e+37
+HIP: kernel cross_entropy_loss_fwd needs 163856 bytes of private (scratch) memory per work-item,
+above the 104832 bytes this device can back at full occupancy (2048 work-items x 20 CUs against a
+4294967296-byte scratch allocation). Launching it would abort the queue rather than fail cleanly
+(gh-ocannl-533)
 ```
 
-It looked systematic: non-deterministic on a fixed input buffer, present on the first call in a fresh
-process, affecting `sum(0)`/`sum()`/`mean(0)`/`amax(0)`/`prod(0)` but not `sum(1)`, all four float
-dtypes, and shape-dependent with a clean band at `rows<=32` (the wave32 size) widening to 8/8 failures
-at `rows>=1024`. `amax` failing ruled out floating-point reassociation. tinygrad on the same HSA
-runtime and every OCANNL `hip` cell were correct throughout.
+That is a real improvement over the previous revision — the HSA queue is no longer aborted and the
+device is not left disturbed — but the outcome for the sweep is identical: the cell produces no
+result, because the pre-validator raises out of `Autotune.tune` instead of recording a decline and
+moving to the next candidate. An unsatisfiable-scratch candidate is exactly the kind of thing the
+decline census exists for. Same escape path breaks `bench_gpt_diag`'s default-placement segment
+timing.
 
-**The next day, on an idle machine, none of it reproduces.** A re-run of the same characterization —
-the full shape sweep including the cells that were 8/8 broken, all five ops, all four dtypes, ~200
-checks — returns **zero** wrong results. `[1024,1024].sum(0)`, which returned NaN ten times out of
-ten, is now correct every time.
+### gh-ocannl-532 is confirmed fixed, in the logs of every GPU search
 
-So the corruption was real and repeatable for the duration of that session, and absent from a clean
-one. What differs is machine state, not code. The leading explanation is **this machine's known
-instability under sustained load**: gfx1151 is an iGPU sharing power and thermals with the 16 CPU
-cores the sweep saturates, and this box hard-froze under exactly that load earlier the same day
-(Kernel-Power 41, plus a display-driver timeout and four prior `0x7F` bugchecks). A secondary
-possibility, not separable from it: several GPU processes were killed mid-kernel during the sweep (the
-50-minute watchdog, and the HSA queue abort of gh-ocannl-533), which can leave device state disturbed
-for subsequent work.
+Every HIP search in this sweep opens with
 
-Practical consequences:
+```
+baseline: NOT DISPATCHED, binds no hardware dimension on hip -- the whole routine would run in one
+work-item (gh-ocannl-532) (digest …)
+```
 
-- **The torch GPU column in the tables below is not a measurement** — but for run-integrity reasons,
-  not because of an upstream defect. Do not cite this report as evidence of a PyTorch bug.
-- **Correctness anomalies observed on this machine under load should be re-checked idle before being
-  attributed to any codebase.** Nothing was filed upstream, deliberately.
-- The OCANNL and tinygrad cells passed the parity gate throughout the same session, so this does not
-  impugn their numbers; but it is a reason to treat this machine's *timing* figures as
-  load-environment-specific too.
+and no cell in the matrix needed a watchdog. `mlp_wide`, `cifar_conv` and `cifar_stride` hip/tuned —
+the three cells the previous revision could not produce — all complete: search costs 24.79 s,
+173.50 s and 130.22 s respectively, with the display intact throughout. `SKIP_CELLS` now contains no
+HIP entry.
 
-This does remain an independent vindication of gh-ocannl-523's did-the-loss-move check: without it,
-four cells with NaN losses would have scored a *passing* max-rel-diff and been published as if they
-had trained — whatever the root cause turned out to be.
+### Cross-framework
 
-For context on why the wrong conclusion was tempting: gfx1151 does have a documented family of torch
-numerical failures — [ROCm/ROCm#6034](https://github.com/ROCm/ROCm/issues/6034),
-[ROCm/TheRock#5259](https://github.com/ROCm/TheRock/issues/5259),
-[unslothai/unsloth#3385](https://github.com/unslothai/unsloth/issues/3385) — and stable ROCm ships no
-gfx1151 kernels at all. A plausible prior is not evidence, and the non-reproduction outweighs it.
+**The torch GPU column is valid this session.** All six `pytorch/cuda(hip)` cells pass the parity
+gate (1.0e-07 to 3.2e-05) with moving losses. The non-deterministic reduction garbage that made
+five of six cells unusable during the gh-476 sweep did not reproduce anywhere in ~4.5 hours of
+continuous load here. That is the third independent observation supporting the machine-state explanation and against
+the retracted PyTorch-defect claim. **This leg therefore has two valid GPU references, not one** —
+an update to gh-538's contract item 6, which assumed tinygrad/HIP would be the only one.
 
-### Two new HIP tuning bugs
+Best OCANNL `hip` cell against the two GPU references:
 
-- **~~Middle-end wedge~~ Unbounded serial baseline candidate in the tuned search** (`mlp_wide`,
-  `cifar_conv`, `cifar_stride`) — gh-ocannl-532. **This bullet's original diagnosis was wrong and is
-  corrected here.** The observed symptom is right — constant ~3-thread CPU spin, zero `autotune_log`
-  lines after `arm A search:` — but it is not in the middle end, and two of the stated evidence
-  claims do not hold. `perf record` over the spinning process (11,890 samples) is **100%
-  `libhsa-runtime64`** — 66.6% `rocr::core::Runtime::AsyncEventsLoop`, 33.4%
-  `rocr::core::BusyWaitSignal::WaitRelaxed` — with **zero OCaml frames**, identical when re-sampled
-  85 minutes later. And "zero debug artifacts" is false: 12 artifacts including a linked `.hsaco`
-  are written within 3 s; what is zero is artifacts written *after* the search banner.
+| workload | ocannl/hip best | tinygrad/HIP | pytorch/cuda(hip) | gap vs tinygrad |
+|---|---|---|---|---|
+| mlp_small | 0.302 (materialized) | 0.450 | 0.645 | **0.67× — ahead** |
+| mlp_wide | 1.758 (tuned) | 1.063 | 1.106 | 1.65× |
+| lenet | 6.454 (tuned) | 0.844 | 1.781 | 7.6× |
+| cifar_stride | 17.739 (tuned) | 1.863 | 2.692 | 9.5× |
+| cifar_conv | 63.992 (tuned) | 6.744 | 3.690 | 9.5× |
+| gpt2_mini | 70.342 (default) | 6.909 | 6.013 | 10.2× |
 
-  The mechanism is the serial baseline candidate that `Autotune.tune` times before any other
-  (`time_routine`, autotune.ml). The dispatched kernel contains **no `threadIdx`/`blockIdx`
-  reference at all** — every loop is a plain serial `for`, e.g. `for(i102<=255) for(i103<=1023)
-  for(i104<=1023)` = 268 M iterations — so the whole training step runs in one work-item, and it
-  runs **four** times (an untimed warmup plus `autotune_repeats=3`). The affected/unaffected split
-  is simply a per-step-compute ranking: `mlp_small` (~1.7 MFLOP) completes in 40 s, `lenet`
-  (~30 MFLOP) completes, `mlp_wide` (~2 GFLOP) and `cifar_conv` do not. A clean re-run at
-  `8436e362` was capped at 2 h with no `baseline:` line.
+The conv and GPT gaps are still close to an order of magnitude, and the shipping-arm attribution
+above says where the remaining time is: the fused kernel-gradient/SGD segment, which no split-reduce
+candidate currently touches. (These are within-run ratios; per contract item 3 they are not compared
+against the ratios in the previous revision of this file, which was recorded at a different commit.)
 
-  So WSL-vs-Windows was never the right axis, and the native-Windows 111.78 s figure is more likely
-  a search against a warm `autotune_cache` (which the README warns must be wiped for `compile_s` to
-  mean anything) than an environment difference. **The bisect this bullet asked for would have
-  chased nothing.**
+**The torch CPU column inverted again, in the opposite direction.** Same machine, same
+`taskset -c 0-15`, same 16 OpenMP threads on MKL 2024.2:
 
-  Severity is higher than "slow search": these are multi-hour uninterruptible dispatches on the
-  same device that drives the display. Over one session they produced two Windows-side
-  driver-timeout reports, a transient GPU fault that made a <2-minute job hang for 30 minutes, a
-  silent death of `cifar_stride hip/tuned` at ~11.5 min, and finally loss of display output
-  requiring a reboot — none of it visible in the WSL guest's `dmesg`, which stayed clean of GPU
-  faults throughout. Bounding the baseline candidate by predicted cost (the roofline model already
-  prices it), or seeding it from a cheap parallel preset instead of the unscheduled form, is a
-  stability fix and not only a performance one.
-- **HSA scratch abort escapes as a fatal error** (`gpt2_mini` hip/tuned) — gh-ocannl-533. A candidate requests
-  `private_seg_size=163856` per work-item; the runtime aborts the queue with
-  `[UpdateScratch] scratch_size overflow!` / `HSA_STATUS_ERROR_INVALID_ARGUMENT` on kernel
-  `cross_entropy_loss_fwd`, and the failure propagates out of `hip_stream_synchronize` and kills the
-  process instead of being caught as a declined candidate. An unsatisfiable-scratch candidate should
-  be declined like any other compile/launch failure, not take the run down.
+| workload | this run | previous revision |
+|---|---|---|
+| mlp_small | 0.446 ms | 112.003 ms |
+| mlp_wide | 240.005 ms | 6.338 ms |
+| lenet | 1.469 ms | 339.967 ms |
+| cifar_conv | 464.006 ms | 17.034 ms |
 
-### Reduced precision: drift confirms macOS, performance does not improve
-
-| workload | backend | bf16 drift | f16 drift |
-|---|---|---|---|
-| mlp_small | cc | 4.20e-04 | 1.53e-04 |
-| mlp_small | hip | 5.96e-04 | 1.50e-04 |
-| mlp_wide | cc | 2.79e-04 | 2.08e-05 |
-| mlp_wide | hip | 2.79e-04 | 1.97e-05 |
-
-**No backend-specific divergence**: hip matches cc to three significant figures on `mlp_wide`
-(2.79e-04 both; f16 1.97e-05 vs 2.08e-05) — the same agreement macOS reported post-fix, which is the
-signal that no backend is quietly computing something else. Max observed anywhere is bf16 5.96e-04
-and f16 1.53e-04, against the current gates of 4e-3 and 2e-3 — 6.7× and 13× headroom, so the
-constants could tighten further (bf16 → 1e-3, f16 → 5e-4 would still hold 1.7× and 3.3×); worth
-deciding once the CUDA leg supplies its numbers, since the constants are global.
-
-Performance repeats the macOS story: reduced precision is not a win. On `cc`, bf16 costs 8.0× f32 on
-`mlp_wide` (1733.7 vs 217.2 ms) and f16 3.8× (815.5 ms) — consistent with the C backend having no
-native reduced-precision arithmetic. On `hip`, bf16 is 1.8× f32 (3.98 vs 2.28 ms) and f16 5.4×
-(12.35 ms); the f16 figure includes the loss-scaling sync, but that is a roughly constant per-step
-cost and does not explain a 10 ms gap that scales with problem size.
-
-### Cross-framework conclusions
-
-Against the valid GPU reference (tinygrad/HIP), OCANNL's best `hip` cell is 8.0–11.9× off on the conv
-and GPT workloads (`lenet` 6.94 vs 0.87 ms, `cifar_conv` 68.4 vs 7.29, `cifar_stride` 21.3 vs 1.79,
-`gpt2_mini` 71.9 vs 6.24), and **ahead** on `mlp_small` (0.273 vs 0.441 ms) where launch overhead
-dominates; `mlp_wide` is 2.2× off. The `gpt2_mini` gap against a *working* GPU framework is 11.5×
-here versus the ~54× off torch/mps quoted for macOS — a materially better standing, though the
-comparison is against a different framework on different hardware. Given that 93–97% of the conv
-step is one serial backward-reduction segment, the conv gaps are substantially that one segment.
-
-On CPU, OCANNL `cc` tuned wins `mlp_small` (0.107 ms vs tinygrad 0.797) and `lenet` (22.3 vs 24.3),
-and loses `mlp_wide` to torch while beating tinygrad (19.4 ms vs torch 6.34 / tinygrad 36.5).
-
-**The torch CPU reference is not a usable performance baseline in this environment**, though it
-remains valid as the *parity* oracle (loss values, not times). Its timings are internally
-inconsistent: `mlp_small` costs 112.0 ms/step while the far larger `mlp_wide` costs 6.34 ms — the
-small workload is 18× *slower* than the wide one on the same device. That inversion (tiny tensors,
-16 threads, spin-wait thread thrash in the ROCm build's CPU path) also makes `lenet`'s 340 ms and
-`cifar_conv`'s 17.0 ms mutually incomparable. Any OCANNL-vs-torch CPU ratio quoted from this report
-should be treated as an artifact of the reference, not a result; tinygrad/CPU is the sound CPU
-comparison here.
+Every cell moved by one to two orders of magnitude, and the specific pathology gh-538's contract
+item 6 names — "`mlp_small` 18× slower than the much larger `mlp_wide`" — **does not reproduce**;
+the inversion now runs the other way. The conclusion is unchanged and if anything stronger: **torch
+CPU on this machine is not a usable performance baseline in either direction**, and any
+OCANNL-vs-torch CPU ratio taken from either revision is an artifact of the reference. It remains
+sound as the *parity* oracle — it is the reference every PASS above is measured against.
+tinygrad/CPU is the sound CPU comparison here; against it, OCANNL `cc` tuned wins `mlp_small`
+(0.127 vs 0.782), `lenet` (5.566 vs 24.440) and `mlp_wide` (18.252 vs 37.101), and loses
+`cifar_conv` (241.794 vs 73.115) and `gpt2_mini` (526.213 vs 100.527).
 
 ### Still open
 
-- The tensor-core measurement this issue exists for **has not been made on HIP** and cannot be until
-  the mixed-precision graph is tunable (item 2 above) — gh-ocannl-529, which the CUDA leg filed and
-  which is the *sole* blocker for this column since HIP has no tf32 escape hatch.
-- `SKIP_CELLS` audit: the stale `cifar_conv metal/tuned` entry was not re-tested here (no Metal
-  hardware); the new `mlp_wide hip/tuned` entry is freshly justified above.
-- ~~The middle-end wedge is unbisected; a `git bisect` against `8436e362` on native Windows vs WSL
-  would separate "regression" from "WSL-specific".~~ **Resolved, and the premise was wrong** — see
-  the corrected gh-ocannl-532 bullet above. There is no wedge and no regression to bisect; the
-  serial baseline candidate is unbounded in cost. Do not spend a bisect on this.
-- Whether the same unbounded-baseline signature appears on the CUDA and Metal legs has not been
-  checked. `time_routine` times the serial baseline on every backend, so any workload heavy enough
-  should show it; a tuned cell that "hangs" where the untuned one is fine is the tell.
-- `cifar_stride hip/tuned` has no step-time number (three attempts: silent, then a silent death at
-  ~11.5 min, then stopped deliberately). The cause is confirmed, not assumed: a perf sample 45 s
-  into a fourth attempt — by which point a Windows driver-timeout notification had already fired —
-  is 66.63% `AsyncEventsLoop` / 33.35% `BusyWaitSignal::WaitRelaxed` with **zero OCaml frames**,
-  matching `mlp_wide` to two decimal places. Same unbounded serial baseline (gh-ocannl-532), so
-  this is a third affected workload rather than a separate defect.
+- **The tensor-core measurement this cluster exists for is now made on HIP, and it is thin.** One
+  crowned cell, −12.8% in-search against the best scalar candidate, still 12% behind the f32
+  artifact. The next question is not "can it be reached" but **why the companion-coverage analysis
+  bails**: it declines 12 of 29 mma seeds on `mlp_small` and 16 of 37 on `mlp_wide`, including every
+  whole-routine seed, and it is the single remaining blocker family on this backend.
+- **The bf16 parity constant must not be tightened to 1e-3** until the 2.64e-03 tensorized-bf16
+  drift is understood and reproduced on a second backend.
+- **`gpt2_mini` has no tuned cell at any precision, and only one working reduced-precision `hip`
+  cell** — three separate blockers (scratch, HIPRTC overload ambiguity, f16 constant overflow), none
+  of them shared with the mlp workloads.
+- The gh-533 pre-validator should decline the candidate rather than raise out of the search.
+- The `grad_checksum` reduction should be parallel in the default GPU pipeline, without a search.
+- `cifar_conv`'s `cc/tuned` search is now the most expensive cell in the suite at 620.93 s (against
+  241.794 ms/step); `gpt2_mini`'s is 507.33 s. Both are dominated by gh-541's larger site pool.
+- `SKIP_CELLS` audit: the only remaining entry is `cifar_conv metal/tuned`, untestable here (no
+  Metal hardware). No HIP entry remains.
+
+### Reproducing
+
+All from `benchmarks/`, with `LD_LIBRARY_PATH=/opt/rocm/lib/rocm_sysdeps/lib` and the wheel's
+`libhsa-runtime64.so` replaced by `/opt/rocm/lib/libhsa-runtime64.so.1.21.0` (see the README's WSL
+notes).
+
+```bash
+# the mma seeded/timed census, per (workload, backend, precision)
+rm -rf /tmp/probe
+BENCH_FIXTURE=fixtures/mlp_wide.safetensors BENCH_TUNE=1 BENCH_TUNE_REPORT=1 BENCH_PRECISION=bf16 \
+  taskset -c 0-15 ../_build/default/benchmarks/runners/ocannl/bench_mlp.exe --ocannl_backend=hip \
+  --ocannl_autotune_cache_dir=/tmp/probe --ocannl_autotune_log=true 2>&1 | grep -E 'tune arm:|mma-gpu'
+
+# which split-reduce sites, through which interchange, and what the cap evicts
+BENCH_FIXTURE=fixtures/lenet.safetensors BENCH_SR_SITES=1 \
+  taskset -c 0-15 ../_build/default/benchmarks/runners/ocannl/bench_conv_diag.exe --ocannl_backend=hip
+
+# the per-site attribution, one process per workload
+rm -rf /tmp/probe
+BENCH_FIXTURE=fixtures/lenet.safetensors BENCH_TUNE=1 \
+  taskset -c 0-15 ../_build/default/benchmarks/runners/ocannl/bench_conv.exe --ocannl_backend=hip \
+  --ocannl_autotune_cache_dir=/tmp/probe --ocannl_autotune_log=true 2>&1 \
+  | grep -E 'F_split\[|F_preset\[|control|arm |winner'
+
+# per-segment attribution; prefix BENCH_MATERIALIZE=1 for the arm that ships
+BENCH_FIXTURE=fixtures/lenet.safetensors BENCH_SEG_TIMES=1 \
+  taskset -c 0-15 ../_build/default/benchmarks/runners/ocannl/bench_conv_diag.exe --ocannl_backend=hip
+
+# the gate-cost legs (f16 only, mutually exclusive)
+BENCH_FIXTURE=fixtures/mlp_wide.safetensors BENCH_PRECISION=f16 BENCH_STATIC_SCALE=1  … bench_mlp.exe
+BENCH_FIXTURE=fixtures/mlp_wide.safetensors BENCH_PRECISION=f16 BENCH_GATE_INTERVAL=16 … bench_mlp.exe
+```
