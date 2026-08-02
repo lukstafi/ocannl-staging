@@ -54,14 +54,26 @@ class CellIdentityTest(unittest.TestCase):
         self.assertEqual(orchestrate.cell_name("default", "f16"), "default/f16")
 
     def test_skip_entries_are_precision_wildcards(self):
-        # The current entry is a scheduling pathology, so it must exclude the cell at every
-        # precision — otherwise the bf16 column would let a known hang back in.
-        self.assertTrue(orchestrate.cell_skipped("cifar_conv", "metal", "tuned", "f32"))
-        self.assertTrue(orchestrate.cell_skipped("cifar_conv", "metal", "tuned", "bf16"))
+        # A None precision means "at every precision": a scheduling pathology must not be let back
+        # in through the bf16/f16 columns. Tested against an injected entry rather than a live one,
+        # so emptying SKIP_CELLS does not silently drop coverage of the wildcard itself.
+        entry = ("some_workload", "metal", "tuned", None)
+        orchestrate.SKIP_CELLS.add(entry)
+        try:
+            self.assertTrue(orchestrate.cell_skipped("some_workload", "metal", "tuned", "f32"))
+            self.assertTrue(orchestrate.cell_skipped("some_workload", "metal", "tuned", "bf16"))
+            self.assertFalse(orchestrate.cell_skipped("some_workload", "metal", "default", "f32"))
+            self.assertFalse(orchestrate.cell_skipped("some_workload", "cc", "tuned", "bf16"))
+        finally:
+            orchestrate.SKIP_CELLS.discard(entry)
 
-    def test_skip_entries_do_not_overreach(self):
-        self.assertFalse(orchestrate.cell_skipped("cifar_conv", "metal", "default", "f32"))
-        self.assertFalse(orchestrate.cell_skipped("cifar_conv", "cc", "tuned", "bf16"))
+    def test_cifar_conv_metal_tuned_is_no_longer_skipped(self):
+        # gh-ocannl-538: the post-tune re-init hang the entry was added for did not reproduce —
+        # the cell completed in ~4 min with no hang, and the sweep reproduced its p50 to 0.005%.
+        for precision in ("f32", "bf16"):
+            self.assertFalse(
+                orchestrate.cell_skipped("cifar_conv", "metal", "tuned", precision), precision
+            )
 
     def test_hip_tuned_cells_are_no_longer_skipped(self):
         # gh-ocannl-532's unparallelized-baseline dispatch is fixed in the tuner and confirmed on
