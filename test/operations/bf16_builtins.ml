@@ -24,6 +24,12 @@ let bf16 t =
   Train.set_materialized t.Tensor.value;
   t
 
+(* Precision without materialization: the builtin's result stays virtual and is inlined into
+   whatever consumes it. *)
+let bf16_virtual t =
+  Tn.update_prec t.Tensor.value Ir.Ops.bfloat16;
+  t
+
 let show ctx label t =
   Stdio.printf "%s: " label;
   Test_utils.print_floats ~prec:4 (Array.to_list (Context.get_values ctx t.Tensor.value));
@@ -57,6 +63,22 @@ let () =
   (* [Satur01] and [Relu] were already bridged; keep them in the same emission to pin them. *)
   let%op sat_x = sat01 (x - 8.) in
   let%op relu_x = relu (x - 8.) in
+  (* The placement half of the defect. Everything above stores the builtin's result in its own
+     bfloat16 node, which CUDA and HIP accept even unbridged (their converting constructor from
+     float is implicit) -- only Metal rejects it. Leaving the builtin virtual instead inlines it
+     into the consuming bfloat16 binop, where the float operand is what nvrtc reports as a
+     mixed-operand [__hadd] and hiprtc as an ambiguous [operator '+']. That is why gpt2_mini at
+     bf16 compiles in the materialized placement on those two backends and not in the default one:
+     nothing introduces a float, inlining just moves the builtin's own float result from an
+     assignment into an operand.
+
+     sqrt x = [2; 4; 0.5; 1] and exp (x - x) = 1, both exact, so the sums and products are too. *)
+  let%op sqrt_inline = sqrt x in
+  let%op inlined_sqrt = y + sqrt_inline in
+  let%op zeroed = x - x in
+  let%op exp_inline = exp zeroed in
+  let%op inlined_exp = y *. exp_inline in
+  List.iter [ sqrt_inline; zeroed; exp_inline ] ~f:(fun t -> ignore (bf16_virtual t));
   let exact = [ ("sqrt", bf16 sqrt_x); ("max", bf16 max_x); ("max sum", bf16 max_xy) ] in
   let exact =
     exact
@@ -66,6 +88,8 @@ let () =
         ("rsqrt", bf16 rsqrt_x);
         ("sat01", bf16 sat_x);
         ("relu", bf16 relu_x);
+        ("inlined sqrt", bf16 inlined_sqrt);
+        ("inlined exp", bf16 inlined_exp);
       ]
   in
   let ranged =
