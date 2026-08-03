@@ -5,3 +5,6 @@ exp -> n0_exp
 log -> n1_log
 floorf -> n2_floorf
 fabsf -> n3_fabsf
+tanh -> compiled
+bfloat16_to_single -> compiled
+single_to_bfloat16 -> compiled

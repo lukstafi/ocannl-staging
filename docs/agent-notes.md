@@ -230,6 +230,20 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   would still vary per batch; an input-independent forward does not). Found by the gh-ocannl-476
   sweep; `Relu` at `Bfloat16_prec` had fallen through to a catch-all commented `Byte_prec,
   Void_prec`. When adding a precision, audit every `unop_syntax`/`binop_syntax` catch-all arm.
+- Tensor-node debug names become identifiers verbatim in the emitted kernel, so anything the
+  backend also emits as a *name* must be reserved (`ident_blacklist`). Reserve it from the
+  backend's own syntax functions, never from the C spellings: `C_syntax.op_syntax_idents` renders
+  every (precision, operator) pair over a placeholder and harvests the identifiers, so an override
+  cannot drift out of the list. Deriving from `Ops.*_c_syntax` instead described C only and left
+  MSL's unsuffixed `tanh`/`exp`/`log`/`sqrt`/`sin`/`cos`/`trunc` free — and those are exactly the
+  `Tensor.unop ~op_label` labels, so a GPT-2 gelu declared `device float *__restrict tanh` and the
+  call on the next line resolved to the pointer (gh-ocannl-553). A backend's builtins-table keys
+  belong in the list too: a node taking one shadows the definition *and* drags it into a kernel
+  that never calls it, since `filter_and_prepend_builtins` selects entries by searching the
+  rendered kernel for their key. The collision only bites when one kernel holds both the
+  declaration and the call, so which backend it fires on depends on fissioning — the guard is
+  `test/operations/test_ident_blacklist.ml`, and its section 3 only has teeth under
+  `OCANNL_BACKEND=metal` (C spells these with an `f` suffix, so no C compile can exhibit it).
 - `test/config/ocannl_config` pins `backend=cc`, so `dune runtest` never exercises GPU codegen —
   a Metal/CUDA-only rendering bug passes a fully green suite. The bf16 bug above was already
   covered by `test/training/mixed_prec_parity.ml` (its "loss trajectory parity within 0.1" check
