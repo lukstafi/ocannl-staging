@@ -366,7 +366,10 @@ Both are recorded rather than worked around.
    max). MSL has no `bfloat` overload for these builtins, so they return `float`, and unlike C it
    rejects the implicit narrowing back to a `bfloat` lvalue. `cc` bf16 runs the same graph fine and
    the Metal *mlp* bf16 leg passes — the same shape as the earlier Metal bf16 `Relu` rendering fix,
-   different operators.
+   different operators. **Fixed** (gh-ocannl-549): the bridge now covers the whole math-builtin
+   family, not one operator at a time, and all three Metal cells run — default 328.7, materialized
+   361.2, tuned 71.7 ms/step, losses agreeing across placements. Numbers from a later run than this
+   sweep's, so they are not comparable with the tables above.
 
 `gpt2_mini cc/bf16` does run, and is the source of the drift row above. It is also 6.9x slower than
 f32 untuned (14421.900 vs 2086.770 ms) and 6.6x tuned (2258.420 vs 342.372) — the same missing

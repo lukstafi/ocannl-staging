@@ -881,7 +881,7 @@ module Impl = struct
       | Ops.Uint32_prec _ -> ""
       | Ops.Uint4x32_prec _ -> "" (* No specific suffix for uint4 *)
       | Ops.Half_prec _ -> "h"
-      | Ops.Bfloat16_prec _ -> "bf" (* TODO: Verify actual Metal suffix for bfloat16 *)
+      | Ops.Bfloat16_prec _ -> "bf" (* Verified: [0.0bf] is a bfloat literal MSL accepts. *)
       | Ops.Fp8_prec _ -> invalid_arg "Metal backend does not support FP8 precision"
       | Ops.Single_prec _ -> "f"
       | Ops.Double_prec _ ->
@@ -889,6 +889,26 @@ module Impl = struct
       | Ops.Int64_prec _ -> "l"
       | Ops.Uint64_prec _ -> "ul"
       | Ops.Void_prec -> ""
+
+    (* MSL's math library has [float] and [half] overloads but no [bfloat] ones, so a builtin
+       called on bfloat operands promotes them and returns [float] -- and unlike C, MSL rejects the
+       narrowing assignment back to a bfloat destination ("assigning to 'bfloat' from incompatible
+       type 'float'"). Every math builtin is affected, so the result is bridged back here rather
+       than one operator at a time (gh-ocannl-549).
+
+       The *call* is unambiguous: MSL's [bfloat] is a native scalar type with a single implicit
+       conversion, unlike [__nv_bfloat16] / [__hip_bfloat16], whose several conversion operators
+       make the call itself ambiguous on the other GPU backends. Conversely those backends accept
+       the narrowing assignment (their converting constructor is implicit), which is why the same
+       op tables fail there only where the float result becomes the operand of a bfloat16 binop --
+       i.e. only in the placement that inlines it.
+
+       Arithmetic, comparisons, the ternary and the bfloat literal suffix ([0.0bf], used by the
+       gates and by [Recip]) are all native for [bfloat] and need no bridging. *)
+    let bf16_from_builtin prec doc =
+      match prec with
+      | Ops.Bfloat16_prec _ -> group (string "(bfloat)" ^^ parens doc)
+      | _ -> doc
 
     let ternop_syntax prec op =
       match op with
@@ -899,15 +919,10 @@ module Impl = struct
              still evaluate its guarded out-of-range buffer read. The whole conditional is
              parenthesized (cf. the CUDA rendering's precedence note). *)
           fun v1 v2 v3 -> group (parens (parens v1 ^^ string " ? " ^^ v2 ^^ string " : " ^^ v3))
-      | FMA -> (
-          match prec with
-          | Ops.Bfloat16_prec _ ->
-              (* MSL's math library has no bfloat [fma] overload: bfloat operands promote to float
-                 and the result cannot be assigned back to a bfloat destination. *)
-              fun v1 v2 v3 ->
-                group (string "(bfloat)fma(" ^^ separate comma_sep [ v1; v2; v3 ] ^^ rparen)
-          | _ ->
-              fun v1 v2 v3 -> group (string "fma(" ^^ separate comma_sep [ v1; v2; v3 ] ^^ rparen))
+      | FMA ->
+          fun v1 v2 v3 ->
+            bf16_from_builtin prec
+              (group (string "fma(" ^^ separate comma_sep [ v1; v2; v3 ] ^^ rparen))
       | Mul3 -> fun v1 v2 v3 -> group (parens (v1 ^^ string " * " ^^ v2 ^^ string " * " ^^ v3))
 
     let infix_binop op v1 v2 = parens (infix 2 1 (string op) v1 v2)
@@ -918,6 +933,8 @@ module Impl = struct
          rather than restating the token. *)
       let f = infix_binop in
       let func fn v1 v2 = group (string fn ^^ parens (v1 ^^ comma ^^ space ^^ v2)) in
+      (* Math-library calls need the bfloat16 result bridged back; see [bf16_from_builtin]. *)
+      let math fn v1 v2 = bf16_from_builtin prec (func fn v1 v2) in
       match (op, prec) with
       | Ops.Add, _ -> f "+"
       | Sub, _ -> f "-"
@@ -927,9 +944,9 @@ module Impl = struct
           ( Ops.Byte_prec _ | Ops.Uint16_prec _ | Ops.Int32_prec _ | Ops.Uint32_prec _
           | Ops.Int64_prec _ | Ops.Uint64_prec _ ) ) ->
           f "%"
-      | Mod, _ -> func "fmod"
-      | Max, _ -> func "fmax"
-      | Min, _ -> func "fmin"
+      | Mod, _ -> math "fmod"
+      | Max, _ -> math "fmax"
+      | Min, _ -> math "fmin"
       (* Comparisons and logical connectives are precision-independent and spelled the same in MSL
          as in C, so they render through the shared default. The constructors stay listed to keep
          the match exhaustiveness-checked. *)
@@ -967,7 +984,7 @@ module Impl = struct
                     (parens (v1 ^^ string (" > 0.0" ^ s ^ " && ") ^^ v1 ^^ string (" < 1.0" ^ s)))
                  ^^ space ^^ string "?" ^^ space ^^ v2 ^^ space ^^ string ":" ^^ space
                  ^^ string ("0.0" ^ s)))
-      | ToPowOf, _ -> func "pow"
+      | ToPowOf, _ -> math "pow"
       (* The RNG ops call the same builtins under the same precision contract on every C-family
          backend, so they render through the shared helper. *)
       | ((Threefry4x32_crypto | Threefry4x32_light | Uint4x32_to_prec_uniform_lane) as op), _ ->
@@ -976,23 +993,25 @@ module Impl = struct
 
     let unop_syntax prec op =
       let func_doc fn v = group (string fn ^^ parens v) in
+      (* Math-library calls need the bfloat16 result bridged back; see [bf16_from_builtin]. *)
+      let math_doc fn v = bf16_from_builtin prec (func_doc fn v) in
       match (op, prec) with
       | Ops.Identity, _ -> fun v -> v
       | Neg, _ -> fun v -> string "-" ^^ v
-      | Exp, _ -> func_doc "exp"
-      | Log, _ -> func_doc "log"
-      | Exp2, _ -> func_doc "exp2"
-      | Log2, _ -> func_doc "log2"
-      | Sin, _ -> func_doc "sin"
-      | Cos, _ -> func_doc "cos"
-      | Sqrt, _ -> func_doc "sqrt"
+      | Exp, _ -> math_doc "exp"
+      | Log, _ -> math_doc "log"
+      | Exp2, _ -> math_doc "exp2"
+      | Log2, _ -> math_doc "log2"
+      | Sin, _ -> math_doc "sin"
+      | Cos, _ -> math_doc "cos"
+      | Sqrt, _ -> math_doc "sqrt"
       | Relu, Ops.Half_prec _ -> fun v -> func_doc "max" (separate comma_sep [ string "0.0h"; v ])
       | Relu, Ops.Single_prec _ -> fun v -> func_doc "max" (separate comma_sep [ string "0.0f"; v ])
       | Relu, Ops.Bfloat16_prec _ ->
-          (* MSL's math library has no bfloat [max] overload (same gap as [fma] above), so the
-             operand promotes to float and the result is cast back. An untyped [0] as the other
-             operand would instead resolve to an *integer* [max] and truncate the activation to an
-             integer — with sub-unit activations that silently zeroes the whole forward pass. *)
+          (* Bridged like every other math builtin (see [bf16_from_builtin]), but spelled out
+             because the other operand is a literal: an untyped [0] would resolve to the *integer*
+             [max] and truncate the activation to an integer — with sub-unit activations that
+             silently zeroes the whole forward pass. *)
           fun v ->
             group
               (string "(bfloat)max(0.0f, (float)"
@@ -1003,7 +1022,8 @@ module Impl = struct
       | Relu, _ (* Byte_prec, Void_prec *) ->
           fun v -> func_doc "max" (separate comma_sep [ string "0"; v ])
       | Satur01, Ops.Bfloat16_prec _ ->
-          (* Like [Relu], MSL has no bfloat overload of the math-library operation. *)
+          (* Like [Relu], spelled out rather than bridged: [clamp(bfloat, 0.0bf, 1.0bf)] — the
+             suffixed form the generic arm below would emit — is itself ambiguous in MSL. *)
           fun v ->
             group
               (string "(bfloat)clamp((float)"
@@ -1016,9 +1036,9 @@ module Impl = struct
       | Recip, p ->
           let s = metal_prec_suffix_float p in
           fun v -> infix_binop "/" (string @@ "1.0" ^ s) v
-      | Recip_sqrt, _ -> func_doc "rsqrt"
-      | Trunc, _ -> func_doc "trunc"
-      | Tanh_approx, _ -> func_doc "tanh"
+      | Recip_sqrt, _ -> math_doc "rsqrt"
+      | Trunc, _ -> math_doc "trunc"
+      | Tanh_approx, _ -> math_doc "tanh"
       | Not, _ -> fun v -> string "!" ^^ v
       | Uint4x32_to_prec_uniform1, _ ->
           fun v -> func_doc ("uint4x32_to_" ^ Ops.prec_string prec ^ "_uniform") v

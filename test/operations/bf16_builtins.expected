@@ -1,0 +1,16 @@
+sqrt: 2.0000 4.0000 5.0000e-1 1.0000
+max: 1.6000e+1
+max sum: 2.4000e+1
+pow 2: 1.6000e+1 2.5600e+2 6.2500e-2 1.0000
+recip: 2.5000e-1 6.2500e-2 4.0000 1.0000
+rsqrt: 5.0000e-1 2.5000e-1 2.0000 1.0000
+sat01: 0.0000 1.0000 0.0000 0.0000
+relu: 0.0000 8.0000 0.0000 0.0000
+inlined sqrt: 4.0000 4.5000 8.5000 4.0000
+inlined exp: 2.0000 5.0000e-1 8.0000 3.0000
+exp: 4 values, all in [0, 3000]: true
+log: 4 values, all in [-2, 3]: true
+log2: 4 values, all in [-2, 4]: true
+sin: 4 values, all in [-1, 1]: true
+cos: 4 values, all in [-1, 1]: true
+tanh: 4 values, all in [-1, 1]: true
