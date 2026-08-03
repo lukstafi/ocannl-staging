@@ -484,8 +484,12 @@ other seven fail for two distinct reasons:
   binary expressions that the HIP headers give no unambiguous overload for. It is
   **placement-dependent**: `hip/materialized/bf16` compiles and runs cleanly (92.798 ms, 11,035
   tok/s, drift 4.5e-04), while `hip/default/bf16` and `hip/tuned/bf16` both die, because only the
-  fissioned graphs emit the mixed expression. The fix belongs in the HIP backend's
-  `convert_precision` / binop emission, not in the workload.
+  fissioned graphs emit the mixed expression. **Fixed** (gh-ocannl-549) — but not where this
+  predicted: neither `convert_precision` nor the binop emission introduces the float. The op
+  table's own `expf`/`logf`/`sqrtf` arms *return* float at bf16, and only inlining moves that
+  result from an assignment (which `__hip_bfloat16` accepts) into a binary operand (which is
+  ambiguous). The fix is bf16 arms for the float-returning unops, mirroring the `ToPowOf` arm
+  already there. `gpt2_mini hip/default/bf16` now runs at 86.3 ms/step.
 - **f16 trips `Low_level.check_constant` on both backends, before any codegen — on two constants
   that are not the same problem.** The guard is `Ops.exceeds_fp16_cutoff`, a *configurable magnitude
   cutoff* (`check_half_prec_constants_cutoff`, default 16384.0 = 2^14) and deliberately well below

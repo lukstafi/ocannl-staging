@@ -449,6 +449,13 @@ The informative part: `cuda/materialized/bf16` **compiles and runs** (239.554 ms
 `default/bf16` and `tuned/bf16` fail. So the bad call comes out of the default (virtual +
 promotion) placement's fissioned cross-entropy segment, not from bf16 lowering in general.
 
+**Fixed** (gh-ocannl-549), and the "comes out of the placement" reading turned out to be half
+right: the float operand is not introduced by fission, it is the *return type of the libm call the
+op table already emitted* (`expf`/`logf` in the log-sum-exp, `sqrtf` in layer_norm). Storing it
+into a bf16 node is accepted — `__nv_bfloat16`'s converting constructor is implicit — so only the
+placement that inlines the call into a bf16 binop trips the ambiguity, which is exactly the
+materialized/default split. `gpt2_mini cuda/default/bf16` now runs at 213.5 ms/step.
+
 **3. `gpt2_mini cuda/tuned` at f32 exhausted the 12 GB card during the search** —
 `CUDA_ERROR_OUT_OF_MEMORY` from `cu_mem_alloc`, raised in `Autotune.tune.search`
 (`autotune.ml:4139`). **It did not reproduce standalone.** Re-run alone on an idle GPU at the same
