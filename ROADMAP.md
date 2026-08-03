@@ -128,9 +128,9 @@ A research-heavy milestone, closed with all 44 assigned issues resolved. GitHub 
 ---
 
 ## v1.0 — August 24, 2026 (ICFP week)
-**Theme: Advanced compiler tiers, schedule-quality follow-through, and release completeness**
+**Theme: Advanced compiler tiers and schedule-quality follow-through**
 
-GitHub milestone scope: *"Few documentation gaps, some degree of feature completeness, ergonomics, safety."*
+GitHub milestone scope: *"Branch-and-bound on the analytic cost model. Better performance: better tensor cores, algebraic rewrites (non-numeric-preserving), better beam search."* The completeness, ergonomics and safety goals originally under v1.0 moved to v1.1: v1.0 marks the compilation side reaching the shape argued for in [the compilation manifesto](docs/compilation_manifesto.md).
 
 **Advanced compiler tiers:**
 - CUDA tensor-core profile completeness (#481), fused attention via online softmax (#483), software-pipelined double-buffered staging (#487), CUDA/HIP graph capture of the fissioned step (#488), and rematerialization on top of the liveness planner (#498).
@@ -159,7 +159,7 @@ Work already completed in this milestone: safety, determinism and `%cd` simplifi
 ## v1.1 — September 30, 2026
 **Theme: Training/deployment utilities, shape design, model examples, and integrations**
 
-GitHub milestone scope: *"Consider introducing axis labels. Consider introducing shape schemes."*
+GitHub milestone scope: *"Completeness, more examples, potentially cloud-tested (datacenter) GPU targets for Nvidia and AMD."* This milestone inherits the documentation, feature-completeness, ergonomics and safety goals originally scoped for v1.0, alongside the axis-label and shape-scheme design directions.
 
 **Training and deployment** (moved here from v1.0):
 - Resumable checkpoints (#96), inference binaries/plugins (#97), experiment tracking (#122), training-loop utilities such as LR schedules and gradient accumulation (#465), and mmap-backed checkpoint loading (#467).
@@ -195,8 +195,8 @@ Quantization (#137, #271), the WebGPU/WASM target (#123), the LLVM backend (#200
 | ~~0.7.1~~ | — | **dissolved** | AMD HIP backend → 0.8; completed examples and tokenizers landed subsequently |
 | **0.8** | Jul 13, 2026 | **released** | **Parallel schedules (GPU + CPU), autotuning, SIMD/`Tile_mma`, AMD HIP backend, benchmark suite** |
 | **0.9** | Aug 3, 2026 | **released** | **Schedule quality, deterministic parallelism, mixed precision, convolution performance, and search survivability** |
-| 1.0    | Aug 24, 2026 | planned | Advanced compiler tiers, schedule-quality follow-through, release completeness **(ICFP week)** |
-| 1.1    | Sep 30, 2026 | planned | Training/deployment utilities, shape design, model examples, and integrations |
+| 1.0    | Aug 24, 2026 | planned | Advanced compiler tiers and schedule-quality follow-through **(ICFP week)** |
+| 1.1    | Sep 30, 2026 | planned | Release completeness: training/deployment utilities, shape design, model examples, and integrations |
 
 ---
 

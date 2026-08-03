@@ -89,14 +89,14 @@ See [ROADMAP.md](ROADMAP.md) for the detailed schedule. GitHub issue assignments
   - [x] Tensor-core hardening delivered tf32 policy, CUDA 13 support, pad-to-tile scheduling, static partitioning, and packed-uniform retirement (#478, #482, #485, #508, #509).
   - [x] Search survivability: typed candidate-failure containment (#536), HIP scratch pre-validation (#533), no unparallelized GPU dispatches (#532), a complete decline census (#541, #543), and reachable GPU mma candidates (#521).
   - [x] CNN classifiers (#54), GPT-2 inference (#377), and the TVM, Tiramisu, superoptimizer, and Lean Attention studies (#242, #267, #261, #263).
-* **1.0 (Aug 24, 2026 — ICFP week): Advanced compiler tiers, schedule-quality follow-through, and release completeness.**
+* **1.0 (Aug 24, 2026 — ICFP week): Advanced compiler tiers and schedule-quality follow-through.**
   - [ ] Advanced schedules and algorithms: CUDA tensor-core completeness, fused attention, software pipelining, CUDA/HIP graph capture, rematerialization, remaining convolution tiers, and branch-and-bound schedule inference (#481, #483, #487, #488, #498, #503, #505, #514).
   - [ ] Schedule-quality follow-through from the v0.9 sweep: rank-3 matmul seeding, CUDA bf16 mma fallbacks, Metal's placement A/B, and the tuner's serial baseline (#528, #545, #546, #552).
   - [ ] CPU reduced precision: native fp16 arithmetic and 16-bit storage with f32 compute (#516, #517).
   - [ ] Frontend and diagnostics: routine-name collision policy and use-site row resolution (#513, #544).
   - [ ] Roadmap-only ergonomics: concise merge-buffer transfer composition and execution-dependency tracking.
   - [x] Tracing design (#160), `%op` inline-initializer scoping (#511), the mixed-precision cost diagnosis (#535), and the f16/bf16 defects that shipped inside v0.9 (#547, #548, #549).
-* **1.1 (Sep 30, 2026): Training/deployment utilities, shape design, model examples, and integrations.**
+* **1.1 (Sep 30, 2026): Release completeness — training/deployment utilities, shape design, model examples, and integrations.**
   - [ ] Training and deployment: resumable checkpoints, inference binaries, experiment tracking, training-loop utilities, and mmap checkpoints (#96, #97, #122, #465, #467).
   - [ ] Shape schemes and the axis-label design direction (#404); user-facing library study of Simply/NanoDO for `lib/` (#435).
   - [ ] Model surgery, LSTM and Bonsai RNN examples, digit addition, BERT/ModernBERT, and DisTrO (#33, #60, #182, #427, #297, #278).
