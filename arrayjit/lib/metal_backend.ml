@@ -551,6 +551,7 @@ module Impl = struct
 
     let ident_blacklist =
       ident_blacklist
+      @ C_syntax.builtin_idents Builtins_metal.builtins
       @ [
           (* MSL address-space qualifiers and function attributes — highly plausible tensor
              labels *)

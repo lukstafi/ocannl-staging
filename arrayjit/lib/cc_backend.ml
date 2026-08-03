@@ -303,6 +303,7 @@ struct
       not @@ Utils.get_global_flag ~default:false ~arg_name:"prefer_backend_uniformity"
   end)
 
+  let ident_blacklist = ident_blacklist @ C_syntax.builtin_idents Builtins_cc.builtins
   let parallel_grid_syntax = parallel_grid_syntax_setting ()
   let parallel_grid_chunks = parallel_grid_chunks_setting ()
   let vector_bytes = vector_bytes_setting ()
