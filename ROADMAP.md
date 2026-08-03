@@ -1,16 +1,18 @@
 # OCANNL Roadmap to v1.0
 
-**Headline target: ICFP 2026 week (August 24, 2026)**
+**Headline target: v1.0 at ICFP 2026 week (August 24, 2026)**
 
 This roadmap outlines the development plan for OCANNL from the current state to version 1.0, incorporating academic paper milestones for workshops collocated with ICFP 2026 (OCaml Workshop, FProPer). Dates indicate **end of period** targets.
 
-> **Schedule note (July 2026):** the roadmap drifted from its original dating because of a slowdown between January and May 2026. v0.7 is now the catch-up release. Three structural changes follow from that:
+> **Schedule note (July 2026):** the roadmap drifted from its original dating because of a slowdown between January and May 2026. v0.7 is the catch-up release. Three structural changes follow from that:
 >
 > - **v0.6.4 is skipped as a release.** Its scope — axis concatenation/block tensors (#49), RoPE and non-learned position embeddings (#398), the decoder-only transformer toy (#57) — is complete (the GitHub milestone is closed), but it ships inside **v0.7** rather than as a separate tagged release. The last tagged release before v0.7 was **0.6.3**.
 > - **v0.7.2 is consolidated into v0.7.** The compiler-optimization and memory-management work that was scheduled separately (loop hoisting, CSE, the universal pool allocator) is part of the single **v0.7** milestone.
 > - **v0.7.1 was dissolved.** Its two tracks were redistributed: the **AMD HIP backend (#411)** shipped in **v0.8**; completed examples and tokenizer work landed subsequently, while remaining examples now follow their current GitHub milestone assignments. The GitHub milestone has been deleted.
 >
-> The version sequence is now: `0.7 → 0.8 → 0.9 → 1.0 → 1.1`. Milestone *scope* below tracks the GitHub milestones, which are the source of truth.
+> **Update (August 2026):** the v0.9 milestone closed on schedule, so **v1.0 is now the ICFP-week release** and v1.1 takes the September 30 slot. Two rebalances came with that: CUDA/HIP graph capture (#488) moved from v0.9 to v1.0, and the training/deployment utilities (#96, #97, #122, #465, #467) plus the `lib/` design study (#435) moved from v1.0 to v1.1, in favor of the compiler-tier and diagnostics work the v0.9 sweep exposed.
+>
+> The version sequence is: `0.7 → 0.8 → 0.9 → 1.0 → 1.1`. Milestone *scope* below tracks the GitHub milestones, which are the source of truth.
 
 ---
 
@@ -48,7 +50,7 @@ This is the consolidated "paper-ready" release. It absorbs the frontend-finaliza
 **Documentation and paper artifacts (done):**
 - **`lowering_and_inlining.md` audit** (#296) — the lowering/optimization docs were fleshed out alongside a `low_level.ml` audit.
 - **Workshop article:** `docs/ocannl_workshop_article_human.md`, LaTeX source, and rendered PDF.
-- **Formal core technical report:** `docs/ocannl-formal-core-technical-report.md` and LaTeX source, covering the core shape/projection inference proof effort.
+- **Formal core technical report:** `docs/ocannl-formal-core-technical-report.latex` (the authoritative source) and its rendered PDF, covering the core shape/projection inference proof effort.
 - **Shape constraint generation notes:** `docs/shape-constraint-generation.md`, documenting the front-end elaboration boundary from `shape.ml` into core constraints.
 
 **Deferred after v0.7:**
@@ -72,7 +74,7 @@ GitHub milestone scope: *"GPU tiling and related optimizations in the polyhedral
 - **Automatic GPU schedules** — CUDA and Metal kernels now parallelize by default (`automatic_gpu_schedule`): hardware axis types render to grid/block/thread loops with launch dimensions, barriers, and shared-memory tiles; per-backend `hardware_limits` validate block sizes, thread counts, and shared-memory use of every kernel.
 - **Kernel fission** — routines split into multiple kernels at materialized cross-nest edges, with aligned cross-nest parallelism merging equal-geometry nests losslessly; Metal encodes fissioned steps as fused command-buffer segments.
 - **CPU kernel-level parallelism** — the `cc` backend renders parallel loops through a thread pool by default; backends renamed to `cc` / `multidev_cc` (`sync_cc` / `multicore_cc` remain as deprecated aliases).
-- **Matmul tiling and tensor cores** (#412, done) — register-tiled `Tile_mma` microkernels, SIMD vector-extension codegen with reduction chains (#468, #469), shared/packed staging, warp shuffles, CUDA WMMA/inline PTX, Metal simdgroup matrices, and HIP rocWMMA.
+- **Matmul tiling and tensor cores** (#412) — register-tiled `Tile_mma` microkernels, SIMD vector-extension codegen with reduction chains (#468, #469), shared/packed staging, warp shuffles, CUDA WMMA/inline PTX, Metal simdgroup matrices, and HIP rocWMMA. The first tranche shipped here; the issue itself continued into v0.9 and was closed there.
 
 **Autotuning (done — pulled into v0.8):**
 - **Measured schedule search** — `Autotune.tune` searches canonical schedule candidates with execution-based timing: a digest-guarded schedule cache, per-segment schedules for fissioned routines, sketch seeding (e.g. matmul), and placement A/B tuning.
@@ -91,74 +93,83 @@ GitHub milestone scope: *"GPU tiling and related optimizations in the polyhedral
 
 ---
 
-## v0.9 — August 24, 2026 (ICFP week)
+## v0.9 — August 3, 2026
 **Theme: Schedule quality, deterministic parallelism, and convolution performance**
 
-A research-heavy milestone. GitHub milestone scope: *"Program search with execution-based per-backend or aggregate-of-backends cost functions; broadening code-graph rewriting rules."*
+A research-heavy milestone, closed with all 44 assigned issues resolved. GitHub milestone scope: *"Program search with execution-based per-backend or aggregate-of-backends cost functions; broadening code-graph rewriting rules."*
 
-The issue assignments on GitHub are authoritative. After the July rebalance, the open scope is:
+**Search quality and schedule legality (done):**
+- **Constraint-based schedule legality** (#494) — `Ir.Affine` and `Low_level.affine_accesses` expose loop boxes and access relations; conflict, coverage, fiber-cardinality and read-before-write queries drive shared-memory safety, fission, scratch validation, and a `Schedule.op_legality` oracle that prunes proven-illegal proposals.
+- **Analytic cost model** (#491) — footprint/FLOP extraction, roofline lower bounds, per-backend envelopes, model-picked untuned defaults (`model_default_schedule`) and a keep-fraction pre-filter over sketch seeds, with calibration logging. Advisory throughout: candidates without model coverage are never dropped.
+- **Cross-machine benchmark and tuning sweep** (#476), re-measured under #538 after the search changes — full Metal, CUDA and HIP columns from a wiped autotune cache, plus paired A/B legs. The checked-in reports under `benchmarks/` are the record.
+- **Pad-to-tile scheduling** (#485), **static partitioning** (#508), and the **tf32 numerics policy** (#478); CUDA 13 / cudajit fixes (#482).
 
-**Search quality and schedule legality:**
-- Cross-machine benchmark/tuning sweep (#476).
-- Analytic cost model for default schedules (#491).
-- Constraint-based schedule legality (#494).
+**Parallel execution and numerics (done):**
+- **Deterministic split reductions** (#484) — two-pass tree combines with autotune seeding, extended by `Swap`-hoist composition (#537) so conv-gradient accumulations became reachable.
+- **Mixed-precision training recipe** (#492) — precision-assignment policy, master weights with cast twins, dynamic loss scaling with a fused on-device gate, and forward-only reduced precision by load-time conversion.
+- **Packed-uniform retirement** (#509) — the packed `uniform` became total over shapes, took over default parameter initialization, and gained lane-extract virtualization.
+- Correct overlapping-window gradients for tropical/einmax1 reductions (#512), with the non-overlapping fast path restored (#527).
 
-**Parallel execution and numerics:**
-- Deterministic split reductions (#484).
-- CUDA/HIP graph capture (#488).
-- Mixed-precision training recipe (#492).
-- Correct overlapping-window gradients for tropical/einmax1 reductions (#512).
+**Convolution performance (done):**
+- Implicit-GEMM sketch families (#493), blocked tile flavors (#500), epilogue twins (#501), compact strided-row staging (#502), and clamped-window lowering for padded max-family pooling (#504).
 
-**Convolution performance:**
-- Blocked-tile schedule sketches (#500).
-- Convolution epilogue twins (#501).
-- Compact strided-row staging (#502).
-- Clamped-window lowering (#504).
+**Search survivability (done — scope that emerged from the sweep):**
+- **Typed candidate-failure containment** (#536) with the Metal, CUDA and HIP arms; **HIP scratch pre-validation** (#533); unparallelized GPU candidates refused rather than dispatched (#532); the decline census made complete (#541, #543); advisory-fallback and model-ranking fixes (#519, #522); GPU mma candidates made reachable (#521); benchmark matrix and parity-gate corrections (#523, #529, #538, #539); HIP tensor-core and memory-accounting fixes (#540, #542).
+- Frontend and backend defects surfaced along the way: unary einsum specs with convolution indices (#515), CUDA's clang-only `0.0h` half literal (#518), and Metal bf16 uniform builtins writing raw bit patterns (#520).
 
-**Completed or dispositioned in this milestone:**
-- Tensor-core and schedule hardening: tf32 policy (#478), CUDA 13 fixes (#482), pad-to-tile scheduling (#485), static partitioning (#508), and packed-uniform-tail retirement (#509).
-- Examples: CNN classifiers (#54) and GPT-2 inference (#377).
-- Research: TVM (#242), [Tiramisu/Telamon](docs/blog/tiramisu-telamon-optimization-space-pruning.md) (#267), and [superoptimizers](docs/research/superoptimizers.md) (#261).
+**Examples, research, and dispositions:**
+- CNN classifiers (#54), GPT-2 inference (#377), and the matmul-to-tensor-cores track (#412) closed here.
+- Research: TVM (#242), [Tiramisu/Telamon](docs/blog/tiramisu-telamon-optimization-space-pruning.md) (#267), [superoptimizers](docs/research/superoptimizers.md) (#261), and Lean Attention (#263).
 - Candle (#265), Petalisp/Caten (#306), and MSVC (#313) were evaluated and closed as not planned.
+
+**Deferred out of v0.9:**
+- CUDA/HIP graph capture (#488) moved to v1.0.
 
 ---
 
-## v1.0 — September 30, 2026
-**Theme: Release completeness, training/deployment utilities, and advanced compiler tiers**
+## v1.0 — August 24, 2026 (ICFP week)
+**Theme: Advanced compiler tiers, schedule-quality follow-through, and release completeness**
 
 GitHub milestone scope: *"Few documentation gaps, some degree of feature completeness, ergonomics, safety."*
 
-**Training and deployment:**
-- Resumable checkpoints (#96), inference binaries/plugins (#97), experiment tracking (#122), training-loop utilities (#465), mmap-backed checkpoints (#467), and a tracing design that preserves efficiency and abstraction (#160).
-
-**User-facing library:**
-- Apply lessons from Simply/NanoDO to `lib/` (#435).
-
 **Advanced compiler tiers:**
-- CUDA tensor-core profile completeness (#481), fused attention (#483), software-pipelined double-buffer staging (#487), and rematerialization (#498).
+- CUDA tensor-core profile completeness (#481), fused attention via online softmax (#483), software-pipelined double-buffered staging (#487), CUDA/HIP graph capture of the fissioned step (#488), and rematerialization on top of the liveness planner (#498).
 - Remaining convolution tiers: zero-nest workgroup geometry (#503) and Winograd (#505).
 - Branch-and-bound schedule inference (#514).
 
+**Schedule-quality follow-through (from the v0.9 sweep):**
+- Rank-3 (batched/attention) matmul sites are never seeded, so `gpt2_mini` cannot reach tensor cores (#528); CUDA bf16 mma times scalar-fallback code under an mma label (#545); a Metal `Tensorize` wins its arm but the placement A/B does not ship it (#546).
+- The tuner's baseline is the unscheduled serial form rather than the default schedule — the shared cause behind #532 and #533 (#552).
+- Conv-sketch tuning wins do not port across CPUs (#530); `gpt2_mini` inference is far off torch CUDA and moves under neither tuning nor materialization (#531); intermittent OOM during CUDA tuning (#550); `bench_gpt` gate-cost legs (#551).
+- CPU reduced precision: native fp16 arithmetic (#516) and 16-bit storage with f32 compute (#517).
+- Retire the concrete-index tracer in favor of affine access relations (#554).
+
 **Frontend and diagnostics:**
-- Correct `%op` inline-parameter initializer scoping (#511).
 - Establish a routine-name collision policy (#513).
+- Shape inference: "close down when known" is a leaf-tensor rule applied too widely (#544).
 
 **Roadmap-only ergonomics:**
 - Concise merge-buffer transfer composition.
 - Execution-dependency tracking analogous to initialization dependencies.
 
-Safety, determinism, and `%cd` simplification work already completed in this milestone includes #288, #247, #341, #348, and #209.
+Work already completed in this milestone: safety, determinism and `%cd` simplification (#288, #247, #341, #348, #209), the tracing design (#160), `%op` inline-initializer scoping (#511), the mixed-precision cost diagnosis (#535), and the f16/bf16 defects that shipped inside v0.9 — the reduction-identity cutoff (#547), the causal mask's sentinel (#548), and the GPU bfloat16 math builtins (#549).
 
 ---
 
-## v1.1 — no target date
-**Theme: Shape design, model examples, integrations, and deferred backend experiments**
+## v1.1 — September 30, 2026
+**Theme: Training/deployment utilities, shape design, model examples, and integrations**
 
 GitHub milestone scope: *"Consider introducing axis labels. Consider introducing shape schemes."*
+
+**Training and deployment** (moved here from v1.0):
+- Resumable checkpoints (#96), inference binaries/plugins (#97), experiment tracking (#122), training-loop utilities such as LR schedules and gradient accumulation (#465), and mmap-backed checkpoint loading (#467).
 
 **Shape and frontend design:**
 - Shape schemes for tensor functions (#404) and the axis-label design direction.
 - Local let-bindings in `%cd` (#80) and plot legends/ticks (#103).
+
+**User-facing library:**
+- Apply lessons from Simply/NanoDO to `lib/` (#435).
 
 **Model examples and research:**
 - Model surgery (#33), LSTM (#60), Bonsai RNN (#182), digit addition (#427), BERT/ModernBERT (#297), and DisTrO (#278).
@@ -167,7 +178,9 @@ GitHub milestone scope: *"Consider introducing axis labels. Consider introducing
 - Polars integration (#219) and a krnl/autograph study (#277).
 
 **Deferred backend experiments:**
-- CUDA pinned host buffers (#170), CUDA constant memory (#195), PoPE (#444), and HIP CDNA tensor cores (#477).
+- CUDA pinned host buffers (#170), CUDA constant memory (#195), PoPE (#444), and HIP CDNA tensor cores via MFMA (#477).
+
+Quantization (#137, #271), the WebGPU/WASM target (#123), the LLVM backend (#200), the fork-based backend (#161), `strict` axis naming (#190), the DumPy/torchdim deep dive (#316), and the Fleuret lecture examples (#216) were completed or dispositioned in this milestone.
 
 ---
 
@@ -181,9 +194,9 @@ GitHub milestone scope: *"Consider introducing axis labels. Consider introducing
 | **0.7** | Jul 3, 2026 | **released** | **Frontend finalization + compiler optimizations** (consolidates 0.7.2) |
 | ~~0.7.1~~ | — | **dissolved** | AMD HIP backend → 0.8; completed examples and tokenizers landed subsequently |
 | **0.8** | Jul 13, 2026 | **released** | **Parallel schedules (GPU + CPU), autotuning, SIMD/`Tile_mma`, AMD HIP backend, benchmark suite** |
-| 0.9    | Aug 24, 2026 | planned | Schedule quality, deterministic parallelism, mixed precision, and convolution performance **(ICFP week)** |
-| 1.0    | Sep 30, 2026 | planned | Training/deployment, release completeness, and advanced compiler tiers |
-| 1.1    | no target date | backlog | Shape design, model examples, integrations, and deferred backend experiments |
+| **0.9** | Aug 3, 2026 | **released** | **Schedule quality, deterministic parallelism, mixed precision, convolution performance, and search survivability** |
+| 1.0    | Aug 24, 2026 | planned | Advanced compiler tiers, schedule-quality follow-through, release completeness **(ICFP week)** |
+| 1.1    | Sep 30, 2026 | planned | Training/deployment utilities, shape design, model examples, and integrations |
 
 ---
 
@@ -193,7 +206,7 @@ The v0.7 release includes the paper-facing material needed for workshop submissi
 
 - Workshop article: [docs/ocannl_workshop_article_human.md](docs/ocannl_workshop_article_human.md).
 - Workshop article PDF: [docs/html/pdfs/ocannl_workshop_article_human.pdf](docs/html/pdfs/ocannl_workshop_article_human.pdf).
-- Formal core technical report: [docs/ocannl-formal-core-technical-report.md](docs/ocannl-formal-core-technical-report.md).
+- Formal core technical report: [rendered PDF](https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf), LaTeX source in [docs/](docs/ocannl-formal-core-technical-report.latex).
 - Shape constraint generation notes: [docs/shape-constraint-generation.md](docs/shape-constraint-generation.md).
 
 ### Proposed Title
