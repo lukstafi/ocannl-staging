@@ -174,6 +174,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name bf16_builtins)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules bf16_builtins)
+ (libraries base ocannl stdio test_utils)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name bf16_ops)
  (package neural_nets_lib)
  (deps

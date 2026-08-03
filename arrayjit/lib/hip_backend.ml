@@ -1157,6 +1157,13 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           ( Byte_prec _ | Uint16_prec _ | Int32_prec _ | Uint32_prec _ | Int64_prec _
           | Uint64_prec _ ) ) ->
           f "%"
+      (* Like the libm calls in [unop_syntax]: [fmod] on bfloat16 operands returns float, which
+         only fails once the placement inlines it into a bfloat16 binop (gh-ocannl-549). *)
+      | Mod, Bfloat16_prec _ ->
+          fun v1 v2 ->
+            group
+              (string "__float2bfloat16(fmodf(__bfloat162float(" ^^ v1
+              ^^ string "), __bfloat162float(" ^^ v2 ^^ string ")))")
       | Mod, _ -> func "fmod"
       (* Comparisons and logical connectives are precision-independent and spelled the same in HIP
          C++ as in C, so they render through the shared default -- fp8 already bridged above. The
@@ -1218,6 +1225,14 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       let open PPrint in
       let f prefix suffix expr = group (string prefix ^^ expr ^^ string suffix) in
       let func fn expr = group (string fn ^^ parens expr) in
+      (* A libm call on a bfloat16 operand resolves (the operand converts to float) but *returns
+         float*. Assigning that back to a bfloat16 cell is accepted -- __hip_bfloat16's converting
+         constructor is implicit -- so it goes unnoticed until the placement that inlines the call
+         instead makes the float an operand of a bfloat16 binop, where hiprtc reports
+         "operator '+' is ambiguous ('__hip_bfloat16' and 'float')" (gh-ocannl-549). Bridge the
+         result back the way [ToPowOf], [Relu], [Recip] and [Satur01] already do, so the emission
+         is bfloat16-typed wherever it lands. *)
+      let bf16_func fn = f ("__float2bfloat16(" ^ fn ^ "(__bfloat162float(") ")))" in
       match (v, prec) with
       | Ops.Identity, _ -> f "" ""
       | Uint4x32_to_prec_uniform1, Ops.Uint4x32_prec _ ->
@@ -1255,24 +1270,31 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Satur01, _ -> f "fmax(0.0, fmin(1.0, " "))"
       | Exp, Half_prec _ -> func "hexp"
       | Exp, Double_prec _ -> func "exp"
+      | Exp, Bfloat16_prec _ -> bf16_func "expf"
       | Exp, _ -> func "expf"
       | Log, Half_prec _ -> func "hlog"
       | Log, Double_prec _ -> func "log"
+      | Log, Bfloat16_prec _ -> bf16_func "logf"
       | Log, _ -> func "logf"
       | Exp2, Half_prec _ -> func "hexp2"
       | Exp2, Double_prec _ -> func "exp2"
+      | Exp2, Bfloat16_prec _ -> bf16_func "exp2f"
       | Exp2, _ -> func "exp2f"
       | Log2, Half_prec _ -> func "hlog2"
       | Log2, Double_prec _ -> func "log2"
+      | Log2, Bfloat16_prec _ -> bf16_func "log2f"
       | Log2, _ -> func "log2f"
       | Sin, Half_prec _ -> func "hsin"
       | Sin, Double_prec _ -> func "sin"
+      | Sin, Bfloat16_prec _ -> bf16_func "sinf"
       | Sin, _ -> func "sinf"
       | Cos, Half_prec _ -> func "hcos"
       | Cos, Double_prec _ -> func "cos"
+      | Cos, Bfloat16_prec _ -> bf16_func "cosf"
       | Cos, _ -> func "cosf"
       | Sqrt, Half_prec _ -> func "hsqrt"
       | Sqrt, Double_prec _ -> func "sqrt"
+      | Sqrt, Bfloat16_prec _ -> bf16_func "sqrtf"
       | Sqrt, _ -> func "sqrtf"
       | Recip, Byte_prec _ ->
           invalid_arg "Hip_backend.unop_syntax: Recip not supported for byte/integer precisions"
@@ -1288,15 +1310,19 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Recip_sqrt, Half_prec _ -> func "hrsqrt"
       | Recip_sqrt, Double_prec _ -> f "(1.0 / sqrt(" "))"
       | Recip_sqrt, Single_prec _ -> f "(1.0f / sqrtf(" "))"
+      | Recip_sqrt, Bfloat16_prec _ ->
+          f "__float2bfloat16(1.0f / sqrtf(__bfloat162float(" ")))"
       | Recip_sqrt, _ -> f "(1 / sqrtf(" "))"
       | Neg, _ -> f "(-(" "))"
       | Trunc, Double_prec _ -> func "trunc"
+      | Trunc, Bfloat16_prec _ -> bf16_func "truncf"
       | Trunc, _ -> func "truncf"
       | Tanh_approx, Byte_prec _ ->
           invalid_arg
             "Hip_backend.unop_syntax: Tanh_approx not supported for byte/integer precisions"
       | Tanh_approx, Half_prec _ -> func "htanh_approx"
       | Tanh_approx, Single_prec _ -> func "tanhf"
+      | Tanh_approx, Bfloat16_prec _ -> bf16_func "tanhf"
       | Tanh_approx, _ -> func "tanh"
       (* [bf16 == 0.0] is ambiguous for the same reason as [1 / bf16] above. *)
       | Not, Bfloat16_prec _ -> f "__float2bfloat16(__bfloat162float(" ") == 0.0f ? 1.0f : 0.0f)"

@@ -219,17 +219,38 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   comments in `cuda_backend.ml`/`hip_backend.ml`). Same family as the MSL `bfloat` trap below —
   a reduced-precision literal or overload that is fine in one dialect is a hard error, or worse a
   silent truncation, in another. Such bugs only surface with that vendor's hardware attached; the
-  executed guards are `test/operations/half_ops.ml` and `test/operations/bf16_ops.ml`, plus
+  executed guards are `test/operations/half_ops.ml`, `test/operations/bf16_ops.ml` (operand
+  ambiguity) and `test/operations/bf16_builtins.ml` (builtin return types), plus
   `test/training/mixed_prec_parity.ml`.
-- MSL's math library has no `bfloat` overloads (`max`, `fma`, ...). Render bf16 arithmetic by
-  promoting to `float` and casting back — `(bfloat)max(0.0f, (float)(v))`, as `FMA` already did.
-  The trap is that an *untyped* literal does not fail loudly: `max(0, v)` makes an integer overload
-  unambiguous, so it compiles and silently truncates every sub-unit activation to 0, whereas
-  `max((bfloat)0.0, v)` is a clean "call to 'max' is ambiguous" error. Fingerprint of the silent
-  form: loss pinned at exactly ln(#classes) with NO batch-to-batch variation (a frozen-weights bug
-  would still vary per batch; an input-independent forward does not). Found by the gh-ocannl-476
-  sweep; `Relu` at `Bfloat16_prec` had fallen through to a catch-all commented `Byte_prec,
-  Void_prec`. When adding a precision, audit every `unop_syntax`/`binop_syntax` catch-all arm.
+- MSL's math library has **no `bfloat` overload of any builtin** — `sqrt`, `exp`, `log`, `pow`,
+  `fmax`, `fmin`, `fmod`, `trunc`, `rsqrt`, `tanh`, `fma` all promote to `float` and return
+  `float`, and unlike C, MSL then rejects the narrowing assignment back to a `bfloat` destination
+  ("assigning to 'bfloat' from incompatible type 'float'"). So the bridge belongs on the whole
+  math-builtin family, not per operator: `metal_backend.ml`'s `bf16_from_builtin` casts the result
+  back (gh-ocannl-549). What is *not* affected, and needs no bridge: arithmetic operators,
+  comparisons, the ternary, `!`, and the `0.0bf` literal suffix — MSL's `bfloat` is a native scalar
+  type. `half` has the full overload set, so f16 has no such gap. Verify claims like these by
+  compiling one-line kernels through `Metal.Library.on_device` rather than by reasoning about the
+  spec; there is no `xcrun metal` without full Xcode.
+- The same bf16 emission fails *differently* per GPU dialect, which is why one backend's evidence
+  misleads about another's (gh-ocannl-549). A float-returning builtin at bf16 is the single root
+  site; where the dialect complains depends on where that float lands. MSL rejects the assignment,
+  so every placement fails. CUDA/HIP accept it (`__nv_bfloat16`/`__hip_bfloat16` have an implicit
+  converting constructor from float), so the materialized placement — which stores each result in
+  its own bf16 node — compiles, and only the placement that *inlines* the builtin into a consuming
+  bf16 binop fails, on the operand: nvrtc reports a mixed-operand `__hadd` (its bf16 `Add` arm is
+  `func "__hadd"`), hiprtc reports `operator '+' is ambiguous ('__hip_bfloat16' and 'float')` (its
+  `Add` falls through to plain `+`). A placement-dependent bf16 compile error is therefore a clue
+  about *inlining*, not about a fission-introduced mixed type — nothing introduces a float, the op
+  table's own `expf`/`sqrtf`/... arms return one.
+- The MSL bf16 trap's older half: an *untyped* literal does not fail loudly. `max(0, v)` makes an
+  integer overload unambiguous, so it compiles and silently truncates every sub-unit activation to
+  0, whereas `max((bfloat)0.0, v)` is a clean "call to 'max' is ambiguous" error. Fingerprint of
+  the silent form: loss pinned at exactly ln(#classes) with NO batch-to-batch variation (a
+  frozen-weights bug would still vary per batch; an input-independent forward does not). Found by
+  the gh-ocannl-476 sweep; `Relu` at `Bfloat16_prec` had fallen through to a catch-all commented
+  `Byte_prec, Void_prec`. When adding a precision, audit every `unop_syntax`/`binop_syntax`
+  catch-all arm.
 - Tensor-node debug names become identifiers verbatim in the emitted kernel, so anything the
   backend also emits as a *name* must be reserved (`ident_blacklist`). Reserve it from the
   backend's own syntax functions, never from the C spellings: `C_syntax.op_syntax_idents` renders
