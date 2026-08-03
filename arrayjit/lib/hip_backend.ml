@@ -458,6 +458,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
 
     let ident_blacklist =
       ident_blacklist
+      @ C_syntax.builtin_idents Builtins_hip.builtins
       @ [
           (* HIP built-in variables — would shadow per-thread or per-block context *)
           "threadIdx";
