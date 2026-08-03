@@ -312,6 +312,132 @@ let rng_binop_syntax ~backend ~call prec op =
       | _ -> call ("uint4x32_to_" ^ Ops.prec_string prec ^ "_uniform_lane"))
   | _ -> invalid_arg "C_syntax.rng_binop_syntax: not a random number generation operator"
 
+(** All maximal identifier-like substrings of [s] -- a run of alphanumerics and underscores starting
+    at a letter or underscore. This decomposes a composite rendering like ["(fabsf(floorf("] into
+    [["fabsf"; "floorf"]] rather than the concatenation ["fabsffloorf"].
+
+    A run whose first character is preceded by a digit or a [.] is the tail of a numeric literal
+    ([f] in ["0.0f"], [h] in ["1.0h"]), not a name, and is skipped -- otherwise every single-letter
+    literal suffix a backend emits would be reserved. *)
+let extract_idents s =
+  let n = String.length s in
+  let result = ref [] in
+  let i = ref 0 in
+  while !i < n do
+    if Char.is_alpha s.[!i] || Char.equal s.[!i] '_' then begin
+      let j = ref !i in
+      while !j < n && (Char.is_alphanum s.[!j] || Char.equal s.[!j] '_') do
+        Int.incr j
+      done;
+      let literal_suffix = !i > 0 && (Char.is_digit s.[!i - 1] || Char.equal s.[!i - 1] '.') in
+      if not literal_suffix then result := String.sub s ~pos:!i ~len:(!j - !i) :: !result;
+      i := !j
+    end
+    else Int.incr i
+  done;
+  !result
+
+(** Every function and type name a backend's operator rendering can emit, obtained by rendering each
+    (precision, operator) pair over a placeholder operand and harvesting the identifiers.
+
+    Rendering the syntax functions is what makes this correct per backend: reading the names off
+    {!Ops.unop_c_syntax} instead would describe *C*, and the GPU backends shadow those functions
+    wholesale. MSL spells [Tanh_approx] as [tanh] where C spells it [tanhf], so the C-derived list
+    left ["tanh"] free for a tensor node -- and {!Tensor.unop}'s [~op_label] makes that an ordinary
+    name, minted by every [Operation.tanh]. The Metal kernel then declared
+    [device float *__restrict tanh] and the call on the next line resolved to that pointer
+    (gh-ocannl-553). The same holds for [exp], [log], [sqrt], [sin], [cos], [trunc]: unsuffixed in
+    MSL, suffixed in C.
+
+    Backends reject some (precision, operator) pairs by raising, either while selecting the renderer
+    or while applying it; those pairs contribute no names. Any escaping exception is swallowed
+    rather than failing the compilation this list only guards. *)
+let op_syntax_idents ~ternop_syntax ~binop_syntax ~unop_syntax ~vec_unop_syntax ~convert_precision =
+  let names = ref (Set.empty (module String)) in
+  let add_string s = List.iter (extract_idents s) ~f:(fun name -> names := Set.add !names name) in
+  let arg = PPrint.string "?" in
+  let add_doc f =
+    try
+      let buf = Buffer.create 256 in
+      (* A width no rendering reaches keeps identifiers off line boundaries. *)
+      PPrint.ToBuffer.pretty 1.0 1_000_000 buf (f ());
+      add_string (Buffer.contents buf)
+    with _ -> ()
+  in
+  let precs =
+    Ops.
+      [ byte; uint16; int32; uint32; int64; uint64; uint4x32; half; bfloat16; fp8; single; double ]
+  in
+  List.iter precs ~f:(fun prec ->
+      List.iter
+        Ops.[ Where; FMA; Mul3 ]
+        ~f:(fun op -> add_doc (fun () -> ternop_syntax prec op arg arg arg));
+      List.iter
+        Ops.
+          [
+            Arg1;
+            Arg2;
+            Add;
+            Sub;
+            Mul;
+            Div;
+            ToPowOf;
+            Relu_gate;
+            Satur01_gate;
+            Max;
+            Min;
+            Mod;
+            Cmplt;
+            Cmple;
+            Cmpeq;
+            Cmpne;
+            Or;
+            And;
+            Threefry4x32_crypto;
+            Threefry4x32_light;
+            Uint4x32_to_prec_uniform_lane;
+          ]
+        ~f:(fun op -> add_doc (fun () -> binop_syntax prec op arg arg));
+      List.iter
+        Ops.
+          [
+            Identity;
+            Relu;
+            Satur01;
+            Exp;
+            Log;
+            Exp2;
+            Log2;
+            Sin;
+            Cos;
+            Sqrt;
+            Recip;
+            Recip_sqrt;
+            Neg;
+            Trunc;
+            Tanh_approx;
+            Not;
+            Uint4x32_to_prec_uniform1;
+          ]
+        ~f:(fun op -> add_doc (fun () -> unop_syntax prec op arg));
+      List.iter
+        Ops.[ Uint4x32_to_prec_uniform ]
+        ~f:(fun op -> add_doc (fun () -> vec_unop_syntax prec op arg));
+      List.iter precs ~f:(fun to_ ->
+          try
+            let prefix, suffix = convert_precision ~from:prec ~to_ in
+            add_string prefix;
+            add_string suffix
+          with _ -> ()));
+  Set.to_list !names
+
+(** The names defined by a backend's builtins table (the keys of its
+    [(name, definition, dependencies)] entries), for its [ident_blacklist]. A node taking one of
+    these names both shadows the definition and, since {!filter_and_prepend_builtins} selects
+    entries by searching the rendered kernel for their key, drags the definition into a kernel that
+    never calls it. *)
+let builtin_idents builtins = List.map builtins ~f:(fun (key, _, _) -> key)
+
 module Pure_C_config (Input : sig
   type buffer_ptr
 
@@ -377,97 +503,37 @@ struct
       let open PPrint in
       string "(int)(" ^^ doc ^^ string " * 1000.0)"
 
+  let ternop_syntax prec op v1 v2 v3 =
+    let op_prefix, op_infix1, op_infix2, op_suffix = Ops.ternop_c_syntax prec op in
+    let open PPrint in
+    group
+      (string op_prefix ^^ v1 ^^ string op_infix1
+      ^^ ifflat (space ^^ v2) (nest 2 (break 1 ^^ v2))
+      ^^ string op_infix2
+      ^^ ifflat (space ^^ v3) (nest 2 (break 1 ^^ v3))
+      ^^ string op_suffix)
+
+  let binop_syntax = default_binop_syntax
+
+  let unop_syntax prec op v =
+    let op_prefix, op_suffix = Ops.unop_c_syntax prec op in
+    let open PPrint in
+    group (string op_prefix ^^ v ^^ string op_suffix)
+
+  let vec_unop_syntax prec op v =
+    let op_prefix, op_suffix = Ops.vec_unop_c_syntax prec op in
+    let open PPrint in
+    group (string op_prefix ^^ v ^^ string op_suffix)
+
+  let convert_precision = Ops.c_convert_precision
+
+  (* The names the *language* reserves and the scaffolding this module emits. The names an operator
+     rendering emits are not restated here: {!C_syntax} derives them from the backend's own syntax
+     functions ({!op_syntax_idents}), so an override cannot drift out of the list. What [c_names]
+     adds is the plain-C rendering's share of that -- a floor every C-family backend keeps even
+     where it overrides the op to something else, so that a node's code name does not depend on
+     which arms a backend happens to shadow. *)
   let ident_blacklist =
-    (* Extract all maximal identifier-like substrings (starting with a letter or underscore,
-       consisting of alphanumeric chars and underscores) from an op syntax prefix string. This
-       correctly decomposes composite prefixes like "(fabsf(floorf(" into ["fabsf"; "floorf"] rather
-       than the old remove_paren approach that produced the wrong concatenation "fabsffloorf". *)
-    let extract_fn_names s =
-      let n = String.length s in
-      let result = ref [] in
-      let i = ref 0 in
-      while !i < n do
-        if Char.is_alpha s.[!i] || Char.equal s.[!i] '_' then begin
-          let j = ref !i in
-          while !j < n && (Char.is_alphanum s.[!j] || Char.equal s.[!j] '_') do
-            Int.incr j
-          done;
-          result := String.sub s ~pos:!i ~len:(!j - !i) :: !result;
-          i := !j
-        end
-        else Int.incr i
-      done;
-      !result
-    in
-    let add_from_prefix functions prefix =
-      List.iter (extract_fn_names prefix) ~f:(fun name -> functions := Set.add !functions name)
-    in
-    let functions = ref (Set.empty (module String)) in
-    let precs = Ops.[ byte; int32; uint32; half; bfloat16; fp8; single; double ] in
-    List.iter precs ~f:(fun prec ->
-        List.iter
-          Ops.[ Where; FMA; Mul3 ]
-          ~f:(fun op ->
-            let p, _, _, _ =
-              try Ops.ternop_c_syntax prec op with Invalid_argument _ -> ("", "", "", "")
-            in
-            add_from_prefix functions p);
-        List.iter
-          Ops.
-            [
-              Add;
-              Sub;
-              Mul;
-              Div;
-              ToPowOf;
-              Relu_gate;
-              Satur01_gate;
-              Max;
-              Min;
-              Mod;
-              Cmplt;
-              Cmple;
-              Cmpeq;
-              Cmpne;
-              Or;
-              And;
-              Threefry4x32_crypto;
-              Threefry4x32_light;
-              Uint4x32_to_prec_uniform_lane;
-            ]
-          ~f:(fun op ->
-            let p, _, _ =
-              try Ops.binop_c_syntax prec op with Invalid_argument _ -> ("", "", "")
-            in
-            add_from_prefix functions p);
-        List.iter
-          Ops.
-            [
-              Identity;
-              Relu;
-              Satur01;
-              Exp;
-              Log;
-              Exp2;
-              Log2;
-              Sin;
-              Cos;
-              Sqrt;
-              Recip;
-              Recip_sqrt;
-              Neg;
-              Tanh_approx;
-              Not;
-              Uint4x32_to_prec_uniform1;
-            ]
-          ~f:(fun op ->
-            let p, _ = try Ops.unop_c_syntax prec op with Invalid_argument _ -> ("", "") in
-            add_from_prefix functions p);
-        List.iter
-          Ops.[ Uint4x32_to_prec_uniform ]
-          ~f:(fun op ->
-            let p, _ = try Ops.vec_unop_c_syntax prec op with Invalid_argument _ -> ("", "") in
-            add_from_prefix functions p));
     let c_keywords =
       [
         (* C89 keywords *)
@@ -516,31 +582,11 @@ struct
         "uint64_t";
       ]
     in
-    Set.to_list !functions @ c_keywords
+    let c_names =
+      op_syntax_idents ~ternop_syntax ~binop_syntax ~unop_syntax ~vec_unop_syntax ~convert_precision
+    in
+    c_keywords @ c_names
 
-  let ternop_syntax prec op v1 v2 v3 =
-    let op_prefix, op_infix1, op_infix2, op_suffix = Ops.ternop_c_syntax prec op in
-    let open PPrint in
-    group
-      (string op_prefix ^^ v1 ^^ string op_infix1
-      ^^ ifflat (space ^^ v2) (nest 2 (break 1 ^^ v2))
-      ^^ string op_infix2
-      ^^ ifflat (space ^^ v3) (nest 2 (break 1 ^^ v3))
-      ^^ string op_suffix)
-
-  let binop_syntax = default_binop_syntax
-
-  let unop_syntax prec op v =
-    let op_prefix, op_suffix = Ops.unop_c_syntax prec op in
-    let open PPrint in
-    group (string op_prefix ^^ v ^^ string op_suffix)
-
-  let vec_unop_syntax prec op v =
-    let op_prefix, op_suffix = Ops.vec_unop_c_syntax prec op in
-    let open PPrint in
-    group (string op_prefix ^^ v ^^ string op_suffix)
-
-  let convert_precision = Ops.c_convert_precision
   let kernel_log_param = Some ("const char*", "log_file_name")
   let log_involves_file_management = true
 
@@ -572,8 +618,18 @@ struct
 end
 
 module C_syntax (B : C_syntax_config) = struct
+  (* Identifiers a tensor node's code name must not take: what the backend declares reserved (the
+     language's keywords, its builtins, its intrinsic globals) plus what its own operator rendering
+     actually emits -- see {!op_syntax_idents} for why the second half has to be derived from [B]
+     and not from the C spellings. *)
+  let ident_blacklist =
+    B.ident_blacklist
+    @ op_syntax_idents ~ternop_syntax:B.ternop_syntax ~binop_syntax:B.binop_syntax
+        ~unop_syntax:B.unop_syntax ~vec_unop_syntax:B.vec_unop_syntax
+        ~convert_precision:B.convert_precision
+
   let get_ident =
-    Low_level.get_ident_within_code ~no_dots:true ~blacklist:B.ident_blacklist
+    Low_level.get_ident_within_code ~no_dots:true ~blacklist:ident_blacklist
     @@ Array.map B.procs ~f:(fun l -> l.llc)
 
   (* Set by [compile_proc]: the per-compilation-lineage placement resolution
