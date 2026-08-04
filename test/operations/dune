@@ -1401,6 +1401,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name schedule_batched_mma)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules schedule_batched_mma)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name schedule_mma_matmul)
  (package neural_nets_lib)
  (deps
