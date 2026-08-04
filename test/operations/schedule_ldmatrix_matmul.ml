@@ -125,6 +125,7 @@ let staged_schedule ~out ~src_a ~src_b ~swz_a ~swz_b ~bk ~ta ~tb (opt : LL.optim
         cooperative = Some simd_width;
         hoisted = false;
         swizzle = swz_a;
+        pad_stride = None;
       };
     Sched.Stage
       {
@@ -134,6 +135,7 @@ let staged_schedule ~out ~src_a ~src_b ~swz_a ~swz_b ~bk ~ta ~tb (opt : LL.optim
         cooperative = Some simd_width;
         hoisted = false;
         swizzle = swz_b;
+        pad_stride = None;
       };
     tz;
   ]

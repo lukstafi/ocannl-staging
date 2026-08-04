@@ -93,6 +93,7 @@ type optop =
       cooperative : int option;
       hoisted : bool;
       swizzle : Low_level.swizzle_kind option;
+      pad_stride : int option;
     }
       (** Stage reads of [source] through a tile: a fresh [Local]-mode node registered in the traced
           store, its dims derived per source axis from the range of the index terms over
@@ -153,6 +154,21 @@ type optop =
             {!constructor-Tensorize}: the tile is both bank-de-conflicted and fragment-loadable in
             one instruction. Backends without such loads still decline it to the scalar
             micro-kernel, which stays correct.
+
+          [pad_stride = Some p] rounds the tile's MINOR dim up to a multiple of [p]
+          (gh-ocannl-481 item 4). The tile's leading-dimension stride is that dim — every consumer
+          reads it off the node — so this changes the stride while the iterated index space stays
+          the unpadded extents. Two payoffs, both about the stride rather than the data: shared
+          memory bank conflicts on a strided read of the tile (proposal §5's "correct, possibly
+          bank-conflicted" v1), and layout rules stated on the stride — a fragment load's
+          ld-multiple constraint, and [Swizzle_b128]'s 16-byte-unit count, which is why the two
+          compose as "pad first, then check". Requires a tile with at least two axes and [p > 1].
+
+          The padded slots hold nothing under a row-major layout: no loop reaches them, so they are
+          neither written nor read, and the {!field:Low_level.zero_fringe} contract — about the
+          fringe of the staged {e source} region within the iterated space — is unaffected. Under a
+          swizzle they do carry data, the XOR being a bijection of the whole padded row, and reads
+          go through the same map.
 
           [hoisted = true] packs a compile-time-constant operand once, out of the routine
           (gh-ocannl-470, the compiler-native analog of ggml's [CPU_REPACK] [set_tensor] hook):

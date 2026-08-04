@@ -123,8 +123,8 @@ let () =
      the remapped reads — a covered serial packing stage is Legal; shared staging stays Unknown
      (barriers and launch geometry are validated downstream). *)
   let stage ?(source = a) ?(tile_loops = [ k ]) ?(shared = false) ?(cooperative = None)
-      ?(hoisted = false) ?(swizzle = None) () =
-    Sched.Stage { source; tile_loops; shared; cooperative; hoisted; swizzle }
+      ?(hoisted = false) ?(swizzle = None) ?(pad_stride = None) () =
+    Sched.Stage { source; tile_loops; shared; cooperative; hoisted; swizzle; pad_stride }
   in
   check "stage packing proves coverage" (stage ());
   check "stage packing two tile loops" (stage ~tile_loops:[ i2; k ] ());

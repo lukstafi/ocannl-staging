@@ -20,10 +20,18 @@
    scalar accesses, so parity holds identically and the two flavors differ only in the emitted
    offset arithmetic.
 
-   The error legs pin [Schedule.Stage]'s swizzle validation on every backend: swizzle requires
+   A third run adds [Stage ~pad_stride] (gh-ocannl-481 item 4) with no swizzle at all: the tiles'
+   minor dim rounds up, which changes the row STRIDE while the iterated index space stays the same.
+   That is the whole mechanism — bank conflicts and every layout rule stated on the leading
+   dimension depend on the stride, not on the data — so parity is unchanged and the evidence is the
+   emitted arithmetic.
+
+   The error legs pin [Schedule.Stage]'s layout validation on every backend: swizzle requires
    shared staging and a tile with at least two axes; the element flavor needs a power-of-two minor
    tile dim, the b128 flavor a power-of-two count > 1 of whole 16-byte units — two rules that
-   neither imply nor are implied by each other. *)
+   neither imply nor are implied by each other; [pad_stride] needs a stride to pad and a multiple
+   above 1. The last leg is where items 3 and 4 touch (D5): the b128 rule is checked on the PADDED
+   dims, so a tile that misses it is lifted over it by [pad_stride] rather than being declined. *)
 
 open Base
 open Ocannl
@@ -97,8 +105,8 @@ let () =
 
   (* --- The swizzled SMEM schedule (element-granularity XOR) --- *)
   let%op mc1 = ma * mb in
-  let smem_schedule ?(kind = LL.Swizzle_elem) (mc : Tensor.t) (opt : LL.optimized) : Sched.schedule
-      =
+  let smem_schedule ?(swizzle = Some LL.Swizzle_elem) ?pad_stride (mc : Tensor.t)
+      (opt : LL.optimized) : Sched.schedule =
     let i, j, k = accum_syms opt in
     let ez, zsyms = Sched.expand_zero ~tn:mc.Tensor.value in
     let zi, zj = match zsyms with [ zi; zj ] -> (zi, zj) | _ -> assert false in
@@ -121,7 +129,8 @@ let () =
           shared = true;
           cooperative = None;
           hoisted = false;
-          swizzle = Some kind;
+          swizzle;
+          pad_stride;
         };
       Sched.Stage
         {
@@ -130,7 +139,8 @@ let () =
           shared = true;
           cooperative = None;
           hoisted = false;
-          swizzle = Some kind;
+          swizzle;
+          pad_stride;
         };
       Sched.Privatize { target = mc.Tensor.value; over = k_o };
     ]
@@ -185,7 +195,7 @@ let () =
      know about [ldmatrix]. --- *)
   let%op mc1b = ma * mb in
   let smem_b128_comp = named "mm_swz128_smem" (Train.forward mc1b) in
-  let transform_b128 opt = Sched.apply (smem_schedule ~kind:LL.Swizzle_b128 mc1b opt) opt in
+  let transform_b128 opt = Sched.apply (smem_schedule ~swizzle:(Some LL.Swizzle_b128) mc1b opt) opt in
   let ctx_b = Context.auto () in
   if on_gpu then (
     let ctx_b, routine_b =
@@ -226,6 +236,57 @@ let () =
     | None -> p "b128-swizzled SMEM matmul parity (GPU) or clean rejection (CPU)" false);
     p "tile accesses b128-swizzled (GPU) or rejected (CPU)" true);
 
+  (* --- [Stage ~pad_stride] (gh-ocannl-481 item 4): the same schedule with the tiles' minor dim
+     rounded up from 8 to a multiple of 12. Nothing about the DATA changes — the load nest and the
+     micro-kernel iterate the same 8x8 index space — only the stride between rows, which is what a
+     bank-conflict fix and every layout rule stated on the leading dimension actually depend on.
+     Parity is therefore the same as the unpadded schedule's, and the emitted evidence is the
+     stride: [* 12 +] row arithmetic over 96-element shared arrays instead of [* 8 +] over 64. --- *)
+  let%op mc1p = ma * mb in
+  let smem_pad_comp = named "mm_padstride_smem" (Train.forward mc1p) in
+  let transform_pad opt =
+    Sched.apply (smem_schedule ~swizzle:None ~pad_stride:12 mc1p opt) opt
+  in
+  let ctx_p = Context.auto () in
+  if on_gpu then (
+    let ctx_p, routine_p =
+      Context.compile ~lowered_transform:transform_pad ctx_p smem_pad_comp Ir.Indexing.Empty
+    in
+    let ctx_p = Context.run ctx_p routine_p in
+    let got = Context.get_values ctx_p mc1p.Tensor.value in
+    p "pad_stride SMEM matmul parity (GPU) or clean rejection (CPU)"
+      (Array.for_all2_exn got got_serial ~f:approx);
+    match read_generated "mm_padstride_smem" with
+    | None -> p "pad_stride widens the tile stride (GPU) or rejected (CPU)" false
+    | Some src ->
+        let has sub = String.is_substring src ~substring:sub in
+        let count_sub sub =
+          String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
+        in
+        let decl =
+          if on_metal then "threadgroup float tile_" else "__shared__ float tile_"
+        in
+        p "pad_stride widens the tile stride (GPU) or rejected (CPU)"
+          (count_sub decl = 2 && count_sub "[96]" = 2
+          && count_sub " * 12 + " >= 4
+          && (not (has " * 8 + "))
+          (* Padding alone is not a swizzle: the offsets stay plain row-major. *)
+          && not (has " ^ ")))
+  else (
+    (match
+       try
+         ignore
+           (Context.compile ~lowered_transform:transform_pad ctx_p smem_pad_comp Ir.Indexing.Empty
+             : Context.t * Context.routine);
+         None
+       with Invalid_argument msg -> Some msg
+     with
+    | Some msg ->
+        p "pad_stride SMEM matmul parity (GPU) or clean rejection (CPU)"
+          (String.is_substring msg ~substring:"not supported")
+    | None -> p "pad_stride SMEM matmul parity (GPU) or clean rejection (CPU)" false);
+    p "pad_stride widens the tile stride (GPU) or rejected (CPU)" true);
+
   (* --- Swizzled tiles feeding Tensorize: the intrinsic/fragment renderings assume row-major
      pointer+stride operands, so they must decline and the lane-0 scalar fallback must run — and
      stay correct, reading elementwise through the swizzled offsets. Same pipeline as the staged leg
@@ -259,6 +320,7 @@ let () =
           cooperative = Some simd_width;
           hoisted = false;
           swizzle = Some LL.Swizzle_elem;
+          pad_stride = None;
         };
       Sched.Stage
         {
@@ -268,6 +330,7 @@ let () =
           cooperative = Some simd_width;
           hoisted = false;
           swizzle = Some LL.Swizzle_elem;
+          pad_stride = None;
         };
       tz;
     ]
@@ -352,6 +415,7 @@ let () =
             cooperative = None;
             hoisted = false;
             swizzle = Some LL.Swizzle_elem;
+            pad_stride = None;
           };
       ]);
   let%op mc4 = ma * mb in
@@ -369,6 +433,7 @@ let () =
             cooperative = None;
             hoisted = false;
             swizzle = Some LL.Swizzle_elem;
+            pad_stride = None;
           };
       ]);
   (* A 24-wide matmul: splitting k by 12 gives a [8 x 12] tile whose minor dim is not a power of two
@@ -395,6 +460,7 @@ let () =
             cooperative = None;
             hoisted = false;
             swizzle = Some LL.Swizzle_elem;
+            pad_stride = None;
           };
       ]);
   (* The b128 flavor's minor-extent rule is a different one, neither implying nor implied by the
@@ -419,6 +485,7 @@ let () =
             cooperative = None;
             hoisted = false;
             swizzle = Some LL.Swizzle_b128;
+            pad_stride = None;
           };
       ]);
   let%op mc7 = ma2 * mb2 in
@@ -439,5 +506,86 @@ let () =
             cooperative = None;
             hoisted = false;
             swizzle = Some LL.Swizzle_b128;
+            pad_stride = None;
+          };
+      ]);
+  (* pad_stride's own validation: it pads against the row stride, so a one-axis tile has no stride
+     to pad, and a multiple of 1 is a no-op request rather than an intent. *)
+  let%op mc8 = ma * mb in
+  expect_error "pad_stride requires at least two tile axes" ~substring:"at least two axes" mc8
+    (fun opt ->
+      let _i, _j, k = accum_syms opt in
+      let sp_k, _, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
+      [
+        sp_k;
+        Sched.Stage
+          {
+            source = ma.Tensor.value;
+            tile_loops = [ k_i ];
+            shared = true;
+            cooperative = None;
+            hoisted = false;
+            swizzle = None;
+            pad_stride = Some 16;
+          };
+      ]);
+  let%op mc9 = ma * mb in
+  expect_error "pad_stride must exceed 1" ~substring:"pad_stride must be > 1" mc9 (fun opt ->
+      let i, _j, k = accum_syms opt in
+      let sp_i, _, i_i = Sched.split ~axis:i ~factor:bm ~outer:LL.Serial ~inner:LL.Serial in
+      let sp_k, _, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
+      [
+        sp_i;
+        sp_k;
+        Sched.Stage
+          {
+            source = ma.Tensor.value;
+            tile_loops = [ i_i; k_i ];
+            shared = true;
+            cooperative = None;
+            hoisted = false;
+            swizzle = None;
+            pad_stride = Some 1;
+          };
+      ]);
+  (* D5, the one place items 3 and 4 touch: [Swizzle_b128]'s extent rule is checked on the PADDED
+     dims, so [pad_stride] is the knob for a tile that misses it. The 12-wide f32 row rejected two
+     legs above (48 bytes = 3 units) becomes a 16-wide one (64 bytes = 4 units) and passes — the
+     coverage half of item 4, converting a layout decline into an emission rather than accepting a
+     bank-conflicted tile. Only the b128 rule is at stake here, so the check is that the schedule
+     does NOT fail for that reason; the C backends still reject the shared placement itself. *)
+  let expect_not_error name ~substring (mc : Tensor.t) schedule_of =
+    let comp = named name (Train.forward mc) in
+    let transform opt = Sched.apply (schedule_of opt) opt in
+    let ctx = Context.auto () in
+    match
+      try
+        ignore
+          (Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty
+            : Context.t * Context.routine);
+        None
+      with Invalid_argument msg -> Some msg
+    with
+    | Some msg -> p name (not (String.is_substring msg ~substring))
+    | None -> p name true
+  in
+  let%op mc10 = ma2 * mb2 in
+  expect_not_error "pad_stride lifts a b128 tile over its unit-count rule"
+    ~substring:"16-byte units" mc10 (fun opt ->
+      let i, _j, k = accum_syms opt in
+      let sp_i, _, i_i = Sched.split ~axis:i ~factor:8 ~outer:LL.Serial ~inner:LL.Serial in
+      let sp_k, _, k_i = Sched.split ~axis:k ~factor:12 ~outer:LL.Serial ~inner:LL.Serial in
+      [
+        sp_i;
+        sp_k;
+        Sched.Stage
+          {
+            source = ma2.Tensor.value;
+            tile_loops = [ i_i; k_i ];
+            shared = true;
+            cooperative = None;
+            hoisted = false;
+            swizzle = Some LL.Swizzle_b128;
+            pad_stride = Some 16;
           };
       ])

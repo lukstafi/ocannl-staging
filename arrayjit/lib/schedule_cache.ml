@@ -40,6 +40,7 @@ type saved_optop =
       cooperative : int option;
       hoisted : bool;
       swizzle : LL.swizzle_kind option; [@sexp.option]
+      pad_stride : int option; [@sexp.option]
     }
   | Privatize of { target : int; over : sym_ref }
   | Expand_zero of { tn : int }
@@ -429,7 +430,7 @@ let to_saved r (sched : Schedule.schedule) : saved_schedule * registry =
               (r, saved)
           | Schedule.Pad { axis; to_multiple_of } ->
               (r, Pad { axis = resolve_exn r axis; to_multiple_of })
-          | Schedule.Stage { source; tile_loops; shared; cooperative; hoisted; swizzle } ->
+          | Schedule.Stage { source; tile_loops; shared; cooperative; hoisted; swizzle; pad_stride } ->
               ( r,
                 Stage
                   {
@@ -439,6 +440,7 @@ let to_saved r (sched : Schedule.schedule) : saved_schedule * registry =
                     cooperative;
                     hoisted;
                     swizzle;
+                    pad_stride;
                   } )
           | Schedule.Privatize { target; over } ->
               (r, Privatize { target = resolve_tn_exn r target; over = resolve_exn r over })
@@ -505,7 +507,7 @@ let of_saved canonical (saved : saved_schedule) : Schedule.schedule * registry =
               (r, op)
           | Pad { axis; to_multiple_of } ->
               (r, Schedule.Pad { axis = unresolve_exn r axis; to_multiple_of })
-          | Stage { source; tile_loops; shared; cooperative; hoisted; swizzle } ->
+          | Stage { source; tile_loops; shared; cooperative; hoisted; swizzle; pad_stride } ->
               ( r,
                 Schedule.Stage
                   {
@@ -515,6 +517,7 @@ let of_saved canonical (saved : saved_schedule) : Schedule.schedule * registry =
                     cooperative;
                     hoisted;
                     swizzle;
+                    pad_stride;
                   } )
           | Privatize { target; over } ->
               ( r,

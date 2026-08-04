@@ -70,6 +70,8 @@ type saved_optop =
       hoisted : bool;
       swizzle : Low_level.swizzle_kind option; [@sexp.option]
           (** Serialized only when set ([@sexp.option]), so pre-swizzle cache files parse. *)
+      pad_stride : int option; [@sexp.option]
+          (** Likewise omitted when unset, so pre-gh-481 cache files parse. *)
     }
   | Privatize of { target : int; over : sym_ref }
   | Expand_zero of { tn : int }

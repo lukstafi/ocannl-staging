@@ -234,6 +234,7 @@ let () =
             cooperative = None;
             hoisted = false;
             swizzle = None;
+            pad_stride = None;
           }
       in
       let sched =
@@ -318,6 +319,7 @@ let () =
              cooperative = None;
              hoisted = true;
              swizzle = None;
+             pad_stride = None;
            };
        ]
        opt
@@ -465,6 +467,7 @@ let () =
               cooperative = None;
               hoisted = false;
               swizzle = None;
+              pad_stride = None;
             }
         in
         let tz, _lane = Sched.tensorize ~i:ow ~j:oc ~k:ic ~simd_width:1 in
@@ -596,6 +599,7 @@ let () =
             cooperative = Some w;
             hoisted = false;
             swizzle = None;
+            pad_stride = None;
           }
       in
       let tz, _lane =
@@ -684,6 +688,7 @@ let () =
             cooperative = Some w;
             hoisted = false;
             swizzle = None;
+            pad_stride = None;
           }
       in
       let tz, _lane =
@@ -839,7 +844,7 @@ let () =
     in
     let cooperative = if shared then Some simd_width else None in
     let stage source tile_loops =
-      Sched.Stage { source; tile_loops; shared; cooperative; hoisted = false; swizzle = None }
+      Sched.Stage { source; tile_loops; shared; cooperative; hoisted = false; swizzle = None; pad_stride = None }
     in
     let outer_grid =
       if not shared then []
@@ -954,6 +959,7 @@ let () =
             cooperative = None;
             hoisted = false;
             swizzle = None;
+            pad_stride = None;
           }
       in
       let tz, _lane =
@@ -1033,6 +1039,7 @@ let () =
             cooperative = None;
             hoisted = false;
             swizzle = None;
+            pad_stride = None;
           }
       in
       let tz, _lane =

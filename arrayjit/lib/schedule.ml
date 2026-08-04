@@ -37,6 +37,7 @@ type optop =
       cooperative : int option;
       hoisted : bool;
       swizzle : Low_level.swizzle_kind option;
+      pad_stride : int option;
     }
   | Privatize of { target : Tn.t; over : Indexing.symbol }
   | Expand_zero of { tn : Tn.t; indices : Indexing.symbol list }
@@ -1034,7 +1035,7 @@ let pack_constant_tile ~debug ~(src_nd : Ndarray.t) ~(src_dims : int array) ~(pr
   Ndarray.apply2 { f2 } src_nd dst;
   dst
 
-let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
+let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_stride
     (opt : Low_level.optimized) : Low_level.optimized =
   let open Low_level in
   if List.is_empty tile_loops then invalid_arg "Schedule.Stage: empty tile_loops";
@@ -1309,6 +1310,37 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
     (* Mint the tile. *)
     let prec = Lazy.force source.Tn.storage_prec in
     let tile_dims = Array.map tile_axes ~f:snd in
+    (* [pad_stride] (gh-ocannl-481 item 4): round the tile's MINOR dim up to a multiple, so the
+       tile's leading-dimension stride — which is that dim, and which every consumer reads off the
+       node — becomes the padded one while the iterated index space stays the unpadded extents.
+       Two payoffs, both about the stride rather than the data: shared-memory bank conflicts on a
+       strided read of the tile, and layout rules stated on the stride (a fragment load's
+       ld-multiple constraint; [Swizzle_b128]'s 16-byte-unit count, hence "pad first, then check" —
+       the validation below runs on the padded dims).
+
+       The padded slots hold nothing in the row-major case: no loop reaches them, so they are
+       neither written nor read (the {!Low_level.zero_fringe} contract is about the fringe of the
+       staged SOURCE region within the iterated space, which is unaffected). Under a swizzle they
+       do carry data — the XOR is a bijection of the whole padded row — and reads use the same map,
+       so that case is coherent too. *)
+    let tile_dims =
+      match pad_stride with
+      | None -> tile_dims
+      | Some p ->
+          let n = Array.length tile_dims in
+          if p <= 1 then
+            invalid_arg
+              (Printf.sprintf "Schedule.Stage: pad_stride must be > 1, got %d" p)
+          else if n < 2 then
+            invalid_arg
+              "Schedule.Stage: pad_stride pads the minor dim against the row stride, so it requires \
+               a tile with at least two axes"
+          else begin
+            let padded = Array.copy tile_dims in
+            padded.(n - 1) <- (tile_dims.(n - 1) + p - 1) / p * p;
+            padded
+          end
+    in
     Option.iter swizzle ~f:(fun kind ->
         let n = Array.length tile_dims in
         if n < 2 then
@@ -3218,8 +3250,8 @@ let can_fuse_epilogue ~target (opt : Low_level.optimized) : bool =
 
 let apply_opt_op (opt : Low_level.optimized) (op : optop) : Low_level.optimized =
   match op with
-  | Stage { source; tile_loops; shared; cooperative; hoisted; swizzle } ->
-      apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle opt
+  | Stage { source; tile_loops; shared; cooperative; hoisted; swizzle; pad_stride } ->
+      apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_stride opt
   | Privatize { target; over } -> apply_privatize ~target ~over opt
   | Tensorize _ -> apply_tensorize op opt
   | Fuse_epilogue { target; shared } -> apply_fuse_epilogue ~target ~shared opt

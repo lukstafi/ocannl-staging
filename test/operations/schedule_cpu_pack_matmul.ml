@@ -91,6 +91,7 @@ let () =
             cooperative = None;
             hoisted = false;
             swizzle = None;
+            pad_stride = None;
           };
         Sched.Stage
           {
@@ -100,6 +101,7 @@ let () =
             cooperative = None;
             hoisted = false;
             swizzle = None;
+            pad_stride = None;
           };
         Sched.Privatize { target = mc1.Tensor.value; over = k_o };
       ]

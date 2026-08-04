@@ -1385,6 +1385,7 @@ let gpu_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
           cooperative = None;
           hoisted = false;
           swizzle = None;
+          pad_stride = None;
         };
       Sched.Stage
         {
@@ -1394,6 +1395,7 @@ let gpu_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
           cooperative = None;
           hoisted = false;
           swizzle = None;
+          pad_stride = None;
         };
       Sched.Privatize { target = site.m_d; over = k_o };
       Sched.Unroll { axis = i_t; materialize = true };
@@ -1428,6 +1430,7 @@ let cpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = b
           cooperative = None;
           hoisted = sk_hoist && hoistable site.m_a;
           swizzle = None;
+          pad_stride = None;
         };
       Sched.Stage
         {
@@ -1437,6 +1440,7 @@ let cpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = b
           cooperative = None;
           hoisted = sk_hoist && hoistable site.m_b;
           swizzle = None;
+          pad_stride = None;
         };
       Sched.Privatize { target = site.m_d; over = k_o };
     ]
@@ -1521,6 +1525,7 @@ let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
             cooperative = Some w;
             hoisted = false;
             swizzle = sk_swizzle;
+            pad_stride = None;
           };
         Sched.Stage
           {
@@ -1530,6 +1535,7 @@ let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
             cooperative = Some w;
             hoisted = false;
             swizzle = sk_swizzle;
+            pad_stride = None;
           };
         tz;
       ]
@@ -1603,7 +1609,7 @@ let cpu_mma_pack_sketch_schedule (site : matmul_site)
       ([ sp_i; sp_j; sp_k ], j_i, sink i_i [ j_o ] @ if grid_outermost then [] else sink i_o [ j_o ])
   in
   let stage ~hoisted source tile_loops =
-    Sched.Stage { source; tile_loops; shared = false; cooperative = None; hoisted; swizzle = None }
+    Sched.Stage { source; tile_loops; shared = false; cooperative = None; hoisted; swizzle = None; pad_stride = None }
   in
   let stages =
     if grid_outermost then
@@ -1736,7 +1742,7 @@ let cpu_conv_sketch_schedule ~(opt : LL.optimized) (site : conv_site)
     { sk_grid; sk_bm; sk_epilogue; _ } : Sched.schedule =
   let stage source tile_loops =
     Sched.Stage
-      { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None }
+      { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None }
   in
   (* Fuse-before-annotate (gh-ocannl-501): the fused twin of an aligned-merged seed omits the preset
      [Retype] on the tail nest [Fuse_epilogue] consumes — see [conv_tail_loop_syms]. *)
@@ -1824,7 +1830,7 @@ let gpu_conv_sketch_schedule (site : conv_site) { sk_simd = w; sk_bm; sk_bn; sk_
     Sched.schedule =
   let stage source tile_loops =
     Sched.Stage
-      { source; tile_loops; shared = true; cooperative = Some w; hoisted = false; swizzle = None }
+      { source; tile_loops; shared = true; cooperative = Some w; hoisted = false; swizzle = None; pad_stride = None }
   in
   let outer_grid =
     List.map site.c_outer ~f:(fun (s, _) -> Sched.Retype { axis = s; ty = LL.Grid })
