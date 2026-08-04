@@ -145,6 +145,7 @@ let () =
       best_ms = 0.;
       baseline_ms = 0.;
       default_ms = None;
+      default_fingerprint = None;
     };
   let hit_report = ref None in
   let hctx = Context.auto () in
@@ -194,6 +195,30 @@ let () =
     | Some d1, Some d2 ->
         Float.is_finite d1 && Float.is_finite d2 && Float.(r1.Autotune.best_ms <= d1)
     | _ -> false);
+  (* Codex P2 on PR #279: the cache key covers neither the scheduling gates nor the preset
+     thresholds, so a config change can redefine the default pipeline without missing the cache.
+     Simulated by rewriting the stored entry's fingerprint: the entry still hits — the winner
+     replay is config-independent — but the config-relative default reference is dropped. *)
+  let key2 = SC.cache_key base_canon ~backend:(Context.backend_name bctx) in
+  (match SC.lookup ~dir:cache_dir2 ~key:key2 with
+  | Some entry ->
+      SC.store ~dir:cache_dir2 ~key:key2
+        { entry with SC.default_fingerprint = Some "a-different-config" };
+      let r3 = ref None in
+      let c3 = Context.auto () in
+      let c3, rt3 =
+        Autotune.tune ~beam_width:2 ~rounds:1 ~repeats:1 ~cache_dir:cache_dir2
+          ~report:(fun r -> r3 := Some r)
+          c3 chain_comp Ir.Indexing.Empty
+      in
+      let (_ : Context.t) = Context.run c3 rt3 in
+      p "a stale default fingerprint drops the cached reference but not the hit (gh-ocannl-552)"
+        (match !r3 with
+        | Some r -> r.Autotune.cache_hit && Option.is_none r.Autotune.default_ms
+        | None -> false)
+  | None ->
+      p "a stale default fingerprint drops the cached reference but not the hit (gh-ocannl-552)"
+        false);
   (* gh-ocannl-543: [candidates_timed >= 2] is a cc-shaped assertion. This chain's candidate space
      is the same on every backend, but most of it is serial forms — the whole-routine presets dedup
      to the unscheduled base, and the beam's Split/Swap/Vectorize moves off that base cannot bind a

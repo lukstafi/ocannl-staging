@@ -352,9 +352,15 @@ type report = {
           included, on CPU backends whose config thresholds leave the code unparallelized). On a
           completed search with [default_ms = Some d], [best_ms <= d] by construction — the seed is
           in the pool — and the margin between them is the value tuning added (the question
-          gh-ocannl-491 asks). [None] when the seed was not proposed (a backend that is neither GPU
-          nor CPU), failed to compile, was refused as unparallelized on GPU (gh-ocannl-532), or on
-          a cache hit against an entry written before this field existed. *)
+          gh-ocannl-491 asks). The attribution honors the scheduling gates: with automatic
+          scheduling inactive ({!Ir.Schedule.automatic_schedule_active}) the untuned default is the
+          unscheduled serial form and this field reports the baseline's measurement (so [None] on
+          GPU, where that form is never dispatched); with config [schedule_fission=false] no
+          candidate reproduces the whole-routine config-thresholds default and this is [None].
+          Also [None] when the seed failed to compile, was refused as unparallelized on GPU
+          (gh-ocannl-532), or on a cache hit whose entry predates this field or was written under a
+          config that shaped a different default pipeline
+          ({!Ir.Schedule.default_schedule_fingerprint} mismatch). *)
   best_ms : float;
       (** The winner's measured time, or [infinity] when nothing was timed at all — every candidate
           failed and the baseline was not dispatched (or was declined). In that case no cache entry

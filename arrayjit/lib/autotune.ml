@@ -3678,7 +3678,18 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
                   model_pruned = 0;
                   fissioned = is_fissioned c.form;
                   baseline_ms = entry.SC.baseline_ms;
-                  default_ms = entry.SC.default_ms;
+                  default_ms =
+                    (* The entry's [default_ms] describes the default pipeline under the config
+                       that ran the search; the cache key covers neither, so a config change can
+                       redefine the default without missing the cache. Fingerprint mismatch drops
+                       the stale diagnostic — the winner replay itself stays valid (Codex P2 on
+                       PR #279). *)
+                    (match (entry.SC.default_ms, entry.SC.default_fingerprint) with
+                    | (Some _ as d), Some fp
+                      when String.equal fp
+                             (Sched.default_schedule_fingerprint ~backend_name:backend) ->
+                        d
+                    | _ -> None);
                   best_ms = entry.SC.best_ms;
                   best_schedule = flat_schedule c.form;
                 };
@@ -3781,11 +3792,22 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
          untuned default pipeline is already in the pool — the [config_thresholds] seed reproduces
          it exactly — and its measurement is attributed by digest, so a seed that dedups against an
          identical earlier candidate (the timed baseline included, on CPU backends whose config
-         thresholds leave the code unparallelized) still reports the time of that code. *)
+         thresholds leave the code unparallelized) still reports the time of that code.
+
+         The attribution honors the scheduling gates (Codex P1 on PR #279): the seed reproduces
+         [maybe_default_schedules] only on its main path. With automatic scheduling inactive
+         ([automatic_gpu_schedule]/[automatic_cpu_schedule] off, or [debug_log_from_routines] on),
+         the untuned default IS the unscheduled serial form, so the reference is the base digest —
+         timed on CPU, deliberately unmeasured on GPU (gh-ocannl-532). With [schedule_fission]
+         off, the untuned default is the whole-routine config-thresholds annotation, which no
+         candidate reproduces (the whole-routine presets use [min_parallel:1]): no attribution,
+         rather than labeling a differently-scheduled pipeline as the default. *)
+      let auto_sched = Sched.automatic_schedule_active ~backend_name:backend in
+      let config_seed_is_default = auto_sched && Sched.default_pipeline_fissions () in
       let timed_ms_by_digest = Hashtbl.create (module String) in
       if baseline_dispatched then
         Hashtbl.set timed_ms_by_digest ~key:base_digest ~data:baseline_ms;
-      let default_seed_digest = ref None in
+      let default_seed_digest = ref (if auto_sched then None else Some base_digest) in
       let default_ms () =
         Option.bind !default_seed_digest ~f:(Hashtbl.find timed_ms_by_digest)
       in
@@ -3858,9 +3880,11 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
         | Ok c ->
             (* Recorded whether or not this compile goes on to be timed: on dedup the code was (or
                will not be) timed under the same digest, and the [default_ms] lookup follows the
-               digest, not the seed (gh-ocannl-552). *)
+               digest, not the seed (gh-ocannl-552). Guarded: the seed is the untuned default only
+               when the default pipeline is active and fissions (Codex P1 on PR #279). *)
             (match spec with
-            | Fiss (F_preset { block_size = None; privatize = false; config_thresholds = true }) ->
+            | Fiss (F_preset { block_size = None; privatize = false; config_thresholds = true })
+              when config_seed_is_default ->
                 default_seed_digest := Some c.digest_after
             | _ -> ());
             if Hash_set.mem seen c.digest_after then (
@@ -4131,7 +4155,10 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
       in
       (match default_ms () with
       | Some ms -> logf "untuned-default pipeline: %.4f ms (gh-ocannl-552 reference)" ms
-      | None -> logf "untuned-default pipeline: not timed (not seeded, failed, or not dispatched)");
+      | None ->
+          logf
+            "untuned-default pipeline: not timed (gated to a form outside the pool, not seeded, \
+             failed, or not dispatched)");
       let pool =
         (* Cross-segment recombination: the singles time every parameter set unmasked, but the best
            full routine may sketch several segments at once. One extra composite candidate applies
@@ -4243,6 +4270,9 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
                best_ms;
                baseline_ms;
                default_ms = default_ms ();
+               default_fingerprint =
+                 Option.map (default_ms ()) ~f:(fun _ ->
+                     Sched.default_schedule_fingerprint ~backend_name:backend);
              });
       (* Diagnostic control (config [autotune_log]): compile and time the UNTUNED default pipeline
          in this very process, on the search context — discriminates a genuinely slow winner from
