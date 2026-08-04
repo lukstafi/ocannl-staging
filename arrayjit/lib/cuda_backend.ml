@@ -182,8 +182,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        (nvrtc's default is below sm_70). Injected only when used, so kernels without tensor cores
        compile exactly as before even where the toolkit headers are absent. The [(wmma-bf16)] and
        [(wmma-tf32)] markers are emitted by [mma_syntax] for bf16 resp. tf32 fragments (both
-       sm_80+); the [(mma-fp8)] marker for the inline-PTX fp8 [mma.sync] path (sm_89+, no header
-       needed). *)
+       sm_80+); the [(mma-fp8)] and [(mma-bf16)] markers for the inline-PTX [mma.sync] paths (sm_89+
+       resp. sm_80+, no header needed). *)
     let uses_wmma = String.is_substring cu_src ~substring:"nvcuda::wmma" in
     let cu_src = if uses_wmma then "#include <mma.h>\n" ^ cu_src else cu_src in
     (* Half/bf16 ARITHMETIC intrinsics (unlike the conversions, which cuda_fp16.h/cuda_bf16.h
@@ -227,6 +227,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           (if uses_wmma then Some (if has "(wmma-bf16)" || has "(wmma-tf32)" then 80 else 70)
            else None);
           (if has "(mma-fp8)" then Some 89 else None);
+          (if has "(mma-bf16)" then Some 80 else None);
           (if uses_h_arith then Some (if has "__nv_bfloat16" then 80 else 53) else None);
         ]
       |> List.max_elt ~compare:Int.compare
@@ -650,6 +651,19 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
             | Ops.Fp8_prec _, Ops.Fp8_prec _, Ops.Single_prec _ -> true
             | _ -> false
           in
+          (* gh-ocannl-545: [nvcuda::wmma] pairs [__nv_bfloat16] operands with a [float] accumulator
+             only — [crt/mma.hpp] declares no bf16 accumulator fragment — so a uniformly-bf16
+             network, where the GEMM's destination node is itself bf16, has no wmma combination and
+             used to render the lane-0 scalar fallback under a tensorized label. The hardware is not
+             the limit: [mma.sync] accumulates bf16 operands in per-lane f32 registers, which we can
+             convert at the [d] boundary because that layout is architecturally defined (unlike wmma
+             fragments, whose element mapping is opaque and forces a warp-uniform [float] staging
+             buffer). Rendered by the inline-PTX arm below. *)
+          let is_bf16_uniform =
+            match (a_prec, b_prec, d_prec) with
+            | Ops.Bfloat16_prec _, Ops.Bfloat16_prec _, Ops.Bfloat16_prec _ -> true
+            | _ -> false
+          in
           if
             is_fp8_combo
             (* Transposed operand storage ([ta]/[tb]) is declined in v1: the per-lane byte gathers
@@ -750,6 +764,121 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
             Some
               (group
                  (string (Printf.sprintf "{ /* tile_mma %dx%dx%d (mma-fp8) e5m2 */" m n k)
+                 ^^ nest 2 (hardline ^^ body)
+                 ^^ hardline ^^ rbrace))
+          else if
+            is_bf16_uniform
+            && m % 16 = 0
+            && n % 8 = 0
+            && k % 16 = 0
+            && loadable d_space && loadable a_space && loadable b_space
+            && min_compute_capability () >= 80
+          then
+            (* Raw [mma.sync] with the architecturally-defined per-lane fragment layouts of
+               m16n8k16 (PTX ISA "Matrix Fragments for mma.m16n8k16", shared by .f16 and .bf16).
+               Thread [lane], with groupID g = lane>>2 and threadID-in-group t = lane&3, holds: A
+               (16x16) regs a0..a3 = the element pairs at rows {g, g+8} x column pairs {2t, 2t+8};
+               B (16x8, column-major fragment) regs b0,b1 = row pairs {2t, 2t+8} down column g;
+               accumulator D (16x8 f32) regs d0..d3 = rows {g, g+8} x columns {2t, 2t+1}. The
+               lower-indexed element of each pair sits in the low half of its .b32 register.
+
+               Unlike the fp8 arm, transposed operand storage ([ta]/[tb]) is supported: every gather
+               goes through [a_at]/[b_at], which index the STORED matrix at (col, row) under the
+               flag while keeping the operand's own leading dimension — the fragment content is
+               unchanged, only its addresses are. Element-wise 16-bit loads impose no alignment or
+               stride constraint and read generic addresses, so both __shared__ tiles and device
+               pointers are covered.
+
+               The accumulator is read from and written back to the bf16 [d] once per statement,
+               with the whole [k] extent accumulated in f32 registers in between — strictly better
+               rounding than the scalar fallback this replaces, which rounds to bf16 per term. *)
+            let open PPrint in
+            let mt = m / 16 and nt = n / 8 and kt = k / 16 in
+            (* Address of logical element (row, col) in an operand stored under its own leading
+               dimension, transposed or not. *)
+            let elem_at ~ld ~transposed ~row ~col =
+              if transposed then Printf.sprintf "(%s) * %d + (%s)" col ld row
+              else Printf.sprintf "(%s) * %d + (%s)" row ld col
+            in
+            let a_at ~row ~col = elem_at ~ld:lda ~transposed:ta ~row ~col in
+            let b_at ~row ~col = elem_at ~ld:ldb ~transposed:tb ~row ~col in
+            let pack2 name base i0 i1 =
+              Printf.sprintf
+                "unsigned %s = (unsigned)__bfloat16_as_ushort(%s[%s]) | \
+                 ((unsigned)__bfloat16_as_ushort(%s[%s]) << 16);"
+                name base i0 base i1
+            in
+            let a_row lo = if lo then "__mi * 16 + __mma_g" else "__mi * 16 + __mma_g + 8" in
+            let a_col c = Printf.sprintf "__ki * 16 + 2 * __mma_t + %d" c in
+            let b_row r = Printf.sprintf "__ki * 16 + 2 * __mma_t + %d" r in
+            let b_col = "__ni * 8 + __mma_g" in
+            let a_reg name ~lo ~c =
+              "      "
+              ^ pack2 name "__mma_ap"
+                  (a_at ~row:(a_row lo) ~col:(a_col c))
+                  (a_at ~row:(a_row lo) ~col:(a_col (c + 1)))
+            in
+            let b_reg name ~r =
+              "      "
+              ^ pack2 name "__mma_bp" (b_at ~row:(b_row r) ~col:b_col)
+                  (b_at ~row:(b_row (r + 1)) ~col:b_col)
+            in
+            let barrier = "__syncthreads();" in
+            let body_lines =
+              [
+                barrier;
+                "unsigned __mma_lid;";
+                "asm(\"mov.u32 %0, %%laneid;\" : \"=r\"(__mma_lid));";
+                "const int __mma_g = (int)(__mma_lid >> 2);";
+                "const int __mma_t = (int)(__mma_lid & 3);";
+                Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                Printf.sprintf
+                  "    __nv_bfloat16 *__mma_dr0 = __mma_dp + (__mi * 16 + __mma_g) * %d + __ni * 8 \
+                   + 2 * __mma_t;"
+                  ldd;
+                Printf.sprintf "    __nv_bfloat16 *__mma_dr1 = __mma_dr0 + 8 * %d;" ldd;
+                "    float __mma_d0 = __bfloat162float(__mma_dr0[0]), __mma_d1 = \
+                 __bfloat162float(__mma_dr0[1]);";
+                "    float __mma_d2 = __bfloat162float(__mma_dr1[0]), __mma_d3 = \
+                 __bfloat162float(__mma_dr1[1]);";
+                Printf.sprintf "    for (int __ki = 0; __ki < %d; ++__ki) {" kt;
+                a_reg "__mma_a0" ~lo:true ~c:0;
+                a_reg "__mma_a1" ~lo:false ~c:0;
+                a_reg "__mma_a2" ~lo:true ~c:8;
+                a_reg "__mma_a3" ~lo:false ~c:8;
+                b_reg "__mma_b0" ~r:0;
+                b_reg "__mma_b1" ~r:8;
+                "      asm(\"mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 \"";
+                "          \"{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\"";
+                "          : \"+f\"(__mma_d0), \"+f\"(__mma_d1), \"+f\"(__mma_d2), \"+f\"(__mma_d3)";
+                "          : \"r\"(__mma_a0), \"r\"(__mma_a1), \"r\"(__mma_a2), \"r\"(__mma_a3), \
+                 \"r\"(__mma_b0), \"r\"(__mma_b1));";
+                "    }";
+                "    __mma_dr0[0] = __float2bfloat16(__mma_d0); __mma_dr0[1] = \
+                 __float2bfloat16(__mma_d1);";
+                "    __mma_dr1[0] = __float2bfloat16(__mma_d2); __mma_dr1[1] = \
+                 __float2bfloat16(__mma_d3);";
+                "  }";
+                "}";
+                barrier;
+              ]
+            in
+            let ptr_decl name typ ptr =
+              string (Printf.sprintf "%s *%s = " typ name) ^^ ptr ^^ semi
+            in
+            let body =
+              ptr_decl "__mma_dp" "__nv_bfloat16" d_ptr
+              ^^ hardline
+              ^^ ptr_decl "__mma_ap" "const __nv_bfloat16" a_ptr
+              ^^ hardline
+              ^^ ptr_decl "__mma_bp" "const __nv_bfloat16" b_ptr
+              ^^ hardline
+              ^^ separate_map hardline string body_lines
+            in
+            Some
+              (group
+                 (string (Printf.sprintf "{ /* tile_mma %dx%dx%d (mma-bf16) */" m n k)
                  ^^ nest 2 (hardline ^^ body)
                  ^^ hardline ^^ rbrace))
           else
@@ -1816,8 +1945,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
            max_workgroup_memory_bytes =
              min_over (fun (a : Cu.Device.attributes) -> a.max_shared_memory_per_block);
            (* Tensor cores (tensorize-mma T3): the 32-thread warp cooperates on 16x16x16 wmma tiles
-              from sm_70 up; [mma_format_tiles] advertises the divergent fp8 16x8x32 and tf32
-              16x16x8 shapes to typed autotune seeds. Precision combinations are
+              from sm_70 up; [mma_format_tiles] advertises the divergent fp8 16x8x32, tf32 16x16x8
+              and uniform-bf16 16x8x16 shapes to typed autotune seeds. Precision combinations are
               ultimately decided per call by [mma_syntax] — but each entry here mirrors an arm of
               that hook, INCLUDING its accumulator format and arch floor (gh-ocannl-545), because a
               seed the hook will decline is a candidate the tuner times as scalar code under a
@@ -1844,6 +1973,11 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                           entry ~min_cc:80
                             (Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_f32)
                             (16, 16, 16);
+                          (* Inline-PTX [mma.sync] m16n8k16, sm_80+: the uniform-bf16 combination
+                             wmma cannot express. *)
+                          entry ~min_cc:80
+                            (Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_bf16)
+                            (16, 8, 16);
                           (* Inline-PTX [mma.sync] m16n8k32, sm_89+. *)
                           entry ~min_cc:89
                             ( Backend_intf.Mma_fp8_e5m2,

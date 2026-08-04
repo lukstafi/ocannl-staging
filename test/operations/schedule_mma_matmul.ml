@@ -147,7 +147,7 @@ let () =
   let got_serial = Context.get_values ctx_s mc0.Tensor.value in
 
   (* --- The tensorized schedule --- *)
-  let mma_schedule ~out (opt : LL.optimized) : Sched.schedule =
+  let mma_schedule ?(bm = bm) ~out (opt : LL.optimized) : Sched.schedule =
     let paths = nest_paths opt.LL.llc in
     let i, j, k =
       match List.find_exn paths ~f:(fun p -> List.length p = 3) with
@@ -420,6 +420,117 @@ let () =
           has "== 0)" && (not (has "simdgroup")) && not (has "Tile_mma register tiling")
       in
       p "half tensorized structure as expected" ok);
+
+  (* --- Bfloat16 (gh-ocannl-545): the two accumulator shapes, which are NOT interchangeable on
+     CUDA. [nvcuda::wmma] has no bf16 accumulator fragment (mma.hpp declares [__nv_bfloat16] operands
+     against a [float] accumulator only), so bf16 x bf16 -> f32 takes the wmma template path while
+     the uniform bf16 x bf16 -> bf16 combination — the one a uniformly-bf16 network actually
+     produces — takes the inline-PTX [mma.sync.aligned.m16n8k16...f32.bf16.bf16.f32] path, whose
+     per-lane accumulator registers convert at the [d] boundary. Both legs are pinned so a
+     regression on either shows up as a rendering change, not just a timing one. HIP has both
+     rocWMMA combinations and Metal has the uniform one ([simdgroup_bfloat8x8]).
+
+     The inputs are multiples of 1/4 and 1/2 with 32-term sums bounded by 16, so every product is a
+     multiple of 1/8 and every partial sum is exactly representable in bf16 (8 mantissa bits): the
+     result is EXACT regardless of accumulation order or accumulator width, and parity is bitwise on
+     every backend and either rendering path. --- *)
+  let mab =
+    NTDSL.init ~l:"mab" ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ]
+      ~f:(fun idcs -> Float.of_int (((idcs.(0) * n) + idcs.(1)) % 3) *. 0.25)
+      ()
+  in
+  let mbb =
+    NTDSL.init ~l:"mbb" ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ]
+      ~f:(fun idcs -> (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 5) -. 2.) *. 0.5)
+      ()
+  in
+  let mtab =
+    NTDSL.init ~l:"mtab" ~prec:Ir.Ops.bfloat16 ~o:[ n; n ]
+      ~f:(fun idcs -> Float.of_int (((idcs.(0) * n) + idcs.(1)) % 3) *. 0.25)
+      ()
+  in
+  let mtbb =
+    NTDSL.init ~l:"mtbb" ~prec:Ir.Ops.bfloat16 ~o:[ n; n ]
+      ~f:(fun idcs -> (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 5) -. 2.) *. 0.5)
+      ()
+  in
+  let bf16_leg ?bm ~tag ~acc_prec ~build ~check () =
+    let mcb0 = build () in
+    Tn.update_prec mcb0.Tensor.value acc_prec;
+    let ctx_bs = Context.auto () in
+    let ctx_bs, routine_bs =
+      Context.compile
+        ~lowered_transform:(fun opt -> opt)
+        ctx_bs
+        (named ("mm_" ^ tag ^ "_serial") (Train.forward mcb0))
+        Ir.Indexing.Empty
+    in
+    let ctx_bs = Context.run ctx_bs routine_bs in
+    let want = Context.get_values ctx_bs mcb0.Tensor.value in
+    let mcb1 = build () in
+    Tn.update_prec mcb1.Tensor.value acc_prec;
+    let transform_b opt = Sched.apply (mma_schedule ?bm ~out:mcb1.Tensor.value opt) opt in
+    let ctx_b = Context.auto () in
+    let ctx_b, routine_b =
+      Context.compile ~lowered_transform:transform_b ctx_b
+        (named ("mm_" ^ tag ^ "_mma") (Train.forward mcb1))
+        Ir.Indexing.Empty
+    in
+    let ctx_b = Context.run ctx_b routine_b in
+    let got = Context.get_values ctx_b mcb1.Tensor.value in
+    p
+      (Printf.sprintf "%s tensorized matmul matches the serial twin bitwise" tag)
+      (Array.for_all2_exn got want ~f:Float.equal);
+    match read_generated ("mm_" ^ tag ^ "_mma") with
+    | None -> p (Printf.sprintf "%s tensorized structure as expected" tag) false
+    | Some src -> p (Printf.sprintf "%s tensorized structure as expected" tag) (check src)
+  in
+  let mul () =
+    let%op t = mab * mbb in
+    t
+  in
+  bf16_leg ~tag:"bf32" ~acc_prec:Ir.Ops.single ~build:mul
+    ~check:(fun src ->
+      let has s = String.is_substring src ~substring:s in
+      if on_metal then
+        (* [simdgroup_matrix] is uniform-precision only: this mixed combination declines. *)
+        has "== 0)"
+      else if String.is_substring backend_name ~substring:"hip" then
+        has "rocwmma::mma_sync" && not (has "== 0)")
+      else if on_gpu then
+        (* CUDA: the wmma bf16 fragment path. Both bf16 renderings need sm_80, the same floor the
+           tf32 legs above already pin strictly. *)
+        has "(wmma-bf16)"
+      else has "== 0)" && (not (has "simdgroup")) && not (has "Tile_mma register tiling"))
+    ();
+  (* The uniform combination in all three operand orientations. CUDA's inline-PTX arm gathers every
+     fragment element through an explicit (row, col) address, so a transposed operand only swaps
+     that address — unlike the fp8 arm, which declines [ta]/[tb]. A mis-mapped gather would compute
+     a different product, so the bitwise parity is what pins the per-lane layout. *)
+  let uniform_check src =
+    let has s = String.is_substring src ~substring:s in
+    if on_metal then has "simdgroup_bfloat8x8" && not (has "== 0)")
+    else if String.is_substring backend_name ~substring:"hip" then
+      has "rocwmma::mma_sync" && not (has "== 0)")
+    else if on_gpu then
+      (* CUDA: the inline-PTX bf16 path (sm_80+). *)
+      has "mma.sync.aligned.m16n8k16"
+    else has "== 0)" && (not (has "simdgroup")) && not (has "Tile_mma register tiling")
+  in
+  bf16_leg ~tag:"bfu" ~acc_prec:Ir.Ops.bfloat16 ~build:mul ~check:uniform_check ();
+  bf16_leg ~tag:"bfu_ta" ~acc_prec:Ir.Ops.bfloat16 ~check:uniform_check
+    ~build:(fun () ->
+      let%op t = mtab +* "ki;kj=>ij" mtbb in
+      t)
+    ();
+  bf16_leg ~tag:"bfu_tb" ~acc_prec:Ir.Ops.bfloat16 ~check:uniform_check
+    ~build:(fun () ->
+      let%op t = mtab +* "ik;jk=>ij" mtbb in
+      t)
+    ();
+  (* [bm = 32] makes the block extents 32x32x32, so the row-tile loop [__mi] runs twice: the
+     m-direction fragment addressing is only exercised above one intrinsic row tile. *)
+  bf16_leg ~bm:(2 * bm) ~tag:"bfu_m2" ~acc_prec:Ir.Ops.bfloat16 ~build:mul ~check:uniform_check ();
 
   (* --- Fp8 (e5m2) inputs accumulated in f32: the inline-PTX [mma.sync] path on CUDA sm_89+
      (tensorize-mma T3+; wmma cannot express fp8), the scalar fallback elsewhere. e5m2 has 2
