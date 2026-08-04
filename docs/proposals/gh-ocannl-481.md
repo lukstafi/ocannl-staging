@@ -166,16 +166,44 @@ are the bank conflicts (proposal §5's original motivation) and the b128 rule ab
 therefore seeds no `pad_stride` variants yet; a stride-decline inventory from gh-479 would be the
 evidence that changes this.
 
+## Measured (2026-08-04): rendered, correct, neutral
+
+The gh-476 sweep ran on rog-nv (RTX 5070 Ti, sm_120) over `mlp_small` and `mlp_wide` at f32 and
+bf16 — full protocol and numbers in [benchmarks/report-gh481-cuda.md](../../benchmarks/report-gh481-cuda.md).
+Summary:
+
+- **The mechanism works end to end.** Per `mlp_wide` bf16 search: 12 distinct swizzled twins
+  seeded (staged seeds only — unstaged ones are correctly never twinned), 12 timed, 0 `Tile_mma`
+  statements falling back to the lane-0 scalar rendering, 0 declines naming a swizzled layout.
+  `ldmatrix` rendered.
+- **The layout is worth ~nothing here.** Pairing each twin with the plain sibling it directly
+  follows in the same search process — identical tile sizes, identical rest-of-pipeline, only the
+  layout differs — gives n = 48, **median +0.20%, stdev 0.50%, range [−1.1%, +1.3%]**.
+- **It cannot reach the shipping artifact on these shapes anyway.** The crowned candidate is always
+  the *unstaged* tensorized family (`sk_bk = 0`, 0.93–0.95 ms); swizzled twins exist only in the
+  staged family, which times 1.54–1.56 ms — and whose plain siblings time the same. The staged
+  family loses by ~65%, so its tiles' layout is a question about a schedule that does not ship.
+- **A whole-cell before/after could not have answered this.** The f32 tuned cell is a negative
+  control (no twins are seeded at f32; both binaries run identical code there) and it varies by
+  19.8% on `mlp_wide`, 40.6% on `mlp_small`, because the beam does not always crown the same
+  family. Any headline A/B smaller than that is search noise wearing a result's clothes.
+
+So T4's acceptance rule — a measured win on at least one leg — is **not met**, and the honest
+status of this work is "the emission exists, is correct, and is inert on the schedules today's
+search selects".
+
 ## Where the next person looks
 
-- Measurement is the open half. Every emission here is verified for *correctness* on hardware;
-  none of it is yet verified for *speed*. Acceptance stays T4's own rule — the gh-476 sweep, a
-  measured win on at least one leg and no regression elsewhere. `bench_mlp`'s bf16 leg is the
-  first candidate: its staged tensorized seeds now come in plain and `swz-b128` twins, so the
-  sweep can compare them directly.
-- If the swizzled twin loses everywhere, the interesting question is *which* half: `ldmatrix` with
-  a plain (bank-conflicted) tile is not expressible today, and separating the instruction's win
-  from the layout's would need that arm.
+- `ldmatrix` reaches the artifact only once *staged* beats *unstaged* on some shape. Candidates:
+  larger `k`, or a reduction that must be blocked for residency; gh-480's accumulator residency
+  making the staged form cheaper per k-block; a workload arithmetic-intense enough that shared-tile
+  bandwidth rather than launch/epilogue overhead is the constraint. Re-run the sweep there before
+  concluding anything about the layout.
+- If the swizzled twin loses *within* the staged family on such a shape, the interesting question
+  is *which* half: `ldmatrix` with a plain (bank-conflicted) tile is not expressible today, and
+  separating the instruction's win from the layout's would need that arm.
+- The instrument to reach for is the in-process twin pairing, not the cell p50. It resolves ~0.5%;
+  the cell resolves ~20%. Anything reported from the latter needs the f32 control beside it.
 - gh-480 and this item both restructure the emission's load path; the rebase point is D3's decline
   relaxation, pinned by the staged-half residency check of `schedule_mma_matmul.ml`.
 - gh-485 pad masks compose: padded staged tiles are zero-fringe and the XOR remap applies to the
