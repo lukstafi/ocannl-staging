@@ -140,7 +140,7 @@ GitHub milestone scope: *"Branch-and-bound on the analytic cost model. Better pe
 - Branch-and-bound schedule inference (#514).
 
 **Schedule-quality follow-through (from the v0.9 sweep):**
-- Rank-3 (batched/attention) matmul sites are never seeded, so `gpt2_mini` cannot reach tensor cores (#528); CUDA bf16 mma times scalar-fallback code under an mma label (#545); a Metal `Tensorize` wins its arm but the placement A/B does not ship it (#546).
+- Rank-3 (batched/attention) matmul sites are never seeded, so `gpt2_mini` cannot reach tensor cores (#528); CUDA bf16 mma times scalar-fallback code under an mma label (#545). Metal's placement A/B was measured and found sound (#546, [report](benchmarks/report-gh546-metal.md)): the arms are separated far outside the noise, and what the discarded arm actually holds is the *only* tensorized candidate that exists at reduced precision, since virtual cast twins make the matmul site's precision triple unadvertisable. The open follow-up is a placement targeted at the site rather than a precision-aware arm choice.
 - The tuner's baseline is the unscheduled serial form rather than the default schedule — the shared cause behind #532 and #533 (#552).
 - Conv-sketch tuning wins do not port across CPUs (#530); `gpt2_mini` inference is far off torch CUDA and moves under neither tuning nor materialization (#531); intermittent OOM during CUDA tuning (#550); `bench_gpt` gate-cost legs (#551).
 - CPU reduced precision: native fp16 arithmetic (#516) and 16-bit storage with f32 compute (#517).

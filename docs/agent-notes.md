@@ -198,6 +198,22 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   measurement budget keeps going to schedules that never tensorize: `mma_format_tiles` is keyed on
   the whole `(a, b, accumulator)` format triple, with per-entry arch floors, precisely so that a
   combination a backend supports at one accumulator width but not the other cannot be seeded.
+- "Crowned" is not "shipped", and neither is reproducible on a small routine. `Train.tune_placements`
+  runs two searches and keeps one artifact, so a family can win the arm that is then discarded whole
+  — read `report.best_label` / `best_tensorized` / `mma_best_ms` per arm (the A/B calls `?report`
+  for arm A first and ships the smaller `best_ms`), never the fact that some search crowned it.
+  Below GEMM-dominated sizes the crown is a lottery: on `mlp_small`/metal five identical cold-cache
+  searches crowned four different families in one arm with a 4.5% spread of best times, while the
+  arm gap stayed at 57–95% (gh-ocannl-546, benchmarks/report-gh546-metal.md). Conclusions of the
+  form "family X wins/never wins here" need repeats; the arm-level verdict does not.
+- Placement decides which tensorized candidates *exist*, not just how they rank, because
+  `mma_tile_for_precisions` keys on the storage precisions of the nodes the site actually reads.
+  Under the mixed-precision recipe on a uniform-format backend (Metal's `simdgroup_matrix`: no mixed
+  multiply-accumulate) the default-placement arm seeds **zero** mma candidates — the reduced-precision
+  cast twins are virtual, so the site reads f32 masters into an f16 destination and no advertised
+  tile matches. `Mixed_prec.Twin_materialized` (three small weight casts) restores the whole family
+  at the default arm's cost, whereas materialize-all buys it by doubling the kernel count. If a
+  reduced-precision cell reports `mma_candidates = 0`, look at the twins before the seeding rules.
 - Supplying a `?lowered_transform` bypasses the default annotator entirely (`backends.ml` `compile`
   only calls `Schedule.maybe_default_schedules` in the `None, None` arm), so **any** code that goes
   through that seam is the unscheduled serial form unless it schedules itself. The autotuner's base

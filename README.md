@@ -93,7 +93,7 @@ See [ROADMAP.md](ROADMAP.md) for the detailed schedule. GitHub issue assignments
   - [x] CNN classifiers (#54), GPT-2 inference (#377), and the TVM, Tiramisu, superoptimizer, and Lean Attention studies (#242, #267, #261, #263).
 * **1.0 (Sep 4, 2026 — IFL draft-paper deadline): Advanced compiler tiers and schedule-quality follow-through.**
   - [ ] Advanced schedules and algorithms: CUDA tensor-core completeness, fused attention, software pipelining, CUDA/HIP graph capture, rematerialization, remaining convolution tiers, and branch-and-bound schedule inference (#481, #483, #487, #488, #498, #503, #505, #514).
-  - [ ] Schedule-quality follow-through from the v0.9 sweep: rank-3 matmul seeding, CUDA bf16 mma fallbacks, Metal's placement A/B, and the tuner's serial baseline (#528, #545, #546, #552).
+  - [ ] Schedule-quality follow-through from the v0.9 sweep: rank-3 matmul seeding, CUDA bf16 mma fallbacks, and the tuner's serial baseline (#528, #545, #552); Metal's placement A/B measured and found sound (#546).
   - [ ] CPU reduced precision: native fp16 arithmetic and 16-bit storage with f32 compute (#516, #517).
   - [ ] Frontend and diagnostics: routine-name collision policy and use-site row resolution (#513, #544).
   - [ ] Roadmap-only ergonomics: concise merge-buffer transfer composition and execution-dependency tracking.
