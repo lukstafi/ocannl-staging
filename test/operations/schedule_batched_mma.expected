@@ -1,0 +1,11 @@
+batched_lb: cpu mma seeds present: true
+batched_lb tensorized matches the serial twin bitwise: true
+batched_lb tensorized structure as expected: true
+leading-batch: gpu mma seeds present: true
+batched_ib: cpu mma seeds present: true
+batched_ib tensorized matches the serial twin bitwise: true
+batched_ib tensorized structure as expected: true
+interior-batch: gpu mma seeds present: true
+interior-batch: gpu staged sketch builds: true
+variance-like site: no cpu mma seeds: true
+variance-like site: no gpu mma seeds: true

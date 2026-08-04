@@ -421,6 +421,9 @@ let () =
               m = 6;
               n = 29;
               k = 5;
+              ldd = 29;
+              lda = 5;
+              ldb = 29;
               lane;
               fallback = nest;
             };

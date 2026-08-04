@@ -300,7 +300,7 @@ let canonicalize ?(static_indices = []) ?(with_placements = true) (opt : LL.opti
         add "){";
         emit body;
         add "}"
-    | LL.Tile_mma { d; a; b; ta; tb; m; n; k; lane; fallback } ->
+    | LL.Tile_mma { d; a; b; ta; tb; m; n; k; ldd; lda; ldb; lane; fallback } ->
         let operand (tn, idcs) =
           emit_tn tn;
           emit_idcs idcs
@@ -309,7 +309,7 @@ let canonicalize ?(static_indices = []) ?(with_placements = true) (opt : LL.opti
         operand d;
         operand a;
         operand b;
-        add (Printf.sprintf " %b %b %d %d %d " ta tb m n k);
+        add (Printf.sprintf " %b %b %d %d %d %d %d %d " ta tb m n k ldd lda ldb);
         emit_sym lane;
         add "{";
         emit fallback;

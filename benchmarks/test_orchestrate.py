@@ -105,11 +105,81 @@ class ReportGroupingTest(unittest.TestCase):
         self.assertLess(
             orchestrate.precision_rank("bf16"), orchestrate.precision_rank("f16")
         )
-        # An unknown precision (the manual f16-static / f16-gatedN legs) sorts last rather
-        # than raising.
+        # A gate leg sorts directly after the storage precision it varies, not last: it is a
+        # variant of how f16's optimizer step is gated, and reads next to plain f16.
         self.assertGreater(
             orchestrate.precision_rank("f16-static"), orchestrate.precision_rank("f16")
         )
+        self.assertLess(
+            orchestrate.precision_rank("f16-gated8"),
+            orchestrate.precision_rank("unknown-precision"),
+        )
+
+    def test_gate_legs_are_parity_gated_at_their_base_precision(self):
+        self.assertEqual(
+            orchestrate.parity_tol("f16-gated8"), orchestrate.PARITY_TOL_PRECISION["f16"]
+        )
+        self.assertEqual(
+            orchestrate.parity_tol("f16-static"), orchestrate.PARITY_TOL_PRECISION["f16"]
+        )
+
+
+class PrecisionLegTest(unittest.TestCase):
+    """gh-ocannl-551: the gate-cost legs are orchestrated cells, and an inexpressible cell is
+    reported rather than silently absent."""
+
+    def test_gate_legs_dispatch_their_own_flags(self):
+        self.assertEqual(
+            orchestrate.precision_env("f16-static"),
+            {"BENCH_PRECISION": "f16", "BENCH_STATIC_SCALE": "1"},
+        )
+        self.assertEqual(
+            orchestrate.precision_env("f16-gated16"),
+            {"BENCH_PRECISION": "f16", "BENCH_GATE_INTERVAL": "16"},
+        )
+        self.assertEqual(orchestrate.precision_env("bf16"), {"BENCH_PRECISION": "bf16"})
+
+    def test_cell_env_carries_the_leg_and_clears_the_others(self):
+        # The gate flags are cleared per cell and then set by the leg — the two collided as
+        # duplicate dict() keywords, which crashed the run only once a gate cell was dispatched.
+        stray = {"BENCH_STATIC_SCALE": "1", "BENCH_GATE_INTERVAL": "7"}
+        plain = orchestrate.cell_env(stray, "fx.safetensors", "default", "bf16")
+        self.assertEqual(plain["BENCH_PRECISION"], "bf16")
+        self.assertEqual(plain["BENCH_STATIC_SCALE"], "0")
+        self.assertEqual(plain["BENCH_GATE_INTERVAL"], "0")
+        gated = orchestrate.cell_env(stray, "fx.safetensors", "tuned", "f16-gated16")
+        self.assertEqual(gated["BENCH_PRECISION"], "f16")
+        self.assertEqual(gated["BENCH_GATE_INTERVAL"], "16")
+        self.assertEqual(gated["BENCH_STATIC_SCALE"], "0")
+        self.assertEqual(gated["BENCH_TUNE"], "1")
+        static = orchestrate.cell_env(stray, "fx.safetensors", "default", "f16-static")
+        self.assertEqual(static["BENCH_STATIC_SCALE"], "1")
+        self.assertEqual(static["BENCH_GATE_INTERVAL"], "0")
+
+    def test_precision_spec_rejects_nonsense(self):
+        for spec in ("f16-gated0", "f16-gated", "f8", "f16-dynamic"):
+            with self.assertRaises(Exception, msg=spec):
+                orchestrate.precision_spec(spec)
+
+    def test_gate_legs_need_a_training_workload(self):
+        # The forward-only gpt2_mini has no optimizer, hence no loss scale to gate.
+        self.assertIsNotNone(
+            orchestrate.precision_unavailable("gpt", "infer", "f16-static")
+        )
+        self.assertIsNotNone(
+            orchestrate.precision_unavailable("gpt", "infer", "f16-gated8")
+        )
+        # ... but gpt2_mini_train does, and plain reduced precisions work in both modes.
+        self.assertIsNone(
+            orchestrate.precision_unavailable("gpt", "train", "f16-static")
+        )
+        self.assertIsNone(orchestrate.precision_unavailable("gpt", "infer", "bf16"))
+        self.assertIsNone(orchestrate.precision_unavailable("mlp", "train", "f16-gated8"))
+
+    def test_conv_workloads_report_the_missing_runner_support(self):
+        reason = orchestrate.precision_unavailable("conv", "train", "bf16")
+        self.assertIsNotNone(reason)
+        self.assertIn("conv", reason)
 
 
 if __name__ == "__main__":

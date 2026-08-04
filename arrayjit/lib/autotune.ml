@@ -361,17 +361,31 @@ type matmul_site = {
   m_ni : int;
   m_nj : int;
   m_nk : int;
+  m_bo : (Idx.symbol * int) list;
+      (** Batch loops enclosing the [m_i] loop, in nest order (gh-ocannl-528): loops beyond the
+          [i x j x k] triple that carry their own output axis. They stay [Serial] in the sketch
+          pipelines (grid slots are budgeted for the row/column blocks) and join the cross-nest
+          alignment chain ([matmul_site_chain]). Empty on plain rank-2 sites. *)
+  m_bi : (Idx.symbol * int) list;
+      (** Batch loops nested {e between} [m_i] and [m_j] (nest order) — attention's interior head
+          axis. The sketch pipelines hoist them above [m_i] with [Swap]s ([batch_hoist_swaps]) so
+          the micro-kernel is perfectly nested for [Tensorize]. Empty on plain rank-2 sites. *)
+  m_row_axis : int;
+      (** The axis of [m_d]'s index map carrying [m_i] (the 2-D tile row). [rank - 2] on plain
+          sites; smaller when interior batch axes sit between the roles. [m_j] is always on the
+          minor axis. *)
   m_d : Ir.Tnode.t;
   m_a : Ir.Tnode.t;
   m_b : Ir.Tnode.t;
   m_zeroed : bool;  (** A whole-node [Zero_out] of [m_d] is present (needed by [expand_zero]). *)
   m_tb : bool option;
-      (** [m_b]'s stored layout: [Some false] = [..., k, j] over its last two axes, [Some true] =
-          transposed ([..., j, k]), [None] = neither cleanly (the candidate then fails [Tensorize]'s
-          own role check at compile). Feeds the seeding pre-filter (gh-ocannl-479): a rendering that
-          reads B {e in place} inherits this orientation — which the register tiling declines when
-          transposed — while a packing [Stage] normalizes it. A transposed A never declines (its
-          feeds are scalar splats either way), so it is not tracked. *)
+      (** [m_b]'s stored layout: [Some false] = [m_j] on its minor axis ([..., k, ..., j]),
+          [Some true] = transposed ([m_k] on the minor axis), [None] = neither cleanly (the
+          candidate then fails [Tensorize]'s own role check at compile). Feeds the seeding
+          pre-filter (gh-ocannl-479): a rendering that reads B {e in place} inherits this
+          orientation — which the register tiling declines when transposed — while a packing
+          [Stage] normalizes it. A transposed A never declines (its feeds are scalar splats either
+          way), so it is not tracked. *)
   m_fma : bool;
       (** The accumulation is in fused ([Ops.FMA]) form, as [optimize]'s simplify leaves it — the
           form the register-tiled [Tile_mma] rendering requires (its vector twin promises bitwise
@@ -412,63 +426,132 @@ let rec collect_gets (sc : LL.scalar_t) : (Ir.Tnode.t * Idx.axis_index array) li
   | LL.Embed_index _ ->
       []
 
-(* The stored orientation of an operand's last two axes w.r.t. its role symbols: [Some false] when
-   [row] has unit coefficient in component [rank-2] and [col] in [rank-1], [Some true] when swapped
-   (transposed storage), [None] otherwise. A permissive mirror of [Schedule.Tensorize]'s role
-   assignment (which additionally checks that the symbols appear nowhere else). *)
-let stored_orientation (idcs : Idx.axis_index array) ~row ~col : bool option =
-  let coeff sym (idx : Idx.axis_index) =
-    match idx with
-    | Idx.Iterator s when Idx.equal_symbol s sym -> 1
-    | Idx.Affine { symbols; _ } ->
-        List.sum (module Int) symbols ~f:(fun (c, s) -> if Idx.equal_symbol s sym then c else 0)
-    | _ -> 0
-  in
-  let rank = Array.length idcs in
-  if rank < 2 then None
-  else if coeff row idcs.(rank - 2) = 1 && coeff col idcs.(rank - 1) = 1 then Some false
-  else if coeff col idcs.(rank - 2) = 1 && coeff row idcs.(rank - 1) = 1 then Some true
-  else None
+let idx_mentions (idx : Idx.axis_index) s =
+  match idx with
+  | Idx.Iterator s2 -> Idx.equal_symbol s s2
+  | Idx.Affine { symbols; _ } -> List.exists symbols ~f:(fun (_, s2) -> Idx.equal_symbol s s2)
+  | _ -> false
+
+let idx_coeff (idx : Idx.axis_index) sym =
+  match idx with
+  | Idx.Iterator s when Idx.equal_symbol s sym -> 1
+  | Idx.Affine { symbols; _ } ->
+      List.sum (module Int) symbols ~f:(fun (c, s) -> if Idx.equal_symbol s sym then c else 0)
+  | _ -> 0
+
+(* The unique axis of [idcs] owning [s]: [s] appears in exactly one component, with coefficient 1
+   there. Mirrors [Schedule.Tensorize]'s ownership discipline. *)
+let unit_axis (idcs : Idx.axis_index array) s : int option =
+  let ps = Array.filter_mapi idcs ~f:(fun p idx -> Option.some_if (idx_mentions idx s) p) in
+  match Array.to_list ps with [ p ] when idx_coeff idcs.(p) s = 1 -> Some p | _ -> None
+
+(* Batched-site classification shared by the relation-based and procedural matchers
+   (gh-ocannl-528). Inputs: the perfectly nested serial accumulation statement's loops in nest
+   order (with extents), the accumulator's index map [di], and the two operand reads. Roles:
+
+   - [k] is the innermost loop and the only one absent from [di].
+   - Every other loop must own a distinct axis of [di] (unit coefficient, sole occurrence).
+   - [j] owns [di]'s minor axis and must be the innermost of the write loops (how lowering orders
+     them — the sketch pipelines' hoisting normalization only handles batch loops above [j]).
+   - Per operand order, [a] must own [k], must not read [j]; [b] must own [j] and [k]; [i] is the
+     {e deepest} write loop owned by [a] and absent from [b] — the 2-D tile row. The exclusions
+     are what keep variance-style self-products [d[b,s] += x[b,s,k] * x[b,s,k]] — whose reads
+     mention every loop — from masquerading as matmuls: they seeded (and always failed candidate
+     compile) before.
+   - Everything else is batch: [m_bo] outside [i], [m_bi] between [i] and [j]; batch symbols may
+     appear in the operands freely (their occurrences form the tile block base).
+
+   Detection remains permissive about everything else — a mis-detected site fails its candidate
+   compile (op preconditions, [validate_parallel], hardware limits) and is skipped. *)
+let classify_matmul ~(loops : (Idx.symbol * int) list) ~(d : Ir.Tnode.t)
+    ~(di : Idx.axis_index array) ~(o1 : Ir.Tnode.t * Idx.axis_index array)
+    ~(o2 : Ir.Tnode.t * Idx.axis_index array) ~(zeroed : bool) ~(fma : bool) : matmul_site option =
+  let rank = Array.length di in
+  match List.rev loops with
+  | (k, nk) :: ((_ :: _ :: _ as rev_ws) : (Idx.symbol * int) list)
+    when rank >= 2 && not (idcs_mention di k) ->
+      let ws = List.rev rev_ws in
+      let d_axes = List.map ws ~f:(fun (s, _) -> unit_axis di s) in
+      if List.exists d_axes ~f:Option.is_none then None
+      else
+        let axes = List.zip_exn ws (List.filter_opt d_axes) in
+        let distinct =
+          let ps = List.map axes ~f:snd in
+          List.length (List.dedup_and_sort ps ~compare:Int.compare) = List.length ps
+        in
+        if not distinct then None
+        else
+          let (j, nj), pj = List.last_exn axes in
+          if pj <> rank - 1 then None
+          else
+            let front = List.drop_last_exn axes in
+            let try_order ((a, ai) : Ir.Tnode.t * Idx.axis_index array)
+                ((b, bi) : Ir.Tnode.t * Idx.axis_index array) : matmul_site option =
+              if
+                idcs_mention ai j
+                || Option.is_none (unit_axis ai k)
+                || Option.is_none (unit_axis bi j)
+                || Option.is_none (unit_axis bi k)
+              then None
+              else
+                let eligible =
+                  List.filter front ~f:(fun ((s, _), _) ->
+                      Option.is_some (unit_axis ai s) && not (idcs_mention bi s))
+                in
+                Option.map (List.last eligible) ~f:(fun ((i, ni), p_row) ->
+                    let before_i = ref true in
+                    let m_bo = ref [] and m_bi = ref [] in
+                    List.iter front ~f:(fun ((s, n), _) ->
+                        if Idx.equal_symbol s i then before_i := false
+                        else if !before_i then m_bo := (s, n) :: !m_bo
+                        else m_bi := (s, n) :: !m_bi);
+                    let rank_b = Array.length bi in
+                    let m_tb =
+                      match (unit_axis bi j, unit_axis bi k) with
+                      | Some p, _ when p = rank_b - 1 -> Some false
+                      | _, Some p when p = rank_b - 1 -> Some true
+                      | _ -> None
+                    in
+                    {
+                      m_i = i;
+                      m_j = j;
+                      m_k = k;
+                      m_ni = ni;
+                      m_nj = nj;
+                      m_nk = nk;
+                      m_bo = List.rev !m_bo;
+                      m_bi = List.rev !m_bi;
+                      m_row_axis = p_row;
+                      m_d = d;
+                      m_a = a;
+                      m_b = b;
+                      m_zeroed = zeroed;
+                      m_tb;
+                      m_fma = fma;
+                    })
+            in
+            (match try_order o1 o2 with Some _ as r -> r | None -> try_order o2 o1)
+  | _ -> None
 
 let detect_matmul_procedural (llc : LL.t) : matmul_site option =
   let stmts = strip_stmts (LL.flat_lines [ llc ]) in
   let zeroed = List.filter_map stmts ~f:(function LL.Zero_out tn -> Some tn | _ -> None) in
   List.find_map stmts ~f:(fun stmt ->
       match serial_nest_of stmt with
-      | [ (i, ni); (j, nj); (k, nk) ], LL.Set { tn = d; idcs = di; llsc; _ } -> (
+      | (_ :: _ :: _ :: _ as loops), LL.Set { tn = d; idcs = di; llsc; _ } -> (
           let gets = collect_gets llsc in
           let is_d_read (tn, idcs) = phys_equal tn d && Array.equal Idx.equal_axis_index idcs di in
           let d_reads, others = List.partition_tf gets ~f:is_d_read in
           match (d_reads, others) with
-          | _ :: _, [ ((_, i1) as o1); ((_, i2) as o2) ]
-            when idcs_mention di i && idcs_mention di j && not (idcs_mention di k) ->
-              let role_a (idcs : Idx.axis_index array) = idcs_mention idcs i && idcs_mention idcs k
-              and role_b idcs = idcs_mention idcs k && idcs_mention idcs j in
-              let assign =
-                if role_a i1 && role_b i2 then Some (o1, o2)
-                else if role_a i2 && role_b i1 then Some (o2, o1)
-                else None
+          | _ :: _, [ o1; o2 ] ->
+              let fma =
+                match llsc with
+                | LL.Ternop (Ir.Ops.FMA, _, _, (LL.Get (tn, idcs), _)) -> is_d_read (tn, idcs)
+                | _ -> false
               in
-              Option.map assign ~f:(fun ((m_a, _ia), (m_b, ib)) ->
-                  let m_fma =
-                    match llsc with
-                    | LL.Ternop (Ir.Ops.FMA, _, _, (LL.Get (tn, idcs), _)) -> is_d_read (tn, idcs)
-                    | _ -> false
-                  in
-                  {
-                    m_i = i;
-                    m_j = j;
-                    m_k = k;
-                    m_ni = ni;
-                    m_nj = nj;
-                    m_nk = nk;
-                    m_d = d;
-                    m_a;
-                    m_b;
-                    m_zeroed = List.exists zeroed ~f:(phys_equal d);
-                    m_tb = stored_orientation ib ~row:k ~col:j;
-                    m_fma;
-                  })
+              classify_matmul ~loops ~d ~di ~o1 ~o2
+                ~zeroed:(List.exists zeroed ~f:(phys_equal d))
+                ~fma
           | _ -> None)
       | _ -> None)
 
@@ -560,39 +643,19 @@ let detect_matmul_affine (llc : LL.t) : matmul_site option =
   let zeroed = List.filter accs ~f:(fun a -> a.A.a_write && a.A.a_whole) in
   List.find_map (accesses_by_statement accs) ~f:(fun g ->
       match serial_kernel_of axes g with
-      | Some (w, (_ :: _ as _d_reads), [ o1; o2 ]) -> (
-          match w.A.a_loops with
-          | [ (i, (_, ti)); (j, (_, tj)); (k, (_, tk)) ]
-            when idcs_mention w.A.a_map i && idcs_mention w.A.a_map j
-                 && not (idcs_mention w.A.a_map k) ->
-              let role_a idcs = idcs_mention idcs i && idcs_mention idcs k
-              and role_b idcs = idcs_mention idcs k && idcs_mention idcs j in
-              let assign =
-                if role_a o1.A.a_map && role_b o2.A.a_map then Some (o1, o2)
-                else if role_a o2.A.a_map && role_b o1.A.a_map then Some (o2, o1)
-                else None
-              in
-              Option.map assign ~f:(fun (oa, ob) ->
-                  {
-                    m_i = i;
-                    m_j = j;
-                    m_k = k;
-                    m_ni = ti + 1;
-                    m_nj = tj + 1;
-                    m_nk = tk + 1;
-                    m_d = w.A.a_tn;
-                    m_a = oa.A.a_tn;
-                    m_b = ob.A.a_tn;
-                    m_zeroed = List.exists zeroed ~f:(fun z -> phys_equal z.A.a_tn w.A.a_tn);
-                    m_tb = stored_orientation ob.A.a_map ~row:k ~col:j;
-                    m_fma = fma_form llc ~stmt_path:w.A.a_path ~d:w.A.a_tn ~di:w.A.a_map;
-                  })
-          | _ -> None)
+      | Some (w, (_ :: _ as _d_reads), [ o1; o2 ]) ->
+          let loops = List.map w.A.a_loops ~f:(fun (s, (_, hi)) -> (s, hi + 1)) in
+          classify_matmul ~loops ~d:w.A.a_tn ~di:w.A.a_map ~o1:(o1.A.a_tn, o1.A.a_map)
+            ~o2:(o2.A.a_tn, o2.A.a_map)
+            ~zeroed:(List.exists zeroed ~f:(fun z -> phys_equal z.A.a_tn w.A.a_tn))
+            ~fma:(fma_form llc ~stmt_path:w.A.a_path ~d:w.A.a_tn ~di:w.A.a_map)
       | _ -> None)
 
 let matmul_site_equal (x : matmul_site) (y : matmul_site) =
+  let batch_equal = List.equal (fun (s1, n1) (s2, n2) -> Idx.equal_symbol s1 s2 && n1 = n2) in
   Idx.equal_symbol x.m_i y.m_i && Idx.equal_symbol x.m_j y.m_j && Idx.equal_symbol x.m_k y.m_k
-  && x.m_ni = y.m_ni && x.m_nj = y.m_nj && x.m_nk = y.m_nk && phys_equal x.m_d y.m_d
+  && x.m_ni = y.m_ni && x.m_nj = y.m_nj && x.m_nk = y.m_nk && batch_equal x.m_bo y.m_bo
+  && batch_equal x.m_bi y.m_bi && x.m_row_axis = y.m_row_axis && phys_equal x.m_d y.m_d
   && phys_equal x.m_a y.m_a && phys_equal x.m_b y.m_b && Bool.equal x.m_zeroed y.m_zeroed
   && Option.equal Bool.equal x.m_tb y.m_tb
   && Bool.equal x.m_fma y.m_fma
@@ -1002,7 +1065,8 @@ let zero_geometry (site : matmul_site) ~(mk_zops : zi:Idx.symbol -> zj:Idx.symbo
     : Sched.schedule =
   if not site.m_zeroed then []
   else (
-    if Array.length (Lazy.force site.m_d.Ir.Tnode.dims) <> 2 then
+    let rank = Array.length (Lazy.force site.m_d.Ir.Tnode.dims) in
+    if rank < 2 || site.m_row_axis >= rank - 1 then
       (* This is a known limitation of the generated sketch, not an arbitrary exception from a
          user transform. Preserve that distinction at the narrow site so strict candidate failure
          classification records a decline and continues trying the remaining seeds. *)
@@ -1012,12 +1076,14 @@ let zero_geometry (site : matmul_site) ~(mk_zops : zi:Idx.symbol -> zj:Idx.symbo
              Outcome.Unsupported
                {
                  feature = "autotune_sketch_output_rank";
-                 detail = "Autotune sketch: only rank-2 outputs in v1";
+                 detail = "Autotune sketch: zero expansion needs a row axis before the minor axis";
                } ));
     let ez, zsyms = Sched.expand_zero ~tn:site.m_d in
-    let zi, zj =
-      match zsyms with [ zi; zj ] -> (zi, zj) | _ -> invalid_arg "Autotune sketch: non-2d zero"
-    in
+    (* Batched outputs (gh-ocannl-528): the row/column zero loops get the accumulation's geometry;
+       the batch-axis zero loops stay [Serial], like the batch loops of the accumulation nest. The
+       row loop precedes the column loop in the zero nest ([m_row_axis < rank - 1]), matching the
+       accumulation's positional hardware-slot order. *)
+    let zi = List.nth_exn zsyms site.m_row_axis and zj = List.last_exn zsyms in
     ez :: mk_zops ~zi ~zj)
 
 (* The would-be epilogue tail's loop symbols: the first real statement after the last statement
@@ -1219,10 +1285,27 @@ let companion_coverage_unsupported ~tensorized why =
                  why;
            } ))
 
-(* The [(i, j)] chain the GPU matmul sketches annotate, as [companion_geometry] wants it: the
-   accumulation nest's own outer loops, which are exactly what {!Sched.aligned_chains} reports for
-   that nest when the site is parallelizable at full arity. *)
-let matmul_site_chain (site : matmul_site) = [ (site.m_i, site.m_ni); (site.m_j, site.m_nj) ]
+(* The chain the GPU matmul sketches annotate, as [companion_geometry] wants it: the accumulation
+   nest's own outer loops in nest order — batch loops included (gh-ocannl-528) — which is exactly
+   what {!Sched.aligned_chains} reports for that nest when the site is parallelizable at full
+   arity. *)
+let matmul_site_chain (site : matmul_site) =
+  site.m_bo @ ((site.m_i, site.m_ni) :: site.m_bi) @ [ (site.m_j, site.m_nj) ]
+
+(* Chain-position roles matching [matmul_site_chain]: batch positions get no annotation (batch
+   loops stay [Serial] — the 3-slot grid budget is spent on the row/column blocks, and serial
+   loops above hardware loops are legal: hardware loops bind, not iterate), row/column positions
+   get the pipeline's geometry. *)
+let matmul_chain_roles (site : matmul_site) : [ `Batch | `Row | `Col ] list =
+  List.map site.m_bo ~f:(fun _ -> `Batch)
+  @ (`Row :: List.map site.m_bi ~f:(fun _ -> `Batch))
+  @ [ `Col ]
+
+(* Hoist interior batch loops above the [m_i] loop (gh-ocannl-528), making the [i x j x k]
+   micro-kernel perfectly nested for the splits, sinks and [Tensorize] below. Sequential adjacent
+   [Swap]s: after each, [m_i] is directly above the next interior batch loop. *)
+let batch_hoist_swaps (site : matmul_site) : Sched.schedule =
+  List.map site.m_bi ~f:(fun (g, _) -> Sched.Swap { outer = site.m_i; inner = g })
 
 (* The register-blocktiled GPU matmul (schedule_register_matmul.ml): each output dimension split
    twice (block tile -> Grid, register tile -> Workgroup), register loops sunk innermost, operands
@@ -1233,14 +1316,20 @@ let matmul_site_chain (site : matmul_site) = [ (site.m_i, site.m_ni); (site.m_j,
 let gpu_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
     { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_tm = tm; sk_tn = tn; sk_epilogue; _ } : Sched.schedule =
   (* One geometry description drives the accumulation nest, the expanded zeroing nest and the
-     companion nests: per chain position, the block split (Grid) and the register split (Workgroup),
-     which is what makes their slots and workgroup extents agree by construction. *)
-  let annotate pos sym =
-    let blk, reg = if pos = 0 then (bm, tm) else (bn, tn) in
-    let sp, _, inner = Sched.split ~axis:sym ~factor:blk ~outer:LL.Grid ~inner:LL.Serial in
-    let sp2, _, _ = Sched.split ~axis:inner ~factor:reg ~outer:LL.Workgroup ~inner:LL.Serial in
-    [ sp; sp2 ]
+     companion nests: per row/column chain position, the block split (Grid) and the register split
+     (Workgroup), which is what makes their slots and workgroup extents agree by construction;
+     batch positions stay [Serial] (gh-ocannl-528). *)
+  let annotate_role role sym =
+    match role with
+    | `Batch -> []
+    | (`Row | `Col) as rc ->
+        let blk, reg = match rc with `Row -> (bm, tm) | `Col -> (bn, tn) in
+        let sp, _, inner = Sched.split ~axis:sym ~factor:blk ~outer:LL.Grid ~inner:LL.Serial in
+        let sp2, _, _ = Sched.split ~axis:inner ~factor:reg ~outer:LL.Workgroup ~inner:LL.Serial in
+        [ sp; sp2 ]
   in
+  let roles = Array.of_list (matmul_chain_roles site) in
+  let annotate pos sym = annotate_role roles.(pos) sym in
   let cops =
     match
       companion_geometry ~site_syms:(matmul_site_chain site)
@@ -1251,7 +1340,9 @@ let gpu_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
     | Ok ops -> ops
     | Error why -> companion_coverage_unsupported ~tensorized:false why
   in
-  let zops = zero_geometry site ~mk_zops:(fun ~zi ~zj -> annotate 0 zi @ annotate 1 zj) in
+  let zops =
+    zero_geometry site ~mk_zops:(fun ~zi ~zj -> annotate_role `Row zi @ annotate_role `Col zj)
+  in
   let zops = cops @ zops in
   let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
   let sp_i2, i_w, i_t = Sched.split ~axis:i_i ~factor:tm ~outer:LL.Workgroup ~inner:LL.Serial in
@@ -1259,7 +1350,7 @@ let gpu_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
   let sp_j2, j_w, j_t = Sched.split ~axis:j_i ~factor:tn ~outer:LL.Workgroup ~inner:LL.Serial in
   let sp_k, k_o, k_i = Sched.split ~axis:site.m_k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
   let swaps = sink i_t [ j_o; j_w; j_t; k_o; k_i ] @ sink j_t [ k_o; k_i ] in
-  zops
+  batch_hoist_swaps site @ zops
   @ [ sp_i; sp_i2; sp_j; sp_j2; sp_k ]
   @ swaps
   @ [
@@ -1301,7 +1392,8 @@ let cpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = b
   let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Serial ~inner:LL.Serial in
   let sp_j, j_o, j_i = Sched.split ~axis:site.m_j ~factor:bn ~outer:LL.Serial ~inner:LL.Serial in
   let sp_k, k_o, k_i = Sched.split ~axis:site.m_k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
-  [ sp_i; sp_j; sp_k ]
+  batch_hoist_swaps site
+  @ [ sp_i; sp_j; sp_k ]
   @ sink i_i [ j_o; j_i; k_o; k_i ]
   @ sink j_i [ k_o; k_i; i_i ]
   @ [
@@ -1345,17 +1437,22 @@ let cpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = b
    the fusion declined the seed had no surviving form. *)
 let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
     { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_simd = w; sk_epilogue; _ } : Sched.schedule =
-  (* Position 1 splits at the lane width, not at [bn]: the inner loop IS the workgroup slot the
-     [Tile_mma]'s lane occupies, and a barrier-carrying kernel requires equal extents at a slot. The
-     seeds constrain [sk_bn = sk_simd], so this is also the accumulation nest's column block. *)
-  let annotate pos sym =
-    if pos = 0 then
-      let sp, _, _ = Sched.split ~axis:sym ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
-      [ sp ]
-    else
-      let sp, _, _ = Sched.split ~axis:sym ~factor:w ~outer:LL.Grid ~inner:LL.Workgroup in
-      [ sp ]
+  (* The column role splits at the lane width, not at [bn]: the inner loop IS the workgroup slot
+     the [Tile_mma]'s lane occupies, and a barrier-carrying kernel requires equal extents at a
+     slot. The seeds constrain [sk_bn = sk_simd], so this is also the accumulation nest's column
+     block. Batch positions stay [Serial] (gh-ocannl-528). *)
+  let annotate_role role sym =
+    match role with
+    | `Batch -> []
+    | `Row ->
+        let sp, _, _ = Sched.split ~axis:sym ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+        [ sp ]
+    | `Col ->
+        let sp, _, _ = Sched.split ~axis:sym ~factor:w ~outer:LL.Grid ~inner:LL.Workgroup in
+        [ sp ]
   in
+  let roles = Array.of_list (matmul_chain_roles site) in
+  let annotate pos sym = annotate_role roles.(pos) sym in
   let cops =
     match
       companion_geometry ~site_syms:(matmul_site_chain site)
@@ -1366,13 +1463,15 @@ let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
     | Ok ops -> ops
     | Error why -> companion_coverage_unsupported ~tensorized:true why
   in
-  let zops = zero_geometry site ~mk_zops:(fun ~zi ~zj -> annotate 0 zi @ annotate 1 zj) in
+  let zops =
+    zero_geometry site ~mk_zops:(fun ~zi ~zj -> annotate_role `Row zi @ annotate_role `Col zj)
+  in
   let zops = cops @ zops in
   let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
   let sp_j, j_o, j_i = Sched.split ~axis:site.m_j ~factor:bn ~outer:LL.Grid ~inner:LL.Serial in
   if bk = 0 then
     let tz, _lane = Sched.tensorize ~i:i_i ~j:j_i ~k:site.m_k ~simd_width:w in
-    zops @ [ sp_i; sp_j ] @ sink i_i [ j_o ] @ [ tz ]
+    batch_hoist_swaps site @ zops @ [ sp_i; sp_j ] @ sink i_i [ j_o ] @ [ tz ]
   else
     let sp_k, k_o, k_i = Sched.split ~axis:site.m_k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
     let tz, _lane = Sched.tensorize ~i:i_i ~j:j_i ~k:k_i ~simd_width:w in
@@ -1380,7 +1479,8 @@ let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
        cooperative tiles, non-multiple extents pad to the block sizes — the guards land on the leaf
        accumulation, [Tensorize] moves the row/column masks to the fragment transfers and
        discharges the reduction mask against the staged tiles. *)
-    pad_to ~axis:site.m_i ~extent:site.m_ni bm
+    batch_hoist_swaps site
+    @ pad_to ~axis:site.m_i ~extent:site.m_ni bm
     @ pad_to ~axis:site.m_j ~extent:site.m_nj bn
     @ pad_to ~axis:site.m_k ~extent:site.m_nk bk
     @ zops
@@ -1424,11 +1524,11 @@ let cpu_mma_sketch_schedule (site : matmul_site) { sk_bm = bm; _ } : Sched.sched
   in
   if bm = 0 then
     let tz, _lane = Sched.tensorize ~i:site.m_i ~j:site.m_j ~k:site.m_k ~simd_width:site.m_nj in
-    zops @ [ tz ]
+    batch_hoist_swaps site @ zops @ [ tz ]
   else
     let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
     let tz, _lane = Sched.tensorize ~i:i_i ~j:site.m_j ~k:site.m_k ~simd_width:site.m_nj in
-    zops @ [ sp_i; tz ]
+    batch_hoist_swaps site @ zops @ [ sp_i; tz ]
 
 (* Cache-blocked, operand-packed tensorized CPU matmul: [Tile_mma] composed with the S4 packing
    pipeline (the remaining piece of gh-ocannl-469). GEBP loop structure, all-Serial: [j_o? { k_o {
@@ -1512,7 +1612,7 @@ let cpu_mma_pack_sketch_schedule (site : matmul_site)
       @ pad_to ~axis:site.m_k ~extent:site.m_nk bk
   in
   let tz, _lane = Sched.tensorize ~i:i_i ~j:j_col ~k:k_i ~simd_width:1 in
-  pads @ zops @ splits @ j_swaps @ sink j_col [ k_o ] @ sink i_i [ k_o ]
+  batch_hoist_swaps site @ pads @ zops @ splits @ j_swaps @ sink j_col [ k_o ] @ sink i_i [ k_o ]
   @ (if grid_outermost then [] else sink i_o [ k_o ])
   @ stages @ [ tz ]
 

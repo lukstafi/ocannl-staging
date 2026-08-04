@@ -13,12 +13,17 @@ is a reduced input format (RDNA3/3.5 WMMA has no f32-input shape).
 
 Timing results are only comparable when the parity gate passes: a FAIL means that cell was
 not computing the same training trajectory, so its step times are flagged, not compared.
+
+A requested cell a workload cannot express — a reduced precision on the conv runner, an f16
+gate-cost leg on a forward-only workload — is reported as NOT APPLICABLE with its reason, in
+the run log and in a report section, rather than quietly not being run (gh-ocannl-551).
 """
 
 import argparse
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import time
@@ -50,12 +55,19 @@ PARITY_TOL_PRECISION = {"bf16": 4e-3, "f16": 2e-3}
 LOSS_MOVE_MIN_REL = 1e-6
 REFERENCE = ("pytorch", "cpu", "eager")
 # Report row order within a workload: precision-major, f32 first (it is the reference's precision
-# and every non-OCANNL cell's), then the reduced precisions; p50-ascending within each group.
+# and every non-OCANNL cell's), then the reduced precisions; a gate-cost leg sorts directly after
+# the storage precision it varies; p50-ascending within each group.
 PRECISION_ORDER = ["f32", "bf16", "f16"]
 # The precision axis is a property of the runner, not of OCANNL: only bench_mlp and bench_gpt
-# implement BENCH_PRECISION (the training recipe and the forward-only leg respectively), so
-# reduced-precision cells are generated for those models only.
+# implement BENCH_PRECISION, so reduced-precision cells are generated for those models only.
 PRECISION_MODELS = ("mlp", "gpt")
+# The gh-ocannl-492 task-5 gate-cost legs: f16 with the dynamic loss-scaling gate replaced by a
+# fixed scale (no gate, no host read) or by the fused on-device gate sampled every N steps. They
+# vary how the optimizer's inf/nan gate is paid for, so they need a workload that HAS an optimizer
+# — on a forward-only fixture they are reported as not applicable rather than silently dropped
+# (gh-ocannl-551).
+GATE_LEG_ENV = {"f16-static": {"BENCH_STATIC_SCALE": "1"}}
+GATED_RE = re.compile(r"^f16-gated([1-9][0-9]*)$")
 
 # The GPU column of the matrix, per --gpu choice: OCANNL backend, PyTorch device,
 # tinygrad device. The CPU column (cc / cpu / CPU) is always run.
@@ -123,12 +135,76 @@ def cell_name(variant, precision):
     return variant if precision == "f32" else f"{variant}/{precision}"
 
 
+def precision_base(precision):
+    """The storage precision a cell computes in, without a gate-leg suffix."""
+    return precision.split("-", 1)[0]
+
+
 def precision_rank(precision):
-    return (
-        PRECISION_ORDER.index(precision)
-        if precision in PRECISION_ORDER
-        else len(PRECISION_ORDER)
+    base = precision_base(precision)
+    rank = (
+        PRECISION_ORDER.index(base) if base in PRECISION_ORDER else len(PRECISION_ORDER)
     )
+    # A gate leg sorts right after the plain cell of the same storage precision: it is a variant
+    # of how that precision's optimizer step is gated, not a precision of its own.
+    return rank * 10 + (0 if precision == base else 1)
+
+
+def parity_tol(precision):
+    return PARITY_TOL_PRECISION.get(precision_base(precision), PARITY_TOL)
+
+
+def precision_spec(spec):
+    """--precision argument: a storage precision, or one of the f16 gate-cost legs."""
+    if spec in ("bf16", "f16") or spec in GATE_LEG_ENV or GATED_RE.match(spec):
+        return spec
+    raise argparse.ArgumentTypeError(
+        f"unknown precision {spec!r}; expected bf16, f16, f16-static, or f16-gatedN"
+    )
+
+
+def precision_env(precision):
+    """The BENCH_* environment a precision cell is dispatched with."""
+    env = {"BENCH_PRECISION": precision_base(precision)}
+    env.update(GATE_LEG_ENV.get(precision, {}))
+    gated = GATED_RE.match(precision)
+    if gated:
+        env["BENCH_GATE_INTERVAL"] = gated.group(1)
+    return env
+
+
+def cell_env(base, fixture, variant, precision):
+    """The environment an OCANNL cell is dispatched with."""
+    env = dict(
+        base,
+        BENCH_FIXTURE=str(fixture),
+        BENCH_TUNE="1" if variant == "tuned" else "0",
+        BENCH_MATERIALIZE="1" if variant == "materialized" else "0",
+        # A gate leg carries its own BENCH_* flags; clear the others so a stray value from the
+        # caller's environment cannot leak into a cell.
+        BENCH_STATIC_SCALE="0",
+        BENCH_GATE_INTERVAL="0",
+    )
+    # Applied after, not as keywords: a gate leg's flags collide with the cleared defaults above
+    # and dict() rejects duplicate keywords.
+    env.update(precision_env(precision))
+    return env
+
+
+def precision_unavailable(model, mode, precision):
+    """Why this workload cannot express this precision cell, or None if it can.
+
+    An unavailable cell is reported (in the run log and the report) instead of quietly not being
+    run: an empty row and an unrun row are otherwise indistinguishable (gh-ocannl-551).
+    """
+    if model not in PRECISION_MODELS:
+        return f"the {model} runner has no BENCH_PRECISION support"
+    if (precision in GATE_LEG_ENV or GATED_RE.match(precision)) and mode != "train":
+        return (
+            "gate-cost legs measure the optimizer's loss-scaling gate; this workload is "
+            "forward-only (mode: infer)"
+        )
+    return None
 
 
 def ocannl_exe(model):
@@ -195,11 +271,11 @@ def parity_check(results):
                 for a, b in zip(r["losses"][:n], ref["losses"][:n])
             )
             r["parity_max_rel"] = max_rel
-            tol = PARITY_TOL_PRECISION.get(r.get("precision", "f32"), PARITY_TOL)
+            tol = parity_tol(r.get("precision", "f32"))
             r["parity"] = "PASS" if max_rel < tol and r["parity_loss_moved"] else "FAIL"
 
 
-def report(results, out_dir):
+def report(results, out_dir, unavailable=()):
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "results.jsonl", "w") as f:
         for r in results:
@@ -255,6 +331,18 @@ def report(results, out_dir):
                 f"| {s['p50']:.3f} | {s['p10']:.3f} | {s['p90']:.3f} "
                 f"| {r['queued_step_ms']:.3f} | {r['compile_s']:.2f} | {parity} |{tokens}"
             )
+    if unavailable:
+        # Stated where the matrix is read: a cell missing because the workload cannot express it
+        # is not a cell someone forgot to run (gh-ocannl-551).
+        lines.append("\n## Cells not applicable\n")
+        lines.append(
+            "Requested cells this matrix cannot contain — the workload cannot express them, so "
+            "their absence above is structural, not an unrun measurement.\n"
+        )
+        lines.append("| workload | precision | why |")
+        lines.append("|---|---|---|")
+        for workload, precision, reason in unavailable:
+            lines.append(f"| {workload} | {precision} | {reason} |")
     text = "\n".join(lines) + "\n"
     (out_dir / "report.md").write_text(text)
     print("\n" + text)
@@ -268,13 +356,17 @@ def main():
         "--precision",
         nargs="*",
         default=[],
-        choices=["bf16", "f16"],
-        help="add OCANNL reduced storage precisions (mlp: the training recipe with master "
-        "weights + storage policy, f16 with dynamic loss scaling; gpt: the forward-only "
-        "leg with load-time weight conversion; gh-ocannl-492). Precision is an axis "
-        "independent of the scheduling variant, so each one requested here is run against "
-        "every selected variant — `--tuned --precision bf16` measures tuned bf16, which is "
-        "the only tensor-core route on RDNA3/3.5 (gh-ocannl-539)",
+        type=precision_spec,
+        metavar="bf16|f16|f16-static|f16-gatedN",
+        help="add OCANNL reduced storage precisions (training workloads: master weights + "
+        "storage policy, f16 with dynamic loss scaling; the forward-only gpt workload: "
+        "load-time weight conversion; gh-ocannl-492). Precision is an axis independent of "
+        "the scheduling variant, so each one requested here is run against every selected "
+        "variant — `--tuned --precision bf16` measures tuned bf16, which is the only "
+        "tensor-core route on RDNA3/3.5 (gh-ocannl-539). f16-static (fixed scale, no gate) "
+        "and f16-gatedN (fused on-device gate sampled every N steps) are the task-5 "
+        "gate-cost legs; they need a training workload and are reported as not applicable "
+        "on a forward-only one (gh-ocannl-551)",
     )
     ap.add_argument(
         "--materialized",
@@ -340,7 +432,8 @@ def main():
     if not fixtures:
         sys.exit("no fixtures found — run gen_fixtures.py first")
 
-    models = {fx: read_st_metadata(fx).get("model", "mlp") for fx in fixtures}
+    metas = {fx: read_st_metadata(fx) for fx in fixtures}
+    models = {fx: metas[fx].get("model", "mlp") for fx in fixtures}
     if "ocannl" in args.only and not args.skip_build:
         targets = sorted(
             {f"benchmarks/runners/ocannl/bench_{m}.exe" for m in models.values()}
@@ -349,6 +442,7 @@ def main():
 
     results = []
     failures = []
+    unavailable = []
     partial = HERE / "results" / "partial.jsonl"
     partial.parent.mkdir(parents=True, exist_ok=True)
     partial.write_text("")  # fresh run
@@ -376,14 +470,20 @@ def main():
                 variants.append("materialized")
             if args.tuned:
                 variants.append("tuned")
-            # The mixed-precision training recipe's benchmark consumer is bench_mlp; bench_gpt
-            # covers the forward-only leg (load-time weight conversion, no cast twins) — both
-            # via BENCH_PRECISION (gh-ocannl-492 task 4). Every scheduling variant composes with
-            # every precision (gh-ocannl-529 lifted the runner-side guard), so the OCANNL cells
-            # of a backend are the product of the two axes.
-            precisions = ["f32"] + (
-                list(args.precision) if model in PRECISION_MODELS else []
-            )
+            # Both training runners implement the mixed-precision recipe (master weights, storage
+            # policy, f16 loss scaling and its gate-cost legs); the forward-only gpt fixture takes
+            # BENCH_PRECISION as load-time weight conversion instead (gh-ocannl-492 task 4). Every
+            # scheduling variant composes with every precision (gh-ocannl-529 lifted the
+            # runner-side guard), so the OCANNL cells of a backend are the product of the two axes.
+            mode = metas[fx].get("mode", "train")
+            precisions = ["f32"]
+            for precision in args.precision:
+                reason = precision_unavailable(model, mode, precision)
+                if reason:
+                    unavailable.append((name, precision, reason))
+                    print(f"--- {name} ocannl/*/{precision}: NOT APPLICABLE ({reason})")
+                else:
+                    precisions.append(precision)
             for backend in ["cc"] + ([gpu_ocannl] if gpu_ocannl else []):
                 for precision in precisions:
                     for variant in variants:
@@ -392,13 +492,7 @@ def main():
                             print(f"--- {name} ocannl/{backend}/{cell}: SKIPPED (SKIP_CELLS; "
                                   "--no-skip-cells to run it anyway)")
                             continue
-                        env = dict(
-                            os.environ,
-                            BENCH_FIXTURE=str(fx),
-                            BENCH_TUNE="1" if variant == "tuned" else "0",
-                            BENCH_MATERIALIZE="1" if variant == "materialized" else "0",
-                            BENCH_PRECISION=precision,
-                        )
+                        env = cell_env(os.environ, fx, variant, precision)
                         cmd = [str(ocannl_exe(model)), f"--ocannl_backend={backend}"]
                         label = f"{name} ocannl/{backend}/{cell}"
                         # The cell's identity is what was dispatched, not what the runner chose to
@@ -442,8 +536,16 @@ def main():
                     )
 
     parity_check(results)
-    report(results, HERE / "results")
+    report(results, HERE / "results", unavailable)
     ok = True
+    if unavailable:
+        # Not a failure: these cells were requested but the workload cannot express them. Saying so
+        # is the point — an unavailable cell and an unrun one otherwise look identical.
+        print(
+            f"NOT APPLICABLE: {len(unavailable)} requested cell(s) the workload cannot express: "
+            + ", ".join(f"{w}/{p}" for w, p, _ in unavailable),
+            flush=True,
+        )
     if failures:
         ok = False
         print(

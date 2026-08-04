@@ -162,19 +162,13 @@ let rec map_code ~fidx (llc : Low_level.t) : Low_level.t =
           debug;
         }
   | Set_local (id, llsc) -> Set_local (id, map_scalar ~fidx llsc)
-  | Tile_mma
-      { d = d_tn, d_idcs; a = a_tn, a_idcs; b = b_tn, b_idcs; ta; tb; m; n; k; lane; fallback } ->
+  | Tile_mma ({ d = d_tn, d_idcs; a = a_tn, a_idcs; b = b_tn, b_idcs; fallback; _ } as tm) ->
       Tile_mma
         {
+          tm with
           d = (d_tn, Array.map d_idcs ~f:fidx);
           a = (a_tn, Array.map a_idcs ~f:fidx);
           b = (b_tn, Array.map b_idcs ~f:fidx);
-          ta;
-          tb;
-          m;
-          n;
-          k;
-          lane;
           (* The fallback's loop symbols are fresh and bound inside it; only free (outer) symbols
              are substituted, exactly like the base indices. *)
           fallback = map_code ~fidx fallback;
@@ -451,49 +445,66 @@ let tensorize_llc ~(zero_fringe : Tn.t -> bool) ~i ~j ~k ~lane ~simd_width (llc 
                 ~f:(fun (c, s) -> if Indexing.equal_symbol s sym then c else 0)
           | _ -> 0
         in
-        (* Index discipline: the tile spans the operand's last two axes with unit strides in the
-           micro-kernel symbols — [row] appears with coefficient 1 exactly in component [rank-2],
-           [col] in component [rank-1], and the third symbol not at all. Outer-loop terms (the
-           block base) may appear anywhere. *)
-        let role_ok (_tn, idcs) ~row ~col =
+        (* Index discipline: the tile is a 2-D slice of the operand — [col] appears with
+           coefficient 1 exactly in the minor component [rank-1] (elements of a tile line are
+           contiguous), [row] with coefficient 1 exactly in one earlier component (the tnode's
+           second-to-last axis in the plain case; further out when interior batch axes sit between
+           the roles, gh-ocannl-528), and the third symbol not at all. Outer-loop terms (the block
+           base, batch coordinates included) may appear anywhere. Returns the major-axis
+           leading-dimension stride in elements — the fragment loads' [ldm]. *)
+        let role_ld (tn, idcs) ~row ~col : int option =
           let rank = Array.length idcs in
-          rank >= 2
-          && coeff row idcs.(rank - 2) = 1
-          && coeff col idcs.(rank - 1) = 1
-          && List.for_all [ i; j; k ] ~f:(fun s ->
-              Array.for_alli idcs ~f:(fun p idx ->
-                  let allowed =
-                    if Indexing.equal_symbol s row then p = rank - 2
-                    else if Indexing.equal_symbol s col then p = rank - 1
-                    else false
-                  in
-                  (not (mentions s idx)) || allowed))
+          let owned_axis sym =
+            let ps =
+              Array.filter_mapi idcs ~f:(fun p idx -> Option.some_if (mentions sym idx) p)
+            in
+            match Array.to_list ps with [ p ] when coeff sym idcs.(p) = 1 -> Some p | _ -> None
+          in
+          if rank < 2 then None
+          else
+            match (owned_axis row, owned_axis col) with
+            | Some pr, Some pc
+              when pc = rank - 1 && pr < pc
+                   && List.for_all [ i; j; k ] ~f:(fun s ->
+                       Indexing.equal_symbol s row || Indexing.equal_symbol s col
+                       || not (Array.exists idcs ~f:(mentions s))) ->
+                let dims = Lazy.force tn.Tn.dims in
+                let ld = ref 1 in
+                for x = pr + 1 to rank - 1 do
+                  ld := !ld * dims.(x)
+                done;
+                Some !ld
+            | _ -> None
         in
-        if not (role_ok (d_tn, d_idcs) ~row:i ~col:j) then
-          invalid_arg
-            ("Schedule.Tensorize: accumulator " ^ Tn.debug_name d_tn
-           ^ " must be indexed [..., i, j] over its last two axes (unit coefficients)");
-        (* Operand roles, including transposed storage: [a] is [..., i, k] ([ta = false]) or [...,
-           k, i] ([ta = true]); [b] is [..., k, j] ([tb = false]) or [..., j, k] ([tb = true]). An
-           operand matches at most one role and orientation ([role_ok] requires both role symbols
-           present at the right positions and the third absent), so the assignment is
-           unambiguous. *)
+        let d_ld =
+          match role_ld (d_tn, d_idcs) ~row:i ~col:j with
+          | Some ld -> ld
+          | None ->
+              invalid_arg
+                ("Schedule.Tensorize: accumulator " ^ Tn.debug_name d_tn
+               ^ " must be indexed [..., i, ..., j] with [j] on its last axis (unit coefficients)")
+        in
+        (* Operand roles, including transposed storage: [a] is [..., i, ..., k] ([ta = false]) or
+           [..., k, ..., i] ([ta = true]); [b] is [..., k, ..., j] ([tb = false]) or
+           [..., j, ..., k] ([tb = true]). An operand matches at most one role and orientation
+           ([role_ld] requires both role symbols owned at valid positions and the third absent), so
+           the assignment is unambiguous. *)
         let a_role op =
-          if role_ok op ~row:i ~col:k then Some false
-          else if role_ok op ~row:k ~col:i then Some true
-          else None
+          match role_ld op ~row:i ~col:k with
+          | Some ld -> Some (false, ld)
+          | None -> Option.map (role_ld op ~row:k ~col:i) ~f:(fun ld -> (true, ld))
         in
         let b_role op =
-          if role_ok op ~row:k ~col:j then Some false
-          else if role_ok op ~row:j ~col:k then Some true
-          else None
+          match role_ld op ~row:k ~col:j with
+          | Some ld -> Some (false, ld)
+          | None -> Option.map (role_ld op ~row:j ~col:k) ~f:(fun ld -> (true, ld))
         in
-        let a_op, ta, b_op, tb =
+        let a_op, ta, a_ld, b_op, tb, b_ld =
           match (a_role x_op, b_role y_op) with
-          | Some ta, Some tb -> (x_op, ta, y_op, tb)
+          | Some (ta, a_ld), Some (tb, b_ld) -> (x_op, ta, a_ld, y_op, tb, b_ld)
           | _ -> (
               match (a_role y_op, b_role x_op) with
-              | Some ta, Some tb -> (y_op, ta, x_op, tb)
+              | Some (ta, a_ld), Some (tb, b_ld) -> (y_op, ta, a_ld, x_op, tb, b_ld)
               | _ ->
                   (* Naming the two tnodes is not enough to act on: the discipline is about the
                      INDEX EXPRESSIONS, so report them against the micro-kernel symbols. *)
@@ -509,9 +520,10 @@ let tensorize_llc ~(zero_fringe : Tn.t -> bool) ~i ~j ~k ~lane ~simd_width (llc 
                     ^ "]"
                   in
                   invalid_arg
-                    ("Schedule.Tensorize: operands of the product must be indexed [..., i, k] \
-                      (or transposed [..., k, i]) and [..., k, j] (or transposed [..., j, k]) \
-                      over their last two axes (unit coefficients); with i="
+                    ("Schedule.Tensorize: operands of the product must be indexed [..., i, ..., k] \
+                      (or transposed [..., k, ..., i]) and [..., k, ..., j] (or transposed \
+                      [..., j, ..., k]) with the second role symbol on the last axis (unit \
+                      coefficients); with i="
                     ^ Indexing.symbol_ident i ^ " j=" ^ Indexing.symbol_ident j ^ " k="
                     ^ Indexing.symbol_ident k ^ " the operands are " ^ show x_op ^ ", "
                     ^ show y_op))
@@ -612,6 +624,9 @@ let tensorize_llc ~(zero_fringe : Tn.t -> bool) ~i ~j ~k ~lane ~simd_width (llc 
                   m = ifc.to_ + 1;
                   n = jfc.to_ + 1;
                   k = kfc.to_ + 1;
+                  ldd = d_ld;
+                  lda = a_ld;
+                  ldb = b_ld;
                   lane;
                   fallback = for_loop ifc;
                 };
@@ -2450,7 +2465,9 @@ let contract_tensorized_accumulator ~lane ~(masks : pad_mask list) (opt : Low_le
         let rec replace = function
           | Tile_mma ({ lane = l; _ } as tm') when same_lane l ->
               replaced := true;
-              Tile_mma { tm' with d = (fragment, fragment_base); fallback }
+              (* The fragment is a fresh contiguous [m x n] tile, so its leading dimension is its
+                 minor extent regardless of the original accumulator's (possibly batched) layout. *)
+              Tile_mma { tm' with d = (fragment, fragment_base); ldd = n; fallback }
           | Seq (a, b) -> Seq (replace a, replace b)
           | For_loop f -> For_loop { f with body = replace f.body }
           | If ({ body; _ } as x) -> If { x with body = replace body }
@@ -2462,7 +2479,16 @@ let contract_tensorized_accumulator ~lane ~(masks : pad_mask list) (opt : Low_le
         let target_idcs = Array.copy d_base in
         let rank = Array.length target_idcs in
         if rank < 2 then invalid_arg "Schedule.Tensorize: accumulator rank must be at least 2";
-        target_idcs.(rank - 2) <- add_symbol target_idcs.(rank - 2) fi;
+        (* The row symbol's axis in the original accumulator indexing — the tnode's second-to-last
+           axis in the plain case, further out when interior batch axes sit between the roles
+           (gh-ocannl-528); the column is always the minor axis ([Tensorize]'s role discipline). *)
+        let row_axis =
+          let hits =
+            Array.filter_mapi original_d_idcs ~f:(fun p idx -> Option.some_if (mentions i idx) p)
+          in
+          match Array.to_list hits with [ p ] -> p | _ -> rank - 2
+        in
+        target_idcs.(row_axis) <- add_symbol target_idcs.(row_axis) fi;
         target_idcs.(rank - 1) <- add_symbol target_idcs.(rank - 1) fj;
         let local_idcs = [| Indexing.Iterator fi; Indexing.Iterator fj |] in
         let mask_cond pm =
