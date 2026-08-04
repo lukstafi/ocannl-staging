@@ -614,7 +614,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
 
        The extent-32 lane loop binds threadIdx.x, so the 32 consecutive .x threads reaching the
        statement form the cooperating warp. Transposed operand storage ([ta]/[tb]) loads wmma
-       fragments as [col_major] with swapped offset arithmetic; the fp8 path declines it in v1.
+       fragments as [col_major] with swapped offset arithmetic; both inline-PTX arms index every
+       gathered element at the transposed (col, row) address instead (gh-ocannl-481 item 1).
        Uniform f32 targets the wmma tf32 shape m16n16k8 on sm_80+ (the [(wmma-tf32)] marker selects
        the arch) when the numerics policy opts in ([Numerics.t.tf32_matmuls], gh-ocannl-478): tf32
        truncates the mantissa to 10 bits, so with the policy off — the default — uniform f32 stays
@@ -666,12 +667,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           in
           if
             is_fp8_combo
-            (* Transposed operand storage ([ta]/[tb]) is declined in v1: the per-lane byte gathers
-               below assume the roles' own layouts (A row-major, B row-major source gathered into
-               the col-major fragment); the scalar fallback keeps transposed fp8 correct. Swapping
-               the gather arithmetic per flag is the natural extension. *)
-            && (not ta)
-            && (not tb)
             && m % 16 = 0
             && n % 8 = 0
             && k % 32 = 0
@@ -687,7 +682,14 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                accumulator D (16x8 f32) regs d0..d3 = rows {g, g+8} x columns {2t, 2t+1}.
                Low-indexed elements sit in low-order bytes of each .b32 register. Byte loads impose
                no alignment or stride constraints and read generic addresses, covering both
-               __shared__ tiles and device pointers. *)
+               __shared__ tiles and device pointers.
+
+               Transposed operand storage ([ta]/[tb], gh-ocannl-481 item 1) is bookkeeping here, not
+               a layout constraint: every fragment byte is addressed by its logical (row, col)
+               through [a_at]/[b_at], which index the STORED matrix at (col, row) under the flag
+               while keeping the operand's own leading dimension. The fragment content is unchanged,
+               only its addresses are — so the gradient GEMMs ([dA = g.B^T], [dB = A^T.g]), whose
+               layouts are exactly these, tensorize instead of silently scalar-falling-back. *)
             let open PPrint in
             let mt = m / 16 and nt = n / 8 and kt = k / 32 in
             let pack4 name base offs =
@@ -696,14 +698,30 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                  16) | ((unsigned)%s[%s] << 24);"
                 name base offs.(0) base offs.(1) base offs.(2) base offs.(3)
             in
-            let consec p0 = [| p0 ^ " + 0"; p0 ^ " + 1"; p0 ^ " + 2"; p0 ^ " + 3" |] in
-            let strided p0 stride =
-              [|
-                p0 ^ " + 0 * " ^ stride;
-                p0 ^ " + 1 * " ^ stride;
-                p0 ^ " + 2 * " ^ stride;
-                p0 ^ " + 3 * " ^ stride;
-              |]
+            (* Byte offset of logical element (row, col) in an operand stored under its own leading
+               dimension, transposed or not (fp8 is one byte per element, so element index = byte
+               offset from the [unsigned char *] base). *)
+            let elem_at ~ld ~transposed ~row ~col =
+              if transposed then Printf.sprintf "(%s) * %d + (%s)" col ld row
+              else Printf.sprintf "(%s) * %d + (%s)" row ld col
+            in
+            let a_at ~row ~col = elem_at ~ld:lda ~transposed:ta ~row ~col in
+            let b_at ~row ~col = elem_at ~ld:ldb ~transposed:tb ~row ~col in
+            let a_row lo = if lo then "__mi * 16 + __mma_g" else "__mi * 16 + __mma_g + 8" in
+            let a_col c = Printf.sprintf "__ki * 32 + 4 * __mma_t + %d" c in
+            let b_row r = Printf.sprintf "__ki * 32 + 4 * __mma_t + %d" r in
+            let b_col = "__ni * 8 + __mma_g" in
+            (* A regs: 4 consecutive columns at rows {g, g+8} of column groups {4t, 4t+16}. *)
+            let a_reg name ~lo ~c =
+              "      "
+              ^ pack4 name "__mma_ap"
+                  (Array.init 4 ~f:(fun i -> a_at ~row:(a_row lo) ~col:(a_col (c + i))))
+            in
+            (* B regs: 4 consecutive rows of the column-major fragment column [g]. *)
+            let b_reg name ~r =
+              "      "
+              ^ pack4 name "__mma_bp"
+                  (Array.init 4 ~f:(fun i -> b_at ~row:(b_row (r + i)) ~col:b_col))
             in
             let barrier = "__syncthreads();" in
             let body_lines =
@@ -723,22 +741,12 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                 "    float __mma_d0 = __mma_dr0[0], __mma_d1 = __mma_dr0[1];";
                 "    float __mma_d2 = __mma_dr1[0], __mma_d3 = __mma_dr1[1];";
                 Printf.sprintf "    for (int __ki = 0; __ki < %d; ++__ki) {" kt;
-                Printf.sprintf
-                  "      const unsigned char *__mma_ar0 = __mma_ap + (__mi * 16 + __mma_g) * %d + \
-                   __ki * 32 + 4 * __mma_t;"
-                  lda;
-                Printf.sprintf "      const unsigned char *__mma_ar1 = __mma_ar0 + 8 * %d;" lda;
-                "      " ^ pack4 "__mma_a0" "__mma_ar0" (consec "0");
-                "      " ^ pack4 "__mma_a1" "__mma_ar1" (consec "0");
-                "      " ^ pack4 "__mma_a2" "__mma_ar0" (consec "16");
-                "      " ^ pack4 "__mma_a3" "__mma_ar1" (consec "16");
-                Printf.sprintf
-                  "      const unsigned char *__mma_br0 = __mma_bp + (__ki * 32 + 4 * __mma_t) * \
-                   %d + __ni * 8 + __mma_g;"
-                  ldb;
-                Printf.sprintf "      const unsigned char *__mma_br1 = __mma_br0 + 16 * %d;" ldb;
-                "      " ^ pack4 "__mma_b0" "__mma_br0" (strided "0" (Int.to_string ldb));
-                "      " ^ pack4 "__mma_b1" "__mma_br1" (strided "0" (Int.to_string ldb));
+                a_reg "__mma_a0" ~lo:true ~c:0;
+                a_reg "__mma_a1" ~lo:false ~c:0;
+                a_reg "__mma_a2" ~lo:true ~c:16;
+                a_reg "__mma_a3" ~lo:false ~c:16;
+                b_reg "__mma_b0" ~r:0;
+                b_reg "__mma_b1" ~r:16;
                 "      asm(\"mma.sync.aligned.m16n8k32.row.col.f32.e5m2.e5m2.f32 \"";
                 "          \"{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\"";
                 "          : \"+f\"(__mma_d0), \"+f\"(__mma_d1), \"+f\"(__mma_d2), \"+f\"(__mma_d3)";
