@@ -27,8 +27,8 @@ let fast_math_enabled () = Utils.get_global_flag ~default:false ~arg_name:"cc_ba
    order of magnitude costlier than on Unix, that probing dominates short tests -- measured on one
    Windows box, test/operations/hello_world_dim1x1 runs in 1.52s probing against 1.00s cached.
 
-   So memoize across processes too, in files under the temp directory. The key covers everything
-   that can change an answer without changing the file's identity: the settings feeding the probes,
+   So memoize across processes too, in files under [probe_cache_dir]. The key covers everything
+   that can change an answer without changing a file's identity: the settings feeding the probes,
    plus a digest of PATH standing in for which toolchain is active (an opam switch change, a
    different compiler in front). A stale entry would silently select wrong ISA flags, so the key
    errs towards re-probing; [cc_backend_probe_cache=false] bypasses the files entirely.
@@ -39,8 +39,38 @@ let fast_math_enabled () = Utils.get_global_flag ~default:false ~arg_name:"cc_ba
    answer, and one file per probe keeps a publication from ever being interleaved with another's. *)
 let probe_cache_marker = "ocannl-cc-probe-v1\n"
 
+(* The cached values are interpolated straight into [Sys.command], so where they are stored is a
+   privilege boundary, not a detail: a predictable name under a world-writable POSIX /tmp would let
+   any local account pre-create a file bearing our marker and thereby choose the compiler command
+   OCANNL runs. Hence a per-user directory created 0700, refused unless it really is a directory we
+   own with no group/other access -- a squatted path (or a symlink, which is why this is [lstat] and
+   not [stat]) fails the test and probing simply stays in-process, as it was before this cache.
+   Ownership and permissions are checked on POSIX only: Windows has no equivalent exposure, its
+   temp directory being per-user already, and it reports both halves synthetically -- [getuid]
+   answers 1 where [lstat] answers uid 0, and the mode always reads 0o777 -- so the test would
+   reject OCANNL's own directory and quietly disable the cache on the platform that needs it most.
+   That the path is a directory rather than a planted symlink is still checked everywhere. *)
+let probe_cache_dir =
+  lazy
+    (let dir =
+       Stdlib.Filename.concat
+         (Stdlib.Filename.get_temp_dir_name ())
+         (Printf.sprintf "ocannl_cc_probes_%d" (Unix.getuid ()))
+     in
+     try
+       (try Unix.mkdir dir 0o700 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+       let st = Unix.lstat dir in
+       let ours =
+         match st.Unix.st_kind with
+         | Unix.S_DIR ->
+             Sys.win32 || (st.Unix.st_uid = Unix.getuid () && st.Unix.st_perm land 0o077 = 0)
+         | _ -> false
+       in
+       Option.some_if ours dir
+     with _ -> None)
+
 let probe_cache_path =
-  let dir =
+  let key_digest =
     lazy
       (let key =
          String.concat ~sep:"\000"
@@ -53,17 +83,21 @@ let probe_cache_path =
        String.prefix (Stdlib.Digest.to_hex (Stdlib.Digest.string key)) 16)
   in
   fun ~name ->
-    Stdlib.Filename.concat
-      (Stdlib.Filename.get_temp_dir_name ())
-      (Printf.sprintf "ocannl_cc_probe_%s_%s.txt" name (Lazy.force dir))
+    Option.map (Lazy.force probe_cache_dir) ~f:(fun dir ->
+        Stdlib.Filename.concat dir
+          (Printf.sprintf "ocannl_cc_probe_%s_%s.txt" name (Lazy.force key_digest)))
 
 (* [compute] must be deterministic given the key above: its result is what every later process on
    this machine will use. [validate] rejects a cached value the caller cannot interpret, so that a
    foreign file carrying our marker re-probes instead of propagating a parse failure. *)
 let cached_probe ?(validate = fun _ -> true) ~name ~compute () =
-  if not (Utils.get_global_flag ~default:true ~arg_name:"cc_backend_probe_cache") then compute ()
-  else
-    let path = probe_cache_path ~name in
+  match
+    if Utils.get_global_flag ~default:true ~arg_name:"cc_backend_probe_cache" then
+      probe_cache_path ~name
+    else None
+  with
+  | None -> compute ()
+  | Some path -> (
     let cached =
       try
         let data = Stdio.In_channel.read_all path in
@@ -81,16 +115,20 @@ let cached_probe ?(validate = fun _ -> true) ~name ~compute () =
         let value = compute () in
         (try
            (* Publish by rename so a concurrent reader sees either the old file or the whole new
-              one, never a partial write. [temp_file] puts the staging file in the same directory,
-              hence on the same volume, which rename requires. *)
-           let tmp = Stdlib.Filename.temp_file "ocannl_cc_probe_" ".tmp" in
+              one, never a partial write. Staging inside the same (private) directory keeps the
+              rename on one volume, which it requires, and keeps the staging file unreadable to
+              anyone else too. *)
+           let tmp =
+             Stdlib.Filename.temp_file ~temp_dir:(Stdlib.Filename.dirname path)
+               "ocannl_cc_probe_" ".tmp"
+           in
            Stdio.Out_channel.write_all tmp ~data:(probe_cache_marker ^ value);
            try Stdlib.Sys.rename tmp path
            with e ->
              (try Stdlib.Sys.remove tmp with _ -> ());
              raise e
          with _ -> ());
-        value
+        value)
 
 let compiler_command =
   let resolved =

@@ -26,8 +26,17 @@ jobs:
     # DUNE_CACHE, and dune's shared cache is opt-in -- so the cache it saves is
     # ~400 bytes on every platform and every run recompiles from scratch.
     # Enabling it here is what makes that input do anything.
+    #
+    # `enabled-except-user-rules` rather than `enabled`: our test suite is
+    # largely user-written rules that run executables, and what those print
+    # depends on runner state dune does not model as a dependency -- the C
+    # toolchain the cc backend shells out to, the host ISA that reaches
+    # `-march=native`, the core count behind pool-rendered Grid loops. Caching
+    # those outputs would let a result recorded on one runner stand in for an
+    # execution that never happened on this one, which is a false green rather
+    # than a speedup. Compilation and linking, the dominant cost, still cache.
     env:
-      DUNE_CACHE: enabled
+      DUNE_CACHE: enabled-except-user-rules
       # DUNE_CACHE_ROOT is C:\dune while the workspace lives on D:\, and dune's
       # default hardlink storage mode cannot cross volumes. `runner.os` is not
       # available in a job-level `env`, hence the matrix test.
