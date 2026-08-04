@@ -22,12 +22,36 @@ jobs:
         ocaml-compiler:
           - 5.3.x
     runs-on: ${{ matrix.os }}
+    # setup-ocaml's `dune-cache: true` exports DUNE_CACHE_ROOT but never
+    # DUNE_CACHE, and dune's shared cache is opt-in -- so the cache it saves is
+    # ~400 bytes on every platform and every run recompiles from scratch.
+    # Enabling it here is what makes that input do anything.
+    env:
+      DUNE_CACHE: enabled
+      # DUNE_CACHE_ROOT is C:\dune while the workspace lives on D:\, and dune's
+      # default hardlink storage mode cannot cross volumes. `runner.os` is not
+      # available in a job-level `env`, hence the matrix test.
+      DUNE_CACHE_STORAGE_MODE: ${{ matrix.os == 'windows-latest' && 'copy' || 'auto' }}
     steps:
     - name: Set git to use LF
       run: |
         git config --global core.autocrlf false
         git config --global core.eol lf
         git config --global core.ignorecase false
+    # Defender scans every file the cache restore unpacks, every executable dune
+    # links, and every kernel .dll the cc backend writes and then dlopens -- the
+    # last two happen thousands of times per build. Exclusions must precede the
+    # first restore to be worth anything. Best-effort: the runner user is an
+    # admin today, but a policy-managed image would refuse, and that is not a
+    # reason to fail the build.
+    - name: Exclude build directories from Defender (Windows)
+      if: runner.os == 'Windows'
+      continue-on-error: true
+      run: |
+        foreach ($path in 'D:\a', 'C:\.opam', 'C:\dune', $env:TEMP) {
+          try { Add-MpPreference -ExclusionPath $path -ErrorAction Stop }
+          catch { Write-Host "could not exclude ${path}: $($_.Exception.Message)" }
+        }
     # Refresh the apt index: the runner image's package lists go stale, making
     # opam's depext step 404 on superseded package versions.
     - name: Update apt package index
@@ -176,5 +200,18 @@ jobs:
     - name: Install opam dependencies
       if: runner.os != 'Windows' && steps.opam-cache.outputs.cache-hit != 'true'
       run: opam install . -y --deps-only --with-test --with-doc
+    # The archive's cost is dominated by file count, not bytes, and that count is
+    # dominated by sources opam has no further use for: it keeps a separate full
+    # copy of the dune tree for each of dune's ~17 sub-packages, so a switch
+    # measures ~150k files of which ~138k are `.opam-switch/sources` holding
+    # ~18% of the bytes. Unpacking 1.28GB of that took 773s on windows against
+    # 18s for 715MB on ubuntu. Nothing downstream reads them: the install steps
+    # above are the only consumers and they are skipped on a cache hit, which is
+    # also why this only needs to run when a save is going to happen (the save
+    # itself is actions/cache's post step, at the end of the job).
+    - name: Prune sources from the switch before caching
+      if: steps.opam-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: rm -rf _opam/.opam-switch/sources _opam/.opam-switch/build
     - run: opam exec -- dune build
     - run: opam exec -- dune runtest
