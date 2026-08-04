@@ -2029,6 +2029,15 @@ let reduce_solved_basis (solved : solved_dim list) : string option =
   | [ b ] -> Some b
   | _ -> None
 
+(* gh-ocannl-544, dim-level counterpart of [resolve_at_use] (defined below): marked dimension
+   variables may close to the GLB of their use sites at stage 6+; unmarked, unconstrained ones are
+   guessed minimal instead (e.g. a learning-rate expression's axis meeting a single parameter
+   shape closes to 1 rather than widening to it). [At_least_dim] variables keep GLB closing
+   regardless: direct indexing is a dim-carrying use. *)
+let resolve_at_use_dim = Hash_set.create (module Dim_var)
+let add_resolve_at_use_dim v = Hash_set.add resolve_at_use_dim v
+let is_resolve_at_use_dim v = Hash_set.mem resolve_at_use_dim v
+
 let%track6_sexp rec unify_dim ~stage origin (eq : dim * dim) env : constraint_ list * _ =
   let dim1 : dim = subst_dim env @@ fst eq and dim2 : dim = subst_dim env @@ snd eq in
   match (dim1, dim2) with
@@ -2294,6 +2303,12 @@ let%track6_sexp rec unify_dim ~stage origin (eq : dim * dim) env : constraint_ l
         @@ Shape_error
              ( "occurs check failed: dimension variable occurs in its own definition",
                [ Dim_mismatch [ Var v; dim2 ] ] );
+      (* Unification merges the axes, so use-site resolvability is shared (gh-ocannl-544). *)
+      (match dim2 with
+      | Var v2 ->
+          if is_resolve_at_use_dim v then add_resolve_at_use_dim v2;
+          if is_resolve_at_use_dim v2 then add_resolve_at_use_dim v
+      | _ -> ());
       let ineqs = ref [] in
       let f in_ =
         let more_ineqs, result = s_dim_one_in_entry v ~value:dim2 in_ in
@@ -4302,8 +4317,20 @@ let%debug5_sexp eliminate_dim_entry stage origin env v ~glb constr =
       if is_stage7 stage then
         Some (Dim_eq { d1 = Var v; d2 = get_bcast_dim ~d:1 ~proj_id:57 (); origin })
       else None
-  | Some glb, (At_least_dim _ | Unconstrained_dim) when is_stage6_up stage ->
+  | Some glb, At_least_dim _ when is_stage6_up stage ->
+      (* Direct indexing is a dim-carrying use: meet the use sites regardless of marking. *)
       Some (Dim_eq { d1 = Var v; d2 = glb; origin })
+  | Some glb, Unconstrained_dim when is_stage6_up stage && is_resolve_at_use_dim v ->
+      Some (Dim_eq { d1 = Var v; d2 = glb; origin })
+  | Some _, Unconstrained_dim when is_stage7 stage ->
+      (* gh-ocannl-544, dim-level: an unmarked, unconstrained operation-result axis closes minimal
+         instead of widening to its use sites' GLB (e.g. a learning-rate expression's axis meeting
+         a single parameter shape closes to 1 and broadcasts). Deferred to stage 7 — not stage 6 —
+         because stage-6 row closings still propagate concrete dims through equality chains
+         (einsum specs), and an eager guess-to-1 would conflict with a dim that arrives within the
+         same stage (box_muller's interior axes). *)
+      Some (Dim_eq { d1 = Var v; d2 = guess_dim (); origin })
+  | Some _, Unconstrained_dim when is_stage6_up stage -> None
   | None, At_least_dim d when is_stage7 stage ->
       Some (Dim_eq { d1 = Var v; d2 = get_default_dim ~d ~proj_id:58 (); origin })
   | None, _ when is_stage7 stage -> Some (Dim_eq { d1 = Var v; d2 = guess_dim (); origin })
@@ -4528,7 +4555,11 @@ let%debug4_sexp solve_inequalities ~(stage : stage)
           (more_ineqs, env)
       | Terminal_dim (is_param, d, origin) ->
           let env = update_dim_is_param d is_param env in
-          let more_ineqs = close_dim_terminal ~stage ~is_param origin env @@ subst_dim env d in
+          let d = subst_dim env d in
+          (* Terminal (leaf and parameter) axes resolve at their use sites — protect them from the
+             minimal-guess default of [eliminate_dim_entry] (gh-ocannl-544). *)
+          Set.iter (vars_of_dim d) ~f:add_resolve_at_use_dim;
+          let more_ineqs = close_dim_terminal ~stage ~is_param origin env d in
           (more_ineqs, env)
       | Terminal_row (is_param, r, origin) ->
           let env = update_row_is_param r is_param env in

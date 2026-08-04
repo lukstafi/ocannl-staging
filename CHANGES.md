@@ -11,7 +11,11 @@
   operation `stretch` requests use-site resolution by name; the `0.5 + 0.5` shape-inferred
   constant idiom is replaced by `stretch 1.0`, and pooling kernels use `stretch 0.0`. The
   gh-ocannl-540 cast-twin pin in `Mixed_prec.cast_param` is reverted: the default now guarantees
-  a twin keeps its master's shape (guarded by `test/operations/mixed_prec_twin_shape`).
+  a twin keeps its master's shape (guarded by `test/operations/mixed_prec_twin_shape`). The same
+  policy applies to dimension variables: an unmarked, unconstrained operation-result axis is
+  guessed minimal instead of widening to its use sites (a learning-rate expression meeting a
+  single parameter shape stays scalar); `At_least_dim` axes keep meeting their use sites, since
+  direct indexing is a dim-carrying use.
 
 ## [0.9] -- 2026-08-03
 

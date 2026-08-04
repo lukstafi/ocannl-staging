@@ -69,3 +69,18 @@ let () =
   ignore (Train.forward_once (Context.auto ()) total : Context.t);
   let ones = find_by_name total "stretch" in
   Stdio.printf "kernel: stretch(1.0) %s\n" (show_dims (dims_of ones))
+
+(* Dim-level close-down: the sum of two fixed scalars has one open axis variable; consumed
+   pointwise by a [din]-wide tensor, that axis used to widen to the use site's dim. Now an
+   unmarked, unconstrained axis is guessed minimal and broadcasts — the pre-544 [0.5 + 0.5]
+   result no longer silently inherits its consumer's width (e.g. a learning-rate expression
+   meeting a single parameter shape stays scalar). *)
+let () =
+  let x4 = batched_input "x4" in
+  let one = TDSL.O.( + ) (TDSL.number 0.5) (TDSL.number 0.5) in
+  let%op y4 = one *. x4 in
+  let%op loss4 = y4 ++ "...|i=>0" in
+  ignore (Train.forward_once (Context.auto ()) loss4 : Context.t);
+  let d = dims_of one in
+  Stdio.printf "dim close-down: 0.5+0.5 %s | scalar=%b\n" (show_dims d)
+    (Array.fold d ~init:1 ~f:( * ) = 1)

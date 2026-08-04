@@ -69,6 +69,12 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   and the row symbol appearing in an operand index. A parity oracle whose model has no batch axis
   cannot see a batch-broadcast bug — `mixed_prec_parity.ml` had covered this recipe for a whole
   release; `mixed_prec_twin_shape.ml` and `stretch_resolution.ml` pin the shapes directly.
+  Dim variables follow the same policy (`Row.add_resolve_at_use_dim`): unmarked
+  `Unconstrained_dim` axes are guessed minimal instead of widening to the use-site GLB — but only
+  at stage 7, because stage-6 row closings still push concrete dims through einsum equality
+  chains and an eager stage-6 guess-to-1 conflicts with a dim arriving in the same stage
+  (box_muller's interior axes were the canary). `At_least_dim` axes always meet their use sites
+  (direct indexing is a dim-carrying use).
 - That spurious axis is also how a shape defect reaches the SCHEDULER, which is where it actually
   got noticed: `Tensorize`'s role check rejects an operand mentioning the third micro symbol, and
   `Stage`'s insertion point L\* is "the deepest loop carrying an outer-part symbol", so an operand

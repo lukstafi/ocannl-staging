@@ -1917,9 +1917,12 @@ let set_terminal ~is_param (sh : t) =
    propagate it further inside [Row.unify_row]. *)
 let set_resolve_at_use (sh : t) =
   let mark row =
-    match (Row.subst_row !state row).bcast with
+    let row = Row.subst_row !state row in
+    (match row.bcast with
     | Row.Row_var v -> Row.add_resolve_at_use v
-    | Row.Broadcastable -> ()
+    | Row.Broadcastable -> ());
+    List.iter (row.beg_dims @ row.dims) ~f:(fun d ->
+        Set.iter (Row.vars_of_dim d) ~f:Row.add_resolve_at_use_dim)
   in
   mark sh.batch;
   mark sh.input;

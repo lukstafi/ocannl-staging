@@ -602,6 +602,16 @@ in but cannot silently widen it beyond its arguments' shapes (the gh-ocannl-540
 cast-twin trap). The mark lives on row variables (`Row.add_resolve_at_use`) and
 propagates through unification.
 
+The same policy split applies one level down, to dimension variables
+(`Row.add_resolve_at_use_dim`): a marked axis may close to the GLB of its use
+sites at stage 6, while an unmarked, `Unconstrained_dim` axis is guessed
+minimal at stage 7 — e.g. a learning-rate expression's axis meeting a single
+parameter shape closes to 1 and broadcasts instead of widening to it. The
+guess is deferred past stage 6 because stage-6 row closings still propagate
+concrete dims through equality chains (einsum specs), and an eager guess would
+conflict with a dim arriving within the same stage. `At_least_dim` variables
+keep GLB closing regardless of marking: direct indexing is a dim-carrying use.
+
 ## 8. Compact Rule Table
 
 For quick reference, the core generation rules in `get_inequalities` are:

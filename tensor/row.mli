@@ -256,6 +256,14 @@ val add_resolve_at_use : row_var -> unit
 
 val is_resolve_at_use : row_var -> bool
 
+val add_resolve_at_use_dim : dim_var -> unit
+(** The dim-level counterpart of {!add_resolve_at_use}: a marked dimension variable may close to
+    the GLB of its use sites; unmarked, unconstrained ones are guessed minimal (dim-1) instead.
+    [At_least_dim]-constrained variables keep GLB closing regardless — direct indexing is a
+    dim-carrying use. *)
+
+val is_resolve_at_use_dim : dim_var -> bool
+
 val subst_row : environment -> t -> t
 
 val unify_row :
