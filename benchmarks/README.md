@@ -98,7 +98,9 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   copies and no loss scaling). Parity is gated at the looser `PARITY_TOL_PRECISION` envelopes.
   In the gpt graph the attention softmax and its causal-mask fill are pinned at f32 in both
   modes — AMP's softmax rule, and for f16 a hard requirement: `-1e9` is outside half's range and
-  the lowering's constant guard rejects it. The scores matmul feeding them stays reduced, which
+  the lowering's constant guard rejects it. Under f16 the masked scores are also materialized,
+  since a pin protects a node's own assignment and not the one it would be inlined into (the
+  forward-only graph virtualizes that node). The scores matmul feeding them stays reduced, which
   is the work these legs measure.
 
   The gh-ocannl-492 task-5 gate-cost legs (f16 and a training workload only):
