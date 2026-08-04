@@ -410,12 +410,18 @@ struct
 
   (* The explicit vector renderings work at the compute precision, so admitting fp16 here is
      admitting native 16-bit vector arithmetic -- [vec_ext_typ] mints a [HALF_T] vector and the
-     lane count doubles. It follows [compute_prec] exactly: a half kernel that widens to f32 keeps
-     f32 lanes and f32 gates. *)
+     lane count doubles.
+
+     The condition is the target's, not the policy's, and the two are not the same question.
+     Arriving here at [Half_prec] does not mean [fp16_arithmetic] chose it: [narrow_compute_f32 =
+     false] also leaves half alone, on any target, and there [HALF_T] is [uint16_t] -- a vector of
+     those would do integer arithmetic on raw half bit patterns and quietly corrupt the loop. So
+     ask the probe directly. Declining on a merely [`Promoted] target costs nothing that existed
+     before gh-ocannl-516, when half never vectorized at all. *)
   let vector_prec_ok prec =
     match prec with
     | Ops.Single_prec _ | Ops.Double_prec _ -> true
-    | Ops.Half_prec _ -> Ops.equal_prec (compute_prec prec) prec
+    | Ops.Half_prec _ -> has_native_fp16_arithmetic ()
     | _ -> false
 
   (* Override operation syntax to handle special precision types *)

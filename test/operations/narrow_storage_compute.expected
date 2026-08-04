@@ -7,6 +7,8 @@ native-fp16 vectorized rendering is bitwise identical to the serial twin: true
 native-fp16 relative error stays within a few half ulps: true
 f32 compute over half storage keeps the intermediate finite: true
 fp16 compute applies fp16's ceiling to the intermediate: true
+per-operator half FMA computes 1.5 * 2 + 1.5: true
+the shared half FMA converts rather than bit-casting: true
 bf16 loop vectorizes with a converting load/store: true
 no operator narrows only to be widened again: true
 arithmetic is f32: true

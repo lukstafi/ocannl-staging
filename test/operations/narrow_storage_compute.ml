@@ -187,6 +187,39 @@ let () =
 
   Ir.Numerics.set_policy { base with narrow_compute_f32 = true; fp16_arithmetic = false };
 
+  (* --- 2c. The shared fp16 FMA must survive an emulated target. --- *)
+  (* `narrow_compute_f32 = false` leaves half at half on *any* target, including one without
+     `_Float16`, where `HALF_T` is `uint16_t`. `OCANNL_HALF_FMA` therefore cannot cast its operands
+     to float directly -- that would compute on the raw half bit pattern (0x3c00 rather than 1.0) --
+     nor take the elementwise builtin, which rejects integer operands. The macro text is what
+     encodes that, and it travels with the kernel, so checking the emitted definition holds on a
+     native machine too. *)
+  let fma_leg () =
+    let a = NTDSL.init ~l:"fma_a" ~prec:Ir.Ops.half ~o:[ 4 ] ~f:(fun _ -> 1.5) () in
+    let b = NTDSL.init ~l:"fma_b" ~prec:Ir.Ops.half ~o:[ 4 ] ~f:(fun _ -> 2.0) () in
+    let%op y = (a *. b) + a in
+    Tn.update_prec y.Tensor.value Ir.Ops.half;
+    Ir.Numerics.set_policy { base with narrow_compute_f32 = false; fp16_arithmetic = false };
+    let ctx = Context.auto () in
+    let ctx, routine =
+      Context.compile ~lowered_transform:serial ctx
+        (named "nsc_half_fma" (Train.forward y))
+        Ir.Indexing.Empty
+    in
+    let v = (Context.get_values (Context.run ctx routine) y.Tensor.value).(0) in
+    Ir.Numerics.set_policy base;
+    v
+  in
+  let fma_v = fma_leg () in
+  p "per-operator half FMA computes 1.5 * 2 + 1.5" Float.(abs (fma_v - 4.5) < 0.01);
+  (match read_generated "nsc_half_fma" with
+  | None -> p "the shared half FMA converts rather than bit-casting" (not on_cpu)
+  | Some src ->
+      let has t = String.is_substring src ~substring:t in
+      p "the shared half FMA converts rather than bit-casting"
+        ((not on_cpu)
+        || (has "OCANNL_HALF_FMA" && has "HALF_TO_FLOAT(a)" && not (has "fmaf((float)(a)"))));
+
   (* --- 3. Structure of the bf16 vectorized source. --- *)
   match read_generated "nsc_vec_bf16" with
   | None -> p "bf16 loop vectorizes with a converting load/store" (not on_cpu)

@@ -605,14 +605,20 @@ uint16_t single_to_bfloat16(float f)
 /* The fused multiply-add of fp16 arithmetic (gh-ocannl-516), shared by the scalar rendering and
    the per-lane fallback of the vector rendering so the two cannot round differently: the builtin
    rounds once at fp16, while promoting to fmaf rounds at float and then again at fp16. Accepts
-   scalars and vectors alike. */
-#if OCANNL_HAS_ELEMENTWISE_FMA
+   scalars and vectors alike.
+
+   The fallback goes through HALF_TO_FLOAT / FLOAT_TO_HALF rather than plain casts, and the builtin
+   arm additionally requires the native type: under narrow_compute_f32=false on a target without
+   _Float16, HALF_T is uint16_t, where a cast would compute on the raw half bit pattern (0x3c00
+   instead of 1.0) and the builtin would not compile at all. */
+#if HAS_NATIVE_FLOAT16 && OCANNL_HAS_ELEMENTWISE_FMA
   #define OCANNL_HALF_FMA(a, b, c) __builtin_elementwise_fma((a), (b), (c))
 #else
-  #define OCANNL_HALF_FMA(a, b, c) ((HALF_T)fmaf((float)(a), (float)(b), (float)(c)))
+  #define OCANNL_HALF_FMA(a, b, c) \
+    FLOAT_TO_HALF(fmaf(HALF_TO_FLOAT(a), HALF_TO_FLOAT(b), HALF_TO_FLOAT(c)))
 #endif
 |},
-      [ "HALF_T" ] );
+      [ "HALF_T"; "HAS_NATIVE_FLOAT16"; "HALF_TO_FLOAT"; "FLOAT_TO_HALF" ] );
     ( "OCANNL_VEC_WIDEN_HALF",
       {|
 #if HAS_NATIVE_FLOAT16 && OCANNL_HAS_CONVERTVECTOR
