@@ -90,6 +90,23 @@ module type C_syntax_config = sig
   val vec_unop_syntax : Ops.prec -> Ops.vec_unop -> PPrint.document -> PPrint.document
   val convert_precision : from:Ops.prec -> to_:Ops.prec -> string * string
 
+  val compute_prec : Ops.prec -> Ops.prec
+  (** The precision the {e arithmetic} over a node runs at, given the precision the node is
+      {e stored} at (gh-ocannl-517). Identity by default: a backend with native arithmetic at every
+      storage width computes where it stores, which is what the GPU backends do ([__nv_bfloat16],
+      MSL's [bfloat]/[half], and the 16-bit tensor-core shapes that consume them).
+
+      The CPU backends have no 16-bit arithmetic, so they map the narrow floats to f32 (subject to
+      {!Ir.Numerics.narrow_compute_f32}). Reads then widen once at the load and the result narrows
+      once at the store, instead of every operator round-tripping through f32 and rounding its
+      result to the narrow format — the "16-bit storage, f32 compute" of gh-ocannl-517.
+
+      Only the register precision of an assignment's intermediates is at stake: this function is
+      never consulted for a declaration, a kernel parameter, or a buffer's element type, which
+      always take the storage precision. It must be a function of the storage precision alone —
+      identical across sibling autotune candidates — or schedule transforms would stop being
+      numerics-preserving. *)
+
   val hardware_index : kind:[ `Grid | `Workgroup ] -> slot:int -> string option
   (** The hardware register expression an annotated loop's index binds to (e.g. ["blockIdx.x"],
       ["gid.y"]), or [None] when the backend cannot bind this axis in hardware — the loop then
@@ -527,6 +544,10 @@ struct
 
   let convert_precision = Ops.c_convert_precision
 
+  (* Compute where you store. The backends that override this are the ones without native narrow
+     arithmetic; see the signature. *)
+  let compute_prec prec = prec
+
   (* The names the *language* reserves and the scaffolding this module emits. The names an operator
      rendering emits are not restated here: {!C_syntax} derives them from the backend's own syntax
      functions ({!op_syntax_idents}), so an override cannot drift out of the list. What [c_names]
@@ -631,6 +652,107 @@ module C_syntax (B : C_syntax_config) = struct
   let get_ident =
     Low_level.get_ident_within_code ~no_dots:true ~blacklist:ident_blacklist
     @@ Array.map B.procs ~f:(fun l -> l.llc)
+
+  (* {3 Storage precision vs. compute precision (gh-ocannl-517)}
+
+     A [Low_level] precision is always a {e storage} precision: it comes off a tensor node, and
+     names the element type of a buffer, a stack array, or a scope-local scalar. The precision an
+     expression is {e rendered} at is a different thing -- it decides which operator spellings and
+     which conversions appear -- and on backends without native narrow arithmetic the two diverge.
+     [comp_prec] is the one-way map between them, and the rule is: declarations and buffer element
+     types take the storage precision, rendered arithmetic takes [comp_prec] of it. *)
+
+  let comp_prec = B.compute_prec
+
+  (* The RNG lane conversions pick both their result type and which of the 128 random bits they
+     consume from the precision they are rendered at ([uint4x32_to_fp8_uniform_lane] is a different
+     generator from [uint4x32_to_single_uniform_lane], not a rounding of it). Their rendering
+     precision is therefore pinned to the target's storage precision, and they are outside the
+     storage/compute split -- [test_uniform_virtual_lane]'s virtual-vs-materialized parity is what
+     this protects. *)
+  let is_rng_conversion (llsc : Low_level.scalar_t) =
+    match llsc with
+    | Low_level.Binop (Ops.Uint4x32_to_prec_uniform_lane, _, _)
+    | Unop (Ops.Uint4x32_to_prec_uniform1, _) ->
+        true
+    | _ -> false
+
+  (* Whether the value of a [Set] renders directly at the target's storage precision, bypassing
+     [comp_prec]. True when the rendering contains no operator, so there is no intermediate to keep
+     wide -- a copy, a constant, a scope-local read -- and for the RNG conversions above. Rendering
+     [x = <narrow y read at f32>] through the store's narrowing conversion would be bitwise the
+     same (widening is exact and narrowing an exactly-representable value is the identity), but it
+     spells a copy loop -- the very shape narrow storage exists to speed up -- as a round-trip
+     through f32 that no C compiler folds away. *)
+  let rec renders_at_store_prec (llsc : Low_level.scalar_t) =
+    match llsc with
+    | Low_level.Get _ | Get_dynamic _ | Get_merge_buffer _ | Get_local _ | Local_scope _
+    | Constant _ | Constant_bits _ | Embed_index _ ->
+        true
+    | _ when is_rng_conversion llsc -> true
+    | Unop (Ops.Identity, (v, _)) -> renders_at_store_prec v
+    | Binop (Ops.Arg1, (v, _), _) | Binop (Ops.Arg2, _, (v, _)) -> renders_at_store_prec v
+    | Unop _ | Binop _ | Ternop _ -> false
+
+  (* The precision a [Set]/[Set_dynamic] value expression renders at, and the conversion wrapping
+     it back to the target's storage precision (empty when they coincide). *)
+  let store_precs ~store_prec llsc =
+    let prec = if renders_at_store_prec llsc then store_prec else comp_prec store_prec in
+    (prec, B.convert_precision ~from:prec ~to_:store_prec)
+
+  (* Scope-local scalars an RNG conversion writes. Their declaration, their assignments and their
+     reads all have to agree on a precision, and only a whole-proc scan sees all three (a
+     [Declare_local] carries no value), so the exclusion is resolved once here rather than per
+     statement. A superset would only forgo an optimization, never mis-render. *)
+  let rng_scope_local_uids =
+    let acc = Hash_set.create (module Int) in
+    let rec scan_sc (llsc : Low_level.scalar_t) =
+      match llsc with
+      | Low_level.Local_scope { body; _ } -> scan body
+      | Get _ | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ ->
+          ()
+      | Get_dynamic { dyn_value = v, _; _ } -> scan_sc v
+      | Ternop (_, (a, _), (b, _), (c, _)) ->
+          scan_sc a;
+          scan_sc b;
+          scan_sc c
+      | Binop (_, (a, _), (b, _)) ->
+          scan_sc a;
+          scan_sc b
+      | Unop (_, (a, _)) -> scan_sc a
+    and scan (llc : Low_level.t) =
+      match llc with
+      | Low_level.Seq (a, b) ->
+          scan a;
+          scan b
+      | For_loop { body; _ } -> scan body
+      | If { cond = c, _; body } ->
+          scan_sc c;
+          scan body
+      | Set_local (id, v) ->
+          if is_rng_conversion v then Hash_set.add acc id.Low_level.tn.Tn.uid;
+          scan_sc v
+      | Set { llsc; _ } -> scan_sc llsc
+      | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+          scan_sc v;
+          scan_sc llsc
+      | Set_from_vec { arg = a, _; _ } -> scan_sc a
+      | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier
+      | Tile_mma _ ->
+          ()
+    in
+    Array.iter B.procs ~f:(fun l -> scan l.Low_level.llc);
+    acc
+
+  (* The precision a scope-local scalar is declared, written and read at. *)
+  let scope_prec_of (id : Low_level.scope_id) =
+    let p = Lazy.force id.tn.Tn.storage_prec in
+    if Hash_set.mem rng_scope_local_uids id.tn.Tn.uid then p else comp_prec p
+
+  let wrap_conversion (pre, post) doc =
+    let open PPrint in
+    if String.is_empty pre && String.is_empty post then doc
+    else group (string pre ^^ doc ^^ string post)
 
   (* Set by [compile_proc]: the per-compilation-lineage placement resolution
      (docs/proposals/context-scoped-memory-modes.md). Codegen both consults and settles placements
@@ -754,6 +876,113 @@ module C_syntax (B : C_syntax_config) = struct
       PPrint.string
         (Printf.sprintf "typedef %s %s __attribute__((vector_size(%d)));" (B.typ_of_prec prec) vtyp
            (lanes * Ops.prec_in_bytes prec)) )
+
+  (* {4 Convert-on-load / convert-on-store for narrow storage (gh-ocannl-517)}
+
+     A node stored at a narrow float precision but computed in f32 ({!C_syntax_config.compute_prec})
+     reaches a vector register through a conversion. The lane geometry is keyed off the {e compute}
+     vector — [lanes] f32 elements, so the narrow side is a half-width vector of [lanes] elements —
+     which is the whole point: converting per lane inside the loop body would keep the loop scalar
+     and give back the traffic win.
+
+     [vec_bridge] returns the [load]/[store] statement builders for one (storage, compute) pair. It
+     is the identity memcpy when they coincide (the pre-gh-517 f32/f64 path, unchanged byte for
+     byte), and otherwise:
+
+     - bf16 is the top 16 bits of an f32, so widening is a zero-extend and a shift, and narrowing is
+       [single_to_bfloat16]'s round-to-nearest-even done with vector arithmetic — bitwise what the
+       scalar path computes, by construction.
+     - fp16 converts in one instruction on [_Float16] targets. Whether the type exists is a
+       C-preprocessor fact the renderer cannot see (gh-ocannl-516's design problem), so both arms
+       are emitted under [#if HAS_NATIVE_FLOAT16]. Only the conversion is duplicated, never the
+       arithmetic, so this stays a few lines rather than a second copy of the kernel body.
+     - everything else (fp8), and every fallback arm, converts per lane through the backend's own
+       [convert_precision] — the scalar path's conversion, so parity is not something to verify —
+       while the arithmetic around it stays vectorized. *)
+
+  let vec_typedef_doc ~ctyp ~name ~bytes =
+    PPrint.string (Printf.sprintf "typedef %s %s __attribute__((vector_size(%d)));" ctyp name bytes)
+
+  (* The auxiliary typedefs a bridge registered, in name order: a hash table's traversal order would
+     make the emitted source depend on hashing, and generated sources are snapshot-compared. *)
+  let registered_typedefs tbl =
+    Hashtbl.to_alist tbl
+    |> List.sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
+    |> List.map ~f:snd
+
+  (* [mem] is an element access document ([x[offset]]); [&x[offset]] is the base of the narrow run
+     it starts. The conversions themselves are backend builtins ([OCANNL_VEC_WIDEN_BFLOAT16] and
+     friends in {!Builtins_cc}) rather than inline preprocessor arms, so a kernel body stays one
+     line per load. *)
+  let vec_bridge ~store_prec ~prec ~lanes ~vtyp ~need_typedef ~fresh:_ =
+    let open PPrint in
+    let base mem = string "&" ^^ mem in
+    let call fn args = string (fn ^ "(") ^^ separate (string ", ") args ^^ string ");" in
+    let per_lane_load ~dst ~mem =
+      let pre, post = B.convert_precision ~from:store_prec ~to_:prec in
+      string
+        (Printf.sprintf
+           "for (int ocannl_l__ = 0; ocannl_l__ < %d; ++ocannl_l__) %s[ocannl_l__] = " lanes dst)
+      ^^ string pre ^^ parens (base mem)
+      ^^ string "[ocannl_l__]" ^^ string post ^^ semi
+    in
+    let per_lane_store ~src ~mem =
+      let pre, post = B.convert_precision ~from:prec ~to_:store_prec in
+      string (Printf.sprintf "for (int ocannl_l__ = 0; ocannl_l__ < %d; ++ocannl_l__) " lanes)
+      ^^ parens (base mem)
+      ^^ string "[ocannl_l__] = " ^^ string pre
+      ^^ string (Printf.sprintf "%s[ocannl_l__]" src)
+      ^^ string post ^^ semi
+    in
+    if Ops.equal_prec store_prec prec then
+      ( (fun ~dst ~mem ->
+          string (vtyp ^ " " ^ dst ^ ";")
+          ^^ hardline
+          ^^ string ("__builtin_memcpy(&" ^ dst ^ ", &")
+          ^^ mem
+          ^^ string (", sizeof(" ^ dst ^ "));")),
+        fun ~src ~mem ->
+          string "__builtin_memcpy(&" ^^ mem
+          ^^ string (Printf.sprintf ", &%s, sizeof(%s));" src src)
+      )
+    else
+      match store_prec with
+      | Ops.Bfloat16_prec _ ->
+          let u16 = Printf.sprintf "ocannl_vec%du16" lanes in
+          let u32 = Printf.sprintf "ocannl_vec%du32" lanes in
+          need_typedef u16 (vec_typedef_doc ~ctyp:"unsigned short" ~name:u16 ~bytes:(lanes * 2));
+          need_typedef u32 (vec_typedef_doc ~ctyp:"uint32_t" ~name:u32 ~bytes:(lanes * 4));
+          let args = [ string u16; string u32; OCaml.int lanes ] in
+          ( (fun ~dst ~mem ->
+              string (vtyp ^ " " ^ dst ^ ";")
+              ^^ hardline
+              ^^ call "OCANNL_VEC_WIDEN_BFLOAT16" (args @ [ string dst; base mem ])),
+            fun ~src ~mem ->
+              call "OCANNL_VEC_NARROW_BFLOAT16" (args @ [ base mem; string src ]) )
+      | Ops.Half_prec _ ->
+          let h = Printf.sprintf "ocannl_vec%dh" lanes in
+          (* [_Float16] exists only where the C preprocessor says so, and this typedef is the one
+             place that needs the type name itself rather than a macro argument. *)
+          need_typedef h
+            (string "#if HAS_NATIVE_FLOAT16"
+            ^^ hardline
+            ^^ vec_typedef_doc ~ctyp:"_Float16" ~name:h ~bytes:(lanes * 2)
+            ^^ hardline ^^ string "#endif");
+          ( (fun ~dst ~mem ->
+              string (vtyp ^ " " ^ dst ^ ";")
+              ^^ hardline
+              ^^ call "OCANNL_VEC_WIDEN_HALF"
+                   [ string vtyp; string h; OCaml.int lanes; string dst; base mem ]),
+            fun ~src ~mem ->
+              call "OCANNL_VEC_NARROW_HALF"
+                [ string h; OCaml.int lanes; base mem; string src ] )
+      | _ ->
+          (* fp8 and any other narrow format: the arithmetic still vectorizes, only the conversion
+             is per lane -- through the scalar path's own conversion, so parity is by
+             construction. *)
+          ( (fun ~dst ~mem ->
+              string (vtyp ^ " " ^ dst ^ ";") ^^ hardline ^^ per_lane_load ~dst ~mem),
+            fun ~src ~mem -> per_lane_store ~src ~mem )
 
   (* The names of a [rows]×[cols] grid of vector accumulator registers. *)
   let vec_acc_grid ~prefix ~rows ~cols : string array array =
@@ -1814,7 +2043,7 @@ module C_syntax (B : C_syntax_config) = struct
            through [emit]; [written] maps written nodes to their store index vectors — every read of
            a written node must use that exact vector (vector semantics evaluates all lanes' loads
            before the store, so cross-lane flow would reorder against the serial loop). *)
-        let vec_ext_machinery ~prec ~lanes ~vtyp ~written ~emit ~fresh =
+        let vec_ext_machinery ~prec ~lanes ~vtyp ~written ~emit ~fresh ~need_typedef =
           let vload tn idcs =
             (* A swizzled layout breaks row-major contiguity within a row. *)
             if is_swizzled tn then raise Bail;
@@ -1822,22 +2051,21 @@ module C_syntax (B : C_syntax_config) = struct
             check_read ~written tn idcs;
             let name = fresh "vget" in
             let offset = pp_array_offset (idcs, Lazy.force tn.Tn.dims) in
-            emit
-              (string (vtyp ^ " " ^ name ^ ";")
-              ^^ hardline
-              ^^ string ("__builtin_memcpy(&" ^ name ^ ", &")
-              ^^ string (get_ident tn)
-              ^^ brackets offset
-              ^^ string (", sizeof(" ^ name ^ "));"));
+            let store_prec = Lazy.force tn.Tn.storage_prec in
+            let load, _store = vec_bridge ~store_prec ~prec ~lanes ~vtyp ~need_typedef ~fresh in
+            emit (load ~dst:name ~mem:(string (get_ident tn) ^^ brackets offset));
             string name
           in
           let rec vec_expr (llsc : Low_level.scalar_t) (p : Ops.prec) : PPrint.document =
             if not (scalar_mentions llsc) then uniform_scalar ~written prec llsc
-            else if not (Ops.equal_prec p prec) then raise Bail
+            else if not (Ops.equal_prec (comp_prec p) prec) then raise Bail
             else
               match llsc with
               | Low_level.Get (tn, idcs) ->
-                  if not (Ops.equal_prec (Lazy.force tn.Tn.storage_prec) prec) then raise Bail;
+                  (* Narrow storage is admissible: [vload] widens it into the compute vector. What
+                     is not is a node whose arithmetic would run at another width. *)
+                  if not (Ops.equal_prec (comp_prec (Lazy.force tn.Tn.storage_prec)) prec) then
+                    raise Bail;
                   vload tn idcs
               | Binop (op, (a, pa), (b, pb)) ->
                   let inf =
@@ -1901,21 +2129,27 @@ module C_syntax (B : C_syntax_config) = struct
                 | _ -> raise Bail)
             in
             if List.is_empty sets then raise Bail;
+            (* The lane geometry is keyed off the *compute* precision (gh-ocannl-517): narrow
+               storage pairs a half-width memory vector with a full-width f32 register, and the
+               conversion rides the load and the store. *)
             let prec =
               let tn, _, _ = List.hd_exn sets in
-              Lazy.force tn.Tn.storage_prec
+              comp_prec (Lazy.force tn.Tn.storage_prec)
             in
             (match prec with Ops.Single_prec _ | Ops.Double_prec _ -> () | _ -> raise Bail);
             let lanes = B.vector_bytes / Ops.prec_in_bytes prec in
             if lanes < 2 || extent < lanes then raise Bail;
             let written = Hashtbl.create (module Int) in
             List.iter sets ~f:(fun (tn, idcs, _) ->
-                if not (Ops.equal_prec (Lazy.force tn.Tn.storage_prec) prec) then raise Bail;
+                if not (Ops.equal_prec (comp_prec (Lazy.force tn.Tn.storage_prec)) prec) then
+                  raise Bail;
                 match Hashtbl.add written ~key:tn.Tn.uid ~data:idcs with
                 | `Ok -> ()
                 | `Duplicate -> raise Bail);
             let stmts_docs = ref [] in
             let emit d = stmts_docs := d :: !stmts_docs in
+            let extra_typedefs = Hashtbl.create (module String) in
+            let need_typedef name doc = Hashtbl.set extra_typedefs ~key:name ~data:doc in
             let fresh =
               let ctr = ref 0 in
               fun pfx ->
@@ -1927,7 +2161,7 @@ module C_syntax (B : C_syntax_config) = struct
               | `Vec_extensions ->
                   let vtyp, typedef_doc = vec_ext_typ ~prec ~lanes in
                   let _vec_expr, vec_operand =
-                    vec_ext_machinery ~prec ~lanes ~vtyp ~written ~emit ~fresh
+                    vec_ext_machinery ~prec ~lanes ~vtyp ~written ~emit ~fresh ~need_typedef
                   in
                   List.iter sets ~f:(fun (tn, idcs, llsc) ->
                       if is_swizzled tn then raise Bail;
@@ -1935,12 +2169,16 @@ module C_syntax (B : C_syntax_config) = struct
                       let rhs = vec_operand llsc prec in
                       let vname = fresh "vset" in
                       emit (string (vtyp ^ " " ^ vname ^ " = ") ^^ rhs ^^ semi);
+                      let store_prec = Lazy.force tn.Tn.storage_prec in
+                      let _load, store =
+                        vec_bridge ~store_prec ~prec ~lanes ~vtyp ~need_typedef ~fresh
+                      in
                       emit
-                        (string "__builtin_memcpy(&"
-                        ^^ string (get_ident tn)
-                        ^^ brackets (pp_array_offset (idcs, Lazy.force tn.Tn.dims))
-                        ^^ string (", &" ^ vname ^ ", sizeof(" ^ vname ^ "));")));
-                  typedef_doc ^^ hardline
+                        (store ~src:vname
+                           ~mem:
+                             (string (get_ident tn)
+                             ^^ brackets (pp_array_offset (idcs, Lazy.force tn.Tn.dims)))));
+                  separate hardline (typedef_doc :: registered_typedefs extra_typedefs) ^^ hardline
               | `Packed_struct ->
                   (* GPU 128-bit packed loads/stores (gh-ocannl-463; llm.c's Packed128): the
                      backend's aligned pack aggregate is loaded/stored via [reinterpret_cast] — one
@@ -2075,7 +2313,8 @@ module C_syntax (B : C_syntax_config) = struct
               | Some r -> r
               | None -> raise Bail
             in
-            let prec = Lazy.force acc_tn.Tn.storage_prec in
+            let acc_store_prec = Lazy.force acc_tn.Tn.storage_prec in
+            let prec = comp_prec acc_store_prec in
             (match prec with Ops.Single_prec _ | Ops.Double_prec _ -> () | _ -> raise Bail);
             (* A loop-invariant contribution deserves strength reduction, not chains. *)
             if not (scalar_mentions contrib) then raise Bail;
@@ -2085,6 +2324,8 @@ module C_syntax (B : C_syntax_config) = struct
             let chains = if 4 * lanes <= extent then 4 else if 2 * lanes <= extent then 2 else 1 in
             let step = chains * lanes in
             let vtyp, typedef_doc = vec_ext_typ ~prec ~lanes in
+            let extra_typedefs = Hashtbl.create (module String) in
+            let need_typedef name doc = Hashtbl.set extra_typedefs ~key:name ~data:doc in
             (* The accumulator is not vector-loaded ([contrib] cannot touch it, per the recognizer),
                so nothing is [written] from the vector expressions' viewpoint. *)
             let written = Hashtbl.create (module Int) in
@@ -2102,7 +2343,7 @@ module C_syntax (B : C_syntax_config) = struct
                 Printf.sprintf "%s%d__" pfx !ctr
             in
             let _vec_expr, vec_operand =
-              vec_ext_machinery ~prec ~lanes ~vtyp ~written ~emit ~fresh
+              vec_ext_machinery ~prec ~lanes ~vtyp ~written ~emit ~fresh ~need_typedef
             in
             (* Chain [c] consumes the flat-offset window shifted by [c * lanes]: under the
                contiguity rule the shift is a constant added to each access's last (loop-index)
@@ -2166,12 +2407,18 @@ module C_syntax (B : C_syntax_config) = struct
               string (get_ident acc_tn)
               ^^ brackets (pp_array_offset (acc_idcs, Lazy.force acc_tn.Tn.dims))
             in
+            (* The accumulator cell itself stays at its storage precision: the fold reads it
+               widened and narrows the combined value once, exactly as the scalar path's [Set]
+               does (gh-ocannl-517). *)
+            let widen = B.convert_precision ~from:acc_store_prec ~to_:prec in
+            let narrow = B.convert_precision ~from:prec ~to_:acc_store_prec in
             let epilogue =
               vec_acc_grid_fold ~prec ~lanes ~op grid
               @ vec_acc_lane_fold ~prec ~lanes ~op ~vname:acc_regs.(0) ~out:total
               @ [
                   acc_cell () ^^ string " = "
-                  ^^ B.binop_syntax prec op (acc_cell ()) (string total)
+                  ^^ wrap_conversion narrow
+                       (B.binop_syntax prec op (wrap_conversion widen (acc_cell ())) (string total))
                   ^^ semi;
                 ]
             in
@@ -2182,7 +2429,9 @@ module C_syntax (B : C_syntax_config) = struct
                     "{ /* Vectorized reduction rendering: %d chain(s) of %d lanes of %s. */" chains
                     lanes (B.typ_of_prec prec))
               ^^ nest 2
-                   (hardline ^^ typedef_doc ^^ hardline
+                   (hardline
+                   ^^ separate hardline (typedef_doc :: registered_typedefs extra_typedefs)
+                   ^^ hardline
                    ^^ string (Printf.sprintf "%s%s = 0;" it ivar)
                    ^^ hardline ^^ separate hardline init_docs ^^ hardline
                    ^^ string
@@ -2440,8 +2689,10 @@ module C_syntax (B : C_syntax_config) = struct
     | Set { tn; idcs; llsc; debug } ->
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
-        let prec = Lazy.force tn.storage_prec in
+        let store_prec = Lazy.force tn.storage_prec in
+        let prec, narrowing = store_precs ~store_prec llsc in
         let local_defs, val_doc = pp_scalar prec llsc in
+        let val_doc = wrap_conversion narrowing val_doc in
         let local_defs = pp_local_defs local_defs in
         let offset_doc = pp_tn_offset tn (idcs, dims) in
         (* See {!C_syntax_config.volatile_scalar_rmw}: pin the per-iteration read-modify-write of
@@ -2496,7 +2747,7 @@ module C_syntax (B : C_syntax_config) = struct
         let wrap_rmw_volatile stmt_doc =
           if not rmw_volatile then stmt_doc
           else
-            let vol_ptr = string (B.buffer_prefix ^ "volatile " ^ B.typ_of_prec prec ^ "*") in
+            let vol_ptr = string (B.buffer_prefix ^ "volatile " ^ B.typ_of_prec store_prec ^ "*") in
             (* The ident is for readability of the generated source; the uid suffix guarantees
                uniqueness — label-derived identifiers (get_ident) could legally collide with a
                prefixed name, and the inner scope must shadow nothing except the target node. *)
@@ -2518,7 +2769,9 @@ module C_syntax (B : C_syntax_config) = struct
             ^^ semi)
         in
         if Utils.debug_log_from_routines () then
-          let num_typ = string (B.typ_of_prec prec) in
+          (* [val_doc] is already narrowed to the storage precision, so the temporary carrying it
+             into the log statement takes the storage type. *)
+          let num_typ = string (B.typ_of_prec store_prec) in
           let new_var = string "new_set_v" in
           let decl = num_typ ^^ space ^^ new_var ^^ string " = " ^^ val_doc ^^ semi in
           let debug_val_doc, debug_args_docs = debug_float prec llsc in
@@ -2575,12 +2828,14 @@ module C_syntax (B : C_syntax_config) = struct
            ^ " (dynamic offsets are not swizzle-remapped)");
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
-        let prec = Lazy.force tn.storage_prec in
+        let store_prec = Lazy.force tn.storage_prec in
+        let prec, narrowing = store_precs ~store_prec llsc in
         let dyn_defs, dyn_expr = pp_scalar iprec iv in
         let idx_typ = B.typ_of_prec (Ops.index_prec ()) in
         let dyn_idx_doc = string ("((" ^ idx_typ ^ ")(") ^^ dyn_expr ^^ string "))" in
         let offset_doc = pp_array_offset_dyn (idcs, dims) ~dyn_axis ~dyn_idx_doc in
         let val_defs, val_doc = pp_scalar prec llsc in
+        let val_doc = wrap_conversion narrowing val_doc in
         let local_defs = pp_local_defs (dyn_defs @ val_defs) in
         let assignment =
           group
@@ -2589,7 +2844,9 @@ module C_syntax (B : C_syntax_config) = struct
             ^^ semi)
         in
         if Utils.debug_log_from_routines () then
-          let num_typ = string (B.typ_of_prec prec) in
+          (* [val_doc] is already narrowed to the storage precision, so the temporary carrying it
+             into the log statement takes the storage type. *)
+          let num_typ = string (B.typ_of_prec store_prec) in
           let new_var = string "new_set_v" in
           let decl = num_typ ^^ space ^^ new_var ^^ string " = " ^^ val_doc ^^ semi in
           let debug_val_doc, debug_args_docs = debug_float prec llsc in
@@ -2749,8 +3006,12 @@ module C_syntax (B : C_syntax_config) = struct
         else
           let block_content = local_defs ^^ hardline ^^ vec_decl ^^ hardline ^^ assignments in
           lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace
-    | Set_local (({ tn = { storage_prec = prec; _ }; _ } as id), value) ->
-        let prec = Lazy.force prec in
+    | Set_local (({ tn = { storage_prec = _; _ }; _ } as id), value) ->
+        (* A scope-local scalar is declared at [scope_prec_of] its node (see [Declare_local] and
+           [pp_scalar]'s [Local_scope]), so its value renders there too: an inlined narrow
+           intermediate keeps f32 mantissa across the whole scope instead of being rounded at every
+           assignment to it. *)
+        let prec = scope_prec_of id in
         let local_defs, value_doc = pp_scalar prec value in
         let local_defs = pp_local_defs local_defs in
         let assignment = pp_scope_id id ^^ string " = " ^^ value_doc ^^ semi in
@@ -2800,8 +3061,8 @@ module C_syntax (B : C_syntax_config) = struct
         else
           let block_content = local_defs ^^ hardline ^^ assignment in
           lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace
-    | Declare_local { id = { tn = { storage_prec = prec; _ }; _ } as id; needs_init } ->
-        let scope_prec = Lazy.force prec in
+    | Declare_local { id = { tn = { storage_prec = _; _ }; _ } as id; needs_init } ->
+        let scope_prec = scope_prec_of id in
         let num_typ = string (B.typ_of_prec scope_prec) in
         let init_zero =
           (* Runtime instrumentation prints both the old and new values for [Set_local]. Even when
@@ -3148,7 +3409,7 @@ module C_syntax (B : C_syntax_config) = struct
     | If { cond = c, cprec; body } ->
         (* Guarded statement (axis-types proposal §2): [body] executes iff [cond] is nonzero -- C's
            [if] tests exactly that. *)
-        let local_defs, cond_doc = pp_scalar cprec c in
+        let local_defs, cond_doc = pp_scalar (comp_prec cprec) c in
         let local_defs = pp_local_defs local_defs in
         let body_doc = pp_ll ~log_set_locals ~in_loop:true body in
         let if_doc =
@@ -3166,9 +3427,8 @@ module C_syntax (B : C_syntax_config) = struct
     let open PPrint in
     match vcomp with
     | Local_scope
-        { id = { tn = { storage_prec = scope_prec; _ }; scope_id } as id; body; orig_indices = _ }
-      ->
-        let scope_prec = Lazy.force scope_prec in
+        { id = { tn = { storage_prec = _; _ }; scope_id } as id; body; orig_indices = _ } ->
+        let scope_prec = scope_prec_of id in
         let num_typ = string (B.typ_of_prec scope_prec) in
         let init_zero =
           if Low_level.reads_scope_before_set id body then
@@ -3186,7 +3446,7 @@ module C_syntax (B : C_syntax_config) = struct
         let expr = string prefix ^^ pp_scope_id id ^^ string postfix in
         ([ (scope_id, def_doc) ], expr)
     | Get_local id ->
-        let scope_prec = Lazy.force id.tn.storage_prec in
+        let scope_prec = scope_prec_of id in
         let prefix, postfix = B.convert_precision ~from:scope_prec ~to_:prec in
         let expr = string prefix ^^ pp_scope_id id ^^ string postfix in
         ([], expr)
@@ -3263,6 +3523,10 @@ module C_syntax (B : C_syntax_config) = struct
     | Binop (Arg1, (v1, _), _v2) -> pp_scalar prec v1
     | Binop (Arg2, _v1, (v2, _)) -> pp_scalar prec v2
     | Ternop (op, (v1, v1_prec), (v2, v2_prec), (v3, v3_prec)) ->
+        (* A heterogeneous argument keeps its own precision, which -- like every precision reaching
+           here from [Low_level] -- is a storage precision; the rendering takes [comp_prec] of it. *)
+        let v1_prec = comp_prec v1_prec and v2_prec = comp_prec v2_prec in
+        let v3_prec = comp_prec v3_prec in
         let d1, e1, d2, e2, d3, e3 =
           if Ops.is_homogeneous_prec_ternop op then
             (* Homogeneous: all arguments use result precision *)
@@ -3295,6 +3559,7 @@ module C_syntax (B : C_syntax_config) = struct
         let expr = group (B.ternop_syntax prec op e1 e2 e3) in
         (defs, expr)
     | Binop (op, (v1, v1_prec), (v2, v2_prec)) ->
+        let v1_prec = comp_prec v1_prec and v2_prec = comp_prec v2_prec in
         let d1, e1, d2, e2 =
           if Ops.is_homogeneous_prec_binop op then
             (* Homogeneous: both arguments use result precision *)
@@ -3315,7 +3580,7 @@ module C_syntax (B : C_syntax_config) = struct
         let arg_prec =
           if Ops.is_homogeneous_prec_unop op then prec
             (* Homogeneous: argument uses result precision *)
-          else v_prec
+          else comp_prec v_prec
         in
         let defs, expr_v = pp_scalar arg_prec v in
         let expr = group (B.unop_syntax prec op expr_v) in
@@ -3345,7 +3610,7 @@ module C_syntax (B : C_syntax_config) = struct
            logs. *)
         debug_float prec @@ Get_local id
     | Get_local id ->
-        let scope_prec = Lazy.force id.tn.storage_prec in
+        let scope_prec = scope_prec_of id in
         let prefix, postfix = B.convert_precision ~from:scope_prec ~to_:prec in
         let v_doc = string prefix ^^ pp_scope_id id ^^ string postfix in
         (v_doc ^^ braces (string ("=" ^ B.float_log_style)), [ `Value v_doc ])
@@ -3413,6 +3678,8 @@ module C_syntax (B : C_syntax_config) = struct
     | Binop (Arg1, (v1, _), _v2) -> debug_float ?guard prec v1
     | Binop (Arg2, _v1, (v2, _)) -> debug_float ?guard prec v2
     | Ternop (op, (v1, v1_prec), (v2, v2_prec), (v3, v3_prec)) ->
+        let v1_prec = comp_prec v1_prec and v2_prec = comp_prec v2_prec in
+        let v3_prec = comp_prec v3_prec in
         let v1_doc, idcs1, v2_doc, idcs2, v3_doc, idcs3 =
           if Ops.is_homogeneous_prec_ternop op then
             (* Homogeneous: all arguments use result precision *)
@@ -3463,6 +3730,7 @@ module C_syntax (B : C_syntax_config) = struct
         in
         (B.ternop_syntax prec op v1_doc v2_doc v3_doc, idcs1 @ idcs2 @ idcs3)
     | Binop (op, (v1, v1_prec), (v2, v2_prec)) ->
+        let v1_prec = comp_prec v1_prec and v2_prec = comp_prec v2_prec in
         let v1_doc, idcs1, v2_doc, idcs2 =
           if Ops.is_homogeneous_prec_binop op then
             (* Homogeneous: both arguments use result precision *)
@@ -3480,7 +3748,7 @@ module C_syntax (B : C_syntax_config) = struct
         let arg_prec =
           if Ops.is_homogeneous_prec_unop op then prec
             (* Homogeneous: argument uses result precision *)
-          else v_prec
+          else comp_prec v_prec
         in
         let v_doc, idcs = debug_float ?guard arg_prec v in
         (B.unop_syntax prec op v_doc, idcs)

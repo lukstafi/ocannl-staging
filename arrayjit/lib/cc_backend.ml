@@ -308,6 +308,15 @@ struct
   let parallel_grid_chunks = parallel_grid_chunks_setting ()
   let vector_bytes = vector_bytes_setting ()
 
+  (* gh-ocannl-517: a CPU has no 16-bit arithmetic -- the narrow arms of the operator renderings
+     below are widen/op/narrow round-trips through f32, and [_Float16] arithmetic, where the type
+     exists at all, is promoted to float by the compiler on targets without AVX512-FP16. So the
+     arithmetic runs in f32 and the narrow format is a storage format: one widen per load, one
+     narrow per store. Under [narrow_compute_f32 = false] the narrow arms below take over again and
+     every operator rounds to the target's storage precision (the pre-gh-517 semantics). *)
+  let compute_prec prec =
+    if Ops.is_narrow_float prec && (Numerics.get ()).narrow_compute_f32 then Ops.single else prec
+
   (* Override operation syntax to handle special precision types *)
   let ternop_syntax prec op v1 v2 v3 =
     match prec with
