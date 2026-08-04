@@ -682,7 +682,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
              the swizzled 16-byte-unit layout, in shared memory, which is the only combination
              whose per-lane row addresses [ldmatrix] can both reach and de-conflict. Everything
              else keeps the per-lane gathers, which stay correct for plain shared tiles and device
-             pointers alike. *)
+             pointers alike. Note the asymmetry the arms below rely on: eligibility is
+             [space AND layout], but the DECLINE is on the layout alone — a swizzled operand this
+             arm cannot [ldmatrix] must not silently fall through to row-major gathers, whatever
+             space it sits in. *)
           let ldm = function
             | `Shared, `Swizzled_b128 -> true
             | (`Shared | `Device | `Thread | `Fragment _), (`Plain | `Swizzled_b128) -> false
@@ -767,8 +770,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           if
             is_fp8_combo
             && plain d_layout
-            && ((not a_swz) || a_ldm)
-            && ((not b_swz) || b_ldm)
+            && (plain a_layout || a_ldm)
+            && (plain b_layout || b_ldm)
             && m % 16 = 0
             && n % 8 = 0
             && k % 32 = 0
@@ -914,6 +917,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                on distribution, which is exactly the difference between the two orientations. *)
             is_bf16_uniform
             && plain d_layout
+            && (plain a_layout || a_swz)
+            && (plain b_layout || b_swz)
             && m % 16 = 0
             && n % 8 = 0
             && k % 16 = 0
