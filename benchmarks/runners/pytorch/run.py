@@ -5,8 +5,10 @@ Model-dispatched on the fixture metadata: mlp / conv (LeNet-5, valid convs) / gp
 (pre-LN GPT-2-style decoder, trained or inference-only per the fixture's `mode`).
 Math mirrors the OCANNL runners exactly:
 same CE formulation (softmax -> one-hot dot -> log), same LayerNorm (biased variance,
-eps inside sqrt), same tanh-gelu constant, same -1e9 causal-mask fill, same conv layouts
-(fixture is channels-last / OCANNL axis order; this runner permutes to NCHW once).
+eps inside sqrt), same tanh-gelu constant, same conv layouts (fixture is channels-last /
+OCANNL axis order; this runner permutes to NCHW once). The causal mask fills with -1e9
+here and with -inf in OCANNL since gh-ocannl-548 — the same value after exp at every
+precision these runners use.
 """
 
 import argparse

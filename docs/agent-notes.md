@@ -391,9 +391,11 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   runners do), add a training workload when the question needs one (`gpt2_mini_train`), and make
   orchestrate report an inexpressible cell as NOT APPLICABLE with its reason instead of omitting
   it. In OCANNL specifics: a parameter has `batch_dims = []` pinned by `Tensor.param`, so a
-  positional-embedding table must be output-axis-shaped and placed with an einsum-add; and the
-  gpt f16 legs need the attention softmax pinned at f32 (`where`/`max_vals`/`exp_vals`) — the
-  causal mask's `-1e9` fill is outside half's range and `Low_level`'s constant guard rejects it.
+  positional-embedding table must be output-axis-shaped and placed with an einsum-add. The gpt
+  f16 cells additionally needed gh-ocannl-548 (`-inf` mask fill) and gh-ocannl-547 (reduction
+  identities out of the fp16 constant guard's scope); the runner-side workaround they replaced —
+  pinning the softmax at f32 and materializing the masked scores — is gone, so do not
+  reintroduce a pin for a constant the library now keeps representable.
 
 ## Build and test mechanics
 

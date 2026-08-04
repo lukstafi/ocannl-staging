@@ -15,7 +15,9 @@
   subset), the legs became orchestrated cells (`--precision f16-static f16-gated16`), and a
   requested cell a workload cannot express is now reported as `NOT APPLICABLE` with its reason —
   in the run log and in a report section — instead of being silently absent, which is
-  indistinguishable from an unrun cell.
+  indistinguishable from an unrun cell. The workload's f16 cells rest on gh-ocannl-548 and
+  gh-ocannl-547 below, which landed alongside it: before the `-inf` mask fill and the guard's
+  narrowed scope, no gpt cell could compile at f16.
 - **The tuner's honest reference point** (gh-ocannl-552, the shared cause behind gh-ocannl-532
   and gh-ocannl-533): `Autotune.tune` reports the untuned default pipeline's measured time as
   `report.default_ms`, next to `baseline_ms` (which is `infinity` on GPU backends, where the

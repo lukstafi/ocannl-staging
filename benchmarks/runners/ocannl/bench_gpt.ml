@@ -168,43 +168,25 @@ let () =
      too ([param_prec]; injection converts the fixture values at load); training leaves them alone
      ([param_prec = None]) because masters and cast twins already carry Specified precisions, and
      assigns the gradients instead. *)
+  (* The attention softmax computes in the reduced precision along with the rest of the body —
+     including at f16, since gh-ocannl-548 made the causal mask's fill -inf (representable, unlike
+     the -1e9 that the fp16 constant guard rejected) and gh-ocannl-547 took reduction identities
+     out of that guard's scope. Both landed while this workload was being built; before them the
+     f16 gpt cells could not compile at all. *)
   Option.iter mp_prec ~f:(fun prec ->
       let body = Hash_set.create (module Int) in
-      let masked_scores = ref [] in
       let rec walk t =
         if not (Hash_set.mem body t.Tensor.value.Ir.Tnode.id) then (
           Hash_set.add body t.Tensor.value.Ir.Tnode.id;
-          if String.is_substring (Ir.Tnode.debug_name t.Tensor.value) ~substring:"where" then
-            masked_scores := t.Tensor.value :: !masked_scores;
           Option.iter t.Tensor.diff ~f:(fun d -> Hash_set.add body d.Tensor.grad.Ir.Tnode.id);
           List.iter t.Tensor.children ~f:(fun c -> walk c.Tensor.subtensor))
       in
       walk logits;
-      (* f16 only, and only because a pinned precision protects a node's own assignment, not the
-         one it is inlined into: the mask fill's -1e9 sits in whichever node STORES the masked
-         scores, and the guard below rejects it there. The training graph materializes [where] for
-         the backward pass, so pinning it suffices; the forward-only graph virtualizes it into an
-         f16 consumer, where the constant reappears. Materializing it puts the constant back in
-         the f32 node that the pin covers. *)
-      if Ir.Ops.equal_prec prec Ir.Ops.half then List.iter !masked_scores ~f:Train.set_materialized;
       let is_ln tn =
         List.exists tn.Ir.Tnode.label ~f:(fun l ->
             String.equal l "gamma" || String.equal l "beta")
       in
-      (* AMP's "softmax stays f32", applied to the attention block as well as the loss head — and
-         for f16 it is not a preference: the causal mask's -1e9 fill is outside half's range, so
-         the lowering's constant guard rejects the [where] node outright, and the stable softmax's
-         row max is an -inf-seeded reduction. Pinned by the debug names %op derives from the
-         block's own bindings ([where], [max_vals], [exp_vals], [softmax]). The scores matmul
-         feeding them keeps the reduced precision — that is the work the leg is measuring. *)
-      let is_attn_softmax tn =
-        let dn = Ir.Tnode.debug_name tn in
-        List.exists [ "where"; "max_vals"; "exp_vals"; "softmax" ] ~f:(fun s ->
-            String.is_substring dn ~substring:s)
-      in
-      let except tn =
-        (not (Hash_set.mem body tn.Ir.Tnode.id)) || is_ln tn || is_attn_softmax tn
-      in
+      let except tn = (not (Hash_set.mem body tn.Ir.Tnode.id)) || is_ln tn in
       Precision_policy.apply ~except
         {
           Precision_policy.param_prec = (if training then None else Some prec);

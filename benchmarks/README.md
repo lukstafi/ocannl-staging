@@ -48,7 +48,9 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   (`stride1`/`stride2`, default 1, valid-only) through the same builder as `lenet`.
 - **gpt2_mini** (`model: gpt`, `mode: infer`): pre-LN GPT-2-style decoder (4 layers, d=256,
   8 heads, seq 128, vocab 1024, tanh-gelu, learned positional embeddings, tied lm_head,
-  causal mask filled with -1e9), forward-only. The parity metric is softmax-CE of the
+  causal mask filled with `-inf` since gh-ocannl-548; the Python runners keep `-1e9`, which
+  is the same number after `exp` at every precision they run), forward-only. The parity
+  metric is softmax-CE of the
   logits against fixture target ids, recorded per batch with no updates; the report shows
   tokens/s. Token embedding uses the logical one-hot gather (gh-343); LayerNorm is the
   idiomatic `Nn_blocks.layer_norm` (gammas/betas injected by name like the attention
@@ -96,12 +98,10 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   re-precisions by load-time conversion instead — data-backed weights convert at wrap
   (`TDSL.wrap ~prec`), attention params through the storage policy (no optimizer, so no master
   copies and no loss scaling). Parity is gated at the looser `PARITY_TOL_PRECISION` envelopes.
-  In the gpt graph the attention softmax and its causal-mask fill are pinned at f32 in both
-  modes — AMP's softmax rule, and for f16 a hard requirement: `-1e9` is outside half's range and
-  the lowering's constant guard rejects it. Under f16 the masked scores are also materialized,
-  since a pin protects a node's own assignment and not the one it would be inlined into (the
-  forward-only graph virtualizes that node). The scores matmul feeding them stays reduced, which
-  is the work these legs measure.
+  In the gpt graph the attention softmax computes in the reduced precision with the rest of the
+  body, f16 included: gh-ocannl-548 made the causal mask's fill `-inf` (representable, unlike the
+  `-1e9` that the fp16 constant guard rejected) and gh-ocannl-547 took reduction identities out of
+  that guard's scope. Before those two the f16 gpt cells could not compile at all.
 
   The gh-ocannl-492 task-5 gate-cost legs (f16 and a training workload only):
   `BENCH_STATIC_SCALE=1` fixes the loss scale with no gate and no host read — the
