@@ -221,9 +221,24 @@ let every_non_literal_materialized =
     of [timing_ctx]), so the arms are hermetic and [tune_placements] leaves no trace on the graph or
     on the caller's contexts beyond the returned winner. See
     test/operations/materialize_after_compile.ml. [report], when given, observes both arms' reports
-    in order. Other arguments are forwarded to {!Autotune.tune}; the same caveats apply (notably
-    [timing_ctx] and non-idempotent routines — both arms share [timing_ctx]'s device for their
-    searches). *)
+    in order — arm A first, then arm B — and the arm with the smaller [best_ms] is the one that
+    ships, so a consumer holding both reports can attribute every per-arm fact to a shipping or a
+    discarded artifact without reading the log. That is how "a [Schedule.Tensorize] was crowned in
+    an arm that did not ship" becomes reportable (gh-ocannl-546): [best_tensorized] on the losing
+    arm's report, with [mma_best_ms] against [best_ms] for the margin. The same conclusion is
+    logged here under config [autotune_log]. Other arguments are forwarded to {!Autotune.tune}; the
+    same caveats apply (notably [timing_ctx] and non-idempotent routines — both arms share
+    [timing_ctx]'s device for their searches).
+
+    The arms differ in which candidates {e exist}, not only in how they rank: a tensorized candidate
+    is seeded only when the matmul site's operand and destination storage precisions resolve to a
+    tile the backend advertises ({!Autotune.mma_tile_for_precisions}), and placement decides which
+    nodes the site reads. Under the mixed-precision recipe on a uniform-format backend (Metal's
+    simdgroup matrices) that makes arm A tensorization-free: the reduced-precision cast twins are
+    virtual there, so the site reads f32 masters into a reduced-precision destination — a mixed
+    triple no tile matches — while materialize-all turns the twins into real reduced-precision nodes
+    and the seeds fire. Materializing just the twins ([Mixed_prec.Twin_materialized]) reaches the
+    same seeds at arm A's cost; see benchmarks/report-gh546-metal.md. *)
 let tune_placements ?beam_width ?rounds ?repeats ?timing_ctx ?report ctx loss comp bindings =
   (* Arm attribution on the same stderr trace as Autotune's config [autotune_log] — winner-arm
      ambiguity misdirected the CUDA benchmark debugging on PR #140. *)
@@ -238,34 +253,63 @@ let tune_placements ?beam_width ?rounds ?repeats ?timing_ctx ?report ctx loss co
   let logf fmt =
     Stdlib.Printf.ksprintf (fun s -> if log_arms then Stdio.eprintf "tune_placements: %s\n%!" s) fmt
   in
-  let best_ms = ref Float.infinity in
+  let last = ref None in
   let capture r =
-    best_ms := r.Autotune.best_ms;
+    last := Some r;
     Option.iter report ~f:(fun f -> f r)
   in
   let tune arm ctx timing_ctx =
     logf "arm %s search:" arm;
-    best_ms := Float.infinity;
+    last := None;
     let result =
       Autotune.tune ?beam_width ?rounds ?repeats ?timing_ctx ~report:capture ctx comp bindings
     in
-    logf "arm %s best: %.4f ms" arm !best_ms;
-    (result, !best_ms)
+    let r = !last in
+    let best_ms = Option.value_map r ~default:Float.infinity ~f:(fun r -> r.Autotune.best_ms) in
+    logf "arm %s best: %.4f ms (%s)" arm best_ms
+      (Option.value_map r ~default:"no report" ~f:(fun r ->
+           Printf.sprintf "%s%s, best tensorized %s"
+             (if String.is_empty r.Autotune.best_label then "nothing timed"
+              else r.Autotune.best_label)
+             (if r.Autotune.best_tensorized then " [tensorized]" else "")
+             (if Float.is_inf r.Autotune.mma_best_ms then "none"
+              else Printf.sprintf "%.4f ms" r.Autotune.mma_best_ms)));
+    (result, best_ms, r)
   in
-  let a, a_ms = tune "A (default placements)" ctx timing_ctx in
+  let a, a_ms, a_report = tune "A (default placements)" ctx timing_ctx in
   let embedded = ref [] in
   Tensor.iter_embedded ~f:(fun tn -> embedded := tn :: !embedded) loss;
   (* [decide_materialized] skips the nodes constrained away from materialization (constants,
      declared-virtual), mirroring [every_non_literal_materialized]'s guards at the decision
      level. *)
   let materialize c = Context.decide_materialized c !embedded in
-  let b, b_ms =
+  let b, b_ms, b_report =
     tune "B (materialize-all)" (materialize ctx) (Option.map timing_ctx ~f:materialize)
   in
-  logf "winner: arm %s (A %.4f ms vs B %.4f ms)"
-    (if Float.( <= ) a_ms b_ms then "A" else "B")
-    a_ms b_ms;
-  if Float.( <= ) a_ms b_ms then a else b
+  let a_wins = Float.( <= ) a_ms b_ms in
+  logf "winner: arm %s (A %.4f ms vs B %.4f ms)" (if a_wins then "A" else "B") a_ms b_ms;
+  (* gh-ocannl-546: a tensorized winner of the arm that is then discarded reaches no artifact and no
+     end-to-end number, so the placement A/B is where it has to be said. Stated as the margin it
+     lost by, not as a bare flag: on a small routine the arms can be separated by less than the
+     candidate-level timing spread. *)
+  let shipped, dropped = if a_wins then (a_report, b_report) else (b_report, a_report) in
+  Option.iter dropped ~f:(fun d ->
+      if d.Autotune.best_tensorized then
+        logf
+          "NOTE arm %s crowned a tensorized candidate (%s at %.4f ms) and did NOT ship: arm %s wins \
+           the placement A/B at %.4f ms%s"
+          (if a_wins then "B" else "A")
+          d.Autotune.best_label d.Autotune.best_ms
+          (if a_wins then "A" else "B")
+          (if a_wins then a_ms else b_ms)
+          (Option.value_map shipped ~default:"" ~f:(fun s ->
+               if s.Autotune.best_tensorized then " (which is tensorized too)"
+               else if Float.is_inf s.Autotune.mma_best_ms then
+                 " (no tensorized candidate was timed in the shipping arm)"
+               else
+                 Printf.sprintf " (its own best tensorized candidate: %.4f ms)"
+                   s.Autotune.mma_best_ms)));
+  if a_wins then a else b
 
 module Lazy = Utils.Lazy
 

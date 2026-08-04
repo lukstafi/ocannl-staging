@@ -244,9 +244,12 @@ let () =
   (* Placement A/B: tune the default (virtual + promotion) graph and the materialize-all graph,
      keep the measured winner. Tuning runs on a scratch lineage, so the repeated candidate
      executions never touch the benchmark's own weights. *)
+  (* Both placement arms' crowned candidates go into the emitted result (gh-ocannl-546). *)
+  let arms = H.tune_arms () in
   let tuned ctx comp =
     let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
-    Train.tune_placements ~rounds:0 ~timing_ctx:scratch ctx batch_loss comp bindings
+    Train.tune_placements ~report:(H.collect_arm arms) ~rounds:0 ~timing_ctx:scratch ctx batch_loss
+      comp bindings
   in
   let ctx, routines =
     match step_shape with
@@ -281,7 +284,7 @@ let () =
          report column and composes the two axes itself (gh-ocannl-539), so a reduced-precision
          cell is distinguished by the precision field rather than by overloading this one. *)
       (if tune then "tuned" else if materialize then "materialized" else "default")
-    ~precision:leg.H.label ~compile_s ~tokens_per_step:(batch_size * seq) ~run_step
+    ~precision:leg.H.label ~compile_s ~tokens_per_step:(batch_size * seq) ~tune:arms ~run_step
     ~read_loss:(fun () -> (!ctx_ref, batch_loss).@[0])
     ~sync:(fun () -> Context.sync !ctx_ref)
     ()

@@ -91,7 +91,14 @@ let () =
      reads their cast twins. wrap_param routes through Tensor.param, so the hook applies. *)
   let params =
     match mp_prec with
-    | Some prec -> Mixed_prec.with_master_weights ~prec make_params
+    | Some prec ->
+        let placement =
+          match Stdlib.Sys.getenv_opt "BENCH_TWIN_PLACEMENT" with
+          | Some "materialized" -> Mixed_prec.Twin_materialized
+          | Some "virtual" -> Mixed_prec.Twin_virtual
+          | _ -> Mixed_prec.Twin_auto
+        in
+        Mixed_prec.with_master_weights ~placement ~prec make_params
     | None -> make_params ()
   in
   let materialize =
@@ -145,35 +152,41 @@ let () =
   let backend = Context.backend_name ctx in
   let ctx = Train.init_params ctx bindings batch_loss in
   let t0 = Unix.gettimeofday () in
-  (* BENCH_TUNE_REPORT=1: print both placement arms' search reports on stderr. *)
+  (* Both placement arms' outcomes go into the emitted result (gh-ocannl-546); BENCH_TUNE_REPORT=1
+     additionally prints each arm's full search report on stderr. *)
+  let arms = H.tune_arms () in
   let report =
-    match Stdlib.Sys.getenv_opt "BENCH_TUNE_REPORT" with
-    | Some "1" ->
-        Some
-          (fun (r : Autotune.report) ->
-            let declines =
-              String.concat ~sep:","
-                (List.map r.declines ~f:(fun d ->
-                     Sexp.to_string (Ir.Schedule_outcome.sexp_of_rejection_key d.key)
-                     ^ "=" ^ Int.to_string d.count))
-            in
-            let terminal =
-              Option.value_map r.terminal_failure ~default:"none" ~f:(fun failure ->
-                  Sexp.to_string (Ir.Schedule_outcome.sexp_of_phase failure.phase)
-                  ^ Option.value_map failure.candidate ~default:""
-                      ~f:(fun candidate -> ":" ^ candidate))
-            in
-            Stdlib.Printf.eprintf
-              "tune arm: cache_hit=%b partial=%b timed=%d failed=%d declines=[%s] terminal=%s \
-               rounds=%d sketch=%d mma_candidates=%d mma_timed=%d fissioned=%b baseline_ms=%.4f \
-               default_ms=%s best_ms=%.4f\n\
-               %!"
-              r.cache_hit r.partial r.candidates_timed r.candidates_failed declines terminal
-              r.rounds_run r.sketch_candidates r.mma_candidates r.mma_timed r.fissioned
-              r.baseline_ms
-              (Option.value_map r.default_ms ~default:"none" ~f:(Printf.sprintf "%.4f"))
-              r.best_ms)
-    | _ -> None
+    let verbose =
+      match Stdlib.Sys.getenv_opt "BENCH_TUNE_REPORT" with Some "1" -> true | _ -> false
+    in
+    Some
+      (fun (r : Autotune.report) ->
+        H.collect_arm arms r;
+        if verbose then (
+          let declines =
+            String.concat ~sep:","
+              (List.map r.declines ~f:(fun d ->
+                   Sexp.to_string (Ir.Schedule_outcome.sexp_of_rejection_key d.key)
+                   ^ "=" ^ Int.to_string d.count))
+          in
+          let terminal =
+            Option.value_map r.terminal_failure ~default:"none" ~f:(fun failure ->
+                Sexp.to_string (Ir.Schedule_outcome.sexp_of_phase failure.phase)
+                ^ Option.value_map failure.candidate ~default:"" ~f:(fun candidate ->
+                      ":" ^ candidate))
+          in
+          Stdlib.Printf.eprintf
+            "tune arm: cache_hit=%b partial=%b timed=%d failed=%d declines=[%s] terminal=%s \
+             rounds=%d sketch=%d mma_candidates=%d mma_timed=%d fissioned=%b baseline_ms=%.4f \
+             default_ms=%s best_ms=%.4f best=%s tensorized=%b mma_best_ms=%s\n\
+             %!"
+            r.cache_hit r.partial r.candidates_timed r.candidates_failed declines terminal
+            r.rounds_run r.sketch_candidates r.mma_candidates r.mma_timed r.fissioned r.baseline_ms
+            (Option.value_map r.default_ms ~default:"none" ~f:(Printf.sprintf "%.4f"))
+            r.best_ms
+            (if String.is_empty r.best_label then "none" else r.best_label)
+            r.best_tensorized
+            (if Float.is_inf r.mma_best_ms then "none" else Printf.sprintf "%.4f" r.mma_best_ms)))
   in
   (* BENCH_TUNE composes with every precision leg (gh-ocannl-529). It used to be rejected outright
      with BENCH_PRECISION, which made bf16 unmeasurable under autotuning — and bf16 is the ONLY
@@ -227,7 +240,7 @@ let () =
          (gh-ocannl-539). They are independent axes, and folding a reduced precision into the
          variant made a tuned bf16 cell unnameable. *)
       (if tune then "tuned" else if materialize then "materialized" else "default")
-    ~precision:leg.H.label ~compile_s ~run_step
+    ~precision:leg.H.label ~compile_s ~tune:arms ~run_step
     ~read_loss:(fun () -> (!ctx_ref, batch_loss).@[0])
     ~sync:(fun () -> Context.sync !ctx_ref)
     ()

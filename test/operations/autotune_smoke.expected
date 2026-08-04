@@ -14,4 +14,7 @@ completed search report is not partial: true
 decline census sums to candidates_failed: true
 second tune call hits the schedule cache: true
 cache-hit report has no declines: true
+searched report's winner fields are self-consistent: true
+cache-hit report's winner fields are self-consistent: true
+cache-hit report names the replayed winner: true
 cached schedule replays to correct values: true

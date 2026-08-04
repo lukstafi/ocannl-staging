@@ -2,6 +2,22 @@
 
 ### Added
 
+- **A search report that says which candidate won, and the placement A/B saying when a tensorized
+  winner is discarded** (gh-ocannl-546). `Autotune.report` gains `best_label`, `best_tensorized`
+  (read off the winner's schedule, not off its label's promise), the winner's `Tile_mma` statement
+  and scalar-fallback counts, and `mma_best_ms` — the best *timed* tensorized candidate, whose
+  margin against `best_ms` separates "tensorization is uncompetitive here" from "it lost inside the
+  noise". `Train.tune_placements` states the cross-arm conclusion, and a tuned benchmark cell emits
+  both arms in its result line, so a per-arm win that reaches no artifact survives in
+  `results.jsonl` instead of only in a discarded stderr stream. The measurement leg behind it
+  ([benchmarks/report-gh546-metal.md](benchmarks/report-gh546-metal.md)) found the Metal placement
+  A/B sound — the arms are 57–95% apart, 4–13x the per-arm spread — and relocated the actual gap:
+  under the mixed-precision recipe the default-placement arm seeds *zero* tensorized candidates,
+  because the virtual cast twins leave the matmul site reading f32 masters into an f16 destination,
+  a triple no uniform-format backend advertises. Materializing just the twins
+  (`Mixed_prec.Twin_materialized`, exposed as `BENCH_TWIN_PLACEMENT`) restores the whole tensorized
+  candidate family at that arm's cost.
+
 - **`gpt2_mini_train`: a transformer training-step cell, and gate-cost legs that cannot go
   missing** (gh-ocannl-551). `bench_gpt` now dispatches its step shape on the fixture's `mode`
   like the Python runners do, and the new `gpt2_mini_train` workload trains the same
