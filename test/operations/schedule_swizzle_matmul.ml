@@ -15,8 +15,15 @@
    operands, so swizzled operands must fall back to the lane-0 scalar micro-kernel — which reads
    elementwise through the swizzle-aware offsets and stays correct.
 
+   The same schedule runs again under [Swizzle_b128] (gh-ocannl-481 item 3, D1): the coarser
+   16-byte-unit XOR — the layout [ldmatrix] wants — is still a per-row bijection read by the same
+   scalar accesses, so parity holds identically and the two flavors differ only in the emitted
+   offset arithmetic.
+
    The error legs pin [Schedule.Stage]'s swizzle validation on every backend: swizzle requires
-   shared staging, a tile with at least two axes, and a power-of-two minor tile dim. *)
+   shared staging and a tile with at least two axes; the element flavor needs a power-of-two minor
+   tile dim, the b128 flavor a power-of-two count > 1 of whole 16-byte units — two rules that
+   neither imply nor are implied by each other. *)
 
 open Base
 open Ocannl
@@ -88,11 +95,12 @@ let () =
   let ctx_s = Context.run ctx_s routine_s in
   let got_serial = Context.get_values ctx_s mc0.Tensor.value in
 
-  (* --- The swizzled SMEM schedule --- *)
+  (* --- The swizzled SMEM schedule (element-granularity XOR) --- *)
   let%op mc1 = ma * mb in
-  let smem_schedule (opt : LL.optimized) : Sched.schedule =
+  let smem_schedule ?(kind = LL.Swizzle_elem) (mc : Tensor.t) (opt : LL.optimized) : Sched.schedule
+      =
     let i, j, k = accum_syms opt in
-    let ez, zsyms = Sched.expand_zero ~tn:mc1.Tensor.value in
+    let ez, zsyms = Sched.expand_zero ~tn:mc.Tensor.value in
     let zi, zj = match zsyms with [ zi; zj ] -> (zi, zj) | _ -> assert false in
     let sp_zi, _, _ = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Workgroup in
     let sp_zj, _, _ = Sched.split ~axis:zj ~factor:bn ~outer:LL.Grid ~inner:LL.Workgroup in
@@ -113,7 +121,7 @@ let () =
           shared = true;
           cooperative = None;
           hoisted = false;
-          swizzle = true;
+          swizzle = Some kind;
         };
       Sched.Stage
         {
@@ -122,13 +130,13 @@ let () =
           shared = true;
           cooperative = None;
           hoisted = false;
-          swizzle = true;
+          swizzle = Some kind;
         };
-      Sched.Privatize { target = mc1.Tensor.value; over = k_o };
+      Sched.Privatize { target = mc.Tensor.value; over = k_o };
     ]
   in
   let smem_comp = named "mm_swizzled_smem" (Train.forward mc1) in
-  let transform opt = Sched.apply (smem_schedule opt) opt in
+  let transform opt = Sched.apply (smem_schedule mc1 opt) opt in
   let ctx_a = Context.auto () in
   if on_gpu then (
     let ctx_a, routine_a =
@@ -168,10 +176,60 @@ let () =
     | None -> p "swizzled SMEM matmul parity (GPU) or clean rejection (CPU)" false);
     p "tile accesses XOR-swizzled (GPU) or rejected (CPU)" true);
 
+  (* --- The same schedule under the 16-byte-unit flavor ([Swizzle_b128], gh-ocannl-481 item 3 D1):
+     the XOR permutes whole 16-byte units of the row instead of single elements, leaving the offset
+     within a unit alone. On these f32 8x8 tiles a row is 32 bytes = 2 units of 4 elements, so the
+     offset renders as [P*8 + ((((col >> 2) ^ (P & 1)) << 2) + (col & 3))]. Still a per-row
+     bijection, so the values are unchanged — the scalar reads below go through it exactly like the
+     element flavor, which is what keeps the b128 layout usable by every rendering that does not
+     know about [ldmatrix]. --- *)
+  let%op mc1b = ma * mb in
+  let smem_b128_comp = named "mm_swz128_smem" (Train.forward mc1b) in
+  let transform_b128 opt = Sched.apply (smem_schedule ~kind:LL.Swizzle_b128 mc1b opt) opt in
+  let ctx_b = Context.auto () in
+  if on_gpu then (
+    let ctx_b, routine_b =
+      Context.compile ~lowered_transform:transform_b128 ctx_b smem_b128_comp Ir.Indexing.Empty
+    in
+    let ctx_b = Context.run ctx_b routine_b in
+    let got = Context.get_values ctx_b mc1b.Tensor.value in
+    p "b128-swizzled SMEM matmul parity (GPU) or clean rejection (CPU)"
+      (Array.for_all2_exn got got_serial ~f:approx);
+    match read_generated "mm_swz128_smem" with
+    | None -> p "tile accesses b128-swizzled (GPU) or rejected (CPU)" false
+    | Some src ->
+        let count_sub sub =
+          String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
+        in
+        (* Four access sites (two cooperative loads, two micro-kernel reads), each rendering the
+           unit index, its XOR mask, the shift back and the within-unit remainder. The element
+           flavor's [& 7] mask must NOT appear: that would be the wrong granularity. *)
+        p "tile accesses b128-swizzled (GPU) or rejected (CPU)"
+          (count_sub " >> 2)" >= 4
+          && count_sub " & 1)" >= 4
+          && count_sub " << 2)" >= 4
+          && count_sub " & 3)" >= 4
+          && count_sub " & 7)" = 0))
+  else (
+    (match
+       try
+         ignore
+           (Context.compile ~lowered_transform:transform_b128 ctx_b smem_b128_comp
+              Ir.Indexing.Empty
+             : Context.t * Context.routine);
+         None
+       with Invalid_argument msg -> Some msg
+     with
+    | Some msg ->
+        p "b128-swizzled SMEM matmul parity (GPU) or clean rejection (CPU)"
+          (String.is_substring msg ~substring:"not supported")
+    | None -> p "b128-swizzled SMEM matmul parity (GPU) or clean rejection (CPU)" false);
+    p "tile accesses b128-swizzled (GPU) or rejected (CPU)" true);
+
   (* --- Swizzled tiles feeding Tensorize: the intrinsic/fragment renderings assume row-major
      pointer+stride operands, so they must decline and the lane-0 scalar fallback must run — and
      stay correct, reading elementwise through the swizzled offsets. Same pipeline as the staged leg
-     of schedule_mma_matmul.ml, with [swizzle = true] on both stages ([bm = 16] keeps the block
+     of schedule_mma_matmul.ml, with [swizzle = Some LL.Swizzle_elem] on both stages ([bm = 16] keeps the block
      extents intrinsic-sized, so a surviving intrinsic would fire — its absence below is the
      decline, not a shape accident). --- *)
   let%op mc2 = ma * mb in
@@ -200,7 +258,7 @@ let () =
           shared = true;
           cooperative = Some simd_width;
           hoisted = false;
-          swizzle = true;
+          swizzle = Some LL.Swizzle_elem;
         };
       Sched.Stage
         {
@@ -209,7 +267,7 @@ let () =
           shared = true;
           cooperative = Some simd_width;
           hoisted = false;
-          swizzle = true;
+          swizzle = Some LL.Swizzle_elem;
         };
       tz;
     ]
@@ -293,7 +351,7 @@ let () =
             shared = false;
             cooperative = None;
             hoisted = false;
-            swizzle = true;
+            swizzle = Some LL.Swizzle_elem;
           };
       ]);
   let%op mc4 = ma * mb in
@@ -310,7 +368,7 @@ let () =
             shared = true;
             cooperative = None;
             hoisted = false;
-            swizzle = true;
+            swizzle = Some LL.Swizzle_elem;
           };
       ]);
   (* A 24-wide matmul: splitting k by 12 gives a [8 x 12] tile whose minor dim is not a power of two
@@ -336,6 +394,50 @@ let () =
             shared = true;
             cooperative = None;
             hoisted = false;
-            swizzle = true;
+            swizzle = Some LL.Swizzle_elem;
+          };
+      ]);
+  (* The b128 flavor's minor-extent rule is a different one, neither implying nor implied by the
+     element flavor's (gh-ocannl-481 item 3, D1): it counts 16-byte units, not elements. A 4-wide
+     f32 tile row is a legal element-flavor extent (power of two) but only 16 bytes = 1 unit, so
+     there is nothing to permute; a 12-wide f32 row is 3 units — a legal unit count in size but not
+     a power of two, so its XOR would leave the row. *)
+  let%op mc6 = ma * mb in
+  expect_error "Swizzle_b128 requires a power-of-two unit count > 1"
+    ~substring:"power-of-two count > 1 of 16-byte units" mc6 (fun opt ->
+      let i, _j, k = accum_syms opt in
+      let sp_i, _, i_i = Sched.split ~axis:i ~factor:8 ~outer:LL.Serial ~inner:LL.Serial in
+      let sp_k, _, k_i = Sched.split ~axis:k ~factor:4 ~outer:LL.Serial ~inner:LL.Serial in
+      [
+        sp_i;
+        sp_k;
+        Sched.Stage
+          {
+            source = ma.Tensor.value;
+            tile_loops = [ i_i; k_i ];
+            shared = true;
+            cooperative = None;
+            hoisted = false;
+            swizzle = Some LL.Swizzle_b128;
+          };
+      ]);
+  let%op mc7 = ma2 * mb2 in
+  expect_error "Swizzle_b128 requires a 16-byte-multiple minor tile dim"
+    ~substring:"multiple of 16 bytes" mc7 (fun opt ->
+      let i, _j, k = accum_syms opt in
+      let sp_i, _, i_i = Sched.split ~axis:i ~factor:8 ~outer:LL.Serial ~inner:LL.Serial in
+      (* A 3-wide f32 row is 12 bytes: not a whole number of 16-byte units. *)
+      let sp_k, _, k_i = Sched.split ~axis:k ~factor:3 ~outer:LL.Serial ~inner:LL.Serial in
+      [
+        sp_i;
+        sp_k;
+        Sched.Stage
+          {
+            source = ma2.Tensor.value;
+            tile_loops = [ i_i; k_i ];
+            shared = true;
+            cooperative = None;
+            hoisted = false;
+            swizzle = Some LL.Swizzle_b128;
           };
       ])

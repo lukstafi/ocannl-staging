@@ -41,7 +41,7 @@ let hand_built ~stmts ~tns_on_device ~tns_local =
     merge_node = None;
     workgroup_shared = Set.empty (module Tn);
     simdgroup_fragments = Set.empty (module Tn);
-    swizzled = Set.empty (module Tn);
+    swizzled = Map.empty (module Tn);
     zero_fringe = Set.empty (module Tn);
   }
 
@@ -123,7 +123,7 @@ let () =
      the remapped reads — a covered serial packing stage is Legal; shared staging stays Unknown
      (barriers and launch geometry are validated downstream). *)
   let stage ?(source = a) ?(tile_loops = [ k ]) ?(shared = false) ?(cooperative = None)
-      ?(hoisted = false) ?(swizzle = false) () =
+      ?(hoisted = false) ?(swizzle = None) () =
     Sched.Stage { source; tile_loops; shared; cooperative; hoisted; swizzle }
   in
   check "stage packing proves coverage" (stage ());

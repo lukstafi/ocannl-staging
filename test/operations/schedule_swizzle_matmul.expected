@@ -1,7 +1,11 @@
 swizzled SMEM matmul parity (GPU) or clean rejection (CPU): true
 tile accesses XOR-swizzled (GPU) or rejected (CPU): true
+b128-swizzled SMEM matmul parity (GPU) or clean rejection (CPU): true
+tile accesses b128-swizzled (GPU) or rejected (CPU): true
 swizzled staged+tensorized parity (GPU) or clean rejection (CPU): true
 swizzled operands decline the MMA intrinsics to the lane-0 fallback: true
 swizzle requires shared staging: true
 swizzle requires at least two tile axes: true
 swizzle requires a power-of-two minor tile dim: true
+Swizzle_b128 requires a power-of-two unit count > 1: true
+Swizzle_b128 requires a 16-byte-multiple minor tile dim: true

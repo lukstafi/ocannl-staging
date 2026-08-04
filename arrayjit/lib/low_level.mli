@@ -329,6 +329,23 @@ val copy_optimize_ctx : optimize_ctx -> optimize_ctx
     copies. Backend [compile] forks the incoming context's [optimize_ctx] through this, so sibling
     candidate compiles from one frontier are hermetic. *)
 
+(** Granularity of the XOR remap applied to a swizzled node's minor axis (gh-ocannl-481 item 3, D1).
+    Both flavors are per-row bijections of the minor axis, so the IR-level semantics are identical;
+    they differ in the unit the XOR permutes and therefore in which access pattern they
+    de-conflict. *)
+type swizzle_kind =
+  | Swizzle_elem
+      (** Element-granularity XOR: [P*C + col] renders as [P*C + (col lxor (P land (C-1)))]. Spreads
+          same-column scalar reads of consecutive rows across banks; the flavor the scalar and
+          register-blocktiled staged kernels want. *)
+  | Swizzle_b128
+      (** 16-byte-unit XOR: the column's 16-byte-unit index is XORed with the low bits of the row
+          prefix, leaving the offset within the unit alone. This is the CUTLASS-style layout
+          [ldmatrix] wants — its 8 per-phase row addresses are 16-byte-aligned, so only a remap that
+          keeps 16-byte units intact can both de-conflict them and stay loadable. Requires the
+          row's byte length to be a multiple of 16 and a power of two in 16-byte units. *)
+[@@deriving sexp, compare, equal]
+
 type optimized = {
   traced_store : traced_store;
   optimize_ctx : optimize_ctx;
@@ -343,14 +360,15 @@ type optimized = {
           form one per-simdgroup fragment lifetime. Backends without a fragment rendering ignore the
           marking and use the ordinary local-array code; Metal maps the marked region to a
           persistent [simdgroup_matrix] array. *)
-  swizzled : Set.M(Tnode).t;
+  swizzled : swizzle_kind Map.M(Tnode).t;
       (** Nodes stored in an XOR-swizzled layout (docs/proposals/tensorize-mma.md, "Swizzled
-          staging"): codegen remaps every element access [flat = P*C + col] (with [C] the minor dim,
-          [P] the linearized prefix) to [P*C + (col lxor (P land (C-1)))] — a bijection on the
-          buffer, so the IR-level semantics are unchanged; only the physical layout differs,
-          spreading same-column accesses across shared-memory banks. Populated by
-          [Schedule.Stage ~swizzle:true]. Renderings that assume a row-major layout must decline
-          swizzled nodes. *)
+          staging"), keyed by the remap's granularity ({!type-swizzle_kind}): codegen remaps every
+          element access [flat = P*C + col] (with [C] the minor dim, [P] the linearized prefix) to a
+          per-row permutation of [col] — a bijection on the buffer, so the IR-level semantics are
+          unchanged; only the physical layout differs, spreading same-column accesses across
+          shared-memory banks. Populated by [Schedule.Stage ~swizzle]. Renderings that assume a
+          row-major layout must decline swizzled nodes; the tile-MMA intrinsic arms decline
+          [Swizzle_elem] and may consume [Swizzle_b128] through [ldmatrix]-style loads. *)
   zero_fringe : Set.M(Tnode).t;
       (** Schedule-minted staged tiles whose whole index space is safe to read: slots outside the
           staged source region (edge tiles of a non-dividing or padded staging, gh-ocannl-485) hold

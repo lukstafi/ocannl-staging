@@ -36,7 +36,7 @@ type optop =
       shared : bool;
       cooperative : int option;
       hoisted : bool;
-      swizzle : bool;
+      swizzle : Low_level.swizzle_kind option;
     }
   | Privatize of { target : Tn.t; over : Indexing.symbol }
   | Expand_zero of { tn : Tn.t; indices : Indexing.symbol list }
@@ -1043,7 +1043,7 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
       if w <= 0 then invalid_arg "Schedule.Stage: cooperative simd width must be positive");
   if hoisted && shared then
     invalid_arg "Schedule.Stage: hoisted staging requires shared = false (it emits no load nest)";
-  if swizzle && not shared then
+  if Option.is_some swizzle && not shared then
     invalid_arg
       "Schedule.Stage: swizzle is a shared-memory bank-conflict layout, it requires shared = true";
   let accesses = collect_source_accesses ~source opt.llc in
@@ -1309,17 +1309,43 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
     (* Mint the tile. *)
     let prec = Lazy.force source.Tn.storage_prec in
     let tile_dims = Array.map tile_axes ~f:snd in
-    if swizzle then (
-      let n = Array.length tile_dims in
-      if n < 2 then
-        invalid_arg
-          "Schedule.Stage: swizzle requires a tile with at least two axes (the minor axis is XORed \
-           against the row prefix)";
-      let c = tile_dims.(n - 1) in
-      if c < 2 || c land (c - 1) <> 0 then
-        invalid_arg
-          (Printf.sprintf
-             "Schedule.Stage: swizzle requires a power-of-two minor tile dim > 1, got %d" c));
+    Option.iter swizzle ~f:(fun kind ->
+        let n = Array.length tile_dims in
+        if n < 2 then
+          invalid_arg
+            "Schedule.Stage: swizzle requires a tile with at least two axes (the minor axis is \
+             XORed against the row prefix)";
+        let c = tile_dims.(n - 1) in
+        (* Each flavor's XOR must stay inside the row, so the count of units it permutes must be a
+           power of two > 1 — elements for [Swizzle_elem], 16-byte groups for [Swizzle_b128]
+           (gh-ocannl-481 item 3, D1). The b128 count is NOT implied by the element one: it is
+           coarser, so it admits minor extents the element flavor rejects (a 24-element f16 row is
+           3 units, rejected; a 12-element f32 row is 3 units, rejected) and rejects extents the
+           element flavor accepts (a 2-element f32 row does not fill one unit). Item 4's
+           [pad_stride] is the knob for shapes whose natural minor extent misses it: pad first,
+           then check — this validation runs on the padded dims. *)
+        match kind with
+        | Low_level.Swizzle_elem ->
+            if c < 2 || c land (c - 1) <> 0 then
+              invalid_arg
+                (Printf.sprintf
+                   "Schedule.Stage: swizzle requires a power-of-two minor tile dim > 1, got %d" c)
+        | Low_level.Swizzle_b128 ->
+            let row_bytes = c * Ops.prec_in_bytes prec in
+            if row_bytes % 16 <> 0 then
+              invalid_arg
+                (Printf.sprintf
+                   "Schedule.Stage: Swizzle_b128 requires the minor tile dim to span a multiple of \
+                    16 bytes, got %d elements of %s (%d bytes)"
+                   c (Ops.prec_string prec) row_bytes)
+            else
+              let units = row_bytes / 16 in
+              if units < 2 || units land (units - 1) <> 0 then
+                invalid_arg
+                  (Printf.sprintf
+                     "Schedule.Stage: Swizzle_b128 requires a power-of-two count > 1 of 16-byte \
+                      units per row, got %d"
+                     units));
     let tile =
       Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
         ~label:("tile" :: source.Tn.label)
@@ -1554,7 +1580,10 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle
       llc;
       workgroup_shared =
         (if shared then Set.add opt.workgroup_shared tile else opt.workgroup_shared);
-      swizzled = (if swizzle then Set.add opt.swizzled tile else opt.swizzled);
+      swizzled =
+        (match swizzle with
+        | Some kind -> Map.set opt.swizzled ~key:tile ~data:kind
+        | None -> opt.swizzled);
       zero_fringe = Set.add opt.zero_fringe tile;
     }
 
@@ -4994,7 +5023,7 @@ let segment_optimized (full : Low_level.optimized) (llc : Low_level.t) : Low_lev
     merge_node = (if reads_merge then full.Low_level.merge_node else None);
     workgroup_shared = Set.filter full.Low_level.workgroup_shared ~f:(Set.mem tns);
     simdgroup_fragments = Set.filter full.Low_level.simdgroup_fragments ~f:(Set.mem tns);
-    swizzled = Set.filter full.Low_level.swizzled ~f:(Set.mem tns);
+    swizzled = Map.filter_keys full.Low_level.swizzled ~f:(Set.mem tns);
     zero_fringe = Set.filter full.Low_level.zero_fringe ~f:(Set.mem tns);
   }
 

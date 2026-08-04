@@ -136,7 +136,7 @@ let () =
               shared = false;
               cooperative = None;
               hoisted = false;
-              swizzle = false;
+              swizzle = None;
             };
           Sched.Stage
             {
@@ -145,7 +145,7 @@ let () =
               shared = false;
               cooperative = None;
               hoisted = false;
-              swizzle = false;
+              swizzle = None;
             };
           Sched.Privatize { target = prod2.Tensor.value; over = k_o };
           Sched.Fuse_epilogue { target = prod2.Tensor.value; shared = false };

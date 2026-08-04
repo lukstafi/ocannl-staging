@@ -1087,34 +1087,65 @@ module C_syntax (B : C_syntax_config) = struct
      {!Low_level.optimized.swizzled}). Scalar element accesses go through [pp_tn_offset] below;
      renderings that assume row-major storage (contiguous vector loads/stores, [Tile_mma] intrinsic
      / register-tiled / fragment paths) must decline these nodes. *)
-  let current_swizzled : Set.M(Tn).t ref = ref (Set.empty (module Tn))
-  let is_swizzled tn = Set.mem !current_swizzled tn
+  let current_swizzled : Low_level.swizzle_kind Map.M(Tn).t ref = ref (Map.empty (module Tn))
+  let swizzle_of tn = Map.find !current_swizzled tn
+  let is_swizzled tn = Option.is_some (swizzle_of tn)
+
+  (* Elements per 16-byte unit for [Low_level.Swizzle_b128]: [u] and its log, with [units] the
+     (power-of-two, checked by [Schedule.Stage]) count of units in one row of [c] elements. *)
+  let b128_units ~prec ~c =
+    let u = 16 / Ops.prec_in_bytes prec in
+    (u, Int.floor_log2 u, c / u)
 
   (* The flat-offset rendering for an element access of [tn]'s buffer: row-major [pp_array_offset],
-     except for swizzled nodes, where the minor-axis index is XORed with the low bits of the
-     linearized row prefix — [P*C + col] becomes [P*C + (col ^ (P & (C-1)))], [C] the (power-of-two,
-     checked by [Schedule.Stage]) minor dim. A bijection per row, so all-element traversals
-     (zeroing) and matched read/write pairs are unaffected; same-column accesses from consecutive
-     rows land in distinct shared-memory banks. The prefix expression is emitted twice; downstream C
-     compilers CSE it. *)
+     except for swizzled nodes, where the minor-axis index is permuted per row against the low bits
+     of the linearized row prefix [P] — a bijection, so all-element traversals (zeroing) and matched
+     read/write pairs are unaffected while same-column accesses from consecutive rows land in
+     distinct shared-memory banks. Two granularities (gh-ocannl-481 item 3, D1):
+
+     - [Swizzle_elem]: [P*C + col] becomes [P*C + (col ^ (P & (C-1)))], [C] the minor dim.
+     - [Swizzle_b128]: the column's 16-byte-unit index is XORed instead, the offset within the unit
+       untouched — [P*C + (((col/u ^ (P & (U-1))) * u) + col%u)] with [u] elements per unit and [U]
+       units per row. Whole 16-byte units stay contiguous and 16-byte-aligned, which is what makes
+       the layout simultaneously bank-de-conflicted and [ldmatrix]-loadable.
+
+     The prefix expression is emitted twice; downstream C compilers CSE it. *)
   let pp_tn_offset tn (idcs, dims) =
     let open PPrint in
     let n = Array.length idcs in
-    if (not (is_swizzled tn)) || n < 2 then pp_array_offset (idcs, dims)
-    else
-      let c = dims.(n - 1) in
-      let prefix_doc =
-        pp_array_offset (Array.sub idcs ~pos:0 ~len:(n - 1), Array.sub dims ~pos:0 ~len:(n - 1))
-      in
-      let col_doc = pp_axis_index idcs.(n - 1) in
-      let col_doc = if PPrint.is_empty col_doc then string "0" else col_doc in
-      if PPrint.is_empty prefix_doc then col_doc
-      else
-        parens prefix_doc
-        ^^ string (" * " ^ Int.to_string c ^ " + ")
-        ^^ parens
-             (parens col_doc ^^ string " ^ "
-             ^^ parens (parens prefix_doc ^^ string (" & " ^ Int.to_string (c - 1))))
+    match swizzle_of tn with
+    | None -> pp_array_offset (idcs, dims)
+    | Some _ when n < 2 -> pp_array_offset (idcs, dims)
+    | Some kind -> (
+        let c = dims.(n - 1) in
+        let prefix_doc =
+          pp_array_offset (Array.sub idcs ~pos:0 ~len:(n - 1), Array.sub dims ~pos:0 ~len:(n - 1))
+        in
+        let col_doc = pp_axis_index idcs.(n - 1) in
+        let col_doc = if PPrint.is_empty col_doc then string "0" else col_doc in
+        if PPrint.is_empty prefix_doc then col_doc
+        else
+          let row_base = parens prefix_doc ^^ string (" * " ^ Int.to_string c ^ " + ") in
+          match kind with
+          | Low_level.Swizzle_elem ->
+              row_base
+              ^^ parens
+                   (parens col_doc ^^ string " ^ "
+                   ^^ parens (parens prefix_doc ^^ string (" & " ^ Int.to_string (c - 1))))
+          | Low_level.Swizzle_b128 ->
+              let u, ushift, units = b128_units ~prec:(Lazy.force tn.Tn.storage_prec) ~c in
+              (* C binds [+] tighter than [<<], so the shifted unit index needs its own parens. *)
+              let unit_idx =
+                parens
+                  (parens (parens col_doc ^^ string (" >> " ^ Int.to_string ushift))
+                  ^^ string " ^ "
+                  ^^ parens (parens prefix_doc ^^ string (" & " ^ Int.to_string (units - 1))))
+              in
+              row_base
+              ^^ parens
+                   (parens (unit_idx ^^ string (" << " ^ Int.to_string ushift))
+                   ^^ string " + "
+                   ^^ parens (parens col_doc ^^ string (" & " ^ Int.to_string (u - 1)))))
 
   type active_mma_accumulator =
     | Active_fragment of Tn.t * string

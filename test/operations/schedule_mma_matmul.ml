@@ -715,7 +715,7 @@ let () =
           shared = true;
           cooperative = Some simd_width;
           hoisted = false;
-          swizzle = false;
+          swizzle = None;
         };
       Sched.Stage
         {
@@ -724,7 +724,7 @@ let () =
           shared = true;
           cooperative = Some simd_width;
           hoisted = false;
-          swizzle = false;
+          swizzle = None;
         };
       tz;
     ]
