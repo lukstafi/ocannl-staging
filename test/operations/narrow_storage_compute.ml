@@ -153,6 +153,38 @@ let () =
       /. Array.fold reference ~init:0. ~f:(fun m v -> Float.max m (Float.abs v))
       < 0.01);
   let native_source = read_generated "nsc_vec_nat" in
+
+  (* Computing *in* fp16 means fp16's 65504 ceiling applies to the intermediates, not just to the
+     stored result. [exp 12.] is 162754, which overflows it; scaling that back down recovers a
+     finite value only if the exponential was allowed to stay in f32. The check is on a library
+     call on purpose: the ring operators compute in [_Float16] whether or not the result of a
+     float-returning call is cast back, so an [expf] is what distinguishes the two. *)
+  let overflow_leg policy =
+    let a =
+      NTDSL.init ~l:"ovf_a" ~prec:Ir.Ops.half ~o:[ 1 ] ~f:(fun _ -> 12.0) ()
+    in
+    let c =
+      NTDSL.init ~l:"ovf_c" ~prec:Ir.Ops.half ~o:[ 1 ] ~f:(fun _ -> 0.001) ()
+    in
+    let%op y = exp a *. c in
+    Tn.update_prec y.Tensor.value Ir.Ops.half;
+    Ir.Numerics.set_policy policy;
+    let ctx = Context.auto () in
+    let ctx, routine =
+      Context.compile ~lowered_transform:serial ctx
+        (named "nsc_ovf" (Train.forward y))
+        Ir.Indexing.Empty
+    in
+    let v = (Context.get_values (Context.run ctx routine) y.Tensor.value).(0) in
+    Ir.Numerics.set_policy base;
+    v
+  in
+  let ovf_wide = overflow_leg { base with narrow_compute_f32 = true; fp16_arithmetic = false } in
+  let ovf_native = overflow_leg { base with narrow_compute_f32 = true; fp16_arithmetic = true } in
+  p "f32 compute over half storage keeps the intermediate finite" Float.(is_finite ovf_wide);
+  p "fp16 compute applies fp16's ceiling to the intermediate"
+    (if native_fp16 then not Float.(is_finite ovf_native) else Float.(is_finite ovf_native));
+
   Ir.Numerics.set_policy { base with narrow_compute_f32 = true; fp16_arithmetic = false };
 
   (* --- 3. Structure of the bf16 vectorized source. --- *)

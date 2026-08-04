@@ -465,7 +465,15 @@ struct
             ^^ ifflat (space ^^ float_v3) (nest 2 (break 1 ^^ float_v3))
             ^^ string op_suffix)
         in
-        string "FP_TO_HALF(" ^^ float_result ^^ string ")"
+        (* [FLOAT_TO_HALF], not [FP_TO_HALF]: the latter is the *identity* on a native [_Float16]
+           target, which would leave the f32 result of a library call ([expf], [sqrtf], [fmaxf]) at
+           f32 -- and C's usual arithmetic conversions then keep every enclosing operator at f32
+           too, all the way to the store. The fp16-arithmetic policy promises fp16 intermediates,
+           10-bit mantissa and a 65504 ceiling included, so the narrowing has to be a real cast
+           (gh-ocannl-516 review). A no-op where the ring operators already compute in [_Float16],
+           and unchanged on the emulated path, where both macros are [float_to_half_emulated].
+           Same reasoning at the two [FLOAT_TO_HALF] sites below. *)
+        string "FLOAT_TO_HALF(" ^^ float_result ^^ string ")"
     | Ops.Fp8_prec _ ->
         (* For FP8, perform operations in float precision *)
         let open PPrint in
@@ -541,7 +549,7 @@ struct
                 ^^ ifflat (space ^^ float_v2) (nest 2 (break 1 ^^ float_v2))
                 ^^ string op_suffix)
             in
-            string "FP_TO_HALF(" ^^ float_result ^^ string ")"
+            string "FLOAT_TO_HALF(" ^^ float_result ^^ string ")"
         | _ ->
             let op_prefix, op_infix, op_suffix = Ops.binop_c_syntax prec op in
             let open PPrint in
@@ -582,7 +590,7 @@ struct
             let float_v = string "HALF_TO_FP(" ^^ v ^^ string ")" in
             let op_prefix, op_suffix = Ops.unop_c_syntax Ops.single op in
             let float_result = group (string op_prefix ^^ float_v ^^ string op_suffix) in
-            string "FP_TO_HALF(" ^^ float_result ^^ string ")"
+            string "FLOAT_TO_HALF(" ^^ float_result ^^ string ")"
         | _ ->
             let op_prefix, op_suffix = Ops.unop_c_syntax prec op in
             let open PPrint in
