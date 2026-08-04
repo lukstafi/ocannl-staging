@@ -247,6 +247,26 @@ let () =
   p "second tune call hits the schedule cache" r2.Autotune.cache_hit;
   p "cache-hit report has no declines"
     (List.is_empty r2.Autotune.declines && r2.Autotune.candidates_failed = 0);
+  (* The crowned candidate's identity in the report (gh-ocannl-546): backend-independent contract,
+     since which candidate wins is not. A per-arm win that never reaches a shipping artifact is
+     invisible in every end-to-end number unless the report says which candidate won and whether it
+     tensorizes. *)
+  let tensorized_schedule (r : Autotune.report) =
+    List.exists r.Autotune.best_schedule ~f:(function SC.Tensorize _ -> true | _ -> false)
+  in
+  let winner_contract (r : Autotune.report) =
+    (* Labeled exactly when something was timed; the flag agrees with the schedule it describes
+       (never with the winning spec's label promise); the best tensorized candidate is timed
+       exactly when one is reported, and can never beat the overall winner. *)
+    Bool.equal (String.is_empty r.Autotune.best_label) (Float.is_inf r.Autotune.best_ms)
+    && Bool.equal r.Autotune.best_tensorized (tensorized_schedule r)
+    && Bool.equal (Float.is_inf r.Autotune.mma_best_ms) (r.Autotune.mma_timed = 0)
+    && Float.(r.Autotune.mma_best_ms >= r.Autotune.best_ms)
+    && r.Autotune.best_mma_scalar_fallbacks <= r.Autotune.best_mma_statements
+  in
+  p "searched report's winner fields are self-consistent" (winner_contract r1);
+  p "cache-hit report's winner fields are self-consistent" (winner_contract r2);
+  p "cache-hit report names the replayed winner" (not (String.is_empty r2.Autotune.best_label));
   p "cached schedule replays to correct values"
     (Array.for_all2_exn got2 expected_c ~f:approx
     && Array.for_all2_exn got_mm2 mm_expected ~f:approx)

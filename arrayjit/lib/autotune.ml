@@ -47,6 +47,14 @@ type report = {
   baseline_ms : float;
   default_ms : float option;
   best_ms : float;
+  best_label : string;
+  best_tensorized : bool;
+  best_mma_statements : int;
+  best_mma_scalar_fallbacks : int;
+  mma_best_ms : float;
+      (** The best timed tensorized candidate's time (gh-ocannl-546), [infinity] when none was
+          timed. Its margin against [best_ms] is what tells a crowned tensorization apart from one
+          that lost by 1% and one that lost by 40%. *)
   best_schedule : SC.saved_schedule;
 }
 
@@ -3730,6 +3738,16 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
     | Whole_saved _ -> false
     | Fiss_saved _ | Split_saved _ -> true
   in
+  (* Whether the crowned schedule tensorizes is read off the schedule, not off the winning spec's
+     label (gh-ocannl-546): the beam can extend a plainly-labeled incumbent with a [Tensorize] move,
+     and a sketch label promises tensorization the transform may not have kept. *)
+  let saved_is_tensorized (saved : SC.saved_schedule) =
+    List.exists saved ~f:(function SC.Tensorize _ -> true | _ -> false)
+  in
+  let mma_scalar_fallbacks c =
+    List.count c.mma_renders ~f:(fun (_, r) ->
+        Ir.C_syntax.equal_mma_rendering r Ir.C_syntax.Mma_scalar_fallback)
+  in
   (* The decline census outlives the cache branch: the baseline compile happens before the lookup and
      can be declined whether or not a cached winner then replays (gh-ocannl-533), so a cache-hit
      report has to carry that rejection too — [baseline_declined] with an empty census would be an
@@ -3807,6 +3825,15 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
                         d
                     | _ -> None);
                   best_ms = entry.SC.best_ms;
+                  best_label = spec_label spec;
+                  best_tensorized = saved_is_tensorized (flat_schedule c.form);
+                  best_mma_statements = List.length c.mma_renders;
+                  best_mma_scalar_fallbacks = mma_scalar_fallbacks c;
+                  (* No search ran, so the only tensorized candidate this process knows of is the
+                     replayed winner itself. *)
+                  mma_best_ms =
+                    (if saved_is_tensorized (flat_schedule c.form) then entry.SC.best_ms
+                     else Float.infinity);
                   best_schedule = flat_schedule c.form;
                 };
               Some (c.cctx, c.routine)
@@ -3895,6 +3922,20 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
          completed so far and is updated at its ordinary accounting site below. [best_so_far] is
          updated after every successful timing, including midway through seed enumeration. *)
       let n_mma_proposed = ref 0 and n_mma_timed = ref 0 in
+      (* gh-ocannl-546: the crowned candidate's identity, and how close tensorization came to it.
+         Labels are keyed by digest rather than carried on the candidate, because the winner is
+         picked from the beam pool (and the beam's own expansions time through the same site), so
+         the timing site is the one place every timed candidate passes exactly once. *)
+      let label_by_digest = Hashtbl.create (module String) in
+      if baseline_dispatched then Hashtbl.set label_by_digest ~key:base_digest ~data:"baseline";
+      let mma_best_ms = ref Float.infinity in
+      let winner_label best_c =
+        Option.value_map best_c ~default:"" ~f:(fun c ->
+            Option.value (Hashtbl.find label_by_digest c.digest_after) ~default:"")
+      in
+      let winner_tensorized best_c =
+        Option.exists best_c ~f:(fun c -> saved_is_tensorized (flat_schedule c.form))
+      in
       let n_model_scored = ref 0 and n_model_pruned = ref 0 in
       let n_fiss_sketch_timed = ref 0 and n_sr_timed = ref 0 in
       let rounds_run = ref 0 in
@@ -3963,6 +4004,12 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
             baseline_ms;
             default_ms = default_ms ();
             best_ms;
+            best_label = winner_label best_c;
+            best_tensorized = winner_tensorized best_c;
+            best_mma_statements = Option.value_map best_c ~default:0 ~f:(fun c ->
+                List.length c.mma_renders);
+            best_mma_scalar_fallbacks = Option.value_map best_c ~default:0 ~f:mma_scalar_fallbacks;
+            mma_best_ms = !mma_best_ms;
             best_schedule = Option.value_map best_c ~default:[] ~f:(fun c -> flat_schedule c.form);
           }
         in
@@ -4036,7 +4083,10 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
               | Ok ms ->
                   Int.incr n_timed;
                   Hashtbl.set timed_ms_by_digest ~key:c.digest_after ~data:ms;
-                  if spec_expects_mma spec then Int.incr n_mma_timed;
+                  Hashtbl.set label_by_digest ~key:c.digest_after ~data:(spec_label spec);
+                  if spec_expects_mma spec then (
+                    Int.incr n_mma_timed;
+                    if Float.(ms < !mma_best_ms) then mma_best_ms := ms);
                   logf "%s: %.4f ms (digest %s)" (spec_label spec) ms (dshort c.digest_after);
                   emit_calibration ~backend ~limits ~label:(spec_label spec) ~digest:c.digest_after
                     ~measured_ms:ms c.all_opts;
@@ -4426,6 +4476,12 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
           baseline_ms;
           default_ms = default_ms ();
           best_ms;
+          best_label = winner_label best_c;
+          best_tensorized = winner_tensorized best_c;
+          best_mma_statements =
+            Option.value_map best_c ~default:0 ~f:(fun c -> List.length c.mma_renders);
+          best_mma_scalar_fallbacks = Option.value_map best_c ~default:0 ~f:mma_scalar_fallbacks;
+          mma_best_ms = !mma_best_ms;
           best_schedule = Option.value_map best_c ~default:[] ~f:(fun c -> flat_schedule c.form);
         }
       in

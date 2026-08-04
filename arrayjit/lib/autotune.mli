@@ -368,6 +368,31 @@ type report = {
           failed and the baseline was not dispatched (or was declined). In that case no cache entry
           is stored and the returned routine is the untuned default compile, not the serial
           baseline. *)
+  best_label : string;
+      (** The crowned candidate's spec label — the same string the [autotune_log] lines carry (e.g.
+          ["F_sketch[mma-gpu 16x32x32 ep]"]). ["baseline"] when no candidate beat the serial
+          baseline, [""] when nothing was timed. Which candidate won is otherwise recoverable only
+          by matching [best_ms] against the log's per-candidate times (gh-ocannl-546). *)
+  best_tensorized : bool;
+      (** The crowned schedule contains a [Schedule.Tensorize] — read off [best_schedule], so this
+          is what the winner {e is}, not what its label promised. This is the fact a caller needs to
+          state that a search's shipping artifact uses tensor cores; per-search [mma_timed] answers
+          only whether one was measured. *)
+  best_mma_statements : int;
+      (** [Tile_mma] statements the crowned candidate emitted, and of those, how many rendered as
+          the lane-0 scalar fallback ([best_mma_scalar_fallbacks]). The pair keeps the reporting
+          contract's distinction (gh-ocannl-545): [best_tensorized] with
+          [best_mma_scalar_fallbacks > 0] is a schedule that carries a [Tensorize] and executes
+          scalar code, and [best_tensorized] with [best_mma_statements = 0] is one that emitted no
+          tensorized statement at all. A genuinely tensorized artifact is [best_tensorized] with
+          [best_mma_statements > 0] and [best_mma_scalar_fallbacks = 0]. *)
+  best_mma_scalar_fallbacks : int;
+  mma_best_ms : float;
+      (** The best {e timed} tensorized candidate's time, [infinity] when none was timed
+          (gh-ocannl-546). Same population as [mma_timed] — label-promised tensorization, counted
+          where candidates are timed. Against [best_ms] this is the margin by which tensorization
+          won or lost this search, which is the difference between "the tensorized pipeline is
+          uncompetitive here" and "it lost inside measurement noise". *)
   best_schedule : Ir.Schedule_cache.saved_schedule;
       (** The winner's schedule; for a fissioned winner, the concatenation of the per-segment
           schedules (informational). Empty when nothing was timed. *)
