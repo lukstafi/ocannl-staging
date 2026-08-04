@@ -200,4 +200,6 @@ grepping a log.
 - Not established: whether targeted materialization pays on a larger workload. On `mlp_small` it is
   neutral-to-slightly-negative on the shipping artifact while unlocking the candidate family — the
   interesting test is a cell where the tensorized candidate has enough work to win by more than the
-  materialization costs.
+  materialization costs (`mlp_wide`, `gpt2_mini_train`). That is gh-ocannl-558, which also carries
+  the mechanical obstacle: by the time site detection runs, the twin whose placement needs changing
+  has already been inlined out of the program.
