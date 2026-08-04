@@ -91,12 +91,15 @@ let () =
   in
   let ctx = H.inject ctx st batch_loss mapping in
   let t0 = Unix.gettimeofday () in
+  (* Both placement arms' crowned candidates go into the emitted result (gh-ocannl-546). *)
+  let arms = H.tune_arms () in
   let ctx, routine =
     if tune then
       let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
       (* Placement A/B: tune the default (virtual + promotion) graph and the materialize-all graph,
          keep the measured winner. *)
-      Train.tune_placements ~rounds:0 ~timing_ctx:scratch ctx batch_loss step_comp bindings
+      Train.tune_placements ~report:(H.collect_arm arms) ~rounds:0 ~timing_ctx:scratch ctx
+        batch_loss step_comp bindings
     else if Lazy.force Autotune.model_default_enabled then
       (* gh-ocannl-491: the model-picked untuned default (config [model_default_schedule=true]). *)
       Autotune.model_default ctx step_comp bindings
@@ -115,7 +118,7 @@ let () =
   let open Operation.At in
   H.measure_and_emit ~st ~backend
     ~variant:(if tune then "tuned" else if materialize then "materialized" else "default")
-    ~compile_s ~run_step
+    ~compile_s ~tune:arms ~run_step
     ~read_loss:(fun () -> (ctx, batch_loss).@[0])
     ~sync:(fun () -> Context.sync ctx)
     ()

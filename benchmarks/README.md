@@ -119,7 +119,14 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
 
   Debug helpers: `BENCH_DEBUG=1` prints param names/dims (conv/gpt) or bias gradients (mlp) and
   exits; `BENCH_NO_SGD=1` compiles the gradient update without the SGD step (mlp);
-  `BENCH_NO_SLICE=1` skips `@|` batch slicing (mlp, single-batch fixture).
+  `BENCH_NO_SLICE=1` skips `@|` batch slicing (mlp, single-batch fixture);
+  `BENCH_TWIN_PLACEMENT=materialized|virtual` (mlp, reduced precision) pins the master weights'
+  cast twins instead of leaving them to the virtualization heuristics
+  (`Mixed_prec.Twin_materialized`). The twins' placement decides whether a tensorized candidate is
+  *seeded at all* on a uniform-format backend (gh-ocannl-546): with virtual twins the matmul site
+  reads f32 masters into a reduced-precision destination, a mixed triple no advertised tile
+  matches, so the default-placement arm proposes zero tensorized candidates — materializing three
+  small weight casts is enough to make them reachable at that arm's cost.
 - `runners/pytorch/run.py` — flags: `--device cpu|mps|cuda`, `--compile` (torch.compile
   variant).
 - `runners/tinygrad/run.py` — flags: `--device CPU|METAL|CUDA|AMD|CL|HIP`, `--jit 0|1`, `--beam N`
@@ -258,6 +265,14 @@ than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it wi
 - The OCANNL runner keeps intermediates Virtual (recomputed in backward) in the untimed
   parity configuration; the tuned variant tunes both that graph and the materialize-all
   graph (placement A/B) and keeps the faster one.
+- A tuned OCANNL cell's result line carries a `tune` object (gh-ocannl-546): `shipped` names the
+  arm whose artifact was kept, and each arm reports its crowned candidate's label, whether that
+  schedule tensorizes, how many of its `Tile_mma` statements rendered as the lane-0 scalar
+  fallback, the seeded/timed tensorized counts, and the best *timed* tensorized candidate's time.
+  A tensorized win in the arm that loses the A/B reaches no artifact and shows up in no step time,
+  so without this the sweep can only find it by grepping `OCANNL_AUTOTUNE_LOG` output that a
+  successful cell discards. Read `mma_best_ms` against `best_ms` for the margin: tensorization
+  losing by 1% and by 40% are different findings.
 - tinygrad's loss must be realized before `opt.step()` (in-place assigns; a later realize
   would recompute the loss from updated weights). tinygrad JIT capture happens during the
   first parity steps; loss values are unaffected.

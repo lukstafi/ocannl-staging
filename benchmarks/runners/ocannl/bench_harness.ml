@@ -204,6 +204,52 @@ let percentile sorted p =
   let idx = Float.to_int (Float.round_nearest (p /. 100. *. Float.of_int (n - 1))) in
   sorted.(idx)
 
+(** {1 Placement A/B arms in the emitted result (gh-ocannl-546)}
+
+    A per-arm search outcome that never reaches the result line is invisible in every end-to-end
+    number the sweep reports: a tensorized candidate can win its arm and then be discarded whole
+    when the other arm ships, and the only trace is an [OCANNL_AUTOTUNE_LOG] stderr stream that a
+    successful cell throws away. So each arm's crowned candidate — its label, whether it tensorizes,
+    and how the best {e timed} tensorized candidate compares — is collected here and emitted with
+    the measurement, where `results.jsonl` keeps it.
+
+    {!Train.tune_placements} calls [report] once per arm, arm A (default placements) first, and
+    ships the arm with the smaller [best_ms]; that is the whole attribution rule and it is applied
+    below rather than guessed at. *)
+
+type tune_arms = { mutable arm_reports : Autotune.report list (* reverse order *) }
+
+let tune_arms () = { arm_reports = [] }
+let collect_arm t (r : Autotune.report) = t.arm_reports <- r :: t.arm_reports
+
+(** The [tune] JSON object, or [None] when no arm reported (an untuned cell). Times are milliseconds;
+    [mma_best_ms] is [null] when no tensorized candidate was timed in that arm. *)
+let tune_json t =
+  match List.rev t.arm_reports with
+  | [] -> None
+  | reports ->
+      let named = List.mapi reports ~f:(fun i r -> (Printf.sprintf "%c" (Char.of_int_exn (65 + i)), r)) in
+      let shipped =
+        List.fold named ~init:None ~f:(fun acc (name, r) ->
+            match acc with
+            | Some (_, best) when Float.( <= ) best r.Autotune.best_ms -> acc
+            | _ -> Some (name, r.Autotune.best_ms))
+        |> Option.value_map ~default:"?" ~f:fst
+      in
+      let arm (name, (r : Autotune.report)) =
+        Printf.sprintf
+          {|{"arm":"%s","best_ms":%.6g,"best_label":"%s","tensorized":%b,"mma_scalar_fallbacks":%d,"mma_seeded":%d,"mma_timed":%d,"mma_best_ms":%s}|}
+          name r.Autotune.best_ms
+          (String.substr_replace_all r.Autotune.best_label ~pattern:{|"|} ~with_:"'")
+          r.Autotune.best_tensorized r.Autotune.best_mma_scalar_fallbacks r.Autotune.mma_candidates
+          r.Autotune.mma_timed
+          (if Float.is_inf r.Autotune.mma_best_ms then "null"
+           else Printf.sprintf "%.6g" r.Autotune.mma_best_ms)
+      in
+      Some
+        (Printf.sprintf {|{"shipped":"%s","arms":[%s]}|} shipped
+           (String.concat ~sep:"," (List.map named ~f:arm)))
+
 let floats_of_gen g =
   let n = Array.fold (Bigarray.Genarray.dims g) ~init:1 ~f:( * ) in
   let a1 = Bigarray.reshape_1 g n in
@@ -484,8 +530,8 @@ let time_segments ?promote_locals ?(repeats = 20) ~backend ~limits ~static_indic
 (** Runs the measurement protocol and prints the JSON result line. [run_step] advances the batch
     binding and enqueues one step; [read_loss] returns the current loss value (awaits the device);
     [sync] awaits all queued work. *)
-let measure_and_emit ~st ~backend ~variant ?(precision = "f32") ~compile_s ?tokens_per_step ~run_step
-    ~read_loss ~sync ()
+let measure_and_emit ~st ~backend ~variant ?(precision = "f32") ~compile_s ?tokens_per_step ?tune
+    ~run_step ~read_loss ~sync ()
     =
   let workload = get_meta st "name" in
   let parity_steps = meta_int st "parity_steps" in
@@ -527,8 +573,14 @@ let measure_and_emit ~st ~backend ~variant ?(precision = "f32") ~compile_s ?toke
   let tokens_field =
     match tokens_per_step with Some t -> Printf.sprintf {|"tokens_per_step":%d,|} t | None -> ""
   in
+  let tune_field =
+    match Option.bind tune ~f:tune_json with
+    | Some j -> Printf.sprintf {|"tune":%s,|} j
+    | None -> ""
+  in
   Stdio.printf
-    {|{"framework":"ocannl","backend":"%s","variant":"%s","precision":"%s","workload":"%s","compile_s":%.3f,%s"step_ms":{"p10":%.6g,"p50":%.6g,"p90":%.6g},"queued_step_ms":%.6g,"timed_steps":%d,"losses":[%s]}|}
-    backend variant precision workload compile_s tokens_field (percentile synced 10.) (percentile synced 50.)
+    {|{"framework":"ocannl","backend":"%s","variant":"%s","precision":"%s","workload":"%s","compile_s":%.3f,%s%s"step_ms":{"p10":%.6g,"p50":%.6g,"p90":%.6g},"queued_step_ms":%.6g,"timed_steps":%d,"losses":[%s]}|}
+    backend variant precision workload compile_s tokens_field tune_field (percentile synced 10.)
+    (percentile synced 50.)
     (percentile synced 90.) queued_ms timed_steps (json_floats losses);
   Stdio.printf "\n"
