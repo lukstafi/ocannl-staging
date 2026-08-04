@@ -295,6 +295,26 @@ let cast ?spec ?(capture_dims = []) =
     ~transpose_op:(transpose_op_of_spec ?spec ~capture_dims ())
     ~op_asn ~grad_asn
 
+(** An identity operation whose result's rows resolve at the use site (gh-ocannl-544): the result
+    widens to what its consumers demand, and the argument broadcasts into it. Operation results
+    otherwise close down to their arguments' shapes, so this is the explicit request for use-site
+    widening — e.g. [stretch !.1.0] is a shape-inferred constant 1 usable as an einsum operand of
+    any shape (formerly spelled [0.5 + 0.5]). *)
+let stretch ?spec ?(capture_dims = []) =
+  let module NTDSL = Initial_NTDSL in
+  let%cd op_asn ~t ~t1 ~projections = v =:+ id v1 in
+  let%cd grad_asn ~t:_ ~g ~t1 ~projections = g1 =+ id g in
+  fun ?grad_spec t1 ?label ?top_down_prec ?batch_dims ?batch_axes ?input_dims ?output_dims
+    ?input_axes ?output_axes ?deduced () ->
+    let result =
+      Tensor.unop ~op_label:"stretch"
+        ~transpose_op:(transpose_op_of_spec ?spec ~capture_dims ())
+        ~op_asn ~grad_asn ?grad_spec t1 ?label ?top_down_prec ?batch_dims ?batch_axes ?input_dims
+        ?output_dims ?input_axes ?output_axes ?deduced ()
+    in
+    Shape.set_resolve_at_use result.Tensor.shape;
+    result
+
 let not ?spec ?(capture_dims = []) =
   let module NTDSL = Initial_NTDSL in
   let%cd op_asn ~t ~t1 ~projections = v =:+ not v1 in
@@ -307,32 +327,49 @@ let uint4x32_to_prec_uniform ?grad_spec =
   let module NTDSL = Initial_NTDSL in
   let%cd op_asn ~t ~t1 ~projections = v =: uint4x32_to_prec_uniform v1 in
   let%cd grad_asn ~t:_ ~g:_ ~t1:_ ~projections:_ = Asgns.empty_comp in
-  fun t1 ?label ?top_down_prec ->
+  fun t1 ?label ?top_down_prec ?batch_dims ?batch_axes ?input_dims ?output_dims ?input_axes
+    ?output_axes ?deduced () ->
     (* Ignore what the caller says, since we must learn the precision from the outside. *)
     ignore (top_down_prec : bool option);
     Tn.update_prec t1.Tensor.value Ir.Ops.uint4x32;
-    Tensor.unop (* A placeholder that will be replaced by the actual precision by Tensor.op. *)
-      ~transpose_op:(Uint4x32_to_prec (lazy (assert false)))
-      ~op_asn ~grad_asn ?grad_spec (* Modifying the label would cause identifier pollution. *)
-      ?label ~top_down_prec:true t1
+    let result =
+      Tensor.unop (* A placeholder that will be replaced by the actual precision by Tensor.op. *)
+        ~transpose_op:(Uint4x32_to_prec (lazy (assert false)))
+        ~op_asn ~grad_asn ?grad_spec (* Modifying the label would cause identifier pollution. *)
+        ?label ~top_down_prec:true t1 ?batch_dims ?batch_axes ?input_dims ?output_dims ?input_axes
+        ?output_axes ?deduced ()
+    in
+    (* A sampler's result resolves at its use site (gh-ocannl-544): a random draw must fill
+       whatever shape the context demands — closing it down and broadcasting would repeat random
+       values along the broadcast axes. *)
+    Shape.set_resolve_at_use result.Tensor.shape;
+    result
 
 let uint4x32_to_prec_uniform1 ?grad_spec =
   let module NTDSL = Initial_NTDSL in
   let%cd op_asn ~t ~t1 ~projections = v =: uint4x32_to_prec_uniform1 v1 in
   let%cd grad_asn ~t:_ ~g:_ ~t1:_ ~projections:_ = Asgns.empty_comp in
-  fun t1 ?label ?top_down_prec ->
+  fun t1 ?label ?top_down_prec ?batch_dims ?batch_axes ?input_dims ?output_dims ?input_axes
+    ?output_axes ?deduced () ->
     (* Ignore what the caller says, since we must learn the precision from the outside. *)
     ignore (top_down_prec : bool option);
     Tn.update_prec t1.Tensor.value Ir.Ops.uint4x32;
-    Tensor.unop
-    (* The argument's shape must EQUAL the result's: with [Pointwise_un] the random bits tensor
-       could close smaller than the result and broadcast, repeating random values along the
-       broadcast axes (few unique values in inferred-shape params). The batch and input rows are
-       left implicit (shared context ellipsis), so they remain safe to close to empty rows when
-       nothing constrains them. *)
-      ~transpose_op:(Permute ("..b.. => ..b..", []))
-      ~op_asn ~grad_asn ?grad_spec (* Modifying the label would cause identifier pollution. *)
-      ?label ~top_down_prec:true t1
+    let result =
+      Tensor.unop
+      (* The argument's shape must EQUAL the result's: with [Pointwise_un] the random bits tensor
+         could close smaller than the result and broadcast, repeating random values along the
+         broadcast axes (few unique values in inferred-shape params). The batch and input rows are
+         left implicit (shared context ellipsis), so they remain safe to close to empty rows when
+         nothing constrains them. *)
+        ~transpose_op:(Permute ("..b.. => ..b..", []))
+        ~op_asn ~grad_asn ?grad_spec (* Modifying the label would cause identifier pollution. *)
+        ?label ~top_down_prec:true t1 ?batch_dims ?batch_axes ?input_dims ?output_dims ?input_axes
+        ?output_axes ?deduced ()
+    in
+    (* A sampler's result resolves at its use site (gh-ocannl-544) — see
+       [uint4x32_to_prec_uniform]. *)
+    Shape.set_resolve_at_use result.Tensor.shape;
+    result
 
 let lt ?spec ?(capture_dims = []) =
   let module NTDSL = Initial_NTDSL in
@@ -1030,6 +1067,7 @@ struct
   let cos ?spec ?capture_dims = cos ?spec ?capture_dims ~grad_spec
   let neg ?spec ?capture_dims = neg ?spec ?capture_dims ~grad_spec
   let cast ?spec ?capture_dims = cast ?spec ?capture_dims ~grad_spec
+  let stretch ?spec ?capture_dims = stretch ?spec ?capture_dims ~grad_spec
   let sqrt ?spec ?capture_dims = sqrt ?spec ?capture_dims ~grad_spec
   let recip ?spec ?capture_dims = recip ?spec ?capture_dims ~grad_spec
   let recip_sqrt ?spec ?capture_dims = recip_sqrt ?spec ?capture_dims ~grad_spec
@@ -1056,6 +1094,7 @@ struct
     let uint4x32_to_prec_uniform1 ?label t1 = uint4x32_to_prec_uniform1 ?label t1 ()
     let ( **. ) ?label base exp = pointpow ?label exp base ()
     let relu ?label t = relu ?label t ()
+    let stretch ?label t = stretch ?label t ()
     let sat01 ?label t = sat01 ?label t ()
     let fma ?label t1 t2 t3 = fma ?label t1 t2 t3 ()
     let ( !. ) f = number f
