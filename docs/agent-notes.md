@@ -263,6 +263,17 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   counter reads zero, which looks exactly like "the problem went away". Fixtures are also not in a
   fresh checkout (`benchmarks/fixtures/*.safetensors` is generated); `gen_fixtures.py` recreates
   them, and they are only valid while `gen_fixtures.py` and `benchmarks/workloads/` are unchanged.
+- A benchmark leg belongs to a WORKLOAD, not to a runner (gh-ocannl-551). `BENCH_STATIC_SCALE` /
+  `BENCH_GATE_INTERVAL` lived in `bench_mlp` alone, so the gate-cost contract silently had no
+  answer for `gpt2_mini` — and a forward-only workload has no loss scale to gate in the first
+  place. The resolution to copy when adding a leg: put the flag parsing and step shapes in
+  `Bench_harness` (shared), dispatch the step shape on the fixture's `mode` (as the Python
+  runners do), add a training workload when the question needs one (`gpt2_mini_train`), and make
+  orchestrate report an inexpressible cell as NOT APPLICABLE with its reason instead of omitting
+  it. In OCANNL specifics: a parameter has `batch_dims = []` pinned by `Tensor.param`, so a
+  positional-embedding table must be output-axis-shaped and placed with an einsum-add; and the
+  gpt f16 legs need the attention softmax pinned at f32 (`where`/`max_vals`/`exp_vals`) — the
+  causal mask's `-1e9` fill is outside half's range and `Low_level`'s constant guard rejects it.
 
 ## Build and test mechanics
 

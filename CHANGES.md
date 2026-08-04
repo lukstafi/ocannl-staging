@@ -10,6 +10,20 @@
 
 ### Added
 
+- **`gpt2_mini_train`: a transformer training-step cell, and gate-cost legs that cannot go
+  missing** (gh-ocannl-551). `bench_gpt` now dispatches its step shape on the fixture's `mode`
+  like the Python runners do, and the new `gpt2_mini_train` workload trains the same
+  architecture with plain SGD in all three frameworks (every weight a parameter, `wte` tied to
+  the lm_head, the positional table added by an einsum since an OCANNL parameter has no batch
+  axes). That closes the gh-492 task-5 gap: the four precision variants `f32 / bf16 /
+  f16-static / f16-gatedN` were unsatisfiable for the matmul-dominated workload, because
+  `BENCH_STATIC_SCALE` / `BENCH_GATE_INTERVAL` existed in `bench_mlp` alone *and* a forward-only
+  workload has no loss scale to gate. The flag parsing and the training-step shapes moved into
+  `Bench_harness` (shared by every training runner, so the next flag added cannot apply to a
+  subset), the legs became orchestrated cells (`--precision f16-static f16-gated16`), and a
+  requested cell a workload cannot express is now reported as `NOT APPLICABLE` with its reason —
+  in the run log and in a report section — instead of being silently absent, which is
+  indistinguishable from an unrun cell.
 - **`Swap` ∘ `Split_reduce` seeding: conv-gradient accumulations become reachable**
   (gh-ocannl-537). The gh-484 split-reduce family timed cleanly but was inert on the reduction it
   was filed for: OCANNL lowers parameter gradients with the accumulated channel loop *innermost*

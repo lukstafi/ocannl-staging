@@ -53,6 +53,16 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   tokens/s. Token embedding uses the logical one-hot gather (gh-343); LayerNorm is the
   idiomatic `Nn_blocks.layer_norm` (gammas/betas injected by name like the attention
   weights).
+- **gpt2_mini_train** (`model: gpt`, `mode: train`): the same architecture and fixture
+  layouts trained with plain SGD (gh-ocannl-551) — every weight (including `wte`, tied to
+  the lm_head, and the positional table `wpe`) is a parameter, and the step is backprop plus
+  `p -= lr * grad` in all three frameworks. This is the matmul-dominated *training* cell:
+  the mixed-precision recipe (master weights, storage policy, f16 dynamic loss scaling) and
+  the task-5 gate-cost legs need an optimizer, so on `gpt2_mini` they do not exist at all —
+  only here. Fewer steps than the inference workload, since a step is ~3x the work. In
+  OCANNL a parameter has no batch axes, so the trained `wpe` is a `[seq]x[d_model]`
+  output-axis table added by an einsum that places its seq axis onto the sequence batch axis
+  (inference keeps the plain broadcast add over a `[seq]`-batched constant).
 
 ## Layout
 
@@ -65,22 +75,47 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   (`dune build benchmarks/runners/ocannl/bench_mlp.exe` etc.). Env: `BENCH_FIXTURE` (path),
   `BENCH_TUNE=1` (`Train.tune_placements`: autotunes both the default placements graph and
   the materialize-all graph, keeping the measured winner), `BENCH_MATERIALIZE=1` (materialize
-  intermediates without tuning), `BENCH_PRECISION=bf16|f16` (mlp and gpt, gh-ocannl-492: the
-  mixed-precision training recipe — f32 master weights with reduced-precision cast twins,
-  storage policy over the MLP body with the loss head kept f32, and for f16 dynamic loss
-  scaling, whose per-step host-read inf/nan gate is included in the reported step times;
-  orchestrate flag `--precision bf16 f16`, parity gated at the looser
-  `PARITY_TOL_PRECISION` envelopes). The gh-ocannl-492 task-5 gate-cost experiment legs (f16
-  only, manual): `BENCH_STATIC_SCALE=1` fixes the loss scale with no gate and no host read —
-  the discriminating experiment for how much of f16's step cost is the dynamic gate;
+  intermediates without tuning), `BENCH_PRECISION=bf16|f16` (mlp and gpt, gh-ocannl-492);
+  backend via the usual `--ocannl_backend=cc|metal|cuda|hip`. `bench_gpt` dispatches its step
+  shape on the fixture's `mode`, like the Python runners: forward-only for `gpt2_mini`,
+  backprop plus SGD for `gpt2_mini_train`.
+
+  **Which precision legs a workload has is a property of the workload, not of the flag**
+  (gh-ocannl-551), and the shared flag parsing lives in `Bench_harness` so a new flag cannot
+  quietly apply to one runner only:
+
+  | leg | conv | gpt (`mode: infer`) | mlp / gpt (`mode: train`) |
+  |---|---|---|---|
+  | `BENCH_PRECISION=bf16\|f16` | — | load-time weight conversion | master weights + cast twins |
+  | `BENCH_STATIC_SCALE=1`, `BENCH_GATE_INTERVAL=N` | — | — (refused: no optimizer) | yes |
+
+  Under a training fixture `BENCH_PRECISION` is the mixed-precision recipe: f32 master weights
+  with reduced-precision cast twins, storage policy over the model body with the loss head (and,
+  for gpt, the layer norms) kept f32, and for f16 dynamic loss scaling, whose per-step host-read
+  inf/nan gate is included in the reported step times. Under the forward-only gpt fixture it
+  re-precisions by load-time conversion instead — data-backed weights convert at wrap
+  (`TDSL.wrap ~prec`), attention params through the storage policy (no optimizer, so no master
+  copies and no loss scaling). Parity is gated at the looser `PARITY_TOL_PRECISION` envelopes.
+  In the gpt graph the attention softmax and its causal-mask fill are pinned at f32 in both
+  modes — AMP's softmax rule, and for f16 a hard requirement: `-1e9` is outside half's range and
+  the lowering's constant guard rejects it. The scores matmul feeding them stays reduced, which
+  is the work these legs measure.
+
+  The gh-ocannl-492 task-5 gate-cost legs (f16 and a training workload only):
+  `BENCH_STATIC_SCALE=1` fixes the loss scale with no gate and no host read — the
+  discriminating experiment for how much of f16's step cost is the dynamic gate;
   `BENCH_GATE_INTERVAL=N` uses the fused on-device gate with the host sampling a sticky window
-  checksum every N steps (reported precision `f16-static` / `f16-gatedN`). For the gpt runner
-  (forward-only), `BENCH_PRECISION` re-precisions by load-time conversion instead of cast twins
-  — data-backed weights convert at wrap (`TDSL.wrap ~prec`), attention params through the
-  storage policy with layer norms and the CE head pinned f32 (no optimizer, so no master
-  copies and no loss scaling); backend via the usual
-  `--ocannl_backend=cc|metal|cuda`. Debug
-  helpers: `BENCH_DEBUG=1` prints param names/dims (conv/gpt) or bias gradients (mlp) and
+  checksum every N steps (reported precision `f16-static` / `f16-gatedN`; orchestrate flag
+  `--precision f16-static f16-gated16`). On a forward-only fixture the runner *refuses* them
+  with a message naming why, rather than ignoring them.
+
+  The f16 legs start from the fixture's `loss_scale` metadata (a workload spec field, defaulting
+  to torch's 65536), overridable with `BENCH_LOSS_SCALE=<float>`. It matters most to the static
+  leg, which never adapts: a scale whose first step already overflows diverges it outright, while
+  the dynamic legs would merely spend backoff steps inside the parity window. Both current
+  workloads run at the default.
+
+  Debug helpers: `BENCH_DEBUG=1` prints param names/dims (conv/gpt) or bias gradients (mlp) and
   exits; `BENCH_NO_SGD=1` compiles the gradient update without the SGD step (mlp);
   `BENCH_NO_SLICE=1` skips `@|` batch slicing (mlp, single-batch fixture).
 - `runners/pytorch/run.py` — flags: `--device cpu|mps|cuda`, `--compile` (torch.compile
@@ -90,8 +125,8 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
 - `orchestrate.py` — runs the matrix (dispatching the OCANNL executable on the fixture's
   `model`), enforces the parity gate, writes `results/results.jsonl` and
   `results/report.md`. Flags: `--workloads mlp_small ...`, `--tuned`, `--materialized`,
-  `--precision bf16 f16`, `--nojit` (tinygrad nojit), `--torch-compile` (pytorch compiled
-  variant), `--beam N`
+  `--precision bf16 f16 f16-static f16-gatedN`, `--nojit` (tinygrad nojit), `--torch-compile`
+  (pytorch compiled variant), `--beam N`
   (tinygrad BEAM=N variant; wipe tinygrad's kernel cache for from-scratch search costs),
   `--only ocannl pytorch tinygrad`, `--skip-build`, `--no-skip-cells` (run the `SKIP_CELLS`
   entries too — each was observed pathological on a single machine/backend/OS, so use this to
@@ -110,8 +145,13 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   each requested precision multiplies an mlp/gpt workload's OCANNL cell count by the number of
   variants, and each tuned cell is a two-pass search. `SKIP_CELLS` entries are
   `(workload, backend, variant, precision)` with `None` meaning "at every precision", which is
-  what both current scheduling-pathology entries use. The conv runner has no `BENCH_PRECISION`
-  support, so conv workloads stay f32 regardless of the flag.
+  what both current scheduling-pathology entries use.
+
+  A requested cell the workload **cannot express** — a reduced precision on the conv runner
+  (no `BENCH_PRECISION` support), an f16 gate-cost leg on the forward-only `gpt2_mini` (no
+  optimizer, hence no loss scale to gate) — is printed as `NOT APPLICABLE` with its reason and
+  listed in a *Cells not applicable* section of the report, so a missing row is distinguishable
+  from an unrun one (gh-ocannl-551). Use `gpt2_mini_train` for the gpt gate-cost row.
 
   With `--gpu hip`, the PyTorch/tinygrad GPU cells run only on Linux (ROCm
   PyTorch presents HIP as its `cuda` device, tinygrad as `AMD`); on Windows neither framework
