@@ -26,7 +26,7 @@ This is why pooling needs a dummy constant kernel - to carry shape info between 
 | `x.view(-1, d)` or `x.reshape(-1, d)` | Only supported for wrapping non-tensor data | Use shape inference and let tensors have the shape they want |
 | `x.flatten()` | Might get supported for explicit axes | Future syntax might be: `"x,y => x&y"` |
 | `nn.Conv2d(in_c, out_c, kernel_size=k)` | `conv2d ~kernel_size:k () x` | Channels inferred or use row vars |
-| `F.max_pool2d(x, kernel_size=k)` | `max_pool2d ~window_size:k () x` | Uses `(0.5 + 0.5)` trick internally |
+| `F.max_pool2d(x, kernel_size=k)` | `max_pool2d ~window_size:k () x` | Uses the `stretch` wrapper internally |
 | `F.avg_pool2d(x, kernel_size=k)` | `avg_pool2d ~window_size:k () x` | Normalized by window size |
 | `nn.BatchNorm2d(channels)` | `batch_norm2d () ~train_step x` | Channels inferred |
 | `F.dropout(x, p=0.5)` | `dropout ~rate:0.5 () ~train_step x` | Needs train_step for PRNG |
@@ -58,7 +58,7 @@ This is why pooling needs a dummy constant kernel - to carry shape info between 
 
 | PyTorch | OCANNL | Notes |
 |---------|---------|--------|
-| `torch.ones_like(x)` | `0.5 + 0.5` | Shape-inferred constant 1 |
+| `torch.ones_like(x)` | `stretch 1.0` | Shape-inferred constant 1 |
 | `torch.tensor(1.0)` | `!.value` or `1.0` | Scalar constant |
 | `torch.full_like(x, value)` | `NTDSL.term ~fetch_op:(Constant value) ()` | Shape-inferred |
 
@@ -178,7 +178,7 @@ x ++ "... | h, w => ... | h0" [ "h"; "w" ]
 
 ✅ **Right:**
 ```ocaml
-0.5 + 0.5       (* Both are shape-inferred constant 1 *)
+stretch 1.0     (* Shape-inferred constant 1: resolves at the use site *)
 NTDSL.term ~fetch_op:(Constant 1.) ()
 ```
 
@@ -675,7 +675,7 @@ The `Train` module is meant to be read, understood, and extended by users - it's
 - Sub-modules don't auto-lift - bind them before use
 
 ### Performance
-- Virtual tensors (like `0.5 + 0.5`) are inlined during optimization
+- Virtual tensors (like `stretch 1.0`) are inlined during optimization
 - Row variables allow operations to work on grouped/multi-channel data
 - Input axes (→) in kernels end up rightmost for better memory locality
 

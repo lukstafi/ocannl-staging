@@ -6,7 +6,7 @@
     Design principles, OCANNL fundamentals, and common patterns:
     - "Principle of least commitment": use row variables where axis count doesn't matter
     - Einsum specs here often use single-char mode (no commas) but with spaces for readability
-    - Pooling uses constant kernels (0.5 + 0.5) to propagate window dimensions
+    - Pooling uses constant kernels (stretch 0.0) to propagate window dimensions
     - conv2d uses convolution syntax: "stride*out+kernel," (often in multi-char mode)
     - Input axes (before →) for kernels show intent (and end up rightmost for memory locality)
     - Inline params \{ \} are always learnable and are lifted to unit parameter ()
@@ -595,20 +595,20 @@ let%op max_pool2d ?(stride = 2) ?(window_size = 2) ?(use_padding = false) () x =
   Shape.set_dim wh window_size;
   Shape.set_dim ww window_size;
   (* NOTE: projections inference runs per-assignment in a distinct phase from shape inference, so
-     for it to know about the window size, we use a constant kernel = 0.0 to propagate the shape. We
-     use a trick to create a shape-inferred constant tensor, equivalently we could write "NTDSL.term
-     ~fetch_op:(Constant 0.0) ()" but that's less concise. See:
-     https://github.com/ahrefs/ocannl/discussions/381 *)
+     for it to know about the window size, we use a constant kernel = 0.0 to propagate the shape.
+     [stretch] makes the kernel's shape resolve at this use site — it acquires the window axes from
+     the einsum spec (gh-ocannl-544; plain operation results close down to their arguments'
+     shapes). See: https://github.com/ahrefs/ocannl/discussions/381 *)
   Shape.set_dim pwh window_size;
   Shape.set_dim pww window_size;
   if use_padding then
     x
     @^+ "... | stride*oh= + pwh, stride*ow= + pww, ..c..; |pwh, pww => ... | oh, ow, ..c.."
-          [ "pwh"; "pww" ] (0.0 + 0.0)
+          [ "pwh"; "pww" ] (stretch 0.0)
   else
     x
     @^+ "... | stride*oh< + wh, stride*ow< + ww, ..c..; |wh, ww => ... | oh, ow, ..c.."
-          [ "wh"; "ww" ] (0.0 + 0.0)
+          [ "wh"; "ww" ] (stretch 0.0)
 
 (** Like {!max_pool2d}, but with [use_padding=true] the pool reads a private materialized copy of
     the operand instead of the operand itself. Since the clamped-window lowering (gh-504) removed
@@ -635,11 +635,11 @@ let%op max_pool2d_copy ?(stride = 2) ?(window_size = 2) ?(use_padding = false) (
     let x_pool = x ++ "... | h, w, ..c.. => ... | h, w, ..c.." in
     x_pool
     @^+ "... | stride*oh= + pwh, stride*ow= + pww, ..c..; |pwh, pww => ... | oh, ow, ..c.."
-          [ "pwh"; "pww" ] (0.0 + 0.0)
+          [ "pwh"; "pww" ] (stretch 0.0)
   else
     x
     @^+ "... | stride*oh< + wh, stride*ow< + ww, ..c..; |wh, ww => ... | oh, ow, ..c.."
-          [ "wh"; "ww" ] (0.0 + 0.0)
+          [ "wh"; "ww" ] (stretch 0.0)
 
 (** Average pooling for 2D spatial data - reduces spatial dimensions by averaging values.
 
@@ -655,7 +655,7 @@ let%op avg_pool2d ?(stride = 2) ?(window_size = 2) () x =
   let sum =
     x
     +++ "... | stride*oh< + wh, stride*ow< + ww, ..c..; |wh, ww => ... | oh, ow, ..c.."
-          [ "wh"; "ww" ] (0.0 + 0.0)
+          [ "wh"; "ww" ] (stretch 0.0)
   in
   sum /. (dim wh *. dim ww)
 

@@ -54,11 +54,11 @@ let%op pool_gate ?(nonoverlapping = false) ?(stride = 2) ?(window_size = 2) ?(us
   if use_padding then
     x
     @^+ "... | stride*oh= + pwh, stride*ow= + pww, ..c..; |pwh, pww => ... | oh, ow, ..c.."
-          [ "pwh"; "pww" ] (0.0 + 0.0)
+          [ "pwh"; "pww" ] (stretch 0.0)
   else
     x
     @^+ "... | stride*oh< + wh, stride*ow< + ww, ..c..; |wh, ww => ... | oh, ow, ..c.."
-          [ "wh"; "ww" ] (0.0 + 0.0)
+          [ "wh"; "ww" ] (stretch 0.0)
 
 (* Deterministic data with in-window ties: coarse quantization repeats values. *)
 let input_f idcs =

@@ -50,19 +50,14 @@ let cast_param ?(placement = Twin_auto) ?(master_prec = Ops.single) ~prec (p : T
   match p.Tensor.diff with
   | None -> p
   | Some diff ->
-      (* [~batch_dims:[]] pins the twin to the master's batch-free shape (gh-ocannl-540). The cast
-         is a shape-inferred pointwise op, so without this the twin's batch row is an open row
-         variable that the USE SITE resolves: read as the weight operand of a batched matmul, it
-         broadcasts the batch axis in and the twin materializes as [batch, out, in] — for
-         mlp_small, a 64x64x64 per-batch-row copy of a 64x64 weight. That is numerically correct
-         (every slice holds the same value), so the parity gate never saw it, but it costs 64x the
-         twin's memory and cast work, and it carries the row symbol into the matmul's weight
-         operand, which is what made every tensorized candidate decline: unstaged seeds fail
-         [Tensorize]'s unit-coefficient role check (the third micro symbol appears in an operand),
-         and staged seeds pin the cooperative [Stage] load nest inside the row loop (the row symbol
-         is an outer-part symbol of the staged source), breaking the perfect nest. A parameter has
-         no batch axes, so neither may its twin. *)
-      let twin = Operation.cast ~grad_spec:Tensor.If_needed p ~batch_dims:[] () in
+      (* The twin keeps its master's shape by the close-down default of gh-ocannl-544: as an
+         operation result, the cast's open batch row closes down to the master's (empty) batch row
+         instead of being widened by a use site. Before that default, a batched-matmul read widened
+         the twin to [batch, out, in] — a per-batch-row copy of the weight, numerically invisible
+         but costing [batch]x memory and cast work and carrying the row symbol into the matmul's
+         weight operand, which declined every tensorized candidate (gh-ocannl-540). The
+         [mixed_prec_twin_shape] test guards the twin's shape either way. *)
+      let twin = Operation.cast ~grad_spec:Tensor.If_needed p () in
       Tn.update_prec twin.Tensor.value prec;
       if Option.is_none (Tn.get_specified_prec p.Tensor.value) then
         Tn.update_prec p.Tensor.value master_prec;

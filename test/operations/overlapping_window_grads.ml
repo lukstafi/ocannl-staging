@@ -41,7 +41,7 @@ let () =
       ~f:(fun idcs -> xv.(idcs.(0)))
       ~grad_spec:Tensor.Require_grad ()
   in
-  let%op y = x @^+ "o<+k; k => o" [ "k" ] (0.0 + 0.0) in
+  let%op y = x @^+ "o<+k; k => o" [ "k" ] (stretch 0.0) in
   Shape.set_dim k 2;
   let%op loss = y ++ "o => 0" in
   let ctx = Context.auto () in
@@ -153,7 +153,7 @@ let () =
       ~f:(fun _ -> 7.)
       ~grad_spec:Tensor.Require_grad ()
   in
-  let%op y4 = x4 @^+ "o<+k; k => o" [ "k" ] (0.0 + 0.0) in
+  let%op y4 = x4 @^+ "o<+k; k => o" [ "k" ] (stretch 0.0) in
   Shape.set_dim k 2;
   let%op loss4 = y4 ++ "o => 0" in
   let ctx = Context.auto () in
@@ -173,7 +173,7 @@ let () =
       ~f:(fun idcs -> Float.of_int idcs.(0) -. 4.)
       ~grad_spec:Tensor.Require_grad ()
   in
-  let%op y5 = x5 @^+ "o=+w; w => o" [ "w" ] (0.0 + 0.0) in
+  let%op y5 = x5 @^+ "o=+w; w => o" [ "w" ] (stretch 0.0) in
   Shape.set_dim w 3;
   let%op loss5 = y5 ++ "o => 0" in
   let ctx = Context.auto () in

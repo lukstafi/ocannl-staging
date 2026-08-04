@@ -1,0 +1,4 @@
+close-down: relu(w) [3x4] | batch-free=true
+stretch: stretch(w2) [8x3x4] | widened-to-batch=true
+kernel: stretch(1.0) [4]
+dim close-down: 0.5+0.5 [1] | scalar=true

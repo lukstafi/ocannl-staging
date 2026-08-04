@@ -51,7 +51,7 @@ let test_shared_operand () =
   Shape.set_dim kh 3;
   Shape.set_dim kw 3;
   (* Padded max-pool: clamped windows, no margin demand (gh-504). *)
-  let%op pooled = input @^+ "oh=+wh, ow=+ww; wh, ww => oh, ow" [ "wh"; "ww" ] (0.0 + 0.0) in
+  let%op pooled = input @^+ "oh=+wh, ow=+ww; wh, ww => oh, ow" [ "wh"; "ww" ] (stretch 0.0) in
   Shape.set_dim wh 3;
   Shape.set_dim ww 3;
   let ctx = Context.auto () in
@@ -71,7 +71,7 @@ let test_separate_copies () =
   printf "\nTesting the copy pattern: conv through a materialized copy...\n%!";
   Tensor.unsafe_reinitialize ();
   let%op input = TDSL.range_of_shape ~output_dims:[ 4; 4 ] () - 16. in
-  let%op pooled = input @^+ "oh=+wh, ow=+ww; wh, ww => oh, ow" [ "wh"; "ww" ] (0.0 + 0.0) in
+  let%op pooled = input @^+ "oh=+wh, ow=+ww; wh, ww => oh, ow" [ "wh"; "ww" ] (stretch 0.0) in
   Shape.set_dim wh 3;
   Shape.set_dim ww 3;
   (* The copy is read by the conv; [input] itself is read only by the max-pool. *)
@@ -115,7 +115,7 @@ let test_single_operation_padding () =
   let%op input = TDSL.range_of_shape ~output_dims:[ 4; 4 ] () - 16. in
 
   (* Only max-pool operation on input - no other operations use this input. *)
-  let%op pooled = input @^+ "oh=+wh, ow=+ww; wh, ww => oh, ow" [ "wh"; "ww" ] (0.0 + 0.0) in
+  let%op pooled = input @^+ "oh=+wh, ow=+ww; wh, ww => oh, ow" [ "wh"; "ww" ] (stretch 0.0) in
   Shape.set_dim wh 3;
   Shape.set_dim ww 3;
 

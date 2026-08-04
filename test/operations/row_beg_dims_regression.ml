@@ -88,6 +88,9 @@ let test_3_closing_preserves_beg_dims () =
 let test_4_glb_merge_symmetric () =
   Stdio.printf "Test 4: GLB merge symmetric on both flanks (matching outer axes)\n";
   let rho = Row.get_row_var () in
+  (* gh-ocannl-544: only resolve-at-use variables close upward to their GLB; mark rho so this test
+     keeps exercising the GLB merge machinery. *)
+  Row.add_resolve_at_use rho;
   let rho_row : Row.t = { beg_dims = []; dims = []; bcast = Row_var rho; prov } in
   let res1 : Row.t =
     { beg_dims = [ dim 3; dim 5 ]; dims = [ dim 7 ]; bcast = Broadcastable; prov }
@@ -117,6 +120,7 @@ let test_4_glb_merge_symmetric () =
 let test_4b_glb_leading_conflict_demotes_to_one () =
   Stdio.printf "Test 4b: leading-flank conflict demotes to unbased Dim 1\n";
   let rho = Row.get_row_var () in
+  Row.add_resolve_at_use rho;
   let rho_row : Row.t = { beg_dims = []; dims = []; bcast = Row_var rho; prov } in
   let res1 : Row.t = { beg_dims = [ dim 3 ]; dims = [ dim 7 ]; bcast = Broadcastable; prov } in
   let res2 : Row.t = { beg_dims = [ dim 5 ]; dims = [ dim 7 ]; bcast = Broadcastable; prov } in
@@ -147,6 +151,7 @@ let test_4b_glb_leading_conflict_demotes_to_one () =
 let test_4c_glb_trailing_conflict_demotes_to_one () =
   Stdio.printf "Test 4c: trailing-flank conflict demotes to unbased Dim 1\n";
   let rho = Row.get_row_var () in
+  Row.add_resolve_at_use rho;
   let rho_row : Row.t = { beg_dims = []; dims = []; bcast = Row_var rho; prov } in
   let res1 : Row.t = { beg_dims = [ dim 3 ]; dims = [ dim 7 ]; bcast = Broadcastable; prov } in
   let res2 : Row.t = { beg_dims = [ dim 3 ]; dims = [ dim 11 ]; bcast = Broadcastable; prov } in
