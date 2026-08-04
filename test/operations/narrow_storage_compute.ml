@@ -97,6 +97,14 @@ let max_err x y =
 let () =
   Tensor.unsafe_reinitialize ();
   let base = Ir.Numerics.get () in
+  (* gh-ocannl-516 task 1: the target capability is read where target capabilities live, not from
+     the backend module -- that is the seam the probe exists to fill. *)
+  (* Deliberately not printed: whether this machine has native fp16 arithmetic is a property of the
+     machine, and every assertion below is written to hold either way -- the structural check at the
+     end is what pins that the policy is honored exactly where the capability is reported. *)
+  let native_fp16 =
+    (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.native_fp16_arithmetic
+  in
 
   (* --- 1. Accuracy: bf16 storage, f32 compute vs. per-operator rounding. --- *)
   let reference = run ~name:"nsc_f32" ~transform:serial ~prec:Ir.Ops.single ~label:"f32_" () in
@@ -125,6 +133,28 @@ let () =
       p (name ^ " vectorized rendering is bitwise identical to the serial twin")
         (Array.for_all2_exn vec twin ~f:Float.equal));
 
+  (* --- 2b. Native fp16 arithmetic (gh-ocannl-516): same parity obligation, one precision up. ---
+     Where the target has genuine 16-bit arithmetic the half legs compute *in* half at twice f32's
+     lane count, so the vector rendering is a different kernel from the one checked above -- and
+     owes its serial twin the same bitwise equality. Where the target has only promoted or emulated
+     fp16 the policy is ignored and this repeats the widening path, which is the point of testing
+     the flag rather than the hardware. *)
+  Ir.Numerics.set_policy { base with narrow_compute_f32 = true; fp16_arithmetic = true };
+  let twin = run ~name:"nsc_twin_nat" ~transform:serial ~prec:Ir.Ops.half ~label:"tnat" () in
+  let vec = run ~name:"nsc_vec_nat" ~transform:vectorize ~prec:Ir.Ops.half ~label:"vnat" () in
+  p "native-fp16 vectorized rendering is bitwise identical to the serial twin"
+    (Array.for_all2_exn vec twin ~f:Float.equal);
+  (* Half's range and mantissa are wider than the chain needs, so computing in half must still land
+     within a couple of half ulps of the f32 reference -- a wrong lane geometry or a mismatched FMA
+     would not. *)
+  p "native-fp16 relative error stays within a few half ulps"
+    Float.(
+      max_err reference vec
+      /. Array.fold reference ~init:0. ~f:(fun m v -> Float.max m (Float.abs v))
+      < 0.01);
+  let native_source = read_generated "nsc_vec_nat" in
+  Ir.Numerics.set_policy { base with narrow_compute_f32 = true; fp16_arithmetic = false };
+
   (* --- 3. Structure of the bf16 vectorized source. --- *)
   match read_generated "nsc_vec_bf16" with
   | None -> p "bf16 loop vectorizes with a converting load/store" (not on_cpu)
@@ -138,6 +168,18 @@ let () =
         p "no operator narrows only to be widened again"
           (not (has "bfloat16_to_single(single_to_bfloat16("));
         (* f32 arithmetic reached a bf16 kernel: the fused multiply-add is the f32 one. *)
-        p "arithmetic is f32" (has "fmaf(" || has "__builtin_elementwise_fma")
+        p "arithmetic is f32" (has "fmaf(" || has "__builtin_elementwise_fma");
+        (* Under the fp16-arithmetic policy the half kernel's vector element type is HALF_T rather
+           than float -- the lane count doubles and no conversion appears at all. On a target
+           without native 16-bit arithmetic the policy is correctly ignored, and the kernel is the
+           widening one. *)
+        match native_source with
+        | None -> p "fp16 policy is honored exactly where the target reports the capability" true
+        | Some nsrc ->
+            let nhas t = String.is_substring nsrc ~substring:t in
+            p "fp16 policy is honored exactly where the target reports the capability"
+              (if native_fp16 then
+                 nhas "HALF_T ocannl_vec" && not (nhas "OCANNL_VEC_WIDEN_HALF")
+               else nhas "OCANNL_VEC_WIDEN_HALF" || nhas "HALF_TO_FLOAT")
       end
       else p "bf16 loop vectorizes with a converting load/store" true

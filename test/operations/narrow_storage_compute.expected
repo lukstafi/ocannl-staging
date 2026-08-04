@@ -3,6 +3,9 @@ wide-compute relative error within one bf16 ulp: true
 per-operator relative error exceeds it: true
 bf16 vectorized rendering is bitwise identical to the serial twin: true
 half vectorized rendering is bitwise identical to the serial twin: true
+native-fp16 vectorized rendering is bitwise identical to the serial twin: true
+native-fp16 relative error stays within a few half ulps: true
 bf16 loop vectorizes with a converting load/store: true
 no operator narrows only to be widened again: true
 arithmetic is f32: true
+fp16 policy is honored exactly where the target reports the capability: true
