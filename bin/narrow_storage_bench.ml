@@ -11,32 +11,39 @@
    comparable to the machine's stream bandwidth; the "vs f32" column is the speedup that matters
    for the issue's claim.
 
-   Measured on an Apple-Silicon M-series (NEON via -march=native, single stream, n = 2^22, 100
-   repeats), "vs f32" column:
+   Measured on an Apple-Silicon M-series (NEON, single stream, n = 2^22, 100 repeats), explicit
+   [Vectorized] rendering, "vs f32" column ("half-nat" is fp16 storage computed in fp16,
+   gh-ocannl-516):
 
    {v
-     kernel      rendering   f32 GB/s   bf16    half
-     add         default       131.3    0.91x   1.97x
-     mul_add     default       131.2    0.88x   1.56x
-     polynomial  default        89.0    0.61x   0.76x
+     kernel      f32 GB/s   bf16    half    half-nat
+     add           127.3    0.91x   1.51x   2.05x
+     mul_add       127.5    0.89x   1.48x   1.98x
+     polynomial     87.3    0.63x   0.76x   1.99x
    v}
 
-   Two findings, and the second is the surprise:
+   Three findings:
 
    - The traffic win is real where the kernel is actually bandwidth-bound. "add" at f32 runs at the
-     machine's stream ceiling, and half storage nearly reaches the theoretical 2x. The compute-bound
-     control stays below 1x, as it must -- there is no traffic to save there, only conversions to
-     pay for. So the mechanism does what gh-ocannl-517 predicts.
+     machine's stream ceiling and half storage collects most of the theoretical 2x. The
+     compute-bound control stays below 1x with f32 compute, as it must -- there is no traffic to
+     save there, only conversions to pay for.
 
-   - It is *fp16*, not bf16, that collects the win on this target, the reverse of the issue's
-     expectation. bf16's conversion is cheap in instruction count but not free: widening is a
-     zero-extend plus a shift and narrowing is four vector ops (the round-to-nearest-even of
-     [single_to_bfloat16]), which at 130 GB/s costs more than halving the bytes saves. fp16's
-     conversion is a single NEON instruction each way. The route to making bf16 competitive is a
-     hardware convert ([BFCVT] on ARMv8.6-A, AVX512-BF16 on x86) rather than the portable bit
-     arithmetic -- with the caveat that hardware conversion would have to be shown to agree with
+   - It is *fp16*, not bf16, that collects the win, the reverse of gh-ocannl-517's expectation.
+     bf16's conversion is cheap in instruction count but not free: widening is a zero-extend plus a
+     shift and narrowing is four vector ops (the round-to-nearest-even of [single_to_bfloat16]),
+     which at 130 GB/s costs more than halving the bytes saves. The route to making bf16
+     competitive is a hardware convert ([BFCVT] on ARMv8.6-A, AVX512-BF16 on x86) rather than
+     portable bit arithmetic -- with the caveat that it would have to be shown to agree with
      [single_to_bfloat16] bitwise, NaN payloads included, or it breaks the parity the vectorized
      rendering owes its serial twin.
+
+   - Native fp16 arithmetic (gh-ocannl-516) is what makes the compute-bound case work at all: the
+     polynomial goes from 0.76x to 1.99x, because the lane count doubles instead of the loads being
+     widened back to f32. It also removes the conversions from the streaming kernels, taking them
+     from 1.5x to ~2x. Reaching it needed the arch-flag fix in the same change: Apple clang accepts
+     [-march=native] on arm64 and downgrades the target with it, so the probe saw a machine without
+     16-bit arithmetic.
 
    Usage: dune exec bin/narrow_storage_bench.exe -- [n] [repeats] [threads] (defaults 4194304, 50,
    1).
@@ -157,20 +164,33 @@ let () =
         2 );
     ]
   in
+  (* The last leg is half storage computed *in* half where the target has native 16-bit arithmetic
+     (gh-ocannl-516): same bytes as "half", twice the lanes and no conversions. On a target without
+     it the policy is ignored and the leg repeats "half". *)
+  let base = Ir.Numerics.get () in
   let precs =
-    [ ("f32", Ir.Ops.single); ("bf16", Ir.Ops.bfloat16); ("half", Ir.Ops.half) ]
+    [
+      ("f32", Ir.Ops.single, base);
+      ("bf16", Ir.Ops.bfloat16, base);
+      ("half", Ir.Ops.half, base);
+      ("half-nat", Ir.Ops.half, { base with Ir.Numerics.fp16_arithmetic = true });
+    ]
   in
   let renderings = [ ("default", serial); ("vectorized", vectorize) ] in
   p "narrow storage bench: n = %d, %d repeats, threads = %d, narrow_compute_f32 = %b\n" n repeats
-    threads (Ir.Numerics.get ()).Ir.Numerics.narrow_compute_f32;
+    threads base.Ir.Numerics.narrow_compute_f32;
+  p "native fp16 arithmetic: %b\n"
+    (Context.hardware_limits (make_ctx ())).Ir.Backend_intf.native_fp16_arithmetic;
   p "%-11s %-11s %-6s %10s %10s %8s  %s\n" "kernel" "rendering" "prec" "us" "GB/s" "vs f32"
     "first value";
   List.iter kernels ~f:(fun (name, build, reads) ->
       List.iter renderings ~f:(fun (rname, transform) ->
           let baseline = ref None in
-          List.iter precs ~f:(fun (pname, prec) ->
+          List.iter precs ~f:(fun (pname, prec, policy) ->
+              Ir.Numerics.set_policy policy;
               let label = Printf.sprintf "nsb_%s_%s_%s" name rname pname in
               let secs, gbs, first = bench ~name ~build ~reads ~prec ~transform ~label in
+              Ir.Numerics.set_policy base;
               let ratio =
                 match !baseline with
                 | None ->

@@ -21,6 +21,7 @@ let cpu_mma_limits () =
   {
     no_hardware_limits with
     simd_vector_bytes = Cc_backend.vector_bytes_setting ();
+    native_fp16_arithmetic = Cc_backend.has_native_fp16_arithmetic ();
     (* [mma_format_tiles] is empty: the register tiling is not a tensor-core instruction — no
        per-format intrinsic tiles exist, and its precision gates (f32/f64) live in the seeding. *)
     mma =
