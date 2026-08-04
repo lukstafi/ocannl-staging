@@ -22,6 +22,7 @@ type report = {
   candidates_timed : int;
   candidates_failed : int;
   partial : bool;
+  baseline_declined : bool;
   declines : decline_summary list;
   terminal_failure : terminal_failure option;
   rounds_run : int;
@@ -44,6 +45,7 @@ type report = {
   model_pruned : int;
   fissioned : bool;
   baseline_ms : float;
+  default_ms : float option;
   best_ms : float;
   best_schedule : SC.saved_schedule;
 }
@@ -96,6 +98,10 @@ let float_arg ~arg_name ~default =
 
 (* A candidate round-improvement below this fraction of the incumbent ends the search. *)
 let min_progress = 0.01
+
+(* The beam holds no compiled candidate exactly when nothing was timed, which every consumer of the
+   winner tests first ([nothing_timed]). *)
+let timed_winner_exists = "Autotune.tune: a finite best time without a compiled candidate"
 
 (** {2 Timing} *)
 
@@ -176,6 +182,43 @@ let binds_hardware_dims (opt : LL.optimized) = not (List.is_empty (LL.hardware_a
    unbounded single-work-item cost. *)
 let dispatchable ~is_gpu (opts : LL.optimized list) =
   (not is_gpu) || List.exists opts ~f:binds_hardware_dims
+
+let axis_type_is_hardware = function
+  | LL.Grid | LL.Workgroup | LL.Workgroup_reduce -> true
+  | LL.Serial | LL.Unrolled | LL.Vectorized -> false
+
+(* Whether a menu move could turn a form that binds no hardware dimension into one that does. Only
+   two families can: a placement retype (or a [Split] whose halves are hardware-typed), and
+   [Tensorize], whose lane loop is a fresh [Workgroup] axis — which is exactly the move the seeding
+   comments call the beam's one path out of the serial baseline. The moves [menu] actually proposes
+   otherwise rewrite serial loops into serial loops ([Split] Serial/Serial, [Swap], [Unroll],
+   [Retype] to [Vectorized]), so extending an undispatchable incumbent with them yields another
+   undispatchable candidate — provable without compiling it (gh-ocannl-543). Families [menu] does
+   not emit answer [true]: not pruning is the conservative side, so a future menu addition is never
+   silently dropped. *)
+let optop_can_bind_hardware (op : SC.saved_optop) =
+  match op with
+  | SC.Split { outer; inner; _ } -> axis_type_is_hardware outer || axis_type_is_hardware inner
+  | SC.Retype { ty; _ } -> axis_type_is_hardware ty
+  | SC.Swap _ | SC.Unroll _ -> false
+  | SC.Tensorize _ | SC.Partition _ | SC.Pad _ | SC.Stage _ | SC.Privatize _ | SC.Expand_zero _
+  | SC.Fuse_epilogue _ | SC.Split_reduce _ ->
+      true
+
+let optop_family (op : SC.saved_optop) =
+  match op with
+  | SC.Split _ -> "Split"
+  | SC.Swap _ -> "Swap"
+  | SC.Retype _ -> "Retype"
+  | SC.Unroll _ -> "Unroll"
+  | SC.Partition _ -> "Partition"
+  | SC.Pad _ -> "Pad"
+  | SC.Stage _ -> "Stage"
+  | SC.Privatize _ -> "Privatize"
+  | SC.Expand_zero _ -> "Expand_zero"
+  | SC.Tensorize _ -> "Tensorize"
+  | SC.Fuse_epilogue _ -> "Fuse_epilogue"
+  | SC.Split_reduce _ -> "Split_reduce"
 
 (** {2 Matmul detection and sketch schedules}
 
@@ -288,14 +331,28 @@ let mma_input_formats_of_prec (prec : Ir.Ops.prec) : Ir.Backend_intf.mma_input_f
       else [ Ir.Backend_intf.Mma_f32 ]
   | _ -> []
 
-let mma_tile_for_precisions (mma : Ir.Backend_intf.mma_capability) ~a_prec ~b_prec =
-  let equal_pair (a1, b1) (a2, b2) =
-    Ir.Backend_intf.equal_mma_input_format a1 a2 && Ir.Backend_intf.equal_mma_input_format b1 b2
+(* The accumulator format of a destination's storage precision (gh-ocannl-545). Unlike the
+   multiplicands, this admits no policy choice: the accumulator is read back from and written to the
+   node, so its format is its storage layout. In particular f32 storage accumulates as [Mma_f32]
+   even under the tf32 policy — tf32 truncates the multiplicands, never the accumulator. *)
+let mma_acc_format_of_prec (prec : Ir.Ops.prec) : Ir.Backend_intf.mma_input_format option =
+  match prec with
+  | Ir.Ops.Half_prec _ -> Some Ir.Backend_intf.Mma_f16
+  | Ir.Ops.Bfloat16_prec _ -> Some Ir.Backend_intf.Mma_bf16
+  | Ir.Ops.Single_prec _ -> Some Ir.Backend_intf.Mma_f32
+  | _ -> None
+
+let mma_tile_for_precisions (mma : Ir.Backend_intf.mma_capability) ~a_prec ~b_prec ~d_prec =
+  let equal_triple (a1, b1, d1) (a2, b2, d2) =
+    Ir.Backend_intf.equal_mma_input_format a1 a2
+    && Ir.Backend_intf.equal_mma_input_format b1 b2
+    && Ir.Backend_intf.equal_mma_input_format d1 d2
   in
-  List.find_map (mma_input_formats_of_prec a_prec) ~f:(fun a_format ->
-      List.find_map (mma_input_formats_of_prec b_prec) ~f:(fun b_format ->
-          List.Assoc.find mma.Ir.Backend_intf.mma_format_tiles (a_format, b_format)
-            ~equal:equal_pair))
+  Option.bind (mma_acc_format_of_prec d_prec) ~f:(fun d_format ->
+      List.find_map (mma_input_formats_of_prec a_prec) ~f:(fun a_format ->
+          List.find_map (mma_input_formats_of_prec b_prec) ~f:(fun b_format ->
+              List.Assoc.find mma.Ir.Backend_intf.mma_format_tiles (a_format, b_format, d_format)
+                ~equal:equal_triple)))
 
 type matmul_site = {
   m_i : Idx.symbol;
@@ -304,17 +361,31 @@ type matmul_site = {
   m_ni : int;
   m_nj : int;
   m_nk : int;
+  m_bo : (Idx.symbol * int) list;
+      (** Batch loops enclosing the [m_i] loop, in nest order (gh-ocannl-528): loops beyond the
+          [i x j x k] triple that carry their own output axis. They stay [Serial] in the sketch
+          pipelines (grid slots are budgeted for the row/column blocks) and join the cross-nest
+          alignment chain ([matmul_site_chain]). Empty on plain rank-2 sites. *)
+  m_bi : (Idx.symbol * int) list;
+      (** Batch loops nested {e between} [m_i] and [m_j] (nest order) — attention's interior head
+          axis. The sketch pipelines hoist them above [m_i] with [Swap]s ([batch_hoist_swaps]) so
+          the micro-kernel is perfectly nested for [Tensorize]. Empty on plain rank-2 sites. *)
+  m_row_axis : int;
+      (** The axis of [m_d]'s index map carrying [m_i] (the 2-D tile row). [rank - 2] on plain
+          sites; smaller when interior batch axes sit between the roles. [m_j] is always on the
+          minor axis. *)
   m_d : Ir.Tnode.t;
   m_a : Ir.Tnode.t;
   m_b : Ir.Tnode.t;
   m_zeroed : bool;  (** A whole-node [Zero_out] of [m_d] is present (needed by [expand_zero]). *)
   m_tb : bool option;
-      (** [m_b]'s stored layout: [Some false] = [..., k, j] over its last two axes, [Some true] =
-          transposed ([..., j, k]), [None] = neither cleanly (the candidate then fails [Tensorize]'s
-          own role check at compile). Feeds the seeding pre-filter (gh-ocannl-479): a rendering that
-          reads B {e in place} inherits this orientation — which the register tiling declines when
-          transposed — while a packing [Stage] normalizes it. A transposed A never declines (its
-          feeds are scalar splats either way), so it is not tracked. *)
+      (** [m_b]'s stored layout: [Some false] = [m_j] on its minor axis ([..., k, ..., j]),
+          [Some true] = transposed ([m_k] on the minor axis), [None] = neither cleanly (the
+          candidate then fails [Tensorize]'s own role check at compile). Feeds the seeding
+          pre-filter (gh-ocannl-479): a rendering that reads B {e in place} inherits this
+          orientation — which the register tiling declines when transposed — while a packing
+          [Stage] normalizes it. A transposed A never declines (its feeds are scalar splats either
+          way), so it is not tracked. *)
   m_fma : bool;
       (** The accumulation is in fused ([Ops.FMA]) form, as [optimize]'s simplify leaves it — the
           form the register-tiled [Tile_mma] rendering requires (its vector twin promises bitwise
@@ -355,63 +426,132 @@ let rec collect_gets (sc : LL.scalar_t) : (Ir.Tnode.t * Idx.axis_index array) li
   | LL.Embed_index _ ->
       []
 
-(* The stored orientation of an operand's last two axes w.r.t. its role symbols: [Some false] when
-   [row] has unit coefficient in component [rank-2] and [col] in [rank-1], [Some true] when swapped
-   (transposed storage), [None] otherwise. A permissive mirror of [Schedule.Tensorize]'s role
-   assignment (which additionally checks that the symbols appear nowhere else). *)
-let stored_orientation (idcs : Idx.axis_index array) ~row ~col : bool option =
-  let coeff sym (idx : Idx.axis_index) =
-    match idx with
-    | Idx.Iterator s when Idx.equal_symbol s sym -> 1
-    | Idx.Affine { symbols; _ } ->
-        List.sum (module Int) symbols ~f:(fun (c, s) -> if Idx.equal_symbol s sym then c else 0)
-    | _ -> 0
-  in
-  let rank = Array.length idcs in
-  if rank < 2 then None
-  else if coeff row idcs.(rank - 2) = 1 && coeff col idcs.(rank - 1) = 1 then Some false
-  else if coeff col idcs.(rank - 2) = 1 && coeff row idcs.(rank - 1) = 1 then Some true
-  else None
+let idx_mentions (idx : Idx.axis_index) s =
+  match idx with
+  | Idx.Iterator s2 -> Idx.equal_symbol s s2
+  | Idx.Affine { symbols; _ } -> List.exists symbols ~f:(fun (_, s2) -> Idx.equal_symbol s s2)
+  | _ -> false
+
+let idx_coeff (idx : Idx.axis_index) sym =
+  match idx with
+  | Idx.Iterator s when Idx.equal_symbol s sym -> 1
+  | Idx.Affine { symbols; _ } ->
+      List.sum (module Int) symbols ~f:(fun (c, s) -> if Idx.equal_symbol s sym then c else 0)
+  | _ -> 0
+
+(* The unique axis of [idcs] owning [s]: [s] appears in exactly one component, with coefficient 1
+   there. Mirrors [Schedule.Tensorize]'s ownership discipline. *)
+let unit_axis (idcs : Idx.axis_index array) s : int option =
+  let ps = Array.filter_mapi idcs ~f:(fun p idx -> Option.some_if (idx_mentions idx s) p) in
+  match Array.to_list ps with [ p ] when idx_coeff idcs.(p) s = 1 -> Some p | _ -> None
+
+(* Batched-site classification shared by the relation-based and procedural matchers
+   (gh-ocannl-528). Inputs: the perfectly nested serial accumulation statement's loops in nest
+   order (with extents), the accumulator's index map [di], and the two operand reads. Roles:
+
+   - [k] is the innermost loop and the only one absent from [di].
+   - Every other loop must own a distinct axis of [di] (unit coefficient, sole occurrence).
+   - [j] owns [di]'s minor axis and must be the innermost of the write loops (how lowering orders
+     them — the sketch pipelines' hoisting normalization only handles batch loops above [j]).
+   - Per operand order, [a] must own [k], must not read [j]; [b] must own [j] and [k]; [i] is the
+     {e deepest} write loop owned by [a] and absent from [b] — the 2-D tile row. The exclusions
+     are what keep variance-style self-products [d[b,s] += x[b,s,k] * x[b,s,k]] — whose reads
+     mention every loop — from masquerading as matmuls: they seeded (and always failed candidate
+     compile) before.
+   - Everything else is batch: [m_bo] outside [i], [m_bi] between [i] and [j]; batch symbols may
+     appear in the operands freely (their occurrences form the tile block base).
+
+   Detection remains permissive about everything else — a mis-detected site fails its candidate
+   compile (op preconditions, [validate_parallel], hardware limits) and is skipped. *)
+let classify_matmul ~(loops : (Idx.symbol * int) list) ~(d : Ir.Tnode.t)
+    ~(di : Idx.axis_index array) ~(o1 : Ir.Tnode.t * Idx.axis_index array)
+    ~(o2 : Ir.Tnode.t * Idx.axis_index array) ~(zeroed : bool) ~(fma : bool) : matmul_site option =
+  let rank = Array.length di in
+  match List.rev loops with
+  | (k, nk) :: ((_ :: _ :: _ as rev_ws) : (Idx.symbol * int) list)
+    when rank >= 2 && not (idcs_mention di k) ->
+      let ws = List.rev rev_ws in
+      let d_axes = List.map ws ~f:(fun (s, _) -> unit_axis di s) in
+      if List.exists d_axes ~f:Option.is_none then None
+      else
+        let axes = List.zip_exn ws (List.filter_opt d_axes) in
+        let distinct =
+          let ps = List.map axes ~f:snd in
+          List.length (List.dedup_and_sort ps ~compare:Int.compare) = List.length ps
+        in
+        if not distinct then None
+        else
+          let (j, nj), pj = List.last_exn axes in
+          if pj <> rank - 1 then None
+          else
+            let front = List.drop_last_exn axes in
+            let try_order ((a, ai) : Ir.Tnode.t * Idx.axis_index array)
+                ((b, bi) : Ir.Tnode.t * Idx.axis_index array) : matmul_site option =
+              if
+                idcs_mention ai j
+                || Option.is_none (unit_axis ai k)
+                || Option.is_none (unit_axis bi j)
+                || Option.is_none (unit_axis bi k)
+              then None
+              else
+                let eligible =
+                  List.filter front ~f:(fun ((s, _), _) ->
+                      Option.is_some (unit_axis ai s) && not (idcs_mention bi s))
+                in
+                Option.map (List.last eligible) ~f:(fun ((i, ni), p_row) ->
+                    let before_i = ref true in
+                    let m_bo = ref [] and m_bi = ref [] in
+                    List.iter front ~f:(fun ((s, n), _) ->
+                        if Idx.equal_symbol s i then before_i := false
+                        else if !before_i then m_bo := (s, n) :: !m_bo
+                        else m_bi := (s, n) :: !m_bi);
+                    let rank_b = Array.length bi in
+                    let m_tb =
+                      match (unit_axis bi j, unit_axis bi k) with
+                      | Some p, _ when p = rank_b - 1 -> Some false
+                      | _, Some p when p = rank_b - 1 -> Some true
+                      | _ -> None
+                    in
+                    {
+                      m_i = i;
+                      m_j = j;
+                      m_k = k;
+                      m_ni = ni;
+                      m_nj = nj;
+                      m_nk = nk;
+                      m_bo = List.rev !m_bo;
+                      m_bi = List.rev !m_bi;
+                      m_row_axis = p_row;
+                      m_d = d;
+                      m_a = a;
+                      m_b = b;
+                      m_zeroed = zeroed;
+                      m_tb;
+                      m_fma = fma;
+                    })
+            in
+            (match try_order o1 o2 with Some _ as r -> r | None -> try_order o2 o1)
+  | _ -> None
 
 let detect_matmul_procedural (llc : LL.t) : matmul_site option =
   let stmts = strip_stmts (LL.flat_lines [ llc ]) in
   let zeroed = List.filter_map stmts ~f:(function LL.Zero_out tn -> Some tn | _ -> None) in
   List.find_map stmts ~f:(fun stmt ->
       match serial_nest_of stmt with
-      | [ (i, ni); (j, nj); (k, nk) ], LL.Set { tn = d; idcs = di; llsc; _ } -> (
+      | (_ :: _ :: _ :: _ as loops), LL.Set { tn = d; idcs = di; llsc; _ } -> (
           let gets = collect_gets llsc in
           let is_d_read (tn, idcs) = phys_equal tn d && Array.equal Idx.equal_axis_index idcs di in
           let d_reads, others = List.partition_tf gets ~f:is_d_read in
           match (d_reads, others) with
-          | _ :: _, [ ((_, i1) as o1); ((_, i2) as o2) ]
-            when idcs_mention di i && idcs_mention di j && not (idcs_mention di k) ->
-              let role_a (idcs : Idx.axis_index array) = idcs_mention idcs i && idcs_mention idcs k
-              and role_b idcs = idcs_mention idcs k && idcs_mention idcs j in
-              let assign =
-                if role_a i1 && role_b i2 then Some (o1, o2)
-                else if role_a i2 && role_b i1 then Some (o2, o1)
-                else None
+          | _ :: _, [ o1; o2 ] ->
+              let fma =
+                match llsc with
+                | LL.Ternop (Ir.Ops.FMA, _, _, (LL.Get (tn, idcs), _)) -> is_d_read (tn, idcs)
+                | _ -> false
               in
-              Option.map assign ~f:(fun ((m_a, _ia), (m_b, ib)) ->
-                  let m_fma =
-                    match llsc with
-                    | LL.Ternop (Ir.Ops.FMA, _, _, (LL.Get (tn, idcs), _)) -> is_d_read (tn, idcs)
-                    | _ -> false
-                  in
-                  {
-                    m_i = i;
-                    m_j = j;
-                    m_k = k;
-                    m_ni = ni;
-                    m_nj = nj;
-                    m_nk = nk;
-                    m_d = d;
-                    m_a;
-                    m_b;
-                    m_zeroed = List.exists zeroed ~f:(phys_equal d);
-                    m_tb = stored_orientation ib ~row:k ~col:j;
-                    m_fma;
-                  })
+              classify_matmul ~loops ~d ~di ~o1 ~o2
+                ~zeroed:(List.exists zeroed ~f:(phys_equal d))
+                ~fma
           | _ -> None)
       | _ -> None)
 
@@ -503,39 +643,19 @@ let detect_matmul_affine (llc : LL.t) : matmul_site option =
   let zeroed = List.filter accs ~f:(fun a -> a.A.a_write && a.A.a_whole) in
   List.find_map (accesses_by_statement accs) ~f:(fun g ->
       match serial_kernel_of axes g with
-      | Some (w, (_ :: _ as _d_reads), [ o1; o2 ]) -> (
-          match w.A.a_loops with
-          | [ (i, (_, ti)); (j, (_, tj)); (k, (_, tk)) ]
-            when idcs_mention w.A.a_map i && idcs_mention w.A.a_map j
-                 && not (idcs_mention w.A.a_map k) ->
-              let role_a idcs = idcs_mention idcs i && idcs_mention idcs k
-              and role_b idcs = idcs_mention idcs k && idcs_mention idcs j in
-              let assign =
-                if role_a o1.A.a_map && role_b o2.A.a_map then Some (o1, o2)
-                else if role_a o2.A.a_map && role_b o1.A.a_map then Some (o2, o1)
-                else None
-              in
-              Option.map assign ~f:(fun (oa, ob) ->
-                  {
-                    m_i = i;
-                    m_j = j;
-                    m_k = k;
-                    m_ni = ti + 1;
-                    m_nj = tj + 1;
-                    m_nk = tk + 1;
-                    m_d = w.A.a_tn;
-                    m_a = oa.A.a_tn;
-                    m_b = ob.A.a_tn;
-                    m_zeroed = List.exists zeroed ~f:(fun z -> phys_equal z.A.a_tn w.A.a_tn);
-                    m_tb = stored_orientation ob.A.a_map ~row:k ~col:j;
-                    m_fma = fma_form llc ~stmt_path:w.A.a_path ~d:w.A.a_tn ~di:w.A.a_map;
-                  })
-          | _ -> None)
+      | Some (w, (_ :: _ as _d_reads), [ o1; o2 ]) ->
+          let loops = List.map w.A.a_loops ~f:(fun (s, (_, hi)) -> (s, hi + 1)) in
+          classify_matmul ~loops ~d:w.A.a_tn ~di:w.A.a_map ~o1:(o1.A.a_tn, o1.A.a_map)
+            ~o2:(o2.A.a_tn, o2.A.a_map)
+            ~zeroed:(List.exists zeroed ~f:(fun z -> phys_equal z.A.a_tn w.A.a_tn))
+            ~fma:(fma_form llc ~stmt_path:w.A.a_path ~d:w.A.a_tn ~di:w.A.a_map)
       | _ -> None)
 
 let matmul_site_equal (x : matmul_site) (y : matmul_site) =
+  let batch_equal = List.equal (fun (s1, n1) (s2, n2) -> Idx.equal_symbol s1 s2 && n1 = n2) in
   Idx.equal_symbol x.m_i y.m_i && Idx.equal_symbol x.m_j y.m_j && Idx.equal_symbol x.m_k y.m_k
-  && x.m_ni = y.m_ni && x.m_nj = y.m_nj && x.m_nk = y.m_nk && phys_equal x.m_d y.m_d
+  && x.m_ni = y.m_ni && x.m_nj = y.m_nj && x.m_nk = y.m_nk && batch_equal x.m_bo y.m_bo
+  && batch_equal x.m_bi y.m_bi && x.m_row_axis = y.m_row_axis && phys_equal x.m_d y.m_d
   && phys_equal x.m_a y.m_a && phys_equal x.m_b y.m_b && Bool.equal x.m_zeroed y.m_zeroed
   && Option.equal Bool.equal x.m_tb y.m_tb
   && Bool.equal x.m_fma y.m_fma
@@ -945,7 +1065,8 @@ let zero_geometry (site : matmul_site) ~(mk_zops : zi:Idx.symbol -> zj:Idx.symbo
     : Sched.schedule =
   if not site.m_zeroed then []
   else (
-    if Array.length (Lazy.force site.m_d.Ir.Tnode.dims) <> 2 then
+    let rank = Array.length (Lazy.force site.m_d.Ir.Tnode.dims) in
+    if rank < 2 || site.m_row_axis >= rank - 1 then
       (* This is a known limitation of the generated sketch, not an arbitrary exception from a
          user transform. Preserve that distinction at the narrow site so strict candidate failure
          classification records a decline and continues trying the remaining seeds. *)
@@ -955,12 +1076,14 @@ let zero_geometry (site : matmul_site) ~(mk_zops : zi:Idx.symbol -> zj:Idx.symbo
              Outcome.Unsupported
                {
                  feature = "autotune_sketch_output_rank";
-                 detail = "Autotune sketch: only rank-2 outputs in v1";
+                 detail = "Autotune sketch: zero expansion needs a row axis before the minor axis";
                } ));
     let ez, zsyms = Sched.expand_zero ~tn:site.m_d in
-    let zi, zj =
-      match zsyms with [ zi; zj ] -> (zi, zj) | _ -> invalid_arg "Autotune sketch: non-2d zero"
-    in
+    (* Batched outputs (gh-ocannl-528): the row/column zero loops get the accumulation's geometry;
+       the batch-axis zero loops stay [Serial], like the batch loops of the accumulation nest. The
+       row loop precedes the column loop in the zero nest ([m_row_axis < rank - 1]), matching the
+       accumulation's positional hardware-slot order. *)
+    let zi = List.nth_exn zsyms site.m_row_axis and zj = List.last_exn zsyms in
     ez :: mk_zops ~zi ~zj)
 
 (* The would-be epilogue tail's loop symbols: the first real statement after the last statement
@@ -1162,10 +1285,27 @@ let companion_coverage_unsupported ~tensorized why =
                  why;
            } ))
 
-(* The [(i, j)] chain the GPU matmul sketches annotate, as [companion_geometry] wants it: the
-   accumulation nest's own outer loops, which are exactly what {!Sched.aligned_chains} reports for
-   that nest when the site is parallelizable at full arity. *)
-let matmul_site_chain (site : matmul_site) = [ (site.m_i, site.m_ni); (site.m_j, site.m_nj) ]
+(* The chain the GPU matmul sketches annotate, as [companion_geometry] wants it: the accumulation
+   nest's own outer loops in nest order — batch loops included (gh-ocannl-528) — which is exactly
+   what {!Sched.aligned_chains} reports for that nest when the site is parallelizable at full
+   arity. *)
+let matmul_site_chain (site : matmul_site) =
+  site.m_bo @ ((site.m_i, site.m_ni) :: site.m_bi) @ [ (site.m_j, site.m_nj) ]
+
+(* Chain-position roles matching [matmul_site_chain]: batch positions get no annotation (batch
+   loops stay [Serial] — the 3-slot grid budget is spent on the row/column blocks, and serial
+   loops above hardware loops are legal: hardware loops bind, not iterate), row/column positions
+   get the pipeline's geometry. *)
+let matmul_chain_roles (site : matmul_site) : [ `Batch | `Row | `Col ] list =
+  List.map site.m_bo ~f:(fun _ -> `Batch)
+  @ (`Row :: List.map site.m_bi ~f:(fun _ -> `Batch))
+  @ [ `Col ]
+
+(* Hoist interior batch loops above the [m_i] loop (gh-ocannl-528), making the [i x j x k]
+   micro-kernel perfectly nested for the splits, sinks and [Tensorize] below. Sequential adjacent
+   [Swap]s: after each, [m_i] is directly above the next interior batch loop. *)
+let batch_hoist_swaps (site : matmul_site) : Sched.schedule =
+  List.map site.m_bi ~f:(fun (g, _) -> Sched.Swap { outer = site.m_i; inner = g })
 
 (* The register-blocktiled GPU matmul (schedule_register_matmul.ml): each output dimension split
    twice (block tile -> Grid, register tile -> Workgroup), register loops sunk innermost, operands
@@ -1176,14 +1316,20 @@ let matmul_site_chain (site : matmul_site) = [ (site.m_i, site.m_ni); (site.m_j,
 let gpu_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
     { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_tm = tm; sk_tn = tn; sk_epilogue; _ } : Sched.schedule =
   (* One geometry description drives the accumulation nest, the expanded zeroing nest and the
-     companion nests: per chain position, the block split (Grid) and the register split (Workgroup),
-     which is what makes their slots and workgroup extents agree by construction. *)
-  let annotate pos sym =
-    let blk, reg = if pos = 0 then (bm, tm) else (bn, tn) in
-    let sp, _, inner = Sched.split ~axis:sym ~factor:blk ~outer:LL.Grid ~inner:LL.Serial in
-    let sp2, _, _ = Sched.split ~axis:inner ~factor:reg ~outer:LL.Workgroup ~inner:LL.Serial in
-    [ sp; sp2 ]
+     companion nests: per row/column chain position, the block split (Grid) and the register split
+     (Workgroup), which is what makes their slots and workgroup extents agree by construction;
+     batch positions stay [Serial] (gh-ocannl-528). *)
+  let annotate_role role sym =
+    match role with
+    | `Batch -> []
+    | (`Row | `Col) as rc ->
+        let blk, reg = match rc with `Row -> (bm, tm) | `Col -> (bn, tn) in
+        let sp, _, inner = Sched.split ~axis:sym ~factor:blk ~outer:LL.Grid ~inner:LL.Serial in
+        let sp2, _, _ = Sched.split ~axis:inner ~factor:reg ~outer:LL.Workgroup ~inner:LL.Serial in
+        [ sp; sp2 ]
   in
+  let roles = Array.of_list (matmul_chain_roles site) in
+  let annotate pos sym = annotate_role roles.(pos) sym in
   let cops =
     match
       companion_geometry ~site_syms:(matmul_site_chain site)
@@ -1194,7 +1340,9 @@ let gpu_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
     | Ok ops -> ops
     | Error why -> companion_coverage_unsupported ~tensorized:false why
   in
-  let zops = zero_geometry site ~mk_zops:(fun ~zi ~zj -> annotate 0 zi @ annotate 1 zj) in
+  let zops =
+    zero_geometry site ~mk_zops:(fun ~zi ~zj -> annotate_role `Row zi @ annotate_role `Col zj)
+  in
   let zops = cops @ zops in
   let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
   let sp_i2, i_w, i_t = Sched.split ~axis:i_i ~factor:tm ~outer:LL.Workgroup ~inner:LL.Serial in
@@ -1202,7 +1350,7 @@ let gpu_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
   let sp_j2, j_w, j_t = Sched.split ~axis:j_i ~factor:tn ~outer:LL.Workgroup ~inner:LL.Serial in
   let sp_k, k_o, k_i = Sched.split ~axis:site.m_k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
   let swaps = sink i_t [ j_o; j_w; j_t; k_o; k_i ] @ sink j_t [ k_o; k_i ] in
-  zops
+  batch_hoist_swaps site @ zops
   @ [ sp_i; sp_i2; sp_j; sp_j2; sp_k ]
   @ swaps
   @ [
@@ -1244,7 +1392,8 @@ let cpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = b
   let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Serial ~inner:LL.Serial in
   let sp_j, j_o, j_i = Sched.split ~axis:site.m_j ~factor:bn ~outer:LL.Serial ~inner:LL.Serial in
   let sp_k, k_o, k_i = Sched.split ~axis:site.m_k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
-  [ sp_i; sp_j; sp_k ]
+  batch_hoist_swaps site
+  @ [ sp_i; sp_j; sp_k ]
   @ sink i_i [ j_o; j_i; k_o; k_i ]
   @ sink j_i [ k_o; k_i; i_i ]
   @ [
@@ -1288,17 +1437,22 @@ let cpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = b
    the fusion declined the seed had no surviving form. *)
 let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
     { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_simd = w; sk_epilogue; _ } : Sched.schedule =
-  (* Position 1 splits at the lane width, not at [bn]: the inner loop IS the workgroup slot the
-     [Tile_mma]'s lane occupies, and a barrier-carrying kernel requires equal extents at a slot. The
-     seeds constrain [sk_bn = sk_simd], so this is also the accumulation nest's column block. *)
-  let annotate pos sym =
-    if pos = 0 then
-      let sp, _, _ = Sched.split ~axis:sym ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
-      [ sp ]
-    else
-      let sp, _, _ = Sched.split ~axis:sym ~factor:w ~outer:LL.Grid ~inner:LL.Workgroup in
-      [ sp ]
+  (* The column role splits at the lane width, not at [bn]: the inner loop IS the workgroup slot
+     the [Tile_mma]'s lane occupies, and a barrier-carrying kernel requires equal extents at a
+     slot. The seeds constrain [sk_bn = sk_simd], so this is also the accumulation nest's column
+     block. Batch positions stay [Serial] (gh-ocannl-528). *)
+  let annotate_role role sym =
+    match role with
+    | `Batch -> []
+    | `Row ->
+        let sp, _, _ = Sched.split ~axis:sym ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+        [ sp ]
+    | `Col ->
+        let sp, _, _ = Sched.split ~axis:sym ~factor:w ~outer:LL.Grid ~inner:LL.Workgroup in
+        [ sp ]
   in
+  let roles = Array.of_list (matmul_chain_roles site) in
+  let annotate pos sym = annotate_role roles.(pos) sym in
   let cops =
     match
       companion_geometry ~site_syms:(matmul_site_chain site)
@@ -1309,13 +1463,15 @@ let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
     | Ok ops -> ops
     | Error why -> companion_coverage_unsupported ~tensorized:true why
   in
-  let zops = zero_geometry site ~mk_zops:(fun ~zi ~zj -> annotate 0 zi @ annotate 1 zj) in
+  let zops =
+    zero_geometry site ~mk_zops:(fun ~zi ~zj -> annotate_role `Row zi @ annotate_role `Col zj)
+  in
   let zops = cops @ zops in
   let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
   let sp_j, j_o, j_i = Sched.split ~axis:site.m_j ~factor:bn ~outer:LL.Grid ~inner:LL.Serial in
   if bk = 0 then
     let tz, _lane = Sched.tensorize ~i:i_i ~j:j_i ~k:site.m_k ~simd_width:w in
-    zops @ [ sp_i; sp_j ] @ sink i_i [ j_o ] @ [ tz ]
+    batch_hoist_swaps site @ zops @ [ sp_i; sp_j ] @ sink i_i [ j_o ] @ [ tz ]
   else
     let sp_k, k_o, k_i = Sched.split ~axis:site.m_k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
     let tz, _lane = Sched.tensorize ~i:i_i ~j:j_i ~k:k_i ~simd_width:w in
@@ -1323,7 +1479,8 @@ let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
        cooperative tiles, non-multiple extents pad to the block sizes — the guards land on the leaf
        accumulation, [Tensorize] moves the row/column masks to the fragment transfers and
        discharges the reduction mask against the staged tiles. *)
-    pad_to ~axis:site.m_i ~extent:site.m_ni bm
+    batch_hoist_swaps site
+    @ pad_to ~axis:site.m_i ~extent:site.m_ni bm
     @ pad_to ~axis:site.m_j ~extent:site.m_nj bn
     @ pad_to ~axis:site.m_k ~extent:site.m_nk bk
     @ zops
@@ -1367,11 +1524,11 @@ let cpu_mma_sketch_schedule (site : matmul_site) { sk_bm = bm; _ } : Sched.sched
   in
   if bm = 0 then
     let tz, _lane = Sched.tensorize ~i:site.m_i ~j:site.m_j ~k:site.m_k ~simd_width:site.m_nj in
-    zops @ [ tz ]
+    batch_hoist_swaps site @ zops @ [ tz ]
   else
     let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
     let tz, _lane = Sched.tensorize ~i:i_i ~j:site.m_j ~k:site.m_k ~simd_width:site.m_nj in
-    zops @ [ sp_i; tz ]
+    batch_hoist_swaps site @ zops @ [ sp_i; tz ]
 
 (* Cache-blocked, operand-packed tensorized CPU matmul: [Tile_mma] composed with the S4 packing
    pipeline (the remaining piece of gh-ocannl-469). GEBP loop structure, all-Serial: [j_o? { k_o {
@@ -1455,7 +1612,7 @@ let cpu_mma_pack_sketch_schedule (site : matmul_site)
       @ pad_to ~axis:site.m_k ~extent:site.m_nk bk
   in
   let tz, _lane = Sched.tensorize ~i:i_i ~j:j_col ~k:k_i ~simd_width:1 in
-  pads @ zops @ splits @ j_swaps @ sink j_col [ k_o ] @ sink i_i [ k_o ]
+  batch_hoist_swaps site @ pads @ zops @ splits @ j_swaps @ sink j_col [ k_o ] @ sink i_i [ k_o ]
   @ (if grid_outermost then [] else sink i_o [ k_o ])
   @ stages @ [ tz ]
 
@@ -1849,6 +2006,7 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
               mma_tile_for_precisions mma
                 ~a_prec:(Lazy.force site.c_a.Ir.Tnode.storage_prec)
                 ~b_prec:(Lazy.force site.c_b.Ir.Tnode.storage_prec)
+                ~d_prec:(Lazy.force site.c_d.Ir.Tnode.storage_prec)
             with
             | None -> []
             | Some (tm_t, tn_t, tk_t) ->
@@ -1986,6 +2144,7 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
           mma_tile_for_precisions mma
             ~a_prec:(Lazy.force site.m_a.Ir.Tnode.storage_prec)
             ~b_prec:(Lazy.force site.m_b.Ir.Tnode.storage_prec)
+            ~d_prec:(Lazy.force site.m_d.Ir.Tnode.storage_prec)
         with
         | None -> []
         | Some (tm_t, tn_t, tk_t) ->
@@ -2327,6 +2486,12 @@ type sr_site = {
   sr_target : Ir.Tnode.t;  (** The accumulated node. *)
   sr_red : int;  (** The [sr_axis] loop's extent. *)
   sr_out : int;  (** The target's cell count — the site's whole output parallelism. *)
+  sr_cost : int;
+      (** Estimated segment cost: the accumulation statement's trip count — the product of every
+          enclosing loop extent, i.e. how many accumulate steps the serial nest spends on this
+          site. Ranks the sites (gh-ocannl-541): the earlier [sr_red / sr_out] integer-division
+          ratio sent every large-output site to 0, silently excluding the very sites (conv weight
+          gradients) with the most serial work to recover. *)
   sr_dynamic : bool;  (** The gh-466 scatter form ([Set_dynamic]). *)
   sr_swaps : (Idx.symbol * Idx.symbol) list;
       (** The enabling interchange (gh-ocannl-537), as [(outer, inner)] pairs applied {e in order}
@@ -2341,9 +2506,6 @@ let sr_out_max = 4096
 (* Reduction extents below this are not worth a second kernel pass (the combine reads
    [num_blocks] partial cells per output cell). *)
 let sr_red_min = 64
-
-(* Candidate-volume cap: the most reduction-dominated sites win ties. *)
-let sr_max_sites = 4
 
 (* The adjacent-interchange chain hoisting [needed] outside [axis] within the write's loop [path]
    (outermost first), or [None] when some symbol is not a loop of that path — e.g. a static index —
@@ -2452,6 +2614,7 @@ let split_reduce_sites ?(static_indices = []) (opt : LL.optimized) : sr_site lis
                 sr_target = tn;
                 sr_red = n;
                 sr_out = out;
+                sr_cost = List.fold enclosing ~init:1 ~f:(fun c (_, n, _) -> c * max 1 n);
                 sr_dynamic = dynamic;
                 sr_swaps = swaps;
               }
@@ -2474,10 +2637,11 @@ let split_reduce_sites ?(static_indices = []) (opt : LL.optimized) : sr_site lis
     | _ -> ()
   in
   walk [] opt.LL.llc;
-  List.take
-    (List.sort (List.rev !acc) ~compare:(fun a b ->
-         Int.compare (b.sr_red / max 1 b.sr_out) (a.sr_red / max 1 a.sr_out)))
-    sr_max_sites
+  (* Estimated segment cost, descending — the site with the most serial work to recover ranks
+     first (gh-ocannl-541). Stable, so equal-cost sites keep detection (program) order. The
+     candidate-volume cap is NOT applied here: it belongs to the search ([tune]'s
+     [max_split_reduce_sites]), which records the sites it evicts in the decline census. *)
+  List.stable_sort (List.rev !acc) ~compare:(fun a b -> Int.compare b.sr_cost a.sr_cost)
 
 (** {2 Analytic cost-model scoring (gh-ocannl-491, the selection half)}
 
@@ -3451,13 +3615,18 @@ let model_default ?report ctx comp bindings =
 
 (** {2 The search} *)
 
-let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fraction ?timing_ctx
-    ?report ctx comp bindings =
+let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fraction
+    ?max_split_reduce_sites ?timing_ctx ?report ctx comp bindings =
   let beam_width =
     max 1 (Option.value beam_width ~default:(int_arg ~arg_name:"autotune_beam_width" ~default:2))
   in
   let rounds = Option.value rounds ~default:(int_arg ~arg_name:"autotune_rounds" ~default:2) in
   let repeats = Option.value repeats ~default:(int_arg ~arg_name:"autotune_repeats" ~default:3) in
+  let max_split_reduce_sites =
+    max 0
+      (Option.value max_split_reduce_sites
+         ~default:(int_arg ~arg_name:"autotune_split_reduce_max_sites" ~default:8))
+  in
   let seed_block_sizes = Option.value seed_block_sizes ~default:[ 64; 128; 256; 512 ] in
   let cache_dir =
     Option.value cache_dir
@@ -3494,19 +3663,49 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
      Canonicalize INSIDE the transform: after the transform returns, codegen forces the remaining
      undecided placements into the very placements table the captured [opt] references, and
      placement classes enter the digest (Schedule_cache.canonicalize) — the disk-cache key must be
-     the deterministic transform-time form so that storing and replaying processes agree. *)
+     the deterministic transform-time form so that storing and replaying processes agree.
+
+     The baseline is a candidate, so its compile is protected like every other candidate's
+     (gh-ocannl-533): a typed rejection — the HIP scratch validator declining the unscheduled serial
+     form at [Backend_link] is the case that motivated this — declines the baseline and lets the
+     search proceed with the scheduled candidates, instead of killing the run before a single
+     candidate has been tried. This is sound because the capture happens INSIDE the transform, which
+     runs before codegen and link: [base_opt] survives the rejection, so every candidate still
+     derives from the same base lowering. Only the timing of the serial form is lost, and on a GPU
+     backend it was never going to be timed anyway ([dispatchable] below). Unclassified failures
+     stay fatal: provenance [Candidate] under strict classification.
+
+     gh-ocannl-552 settled whether this base compile should instead be the default-annotated
+     pipeline (the shared cause behind gh-ocannl-532 and gh-ocannl-533): it cannot be. The default
+     form is [maybe_default_schedules] — fission, then per-segment annotation — so in general it is
+     several kernels, not one [optimized] to rebase candidates on; every candidate family (presets,
+     the sketch detectors, fission enumeration, beam menu moves) assumes the serial zero point; and
+     annotation consults [hardware_limits], which would bake per-device decisions into
+     [source_digest]. The consequences that motivated the question are each handled where they
+     arise: the scratch hazard by this compile's candidate-grade protection (gh-ocannl-533), the
+     GPU dispatch hazard by [dispatchable] (gh-ocannl-532), and the missing "did tuning beat the
+     default?" reference by [report.default_ms] — the [config_thresholds] seed's measurement, not a
+     new baseline. *)
   let base_capture = ref None in
-  let bctx, broutine =
-    Context.compile
+  let base_outcome =
+    Context.compile_outcome
       ~lowered_transform:(fun opt ->
         base_capture := Some (opt, SC.canonicalize ~static_indices opt);
         opt)
-      search_ctx comp bindings
+      ~provenance:Outcome.Candidate ~candidate:"baseline" search_ctx comp bindings
   in
   let base_opt, canon =
-    match !base_capture with
-    | Some oc -> oc
-    | None -> failwith "Autotune.tune: backend compile did not invoke lowered_transform"
+    match (!base_capture, base_outcome) with
+    | Some oc, _ -> oc
+    (* Failed before reaching the transform: there is no base lowering, hence no search. *)
+    | None, Error failure -> Outcome.raise_failure failure
+    | None, Ok _ -> failwith "Autotune.tune: backend compile did not invoke lowered_transform"
+  in
+  let baseline_linked, baseline_decline =
+    match base_outcome with
+    | Ok (bctx, broutine) -> (Some (bctx, broutine), None)
+    | Error (Outcome.Classified classified) -> (None, Some classified)
+    | Error (Outcome.Fatal _ as failure) -> Outcome.raise_failure failure
   in
   let base_digest = SC.digest canon in
   let use_cache = (not (String.is_empty cache_dir)) && SC.complete canon in
@@ -3531,6 +3730,18 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
     | Whole_saved _ -> false
     | Fiss_saved _ | Split_saved _ -> true
   in
+  (* The decline census outlives the cache branch: the baseline compile happens before the lookup and
+     can be declined whether or not a cached winner then replays (gh-ocannl-533), so a cache-hit
+     report has to carry that rejection too — [baseline_declined] with an empty census would be an
+     internally inconsistent diagnostic on exactly the warm-cache runs of the workload that motivated
+     the fix (Codex review, PR #271). *)
+  let declines : (Outcome.rejection_key, decline_acc) Hashtbl.Poly.t = Hashtbl.Poly.create () in
+  (* A declined baseline is an ordinary entry in the census: it is the same evidence about the same
+     device as any candidate's rejection, and dropping it would report a smaller [candidates_failed]
+     than the work actually attempted. It is recorded HERE and NOT as a [Not_dispatched] refusal
+     below — the two are mutually exclusive accounts of one baseline, and the gh-ocannl-532 refusal
+     asserts a reason ("binds no hardware dimension") that is not why this baseline did not run. *)
+  Option.iter baseline_decline ~f:(record_decline declines);
   let cached =
     if use_cache then
       match SC.lookup ~dir:cache_dir ~key with
@@ -3564,9 +3775,11 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
                 {
                   cache_hit = true;
                   candidates_timed = 0;
-                  candidates_failed = 0;
+                  (* No search ran, so the only rejection this can carry is the baseline's. *)
+                  candidates_failed = failed_count declines;
                   partial = false;
-                  declines = [];
+                  baseline_declined = Option.is_some baseline_decline;
+                  declines = decline_summaries declines;
                   terminal_failure = None;
                   rounds_run = 0;
                   sketch_candidates = 0;
@@ -3581,6 +3794,18 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
                   model_pruned = 0;
                   fissioned = is_fissioned c.form;
                   baseline_ms = entry.SC.baseline_ms;
+                  default_ms =
+                    (* The entry's [default_ms] describes the default pipeline under the config
+                       that ran the search; the cache key covers neither, so a config change can
+                       redefine the default without missing the cache. Fingerprint mismatch drops
+                       the stale diagnostic — the winner replay itself stays valid (Codex P2 on
+                       PR #279). *)
+                    (match (entry.SC.default_ms, entry.SC.default_fingerprint) with
+                    | (Some _ as d), Some fp
+                      when String.equal fp
+                             (Sched.default_schedule_fingerprint ~backend_name:backend) ->
+                        d
+                    | _ -> None);
                   best_ms = entry.SC.best_ms;
                   best_schedule = flat_schedule c.form;
                 };
@@ -3599,41 +3824,73 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
   | None -> (
       let seen = Hash_set.create (module String) in
       Hash_set.add seen base_digest;
+      (* Every gh-ocannl-532 refusal enters the same decline census (gh-ocannl-543). Without it a GPU
+         search that timed a single candidate reports [candidates_timed = 1] with an empty census —
+         the same report a computation with a one-element schedule space would give — and the
+         difference (how many candidates existed and were refused, and why) was only ever visible in
+         the [autotune_log] stderr stream. *)
+      let record_not_dispatched ~origin ~detail =
+        record_decline declines
+          {
+            Outcome.phase = Outcome.Transform;
+            cause = Outcome.Not_dispatched { origin; detail };
+            execution_effect = Outcome.No_device_writes;
+          }
+      in
+      (* [None] when the baseline compile was declined (gh-ocannl-533): there is no routine to time
+         and none to return, and the search runs on the scheduled candidates alone. *)
+      let baseline =
+        Option.map baseline_linked ~f:(fun (bctx, broutine) ->
+            {
+              form = Whole_saved [];
+              cctx = bctx;
+              routine = broutine;
+              units =
+                [
+                  {
+                    u_key = None;
+                    u_saved = [];
+                    u_registry = SC.base_registry canon;
+                    u_opt = base_opt;
+                  };
+                ];
+              all_opts = [ base_opt ];
+              digest_after = base_digest;
+              mma_renders = [];
+            })
+      in
       (* Baseline timing runs uncaught: its failures (e.g. uninitialized inputs) are the user's bug,
          with the same message [Context.run] would give. On a GPU backend the baseline is the
          unscheduled serial form and is not dispatched at all (see [dispatchable]); [infinity] is
          its rank, so every timed candidate beats it and the search never returns it (see the
-         fallback at the end). *)
-      let baseline_dispatched = dispatchable ~is_gpu [ base_opt ] in
+         fallback at the end), and a declined baseline ranks the same way. *)
+      let baseline_dispatched = Option.is_some baseline && dispatchable ~is_gpu [ base_opt ] in
       let baseline_ms =
-        if baseline_dispatched then time_routine ~repeats bctx broutine else Float.infinity
+        match baseline with
+        | Some b when baseline_dispatched -> time_routine ~repeats b.cctx b.routine
+        | _ -> Float.infinity
       in
-      if baseline_dispatched then (
-        logf "baseline: %.4f ms (digest %s)" baseline_ms (dshort base_digest);
-        emit_calibration ~backend ~limits ~label:"baseline" ~digest:base_digest
-          ~measured_ms:baseline_ms [ base_opt ])
-      else
-        (* No calibration row: the model column is only meaningful next to a measurement. *)
-        logf
-          "baseline: NOT DISPATCHED, binds no hardware dimension on %s -- the whole routine would \
-           run in one work-item (gh-ocannl-532) (digest %s)"
-          backend (dshort base_digest);
-      let baseline =
-        {
-          form = Whole_saved [];
-          cctx = bctx;
-          routine = broutine;
-          units =
-            [
-              { u_key = None; u_saved = []; u_registry = SC.base_registry canon; u_opt = base_opt };
-            ];
-          all_opts = [ base_opt ];
-          digest_after = base_digest;
-          mma_renders = [];
-        }
-      in
+      (match baseline_decline with
+      | Some classified ->
+          logf "baseline: DECLINED at %s %s"
+            (phase_label classified.phase)
+            (Outcome.detail_of_cause classified.cause)
+      | None ->
+          if baseline_dispatched then (
+            logf "baseline: %.4f ms (digest %s)" baseline_ms (dshort base_digest);
+            emit_calibration ~backend ~limits ~label:"baseline" ~digest:base_digest
+              ~measured_ms:baseline_ms [ base_opt ])
+          else (
+            (* No calibration row: the model column is only meaningful next to a measurement. *)
+            logf
+              "baseline: NOT DISPATCHED, binds no hardware dimension on %s -- the whole routine \
+               would run in one work-item (gh-ocannl-532) (digest %s)"
+              backend (dshort base_digest);
+            record_not_dispatched ~origin:"baseline"
+              ~detail:
+                (Printf.sprintf "the serial baseline binds no hardware dimension on %s (gh-ocannl-532)"
+                   backend)));
       let n_timed = ref (if baseline_dispatched then 1 else 0) in
-      let declines : (Outcome.rejection_key, decline_acc) Hashtbl.Poly.t = Hashtbl.Poly.create () in
       (* Live search state for an honest partial report. Each counter starts at the amount of work
          completed so far and is updated at its ordinary accounting site below. [best_so_far] is
          updated after every successful timing, including midway through seed enumeration. *)
@@ -3646,6 +3903,30 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
       and n_fiss_sketch_candidates = ref 0
       and n_split_reduce_candidates = ref 0 in
       let best_so_far = ref (baseline, baseline_ms) in
+      (* The gh-ocannl-552 reference point. [baseline_ms] is the serial form's time ([infinity] on
+         GPU), so it cannot answer "did tuning beat what the user gets without tuning?". The
+         untuned default pipeline is already in the pool — the [config_thresholds] seed reproduces
+         it exactly — and its measurement is attributed by digest, so a seed that dedups against an
+         identical earlier candidate (the timed baseline included, on CPU backends whose config
+         thresholds leave the code unparallelized) still reports the time of that code.
+
+         The attribution honors the scheduling gates (Codex P1 on PR #279): the seed reproduces
+         [maybe_default_schedules] only on its main path. With automatic scheduling inactive
+         ([automatic_gpu_schedule]/[automatic_cpu_schedule] off, or [debug_log_from_routines] on),
+         the untuned default IS the unscheduled serial form, so the reference is the base digest —
+         timed on CPU, deliberately unmeasured on GPU (gh-ocannl-532). With [schedule_fission]
+         off, the untuned default is the whole-routine config-thresholds annotation, which no
+         candidate reproduces (the whole-routine presets use [min_parallel:1]): no attribution,
+         rather than labeling a differently-scheduled pipeline as the default. *)
+      let auto_sched = Sched.automatic_schedule_active ~backend_name:backend in
+      let config_seed_is_default = auto_sched && Sched.default_pipeline_fissions () in
+      let timed_ms_by_digest = Hashtbl.create (module String) in
+      if baseline_dispatched then
+        Hashtbl.set timed_ms_by_digest ~key:base_digest ~data:baseline_ms;
+      let default_seed_digest = ref (if auto_sched then None else Some base_digest) in
+      let default_ms () =
+        Option.bind !default_seed_digest ~f:(Hashtbl.find timed_ms_by_digest)
+      in
       let partial_emitted = ref false in
       let emit_partial_and_raise (fatal : Outcome.fatal) =
         let summaries = decline_summaries declines in
@@ -3664,6 +3945,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
             candidates_timed = !n_timed;
             candidates_failed = failed_count declines;
             partial = true;
+            baseline_declined = Option.is_some baseline_decline;
             declines = summaries;
             terminal_failure;
             rounds_run = !rounds_run;
@@ -3677,10 +3959,11 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
             mma_timed = !n_mma_timed;
             model_scored = !n_model_scored;
             model_pruned = !n_model_pruned;
-            fissioned = is_fissioned best_c.form;
+            fissioned = Option.exists best_c ~f:(fun c -> is_fissioned c.form);
             baseline_ms;
+            default_ms = default_ms ();
             best_ms;
-            best_schedule = flat_schedule best_c.form;
+            best_schedule = Option.value_map best_c ~default:[] ~f:(fun c -> flat_schedule c.form);
           }
         in
         (* Reporting is best-effort on the exceptional path and must not replace the compiler
@@ -3711,6 +3994,15 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
             None
         | Error (Outcome.Fatal fatal) -> emit_partial_and_raise fatal
         | Ok c ->
+            (* Recorded whether or not this compile goes on to be timed: on dedup the code was (or
+               will not be) timed under the same digest, and the [default_ms] lookup follows the
+               digest, not the seed (gh-ocannl-552). Guarded: the seed is the untuned default only
+               when the default pipeline is active and fissions (Codex P1 on PR #279). *)
+            (match spec with
+            | Fiss (F_preset { block_size = None; privatize = false; config_thresholds = true })
+              when config_seed_is_default ->
+                default_seed_digest := Some c.digest_after
+            | _ -> ());
             if Hash_set.mem seen c.digest_after then (
               logf "%s: dedup (digest %s)" (spec_label spec) (dshort c.digest_after);
               None)
@@ -3720,6 +4012,10 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
               Hash_set.add seen c.digest_after;
               logf "%s: NOT DISPATCHED, binds no hardware dimension (digest %s)" (spec_label spec)
                 (dshort c.digest_after);
+              record_not_dispatched ~origin:"candidate"
+                ~detail:
+                  (Printf.sprintf "%s degenerated to a form binding no hardware dimension"
+                     (spec_label spec));
               None)
             else (
               Hash_set.add seen c.digest_after;
@@ -3739,6 +4035,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
               with
               | Ok ms ->
                   Int.incr n_timed;
+                  Hashtbl.set timed_ms_by_digest ~key:c.digest_after ~data:ms;
                   if spec_expects_mma spec then Int.incr n_mma_timed;
                   logf "%s: %.4f ms (digest %s)" (spec_label spec) ms (dshort c.digest_after);
                   emit_calibration ~backend ~limits ~label:(spec_label spec) ~digest:c.digest_after
@@ -3761,7 +4058,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
                   else if total = 0 && spec_expects_mma spec then
                     logf "%s: NOTE tensorized candidate emitted no Tile_mma statement"
                       (spec_label spec);
-                  if Float.(ms < snd !best_so_far) then best_so_far := (c, ms);
+                  if Float.(ms < snd !best_so_far) then best_so_far := (Some c, ms);
                   Some (c, ms)
               | Error (Outcome.Classified classified) -> (
                   record_decline declines classified;
@@ -3904,7 +4201,30 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
          overhead). On GPU the block loop is the bulk of pass 1's launch parallelism at these
          low-output sites, so the sweep leans larger; the CPU pool saturates at core counts.
          Multi-site combination is recovered below by recombining the best-timed singles. *)
-      let sr_sites = if is_gpu || is_cpu then split_reduce_sites ~static_indices base_opt else [] in
+      let sr_ranked =
+        if is_gpu || is_cpu then split_reduce_sites ~static_indices base_opt else []
+      in
+      let sr_sites = List.take sr_ranked max_split_reduce_sites in
+      (* The candidate-volume cap binding is an eviction, not a judgement about the site: it was
+         reachable and ranked, and lost only to the cap. Record each evicted site in the decline
+         census — the gh-ocannl-541 blind spot was exactly a previously-seeded site silently
+         dropping out of the proposal set when newly-reachable sites filled the cap. *)
+      List.iter (List.drop sr_ranked max_split_reduce_sites) ~f:(fun s ->
+          let detail =
+            Printf.sprintf "site %s red%d out%d cost%d%s evicted by autotune_split_reduce_max_sites=%d"
+              (Ir.Tnode.debug_name s.sr_target) s.sr_red s.sr_out s.sr_cost
+              (match List.length s.sr_swaps with
+              | 0 -> ""
+              | n -> Printf.sprintf " swap%d" n)
+              max_split_reduce_sites
+          in
+          logf "split_reduce: %s" detail;
+          record_decline declines
+            {
+              Outcome.phase = Outcome.Transform;
+              cause = Outcome.Seed_evicted { family = "split_reduce"; detail };
+              execution_effect = Outcome.No_device_writes;
+            });
       let sr_num_blocks = if is_gpu then [ 32; 128; 512 ] else [ 8; 32; 128 ] in
       let sr_specs =
         List.concat_map sr_sites ~f:(fun s ->
@@ -3932,8 +4252,10 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
       let fiss_single_results = ref [] in
       let sr_single_results = ref [] in
       let pool =
-        (baseline, baseline_ms)
-        :: List.filter_map seed_specs ~f:(fun spec ->
+        (* A declined baseline contributes no pool entry, so the pool — and with it the beam — can
+           be empty; every consumer below takes that as "nothing was timed" (gh-ocannl-533). *)
+        Option.to_list (Option.map baseline ~f:(fun b -> (b, baseline_ms)))
+        @ List.filter_map seed_specs ~f:(fun spec ->
             let result = try_spec spec in
             (match (spec, result) with
             | Fiss (F_sketch [ (key, p) ]), Some (_, ms) ->
@@ -3947,6 +4269,12 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
             | _ -> ());
             result)
       in
+      (match default_ms () with
+      | Some ms -> logf "untuned-default pipeline: %.4f ms (gh-ocannl-552 reference)" ms
+      | None ->
+          logf
+            "untuned-default pipeline: not timed (gated to a form outside the pool, not seeded, \
+             failed, or not dispatched)");
       let pool =
         (* Cross-segment recombination: the singles time every parameter set unmasked, but the best
            full routine may sketch several segments at once. One extra composite candidate applies
@@ -3987,35 +4315,62 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
           | None -> pool
       in
       let beam = ref (List.take (List.sort pool ~compare:by_time) beam_width) in
-      let best = ref (List.hd_exn !beam) in
+      (* [None] iff the beam is empty: no candidate timed and the baseline was not eligible (an
+         undispatched GPU baseline never enters the pool with a finite rank; a declined one does not
+         enter it at all). *)
+      let best = ref (List.hd !beam) in
       let continue_ = ref true in
       while !continue_ && !rounds_run < rounds do
         Int.incr rounds_run;
         let cands =
           List.concat_map !beam ~f:(fun (elem, _) ->
+              (* On a GPU backend the beam can hold an incumbent that was never dispatched — the
+                 serial baseline, whose [infinity] rank keeps it in the pool when fewer than
+                 [beam_width] candidates were timed. Expanding it is worthwhile only through the
+                 moves that can bind a hardware dimension (the [Tensorize] path the sketch comments
+                 describe); every other move provably yields another undispatchable candidate, which
+                 [try_spec]'s dispatchability skip drops after paying for its transform, codegen,
+                 compile and link (16 such compiles per round on the gh-ocannl-543 chain). Pruned
+                 moves are still counted in the census, so the refusal stays visible where it was
+                 before. *)
+              let elem_dispatchable = dispatchable ~is_gpu elem.all_opts in
               List.concat_map elem.units ~f:(fun u ->
-                  List.filter_map (menu ~is_cpu ~is_gpu ~limits u) ~f:(extend_spec elem u)))
+                  List.filter_map (menu ~is_cpu ~is_gpu ~limits u) ~f:(fun op ->
+                      if elem_dispatchable || optop_can_bind_hardware op then extend_spec elem u op
+                      else (
+                        logf "menu prune (cannot parallelize an undispatched incumbent): %s"
+                          (optop_family op);
+                        record_not_dispatched ~origin:"beam_move"
+                          ~detail:
+                            (Printf.sprintf
+                               "%s on an incumbent binding no hardware dimension cannot bind one \
+                                either"
+                               (optop_family op));
+                        None))))
         in
         let results = List.sort (List.filter_map cands ~f:try_spec) ~compare:by_time in
         match results with
         | [] -> continue_ := false
         | (_, round_best_ms) :: _ ->
-            let _, incumbent_ms = !best in
+            let incumbent_ms = Option.value_map !best ~default:Float.infinity ~f:snd in
             if Float.(round_best_ms < incumbent_ms *. (1. -. min_progress)) then (
               beam := List.take results beam_width;
-              best := List.hd_exn !beam)
+              best := List.hd !beam)
             else continue_ := false
       done;
-      let best_c, best_ms = !best in
-      (* The winner is the undispatched baseline exactly when nothing was timed: every candidate
-         failed and (on GPU) the serial baseline was never run. Nothing measured means nothing to
-         cache — a stored entry would pin future processes to a never-timed schedule. *)
+      let best_c, best_ms =
+        match !best with Some (c, ms) -> (Some c, ms) | None -> (None, Float.infinity)
+      in
+      (* Nothing was timed exactly when every candidate failed and (on GPU) the serial baseline was
+         never run — or, since gh-ocannl-533, was itself declined. Nothing measured means nothing to
+         cache: a stored entry would pin future processes to a never-timed schedule. *)
       let nothing_timed = Float.is_inf best_ms in
       (if use_cache then
          if nothing_timed then
            logf "nothing was timed: storing no cache entry (gh-ocannl-532)"
          else
            let saved, segments =
+             let best_c = Option.value_exn best_c ~message:timed_winner_exists in
              match best_c.form with
              | Whole_saved saved -> (saved, None)
              | Fiss_saved assoc -> ([], Some assoc)
@@ -4030,6 +4385,10 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
                segments;
                best_ms;
                baseline_ms;
+               default_ms = default_ms ();
+               default_fingerprint =
+                 Option.map (default_ms ()) ~f:(fun _ ->
+                     Sched.default_schedule_fingerprint ~backend_name:backend);
              });
       (* Diagnostic control (config [autotune_log]): compile and time the UNTUNED default pipeline
          in this very process, on the search context — discriminates a genuinely slow winner from
@@ -4049,6 +4408,7 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
           candidates_timed = !n_timed;
           candidates_failed = failed_count declines;
           partial = false;
+          baseline_declined = Option.is_some baseline_decline;
           declines = decline_summaries declines;
           terminal_failure = None;
           rounds_run = !rounds_run;
@@ -4062,10 +4422,11 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
           mma_timed = !n_mma_timed;
           model_scored = !n_model_scored;
           model_pruned = !n_model_pruned;
-          fissioned = is_fissioned best_c.form;
+          fissioned = Option.exists best_c ~f:(fun c -> is_fissioned c.form);
           baseline_ms;
+          default_ms = default_ms ();
           best_ms;
-          best_schedule = flat_schedule best_c.form;
+          best_schedule = Option.value_map best_c ~default:[] ~f:(fun c -> flat_schedule c.form);
         }
       in
       let result =
@@ -4076,8 +4437,11 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
              caller would have compiled without the tuner. *)
           logf "nothing was timed: falling back to the untuned default compile (gh-ocannl-532)";
           Context.compile ctx comp bindings)
-        else if Option.is_none timing_ctx then (best_c.cctx, best_c.routine)
         else
+          (* [nothing_timed] is false, so the beam holds a timed winner. *)
+          let best_c = Option.value_exn best_c ~message:timed_winner_exists in
+          if Option.is_none timing_ctx then (best_c.cctx, best_c.routine)
+          else
           (* The search ran against the scratch lineage; compile the winner from the caller's
              context (like the cache-hit path). Digest mismatch or replay failure falls back to the
              production default schedule. *)

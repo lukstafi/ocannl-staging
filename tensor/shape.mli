@@ -259,6 +259,13 @@ val set_terminal : is_param:bool -> t -> unit
     function is only intended for parameters shapes, which would otherwise not be terminal because
     of the initialization expressions of the parameters. *)
 
+val set_resolve_at_use : t -> unit
+(** Mark the shape's rows as resolved by their use sites (gh-ocannl-544): at the final solver
+    stages their row variables may close to the GLB of the use sites' rows, where operation
+    results close to an empty remainder by default. Used by [Tensor.param] for
+    parameter-initialization cones and by the [stretch] operation; terminal shapes (leaves,
+    parameters) are marked automatically. *)
+
 (** How to propagate shape updates and do the last update of [Tensor.t.shape] when finalizing the
     tensor. Axes are broadcast-expanded on a bottom-up update to fit the incoming shape. *)
 type logic =

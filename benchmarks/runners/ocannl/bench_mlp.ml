@@ -166,18 +166,22 @@ let () =
             Stdlib.Printf.eprintf
               "tune arm: cache_hit=%b partial=%b timed=%d failed=%d declines=[%s] terminal=%s \
                rounds=%d sketch=%d mma_candidates=%d mma_timed=%d fissioned=%b baseline_ms=%.4f \
-               best_ms=%.4f\n\
+               default_ms=%s best_ms=%.4f\n\
                %!"
               r.cache_hit r.partial r.candidates_timed r.candidates_failed declines terminal
               r.rounds_run r.sketch_candidates r.mma_candidates r.mma_timed r.fissioned
-              r.baseline_ms r.best_ms)
+              r.baseline_ms
+              (Option.value_map r.default_ms ~default:"none" ~f:(Printf.sprintf "%.4f"))
+              r.best_ms)
     | _ -> None
   in
   (* BENCH_TUNE composes with every precision leg (gh-ocannl-529). It used to be rejected outright
      with BENCH_PRECISION, which made bf16 unmeasurable under autotuning — and bf16 is the ONLY
      tensor-core route on RDNA3/3.5, whose WMMA has no f32-input shape, so whether HIP even seeds a
      tensorized candidate could not be asked. (Which candidates are seeded depends on the operand
-     storage precision, via mma_input_formats_of_prec against the backend's mma_format_tiles.)
+     AND accumulator storage precisions, via mma_input_formats_of_prec / mma_acc_format_of_prec
+     against the backend's mma_format_tiles — gh-ocannl-545, where keying on the operands alone had
+     CUDA seeding and timing 20 bf16 candidates that every emission rendered as scalar.)
 
      Each leg tunes the routine that carries the work. The dynamic-loss-scaling legs keep their
      step SHAPE — the gate is what is being measured — so only the gradient/fused routine is tuned

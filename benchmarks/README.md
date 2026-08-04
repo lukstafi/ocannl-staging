@@ -135,7 +135,13 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   retest whether an entry still applies in your environment),
   `--gpu metal|cuda|hip|none` (the GPU column of the matrix — OCANNL backend, PyTorch device,
   tinygrad device together; defaults to metal on macOS and cuda elsewhere, `none` runs a
-  CPU-only matrix).
+  CPU-only matrix). Env: `BENCH_CELL_LOG_DIR=<dir>` keeps every cell's raw combined output, one
+  file per cell label — a successful cell's output is otherwise discarded, which throws away the
+  candidate-level evidence a measurement sweep has to report. Combined with
+  `OCANNL_AUTOTUNE_LOG=true` it makes the seeded-vs-timed mma and split-reduce counts, the
+  `FAILED` blocker breakdown and the split-reduce evictions fall out of the sweep's own search
+  passes instead of costing a second round of searches (it does inflate a tuned cell's reported
+  `compile_s` a little; step times come from the pass-2 replay and are unaffected).
 
   **An OCANNL cell is a (scheduling variant, storage precision) pair** (gh-ocannl-539). The two
   are independent axes and the matrix is their product: `--tuned --precision bf16` measures
@@ -163,9 +169,14 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   its `HIP` device automatically; and torch's bundled `libhsa-runtime64.so` (the KFD build) must
   be replaced with `/opt/rocm/lib/libhsa-runtime64.so.1.21.0`, with
   `/opt/rocm/lib/rocm_sysdeps/lib` on `LD_LIBRARY_PATH`. See
-  [example-report.md](example-report.md) (macOS/Metal),
+  [example-report.md](example-report.md) (macOS/Metal — the gh-ocannl-538 sweep: tensorized
+  candidates now compile and time on Metal, and win a search arm once, but none reaches a shipping
+  artifact; split reduction is worth 46-82% on the default-placement arm; f16's cost is the
+  loss-scaling gate, not f16 arithmetic),
   [example-report-cuda.md](example-report-cuda.md) (Linux/CUDA),
-  [report-hip.md](report-hip.md) (WSL2/HIP on gfx1151, all three frameworks),
+  [report-hip.md](report-hip.md) (WSL2/HIP on gfx1151, all three frameworks — the gh-ocannl-538
+  re-measurement leg, and the first report in which a rocWMMA candidate is seeded, timed and
+  crowned),
   [report-cifar-cuda.md](report-cifar-cuda.md) (Linux/CUDA, the cifar-scale conv baseline
   for gh-ocannl-500/502 with a per-layer breakdown) and
   [report-gh537-metal.md](report-gh537-metal.md) (macOS/Metal, the paired before/after A/B of
@@ -178,10 +189,11 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   gh-ocannl-537's `Swap` ∘ `Split_reduce` seeding, which removes ~90% of the segment gh-484 was
   filed against — and the reference for why a segment share must name the placement it is a share
   of) for checked-in example output (`results/` itself is gitignored).
-  [RESULTS-484-532.md](RESULTS-484-532.md) is the raw extracted dataset behind `report-hip.md`'s
-  post-gh-527 subsection and the gh-ocannl-532 correction (per-segment attribution, the
-  split-reduce `op_legality` verdicts, and the nine variant cells) — kept because that session's
-  logs were lost to GPU-driver crashes and reboots, so it is the only surviving primary source.
+  [RESULTS-484-532.md](RESULTS-484-532.md) is the raw extracted dataset behind the gh-ocannl-527
+  and gh-ocannl-532 subsections of `report-hip.md`'s **pre-gh-538 revision** (per-segment
+  attribution, the split-reduce `op_legality` verdicts, and the nine variant cells) — kept because
+  that session's logs were lost to GPU-driver crashes and reboots, so it is the only surviving
+  primary source for a state the current report no longer describes.
 - `runners/ocannl/bench_{gpt,conv}_diag.ml` — schedule diagnostics: print the default
   fission-pipeline segment census (launch geometry, per-nest loop extents, written nodes with
   materialization markers) for the gpt2_mini / lenet graphs, then optionally time steps

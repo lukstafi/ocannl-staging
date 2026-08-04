@@ -2029,6 +2029,15 @@ let reduce_solved_basis (solved : solved_dim list) : string option =
   | [ b ] -> Some b
   | _ -> None
 
+(* gh-ocannl-544, dim-level counterpart of [resolve_at_use] (defined below): marked dimension
+   variables may close to the GLB of their use sites at stage 6+; unmarked, unconstrained ones are
+   guessed minimal instead (e.g. a learning-rate expression's axis meeting a single parameter
+   shape closes to 1 rather than widening to it). [At_least_dim] variables keep GLB closing
+   regardless: direct indexing is a dim-carrying use. *)
+let resolve_at_use_dim = Hash_set.create (module Dim_var)
+let add_resolve_at_use_dim v = Hash_set.add resolve_at_use_dim v
+let is_resolve_at_use_dim v = Hash_set.mem resolve_at_use_dim v
+
 let%track6_sexp rec unify_dim ~stage origin (eq : dim * dim) env : constraint_ list * _ =
   let dim1 : dim = subst_dim env @@ fst eq and dim2 : dim = subst_dim env @@ snd eq in
   match (dim1, dim2) with
@@ -2294,6 +2303,12 @@ let%track6_sexp rec unify_dim ~stage origin (eq : dim * dim) env : constraint_ l
         @@ Shape_error
              ( "occurs check failed: dimension variable occurs in its own definition",
                [ Dim_mismatch [ Var v; dim2 ] ] );
+      (* Unification merges the axes, so use-site resolvability is shared (gh-ocannl-544). *)
+      (match dim2 with
+      | Var v2 ->
+          if is_resolve_at_use_dim v then add_resolve_at_use_dim v2;
+          if is_resolve_at_use_dim v2 then add_resolve_at_use_dim v
+      | _ -> ());
       let ineqs = ref [] in
       let f in_ =
         let more_ineqs, result = s_dim_one_in_entry v ~value:dim2 in_ in
@@ -2516,6 +2531,17 @@ let used_in_pointwise = Hash_set.create (module Row_var)
 let add_used_in_spec_or_compose v = Hash_set.add used_in_spec_or_compose v
 let add_used_in_pointwise v = Hash_set.add used_in_pointwise v
 
+(* gh-ocannl-544: row variables marked here are resolved by their use sites — at the final stages
+   they may close to the GLB of their use sites' rows, acquiring axes their own arguments do not
+   have. Unmarked (operation-result) variables close to an empty remainder instead: a use site must
+   not silently widen an operation's result row beyond its arguments'. Registered for terminal rows
+   (leaf tensors and parameters, from the [Terminal_row] dispatch), for parameter-initialization
+   cones ([Tensor.param] via [Shape.set_resolve_at_use]: the init expression's job is to fill the
+   parameter's shape, so its intermediates widen to it), and for explicit [stretch] wrappers. *)
+let resolve_at_use = Hash_set.create (module Row_var)
+let add_resolve_at_use v = Hash_set.add resolve_at_use v
+let is_resolve_at_use v = Hash_set.mem resolve_at_use v
+
 (* Persistent rank-relation graph, global like [global_template_cache] (row variable ids are never
    reused, so entries from unrelated inference problems are unreachable). An edge [v -> (w, k)] with
    [k >= 0] records the entailed fact [rank v >= rank w + k]: from solving [v := <w> ++ k known
@@ -2665,6 +2691,9 @@ let%debug5_sexp rec unify_row ~stage origin (eq : t * t) env : constraint_ list 
               if Hash_set.mem safe_to_guess v then add_safe_to_guess v2;
               if Hash_set.mem used_in_spec_or_compose v then add_used_in_spec_or_compose v2;
               if Hash_set.mem used_in_pointwise v then add_used_in_pointwise v2;
+              (* Unification merges the rows, so use-site resolvability is shared. *)
+              if is_resolve_at_use v2 then add_resolve_at_use v;
+              if is_resolve_at_use v then add_resolve_at_use v2;
               let result =
                 try unify_suffix ([], env) dims1 r2.dims dims1_l
                 with Shape_error (s, trace) ->
@@ -4288,8 +4317,20 @@ let%debug5_sexp eliminate_dim_entry stage origin env v ~glb constr =
       if is_stage7 stage then
         Some (Dim_eq { d1 = Var v; d2 = get_bcast_dim ~d:1 ~proj_id:57 (); origin })
       else None
-  | Some glb, (At_least_dim _ | Unconstrained_dim) when is_stage6_up stage ->
+  | Some glb, At_least_dim _ when is_stage6_up stage ->
+      (* Direct indexing is a dim-carrying use: meet the use sites regardless of marking. *)
       Some (Dim_eq { d1 = Var v; d2 = glb; origin })
+  | Some glb, Unconstrained_dim when is_stage6_up stage && is_resolve_at_use_dim v ->
+      Some (Dim_eq { d1 = Var v; d2 = glb; origin })
+  | Some _, Unconstrained_dim when is_stage7 stage ->
+      (* gh-ocannl-544, dim-level: an unmarked, unconstrained operation-result axis closes minimal
+         instead of widening to its use sites' GLB (e.g. a learning-rate expression's axis meeting
+         a single parameter shape closes to 1 and broadcasts). Deferred to stage 7 — not stage 6 —
+         because stage-6 row closings still propagate concrete dims through equality chains
+         (einsum specs), and an eager guess-to-1 would conflict with a dim that arrives within the
+         same stage (box_muller's interior axes). *)
+      Some (Dim_eq { d1 = Var v; d2 = guess_dim (); origin })
+  | Some _, Unconstrained_dim when is_stage6_up stage -> None
   | None, At_least_dim d when is_stage7 stage ->
       Some (Dim_eq { d1 = Var v; d2 = get_default_dim ~d ~proj_id:58 (); origin })
   | None, _ when is_stage7 stage -> Some (Dim_eq { d1 = Var v; d2 = guess_dim (); origin })
@@ -4350,8 +4391,14 @@ let%track5_sexp process_shape_row ~(stage : stage) origin env
          would leave them unresolved forever. *)
       let keep = if final then [] else [ Shape_row (r, origin) ] in
       match find_row env.row_env v with
-      | Some (Bounds_row { glb = Some glb; constr = Unconstrained; _ }) when is_stage6_up stage ->
-          (keep @ (Row_eq { r1; r2 = glb; origin } :: dim_eqs), env)
+      | Some (Bounds_row { glb = Some glb; constr = Unconstrained; is_in_param; _ })
+        when is_stage6_up stage ->
+          (* gh-ocannl-544: only rows that resolve at use sites (terminal rows of leaves and
+             parameters, parameter-initialization cones, explicit [stretch]) close to the GLB of
+             their use sites' rows. Operation results close to an empty remainder: a use site must
+             broadcast the result in, not silently widen it (the gh-ocannl-540 cast-twin trap). *)
+          let r2 = if is_in_param || is_resolve_at_use v then glb else empty_broadcastable in
+          (keep @ (Row_eq { r1; r2; origin } :: dim_eqs), env)
       | Some (Bounds_row { constr = Unconstrained; _ }) when not final ->
           (Shape_row (r, origin) :: dim_eqs, env)
       | Some (Bounds_row { constr = Unconstrained; _ }) when final ->
@@ -4508,11 +4555,19 @@ let%debug4_sexp solve_inequalities ~(stage : stage)
           (more_ineqs, env)
       | Terminal_dim (is_param, d, origin) ->
           let env = update_dim_is_param d is_param env in
-          let more_ineqs = close_dim_terminal ~stage ~is_param origin env @@ subst_dim env d in
+          let d = subst_dim env d in
+          (* Terminal (leaf and parameter) axes resolve at their use sites — protect them from the
+             minimal-guess default of [eliminate_dim_entry] (gh-ocannl-544). *)
+          Set.iter (vars_of_dim d) ~f:add_resolve_at_use_dim;
+          let more_ineqs = close_dim_terminal ~stage ~is_param origin env d in
           (more_ineqs, env)
       | Terminal_row (is_param, r, origin) ->
           let env = update_row_is_param r is_param env in
-          let more_ineqs = close_row_terminal ~stage ~is_param origin env @@ subst_row env r in
+          let r = subst_row env r in
+          (* Terminal (leaf and parameter) rows resolve at their use sites — protect them from the
+             close-down default of [process_shape_row] (gh-ocannl-544). *)
+          (match r.bcast with Row_var v -> add_resolve_at_use v | Broadcastable -> ());
+          let more_ineqs = close_row_terminal ~stage ~is_param origin env r in
           (more_ineqs, env)
       | Shape_row (r, origin) -> process_shape_row ~stage origin env @@ subst_row env r
     in

@@ -42,7 +42,7 @@ A possible route to learning OCANNL:
 6. Read the NN building blocks file [lib/nn_blocks.ml](lib/nn_blocks.ml) and the training recipes [lib/train.ml](lib/train.ml).
   * Work through the [makemore tutorial](docs/makemore_tutorial.md) — a character-level language-model progression mirroring Andrej Karpathy's *Neural Networks: Zero to Hero* lectures.
 7. Read the introductory part of the shape inference documentation [docs/shape_inference.md](docs/shape_inference.md).
-8. For the paper-facing account, read the workshop article [docs/ocannl_workshop_article_human.md](docs/ocannl_workshop_article_human.md), the formal core technical report [ocannl-formal-core-technical-report.pdf](https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf) (LaTeX source in [docs/](docs/ocannl-formal-core-technical-report.latex)), and the constraint-generation notes [docs/shape-constraint-generation.md](docs/shape-constraint-generation.md).
+8. For the paper-facing account, read the workshop article [docs/ocannl_workshop_article_human.md](docs/ocannl_workshop_article_human.md) (an archival artifact: it was written for the OCaml Workshop / FProPer submission and describes the project as of the 0.8 release; the current paper target is IFL 2026), the formal core technical report [ocannl-formal-core-technical-report.pdf](https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf) (LaTeX source in [docs/](docs/ocannl-formal-core-technical-report.latex)), and the constraint-generation notes [docs/shape-constraint-generation.md](docs/shape-constraint-generation.md).
 9. Skim the configuration documentation [ocannl_config.reference](ocannl_config.reference).
 10. Improve your understanding by reading or skimming the framework internals: [tensor/shape.mli](tensor/shape.mli), [tensor/tensor.mli](tensor/tensor.mli), [tensor/operation.ml](tensor/operation.ml), [arrayjit/lib/context.mli](arrayjit/lib/context.mli).
 11. Read the implementation overview:
@@ -59,9 +59,13 @@ NOTE: debug logging from CUDA or HIP in complex settings is a bit tricky, as it 
 
 ## Milestones
 
-See [ROADMAP.md](ROADMAP.md) for the detailed schedule. GitHub issue assignments are the source of truth for release scope. Headline target: **ICFP 2026 week (August 24, 2026)**.
+See [ROADMAP.md](ROADMAP.md) for the detailed schedule. GitHub issue assignments are the source of truth for release scope. Headline target: **v1.0 at the [IFL 2026](https://ifl26.cse.chalmers.se/) draft-paper deadline (September 4, 2026)**.
 
-> Note (July 2026): **v0.7 shipped on July 3, 2026** as the consolidated paper-ready release. **v0.6.4 was skipped as a release** — its work (concatenation, RoPE, transformer toy) shipped inside v0.7 — and **v0.7.2 was consolidated into v0.7**. **v0.7.1 was dissolved**: its AMD HIP backend (#411) shipped in v0.8; completed examples and tokenizer work landed subsequently, while remaining work follows the current GitHub milestone assignments. The sequence is now `0.7 → 0.8 → 0.9 → 1.0 → 1.1`.
+> Note (July 2026): **v0.7 shipped on July 3, 2026** as the consolidated paper-ready release. **v0.6.4 was skipped as a release** — its work (concatenation, RoPE, transformer toy) shipped inside v0.7 — and **v0.7.2 was consolidated into v0.7**. **v0.7.1 was dissolved**: its AMD HIP backend (#411) shipped in v0.8; completed examples and tokenizer work landed subsequently, while remaining work follows the current GitHub milestone assignments. The sequence is `0.7 → 0.8 → 0.9 → 1.0 → 1.1`.
+>
+> Update (August 2026): **v0.9 shipped on August 3, 2026** with its milestone fully closed, so **v1.0 becomes the next paper-deadline release** and v1.1 follows it. CUDA/HIP graph capture (#488) moved from v0.9 to v1.0, and the training/deployment utilities (#96, #97, #122, #465, #467) plus the `lib/` design study (#435) moved from v1.0 to v1.1.
+>
+> Venue change (August 2026): the OCaml Workshop submission was not accepted — the article reads as a research report rather than an introductory demonstration, which put it outside that audience's scope. The paper track now targets **IFL 2026** (Gothenburg, October 28–30, 2026; draft papers due September 4, 2026), and the release dates follow it: **v1.0 on September 4** and **v1.1 on October 28**. The workshop article stays in the repository unchanged, as a historical artifact of the project at v0.8.
 
 * **0.7 (Jul 3, 2026, released): Frontend finalization + compiler optimizations.** The consolidated paper-ready release for workshop submissions (OCaml Workshop, FProPer). Absorbs the former v0.6.4/v0.6.5/v0.7.0 frontend work and the former v0.7.2 optimization work.
   - [x] Migrate from the "hosted tensor" idea to always requiring a context when accessing tensors and dealing with devices directly; remove the `array` field of `Tnode.t` and the hosted memory mode (#333).
@@ -79,21 +83,24 @@ See [ROADMAP.md](ROADMAP.md) for the detailed schedule. GitHub issue assignments
   - [x] CUDA WMMA/inline-PTX, Metal simdgroup-matrix, and HIP rocWMMA tensor-core paths.
   - [x] HIP backend for AMD hardware via the independent [hipjit](https://github.com/lukstafi/ocaml-hipjit) bindings (#411).
   - [x] Native Windows support via mingw-w64; an additional MSVC toolchain was evaluated and closed as not planned (#313).
-* **0.9 (Aug 24, 2026 — ICFP week): Schedule quality, deterministic parallelism, and convolution performance.**
-  - [ ] Cross-machine benchmark/tuning sweep, an analytic default-schedule cost model, and constraint-based schedule legality (#476, #491, #494).
-  - [ ] Deterministic split reductions, CUDA/HIP graph capture, and a mixed-precision training recipe (#484, #488, #492).
-  - [ ] Convolution schedule families and boundary handling: tiled sketches, epilogue twins, compact strided staging, and clamped windows (#500, #501, #502, #504).
-  - [ ] Fix overlapping-window tropical/einmax1 gradients (#512).
-  - [x] Tensor-core hardening delivered tf32 policy, CUDA 13 support, pad-to-tile scheduling, static partitioning, and packed-uniform tails (#478, #482, #485, #508, #509).
-  - [x] CNN classifiers (#54), GPT-2 inference (#377), and the TVM, Tiramisu, and superoptimizer studies (#242, #267, #261).
-* **1.0 (Sep 30, 2026): Release completeness, training/deployment utilities, and advanced compiler tiers.**
-  - [ ] Training and deployment: resumable checkpoints, inference binaries, experiment tracking, training-loop utilities, mmap checkpoints, and tracing design (#96, #97, #122, #465, #467, #160).
-  - [ ] User-facing library study: implications of Simply/NanoDO for `lib/` (#435).
-  - [ ] Advanced schedules and algorithms: CUDA tensor-core completeness, fused attention, software pipelining, rematerialization, remaining convolution tiers, and branch-and-bound schedule inference (#481, #483, #487, #498, #503, #505, #514).
-  - [ ] Frontend and diagnostics: `%op` inline-initializer scoping and routine-name collision policy (#511, #513).
+* **0.9 (Aug 3, 2026, released): Schedule quality, deterministic parallelism, and convolution performance.**
+  - [x] Constraint-based schedule legality (#494), an analytic default-schedule cost model (#491), and the cross-machine benchmark/tuning sweep (#476, re-measured under #538).
+  - [x] Deterministic split reductions (#484, #537) and a mixed-precision training recipe: precision policy, master weights, loss scaling, and forward-only reduced precision (#492).
+  - [x] Convolution schedule families and boundary handling: implicit-GEMM sketches, blocked tiles, epilogue twins, compact strided staging, and clamped windows (#493, #500, #501, #502, #504).
+  - [x] Correct overlapping-window tropical/einmax1 gradients (#512), with the non-overlapping fast path restored (#527).
+  - [x] Tensor-core hardening delivered tf32 policy, CUDA 13 support, pad-to-tile scheduling, static partitioning, and packed-uniform retirement (#478, #482, #485, #508, #509).
+  - [x] Search survivability: typed candidate-failure containment (#536), HIP scratch pre-validation (#533), no unparallelized GPU dispatches (#532), a complete decline census (#541, #543), and reachable GPU mma candidates (#521).
+  - [x] CNN classifiers (#54), GPT-2 inference (#377), and the TVM, Tiramisu, superoptimizer, and Lean Attention studies (#242, #267, #261, #263).
+* **1.0 (Sep 4, 2026 — IFL draft-paper deadline): Advanced compiler tiers and schedule-quality follow-through.**
+  - [ ] Advanced schedules and algorithms: CUDA tensor-core completeness, fused attention, software pipelining, CUDA/HIP graph capture, rematerialization, remaining convolution tiers, and branch-and-bound schedule inference (#481, #483, #487, #488, #498, #503, #505, #514).
+  - [ ] Schedule-quality follow-through from the v0.9 sweep: rank-3 matmul seeding, CUDA bf16 mma fallbacks, Metal's placement A/B, and the tuner's serial baseline (#528, #545, #546, #552).
+  - [ ] CPU reduced precision: native fp16 arithmetic and 16-bit storage with f32 compute (#516, #517).
+  - [ ] Frontend and diagnostics: routine-name collision policy and use-site row resolution (#513, #544).
   - [ ] Roadmap-only ergonomics: concise merge-buffer transfer composition and execution-dependency tracking.
-* **1.1 (no target date): Shape design, model examples, integrations, and deferred backend experiments.**
-  - [ ] Shape schemes and the axis-label design direction (#404).
+  - [x] Tracing design (#160), `%op` inline-initializer scoping (#511), the mixed-precision cost diagnosis (#535), and the f16/bf16 defects that shipped inside v0.9 (#547, #548, #549).
+* **1.1 (Oct 28, 2026 — IFL symposium week): Release completeness — training/deployment utilities, shape design, model examples, and integrations.**
+  - [ ] Training and deployment: resumable checkpoints, inference binaries, experiment tracking, training-loop utilities, and mmap checkpoints (#96, #97, #122, #465, #467).
+  - [ ] Shape schemes and the axis-label design direction (#404); user-facing library study of Simply/NanoDO for `lib/` (#435).
   - [ ] Model surgery, LSTM and Bonsai RNN examples, digit addition, BERT/ModernBERT, and DisTrO (#33, #60, #182, #427, #297, #278).
   - [ ] Plot polish, local `%cd` lets, Polars integration, and external-framework study (#103, #80, #219, #277).
   - [ ] CUDA pinned/constant host-memory experiments, PoPE, and HIP CDNA tensor cores (#170, #195, #444, #477).
@@ -102,6 +109,20 @@ See [ROADMAP.md](ROADMAP.md) for the detailed schedule. GitHub issue assignments
 
 For more details, see [CHANGES](CHANGES.md).
 
+* **0.9: Program search and optimization.**
+  * Native affine program analysis and a `Schedule.op_legality` oracle; an analytic roofline cost model that picks untuned defaults and pre-filters the autotune beam (advisory throughout).
+  * Deterministic split reductions, pad-to-tile scheduling (PADTO), static partitioning, epilogue fusion, and launch-time symbolic extents.
+  * Convolution schedule families: implicit GEMM via packing `Stage`, blocked tile flavors, epilogue twins, compacting strided-row staging, and clamped-window pooling.
+  * Mixed precision: a precision-assignment policy, master weights with cast twins, dynamic loss scaling with a fused on-device gate, tf32 matmuls, and forward-only reduced precision by load-time conversion.
+  * Liveness-based buffer aliasing; a packed `uniform` that is total over shapes and now backs default parameter initialization.
+  * Search survivability: typed candidate-failure containment across Metal/CUDA/HIP, HIP scratch pre-validation, no unparallelized GPU dispatches, and a decline census that accounts for every refusal.
+  * A cross-machine benchmark sweep on Metal, CUDA and HIP, with the reports checked in under `benchmarks/`.
+* **0.8: Parallel schedules, autotuning, tensor cores, and the AMD HIP backend.**
+  * Automatic GPU schedules: hardware axis types render to grid/block/thread loops with launch dimensions, barriers, and shared-memory tiles, validated against per-backend hardware limits.
+  * Kernel fission with aligned cross-nest parallelism; CPU kernel-level parallelism through a thread pool; backends renamed to `cc` / `multidev_cc`.
+  * Register-tiled `Tile_mma` microkernels, SIMD vector-extension codegen, and CUDA WMMA / Metal simdgroup-matrix / HIP rocWMMA tensor-core paths.
+  * Measured schedule search (`Autotune.tune`) with a digest-guarded cache, per-segment schedules, sketch seeding, and placement A/B tuning.
+  * The AMD HIP backend via the independent [hipjit](https://github.com/lukstafi/ocaml-hipjit) bindings, and a cross-framework benchmark suite gated on loss parity.
 * **0.7: Frontend finalization, compiler optimizations, and paper-ready formal docs.**
   * Removed hosted tensors in favor of explicit context-mediated access.
   * Added axis concatenation/block tensors, RoPE, the decoder-only transformer toy, ternary einsum, sharding primitives, and zero-copy leading-axis slice views.
@@ -199,6 +220,6 @@ The codebase is organized to separate user-facing recipes from framework interna
 
 ## Development
 
-NOTE TO POTENTIAL CONTRIBUTORS: while I ~~am~~ might be slowly starting to work with PRs in separate branches rather than just a stream of commits on the main branch, design migrations will be broken into small PRs to avoid main (master) branch staleness; and many changes will still be commits on the main branch. We allow for failing tests on the main branch, although going forward this would hopefully be happening less. Tagged i.e. released versions of the code are guaranteed to work as well as the given stage of the project permitted, the policy is that all tests must pass for releases with the backend `sync_cc` and must have the behavior expected of a backend with all other backends. We try to minimize discrepancy across backends but prefer more stringent tests even if some backends only pass them "in spirit" rather than with exact expectations of the `sync_cc` backend.
+NOTE TO POTENTIAL CONTRIBUTORS: while I ~~am~~ might be slowly starting to work with PRs in separate branches rather than just a stream of commits on the main branch, design migrations will be broken into small PRs to avoid main (master) branch staleness; and many changes will still be commits on the main branch. We allow for failing tests on the main branch, although going forward this would hopefully be happening less. Tagged i.e. released versions of the code are guaranteed to work as well as the given stage of the project permitted, the policy is that all tests must pass for releases with the backend `cc` and must have the behavior expected of a backend with all other backends. We try to minimize discrepancy across backends but prefer more stringent tests even if some backends only pass them "in spirit" rather than with exact expectations of the `cc` backend.
 
 OCANNL uses [`ppx_minidebug`](https://github.com/lukstafi/ppx_minidebug) for debugging. Currently, we migrated to a per-file opt-in scheme for enabling ppx_minidebug at compile time (via environment variables, see the top of `.ml` files in question), and then a unified log level configuration (`ocannl_log_level`) for tuning logging at runtime. Due to the compile-time nature of the per-file settings, run `dune clean` after setting/exporting one of these environment variables.

@@ -105,6 +105,7 @@ let known_config_keys =
       "cuda_printf_fifo_size";
       "hip_printf_fifo_size";
       "hip_scratch_validation";
+      "gpu_graph_capture";
       "multidev_num_devices";
       "buffer_aliasing";
       "log_buffer_aliasing";
@@ -137,6 +138,7 @@ let known_config_keys =
       "autotune_rounds";
       "autotune_repeats";
       "autotune_cache_dir";
+      "autotune_split_reduce_max_sites";
       "autotune_log";
       "strict_failure_classification";
       (* Analytic cost model (gh-ocannl-491) *)

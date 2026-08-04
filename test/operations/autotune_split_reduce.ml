@@ -16,7 +16,9 @@
    two skinny matvec accumulations in one routine seed per-site singles plus one composite
    recombining each site's best-timed [num_blocks]. - gh-ocannl-537: a bias gradient — the
    conv-benchmark shape, accumulated channel loop innermost — is reached through the enabling
-   [Swap] chain and its candidate is TIMED, not merely seeded. *)
+   [Swap] chain and its candidate is TIMED, not merely seeded. - gh-ocannl-541: sites rank by
+   estimated segment cost (no integer-division ratio-0 artefact), the candidate-volume cap lives
+   in [tune], and a site the cap evicts is recorded in the decline census instead of vanishing. *)
 
 open Base
 open Ocannl
@@ -237,6 +239,8 @@ let () =
       segments = Some !segments_assoc;
       best_ms = 0.;
       baseline_ms = 0.;
+      default_ms = None;
+      default_fingerprint = None;
     };
   let hit_report = ref None in
   let hctx = Context.auto () in
@@ -417,5 +421,90 @@ let () =
   | None ->
       p "conv-gradient split-reduce candidates seeded" false;
       p "the interchanged bias-gradient candidate reaches timing" false);
-  p "tuned bias gradient matches the serial reference" (Array.for_all2_exn got want ~f:approx);
+  p "tuned bias gradient matches the serial reference" (Array.for_all2_exn got want ~f:approx)
+
+(* === Leg 7: cost ranking and the eviction census (gh-ocannl-541). ===
+
+   Three sites in one routine, chosen so the estimated-segment-cost ranking exactly INVERTS the
+   old [sr_red / sr_out] integer-division ranking: a large-output matvec (out 512, red 128 — old
+   ratio 0, the artefact that excluded every conv weight gradient), a skinny matvec (out 8, red
+   128 — old ratio 16), and a scalar total (out 1, red 512 — old ratio 512). Trip counts 65536 /
+   1024 / 512 rank them large-first. And with [max_split_reduce_sites:1] only the top site is
+   seeded while the two evicted sites land in the decline census under
+   [Seed_evicted_key "split_reduce"] — the gh-541 Metal-leg blind spot was exactly a
+   previously-seeded site vanishing without a signal when the cap bound. *)
+
+let rk_o = 512
+
+let rk_mv =
+  Array.init (rk_o * red_d) ~f:(fun x ->
+      Float.cos (Float.of_int (2 * x)) *. Float.of_int ((x % 3) + 1))
+
+let make_ranked label =
+  let mb =
+    TDSL.ndarray rk_mv ~label:[ "rk_mb" ^ label ] ~input_dims:[ red_d ] ~output_dims:[ rk_o ] ()
+  in
+  let vb = TDSL.ndarray mvv ~label:[ "rk_vb" ^ label ] ~output_dims:[ red_d ] () in
+  let ms =
+    TDSL.ndarray mav ~label:[ "rk_ms" ^ label ] ~input_dims:[ red_d ] ~output_dims:[ out_d ] ()
+  in
+  let vs = TDSL.ndarray mvv ~label:[ "rk_vs" ^ label ] ~output_dims:[ red_d ] () in
+  let%op yb = mb * vb in
+  Train.set_materialized yb.Tensor.value;
+  let%op ys = ms * vs in
+  Train.set_materialized ys.Tensor.value;
+  (* The scalar total of the large intermediate: red 512 over out 1 — the old ranking's #1.
+     Materialized so its accumulation exists as an on-device rmw site; the short (red 8) total of
+     [ys] stays below [sr_red_min] and contributes no site. *)
+  let%op tb = yb ++ "o => 0" in
+  Train.set_materialized tb.Tensor.value;
+  let%op z = tb + (ys ++ "o => 0") in
+  z
+
+let () =
+  let base_opt = capture_base (named "asr_rk_probe" (Train.forward (make_ranked "probe"))) in
+  let sites = Autotune.split_reduce_sites base_opt in
+  p "sites rank by estimated segment cost, inverting the old ratio-0 order"
+    (match sites with
+    | [ s1; s2; s3 ] ->
+        s1.Autotune.sr_out = rk_o
+        && s1.Autotune.sr_cost = rk_o * red_d
+        && s2.Autotune.sr_out = out_d
+        && s2.Autotune.sr_cost = out_d * red_d
+        && s3.Autotune.sr_out = 1 && s3.Autotune.sr_cost = rk_o
+    | _ -> false);
+  let z0 = make_ranked "ref" in
+  let want = run_forward ~name:"asr_rk_serial" z0 in
+  let z1 = make_ranked "capped" in
+  let report = ref None in
+  let ctx = Context.auto () in
+  let ctx, routine =
+    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"" ~max_split_reduce_sites:1
+      ~report:(fun r -> report := Some r)
+      ctx
+      (named "asr_rk_capped" (Train.forward z1))
+      Ir.Indexing.Empty
+  in
+  let ctx = Context.run ctx routine in
+  let got = Context.get_values ctx z1.Tensor.value in
+  (match !report with
+  | Some r ->
+      (* Only the top-ranked (large-output) site is seeded: red 128 admits b ∈ {8, 32} of the CPU
+         sweep, b ∈ {32} of the GPU sweep. *)
+      p "only the top-cost site is seeded under the cap"
+        (if is_cpu then r.Autotune.split_reduce_candidates = 2
+         else r.Autotune.split_reduce_candidates >= 1);
+      p "the two evicted sites appear in the decline census"
+        (List.exists r.Autotune.declines ~f:(fun d ->
+             match d.Autotune.key with
+             | Ir.Schedule_outcome.Seed_evicted_key "split_reduce" -> d.Autotune.count = 2
+             | _ -> false));
+      p "the census still sums to candidates_failed"
+        (r.Autotune.candidates_failed
+        = List.sum (module Int) r.Autotune.declines ~f:(fun d -> d.Autotune.count))
+  | None ->
+      p "only the top-cost site is seeded under the cap" false;
+      p "the two evicted sites appear in the decline census" false;
+      p "the census still sums to candidates_failed" false);
+  p "the capped tuned routine matches the serial reference" (Array.for_all2_exn got want ~f:approx);
   Stdio.printf "\nDone.\n%!"

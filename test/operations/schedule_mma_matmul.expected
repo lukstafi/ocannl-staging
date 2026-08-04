@@ -11,6 +11,16 @@ C-backend fallback matches bitwise: true
 tensorized structure as expected: true
 half tensorized matmul matches the serial twin bitwise: true
 half tensorized structure as expected: true
+bf32 tensorized matmul matches the serial twin bitwise: true
+bf32 tensorized structure as expected: true
+bfu tensorized matmul matches the serial twin bitwise: true
+bfu tensorized structure as expected: true
+bfu_ta tensorized matmul matches the serial twin bitwise: true
+bfu_ta tensorized structure as expected: true
+bfu_tb tensorized matmul matches the serial twin bitwise: true
+bfu_tb tensorized structure as expected: true
+bfu_m2 tensorized matmul matches the serial twin bitwise: true
+bfu_m2 tensorized structure as expected: true
 fp8 tensorized matmul matches the serial twin bitwise: true
 fp8 tensorized structure as expected: true
 edge-extent tensorized matmul matches the serial twin bitwise: true

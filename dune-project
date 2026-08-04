@@ -10,7 +10,7 @@
 
 (name ocannl)
 
-(version 0.8)
+(version 0.9)
 
 (generate_opam_files true)
 
@@ -80,11 +80,14 @@
    (= :os macos)))
  (depopts
   (cudajit
-   (>= 0.7.0))
-  hipjit)
+   (>= 0.8.0))
+  (hipjit
+   (>= 0.2.0)))
  (conflicts
   (cudajit
-   (< 0.7.0)))
+   (< 0.8.0))
+  (hipjit
+   (< 0.2.0)))
  (tags
   (deeplearning array jit CUDA HIP Metal)))
 

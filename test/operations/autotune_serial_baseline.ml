@@ -14,7 +14,8 @@
      on GPU the baseline is strictly the serial twin of code the backend parallelizes for free.
    - [Autotune.tune] times the baseline exactly where it is not a single work-item: [baseline_ms] is
      finite on CPU backends (the serial form runs at full single-core speed and stays a legitimate
-     competitor) and [infinity] on GPU ones.
+     competitor) and [infinity] on GPU ones. Where it is refused, the refusal is recorded in the
+     report's decline census under [Not_dispatched_key "baseline"] (gh-ocannl-543).
    - Either way the search returns a working routine whose winner carries a measurement.
    - The rule holds on the cache-replay path too: a planted entry naming the serial form as the
      winner is rejected and re-searched on GPU, and honoured on CPU. *)
@@ -100,8 +101,26 @@ let () =
   let is_gpu = Sched.backend_is_gpu backend in
   p "the serial baseline is timed on CPU backends and not dispatched on GPU ones"
     (Bool.equal (Float.is_finite r.Autotune.baseline_ms) (not is_gpu));
+  (* gh-ocannl-543: the refusal is a decline like any other. Without a census entry a GPU search
+     that refused most of its candidate space reports exactly what an empty candidate space
+     reports, and the difference was only visible in the [autotune_log] stderr stream. *)
+  p "the refusal is recorded in the decline census, on GPU backends only"
+    (Bool.equal is_gpu
+       (List.exists r.Autotune.declines ~f:(fun d ->
+            match d.Autotune.key with
+            | Ir.Schedule_outcome.Not_dispatched_key origin -> String.equal origin "baseline"
+            | _ -> false)));
   p "the search timed at least one candidate" (r.Autotune.candidates_timed >= 1);
   p "the winner carries a measurement" (Float.is_finite r.Autotune.best_ms);
+  (* gh-ocannl-552: [baseline_ms] cannot answer "did tuning beat what the user gets without
+     tuning?" on GPU (it is [infinity] there), so the untuned default pipeline's own seed is the
+     reference. Attributed by digest: on CPU backends the config thresholds may leave the code
+     unparallelized, in which case the seed dedups against the timed serial baseline and inherits
+     its measurement. *)
+  p "the untuned default pipeline is measured as the reference (gh-ocannl-552)"
+    (match r.Autotune.default_ms with
+    | Some d -> Float.is_finite d && Float.(r.Autotune.best_ms <= d)
+    | None -> false);
   p "tuned routine values correct" (Array.for_all2_exn got mm_expected ~f:approx);
 
   (* --- The same rule on the cache-replay path. A cache entry written before the rule can name the
@@ -134,6 +153,9 @@ let () =
       segments = None;
       best_ms = 1e-6;
       baseline_ms = 1e-6;
+      (* A pre-gh-552 entry: written before [default_ms] existed. *)
+      default_ms = None;
+      default_fingerprint = None;
     };
   let report = ref None in
   let ctx = Context.auto () in
@@ -149,5 +171,7 @@ let () =
     (Bool.equal r.Autotune.cache_hit (not is_gpu));
   p "rejecting it re-searches rather than returning the serial routine"
     (if is_gpu then r.Autotune.candidates_timed >= 1 else r.Autotune.candidates_timed = 0);
+  p "a pre-gh-552 entry reports no default measurement; a re-search measures one"
+    (Bool.equal (Option.is_some r.Autotune.default_ms) is_gpu);
   p "the routine from the poisoned-cache path computes correct values"
     (Array.for_all2_exn got mm_expected ~f:approx)

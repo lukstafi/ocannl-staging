@@ -515,6 +515,21 @@ val automatic_schedule_active : backend_name:string -> bool
     ([debug_log_from_routines]) is off. Callers that substitute their own default-schedule choice
     (e.g. the cost-model default selection of gh-ocannl-491) must respect this gate. *)
 
+val default_pipeline_fissions : unit -> bool
+(** The config [schedule_fission] gate consulted by {!maybe_default_schedules}: whether the untuned
+    default pipeline fissions into per-segment kernels (subject to {!automatic_schedule_active}),
+    or applies the whole-routine {!maybe_default_schedule} instead. *)
+
+val default_schedule_fingerprint : backend_name:string -> string
+(** A stable summary of the configuration that shapes the untuned default pipeline on this backend:
+    the {!automatic_schedule_active} gate (["inactive"] when it is off — the untuned default is
+    then the unscheduled serial form), the [schedule_fission] gate, and the preset thresholds
+    ([gpu_schedule_block_size] / [gpu_schedule_min_parallel] / [cpu_schedule_min_parallel]).
+    Diagnostics recorded against one default pipeline (e.g. the autotuner's [default_ms],
+    gh-ocannl-552) compare fingerprints to detect that a config change redefined the default
+    (Codex P2 on PR #279). Does not cover per-device hardware limits — cache consumers already key
+    per backend. *)
+
 val maybe_default_schedule :
   backend_name:string ->
   ?limits:Backend_intf.hardware_limits ->

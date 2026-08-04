@@ -1,0 +1,11 @@
+scratch/tune: the over-budget baseline is declined, not fatal: true
+scratch/tune: the declined baseline carries no measurement: true
+scratch/tune: the decline census sums to candidates_failed: true
+scratch/tune: the declined baseline is not also counted as a gh-532 refusal: true
+scratch/tune: the search completed: true
+scratch/tune: the search timed at least one candidate: true
+scratch/tune: the tuned routine computes the right value: true
+scratch/tune: the second run replays from the cache: true
+scratch/tune: a cache hit still reports the declined baseline: true
+scratch/tune: the cache-hit census accounts for that decline, and only it: true
+scratch/tune: the cache-hit replay computes the right value: true

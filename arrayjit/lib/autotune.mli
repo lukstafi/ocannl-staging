@@ -22,14 +22,27 @@
       of uninterruptible dispatch on a device shared with the display (gh-ocannl-532). It keeps its
       role as the search's starting point for menu moves and as the code every candidate derives
       from; it just carries no measurement. On CPU backends it runs at full single-core speed and is
-      timed as before.
+      timed as before. Every such refusal enters the report's decline census under
+      [Not_dispatched_key] (gh-ocannl-543): [candidates_timed] alone cannot distinguish a GPU search
+      whose serial candidates were all refused from one whose candidate space was empty. Beam rounds
+      expanding an incumbent that was never dispatched propose only the moves that can bind a
+      hardware dimension ([Tensorize], placement retypes); the rest are pruned before compile and
+      counted in the same census. Separately, the baseline's compile is protected like any
+      candidate's (gh-ocannl-533): a typed rejection — a large softmax/cross-entropy head whose
+      unscheduled form exceeds the HIP scratch budget is the case in hand — declines the baseline
+      ([baseline_declined] in the report, and its own key in the census rather than a
+      [Not_dispatched] refusal, which would assert a reason that is not the one) and the search
+      proceeds on the scheduled candidates, which fission and placement promotion routinely bring
+      back within budget. Only the base lowering itself is indispensable: a failure before it is
+      captured has no search to run and propagates.
     - {b Fissioned candidates}: the kernel-fission pipeline ({!Ir.Schedule.fission_scheduled}) with
       per-segment schedules — the same preset sweep per segment, and beam rounds that extend
       {e one segment at a time}. Per-segment schedules are cached keyed by the pre-schedule
       segment's canonical digest. [`Zeros] segments keep the default zero-expansion; [`Solo]
       segments stay unscheduled. One seed uses the config-default thresholds, reproducing the
       untuned default pipeline exactly — so the winner is never worse than not tuning, even on
-      launch-overhead-bound workloads where every aggressive preset loses to it. Each preset is
+      launch-overhead-bound workloads where every aggressive preset loses to it; its measured time
+      is surfaced as the report's [default_ms] reference (gh-ocannl-552). Each preset is
       additionally seeded in a {e privatized} variant ({!extend_with_privatize}): per segment, every
       materialized read-modify-write accumulator is contracted into a per-thread register tile
       ({!Ir.Schedule.optop.Privatize}) over its serial reduction loop where the op's preconditions
@@ -162,8 +175,10 @@ val sketch_seed_params :
   sketch_params list
 (** The matmul-sketch seeds proposed for the given lowering: parameterized instantiations of the
     composed pipelines with dividing tile sizes, pre-filtered against rules that statically imply a
-    declined rendering (gh-ocannl-479) — on GPU backends: the operand-format tile advertised by
-    [limits.mma.mma_format_tiles], including policy-enabled TF32; on the C backends:
+    declined rendering (gh-ocannl-479) — on GPU backends: the (operand, operand, accumulator) format
+    tile advertised by [limits.mma.mma_format_tiles], including policy-enabled TF32 and excluding
+    combinations the backend supports at one accumulator width but not the other (gh-ocannl-545:
+    CUDA's bf16 has no wmma accumulator of its own); on the C backends:
     operand-precision uniformity (f32/f64), the fused accumulation form, micro-kernel column extent
     at least one vector of lanes ([limits.simd_vector_bytes]), and transposed-B storage for shapes
     that read B in place. Exposed for tests. *)
@@ -192,6 +207,10 @@ type sr_site = {
   sr_target : Ir.Tnode.t;  (** The accumulated node. *)
   sr_red : int;  (** The reduction loop's extent. *)
   sr_out : int;  (** The target's cell count — the site's whole output parallelism. *)
+  sr_cost : int;
+      (** Estimated segment cost: the accumulation statement's trip count (the product of every
+          enclosing loop extent) — the serial work a split could recover. The ranking key
+          (gh-ocannl-541). *)
   sr_dynamic : bool;  (** The gh-466 scatter form ([Set_dynamic]). *)
   sr_swaps : (Ir.Indexing.symbol * Ir.Indexing.symbol) list;
       (** The gh-ocannl-537 enabling interchange: [(outer, inner)] [Swap]s applied {e in order}
@@ -209,6 +228,13 @@ val split_reduce_sites :
     work. Per site the largest-extent enclosing serial loop that passes the hermetic
     {!Ir.Schedule.op_legality} probe of the corresponding [Split_reduce] is chosen (the op's own
     recognizer decides the pinning discipline), so every returned site is seedable as proposed.
+
+    Every detected site is returned, ranked by descending estimated segment cost ([sr_cost], the
+    accumulation's trip count) — gh-ocannl-541: the earlier [sr_red / sr_out] integer-division
+    ratio zeroed every large-output site, and the in-detection cap then silently excluded (and,
+    once gh-537 made more sites reachable, evicted) exactly the sites carrying the most serial
+    work. The candidate-volume cap now lives in {!tune} ([max_split_reduce_sites] /
+    config [autotune_split_reduce_max_sites]), which records evicted sites in the decline census.
 
     A candidate rejected {e only} because the accumulation cell's loops sit inside the reduction
     loop — how OCANNL lowers conv bias/weight gradients, where nothing else in the schedule space
@@ -232,15 +258,33 @@ type terminal_failure = {
 }
 
 type report = {
-  cache_hit : bool;  (** The schedule came from the disk cache; no search ran. *)
+  cache_hit : bool;
+      (** The schedule came from the disk cache; no search ran. The census is then empty except for
+          a declined baseline: the base compile precedes the lookup, so its rejection is real
+          information about this process on this device even though nothing was searched. *)
   candidates_timed : int;
       (** Including the serial baseline where it was dispatched — on GPU backends it is not
-          (gh-ocannl-532), and neither is any other candidate that binds no hardware dimension. *)
+          (gh-ocannl-532), and neither is any other candidate that binds no hardware dimension. So
+          this count is not comparable across a CPU and a GPU backend: every serial-form candidate
+          the CPU backends legitimately time is refused on GPU, and the refusals are counted in
+          [declines] under [Not_dispatched_key] instead (gh-ocannl-543). *)
   candidates_failed : int;
-      (** Candidates rejected by op preconditions, hardware limits, or backend compilation. *)
+      (** Candidates rejected by op preconditions, hardware limits, or backend compilation — the
+          serial baseline included (gh-ocannl-533) — plus detected seed sites declined before
+          proposal (split-reduce sites evicted by [max_split_reduce_sites], gh-ocannl-541) and
+          candidates refused as unparallelized on a GPU backend (gh-ocannl-532), which the decline
+          census records so a previously-proposed site — or a candidate space the backend's
+          execution model empties — never stops being proposed silently. *)
   partial : bool;
       (** [true] when candidate work terminated on a fatal failure after the baseline was handled.
-          Base-compile and baseline-timing failures occur before reporting begins. *)
+          A base compile that fails before the base lowering is captured, and a baseline timing
+          failure, occur before reporting begins. *)
+  baseline_declined : bool;
+      (** The serial baseline's own compile was rejected with a typed cause and the search ran on
+          the scheduled candidates alone (gh-ocannl-533): [baseline_ms] is then [infinity] and the
+          rejection is in [declines] like any candidate's. The HIP scratch validator declining the
+          unscheduled serial form of a large softmax/cross-entropy head at [Backend_link] is the
+          case this exists for — before it was contained, that one rejection ended the search. *)
   declines : decline_summary list;
       (** Candidate rejections aggregated by stable cause key. Their counts sum to
           [candidates_failed]. Cache-entry replay failures are excluded. *)
@@ -267,10 +311,11 @@ type report = {
       *)
   split_reduce_candidates : int;
       (** Split-reduce seeds (gh-ocannl-484 task 3): one candidate per {!split_reduce_sites} site
-          and eligible [num_blocks] value — the two-pass deterministic split reduction applied
-          whole-routine before fission, each resulting segment getting the default preset.
-          Deterministic given the computation and backend; [0] when no reduction-dominated site is
-          detected. *)
+          within the [max_split_reduce_sites] cap and eligible [num_blocks] value — the two-pass
+          deterministic split reduction applied whole-routine before fission, each resulting
+          segment getting the default preset. Deterministic given the computation and backend; [0]
+          when no reduction-dominated site is detected. Sites the cap evicts appear in [declines]
+          under [Seed_evicted_key "split_reduce"]. *)
   split_reduce_timed : int;
       (** Of the split-reduce candidates (the per-site singles and the recombined multi-site
           composite), those that compiled and were actually timed. *)
@@ -292,19 +337,40 @@ type report = {
   model_pruned : int;
       (** Of [model_scored], the candidates dropped before compilation and timing. Candidates
           without model coverage are never counted here — they are always kept. *)
-  fissioned : bool;  (** The winning candidate compiles as multiple fissioned kernels. *)
+  fissioned : bool;
+      (** The winning candidate compiles as multiple fissioned kernels; [false] when nothing was
+          timed. *)
   baseline_ms : float;
       (** The unscheduled serial baseline's measured time, or [infinity] when it was not dispatched:
           on a GPU backend an unparallelized candidate is never run (gh-ocannl-532 — the whole
           routine in one work-item, unbounded in cost and uninterruptible), so it has no
-          measurement and cannot win. *)
+          measurement and cannot win. Also [infinity] when [baseline_declined]. *)
+  default_ms : float option;
+      (** The untuned default pipeline's measured time (gh-ocannl-552): the [config_thresholds]
+          fissioned-preset seed reproduces {!Ir.Schedule.maybe_default_schedules} exactly, so this
+          is the schedule the user gets without tuning — the reference [baseline_ms] cannot provide
+          on GPU backends, where it is [infinity]. Attributed by digest, so it is present even when
+          the seed deduplicated against an identical earlier candidate (the timed serial baseline
+          included, on CPU backends whose config thresholds leave the code unparallelized). On a
+          completed search with [default_ms = Some d], [best_ms <= d] by construction — the seed is
+          in the pool — and the margin between them is the value tuning added (the question
+          gh-ocannl-491 asks). The attribution honors the scheduling gates: with automatic
+          scheduling inactive ({!Ir.Schedule.automatic_schedule_active}) the untuned default is the
+          unscheduled serial form and this field reports the baseline's measurement (so [None] on
+          GPU, where that form is never dispatched); with config [schedule_fission=false] no
+          candidate reproduces the whole-routine config-thresholds default and this is [None].
+          Also [None] when the seed failed to compile, was refused as unparallelized on GPU
+          (gh-ocannl-532), or on a cache hit whose entry predates this field or was written under a
+          config that shaped a different default pipeline
+          ({!Ir.Schedule.default_schedule_fingerprint} mismatch). *)
   best_ms : float;
       (** The winner's measured time, or [infinity] when nothing was timed at all — every candidate
-          failed and the baseline was not dispatched. In that case no cache entry is stored and the
-          returned routine is the untuned default compile, not the serial baseline. *)
+          failed and the baseline was not dispatched (or was declined). In that case no cache entry
+          is stored and the returned routine is the untuned default compile, not the serial
+          baseline. *)
   best_schedule : Ir.Schedule_cache.saved_schedule;
       (** The winner's schedule; for a fissioned winner, the concatenation of the per-segment
-          schedules (informational). *)
+          schedules (informational). Empty when nothing was timed. *)
 }
 
 val model_score :
@@ -419,6 +485,11 @@ val tune :
      config [autotune_keep_fraction] (1 = pre-filter off). Candidates without model coverage are
      always kept — never dropped, only measured — so the pre-filter never overrides (or precludes) a
      measured result; presets, saved schedules and the baseline are never pruned. *)
+  ?max_split_reduce_sites:int ->
+  (* Candidate-volume cap on the split-reduce seed family: the top so-many {!split_reduce_sites}
+     (ranked by estimated segment cost) are seeded; evicted sites are recorded in the decline
+     census under [Seed_evicted_key "split_reduce"] (gh-ocannl-541). Default from config
+     [autotune_split_reduce_max_sites] (8); [0] disables the family. *)
   ?timing_ctx:Context.t ->
   (* A scratch context lineage against which candidates are compiled and timed, so the timing runs
      never mutate [ctx]'s live buffers (parameters, accumulators — running a training step on

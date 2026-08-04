@@ -54,16 +54,19 @@ build_files/
 # Root-anchored: same-named dirs under test/config/ hold tracked fixtures, and an
 # unanchored pattern would silently ignore a fixture regenerated under a new digest.
 /autotune_cache/
+/autotune_cache_serial_baseline/
 /autotune_cache_test/
 /autotune_fission_cache/
 /autotune_fission_cache2/
 /autotune_sketch_cache/
+/autotune_split_cache/
 /conv_tune_cache/
 /conv_tune_cache_aligned/
 /conv_tune_cache_blocked/
 /conv_tune_cache_gpu/
 /conv_tune_cache_merged_blocked/
 /epilogue_tune_cache/
+/mma_companion_cache/
 /symbolic_extent_tune_cache/
 
 # Test artifacts written to the working directory

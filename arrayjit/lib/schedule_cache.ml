@@ -300,7 +300,7 @@ let canonicalize ?(static_indices = []) ?(with_placements = true) (opt : LL.opti
         add "){";
         emit body;
         add "}"
-    | LL.Tile_mma { d; a; b; ta; tb; m; n; k; lane; fallback } ->
+    | LL.Tile_mma { d; a; b; ta; tb; m; n; k; ldd; lda; ldb; lane; fallback } ->
         let operand (tn, idcs) =
           emit_tn tn;
           emit_idcs idcs
@@ -309,7 +309,7 @@ let canonicalize ?(static_indices = []) ?(with_placements = true) (opt : LL.opti
         operand d;
         operand a;
         operand b;
-        add (Printf.sprintf " %b %b %d %d %d " ta tb m n k);
+        add (Printf.sprintf " %b %b %d %d %d %d %d %d " ta tb m n k ldd lda ldb);
         emit_sym lane;
         add "{";
         emit fallback;
@@ -559,6 +559,17 @@ type entry = {
           canonical digest ([saved] is then empty). [None] for whole-routine schedules. *)
   best_ms : float;
   baseline_ms : float;
+  default_ms : float option; [@sexp.option]
+      (** The untuned default pipeline's measured time from the search that wrote the entry, for
+          diagnostics (gh-ocannl-552). [None] when the default seed was not timed, or for entries
+          written before this field existed — optional so such entries stay readable without an
+          [entry_version] bump. *)
+  default_fingerprint : string option; [@sexp.option]
+      (** {!Schedule.default_schedule_fingerprint} at store time, present iff [default_ms] is: the
+          cache key covers only the source digest and the backend, so a config change can redefine
+          what "the default pipeline" means without missing the cache. A replaying process
+          compares fingerprints and drops a stale [default_ms] (the schedule itself stays valid —
+          only this diagnostic is config-relative). *)
 }
 [@@deriving sexp]
 

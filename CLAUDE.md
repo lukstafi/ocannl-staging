@@ -221,7 +221,7 @@ design history) that is not derivable from the code alone.
 
 **Common gotchas and idioms**:
 - `*` is tensor/matrix multiply, `*.` is pointwise multiply (no `/`, use `/.` for pointwise division)
-- `0.5 + 0.5` creates a shape-inferred constant 1 (both operands broadcast); `1.0` alone is a fixed scalar
+- `stretch 1.0` creates a shape-inferred constant 1 whose shape resolves at the use site; `1.0` alone is a fixed scalar. Operation results otherwise close down to their arguments' shapes — a use site broadcasts them in but cannot widen them (gh-544; the old `0.5 + 0.5` idiom relied on the pre-544 widening default)
 - Einsum spec must be a literal string when capturing dimensions: `x ++ "a,b" ["a"]` works, `let s = "a,b" in x ++ s ["a"]` fails
 - Single-char vs multi-char mode: `"abc"` = 3 axes; `"abc,"` = 1 axis named `abc` (comma triggers multi-char)
 - `{ param }` in `%op` creates learnable parameters; same syntax in `%cd` creates non-differentiable tensors

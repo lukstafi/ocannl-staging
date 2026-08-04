@@ -107,18 +107,25 @@ type t =
       d : Tnode.t * Indexing.axis_index array;  (** Accumulator block base. *)
       a : Tnode.t * Indexing.axis_index array;
       b : Tnode.t * Indexing.axis_index array;
-      ta : bool;  (** [a] is stored transposed: its last two axes are [k, i] rather than [i, k]. *)
-      tb : bool;  (** [b] is stored transposed: its last two axes are [j, k] rather than [k, j]. *)
+      ta : bool;  (** [a] is stored transposed: its tile axes are [k, i]-major rather than [i, k]. *)
+      tb : bool;  (** [b] is stored transposed: its tile axes are [j, k]-major rather than [k, j]. *)
       m : int;
       n : int;
       k : int;  (** Covered block extents (multiples of the backend's intrinsic tile). *)
+      ldd : int;
+      lda : int;
+      ldb : int;
+          (** Leading-dimension strides in elements, recorded by {!Schedule.optop.Tensorize}: the
+              tnode's minor dim in the plain last-two-axes case, larger when interior batch axes
+              sit between the tile roles (gh-ocannl-528). *)
       lane : Indexing.symbol;  (** The cooperating [Workgroup] axis (extent = SIMD width). *)
       fallback : t;  (** Semantically equivalent scalar micro-kernel over fresh serial symbols. *)
     }
       (** Cooperative tile multiply-accumulate (docs/proposals/tensorize-mma.md):
           [d[i,j] += Σ_{l<k} a[i,l] * b[l,j]] for [i < m], [j < n], relative to the operands' base
           index vectors, executed jointly by the threads of the [lane] axis (tensor cores /
-          [simdgroup_matrix]). Each operand's tile spans its tnode's last two axes (row-major; with
+          [simdgroup_matrix]). Each operand's tile is a 2-D slice: minor tile axis on the tnode's
+          last axis (stride 1), major tile axis at the recorded leading-dimension stride (with
           [ta]/[tb] the stored layout is the role's transpose and emissions use the hardware
           transpose flag); the base indices must not mention [lane]. Constructed by schedule
           transforms only ({!Schedule.optop.Tensorize}), after the optimization pipeline. Backends

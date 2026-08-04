@@ -136,6 +136,6 @@ struct
   let link_batch _context _code_batch =
     failwith @@ "Backend " ^ Config.name ^ " missing -- install the corresponding library"
 
-  let sequence_segments _context ~name:_ _tasks =
+  let sequence_segments _context ~name:_ ~bindings:_ ~uses_merge_buffer:_ _tasks =
     failwith @@ "Backend " ^ Config.name ^ " missing -- install the corresponding library"
 end

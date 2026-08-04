@@ -76,10 +76,25 @@ let is_up_to_fp16 = function
   | Half_prec _ | Byte_prec _ | Fp8_prec _ -> true
   | _ (* includes Bfloat16_prec *) -> false
 
+(** Whether a constant is too large to be safe in a half-precision node. The cutoff
+    ([check_half_prec_constants_cutoff], default 2^14) sits well below fp16's 65504 max finite: it
+    is headroom against overflow during {e arithmetic} on the constant, not a representability test.
+
+    Both infinities are therefore out of scope by construction, not by exception (gh-ocannl-547).
+    They are exactly representable in IEEE binary16; they are emitted deliberately as {e reduction
+    identities} — see {!neutral_elem}, whose [Max] is [neg_infinity] and [Min] is [infinity], with
+    {!C_syntax} rendering them as [(-INFINITY)] / [INFINITY] and the GPU backends converting through
+    [__float2half] / [__double2half] / a [(half)] cast, all of which map infinities per IEEE; and no
+    arithmetic can push an infinity past a finite bound, so there is no headroom to preserve. An
+    identity is a sentinel arithmetic is expected to {e consume}, not to accumulate.
+
+    Refusing them made every fp16 max-reduction — hence every fp16 softmax, hence every attention
+    model at f16 — fail during lowering, on every backend. NaN is likewise out of scope, by the
+    comparison below being false for it. *)
 let exceeds_fp16_cutoff c =
   match Utils.settings.check_half_prec_constants_cutoff with
   | None -> false
-  | Some cutoff -> Float.(abs c >= cutoff)
+  | Some cutoff -> Float.(is_finite c && abs c >= cutoff)
 
 let sexp_of_prec = function
   | Void_prec -> Sexp.Atom "Void_prec"

@@ -54,16 +54,27 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   `Assignments.to_low_level`); add-family keeps physical halos committed as tensor-node identity
   (padded convs lower offset-free). The padded dim equation requires the input divisible by the
   stride, and a stride-2 window only clips on the right for window ≥ 5.
-- A shape-INFERRED wrapper around a parameter has its open row variables resolved by the USE SITE,
-  not by the thing it wraps. `Mixed_prec`'s cast twin (`Operation.cast`, a pointwise op) read as
-  the weight operand of a *batched* matmul broadcast the batch axis in and materialized as
-  `[batch, out, in]` — a per-batch-row copy of one weight (gh-ocannl-540; fixed by passing
-  `~batch_dims:[]`, since a parameter has no batch axes). Nothing catches this downstream: every
-  slice holds the same value, so results, gradients and loss trajectories are all correct, and the
-  only symptoms are `batch`x memory/work and the row symbol appearing in an operand index. Two
-  lessons: (1) when wrapping a parameter, PIN the axes the wrapper must not acquire rather than
-  letting inference pick; (2) a parity oracle whose model has no batch axis cannot see a
-  batch-broadcast bug — `mixed_prec_parity.ml` had covered this recipe for a whole release.
+- Use-site row resolution is opt-in (gh-ocannl-544): an operation result's open row variables
+  close DOWN to its arguments' shapes; a use site broadcasts the result in but cannot widen it.
+  The resolve-at-use mark (`Row.add_resolve_at_use`, propagated through unification) grants the
+  old widening behavior and is registered for: terminal rows (leaves and params), parameter
+  initialization cones (`Tensor.mark_init_cone` — init intermediates must FILL the param's shape,
+  or broadcasting repeats random values), sampler results (`uint4x32_to_prec_uniform{,1}` — a
+  draw fills whatever shape context demands), and the explicit `stretch` identity wrapper (which
+  replaced the `0.5 + 0.5` shape-inferred-constant idiom, e.g. pooling kernels `stretch 0.0`).
+  The motivating trap (gh-ocannl-540): `Mixed_prec`'s cast twin read as the weight operand of a
+  *batched* matmul was widened by the use site to `[batch, out, in]` — a per-batch-row copy of
+  one weight. Nothing catches that downstream: every slice holds the same value, so results,
+  gradients and loss trajectories are all correct, and the only symptoms are `batch`x memory/work
+  and the row symbol appearing in an operand index. A parity oracle whose model has no batch axis
+  cannot see a batch-broadcast bug — `mixed_prec_parity.ml` had covered this recipe for a whole
+  release; `mixed_prec_twin_shape.ml` and `stretch_resolution.ml` pin the shapes directly.
+  Dim variables follow the same policy (`Row.add_resolve_at_use_dim`): unmarked
+  `Unconstrained_dim` axes are guessed minimal instead of widening to the use-site GLB — but only
+  at stage 7, because stage-6 row closings still push concrete dims through einsum equality
+  chains and an eager stage-6 guess-to-1 conflicts with a dim arriving in the same stage
+  (box_muller's interior axes were the canary). `At_least_dim` axes always meet their use sites
+  (direct indexing is a dim-carrying use).
 - That spurious axis is also how a shape defect reaches the SCHEDULER, which is where it actually
   got noticed: `Tensorize`'s role check rejects an operand mentioning the third micro symbol, and
   `Stage`'s insertion point L\* is "the deepest loop carrying an outer-part symbol", so an operand
@@ -138,6 +149,26 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   occurrence-level; they coincide only at first touch on the linear path.
 - Big-reduction producers are forced `Never_virtual` by `virtualize_max_inline_reduction`
   (default 16) — remember it when a structural expectation assumes inlining.
+- `check_half_prec_constants_cutoff` (`Ops.exceeds_fp16_cutoff`, enforced from
+  `Low_level.simplify_llc.check_constant` during lowering, hence backend-independently) is a
+  HEADROOM policy, not a representability check: its default 2^14 sits far below fp16's 65504 max
+  finite, so a constant it rejects may be perfectly representable. Read "too big for FP16" twice
+  before believing it names an overflow — the one message covered two opposite defects at once
+  (gh-ocannl-547/548), and fixing either alone just moves the failure to the other. Reduction
+  identities are out of scope by construction (`Ops.neutral_elem`: `Max` → `-inf`, `Min` → `+inf`),
+  exempted via `Float.is_finite`: they are sentinels arithmetic consumes, exactly representable, and
+  every backend converts them per IEEE (`__float2half` / `__double2half` / a `(half)` cast). Attention
+  masks fill with `Nn_blocks.default_mask_fill` = `-inf` (per-call `?mask_fill` for the one case that
+  needs finite: a mask that can cover a whole row, where `-inf - -inf` would give NaN) rather than a
+  large finite magic number, so the fill needs no per-precision tuning.
+- The `bf16_ops`/`half_ops` convention of picking inputs that are exactly representable in the
+  reduced precision, so printed numbers stay backend-uniform, does NOT extend to transcendental
+  results: no choice of inputs makes an `exp` output exactly representable, and backend libm
+  implementations disagree in the last mantissa bit (HIP's `exp` gives `2.1215e-1` where cc, metal
+  and cuda give `2.1228e-1` — one ulp at 2^-13, found only by running `half_softmax` on real ROCm
+  hardware). A reduced-precision golden containing `exp`/`log`/`tanh` output must therefore print
+  coarsely enough to sit above an ulp and carry its numeric content in a tolerance comparison against
+  a double-precision reference computed in the test, not in the printed digits.
 - A GPU schedule must cover EVERY materialized-writing nest of the routine, not only the one the
   pipeline builds. Launch dimensions are kernel-global, so `Low_level.validate_parallel` rejects any
   companion write (a bias/relu tail; the elementwise statements an aligned-merged fission segment
@@ -158,6 +189,15 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   candidate compile, and a count of proposals then reads as coverage it does not have — assert on
   the *timed* counter (`report.mma_timed`, `fiss_sketch_timed`, `split_reduce_timed`), and follow it
   with an executed value check, since a candidate that compiles is not yet one that computes.
+- "Timed" is not "tensorized" either, and that failure is worse: a declined `Tile_mma` renders its
+  scalar fallback, which compiles and runs, so the candidate is timed, ranked and possibly crowned
+  under an `mma-*` label (gh-ocannl-545: 20 of 20 timed bf16 candidates on CUDA were scalar). The
+  emission is the source of truth — grep the emitted kernel for the intrinsic
+  (`wmma::`/`mma.sync`/`simdgroup_`), or read `C_syntax.mma_census`; `schedule_log_declines=true`
+  names the rule that fired. When seeding and emission can disagree, fix the seeding side too, or the
+  measurement budget keeps going to schedules that never tensorize: `mma_format_tiles` is keyed on
+  the whole `(a, b, accumulator)` format triple, with per-entry arch floors, precisely so that a
+  combination a backend supports at one accumulator width but not the other cannot be seeded.
 - Supplying a `?lowered_transform` bypasses the default annotator entirely (`backends.ml` `compile`
   only calls `Schedule.maybe_default_schedules` in the `None, None` arm), so **any** code that goes
   through that seam is the unscheduled serial form unless it schedules itself. The autotuner's base
@@ -170,9 +210,29 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   timed the search stores no cache entry and returns the untuned default compile rather than the
   serial incumbent. On CPU backends the serial form runs at full single-core speed and is still
   timed. When timing anything else through this seam, price the serial form before dispatching it.
+- The base compile staying unscheduled is a settled decision, not an oversight (gh-ocannl-552): the
+  default pipeline is `maybe_default_schedules` — fission then per-segment annotation, so several
+  kernels in general, not one `optimized` to rebase candidates on; every candidate family assumes
+  the serial zero point; and annotation reads `hardware_limits`, which would bake per-device
+  decisions into the cache's `source_digest`. The "did tuning beat the shipped default?" reference
+  is `report.default_ms` instead — the config-thresholds fissioned seed reproduces the untuned
+  pipeline exactly and its time is attributed by digest (so a seed that dedups against a timed twin,
+  the CPU serial baseline included, still reports).
 
 ## Backends
 
+- Fissioned-step segment batches go through the `sequence_segments` seam
+  (`Backend_impl.Lowered_backend`): Metal encodes one serial-dispatch command buffer; CUDA/HIP
+  stream-capture the launch loop into a graph replayed as one `cuGraphLaunch`/`hipGraphLaunch`
+  per step (gh-ocannl-488, config `gpu_graph_capture`). Graph capture bakes kernel arguments, so
+  instantiated graphs are cached keyed on every launch-time-varying argument: static-index
+  binding values and the merge-buffer position. Two traps encoded there: the merge pool is the
+  one pool that can be REALLOCATED IN PLACE (same `pool_id`, new base), so its key component must
+  be pointer identity, not `buffer_loc`; and a failed capture leaves the stream in capture mode —
+  always terminate via `end_capture` before falling back or re-raising. The legacy NULL stream
+  cannot be captured (OCANNL streams are all non-default, so this only bites standalone repros).
+  Fallback paths (logging on, capture rejected, config off) are plain per-segment launches —
+  same-stream FIFO makes the generic event chain redundant on CUDA/HIP.
 - Metal shader compiler miscompiles serial `acc[k] = acc[k] + f(i)` loops when pointers derive
   from dynamically-loaded offsets (the pooled `__pool_slots` binding): result = last iteration
   only; hides under API validation (`MTL_SHADER_VALIDATION=1` makes it vanish). Fingerprint:
@@ -199,17 +259,52 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   comments in `cuda_backend.ml`/`hip_backend.ml`). Same family as the MSL `bfloat` trap below —
   a reduced-precision literal or overload that is fine in one dialect is a hard error, or worse a
   silent truncation, in another. Such bugs only surface with that vendor's hardware attached; the
-  executed guards are `test/operations/half_ops.ml` and `test/operations/bf16_ops.ml`, plus
+  executed guards are `test/operations/half_ops.ml`, `test/operations/bf16_ops.ml` (operand
+  ambiguity) and `test/operations/bf16_builtins.ml` (builtin return types), plus
   `test/training/mixed_prec_parity.ml`.
-- MSL's math library has no `bfloat` overloads (`max`, `fma`, ...). Render bf16 arithmetic by
-  promoting to `float` and casting back — `(bfloat)max(0.0f, (float)(v))`, as `FMA` already did.
-  The trap is that an *untyped* literal does not fail loudly: `max(0, v)` makes an integer overload
-  unambiguous, so it compiles and silently truncates every sub-unit activation to 0, whereas
-  `max((bfloat)0.0, v)` is a clean "call to 'max' is ambiguous" error. Fingerprint of the silent
-  form: loss pinned at exactly ln(#classes) with NO batch-to-batch variation (a frozen-weights bug
-  would still vary per batch; an input-independent forward does not). Found by the gh-ocannl-476
-  sweep; `Relu` at `Bfloat16_prec` had fallen through to a catch-all commented `Byte_prec,
-  Void_prec`. When adding a precision, audit every `unop_syntax`/`binop_syntax` catch-all arm.
+- MSL's math library has **no `bfloat` overload of any builtin** — `sqrt`, `exp`, `log`, `pow`,
+  `fmax`, `fmin`, `fmod`, `trunc`, `rsqrt`, `tanh`, `fma` all promote to `float` and return
+  `float`, and unlike C, MSL then rejects the narrowing assignment back to a `bfloat` destination
+  ("assigning to 'bfloat' from incompatible type 'float'"). So the bridge belongs on the whole
+  math-builtin family, not per operator: `metal_backend.ml`'s `bf16_from_builtin` casts the result
+  back (gh-ocannl-549). What is *not* affected, and needs no bridge: arithmetic operators,
+  comparisons, the ternary, `!`, and the `0.0bf` literal suffix — MSL's `bfloat` is a native scalar
+  type. `half` has the full overload set, so f16 has no such gap. Verify claims like these by
+  compiling one-line kernels through `Metal.Library.on_device` rather than by reasoning about the
+  spec; there is no `xcrun metal` without full Xcode.
+- The same bf16 emission fails *differently* per GPU dialect, which is why one backend's evidence
+  misleads about another's (gh-ocannl-549). A float-returning builtin at bf16 is the single root
+  site; where the dialect complains depends on where that float lands. MSL rejects the assignment,
+  so every placement fails. CUDA/HIP accept it (`__nv_bfloat16`/`__hip_bfloat16` have an implicit
+  converting constructor from float), so the materialized placement — which stores each result in
+  its own bf16 node — compiles, and only the placement that *inlines* the builtin into a consuming
+  bf16 binop fails, on the operand: nvrtc reports a mixed-operand `__hadd` (its bf16 `Add` arm is
+  `func "__hadd"`), hiprtc reports `operator '+' is ambiguous ('__hip_bfloat16' and 'float')` (its
+  `Add` falls through to plain `+`). A placement-dependent bf16 compile error is therefore a clue
+  about *inlining*, not about a fission-introduced mixed type — nothing introduces a float, the op
+  table's own `expf`/`sqrtf`/... arms return one.
+- The MSL bf16 trap's older half: an *untyped* literal does not fail loudly. `max(0, v)` makes an
+  integer overload unambiguous, so it compiles and silently truncates every sub-unit activation to
+  0, whereas `max((bfloat)0.0, v)` is a clean "call to 'max' is ambiguous" error. Fingerprint of
+  the silent form: loss pinned at exactly ln(#classes) with NO batch-to-batch variation (a
+  frozen-weights bug would still vary per batch; an input-independent forward does not). Found by
+  the gh-ocannl-476 sweep; `Relu` at `Bfloat16_prec` had fallen through to a catch-all commented
+  `Byte_prec, Void_prec`. When adding a precision, audit every `unop_syntax`/`binop_syntax`
+  catch-all arm.
+- Tensor-node debug names become identifiers verbatim in the emitted kernel, so anything the
+  backend also emits as a *name* must be reserved (`ident_blacklist`). Reserve it from the
+  backend's own syntax functions, never from the C spellings: `C_syntax.op_syntax_idents` renders
+  every (precision, operator) pair over a placeholder and harvests the identifiers, so an override
+  cannot drift out of the list. Deriving from `Ops.*_c_syntax` instead described C only and left
+  MSL's unsuffixed `tanh`/`exp`/`log`/`sqrt`/`sin`/`cos`/`trunc` free — and those are exactly the
+  `Tensor.unop ~op_label` labels, so a GPT-2 gelu declared `device float *__restrict tanh` and the
+  call on the next line resolved to the pointer (gh-ocannl-553). A backend's builtins-table keys
+  belong in the list too: a node taking one shadows the definition *and* drags it into a kernel
+  that never calls it, since `filter_and_prepend_builtins` selects entries by searching the
+  rendered kernel for their key. The collision only bites when one kernel holds both the
+  declaration and the call, so which backend it fires on depends on fissioning — the guard is
+  `test/operations/test_ident_blacklist.ml`, and its section 3 only has teeth under
+  `OCANNL_BACKEND=metal` (C spells these with an `f` suffix, so no C compile can exhibit it).
 - `test/config/ocannl_config` pins `backend=cc`, so `dune runtest` never exercises GPU codegen —
   a Metal/CUDA-only rendering bug passes a fully green suite. The bf16 bug above was already
   covered by `test/training/mixed_prec_parity.ml` (its "loss trajectory parity within 0.1" check
@@ -231,6 +326,21 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   `hipLimitStackSize` is 1024 and has nothing to do with it, and hipcc separately refuses frames
   over 262136 B. Disable with `ocannl_hip_scratch_validation=false` where the model doesn't hold.
   Guard: `test/operations/hip_scratch_budget.ml` (`slow` alias).
+- A typed decline is only half of gh-ocannl-533: what the issue asked for is that the SEARCH
+  survive it. The rejection fired on `Autotune.tune`'s own base compile — the identity-transform
+  capture, historically the one compile in `tune` that raised instead of returning an outcome — so
+  it bypassed `try_spec`, the decline census and the partial report, and killed the run with a
+  perfectly-classified cause. Two facts worth carrying: the baseline is the one candidate not
+  compiled *as* a candidate, and passing `?lowered_transform` bypasses the default annotator, so
+  what gets validated there is the unscheduled serial form — the worst case for per-work-item
+  scratch, and on GPU never dispatched anyway. It is now declined (`report.baseline_declined`,
+  `baseline_ms = infinity`) and the scheduled candidates carry the search; fission plus
+  `promote_locals` is what brings a large softmax/CE head back within budget, which is why
+  `gpt2_mini hip/tuned` completes while every whole-routine preset declines. In the census it
+  carries its own cause and NOT gh-ocannl-543's `Not_dispatched_key "baseline"` — a declined
+  baseline is never dispatched either, but recording both would double-count it under a reason that
+  is not the one. One refusal, one entry. Guard:
+  `test/operations/hip_scratch_tune_survives.ml` (`slow` alias).
 - Building a test kernel that actually *has* a big scratch frame takes care: write the `Local`
   array in one loop and read it back in REVERSE in another. A forward read in the same order lets
   the compiler forward each store to its load and delete the array, leaving nothing to reject.
@@ -252,6 +362,16 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   scratch lineage is MANDATORY for training comps fed via `set_values` — timing on all-zero
   inputs poisons params through log(0)→NaN, and reinit-after-tune is not airtight (ledger trips,
   Metal device-side races).
+- `Autotune.report.candidates_timed` is NOT comparable across a CPU and a GPU backend, so an
+  assertion on it recorded from `cc` is a portability trap (gh-ocannl-543 —
+  `autotune_fission_sketch` timed 19 candidates on cc and 1 on HIP for the same chain). The GPU
+  rule of gh-ocannl-532 refuses every candidate that binds no hardware dimension, and on a
+  two-nest chain that is most of the space: the whole-routine presets dedup to the unscheduled
+  base, and the beam's `Split`/`Swap`/`Retype-Vectorized` moves off that base cannot introduce a
+  `Grid`/`Workgroup` loop (only `Tensorize` and placement retypes can), so the fissioned preset is
+  the only thing left to measure. The refusals now carry a typed census key,
+  `Not_dispatched_key of origin` (`baseline` | `candidate` | `beam_move`) — read it (or
+  `BENCH_TUNE_REPORT=1`) before concluding a GPU search "found nothing".
 - benchmarks/ is the cross-framework parity+timing suite (self-describing safetensors fixtures,
   one-JSON-line runners, loss-trajectory parity gate ~1e-7 fp32 vs pytorch/cpu). The gate
   doubles as a gradient oracle. tinygrad: realize the loss BEFORE `opt.step()` or it recomputes

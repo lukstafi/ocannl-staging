@@ -334,6 +334,51 @@ OCANNL grows the second fp8 format; `ldmatrix`-based fragment loads from swizzle
 and Blackwell's block-scaled `kind::mxf8f6f4` (the T4 ceiling chase). tf32 for uniform f32
 landed 2026-07-22 behind the `tf32_matmuls` numerics-policy key (see T3 status above).
 
+## The accumulator is part of the capability (gh-ocannl-545, 2026-08-04)
+
+Found by the gh-538 CUDA benchmark leg: on a uniformly-bf16 `mlp_wide`, the tuner seeded 36
+tensorized candidates and *timed* 20 of them — and all 20 carried the scalar-fallback census note,
+with no mma intrinsic anywhere in the emitted `.cu`. The tuner was ranking scalar schedules against
+each other under `mma-gpu` labels; reported as "20 timed", the cell read as bf16 tensor-core
+adoption.
+
+**The decline was `mma_syntax`, not `try_register_tile`, and it was a capability gap in the *API*,
+not in the hardware.** `nvcuda::wmma` declares `__nv_bfloat16` multiplicands against a `float`
+accumulator only (`crt/mma.hpp`), so `wmma_combo` returned `None` for bf16×bf16→bf16 — the
+combination a uniformly-bf16 network actually produces, since the GEMM's destination node is itself
+bf16. HIP's rocWMMA has the uniform combination, which is exactly why bf16-as-mma looked alive on
+the one backend where bf16 is the only route. Two independent fixes, because either alone leaves a
+defect:
+
+- **Emission (`cuda_backend.ml`).** A third `mma_syntax` arm renders uniform bf16 as inline-PTX
+  `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32` (sm_80+, `(mma-bf16)` marker → `compute_80`;
+  no `mma.h` needed). Why PTX rather than wmma with an f32 accumulator fragment: converting such a
+  fragment down to a bf16 `d` needs `store_matrix_sync` into a **warp-uniform** `float` staging
+  buffer — wmma's fragment element mapping is opaque — which means per-warp shared memory sized
+  against a block geometry the hook cannot see. `mma.sync`'s per-lane accumulator layout is
+  architecturally defined, so each lane converts its own four registers at the `d` boundary and no
+  staging exists. Two bonuses over the fp8 arm it is modeled on: the whole statement's `k` extent
+  accumulates in f32 registers (strictly better rounding than the scalar fallback it replaces, which
+  rounded to bf16 per term), and transposed operands are supported — every fragment element is
+  gathered through an explicit `(row, col)` address, so `ta`/`tb` only swap that address.
+- **Seeding (`backend_intf.ml`, `autotune.ml`).** `mma_format_tiles` is keyed on the
+  `(a, b, accumulator)` format triple rather than the operand pair, and `mma_tile_for_precisions`
+  takes `~d_prec` (`mma_acc_format_of_prec`: the accumulator admits no policy choice — f32 storage
+  accumulates as `Mma_f32` even under the tf32 policy, which truncates only multiplicands). Each
+  CUDA entry is additionally gated on its own arch floor, so a sm_70 device no longer advertises the
+  sm_80/sm_89 shapes. Without this the same class of defect returns for the next combination a
+  backend supports at one accumulator width but not the other; with it, seeding follows emission.
+
+Verified on an RTX 5070 Ti Laptop (sm_120): the new `schedule_mma_matmul` bf16 legs (uniform,
+transposed-A, transposed-B, and a two-row-tile block) all emit the intrinsic and match their serial
+twins BITWISE — the inputs are bf16-exact, so a mis-mapped per-lane gather cannot hide. End to end,
+`bench_mlp` `mlp_wide` at bf16 with `BENCH_TUNE_REPORT=1` now reports 37 seeded / 21 timed with
+**zero** scalar-fallback notes, `mma.sync…bf16` in the winner's `.cu`, and crowns
+`F_sketch[mma-gpu 16x32x0, mma-gpu 32x32x0]` at 1.1075 ms against 1.7581 ms for the best
+non-tensorized candidate in the same arm. `tile_mma_declines.ml` pins the seeding gate against a
+synthetic table that advertises bf16 at f32 only, so it tests the mechanism rather than any
+backend's current arm set.
+
 ## Swizzled staging (implemented 2026-07-19)
 
 The first slice of the T4 layout work: `Stage { …; swizzle = true }` stores the shared tile in an

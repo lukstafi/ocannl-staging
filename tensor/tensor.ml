@@ -832,6 +832,22 @@ let strip_param_diff t =
     sole member of the result's {!field:params}. Reset by {!unsafe_reinitialize}. *)
 let param_postprocess : (t -> t) ref = ref Fn.id
 
+(* gh-ocannl-544: an initialization expression's job is to fill the parameter's shape, so its
+   intermediate results resolve at their use sites — they widen to the parameter instead of closing
+   down and broadcasting (which would repeat random values along the broadcast axes). Walks the
+   init expression's subgraph, stopping at parameters (their own terminal marking governs them). *)
+let mark_init_cone (t : t) =
+  let visited = Hash_set.create (module Int) in
+  let rec loop sub =
+    let uid = sub.value.Tn.uid in
+    if not (Hash_set.mem visited uid) then (
+      Hash_set.add visited uid;
+      if not (Set.mem sub.params sub) then (
+        Shape.set_resolve_at_use sub.shape;
+        List.iter sub.children ~f:(fun { subtensor; _ } -> loop subtensor)))
+  in
+  List.iter t.children ~f:(fun { subtensor; _ } -> loop subtensor)
+
 let%debug7_sexp param ?(require_grad = true) ~t (name : string) ?(more_label = []) ?input_dims
     ?output_dims ?input_axes ?output_axes ?deduced () : t =
   let t =
@@ -855,6 +871,7 @@ let%debug7_sexp param ?(require_grad = true) ~t (name : string) ?(more_label = [
   | Some diff -> Tn.set_observable diff.grad
   | None -> ());
   Shape.set_terminal ~is_param:(Option.is_some t.diff) t.shape;
+  mark_init_cone t;
   remove_fwd_root t;
   !param_postprocess { t with params = Set.singleton (module T) t }
 

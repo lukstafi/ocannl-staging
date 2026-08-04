@@ -174,6 +174,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name bf16_builtins)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules bf16_builtins)
+ (libraries base ocannl stdio test_utils)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name bf16_ops)
  (package neural_nets_lib)
  (deps
@@ -181,6 +192,17 @@
   (env_var OCANNL_BACKEND))
  (modules bf16_ops)
  (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
+ (name half_softmax)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules half_softmax)
+ (libraries base ocannl stdio test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -217,6 +239,21 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules mixed_prec_twin_shape)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+; gh-ocannl-544: operation results close down to their arguments' shapes — a use site broadcasts
+; them in but cannot silently widen them; the [stretch] wrapper requests use-site resolution by
+; name (also covers the shape-inferred-constant idiom that replaced [0.5 + 0.5]).
+
+(test
+ (name stretch_resolution)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules stretch_resolution)
  (libraries base ocannl stdio)
  (preprocess
   (pps ppx_here ppx_ocannl)))
@@ -1364,6 +1401,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name schedule_batched_mma)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules schedule_batched_mma)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name schedule_mma_matmul)
  (package neural_nets_lib)
  (deps
@@ -1808,3 +1856,29 @@
      hip_scratch_budget.actual
      (run %{dep:hip_scratch_budget.exe}))
     (diff hip_scratch_budget.expected hip_scratch_budget.actual)))))
+
+; gh-ocannl-533, the containment half: a declined baseline must not end the search. Same gating as
+; above — HIP-meaningful, and it runs a (small) autotune search.
+
+(executable
+ (name hip_scratch_tune_survives)
+ (modules hip_scratch_tune_survives)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(rule
+ (alias slow)
+ (package neural_nets_lib)
+ (locks ocannl_training_test)
+ (deps
+  hip_scratch_tune_survives.expected
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (action
+  (no-infer
+   (progn
+    (with-stdout-to
+     hip_scratch_tune_survives.actual
+     (run %{dep:hip_scratch_tune_survives.exe}))
+    (diff hip_scratch_tune_survives.expected hip_scratch_tune_survives.actual)))))

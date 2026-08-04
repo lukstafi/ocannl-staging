@@ -182,8 +182,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        (nvrtc's default is below sm_70). Injected only when used, so kernels without tensor cores
        compile exactly as before even where the toolkit headers are absent. The [(wmma-bf16)] and
        [(wmma-tf32)] markers are emitted by [mma_syntax] for bf16 resp. tf32 fragments (both
-       sm_80+); the [(mma-fp8)] marker for the inline-PTX fp8 [mma.sync] path (sm_89+, no header
-       needed). *)
+       sm_80+); the [(mma-fp8)] and [(mma-bf16)] markers for the inline-PTX [mma.sync] paths (sm_89+
+       resp. sm_80+, no header needed). *)
     let uses_wmma = String.is_substring cu_src ~substring:"nvcuda::wmma" in
     let cu_src = if uses_wmma then "#include <mma.h>\n" ^ cu_src else cu_src in
     (* Half/bf16 ARITHMETIC intrinsics (unlike the conversions, which cuda_fp16.h/cuda_bf16.h
@@ -227,6 +227,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           (if uses_wmma then Some (if has "(wmma-bf16)" || has "(wmma-tf32)" then 80 else 70)
            else None);
           (if has "(mma-fp8)" then Some 89 else None);
+          (if has "(mma-bf16)" then Some 80 else None);
           (if uses_h_arith then Some (if has "__nv_bfloat16" then 80 else 53) else None);
         ]
       |> List.max_elt ~compare:Int.compare
@@ -455,6 +456,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
 
     let ident_blacklist =
       ident_blacklist
+      @ C_syntax.builtin_idents Builtins_cuda.builtins
       @ [
           (* CUDA built-in variables — would shadow per-thread or per-block context *)
           "threadIdx";
@@ -649,6 +651,19 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
             | Ops.Fp8_prec _, Ops.Fp8_prec _, Ops.Single_prec _ -> true
             | _ -> false
           in
+          (* gh-ocannl-545: [nvcuda::wmma] pairs [__nv_bfloat16] operands with a [float] accumulator
+             only — [crt/mma.hpp] declares no bf16 accumulator fragment — so a uniformly-bf16
+             network, where the GEMM's destination node is itself bf16, has no wmma combination and
+             used to render the lane-0 scalar fallback under a tensorized label. The hardware is not
+             the limit: [mma.sync] accumulates bf16 operands in per-lane f32 registers, which we can
+             convert at the [d] boundary because that layout is architecturally defined (unlike wmma
+             fragments, whose element mapping is opaque and forces a warp-uniform [float] staging
+             buffer). Rendered by the inline-PTX arm below. *)
+          let is_bf16_uniform =
+            match (a_prec, b_prec, d_prec) with
+            | Ops.Bfloat16_prec _, Ops.Bfloat16_prec _, Ops.Bfloat16_prec _ -> true
+            | _ -> false
+          in
           if
             is_fp8_combo
             (* Transposed operand storage ([ta]/[tb]) is declined in v1: the per-lane byte gathers
@@ -749,6 +764,121 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
             Some
               (group
                  (string (Printf.sprintf "{ /* tile_mma %dx%dx%d (mma-fp8) e5m2 */" m n k)
+                 ^^ nest 2 (hardline ^^ body)
+                 ^^ hardline ^^ rbrace))
+          else if
+            is_bf16_uniform
+            && m % 16 = 0
+            && n % 8 = 0
+            && k % 16 = 0
+            && loadable d_space && loadable a_space && loadable b_space
+            && min_compute_capability () >= 80
+          then
+            (* Raw [mma.sync] with the architecturally-defined per-lane fragment layouts of
+               m16n8k16 (PTX ISA "Matrix Fragments for mma.m16n8k16", shared by .f16 and .bf16).
+               Thread [lane], with groupID g = lane>>2 and threadID-in-group t = lane&3, holds: A
+               (16x16) regs a0..a3 = the element pairs at rows {g, g+8} x column pairs {2t, 2t+8};
+               B (16x8, column-major fragment) regs b0,b1 = row pairs {2t, 2t+8} down column g;
+               accumulator D (16x8 f32) regs d0..d3 = rows {g, g+8} x columns {2t, 2t+1}. The
+               lower-indexed element of each pair sits in the low half of its .b32 register.
+
+               Unlike the fp8 arm, transposed operand storage ([ta]/[tb]) is supported: every gather
+               goes through [a_at]/[b_at], which index the STORED matrix at (col, row) under the
+               flag while keeping the operand's own leading dimension — the fragment content is
+               unchanged, only its addresses are. Element-wise 16-bit loads impose no alignment or
+               stride constraint and read generic addresses, so both __shared__ tiles and device
+               pointers are covered.
+
+               The accumulator is read from and written back to the bf16 [d] once per statement,
+               with the whole [k] extent accumulated in f32 registers in between — strictly better
+               rounding than the scalar fallback this replaces, which rounds to bf16 per term. *)
+            let open PPrint in
+            let mt = m / 16 and nt = n / 8 and kt = k / 16 in
+            (* Address of logical element (row, col) in an operand stored under its own leading
+               dimension, transposed or not. *)
+            let elem_at ~ld ~transposed ~row ~col =
+              if transposed then Printf.sprintf "(%s) * %d + (%s)" col ld row
+              else Printf.sprintf "(%s) * %d + (%s)" row ld col
+            in
+            let a_at ~row ~col = elem_at ~ld:lda ~transposed:ta ~row ~col in
+            let b_at ~row ~col = elem_at ~ld:ldb ~transposed:tb ~row ~col in
+            let pack2 name base i0 i1 =
+              Printf.sprintf
+                "unsigned %s = (unsigned)__bfloat16_as_ushort(%s[%s]) | \
+                 ((unsigned)__bfloat16_as_ushort(%s[%s]) << 16);"
+                name base i0 base i1
+            in
+            let a_row lo = if lo then "__mi * 16 + __mma_g" else "__mi * 16 + __mma_g + 8" in
+            let a_col c = Printf.sprintf "__ki * 16 + 2 * __mma_t + %d" c in
+            let b_row r = Printf.sprintf "__ki * 16 + 2 * __mma_t + %d" r in
+            let b_col = "__ni * 8 + __mma_g" in
+            let a_reg name ~lo ~c =
+              "      "
+              ^ pack2 name "__mma_ap"
+                  (a_at ~row:(a_row lo) ~col:(a_col c))
+                  (a_at ~row:(a_row lo) ~col:(a_col (c + 1)))
+            in
+            let b_reg name ~r =
+              "      "
+              ^ pack2 name "__mma_bp" (b_at ~row:(b_row r) ~col:b_col)
+                  (b_at ~row:(b_row (r + 1)) ~col:b_col)
+            in
+            let barrier = "__syncthreads();" in
+            let body_lines =
+              [
+                barrier;
+                "unsigned __mma_lid;";
+                "asm(\"mov.u32 %0, %%laneid;\" : \"=r\"(__mma_lid));";
+                "const int __mma_g = (int)(__mma_lid >> 2);";
+                "const int __mma_t = (int)(__mma_lid & 3);";
+                Printf.sprintf "for (int __mi = 0; __mi < %d; ++__mi) {" mt;
+                Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
+                Printf.sprintf
+                  "    __nv_bfloat16 *__mma_dr0 = __mma_dp + (__mi * 16 + __mma_g) * %d + __ni * 8 \
+                   + 2 * __mma_t;"
+                  ldd;
+                Printf.sprintf "    __nv_bfloat16 *__mma_dr1 = __mma_dr0 + 8 * %d;" ldd;
+                "    float __mma_d0 = __bfloat162float(__mma_dr0[0]), __mma_d1 = \
+                 __bfloat162float(__mma_dr0[1]);";
+                "    float __mma_d2 = __bfloat162float(__mma_dr1[0]), __mma_d3 = \
+                 __bfloat162float(__mma_dr1[1]);";
+                Printf.sprintf "    for (int __ki = 0; __ki < %d; ++__ki) {" kt;
+                a_reg "__mma_a0" ~lo:true ~c:0;
+                a_reg "__mma_a1" ~lo:false ~c:0;
+                a_reg "__mma_a2" ~lo:true ~c:8;
+                a_reg "__mma_a3" ~lo:false ~c:8;
+                b_reg "__mma_b0" ~r:0;
+                b_reg "__mma_b1" ~r:8;
+                "      asm(\"mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 \"";
+                "          \"{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\"";
+                "          : \"+f\"(__mma_d0), \"+f\"(__mma_d1), \"+f\"(__mma_d2), \"+f\"(__mma_d3)";
+                "          : \"r\"(__mma_a0), \"r\"(__mma_a1), \"r\"(__mma_a2), \"r\"(__mma_a3), \
+                 \"r\"(__mma_b0), \"r\"(__mma_b1));";
+                "    }";
+                "    __mma_dr0[0] = __float2bfloat16(__mma_d0); __mma_dr0[1] = \
+                 __float2bfloat16(__mma_d1);";
+                "    __mma_dr1[0] = __float2bfloat16(__mma_d2); __mma_dr1[1] = \
+                 __float2bfloat16(__mma_d3);";
+                "  }";
+                "}";
+                barrier;
+              ]
+            in
+            let ptr_decl name typ ptr =
+              string (Printf.sprintf "%s *%s = " typ name) ^^ ptr ^^ semi
+            in
+            let body =
+              ptr_decl "__mma_dp" "__nv_bfloat16" d_ptr
+              ^^ hardline
+              ^^ ptr_decl "__mma_ap" "const __nv_bfloat16" a_ptr
+              ^^ hardline
+              ^^ ptr_decl "__mma_bp" "const __nv_bfloat16" b_ptr
+              ^^ hardline
+              ^^ separate_map hardline string body_lines
+            in
+            Some
+              (group
+                 (string (Printf.sprintf "{ /* tile_mma %dx%dx%d (mma-bf16) */" m n k)
                  ^^ nest 2 (hardline ^^ body)
                  ^^ hardline ^^ rbrace))
           else
@@ -1292,6 +1422,13 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           ( Byte_prec _ | Uint16_prec _ | Int32_prec _ | Uint32_prec _ | Int64_prec _
           | Uint64_prec _ ) ) ->
           f "%"
+      (* Like the libm calls in [unop_syntax]: [fmod] on bfloat16 operands returns float, which
+         only fails once the placement inlines it into a bfloat16 binop (gh-ocannl-549). *)
+      | Mod, Bfloat16_prec _ ->
+          fun v1 v2 ->
+            group
+              (string "__float2bfloat16(fmodf(__bfloat162float(" ^^ v1
+              ^^ string "), __bfloat162float(" ^^ v2 ^^ string ")))")
       | Mod, _ -> func "fmod"
       (* Comparisons and logical connectives are precision-independent and spelled the same in
          CUDA C++ as in C, so they render through the shared default -- fp8 already bridged above.
@@ -1353,6 +1490,14 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       let open PPrint in
       let f prefix suffix expr = group (string prefix ^^ expr ^^ string suffix) in
       let func fn expr = group (string fn ^^ parens expr) in
+      (* A libm call on a bfloat16 operand resolves (the operand converts to float) but *returns
+         float*. Assigning that back to a bfloat16 cell is accepted -- __nv_bfloat16's converting
+         constructor is implicit -- so it goes unnoticed until the placement that inlines the call
+         instead makes the float an operand of a bfloat16 binop, where the arithmetic overloads
+         become ambiguous: nvrtc then reports a mixed-operand __hadd (gh-ocannl-549). Bridge the
+         result back the way [ToPowOf], [Recip] and [Satur01] already do, so the emission is
+         bfloat16-typed wherever it lands. *)
+      let bf16_func fn = f ("__float2bfloat16(" ^ fn ^ "(__bfloat162float(") ")))" in
       match (v, prec) with
       | Ops.Identity, _ -> f "" ""
       | Uint4x32_to_prec_uniform1, Ops.Uint4x32_prec _ ->
@@ -1394,24 +1539,31 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Satur01, _ -> f "fmax(0.0, fmin(1.0, " "))"
       | Exp, Half_prec _ -> func "hexp"
       | Exp, Double_prec _ -> func "exp"
+      | Exp, Bfloat16_prec _ -> bf16_func "expf"
       | Exp, _ -> func "expf"
       | Log, Half_prec _ -> func "hlog"
       | Log, Double_prec _ -> func "log"
+      | Log, Bfloat16_prec _ -> bf16_func "logf"
       | Log, _ -> func "logf"
       | Exp2, Half_prec _ -> func "hexp2"
       | Exp2, Double_prec _ -> func "exp2"
+      | Exp2, Bfloat16_prec _ -> bf16_func "exp2f"
       | Exp2, _ -> func "exp2f"
       | Log2, Half_prec _ -> func "hlog2"
       | Log2, Double_prec _ -> func "log2"
+      | Log2, Bfloat16_prec _ -> bf16_func "log2f"
       | Log2, _ -> func "log2f"
       | Sin, Half_prec _ -> func "hsin"
       | Sin, Double_prec _ -> func "sin"
+      | Sin, Bfloat16_prec _ -> bf16_func "sinf"
       | Sin, _ -> func "sinf"
       | Cos, Half_prec _ -> func "hcos"
       | Cos, Double_prec _ -> func "cos"
+      | Cos, Bfloat16_prec _ -> bf16_func "cosf"
       | Cos, _ -> func "cosf"
       | Sqrt, Half_prec _ -> func "hsqrt"
       | Sqrt, Double_prec _ -> func "sqrt"
+      | Sqrt, Bfloat16_prec _ -> bf16_func "sqrtf"
       | Sqrt, _ -> func "sqrtf"
       | Recip, Byte_prec _ ->
           invalid_arg "Cuda_backend.unop_syntax: Recip not supported for byte/integer precisions"
@@ -1428,15 +1580,19 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Recip_sqrt, Half_prec _ -> func "hrsqrt"
       | Recip_sqrt, Double_prec _ -> f "(1.0 / sqrt(" "))"
       | Recip_sqrt, Single_prec _ -> f "(1.0f / sqrtf(" "))"
+      | Recip_sqrt, Bfloat16_prec _ ->
+          f "__float2bfloat16(1.0f / sqrtf(__bfloat162float(" ")))"
       | Recip_sqrt, _ -> f "(1 / sqrtf(" "))"
       | Neg, _ -> f "(-(" "))"
       | Trunc, Double_prec _ -> func "trunc"
+      | Trunc, Bfloat16_prec _ -> bf16_func "truncf"
       | Trunc, _ -> func "truncf"
       | Tanh_approx, Byte_prec _ ->
           invalid_arg
             "Cuda_backend.unop_syntax: Tanh_approx not supported for byte/integer precisions"
       | Tanh_approx, Half_prec _ -> func "htanh_approx"
       | Tanh_approx, Single_prec _ -> func "__tanhf"
+      | Tanh_approx, Bfloat16_prec _ -> bf16_func "tanhf"
       | Tanh_approx, _ -> func "tanh"
       (* [bf16 == 0.0] is ambiguous for the same reason as [1 / bf16] above. *)
       | Not, Bfloat16_prec _ -> f "__float2bfloat16(__bfloat162float(" ") == 0.0f ? 1.0f : 0.0f)"
@@ -1741,9 +1897,104 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     in
     (lowered_bindings, procs)
 
-  (* CUDA kernel launches on one stream already execute in FIFO order, so the generic event chain is
-     correct; a cheaper plain-sequence task is a possible follow-up (events are ~free there). *)
-  let sequence_segments _context ~name:_ _tasks = None
+  (* One CUDA graph for a fissioned routine's whole segment batch (gh-ocannl-488): stream-capture
+     the segment launch loop once per distinct set of launch-time-varying arguments — static-index
+     binding values, plus the merge-buffer position when the routine reads it — instantiate, and
+     replay with a single cuGraphLaunch per step instead of one cuLaunchKernel per segment.
+     Baking kernel arguments into the graph is sound because context buffer bases are pre-resolved
+     at link time (tnode pools are never reallocated in place while their routines are live; the
+     merge pool, which can be, is part of the key by pointer identity) and every other varying
+     argument is part of the key. The same-stream linear dependency chain the capture records is
+     exactly the FIFO ordering the per-segment launch loop relies on. Instantiated graphs are
+     retained in a bounded FIFO cache, so a training loop cycling through batch-index bindings
+     replays cached graphs from the second epoch on. Transparent fallback to per-segment launches:
+     when kernel logging is on (the log id is a fresh kernel argument every run), when disabled via
+     [gpu_graph_capture=false], or permanently for this routine if the driver rejects capture. *)
+  let sequence_segments (context : context) ~name ~(bindings : Indexing.lowered_bindings)
+      ~uses_merge_buffer (tasks : Task.t list) : Task.t option =
+    let use_capture =
+      List.length tasks > 1
+      && Utils.get_global_flag ~default:true ~arg_name:"gpu_graph_capture"
+      && not (Utils.debug_log_from_routines ())
+    in
+    if not use_capture then None
+    else
+      let device = context.device in
+      let max_cached_graphs = 128 in
+      let cache : (string, Cu.Graph.exec) Hashtbl.t = Hashtbl.create (module String) in
+      let order : string Queue.t = Queue.create () in
+      let broken = ref false in
+      let run_plain () = List.iter tasks ~f:Task.run in
+      let current_key () =
+        let idx = List.map bindings ~f:(fun (_, r) -> Int.to_string !r) in
+        let merge =
+          if not uses_merge_buffer then []
+          else
+            match !(device.merge_buffer) with
+            | Some loc ->
+                [ Cu.Deviceptr.string_of (Slab.resolve_pool device loc); Int.to_string loc.offset ]
+            | None -> [ "no-merge" ]
+        in
+        String.concat ~sep:";" (idx @ merge)
+      in
+      let capture () =
+        (* RELAXED, not THREAD_LOCAL: GC finalizers (module unloads, buffer frees of dead
+           handles) can fire at any allocation point on the capturing thread, and stricter modes
+           make the driver reject such "potentially unsafe" calls mid-capture — with the
+           exception then escaping [Gc.finalise] at an arbitrary program point. The finalizers
+           only release dead handles, so they are genuinely safe to run concurrently with
+           capture. *)
+        Cu.Graph.begin_capture ~mode:Cu.Graph.RELAXED device.runner;
+        let graph =
+          try
+            run_plain ();
+            Cu.Graph.end_capture device.runner
+          with exn ->
+            (* Terminate the capture before propagating, else the stream stays in capture mode. *)
+            (try Cu.Graph.destroy (Cu.Graph.end_capture device.runner) with _ -> ());
+            raise exn
+        in
+        let exec = Cu.Graph.instantiate graph in
+        Cu.Graph.destroy graph;
+        exec
+      in
+      Some
+        (Task.Task
+           {
+             context_lifetime = tasks;
+             description = "graph-captured segments of " ^ name ^ " on " ^ get_name device;
+             work =
+               (fun () ->
+                 if !broken then run_plain ()
+                 else (
+                   set_ctx @@ ctx_of context;
+                   let key = current_key () in
+                   match Hashtbl.find cache key with
+                   | Some exec -> Cu.Graph.launch exec device.runner
+                   | None -> (
+                       match capture () with
+                       | exec ->
+                           if Queue.length order >= max_cached_graphs then (
+                             let victim = Queue.dequeue_exn order in
+                             (* The evicted exec may still have a pending launch on the stream. *)
+                             Cu.Stream.synchronize device.runner;
+                             Cu.Graph.exec_destroy (Hashtbl.find_exn cache victim);
+                             Hashtbl.remove cache victim);
+                           Hashtbl.set cache ~key ~data:exec;
+                           Queue.enqueue order key;
+                           Cu.Graph.launch exec device.runner
+                       | exception Cu.Cuda_error { status; message } ->
+                           (* E.g. capture unsupported on this driver: fall back to per-segment
+                              launches for this routine (same-stream FIFO supplies the segment
+                              ordering), and re-run outside capture so a genuine launch failure
+                              surfaces on the plain path. *)
+                           broken := true;
+                           Stdio.eprintf
+                             "ocannl: disabling CUDA graph capture for routine %s (%s: %s)\n%!"
+                             name message
+                             (Sexp.to_string_hum @@ Cu.sexp_of_result status);
+                           run_plain ())));
+           })
 
   let get_global_debug_info () =
     Sexp.message "cuda_global_debug"
@@ -1789,22 +2040,51 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
            max_workgroup_memory_bytes =
              min_over (fun (a : Cu.Device.attributes) -> a.max_shared_memory_per_block);
            (* Tensor cores (tensorize-mma T3): the 32-thread warp cooperates on 16x16x16 wmma tiles
-              from sm_70 up; [mma_format_tiles] advertises the divergent fp8 16x8x32 and tf32
-              16x16x8 shapes to typed autotune seeds. Precision combinations are ultimately decided
-              per call by [mma_syntax]. *)
+              from sm_70 up; [mma_format_tiles] advertises the divergent fp8 16x8x32, tf32 16x16x8
+              and uniform-bf16 16x8x16 shapes to typed autotune seeds. Precision combinations are
+              ultimately decided per call by [mma_syntax] — but each entry here mirrors an arm of
+              that hook, INCLUDING its accumulator format and arch floor (gh-ocannl-545), because a
+              seed the hook will decline is a candidate the tuner times as scalar code under a
+              tensorized label. *)
            mma =
-             (if min_compute_capability () >= 70 then
+             (let cc = min_compute_capability () in
+              let entry ~min_cc key tile = if cc >= min_cc then Some (key, tile) else None in
+              if cc >= 70 then
                 Some
                   {
                     Backend_intf.mma_simd_width = 32;
                     mma_tile = (16, 16, 16);
                     mma_format_tiles =
-                      [
-                        ((Backend_intf.Mma_f16, Backend_intf.Mma_f16), (16, 16, 16));
-                        ((Backend_intf.Mma_bf16, Backend_intf.Mma_bf16), (16, 16, 16));
-                        ((Backend_intf.Mma_fp8_e5m2, Backend_intf.Mma_fp8_e5m2), (16, 8, 32));
-                        ((Backend_intf.Mma_tf32, Backend_intf.Mma_tf32), (16, 16, 8));
-                      ];
+                      List.filter_opt
+                        [
+                          (* wmma, sm_70+: f16 operands against either accumulator width. *)
+                          entry ~min_cc:70
+                            (Backend_intf.Mma_f16, Backend_intf.Mma_f16, Backend_intf.Mma_f32)
+                            (16, 16, 16);
+                          entry ~min_cc:70
+                            (Backend_intf.Mma_f16, Backend_intf.Mma_f16, Backend_intf.Mma_f16)
+                            (16, 16, 16);
+                          (* wmma, sm_80+: bf16 operands accumulate in f32 only. *)
+                          entry ~min_cc:80
+                            (Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_f32)
+                            (16, 16, 16);
+                          (* Inline-PTX [mma.sync] m16n8k16, sm_80+: the uniform-bf16 combination
+                             wmma cannot express. *)
+                          entry ~min_cc:80
+                            (Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_bf16)
+                            (16, 8, 16);
+                          (* Inline-PTX [mma.sync] m16n8k32, sm_89+. *)
+                          entry ~min_cc:89
+                            ( Backend_intf.Mma_fp8_e5m2,
+                              Backend_intf.Mma_fp8_e5m2,
+                              Backend_intf.Mma_f32 )
+                            (16, 8, 32);
+                          (* wmma tf32, sm_80+; [mma_input_formats_of_prec] additionally gates this
+                             on the numerics policy. *)
+                          entry ~min_cc:80
+                            (Backend_intf.Mma_tf32, Backend_intf.Mma_tf32, Backend_intf.Mma_f32)
+                            (16, 16, 8);
+                        ];
                   }
               else None);
            simd_vector_bytes = 0;

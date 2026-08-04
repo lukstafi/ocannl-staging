@@ -285,3 +285,71 @@ let () =
   let%op yn = ma4 * mb4 in
   summarize "seeds: narrow columns (nj < lanes)"
     (seeds_of ~name:"tmd_seeds_narrow" (Train.forward yn))
+
+(* === Accumulator-aware GPU seeding (gh-ocannl-545). A backend's tensor-core support is a property
+   of the whole (a, b, accumulator) triple, not of the operand pair: CUDA's [nvcuda::wmma] declares
+   bf16 multiplicands against a [float] accumulator only. Keyed on the pair alone, a uniformly-bf16
+   network seeded tensorized candidates that every emission then rendered as the lane-0 scalar
+   fallback — the tuner spent its measurement budget timing, ranking and crowning scalar schedules
+   under `mma-gpu` labels, which is indistinguishable in a report from genuine tensor-core adoption.
+   The capability key carries the accumulator format, so seeding follows emission.
+
+   The synthetic table below deliberately advertises bf16 against f32 ONLY (and f16 against both),
+   so it pins the gating mechanism rather than any one backend's current arm set. Seeds are
+   enumerated on the pre-schedule lowering, so the counts hold on every backend. === *)
+let () =
+  let mma_limits =
+    {
+      Ir.Backend_intf.no_hardware_limits with
+      mma =
+        Some
+          {
+            Ir.Backend_intf.mma_simd_width = 32;
+            mma_tile = (16, 16, 16);
+            mma_format_tiles =
+              [
+                ( (Ir.Backend_intf.Mma_f16, Ir.Backend_intf.Mma_f16, Ir.Backend_intf.Mma_f32),
+                  (16, 16, 16) );
+                ( (Ir.Backend_intf.Mma_f16, Ir.Backend_intf.Mma_f16, Ir.Backend_intf.Mma_f16),
+                  (16, 16, 16) );
+                ( (Ir.Backend_intf.Mma_bf16, Ir.Backend_intf.Mma_bf16, Ir.Backend_intf.Mma_f32),
+                  (16, 16, 16) );
+              ];
+          };
+    }
+  in
+  let mma_seeds_of ~name comp =
+    let captured = ref None in
+    let ctx = Context.auto () in
+    let (_ : Context.t * Context.routine) =
+      Context.compile
+        ~lowered_transform:(fun opt ->
+          captured :=
+            Some (Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits:mma_limits opt);
+          opt)
+        ctx (named name comp) Ir.Indexing.Empty
+    in
+    Option.value_exn !captured
+  in
+  let count_mma label ~name ~operand_prec ~acc_prec =
+    let a =
+      NTDSL.init ~l:(name ^ "_a") ~prec:operand_prec ~i:[ n ] ~o:[ n ]
+        ~f:(fun idcs -> Float.of_int (((idcs.(0) * n) + idcs.(1)) % 3) *. 0.25)
+        ()
+    in
+    let b =
+      NTDSL.init ~l:(name ^ "_b") ~prec:operand_prec ~i:[ n ] ~o:[ n ]
+        ~f:(fun idcs -> (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 5) -. 2.) *. 0.5)
+        ()
+    in
+    let%op c = a * b in
+    Ir.Tnode.update_prec c.Tensor.value acc_prec;
+    let seeds = mma_seeds_of ~name (Train.forward c) in
+    Stdio.printf "%s: mma seeds=%d\n" label (List.count seeds ~f:(fun p -> p.Autotune.sk_mma))
+  in
+  count_mma "seeds: f16 operands, f16 accumulator (advertised)" ~name:"tmd_acc_f16_f16"
+    ~operand_prec:Ir.Ops.half ~acc_prec:Ir.Ops.half;
+  count_mma "seeds: bf16 operands, f32 accumulator (advertised)" ~name:"tmd_acc_bf16_f32"
+    ~operand_prec:Ir.Ops.bfloat16 ~acc_prec:Ir.Ops.single;
+  count_mma "seeds: bf16 operands, bf16 accumulator (not advertised)" ~name:"tmd_acc_bf16_bf16"
+    ~operand_prec:Ir.Ops.bfloat16 ~acc_prec:Ir.Ops.bfloat16

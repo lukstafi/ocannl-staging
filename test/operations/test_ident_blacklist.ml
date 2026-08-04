@@ -64,4 +64,38 @@ let () =
   print_code_name "exp" t_exp.value;
   print_code_name "log" t_log.value;
   print_code_name "floorf" t_floorf.value;
-  print_code_name "fabsf" t_fabsf.value
+  print_code_name "fabsf" t_fabsf.value;
+
+  (* ── Test 3: names the backend's own rendering emits, colliding inside one kernel ── A reserved
+     name only bites when the kernel that declares the node also *calls* the function, so each case
+     below puts the two in the same routine. The reserved set is per-backend by construction (C
+     spells [Tanh_approx] "tanhf", MSL spells it "tanh"), so the code name each node ends up with is
+     backend-dependent and deliberately not printed; what is uniform, and what this section pins, is
+     that the kernel compiles at all.
+
+     [tanh] covers the GPU backends. It is not a contrived label: {!Tensor.unop}'s [~op_label] makes
+     it the label of the node every [Operation.tanh] mints, so the gelu in a GPT-2 forward pass
+     produces one. When the reserved names were read off the C spellings instead of the backend's
+     own syntax functions, Metal declared [device float *__restrict tanh] for that node and the
+     [tanh(...)] call on the next line resolved to the pointer -- "called object type 'device float
+     *' is not a function or function pointer" (gh-ocannl-553).
+
+     [bfloat16_to_single] covers the C-family backends, which bridge bfloat16 arithmetic through
+     builtins of that name ({!Cc_backend.CC_syntax_config}); those spellings live in the backend's
+     overrides, so they were likewise invisible to a list derived from {!Ir.Ops}. *)
+  Tensor.unsafe_reinitialize ();
+  let ctx3 = Context.auto () in
+  (* The operand is unlabelled so the destination node's label is exactly ["tanh"] -- with a
+     labelled operand it would be "tanh_<operand>" and never collide. *)
+  let t_tanh = NTDSL.tanh (NTDSL.add (mk "a") (mk "b") ()) () in
+  let bf_a = mk "bfloat16_to_single" in
+  let bf_b = mk "single_to_bfloat16" in
+  let bf_sum = NTDSL.add bf_a bf_b () in
+  List.iter [ bf_a; bf_b; bf_sum ] ~f:(fun t -> Tn.update_prec t.Tensor.value Ir.Ops.bfloat16);
+  let result3 = NTDSL.add t_tanh bf_sum () in
+  List.iter [ t_tanh; bf_a; bf_b; bf_sum; result3 ] ~f:(fun t ->
+      Train.set_materialized t.Tensor.value);
+  let _ctx3 = Train.forward_once ctx3 result3 in
+  Stdio.printf "tanh -> %s\n" (if Option.is_some t_tanh.value.Tn.code_name then "compiled" else "?");
+  List.iter [ bf_a; bf_b ] ~f:(fun t ->
+      Stdio.printf "%s -> compiled\n" (List.hd_exn t.Tensor.value.Tn.label))
