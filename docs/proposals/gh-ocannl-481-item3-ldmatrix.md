@@ -1,5 +1,16 @@
 # gh-ocannl-481 item 3: `ldmatrix` over swizzled shared tiles; Blackwell block-scaled `kind::mxf8f6f4`
 
+> **Status (2026-08-04): implemented, D1–D3 and D4.1.** Steps 1–5 of the plan below landed; step 6
+> (f16/tf32 `mma.sync` arms) was not attempted, and step 7 (the gh-476 sweep) has not run — every
+> emission here is verified for correctness on hardware, none of it yet for speed. Two decisions
+> deviate from this document on purpose, both recorded with their reasons in
+> [gh-ocannl-481](gh-ocannl-481.md): `Swizzle_b128`'s extent rule is a SEPARATE validation from the
+> element flavor's rather than an addition to it (neither implies the other), and
+> `mma_staged_layouts` is keyed by format triple rather than being a per-backend flag (eligibility
+> is per operand and per orientation, so a flat flag would seed fp8 twins that render the scalar
+> fallback under a tensorized label). Read that file for what the tree actually does; read this one
+> for why.
+
 Design resolution + implementation handoff for the T4 ceiling chase of
 [tensorize-mma](tensorize-mma.md). Written against the state of the tree after gh-ocannl-528
 (batched matmul sites; `Tile_mma` carries explicit `ldd`/`lda`/`ldb` leading-dimension strides).

@@ -198,6 +198,11 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   measurement budget keeps going to schedules that never tensorize: `mma_format_tiles` is keyed on
   the whole `(a, b, accumulator)` format triple, with per-entry arch floors, precisely so that a
   combination a backend supports at one accumulator width but not the other cannot be seeded.
+  `mma_staged_layouts` (gh-ocannl-481) is keyed the same way for the same reason: the swizzled
+  staged twin is seeded only where the emission can actually read that layout, which on CUDA is
+  the uniform-bf16 combination and not fp8 (whose B side has no 16-bit `ldmatrix` form at the
+  orientation the staged sketches mint). The census distinguishes `Mma_intrinsics_ldmatrix` from
+  `Mma_intrinsics`, so "tensorized" and "fed at rate" are separable in a sweep.
 - "Crowned" is not "shipped", and neither is reproducible on a small routine. `Train.tune_placements`
   runs two searches and keeps one artifact, so a family can win the arm that is then discarded whole
   — read `report.best_label` / `best_tensorized` / `mma_best_ms` per arm (the A/B calls `?report`

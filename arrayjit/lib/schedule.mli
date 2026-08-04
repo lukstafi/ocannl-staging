@@ -92,7 +92,8 @@ type optop =
       shared : bool;
       cooperative : int option;
       hoisted : bool;
-      swizzle : bool;
+      swizzle : Low_level.swizzle_kind option;
+      pad_stride : int option;
     }
       (** Stage reads of [source] through a tile: a fresh [Local]-mode node registered in the traced
           store, its dims derived per source axis from the range of the index terms over
@@ -129,18 +130,45 @@ type optop =
           restricted to lane 0 (division is not expressible in affine indices). The lane loop covers
           workgroup slot 0 for the staging-point coverage rule by construction.
 
-          [swizzle = true] stores the tile in an XOR-swizzled layout (the bank-conflict-avoidance
-          follow-up of docs/proposals/tensorize-mma.md): the tile node is added to the [optimized]
-          record's {!field:Low_level.swizzled} set and codegen remaps every element access
-          [P*C + col] to [P*C + (col lxor (P land (C-1)))] — a per-row bijection of the minor axis,
+          [swizzle = Some kind] stores the tile in an XOR-swizzled layout (the
+          bank-conflict-avoidance follow-up of docs/proposals/tensorize-mma.md): the tile node is
+          recorded in the [optimized] record's {!field:Low_level.swizzled} map under [kind] and
+          codegen remaps every element access [P*C + col] to a per-row bijection of the minor axis,
           so semantics are unchanged while same-column accesses (the classic strided read of a
-          staged tile) spread across shared-memory banks. Requires [shared = true], a tile with at
-          least two axes, and a power-of-two minor tile dim [> 1]. Renderings that assume row-major
-          storage decline swizzled operands: [Tile_mma] intrinsic/register-tiled paths fall back to
-          the scalar micro-kernel (which reads elementwise and stays correct), so do not combine
-          [swizzle] with {!constructor-Tensorize} when the intrinsics are the goal — the swizzled
-          tile is for scalar/register-blocktiled staged kernels until [ldmatrix]-style swizzle-aware
-          fragment loads exist.
+          staged tile) spread across shared-memory banks. Requires [shared = true] and a tile with
+          at least two axes.
+
+          The two flavors differ in the unit the XOR permutes — hence in their minor-extent
+          requirement, neither of which implies the other — and in who can consume them
+          (gh-ocannl-481 item 3):
+
+          - {!constructor-Low_level.Swizzle_elem} remaps [P*C + col] to
+            [P*C + (col lxor (P land (C-1)))], requiring a power-of-two minor tile dim [> 1].
+            Renderings that assume row-major storage decline it: [Tile_mma] intrinsic/register-tiled
+            paths fall back to the scalar micro-kernel (which reads elementwise and stays correct),
+            so do not combine it with {!constructor-Tensorize} when the intrinsics are the goal —
+            this flavor is for scalar/register-blocktiled staged kernels.
+          - {!constructor-Low_level.Swizzle_b128} permutes whole 16-byte units, requiring the minor
+            tile dim to span a power-of-two count [> 1] of 16-byte units. This is the layout the
+            CUDA inline-PTX [mma.sync] arms' [ldmatrix] loads consume, so it DOES combine with
+            {!constructor-Tensorize}: the tile is both bank-de-conflicted and fragment-loadable in
+            one instruction. Backends without such loads still decline it to the scalar
+            micro-kernel, which stays correct.
+
+          [pad_stride = Some p] rounds the tile's MINOR dim up to a multiple of [p]
+          (gh-ocannl-481 item 4). The tile's leading-dimension stride is that dim — every consumer
+          reads it off the node — so this changes the stride while the iterated index space stays
+          the unpadded extents. Two payoffs, both about the stride rather than the data: shared
+          memory bank conflicts on a strided read of the tile (proposal §5's "correct, possibly
+          bank-conflicted" v1), and layout rules stated on the stride — a fragment load's
+          ld-multiple constraint, and [Swizzle_b128]'s 16-byte-unit count, which is why the two
+          compose as "pad first, then check". Requires a tile with at least two axes and [p > 1].
+
+          The padded slots hold nothing under a row-major layout: no loop reaches them, so they are
+          neither written nor read, and the {!field:Low_level.zero_fringe} contract — about the
+          fringe of the staged {e source} region within the iterated space — is unaffected. Under a
+          swizzle they do carry data, the XOR being a bijection of the whole padded row, and reads
+          go through the same map.
 
           [hoisted = true] packs a compile-time-constant operand once, out of the routine
           (gh-ocannl-470, the compiler-native analog of ggml's [CPU_REPACK] [set_tensor] hook):

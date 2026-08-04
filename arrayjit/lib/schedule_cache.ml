@@ -39,7 +39,8 @@ type saved_optop =
       shared : bool;
       cooperative : int option;
       hoisted : bool;
-      swizzle : bool; [@sexp.bool]
+      swizzle : LL.swizzle_kind option; [@sexp.option]
+      pad_stride : int option; [@sexp.option]
     }
   | Privatize of { target : int; over : sym_ref }
   | Expand_zero of { tn : int }
@@ -325,11 +326,16 @@ let canonicalize ?(static_indices = []) ?(with_placements = true) (opt : LL.opti
   Set.iter opt.LL.simdgroup_fragments ~f:(fun tn ->
       emit_tn tn;
       add ",");
-  (* Emitted only when non-empty so pre-swizzle canonical digests (and their caches) stay valid. *)
-  if not (Set.is_empty opt.LL.swizzled) then begin
+  (* Emitted only when non-empty so pre-swizzle canonical digests (and their caches) stay valid.
+     The layout kind is part of the entry (gh-ocannl-481 item 3: the two flavors are different
+     physical layouts consumed by different renderings, so a cached winner must never alias across
+     them), with the original element flavor keeping its bare rendering for the same reason the
+     whole section is gated on non-emptiness. *)
+  if not (Map.is_empty opt.LL.swizzled) then begin
     add "];swizzled:[";
-    Set.iter opt.LL.swizzled ~f:(fun tn ->
+    Map.iteri opt.LL.swizzled ~f:(fun ~key:tn ~data:kind ->
         emit_tn tn;
+        (match kind with LL.Swizzle_elem -> () | LL.Swizzle_b128 -> add ":b128");
         add ",")
   end;
   add "];merge:";
@@ -424,7 +430,7 @@ let to_saved r (sched : Schedule.schedule) : saved_schedule * registry =
               (r, saved)
           | Schedule.Pad { axis; to_multiple_of } ->
               (r, Pad { axis = resolve_exn r axis; to_multiple_of })
-          | Schedule.Stage { source; tile_loops; shared; cooperative; hoisted; swizzle } ->
+          | Schedule.Stage { source; tile_loops; shared; cooperative; hoisted; swizzle; pad_stride } ->
               ( r,
                 Stage
                   {
@@ -434,6 +440,7 @@ let to_saved r (sched : Schedule.schedule) : saved_schedule * registry =
                     cooperative;
                     hoisted;
                     swizzle;
+                    pad_stride;
                   } )
           | Schedule.Privatize { target; over } ->
               (r, Privatize { target = resolve_tn_exn r target; over = resolve_exn r over })
@@ -500,7 +507,7 @@ let of_saved canonical (saved : saved_schedule) : Schedule.schedule * registry =
               (r, op)
           | Pad { axis; to_multiple_of } ->
               (r, Schedule.Pad { axis = unresolve_exn r axis; to_multiple_of })
-          | Stage { source; tile_loops; shared; cooperative; hoisted; swizzle } ->
+          | Stage { source; tile_loops; shared; cooperative; hoisted; swizzle; pad_stride } ->
               ( r,
                 Schedule.Stage
                   {
@@ -510,6 +517,7 @@ let of_saved canonical (saved : saved_schedule) : Schedule.schedule * registry =
                     cooperative;
                     hoisted;
                     swizzle;
+                    pad_stride;
                   } )
           | Privatize { target; over } ->
               ( r,

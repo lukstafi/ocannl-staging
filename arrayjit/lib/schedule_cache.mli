@@ -68,8 +68,10 @@ type saved_optop =
       shared : bool;
       cooperative : int option;
       hoisted : bool;
-      swizzle : bool; [@sexp.bool]
-          (** Serialized only when [true] ([@sexp.bool]), so pre-swizzle cache files parse. *)
+      swizzle : Low_level.swizzle_kind option; [@sexp.option]
+          (** Serialized only when set ([@sexp.option]), so pre-swizzle cache files parse. *)
+      pad_stride : int option; [@sexp.option]
+          (** Likewise omitted when unset, so pre-gh-481 cache files parse. *)
     }
   | Privatize of { target : int; over : sym_ref }
   | Expand_zero of { tn : int }

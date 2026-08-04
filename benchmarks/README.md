@@ -191,7 +191,12 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   `report-gh537-cuda.md`, replicating it),
   [report-gh484-cuda.md](report-gh484-cuda.md) (Linux/CUDA, the paired before/after A/B of
   gh-ocannl-484 task 3's split-reduce seeding — also the reference for why only same-session
-  paired runs are trustworthy on that machine) and
+  paired runs are trustworthy on that machine),
+  [report-gh481-cuda.md](report-gh481-cuda.md) (Linux/CUDA, gh-ocannl-481's `ldmatrix` over
+  swizzled staged tiles: a neutral result, and the reference for two measurement traps a tuned-cell
+  A/B has to control for — the schedule disk cache silently replaying the other arm's winner, and a
+  ~20-40% cell-level spread from the beam not always crowning the same family, which its own
+  identical-code negative control exposes) and
   [report-gh537-cuda.md](report-gh537-cuda.md) (Linux/CUDA, its successor: the paired A/B of
   gh-ocannl-537's `Swap` ∘ `Split_reduce` seeding, which removes ~90% of the segment gh-484 was
   filed against — and the reference for why a segment share must name the placement it is a share
