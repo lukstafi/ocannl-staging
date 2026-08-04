@@ -174,8 +174,10 @@ val sketch_seed_params :
   sketch_params list
 (** The matmul-sketch seeds proposed for the given lowering: parameterized instantiations of the
     composed pipelines with dividing tile sizes, pre-filtered against rules that statically imply a
-    declined rendering (gh-ocannl-479) — on GPU backends: the operand-format tile advertised by
-    [limits.mma.mma_format_tiles], including policy-enabled TF32; on the C backends:
+    declined rendering (gh-ocannl-479) — on GPU backends: the (operand, operand, accumulator) format
+    tile advertised by [limits.mma.mma_format_tiles], including policy-enabled TF32 and excluding
+    combinations the backend supports at one accumulator width but not the other (gh-ocannl-545:
+    CUDA's bf16 has no wmma accumulator of its own); on the C backends:
     operand-precision uniformity (f32/f64), the fused accumulation form, micro-kernel column extent
     at least one vector of lanes ([limits.simd_vector_bytes]), and transposed-B storage for shapes
     that read B in place. Exposed for tests. *)

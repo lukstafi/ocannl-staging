@@ -1817,21 +1817,45 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
              min_over (fun (a : Cu.Device.attributes) -> a.max_shared_memory_per_block);
            (* Tensor cores (tensorize-mma T3): the 32-thread warp cooperates on 16x16x16 wmma tiles
               from sm_70 up; [mma_format_tiles] advertises the divergent fp8 16x8x32 and tf32
-              16x16x8 shapes to typed autotune seeds. Precision combinations are ultimately decided
-              per call by [mma_syntax]. *)
+              16x16x8 shapes to typed autotune seeds. Precision combinations are
+              ultimately decided per call by [mma_syntax] — but each entry here mirrors an arm of
+              that hook, INCLUDING its accumulator format and arch floor (gh-ocannl-545), because a
+              seed the hook will decline is a candidate the tuner times as scalar code under a
+              tensorized label. *)
            mma =
-             (if min_compute_capability () >= 70 then
+             (let cc = min_compute_capability () in
+              let entry ~min_cc key tile = if cc >= min_cc then Some (key, tile) else None in
+              if cc >= 70 then
                 Some
                   {
                     Backend_intf.mma_simd_width = 32;
                     mma_tile = (16, 16, 16);
                     mma_format_tiles =
-                      [
-                        ((Backend_intf.Mma_f16, Backend_intf.Mma_f16), (16, 16, 16));
-                        ((Backend_intf.Mma_bf16, Backend_intf.Mma_bf16), (16, 16, 16));
-                        ((Backend_intf.Mma_fp8_e5m2, Backend_intf.Mma_fp8_e5m2), (16, 8, 32));
-                        ((Backend_intf.Mma_tf32, Backend_intf.Mma_tf32), (16, 16, 8));
-                      ];
+                      List.filter_opt
+                        [
+                          (* wmma, sm_70+: f16 operands against either accumulator width. *)
+                          entry ~min_cc:70
+                            (Backend_intf.Mma_f16, Backend_intf.Mma_f16, Backend_intf.Mma_f32)
+                            (16, 16, 16);
+                          entry ~min_cc:70
+                            (Backend_intf.Mma_f16, Backend_intf.Mma_f16, Backend_intf.Mma_f16)
+                            (16, 16, 16);
+                          (* wmma, sm_80+: bf16 operands accumulate in f32 only. *)
+                          entry ~min_cc:80
+                            (Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_f32)
+                            (16, 16, 16);
+                          (* Inline-PTX [mma.sync] m16n8k32, sm_89+. *)
+                          entry ~min_cc:89
+                            ( Backend_intf.Mma_fp8_e5m2,
+                              Backend_intf.Mma_fp8_e5m2,
+                              Backend_intf.Mma_f32 )
+                            (16, 8, 32);
+                          (* wmma tf32, sm_80+; [mma_input_formats_of_prec] additionally gates this
+                             on the numerics policy. *)
+                          entry ~min_cc:80
+                            (Backend_intf.Mma_tf32, Backend_intf.Mma_tf32, Backend_intf.Mma_f32)
+                            (16, 16, 8);
+                        ];
                   }
               else None);
            simd_vector_bytes = 0;

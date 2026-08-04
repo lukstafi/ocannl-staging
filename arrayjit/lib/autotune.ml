@@ -330,14 +330,28 @@ let mma_input_formats_of_prec (prec : Ir.Ops.prec) : Ir.Backend_intf.mma_input_f
       else [ Ir.Backend_intf.Mma_f32 ]
   | _ -> []
 
-let mma_tile_for_precisions (mma : Ir.Backend_intf.mma_capability) ~a_prec ~b_prec =
-  let equal_pair (a1, b1) (a2, b2) =
-    Ir.Backend_intf.equal_mma_input_format a1 a2 && Ir.Backend_intf.equal_mma_input_format b1 b2
+(* The accumulator format of a destination's storage precision (gh-ocannl-545). Unlike the
+   multiplicands, this admits no policy choice: the accumulator is read back from and written to the
+   node, so its format is its storage layout. In particular f32 storage accumulates as [Mma_f32]
+   even under the tf32 policy — tf32 truncates the multiplicands, never the accumulator. *)
+let mma_acc_format_of_prec (prec : Ir.Ops.prec) : Ir.Backend_intf.mma_input_format option =
+  match prec with
+  | Ir.Ops.Half_prec _ -> Some Ir.Backend_intf.Mma_f16
+  | Ir.Ops.Bfloat16_prec _ -> Some Ir.Backend_intf.Mma_bf16
+  | Ir.Ops.Single_prec _ -> Some Ir.Backend_intf.Mma_f32
+  | _ -> None
+
+let mma_tile_for_precisions (mma : Ir.Backend_intf.mma_capability) ~a_prec ~b_prec ~d_prec =
+  let equal_triple (a1, b1, d1) (a2, b2, d2) =
+    Ir.Backend_intf.equal_mma_input_format a1 a2
+    && Ir.Backend_intf.equal_mma_input_format b1 b2
+    && Ir.Backend_intf.equal_mma_input_format d1 d2
   in
-  List.find_map (mma_input_formats_of_prec a_prec) ~f:(fun a_format ->
-      List.find_map (mma_input_formats_of_prec b_prec) ~f:(fun b_format ->
-          List.Assoc.find mma.Ir.Backend_intf.mma_format_tiles (a_format, b_format)
-            ~equal:equal_pair))
+  Option.bind (mma_acc_format_of_prec d_prec) ~f:(fun d_format ->
+      List.find_map (mma_input_formats_of_prec a_prec) ~f:(fun a_format ->
+          List.find_map (mma_input_formats_of_prec b_prec) ~f:(fun b_format ->
+              List.Assoc.find mma.Ir.Backend_intf.mma_format_tiles (a_format, b_format, d_format)
+                ~equal:equal_triple)))
 
 type matmul_site = {
   m_i : Idx.symbol;
@@ -1891,6 +1905,7 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
               mma_tile_for_precisions mma
                 ~a_prec:(Lazy.force site.c_a.Ir.Tnode.storage_prec)
                 ~b_prec:(Lazy.force site.c_b.Ir.Tnode.storage_prec)
+                ~d_prec:(Lazy.force site.c_d.Ir.Tnode.storage_prec)
             with
             | None -> []
             | Some (tm_t, tn_t, tk_t) ->
@@ -2028,6 +2043,7 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
           mma_tile_for_precisions mma
             ~a_prec:(Lazy.force site.m_a.Ir.Tnode.storage_prec)
             ~b_prec:(Lazy.force site.m_b.Ir.Tnode.storage_prec)
+            ~d_prec:(Lazy.force site.m_d.Ir.Tnode.storage_prec)
         with
         | None -> []
         | Some (tm_t, tn_t, tk_t) ->
