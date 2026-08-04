@@ -38,11 +38,35 @@ let log_declines = lazy (Utils.get_global_flag ~default:false ~arg_name:"schedul
    (gh-ocannl-479): [Autotune] flips it around candidate compiles, because "the tensorized candidate
    lost" and "the tensorized candidate never ran tensorized" must be distinguishable in tuning logs.
    Entries are (kernel name, rendering), most recent first; tests assert on it directly. *)
-type mma_rendering = Mma_intrinsics | Mma_register_tiled | Mma_scalar_fallback
+type mma_rendering =
+  | Mma_intrinsics
+  | Mma_intrinsics_ldmatrix
+      (** The intrinsic arms fed by warp-cooperative [ldmatrix] loads over a [Swizzle_b128] staged
+          tile (gh-ocannl-481 item 3) instead of per-lane gathers. Recorded distinctly because the
+          gh-476 sweep must be able to pin which of the two load paths a timing measured. *)
+  | Mma_register_tiled
+  | Mma_scalar_fallback
 [@@deriving sexp, compare, equal]
 
 let mma_census_enabled = ref false
 let mma_census : (string * mma_rendering) list ref = ref []
+
+(** The address space of a tile-MMA operand as the emission hooks see it. *)
+type mma_space = [ `Device | `Shared | `Thread | `Fragment of string ]
+
+(** The physical layout of a tile-MMA operand's storage (gh-ocannl-481 item 3, D2). This is the
+    whole [Stage] -> emission contract: the emission never re-derives the layout, it trusts the
+    component it is handed.
+
+    [`Swizzled_elem] operands never reach a hook — the [Tile_mma] rendering declines them centrally,
+    since no intrinsic load form matches an element-granularity permutation. [`Swizzled_b128] is
+    only passed when the access is reconstructible from [(ptr, ld)] alone: the pointer is the tile
+    origin of a rank-2 node whose minor dim is [ld], so the element at [(row, col)] sits at
+    [row*ld + (((col/u) lxor (row land (ld/u - 1))) * u)] with [u = 16 / prec_in_bytes] — everything
+    else declines. *)
+type mma_layout = [ `Plain | `Swizzled_b128 ]
+
+type mma_operand = PPrint.document * int * mma_space * mma_layout
 
 module type C_syntax_config = sig
   val procs : Low_level.optimized array
@@ -215,9 +239,9 @@ module type C_syntax_config = sig
     m:int ->
     n:int ->
     k:int ->
-    d:PPrint.document * int * [ `Device | `Shared | `Thread | `Fragment of string ] ->
-    a:PPrint.document * int * [ `Device | `Shared | `Thread | `Fragment of string ] ->
-    b:PPrint.document * int * [ `Device | `Shared | `Thread | `Fragment of string ] ->
+    d:mma_operand ->
+    a:mma_operand ->
+    b:mma_operand ->
     PPrint.document option)
     option
   (** Cooperative tile-MMA emission for [Low_level.Tile_mma] (docs/proposals/tensorize-mma.md §4):
@@ -226,12 +250,17 @@ module type C_syntax_config = sig
       f16×f16→f32), the transposed-storage flags [ta]/[tb] (the operand's stored layout is the
       transpose of its role — load tiles with the hardware transpose flag and swapped offset
       arithmetic), the covered block extents [m]/[n]/[k], and per operand a pointer expression to
-      the tile base (already offset), its leading-dimension stride in elements, and its address
-      space, emit the intrinsic sequence (fragment declarations / loads / mma steps / stores)
-      executed by every lane of the enclosing lane loop. Return [None] to decline a particular call
-      (unsupported precision combination, extents not multiples of the intrinsic tile, thread-space
-      operand) — the caller then renders the scalar [fallback] under an [if (lane == 0)] guard,
-      which is also the path when the whole hook is [None] (cc, and any backend until wired). *)
+      the tile base (already offset), its leading-dimension stride in elements, its address space
+      and its physical layout ({!type-mma_layout}), emit the intrinsic sequence (fragment
+      declarations / loads / mma steps / stores) executed by every lane of the enclosing lane loop.
+      Return [None] to decline a particular call (unsupported precision combination, extents not
+      multiples of the intrinsic tile, thread-space operand, a swizzled layout the arm has no load
+      form for) — the caller then renders the scalar [fallback] under an [if (lane == 0)] guard,
+      which is also the path when the whole hook is [None] (cc, and any backend until wired).
+
+      Accepting a [`Swizzled_b128] operand is a promise that it was consumed through a
+      swizzle-aware load: the caller records the call as {!Mma_intrinsics_ldmatrix} on that basis.
+      An arm without such a load form must decline the call. *)
 
   val mma_fragment_syntax :
     (d_prec:Ops.prec ->
@@ -241,9 +270,9 @@ module type C_syntax_config = sig
     n:int ->
     k:int ->
     fragment:string ->
-    target:PPrint.document * int * [ `Device | `Shared | `Thread | `Fragment of string ] ->
-    a:PPrint.document * int * [ `Device | `Shared | `Thread | `Fragment of string ] ->
-    b:PPrint.document * int * [ `Device | `Shared | `Thread | `Fragment of string ] ->
+    target:mma_operand ->
+    a:mma_operand ->
+    b:mma_operand ->
     body:(unit -> PPrint.document) ->
     PPrint.document option)
     option
@@ -1147,10 +1176,35 @@ module C_syntax (B : C_syntax_config) = struct
                    ^^ string " + "
                    ^^ parens (parens col_doc ^^ string (" & " ^ Int.to_string (u - 1)))))
 
+  (* Whether an operand's storage layout is one the intrinsic arms can be handed: [`Plain] and
+     [`Swizzled_b128] are (the latter only when the access is reconstructible from the pointer and
+     leading dimension alone — see {!type-mma_layout}), everything else names its decline reason. *)
+  let operand_layout tn ~ld ~idcs ~dims : [ mma_layout | `Decline of string ] =
+    match swizzle_of tn with
+    | None -> `Plain
+    | Some Low_level.Swizzle_elem ->
+        `Decline "element-granularity swizzle (no intrinsic load form matches it)"
+    | Some Low_level.Swizzle_b128 ->
+        if Array.length dims <> 2 then `Decline "b128-swizzled operand of rank <> 2"
+        else if ld <> dims.(1) then
+          `Decline "b128-swizzled operand whose leading dimension is not its minor dim"
+        else if
+          not (Array.for_all idcs ~f:(function Indexing.Fixed_idx 0 -> true | _ -> false))
+        then `Decline "b128-swizzled operand not accessed from the tile origin"
+        else `Swizzled_b128
+
+  (* An operand tuple carrying a decline reason cannot be handed to an emission hook. *)
+  let narrow_operand (ptr, ld, space, layout) : mma_operand option =
+    match layout with
+    | `Decline _ -> None
+    | (`Plain | `Swizzled_b128) as layout -> Some (ptr, ld, space, layout)
+
+  let operand_decline (_, _, _, layout) =
+    match layout with `Decline reason -> Some reason | `Plain | `Swizzled_b128 -> None
+
   type active_mma_accumulator =
     | Active_fragment of Tn.t * string
-    | Active_target of
-        Tn.t * (PPrint.document * int * [ `Device | `Shared | `Thread | `Fragment of string ])
+    | Active_target of Tn.t * mma_operand
 
   let active_mma_accumulator : active_mma_accumulator option ref = ref None
 
@@ -1700,7 +1754,7 @@ module C_syntax (B : C_syntax_config) = struct
         else `Thread
       in
       let ptr = parens (string (get_ident tn) ^^ string " + " ^^ pp_array_offset (idcs, dims)) in
-      (prec, (ptr, ld, space))
+      (prec, (ptr, ld, space, operand_layout tn ~ld ~idcs ~dims))
     in
     (* The target's leading-dimension stride: the stride of the axis carrying the transfer nest's
        outermost (row) copy symbol — the minor dim in the plain case, larger when interior batch
@@ -1746,18 +1800,23 @@ module C_syntax (B : C_syntax_config) = struct
                && Indexing.equal_symbol lane1 lane2
                && Array.equal Indexing.equal_axis_index init_idcs store_idcs -> (
             match collect_fragment_tiles fragment [] reduction with
-            (* Swizzled operands decline the fragment hooks (row-major pointer+stride contract);
-               falling through to [None] keeps the ordinary rendering, whose [Tile_mma]s decline to
-               the swizzle-aware scalar fallback. *)
-            | [ Tile_mma { a; b; ta; tb; m; n; k; lda; ldb; _ } ]
-              when not (List.exists [ target; fst a; fst b ] ~f:is_swizzled) -> (
+            | [ Tile_mma { a; b; ta; tb; m; n; k; lda; ldb; _ } ] -> (
                 let target_base = Array.map init_idcs ~f:(zero_symbols init_syms) in
                 (* [init_syms] is innermost-first, so its last element is the outermost (row)
                    copy symbol; [init_idcs] still carries it. *)
                 let t_ld = target_ld_of ~row_sym:(List.last init_syms) (target, init_idcs) in
-                let d_prec, target_op = operand t_ld (target, target_base) in
-                let a_prec, a_op = operand lda a in
-                let b_prec, b_op = operand ldb b in
+                let d_prec, target_raw = operand t_ld (target, target_base) in
+                let a_prec, a_raw = operand lda a in
+                let b_prec, b_raw = operand ldb b in
+                (* Operands whose layout no intrinsic load form matches (the element-granularity
+                   swizzle; a b128 tile not addressable from its origin) decline the fragment hooks;
+                   falling through to [None] keeps the ordinary rendering, whose [Tile_mma]s decline
+                   to the swizzle-aware scalar fallback. A [`Swizzled_b128] staged tile does NOT
+                   decline here (gh-ocannl-481 item 3, D3): the per-call hooks below judge it, and
+                   an accumulator-resident wmma scope that cannot feed from [ldmatrix] declines
+                   there — leaving the ordinary [mma_syntax] path, which can. *)
+                match (narrow_operand target_raw, narrow_operand a_raw, narrow_operand b_raw) with
+                | Some target_op, Some a_op, Some b_op -> (
                 let fragment_name = Printf.sprintf "__mma_fragment_%d" fragment.Tn.uid in
                 let render_with active =
                   let old = !active_mma_accumulator in
@@ -1810,6 +1869,7 @@ module C_syntax (B : C_syntax_config) = struct
                       | Some barrier ->
                           string barrier ^^ hardline ^^ body_doc ^^ hardline ^^ string barrier
                       | None -> body_doc))
+                | _ -> None)
             | _ -> None)
         | _ -> None)
     | _ -> None
@@ -3187,12 +3247,13 @@ module C_syntax (B : C_syntax_config) = struct
         let operand ld (tn, idcs) =
           let dims = Lazy.force tn.Tn.dims in
           let prec = Lazy.force tn.Tn.storage_prec in
-          let ptr_doc, ld, space =
+          let ptr_doc, ld, space, layout =
             match !active_mma_accumulator with
             | Some (Active_fragment (fragment, name)) when Tn.equal tn fragment ->
-                (string name, ld, `Fragment name)
-            | Some (Active_target (fragment, (ptr, target_ld, space))) when Tn.equal tn fragment ->
-                (ptr, target_ld, space)
+                (string name, ld, `Fragment name, `Plain)
+            | Some (Active_target (fragment, (ptr, target_ld, space, layout)))
+              when Tn.equal tn fragment ->
+                (ptr, target_ld, space, (layout :> [ mma_layout | `Decline of string ]))
             | _ ->
                 let space =
                   if Set.mem !current_workgroup_shared tn then `Shared
@@ -3201,9 +3262,10 @@ module C_syntax (B : C_syntax_config) = struct
                 in
                 ( parens (string (get_ident tn) ^^ string " + " ^^ pp_array_offset (idcs, dims)),
                   ld,
-                  space )
+                  space,
+                  operand_layout tn ~ld ~idcs ~dims )
           in
-          (prec, (ptr_doc, ld, space))
+          (prec, (ptr_doc, ld, space, layout))
         in
         let lane0_guarded body_doc =
           let guarded =
@@ -3232,10 +3294,15 @@ module C_syntax (B : C_syntax_config) = struct
             | `Thread -> "thread"
             | `Fragment _ -> "fragment"
           in
+          let layout_str = function
+            | `Plain -> ""
+            | `Swizzled_b128 -> ",swz128"
+            | `Decline reason -> ",unsupported layout: " ^ reason
+          in
           let op_str role ld (tn, idcs) =
-            let prec, (_, ld, space) = operand ld (tn, idcs) in
-            Printf.sprintf "%s=%s:%s[ld=%d,%s]" role (Tn.debug_name tn) (Ops.prec_string prec) ld
-              (space_str space)
+            let prec, (_, ld, space, layout) = operand ld (tn, idcs) in
+            Printf.sprintf "%s=%s:%s[ld=%d,%s%s]" role (Tn.debug_name tn) (Ops.prec_string prec) ld
+              (space_str space) (layout_str layout)
           in
           Printf.sprintf "%dx%dx%d ta=%b tb=%b %s %s %s" m n k ta tb (op_str "d" ldd d)
             (op_str "a" lda a) (op_str "b" ldb b)
@@ -3336,9 +3403,9 @@ module C_syntax (B : C_syntax_config) = struct
           let ctyp = B.typ_of_prec prec in
           let it = B.loop_index_type in
           let fma_fn = match prec with Ops.Double_prec _ -> "fma" | _ -> "fmaf" in
-          let _, (d_ptr, ldd, _) = operand ldd d in
-          let _, (a_ptr, lda, _) = operand lda a in
-          let _, (b_ptr, ldb, _) = operand ldb b in
+          let _, (d_ptr, ldd, _, _) = operand ldd d in
+          let _, (a_ptr, lda, _, _) = operand lda a in
+          let _, (b_ptr, ldb, _, _) = operand ldb b in
           (* The A element at (row expression, k expression), honoring [ta]'s storage order. *)
           let a_at ~row ~l =
             if ta then Printf.sprintf "tmma_a__[%s * %d + %s]" l lda row
@@ -3471,22 +3538,37 @@ module C_syntax (B : C_syntax_config) = struct
                deterministic): %s"
               (describe ());
             fallback_doc ()
-        | Some _ when List.exists [ fst d; fst a; fst b ] ~f:is_swizzled ->
-            (* The intrinsic loads assume row-major pointer+stride operands; the scalar fallback
-               reads elementwise through the swizzle-aware offsets and stays correct. *)
-            declinef "Tile_mma intrinsics declined (swizzled operand layout): %s" (describe ());
-            fallback_or_tiled ()
         | Some emit -> (
-            let d_prec, d_op = operand ldd d in
-            let a_prec, a_op = operand lda a in
-            let b_prec, b_op = operand ldb b in
-            match emit ~d_prec ~a_prec ~b_prec ~ta ~tb ~m ~n ~k ~d:d_op ~a:a_op ~b:b_op with
-            | Some doc ->
-                record Mma_intrinsics;
-                doc
-            | None ->
-                declinef "Tile_mma intrinsics declined by the backend hook: %s" (describe ());
-                fallback_or_tiled ()))
+            let d_prec, d_raw = operand ldd d in
+            let a_prec, a_raw = operand lda a in
+            let b_prec, b_raw = operand ldb b in
+            (* Layouts the intrinsic loads have no form for (the element-granularity swizzle; a
+               b128-swizzled tile not addressable from its origin) never reach the hook: the scalar
+               fallback reads elementwise through the swizzle-aware offsets and stays correct. A
+               [`Swizzled_b128] tile addressed from its origin DOES reach it — the arms that own
+               [ldmatrix] consume it, the others decline per call (gh-ocannl-481 item 3, D2). *)
+            match List.find_map [ d_raw; a_raw; b_raw ] ~f:operand_decline with
+            | Some reason ->
+                declinef "Tile_mma intrinsics declined (%s): %s" reason (describe ());
+                fallback_or_tiled ()
+            | None -> (
+                let d_op = Option.value_exn ~here:[%here] (narrow_operand d_raw) in
+                let a_op = Option.value_exn ~here:[%here] (narrow_operand a_raw) in
+                let b_op = Option.value_exn ~here:[%here] (narrow_operand b_raw) in
+                match emit ~d_prec ~a_prec ~b_prec ~ta ~tb ~m ~n ~k ~d:d_op ~a:a_op ~b:b_op with
+                | Some doc ->
+                    (* Accepting a swizzled operand is a promise that it was read through a
+                       swizzle-aware load; no other reading of that layout is correct. *)
+                    let swizzled (_, _, _, layout) =
+                      match layout with `Swizzled_b128 -> true | `Plain -> false
+                    in
+                    record
+                      (if List.exists [ d_op; a_op; b_op ] ~f:swizzled then Mma_intrinsics_ldmatrix
+                       else Mma_intrinsics);
+                    doc
+                | None ->
+                    declinef "Tile_mma intrinsics declined by the backend hook: %s" (describe ());
+                    fallback_or_tiled ())))
     | If { cond = c, cprec; body } ->
         (* Guarded statement (axis-types proposal §2): [body] executes iff [cond] is nonzero -- C's
            [if] tests exactly that. *)
@@ -4089,9 +4171,20 @@ module C_syntax (B : C_syntax_config) = struct
                  (* Workgroup-shared placement (axis-types proposal §3): one tile per workgroup
                     instead of one per thread. [= {0}] is not allowed for shared declarations, so
                     zero-initialization stays as explicit [Zero_out] code (never elided for shared
-                    nodes; see [zero_out_loop_redundant]); shared placements also keep the backend's
-                    default layout (no [aligned_local_attr]). *)
-                 string (Option.value_exn ~here:[%here] B.shared_decl_prefix)
+                    nodes; see [zero_out_loop_redundant]); shared placements otherwise keep the
+                    backend's default layout (no [aligned_local_attr]).
+
+                    A [Swizzle_b128] tile is the exception: its layout contract is stated in
+                    16-byte units, and the warp-cooperative loads that consume it
+                    ([ldmatrix], gh-ocannl-481 item 3) require every row-group address to be
+                    16-byte aligned. Row starts are 16-byte multiples by the [Stage] validation, so
+                    aligning the base is what makes all of them aligned. The GNU attribute spelling
+                    is understood by every compiler that has a shared address space here (nvcc,
+                    hipcc, MSL's clang). *)
+                 (match swizzle_of tn with
+                 | Some Low_level.Swizzle_b128 -> string "__attribute__((aligned(16))) "
+                 | Some Low_level.Swizzle_elem | None -> empty)
+                 ^^ string (Option.value_exn ~here:[%here] B.shared_decl_prefix)
                  ^^ string (B.typ_of_prec @@ Lazy.force tn.storage_prec)
                  ^^ space
                  ^^ string (get_ident tn)
