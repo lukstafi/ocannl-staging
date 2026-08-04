@@ -160,7 +160,7 @@ val mma_syntax :
 - Fragment loads take a leading-dimension stride; `Stage` mints the shared tiles, so a
   `~pad_stride` option there (pad the minor dimension to avoid bank conflicts / satisfy
   alignment) is the natural follow-up knob. v1 uses exact dims — correct, possibly
-  bank-conflicted.
+  bank-conflicted. *(Landed as `Stage { pad_stride }`, gh-ocannl-481 item 4.)*
 - `check_hardware_limits` already budgets `workgroup_shared` bytes; fragments live in
   the register file and need no new budget in v1.
 
@@ -196,7 +196,8 @@ proposal.
   ordering).
 - **T4 (optional) — the ceiling**: raw `mma.sync`/`ldmatrix`, swizzled staging layouts
   (`Stage ~pad_stride` and beyond), double-buffered tiles; driven by benchmarks, not
-  speculation.
+  speculation. *(The emission half landed with gh-ocannl-481; the benchmark half — the rule that
+  decides whether any of it stays — has not run. Double buffering is untouched.)*
 
 ## Acceptance criteria
 
@@ -334,6 +335,14 @@ OCANNL grows the second fp8 format; `ldmatrix`-based fragment loads from swizzle
 and Blackwell's block-scaled `kind::mxf8f6f4` (the T4 ceiling chase). tf32 for uniform f32
 landed 2026-07-22 behind the `tf32_matmuls` numerics-policy key (see T3 status above).
 
+Most of that list landed 2026-08-04 — the fp8 arm's `ta`/`tb` gathers, `ldmatrix` over
+`Swizzle_b128` staged tiles on both inline-PTX arms, the swizzled autotune twins, the family-arch
+marker mechanism, and `Stage ~pad_stride`. e4m3 and block scaling stay blocked on the precision /
+microscaling-storage question rather than on emission. See
+[gh-ocannl-481](gh-ocannl-481.md) for the outcome record, and
+[gh-ocannl-481-item3-ldmatrix](gh-ocannl-481-item3-ldmatrix.md) for the design resolution it
+implements.
+
 ## The accumulator is part of the capability (gh-ocannl-545, 2026-08-04)
 
 Found by the gh-538 CUDA benchmark leg: on a uniformly-bf16 `mlp_wide`, the tuner seeded 36
@@ -396,7 +405,9 @@ XOR-swizzled layout. Design decisions:
   scalar today, so `col ^ (P & (C-1))` spreads same-column accesses of consecutive rows across
   banks at element granularity (fully conflict-free for f32 when `C >= 32`, `C/32`-fold reduced
   below). The CUTLASS-style vector-unit swizzle becomes relevant with `ldmatrix`/vectorized loads
-  — that is the remaining T4 chase, not this slice.
+  — that is the remaining T4 chase, not this slice. *(Landed as the second flavor
+  `Swizzle_b128`, gh-ocannl-481 item 3: the mark became a `Tn.t -> swizzle_kind` map and the
+  element flavor kept its name and meaning.)*
 - **Row-major renderings decline swizzled nodes.** The `Tile_mma` intrinsic hook, the fragment
   scope, and the register-tiled path all consume pointer+stride operands, so swizzled operands
   decline (visible via `schedule_log_declines` / `mma_census`) into the lane-0 scalar fallback,
@@ -404,12 +415,18 @@ XOR-swizzled layout. Design decisions:
   contiguous vector load/store renderings bail. Consequently `swizzle` currently benefits the
   scalar/blocktiled staged GPU kernels (the S2 shape); combining it with `Tensorize` is correct
   but forfeits the intrinsics until swizzle-aware (`ldmatrix`-based) fragment loads exist.
+  *(Still true of `Swizzle_elem`, which is what this bullet now names. `Swizzle_b128` is the
+  flavor the CUDA inline-PTX arms DO consume — gh-ocannl-481 item 3 — so it composes with
+  `Tensorize`; wmma and Metal still decline both.)*
 - Exercised by `test/operations/schedule_swizzle_matmul.ml`: GPU parity of the swizzled S2 matmul
   and of the swizzled staged+tensorized pipeline against the serial twin (verified on the RTX
   5070), structural XOR-in-source checks, the intrinsic-decline check, and the three `Stage`
   validation errors (uniform on all backends). Autotune sketch seeds deliberately do not set
   `swizzle` yet: the staged sketches feed `Tensorize`, where a swizzled tile would trade the
   intrinsics for a bank-conflict fix — a bad bargain until the fragment loads are swizzle-aware.
+  *(Since gh-ocannl-481 item 3 the staged mma seeds DO carry a `Swizzle_b128` twin — but only for
+  format triples the backend advertises in `mma_capability.mma_staged_layouts`, i.e. exactly where
+  the bargain is no longer bad.)*
 
 ## Lane-aware Stage (implemented 2026-07-07)
 
