@@ -1770,7 +1770,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
 
   (* CUDA kernel launches on one stream already execute in FIFO order, so the generic event chain is
      correct; a cheaper plain-sequence task is a possible follow-up (events are ~free there). *)
-  let sequence_segments _context ~name:_ _tasks = None
+  let sequence_segments _context ~name:_ ~bindings:_ ~uses_merge_buffer:_ _tasks = None
 
   let get_global_debug_info () =
     Sexp.message "cuda_global_debug"

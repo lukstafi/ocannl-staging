@@ -509,7 +509,7 @@ struct
 
   (* CPU segment tasks are host closures the stream runner executes in order; the generic event
      chain degenerates to no-ops there, so there is nothing cheaper to provide. *)
-  let sequence_segments _context ~name:_ _tasks = None
+  let sequence_segments _context ~name:_ ~bindings:_ ~uses_merge_buffer:_ _tasks = None
 
   (* Transfers take {!Backend_intf.buffer_loc} and resolve to the backend pointer here, against the
      device's private pool table -- the resolution is backend-side, not in the generic shared
@@ -995,7 +995,11 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
              [sequence_segments]; the fallback chains an event per boundary: schedule each next
              segment to wait for all work enqueued so far. No host blocking. *)
           let schedule =
-            match sequence_segments context ~name:code.name tasks with
+            match
+              sequence_segments context ~name:code.name ~bindings
+                ~uses_merge_buffer:(Option.is_some code.expected_merge_node)
+                tasks
+            with
             | Some fused -> fused
             | None ->
                 Task.Task
