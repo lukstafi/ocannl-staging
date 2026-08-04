@@ -38,6 +38,29 @@
 
 ### Changed
 
+- **Native fp16 arithmetic on the CPU backends** (gh-ocannl-516): fp16 is the one 16-bit format a
+  CPU can execute natively, and where it does, computing in it doubles the lane count against f32.
+  `cc` probes the configured compiler once per process for `_Float16` and for whether its arithmetic
+  is genuinely 16-bit (ARMv8.2-FP16, AVX512-FP16) rather than promoted to float, and reports the
+  latter as `hardware_limits.native_fp16_arithmetic`. `Ir.Numerics.fp16_arithmetic` (config
+  `fp16_arithmetic`, default **false** — unlike gh-ocannl-517's widening, this trades mantissa for
+  throughput) then makes fp16 compute in fp16: `Vectorized` loops mint a `HALF_T` vector and run at
+  twice f32's lanes with no conversions at all. The fused multiply-add of both the scalar and the
+  vector rendering goes through one shared builtin macro, because `fmaf` on `_Float16` rounds twice
+  where the elementwise builtin rounds once — the two paths must not disagree. `Tile_mma` register
+  tiling still declines fp16; its tile geometry and packed-`Stage` seeds assume f32 lane counts.
+
+  Measured on an M-series at n = 2^22: the compute-bound control goes from 0.76x to **1.99x** of
+  f32, and the streaming kernels from ~1.5x to ~2x.
+
+- **`cc_backend_arch_flags` defaults to `auto`** (found while implementing gh-ocannl-516): the
+  previous default `-march=native` is accepted by Apple clang on arm64 and *downgrades* the target
+  — 22 `__ARM_FEATURE_*` macros against 26 with no flag and 33 with `-mcpu=native`, losing
+  `__ARM_FEATURE_FP16_VECTOR_ARITHMETIC` among them, so a machine with native 16-bit arithmetic
+  looked like one without. `auto` asks the target which architecture family it is in and probes that
+  family's spelling (`-mcpu=native` on ARM, `-march=native` on x86, where `-mcpu=` is only an alias
+  for `-mtune=` and would not select the ISA). Explicit values are passed through verbatim.
+
 - **16-bit storage, f32 compute on the CPU backends** (gh-ocannl-517): a tensor node's precision is
   now its *storage* precision only; the precision its arithmetic runs at is a separate decision at
   the codegen seam (`C_syntax_config.compute_prec`). The GPU backends are unchanged — they have

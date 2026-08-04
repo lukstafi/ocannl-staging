@@ -133,6 +133,7 @@ let known_config_keys =
       "cc_parallel_chunks";
       "cc_grid_private_bytes_cap";
       "cc_vector_bytes";
+      "cc_fp16_arithmetic";
       (* Autotuning (Autotune.tune) *)
       "autotune_beam_width";
       "autotune_rounds";
@@ -150,6 +151,7 @@ let known_config_keys =
       (* Numerics policy (gh-ocannl-478) *)
       "tf32_matmuls";
       "narrow_compute_f32";
+      "fp16_arithmetic";
       (* Identifiers and other *)
       "ll_ident_style";
       "cd_ident_style";

@@ -346,9 +346,14 @@ cc_backend_optimization_level=3
 cc_backend_compiler_command=
 
 # Additional architecture-specific flags for the CC backend compiler invocation.
-# Default `-march=native` targets the host CPU. Override for portability/cross-compilation.
-# To disable arch-specific tuning from commandline, pass `--ocannl_cc_backend_arch_flags=`.
-cc_backend_arch_flags=-march=native
+# The default "auto" targets the host CPU with the spelling that architecture uses, probed once
+# per process: `-mcpu=native` on ARM, `-march=native` on x86, nothing if the compiler rejects it.
+# The distinction matters -- Apple clang accepts `-march=native` on arm64 and DOWNGRADES the
+# target with it, losing __ARM_FEATURE_FP16_VECTOR_ARITHMETIC among others, while on x86 `-mcpu=`
+# is an alias for `-mtune=` and would not select the ISA at all. Any other value is passed through
+# verbatim (`-march=native` restores the pre-gh-517 behavior); pass an empty value for
+# portability/cross-compilation.
+cc_backend_arch_flags=auto
 
 # Explicit SIMD flags appended to the CC backend compiler invocation (gh-ocannl-164).
 # The default "auto" probes once per process: if the target selected by cc_backend_arch_flags
@@ -513,6 +518,21 @@ tf32_matmuls=false
 # GPU backends have native 16-bit types and are unaffected either way.
 # Programmatic override: `Ir.Numerics.set_policy`.
 narrow_compute_f32=true
+
+# Numerics policy: on CPU targets with native 16-bit arithmetic (ARMv8.2-FP16, AVX512-FP16),
+# compute fp16 in fp16 instead of widening to f32 -- the lane count doubles against f32, at
+# fp16's 10-bit mantissa and 65504 range for intermediates. Off by default: unlike
+# narrow_compute_f32 this trades accuracy for throughput. Ignored on targets whose fp16
+# arithmetic is promoted to float (see cc_fp16_arithmetic), where it would cost accuracy for no
+# speed, and on the GPU backends. Programmatic override: `Ir.Numerics.set_policy`.
+fp16_arithmetic=false
+
+# Whether the cc backend's target has native _Float16 arithmetic. "auto" (the default) probes the
+# configured compiler once per process: "none" if _Float16 is missing, "native" if the target
+# defines __ARM_FEATURE_FP16_VECTOR_ARITHMETIC or __AVX512FP16__, "promoted" if the type exists
+# but the compiler implements its arithmetic by widening to float. Set explicitly to override the
+# probe (e.g. to measure the promoted path on a native target).
+cc_fp16_arithmetic=auto
 
 # Limit on the allowed size of unrolled constant tensor nodes
 # (where the initialization code sets the values).

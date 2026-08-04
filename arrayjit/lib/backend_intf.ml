@@ -127,6 +127,17 @@ type hardware_limits = {
       (** Advisory peak main-memory bandwidth in bytes/s, the other leg of the roofline envelope
           (gh-ocannl-491). Same contract as [peak_flops]: advisory, rough, never load-bearing for
           correctness; [None] when the backend offers no estimate. *)
+  native_fp16_arithmetic : bool;
+      (** Whether 16-bit float arithmetic executes natively at twice f32's lane count (gh-ocannl-516:
+          ARMv8.2-FP16, AVX512-FP16). [false] covers both "no [_Float16] on this target" and the
+          middle case that matters for ranking: the type exists and computes correctly, but the
+          compiler implements it by promoting to float, so the lane count does {e not} double and
+          candidates must not be seeded as if it did. Whether the type exists at all is a separate,
+          purely textual question the emitted C answers for itself ([HAS_NATIVE_FLOAT16]); this
+          field is about throughput.
+
+          Always [false] on the GPU backends, whose 16-bit story is their native types and
+          tensor-core shapes rather than a CPU vector width. *)
 }
 [@@deriving sexp, compare, equal]
 
@@ -138,6 +149,7 @@ let no_hardware_limits =
     simd_vector_bytes = 0;
     peak_flops = None;
     peak_memory_bandwidth = None;
+    native_fp16_arithmetic = false;
   }
 
 (** The backend slab allocator, replacing the per-tnode [Alloc_buffer] interface. The shared
