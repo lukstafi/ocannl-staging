@@ -1,5 +1,25 @@
 ## [Unreleased]
 
+### Added
+
+- **The tuner's honest reference point** (gh-ocannl-552, the shared cause behind gh-ocannl-532
+  and gh-ocannl-533): `Autotune.tune` reports the untuned default pipeline's measured time as
+  `report.default_ms`, next to `baseline_ms` (which is `infinity` on GPU backends, where the
+  serial baseline is never dispatched) — the in-search answer to "did tuning beat the schedule
+  the user gets without tuning?", the question gh-ocannl-491 could previously only ask in the
+  benchmark harness. The measurement is the existing config-thresholds fissioned seed's,
+  attributed by digest so a seed that dedups against a timed twin still reports; it persists on
+  schedule-cache entries as an optional field, so pre-existing entries stay readable. The
+  attribution honors the scheduling gates (with automatic scheduling inactive the untuned default
+  is the serial form, reported via the baseline; with `schedule_fission=false` no candidate
+  reproduces the default and the field is absent), and cached values are validated against a
+  config fingerprint of the gates and preset thresholds, so a config change that redefines the
+  default drops the stale diagnostic instead of reporting it. The issue's
+  other half is settled in place: the base compile stays the unscheduled serial form (the default
+  pipeline is several kernels in general, every candidate family assumes the serial zero point,
+  and annotation would bake per-device decisions into the cache digest), documented at the
+  capture site.
+
 ### Changed
 
 - **Operation results close down; `stretch` requests use-site resolution** (gh-ocannl-544): an

@@ -5174,6 +5174,22 @@ let automatic_schedule_active ~backend_name =
   && ((backend_is_gpu backend_name && Lazy.force automatic_gpu_schedule)
      || (backend_is_cpu backend_name && Lazy.force automatic_cpu_schedule))
 
+let default_pipeline_fissions () = Lazy.force schedule_fission
+
+let default_schedule_fingerprint ~backend_name =
+  if not (automatic_schedule_active ~backend_name) then "inactive"
+  else
+    let fission = Lazy.force schedule_fission in
+    if backend_is_gpu backend_name then
+      let bs = String.strip (Utils.get_global_arg ~arg_name:"gpu_schedule_block_size" ~default:"256") in
+      let mp = String.strip (Utils.get_global_arg ~arg_name:"gpu_schedule_min_parallel" ~default:"64") in
+      [%string "gpu:fission=%{fission#Bool}:block_size=%{bs}:min_parallel=%{mp}"]
+    else
+      let mp =
+        String.strip (Utils.get_global_arg ~arg_name:"cpu_schedule_min_parallel" ~default:"16384")
+      in
+      [%string "cpu:fission=%{fission#Bool}:min_parallel=%{mp}"]
+
 let maybe_default_schedule ~backend_name ?(limits = Backend_intf.no_hardware_limits) ~static_indices
     (opt : Low_level.optimized) : Low_level.optimized =
   (* [automatic_schedule_active] keeps logged runs serial: runtime kernel logging is

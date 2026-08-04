@@ -5,6 +5,8 @@ cache-hit replay is fissioned: true
 fissioned cache-hit replay computes correctly: true
 tuned fissionable chain values correct: true
 chain tune searches then hits the cache: true
+the default reference is measured and survives the cache round-trip (gh-ocannl-552): true
+a stale default fingerprint drops the cached reference but not the hit (gh-ocannl-552): true
 chain tune timed a dispatchable candidate: true
 chain tune reached multiple candidates (timed, or refused as unparallelized): true
 chain tune: candidates refused as unparallelized exactly on GPU: true

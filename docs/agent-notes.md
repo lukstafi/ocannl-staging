@@ -210,6 +210,14 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   timed the search stores no cache entry and returns the untuned default compile rather than the
   serial incumbent. On CPU backends the serial form runs at full single-core speed and is still
   timed. When timing anything else through this seam, price the serial form before dispatching it.
+- The base compile staying unscheduled is a settled decision, not an oversight (gh-ocannl-552): the
+  default pipeline is `maybe_default_schedules` — fission then per-segment annotation, so several
+  kernels in general, not one `optimized` to rebase candidates on; every candidate family assumes
+  the serial zero point; and annotation reads `hardware_limits`, which would bake per-device
+  decisions into the cache's `source_digest`. The "did tuning beat the shipped default?" reference
+  is `report.default_ms` instead — the config-thresholds fissioned seed reproduces the untuned
+  pipeline exactly and its time is attributed by digest (so a seed that dedups against a timed twin,
+  the CPU serial baseline included, still reports).
 
 ## Backends
 

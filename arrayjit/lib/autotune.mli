@@ -41,7 +41,8 @@
       segment's canonical digest. [`Zeros] segments keep the default zero-expansion; [`Solo]
       segments stay unscheduled. One seed uses the config-default thresholds, reproducing the
       untuned default pipeline exactly — so the winner is never worse than not tuning, even on
-      launch-overhead-bound workloads where every aggressive preset loses to it. Each preset is
+      launch-overhead-bound workloads where every aggressive preset loses to it; its measured time
+      is surfaced as the report's [default_ms] reference (gh-ocannl-552). Each preset is
       additionally seeded in a {e privatized} variant ({!extend_with_privatize}): per segment, every
       materialized read-modify-write accumulator is contracted into a per-thread register tile
       ({!Ir.Schedule.optop.Privatize}) over its serial reduction loop where the op's preconditions
@@ -344,6 +345,24 @@ type report = {
           on a GPU backend an unparallelized candidate is never run (gh-ocannl-532 — the whole
           routine in one work-item, unbounded in cost and uninterruptible), so it has no
           measurement and cannot win. Also [infinity] when [baseline_declined]. *)
+  default_ms : float option;
+      (** The untuned default pipeline's measured time (gh-ocannl-552): the [config_thresholds]
+          fissioned-preset seed reproduces {!Ir.Schedule.maybe_default_schedules} exactly, so this
+          is the schedule the user gets without tuning — the reference [baseline_ms] cannot provide
+          on GPU backends, where it is [infinity]. Attributed by digest, so it is present even when
+          the seed deduplicated against an identical earlier candidate (the timed serial baseline
+          included, on CPU backends whose config thresholds leave the code unparallelized). On a
+          completed search with [default_ms = Some d], [best_ms <= d] by construction — the seed is
+          in the pool — and the margin between them is the value tuning added (the question
+          gh-ocannl-491 asks). The attribution honors the scheduling gates: with automatic
+          scheduling inactive ({!Ir.Schedule.automatic_schedule_active}) the untuned default is the
+          unscheduled serial form and this field reports the baseline's measurement (so [None] on
+          GPU, where that form is never dispatched); with config [schedule_fission=false] no
+          candidate reproduces the whole-routine config-thresholds default and this is [None].
+          Also [None] when the seed failed to compile, was refused as unparallelized on GPU
+          (gh-ocannl-532), or on a cache hit whose entry predates this field or was written under a
+          config that shaped a different default pipeline
+          ({!Ir.Schedule.default_schedule_fingerprint} mismatch). *)
   best_ms : float;
       (** The winner's measured time, or [infinity] when nothing was timed at all — every candidate
           failed and the baseline was not dispatched (or was declined). In that case no cache entry

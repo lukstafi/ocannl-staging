@@ -160,6 +160,17 @@ type entry = {
   baseline_ms : float;
       (** The unscheduled baseline's measured time, for diagnostics; [infinity] on GPU backends,
           where the unparallelized baseline is not dispatched (gh-ocannl-532). *)
+  default_ms : float option; [@sexp.option]
+      (** The untuned default pipeline's measured time from the search that wrote the entry, for
+          diagnostics (gh-ocannl-552). [None] when the default seed was not timed, or for entries
+          written before this field existed — optional so such entries stay readable without an
+          [entry_version] bump. *)
+  default_fingerprint : string option; [@sexp.option]
+      (** {!Schedule.default_schedule_fingerprint} at store time, present iff [default_ms] is: the
+          cache key covers only the source digest and the backend, so a config change can redefine
+          what "the default pipeline" means without missing the cache. A replaying process
+          compares fingerprints and drops a stale [default_ms] (the schedule itself stays valid —
+          only this diagnostic is config-relative). *)
 }
 [@@deriving sexp]
 
