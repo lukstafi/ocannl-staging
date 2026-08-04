@@ -102,6 +102,98 @@ end
 let initialized_devices = Hash_set.create (module Int)
 let initialized = ref false
 
+(* The compute capability, as [major * 10 + minor], of the GeForce-Blackwell family whose
+   block-scaled [mma.sync ... kind::mxf8f6f4] forms exist only under an architecture-specific
+   target (gh-ocannl-481 item 3, D4). *)
+let mxfp8_family_cc = 120
+
+let%diagn_sexp gpu_arch_options ~device_cc cu_src : string list =
+  (* The [--gpu-architecture] options for one nvrtc compile, as a pure function of the source's arch
+     markers and the attached devices' minimum compute capability — separated from [cuda_to_ptx] so
+     the policy is testable without a device (arrayjit/test/test_cuda_arch_flags.ml).
+
+     Two kinds of target, and the difference is the whole point of this function:
+
+     - A FLOOR (every marker but one): the lowest arch whose PTX contains the instruction. PTX
+       targeted at a floor is forward-JIT-compiled by the driver on every later GPU, so one compile
+       covers the entire range above it. The [(wmma-bf16)] and [(wmma-tf32)] markers are emitted by
+       [mma_syntax] for bf16 resp. tf32 fragments (both sm_80+); [(mma-fp8)] and [(mma-bf16)] for
+       the inline-PTX [mma.sync] paths (sm_89+ resp. sm_80+, no header needed).
+     - A FAMILY target ([(mma-mxfp8)]): a [compute_120a]-style architecture-specific arch, which
+       only the device family it names can load. Blackwell's block-scaled [kind::mxf8f6f4] forms
+       exist ONLY under such a target, so this is the one case where forward-JIT portability has to
+       be given up — and therefore the one marker gated on the attached devices' own family. Family
+       PTX is never produced for a device that could not load it; a marked kernel reaching a
+       mismatched device falls back to floor targeting, which is defense in depth rather than a
+       recovery path (an arm emitting the marker is gated on the same family, so it should have
+       declined already). No arm emits it yet: block scaling itself is blocked on OCANNL having
+       microscaling storage at all (the e8m0 per-32-element scale factors are extra mma OPERANDS
+       with their own layout, and [Tile_mma] has no slot for them), and a unit-scale arm would be
+       numerically identical to the plain fp8 path while forfeiting forward-JIT. *)
+  let has s = String.is_substring cu_src ~substring:s in
+  if has "(mma-mxfp8)" && device_cc / 10 = mxfp8_family_cc / 10 then (
+    [%log "family-arch target", (device_cc : int)];
+    [ Printf.sprintf "--gpu-architecture=compute_%da" device_cc ])
+  else
+    let uses_wmma = has "nvcuda::wmma" in
+    (* Half/bf16 ARITHMETIC intrinsics (unlike the conversions, which cuda_fp16.h/cuda_bf16.h
+       emulate on any arch) are only declared for __CUDA_ARCH__ >= 530 (halfs) resp. >= 800
+       (bfloat16s), while nvrtc's default target is compute_52 — e.g. [__hfma] in a serial half
+       matmul fails with "identifier undefined" unless we raise the floor. The bf16 overloads share
+       the half intrinsics' names, so a bf16 kernel is recognized by the type name appearing
+       alongside the arithmetic tokens; a kernel mixing half arithmetic with bf16 storage-only is
+       conservatively floored at compute_80 too. *)
+    let uses_h_arith =
+      (* Every half-arith token [unop_syntax]/[binop_syntax]/[ternop_syntax] can emit; [hexp]/[hlog]
+         also cover their [2]-suffixed variants and [__hmax]/[__hmin] the [_nan] variants as
+         substrings. *)
+      List.exists ~f:has
+        [
+          "__hadd";
+          "__hsub";
+          "__hmul";
+          "__hdiv";
+          "__hmax";
+          "__hmin";
+          "__hgt";
+          "__hfma";
+          "hexp";
+          "hlog";
+          "hsin";
+          "hcos";
+          "hsqrt";
+          "hrcp";
+          "hrsqrt";
+          "htanh_approx";
+        ]
+    in
+    (* [compile_batch] concatenates several kernels into one source, so the floors can trigger
+       independently (e.g. a half-wmma kernel batched with scalar bf16 arithmetic needs compute_80
+       even without the [(wmma-bf16)] marker): take the max, not the first match. *)
+    let arch_floor =
+      List.filter_opt
+        [
+          (if uses_wmma then Some (if has "(wmma-bf16)" || has "(wmma-tf32)" then 80 else 70)
+           else None);
+          (if has "(mma-fp8)" then Some 89 else None);
+          (if has "(mma-bf16)" then Some 80 else None);
+          (if uses_h_arith then Some (if has "__nv_bfloat16" then 80 else 53) else None);
+        ]
+      |> List.max_elt ~compare:Int.compare
+    in
+    match arch_floor with
+    | Some floor ->
+        (* CUDA 13 dropped offline compilation below compute_75 (Maxwell through Volta), so nvrtc 13
+           rejects the compute_53/compute_70 floors outright: raise a triggered floor to compute_75
+           whenever every attached device can load such PTX (a device below sm_75 keeps the literal
+           floor — it must be paired with an nvrtc 12.x that still accepts it). We deliberately do
+           NOT raise all the way to the device arch (e.g. compute_120 on Blackwell GeForce): the
+           sm_89 fp8 [mma.sync] encoding remains valid under a compute_89 target where a compute_120
+           target would demand the family-specific [kind::] forms. *)
+        let arch = max floor (min 75 device_cc) in
+        [ Printf.sprintf "--gpu-architecture=compute_%d" arch ]
+    | None -> []
+
 module Impl : Ir.Backend_impl.Lowered_backend = struct
   include Backend_impl.Device (Device_stream) (Slab)
 
@@ -178,76 +270,14 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
         Option.iter Slab.free_pool ~f:(fun free -> free device ~pool_id))
 
   let%diagn2_sexp cuda_to_ptx ~name cu_src =
-    (* Tensorize-mma T3: kernels containing wmma intrinsics need <mma.h> and an explicit arch
-       (nvrtc's default is below sm_70). Injected only when used, so kernels without tensor cores
-       compile exactly as before even where the toolkit headers are absent. The [(wmma-bf16)] and
-       [(wmma-tf32)] markers are emitted by [mma_syntax] for bf16 resp. tf32 fragments (both
-       sm_80+); the [(mma-fp8)] and [(mma-bf16)] markers for the inline-PTX [mma.sync] paths (sm_89+
-       resp. sm_80+, no header needed). *)
-    let uses_wmma = String.is_substring cu_src ~substring:"nvcuda::wmma" in
-    let cu_src = if uses_wmma then "#include <mma.h>\n" ^ cu_src else cu_src in
-    (* Half/bf16 ARITHMETIC intrinsics (unlike the conversions, which cuda_fp16.h/cuda_bf16.h
-       emulate on any arch) are only declared for __CUDA_ARCH__ >= 530 (halfs) resp. >= 800
-       (bfloat16s), while nvrtc's default target is compute_52 — e.g. [__hfma] in a serial half
-       matmul fails with "identifier undefined" unless we raise the floor. The bf16 overloads share
-       the half intrinsics' names, so a bf16 kernel is recognized by the type name appearing
-       alongside the arithmetic tokens; a kernel mixing half arithmetic with bf16 storage-only is
-       conservatively floored at compute_80 too. *)
-    let has s = String.is_substring cu_src ~substring:s in
-    let uses_h_arith =
-      (* Every half-arith token [unop_syntax]/[binop_syntax]/[ternop_syntax] can emit; [hexp]/[hlog]
-         also cover their [2]-suffixed variants and [__hmax]/[__hmin] the [_nan] variants as
-         substrings. *)
-      List.exists ~f:has
-        [
-          "__hadd";
-          "__hsub";
-          "__hmul";
-          "__hdiv";
-          "__hmax";
-          "__hmin";
-          "__hgt";
-          "__hfma";
-          "hexp";
-          "hlog";
-          "hsin";
-          "hcos";
-          "hsqrt";
-          "hrcp";
-          "hrsqrt";
-          "htanh_approx";
-        ]
+    (* Tensorize-mma T3: kernels containing wmma intrinsics need <mma.h> (nvrtc's default target is
+       below sm_70). Injected only when used, so kernels without tensor cores compile exactly as
+       before even where the toolkit headers are absent. *)
+    let cu_src =
+      if String.is_substring cu_src ~substring:"nvcuda::wmma" then "#include <mma.h>\n" ^ cu_src
+      else cu_src
     in
-    (* [compile_batch] concatenates several kernels into one source, so the floors can trigger
-       independently (e.g. a half-wmma kernel batched with scalar bf16 arithmetic needs compute_80
-       even without the [(wmma-bf16)] marker): take the max, not the first match. *)
-    let arch_floor =
-      List.filter_opt
-        [
-          (if uses_wmma then Some (if has "(wmma-bf16)" || has "(wmma-tf32)" then 80 else 70)
-           else None);
-          (if has "(mma-fp8)" then Some 89 else None);
-          (if has "(mma-bf16)" then Some 80 else None);
-          (if uses_h_arith then Some (if has "__nv_bfloat16" then 80 else 53) else None);
-        ]
-      |> List.max_elt ~compare:Int.compare
-    in
-    let arch_opts =
-      match arch_floor with
-      | Some floor ->
-          (* CUDA 13 dropped offline compilation below compute_75 (Maxwell through Volta), so nvrtc
-             13 rejects the compute_53/compute_70 floors outright: raise a triggered floor to
-             compute_75 whenever every attached device can load such PTX (a device below sm_75 keeps
-             the literal floor — it must be paired with an nvrtc 12.x that still accepts it). We
-             deliberately do NOT raise all the way to the device arch (e.g. compute_120 on Blackwell
-             GeForce): PTX targeted at a floor arch is forward-JIT-compiled by the driver on every
-             later GPU, and instruction variants like the sm_89 fp8 [mma.sync] remain valid under a
-             compute_89 target where a compute_120 target would demand the family-specific [kind::]
-             forms. *)
-          let arch = max floor (min 75 (min_compute_capability ())) in
-          [ Printf.sprintf "--gpu-architecture=compute_%d" arch ]
-      | None -> []
-    in
+    let arch_opts = gpu_arch_options ~device_cc:(min_compute_capability ()) cu_src in
     let name_cu = name ^ ".cu" in
     if Utils.settings.output_debug_files_in_build_directory then (
       let build_file = Utils.open_build_file ~base_name:name ~extension:".cu" in
