@@ -246,6 +246,16 @@ val add_used_in_pointwise : row_var -> unit
 (** Mark a row variable as used in a pointwise shape update. Meant specifically for input rows, to
     indicate that the variable can be guessed empty when it ends up in a parameter. *)
 
+val add_resolve_at_use : row_var -> unit
+(** Mark a row variable as resolved by its use sites: at the final solver stages it may close to
+    the GLB of its use sites' rows, acquiring axes its own arguments do not have. Unmarked
+    variables close to an empty remainder instead — a use site broadcasts an operation result in
+    but cannot silently widen it beyond its arguments' shapes (gh-ocannl-544). Registered
+    automatically for terminal rows (leaf tensors and parameters) and for
+    parameter-initialization cones; requested explicitly by the [stretch] operation. *)
+
+val is_resolve_at_use : row_var -> bool
+
 val subst_row : environment -> t -> t
 
 val unify_row :

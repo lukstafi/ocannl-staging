@@ -1910,6 +1910,21 @@ let set_terminal ~is_param (sh : t) =
     :: Row.Terminal_row (is_param, sh.output, [ get_origin `Output ])
     :: !active_constraints
 
+(* Marks the shape's rows as resolved by their use sites (gh-ocannl-544): their row variables may
+   close to the GLB of their use sites' rows at the final solver stages, where operation results
+   close to an empty remainder by default. Substitutes through the current environment so that a
+   variable already unified away transfers the mark to its representative; later unifications
+   propagate it further inside [Row.unify_row]. *)
+let set_resolve_at_use (sh : t) =
+  let mark row =
+    match (Row.subst_row !state row).bcast with
+    | Row.Row_var v -> Row.add_resolve_at_use v
+    | Row.Broadcastable -> ()
+  in
+  mark sh.batch;
+  mark sh.input;
+  mark sh.output
+
 let unsafe_reinitialize () =
   update_uid := 0;
   state := Row.empty_env;
