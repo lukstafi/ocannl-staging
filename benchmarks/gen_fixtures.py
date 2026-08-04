@@ -123,7 +123,9 @@ def build_conv(spec, rng, tensors, meta):
 
 
 def build_gpt(spec, rng, tensors, meta):
-    """GPT-2-style decoder, inference-only. OCANNL layouts:
+    """GPT-2-style decoder. The same builder serves the forward-only workload (gpt2_mini,
+    [mode: infer]) and the training one (gpt2_mini_train, [mode: train], gh-ocannl-551),
+    which trains every weight below with plain SGD. OCANNL layouts:
     wte [d_model, vocab] (output d, input v — used transposed as the tied lm_head);
     wq/wk/wv [heads, d_head, d_model]; wo [d_model, heads, d_head];
     ffn w1 [d_ff, d_model], w2 [d_model, d_ff]; ln gammas/betas [d_model];
@@ -164,6 +166,10 @@ def build(spec_path: Path, out_dir: Path):
         "mode": spec.get("mode", "train"),
         "batch_size": str(spec["batch_size"]),
         "lr": repr(spec.get("lr", 0.0)),
+        # Initial f16 loss scale for the mixed-precision legs (torch's GradScaler default). It is
+        # a workload property: a scale whose first step already overflows costs the dynamic legs
+        # backoff steps inside the parity window, and diverges the fixed-scale leg outright.
+        "loss_scale": repr(float(spec.get("loss_scale", 65536.0))),
         "seed": str(spec["seed"]),
         "parity_steps": str(spec["parity_steps"]),
         "warmup_steps": str(spec["warmup_steps"]),

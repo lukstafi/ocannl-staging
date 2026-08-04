@@ -2,8 +2,9 @@
 """tinygrad runner for the cross-framework benchmark suite (see benchmarks/README.md).
 
 Model-dispatched on the fixture metadata: mlp / conv (LeNet-5, valid convs) / gpt
-(pre-LN GPT-2-style decoder, inference-only). Math mirrors the OCANNL and PyTorch runners
-exactly; see the PyTorch runner's docstring for the conventions.
+(pre-LN GPT-2-style decoder, trained or inference-only per the fixture's `mode`). Math
+mirrors the OCANNL and PyTorch runners exactly; see the PyTorch runner's docstring for the
+conventions.
 """
 
 import argparse
@@ -123,31 +124,41 @@ def build_gpt(meta, data):
     n_layer, nh = int(meta["n_layer"]), int(meta["n_head"])
     d, v, seq = int(meta["d_model"]), int(meta["vocab"]), int(meta["seq_len"])
     dh = d // nh
-    wte = Tensor(data["wte"])  # [d, v]
-    emb = wte.T.contiguous().realize()  # [v, d]
-    wpe = Tensor(data["wpe"])
+    # mode: train (gpt2_mini_train) makes every weight a parameter of the SGD step; mode: infer
+    # (gpt2_mini) keeps them plain constants, as before.
+    training = meta.get("mode", "train") == "train"
+    leaf = param if training else Tensor
+    wte = leaf(data["wte"])  # [d, v]
+    wpe = leaf(data["wpe"])
     layers = [
         {
-            "wq": Tensor(data[f"l{i}_wq"].reshape(nh * dh, d)),
-            "wk": Tensor(data[f"l{i}_wk"].reshape(nh * dh, d)),
-            "wv": Tensor(data[f"l{i}_wv"].reshape(nh * dh, d)),
-            "wo": Tensor(data[f"l{i}_wo"].reshape(d, nh * dh)),
-            "g1": Tensor(data[f"l{i}_ln1_g"]),
-            "b1": Tensor(data[f"l{i}_ln1_b"]),
-            "g2": Tensor(data[f"l{i}_ln2_g"]),
-            "b2": Tensor(data[f"l{i}_ln2_b"]),
-            "fw1": Tensor(data[f"l{i}_ffn_w1"]),
-            "fb1": Tensor(data[f"l{i}_ffn_b1"]),
-            "fw2": Tensor(data[f"l{i}_ffn_w2"]),
-            "fb2": Tensor(data[f"l{i}_ffn_b2"]),
+            "wq": leaf(data[f"l{i}_wq"].reshape(nh * dh, d)),
+            "wk": leaf(data[f"l{i}_wk"].reshape(nh * dh, d)),
+            "wv": leaf(data[f"l{i}_wv"].reshape(nh * dh, d)),
+            "wo": leaf(data[f"l{i}_wo"].reshape(d, nh * dh)),
+            "g1": leaf(data[f"l{i}_ln1_g"]),
+            "b1": leaf(data[f"l{i}_ln1_b"]),
+            "g2": leaf(data[f"l{i}_ln2_g"]),
+            "b2": leaf(data[f"l{i}_ln2_b"]),
+            "fw1": leaf(data[f"l{i}_ffn_w1"]),
+            "fb1": leaf(data[f"l{i}_ffn_b1"]),
+            "fw2": leaf(data[f"l{i}_ffn_w2"]),
+            "fb2": leaf(data[f"l{i}_ffn_b2"]),
         }
         for i in range(n_layer)
     ]
-    gf, bf = Tensor(data["lnf_g"]), Tensor(data["lnf_b"])
+    gf, bf = leaf(data["lnf_g"]), leaf(data["lnf_b"])
+    flat = (
+        [wte, wpe, gf, bf] + [p for layer in layers for p in layer.values()] if training else []
+    )
     mask = Tensor(np.tril(np.ones((seq, seq), np.bool_)))  # [s, t]
+    # The embedding table is the transpose of the tied lm_head weight; under training it is
+    # recomputed inside forward so its gradient reaches wte, instead of being realized once.
+    emb_once = None if training else wte.T.contiguous().realize()  # [v, d]
 
     def forward(ids_onehot):
         b = ids_onehot.shape[0]
+        emb = wte.T if training else emb_once
         x = ids_onehot @ emb + wpe  # [b,s,d]
         for p in layers:
             h = layernorm(x, p["g1"], p["b1"])
@@ -175,7 +186,7 @@ def build_gpt(meta, data):
 
     ids = one_hot(data["ids"])
     tgt = one_hot(data["tgt"])
-    return loss_fn, [], (ids, tgt), int(meta["batch_size"]) * seq
+    return loss_fn, flat, (ids, tgt), int(meta["batch_size"]) * seq
 
 
 def main():

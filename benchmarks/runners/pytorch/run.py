@@ -2,10 +2,13 @@
 """PyTorch runner for the cross-framework benchmark suite (see benchmarks/README.md).
 
 Model-dispatched on the fixture metadata: mlp / conv (LeNet-5, valid convs) / gpt
-(pre-LN GPT-2-style decoder, inference-only). Math mirrors the OCANNL runners exactly:
+(pre-LN GPT-2-style decoder, trained or inference-only per the fixture's `mode`).
+Math mirrors the OCANNL runners exactly:
 same CE formulation (softmax -> one-hot dot -> log), same LayerNorm (biased variance,
-eps inside sqrt), same tanh-gelu constant, same -1e9 causal-mask fill, same conv layouts
-(fixture is channels-last / OCANNL axis order; this runner permutes to NCHW once).
+eps inside sqrt), same tanh-gelu constant, same conv layouts (fixture is channels-last /
+OCANNL axis order; this runner permutes to NCHW once). The causal mask fills with -1e9
+here and with -inf in OCANNL since gh-ocannl-548 — the same value after exp at every
+precision these runners use.
 """
 
 import argparse
@@ -107,32 +110,50 @@ def build_gpt(meta, data, dev):
     n_layer, nh = int(meta["n_layer"]), int(meta["n_head"])
     d, v, seq = int(meta["d_model"]), int(meta["vocab"]), int(meta["seq_len"])
     dh = d // nh
-    wte = data["wte"].to(dev)  # [d, v]
-    emb = wte.T.contiguous()  # [v, d]
-    wpe = data["wpe"].to(dev)
+    # mode: train (gpt2_mini_train) makes every weight a leaf parameter of the plain-SGD step;
+    # mode: infer (gpt2_mini) keeps them plain constants, as before.
+    training = meta.get("mode", "train") == "train"
+
+    def leaf(t):
+        t = t.contiguous().to(dev)
+        return t.requires_grad_() if training else t
+
+    wte = leaf(data["wte"])  # [d, v]
+    wpe = leaf(data["wpe"])
     layers = []
     for i in range(n_layer):
         layers.append(
             {
-                "wq": data[f"l{i}_wq"].reshape(nh * dh, d).to(dev),
-                "wk": data[f"l{i}_wk"].reshape(nh * dh, d).to(dev),
-                "wv": data[f"l{i}_wv"].reshape(nh * dh, d).to(dev),
-                "wo": data[f"l{i}_wo"].reshape(d, nh * dh).to(dev),
-                "g1": data[f"l{i}_ln1_g"].to(dev),
-                "b1": data[f"l{i}_ln1_b"].to(dev),
-                "g2": data[f"l{i}_ln2_g"].to(dev),
-                "b2": data[f"l{i}_ln2_b"].to(dev),
-                "fw1": data[f"l{i}_ffn_w1"].to(dev),
-                "fb1": data[f"l{i}_ffn_b1"].to(dev),
-                "fw2": data[f"l{i}_ffn_w2"].to(dev),
-                "fb2": data[f"l{i}_ffn_b2"].to(dev),
+                "wq": leaf(data[f"l{i}_wq"].reshape(nh * dh, d)),
+                "wk": leaf(data[f"l{i}_wk"].reshape(nh * dh, d)),
+                "wv": leaf(data[f"l{i}_wv"].reshape(nh * dh, d)),
+                "wo": leaf(data[f"l{i}_wo"].reshape(d, nh * dh)),
+                "g1": leaf(data[f"l{i}_ln1_g"]),
+                "b1": leaf(data[f"l{i}_ln1_b"]),
+                "g2": leaf(data[f"l{i}_ln2_g"]),
+                "b2": leaf(data[f"l{i}_ln2_b"]),
+                "fw1": leaf(data[f"l{i}_ffn_w1"]),
+                "fb1": leaf(data[f"l{i}_ffn_b1"]),
+                "fw2": leaf(data[f"l{i}_ffn_w2"]),
+                "fb2": leaf(data[f"l{i}_ffn_b2"]),
             }
         )
-    gf, bf = data["lnf_g"].to(dev), data["lnf_b"].to(dev)
+    gf, bf = leaf(data["lnf_g"]), leaf(data["lnf_b"])
+    flat = (
+        [wte, wpe, gf, bf] + [p for layer in layers for p in layer.values()] if training else []
+    )
     mask = torch.tril(torch.ones(seq, seq, dtype=torch.bool, device=dev))  # [s, t]
+    # The embedding table is the transpose of the tied lm_head weight. Under training it must be
+    # rebuilt inside forward: built once, its autograd graph would be freed by the first backward
+    # and the second step would fail. Inference keeps the one-time transpose. Keep the
+    # `.contiguous()` in both: gathering rows out of the transposed *view* takes a slow path here
+    # (measured 5.4 s/step vs 98 ms on the gpt2_mini_train fixture, CPU) — a runner artifact that
+    # would misreport the reference, not a property of the model.
+    emb_once = None if training else wte.T.contiguous()  # [v, d]
 
     def forward(ids):
         b = ids.shape[0]
+        emb = wte.T.contiguous() if training else emb_once
         x = emb[ids] + wpe
         for p in layers:
             h = layernorm(x, p["g1"], p["b1"])
@@ -155,7 +176,7 @@ def build_gpt(meta, data, dev):
 
     ids = data["ids"].long().to(dev)
     tgt = F.one_hot(data["tgt"].long(), v).float().to(dev)
-    return loss_fn, [], (ids, tgt), int(meta["batch_size"]) * seq
+    return loss_fn, flat, (ids, tgt), int(meta["batch_size"]) * seq
 
 
 def main():
