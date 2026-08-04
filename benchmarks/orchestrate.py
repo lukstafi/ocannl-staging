@@ -163,6 +163,24 @@ def precision_env(precision):
     return env
 
 
+def cell_env(base, fixture, variant, precision):
+    """The environment an OCANNL cell is dispatched with."""
+    env = dict(
+        base,
+        BENCH_FIXTURE=str(fixture),
+        BENCH_TUNE="1" if variant == "tuned" else "0",
+        BENCH_MATERIALIZE="1" if variant == "materialized" else "0",
+        # A gate leg carries its own BENCH_* flags; clear the others so a stray value from the
+        # caller's environment cannot leak into a cell.
+        BENCH_STATIC_SCALE="0",
+        BENCH_GATE_INTERVAL="0",
+    )
+    # Applied after, not as keywords: a gate leg's flags collide with the cleared defaults above
+    # and dict() rejects duplicate keywords.
+    env.update(precision_env(precision))
+    return env
+
+
 def precision_unavailable(model, mode, precision):
     """Why this workload cannot express this precision cell, or None if it can.
 
@@ -455,17 +473,7 @@ def main():
                             print(f"--- {name} ocannl/{backend}/{cell}: SKIPPED (SKIP_CELLS; "
                                   "--no-skip-cells to run it anyway)")
                             continue
-                        env = dict(
-                            os.environ,
-                            BENCH_FIXTURE=str(fx),
-                            BENCH_TUNE="1" if variant == "tuned" else "0",
-                            BENCH_MATERIALIZE="1" if variant == "materialized" else "0",
-                            # A gate leg carries its own BENCH_* flags; clear the others so a
-                            # stray value from the caller's environment cannot leak into a cell.
-                            BENCH_STATIC_SCALE="0",
-                            BENCH_GATE_INTERVAL="0",
-                            **precision_env(precision),
-                        )
+                        env = cell_env(os.environ, fx, variant, precision)
                         cmd = [str(ocannl_exe(model)), f"--ocannl_backend={backend}"]
                         label = f"{name} ocannl/{backend}/{cell}"
                         # The cell's identity is what was dispatched, not what the runner chose to

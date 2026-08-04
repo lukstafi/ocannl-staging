@@ -127,6 +127,23 @@ class PrecisionLegTest(unittest.TestCase):
         )
         self.assertEqual(orchestrate.precision_env("bf16"), {"BENCH_PRECISION": "bf16"})
 
+    def test_cell_env_carries_the_leg_and_clears_the_others(self):
+        # The gate flags are cleared per cell and then set by the leg — the two collided as
+        # duplicate dict() keywords, which crashed the run only once a gate cell was dispatched.
+        stray = {"BENCH_STATIC_SCALE": "1", "BENCH_GATE_INTERVAL": "7"}
+        plain = orchestrate.cell_env(stray, "fx.safetensors", "default", "bf16")
+        self.assertEqual(plain["BENCH_PRECISION"], "bf16")
+        self.assertEqual(plain["BENCH_STATIC_SCALE"], "0")
+        self.assertEqual(plain["BENCH_GATE_INTERVAL"], "0")
+        gated = orchestrate.cell_env(stray, "fx.safetensors", "tuned", "f16-gated16")
+        self.assertEqual(gated["BENCH_PRECISION"], "f16")
+        self.assertEqual(gated["BENCH_GATE_INTERVAL"], "16")
+        self.assertEqual(gated["BENCH_STATIC_SCALE"], "0")
+        self.assertEqual(gated["BENCH_TUNE"], "1")
+        static = orchestrate.cell_env(stray, "fx.safetensors", "default", "f16-static")
+        self.assertEqual(static["BENCH_STATIC_SCALE"], "1")
+        self.assertEqual(static["BENCH_GATE_INTERVAL"], "0")
+
     def test_precision_spec_rejects_nonsense(self):
         for spec in ("f16-gated0", "f16-gated", "f8", "f16-dynamic"):
             with self.assertRaises(Exception, msg=spec):

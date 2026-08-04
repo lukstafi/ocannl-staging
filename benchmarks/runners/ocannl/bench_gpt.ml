@@ -170,13 +170,23 @@ let () =
      assigns the gradients instead. *)
   Option.iter mp_prec ~f:(fun prec ->
       let body = Hash_set.create (module Int) in
+      let masked_scores = ref [] in
       let rec walk t =
         if not (Hash_set.mem body t.Tensor.value.Ir.Tnode.id) then (
           Hash_set.add body t.Tensor.value.Ir.Tnode.id;
+          if String.is_substring (Ir.Tnode.debug_name t.Tensor.value) ~substring:"where" then
+            masked_scores := t.Tensor.value :: !masked_scores;
           Option.iter t.Tensor.diff ~f:(fun d -> Hash_set.add body d.Tensor.grad.Ir.Tnode.id);
           List.iter t.Tensor.children ~f:(fun c -> walk c.Tensor.subtensor))
       in
       walk logits;
+      (* f16 only, and only because a pinned precision protects a node's own assignment, not the
+         one it is inlined into: the mask fill's -1e9 sits in whichever node STORES the masked
+         scores, and the guard below rejects it there. The training graph materializes [where] for
+         the backward pass, so pinning it suffices; the forward-only graph virtualizes it into an
+         f16 consumer, where the constant reappears. Materializing it puts the constant back in
+         the f32 node that the pin covers. *)
+      if Ir.Ops.equal_prec prec Ir.Ops.half then List.iter !masked_scores ~f:Train.set_materialized;
       let is_ln tn =
         List.exists tn.Ir.Tnode.label ~f:(fun l ->
             String.equal l "gamma" || String.equal l "beta")
