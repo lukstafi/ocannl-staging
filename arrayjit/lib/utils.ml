@@ -98,6 +98,7 @@ let known_config_keys =
       "cc_backend_compiler_command";
       "cc_backend_arch_flags";
       "cc_backend_simd_flags";
+      "cc_backend_probe_cache";
       "cc_backend_fast_math";
       "cc_backend_post_compile_timeout";
       "cc_backend_verify_codesign";
@@ -364,8 +365,19 @@ let filename_concat p1 p2 =
 let clean_filename fname =
   let fname = String.strip fname in
   let fname =
+    (* Beyond the path separators, the rest of the set Windows reserves: a routine named after a
+       diagnostic can carry any of them (gh-ocannl-481's "... unit count > 1" reached [open_out] as
+       a filename and killed the test process on Windows with [Invalid argument], while passing on
+       POSIX where only '/' is special). Replaced on every platform rather than under [Sys.win32],
+       so that a debug artifact has one name everywhere and a rule naming it cannot be
+       platform-dependent. *)
     String.map
-      ~f:(fun c -> if List.exists ~f:(equal_char c) [ '/'; '\\'; ':' ] then '-' else c)
+      ~f:(fun c ->
+        if
+          List.exists ~f:(equal_char c) [ '/'; '\\'; ':'; '<'; '>'; '"'; '|'; '?'; '*' ]
+          || Char.to_int c < 0x20
+        then '-'
+        else c)
       fname
   in
   (* Reject bare "."/".." (and the empty string): otherwise filename_concat "build_files" cleaned
