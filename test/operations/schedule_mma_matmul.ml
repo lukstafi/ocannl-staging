@@ -31,7 +31,7 @@ module Asgns = Ir.Assignments
 module Numerics = Ir.Numerics
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
-let () = Numerics.set_policy { tf32_matmuls = false }
+let () = Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = false }
 let p name b = Stdio.printf "%s: %b\n" name b
 let approx a b = Float.(abs (a - b) < 1e-2)
 let approx_rel a b = Float.(abs (a - b) <= 1e-2 * max 1. (abs b))
@@ -238,7 +238,7 @@ let () =
     let a_off, b_off = tf32_inputs ~tag:"tf32_off_" ~k:n in
     let%op c_off_serial = a_off * b_off in
     let%op c_off_mma = a_off * b_off in
-    Numerics.set_policy { tf32_matmuls = false };
+    Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = false };
     let want_off = compile_serial ~name:"mm_tf32_off_serial" c_off_serial in
     let off_seeded = ref false in
     let got_off, census_off =
@@ -258,7 +258,7 @@ let () =
           && not (String.is_substring src ~substring:"precision::tf32")));
     p "tf32 policy-off autotune omits tensorized candidates" (not !off_seeded);
 
-    Numerics.set_policy { tf32_matmuls = true };
+    Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = true };
     let a_on, b_on = tf32_inputs ~tag:"tf32_on_" ~k:n in
     let%op c_on_serial = a_on * b_on in
     let%op c_on_mma = a_on * b_on in
@@ -313,7 +313,7 @@ let () =
           String.is_substring src ~substring:"matrix_a, 16, 16, 8"
           && String.is_substring src ~substring:"col_major"
           && String.is_substring src ~substring:"(wmma-tf32)"));
-    Numerics.set_policy { tf32_matmuls = false })
+    Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = false })
   else (
     p "tf32 policy-off matmul matches the serial twin bitwise" true;
     p "tf32 policy-off renders and records the scalar fallback" true;

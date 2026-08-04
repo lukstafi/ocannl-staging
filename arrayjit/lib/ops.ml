@@ -76,6 +76,13 @@ let is_up_to_fp16 = function
   | Half_prec _ | Byte_prec _ | Fp8_prec _ -> true
   | _ (* includes Bfloat16_prec *) -> false
 
+(** The floating-point formats narrower than f32: the ones a CPU has no arithmetic for, so that
+    every operator over them is a widen/op/narrow round-trip through f32 (gh-ocannl-517). Integer
+    precisions are excluded — their arithmetic is native at every width. *)
+let is_narrow_float = function
+  | Half_prec _ | Bfloat16_prec _ | Fp8_prec _ -> true
+  | _ -> false
+
 (** Whether a constant is too large to be safe in a half-precision node. The cutoff
     ([check_half_prec_constants_cutoff], default 2^14) sits well below fp16's 65504 max finite: it
     is headroom against overflow during {e arithmetic} on the constant, not a representability test.
