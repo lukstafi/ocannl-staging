@@ -1,15 +1,26 @@
 (* Shared scaffolding for the OCANNL benchmark runners: fixture metadata access, weight injection
-   into block-created params by debug-name tokens, the measurement protocol (parity losses, warmup,
-   per-step-synced percentiles, queued mean), and JSON emission. See benchmarks/README.md for the
-   protocol. *)
+   into block-created params by debug-name tokens, the reduced-precision legs and training-step
+   shapes, the measurement protocol (parity losses, warmup, per-step-synced percentiles, queued
+   mean), and JSON emission. See benchmarks/README.md for the protocol. *)
 
 open Base
 open Ocannl
 module St = Safetensors
 module Tn = Ir.Tnode
+module Asgns = Ir.Assignments
 
 let get_meta st k = List.Assoc.find_exn (St.metadata st) ~equal:String.equal k
 let meta_int st k = Int.of_string (get_meta st k)
+
+let meta_default st k ~default =
+  match List.Assoc.find (St.metadata st) ~equal:String.equal k with
+  | Some v -> v
+  | None -> default
+
+(** Whether the fixture describes a training workload ([mode: train], the generator's default) as
+    opposed to a forward-only one ([mode: infer]). Every runner dispatches its step shape on this,
+    the same way the Python runners do. *)
+let is_training st = String.equal (meta_default st "mode" ~default:"train") "train"
 
 (* Keys added after fixtures existed (e.g. stride1/stride2) default rather than fail, so
    pre-existing fixtures keep working. *)
@@ -18,6 +29,175 @@ let meta_int_default st k ~default =
   | Some v -> Int.of_string v
   | None -> default
 let env_flag name = match Stdlib.Sys.getenv_opt name with Some "1" -> true | _ -> false
+
+(** {1 Reduced-precision legs and training-step shapes (gh-ocannl-492 tasks 4 and 5)}
+
+    These live here rather than in a runner because a flag implemented in {e one} runner is
+    indistinguishable, from the report, from a cell nobody ran: [BENCH_STATIC_SCALE] and
+    [BENCH_GATE_INTERVAL] existed in [bench_mlp] alone, which silently made the gate-cost
+    experiment unavailable for every other workload — including [gpt2_mini], the matmul-dominated
+    one where reduced precision matters most (gh-ocannl-551). A runner now opts in by calling
+    {!precision_leg} with whether its fixture is a training one, and every leg is either available
+    or refused with a message naming why. *)
+
+type precision_leg = {
+  label : string;
+      (** The report's [precision] field: [f32 | bf16 | f16 | f16-static | f16-gatedN]. *)
+  base : string;  (** [f32 | bf16 | f16] — the storage precision, without the gate-leg suffix. *)
+  prec : Ir.Ops.prec option;  (** [None] at f32. *)
+  static_scale : bool;  (** f16 with a fixed scale: no gate, no host read. *)
+  gate_interval : int option;  (** f16 with the fused on-device gate, sampled every N steps. *)
+  init_scale : float;
+      (** The f16 loss scale to start from — the fixture's [loss_scale] metadata (torch's 65536
+          when absent), overridable with [BENCH_LOSS_SCALE]. It is a workload property: a scale
+          that overflows on the first step costs the dynamic legs a few backoff steps (which the
+          parity window then sees) and makes the static leg — which never adjusts — diverge
+          outright. *)
+}
+
+(** Parses [BENCH_PRECISION] / [BENCH_STATIC_SCALE] / [BENCH_GATE_INTERVAL]. [runner] prefixes
+    error messages; [training] is {!is_training} of the fixture — the gate legs measure the cost of
+    the loss-scaling gate, which only a training step has, so on a forward-only fixture they are
+    refused rather than silently ignored. *)
+let precision_leg ~runner ~training ?st () =
+  let base, prec =
+    match Stdlib.Sys.getenv_opt "BENCH_PRECISION" with
+    | None | Some "" | Some "0" | Some "f32" -> ("f32", None)
+    | Some "bf16" -> ("bf16", Some Ir.Ops.bfloat16)
+    | Some "f16" -> ("f16", Some Ir.Ops.half)
+    | Some other -> failwith (runner ^ ": unknown BENCH_PRECISION: " ^ other)
+  in
+  let static_scale = env_flag "BENCH_STATIC_SCALE" in
+  let gate_interval =
+    match Stdlib.Sys.getenv_opt "BENCH_GATE_INTERVAL" with
+    | None | Some "" | Some "0" -> None
+    | Some n -> Some (Int.of_string n)
+  in
+  Option.iter gate_interval ~f:(fun n ->
+      if n <= 0 then failwith (runner ^ ": BENCH_GATE_INTERVAL must be a positive integer"));
+  let gate_leg = static_scale || Option.is_some gate_interval in
+  if gate_leg && not (String.equal base "f16") then
+    failwith (runner ^ ": BENCH_STATIC_SCALE / BENCH_GATE_INTERVAL require BENCH_PRECISION=f16");
+  if static_scale && Option.is_some gate_interval then
+    failwith (runner ^ ": BENCH_STATIC_SCALE and BENCH_GATE_INTERVAL are mutually exclusive");
+  if gate_leg && not training then
+    failwith
+      (runner
+     ^ ": BENCH_STATIC_SCALE / BENCH_GATE_INTERVAL measure the loss-scaling gate, which only a \
+        training step has; this fixture is forward-only (metadata mode=infer)");
+  let label =
+    if static_scale then base ^ "-static"
+    else
+      match gate_interval with Some n -> Printf.sprintf "%s-gated%d" base n | None -> base
+  in
+  let init_scale =
+    match Stdlib.Sys.getenv_opt "BENCH_LOSS_SCALE" with
+    | Some s when not (String.is_empty s) -> Float.of_string s
+    | _ -> (
+        match st with
+        | Some st -> Float.of_string (meta_default st "loss_scale" ~default:"65536.")
+        | None -> 65536.)
+  in
+  if Float.(init_scale <= 0.) then failwith (runner ^ ": loss scale must be positive");
+  { label; base; prec; static_scale; gate_interval; init_scale }
+
+(** The step shapes of the training legs, before compilation. *)
+type train_parts =
+  | Plain_step of Asgns.comp  (** One fused routine: f32, bf16, and the f16 static-scale leg. *)
+  | Host_gated of Mixed_prec.Loss_scaler.t * Tensor.t * Asgns.comp * Asgns.comp
+      (** Gradient routine, host-read checksum gate, optimizer routine (the f16 default). *)
+  | Device_gated of Mixed_prec.Loss_scaler.t * Tensor.t * Asgns.comp * int
+      (** One routine with the gate on device; the host samples the window checksum every N. *)
+
+(** The step shape of [leg]. f16 without a gate-leg flag is the dynamic host-read gate (its
+    per-step device sync is part of what the leg measures); [no_sgd] builds the gradient update
+    alone (f32/bf16 only — a debugging shape, not a comparable cell). *)
+let train_step_parts ?(setup_for_parallel = false) ?(no_sgd = false) ~leg ~learning_rate loss =
+  match leg with
+  | { base = "f16"; static_scale = false; gate_interval = Some interval; _ } ->
+      let scaler = Mixed_prec.Loss_scaler.create ~init_scale:leg.init_scale () in
+      let wflag, comp =
+        Mixed_prec.gated_scaled_update ~setup_for_parallel scaler ~learning_rate loss
+      in
+      Device_gated (scaler, wflag, comp, interval)
+  | { base = "f16"; static_scale = false; _ } ->
+      let scaler = Mixed_prec.Loss_scaler.create ~init_scale:leg.init_scale () in
+      let checksum, grad_comp = Mixed_prec.scaled_grad_update ~setup_for_parallel scaler loss in
+      let sgd_comp = Mixed_prec.scaled_sgd_update scaler ~learning_rate loss in
+      Host_gated (scaler, checksum, grad_comp, sgd_comp)
+  | { base = "f16"; static_scale = true; _ } ->
+      (* Scaled backprop and unscaled optimizer as ONE routine, no checksum, no gate, no host
+         read — the scale scalars are set once and never adjusted. *)
+      let scaler = Mixed_prec.Loss_scaler.create ~init_scale:leg.init_scale () in
+      Plain_step
+        (Asgns.sequence
+           [
+             Train.grad_update ~setup_for_parallel
+               ~loss_scale:scaler.Mixed_prec.Loss_scaler.scale loss;
+             Train.sgd_update ~learning_rate
+               ~grad_unscale:scaler.Mixed_prec.Loss_scaler.unscale loss;
+           ])
+  | _ ->
+      let update = Train.grad_update ~setup_for_parallel loss in
+      Plain_step
+        (if no_sgd then update
+         else Asgns.sequence [ update; Train.sgd_update ~learning_rate loss ])
+
+(** The compiled counterpart of {!train_parts}. A forward-only runner reuses [Plain] for its
+    forward routine, so one step driver ({!run_train_step}) serves both modes. *)
+type train_routines =
+  | Plain of Context.routine
+  | Host_gate of Mixed_prec.Loss_scaler.t * Tensor.t * Context.routine * Context.routine
+  | Device_gate of Mixed_prec.Loss_scaler.t * Tensor.t * Context.routine * int
+
+(** Compiles a step shape. [tuned] is the runner's autotuning compile (it needs the loss tensor,
+    so the runner supplies it). Each leg tunes the routine that carries the work: the
+    dynamic-loss-scaling legs keep their step SHAPE — the gate is what they measure — so only the
+    gradient/fused routine is tuned and the tiny optimizer routine is compiled plainly, from the
+    tuned context so the lineage's compile order is unchanged. *)
+let compile_train_step ~tune ~tuned ctx bindings parts =
+  match parts with
+  | Plain_step comp ->
+      let ctx, routine =
+        if tune then tuned ctx comp
+        else if Lazy.force Autotune.model_default_enabled then
+          (* gh-ocannl-491: the model-picked untuned default (config
+             [model_default_schedule=true]) — run the same benchmark with the gate off vs on for
+             the before/after comparison. *)
+          Autotune.model_default ctx comp bindings
+        else Context.compile ctx comp bindings
+      in
+      (ctx, Plain routine)
+  | Host_gated (scaler, checksum, grad_comp, sgd_comp) ->
+      let ctx, grad_routine =
+        if tune then tuned ctx grad_comp else Context.compile ctx grad_comp bindings
+      in
+      let ctx, sgd_routine = Context.compile ctx sgd_comp bindings in
+      (ctx, Host_gate (scaler, checksum, grad_routine, sgd_routine))
+  | Device_gated (scaler, wflag, comp, interval) ->
+      let ctx, routine = if tune then tuned ctx comp else Context.compile ctx comp bindings in
+      (ctx, Device_gate (scaler, wflag, routine, interval))
+
+let train_step_bindings = function
+  | Plain routine -> Context.bindings routine
+  | Host_gate (_, _, grad_routine, _) -> Context.bindings grad_routine
+  | Device_gate (_, _, routine, _) -> Context.bindings routine
+
+(** Runs one step of [routines] — a training step, or a forward pass when the runner compiled its
+    forward code as [Plain]. The scaled legs thread the context (the scaler overwrites the scale
+    tensors), hence the reference. [step] is 0-based. *)
+let run_train_step routines ctx_ref ~step =
+  match routines with
+  | Plain routine -> Train.run !ctx_ref routine
+  | Host_gate (scaler, checksum, grad_routine, sgd_routine) ->
+      let ctx, _ran = Mixed_prec.scaled_step ~scaler ~grad_routine ~sgd_routine ~checksum !ctx_ref in
+      ctx_ref := ctx
+  | Device_gate (scaler, wflag, routine, interval) ->
+      let ctx, _window_finite =
+        Mixed_prec.gated_step ~scaler ~routine ~window_checksum:wflag ~check_interval:interval ~step
+          !ctx_ref
+      in
+      ctx_ref := ctx
 
 let percentile sorted p =
   let n = Array.length sorted in
