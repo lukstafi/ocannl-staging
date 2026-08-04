@@ -149,6 +149,7 @@ let known_config_keys =
       "model_peak_memory_bandwidth";
       (* Numerics policy (gh-ocannl-478) *)
       "tf32_matmuls";
+      "narrow_compute_f32";
       (* Identifiers and other *)
       "ll_ident_style";
       "cd_ident_style";

@@ -22,6 +22,27 @@
 
 ### Changed
 
+- **16-bit storage, f32 compute on the CPU backends** (gh-ocannl-517): a tensor node's precision is
+  now its *storage* precision only; the precision its arithmetic runs at is a separate decision at
+  the codegen seam (`C_syntax_config.compute_prec`). The GPU backends are unchanged — they have
+  native 16-bit types and arithmetic — but `cc`, which had no 16-bit arithmetic and wrapped every
+  narrow-float operator in a widen/op/narrow round-trip, now computes narrow floats in f32: a load
+  widens once, a store narrows once, and an assignment's intermediates keep f32 mantissa instead of
+  being rounded per operator. This is both strictly more accurate and the precondition for the
+  `Vectorized` renderings, previously gated to f32/f64, to accept 16-bit nodes at all: narrow loads
+  widen into f32 vector registers and stores narrow on the way out, whole vectors at a time
+  (shift-based for bf16, `__builtin_convertvector` for fp16 on `_Float16` targets, a per-lane
+  fallback otherwise — every arm bitwise-identical to the scalar path, so a vectorized loop still
+  matches its serial remainder exactly). Governed by `Ir.Numerics.narrow_compute_f32` (config
+  `narrow_compute_f32`, default true); setting it false restores per-operator rounding. Two things
+  deliberately stay at storage precision: the RNG lane conversions, whose generator is selected by
+  the precision they render at, and operator-free assignments, so a copy loop stays a copy. New
+  `bin/narrow_storage_bench.exe` and `test/operations/narrow_storage_compute.ml`.
+
+  The measured verdict is the reverse of the issue's expectation: on an M-series, a bandwidth-bound
+  elementwise add reaches 1.97x at fp16 storage but 0.91x at bf16, whose round-to-nearest-even
+  narrowing costs more than the halved traffic saves.
+
 - **Operation results close down; `stretch` requests use-site resolution** (gh-ocannl-544): an
   open row of an operation's result no longer widens to what a use site demands — it closes to
   the arguments' shapes and the use site broadcasts it in. Use-site resolution (closing to the

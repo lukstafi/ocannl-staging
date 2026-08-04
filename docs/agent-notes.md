@@ -249,6 +249,40 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   command buffers overlap over untracked resources: back-to-back runs of the SAME routine need
   the FIFO wait, pipelined (no-sync) timing is unreliable, and `get_values`/`set_values` do FULL
   awaits by design.
+- A tensor node's precision is its **storage** precision; the precision its arithmetic runs at is a
+  separate thing, `C_syntax_config.compute_prec` (gh-ocannl-517). They coincide on the GPU backends
+  (native `__nv_bfloat16` / MSL `bfloat`/`half`, and the 16-bit tensor-core shapes that consume
+  them) and diverge on `cc`, where every narrow-float operator was a widen/op/narrow round-trip
+  anyway: there the narrow floats compute in f32 (`Ir.Numerics.narrow_compute_f32`, on by default),
+  so a load widens once and a store narrows once, and an assignment's intermediates keep f32
+  mantissa. The rule when touching `c_syntax.ml`: a **declaration**, a kernel parameter or a buffer
+  element type takes the storage precision; a **rendered expression** takes `comp_prec` of it. Two
+  exceptions are load-bearing. The RNG lane conversions (`uint4x32_to_<prec>_uniform*`) pick both
+  their result type and which random bits they consume from the precision they render at — the fp8
+  generator is not a rounding of the f32 one — so they stay at storage precision, and the
+  scope-locals they write are excluded by a whole-proc scan (`rng_scope_local_uids`), because a
+  `Declare_local` carries no value to test. And a `Set` whose value contains no operator renders at
+  storage precision, so a copy loop stays a copy instead of a round-trip through f32.
+- Convert-on-load/store is what makes the `Vectorized` renderings reachable for 16-bit nodes: the
+  lane count comes from the **compute** vector, so the narrow side is a half-width vector, and the
+  conversion happens at the memory boundary rather than per lane inside the body (per-lane
+  conversion would give the traffic win straight back). Bitwise parity with the serial remainder
+  loop is by construction — every fallback arm calls the same scalar conversion the serial path
+  does — and `test/operations/narrow_storage_compute.ml` asserts it with `=`, not a tolerance.
+- The traffic win is real but it favors **fp16, not bf16**, the reverse of gh-ocannl-517's
+  expectation. On an M-series at n = 2^22, a bandwidth-bound elementwise add measures 131 GB/s at
+  f32, 1.97x that at half storage, and **0.91x** at bf16 (`bin/narrow_storage_bench.exe`); a
+  compute-bound control stays below 1x for both, as it must. bf16's round-to-nearest-even narrowing
+  is four vector ops against fp16's single NEON instruction, and at stream speed that costs more
+  than halving the bytes saves. The route to competitive bf16 is a hardware convert (`BFCVT` on
+  ARMv8.6-A, AVX512-BF16 on x86) — but only if it can be shown to agree with `single_to_bfloat16`
+  bitwise, NaN payloads included, or the vectorized rendering stops matching its serial twin.
+- Benchmark trap: `Context.get_values` walks the whole buffer into an OCaml `float array`, an O(n)
+  host-side cost that does **not** depend on storage precision. Timing it inside the measured region
+  (as `bin/cpu_vectorization_bench.ml` did until gh-ocannl-517) makes every kernel look equally slow
+  — an order of magnitude below the machine's stream bandwidth — and exactly masks any traffic
+  difference. Keep readbacks outside the timed region; the `cc` scheduler is synchronous, so no
+  separate await is needed.
 - Reduced-precision *literals* are dialect-specific and do not transpose between backends. `0.0h`
   is a clang extension and valid MSL, but not CUDA C++ — nvrtc rejects it with "user-defined
   literal operator not found" (gh-ocannl-518, the half `Relu_gate`). On CUDA/HIP write the zero as

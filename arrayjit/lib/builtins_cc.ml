@@ -549,6 +549,89 @@ uint16_t single_to_bfloat16(float f)
 }
 |},
       [] );
+    (* Whole-vector conversion between 16-bit storage and f32 compute registers (gh-ocannl-517).
+       The vector typedefs are minted by the codegen (their lane count follows cc_vector_bytes), so
+       they are macro parameters; [LANES] is only used by the fallback arms. Each fallback goes
+       through the very scalar conversion the serial path uses, which is what makes the vectorized
+       rendering bitwise identical to its serial remainder loop on any compiler. *)
+    ( "OCANNL_HAS_CONVERTVECTOR",
+      {|
+#if __has_builtin(__builtin_convertvector)
+  #define OCANNL_HAS_CONVERTVECTOR 1
+#else
+  #define OCANNL_HAS_CONVERTVECTOR 0
+#endif
+|},
+      [] );
+    ( "OCANNL_VEC_WIDEN_BFLOAT16",
+      {|
+/* bfloat16 is the top 16 bits of a float: zero-extend and shift. */
+#if OCANNL_HAS_CONVERTVECTOR
+  #define OCANNL_VEC_WIDEN_BFLOAT16(U16V, U32V, LANES, dst, src) do { \
+    U16V ocannl_nb__; __builtin_memcpy(&ocannl_nb__, (src), sizeof(ocannl_nb__)); \
+    U32V ocannl_nw__ = __builtin_convertvector(ocannl_nb__, U32V) << 16; \
+    __builtin_memcpy(&(dst), &ocannl_nw__, sizeof(dst)); \
+  } while (0)
+#else
+  #define OCANNL_VEC_WIDEN_BFLOAT16(U16V, U32V, LANES, dst, src) do { \
+    const unsigned short *ocannl_ps__ = (src); \
+    for (int ocannl_l__ = 0; ocannl_l__ < (LANES); ++ocannl_l__) \
+      (dst)[ocannl_l__] = bfloat16_to_single(ocannl_ps__[ocannl_l__]); \
+  } while (0)
+#endif
+|},
+      [ "OCANNL_HAS_CONVERTVECTOR"; "bfloat16_to_single" ] );
+    ( "OCANNL_VEC_NARROW_BFLOAT16",
+      {|
+/* single_to_bfloat16's round-to-nearest-even, lane-wise. */
+#if OCANNL_HAS_CONVERTVECTOR
+  #define OCANNL_VEC_NARROW_BFLOAT16(U16V, U32V, LANES, dst, src) do { \
+    U32V ocannl_nb__; __builtin_memcpy(&ocannl_nb__, &(src), sizeof(ocannl_nb__)); \
+    U32V ocannl_nr__ = ocannl_nb__ + 0x7FFFu + ((ocannl_nb__ >> 16) & 1u); \
+    U16V ocannl_nn__ = __builtin_convertvector(ocannl_nr__ >> 16, U16V); \
+    __builtin_memcpy((dst), &ocannl_nn__, sizeof(ocannl_nn__)); \
+  } while (0)
+#else
+  #define OCANNL_VEC_NARROW_BFLOAT16(U16V, U32V, LANES, dst, src) do { \
+    unsigned short *ocannl_pd__ = (dst); \
+    for (int ocannl_l__ = 0; ocannl_l__ < (LANES); ++ocannl_l__) \
+      ocannl_pd__[ocannl_l__] = single_to_bfloat16((src)[ocannl_l__]); \
+  } while (0)
+#endif
+|},
+      [ "OCANNL_HAS_CONVERTVECTOR"; "single_to_bfloat16" ] );
+    ( "OCANNL_VEC_WIDEN_HALF",
+      {|
+#if HAS_NATIVE_FLOAT16 && OCANNL_HAS_CONVERTVECTOR
+  #define OCANNL_VEC_WIDEN_HALF(FV, HV, LANES, dst, src) do { \
+    HV ocannl_nh__; __builtin_memcpy(&ocannl_nh__, (src), sizeof(ocannl_nh__)); \
+    (dst) = __builtin_convertvector(ocannl_nh__, FV); \
+  } while (0)
+#else
+  #define OCANNL_VEC_WIDEN_HALF(FV, HV, LANES, dst, src) do { \
+    const HALF_T *ocannl_ps__ = (src); \
+    for (int ocannl_l__ = 0; ocannl_l__ < (LANES); ++ocannl_l__) \
+      (dst)[ocannl_l__] = HALF_TO_FLOAT(ocannl_ps__[ocannl_l__]); \
+  } while (0)
+#endif
+|},
+      [ "OCANNL_HAS_CONVERTVECTOR"; "HAS_NATIVE_FLOAT16"; "HALF_T"; "HALF_TO_FLOAT" ] );
+    ( "OCANNL_VEC_NARROW_HALF",
+      {|
+#if HAS_NATIVE_FLOAT16 && OCANNL_HAS_CONVERTVECTOR
+  #define OCANNL_VEC_NARROW_HALF(HV, LANES, dst, src) do { \
+    HV ocannl_nh__ = __builtin_convertvector((src), HV); \
+    __builtin_memcpy((dst), &ocannl_nh__, sizeof(ocannl_nh__)); \
+  } while (0)
+#else
+  #define OCANNL_VEC_NARROW_HALF(HV, LANES, dst, src) do { \
+    HALF_T *ocannl_pd__ = (dst); \
+    for (int ocannl_l__ = 0; ocannl_l__ < (LANES); ++ocannl_l__) \
+      ocannl_pd__[ocannl_l__] = FLOAT_TO_HALF((src)[ocannl_l__]); \
+  } while (0)
+#endif
+|},
+      [ "OCANNL_HAS_CONVERTVECTOR"; "HAS_NATIVE_FLOAT16"; "HALF_T"; "FLOAT_TO_HALF" ] );
     ( "half_to_single",
       {|
 /* Half (Float16) to Float conversion (C function) */

@@ -504,6 +504,16 @@ default_prec=single
 # Programmatic override: `Ir.Numerics.set_policy`.
 tf32_matmuls=false
 
+# Numerics policy: on backends without native 16-bit arithmetic (the CPU backends), run the
+# arithmetic over narrow-float storage (bfloat16, half, fp8) in f32 -- widen once at each load,
+# narrow once at each store -- instead of rounding to the target's storage precision after every
+# operator. Storage is unchanged; only the register precision of intermediates is. On by default:
+# it is strictly more accurate than per-operator rounding, and it is what makes the vectorized
+# renderings reachable for narrow-storage kernels. Set to false to recover per-operator rounding.
+# GPU backends have native 16-bit types and are unaffected either way.
+# Programmatic override: `Ir.Numerics.set_policy`.
+narrow_compute_f32=true
+
 # Limit on the allowed size of unrolled constant tensor nodes
 # (where the initialization code sets the values).
 limit_constant_fill_size=16
