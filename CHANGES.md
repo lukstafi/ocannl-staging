@@ -1,3 +1,18 @@
+## [Unreleased]
+
+### Changed
+
+- **Operation results close down; `stretch` requests use-site resolution** (gh-ocannl-544): an
+  open row of an operation's result no longer widens to what a use site demands — it closes to
+  the arguments' shapes and the use site broadcasts it in. Use-site resolution (closing to the
+  GLB of the use sites) remains the rule for leaf tensors, parameters, and — via the new
+  resolve-at-use row marking — parameter-initialization expressions, whose intermediates must
+  fill the parameter's shape rather than broadcast (repeating random values). The new identity
+  operation `stretch` requests use-site resolution by name; the `0.5 + 0.5` shape-inferred
+  constant idiom is replaced by `stretch 1.0`, and pooling kernels use `stretch 0.0`. The
+  gh-ocannl-540 cast-twin pin in `Mixed_prec.cast_param` is reverted: the default now guarantees
+  a twin keeps its master's shape (guarded by `test/operations/mixed_prec_twin_shape`).
+
 ## [0.9] -- 2026-08-03
 
 > Release note: theme — program search and optimization. Since 0.8, the schedule system has

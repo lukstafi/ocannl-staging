@@ -634,6 +634,14 @@ Recurring stumbling points, each verified against the sources:
   similar masks. Note `range_of_shape` gives row-major *flattened* offsets, not per-axis indices.
 - **Only numeric literals auto-lift to tensors in `%op`.** A `let`-bound float needs explicit
   embedding: `r *. !.step`, not `r *. step`.
+- **An operation result's shape closes down to its arguments'; `stretch` opts into use-site
+  resolution** (gh-ocannl-544). A use site can broadcast an operation result in, but cannot widen
+  it: `relu w` read by a batched matmul keeps `w`'s shape rather than materializing per-batch
+  copies. When a result *should* acquire axes from its consumer — e.g. a shape-inferred constant
+  used as a pooling kernel so projections see the window axes — wrap it: `stretch 0.0` (the
+  pre-544 idiom for this was `0.5 + 0.5`, which relied on implicit use-site widening). Leaf
+  tensors, parameters, and parameter-initialization expressions resolve at their use sites
+  automatically.
 - **Inline declarations without a unit parameter are shared.** In
   `let%op f x = ... { w = kaiming normal1 () } ...`, `w` is created once when `f` is defined and
   shared by every application of `f`. To create a fresh parameter for each model instance, make

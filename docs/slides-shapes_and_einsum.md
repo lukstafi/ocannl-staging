@@ -270,7 +270,7 @@ is still being designed—the natural `[rhs1; rhs2]` conflicts with block tensor
 > ```ocaml
 > (* Used in pooling to propagate dimensions *)
 > let%op avg_pool2d ~window () x =
->   let kernel = 0.5 + 0.5 in  (* Shape-inferred 1s *)
+>   let kernel = stretch 1.0 in  (* Shape-inferred 1s *)
 >   x +* "... | stride*oh+kh, stride*ow+kw, c; 
 >         kh, kw => ... | oh, ow, c" kernel
 >   /. !.(window * window)

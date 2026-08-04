@@ -593,6 +593,15 @@ of the policy boundary: terminals are exactly the leaves that cannot be forced
 from an upstream producer, while non-terminals are revisited after operation
 constraints have propagated their lower bounds.
 
+Since gh-ocannl-544 the two triggers carry different closing policies. Terminal
+rows (and rows explicitly marked resolve-at-use: parameter-initialization cones,
+the `stretch` operation) close to the GLB of their use sites, acquiring axes
+from usage. Plain operation-result rows reached only through `Shape_row` close
+their remaining row variable to an empty row: a use site broadcasts the result
+in but cannot silently widen it beyond its arguments' shapes (the gh-ocannl-540
+cast-twin trap). The mark lives on row variables (`Row.add_resolve_at_use`) and
+propagates through unification.
+
 ## 8. Compact Rule Table
 
 For quick reference, the core generation rules in `get_inequalities` are:

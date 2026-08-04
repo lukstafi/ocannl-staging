@@ -243,6 +243,21 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; gh-ocannl-544: operation results close down to their arguments' shapes — a use site broadcasts
+; them in but cannot silently widen them; the [stretch] wrapper requests use-site resolution by
+; name (also covers the shape-inferred-constant idiom that replaced [0.5 + 0.5]).
+
+(test
+ (name stretch_resolution)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules stretch_resolution)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
 (test
  (name precision_policy_parity)
  (package neural_nets_lib)

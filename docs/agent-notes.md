@@ -54,16 +54,21 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   `Assignments.to_low_level`); add-family keeps physical halos committed as tensor-node identity
   (padded convs lower offset-free). The padded dim equation requires the input divisible by the
   stride, and a stride-2 window only clips on the right for window ≥ 5.
-- A shape-INFERRED wrapper around a parameter has its open row variables resolved by the USE SITE,
-  not by the thing it wraps. `Mixed_prec`'s cast twin (`Operation.cast`, a pointwise op) read as
-  the weight operand of a *batched* matmul broadcast the batch axis in and materialized as
-  `[batch, out, in]` — a per-batch-row copy of one weight (gh-ocannl-540; fixed by passing
-  `~batch_dims:[]`, since a parameter has no batch axes). Nothing catches this downstream: every
-  slice holds the same value, so results, gradients and loss trajectories are all correct, and the
-  only symptoms are `batch`x memory/work and the row symbol appearing in an operand index. Two
-  lessons: (1) when wrapping a parameter, PIN the axes the wrapper must not acquire rather than
-  letting inference pick; (2) a parity oracle whose model has no batch axis cannot see a
-  batch-broadcast bug — `mixed_prec_parity.ml` had covered this recipe for a whole release.
+- Use-site row resolution is opt-in (gh-ocannl-544): an operation result's open row variables
+  close DOWN to its arguments' shapes; a use site broadcasts the result in but cannot widen it.
+  The resolve-at-use mark (`Row.add_resolve_at_use`, propagated through unification) grants the
+  old widening behavior and is registered for: terminal rows (leaves and params), parameter
+  initialization cones (`Tensor.mark_init_cone` — init intermediates must FILL the param's shape,
+  or broadcasting repeats random values), sampler results (`uint4x32_to_prec_uniform{,1}` — a
+  draw fills whatever shape context demands), and the explicit `stretch` identity wrapper (which
+  replaced the `0.5 + 0.5` shape-inferred-constant idiom, e.g. pooling kernels `stretch 0.0`).
+  The motivating trap (gh-ocannl-540): `Mixed_prec`'s cast twin read as the weight operand of a
+  *batched* matmul was widened by the use site to `[batch, out, in]` — a per-batch-row copy of
+  one weight. Nothing catches that downstream: every slice holds the same value, so results,
+  gradients and loss trajectories are all correct, and the only symptoms are `batch`x memory/work
+  and the row symbol appearing in an operand index. A parity oracle whose model has no batch axis
+  cannot see a batch-broadcast bug — `mixed_prec_parity.ml` had covered this recipe for a whole
+  release; `mixed_prec_twin_shape.ml` and `stretch_resolution.ml` pin the shapes directly.
 - That spurious axis is also how a shape defect reaches the SCHEDULER, which is where it actually
   got noticed: `Tensorize`'s role check rejects an operand mentioning the third micro symbol, and
   `Stage`'s insertion point L\* is "the deepest loop carrying an outer-part symbol", so an operand
