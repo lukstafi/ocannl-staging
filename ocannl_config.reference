@@ -485,6 +485,14 @@ debug_log_truncate_children=
 # shortcoming.
 prefer_backend_uniformity=false
 
+# On the CUDA and HIP backends, run a fissioned routine's segment batch by stream-capturing the
+# per-segment kernel launches into a graph (cuGraph/hipGraph) and replaying it as one API call
+# per step, keyed on the static-index binding values (and merge-buffer position). Removes
+# per-launch overhead, which dominates small-model training steps. Automatically bypassed when
+# debug_log_from_routines is on, and per-routine if the driver rejects capture. Metal's
+# counterpart (fused command-buffer encoding) is always on; the cc backend is unaffected.
+gpu_graph_capture=true
+
 # The initial value for the default precisions for tensors. The default precisions for values and
 # gradients can be changed separately via the `Tensor` API.
 default_prec=single

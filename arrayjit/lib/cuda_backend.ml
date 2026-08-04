@@ -1768,9 +1768,104 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     in
     (lowered_bindings, procs)
 
-  (* CUDA kernel launches on one stream already execute in FIFO order, so the generic event chain is
-     correct; a cheaper plain-sequence task is a possible follow-up (events are ~free there). *)
-  let sequence_segments _context ~name:_ ~bindings:_ ~uses_merge_buffer:_ _tasks = None
+  (* One CUDA graph for a fissioned routine's whole segment batch (gh-ocannl-488): stream-capture
+     the segment launch loop once per distinct set of launch-time-varying arguments — static-index
+     binding values, plus the merge-buffer position when the routine reads it — instantiate, and
+     replay with a single cuGraphLaunch per step instead of one cuLaunchKernel per segment.
+     Baking kernel arguments into the graph is sound because context buffer bases are pre-resolved
+     at link time (tnode pools are never reallocated in place while their routines are live; the
+     merge pool, which can be, is part of the key by pointer identity) and every other varying
+     argument is part of the key. The same-stream linear dependency chain the capture records is
+     exactly the FIFO ordering the per-segment launch loop relies on. Instantiated graphs are
+     retained in a bounded FIFO cache, so a training loop cycling through batch-index bindings
+     replays cached graphs from the second epoch on. Transparent fallback to per-segment launches:
+     when kernel logging is on (the log id is a fresh kernel argument every run), when disabled via
+     [gpu_graph_capture=false], or permanently for this routine if the driver rejects capture. *)
+  let sequence_segments (context : context) ~name ~(bindings : Indexing.lowered_bindings)
+      ~uses_merge_buffer (tasks : Task.t list) : Task.t option =
+    let use_capture =
+      List.length tasks > 1
+      && Utils.get_global_flag ~default:true ~arg_name:"gpu_graph_capture"
+      && not (Utils.debug_log_from_routines ())
+    in
+    if not use_capture then None
+    else
+      let device = context.device in
+      let max_cached_graphs = 128 in
+      let cache : (string, Cu.Graph.exec) Hashtbl.t = Hashtbl.create (module String) in
+      let order : string Queue.t = Queue.create () in
+      let broken = ref false in
+      let run_plain () = List.iter tasks ~f:Task.run in
+      let current_key () =
+        let idx = List.map bindings ~f:(fun (_, r) -> Int.to_string !r) in
+        let merge =
+          if not uses_merge_buffer then []
+          else
+            match !(device.merge_buffer) with
+            | Some loc ->
+                [ Cu.Deviceptr.string_of (Slab.resolve_pool device loc); Int.to_string loc.offset ]
+            | None -> [ "no-merge" ]
+        in
+        String.concat ~sep:";" (idx @ merge)
+      in
+      let capture () =
+        (* RELAXED, not THREAD_LOCAL: GC finalizers (module unloads, buffer frees of dead
+           handles) can fire at any allocation point on the capturing thread, and stricter modes
+           make the driver reject such "potentially unsafe" calls mid-capture — with the
+           exception then escaping [Gc.finalise] at an arbitrary program point. The finalizers
+           only release dead handles, so they are genuinely safe to run concurrently with
+           capture. *)
+        Cu.Graph.begin_capture ~mode:Cu.Graph.RELAXED device.runner;
+        let graph =
+          try
+            run_plain ();
+            Cu.Graph.end_capture device.runner
+          with exn ->
+            (* Terminate the capture before propagating, else the stream stays in capture mode. *)
+            (try Cu.Graph.destroy (Cu.Graph.end_capture device.runner) with _ -> ());
+            raise exn
+        in
+        let exec = Cu.Graph.instantiate graph in
+        Cu.Graph.destroy graph;
+        exec
+      in
+      Some
+        (Task.Task
+           {
+             context_lifetime = tasks;
+             description = "graph-captured segments of " ^ name ^ " on " ^ get_name device;
+             work =
+               (fun () ->
+                 if !broken then run_plain ()
+                 else (
+                   set_ctx @@ ctx_of context;
+                   let key = current_key () in
+                   match Hashtbl.find cache key with
+                   | Some exec -> Cu.Graph.launch exec device.runner
+                   | None -> (
+                       match capture () with
+                       | exec ->
+                           if Queue.length order >= max_cached_graphs then (
+                             let victim = Queue.dequeue_exn order in
+                             (* The evicted exec may still have a pending launch on the stream. *)
+                             Cu.Stream.synchronize device.runner;
+                             Cu.Graph.exec_destroy (Hashtbl.find_exn cache victim);
+                             Hashtbl.remove cache victim);
+                           Hashtbl.set cache ~key ~data:exec;
+                           Queue.enqueue order key;
+                           Cu.Graph.launch exec device.runner
+                       | exception Cu.Cuda_error { status; message } ->
+                           (* E.g. capture unsupported on this driver: fall back to per-segment
+                              launches for this routine (same-stream FIFO supplies the segment
+                              ordering), and re-run outside capture so a genuine launch failure
+                              surfaces on the plain path. *)
+                           broken := true;
+                           Stdio.eprintf
+                             "ocannl: disabling CUDA graph capture for routine %s (%s: %s)\n%!"
+                             name message
+                             (Sexp.to_string_hum @@ Cu.sexp_of_result status);
+                           run_plain ())));
+           })
 
   let get_global_debug_info () =
     Sexp.message "cuda_global_debug"
