@@ -389,12 +389,21 @@ type report = {
   best_mma_scalar_fallbacks : int;
   mma_best_ms : float;
       (** The best {e timed} tensorized candidate's time, [infinity] when none was timed
-          (gh-ocannl-546). Same population as [mma_timed] — label-promised tensorization, counted
-          where candidates are timed. Against [best_ms] this is the margin by which tensorization
-          won or lost this search, which is the difference between "the tensorized pipeline is
-          uncompetitive here" and "it lost inside measurement noise". [infinity] on a cache hit even
-          when the replayed winner tensorizes: this process timed nothing, and [best_ms] there is
-          the searching process's measurement. *)
+          (gh-ocannl-546). Against [best_ms] this is the margin by which tensorization won or lost
+          this search, which is the difference between "the tensorized pipeline is uncompetitive
+          here" and "it lost inside measurement noise"; [best_tensorized] implies the two are
+          equal.
+
+          Its population is {e structural} — timed candidates whose schedule contains a
+          [Schedule.Tensorize] — and therefore differs from [mma_timed]'s label-promised one, in
+          both directions. A beam move can append a [Tensorize] to a saved or preset incumbent,
+          producing a candidate that is tensorized while its label promises nothing (so it counts
+          here and not in [mma_timed]); conversely a labeled candidate whose applied schedule
+          carries no [Tensorize] counts in [mma_timed] and not here. Same choice as
+          [best_tensorized], for the same reason: what shipped is a property of the schedule.
+
+          [infinity] on a cache hit even when the replayed winner tensorizes: this process timed
+          nothing, and [best_ms] there is the searching process's measurement. *)
   best_schedule : Ir.Schedule_cache.saved_schedule;
       (** The winner's schedule; for a fissioned winner, the concatenation of the per-segment
           schedules (informational). Empty when nothing was timed. *)

@@ -223,9 +223,13 @@ type tune_arms = { mutable arm_reports : Autotune.report list (* reverse order *
 let tune_arms () = { arm_reports = [] }
 let collect_arm t (r : Autotune.report) = t.arm_reports <- r :: t.arm_reports
 
-(** The [tune] JSON object, or [None] when no arm reported (an untuned cell). Times are milliseconds;
-    [mma_best_ms] is [null] when no tensorized candidate was timed in that arm. *)
+(** The [tune] JSON object, or [None] when no arm reported (an untuned cell). Times are milliseconds,
+    and a time that was never measured is [null], not [inf]: [best_ms] is [infinity] when an arm
+    timed nothing at all (every candidate failed and the GPU baseline was not dispatched) and
+    [mma_best_ms] when it timed no tensorized candidate. Those are exactly the runs whose evidence
+    this object exists to preserve, so they must not be the runs whose result line fails to parse. *)
 let tune_json t =
+  let ms_json v = if Float.is_inf v then "null" else Printf.sprintf "%.6g" v in
   match List.rev t.arm_reports with
   | [] -> None
   | reports ->
@@ -239,13 +243,13 @@ let tune_json t =
       in
       let arm (name, (r : Autotune.report)) =
         Printf.sprintf
-          {|{"arm":"%s","best_ms":%.6g,"best_label":"%s","tensorized":%b,"mma_scalar_fallbacks":%d,"mma_seeded":%d,"mma_timed":%d,"mma_best_ms":%s}|}
-          name r.Autotune.best_ms
+          {|{"arm":"%s","best_ms":%s,"best_label":"%s","tensorized":%b,"mma_scalar_fallbacks":%d,"mma_seeded":%d,"mma_timed":%d,"mma_best_ms":%s}|}
+          name
+          (ms_json r.Autotune.best_ms)
           (String.substr_replace_all r.Autotune.best_label ~pattern:{|"|} ~with_:"'")
           r.Autotune.best_tensorized r.Autotune.best_mma_scalar_fallbacks r.Autotune.mma_candidates
           r.Autotune.mma_timed
-          (if Float.is_inf r.Autotune.mma_best_ms then "null"
-           else Printf.sprintf "%.6g" r.Autotune.mma_best_ms)
+          (ms_json r.Autotune.mma_best_ms)
       in
       Some
         (Printf.sprintf {|{"shipped":"%s","arms":[%s]}|} shipped

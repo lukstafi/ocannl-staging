@@ -4084,9 +4084,15 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
                   Int.incr n_timed;
                   Hashtbl.set timed_ms_by_digest ~key:c.digest_after ~data:ms;
                   Hashtbl.set label_by_digest ~key:c.digest_after ~data:(spec_label spec);
-                  if spec_expects_mma spec then (
-                    Int.incr n_mma_timed;
-                    if Float.(ms < !mma_best_ms) then mma_best_ms := ms);
+                  if spec_expects_mma spec then Int.incr n_mma_timed;
+                  (* Structural, not label-promised, and deliberately a different population from
+                     [n_mma_timed]: with [rounds > 0] the beam menu appends a [Tensorize] to a saved
+                     or preset incumbent, and the resulting [W_saved]/[F_saved] spec promises
+                     nothing in its label — yet it is exactly as tensorized as a sketch seed, and it
+                     can win. Keying this on the label would let the placement A/B report "no
+                     tensorized candidate was timed" about a search whose winner tensorizes. *)
+                  if saved_is_tensorized (flat_schedule c.form) && Float.(ms < !mma_best_ms) then
+                    mma_best_ms := ms;
                   logf "%s: %.4f ms (digest %s)" (spec_label spec) ms (dshort c.digest_after);
                   emit_calibration ~backend ~limits ~label:(spec_label spec) ~digest:c.digest_after
                     ~measured_ms:ms c.all_opts;

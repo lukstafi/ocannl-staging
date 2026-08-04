@@ -256,12 +256,15 @@ let () =
   in
   let winner_contract (r : Autotune.report) =
     (* Labeled exactly when something was timed; the flag agrees with the schedule it describes
-       (never with the winning spec's label promise); the best tensorized candidate is timed
-       exactly when one is reported, and can never beat the overall winner. *)
+       (never with the winning spec's label promise); the best tensorized candidate can never beat
+       the overall winner, and a search whose winner tensorizes must have timed it — the invariant
+       that fails if [mma_best_ms] is keyed on labels, since a beam-appended [Tensorize] promises
+       nothing in its label. Excluded on a cache hit, which times nothing in this process. *)
     Bool.equal (String.is_empty r.Autotune.best_label) (Float.is_inf r.Autotune.best_ms)
     && Bool.equal r.Autotune.best_tensorized (tensorized_schedule r)
-    && Bool.equal (Float.is_inf r.Autotune.mma_best_ms) (r.Autotune.mma_timed = 0)
     && Float.(r.Autotune.mma_best_ms >= r.Autotune.best_ms)
+    && ((not r.Autotune.best_tensorized) || r.Autotune.cache_hit
+       || Float.(r.Autotune.mma_best_ms = r.Autotune.best_ms))
     && r.Autotune.best_mma_scalar_fallbacks <= r.Autotune.best_mma_statements
   in
   p "searched report's winner fields are self-consistent" (winner_contract r1);
