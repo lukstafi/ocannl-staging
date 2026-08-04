@@ -105,6 +105,7 @@ let known_config_keys =
       "cuda_printf_fifo_size";
       "hip_printf_fifo_size";
       "hip_scratch_validation";
+      "gpu_graph_capture";
       "multidev_num_devices";
       "buffer_aliasing";
       "log_buffer_aliasing";

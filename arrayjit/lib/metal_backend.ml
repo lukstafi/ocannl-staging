@@ -1458,7 +1458,8 @@ using namespace metal;|} in
      ~0.2-0.5 ms of pipeline latency). The tasks are this backend's [link_batch] kernel launches:
      while [runner.fused] is set, [link_proc]'s work encodes into the open pass instead of
      committing its own buffer. *)
-  let sequence_segments (context : context) ~name (tasks : Task.t list) : Task.t option =
+  let sequence_segments (context : context) ~name ~bindings:_ ~uses_merge_buffer:_
+      (tasks : Task.t list) : Task.t option =
     let dev = context.device in
     Some
       (Task.Task

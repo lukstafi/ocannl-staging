@@ -193,6 +193,18 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
 
 ## Backends
 
+- Fissioned-step segment batches go through the `sequence_segments` seam
+  (`Backend_impl.Lowered_backend`): Metal encodes one serial-dispatch command buffer; CUDA/HIP
+  stream-capture the launch loop into a graph replayed as one `cuGraphLaunch`/`hipGraphLaunch`
+  per step (gh-ocannl-488, config `gpu_graph_capture`). Graph capture bakes kernel arguments, so
+  instantiated graphs are cached keyed on every launch-time-varying argument: static-index
+  binding values and the merge-buffer position. Two traps encoded there: the merge pool is the
+  one pool that can be REALLOCATED IN PLACE (same `pool_id`, new base), so its key component must
+  be pointer identity, not `buffer_loc`; and a failed capture leaves the stream in capture mode —
+  always terminate via `end_capture` before falling back or re-raising. The legacy NULL stream
+  cannot be captured (OCANNL streams are all non-default, so this only bites standalone repros).
+  Fallback paths (logging on, capture rejected, config off) are plain per-segment launches —
+  same-stream FIFO makes the generic event chain redundant on CUDA/HIP.
 - Metal shader compiler miscompiles serial `acc[k] = acc[k] + f(i)` loops when pointers derive
   from dynamically-loaded offsets (the pooled `__pool_slots` binding): result = last iteration
   only; hides under API validation (`MTL_SHADER_VALIDATION=1` makes it vanish). Fingerprint:
