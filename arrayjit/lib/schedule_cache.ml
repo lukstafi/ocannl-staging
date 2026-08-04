@@ -559,6 +559,11 @@ type entry = {
           canonical digest ([saved] is then empty). [None] for whole-routine schedules. *)
   best_ms : float;
   baseline_ms : float;
+  default_ms : float option; [@sexp.option]
+      (** The untuned default pipeline's measured time from the search that wrote the entry, for
+          diagnostics (gh-ocannl-552). [None] when the default seed was not timed, or for entries
+          written before this field existed — optional so such entries stay readable without an
+          [entry_version] bump. *)
 }
 [@@deriving sexp]
 

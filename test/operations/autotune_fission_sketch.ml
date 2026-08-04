@@ -144,6 +144,7 @@ let () =
       segments = Some !segments_assoc;
       best_ms = 0.;
       baseline_ms = 0.;
+      default_ms = None;
     };
   let hit_report = ref None in
   let hctx = Context.auto () in
@@ -184,6 +185,15 @@ let () =
   in
   p "tuned fissionable chain values correct" (Array.for_all2_exn got_t1 expected_e ~f:approx);
   p "chain tune searches then hits the cache" ((not r1.Autotune.cache_hit) && r2.Autotune.cache_hit);
+  (* gh-ocannl-552: the untuned-default reference is measured by the search — the config-thresholds
+     fissioned seed is the first candidate that binds a hardware dimension on GPU, and on CPU it is
+     timed or dedups against a timed twin — and persists through the cache entry, so a cache-hit
+     report still answers "did tuning beat the default?". *)
+  p "the default reference is measured and survives the cache round-trip (gh-ocannl-552)"
+    (match (r1.Autotune.default_ms, r2.Autotune.default_ms) with
+    | Some d1, Some d2 ->
+        Float.is_finite d1 && Float.is_finite d2 && Float.(r1.Autotune.best_ms <= d1)
+    | _ -> false);
   (* gh-ocannl-543: [candidates_timed >= 2] is a cc-shaped assertion. This chain's candidate space
      is the same on every backend, but most of it is serial forms — the whole-routine presets dedup
      to the unscheduled base, and the beam's Split/Swap/Vectorize moves off that base cannot bind a

@@ -239,6 +239,7 @@ let () =
       segments = Some !segments_assoc;
       best_ms = 0.;
       baseline_ms = 0.;
+      default_ms = None;
     };
   let hit_report = ref None in
   let hctx = Context.auto () in
