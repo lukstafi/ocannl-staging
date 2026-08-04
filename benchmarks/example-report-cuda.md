@@ -212,6 +212,16 @@ Consequences worth acting on:
 2. **bf16's mma route on CUDA is nominally reachable and actually dead.** It is the one route that
    does not need a precision policy opt-in, and it is silently degrading to scalar. Whatever rule
    declines at emission is the thing to fix; `schedule_log_declines=true` names it.
+
+   *Resolved 2026-08-04 (gh-ocannl-545).* The declining rule was `mma_syntax`: `nvcuda::wmma` has no
+   bf16 accumulator fragment, so the uniform bf16×bf16→bf16 combination a bf16 network produces had
+   no wmma arm at all. `cuda_backend.ml` now renders it as inline-PTX
+   `mma.sync.aligned.m16n8k16…bf16`, and `mma_format_tiles` is keyed on the `(a, b, accumulator)`
+   triple so seeds that would decline are no longer proposed. Re-running the same command on this
+   machine: **37 seeded / 21 timed, zero scalar-fallback notes**, `mma.sync…bf16` in the winner's
+   `.cu`, and the crowned `F_sketch[mma-gpu 16x32x0, mma-gpu 32x32x0]` at 1.1075 ms against
+   1.7581 ms for the best non-tensorized candidate of the same arm. The numbers in the tables above
+   are the pre-fix measurements and are left as recorded.
 3. **`mlp_small` seeds at f32/tf32 but does not crown mma** (48 seeded, 31 timed; a split-reduce
    candidate in the default-placements arm wins at 0.083 ms against the materialize-all arm's best
    sketch at 0.156 ms) — at that size the tensorized tile is measured and loses, which is the
