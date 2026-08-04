@@ -215,7 +215,8 @@ let percentile sorted p =
 
     {!Train.tune_placements} calls [report] once per arm, arm A (default placements) first, and
     ships the arm with the smaller [best_ms]; that is the whole attribution rule and it is applied
-    below rather than guessed at. *)
+    below rather than guessed at. Arms are named in arrival order, so one collector describes one
+    placement A/B — every step shape in {!compile_train_step} tunes exactly one routine. *)
 
 type tune_arms = { mutable arm_reports : Autotune.report list (* reverse order *) }
 

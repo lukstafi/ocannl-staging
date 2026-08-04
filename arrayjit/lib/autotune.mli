@@ -392,7 +392,9 @@ type report = {
           (gh-ocannl-546). Same population as [mma_timed] — label-promised tensorization, counted
           where candidates are timed. Against [best_ms] this is the margin by which tensorization
           won or lost this search, which is the difference between "the tensorized pipeline is
-          uncompetitive here" and "it lost inside measurement noise". *)
+          uncompetitive here" and "it lost inside measurement noise". [infinity] on a cache hit even
+          when the replayed winner tensorizes: this process timed nothing, and [best_ms] there is
+          the searching process's measurement. *)
   best_schedule : Ir.Schedule_cache.saved_schedule;
       (** The winner's schedule; for a fissioned winner, the concatenation of the per-segment
           schedules (informational). Empty when nothing was timed. *)

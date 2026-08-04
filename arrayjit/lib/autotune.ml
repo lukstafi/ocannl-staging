@@ -3829,11 +3829,11 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
                   best_tensorized = saved_is_tensorized (flat_schedule c.form);
                   best_mma_statements = List.length c.mma_renders;
                   best_mma_scalar_fallbacks = mma_scalar_fallbacks c;
-                  (* No search ran, so the only tensorized candidate this process knows of is the
-                     replayed winner itself. *)
-                  mma_best_ms =
-                    (if saved_is_tensorized (flat_schedule c.form) then entry.SC.best_ms
-                     else Float.infinity);
+                  (* Nothing was timed in this process ([mma_timed = 0] like every other counter
+                     here), so there is no measured tensorized candidate to report — including the
+                     replayed winner, whose [best_ms] was measured by the process that searched.
+                     [best_tensorized] still describes the artifact, which is what it is for. *)
+                  mma_best_ms = Float.infinity;
                   best_schedule = flat_schedule c.form;
                 };
               Some (c.cctx, c.routine)
@@ -4006,8 +4006,8 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
             best_ms;
             best_label = winner_label best_c;
             best_tensorized = winner_tensorized best_c;
-            best_mma_statements = Option.value_map best_c ~default:0 ~f:(fun c ->
-                List.length c.mma_renders);
+            best_mma_statements =
+              Option.value_map best_c ~default:0 ~f:(fun c -> List.length c.mma_renders);
             best_mma_scalar_fallbacks = Option.value_map best_c ~default:0 ~f:mma_scalar_fallbacks;
             mma_best_ms = !mma_best_ms;
             best_schedule = Option.value_map best_c ~default:[] ~f:(fun c -> flat_schedule c.form);

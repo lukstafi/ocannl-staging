@@ -192,8 +192,11 @@ grepping a log.
   At ~1.8 MFLOP/step it is launch-bound, which is exactly why the candidate spread is wide and the
   arm gap is not. Nothing here generalizes to the GEMM-dominated cells; `mlp_wide` and `gpt2_mini`
   would need their own leg.
-- The `example-report.md` sweep's own numbers (arm A 0.9915, arm B 1.6484) reproduce within this
-  leg's ranges, so this is a re-measurement of the same state, not of a changed one.
+- The `example-report.md` sweep ran on this same machine at `e687da82`. Its arm B figure (1.6484 ms)
+  falls inside this leg's arm B range; its arm A figure (0.9915 ms) sits ~5% below this leg's arm A
+  minimum. Different session, different commit, so the comparison is recorded and not leaned on —
+  which is itself the section-3 point: at this scale a single number carries a session's worth of
+  drift, while the arm gap (57%) survives both.
 - Not established: whether targeted materialization pays on a larger workload. On `mlp_small` it is
   neutral-to-slightly-negative on the shipping artifact while unlocking the candidate family — the
   interesting test is a cell where the tensorized candidate has enough work to win by more than the
