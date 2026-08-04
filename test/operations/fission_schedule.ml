@@ -155,7 +155,7 @@ let hand_built ~stmts ~tns_on_device ~tns_local =
     merge_node = None;
     workgroup_shared = Set.empty (module Tn);
     simdgroup_fragments = Set.empty (module Tn);
-    swizzled = Set.empty (module Tn);
+    swizzled = Map.empty (module Tn);
     zero_fringe = Set.empty (module Tn);
   }
 

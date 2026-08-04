@@ -381,6 +381,9 @@ module Impl = struct
                         ((Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_bf16),
                           (8, 8, 8));
                       ];
+                    (* Metal banks too, but [simdgroup_load] takes a plain pointer and leading
+                       dimension — no [ldmatrix] analogue (gh-ocannl-481 item 3, D3). *)
+                    mma_staged_layouts = [];
                   }
               else None);
            simd_vector_bytes = 0;
@@ -642,14 +645,19 @@ module Impl = struct
           ~m
           ~n
           ~k
-          ~d:(d_ptr, ldd, d_space)
-          ~a:(a_ptr, lda, a_space)
-          ~b:(b_ptr, ldb, b_space)
+          ~d:(d_ptr, ldd, d_space, d_layout)
+          ~a:(a_ptr, lda, a_space, a_layout)
+          ~b:(b_ptr, ldb, b_space, b_layout)
         ->
+          (* [simdgroup_matrix] loads take a plain pointer and leading dimension; Metal has no
+             [ldmatrix] analogue, so a swizzled operand layout declines to the caller's scalar
+             fallback (gh-ocannl-481 item 3, D2). *)
+          let plain = function `Plain -> true | `Swizzled_b128 -> false in
           let tile = 8 in
           (* [simdgroup_matrix] has no mixed-precision multiply-accumulate: uniform only. *)
           let frag_typ =
-            if not (Ops.equal_prec d_prec a_prec && Ops.equal_prec d_prec b_prec) then None
+            if not (plain d_layout && plain a_layout && plain b_layout) then None
+            else if not (Ops.equal_prec d_prec a_prec && Ops.equal_prec d_prec b_prec) then None
             else
               match d_prec with
               | Ops.Single_prec _ -> Some "simdgroup_float8x8"
@@ -804,14 +812,19 @@ module Impl = struct
           ~n
           ~k
           ~fragment
-          ~target:(d_ptr, ldd, d_space)
-          ~a:(_, _, a_space)
-          ~b:(_, _, b_space)
+          ~target:(d_ptr, ldd, d_space, d_layout)
+          ~a:(_, _, a_space, a_layout)
+          ~b:(_, _, b_space, b_layout)
           ~body
         ->
+          (* [simdgroup_matrix] loads take a plain pointer and leading dimension; Metal has no
+             [ldmatrix] analogue, so a swizzled operand layout declines to the caller's scalar
+             fallback (gh-ocannl-481 item 3, D2). *)
+          let plain = function `Plain -> true | `Swizzled_b128 -> false in
           let tile = 8 in
           let frag_typ =
-            if not (Ops.equal_prec d_prec a_prec && Ops.equal_prec d_prec b_prec) then None
+            if not (plain d_layout && plain a_layout && plain b_layout) then None
+            else if not (Ops.equal_prec d_prec a_prec && Ops.equal_prec d_prec b_prec) then None
             else
               match d_prec with
               | Ops.Single_prec _ -> Some "simdgroup_float8x8"

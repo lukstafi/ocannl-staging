@@ -23,7 +23,14 @@ let cpu_mma_limits () =
     simd_vector_bytes = Cc_backend.vector_bytes_setting ();
     (* [mma_format_tiles] is empty: the register tiling is not a tensor-core instruction — no
        per-format intrinsic tiles exist, and its precision gates (f32/f64) live in the seeding. *)
-    mma = Some { mma_simd_width = 1; mma_tile = (1, 1, 1); mma_format_tiles = [] };
+    mma =
+      Some
+        {
+          mma_simd_width = 1;
+          mma_tile = (1, 1, 1);
+          mma_format_tiles = [];
+          mma_staged_layouts = [];
+        };
   }
 
 module Multidev (Backend : For_add_scheduler) :
