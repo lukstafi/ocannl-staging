@@ -2,6 +2,8 @@
 
 Proposal for OCaml Workshop 2026 / FProPer (collocated with ICFP 2026)
 
+> **Status (August 2026):** the OCaml Workshop submission was not accepted — the article was written as a research report rather than as an introductory demonstration, outside that audience's scope. The paper track now targets **[IFL 2026](https://ifl26.cse.chalmers.se/)** (38th Symposium on Implementation and Application of Functional Languages, Gothenburg, October 28–30, 2026): draft papers due **September 4, 2026**, post-symposium papers for the proceedings due November 25, 2026. The submitted article, `docs/ocannl_workshop_article_human.md`, is kept as a historical artifact describing the project at v0.8; this proposal below is likewise the record of the original plan, retained as written.
+
 ## Motivation
 
 Tensor shape mismatches are among the most common and frustrating bugs in deep learning code. Existing frameworks address this differently:
@@ -58,8 +60,8 @@ Write and submit a workshop paper (extended abstract or short paper, per CFP for
 
 5. **Examples.** Multi-head attention, transformer encoder/decoder, and convolution — all drawn from working OCANNL code.
 
-**Target venues** (in priority order):
-- OCaml Workshop 2026 (primary — co-located with ICFP, shorter format)
+**Target venues** (in priority order; superseded — see the status note above, the current target is IFL 2026):
+- OCaml Workshop 2026 (primary — co-located with ICFP, shorter format) — submitted, not accepted
 - FProPer (if it runs — practice-oriented)
 - ML Workshop (backup — ML-family languages focus)
 - ARRAY 2026 (backup — array programming focus)

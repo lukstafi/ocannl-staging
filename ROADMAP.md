@@ -1,8 +1,8 @@
 # OCANNL Roadmap to v1.0
 
-**Headline target: v1.0 at ICFP 2026 week (August 24, 2026)**
+**Headline target: v1.0 at the IFL 2026 draft-paper deadline (September 4, 2026)**
 
-This roadmap outlines the development plan for OCANNL from the current state to version 1.0, incorporating academic paper milestones for workshops collocated with ICFP 2026 (OCaml Workshop, FProPer). Dates indicate **end of period** targets.
+This roadmap outlines the development plan for OCANNL from the current state to version 1.0 and beyond, pinned to the deadlines of the paper track — now [IFL 2026](https://ifl26.cse.chalmers.se/), the 38th Symposium on Implementation and Application of Functional Languages (Gothenburg, October 28–30, 2026; draft papers due September 4, 2026). Dates indicate **end of period** targets.
 
 > **Schedule note (July 2026):** the roadmap drifted from its original dating because of a slowdown between January and May 2026. v0.7 is the catch-up release. Three structural changes follow from that:
 >
@@ -10,7 +10,9 @@ This roadmap outlines the development plan for OCANNL from the current state to 
 > - **v0.7.2 is consolidated into v0.7.** The compiler-optimization and memory-management work that was scheduled separately (loop hoisting, CSE, the universal pool allocator) is part of the single **v0.7** milestone.
 > - **v0.7.1 was dissolved.** Its two tracks were redistributed: the **AMD HIP backend (#411)** shipped in **v0.8**; completed examples and tokenizer work landed subsequently, while remaining examples now follow their current GitHub milestone assignments. The GitHub milestone has been deleted.
 >
-> **Update (August 2026):** the v0.9 milestone closed on schedule, so **v1.0 is now the ICFP-week release** and v1.1 takes the September 30 slot. Two rebalances came with that: CUDA/HIP graph capture (#488) moved from v0.9 to v1.0, and the training/deployment utilities (#96, #97, #122, #465, #467) plus the `lib/` design study (#435) moved from v1.0 to v1.1, in favor of the compiler-tier and diagnostics work the v0.9 sweep exposed.
+> **Update (August 2026):** the v0.9 milestone closed on schedule, so **v1.0 becomes the next paper-deadline release** and v1.1 follows it. Two rebalances came with that: CUDA/HIP graph capture (#488) moved from v0.9 to v1.0, and the training/deployment utilities (#96, #97, #122, #465, #467) plus the `lib/` design study (#435) moved from v1.0 to v1.1, in favor of the compiler-tier and diagnostics work the v0.9 sweep exposed.
+>
+> **Venue change (August 2026):** the OCaml Workshop submission was not accepted — the article was written as a research report rather than as an introductory demonstration, which put it outside that audience's scope. The paper track now targets **IFL 2026** (Gothenburg, October 28–30, 2026), whose draft-paper deadline is **September 4, 2026** (post-symposium papers for the formal proceedings are due November 25, 2026). The release schedule follows the new venue: **v1.0 lands on the September 4 draft-paper deadline** and **v1.1 on October 28, the symposium's opening day**. The existing workshop article and its PDF stay in the repository unchanged, as a historical artifact capturing the state of the project at v0.8.
 >
 > The version sequence is: `0.7 → 0.8 → 0.9 → 1.0 → 1.1`. Milestone *scope* below tracks the GitHub milestones, which are the source of truth.
 
@@ -127,7 +129,7 @@ A research-heavy milestone, closed with all 44 assigned issues resolved. GitHub 
 
 ---
 
-## v1.0 — August 24, 2026 (ICFP week)
+## v1.0 — September 4, 2026 (IFL draft-paper deadline)
 **Theme: Advanced compiler tiers and schedule-quality follow-through**
 
 GitHub milestone scope: *"Branch-and-bound on the analytic cost model. Better performance: better tensor cores, algebraic rewrites (non-numeric-preserving), better beam search."* The completeness, ergonomics and safety goals originally under v1.0 moved to v1.1: v1.0 marks the compilation side reaching the shape argued for in [the compilation manifesto](docs/compilation_manifesto.md).
@@ -156,7 +158,7 @@ Work already completed in this milestone: safety, determinism and `%cd` simplifi
 
 ---
 
-## v1.1 — September 30, 2026
+## v1.1 — October 28, 2026 (IFL symposium week)
 **Theme: Training/deployment utilities, shape design, model examples, and integrations**
 
 GitHub milestone scope: *"Completeness, more examples, potentially cloud-tested (datacenter) GPU targets for Nvidia and AMD."* This milestone inherits the documentation, feature-completeness, ergonomics and safety goals originally scoped for v1.0, alongside the axis-label and shape-scheme design directions.
@@ -195,19 +197,21 @@ Quantization (#137, #271), the WebGPU/WASM target (#123), the LLVM backend (#200
 | ~~0.7.1~~ | — | **dissolved** | AMD HIP backend → 0.8; completed examples and tokenizers landed subsequently |
 | **0.8** | Jul 13, 2026 | **released** | **Parallel schedules (GPU + CPU), autotuning, SIMD/`Tile_mma`, AMD HIP backend, benchmark suite** |
 | **0.9** | Aug 3, 2026 | **released** | **Schedule quality, deterministic parallelism, mixed precision, convolution performance, and search survivability** |
-| 1.0    | Aug 24, 2026 | planned | Advanced compiler tiers and schedule-quality follow-through **(ICFP week)** |
-| 1.1    | Sep 30, 2026 | planned | Release completeness: training/deployment utilities, shape design, model examples, and integrations |
+| 1.0    | Sep 4, 2026 | planned | Advanced compiler tiers and schedule-quality follow-through **(IFL draft-paper deadline)** |
+| 1.1    | Oct 28, 2026 | planned | Release completeness: training/deployment utilities, shape design, model examples, and integrations **(IFL symposium week)** |
 
 ---
 
-## Workshop Paper Artifacts (OCaml Workshop / FProPer at ICFP 2026)
+## Paper Artifacts (IFL 2026; formerly OCaml Workshop / FProPer at ICFP 2026)
 
-The v0.7 release includes the paper-facing material needed for workshop submission and follow-up discussion:
+The paper track now targets [IFL 2026](https://ifl26.cse.chalmers.se/): draft papers are due **September 4, 2026** (the v1.0 date), the symposium runs **October 28–30, 2026** in Gothenburg (v1.1 opens on its first day), and post-symposium papers for the formal proceedings are due **November 25, 2026**.
 
-- Workshop article: [docs/ocannl_workshop_article_human.md](docs/ocannl_workshop_article_human.md).
-- Workshop article PDF: [docs/html/pdfs/ocannl_workshop_article_human.pdf](docs/html/pdfs/ocannl_workshop_article_human.pdf).
-- Formal core technical report: [rendered PDF](https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf), LaTeX source in [docs/](docs/ocannl-formal-core-technical-report.latex).
-- Shape constraint generation notes: [docs/shape-constraint-generation.md](docs/shape-constraint-generation.md).
+The paper-facing material, first assembled for the v0.7/v0.8 workshop submission, carries over:
+
+- Workshop article: [docs/ocannl_workshop_article_human.md](docs/ocannl_workshop_article_human.md) — **historical artifact**, kept as-is; it describes the project as of the [0.8 release](https://github.com/ahrefs/ocannl/releases/tag/0.8) and was written for the OCaml Workshop / FProPer submission, which was not accepted. It is the starting point for the IFL draft, not the draft itself.
+- Workshop article PDF: [docs/html/pdfs/ocannl_workshop_article_human.pdf](docs/html/pdfs/ocannl_workshop_article_human.pdf) — likewise archival, rendered from the v0.8-era source.
+- Formal core technical report: [rendered PDF](https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf), LaTeX source in [docs/](docs/ocannl-formal-core-technical-report.latex) — live, still developing.
+- Shape constraint generation notes: [docs/shape-constraint-generation.md](docs/shape-constraint-generation.md) — live.
 
 ### Proposed Title
 *"Generalized Einsum with Row Variables: Shape Inference for Deep Learning in OCaml"*
