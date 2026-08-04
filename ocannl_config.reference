@@ -357,6 +357,15 @@ cc_backend_arch_flags=-march=native
 # beyond the configured target. Any other value is passed through verbatim; empty disables.
 cc_backend_simd_flags=auto
 
+# If true (the default), the results of the CC backend's toolchain probes -- the compiler command
+# from `ocamlc -config`, cc_backend_simd_flags=auto, cc_parallel_grid=auto -- are memoized in files
+# under the temp directory, shared by every OCANNL process on the machine. Probing costs about five
+# subprocesses per process, which dominates short runs when many executables run in sequence (a
+# `dune build` of the test suite, most visibly on Windows). The memo is keyed by
+# cc_backend_compiler_command, cc_backend_arch_flags and PATH, so an opam switch or toolchain change
+# re-probes; set to false to probe in-process every time.
+cc_backend_probe_cache=true
+
 # If true, enables `-ffast-math` for the CC backend. This may change numerical behavior.
 cc_backend_fast_math=false
 

@@ -98,6 +98,7 @@ let known_config_keys =
       "cc_backend_compiler_command";
       "cc_backend_arch_flags";
       "cc_backend_simd_flags";
+      "cc_backend_probe_cache";
       "cc_backend_fast_math";
       "cc_backend_post_compile_timeout";
       "cc_backend_verify_codesign";
