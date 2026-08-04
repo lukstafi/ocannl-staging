@@ -227,6 +227,7 @@ let () =
                 ( (Ir.Backend_intf.Mma_tf32, Ir.Backend_intf.Mma_tf32, Ir.Backend_intf.Mma_f32),
                   (16, 16, 8) );
               ];
+            mma_staged_layouts = [];
           };
     }
   in

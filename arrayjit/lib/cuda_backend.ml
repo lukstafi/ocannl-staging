@@ -2257,6 +2257,20 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                             (Backend_intf.Mma_tf32, Backend_intf.Mma_tf32, Backend_intf.Mma_f32)
                             (16, 16, 8);
                         ];
+                    (* Swizzled staged tiles (gh-ocannl-481 item 3, D3): only the inline-PTX arms
+                       can read them, and only in the orientations the staged sketches mint. That
+                       is the uniform-bf16 combination — both its operands' fragment registers hold
+                       16-bit pairs that are contiguous in the roles' own orientations. fp8 is
+                       deliberately absent: its A side qualifies but its B side does not (4 fp8
+                       bytes of a B register are strided at that orientation), so a swizzled fp8
+                       twin would render the scalar fallback under a tensorized label. *)
+                    mma_staged_layouts =
+                      List.filter_opt
+                        [
+                          entry ~min_cc:80
+                            (Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_bf16)
+                            Backend_intf.Mma_swizzled_b128;
+                        ];
                   }
               else None);
            simd_vector_bytes = 0;

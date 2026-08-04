@@ -315,6 +315,7 @@ let () =
                 ( (Ir.Backend_intf.Mma_bf16, Ir.Backend_intf.Mma_bf16, Ir.Backend_intf.Mma_f32),
                   (16, 16, 16) );
               ];
+            mma_staged_layouts = [];
           };
     }
   in
@@ -353,3 +354,73 @@ let () =
     ~operand_prec:Ir.Ops.bfloat16 ~acc_prec:Ir.Ops.single;
   count_mma "seeds: bf16 operands, bf16 accumulator (not advertised)" ~name:"tmd_acc_bf16_bf16"
     ~operand_prec:Ir.Ops.bfloat16 ~acc_prec:Ir.Ops.bfloat16
+
+(* === Swizzled staged twins are capability-gated (gh-ocannl-481 item 3, D3) ===
+
+   A swizzled staged tile is only worth proposing where the emission can actually read it: a twin
+   the arms decline renders the scalar fallback, and the tuner would time and rank it under an
+   `mma-gpu` label — the same failure the accumulator key above was introduced to stop.
+   [mma_staged_layouts] is therefore keyed by format triple, and the twins follow it.
+
+   Two more properties this pins, both mechanism rather than any backend's arm set:
+
+   - Only STAGED seeds ([sk_bk > 0]) are twinned. An unstaged seed reads its operands in place;
+     there is no shared tile to lay out.
+   - The twin must satisfy [Swizzle_b128]'s extent rule (a power-of-two count > 1 of whole 16-byte
+     units per staged tile row) at SEEDING time. The f32 table below advertises the layout for a
+     format whose 32-element tile rows are 128 bytes — 8 units — while the bf16 table's are 64
+     bytes; a format whose rows missed the rule would simply not be twinned, rather than raise
+     inside [Schedule.apply]. === *)
+let () =
+  let staged_limits advertised =
+    {
+      Ir.Backend_intf.no_hardware_limits with
+      mma =
+        Some
+          {
+            Ir.Backend_intf.mma_simd_width = 32;
+            mma_tile = (16, 16, 16);
+            mma_format_tiles =
+              [
+                ( (Ir.Backend_intf.Mma_f32, Ir.Backend_intf.Mma_f32, Ir.Backend_intf.Mma_f32),
+                  (16, 16, 16) );
+              ];
+            mma_staged_layouts =
+              (if advertised then
+                 [
+                   ( (Ir.Backend_intf.Mma_f32, Ir.Backend_intf.Mma_f32, Ir.Backend_intf.Mma_f32),
+                     Ir.Backend_intf.Mma_swizzled_b128 );
+                 ]
+               else []);
+          };
+    }
+  in
+  let av = Array.init (n * n) ~f:(fun x -> Float.of_int (x % 13) *. 0.25) in
+  let bv = Array.init (n * n) ~f:(fun x -> Float.of_int (x % 17) -. 8.) in
+  let a = TDSL.ndarray av ~label:[ "tmd_swz_a" ] ~input_dims:[ n ] ~output_dims:[ n ] () in
+  let b = TDSL.ndarray bv ~label:[ "tmd_swz_b" ] ~input_dims:[ n ] ~output_dims:[ n ] () in
+  let%op c = a * b in
+  let captured = ref None in
+  let ctx = Context.auto () in
+  let (_ : Context.t * Context.routine) =
+    Context.compile
+      ~lowered_transform:(fun opt ->
+        captured := Some opt;
+        opt)
+      ctx
+      (named "tmd_swizzled_seeds" (Train.forward c))
+      Ir.Indexing.Empty
+  in
+  let opt = Option.value_exn !captured in
+  let report label advertised =
+    let seeds =
+      Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits:(staged_limits advertised) opt
+      |> List.filter ~f:(fun p -> p.Autotune.sk_mma)
+    in
+    let swizzled = List.filter seeds ~f:(fun p -> Option.is_some p.Autotune.sk_swizzle) in
+    Stdio.printf "%s: mma seeds=%d swizzled=%d unstaged swizzled=%d\n" label (List.length seeds)
+      (List.length swizzled)
+      (List.count swizzled ~f:(fun p -> p.Autotune.sk_bk = 0))
+  in
+  report "seeds: staged layout advertised" true;
+  report "seeds: staged layout not advertised" false

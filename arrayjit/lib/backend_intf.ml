@@ -49,6 +49,15 @@ type mma_input_format =
           pair, so mixed e5m2×e4m3 combinations need no interface change. *)
 [@@deriving sexp, compare, equal]
 
+(** A physical layout the backend's tensor-core loads can consume for a cooperatively staged operand
+    tile, beyond the plain row-major one (gh-ocannl-481 item 3, D3). *)
+type mma_staged_layout =
+  | Mma_swizzled_b128
+      (** {!Low_level.Swizzle_b128}: the CUDA inline-PTX [mma.sync] arms read it with
+          [ldmatrix.sync.aligned.m8n8]. Metal banks too but has no [ldmatrix] analogue; a later
+          [simdgroup]-era entry would reuse this type. *)
+[@@deriving sexp, compare, equal]
+
 type mma_capability = {
   mma_simd_width : int;
       (** Threads cooperating in one tile-MMA instruction (CUDA warp / Metal simdgroup width). *)
@@ -71,6 +80,19 @@ type mma_capability = {
           [nvcuda::wmma] pairs bf16 operands with a [float] accumulator only, so keying on the
           operands alone made the autotuner seed — and time, and rank — 36 candidates per arm on a
           uniformly-bf16 network that every one of them rendered as the lane-0 scalar fallback. *)
+  mma_staged_layouts :
+    ((mma_input_format * mma_input_format * mma_input_format) * mma_staged_layout) list;
+      (** Format triples whose cooperatively staged operand tiles the backend can read in a
+          non-row-major layout, and which layout (gh-ocannl-481 item 3, D3). Autotune's {e staged}
+          mma sketches seed a swizzled twin per staged seed exactly for the advertised triples — the
+          tuner, not a heuristic, then decides whether the bank-conflict fix beats the plain tile.
+
+          Keyed by format triple for the same reason as [mma_format_tiles], and pre-filtered for the
+          same reason (gh-ocannl-479): eligibility is per operand AND per orientation, and the
+          orientation the staged sketches mint is each role's own. CUDA's fp8 arm, for instance, can
+          feed A from [ldmatrix] in that orientation but not B — 4 fp8 bytes of a B register are
+          strided there — so a swizzled fp8 twin would be timed and ranked as a tensorized candidate
+          while rendering the scalar fallback. Empty everywhere the question does not arise. *)
 }
 [@@deriving sexp, compare, equal]
 (** Tensor-core capability descriptor (docs/proposals/tensorize-mma.md §6). Which operand precisions

@@ -140,8 +140,8 @@ let staged_schedule ~out ~src_a ~src_b ~swz_a ~swz_b ~bk ~ta ~tb (opt : LL.optim
 
 (* One leg: the serial twin, then the swizzled staged+tensorized form under census collection. On
    the C backends the shared placement is rejected before any of that. *)
-let leg ~tag ~build ~src_a ~src_b ~swz_a ~swz_b ~check ~acc_prec ?(bk = bm) ?(ta = false)
-    ?(tb = false) () =
+let leg ?schedule_of ~tag ~build ~src_a ~src_b ~swz_a ~swz_b ~check ~acc_prec ?(bk = bm)
+    ?(ta = false) ?(tb = false) () =
   let name = "ldm_" ^ tag in
   let parity_label = Printf.sprintf "%s staged ldmatrix parity (GPU) or clean rejection (CPU)" tag in
   let struct_label = Printf.sprintf "%s ldmatrix structure and census as expected" tag in
@@ -150,11 +150,11 @@ let leg ~tag ~build ~src_a ~src_b ~swz_a ~swz_b ~check ~acc_prec ?(bk = bm) ?(ta
   let with_target f =
     let t0 = build () in
     Tn.update_prec t0.Tensor.value acc_prec;
-    let transform opt =
-      Sched.apply
-        (staged_schedule ~out:t0.Tensor.value ~src_a ~src_b ~swz_a ~swz_b ~bk ~ta ~tb opt)
-        opt
+    let schedule_of =
+      Option.value schedule_of
+        ~default:(staged_schedule ~out:t0.Tensor.value ~src_a ~src_b ~swz_a ~swz_b ~bk ~ta ~tb)
     in
+    let transform opt = Sched.apply (schedule_of opt) opt in
     f t0 transform
   in
   if not on_gpu then (
@@ -284,6 +284,37 @@ let () =
       let%op t = mab * mbb in
       t)
     ~check:(bf16_check ~a_trans:false ~b_trans:false)
+    ();
+  (* The swizzled twin as AUTOTUNE builds it (gh-ocannl-481 item 3, D3), not as this file hand-wires
+     it: [Autotune.sketch_schedule] with [sk_swizzle] set is the pipeline the tuner will actually
+     time on CUDA, pads and companion geometry included. Its staged tiles are [16 x 32] and
+     [32 x 32] bf16 — 64-byte rows, 4 whole 16-byte units. *)
+  leg ~tag:"bf_sketch" ~acc_prec:Ir.Ops.bfloat16 ~src_a:mab.Tensor.value ~src_b:mbb.Tensor.value
+    ~swz_a:b128 ~swz_b:b128
+    ~build:(fun () ->
+      let%op t = mab * mbb in
+      t)
+    ~schedule_of:(fun opt ->
+      Autotune.sketch_schedule
+        ~p:
+          {
+            Autotune.sk_gpu = true;
+            sk_mma = true;
+            sk_simd = simd_width;
+            sk_bm = bm;
+            sk_bn = n;
+            sk_bk = n;
+            sk_tm = 0;
+            sk_tn = 0;
+            sk_hoist = false;
+            sk_grid = false;
+            sk_pack_rest = false;
+            sk_conv = false;
+            sk_epilogue = false;
+            sk_swizzle = Some LL.Swizzle_b128;
+          }
+        opt)
+    ~check:(bf16_check ~a_trans:false ~b_trans:true)
     ();
   (* fp8, A-side only: staged in the A role's orientation, A's 4 fp8 bytes per register are
      contiguous and come in through [ldmatrix], while B keeps its strided byte gathers from a plain

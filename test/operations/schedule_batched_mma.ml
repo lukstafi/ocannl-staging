@@ -66,6 +66,7 @@ let gpu_limits =
               ( (Ir.Backend_intf.Mma_f32, Ir.Backend_intf.Mma_f32, Ir.Backend_intf.Mma_f32),
                 (8, 8, 8) );
             ];
+          mma_staged_layouts = [];
         };
   }
 

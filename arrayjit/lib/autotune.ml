@@ -313,6 +313,15 @@ type sketch_params = {
           duplicating the store-back) fails its compile and is skipped like any other invalid
           candidate. On GPU the accumulator moves to workgroup-shared memory (the [shared] flag) so
           the Metal fragment intrinsics keep firing after placement makes it routine-local. *)
+  sk_swizzle : LL.swizzle_kind option;
+      (** Staged GPU mma sketches only ([sk_mma] with [sk_bk > 0]): store both cooperative operand
+          tiles in this XOR layout (gh-ocannl-481 item 3, D3). Seeded as a {e twin} of each staged
+          seed — same tile sizes, both operands marked — and only for format triples the backend
+          advertises in {!Ir.Backend_intf.mma_capability.mma_staged_layouts}, so a twin is never
+          proposed where the emission would decline it back to the scalar fallback (gh-ocannl-479).
+          The tuner, not a heuristic, decides whether the bank-conflict fix beats the plain tile:
+          the same "propose both, measure" pattern as hoisted packing. Unstaged seeds have no shared
+          tile to swizzle and are never twinned. *)
 }
 
 (* Resolve the tensor-core input format from storage precision before seeding a typed matmul/conv
@@ -342,17 +351,31 @@ let mma_acc_format_of_prec (prec : Ir.Ops.prec) : Ir.Backend_intf.mma_input_form
   | Ir.Ops.Single_prec _ -> Some Ir.Backend_intf.Mma_f32
   | _ -> None
 
+let equal_mma_format_triple (a1, b1, d1) (a2, b2, d2) =
+  Ir.Backend_intf.equal_mma_input_format a1 a2
+  && Ir.Backend_intf.equal_mma_input_format b1 b2
+  && Ir.Backend_intf.equal_mma_input_format d1 d2
+
+(* The site's resolved format triples, in [mma_input_formats_of_prec]'s preference order. *)
+let mma_format_triples ~a_prec ~b_prec ~d_prec =
+  match mma_acc_format_of_prec d_prec with
+  | None -> []
+  | Some d_format ->
+      List.concat_map (mma_input_formats_of_prec a_prec) ~f:(fun a_format ->
+          List.map (mma_input_formats_of_prec b_prec) ~f:(fun b_format ->
+              (a_format, b_format, d_format)))
+
 let mma_tile_for_precisions (mma : Ir.Backend_intf.mma_capability) ~a_prec ~b_prec ~d_prec =
-  let equal_triple (a1, b1, d1) (a2, b2, d2) =
-    Ir.Backend_intf.equal_mma_input_format a1 a2
-    && Ir.Backend_intf.equal_mma_input_format b1 b2
-    && Ir.Backend_intf.equal_mma_input_format d1 d2
-  in
-  Option.bind (mma_acc_format_of_prec d_prec) ~f:(fun d_format ->
-      List.find_map (mma_input_formats_of_prec a_prec) ~f:(fun a_format ->
-          List.find_map (mma_input_formats_of_prec b_prec) ~f:(fun b_format ->
-              List.Assoc.find mma.Ir.Backend_intf.mma_format_tiles (a_format, b_format, d_format)
-                ~equal:equal_triple)))
+  List.find_map (mma_format_triples ~a_prec ~b_prec ~d_prec) ~f:(fun key ->
+      List.Assoc.find mma.Ir.Backend_intf.mma_format_tiles key ~equal:equal_mma_format_triple)
+
+(* The swizzled staged layout, if any, that the backend can read for this site's formats
+   (gh-ocannl-481 item 3, D3). [None] leaves the staged seeds untwinned. *)
+let mma_staged_layout_for_precisions (mma : Ir.Backend_intf.mma_capability) ~a_prec ~b_prec ~d_prec :
+    LL.swizzle_kind option =
+  List.find_map (mma_format_triples ~a_prec ~b_prec ~d_prec) ~f:(fun key ->
+      List.Assoc.find mma.Ir.Backend_intf.mma_staged_layouts key ~equal:equal_mma_format_triple)
+  |> Option.map ~f:(function Ir.Backend_intf.Mma_swizzled_b128 -> LL.Swizzle_b128)
 
 type matmul_site = {
   m_i : Idx.symbol;
@@ -1436,7 +1459,8 @@ let cpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = b
    at all (gh-ocannl-521): before, only the [Fuse_epilogue] twin could survive a companion, and when
    the fusion declined the seed had no surviving form. *)
 let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
-    { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_simd = w; sk_epilogue; _ } : Sched.schedule =
+    { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_simd = w; sk_epilogue; sk_swizzle; _ } : Sched.schedule
+    =
   (* The column role splits at the lane width, not at [bn]: the inner loop IS the workgroup slot
      the [Tile_mma]'s lane occupies, and a barrier-carrying kernel requires equal extents at a
      slot. The seeds constrain [sk_bn = sk_simd], so this is also the accumulation nest's column
@@ -1486,6 +1510,9 @@ let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
     @ zops
     @ [ sp_i; sp_j; sp_k ] @ sink i_i [ j_o ] @ sink j_i [ k_o ] @ sink i_i [ k_o ]
     @ [
+        (* The swizzled twin (gh-ocannl-481 item 3, D3) marks BOTH operand tiles: the tile sizes and
+           the whole rest of the pipeline are identical to its plain sibling, so a timing difference
+           between the two is the layout's, and nothing else's. *)
         Sched.Stage
           {
             source = site.m_a;
@@ -1493,7 +1520,7 @@ let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
             shared = true;
             cooperative = Some w;
             hoisted = false;
-            swizzle = None;
+            swizzle = sk_swizzle;
           };
         Sched.Stage
           {
@@ -1502,7 +1529,7 @@ let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
             shared = true;
             cooperative = Some w;
             hoisted = false;
-            swizzle = None;
+            swizzle = sk_swizzle;
           };
         tz;
       ]
@@ -1939,6 +1966,7 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
           sk_pack_rest = false;
           sk_conv = true;
           sk_epilogue = false;
+          sk_swizzle = None;
         }
       in
       let cpu_seeds =
@@ -2106,6 +2134,7 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                 sk_pack_rest = false;
                 sk_conv = false;
                 sk_epilogue = false;
+                sk_swizzle = None;
               }
           else None)
     else if is_cpu then
@@ -2127,6 +2156,7 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                   sk_pack_rest = false;
                   sk_conv = false;
                   sk_epilogue = false;
+                  sk_swizzle = None;
                 }
             else None)
       in
@@ -2154,7 +2184,33 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                non-multiple axes and [Tensorize] masks the edges (gh-ocannl-485) — block sizes must
                still be intrinsic-tile multiples. Unstaged seeds read the operands in place, so a
                pad cannot be absorbed and the full divisibility gates remain. *)
-            List.filter_map
+            let a_prec = Lazy.force site.m_a.Ir.Tnode.storage_prec in
+            let b_prec = Lazy.force site.m_b.Ir.Tnode.storage_prec in
+            (* The swizzled layout the emission can read for these formats, if any, and the tile
+               extents it needs (gh-ocannl-481 item 3, D3): [Swizzle_b128] permutes whole 16-byte
+               units, so each staged tile's minor extent — [bk] elements of A, [bn] of B — must span
+               a power-of-two count > 1 of them. Both are checked here rather than left to raise
+               inside [Schedule.apply]: an inapplicable twin should not exist, not merely fail. *)
+            let staged_layout =
+              mma_staged_layout_for_precisions mma ~a_prec ~b_prec
+                ~d_prec:(Lazy.force site.m_d.Ir.Tnode.storage_prec)
+            in
+            let b128_rows_ok ~bn ~bk =
+              let units_ok prec extent =
+                let bytes = extent * Ir.Ops.prec_in_bytes prec in
+                bytes % 16 = 0
+                &&
+                let units = bytes / 16 in
+                units > 1 && units land (units - 1) = 0
+              in
+              units_ok a_prec bk && units_ok b_prec bn
+            in
+            let swizzle_for ~bn ~bk =
+              match staged_layout with
+              | Some LL.Swizzle_b128 when bk > 0 && b128_rows_ok ~bn ~bk -> Some LL.Swizzle_b128
+              | Some LL.Swizzle_elem | Some LL.Swizzle_b128 | None -> None
+            in
+            List.concat_map
               [ (16, w, 0); (32, w, 0); (16, w, 32); (32, w, 32); (32, w, 16) ]
               ~f:(fun (bm, bn, bk) ->
                 if
@@ -2164,7 +2220,7 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                         divides bm site.m_ni && divides bn site.m_nj && site.m_nk % tk_t = 0
                       else bk % tk_t = 0)
                 then
-                  Some
+                  let base =
                     {
                       sk_gpu = true;
                       sk_mma = true;
@@ -2179,8 +2235,14 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                       sk_pack_rest = false;
                       sk_conv = false;
                       sk_epilogue = false;
+                      sk_swizzle = None;
                     }
-                else None))
+                  in
+                  base
+                  :: (match swizzle_for ~bn ~bk with
+                     | Some kind -> [ { base with sk_swizzle = Some kind } ]
+                     | None -> [])
+                else []))
     | _ when is_cpu ->
         (* The register-tiled [Tile_mma] rendering needs no MMA units (cc's [limits.mma] is a token
            1x1x1 capability): seed the whole-triple form plus Grid-parallel row-block splits, and
@@ -2232,6 +2294,7 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                       sk_pack_rest = false;
                       sk_conv = false;
                       sk_epilogue = false;
+                      sk_swizzle = None;
                     }
                 else None)
           in
@@ -2277,6 +2340,7 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                         sk_pack_rest = false;
                         sk_conv = false;
                         sk_epilogue = false;
+                        sk_swizzle = None;
                       },
                       full_div )
                 else None)
@@ -2871,15 +2935,25 @@ let spec_expects_mma = function
   | Fiss (F_sketch entries) -> List.exists entries ~f:(fun (_, p) -> p.sk_mma)
   | _ -> false
 
+(* The swizzled staged twin is labeled apart from its plain sibling (gh-ocannl-481 item 3, D3): the
+   two are otherwise identical, so a timing report that could not name which is which would be
+   reporting the same candidate twice. *)
+let swz_label p =
+  match p.sk_swizzle with
+  | None -> ""
+  | Some LL.Swizzle_elem -> " swz-elem"
+  | Some LL.Swizzle_b128 -> " swz-b128"
+
 let spec_label = function
   | Whole (W_saved s) -> Printf.sprintf "W_saved[%d ops]" (List.length s)
   | Whole (W_preset { block_size }) -> Printf.sprintf "W_preset[bs=%s]" (bs_label block_size)
   | Whole (W_sketch p) when p.sk_mma ->
-      Printf.sprintf "W_sketch[%smma-%s %dx%dx%d%s%s%s%s%s]"
+      Printf.sprintf "W_sketch[%smma-%s %dx%dx%d%s%s%s%s%s%s]"
         (if p.sk_conv then "conv-" else "")
         (if p.sk_gpu then "gpu" else "cpu")
         p.sk_bm p.sk_bn p.sk_bk
         (if p.sk_bk > 0 then if p.sk_gpu then " staged" else " pack" else "")
+        (swz_label p)
         (if p.sk_hoist then " hoist" else "")
         (if p.sk_grid then " grid" else "")
         (if p.sk_pack_rest then " packrest" else "")
@@ -2899,12 +2973,13 @@ let spec_label = function
       Printf.sprintf "F_sketch[%s]"
         (String.concat ~sep:","
            (List.map entries ~f:(fun (_, p) ->
-                Printf.sprintf "%s%s%s %dx%dx%d%s%s%s%s%s"
+                Printf.sprintf "%s%s%s %dx%dx%d%s%s%s%s%s%s"
                   (if p.sk_conv then "conv-" else "")
                   (if p.sk_mma then "mma-" else "")
                   (if p.sk_gpu then "gpu" else "cpu")
                   p.sk_bm p.sk_bn p.sk_bk
                   (if p.sk_mma then "" else Printf.sprintf "/%dx%d" p.sk_tm p.sk_tn)
+                  (swz_label p)
                   (if p.sk_hoist then " hoist" else "")
                   (if p.sk_grid then " grid" else "")
                   (if p.sk_pack_rest then " packrest" else "")

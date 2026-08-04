@@ -381,6 +381,9 @@ module Impl = struct
                         ((Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_bf16),
                           (8, 8, 8));
                       ];
+                    (* Metal banks too, but [simdgroup_load] takes a plain pointer and leading
+                       dimension — no [ldmatrix] analogue (gh-ocannl-481 item 3, D3). *)
+                    mma_staged_layouts = [];
                   }
               else None);
            simd_vector_bytes = 0;

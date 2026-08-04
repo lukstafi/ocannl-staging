@@ -1893,6 +1893,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                         ((Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_bf16),
                           (16, 16, 16));
                       ];
+                    (* rocWMMA fragments are opaque like wmma's: no swizzle-aware fragment load
+                       here (gh-ocannl-481 item 3, D3). *)
+                    mma_staged_layouts = [];
                   }
               else None);
            simd_vector_bytes = 0;
