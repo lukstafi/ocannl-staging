@@ -2088,6 +2088,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                   }
               else None);
            simd_vector_bytes = 0;
+           native_fp16_arithmetic = false;
            (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the sm_70+
               discrete-GPU class (RTX-30/40 mid-range: ~15 fp32 TFLOP/s, ~450 GB/s). Per-device
               queries (SM count x clock, memory clock x bus width) are calibration follow-up work;

@@ -107,6 +107,13 @@ module type C_syntax_config = sig
       identical across sibling autotune candidates — or schedule transforms would stop being
       numerics-preserving. *)
 
+  val vector_prec_ok : Ops.prec -> bool
+  (** Whether the explicit vector renderings ([Vectorized] loops) can operate at this {e compute}
+      precision. f32 and f64 everywhere; fp16 additionally on CPU targets with native 16-bit
+      arithmetic (gh-ocannl-516), which is exactly where {!compute_prec} leaves [Half_prec] alone.
+      A storage precision this rejects can still be vectorized when {!compute_prec} maps it to one
+      this accepts -- that is gh-ocannl-517's convert-on-load/store. *)
+
   val hardware_index : kind:[ `Grid | `Workgroup ] -> slot:int -> string option
   (** The hardware register expression an annotated loop's index binds to (e.g. ["blockIdx.x"],
       ["gid.y"]), or [None] when the backend cannot bind this axis in hardware — the loop then
@@ -548,6 +555,8 @@ struct
      arithmetic; see the signature. *)
   let compute_prec prec = prec
 
+  let vector_prec_ok = function Ops.Single_prec _ | Ops.Double_prec _ -> true | _ -> false
+
   (* The names the *language* reserves and the scaffolding this module emits. The names an operator
      rendering emits are not restated here: {!C_syntax} derives them from the backend's own syntax
      functions ({!op_syntax_idents}), so an override cannot drift out of the list. What [c_names]
@@ -866,11 +875,13 @@ module C_syntax (B : C_syntax_config) = struct
      exit — and the register-tiled [Tile_mma] micro-kernel (gh-ocannl-469) will hold its C-tile as
      an RM×RN grid of vector registers across the fused k-loop. *)
 
-  (* The vector-extension typedef shared by the explicit-SIMD renderings: [lanes] elements of [prec]
-     (single or double). *)
+  (* The vector-extension typedef shared by the explicit-SIMD renderings: [lanes] elements of the
+     compute precision (f32, f64, or -- where the target has native 16-bit arithmetic, gh-ocannl-516
+     -- fp16, whose element type [HALF_T] is [_Float16] exactly when that probe passed). *)
   let vec_ext_typ ~prec ~lanes =
     let vtyp =
-      Printf.sprintf "ocannl_vec%d%s" lanes (match prec with Ops.Double_prec _ -> "d" | _ -> "f")
+      Printf.sprintf "ocannl_vec%d%s" lanes
+        (match prec with Ops.Double_prec _ -> "d" | Ops.Half_prec _ -> "h" | _ -> "f")
     in
     ( vtyp,
       PPrint.string
@@ -1013,7 +1024,17 @@ module C_syntax (B : C_syntax_config) = struct
      per-lane fused loop. *)
   let vec_acc_fma ~prec ~lanes ~dst ~a ~b =
     let open PPrint in
-    let fma_fn = match prec with Ops.Double_prec _ -> "fma" | _ -> "fmaf" in
+    (* At fp16 the per-lane fallback must be the *same* fused multiply-add the scalar path emits,
+       or the two arms of the [#if] -- and the vector rendering and its serial remainder -- would
+       round differently: [fmaf] on [_Float16] operands promotes to float and rounds twice, while
+       [__builtin_elementwise_fma] on an fp16 vector rounds once. [OCANNL_HALF_FMA] is defined by
+       the same [#if], so both configurations agree by construction (gh-ocannl-516). *)
+    let fma_fn =
+      match prec with
+      | Ops.Double_prec _ -> "fma"
+      | Ops.Half_prec _ -> "OCANNL_HALF_FMA"
+      | _ -> "fmaf"
+    in
     string "#if OCANNL_HAS_ELEMENTWISE_FMA"
     ^^ hardline
     ^^ string (Printf.sprintf "%s = __builtin_elementwise_fma(%s, %s, %s);" dst a b dst)
@@ -2136,7 +2157,7 @@ module C_syntax (B : C_syntax_config) = struct
               let tn, _, _ = List.hd_exn sets in
               comp_prec (Lazy.force tn.Tn.storage_prec)
             in
-            (match prec with Ops.Single_prec _ | Ops.Double_prec _ -> () | _ -> raise Bail);
+            if not (B.vector_prec_ok prec) then raise Bail;
             let lanes = B.vector_bytes / Ops.prec_in_bytes prec in
             if lanes < 2 || extent < lanes then raise Bail;
             let written = Hashtbl.create (module Int) in
@@ -2315,7 +2336,7 @@ module C_syntax (B : C_syntax_config) = struct
             in
             let acc_store_prec = Lazy.force acc_tn.Tn.storage_prec in
             let prec = comp_prec acc_store_prec in
-            (match prec with Ops.Single_prec _ | Ops.Double_prec _ -> () | _ -> raise Bail);
+            if not (B.vector_prec_ok prec) then raise Bail;
             (* A loop-invariant contribution deserves strength reduction, not chains. *)
             if not (scalar_mentions contrib) then raise Bail;
             let lanes = B.vector_bytes / Ops.prec_in_bytes prec in
