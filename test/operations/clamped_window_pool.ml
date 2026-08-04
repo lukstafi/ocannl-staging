@@ -143,7 +143,7 @@ let () =
   let xv = Array.init 8 ~f:(fun i -> Float.of_int i -. 16.) in
   let make_pool () =
     let x = TDSL.ndarray xv ~label:[ "cw_x" ] ~output_dims:[ 8 ] () in
-    let%op y = x @^+ "2*o=+w; w => o" [ "w" ] (0.0 + 0.0) in
+    let%op y = x @^+ "2*o=+w; w => o" [ "w" ] (stretch 0.0) in
     Shape.set_dim w 5;
     (x, y)
   in
@@ -205,7 +205,7 @@ let () =
       ~f:(fun idcs -> Float.of_int idcs.(0) -. 16.)
       ~grad_spec:Tensor.Require_grad ()
   in
-  let%op by = bx @^+ "2*o=+w; w => o" [ "w" ] (0.0 + 0.0) in
+  let%op by = bx @^+ "2*o=+w; w => o" [ "w" ] (stretch 0.0) in
   Shape.set_dim w 2;
   let%op loss = by ++ "o => 0" in
   let update = Train.grad_update loss in
@@ -240,7 +240,7 @@ let () =
   (* Created (and compiled) first: [conv_out] embeds [sx]'s computation. *)
   let%op conv_out = sx +* "o=+k; k => o" [ "k" ] (1.0 + 0.0) in
   Shape.set_dim k 3;
-  let%op pooled = sx @^+ "2*o=+w; w => o" [ "w" ] (0.0 + 0.0) in
+  let%op pooled = sx @^+ "2*o=+w; w => o" [ "w" ] (stretch 0.0) in
   Shape.set_dim w 3;
   let ctx = Context.auto () in
   Train.set_materialized sx.Tensor.value;
