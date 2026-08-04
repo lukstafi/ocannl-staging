@@ -369,11 +369,17 @@ module Impl = struct
                   {
                     Backend_intf.mma_simd_width = 32;
                     mma_tile = (8, 8, 8);
+                    (* [simdgroup_matrix] has no mixed-precision multiply-accumulate, so every
+                       entry is uniform: the accumulator format equals the operand format
+                       (gh-ocannl-545). *)
                     mma_format_tiles =
                       [
-                        ((Backend_intf.Mma_f32, Backend_intf.Mma_f32), (8, 8, 8));
-                        ((Backend_intf.Mma_f16, Backend_intf.Mma_f16), (8, 8, 8));
-                        ((Backend_intf.Mma_bf16, Backend_intf.Mma_bf16), (8, 8, 8));
+                        ((Backend_intf.Mma_f32, Backend_intf.Mma_f32, Backend_intf.Mma_f32),
+                          (8, 8, 8));
+                        ((Backend_intf.Mma_f16, Backend_intf.Mma_f16, Backend_intf.Mma_f16),
+                          (8, 8, 8));
+                        ((Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_bf16),
+                          (8, 8, 8));
                       ];
                   }
               else None);

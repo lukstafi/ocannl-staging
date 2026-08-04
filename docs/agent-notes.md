@@ -189,6 +189,15 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   candidate compile, and a count of proposals then reads as coverage it does not have — assert on
   the *timed* counter (`report.mma_timed`, `fiss_sketch_timed`, `split_reduce_timed`), and follow it
   with an executed value check, since a candidate that compiles is not yet one that computes.
+- "Timed" is not "tensorized" either, and that failure is worse: a declined `Tile_mma` renders its
+  scalar fallback, which compiles and runs, so the candidate is timed, ranked and possibly crowned
+  under an `mma-*` label (gh-ocannl-545: 20 of 20 timed bf16 candidates on CUDA were scalar). The
+  emission is the source of truth — grep the emitted kernel for the intrinsic
+  (`wmma::`/`mma.sync`/`simdgroup_`), or read `C_syntax.mma_census`; `schedule_log_declines=true`
+  names the rule that fired. When seeding and emission can disagree, fix the seeding side too, or the
+  measurement budget keeps going to schedules that never tensorize: `mma_format_tiles` is keyed on
+  the whole `(a, b, accumulator)` format triple, with per-entry arch floors, precisely so that a
+  combination a backend supports at one accumulator width but not the other cannot be seeded.
 - Supplying a `?lowered_transform` bypasses the default annotator entirely (`backends.ml` `compile`
   only calls `Schedule.maybe_default_schedules` in the `None, None` arm), so **any** code that goes
   through that seam is the unscheduled serial form unless it schedules itself. The autotuner's base

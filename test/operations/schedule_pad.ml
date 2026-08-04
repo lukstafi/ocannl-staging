@@ -251,7 +251,11 @@ let () =
           {
             Ir.Backend_intf.mma_simd_width = 32;
             mma_tile = (8, 8, 8);
-            mma_format_tiles = [ ((Ir.Backend_intf.Mma_f32, Ir.Backend_intf.Mma_f32), (8, 8, 8)) ];
+            mma_format_tiles =
+              [
+                ( (Ir.Backend_intf.Mma_f32, Ir.Backend_intf.Mma_f32, Ir.Backend_intf.Mma_f32),
+                  (8, 8, 8) );
+              ];
           };
     }
   in

@@ -248,7 +248,9 @@ let () =
      with BENCH_PRECISION, which made bf16 unmeasurable under autotuning — and bf16 is the ONLY
      tensor-core route on RDNA3/3.5, whose WMMA has no f32-input shape, so whether HIP even seeds a
      tensorized candidate could not be asked. (Which candidates are seeded depends on the operand
-     storage precision, via mma_input_formats_of_prec against the backend's mma_format_tiles.)
+     AND accumulator storage precisions, via mma_input_formats_of_prec / mma_acc_format_of_prec
+     against the backend's mma_format_tiles — gh-ocannl-545, where keying on the operands alone had
+     CUDA seeding and timing 20 bf16 candidates that every emission rendered as scalar.)
 
      Each leg tunes the routine that carries the work. The dynamic-loss-scaling legs keep their
      step SHAPE — the gate is what is being measured — so only the gradient/fused routine is tuned

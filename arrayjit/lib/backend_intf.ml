@@ -31,9 +31,10 @@ let () =
         Some (Printf.sprintf "Backend %s unavailable: %s" backend detail)
     | _ -> None)
 
-(** Element formats tensor-core instructions accept for their multiplicand operands. This is
-    deliberately NOT [Ops.prec]: formats like tf32 have no byte layout of their own, so they must
-    never appear as a tensor node's storage precision. *)
+(** Element formats tensor-core instructions accept for their multiplicand operands, and (reusing
+    the same constructors) for their accumulator. This is deliberately NOT [Ops.prec]: formats like
+    tf32 have no byte layout of their own, so they must never appear as a tensor node's storage
+    precision. *)
 type mma_input_format =
   | Mma_f32  (** Genuine f32 multiply-accumulate (Metal [simdgroup_float8x8]). *)
   | Mma_tf32
@@ -56,12 +57,20 @@ type mma_capability = {
           16×16×16 for CUDA wmma), used where schedule construction has no typed operand site; a
           {!Low_level.t.Tile_mma}'s block extents must be multiples of the tile of the format
           actually emitted. Typed matmul/conv sketch seeds use [mma_format_tiles] below. *)
-  mma_format_tiles : ((mma_input_format * mma_input_format) * (int * int * int)) list;
-      (** Per (a-operand, b-operand) input-format intrinsic tile shapes, for formats whose tile
-          diverges from [mma_tile] as well as the ones matching it (e.g. CUDA fp8 16×8×32, tf32
+  mma_format_tiles :
+    ((mma_input_format * mma_input_format * mma_input_format) * (int * int * int)) list;
+      (** Per (a-operand, b-operand, accumulator) format intrinsic tile shapes, for formats whose
+          tile diverges from [mma_tile] as well as the ones matching it (e.g. CUDA fp8 16×8×32, tf32
           16×16×8). Typed autotune seeds use the matching entry for divisibility; whether a given
           call ultimately emits is still decided by the backend's [mma_syntax] hook plus the
-          {!Numerics} policy. *)
+          {!Numerics} policy.
+
+          The accumulator format is part of the key because it is NOT free to choose: the operand
+          pair that a backend supports against an f32 accumulator is generally not the pair it
+          supports against a narrow one. CUDA is the case that made this explicit (gh-ocannl-545):
+          [nvcuda::wmma] pairs bf16 operands with a [float] accumulator only, so keying on the
+          operands alone made the autotuner seed — and time, and rank — 36 candidates per arm on a
+          uniformly-bf16 network that every one of them rendered as the lane-0 scalar fallback. *)
 }
 [@@deriving sexp, compare, equal]
 (** Tensor-core capability descriptor (docs/proposals/tensorize-mma.md §6). Which operand precisions

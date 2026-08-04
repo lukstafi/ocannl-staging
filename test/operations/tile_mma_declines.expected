@@ -9,3 +9,6 @@ seeds: computed A x hoistable B: total=20 whole=3 packed=13 hoist=9 grid=3 packr
 seeds: hoistable A x computed transposed B: total=16 whole=0 packed=12 hoist=8 grid=2 packrest=1
 seeds: no hoistable operand: total=12 whole=3 packed=7 hoist=0 grid=2 packrest=1
 seeds: narrow columns (nj < lanes): total=4 whole=0 packed=4 hoist=2 grid=0 packrest=0
+seeds: f16 operands, f16 accumulator (advertised): mma seeds=5
+seeds: bf16 operands, f32 accumulator (advertised): mma seeds=5
+seeds: bf16 operands, bf16 accumulator (not advertised): mma seeds=0

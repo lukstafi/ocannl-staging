@@ -1867,10 +1867,19 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                   {
                     Backend_intf.mma_simd_width = 32;
                     mma_tile = (16, 16, 16);
+                    (* rocWMMA has both accumulator widths for both operand pairs — the CUDA
+                       asymmetry that motivated the accumulator key (gh-ocannl-545) does not exist
+                       here. *)
                     mma_format_tiles =
                       [
-                        ((Backend_intf.Mma_f16, Backend_intf.Mma_f16), (16, 16, 16));
-                        ((Backend_intf.Mma_bf16, Backend_intf.Mma_bf16), (16, 16, 16));
+                        ((Backend_intf.Mma_f16, Backend_intf.Mma_f16, Backend_intf.Mma_f32),
+                          (16, 16, 16));
+                        ((Backend_intf.Mma_f16, Backend_intf.Mma_f16, Backend_intf.Mma_f16),
+                          (16, 16, 16));
+                        ((Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_f32),
+                          (16, 16, 16));
+                        ((Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_bf16),
+                          (16, 16, 16));
                       ];
                   }
               else None);
