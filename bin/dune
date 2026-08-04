@@ -27,3 +27,13 @@
  (preprocess
   (pps ppx_here ppx_ocannl))
  (modes exe))
+
+(executable
+ (package neural_nets_lib)
+ (public_name narrow_storage_bench)
+ (name narrow_storage_bench)
+ (modules narrow_storage_bench)
+ (libraries ocannl base stdio time_now)
+ (preprocess
+  (pps ppx_here ppx_ocannl))
+ (modes exe))

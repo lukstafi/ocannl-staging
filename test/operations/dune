@@ -1245,6 +1245,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name narrow_storage_compute)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules narrow_storage_compute)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name cpu_simd_reduction)
  (package neural_nets_lib)
  (deps

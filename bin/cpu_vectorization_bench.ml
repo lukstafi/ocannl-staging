@@ -18,10 +18,14 @@
 
    (the -fno-* spelling above is Clang's; for GCC use "-fno-tree-vectorize -fno-tree-slp-vectorize".
    The acceptance criterion is >= 2x on a float32 elementwise op or reduction at n >= 1024: on an
-   Apple-Silicon M-series (NEON via -march=native) the compute-bound polynomial measures 2.0x — 36.5
-   vs 18.2 GFLOP/s at the defaults; "add" is memory-bound and shows the bandwidth ceiling instead,
-   and the strict-FP "dot" reduction cannot auto-vectorize without reassociation permission (enable
-   cc_backend_fast_math=true to see it vectorize). *)
+   Apple-Silicon M-series (NEON via -march=native, n = 2^20) "add" measures 2.1x — 165.8 vs 78.2
+   GB/s — and the compute-bound polynomial 1.7x (134.4 vs 77.8 GFLOP/s); the strict-FP "dot"
+   reduction cannot auto-vectorize without reassociation permission (enable
+   cc_backend_fast_math=true to see it vectorize).
+
+   Those figures supersede the ones recorded before gh-ocannl-517: the timed region used to include
+   a [get_values] readback, an O(n) host-side walk that at these sizes dwarfed the kernel and made
+   every reported throughput roughly an order of magnitude too low. *)
 
 open Base
 open Ocannl
@@ -67,8 +71,12 @@ let () =
         (fun ctx () -> Context.run ctx routine)
         ctx (Stdlib.Array.make repeats ())
     in
-    let (_ : float array) = Context.get_values ctx t.Tensor.value in
     let stop = Time_now.nanoseconds_since_unix_epoch () in
+    (* Outside the timed region: [get_values] walks the whole buffer into an OCaml [float array],
+       an O(n) host-side cost that at n >= 10^6 is an order of magnitude larger than the kernel and
+       was previously swamping every number this benchmark reports. The cc scheduler is
+       synchronous, so the fold above needs no separate await. *)
+    let (_ : float array) = Context.get_values ctx t.Tensor.value in
     let secs = Float.of_int63 Int63.(stop - start) /. 1e9 /. Float.of_int repeats in
     p "%-12s %10.3f us  %8.2f %s  correct: %b\n" variant (secs *. 1e6)
       (work_per_run /. secs /. 1e9)
