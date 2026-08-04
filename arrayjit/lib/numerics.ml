@@ -32,6 +32,19 @@ type t = {
           it off to recover the pre-gh-517 semantics, where every operator rounds to the target
           node's storage precision. The GPU backends are unaffected either way — they have native
           16-bit types and arithmetic, so their compute precision is their storage precision. *)
+  fp16_arithmetic : bool;
+      (** Compute fp16 in fp16 on CPU targets that have native 16-bit arithmetic (ARMv8.2-FP16,
+          AVX512-FP16), instead of widening to f32 (gh-ocannl-516). This is the one narrow format a
+          CPU can execute natively — bf16 has no C type and no general ARM/x86 arithmetic, and
+          stays emulated by design — and where the hardware has it, the lane count doubles against
+          f32.
+
+          Off by default, and the asymmetry with {!narrow_compute_f32} is deliberate: computing in
+          fp16 keeps intermediates at fp16's 10-bit mantissa and 65504 range, so it trades accuracy
+          for throughput, while widening to f32 trades nothing. It also only pays where the target's
+          arithmetic is genuinely 16-bit ({!Ir.Backend_intf.hardware_limits.native_fp16_arithmetic});
+          on a target that merely promotes to float, turning it on costs accuracy for no speed, so
+          the backend ignores it there. *)
 }
 [@@deriving sexp, compare, equal]
 
@@ -39,6 +52,7 @@ let default () =
   {
     tf32_matmuls = Utils.get_global_flag ~default:false ~arg_name:"tf32_matmuls";
     narrow_compute_f32 = Utils.get_global_flag ~default:true ~arg_name:"narrow_compute_f32";
+    fp16_arithmetic = Utils.get_global_flag ~default:false ~arg_name:"fp16_arithmetic";
   }
 let policy : t option ref = ref None
 

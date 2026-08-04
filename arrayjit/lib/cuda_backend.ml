@@ -102,6 +102,98 @@ end
 let initialized_devices = Hash_set.create (module Int)
 let initialized = ref false
 
+(* The compute capability, as [major * 10 + minor], of the GeForce-Blackwell family whose
+   block-scaled [mma.sync ... kind::mxf8f6f4] forms exist only under an architecture-specific
+   target (gh-ocannl-481 item 3, D4). *)
+let mxfp8_family_cc = 120
+
+let%diagn_sexp gpu_arch_options ~device_cc cu_src : string list =
+  (* The [--gpu-architecture] options for one nvrtc compile, as a pure function of the source's arch
+     markers and the attached devices' minimum compute capability — separated from [cuda_to_ptx] so
+     the policy is testable without a device (arrayjit/test/test_cuda_arch_flags.ml).
+
+     Two kinds of target, and the difference is the whole point of this function:
+
+     - A FLOOR (every marker but one): the lowest arch whose PTX contains the instruction. PTX
+       targeted at a floor is forward-JIT-compiled by the driver on every later GPU, so one compile
+       covers the entire range above it. The [(wmma-bf16)] and [(wmma-tf32)] markers are emitted by
+       [mma_syntax] for bf16 resp. tf32 fragments (both sm_80+); [(mma-fp8)] and [(mma-bf16)] for
+       the inline-PTX [mma.sync] paths (sm_89+ resp. sm_80+, no header needed).
+     - A FAMILY target ([(mma-mxfp8)]): a [compute_120a]-style architecture-specific arch, which
+       only the device family it names can load. Blackwell's block-scaled [kind::mxf8f6f4] forms
+       exist ONLY under such a target, so this is the one case where forward-JIT portability has to
+       be given up — and therefore the one marker gated on the attached devices' own family. Family
+       PTX is never produced for a device that could not load it; a marked kernel reaching a
+       mismatched device falls back to floor targeting, which is defense in depth rather than a
+       recovery path (an arm emitting the marker is gated on the same family, so it should have
+       declined already). No arm emits it yet: block scaling itself is blocked on OCANNL having
+       microscaling storage at all (the e8m0 per-32-element scale factors are extra mma OPERANDS
+       with their own layout, and [Tile_mma] has no slot for them), and a unit-scale arm would be
+       numerically identical to the plain fp8 path while forfeiting forward-JIT. *)
+  let has s = String.is_substring cu_src ~substring:s in
+  if has "(mma-mxfp8)" && device_cc / 10 = mxfp8_family_cc / 10 then (
+    [%log "family-arch target", (device_cc : int)];
+    [ Printf.sprintf "--gpu-architecture=compute_%da" device_cc ])
+  else
+    let uses_wmma = has "nvcuda::wmma" in
+    (* Half/bf16 ARITHMETIC intrinsics (unlike the conversions, which cuda_fp16.h/cuda_bf16.h
+       emulate on any arch) are only declared for __CUDA_ARCH__ >= 530 (halfs) resp. >= 800
+       (bfloat16s), while nvrtc's default target is compute_52 — e.g. [__hfma] in a serial half
+       matmul fails with "identifier undefined" unless we raise the floor. The bf16 overloads share
+       the half intrinsics' names, so a bf16 kernel is recognized by the type name appearing
+       alongside the arithmetic tokens; a kernel mixing half arithmetic with bf16 storage-only is
+       conservatively floored at compute_80 too. *)
+    let uses_h_arith =
+      (* Every half-arith token [unop_syntax]/[binop_syntax]/[ternop_syntax] can emit; [hexp]/[hlog]
+         also cover their [2]-suffixed variants and [__hmax]/[__hmin] the [_nan] variants as
+         substrings. *)
+      List.exists ~f:has
+        [
+          "__hadd";
+          "__hsub";
+          "__hmul";
+          "__hdiv";
+          "__hmax";
+          "__hmin";
+          "__hgt";
+          "__hfma";
+          "hexp";
+          "hlog";
+          "hsin";
+          "hcos";
+          "hsqrt";
+          "hrcp";
+          "hrsqrt";
+          "htanh_approx";
+        ]
+    in
+    (* [compile_batch] concatenates several kernels into one source, so the floors can trigger
+       independently (e.g. a half-wmma kernel batched with scalar bf16 arithmetic needs compute_80
+       even without the [(wmma-bf16)] marker): take the max, not the first match. *)
+    let arch_floor =
+      List.filter_opt
+        [
+          (if uses_wmma then Some (if has "(wmma-bf16)" || has "(wmma-tf32)" then 80 else 70)
+           else None);
+          (if has "(mma-fp8)" then Some 89 else None);
+          (if has "(mma-bf16)" then Some 80 else None);
+          (if uses_h_arith then Some (if has "__nv_bfloat16" then 80 else 53) else None);
+        ]
+      |> List.max_elt ~compare:Int.compare
+    in
+    match arch_floor with
+    | Some floor ->
+        (* CUDA 13 dropped offline compilation below compute_75 (Maxwell through Volta), so nvrtc 13
+           rejects the compute_53/compute_70 floors outright: raise a triggered floor to compute_75
+           whenever every attached device can load such PTX (a device below sm_75 keeps the literal
+           floor — it must be paired with an nvrtc 12.x that still accepts it). We deliberately do
+           NOT raise all the way to the device arch (e.g. compute_120 on Blackwell GeForce): the
+           sm_89 fp8 [mma.sync] encoding remains valid under a compute_89 target where a compute_120
+           target would demand the family-specific [kind::] forms. *)
+        let arch = max floor (min 75 device_cc) in
+        [ Printf.sprintf "--gpu-architecture=compute_%d" arch ]
+    | None -> []
+
 module Impl : Ir.Backend_impl.Lowered_backend = struct
   include Backend_impl.Device (Device_stream) (Slab)
 
@@ -178,76 +270,14 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
         Option.iter Slab.free_pool ~f:(fun free -> free device ~pool_id))
 
   let%diagn2_sexp cuda_to_ptx ~name cu_src =
-    (* Tensorize-mma T3: kernels containing wmma intrinsics need <mma.h> and an explicit arch
-       (nvrtc's default is below sm_70). Injected only when used, so kernels without tensor cores
-       compile exactly as before even where the toolkit headers are absent. The [(wmma-bf16)] and
-       [(wmma-tf32)] markers are emitted by [mma_syntax] for bf16 resp. tf32 fragments (both
-       sm_80+); the [(mma-fp8)] and [(mma-bf16)] markers for the inline-PTX [mma.sync] paths (sm_89+
-       resp. sm_80+, no header needed). *)
-    let uses_wmma = String.is_substring cu_src ~substring:"nvcuda::wmma" in
-    let cu_src = if uses_wmma then "#include <mma.h>\n" ^ cu_src else cu_src in
-    (* Half/bf16 ARITHMETIC intrinsics (unlike the conversions, which cuda_fp16.h/cuda_bf16.h
-       emulate on any arch) are only declared for __CUDA_ARCH__ >= 530 (halfs) resp. >= 800
-       (bfloat16s), while nvrtc's default target is compute_52 — e.g. [__hfma] in a serial half
-       matmul fails with "identifier undefined" unless we raise the floor. The bf16 overloads share
-       the half intrinsics' names, so a bf16 kernel is recognized by the type name appearing
-       alongside the arithmetic tokens; a kernel mixing half arithmetic with bf16 storage-only is
-       conservatively floored at compute_80 too. *)
-    let has s = String.is_substring cu_src ~substring:s in
-    let uses_h_arith =
-      (* Every half-arith token [unop_syntax]/[binop_syntax]/[ternop_syntax] can emit; [hexp]/[hlog]
-         also cover their [2]-suffixed variants and [__hmax]/[__hmin] the [_nan] variants as
-         substrings. *)
-      List.exists ~f:has
-        [
-          "__hadd";
-          "__hsub";
-          "__hmul";
-          "__hdiv";
-          "__hmax";
-          "__hmin";
-          "__hgt";
-          "__hfma";
-          "hexp";
-          "hlog";
-          "hsin";
-          "hcos";
-          "hsqrt";
-          "hrcp";
-          "hrsqrt";
-          "htanh_approx";
-        ]
+    (* Tensorize-mma T3: kernels containing wmma intrinsics need <mma.h> (nvrtc's default target is
+       below sm_70). Injected only when used, so kernels without tensor cores compile exactly as
+       before even where the toolkit headers are absent. *)
+    let cu_src =
+      if String.is_substring cu_src ~substring:"nvcuda::wmma" then "#include <mma.h>\n" ^ cu_src
+      else cu_src
     in
-    (* [compile_batch] concatenates several kernels into one source, so the floors can trigger
-       independently (e.g. a half-wmma kernel batched with scalar bf16 arithmetic needs compute_80
-       even without the [(wmma-bf16)] marker): take the max, not the first match. *)
-    let arch_floor =
-      List.filter_opt
-        [
-          (if uses_wmma then Some (if has "(wmma-bf16)" || has "(wmma-tf32)" then 80 else 70)
-           else None);
-          (if has "(mma-fp8)" then Some 89 else None);
-          (if has "(mma-bf16)" then Some 80 else None);
-          (if uses_h_arith then Some (if has "__nv_bfloat16" then 80 else 53) else None);
-        ]
-      |> List.max_elt ~compare:Int.compare
-    in
-    let arch_opts =
-      match arch_floor with
-      | Some floor ->
-          (* CUDA 13 dropped offline compilation below compute_75 (Maxwell through Volta), so nvrtc
-             13 rejects the compute_53/compute_70 floors outright: raise a triggered floor to
-             compute_75 whenever every attached device can load such PTX (a device below sm_75 keeps
-             the literal floor — it must be paired with an nvrtc 12.x that still accepts it). We
-             deliberately do NOT raise all the way to the device arch (e.g. compute_120 on Blackwell
-             GeForce): PTX targeted at a floor arch is forward-JIT-compiled by the driver on every
-             later GPU, and instruction variants like the sm_89 fp8 [mma.sync] remain valid under a
-             compute_89 target where a compute_120 target would demand the family-specific [kind::]
-             forms. *)
-          let arch = max floor (min 75 (min_compute_capability ())) in
-          [ Printf.sprintf "--gpu-architecture=compute_%d" arch ]
-      | None -> []
-    in
+    let arch_opts = gpu_arch_options ~device_cc:(min_compute_capability ()) cu_src in
     let name_cu = name ^ ".cu" in
     if Utils.settings.output_debug_files_in_build_directory then (
       let build_file = Utils.open_build_file ~base_name:name ~extension:".cu" in
@@ -614,7 +644,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
 
        The extent-32 lane loop binds threadIdx.x, so the 32 consecutive .x threads reaching the
        statement form the cooperating warp. Transposed operand storage ([ta]/[tb]) loads wmma
-       fragments as [col_major] with swapped offset arithmetic; the fp8 path declines it in v1.
+       fragments as [col_major] with swapped offset arithmetic; both inline-PTX arms index every
+       gathered element at the transposed (col, row) address instead (gh-ocannl-481 item 1).
        Uniform f32 targets the wmma tf32 shape m16n16k8 on sm_80+ (the [(wmma-tf32)] marker selects
        the arch) when the numerics policy opts in ([Numerics.t.tf32_matmuls], gh-ocannl-478): tf32
        truncates the mantissa to 10 bits, so with the policy off — the default — uniform f32 stays
@@ -634,9 +665,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           ~m
           ~n
           ~k
-          ~d:(d_ptr, ldd, d_space)
-          ~a:(a_ptr, lda, a_space)
-          ~b:(b_ptr, ldb, b_space)
+          ~d:(d_ptr, ldd, d_space, d_layout)
+          ~a:(a_ptr, lda, a_space, a_layout)
+          ~b:(b_ptr, ldb, b_space, b_layout)
         ->
           (* Pointer declarations use [typ_of_prec] of the operand's own precision, which coincides
              with [wmma_combo]'s fragment element types (tf32 fragments load from plain [float]
@@ -645,6 +676,68 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           let loadable = function
             | `Device | `Shared -> true (* generic-address loads cover both *)
             | `Thread | `Fragment _ -> false
+          in
+          let plain = function `Plain -> true | `Swizzled_b128 -> false in
+          (* An operand eligible for the warp-cooperative [ldmatrix] load (gh-ocannl-481 item 3):
+             the swizzled 16-byte-unit layout, in shared memory, which is the only combination
+             whose per-lane row addresses [ldmatrix] can both reach and de-conflict. Everything
+             else keeps the per-lane gathers, which stay correct for plain shared tiles and device
+             pointers alike. Note the asymmetry the arms below rely on: eligibility is
+             [space AND layout], but the DECLINE is on the layout alone — a swizzled operand this
+             arm cannot [ldmatrix] must not silently fall through to row-major gathers, whatever
+             space it sits in. *)
+          let ldm = function
+            | `Shared, `Swizzled_b128 -> true
+            | (`Shared | `Device | `Thread | `Fragment _), (`Plain | `Swizzled_b128) -> false
+          in
+          let a_swz = ldm (a_space, a_layout) and b_swz = ldm (b_space, b_layout) in
+          (* The shared-window address of the element at (row, col) of a [Swizzle_b128] tile whose
+             minor dim is [ld]: the column's 16-byte-unit index is XORed with the low bits of the
+             row (see [Low_level.Swizzle_b128]), everything within a unit left alone. Every
+             fragment entry point below has [col] a multiple of [u], so the within-unit remainder
+             is zero and drops out. [ldmatrix] is a [.shared] instruction, hence the conversion out
+             of the generic window. *)
+          let swz_saddr ~ptr ~ld ~prec ~row ~col =
+            let u = 16 / Ops.prec_in_bytes prec in
+            let s = Int.floor_log2 u in
+            let units = ld / u in
+            Printf.sprintf
+              "(unsigned)__cvta_generic_to_shared(%s + (%s) * %d + (((((%s) >> %d) ^ ((%s) & %d)) \
+               << %d)))"
+              ptr row ld col s row (units - 1) s
+          in
+          (* [ldmatrix.sync.aligned.m8n8.xN[.trans].shared.b16]: the first 8N lanes each supply one
+             16-byte row address of the N 8x8 tiles of 16-bit elements, and the results land in
+             exactly the per-lane fragment layout [mma.sync] consumes — replacing 4 (resp. 2)
+             per-lane gather chains with one instruction. The remaining lanes' addresses are
+             ignored; they are still computed in range. *)
+          let ldmatrix_lines ~indent ~regs ~trans ~addr =
+            let num = List.length regs in
+            let outs =
+              String.concat ~sep:", " (List.map regs ~f:(fun r -> Printf.sprintf "\"=r\"(%s)" r))
+            in
+            let slots =
+              String.concat ~sep:"," (List.mapi regs ~f:(fun i _ -> Printf.sprintf "%%%d" i))
+            in
+            [
+              Printf.sprintf "%sunsigned %s;" indent (String.concat ~sep:", " regs);
+              Printf.sprintf "%s{ unsigned __mma_sa = %s;" indent addr;
+              Printf.sprintf
+                "%s  asm volatile(\"ldmatrix.sync.aligned.m8n8.x%d%s.shared.b16 {%s}, [%%%d];\" : \
+                 %s : \"r\"(__mma_sa)); }"
+                indent num
+                (if trans then ".trans" else "")
+                slots num outs;
+            ]
+          in
+          (* Names the load path in the emitted block comment, so a reader (and the structural test
+             pins) can tell which operands came in through [ldmatrix]. *)
+          let ldm_tag ~a ~b =
+            match (a, b) with
+            | false, false -> ""
+            | true, true -> " ldmatrix a,b"
+            | true, false -> " ldmatrix a"
+            | false, true -> " ldmatrix b"
           in
           let is_fp8_combo =
             match (a_prec, b_prec, d_prec) with
@@ -664,14 +757,21 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
             | Ops.Bfloat16_prec _, Ops.Bfloat16_prec _, Ops.Bfloat16_prec _ -> true
             | _ -> false
           in
+          (* fp8's [ldmatrix] eligibility is one-sided per operand, and the sides are opposite
+             (gh-ocannl-481 item 3, D2). [ldmatrix.b16] moves 16-bit units, so it can build a
+             fragment register only when the 4 fp8 bytes that register holds are CONTIGUOUS in
+             storage. For A those 4 bytes are 4 consecutive [k] at fixed [m] — contiguous exactly
+             when A is stored row-major ([ta = false]); for B they are 4 consecutive [k] at fixed
+             [n] — contiguous exactly when B is stored transposed ([tb = true]). The other
+             orientations need the 8-bit [ldmatrix] forms (Blackwell-only), so they keep their byte
+             gathers; per-operand choice, one statement. *)
+          let a_ldm = is_fp8_combo && a_swz && not ta in
+          let b_ldm = is_fp8_combo && b_swz && tb in
           if
             is_fp8_combo
-            (* Transposed operand storage ([ta]/[tb]) is declined in v1: the per-lane byte gathers
-               below assume the roles' own layouts (A row-major, B row-major source gathered into
-               the col-major fragment); the scalar fallback keeps transposed fp8 correct. Swapping
-               the gather arithmetic per flag is the natural extension. *)
-            && (not ta)
-            && (not tb)
+            && plain d_layout
+            && (plain a_layout || a_ldm)
+            && (plain b_layout || b_ldm)
             && m % 16 = 0
             && n % 8 = 0
             && k % 32 = 0
@@ -687,7 +787,14 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                accumulator D (16x8 f32) regs d0..d3 = rows {g, g+8} x columns {2t, 2t+1}.
                Low-indexed elements sit in low-order bytes of each .b32 register. Byte loads impose
                no alignment or stride constraints and read generic addresses, covering both
-               __shared__ tiles and device pointers. *)
+               __shared__ tiles and device pointers.
+
+               Transposed operand storage ([ta]/[tb], gh-ocannl-481 item 1) is bookkeeping here, not
+               a layout constraint: every fragment byte is addressed by its logical (row, col)
+               through [a_at]/[b_at], which index the STORED matrix at (col, row) under the flag
+               while keeping the operand's own leading dimension. The fragment content is unchanged,
+               only its addresses are — so the gradient GEMMs ([dA = g.B^T], [dB = A^T.g]), whose
+               layouts are exactly these, tensorize instead of silently scalar-falling-back. *)
             let open PPrint in
             let mt = m / 16 and nt = n / 8 and kt = k / 32 in
             let pack4 name base offs =
@@ -696,14 +803,53 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                  16) | ((unsigned)%s[%s] << 24);"
                 name base offs.(0) base offs.(1) base offs.(2) base offs.(3)
             in
-            let consec p0 = [| p0 ^ " + 0"; p0 ^ " + 1"; p0 ^ " + 2"; p0 ^ " + 3" |] in
-            let strided p0 stride =
-              [|
-                p0 ^ " + 0 * " ^ stride;
-                p0 ^ " + 1 * " ^ stride;
-                p0 ^ " + 2 * " ^ stride;
-                p0 ^ " + 3 * " ^ stride;
-              |]
+            (* Byte offset of logical element (row, col) in an operand stored under its own leading
+               dimension, transposed or not (fp8 is one byte per element, so element index = byte
+               offset from the [unsigned char *] base). *)
+            let elem_at ~ld ~transposed ~row ~col =
+              if transposed then Printf.sprintf "(%s) * %d + (%s)" col ld row
+              else Printf.sprintf "(%s) * %d + (%s)" row ld col
+            in
+            let a_at ~row ~col = elem_at ~ld:lda ~transposed:ta ~row ~col in
+            let b_at ~row ~col = elem_at ~ld:ldb ~transposed:tb ~row ~col in
+            let a_row lo = if lo then "__mi * 16 + __mma_g" else "__mi * 16 + __mma_g + 8" in
+            let a_col c = Printf.sprintf "__ki * 32 + 4 * __mma_t + %d" c in
+            let b_row r = Printf.sprintf "__ki * 32 + 4 * __mma_t + %d" r in
+            let b_col = "__ni * 8 + __mma_g" in
+            (* A regs: 4 consecutive columns at rows {g, g+8} of column groups {4t, 4t+16}. *)
+            let a_reg name ~lo ~c =
+              "      "
+              ^ pack4 name "__mma_ap"
+                  (Array.init 4 ~f:(fun i -> a_at ~row:(a_row lo) ~col:(a_col (c + i))))
+            in
+            (* B regs: 4 consecutive rows of the column-major fragment column [g]. *)
+            let b_reg name ~r =
+              "      "
+              ^ pack4 name "__mma_bp"
+                  (Array.init 4 ~f:(fun i -> b_at ~row:(b_row (r + i)) ~col:b_col))
+            in
+            (* The [ldmatrix] entry points, in the 16-bit view of the fp8 bytes: A's four 8x8
+               matrices are (m rows {0-7, 8-15}) x (byte columns {0-15, 16-31}), which is the
+               [m16n8k16] A arrangement at byte granularity; B stored transposed is (n rows 0-7) x
+               (byte columns {0-15, 16-31}), giving b0/b1 in that order. With [q = lane >> 3]
+               naming the matrix, lane [r = lane & 7] supplies row [r] of matrix [q]. *)
+            let a_ldm_lines =
+              ldmatrix_lines ~indent:"      "
+                ~regs:[ "__mma_a0"; "__mma_a1"; "__mma_a2"; "__mma_a3" ]
+                ~trans:false
+                ~addr:
+                  (swz_saddr ~ptr:"__mma_ap" ~ld:lda ~prec:a_prec
+                     ~row:"__mi * 16 + (__mma_lid & 7) + 8 * ((__mma_lid >> 3) & 1)"
+                     ~col:"__ki * 32 + 16 * (__mma_lid >> 4)")
+            in
+            let b_ldm_lines =
+              ldmatrix_lines ~indent:"      "
+                ~regs:[ "__mma_b0"; "__mma_b1" ]
+                ~trans:false
+                ~addr:
+                  (swz_saddr ~ptr:"__mma_bp" ~ld:ldb ~prec:b_prec
+                     ~row:"__ni * 8 + (__mma_lid & 7)"
+                     ~col:"__ki * 32 + 16 * ((__mma_lid >> 3) & 1)")
             in
             let barrier = "__syncthreads();" in
             let body_lines =
@@ -723,22 +869,18 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                 "    float __mma_d0 = __mma_dr0[0], __mma_d1 = __mma_dr0[1];";
                 "    float __mma_d2 = __mma_dr1[0], __mma_d3 = __mma_dr1[1];";
                 Printf.sprintf "    for (int __ki = 0; __ki < %d; ++__ki) {" kt;
-                Printf.sprintf
-                  "      const unsigned char *__mma_ar0 = __mma_ap + (__mi * 16 + __mma_g) * %d + \
-                   __ki * 32 + 4 * __mma_t;"
-                  lda;
-                Printf.sprintf "      const unsigned char *__mma_ar1 = __mma_ar0 + 8 * %d;" lda;
-                "      " ^ pack4 "__mma_a0" "__mma_ar0" (consec "0");
-                "      " ^ pack4 "__mma_a1" "__mma_ar1" (consec "0");
-                "      " ^ pack4 "__mma_a2" "__mma_ar0" (consec "16");
-                "      " ^ pack4 "__mma_a3" "__mma_ar1" (consec "16");
-                Printf.sprintf
-                  "      const unsigned char *__mma_br0 = __mma_bp + (__ki * 32 + 4 * __mma_t) * \
-                   %d + __ni * 8 + __mma_g;"
-                  ldb;
-                Printf.sprintf "      const unsigned char *__mma_br1 = __mma_br0 + 16 * %d;" ldb;
-                "      " ^ pack4 "__mma_b0" "__mma_br0" (strided "0" (Int.to_string ldb));
-                "      " ^ pack4 "__mma_b1" "__mma_br1" (strided "0" (Int.to_string ldb));
+              ]
+              @ (if a_ldm then a_ldm_lines
+                 else
+                   [
+                     a_reg "__mma_a0" ~lo:true ~c:0;
+                     a_reg "__mma_a1" ~lo:false ~c:0;
+                     a_reg "__mma_a2" ~lo:true ~c:16;
+                     a_reg "__mma_a3" ~lo:false ~c:16;
+                   ])
+              @ (if b_ldm then b_ldm_lines
+                 else [ b_reg "__mma_b0" ~r:0; b_reg "__mma_b1" ~r:16 ])
+              @ [
                 "      asm(\"mma.sync.aligned.m16n8k32.row.col.f32.e5m2.e5m2.f32 \"";
                 "          \"{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\"";
                 "          : \"+f\"(__mma_d0), \"+f\"(__mma_d1), \"+f\"(__mma_d2), \"+f\"(__mma_d3)";
@@ -763,11 +905,20 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
             in
             Some
               (group
-                 (string (Printf.sprintf "{ /* tile_mma %dx%dx%d (mma-fp8) e5m2 */" m n k)
+                 (string
+                    (Printf.sprintf "{ /* tile_mma %dx%dx%d (mma-fp8) e5m2%s */" m n k
+                       (ldm_tag ~a:a_ldm ~b:b_ldm))
                  ^^ nest 2 (hardline ^^ body)
                  ^^ hardline ^^ rbrace))
           else if
+            (* Unlike fp8, both bf16 operands can come in through [ldmatrix] in either storage
+               orientation: the fragment registers hold 16-bit element PAIRS, and the pair a lane
+               needs is contiguous under one of the two forms — [.trans] transposes each 8x8 tile
+               on distribution, which is exactly the difference between the two orientations. *)
             is_bf16_uniform
+            && plain d_layout
+            && (plain a_layout || a_swz)
+            && (plain b_layout || b_swz)
             && m % 16 = 0
             && n % 8 = 0
             && k % 16 = 0
@@ -823,6 +974,40 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               ^ pack2 name "__mma_bp" (b_at ~row:(b_row r) ~col:b_col)
                   (b_at ~row:(b_row (r + 1)) ~col:b_col)
             in
+            (* The [ldmatrix] entry points. Naming the matrix [q = lane >> 3] and the row within it
+               [r = lane & 7], the four A matrices are (m rows {0-7, 8-15}) x (k columns {0-7,
+               8-15}) in register order a0..a3, and the two B matrices are (k rows {0-7, 8-15}) x
+               (n columns 0-7) in order b0, b1. Each is read as 8 rows of 8 contiguous 16-bit
+               elements from the operand's OWN storage, so the transposed orientations swap which
+               index walks the rows and add [.trans] exactly when the fragment's minor direction is
+               the stored major one. *)
+            let a_ldm_lines =
+              ldmatrix_lines ~indent:"      "
+                ~regs:[ "__mma_a0"; "__mma_a1"; "__mma_a2"; "__mma_a3" ]
+                ~trans:ta
+                ~addr:
+                  (if ta then
+                     swz_saddr ~ptr:"__mma_ap" ~ld:lda ~prec:a_prec
+                       ~row:"__ki * 16 + (__mma_lid & 7) + 8 * (__mma_lid >> 4)"
+                       ~col:"__mi * 16 + 8 * ((__mma_lid >> 3) & 1)"
+                   else
+                     swz_saddr ~ptr:"__mma_ap" ~ld:lda ~prec:a_prec
+                       ~row:"__mi * 16 + (__mma_lid & 7) + 8 * ((__mma_lid >> 3) & 1)"
+                       ~col:"__ki * 16 + 8 * (__mma_lid >> 4)")
+            in
+            let b_ldm_lines =
+              ldmatrix_lines ~indent:"      "
+                ~regs:[ "__mma_b0"; "__mma_b1" ]
+                ~trans:(not tb)
+                ~addr:
+                  (if tb then
+                     swz_saddr ~ptr:"__mma_bp" ~ld:ldb ~prec:b_prec
+                       ~row:"__ni * 8 + (__mma_lid & 7)"
+                       ~col:"__ki * 16 + 8 * ((__mma_lid >> 3) & 1)"
+                   else
+                     swz_saddr ~ptr:"__mma_bp" ~ld:ldb ~prec:b_prec
+                       ~row:"__ki * 16 + (__mma_lid & 15)" ~col:"__ni * 8")
+            in
             let barrier = "__syncthreads();" in
             let body_lines =
               [
@@ -843,12 +1028,17 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                 "    float __mma_d2 = __bfloat162float(__mma_dr1[0]), __mma_d3 = \
                  __bfloat162float(__mma_dr1[1]);";
                 Printf.sprintf "    for (int __ki = 0; __ki < %d; ++__ki) {" kt;
-                a_reg "__mma_a0" ~lo:true ~c:0;
-                a_reg "__mma_a1" ~lo:false ~c:0;
-                a_reg "__mma_a2" ~lo:true ~c:8;
-                a_reg "__mma_a3" ~lo:false ~c:8;
-                b_reg "__mma_b0" ~r:0;
-                b_reg "__mma_b1" ~r:8;
+              ]
+              @ (if a_swz then a_ldm_lines
+                 else
+                   [
+                     a_reg "__mma_a0" ~lo:true ~c:0;
+                     a_reg "__mma_a1" ~lo:false ~c:0;
+                     a_reg "__mma_a2" ~lo:true ~c:8;
+                     a_reg "__mma_a3" ~lo:false ~c:8;
+                   ])
+              @ (if b_swz then b_ldm_lines else [ b_reg "__mma_b0" ~r:0; b_reg "__mma_b1" ~r:8 ])
+              @ [
                 "      asm(\"mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 \"";
                 "          \"{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\"";
                 "          : \"+f\"(__mma_d0), \"+f\"(__mma_d1), \"+f\"(__mma_d2), \"+f\"(__mma_d3)";
@@ -878,11 +1068,20 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
             in
             Some
               (group
-                 (string (Printf.sprintf "{ /* tile_mma %dx%dx%d (mma-bf16) */" m n k)
+                 (string
+                    (Printf.sprintf "{ /* tile_mma %dx%dx%d (mma-bf16)%s */" m n k
+                       (ldm_tag ~a:a_swz ~b:b_swz))
                  ^^ nest 2 (hardline ^^ body)
                  ^^ hardline ^^ rbrace))
           else
-            match combo with
+            (* wmma fragments are opaque: [load_matrix_sync] assumes row-major (or column-major)
+               pointer+stride storage and there is no supported way to feed one from [ldmatrix]
+               destination registers. So the whole template path declines swizzled operands
+               (gh-ocannl-481 item 3, D2) — the caller then reaches for the scalar fallback, or, in
+               an accumulator-resident scope, for the inline-PTX arms above. *)
+            match
+              (if plain d_layout && plain a_layout && plain b_layout then combo else None)
+            with
             | None -> None
             | Some
                 {
@@ -907,8 +1106,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                 let ptr_decl name typ ptr =
                   string (Printf.sprintf "%s *%s = " typ name) ^^ ptr ^^ semi
                 in
-                let a_layout = if ta then "col_major" else "row_major" in
-                let b_layout = if tb then "col_major" else "row_major" in
+                let a_frag_layout = if ta then "col_major" else "row_major" in
+                let b_frag_layout = if tb then "col_major" else "row_major" in
                 let barrier = "__syncthreads();" in
                 (* tf32 fragments load raw f32 bits; the explicit elementwise [__float_to_tf32]
                    performs the mantissa truncation the intrinsic expects (CUDA programming guide
@@ -930,7 +1129,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                 let k_loop_lines ~ab_typ ~acc =
                   [
                     Printf.sprintf "for (int __ki = 0; __ki < %d; ++__ki) {" kt;
-                    Printf.sprintf "  %s __mma_bf[%d];" (frag "matrix_b" ab_typ (Some b_layout)) nt;
+                    Printf.sprintf "  %s __mma_bf[%d];" (frag "matrix_b" ab_typ (Some b_frag_layout)) nt;
                     Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
                     (* Transposed storage ([tb]): the stored matrix is the role's transpose — index
                        it at (col, row) and declare the fragment [col_major]; the leading dimension
@@ -950,7 +1149,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                   @ [
                       "  }";
                       Printf.sprintf "  for (int __mi = 0; __mi < %d; ++__mi) {" mt;
-                      Printf.sprintf "    %s __mma_af;" (frag "matrix_a" ab_typ (Some a_layout));
+                      Printf.sprintf "    %s __mma_af;" (frag "matrix_a" ab_typ (Some a_frag_layout));
                       (if ta then
                          Printf.sprintf
                            "    nvcuda::wmma::load_matrix_sync(__mma_af, __mma_ap + __ki * %d * %d \
@@ -1055,7 +1254,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        wmma arm exactly (via [wmma_combo] and the same extent/stride/space/arch checks), so an
        accepted scope never strands its inner call. The fp8 inline-PTX combination declines: its
        accumulator lives in per-lane f32 registers with the m16n8k32 layout, not wmma fragments, so
-       it keeps the per-[k_o] rendering through the caller's target-aliasing path. *)
+       it keeps the per-[k_o] rendering through the caller's target-aliasing path. Swizzled
+       operands decline for the same reason the wmma arm of [mma_syntax] does — opaque fragments
+       cannot be fed from [ldmatrix] — which is precisely what routes a swizzled staged bf16 leg to
+       the inline-PTX arm via the caller's target aliasing (gh-ocannl-481 item 3, D3). *)
     let mma_fragment_syntax =
       Some
         (fun ~d_prec
@@ -1065,16 +1267,21 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           ~n
           ~k
           ~fragment
-          ~target:(d_ptr, ldd, d_space)
-          ~a:(_, lda, a_space)
-          ~b:(_, ldb, b_space)
+          ~target:(d_ptr, ldd, d_space, d_layout)
+          ~a:(_, lda, a_space, a_layout)
+          ~b:(_, ldb, b_space, b_layout)
           ~body
         ->
           let loadable = function
             | `Device | `Shared -> true (* generic-address loads cover both *)
             | `Thread | `Fragment _ -> false
           in
-          match wmma_combo ~a_prec ~b_prec ~d_prec with
+          let plain = function `Plain -> true | `Swizzled_b128 -> false in
+          match
+            if plain d_layout && plain a_layout && plain b_layout then
+              wmma_combo ~a_prec ~b_prec ~d_prec
+            else None
+          with
           | Some
               {
                 wc_acc_typ = acc_typ;
@@ -2085,9 +2292,24 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                             (Backend_intf.Mma_tf32, Backend_intf.Mma_tf32, Backend_intf.Mma_f32)
                             (16, 16, 8);
                         ];
+                    (* Swizzled staged tiles (gh-ocannl-481 item 3, D3): only the inline-PTX arms
+                       can read them, and only in the orientations the staged sketches mint. That
+                       is the uniform-bf16 combination — both its operands' fragment registers hold
+                       16-bit pairs that are contiguous in the roles' own orientations. fp8 is
+                       deliberately absent: its A side qualifies but its B side does not (4 fp8
+                       bytes of a B register are strided at that orientation), so a swizzled fp8
+                       twin would render the scalar fallback under a tensorized label. *)
+                    mma_staged_layouts =
+                      List.filter_opt
+                        [
+                          entry ~min_cc:80
+                            (Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_bf16)
+                            Backend_intf.Mma_swizzled_b128;
+                        ];
                   }
               else None);
            simd_vector_bytes = 0;
+           native_fp16_arithmetic = false;
            (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the sm_70+
               discrete-GPU class (RTX-30/40 mid-range: ~15 fp32 TFLOP/s, ~450 GB/s). Per-device
               queries (SM count x clock, memory clock x bus width) are calibration follow-up work;

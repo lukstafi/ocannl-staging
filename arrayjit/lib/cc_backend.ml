@@ -17,15 +17,15 @@ let name = "cc"
 let optimization_level () =
   Int.of_string @@ Utils.get_global_arg ~default:"3" ~arg_name:"cc_backend_optimization_level"
 
-let arch_flags () = Utils.get_global_arg ~default:"-march=native" ~arg_name:"cc_backend_arch_flags"
 let fast_math_enabled () = Utils.get_global_flag ~default:false ~arg_name:"cc_backend_fast_math"
 
-(* Toolchain probing -- resolving the compiler command, [simd_flags], [parallel_grid_syntax_setting]
-   -- costs about five subprocesses per process: one [ocamlc -config], up to three compile probes
-   and two link probes. Each is memoized by a [lazy], so the memoization is process-local, while a
-   [dune build] runs a couple hundred test executables. On Windows, where process creation is an
-   order of magnitude costlier than on Unix, that probing dominates short tests -- measured on one
-   Windows box, test/operations/hello_world_dim1x1 runs in 1.52s probing against 1.00s cached.
+(* Toolchain probing -- resolving the compiler command, [arch_flags], [simd_flags],
+   [parallel_grid_syntax_setting], [fp16_arithmetic_support] -- costs the better part of a dozen
+   subprocesses per process: one [ocamlc -config], plus compile and link probes for each of the
+   rest. Each is memoized by a [lazy], so the memoization is process-local, while a [dune build]
+   runs a couple hundred test executables. On Windows, where process creation is an order of
+   magnitude costlier than on Unix, that probing dominates short tests -- measured on one Windows
+   box, test/operations/hello_world_dim1x1 runs in 1.52s probing against 1.00s cached.
 
    So memoize across processes too, in files under [probe_cache_dir]. The key covers everything
    that can change an answer without changing a file's identity: the settings feeding the probes,
@@ -72,11 +72,15 @@ let probe_cache_dir =
 let probe_cache_path =
   let key_digest =
     lazy
+      (* Raw settings, not resolved values: [arch_flags] is itself one of the probes cached here, so
+         keying on its result would both invert the dependency and spend the probes the key exists
+         to avoid. Nothing is lost -- what it resolves to is a function of the compiler and the
+         target, and both are already pinned by the entries below. *)
       (let key =
          String.concat ~sep:"\000"
            [
              Utils.get_global_arg ~default:"" ~arg_name:"cc_backend_compiler_command";
-             arch_flags ();
+             Utils.get_global_arg ~default:"auto" ~arg_name:"cc_backend_arch_flags";
              Option.value (Stdlib.Sys.getenv_opt "PATH") ~default:"";
            ]
        in
@@ -190,6 +194,41 @@ let probe_compiles ?(mode = `Compile) ~flags ~data () =
   List.iter [ src; out; log ] ~f:(fun f -> try Stdlib.Sys.remove f with _ -> ());
   ok
 
+(* The flag that tells the compiler to target the host CPU. Its spelling is architecture-specific,
+   and getting it wrong is worse than passing nothing: Apple clang accepts [-march=native] on arm64
+   and *downgrades* the target with it -- 22 [__ARM_FEATURE_*] macros against 26 with no flag and 33
+   with [-mcpu=native], losing [__ARM_FEATURE_FP16_VECTOR_ARITHMETIC] among them, so a machine with
+   native 16-bit arithmetic looked like one without (gh-ocannl-516). On x86 the mistake runs the
+   other way: [-mcpu=] is an alias for [-mtune=] there, which selects scheduling but not the ISA,
+   so it would silently forgo AVX2.
+
+   "auto" (the default) therefore asks the target which family it is in and then probes that
+   family's spelling, falling back to no flag -- the compiler's own default target, which is the
+   host on Apple and a portable baseline elsewhere. Any other config value is passed through
+   verbatim, so [cc_backend_arch_flags=-march=native] restores the old behavior exactly. *)
+let arch_flags =
+  let probed =
+    lazy
+      (cached_probe ~name:"arch"
+         ~compute:(fun () ->
+           let is_arm =
+             probe_compiles ~flags:""
+               ~data:"#if !defined(__aarch64__) && !defined(__arm__) && !defined(_M_ARM64)\n\
+                      #error \"not ARM\"\n\
+                      #endif\n\
+                      int ocannl_arch_probe;\n"
+               ()
+           in
+           let trivial = "int ocannl_arch_probe;\n" in
+           let candidate = if is_arm then "-mcpu=native" else "-march=native" in
+           if probe_compiles ~flags:candidate ~data:trivial () then candidate else "")
+         ())
+  in
+  fun () ->
+    match Utils.get_global_arg ~default:"auto" ~arg_name:"cc_backend_arch_flags" with
+    | "auto" -> Lazy.force probed
+    | flags -> flags
+
 let simd_flags =
   let probed =
     lazy
@@ -273,6 +312,73 @@ let parallel_grid_syntax_setting =
       | Some mode -> mode
       | None ->
           invalid_arg ("cc_parallel_grid: expected auto | dispatch | openmp | none, got " ^ setting)
+
+(* gh-ocannl-516: whether the target has native fp16 arithmetic. Three states, and the middle one
+   is the reason a boolean will not do:
+
+   - [`None]: no [_Float16] at all. Half is emulated -- stored as uint16, computed through float.
+   - [`Promoted]: the type exists and its arithmetic is correct, but the compiler implements it by
+     promoting to float (x86-64 without AVX512-FP16). Better than bf16's explicit round-trips
+     because the compiler owns the promotion and can keep values in registers, but there is no
+     lane-count win, so the vector renderings and the cost model must not expect one.
+   - [`Native]: genuine 16-bit vector arithmetic (ARMv8.2-FP16, AVX512-FP16) -- twice f32's lanes.
+
+   All three are C-preprocessor facts, resolved when [cc] compiles a kernel, while the renderer
+   decides what to emit in OCaml well before that. Probing the compiler once per process and
+   carrying the answer in [hardware_limits] puts a target capability where target capabilities
+   already live, and keeps a half kernel's body single-armed. *)
+let fp16_arithmetic_of_string = function
+  | "none" | "false" -> Some `None
+  | "promoted" -> Some `Promoted
+  | "native" | "true" -> Some `Native
+  | _ -> None
+
+let fp16_arithmetic_support =
+  let probed =
+    lazy
+      (let cached =
+         cached_probe ~name:"fp16"
+           ~validate:(fun s -> Option.is_some (fp16_arithmetic_of_string s))
+           ~compute:(fun () ->
+             let flags = String.strip (arch_flags () ^ " " ^ simd_flags ()) in
+             (* Vector arithmetic, not just the type: a target can define [__FLT16_MAX__] and still
+                reject [_Float16] in a [vector_size] type. *)
+             let typed =
+               "#ifndef __FLT16_MAX__\n\
+                #error \"no _Float16\"\n\
+                #endif\n\
+                typedef _Float16 ocannl_v8h __attribute__((vector_size(16)));\n\
+                ocannl_v8h ocannl_fp16_probe(ocannl_v8h a, ocannl_v8h b, ocannl_v8h c) { return a \
+                * b + c; }\n"
+             in
+             let native =
+               "#if !defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC) && !defined(__AVX512FP16__)\n\
+                #error \"fp16 arithmetic is promoted to float, not native\"\n\
+                #endif\n\
+                int ocannl_fp16_native_probe;\n"
+             in
+             if not (probe_compiles ~flags ~data:typed ()) then "none"
+             else if probe_compiles ~flags ~data:native () then "native"
+             else "promoted")
+           ()
+       in
+       Option.value_exn ~message:"Cc_backend: unexpected fp16-arithmetic probe result"
+         (fp16_arithmetic_of_string cached))
+  in
+  fun () ->
+    let setting =
+      String.lowercase (Utils.get_global_arg ~default:"auto" ~arg_name:"cc_fp16_arithmetic")
+    in
+    if String.equal setting "auto" then Lazy.force probed
+    else
+      match fp16_arithmetic_of_string setting with
+      | Some support -> support
+      | None ->
+          invalid_arg
+            ("cc_fp16_arithmetic: expected auto | none | promoted | native, got " ^ setting)
+
+let has_native_fp16_arithmetic () =
+  match fp16_arithmetic_support () with `Native -> true | `Promoted | `None -> false
 
 (* Explicit SIMD width for [Vectorized] loops (gh-ocannl-164 follow-up): vector register bytes for
    the GCC/Clang vector-extension rendering in [C_syntax]. Auto (-1 or unset): 32 bytes when the
@@ -463,10 +569,48 @@ struct
      narrow per store. Under [narrow_compute_f32 = false] the narrow arms below take over again and
      every operator rounds to the target's storage precision (the pre-gh-517 semantics). *)
   let compute_prec prec =
-    if Ops.is_narrow_float prec && (Numerics.get ()).narrow_compute_f32 then Ops.single else prec
+    match prec with
+    (* gh-ocannl-516: fp16 is the one narrow format a CPU can execute natively, and where it does,
+       computing in it doubles the lane count against f32. Opt-in, and only where the arithmetic is
+       genuinely 16-bit -- on a target that merely promotes to float there is no throughput to win,
+       so the policy is ignored rather than silently costing mantissa. *)
+    | Ops.Half_prec _
+      when (Numerics.get ()).fp16_arithmetic && has_native_fp16_arithmetic () ->
+        prec
+    | _ when Ops.is_narrow_float prec && (Numerics.get ()).narrow_compute_f32 -> Ops.single
+    | _ -> prec
+
+  (* The explicit vector renderings work at the compute precision, so admitting fp16 here is
+     admitting native 16-bit vector arithmetic -- [vec_ext_typ] mints a [HALF_T] vector and the
+     lane count doubles.
+
+     The condition is the target's, not the policy's, and the two are not the same question.
+     Arriving here at [Half_prec] does not mean [fp16_arithmetic] chose it: [narrow_compute_f32 =
+     false] also leaves half alone, on any target, and there [HALF_T] is [uint16_t] -- a vector of
+     those would do integer arithmetic on raw half bit patterns and quietly corrupt the loop. So
+     ask the probe directly. Declining on a merely [`Promoted] target costs nothing that existed
+     before gh-ocannl-516, when half never vectorized at all. *)
+  let vector_prec_ok prec =
+    match prec with
+    | Ops.Single_prec _ | Ops.Double_prec _ -> true
+    | Ops.Half_prec _ -> has_native_fp16_arithmetic ()
+    | _ -> false
 
   (* Override operation syntax to handle special precision types *)
   let ternop_syntax prec op v1 v2 v3 =
+    match (prec, op) with
+    (* gh-ocannl-516: at fp16 compute precision the FMA goes through the shared macro, so the
+       scalar path and the vector rendering's per-lane fallback are the same operation -- see
+       [C_syntax.vec_acc_fma]. *)
+    | Ops.Half_prec _, Ops.FMA ->
+        let open PPrint in
+        group
+          (string "OCANNL_HALF_FMA(" ^^ v1 ^^ string ","
+          ^^ ifflat (space ^^ v2) (nest 2 (break 1 ^^ v2))
+          ^^ string ","
+          ^^ ifflat (space ^^ v3) (nest 2 (break 1 ^^ v3))
+          ^^ string ")")
+    | _ -> (
     match prec with
     | Ops.Bfloat16_prec _ ->
         (* For BFloat16, perform operations in float precision *)
@@ -499,7 +643,15 @@ struct
             ^^ ifflat (space ^^ float_v3) (nest 2 (break 1 ^^ float_v3))
             ^^ string op_suffix)
         in
-        string "FP_TO_HALF(" ^^ float_result ^^ string ")"
+        (* [FLOAT_TO_HALF], not [FP_TO_HALF]: the latter is the *identity* on a native [_Float16]
+           target, which would leave the f32 result of a library call ([expf], [sqrtf], [fmaxf]) at
+           f32 -- and C's usual arithmetic conversions then keep every enclosing operator at f32
+           too, all the way to the store. The fp16-arithmetic policy promises fp16 intermediates,
+           10-bit mantissa and a 65504 ceiling included, so the narrowing has to be a real cast
+           (gh-ocannl-516 review). A no-op where the ring operators already compute in [_Float16],
+           and unchanged on the emulated path, where both macros are [float_to_half_emulated].
+           Same reasoning at the two [FLOAT_TO_HALF] sites below. *)
+        string "FLOAT_TO_HALF(" ^^ float_result ^^ string ")"
     | Ops.Fp8_prec _ ->
         (* For FP8, perform operations in float precision *)
         let open PPrint in
@@ -524,7 +676,7 @@ struct
           ^^ ifflat (space ^^ v2) (nest 2 (break 1 ^^ v2))
           ^^ string op_infix2
           ^^ ifflat (space ^^ v3) (nest 2 (break 1 ^^ v3))
-          ^^ string op_suffix)
+          ^^ string op_suffix))
 
   let binop_syntax prec op v1 v2 =
     match op with
@@ -575,7 +727,7 @@ struct
                 ^^ ifflat (space ^^ float_v2) (nest 2 (break 1 ^^ float_v2))
                 ^^ string op_suffix)
             in
-            string "FP_TO_HALF(" ^^ float_result ^^ string ")"
+            string "FLOAT_TO_HALF(" ^^ float_result ^^ string ")"
         | _ ->
             let op_prefix, op_infix, op_suffix = Ops.binop_c_syntax prec op in
             let open PPrint in
@@ -616,7 +768,7 @@ struct
             let float_v = string "HALF_TO_FP(" ^^ v ^^ string ")" in
             let op_prefix, op_suffix = Ops.unop_c_syntax Ops.single op in
             let float_result = group (string op_prefix ^^ float_v ^^ string op_suffix) in
-            string "FP_TO_HALF(" ^^ float_result ^^ string ")"
+            string "FLOAT_TO_HALF(" ^^ float_result ^^ string ")"
         | _ ->
             let op_prefix, op_suffix = Ops.unop_c_syntax prec op in
             let open PPrint in

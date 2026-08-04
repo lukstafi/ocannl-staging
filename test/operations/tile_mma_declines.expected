@@ -12,3 +12,5 @@ seeds: narrow columns (nj < lanes): total=4 whole=0 packed=4 hoist=2 grid=0 pack
 seeds: f16 operands, f16 accumulator (advertised): mma seeds=5
 seeds: bf16 operands, f32 accumulator (advertised): mma seeds=5
 seeds: bf16 operands, bf16 accumulator (not advertised): mma seeds=0
+seeds: staged layout advertised: mma seeds=8 swizzled=3 unstaged swizzled=0
+seeds: staged layout not advertised: mma seeds=5 swizzled=0 unstaged swizzled=0

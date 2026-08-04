@@ -576,16 +576,22 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           ~m
           ~n
           ~k
-          ~d:(d_ptr, ldd, d_space)
-          ~a:(a_ptr, lda, a_space)
-          ~b:(b_ptr, ldb, b_space)
+          ~d:(d_ptr, ldd, d_space, d_layout)
+          ~a:(a_ptr, lda, a_space, a_layout)
+          ~b:(b_ptr, ldb, b_space, b_layout)
         ->
+          (* rocWMMA fragments are opaque like [nvcuda::wmma]'s: there is no swizzle-aware
+             fragment load here, so a swizzled operand layout declines to the caller's scalar
+             fallback (gh-ocannl-481 item 3, D2). *)
+          let plain = function `Plain -> true | `Swizzled_b128 -> false in
           let tile = 16 in
           (* (a/b fragment element type, accumulator fragment element type, ld multiple for a/b, ld
              multiple for d). rocWMMA element types [rocwmma::float16_t] / [rocwmma::bfloat16_t] /
              [float] need not be textually identical to the node's own C type ([__half] /
              [__hip_bfloat16]), so the operand pointers are [reinterpret_cast] to them below. *)
           let combo =
+            if not (plain d_layout && plain a_layout && plain b_layout) then None
+            else
             match (a_prec, b_prec, d_prec) with
             | Ops.Half_prec _, Ops.Half_prec _, Ops.Single_prec _ ->
                 Some ("rocwmma::float16_t", "float", 8, 4)
@@ -808,13 +814,19 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           ~n
           ~k
           ~fragment
-          ~target:(d_ptr, ldd, d_space)
-          ~a:(_, lda, a_space)
-          ~b:(_, ldb, b_space)
+          ~target:(d_ptr, ldd, d_space, d_layout)
+          ~a:(_, lda, a_space, a_layout)
+          ~b:(_, ldb, b_space, b_layout)
           ~body
         ->
+          (* rocWMMA fragments are opaque like [nvcuda::wmma]'s: there is no swizzle-aware
+             fragment load here, so a swizzled operand layout declines to the caller's scalar
+             fallback (gh-ocannl-481 item 3, D2). *)
+          let plain = function `Plain -> true | `Swizzled_b128 -> false in
           let tile = 16 in
           let combo =
+            if not (plain d_layout && plain a_layout && plain b_layout) then None
+            else
             match (a_prec, b_prec, d_prec) with
             | Ops.Half_prec _, Ops.Half_prec _, Ops.Single_prec _ ->
                 Some ("rocwmma::float16_t", "float", 8, 4)
@@ -1881,9 +1893,13 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                         ((Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_bf16),
                           (16, 16, 16));
                       ];
+                    (* rocWMMA fragments are opaque like wmma's: no swizzle-aware fragment load
+                       here (gh-ocannl-481 item 3, D3). *)
+                    mma_staged_layouts = [];
                   }
               else None);
            simd_vector_bytes = 0;
+           native_fp16_arithmetic = false;
            (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the
               RDNA3-class targets this backend is exercised on (dGPU/APU: ~10 fp32 TFLOP/s, ~250
               GB/s — Strix-Halo-class LPDDR5X). Per-device queries are calibration follow-up work;

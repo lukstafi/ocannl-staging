@@ -198,6 +198,11 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   measurement budget keeps going to schedules that never tensorize: `mma_format_tiles` is keyed on
   the whole `(a, b, accumulator)` format triple, with per-entry arch floors, precisely so that a
   combination a backend supports at one accumulator width but not the other cannot be seeded.
+  `mma_staged_layouts` (gh-ocannl-481) is keyed the same way for the same reason: the swizzled
+  staged twin is seeded only where the emission can actually read that layout, which on CUDA is
+  the uniform-bf16 combination and not fp8 (whose B side has no 16-bit `ldmatrix` form at the
+  orientation the staged sketches mint). The census distinguishes `Mma_intrinsics_ldmatrix` from
+  `Mma_intrinsics`, so "tensorized" and "fed at rate" are separable in a sweep.
 - Supplying a `?lowered_transform` bypasses the default annotator entirely (`backends.ml` `compile`
   only calls `Schedule.maybe_default_schedules` in the `None, None` arm), so **any** code that goes
   through that seam is the unscheduled serial form unless it schedules itself. The autotuner's base
@@ -269,6 +274,28 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   conversion would give the traffic win straight back). Bitwise parity with the serial remainder
   loop is by construction — every fallback arm calls the same scalar conversion the serial path
   does — and `test/operations/narrow_storage_compute.ml` asserts it with `=`, not a tolerance.
+- **fp16 is the one narrow format a CPU can compute in natively** (gh-ocannl-516), and whether it
+  can is a C-preprocessor fact the OCaml renderer cannot see. `cc` probes the configured compiler
+  once per process and reports three states — no `_Float16`, `_Float16` with arithmetic *promoted*
+  to float (correct, no lane-count win: x86 without AVX512-FP16), and genuinely native
+  (ARMv8.2-FP16, AVX512-FP16) — surfacing the last as `hardware_limits.native_fp16_arithmetic`.
+  `Ir.Numerics.fp16_arithmetic` (off by default: it trades mantissa for throughput, unlike
+  `narrow_compute_f32`) then makes `compute_prec` leave `Half_prec` alone, so `vec_ext_typ` mints a
+  `HALF_T` vector and the lane count doubles. The middle state is why the probe is not a boolean:
+  seeding and the cost model must not expect a lane-count win where only the type exists.
+- The fp16 FMA is where parity nearly breaks: `fmaf` on `_Float16` operands promotes to float and
+  rounds **twice**, while `__builtin_elementwise_fma` on an fp16 vector rounds once. The scalar
+  rendering and the vector rendering's per-lane fallback therefore both go through one builtin
+  macro, `OCANNL_HALF_FMA`, defined by the same `#if` — so both configurations agree by
+  construction rather than by inspection. Any new fp16 op admitted to the vector path needs the
+  same treatment.
+- **`-march=native` is the wrong flag on ARM and was silently downgrading every CPU kernel.** Apple
+  clang accepts it on arm64 and targets a *lower* baseline than passing nothing: 22
+  `__ARM_FEATURE_*` macros against 26 with no flag and 33 with `-mcpu=native`, losing
+  `__ARM_FEATURE_FP16_VECTOR_ARITHMETIC` among them — so a machine with native 16-bit arithmetic
+  probed as one without. `cc_backend_arch_flags` now defaults to `auto`, which asks the target
+  which family it is in and probes that family's spelling (`-mcpu=native` on ARM, `-march=native`
+  on x86 — where `-mcpu=` is merely an alias for `-mtune=` and would not select the ISA at all).
 - The traffic win is real but it favors **fp16, not bf16**, the reverse of gh-ocannl-517's
   expectation. On an M-series at n = 2^22, a bandwidth-bound elementwise add measures 131 GB/s at
   f32, 1.97x that at half storage, and **0.91x** at bf16 (`bin/narrow_storage_bench.exe`); a

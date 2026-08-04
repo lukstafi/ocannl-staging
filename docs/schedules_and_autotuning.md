@@ -55,7 +55,7 @@ Structural rewrites:
 
 Code-synthesizing transforms:
 
-- **`Stage { source; tile_loops; shared; cooperative; hoisted; swizzle }`** — stage reads of a
+- **`Stage { source; tile_loops; shared; cooperative; hoisted; swizzle; pad_stride }`** — stage reads of a
   tensor node through a fresh tile sized by the tile loops' extents. `shared = false` is CPU
   operand packing (a serial copy nest into `Local` scratch, normalizing layout — the tile's axes
   follow `tile_loops` order, so packing untransposes operands); `shared = true` places the tile
@@ -63,7 +63,11 @@ Code-synthesizing transforms:
   `cooperative = Some width` is the lane-aware mode that composes with `Tensorize`;
   `hoisted = true` packs a compile-time-constant operand once at link time into the per-device
   constant pool (gh-ocannl-470); `swizzle` stores the tile XOR-swizzled against shared-memory
-  bank conflicts. Edge guards are `Where`-form and store 0 — the add-reduce identity — to
+  bank conflicts — `Swizzle_elem` permutes single elements and is declined by every intrinsic
+  path, `Swizzle_b128` permutes whole 16-byte units and is the layout CUDA's inline-PTX
+  `mma.sync` arms read with `ldmatrix` (gh-ocannl-481); `pad_stride` rounds the tile's minor dim
+  up to a multiple, widening the row stride (bank conflicts, and layout rules stated on the
+  leading dimension) without changing the iterated index space. Edge guards are `Where`-form and store 0 — the add-reduce identity — to
   out-of-range slots, so every staged tile is safe to read over its whole index space
   (tracked in `Low_level.optimized.zero_fringe`; the padding contract of PADTO). A tile axis
   whose source index is a single strided term `c*i` (`c > 1` — a stride-2 conv's GEMM row) is

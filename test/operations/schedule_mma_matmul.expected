@@ -21,8 +21,12 @@ bfu_tb tensorized matmul matches the serial twin bitwise: true
 bfu_tb tensorized structure as expected: true
 bfu_m2 tensorized matmul matches the serial twin bitwise: true
 bfu_m2 tensorized structure as expected: true
-fp8 tensorized matmul matches the serial twin bitwise: true
-fp8 tensorized structure as expected: true
+f8 tensorized matmul matches the serial twin bitwise: true
+f8 tensorized structure as expected: true
+f8_ta tensorized matmul matches the serial twin bitwise: true
+f8_ta tensorized structure as expected: true
+f8_tb tensorized matmul matches the serial twin bitwise: true
+f8_tb tensorized structure as expected: true
 edge-extent tensorized matmul matches the serial twin bitwise: true
 edge-extent register tiling with peeled edges: true
 staged+tensorized matmul parity (GPU) or clean rejection (CPU): true
