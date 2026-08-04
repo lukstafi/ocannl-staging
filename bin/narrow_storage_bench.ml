@@ -133,6 +133,11 @@ let () =
         ctx
         (Stdlib.Array.make repeats ())
     in
+    (* An explicitly configured accelerator enqueues asynchronously, so the timed region has to be
+       fenced: without this it would report enqueue time, and the readback below -- which fences on
+       its own -- happens after the clock stops. Cheap and a no-op on the synchronous cc
+       scheduler. *)
+    Context.sync ctx;
     let stop = Time_now.nanoseconds_since_unix_epoch () in
     let (_ : float array) = Context.get_values ctx t.Tensor.value in
     let secs = Float.of_int63 Int63.(stop - start) /. 1e9 /. Float.of_int repeats in

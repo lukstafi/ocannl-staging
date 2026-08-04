@@ -686,9 +686,29 @@ module C_syntax (B : C_syntax_config) = struct
         true
     | _ -> false
 
+  (* Anywhere in the expression, not just at its root: a virtualized narrow uniform is routinely
+     consumed by further arithmetic (the default centered-scaled parameter initializer is exactly
+     that shape), and the generator is selected by the precision the {e conversion} renders at,
+     which [pp_scalar] inherits from its enclosing operator. An assignment that mentions one
+     therefore renders wholly at the storage precision -- forgoing the wide-compute benefit for
+     that statement, which is the cheap side of the trade. Not descended into [Local_scope]: its
+     body renders at its own scope precision, decided by [scope_prec_of]. *)
+  let rec mentions_rng_conversion (llsc : Low_level.scalar_t) =
+    is_rng_conversion llsc
+    ||
+    match llsc with
+    | Low_level.Ternop (_, (a, _), (b, _), (c, _)) ->
+        mentions_rng_conversion a || mentions_rng_conversion b || mentions_rng_conversion c
+    | Binop (_, (a, _), (b, _)) -> mentions_rng_conversion a || mentions_rng_conversion b
+    | Unop (_, (a, _)) -> mentions_rng_conversion a
+    | Local_scope _ | Get _ | Get_local _ | Get_dynamic _ | Get_merge_buffer _ | Constant _
+    | Constant_bits _ | Embed_index _ ->
+        false
+
   (* Whether the value of a [Set] renders directly at the target's storage precision, bypassing
      [comp_prec]. True when the rendering contains no operator, so there is no intermediate to keep
-     wide -- a copy, a constant, a scope-local read -- and for the RNG conversions above. Rendering
+     wide -- a copy, a constant, a scope-local read -- and whenever an RNG conversion appears
+     anywhere in it. Rendering
      [x = <narrow y read at f32>] through the store's narrowing conversion would be bitwise the
      same (widening is exact and narrowing an exactly-representable value is the identity), but it
      spells a copy loop -- the very shape narrow storage exists to speed up -- as a round-trip
@@ -698,7 +718,7 @@ module C_syntax (B : C_syntax_config) = struct
     | Low_level.Get _ | Get_dynamic _ | Get_merge_buffer _ | Get_local _ | Local_scope _
     | Constant _ | Constant_bits _ | Embed_index _ ->
         true
-    | _ when is_rng_conversion llsc -> true
+    | _ when mentions_rng_conversion llsc -> true
     | Unop (Ops.Identity, (v, _)) -> renders_at_store_prec v
     | Binop (Ops.Arg1, (v, _), _) | Binop (Ops.Arg2, _, (v, _)) -> renders_at_store_prec v
     | Unop _ | Binop _ | Ternop _ -> false
@@ -739,7 +759,7 @@ module C_syntax (B : C_syntax_config) = struct
           scan_sc c;
           scan body
       | Set_local (id, v) ->
-          if is_rng_conversion v then Hash_set.add acc id.Low_level.tn.Tn.uid;
+          if mentions_rng_conversion v then Hash_set.add acc id.Low_level.tn.Tn.uid;
           scan_sc v
       | Set { llsc; _ } -> scan_sc llsc
       | Set_dynamic { dyn_value = v, _; llsc; _ } ->

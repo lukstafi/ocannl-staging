@@ -71,6 +71,11 @@ let () =
         (fun ctx () -> Context.run ctx routine)
         ctx (Stdlib.Array.make repeats ())
     in
+    (* An explicitly configured accelerator enqueues asynchronously, so the timed region has to be
+       fenced: without this it would report enqueue time, and the readback below -- which fences on
+       its own -- happens after the clock stops. Cheap and a no-op on the synchronous cc
+       scheduler. *)
+    Context.sync ctx;
     let stop = Time_now.nanoseconds_since_unix_epoch () in
     (* Outside the timed region: [get_values] walks the whole buffer into an OCaml [float array],
        an O(n) host-side cost that at n >= 10^6 is an order of magnitude larger than the kernel and
