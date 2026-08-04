@@ -118,11 +118,19 @@ type t =
       d : Tn.t * Indexing.axis_index array;  (** Accumulator block base. *)
       a : Tn.t * Indexing.axis_index array;
       b : Tn.t * Indexing.axis_index array;
-      ta : bool;  (** [a] is stored transposed: its last two axes are [k, i] rather than [i, k]. *)
-      tb : bool;  (** [b] is stored transposed: its last two axes are [j, k] rather than [k, j]. *)
+      ta : bool;  (** [a] is stored transposed: its tile axes are [k, i]-major rather than [i, k]. *)
+      tb : bool;  (** [b] is stored transposed: its tile axes are [j, k]-major rather than [k, j]. *)
       m : int;
       n : int;
       k : int;  (** Covered block extents (multiples of the backend's intrinsic tile). *)
+      ldd : int;
+      lda : int;
+      ldb : int;
+          (** Leading-dimension strides in elements: the address distance between consecutive
+              tile-major-axis lines of each operand. Historically each tile spanned its tnode's last
+              two axes, making the stride the minor dim; with batched sites (gh-ocannl-528) the tile
+              major axis may sit further out (an interior batch axis between the row and column
+              axes), so the stride is recorded explicitly by [Schedule.Tensorize]. *)
       lane : Indexing.symbol;  (** The cooperating [Workgroup] axis (extent = SIMD width). *)
       fallback : t;  (** Semantically equivalent scalar micro-kernel over fresh serial symbols. *)
     }
@@ -131,15 +139,17 @@ type t =
           index vectors, executed jointly by the threads of the [lane] axis (tensor cores /
           [simdgroup_matrix]). The per-lane ownership of tile elements is architecture-defined and
           deliberately opaque — the [lane] index must not occur in the base indices. Each operand's
-          tile spans its tnode's last two axes (row-major, minor axis stride 1); strides come from
-          the tnode dims. With [ta] (resp. [tb]) the stored layout of [a] (resp. [b]) is the
-          transpose of its role — emissions load tiles with the hardware transpose flag
-          ([simdgroup_load]'s [transpose_matrix], wmma's [col_major]) and swap the tile-offset
-          arithmetic; the scalar [fallback] carries the original indexing and is unaffected.
-          Backends without an MMA hook render [fallback] once per simdgroup, under an
-          [if (lane == 0)] guard — the renderer's obligation, keyed off [lane]. The statement
-          validates like {!Workgroup_barrier} (it is one for code-motion and divergence purposes)
-          plus a write of [d] for the coverage rule. *)
+          tile is a 2-D slice with the minor tile axis at the tnode's last axis (stride 1) and the
+          major tile axis at the recorded leading-dimension stride ([ldd]/[lda]/[ldb]) — the
+          tnode's second-to-last axis in the plain case, further out for batched sites. With [ta]
+          (resp. [tb]) the stored layout of [a] (resp. [b]) is the transpose of its role —
+          emissions load tiles with the hardware transpose flag ([simdgroup_load]'s
+          [transpose_matrix], wmma's [col_major]) and swap the tile-offset arithmetic; the scalar
+          [fallback] carries the original indexing and is unaffected. Backends without an MMA hook
+          render [fallback] once per simdgroup, under an [if (lane == 0)] guard — the renderer's
+          obligation, keyed off [lane]. The statement validates like {!Workgroup_barrier} (it is
+          one for code-motion and divergence purposes) plus a write of [d] for the coverage
+          rule. *)
 [@@deriving sexp_of, equal]
 
 and scalar_t =
@@ -4437,7 +4447,19 @@ let to_doc_cstyle ?name ?static_indices () llc =
         group (header ^^ body_doc ^^ break 1 ^^ string "}")
     | Workgroup_barrier -> string "workgroup_barrier;"
     | Tile_mma
-        { d = d_tn, d_idcs; a = a_tn, a_idcs; b = b_tn, b_idcs; ta; tb; m; n; k; lane; fallback } ->
+        {
+          d = d_tn, d_idcs;
+          a = a_tn, a_idcs;
+          b = b_tn, b_idcs;
+          ta;
+          tb;
+          m;
+          n;
+          k;
+          lane;
+          fallback;
+          _;
+        } ->
         let transposed t = if t then string "^T" else empty in
         let header =
           string (Printf.sprintf "tile_mma<%dx%dx%d>@" m n k)
@@ -4578,7 +4600,19 @@ let to_doc ?name ?static_indices () llc =
         group (header ^^ body_doc ^^ break 1 ^^ string "}")
     | Workgroup_barrier -> string "workgroup_barrier;"
     | Tile_mma
-        { d = d_tn, d_idcs; a = a_tn, a_idcs; b = b_tn, b_idcs; ta; tb; m; n; k; lane; fallback } ->
+        {
+          d = d_tn, d_idcs;
+          a = a_tn, a_idcs;
+          b = b_tn, b_idcs;
+          ta;
+          tb;
+          m;
+          n;
+          k;
+          lane;
+          fallback;
+          _;
+        } ->
         let transposed t = if t then string "^T" else empty in
         let header =
           string (Printf.sprintf "tile_mma<%dx%dx%d>@" m n k)

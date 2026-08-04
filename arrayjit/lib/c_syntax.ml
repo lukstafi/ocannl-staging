@@ -1411,11 +1411,9 @@ module C_syntax (B : C_syntax_config) = struct
           | _ -> Indexing.Affine { symbols; offset })
       | other -> other
     in
-    let operand (tn, idcs) =
+    let operand ld (tn, idcs) =
       let dims = Lazy.force tn.Tn.dims in
       let prec = Lazy.force tn.Tn.storage_prec in
-      let rank = Array.length dims in
-      let ld = if rank >= 1 then dims.(rank - 1) else 1 in
       let space =
         if Set.mem !current_workgroup_shared tn then `Shared
         else if Tn.Placements.is_materialized_force (placements ()) tn 441 then `Device
@@ -1423,6 +1421,34 @@ module C_syntax (B : C_syntax_config) = struct
       in
       let ptr = parens (string (get_ident tn) ^^ string " + " ^^ pp_array_offset (idcs, dims)) in
       (prec, (ptr, ld, space))
+    in
+    (* The target's leading-dimension stride: the stride of the axis carrying the transfer nest's
+       outermost (row) copy symbol — the minor dim in the plain case, larger when interior batch
+       axes sit between the tile roles (gh-ocannl-528). The transfer nests are synthesized by
+       [Schedule.contract_tensorized_accumulator], so the outermost serial copy loop is the
+       fragment's row by construction. *)
+    let target_ld_of ~(row_sym : Indexing.symbol option) (tn, idcs) =
+      let dims = Lazy.force tn.Tn.dims in
+      let rank = Array.length dims in
+      let default = if rank >= 1 then dims.(rank - 1) else 1 in
+      let mentions_sym s (idx : Indexing.axis_index) =
+        match idx with
+        | Indexing.Iterator s' -> Indexing.equal_symbol s s'
+        | Indexing.Affine { symbols; _ } ->
+            List.exists symbols ~f:(fun (_, s') -> Indexing.equal_symbol s s')
+        | _ -> false
+      in
+      match row_sym with
+      | None -> default
+      | Some s -> (
+          match Array.findi idcs ~f:(fun _ idx -> mentions_sym s idx) with
+          | Some (p, _) ->
+              let ld = ref 1 in
+              for x = p + 1 to rank - 1 do
+                ld := !ld * dims.(x)
+              done;
+              !ld
+          | None -> default)
     in
     match nonempty with
     | init :: reduction :: store :: rest -> (
@@ -1443,12 +1469,15 @@ module C_syntax (B : C_syntax_config) = struct
             (* Swizzled operands decline the fragment hooks (row-major pointer+stride contract);
                falling through to [None] keeps the ordinary rendering, whose [Tile_mma]s decline to
                the swizzle-aware scalar fallback. *)
-            | [ Tile_mma { a; b; ta; tb; m; n; k; _ } ]
+            | [ Tile_mma { a; b; ta; tb; m; n; k; lda; ldb; _ } ]
               when not (List.exists [ target; fst a; fst b ] ~f:is_swizzled) -> (
                 let target_base = Array.map init_idcs ~f:(zero_symbols init_syms) in
-                let d_prec, target_op = operand (target, target_base) in
-                let a_prec, a_op = operand a in
-                let b_prec, b_op = operand b in
+                (* [init_syms] is innermost-first, so its last element is the outermost (row)
+                   copy symbol; [init_idcs] still carries it. *)
+                let t_ld = target_ld_of ~row_sym:(List.last init_syms) (target, init_idcs) in
+                let d_prec, target_op = operand t_ld (target, target_base) in
+                let a_prec, a_op = operand lda a in
+                let b_prec, b_op = operand ldb b in
                 let fragment_name = Printf.sprintf "__mma_fragment_%d" fragment.Tn.uid in
                 let render_with active =
                   let old = !active_mma_accumulator in
@@ -2822,7 +2851,7 @@ module C_syntax (B : C_syntax_config) = struct
             invalid_arg
               "C_syntax.pp_ll: Workgroup_barrier not supported by this backend (serialization \
                cannot implement a barrier)")
-    | Tile_mma { d; a; b; ta; tb; m; n; k; lane; fallback } -> (
+    | Tile_mma { d; a; b; ta; tb; m; n; k; ldd; lda; ldb; lane; fallback } -> (
         (* Cooperative tile-MMA (docs/proposals/tensorize-mma.md §4). Backends with an [mma_syntax]
            hook emit the intrinsic sequence on every lane; everywhere else (including per-call
            declines and logged runs, which must stay serial and deterministic) the scalar fallback
@@ -2840,11 +2869,12 @@ module C_syntax (B : C_syntax_config) = struct
             "marked simdgroup fragment %s rendered outside its recognized fragment scope; falling \
              back from the intended persistent intrinsic path"
             (Tn.debug_name d_tn);
-        let operand (tn, idcs) =
+        (* [ld] is the statement's recorded leading-dimension stride for this operand
+           ([Tile_mma.ldd]/[lda]/[ldb]) — the minor dim of the tnode's last axis in the plain case,
+           a larger stride when interior batch axes sit between the tile roles (gh-ocannl-528). *)
+        let operand ld (tn, idcs) =
           let dims = Lazy.force tn.Tn.dims in
           let prec = Lazy.force tn.Tn.storage_prec in
-          let rank = Array.length dims in
-          let ld = if rank >= 1 then dims.(rank - 1) else 1 in
           let ptr_doc, ld, space =
             match !active_mma_accumulator with
             | Some (Active_fragment (fragment, name)) when Tn.equal tn fragment ->
@@ -2890,13 +2920,13 @@ module C_syntax (B : C_syntax_config) = struct
             | `Thread -> "thread"
             | `Fragment _ -> "fragment"
           in
-          let op_str role (tn, idcs) =
-            let prec, (_, ld, space) = operand (tn, idcs) in
+          let op_str role ld (tn, idcs) =
+            let prec, (_, ld, space) = operand ld (tn, idcs) in
             Printf.sprintf "%s=%s:%s[ld=%d,%s]" role (Tn.debug_name tn) (Ops.prec_string prec) ld
               (space_str space)
           in
-          Printf.sprintf "%dx%dx%d ta=%b tb=%b %s %s %s" m n k ta tb (op_str "d" d) (op_str "a" a)
-            (op_str "b" b)
+          Printf.sprintf "%dx%dx%d ta=%b tb=%b %s %s %s" m n k ta tb (op_str "d" ldd d)
+            (op_str "a" lda a) (op_str "b" ldb b)
         in
         let fallback_doc () =
           record Mma_scalar_fallback;
@@ -2994,9 +3024,9 @@ module C_syntax (B : C_syntax_config) = struct
           let ctyp = B.typ_of_prec prec in
           let it = B.loop_index_type in
           let fma_fn = match prec with Ops.Double_prec _ -> "fma" | _ -> "fmaf" in
-          let _, (d_ptr, ldd, _) = operand d in
-          let _, (a_ptr, lda, _) = operand a in
-          let _, (b_ptr, ldb, _) = operand b in
+          let _, (d_ptr, ldd, _) = operand ldd d in
+          let _, (a_ptr, lda, _) = operand lda a in
+          let _, (b_ptr, ldb, _) = operand ldb b in
           (* The A element at (row expression, k expression), honoring [ta]'s storage order. *)
           let a_at ~row ~l =
             if ta then Printf.sprintf "tmma_a__[%s * %d + %s]" l lda row
@@ -3135,9 +3165,9 @@ module C_syntax (B : C_syntax_config) = struct
             declinef "Tile_mma intrinsics declined (swizzled operand layout): %s" (describe ());
             fallback_or_tiled ()
         | Some emit -> (
-            let d_prec, d_op = operand d in
-            let a_prec, a_op = operand a in
-            let b_prec, b_op = operand b in
+            let d_prec, d_op = operand ldd d in
+            let a_prec, a_op = operand lda a in
+            let b_prec, b_op = operand ldb b in
             match emit ~d_prec ~a_prec ~b_prec ~ta ~tb ~m ~n ~k ~d:d_op ~a:a_op ~b:b_op with
             | Some doc ->
                 record Mma_intrinsics;
