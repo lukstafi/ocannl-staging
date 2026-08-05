@@ -360,11 +360,13 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
         logf "flip refinement skipped: the capture compile failed: %s" (Exn.to_string exn));
     let candidates =
       List.fold !captured ~init:[] ~f:(fun acc fc ->
-          if List.exists acc ~f:(fun c -> c.LL.fc_tn.Tn.id = fc.LL.fc_tn.Tn.id) then acc
+          (* Identity is [Tn.uid] ([Tn.equal]), not the session [id], which can repeat across
+             namespaces and reinitializations. *)
+          if List.exists acc ~f:(fun c -> Tn.equal c.LL.fc_tn fc.LL.fc_tn) then acc
           else fc :: acc)
       |> List.sort ~compare:(fun a b ->
              match Int.compare b.LL.fc_recompute_cost a.LL.fc_recompute_cost with
-             | 0 -> Int.compare a.LL.fc_tn.Tn.id b.LL.fc_tn.Tn.id
+             | 0 -> Tn.compare a.LL.fc_tn b.LL.fc_tn
              | c -> c)
       |> fun l -> List.take l inline_flips
     in

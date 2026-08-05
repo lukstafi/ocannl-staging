@@ -4457,7 +4457,7 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
               :: acc)
     |> List.sort ~compare:(fun a b ->
            match Int.compare b.fc_recompute_cost a.fc_recompute_cost with
-           | 0 -> Int.compare a.fc_tn.Tn.id b.fc_tn.Tn.id
+           | 0 -> Tn.compare a.fc_tn b.fc_tn
            | c -> c)
   in
   let optimize_ctx = input_ctx in
