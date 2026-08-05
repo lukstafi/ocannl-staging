@@ -684,3 +684,27 @@ let decide_materialized ctx tns =
       }
   in
   { ctx with wrapped }
+
+let decide_inline ctx tns =
+  let wrapped, () =
+    Backends.with_backend ctx.wrapped
+      {
+        f =
+          (fun (type dev runner event)
+            (module Backend : BI.Backend
+              with type dev = dev
+               and type runner = runner
+               and type event = event)
+            bctx
+          ->
+            (* Fork like [decide_materialized]; the preference is recorded rather than a placement
+               decided, because inlining legality is settled only during optimization
+               ([check_and_store_virtual]) — a preferred node the virtualizer rejects still
+               materializes. *)
+            let optimize_ctx = Ir.Low_level.copy_optimize_ctx bctx.BI.optimize_ctx in
+            List.iter tns
+              ~f:(Hash_set.add optimize_ctx.Ir.Low_level.inline_preferences);
+            (Backend.make_child ~optimize_ctx bctx, ()));
+      }
+  in
+  { ctx with wrapped }

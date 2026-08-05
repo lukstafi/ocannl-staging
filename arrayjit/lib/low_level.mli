@@ -317,6 +317,13 @@ type optimize_ctx = {
           codegen). Codegen must not emit the [restrict] qualifier for these parameters — whether a
           candidate pair actually shares bytes is settled only at link time, and an aliased
           [restrict] pair is a miscompile. *)
+  inline_preferences : Hash_set.M(Tnode).t;
+      (** gh-555: the [Inline] half of the per-lineage inlining decision vector. A node recorded
+          here is exempt from the heuristic virtualization caps ([virtualize_max_visits],
+          [virtualize_max_inline_reduction]) — the caps are priors of the default decision policy,
+          not legality; the legality rejections and observability pessimizations still apply. The
+          [Materialize] half of the vector is a pre-seeded [On_device] decision in [placements]
+          (see [Context.decide_materialized] / [Context.decide_inline]). *)
 }
 [@@deriving sexp_of]
 

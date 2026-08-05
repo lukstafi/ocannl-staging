@@ -299,6 +299,14 @@ type optimize_ctx = {
           candidate pair actually shares bytes is settled only at link time ([allocate_delta]), and
           an aliased [restrict] pair is a miscompile. Another per-compilation-lineage decision kind,
           same species as {!field-placements}. *)
+  inline_preferences : Hash_set.M(Tnode).t;
+      (** gh-555: the [Inline] half of the per-lineage inlining decision vector. A node recorded
+          here is exempt from the heuristic virtualization caps ([virtualize_max_visits],
+          [virtualize_max_inline_reduction]) in {!decide_placements} — the caps are priors of the
+          default policy, not legality. Legality is unaffected: [check_and_store_virtual] /
+          [inline_computation] can still reject the node ([Never_virtual] with their provenances).
+          The [Materialize] half of the vector is a pre-seeded [On_device] decision in
+          {!field-placements} (see [Context.decide_materialized]). *)
 }
 [@@deriving sexp_of]
 
@@ -307,17 +315,19 @@ let empty_optimize_ctx () =
     computations = Hashtbl.create (module Tnode);
     placements = Tnode.Placements.create ();
     alias_candidates = Hash_set.create (module Tnode);
+    inline_preferences = Hash_set.create (module Tnode);
   }
 
 (** A shallow-copy fork of the lineage state: the copy sees everything decided so far, and neither
     the original nor sibling copies observe its later mutations. Backend [compile] forks the
     incoming context's [optimize_ctx] through this, which is what makes sibling candidate compiles
     from one frontier hermetic. *)
-let copy_optimize_ctx { computations; placements; alias_candidates } =
+let copy_optimize_ctx { computations; placements; alias_candidates; inline_preferences } =
   {
     computations = Hashtbl.copy computations;
     placements = Tnode.Placements.copy placements;
     alias_candidates = Hash_set.copy alias_candidates;
+    inline_preferences = Hash_set.copy inline_preferences;
   }
 
 type traced_store = (Tn.t, traced_array) Base.Hashtbl.t [@@deriving sexp_of]
@@ -4236,12 +4246,26 @@ let read_multiplicity_query (static_indices : Indexing.static_symbol list)
 (* The placement decision procedure over the traced facts and affine metrics — the tail of the
    retired [visit_llc], factored out (gh-554; the analysis/decision split of gh-555 step 1). Writes
    decisions into the lineage's placements table; the metrics are forced only when a decision
-   actually consults them. *)
-let decide_placements plc traced_store ~max_visits ~reads_covered ~read_multiplicity =
+   actually consults them. The heuristic caps ([max_visits], [max_inline_reduction]) are priors of
+   this default policy, not legality: a node in [optim_ctx.inline_preferences] (gh-555) is exempt
+   from both, like one-hot selector producers always were, while the legality rejections
+   ([check_and_store_virtual] / [inline_computation]) and the observability pessimizations
+   (read-only, read-before-write) apply regardless. *)
+let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads_covered
+    ~read_multiplicity =
+  let plc = optim_ctx.placements in
   Hashtbl.iter traced_store ~f:(fun traced ->
       let tn = traced.tn in
       let covered =
         lazy (match (Lazy.force reads_covered) tn with `Covered -> true | `Unknown _ -> false)
+      in
+      let cap_exempt =
+        (* task-73617488: one-hot selector producers are exempt from the heuristic caps. The
+           ordinary [virtual_llc]/[cleanup_virtual_llc] path will inline them so that
+           [rewrite_one_hot_reductions] can fire at default [max_visits = 1]. gh-555: an explicit
+           [Inline] decision ([inline_preferences]) is the same kind of exemption, searchable. *)
+        (traced.prefers_virtual_one_hot && not traced.has_non_one_hot_setter)
+        || Hash_set.mem optim_ctx.inline_preferences tn
       in
       if
         virtualize_settings.inline_scalar_constexprs && traced.is_scalar_constexpr
@@ -4258,7 +4282,7 @@ let decide_placements plc traced_store ~max_visits ~reads_covered ~read_multipli
         && traced.inline_reduction_extent > virtualize_settings.max_inline_reduction
         && traced.read_by_other
         && Option.is_none (Tn.Placements.get plc tn)
-        && not (traced.prefers_virtual_one_hot && not traced.has_non_one_hot_setter)
+        && not cap_exempt
       then Tn.Placements.update plc tn Never_virtual 39;
       let skip_simple =
         virtualize_settings.inline_simple_computations && (not traced.is_complex)
@@ -4270,10 +4294,7 @@ let decide_placements plc traced_store ~max_visits ~reads_covered ~read_multipli
         (not skip_simple)
         && Option.is_none (Tn.Placements.get plc tn)
         && ((Lazy.force read_multiplicity) tn > max_visits || not (Lazy.force covered))
-        (* task-73617488: one-hot selector producers are exempt from the visit-count cap. The
-           ordinary [virtual_llc]/[cleanup_virtual_llc] path will inline them so that
-           [rewrite_one_hot_reductions] can fire at default [max_visits = 1]. *)
-        && not (traced.prefers_virtual_one_hot && not traced.has_non_one_hot_setter)
+        && not cap_exempt
       then Tn.Placements.update plc tn Never_virtual 1;
       if (not traced.zeroed_out) && not traced.has_assignment then (
         (* The tensor node is read-only/recurrent for this computation, but maybe computed or
@@ -4311,7 +4332,7 @@ let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
   let accs = lazy (affine_accesses llc) in
   let reads_covered = lazy (reads_covered_query static_indices (Lazy.force accs)) in
   let read_multiplicity = lazy (read_multiplicity_query static_indices (Lazy.force accs)) in
-  decide_placements input_ctx.placements traced_store ~max_visits:virtualize_settings.max_visits
+  decide_placements input_ctx traced_store ~max_visits:virtualize_settings.max_visits
     ~reads_covered ~read_multiplicity;
   [%log "optimizing"];
   let virtual_llc_result = virtual_llc input_ctx traced_store reverse_node_map static_indices llc in

@@ -246,3 +246,14 @@ val decide_materialized : t -> Ir.Tnode.t list -> t
     sibling can coexist (e.g. the placement-A/B arms of [Train.tune_placements]). Nodes the lineage
     or intent already constrains away from plain materialization ([Virtual], [Local], or constant)
     are skipped. *)
+
+val decide_inline : t -> Ir.Tnode.t list -> t
+(** A child context whose compilation lineage additionally prefers the given nodes inline
+    (gh-555): subsequent compiles exempt them from the heuristic virtualization caps
+    ([virtualize_max_visits], [virtualize_max_inline_reduction]) — the caps are priors of the
+    default placement policy, not legality. Legality still applies: a preferred node the
+    virtualizer rejects (escaping symbols, non-injective producer indices, opaque effects, ...)
+    materializes as before, and the observability pessimizations (read-only, read-before-write)
+    are unaffected. Together with {!decide_materialized} this spans the per-node inlining decision
+    vector: [Inline] here, [Materialize] there, the default heuristics elsewhere. Hermetic like
+    {!decide_materialized}: the argument context and its other descendants are unaffected. *)
