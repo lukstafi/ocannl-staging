@@ -200,4 +200,142 @@ let () =
   let%op var = x2 +* "bsk;bsk=>bs" x2 in
   let opt_var, _ctx, _routine = with_lowering ~name:"batched_var" var ~transform:Fn.id in
   p "variance-like site: no cpu mma seeds" (List.is_empty (cpu_mma_seeds opt_var));
-  p "variance-like site: no gpu mma seeds" (List.is_empty (gpu_mma_seeds opt_var))
+  p "variance-like site: no gpu mma seeds" (List.is_empty (gpu_mma_seeds opt_var));
+
+  (* --- The tensor-core legs, at bf16, against the backend's REAL advertised capability ---
+
+     Everything above runs the batched sites through synthetic limits, which keeps the seeding
+     checks machine-independent but leaves the question this file exists for unanswered on a GPU:
+     the recorded leading-dimension strides ([Tile_mma.ldd]/[lda]/[ldb]) are consumed by the
+     backends' own mma hooks, and a stride that is right for the register-tiled C rendering can
+     still be wrong for a fragment load. On a real device an f32 site seeds nothing on the wmma
+     backends (RDNA3.5 and CUDA have no f32 operand shape), so the reachable format is a narrow
+     one; bf16 is the one both wmma backends and Metal have in the uniform combination.
+
+     So: seed against [Context.hardware_limits], apply the real pipeline, execute, and require both
+     that the values match the serial twin and that the emitted source carries the backend's
+     intrinsic. The interior-batch leg is the load-bearing one — its [lda]/[ldb]/[ldd] are
+     [hh]-times larger than the minor dims, which is exactly the case gh-ocannl-528 introduced and
+     the case a fragment load addresses differently from a scalar loop.
+
+     Tolerance rather than bitwise on HIP, for the reason [schedule_mma_matmul] documents at
+     length: gfx1151's WMMA does not return the exactly-rounded dot product in any format
+     combination, reproducibly so outside OCANNL. It is loose enough to admit that (worst measured
+     5.86e-03 in the uniform-bf16 combination) and far tighter than a stride defect, which moves
+     values by O(1). *)
+  let real_limits = Context.hardware_limits (Context.auto ()) in
+  let has_uniform_bf16_tile =
+    match real_limits.Ir.Backend_intf.mma with
+    | None -> false
+    | Some cap ->
+        List.exists cap.Ir.Backend_intf.mma_format_tiles ~f:(fun ((a, b, d), _) ->
+            Ir.Backend_intf.equal_mma_input_format a Ir.Backend_intf.Mma_bf16
+            && Ir.Backend_intf.equal_mma_input_format b Ir.Backend_intf.Mma_bf16
+            && Ir.Backend_intf.equal_mma_input_format d Ir.Backend_intf.Mma_bf16)
+  in
+  let renders_intrinsic src =
+    let has s = String.is_substring src ~substring:s in
+    if String.is_substring backend_name ~substring:"metal" then has "simdgroup_bfloat8x8"
+    else if String.is_substring backend_name ~substring:"hip" then has "rocwmma::mma_sync"
+    else if String.is_substring backend_name ~substring:"cuda" then has "mma.sync.aligned.m16n8k16"
+    else false
+  in
+  let close a b = Float.(abs (a - b) <= 0.05 * max 1. (abs b)) in
+  (* At most this many candidates are executed per site: each one is a full backend compile, and on
+     HIP the rocWMMA headers make that expensive. Reported on stderr so the bound is never silent. *)
+  let max_candidates = 4 in
+  let bf16_leg ~tag ~build =
+    let ref_t = build () in
+    let want =
+      let ctx, routine =
+        Context.compile
+          ~lowered_transform:(fun opt -> opt)
+          (Context.auto ())
+          (named (tag ^ "_bf16_serial") (Train.forward ref_t))
+          Ir.Indexing.Empty
+      in
+      Context.get_values (Context.run ctx routine) ref_t.Tensor.value
+    in
+    let cand = build () in
+    let fwd = named (tag ^ "_bf16_mma") (Train.forward cand) in
+    let captured = ref None in
+    let _ctx, _r =
+      Context.compile
+        ~lowered_transform:(fun opt ->
+          captured := Some opt;
+          opt)
+        (Context.auto ()) fwd Ir.Indexing.Empty
+    in
+    let opt = Option.value_exn ~here:[%here] !captured in
+    let seeds =
+      Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits:real_limits opt
+      |> List.filter ~f:(fun q -> q.Autotune.sk_mma)
+    in
+    if not has_uniform_bf16_tile then
+      Stdio.eprintf
+        "%s: %s advertises no uniform-bf16 mma tile — the tensor-core checks below are vacuous\n"
+        tag backend_name
+    else if List.length seeds > max_candidates then
+      Stdio.eprintf "%s: executing %d of %d bf16 mma seeds (compile cost)\n" tag max_candidates
+        (List.length seeds);
+    let n_ran = ref 0 and n_close = ref 0 and n_intrinsic = ref 0 in
+    List.iteri seeds ~f:(fun idx q ->
+        if idx < max_candidates then
+          match
+            let ctx, routine =
+              Context.compile
+                ~lowered_transform:(fun o -> Sched.apply (Autotune.sketch_schedule ~p:q o) o)
+                (Context.auto ()) fwd Ir.Indexing.Empty
+            in
+            Context.get_values (Context.run ctx routine) cand.Tensor.value
+          with
+          | got ->
+              Int.incr n_ran;
+              if Array.for_all2_exn got want ~f:close then Int.incr n_close;
+              if Option.value_map (read_generated (tag ^ "_bf16_mma")) ~default:false
+                   ~f:renders_intrinsic
+              then Int.incr n_intrinsic
+          | exception _ -> ());
+    p (tag ^ " bf16: the backend's advertised tile is seeded")
+      ((not has_uniform_bf16_tile) || not (List.is_empty seeds));
+    p (tag ^ " bf16: some candidate compiles and runs")
+      ((not has_uniform_bf16_tile) || !n_ran >= 1);
+    p (tag ^ " bf16: every running candidate matches the serial twin") (!n_ran = !n_close);
+    p (tag ^ " bf16: some running candidate renders the tensor-core intrinsic")
+      ((not has_uniform_bf16_tile) || !n_intrinsic >= 1)
+  in
+  let bf16_init ~l ~o ~f = NTDSL.init ~l ~prec:Ir.Ops.bfloat16 ~o ~f () in
+  (* Products are multiples of 1/8 and every partial sum is bounded by 16, so the serial twin is
+     exact and any deviation the tolerance admits is the tensor core's own. *)
+  let ss2 = 32 and kk2 = 32 and jj2 = 32 in
+  let xb =
+    bf16_init ~l:"xb" ~o:[ bt; ss2; kk2 ] ~f:(fun idcs ->
+        Float.of_int (((idcs.(0) * ss2 * kk2) + (idcs.(1) * kk2) + idcs.(2)) % 3) *. 0.25)
+  in
+  let wb =
+    bf16_init ~l:"wb" ~o:[ kk2; jj2 ] ~f:(fun idcs ->
+        (Float.of_int (((idcs.(0) * jj2) + idcs.(1)) % 5) -. 2.) *. 0.5)
+  in
+  bf16_leg ~tag:"batched_lb" ~build:(fun () ->
+      let%op t = xb +* "bsk;kj=>bsj" wb in
+      Tn.update_prec t.Tensor.value Ir.Ops.bfloat16;
+      t);
+  (* The interior-batch shape: [h] sits between the tile roles, so [lda]/[ldb]/[ldd] are all
+     [hh]-times the minor dim (64 here, against minor dims of 32). *)
+  let attb =
+    bf16_init ~l:"attb" ~o:[ bt; ss2; hh; kk2 ] ~f:(fun idcs ->
+        Float.of_int
+          (((idcs.(0) * ss2 * hh * kk2) + (idcs.(1) * hh * kk2) + (idcs.(2) * kk2) + idcs.(3)) % 3)
+        *. 0.25)
+  in
+  let vb =
+    bf16_init ~l:"vb" ~o:[ bt; kk2; hh; jj2 ] ~f:(fun idcs ->
+        (Float.of_int
+           (((idcs.(0) * kk2 * hh * jj2) + (idcs.(1) * hh * jj2) + (idcs.(2) * jj2) + idcs.(3)) % 5)
+        -. 2.)
+        *. 0.5)
+  in
+  bf16_leg ~tag:"batched_ib" ~build:(fun () ->
+      let%op t = attb +* "bihk;bkhj=>bihj" vb in
+      Tn.update_prec t.Tensor.value Ir.Ops.bfloat16;
+      t)
