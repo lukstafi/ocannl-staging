@@ -156,14 +156,41 @@ eliminate_common_subexpressions     (within-statement scalar CSE)
 hoist_cross_statement_cse           (cross-statement CSE; introduces Declare_local)
 ```
 
-`optimize` is a thin wrapper around `optimize_proc` that additionally invokes optional
-pretty-printing callbacks (`unoptim_ll_source` before optimization, `ll_source` after) so that
-backends and debug tooling can capture the `.ll` source at both stages.
+The pipeline is split at the analysis/decision boundary (gh-555 step 1): `analyze_proc` computes
+everything decision-independent (the structural facts, the lazily-materialized affine metrics, the
+written-bounds pinning) once per routine, and `specialize_proc` is the decision-dependent tail
+(`decide_placements` onward), cheap to replay per candidate over one shared analysis — each call
+record-copies the traced store so sibling candidates stay hermetic. `optimize` is a thin wrapper
+that additionally invokes optional pretty-printing callbacks (`unoptim_ll_source` before
+optimization, `ll_source` after) so that backends and debug tooling can capture the `.ll` source at
+both stages.
 
 The `optimize_ctx` record carries a `computations` table (a map from tensor node to its stored
 inlinable computations) **across** compilation calls, so that a tensor virtualized while compiling
 one routine can be inlined into a later routine that reads it. `optimize_proc` threads the incoming
 `optimize_ctx` through `virtual_llc` and returns it unchanged in the `optimized` result.
+
+### Inlining as a schedule decision (gh-555)
+
+In Halide's vocabulary virtualization is the inline / compute_root axis, and OCANNL treats it as a
+searchable, per-compilation-lineage decision vector rather than a fixed pre-pass:
+
+- The **Materialize** half of the vector is a pre-seeded `On_device` decision in the lineage's
+  placements (`Context.decide_materialized`).
+- The **Inline** half is `optimize_ctx.inline_preferences` (`Context.decide_inline`): nodes exempt
+  from the heuristic caps (`virtualize_max_visits`, `virtualize_max_inline_reduction`) — the caps
+  are priors of the *default* decision policy, not legality. Legality (`check_and_store_virtual`,
+  `inline_computation`, including the injectivity conditions that preserve reduction order — the
+  determinism contract) and the observability pessimizations (read-only, read-before-write) apply
+  regardless of the vector.
+- Each specialization reports its **decision surface** as `optimized.flip_candidates`: the nodes
+  the default policy decided, the flip a search can try, and the recompute-cost bound of the
+  virtual placement (reduction extent × per-cell read multiplicity — the affine metrics double as
+  the cost model's inputs).
+- The search is hierarchical: `Train.tune_placements` decides inlining coarsely first (the
+  placement A/B), then — with a `tune_inline_flips` budget — refines greedily per node from the
+  default-policy arm, tiling/scheduling within each candidate via the nested `Autotune.tune`. The
+  current heuristics with a zero budget reproduce the previous behavior exactly.
 
 ### 1. Tracing Phase (`trace_node_facts` + `decide_placements`)
 
