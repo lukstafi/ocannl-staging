@@ -238,6 +238,25 @@ let case_dead_loop () =
   p "dead loop: node is a routine input, not an output"
     (Set.mem inputs d && not (Set.mem outputs d))
 
+(* === Case 9b: a dead write supplies no coverage === The coverage-side companion of case 9: the
+   dead write is dropped from the metric views, so the fixed-position read is read-before-write and
+   the node is a routine input. *)
+let case_dead_non_traced () =
+  let d = mk "deadnt" and out = mk "dnto" in
+  materialize out;
+  let i = sym () and j = sym () in
+  let dead_write =
+    LL.For_loop { index = i; from_ = 0; to_ = -1; body = set i d (c 7.); axis = Serial }
+  in
+  let consume =
+    loop j (LL.Set { tn = out; idcs = [| iter j |]; llsc = LL.Get (d, [| Ir.Indexing.Fixed_idx 0 |]); debug = "" })
+  in
+  let o = optimize (seq dead_write consume) in
+  let traced = Base.Hashtbl.find_exn o.LL.traced_store d in
+  p "dead-write coverage: read_before_write set" traced.LL.read_before_write;
+  let (inputs, _outputs), _merge = LL.input_and_output_nodes o in
+  p "dead-write coverage: node is a routine input" (Set.mem inputs d)
+
 (* === Case 10: an If condition's read is not a read-modify-write self-read === The condition reads
    [a] at the same position the guarded body writes it, and shares the body's program path; the
    exemption must not fire (the read executes before the write), so [a] is read-before-write — a
@@ -268,5 +287,6 @@ let () =
   case_complex ();
   case_inloop_consumer ();
   case_dead_loop ();
+  case_dead_non_traced ();
   case_if_cond_read ();
   Stdio.printf "%!"

@@ -4187,6 +4187,17 @@ let statics_set_of static_indices =
    recorded. Statement subordination, not program-path matching: an [If] condition's read shares
    its path with the guarded body's write but executes before it, so it is never exempt. Shared by
    {!reads_covered_query} and {!read_multiplicity_query}. *)
+(* Inclusive value bounds of a static symbol, matching the runtime validation of static bindings
+   ([Indexing]): a symbol [used_as_extent] takes values in [0, r] (extents size buffers), while a
+   plain static is a strict index in [0, r) — universalizing a read over the impossible cell [r]
+   would spuriously decline coverage of fully-covered static-slice routines. *)
+let static_bounds (static_indices : Indexing.static_symbol list) s =
+  List.find_map static_indices ~f:(fun ss ->
+      if Indexing.equal_symbol ss.Indexing.static_symbol s then
+        Option.map ss.static_range ~f:(fun r ->
+            if ss.used_as_extent then (0, r) else (0, r - 1))
+      else None)
+
 let rmw_exempt ~statics_set (r : _ Affine.access) =
   virtualize_settings.inline_complex_computations
   && Option.exists r.Affine.a_stmt_write ~f:(fun w -> same_position ~statics_set w r.a_map)
@@ -4210,12 +4221,7 @@ let reads_covered_query (static_indices : Indexing.static_symbol list)
   let by_tn = Hashtbl.create (module Tn) in
   List.iter accs ~f:(fun a -> Hashtbl.add_multi by_tn ~key:a.Affine.a_tn ~data:a);
   let statics_set = statics_set_of static_indices in
-  let static_range s =
-    List.find_map static_indices ~f:(fun ss ->
-        if Indexing.equal_symbol ss.Indexing.static_symbol s then
-          Option.map ss.static_range ~f:(fun r -> (0, r))
-        else None)
-  in
+  let static_range = static_bounds static_indices in
   let exempt = rmw_exempt ~statics_set in
   fun tn ->
     match Hashtbl.find by_tn tn with
@@ -4249,12 +4255,7 @@ let reads_covered_query (static_indices : Indexing.static_symbol list)
 let read_multiplicity_query (static_indices : Indexing.static_symbol list)
     (accs : Tn.t Affine.access list) : Tn.t -> int =
   let statics_set = statics_set_of static_indices in
-  let static_range s =
-    List.find_map static_indices ~f:(fun ss ->
-        if Indexing.equal_symbol ss.Indexing.static_symbol s then
-          Option.map ss.static_range ~f:(fun r -> (0, r))
-        else None)
-  in
+  let static_range = static_bounds static_indices in
   let exempt = rmw_exempt ~statics_set in
   let reads_by_tn = Hashtbl.create (module Tn) in
   List.iter accs ~f:(fun a ->
