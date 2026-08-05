@@ -1,0 +1,15 @@
+# The "exhaustive config file" scenario of gh-ocannl-559: this file picks a profile AND
+# states some of that profile's keys explicitly. The explicit keys win over the profile
+# THIS file picked, but lose to a profile picked on the commandline or in the environment.
+suppress_welcome_message=true
+log_config_sourcing=false
+log_level=0
+# As in test/config/ocannl_config: don't delete files as tests might be running in parallel
+# deleting each-other's files. This executable writes none, but the startup cleanup complains
+# on stderr about the directory it does not find.
+clean_up_build_files_on_startup=false
+clean_up_log_files_on_startup=false
+profile=reproducible
+autotune_rounds=7
+cc_vector_bytes=64
+fp16_arithmetic=true

@@ -1,10 +1,26 @@
 open Base
 open Stdio
 
+(* The reference file ships with every setting COMMENTED OUT (gh-ocannl-559), so that copying it
+   wholesale to an `ocannl_config` states no settings. A commented-out setting is spelled `#key=…`
+   with no space after the `#`; prose comments (and the verbatim profile-payload blocks at the end
+   of the file) always use `# `, so the two are told apart mechanically. *)
+let uncomment line =
+  match String.chop_prefix line ~prefix:"#" with
+  | Some rest -> (
+      match String.lsplit2 rest ~on:'=' with
+      | Some (key, _)
+        when (not (String.is_empty key))
+             && String.for_all key ~f:(fun c ->
+                    Char.is_alphanum c || Char.equal '_' c || Char.equal '-' c) ->
+          rest
+      | _ -> line)
+  | None -> line
+
 let extract_keys filename =
   In_channel.read_lines filename
+  |> List.map ~f:(fun line -> uncomment (String.strip line))
   |> List.filter_map ~f:(fun line ->
-      let line = String.strip line in
       if
         String.is_empty line || String.is_prefix ~prefix:"#" line
         || String.is_prefix ~prefix:"~~" line
@@ -92,8 +108,63 @@ let () =
     fail
       (Printf.sprintf "known_config_keys has keys not in reference file: %s"
          (String.concat ~sep:", " @@ Set.to_list extra_in_registry));
-  if !ok then
+  (* 4. Profile payloads (gh-ocannl-559) are partial config files: every key they set must be a
+     known, documented setting -- a payload is not a place a new key can hide. *)
+  let payload_keys =
+    List.map Utils.profile_payloads ~f:(fun (name, text) ->
+        let keys =
+          Utils.parse_config_lines ~source:("profile " ^ name) (String.split_lines text)
+          |> List.map ~f:fst
+          |> Set.of_list (module String)
+        in
+        let unknown = Set.diff keys code_keys in
+        if not (Set.is_empty unknown) then
+          fail
+            (Printf.sprintf "profile %S sets keys missing from known_config_keys registry: %s" name
+               (String.concat ~sep:", " @@ Set.to_list unknown));
+        let undocumented = Set.diff keys file_keys in
+        if not (Set.is_empty undocumented) then
+          fail
+            (Printf.sprintf "profile %S sets keys missing from %s: %s" name reference_file
+               (String.concat ~sep:", " @@ Set.to_list undocumented));
+        (name, keys))
+  in
+  (* 5. The payload texts are reproduced in the reference file between BEGIN/END markers, each line
+     prefixed with "# ". Documentation of a value that can drift from the value is worse than no
+     documentation, so the copy is checked rather than trusted. *)
+  let reference_lines = In_channel.read_lines reference_file in
+  List.iter Utils.profile_payloads ~f:(fun (name, text) ->
+      let marker kind = Printf.sprintf "# --- %s PROFILE PAYLOAD %s ---" kind name in
+      let index_of m =
+        List.findi reference_lines ~f:(fun _ l -> String.equal (String.strip l) m)
+        |> Option.map ~f:fst
+      in
+      match (index_of (marker "BEGIN"), index_of (marker "END")) with
+      | Some b, Some e when e > b ->
+          let quoted =
+            List.sub reference_lines ~pos:(b + 1) ~len:(e - b - 1)
+            |> List.map ~f:(fun l ->
+                let l = Option.value (String.chop_prefix l ~prefix:"#") ~default:l in
+                Option.value (String.chop_prefix l ~prefix:" ") ~default:l)
+          in
+          let expected = String.split_lines text in
+          if not (List.equal String.equal quoted expected) then
+            fail
+              (Printf.sprintf
+                 "the %s payload quoted in %s differs from the embedded one in \
+                  arrayjit/lib/utils.ml"
+                 name reference_file)
+      | _ ->
+          fail
+            (Printf.sprintf "%s has no '%s' … '%s' block" reference_file (marker "BEGIN")
+               (marker "END")));
+  if !ok then (
     printf
       "OK: %d call-site keys, all in reference file and registry; registry and reference agree on \
        %d keys.\n"
-      (Set.length source_keys) (Set.length code_keys)
+      (Set.length source_keys) (Set.length code_keys);
+    printf "OK: %d profile payloads, documented and quoted verbatim: %s.\n"
+      (List.length payload_keys)
+      (String.concat ~sep:", "
+      @@ List.map payload_keys ~f:(fun (name, keys) ->
+             Printf.sprintf "%s (%d keys)" name (Set.length keys))))

@@ -272,4 +272,61 @@ let () =
   p "cache-hit report names the replayed winner" (not (String.is_empty r2.Autotune.best_label));
   p "cached schedule replays to correct values"
     (Array.for_all2_exn got2 expected_c ~f:approx
-    && Array.for_all2_exn got_mm2 mm_expected ~f:approx)
+    && Array.for_all2_exn got_mm2 mm_expected ~f:approx);
+
+  (* --- gh-ocannl-559: with the search off (config [autotune_search], which the [reproducible]
+     profile sets), nothing is timed. A committed cache entry still replays -- a pinned schedule is
+     deterministic, so a reproducible run can keep a tuned one -- and a miss compiles the untuned
+     default pipeline, which is what the caller would have gotten without calling [tune]. The cache
+     populated by the two calls above is the "committed" one. --- *)
+  let tune_no_search ~cache_dir () =
+    let ctx = Context.auto () in
+    let report = ref None in
+    let ctx, routine =
+      Autotune.tune ~search:false ~cache_dir
+        ~report:(fun r -> report := Some r)
+        ctx tune_comp Ir.Indexing.Empty
+    in
+    let ctx = Context.run ctx routine in
+    ( Option.value_exn ~here:[%here] !report,
+      Context.get_values ctx tc1.Tensor.value,
+      Context.get_values ctx tc2.Tensor.value )
+  in
+  let r3, got3, got_mm3 = tune_no_search ~cache_dir:"" () in
+  p "search off without a cache times nothing"
+    ((not r3.Autotune.cache_hit)
+    && r3.Autotune.candidates_timed = 0
+    && r3.Autotune.rounds_run = 0
+    && List.is_empty r3.Autotune.best_schedule
+    && String.equal r3.Autotune.best_label "search disabled");
+  p "search off without a cache returns the correct untuned routine"
+    (Array.for_all2_exn got3 expected_c ~f:approx
+    && Array.for_all2_exn got_mm3 mm_expected ~f:approx);
+  let r4, got4, got_mm4 = tune_no_search ~cache_dir () in
+  p "search off still replays a committed cache entry"
+    (r4.Autotune.cache_hit && r4.Autotune.candidates_timed = 0);
+  p "cache replay under search off gives correct values"
+    (Array.for_all2_exn got4 expected_c ~f:approx
+    && Array.for_all2_exn got_mm4 mm_expected ~f:approx);
+  (* Only a CHOSEN cache replays (Codex P2 on PR #291): the SAME directory is replayed or ignored
+     depending on whether someone asked for it. A search with no [cache_dir] populates the built-in
+     default directory; a search-less call that likewise names no directory must not pick that entry
+     up -- otherwise two reproducible runs would differ on whether an earlier local search happened
+     to leave one there -- while naming the same directory explicitly replays it. *)
+  let default_cache_dir = "autotune_cache" in
+  let ctx = Context.auto () in
+  let _ctx, _routine = Autotune.tune ~beam_width:2 ~rounds:1 ~repeats:1 ctx tune_comp Ir.Indexing.Empty in
+  let r5, _, _ = tune_no_search ~cache_dir:default_cache_dir () in
+  p "search off replays the default cache directory when asked for it" r5.Autotune.cache_hit;
+  let r6 = ref None in
+  let ctx = Context.auto () in
+  let ctx, routine =
+    Autotune.tune ~search:false ~report:(fun r -> r6 := Some r) ctx tune_comp Ir.Indexing.Empty
+  in
+  let ctx = Context.run ctx routine in
+  let got6 = Context.get_values ctx tc1.Tensor.value in
+  let r6 = Option.value_exn ~here:[%here] !r6 in
+  p "search off ignores the unchosen default cache directory"
+    ((not r6.Autotune.cache_hit) && String.equal r6.Autotune.best_label "search disabled");
+  p "the ignored-cache fallback is still a correct routine"
+    (Array.for_all2_exn got6 expected_c ~f:approx)

@@ -1,0 +1,195 @@
+; gh-ocannl-559: the same executable, resolved against four different pickers. The local
+; ocannl_config (not the shared test/config one -- the config search stops at the first file
+; walking up from the working directory) is deliberately "exhaustive": it picks a profile and
+; also states three settings explicitly.
+
+(executable
+ (name profile_precedence)
+ (modules profile_precedence)
+ (libraries base arrayjit.utils stdio))
+
+; An ambient profile variable would outrank this directory's config file and turn the file-picked
+; rules into env-picked ones, so every rule clears all four spellings OCANNL accepts (an empty
+; value counts as unset at every source) -- including the dashed ones, and including the lowercase
+; `ocannl_profile`, which `Utils.read_env_var` consults BEFORE `OCANNL_PROFILE` and which would
+; therefore beat the env-picked rule's own setting (Codex P2 on PR #291). For the other keys the
+; executable itself refuses to run when one is set: a clear failure rather than a rewritten golden.
+; That guard covers the bootstrap keys too (`no_config_file`, and the two that would put a welcome
+; message or the profile banner on stdout ahead of the table) -- it cannot prevent their effect,
+; those being read during Utils' initialization, but a rule that exits nonzero writes no golden.
+
+(rule
+ (target from_config_file.actual)
+ (deps ocannl_config)
+ (action
+  (setenv
+   ocannl_profile
+   ""
+   (setenv
+    OCANNL_PROFILE
+    ""
+    (setenv
+     ocannl-profile
+     ""
+     (setenv
+      OCANNL-PROFILE
+      ""
+      (with-stdout-to
+       %{target}
+       (run %{dep:profile_precedence.exe}))))))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff from_config_file.expected from_config_file.actual)))
+
+(rule
+ (target from_cmdline.actual)
+ (deps ocannl_config)
+ (action
+  (setenv
+   ocannl_profile
+   ""
+   (setenv
+    OCANNL_PROFILE
+    ""
+    (setenv
+     ocannl-profile
+     ""
+     (setenv
+      OCANNL-PROFILE
+      ""
+      (with-stdout-to
+       %{target}
+       (run %{dep:profile_precedence.exe} --ocannl_profile=performance))))))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff from_cmdline.expected from_cmdline.actual)))
+
+; The env-picked rule clears the three spellings that could preempt the one it sets.
+
+(rule
+ (target from_env.actual)
+ (deps ocannl_config)
+ (action
+  (setenv
+   ocannl_profile
+   ""
+   (setenv
+    ocannl-profile
+    ""
+    (setenv
+     OCANNL-PROFILE
+     ""
+     (setenv
+      OCANNL_PROFILE
+      performance
+      (with-stdout-to
+       %{target}
+       (run %{dep:profile_precedence.exe}))))))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff from_env.expected from_env.actual)))
+
+; OCANNL scans the host executable's argv, so a host application's own `--profile=prod` must not
+; be read as an OCANNL profile: only the `ocannl_`-qualified spellings pick one. Before that rule
+; this run died during module initialization with `unknown ocannl_profile prod`. The output is the
+; file-picked one, unchanged -- the flag reaches nothing.
+
+(rule
+ (target host_profile_flag.actual)
+ (deps ocannl_config)
+ (action
+  (setenv
+   ocannl_profile
+   ""
+   (setenv
+    OCANNL_PROFILE
+    ""
+    (setenv
+     ocannl-profile
+     ""
+     (setenv
+      OCANNL-PROFILE
+      ""
+      (with-stdout-to
+       %{target}
+       (run %{dep:profile_precedence.exe} --profile=prod))))))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff host_profile_flag.expected host_profile_flag.actual)))
+
+; A profile can never defeat a setting of equal or greater immediacy: the explicit
+; commandline key wins over the payload of the profile the commandline picked.
+
+(rule
+ (target explicit_beats_profile.actual)
+ (deps ocannl_config)
+ (action
+  (setenv
+   ocannl_profile
+   ""
+   (setenv
+    OCANNL_PROFILE
+    ""
+    (setenv
+     ocannl-profile
+     ""
+     (setenv
+      OCANNL-PROFILE
+      ""
+      (with-stdout-to
+       %{target}
+       (run
+        %{dep:profile_precedence.exe}
+        --ocannl_profile=performance
+        --ocannl_autotune_rounds=3))))))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff explicit_beats_profile.expected explicit_beats_profile.actual)))
+
+; An EMPTY value is unset at each level independently, so a launcher expanding
+; `--ocannl_profile=$PROFILE` with the variable unset must fall through to the environment and the
+; config file rather than disabling the profile they name. Here the empty flag falls through to
+; OCANNL_PROFILE, and the output is the env-picked one.
+
+(rule
+ (target empty_cmdline_falls_through.actual)
+ (deps ocannl_config)
+ (action
+  (setenv
+   ocannl_profile
+   ""
+   (setenv
+    ocannl-profile
+    ""
+    (setenv
+     OCANNL-PROFILE
+     ""
+     (setenv
+      OCANNL_PROFILE
+      performance
+      (with-stdout-to
+       %{target}
+       (run %{dep:profile_precedence.exe} --ocannl_profile=))))))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff
+   empty_cmdline_falls_through.expected
+   empty_cmdline_falls_through.actual)))

@@ -149,10 +149,17 @@ Key points:
 
 ## Configuration
 - Precedence is command-line `--ocannl_<key>`, environment `OCANNL_<KEY>`, then the nearest
-  `ocannl_config` in the current/ancestor directories.
-- `ocannl_config.reference` is authoritative. Adding a key requires three updates, enforced by
-  `test/operations/test_config_consistency`: document it there, register it in
+  `ocannl_config` in the current/ancestor directories. Each of those levels splits into two
+  sublevels: its explicit keys, then the payload of a `profile` picked at that level
+  (gh-ocannl-559) — so a specific key always beats an aggregate of equal immediacy, and
+  `--ocannl_profile=reproducible` still overrides an exhaustive config file.
+- `ocannl_config.reference` is authoritative, and ships with every setting COMMENTED OUT (`#key=…`,
+  no space; prose comments use `# `) so copying it states nothing. Adding a key requires three
+  updates, enforced by `test/operations/test_config_consistency`: document it there, register it in
   `Utils.known_config_keys`, and add a newly participating source file to the test's scan list.
+- The built-in profile payloads are embedded strings in `arrayjit/lib/utils.ml`, quoted verbatim at
+  the end of `ocannl_config.reference`; the same test checks the quote and that payload keys are
+  known and documented.
 - `dune test --force` does not reliably rerun inline expectations. For non-backend config changes,
   edit `test/config/ocannl_config`, clean, or touch the affected test/module.
 

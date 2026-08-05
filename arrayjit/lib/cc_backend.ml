@@ -227,7 +227,22 @@ let arch_flags =
   fun () ->
     match Utils.get_global_arg ~default:"auto" ~arg_name:"cc_backend_arch_flags" with
     | "auto" -> Lazy.force probed
+    (* The portable baseline, spelled as a word because a config source cannot carry an empty
+       value (an empty setting means "unset"), and the `reproducible` profile has to be able to
+       pin it. *)
+    | "none" -> ""
     | flags -> flags
+
+(* Floating-point contraction beyond what the codegen selects explicitly (it emits `fmaf` where it
+   wants an FMA): whether the compiler is free to fuse a*b+c on its own is compiler- and
+   target-discretionary, so a reproducible run pins it off. "auto" (the default) passes no flag,
+   leaving the compiler's own default -- which is what every OCANNL release before gh-ocannl-559
+   did. *)
+let fp_contract_flag () =
+  match String.lowercase (String.strip (Utils.get_global_arg ~default:"auto" ~arg_name:"cc_backend_fp_contract")) with
+  | "auto" -> None
+  | ("off" | "on" | "fast") as mode -> Some ("-ffp-contract=" ^ mode)
+  | other -> invalid_arg ("cc_backend_fp_contract: expected auto | off | on | fast, got " ^ other)
 
 let simd_flags =
   let probed =
@@ -252,6 +267,12 @@ let simd_flags =
   fun () ->
     match Utils.get_global_arg ~default:"auto" ~arg_name:"cc_backend_simd_flags" with
     | "auto" -> Lazy.force probed
+    (* No SIMD flags, spelled as a word for the same reason as [arch_flags]' "none": a config
+       source cannot carry an empty value. Whether the probe fires at all depends on what the
+       toolchain's default target already exposes, which is a per-machine fact, so a run that must
+       be machine-independent pins this rather than reasoning about which of the added flags could
+       have changed a result. *)
+    | "none" -> ""
     | flags -> flags
 
 (* Pool-backed Grid rendering (docs/proposals/gh-ocannl-164.md): eligible outermost [Grid] loops
@@ -463,6 +484,11 @@ let%track7_sexp c_compile_and_load ~f_path =
       Option.some_if (not (String.is_empty arch_flag)) arch_flag;
       Option.some_if (not (String.is_empty simd_flag)) simd_flag;
       fast_math_flag;
+      (* AFTER [-ffast-math], which itself sets contraction to fast: clang documents that the last
+         of the two wins, so the explicit knob has to come last or [cc_backend_fp_contract=off]
+         would silently do nothing in the one combination where it is load-bearing (Codex P2 on PR
+         #291). *)
+      fp_contract_flag ();
       parallel_flag;
     ]
     |> List.filter_opt |> String.concat ~sep:" "

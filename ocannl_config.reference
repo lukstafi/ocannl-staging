@@ -7,15 +7,29 @@
 # should be lowercase where case is irrelevant. The configuration is read from a few
 # sources, from highest priority:
 # 1. Commandline arguments.
+#    1a. The payload of a `profile` picked by a commandline argument.
 # 2. Environment variables.
+#    2a. The payload of a `profile` picked by an environment variable.
 # 3. `ocannl_config` files.
+#    3a. The payload of a `profile` picked by the `ocannl_config` file.
 # 4. Defaults hard-coded at use sites in the source code.
+#
+# Each source level splits into two sublevels because a profile is an aggregate setting:
+# it applies at the sublevel just below the explicit keys of whichever source picked it
+# (see `profile` below). So a specific key always beats a profile of equal immediacy
+# (`--ocannl_profile=reproducible --ocannl_autotune_rounds=3` gets the profile except for
+# that one key), while a profile named on the commandline still overrides an exhaustive
+# config file.
 #
 # Only one `ocannl_config` file is used per run, searched for in the current directory
 # and in ancestor directories. Unless `log_config_sourcing` is false, the source of the
 # `log_level` config is always printed, and the sources of other configs are printed
 # when the log level > 0.
-# The configuration values below are (one of) the defaults.
+#
+# Every setting below is COMMENTED OUT and its value is (one of) the defaults, so that
+# this file can be copied wholesale to an `ocannl_config` without thereby stating a
+# hundred explicit settings that were never chosen (which would, among other things,
+# leave a profile mostly inert). Uncomment the lines you mean.
 #
 # Repeating fields are disallowed. If the value is an empty string, the default value
 # is used (as if the config was not present).
@@ -23,50 +37,83 @@
 # Bootstrap configurations (read before the config file search begins):
 
 # If true, suppresses the "Welcome to OCANNL!" startup message.
-suppress_welcome_message=false
+#suppress_welcome_message=false
 
 # If true, disables reading any ocannl_config file; only commandline and environment
 # variable configuration is used.
-no_config_file=false
+#no_config_file=false
 
 # If true, prints where each configuration setting comes from (commandline, environment,
 # config file, or the hard-coded default): always for `log_level`, and for the remaining
 # settings when the log level > 0. Set to false to keep the output clean, e.g. in tests;
 # re-enable it (also for a single run, via `--ocannl_log_config_sourcing=true`) to debug
 # which configuration a run actually picks up.
-log_config_sourcing=true
+#log_config_sourcing=true
+
+# A goal-oriented preset bundle. Two are built in:
+#   reproducible -- deterministic, and identical across machines wherever reasonable
+#                   (cross-BACKEND reproducibility is out of scope).
+#   performance  -- the fastest configuration AT UNCHANGED SEMANTICS.
+# Unset (the default) means no profile: every setting resolves as it always has. Empty counts
+# as unset at each level independently, so `--ocannl_profile=` (a launcher expanding an unset
+# variable) falls through to `OCANNL_PROFILE` and to the config file rather than disabling the
+# profile they name.
+#
+# A profile's payload is literally a partial config file (the two verbatim texts are
+# reproduced at the end of this file); it sets only the keys where the two goals disagree,
+# and everything it does not mention keeps its ordinary resolution. The payload applies at
+# the sublevel just below the explicit keys of the source that PICKED the profile: a
+# profile picked by `--ocannl_profile=...` outranks explicit config-file keys, while
+# within one config file the explicit keys outrank a `profile=...` line of that same file.
+# With `log_config_sourcing`, each payload-derived value is reported with its provenance,
+# e.g. `Found false, in the profile "reproducible" picked via the commandline`.
+#
+# The bootstrap keys above (`suppress_welcome_message`, `no_config_file`,
+# `log_config_sourcing`) and `profile` itself are resolved before profiles are, so a
+# payload cannot set them.
+#
+# This is the one key whose commandline form must carry the `ocannl_` prefix:
+# `--ocannl_profile=...`, not `--profile=...`. OCANNL scans the host executable's whole
+# commandline, `--profile` is a common application option, and an unknown profile name is
+# fatal -- so claiming the prefix-free spelling would kill host programs that have their
+# own. The environment (`OCANNL_PROFILE`) and the config file are unaffected.
+#
+# Note the documented dune-caching trap: changing `OCANNL_PROFILE` does not retrigger
+# tests (only `OCANNL_BACKEND` is an explicit dune dependency), so pick profiles for a
+# test run in `test/config/ocannl_config` instead.
+#profile=
 
 # Configurations that are stored as `Utils.settings`:
 
 # The log level, for ppx_minidebug and with a few other uses in OCANNL.
-log_level=1
+#log_level=1
 
 # If `log_level` is at least 2 and this is true, the generated code will contain
 # printf statements, whose output is then (typically) integrated into ppx_minidebug logs.
-debug_log_from_routines=false
+#debug_log_from_routines=false
 
 # If true, various intermediate representation files for the compiled code are generated
 # (or not removed). Moreover, if log level is at least 2, the generated binaries will
 # contain debug symbols for debugging with `gdb`, `cuda-gdb` etc.
-output_debug_files_in_build_directory=false
+#output_debug_files_in_build_directory=false
 
 # If true, when printing Low_level.t values in human-readable syntax (.ll files),
 # tensor node names will include their precision annotations (e.g., `n3<single>` instead of `n3`).
 # This is useful for debugging precision-related issues in generated code.
-output_prec_in_ll_files=false
+#output_prec_in_ll_files=false
 
 # If given, the integer seed to initialize the randomness library with.
-fixed_state_for_init=
+#fixed_state_for_init=
 
 # For printing tensors, etc.
-print_decimals_precision=2
+#print_decimals_precision=2
 
 # Complains if a half-precision tensor node is a constant with absolute value exceeding this.
-check_half_prec_constants_cutoff=16384.0
+#check_half_prec_constants_cutoff=16384.0
 
 # The default variant of threefry4x32 PRNG to use. Options: "crypto" (20 rounds) or
 # "light" (2 rounds). Defaults to "light" for better performance.
-default_prng_variant=light
+#default_prng_variant=light
 
 # If true, use int64 for indexing arithmetic. If false (default), use int32 for indexing arithmetic
 # (signed since docs/proposals/signed-index-precision.md; unsigned precisions remain for data
@@ -74,11 +121,11 @@ default_prng_variant=light
 # Metal pool offset width (which stays unsigned: uint vs ulong). Set to true for models with
 # tensors/pools larger than 2^31 elements / 2^32 bytes; with the default, each tensor node's padded
 # element count must fit int32 (enforced with an error when the node's dimensions are resolved).
-large_models=false
+#large_models=false
 
 # Deprecated alias for large_models (its pre-gh-ocannl-344 name): read as a fallback only when
 # large_models is unset, so existing configs / CLI / OCANNL_BIG_MODELS keep working.
-big_models=false
+#big_models=false
 
 # Generated code files are placed in build_files/<prefix>/, and diagnostic / routine-debug
 # logs in log_files/<prefix>/. When unset (the default), the prefix is derived from the
@@ -86,39 +133,39 @@ big_models=false
 # (e.g. parallel dune tests) never collide on same-named kernels. Set to a non-empty value
 # to pick the subdirectory explicitly, or to the special value "." for the flat legacy
 # layout (files directly in build_files/ and log_files/).
-build_files_prefix=
+#build_files_prefix=
 
 # If true, the build_files/<prefix>/ subdirectory of this process (see build_files_prefix)
 # is deleted on startup; the whole build_files/ directory when the prefix is ".".
-clean_up_build_files_on_startup=true
+#clean_up_build_files_on_startup=true
 
 # If true, the log_files/<prefix>/ subdirectory of this process (see build_files_prefix)
 # is deleted on startup; the whole log_files/ directory when the prefix is ".".
-clean_up_log_files_on_startup=true
+#clean_up_log_files_on_startup=true
 
 # Other configurations:
 
 # The default backend for computations, if `Backends.fresh_backend` isn't passed `backend_name`.
 # Available: cc, multidev_cc, cuda, hip, metal.
-backend=cc
+#backend=cc
 
 # The number of devices the multidev_cc backend exposes (each is a worker domain with its own
 # FIFO queue, for debugging multi-device parallel workflows on CPU); 0 means the domain count
 # recommended for this machine. Fixed at first use of the backend.
-multidev_num_devices=0
+#multidev_num_devices=0
 
 # If true, on GPU backends (cuda, hip, metal) kernels compiled without an explicit `lowered_transform`
 # get the default GPU schedule (docs/proposals/schedule-ir-optops.md §6): parallelizable loops are
 # annotated / split into Grid x Workgroup pairs when a conservative analysis proves the kernel
 # race-free under the annotation; otherwise the kernel runs single-threaded as before. Disabled
 # automatically while `debug_log_from_routines` is active (to keep kernel logs serial).
-automatic_gpu_schedule=true
+#automatic_gpu_schedule=true
 
 # The workgroup (threadgroup, block) size the default GPU schedule targets: single parallel loops
 # are split by this factor; a second parallelizable loop is used as the Workgroup axis directly
 # when its extent fits. The configured value is a target: the annotator clamps it to the backend's
 # max-threads-per-workgroup device limit (minimum across devices on multi-device backends).
-gpu_schedule_block_size=256
+#gpu_schedule_block_size=256
 
 # Kernels whose largest parallelizable loop nest has fewer than this many parallel iterations are
 # left unscheduled by the default GPU schedule. The default is low (64): a kernel launches either
@@ -126,18 +173,18 @@ gpu_schedule_block_size=256
 # of magnitude slower than a CPU core). Sub-simdgroup-scale kernels stay serial so that tiny
 # programs' segments coalesce back to a single kernel with unchanged placements. Raise this to
 # keep more kernels serial, e.g. to make their generated code easier to read.
-gpu_schedule_min_parallel=64
+#gpu_schedule_min_parallel=64
 
 # If true, on CPU backends (cc, multidev_cc) kernels compiled without an explicit
 # `lowered_transform` get the default CPU schedule: the same conservative analysis as the GPU
 # schedule, retyping each nest's outermost parallelizable loop to Grid, which the C backend
 # renders as chunked parallel loops on a native thread pool (see `cc_parallel_grid`). Disabled
 # automatically while `debug_log_from_routines` is active.
-automatic_cpu_schedule=true
+#automatic_cpu_schedule=true
 
 # Kernels whose largest parallelizable loop nest has fewer than this many parallel iterations are
 # left unscheduled by the default CPU schedule (task fan-out overhead would dominate).
-cpu_schedule_min_parallel=16384
+#cpu_schedule_min_parallel=16384
 
 # If true (and the automatic schedule for the backend is active), routines are split into multiple
 # kernels at cross-workgroup dependency edges — sibling top-level statements whose
@@ -148,12 +195,12 @@ cpu_schedule_min_parallel=16384
 # segment is scheduled on its own launch geometry. Adjacent segments that end up serial are coalesced, so an all-serial
 # routine still compiles to a single kernel. If false, such routines compile to one kernel and run
 # serially whenever the analysis bails, as before.
-schedule_fission=true
+#schedule_fission=true
 
 # If true, backend compilation logs one stderr line per compiled kernel/segment with its launch
 # grid/block dimensions and statement count — for diffing what two compiles of nominally
 # identical code actually emit. Debugging aid; independent of the ppx_minidebug log levels.
-schedule_log_launches=false
+#schedule_log_launches=false
 
 # Liveness-based buffer aliasing (the memory planner, gh-ocannl-489). If true, a routine's
 # working (non-constant, freshly allocated) tensor-node buffers are laid out in one arena where
@@ -168,12 +215,12 @@ schedule_log_launches=false
 # whole-node zeroing to just before the node's first update (values unchanged), so the gradients
 # zeroed up-front by Train.grad_update get liveness-disjoint spans across the backprop chain
 # instead of all starting at the zero-grads block.
-buffer_aliasing=false
+#buffer_aliasing=false
 
 # If true, linking a liveness-planned routine logs one stderr line with the working pool's arena
 # size vs. the dedicated (bump-packed) size and how many nodes were liveness-planned — the
 # footprint report accompanying buffer_aliasing. Debugging aid, schedule_log_launches-style.
-log_buffer_aliasing=false
+#log_buffer_aliasing=false
 
 # If true, code generation logs one stderr line per declined rendering, naming the kernel, the
 # construct, and the rule that failed: a Grid loop that fails pool-parallel eligibility (an
@@ -183,14 +230,14 @@ log_buffer_aliasing=false
 # operand address spaces). Declines are silent by design — the fallback is correct — but
 # indistinguishable from the intended rendering in timings; this is the "why did my schedule
 # render serial/scalar" switch for hand schedules and autotune runs.
-schedule_log_declines=false
+#schedule_log_declines=false
 
 # gh-494: run the legacy procedural schedule-legality analyses alongside the affine conflict
 # queries (arrayjit/lib/affine.ml) that replaced them, and compare. A query stricter than the
 # procedural answer raises (a query precision regression, or a latent unsoundness of the procedural
 # rule); a query more permissive than the procedural answer is the expected precision gain, logged
 # to stderr. A debugging/soak switch: off by default, no effect on behavior beyond the comparison.
-legality_crosscheck=false
+#legality_crosscheck=false
 
 # How the C backend renders eligible outermost Grid loops (pool-backed Grid rendering,
 # docs/proposals/gh-ocannl-164.md): "dispatch" uses libdispatch's dispatch_apply (macOS),
@@ -200,11 +247,11 @@ legality_crosscheck=false
 # Applies to explicitly annotated (schedule-transformed) kernels as well as the automatic
 # schedule; results are bitwise identical to serial execution (grid iterations write disjoint
 # elements).
-cc_parallel_grid=auto
+#cc_parallel_grid=auto
 
 # Target chunk count for parallel Grid rendering; the actual count is capped by the loop extent.
 # 0 (default) means automatic: 4 x the recommended domain count (core count).
-cc_parallel_chunks=0
+#cc_parallel_chunks=0
 
 # Byte cap on the combined footprint of the per-chunk privatized tiles of one pool-parallel Grid
 # loop (block-scope arrays living on the pool workers' stacks; see the privatization rule in
@@ -214,7 +261,7 @@ cc_parallel_chunks=0
 # larger (e.g. under OMP_STACKSIZE with the OpenMP rendering) — for instance to let a
 # grid-outermost packed GEMM re-pack a whole B~ panel per chunk. Values <= 0 fall back to the
 # default.
-cc_grid_private_bytes_cap=262144
+#cc_grid_private_bytes_cap=262144
 
 # Vector register width in bytes for explicit SIMD rendering of Vectorized-typed loops in the C
 # backends (GCC/Clang vector extensions): eligible loop bodies emit vector loads/arithmetic/stores
@@ -228,50 +275,65 @@ cc_grid_private_bytes_cap=262144
 # (non-elementwise, non-contiguous, cross-lane flow) keep the pragma rendering; ineligible
 # ACCUMULATING bodies fall back to a plain serial loop instead (the pragmas would assert
 # iteration independence).
-cc_vector_bytes=-1
+#cc_vector_bytes=-1
+
+# Whether `Autotune.tune` searches at all. With false, no candidate is ever compiled or timed,
+# and a cache miss compiles the untuned default pipeline, exactly as if `Autotune.tune` had not
+# been called. Crowning a schedule by measurement is the largest cross-machine determinism leak
+# (schedule identity pins numerics), which is why the `reproducible` profile turns it off.
+# A committed schedule cache still replays -- a pinned schedule is deterministic -- but only from
+# a CHOSEN autotune_cache_dir: one passed to `Autotune.tune` or set at some config source. With
+# the search off the built-in default directory counts as no cache, so a run cannot silently pin
+# itself to whatever an earlier local search left in ./autotune_cache. (With the search on the
+# default cache behaves as it always has -- a search that misses rewrites it.)
+#autotune_search=true
 
 # The beam width of `Autotune.tune`'s empirical schedule search: how many of the fastest
 # candidates each round expands with further schedule ops.
-autotune_beam_width=2
+#autotune_beam_width=2
 
 # The maximum number of beam-expansion rounds beyond the seed candidates (the serial baseline and
 # the default-annotator block-size sweep). The search also stops when a round improves the best
 # time by less than 1%.
-autotune_rounds=2
+#autotune_rounds=2
 
 # Timed runs per tuning candidate (after one warmup run); the minimum is kept.
-autotune_repeats=3
+#autotune_repeats=3
 
 # Directory of the autotuner's schedule disk cache, keyed by the canonical digest of the
 # optimized code and the backend name. Relative paths resolve against the working directory.
 # An empty value disables the cache (every `Autotune.tune` call searches afresh).
-autotune_cache_dir=autotune_cache
+#autotune_cache_dir=autotune_cache
 
 # Candidate-volume cap on `Autotune.tune`'s split-reduce seed family (gh-ocannl-484 task 3): the
 # top so-many detected reduction-dominated sites, ranked by estimated segment cost (the
 # accumulation's trip count), are seeded with a few `num_blocks` values each. Sites the cap
 # evicts are recorded in the report's decline census rather than dropped silently
 # (gh-ocannl-541). 0 disables the family.
-autotune_split_reduce_max_sites=8
+#autotune_split_reduce_max_sites=8
 
 # If true, `Autotune.tune` logs each candidate to stderr: its spec, whether it failed (with the
 # error message), deduplicated against an already-seen post-schedule digest, or was timed (and
 # its time), plus the cache-hit, winner-replay and fallback outcomes. For debugging search
 # quality; independent of the ppx_minidebug log levels.
-autotune_log=false
+#autotune_log=false
 
 # gh-555: budget for the greedy per-node inlining refinement of `Train.tune_placements` — after
 # the placement A/B, try flipping up to this many of the winning arm's most expensive inlining
 # decisions (materialize a policy-virtual node / inline a cap-materialized one), each accepted
 # flip becoming the base for the next. Every tried flip costs a full `Autotune.tune` search like
-# an arm; 0 (the default) keeps the plain A/B behavior.
-tune_inline_flips=0
+# an arm; 0 (the default) keeps the plain A/B behavior. A flip is accepted on a measured
+# improvement, so the refinement is a determinism leak of the same kind as the schedule search --
+# and one that is not numerics-neutral, since a materialized node rounds to its storage precision
+# where an inlined one does not. The `reproducible` profile pins it at 0; `performance` leaves it
+# alone, its cost being a full search per candidate.
+#tune_inline_flips=0
 
 # If true, an exception crossing a candidate transform/codegen/compile/link boundary is fatal unless
 # a narrow compiler seam or the backend classifies it. If false, unattributed compile-side failures
 # of tuner/advisory/cache work are temporarily contained as `Unclassified` declines. Launch and sync
 # failures remain fatal unless classified, and public user schedules retain their exception behavior.
-strict_failure_classification=true
+#strict_failure_classification=true
 
 # The analytic-cost-model pre-filter of `Autotune.tune`'s sketch seeding (gh-ocannl-491): per
 # candidate family (the whole-routine sketches; each fission segment's sketches), candidates are
@@ -281,7 +343,7 @@ strict_failure_classification=true
 # dropped, only measured, so the model never overrides (or precludes) a measured result and the
 # outcome is independent of enumeration order. Presets, saved schedules and the serial baseline
 # are never pruned.
-autotune_keep_fraction=1
+#autotune_keep_fraction=1
 
 # When non-empty, `Autotune.tune` appends one tab-separated calibration row per timed candidate
 # to this file: backend, digest tag, candidate label, measured ms, model-roofline ms (empty when
@@ -292,7 +354,7 @@ autotune_keep_fraction=1
 # envelope constants (see model_peak_flops).
 # Relative paths resolve against the working directory. With autotune_log=true the same
 # calibration lines also go to stderr, human-readable.
-autotune_calibration_file=
+#autotune_calibration_file=
 
 # If true, untuned compiles issued by the recipes (`Train.to_routine`, `Train.run_once` and its
 # wrappers, the benchmark runners' untuned arms) pick the default schedule with the analytic
@@ -305,18 +367,18 @@ autotune_calibration_file=
 # recompiled with the default pipeline instead of failing the compile. Candidates whose
 # scheduled form fails that same check are excluded from the ranking, so the model chooses
 # among schedules that can actually be built.
-model_default_schedule=false
+#model_default_schedule=false
 
 # Overrides the backend's advisory peak arithmetic throughput, in FLOP/s (single precision, FMA
 # counted as two operations), used as the compute leg of the analytic cost model's roofline
 # envelope. Calibrated per-machine values (fit from autotune_calibration_file data) beat the
 # backends' class-level constants; unset/empty uses the backend's value (the C backends provide
 # none, so scoring on them requires setting this and/or model_peak_memory_bandwidth).
-model_peak_flops=
+#model_peak_flops=
 
 # Overrides the backend's advisory peak main-memory bandwidth, in bytes/s — the memory leg of
 # the roofline envelope. Same contract as model_peak_flops.
-model_peak_memory_bandwidth=
+#model_peak_memory_bandwidth=
 
 # If true, stdout capturing is disabled, so some logs meant for the ppx_minidebug log files
 # (in particular CUDA logs) remain on the stdout.
@@ -324,17 +386,17 @@ model_peak_memory_bandwidth=
 # NOTE: current implementation of stdout capture loses information on channel
 # buffering overflows, so it is important to verify with this setting if one gets
 # sufficient information in the logs files.
-never_capture_stdout=false
+#never_capture_stdout=false
 
 # If `false`, debug logs from routines are re-logged via the ppx_minidebug framework.
 # If `true`, the logs are in stream-specific files. WARNING: files are appended to, not overwritten.
-debug_log_to_stream_files=false
+#debug_log_to_stream_files=false
 
 # If set and relevant, it's the `CU_LIMIT_PRINTF_FIFO_SIZE` CUDA configuration.
-cuda_printf_fifo_size=
+#cuda_printf_fifo_size=
 
 # If set and relevant, it's the `hipLimitPrintfFifoSize` HIP configuration.
-hip_printf_fifo_size=
+#hip_printf_fifo_size=
 
 # If `true` (the default), the HIP backend checks a freshly linked kernel's private (scratch)
 # segment size against what the device can back at full occupancy, and declines an over-budget
@@ -343,31 +405,43 @@ hip_printf_fifo_size=
 # which takes down unrelated work on the stream (gh-ocannl-533). Set to `false` on a device where
 # the budget model is wrong -- it was calibrated on gfx1151/ROCm 7.14 -- if valid kernels are
 # being rejected.
-hip_scratch_validation=true
+#hip_scratch_validation=true
 
 # The `-O` argument to the compiler executable for the `cc` and `multidev_cc` backends.
-cc_backend_optimization_level=3
+#cc_backend_optimization_level=3
 
 # The `cc` and `multidev_cc` backends compiler executable name.
 # By default, `ocamlc -config` field `c_compiler` is used.
-cc_backend_compiler_command=
+#cc_backend_compiler_command=
 
 # Additional architecture-specific flags for the CC backend compiler invocation.
 # The default "auto" targets the host CPU with the spelling that architecture uses, probed once
 # per process: `-mcpu=native` on ARM, `-march=native` on x86, nothing if the compiler rejects it.
 # The distinction matters -- Apple clang accepts `-march=native` on arm64 and DOWNGRADES the
 # target with it, losing __ARM_FEATURE_FP16_VECTOR_ARITHMETIC among others, while on x86 `-mcpu=`
-# is an alias for `-mtune=` and would not select the ISA at all. Any other value is passed through
-# verbatim (`-march=native` restores the pre-gh-517 behavior); pass an empty value for
-# portability/cross-compilation.
-cc_backend_arch_flags=auto
+# is an alias for `-mtune=` and would not select the ISA at all. The value "none" passes no
+# architecture flag at all -- the portable baseline, spelled as a word because a config source
+# cannot carry an empty value ("" means unset), which is how the `reproducible` profile pins it.
+# Any other value is passed through verbatim (`-march=native` restores the pre-gh-517 behavior).
+#cc_backend_arch_flags=auto
+
+# Floating-point contraction in the CC backend's compiles, beyond the explicit `fmaf` selections
+# the code generator makes: "auto" (the default) passes no flag and leaves the compiler's own
+# default, "off" / "on" / "fast" pass `-ffp-contract=<value>`. Whether the compiler is free to
+# fuse `a*b+c` into a single rounding differs across compilers and targets, which is why the
+# `reproducible` profile pins it off; the results change either way, so this is a deliberate
+# numerics choice, not an optimization level.
+#cc_backend_fp_contract=auto
 
 # Explicit SIMD flags appended to the CC backend compiler invocation (gh-ocannl-164).
 # The default "auto" probes once per process: if the target selected by cc_backend_arch_flags
 # already has AVX2 and FMA, `-mavx2 -mfma -ftree-vectorize` (or the subset the compiler accepts)
 # is appended; otherwise (non-AVX2 x86, ARM) nothing is, so generated code never requires an ISA
-# beyond the configured target. Any other value is passed through verbatim; empty disables.
-cc_backend_simd_flags=auto
+# beyond the configured target. The value "none" appends nothing at all (whether the probe fires
+# is a per-machine fact, so the `reproducible` profile pins this too); like the "none" of
+# cc_backend_arch_flags it is spelled as a word because an empty value means "unset". Any other
+# value is passed through verbatim.
+#cc_backend_simd_flags=auto
 
 # If true (the default), the results of the CC backend's toolchain probes -- the compiler command
 # from `ocamlc -config`, cc_backend_simd_flags=auto, cc_parallel_grid=auto -- are memoized in files
@@ -376,132 +450,132 @@ cc_backend_simd_flags=auto
 # `dune build` of the test suite, most visibly on Windows). The memo is keyed by
 # cc_backend_compiler_command, cc_backend_arch_flags and PATH, so an opam switch or toolchain change
 # re-probes; set to false to probe in-process every time.
-cc_backend_probe_cache=true
+#cc_backend_probe_cache=true
 
 # If true, enables `-ffast-math` for the CC backend. This may change numerical behavior.
-cc_backend_fast_math=false
+#cc_backend_fast_math=false
 
 # If true, compiled dynamic libraries (.dll/.so files) for the CC backend are placed 
 # in the build_files directory using the source file path. If false, temporary files
 # are used for the dynamic libraries (default behavior).
-output_dlls_in_build_directory=false
+#output_dlls_in_build_directory=false
 
 # Per-tensor-node cutoff in bytes for considering off-stack allocation, opt-in for backends.
 # Decrease it if you see crashes like `bus error`. Values smaller-or-equal 0 mean "no limits".
 # Tensors exceeding this size will be allocated on the device's global memory.
-stack_threshold_in_bytes=16384
+#stack_threshold_in_bytes=16384
 
 # Only tensor nodes with up to this many visits per array cell (in a dedicated interpreter)
 # can be inlined. Values worth considering: 0 (disables inlining) to 3.
-virtualize_max_visits=1
+#virtualize_max_visits=1
 
 # Recompute-cost cap for inlining: a tensor node whose computation contains reduction loops
 # (loops enclosing a setter without appearing in its indices) with a total trip-count product
 # exceeding this value is never virtualized, because inlining would replay the reduction at
 # every read site (multiplying through chains of virtual consumers). Negative values disable
 # the cap.
-virtualize_max_inline_reduction=16
+#virtualize_max_inline_reduction=16
 
 # If `true`, tensor nodes will by default not be hosted.
-enable_device_only=true
+#enable_device_only=true
 
 # If true, scalar constant expressions will always be inlined.
-inline_scalar_constexprs=true
+#inline_scalar_constexprs=true
 
 # If true, if the tensor node is built from either single getters, or index embeddings and
 # scalar constant expressions, regardless of accesses, it will be inlined.
-inline_simple_computations=true
+#inline_simple_computations=true
 
 # If true, virtualize_max_visits only counts accesses that are not used for assignment of
 # the same cell (typically accumulation). Otherwise, all accesses are counted, so computations
 # that reduce an axis will rarely be inlined.
-inline_complex_computations=true
+#inline_complex_computations=true
 
 # Low-level-code identifier syntax. Options: heuristic, name_and_label, name_only.
-ll_ident_style=heuristic
+#ll_ident_style=heuristic
 
 # Computation DSL identifier syntax. Options: heuristic, name_and_label, name_only.
-cd_ident_style=heuristic
+#cd_ident_style=heuristic
 
 # For ppx_minidebug non-flushing static backends, when non-empty, enables snapshotting of ongoing
 # logging into a file, with the given frequency.
-snapshot_every_sec=
+#snapshot_every_sec=
 
 # Whether ppx_minidebug entries should be tagged by time information.
 # Options: not_tagged, clock, elapsed (relative to start of the program).
-time_tagged=elapsed
+#time_tagged=elapsed
 
 # Whether ppx_minidebug should print the time span of each entry, and in what units.
 # Options: not_reported, seconds, milliseconds, microseconds, nanoseconds.
-elapsed_times=not_reported
+#elapsed_times=not_reported
 
 # For ppx_minidebug, how file locations should be presented. Options:
 # no_location, file_only, beg_line, beg_pos, range_line, range_pos.
-location_format=beg_pos
+#location_format=beg_pos
 
 # The ppx_minidebug logging backend (i.e. format). Options: db, text, html, markdown, flushing.
 # The db backend requires a rendering client from ppx_minidebug, the other backends
 # generate static (rendered) artifacts.
-debug_backend=db
+#debug_backend=db
 
 # For ppx_minidebug: a prefix for file positions relative to the project root.
 # A more elaborate example:
 # hyperlink_prefix=vscode://file//wsl.localhost/ubuntu-24.04/home/lukstafi/ocannl/
-hyperlink_prefix=./
+#hyperlink_prefix=./
 
 # For ppx_minidebug: whether to print IDs for log entries.
-logs_print_scope_ids=false
+#logs_print_scope_ids=false
 
 # For ppx_minidebug.
-logs_verbose_scope_ids=false
+#logs_verbose_scope_ids=false
 
 # For ppx_minidebug, whether logging from the main domain, `Domain.is_main ()`,
 # should be directed to stdout rather than to a file.
-log_main_domain_to_stdout=false
+#log_main_domain_to_stdout=false
 
 # For ppx_minidebug Table of Contents.
-toc_entry_minimal_depth=
-toc_entry_minimal_size=
+#toc_entry_minimal_depth=
+#toc_entry_minimal_size=
 # The span is expressed in units: ns, us or ms.
-toc_entry_minimal_span=
+#toc_entry_minimal_span=
 
 # For ppx_minidebug: `|`-separated list of terms to highlight in the logs.
-debug_highlights=
+#debug_highlights=
 
 # For ppx_minidebug: a pcre syntax regular expression to highlight in the logs.
-debug_highlight_pcre=
+#debug_highlight_pcre=
 
 # For ppx_minidebug: if provided, enables highlighting differences between the current run
 # and a previous run loaded from `.raw` files derived using the given prefix.
-prev_run_prefix=
+#prev_run_prefix=
 
 # For ppx_minidebug: a pcre syntax regular expression pattern that will be removed from messages
 # before comparison when highlighting differences between runs, allowing certain differences to be ignored.
-diff_ignore_pattern_pcre=
+#diff_ignore_pattern_pcre=
 
 # If not empty, should be a number giving the depth till which non-highlighted ppx_minidebug
 # logs are pruned. Useful when enabling logging (e.g. shape inference) for non-toy examples.
-debug_log_prune_upto=
+#debug_log_prune_upto=
 
 # For ppx_minidebug: (minimal) width of the search band for the minimal edit distance algorithm.
-diff_max_distance_factor=
+#diff_max_distance_factor=
 
 # For ppx_minidebug: semicolon-separated list of comma-separated entry IDs from
 # the previous and current run, that should be considered the same by the diffing algorithm.
-debug_scope_id_pairs=
+#debug_scope_id_pairs=
 
 # For ppx_minidebug: for generating file names. If empty, all logging will be done to stdout,
 # regardless of the value of `log_main_domain_to_stdout`.
-log_file_stem=debug
+#log_file_stem=debug
 
 # For ppx_minidebug: If given a number, sets the `truncate_children` parameter: only this number
 # of the most recent children of each log entry are held.`
-debug_log_truncate_children=
+#debug_log_truncate_children=
 
 # It is useful for testing to have outputs more uniform across backends even if that criples
 # some backends. Currently, this setting only affects logging from routines to accomodate Metal's
 # shortcoming.
-prefer_backend_uniformity=false
+#prefer_backend_uniformity=false
 
 # On the CUDA and HIP backends, run a fissioned routine's segment batch by stream-capturing the
 # per-segment kernel launches into a graph (cuGraph/hipGraph) and replaying it as one API call
@@ -509,18 +583,18 @@ prefer_backend_uniformity=false
 # per-launch overhead, which dominates small-model training steps. Automatically bypassed when
 # debug_log_from_routines is on, and per-routine if the driver rejects capture. Metal's
 # counterpart (fused command-buffer encoding) is always on; the cc backend is unaffected.
-gpu_graph_capture=true
+#gpu_graph_capture=true
 
 # The initial value for the default precisions for tensors. The default precisions for values and
 # gradients can be changed separately via the `Tensor` API.
-default_prec=single
+#default_prec=single
 
 # Numerics policy: allow tensor-core matmuls over uniform-f32 operands to compute in tf32
 # (f32's exponent range, 10-bit mantissa, f32 accumulation) on backends with a tf32 tile shape
 # (CUDA sm_80+). Off by default because enabling it silently changes numerics (PyTorch-style
 # opt-in). Metal (genuine f32 simdgroup tiles) and HIP (no tf32-like shape) are unaffected.
 # Programmatic override: `Ir.Numerics.set_policy`.
-tf32_matmuls=false
+#tf32_matmuls=false
 
 # Numerics policy: on backends without native 16-bit arithmetic (the CPU backends), run the
 # arithmetic over narrow-float storage (bfloat16, half, fp8) in f32 -- widen once at each load,
@@ -530,7 +604,7 @@ tf32_matmuls=false
 # renderings reachable for narrow-storage kernels. Set to false to recover per-operator rounding.
 # GPU backends have native 16-bit types and are unaffected either way.
 # Programmatic override: `Ir.Numerics.set_policy`.
-narrow_compute_f32=true
+#narrow_compute_f32=true
 
 # Numerics policy: on CPU targets with native 16-bit arithmetic (ARMv8.2-FP16, AVX512-FP16),
 # compute fp16 in fp16 instead of widening to f32 -- the lane count doubles against f32, at
@@ -538,26 +612,97 @@ narrow_compute_f32=true
 # narrow_compute_f32 this trades accuracy for throughput. Ignored on targets whose fp16
 # arithmetic is promoted to float (see cc_fp16_arithmetic), where it would cost accuracy for no
 # speed, and on the GPU backends. Programmatic override: `Ir.Numerics.set_policy`.
-fp16_arithmetic=false
+#fp16_arithmetic=false
 
 # Whether the cc backend's target has native _Float16 arithmetic. "auto" (the default) probes the
 # configured compiler once per process: "none" if _Float16 is missing, "native" if the target
 # defines __ARM_FEATURE_FP16_VECTOR_ARITHMETIC or __AVX512FP16__, "promoted" if the type exists
 # but the compiler implements its arithmetic by widening to float. Set explicitly to override the
 # probe (e.g. to measure the promoted path on a native target).
-cc_fp16_arithmetic=auto
+#cc_fp16_arithmetic=auto
 
 # Limit on the allowed size of unrolled constant tensor nodes
 # (where the initialization code sets the values).
-limit_constant_fill_size=16
+#limit_constant_fill_size=16
 
 # The timeout for the CC backend to wait for the compilation files to appear, in seconds.
 # This is the wait after the compiler command exits (doesn't include the compilation time).
-cc_backend_post_compile_timeout=10.0
+#cc_backend_post_compile_timeout=10.0
 
 # If true, the CC backend will fail if the codesign of the compiled dynamic library fails.
-cc_backend_verify_codesign=false
+#cc_backend_verify_codesign=false
 
 # The maximal number of entries for the provenance of constraints, as for example reported
 # in shape error exceptions.
-max_shape_error_origins=20
+#max_shape_error_origins=20
+
+# ---------------------------------------------------------------------------
+# The built-in profile payloads
+#
+# Reproduced from the embedded string constants in `arrayjit/lib/utils.ml` (the
+# `test_config_consistency` test fails if the two drift apart). Each line below is a line
+# of the payload with a `# ` prefix added, so that copying this file states no settings;
+# the payload itself is an ordinary partial `ocannl_config`.
+
+# --- BEGIN PROFILE PAYLOAD reproducible ---
+# # Deterministic, and identical across machines wherever reasonable. Cross-BACKEND
+# # reproducibility is explicitly out of scope: this profile does not try to make the cc
+# # and the cuda backends agree bit for bit.
+#
+# # The largest cross-machine determinism leak: schedule identity pins numerics (loop order,
+# # split reductions, tensorization), so two machines crowning two schedules compute two
+# # results. Replaying stays allowed -- a pinned schedule is deterministic -- but only from a
+# # CHOSEN autotune_cache_dir: with the search off the built-in default is treated as no cache,
+# # so an earlier local search's leftovers in ./autotune_cache cannot silently pin a schedule.
+# autotune_search=false
+# # The analytic cost model picks schedules from per-backend (and, once calibrated, per-machine)
+# # envelope constants -- the same leak without the timing runs.
+# model_default_schedule=false
+# # The greedy inlining refinement of Train.tune_placements accepts a flip when the timing
+# # improves, so which nodes end up inlined is machine-dependent -- and inlining is not
+# # numerics-neutral where storage precision is narrower than compute precision: a materialized
+# # node rounds to its storage precision, an inlined one does not.
+# tune_inline_flips=0
+#
+# # `-mcpu=native` / `-march=native` changes which FMA and vector instructions the compiler may
+# # use, hence the results, per machine. "none" passes no architecture flag.
+# cc_backend_arch_flags=none
+# # Whether the SIMD probe fires depends on what the toolchain's DEFAULT target already exposes,
+# # which is itself a per-machine fact -- so pin the flags off rather than reason about which of
+# # them could have changed a result.
+# cc_backend_simd_flags=none
+# # Contraction the codegen did not ask for (the explicit `fmaf` selections stay): whether a*b+c
+# # becomes one fused op is compiler- and target-discretionary.
+# cc_backend_fp_contract=off
+# cc_backend_fast_math=false
+# # Explicit SIMD rendering reassociates strict-FP reductions into per-lane accumulator chains,
+# # so the summation order would follow the probed vector width. 0 keeps the serial order.
+# cc_vector_bytes=0
+#
+# # The numerics gates at their exact defaults, so that a profile switch never silently changes
+# # what math is being done (they are the orthogonal axis; see the issue).
+# tf32_matmuls=false
+# fp16_arithmetic=false
+# narrow_compute_f32=true
+# --- END PROFILE PAYLOAD reproducible ---
+
+# --- BEGIN PROFILE PAYLOAD performance ---
+# # The fastest configuration AT UNCHANGED SEMANTICS. Result-changing gates (tf32_matmuls,
+# # fp16_arithmetic's accuracy-for-throughput trade is the one exception below, and the
+# # algebraic-rewrite tiers) belong to the numerics axis, not to this one.
+#
+# # Empirical schedule search on, with a wider beam and more rounds than the everyday defaults.
+# autotune_search=true
+# autotune_beam_width=4
+# autotune_rounds=4
+# # Untuned compiles still get the cost model's pick instead of the plain default pipeline.
+# model_default_schedule=true
+#
+# # Target the host CPU, and let the SIMD probe add what that target already supports.
+# cc_backend_arch_flags=auto
+# cc_backend_simd_flags=auto
+#
+# # Native 16-bit arithmetic where the target has it; ignored on targets that promote fp16 to
+# # float, and on the GPU backends.
+# fp16_arithmetic=true
+# --- END PROFILE PAYLOAD performance ---

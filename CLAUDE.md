@@ -155,6 +155,13 @@ design history) that is not derivable from the code alone.
 2. Environment variables: `OCANNL_<OPTION>=<value>` (e.g., `OCANNL_BACKEND=cuda`)
 3. Config file: `ocannl_config` in current or ancestor directories
 
+**Config profiles** (gh-ocannl-559): `profile=reproducible|performance` picks a preset bundle
+whose payload (an embedded partial config file in `arrayjit/lib/utils.ml`) applies at the sublevel
+just below the explicit keys of whichever source picked it — so explicit keys beat a profile of
+equal immediacy, and a CLI-picked profile beats an exhaustive config file. Payload keys must be
+known and documented, and the reference file's verbatim quote of each payload is checked, both by
+`test/operations/test_config_consistency`.
+
 **Testing with Different Configurations**:
 
 - When using environment variables for test configuration other than OCANNL_BACKEND, Dune won't detect changes and may skip tests
