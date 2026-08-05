@@ -14,3 +14,5 @@ is_complex from genuine complex scalar: true
 in-loop consumer: both providers virtual: true
 in-loop consumer: providers inlined (no array reads survive): true
 in-loop consumer: consumer setter kept: true
+non-traced consumer loop: producer stays virtual (single-sample semantics): true
+non-traced consumer loop: producer inlined into the consumer: true

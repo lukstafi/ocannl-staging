@@ -4265,6 +4265,42 @@ let read_multiplicity_query (static_indices : Indexing.static_symbol list)
             in
             max acc total)
 
+(* The retired concrete tracer executed a [trace_it = false] loop's body once, with the index
+   pinned at [from_] — such loops are opaque to virtualization (a stored computation containing one
+   is rejected, [Non_virtual 6]). Mirror that in the placement metrics: clamp the loop's bounds to
+   its first iteration in the access views fed to [reads_covered_query] and
+   [read_multiplicity_query], so the symbol becomes a pinned parameter (width 1) instead of
+   contributing its full trip count to multiplicities and coverage. Other [affine_accesses]
+   consumers (liveness, cost model, schedule legality) correctly keep the full ranges. Runs
+   pre-virtualization, so [Local_scope] does not occur in statement position. *)
+let clamp_non_traced_loops (llc : t) (accs : Tn.t Affine.access list) : Tn.t Affine.access list =
+  let pinned = ref [] in
+  let rec go = function
+    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _
+    | Set _ | Set_dynamic _ | Set_from_vec _ | Set_local _ ->
+        ()
+    | Seq (a, b) ->
+        go a;
+        go b
+    | For_loop { index; from_; body; trace_it; _ } ->
+        if not trace_it then pinned := (index, from_) :: !pinned;
+        go body
+    | If { body; _ } -> go body
+    | Tile_mma { fallback; _ } -> go fallback
+  in
+  go llc;
+  if List.is_empty !pinned then accs
+  else
+    List.map accs ~f:(fun a ->
+        {
+          a with
+          Affine.a_loops =
+            List.map a.Affine.a_loops ~f:(fun ((s, _) as entry) ->
+                match List.Assoc.find !pinned s ~equal:Indexing.equal_symbol with
+                | Some from_ -> (s, (from_, from_))
+                | None -> entry);
+        })
+
 (* The placement decision procedure over the traced facts and affine metrics — the tail of the
    retired [visit_llc], factored out (gh-554; the analysis/decision split of gh-555 step 1). Writes
    decisions into the lineage's placements table; the metrics are forced only when a decision
@@ -4368,7 +4404,7 @@ let%diagn2_sexp analyze_proc (static_indices : Indexing.static_symbol list) (llc
   trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indices llc;
   (* The affine metrics are lazily-materialized views over the routine's access relations: only the
      facts the decisions actually consult get computed (gh-554). *)
-  let accs = lazy (affine_accesses llc) in
+  let accs = lazy (clamp_non_traced_loops llc (affine_accesses llc)) in
   {
     an_llc = llc;
     an_static_indices = static_indices;

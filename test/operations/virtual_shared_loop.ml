@@ -219,6 +219,33 @@ let case_inloop_consumer () =
     (count_get o a = 0 && count_get o b = 0);
   p "in-loop consumer: consumer setter kept" (count_set o cons = 1)
 
+(* === Case 8: consumer inside a non-traced loop (trace_it = false; gh-554 follow-up) === The
+   retired concrete tracer executed such a loop's body once with the index pinned at [from_], so a
+   fixed-position read of a producer inside it sampled as a single visit. The affine placement
+   metrics mirror that ([clamp_non_traced_loops]): without the clamp, the read's fiber over the
+   loop's full trip count (3 > virtualize_max_visits) would spuriously materialize the producer. *)
+let case_non_traced_loop () =
+  let x = mk "ntx" and prod = mk "ntp" and out = mk "nto" in
+  materialize x;
+  materialize out;
+  let i = sym () and j = sym () in
+  let produce = loop i (set i prod (mul (get i x) (c 2.))) in
+  let consume =
+    LL.For_loop
+      {
+        index = j;
+        from_ = 0;
+        to_ = 2;
+        body = LL.Set { tn = out; idcs = [| iter j |]; llsc = LL.Get (prod, [| Ir.Indexing.Fixed_idx 0 |]); debug = "" };
+        trace_it = false;
+        axis = Serial;
+      }
+  in
+  let o = optimize (seq produce consume) in
+  p "non-traced consumer loop: producer stays virtual (single-sample semantics)"
+    (known_virtual o prod);
+  p "non-traced consumer loop: producer inlined into the consumer" (count_get o prod = 0)
+
 let () =
   case_independent ();
   case_mixed ();
@@ -227,4 +254,5 @@ let () =
   case_reverse ();
   case_complex ();
   case_inloop_consumer ();
+  case_non_traced_loop ();
   Stdio.printf "%!"
