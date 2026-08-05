@@ -4319,7 +4319,24 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
         traced.read_before_write <- true;
         Tn.Placements.update plc tn On_device 36))
 
-let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
+type analysis = {
+  an_llc : t;
+  an_static_indices : Indexing.static_symbol list;
+  an_traced_store : traced_store;
+      (** The decision-independent facts. [specialize_proc] hands each candidate a record-copied
+          view, because [decide_placements] writes the placement-dependent [read_only] /
+          [read_before_write] flags under the candidate's own placements. *)
+  an_reverse_node_map : (Indexing.symbol, Tnode.t list) Hashtbl.t;
+  an_merge_node : Tnode.t option;
+  an_reads_covered : (Tn.t -> [ `Covered | `Unknown of string ]) Lazy.t;
+  an_read_multiplicity : (Tn.t -> int) Lazy.t;
+}
+
+(* Decision-independent analysis of a lowered routine (gh-555 step 1): the structural facts pass,
+   the lazily-materialized affine metrics, and the written-bounds pinning — everything
+   [specialize_proc] consumes that does not depend on the lineage's placement decisions. Computed
+   once per routine; per-candidate compiles replay only [specialize_proc]. *)
+let%diagn2_sexp analyze_proc (static_indices : Indexing.static_symbol list) (llc : t) : analysis =
   let traced_store = Hashtbl.create (module Tnode) in
   (* Identifies the computations that the code block associated with the symbol belongs to. *)
   let reverse_node_map = Hashtbl.create (module Indexing.Symbol) in
@@ -4330,12 +4347,32 @@ let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
   (* The affine metrics are lazily-materialized views over the routine's access relations: only the
      facts the decisions actually consult get computed (gh-554). *)
   let accs = lazy (affine_accesses llc) in
-  let reads_covered = lazy (reads_covered_query static_indices (Lazy.force accs)) in
-  let read_multiplicity = lazy (read_multiplicity_query static_indices (Lazy.force accs)) in
+  {
+    an_llc = llc;
+    an_static_indices = static_indices;
+    an_traced_store = traced_store;
+    an_reverse_node_map = reverse_node_map;
+    an_merge_node = !merge_node_ref;
+    an_reads_covered = lazy (reads_covered_query static_indices (Lazy.force accs));
+    an_read_multiplicity = lazy (read_multiplicity_query static_indices (Lazy.force accs));
+  }
+
+(* A candidate-private view of the analysis' traced store: record-level copies, so one candidate's
+   [decide_placements] writes ([read_only], [read_before_write] under its own placements) do not
+   leak into siblings replaying the same analysis. *)
+let copy_traced_store (store : traced_store) : traced_store =
+  Hashtbl.map store ~f:(fun t -> { t with tn = t.tn })
+
+let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : optimized =
+  let static_indices = an.an_static_indices in
+  let llc = an.an_llc in
+  let traced_store = copy_traced_store an.an_traced_store in
   decide_placements input_ctx traced_store ~max_visits:virtualize_settings.max_visits
-    ~reads_covered ~read_multiplicity;
+    ~reads_covered:an.an_reads_covered ~read_multiplicity:an.an_read_multiplicity;
   [%log "optimizing"];
-  let virtual_llc_result = virtual_llc input_ctx traced_store reverse_node_map static_indices llc in
+  let virtual_llc_result =
+    virtual_llc input_ctx traced_store an.an_reverse_node_map static_indices llc
+  in
   let llc =
     hoist_cross_statement_cse @@ eliminate_common_subexpressions
     @@ rewrite_one_hot_reductions ~static_indices
@@ -4343,18 +4380,20 @@ let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
     @@ cleanup_virtual_llc input_ctx.placements ~static_indices
     @@ virtual_llc_result
   in
-  let merge_node = !merge_node_ref in
   let optimize_ctx = input_ctx in
   {
     traced_store;
     optimize_ctx;
     llc;
-    merge_node;
+    merge_node = an.an_merge_node;
     workgroup_shared = Set.empty (module Tnode);
     simdgroup_fragments = Set.empty (module Tnode);
     swizzled = Map.empty (module Tnode);
     zero_fringe = Set.empty (module Tnode);
   }
+
+let optimize_proc (input_ctx : optimize_ctx) static_indices llc =
+  specialize_proc input_ctx (analyze_proc static_indices llc)
 
 let code_hum_margin = ref 100
 

@@ -393,6 +393,22 @@ val optimize :
   t ->
   optimized
 
+type analysis
+(** Decision-independent analysis of a lowered routine (gh-555 step 1): the structural per-node
+    facts and the lazily-materialized affine access metrics — everything the optimization pipeline
+    consumes that does not depend on the lineage's placement decisions. *)
+
+val analyze_proc : Indexing.static_symbol list -> t -> analysis
+(** Compute the analysis once for a routine. [optimize] is [analyze_proc] followed by
+    [specialize_proc] (plus the pretty-printing callbacks). *)
+
+val specialize_proc : optimize_ctx -> analysis -> optimized
+(** The decision-dependent tail of the pipeline: placement decisions ([decide_placements] under the
+    given lineage's placements and inline preferences), virtualization, cleanup, simplification and
+    CSE. Cheap to replay per candidate over one shared [analysis] (gh-555): sibling calls with
+    hermetic [optimize_ctx] forks (see [copy_optimize_ctx]) produce hermetic [optimized] results —
+    the traced store is record-copied per call. *)
+
 val reads_scope_before_set : scope_id -> t -> bool
 (** [reads_scope_before_set id body] returns [true] if [id] is read (via [Get_local]) before the
     first definitely-executed [Set_local id] in [body]. Use this at code-generation time to decide
