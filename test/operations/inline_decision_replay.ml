@@ -133,7 +133,18 @@ let phase1 () =
   p "replay over shared analysis reproduces the default result"
     (Sexp.equal (LL.sexp_of_t o_default.LL.llc) (LL.sexp_of_t o_replay.LL.llc));
   p "hermeticity: inline candidate did not leak into the default traced store"
-    (Tn.Placements.known_non_virtual (plc o_replay) prod)
+    (Tn.Placements.known_non_virtual (plc o_replay) prod);
+  (* The searchable decision surface (gh-555): each arm reports the producer as flippable in the
+     opposite direction, with the recompute-cost bound (extent 1 × multiplicity 2). *)
+  let find_flip o tn =
+    List.find_map o.LL.flip_candidates ~f:(fun fc ->
+        if fc.LL.fc_tn.Tn.id = tn.Tn.id then Some (fc.LL.fc_flip, fc.LL.fc_recompute_cost)
+        else None)
+  in
+  p "default arm reports the producer as an Inline flip of cost 2"
+    (match find_flip o_default prod with Some (`Inline, 2) -> true | _ -> false);
+  p "inline arm reports the producer as a Materialize flip"
+    (match find_flip o_inline prod with Some (`Materialize, 2) -> true | _ -> false)
 
 open Ocannl
 open Ocannl.Operation.DSL_modules

@@ -221,6 +221,7 @@ let () =
       simdgroup_fragments = Set.empty (module Ir.Tnode);
       swizzled = Map.empty (module Ir.Tnode);
       zero_fringe = Set.empty (module Ir.Tnode);
+      flip_candidates = [];
     }
   in
   let guarded_accum ~cond_of =

@@ -54,6 +54,7 @@ let compile_to_c ~name llc =
       simdgroup_fragments = Base.Set.empty (module Tn);
       swizzled = Base.Map.empty (module Tn);
       zero_fringe = Base.Set.empty (module Tn);
+      flip_candidates = [];
     }
   in
   let module Syntax = Ir.C_syntax.C_syntax (Ir.C_syntax.Pure_C_config (struct

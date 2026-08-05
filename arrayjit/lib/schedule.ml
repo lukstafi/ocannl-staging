@@ -5057,6 +5057,7 @@ let segment_optimized (full : Low_level.optimized) (llc : Low_level.t) : Low_lev
     simdgroup_fragments = Set.filter full.Low_level.simdgroup_fragments ~f:(Set.mem tns);
     swizzled = Map.filter_keys full.Low_level.swizzled ~f:(Set.mem tns);
     zero_fringe = Set.filter full.Low_level.zero_fringe ~f:(Set.mem tns);
+    flip_candidates = full.Low_level.flip_candidates;
   }
 
 (* Expand-and-annotate schedule for a segment of materialized whole-node [Zero_out]s (GPU): the

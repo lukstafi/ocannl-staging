@@ -4,6 +4,8 @@ inline-preferred: producer virtual: true
 inline-preferred: setter dropped, no residual reads: true
 replay over shared analysis reproduces the default result: true
 hermeticity: inline candidate did not leak into the default traced store: true
+default arm reports the producer as an Inline flip of cost 2: true
+inline arm reports the producer as a Materialize flip: true
 phase2 default: intermediate is non-virtual: true
 phase2 inline-forced: intermediate is virtual: true
 phase2 parity: same result length: true

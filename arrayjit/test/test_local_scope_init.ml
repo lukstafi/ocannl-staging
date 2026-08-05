@@ -27,6 +27,7 @@ let make_optimized llc =
       simdgroup_fragments = Base.Set.empty (module Tn);
       swizzled = Base.Map.empty (module Tn);
       zero_fringe = Base.Set.empty (module Tn);
+      flip_candidates = [];
     }
 
 let pp llc =

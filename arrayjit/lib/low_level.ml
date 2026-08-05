@@ -349,6 +349,21 @@ type swizzle_kind =
           row's byte length to be a multiple of 16 and a power of two in 16-byte units. *)
 [@@deriving sexp, compare, equal]
 
+(** gh-555: one searchable inlining decision dimension of a compile — a node whose placement the
+    default policy decided, together with the flip a search can try and the recompute-cost bound of
+    the virtual placement (reduction extent × per-cell read multiplicity — the cost the flip trades
+    against memory traffic). [`Materialize] flips a node the policy left virtual (via
+    [Context.decide_materialized]); [`Inline] flips a node materialized by the heuristic caps
+    (provenance 1 or 39 — never by legality or observability, which are not decisions), via
+    [Context.decide_inline]. An [`Inline] flip's legality is settled only when the virtualizer
+    replays ([check_and_store_virtual]): a rejected flip reproduces the materialized placement. *)
+type flip_candidate = {
+  fc_tn : Tnode.t;
+  fc_flip : [ `Materialize | `Inline ];
+  fc_recompute_cost : int;
+}
+[@@deriving sexp_of]
+
 type optimized = {
   traced_store : traced_store;
   optimize_ctx : optimize_ctx;
@@ -379,6 +394,13 @@ type optimized = {
           0 — the add-reduce accumulation identity — written by the load nest's [Where]-form edge
           guards or by the host-side constant packing. [Schedule.Tensorize] consults this to
           discharge pad guards on the intrinsic path. *)
+  flip_candidates : flip_candidate list;
+      (** gh-555: the searchable inlining decision dimensions of this compile, most expensive
+          first, as decided at the whole-routine specialization (schedule-transform copies inherit
+          the whole-routine list). Excluded: nodes never assigned or never read (no decision to
+          make), scalar constexprs and pure one-hot selector producers (must stay virtual for their
+          rewrites), and nodes placed by legality, intent or observability rather than the
+          heuristic policy. *)
 }
 [@@deriving sexp_of]
 
@@ -4380,6 +4402,36 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
     @@ cleanup_virtual_llc input_ctx.placements ~static_indices
     @@ virtual_llc_result
   in
+  (* The searchable decision dimensions (gh-555), read off the now-committed placements: cleanup
+     has committed the surviving virtual candidates, and the backend-compile finalization
+     ([default_to_most_local]) has not yet rewritten the cap provenances. *)
+  let flip_candidates =
+    let plc = input_ctx.placements in
+    Hashtbl.fold traced_store ~init:[] ~f:(fun ~key:tn ~data:traced acc ->
+        let one_hot = traced.prefers_virtual_one_hot && not traced.has_non_one_hot_setter in
+        if
+          (not traced.has_assignment)
+          || one_hot || traced.is_scalar_constexpr
+          || not traced.read_by_other
+        then acc
+        else
+          let flip =
+            match Tn.Placements.get plc tn with
+            | Some (Virtual, _) -> Some `Materialize
+            | Some (Never_virtual, (1 | 39)) -> Some `Inline
+            | _ -> None
+          in
+          match flip with
+          | None -> acc
+          | Some fc_flip ->
+              let mult = max 1 ((Lazy.force an.an_read_multiplicity) tn) in
+              { fc_tn = tn; fc_flip; fc_recompute_cost = traced.inline_reduction_extent * mult }
+              :: acc)
+    |> List.sort ~compare:(fun a b ->
+           match Int.compare b.fc_recompute_cost a.fc_recompute_cost with
+           | 0 -> Int.compare a.fc_tn.Tn.id b.fc_tn.Tn.id
+           | c -> c)
+  in
   let optimize_ctx = input_ctx in
   {
     traced_store;
@@ -4390,6 +4442,7 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
     simdgroup_fragments = Set.empty (module Tnode);
     swizzled = Map.empty (module Tnode);
     zero_fringe = Set.empty (module Tnode);
+    flip_candidates;
   }
 
 let optimize_proc (input_ctx : optimize_ctx) static_indices llc =

@@ -31,6 +31,7 @@ let make_optimized llc tns : LL.optimized =
     simdgroup_fragments = Base.Set.empty (module Tn);
     swizzled = Base.Map.empty (module Tn);
     zero_fringe = Base.Set.empty (module Tn);
+    flip_candidates = [];
   }
 
 let make_on_device id label =

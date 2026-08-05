@@ -352,6 +352,20 @@ type swizzle_kind =
           row's byte length to be a multiple of 16 and a power of two in 16-byte units. *)
 [@@deriving sexp, compare, equal]
 
+(** gh-555: one searchable inlining decision dimension of a compile — a node whose placement the
+    default policy decided, together with the flip a search can try and the recompute-cost bound of
+    the virtual placement (reduction extent × per-cell read multiplicity). [`Materialize] flips a
+    node the policy left virtual (via [Context.decide_materialized]); [`Inline] flips a node
+    materialized by the heuristic caps (never by legality or observability), via
+    [Context.decide_inline]. An [`Inline] flip's legality is settled only when the virtualizer
+    replays: a rejected flip reproduces the materialized placement. *)
+type flip_candidate = {
+  fc_tn : Tnode.t;
+  fc_flip : [ `Materialize | `Inline ];
+  fc_recompute_cost : int;
+}
+[@@deriving sexp_of]
+
 type optimized = {
   traced_store : traced_store;
   optimize_ctx : optimize_ctx;
@@ -381,6 +395,12 @@ type optimized = {
           0 — the add-reduce accumulation identity — written by the load nest's [Where]-form edge
           guards or by the host-side constant packing. [Schedule.Tensorize] consults this to
           discharge pad guards on the intrinsic path. *)
+  flip_candidates : flip_candidate list;
+      (** gh-555: the searchable inlining decision dimensions of this compile, most expensive
+          first, as decided at the whole-routine specialization (schedule-transform copies inherit
+          the whole-routine list). Excluded: nodes never assigned or never read, scalar constexprs
+          and pure one-hot selector producers, and nodes placed by legality, intent or
+          observability rather than the heuristic policy. *)
 }
 [@@deriving sexp_of]
 
