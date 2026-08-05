@@ -28,12 +28,21 @@ let keys =
     ("virtualize_max_visits", "1");
   ]
 
+(* The bootstrap keys are consulted during [Utils]'s own initialization, before this executable
+   reaches [main]: `no_config_file` would discard the ocannl_config the whole test rests on, and
+   the two output keys would put a welcome message or the profile banner on stdout, ahead of the
+   table. Nothing here can PREVENT that -- but detecting it is enough, since a rule that exits
+   nonzero writes no golden, and detection is one list entry where clearing each of these in dune
+   would be four spellings x three keys x six rules (Codex P2 on PR #291). *)
+let guarded_keys =
+  List.map keys ~f:fst @ [ "suppress_welcome_message"; "no_config_file"; "log_config_sourcing" ]
+
 let () =
   (* An OCANNL variable in the ambient environment outranks this directory's config file, so it
      would rewrite the golden -- and dune tracks no environment variable but OCANNL_BACKEND, so a
      stale output could be reused besides (Codex P2 on PR #291). Fail with the variable's name
      instead of producing a mystifying diff. `profile` is exempt: the env-picked rule sets it. *)
-  List.iter keys ~f:(fun (arg_name, _) ->
+  List.iter guarded_keys ~f:(fun arg_name ->
       Option.iter (Utils.read_env_var arg_name) ~f:(fun (value, var) ->
           eprintf
             "profile_precedence: %s=%s is set in the environment and would outrank this test's \

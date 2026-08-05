@@ -14,6 +14,9 @@
 ; `ocannl_profile`, which `Utils.read_env_var` consults BEFORE `OCANNL_PROFILE` and which would
 ; therefore beat the env-picked rule's own setting (Codex P2 on PR #291). For the other keys the
 ; executable itself refuses to run when one is set: a clear failure rather than a rewritten golden.
+; That guard covers the bootstrap keys too (`no_config_file`, and the two that would put a welcome
+; message or the profile banner on stdout ahead of the table) -- it cannot prevent their effect,
+; those being read during Utils' initialization, but a rule that exits nonzero writes no golden.
 
 (rule
  (target from_config_file.actual)
