@@ -315,6 +315,17 @@
 # quality; independent of the ppx_minidebug log levels.
 #autotune_log=false
 
+# gh-555: budget for the greedy per-node inlining refinement of `Train.tune_placements` — after
+# the placement A/B, try flipping up to this many of the winning arm's most expensive inlining
+# decisions (materialize a policy-virtual node / inline a cap-materialized one), each accepted
+# flip becoming the base for the next. Every tried flip costs a full `Autotune.tune` search like
+# an arm; 0 (the default) keeps the plain A/B behavior. A flip is accepted on a measured
+# improvement, so the refinement is a determinism leak of the same kind as the schedule search --
+# and one that is not numerics-neutral, since a materialized node rounds to its storage precision
+# where an inlined one does not. The `reproducible` profile pins it at 0; `performance` leaves it
+# alone, its cost being a full search per candidate.
+#tune_inline_flips=0
+
 # If true, an exception crossing a candidate transform/codegen/compile/link boundary is fatal unless
 # a narrow compiler seam or the backend classifies it. If false, unattributed compile-side failures
 # of tuner/advisory/cache work are temporarily contained as `Unclassified` declines. Launch and sync
@@ -461,9 +472,6 @@
 # every read site (multiplying through chains of virtual consumers). Negative values disable
 # the cap.
 #virtualize_max_inline_reduction=16
-
-# Truncate longer axes to this many dimensions in the generic optimizer's interpreter.
-#virtualize_max_tracing_dim=5
 
 # If `true`, tensor nodes will by default not be hosted.
 #enable_device_only=true
@@ -647,6 +655,11 @@
 # # The analytic cost model picks schedules from per-backend (and, once calibrated, per-machine)
 # # envelope constants -- the same leak without the timing runs.
 # model_default_schedule=false
+# # The greedy inlining refinement of Train.tune_placements accepts a flip when the timing
+# # improves, so which nodes end up inlined is machine-dependent -- and inlining is not
+# # numerics-neutral where storage precision is narrower than compute precision: a materialized
+# # node rounds to its storage precision, an inlined one does not.
+# tune_inline_flips=0
 #
 # # `-mcpu=native` / `-march=native` changes which FMA and vector instructions the compiler may
 # # use, hence the results, per machine. "none" passes no architecture flag.

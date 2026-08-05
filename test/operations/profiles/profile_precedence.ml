@@ -18,6 +18,7 @@ let keys =
     ("autotune_rounds", "2");
     ("autotune_beam_width", "2");
     ("model_default_schedule", "false");
+    ("tune_inline_flips", "0");
     ("cc_backend_arch_flags", "auto");
     ("cc_backend_simd_flags", "auto");
     ("cc_backend_fp_contract", "auto");

@@ -596,7 +596,6 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
                   body =
                     extent_guard ~projections ~index ~iter
                       (for_loop (iter :: block_iters) (index :: rev_iters) product);
-                  trace_it = true;
                   axis = Serial;
                 })
     in
@@ -802,7 +801,6 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
                   body =
                     extent_guard ~projections ~index ~iter
                       (for_loop (iter :: block_iters) (index :: rev_iters) product);
-                  trace_it = true;
                   axis = Serial;
                 })
     in
@@ -988,7 +986,6 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
                     from_;
                     to_;
                     body = for_loop ~tail (index :: rev_iters) product;
-                    trace_it = true;
                     axis = Serial;
                   }
               in
@@ -1003,7 +1000,6 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
                   from_ = 0;
                   to_ = d - 1;
                   body = for_loop ~tail (index :: rev_iters) product;
-                  trace_it = true;
                   axis = Serial;
                 }
           | _ -> raise @@ Utils.User_error "Concat indexing not supported in Set_vec_unop"

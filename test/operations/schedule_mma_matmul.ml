@@ -479,9 +479,35 @@ let () =
     in
     let ctx_b = Context.run ctx_b routine_b in
     let got = Context.get_values ctx_b mcb1.Tensor.value in
+    (* Bitwise on CUDA and Metal, where the tensor core returns the exactly-rounded dot product for
+       these exactly-representable inputs. NOT bitwise on HIP: gfx1151's WMMA does not, in any of
+       the four rocWMMA format combinations, and the deviation is a hardware property rather than a
+       rendering defect — a standalone rocWMMA program (no OCANNL in the loop) reproduces it cell
+       for cell from the same data. Measured on a single exact 16x16x16 [mma_sync] with a
+       [fill_fragment]-zeroed accumulator, against an exact double reference:
+
+         bf16 x bf16 -> f32   227/256 cells differ, worst 1.19e-07  (one f32 ulp at ~1.0)
+         bf16 x bf16 -> bf16  235/256 cells differ, worst 5.86e-03
+         f16  x f16  -> f32   227/256 cells differ, worst 1.19e-07
+         f16  x f16  -> f16    18/256 cells differ, worst 5.96e-08
+
+       So the tolerance is per accumulator format, and the narrow-accumulator one has to be wide:
+       the uniform-bf16 combination — HIP's only tensor-core route for a uniformly-bf16 network —
+       loses close to a bf16 ulp at the partial-sum scale. The [staged+tensorized half] leg below
+       already carried this exception for the f16->f32 combination; these legs arrived later
+       (gh-ocannl-545) without AMD hardware in the loop, so they asserted the CUDA/Metal premise on
+       a backend where it does not hold. Keeping the comparison numeric rather than dropping it
+       preserves what it is for: a wrong stride or a mis-mapped fragment moves values by O(1), not
+       by 1e-2. *)
+    let eq =
+      if not (String.is_substring backend_name ~substring:"hip") then Float.equal
+      else if Ir.Ops.equal_prec acc_prec Ir.Ops.bfloat16 then fun a b ->
+        Float.(abs (a - b) <= 0.05 * max 1. (abs b))
+      else fun a b -> Float.(abs (a - b) <= 1e-5 * max 1. (abs b))
+    in
     p
-      (Printf.sprintf "%s tensorized matmul matches the serial twin bitwise" tag)
-      (Array.for_all2_exn got want ~f:Float.equal);
+      (Printf.sprintf "%s tensorized matmul matches the serial twin" tag)
+      (Array.for_all2_exn got want ~f:eq);
     match read_generated ("mm_" ^ tag ^ "_mma") with
     | None -> p (Printf.sprintf "%s tensorized structure as expected" tag) false
     | Some src -> p (Printf.sprintf "%s tensorized structure as expected" tag) (check src)

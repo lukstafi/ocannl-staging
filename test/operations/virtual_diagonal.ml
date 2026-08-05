@@ -5,14 +5,14 @@
    High-level lowering never produces a [Get] of a virtual diagonal with two distinct call-site
    symbols in one place (each assignment lowers to its own loop nest), so -- like
    [virtual_shared_loop] -- these cases are built directly as [Ir.Low_level.t] and run through
-   [Ir.Low_level.optimize], the same pipeline (visit_llc -> virtual_llc -> cleanup_virtual_llc ->
+   [Ir.Low_level.optimize], the same pipeline (trace_node_facts -> virtual_llc -> cleanup_virtual_llc ->
    simplify -> CSE -> hoist) the backends use. We assert structurally on the optimized form: that
    the diagonal producer virtualizes, that its reads are inlined, and that an equality guard ([Where
    (Cmpeq ...)]) is emitted exactly when the read uses distinct/dynamic indices and folded away when
    the read indices are syntactically equal.
 
    [Concat] virtualization stays out of scope: a [Concat] index is eliminated during lowering and
-   [visit_llc] raises if one ever reaches this pass, so it cannot be exercised through [optimize]
+   [trace_node_facts] raises if one ever reaches this pass, so it cannot be exercised through [optimize]
    here. The "Concat remains rejected" criterion is the unchanged [check_idcs] [Non_virtual 52]
    branch plus the existing test_concat_graph / test_block_tensor coverage.
 
@@ -48,7 +48,7 @@ let set_at idcs tn llsc : LL.t = LL.Set { tn; idcs; llsc; debug = "" }
 let get_at idcs tn : LL.scalar_t = LL.Get (tn, idcs)
 
 let loop s body : LL.t =
-  LL.For_loop { index = s; from_ = 0; to_ = 2; body; trace_it = true; axis = Serial }
+  LL.For_loop { index = s; from_ = 0; to_ = 2; body; axis = Serial }
 
 let seq a b : LL.t = LL.Seq (a, b)
 

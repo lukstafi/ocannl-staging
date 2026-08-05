@@ -57,7 +57,6 @@ type t =
       from_ : int;
       to_ : int;
       body : t;
-      trace_it : bool;
       axis : axis_type;
     }
   | Zero_out of Tnode.t
@@ -227,11 +226,13 @@ val guard_annotated_extents : should_guard:([ `Grid | `Workgroup ] -> bool) -> t
 type virtualize_settings = {
   mutable enable_device_only : bool;
   mutable max_visits : int;
+      (** Per-cell read multiplicity cap for inlining: a node with a cell read more than this many
+          times (as bounded by the affine access relations, gh-554) is never virtualized unless the
+          computation is simple or a one-hot selector producer. *)
   mutable max_inline_reduction : int;
       (** Recompute-cost cap for inlining: a node whose setters have enclosing reduction loops
           (loops not appearing in the setter's indices) with a trip-count product exceeding this
           value is never virtualized. Negative values disable the cap. *)
-  mutable max_tracing_dim : int;
   mutable inline_scalar_constexprs : bool;
   mutable inline_simple_computations : bool;
   mutable inline_complex_computations : bool;
@@ -239,16 +240,13 @@ type virtualize_settings = {
 
 val virtualize_settings : virtualize_settings
 
-type visits =
-  | Visits of int
-  | Recurrent
-      (** A [Recurrent] visit is when there is an access prior to any assignment in an update. *)
-[@@deriving sexp, equal, variants]
-
 type traced_array = {
   tn : Tnode.t;
-  assignments : int array Base.Hash_set.t;
-  accesses : (int array, visits) Base.Hashtbl.t;
+  mutable has_assignment : bool;
+      (** The code contains a [Set] or [Set_from_vec] of the node ([Zero_out] is tracked separately
+          as [zeroed_out]). Structural replacement (gh-554) for the retired concrete-index tracer's
+          per-cell assignment table; per-cell facts are answered by affine queries over the access
+          relations instead. *)
   mutable zero_initialized_by_code : bool;
   mutable zeroed_out : bool;
   mutable read_before_write : bool;
@@ -287,10 +285,10 @@ type traced_array = {
           appearing in its indices (i.e. reduction loops). Inlining the computation replays these
           loops at every read site; compared against [virtualize_settings.max_inline_reduction]. *)
   mutable read_by_other : bool;
-      (** True when some statement other than the node's own setters reads the node. Unlike
-          [accesses], same-cell reads count, while a setter's own read-modify-write does not. Gates
-          the recompute-cost guard: a node never read in the routine has no inlining cost, so it
-          must stay eligible for virtual dead-code elimination. *)
+      (** True when some statement other than the node's own setters reads the node. Unlike the
+          read-multiplicity metric, same-cell reads count, while a setter's own read-modify-write
+          does not. Gates the recompute-cost guard: a node never read in the routine has no inlining
+          cost, so it must stay eligible for virtual dead-code elimination. *)
 }
 [@@deriving sexp_of]
 
@@ -318,6 +316,13 @@ type optimize_ctx = {
           codegen). Codegen must not emit the [restrict] qualifier for these parameters — whether a
           candidate pair actually shares bytes is settled only at link time, and an aliased
           [restrict] pair is a miscompile. *)
+  inline_preferences : Hash_set.M(Tnode).t;
+      (** gh-555: the [Inline] half of the per-lineage inlining decision vector. A node recorded
+          here is exempt from the heuristic virtualization caps ([virtualize_max_visits],
+          [virtualize_max_inline_reduction]) — the caps are priors of the default decision policy,
+          not legality; the legality rejections and observability pessimizations still apply. The
+          [Materialize] half of the vector is a pre-seeded [On_device] decision in [placements]
+          (see [Context.decide_materialized] / [Context.decide_inline]). *)
 }
 [@@deriving sexp_of]
 
@@ -345,6 +350,20 @@ type swizzle_kind =
           keeps 16-byte units intact can both de-conflict them and stay loadable. Requires the
           row's byte length to be a multiple of 16 and a power of two in 16-byte units. *)
 [@@deriving sexp, compare, equal]
+
+(** gh-555: one searchable inlining decision dimension of a compile — a node whose placement the
+    default policy decided, together with the flip a search can try and the recompute-cost bound of
+    the virtual placement (reduction extent × per-cell read multiplicity). [`Materialize] flips a
+    node the policy left virtual (via [Context.decide_materialized]); [`Inline] flips a node
+    materialized by the heuristic caps (never by legality or observability), via
+    [Context.decide_inline]. An [`Inline] flip's legality is settled only when the virtualizer
+    replays: a rejected flip reproduces the materialized placement. *)
+type flip_candidate = {
+  fc_tn : Tnode.t;
+  fc_flip : [ `Materialize | `Inline ];
+  fc_recompute_cost : int;
+}
+[@@deriving sexp_of]
 
 type optimized = {
   traced_store : traced_store;
@@ -375,6 +394,12 @@ type optimized = {
           0 — the add-reduce accumulation identity — written by the load nest's [Where]-form edge
           guards or by the host-side constant packing. [Schedule.Tensorize] consults this to
           discharge pad guards on the intrinsic path. *)
+  flip_candidates : flip_candidate list;
+      (** gh-555: the searchable inlining decision dimensions of this compile, most expensive
+          first, as decided at the whole-routine specialization (schedule-transform copies inherit
+          the whole-routine list). Excluded: nodes never assigned or never read, scalar constexprs
+          and pure one-hot selector producers, and nodes placed by legality, intent or
+          observability rather than the heuristic policy. *)
 }
 [@@deriving sexp_of]
 
@@ -386,6 +411,22 @@ val optimize :
   Indexing.static_symbol list ->
   t ->
   optimized
+
+type analysis
+(** Decision-independent analysis of a lowered routine (gh-555 step 1): the structural per-node
+    facts and the lazily-materialized affine access metrics — everything the optimization pipeline
+    consumes that does not depend on the lineage's placement decisions. *)
+
+val analyze_proc : Indexing.static_symbol list -> t -> analysis
+(** Compute the analysis once for a routine. [optimize] is [analyze_proc] followed by
+    [specialize_proc] (plus the pretty-printing callbacks). *)
+
+val specialize_proc : optimize_ctx -> analysis -> optimized
+(** The decision-dependent tail of the pipeline: placement decisions ([decide_placements] under the
+    given lineage's placements and inline preferences), virtualization, cleanup, simplification and
+    CSE. Cheap to replay per candidate over one shared [analysis] (gh-555): sibling calls with
+    hermetic [optimize_ctx] forks (see [copy_optimize_ctx]) produce hermetic [optimized] results —
+    the traced store is record-copied per call. *)
 
 val reads_scope_before_set : scope_id -> t -> bool
 (** [reads_scope_before_set id body] returns [true] if [id] is read (via [Get_local]) before the

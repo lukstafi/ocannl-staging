@@ -1,18 +1,17 @@
-(* gh-494 waypoint 2 follow-up: the read-before-write decider flip. [visit_llc]'s tracer truncates
-   loops at [virtualize_settings.max_tracing_dim] (default 5), so on a padded-conv intermediate the
-   consumer's affine reads (e.g. [oh+kh]) reach positions past the traced write range and are
-   classified [Recurrent] — spuriously: every read is in fact covered by prior in-routine writes.
-   The affine containment query ([Low_level.reads_covered_query], mirroring the tracer's semantics
-   exactly) now cancels the spurious flag, skipping the [On_device] pessimization; it never
-   overrides in the other direction.
+(* gh-494 waypoint 2 / gh-554: the read-before-write decider. The retired concrete-index tracer
+   truncated loops (at the retired [virtualize_max_tracing_dim], default 5), so on a padded-conv
+   intermediate the consumer's affine reads (e.g. [oh+kh]) reached positions past the traced write
+   range and were classified [Recurrent] — spuriously: every read is in fact covered by prior
+   in-routine writes. The affine containment query ([Low_level.reads_covered_query]) is now the
+   primary decider and is exact where the tracer sampled.
 
-   Pinned here, on a chain of two padded convs whose intermediate has spatial dims 9x9 (> the
-   tracing truncation): - the tracer still flags the intermediate recurrent (otherwise this probe
-   went stale); - the override fires: [read_before_write] stays false, so the intermediate is no
-   longer classified as a routine input ([input_and_output_nodes]) — pre-flip it was, forcing
+   Pinned here, on a chain of two padded convs whose intermediate has spatial dims 9x9 (larger than
+   the retired tracing truncation, so the concrete tracer used to misclassify it): - the query
+   proves coverage: [read_before_write] stays false, so the intermediate is not classified as a
+   routine input ([input_and_output_nodes]) — under the truncating tracer it was, forcing
    [On_device] and excluding it from buffer aliasing; - executed parity: the default run's values
-   match a run with the intermediate forced materialized (the pre-flip placement) — the decider flip
-   must not change computed values.
+   match a run with the intermediate forced materialized (the pre-flip placement) — the placement
+   difference must not change computed values.
 
    Printed facts are booleans/PASS lines so the expected output stays backend-stable. *)
 
@@ -73,18 +72,14 @@ let () =
   let h_tn = h.Tensor.value in
   (match Hashtbl.find opt.LL.traced_store h_tn with
   | None -> p "default: intermediate traced" false
-  | Some traced ->
-      p "default: tracer flags the intermediate recurrent"
-        (Hashtbl.exists traced.LL.accesses ~f:LL.is_recurrent);
-      p "default: read_before_write overridden to false" (not traced.LL.read_before_write));
+  | Some traced -> p "default: read_before_write stays false" (not traced.LL.read_before_write));
   let (inputs, _outputs), _merge = LL.input_and_output_nodes opt in
   p "default: intermediate is not a routine input" (not (Set.mem inputs h_tn));
   let yv_mat, opt_mat, h_mat = run ~materialize_h:true in
   (match Hashtbl.find opt_mat.LL.traced_store h_mat.Tensor.value with
   | None -> p "materialized: intermediate traced" false
   | Some traced ->
-      p "materialized: tracer flags the intermediate recurrent"
-        (Hashtbl.exists traced.LL.accesses ~f:LL.is_recurrent));
+      p "materialized: read_before_write stays false" (not traced.LL.read_before_write));
   p "materialized: intermediate stays non-virtual"
     (not (Tn.Placements.known_virtual opt_mat.LL.optimize_ctx.LL.placements h_mat.Tensor.value));
   p "parity: same result length" (Array.length yv_default = Array.length yv_mat);

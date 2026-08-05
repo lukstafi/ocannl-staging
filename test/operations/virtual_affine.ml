@@ -3,7 +3,7 @@
 
    High-level lowering never produces these shapes directly in a controllable way, so -- like
    [virtual_shared_loop.ml] -- the cases are built directly as [Ir.Low_level.t] and run through
-   [Ir.Low_level.optimize] (the same visit_llc -> virtual_llc -> cleanup -> simplify pipeline the
+   [Ir.Low_level.optimize] (the same trace_node_facts -> virtual_llc -> cleanup -> simplify pipeline the
    backends use). We assert structurally on the optimized form (which producers virtualize, that no
    intermediate array read/setter survives, and which stay materialized).
 
@@ -46,7 +46,7 @@ let zero tn : LL.t = LL.Zero_out tn
 
 (* [from_ = 0, to_ = n - 1] gives a loop of width [n]. *)
 let loop_r s n body : LL.t =
-  LL.For_loop { index = s; from_ = 0; to_ = n - 1; body; trace_it = true; axis = Serial }
+  LL.For_loop { index = s; from_ = 0; to_ = n - 1; body; axis = Serial }
 
 let seq a b : LL.t = LL.Seq (a, b)
 

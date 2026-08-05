@@ -116,7 +116,6 @@ let known_config_keys =
       (* Low-level / optimization *)
       "virtualize_max_visits";
       "virtualize_max_inline_reduction";
-      "virtualize_max_tracing_dim";
       "enable_device_only";
       "inline_scalar_constexprs";
       "inline_simple_computations";
@@ -146,6 +145,7 @@ let known_config_keys =
       "autotune_cache_dir";
       "autotune_split_reduce_max_sites";
       "autotune_log";
+      "tune_inline_flips";
       "strict_failure_classification";
       (* Analytic cost model (gh-ocannl-491) *)
       "autotune_keep_fraction";
@@ -429,6 +429,11 @@ autotune_search=false
 # The analytic cost model picks schedules from per-backend (and, once calibrated, per-machine)
 # envelope constants -- the same leak without the timing runs.
 model_default_schedule=false
+# The greedy inlining refinement of Train.tune_placements accepts a flip when the timing
+# improves, so which nodes end up inlined is machine-dependent -- and inlining is not
+# numerics-neutral where storage precision is narrower than compute precision: a materialized
+# node rounds to its storage precision, an inlined one does not.
+tune_inline_flips=0
 
 # `-mcpu=native` / `-march=native` changes which FMA and vector instructions the compiler may
 # use, hence the results, per machine. "none" passes no architecture flag.

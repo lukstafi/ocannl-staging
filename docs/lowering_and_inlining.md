@@ -21,7 +21,7 @@ type t =
   | Comment of string
   | Staged_compilation of (unit -> PPrint.document)
   | Seq of t * t
-  | For_loop of { index : Indexing.symbol; from_ : int; to_ : int; body : t; trace_it : bool }
+  | For_loop of { index : Indexing.symbol; from_ : int; to_ : int; body : t; axis : axis_type }
   | Zero_out of Tn.t
   | Set of { tn : Tn.t; idcs : Indexing.axis_index array; llsc : scalar_t; mutable debug : string }
   | Set_from_vec of { tn : Tn.t; idcs : Indexing.axis_index array; length : int;
@@ -46,9 +46,10 @@ and scalar_t =
 and scalar_arg = scalar_t * Ops.prec
 ```
 
-`t` represents code/statements while `scalar_t` represents scalar expressions. The `trace_it` flag in
-`For_loop` indicates whether the loop should be traced for optimization (its initial segment is
-unrolled for analysis).
+`t` represents code/statements while `scalar_t` represents scalar expressions. (A historical
+`trace_it` flag on `For_loop` — "don't unroll this loop in the retired concrete-index tracer" — was
+retired with the tracer, gh-554/gh-555; schedule-minted loops are opaque to virtualization by
+pipeline order, since transforms run after `optimize`.)
 
 Notable constructors:
 
@@ -139,7 +140,9 @@ block tensor operation ambiguity.
 by a chain of passes:
 
 ```
-visit_llc            (tracing: builds traced_store + reverse_node_map)
+trace_node_facts     (structural facts pass: builds traced_store + reverse_node_map)
+  ↓
+decide_placements    (placement decisions from the facts + affine access metrics)
   ↓
 virtual_llc          (identify + validate inlinable computations)
   ↓
@@ -154,25 +157,52 @@ eliminate_common_subexpressions     (within-statement scalar CSE)
 hoist_cross_statement_cse           (cross-statement CSE; introduces Declare_local)
 ```
 
-`optimize` is a thin wrapper around `optimize_proc` that additionally invokes optional
-pretty-printing callbacks (`unoptim_ll_source` before optimization, `ll_source` after) so that
-backends and debug tooling can capture the `.ll` source at both stages.
+The pipeline is split at the analysis/decision boundary (gh-555 step 1): `analyze_proc` computes
+everything decision-independent (the structural facts, the lazily-materialized affine metrics, the
+written-bounds pinning) once per routine, and `specialize_proc` is the decision-dependent tail
+(`decide_placements` onward), cheap to replay per candidate over one shared analysis — each call
+record-copies the traced store so sibling candidates stay hermetic. `optimize` is a thin wrapper
+that additionally invokes optional pretty-printing callbacks (`unoptim_ll_source` before
+optimization, `ll_source` after) so that backends and debug tooling can capture the `.ll` source at
+both stages.
 
 The `optimize_ctx` record carries a `computations` table (a map from tensor node to its stored
 inlinable computations) **across** compilation calls, so that a tensor virtualized while compiling
 one routine can be inlined into a later routine that reads it. `optimize_proc` threads the incoming
 `optimize_ctx` through `virtual_llc` and returns it unchanged in the `optimized` result.
 
-### 1. Tracing Phase (`visit_llc`)
+### Inlining as a schedule decision (gh-555)
 
-This phase symbolically executes the computation to build a `traced_store` mapping each tensor node
-to a `traced_array`:
+In Halide's vocabulary virtualization is the inline / compute_root axis, and OCANNL treats it as a
+searchable, per-compilation-lineage decision vector rather than a fixed pre-pass:
+
+- The **Materialize** half of the vector is a pre-seeded `On_device` decision in the lineage's
+  placements (`Context.decide_materialized`).
+- The **Inline** half is `optimize_ctx.inline_preferences` (`Context.decide_inline`): nodes exempt
+  from the heuristic caps (`virtualize_max_visits`, `virtualize_max_inline_reduction`) — the caps
+  are priors of the *default* decision policy, not legality. Legality (`check_and_store_virtual`,
+  `inline_computation`, including the injectivity conditions that preserve reduction order — the
+  determinism contract) and the observability pessimizations (read-only, read-before-write) apply
+  regardless of the vector.
+- Each specialization reports its **decision surface** as `optimized.flip_candidates`: the nodes
+  the default policy decided, the flip a search can try, and the recompute-cost bound of the
+  virtual placement (reduction extent × per-cell read multiplicity — the affine metrics double as
+  the cost model's inputs).
+- The search is hierarchical: `Train.tune_placements` decides inlining coarsely first (the
+  placement A/B), then — with a `tune_inline_flips` budget — refines greedily per node from the
+  default-policy arm, tiling/scheduling within each candidate via the nested `Autotune.tune`. The
+  current heuristics with a zero budget reproduce the previous behavior exactly.
+
+### 1. Tracing Phase (`trace_node_facts` + `decide_placements`)
+
+A single structural, non-enumerating program-order traversal (`trace_node_facts`; gh-554 retired
+the concrete-index interpreter that used to unroll loops here) builds a `traced_store` mapping each
+tensor node to a `traced_array`:
 
 ```ocaml
 type traced_array = {
   tn : Tn.t;
-  assignments : int array Hash_set.t;       (* Positions written to *)
-  accesses : (int array, visits) Hashtbl.t; (* Positions read, with visit counts *)
+  mutable has_assignment : bool;            (* Is there a Set/Set_from_vec of the node? *)
   mutable zero_initialized_by_code : bool;
   mutable zeroed_out : bool;
   mutable read_before_write : bool;
@@ -194,19 +224,16 @@ constraint.
 
 Key analyses performed:
 
-- **Access Pattern Analysis**: Tracks which positions are read/written and how many times (`visits`).
-- **Dependency Analysis**: Determines read-before-write patterns (recurrence).
-- **Scalar Constant Expression Detection**: Identifies tensor nodes that are constant scalars.
-- **Complexity Classification**: Determines `is_accessing` (reads non-constant arrays) and
-  `is_complex` (performs non-trivial operations on array accesses).
-- **Memory Mode Inference**: Decides whether tensors should be virtual, materialized, etc.
-
-#### Index Position Computation
-
-For tracing, a `lookup` helper converts symbolic indices to concrete integer positions: `Fixed_idx`
-yields its constant, `Sub_axis` yields 0, `Iterator` yields the symbol's bound value (default 0), and
-`Affine { symbols; offset }` computes the linear combination `offset + Σ coeff·value`. For-loops are
-only unrolled up to `max_tracing_dim` positions during this symbolic execution.
+- **Structural facts** (`trace_node_facts`): setter/reader structure, scalar-constexpr and one-hot
+  classifications, reduction extents, loop-symbol ownership, the merge node.
+- **Affine access metrics** (gh-554; lazily computed from `affine_accesses`): per-cell read
+  multiplicity as a cardinality bound (`read_multiplicity_query`, replacing the retired sampled
+  visit counts), and read-before-write as a containment query (`reads_covered_query` over
+  `Affine.read_covered_before`). Both are exact where the retired concrete-index interpreter
+  sampled truncated loop ranges.
+- **Placement decisions** (`decide_placements`): resolves virtual/materialized placements from the
+  facts and metrics — the visit cap (`virtualize_max_visits`), the recompute-cost cap
+  (`virtualize_max_inline_reduction`), read-only and recurrence pessimizations.
 
 ### 2. Virtualization Phase (`virtual_llc` + `check_and_store_virtual`)
 
@@ -253,13 +280,10 @@ This function validates that the computation can be safely inlined, via these ch
    (in sibling `Set`/`Set_from_vec` indices), `Non_virtual 9` (in sibling `Get`/`Get_merge_buffer`
    indices), or `Non_virtual 10` (in `Embed_index`).
 
-5. **Non-Traced Loops Forbidden**: Loops with `trace_it = false` prevent virtualization
-   (`Non_virtual 6`).
-
-6. **No vector stores / staged code / hoisted locals**: a `Staged_compilation` node fails with
+5. **No vector stores / staged code / hoisted locals**: a `Staged_compilation` node fails with
    `Non_virtual 8`; a `Declare_local` fails with `Non_virtual 19` (defensive — see below).
 
-7. **Has Setter**: the computation must actually write to the tensor (`Non_virtual 12`); and the
+6. **Has Setter**: the computation must actually write to the tensor (`Non_virtual 12`); and the
    tensor must not be already non-virtual (`Non_virtual 11`).
 
 If all checks pass, the computation (with its defining indices) is stored in the `computations` table
@@ -274,7 +298,7 @@ and the handler commits the tensor to `Never_virtual i` (the provenance `i` reco
 - **4** — Inconsistent index patterns between accesses.
 - **5** — Symbol coverage/groundability failure (a non-static symbol is neither bound from a bare
   iterator position nor pinned by an injective affine map).
-- **6** — Non-traced loop (`trace_it = false`) encountered.
+- **6** — Retired (was: non-traced loop encountered; the `trace_it` flag is gone).
 - **7** — Escaping variable in a sibling `Set`/`Set_from_vec` index.
 - **8** — `Staged_compilation` node encountered.
 - **9** — Escaping variable in a sibling `Get`/`Get_merge_buffer` index.
@@ -406,9 +430,8 @@ is the soundness-critical comparator; an overly-loose comparison would merge dis
 
 The optimization behavior is controlled by `virtualize_settings`:
 
-- `max_visits`: maximum number of times a tensor can be accessed before being materialized
-  (default: **1**).
-- `max_tracing_dim`: maximum dimension size for loop unrolling during analysis (default: **5**).
+- `max_visits`: maximum per-cell read multiplicity (bounded via the affine access relations) before
+  a tensor is materialized (default: **1**).
 - `enable_device_only`: whether to prefer device-only storage when possible (default: **true**).
 - `inline_scalar_constexprs`: whether to inline scalar constant expressions regardless of access
   counts (default: **true**).

@@ -238,8 +238,22 @@ let every_non_literal_materialized =
     virtual there, so the site reads f32 masters into a reduced-precision destination — a mixed
     triple no tile matches — while materialize-all turns the twins into real reduced-precision nodes
     and the seeds fire. Materializing just the twins ([Mixed_prec.Twin_materialized]) reaches the
-    same seeds at arm A's cost; see benchmarks/report-gh546-metal.md. *)
-let tune_placements ?beam_width ?rounds ?repeats ?timing_ctx ?report ctx loss comp bindings =
+    same seeds at arm A's cost; see benchmarks/report-gh546-metal.md.
+
+    gh-555: the A/B is the coarse level of the hierarchical inlining search — inlining decided
+    first, tiling/scheduling within each arm by the nested {!Autotune.tune}. [inline_flips] (config
+    [tune_inline_flips], default 0) adds a greedy per-node refinement level: the default-policy
+    arm's compile reports its searchable decision dimensions
+    ({!Ir.Low_level.field-flip_candidates}, ranked by the recompute-cost bound), and the top
+    candidates are tried one at a time from arm A's context — [Materialize] via
+    {!Context.decide_materialized} (walking toward arm B one node at a time), [Inline] via
+    {!Context.decide_inline} — each accepted flip becoming the base for the next, and the refined
+    result shipping only if it beats the A/B winner. Every tried flip costs a full search like an
+    arm, so the budget is explicit and defaults to zero. Flip searches report through
+    [flip_report], not [report]: the positional arm-A-then-arm-B contract of [report] is preserved
+    regardless of the budget. *)
+let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report ?flip_report
+    ?inline_flips ctx loss comp bindings =
   (* Arm attribution on the same stderr trace as Autotune's config [autotune_log] — winner-arm
      ambiguity misdirected the CUDA benchmark debugging on PR #140. *)
   let log_arms =
@@ -254,15 +268,20 @@ let tune_placements ?beam_width ?rounds ?repeats ?timing_ctx ?report ctx loss co
     Stdlib.Printf.ksprintf (fun s -> if log_arms then Stdio.eprintf "tune_placements: %s\n%!" s) fmt
   in
   let last = ref None in
-  let capture r =
-    last := Some r;
-    Option.iter report ~f:(fun f -> f r)
-  in
-  let tune arm ctx timing_ctx =
+  (* The public [?report] contract is positional — arm A's report then arm B's, which consumers
+     (e.g. the benchmark harness) attribute by arrival order — so flip-refinement searches report
+     through the separate [?flip_report] instead ([~to_report] selects the callback). *)
+  let tune ?to_report arm ctx timing_ctx =
+    let to_report = Option.value to_report ~default:report in
+    let capture r =
+      last := Some r;
+      Option.iter to_report ~f:(fun f -> f r)
+    in
     logf "arm %s search:" arm;
     last := None;
     let result =
-      Autotune.tune ?beam_width ?rounds ?repeats ?timing_ctx ~report:capture ctx comp bindings
+      Autotune.tune ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ~report:capture ctx comp
+        bindings
     in
     let r = !last in
     let best_ms = Option.value_map r ~default:Float.infinity ~f:(fun r -> r.Autotune.best_ms) in
@@ -309,7 +328,76 @@ let tune_placements ?beam_width ?rounds ?repeats ?timing_ctx ?report ctx loss co
                else
                  Printf.sprintf " (its own best tensorized candidate: %.4f ms)"
                    s.Autotune.mma_best_ms)));
-  if a_wins then a else b
+  let winner, winner_ms = if a_wins then (a, a_ms) else (b, b_ms) in
+  let inline_flips =
+    match inline_flips with
+    | Some n -> n
+    | None -> Int.of_string (Utils.get_global_arg ~arg_name:"tune_inline_flips" ~default:"0")
+  in
+  if inline_flips <= 0 then winner
+  else (
+    (* gh-555: greedy per-node refinement over the inlining decision vector. The vector lives on
+       the default-policy arm (arm B's placements are caller-seeded wholesale, so its compile
+       reports no policy decisions to flip), so the chain refines from arm A's context — a
+       Materialize chain walks from A toward B one node at a time — and the refined result ships
+       only if it beats the A/B winner. A capture compile (no timing) reads the decision surface
+       off the default compile. *)
+    let module LL = Ir.Low_level in
+    let captured = ref [] in
+    (* The capture compile runs outside the tuner's failure containment; a backend that rejects
+       the unscheduled base lowering (the A/B searches above can still have crowned a scheduled
+       winner) must skip the refinement, not fail the tune. *)
+    (match
+       Context.compile
+         ~lowered_transform:(fun o ->
+           captured := o.LL.flip_candidates @ !captured;
+           o)
+         ctx comp bindings
+     with
+    | (_ : Context.t), (_ : Context.routine) -> ()
+    | exception exn ->
+        captured := [];
+        logf "flip refinement skipped: the capture compile failed: %s" (Exn.to_string exn));
+    let candidates =
+      List.fold !captured ~init:[] ~f:(fun acc fc ->
+          (* Identity is [Tn.uid] ([Tn.equal]), not the session [id], which can repeat across
+             namespaces and reinitializations. *)
+          if List.exists acc ~f:(fun c -> Tn.equal c.LL.fc_tn fc.LL.fc_tn) then acc
+          else fc :: acc)
+      |> List.sort ~compare:(fun a b ->
+             match Int.compare b.LL.fc_recompute_cost a.LL.fc_recompute_cost with
+             | 0 -> Tn.compare a.LL.fc_tn b.LL.fc_tn
+             | c -> c)
+      |> fun l -> List.take l inline_flips
+    in
+    logf "flip refinement: trying %d candidate(s) within budget %d" (List.length candidates)
+      inline_flips;
+    let chain = ref (a, a_ms, ctx, timing_ctx) in
+    List.iter candidates ~f:(fun fc ->
+        let _, chain_ms, base_ctx, base_timing = !chain in
+        let apply c =
+          match fc.LL.fc_flip with
+          | `Materialize -> Context.decide_materialized c [ fc.LL.fc_tn ]
+          | `Inline -> Context.decide_inline c [ fc.LL.fc_tn ]
+        in
+        let arm =
+          Printf.sprintf "flip %s %s (cost %d)"
+            (match fc.LL.fc_flip with `Inline -> "inline" | `Materialize -> "materialize")
+            (Tn.debug_name fc.LL.fc_tn) fc.LL.fc_recompute_cost
+        in
+        let ctx' = apply base_ctx in
+        let timing' = Option.map base_timing ~f:apply in
+        let r, ms, _rep = tune ~to_report:flip_report arm ctx' timing' in
+        if Float.(ms < chain_ms) then chain := (r, ms, ctx', timing'));
+    let chain_result, chain_ms, _, _ = !chain in
+    if Float.(chain_ms < winner_ms) then (
+      logf "flip refinement ships: %.4f ms (the placement A/B winner was %.4f ms)" chain_ms
+        winner_ms;
+      chain_result)
+    else (
+      logf "flip refinement did not improve on the A/B winner (%.4f ms vs %.4f ms)" chain_ms
+        winner_ms;
+      winner))
 
 module Lazy = Utils.Lazy
 

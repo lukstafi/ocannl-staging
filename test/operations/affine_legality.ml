@@ -337,6 +337,7 @@ let () =
       a_guarded = false;
       a_rmw = false;
       a_val_syms = [];
+      a_stmt_write = None;
       a_loops = loops;
       a_path = path;
     }

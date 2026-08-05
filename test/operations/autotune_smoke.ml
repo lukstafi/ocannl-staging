@@ -127,6 +127,7 @@ let () =
         simdgroup_fragments = Set.empty (module Ir.Tnode);
         swizzled = Map.empty (module Ir.Tnode);
         zero_fringe = Set.empty (module Ir.Tnode);
+        flip_candidates = [];
       }
     in
     fake
@@ -135,7 +136,6 @@ let () =
            index = s;
            from_ = 0;
            to_ = 3;
-           trace_it = false;
            axis = LL.Serial;
            body =
              LL.Seq

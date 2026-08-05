@@ -26,7 +26,7 @@ let fresh_tn =
 let sp = Ops.single
 
 let for_over ?(extent = 4) sym body =
-  LL.For_loop { index = sym; from_ = 0; to_ = extent - 1; body; trace_it = false; axis = LL.Serial }
+  LL.For_loop { index = sym; from_ = 0; to_ = extent - 1; body; axis = LL.Serial }
 
 let get tn idcs = LL.Get (tn, idcs)
 let it s = Idx.Iterator s

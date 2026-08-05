@@ -7,7 +7,9 @@
   sources (`--ocannl_profile=…`, `OCANNL_PROFILE=…`, `profile=…` in `ocannl_config`).
   `reproducible` is deterministic and, wherever reasonable, identical across machines — the
   autotuner's *search* off (replaying a committed cache stays allowed: a pinned schedule is
-  deterministic), no `-mcpu=native`, FP contraction pinned off, explicit SIMD rendering off (it
+  deterministic), the gh-555 inlining refinement off (a flip is accepted on a measured
+  improvement, and inlining is not numerics-neutral where storage is narrower than compute), no
+  `-mcpu=native`, no probed SIMD flags, FP contraction pinned off, explicit SIMD rendering off (it
   reassociates strict-FP reductions), and the numerics gates at their exact defaults.
   `performance` is the fastest configuration *at unchanged semantics*: search on with a wider beam,
   the cost model picking untuned compiles, host-targeted arch flags, `fp16_arithmetic`.

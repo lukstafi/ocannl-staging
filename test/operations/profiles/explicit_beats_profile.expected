@@ -3,6 +3,7 @@ autotune_search          = true           (profile 'performance' via the command
 autotune_rounds          = 3              (commandline)
 autotune_beam_width      = 4              (profile 'performance' via the commandline)
 model_default_schedule   = true           (profile 'performance' via the commandline)
+tune_inline_flips        = 0              (default)
 cc_backend_arch_flags    = auto           (profile 'performance' via the commandline)
 cc_backend_simd_flags    = auto           (profile 'performance' via the commandline)
 cc_backend_fp_contract   = auto           (default)

@@ -63,7 +63,6 @@ let over_budget_transform ~out_tn ~src_tn ~rows (opt : LL.optimized) : LL.optimi
         from_ = 0;
         to_ = scratch_floats - 1;
         axis = LL.Serial;
-        trace_it = false;
         body =
           LL.Set
             {
@@ -81,7 +80,6 @@ let over_budget_transform ~out_tn ~src_tn ~rows (opt : LL.optimized) : LL.optimi
         from_ = 0;
         to_ = scratch_floats - 1;
         axis = LL.Serial;
-        trace_it = false;
         body =
           LL.Set
             {
@@ -102,7 +100,6 @@ let over_budget_transform ~out_tn ~src_tn ~rows (opt : LL.optimized) : LL.optimi
         from_ = 0;
         to_ = rows - 1;
         axis = LL.Grid;
-        trace_it = false;
         body = LL.Seq (fill, drain);
       }
   in
