@@ -1,0 +1,48 @@
+Profile picked via nowhere (no profile):
+  k_cmd  = cmdline  (commandline)
+  k_env  = env      (environment)
+  k_file = file     (config file)
+  k_prof = builtin  (default)
+  k_none = builtin  (default)
+
+Profile picked via the commandline:
+  k_cmd  = cmdline  (commandline)
+  k_env  = payload  (profile 'demo' via the commandline)
+  k_file = payload  (profile 'demo' via the commandline)
+  k_prof = payload  (profile 'demo' via the commandline)
+  k_none = builtin  (default)
+
+Profile picked via the environment:
+  k_cmd  = cmdline  (commandline)
+  k_env  = env      (environment)
+  k_file = payload  (profile 'demo' via the environment)
+  k_prof = payload  (profile 'demo' via the environment)
+  k_none = builtin  (default)
+
+Profile picked via the config file:
+  k_cmd  = cmdline  (commandline)
+  k_env  = env      (environment)
+  k_file = file     (config file)
+  k_prof = payload  (profile 'demo' via the config file)
+  k_none = builtin  (default)
+
+Profile "reproducible" sets:
+  autotune_search=false
+  model_default_schedule=false
+  cc_backend_arch_flags=none
+  cc_backend_fp_contract=off
+  cc_backend_fast_math=false
+  cc_vector_bytes=0
+  tf32_matmuls=false
+  fp16_arithmetic=false
+  narrow_compute_f32=true
+
+Profile "performance" sets:
+  autotune_search=true
+  autotune_beam_width=4
+  autotune_rounds=4
+  model_default_schedule=true
+  cc_backend_arch_flags=auto
+  cc_backend_simd_flags=auto
+  fp16_arithmetic=true
+

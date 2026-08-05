@@ -1,0 +1,74 @@
+; gh-ocannl-559: the same executable, resolved against four different pickers. The local
+; ocannl_config (not the shared test/config one -- the config search stops at the first file
+; walking up from the working directory) is deliberately "exhaustive": it picks a profile and
+; also states two of that profile's keys explicitly.
+
+(executable
+ (name profile_precedence)
+ (modules profile_precedence)
+ (libraries base arrayjit.utils stdio))
+
+(rule
+ (target from_config_file.actual)
+ (deps ocannl_config)
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:profile_precedence.exe}))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff from_config_file.expected from_config_file.actual)))
+
+(rule
+ (target from_cmdline.actual)
+ (deps ocannl_config)
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:profile_precedence.exe} --ocannl_profile=performance))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff from_cmdline.expected from_cmdline.actual)))
+
+(rule
+ (target from_env.actual)
+ (deps ocannl_config)
+ (action
+  (setenv
+   OCANNL_PROFILE
+   performance
+   (with-stdout-to
+    %{target}
+    (run %{dep:profile_precedence.exe})))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff from_env.expected from_env.actual)))
+
+; A profile can never defeat a setting of equal or greater immediacy: the explicit
+; commandline key wins over the payload of the profile the commandline picked.
+
+(rule
+ (target explicit_beats_profile.actual)
+ (deps ocannl_config)
+ (action
+  (with-stdout-to
+   %{target}
+   (run
+    %{dep:profile_precedence.exe}
+    --ocannl_profile=performance
+    --ocannl_autotune_rounds=3))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff explicit_beats_profile.expected explicit_beats_profile.actual)))

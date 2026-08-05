@@ -1058,6 +1058,13 @@
   (pps ppx_here ppx_expect ppx_inline_test ppx_ocannl))
  (modes best))
 
+(test
+ (name config_profiles)
+ (package neural_nets_lib)
+ (deps ocannl_config config_profiles.expected)
+ (modules config_profiles)
+ (libraries base arrayjit.utils stdio))
+
 (executable
  (name test_config_consistency)
  (modules test_config_consistency)
