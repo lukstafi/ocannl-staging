@@ -2,7 +2,7 @@
 
    High-level lowering never places two distinct tensors in the same for-loop (each assignment
    lowers to its own [loop_over_dims]), so these cases are built directly as [Ir.Low_level.t] and
-   run through [Ir.Low_level.optimize] -- the same pipeline (visit_llc -> virtual_llc ->
+   run through [Ir.Low_level.optimize] -- the same pipeline (trace_node_facts -> decide_placements -> virtual_llc ->
    cleanup_virtual_llc -> simplify -> CSE -> hoist) the backends use. We assert structurally on the
    optimized form and on the resulting [traced_array]/memory-mode facts, which precisely pin the
    #134 invariants:
