@@ -395,9 +395,6 @@ virtualize_max_visits=1
 # the cap.
 virtualize_max_inline_reduction=16
 
-# Truncate longer axes to this many dimensions in the generic optimizer's interpreter.
-virtualize_max_tracing_dim=5
-
 # If `true`, tensor nodes will by default not be hosted.
 enable_device_only=true
 

@@ -677,8 +677,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
                     Tn.Placements.is_in_context_force plc tn 45
                     && (not node.Low_level.read_only)
                     && (not node.Low_level.read_before_write)
-                    && (node.Low_level.zeroed_out
-                       || not (Hash_set.is_empty node.Low_level.assignments))
+                    && (node.Low_level.zeroed_out || node.Low_level.has_assignment)
                     (* Written but never consumed in-routine means the write is an EXPORT for later
                        routines (parameter initialization is the ubiquitous case) -- its lifetime
                        extends past this routine, so it must keep dedicated bytes. *)

@@ -139,7 +139,9 @@ block tensor operation ambiguity.
 by a chain of passes:
 
 ```
-visit_llc            (tracing: builds traced_store + reverse_node_map)
+trace_node_facts     (structural facts pass: builds traced_store + reverse_node_map)
+  ↓
+decide_placements    (placement decisions from the facts + affine access metrics)
   ↓
 virtual_llc          (identify + validate inlinable computations)
   ↓
@@ -163,16 +165,16 @@ inlinable computations) **across** compilation calls, so that a tensor virtualiz
 one routine can be inlined into a later routine that reads it. `optimize_proc` threads the incoming
 `optimize_ctx` through `virtual_llc` and returns it unchanged in the `optimized` result.
 
-### 1. Tracing Phase (`visit_llc`)
+### 1. Tracing Phase (`trace_node_facts` + `decide_placements`)
 
-This phase symbolically executes the computation to build a `traced_store` mapping each tensor node
-to a `traced_array`:
+A single structural, non-enumerating program-order traversal (`trace_node_facts`; gh-554 retired
+the concrete-index interpreter that used to unroll loops here) builds a `traced_store` mapping each
+tensor node to a `traced_array`:
 
 ```ocaml
 type traced_array = {
   tn : Tn.t;
-  assignments : int array Hash_set.t;       (* Positions written to *)
-  accesses : (int array, visits) Hashtbl.t; (* Positions read, with visit counts *)
+  mutable has_assignment : bool;            (* Is there a Set/Set_from_vec of the node? *)
   mutable zero_initialized_by_code : bool;
   mutable zeroed_out : bool;
   mutable read_before_write : bool;
@@ -194,19 +196,16 @@ constraint.
 
 Key analyses performed:
 
-- **Access Pattern Analysis**: Tracks which positions are read/written and how many times (`visits`).
-- **Dependency Analysis**: Determines read-before-write patterns (recurrence).
-- **Scalar Constant Expression Detection**: Identifies tensor nodes that are constant scalars.
-- **Complexity Classification**: Determines `is_accessing` (reads non-constant arrays) and
-  `is_complex` (performs non-trivial operations on array accesses).
-- **Memory Mode Inference**: Decides whether tensors should be virtual, materialized, etc.
-
-#### Index Position Computation
-
-For tracing, a `lookup` helper converts symbolic indices to concrete integer positions: `Fixed_idx`
-yields its constant, `Sub_axis` yields 0, `Iterator` yields the symbol's bound value (default 0), and
-`Affine { symbols; offset }` computes the linear combination `offset + Σ coeff·value`. For-loops are
-only unrolled up to `max_tracing_dim` positions during this symbolic execution.
+- **Structural facts** (`trace_node_facts`): setter/reader structure, scalar-constexpr and one-hot
+  classifications, reduction extents, loop-symbol ownership, the merge node.
+- **Affine access metrics** (gh-554; lazily computed from `affine_accesses`): per-cell read
+  multiplicity as a cardinality bound (`read_multiplicity_query`, replacing the retired sampled
+  visit counts), and read-before-write as a containment query (`reads_covered_query` over
+  `Affine.read_covered_before`). Both are exact where the retired concrete-index interpreter
+  sampled truncated loop ranges.
+- **Placement decisions** (`decide_placements`): resolves virtual/materialized placements from the
+  facts and metrics — the visit cap (`virtualize_max_visits`), the recompute-cost cap
+  (`virtualize_max_inline_reduction`), read-only and recurrence pessimizations.
 
 ### 2. Virtualization Phase (`virtual_llc` + `check_and_store_virtual`)
 
@@ -406,9 +405,8 @@ is the soundness-critical comparator; an overly-loose comparison would merge dis
 
 The optimization behavior is controlled by `virtualize_settings`:
 
-- `max_visits`: maximum number of times a tensor can be accessed before being materialized
-  (default: **1**).
-- `max_tracing_dim`: maximum dimension size for loop unrolling during analysis (default: **5**).
+- `max_visits`: maximum per-cell read multiplicity (bounded via the affine access relations) before
+  a tensor is materialized (default: **1**).
 - `enable_device_only`: whether to prefer device-only storage when possible (default: **true**).
 - `inline_scalar_constexprs`: whether to inline scalar constant expressions regardless of access
   counts (default: **true**).

@@ -3,7 +3,7 @@
 
    High-level lowering never produces these shapes directly in a controllable way, so -- like
    [virtual_shared_loop.ml] -- the cases are built directly as [Ir.Low_level.t] and run through
-   [Ir.Low_level.optimize] (the same visit_llc -> virtual_llc -> cleanup -> simplify pipeline the
+   [Ir.Low_level.optimize] (the same trace_node_facts -> virtual_llc -> cleanup -> simplify pipeline the
    backends use). We assert structurally on the optimized form (which producers virtualize, that no
    intermediate array read/setter survives, and which stay materialized).
 

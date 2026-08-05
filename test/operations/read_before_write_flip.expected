@@ -1,7 +1,6 @@
-default: tracer flags the intermediate recurrent: true
-default: read_before_write overridden to false: true
+default: read_before_write stays false: true
 default: intermediate is not a routine input: true
-materialized: tracer flags the intermediate recurrent: true
+materialized: read_before_write stays false: true
 materialized: intermediate stays non-virtual: true
 parity: same result length: true
 parity: PASS
