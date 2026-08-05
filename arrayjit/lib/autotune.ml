@@ -3760,20 +3760,35 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
          ~default:(int_arg ~arg_name:"autotune_split_reduce_max_sites" ~default:8))
   in
   let seed_block_sizes = Option.value seed_block_sizes ~default:[ 64; 128; 256; 512 ] in
+  (* Whether the cache directory was CHOSEN, as opposed to being the built-in default: passed by the
+     caller, or set at some config source (a profile payload included). Only relevant with the
+     search off, where it is the difference between replaying a cache someone committed and
+     replaying whatever an earlier local search happened to leave in ./autotune_cache
+     (gh-ocannl-559; Codex P2 on PR #291) -- the latter would make two reproducible runs differ on
+     local state, which is the leak that turning the search off exists to close. *)
+  let cache_dir_chosen =
+    Option.is_some cache_dir
+    ||
+    match snd (Utils.get_global_arg_with_source ~arg_name:"autotune_cache_dir" ~default:"") with
+    | Utils.From_default -> false
+    | _ -> true
+  in
   let cache_dir =
     Option.value cache_dir
       ~default:(Utils.get_global_arg ~arg_name:"autotune_cache_dir" ~default:"autotune_cache")
   in
+  (* A search-less [tune] replays only a cache someone asked for. *)
+  let cache_dir = if search || cache_dir_chosen then cache_dir else "" in
   let keep_fraction =
     Option.value keep_fraction ~default:(float_arg ~arg_name:"autotune_keep_fraction" ~default:1.)
   in
   let static_indices = Idx.bound_symbols bindings in
   let backend = Context.backend_name ctx in
-  (* Without a cache there is nothing for a search-less [tune] to replay, so it does not even take
-     the base compile that computes the cache key: the caller gets the untuned default compile it
-     would have gotten from [Context.compile]. *)
+  (* Without a cache to replay there is nothing for a search-less [tune] to do, so it does not even
+     take the base compile that computes the cache key: the caller gets the untuned default compile
+     it would have gotten from [Context.compile]. *)
   if (not search) && String.is_empty cache_dir then (
-    logf "search disabled (autotune_search=false) and no cache: compiling the untuned default";
+    logf "search disabled (autotune_search=false) and no chosen cache: compiling the untuned default";
     Option.iter report ~f:(fun f -> f no_search_report);
     Context.compile ctx comp bindings)
   else

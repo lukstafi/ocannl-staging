@@ -267,6 +267,12 @@ let simd_flags =
   fun () ->
     match Utils.get_global_arg ~default:"auto" ~arg_name:"cc_backend_simd_flags" with
     | "auto" -> Lazy.force probed
+    (* No SIMD flags, spelled as a word for the same reason as [arch_flags]' "none": a config
+       source cannot carry an empty value. Whether the probe fires at all depends on what the
+       toolchain's default target already exposes, which is a per-machine fact, so a run that must
+       be machine-independent pins this rather than reasoning about which of the added flags could
+       have changed a result. *)
+    | "none" -> ""
     | flags -> flags
 
 (* Pool-backed Grid rendering (docs/proposals/gh-ocannl-164.md): eligible outermost [Grid] loops

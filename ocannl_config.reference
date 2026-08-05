@@ -268,12 +268,15 @@
 # iteration independence).
 #cc_vector_bytes=-1
 
-# Whether `Autotune.tune` searches at all. With false, a committed schedule cache entry still
-# replays (see autotune_cache_dir) -- a pinned schedule is deterministic -- but no candidate is
-# ever compiled or timed, and a cache miss compiles the untuned default pipeline, exactly as if
-# `Autotune.tune` had not been called. Crowning a schedule by measurement is the largest
-# cross-machine determinism leak (schedule identity pins numerics), which is why the
-# `reproducible` profile turns it off.
+# Whether `Autotune.tune` searches at all. With false, no candidate is ever compiled or timed,
+# and a cache miss compiles the untuned default pipeline, exactly as if `Autotune.tune` had not
+# been called. Crowning a schedule by measurement is the largest cross-machine determinism leak
+# (schedule identity pins numerics), which is why the `reproducible` profile turns it off.
+# A committed schedule cache still replays -- a pinned schedule is deterministic -- but only from
+# a CHOSEN autotune_cache_dir: one passed to `Autotune.tune` or set at some config source. With
+# the search off the built-in default directory counts as no cache, so a run cannot silently pin
+# itself to whatever an earlier local search left in ./autotune_cache. (With the search on the
+# default cache behaves as it always has -- a search that misses rewrites it.)
 #autotune_search=true
 
 # The beam width of `Autotune.tune`'s empirical schedule search: how many of the fastest
@@ -414,7 +417,10 @@
 # The default "auto" probes once per process: if the target selected by cc_backend_arch_flags
 # already has AVX2 and FMA, `-mavx2 -mfma -ftree-vectorize` (or the subset the compiler accepts)
 # is appended; otherwise (non-AVX2 x86, ARM) nothing is, so generated code never requires an ISA
-# beyond the configured target. Any other value is passed through verbatim; empty disables.
+# beyond the configured target. The value "none" appends nothing at all (whether the probe fires
+# is a per-machine fact, so the `reproducible` profile pins this too); like the "none" of
+# cc_backend_arch_flags it is spelled as a word because an empty value means "unset". Any other
+# value is passed through verbatim.
 #cc_backend_simd_flags=auto
 
 # If true (the default), the results of the CC backend's toolchain probes -- the compiler command
@@ -628,8 +634,9 @@
 #
 # # The largest cross-machine determinism leak: schedule identity pins numerics (loop order,
 # # split reductions, tensorization), so two machines crowning two schedules compute two
-# # results. Replaying an explicitly provided, committed autotune_cache_dir stays allowed --
-# # a pinned schedule is deterministic.
+# # results. Replaying stays allowed -- a pinned schedule is deterministic -- but only from a
+# # CHOSEN autotune_cache_dir: with the search off the built-in default is treated as no cache,
+# # so an earlier local search's leftovers in ./autotune_cache cannot silently pin a schedule.
 # autotune_search=false
 # # The analytic cost model picks schedules from per-backend (and, once calibrated, per-machine)
 # # envelope constants -- the same leak without the timing runs.
@@ -638,6 +645,10 @@
 # # `-mcpu=native` / `-march=native` changes which FMA and vector instructions the compiler may
 # # use, hence the results, per machine. "none" passes no architecture flag.
 # cc_backend_arch_flags=none
+# # Whether the SIMD probe fires depends on what the toolchain's DEFAULT target already exposes,
+# # which is itself a per-machine fact -- so pin the flags off rather than reason about which of
+# # them could have changed a result.
+# cc_backend_simd_flags=none
 # # Contraction the codegen did not ask for (the explicit `fmaf` selections stay): whether a*b+c
 # # becomes one fused op is compiler- and target-discretionary.
 # cc_backend_fp_contract=off

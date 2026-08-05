@@ -509,7 +509,10 @@ val tune :
   (* Whether to search at all; default from config [autotune_search] (true). With [false]
      (gh-ocannl-559: the [reproducible] profile) a committed cache entry still replays -- a pinned
      schedule is deterministic -- but nothing is timed, and a cache miss compiles the untuned
-     default pipeline and reports {!no_search_report}. *)
+     default pipeline and reports {!no_search_report}. Only a CHOSEN cache replays: [cache_dir]
+     passed here, or [autotune_cache_dir] set at some config source. The built-in default counts
+     as no cache, so a search-less run cannot silently pin itself to whatever an earlier local
+     search left in ./autotune_cache. *)
   ?beam_width:int ->
   (* Default from config [autotune_beam_width] (2). *)
   ?rounds:int ->

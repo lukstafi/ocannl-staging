@@ -413,8 +413,9 @@ let reproducible_profile_payload =
 
 # The largest cross-machine determinism leak: schedule identity pins numerics (loop order,
 # split reductions, tensorization), so two machines crowning two schedules compute two
-# results. Replaying an explicitly provided, committed autotune_cache_dir stays allowed --
-# a pinned schedule is deterministic.
+# results. Replaying stays allowed -- a pinned schedule is deterministic -- but only from a
+# CHOSEN autotune_cache_dir: with the search off the built-in default is treated as no cache,
+# so an earlier local search's leftovers in ./autotune_cache cannot silently pin a schedule.
 autotune_search=false
 # The analytic cost model picks schedules from per-backend (and, once calibrated, per-machine)
 # envelope constants -- the same leak without the timing runs.
@@ -423,6 +424,10 @@ model_default_schedule=false
 # `-mcpu=native` / `-march=native` changes which FMA and vector instructions the compiler may
 # use, hence the results, per machine. "none" passes no architecture flag.
 cc_backend_arch_flags=none
+# Whether the SIMD probe fires depends on what the toolchain's DEFAULT target already exposes,
+# which is itself a per-machine fact -- so pin the flags off rather than reason about which of
+# them could have changed a result.
+cc_backend_simd_flags=none
 # Contraction the codegen did not ask for (the explicit `fmaf` selections stay): whether a*b+c
 # becomes one fused op is compiler- and target-discretionary.
 cc_backend_fp_contract=off
