@@ -246,6 +246,46 @@ let case_non_traced_loop () =
     (known_virtual o prod);
   p "non-traced consumer loop: producer inlined into the consumer" (count_get o prod = 0)
 
+(* === Case 9: a write under a dead loop ([to_ < from_]) never executes === The retired tracer
+   never enumerated dead loops; the structural facts pass and the metric views must likewise record
+   nothing from them: the node stays read-only (a routine input, not a spurious output). *)
+let case_dead_loop () =
+  let d = mk "dead" and out = mk "dlo" in
+  materialize out;
+  let i = sym () and j = sym () in
+  let dead_write =
+    LL.For_loop
+      { index = i; from_ = 0; to_ = -1; body = set i d (c 7.); trace_it = true; axis = Serial }
+  in
+  let consume = loop j (set j out (get j d)) in
+  let o = optimize (seq dead_write consume) in
+  let traced = Base.Hashtbl.find_exn o.LL.traced_store d in
+  p "dead loop: node stays read-only" traced.LL.read_only;
+  let (inputs, outputs), _merge = LL.input_and_output_nodes o in
+  p "dead loop: node is a routine input, not an output"
+    (Set.mem inputs d && not (Set.mem outputs d))
+
+(* === Case 10: an If condition's read is not a read-modify-write self-read === The condition reads
+   [a] at the same position the guarded body writes it, and shares the body's program path; the
+   exemption must not fire (the read executes before the write), so [a] is read-before-write — a
+   routine input whose prior contents must be preserved. *)
+let case_if_cond_read () =
+  let a = mk "guarded" in
+  let i = sym () in
+  let guarded_update =
+    loop i
+      (LL.If
+         {
+           cond = (LL.Binop (Ops.Cmplt, (get i a, single), (c 1., single)), single);
+           body = set i a (c 1.);
+         })
+  in
+  let o = optimize guarded_update in
+  let traced = Base.Hashtbl.find_exn o.LL.traced_store a in
+  p "if-cond read: read_before_write set" traced.LL.read_before_write;
+  let (inputs, _outputs), _merge = LL.input_and_output_nodes o in
+  p "if-cond read: node is a routine input" (Set.mem inputs a)
+
 let () =
   case_independent ();
   case_mixed ();
@@ -255,4 +295,6 @@ let () =
   case_complex ();
   case_inloop_consumer ();
   case_non_traced_loop ();
+  case_dead_loop ();
+  case_if_cond_read ();
   Stdio.printf "%!"

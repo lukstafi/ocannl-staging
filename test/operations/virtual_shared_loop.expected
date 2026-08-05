@@ -16,3 +16,7 @@ in-loop consumer: providers inlined (no array reads survive): true
 in-loop consumer: consumer setter kept: true
 non-traced consumer loop: producer stays virtual (single-sample semantics): true
 non-traced consumer loop: producer inlined into the consumer: true
+dead loop: node stays read-only: true
+dead loop: node is a routine input, not an output: true
+if-cond read: read_before_write set: true
+if-cond read: node is a routine input: true
