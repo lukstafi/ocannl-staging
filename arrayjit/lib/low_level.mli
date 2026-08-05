@@ -227,11 +227,13 @@ val guard_annotated_extents : should_guard:([ `Grid | `Workgroup ] -> bool) -> t
 type virtualize_settings = {
   mutable enable_device_only : bool;
   mutable max_visits : int;
+      (** Per-cell read multiplicity cap for inlining: a node with a cell read more than this many
+          times (as bounded by the affine access relations, gh-554) is never virtualized unless the
+          computation is simple or a one-hot selector producer. *)
   mutable max_inline_reduction : int;
       (** Recompute-cost cap for inlining: a node whose setters have enclosing reduction loops
           (loops not appearing in the setter's indices) with a trip-count product exceeding this
           value is never virtualized. Negative values disable the cap. *)
-  mutable max_tracing_dim : int;
   mutable inline_scalar_constexprs : bool;
   mutable inline_simple_computations : bool;
   mutable inline_complex_computations : bool;
@@ -239,16 +241,13 @@ type virtualize_settings = {
 
 val virtualize_settings : virtualize_settings
 
-type visits =
-  | Visits of int
-  | Recurrent
-      (** A [Recurrent] visit is when there is an access prior to any assignment in an update. *)
-[@@deriving sexp, equal, variants]
-
 type traced_array = {
   tn : Tnode.t;
-  assignments : int array Base.Hash_set.t;
-  accesses : (int array, visits) Base.Hashtbl.t;
+  mutable has_assignment : bool;
+      (** The code contains a [Set] or [Set_from_vec] of the node ([Zero_out] is tracked separately
+          as [zeroed_out]). Structural replacement (gh-554) for the retired concrete-index tracer's
+          per-cell assignment table; per-cell facts are answered by affine queries over the access
+          relations instead. *)
   mutable zero_initialized_by_code : bool;
   mutable zeroed_out : bool;
   mutable read_before_write : bool;
@@ -287,10 +286,10 @@ type traced_array = {
           appearing in its indices (i.e. reduction loops). Inlining the computation replays these
           loops at every read site; compared against [virtualize_settings.max_inline_reduction]. *)
   mutable read_by_other : bool;
-      (** True when some statement other than the node's own setters reads the node. Unlike
-          [accesses], same-cell reads count, while a setter's own read-modify-write does not. Gates
-          the recompute-cost guard: a node never read in the routine has no inlining cost, so it
-          must stay eligible for virtual dead-code elimination. *)
+      (** True when some statement other than the node's own setters reads the node. Unlike the
+          read-multiplicity metric, same-cell reads count, while a setter's own read-modify-write
+          does not. Gates the recompute-cost guard: a node never read in the routine has no inlining
+          cost, so it must stay eligible for virtual dead-code elimination. *)
 }
 [@@deriving sexp_of]
 

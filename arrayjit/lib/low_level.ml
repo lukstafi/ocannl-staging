@@ -224,7 +224,6 @@ type virtualize_settings = {
   mutable enable_device_only : bool;
   mutable max_visits : int;
   mutable max_inline_reduction : int;
-  mutable max_tracing_dim : int;
   mutable inline_scalar_constexprs : bool;
   mutable inline_simple_computations : bool;
   mutable inline_complex_computations : bool;
@@ -236,9 +235,6 @@ let virtualize_settings =
   in
   let max_inline_reduction =
     Int.of_string @@ Utils.get_global_arg ~arg_name:"virtualize_max_inline_reduction" ~default:"16"
-  in
-  let max_tracing_dim =
-    Int.of_string @@ Utils.get_global_arg ~arg_name:"virtualize_max_tracing_dim" ~default:"5"
   in
   let enable_device_only = Utils.get_global_flag ~default:true ~arg_name:"enable_device_only" in
   let inline_scalar_constexprs =
@@ -254,18 +250,17 @@ let virtualize_settings =
     enable_device_only;
     max_visits;
     max_inline_reduction;
-    max_tracing_dim;
     inline_scalar_constexprs;
     inline_simple_computations;
     inline_complex_computations;
   }
 
-type visits = Visits of int | Recurrent [@@deriving sexp, equal, variants]
-
 type traced_array = {
   tn : Tn.t;
-  assignments : int array Hash_set.t;
-  accesses : (int array, visits) Hashtbl.t;
+  mutable has_assignment : bool;
+      (** The code contains a [Set] or [Set_from_vec] of the node ([Zero_out] is tracked separately
+          as [zeroed_out]). Structural replacement (gh-554) for the retired concrete tracer's
+          per-cell assignment table; per-cell facts are answered by the affine queries instead. *)
   mutable zero_initialized_by_code : bool;
   mutable zeroed_out : bool;
   mutable read_before_write : bool;
@@ -381,8 +376,7 @@ let get_node store tn =
   Hashtbl.find_or_add store tn ~default:(fun () ->
       {
         tn;
-        assignments = Hash_set.Poly.create ();
-        accesses = Hashtbl.Poly.create ();
+        has_assignment = false;
         zero_initialized_by_code = false;
         zeroed_out = false;
         read_before_write = false;
@@ -396,14 +390,6 @@ let get_node store tn =
         inline_reduction_extent = 1;
         read_by_other = false;
       })
-
-let visit ~is_assigned old =
-  if not is_assigned then Recurrent
-  else
-    match old with
-    | None -> Visits 1
-    | Some (Visits i) -> Visits (i + 1)
-    | Some Recurrent -> Recurrent
 
 let is_constexpr_comp traced_store llsc =
   let rec loop llsc =
@@ -483,7 +469,7 @@ let track_symbol reverse_node_map tn idcs =
     | Indexing.Concat syms -> List.iter syms ~f:add)
 
 (* gh-343 / task-73617488: helpers for the one-hot reduction rewrite and the virtualizer exemption.
-   Placed before [visit_llc] so [is_one_hot_selector_assignment] is available during tracing. *)
+   Placed before [trace_node_facts] so [is_one_hot_selector_assignment] is available during tracing. *)
 
 let axis_index_mentions_symbol (s : Indexing.symbol) (idx : Indexing.axis_index) : bool =
   match idx with
@@ -583,23 +569,50 @@ let is_one_hot_selector_assignment traced_store ~(idcs : Indexing.axis_index arr
         | _ -> false)
     | _ -> false)
 
-let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits ~reads_covered llc =
-  let is_too_many = function Visits i -> i > max_visits | Recurrent -> true in
-  (* FIXME: migrate hashtable to use offsets instead of indices *)
-  let lookup env indices =
-    Array.map indices ~f:(function
-      | Indexing.Fixed_idx i -> i
-      | Indexing.Sub_axis -> 0
-      | Iterator s -> Option.value ~default:(* static index *) 0 @@ Map.find env s
-      | Indexing.Affine { symbols; offset } ->
-          List.fold symbols ~init:offset ~f:(fun acc (coeff, s) ->
-              acc + (coeff * (Option.value ~default:0 @@ Map.find env s)))
-      | Indexing.Concat _syms ->
-          (* Concat should be eliminated during lowering before we get here *)
-          invalid_arg
-            "BUG: Concat index encountered during virtualization - should have been eliminated \
-             during lowering")
+(* The affine form of an access position component as the retired concrete tracer evaluated it:
+   statics contribute 0 (they are fixed per routine invocation, so equal statics cancel and distinct
+   statics are conflated — mirroring the tracer's statics-pinned-to-0 environment). [None] =
+   uninterpretable component. Shared by the read-modify-write exemption of [trace_node_facts],
+   [read_multiplicity_query] and [reads_covered_query]. *)
+let norm_position_comp ~statics_set (idx : Indexing.axis_index) =
+  let drop_statics symbols =
+    List.filter (Indexing.coalesce_affine_terms symbols) ~f:(fun (_, s) ->
+        not (Set.mem statics_set s))
+    |> List.sort ~compare:[%compare: int * Indexing.symbol]
   in
+  match idx with
+  | Indexing.Fixed_idx c -> Some ([], c)
+  | Indexing.Iterator s -> Some (drop_statics [ (1, s) ], 0)
+  | Indexing.Affine { symbols; offset } -> Some (drop_statics symbols, offset)
+  | Indexing.Sub_axis | Indexing.Concat _ -> None
+
+(* Whether two access positions denote the same cell at every iteration: per-axis affine-form
+   equality with statics zeroed. The [inline_complex_computations] exemption ("a read at the
+   enclosing statement's write position is a read-modify-write self-read, not a visit") compares
+   positions with this — whichever nodes the two accesses touch, exactly as the retired tracer
+   compared concrete index vectors. *)
+let same_position ~statics_set (m : Indexing.axis_index array) (m' : Indexing.axis_index array) =
+  Array.length m = Array.length m'
+  && Array.for_all2_exn m m' ~f:(fun a b ->
+      match (norm_position_comp ~statics_set a, norm_position_comp ~statics_set b) with
+      | Some fa, Some fb -> [%equal: (int * Indexing.symbol) list * int] fa fb
+      | _ -> false)
+
+(* Structural facts pass (gh-554): a single non-enumerating program-order traversal computing the
+   per-node facts of {!traced_array} that are not affine questions — setter/reader structure,
+   scalar-constexpr and one-hot classifications, reduction extents, loop-symbol ownership and the
+   merge node. Each statement is visited exactly once (the retired concrete-index tracer's
+   [first_visit] pass); the per-cell visit counts and read-before-write facts the tracer sampled by
+   enumerating loop iterations are answered exactly by the affine queries instead
+   ({!read_multiplicity_query}, {!reads_covered_query}, consumed by {!decide_placements}). *)
+let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indices llc =
+  let statics_set =
+    Set.of_list (module Indexing.Symbol)
+    @@ List.map static_indices ~f:(fun s -> s.Indexing.static_symbol)
+  in
+  (* Nodes with a non-exempt read seen so far, in program order — the first-touch state behind
+     [is_scalar_constexpr] and [zero_initialized_by_code] (the tracer's accesses-empty test). *)
+  let read_seen = Hash_set.create (module Tnode) in
   (* [loop_ranges] maps each enclosing loop's index symbol to its full trip count; at a setter, the
      fiber cardinality of the LHS map over that box — the product over symbols absent from the LHS
      indices — is the recompute cost (per read site) of inlining that setter's computation (gh-494:
@@ -609,50 +622,38 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits ~rea
     match Affine.fiber_cardinality ~domain:(Map.to_alist loop_ranges) idcs with
     | `Exact n | `At_least n -> n
   in
-  let rec loop_proc ~first_visit ~loop_ranges env llc =
-    let loop = loop_proc ~first_visit ~loop_ranges env in
+  let rec loop_proc ~loop_ranges llc =
+    let loop = loop_proc ~loop_ranges in
     match llc with
     | Noop -> ()
     | (Seq (c1, c2) : t) ->
         loop c1;
         loop c2
-    | For_loop { index; from_; to_; body; trace_it = false; axis = _ } ->
-        loop_proc ~first_visit
-          ~loop_ranges:(Map.set loop_ranges ~key:index ~data:(to_ - from_ + 1))
-          (Map.add_exn ~key:index ~data:from_ env)
-          body
-    | For_loop { index; from_; to_; body; trace_it = true; axis = _ } ->
-        let loop_ranges = Map.set loop_ranges ~key:index ~data:(to_ - from_ + 1) in
-        for data = from_ to min to_ (from_ + virtualize_settings.max_tracing_dim) do
-          loop_proc
-            ~first_visit:(first_visit && data = from_)
-            ~loop_ranges
-            (Map.add_exn ~key:index ~data env)
-            body
-        done
+    | For_loop { index; from_; to_; body; trace_it = _; axis = _ } ->
+        loop_proc ~loop_ranges:(Map.set loop_ranges ~key:index ~data:(to_ - from_ + 1)) body
     | Zero_out tn ->
         let traced : traced_array = get_node traced_store tn in
-        if Hash_set.is_empty traced.assignments && Hashtbl.is_empty traced.accesses then (
+        if (not traced.has_assignment) && not (Hash_set.mem read_seen tn) then (
           traced.zero_initialized_by_code <- true;
           traced.is_accessing <- false;
           traced.is_complex <- false;
           if is_scalar_dims tn then traced.is_scalar_constexpr <- true);
         traced.zeroed_out <- true
     | Set { tn; idcs; llsc; debug = _ } ->
-        loop_scalar ~loop_ranges ~lhs_tn:(Some tn) env (Some (lookup env idcs)) llsc;
+        loop_scalar ~loop_ranges ~lhs:(Some (tn, idcs)) llsc;
         let traced : traced_array = get_node traced_store tn in
         traced.inline_reduction_extent <-
           max traced.inline_reduction_extent (reduction_extent loop_ranges idcs);
-        if
-          Hash_set.is_empty traced.assignments
-          && Hashtbl.is_empty traced.accesses && is_scalar_dims tn
-        then traced.is_scalar_constexpr <- is_constexpr_comp traced_store llsc
-          (* Note: this prevents detection if the same constant is assigned inside a loop. *)
-        else if not @@ Hash_set.is_empty traced.assignments then traced.is_scalar_constexpr <- false;
-        if first_visit then (
-          traced.is_accessing <- traced.is_accessing || is_accessing_comp traced_store llsc;
-          traced.is_complex <- traced.is_complex || is_complex_comp traced_store llsc);
-        Hash_set.add traced.assignments (lookup env idcs);
+        if (not traced.has_assignment) && (not (Hash_set.mem read_seen tn)) && is_scalar_dims tn
+        then
+          (* An assignment re-executed by an enclosing loop is not a single constant assignment
+             (the retired tracer cleared the flag on the statement's second enumerated visit). *)
+          traced.is_scalar_constexpr <-
+            Map.for_all loop_ranges ~f:(fun w -> w <= 1) && is_constexpr_comp traced_store llsc
+        else if traced.has_assignment then traced.is_scalar_constexpr <- false;
+        traced.is_accessing <- traced.is_accessing || is_accessing_comp traced_store llsc;
+        traced.is_complex <- traced.is_complex || is_complex_comp traced_store llsc;
+        traced.has_assignment <- true;
         (* task-73617488: track range producers (assigned purely from Embed_index) so the indirect
            arm of is_one_hot_selector_assignment can identify them precisely. *)
         (match llsc with
@@ -668,79 +669,53 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits ~rea
            first-seen (trace) order. Sharing a symbol no longer marks tensors [is_complex] -- only
            genuine computation complexity does (see #134). *)
         track_symbol reverse_node_map tn idcs
-    | Set_from_vec { tn; idcs; length; vec_unop = _; arg = arg, _; debug = _ } ->
-        loop_scalar ~loop_ranges ~lhs_tn:(Some tn) env (Some (lookup env idcs)) arg;
+    | Set_from_vec { tn; idcs; length = _; vec_unop = _; arg = arg, _; debug = _ } ->
+        loop_scalar ~loop_ranges ~lhs:(Some (tn, idcs)) arg;
         let traced : traced_array = get_node traced_store tn in
         traced.inline_reduction_extent <-
           max traced.inline_reduction_extent (reduction_extent loop_ranges idcs);
         (* Vector operations cannot be scalar constexpr or one-hot selectors. *)
         traced.is_scalar_constexpr <- false;
         traced.has_non_one_hot_setter <- true;
-        if first_visit then (
-          traced.is_accessing <- traced.is_accessing || is_accessing_comp traced_store arg;
-          traced.is_complex <- traced.is_complex || not (is_constexpr_comp traced_store arg));
-        (* Mark all positions that will be written to *)
-        for i = 0 to length - 1 do
-          let pos_idcs = Array.copy idcs in
-          (* Robustness against empty axes shapes *)
-          let pos_idcs = if Array.is_empty pos_idcs then [| Indexing.Fixed_idx 0 |] else pos_idcs in
-          (match pos_idcs.(Array.length pos_idcs - 1) with
-          | Fixed_idx idx -> pos_idcs.(Array.length pos_idcs - 1) <- Fixed_idx (idx + i)
-          | _ ->
-              (* For non-Fixed_idx, we need to increment through the dimension *)
-              let dims = Tn.dims_without_padding tn in
-              let base_pos = lookup env idcs in
-              (* Compute the flat position from base_pos *)
-              let flat_pos = ref 0 in
-              let stride = ref 1 in
-              for j = Array.length base_pos - 1 downto 0 do
-                flat_pos := !flat_pos + (base_pos.(j) * !stride);
-                stride := !stride * dims.(j)
-              done;
-              flat_pos := !flat_pos + i;
-              (* Convert back to multi-dimensional indices *)
-              for j = Array.length pos_idcs - 1 downto 0 do
-                pos_idcs.(j) <- Fixed_idx (!flat_pos % dims.(j));
-                flat_pos := !flat_pos / dims.(j)
-              done);
-          Hash_set.add traced.assignments (lookup env pos_idcs)
-        done;
+        traced.is_accessing <- traced.is_accessing || is_accessing_comp traced_store arg;
+        traced.is_complex <- traced.is_complex || not (is_constexpr_comp traced_store arg);
+        traced.has_assignment <- true;
         track_symbol reverse_node_map tn idcs
-    | Set_local (_, llsc) -> loop_scalar ~loop_ranges ~lhs_tn:None env None llsc
+    | Set_local (_, llsc) -> loop_scalar ~loop_ranges ~lhs:None llsc
     | Declare_local _ -> ()
     | Comment _ -> ()
     | Staged_compilation _ -> ()
     | Workgroup_barrier -> ()
     | Set_dynamic _ ->
-        (* gh-466: [rewrite_one_hot_reductions] constructs [Set_dynamic] after visit tracing. *)
-        invalid_arg "Low_level.visit_llc: Set_dynamic reached visit tracing"
+        (* gh-466: [rewrite_one_hot_reductions] constructs [Set_dynamic] after fact tracing. *)
+        invalid_arg "Low_level.trace_node_facts: Set_dynamic reached fact tracing"
     | Tile_mma _ ->
         (* Schedule transforms construct [Tile_mma] after the optimization pipeline ran; it never
-           reaches visit tracing. *)
-        invalid_arg "Low_level.visit_llc: Tile_mma reached the optimization pipeline"
+           reaches fact tracing. *)
+        invalid_arg "Low_level.trace_node_facts: Tile_mma reached the optimization pipeline"
     | If { cond = c, _; body } ->
-        loop_scalar ~loop_ranges ~lhs_tn:None env None c;
+        loop_scalar ~loop_ranges ~lhs:None c;
         loop body
-  and loop_scalar ~loop_ranges ~lhs_tn env (access_pos : int array option) llsc =
-    let loop = loop_scalar ~loop_ranges ~lhs_tn env access_pos in
+  and loop_scalar ~loop_ranges ~lhs llsc =
+    let loop = loop_scalar ~loop_ranges ~lhs in
     match llsc with
     | Constant _ | Constant_bits _ -> ()
     | Get (ptr, indices) ->
         let traced : traced_array = get_node traced_store ptr in
-        if not (Option.exists lhs_tn ~f:(Tn.equal ptr)) then traced.read_by_other <- true;
-        let at_pos = lookup env indices in
-        if
-          (not virtualize_settings.inline_complex_computations)
-          || Option.value_map access_pos ~default:true ~f:(fun pos ->
-              not ([%equal: int array] pos at_pos))
-        then
-          Hashtbl.update traced.accesses at_pos
-            ~f:(visit ~is_assigned:(traced.zeroed_out || Hash_set.mem traced.assignments at_pos))
+        if not (Option.exists lhs ~f:(fun (tn, _) -> Tn.equal ptr tn)) then
+          traced.read_by_other <- true;
+        (* The read-modify-write exemption: a read at the enclosing statement's write position is
+           not a visit ([inline_complex_computations]), whichever node it reads. *)
+        let exempt =
+          virtualize_settings.inline_complex_computations
+          && Option.exists lhs ~f:(fun (_, w_idcs) -> same_position ~statics_set w_idcs indices)
+        in
+        if not exempt then Hash_set.add read_seen ptr
     | Get_dynamic { dyn_value = v, _; _ } ->
         (* gh-343: [Get_dynamic] is produced after this tracing pass, so this arm is defensive; the
            dynamic index sub-expression is still traversed for completeness. *)
         loop v
-    | Local_scope { body; _ } -> loop_proc ~first_visit:true ~loop_ranges env body
+    | Local_scope { body; _ } -> loop_proc ~loop_ranges body
     | Get_local _ -> ()
     | Get_merge_buffer (source, _) ->
         Option.iter !merge_node_ref ~f:(fun merge_node ->
@@ -763,72 +738,7 @@ let visit_llc plc traced_store ~merge_node_ref reverse_node_map ~max_visits ~rea
         loop llv2
     | Unop (_, (llsc, _)) -> loop llsc
   in
-  loop_proc ~first_visit:true
-    ~loop_ranges:(Map.empty (module Indexing.Symbol))
-    Indexing.empty_env llc;
-  Hashtbl.iter traced_store ~f:(fun traced ->
-      let tn = traced.tn in
-      if
-        virtualize_settings.inline_scalar_constexprs && traced.is_scalar_constexpr
-        && not (Tn.Placements.known_non_virtual plc tn)
-      then Tn.Placements.update plc tn Virtual 40;
-      (* Recompute-cost guard: inlining a computation replays its reduction loops (loops enclosing a
-         setter without appearing in its indices) at every read site, and the cost multiplies
-         through chains of virtual consumers -- reads of the consumers replay the producer's
-         reduction too. Cap the tolerated extent. One-hot selector producers are exempt like for the
-         visit cap: they must stay virtual so [rewrite_one_hot_reductions] can fire (the rewrite
-         itself removes the recompute cost). *)
-      if
-        virtualize_settings.max_inline_reduction >= 0
-        && traced.inline_reduction_extent > virtualize_settings.max_inline_reduction
-        && traced.read_by_other
-        && Option.is_none (Tn.Placements.get plc tn)
-        && not (traced.prefers_virtual_one_hot && not traced.has_non_one_hot_setter)
-      then Tn.Placements.update plc tn Never_virtual 39;
-      let skip_simple =
-        virtualize_settings.inline_simple_computations && (not traced.is_complex)
-        && not (Tn.Placements.known_non_virtual plc tn)
-      in
-      if
-        (not skip_simple)
-        && Option.is_none (Tn.Placements.get plc tn)
-        && Hashtbl.exists traced.accesses ~f:is_too_many
-        (* task-73617488: one-hot selector producers are exempt from the visit-count cap. The
-           ordinary [virtual_llc]/[cleanup_virtual_llc] path will inline them so that
-           [rewrite_one_hot_reductions] can fire at default [max_visits = 1]. *)
-        && not (traced.prefers_virtual_one_hot && not traced.has_non_one_hot_setter)
-      then Tn.Placements.update plc tn Never_virtual 1;
-      if (not traced.zeroed_out) && Hash_set.is_empty traced.assignments then (
-        (* The tensor node is read-only/recurrent for this computation, but maybe computed or
-           specified as virtual by another routine (in this compilation lineage). However, if the
-           placement is unspecified, we assume this will be the first computation involving the
-           tensor node. *)
-        traced.read_only <- true;
-        if Tn.Placements.mode_is_unspecified plc tn then Tn.Placements.update plc tn On_device 37
-        else if Tn.Placements.known_not_materialized plc tn then (
-          if Tn.Placements.known_non_virtual plc tn then
-            raise
-              (Utils.User_error
-                 [%string
-                   "Mark %{Tn.debug_name tn} as materialized (e.g. via Train.set_materialized) \
-                    before the first routine using it gets compiled; another routine re-uses that \
-                    computation. Debug: %{Tn.Placements.debug plc tn}"]))
-        else if Tn.Placements.known_non_virtual plc tn then Tn.Placements.update plc tn On_device 35);
-      (* We allow sharing virtual nodes across routines. *)
-      if Hashtbl.exists traced.accesses ~f:is_recurrent && not (Tn.Placements.known_virtual plc tn)
-      then
-        (* gh-494 waypoint 2 follow-up: the tracer truncates loops at [max_tracing_dim], so its
-           recurrent classification has false positives (e.g. padded-conv intermediates read at
-           affine offsets past the traced write range). The affine containment query is exact: when
-           it proves every read covered by prior in-routine writes, skip the recurrent
-           pessimization. The override is one-directional — a query decline never introduces a
-           recurrence the tracer did not find — and the query is only forced (and only consulted)
-           for nodes the tracer actually flags. *)
-        match (Lazy.force reads_covered) tn with
-        | `Covered -> ()
-        | `Unknown _ | `Opaque ->
-            traced.read_before_write <- true;
-            Tn.Placements.update plc tn On_device 36)
+  loop_proc ~loop_ranges:(Map.empty (module Indexing.Symbol)) llc
 
 let%diagn2_sexp check_and_store_virtual (optim_ctx : optimize_ctx) traced static_indices top_llc =
   let exception Non_virtual of int in
@@ -1951,7 +1861,7 @@ and substitute_proc ~var ~value llc =
     Phase A of docs/proposals/interval-analysis-scalar-t.md: [interval_of] computes machine-value
     bounds of a scalar expression as consumed at a given precision, threading a total symbol
     environment (every in-scope symbol comes from a [For_loop] or a static binding) -- the abstract
-    twin of [visit_llc]'s concrete [symbol -> int] env. Results carry the set of tensor nodes whose
+    twin of the retired concrete tracer's [symbol -> int] env. Results carry the set of tensor nodes whose
     {e proposed} (unsettled) bounds candidates were consulted; any rewrite that consumes a result
     must settle those sources ({!Tnode.settle_bounds}, binding constraint 2) -- facts derived purely
     from precisions and loop extents have no sources and need no settlement. *)
@@ -3398,8 +3308,7 @@ let input_and_output_nodes optimized =
           else inputs
         in
         let outputs =
-          if materialized && (data.zeroed_out || not (Hash_set.is_empty data.assignments)) then
-            Set.add outputs key
+          if materialized && (data.zeroed_out || data.has_assignment) then Set.add outputs key
           else outputs
         in
         (inputs, outputs)),
@@ -3464,6 +3373,9 @@ let rec scalar_value_syms ~(locals : (int, Indexing.symbol list) Hashtbl.t) (lls
   | Get_dynamic { idcs; dyn_value = v, _; _ } ->
       List.concat_map (Array.to_list idcs) ~f:idx_syms @ scalar_syms v
   | Ternop (_, (a, _), (b, _), (c, _)) -> scalar_syms a @ scalar_syms b @ scalar_syms c
+  (* The dead operand of a projection is never evaluated (codegen renders only the used one). *)
+  | Binop (Ops.Arg1, (a, _), _) -> scalar_syms a
+  | Binop (Ops.Arg2, _, (b, _)) -> scalar_syms b
   | Binop (_, (a, _), (b, _)) -> scalar_syms a @ scalar_syms b
   | Unop (_, (a, _)) -> scalar_syms a
 
@@ -3556,6 +3468,9 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
     | Get_merge_buffer _ | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ -> false
     | Local_scope { body; _ } -> body_reads uid body
     | Ternop (_, (a, _), (b, _), (c, _)) -> reads_tn uid a || reads_tn uid b || reads_tn uid c
+    (* The dead operand of a projection is never evaluated (codegen renders only the used one). *)
+    | Binop (Ops.Arg1, (a, _), _) -> reads_tn uid a
+    | Binop (Ops.Arg2, _, (b, _)) -> reads_tn uid b
     | Binop (_, (a, _), (b, _)) -> reads_tn uid a || reads_tn uid b
     | Unop (_, (a, _)) -> reads_tn uid a
   and body_reads uid (llc : t) =
@@ -3633,6 +3548,10 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
         scalar ~loops ~path ~guarded a;
         scalar ~loops ~path ~guarded b;
         scalar ~loops ~path ~guarded c
+    (* The dead operand of a projection is never evaluated (codegen renders only the used one), so
+       it contributes no access. *)
+    | Binop (Ops.Arg1, (a, _), _) -> scalar ~loops ~path ~guarded a
+    | Binop (Ops.Arg2, _, (b, _)) -> scalar ~loops ~path ~guarded b
     | Binop (_, (a, _), (b, _)) ->
         scalar ~loops ~path ~guarded a;
         scalar ~loops ~path ~guarded b
@@ -4206,108 +4125,178 @@ and pin_scalar_written_bounds (llsc : scalar_t) : unit =
       pin_scalar_written_bounds v2
   | Unop (_, (v, _)) -> pin_scalar_written_bounds v
 
-(* gh-494 waypoint 2: the read-before-write fact of [visit_llc] (its [Recurrent] classification),
-   recomputed as containment queries — every read covered by prior writes. The tracer's semantics is
-   mirrored: [If] guards are taken (guarded writes count as assignments, as the tracer traces [If]
-   bodies unconditionally); a read whose position coincides with the enclosing statement's write
-   position at every iteration is exempt when [inline_complex_computations] (the tracer skips
-   same-position reads, whichever node they read, and it pins static symbols to 0), mirrored here as
-   per-axis affine-form equality with statics zeroed; and static symbols are universalized over
-   their declared ranges — the query is exact where the tracer approximates (loops truncated at
-   [max_tracing_dim], statics at 0).
+let statics_set_of static_indices =
+  Set.of_list
+    (module Indexing.Symbol)
+    (List.map static_indices ~f:(fun s -> s.Indexing.static_symbol))
 
-   The result decides [visit_llc]'s recurrent pessimization, overriding the tracer in the safe
-   direction only (see the call site in [optimize_proc]): a coverage proof cancels a spurious
-   recurrent flag; an [`Unknown] never introduces a recurrence the tracer did not find.
-   [affine_accesses] is not exhaustive on [Staged_compilation], so its presence makes coverage
-   unknowable: [`Opaque] — no override, and no tracer-vs-query comparison either (the tracer is
-   equally blind to staged accesses, so a disagreement would be meaningless). A node without affine
-   accesses is vacuously covered ([affine_accesses] and the tracer walk the same tree, so such a
-   node has no traced reads either). *)
-let reads_covered_query (static_indices : Indexing.static_symbol list) llc :
-    Tn.t -> [ `Covered | `Unknown of string | `Opaque ] =
-  let opaque = ref false in
-  iter_buffer_accesses ~touch:(fun _ -> ()) ~on_opaque:(fun () -> opaque := true) llc;
-  if !opaque then fun _ -> `Opaque
-  else
-    let accs = affine_accesses llc in
-    let by_tn = Hashtbl.create (module Tn) in
-    List.iter accs ~f:(fun a -> Hashtbl.add_multi by_tn ~key:a.Affine.a_tn ~data:a);
-    let all_writes =
-      List.filter_map accs ~f:(fun a ->
-          if a.Affine.a_write && not a.a_whole then Some (a.a_path, a.a_map) else None)
-    in
-    let statics_set =
-      Set.of_list
-        (module Indexing.Symbol)
-        (List.map static_indices ~f:(fun s -> s.Indexing.static_symbol))
-    in
-    let static_range s =
-      List.find_map static_indices ~f:(fun ss ->
-          if Indexing.equal_symbol ss.Indexing.static_symbol s then
-            Option.map ss.static_range ~f:(fun r -> (0, r))
-          else None)
-    in
-    (* The affine form of a position component as the tracer evaluates it: statics contribute 0. *)
-    let norm_comp (idx : Indexing.axis_index) =
-      let drop_statics symbols =
-        List.filter (Indexing.coalesce_affine_terms symbols) ~f:(fun (_, s) ->
-            not (Set.mem statics_set s))
-        |> List.sort ~compare:[%compare: int * Indexing.symbol]
-      in
-      match idx with
-      | Indexing.Fixed_idx c -> Some ([], c)
-      | Indexing.Iterator s -> Some (drop_statics [ (1, s) ], 0)
-      | Indexing.Affine { symbols; offset } -> Some (drop_statics symbols, offset)
-      | Indexing.Sub_axis | Indexing.Concat _ -> None
-    in
-    let same_pos (m : Indexing.axis_index array) (m' : Indexing.axis_index array) =
-      Array.length m = Array.length m'
-      && Array.for_all2_exn m m' ~f:(fun a b ->
-          match (norm_comp a, norm_comp b) with
-          | Some fa, Some fb -> [%equal: (int * Indexing.symbol) list * int] fa fb
-          | _ -> false)
-    in
-    let exempt (r : _ Affine.access) =
-      virtualize_settings.inline_complex_computations
-      && List.exists all_writes ~f:(fun (p, m) ->
-          [%equal: int list] p r.Affine.a_path && same_pos m r.a_map)
-    in
-    fun tn ->
-      match Hashtbl.find by_tn tn with
-      | None -> `Covered
-      | Some accs ->
-          let accs = List.rev accs in
-          let writes = List.filter accs ~f:(fun a -> a.Affine.a_write) in
-          let witness = ref "" in
-          let covered =
-            List.for_all accs ~f:(fun r ->
-                r.Affine.a_write || exempt r
-                ||
-                match Affine.read_covered_before ~static_range ~read:r ~writes () with
-                | `Covered -> true
-                | `Unknown w ->
-                    witness := w;
-                    false)
-          in
-          if covered then `Covered else `Unknown !witness
+(* The [inline_complex_computations] read-modify-write exemption over access records: a read at the
+   enclosing statement's write position (same program path, same {!same_position} map, whichever
+   nodes are involved) is a self-read of the statement's own store, not a visit — exactly the reads
+   the retired concrete tracer never recorded. Shared by {!reads_covered_query} and
+   {!read_multiplicity_query}. *)
+let rmw_exempt ~statics_set accs =
+  let all_writes =
+    List.filter_map accs ~f:(fun a ->
+        if a.Affine.a_write && not a.a_whole then Some (a.a_path, a.a_map) else None)
+  in
+  fun (r : _ Affine.access) ->
+    virtualize_settings.inline_complex_computations
+    && List.exists all_writes ~f:(fun (p, m) ->
+        [%equal: int list] p r.Affine.a_path && same_position ~statics_set m r.a_map)
 
-(* Under [legality_crosscheck], compares the tracer's raw [Recurrent] verdict against the query for
-   every traced node. [procedural_safe] is the tracer's classification BEFORE the decider flip's
-   override, so the stderr precision-gain lines enumerate exactly the overrides applied by
-   [visit_llc]; a disagreement in the stricter direction still raises. [`Opaque] (staged code) is
-   incomparable — both sides are blind to staged accesses — so it is skipped, not compared. *)
-let crosscheck_read_before_write traced_store reads_covered =
+(* gh-494 waypoint 2 / gh-554: the read-before-write fact of the retired concrete-index tracer (its
+   [Recurrent] classification), computed as containment queries — every read covered by prior
+   writes. The tracer's semantics is mirrored: [If] guards are taken (guarded writes count as
+   assignments, as the tracer traced [If] bodies unconditionally); a read at the enclosing
+   statement's write position is exempt ({!rmw_exempt}); and static symbols are universalized over
+   their declared ranges — the query is exact where the tracer sampled (loops truncated at the
+   retired [virtualize_max_tracing_dim], statics pinned to 0).
+
+   [affine_accesses] is not exhaustive on [Staged_compilation] (opaque), so in its presence the
+   verdicts describe the visible accesses only — the same blindness the tracer had: a write hidden
+   in staged code makes the query decline coverage (pessimize — the safe direction), a hidden read
+   is invisible to both analyses. A node without affine accesses is vacuously covered
+   ([affine_accesses] and [trace_node_facts] walk the same tree, so such a node has no traced reads
+   either). *)
+let reads_covered_query (static_indices : Indexing.static_symbol list)
+    (accs : Tn.t Affine.access list) : Tn.t -> [ `Covered | `Unknown of string ] =
+  let by_tn = Hashtbl.create (module Tn) in
+  List.iter accs ~f:(fun a -> Hashtbl.add_multi by_tn ~key:a.Affine.a_tn ~data:a);
+  let statics_set = statics_set_of static_indices in
+  let static_range s =
+    List.find_map static_indices ~f:(fun ss ->
+        if Indexing.equal_symbol ss.Indexing.static_symbol s then
+          Option.map ss.static_range ~f:(fun r -> (0, r))
+        else None)
+  in
+  let exempt = rmw_exempt ~statics_set accs in
+  fun tn ->
+    match Hashtbl.find by_tn tn with
+    | None -> `Covered
+    | Some accs ->
+        let accs = List.rev accs in
+        let writes = List.filter accs ~f:(fun a -> a.Affine.a_write) in
+        let witness = ref "" in
+        let covered =
+          List.for_all accs ~f:(fun r ->
+              r.Affine.a_write || exempt r
+              ||
+              match Affine.read_covered_before ~static_range ~read:r ~writes () with
+              | `Covered -> true
+              | `Unknown w ->
+                  witness := w;
+                  false)
+        in
+        if covered then `Covered else `Unknown !witness
+
+(* gh-554: per-cell read multiplicity upper bound — the abstract replacement for the retired
+   tracer's sampled per-cell visit counts ([Visits i > max_visits]). A read site's own per-cell
+   contribution is bounded by {!Affine.fiber_cardinality_ub} over its loop box; sites that can touch
+   a common cell ({!Affine.may_touch_same_cell}) can stack, so a cell's total is bounded by a site's
+   own bound plus the bounds of every site overlapping it — maximized over sites. Exemptions mirror
+   the tracer: reads at the enclosing statement's write position are skipped ({!rmw_exempt});
+   dynamic reads carry no interpretable map and are skipped like the tracer's defensive
+   [Get_dynamic] arm (the construct postdates this analysis); guarded reads count (guards-taken).
+   The bound over-approximates where the engine cannot prove per-site exactness or pairwise
+   disjointness — erring toward materialization, the safe direction for the visit cap. *)
+let read_multiplicity_query (static_indices : Indexing.static_symbol list)
+    (accs : Tn.t Affine.access list) : Tn.t -> int =
+  let statics_set = statics_set_of static_indices in
+  let static_range s =
+    List.find_map static_indices ~f:(fun ss ->
+        if Indexing.equal_symbol ss.Indexing.static_symbol s then
+          Option.map ss.static_range ~f:(fun r -> (0, r))
+        else None)
+  in
+  let exempt = rmw_exempt ~statics_set accs in
+  let reads_by_tn = Hashtbl.create (module Tn) in
+  List.iter accs ~f:(fun a ->
+      if (not a.Affine.a_write) && (not a.a_dynamic) && not (exempt a) then
+        Hashtbl.add_multi reads_by_tn ~key:a.a_tn ~data:a);
+  fun tn ->
+    match Hashtbl.find reads_by_tn tn with
+    | None -> 0
+    | Some sites ->
+        let sites = Array.of_list sites in
+        let bounds =
+          Array.map sites ~f:(fun a ->
+              let domain = List.map a.Affine.a_loops ~f:(fun (s, (lo, hi)) -> (s, hi - lo + 1)) in
+              match Affine.fiber_cardinality_ub ~domain a.a_map with
+              | `Exact n | `At_most n -> n)
+        in
+        Array.foldi sites ~init:0 ~f:(fun i acc a ->
+            let total =
+              Array.foldi sites ~init:bounds.(i) ~f:(fun j acc' b ->
+                  if j = i || not (Affine.may_touch_same_cell ~static_range a b) then acc'
+                  else acc' + bounds.(j))
+            in
+            max acc total)
+
+(* The placement decision procedure over the traced facts and affine metrics — the tail of the
+   retired [visit_llc], factored out (gh-554; the analysis/decision split of gh-555 step 1). Writes
+   decisions into the lineage's placements table; the metrics are forced only when a decision
+   actually consults them. *)
+let decide_placements plc traced_store ~max_visits ~reads_covered ~read_multiplicity =
   Hashtbl.iter traced_store ~f:(fun traced ->
-      match reads_covered traced.tn with
-      | `Opaque -> ()
-      | (`Covered | `Unknown _) as verdict ->
-          let query_safe, witness =
-            match verdict with `Covered -> (true, "") | `Unknown w -> (false, w)
-          in
-          Affine.crosscheck ~site:"visit read-before-write" ~context:(Tn.debug_name traced.tn)
-            ~procedural_safe:(fun () -> not (Hashtbl.exists traced.accesses ~f:is_recurrent))
-            ~query_safe ~witness)
+      let tn = traced.tn in
+      let covered =
+        lazy (match (Lazy.force reads_covered) tn with `Covered -> true | `Unknown _ -> false)
+      in
+      if
+        virtualize_settings.inline_scalar_constexprs && traced.is_scalar_constexpr
+        && not (Tn.Placements.known_non_virtual plc tn)
+      then Tn.Placements.update plc tn Virtual 40;
+      (* Recompute-cost guard: inlining a computation replays its reduction loops (loops enclosing a
+         setter without appearing in its indices) at every read site, and the cost multiplies
+         through chains of virtual consumers -- reads of the consumers replay the producer's
+         reduction too. Cap the tolerated extent. One-hot selector producers are exempt like for the
+         visit cap: they must stay virtual so [rewrite_one_hot_reductions] can fire (the rewrite
+         itself removes the recompute cost). *)
+      if
+        virtualize_settings.max_inline_reduction >= 0
+        && traced.inline_reduction_extent > virtualize_settings.max_inline_reduction
+        && traced.read_by_other
+        && Option.is_none (Tn.Placements.get plc tn)
+        && not (traced.prefers_virtual_one_hot && not traced.has_non_one_hot_setter)
+      then Tn.Placements.update plc tn Never_virtual 39;
+      let skip_simple =
+        virtualize_settings.inline_simple_computations && (not traced.is_complex)
+        && not (Tn.Placements.known_non_virtual plc tn)
+      in
+      (* Visit cap (gh-554): the retired tracer's sampled per-cell counts, as an exact-or-upper
+         cardinality bound; an uncovered read (the tracer's [Recurrent]) also trips the cap. *)
+      if
+        (not skip_simple)
+        && Option.is_none (Tn.Placements.get plc tn)
+        && ((Lazy.force read_multiplicity) tn > max_visits || not (Lazy.force covered))
+        (* task-73617488: one-hot selector producers are exempt from the visit-count cap. The
+           ordinary [virtual_llc]/[cleanup_virtual_llc] path will inline them so that
+           [rewrite_one_hot_reductions] can fire at default [max_visits = 1]. *)
+        && not (traced.prefers_virtual_one_hot && not traced.has_non_one_hot_setter)
+      then Tn.Placements.update plc tn Never_virtual 1;
+      if (not traced.zeroed_out) && not traced.has_assignment then (
+        (* The tensor node is read-only/recurrent for this computation, but maybe computed or
+           specified as virtual by another routine (in this compilation lineage). However, if the
+           placement is unspecified, we assume this will be the first computation involving the
+           tensor node. *)
+        traced.read_only <- true;
+        if Tn.Placements.mode_is_unspecified plc tn then Tn.Placements.update plc tn On_device 37
+        else if Tn.Placements.known_not_materialized plc tn then (
+          if Tn.Placements.known_non_virtual plc tn then
+            raise
+              (Utils.User_error
+                 [%string
+                   "Mark %{Tn.debug_name tn} as materialized (e.g. via Train.set_materialized) \
+                    before the first routine using it gets compiled; another routine re-uses that \
+                    computation. Debug: %{Tn.Placements.debug plc tn}"]))
+        else if Tn.Placements.known_non_virtual plc tn then Tn.Placements.update plc tn On_device 35);
+      (* We allow sharing virtual nodes across routines. A node with an uncovered read (read before
+         write within this routine — the tracer's [Recurrent]) must own a device buffer whose prior
+         contents are preserved: it is an input of the routine. *)
+      if (not (Tn.Placements.known_virtual plc tn)) && not (Lazy.force covered) then (
+        traced.read_before_write <- true;
+        Tn.Placements.update plc tn On_device 36))
 
 let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
   let traced_store = Hashtbl.create (module Tnode) in
@@ -4316,11 +4305,14 @@ let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
   [%log "tracing"];
   pin_device_written_bounds llc;
   let merge_node_ref = ref None in
-  let reads_covered = lazy (reads_covered_query static_indices llc) in
-  visit_llc input_ctx.placements traced_store ~merge_node_ref reverse_node_map
-    ~max_visits:virtualize_settings.max_visits ~reads_covered llc;
-  if Lazy.force Affine.crosscheck_enabled then
-    crosscheck_read_before_write traced_store (Lazy.force reads_covered);
+  trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indices llc;
+  (* The affine metrics are lazily-materialized views over the routine's access relations: only the
+     facts the decisions actually consult get computed (gh-554). *)
+  let accs = lazy (affine_accesses llc) in
+  let reads_covered = lazy (reads_covered_query static_indices (Lazy.force accs)) in
+  let read_multiplicity = lazy (read_multiplicity_query static_indices (Lazy.force accs)) in
+  decide_placements input_ctx.placements traced_store ~max_visits:virtualize_settings.max_visits
+    ~reads_covered ~read_multiplicity;
   [%log "optimizing"];
   let virtual_llc_result = virtual_llc input_ctx traced_store reverse_node_map static_indices llc in
   let llc =
