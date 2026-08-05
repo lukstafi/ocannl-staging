@@ -21,7 +21,7 @@ type t =
   | Comment of string
   | Staged_compilation of (unit -> PPrint.document)
   | Seq of t * t
-  | For_loop of { index : Indexing.symbol; from_ : int; to_ : int; body : t; trace_it : bool }
+  | For_loop of { index : Indexing.symbol; from_ : int; to_ : int; body : t; axis : axis_type }
   | Zero_out of Tn.t
   | Set of { tn : Tn.t; idcs : Indexing.axis_index array; llsc : scalar_t; mutable debug : string }
   | Set_from_vec of { tn : Tn.t; idcs : Indexing.axis_index array; length : int;
@@ -46,9 +46,10 @@ and scalar_t =
 and scalar_arg = scalar_t * Ops.prec
 ```
 
-`t` represents code/statements while `scalar_t` represents scalar expressions. The `trace_it` flag in
-`For_loop` indicates whether the loop should be traced for optimization (its initial segment is
-unrolled for analysis).
+`t` represents code/statements while `scalar_t` represents scalar expressions. (A historical
+`trace_it` flag on `For_loop` — "don't unroll this loop in the retired concrete-index tracer" — was
+retired with the tracer, gh-554/gh-555; schedule-minted loops are opaque to virtualization by
+pipeline order, since transforms run after `optimize`.)
 
 Notable constructors:
 
@@ -279,13 +280,10 @@ This function validates that the computation can be safely inlined, via these ch
    (in sibling `Set`/`Set_from_vec` indices), `Non_virtual 9` (in sibling `Get`/`Get_merge_buffer`
    indices), or `Non_virtual 10` (in `Embed_index`).
 
-5. **Non-Traced Loops Forbidden**: Loops with `trace_it = false` prevent virtualization
-   (`Non_virtual 6`).
-
-6. **No vector stores / staged code / hoisted locals**: a `Staged_compilation` node fails with
+5. **No vector stores / staged code / hoisted locals**: a `Staged_compilation` node fails with
    `Non_virtual 8`; a `Declare_local` fails with `Non_virtual 19` (defensive — see below).
 
-7. **Has Setter**: the computation must actually write to the tensor (`Non_virtual 12`); and the
+6. **Has Setter**: the computation must actually write to the tensor (`Non_virtual 12`); and the
    tensor must not be already non-virtual (`Non_virtual 11`).
 
 If all checks pass, the computation (with its defining indices) is stored in the `computations` table
@@ -300,7 +298,7 @@ and the handler commits the tensor to `Never_virtual i` (the provenance `i` reco
 - **4** — Inconsistent index patterns between accesses.
 - **5** — Symbol coverage/groundability failure (a non-static symbol is neither bound from a bare
   iterator position nor pinned by an injective affine map).
-- **6** — Non-traced loop (`trace_it = false`) encountered.
+- **6** — Retired (was: non-traced loop encountered; the `trace_it` flag is gone).
 - **7** — Escaping variable in a sibling `Set`/`Set_from_vec` index.
 - **8** — `Staged_compilation` node encountered.
 - **9** — Escaping variable in a sibling `Get`/`Get_merge_buffer` index.

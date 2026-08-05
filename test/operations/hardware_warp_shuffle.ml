@@ -62,7 +62,6 @@ let reduce_transform ~n ~body_of (s : Tn.t) (opt : LL.optimized) : LL.optimized 
           from_ = 0;
           to_ = n - 1;
           body = body_of i;
-          trace_it = false;
           axis = Workgroup_reduce;
         };
   }
@@ -234,7 +233,6 @@ let () =
           index = j;
           from_ = 0;
           to_ = t - 1;
-          trace_it = false;
           axis = Workgroup;
           body =
             LL.Set
@@ -252,7 +250,6 @@ let () =
           index = i;
           from_ = 0;
           to_ = 63;
-          trace_it = false;
           axis = Workgroup_reduce;
           body =
             LL.Set

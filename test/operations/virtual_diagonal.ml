@@ -48,7 +48,7 @@ let set_at idcs tn llsc : LL.t = LL.Set { tn; idcs; llsc; debug = "" }
 let get_at idcs tn : LL.scalar_t = LL.Get (tn, idcs)
 
 let loop s body : LL.t =
-  LL.For_loop { index = s; from_ = 0; to_ = 2; body; trace_it = true; axis = Serial }
+  LL.For_loop { index = s; from_ = 0; to_ = 2; body; axis = Serial }
 
 let seq a b : LL.t = LL.Seq (a, b)
 

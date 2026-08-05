@@ -76,7 +76,6 @@ let () =
         from_ = 0;
         to_ = 3;
         body = LL.Set_local (id, LL.Constant 1.);
-        trace_it = false;
         axis = Serial;
       }
   in
@@ -92,7 +91,6 @@ let () =
         body =
           LL.Set_local
             (id, LL.Binop (Ops.Add, (LL.Get_local id, Ops.single), (LL.Constant 1., Ops.single)));
-        trace_it = false;
         axis = Serial;
       }
   in
@@ -113,7 +111,6 @@ let () =
         from_ = 5;
         to_ = 0;
         body = LL.Set_local (id, LL.Constant 1.);
-        trace_it = false;
         axis = Serial;
       }
   in
@@ -170,7 +167,6 @@ let () =
                 ( Ops.Add,
                   (LL.Get_local id, Ops.single),
                   (LL.Get (tn_src, [| Idx.Iterator idx |]), Ops.single) ) );
-        trace_it = false;
         axis = Serial;
       }
   in
@@ -214,7 +210,6 @@ let () =
         from_ = 5;
         to_ = 0;
         body = LL.Set_local (id, LL.Constant 0.);
-        trace_it = false;
         axis = Serial;
       }
   in
@@ -289,7 +284,6 @@ let () =
                       ( Ops.Add,
                         (LL.Get_local sid, Ops.single),
                         (LL.Get (tn_src, [| Idx.Iterator idx |]), Ops.single) ) );
-              trace_it = false;
               axis = Serial;
             };
         orig_indices = [||];

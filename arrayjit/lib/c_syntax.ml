@@ -1914,7 +1914,7 @@ module C_syntax (B : C_syntax_config) = struct
             if PPrint.is_empty d1 then d2
             else if PPrint.is_empty d2 then d1
             else d1 ^^ hardline ^^ d2)
-    | For_loop { index = i; from_; to_; body; trace_it = _; axis } -> (
+    | For_loop { index = i; from_; to_; body; axis } -> (
         (* Rendering phase of docs/proposals/axis-types-for-loops.md (§5): [Serial] loops render as
            C [for] statements; [Grid]/[Workgroup]/[Workgroup_reduce] loops bind their index to the
            backend's hardware register (at the signed [loop_index_type] width, with an explicit cast

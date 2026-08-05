@@ -93,7 +93,7 @@ let make_local_scope_reduction ~table ~ids ~result ~table_idcs ~vocab ~bounds ~r
     LL.Seq
       ( LL.Set_local (id, LL.Constant 0.),
         LL.For_loop
-          { index = k; from_; to_; trace_it = false; axis = Serial; body = LL.Set_local (id, acc) }
+          { index = k; from_; to_; axis = Serial; body = LL.Set_local (id, acc) }
       )
   in
   ignore vocab;
@@ -216,7 +216,6 @@ let make_transposed_loop ~d_table ~ids ~g ~lhs_idcs ~bounds ~fma =
       index = k;
       from_;
       to_;
-      trace_it = false;
       axis = Serial;
       body = LL.Set { tn = d_table; idcs = lhs_idcs; llsc = acc; debug = "" };
     }

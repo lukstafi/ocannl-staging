@@ -64,7 +64,6 @@ let group_reduce ~(v : Tn.t) ~(s : Tn.t) (opt : LL.optimized) : LL.optimized =
         from_ = 0;
         to_ = n - 1;
         body = body_f i;
-        trace_it = false;
         axis = Workgroup_reduce;
       }
   in

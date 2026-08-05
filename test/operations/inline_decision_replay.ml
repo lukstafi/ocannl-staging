@@ -37,7 +37,7 @@ let mul a b : LL.scalar_t = LL.Binop (Ops.Mul, (a, single), (b, single))
 let c x : LL.scalar_t = LL.Constant x
 
 let loop s body : LL.t =
-  LL.For_loop { index = s; from_ = 0; to_ = 2; body; trace_it = true; axis = Serial }
+  LL.For_loop { index = s; from_ = 0; to_ = 2; body; axis = Serial }
 
 let seq a b : LL.t = LL.Seq (a, b)
 

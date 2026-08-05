@@ -125,7 +125,6 @@ let () =
         to_ = 3;
         body =
           LL.Set { tn = tn_src; idcs = [| Idx.Iterator k |]; llsc = LL.Constant 1.0; debug = "" };
-        trace_it = false;
         axis = Serial;
       }
   in
@@ -160,7 +159,6 @@ let () =
                       ( Ops.Add,
                         (LL.Get_local scope_id, Ops.single),
                         (LL.Get (tn_src, [| Idx.Iterator idx |]), Ops.single) ) );
-              trace_it = true;
               axis = Serial;
             };
         orig_indices = [||];

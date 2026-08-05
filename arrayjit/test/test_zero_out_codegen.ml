@@ -50,7 +50,6 @@ let () =
         from_ = 0;
         to_ = 3;
         body = LL.Zero_out tn_b;
-        trace_it = false;
         axis = Serial;
       }
   in

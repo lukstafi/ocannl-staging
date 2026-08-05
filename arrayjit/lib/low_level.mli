@@ -57,7 +57,6 @@ type t =
       from_ : int;
       to_ : int;
       body : t;
-      trace_it : bool;
       axis : axis_type;
     }
   | Zero_out of Tnode.t

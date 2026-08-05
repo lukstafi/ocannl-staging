@@ -250,7 +250,6 @@ let () =
           from_ = 0;
           to_;
           body = LL.If { cond = (mk axis, iprec); body = LL.Noop };
-          trace_it = false;
           axis = LL.Serial;
         }
     in

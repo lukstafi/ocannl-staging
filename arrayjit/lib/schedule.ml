@@ -200,13 +200,12 @@ type floop = {
   from_ : int;
   to_ : int;
   body : Low_level.t;
-  trace_it : bool;
   axis : Low_level.axis_type;
 }
 (* A copy of [For_loop]'s inlined record (which cannot escape its match). *)
 
-let for_loop { index; from_; to_; body; trace_it; axis } =
-  Low_level.For_loop { index; from_; to_; body; trace_it; axis }
+let for_loop { index; from_; to_; body; axis } =
+  Low_level.For_loop { index; from_; to_; body; axis }
 
 let rec find_loop axis (llc : Low_level.t) : Low_level.t option =
   let open Low_level in
@@ -225,9 +224,9 @@ let rewrite_loop ~what ~sym ~(f : floop -> Low_level.t) (llc : Low_level.t) : Lo
   let found = ref false in
   let rec go llc =
     match llc with
-    | For_loop { index; from_; to_; body; trace_it; axis } when Indexing.equal_symbol index sym ->
+    | For_loop { index; from_; to_; body; axis } when Indexing.equal_symbol index sym ->
         found := true;
-        f { index; from_; to_; body; trace_it; axis }
+        f { index; from_; to_; body; axis }
     | For_loop fc -> For_loop { fc with body = go fc.body }
     | Seq (a, b) -> Seq (go a, go b)
     | If { cond; body } -> If { cond; body = go body }
@@ -377,9 +376,9 @@ let tensorize_llc ~(zero_fringe : Tn.t -> bool) ~i ~j ~k ~lane ~simd_width (llc 
         in
         let nested ~of_ sym body =
           match skim body with
-          | [ For_loop { index; from_; to_; body; trace_it; axis } ]
+          | [ For_loop { index; from_; to_; body; axis } ]
             when Indexing.equal_symbol index sym ->
-              { index; from_; to_; body; trace_it; axis }
+              { index; from_; to_; body; axis }
           | stmts ->
               invalid_arg
                 ("Schedule.Tensorize: loop " ^ Indexing.symbol_ident sym
@@ -613,7 +612,6 @@ let tensorize_llc ~(zero_fringe : Tn.t -> bool) ~i ~j ~k ~lane ~simd_width (llc 
             from_ = 0;
             to_ = simd_width - 1;
             axis = Workgroup;
-            trace_it = false;
             body =
               Tile_mma
                 {
@@ -674,7 +672,6 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
               from_ = 0;
               to_ = ((n + factor - 1) / factor) - 1;
               axis = outer;
-              trace_it = fc.trace_it;
               body =
                 For_loop
                   {
@@ -682,16 +679,15 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
                     from_ = 0;
                     to_ = factor - 1;
                     axis = inner;
-                    trace_it = fc.trace_it;
                     body;
                   };
             })
   | Swap { outer; inner } ->
       rewrite_loop ~what:"Schedule.Swap" ~sym:outer llc ~f:(fun ofc ->
           match ofc.body with
-          | For_loop { index; from_; to_; body; trace_it; axis }
+          | For_loop { index; from_; to_; body; axis }
             when Indexing.equal_symbol index inner ->
-              for_loop { index; from_; to_; trace_it; axis; body = for_loop { ofc with body } }
+              for_loop { index; from_; to_; axis; body = for_loop { ofc with body } }
           | _ ->
               invalid_arg
                 ("Schedule.Swap: loops " ^ Indexing.symbol_ident outer ^ " and "
@@ -804,7 +800,7 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
                         fc.body
                  in
                  For_loop
-                   { index = s; from_ = lo; to_ = hi; body; trace_it = fc.trace_it; axis = Serial })))
+                   { index = s; from_ = lo; to_ = hi; body; axis = Serial })))
   | Expand_zero { tn; indices } ->
       (* Whole-node [Zero_out] is never distributed across hardware threads ([validate_parallel]
          rejects it in multi-threaded kernels); expand it into an ordinary loop nest — over the
@@ -824,7 +820,7 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
           (List.zip_exn indices (Array.to_list dims))
           ~init:(Set { tn; idcs; llsc = Constant 0.; debug = "" })
           ~f:(fun (s, d) body ->
-            For_loop { index = s; from_ = 0; to_ = d - 1; body; trace_it = false; axis = Serial })
+            For_loop { index = s; from_ = 0; to_ = d - 1; body; axis = Serial })
       in
       let found = ref false in
       let rec go llc =
@@ -908,8 +904,8 @@ let collect_source_accesses ~source (llc : Low_level.t) :
     | Seq (a, b) ->
         code stack a;
         code stack b
-    | For_loop { index; from_; to_; body; trace_it; axis } ->
-        code ({ index; from_; to_; body = Noop; trace_it; axis } :: stack) body
+    | For_loop { index; from_; to_; body; axis } ->
+        code ({ index; from_; to_; body = Noop; axis } :: stack) body
     | Set { tn; llsc; _ } ->
         reject_write tn;
         scalar stack llsc
@@ -1484,10 +1480,10 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
           | `Drop_inner (si, _, _) when Indexing.equal_symbol s' si -> body
           | `Divide_inner (si, ext', _, _) when Indexing.equal_symbol s' si ->
               For_loop
-                { index = s'; from_ = 0; to_ = ext' - 1; body; trace_it = false; axis = Serial }
+                { index = s'; from_ = 0; to_ = ext' - 1; body; axis = Serial }
           | _ ->
               For_loop
-                { index = s'; from_ = 0; to_ = extent s - 1; body; trace_it = false; axis = Serial })
+                { index = s'; from_ = 0; to_ = extent s - 1; body; axis = Serial })
     in
     (* The splice target. With an anchor L* (an outer-part symbol or reused workgroup axis), the
        load nest goes at the start of L*'s body. A shared stage with no anchor (e.g. staging a
@@ -1590,7 +1586,7 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
             | `Serial_all | `Drop_inner _ | `Divide_inner _ -> load_nest
           in
           For_loop
-            { index = w_sym; from_ = 0; to_ = w - 1; axis = Workgroup; trace_it = false; body }
+            { index = w_sym; from_ = 0; to_ = w - 1; axis = Workgroup; body }
     in
     let build inner =
       let remapped = remap_reads ~source ~from_idcs:idcs0 ~tile ~tile_idcs:tile_read_idcs inner in
@@ -1663,8 +1659,8 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
         | Seq (a, b) ->
             scan stack conds a;
             scan stack conds b
-        | For_loop { index; from_; to_; body; trace_it; axis } ->
-            scan ({ index; from_; to_; body = Noop; trace_it; axis } :: stack) conds body
+        | For_loop { index; from_; to_; body; axis } ->
+            scan ({ index; from_; to_; body = Noop; axis } :: stack) conds body
         | Set { tn; idcs; llsc; _ } ->
             if Tn.equal tn target then (
               has_write := true;
@@ -1890,7 +1886,7 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
         let nest =
           Map.fold fresh_syms ~init:stmt ~f:(fun ~key:s ~data:s' body ->
               For_loop
-                { index = s'; from_ = 0; to_ = extent s - 1; body; trace_it = false; axis = Serial })
+                { index = s'; from_ = 0; to_ = extent s - 1; body; axis = Serial })
         in
         (* Carry the accesses' (uniform, iteration-invariant) guard chain onto the transfers: only
            the lanes that update their private accumulator may load and store it back (PR #91
@@ -2010,9 +2006,9 @@ let apply_split_reduce ~axis ~target ~num_blocks ~block_index ~inner_index ~comb
   let rec enclosing_path path guarded llc =
     match llc with
     | For_loop { index; _ } when Indexing.equal_symbol index axis -> Some (List.rev path, guarded)
-    | For_loop { index; from_; to_; body; trace_it; axis = ty } ->
+    | For_loop { index; from_; to_; body; axis = ty } ->
         enclosing_path
-          ({ index; from_; to_; body = Noop; trace_it; axis = ty } :: path)
+          ({ index; from_; to_; body = Noop; axis = ty } :: path)
           guarded body
     | Seq (a, b) -> (
         match enclosing_path path guarded a with
@@ -2055,7 +2051,7 @@ let apply_split_reduce ~axis ~target ~num_blocks ~block_index ~inner_index ~comb
         }
     in
     List.fold_right loops ~init:set ~f:(fun (s, lo, hi) body ->
-        For_loop { index = s; from_ = lo; to_ = hi; body; trace_it = false; axis = Serial })
+        For_loop { index = s; from_ = lo; to_ = hi; body; axis = Serial })
   in
   let combine_stmt = ref Noop in
   let zero_stmt = ref None in
@@ -2150,7 +2146,6 @@ let apply_split_reduce ~axis ~target ~num_blocks ~block_index ~inner_index ~comb
                 from_ = 0;
                 to_ = chunk - 1;
                 body;
-                trace_it = fc.trace_it;
                 axis = Serial;
               }
           in
@@ -2160,7 +2155,6 @@ let apply_split_reduce ~axis ~target ~num_blocks ~block_index ~inner_index ~comb
               from_ = 0;
               to_ = num_blocks - 1;
               body = (match init with Some i -> Seq (i, inner) | None -> inner);
-              trace_it = fc.trace_it;
               axis = Serial;
             }
         in
@@ -2492,7 +2486,6 @@ let contract_tensorized_accumulator ~lane ~(masks : pad_mask list) (opt : Low_le
         from_ = 0;
         to_ = p - 1;
         body = If { cond = (cond, iprec); body };
-        trace_it = false;
         axis = Workgroup;
       }
   in
@@ -2585,7 +2578,6 @@ let contract_tensorized_accumulator ~lane ~(masks : pad_mask list) (opt : Low_le
               index = fi;
               from_ = 0;
               to_ = m - 1;
-              trace_it = false;
               axis = Serial;
               body =
                 For_loop
@@ -2593,7 +2585,6 @@ let contract_tensorized_accumulator ~lane ~(masks : pad_mask list) (opt : Low_le
                     index = fj;
                     from_ = 0;
                     to_ = n - 1;
-                    trace_it = false;
                     axis = Serial;
                     body = stmt;
                   };
@@ -2616,9 +2607,9 @@ let contract_tensorized_accumulator ~lane ~(masks : pad_mask list) (opt : Low_le
      loop — recurses into its body. *)
   let rec rewrite llc =
     match llc with
-    | For_loop { index; from_; to_; body; trace_it; axis }
+    | For_loop { index; from_; to_; body; axis }
       when Option.is_none !promoted && equal_axis_type axis Serial && to_ > from_ -> (
-        let fc : floop = { index; from_; to_; body; trace_it; axis } in
+        let fc : floop = { index; from_; to_; body; axis } in
         match try_contract fc with
         | Some replaced -> replaced
         | None -> for_loop { fc with body = rewrite fc.body })
@@ -2924,7 +2915,6 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
         from_ = 0;
         to_ = width - 1;
         body = If { cond = (cond, iprec); body };
-        trace_it = false;
         axis = Workgroup;
       }
   in
@@ -3050,7 +3040,7 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
               let body =
                 List.fold_right loops ~init:tail_leaf ~f:(fun (s, e) body ->
                     For_loop
-                      { index = s; from_ = 0; to_ = e - 1; body; trace_it = false; axis = Serial })
+                      { index = s; from_ = 0; to_ = e - 1; body; axis = Serial })
               in
               Seq (For_loop fc, lane0 ~lane ~width body)
           | None -> (
@@ -3080,7 +3070,6 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
                         index = fi;
                         from_ = 0;
                         to_ = m - 1;
-                        trace_it = false;
                         axis = Serial;
                         body =
                           For_loop
@@ -3088,7 +3077,6 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
                               index = fj;
                               from_ = 0;
                               to_ = n - 1;
-                              trace_it = false;
                               axis = Serial;
                               body = subst_tail ~site_idcs;
                             };
@@ -3126,8 +3114,8 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
             | Some _, Some _ -> fail "multiple write sites of the reduction output"
             | (Some _ as res), None | None, (Some _ as res) -> res
             | None, None -> None)
-        | For_loop { index; from_; to_; body; trace_it; axis } ->
-            find_write ({ index; from_; to_; body = Noop; trace_it; axis } :: path) body
+        | For_loop { index; from_; to_; body; axis } ->
+            find_write ({ index; from_; to_; body = Noop; axis } :: path) body
         | If { body; _ } ->
             if writes_tn target body then
               fail "guarded writes of the reduction output are unsupported"
@@ -3196,7 +3184,6 @@ let apply_fuse_epilogue ~target ~shared (opt : Low_level.optimized) : Low_level.
                         from_ = 0;
                         to_ = fc.to_;
                         body;
-                        trace_it = false;
                         axis = Serial;
                       })
               in

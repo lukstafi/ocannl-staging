@@ -51,7 +51,6 @@ let vec_loop ~axis tn =
       index = i;
       from_ = 0;
       to_ = 7;
-      trace_it = false;
       axis;
       body = LL.Set { tn; idcs = [| Idx.Iterator i |]; llsc = LL.Constant 1.0; debug = "" };
     }
@@ -115,7 +114,6 @@ let () =
         index = i;
         from_ = 0;
         to_ = 7;
-        trace_it = false;
         axis = LL.Serial;
         body =
           LL.Seq
@@ -160,7 +158,6 @@ let () =
         index = i;
         from_ = 0;
         to_ = 7;
-        trace_it = false;
         axis = LL.Vectorized;
         body =
           LL.Seq
@@ -196,7 +193,6 @@ let () =
         index = i;
         from_ = 0;
         to_ = 3;
-        trace_it = false;
         axis = LL.Vectorized;
         body =
           LL.Set
@@ -227,7 +223,6 @@ let () =
         index = i;
         from_ = 0;
         to_ = 7;
-        trace_it = false;
         axis = LL.Vectorized;
         body =
           LL.Set
@@ -274,7 +269,6 @@ let () =
         index = i;
         from_ = 0;
         to_ = 71;
-        trace_it = false;
         axis = LL.Vectorized;
         body =
           LL.Set
@@ -309,7 +303,6 @@ let () =
         index = i;
         from_ = 0;
         to_ = 15;
-        trace_it = false;
         axis = LL.Vectorized;
         body =
           LL.Set
@@ -344,7 +337,6 @@ let () =
         index = i;
         from_ = 0;
         to_ = 7;
-        trace_it = false;
         axis = LL.Vectorized;
         body =
           LL.Set
@@ -400,7 +392,7 @@ let () =
         LL.Set { tn = td; idcs = [| Idx.Iterator fi; Idx.Iterator fj |]; llsc; debug = "" }
       in
       let mk index to_ body =
-        LL.For_loop { index; from_ = 0; to_; trace_it = false; axis = LL.Serial; body }
+        LL.For_loop { index; from_ = 0; to_; axis = LL.Serial; body }
       in
       mk fi 5 (mk fj 28 (mk fl 4 set))
     in
@@ -409,7 +401,6 @@ let () =
         index = lane;
         from_ = 0;
         to_ = 0;
-        trace_it = false;
         axis = LL.Workgroup;
         body =
           LL.Tile_mma

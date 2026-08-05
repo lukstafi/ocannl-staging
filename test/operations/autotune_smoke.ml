@@ -136,7 +136,6 @@ let () =
            index = s;
            from_ = 0;
            to_ = 3;
-           trace_it = false;
            axis = LL.Serial;
            body =
              LL.Seq

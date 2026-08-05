@@ -34,7 +34,7 @@ let fresh_tn =
 let sp = Ir.Ops.single
 
 let for_over ?(extent = 64) sym body =
-  LL.For_loop { index = sym; from_ = 0; to_ = extent - 1; body; trace_it = false; axis = LL.Serial }
+  LL.For_loop { index = sym; from_ = 0; to_ = extent - 1; body; axis = LL.Serial }
 
 let hand_built ~stmts ~tns_on_device ~tns_local =
   let optimize_ctx = LL.empty_optimize_ctx () in

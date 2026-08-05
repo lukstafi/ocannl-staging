@@ -69,7 +69,6 @@ type t =
       from_ : int;
       to_ : int;
       body : t;
-      trace_it : bool;
       axis : axis_type;
     }
   | Zero_out of Tn.t
@@ -661,7 +660,7 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
     | (Seq (c1, c2) : t) ->
         loop c1;
         loop c2
-    | For_loop { index; from_; to_; body; trace_it = _; axis = _ } ->
+    | For_loop { index; from_; to_; body; axis = _ } ->
         loop_proc ~loop_ranges:(Map.set loop_ranges ~key:index ~data:(to_ - from_ + 1)) body
     | Zero_out tn ->
         let traced : traced_array = get_node traced_store tn in
@@ -864,8 +863,7 @@ let%diagn2_sexp check_and_store_virtual (optim_ctx : optimize_ctx) traced static
     | (Seq (c1, c2) : t) ->
         loop c1;
         loop c2
-    | For_loop { trace_it = false; _ } -> raise @@ Non_virtual 6
-    | For_loop { index; body; from_; to_; trace_it = true; axis = _ } ->
+    | For_loop { index; body; from_; to_; axis = _ } ->
         loop_proc ~env_dom:(Set.add env_dom index)
           ~loop_ranges:(Map.set loop_ranges ~key:index ~data:(to_ - from_ + 1))
           body
@@ -1340,14 +1338,12 @@ let%track7_sexp inline_computation ~id (optim_ctx : optimize_ctx) (traced : trac
       | Seq _ ->
           let body = List.filter_map ~f:(loop env) @@ flat_lines [ llc ] in
           if List.is_empty body then None else Some (unflat_lines body)
-      | For_loop { trace_it = false; _ } -> assert false
       | For_loop { index; body; _ } when Map.mem env index -> loop env body
-      | For_loop { index; from_; to_; body; trace_it; axis } ->
+      | For_loop { index; from_; to_; body; axis } ->
           (* Freshen the binding. *)
           let fresh = Indexing.get_symbol () in
           let env = Map.add_exn ~key:index ~data:(Indexing.Iterator fresh) env in
-          Option.map ~f:(fun body : t ->
-              For_loop { index = fresh; from_; to_; body; trace_it; axis })
+          Option.map ~f:(fun body : t -> For_loop { index = fresh; from_; to_; body; axis })
           @@ loop env body
       | Zero_out tn when Tn.equal tn traced.tn -> Some (Set_local (id, Constant 0.0))
       | Set { tn; idcs; llsc; debug = _ } when Tn.equal tn traced.tn ->
@@ -2530,10 +2526,10 @@ let cse_equal_scalar s1 s2 =
     | Noop, Noop -> true
     | Comment s1, Comment s2 -> String.equal s1 s2
     | Seq (a1, a2), Seq (b1, b2) -> equal_t a1 b1 && equal_t a2 b2
-    | ( For_loop { index = i1; from_ = f1; to_ = t1; body = bd1; trace_it = tr1; axis = ax1 },
-        For_loop { index = i2; from_ = f2; to_ = t2; body = bd2; trace_it = tr2; axis = ax2 } ) ->
-        Int.equal f1 f2 && Int.equal t1 t2 && Bool.equal tr1 tr2 && equal_axis_type ax1 ax2
-        && sym_bind i1 i2 && equal_t bd1 bd2
+    | ( For_loop { index = i1; from_ = f1; to_ = t1; body = bd1; axis = ax1 },
+        For_loop { index = i2; from_ = f2; to_ = t2; body = bd2; axis = ax2 } ) ->
+        Int.equal f1 f2 && Int.equal t1 t2 && equal_axis_type ax1 ax2 && sym_bind i1 i2
+        && equal_t bd1 bd2
     | Zero_out tn1, Zero_out tn2 -> Tn.equal tn1 tn2
     | Set { tn = tn1; idcs = i1; llsc = s1; _ }, Set { tn = tn2; idcs = i2; llsc = s2; _ } ->
         Tn.equal tn1 tn2 && Array.equal idx_equal i1 i2 && equal_scalar s1 s2
@@ -4265,42 +4261,6 @@ let read_multiplicity_query (static_indices : Indexing.static_symbol list)
             in
             max acc total)
 
-(* The retired concrete tracer executed a [trace_it = false] loop's body once, with the index
-   pinned at [from_] — such loops are opaque to virtualization (a stored computation containing one
-   is rejected, [Non_virtual 6]). Mirror that in the placement metrics: clamp the loop's bounds to
-   its first iteration in the access views fed to [reads_covered_query] and
-   [read_multiplicity_query], so the symbol becomes a pinned parameter (width 1) instead of
-   contributing its full trip count to multiplicities and coverage. Other [affine_accesses]
-   consumers (liveness, cost model, schedule legality) correctly keep the full ranges. Runs
-   pre-virtualization, so [Local_scope] does not occur in statement position. *)
-let clamp_non_traced_loops (llc : t) (accs : Tn.t Affine.access list) : Tn.t Affine.access list =
-  let pinned = ref [] in
-  let rec go = function
-    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _
-    | Set _ | Set_dynamic _ | Set_from_vec _ | Set_local _ ->
-        ()
-    | Seq (a, b) ->
-        go a;
-        go b
-    | For_loop { index; from_; body; trace_it; _ } ->
-        if not trace_it then pinned := (index, from_) :: !pinned;
-        go body
-    | If { body; _ } -> go body
-    | Tile_mma { fallback; _ } -> go fallback
-  in
-  go llc;
-  if List.is_empty !pinned then accs
-  else
-    List.map accs ~f:(fun a ->
-        {
-          a with
-          Affine.a_loops =
-            List.map a.Affine.a_loops ~f:(fun ((s, _) as entry) ->
-                match List.Assoc.find !pinned s ~equal:Indexing.equal_symbol with
-                | Some from_ -> (s, (from_, from_))
-                | None -> entry);
-        })
-
 (* The placement decision procedure over the traced facts and affine metrics — the tail of the
    retired [visit_llc], factored out (gh-554; the analysis/decision split of gh-555 step 1). Writes
    decisions into the lineage's placements table; the metrics are forced only when a decision
@@ -4404,7 +4364,7 @@ let%diagn2_sexp analyze_proc (static_indices : Indexing.static_symbol list) (llc
   trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indices llc;
   (* The affine metrics are lazily-materialized views over the routine's access relations: only the
      facts the decisions actually consult get computed (gh-554). *)
-  let accs = lazy (clamp_non_traced_loops llc (affine_accesses llc)) in
+  let accs = lazy (affine_accesses llc) in
   {
     an_llc = llc;
     an_static_indices = static_indices;
@@ -4598,7 +4558,7 @@ let to_doc_cstyle ?name ?static_indices () llc =
           List.filter_map [ c1; c2 ] ~f:(function Noop -> None | c -> Some (doc_of_code c))
         in
         separate hardline docs
-    | For_loop { index = i; from_; to_; body; trace_it = _; axis } ->
+    | For_loop { index = i; from_; to_; body; axis } ->
         let header =
           string (axis_type_label axis ^ " ")
           ^^ pp_symbol i ^^ string " = " ^^ int from_ ^^ string " to " ^^ int to_ ^^ string " {"
@@ -4751,7 +4711,7 @@ let to_doc ?name ?static_indices () llc =
           List.filter_map [ c1; c2 ] ~f:(function Noop -> None | c -> Some (doc_of_code c))
         in
         separate hardline docs
-    | For_loop { index = i; from_; to_; body; trace_it = _; axis } ->
+    | For_loop { index = i; from_; to_; body; axis } ->
         let header =
           string (axis_type_label axis ^ " ")
           ^^ pp_symbol i ^^ string " = " ^^ int from_ ^^ string " to " ^^ int to_ ^^ string " {"
@@ -4900,7 +4860,6 @@ let loop_over_dims dims ~body =
             from_ = 0;
             to_ = d - 1;
             body = for_loop (Indexing.Iterator index :: rev_idcs) product;
-            trace_it = true;
             axis = Serial;
           }
   in
@@ -4968,7 +4927,6 @@ let loop_over_padding_region ~dims ~(padding : Ops.axis_padding array) ~body =
             to_ = dim - 1;
             body =
               build_loops ~any_padding_so_far (dim_idx + 1) (Indexing.Iterator index :: rev_idcs);
-            trace_it = true;
             axis = Serial;
           }
       else
@@ -4988,7 +4946,6 @@ let loop_over_padding_region ~dims ~(padding : Ops.axis_padding array) ~body =
                       body
                       @@ Array.concat
                            [ Array.of_list_rev rev_idcs; [| Indexing.Iterator index |]; rest_idcs ]);
-                trace_it = true;
                 axis = Serial;
               }
           else Noop
@@ -5005,7 +4962,6 @@ let loop_over_padding_region ~dims ~(padding : Ops.axis_padding array) ~body =
                 body =
                   (* In middle - NOT in padding for this dim, recurse to find other padded dims *)
                   build_loops ~any_padding_so_far (dim_idx + 1) (Indexing.Iterator index :: rev_idcs);
-                trace_it = true;
                 axis = Serial;
               }
           else Noop
@@ -5030,7 +4986,6 @@ let loop_over_padding_region ~dims ~(padding : Ops.axis_padding array) ~body =
                              [| Indexing.Iterator right_index |];
                              rest_idcs;
                            ]);
-                trace_it = true;
                 axis = Serial;
               }
           else Noop
