@@ -510,5 +510,13 @@ that they earn a lookup rather than always-loaded space.
 ## Conventions
 
 - Releases use lightweight, un-prefixed git tags (`0.8`, not `v0.8`).
+- `ocannl_config.reference` ships with every setting COMMENTED OUT, and the two forms are
+  load-bearing: a commented-out setting is `#key=value` with NO space after the `#`, while prose
+  (and the verbatim profile-payload blocks at the end of the file) always uses `# `. That is how
+  `test_config_consistency` tells documented keys from prose, so a new key documented as `# key=…`
+  reads as undocumented and fails the test. Config values may not contain `=` — the parser splits
+  on it and rejects a line with two, which rules out payload/config values like `-mcpu=native`; a
+  setting that needs one gets a word spelling instead (`cc_backend_arch_flags=none`). A value can
+  never be the empty string either: empty means "unset" at every source.
 - Prefer the minimal targeted fix over speculative hardening: offer hardening separately as an
   option with its costs, don't fold it into the fix.

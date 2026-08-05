@@ -2,6 +2,30 @@
 
 ### Added
 
+- **Config profiles: `reproducible` and `performance`, with picker-inherited precedence**
+  (gh-ocannl-559). A new `profile` setting picks a goal-oriented preset bundle through the ordinary
+  sources (`--ocannl_profile=…`, `OCANNL_PROFILE=…`, `profile=…` in `ocannl_config`).
+  `reproducible` is deterministic and, wherever reasonable, identical across machines — the
+  autotuner's *search* off (replaying a committed cache stays allowed: a pinned schedule is
+  deterministic), no `-mcpu=native`, FP contraction pinned off, explicit SIMD rendering off (it
+  reassociates strict-FP reductions), and the numerics gates at their exact defaults.
+  `performance` is the fastest configuration *at unchanged semantics*: search on with a wider beam,
+  the cost model picking untuned compiles, host-targeted arch flags, `fp16_arithmetic`.
+  Result-changing gates like `tf32_matmuls` stay on the orthogonal numerics axis, so an A/B across
+  profiles keeps measuring scheduling rather than different math.
+
+  Each source level splits into two sublevels — its explicit keys, then the payload of a profile
+  *picked at that level* — so a specific setting can never be defeated by an aggregate one of equal
+  immediacy (`--ocannl_profile=reproducible --ocannl_autotune_rounds=3` gets both), while a profile
+  named on the commandline does override an exhaustive config file. The payloads are partial
+  `ocannl_config` files embedded as string constants (no share-directory machinery, nothing for the
+  walk-up config search to shadow), quoted verbatim in `ocannl_config.reference`, and each
+  payload-derived value is reported with its provenance by `log_config_sourcing`. Companion
+  convention: the reference file now ships with every setting commented out, so copying it wholesale
+  no longer manufactures a hundred explicit settings the user never chose. New keys:
+  `profile`, `autotune_search`, `cc_backend_fp_contract`, and the `none` spelling of
+  `cc_backend_arch_flags`.
+
 - **A search report that says which candidate won, and the placement A/B saying when a tensorized
   winner is discarded** (gh-ocannl-546). `Autotune.report` gains `best_label`, `best_tensorized`
   (read off the winner's schedule, not off its label's promise), the winner's `Tile_mma` statement
