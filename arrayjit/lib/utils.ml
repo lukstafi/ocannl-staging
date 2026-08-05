@@ -141,6 +141,7 @@ let known_config_keys =
       "autotune_cache_dir";
       "autotune_split_reduce_max_sites";
       "autotune_log";
+      "tune_inline_flips";
       "strict_failure_classification";
       (* Analytic cost model (gh-ocannl-491) *)
       "autotune_keep_fraction";

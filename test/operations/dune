@@ -1089,7 +1089,8 @@
     %{dep:../../arrayjit/lib/tnode.ml}
     %{dep:../../arrayjit/lib/assignments.ml}
     %{dep:../../tensor/tensor.ml}
-    %{dep:../../tensor/row.ml}))))
+    %{dep:../../tensor/row.ml}
+    %{dep:../../lib/train.ml}))))
 
 (rule
  (alias runtest)
@@ -1775,6 +1776,17 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules inline_decision_replay)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
+ (name inline_flip_tune)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules inline_flip_tune)
  (libraries base ocannl stdio)
  (preprocess
   (pps ppx_here ppx_ocannl)))
