@@ -644,6 +644,17 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
   (* Nodes with a non-exempt read seen so far, in program order — the first-touch state behind
      [is_scalar_constexpr] and [zero_initialized_by_code] (the tracer's accesses-empty test). *)
   let read_seen = Hash_set.create (module Tnode) in
+  (* Concat indices are eliminated during lowering (concatenation lowers to sequenced components);
+     one reaching this pass would survive to codegen, which has no rendering for it. Reject loudly,
+     as the retired tracer's concrete-index evaluator did. *)
+  let check_no_concat idcs =
+    Array.iter idcs ~f:(function
+      | Indexing.Concat _ ->
+          invalid_arg
+            "BUG: Concat index encountered during virtualization - should have been eliminated \
+             during lowering"
+      | _ -> ())
+  in
   (* [loop_ranges] maps each enclosing loop's index symbol to its full trip count; at a setter, the
      fiber cardinality of the LHS map over that box — the product over symbols absent from the LHS
      indices — is the recompute cost (per read site) of inlining that setter's computation (gh-494:
@@ -661,7 +672,10 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
         loop c1;
         loop c2
     | For_loop { index; from_; to_; body; axis = _ } ->
-        loop_proc ~loop_ranges:(Map.set loop_ranges ~key:index ~data:(to_ - from_ + 1)) body
+        (* A dead loop ([to_ < from_]) never executes its body: record no facts from it, like the
+           retired tracer, which never enumerated such loops. *)
+        if to_ >= from_ then
+          loop_proc ~loop_ranges:(Map.set loop_ranges ~key:index ~data:(to_ - from_ + 1)) body
     | Zero_out tn ->
         let traced : traced_array = get_node traced_store tn in
         if (not traced.has_assignment) && not (Hash_set.mem read_seen tn) then (
@@ -671,6 +685,7 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
           if is_scalar_dims tn then traced.is_scalar_constexpr <- true);
         traced.zeroed_out <- true
     | Set { tn; idcs; llsc; debug = _ } ->
+        check_no_concat idcs;
         loop_scalar ~loop_ranges ~lhs:(Some (tn, idcs)) llsc;
         let traced : traced_array = get_node traced_store tn in
         traced.inline_reduction_extent <-
@@ -701,6 +716,7 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
            genuine computation complexity does (see #134). *)
         track_symbol reverse_node_map tn idcs
     | Set_from_vec { tn; idcs; length = _; vec_unop = _; arg = arg, _; debug = _ } ->
+        check_no_concat idcs;
         loop_scalar ~loop_ranges ~lhs:(Some (tn, idcs)) arg;
         let traced : traced_array = get_node traced_store tn in
         traced.inline_reduction_extent <-
@@ -732,6 +748,7 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
     match llsc with
     | Constant _ | Constant_bits _ -> ()
     | Get (ptr, indices) ->
+        check_no_concat indices;
         let traced : traced_array = get_node traced_store ptr in
         if not (Option.exists lhs ~f:(fun (tn, _) -> Tn.equal ptr tn)) then
           traced.read_by_other <- true;
@@ -3515,7 +3532,7 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
   in
   let acc = ref [] in
   let add ~loops ~path ~guarded ?(dynamic = false) ?(whole = false) ?(vec_len = 0) ?(rmw = false)
-      ?(val_syms = []) ~write tn map =
+      ?(val_syms = []) ?stmt_write ~write tn map =
     acc :=
       {
         Affine.a_tn = tn;
@@ -3528,6 +3545,7 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
         a_guarded = guarded;
         a_rmw = rmw;
         a_val_syms = val_syms;
+        a_stmt_write = stmt_write;
         a_loops = List.rev loops;
         a_path = List.rev path;
       }
@@ -3535,6 +3553,10 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
   in
   let local_syms = scope_value_syms llc in
   let scalar_syms = scalar_value_syms ~locals:local_syms in
+  (* [stmt_write] threads the enclosing [Set]-family statement's write map through its right-hand
+     side, and only there: [If] conditions and [Set_local] pass [None], and a [Local_scope] body's
+     statements establish their own (its reads are subordinate to the inner setters, not to the
+     statement the scope is inlined into). *)
   let rec code ~loops ~path ~guarded (llc : t) =
     match llc with
     | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ -> ()
@@ -3544,46 +3566,46 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
     | For_loop { index; from_; to_; body; _ } ->
         code ~loops:((index, (from_, to_)) :: loops) ~path ~guarded body
     | If { cond = c, _; body } ->
-        scalar ~loops ~path ~guarded c;
+        scalar ~loops ~path ~guarded ?stmt_write:None c;
         code ~loops ~path ~guarded:true body
     | Zero_out tn -> add ~loops ~path ~guarded ~whole:true ~write:true tn [||]
     | Set { tn; idcs; llsc; _ } ->
-        scalar ~loops ~path ~guarded llsc;
+        scalar ~loops ~path ~guarded ~stmt_write:idcs llsc;
         add ~loops ~path ~guarded ~rmw:(reads_tn tn.Tn.uid llsc) ~val_syms:(scalar_syms llsc)
           ~write:true tn idcs
     | Set_dynamic { tn; idcs; dyn_value = v, _; llsc; _ } ->
-        scalar ~loops ~path ~guarded v;
-        scalar ~loops ~path ~guarded llsc;
+        scalar ~loops ~path ~guarded ~stmt_write:idcs v;
+        scalar ~loops ~path ~guarded ~stmt_write:idcs llsc;
         add ~loops ~path ~guarded ~dynamic:true
           ~rmw:(reads_tn tn.Tn.uid llsc || reads_tn tn.Tn.uid v)
           ~val_syms:(scalar_syms v @ scalar_syms llsc)
           ~write:true tn idcs
     | Set_from_vec { tn; idcs; length; arg = a, _; _ } ->
-        scalar ~loops ~path ~guarded a;
+        scalar ~loops ~path ~guarded ~stmt_write:idcs a;
         add ~loops ~path ~guarded ~vec_len:length ~rmw:(reads_tn tn.Tn.uid a)
           ~val_syms:(scalar_syms a) ~write:true tn idcs
-    | Set_local (_, llsc) -> scalar ~loops ~path ~guarded llsc
+    | Set_local (_, llsc) -> scalar ~loops ~path ~guarded ?stmt_write:None llsc
     | Tile_mma { fallback; _ } -> code ~loops ~path ~guarded fallback
-  and scalar ~loops ~path ~guarded (llsc : scalar_t) =
+  and scalar ~loops ~path ~guarded ?stmt_write (llsc : scalar_t) =
     match llsc with
     | Local_scope { body; _ } -> code ~loops ~path ~guarded body
     | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
-    | Get (tn, idcs) -> add ~loops ~path ~guarded ~write:false tn idcs
+    | Get (tn, idcs) -> add ~loops ~path ~guarded ?stmt_write ~write:false tn idcs
     | Get_dynamic { tn; idcs; dyn_value = v, _; _ } ->
-        add ~loops ~path ~guarded ~dynamic:true ~write:false tn idcs;
-        scalar ~loops ~path ~guarded v
+        add ~loops ~path ~guarded ~dynamic:true ?stmt_write ~write:false tn idcs;
+        scalar ~loops ~path ~guarded ?stmt_write v
     | Ternop (_, (a, _), (b, _), (c, _)) ->
-        scalar ~loops ~path ~guarded a;
-        scalar ~loops ~path ~guarded b;
-        scalar ~loops ~path ~guarded c
+        scalar ~loops ~path ~guarded ?stmt_write a;
+        scalar ~loops ~path ~guarded ?stmt_write b;
+        scalar ~loops ~path ~guarded ?stmt_write c
     (* The dead operand of a projection is never evaluated (codegen renders only the used one), so
        it contributes no access. *)
-    | Binop (Ops.Arg1, (a, _), _) -> scalar ~loops ~path ~guarded a
-    | Binop (Ops.Arg2, _, (b, _)) -> scalar ~loops ~path ~guarded b
+    | Binop (Ops.Arg1, (a, _), _) -> scalar ~loops ~path ~guarded ?stmt_write a
+    | Binop (Ops.Arg2, _, (b, _)) -> scalar ~loops ~path ~guarded ?stmt_write b
     | Binop (_, (a, _), (b, _)) ->
-        scalar ~loops ~path ~guarded a;
-        scalar ~loops ~path ~guarded b
-    | Unop (_, (a, _)) -> scalar ~loops ~path ~guarded a
+        scalar ~loops ~path ~guarded ?stmt_write a;
+        scalar ~loops ~path ~guarded ?stmt_write b
+    | Unop (_, (a, _)) -> scalar ~loops ~path ~guarded ?stmt_write a
   in
   code ~loops:[] ~path:[] ~guarded:false llc;
   List.rev !acc
@@ -4158,20 +4180,16 @@ let statics_set_of static_indices =
     (module Indexing.Symbol)
     (List.map static_indices ~f:(fun s -> s.Indexing.static_symbol))
 
-(* The [inline_complex_computations] read-modify-write exemption over access records: a read at the
-   enclosing statement's write position (same program path, same {!same_position} map, whichever
-   nodes are involved) is a self-read of the statement's own store, not a visit — exactly the reads
-   the retired concrete tracer never recorded. Shared by {!reads_covered_query} and
-   {!read_multiplicity_query}. *)
-let rmw_exempt ~statics_set accs =
-  let all_writes =
-    List.filter_map accs ~f:(fun a ->
-        if a.Affine.a_write && not a.a_whole then Some (a.a_path, a.a_map) else None)
-  in
-  fun (r : _ Affine.access) ->
-    virtualize_settings.inline_complex_computations
-    && List.exists all_writes ~f:(fun (p, m) ->
-        [%equal: int list] p r.Affine.a_path && same_position ~statics_set m r.a_map)
+(* The [inline_complex_computations] read-modify-write exemption over access records: a read at its
+   enclosing statement's write position (same {!same_position} map as the write the read is
+   subordinate to — [a_stmt_write] — whichever nodes are involved) is a self-read of the
+   statement's own store, not a visit — exactly the reads the retired concrete tracer never
+   recorded. Statement subordination, not program-path matching: an [If] condition's read shares
+   its path with the guarded body's write but executes before it, so it is never exempt. Shared by
+   {!reads_covered_query} and {!read_multiplicity_query}. *)
+let rmw_exempt ~statics_set (r : _ Affine.access) =
+  virtualize_settings.inline_complex_computations
+  && Option.exists r.Affine.a_stmt_write ~f:(fun w -> same_position ~statics_set w r.a_map)
 
 (* gh-494 waypoint 2 / gh-554: the read-before-write fact of the retired concrete-index tracer (its
    [Recurrent] classification), computed as containment queries — every read covered by prior
@@ -4198,7 +4216,7 @@ let reads_covered_query (static_indices : Indexing.static_symbol list)
           Option.map ss.static_range ~f:(fun r -> (0, r))
         else None)
   in
-  let exempt = rmw_exempt ~statics_set accs in
+  let exempt = rmw_exempt ~statics_set in
   fun tn ->
     match Hashtbl.find by_tn tn with
     | None -> `Covered
@@ -4237,7 +4255,7 @@ let read_multiplicity_query (static_indices : Indexing.static_symbol list)
           Option.map ss.static_range ~f:(fun r -> (0, r))
         else None)
   in
-  let exempt = rmw_exempt ~statics_set accs in
+  let exempt = rmw_exempt ~statics_set in
   let reads_by_tn = Hashtbl.create (module Tn) in
   List.iter accs ~f:(fun a ->
       if (not a.Affine.a_write) && (not a.a_dynamic) && not (exempt a) then
@@ -4260,6 +4278,13 @@ let read_multiplicity_query (static_indices : Indexing.static_symbol list)
                   else acc' + bounds.(j))
             in
             max acc total)
+
+(* An access under a dead loop ([to_ < from_]: the body never executes) never happens: drop it from
+   the metric views, like the retired tracer, which never enumerated such loops — a dead write must
+   not supply coverage and a dead read must not demand it or count as a visit. *)
+let drop_dead_loop_accesses (accs : Tn.t Affine.access list) : Tn.t Affine.access list =
+  List.filter accs ~f:(fun a -> List.for_all a.Affine.a_loops ~f:(fun (_, (lo, hi)) -> hi >= lo))
+
 
 (* The placement decision procedure over the traced facts and affine metrics — the tail of the
    retired [visit_llc], factored out (gh-554; the analysis/decision split of gh-555 step 1). Writes
@@ -4364,7 +4389,7 @@ let%diagn2_sexp analyze_proc (static_indices : Indexing.static_symbol list) (llc
   trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indices llc;
   (* The affine metrics are lazily-materialized views over the routine's access relations: only the
      facts the decisions actually consult get computed (gh-554). *)
-  let accs = lazy (affine_accesses llc) in
+  let accs = lazy (drop_dead_loop_accesses (affine_accesses llc)) in
   {
     an_llc = llc;
     an_static_indices = static_indices;

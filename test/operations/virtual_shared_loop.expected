@@ -14,3 +14,7 @@ is_complex from genuine complex scalar: true
 in-loop consumer: both providers virtual: true
 in-loop consumer: providers inlined (no array reads survive): true
 in-loop consumer: consumer setter kept: true
+dead loop: node stays read-only: true
+dead loop: node is a routine input, not an output: true
+if-cond read: read_before_write set: true
+if-cond read: node is a routine input: true

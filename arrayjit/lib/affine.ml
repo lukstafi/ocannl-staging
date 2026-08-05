@@ -510,6 +510,13 @@ type 'tn access = {
       (** Writes only: loop symbols the written value depends on syntactically (index symbols of rhs
           reads, embedded indices, dynamic-index sub-expressions). Direct dependence only — a chain
           through another node's cells is not tracked. *)
+  a_stmt_write : Idx.axis_index array option;
+      (** Reads only: the index map of the enclosing [Set]/[Set_from_vec]/[Set_dynamic] statement's
+          write when the read occurs in that statement's right-hand side; [None] elsewhere ([If]
+          conditions and [Local_scope] inner statements carry their own statements' writes). The
+          subject of the read-modify-write exemption ([Low_level.rmw_exempt]): matching by
+          statement subordination rather than by program path, so a guarded body's write cannot
+          alias its [If] condition's read (they share a path). *)
   a_loops : (Idx.symbol * (int * int)) list;
       (** Enclosing loops, outermost first, with inclusive iteration bounds. *)
   a_path : int list;
