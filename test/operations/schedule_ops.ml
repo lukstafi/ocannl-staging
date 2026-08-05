@@ -221,6 +221,7 @@ let () =
       simdgroup_fragments = Set.empty (module Ir.Tnode);
       swizzled = Map.empty (module Ir.Tnode);
       zero_fringe = Set.empty (module Ir.Tnode);
+      flip_candidates = [];
     }
   in
   let guarded_accum ~cond_of =
@@ -244,7 +245,6 @@ let () =
           index = w;
           from_ = 0;
           to_ = 3;
-          trace_it = false;
           axis = LL.Workgroup;
           body =
             LL.For_loop
@@ -252,7 +252,6 @@ let () =
                 index = k;
                 from_ = 0;
                 to_ = 3;
-                trace_it = false;
                 axis = LL.Serial;
                 body = LL.If { cond = (cond_of ~w ~k, iprec); body = accum };
               };

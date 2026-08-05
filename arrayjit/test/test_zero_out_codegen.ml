@@ -50,7 +50,6 @@ let () =
         from_ = 0;
         to_ = 3;
         body = LL.Zero_out tn_b;
-        trace_it = false;
         axis = Serial;
       }
   in
@@ -73,6 +72,7 @@ let () =
       simdgroup_fragments = Base.Set.empty (module Tn);
       swizzled = Base.Map.empty (module Tn);
       zero_fringe = Base.Set.empty (module Tn);
+      flip_candidates = [];
     }
   in
   let module Syntax = Ir.C_syntax.C_syntax (Ir.C_syntax.Pure_C_config (struct

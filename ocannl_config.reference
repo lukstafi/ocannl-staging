@@ -260,6 +260,13 @@ autotune_split_reduce_max_sites=8
 # quality; independent of the ppx_minidebug log levels.
 autotune_log=false
 
+# gh-555: budget for the greedy per-node inlining refinement of `Train.tune_placements` — after
+# the placement A/B, try flipping up to this many of the winning arm's most expensive inlining
+# decisions (materialize a policy-virtual node / inline a cap-materialized one), each accepted
+# flip becoming the base for the next. Every tried flip costs a full `Autotune.tune` search like
+# an arm; 0 (the default) keeps the plain A/B behavior.
+tune_inline_flips=0
+
 # If true, an exception crossing a candidate transform/codegen/compile/link boundary is fatal unless
 # a narrow compiler seam or the backend classifies it. If false, unattributed compile-side failures
 # of tuner/advisory/cache work are temporarily contained as `Unclassified` declines. Launch and sync

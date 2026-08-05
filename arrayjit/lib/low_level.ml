@@ -69,7 +69,6 @@ type t =
       from_ : int;
       to_ : int;
       body : t;
-      trace_it : bool;
       axis : axis_type;
     }
   | Zero_out of Tn.t
@@ -299,6 +298,14 @@ type optimize_ctx = {
           candidate pair actually shares bytes is settled only at link time ([allocate_delta]), and
           an aliased [restrict] pair is a miscompile. Another per-compilation-lineage decision kind,
           same species as {!field-placements}. *)
+  inline_preferences : Hash_set.M(Tnode).t;
+      (** gh-555: the [Inline] half of the per-lineage inlining decision vector. A node recorded
+          here is exempt from the heuristic virtualization caps ([virtualize_max_visits],
+          [virtualize_max_inline_reduction]) in {!decide_placements} — the caps are priors of the
+          default policy, not legality. Legality is unaffected: [check_and_store_virtual] /
+          [inline_computation] can still reject the node ([Never_virtual] with their provenances).
+          The [Materialize] half of the vector is a pre-seeded [On_device] decision in
+          {!field-placements} (see [Context.decide_materialized]). *)
 }
 [@@deriving sexp_of]
 
@@ -307,17 +314,19 @@ let empty_optimize_ctx () =
     computations = Hashtbl.create (module Tnode);
     placements = Tnode.Placements.create ();
     alias_candidates = Hash_set.create (module Tnode);
+    inline_preferences = Hash_set.create (module Tnode);
   }
 
 (** A shallow-copy fork of the lineage state: the copy sees everything decided so far, and neither
     the original nor sibling copies observe its later mutations. Backend [compile] forks the
     incoming context's [optimize_ctx] through this, which is what makes sibling candidate compiles
     from one frontier hermetic. *)
-let copy_optimize_ctx { computations; placements; alias_candidates } =
+let copy_optimize_ctx { computations; placements; alias_candidates; inline_preferences } =
   {
     computations = Hashtbl.copy computations;
     placements = Tnode.Placements.copy placements;
     alias_candidates = Hash_set.copy alias_candidates;
+    inline_preferences = Hash_set.copy inline_preferences;
   }
 
 type traced_store = (Tn.t, traced_array) Base.Hashtbl.t [@@deriving sexp_of]
@@ -338,6 +347,21 @@ type swizzle_kind =
           keeps 16-byte units intact can both de-conflict them and stay loadable. Requires the
           row's byte length to be a multiple of 16 and a power of two in 16-byte units. *)
 [@@deriving sexp, compare, equal]
+
+(** gh-555: one searchable inlining decision dimension of a compile — a node whose placement the
+    default policy decided, together with the flip a search can try and the recompute-cost bound of
+    the virtual placement (reduction extent × per-cell read multiplicity — the cost the flip trades
+    against memory traffic). [`Materialize] flips a node the policy left virtual (via
+    [Context.decide_materialized]); [`Inline] flips a node materialized by the heuristic caps
+    (provenance 1 or 39 — never by legality or observability, which are not decisions), via
+    [Context.decide_inline]. An [`Inline] flip's legality is settled only when the virtualizer
+    replays ([check_and_store_virtual]): a rejected flip reproduces the materialized placement. *)
+type flip_candidate = {
+  fc_tn : Tnode.t;
+  fc_flip : [ `Materialize | `Inline ];
+  fc_recompute_cost : int;
+}
+[@@deriving sexp_of]
 
 type optimized = {
   traced_store : traced_store;
@@ -369,6 +393,13 @@ type optimized = {
           0 — the add-reduce accumulation identity — written by the load nest's [Where]-form edge
           guards or by the host-side constant packing. [Schedule.Tensorize] consults this to
           discharge pad guards on the intrinsic path. *)
+  flip_candidates : flip_candidate list;
+      (** gh-555: the searchable inlining decision dimensions of this compile, most expensive
+          first, as decided at the whole-routine specialization (schedule-transform copies inherit
+          the whole-routine list). Excluded: nodes never assigned or never read (no decision to
+          make), scalar constexprs and pure one-hot selector producers (must stay virtual for their
+          rewrites), and nodes placed by legality, intent or observability rather than the
+          heuristic policy. *)
 }
 [@@deriving sexp_of]
 
@@ -640,7 +671,7 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
     | (Seq (c1, c2) : t) ->
         loop c1;
         loop c2
-    | For_loop { index; from_; to_; body; trace_it = _; axis = _ } ->
+    | For_loop { index; from_; to_; body; axis = _ } ->
         (* A dead loop ([to_ < from_]) never executes its body: record no facts from it, like the
            retired tracer, which never enumerated such loops. *)
         if to_ >= from_ then
@@ -849,8 +880,7 @@ let%diagn2_sexp check_and_store_virtual (optim_ctx : optimize_ctx) traced static
     | (Seq (c1, c2) : t) ->
         loop c1;
         loop c2
-    | For_loop { trace_it = false; _ } -> raise @@ Non_virtual 6
-    | For_loop { index; body; from_; to_; trace_it = true; axis = _ } ->
+    | For_loop { index; body; from_; to_; axis = _ } ->
         loop_proc ~env_dom:(Set.add env_dom index)
           ~loop_ranges:(Map.set loop_ranges ~key:index ~data:(to_ - from_ + 1))
           body
@@ -1325,14 +1355,12 @@ let%track7_sexp inline_computation ~id (optim_ctx : optimize_ctx) (traced : trac
       | Seq _ ->
           let body = List.filter_map ~f:(loop env) @@ flat_lines [ llc ] in
           if List.is_empty body then None else Some (unflat_lines body)
-      | For_loop { trace_it = false; _ } -> assert false
       | For_loop { index; body; _ } when Map.mem env index -> loop env body
-      | For_loop { index; from_; to_; body; trace_it; axis } ->
+      | For_loop { index; from_; to_; body; axis } ->
           (* Freshen the binding. *)
           let fresh = Indexing.get_symbol () in
           let env = Map.add_exn ~key:index ~data:(Indexing.Iterator fresh) env in
-          Option.map ~f:(fun body : t ->
-              For_loop { index = fresh; from_; to_; body; trace_it; axis })
+          Option.map ~f:(fun body : t -> For_loop { index = fresh; from_; to_; body; axis })
           @@ loop env body
       | Zero_out tn when Tn.equal tn traced.tn -> Some (Set_local (id, Constant 0.0))
       | Set { tn; idcs; llsc; debug = _ } when Tn.equal tn traced.tn ->
@@ -2515,10 +2543,10 @@ let cse_equal_scalar s1 s2 =
     | Noop, Noop -> true
     | Comment s1, Comment s2 -> String.equal s1 s2
     | Seq (a1, a2), Seq (b1, b2) -> equal_t a1 b1 && equal_t a2 b2
-    | ( For_loop { index = i1; from_ = f1; to_ = t1; body = bd1; trace_it = tr1; axis = ax1 },
-        For_loop { index = i2; from_ = f2; to_ = t2; body = bd2; trace_it = tr2; axis = ax2 } ) ->
-        Int.equal f1 f2 && Int.equal t1 t2 && Bool.equal tr1 tr2 && equal_axis_type ax1 ax2
-        && sym_bind i1 i2 && equal_t bd1 bd2
+    | ( For_loop { index = i1; from_ = f1; to_ = t1; body = bd1; axis = ax1 },
+        For_loop { index = i2; from_ = f2; to_ = t2; body = bd2; axis = ax2 } ) ->
+        Int.equal f1 f2 && Int.equal t1 t2 && equal_axis_type ax1 ax2 && sym_bind i1 i2
+        && equal_t bd1 bd2
     | Zero_out tn1, Zero_out tn2 -> Tn.equal tn1 tn2
     | Set { tn = tn1; idcs = i1; llsc = s1; _ }, Set { tn = tn2; idcs = i2; llsc = s2; _ } ->
         Tn.equal tn1 tn2 && Array.equal idx_equal i1 i2 && equal_scalar s1 s2
@@ -4252,57 +4280,36 @@ let read_multiplicity_query (static_indices : Indexing.static_symbol list)
             in
             max acc total)
 
-(* The retired concrete tracer executed a [trace_it = false] loop's body once, with the index
-   pinned at [from_] — such loops are opaque to virtualization (a stored computation containing one
-   is rejected, [Non_virtual 6]). Mirror that in the placement metrics: clamp the loop's bounds to
-   its first iteration in the access views fed to [reads_covered_query] and
-   [read_multiplicity_query], so the symbol becomes a pinned parameter (width 1) instead of
-   contributing its full trip count to multiplicities and coverage. Other [affine_accesses]
-   consumers (liveness, cost model, schedule legality) correctly keep the full ranges. Runs
-   pre-virtualization, so [Local_scope] does not occur in statement position. *)
 (* An access under a dead loop ([to_ < from_]: the body never executes) never happens: drop it from
    the metric views, like the retired tracer, which never enumerated such loops — a dead write must
    not supply coverage and a dead read must not demand it or count as a visit. *)
 let drop_dead_loop_accesses (accs : Tn.t Affine.access list) : Tn.t Affine.access list =
   List.filter accs ~f:(fun a -> List.for_all a.Affine.a_loops ~f:(fun (_, (lo, hi)) -> hi >= lo))
 
-let clamp_non_traced_loops (llc : t) (accs : Tn.t Affine.access list) : Tn.t Affine.access list =
-  let pinned = ref [] in
-  let rec go = function
-    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _
-    | Set _ | Set_dynamic _ | Set_from_vec _ | Set_local _ ->
-        ()
-    | Seq (a, b) ->
-        go a;
-        go b
-    | For_loop { index; from_; body; trace_it; _ } ->
-        if not trace_it then pinned := (index, from_) :: !pinned;
-        go body
-    | If { body; _ } -> go body
-    | Tile_mma { fallback; _ } -> go fallback
-  in
-  go llc;
-  if List.is_empty !pinned then accs
-  else
-    List.map accs ~f:(fun a ->
-        {
-          a with
-          Affine.a_loops =
-            List.map a.Affine.a_loops ~f:(fun ((s, _) as entry) ->
-                match List.Assoc.find !pinned s ~equal:Indexing.equal_symbol with
-                | Some from_ -> (s, (from_, from_))
-                | None -> entry);
-        })
 
 (* The placement decision procedure over the traced facts and affine metrics — the tail of the
    retired [visit_llc], factored out (gh-554; the analysis/decision split of gh-555 step 1). Writes
    decisions into the lineage's placements table; the metrics are forced only when a decision
-   actually consults them. *)
-let decide_placements plc traced_store ~max_visits ~reads_covered ~read_multiplicity =
+   actually consults them. The heuristic caps ([max_visits], [max_inline_reduction]) are priors of
+   this default policy, not legality: a node in [optim_ctx.inline_preferences] (gh-555) is exempt
+   from both, like one-hot selector producers always were, while the legality rejections
+   ([check_and_store_virtual] / [inline_computation]) and the observability pessimizations
+   (read-only, read-before-write) apply regardless. *)
+let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads_covered
+    ~read_multiplicity =
+  let plc = optim_ctx.placements in
   Hashtbl.iter traced_store ~f:(fun traced ->
       let tn = traced.tn in
       let covered =
         lazy (match (Lazy.force reads_covered) tn with `Covered -> true | `Unknown _ -> false)
+      in
+      let cap_exempt =
+        (* task-73617488: one-hot selector producers are exempt from the heuristic caps. The
+           ordinary [virtual_llc]/[cleanup_virtual_llc] path will inline them so that
+           [rewrite_one_hot_reductions] can fire at default [max_visits = 1]. gh-555: an explicit
+           [Inline] decision ([inline_preferences]) is the same kind of exemption, searchable. *)
+        (traced.prefers_virtual_one_hot && not traced.has_non_one_hot_setter)
+        || Hash_set.mem optim_ctx.inline_preferences tn
       in
       if
         virtualize_settings.inline_scalar_constexprs && traced.is_scalar_constexpr
@@ -4319,7 +4326,7 @@ let decide_placements plc traced_store ~max_visits ~reads_covered ~read_multipli
         && traced.inline_reduction_extent > virtualize_settings.max_inline_reduction
         && traced.read_by_other
         && Option.is_none (Tn.Placements.get plc tn)
-        && not (traced.prefers_virtual_one_hot && not traced.has_non_one_hot_setter)
+        && not cap_exempt
       then Tn.Placements.update plc tn Never_virtual 39;
       let skip_simple =
         virtualize_settings.inline_simple_computations && (not traced.is_complex)
@@ -4331,10 +4338,7 @@ let decide_placements plc traced_store ~max_visits ~reads_covered ~read_multipli
         (not skip_simple)
         && Option.is_none (Tn.Placements.get plc tn)
         && ((Lazy.force read_multiplicity) tn > max_visits || not (Lazy.force covered))
-        (* task-73617488: one-hot selector producers are exempt from the visit-count cap. The
-           ordinary [virtual_llc]/[cleanup_virtual_llc] path will inline them so that
-           [rewrite_one_hot_reductions] can fire at default [max_visits = 1]. *)
-        && not (traced.prefers_virtual_one_hot && not traced.has_non_one_hot_setter)
+        && not cap_exempt
       then Tn.Placements.update plc tn Never_virtual 1;
       if (not traced.zeroed_out) && not traced.has_assignment then (
         (* The tensor node is read-only/recurrent for this computation, but maybe computed or
@@ -4359,7 +4363,24 @@ let decide_placements plc traced_store ~max_visits ~reads_covered ~read_multipli
         traced.read_before_write <- true;
         Tn.Placements.update plc tn On_device 36))
 
-let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
+type analysis = {
+  an_llc : t;
+  an_static_indices : Indexing.static_symbol list;
+  an_traced_store : traced_store;
+      (** The decision-independent facts. [specialize_proc] hands each candidate a record-copied
+          view, because [decide_placements] writes the placement-dependent [read_only] /
+          [read_before_write] flags under the candidate's own placements. *)
+  an_reverse_node_map : (Indexing.symbol, Tnode.t list) Hashtbl.t;
+  an_merge_node : Tnode.t option;
+  an_reads_covered : (Tn.t -> [ `Covered | `Unknown of string ]) Lazy.t;
+  an_read_multiplicity : (Tn.t -> int) Lazy.t;
+}
+
+(* Decision-independent analysis of a lowered routine (gh-555 step 1): the structural facts pass,
+   the lazily-materialized affine metrics, and the written-bounds pinning — everything
+   [specialize_proc] consumes that does not depend on the lineage's placement decisions. Computed
+   once per routine; per-candidate compiles replay only [specialize_proc]. *)
+let%diagn2_sexp analyze_proc (static_indices : Indexing.static_symbol list) (llc : t) : analysis =
   let traced_store = Hashtbl.create (module Tnode) in
   (* Identifies the computations that the code block associated with the symbol belongs to. *)
   let reverse_node_map = Hashtbl.create (module Indexing.Symbol) in
@@ -4369,15 +4390,33 @@ let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
   trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indices llc;
   (* The affine metrics are lazily-materialized views over the routine's access relations: only the
      facts the decisions actually consult get computed (gh-554). *)
-  (* Dead-loop filtering must precede the non-traced clamp: clamping rewrites a dead non-traced
-     loop's bounds to a live-looking width-1 range, which would revive its accesses. *)
-  let accs = lazy (clamp_non_traced_loops llc (drop_dead_loop_accesses (affine_accesses llc))) in
-  let reads_covered = lazy (reads_covered_query static_indices (Lazy.force accs)) in
-  let read_multiplicity = lazy (read_multiplicity_query static_indices (Lazy.force accs)) in
-  decide_placements input_ctx.placements traced_store ~max_visits:virtualize_settings.max_visits
-    ~reads_covered ~read_multiplicity;
+  let accs = lazy (drop_dead_loop_accesses (affine_accesses llc)) in
+  {
+    an_llc = llc;
+    an_static_indices = static_indices;
+    an_traced_store = traced_store;
+    an_reverse_node_map = reverse_node_map;
+    an_merge_node = !merge_node_ref;
+    an_reads_covered = lazy (reads_covered_query static_indices (Lazy.force accs));
+    an_read_multiplicity = lazy (read_multiplicity_query static_indices (Lazy.force accs));
+  }
+
+(* A candidate-private view of the analysis' traced store: record-level copies, so one candidate's
+   [decide_placements] writes ([read_only], [read_before_write] under its own placements) do not
+   leak into siblings replaying the same analysis. *)
+let copy_traced_store (store : traced_store) : traced_store =
+  Hashtbl.map store ~f:(fun t -> { t with tn = t.tn })
+
+let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : optimized =
+  let static_indices = an.an_static_indices in
+  let llc = an.an_llc in
+  let traced_store = copy_traced_store an.an_traced_store in
+  decide_placements input_ctx traced_store ~max_visits:virtualize_settings.max_visits
+    ~reads_covered:an.an_reads_covered ~read_multiplicity:an.an_read_multiplicity;
   [%log "optimizing"];
-  let virtual_llc_result = virtual_llc input_ctx traced_store reverse_node_map static_indices llc in
+  let virtual_llc_result =
+    virtual_llc input_ctx traced_store an.an_reverse_node_map static_indices llc
+  in
   let llc =
     hoist_cross_statement_cse @@ eliminate_common_subexpressions
     @@ rewrite_one_hot_reductions ~static_indices
@@ -4385,18 +4424,57 @@ let%diagn2_sexp optimize_proc (input_ctx : optimize_ctx) static_indices llc =
     @@ cleanup_virtual_llc input_ctx.placements ~static_indices
     @@ virtual_llc_result
   in
-  let merge_node = !merge_node_ref in
+  (* The searchable decision dimensions (gh-555), read off the now-committed placements: cleanup
+     has committed the surviving virtual candidates, and the backend-compile finalization
+     ([default_to_most_local]) has not yet rewritten the cap provenances. *)
+  let flip_candidates =
+    let plc = input_ctx.placements in
+    Hashtbl.fold traced_store ~init:[] ~f:(fun ~key:tn ~data:traced acc ->
+        let one_hot = traced.prefers_virtual_one_hot && not traced.has_non_one_hot_setter in
+        if
+          (not traced.has_assignment)
+          || one_hot || traced.is_scalar_constexpr
+          || not traced.read_by_other
+        then acc
+        else
+          let flip =
+            (* The raw lineage entry (no intent fallback): only policy decisions are flippable. A
+               node whose virtuality is declared intent (e.g. Mixed_prec.Twin_virtual) would make
+               [Context.decide_materialized] a no-op and waste a search slot; reading the raw entry
+               also keeps tnode-level intent provenances from coincidentally matching the cap
+               provenances on the [`Inline] side. *)
+            match Tn.Placements.raw_entry plc tn with
+            | Some (Virtual, _) when not (Tn.known_virtual tn || Tn.known_constant tn) ->
+                Some `Materialize
+            | Some (Never_virtual, (1 | 39)) -> Some `Inline
+            | _ -> None
+          in
+          match flip with
+          | None -> acc
+          | Some fc_flip ->
+              let mult = max 1 ((Lazy.force an.an_read_multiplicity) tn) in
+              { fc_tn = tn; fc_flip; fc_recompute_cost = traced.inline_reduction_extent * mult }
+              :: acc)
+    |> List.sort ~compare:(fun a b ->
+           match Int.compare b.fc_recompute_cost a.fc_recompute_cost with
+           | 0 -> Tn.compare a.fc_tn b.fc_tn
+           | c -> c)
+  in
   let optimize_ctx = input_ctx in
   {
     traced_store;
     optimize_ctx;
     llc;
-    merge_node;
+    merge_node = an.an_merge_node;
     workgroup_shared = Set.empty (module Tnode);
     simdgroup_fragments = Set.empty (module Tnode);
     swizzled = Map.empty (module Tnode);
     zero_fringe = Set.empty (module Tnode);
+    flip_candidates;
   }
+
+let optimize_proc (input_ctx : optimize_ctx) static_indices llc =
+  specialize_proc input_ctx (analyze_proc static_indices llc)
 
 let code_hum_margin = ref 100
 
@@ -4512,7 +4590,7 @@ let to_doc_cstyle ?name ?static_indices () llc =
           List.filter_map [ c1; c2 ] ~f:(function Noop -> None | c -> Some (doc_of_code c))
         in
         separate hardline docs
-    | For_loop { index = i; from_; to_; body; trace_it = _; axis } ->
+    | For_loop { index = i; from_; to_; body; axis } ->
         let header =
           string (axis_type_label axis ^ " ")
           ^^ pp_symbol i ^^ string " = " ^^ int from_ ^^ string " to " ^^ int to_ ^^ string " {"
@@ -4665,7 +4743,7 @@ let to_doc ?name ?static_indices () llc =
           List.filter_map [ c1; c2 ] ~f:(function Noop -> None | c -> Some (doc_of_code c))
         in
         separate hardline docs
-    | For_loop { index = i; from_; to_; body; trace_it = _; axis } ->
+    | For_loop { index = i; from_; to_; body; axis } ->
         let header =
           string (axis_type_label axis ^ " ")
           ^^ pp_symbol i ^^ string " = " ^^ int from_ ^^ string " to " ^^ int to_ ^^ string " {"
@@ -4814,7 +4892,6 @@ let loop_over_dims dims ~body =
             from_ = 0;
             to_ = d - 1;
             body = for_loop (Indexing.Iterator index :: rev_idcs) product;
-            trace_it = true;
             axis = Serial;
           }
   in
@@ -4882,7 +4959,6 @@ let loop_over_padding_region ~dims ~(padding : Ops.axis_padding array) ~body =
             to_ = dim - 1;
             body =
               build_loops ~any_padding_so_far (dim_idx + 1) (Indexing.Iterator index :: rev_idcs);
-            trace_it = true;
             axis = Serial;
           }
       else
@@ -4902,7 +4978,6 @@ let loop_over_padding_region ~dims ~(padding : Ops.axis_padding array) ~body =
                       body
                       @@ Array.concat
                            [ Array.of_list_rev rev_idcs; [| Indexing.Iterator index |]; rest_idcs ]);
-                trace_it = true;
                 axis = Serial;
               }
           else Noop
@@ -4919,7 +4994,6 @@ let loop_over_padding_region ~dims ~(padding : Ops.axis_padding array) ~body =
                 body =
                   (* In middle - NOT in padding for this dim, recurse to find other padded dims *)
                   build_loops ~any_padding_so_far (dim_idx + 1) (Indexing.Iterator index :: rev_idcs);
-                trace_it = true;
                 axis = Serial;
               }
           else Noop
@@ -4944,7 +5018,6 @@ let loop_over_padding_region ~dims ~(padding : Ops.axis_padding array) ~body =
                              [| Indexing.Iterator right_index |];
                              rest_idcs;
                            ]);
-                trace_it = true;
                 axis = Serial;
               }
           else Noop

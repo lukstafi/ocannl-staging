@@ -371,7 +371,6 @@ let () =
                        from_ = 0;
                        to_ = 1;
                        body;
-                       trace_it = false;
                        axis = LL.Serial;
                      };
                })

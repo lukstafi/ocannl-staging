@@ -44,7 +44,7 @@ let mul a b : LL.scalar_t = LL.Binop (Ops.Mul, (a, single), (b, single))
 let c x : LL.scalar_t = LL.Constant x
 
 let loop s body : LL.t =
-  LL.For_loop { index = s; from_ = 0; to_ = 2; body; trace_it = true; axis = Serial }
+  LL.For_loop { index = s; from_ = 0; to_ = 2; body; axis = Serial }
 
 let seq a b : LL.t = LL.Seq (a, b)
 
@@ -219,33 +219,6 @@ let case_inloop_consumer () =
     (count_get o a = 0 && count_get o b = 0);
   p "in-loop consumer: consumer setter kept" (count_set o cons = 1)
 
-(* === Case 8: consumer inside a non-traced loop (trace_it = false; gh-554 follow-up) === The
-   retired concrete tracer executed such a loop's body once with the index pinned at [from_], so a
-   fixed-position read of a producer inside it sampled as a single visit. The affine placement
-   metrics mirror that ([clamp_non_traced_loops]): without the clamp, the read's fiber over the
-   loop's full trip count (3 > virtualize_max_visits) would spuriously materialize the producer. *)
-let case_non_traced_loop () =
-  let x = mk "ntx" and prod = mk "ntp" and out = mk "nto" in
-  materialize x;
-  materialize out;
-  let i = sym () and j = sym () in
-  let produce = loop i (set i prod (mul (get i x) (c 2.))) in
-  let consume =
-    LL.For_loop
-      {
-        index = j;
-        from_ = 0;
-        to_ = 2;
-        body = LL.Set { tn = out; idcs = [| iter j |]; llsc = LL.Get (prod, [| Ir.Indexing.Fixed_idx 0 |]); debug = "" };
-        trace_it = false;
-        axis = Serial;
-      }
-  in
-  let o = optimize (seq produce consume) in
-  p "non-traced consumer loop: producer stays virtual (single-sample semantics)"
-    (known_virtual o prod);
-  p "non-traced consumer loop: producer inlined into the consumer" (count_get o prod = 0)
-
 (* === Case 9: a write under a dead loop ([to_ < from_]) never executes === The retired tracer
    never enumerated dead loops; the structural facts pass and the metric views must likewise record
    nothing from them: the node stays read-only (a routine input, not a spurious output). *)
@@ -255,7 +228,7 @@ let case_dead_loop () =
   let i = sym () and j = sym () in
   let dead_write =
     LL.For_loop
-      { index = i; from_ = 0; to_ = -1; body = set i d (c 7.); trace_it = true; axis = Serial }
+      { index = i; from_ = 0; to_ = -1; body = set i d (c 7.); axis = Serial }
   in
   let consume = loop j (set j out (get j d)) in
   let o = optimize (seq dead_write consume) in
@@ -265,26 +238,24 @@ let case_dead_loop () =
   p "dead loop: node is a routine input, not an output"
     (Set.mem inputs d && not (Set.mem outputs d))
 
-(* === Case 9b: a dead loop stays dead under the non-traced clamp === Filtering must precede the
-   clamp: clamping a dead [trace_it = false] loop's bounds to its first iteration would make the
-   dead write look live and supply spurious coverage for the fixed-position read. *)
+(* === Case 9b: a dead write supplies no coverage === The coverage-side companion of case 9: the
+   dead write is dropped from the metric views, so the fixed-position read is read-before-write and
+   the node is a routine input. *)
 let case_dead_non_traced () =
   let d = mk "deadnt" and out = mk "dnto" in
   materialize out;
   let i = sym () and j = sym () in
   let dead_write =
-    LL.For_loop
-      { index = i; from_ = 0; to_ = -1; body = set i d (c 7.); trace_it = false; axis = Serial }
+    LL.For_loop { index = i; from_ = 0; to_ = -1; body = set i d (c 7.); axis = Serial }
   in
   let consume =
     loop j (LL.Set { tn = out; idcs = [| iter j |]; llsc = LL.Get (d, [| Ir.Indexing.Fixed_idx 0 |]); debug = "" })
   in
   let o = optimize (seq dead_write consume) in
   let traced = Base.Hashtbl.find_exn o.LL.traced_store d in
-  p "dead non-traced loop: read_before_write set (no spurious coverage)"
-    traced.LL.read_before_write;
+  p "dead-write coverage: read_before_write set" traced.LL.read_before_write;
   let (inputs, _outputs), _merge = LL.input_and_output_nodes o in
-  p "dead non-traced loop: node is a routine input" (Set.mem inputs d)
+  p "dead-write coverage: node is a routine input" (Set.mem inputs d)
 
 (* === Case 10: an If condition's read is not a read-modify-write self-read === The condition reads
    [a] at the same position the guarded body writes it, and shares the body's program path; the
@@ -315,7 +286,6 @@ let () =
   case_reverse ();
   case_complex ();
   case_inloop_consumer ();
-  case_non_traced_loop ();
   case_dead_loop ();
   case_dead_non_traced ();
   case_if_cond_read ();

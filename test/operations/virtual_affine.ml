@@ -46,7 +46,7 @@ let zero tn : LL.t = LL.Zero_out tn
 
 (* [from_ = 0, to_ = n - 1] gives a loop of width [n]. *)
 let loop_r s n body : LL.t =
-  LL.For_loop { index = s; from_ = 0; to_ = n - 1; body; trace_it = true; axis = Serial }
+  LL.For_loop { index = s; from_ = 0; to_ = n - 1; body; axis = Serial }
 
 let seq a b : LL.t = LL.Seq (a, b)
 

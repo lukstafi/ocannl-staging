@@ -21,7 +21,7 @@ type t =
   | Comment of string
   | Staged_compilation of (unit -> PPrint.document)
   | Seq of t * t
-  | For_loop of { index : Indexing.symbol; from_ : int; to_ : int; body : t; trace_it : bool }
+  | For_loop of { index : Indexing.symbol; from_ : int; to_ : int; body : t; axis : axis_type }
   | Zero_out of Tn.t
   | Set of { tn : Tn.t; idcs : Indexing.axis_index array; llsc : scalar_t; mutable debug : string }
   | Set_from_vec of { tn : Tn.t; idcs : Indexing.axis_index array; length : int;
@@ -46,9 +46,10 @@ and scalar_t =
 and scalar_arg = scalar_t * Ops.prec
 ```
 
-`t` represents code/statements while `scalar_t` represents scalar expressions. The `trace_it` flag in
-`For_loop` indicates whether the loop should be traced for optimization (its initial segment is
-unrolled for analysis).
+`t` represents code/statements while `scalar_t` represents scalar expressions. (A historical
+`trace_it` flag on `For_loop` — "don't unroll this loop in the retired concrete-index tracer" — was
+retired with the tracer, gh-554/gh-555; schedule-minted loops are opaque to virtualization by
+pipeline order, since transforms run after `optimize`.)
 
 Notable constructors:
 
@@ -156,14 +157,41 @@ eliminate_common_subexpressions     (within-statement scalar CSE)
 hoist_cross_statement_cse           (cross-statement CSE; introduces Declare_local)
 ```
 
-`optimize` is a thin wrapper around `optimize_proc` that additionally invokes optional
-pretty-printing callbacks (`unoptim_ll_source` before optimization, `ll_source` after) so that
-backends and debug tooling can capture the `.ll` source at both stages.
+The pipeline is split at the analysis/decision boundary (gh-555 step 1): `analyze_proc` computes
+everything decision-independent (the structural facts, the lazily-materialized affine metrics, the
+written-bounds pinning) once per routine, and `specialize_proc` is the decision-dependent tail
+(`decide_placements` onward), cheap to replay per candidate over one shared analysis — each call
+record-copies the traced store so sibling candidates stay hermetic. `optimize` is a thin wrapper
+that additionally invokes optional pretty-printing callbacks (`unoptim_ll_source` before
+optimization, `ll_source` after) so that backends and debug tooling can capture the `.ll` source at
+both stages.
 
 The `optimize_ctx` record carries a `computations` table (a map from tensor node to its stored
 inlinable computations) **across** compilation calls, so that a tensor virtualized while compiling
 one routine can be inlined into a later routine that reads it. `optimize_proc` threads the incoming
 `optimize_ctx` through `virtual_llc` and returns it unchanged in the `optimized` result.
+
+### Inlining as a schedule decision (gh-555)
+
+In Halide's vocabulary virtualization is the inline / compute_root axis, and OCANNL treats it as a
+searchable, per-compilation-lineage decision vector rather than a fixed pre-pass:
+
+- The **Materialize** half of the vector is a pre-seeded `On_device` decision in the lineage's
+  placements (`Context.decide_materialized`).
+- The **Inline** half is `optimize_ctx.inline_preferences` (`Context.decide_inline`): nodes exempt
+  from the heuristic caps (`virtualize_max_visits`, `virtualize_max_inline_reduction`) — the caps
+  are priors of the *default* decision policy, not legality. Legality (`check_and_store_virtual`,
+  `inline_computation`, including the injectivity conditions that preserve reduction order — the
+  determinism contract) and the observability pessimizations (read-only, read-before-write) apply
+  regardless of the vector.
+- Each specialization reports its **decision surface** as `optimized.flip_candidates`: the nodes
+  the default policy decided, the flip a search can try, and the recompute-cost bound of the
+  virtual placement (reduction extent × per-cell read multiplicity — the affine metrics double as
+  the cost model's inputs).
+- The search is hierarchical: `Train.tune_placements` decides inlining coarsely first (the
+  placement A/B), then — with a `tune_inline_flips` budget — refines greedily per node from the
+  default-policy arm, tiling/scheduling within each candidate via the nested `Autotune.tune`. The
+  current heuristics with a zero budget reproduce the previous behavior exactly.
 
 ### 1. Tracing Phase (`trace_node_facts` + `decide_placements`)
 
@@ -252,13 +280,10 @@ This function validates that the computation can be safely inlined, via these ch
    (in sibling `Set`/`Set_from_vec` indices), `Non_virtual 9` (in sibling `Get`/`Get_merge_buffer`
    indices), or `Non_virtual 10` (in `Embed_index`).
 
-5. **Non-Traced Loops Forbidden**: Loops with `trace_it = false` prevent virtualization
-   (`Non_virtual 6`).
-
-6. **No vector stores / staged code / hoisted locals**: a `Staged_compilation` node fails with
+5. **No vector stores / staged code / hoisted locals**: a `Staged_compilation` node fails with
    `Non_virtual 8`; a `Declare_local` fails with `Non_virtual 19` (defensive — see below).
 
-7. **Has Setter**: the computation must actually write to the tensor (`Non_virtual 12`); and the
+6. **Has Setter**: the computation must actually write to the tensor (`Non_virtual 12`); and the
    tensor must not be already non-virtual (`Non_virtual 11`).
 
 If all checks pass, the computation (with its defining indices) is stored in the `computations` table
@@ -273,7 +298,7 @@ and the handler commits the tensor to `Never_virtual i` (the provenance `i` reco
 - **4** — Inconsistent index patterns between accesses.
 - **5** — Symbol coverage/groundability failure (a non-static symbol is neither bound from a bare
   iterator position nor pinned by an injective affine map).
-- **6** — Non-traced loop (`trace_it = false`) encountered.
+- **6** — Retired (was: non-traced loop encountered; the `trace_it` flag is gone).
 - **7** — Escaping variable in a sibling `Set`/`Set_from_vec` index.
 - **8** — `Staged_compilation` node encountered.
 - **9** — Escaping variable in a sibling `Get`/`Get_merge_buffer` index.

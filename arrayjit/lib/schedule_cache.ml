@@ -248,12 +248,11 @@ let canonicalize ?(static_indices = []) ?(with_placements = true) (opt : LL.opti
     | LL.Seq (a, b) ->
         emit a;
         emit b
-    | LL.For_loop { index; from_; to_; body; trace_it; axis } ->
+    | LL.For_loop { index; from_; to_; body; axis } ->
         let tok = bind_loop index in
         add
-          (Printf.sprintf "for %s=%d..%d@%s%s{" tok from_ to_
-             (Sexp.to_string (LL.sexp_of_axis_type axis))
-             (if trace_it then "" else "!"));
+          (Printf.sprintf "for %s=%d..%d@%s{" tok from_ to_
+             (Sexp.to_string (LL.sexp_of_axis_type axis)));
         emit body;
         add "}"
     | LL.Zero_out tn ->
