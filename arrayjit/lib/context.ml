@@ -700,7 +700,12 @@ let decide_inline ctx tns =
             (* Fork like [decide_materialized]; the preference is recorded rather than a placement
                decided, because inlining legality is settled only during optimization
                ([check_and_store_virtual]) — a preferred node the virtualizer rejects still
-               materializes. *)
+               materializes. A node whose placement THIS lineage already decided (e.g. a cap
+               materialization from an earlier compile of a routine setting it) keeps that
+               decision: decisions are final within a lineage — already-compiled routines depend on
+               them (a consumer compiled against the node's buffer must find it written) — so the
+               preference only steers placements not yet decided. Callers wanting the exemption to
+               take effect fork a pre-compile sibling, as [Train.tune_placements] does. *)
             let optimize_ctx = Ir.Low_level.copy_optimize_ctx bctx.BI.optimize_ctx in
             List.iter tns
               ~f:(Hash_set.add optimize_ctx.Ir.Low_level.inline_preferences);

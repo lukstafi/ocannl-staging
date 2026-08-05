@@ -254,6 +254,10 @@ val decide_inline : t -> Ir.Tnode.t list -> t
     default placement policy, not legality. Legality still applies: a preferred node the
     virtualizer rejects (escaping symbols, non-injective producer indices, opaque effects, ...)
     materializes as before, and the observability pessimizations (read-only, read-before-write)
-    are unaffected. Together with {!decide_materialized} this spans the per-node inlining decision
-    vector: [Inline] here, [Materialize] there, the default heuristics elsewhere. Hermetic like
+    are unaffected. The preference steers placements the lineage has {e not yet decided}: a node
+    already materialized by an earlier compile in this lineage keeps that decision (decisions are
+    final within a lineage — compiled routines depend on them), so apply the preference to a
+    pre-compile sibling of the routines that set the node, as [Train.tune_placements] does.
+    Together with {!decide_materialized} this spans the per-node inlining decision vector:
+    [Inline] here, [Materialize] there, the default heuristics elsewhere. Hermetic like
     {!decide_materialized}: the argument context and its other descendants are unaffected. *)

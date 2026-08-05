@@ -338,13 +338,20 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
        off the default compile. *)
     let module LL = Ir.Low_level in
     let captured = ref [] in
-    let (_ : Context.t), (_ : Context.routine) =
-      Context.compile
-        ~lowered_transform:(fun o ->
-          captured := o.LL.flip_candidates @ !captured;
-          o)
-        ctx comp bindings
-    in
+    (* The capture compile runs outside the tuner's failure containment; a backend that rejects
+       the unscheduled base lowering (the A/B searches above can still have crowned a scheduled
+       winner) must skip the refinement, not fail the tune. *)
+    (match
+       Context.compile
+         ~lowered_transform:(fun o ->
+           captured := o.LL.flip_candidates @ !captured;
+           o)
+         ctx comp bindings
+     with
+    | (_ : Context.t), (_ : Context.routine) -> ()
+    | exception exn ->
+        captured := [];
+        logf "flip refinement skipped: the capture compile failed: %s" (Exn.to_string exn));
     let candidates =
       List.fold !captured ~init:[] ~f:(fun acc fc ->
           if List.exists acc ~f:(fun c -> c.LL.fc_tn.Tn.id = fc.LL.fc_tn.Tn.id) then acc
