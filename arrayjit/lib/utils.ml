@@ -53,6 +53,8 @@ let known_config_keys =
       "suppress_welcome_message";
       "no_config_file";
       "log_config_sourcing";
+      (* The preset-bundle picker (gh-ocannl-559); resolved before any ordinary key *)
+      "profile";
       (* Utils.settings *)
       "log_level";
       "debug_log_from_routines";
@@ -98,6 +100,7 @@ let known_config_keys =
       "cc_backend_compiler_command";
       "cc_backend_arch_flags";
       "cc_backend_simd_flags";
+      "cc_backend_fp_contract";
       "cc_backend_probe_cache";
       "cc_backend_fast_math";
       "cc_backend_post_compile_timeout";
@@ -136,6 +139,7 @@ let known_config_keys =
       "cc_vector_bytes";
       "cc_fp16_arithmetic";
       (* Autotuning (Autotune.tune) *)
+      "autotune_search";
       "autotune_beam_width";
       "autotune_rounds";
       "autotune_repeats";
@@ -174,17 +178,17 @@ let bool_of_config_string ~arg_name s =
     the config file is read. Can also be set programmatically, e.g. to trace configs a test reads. *)
 let log_config_sourcing = ref true
 
-let read_cmdline_or_env_var n =
-  let with_debug =
-    !log_config_sourcing
-    && (settings.log_level > 0 || equal_string n "log_level")
-    && not (Hash_set.mem accessed_global_args n)
-  in
-  let n_dash = String.tr ~target:'_' ~replacement:'-' n in
+let env_var_names n =
   let env_variants = [ "ocannl_" ^ n; "ocannl-" ^ n ] in
-  let env_variants = List.concat_map env_variants ~f:(fun n -> [ n; String.uppercase n ]) in
+  List.concat_map env_variants ~f:(fun n -> [ n; String.uppercase n ])
+
+(** The commandline sublevel of {!get_global_arg}: returns the setting's value and the [Sys.argv]
+    element it came from. Pure -- the sourcing log lives at the resolution seam, which is the only
+    place that knows which sublevel actually won. *)
+let read_cmdline_var n =
+  let n_dash = String.tr ~target:'_' ~replacement:'-' n in
   (* Prefixed commandline variants first (backward compat), then prefix-free *)
-  let cmd_prefixed = List.concat_map env_variants ~f:(fun n -> [ "-" ^ n; "--" ^ n; n ]) in
+  let cmd_prefixed = List.concat_map (env_var_names n) ~f:(fun n -> [ "-" ^ n; "--" ^ n; n ]) in
   let cmd_unprefixed =
     let keys = if String.equal n n_dash then [ n ] else [ n; n_dash ] in
     List.concat_map keys ~f:(fun k -> [ "--" ^ k; "-" ^ k ])
@@ -192,24 +196,37 @@ let read_cmdline_or_env_var n =
   let cmd_variants =
     List.concat_map (cmd_prefixed @ cmd_unprefixed) ~f:(fun n -> [ n ^ "_"; n ^ "-"; n ^ "="; n ])
   in
+  Array.find_map Stdlib.Sys.argv ~f:(fun arg ->
+      List.find_map cmd_variants ~f:(fun p ->
+          Option.some_if (String.is_prefix ~prefix:p arg)
+            (String.drop_prefix arg (String.length p), arg)))
+
+(** The environment sublevel of {!get_global_arg}: returns the setting's value and the variable it
+    came from. An empty value counts as unset. *)
+let read_env_var n =
   match
-    Array.find_map Stdlib.Sys.argv ~f:(fun arg ->
-        List.find_map cmd_variants ~f:(fun prefix ->
-            Option.some_if (String.is_prefix ~prefix arg) (prefix, arg)))
+    List.find_map (env_var_names n) ~f:(fun env_n ->
+        Option.(join @@ map (Stdlib.Sys.getenv_opt env_n) ~f:(str_nonempty ~f:(pair env_n))))
   with
-  | Some (p, arg) ->
-      let result = String.(drop_prefix arg (length p)) in
+  | None | Some (_, "") -> None
+  | Some (env_n, result) -> Some (result, env_n)
+
+(** The bootstrap reader: the few keys that are consulted before the config file exists (and hence
+    before profiles are resolved) come from the commandline or the environment only. *)
+let read_cmdline_or_env_var n =
+  let with_debug =
+    !log_config_sourcing
+    && (settings.log_level > 0 || equal_string n "log_level")
+    && not (Hash_set.mem accessed_global_args n)
+  in
+  match read_cmdline_var n with
+  | Some (result, arg) ->
       if with_debug then Stdio.printf "Found %s, commandline %s\n%!" result arg;
       Some result
-  | None -> (
-      match
-        List.find_map env_variants ~f:(fun env_n ->
-            Option.(join @@ map (Stdlib.Sys.getenv_opt env_n) ~f:(str_nonempty ~f:(pair env_n))))
-      with
-      | None | Some (_, "") -> None
-      | Some (p, result) ->
-          if with_debug then Stdio.printf "Found %s, environment %s\n%!" result p;
-          Some result)
+  | None ->
+      Option.map (read_env_var n) ~f:(fun (result, env_n) ->
+          if with_debug then Stdio.printf "Found %s, environment %s\n%!" result env_n;
+          result)
 
 (* Originally from the library core.filename_base. *)
 let filename_parts filename =
@@ -233,6 +250,37 @@ let () =
   Option.iter log_config_sourcing_arg ~f:(fun v ->
       log_config_sourcing := bool_of_config_string ~arg_name:"log_config_sourcing" v)
 
+(** Parses the [ocannl_config] syntax: one [key=value] per line, [#] and [~~] lines are comments,
+    empty values mean "unset", the [ocannl_] key prefix is optional and keys are case-insensitive.
+    Shared by the config file and by the embedded profile payloads (which are literally partial
+    config files); [source] names the origin in error messages. *)
+let parse_config_lines ~source lines =
+  lines
+  |> List.filter ~f:(fun l ->
+      not (String.is_prefix ~prefix:"~~" l || String.is_prefix ~prefix:"#" l))
+  |> List.map ~f:(String.split ~on:'=')
+  |> List.filter_map ~f:(function
+    | [] -> None
+    | [ s ] when String.is_empty (String.strip s) -> None
+    | key :: [ v ] ->
+        let key =
+          String.(lowercase @@ strip ~drop:(fun c -> equal_char '-' c || equal_char ' ' c) key)
+        in
+        let key =
+          if String.is_prefix key ~prefix:"ocannl" then
+            String.drop_prefix key 6 |> String.strip ~drop:(equal_char '_')
+          else key
+        in
+        str_nonempty ~f:(pair key) v
+    | l ->
+        failwith @@ "OCANNL: invalid syntax in " ^ source
+        ^ ", should have a single '=' on each non-empty line, found: " ^ String.concat l)
+
+let config_table_of_lines ~source lines =
+  match Hashtbl.of_alist (module String) (parse_config_lines ~source lines) with
+  | `Ok h -> h
+  | `Duplicate_key key -> failwith @@ "OCANNL: duplicate key in " ^ source ^ ": " ^ key
+
 let config_file_args =
   let suppress_welcome_message () =
     Option.value_map ~default:false ~f:Bool.of_string
@@ -255,34 +303,7 @@ let config_file_args =
         in
         find_up rev_dirs
       in
-      let result =
-        config_lines
-        |> List.filter ~f:(fun l ->
-            not (String.is_prefix ~prefix:"~~" l || String.is_prefix ~prefix:"#" l))
-        |> List.map ~f:(String.split ~on:'=')
-        |> List.filter_map ~f:(function
-          | [] -> None
-          | [ s ] when String.is_empty s -> None
-          | key :: [ v ] ->
-              let key =
-                String.(
-                  lowercase @@ strip ~drop:(fun c -> equal_char '-' c || equal_char ' ' c) key)
-              in
-              let key =
-                if String.is_prefix key ~prefix:"ocannl" then
-                  String.drop_prefix key 6 |> String.strip ~drop:(equal_char '_')
-                else key
-              in
-              str_nonempty ~f:(pair key) v
-          | l ->
-              failwith @@ "OCANNL: invalid syntax in the config file " ^ fname
-              ^ ", should have a single '=' on each non-empty line, found: " ^ String.concat l)
-        |> Hashtbl.of_alist (module String)
-        |> function
-        | `Ok h -> h
-        | `Duplicate_key key ->
-            failwith @@ "OCANNL: duplicate key in config file " ^ fname ^ ": " ^ key
-      in
+      let result = config_table_of_lines ~source:("the config file " ^ fname) config_lines in
       if String.length fname > 0 then
         Hashtbl.iter_keys result ~f:(fun key ->
             if not (Set.mem known_config_keys key) then
@@ -306,9 +327,192 @@ let () =
     Option.iter (Hashtbl.find config_file_args "log_config_sourcing") ~f:(fun v ->
         log_config_sourcing := bool_of_config_string ~arg_name:"log_config_sourcing" v)
 
-(** Retrieves [arg_name] argument from the command line or from an environment variable, returns
-    [default] if none found. *)
-let get_global_arg ~default ~arg_name:n =
+(** {2 Configuration profiles (gh-ocannl-559)} *)
+
+(** The source levels a setting can come from, in decreasing priority. Each level splits into two
+    sublevels: the keys stated explicitly at that level, then the payload of a profile {e picked} at
+    that level -- so a specific setting always beats an aggregate one of equal immediacy, and a
+    profile named on the commandline still overrides an exhaustive config file. *)
+type config_level = Cmdline_level | Env_level | Config_file_level
+
+let equal_config_level l1 l2 =
+  match (l1, l2) with
+  | Cmdline_level, Cmdline_level | Env_level, Env_level | Config_file_level, Config_file_level ->
+      true
+  | (Cmdline_level | Env_level | Config_file_level), _ -> false
+
+let describe_config_level = function
+  | Cmdline_level -> "the commandline"
+  | Env_level -> "the environment"
+  | Config_file_level -> "the config file"
+
+(** Where {!get_global_arg} found a value; reported by the [log_config_sourcing] trace. *)
+type config_source =
+  | From_cmdline of string  (** the matching [Sys.argv] element *)
+  | From_env of string  (** the matching environment variable *)
+  | From_config_file
+  | From_profile of config_level * string  (** the level that picked the profile, and its name *)
+  | From_default
+
+(** A short provenance tag, e.g. ["profile 'reproducible' via the commandline"]. *)
+let config_source_label = function
+  | From_cmdline _ -> "commandline"
+  | From_env _ -> "environment"
+  | From_config_file -> "config file"
+  | From_profile (level, name) ->
+      Printf.sprintf "profile '%s' via %s" name (describe_config_level level)
+  | From_default -> "default"
+
+let describe_config_source ~value ~default = function
+  | From_cmdline arg -> Printf.sprintf "Found %s, commandline %s" value arg
+  | From_env var -> Printf.sprintf "Found %s, environment %s" value var
+  | From_config_file -> Printf.sprintf "Found %s, in the config file" value
+  | From_profile (level, name) ->
+      Printf.sprintf "Found %s, in the profile %S picked via %s" value name
+        (describe_config_level level)
+  | From_default -> Printf.sprintf "Not found, using default %s" default
+
+(** The precedence walk, factored out of {!get_global_arg} so it can be exercised on synthetic
+    sources (see test/operations/config_profiles.ml). The lookups are pure; logging happens at the
+    call site, which is the only place that knows which sublevel won. *)
+let resolve_config_value ~cmdline ~env ~file ~profile ~default ~arg_name =
+  let from_profile level =
+    match profile with
+    | Some (l, name, lookup) when equal_config_level l level ->
+        Option.map (lookup arg_name) ~f:(fun v -> (v, From_profile (level, name)))
+    | _ -> None
+  in
+  let sublevels =
+    [
+      (fun () -> Option.map (cmdline arg_name) ~f:(fun (v, arg) -> (v, From_cmdline arg)));
+      (fun () -> from_profile Cmdline_level);
+      (fun () -> Option.map (env arg_name) ~f:(fun (v, var) -> (v, From_env var)));
+      (fun () -> from_profile Env_level);
+      (fun () -> Option.map (file arg_name) ~f:(fun v -> (v, From_config_file)));
+      (fun () -> from_profile Config_file_level);
+    ]
+  in
+  Option.value (List.find_map sublevels ~f:(fun f -> f ())) ~default:(default, From_default)
+
+(** The keys a profile payload may not set: they are read before profiles are resolved (or would
+    make the resolution recursive). *)
+let profile_ineligible_keys =
+  Set.of_list (module String) [ "profile"; "no_config_file"; "log_config_sourcing" ]
+
+(* The payloads are embedded rather than installed as files: the config search walks up from the
+   working directory and would find the USER's config, so a shipped preset file would need
+   share-directory machinery -- painful on Windows, and wrong under `dune runtest` where the working
+   directory is _build/default/<test dir>. Embedded text costs no distribution machinery and stays
+   inspectable: it is reproduced verbatim in ocannl_config.reference and its provenance is reported
+   by the log_config_sourcing trace. *)
+
+let reproducible_profile_payload =
+  {|# Deterministic, and identical across machines wherever reasonable. Cross-BACKEND
+# reproducibility is explicitly out of scope: this profile does not try to make the cc
+# and the cuda backends agree bit for bit.
+
+# The largest cross-machine determinism leak: schedule identity pins numerics (loop order,
+# split reductions, tensorization), so two machines crowning two schedules compute two
+# results. Replaying an explicitly provided, committed autotune_cache_dir stays allowed --
+# a pinned schedule is deterministic.
+autotune_search=false
+# The analytic cost model picks schedules from per-backend (and, once calibrated, per-machine)
+# envelope constants -- the same leak without the timing runs.
+model_default_schedule=false
+
+# `-mcpu=native` / `-march=native` changes which FMA and vector instructions the compiler may
+# use, hence the results, per machine. "none" passes no architecture flag.
+cc_backend_arch_flags=none
+# Contraction the codegen did not ask for (the explicit `fmaf` selections stay): whether a*b+c
+# becomes one fused op is compiler- and target-discretionary.
+cc_backend_fp_contract=off
+cc_backend_fast_math=false
+# Explicit SIMD rendering reassociates strict-FP reductions into per-lane accumulator chains,
+# so the summation order would follow the probed vector width. 0 keeps the serial order.
+cc_vector_bytes=0
+
+# The numerics gates at their exact defaults, so that a profile switch never silently changes
+# what math is being done (they are the orthogonal axis; see the issue).
+tf32_matmuls=false
+fp16_arithmetic=false
+narrow_compute_f32=true
+|}
+
+let performance_profile_payload =
+  {|# The fastest configuration AT UNCHANGED SEMANTICS. Result-changing gates (tf32_matmuls,
+# fp16_arithmetic's accuracy-for-throughput trade is the one exception below, and the
+# algebraic-rewrite tiers) belong to the numerics axis, not to this one.
+
+# Empirical schedule search on, with a wider beam and more rounds than the everyday defaults.
+autotune_search=true
+autotune_beam_width=4
+autotune_rounds=4
+# Untuned compiles still get the cost model's pick instead of the plain default pipeline.
+model_default_schedule=true
+
+# Target the host CPU, and let the SIMD probe add what that target already supports.
+cc_backend_arch_flags=auto
+cc_backend_simd_flags=auto
+
+# Native 16-bit arithmetic where the target has it; ignored on targets that promote fp16 to
+# float, and on the GPU backends.
+fp16_arithmetic=true
+|}
+
+(** The embedded profile payloads, by name. Each is literally a partial [ocannl_config] file: same
+    syntax, same parser, setting only the keys where the profiles' goals disagree. *)
+let profile_payloads =
+  [ ("reproducible", reproducible_profile_payload); ("performance", performance_profile_payload) ]
+
+let parse_profile_payload ~name text =
+  let source = Printf.sprintf "the built-in profile %S" name in
+  let table = config_table_of_lines ~source (String.split_lines text) in
+  Hashtbl.iter_keys table ~f:(fun key ->
+      if Set.mem profile_ineligible_keys key then
+        failwith @@ "OCANNL: " ^ source ^ " sets the key " ^ key
+        ^ ", which is resolved before profiles are"
+      else if not (Set.mem known_config_keys key) then
+        failwith @@ "OCANNL: " ^ source ^ " sets the unknown config key " ^ key);
+  table
+
+(** The profile picked for this run, if any: its level (which decides the priority of its payload),
+    its name, and the parsed payload. *)
+let active_profile =
+  let picked =
+    match read_cmdline_var "profile" with
+    | Some (v, _) -> Some (Cmdline_level, v)
+    | None -> (
+        match read_env_var "profile" with
+        | Some (v, _) -> Some (Env_level, v)
+        | None ->
+            Option.map (Hashtbl.find config_file_args "profile") ~f:(fun v ->
+                (Config_file_level, v)))
+  in
+  let picked =
+    Option.bind picked ~f:(fun (level, name) ->
+        Option.map (str_nonempty ~f:Fn.id (String.lowercase (String.strip name)))
+          ~f:(fun name -> (level, name)))
+  in
+  Option.map picked ~f:(fun (level, name) ->
+      match List.Assoc.find profile_payloads name ~equal:String.equal with
+      | None ->
+          invalid_arg @@ "OCANNL: unknown ocannl_profile " ^ name ^ " (picked via "
+          ^ describe_config_level level ^ "); known profiles: "
+          ^ String.concat ~sep:", " (List.map profile_payloads ~f:fst)
+      | Some text ->
+          if !log_config_sourcing then
+            Stdio.printf "\nOCANNL: using the configuration profile %S, picked via %s.\n%!" name
+              (describe_config_level level);
+          (level, name, parse_profile_payload ~name text))
+
+let profile_lookup =
+  Option.map active_profile ~f:(fun (level, name, table) ->
+      (level, name, fun key -> Hashtbl.find table key))
+
+(** Retrieves the [arg_name] setting from the commandline, the environment, the config file, or the
+    payload of the profile picked at one of those levels; returns [default] if none has it, together
+    with where the value came from. *)
+let get_global_arg_with_source ~default ~arg_name:n =
   let with_debug =
     !log_config_sourcing
     && (settings.log_level > 0 || equal_string n "log_level")
@@ -316,18 +520,15 @@ let get_global_arg ~default ~arg_name:n =
   in
   if with_debug then
     Stdio.printf "Retrieving commandline, environment, or config file variable ocannl_%s\n%!" n;
-  let result =
-    Option.value_or_thunk (read_cmdline_or_env_var n) ~default:(fun () ->
-        match Hashtbl.find config_file_args n with
-        | Some v ->
-            if with_debug then Stdio.printf "Found %s, in the config file\n%!" v;
-            v
-        | None ->
-            if with_debug then Stdio.printf "Not found, using default %s\n%!" default;
-            default)
+  let result, source =
+    resolve_config_value ~cmdline:read_cmdline_var ~env:read_env_var
+      ~file:(Hashtbl.find config_file_args) ~profile:profile_lookup ~default ~arg_name:n
   in
+  if with_debug then Stdio.printf "%s\n%!" (describe_config_source ~value:result ~default source);
   Hash_set.add accessed_global_args n;
-  result
+  (result, source)
+
+let get_global_arg ~default ~arg_name = fst (get_global_arg_with_source ~default ~arg_name)
 
 let get_global_flag ~default ~arg_name:n =
   bool_of_config_string ~arg_name:n
