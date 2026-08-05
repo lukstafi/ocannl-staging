@@ -184,6 +184,12 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   [report-hip.md](report-hip.md) (WSL2/HIP on gfx1151, all three frameworks — the gh-ocannl-538
   re-measurement leg, and the first report in which a rocWMMA candidate is seeded, timed and
   crowned),
+  [report-gh528-hip.md](report-gh528-hip.md) (WSL2/HIP on gfx1151, the hardware validation of
+  gh-ocannl-528's interior-batch `Tensorize` and gh-ocannl-481's HIP declines, plus the `gpt2_mini`
+  tensor-core probe: three tensorized sites reached and verified in the emitted source, landing
+  within noise of an f32 schedule with none — and the reference for two facts that outlive it,
+  that gfx1151's WMMA is not exactly-rounded in any format combination, and that `taskset -c 0-15`
+  on that box is 8 SMT-shared cores rather than 16 private ones),
   [report-cifar-cuda.md](report-cifar-cuda.md) (Linux/CUDA, the cifar-scale conv baseline
   for gh-ocannl-500/502 with a per-layer breakdown) and
   [report-gh537-metal.md](report-gh537-metal.md) (macOS/Metal, the paired before/after A/B of
