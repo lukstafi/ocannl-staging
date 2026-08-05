@@ -258,7 +258,7 @@ let covers_box ~range ~(dims : int array) (idcs : Idx.axis_index array) : bool =
 
     [fiber_cardinality ~domain idcs]: how many points of the loop box [domain] (symbol, width pairs)
     map to one given cell in the image of the access map [idcs] — the per-cell visit count of a read
-    access, and the recompute cost per read site of inlining a setter ([Low_level.visit_llc]'s
+    access, and the recompute cost per read site of inlining a setter (the retired [Low_level] concrete tracer's
     reduction extent, [virtualize_max_inline_reduction]'s subject). Domain symbols absent from the
     map contribute the product of their widths; when the map is injective on its mentioned symbols
     ({!Indexing.affine_injective}) that product is the exact fiber size of every image cell (cells
@@ -281,6 +281,60 @@ let fiber_cardinality ~(domain : (Idx.symbol * int) list) (idcs : Idx.axis_index
     List.Assoc.find domain s ~equal:Idx.equal_symbol |> Option.value ~default:1
   in
   if Idx.affine_injective ~symbol_range idcs then `Exact base else `At_least base
+
+(** Upper-bound companion of {!fiber_cardinality}: at most how many points of the loop box [domain]
+    map to any single cell of the image of [idcs]. Domain symbols absent from the map contribute the
+    product of their widths exactly; when the map is injective on its mentioned symbols that is the
+    whole fiber and the bound is exact. Otherwise the mentioned symbols' contribution is bounded per
+    component: the solutions of [Σ c_k·s_k = const] over a box are pinned once all symbols but one
+    are fixed, so one component admits at most the product of its symbols' widths divided by the
+    largest of them, times the widths of the mentioned symbols it does not constrain; the smallest
+    component-wise bound is taken. Uninterpretable components ([Sub_axis], [Concat]) constrain
+    nothing. *)
+let fiber_cardinality_ub ~(domain : (Idx.symbol * int) list) (idcs : Idx.axis_index array) :
+    [ `Exact of int | `At_most of int ] =
+  let mentioned_in (idx : Idx.axis_index) : Idx.symbol list =
+    match idx with
+    | Idx.Iterator s -> [ s ]
+    | Idx.Affine { symbols; _ } -> List.map (Idx.coalesce_affine_terms symbols) ~f:snd
+    | Idx.Concat syms -> syms
+    | Idx.Fixed_idx _ | Idx.Sub_axis -> []
+  in
+  let in_domain s = List.Assoc.mem domain s ~equal:Idx.equal_symbol in
+  let width s = List.Assoc.find domain s ~equal:Idx.equal_symbol |> Option.value ~default:1 in
+  let mentioned =
+    Array.to_list idcs |> List.concat_map ~f:mentioned_in
+    |> List.dedup_and_sort ~compare:Idx.compare_symbol
+    |> List.filter ~f:in_domain
+  in
+  let base =
+    List.fold domain ~init:1 ~f:(fun acc (s, w) ->
+        if List.mem mentioned s ~equal:Idx.equal_symbol then acc else acc * w)
+  in
+  if Idx.affine_injective ~symbol_range:width idcs then `Exact base
+  else
+    let product syms = List.fold syms ~init:1 ~f:(fun acc s -> acc * width s) in
+    let component_bound (idx : Idx.axis_index) : int option =
+      match idx with
+      | Idx.Fixed_idx _ | Idx.Sub_axis | Idx.Concat _ -> None
+      | Idx.Iterator _ | Idx.Affine _ -> (
+          let syms = List.filter (mentioned_in idx) ~f:in_domain in
+          match syms with
+          | [] -> None
+          | _ ->
+              let widths = List.map syms ~f:width in
+              let wmax = List.fold widths ~init:1 ~f:max in
+              let own = List.fold widths ~init:1 ~f:( * ) / wmax in
+              let others =
+                List.filter mentioned ~f:(fun s -> not (List.mem syms s ~equal:Idx.equal_symbol))
+              in
+              Some (own * product others))
+    in
+    let best =
+      Array.fold idcs ~init:(product mentioned) ~f:(fun acc idx ->
+          match component_bound idx with Some b -> min acc b | None -> acc)
+    in
+    `At_most (base * best)
 
 (** {2 Projection-level predicates}
 
@@ -463,6 +517,30 @@ type 'tn access = {
 }
 [@@deriving sexp_of]
 
+(** Whether two accesses (of the same node) can touch a common cell, each access taken over its
+    whole loop box — the two sides' iterations paired independently, including iterations of loops
+    the sides share (the accesses need not be simultaneous, so a shared loop's symbol varies
+    independently between one side's visit and the other's). Symbols bound by neither side's loops
+    (static indices) are shared parameters, equal on both sides, bounded by [static_range] when
+    known. Conservative: [false] only when {!pair_conflict} proves disjointness; uninterpretable
+    access kinds (dynamic, whole-node, vectorized) count as overlapping. *)
+let may_touch_same_cell ?(static_range = fun _ -> None) (a : 'tn access) (b : 'tn access) : bool =
+  if a.a_dynamic || b.a_dynamic || a.a_whole || b.a_whole || a.a_vec_last || b.a_vec_last then true
+  else
+    let range s =
+      match List.Assoc.find a.a_loops s ~equal:Idx.equal_symbol with
+      | Some bounds -> Some bounds
+      | None -> (
+          match List.Assoc.find b.a_loops s ~equal:Idx.equal_symbol with
+          | Some bounds -> Some bounds
+          | None -> static_range s)
+    in
+    let dup_left s = List.Assoc.mem a.a_loops s ~equal:Idx.equal_symbol in
+    let dup_right s = List.Assoc.mem b.a_loops s ~equal:Idx.equal_symbol in
+    match pair_conflict ~range ~dup_left ~dup_right ~pairs:[] ~left:a.a_map ~right:b.a_map with
+    | Disjoint -> false
+    | Same_thread | Cross_thread _ -> true
+
 (** {2 The containment query}
 
     [read_covered_before ~read ~writes ()]: is every cell the [read] access can touch necessarily
@@ -497,7 +575,7 @@ type 'tn access = {
     write's map).
 
     Guarded writes are the caller's choice: include them to mirror guards-taken analyses
-    ([Low_level.visit_llc] traces [If] bodies unconditionally), pre-filter [a_guarded] for
+    ([Low_level.trace_node_facts] and the coverage queries take guards unconditionally), pre-filter [a_guarded] for
     execution-accurate coverage. [writes] must be accesses of the same node as [read]. *)
 
 (* Value set of one axis component, abstracted as an arithmetic progression {ap_lo, ap_lo + ap_step,
