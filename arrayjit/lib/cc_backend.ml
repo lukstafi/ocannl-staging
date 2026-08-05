@@ -227,7 +227,22 @@ let arch_flags =
   fun () ->
     match Utils.get_global_arg ~default:"auto" ~arg_name:"cc_backend_arch_flags" with
     | "auto" -> Lazy.force probed
+    (* The portable baseline, spelled as a word because a config source cannot carry an empty
+       value (an empty setting means "unset"), and the `reproducible` profile has to be able to
+       pin it. *)
+    | "none" -> ""
     | flags -> flags
+
+(* Floating-point contraction beyond what the codegen selects explicitly (it emits `fmaf` where it
+   wants an FMA): whether the compiler is free to fuse a*b+c on its own is compiler- and
+   target-discretionary, so a reproducible run pins it off. "auto" (the default) passes no flag,
+   leaving the compiler's own default -- which is what every OCANNL release before gh-ocannl-559
+   did. *)
+let fp_contract_flag () =
+  match String.lowercase (String.strip (Utils.get_global_arg ~default:"auto" ~arg_name:"cc_backend_fp_contract")) with
+  | "auto" -> None
+  | ("off" | "on" | "fast") as mode -> Some ("-ffp-contract=" ^ mode)
+  | other -> invalid_arg ("cc_backend_fp_contract: expected auto | off | on | fast, got " ^ other)
 
 let simd_flags =
   let probed =
@@ -462,6 +477,7 @@ let%track7_sexp c_compile_and_load ~f_path =
       Some optimization_flag;
       Option.some_if (not (String.is_empty arch_flag)) arch_flag;
       Option.some_if (not (String.is_empty simd_flag)) simd_flag;
+      fp_contract_flag ();
       fast_math_flag;
       parallel_flag;
     ]

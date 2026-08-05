@@ -58,6 +58,41 @@ type report = {
   best_schedule : SC.saved_schedule;
 }
 
+(** The report of a [tune] call that never searched (config [autotune_search=false], gh-ocannl-559):
+    every counter zero and every time [infinity], like a search whose candidates all failed. The
+    caller gets the untuned default compile; [best_label] says why. *)
+let no_search_report =
+  {
+    cache_hit = false;
+    candidates_timed = 0;
+    candidates_failed = 0;
+    partial = false;
+    baseline_declined = false;
+    declines = [];
+    terminal_failure = None;
+    rounds_run = 0;
+    sketch_candidates = 0;
+    epilogue_sketch_candidates = 0;
+    fiss_sketch_candidates = 0;
+    fiss_sketch_timed = 0;
+    split_reduce_candidates = 0;
+    split_reduce_timed = 0;
+    mma_candidates = 0;
+    mma_timed = 0;
+    model_scored = 0;
+    model_pruned = 0;
+    fissioned = false;
+    baseline_ms = Float.infinity;
+    default_ms = None;
+    best_ms = Float.infinity;
+    best_label = "search disabled";
+    best_tensorized = false;
+    best_mma_statements = 0;
+    best_mma_scalar_fallbacks = 0;
+    mma_best_ms = Float.infinity;
+    best_schedule = [];
+  }
+
 type decline_acc = { mutable da_count : int; mutable da_details : string list }
 
 (* Where the candidate died, for the per-candidate log line. Compile-side phases are already
@@ -3704,8 +3739,16 @@ let model_default ?report ctx comp bindings =
 
 (** {2 The search} *)
 
-let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fraction
+let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fraction
     ?max_split_reduce_sites ?timing_ctx ?report ctx comp bindings =
+  (* gh-ocannl-559: with the search off, [tune] still replays an explicitly provided cache -- a
+     pinned schedule is deterministic, and committing one is how a reproducible run keeps a tuned
+     schedule -- but never times candidates, whose crowning is the largest cross-machine
+     determinism leak. A miss compiles the untuned default pipeline, exactly like the
+     nothing-was-timed fallback below. *)
+  let search =
+    Option.value search ~default:(Utils.get_global_flag ~arg_name:"autotune_search" ~default:true)
+  in
   let beam_width =
     max 1 (Option.value beam_width ~default:(int_arg ~arg_name:"autotune_beam_width" ~default:2))
   in
@@ -3726,6 +3769,14 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
   in
   let static_indices = Idx.bound_symbols bindings in
   let backend = Context.backend_name ctx in
+  (* Without a cache there is nothing for a search-less [tune] to replay, so it does not even take
+     the base compile that computes the cache key: the caller gets the untuned default compile it
+     would have gotten from [Context.compile]. *)
+  if (not search) && String.is_empty cache_dir then (
+    logf "search disabled (autotune_search=false) and no cache: compiling the untuned default";
+    Option.iter report ~f:(fun f -> f no_search_report);
+    Context.compile ctx comp bindings)
+  else
   let is_gpu = Sched.backend_is_gpu backend and is_cpu = Sched.backend_is_cpu backend in
   let limits = Context.hardware_limits ctx in
   (* With [timing_ctx], the search (candidate compiles and timing runs) happens against that scratch
@@ -3929,6 +3980,16 @@ let tune ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fractio
   in
   match cached with
   | Some result -> result
+  | None when not search ->
+      logf "search disabled (autotune_search=false) and no cache entry: compiling the untuned default";
+      emit_report
+        {
+          no_search_report with
+          candidates_failed = failed_count declines;
+          baseline_declined = Option.is_some baseline_decline;
+          declines = decline_summaries declines;
+        };
+      Context.compile ctx comp bindings
   | None -> (
       let seen = Hash_set.create (module String) in
       Hash_set.add seen base_digest;
