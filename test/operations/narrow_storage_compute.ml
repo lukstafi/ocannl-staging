@@ -116,12 +116,23 @@ let () =
   in
   Ir.Numerics.set_policy { base with narrow_compute_f32 = true };
   let err_wide = max_err reference wide and err_per_op = max_err reference per_op in
-  p "f32 compute over bf16 storage beats per-operator rounding" Float.(err_wide < err_per_op);
+  (* [narrow_compute_f32] is a C-backend policy: the GPU backends have native 16-bit arithmetic and
+     ignore it, so both legs above are the same computation there and the accuracy comparison has
+     nothing to compare. That is the same reason the structural checks at the end are CPU-only —
+     said on stderr, as the sibling schedule tests do, so a vacuous pass is not read as coverage.
+     The parity checks in section 2 do hold on every backend and stay ungated. *)
+  if not on_cpu then
+    Stdio.eprintf
+      "narrow-compute: %s ignores narrow_compute_f32 (native 16-bit arithmetic) — the accuracy \
+       checks are vacuous here\n"
+      backend_name;
+  p "f32 compute over bf16 storage beats per-operator rounding"
+    ((not on_cpu) || Float.(err_wide < err_per_op));
   (* The wide leg's only rounding is the final store, so its relative error is bounded by bf16's
      half-ulp (2^-9); the per-operator leg compounds five of them. *)
   let rel arr = max_err reference arr /. Array.fold reference ~init:0. ~f:(fun m v ->
       Float.max m (Float.abs v)) in
-  p "wide-compute relative error within one bf16 ulp" Float.(rel wide < 0.004);
+  p "wide-compute relative error within one bf16 ulp" ((not on_cpu) || Float.(rel wide < 0.004));
   p "per-operator relative error exceeds it" Float.(rel per_op > 0.004);
 
   (* --- 2. Bitwise parity of the vectorized rendering against the serial twin. --- *)
@@ -181,9 +192,14 @@ let () =
   in
   let ovf_wide = overflow_leg { base with narrow_compute_f32 = true; fp16_arithmetic = false } in
   let ovf_native = overflow_leg { base with narrow_compute_f32 = true; fp16_arithmetic = true } in
-  p "f32 compute over half storage keeps the intermediate finite" Float.(is_finite ovf_wide);
+  (* Same gate as the bf16 accuracy legs: both policies are C-backend knobs, so on a GPU backend
+     both [overflow_leg] calls compute [exp 12.] in half and overflow — a property of the target's
+     native arithmetic, not of the policy this pair exists to pin. *)
+  p "f32 compute over half storage keeps the intermediate finite"
+    ((not on_cpu) || Float.(is_finite ovf_wide));
   p "fp16 compute applies fp16's ceiling to the intermediate"
-    (if native_fp16 then not Float.(is_finite ovf_native) else Float.(is_finite ovf_native));
+    ((not on_cpu)
+    || if native_fp16 then not Float.(is_finite ovf_native) else Float.(is_finite ovf_native));
 
   Ir.Numerics.set_policy { base with narrow_compute_f32 = true; fp16_arithmetic = false };
 
@@ -220,31 +236,35 @@ let () =
         ((not on_cpu)
         || (has "OCANNL_HALF_FMA" && has "HALF_TO_FLOAT(a)" && not (has "fmaf((float)(a)"))));
 
-  (* --- 3. Structure of the bf16 vectorized source. --- *)
-  match read_generated "nsc_vec_bf16" with
-  | None -> p "bf16 loop vectorizes with a converting load/store" (not on_cpu)
-  | Some src ->
-      let has s = String.is_substring src ~substring:s in
-      if on_cpu then begin
-        p "bf16 loop vectorizes with a converting load/store"
-          (has "vector_size" && has "OCANNL_VEC_WIDEN_BFLOAT16" && has "OCANNL_VEC_NARROW_BFLOAT16");
-        (* [narrow(op(...))] immediately re-widened is the signature of per-operator rounding; the
-           seam makes it unspellable, in the vector body and in the serial remainder alike. *)
-        p "no operator narrows only to be widened again"
-          (not (has "bfloat16_to_single(single_to_bfloat16("));
-        (* f32 arithmetic reached a bf16 kernel: the fused multiply-add is the f32 one. *)
-        p "arithmetic is f32" (has "fmaf(" || has "__builtin_elementwise_fma");
-        (* Under the fp16-arithmetic policy the half kernel's vector element type is HALF_T rather
-           than float -- the lane count doubles and no conversion appears at all. On a target
-           without native 16-bit arithmetic the policy is correctly ignored, and the kernel is the
-           widening one. *)
-        match native_source with
-        | None -> p "fp16 policy is honored exactly where the target reports the capability" true
-        | Some nsrc ->
-            let nhas t = String.is_substring nsrc ~substring:t in
-            p "fp16 policy is honored exactly where the target reports the capability"
-              (if native_fp16 then
-                 nhas "HALF_T ocannl_vec" && not (nhas "OCANNL_VEC_WIDEN_HALF")
-               else nhas "OCANNL_VEC_WIDEN_HALF" || nhas "HALF_TO_FLOAT")
-      end
-      else p "bf16 loop vectorizes with a converting load/store" true
+  (* --- 3. Structure of the bf16 vectorized source. ---
+
+     CPU-only in substance (the vector seam these pin is the C backends'), but printed on every
+     backend: the golden is shared, so a GPU run that emitted fewer lines than cc could never match
+     it however it behaved. *)
+  let vec_source = read_generated "nsc_vec_bf16" in
+  let src_has src s = Option.value_map src ~default:false ~f:(String.is_substring ~substring:s) in
+  p "bf16 loop vectorizes with a converting load/store"
+    ((not on_cpu)
+    || src_has vec_source "vector_size"
+       && src_has vec_source "OCANNL_VEC_WIDEN_BFLOAT16"
+       && src_has vec_source "OCANNL_VEC_NARROW_BFLOAT16");
+  (* [narrow(op(...))] immediately re-widened is the signature of per-operator rounding; the seam
+     makes it unspellable, in the vector body and in the serial remainder alike. *)
+  p "no operator narrows only to be widened again"
+    ((not on_cpu) || not (src_has vec_source "bfloat16_to_single(single_to_bfloat16("));
+  (* f32 arithmetic reached a bf16 kernel: the fused multiply-add is the f32 one. *)
+  p "arithmetic is f32"
+    ((not on_cpu)
+    || src_has vec_source "fmaf(" || src_has vec_source "__builtin_elementwise_fma");
+  (* Under the fp16-arithmetic policy the half kernel's vector element type is HALF_T rather than
+     float -- the lane count doubles and no conversion appears at all. On a target without native
+     16-bit arithmetic the policy is correctly ignored, and the kernel is the widening one. *)
+  p "fp16 policy is honored exactly where the target reports the capability"
+    ((not on_cpu)
+    ||
+    match native_source with
+    | None -> true
+    | Some nsrc ->
+        let nhas t = String.is_substring nsrc ~substring:t in
+        if native_fp16 then nhas "HALF_T ocannl_vec" && not (nhas "OCANNL_VEC_WIDEN_HALF")
+        else nhas "OCANNL_VEC_WIDEN_HALF" || nhas "HALF_TO_FLOAT")
