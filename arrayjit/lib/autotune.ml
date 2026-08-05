@@ -3789,8 +3789,13 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
      it would have gotten from [Context.compile]. *)
   if (not search) && String.is_empty cache_dir then (
     logf "search disabled (autotune_search=false) and no chosen cache: compiling the untuned default";
+    (* Report AFTER the fallback compile: a report is a record of what this call achieved, and
+       [no_search_report] says the untuned default shipped. Emitting it first would leave a
+       consumer holding a clean, non-partial report for a call that then raised (Codex P2 on PR
+       #291) -- every other fatal path here reports the failure or nothing. *)
+    let result = Context.compile ctx comp bindings in
     Option.iter report ~f:(fun f -> f no_search_report);
-    Context.compile ctx comp bindings)
+    result)
   else
   let is_gpu = Sched.backend_is_gpu backend and is_cpu = Sched.backend_is_cpu backend in
   let limits = Context.hardware_limits ctx in
@@ -3997,6 +4002,8 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
   | Some result -> result
   | None when not search ->
       logf "search disabled (autotune_search=false) and no cache entry: compiling the untuned default";
+      (* After the compile, as in the no-cache branch above. *)
+      let result = Context.compile ctx comp bindings in
       emit_report
         {
           no_search_report with
@@ -4004,7 +4011,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
           baseline_declined = Option.is_some baseline_decline;
           declines = decline_summaries declines;
         };
-      Context.compile ctx comp bindings
+      result
   | None -> (
       let seen = Hash_set.create (module String) in
       Hash_set.add seen base_digest;

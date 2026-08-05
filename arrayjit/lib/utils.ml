@@ -497,21 +497,21 @@ let parse_profile_payload ~name text =
 (** The profile picked for this run, if any: its level (which decides the priority of its payload),
     its name, and the parsed payload. *)
 let active_profile =
+  (* An EMPTY value is unset, at each level independently: everywhere else in the configuration
+     "" means "as if absent", and a launcher expanding [--ocannl_profile=$PROFILE] with an unset
+     variable must not thereby disable a profile the environment or the config file names (Codex P2
+     on PR #291). So the fall-through tests each level's value, not just its presence. *)
+  let normalize name = str_nonempty ~f:Fn.id (String.lowercase (String.strip name)) in
   let picked =
-    (* [--ocannl_profile=...], not [--profile=...]: see [read_cmdline_var]'s [qualified_only]. *)
-    match read_cmdline_var ~qualified_only:true "profile" with
-    | Some (v, _) -> Some (Cmdline_level, v)
-    | None -> (
-        match read_env_var "profile" with
-        | Some (v, _) -> Some (Env_level, v)
-        | None ->
-            Option.map (Hashtbl.find config_file_args "profile") ~f:(fun v ->
-                (Config_file_level, v)))
-  in
-  let picked =
-    Option.bind picked ~f:(fun (level, name) ->
-        Option.map (str_nonempty ~f:Fn.id (String.lowercase (String.strip name)))
-          ~f:(fun name -> (level, name)))
+    List.find_map
+      [
+        (* [--ocannl_profile=...], not [--profile=...]: see [read_cmdline_var]'s [qualified_only]. *)
+        (Cmdline_level, Option.map (read_cmdline_var ~qualified_only:true "profile") ~f:fst);
+        (Env_level, Option.map (read_env_var "profile") ~f:fst);
+        (Config_file_level, Hashtbl.find config_file_args "profile");
+      ]
+      ~f:(fun (level, value) ->
+        Option.map (Option.bind value ~f:normalize) ~f:(fun name -> (level, name)))
   in
   Option.map picked ~f:(fun (level, name) ->
       match List.Assoc.find profile_payloads name ~equal:String.equal with

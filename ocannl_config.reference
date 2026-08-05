@@ -54,7 +54,10 @@
 #   reproducible -- deterministic, and identical across machines wherever reasonable
 #                   (cross-BACKEND reproducibility is out of scope).
 #   performance  -- the fastest configuration AT UNCHANGED SEMANTICS.
-# Unset (the default) means no profile: every setting resolves as it always has.
+# Unset (the default) means no profile: every setting resolves as it always has. Empty counts
+# as unset at each level independently, so `--ocannl_profile=` (a launcher expanding an unset
+# variable) falls through to `OCANNL_PROFILE` and to the config file rather than disabling the
+# profile they name.
 #
 # A profile's payload is literally a partial config file (the two verbatim texts are
 # reproduced at the end of this file); it sets only the keys where the two goals disagree,
