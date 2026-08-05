@@ -64,6 +64,11 @@ Testing notes:
   copied `test/config/ocannl_config`, so a test may fail or silently select another backend.
   Build `test/<dir>/<name>.exe.output`, inspect `_build/default/test/<dir>/<name>.exe.output`,
   then run `dune runtest test/<dir>/` and promote. Pin `OCANNL_BACKEND` for bin executables.
+  Check that build's exit status (or let its stderr through): if it fails, the previous
+  `.exe.output` stays in place and the stale content reads as a green probe.
+- A `(test)` stanza already diffs an adjacent `<name>.expected` against the test's output during
+  `dune runtest`; the explicit `rule` + `diff` pattern (as in `test_config_consistency`) is only
+  needed for tests not run by a `(test)` stanza, such as the `@slow` rules.
 - Explicit `@slow` training tests are excluded from `dune runtest`; run `dune build @slow` when
   relevant. Both regular and slow executables are compiled by `dune build @check`.
 - Training actions share the `ocannl_training_test` Dune lock, so they do not run their
