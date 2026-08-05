@@ -483,8 +483,12 @@ let%track7_sexp c_compile_and_load ~f_path =
       Some optimization_flag;
       Option.some_if (not (String.is_empty arch_flag)) arch_flag;
       Option.some_if (not (String.is_empty simd_flag)) simd_flag;
-      fp_contract_flag ();
       fast_math_flag;
+      (* AFTER [-ffast-math], which itself sets contraction to fast: clang documents that the last
+         of the two wins, so the explicit knob has to come last or [cc_backend_fp_contract=off]
+         would silently do nothing in the one combination where it is load-bearing (Codex P2 on PR
+         #291). *)
+      fp_contract_flag ();
       parallel_flag;
     ]
     |> List.filter_opt |> String.concat ~sep:" "

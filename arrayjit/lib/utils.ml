@@ -184,14 +184,23 @@ let env_var_names n =
 
 (** The commandline sublevel of {!get_global_arg}: returns the setting's value and the [Sys.argv]
     element it came from. Pure -- the sourcing log lives at the resolution seam, which is the only
-    place that knows which sublevel actually won. *)
-let read_cmdline_var n =
+    place that knows which sublevel actually won.
+
+    [qualified_only] drops the prefix-free spellings, leaving the [ocannl_]-qualified ones. OCANNL
+    is a library: it scans the host executable's [Sys.argv], so a prefix-free key claims an
+    application's own option of that name. That is tolerable for keys nobody else would spell
+    ([--virtualize_max_visits]) and not for [--profile], which is a common application flag and
+    which OCANNL treats as fatal when it does not name a known bundle -- a host passing
+    [--profile=prod] would die during module initialization (Codex P2 on PR #291). *)
+let read_cmdline_var ?(qualified_only = false) n =
   let n_dash = String.tr ~target:'_' ~replacement:'-' n in
   (* Prefixed commandline variants first (backward compat), then prefix-free *)
   let cmd_prefixed = List.concat_map (env_var_names n) ~f:(fun n -> [ "-" ^ n; "--" ^ n; n ]) in
   let cmd_unprefixed =
-    let keys = if String.equal n n_dash then [ n ] else [ n; n_dash ] in
-    List.concat_map keys ~f:(fun k -> [ "--" ^ k; "-" ^ k ])
+    if qualified_only then []
+    else
+      let keys = if String.equal n n_dash then [ n ] else [ n; n_dash ] in
+      List.concat_map keys ~f:(fun k -> [ "--" ^ k; "-" ^ k ])
   in
   let cmd_variants =
     List.concat_map (cmd_prefixed @ cmd_unprefixed) ~f:(fun n -> [ n ^ "_"; n ^ "-"; n ^ "="; n ])
@@ -484,7 +493,8 @@ let parse_profile_payload ~name text =
     its name, and the parsed payload. *)
 let active_profile =
   let picked =
-    match read_cmdline_var "profile" with
+    (* [--ocannl_profile=...], not [--profile=...]: see [read_cmdline_var]'s [qualified_only]. *)
+    match read_cmdline_var ~qualified_only:true "profile" with
     | Some (v, _) -> Some (Cmdline_level, v)
     | None -> (
         match read_env_var "profile" with

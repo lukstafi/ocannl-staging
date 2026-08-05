@@ -8,13 +8,24 @@
  (modules profile_precedence)
  (libraries base arrayjit.utils stdio))
 
+; OCANNL_PROFILE in the ambient environment would outrank this directory's config file and turn
+; the file-picked rules into env-picked ones, so the rules that must NOT be env-picked clear it
+; (an empty value counts as unset at every source). The executable itself refuses to run if any
+; OTHER variable it prints is set -- a clear failure rather than a rewritten golden.
+
 (rule
  (target from_config_file.actual)
  (deps ocannl_config)
  (action
-  (with-stdout-to
-   %{target}
-   (run %{dep:profile_precedence.exe}))))
+  (setenv
+   OCANNL_PROFILE
+   ""
+   (setenv
+    ocannl_profile
+    ""
+    (with-stdout-to
+     %{target}
+     (run %{dep:profile_precedence.exe}))))))
 
 (rule
  (alias runtest)
@@ -26,9 +37,15 @@
  (target from_cmdline.actual)
  (deps ocannl_config)
  (action
-  (with-stdout-to
-   %{target}
-   (run %{dep:profile_precedence.exe} --ocannl_profile=performance))))
+  (setenv
+   OCANNL_PROFILE
+   ""
+   (setenv
+    ocannl_profile
+    ""
+    (with-stdout-to
+     %{target}
+     (run %{dep:profile_precedence.exe} --ocannl_profile=performance))))))
 
 (rule
  (alias runtest)
@@ -53,6 +70,31 @@
  (action
   (diff from_env.expected from_env.actual)))
 
+; OCANNL scans the host executable's argv, so a host application's own `--profile=prod` must not
+; be read as an OCANNL profile: only the `ocannl_`-qualified spellings pick one. Before that rule
+; this run died during module initialization with `unknown ocannl_profile prod`. The output is the
+; file-picked one, unchanged -- the flag reaches nothing.
+
+(rule
+ (target host_profile_flag.actual)
+ (deps ocannl_config)
+ (action
+  (setenv
+   OCANNL_PROFILE
+   ""
+   (setenv
+    ocannl_profile
+    ""
+    (with-stdout-to
+     %{target}
+     (run %{dep:profile_precedence.exe} --profile=prod))))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff host_profile_flag.expected host_profile_flag.actual)))
+
 ; A profile can never defeat a setting of equal or greater immediacy: the explicit
 ; commandline key wins over the payload of the profile the commandline picked.
 
@@ -60,12 +102,18 @@
  (target explicit_beats_profile.actual)
  (deps ocannl_config)
  (action
-  (with-stdout-to
-   %{target}
-   (run
-    %{dep:profile_precedence.exe}
-    --ocannl_profile=performance
-    --ocannl_autotune_rounds=3))))
+  (setenv
+   OCANNL_PROFILE
+   ""
+   (setenv
+    ocannl_profile
+    ""
+    (with-stdout-to
+     %{target}
+     (run
+      %{dep:profile_precedence.exe}
+      --ocannl_profile=performance
+      --ocannl_autotune_rounds=3))))))
 
 (rule
  (alias runtest)

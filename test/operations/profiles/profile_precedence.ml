@@ -14,7 +14,6 @@ open Stdio
    (autotune_rounds, cc_vector_bytes, fp16_arithmetic) and one no source mentions. *)
 let keys =
   [
-    ("profile", "");
     ("autotune_search", "true");
     ("autotune_rounds", "2");
     ("autotune_beam_width", "2");
@@ -29,6 +28,21 @@ let keys =
   ]
 
 let () =
+  (* An OCANNL variable in the ambient environment outranks this directory's config file, so it
+     would rewrite the golden -- and dune tracks no environment variable but OCANNL_BACKEND, so a
+     stale output could be reused besides (Codex P2 on PR #291). Fail with the variable's name
+     instead of producing a mystifying diff. `profile` is exempt: the env-picked rule sets it. *)
+  List.iter keys ~f:(fun (arg_name, _) ->
+      Option.iter (Utils.read_env_var arg_name) ~f:(fun (value, var) ->
+          eprintf
+            "profile_precedence: %s=%s is set in the environment and would outrank this test's \
+             ocannl_config; unset it to run the test.\n"
+            var value;
+          Stdlib.exit 1));
+  (match Utils.active_profile with
+  | None -> printf "%-24s = %-14s (%s)\n" "profile" "" "unset"
+  | Some (level, name, _) ->
+      printf "%-24s = %-14s (picked via %s)\n" "profile" name (Utils.describe_config_level level));
   List.iter keys ~f:(fun (arg_name, default) ->
       let value, source = Utils.get_global_arg_with_source ~default ~arg_name in
       printf "%-24s = %-14s (%s)\n" arg_name value (Utils.config_source_label source))

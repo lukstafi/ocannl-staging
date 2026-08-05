@@ -69,6 +69,12 @@
 # `log_config_sourcing`) and `profile` itself are resolved before profiles are, so a
 # payload cannot set them.
 #
+# This is the one key whose commandline form must carry the `ocannl_` prefix:
+# `--ocannl_profile=...`, not `--profile=...`. OCANNL scans the host executable's whole
+# commandline, `--profile` is a common application option, and an unknown profile name is
+# fatal -- so claiming the prefix-free spelling would kill host programs that have their
+# own. The environment (`OCANNL_PROFILE`) and the config file are unaffected.
+#
 # Note the documented dune-caching trap: changing `OCANNL_PROFILE` does not retrigger
 # tests (only `OCANNL_BACKEND` is an explicit dune dependency), so pick profiles for a
 # test run in `test/config/ocannl_config` instead.
