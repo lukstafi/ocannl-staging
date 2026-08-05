@@ -4437,8 +4437,14 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
         then acc
         else
           let flip =
-            match Tn.Placements.get plc tn with
-            | Some (Virtual, _) -> Some `Materialize
+            (* The raw lineage entry (no intent fallback): only policy decisions are flippable. A
+               node whose virtuality is declared intent (e.g. Mixed_prec.Twin_virtual) would make
+               [Context.decide_materialized] a no-op and waste a search slot; reading the raw entry
+               also keeps tnode-level intent provenances from coincidentally matching the cap
+               provenances on the [`Inline] side. *)
+            match Tn.Placements.raw_entry plc tn with
+            | Some (Virtual, _) when not (Tn.known_virtual tn || Tn.known_constant tn) ->
+                Some `Materialize
             | Some (Never_virtual, (1 | 39)) -> Some `Inline
             | _ -> None
           in

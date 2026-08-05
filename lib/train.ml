@@ -249,9 +249,11 @@ let every_non_literal_materialized =
     {!Context.decide_materialized} (walking toward arm B one node at a time), [Inline] via
     {!Context.decide_inline} — each accepted flip becoming the base for the next, and the refined
     result shipping only if it beats the A/B winner. Every tried flip costs a full search like an
-    arm, so the budget is explicit and defaults to zero. *)
-let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report ?inline_flips ctx
-    loss comp bindings =
+    arm, so the budget is explicit and defaults to zero. Flip searches report through
+    [flip_report], not [report]: the positional arm-A-then-arm-B contract of [report] is preserved
+    regardless of the budget. *)
+let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report ?flip_report
+    ?inline_flips ctx loss comp bindings =
   (* Arm attribution on the same stderr trace as Autotune's config [autotune_log] — winner-arm
      ambiguity misdirected the CUDA benchmark debugging on PR #140. *)
   let log_arms =
@@ -266,11 +268,15 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
     Stdlib.Printf.ksprintf (fun s -> if log_arms then Stdio.eprintf "tune_placements: %s\n%!" s) fmt
   in
   let last = ref None in
-  let capture r =
-    last := Some r;
-    Option.iter report ~f:(fun f -> f r)
-  in
-  let tune arm ctx timing_ctx =
+  (* The public [?report] contract is positional — arm A's report then arm B's, which consumers
+     (e.g. the benchmark harness) attribute by arrival order — so flip-refinement searches report
+     through the separate [?flip_report] instead ([~to_report] selects the callback). *)
+  let tune ?to_report arm ctx timing_ctx =
+    let to_report = Option.value to_report ~default:report in
+    let capture r =
+      last := Some r;
+      Option.iter to_report ~f:(fun f -> f r)
+    in
     logf "arm %s search:" arm;
     last := None;
     let result =
@@ -379,7 +385,7 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
         in
         let ctx' = apply base_ctx in
         let timing' = Option.map base_timing ~f:apply in
-        let r, ms, _rep = tune arm ctx' timing' in
+        let r, ms, _rep = tune ~to_report:flip_report arm ctx' timing' in
         if Float.(ms < chain_ms) then chain := (r, ms, ctx', timing'));
     let chain_result, chain_ms, _, _ = !chain in
     if Float.(chain_ms < winner_ms) then (
