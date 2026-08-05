@@ -28,6 +28,24 @@ let env_lookup key =
 
 let file_lookup key = alist_lookup file key
 
+(* The table below is pure -- synthetic sources, embedded payloads, no real configuration is read
+   -- but linking arrayjit.utils runs the config machinery at module initialization, which can put
+   a welcome message or a profile banner on stdout before this test writes a line, and an unknown
+   ambient OCANNL_PROFILE aborts the process outright. Same stray-variable guard as
+   test/operations/profiles/profile_precedence.ml (Codex P2 on PR #291), duplicated rather than
+   shared: the two tests link only arrayjit.utils between them, and test_utils would drag in the
+   whole IR for eight lines. A third copy is the signal to factor it out. *)
+let () =
+  List.iter
+    [ "profile"; "suppress_welcome_message"; "no_config_file"; "log_config_sourcing" ]
+    ~f:(fun arg_name ->
+      Option.iter (Utils.read_env_var arg_name) ~f:(fun (value, var) ->
+          eprintf
+            "config_profiles: %s=%s is set in the environment; it can make the config machinery \
+             print before this test does. Unset it to run the test.\n"
+            var value;
+          Stdlib.exit 1))
+
 let () =
   let levels =
     [
