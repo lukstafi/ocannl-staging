@@ -1077,8 +1077,15 @@ let find ~id = find_namespaced ~namespace:!current_namespace ~id
     [points_2d]) now lives in {!Context}: it requires an explicit context and performs an on-demand
     device-to-host transfer. There is no host copy stored on the tensor node. *)
 
+(* gh-560: cleanups to run before an accessibility snapshot ([print_accessible_headers] /
+   [log_accessible_headers]). The snapshot's subject is user-code liveness, so caches above this
+   module in the dependency order (the [Low_level] analysis cache) register themselves here to be
+   dropped first — nodes retained only by a compiler cache must not report as accessible. *)
+let before_accessibility_snapshot : (unit -> unit) list ref = ref []
+
 let print_accessible_headers ?(pred = fun _ -> true) () =
   Stdio.printf "Tnode: collecting accessible arrays...%!\n";
+  List.iter !before_accessibility_snapshot ~f:(fun f -> f ());
   Stdlib.Gc.full_major ();
   let results =
     Registry.fold
@@ -1092,6 +1099,7 @@ let print_accessible_headers ?(pred = fun _ -> true) () =
   Stdio.printf "Tnode: Finished printing headers.%!\n"
 
 let%debug_sexp log_accessible_headers ?(pred = fun _ -> true) () =
+  List.iter !before_accessibility_snapshot ~f:(fun f -> f ());
   Stdlib.Gc.full_major ();
   let results =
     Registry.fold

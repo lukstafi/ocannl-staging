@@ -1,17 +1,29 @@
 === affine_accesses dump ===
-wr S   []             loops=[] path=[0] whole 
-rd A   [i1;i2]        loops=[i1:0..3,i2:0..2] path=[1] 
-rd B   [i2]           loops=[i1:0..3,i2:0..2] path=[1] 
-wr C   [i1;i2]        loops=[i1:0..3,i2:0..2] path=[1] 
-rd S   [i4]           loops=[i4:0..3,i3:0..4] path=[2] 
-rd A   [i4;i3]        loops=[i4:0..3,i3:0..4] path=[2] 
-wr S   [i4]           loops=[i4:0..3,i3:0..4] path=[2] rmw 
-rd G   [0]            loops=[] path=[3] 
-wr D   [0]            loops=[] path=[3] guarded 
-rd A   [0;0]          loops=[i5:0..3] path=[4] dyn 
-rd I   [i5]           loops=[i5:0..3] path=[4] 
-wr E   [i5]           loops=[i5:0..3] path=[4] 
+wr S   []             loops=[] path=[0.w] whole 
+rd A   [i1;i2]        loops=[i1:0..3,i2:0..2] path=[1.r] 
+rd B   [i2]           loops=[i1:0..3,i2:0..2] path=[1.r] 
+wr C   [i1;i2]        loops=[i1:0..3,i2:0..2] path=[1.w] 
+rd S   [i4]           loops=[i4:0..3,i3:0..4] path=[2.r] 
+rd A   [i4;i3]        loops=[i4:0..3,i3:0..4] path=[2.r] 
+wr S   [i4]           loops=[i4:0..3,i3:0..4] path=[2.w] rmw 
+rd G   [0]            loops=[] path=[3.c] 
+wr D   [0]            loops=[] path=[3.b.w] guarded 
+rd A   [0;0]          loops=[i5:0..3] path=[4.r] dyn 
+rd I   [i5]           loops=[i5:0..3] path=[4.r] 
+wr E   [i5]           loops=[i5:0..3] path=[4.w] 
+rd E   [i6]           loops=[i6:0..3] path=[5.c] 
+rd E   [i6]           loops=[i6:0..3] path=[5.b.r] guarded 
+wr E   [i6]           loops=[i6:0..3] path=[5.b.w] guarded rmw 
 
 === which loops of the reduction nest parallelize? ===
 i4 (map axis) parallelizable: true
 i3 (reduced axis) parallelizable: false
+
+=== sibling scope operands (gh-561 Arg components) ===
+rd X   [i7]           loops=[i7:0..3] path=[r.a0.r] 
+wr X   [i7]           loops=[i7:0..3] path=[r.a1.0.w] 
+wr Y   [i7]           loops=[i7:0..3] path=[w] 
+scope A's read not covered by the sibling operand's write: correct
+no ordering claimed across sibling operands (write-first): correct
+decide_placements classifies X as read-before-write: true
+X is a routine input (incoming buffer preserved): true

@@ -1799,6 +1799,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name analysis_cache)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules analysis_cache)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name autotune_arm_containment)
  (package neural_nets_lib)
  (deps

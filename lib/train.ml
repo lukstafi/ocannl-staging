@@ -531,26 +531,22 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
        the default-policy arm (arm B's placements are caller-seeded wholesale, so its compile
        reports no policy decisions to flip), so the chain refines from arm A's context — a
        Materialize chain walks from A toward B one node at a time — and the refined result ships
-       only if it beats the A/B winner. A capture compile (no timing) reads the decision surface
-       off the default compile. *)
+       only if it beats the A/B winner. The decision surface is read analyze-only (gh-560:
+       [Context.decision_surface] — no backend codegen, and the arms' compiles already populated
+       the analysis cache, so this costs one specialization replay). *)
     let module LL = Ir.Low_level in
-    let captured = ref [] in
-    (* The capture compile runs outside the tuner's failure containment; a backend that rejects
-       the unscheduled base lowering (the A/B searches above can still have crowned a scheduled
-       winner) must skip the refinement, not fail the tune. *)
-    (match
-       Context.compile
-         ~lowered_transform:(fun o ->
-           captured := o.LL.flip_candidates @ !captured;
-           o)
-         ctx comp bindings
-     with
-    | (_ : Context.t), (_ : Context.routine) -> ()
-    | exception exn ->
-        captured := [];
-        logf "flip refinement skipped: the capture compile failed: %s" (Exn.to_string exn));
+    let captured =
+      (* Outside the tuner's failure containment; a lowering failure (the A/B searches above can
+         still have crowned a winner) must skip the refinement, not fail the tune. *)
+      match Context.decision_surface ctx comp bindings with
+      | candidates -> candidates
+      | exception exn ->
+          logf "flip refinement skipped: the decision-surface lowering failed: %s"
+            (Exn.to_string exn);
+          []
+    in
     let candidates =
-      List.fold !captured ~init:[] ~f:(fun acc fc ->
+      List.fold captured ~init:[] ~f:(fun acc fc ->
           (* Identity is [Tn.uid] ([Tn.equal]), not the session [id], which can repeat across
              namespaces and reinitializations. *)
           if List.exists acc ~f:(fun c -> Tn.equal c.LL.fc_tn fc.LL.fc_tn) then acc

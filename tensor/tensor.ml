@@ -969,6 +969,9 @@ let%track5_sexp unsafe_reinitialize ?(namespace = Tn.default_namespace) () : uni
   param_postprocess := Fn.id;
   random_seed := None;
   Tn.Registry.clear Tn.registry;
+  (* The analysis cache retains recent routines' lowered code (gh-560): release the old session's
+     nodes promptly. Stale entries could never alias fresh nodes anyway (uids are not reused). *)
+  Ir.Low_level.clear_analysis_cache ();
   Shape.unsafe_reinitialize ()
 
 let header t =

@@ -659,6 +659,18 @@ let get_used_memory ctx =
 let placements ctx =
   Backends.query ctx.wrapped { q = (fun _ c -> c.BI.optimize_ctx.Ir.Low_level.placements) }
 
+(* gh-560: the analyze-only entry point — lowering and optimization without backend codegen or
+   linking. [Backends.lower_assignments] forks the lineage state itself, so the surface is read off
+   a hermetic sibling: the argument context, its ledger and frontier are unaffected. With the
+   analysis cache (gh-560), a context that already compiled this routine (e.g. the tuner's arms)
+   pays only the [specialize_proc] replay here. *)
+let decision_surface ?name ctx comp bindings =
+  let optim_ctx = Backends.query ctx.wrapped { q = (fun _ c -> c.BI.optimize_ctx) } in
+  let _name, (lowered : Ir.Low_level.optimized) =
+    Backends.lower_assignments optim_ctx ?name bindings comp.Asgns.asgns
+  in
+  lowered.Ir.Low_level.flip_candidates
+
 let decide_materialized ctx tns =
   let wrapped, () =
     Backends.with_backend ctx.wrapped

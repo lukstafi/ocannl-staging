@@ -127,6 +127,17 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   reads f32 masters into a reduced-precision destination, a mixed triple no advertised tile
   matches, so the default-placement arm proposes zero tensorized candidates — materializing three
   small weight casts is enough to make them reachable at that arm's cost.
+  `BENCH_PRESEED_TWINS=1` (mlp, reduced precision) reaches the same placement through
+  `Context.decide_materialized` instead: a context-level *decision* rather than a tnode-level
+  intent, so unlike `BENCH_TWIN_PLACEMENT` it is visible to the placement A/B and composes with the
+  gh-555 flip chain. The two are refused together: declaring the intent as well either nullifies
+  the pre-seed (`virtual` — `decide_materialized` skips declared-virtual nodes by contract) or
+  applies it to both arms (`materialized`), and neither shows up in the result line. `BENCH_TUNE_REPORT=1` (mlp) prints each search's report fields on stderr —
+  both placement arms under `tune arm:` and each `tune_inline_flips` refinement search under
+  `tune flip:`; `BENCH_FLIP_DUMP=1` (mlp) prints the default-placement compile's whole
+  `flip_candidates` list, which is how "this node is not a searchable decision" is told apart from
+  "it ranked below `tune_inline_flips`" (gh-ocannl-558,
+  [report-gh558-hip-flips.md](report-gh558-hip-flips.md)).
 - `runners/pytorch/run.py` — flags: `--device cpu|mps|cuda`, `--compile` (torch.compile
   variant).
 - `runners/tinygrad/run.py` — flags: `--device CPU|METAL|CUDA|AMD|CL|HIP`, `--jit 0|1`, `--beam N`
@@ -184,6 +195,12 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   [report-hip.md](report-hip.md) (WSL2/HIP on gfx1151, all three frameworks — the gh-ocannl-538
   re-measurement leg, and the first report in which a rocWMMA candidate is seeded, timed and
   crowned),
+  [report-gh558-hip-flips.md](report-gh558-hip-flips.md) (WSL2/HIP on gfx1151 — gh-ocannl-558's
+  reduced scope: the reduced-precision cast twins *are* on gh-555's inlining decision surface, so
+  the flip chain reaches the tensorized candidate family from the default-placement arm unaided,
+  worth −37.0% inside that arm on `mlp_wide`/bf16 — −33.7% for the `decide_materialized` control
+  that materializes the twins and nothing else; it still loses to materialize-all, which reaches
+  two tensorized sites where site-targeted materialization reaches one),
   [report-gh528-hip.md](report-gh528-hip.md) (WSL2/HIP on gfx1151, the hardware validation of
   gh-ocannl-528's interior-batch `Tensorize` and gh-ocannl-481's HIP declines, plus the `gpt2_mini`
   tensor-core probe: three tensorized sites reached and verified in the emitted source, landing

@@ -62,7 +62,14 @@ let show (a : Tn.t Aff.access) =
     (String.concat ~sep:","
        (List.map a.a_loops ~f:(fun (s, (lo, hi)) ->
             Printf.sprintf "%s:%d..%d" (Idx.symbol_ident s) lo hi)))
-    (String.concat ~sep:"." (List.map a.a_path ~f:Int.to_string))
+    (String.concat ~sep:"."
+       (List.map a.a_path ~f:(function
+         | Aff.Stmt k -> Int.to_string k
+         | Aff.Arg k -> "a" ^ Int.to_string k
+         | Aff.Cond -> "c"
+         | Aff.Body -> "b"
+         | Aff.Rhs -> "r"
+         | Aff.Write -> "w")))
     flags
 
 let () =
@@ -75,7 +82,7 @@ let () =
   let e = fresh_tn "E" [| 4 |] in
   let ids = fresh_tn "I" [| 4 |] in
   let i = Idx.get_symbol () and j = Idx.get_symbol () and k = Idx.get_symbol () in
-  let i2 = Idx.get_symbol () and i3 = Idx.get_symbol () in
+  let i2 = Idx.get_symbol () and i3 = Idx.get_symbol () and i6 = Idx.get_symbol () in
   let pointwise =
     (* for i: for j: C[i][j] = A[i][j] + B[j] *)
     for_over i
@@ -126,7 +133,28 @@ let () =
            debug = "";
          })
   in
-  let program = LL.unflat_lines [ LL.Zero_out s; pointwise; reduction; guarded; gather ] in
+  let guarded_rmw =
+    (* for i6: if E[i6] < 1 then E[i6] = E[i6] + 1 — the gh-554/gh-561 trap shape: the condition
+       reads the node the guarded body writes, at the same position. The intra-statement path
+       components keep them apart (the condition's read at [.c] is not subordinate to the body's
+       write at [.b.w]), where the bare statement position made them alias. *)
+    for_over i6
+      (LL.If
+         {
+           cond = (LL.Binop (Ops.Cmplt, (get e [| it i6 |], sp), (LL.Constant 1., sp)), sp);
+           body =
+             LL.Set
+               {
+                 tn = e;
+                 idcs = [| it i6 |];
+                 llsc = LL.Binop (Ops.Add, (get e [| it i6 |], sp), (LL.Constant 1., sp));
+                 debug = "";
+               };
+         })
+  in
+  let program =
+    LL.unflat_lines [ LL.Zero_out s; pointwise; reduction; guarded; gather; guarded_rmw ]
+  in
   Stdio.printf "=== affine_accesses dump ===\n";
   let accesses = LL.affine_accesses program in
   List.iter accesses ~f:show;
@@ -158,4 +186,94 @@ let () =
     Stdio.printf "%s %s parallelizable: %b\n" (Idx.symbol_ident sym) name safe
   in
   check_par "(map axis)" i2;
-  check_par "(reduced axis)" k
+  check_par "(reduced axis)" k;
+
+  Stdio.printf "\n=== sibling scope operands (gh-561 Arg components) ===\n";
+  (* for i7: Y[i7] = scopeA{ la := X[i7] } + scopeB{ X[i7] := 5; lb := 1 } — two [Local_scope]
+     operands inlined into one statement's rhs. Each scope occurrence extends the path with its own
+     [Arg] evaluation position, so scope A's read and scope B's write of the same node never
+     interleave their interior components — and coverage claims nothing across sibling operands
+     (evaluation order among them is not modeled), so X keeps its read-before-write (input)
+     classification. *)
+  let x = fresh_tn "X" [| 4 |] in
+  let y2 = fresh_tn "Y" [| 4 |] in
+  let i7 = Idx.get_symbol () in
+  (* Fresh (virtualizable) scope nodes, so the program below also survives [specialize_proc] for
+     the decision-level check further down. *)
+  let la = LL.get_scope (fresh_tn "LA" [| 4 |]) and lb = LL.get_scope (fresh_tn "LB" [| 4 |]) in
+  let scope_a : LL.scalar_t =
+    LL.Local_scope
+      { id = la; body = LL.Set_local (la, get x [| it i7 |]); orig_indices = [| it i7 |] }
+  in
+  let scope_b : LL.scalar_t =
+    LL.Local_scope
+      {
+        id = lb;
+        body =
+          LL.Seq
+            ( LL.Set { tn = x; idcs = [| it i7 |]; llsc = LL.Constant 5.; debug = "" },
+              LL.Set_local (lb, LL.Constant 1.) );
+        orig_indices = [| it i7 |];
+      }
+  in
+  let sibling =
+    for_over i7
+      (LL.Set
+         {
+           tn = y2;
+           idcs = [| it i7 |];
+           llsc = LL.Binop (Ops.Add, (scope_a, sp), (scope_b, sp));
+           debug = "";
+         })
+  in
+  let sib_accs = LL.affine_accesses sibling in
+  List.iter sib_accs ~f:show;
+  let x_read =
+    List.find_exn sib_accs ~f:(fun a -> (not a.Aff.a_write) && a.Aff.a_tn.Tn.uid = x.Tn.uid)
+  in
+  let x_writes = List.filter sib_accs ~f:(fun a -> a.Aff.a_write && a.Aff.a_tn.Tn.uid = x.Tn.uid) in
+  (match Aff.read_covered_before ~read:x_read ~writes:x_writes () with
+  | `Covered -> Stdio.printf "scope A's read covered by scope B's write: UNSOUND\n"
+  | `Unknown _ ->
+      Stdio.printf "scope A's read not covered by the sibling operand's write: correct\n");
+  (* The reverse arrangement — the writing scope evaluated first in traversal order — is declined
+     too: sibling [Arg] positions are incomparable, so no cross-operand ordering is claimed even
+     where left-to-right emission would justify it. *)
+  let sibling_rev =
+    for_over i7
+      (LL.Set
+         {
+           tn = y2;
+           idcs = [| it i7 |];
+           llsc = LL.Binop (Ops.Add, (scope_b, sp), (scope_a, sp));
+           debug = "";
+         })
+  in
+  let rev_accs = LL.affine_accesses sibling_rev in
+  let x_read =
+    List.find_exn rev_accs ~f:(fun a -> (not a.Aff.a_write) && a.Aff.a_tn.Tn.uid = x.Tn.uid)
+  in
+  let x_writes = List.filter rev_accs ~f:(fun a -> a.Aff.a_write && a.Aff.a_tn.Tn.uid = x.Tn.uid) in
+  (match Aff.read_covered_before ~read:x_read ~writes:x_writes () with
+  | `Covered -> Stdio.printf "read covered across sibling operands (write-first): ordering claimed\n"
+  | `Unknown _ -> Stdio.printf "no ordering claimed across sibling operands (write-first): correct\n");
+
+  (* The decision level: the same verdict driving the real pipeline. [analyze_proc] +
+     [specialize_proc] run [decide_placements] (hence [reads_covered_query]) on this code, and must
+     classify X as read-before-write — a routine input ([input_and_output_nodes]) whose incoming
+     buffer is preserved. If coverage wrongly crossed the sibling operands, both facts would flip
+     and X's incoming values could be silently overwritten. The classification→execution leg is
+     pinned by read_before_write_flip.ml on pipeline-produced code; this pattern itself cannot
+     reach codegen (the optimizer never emits materialized-node writes inside scope bodies — the
+     crosscheck-soak corner), so the decision surface is the deepest executable check here. *)
+  let materialize tn = Tn.update_memory_mode tn Tn.On_device 99 in
+  materialize x;
+  materialize y2;
+  let opt = LL.specialize_proc (LL.empty_optimize_ctx ()) (LL.analyze_proc [] sibling) in
+  (match Base.Hashtbl.find opt.LL.traced_store x with
+  | None -> Stdio.printf "decide_placements: X not traced: UNSOUND\n"
+  | Some traced ->
+      Stdio.printf "decide_placements classifies X as read-before-write: %b\n"
+        traced.LL.read_before_write);
+  let (inputs, _outputs), _merge = LL.input_and_output_nodes opt in
+  Stdio.printf "X is a routine input (incoming buffer preserved): %b\n" (Base.Set.mem inputs x)

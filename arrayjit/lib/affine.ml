@@ -485,6 +485,46 @@ let is_injective (proj : Idx.projections) =
     cells, and the program placement. ['tn] abstracts the tensor-node type to keep this module below
     [Tnode] in the dependency order. *)
 
+(** gh-561: one component of an access's program position ({!field-a_path}). [Stmt] components are
+    per-[Seq] statement indices as before; the other constructors encode {e intra-statement} order,
+    which bare statement positions cannot express — an [If] body that is not a [Seq] used to share
+    its condition's path, so a consumer ordering reads against writes by path aliased a guarded
+    body's write with its own condition's read (the gh-554 round-3 bug). Constructor order is
+    execution order, so the derived compare makes lexicographic path comparison program order: a
+    statement's [Cond] ([If] condition) evaluates before its [Body], and a [Set]-family statement's
+    [Rhs] (right-hand side and dynamic-index reads, including [Local_scope] bodies inlined there)
+    executes before its [Write]. Every access path ends in [Cond], [Rhs] or [Write], and nothing
+    extends a path past [Write] (writes have no interior), so a write's path is never a proper
+    prefix of a read's. *)
+type path_comp =
+  | Stmt of int  (** Statement index at one [Seq] nesting level. *)
+  | Arg of int
+      (** A [Local_scope] occurrence's per-statement evaluation position: two scope bodies inlined
+          into one statement's scalar tree extend {e distinct} bases, so their interior components
+          never interleave (bare-bodied and [Seq]-bodied siblings used to collide — a later
+          operand's [Stmt] sorted before an earlier operand's [Rhs]). Sibling positions are
+          deliberately {e incomparable} in the visibility rule ([path_before]): evaluation order
+          among one statement's operands is not modeled, so no cross-operand ordering is claimed.
+      *)
+  | Cond  (** Inside an [If] statement's condition. *)
+  | Body  (** Inside an [If] statement's guarded body. *)
+  | Rhs  (** Inside a [Set]-family statement's right-hand side (or a [Set_local]'s). *)
+  | Write  (** The [Set]-family or [Zero_out] statement's own write. *)
+[@@deriving sexp_of, compare, equal]
+
+(** Whether two accesses sit in the same [Set]-family statement — their paths agree above their
+    final component (the write's [Write] against the statement's own direct [Rhs]/[Cond] reads;
+    reads nested deeper, e.g. in a [Local_scope] body's statements, have longer paths and do not
+    match). This is the path-level counterpart of the [a_stmt_write] subordination. *)
+let same_statement p q =
+  match (List.drop_last p, List.drop_last q) with
+  | Some p', Some q' -> List.equal equal_path_comp p' q'
+  | _ -> false
+
+(** The top-level statement index of a path, [-1] when the whole routine is a single statement
+    (its accesses' paths start with an intra-statement component). *)
+let stmt_head = function Stmt h :: _ -> h | _ -> -1
+
 type 'tn access = {
   a_tn : 'tn;
   a_map : Idx.axis_index array;
@@ -519,8 +559,10 @@ type 'tn access = {
           alias its [If] condition's read (they share a path). *)
   a_loops : (Idx.symbol * (int * int)) list;
       (** Enclosing loops, outermost first, with inclusive iteration bounds. *)
-  a_path : int list;
-      (** Lexicographic program-order position: statement indices per [Seq] nesting level. *)
+  a_path : path_comp list;
+      (** Lexicographic program-order position: statement indices per [Seq] nesting level,
+          interleaved with intra-statement components ({!path_comp}) at each statement the
+          traversal descends into. *)
 }
 [@@deriving sexp_of]
 
@@ -664,10 +706,27 @@ let read_covered_before ?(thread = fun _ -> false) ?(static_range = fun _ -> Non
     ~(read : 'tn access) ~(writes : 'tn access list) () : [ `Covered | `Unknown of string ] =
   let exception Fail of string in
   let path_before p q =
-    (* Lexicographic statement order, except that a prefix path is an ENCLOSING statement
-       ([Local_scope] bodies extend the enclosing statement's path): the enclosing write happens
-       after its rhs body executes, so it is not prior to reads inside the body. *)
-    List.compare Int.compare p q < 0 && not (List.is_prefix q ~prefix:p ~equal:Int.equal)
+    (* Lexicographic order over {!path_comp} is program order (gh-561): intra-statement components
+       order an [If] condition before its guarded body and a statement's rhs (including
+       [Local_scope] bodies inlined there) before its own write — the case that used to need a
+       prefix-exclusion hack, since an enclosing write's bare statement position was a prefix of
+       its rhs body's positions. A write's path can no longer be a proper prefix of a read's
+       (every write path ends in [Write], which nothing extends). The one non-lexicographic rule:
+       paths diverging at sibling [Arg] positions are incomparable — evaluation order among one
+       statement's inlined scope bodies is not modeled, so a write there proves nothing about
+       reads in a sibling operand. *)
+    let rec before p q =
+      match (p, q) with
+      | [], [] | _ :: _, [] -> false
+      | [], _ :: _ -> true
+      | a :: p', b :: q' ->
+          if equal_path_comp a b then before p' q'
+          else (
+            match (a, b) with
+            | Arg _, Arg _ -> false
+            | _ -> compare_path_comp a b < 0)
+    in
+    before p q
   in
   let has_opaque m =
     Array.exists m ~f:(function Idx.Sub_axis | Idx.Concat _ -> true | _ -> false)

@@ -3558,54 +3558,69 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
      statements establish their own (its reads are subordinate to the inner setters, not to the
      statement the scope is inlined into). *)
   let rec code ~loops ~path ~guarded (llc : t) =
+    (* gh-561: paths gain an intra-statement component at each statement the traversal descends
+       into — [Cond]/[Body] for [If], [Rhs]/[Write] for the [Set] family — so lexicographic path
+       order is program order within a statement too: a guarded body's write no longer shares its
+       condition's path, and a statement's write orders after its right-hand side (including
+       [Local_scope] bodies inlined there, which used to need a prefix-exclusion rule in
+       [Affine.read_covered_before]). Each statement's scalar tree carries an evaluation-position
+       counter ([arg_c], shared across [Set_dynamic]'s dynamic index and value): every
+       [Local_scope] occurrence extends the path with a distinct [Arg] component, so sibling scope
+       bodies inlined into one statement never interleave their interior components — and
+       [path_before] deliberately does not order across sibling [Arg]s. *)
+    let arg_c = ref 0 in
     match llc with
     | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ -> ()
     | Seq _ ->
         List.iteri (flat_lines [ llc ]) ~f:(fun k stmt ->
-            code ~loops ~path:(k :: path) ~guarded stmt)
+            code ~loops ~path:(Affine.Stmt k :: path) ~guarded stmt)
     | For_loop { index; from_; to_; body; _ } ->
         code ~loops:((index, (from_, to_)) :: loops) ~path ~guarded body
     | If { cond = c, _; body } ->
-        scalar ~loops ~path ~guarded ?stmt_write:None c;
-        code ~loops ~path ~guarded:true body
-    | Zero_out tn -> add ~loops ~path ~guarded ~whole:true ~write:true tn [||]
+        scalar ~loops ~path:(Affine.Cond :: path) ~guarded ~arg_c ?stmt_write:None c;
+        code ~loops ~path:(Affine.Body :: path) ~guarded:true body
+    | Zero_out tn -> add ~loops ~path:(Affine.Write :: path) ~guarded ~whole:true ~write:true tn [||]
     | Set { tn; idcs; llsc; _ } ->
-        scalar ~loops ~path ~guarded ~stmt_write:idcs llsc;
-        add ~loops ~path ~guarded ~rmw:(reads_tn tn.Tn.uid llsc) ~val_syms:(scalar_syms llsc)
-          ~write:true tn idcs
+        scalar ~loops ~path:(Affine.Rhs :: path) ~guarded ~arg_c ~stmt_write:idcs llsc;
+        add ~loops ~path:(Affine.Write :: path) ~guarded ~rmw:(reads_tn tn.Tn.uid llsc)
+          ~val_syms:(scalar_syms llsc) ~write:true tn idcs
     | Set_dynamic { tn; idcs; dyn_value = v, _; llsc; _ } ->
-        scalar ~loops ~path ~guarded ~stmt_write:idcs v;
-        scalar ~loops ~path ~guarded ~stmt_write:idcs llsc;
-        add ~loops ~path ~guarded ~dynamic:true
+        scalar ~loops ~path:(Affine.Rhs :: path) ~guarded ~arg_c ~stmt_write:idcs v;
+        scalar ~loops ~path:(Affine.Rhs :: path) ~guarded ~arg_c ~stmt_write:idcs llsc;
+        add ~loops ~path:(Affine.Write :: path) ~guarded ~dynamic:true
           ~rmw:(reads_tn tn.Tn.uid llsc || reads_tn tn.Tn.uid v)
           ~val_syms:(scalar_syms v @ scalar_syms llsc)
           ~write:true tn idcs
     | Set_from_vec { tn; idcs; length; arg = a, _; _ } ->
-        scalar ~loops ~path ~guarded ~stmt_write:idcs a;
-        add ~loops ~path ~guarded ~vec_len:length ~rmw:(reads_tn tn.Tn.uid a)
-          ~val_syms:(scalar_syms a) ~write:true tn idcs
-    | Set_local (_, llsc) -> scalar ~loops ~path ~guarded ?stmt_write:None llsc
+        scalar ~loops ~path:(Affine.Rhs :: path) ~guarded ~arg_c ~stmt_write:idcs a;
+        add ~loops ~path:(Affine.Write :: path) ~guarded ~vec_len:length
+          ~rmw:(reads_tn tn.Tn.uid a) ~val_syms:(scalar_syms a) ~write:true tn idcs
+    | Set_local (_, llsc) ->
+        scalar ~loops ~path:(Affine.Rhs :: path) ~guarded ~arg_c ?stmt_write:None llsc
     | Tile_mma { fallback; _ } -> code ~loops ~path ~guarded fallback
-  and scalar ~loops ~path ~guarded ?stmt_write (llsc : scalar_t) =
+  and scalar ~loops ~path ~guarded ~arg_c ?stmt_write (llsc : scalar_t) =
     match llsc with
-    | Local_scope { body; _ } -> code ~loops ~path ~guarded body
+    | Local_scope { body; _ } ->
+        let k = !arg_c in
+        Int.incr arg_c;
+        code ~loops ~path:(Affine.Arg k :: path) ~guarded body
     | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
     | Get (tn, idcs) -> add ~loops ~path ~guarded ?stmt_write ~write:false tn idcs
     | Get_dynamic { tn; idcs; dyn_value = v, _; _ } ->
         add ~loops ~path ~guarded ~dynamic:true ?stmt_write ~write:false tn idcs;
-        scalar ~loops ~path ~guarded ?stmt_write v
+        scalar ~loops ~path ~guarded ~arg_c ?stmt_write v
     | Ternop (_, (a, _), (b, _), (c, _)) ->
-        scalar ~loops ~path ~guarded ?stmt_write a;
-        scalar ~loops ~path ~guarded ?stmt_write b;
-        scalar ~loops ~path ~guarded ?stmt_write c
+        scalar ~loops ~path ~guarded ~arg_c ?stmt_write a;
+        scalar ~loops ~path ~guarded ~arg_c ?stmt_write b;
+        scalar ~loops ~path ~guarded ~arg_c ?stmt_write c
     (* The dead operand of a projection is never evaluated (codegen renders only the used one), so
        it contributes no access. *)
-    | Binop (Ops.Arg1, (a, _), _) -> scalar ~loops ~path ~guarded ?stmt_write a
-    | Binop (Ops.Arg2, _, (b, _)) -> scalar ~loops ~path ~guarded ?stmt_write b
+    | Binop (Ops.Arg1, (a, _), _) -> scalar ~loops ~path ~guarded ~arg_c ?stmt_write a
+    | Binop (Ops.Arg2, _, (b, _)) -> scalar ~loops ~path ~guarded ~arg_c ?stmt_write b
     | Binop (_, (a, _), (b, _)) ->
-        scalar ~loops ~path ~guarded ?stmt_write a;
-        scalar ~loops ~path ~guarded ?stmt_write b
-    | Unop (_, (a, _)) -> scalar ~loops ~path ~guarded ?stmt_write a
+        scalar ~loops ~path ~guarded ~arg_c ?stmt_write a;
+        scalar ~loops ~path ~guarded ~arg_c ?stmt_write b
+    | Unop (_, (a, _)) -> scalar ~loops ~path ~guarded ~arg_c ?stmt_write a
   in
   code ~loops:[] ~path:[] ~guarded:false llc;
   List.rev !acc
@@ -4473,8 +4488,251 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
     flip_candidates;
   }
 
+(* gh-560: the identity of a routine's analysis inputs — a canonical rendering of the raw lowered
+   code plus everything else [analyze_proc] (and the lazy queries it closes over) consults,
+   digested. Follows [Schedule_cache.canonicalize]'s approach with the opposite identity choices:
+   tensor nodes and static symbols enter by IDENTITY ([Tn.uid]; the symbol's unique ident, with the
+   mutable range facts that feed coverage universalization) because a cache hit reuses the stored
+   analysis' code verbatim — a same-shape routine over different nodes or differently-bound statics
+   must not share an entry — while loop binders and local-scope ids (minted fresh on every
+   lowering) are alpha-renamed by first occurrence so sibling lowerings of one routine agree.
+   Comment text is skipped: identical code under different names shares one analysis. [None] = not
+   cacheable: an opaque statement ([Staged_compilation]) or a duplicated binder would make the
+   rendering unfaithful. *)
+let analysis_digest (static_indices : Indexing.static_symbol list) (llc : t) : string option =
+  let buf = Buffer.create 4096 in
+  let add = Buffer.add_string buf in
+  let cacheable = ref true in
+  (* Alpha tokens for loop binders; statics and any free symbols render by their raw ident. *)
+  let tokens = Hashtbl.create (module Indexing.Symbol) in
+  let base_count = ref 0 in
+  let bind_loop s =
+    if Hashtbl.mem tokens s then cacheable := false;
+    let tok = "b" ^ Int.to_string !base_count in
+    Int.incr base_count;
+    Hashtbl.set tokens ~key:s ~data:tok;
+    tok
+  in
+  let emit_sym s =
+    match Hashtbl.find tokens s with
+    | Some tok -> add tok
+    | None -> add (Indexing.symbol_ident s)
+  in
+  (* The read-modify-write exemption setting changes which reads the coverage and multiplicity
+     queries count, so it is part of the analysis identity. *)
+  if virtualize_settings.inline_complex_computations then add "icc;";
+  List.iter static_indices ~f:(fun ss ->
+      add
+        (Printf.sprintf "%s=[%s%s];"
+           (Indexing.symbol_ident ss.Indexing.static_symbol)
+           (Option.value_map ss.static_range ~default:"" ~f:Int.to_string)
+           (if ss.used_as_extent then ";ext" else "")));
+  let emit_tn tn = add ("t" ^ Int.to_string tn.Tn.uid) in
+  (* Local scope ids come from a process-global counter freshly on each lowering (like loop
+     symbols): alpha-rename by first occurrence. *)
+  let scope_alpha = Hashtbl.create (module Int) in
+  let emit_scope (id : scope_id) =
+    emit_tn id.tn;
+    let a =
+      Hashtbl.find_or_add scope_alpha id.scope_id ~default:(fun () -> Hashtbl.length scope_alpha)
+    in
+    add ("." ^ Int.to_string a)
+  in
+  let emit_idx = function
+    | Indexing.Fixed_idx i -> add ("#" ^ Int.to_string i)
+    | Indexing.Iterator s -> emit_sym s
+    | Indexing.Affine { symbols; offset } ->
+        add "(";
+        List.iter symbols ~f:(fun (c, s) ->
+            add (Int.to_string c ^ "*");
+            emit_sym s;
+            add "+");
+        add (Int.to_string offset ^ ")")
+    | Indexing.Sub_axis -> add "_"
+    | Indexing.Concat syms ->
+        add "cat(";
+        List.iter syms ~f:(fun s ->
+            emit_sym s;
+            add ",");
+        add ")"
+  in
+  let emit_idcs idcs =
+    add "[";
+    Array.iter idcs ~f:(fun idx ->
+        emit_idx idx;
+        add ",");
+    add "]"
+  in
+  let rec emit_scalar (sc : scalar_t) =
+    match sc with
+    | Local_scope { id; body; orig_indices } ->
+        add "scope(";
+        emit_scope id;
+        add ")";
+        emit_idcs orig_indices;
+        add "{";
+        emit body;
+        add "}"
+    | Get_local id ->
+        add "getl(";
+        emit_scope id;
+        add ")"
+    | Get (tn, idcs) ->
+        add "get ";
+        emit_tn tn;
+        emit_idcs idcs
+    | Get_dynamic { tn; idcs; dyn_axis; dyn_value } ->
+        add "getd ";
+        emit_tn tn;
+        emit_idcs idcs;
+        add ("/" ^ Int.to_string dyn_axis ^ ":");
+        emit_arg dyn_value
+    | Get_merge_buffer (tn, idcs) ->
+        add "getm ";
+        emit_tn tn;
+        emit_idcs idcs
+    | Ternop (op, a, b, c) ->
+        add (Sexp.to_string (Ops.sexp_of_ternop op));
+        add "(";
+        emit_arg a;
+        add ",";
+        emit_arg b;
+        add ",";
+        emit_arg c;
+        add ")"
+    | Binop (op, a, b) ->
+        add (Sexp.to_string (Ops.sexp_of_binop op));
+        add "(";
+        emit_arg a;
+        add ",";
+        emit_arg b;
+        add ")"
+    | Unop (op, a) ->
+        add (Sexp.to_string (Ops.sexp_of_unop op));
+        add "(";
+        emit_arg a;
+        add ")"
+    | Constant f -> add (Float.to_string f)
+    | Constant_bits b -> add ("bits:" ^ Int64.to_string b)
+    | Embed_index idx ->
+        add "ix:";
+        emit_idx idx
+  and emit_arg ((sc, prec) : scalar_arg) =
+    emit_scalar sc;
+    add ("@" ^ Sexp.to_string (Ops.sexp_of_prec prec))
+  and emit (llc : t) =
+    match llc with
+    | Noop -> add "nop;"
+    | Comment _ -> add "c;"
+    | Staged_compilation _ ->
+        cacheable := false;
+        add "staged;"
+    | Seq (a, b) ->
+        emit a;
+        emit b
+    | For_loop { index; from_; to_; body; axis } ->
+        let tok = bind_loop index in
+        add
+          (Printf.sprintf "for %s=%d..%d@%s{" tok from_ to_
+             (Sexp.to_string (sexp_of_axis_type axis)));
+        emit body;
+        add "}"
+    | Zero_out tn ->
+        add "zero ";
+        emit_tn tn;
+        add ";"
+    | Set { tn; idcs; llsc; debug = _ } ->
+        add "set ";
+        emit_tn tn;
+        emit_idcs idcs;
+        add ":=";
+        emit_scalar llsc;
+        add ";"
+    | Set_dynamic { tn; idcs; dyn_axis; dyn_value; llsc; debug = _ } ->
+        add "setdyn ";
+        emit_tn tn;
+        emit_idcs idcs;
+        add ("@" ^ Int.to_string dyn_axis ^ "=");
+        emit_arg dyn_value;
+        add ":=";
+        emit_scalar llsc;
+        add ";"
+    | Set_from_vec { tn; idcs; length; vec_unop; arg; debug = _ } ->
+        add ("setv" ^ Int.to_string length ^ " ");
+        emit_tn tn;
+        emit_idcs idcs;
+        add (":=" ^ Sexp.to_string (Ops.sexp_of_vec_unop vec_unop));
+        add "(";
+        emit_arg arg;
+        add ");"
+    | Set_local (id, sc) ->
+        add "setl ";
+        emit_scope id;
+        add ":=";
+        emit_scalar sc;
+        add ";"
+    | Declare_local { id; needs_init } ->
+        add "decl ";
+        emit_scope id;
+        add (if needs_init then "0;" else ";")
+    | Workgroup_barrier -> add "bar;"
+    | If { cond; body } ->
+        add "if(";
+        emit_arg cond;
+        add "){";
+        emit body;
+        add "}"
+    | Tile_mma _ ->
+        (* Schedule transforms construct [Tile_mma] after the optimization pipeline ran; it never
+           reaches analysis. Defensive. *)
+        cacheable := false;
+        add "mma;"
+  in
+  emit llc;
+  if not !cacheable then None
+  else Some (Stdlib.Digest.to_hex (Stdlib.Digest.string (Buffer.contents buf)))
+
+(* gh-560: sibling candidate compiles of one routine (the placement A/B arms, flip refinements and
+   schedule candidates of [Train.tune_placements] / [Autotune.tune] each re-lower the routine from
+   the same assignments) share one [analyze_proc] result and replay only [specialize_proc]. Safe by
+   the gh-555 hermeticity contract: the analysis is decision-independent, [specialize_proc]
+   record-copies the traced store per candidate and only reads the rest. Bounded, process-global,
+   move-to-front on hit; entries keyed by stale [Tn.uid]s can never alias fresh nodes (uids are
+   never reused), they just age out. *)
+let analysis_cache_capacity = 8
+let analysis_cache : (string * analysis) list ref = ref []
+let analysis_cache_hits = ref 0
+let analysis_cache_misses = ref 0
+let analysis_cache_stats () = (!analysis_cache_hits, !analysis_cache_misses)
+let clear_analysis_cache () = analysis_cache := []
+
+(* Entries retain their routines' code, hence their tensor nodes: drop them before an
+   accessibility snapshot — the diagnostic reports user-code liveness, not cache retention. *)
+let () =
+  Tn.before_accessibility_snapshot := clear_analysis_cache :: !Tn.before_accessibility_snapshot
+
+let cached_analyze_proc (static_indices : Indexing.static_symbol list) (llc : t) : analysis =
+  match analysis_digest static_indices llc with
+  | None -> analyze_proc static_indices llc
+  | Some key -> (
+      match List.Assoc.find !analysis_cache key ~equal:String.equal with
+      | Some an ->
+          Int.incr analysis_cache_hits;
+          analysis_cache :=
+            (key, an) :: List.Assoc.remove !analysis_cache key ~equal:String.equal;
+          (* Re-run the (cheap) written-bounds pinning: it is idempotent on this routine's nodes,
+             but its raising guard — a writer compiled after a reader settled the written node's
+             bounds — must fire regardless of the cache (see [pin_device_written_bounds]). *)
+          pin_device_written_bounds an.an_llc;
+          an
+      | None ->
+          Int.incr analysis_cache_misses;
+          let an = analyze_proc static_indices llc in
+          analysis_cache := List.take ((key, an) :: !analysis_cache) analysis_cache_capacity;
+          an)
+
 let optimize_proc (input_ctx : optimize_ctx) static_indices llc =
-  specialize_proc input_ctx (analyze_proc static_indices llc)
+  specialize_proc input_ctx (cached_analyze_proc static_indices llc)
 
 let code_hum_margin = ref 100
 
