@@ -227,29 +227,47 @@ let collect_arm t (r : Autotune.report) = t.arm_reports <- r :: t.arm_reports
     and a time that was never measured is [null], not [inf]: [best_ms] is [infinity] when an arm
     timed nothing at all (every candidate failed and the GPU baseline was not dispatched) and
     [mma_best_ms] when it timed no tensorized candidate. Those are exactly the runs whose evidence
-    this object exists to preserve, so they must not be the runs whose result line fails to parse. *)
+    this object exists to preserve, so they must not be the runs whose result line fails to parse.
+
+    An arm that terminated on a failure carries [terminal_failure] and is {e never} the shipped one,
+    whatever its pre-failure [best_ms] says (gh-ocannl-550): the search raised, so no routine was
+    compiled from it — [Train.tune_placements] ranks it at [infinity] and this attribution follows
+    the same rule rather than re-deriving a winner from times alone. *)
 let tune_json t =
   let ms_json v = if Float.is_inf v then "null" else Printf.sprintf "%.6g" v in
+  (* Quote-and-control-character scrubbing rather than escaping: these strings are diagnostics
+     (labels, an exception's message) and the result line has to stay one parseable JSON line. *)
+  let json_string s =
+    String.map s ~f:(function
+      | '"' -> '\''
+      | '\\' -> '/'
+      | c when Char.is_whitespace c && not (Char.equal c ' ') -> ' '
+      | c -> c)
+  in
   match List.rev t.arm_reports with
   | [] -> None
   | reports ->
       let named = List.mapi reports ~f:(fun i r -> (Printf.sprintf "%c" (Char.of_int_exn (65 + i)), r)) in
       let shipped =
-        List.fold named ~init:None ~f:(fun acc (name, r) ->
-            match acc with
-            | Some (_, best) when Float.( <= ) best r.Autotune.best_ms -> acc
-            | _ -> Some (name, r.Autotune.best_ms))
+        List.fold named ~init:None ~f:(fun acc (name, (r : Autotune.report)) ->
+            if Option.is_some r.terminal_failure then acc
+            else
+              match acc with
+              | Some (_, best) when Float.( <= ) best r.best_ms -> acc
+              | _ -> Some (name, r.best_ms))
         |> Option.value_map ~default:"?" ~f:fst
       in
       let arm (name, (r : Autotune.report)) =
         Printf.sprintf
-          {|{"arm":"%s","best_ms":%s,"best_label":"%s","tensorized":%b,"mma_scalar_fallbacks":%d,"mma_seeded":%d,"mma_timed":%d,"mma_best_ms":%s}|}
+          {|{"arm":"%s","best_ms":%s,"best_label":"%s","tensorized":%b,"mma_scalar_fallbacks":%d,"mma_seeded":%d,"mma_timed":%d,"mma_best_ms":%s,"terminal_failure":%s}|}
           name
           (ms_json r.Autotune.best_ms)
-          (String.substr_replace_all r.Autotune.best_label ~pattern:{|"|} ~with_:"'")
+          (json_string r.Autotune.best_label)
           r.Autotune.best_tensorized r.Autotune.best_mma_scalar_fallbacks r.Autotune.mma_candidates
           r.Autotune.mma_timed
           (ms_json r.Autotune.mma_best_ms)
+          (Option.value_map r.Autotune.terminal_failure ~default:"null" ~f:(fun tf ->
+               Printf.sprintf {|"%s"|} (json_string tf.Autotune.detail)))
       in
       Some
         (Printf.sprintf {|{"shipped":"%s","arms":[%s]}|} shipped
