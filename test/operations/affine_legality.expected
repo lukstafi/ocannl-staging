@@ -67,4 +67,11 @@ mixed-radix write gapped           query Unknown      oracle uncovered
 2-D margins with hole              query Unknown      oracle uncovered   
 pointwise writes tile the box      query Covered      oracle covered     
 
+=== gh-561: intra-statement path components ===
+cond read is NOT statement-subordinate to the guarded body's write true
+the body's own rhs read IS statement-subordinate to its write    true
+program order: cond read before the guarded body's write         true
+program order: a statement's rhs before its own write            true
+program order: an inlined scope body's read before the enclosing write true
+
 unsound cases: 0

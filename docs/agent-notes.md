@@ -136,6 +136,23 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   phantom "accessible" nodes (this is how the cache was caught); (2) on a hit, still re-run
   `pin_device_written_bounds` — its raising writer-after-settled-reader guard must fire regardless
   of caching.
+- `Affine.access.a_path` components are TYPED (`Affine.path_comp`, gh-ocannl-561): `Stmt` indices
+  interleaved with `Cond`/`Body` (`If`) and `Rhs`/`Write` (`Set` family), constructor order =
+  execution order, so lexicographic comparison is program order within a statement too. Every
+  access path ends in `Cond`/`Rhs`/`Write` and nothing extends past `Write`. Consumers must not
+  compare bare paths for "same statement" — use `Affine.same_statement` (agreement above the
+  final component; the path-level twin of `a_stmt_write` subordination) — and must take top-level
+  statement identity via `Affine.stmt_head`, never `List.hd` (a single-statement routine's paths
+  start with a marker, not a `Stmt`). History: with bare positions an `If` condition's read
+  aliased its guarded body's write (gh-554 round 3), and `read_covered_before` needed a
+  prefix-exclusion hack for enclosing writes vs their inlined `Local_scope` bodies — both
+  unrepresentable now. Each `Local_scope` occurrence additionally extends the path with an `Arg`
+  evaluation position (per-statement counter), and `path_before` deliberately does NOT order
+  across sibling `Arg`s: two scope bodies inlined into one statement must neither interleave
+  their interior components (a `Seq`-bodied sibling's `Stmt` sorts before a bare-bodied one's
+  `Rhs` — a later operand's write would pose as prior to an earlier operand's read; Codex P1 on
+  PR #297) nor claim cross-operand evaluation order at all (it would silently depend on codegen's
+  scope emission order).
 - `Ir.Ops.index_prec ()` is SIGNED (int32; int64 under `large_models`): negative index
   intermediates are well-defined; emit guards in natural signed form. Guard shapes are
   canonicalized to ONE shape per role: upper bounds are strict `Cmplt` (`idx < bound`, the natural

@@ -3709,12 +3709,15 @@ let op_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
   let vectorized = function Vectorized -> true | _ -> false in
   (* Under the reassociation license (Vectorized retypes; Swap's accumulation contract), a
      read-modify-write's conflicts with itself and with its own same-cell read are the reduction
-     dependence the license permits. *)
+     dependence the license permits. Same-cell means the statement's OWN rhs read at the write's
+     position ([Affine.same_statement], gh-561): an [If] condition's read no longer shares the
+     guarded body's write path, and a read nested in a [Local_scope] body (which used to share a
+     non-[Seq] statement's bare path) is not the rmw carrier either. *)
   let rmw_license (w : _ Affine.access) (x : _ Affine.access) =
     w.Affine.a_rmw
     && (phys_equal w x
        || (not x.Affine.a_write)
-          && [%equal: int list] w.a_path x.Affine.a_path
+          && Affine.same_statement w.a_path x.Affine.a_path
           && [%equal: Indexing.axis_index array] w.a_map x.a_map)
   in
   let none _ _ = false in
@@ -4366,7 +4369,7 @@ let crosscheck_scratch_containment (opt : Low_level.optimized) (chains : Low_lev
     let accs =
       List.map (Low_level.affine_accesses opt.llc) ~f:(fun a ->
           match a.Affine.a_path with
-          | g :: _ -> (
+          | Affine.Stmt g :: _ -> (
               match List.Assoc.find renames g ~equal:Int.equal with
               | None -> a
               | Some m ->
@@ -4376,7 +4379,7 @@ let crosscheck_scratch_containment (opt : Low_level.optimized) (chains : Low_lev
                     a_loops = List.map a.a_loops ~f:(fun (s, b) -> (rename_sym m s, b));
                     a_val_syms = List.map a.a_val_syms ~f:(rename_sym m);
                   })
-          | [] -> a)
+          | _ -> a)
     in
     let thread s =
       Array.exists canon ~f:(function Some c -> Indexing.equal_symbol c s | None -> false)
@@ -4392,7 +4395,7 @@ let crosscheck_scratch_containment (opt : Low_level.optimized) (chains : Low_lev
           && not (List.exists accs ~f:(fun a -> a.Affine.a_dynamic))
         then
           let writes = List.filter accs ~f:(fun a -> a.Affine.a_write) in
-          let head p = List.hd p |> Option.value ~default:(-1) in
+          let head = Affine.stmt_head in
           let witness = ref "" in
           (* The value side of the per-thread-copy semantics (see [read_covered_before]'s doc): a
              write covering reads in other top-level statements must have every thread symbol that

@@ -3558,54 +3558,69 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
      statements establish their own (its reads are subordinate to the inner setters, not to the
      statement the scope is inlined into). *)
   let rec code ~loops ~path ~guarded (llc : t) =
+    (* gh-561: paths gain an intra-statement component at each statement the traversal descends
+       into — [Cond]/[Body] for [If], [Rhs]/[Write] for the [Set] family — so lexicographic path
+       order is program order within a statement too: a guarded body's write no longer shares its
+       condition's path, and a statement's write orders after its right-hand side (including
+       [Local_scope] bodies inlined there, which used to need a prefix-exclusion rule in
+       [Affine.read_covered_before]). Each statement's scalar tree carries an evaluation-position
+       counter ([arg_c], shared across [Set_dynamic]'s dynamic index and value): every
+       [Local_scope] occurrence extends the path with a distinct [Arg] component, so sibling scope
+       bodies inlined into one statement never interleave their interior components — and
+       [path_before] deliberately does not order across sibling [Arg]s. *)
+    let arg_c = ref 0 in
     match llc with
     | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ -> ()
     | Seq _ ->
         List.iteri (flat_lines [ llc ]) ~f:(fun k stmt ->
-            code ~loops ~path:(k :: path) ~guarded stmt)
+            code ~loops ~path:(Affine.Stmt k :: path) ~guarded stmt)
     | For_loop { index; from_; to_; body; _ } ->
         code ~loops:((index, (from_, to_)) :: loops) ~path ~guarded body
     | If { cond = c, _; body } ->
-        scalar ~loops ~path ~guarded ?stmt_write:None c;
-        code ~loops ~path ~guarded:true body
-    | Zero_out tn -> add ~loops ~path ~guarded ~whole:true ~write:true tn [||]
+        scalar ~loops ~path:(Affine.Cond :: path) ~guarded ~arg_c ?stmt_write:None c;
+        code ~loops ~path:(Affine.Body :: path) ~guarded:true body
+    | Zero_out tn -> add ~loops ~path:(Affine.Write :: path) ~guarded ~whole:true ~write:true tn [||]
     | Set { tn; idcs; llsc; _ } ->
-        scalar ~loops ~path ~guarded ~stmt_write:idcs llsc;
-        add ~loops ~path ~guarded ~rmw:(reads_tn tn.Tn.uid llsc) ~val_syms:(scalar_syms llsc)
-          ~write:true tn idcs
+        scalar ~loops ~path:(Affine.Rhs :: path) ~guarded ~arg_c ~stmt_write:idcs llsc;
+        add ~loops ~path:(Affine.Write :: path) ~guarded ~rmw:(reads_tn tn.Tn.uid llsc)
+          ~val_syms:(scalar_syms llsc) ~write:true tn idcs
     | Set_dynamic { tn; idcs; dyn_value = v, _; llsc; _ } ->
-        scalar ~loops ~path ~guarded ~stmt_write:idcs v;
-        scalar ~loops ~path ~guarded ~stmt_write:idcs llsc;
-        add ~loops ~path ~guarded ~dynamic:true
+        scalar ~loops ~path:(Affine.Rhs :: path) ~guarded ~arg_c ~stmt_write:idcs v;
+        scalar ~loops ~path:(Affine.Rhs :: path) ~guarded ~arg_c ~stmt_write:idcs llsc;
+        add ~loops ~path:(Affine.Write :: path) ~guarded ~dynamic:true
           ~rmw:(reads_tn tn.Tn.uid llsc || reads_tn tn.Tn.uid v)
           ~val_syms:(scalar_syms v @ scalar_syms llsc)
           ~write:true tn idcs
     | Set_from_vec { tn; idcs; length; arg = a, _; _ } ->
-        scalar ~loops ~path ~guarded ~stmt_write:idcs a;
-        add ~loops ~path ~guarded ~vec_len:length ~rmw:(reads_tn tn.Tn.uid a)
-          ~val_syms:(scalar_syms a) ~write:true tn idcs
-    | Set_local (_, llsc) -> scalar ~loops ~path ~guarded ?stmt_write:None llsc
+        scalar ~loops ~path:(Affine.Rhs :: path) ~guarded ~arg_c ~stmt_write:idcs a;
+        add ~loops ~path:(Affine.Write :: path) ~guarded ~vec_len:length
+          ~rmw:(reads_tn tn.Tn.uid a) ~val_syms:(scalar_syms a) ~write:true tn idcs
+    | Set_local (_, llsc) ->
+        scalar ~loops ~path:(Affine.Rhs :: path) ~guarded ~arg_c ?stmt_write:None llsc
     | Tile_mma { fallback; _ } -> code ~loops ~path ~guarded fallback
-  and scalar ~loops ~path ~guarded ?stmt_write (llsc : scalar_t) =
+  and scalar ~loops ~path ~guarded ~arg_c ?stmt_write (llsc : scalar_t) =
     match llsc with
-    | Local_scope { body; _ } -> code ~loops ~path ~guarded body
+    | Local_scope { body; _ } ->
+        let k = !arg_c in
+        Int.incr arg_c;
+        code ~loops ~path:(Affine.Arg k :: path) ~guarded body
     | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
     | Get (tn, idcs) -> add ~loops ~path ~guarded ?stmt_write ~write:false tn idcs
     | Get_dynamic { tn; idcs; dyn_value = v, _; _ } ->
         add ~loops ~path ~guarded ~dynamic:true ?stmt_write ~write:false tn idcs;
-        scalar ~loops ~path ~guarded ?stmt_write v
+        scalar ~loops ~path ~guarded ~arg_c ?stmt_write v
     | Ternop (_, (a, _), (b, _), (c, _)) ->
-        scalar ~loops ~path ~guarded ?stmt_write a;
-        scalar ~loops ~path ~guarded ?stmt_write b;
-        scalar ~loops ~path ~guarded ?stmt_write c
+        scalar ~loops ~path ~guarded ~arg_c ?stmt_write a;
+        scalar ~loops ~path ~guarded ~arg_c ?stmt_write b;
+        scalar ~loops ~path ~guarded ~arg_c ?stmt_write c
     (* The dead operand of a projection is never evaluated (codegen renders only the used one), so
        it contributes no access. *)
-    | Binop (Ops.Arg1, (a, _), _) -> scalar ~loops ~path ~guarded ?stmt_write a
-    | Binop (Ops.Arg2, _, (b, _)) -> scalar ~loops ~path ~guarded ?stmt_write b
+    | Binop (Ops.Arg1, (a, _), _) -> scalar ~loops ~path ~guarded ~arg_c ?stmt_write a
+    | Binop (Ops.Arg2, _, (b, _)) -> scalar ~loops ~path ~guarded ~arg_c ?stmt_write b
     | Binop (_, (a, _), (b, _)) ->
-        scalar ~loops ~path ~guarded ?stmt_write a;
-        scalar ~loops ~path ~guarded ?stmt_write b
-    | Unop (_, (a, _)) -> scalar ~loops ~path ~guarded ?stmt_write a
+        scalar ~loops ~path ~guarded ~arg_c ?stmt_write a;
+        scalar ~loops ~path ~guarded ~arg_c ?stmt_write b
+    | Unop (_, (a, _)) -> scalar ~loops ~path ~guarded ~arg_c ?stmt_write a
   in
   code ~loops:[] ~path:[] ~guarded:false llc;
   List.rev !acc
