@@ -93,6 +93,15 @@ let no_search_report =
     best_schedule = [];
   }
 
+(* Best-effort reporting must stay best-effort for ordinary callback errors and NOT for these: an
+   interrupt or a runtime-fatal condition raised inside a [report] callback is about the process, and
+   swallowing it (on a path that is already failing) would, for a caller that CONTAINS the failure
+   per arm, let a long search carry on through a Ctrl-C (gh-ocannl-550). Same set
+   {!Ir.Schedule_outcome.classify_raw} refuses to classify. *)
+let process_fatal_exn = function
+  | Out_of_memory | Stdlib.Sys.Break | Stack_overflow | Assert_failure _ -> true
+  | _ -> false
+
 type decline_acc = { mutable da_count : int; mutable da_details : string list }
 
 (* Where the candidate died, for the per-candidate log line. Compile-side phases are already
@@ -3818,7 +3827,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
       }
     in
     try emit_report r
-    with report_exn ->
+    with report_exn when not (process_fatal_exn report_exn) ->
       Stdio.eprintf "autotune: pre-search failure report callback failed: %s\n%!"
         (Exn.to_string report_exn)
   in
@@ -3856,7 +3865,18 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
     result)
   else
   let is_gpu = Sched.backend_is_gpu backend and is_cpu = Sched.backend_is_cpu backend in
-  let limits = Context.hardware_limits ctx in
+  (* Device work, not a pure query: the GPU backends lazily initialize the device and read driver
+     attributes here, so a driver or enumeration error surfaces at this line — the first thing this
+     call does that can fail, and squarely inside the reporting contract. *)
+  let limits =
+    match Context.hardware_limits ctx with
+    | limits -> limits
+    | exception exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        emit_pre_search_failure ~phase:Outcome.Hardware_limits ~candidate:None
+          ~detail:(Exn.to_string exn) ();
+        Stdlib.Printexc.raise_with_backtrace exn backtrace
+  in
   (* With [timing_ctx], the search (candidate compiles and timing runs) happens against that scratch
      lineage's buffers, and only the winner is compiled from [ctx] — so the timing runs never mutate
      the caller's live state (parameters, accumulators). The scratch context must contain the nodes
@@ -4131,17 +4151,35 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
         | Some b when baseline_dispatched -> (
             (* Still uncaught in the sense that matters — the caller sees the same exception
                [Context.run] would raise, unwrapped and with its own backtrace. The tagging is only
-               so the report can name the phase (launch vs. sync) before it propagates. *)
+               so the report can name the phase (launch vs. sync) before it propagates.
+
+               The lineage effect is NOT optional, though, and it is why this consults the backend's
+               classifier like the candidate timing below (gh-ocannl-550): a baseline launch that may
+               have written buffers leaves the lineage unusable, and a caller that CONTAINS this
+               failure — [Train.tune_placements] does, per arm — would otherwise go on to time its
+               other arm against buffers the failed baseline had already modified. Proven
+               write-free, the routine's execution claim is withdrawn instead; unattributed, the
+               device's state is unknown and the lineage is condemned, exactly as an unattributed
+               candidate launch failure condemns it. *)
+            let condemn phase exn =
+              match Context.failure_classifier b.cctx phase exn with
+              | Some { Ir.Schedule_outcome.execution_effect = Outcome.No_device_writes; _ } ->
+                  Context.rollback_execution b.cctx (Context.routine_id b.routine)
+              | Some _ | None ->
+                  Context.poison_lineage b.cctx ~routine_name:(Context.routine_name b.routine) exn
+            in
             match
               time_routine ~tag_failures:true ~repeats b.cctx b.routine
             with
             | ms -> ms
             | exception Outcome.Raised_at (phase, exn, backtrace) ->
+                condemn phase exn;
                 emit_pre_search_failure ~base:(census ()) ~phase ~candidate:(Some "baseline")
                   ~detail:(Exn.to_string exn) ();
                 Stdlib.Printexc.raise_with_backtrace exn backtrace
             | exception exn ->
                 let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+                condemn Outcome.Launch exn;
                 emit_pre_search_failure ~base:(census ()) ~phase:Outcome.Launch
                   ~candidate:(Some "baseline") ~detail:(Exn.to_string exn) ();
                 Stdlib.Printexc.raise_with_backtrace exn backtrace)
@@ -4267,7 +4305,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
            failure or its raw backtrace. *)
         partial_emitted := true;
         (try emit_report partial_report
-         with report_exn ->
+         with report_exn when not (process_fatal_exn report_exn) ->
            Stdio.eprintf "autotune: partial-report callback failed: %s\n%!"
              (Exn.to_string report_exn));
         Outcome.raise_failure (Outcome.Fatal fatal)

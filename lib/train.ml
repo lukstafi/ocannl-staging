@@ -339,6 +339,11 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
       Option.iter to_report ~f:(fun f ->
           match f r with
           | () -> ()
+          (* Wrapped so it can be told apart from the search's own failures — except when it is
+             process-fatal, where that distinction is pointless and the wrapper would hide it from
+             the tuner's own guard on the fatal path (which re-raises such exceptions rather than
+             swallowing them). *)
+          | exception exn when must_propagate exn -> raise exn
           | exception exn ->
               raise
                 (Report_callback_failed
@@ -393,7 +398,7 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
           (* Best-effort, like the tuner's own fatal-path reporting: this is already the failure
              path, and the arm failure is the error worth propagating. *)
           (try Option.iter to_report ~f:(fun f -> f slot)
-           with report_exn ->
+           with report_exn when not (must_propagate report_exn) ->
              Stdio.eprintf "tune_placements: arm-slot report callback failed: %s\n%!"
                (Exn.to_string report_exn));
           Some slot
@@ -506,7 +511,18 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
      [Error] propagated, [a_wins] never picks a failed arm, and the flip chain only ever replaces
      its incumbent with a strictly faster {e completed} search ([infinity] ranks a failed one). *)
   let ship = function
-    | Ok compiled -> compiled
+    | Ok compiled -> (
+        (* A later arm can poison the lineage after this one succeeded. With a [timing_ctx] that is
+           the scratch lineage and the winner — compiled from [ctx] — is unaffected. WITHOUT one the
+           arms search in the caller's own lineage, so the winner's first [Context.run] is
+           guaranteed to raise: handing it back would report success for a routine that cannot
+           execute, and blame it on whichever routine poisoned the ledger. The poisoning failure is
+           the honest answer, at the point where it is known. *)
+        match if Option.is_none timing_ctx then Context.poisoned_failure ctx else None with
+        | None -> compiled
+        | Some poisoned ->
+            logf "the winner cannot ship: a later arm poisoned the caller's lineage";
+            raise poisoned)
     | Error (exn, backtrace) -> Stdlib.Printexc.raise_with_backtrace exn backtrace
   in
   if inline_flips <= 0 then ship winner

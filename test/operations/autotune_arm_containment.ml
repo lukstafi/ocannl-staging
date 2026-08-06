@@ -224,4 +224,53 @@ let () =
   in
   p "a failure that poisons the shared lineage propagates instead of trying the sibling"
     poisoned_propagated;
-  p "the sibling arm was not attempted on a poisoned lineage" (!reports = 1)
+  p "the sibling arm was not attempted on a poisoned lineage" (!reports = 1);
+
+  (* --- The mirror case: the arm that poisons is the LATER one, so an earlier arm's winner is in
+     hand — but without a [timing_ctx] the arms searched the caller's own lineage, so that winner
+     can never run. Handing it back would report success for a routine guaranteed to raise. --- *)
+  let ctx_q = Context.auto () in
+  let arms_reported = ref 0 in
+  let attempts = ref 0 in
+  let poisoned_winner_refused =
+    Exn.protect
+      ~f:(fun () ->
+        (Autotune.on_candidate_attempt :=
+           fun _ ->
+             if !arms_reported >= 1 then (
+               Int.incr attempts;
+               if !attempts = 3 then (
+                 Context.poison_lineage ctx_q ~routine_name:"injected"
+                   (Failure "injected late poisoning");
+                 raise (Failure "injected late poisoning"))));
+        match
+          Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:""
+            ~report:(fun _ -> Int.incr arms_reported)
+            ctx_q t2 comp Ir.Indexing.Empty
+        with
+        | _ -> false
+        | exception Failure msg -> String.is_substring msg ~substring:"poisoned")
+      ~finally:(fun () -> Autotune.on_candidate_attempt := fun _ -> ())
+  in
+  p "a winner is not shipped out of a lineage a later arm poisoned" poisoned_winner_refused;
+
+  (* --- An interrupt raised inside a report callback is about the process, not the arm: the
+     best-effort reporting on the failure path must not swallow it. --- *)
+  let attempts = ref 0 in
+  let interrupt_propagated =
+    Exn.protect
+      ~f:(fun () ->
+        (Autotune.on_candidate_attempt :=
+           fun _ ->
+             Int.incr attempts;
+             if !attempts = 3 then raise (Failure "injected failure under interrupt"));
+        match
+          Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:""
+            ~report:(fun r -> if r.Autotune.partial then raise Stdlib.Sys.Break)
+            (Context.auto ()) t2 comp Ir.Indexing.Empty
+        with
+        | _ -> false
+        | exception Stdlib.Sys.Break -> true)
+      ~finally:(fun () -> Autotune.on_candidate_attempt := fun _ -> ())
+  in
+  p "an interrupt raised by a report callback is not swallowed" interrupt_propagated
