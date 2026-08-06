@@ -236,7 +236,12 @@ let every_non_literal_materialized =
     still reaches [report] in position, so the failure is recorded rather than downgraded to "that
     arm merely lost". A partial arm's [best_ms] is deliberately {e not} shippable and not compared:
     {!Autotune.tune} raised, so no routine was compiled from [ctx] for it. Only when every arm fails
-    does [tune_placements] propagate, with the first failure's original backtrace. Consumers
+    does [tune_placements] propagate, with the first failure's original backtrace — with two
+    exceptions that are not the arm's to absorb and propagate at once: process-level failures
+    ([Out_of_memory], [Sys.Break]) and compiler invariant violations ([Assert_failure],
+    [Stack_overflow]), the same classes {!Ir.Schedule_outcome.classify_raw} refuses to classify.
+    A [report] callback's own exception likewise propagates rather than counting as an arm
+    failure. Consumers
     attributing arms by arrival order should read [terminal_failure] (equivalently [partial]) before
     [best_ms], as benchmarks/runners/ocannl/bench_harness.ml does.
 
@@ -295,13 +300,23 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
      ranks at [infinity], which is not the same as a completed search that timed nothing (which
      returns the untuned default compile and also ranks at [infinity] — hence [Result.t] rather than
      a sentinel time). *)
-  (* The arms are contained; the PROCESS is not. An interrupt or a host-heap exhaustion says nothing
-     about this arm, there is nothing to fall back to, and swallowing an interrupt to run the other
-     arm would make Ctrl-C during a half-hour search do nothing. {!Ir.Schedule_outcome.classify_raw}
-     keeps exactly these fatal for the same reason. The device OOM this containment exists for is an
-     ordinary [Invalid_argument] from the driver, so it stays contained. *)
-  let process_fatal = function
-    | Out_of_memory | Stdlib.Sys.Break | Stack_overflow -> true
+  (* The arms are contained; two classes of failure are not the arm's to absorb, and they are the
+     same two {!Ir.Schedule_outcome.classify_raw} refuses to classify one level down — containing
+     them here would re-absorb exactly what that policy exists to refuse.
+
+     - Process-level ([Out_of_memory] on the host heap, [Sys.Break]): no evidence about this arm and
+       nothing to fall back to. Swallowing an interrupt to go run the other arm would make Ctrl-C
+       during a half-hour search do nothing.
+     - Compiler invariant violations ([Assert_failure], [Stack_overflow]): a tuner bug, not a
+       schedule that lost. Demoting one to "that arm lost" would let a process exit 0 with a shipped
+       winner and the bug unmentioned outside the report. (A stale cache entry tripping an assert is
+       already turned into a classified decline inside {!Autotune.tune} under [Cache_replay]
+       provenance, so it never reaches here as an exception.)
+
+     The device OOM this containment exists for is an ordinary [Invalid_argument] from the driver
+     and stays contained. *)
+  let must_propagate = function
+    | Out_of_memory | Stdlib.Sys.Break | Stack_overflow | Assert_failure _ -> true
     | _ -> false
   in
   let tune ?to_report arm ctx timing_ctx =
@@ -332,7 +347,7 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
       | exception exn ->
           let backtrace = Stdlib.Printexc.get_raw_backtrace () in
           if
-            process_fatal exn
+            must_propagate exn
             || Option.exists !callback_failure ~f:(fun raised -> phys_equal raised exn)
           then Stdlib.Printexc.raise_with_backtrace exn backtrace
           else Error (exn, backtrace)

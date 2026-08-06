@@ -145,4 +145,26 @@ let () =
       false
     with Failure msg -> String.is_substring msg ~substring:"injected report callback failure"
   in
-  p "a report-callback exception propagates instead of losing an arm" raised
+  p "a report-callback exception propagates instead of losing an arm" raised;
+
+  (* --- A compiler invariant violation is a tuner bug, not a schedule that lost: containing it
+     would let the process exit 0 with a shipped winner and the bug unmentioned. Same classes
+     [Ir.Schedule_outcome.classify_raw] refuses to classify one level down. --- *)
+  let attempts = ref 0 in
+  let assertion_propagated =
+    Exn.protect
+      ~f:(fun () ->
+        (Autotune.on_candidate_attempt :=
+           fun _ ->
+             Int.incr attempts;
+             if !attempts = 2 then assert false);
+        try
+          let _ =
+            Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir
+              (Context.auto ()) t2 comp Ir.Indexing.Empty
+          in
+          false
+        with Assert_failure _ -> true)
+      ~finally:(fun () -> Autotune.on_candidate_attempt := fun _ -> ())
+  in
+  p "a compiler assertion propagates instead of losing an arm" assertion_propagated
