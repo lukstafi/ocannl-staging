@@ -3797,6 +3797,51 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
   in
   let static_indices = Idx.bound_symbols bindings in
   let backend = Context.backend_name ctx in
+  let emit_report r = Option.iter report ~f:(fun f -> f r) in
+  (* [tune] reports exactly once per call, on every path (gh-ocannl-550). The failures that happen
+     before (or instead of) the search proper — the base compile failing before its lowering is
+     captured, a fatal baseline link, a fatal cache replay, a baseline timing failure, and either
+     untuned fallback compile of a search-less call — used to raise with no report at all, which
+     leaves a caller that attributes arms by arrival order (the positional [?report] of
+     [Train.tune_placements]) with no slot for this search. The phase reported is the one the
+     failure itself carries, so the diagnostic names where it actually died — at codegen, at link,
+     at launch, at sync — instead of guessing. Reporting is best-effort here, as on the search's own
+     fatal path: it must not replace the compiler failure. [base] carries whatever the call did
+     learn before failing (e.g. a decline census). *)
+  let emit_pre_search_failure ?(base = no_search_report) ~phase ~candidate ~detail () =
+    let r =
+      {
+        base with
+        partial = true;
+        best_label = "";
+        terminal_failure = Some { phase; candidate; detail };
+      }
+    in
+    try emit_report r
+    with report_exn ->
+      Stdio.eprintf "autotune: pre-search failure report callback failed: %s\n%!"
+        (Exn.to_string report_exn)
+  in
+  let raise_pre_search ?base (failure : Outcome.failure) =
+    (match failure with
+    | Outcome.Classified c ->
+        emit_pre_search_failure ?base ~phase:c.Outcome.phase ~candidate:None
+          ~detail:(Outcome.detail_of_cause c.Outcome.cause) ()
+    | Outcome.Fatal f ->
+        emit_pre_search_failure ?base ~phase:f.Outcome.phase ~candidate:f.Outcome.candidate
+          ~detail:(Exn.to_string f.Outcome.exn) ());
+    Outcome.raise_failure failure
+  in
+  (* The untuned fallback of a search-less call, through the containment-aware form so a failure
+     reports the phase it carries. [Context.compile] is exactly this plus [raise_failure], which is
+     what [raise_pre_search] ends with, so the caller sees the same exception either way. *)
+  let compile_untuned_default ?base () =
+    match
+      Context.compile_outcome ~provenance:Ir.Schedule_outcome.User_schedule ctx comp bindings
+    with
+    | Ok result -> result
+    | Error failure -> raise_pre_search ?base failure
+  in
   (* Without a cache to replay there is nothing for a search-less [tune] to do, so it does not even
      take the base compile that computes the cache key: the caller gets the untuned default compile
      it would have gotten from [Context.compile]. *)
@@ -3805,8 +3850,8 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
     (* Report AFTER the fallback compile: a report is a record of what this call achieved, and
        [no_search_report] says the untuned default shipped. Emitting it first would leave a
        consumer holding a clean, non-partial report for a call that then raised (Codex P2 on PR
-       #291) -- every other fatal path here reports the failure or nothing. *)
-    let result = Context.compile ctx comp bindings in
+       #291); a compile that raises reports its own failure instead (gh-ocannl-550). *)
+    let result = compile_untuned_default () in
     Option.iter report ~f:(fun f -> f no_search_report);
     result)
   else
@@ -3859,39 +3904,6 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
      GPU dispatch hazard by [dispatchable] (gh-ocannl-532), and the missing "did tuning beat the
      default?" reference by [report.default_ms] — the [config_thresholds] seed's measurement, not a
      new baseline. *)
-  let emit_report r = Option.iter report ~f:(fun f -> f r) in
-  (* [tune] reports exactly once per call, on every path (gh-ocannl-550). The failures that happen
-     before the search proper — the base compile failing before its lowering is captured, a fatal
-     baseline link, a fatal cache replay, a baseline timing failure — used to raise with no report
-     at all, which leaves a caller that attributes arms by arrival order (the positional [?report]
-     of [Train.tune_placements]) with no slot for this search. The phase reported is the one the
-     failure itself carries, so the diagnostic names where the arm actually died — at link, at
-     launch, at sync — instead of guessing. Reporting is best-effort here, as on the search's own
-     fatal path: it must not replace the compiler failure. *)
-  let emit_pre_search_failure ~phase ~candidate ~detail =
-    let r =
-      {
-        no_search_report with
-        partial = true;
-        best_label = "";
-        terminal_failure = Some { phase; candidate; detail };
-      }
-    in
-    try emit_report r
-    with report_exn ->
-      Stdio.eprintf "autotune: pre-search failure report callback failed: %s\n%!"
-        (Exn.to_string report_exn)
-  in
-  let raise_pre_search (failure : Outcome.failure) =
-    (match failure with
-    | Outcome.Classified c ->
-        emit_pre_search_failure ~phase:c.Outcome.phase ~candidate:None
-          ~detail:(Outcome.detail_of_cause c.Outcome.cause)
-    | Outcome.Fatal f ->
-        emit_pre_search_failure ~phase:f.Outcome.phase ~candidate:f.Outcome.candidate
-          ~detail:(Exn.to_string f.Outcome.exn));
-    Outcome.raise_failure failure
-  in
   let base_capture = ref None in
   !on_candidate_attempt "baseline";
   let base_outcome =
@@ -4048,15 +4060,18 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
   | Some result -> result
   | None when not search ->
       logf "search disabled (autotune_search=false) and no cache entry: compiling the untuned default";
-      (* After the compile, as in the no-cache branch above. *)
-      let result = Context.compile ctx comp bindings in
-      emit_report
+      (* After the compile, as in the no-cache branch above. The census the base compile already
+         produced is carried whether this succeeds or fails. *)
+      let census =
         {
           no_search_report with
           candidates_failed = failed_count declines;
           baseline_declined = Option.is_some baseline_decline;
           declines = decline_summaries declines;
-        };
+        }
+      in
+      let result = compile_untuned_default ~base:census () in
+      emit_report census;
       result
   | None -> (
       let seen = Hash_set.create (module String) in
@@ -4115,12 +4130,12 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
             | ms -> ms
             | exception Outcome.Raised_at (phase, exn, backtrace) ->
                 emit_pre_search_failure ~phase ~candidate:(Some "baseline")
-                  ~detail:(Exn.to_string exn);
+                  ~detail:(Exn.to_string exn) ();
                 Stdlib.Printexc.raise_with_backtrace exn backtrace
             | exception exn ->
                 let backtrace = Stdlib.Printexc.get_raw_backtrace () in
                 emit_pre_search_failure ~phase:Outcome.Launch ~candidate:(Some "baseline")
-                  ~detail:(Exn.to_string exn);
+                  ~detail:(Exn.to_string exn) ();
                 Stdlib.Printexc.raise_with_backtrace exn backtrace)
         | _ -> Float.infinity
       in

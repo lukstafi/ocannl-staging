@@ -280,8 +280,9 @@ type report = {
       (** [true] when the call terminated on a fatal failure instead of completing. {!tune} reports
           exactly once per call, on every path (gh-ocannl-550): the failures that precede the search
           proper — a base compile that fails before the base lowering is captured, a fatal baseline
-          link, a fatal cache replay, a baseline timing failure — report with every counter at its
-          zero value and the failure in [terminal_failure], so a caller attributing arms by arrival
+          link, a fatal cache replay, a baseline timing failure — and the untuned fallback compiles
+          of a search-less call ([search=false]) report with every counter at the value it had
+          reached and the failure in [terminal_failure], so a caller attributing arms by arrival
           order (the positional [?report] of [Train.tune_placements]) still gets a slot for the
           search that died. *)
   baseline_declined : bool;
