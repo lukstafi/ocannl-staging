@@ -139,6 +139,25 @@
   single parameter shape stays scalar); `At_least_dim` axes keep meeting their use sites, since
   direct indexing is a dim-carrying use.
 
+### Fixed
+
+- **A failed placement arm no longer destroys the other arm's finished winner** (gh-ocannl-550,
+  robustness half). `Train.tune_placements` now treats an arm whose search terminates on a fatal
+  failure as a *losing* arm: it ranks at `infinity`, the surviving arm's winner ships and stays
+  cached, and the failed arm's partial report — carrying its `terminal_failure` — still arrives in
+  position, so the failure is recorded rather than downgraded to "that arm merely lost". Only when
+  every arm fails does the tune propagate, with the first failure's original backtrace. The same
+  containment covers the gh-555 flip-refinement searches. Per-candidate containment inside a search
+  was already in place (gh-ocannl-533/536) and held on the reproduction; what escaped was the
+  aftermath — with the device exhausted by candidate 47, the arm's own winner replay could not
+  compile and neither could its untuned-default fallback, so `Autotune.tune` raised and took arm
+  A's already-crowned, already-cached winner out of the process with it (five of five tf32
+  `gpt2_mini` runs, benchmarks/report-gh528-gpt2-cuda.md §3). Regression coverage is backend-neutral
+  and GPU-free: `Autotune.on_candidate_attempt` injects a candidate failure at a chosen position
+  within arm B (`test/operations/autotune_arm_containment`). The benchmark harness's arm
+  attribution follows the same rule — an arm with a `terminal_failure` is never reported as
+  shipped, and its failure is emitted in the result line.
+
 ## [0.9] -- 2026-08-03
 
 > Release note: theme — program search and optimization. Since 0.8, the schedule system has

@@ -230,6 +230,16 @@ let every_non_literal_materialized =
     same caveats apply (notably [timing_ctx] and non-idempotent routines — both arms share
     [timing_ctx]'s device for their searches).
 
+    An arm that fails is a {e losing} arm, not a failed run (gh-ocannl-550): a search that
+    terminates on a fatal failure ranks at [infinity], the other arm's completed winner ships and
+    stays cached, and the failed arm's own (partial) report — carrying its [terminal_failure] —
+    still reaches [report] in position, so the failure is recorded rather than downgraded to "that
+    arm merely lost". A partial arm's [best_ms] is deliberately {e not} shippable and not compared:
+    {!Autotune.tune} raised, so no routine was compiled from [ctx] for it. Only when every arm fails
+    does [tune_placements] propagate, with the first failure's original backtrace. Consumers
+    attributing arms by arrival order should read [terminal_failure] (equivalently [partial]) before
+    [best_ms], as benchmarks/runners/ocannl/bench_harness.ml does.
+
     The arms differ in which candidates {e exist}, not only in how they rank: a tensorized candidate
     is seeded only when the matmul site's operand and destination storage precisions resolve to a
     tile the backend advertises ({!Autotune.mma_tile_for_precisions}), and placement decides which
@@ -270,7 +280,21 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
   let last = ref None in
   (* The public [?report] contract is positional — arm A's report then arm B's, which consumers
      (e.g. the benchmark harness) attribute by arrival order — so flip-refinement searches report
-     through the separate [?flip_report] instead ([~to_report] selects the callback). *)
+     through the separate [?flip_report] instead ([~to_report] selects the callback).
+
+     gh-ocannl-550: the arms are independent experiments, so one arm's terminal failure is no
+     evidence about another arm's completed result — and must not destroy it. Per-candidate
+     containment inside a search is {!Autotune.tune}'s job (gh-ocannl-533/536) and it holds: on the
+     reproduction that motivated this (benchmarks/report-gh528-gpt2-cuda.md §3, five of five tf32
+     gpt2_mini runs) the OOMing candidates were absorbed as ordinary [Backend_link] declines and the
+     search ran to its end. What escaped is the aftermath: with the device exhausted, the arm's
+     winner replay could not compile and neither could its untuned-default fallback, so
+     [Autotune.tune] raised — and with no handler here, arm B's failure took arm A's already
+     finished, already cached winner (106.389 ms, the best arm-A result of that whole leg) out of
+     the process with it. Catching per arm is the whole fix: a failed search returns [Error] and
+     ranks at [infinity], which is not the same as a completed search that timed nothing (which
+     returns the untuned default compile and also ranks at [infinity] — hence [Result.t] rather than
+     a sentinel time). *)
   let tune ?to_report arm ctx timing_ctx =
     let to_report = Option.value to_report ~default:report in
     let capture r =
@@ -280,19 +304,38 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
     logf "arm %s search:" arm;
     last := None;
     let result =
-      Autotune.tune ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ~report:capture ctx comp
-        bindings
+      match
+        Autotune.tune ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ~report:capture ctx comp
+          bindings
+      with
+      | compiled -> Ok compiled
+      | exception exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
     in
     let r = !last in
-    let best_ms = Option.value_map r ~default:Float.infinity ~f:(fun r -> r.Autotune.best_ms) in
-    logf "arm %s best: %.4f ms (%s)" arm best_ms
-      (Option.value_map r ~default:"no report" ~f:(fun r ->
-           Printf.sprintf "%s%s, best tensorized %s"
-             (if String.is_empty r.Autotune.best_label then "nothing timed"
-              else r.Autotune.best_label)
-             (if r.Autotune.best_tensorized then " [tensorized]" else "")
-             (if Float.is_inf r.Autotune.mma_best_ms then "none"
-              else Printf.sprintf "%.4f ms" r.Autotune.mma_best_ms)));
+    let best_ms =
+      match result with
+      (* Not [r.best_ms]: the partial report's best is a measurement of the search context, and no
+         routine was compiled from [ctx] for it. There is nothing to ship at that time. *)
+      | Error _ -> Float.infinity
+      | Ok _ -> Option.value_map r ~default:Float.infinity ~f:(fun r -> r.Autotune.best_ms)
+    in
+    (match result with
+    | Error (exn, _) ->
+        logf "arm %s FAILED, it loses the comparison (%s): %s" arm
+          (Option.value_map r ~default:"it reported nothing" ~f:(fun r ->
+               if Float.is_inf r.Autotune.best_ms then "it had timed nothing"
+               else
+                 Printf.sprintf "its pre-failure best of %.4f ms is not shippable" r.Autotune.best_ms))
+          (Exn.to_string exn)
+    | Ok _ ->
+        logf "arm %s best: %.4f ms (%s)" arm best_ms
+          (Option.value_map r ~default:"no report" ~f:(fun r ->
+               Printf.sprintf "%s%s, best tensorized %s"
+                 (if String.is_empty r.Autotune.best_label then "nothing timed"
+                  else r.Autotune.best_label)
+                 (if r.Autotune.best_tensorized then " [tensorized]" else "")
+                 (if Float.is_inf r.Autotune.mma_best_ms then "none"
+                  else Printf.sprintf "%.4f ms" r.Autotune.mma_best_ms))));
     (result, best_ms, r)
   in
   let a, a_ms, a_report = tune "A (default placements)" ctx timing_ctx in
@@ -305,8 +348,26 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
   let b, b_ms, b_report =
     tune "B (materialize-all)" (materialize ctx) (Option.map timing_ctx ~f:materialize)
   in
-  let a_wins = Float.( <= ) a_ms b_ms in
-  logf "winner: arm %s (A %.4f ms vs B %.4f ms)" (if a_wins then "A" else "B") a_ms b_ms;
+  (* Both arms gone: there is no winner to ship, and the first failure is the one that has not been
+     cascaded from — a device the other arm's failure exhausted or a lineage it poisoned would
+     otherwise be reported as the cause. *)
+  (match (a, b) with
+  | Error (a_exn, a_backtrace), Error (b_exn, _) ->
+      logf "both arms failed, nothing to ship (A: %s; B: %s)" (Exn.to_string a_exn)
+        (Exn.to_string b_exn);
+      Stdlib.Printexc.raise_with_backtrace a_exn a_backtrace
+  | _ -> ());
+  let a_wins =
+    match (a, b) with
+    (* A failed arm never wins, whatever the other arm's time is — including [infinity], which a
+       completed search that timed nothing legitimately reports. *)
+    | Ok _, Error _ -> true
+    | Error _, Ok _ -> false
+    | Ok _, Ok _ | Error _, Error _ -> Float.( <= ) a_ms b_ms
+  in
+  let arm_ms r ms = match r with Error _ -> "FAILED" | Ok _ -> Printf.sprintf "%.4f ms" ms in
+  logf "winner: arm %s (A %s vs B %s)" (if a_wins then "A" else "B") (arm_ms a a_ms)
+    (arm_ms b b_ms);
   (* gh-ocannl-546: a tensorized winner of the arm that is then discarded reaches no artifact and no
      end-to-end number, so the placement A/B is where it has to be said. Stated as the margin it
      lost by, not as a bare flag: on a small routine the arms can be separated by less than the
@@ -315,10 +376,12 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
   Option.iter dropped ~f:(fun d ->
       if d.Autotune.best_tensorized then
         logf
-          "NOTE arm %s crowned a tensorized candidate (%s at %.4f ms) and did NOT ship: arm %s wins \
-           the placement A/B at %.4f ms%s"
+          "NOTE arm %s crowned a tensorized candidate (%s at %.4f ms%s) and did NOT ship: arm %s \
+           wins the placement A/B at %.4f ms%s"
           (if a_wins then "B" else "A")
           d.Autotune.best_label d.Autotune.best_ms
+          (* A partial arm's crown is mid-search, and it lost the A/B by failing, not by its time. *)
+          (if Option.is_some d.Autotune.terminal_failure then ", before that arm failed" else "")
           (if a_wins then "A" else "B")
           (if a_wins then a_ms else b_ms)
           (Option.value_map shipped ~default:"" ~f:(fun s ->
@@ -334,7 +397,14 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
     | Some n -> n
     | None -> Int.of_string (Utils.get_global_arg ~arg_name:"tune_inline_flips" ~default:"0")
   in
-  if inline_flips <= 0 then winner
+  (* The unwrap is the type-level statement of an invariant already established above: both arms
+     [Error] propagated, [a_wins] never picks a failed arm, and the flip chain only ever replaces
+     its incumbent with a strictly faster {e completed} search ([infinity] ranks a failed one). *)
+  let ship = function
+    | Ok compiled -> compiled
+    | Error (exn, backtrace) -> Stdlib.Printexc.raise_with_backtrace exn backtrace
+  in
+  if inline_flips <= 0 then ship winner
   else (
     (* gh-555: greedy per-node refinement over the inlining decision vector. The vector lives on
        the default-policy arm (arm B's placements are caller-seeded wholesale, so its compile
@@ -393,11 +463,11 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
     if Float.(chain_ms < winner_ms) then (
       logf "flip refinement ships: %.4f ms (the placement A/B winner was %.4f ms)" chain_ms
         winner_ms;
-      chain_result)
+      ship chain_result)
     else (
       logf "flip refinement did not improve on the A/B winner (%.4f ms vs %.4f ms)" chain_ms
         winner_ms;
-      winner))
+      ship winner))
 
 module Lazy = Utils.Lazy
 
