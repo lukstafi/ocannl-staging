@@ -949,6 +949,16 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     let pack ?arena (group : (Tn.t * Low_level.traced_array) list)
         ~(register : Tn.t -> alloc:(unit -> buffer_loc) -> unit) : unit =
       if not (List.is_empty group) then begin
+        (* gh-ocannl-498: lay every group out in CANONICAL (uid) order, which is the order
+           [score_footprint] scores. Both planners are order-sensitive -- the arena's greedy
+           coloring breaks equal-size ties by input order, and bump packing's alignment padding and
+           cap segmentation depend on the running offset (sizes 4 then 64 at alignment 32 occupy 96
+           bytes, reversed 68). Scoring one order and allocating another would let a plan report
+           itself under budget while linking asks for a larger pool. [traced_store] order was merely
+           a deterministic order; uid order is deterministic too, and shared with the scorer. Only
+           the layout input is reordered: pool ids are minted per segment before any placement, and
+           registration is order-independent. *)
+        let group = List.sort group ~compare:(fun (a, _) (b, _) -> Tn.compare a b) in
         let items =
           (* Within-pool offsets are padded to [Ops.buffer_alignment] (not just the element size) so
              that every node's buffer — not only each pool's base — is SIMD-aligned (gh-ocannl-164);
@@ -959,38 +969,15 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
         in
         (* gh-ocannl-489: with a liveness plan (the working group under [buffer_aliasing]), lay the
            group out as one arena where liveness-disjoint same-precision nodes overlap. Falls back
-           to bump packing when the arena would exceed the per-pool cap.
-
-           The planner is greedy by decreasing size and breaks EQUAL-SIZE ties by input order, so
-           the order it is fed is part of the layout. Feed it the canonical (uid) order, which is
-           what [score_footprint] uses, rather than [group]'s [traced_store] order: otherwise two
-           equal-size nodes with different conflict sets could color differently in the scorer and
-           in the allocator, and a plan reported under budget could link a larger pool
-           (gh-ocannl-498). Only the coloring is reordered — [group] itself still drives pool-id
-           minting and registration, so allocation order is unchanged. *)
+           to bump packing when the arena would exceed the per-pool cap. *)
         let arena_layout =
           Option.bind arena ~f:(fun spans ->
-              (* Arrays, not lists: this runs per link on every working node, and indexing a list
-                 inside a sort comparator would make canonicalization quadratic in the node count (a
-                 large generated graph has thousands). *)
-              let entries =
-                Array.of_list
-                  (List.map2_exn group items ~f:(fun (key, _) (size, align) ->
-                       ( key,
-                         ( size,
-                           align,
-                           Ops.prec_string (Lazy.force key.Tn.storage_prec),
-                           Hashtbl.find spans key ) )))
-              in
-              let n = Array.length entries in
-              let order = Array.init n ~f:Fn.id in
-              Array.sort order ~compare:(fun i j -> Tn.compare (fst entries.(i)) (fst entries.(j)));
-              let permuted = List.init n ~f:(fun k -> snd entries.(order.(k))) in
-              Option.map (plan_arena_offsets ~cap permuted) ~f:(fun (offsets, total) ->
-                  (* Undo the permutation: [plan_arena_offsets] answers in ITS input order. *)
-                  let back = Array.create ~len:n 0 in
-                  List.iteri offsets ~f:(fun k off -> back.(order.(k)) <- off);
-                  (Array.to_list back, total)))
+              plan_arena_offsets ~cap
+                (List.map2_exn group items ~f:(fun (key, _) (size, align) ->
+                     ( size,
+                       align,
+                       Ops.prec_string (Lazy.force key.Tn.storage_prec),
+                       Hashtbl.find spans key ))))
         in
         match arena_layout with
         | Some (offsets, total) ->
