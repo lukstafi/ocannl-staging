@@ -65,6 +65,7 @@ let show (a : Tn.t Aff.access) =
     (String.concat ~sep:"."
        (List.map a.a_path ~f:(function
          | Aff.Stmt k -> Int.to_string k
+         | Aff.Arg k -> "a" ^ Int.to_string k
          | Aff.Cond -> "c"
          | Aff.Body -> "b"
          | Aff.Rhs -> "r"
@@ -185,4 +186,72 @@ let () =
     Stdio.printf "%s %s parallelizable: %b\n" (Idx.symbol_ident sym) name safe
   in
   check_par "(map axis)" i2;
-  check_par "(reduced axis)" k
+  check_par "(reduced axis)" k;
+
+  Stdio.printf "\n=== sibling scope operands (gh-561 Arg components) ===\n";
+  (* for i7: Y[i7] = scopeA{ la := X[i7] } + scopeB{ X[i7] := 5; lb := 1 } — two [Local_scope]
+     operands inlined into one statement's rhs. Each scope occurrence extends the path with its own
+     [Arg] evaluation position, so scope A's read and scope B's write of the same node never
+     interleave their interior components — and coverage claims nothing across sibling operands
+     (evaluation order among them is not modeled), so X keeps its read-before-write (input)
+     classification. *)
+  let x = fresh_tn "X" [| 4 |] in
+  let y2 = fresh_tn "Y" [| 4 |] in
+  let i7 = Idx.get_symbol () in
+  let la = LL.get_scope y2 and lb = LL.get_scope y2 in
+  let scope_a : LL.scalar_t =
+    LL.Local_scope
+      { id = la; body = LL.Set_local (la, get x [| it i7 |]); orig_indices = [| it i7 |] }
+  in
+  let scope_b : LL.scalar_t =
+    LL.Local_scope
+      {
+        id = lb;
+        body =
+          LL.Seq
+            ( LL.Set { tn = x; idcs = [| it i7 |]; llsc = LL.Constant 5.; debug = "" },
+              LL.Set_local (lb, LL.Constant 1.) );
+        orig_indices = [| it i7 |];
+      }
+  in
+  let sibling =
+    for_over i7
+      (LL.Set
+         {
+           tn = y2;
+           idcs = [| it i7 |];
+           llsc = LL.Binop (Ops.Add, (scope_a, sp), (scope_b, sp));
+           debug = "";
+         })
+  in
+  let sib_accs = LL.affine_accesses sibling in
+  List.iter sib_accs ~f:show;
+  let x_read =
+    List.find_exn sib_accs ~f:(fun a -> (not a.Aff.a_write) && a.Aff.a_tn.Tn.uid = x.Tn.uid)
+  in
+  let x_writes = List.filter sib_accs ~f:(fun a -> a.Aff.a_write && a.Aff.a_tn.Tn.uid = x.Tn.uid) in
+  (match Aff.read_covered_before ~read:x_read ~writes:x_writes () with
+  | `Covered -> Stdio.printf "scope A's read covered by scope B's write: UNSOUND\n"
+  | `Unknown _ ->
+      Stdio.printf "scope A's read not covered by the sibling operand's write: correct\n");
+  (* The reverse arrangement — the writing scope evaluated first in traversal order — is declined
+     too: sibling [Arg] positions are incomparable, so no cross-operand ordering is claimed even
+     where left-to-right emission would justify it. *)
+  let sibling_rev =
+    for_over i7
+      (LL.Set
+         {
+           tn = y2;
+           idcs = [| it i7 |];
+           llsc = LL.Binop (Ops.Add, (scope_b, sp), (scope_a, sp));
+           debug = "";
+         })
+  in
+  let rev_accs = LL.affine_accesses sibling_rev in
+  let x_read =
+    List.find_exn rev_accs ~f:(fun a -> (not a.Aff.a_write) && a.Aff.a_tn.Tn.uid = x.Tn.uid)
+  in
+  let x_writes = List.filter rev_accs ~f:(fun a -> a.Aff.a_write && a.Aff.a_tn.Tn.uid = x.Tn.uid) in
+  match Aff.read_covered_before ~read:x_read ~writes:x_writes () with
+  | `Covered -> Stdio.printf "read covered across sibling operands (write-first): ordering claimed\n"
+  | `Unknown _ -> Stdio.printf "no ordering claimed across sibling operands (write-first): correct\n"

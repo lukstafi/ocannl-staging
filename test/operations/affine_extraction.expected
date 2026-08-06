@@ -18,3 +18,10 @@ wr E   [i6]           loops=[i6:0..3] path=[5.b.w] guarded rmw
 === which loops of the reduction nest parallelize? ===
 i4 (map axis) parallelizable: true
 i3 (reduced axis) parallelizable: false
+
+=== sibling scope operands (gh-561 Arg components) ===
+rd X   [i7]           loops=[i7:0..3] path=[r.a0.r] 
+wr X   [i7]           loops=[i7:0..3] path=[r.a1.0.w] 
+wr Y   [i7]           loops=[i7:0..3] path=[w] 
+scope A's read not covered by the sibling operand's write: correct
+no ordering claimed across sibling operands (write-first): correct

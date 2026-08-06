@@ -498,6 +498,14 @@ let is_injective (proj : Idx.projections) =
     prefix of a read's. *)
 type path_comp =
   | Stmt of int  (** Statement index at one [Seq] nesting level. *)
+  | Arg of int
+      (** A [Local_scope] occurrence's per-statement evaluation position: two scope bodies inlined
+          into one statement's scalar tree extend {e distinct} bases, so their interior components
+          never interleave (bare-bodied and [Seq]-bodied siblings used to collide — a later
+          operand's [Stmt] sorted before an earlier operand's [Rhs]). Sibling positions are
+          deliberately {e incomparable} in the visibility rule ([path_before]): evaluation order
+          among one statement's operands is not modeled, so no cross-operand ordering is claimed.
+      *)
   | Cond  (** Inside an [If] statement's condition. *)
   | Body  (** Inside an [If] statement's guarded body. *)
   | Rhs  (** Inside a [Set]-family statement's right-hand side (or a [Set_local]'s). *)
@@ -703,8 +711,22 @@ let read_covered_before ?(thread = fun _ -> false) ?(static_range = fun _ -> Non
        [Local_scope] bodies inlined there) before its own write — the case that used to need a
        prefix-exclusion hack, since an enclosing write's bare statement position was a prefix of
        its rhs body's positions. A write's path can no longer be a proper prefix of a read's
-       (every write path ends in [Write], which nothing extends). *)
-    List.compare compare_path_comp p q < 0
+       (every write path ends in [Write], which nothing extends). The one non-lexicographic rule:
+       paths diverging at sibling [Arg] positions are incomparable — evaluation order among one
+       statement's inlined scope bodies is not modeled, so a write there proves nothing about
+       reads in a sibling operand. *)
+    let rec before p q =
+      match (p, q) with
+      | [], [] | _ :: _, [] -> false
+      | [], _ :: _ -> true
+      | a :: p', b :: q' ->
+          if equal_path_comp a b then before p' q'
+          else (
+            match (a, b) with
+            | Arg _, Arg _ -> false
+            | _ -> compare_path_comp a b < 0)
+    in
+    before p q
   in
   let has_opaque m =
     Array.exists m ~f:(function Idx.Sub_axis | Idx.Concat _ -> true | _ -> false)
