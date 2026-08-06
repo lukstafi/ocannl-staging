@@ -62,7 +62,13 @@ let show (a : Tn.t Aff.access) =
     (String.concat ~sep:","
        (List.map a.a_loops ~f:(fun (s, (lo, hi)) ->
             Printf.sprintf "%s:%d..%d" (Idx.symbol_ident s) lo hi)))
-    (String.concat ~sep:"." (List.map a.a_path ~f:Int.to_string))
+    (String.concat ~sep:"."
+       (List.map a.a_path ~f:(function
+         | Aff.Stmt k -> Int.to_string k
+         | Aff.Cond -> "c"
+         | Aff.Body -> "b"
+         | Aff.Rhs -> "r"
+         | Aff.Write -> "w")))
     flags
 
 let () =
@@ -75,7 +81,7 @@ let () =
   let e = fresh_tn "E" [| 4 |] in
   let ids = fresh_tn "I" [| 4 |] in
   let i = Idx.get_symbol () and j = Idx.get_symbol () and k = Idx.get_symbol () in
-  let i2 = Idx.get_symbol () and i3 = Idx.get_symbol () in
+  let i2 = Idx.get_symbol () and i3 = Idx.get_symbol () and i6 = Idx.get_symbol () in
   let pointwise =
     (* for i: for j: C[i][j] = A[i][j] + B[j] *)
     for_over i
@@ -126,7 +132,28 @@ let () =
            debug = "";
          })
   in
-  let program = LL.unflat_lines [ LL.Zero_out s; pointwise; reduction; guarded; gather ] in
+  let guarded_rmw =
+    (* for i6: if E[i6] < 1 then E[i6] = E[i6] + 1 — the gh-554/gh-561 trap shape: the condition
+       reads the node the guarded body writes, at the same position. The intra-statement path
+       components keep them apart (the condition's read at [.c] is not subordinate to the body's
+       write at [.b.w]), where the bare statement position made them alias. *)
+    for_over i6
+      (LL.If
+         {
+           cond = (LL.Binop (Ops.Cmplt, (get e [| it i6 |], sp), (LL.Constant 1., sp)), sp);
+           body =
+             LL.Set
+               {
+                 tn = e;
+                 idcs = [| it i6 |];
+                 llsc = LL.Binop (Ops.Add, (get e [| it i6 |], sp), (LL.Constant 1., sp));
+                 debug = "";
+               };
+         })
+  in
+  let program =
+    LL.unflat_lines [ LL.Zero_out s; pointwise; reduction; guarded; gather; guarded_rmw ]
+  in
   Stdio.printf "=== affine_accesses dump ===\n";
   let accesses = LL.affine_accesses program in
   List.iter accesses ~f:show;

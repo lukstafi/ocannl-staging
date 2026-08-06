@@ -326,6 +326,12 @@ let () =
   Stdio.printf "\n=== read_covered_before ===\n";
   (* Access records over a dummy node; only maps, loops, paths, and kind flags matter here. *)
   let acc ?(write = true) ?(whole = false) ?(vec_len = 0) ~loops ~path map =
+    (* Call sites give the statement position; the terminal intra-statement component (gh-561) is
+       appended here — [Write] for writes, [Rhs] for reads — as [Low_level.affine_accesses]
+       would. *)
+    let path =
+      List.map path ~f:(fun k -> Aff.Stmt k) @ [ (if write then Aff.Write else Aff.Rhs) ]
+    in
     {
       Aff.a_tn = "x";
       a_map = map;
@@ -388,7 +394,8 @@ let () =
                         let cmp = List.compare Int.compare ct_w ct_r in
                         thread_ok
                         && (cmp < 0
-                           || (cmp = 0 && List.compare Int.compare w.a_path read.a_path < 0))
+                           || cmp = 0
+                              && List.compare Aff.compare_path_comp w.a_path read.a_path < 0)
                         &&
                         if w.a_whole then true
                         else
@@ -479,13 +486,17 @@ let () =
     ~read:(acc ~write:false ~loops:[ (i1, (0, 2)) ] ~path:[ 0; 1 ] [| Idx.Fixed_idx 0 |])
     ~writes:[ acc ~loops:[ (i1, (0, 2)) ] ~path:[ 0; 0 ] [| Idx.Iterator i1 |] ]
     ();
-  (* Loop-carried coverage (read x[i-1] under the writing loop): declined, oracle covers. *)
+  (* Loop-carried coverage (read x[i-1] on the rhs of the statement writing x[i], after an x[0]
+     init statement): declined, oracle covers. gh-561 note: this used to hand-build the shift
+     statement's read and write at sibling positions and the init at their PREFIX — the ambiguity
+     the intra-statement components remove; now the read/write share the shift statement's
+     position, ordered [Rhs] before [Write], and the init is an honestly earlier statement. *)
   check_containment ~name:"loop-carried shift declined"
-    ~read:(acc ~write:false ~loops:[ (i1, (1, 3)) ] ~path:[ 0; 1 ] [| aff [ (1, i1) ] (-1) |])
+    ~read:(acc ~write:false ~loops:[ (i1, (1, 3)) ] ~path:[ 1 ] [| aff [ (1, i1) ] (-1) |])
     ~writes:
       [
         acc ~loops:[] ~path:[ 0 ] [| Idx.Fixed_idx 0 |];
-        acc ~loops:[ (i1, (1, 3)) ] ~path:[ 0; 0 ] [| Idx.Iterator i1 |];
+        acc ~loops:[ (i1, (1, 3)) ] ~path:[ 1 ] [| Idx.Iterator i1 |];
       ]
     ();
   (* Whole-node write (Zero_out). *)
@@ -600,5 +611,29 @@ let () =
            List.map [ 0; 1 ] ~f:(fun b ->
                acc ~loops:[] ~path:[ (2 * a) + b ] [| Idx.Fixed_idx a; Idx.Fixed_idx b |])))
     ();
+
+  Stdio.printf "\n=== gh-561: intra-statement path components ===\n";
+  (* The trap shape (gh-554 round 3): [if (E[i] < 1) then E[i] = ...] — the condition's read and
+     the guarded body's write used to share one statement position, so a consumer ordering or
+     matching reads against writes by path aliased them. The encoding now keeps them apart. *)
+  let cond_read = [ Aff.Stmt 3; Aff.Cond ] in
+  let body_write = [ Aff.Stmt 3; Aff.Body; Aff.Write ] in
+  let rhs_read = [ Aff.Stmt 3; Aff.Body; Aff.Rhs ] in
+  let p name b = Stdio.printf "%-64s %b\n" name b in
+  p "cond read is NOT statement-subordinate to the guarded body's write"
+    (not (Aff.same_statement cond_read body_write));
+  p "the body's own rhs read IS statement-subordinate to its write"
+    (Aff.same_statement rhs_read body_write);
+  p "program order: cond read before the guarded body's write"
+    (List.compare Aff.compare_path_comp cond_read body_write < 0);
+  p "program order: a statement's rhs before its own write"
+    (List.compare Aff.compare_path_comp rhs_read body_write < 0);
+  (* The [Local_scope] case that used to need [read_covered_before]'s prefix-exclusion rule: the
+     enclosing statement's write now orders after reads in its inlined rhs body by the [Rhs] <
+     [Write] component, so it cannot pose as a covering prior write. *)
+  let scope_body_read = [ Aff.Stmt 3; Aff.Rhs; Aff.Stmt 0; Aff.Rhs ] in
+  let enclosing_write = [ Aff.Stmt 3; Aff.Write ] in
+  p "program order: an inlined scope body's read before the enclosing write"
+    (List.compare Aff.compare_path_comp scope_body_read enclosing_write < 0);
 
   Stdio.printf "\nunsound cases: %d\n" !unsound_count

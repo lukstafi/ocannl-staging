@@ -645,7 +645,7 @@ let rec loop_axis_types acc (llc : LL.t) =
   | LL.If { body; _ } -> loop_axis_types acc body
   | _ -> acc
 
-let path_head p = match p with [] -> -1 | h :: _ -> h
+let path_head = A.stmt_head
 
 (* Access records per top-level statement, in program order (the extraction fires in program order
    and top-level statement indices are nondecreasing). *)
@@ -670,10 +670,11 @@ let fma_form (llc : LL.t) ~stmt_path ~d ~(di : Idx.axis_index array) : bool =
   | _ -> false
 
 (* The perfect all-serial from-0 accumulation statement, as the relations express it: a single
-   interpretable write whose enclosing statement's accesses all share its path and loop box (a
-   sibling statement inside the nest, or a read under extra [Local_scope] loops, breaks the
-   agreement). Returns the write and the non-write accesses split into the write's own same-cell
-   reads (the rmw carrier) and the operand reads, in program order. *)
+   interpretable write whose enclosing statement's accesses are all the statement's own direct
+   reads ([Affine.same_statement]: paths agreeing above the final [Rhs]/[Write] component — a
+   sibling statement inside the nest, or a read nested in a [Local_scope] body, breaks the
+   agreement) and share its loop box. Returns the write and the non-write accesses split into the
+   write's own same-cell reads (the rmw carrier) and the operand reads, in program order. *)
 let serial_kernel_of axes (g : Ir.Tnode.t A.access list) =
   let writes = List.filter g ~f:(fun a -> a.A.a_write) in
   match writes with
@@ -692,7 +693,7 @@ let serial_kernel_of axes (g : Ir.Tnode.t A.access list) =
       if
         List.for_all w.A.a_loops ~f:serial0
         && List.for_all g ~f:(fun a ->
-            List.equal Int.equal a.A.a_path w.A.a_path && loops_equal a.A.a_loops w.A.a_loops)
+            A.same_statement a.A.a_path w.A.a_path && loops_equal a.A.a_loops w.A.a_loops)
       then
         let same_d a =
           phys_equal a.A.a_tn w.A.a_tn && Array.equal Idx.equal_axis_index a.A.a_map w.A.a_map
