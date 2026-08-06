@@ -325,7 +325,8 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
           (Option.value_map r ~default:"it reported nothing" ~f:(fun r ->
                if Float.is_inf r.Autotune.best_ms then "it had timed nothing"
                else
-                 Printf.sprintf "its pre-failure best of %.4f ms is not shippable" r.Autotune.best_ms))
+                 Printf.sprintf "its pre-failure best of %.4f ms is not shippable"
+                   r.Autotune.best_ms))
           (Exn.to_string exn)
     | Ok _ ->
         logf "arm %s best: %.4f ms (%s)" arm best_ms
@@ -380,7 +381,7 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
            wins the placement A/B at %.4f ms%s"
           (if a_wins then "B" else "A")
           d.Autotune.best_label d.Autotune.best_ms
-          (* A partial arm's crown is mid-search, and it lost the A/B by failing, not by its time. *)
+          (* A partial arm's crown is mid-search: it lost the A/B by failing, not by its time. *)
           (if Option.is_some d.Autotune.terminal_failure then ", before that arm failed" else "")
           (if a_wins then "A" else "B")
           (if a_wins then a_ms else b_ms)
