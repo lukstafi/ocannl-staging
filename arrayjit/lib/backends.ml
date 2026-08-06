@@ -959,15 +959,37 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
         in
         (* gh-ocannl-489: with a liveness plan (the working group under [buffer_aliasing]), lay the
            group out as one arena where liveness-disjoint same-precision nodes overlap. Falls back
-           to bump packing when the arena would exceed the per-pool cap. *)
+           to bump packing when the arena would exceed the per-pool cap.
+
+           The planner is greedy by decreasing size and breaks EQUAL-SIZE ties by input order, so
+           the order it is fed is part of the layout. Feed it the canonical (uid) order, which is
+           what [score_footprint] uses, rather than [group]'s [traced_store] order: otherwise two
+           equal-size nodes with different conflict sets could color differently in the scorer and
+           in the allocator, and a plan reported under budget could link a larger pool
+           (gh-ocannl-498). Only the coloring is reordered — [group] itself still drives pool-id
+           minting and registration, so allocation order is unchanged. *)
         let arena_layout =
           Option.bind arena ~f:(fun spans ->
-              plan_arena_offsets ~cap
-                (List.map2_exn group items ~f:(fun (key, _) (size, align) ->
-                     ( size,
-                       align,
-                       Ops.prec_string (Lazy.force key.Tn.storage_prec),
-                       Hashtbl.find spans key ))))
+              let entries =
+                List.map2_exn group items ~f:(fun (key, _) (size, align) ->
+                    ( key,
+                      ( size,
+                        align,
+                        Ops.prec_string (Lazy.force key.Tn.storage_prec),
+                        Hashtbl.find spans key ) ))
+              in
+              let order =
+                List.sort
+                  (List.init (List.length entries) ~f:Fn.id)
+                  ~compare:(fun i j ->
+                    Tn.compare (fst (List.nth_exn entries i)) (fst (List.nth_exn entries j)))
+              in
+              let permuted = List.map order ~f:(fun i -> snd (List.nth_exn entries i)) in
+              Option.map (plan_arena_offsets ~cap permuted) ~f:(fun (offsets, total) ->
+                  (* Undo the permutation: [plan_arena_offsets] answers in ITS input order. *)
+                  let back = Array.create ~len:(List.length entries) 0 in
+                  List.iter2_exn order offsets ~f:(fun i off -> back.(i) <- off);
+                  (Array.to_list back, total)))
         in
         match arena_layout with
         | Some (offsets, total) ->

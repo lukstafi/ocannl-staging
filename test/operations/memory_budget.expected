@@ -3,7 +3,8 @@ calibration: the baseline is the plan's own baseline: true
 minimize: relieves footprint: true
 minimize: takes at least one flip: true
 minimize: reports itself within budget (it has no target): true
-minimize: every accepted flip relieved something: true
+minimize: the reported reliefs sum to the footprint moved: true
+minimize: no flip reports negative relief: true
 budget at the baseline: no flips: true
 budget at the baseline: within budget: true
 reachable budget: met: true

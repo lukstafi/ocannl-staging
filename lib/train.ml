@@ -598,8 +598,22 @@ module Lazy = Utils.Lazy
    [model_default_schedule=true], the default schedule is picked by the analytic cost model
    ({!Autotune.model_default} — zero timing runs, advisory, falls back to the ordinary default
    pipeline); otherwise plain [Context.compile]. *)
-let compile_with_model_gate ctx comp bindings =
-  if Lazy.force Autotune.model_default_enabled then Autotune.model_default ctx comp bindings
+let compile_with_model_gate ?(budgeted = false) ctx comp bindings =
+  (* gh-ocannl-498: a memory budget is scored against the DEFAULT schedule pipeline
+     ({!Ir.Schedule.maybe_default_schedules}, what [Backends.score_footprint] runs). The model gate
+     picks a different segmentation, and alias spans and arena size are functions of the final
+     segmentation — so honoring the gate on a budgeted compile would link a layout nobody scored,
+     and a plan reported within budget could still exhaust the device. The budget is a constraint
+     and the model pick is an advisory optimization, so the constraint wins: a budgeted compile uses
+     the pipeline that was scored. Documented at [memory_budget] in ocannl_config.reference. *)
+  if budgeted then (
+    if Lazy.force Autotune.model_default_enabled then
+      Stdio.eprintf
+        "Train: memory_budget is set, so this compile uses the default schedule pipeline that the \
+         budget was scored against, not model_default_schedule's pick.\n\
+         %!";
+    Context.compile ctx comp bindings)
+  else if Lazy.force Autotune.model_default_enabled then Autotune.model_default ctx comp bindings
   else Context.compile ctx comp bindings
 
 (** gh-ocannl-498 rematerialization: the configured device-memory budget for a compiled routine, or
@@ -674,7 +688,8 @@ let%track7_sexp to_routine (ctx : Context.t) ?(output_cd_file = false) ?budget ?
      with no budget this is the identity and the compile below is unchanged. *)
   let ctx, budget_plan = fit_memory_budget ?budget ?max_candidates ctx comp bindings in
   Option.iter budget_report ~f:(fun f -> Option.iter budget_plan ~f);
-  let _ctx, routine = compile_with_model_gate ctx comp bindings in
+  let budgeted = Option.is_some budget_plan in
+  let _ctx, routine = compile_with_model_gate ~budgeted ctx comp bindings in
   (* Return just the routine for backward compatibility - ctx is discarded here *)
   routine
 
@@ -747,7 +762,8 @@ let%track3_sexp run_once ?(output_cd_file = false) ?(skip_init = false) ?reinit_
      budget, then compile from the planned context. Identity when no budget is set. *)
   let ctx, budget_plan = fit_memory_budget ?budget ?max_candidates ctx update bindings in
   Option.iter budget_report ~f:(fun f -> Option.iter budget_plan ~f);
-  let ctx, routine = compile_with_model_gate ctx update bindings in
+  let budgeted = Option.is_some budget_plan in
+  let ctx, routine = compile_with_model_gate ~budgeted ctx update bindings in
   Context.run ctx routine
 
 (** Context-based versions of training functions for the new simplified API *)

@@ -41,6 +41,12 @@ module Asgns = Ir.Assignments
 
 let p name b = printf "%s: %b\n" name b
 
+(* The gate's off position must really be off. An environment setting outranks the copied test
+   config, so an ambient OCANNL_MEMORY_BUDGET would make the "budget off" phase plan after all and
+   quietly invalidate both the default-off and the footprint-reduction assertions. Pin it here; the
+   budgeted phases pass their budget as an argument, not through the environment. *)
+let () = Unix.putenv "OCANNL_MEMORY_BUDGET" "0"
+
 (* The subject: a 4-hidden-layer MLP whose whole training step is one routine. Depth matters — the
    backprop chain's activation gradients are what the liveness planner staggers and what the budget
    selector then demotes. *)
@@ -118,18 +124,19 @@ let baseline, minimum, mid =
   let baseline = base.fp_total and minimum = min_plan.bp_final.fp_total in
   eprintf
     "calibration: baseline %d bytes, minimum %d bytes, %d flip(s), dedicated %d, planned %d\n%!"
-    baseline minimum
-    (List.length min_plan.bp_flips)
-    base.fp_dedicated base.fp_planned;
-  p "calibration: the baseline is the plan's own baseline"
-    (baseline = min_plan.bp_baseline.fp_total);
+    baseline minimum (List.length min_plan.bp_flips) base.fp_dedicated base.fp_planned;
+  p "calibration: the baseline is the plan's own baseline" (baseline = min_plan.bp_baseline.fp_total);
   p "minimize: relieves footprint" (minimum < baseline);
   p "minimize: takes at least one flip" (not (List.is_empty min_plan.bp_flips));
   p "minimize: reports itself within budget (it has no target)" min_plan.bp_within_budget;
-  (* Every accepted flip's reported marginal relief is positive by construction; check it, since
-     accepting a zero-relief flip would mean paying recompute for nothing. *)
-  p "minimize: every accepted flip relieved something"
-    (List.for_all min_plan.bp_flips ~f:(fun (_, relief, _) -> relief > 0));
+  (* The reported reliefs must account for the whole move: a flip committed as part of a joint group
+     carries 0 and the group's relief lands on the flip that closed it, so the SUM is the invariant
+     to assert, not per-flip positivity. *)
+  p "minimize: the reported reliefs sum to the footprint moved"
+    (List.fold min_plan.bp_flips ~init:0 ~f:(fun a (_, relief, _) -> a + relief)
+    = baseline - minimum);
+  p "minimize: no flip reports negative relief"
+    (List.for_all min_plan.bp_flips ~f:(fun (_, relief, _) -> relief >= 0));
   (* Strictly between the two ends, so it is reachable but not free. *)
   (baseline, minimum, (baseline + minimum) / 2)
 
@@ -144,8 +151,8 @@ let () =
   (* The footprint assertion: the layout the plan reports is actually under the budget. *)
   p "reachable budget: the scored footprint is under it" (at_mid.bp_final.fp_total <= mid);
   p "reachable budget: it took flips" (not (List.is_empty at_mid.bp_flips));
-  (* Acceptance stops as soon as the budget is met, so a loose-enough budget must not go all the
-     way to the minimum. *)
+  (* Acceptance stops as soon as the budget is met, so a loose-enough budget must not go all the way
+     to the minimum. *)
   p "reachable budget: stops at the budget rather than minimizing"
     (at_mid.bp_final.fp_total >= minimum);
   let unreachable = plan (Context.Bytes 1) in
@@ -166,9 +173,7 @@ let () =
 let () =
   let losses_off, mem_off, plan_off = train_phase ~label:"budget off" () in
   p "default-off: nothing is planned" (Option.is_none plan_off);
-  let losses_on, mem_on, plan_on =
-    train_phase ~budget:(Context.Bytes mid) ~label:"budget on" ()
-  in
+  let losses_on, mem_on, plan_on = train_phase ~budget:(Context.Bytes mid) ~label:"budget on" () in
   (match plan_on with
   | None -> p "budget on: a plan shipped" false
   | Some plan ->

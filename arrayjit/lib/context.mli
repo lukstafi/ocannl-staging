@@ -305,12 +305,14 @@ type budget_plan = {
   bp_flips : (Ir.Tnode.t * int * int) list;
       (** The accepted flips in acceptance order: the node demoted to recompute-at-use, the
           {e marginal} bytes it relieved on top of the flips accepted before it, and its
-          recompute-cost bound. *)
+          recompute-cost bound. Flips committed as one joint group (see {!plan_memory_budget})
+          carry [0] each except the one that closed the group, which carries the group's whole
+          relief — so the reliefs sum to exactly [bp_baseline - bp_final] either way. *)
   bp_considered : int;  (** Inline candidates individually scored. *)
   bp_dropped : int;  (** Inline candidates the [max_candidates] cut left unscored. *)
   bp_within_budget : bool;
-      (** Whether [bp_final] meets the budget. Always [false] for {!Minimize}, which has no
-          target. A [false] here is a planning outcome, not an error: the selector reports that
+      (** Whether [bp_final] meets the budget. Always [true] for {!Minimize}, which has no target
+          to miss. A [false] here is a planning outcome, not an error: the selector reports that
           the decision vector cannot reach the budget rather than forcing illegal flips. *)
 }
 [@@deriving sexp_of]
@@ -345,13 +347,19 @@ val plan_memory_budget :
     placements the pass always chooses the same flips.
 
     The selection is greedy in two rounds. First every candidate is scored on its own against the
-    baseline layout, and those relieving nothing are dropped — footprint relief is not a function
-    of the node's own size, since a node whose live span was already shared with another's frees
-    no bytes by leaving. The survivors are ranked by relief per unit of recompute cost (compared
-    as a rational, so the order is bit-reproducible), and accepted as a prefix, re-scoring the
-    cumulative vector at each step: inlining one node moves the others' spans, so a candidate that
-    no longer relieves anything on top of the accepted set is skipped rather than accepted for
-    free. Acceptance stops as soon as the budget is met; {!Minimize} takes every flip that helps.
+    baseline layout — footprint relief is not a function of the node's own size, since a node
+    whose live span was already shared with another's frees no bytes by leaving. That solo relief
+    only {e ranks}: candidates are ordered by relief per unit of recompute cost (an exact rational
+    comparison, never a cross-multiplication that could overflow nor a float, so the order is
+    bit-reproducible), zero-relief ones last.
+
+    Round two accepts a prefix, re-scoring the {e cumulative} vector at each step, since inlining
+    one node moves the others' spans. A candidate that adds nothing on top of the accepted set is
+    not dropped but held {e speculatively}: relief is not additive in either direction, and two
+    nodes pinning the same arena peak each free nothing alone yet free the whole range together.
+    When a later candidate does pay, the held group is committed with it; speculatives never
+    joined by a paying flip are discarded, so recompute is never paid for zero bytes. Acceptance
+    stops as soon as the budget is met; {!Minimize} takes every flip that helps.
 
     [max_candidates] (default 32) bounds the individually-scored candidates, keeping the
     cheapest-to-recompute ones; the count left unscored is reported as [bp_dropped] and logged

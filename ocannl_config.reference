@@ -235,6 +235,10 @@
 # (a budget set with the planner off raises a User_error rather than planning against a fiction).
 # The budget applies per compiled routine and counts the routine's whole in-context node set —
 # parameters included — so it is the peak the routine implies, not just its scratch.
+# Takes precedence over model_default_schedule: the budget is scored against the default schedule
+# pipeline, and alias spans and arena size are functions of the final segmentation, so a budgeted
+# compile uses the pipeline that was scored rather than the cost model's pick (which would link a
+# layout nobody scored). Train logs one line to stderr when it overrides the gate that way.
 #memory_budget=0
 
 # If true, memory-budget planning logs its decisions to stderr: each inline candidate's

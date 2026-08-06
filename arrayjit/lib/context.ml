@@ -832,23 +832,43 @@ let plan_memory_budget ?name ?(max_candidates = 32) ~budget ctx comp bindings =
           bp_dropped (List.length all) max_candidates;
       (* Round 1: each candidate's relief against the ACTUAL baseline layout. A node whose span was
          already shared relieves nothing on its own (the gh-ocannl-558 lesson in reverse: relief is
-         not a function of the node's own size), and drops out here. *)
+         not a function of the node's own size). Solo relief only RANKS here -- a zero-relief
+         candidate is kept, at the back, because relief is not additive in either direction: two
+         nodes pinning the same arena peak each free nothing alone and the whole range together, so
+         dropping them outright would report an otherwise reachable budget unreachable. Round 2
+         picks those up jointly. *)
       let scored =
-        List.filter_map considered ~f:(fun fc ->
+        List.map considered ~f:(fun fc ->
             let fp = score [ fc.Ir.Low_level.fc_tn ] in
             let relief = bp_baseline.Backends.fp_total - fp.Backends.fp_total in
             logf "candidate %s: recompute cost %d, solo relief %d bytes"
               (Tn.debug_name fc.Ir.Low_level.fc_tn)
               fc.Ir.Low_level.fc_recompute_cost relief;
-            if relief > 0 then Some (fc, relief) else None)
+            (fc, relief))
       in
-      (* Relief per recompute cost, compared as a rational (no floats: the ranking must be
-         reproducible bit for bit). Ties fall back to bigger relief, then to uid. *)
+      (* Relief per recompute cost as an EXACT rational. Cross-multiplying would be the obvious
+         comparison and is wrong: both factors are legitimately large (relief is a byte count, cost
+         is reduction extent x read multiplicity), so the products can wrap and silently invert the
+         order. The Euclidean/continued-fraction descent below compares [ra/ca] against [rb/cb]
+         exactly, using only subtraction and remainder, so it cannot overflow -- and stays
+         bit-reproducible, unlike a float ratio. *)
+      let rec compare_ratio ra ca rb cb =
+        (* Compare ra/ca with rb/cb, all non-negative, ca and cb positive. *)
+        let qa = ra / ca and qb = rb / cb in
+        if qa <> qb then Int.compare qa qb
+        else
+          let ma = ra - (qa * ca) and mb = rb - (qb * cb) in
+          if ma = 0 then if mb = 0 then 0 else -1
+          else if mb = 0 then 1
+          else (* both fractional parts nonzero: compare ca/ma with cb/mb, inverted. *)
+            compare_ratio cb mb ca ma
+      in
       let ranked =
         List.sort scored ~compare:(fun (a, ra) (b, rb) ->
             let ca = max 1 a.Ir.Low_level.fc_recompute_cost
             and cb = max 1 b.Ir.Low_level.fc_recompute_cost in
-            match Int.compare (rb * ca) (ra * cb) with
+            (* Descending by ratio, so [b] against [a]. *)
+            match compare_ratio rb cb ra ca with
             | 0 -> (
                 match Int.compare rb ra with
                 | 0 -> Tn.compare a.Ir.Low_level.fc_tn b.Ir.Low_level.fc_tn
@@ -856,25 +876,48 @@ let plan_memory_budget ?name ?(max_candidates = 32) ~budget ctx comp bindings =
             | c -> c)
       in
       (* Round 2: accept a prefix, re-scoring the CUMULATIVE vector each time. Inlining one node
-         moves the others' live spans, so a candidate whose solo relief was real can be worth
-         nothing on top of the accepted set -- it is skipped rather than accepted for free. *)
+         moves the others' live spans, so a candidate's solo relief is not what it is worth here. A
+         candidate that adds nothing is held SPECULATIVELY rather than dropped: if a later one then
+         relieves bytes on top of it, the whole speculative group is committed together (the
+         two-nodes-at-one-peak case); speculatives never joined by a paying flip are discarded at
+         the end, so no recompute is ever paid for zero bytes. The relief of a joint commit is
+         reported on the flip that closed it, and the sum over [bp_flips] is exactly [bp_baseline -
+         bp_final]. *)
       let accepted = ref [] and flips = ref [] and cur = ref bp_baseline in
+      (* Held (node, recompute cost) pairs, most recently held first. *)
+      let speculative = ref [] in
+      let names l = String.concat ~sep:", " (List.map l ~f:(fun (tn, _) -> Tn.debug_name tn)) in
       List.iter ranked ~f:(fun (fc, solo) ->
           if not (met !cur) then begin
-            let tn = fc.Ir.Low_level.fc_tn in
-            let cand = tn :: !accepted in
+            let tn = fc.Ir.Low_level.fc_tn and cost = fc.Ir.Low_level.fc_recompute_cost in
+            let cand = (tn :: List.map !speculative ~f:fst) @ !accepted in
             let fp = score cand in
             let marginal = !cur.Backends.fp_total - fp.Backends.fp_total in
             if marginal > 0 then (
-              logf "accept %s: %d bytes (solo %d), cost %d, footprint now %d" (Tn.debug_name tn)
-                marginal solo fc.Ir.Low_level.fc_recompute_cost fp.Backends.fp_total;
+              logf "accept %s: %d bytes (solo %d), cost %d%s, footprint now %d" (Tn.debug_name tn)
+                marginal solo cost
+                (match !speculative with
+                | [] -> ""
+                | held -> Printf.sprintf " jointly with %s" (names held))
+                fp.Backends.fp_total;
+              (* [flips] is reverse-chronological until the final [List.rev]. The held flips are
+                 committed with this one; their own marginal was 0, and the group's relief lands on
+                 the flip that made it pay. *)
+              flips :=
+                ((tn, marginal, cost) :: List.map !speculative ~f:(fun (h, c) -> (h, 0, c)))
+                @ !flips;
               accepted := cand;
-              flips := (tn, marginal, fc.Ir.Low_level.fc_recompute_cost) :: !flips;
+              speculative := [];
               cur := fp)
-            else
-              logf "skip %s: no marginal relief on top of the accepted set (solo was %d)"
-                (Tn.debug_name tn) solo
+            else (
+              logf "hold %s: no marginal relief yet (solo was %d); speculative" (Tn.debug_name tn)
+                solo;
+              speculative := (tn, cost) :: !speculative)
           end);
+      (match !speculative with
+      | [] -> ()
+      | held ->
+          logf "dropping %d speculative flip(s) that never paid: %s" (List.length held) (names held));
       let bp_final = !cur in
       let bp_within_budget = within bp_final in
       (match budget with
