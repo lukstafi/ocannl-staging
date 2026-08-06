@@ -428,6 +428,21 @@ val specialize_proc : optimize_ctx -> analysis -> optimized
     hermetic [optimize_ctx] forks (see [copy_optimize_ctx]) produce hermetic [optimized] results —
     the traced store is record-copied per call. *)
 
+val analysis_cache_stats : unit -> int * int
+(** gh-560: [(hits, misses)] of the process-global analysis cache consulted by [optimize]: sibling
+    candidate compiles of one routine share one [analyze_proc] result — keyed by a canonical digest
+    of the raw lowered code and the static indices (tensor nodes and static symbols by identity,
+    loop binders and local-scope ids alpha-renamed) — and replay only [specialize_proc]. Cumulative
+    counters, for tests and diagnostics. *)
+
+val clear_analysis_cache : unit -> unit
+(** Drops the analysis cache's entries (the stats persist). Entries retain their routines' lowered
+    code, hence their tensor nodes; the cache clears itself before accessibility snapshots
+    ({!Tnode.print_accessible_headers}) and callers that tear down a session
+    ([Tensor.unsafe_reinitialize]) clear it to release the nodes promptly. Never needed for
+    correctness: entries keyed by stale nodes cannot alias fresh ones ([Tnode.uid] is never
+    reused). *)
+
 val reads_scope_before_set : scope_id -> t -> bool
 (** [reads_scope_before_set id body] returns [true] if [id] is read (via [Get_local]) before the
     first definitely-executed [Set_local id] in [body]. Use this at code-generation time to decide
