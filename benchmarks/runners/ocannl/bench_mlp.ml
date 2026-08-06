@@ -101,6 +101,18 @@ let () =
         Mixed_prec.with_master_weights ~placement ~prec make_params
     | None -> make_params ()
   in
+  (* Under the mixed-precision recipe the postprocess hook has replaced each parameter with its
+     cast twin, so these ARE the twin nodes. BENCH_PRESEED_TWINS=1 hands them to
+     [Context.decide_materialized] before tuning (gh-ocannl-558's other route to site-targeted
+     materialization): a context-level decision, unlike BENCH_TWIN_PLACEMENT=materialized, which
+     declares tnode-level intent and so is invisible to the placement A/B and to the gh-555 flip
+     chain. Empty without a reduced precision, where there are no twins. *)
+  let twin_tns =
+    match mp_prec with
+    | None -> []
+    | Some _ ->
+        List.concat_map params ~f:(fun (w, b) -> [ w.Tensor.value; b.Tensor.value ])
+  in
   let materialize =
     match Stdlib.Sys.getenv_opt "BENCH_MATERIALIZE" with Some "1" -> true | _ -> false
   in
@@ -155,14 +167,15 @@ let () =
   (* Both placement arms' outcomes go into the emitted result (gh-ocannl-546); BENCH_TUNE_REPORT=1
      additionally prints each arm's full search report on stderr. *)
   let arms = H.tune_arms () in
-  let report =
-    let verbose =
-      match Stdlib.Sys.getenv_opt "BENCH_TUNE_REPORT" with Some "1" -> true | _ -> false
-    in
-    Some
-      (fun (r : Autotune.report) ->
-        H.collect_arm arms r;
-        if verbose then (
+  let verbose_report =
+    match Stdlib.Sys.getenv_opt "BENCH_TUNE_REPORT" with Some "1" -> true | _ -> false
+  in
+  (* The same field dump for both callbacks. [tune_placements]'s [report] is positional (arm A then
+     arm B) and its [flip_report] carries the gh-555 refinement searches, so a flip arm must NOT go
+     into [arms] — [tune_json]'s attribution rule names arms by arrival order. Printed under a
+     distinct tag instead, which is all the flip chain needs to be readable (gh-ocannl-558). *)
+  let print_report tag (r : Autotune.report) =
+    if verbose_report then (
           let declines =
             String.concat ~sep:","
               (List.map r.declines ~f:(fun d ->
@@ -176,18 +189,26 @@ let () =
                       ":" ^ candidate))
           in
           Stdlib.Printf.eprintf
-            "tune arm: cache_hit=%b partial=%b timed=%d failed=%d declines=[%s] terminal=%s \
+            "%s: cache_hit=%b partial=%b timed=%d failed=%d declines=[%s] terminal=%s \
              rounds=%d sketch=%d mma_candidates=%d mma_timed=%d fissioned=%b baseline_ms=%.4f \
-             default_ms=%s best_ms=%.4f best=%s tensorized=%b mma_best_ms=%s\n\
+             default_ms=%s best_ms=%.4f best=%s tensorized=%b mma_statements=%d \
+             mma_scalar_fallbacks=%d mma_best_ms=%s\n\
              %!"
-            r.cache_hit r.partial r.candidates_timed r.candidates_failed declines terminal
+            tag r.cache_hit r.partial r.candidates_timed r.candidates_failed declines terminal
             r.rounds_run r.sketch_candidates r.mma_candidates r.mma_timed r.fissioned r.baseline_ms
             (Option.value_map r.default_ms ~default:"none" ~f:(Printf.sprintf "%.4f"))
             r.best_ms
             (if String.is_empty r.best_label then "none" else r.best_label)
-            r.best_tensorized
-            (if Float.is_inf r.mma_best_ms then "none" else Printf.sprintf "%.4f" r.mma_best_ms)))
+            r.best_tensorized r.best_mma_statements r.best_mma_scalar_fallbacks
+            (if Float.is_inf r.mma_best_ms then "none" else Printf.sprintf "%.4f" r.mma_best_ms))
   in
+  let report =
+    Some
+      (fun (r : Autotune.report) ->
+        H.collect_arm arms r;
+        print_report "tune arm" r)
+  in
+  let flip_report = Some (fun (r : Autotune.report) -> print_report "tune flip" r) in
   (* BENCH_TUNE composes with every precision leg (gh-ocannl-529). It used to be rejected outright
      with BENCH_PRECISION, which made bf16 unmeasurable under autotuning — and bf16 is the ONLY
      tensor-core route on RDNA3/3.5, whose WMMA has no f32-input shape, so whether HIP even seeds a
@@ -201,9 +222,43 @@ let () =
      and the tiny optimizer routine is compiled plainly, from the tuned context so the lineage's
      compile order is unchanged. Tuning runs on a scratch lineage ([timing_ctx]), so the repeated
      candidate executions never touch the benchmark's own weights or the host-side scaler state. *)
+  (* BENCH_FLIP_DUMP=1 prints the whole gh-555 inlining decision surface of the default-placement
+     compile — every candidate, not just the [tune_inline_flips] prefix the chain can afford to
+     try. Asking "is this node on the surface at all" is otherwise indistinguishable from "it
+     ranked below the budget" (gh-ocannl-558 part 2.1). Its own capture compile, so it observes
+     the same lowering the chain reads and stays out of the searches' way. *)
+  let dump_flip_candidates ctx comp =
+    if H.env_flag "BENCH_FLIP_DUMP" then
+      match
+        Context.compile
+          ~lowered_transform:(fun o ->
+            List.iteri o.Ir.Low_level.flip_candidates ~f:(fun i fc ->
+                Stdlib.Printf.eprintf "flip candidate %d: %s %s uid=%d prec=%s cost=%d\n%!" i
+                  (match fc.Ir.Low_level.fc_flip with
+                  | `Inline -> "inline"
+                  | `Materialize -> "materialize")
+                  (Ir.Tnode.debug_name fc.Ir.Low_level.fc_tn)
+                  fc.Ir.Low_level.fc_tn.Ir.Tnode.uid
+                  (Ir.Ops.prec_string (Stdlib.Lazy.force fc.Ir.Low_level.fc_tn.Ir.Tnode.storage_prec))
+                  fc.Ir.Low_level.fc_recompute_cost);
+            o)
+          ctx comp bindings
+      with
+      | (_ : Context.t), (_ : Context.routine) -> ()
+      | exception exn ->
+          Stdlib.Printf.eprintf "flip candidate dump failed: %s\n%!" (Exn.to_string exn)
+  in
+  let preseed_twins = H.env_flag "BENCH_PRESEED_TWINS" in
+  if preseed_twins && List.is_empty twin_tns then
+    failwith "bench_mlp: BENCH_PRESEED_TWINS needs BENCH_PRECISION (no twins without it)";
   let tuned ctx comp =
+    (* Both lineages, so the timing context's placements match the compiled one's. *)
+    let ctx = if preseed_twins then Context.decide_materialized ctx twin_tns else ctx in
+    dump_flip_candidates ctx comp;
     let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
-    Train.tune_placements ?report ~rounds:0 ~timing_ctx:scratch ctx batch_loss comp bindings
+    let scratch = if preseed_twins then Context.decide_materialized scratch twin_tns else scratch in
+    Train.tune_placements ?report ?flip_report ~rounds:0 ~timing_ctx:scratch ctx batch_loss comp
+      bindings
   in
   let ctx, routines = H.compile_train_step ~tune ~tuned ctx bindings parts in
   let compile_s = Unix.gettimeofday () -. t0 in
