@@ -749,6 +749,38 @@ type budget_plan = {
 }
 [@@deriving sexp_of]
 
+(* gh-ocannl-498: compare the rationals [ra/ca] and [rb/cb] EXACTLY, for ranking candidates by
+   footprint relief per unit of recompute cost. [ca] and [cb] must be positive; the numerators are
+   byte counts and may be negative, since inlining a node can lengthen other nodes' spans and cost
+   footprint rather than free it.
+
+   Cross-multiplying would be the obvious comparison and is wrong: both factors are legitimately
+   large (bytes against reduction extent x read multiplicity), so the products can wrap and silently
+   invert the order. The Euclidean/continued-fraction descent uses only division and remainder, so
+   it cannot overflow, and stays bit-reproducible unlike a float ratio -- but it assumes
+   NON-NEGATIVE numerators: OCaml's division truncates toward zero, so a negative numerator inverts
+   the very comparison the descent is making ([-1/10] would rank above [1/10], and [0/1] above
+   [-1/5]). The sign is therefore settled first, and two negatives are compared by reversed
+   magnitude. *)
+let compare_relief_ratio ra ca rb cb =
+  let rec nonneg ra ca rb cb =
+    (* Both numerators non-negative here; denominators positive. *)
+    let qa = ra / ca and qb = rb / cb in
+    if qa <> qb then Int.compare qa qb
+    else
+      let ma = ra - (qa * ca) and mb = rb - (qb * cb) in
+      if ma = 0 then if mb = 0 then 0 else -1
+      else if mb = 0 then 1
+      else (* both fractional parts nonzero: compare ca/ma with cb/mb, inverted. *)
+        nonneg cb mb ca ma
+  in
+  match (ra >= 0, rb >= 0) with
+  | true, true -> nonneg ra ca rb cb
+  | true, false -> 1
+  | false, true -> -1
+  (* Both negative: |ra|/ca vs |rb|/cb with the order reversed. *)
+  | false, false -> nonneg (-rb) cb (-ra) ca
+
 let log_memory_budget () = Utils.get_global_flag ~default:false ~arg_name:"log_memory_budget"
 
 (* One hermetic analysis of [comp] from [ctx]'s lineage with [inline] additionally preferred inline:
@@ -857,29 +889,12 @@ let plan_memory_budget ?name ?max_candidates ~budget ctx comp bindings =
               fc.Ir.Low_level.fc_recompute_cost relief;
             (fc, relief))
       in
-      (* Relief per recompute cost as an EXACT rational. Cross-multiplying would be the obvious
-         comparison and is wrong: both factors are legitimately large (relief is a byte count, cost
-         is reduction extent x read multiplicity), so the products can wrap and silently invert the
-         order. The Euclidean/continued-fraction descent below compares [ra/ca] against [rb/cb]
-         exactly, using only subtraction and remainder, so it cannot overflow -- and stays
-         bit-reproducible, unlike a float ratio. *)
-      let rec compare_ratio ra ca rb cb =
-        (* Compare ra/ca with rb/cb, all non-negative, ca and cb positive. *)
-        let qa = ra / ca and qb = rb / cb in
-        if qa <> qb then Int.compare qa qb
-        else
-          let ma = ra - (qa * ca) and mb = rb - (qb * cb) in
-          if ma = 0 then if mb = 0 then 0 else -1
-          else if mb = 0 then 1
-          else (* both fractional parts nonzero: compare ca/ma with cb/mb, inverted. *)
-            compare_ratio cb mb ca ma
-      in
       let ranked =
         List.sort scored ~compare:(fun (a, ra) (b, rb) ->
             let ca = max 1 a.Ir.Low_level.fc_recompute_cost
             and cb = max 1 b.Ir.Low_level.fc_recompute_cost in
             (* Descending by ratio, so [b] against [a]. *)
-            match compare_ratio rb cb ra ca with
+            match compare_relief_ratio rb cb ra ca with
             | 0 -> (
                 match Int.compare rb ra with
                 | 0 -> Tn.compare a.Ir.Low_level.fc_tn b.Ir.Low_level.fc_tn

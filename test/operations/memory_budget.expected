@@ -4,6 +4,8 @@ budget parse: plain bytes: true
 budget parse: K/M/G suffixes scale by 1024: true
 budget parse: a suffix that would overflow is rejected: true
 budget parse: nonsense is rejected: true
+ratio: agrees with exact division on signs, ties and magnitudes: true
+ratio: survives operands whose cross-products would overflow: true
 budget without buffer_aliasing raises: true
 calibration: the baseline is the plan's own baseline: true
 minimize: relieves footprint: true

@@ -317,6 +317,15 @@ type budget_plan = {
 }
 [@@deriving sexp_of]
 
+val compare_relief_ratio : int -> int -> int -> int -> int
+(** gh-ocannl-498: [compare_relief_ratio ra ca rb cb] compares the rationals [ra/ca] and [rb/cb]
+    exactly, as {!plan_memory_budget} ranks candidates by footprint relief per unit of recompute
+    cost. [ca] and [cb] must be positive; the numerators are byte counts and may be negative, since
+    inlining a node can cost footprint rather than free it. Never cross-multiplies (the products of
+    a byte count and a recompute cost can overflow) and never uses floats (the order must be
+    bit-reproducible). Exposed for unit testing the ordering, including the sign cases where a
+    continued-fraction descent over truncating division would otherwise invert it. *)
+
 val footprint :
   ?name:string ->
   t ->

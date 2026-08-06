@@ -85,6 +85,40 @@ let () =
   p "budget parse: nonsense is rejected" (String.equal (setting "banana") "rejected");
   Unix.putenv "OCANNL_MEMORY_BUDGET" "0"
 
+(* The relief-per-cost comparator, which ranks the candidates. Numerators are byte counts and CAN be
+   negative — inlining a node can lengthen other nodes' spans and cost footprint rather than free it
+   — and OCaml's division truncates toward zero, so a continued-fraction descent that assumes
+   non-negative numerators silently inverts those comparisons. Checked against float division: the
+   wrong tool for the real comparator (not bit-reproducible, and it overflows differently) but a
+   fine oracle at these magnitudes. *)
+let () =
+  let oracle ra ca rb cb =
+    Float.compare (Float.of_int ra /. Float.of_int ca) (Float.of_int rb /. Float.of_int cb)
+  in
+  let cases =
+    [
+      (* The sign cases a descent over truncating division gets backwards. *)
+      (-1, 10, 1, 10);
+      (1, 10, -1, 10);
+      (0, 1, -1, 5);
+      (-1, 5, 0, 1);
+      (-5, 2, -1, 2);
+      (-1, 2, -5, 2);
+      (* Ordinary positives, an exact tie, and pairs close together or far apart. *)
+      (3, 4, 5, 6);
+      (7, 3, 7, 3);
+      (1, 1000000, 1, 999999);
+      (32768, 512, 32768, 256);
+    ]
+  in
+  p "ratio: agrees with exact division on signs, ties and magnitudes"
+    (List.for_all cases ~f:(fun (ra, ca, rb, cb) ->
+         Context.compare_relief_ratio ra ca rb cb = oracle ra ca rb cb));
+  (* The reason it is not a cross-multiplication: these products overflow, the ratios do not. *)
+  let big = Int.max_value / 3 in
+  p "ratio: survives operands whose cross-products would overflow"
+    (Context.compare_relief_ratio big 2 big 3 > 0 && Context.compare_relief_ratio big 3 big 2 < 0)
+
 (* The subject: a 4-hidden-layer MLP whose whole training step is one routine. Depth matters — the
    backprop chain's activation gradients are what the liveness planner staggers and what the budget
    selector then demotes. *)
