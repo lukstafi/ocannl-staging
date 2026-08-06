@@ -68,6 +68,6 @@ x-maintenance-intent: ["(latest)"]
 pin-depends: [
   ["ppx_minidebug.dev" "git+https://github.com/lukstafi/ppx_minidebug.git#main"]
   ["notty-community.dev" "git+https://github.com/lukstafi/notty-community.git#master"]
-  ["cudajit.dev" "git+https://github.com/lukstafi/ocaml-cudajit.git#main"]
-  ["hipjit.dev" "git+https://github.com/lukstafi/ocaml-hipjit.git#main"]
+  ["cudajit.dev" "git+https://github.com/lukstafi/ocaml-cudajit.git#0.8.0"]
+  ["hipjit.dev" "git+https://github.com/lukstafi/ocaml-hipjit.git#0.2.0"]
 ]
