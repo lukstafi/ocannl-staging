@@ -319,22 +319,28 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
     | Out_of_memory | Stdlib.Sys.Break | Stack_overflow | Assert_failure _ -> true
     | _ -> false
   in
+  (* A [report] callback exception is the caller's failure, not the search's — {!Autotune.tune}
+     propagates it deliberately on the completion path — so it is re-raised rather than reclassified
+     as an arm failure (which would hide it, and could ship the other arm even though this search
+     completed). It is marked by WRAPPING it at the raise site: a nullary exception ([Exit],
+     [End_of_file]) is a singleton value, so physical identity cannot tell a callback's [Exit] from
+     an arm failure's, and the tuner's fatal path deliberately swallows the callback's exception and
+     raises the arm's — the very case a same-value collision would misread as "the callback failed".
+     A wrapper the tuner never constructs cannot collide: whatever comes out unwrapped is the
+     search's. The rendered message is carried alongside because the tuner prints the wrapper with
+     the default exception printer when it swallows it, and that printer shows string fields only. *)
+  let exception Report_callback_failed of string * exn * Stdlib.Printexc.raw_backtrace in
   let tune ?to_report arm ctx timing_ctx =
     let to_report = Option.value to_report ~default:report in
-    (* A [report] callback exception is the caller's failure, not the search's — {!Autotune.tune}
-       propagates it deliberately on the completion path — so it is tracked by identity here and
-       re-raised rather than reclassified as an arm failure (which would hide it, and could ship the
-       other arm even though this search completed). Callback failures on the tuner's own fatal path
-       are already swallowed there, so they never reach this identity check. *)
-    let callback_failure = ref None in
     let capture r =
       last := Some r;
       Option.iter to_report ~f:(fun f ->
           match f r with
           | () -> ()
           | exception exn ->
-              callback_failure := Some exn;
-              raise exn)
+              raise
+                (Report_callback_failed
+                   (Exn.to_string exn, exn, Stdlib.Printexc.get_raw_backtrace ())))
     in
     logf "arm %s search:" arm;
     last := None;
@@ -344,12 +350,13 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
           bindings
       with
       | compiled -> Ok compiled
+      (* Unwrapped, so the caller sees its own exception with its own backtrace: the wrapper is an
+         internal marker, not part of this function's contract. *)
+      | exception Report_callback_failed (_, callback_exn, callback_backtrace) ->
+          Stdlib.Printexc.raise_with_backtrace callback_exn callback_backtrace
       | exception exn ->
           let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-          if
-            must_propagate exn
-            || Option.exists !callback_failure ~f:(fun raised -> phys_equal raised exn)
-          then Stdlib.Printexc.raise_with_backtrace exn backtrace
+          if must_propagate exn then Stdlib.Printexc.raise_with_backtrace exn backtrace
           else Error (exn, backtrace)
     in
     let r =

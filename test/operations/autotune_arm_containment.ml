@@ -30,7 +30,7 @@ let clean_cache dir =
 
 (* The injection is global state on a library ref, so it is restored unconditionally: a leaked
    raiser would fail every later autotune call in this process. *)
-let with_injected_failure ~arms_reported ~at ~message f =
+let with_injected_failure ?exn ~arms_reported ~at ~message f =
   let attempts = ref 0 in
   (Autotune.on_candidate_attempt :=
      fun label ->
@@ -38,7 +38,9 @@ let with_injected_failure ~arms_reported ~at ~message f =
        if !arms_reported >= 1 then (
          Int.incr attempts;
          if !attempts = at then
-           raise (Failure (Printf.sprintf "%s at candidate %s" message label))));
+           raise
+             (Option.value exn
+                ~default:(Failure (Printf.sprintf "%s at candidate %s" message label)))));
   Exn.protect ~f ~finally:(fun () -> Autotune.on_candidate_attempt := fun _ -> ())
 
 let () =
@@ -167,4 +169,27 @@ let () =
         with Assert_failure _ -> true)
       ~finally:(fun () -> Autotune.on_candidate_attempt := fun _ -> ())
   in
-  p "a compiler assertion propagates instead of losing an arm" assertion_propagated
+  p "a compiler assertion propagates instead of losing an arm" assertion_propagated;
+
+  (* --- The callback failure and the arm failure are the SAME nullary exception. [Exit] is a
+     singleton value, so "was this the callback's exception?" cannot be answered by physical
+     identity: here the tuner swallows the callback's [Exit] on its partial-report path and raises
+     the arm's own [Exit], which identity would misread as the callback's and propagate, losing the
+     completed arm. Cache off so arm B searches instead of replaying. --- *)
+  let arms_reported = ref 0 in
+  let collision_contained =
+    with_injected_failure ~exn:Stdlib.Exit ~arms_reported ~at:4 ~message:"unused" (fun () ->
+        match
+          Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:""
+            ~report:(fun r ->
+              Int.incr arms_reported;
+              if r.Autotune.partial then raise Stdlib.Exit)
+            (Context.auto ()) t2 comp Ir.Indexing.Empty
+        with
+        | ctx_c, routine_c ->
+            let ctx_c = Context.run ctx_c routine_c in
+            Array.for_all2_exn (Context.get_values ctx_c t2.Tensor.value) expected ~f:approx
+        | exception Stdlib.Exit -> false)
+  in
+  p "an arm failing with the same exception its callback raised is still contained"
+    collision_contained

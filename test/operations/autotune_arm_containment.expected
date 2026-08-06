@@ -15,3 +15,4 @@ the slot report says the arm died before reporting: true
 arm A still ships when arm B dies before reporting: true
 a report-callback exception propagates instead of losing an arm: true
 a compiler assertion propagates instead of losing an arm: true
+an arm failing with the same exception its callback raised is still contained: true
