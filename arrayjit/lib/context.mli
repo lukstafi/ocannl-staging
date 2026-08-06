@@ -94,6 +94,16 @@ val run : t -> routine -> t
 (** Execute a compiled routine. Mutates buffers in-place. Returns updated context with newly
     initialized nodes tracked. Raises [Failure] if execution dependencies are not satisfied. *)
 
+val check_runnable : t -> routine -> unit
+(** {!run}'s pre-dispatch validation on its own — poisoned lineage, uninitialized inputs,
+    unsatisfied execution dependencies, out-of-range bindings — raising exactly what [run] would.
+    All of it precedes the dispatch, so a failure here proves nothing was executed and no device
+    buffer was written. That is the point (gh-ocannl-550): a caller that runs a routine inside a
+    launch-tagged failure boundary validates through this {e outside} the boundary, so a failure
+    the backend cannot attribute {e inside} it means dispatch was attempted and the lineage must be
+    condemned — while an unsatisfied dependency, which the caller can fix and retry, does not
+    condemn anything. *)
+
 val sync : t -> unit
 (** Blocks until the context's device is idle. Host reads ({!to_host}, {!get_values}) synchronize on
     their own; explicit [sync] is for timing runs (e.g. the autotuner) and for fencing against

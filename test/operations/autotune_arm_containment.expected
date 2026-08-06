@@ -20,3 +20,6 @@ a failure that poisons the shared lineage propagates instead of trying the sibli
 the sibling arm was not attempted on a poisoned lineage: true
 a winner is not shipped out of a lineage a later arm poisoned: true
 an interrupt raised by a report callback is not swallowed: true
+pre-dispatch validation rejects an unexecuted dependency: true
+a pre-dispatch rejection leaves the lineage usable: true
+and the retry succeeds once the dependency has executed: true

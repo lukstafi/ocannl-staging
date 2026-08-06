@@ -3866,18 +3866,6 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
     result)
   else
   let is_gpu = Sched.backend_is_gpu backend and is_cpu = Sched.backend_is_cpu backend in
-  (* Device work, not a pure query: the GPU backends lazily initialize the device and read driver
-     attributes here, so a driver or enumeration error surfaces at this line — the first thing this
-     call does that can fail, and squarely inside the reporting contract. *)
-  let limits =
-    match Context.hardware_limits ctx with
-    | limits -> limits
-    | exception exn ->
-        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-        emit_pre_search_failure ~phase:Outcome.Hardware_limits ~candidate:None
-          ~detail:(Exn.to_string exn) ();
-        Stdlib.Printexc.raise_with_backtrace exn backtrace
-  in
   (* With [timing_ctx], the search (candidate compiles and timing runs) happens against that scratch
      lineage's buffers, and only the winner is compiled from [ctx] — so the timing runs never mutate
      the caller's live state (parameters, accumulators). The scratch context must contain the nodes
@@ -3896,6 +3884,19 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
              "Autotune.tune: timing_ctx must be on the same backend and device as the target \
               context (timing: %s device %d, target: %s device %d)"
              (Context.backend_name tctx) (Context.device_id tctx) backend (Context.device_id ctx)));
+
+  (* Device work, not a pure query: the GPU backends lazily initialize the device and read driver
+     attributes here, so a driver or enumeration error surfaces at this line — the first thing this
+     call does that can fail, and squarely inside the reporting contract. *)
+  let limits =
+    match Context.hardware_limits ctx with
+    | limits -> limits
+    | exception exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        emit_pre_search_failure ~phase:Outcome.Hardware_limits ~candidate:None
+          ~detail:(Exn.to_string exn) ();
+        Stdlib.Printexc.raise_with_backtrace exn backtrace
+  in
   let search_ctx = Option.value timing_ctx ~default:ctx in
   (* The base compile: identity transform (= the serial baseline candidate), capturing the optimized
      code every candidate derives from (see [compile_candidate]) and its canonical form.
@@ -4169,6 +4170,19 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
               | Some _ | None ->
                   Context.poison_lineage b.cctx ~routine_name:(Context.routine_name b.routine) exn
             in
+            (* Validated OUTSIDE the tagged region, so [condemn] below only ever judges a failure
+               that got as far as dispatch. [Context.run]'s pre-dispatch checks — an unsatisfied
+               dependency, an out-of-range binding — write nothing and are the caller's to fix and
+               retry, and on a backend whose classifier attributes nothing (the C backends) they
+               would otherwise condemn the lineage and make that retry impossible. Reported like any
+               other pre-search failure, and re-raised as [Context.run] would raise it. *)
+            (match Context.check_runnable b.cctx b.routine with
+            | () -> ()
+            | exception exn ->
+                let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+                emit_pre_search_failure ~base:(census ()) ~phase:Outcome.Launch
+                  ~candidate:(Some "baseline") ~detail:(Exn.to_string exn) ();
+                Stdlib.Printexc.raise_with_backtrace exn backtrace);
             match
               time_routine ~tag_failures:true ~repeats b.cctx b.routine
             with

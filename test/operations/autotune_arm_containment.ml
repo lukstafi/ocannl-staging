@@ -273,4 +273,22 @@ let () =
         | exception Stdlib.Sys.Break -> true)
       ~finally:(fun () -> Autotune.on_candidate_attempt := fun _ -> ())
   in
-  p "an interrupt raised by a report callback is not swallowed" interrupt_propagated
+  p "an interrupt raised by a report callback is not swallowed" interrupt_propagated;
+
+  (* --- The timing runs condemn a lineage they cannot attribute a failure in, which is only sound
+     if pre-dispatch validation happens outside that judgement: an unsatisfied dependency writes
+     nothing and is the caller's to fix and retry, so it must leave the lineage usable. --- *)
+  let ctx_r = Context.auto () in
+  let ctx_r1, r1 = Context.compile ctx_r comp Ir.Indexing.Empty in
+  let _ctx_r2, r2 = Context.compile ctx_r1 comp Ir.Indexing.Empty in
+  let preflight_rejected =
+    match Context.check_runnable ctx_r1 r2 with
+    | () -> false
+    | exception Failure _ -> true
+  in
+  p "pre-dispatch validation rejects an unexecuted dependency" preflight_rejected;
+  p "a pre-dispatch rejection leaves the lineage usable"
+    (Option.is_none (Context.poisoned_failure ctx_r1));
+  let ctx_r1 = Context.run ctx_r1 r1 in
+  p "and the retry succeeds once the dependency has executed"
+    (match Context.check_runnable ctx_r1 r2 with () -> true | exception _ -> false)

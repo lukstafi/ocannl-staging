@@ -299,7 +299,13 @@ let rollback_execution ctx routine_id =
 let poison_lineage ctx ~routine_name exn =
   if Option.is_none ctx.ledger.poisoned then ctx.ledger.poisoned <- Some (routine_name, exn)
 
-let run ctx routine =
+(* The pre-dispatch validation of {!run}, callable on its own (gh-ocannl-550): everything here
+   happens BEFORE [Ir.Task.run], so a failure it raises proves the routine was never dispatched and
+   the device wrote nothing. A caller that wraps [run] in a launch-tagged failure boundary (the
+   autotuner's timing runs) validates through this first, so an unattributed failure inside that
+   boundary means dispatch was attempted — which is what makes condemning the lineage there sound,
+   and what keeps a mere unsatisfied dependency or an out-of-range binding from condemning it. *)
+let check_runnable ctx routine =
   check_not_poisoned ctx;
   (* Check that all required inputs are initialized. A node counts as initialized if it was produced
      by a prior routine ([initialized_nodes]) or is already allocated in the running context's
@@ -339,7 +345,10 @@ let run ctx routine =
   (* Bind-time validation of launch parameters (docs/proposals/signed-index-precision.md): each
      bound value must be non-negative, within its declared static range, and within the index
      width. *)
-  Idx.validate_lowered_bindings ~width64:Utils.settings.large_models routine.bindings;
+  Idx.validate_lowered_bindings ~width64:Utils.settings.large_models routine.bindings
+
+let run ctx routine =
+  check_runnable ctx routine;
 
   (* Run the routine's task/schedule *)
   Ir.Task.run routine.task;
