@@ -38,6 +38,18 @@ val finalize :
     use [finalize] to optimize memory, it is not obligatory because all pools are freed when their
     backend buffers are garbage-collected. *)
 
+val lower_assignments :
+  Ir.Low_level.optimize_ctx ->
+  ?name:string ->
+  'a Ir.Indexing.bindings ->
+  Ir.Assignments.t ->
+  string * Ir.Low_level.optimized
+(** The shared lowering front half of backend [compile]: forks the lineage state
+    ([Low_level.copy_optimize_ctx], so the compile's decisions stay hermetic), derives the routine
+    name, wires the debug-file callbacks, and runs [Assignments.lower]. Exposed for analyze-only
+    consumers (gh-560: {!Context.decision_surface}) that read the optimized code's decision surface
+    without backend codegen. *)
+
 (** {2 The implemented backends}
 
     Each backend is instantiated once per process, so its context type is nameable and two
