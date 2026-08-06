@@ -647,7 +647,10 @@ let memory_budget_setting () =
                 | None -> (1, lower)))
       in
       let n = match Int.of_string_opt (String.strip digits) with Some n -> n | None -> bad () in
-      if n <= 0 then bad () else Some (Context.Bytes (n * mult))
+      (* The suffix scaling is where a syntactically fine setting turns into nonsense: "5000000000G"
+         parses, then wraps to a negative or tiny target that the planner would honor as an
+         unreachably tight budget and rematerialize hard against. Reject instead. *)
+      if n <= 0 || n > Int.max_value / mult then bad () else Some (Context.Bytes (n * mult))
 
 (** gh-ocannl-498: plan [comp]'s inlining decision vector against a device-memory budget and return
     the context to compile it from. [budget] overrides the config key [memory_budget]; with neither,
@@ -687,9 +690,14 @@ let%track7_sexp to_routine (ctx : Context.t) ?(output_cd_file = false) ?budget ?
      must not be flip candidates) and BEFORE the compile whose placements it steers. Off by default:
      with no budget this is the identity and the compile below is unchanged. *)
   let ctx, budget_plan = fit_memory_budget ?budget ?max_candidates ctx comp bindings in
-  Option.iter budget_report ~f:(fun f -> Option.iter budget_plan ~f);
   let budgeted = Option.is_some budget_plan in
   let _ctx, routine = compile_with_model_gate ~budgeted ctx comp bindings in
+  (* AFTER the compile: [budget_report] observes the plan that SHIPPED, so a compile or link failure
+     must not have announced one. It also keeps a callback from reaching the compile it is reporting
+     on -- the config gates the scoring depends on ([buffer_aliasing]) are re-read at each compile,
+     so a callback that flipped one would make the routine use a layout other than the one just
+     scored. *)
+  Option.iter budget_report ~f:(fun f -> Option.iter budget_plan ~f);
   (* Return just the routine for backward compatibility - ctx is discarded here *)
   routine
 
@@ -761,9 +769,10 @@ let%track3_sexp run_once ?(output_cd_file = false) ?(skip_init = false) ?reinit_
   (* gh-ocannl-498: same seam as [to_routine] — plan the inlining decision vector against the
      budget, then compile from the planned context. Identity when no budget is set. *)
   let ctx, budget_plan = fit_memory_budget ?budget ?max_candidates ctx update bindings in
-  Option.iter budget_report ~f:(fun f -> Option.iter budget_plan ~f);
   let budgeted = Option.is_some budget_plan in
   let ctx, routine = compile_with_model_gate ~budgeted ctx update bindings in
+  (* After the compile, for the reasons given in [to_routine]. *)
+  Option.iter budget_report ~f:(fun f -> Option.iter budget_plan ~f);
   Context.run ctx routine
 
 (** Context-based versions of training functions for the new simplified API *)

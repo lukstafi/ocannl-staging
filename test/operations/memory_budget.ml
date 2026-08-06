@@ -47,6 +47,36 @@ let p name b = printf "%s: %b\n" name b
    budgeted phases pass their budget as an argument, not through the environment. *)
 let () = Unix.putenv "OCANNL_MEMORY_BUDGET" "0"
 
+(* Same reasoning for the planner's own precondition: layer 0 asserts that a budget without
+   [buffer_aliasing] raises, so the gate must start OFF regardless of what the process inherited.
+   The later phases switch it on explicitly. *)
+let () = Unix.putenv "OCANNL_BUFFER_ALIASING" "false"
+
+(* The config-key parser, exercised through the environment (values are re-read on each access). The
+   suffix scaling is the interesting part: a syntactically valid but absurd setting must be REJECTED
+   rather than wrapped into a small or negative target, which the planner would honor as an
+   unreachably tight budget. *)
+let () =
+  let setting s =
+    Unix.putenv "OCANNL_MEMORY_BUDGET" s;
+    match Train.memory_budget_setting () with
+    | None -> "none"
+    | Some Context.Minimize -> "minimize"
+    | Some (Context.Bytes n) -> Int.to_string n
+    | exception Utils.User_error _ -> "rejected"
+  in
+  p "budget parse: 0 is off" (String.equal (setting "0") "none");
+  p "budget parse: minimize" (String.equal (setting "minimize") "minimize");
+  p "budget parse: plain bytes" (String.equal (setting "4096") "4096");
+  p "budget parse: K/M/G suffixes scale by 1024"
+    (String.equal (setting "2K") "2048"
+    && String.equal (setting "3M") "3145728"
+    && String.equal (setting "1G") "1073741824");
+  p "budget parse: a suffix that would overflow is rejected"
+    (String.equal (setting "5000000000G") "rejected");
+  p "budget parse: nonsense is rejected" (String.equal (setting "banana") "rejected");
+  Unix.putenv "OCANNL_MEMORY_BUDGET" "0"
+
 (* The subject: a 4-hidden-layer MLP whose whole training step is one routine. Depth matters — the
    backprop chain's activation gradients are what the liveness planner staggers and what the budget
    selector then demotes. *)

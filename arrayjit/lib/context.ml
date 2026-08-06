@@ -769,7 +769,18 @@ let analyze_footprint ?name ~(inline : Tn.t list) ctx comp bindings :
 
 let footprint ?name ctx comp bindings = fst (analyze_footprint ?name ~inline:[] ctx comp bindings)
 
-let plan_memory_budget ?name ?(max_candidates = 32) ~budget ctx comp bindings =
+let plan_memory_budget ?name ?max_candidates ~budget ctx comp bindings =
+  (* [Minimize] promises every flip that still relieves footprint, so it must not silently stop at a
+     default cut -- and a config-only user (memory_budget=minimize) has no way to raise one. It
+     therefore defaults to unbounded, paying two lowerings per candidate; a caller who wants that
+     bounded passes [max_candidates] explicitly, which applies to both budget kinds. A byte budget
+     stops as soon as it is met, so its default cut is a cost guard, not a semantic one. *)
+  let max_candidates =
+    match (max_candidates, budget) with
+    | Some n, _ -> n
+    | None, Minimize -> Int.max_value
+    | None, Bytes _ -> 32
+  in
   if not (Utils.get_global_flag ~default:false ~arg_name:"buffer_aliasing") then
     raise
     @@ Utils.User_error

@@ -1605,7 +1605,8 @@
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND)
-  (env_var OCANNL_MEMORY_BUDGET))
+  (env_var OCANNL_MEMORY_BUDGET)
+  (env_var OCANNL_BUFFER_ALIASING))
  (modules memory_budget)
  (libraries base ocannl stdio unix)
  (preprocess

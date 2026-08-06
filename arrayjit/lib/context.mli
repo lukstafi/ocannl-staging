@@ -361,9 +361,13 @@ val plan_memory_budget :
     joined by a paying flip are discarded, so recompute is never paid for zero bytes. Acceptance
     stops as soon as the budget is met; {!Minimize} takes every flip that helps.
 
-    [max_candidates] (default 32) bounds the individually-scored candidates, keeping the
-    cheapest-to-recompute ones; the count left unscored is reported as [bp_dropped] and logged
-    under config [log_memory_budget], never silently dropped.
+    [max_candidates] bounds the individually-scored candidates, keeping the cheapest-to-recompute
+    ones; the count left unscored is reported as [bp_dropped] and logged under config
+    [log_memory_budget], never silently dropped. It defaults to 32 for a {!Bytes} budget — which
+    stops as soon as it is met, so the cut is a cost guard — and to {e unbounded} for {!Minimize},
+    whose contract is every flip that still relieves footprint and whose config-only users
+    ([memory_budget=minimize]) cannot raise a cap. Passing it explicitly bounds either kind, at two
+    lowerings per candidate scored.
 
     Only the [`Inline] direction is considered — the opposite of the [`Materialize] chain
     {!Ir.Low_level.field-flip_candidates} feeds in [Train.tune_placements]. Legality and

@@ -970,25 +970,26 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
            minting and registration, so allocation order is unchanged. *)
         let arena_layout =
           Option.bind arena ~f:(fun spans ->
+              (* Arrays, not lists: this runs per link on every working node, and indexing a list
+                 inside a sort comparator would make canonicalization quadratic in the node count (a
+                 large generated graph has thousands). *)
               let entries =
-                List.map2_exn group items ~f:(fun (key, _) (size, align) ->
-                    ( key,
-                      ( size,
-                        align,
-                        Ops.prec_string (Lazy.force key.Tn.storage_prec),
-                        Hashtbl.find spans key ) ))
+                Array.of_list
+                  (List.map2_exn group items ~f:(fun (key, _) (size, align) ->
+                       ( key,
+                         ( size,
+                           align,
+                           Ops.prec_string (Lazy.force key.Tn.storage_prec),
+                           Hashtbl.find spans key ) )))
               in
-              let order =
-                List.sort
-                  (List.init (List.length entries) ~f:Fn.id)
-                  ~compare:(fun i j ->
-                    Tn.compare (fst (List.nth_exn entries i)) (fst (List.nth_exn entries j)))
-              in
-              let permuted = List.map order ~f:(fun i -> snd (List.nth_exn entries i)) in
+              let n = Array.length entries in
+              let order = Array.init n ~f:Fn.id in
+              Array.sort order ~compare:(fun i j -> Tn.compare (fst entries.(i)) (fst entries.(j)));
+              let permuted = List.init n ~f:(fun k -> snd entries.(order.(k))) in
               Option.map (plan_arena_offsets ~cap permuted) ~f:(fun (offsets, total) ->
                   (* Undo the permutation: [plan_arena_offsets] answers in ITS input order. *)
-                  let back = Array.create ~len:(List.length entries) 0 in
-                  List.iter2_exn order offsets ~f:(fun i off -> back.(i) <- off);
+                  let back = Array.create ~len:n 0 in
+                  List.iteri offsets ~f:(fun k off -> back.(order.(k)) <- off);
                   (Array.to_list back, total)))
         in
         match arena_layout with
