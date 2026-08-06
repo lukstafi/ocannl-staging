@@ -124,6 +124,17 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
 
 ## Lowering, virtualization, indexing
 
+- `Affine.access.a_path` components are TYPED (`Affine.path_comp`, gh-ocannl-561): `Stmt` indices
+  interleaved with `Cond`/`Body` (`If`) and `Rhs`/`Write` (`Set` family), constructor order =
+  execution order, so lexicographic comparison is program order within a statement too. Every
+  access path ends in `Cond`/`Rhs`/`Write` and nothing extends past `Write`. Consumers must not
+  compare bare paths for "same statement" — use `Affine.same_statement` (agreement above the
+  final component; the path-level twin of `a_stmt_write` subordination) — and must take top-level
+  statement identity via `Affine.stmt_head`, never `List.hd` (a single-statement routine's paths
+  start with a marker, not a `Stmt`). History: with bare positions an `If` condition's read
+  aliased its guarded body's write (gh-554 round 3), and `read_covered_before` needed a
+  prefix-exclusion hack for enclosing writes vs their inlined `Local_scope` bodies — both
+  unrepresentable now.
 - `Ir.Ops.index_prec ()` is SIGNED (int32; int64 under `large_models`): negative index
   intermediates are well-defined; emit guards in natural signed form. Guard shapes are
   canonicalized to ONE shape per role: upper bounds are strict `Cmplt` (`idx < bound`, the natural
