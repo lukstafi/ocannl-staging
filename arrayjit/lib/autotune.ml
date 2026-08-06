@@ -3859,6 +3859,39 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
      GPU dispatch hazard by [dispatchable] (gh-ocannl-532), and the missing "did tuning beat the
      default?" reference by [report.default_ms] — the [config_thresholds] seed's measurement, not a
      new baseline. *)
+  let emit_report r = Option.iter report ~f:(fun f -> f r) in
+  (* [tune] reports exactly once per call, on every path (gh-ocannl-550). The failures that happen
+     before the search proper — the base compile failing before its lowering is captured, a fatal
+     baseline link, a fatal cache replay, a baseline timing failure — used to raise with no report
+     at all, which leaves a caller that attributes arms by arrival order (the positional [?report]
+     of [Train.tune_placements]) with no slot for this search. The phase reported is the one the
+     failure itself carries, so the diagnostic names where the arm actually died — at link, at
+     launch, at sync — instead of guessing. Reporting is best-effort here, as on the search's own
+     fatal path: it must not replace the compiler failure. *)
+  let emit_pre_search_failure ~phase ~candidate ~detail =
+    let r =
+      {
+        no_search_report with
+        partial = true;
+        best_label = "";
+        terminal_failure = Some { phase; candidate; detail };
+      }
+    in
+    try emit_report r
+    with report_exn ->
+      Stdio.eprintf "autotune: pre-search failure report callback failed: %s\n%!"
+        (Exn.to_string report_exn)
+  in
+  let raise_pre_search (failure : Outcome.failure) =
+    (match failure with
+    | Outcome.Classified c ->
+        emit_pre_search_failure ~phase:c.Outcome.phase ~candidate:None
+          ~detail:(Outcome.detail_of_cause c.Outcome.cause)
+    | Outcome.Fatal f ->
+        emit_pre_search_failure ~phase:f.Outcome.phase ~candidate:f.Outcome.candidate
+          ~detail:(Exn.to_string f.Outcome.exn));
+    Outcome.raise_failure failure
+  in
   let base_capture = ref None in
   !on_candidate_attempt "baseline";
   let base_outcome =
@@ -3872,14 +3905,14 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
     match (!base_capture, base_outcome) with
     | Some oc, _ -> oc
     (* Failed before reaching the transform: there is no base lowering, hence no search. *)
-    | None, Error failure -> Outcome.raise_failure failure
+    | None, Error failure -> raise_pre_search failure
     | None, Ok _ -> failwith "Autotune.tune: backend compile did not invoke lowered_transform"
   in
   let baseline_linked, baseline_decline =
     match base_outcome with
     | Ok (bctx, broutine) -> (Some (bctx, broutine), None)
     | Error (Outcome.Classified classified) -> (None, Some classified)
-    | Error (Outcome.Fatal _ as failure) -> Outcome.raise_failure failure
+    | Error (Outcome.Fatal _ as failure) -> raise_pre_search failure
   in
   let base_digest = SC.digest canon in
   let use_cache = (not (String.is_empty cache_dir)) && SC.complete canon in
@@ -3894,7 +3927,6 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
     compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ~provenance ctx comp
       bindings
   in
-  let emit_report r = Option.iter report ~f:(fun f -> f r) in
   let flat_schedule = function
     | Whole_saved saved -> saved
     | Fiss_saved assoc -> List.concat_map assoc ~f:snd
@@ -4008,7 +4040,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
               logf "cache entry replay FAILED, re-searching: %s"
                 (Outcome.detail_of_cause classified.cause);
               None
-          | Error (Outcome.Fatal _ as failure) -> Outcome.raise_failure failure)
+          | Error (Outcome.Fatal _ as failure) -> raise_pre_search failure)
       | _ -> None
     else None
   in
@@ -4064,15 +4096,32 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
               mma_renders = [];
             })
       in
-      (* Baseline timing runs uncaught: its failures (e.g. uninitialized inputs) are the user's bug,
-         with the same message [Context.run] would give. On a GPU backend the baseline is the
+      (* Baseline timing failures are the user's bug (e.g. uninitialized inputs) and propagate as
+         the exception [Context.run] would give — reported first, with the phase they carry, so the
+         arm still occupies its slot (gh-ocannl-550). On a GPU backend the baseline is the
          unscheduled serial form and is not dispatched at all (see [dispatchable]); [infinity] is
          its rank, so every timed candidate beats it and the search never returns it (see the
          fallback at the end), and a declined baseline ranks the same way. *)
       let baseline_dispatched = Option.is_some baseline && dispatchable ~is_gpu [ base_opt ] in
       let baseline_ms =
         match baseline with
-        | Some b when baseline_dispatched -> time_routine ~repeats b.cctx b.routine
+        | Some b when baseline_dispatched -> (
+            (* Still uncaught in the sense that matters — the caller sees the same exception
+               [Context.run] would raise, unwrapped and with its own backtrace. The tagging is only
+               so the report can name the phase (launch vs. sync) before it propagates. *)
+            match
+              time_routine ~tag_failures:true ~repeats b.cctx b.routine
+            with
+            | ms -> ms
+            | exception Outcome.Raised_at (phase, exn, backtrace) ->
+                emit_pre_search_failure ~phase ~candidate:(Some "baseline")
+                  ~detail:(Exn.to_string exn);
+                Stdlib.Printexc.raise_with_backtrace exn backtrace
+            | exception exn ->
+                let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+                emit_pre_search_failure ~phase:Outcome.Launch ~candidate:(Some "baseline")
+                  ~detail:(Exn.to_string exn);
+                Stdlib.Printexc.raise_with_backtrace exn backtrace)
         | _ -> Float.infinity
       in
       (match baseline_decline with

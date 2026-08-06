@@ -357,11 +357,12 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
       | (Some _ as reported), _ -> reported
       | None, Ok _ -> None
       | None, Error (exn, _) ->
-          (* [?report] is positional and consumers name arms by arrival order, so an arm that died
-             before {!Autotune.tune} reported anything — a base compile failing before the base
-             lowering is captured, or a baseline timing failure, the two pre-report failures the
-             [partial] contract names — must still occupy its slot. Otherwise the surviving arm's
-             report arrives first and is attributed to this arm's position. *)
+          (* [?report] is positional and consumers name arms by arrival order, so an arm that
+             reported nothing must still occupy its slot — otherwise the surviving arm's report
+             arrives first and is attributed to this arm's position. {!Autotune.tune} now reports on
+             every path, each pre-search failure carrying the phase it died at, so this is the
+             backstop for a raise from outside that contract; [Transform] is the tuner's own
+             convention for an unattributed failure, and the detail says the phase is not known. *)
           let slot =
             {
               Autotune.no_search_report with
@@ -373,7 +374,8 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
                     Autotune.phase = Ir.Schedule_outcome.Transform;
                     candidate = None;
                     detail =
-                      Printf.sprintf "arm terminated before the search reported anything: %s"
+                      Printf.sprintf
+                        "arm terminated before the search reported anything (phase unknown): %s"
                         (Exn.to_string exn);
                   };
             }

@@ -277,9 +277,13 @@ type report = {
           census records so a previously-proposed site — or a candidate space the backend's
           execution model empties — never stops being proposed silently. *)
   partial : bool;
-      (** [true] when candidate work terminated on a fatal failure after the baseline was handled.
-          A base compile that fails before the base lowering is captured, and a baseline timing
-          failure, occur before reporting begins. *)
+      (** [true] when the call terminated on a fatal failure instead of completing. {!tune} reports
+          exactly once per call, on every path (gh-ocannl-550): the failures that precede the search
+          proper — a base compile that fails before the base lowering is captured, a fatal baseline
+          link, a fatal cache replay, a baseline timing failure — report with every counter at its
+          zero value and the failure in [terminal_failure], so a caller attributing arms by arrival
+          order (the positional [?report] of [Train.tune_placements]) still gets a slot for the
+          search that died. *)
   baseline_declined : bool;
       (** The serial baseline's own compile was rejected with a typed cause and the search ran on
           the scheduled candidates alone (gh-ocannl-533): [baseline_ms] is then [infinity] and the
@@ -290,7 +294,9 @@ type report = {
       (** Candidate rejections aggregated by stable cause key. Their counts sum to
           [candidates_failed]. Cache-entry replay failures are excluded. *)
   terminal_failure : terminal_failure option;
-      (** The fatal failure that stopped a partial search; [None] on completed reports. *)
+      (** The fatal failure that stopped a partial search; [None] on completed reports. [phase] is
+          the one the failure carries — where the search actually died (at link, at launch, at
+          sync), not where the report was assembled. *)
   rounds_run : int;  (** Beam-expansion rounds actually executed (0 = seeds only). *)
   sketch_candidates : int;
       (** Whole-routine matmul-sketch instantiations seeded (0 when no matmul micro-kernel was
