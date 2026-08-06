@@ -240,8 +240,10 @@ let every_non_literal_materialized =
     exceptions that are not the arm's to absorb and propagate at once: process-level failures
     ([Out_of_memory], [Sys.Break]) and compiler invariant violations ([Assert_failure],
     [Stack_overflow]), the same classes {!Ir.Schedule_outcome.classify_raw} refuses to classify.
-    A [report] callback's own exception likewise propagates rather than counting as an arm
-    failure. Consumers
+    A [report] callback's own exception likewise propagates rather than counting as an arm failure,
+    and so does a failure that poisoned the lineage the arms share ({!Context.poisoned_failure}):
+    every timing run in the sibling would then refuse to execute, so the second arm can only burn a
+    search proving it. Consumers
     attributing arms by arrival order should read [terminal_failure] (equivalently [partial]) before
     [best_ms], as benchmarks/runners/ocannl/bench_harness.ml does.
 
@@ -423,7 +425,25 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
                   else Printf.sprintf "%.4f ms" r.Autotune.mma_best_ms))));
     (result, best_ms, r)
   in
+  (* The arms are independent experiments but they are not independent lineages: the B arm searches
+     in a {!Context.decide_materialized} sibling, which shares the execution ledger. A failure whose
+     damage the backend could not bound ([Writes_may_have_occurred], or an unattributed launch/sync
+     failure) poisons that ledger, and every timing run in the sibling then refuses to execute — so
+     the next arm cannot produce a result, only burn a search proving it. Propagate the failure that
+     poisoned it instead, which is also the honest error: the second arm's failures would all be
+     consequences of the first (gh-ocannl-550). Giving each arm its own root lineage is the other
+     way out, at the cost of re-initializing the caller's parameters per arm. *)
+  let search_lineage = Option.value timing_ctx ~default:ctx in
+  let lineage_poisoned () = Option.is_some (Context.poisoned_failure search_lineage) in
+  let propagate_if_poisoned who = function
+    | Error (exn, backtrace) when lineage_poisoned () ->
+        logf "arm %s poisoned the shared %s lineage, so no sibling arm can run: propagating" who
+          (if Option.is_some timing_ctx then "timing" else "caller's");
+        Stdlib.Printexc.raise_with_backtrace exn backtrace
+    | _ -> ()
+  in
   let a, a_ms, a_report = tune "A (default placements)" ctx timing_ctx in
+  propagate_if_poisoned "A" a;
   let embedded = ref [] in
   Tensor.iter_embedded ~f:(fun tn -> embedded := tn :: !embedded) loss;
   (* [decide_materialized] skips the nodes constrained away from materialization (constants,
@@ -542,8 +562,14 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
         in
         let ctx' = apply base_ctx in
         let timing' = Option.map base_timing ~f:apply in
-        let r, ms, _rep = tune ~to_report:flip_report arm ctx' timing' in
-        if Float.(ms < chain_ms) then chain := (r, ms, ctx', timing'));
+        (* Same lineage, same rule as the A/B above: a poisoned one refuses every timing run, so a
+           further search can only fail. Unlike the arms, there is nothing to propagate here — the
+           A/B winner is already in hand — so the refinement just stops. *)
+        if lineage_poisoned () then
+          logf "flip refinement stopped: the shared lineage is poisoned"
+        else
+          let r, ms, _rep = tune ~to_report:flip_report arm ctx' timing' in
+          if Float.(ms < chain_ms) then chain := (r, ms, ctx', timing'));
     let chain_result, chain_ms, _, _ = !chain in
     if Float.(chain_ms < winner_ms) then (
       logf "flip refinement ships: %.4f ms (the placement A/B winner was %.4f ms)" chain_ms

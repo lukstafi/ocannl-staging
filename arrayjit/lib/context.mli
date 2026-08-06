@@ -107,6 +107,12 @@ val poison_lineage : t -> routine_name:string -> exn -> unit
     restore: recovering would mean rebuilding inputs and parameters, which the current
     [timing_ctx]-shaped API cannot express (gh-ocannl-536). *)
 
+val poisoned_failure : t -> exn option
+(** The failure that poisoned this execution lineage, if any — the exception every entrypoint on it
+    now raises. Lets a caller that would otherwise start fresh work on the lineage see that it
+    cannot run: [Train.tune_placements] checks it before searching the second placement arm, since
+    the arms share a lineage and a poisoned one refuses every timing run (gh-ocannl-550). *)
+
 val hardware_limits : t -> Ir.Backend_intf.hardware_limits
 (** The backend's conservative per-workgroup device limits (all-[None] on backends that do not bind
     hardware axes). Chiefly for schedule transforms and the autotuner. *)

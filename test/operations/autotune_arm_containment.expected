@@ -16,3 +16,5 @@ arm A still ships when arm B dies before reporting: true
 a report-callback exception propagates instead of losing an arm: true
 a compiler assertion propagates instead of losing an arm: true
 an arm failing with the same exception its callback raised is still contained: true
+a failure that poisons the shared lineage propagates instead of trying the sibling: true
+the sibling arm was not attempted on a poisoned lineage: true

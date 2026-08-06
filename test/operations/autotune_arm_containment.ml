@@ -194,4 +194,34 @@ let () =
         | exception Stdlib.Exit -> false)
   in
   p "an arm failing with the same exception its callback raised is still contained"
-    collision_contained
+    collision_contained;
+
+  (* --- Containment stops where the damage is shared: a failure that poisons the lineage the arms
+     search in leaves the sibling unable to execute a single timing run, so it must propagate rather
+     than burn a search proving that. The injected failure poisons the lineage the way an
+     unattributed launch failure would. --- *)
+  let ctx_p = Context.auto () in
+  let reports = ref 0 in
+  let attempts = ref 0 in
+  let poisoned_propagated =
+    Exn.protect
+      ~f:(fun () ->
+        (Autotune.on_candidate_attempt :=
+           fun _ ->
+             Int.incr attempts;
+             if !attempts = 1 then (
+               Context.poison_lineage ctx_p ~routine_name:"injected"
+                 (Failure "injected lineage poisoning");
+               raise (Failure "injected lineage poisoning")));
+        match
+          Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:""
+            ~report:(fun _ -> Int.incr reports)
+            ctx_p t2 comp Ir.Indexing.Empty
+        with
+        | _ -> false
+        | exception Failure msg -> String.is_substring msg ~substring:"injected lineage poisoning")
+      ~finally:(fun () -> Autotune.on_candidate_attempt := fun _ -> ())
+  in
+  p "a failure that poisons the shared lineage propagates instead of trying the sibling"
+    poisoned_propagated;
+  p "the sibling arm was not attempted on a poisoned lineage" (!reports = 1)

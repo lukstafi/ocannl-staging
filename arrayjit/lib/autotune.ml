@@ -4272,6 +4272,21 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
              (Exn.to_string report_exn));
         Outcome.raise_failure (Outcome.Fatal fatal)
       in
+      (* The post-search fallbacks to the untuned default (nothing timed; the winner replay failed
+         or degenerated). Through the containment-aware form, so a failure here reports the phase it
+         carries — the outer catch-all would otherwise record every one of them as [Transform],
+         which for a link failure is simply wrong. The exception the caller sees is unchanged:
+         [emit_partial_and_raise] ends in [raise_failure], exactly as [Context.compile] does. *)
+      let untuned_default_or_raise () =
+        match
+          Context.compile_outcome ~provenance:Ir.Schedule_outcome.User_schedule ctx comp bindings
+        with
+        | Ok result -> result
+        | Error (Outcome.Fatal fatal) -> emit_partial_and_raise fatal
+        | Error (Outcome.Classified classified) ->
+            emit_partial_and_raise
+              (Outcome.fatal_of_classified ~candidate:"untuned default fallback" classified)
+      in
       let search () =
       (* gh-ocannl-521: tensorized candidates are counted where they are TIMED, not where they are
          enumerated — a family can be seeded in bulk and rejected in bulk at candidate compile, and
@@ -4749,7 +4764,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
              unbounded. The untuned default pipeline is the honest fallback: the same code the
              caller would have compiled without the tuner. *)
           logf "nothing was timed: falling back to the untuned default compile (gh-ocannl-532)";
-          Context.compile ctx comp bindings)
+          untuned_default_or_raise ())
         else
           (* [nothing_timed] is false, so the beam holds a timed winner. *)
           let best_c = Option.value_exn best_c ~message:timed_winner_exists in
@@ -4773,14 +4788,14 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                  fallback a failed replay takes. *)
               logf "winner replay produced an unparallelized routine, falling back: %s"
                 (spec_label spec);
-              Context.compile ctx comp bindings
+              untuned_default_or_raise ()
           | Ok c ->
               logf "winner replay ok: %s" (spec_label spec);
               (c.cctx, c.routine)
           | Error (Outcome.Classified classified) ->
               logf "winner replay FAILED (%s), falling back to the default compile: %s"
                 (spec_label spec) (Outcome.detail_of_cause classified.cause);
-              Context.compile ctx comp bindings
+              untuned_default_or_raise ()
           | Error (Outcome.Fatal fatal) -> emit_partial_and_raise fatal
       in
       (result, completed_report)

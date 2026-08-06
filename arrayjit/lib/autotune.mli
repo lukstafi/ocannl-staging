@@ -278,7 +278,11 @@ type report = {
           execution model empties — never stops being proposed silently. *)
   partial : bool;
       (** [true] when the call terminated on a fatal failure instead of completing. {!tune} reports
-          exactly once per call, on every path (gh-ocannl-550): the failures that precede the search
+          exactly once per call, on every path that does any work (gh-ocannl-550) — argument
+          validation is the exception, and deliberately so: an incompatible [timing_ctx] is a
+          precondition violation detected before anything happens, not an outcome of a search, and
+          reporting it would attribute a phase to a call that never reached one. The failures that
+          precede the search
           proper — a base compile that fails before the base lowering is captured, a fatal baseline
           link, a fatal cache replay, a baseline timing failure — and the untuned fallback compiles
           of a search-less call ([search=false]) report with every counter at the value it had
