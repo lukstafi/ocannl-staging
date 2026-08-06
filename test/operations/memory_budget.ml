@@ -52,6 +52,14 @@ let () = Unix.putenv "OCANNL_MEMORY_BUDGET" "0"
    The later phases switch it on explicitly. *)
 let () = Unix.putenv "OCANNL_BUFFER_ALIASING" "false"
 
+(* And the model schedule gate, which the loss-trajectory parity assertion is sensitive to for a
+   reason this feature created: a budgeted compile deliberately bypasses [model_default_schedule] to
+   use the pipeline its footprint was scored against. With the gate ambiently on, the budget-off
+   phase would take the model's pick and the budget-on phase the default one, so the two arms would
+   differ in SCHEDULE as well as placement and could diverge on reduction ordering alone -- a
+   failure that looks like rematerialization changing values but is not. *)
+let () = Unix.putenv "OCANNL_MODEL_DEFAULT_SCHEDULE" "false"
+
 (* The config-key parser, exercised through the environment (values are re-read on each access). The
    suffix scaling is the interesting part: a syntactically valid but absurd setting must be REJECTED
    rather than wrapped into a small or negative target, which the planner would honor as an

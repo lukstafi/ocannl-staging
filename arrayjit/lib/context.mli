@@ -357,9 +357,16 @@ val plan_memory_budget :
     one node moves the others' spans. A candidate that adds nothing on top of the accepted set is
     not dropped but held {e speculatively}: relief is not additive in either direction, and two
     nodes pinning the same arena peak each free nothing alone yet free the whole range together.
-    When a later candidate does pay, the held group is committed with it; speculatives never
-    joined by a paying flip are discarded, so recompute is never paid for zero bytes. Acceptance
-    stops as soon as the budget is met; {!Minimize} takes every flip that helps.
+    Each later candidate is then scored both with and without the held group, because a held flip
+    can be actively harmful rather than merely unpaid, and judging every later candidate only in its
+    company would let one bad hold mask a candidate that pays on its own. A group that beats the
+    candidate alone is load-bearing and commits with it; a group that loses is harmful and is
+    discarded, never reconsidered (this is a bounded planner, not a search over subsets); a group
+    that ties is merely neutral and keeps being held — committing it would pay recompute for zero
+    bytes, and discarding it would throw away a flip that may still be half of a later pair.
+    Speculatives never joined by a paying flip are discarded at the end, so recompute is never paid
+    for zero bytes. Acceptance stops as soon as the budget is met; {!Minimize} takes every flip that
+    helps.
 
     [max_candidates] bounds the individually-scored candidates, keeping the cheapest-to-recompute
     ones; the count left unscored is reported as [bp_dropped] and logged under config

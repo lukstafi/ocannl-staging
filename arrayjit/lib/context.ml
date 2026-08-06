@@ -890,10 +890,26 @@ let plan_memory_budget ?name ?max_candidates ~budget ctx comp bindings =
          moves the others' live spans, so a candidate's solo relief is not what it is worth here. A
          candidate that adds nothing is held SPECULATIVELY rather than dropped: if a later one then
          relieves bytes on top of it, the whole speculative group is committed together (the
-         two-nodes-at-one-peak case); speculatives never joined by a paying flip are discarded at
-         the end, so no recompute is ever paid for zero bytes. The relief of a joint commit is
-         reported on the flip that closed it, and the sum over [bp_flips] is exactly [bp_baseline -
-         bp_final]. *)
+         two-nodes-at-one-peak case).
+
+         Every candidate is therefore scored BOTH ways, with and without the held group, and the
+         three outcomes are treated differently. Held flips are not merely unpaid, they can be
+         actively HARMFUL — a flip whose marginal was negative moved someone's span the wrong way —
+         and judging every later candidate only in their company would let one bad hold mask a
+         candidate that pays on its own, losing it and, with it, a reachable budget.
+
+         - joint strictly better: the group is load-bearing, so commit it with the candidate. -
+         joint strictly worse: the group is harmful here, so commit the candidate alone and DISCARD
+         the group (no group is reconsidered once discarded — this is a bounded planner, not a
+         search over subsets). - equal: the group is merely neutral. Commit the candidate alone but
+         KEEP holding it: committing it would pay recompute for zero bytes, and discarding it would
+         throw away a flip that may still be half of a later pair. Dropping neutral holds eagerly
+         measurably costs relief (on test/operations/memory_budget's step, 1196164 -> 1228932
+         bytes).
+
+         Speculatives never joined by a paying flip are discarded at the end, so no recompute is
+         ever paid for zero bytes. The relief of a joint commit is reported on the flip that closed
+         it, and the sum over [bp_flips] is exactly [bp_baseline - bp_final]. *)
       let accepted = ref [] and flips = ref [] and cur = ref bp_baseline in
       (* Held (node, recompute cost) pairs, most recently held first. *)
       let speculative = ref [] in
@@ -901,24 +917,46 @@ let plan_memory_budget ?name ?max_candidates ~budget ctx comp bindings =
       List.iter ranked ~f:(fun (fc, solo) ->
           if not (met !cur) then begin
             let tn = fc.Ir.Low_level.fc_tn and cost = fc.Ir.Low_level.fc_recompute_cost in
-            let cand = (tn :: List.map !speculative ~f:fst) @ !accepted in
-            let fp = score cand in
+            let held = !speculative in
+            let cand_alone = tn :: !accepted in
+            let fp_alone = score cand_alone in
+            let cand_joint, fp_joint =
+              if List.is_empty held then (cand_alone, fp_alone)
+              else
+                let c = (tn :: List.map held ~f:fst) @ !accepted in
+                (c, score c)
+            in
+            let verdict =
+              match compare_int fp_joint.Backends.fp_total fp_alone.Backends.fp_total with
+              | c when c < 0 -> `Load_bearing
+              | 0 -> `Neutral
+              | _ -> `Harmful
+            in
+            let cand = match verdict with `Load_bearing -> cand_joint | _ -> cand_alone in
+            let fp = match verdict with `Load_bearing -> fp_joint | _ -> fp_alone in
             let marginal = !cur.Backends.fp_total - fp.Backends.fp_total in
             if marginal > 0 then (
               logf "accept %s: %d bytes (solo %d), cost %d%s, footprint now %d" (Tn.debug_name tn)
                 marginal solo cost
-                (match !speculative with
-                | [] -> ""
-                | held -> Printf.sprintf " jointly with %s" (names held))
+                (match (verdict, held) with
+                | _, [] -> ""
+                | `Load_bearing, _ -> Printf.sprintf " jointly with %s" (names held)
+                | `Neutral, _ -> Printf.sprintf " alone, still holding %s" (names held)
+                | `Harmful, _ -> Printf.sprintf " alone, dropping harmful held %s" (names held))
                 fp.Backends.fp_total;
-              (* [flips] is reverse-chronological until the final [List.rev]. The held flips are
-                 committed with this one; their own marginal was 0, and the group's relief lands on
-                 the flip that made it pay. *)
+              (* [flips] is reverse-chronological until the final [List.rev]. A joint commit's held
+                 flips carry 0 and the group's relief lands on the flip that made it pay. *)
               flips :=
-                ((tn, marginal, cost) :: List.map !speculative ~f:(fun (h, c) -> (h, 0, c)))
+                (tn, marginal, cost)
+                ::
+                (match verdict with
+                | `Load_bearing -> List.map held ~f:(fun (h, c) -> (h, 0, c))
+                | `Neutral | `Harmful -> [])
                 @ !flips;
               accepted := cand;
-              speculative := [];
+              (* A neutral group stays held: committing it would pay recompute for zero bytes, and
+                 dropping it would discard a flip that may still be half of a later pair. *)
+              (speculative := match verdict with `Neutral -> held | _ -> []);
               cur := fp)
             else (
               logf "hold %s: no marginal relief yet (solo was %d); speculative" (Tn.debug_name tn)
