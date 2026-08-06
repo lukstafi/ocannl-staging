@@ -25,3 +25,5 @@ wr X   [i7]           loops=[i7:0..3] path=[r.a1.0.w]
 wr Y   [i7]           loops=[i7:0..3] path=[w] 
 scope A's read not covered by the sibling operand's write: correct
 no ordering claimed across sibling operands (write-first): correct
+decide_placements classifies X as read-before-write: true
+X is a routine input (incoming buffer preserved): true

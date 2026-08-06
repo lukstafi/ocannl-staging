@@ -198,7 +198,9 @@ let () =
   let x = fresh_tn "X" [| 4 |] in
   let y2 = fresh_tn "Y" [| 4 |] in
   let i7 = Idx.get_symbol () in
-  let la = LL.get_scope y2 and lb = LL.get_scope y2 in
+  (* Fresh (virtualizable) scope nodes, so the program below also survives [specialize_proc] for
+     the decision-level check further down. *)
+  let la = LL.get_scope (fresh_tn "LA" [| 4 |]) and lb = LL.get_scope (fresh_tn "LB" [| 4 |]) in
   let scope_a : LL.scalar_t =
     LL.Local_scope
       { id = la; body = LL.Set_local (la, get x [| it i7 |]); orig_indices = [| it i7 |] }
@@ -252,6 +254,26 @@ let () =
     List.find_exn rev_accs ~f:(fun a -> (not a.Aff.a_write) && a.Aff.a_tn.Tn.uid = x.Tn.uid)
   in
   let x_writes = List.filter rev_accs ~f:(fun a -> a.Aff.a_write && a.Aff.a_tn.Tn.uid = x.Tn.uid) in
-  match Aff.read_covered_before ~read:x_read ~writes:x_writes () with
+  (match Aff.read_covered_before ~read:x_read ~writes:x_writes () with
   | `Covered -> Stdio.printf "read covered across sibling operands (write-first): ordering claimed\n"
-  | `Unknown _ -> Stdio.printf "no ordering claimed across sibling operands (write-first): correct\n"
+  | `Unknown _ -> Stdio.printf "no ordering claimed across sibling operands (write-first): correct\n");
+
+  (* The decision level: the same verdict driving the real pipeline. [analyze_proc] +
+     [specialize_proc] run [decide_placements] (hence [reads_covered_query]) on this code, and must
+     classify X as read-before-write — a routine input ([input_and_output_nodes]) whose incoming
+     buffer is preserved. If coverage wrongly crossed the sibling operands, both facts would flip
+     and X's incoming values could be silently overwritten. The classification→execution leg is
+     pinned by read_before_write_flip.ml on pipeline-produced code; this pattern itself cannot
+     reach codegen (the optimizer never emits materialized-node writes inside scope bodies — the
+     crosscheck-soak corner), so the decision surface is the deepest executable check here. *)
+  let materialize tn = Tn.update_memory_mode tn Tn.On_device 99 in
+  materialize x;
+  materialize y2;
+  let opt = LL.specialize_proc (LL.empty_optimize_ctx ()) (LL.analyze_proc [] sibling) in
+  (match Base.Hashtbl.find opt.LL.traced_store x with
+  | None -> Stdio.printf "decide_placements: X not traced: UNSOUND\n"
+  | Some traced ->
+      Stdio.printf "decide_placements classifies X as read-before-write: %b\n"
+        traced.LL.read_before_write);
+  let (inputs, _outputs), _merge = LL.input_and_output_nodes opt in
+  Stdio.printf "X is a routine input (incoming buffer preserved): %b\n" (Base.Set.mem inputs x)
