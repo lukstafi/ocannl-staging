@@ -1,0 +1,12 @@
+first compile misses: true
+alpha-variant sibling lowering hits: true
+hit reproduces the first result exactly: true
+same structure over different tensor nodes misses: true
+static-indexed first compile misses: true
+same static symbol hits: true
+a fresh static symbol misses: true
+mutating the static's range misses: true
+sibling Context.compile shares the analysis: true
+decision_surface shares the analysis too: true
+decision_surface matches the capture compile's flip candidates: true
+decision_surface reports a nonempty surface here: true
