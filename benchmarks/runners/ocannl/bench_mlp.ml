@@ -251,6 +251,19 @@ let () =
   let preseed_twins = H.env_flag "BENCH_PRESEED_TWINS" in
   if preseed_twins && List.is_empty twin_tns then
     failwith "bench_mlp: BENCH_PRESEED_TWINS needs BENCH_PRECISION (no twins without it)";
+  (* The two flags do not compose, and neither failure mode is visible in the result line, so
+     refuse rather than measure something other than what was asked for. With
+     BENCH_TWIN_PLACEMENT=virtual the twins carry declared [Virtual] intent, which
+     [Context.decide_materialized] skips by contract — the pre-seed would be a silent no-op and the
+     "control" would be the default arm again. With =materialized the intent already pins the twins
+     in BOTH arms, so the run is no longer the context-level-decision-only experiment the pre-seed
+     exists to be. *)
+  if preseed_twins && Option.is_some (Stdlib.Sys.getenv_opt "BENCH_TWIN_PLACEMENT") then
+    failwith
+      "bench_mlp: BENCH_PRESEED_TWINS conflicts with BENCH_TWIN_PLACEMENT. The pre-seed is a \
+       context-level placement decision over twins whose declared intent is left open; setting \
+       intent as well either nullifies it (virtual) or applies it to both arms (materialized). \
+       Unset one of the two.";
   let tuned ctx comp =
     (* Both lineages, so the timing context's placements match the compiled one's. *)
     let ctx = if preseed_twins then Context.decide_materialized ctx twin_tns else ctx in

@@ -19,7 +19,11 @@ neither of the two the issue anticipated.
   policy-decided) is not what happens.
 - The chain **finds them and it works**: materializing the twins from arm A's context converts the
   tensorized family from unreachable to crowned, and on the GEMM-dominated cell that is worth
-  **−33.7%** inside arm A, with genuine rocWMMA in the emitted source.
+  **−37.0%** inside arm A for the flip chain (**−33.7%** for the `decide_materialized` control,
+  which materializes the twins and nothing else). The crowned arm-A artifacts are tensorized by the
+  `mma_statements` / `mma_scalar_fallbacks` counters; the direct rocWMMA source read is of arm B's
+  shipping artifact — see [the emission section](#the-emission-read-off-the-source) for which claim
+  rests on which.
 - It **still does not ship**, and not because tensorization is uncompetitive. On `mlp_wide`
   materialize-all is *better still*: arm A with the twins materialized is **+11.5%** behind arm B
   (paired, in-process, 3 of 3), and the budget-18 flip chain lands **+5.2%** behind it (3 of 3) for
@@ -75,7 +79,11 @@ Both additions are benchmark-side and measurement-only:
 - **`BENCH_PRESEED_TWINS=1`** hands the twins to `Context.decide_materialized` before tuning: part
   3's control, and the other route #558's comment names. Note this is *not* the pre-existing
   `BENCH_TWIN_PLACEMENT=materialized`, which declares tnode-level intent and is therefore invisible
-  to both the placement A/B and the flip chain.
+  to both the placement A/B and the flip chain. The runner refuses the two flags together: with
+  `=virtual` the pre-seed would be a silent no-op (`decide_materialized` skips declared-virtual
+  nodes by contract) and with `=materialized` the intent pins the twins in both arms, so the run
+  would no longer be the context-level-decision-only experiment. No run in this report set
+  `BENCH_TWIN_PLACEMENT`; the twins are left at `Twin_auto` throughout.
 
 ## Part 1 — the premise, on both cells
 
