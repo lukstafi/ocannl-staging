@@ -124,6 +124,18 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
 
 ## Lowering, virtualization, indexing
 
+- The `Low_level` analysis cache (gh-ocannl-560) makes sibling candidate compiles share one
+  `analyze_proc` result keyed by a digest of the raw lowered code. Its identity choices are the
+  OPPOSITE of `Schedule_cache.canonicalize`'s: tensor nodes and static symbols enter by identity
+  (`Tn.uid`; symbol ident + the mutable `static_range`/`used_as_extent` facts) because a hit
+  reuses the stored code verbatim, while loop binders and scope ids alpha-rename. Anything the
+  analysis consults beyond the code must enter the key — `inline_complex_computations` does, since
+  the rmw exemption changes what the coverage/multiplicity queries count. Two traps: (1) caches
+  that retain lowered code keep tensor nodes (and, via pool finalizers, buffers) alive — register
+  a clearer in `Tnode.before_accessibility_snapshot`, or `print_accessible_headers` goldens grow
+  phantom "accessible" nodes (this is how the cache was caught); (2) on a hit, still re-run
+  `pin_device_written_bounds` — its raising writer-after-settled-reader guard must fire regardless
+  of caching.
 - `Affine.access.a_path` components are TYPED (`Affine.path_comp`, gh-ocannl-561): `Stmt` indices
   interleaved with `Cond`/`Body` (`If`) and `Rhs`/`Write` (`Set` family), constructor order =
   execution order, so lexicographic comparison is program order within a statement too. Every
