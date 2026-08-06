@@ -317,3 +317,67 @@ run log's line count at capture time, which pins each snapshot to a position in 
 The snapshot captured at or before the `tune_placements: arm A ... best:` line is arm A's winner
 replay — the artifact that ships. With a **warm** cache both arms replay instead of searching, so
 the whole confirmation costs minutes.
+
+---
+
+## Addendum (post-gh-550 robustness fix): the tf32 cells report end-to-end now
+
+Measured after the arm-containment fix (a failed arm is a *losing* arm; the surviving arm's winner
+ships), same box, staging master `3e7db701` + the fix. **5 of 5 cold tf32 searches now report a
+winner and exit 0**, where 5 of 5 previously died. Protocol as in §3: one process per replicate,
+`--ocannl_backend=cuda --ocannl_tf32_matmuls=true --ocannl_autotune_log=true`, a fresh
+`--ocannl_autotune_cache_dir` per replicate, box otherwise idle.
+
+| run | arm A best (ms) | arm A crowned label | arm B | shipped | step p50 (ms) | search (s) | peak MiB |
+|---|---|---|---|---|---|---|---|
+| r1 | **105.856** | `F_sketch[mma-gpu 16x32x0, 16x32x32, 32x32x32]` | FAILED (pre-OOM best 224.971) | **A** | 103.954 | 895 | 11,912 |
+| r2 | **105.561** | `F_sketch[mma-gpu 16x32x0, 16x32x32, 16x32x0]` | FAILED (222.622) | **A** | 105.030 | 724 | 11,870 |
+| r3 | **103.508** | `F_sketch[mma-gpu 16x32x0, 16x32x32, 32x32x0]` | FAILED (225.333) | **A** | 104.036 | 678 | 11,877 |
+| r4 | **104.174** | `F_sketch[mma-gpu 16x32x0, 32x32x0, 32x32x0]` | FAILED (223.811) | **A** | 104.628 | 717 | 11,868 |
+| r5 | **103.122** | `F_sketch[mma-gpu 16x32x0, 16x32x32, 16x32x0]` | FAILED (224.293) | **A** | 103.670 | 668 | 11,864 |
+
+Arm A best 103.1–105.9 ms (median 104.174); end-to-end step p50 103.7–105.0 ms (median 104.036).
+That median lands within 0.6% of the 103.39 ms §2 row, which had to be taken from a **warm-cache
+replay** because no cold search survived — so the row's provenance caveat can now be dropped, and
+gh-487's precondition "measurable at f32 storage" (§4 qualification 3) is met.
+
+**The OOM is unchanged — only what it destroys is.** Every replicate still exhausts the card and
+still fails arm B, at the same place as before: several candidates decline at `Backend_link` with
+`CUDA_ERROR_OUT_OF_MEMORY` (absorbed, as they always were), then arm B's winner replay cannot
+compile and its untuned-default fallback cannot either. The difference is that this now ends
+arm B rather than the run: `tune_placements` ranks the failed arm at `infinity`, ships arm A's
+winner, and records arm B's terminal failure in the report and in `results.jsonl`
+(`"terminal_failure": "…CUDA_ERROR_OUT_OF_MEMORY raised by cu_mem_alloc"`). Arm B's pre-failure
+best (222–225 ms) is deliberately not shippable — no routine was compiled from the caller's
+context for it.
+
+### The accumulation curve, sampled per candidate (ride-along for gh-550)
+
+`nvidia-smi` memory sampled every 2 s alongside the autotune trace, so each sample is pinned to a
+position in the candidate stream. Medians across the 5 replicates:
+
+| candidates attempted | median MiB used | median t (s) |
+|---|---|---|
+| 0 | 396 | 0 |
+| 20 | 2,663 | 9 |
+| 40 | 3,500 | 15 |
+| 60 | 4,430 | 23 |
+| 80 | 5,037 | 27 |
+| 100 | 6,089 | 36 |
+| 120 | 10,522 | 54 |
+| 140 | 11,802 | 154 |
+| 160 | 11,835 | 244 |
+| 180 | 11,859 | 287 |
+| 240 | 11,869 | 428 |
+| 260 | 11,831 | 697 |
+
+Three things this says, none of which the peak-only table in §3 could:
+
+1. **Growth is monotone in candidates attempted, not in time** — ~50 MiB per candidate through the
+   first hundred, with no plateau until the card is full. Nothing is being released between
+   candidates.
+2. **The ceiling is hit at ~candidate 130, one fifth of the way through**, and the remaining ~130
+   candidates all run against a full card — which is why the failures cluster at the end (the
+   winner replay) rather than at a particular candidate's size.
+3. The program itself needs ~1 GB (the untuned cells), and the at-exit reading is still
+   11.7–11.9 GB, so nothing is returned after the search either.

@@ -1,0 +1,25 @@
+the failing arm did not take the tune down with it: true
+both arms reported, in position: true
+arm A completed: true
+arm A crowned a timed winner: true
+arm B is reported as partial: true
+arm B's report carries the terminal failure: true
+arm B had timed candidates before failing: true
+the surviving arm's routine ships and computes the right values: true
+arm A's winner was cached by the run its sibling arm failed in: true
+the replay is the very schedule run 1 crowned: true
+the cached winner replays to the right values: true
+an arm failing before its search starts still occupies its slot: true
+the slot report is arm B's, not arm A's misattributed one: true
+the pre-search report names the injected failure at a structured phase: true
+arm A still ships when arm B dies before reporting: true
+a report-callback exception propagates instead of losing an arm: true
+a compiler assertion propagates instead of losing an arm: true
+an arm failing with the same exception its callback raised is still contained: true
+a failure that poisons the shared lineage propagates instead of trying the sibling: true
+the sibling arm was not attempted on a poisoned lineage: true
+a winner is not shipped out of a lineage a later arm poisoned: true
+an interrupt raised by a report callback is not swallowed: true
+pre-dispatch validation rejects an unexecuted dependency: true
+a pre-dispatch rejection leaves the lineage usable: true
+and the retry succeeds once the dependency has executed: true

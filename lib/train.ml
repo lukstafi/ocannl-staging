@@ -230,6 +230,23 @@ let every_non_literal_materialized =
     same caveats apply (notably [timing_ctx] and non-idempotent routines — both arms share
     [timing_ctx]'s device for their searches).
 
+    An arm that fails is a {e losing} arm, not a failed run (gh-ocannl-550): a search that
+    terminates on a fatal failure ranks at [infinity], the other arm's completed winner ships and
+    stays cached, and the failed arm's own (partial) report — carrying its [terminal_failure] —
+    still reaches [report] in position, so the failure is recorded rather than downgraded to "that
+    arm merely lost". A partial arm's [best_ms] is deliberately {e not} shippable and not compared:
+    {!Autotune.tune} raised, so no routine was compiled from [ctx] for it. Only when every arm fails
+    does [tune_placements] propagate, with the first failure's original backtrace — with two
+    exceptions that are not the arm's to absorb and propagate at once: process-level failures
+    ([Out_of_memory], [Sys.Break]) and compiler invariant violations ([Assert_failure],
+    [Stack_overflow]), the same classes {!Ir.Schedule_outcome.classify_raw} refuses to classify.
+    A [report] callback's own exception likewise propagates rather than counting as an arm failure,
+    and so does a failure that poisoned the lineage the arms share ({!Context.poisoned_failure}):
+    every timing run in the sibling would then refuse to execute, so the second arm can only burn a
+    search proving it. Consumers
+    attributing arms by arrival order should read [terminal_failure] (equivalently [partial]) before
+    [best_ms], as benchmarks/runners/ocannl/bench_harness.ml does.
+
     The arms differ in which candidates {e exist}, not only in how they rank: a tensorized candidate
     is seeded only when the matmul site's operand and destination storage precisions resolve to a
     tile the backend advertises ({!Autotune.mma_tile_for_precisions}), and placement decides which
@@ -270,32 +287,168 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
   let last = ref None in
   (* The public [?report] contract is positional — arm A's report then arm B's, which consumers
      (e.g. the benchmark harness) attribute by arrival order — so flip-refinement searches report
-     through the separate [?flip_report] instead ([~to_report] selects the callback). *)
+     through the separate [?flip_report] instead ([~to_report] selects the callback).
+
+     gh-ocannl-550: the arms are independent experiments, so one arm's terminal failure is no
+     evidence about another arm's completed result — and must not destroy it. Per-candidate
+     containment inside a search is {!Autotune.tune}'s job (gh-ocannl-533/536) and it holds: on the
+     reproduction that motivated this (benchmarks/report-gh528-gpt2-cuda.md §3, five of five tf32
+     gpt2_mini runs) the OOMing candidates were absorbed as ordinary [Backend_link] declines and the
+     search ran to its end. What escaped is the aftermath: with the device exhausted, the arm's
+     winner replay could not compile and neither could its untuned-default fallback, so
+     [Autotune.tune] raised — and with no handler here, arm B's failure took arm A's already
+     finished, already cached winner (106.389 ms, the best arm-A result of that whole leg) out of
+     the process with it. Catching per arm is the whole fix: a failed search returns [Error] and
+     ranks at [infinity], which is not the same as a completed search that timed nothing (which
+     returns the untuned default compile and also ranks at [infinity] — hence [Result.t] rather than
+     a sentinel time). *)
+  (* The arms are contained; two classes of failure are not the arm's to absorb, and they are the
+     same two {!Ir.Schedule_outcome.classify_raw} refuses to classify one level down — containing
+     them here would re-absorb exactly what that policy exists to refuse.
+
+     - Process-level ([Out_of_memory] on the host heap, [Sys.Break]): no evidence about this arm and
+       nothing to fall back to. Swallowing an interrupt to go run the other arm would make Ctrl-C
+       during a half-hour search do nothing.
+     - Compiler invariant violations ([Assert_failure], [Stack_overflow]): a tuner bug, not a
+       schedule that lost. Demoting one to "that arm lost" would let a process exit 0 with a shipped
+       winner and the bug unmentioned outside the report. (A stale cache entry tripping an assert is
+       already turned into a classified decline inside {!Autotune.tune} under [Cache_replay]
+       provenance, so it never reaches here as an exception.)
+
+     The device OOM this containment exists for is an ordinary [Invalid_argument] from the driver
+     and stays contained. *)
+  let must_propagate = function
+    | Out_of_memory | Stdlib.Sys.Break | Stack_overflow | Assert_failure _ -> true
+    | _ -> false
+  in
+  (* A [report] callback exception is the caller's failure, not the search's — {!Autotune.tune}
+     propagates it deliberately on the completion path — so it is re-raised rather than reclassified
+     as an arm failure (which would hide it, and could ship the other arm even though this search
+     completed). It is marked by WRAPPING it at the raise site: a nullary exception ([Exit],
+     [End_of_file]) is a singleton value, so physical identity cannot tell a callback's [Exit] from
+     an arm failure's, and the tuner's fatal path deliberately swallows the callback's exception and
+     raises the arm's — the very case a same-value collision would misread as "the callback failed".
+     A wrapper the tuner never constructs cannot collide: whatever comes out unwrapped is the
+     search's. The rendered message is carried alongside because the tuner prints the wrapper with
+     the default exception printer when it swallows it, and that printer shows string fields only. *)
+  let exception Report_callback_failed of string * exn * Stdlib.Printexc.raw_backtrace in
   let tune ?to_report arm ctx timing_ctx =
     let to_report = Option.value to_report ~default:report in
     let capture r =
       last := Some r;
-      Option.iter to_report ~f:(fun f -> f r)
+      Option.iter to_report ~f:(fun f ->
+          match f r with
+          | () -> ()
+          (* Wrapped so it can be told apart from the search's own failures — except when it is
+             process-fatal, where that distinction is pointless and the wrapper would hide it from
+             the tuner's own guard on the fatal path (which re-raises such exceptions rather than
+             swallowing them). *)
+          | exception exn when must_propagate exn -> raise exn
+          | exception exn ->
+              raise
+                (Report_callback_failed
+                   (Exn.to_string exn, exn, Stdlib.Printexc.get_raw_backtrace ())))
     in
     logf "arm %s search:" arm;
     last := None;
     let result =
-      Autotune.tune ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ~report:capture ctx comp
-        bindings
+      match
+        Autotune.tune ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ~report:capture ctx comp
+          bindings
+      with
+      | compiled -> Ok compiled
+      (* Unwrapped, so the caller sees its own exception with its own backtrace: the wrapper is an
+         internal marker, not part of this function's contract. *)
+      | exception Report_callback_failed (_, callback_exn, callback_backtrace) ->
+          Stdlib.Printexc.raise_with_backtrace callback_exn callback_backtrace
+      | exception exn ->
+          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+          if must_propagate exn then Stdlib.Printexc.raise_with_backtrace exn backtrace
+          else Error (exn, backtrace)
     in
-    let r = !last in
-    let best_ms = Option.value_map r ~default:Float.infinity ~f:(fun r -> r.Autotune.best_ms) in
-    logf "arm %s best: %.4f ms (%s)" arm best_ms
-      (Option.value_map r ~default:"no report" ~f:(fun r ->
-           Printf.sprintf "%s%s, best tensorized %s"
-             (if String.is_empty r.Autotune.best_label then "nothing timed"
-              else r.Autotune.best_label)
-             (if r.Autotune.best_tensorized then " [tensorized]" else "")
-             (if Float.is_inf r.Autotune.mma_best_ms then "none"
-              else Printf.sprintf "%.4f ms" r.Autotune.mma_best_ms)));
+    let r =
+      match (!last, result) with
+      | (Some _ as reported), _ -> reported
+      | None, Ok _ -> None
+      | None, Error (exn, _) ->
+          (* [?report] is positional and consumers name arms by arrival order, so an arm that
+             reported nothing must still occupy its slot — otherwise the surviving arm's report
+             arrives first and is attributed to this arm's position. {!Autotune.tune} now reports on
+             every path, each pre-search failure carrying the phase it died at, so this is the
+             backstop for a raise from outside that contract; [Transform] is the tuner's own
+             convention for an unattributed failure, and the detail says the phase is not known. *)
+          let slot =
+            {
+              Autotune.no_search_report with
+              partial = true;
+              best_label = "";
+              terminal_failure =
+                Some
+                  {
+                    Autotune.phase = Ir.Schedule_outcome.Transform;
+                    candidate = None;
+                    detail =
+                      Printf.sprintf
+                        "arm terminated before the search reported anything (phase unknown): %s"
+                        (Exn.to_string exn);
+                  };
+            }
+          in
+          last := Some slot;
+          (* Best-effort, like the tuner's own fatal-path reporting: this is already the failure
+             path, and the arm failure is the error worth propagating. *)
+          (try Option.iter to_report ~f:(fun f -> f slot)
+           with report_exn when not (must_propagate report_exn) ->
+             Stdio.eprintf "tune_placements: arm-slot report callback failed: %s\n%!"
+               (Exn.to_string report_exn));
+          Some slot
+    in
+    let best_ms =
+      match result with
+      (* Not [r.best_ms]: the partial report's best is a measurement of the search context, and no
+         routine was compiled from [ctx] for it. There is nothing to ship at that time. *)
+      | Error _ -> Float.infinity
+      | Ok _ -> Option.value_map r ~default:Float.infinity ~f:(fun r -> r.Autotune.best_ms)
+    in
+    (match result with
+    | Error (exn, _) ->
+        logf "arm %s FAILED, it loses the comparison (%s): %s" arm
+          (Option.value_map r ~default:"it reported nothing" ~f:(fun r ->
+               if Float.is_inf r.Autotune.best_ms then "it had timed nothing"
+               else
+                 Printf.sprintf "its pre-failure best of %.4f ms is not shippable"
+                   r.Autotune.best_ms))
+          (Exn.to_string exn)
+    | Ok _ ->
+        logf "arm %s best: %.4f ms (%s)" arm best_ms
+          (Option.value_map r ~default:"no report" ~f:(fun r ->
+               Printf.sprintf "%s%s, best tensorized %s"
+                 (if String.is_empty r.Autotune.best_label then "nothing timed"
+                  else r.Autotune.best_label)
+                 (if r.Autotune.best_tensorized then " [tensorized]" else "")
+                 (if Float.is_inf r.Autotune.mma_best_ms then "none"
+                  else Printf.sprintf "%.4f ms" r.Autotune.mma_best_ms))));
     (result, best_ms, r)
   in
+  (* The arms are independent experiments but they are not independent lineages: the B arm searches
+     in a {!Context.decide_materialized} sibling, which shares the execution ledger. A failure whose
+     damage the backend could not bound ([Writes_may_have_occurred], or an unattributed launch/sync
+     failure) poisons that ledger, and every timing run in the sibling then refuses to execute — so
+     the next arm cannot produce a result, only burn a search proving it. Propagate the failure that
+     poisoned it instead, which is also the honest error: the second arm's failures would all be
+     consequences of the first (gh-ocannl-550). Giving each arm its own root lineage is the other
+     way out, at the cost of re-initializing the caller's parameters per arm. *)
+  let search_lineage = Option.value timing_ctx ~default:ctx in
+  let lineage_poisoned () = Option.is_some (Context.poisoned_failure search_lineage) in
+  let propagate_if_poisoned who = function
+    | Error (exn, backtrace) when lineage_poisoned () ->
+        logf "arm %s poisoned the shared %s lineage, so no sibling arm can run: propagating" who
+          (if Option.is_some timing_ctx then "timing" else "caller's");
+        Stdlib.Printexc.raise_with_backtrace exn backtrace
+    | _ -> ()
+  in
   let a, a_ms, a_report = tune "A (default placements)" ctx timing_ctx in
+  propagate_if_poisoned "A" a;
   let embedded = ref [] in
   Tensor.iter_embedded ~f:(fun tn -> embedded := tn :: !embedded) loss;
   (* [decide_materialized] skips the nodes constrained away from materialization (constants,
@@ -305,8 +458,26 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
   let b, b_ms, b_report =
     tune "B (materialize-all)" (materialize ctx) (Option.map timing_ctx ~f:materialize)
   in
-  let a_wins = Float.( <= ) a_ms b_ms in
-  logf "winner: arm %s (A %.4f ms vs B %.4f ms)" (if a_wins then "A" else "B") a_ms b_ms;
+  (* Both arms gone: there is no winner to ship, and the first failure is the one that has not been
+     cascaded from — a device the other arm's failure exhausted or a lineage it poisoned would
+     otherwise be reported as the cause. *)
+  (match (a, b) with
+  | Error (a_exn, a_backtrace), Error (b_exn, _) ->
+      logf "both arms failed, nothing to ship (A: %s; B: %s)" (Exn.to_string a_exn)
+        (Exn.to_string b_exn);
+      Stdlib.Printexc.raise_with_backtrace a_exn a_backtrace
+  | _ -> ());
+  let a_wins =
+    match (a, b) with
+    (* A failed arm never wins, whatever the other arm's time is — including [infinity], which a
+       completed search that timed nothing legitimately reports. *)
+    | Ok _, Error _ -> true
+    | Error _, Ok _ -> false
+    | Ok _, Ok _ | Error _, Error _ -> Float.( <= ) a_ms b_ms
+  in
+  let arm_ms r ms = match r with Error _ -> "FAILED" | Ok _ -> Printf.sprintf "%.4f ms" ms in
+  logf "winner: arm %s (A %s vs B %s)" (if a_wins then "A" else "B") (arm_ms a a_ms)
+    (arm_ms b b_ms);
   (* gh-ocannl-546: a tensorized winner of the arm that is then discarded reaches no artifact and no
      end-to-end number, so the placement A/B is where it has to be said. Stated as the margin it
      lost by, not as a bare flag: on a small routine the arms can be separated by less than the
@@ -315,10 +486,12 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
   Option.iter dropped ~f:(fun d ->
       if d.Autotune.best_tensorized then
         logf
-          "NOTE arm %s crowned a tensorized candidate (%s at %.4f ms) and did NOT ship: arm %s wins \
-           the placement A/B at %.4f ms%s"
+          "NOTE arm %s crowned a tensorized candidate (%s at %.4f ms%s) and did NOT ship: arm %s \
+           wins the placement A/B at %.4f ms%s"
           (if a_wins then "B" else "A")
           d.Autotune.best_label d.Autotune.best_ms
+          (* A partial arm's crown is mid-search: it lost the A/B by failing, not by its time. *)
+          (if Option.is_some d.Autotune.terminal_failure then ", before that arm failed" else "")
           (if a_wins then "A" else "B")
           (if a_wins then a_ms else b_ms)
           (Option.value_map shipped ~default:"" ~f:(fun s ->
@@ -334,7 +507,25 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
     | Some n -> n
     | None -> Int.of_string (Utils.get_global_arg ~arg_name:"tune_inline_flips" ~default:"0")
   in
-  if inline_flips <= 0 then winner
+  (* The unwrap is the type-level statement of an invariant already established above: both arms
+     [Error] propagated, [a_wins] never picks a failed arm, and the flip chain only ever replaces
+     its incumbent with a strictly faster {e completed} search ([infinity] ranks a failed one). *)
+  let ship = function
+    | Ok compiled -> (
+        (* A later arm can poison the lineage after this one succeeded. With a [timing_ctx] that is
+           the scratch lineage and the winner — compiled from [ctx] — is unaffected. WITHOUT one the
+           arms search in the caller's own lineage, so the winner's first [Context.run] is
+           guaranteed to raise: handing it back would report success for a routine that cannot
+           execute, and blame it on whichever routine poisoned the ledger. The poisoning failure is
+           the honest answer, at the point where it is known. *)
+        match if Option.is_none timing_ctx then Context.poisoned_failure ctx else None with
+        | None -> compiled
+        | Some poisoned ->
+            logf "the winner cannot ship: a later arm poisoned the caller's lineage";
+            raise poisoned)
+    | Error (exn, backtrace) -> Stdlib.Printexc.raise_with_backtrace exn backtrace
+  in
+  if inline_flips <= 0 then ship winner
   else (
     (* gh-555: greedy per-node refinement over the inlining decision vector. The vector lives on
        the default-policy arm (arm B's placements are caller-seeded wholesale, so its compile
@@ -383,17 +574,23 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
         in
         let ctx' = apply base_ctx in
         let timing' = Option.map base_timing ~f:apply in
-        let r, ms, _rep = tune ~to_report:flip_report arm ctx' timing' in
-        if Float.(ms < chain_ms) then chain := (r, ms, ctx', timing'));
+        (* Same lineage, same rule as the A/B above: a poisoned one refuses every timing run, so a
+           further search can only fail. Unlike the arms, there is nothing to propagate here — the
+           A/B winner is already in hand — so the refinement just stops. *)
+        if lineage_poisoned () then
+          logf "flip refinement stopped: the shared lineage is poisoned"
+        else
+          let r, ms, _rep = tune ~to_report:flip_report arm ctx' timing' in
+          if Float.(ms < chain_ms) then chain := (r, ms, ctx', timing'));
     let chain_result, chain_ms, _, _ = !chain in
     if Float.(chain_ms < winner_ms) then (
       logf "flip refinement ships: %.4f ms (the placement A/B winner was %.4f ms)" chain_ms
         winner_ms;
-      chain_result)
+      ship chain_result)
     else (
       logf "flip refinement did not improve on the A/B winner (%.4f ms vs %.4f ms)" chain_ms
         winner_ms;
-      winner))
+      ship winner))
 
 module Lazy = Utils.Lazy
 

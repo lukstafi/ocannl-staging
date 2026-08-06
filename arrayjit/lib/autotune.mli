@@ -277,9 +277,18 @@ type report = {
           census records so a previously-proposed site — or a candidate space the backend's
           execution model empties — never stops being proposed silently. *)
   partial : bool;
-      (** [true] when candidate work terminated on a fatal failure after the baseline was handled.
-          A base compile that fails before the base lowering is captured, and a baseline timing
-          failure, occur before reporting begins. *)
+      (** [true] when the call terminated on a fatal failure instead of completing. {!tune} reports
+          exactly once per call, on every path that does any work (gh-ocannl-550) — argument
+          validation is the exception, and deliberately so: an incompatible [timing_ctx] is a
+          precondition violation detected before anything happens, not an outcome of a search, and
+          reporting it would attribute a phase to a call that never reached one. The failures that
+          precede the search
+          proper — a base compile that fails before the base lowering is captured, a fatal baseline
+          link, a fatal cache replay, a baseline timing failure — and the untuned fallback compiles
+          of a search-less call ([search=false]) report with every counter at the value it had
+          reached and the failure in [terminal_failure], so a caller attributing arms by arrival
+          order (the positional [?report] of [Train.tune_placements]) still gets a slot for the
+          search that died. *)
   baseline_declined : bool;
       (** The serial baseline's own compile was rejected with a typed cause and the search ran on
           the scheduled candidates alone (gh-ocannl-533): [baseline_ms] is then [infinity] and the
@@ -290,7 +299,9 @@ type report = {
       (** Candidate rejections aggregated by stable cause key. Their counts sum to
           [candidates_failed]. Cache-entry replay failures are excluded. *)
   terminal_failure : terminal_failure option;
-      (** The fatal failure that stopped a partial search; [None] on completed reports. *)
+      (** The fatal failure that stopped a partial search; [None] on completed reports. [phase] is
+          the one the failure carries — where the search actually died (at link, at launch, at
+          sync), not where the report was assembled. *)
   rounds_run : int;  (** Beam-expansion rounds actually executed (0 = seeds only). *)
   sketch_candidates : int;
       (** Whole-routine matmul-sketch instantiations seeded (0 when no matmul micro-kernel was
@@ -503,6 +514,18 @@ val set_test_bindings : Context.routine -> unit
     symbolic extents at their upper bound [range] (the schedule-cache identity is
     extent-value-independent, so the single tuned entry is measured at the maximum). Unranged
     bindings are left at their current values. Exposed for tests and custom timing harnesses. *)
+
+val on_candidate_attempt : (string -> unit) ref
+(** Fault-injection seam for the containment tests (gh-ocannl-550), called with each candidate's
+    label just before its compile — including the baseline's, which is a candidate (gh-ocannl-533);
+    that one is called inside the base compile's transform, so a fault injected there is classified
+    like any other and surfaces as the pre-search failure of a search that never started. The
+    default is a no-op and no configuration selects it; raising
+    from it terminates the search the way an uncontainable failure does — the partial report
+    (carrying [terminal_failure]) is emitted to [?report] and the exception propagates out of
+    {!tune}, which is what [Train.tune_placements] must survive without losing the other arm's
+    winner. Not a production seam: candidate failures that a backend {e can} attribute are
+    contained without it (see [declines]). *)
 
 val tune :
   ?search:bool ->

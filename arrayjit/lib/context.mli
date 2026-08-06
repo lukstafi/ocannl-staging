@@ -94,6 +94,16 @@ val run : t -> routine -> t
 (** Execute a compiled routine. Mutates buffers in-place. Returns updated context with newly
     initialized nodes tracked. Raises [Failure] if execution dependencies are not satisfied. *)
 
+val check_runnable : t -> routine -> unit
+(** {!run}'s pre-dispatch validation on its own — poisoned lineage, uninitialized inputs,
+    unsatisfied execution dependencies, out-of-range bindings — raising exactly what [run] would.
+    All of it precedes the dispatch, so a failure here proves nothing was executed and no device
+    buffer was written. That is the point (gh-ocannl-550): a caller that runs a routine inside a
+    launch-tagged failure boundary validates through this {e outside} the boundary, so a failure
+    the backend cannot attribute {e inside} it means dispatch was attempted and the lineage must be
+    condemned — while an unsatisfied dependency, which the caller can fix and retry, does not
+    condemn anything. *)
+
 val sync : t -> unit
 (** Blocks until the context's device is idle. Host reads ({!to_host}, {!get_values}) synchronize on
     their own; explicit [sync] is for timing runs (e.g. the autotuner) and for fencing against
@@ -120,6 +130,12 @@ val poison_lineage : t -> routine_name:string -> exn -> unit
     the lineage raises, naming the routine and the original failure. There is deliberately no
     restore: recovering would mean rebuilding inputs and parameters, which the current
     [timing_ctx]-shaped API cannot express (gh-ocannl-536). *)
+
+val poisoned_failure : t -> exn option
+(** The failure that poisoned this execution lineage, if any — the exception every entrypoint on it
+    now raises. Lets a caller that would otherwise start fresh work on the lineage see that it
+    cannot run: [Train.tune_placements] checks it before searching the second placement arm, since
+    the arms share a lineage and a poisoned one refuses every timing run (gh-ocannl-550). *)
 
 val hardware_limits : t -> Ir.Backend_intf.hardware_limits
 (** The backend's conservative per-workgroup device limits (all-[None] on backends that do not bind

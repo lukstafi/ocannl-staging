@@ -240,6 +240,18 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   searches crowned four different families in one arm with a 4.5% spread of best times, while the
   arm gap stayed at 57–95% (gh-ocannl-546, benchmarks/report-gh546-metal.md). Conclusions of the
   form "family X wins/never wins here" need repeats; the arm-level verdict does not.
+  The arms are independent experiments and are contained as such since gh-ocannl-550: an arm whose
+  search raises is a LOSING arm (ranked `infinity`), the other arm's winner ships and stays cached,
+  and the failed arm's partial report still arrives in position carrying `terminal_failure` — read
+  that (or `partial`) before `best_ms`, because a partial arm's best is a time whose routine was
+  never compiled. Before that fix, one arm's late failure destroyed the other arm's finished work
+  in-process (the cache entry survived, since `SC.store` precedes the winner replay — so a warm
+  cache could still replay it; five of five tf32 `gpt2_mini` runs lost arm A this way). Note where
+  it escaped: NOT at the failing candidate — candidate-grade protection absorbed those OOMs as
+  `Backend_link` declines — but after the search concluded, when the exhausted device defeated both
+  the winner replay and the untuned-default fallback compile behind it. Containment tests do not
+  need a device that can fail: `Autotune.on_candidate_attempt` injects one
+  (`test/operations/autotune_arm_containment`).
 - Placement decides which tensorized candidates *exist*, not just how they rank, because
   `mma_tile_for_precisions` keys on the storage precisions of the nodes the site actually reads.
   Under the mixed-precision recipe on a uniform-format backend (Metal's `simdgroup_matrix`: no mixed

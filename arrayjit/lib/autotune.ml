@@ -93,6 +93,15 @@ let no_search_report =
     best_schedule = [];
   }
 
+(* Best-effort reporting must stay best-effort for ordinary callback errors and NOT for these: an
+   interrupt or a runtime-fatal condition raised inside a [report] callback is about the process, and
+   swallowing it (on a path that is already failing) would, for a caller that CONTAINS the failure
+   per arm, let a long search carry on through a Ctrl-C (gh-ocannl-550). Same set
+   {!Ir.Schedule_outcome.classify_raw} refuses to classify. *)
+let process_fatal_exn = function
+  | Out_of_memory | Stdlib.Sys.Break | Stack_overflow | Assert_failure _ -> true
+  | _ -> false
+
 type decline_acc = { mutable da_count : int; mutable da_details : string list }
 
 (* Where the candidate died, for the per-candidate log line. Compile-side phases are already
@@ -3740,6 +3749,19 @@ let model_default ?report ctx comp bindings =
 
 (** {2 The search} *)
 
+(* gh-ocannl-550: the containment properties of the search — a failed candidate costs that
+   candidate, a failed search costs that search and not its sibling arm — are only testable with a
+   candidate that fails, and the reproduction that motivated them needs a 12 GB GPU and a
+   half-hour search. This seam manufactures the failure instead. It is called with the candidate's
+   label before each candidate compile; raising from it emulates the shape the device OOM had, a
+   failure that is NOT contained as a candidate decline (there it escaped after the search had
+   concluded, when the exhausted device defeated both the winner replay and its untuned fallback).
+   Not a production seam: default no-op, and no config key selects it. Called for the baseline
+   compile too — it is a candidate (gh-ocannl-533) — which is what makes a failure BEFORE the
+   search has reported anything injectable, the case the positional-arm-slot handling in
+   [Train.tune_placements] exists for. *)
+let on_candidate_attempt : (string -> unit) ref = ref (fun _label -> ())
+
 let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fraction
     ?max_split_reduce_sites ?timing_ctx ?report ctx comp bindings =
   (* gh-ocannl-559: with the search off, [tune] still replays an explicitly provided cache -- a
@@ -3785,6 +3807,51 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
   in
   let static_indices = Idx.bound_symbols bindings in
   let backend = Context.backend_name ctx in
+  let emit_report r = Option.iter report ~f:(fun f -> f r) in
+  (* [tune] reports exactly once per call, on every path (gh-ocannl-550). The failures that happen
+     before (or instead of) the search proper — the base compile failing before its lowering is
+     captured, a fatal baseline link, a fatal cache replay, a baseline timing failure, and either
+     untuned fallback compile of a search-less call — used to raise with no report at all, which
+     leaves a caller that attributes arms by arrival order (the positional [?report] of
+     [Train.tune_placements]) with no slot for this search. The phase reported is the one the
+     failure itself carries, so the diagnostic names where it actually died — at codegen, at link,
+     at launch, at sync — instead of guessing. Reporting is best-effort here, as on the search's own
+     fatal path: it must not replace the compiler failure. [base] carries whatever the call did
+     learn before failing (e.g. a decline census). *)
+  let emit_pre_search_failure ?(base = no_search_report) ~phase ~candidate ~detail () =
+    let r =
+      {
+        base with
+        partial = true;
+        best_label = "";
+        terminal_failure = Some { phase; candidate; detail };
+      }
+    in
+    try emit_report r
+    with report_exn when not (process_fatal_exn report_exn) ->
+      Stdio.eprintf "autotune: pre-search failure report callback failed: %s\n%!"
+        (Exn.to_string report_exn)
+  in
+  let raise_pre_search ?base (failure : Outcome.failure) =
+    (match failure with
+    | Outcome.Classified c ->
+        emit_pre_search_failure ?base ~phase:c.Outcome.phase ~candidate:None
+          ~detail:(Outcome.detail_of_cause c.Outcome.cause) ()
+    | Outcome.Fatal f ->
+        emit_pre_search_failure ?base ~phase:f.Outcome.phase ~candidate:f.Outcome.candidate
+          ~detail:(Exn.to_string f.Outcome.exn) ());
+    Outcome.raise_failure failure
+  in
+  (* The untuned fallback of a search-less call, through the containment-aware form so a failure
+     reports the phase it carries. [Context.compile] is exactly this plus [raise_failure], which is
+     what [raise_pre_search] ends with, so the caller sees the same exception either way. *)
+  let compile_untuned_default ?base () =
+    match
+      Context.compile_outcome ~provenance:Ir.Schedule_outcome.User_schedule ctx comp bindings
+    with
+    | Ok result -> result
+    | Error failure -> raise_pre_search ?base failure
+  in
   (* Without a cache to replay there is nothing for a search-less [tune] to do, so it does not even
      take the base compile that computes the cache key: the caller gets the untuned default compile
      it would have gotten from [Context.compile]. *)
@@ -3793,13 +3860,12 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
     (* Report AFTER the fallback compile: a report is a record of what this call achieved, and
        [no_search_report] says the untuned default shipped. Emitting it first would leave a
        consumer holding a clean, non-partial report for a call that then raised (Codex P2 on PR
-       #291) -- every other fatal path here reports the failure or nothing. *)
-    let result = Context.compile ctx comp bindings in
+       #291); a compile that raises reports its own failure instead (gh-ocannl-550). *)
+    let result = compile_untuned_default () in
     Option.iter report ~f:(fun f -> f no_search_report);
     result)
   else
   let is_gpu = Sched.backend_is_gpu backend and is_cpu = Sched.backend_is_cpu backend in
-  let limits = Context.hardware_limits ctx in
   (* With [timing_ctx], the search (candidate compiles and timing runs) happens against that scratch
      lineage's buffers, and only the winner is compiled from [ctx] — so the timing runs never mutate
      the caller's live state (parameters, accumulators). The scratch context must contain the nodes
@@ -3818,6 +3884,19 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
              "Autotune.tune: timing_ctx must be on the same backend and device as the target \
               context (timing: %s device %d, target: %s device %d)"
              (Context.backend_name tctx) (Context.device_id tctx) backend (Context.device_id ctx)));
+
+  (* Device work, not a pure query: the GPU backends lazily initialize the device and read driver
+     attributes here, so a driver or enumeration error surfaces at this line — the first thing this
+     call does that can fail, and squarely inside the reporting contract. *)
+  let limits =
+    match Context.hardware_limits ctx with
+    | limits -> limits
+    | exception exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        emit_pre_search_failure ~phase:Outcome.Hardware_limits ~candidate:None
+          ~detail:(Exn.to_string exn) ();
+        Stdlib.Printexc.raise_with_backtrace exn backtrace
+  in
   let search_ctx = Option.value timing_ctx ~default:ctx in
   (* The base compile: identity transform (= the serial baseline candidate), capturing the optimized
      code every candidate derives from (see [compile_candidate]) and its canonical form.
@@ -3851,6 +3930,11 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
   let base_outcome =
     Context.compile_outcome
       ~lowered_transform:(fun opt ->
+        (* Inside the transform, so an injected fault is classified by the ordinary machinery
+           (phase [Transform], provenance [Candidate]) and reaches [raise_pre_search] below with a
+           real phase and a report — rather than escaping the whole call unreported, which would
+           break the exactly-once contract for direct [tune] callers. *)
+        !on_candidate_attempt "baseline";
         base_capture := Some (opt, SC.canonicalize ~static_indices opt);
         opt)
       ~provenance:Outcome.Candidate ~candidate:"baseline" search_ctx comp bindings
@@ -3859,14 +3943,14 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
     match (!base_capture, base_outcome) with
     | Some oc, _ -> oc
     (* Failed before reaching the transform: there is no base lowering, hence no search. *)
-    | None, Error failure -> Outcome.raise_failure failure
+    | None, Error failure -> raise_pre_search failure
     | None, Ok _ -> failwith "Autotune.tune: backend compile did not invoke lowered_transform"
   in
   let baseline_linked, baseline_decline =
     match base_outcome with
     | Ok (bctx, broutine) -> (Some (bctx, broutine), None)
     | Error (Outcome.Classified classified) -> (None, Some classified)
-    | Error (Outcome.Fatal _ as failure) -> Outcome.raise_failure failure
+    | Error (Outcome.Fatal _ as failure) -> raise_pre_search failure
   in
   let base_digest = SC.digest canon in
   let use_cache = (not (String.is_empty cache_dir)) && SC.complete canon in
@@ -3881,7 +3965,6 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
     compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ~provenance ctx comp
       bindings
   in
-  let emit_report r = Option.iter report ~f:(fun f -> f r) in
   let flat_schedule = function
     | Whole_saved saved -> saved
     | Fiss_saved assoc -> List.concat_map assoc ~f:snd
@@ -3913,6 +3996,17 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
      below — the two are mutually exclusive accounts of one baseline, and the gh-ocannl-532 refusal
      asserts a reason ("binds no hardware dimension") that is not why this baseline did not run. *)
   Option.iter baseline_decline ~f:(record_decline declines);
+  (* What the call has learned by now: everything after this point reports on top of it, success or
+     failure, so a pre-search failure never understates the work already attempted (a declined
+     baseline in particular must not read back as [baseline_declined = false], [declines = []]). *)
+  let census () =
+    {
+      no_search_report with
+      candidates_failed = failed_count declines;
+      baseline_declined = Option.is_some baseline_decline;
+      declines = decline_summaries declines;
+    }
+  in
   let cached =
     if use_cache then
       match SC.lookup ~dir:cache_dir ~key with
@@ -3995,7 +4089,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
               logf "cache entry replay FAILED, re-searching: %s"
                 (Outcome.detail_of_cause classified.cause);
               None
-          | Error (Outcome.Fatal _ as failure) -> Outcome.raise_failure failure)
+          | Error (Outcome.Fatal _ as failure) -> raise_pre_search ~base:(census ()) failure)
       | _ -> None
     else None
   in
@@ -4003,15 +4097,11 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
   | Some result -> result
   | None when not search ->
       logf "search disabled (autotune_search=false) and no cache entry: compiling the untuned default";
-      (* After the compile, as in the no-cache branch above. *)
-      let result = Context.compile ctx comp bindings in
-      emit_report
-        {
-          no_search_report with
-          candidates_failed = failed_count declines;
-          baseline_declined = Option.is_some baseline_decline;
-          declines = decline_summaries declines;
-        };
+      (* After the compile, as in the no-cache branch above. The census the base compile already
+         produced is carried whether this succeeds or fails. *)
+      let reached = census () in
+      let result = compile_untuned_default ~base:reached () in
+      emit_report reached;
       result
   | None -> (
       let seen = Hash_set.create (module String) in
@@ -4051,15 +4141,63 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
               mma_renders = [];
             })
       in
-      (* Baseline timing runs uncaught: its failures (e.g. uninitialized inputs) are the user's bug,
-         with the same message [Context.run] would give. On a GPU backend the baseline is the
+      (* Baseline timing failures are the user's bug (e.g. uninitialized inputs) and propagate as
+         the exception [Context.run] would give — reported first, with the phase they carry, so the
+         arm still occupies its slot (gh-ocannl-550). On a GPU backend the baseline is the
          unscheduled serial form and is not dispatched at all (see [dispatchable]); [infinity] is
          its rank, so every timed candidate beats it and the search never returns it (see the
          fallback at the end), and a declined baseline ranks the same way. *)
       let baseline_dispatched = Option.is_some baseline && dispatchable ~is_gpu [ base_opt ] in
       let baseline_ms =
         match baseline with
-        | Some b when baseline_dispatched -> time_routine ~repeats b.cctx b.routine
+        | Some b when baseline_dispatched -> (
+            (* Still uncaught in the sense that matters — the caller sees the same exception
+               [Context.run] would raise, unwrapped and with its own backtrace. The tagging is only
+               so the report can name the phase (launch vs. sync) before it propagates.
+
+               The lineage effect is NOT optional, though, and it is why this consults the backend's
+               classifier like the candidate timing below (gh-ocannl-550): a baseline launch that may
+               have written buffers leaves the lineage unusable, and a caller that CONTAINS this
+               failure — [Train.tune_placements] does, per arm — would otherwise go on to time its
+               other arm against buffers the failed baseline had already modified. Proven
+               write-free, the routine's execution claim is withdrawn instead; unattributed, the
+               device's state is unknown and the lineage is condemned, exactly as an unattributed
+               candidate launch failure condemns it. *)
+            let condemn phase exn =
+              match Context.failure_classifier b.cctx phase exn with
+              | Some { Ir.Schedule_outcome.execution_effect = Outcome.No_device_writes; _ } ->
+                  Context.rollback_execution b.cctx (Context.routine_id b.routine)
+              | Some _ | None ->
+                  Context.poison_lineage b.cctx ~routine_name:(Context.routine_name b.routine) exn
+            in
+            (* Validated OUTSIDE the tagged region, so [condemn] below only ever judges a failure
+               that got as far as dispatch. [Context.run]'s pre-dispatch checks — an unsatisfied
+               dependency, an out-of-range binding — write nothing and are the caller's to fix and
+               retry, and on a backend whose classifier attributes nothing (the C backends) they
+               would otherwise condemn the lineage and make that retry impossible. Reported like any
+               other pre-search failure, and re-raised as [Context.run] would raise it. *)
+            (match Context.check_runnable b.cctx b.routine with
+            | () -> ()
+            | exception exn ->
+                let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+                emit_pre_search_failure ~base:(census ()) ~phase:Outcome.Launch
+                  ~candidate:(Some "baseline") ~detail:(Exn.to_string exn) ();
+                Stdlib.Printexc.raise_with_backtrace exn backtrace);
+            match
+              time_routine ~tag_failures:true ~repeats b.cctx b.routine
+            with
+            | ms -> ms
+            | exception Outcome.Raised_at (phase, exn, backtrace) ->
+                condemn phase exn;
+                emit_pre_search_failure ~base:(census ()) ~phase ~candidate:(Some "baseline")
+                  ~detail:(Exn.to_string exn) ();
+                Stdlib.Printexc.raise_with_backtrace exn backtrace
+            | exception exn ->
+                let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+                condemn Outcome.Launch exn;
+                emit_pre_search_failure ~base:(census ()) ~phase:Outcome.Launch
+                  ~candidate:(Some "baseline") ~detail:(Exn.to_string exn) ();
+                Stdlib.Printexc.raise_with_backtrace exn backtrace)
         | _ -> Float.infinity
       in
       (match baseline_decline with
@@ -4182,10 +4320,25 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
            failure or its raw backtrace. *)
         partial_emitted := true;
         (try emit_report partial_report
-         with report_exn ->
+         with report_exn when not (process_fatal_exn report_exn) ->
            Stdio.eprintf "autotune: partial-report callback failed: %s\n%!"
              (Exn.to_string report_exn));
         Outcome.raise_failure (Outcome.Fatal fatal)
+      in
+      (* The post-search fallbacks to the untuned default (nothing timed; the winner replay failed
+         or degenerated). Through the containment-aware form, so a failure here reports the phase it
+         carries — the outer catch-all would otherwise record every one of them as [Transform],
+         which for a link failure is simply wrong. The exception the caller sees is unchanged:
+         [emit_partial_and_raise] ends in [raise_failure], exactly as [Context.compile] does. *)
+      let untuned_default_or_raise () =
+        match
+          Context.compile_outcome ~provenance:Ir.Schedule_outcome.User_schedule ctx comp bindings
+        with
+        | Ok result -> result
+        | Error (Outcome.Fatal fatal) -> emit_partial_and_raise fatal
+        | Error (Outcome.Classified classified) ->
+            emit_partial_and_raise
+              (Outcome.fatal_of_classified ~candidate:"untuned default fallback" classified)
       in
       let search () =
       (* gh-ocannl-521: tensorized candidates are counted where they are TIMED, not where they are
@@ -4196,6 +4349,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
          [try_spec] without appearing in the seed list, and counting only seeds in the denominator
          would let [mma_timed] exceed [mma_candidates] on a multi-segment routine. *)
       let try_spec spec =
+        !on_candidate_attempt (spec_label spec);
         if spec_expects_mma spec then Int.incr n_mma_proposed;
         match compile_spec spec with
         | Error (Outcome.Classified classified) ->
@@ -4663,7 +4817,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
              unbounded. The untuned default pipeline is the honest fallback: the same code the
              caller would have compiled without the tuner. *)
           logf "nothing was timed: falling back to the untuned default compile (gh-ocannl-532)";
-          Context.compile ctx comp bindings)
+          untuned_default_or_raise ())
         else
           (* [nothing_timed] is false, so the beam holds a timed winner. *)
           let best_c = Option.value_exn best_c ~message:timed_winner_exists in
@@ -4687,14 +4841,14 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                  fallback a failed replay takes. *)
               logf "winner replay produced an unparallelized routine, falling back: %s"
                 (spec_label spec);
-              Context.compile ctx comp bindings
+              untuned_default_or_raise ()
           | Ok c ->
               logf "winner replay ok: %s" (spec_label spec);
               (c.cctx, c.routine)
           | Error (Outcome.Classified classified) ->
               logf "winner replay FAILED (%s), falling back to the default compile: %s"
                 (spec_label spec) (Outcome.detail_of_cause classified.cause);
-              Context.compile ctx comp bindings
+              untuned_default_or_raise ()
           | Error (Outcome.Fatal fatal) -> emit_partial_and_raise fatal
       in
       (result, completed_report)
