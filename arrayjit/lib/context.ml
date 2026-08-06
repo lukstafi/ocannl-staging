@@ -734,3 +734,165 @@ let decide_inline ctx tns =
       }
   in
   { ctx with wrapped }
+
+(* {2 gh-ocannl-498: budget-driven recompute-vs-store} *)
+
+type memory_budget = Bytes of int | Minimize [@@deriving sexp_of]
+
+type budget_plan = {
+  bp_baseline : Backends.footprint;
+  bp_final : Backends.footprint;
+  bp_flips : (Tn.t * int * int) list;
+  bp_considered : int;
+  bp_dropped : int;
+  bp_within_budget : bool;
+}
+[@@deriving sexp_of]
+
+let log_memory_budget () = Utils.get_global_flag ~default:false ~arg_name:"log_memory_budget"
+
+(* One hermetic analysis of [comp] from [ctx]'s lineage with [inline] additionally preferred inline:
+   the footprint the resulting placement vector implies, plus the decision surface it reports.
+   [Backends.lower_assignments] forks the lineage state, so nothing here reaches [ctx] -- and the
+   gh-560 analysis cache makes every call after the first one a specialization replay. *)
+let analyze_footprint ?name ~(inline : Tn.t list) ctx comp bindings :
+    Backends.footprint * Ir.Low_level.flip_candidate list =
+  let optim_ctx = Backends.query ctx.wrapped { q = (fun _ c -> c.BI.optimize_ctx) } in
+  let optim_ctx = Ir.Low_level.copy_optimize_ctx optim_ctx in
+  List.iter inline ~f:(Hash_set.add optim_ctx.Ir.Low_level.inline_preferences);
+  let _name, (lowered : Ir.Low_level.optimized) =
+    Backends.lower_assignments optim_ctx ?name bindings comp.Asgns.asgns
+  in
+  ( Backends.score_footprint ~backend_name:(backend_name ctx) ~limits:(hardware_limits ctx)
+      ~static_indices:(Idx.bound_symbols bindings) lowered,
+    lowered.Ir.Low_level.flip_candidates )
+
+let footprint ?name ctx comp bindings = fst (analyze_footprint ?name ~inline:[] ctx comp bindings)
+
+let plan_memory_budget ?name ?(max_candidates = 32) ~budget ctx comp bindings =
+  if not (Utils.get_global_flag ~default:false ~arg_name:"buffer_aliasing") then
+    raise
+    @@ Utils.User_error
+         "Context.plan_memory_budget: a memory budget needs the liveness memory planner (config \
+          buffer_aliasing=true) -- without it every node is always-live, the footprint score \
+          degenerates to bump packing, and the relief of demoting an intermediate is unrelated to \
+          what the allocator would do"
+  else begin
+    let logf fmt =
+      Stdlib.Printf.ksprintf
+        (fun s -> if log_memory_budget () then Stdio.eprintf "memory budget: %s\n%!" s)
+        fmt
+    in
+    let score inline = fst (analyze_footprint ?name ~inline ctx comp bindings) in
+    let bp_baseline, surface = analyze_footprint ?name ~inline:[] ctx comp bindings in
+    (* The acceptance-stopping predicate: [Minimize] is never satisfied, so it keeps taking flips
+       that still help. [within] is the reported outcome, where a target-less [Minimize] trivially
+       holds -- there is no budget for it to miss. *)
+    let met (fp : Backends.footprint) =
+      match budget with Minimize -> false | Bytes b -> fp.Backends.fp_total <= b
+    in
+    let within (fp : Backends.footprint) =
+      match budget with Minimize -> true | Bytes b -> fp.Backends.fp_total <= b
+    in
+    let done_ () =
+      {
+        bp_baseline;
+        bp_final = bp_baseline;
+        bp_flips = [];
+        bp_considered = 0;
+        bp_dropped = 0;
+        bp_within_budget = within bp_baseline;
+      }
+    in
+    if met bp_baseline then (
+      logf "baseline %d bytes is already within budget; no flips" bp_baseline.Backends.fp_total;
+      (ctx, done_ ()))
+    else
+      (* Only the [`Inline] direction: demoting a materialized intermediate to recompute-at-use is
+         what relieves footprint. Ranked CHEAPEST-recompute-first for the pre-filter (the surface's
+         own order is most-expensive-first, which the [Materialize]-direction search wants), so a
+         [max_candidates] cut keeps the flips a budget would most want to pay for. *)
+      let all =
+        List.fold surface ~init:[] ~f:(fun acc fc ->
+            match fc.Ir.Low_level.fc_flip with
+            | `Materialize -> acc
+            | `Inline ->
+                if List.exists acc ~f:(fun c -> Tn.equal c.Ir.Low_level.fc_tn fc.Ir.Low_level.fc_tn)
+                then acc
+                else fc :: acc)
+        |> List.sort ~compare:(fun a b ->
+            match Int.compare a.Ir.Low_level.fc_recompute_cost b.Ir.Low_level.fc_recompute_cost with
+            | 0 -> Tn.compare a.Ir.Low_level.fc_tn b.Ir.Low_level.fc_tn
+            | c -> c)
+      in
+      let considered = List.take all max_candidates in
+      let bp_dropped = List.length all - List.length considered in
+      if bp_dropped > 0 then
+        logf "%d of %d inline candidates dropped by max_candidates=%d (cheapest recompute kept)"
+          bp_dropped (List.length all) max_candidates;
+      (* Round 1: each candidate's relief against the ACTUAL baseline layout. A node whose span was
+         already shared relieves nothing on its own (the gh-ocannl-558 lesson in reverse: relief is
+         not a function of the node's own size), and drops out here. *)
+      let scored =
+        List.filter_map considered ~f:(fun fc ->
+            let fp = score [ fc.Ir.Low_level.fc_tn ] in
+            let relief = bp_baseline.Backends.fp_total - fp.Backends.fp_total in
+            logf "candidate %s: recompute cost %d, solo relief %d bytes"
+              (Tn.debug_name fc.Ir.Low_level.fc_tn)
+              fc.Ir.Low_level.fc_recompute_cost relief;
+            if relief > 0 then Some (fc, relief) else None)
+      in
+      (* Relief per recompute cost, compared as a rational (no floats: the ranking must be
+         reproducible bit for bit). Ties fall back to bigger relief, then to uid. *)
+      let ranked =
+        List.sort scored ~compare:(fun (a, ra) (b, rb) ->
+            let ca = max 1 a.Ir.Low_level.fc_recompute_cost
+            and cb = max 1 b.Ir.Low_level.fc_recompute_cost in
+            match Int.compare (rb * ca) (ra * cb) with
+            | 0 -> (
+                match Int.compare rb ra with
+                | 0 -> Tn.compare a.Ir.Low_level.fc_tn b.Ir.Low_level.fc_tn
+                | c -> c)
+            | c -> c)
+      in
+      (* Round 2: accept a prefix, re-scoring the CUMULATIVE vector each time. Inlining one node
+         moves the others' live spans, so a candidate whose solo relief was real can be worth
+         nothing on top of the accepted set -- it is skipped rather than accepted for free. *)
+      let accepted = ref [] and flips = ref [] and cur = ref bp_baseline in
+      List.iter ranked ~f:(fun (fc, solo) ->
+          if not (met !cur) then begin
+            let tn = fc.Ir.Low_level.fc_tn in
+            let cand = tn :: !accepted in
+            let fp = score cand in
+            let marginal = !cur.Backends.fp_total - fp.Backends.fp_total in
+            if marginal > 0 then (
+              logf "accept %s: %d bytes (solo %d), cost %d, footprint now %d" (Tn.debug_name tn)
+                marginal solo fc.Ir.Low_level.fc_recompute_cost fp.Backends.fp_total;
+              accepted := cand;
+              flips := (tn, marginal, fc.Ir.Low_level.fc_recompute_cost) :: !flips;
+              cur := fp)
+            else
+              logf "skip %s: no marginal relief on top of the accepted set (solo was %d)"
+                (Tn.debug_name tn) solo
+          end);
+      let bp_final = !cur in
+      let bp_within_budget = within bp_final in
+      (match budget with
+      | Minimize ->
+          logf "minimized: %d -> %d bytes with %d flip(s)" bp_baseline.Backends.fp_total
+            bp_final.Backends.fp_total (List.length !flips)
+      | Bytes b ->
+          logf "budget %d bytes: %d -> %d bytes with %d flip(s), %s" b bp_baseline.Backends.fp_total
+            bp_final.Backends.fp_total (List.length !flips)
+            (if bp_within_budget then "within budget" else "STILL OVER BUDGET"));
+      let ctx = if List.is_empty !accepted then ctx else decide_inline ctx !accepted in
+      ( ctx,
+        {
+          bp_baseline;
+          bp_final;
+          bp_flips = List.rev !flips;
+          bp_considered = List.length considered;
+          bp_dropped;
+          bp_within_budget;
+        } )
+  end

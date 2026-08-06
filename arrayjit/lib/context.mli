@@ -291,3 +291,79 @@ val decide_inline : t -> Ir.Tnode.t list -> t
     Together with {!decide_materialized} this spans the per-node inlining decision vector:
     [Inline] here, [Materialize] there, the default heuristics elsewhere. Hermetic like
     {!decide_materialized}: the argument context and its other descendants are unaffected. *)
+
+(** {2 Memory-budget planning (gh-ocannl-498)} *)
+
+type memory_budget =
+  | Bytes of int  (** Fit the routine's scored footprint under this many bytes. *)
+  | Minimize  (** Take every flip that relieves footprint, whatever the recompute cost. *)
+[@@deriving sexp_of]
+
+type budget_plan = {
+  bp_baseline : Backends_deprecated.footprint;  (** The default-policy placement vector's score. *)
+  bp_final : Backends_deprecated.footprint;  (** The score after the accepted flips. *)
+  bp_flips : (Ir.Tnode.t * int * int) list;
+      (** The accepted flips in acceptance order: the node demoted to recompute-at-use, the
+          {e marginal} bytes it relieved on top of the flips accepted before it, and its
+          recompute-cost bound. *)
+  bp_considered : int;  (** Inline candidates individually scored. *)
+  bp_dropped : int;  (** Inline candidates the [max_candidates] cut left unscored. *)
+  bp_within_budget : bool;
+      (** Whether [bp_final] meets the budget. Always [false] for {!Minimize}, which has no
+          target. A [false] here is a planning outcome, not an error: the selector reports that
+          the decision vector cannot reach the budget rather than forcing illegal flips. *)
+}
+[@@deriving sexp_of]
+
+val footprint :
+  ?name:string ->
+  t ->
+  Ir.Assignments.comp ->
+  Ir.Indexing.unit_bindings ->
+  Backends_deprecated.footprint
+(** The byte footprint {!compile} of this routine from this context would imply under the default
+    placement policy ({!Backends_deprecated.score_footprint}). Analyze-only and hermetic, exactly
+    like {!decision_surface}: lowering and optimization, no backend codegen, no linking, no effect
+    on the context. *)
+
+val plan_memory_budget :
+  ?name:string ->
+  ?max_candidates:int ->
+  budget:memory_budget ->
+  t ->
+  Ir.Assignments.comp ->
+  Ir.Indexing.unit_bindings ->
+  t * budget_plan
+(** gh-ocannl-498 rematerialization: choose which materialized intermediates to demote to
+    recompute-at-use so that the routine's scored footprint ({!footprint}) fits [budget], and
+    return a child context that decides them inline ({!decide_inline}) together with the plan.
+
+    A deterministic planning pass, not a timed search: recompute-vs-store under a budget is
+    decidable from the two cost sides — the recompute-cost bound each [`Inline] flip candidate
+    carries ({!Ir.Low_level.field-flip_candidates}) and the footprint relief scored against the
+    actual arena layout. Nothing is compiled, linked or executed; given the same code, config and
+    placements the pass always chooses the same flips.
+
+    The selection is greedy in two rounds. First every candidate is scored on its own against the
+    baseline layout, and those relieving nothing are dropped — footprint relief is not a function
+    of the node's own size, since a node whose live span was already shared with another's frees
+    no bytes by leaving. The survivors are ranked by relief per unit of recompute cost (compared
+    as a rational, so the order is bit-reproducible), and accepted as a prefix, re-scoring the
+    cumulative vector at each step: inlining one node moves the others' spans, so a candidate that
+    no longer relieves anything on top of the accepted set is skipped rather than accepted for
+    free. Acceptance stops as soon as the budget is met; {!Minimize} takes every flip that helps.
+
+    [max_candidates] (default 32) bounds the individually-scored candidates, keeping the
+    cheapest-to-recompute ones; the count left unscored is reported as [bp_dropped] and logged
+    under config [log_memory_budget], never silently dropped.
+
+    Only the [`Inline] direction is considered — the opposite of the [`Materialize] chain
+    {!Ir.Low_level.field-flip_candidates} feeds in [Train.tune_placements]. Legality and
+    observability are not this pass's to enforce and it does not try: {!decide_inline} records a
+    preference, the virtualizer's [check_and_store_virtual] settles legality, and a rejected
+    preference simply reproduces the materialized placement — which is why relief is scored from a
+    real lowering rather than assumed.
+
+    Raises {!Ir.Utils.User_error} when config [buffer_aliasing] is off: without the liveness
+    planner every node is always-live and the score has nothing to do with what the allocator
+    would do. *)
