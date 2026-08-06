@@ -295,11 +295,31 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
      ranks at [infinity], which is not the same as a completed search that timed nothing (which
      returns the untuned default compile and also ranks at [infinity] — hence [Result.t] rather than
      a sentinel time). *)
+  (* The arms are contained; the PROCESS is not. An interrupt or a host-heap exhaustion says nothing
+     about this arm, there is nothing to fall back to, and swallowing an interrupt to run the other
+     arm would make Ctrl-C during a half-hour search do nothing. {!Ir.Schedule_outcome.classify_raw}
+     keeps exactly these fatal for the same reason. The device OOM this containment exists for is an
+     ordinary [Invalid_argument] from the driver, so it stays contained. *)
+  let process_fatal = function
+    | Out_of_memory | Stdlib.Sys.Break | Stack_overflow -> true
+    | _ -> false
+  in
   let tune ?to_report arm ctx timing_ctx =
     let to_report = Option.value to_report ~default:report in
+    (* A [report] callback exception is the caller's failure, not the search's — {!Autotune.tune}
+       propagates it deliberately on the completion path — so it is tracked by identity here and
+       re-raised rather than reclassified as an arm failure (which would hide it, and could ship the
+       other arm even though this search completed). Callback failures on the tuner's own fatal path
+       are already swallowed there, so they never reach this identity check. *)
+    let callback_failure = ref None in
     let capture r =
       last := Some r;
-      Option.iter to_report ~f:(fun f -> f r)
+      Option.iter to_report ~f:(fun f ->
+          match f r with
+          | () -> ()
+          | exception exn ->
+              callback_failure := Some exn;
+              raise exn)
     in
     logf "arm %s search:" arm;
     last := None;
@@ -309,9 +329,49 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
           bindings
       with
       | compiled -> Ok compiled
-      | exception exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+      | exception exn ->
+          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+          if
+            process_fatal exn
+            || Option.exists !callback_failure ~f:(fun raised -> phys_equal raised exn)
+          then Stdlib.Printexc.raise_with_backtrace exn backtrace
+          else Error (exn, backtrace)
     in
-    let r = !last in
+    let r =
+      match (!last, result) with
+      | (Some _ as reported), _ -> reported
+      | None, Ok _ -> None
+      | None, Error (exn, _) ->
+          (* [?report] is positional and consumers name arms by arrival order, so an arm that died
+             before {!Autotune.tune} reported anything — a base compile failing before the base
+             lowering is captured, or a baseline timing failure, the two pre-report failures the
+             [partial] contract names — must still occupy its slot. Otherwise the surviving arm's
+             report arrives first and is attributed to this arm's position. *)
+          let slot =
+            {
+              Autotune.no_search_report with
+              partial = true;
+              best_label = "";
+              terminal_failure =
+                Some
+                  {
+                    Autotune.phase = Ir.Schedule_outcome.Transform;
+                    candidate = None;
+                    detail =
+                      Printf.sprintf "arm terminated before the search reported anything: %s"
+                        (Exn.to_string exn);
+                  };
+            }
+          in
+          last := Some slot;
+          (* Best-effort, like the tuner's own fatal-path reporting: this is already the failure
+             path, and the arm failure is the error worth propagating. *)
+          (try Option.iter to_report ~f:(fun f -> f slot)
+           with report_exn ->
+             Stdio.eprintf "tune_placements: arm-slot report callback failed: %s\n%!"
+               (Exn.to_string report_exn));
+          Some slot
+    in
     let best_ms =
       match result with
       (* Not [r.best_ms]: the partial report's best is a measurement of the search context, and no

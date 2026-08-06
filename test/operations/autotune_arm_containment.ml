@@ -68,8 +68,10 @@ let () =
     reports := r :: !reports
   in
   let message = "injected candidate failure" in
+  (* Attempt 1 of an arm is its baseline compile; injecting later leaves arm B with timed
+     candidates of its own, which is the point of this scenario. *)
   let ctx_t, routine_t =
-    with_injected_failure ~arms_reported ~at:3 ~message (fun () ->
+    with_injected_failure ~arms_reported ~at:4 ~message (fun () ->
         Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir ~report
           (Context.auto ()) t2 comp Ir.Indexing.Empty)
   in
@@ -103,4 +105,44 @@ let () =
     (SC.equal_saved_schedule arm_a.Autotune.best_schedule arm_a2.Autotune.best_schedule);
   let ctx_2 = Context.run ctx_2 routine_2 in
   let got_2 = Context.get_values ctx_2 t2.Tensor.value in
-  p "the cached winner replays to the right values" (Array.for_all2_exn got_2 expected ~f:approx)
+  p "the cached winner replays to the right values" (Array.for_all2_exn got_2 expected ~f:approx);
+
+  (* --- Run 3: arm B dies at its FIRST attempt, before its search reports anything. [?report] is
+     positional, so consumers name arms by arrival order; the failed arm must still occupy its slot
+     rather than let the surviving arm's report be attributed to it. --- *)
+  let arms_reported = ref 0 in
+  let reports = ref [] in
+  let report r =
+    Int.incr arms_reported;
+    reports := r :: !reports
+  in
+  let ctx_3, routine_3 =
+    with_injected_failure ~arms_reported ~at:1 ~message (fun () ->
+        Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir ~report
+          (Context.auto ()) t2 comp Ir.Indexing.Empty)
+  in
+  let reports3 = List.rev !reports in
+  p "an arm failing before it reports still occupies its slot" (List.length reports3 = 2);
+  let arm_a3 = List.nth_exn reports3 0 and arm_b3 = List.nth_exn reports3 1 in
+  p "the slot report is arm B's, not arm A's misattributed one"
+    (arm_a3.Autotune.cache_hit && arm_b3.Autotune.partial);
+  p "the slot report says the arm died before reporting"
+    (Option.value_map arm_b3.Autotune.terminal_failure ~default:false ~f:(fun tf ->
+         String.is_substring tf.Autotune.detail ~substring:"before the search reported"));
+  let ctx_3 = Context.run ctx_3 routine_3 in
+  p "arm A still ships when arm B dies before reporting"
+    (Array.for_all2_exn (Context.get_values ctx_3 t2.Tensor.value) expected ~f:approx);
+
+  (* --- A report-callback exception is the caller's, not the search's: it propagates instead of
+     being reclassified as an arm failure. --- *)
+  let raised =
+    try
+      let _ =
+        Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir
+          ~report:(fun _ -> failwith "injected report callback failure")
+          (Context.auto ()) t2 comp Ir.Indexing.Empty
+      in
+      false
+    with Failure msg -> String.is_substring msg ~substring:"injected report callback failure"
+  in
+  p "a report-callback exception propagates instead of losing an arm" raised

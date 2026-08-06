@@ -236,12 +236,15 @@ let collect_arm t (r : Autotune.report) = t.arm_reports <- r :: t.arm_reports
 let tune_json t =
   let ms_json v = if Float.is_inf v then "null" else Printf.sprintf "%.6g" v in
   (* Quote-and-control-character scrubbing rather than escaping: these strings are diagnostics
-     (labels, an exception's message) and the result line has to stay one parseable JSON line. *)
+     (labels, an exception's message) and the result line has to stay one parseable JSON line. JSON
+     forbids every unescaped byte below U+0020, not just the whitespace ones, so the test is the
+     code point — a NUL or an ESC from a backend diagnostic would otherwise invalidate the record
+     and cost the whole measurement. *)
   let json_string s =
     String.map s ~f:(function
       | '"' -> '\''
       | '\\' -> '/'
-      | c when Char.is_whitespace c && not (Char.equal c ' ') -> ' '
+      | c when Char.to_int c < 0x20 || Char.to_int c = 0x7f -> ' '
       | c -> c)
   in
   match List.rev t.arm_reports with

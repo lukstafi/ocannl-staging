@@ -3746,7 +3746,10 @@ let model_default ?report ctx comp bindings =
    label before each candidate compile; raising from it emulates the shape the device OOM had, a
    failure that is NOT contained as a candidate decline (there it escaped after the search had
    concluded, when the exhausted device defeated both the winner replay and its untuned fallback).
-   Not a production seam: default no-op, and no config key selects it. *)
+   Not a production seam: default no-op, and no config key selects it. Called for the baseline
+   compile too — it is a candidate (gh-ocannl-533) — which is what makes a failure BEFORE the
+   search has reported anything injectable, the case the positional-arm-slot handling in
+   [Train.tune_placements] exists for. *)
 let on_candidate_attempt : (string -> unit) ref = ref (fun _label -> ())
 
 let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fraction
@@ -3857,6 +3860,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
      default?" reference by [report.default_ms] — the [config_thresholds] seed's measurement, not a
      new baseline. *)
   let base_capture = ref None in
+  !on_candidate_attempt "baseline";
   let base_outcome =
     Context.compile_outcome
       ~lowered_transform:(fun opt ->
