@@ -3905,10 +3905,14 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
      default?" reference by [report.default_ms] — the [config_thresholds] seed's measurement, not a
      new baseline. *)
   let base_capture = ref None in
-  !on_candidate_attempt "baseline";
   let base_outcome =
     Context.compile_outcome
       ~lowered_transform:(fun opt ->
+        (* Inside the transform, so an injected fault is classified by the ordinary machinery
+           (phase [Transform], provenance [Candidate]) and reaches [raise_pre_search] below with a
+           real phase and a report — rather than escaping the whole call unreported, which would
+           break the exactly-once contract for direct [tune] callers. *)
+        !on_candidate_attempt "baseline";
         base_capture := Some (opt, SC.canonicalize ~static_indices opt);
         opt)
       ~provenance:Outcome.Candidate ~candidate:"baseline" search_ctx comp bindings
@@ -3970,6 +3974,17 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
      below — the two are mutually exclusive accounts of one baseline, and the gh-ocannl-532 refusal
      asserts a reason ("binds no hardware dimension") that is not why this baseline did not run. *)
   Option.iter baseline_decline ~f:(record_decline declines);
+  (* What the call has learned by now: everything after this point reports on top of it, success or
+     failure, so a pre-search failure never understates the work already attempted (a declined
+     baseline in particular must not read back as [baseline_declined = false], [declines = []]). *)
+  let census () =
+    {
+      no_search_report with
+      candidates_failed = failed_count declines;
+      baseline_declined = Option.is_some baseline_decline;
+      declines = decline_summaries declines;
+    }
+  in
   let cached =
     if use_cache then
       match SC.lookup ~dir:cache_dir ~key with
@@ -4052,7 +4067,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
               logf "cache entry replay FAILED, re-searching: %s"
                 (Outcome.detail_of_cause classified.cause);
               None
-          | Error (Outcome.Fatal _ as failure) -> raise_pre_search failure)
+          | Error (Outcome.Fatal _ as failure) -> raise_pre_search ~base:(census ()) failure)
       | _ -> None
     else None
   in
@@ -4062,16 +4077,9 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
       logf "search disabled (autotune_search=false) and no cache entry: compiling the untuned default";
       (* After the compile, as in the no-cache branch above. The census the base compile already
          produced is carried whether this succeeds or fails. *)
-      let census =
-        {
-          no_search_report with
-          candidates_failed = failed_count declines;
-          baseline_declined = Option.is_some baseline_decline;
-          declines = decline_summaries declines;
-        }
-      in
-      let result = compile_untuned_default ~base:census () in
-      emit_report census;
+      let reached = census () in
+      let result = compile_untuned_default ~base:reached () in
+      emit_report reached;
       result
   | None -> (
       let seen = Hash_set.create (module String) in
@@ -4129,13 +4137,13 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
             with
             | ms -> ms
             | exception Outcome.Raised_at (phase, exn, backtrace) ->
-                emit_pre_search_failure ~phase ~candidate:(Some "baseline")
+                emit_pre_search_failure ~base:(census ()) ~phase ~candidate:(Some "baseline")
                   ~detail:(Exn.to_string exn) ();
                 Stdlib.Printexc.raise_with_backtrace exn backtrace
             | exception exn ->
                 let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-                emit_pre_search_failure ~phase:Outcome.Launch ~candidate:(Some "baseline")
-                  ~detail:(Exn.to_string exn) ();
+                emit_pre_search_failure ~base:(census ()) ~phase:Outcome.Launch
+                  ~candidate:(Some "baseline") ~detail:(Exn.to_string exn) ();
                 Stdlib.Printexc.raise_with_backtrace exn backtrace)
         | _ -> Float.infinity
       in

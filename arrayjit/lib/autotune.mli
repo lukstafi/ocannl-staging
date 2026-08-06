@@ -513,10 +513,10 @@ val set_test_bindings : Context.routine -> unit
 
 val on_candidate_attempt : (string -> unit) ref
 (** Fault-injection seam for the containment tests (gh-ocannl-550), called with each candidate's
-    label just before its compile — including the baseline's, which is a candidate (gh-ocannl-533)
-    and is the one attempt that precedes any reporting, so raising there exercises the arm-slot
-    handling for a search that fails before it reports. The default is a no-op and no configuration
-    selects it; raising
+    label just before its compile — including the baseline's, which is a candidate (gh-ocannl-533);
+    that one is called inside the base compile's transform, so a fault injected there is classified
+    like any other and surfaces as the pre-search failure of a search that never started. The
+    default is a no-op and no configuration selects it; raising
     from it terminates the search the way an uncontainable failure does — the partial report
     (carrying [terminal_failure]) is emitted to [?report] and the exception propagates out of
     {!tune}, which is what [Train.tune_placements] must survive without losing the other arm's

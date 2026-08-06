@@ -109,9 +109,10 @@ let () =
   let got_2 = Context.get_values ctx_2 t2.Tensor.value in
   p "the cached winner replays to the right values" (Array.for_all2_exn got_2 expected ~f:approx);
 
-  (* --- Run 3: arm B dies at its FIRST attempt, before its search reports anything. [?report] is
-     positional, so consumers name arms by arrival order; the failed arm must still occupy its slot
-     rather than let the surviving arm's report be attributed to it. --- *)
+  (* --- Run 3: arm B dies at its FIRST attempt — its base compile, before a search exists. [?report]
+     is positional, so consumers name arms by arrival order; the failed arm must still occupy its
+     slot rather than let the surviving arm's report be attributed to it. The report is the tuner's
+     own (it reports on every path), so it carries a structured phase rather than a guess. --- *)
   let arms_reported = ref 0 in
   let reports = ref [] in
   let report r =
@@ -124,13 +125,14 @@ let () =
           (Context.auto ()) t2 comp Ir.Indexing.Empty)
   in
   let reports3 = List.rev !reports in
-  p "an arm failing before it reports still occupies its slot" (List.length reports3 = 2);
+  p "an arm failing before its search starts still occupies its slot" (List.length reports3 = 2);
   let arm_a3 = List.nth_exn reports3 0 and arm_b3 = List.nth_exn reports3 1 in
   p "the slot report is arm B's, not arm A's misattributed one"
     (arm_a3.Autotune.cache_hit && arm_b3.Autotune.partial);
-  p "the slot report says the arm died before reporting"
+  p "the pre-search report names the injected failure at a structured phase"
     (Option.value_map arm_b3.Autotune.terminal_failure ~default:false ~f:(fun tf ->
-         String.is_substring tf.Autotune.detail ~substring:"before the search reported"));
+         String.is_substring tf.Autotune.detail ~substring:message
+         && Ir.Schedule_outcome.equal_phase tf.Autotune.phase Ir.Schedule_outcome.Transform));
   let ctx_3 = Context.run ctx_3 routine_3 in
   p "arm A still ships when arm B dies before reporting"
     (Array.for_all2_exn (Context.get_values ctx_3 t2.Tensor.value) expected ~f:approx);

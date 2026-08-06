@@ -9,9 +9,9 @@ the surviving arm's routine ships and computes the right values: true
 arm A's winner was cached by the run its sibling arm failed in: true
 the replay is the very schedule run 1 crowned: true
 the cached winner replays to the right values: true
-an arm failing before it reports still occupies its slot: true
+an arm failing before its search starts still occupies its slot: true
 the slot report is arm B's, not arm A's misattributed one: true
-the slot report says the arm died before reporting: true
+the pre-search report names the injected failure at a structured phase: true
 arm A still ships when arm B dies before reporting: true
 a report-callback exception propagates instead of losing an arm: true
 a compiler assertion propagates instead of losing an arm: true
