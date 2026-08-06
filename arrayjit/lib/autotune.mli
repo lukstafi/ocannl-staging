@@ -504,6 +504,15 @@ val set_test_bindings : Context.routine -> unit
     extent-value-independent, so the single tuned entry is measured at the maximum). Unranged
     bindings are left at their current values. Exposed for tests and custom timing harnesses. *)
 
+val on_candidate_attempt : (string -> unit) ref
+(** Fault-injection seam for the containment tests (gh-ocannl-550), called with each candidate's
+    label just before its compile. The default is a no-op and no configuration selects it; raising
+    from it terminates the search the way an uncontainable failure does — the partial report
+    (carrying [terminal_failure]) is emitted to [?report] and the exception propagates out of
+    {!tune}, which is what [Train.tune_placements] must survive without losing the other arm's
+    winner. Not a production seam: candidate failures that a backend {e can} attribute are
+    contained without it (see [declines]). *)
+
 val tune :
   ?search:bool ->
   (* Whether to search at all; default from config [autotune_search] (true). With [false]

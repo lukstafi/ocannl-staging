@@ -3739,6 +3739,16 @@ let model_default ?report ctx comp bindings =
 
 (** {2 The search} *)
 
+(* gh-ocannl-550: the containment properties of the search — a failed candidate costs that
+   candidate, a failed search costs that search and not its sibling arm — are only testable with a
+   candidate that fails, and the reproduction that motivated them needs a 12 GB GPU and a
+   half-hour search. This seam manufactures the failure instead. It is called with the candidate's
+   label before each candidate compile; raising from it emulates the shape the device OOM had, a
+   failure that is NOT contained as a candidate decline (there it escaped after the search had
+   concluded, when the exhausted device defeated both the winner replay and its untuned fallback).
+   Not a production seam: default no-op, and no config key selects it. *)
+let on_candidate_attempt : (string -> unit) ref = ref (fun _label -> ())
+
 let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fraction
     ?max_split_reduce_sites ?timing_ctx ?report ctx comp bindings =
   (* gh-ocannl-559: with the search off, [tune] still replays an explicitly provided cache -- a
@@ -4195,6 +4205,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
          [try_spec] without appearing in the seed list, and counting only seeds in the denominator
          would let [mma_timed] exceed [mma_candidates] on a multi-segment routine. *)
       let try_spec spec =
+        !on_candidate_attempt (spec_label spec);
         if spec_expects_mma spec then Int.incr n_mma_proposed;
         match compile_spec spec with
         | Error (Outcome.Classified classified) ->
