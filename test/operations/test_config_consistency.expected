@@ -1,2 +1,2 @@
-OK: 98 call-site keys, all in reference file and registry; registry and reference agree on 102 keys.
+OK: 100 call-site keys, all in reference file and registry; registry and reference agree on 104 keys.
 OK: 2 profile payloads, documented and quoted verbatim: reproducible (11 keys), performance (7 keys).

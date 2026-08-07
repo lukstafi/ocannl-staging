@@ -113,6 +113,8 @@ let known_config_keys =
       "multidev_num_devices";
       "buffer_aliasing";
       "log_buffer_aliasing";
+      "memory_budget";
+      "log_memory_budget";
       (* Low-level / optimization *)
       "virtualize_max_visits";
       "virtualize_max_inline_reduction";

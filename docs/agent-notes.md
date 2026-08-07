@@ -471,6 +471,25 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   1556896 -> 1425668 B once measured properly (cc: 1556640 -> 1425540). When one backend's
   numeric assertion inverts while its parity assertions pass, suspect the measurement API before
   the pass under test — and check whether a sibling backend already fixed the same thing.
+- Rematerialization (gh-ocannl-498) is a PLANNING pass, not a search: `Context.plan_memory_budget`
+  picks `Inline` flips from `Backends.score_footprint` (the arena layout's own bytes) versus the
+  recompute-cost bound `flip_candidates` already carries, and compiles nothing to decide. The trap
+  it is built around: footprint relief is NOT per-node-local under aliasing. A node whose live span
+  was already shared frees nothing by leaving, and inlining one node moves the others' spans — so
+  both the solo pass and the cumulative prefix are scored against a real lowering, and a candidate
+  with zero marginal relief is skipped rather than taken for free (the gh-ocannl-558 enablement
+  lesson, in reverse). Score the layout, never the node's own size.
+- The footprint scorer deliberately scores the routine's WHOLE in-context node set, not a context's
+  allocation delta, and enumerates by uid rather than in `traced_store` order — otherwise the
+  selector's choices would drift with how much of the graph a particular context had already
+  allocated, and with hash order across processes. On `cc` the model came out equal to the measured
+  `Context.get_used_memory` delta to the byte (1392772 both ways in
+  `test/operations/memory_budget`), but treat that as a coincidence of a single-context run: the
+  real allocator skips already-held nodes and the driver page-rounds pool bases.
+- `Inline`-direction candidates want the CHEAPEST recompute cost first; `flip_candidates` is sorted
+  most-expensive-first because the `Materialize` chain of `Train.tune_placements` wants that end. A
+  pre-filter cut that forgets to reverse keeps exactly the flips a budget would least want to pay
+  for.
 
 ## Training and performance
 

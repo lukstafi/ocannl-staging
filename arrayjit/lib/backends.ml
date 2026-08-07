@@ -108,6 +108,148 @@ let size_in_bytes_of (key : Tn.t) =
   let prec = Lazy.force key.Tn.storage_prec in
   Array.fold (Lazy.force key.Tn.dims) ~init:1 ~f:( * ) * Ops.prec_in_bytes prec
 
+(* gh-ocannl-489 liveness-based buffer aliasing, the per-compile planning half: live spans over the
+   FINAL segment sequence (post-schedule, post-fission -- cross-nest merges and kernel cuts change
+   which accesses can interleave, so pre-schedule spans would be unsound), filtered down to the
+   aliasing-eligible nodes. Eligible = in-context working nodes that the routine writes before any
+   read: not read-only, not read-before-write (excludes recurrent nodes and reliance on alloc-time
+   zeros), not observable (host reads must stay valid), not host-initialized (live before the
+   program), not constants, not the merge node. Callers run this BEFORE backend codegen: the
+   candidates registered on [optimize_ctx.alias_candidates] make codegen drop the [restrict]
+   qualifier on their kernel parameters (an actually-aliased [restrict] pair is a miscompile).
+   Position granularity: statements on backends that synchronize between top-level statements (the C
+   backends -- no hardware workgroup binding, parallel dispatches join), segments otherwise (GPU
+   kernels lack grid-wide sync between statements). [lowered] is the whole-routine (pre-fission)
+   code, whose traced store and placements decide eligibility; [segments] is the final kernel
+   sequence in execution order. *)
+let plan_alias_spans ~(name : string) ~(limits : hardware_limits) ~(lowered : Low_level.optimized)
+    ~(segments : Low_level.optimized list) : (Tn.t, int * int) Base.Hashtbl.t option =
+  if not (buffer_aliasing ()) then None
+  else
+    let stmt_serial = Option.is_none limits.max_threads_per_workgroup in
+    match
+      Low_level.buffer_access_spans ~stmt_serial
+        (List.map segments ~f:(fun seg -> seg.Low_level.llc))
+    with
+    | None -> None
+    | Some spans ->
+        let plc = lowered.Low_level.optimize_ctx.placements in
+        Hashtbl.filter_keys_inplace spans ~f:(fun tn ->
+            match Hashtbl.find lowered.Low_level.traced_store tn with
+            | None -> false
+            | Some node ->
+                Tn.Placements.is_in_context_force plc tn 45
+                && (not node.Low_level.read_only)
+                && (not node.Low_level.read_before_write)
+                && (node.Low_level.zeroed_out || node.Low_level.has_assignment)
+                (* Written but never consumed in-routine means the write is an EXPORT for later
+                   routines (parameter initialization is the ubiquitous case) -- its lifetime
+                   extends past this routine, so it must keep dedicated bytes. *)
+                && node.Low_level.read_by_other
+                && (not (Tn.is_observable tn))
+                && (not (Host_inits.mem tn))
+                && (not (Tn.Placements.known_constant plc tn))
+                && not (Option.exists lowered.Low_level.merge_node ~f:(Tn.equal tn)));
+        if Hashtbl.is_empty spans then None
+        else (
+          Hashtbl.iter_keys spans ~f:(Hash_set.add lowered.Low_level.optimize_ctx.alias_candidates);
+          if log_buffer_aliasing () then
+            List.iter
+              (Hashtbl.to_alist spans
+              |> List.sort ~compare:(fun (_, (a, _)) (_, (b, _)) -> compare_int a b))
+              ~f:(fun (tn, (lo, hi)) ->
+                Stdlib.Printf.eprintf "buffer aliasing: %s: candidate %s live [%d, %d]\n%!" name
+                  (Tn.debug_name tn) lo hi);
+          Some spans)
+
+type footprint = {
+  fp_total : int;
+  fp_working : int;
+  fp_constants : int;
+  fp_dedicated : int;
+  fp_planned : int;
+  fp_nodes : int;
+}
+[@@deriving sexp_of, equal]
+
+(* gh-ocannl-498: the byte footprint a routine's placement vector implies, scored with the same
+   liveness/arena machinery the allocator uses ([plan_alias_spans] + [plan_arena_offsets]) but
+   without a device or a context. This is the cost side [Low_level.flip_candidates] does not carry:
+   the recompute-cost bound says what inlining a node COSTS, this says what it SAVES.
+
+   Scored over the routine's whole in-context node set, not a context's allocation delta, so the
+   number depends only on the code and the placements -- the precondition for a deterministic budget
+   selector ([Context.plan_memory_budget]) whose choices do not drift with how much of the graph a
+   particular context has already allocated. It is therefore a MODEL of the peak, not a prediction
+   of [Context.get_used_memory]: the real allocator skips nodes a prior context already holds, and
+   pool bases are page-rounded by the driver.
+
+   Enumeration is canonical ([Tn.compare], i.e. by uid) rather than [traced_store] order, so the
+   greedy arena coloring is reproducible across processes; [allocate_delta] uses store order to keep
+   pool ids stable and can therefore break size ties differently. *)
+let score_footprint ~(backend_name : string) ~(limits : hardware_limits)
+    ~(static_indices : Indexing.static_symbol list) (lowered : Low_level.optimized) : footprint =
+  let lowered =
+    if buffer_aliasing () then
+      { lowered with Low_level.llc = Low_level.sink_zero_outs lowered.Low_level.llc }
+    else lowered
+  in
+  let segments = Schedule.maybe_default_schedules ~backend_name ~limits ~static_indices lowered in
+  let spans = plan_alias_spans ~name:"<footprint>" ~limits ~lowered ~segments in
+  (* Schedule ops applied per segment can CREATE tnodes the pre-fission store has never seen (a
+     hoisted [Stage] registers its packed-constant tile), and [allocate_delta] enumerates the store
+     it is handed -- so score the union, as the compile's own fold-back does. *)
+  let store = Hashtbl.copy lowered.Low_level.traced_store in
+  List.iter segments ~f:(fun seg ->
+      Hashtbl.iteri seg.Low_level.traced_store ~f:(fun ~key ~data ->
+          if not (Hashtbl.mem store key) then Hashtbl.add_exn store ~key ~data));
+  let plc = lowered.Low_level.optimize_ctx.placements in
+  let working = ref [] and constants = ref [] in
+  Hashtbl.iteri store ~f:(fun ~key ~data:node ->
+      if Tn.Placements.is_in_context_force plc key 47 then
+        if node.Low_level.read_only || Tn.Placements.known_constant plc key then
+          constants := key :: !constants
+        else working := key :: !working);
+  let canonical l = List.sort !l ~compare:Tn.compare in
+  let working = canonical working and constants = canonical constants in
+  let items group =
+    List.map group ~f:(fun key ->
+        ( size_in_bytes_of key,
+          max (Ops.prec_in_bytes (Lazy.force key.Tn.storage_prec)) Ops.buffer_alignment ))
+  in
+  let cap = if Utils.settings.large_models then Int.max_value else 0x1_0000_0000 in
+  let bump ~what group =
+    let _, segment_sizes =
+      plan_pool_segments ~cap ~what
+        ~debug_name:(fun i -> Tn.debug_name (List.nth_exn group i))
+        (items group)
+    in
+    List.fold segment_sizes ~init:0 ~f:( + )
+  in
+  let fp_dedicated = bump ~what:"Backends.score_footprint" working in
+  let fp_planned =
+    Option.value_map spans ~default:0 ~f:(fun spans -> List.count working ~f:(Hashtbl.mem spans))
+  in
+  let arena =
+    Option.bind spans ~f:(fun spans ->
+        plan_arena_offsets ~cap
+          (List.map2_exn working (items working) ~f:(fun key (size, align) ->
+               ( size,
+                 align,
+                 Ops.prec_string (Lazy.force key.Tn.storage_prec),
+                 Hashtbl.find spans key ))))
+  in
+  let fp_working = match arena with Some (_, total) -> total | None -> fp_dedicated in
+  let fp_constants = bump ~what:"Backends.score_footprint" constants in
+  {
+    fp_total = fp_working + fp_constants;
+    fp_working;
+    fp_constants;
+    fp_dedicated;
+    fp_planned;
+    fp_nodes = List.length working + List.length constants;
+  }
+
 (* gh-ocannl-489: whether [tn]'s buffer shares bytes with another node's in [ctx_buffers] -- i.e.
    the liveness planner ([plan_arena_offsets] via [allocate_delta]) placed it at an overlapping
    range. Exact and layout-derived: bump-packed tenants of one pool have disjoint ranges and never
@@ -647,57 +789,12 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
              "schedule: %s seg %d/%d grid=[%d;%d;%d] block=[%d;%d;%d] stmts=%d\n%!" name i n_segs
              d.grid.(0) d.grid.(1) d.grid.(2) d.block.(0) d.block.(1) d.block.(2)
              (List.length (Low_level.flat_lines [ seg.Low_level.llc ]))));
-    (* gh-ocannl-489 liveness-based buffer aliasing, the per-compile planning half: live spans over
-       the FINAL segment sequence (post-schedule, post-fission -- cross-nest merges and kernel cuts
-       change which accesses can interleave, so pre-schedule spans would be unsound), filtered down
-       to the aliasing-eligible nodes. Eligible = in-context working nodes that the routine writes
-       before any read: not read-only, not read-before-write (excludes recurrent nodes and reliance
-       on alloc-time zeros), not observable (host reads must stay valid), not host-initialized (live
-       before the program), not constants, not the merge node. Runs BEFORE [Device.compile] below:
-       the candidates registered on [optimize_ctx.alias_candidates] make codegen drop the [restrict]
-       qualifier on their kernel parameters (an actually-aliased [restrict] pair is a miscompile).
-       Position granularity: statements on backends that synchronize between top-level statements
-       (the C backends -- no hardware workgroup binding, parallel dispatches join), segments
-       otherwise (GPU kernels lack grid-wide sync between statements). *)
+    (* gh-ocannl-489 liveness-based buffer aliasing: the per-compile planning half runs BEFORE
+       [Device.compile] below, because the candidates it registers on
+       [optimize_ctx.alias_candidates] make codegen drop the [restrict] qualifier on their kernel
+       parameters (an actually-aliased [restrict] pair is a miscompile). *)
     let alias_spans : (Tn.t, int * int) Base.Hashtbl.t option =
-      if not (buffer_aliasing ()) then None
-      else
-        let stmt_serial = Option.is_none limits.max_threads_per_workgroup in
-        match
-          Low_level.buffer_access_spans ~stmt_serial
-            (List.map lowereds ~f:(fun seg -> seg.Low_level.llc))
-        with
-        | None -> None
-        | Some spans ->
-            let plc = lowered.Low_level.optimize_ctx.placements in
-            Hashtbl.filter_keys_inplace spans ~f:(fun tn ->
-                match Hashtbl.find lowered.Low_level.traced_store tn with
-                | None -> false
-                | Some node ->
-                    Tn.Placements.is_in_context_force plc tn 45
-                    && (not node.Low_level.read_only)
-                    && (not node.Low_level.read_before_write)
-                    && (node.Low_level.zeroed_out || node.Low_level.has_assignment)
-                    (* Written but never consumed in-routine means the write is an EXPORT for later
-                       routines (parameter initialization is the ubiquitous case) -- its lifetime
-                       extends past this routine, so it must keep dedicated bytes. *)
-                    && node.Low_level.read_by_other
-                    && (not (Tn.is_observable tn))
-                    && (not (Host_inits.mem tn))
-                    && (not (Tn.Placements.known_constant plc tn))
-                    && not (Option.exists lowered.Low_level.merge_node ~f:(Tn.equal tn)));
-            if Hashtbl.is_empty spans then None
-            else (
-              Hashtbl.iter_keys spans
-                ~f:(Hash_set.add lowered.Low_level.optimize_ctx.alias_candidates);
-              if log_buffer_aliasing () then
-                List.iter
-                  (Hashtbl.to_alist spans
-                  |> List.sort ~compare:(fun (_, (a, _)) (_, (b, _)) -> compare_int a b))
-                  ~f:(fun (tn, (lo, hi)) ->
-                    Stdlib.Printf.eprintf "buffer aliasing: %s: candidate %s live [%d, %d]\n%!" name
-                      (Tn.debug_name tn) lo hi);
-              Some spans)
+      plan_alias_spans ~name ~limits ~lowered ~segments:lowereds
     in
     let (proc : (Device.code, fissioned) Either.t), (lowered : Low_level.optimized) =
       match lowereds with
@@ -852,6 +949,16 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     let pack ?arena (group : (Tn.t * Low_level.traced_array) list)
         ~(register : Tn.t -> alloc:(unit -> buffer_loc) -> unit) : unit =
       if not (List.is_empty group) then begin
+        (* gh-ocannl-498: lay every group out in CANONICAL (uid) order, which is the order
+           [score_footprint] scores. Both planners are order-sensitive -- the arena's greedy
+           coloring breaks equal-size ties by input order, and bump packing's alignment padding and
+           cap segmentation depend on the running offset (sizes 4 then 64 at alignment 32 occupy 96
+           bytes, reversed 68). Scoring one order and allocating another would let a plan report
+           itself under budget while linking asks for a larger pool. [traced_store] order was merely
+           a deterministic order; uid order is deterministic too, and shared with the scorer. Only
+           the layout input is reordered: pool ids are minted per segment before any placement, and
+           registration is order-independent. *)
+        let group = List.sort group ~compare:(fun (a, _) (b, _) -> Tn.compare a b) in
         let items =
           (* Within-pool offsets are padded to [Ops.buffer_alignment] (not just the element size) so
              that every node's buffer — not only each pool's base — is SIMD-aligned (gh-ocannl-164);

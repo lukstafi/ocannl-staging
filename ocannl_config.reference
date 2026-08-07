@@ -222,6 +222,31 @@
 # footprint report accompanying buffer_aliasing. Debugging aid, schedule_log_launches-style.
 #log_buffer_aliasing=false
 
+# Rematerialization: a device-memory budget for a compiled routine, in bytes (gh-ocannl-498).
+# 0 (the default) disables the pass entirely and leaves compilation bit-for-bit unchanged. A
+# positive value, or the word "minimize", makes Train.to_routine plan the routine's inlining
+# decision vector before compiling it: materialized intermediates are demoted to recompute-at-use
+# (Context.decide_inline) until the routine's scored footprint fits the budget, chosen by footprint
+# relief per unit of recompute cost. Deterministic — a planning pass, not a timed search: nothing
+# is compiled, linked or executed to make the choice. "minimize" takes every flip that still
+# relieves footprint, whatever the recompute cost. Suffixes K/M/G (powers of 1024) are accepted.
+# REQUIRES buffer_aliasing=true: the budget is scored against the liveness arena layout, and
+# without the planner every node is always-live and the relief of demoting one is meaningless
+# (a budget set with the planner off raises a User_error rather than planning against a fiction).
+# The budget applies per compiled routine and counts the routine's whole in-context node set —
+# parameters included — so it is the peak the routine implies, not just its scratch.
+# Takes precedence over model_default_schedule: the budget is scored against the default schedule
+# pipeline, and alias spans and arena size are functions of the final segmentation, so a budgeted
+# compile uses the pipeline that was scored rather than the cost model's pick (which would link a
+# layout nobody scored). Train logs one line to stderr when it overrides the gate that way.
+#memory_budget=0
+
+# If true, memory-budget planning logs its decisions to stderr: each inline candidate's
+# recompute cost and solo footprint relief, each accepted flip's marginal relief, each candidate
+# skipped for relieving nothing on top of the accepted set, and the candidates a max_candidates
+# cut left unscored. Debugging aid, log_buffer_aliasing-style.
+#log_memory_budget=false
+
 # If true, code generation logs one stderr line per declined rendering, naming the kernel, the
 # construct, and the rule that failed: a Grid loop that fails pool-parallel eligibility (an
 # ineligible local and which of the shared/privatization rules it broke, or the per-chunk

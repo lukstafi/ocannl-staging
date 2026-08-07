@@ -1595,6 +1595,24 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; gh-ocannl-498. Runs training steps, so it takes the shared training lock: its process-local
+; OpenMP pool must not overlap another training test's.
+
+(test
+ (name memory_budget)
+ (package neural_nets_lib)
+ (locks ocannl_training_test)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND)
+  (env_var OCANNL_MEMORY_BUDGET)
+  (env_var OCANNL_BUFFER_ALIASING)
+  (env_var OCANNL_MODEL_DEFAULT_SCHEDULE))
+ (modules memory_budget)
+ (libraries base ocannl stdio unix)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
 (test
  (name schedule_epilogue_fusion)
  (package neural_nets_lib)

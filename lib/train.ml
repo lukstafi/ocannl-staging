@@ -598,11 +598,79 @@ module Lazy = Utils.Lazy
    [model_default_schedule=true], the default schedule is picked by the analytic cost model
    ({!Autotune.model_default} — zero timing runs, advisory, falls back to the ordinary default
    pipeline); otherwise plain [Context.compile]. *)
-let compile_with_model_gate ctx comp bindings =
-  if Lazy.force Autotune.model_default_enabled then Autotune.model_default ctx comp bindings
+let compile_with_model_gate ?(budgeted = false) ctx comp bindings =
+  (* gh-ocannl-498: a memory budget is scored against the DEFAULT schedule pipeline
+     ({!Ir.Schedule.maybe_default_schedules}, what [Backends.score_footprint] runs). The model gate
+     picks a different segmentation, and alias spans and arena size are functions of the final
+     segmentation — so honoring the gate on a budgeted compile would link a layout nobody scored,
+     and a plan reported within budget could still exhaust the device. The budget is a constraint
+     and the model pick is an advisory optimization, so the constraint wins: a budgeted compile uses
+     the pipeline that was scored. Documented at [memory_budget] in ocannl_config.reference. *)
+  if budgeted then (
+    if Lazy.force Autotune.model_default_enabled then
+      Stdio.eprintf
+        "Train: memory_budget is set, so this compile uses the default schedule pipeline that the \
+         budget was scored against, not model_default_schedule's pick.\n\
+         %!";
+    Context.compile ctx comp bindings)
+  else if Lazy.force Autotune.model_default_enabled then Autotune.model_default ctx comp bindings
   else Context.compile ctx comp bindings
 
-let%track7_sexp to_routine (ctx : Context.t) ?(output_cd_file = false) bindings comp =
+(** gh-ocannl-498 rematerialization: the configured device-memory budget for a compiled routine, or
+    [None] when there is none (the default — under which the planning pass never runs and
+    compilation is bit-for-bit what it was). The setting is a byte count with an optional K/M/G
+    suffix (powers of 1024), the word [minimize], or 0 / off / false / none. *)
+let memory_budget_setting () =
+  let raw = String.strip (Utils.get_global_arg ~arg_name:"memory_budget" ~default:"0") in
+  let bad () =
+    raise
+    @@ Utils.User_error
+         (Printf.sprintf
+            "Train: ocannl_memory_budget should be a byte count (optionally suffixed K, M or G), \
+             the word \"minimize\", or 0 to disable; found: %s"
+            raw)
+  in
+  match String.lowercase raw with
+  | "" | "0" | "off" | "false" | "none" -> None
+  | "minimize" -> Some Context.Minimize
+  | lower ->
+      let lower = Option.value (String.chop_suffix lower ~suffix:"b") ~default:lower in
+      let mult, digits =
+        match String.chop_suffix lower ~suffix:"k" with
+        | Some d -> (1024, d)
+        | None -> (
+            match String.chop_suffix lower ~suffix:"m" with
+            | Some d -> (1024 * 1024, d)
+            | None -> (
+                match String.chop_suffix lower ~suffix:"g" with
+                | Some d -> (1024 * 1024 * 1024, d)
+                | None -> (1, lower)))
+      in
+      let n = match Int.of_string_opt (String.strip digits) with Some n -> n | None -> bad () in
+      (* The suffix scaling is where a syntactically fine setting turns into nonsense: "5000000000G"
+         parses, then wraps to a negative or tiny target that the planner would honor as an
+         unreachably tight budget and rematerialize hard against. Reject instead. *)
+      if n <= 0 || n > Int.max_value / mult then bad () else Some (Context.Bytes (n * mult))
+
+(** gh-ocannl-498: plan [comp]'s inlining decision vector against a device-memory budget and return
+    the context to compile it from. [budget] overrides the config key [memory_budget]; with neither,
+    this is the identity on [ctx] and returns [None] — the default-off path does not lower, score or
+    decide anything. See {!Context.plan_memory_budget} for what the planner does and what it
+    requires (config [buffer_aliasing]). *)
+let fit_memory_budget ?budget ?max_candidates ?name ctx comp bindings =
+  match match budget with Some _ as b -> b | None -> memory_budget_setting () with
+  | None -> (ctx, None)
+  | Some budget ->
+      let ctx, plan = Context.plan_memory_budget ?name ?max_candidates ~budget ctx comp bindings in
+      (ctx, Some plan)
+
+(** Compiles [comp] and returns the routine (the context is discarded). [budget], [max_candidates]
+    and [budget_report] are the gh-ocannl-498 rematerialization seam, forwarded to
+    {!fit_memory_budget}: with no [budget] and no [memory_budget] config key nothing is planned and
+    the compile is exactly what it was; [budget_report], if given, observes the plan that shipped.
+*)
+let%track7_sexp to_routine (ctx : Context.t) ?(output_cd_file = false) ?budget ?max_candidates
+    ?budget_report bindings comp =
   if output_cd_file then (
     let name = Asgns.get_name_exn comp.Asgns.asgns in
     if not Utils.settings.output_debug_files_in_build_directory then
@@ -618,7 +686,18 @@ let%track7_sexp to_routine (ctx : Context.t) ?(output_cd_file = false) bindings 
   (* Materialize the guessed output nodes so they persist across calls and are inspectable on demand
      via the context (gh-ocannl-333). *)
   Set.iter (snd @@ Asgns.collect_nodes_guess_output comp.Asgns.asgns) ~f:set_materialized;
-  let _ctx, routine = compile_with_model_gate ctx comp bindings in
+  (* gh-ocannl-498: budget planning goes AFTER the output-materialization intent above (those nodes
+     must not be flip candidates) and BEFORE the compile whose placements it steers. Off by default:
+     with no budget this is the identity and the compile below is unchanged. *)
+  let ctx, budget_plan = fit_memory_budget ?budget ?max_candidates ctx comp bindings in
+  let budgeted = Option.is_some budget_plan in
+  let _ctx, routine = compile_with_model_gate ~budgeted ctx comp bindings in
+  (* AFTER the compile: [budget_report] observes the plan that SHIPPED, so a compile or link failure
+     must not have announced one. It also keeps a callback from reaching the compile it is reporting
+     on -- the config gates the scoring depends on ([buffer_aliasing]) are re-read at each compile,
+     so a callback that flipped one would make the routine use a layout other than the one just
+     scored. *)
+  Option.iter budget_report ~f:(fun f -> Option.iter budget_plan ~f);
   (* Return just the routine for backward compatibility - ctx is discarded here *)
   routine
 
@@ -667,7 +746,8 @@ type example_train_result = {
     true, and the update code is output to a file before shape inference potentially crashes at
     [init_params]. *)
 let%track3_sexp run_once ?(output_cd_file = false) ?(skip_init = false) ?reinit_all
-    ?(bindings = IDX.empty) ~f ctx (t : Tensor.t) : Context.t =
+    ?(bindings = IDX.empty) ?budget ?max_candidates ?budget_report ~f ctx (t : Tensor.t) : Context.t
+    =
   set_materialized t.Tensor.value;
   (* Compute the update early, to ensure the shape inference is done. *)
   let update = f t in
@@ -686,22 +766,34 @@ let%track3_sexp run_once ?(output_cd_file = false) ?(skip_init = false) ?reinit_
   let ctx =
     if skip_init || Set.is_empty t.params then ctx else init_params ?reinit_all ctx bindings t
   in
-  let ctx, routine = compile_with_model_gate ctx update bindings in
+  (* gh-ocannl-498: same seam as [to_routine] — plan the inlining decision vector against the
+     budget, then compile from the planned context. Identity when no budget is set. *)
+  let ctx, budget_plan = fit_memory_budget ?budget ?max_candidates ctx update bindings in
+  let budgeted = Option.is_some budget_plan in
+  let ctx, routine = compile_with_model_gate ~budgeted ctx update bindings in
+  (* After the compile, for the reasons given in [to_routine]. *)
+  Option.iter budget_report ~f:(fun f -> Option.iter budget_plan ~f);
   Context.run ctx routine
 
 (** Context-based versions of training functions for the new simplified API *)
 
 (** [forward_once] is a wrapper around {!run_once} that runs the forward code of [t]. *)
-let forward_once ?output_cd_file ?(skip_init = false) ?reinit_all ?(bindings = IDX.empty) ctx t =
-  let ctx = run_once ?output_cd_file ~skip_init ?reinit_all ~bindings ~f:forward ctx t in
+let forward_once ?output_cd_file ?(skip_init = false) ?reinit_all ?(bindings = IDX.empty) ?budget
+    ?max_candidates ?budget_report ctx t =
+  let ctx =
+    run_once ?output_cd_file ~skip_init ?reinit_all ~bindings ?budget ?max_candidates ?budget_report
+      ~f:forward ctx t
+  in
   (* FIXME: this is going away soon. *)
   Tensor.remove_bprop_root t;
   ctx
 
 (** [update_once] is a wrapper around {!run_once} that runs the gradient update code of [t]: both
     forward and backprop. *)
-let update_once ?output_cd_file ?(skip_init = false) ?reinit_all ?(bindings = IDX.empty) ctx t =
-  run_once ?output_cd_file ~skip_init ?reinit_all ~bindings ~f:grad_update ctx t
+let update_once ?output_cd_file ?(skip_init = false) ?reinit_all ?(bindings = IDX.empty) ?budget
+    ?max_candidates ?budget_report ctx t =
+  run_once ?output_cd_file ~skip_init ?reinit_all ~bindings ?budget ?max_candidates ?budget_report
+    ~f:grad_update ctx t
 
 (* For-print materialization (gh-ocannl-333 AC 5): the [%cd "for_print" =: t] trick. When a tensor's
    value is not already materialized in the printing context, recompile a copy of it ([for_print = t
