@@ -252,6 +252,23 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   the winner replay and the untuned-default fallback compile behind it. Containment tests do not
   need a device that can fail: `Autotune.on_candidate_attempt` injects one
   (`test/operations/autotune_arm_containment`).
+- A timing failure's *phase* decides whether the lineage is condemned, so pre-dispatch validation
+  has to be its own phase. `Context.run` validates (poisoned lineage, uninitialized inputs,
+  unsatisfied execution dependencies, out-of-range static bindings) before it dispatches; wrapped in
+  a `Launch`-tagged boundary those failures were unattributable — `classify_failure` returns `None`
+  on every C backend — so `classify_raw` made them `Fatal` and the handler poisoned the lineage.
+  A one-line user mistake (the `timing_ctx` scratch context missing one of the caller's
+  initializations, which its own docs warn about) therefore condemned the search *and* the context,
+  with no restore API (gh-ocannl-564, and #536 for why there is no restore). Since then
+  `Schedule_outcome.Preflight` tags that region and `classify_raw` classifies it as a contained
+  `No_device_writes` decline **without consulting the backend** — the validation is host-side, the
+  backend has no evidence, and a classifier guessing `Writes_may_have_occurred` would escalate a
+  failure that provably wrote nothing. When adding a new failure boundary around `Context.run`,
+  the rule is: tag what precedes `Ir.Task.run` as `Preflight`, or a fixable mistake will read as
+  device damage. Note the injection asymmetry these causes create — they are properties of the
+  lineage and the bindings, not of a candidate, so a genuine one fails *every* candidate at once;
+  `Autotune.on_candidate_preflight` exists because "declined, and the search shipped anyway" is
+  otherwise untestable.
 - Placement decides which tensorized candidates *exist*, not just how they rank, because
   `mma_tile_for_precisions` keys on the storage precisions of the nodes the site actually reads.
   Under the mixed-precision recipe on a uniform-format backend (Metal's `simdgroup_matrix`: no mixed

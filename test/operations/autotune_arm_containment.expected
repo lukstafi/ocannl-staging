@@ -23,3 +23,18 @@ an interrupt raised by a report callback is not swallowed: true
 pre-dispatch validation rejects an unexecuted dependency: true
 a pre-dispatch rejection leaves the lineage usable: true
 and the retry succeeds once the dependency has executed: true
+control: an uninjected search declines nothing at pre-dispatch validation: true
+control: an uninjected search completes and ships: true
+an unsatisfied dependency reached a candidate's timing run: true
+it is a decline in the census, at the pre-dispatch phase: true
+the search that declined it completed: true
+and did not condemn the lineage: true
+a winner still ships and computes the right values: true
+an out-of-range static binding reached a candidate's timing run: true
+it too is a decline in the census, at the pre-dispatch phase: true
+the search that declined it completed: true
+and did not condemn the lineage: true
+a winner still ships and computes the right values: true
+a tune whose lineage cannot run its own baseline fails with the validation error: true
+the lineage it failed in is not condemned: true
+and the retry in it succeeds once the dependency has executed: true

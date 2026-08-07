@@ -141,6 +141,26 @@
 
 ### Fixed
 
+- **A fixable mistake before a timing run no longer condemns the autotuner's lineage**
+  (gh-ocannl-564). `Context.run` validates — poisoned lineage, uninitialized inputs, unsatisfied
+  execution dependencies, out-of-range static bindings — *before* it dispatches, but the candidate
+  timing wrapped all of it in a `Launch`-tagged failure boundary. With no backend verdict (
+  `classify_failure` answers `None` on every C backend) such a failure classified as `Fatal`, so the
+  handler poisoned the lineage and the search died — for a mistake nothing had yet acted on, and
+  with no restore API (gh-ocannl-536) to undo it. The most reachable trigger is the one
+  `Autotune.tune`'s own `timing_ctx` documentation warns about: a scratch context missing one of the
+  caller's initializations. `Ir.Schedule_outcome` gains a `Preflight` phase for that region, and
+  classifies its failures as contained `No_device_writes` declines without consulting the backend —
+  the validation is host-side, so the backend has no evidence, and a classifier guessing
+  `Writes_may_have_occurred` would escalate a failure that provably wrote nothing. A candidate whose
+  timing run fails validation is now an ordinary census-visible decline (`Unclassified_key
+  (Preflight, _)`) and the search runs on; the baseline's own such failure still propagates, as
+  every baseline timing failure does, but leaves the lineage usable and the retry possible.
+  Coverage extends the GPU-free fault-injection suite (`test/operations/autotune_arm_containment`),
+  with `Autotune.on_candidate_preflight` as the per-candidate seam — the real causes are properties
+  of the lineage and the bindings, so a genuine one fails every candidate at once, which the suite
+  also pins end-to-end.
+
 - **A failed placement arm no longer destroys the other arm's finished winner** (gh-ocannl-550,
   robustness half). `Train.tune_placements` now treats an arm whose search terminates on a fatal
   failure as a *losing* arm: it ranks at `infinity`, the surviving arm's winner ships and stays
