@@ -4,7 +4,7 @@ depth 2 rotates the buffers the depth-1 kernel does not: true
 depth 1 records no pipelined tiles: true
 depth 2 records both tiles at depth 2 with k_o as rotor: true
 depth 1 keeps both phase barriers per stage inside k_o: true
-depth 2 shares one barrier per iteration across both stages, one trailing outside: true
+depth 2 leaves the per-iteration phase to Tile_mma's bracket, one trailing barrier: true
 depth 2 issues one If-guarded prefetch per stage inside k_o: true
 depth 2 places both prologue loads outside k_o: true
 canonical digests distinguish depths 1 and 2: true

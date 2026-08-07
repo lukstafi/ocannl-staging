@@ -203,7 +203,13 @@ type optop =
           into the {e same} phase — the later stage's prefetch is grouped behind the existing
           barrier, back to back with the earlier ones, keeping one barrier per iteration for all of
           them (a barrier between prefetches would force the earlier copy to complete before the
-          compute, forfeiting its overlap). The tile is recorded in {!field:Low_level.pipelined}:
+          compute, forfeiting its overlap). When a later {!constructor-Tensorize} leaves the rotor
+          body ending in a [Tile_mma] — a barrier by the emission contract, bracketed on every
+          barrier-capable backend — {!apply}'s finalization elides the pipeline's own barriers
+          (the loop-leading one, and the after-loop one where still adjacent): the intrinsic's
+          bracket is the phase, so the tensorized pipelined kernel pays exactly one barrier per
+          iteration; a scalar pipelined compute keeps its explicit barriers. The tile is recorded
+          in {!field:Low_level.pipelined}:
           codegen allocates [d] rotating copies and selects the buffer by the loop counter (reads
           [k mod d], in-loop writes [(k+1) mod d], the prologue write copy 0), so the compute reads
           exactly the values the unpipelined form reads, in the same order — the pipelined

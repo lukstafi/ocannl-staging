@@ -258,13 +258,15 @@ let () =
      statement-level If-guarded prefetches, no tile writes outside the loop. Depth 2: the two
      same-anchor stages share ONE barrier phase per iteration — both If-guarded prefetches
      (statement-level, so the lane restriction Ifs nested within load nests are not miscounted)
-     grouped back to back behind the single barrier, so neither copy is forced to complete before
-     the compute — with the prologue loads (tile writes outside k_o) and one shared trailing
-     barrier as the loop's siblings. *)
+     grouped back to back — and since the tensorized compute ends every iteration with [Tile_mma]
+     (a barrier by the emission contract), the pipeline's own leading barrier is elided outright:
+     the k_o body carries NO explicit barrier, the intrinsic's bracket is the phase. The one
+     explicit barrier left in the routine is the trailing one after the contraction's store-back
+     (its elision would need the region contract across the store — kept conservative). *)
   p "depth 1 keeps both phase barriers per stage inside k_o"
     (barriers d1_body = 4 && barriers opt_d1.LL.llc = 4);
-  p "depth 2 shares one barrier per iteration across both stages, one trailing outside"
-    (barriers d2_body = 1 && barriers opt_d2.LL.llc = 2);
+  p "depth 2 leaves the per-iteration phase to Tile_mma's bracket, one trailing barrier"
+    (barriers d2_body = 0 && barriers opt_d2.LL.llc = 1);
   let stmt_prefetches opt llc =
     List.count (LL.flat_lines [ llc ]) ~f:(function
       | LL.If { body; _ } -> writes_tile ~is_tile:(is_tile opt) body

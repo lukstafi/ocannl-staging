@@ -3392,11 +3392,69 @@ let split_reduce_hoist (opt : Low_level.optimized) (op : optop) : Indexing.symbo
       | exception Invalid_argument _ -> [])
   | _ -> []
 
+(* gh-ocannl-487 (Codex P2 on PR #303): the [Tile_mma] emission contract brackets the intrinsic
+   block in workgroup barriers on every barrier-capable backend ("Tile_mma is a barrier";
+   {!optop.Tensorize} docs) — so once Tensorize has replaced a pipelined rotor loop's compute with
+   a Tile_mma, every iteration already ends with a barrier and the pipeline's own barriers render
+   as consecutive barriers with no work between: the loop-leading one against the previous
+   iteration's trailing bracket, and the after-loop one against the last iteration's. Elide both
+   exactly when the rotor body provably ends with a barrier (conservative otherwise — a scalar
+   pipelined compute keeps its barriers). Phase separation is preserved: the bracket before the
+   intrinsic block separates the prologue copies from the first compute, and each iteration's
+   trailing bracket separates its copies' reads from the next iteration's prefetch overwrites and
+   the loop's last writes from whatever follows. Runs at {!apply}'s finalization, after Tensorize
+   (Stage precedes Tensorize by Stage's own precondition, so the schedule half cannot see the
+   Tile_mma at splice time). *)
+let rec ends_with_barrier (llc : Low_level.t) : bool =
+  match llc with
+  | Low_level.Workgroup_barrier | Low_level.Tile_mma _ -> true
+  | Low_level.Seq (_, b) -> ends_with_barrier b
+  (* Hardware axes bind rather than iterate; a serial loop ends with its (non-empty) last
+     iteration's end. A dead loop executes nothing, so it ends with no barrier. *)
+  | Low_level.For_loop { body; from_; to_; _ } -> to_ >= from_ && ends_with_barrier body
+  | _ -> false
+
+let elide_pipelined_barriers (opt : Low_level.optimized) : Low_level.optimized =
+  let open Low_level in
+  if Map.is_empty opt.pipelined then opt
+  else
+    let rotors =
+      Map.data opt.pipelined
+      |> List.map ~f:(fun { pt_rotor; _ } -> pt_rotor)
+      |> List.dedup_and_sort ~compare:Indexing.Symbol.compare
+    in
+    let is_rotor s = List.mem rotors s ~equal:Indexing.equal_symbol in
+    let rec stmt (llc : Low_level.t) : Low_level.t =
+      match llc with
+      | For_loop fc when is_rotor fc.index ->
+          let body_stmts = List.map (flat_lines [ fc.body ]) ~f:stmt in
+          let body_stmts =
+            match body_stmts with
+            | Workgroup_barrier :: rest when ends_with_barrier (unflat_lines rest) -> rest
+            | other -> other
+          in
+          For_loop { fc with body = unflat_lines body_stmts }
+      | For_loop fc -> For_loop { fc with body = seq fc.body }
+      | If { cond; body } -> If { cond; body = seq body }
+      | other -> other
+    and seq (llc : Low_level.t) : Low_level.t =
+      let rec drop = function
+        | (For_loop { index; from_; to_; body; _ } as lp) :: Workgroup_barrier :: tl
+          when is_rotor index && to_ >= from_ && ends_with_barrier body ->
+            lp :: drop tl
+        | hd :: tl -> hd :: drop tl
+        | [] -> []
+      in
+      unflat_lines (drop (List.map (flat_lines [ llc ]) ~f:stmt))
+    in
+    { opt with llc = seq opt.llc }
+
 let apply ?(static_indices = []) (sched : schedule) (opt : Low_level.optimized) :
     Low_level.optimized =
   if List.is_empty sched then opt
   else
     let opt = List.fold sched ~init:opt ~f:apply_opt_op in
+    let opt = elide_pipelined_barriers opt in
     let llc = opt.Low_level.llc in
     (* Transforms fold their own guards (schedule-ir-optops §2): the pipeline's simplify already
        ran, so re-run it here; and when a transform duplicated code, re-run CSE + hoisting too. *)

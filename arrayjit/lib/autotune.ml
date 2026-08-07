@@ -2192,15 +2192,26 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
                         else None)
                   in
                   (* The pipelined twins (gh-ocannl-487): every conv GPU flavor stages
-                     cooperatively, so each gets a twin per advertised depth — gated on the
-                     [copies]-multiplied footprint, since the rotation allocates that many tile
-                     copies. *)
+                     cooperatively, so each unmasked flavor gets a twin per advertised depth —
+                     gated on the [copies]-multiplied footprint, since the rotation allocates that
+                     many tile copies. Masked flavors (any pad multiple set, or a row block that
+                     does not divide the row extent) are not twinned: their pad masks keep
+                     [Tensorize] on the barrier-bracketed per-call arm, whose leading bracket sits
+                     between the prefetch and the compute — the copy must complete there, so the
+                     twin could only pay the doubled footprint (Codex P2 on PR #303). *)
+                  let masked p0 =
+                    p0.sk_bn > 0 || p0.sk_bk > 0
+                    ||
+                    if p0.sk_bm = 0 then p0.sk_tm > 0 else site.c_nrow % p0.sk_bm <> 0
+                  in
                   let depth_twins =
                     List.concat_map (whole @ blocked) ~f:(fun p0 ->
-                        let rows = if p0.sk_bm = 0 then rows_p else p0.sk_bm in
-                        List.filter_map mma.Ir.Backend_intf.mma_pipeline_depths ~f:(fun d ->
-                            if shared_fits ~copies:d rows then Some { p0 with sk_depth = d }
-                            else None))
+                        if masked p0 then []
+                        else
+                          let rows = if p0.sk_bm = 0 then rows_p else p0.sk_bm in
+                          List.filter_map mma.Ir.Backend_intf.mma_pipeline_depths ~f:(fun d ->
+                              if shared_fits ~copies:d rows then Some { p0 with sk_depth = d }
+                              else None))
                   in
                   whole @ blocked @ depth_twins)
         | _ -> []
@@ -2358,12 +2369,19 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                      cooperative copies double-buffered — seeded per advertised depth, staged seeds
                      only (an unstaged seed has no cooperative copy to pipeline). Not composed with
                      the swizzled twin: the paired instruments each measure one knob against the
-                     shared plain sibling. *)
+                     shared plain sibling. Masked sites (non-dividing extents, padded by the
+                     builder) are not twinned either: their pad masks keep [Tensorize] on the
+                     barrier-bracketed per-call arm, whose leading bracket sits between the
+                     prefetch and the compute — the copy must complete there, so the twin could
+                     only pay the doubled footprint (Codex P2 on PR #303). *)
                   (base
                   :: (match swizzle_for ~bn ~bk with
                      | Some kind -> [ { base with sk_swizzle = Some kind } ]
                      | None -> []))
-                  @ (if bk > 0 then
+                  @ (if
+                       bk > 0 && divides bm site.m_ni && divides bn site.m_nj
+                       && divides bk site.m_nk
+                     then
                        List.map mma.Ir.Backend_intf.mma_pipeline_depths ~f:(fun d ->
                            { base with sk_depth = d })
                      else [])
