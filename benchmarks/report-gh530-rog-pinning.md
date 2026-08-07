@@ -95,7 +95,7 @@ reference data rather than evidence for the verdict.
 ## The pool-width confound
 
 CPU parallelism here is **OpenMP/libgomp** (`cc_parallel_grid=auto` probes `dispatch` first --
-macOS-only -- then `-fopenmp`, [cc_backend.ml:278](../arrayjit/lib/cc_backend.ml:278)). Two widths
+macOS-only -- then `-fopenmp`, [cc_backend.ml:278](../arrayjit/lib/cc_backend.ml#L278)). Two widths
 matter and they behave differently.
 
 **1. OpenMP thread count -- affinity-aware; no knob needed.** Measured with a purpose-built probe
@@ -117,8 +117,8 @@ platform** -- the opposite of the Linux-intuition failure mode, and a per-platfo
 re-checking before the assumption is reused.
 
 **2. Grid chunk count -- affinity-blind; this one needs pinning.** `cc_parallel_chunks` defaults to
-`4 x Domain.recommended_domain_count ()` ([cc_backend.ml:427](../arrayjit/lib/cc_backend.ml:427),
-[ocannl_config.reference:252](../ocannl_config.reference:252)). `Domain.recommended_domain_count`
+`4 x Domain.recommended_domain_count ()` ([cc_backend.ml:427](../arrayjit/lib/cc_backend.ml#L427),
+[ocannl_config.reference:252](../ocannl_config.reference#L252)). `Domain.recommended_domain_count`
 ignores the affinity mask on Windows -- it returns 24 under every mask above, so the auto chunk
 count is 96 regardless. **Every arm therefore pins `--ocannl_cc_parallel_chunks` to
 `4 x threads-in-mask`**, holding chunks-per-thread constant at 4.
@@ -302,7 +302,7 @@ not the proportion of slow workers alone; mixing and pool size compound.
 narrower pool.** The crown is within +/-0.6% of the materialized control in both replicates, and
 the runner's emitted `tune` object says why rather than leaving it to be inferred from near-equal
 timings. Every arm ships **B**, the materialize-all placement (arm A is default placements, arm B
-materialize-all -- [bench_harness.ml:216](runners/ocannl/bench_harness.ml:216)), but the crowned
+materialize-all -- [bench_harness.ml:216](runners/ocannl/bench_harness.ml#L216)), but the crowned
 *schedule label* differs by pool:
 
 | pool | arm A label | arm B label (shipped) |
@@ -406,6 +406,17 @@ benchmarks\.venv\Scripts\python.exe -m pip install numpy safetensors
 benchmarks\.venv\Scripts\python.exe benchmarks\gen_fixtures.py benchmarks\workloads\cifar_conv.json
 ```
 
+One *cell* of this report is three invocations at the same mask and chunk count -- untuned default,
+materialized control, and the tuned pair -- because the claim-bearing quantities are ratios and
+differences between them:
+
+| quantity | needs |
+|---|---|
+| tune ratio | default p50 / tuned-replay p50 |
+| crown vs materialize-all | materialized p50 vs tuned-replay p50 |
+| composition or width effect | the tune ratios of two cells |
+| parity | the `losses` array of every run, compared against the default's |
+
 A tuned cell is two passes against the same cache: pass 1 searches, pass 2 replays it from a fresh
 process. Reporting pass 1's step times measures a different protocol from the tables above, because
 the search leaves its own process slower.
@@ -413,17 +424,40 @@ the search leaves its own process slower.
 ```
 cd benchmarks
 set BENCH_FIXTURE=fixtures/cifar_conv.safetensors
-set BENCH_TUNE=1
 set AFFMASK=C03C03
-rem pass 1 -- from-scratch search; its compile_s is the search cost
-pin.bat ../_build/default/benchmarks/runners/ocannl/bench_conv.exe ^
-    --ocannl_backend=cc --ocannl_cc_parallel_chunks=32 ^
-    --ocannl_autotune_cache_dir=%CD%\cache-p-only
-rem pass 2 -- fresh process replays the cached winner; THIS is the reported p50
-pin.bat ../_build/default/benchmarks/runners/ocannl/bench_conv.exe ^
-    --ocannl_backend=cc --ocannl_cc_parallel_chunks=32 ^
-    --ocannl_autotune_cache_dir=%CD%\cache-p-only
+set CHUNKS=32
+set EXE=../_build/default/benchmarks/runners/ocannl/bench_conv.exe
+set CACHE=%CD%\cache-p-only
+
+rem (1) untuned default -- the denominator of the tune ratio
+set BENCH_TUNE=0
+set BENCH_MATERIALIZE=
+pin.bat %EXE% --ocannl_backend=cc --ocannl_cc_parallel_chunks=%CHUNKS%
+
+rem (2) materialized control -- the crown-vs-materialize-all comparison
+set BENCH_TUNE=0
+set BENCH_MATERIALIZE=1
+pin.bat %EXE% --ocannl_backend=cc --ocannl_cc_parallel_chunks=%CHUNKS%
+
+rem (3) tuned, pass 1 -- from-scratch search; its compile_s is the search cost.
+rem     The cache MUST be empty here or this silently becomes a replay.
+set BENCH_TUNE=1
+set BENCH_MATERIALIZE=
+if exist "%CACHE%" rmdir /s /q "%CACHE%"
+pin.bat %EXE% --ocannl_backend=cc --ocannl_cc_parallel_chunks=%CHUNKS% ^
+    --ocannl_autotune_cache_dir=%CACHE%
+
+rem (4) tuned, pass 2 -- fresh process replays the cached winner. Do NOT clear the
+rem     cache between (3) and (4); THIS run's p50 is the reported tuned number.
+pin.bat %EXE% --ocannl_backend=cc --ocannl_cc_parallel_chunks=%CHUNKS% ^
+    --ocannl_autotune_cache_dir=%CACHE%
 ```
+
+Each invocation prints one JSON result line. Take `step_ms.p50` from (1), (2) and (4); take
+`compile_s` from (3). For parity, compare the `losses` array of (2), (3) and (4) against (1) using
+orchestrate.py's metric, `max |a-b| / max(|b|, 1e-6)`, against `PARITY_TOL = 2e-3`; every arm in
+this report came in at ~2e-7. Also check the trajectory actually moves (`loss_moved`), or the
+tolerance is vacuous.
 
 where `pin.bat` is:
 
