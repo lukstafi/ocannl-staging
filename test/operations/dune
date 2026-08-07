@@ -1453,6 +1453,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name schedule_pipelined_matmul)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules schedule_pipelined_matmul)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name schedule_ldmatrix_matmul)
  (package neural_nets_lib)
  (deps
