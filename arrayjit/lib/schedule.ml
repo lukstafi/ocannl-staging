@@ -1638,6 +1638,17 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
                 ("Schedule.Stage: pipeline_depth > 1 requires the staging anchor loop "
                 ^ Indexing.symbol_ident stack0.(ld).index
                 ^ " to start at 0 (the prologue fills buffer copy 0)");
+            (* A dead anchor ([to_ < from_], supported by the IR) never executes its body, so the
+               unconditional prologue would run a load the unpipelined form never runs — an
+               unreachable body may even carry accesses that are only valid because they never
+               execute (Codex P2 on PR #303). Unreachable from real tensors (a k-block loop has at
+               least one block); defensive like the bounds check above. *)
+            if stack0.(ld).to_ < stack0.(ld).from_ then
+              invalid_arg
+                ("Schedule.Stage: pipeline_depth > 1 requires the staging anchor loop "
+                ^ Indexing.symbol_ident stack0.(ld).index
+                ^ " to have at least one iteration (a dead anchor cannot execute the prologue \
+                   copy)");
             Some stack0.(ld).index
         | Some ld ->
             invalid_arg

@@ -193,9 +193,9 @@ type optop =
           taking exactly the unpipelined code path; phase 1 implements [d = 2] only, the
           single-step lookahead of the portable form — deeper pipelines arrive with the phase-2
           async-copy arms and are rejected until then). Requires [cooperative = Some _] and an
-          anchor loop L* that is [Serial] and starts at 0 (the rotation needs a well-defined
-          iteration order and the prologue fills buffer copy 0; the no-anchor broadcast case has no
-          rotor). The staging composition then becomes: a prologue copy of iteration [from_] before
+          anchor loop L* that is [Serial], starts at 0 and has at least one iteration (the
+          rotation needs a well-defined iteration order and the prologue fills buffer copy 0 — a
+          dead anchor must not execute it; the no-anchor broadcast case has no rotor). The staging composition then becomes: a prologue copy of iteration [from_] before
           L*, per iteration [k] a single barrier followed by the copy for [k + 1] under an
           [If (k < to_)] guard (folded away on 1-trip loops) followed by the compute, and a
           trailing barrier after L* — [2N] barriers become [N + 1], and the prefetch is issued

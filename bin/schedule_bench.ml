@@ -32,7 +32,15 @@ open Ocannl.Operation.DSL_modules
 module LL = Ir.Low_level
 module Sched = Ir.Schedule
 module Asgns = Ir.Assignments
+module Numerics = Ir.Numerics
 
+(* CUDA's uniform-f32 MMA arm is gated on tf32 (the Numerics policy): without it the [Tile_mma]s
+   of the mma_pd* variants render the lane-0 scalar fallback and the labels would time a kernel
+   that never tensorizes ("timed is not tensorized", docs/agent-notes.md). Metal's f32
+   [simdgroup_matrix] path has no such gate and is unaffected. This bench asserts no parity, so
+   the tf32 rounding is free; cross-check a new backend's emission with
+   --ocannl_schedule_log_declines=true before trusting the labels. *)
+let () = Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = true }
 let p = Stdio.printf
 
 let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
