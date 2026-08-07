@@ -67,6 +67,7 @@ let gpu_limits =
                 (8, 8, 8) );
             ];
           mma_staged_layouts = [];
+            mma_pipeline_depths = [];
         };
   }
 

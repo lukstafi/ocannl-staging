@@ -32,7 +32,15 @@ open Ocannl.Operation.DSL_modules
 module LL = Ir.Low_level
 module Sched = Ir.Schedule
 module Asgns = Ir.Assignments
+module Numerics = Ir.Numerics
 
+(* CUDA's uniform-f32 MMA arm is gated on tf32 (the Numerics policy): without it the [Tile_mma]s
+   of the mma_pd* variants render the lane-0 scalar fallback and the labels would time a kernel
+   that never tensorizes ("timed is not tensorized", docs/agent-notes.md). Metal's f32
+   [simdgroup_matrix] path has no such gate and is unaffected. This bench asserts no parity, so
+   the tf32 rounding is free; cross-check a new backend's emission with
+   --ocannl_schedule_log_declines=true before trusting the labels. *)
+let () = Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = true }
 let p = Stdio.printf
 
 let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
@@ -64,6 +72,10 @@ let () =
   let repeats = arg 1 20 in
   let m = arg 2 n in
   let k = arg 3 n in
+  (* The naive 1x1-launch kernel is minutes per run at large sizes (a single GPU thread); cap its
+     repeats separately so the scheduled variants can be timed at scale (arg 5, default = repeats;
+     0 skips the naive leg entirely, including its warmup run — speedups then print as nan). *)
+  let naive_repeats = arg 4 repeats in
   assert (n % 64 = 0 && m % 64 = 0 && k % 64 = 0);
   let mav = Array.init (m * k) ~f:(fun i -> Float.of_int (i % 13) *. 0.25) in
   let mbv = Array.init (k * n) ~f:(fun i -> Float.of_int (i % 17) -. 8.) in
@@ -118,6 +130,7 @@ let () =
           hoisted = false;
           swizzle = None;
           pad_stride = None;
+          pipeline_depth = 1;
         };
       Sched.Stage
         {
@@ -128,6 +141,7 @@ let () =
           hoisted = false;
           swizzle = None;
           pad_stride = None;
+          pipeline_depth = 1;
         };
       Sched.Privatize { target = mc; over = k_o };
     ]
@@ -154,6 +168,7 @@ let () =
             hoisted = false;
             swizzle = None;
             pad_stride = None;
+            pipeline_depth = 1;
           };
         Sched.Stage
           {
@@ -164,6 +179,7 @@ let () =
             hoisted = false;
             swizzle = None;
             pad_stride = None;
+            pipeline_depth = 1;
           };
         Sched.Privatize { target = mc; over = k_o };
       ]
@@ -198,6 +214,7 @@ let () =
             hoisted = false;
             swizzle = None;
             pad_stride = None;
+            pipeline_depth = 1;
           };
         Sched.Stage
           {
@@ -208,11 +225,47 @@ let () =
             hoisted = false;
             swizzle = None;
             pad_stride = None;
+            pipeline_depth = 1;
           };
         Sched.Privatize { target = mc; over = k_o };
         Sched.Unroll { axis = i_t; materialize = true };
         Sched.Unroll { axis = j_t; materialize = true };
       ]
+  in
+
+  (* Staged + tensorized simdgroup mma (the autotune staged-seed shape, gh-ocannl-487): both
+     operand tiles cooperatively staged at the serial [k_o] anchor and the micro-kernel tensorized,
+     with the software-pipelining depth as the knob — [pipeline_depth = 1] is the strictly phased
+     form, [2] the double-buffered one, bitwise identical by the transform's invariant, so the
+     paired timing difference is the prefetch overlap's alone. *)
+  let mma_staged_schedule ~pipeline_depth ~mc opt =
+    let bm, bn, bk, w = (32, 32, 32, 32) in
+    let i, j, k = accum_syms opt in
+    let ez, zsyms = Sched.expand_zero ~tn:mc in
+    let zi, zj = match zsyms with [ zi; zj ] -> (zi, zj) | _ -> assert false in
+    let sp_zi, _, _ = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+    let sp_zj, _, _ = Sched.split ~axis:zj ~factor:w ~outer:LL.Grid ~inner:LL.Workgroup in
+    let sp_i, _, i_i = Sched.split ~axis:i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
+    let sp_j, j_o, j_i = Sched.split ~axis:j ~factor:bn ~outer:LL.Grid ~inner:LL.Serial in
+    let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
+    let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner }) in
+    let tz, _lane = Sched.tensorize ~i:i_i ~j:j_i ~k:k_i ~simd_width:w in
+    let stage source tile_loops =
+      Sched.Stage
+        {
+          source;
+          tile_loops;
+          shared = true;
+          cooperative = Some w;
+          hoisted = false;
+          swizzle = None;
+          pad_stride = None;
+          pipeline_depth;
+        }
+    in
+    [ ez; sp_zi; sp_zj; sp_i; sp_j; sp_k ]
+    @ sink i_i [ j_o ] @ sink j_i [ k_o ] @ sink i_i [ k_o ]
+    @ [ stage ma.Tensor.value [ i_i; k_i ]; stage mb.Tensor.value [ k_i; j_i ]; tz ]
   in
 
   (* Register-tiled Tile_mma micro-kernel (gh-ocannl-469): the whole i x j x k triple becomes one
@@ -243,7 +296,7 @@ let () =
     let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner }) in
     let stage source tile_loops =
       Sched.Stage
-        { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None }
+        { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None; pipeline_depth = 1 }
     in
     let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1 in
     [ sp_i; sp_k ] @ sink j [ k_o ] @ sink i_i [ k_o ] @ sink i_o [ k_o ]
@@ -266,7 +319,7 @@ let () =
     let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner }) in
     let stage source tile_loops =
       Sched.Stage
-        { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None }
+        { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None; pipeline_depth = 1 }
     in
     let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1 in
     [ ez; sp_zi; sp_i; sp_k ] @ sink j [ k_o ] @ sink i_i [ k_o ] @ sink i_o [ k_o ]
@@ -290,7 +343,7 @@ let () =
     let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner }) in
     let stage ~hoisted source tile_loops =
       Sched.Stage
-        { source; tile_loops; shared = false; cooperative = None; hoisted; swizzle = None; pad_stride = None }
+        { source; tile_loops; shared = false; cooperative = None; hoisted; swizzle = None; pad_stride = None; pipeline_depth = 1 }
     in
     let stage_b =
       match pack_b with
@@ -302,7 +355,7 @@ let () =
     [ ez; sp_zi; sp_i; sp_k ] @ sink j [ k_o ] @ sink i_i [ k_o ] @ stage_b @ stage_a @ [ tz ]
   in
 
-  let bench ~variant ~schedule =
+  let bench ?(repeats = repeats) ~variant ~schedule () =
     let%op mc = ma * mb in
     let comp = named ("mm_" ^ variant) (Train.forward mc) in
     let transform opt =
@@ -332,29 +385,32 @@ let () =
   let has_shared =
     String.is_substring backend ~substring:"metal" || String.is_substring backend ~substring:"cuda"
   in
-  let t_naive = bench ~variant:"naive" ~schedule:None in
+  let t_naive =
+    if naive_repeats > 0 then bench ~repeats:naive_repeats ~variant:"naive" ~schedule:None ()
+    else Float.nan
+  in
   if has_shared then
-    let t_par = bench ~variant:"parallel" ~schedule:(Some parallel_schedule) in
-    let t_smem = bench ~variant:"smem" ~schedule:(Some smem_schedule) in
-    let t_reg = bench ~variant:"regtile" ~schedule:(Some regtile_schedule) in
-    p "speedups vs naive: parallel %.1fx, smem %.1fx, regtile %.1fx\n" (t_naive /. t_par)
-      (t_naive /. t_smem) (t_naive /. t_reg)
+    let t_par = bench ~variant:"parallel" ~schedule:(Some parallel_schedule) () in
+    let t_smem = bench ~variant:"smem" ~schedule:(Some smem_schedule) () in
+    let t_reg = bench ~variant:"regtile" ~schedule:(Some regtile_schedule) () in
+    let t_mma1 =
+      bench ~variant:"mma_pd1" ~schedule:(Some (mma_staged_schedule ~pipeline_depth:1)) () in
+    let t_mma2 =
+      bench ~variant:"mma_pd2" ~schedule:(Some (mma_staged_schedule ~pipeline_depth:2)) () in
+    p "speedups vs naive: parallel %.1fx, smem %.1fx, regtile %.1fx, mma_pd1 %.1fx, mma_pd2 %.1fx\n"
+      (t_naive /. t_par) (t_naive /. t_smem) (t_naive /. t_reg) (t_naive /. t_mma1)
+      (t_naive /. t_mma2)
   else
-    let t_pack = bench ~variant:"cpupack" ~schedule:(Some cpupack_schedule) in
-    let t_tmma = bench ~variant:"tensorize" ~schedule:(Some tensorize_schedule) in
-    let t_pmma = bench ~variant:"packmma" ~schedule:(Some packmma_schedule) in
-    let t_pmmap = bench ~variant:"packmma_par" ~schedule:(Some packmma_par_schedule) in
+    let t_pack = bench ~variant:"cpupack" ~schedule:(Some cpupack_schedule) () in
+    let t_tmma = bench ~variant:"tensorize" ~schedule:(Some tensorize_schedule) () in
+    let t_pmma = bench ~variant:"packmma" ~schedule:(Some packmma_schedule) () in
+    let t_pmmap = bench ~variant:"packmma_par" ~schedule:(Some packmma_par_schedule) () in
     let t_hoist =
-      bench ~variant:"pm_hoist"
-        ~schedule:(Some (packmma_outer_schedule ~pack_a:false ~pack_b:`Hoist))
-    in
+      bench ~variant:"pm_hoist" ~schedule:(Some (packmma_outer_schedule ~pack_a:false ~pack_b:`Hoist)) () in
     let t_mixed =
-      bench ~variant:"pm_mixed"
-        ~schedule:(Some (packmma_outer_schedule ~pack_a:true ~pack_b:`Hoist))
-    in
+      bench ~variant:"pm_mixed" ~schedule:(Some (packmma_outer_schedule ~pack_a:true ~pack_b:`Hoist)) () in
     let t_bpk =
-      bench ~variant:"pm_bpk" ~schedule:(Some (packmma_outer_schedule ~pack_a:true ~pack_b:`Chunk))
-    in
+      bench ~variant:"pm_bpk" ~schedule:(Some (packmma_outer_schedule ~pack_a:true ~pack_b:`Chunk)) () in
     p
       "speedups vs naive: cpupack %.1fx, tensorize %.1fx, packmma %.1fx, packmma_par %.1fx, \
        pm_hoist %.1fx, pm_mixed %.1fx, pm_bpk %.1fx\n"

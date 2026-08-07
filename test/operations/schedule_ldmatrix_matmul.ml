@@ -126,6 +126,7 @@ let staged_schedule ~out ~src_a ~src_b ~swz_a ~swz_b ~bk ~ta ~tb (opt : LL.optim
         hoisted = false;
         swizzle = swz_a;
         pad_stride = None;
+        pipeline_depth = 1;
       };
     Sched.Stage
       {
@@ -136,6 +137,7 @@ let staged_schedule ~out ~src_a ~src_b ~swz_a ~swz_b ~bk ~ta ~tb (opt : LL.optim
         hoisted = false;
         swizzle = swz_b;
         pad_stride = None;
+        pipeline_depth = 1;
       };
     tz;
   ]
@@ -314,6 +316,7 @@ let () =
             sk_conv = false;
             sk_epilogue = false;
             sk_swizzle = Some LL.Swizzle_b128;
+            sk_depth = 1;
           }
         opt)
     ~check:(bf16_check ~a_trans:false ~b_trans:true)

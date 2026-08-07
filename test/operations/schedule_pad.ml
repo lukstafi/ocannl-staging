@@ -111,7 +111,7 @@ let () =
     let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
     let stage source tile_loops =
       Sched.Stage
-        { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None }
+        { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None; pipeline_depth = 1 }
     in
     [ Sched.Pad { axis = i; to_multiple_of = bm }; Sched.Pad { axis = k; to_multiple_of = bk } ]
     @ [ sp_i; sp_k ]
@@ -192,6 +192,7 @@ let () =
             hoisted = false;
             swizzle = None;
             pad_stride = None;
+            pipeline_depth = 1;
           };
         Sched.Stage
           {
@@ -202,6 +203,7 @@ let () =
             hoisted = false;
             swizzle = None;
             pad_stride = None;
+            pipeline_depth = 1;
           };
         tz;
       ]
@@ -259,6 +261,7 @@ let () =
                   (8, 8, 8) );
               ];
             mma_staged_layouts = [];
+            mma_pipeline_depths = [];
           };
     }
   in

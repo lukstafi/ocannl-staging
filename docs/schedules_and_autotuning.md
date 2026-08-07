@@ -55,7 +55,7 @@ Structural rewrites:
 
 Code-synthesizing transforms:
 
-- **`Stage { source; tile_loops; shared; cooperative; hoisted; swizzle; pad_stride }`** — stage reads of a
+- **`Stage { source; tile_loops; shared; cooperative; hoisted; swizzle; pad_stride; pipeline_depth }`** — stage reads of a
   tensor node through a fresh tile sized by the tile loops' extents. `shared = false` is CPU
   operand packing (a serial copy nest into `Local` scratch, normalizing layout — the tile's axes
   follow `tile_loops` order, so packing untransposes operands); `shared = true` places the tile
@@ -75,6 +75,17 @@ Code-synthesizing transforms:
   coefficient 1, only the load's source index and its edge guard keeping the stride, so the
   packed tile is dense and satisfies `Tensorize`'s unit-coefficient index discipline. Multi-term
   tile parts keep the range-sized layout, and hoisted staging rejects compaction (v1).
+  `pipeline_depth = d > 1` software-pipelines a cooperative staging (gh-ocannl-487, an int so a
+  search has a dimension; phase 1 implements `d = 2` only — deeper lookahead arrives with the
+  phase-2 async-copy arms): the copy for k-block `k+1` issues before the compute of `k` (prologue
+  copy before the serial anchor loop, one in-loop barrier instead of two, a trailing barrier;
+  pipelined stages sharing the anchor group their prefetches behind that one barrier), and
+  codegen allocates `d` rotating tile copies selected by the loop counter
+  (`Low_level.optimized.pipelined`; shared-memory accounting multiplies by `d`). The rendering is
+  bitwise identical to depth 1 — a pure prefetch-timing transform, searchable without a numerics
+  gate. Autotune twins each staged mma/conv seed per depth in the backend's
+  `mma_capability.mma_pipeline_depths` (Metal `[2]`; CUDA/HIP empty until the phase-2 `cp.async`
+  / LDS arms).
 - **`Privatize { target; over }`** — contract a materialized accumulator's read-modify-write
   across a reduction loop into per-thread `Local` scratch with one init-load and one store-back;
   recovers for materialized nodes what virtualization gives virtual accumulators.

@@ -131,6 +131,7 @@ let () =
           hoisted = false;
           swizzle;
           pad_stride;
+          pipeline_depth = 1;
         };
       Sched.Stage
         {
@@ -141,6 +142,7 @@ let () =
           hoisted = false;
           swizzle;
           pad_stride;
+          pipeline_depth = 1;
         };
       Sched.Privatize { target = mc.Tensor.value; over = k_o };
     ]
@@ -321,6 +323,7 @@ let () =
           hoisted = false;
           swizzle = Some LL.Swizzle_elem;
           pad_stride = None;
+          pipeline_depth = 1;
         };
       Sched.Stage
         {
@@ -331,6 +334,7 @@ let () =
           hoisted = false;
           swizzle = Some LL.Swizzle_elem;
           pad_stride = None;
+          pipeline_depth = 1;
         };
       tz;
     ]
@@ -416,6 +420,7 @@ let () =
             hoisted = false;
             swizzle = Some LL.Swizzle_elem;
             pad_stride = None;
+            pipeline_depth = 1;
           };
       ]);
   let%op mc4 = ma * mb in
@@ -434,6 +439,7 @@ let () =
             hoisted = false;
             swizzle = Some LL.Swizzle_elem;
             pad_stride = None;
+            pipeline_depth = 1;
           };
       ]);
   (* A 24-wide matmul: splitting k by 12 gives a [8 x 12] tile whose minor dim is not a power of two
@@ -461,6 +467,7 @@ let () =
             hoisted = false;
             swizzle = Some LL.Swizzle_elem;
             pad_stride = None;
+            pipeline_depth = 1;
           };
       ]);
   (* The b128 flavor's minor-extent rule is a different one, neither implying nor implied by the
@@ -486,6 +493,7 @@ let () =
             hoisted = false;
             swizzle = Some LL.Swizzle_b128;
             pad_stride = None;
+            pipeline_depth = 1;
           };
       ]);
   let%op mc7 = ma2 * mb2 in
@@ -507,6 +515,7 @@ let () =
             hoisted = false;
             swizzle = Some LL.Swizzle_b128;
             pad_stride = None;
+            pipeline_depth = 1;
           };
       ]);
   (* pad_stride's own validation: it pads against the row stride, so a one-axis tile has no stride
@@ -527,6 +536,7 @@ let () =
             hoisted = false;
             swizzle = None;
             pad_stride = Some 16;
+            pipeline_depth = 1;
           };
       ]);
   let%op mc9 = ma * mb in
@@ -546,6 +556,7 @@ let () =
             hoisted = false;
             swizzle = None;
             pad_stride = Some 1;
+            pipeline_depth = 1;
           };
       ]);
   (* D5, the one place items 3 and 4 touch: [Swizzle_b128]'s extent rule is checked on the PADDED
@@ -587,5 +598,6 @@ let () =
             hoisted = false;
             swizzle = Some LL.Swizzle_b128;
             pad_stride = Some 16;
+            pipeline_depth = 1;
           };
       ])

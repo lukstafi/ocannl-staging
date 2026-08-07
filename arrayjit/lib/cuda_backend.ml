@@ -2306,6 +2306,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                             (Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_bf16)
                             Backend_intf.Mma_swizzled_b128;
                         ];
+                    (* Phase 2 of gh-ocannl-487 (cp.async emission + hardware validation) flips
+                       this on. *)
+                    mma_pipeline_depths = [];
                   }
               else None);
            simd_vector_bytes = 0;

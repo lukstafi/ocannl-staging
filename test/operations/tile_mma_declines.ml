@@ -144,7 +144,7 @@ let () =
     let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
     let stage source tile_loops =
       Sched.Stage
-        { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None }
+        { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None; pipeline_depth = 1 }
     in
     let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1 in
     (* No [sink i_o [k_o]]: the Grid loop stays outermost, so the B~ pack at [k_o] lands inside the
@@ -316,6 +316,7 @@ let () =
                   (16, 16, 16) );
               ];
             mma_staged_layouts = [];
+            mma_pipeline_depths = [];
           };
     }
   in
@@ -392,6 +393,7 @@ let () =
                      Ir.Backend_intf.Mma_swizzled_b128 );
                  ]
                else []);
+            mma_pipeline_depths = [];
           };
     }
   in

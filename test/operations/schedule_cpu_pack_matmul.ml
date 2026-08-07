@@ -92,6 +92,7 @@ let () =
             hoisted = false;
             swizzle = None;
             pad_stride = None;
+            pipeline_depth = 1;
           };
         Sched.Stage
           {
@@ -102,6 +103,7 @@ let () =
             hoisted = false;
             swizzle = None;
             pad_stride = None;
+            pipeline_depth = 1;
           };
         Sched.Privatize { target = mc1.Tensor.value; over = k_o };
       ]

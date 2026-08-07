@@ -410,6 +410,15 @@ type flip_candidate = {
 }
 [@@deriving sexp_of]
 
+(** gh-487: a software-pipelined (double-buffered) staged tile — codegen allocates [pt_depth]
+    rotating copies of the tile and renders every access with a buffer-selection term rotated by
+    the [pt_rotor] loop counter: reads select copy [rotor mod depth], writes copy
+    [(rotor + 1) mod depth] (the schedule emits the loads one iteration ahead), and writes outside
+    the rotor loop (the prologue load) select copy 0. The IR keeps the tile's single-copy dims and
+    indices — the rotation is a physical-layout choice like {!type-swizzle_kind}, invisible to
+    IR-level semantics — so the pipelined rendering is bitwise identical to the unpipelined one. *)
+type pipelined_tile = { pt_depth : int; pt_rotor : Indexing.symbol } [@@deriving sexp_of]
+
 type optimized = {
   traced_store : traced_store;
   optimize_ctx : optimize_ctx;
@@ -433,6 +442,12 @@ type optimized = {
           shared-memory banks. Populated by [Schedule.Stage ~swizzle]. Renderings that assume a
           row-major layout must decline swizzled nodes; the tile-MMA intrinsic arms decline
           [Swizzle_elem] and may consume [Swizzle_b128] through [ldmatrix]-style loads. *)
+  pipelined : pipelined_tile Map.M(Tnode).t;
+      (** gh-487: workgroup-shared staged tiles rendered as [pt_depth] rotating buffer copies (see
+          {!type-pipelined_tile}). Populated by [Schedule.Stage ~pipeline_depth] with depth > 1;
+          codegen multiplies the tile's allocation by the depth and rotates a buffer-selection
+          offset with the [pt_rotor] loop counter. Renderings that assume single-copy storage
+          (vectorized/contiguous multi-element accesses) must decline pipelined nodes. *)
   zero_fringe : Set.M(Tnode).t;
       (** Schedule-minted staged tiles whose whole index space is safe to read: slots outside the
           staged source region (edge tiles of a non-dividing or padded staging, gh-ocannl-485) hold

@@ -235,6 +235,7 @@ let () =
             hoisted = false;
             swizzle = None;
             pad_stride = None;
+            pipeline_depth = 1;
           }
       in
       let sched =
@@ -320,6 +321,7 @@ let () =
              hoisted = true;
              swizzle = None;
              pad_stride = None;
+             pipeline_depth = 1;
            };
        ]
        opt
@@ -468,6 +470,7 @@ let () =
               hoisted = false;
               swizzle = None;
               pad_stride = None;
+              pipeline_depth = 1;
             }
         in
         let tz, _lane = Sched.tensorize ~i:ow ~j:oc ~k:ic ~simd_width:1 in
@@ -600,6 +603,7 @@ let () =
             hoisted = false;
             swizzle = None;
             pad_stride = None;
+            pipeline_depth = 1;
           }
       in
       let tz, _lane =
@@ -637,11 +641,12 @@ let () =
   let got_u = Context.get_values ctx y.Tensor.value in
   (match !reports with
   | [ r ] ->
+      (* metal: the whole-extent staged flavor plus its pd2 pipelined twin (gh-ocannl-487). *)
       p "cvu: conv seeds per fission segment (GPU staged on metal; serial+grid on cc)"
         (if on_metal then
            r.Autotune.sketch_candidates = 0
-           && r.Autotune.fiss_sketch_candidates = 1
-           && r.Autotune.fiss_sketch_timed = 1
+           && r.Autotune.fiss_sketch_candidates = 2
+           && r.Autotune.fiss_sketch_timed = 2
          else if on_cpu then
            r.Autotune.sketch_candidates = 2
            && r.Autotune.fiss_sketch_candidates = 2
@@ -689,6 +694,7 @@ let () =
             hoisted = false;
             swizzle = None;
             pad_stride = None;
+            pipeline_depth = 1;
           }
       in
       let tz, _lane =
@@ -728,11 +734,12 @@ let () =
   let got_u2 = Context.get_values ctx y.Tensor.value in
   (match !reports with
   | [ r ] ->
+      (* metal: the staged flavor plus its pd2 pipelined twin (gh-ocannl-487). *)
       p "cvu2: stride-2 conv seeds per fission segment (GPU staged on metal; serial+grid on cc)"
         (if on_metal then
            r.Autotune.sketch_candidates = 0
-           && r.Autotune.fiss_sketch_candidates = 1
-           && r.Autotune.fiss_sketch_timed = 1
+           && r.Autotune.fiss_sketch_candidates = 2
+           && r.Autotune.fiss_sketch_timed = 2
          else if on_cpu then
            r.Autotune.sketch_candidates = 2
            && r.Autotune.fiss_sketch_candidates = 2
@@ -844,7 +851,7 @@ let () =
     in
     let cooperative = if shared then Some simd_width else None in
     let stage source tile_loops =
-      Sched.Stage { source; tile_loops; shared; cooperative; hoisted = false; swizzle = None; pad_stride = None }
+      Sched.Stage { source; tile_loops; shared; cooperative; hoisted = false; swizzle = None; pad_stride = None; pipeline_depth = 1 }
     in
     let outer_grid =
       if not shared then []
@@ -904,9 +911,10 @@ let () =
   (match !reports with
   | [ r ] ->
       (* cc per-segment: serial + grid + one row-block panel (bm=8, 16/8=2 panels) = 3. metal
-         per-segment: whole-extent staged + one threadgroup-block (bm=8) = 2. *)
+         per-segment: whole-extent staged + one threadgroup-block (bm=8), each with its pd2
+         pipelined twin (gh-ocannl-487) = 4. *)
       p "cvb: blocked flavors seeded per fission segment"
-        (if on_metal then r.Autotune.fiss_sketch_candidates = 2
+        (if on_metal then r.Autotune.fiss_sketch_candidates = 4
          else if on_cpu then r.Autotune.fiss_sketch_candidates = 3
          else true)
   | _ -> p "cvb: blocked flavors seeded per fission segment" false);
@@ -960,6 +968,7 @@ let () =
             hoisted = false;
             swizzle = None;
             pad_stride = None;
+            pipeline_depth = 1;
           }
       in
       let tz, _lane =
@@ -1040,6 +1049,7 @@ let () =
             hoisted = false;
             swizzle = None;
             pad_stride = None;
+            pipeline_depth = 1;
           }
       in
       let tz, _lane =

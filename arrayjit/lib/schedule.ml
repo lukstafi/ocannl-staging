@@ -38,6 +38,7 @@ type optop =
       hoisted : bool;
       swizzle : Low_level.swizzle_kind option;
       pad_stride : int option;
+      pipeline_depth : int;
     }
   | Privatize of { target : Tn.t; over : Indexing.symbol }
   | Expand_zero of { tn : Tn.t; indices : Indexing.symbol list }
@@ -1032,12 +1033,28 @@ let pack_constant_tile ~debug ~(src_nd : Ndarray.t) ~(src_dims : int array) ~(pr
   dst
 
 let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_stride
-    (opt : Low_level.optimized) : Low_level.optimized =
+    ~pipeline_depth (opt : Low_level.optimized) : Low_level.optimized =
   let open Low_level in
   if List.is_empty tile_loops then invalid_arg "Schedule.Stage: empty tile_loops";
   Option.iter cooperative ~f:(fun w ->
       if not shared then invalid_arg "Schedule.Stage: cooperative staging requires shared = true";
       if w <= 0 then invalid_arg "Schedule.Stage: cooperative simd width must be positive");
+  if pipeline_depth < 1 then
+    invalid_arg
+      (Printf.sprintf "Schedule.Stage: pipeline_depth must be >= 1, got %d" pipeline_depth);
+  if pipeline_depth > 1 && Option.is_none cooperative then
+    invalid_arg
+      "Schedule.Stage: pipeline_depth > 1 requires cooperative staging (the rotation pipelines the \
+       cooperative copy against the compute; packing and reused-workgroup stagings have no \
+       prefetch to overlap)";
+  if pipeline_depth > 2 then
+    invalid_arg
+      (Printf.sprintf
+         "Schedule.Stage: pipeline_depth %d is not implemented in phase 1 of gh-ocannl-487: the \
+          portable form's single-step lookahead (one prefetch per iteration behind one barrier) \
+          keeps at most one block in flight, so copies beyond 2 would only consume shared memory; \
+          deeper pipelines arrive with the phase-2 async-copy arms"
+         pipeline_depth);
   if hoisted && shared then
     invalid_arg "Schedule.Stage: hoisted staging requires shared = false (it emits no load nest)";
   if Option.is_some swizzle && not shared then
@@ -1593,15 +1610,104 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
       if shared then unflat_lines [ load_nest; Workgroup_barrier; remapped; Workgroup_barrier ]
       else unflat_lines [ load_nest; remapped ]
     in
+    (* Software pipelining (gh-ocannl-487): with [pipeline_depth > 1], the anchor L* — required
+       [Serial], the rotor whose counter selects the buffer copy at rendering — gets the staging
+       composition restructured from per-iteration [load(k); barrier; compute(k); barrier] to a
+       prologue [load(from_)] before the loop, per-iteration [barrier; If (k < to_) load(k+1);
+       compute(k)], and one trailing barrier after the loop. The compute subtree is remapped
+       exactly as in the unpipelined form and never otherwise touched, and the loads write the same
+       values into rotated copies the reads resolve to, so the rendering is bitwise identical to
+       depth 1 — only the prefetch timing changes. Same-phase safety is the renderer's rotation:
+       the in-loop copy targets buffer [(k+1) mod d] while the compute reads [k mod d], and the
+       single barrier separates each buffer's write from its reads (one iteration apart) and from
+       its next overwrite ([d - 1] iterations apart). The load nest contains no [Local_scope], so
+       duplicating it needs no scope refresh; the [If] guard interval-folds to [Noop] on 1-trip
+       loops (construct-then-fold, as for the edge guards above). *)
+    let pipeline_rotor =
+      if pipeline_depth = 1 then None
+      else
+        match lstar_depth with
+        | Some ld when (match stack0.(ld).axis with Serial -> true | _ -> false) ->
+            (* The prologue fills copy 0 and the renderer's first-iteration read is copy
+               [from_ mod depth], so a nonzero lower bound would read an uninitialized copy
+               (Codex P1 on PR #303). Unreachable today — lowering emits 0-based loops and a
+               Partition-segmented anchor fails the single-index-vector rule first — so this is a
+               defensive rejection, not a supported-case gate. *)
+            if stack0.(ld).from_ <> 0 then
+              invalid_arg
+                ("Schedule.Stage: pipeline_depth > 1 requires the staging anchor loop "
+                ^ Indexing.symbol_ident stack0.(ld).index
+                ^ " to start at 0 (the prologue fills buffer copy 0)");
+            (* A dead anchor ([to_ < from_], supported by the IR) never executes its body, so the
+               unconditional prologue would run a load the unpipelined form never runs — an
+               unreachable body may even carry accesses that are only valid because they never
+               execute (Codex P2 on PR #303). Unreachable from real tensors (a k-block loop has at
+               least one block); defensive like the bounds check above. *)
+            if stack0.(ld).to_ < stack0.(ld).from_ then
+              invalid_arg
+                ("Schedule.Stage: pipeline_depth > 1 requires the staging anchor loop "
+                ^ Indexing.symbol_ident stack0.(ld).index
+                ^ " to have at least one iteration (a dead anchor cannot execute the prologue \
+                   copy)");
+            Some stack0.(ld).index
+        | Some ld ->
+            invalid_arg
+              ("Schedule.Stage: pipeline_depth > 1 requires the staging anchor loop "
+              ^ Indexing.symbol_ident stack0.(ld).index
+              ^ " to be Serial (the buffer rotation needs a well-defined iteration order)")
+        | None ->
+            invalid_arg
+              ("Schedule.Stage: pipeline_depth > 1 requires an anchored staging point (a serial \
+                loop carrying an outer-part symbol) for " ^ Tn.debug_name source
+             ^ "; an unanchored (broadcast) staging has no loop to rotate the buffers with")
+    in
+    let build_pipelined rotor fc =
+      let subst by = map_code ~fidx:(subst_axis_index ~sym:rotor ~by) load_nest in
+      let prologue = subst { terms = []; offset = fc.from_ } in
+      let prefetch = subst { terms = [ (1, rotor) ]; offset = 1 } in
+      let guard =
+        Binop
+          ( Ops.Cmplt,
+            (Embed_index (Indexing.Iterator rotor), iprec),
+            (Constant (Float.of_int fc.to_), iprec) )
+      in
+      let guarded_prefetch = If { cond = (guard, iprec); body = prefetch } in
+      let remap llc = remap_reads ~source ~from_idcs:idcs0 ~tile ~tile_idcs:tile_read_idcs llc in
+      (* Same-anchor composition (Codex P2 on PR #303): a previous pipelined stage at this rotor
+         already restructured the body to [barrier; prefetches...; compute] and appended the
+         trailing barrier after the loop. Wrapping it again ([barrier; prefetch_B; barrier;
+         prefetch_A; compute]) would place a barrier between the two prefetches — the copy issued
+         before it must complete at that barrier, so its load no longer overlaps the compute.
+         Instead, group this stage's prefetch into the SAME phase: one barrier per iteration,
+         prefetches back to back, then the compute. Safety is unchanged — the prefetches write
+         next-iteration copies of distinct tiles, and the single barrier still separates every
+         copy's write from its reads (one iteration apart) and from its next overwrite. *)
+      let same_anchor =
+        Map.exists opt.pipelined ~f:(fun { pt_rotor; _ } -> Indexing.equal_symbol pt_rotor rotor)
+      in
+      match (same_anchor, flat_lines [ fc.body ]) with
+      | true, Workgroup_barrier :: rest ->
+          let body =
+            unflat_lines [ Workgroup_barrier; guarded_prefetch; remap (unflat_lines rest) ]
+          in
+          (* The previous same-anchor stage's trailing barrier already follows the loop. *)
+          unflat_lines [ prologue; for_loop { fc with body } ]
+      | _ ->
+          let body = unflat_lines [ Workgroup_barrier; guarded_prefetch; remap fc.body ] in
+          unflat_lines [ prologue; for_loop { fc with body }; Workgroup_barrier ]
+    in
     let llc =
-      match lstar_depth with
-      | Some ld ->
+      match (lstar_depth, pipeline_rotor) with
+      | Some ld, Some rotor ->
+          rewrite_loop ~what:"Schedule.Stage" ~sym:stack0.(ld).index opt.llc
+            ~f:(build_pipelined rotor)
+      | Some ld, None ->
           rewrite_loop ~what:"Schedule.Stage" ~sym:stack0.(ld).index opt.llc ~f:(fun fc ->
               for_loop { fc with body = build fc.body })
-      | None when wrap_outermost_tile ->
+      | None, _ when wrap_outermost_tile ->
           rewrite_loop ~what:"Schedule.Stage" ~sym:stack0.(outermost_tile_depth).index opt.llc
             ~f:(fun fc -> build (for_loop fc))
-      | None -> build opt.llc
+      | None, _ -> build opt.llc
     in
     {
       opt with
@@ -1612,6 +1718,11 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
         (match swizzle with
         | Some kind -> Map.set opt.swizzled ~key:tile ~data:kind
         | None -> opt.swizzled);
+      pipelined =
+        (match pipeline_rotor with
+        | Some rotor ->
+            Map.set opt.pipelined ~key:tile ~data:{ pt_depth = pipeline_depth; pt_rotor = rotor }
+        | None -> opt.pipelined);
       zero_fringe = Set.add opt.zero_fringe tile;
     }
 
@@ -3237,8 +3348,10 @@ let can_fuse_epilogue ~target (opt : Low_level.optimized) : bool =
 
 let apply_opt_op (opt : Low_level.optimized) (op : optop) : Low_level.optimized =
   match op with
-  | Stage { source; tile_loops; shared; cooperative; hoisted; swizzle; pad_stride } ->
-      apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_stride opt
+  | Stage { source; tile_loops; shared; cooperative; hoisted; swizzle; pad_stride; pipeline_depth }
+    ->
+      apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_stride
+        ~pipeline_depth opt
   | Privatize { target; over } -> apply_privatize ~target ~over opt
   | Tensorize _ -> apply_tensorize op opt
   | Fuse_epilogue { target; shared } -> apply_fuse_epilogue ~target ~shared opt
@@ -3279,11 +3392,69 @@ let split_reduce_hoist (opt : Low_level.optimized) (op : optop) : Indexing.symbo
       | exception Invalid_argument _ -> [])
   | _ -> []
 
+(* gh-ocannl-487 (Codex P2 on PR #303): the [Tile_mma] emission contract brackets the intrinsic
+   block in workgroup barriers on every barrier-capable backend ("Tile_mma is a barrier";
+   {!optop.Tensorize} docs) — so once Tensorize has replaced a pipelined rotor loop's compute with
+   a Tile_mma, every iteration already ends with a barrier and the pipeline's own barriers render
+   as consecutive barriers with no work between: the loop-leading one against the previous
+   iteration's trailing bracket, and the after-loop one against the last iteration's. Elide both
+   exactly when the rotor body provably ends with a barrier (conservative otherwise — a scalar
+   pipelined compute keeps its barriers). Phase separation is preserved: the bracket before the
+   intrinsic block separates the prologue copies from the first compute, and each iteration's
+   trailing bracket separates its copies' reads from the next iteration's prefetch overwrites and
+   the loop's last writes from whatever follows. Runs at {!apply}'s finalization, after Tensorize
+   (Stage precedes Tensorize by Stage's own precondition, so the schedule half cannot see the
+   Tile_mma at splice time). *)
+let rec ends_with_barrier (llc : Low_level.t) : bool =
+  match llc with
+  | Low_level.Workgroup_barrier | Low_level.Tile_mma _ -> true
+  | Low_level.Seq (_, b) -> ends_with_barrier b
+  (* Hardware axes bind rather than iterate; a serial loop ends with its (non-empty) last
+     iteration's end. A dead loop executes nothing, so it ends with no barrier. *)
+  | Low_level.For_loop { body; from_; to_; _ } -> to_ >= from_ && ends_with_barrier body
+  | _ -> false
+
+let elide_pipelined_barriers (opt : Low_level.optimized) : Low_level.optimized =
+  let open Low_level in
+  if Map.is_empty opt.pipelined then opt
+  else
+    let rotors =
+      Map.data opt.pipelined
+      |> List.map ~f:(fun { pt_rotor; _ } -> pt_rotor)
+      |> List.dedup_and_sort ~compare:Indexing.Symbol.compare
+    in
+    let is_rotor s = List.mem rotors s ~equal:Indexing.equal_symbol in
+    let rec stmt (llc : Low_level.t) : Low_level.t =
+      match llc with
+      | For_loop fc when is_rotor fc.index ->
+          let body_stmts = List.map (flat_lines [ fc.body ]) ~f:stmt in
+          let body_stmts =
+            match body_stmts with
+            | Workgroup_barrier :: rest when ends_with_barrier (unflat_lines rest) -> rest
+            | other -> other
+          in
+          For_loop { fc with body = unflat_lines body_stmts }
+      | For_loop fc -> For_loop { fc with body = seq fc.body }
+      | If { cond; body } -> If { cond; body = seq body }
+      | other -> other
+    and seq (llc : Low_level.t) : Low_level.t =
+      let rec drop = function
+        | (For_loop { index; from_; to_; body; _ } as lp) :: Workgroup_barrier :: tl
+          when is_rotor index && to_ >= from_ && ends_with_barrier body ->
+            lp :: drop tl
+        | hd :: tl -> hd :: drop tl
+        | [] -> []
+      in
+      unflat_lines (drop (List.map (flat_lines [ llc ]) ~f:stmt))
+    in
+    { opt with llc = seq opt.llc }
+
 let apply ?(static_indices = []) (sched : schedule) (opt : Low_level.optimized) :
     Low_level.optimized =
   if List.is_empty sched then opt
   else
     let opt = List.fold sched ~init:opt ~f:apply_opt_op in
+    let opt = elide_pipelined_barriers opt in
     let llc = opt.Low_level.llc in
     (* Transforms fold their own guards (schedule-ir-optops §2): the pipeline's simplify already
        ran, so re-run it here; and when a transform duplicated code, re-run CSE + hoisting too. *)
@@ -5046,6 +5217,7 @@ let segment_optimized (full : Low_level.optimized) (llc : Low_level.t) : Low_lev
     workgroup_shared = Set.filter full.Low_level.workgroup_shared ~f:(Set.mem tns);
     simdgroup_fragments = Set.filter full.Low_level.simdgroup_fragments ~f:(Set.mem tns);
     swizzled = Map.filter_keys full.Low_level.swizzled ~f:(Set.mem tns);
+    pipelined = Map.filter_keys full.Low_level.pipelined ~f:(Set.mem tns);
     zero_fringe = Set.filter full.Low_level.zero_fringe ~f:(Set.mem tns);
     flip_candidates = full.Low_level.flip_candidates;
   }
@@ -5318,7 +5490,15 @@ let check_hardware_limits_classified ~name ~(limits : Backend_intf.hardware_limi
   Option.iter limits.max_workgroup_memory_bytes ~f:(fun max_bytes ->
       let shared_bytes =
         Set.fold opt.workgroup_shared ~init:0 ~f:(fun acc tn ->
-            acc + Lazy.force tn.Tn.size_in_bytes)
+            (* A pipelined tile is allocated as [pt_depth] rotating copies (gh-ocannl-487): the
+               IR-level dims stay single-copy, so the accounting multiplies here, matching the
+               codegen declaration. *)
+            let copies =
+              match Map.find opt.Low_level.pipelined tn with
+              | Some { Low_level.pt_depth; _ } -> pt_depth
+              | None -> 1
+            in
+            acc + (copies * Lazy.force tn.Tn.size_in_bytes))
       in
       if shared_bytes > max_bytes then
         let detail =

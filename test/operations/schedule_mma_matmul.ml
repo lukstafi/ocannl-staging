@@ -228,6 +228,7 @@ let () =
                   (16, 16, 8) );
               ];
             mma_staged_layouts = [];
+            mma_pipeline_depths = [];
           };
     }
   in
@@ -744,6 +745,7 @@ let () =
           hoisted = false;
           swizzle = None;
           pad_stride = None;
+          pipeline_depth = 1;
         };
       Sched.Stage
         {
@@ -754,6 +756,7 @@ let () =
           hoisted = false;
           swizzle = None;
           pad_stride = None;
+          pipeline_depth = 1;
         };
       tz;
     ]
