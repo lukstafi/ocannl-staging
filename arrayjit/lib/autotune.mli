@@ -527,6 +527,18 @@ val on_candidate_attempt : (string -> unit) ref
     winner. Not a production seam: candidate failures that a backend {e can} attribute are
     contained without it (see [declines]). *)
 
+val on_candidate_preflight : (string -> unit) ref
+(** Fault-injection seam for the pre-dispatch containment tests (gh-ocannl-564), called with a
+    routine's name inside the {!Ir.Schedule_outcome.Preflight} region of its timing run, just before
+    {!Context.check_runnable}. Raising from it is classified exactly as a real validation failure
+    is: for a candidate, a contained decline under [Unclassified_key (Preflight, _)] that leaves the
+    lineage usable and the search running; for the baseline, the propagating pre-search failure a
+    baseline timing failure always is. It exists because the real triggers — an unsatisfied
+    execution dependency, an out-of-range static binding — are properties of the lineage and the
+    bindings rather than of a candidate, so a genuine one fails every candidate at once and cannot
+    exercise "declined, and the search shipped a winner anyway". Default a no-op; no configuration
+    selects it. *)
+
 val tune :
   ?search:bool ->
   (* Whether to search at all; default from config [autotune_search] (true). With [false]

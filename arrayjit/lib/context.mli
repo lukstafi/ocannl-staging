@@ -99,10 +99,11 @@ val check_runnable : t -> routine -> unit
     unsatisfied execution dependencies, out-of-range bindings — raising exactly what [run] would.
     All of it precedes the dispatch, so a failure here proves nothing was executed and no device
     buffer was written. That is the point (gh-ocannl-550): a caller that runs a routine inside a
-    launch-tagged failure boundary validates through this {e outside} the boundary, so a failure
-    the backend cannot attribute {e inside} it means dispatch was attempted and the lineage must be
-    condemned — while an unsatisfied dependency, which the caller can fix and retry, does not
-    condemn anything. *)
+    launch-tagged failure boundary validates through this in its own
+    {!Ir.Schedule_outcome.Preflight} region, so a failure the backend cannot attribute at
+    [Launch] means dispatch was attempted and the lineage must be condemned — while an unsatisfied
+    dependency, which the caller can fix and retry, is classified as the contained decline it is
+    (gh-ocannl-564) and condemns nothing. *)
 
 val sync : t -> unit
 (** Blocks until the context's device is idle. Host reads ({!to_host}, {!get_values}) synchronize on
