@@ -79,7 +79,6 @@ def main():
         raise SystemExit(__doc__)
     src = open(sys.argv[1]).read()
     outdir = sys.argv[2]
-    os.makedirs(outdir, exist_ok=True)
 
     # Sanity: this must be arm A, the shipping artifact, not arm B's discarded emission.
     n_glob = src.count("__global__")
@@ -96,11 +95,12 @@ def main():
     gemm_var = re.search(r"for \(int (i\d+) = 0; \1 <= 1023; \+\+\1\) \{\s*\n\s*for \(int i\d+ = 0;"
                          r" i\d+ <= 255", body25).group(1)
     gelu_var = [v for v in re.findall(r"for \(int (i\d+) = 0; \1 <= 1023", body25) if v != gemm_var][0]
+    out_files = {}
     for c in CHUNKS:
         per = DFF // c
         b = rebase_loop(body25, gemm_var, per)
         b = rebase_loop(b, gelu_var, per)
-        open(os.path.join(outdir, "seg25_chunk%d.cu" % c), "w").write(src[:s25] + b + src[e25:])
+        out_files["seg25_chunk%d.cu" % c] = src[:s25] + b + src[e25:]
 
     # --- seg111: fission, then chunk the GEMM half --------------------------
     s111, e111 = kernel_span(src, "cross_entropy_loss_fwd__seg111")
@@ -122,7 +122,20 @@ def main():
         out += (sig % "_gemm") + "{" + gemm + "}\n}\n"
         out += (sig % "_reduce") + "{" + blocks[1] + "}\n{" + blocks[2] + "}\n}\n"
         out += src[e111:]
-        open(os.path.join(outdir, "seg111_split%d.cu" % c), "w").write(out)
+        out_files["seg111_split%d.cu" % c] = out
+
+    # Everything parsed. Only now touch the filesystem, and clear any variants a previous (possibly
+    # failed, possibly different-snapshot) run left behind -- otherwise the harness can be pointed
+    # at a directory mixing artifacts from two runs and time the stale ones.
+    os.makedirs(outdir, exist_ok=True)
+    for stale in os.listdir(outdir):
+        if re.match(r"^(seg25_chunk|seg111_split)\d+\.cu$", stale):
+            os.remove(os.path.join(outdir, stale))
+    for name, text in out_files.items():
+        tmp = os.path.join(outdir, name + ".tmp")
+        with open(tmp, "w") as f:
+            f.write(text)
+        os.replace(tmp, os.path.join(outdir, name))   # atomic: no half-written variant is visible
 
     print("wrote %d seg25 and %d seg111 variants to %s" % (len(CHUNKS), len(CHUNKS), outdir))
 

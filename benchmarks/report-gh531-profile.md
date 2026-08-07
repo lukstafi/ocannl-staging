@@ -203,7 +203,7 @@ here (`ERR_NVGPUCTRPERM`). So the table alone establishes only that no kernel is
 
 The byte question is settled separately, and empirically, by the control in the next section: with
 each thread's addresses held **exactly** fixed and only the resident-block count varied, time falls
-linearly with blocks and saturates at 5.86x. A kernel whose binding resource were memory traffic
+linearly with blocks and saturates at 5.91x. A kernel whose binding resource were memory traffic
 would not scale with block count while touching the same bytes in the same order. With both legs
 accounted for: **the traffic does not have to shrink.**
 
@@ -292,18 +292,18 @@ row:
 
 | variant | blocks | ms | vs shipped |
 |---|---:|---:|---:|
-| **as shipped**, `grid=(8,1)` | 8 | **13.85** | 1.00x |
-| `j` chunked, `grid=(8,2)` | 16 | 7.24 | 1.92x |
-| `j` chunked, `grid=(8,4)` | 32 | 3.50 | 3.97x |
-| `j` chunked, `grid=(8,16)` | 128 | 2.47 | 5.63x |
-| **`j` chunked, `grid=(8,128)`** | 1,024 | **2.36** | **5.86x** |
+| **as shipped**, `grid=(8,1)` | 8 | **13.91** | 1.00x |
+| `j` chunked, `grid=(8,2)` | 16 | 7.07 | 1.97x |
+| `j` chunked, `grid=(8,4)` | 32 | 3.56 | 3.91x |
+| `j` chunked, `grid=(8,16)` | 128 | 2.46 | 5.65x |
+| **`j` chunked, `grid=(8,128)`** | 1,024 | **2.36** | **5.91x** |
 
-The harness reproduces production: 13.85 ms here against the **14.31 ms** nsys measures for `seg25`
+The harness reproduces production: 13.91 ms here against the **14.31 ms** nsys measures for `seg25`
 in the step, a 2.8% match, on the same source through the same compiler with the same flags. So
 this is a measured production replacement, not a cross-toolchain estimate, and the epilogue is
 inside both numbers rather than being an unmeasured residual. (Rewriting the loop bound costs ~6% on
 its own -- the chunked kernel at 8 blocks is 14.63-14.83 ms -- so the same-code-shape ratio is 6.2x;
-5.86x is quoted against what OCANNL emits today, which is the conservative choice.)
+5.91x is quoted against what OCANNL emits today, which is the conservative choice.)
 
 Time falls **linearly with resident blocks** -- 1.92x at 2x, 3.97x at 4x -- and saturates around 128
 blocks, which is what a parallelism-starved kernel looks like and is not what a bandwidth-saturated
@@ -366,12 +366,13 @@ concentration is extreme:
 - 4 x attention out-projection = **12.6 ms (12.2%)**, blocked at `8x128x8x128`.
 
 **Size of the prize -- measured on the production kernels.** These are not proxies: they are the
-emitted sources, compiled the way OCANNL compiles them, verified pointwise against an fp64
-reference before any time is reported.
+emitted sources, compiled the way OCANNL compiles them, verified against an fp64 reference --
+every output cell, on deliberately non-periodic inputs so that a duplicated or permuted chunk
+cannot match -- before any time is reported.
 
 **FFN up-projection (`seg25`, and identically `seg51`/`77`/`103`).** Spreading its `j` range over
 more blocks -- no tiling, no shared memory, no tensor cores, no change to any thread's access
-pattern -- takes it from 13.85 ms to **2.36 ms**, **5.86x**, with the gelu epilogue inside both.
+pattern -- takes it from 13.91 ms to **2.36 ms**, **5.91x**, with the gelu epilogue inside both.
 
 **Tied lm_head (`seg111`) needs one extra step, and it is not the same transformation.** Its output
 axis is the vocabulary, and that axis carries a *reduction*: the kernel computes the logits and then
@@ -382,11 +383,11 @@ geometry). Measured that way:
 
 | `seg111` | blocks | ms |
 |---|---:|---:|
-| as shipped, one kernel | 8 | 15.12 |
+| as shipped, one kernel | 8 | 15.20 |
 | GEMM half, as shipped | 8 | 14.41 |
-| **GEMM half, chunked** | 1,024 | **2.33** |
+| **GEMM half, chunked** | 1,024 | **2.32** |
 | **reduce half** (init + max over vocab) | 8 | **0.05** |
-| **fissioned total** | | **2.38** (6.4x) |
+| **fissioned total** | | **2.37** (6.4x) |
 
 The reduce half is cheap because it is one pass over the logits, not a 256-deep accumulation. The
 fission costs one extra kernel launch, which the timeline above prices at ~4.2 us.
@@ -395,10 +396,10 @@ Applying each measured factor to its own kernels:
 
 | | now | measured replacement |
 |---|---:|---:|
-| FFN GEMM1 + gelu x4 (5.86x) | 57.51 | ~9.8 |
+| FFN GEMM1 + gelu x4 (5.91x) | 57.51 | ~9.7 |
 | lm_head, fissioned (6.4x) | 14.76 | ~2.3 |
-| **five-kernel total** | **72.27** | **~12.2** |
-| **step (kernel time)** | **102.95** | **~42.9** |
+| **five-kernel total** | **72.27** | **~12.0** |
+| **step (kernel time)** | **102.95** | **~42.7** |
 
 That is a **~2.4x end-to-end floor**, against bin 1's 1.06x.
 
@@ -512,7 +513,7 @@ The supporting facts, in the order that matters:
 3. Nothing saturates the device roofline (0.000 ms at-roofline, 96.5% well under) -- which bounds
    what any *fusion* can be worth, since fusion targets traffic. For the dominant kernel the binding
    resource is identified directly: holding each thread's addresses exactly fixed and varying only
-   the block count, its time falls **linearly with resident blocks** and saturates at 5.86x, so it
+   the block count, its time falls **linearly with resident blocks** and saturates at 5.91x, so it
    is not byte-bound and "the traffic must shrink" is false here. What binds it is occupancy:
    **1024 threads on 46 SMs**. (Being far under a device-wide envelope does not by itself prove a
    kernel is not compute-bound -- a serial dependency chain can bind at a few percent of peak -- so
@@ -521,9 +522,9 @@ The supporting facts, in the order that matters:
    **and 10 scalar** seeds at the `8x128x1024` output geometry, which is exactly FFN GEMM1 and the
    lm_head; and 5+5 at `8x128x8x128`, which is the out-projection and QK^T.
 5. The prize on the other side is measured **on the production kernels through OCANNL's own
-   compiler**, each with its own transformation: the FFN up-projection goes 13.85 -> 2.36 ms (5.86x)
+   compiler**, each with its own transformation: the FFN up-projection goes 13.91 -> 2.36 ms (5.91x)
    on block count alone, and the lm_head -- whose vocabulary axis carries the `max_logits` reduction
-   and so cannot simply be chunked -- goes 15.12 -> 2.38 ms (6.4x) once fissioned into a chunked
+   and so cannot simply be chunked -- goes 15.20 -> 2.37 ms (6.4x) once fissioned into a chunked
    GEMM plus an unchanged reduce. That puts the step at **~43 ms -- ~2.4x**. The harness reproduces
    both in-step times to ~3%, so these are replacement measurements, not extrapolations.
 
@@ -550,7 +551,9 @@ unchanged. The pass-2 replay processes that produced every number above need wel
 cd benchmarks
 # pass 1: COLD search -- the empty cache dir is load-bearing, otherwise this replays a
 # previous winner instead of searching, and compile_s/the calibration rows describe stale state.
-rm -rf /tmp/gh531-cache
+# autotune_calibration_file is opened with ~append:true, so a stale TSV would silently mix a
+# previous search's rows into this one; remove both it and the cache dir.
+rm -rf /tmp/gh531-cache /tmp/calib.tsv
 BENCH_FIXTURE=fixtures/gpt2_mini.safetensors BENCH_TUNE=1 OCANNL_AUTOTUNE_LOG=true \
   ../_build/default/benchmarks/runners/ocannl/bench_gpt.exe \
   --ocannl_backend=cuda --ocannl_tf32_matmuls=true \
@@ -616,14 +619,18 @@ The variant sources are generated from an arm-A snapshot by
 an fp64 reference before reporting a time:
 
 ```bash
-python3 benchmarks/ffn1_make_variants.py armA-117.cu /tmp/vars
-gcc -O2 -o /tmp/h benchmarks/ffn1_nvrtc_harness.c -I/usr/local/cuda/include \
-    -L/usr/local/cuda/lib64 -L/usr/lib/wsl/lib -lnvrtc -lcuda -lm
-/tmp/h armA-117.cu            cross_entropy_loss_fwd__seg25          1
-/tmp/h /tmp/vars/seg25_chunk128.cu   cross_entropy_loss_fwd__seg25   128
-/tmp/h /tmp/vars/seg111_split128.cu  cross_entropy_loss_fwd__seg111_gemm   128
-/tmp/h /tmp/vars/seg111_split1.cu    cross_entropy_loss_fwd__seg111_reduce   1
+rm -rf /tmp/vars && python3 benchmarks/ffn1_make_variants.py armA-117.cu /tmp/vars \
+  && gcc -O2 -o /tmp/h benchmarks/ffn1_nvrtc_harness.c -I/usr/local/cuda/include \
+       -L/usr/local/cuda/lib64 -L/usr/lib/wsl/lib -lnvrtc -lcuda -lm \
+  && /tmp/h armA-117.cu                  cross_entropy_loss_fwd__seg25            1 \
+  && /tmp/h /tmp/vars/seg25_chunk128.cu  cross_entropy_loss_fwd__seg25          128 \
+  && /tmp/h /tmp/vars/seg111_split128.cu cross_entropy_loss_fwd__seg111_gemm    128 \
+  && /tmp/h /tmp/vars/seg111_split1.cu   cross_entropy_loss_fwd__seg111_reduce    1
 ```
+
+Chained with `&&` deliberately: the generator writes nothing until every rewrite has parsed, and
+clears stale variants before writing, but an unchained sequence could still time artifacts from a
+previous run if the generator failed.
 
 The OCANNL-independent replication is checked in as
 [`benchmarks/ffn1_geometry_probe.cu`](ffn1_geometry_probe.cu) -- plain CUDA, no OCANNL:

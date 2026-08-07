@@ -40,18 +40,18 @@
 // Measured on an RTX 5070 Ti Laptop (46 SMs), CUDA 13.3, WSL2. Every row verified before timing:
 //
 //   seg25 (FFN up-projection, GEMM + gelu, chunkable as-is)
-//     as shipped,     8 blocks   13.70-13.85 ms   (nsys measures 14.31 ms in the step: ~3%)
-//     chunked,       16 blocks    7.24 ms
-//     chunked,       32 blocks    3.50 ms
-//     chunked,     1024 blocks    2.32-2.37 ms    -> 5.9x
+//     as shipped,     8 blocks   13.70-13.91 ms   (nsys measures 14.31 ms in the step: ~3%)
+//     chunked,       16 blocks    7.07 ms
+//     chunked,       32 blocks    3.56 ms
+//     chunked,     1024 blocks    2.36 ms         -> 5.9x
 //
 //   seg111 (tied lm_head). Its vocabulary axis carries the max_logits REDUCTION, so it cannot be
 //   chunked as one kernel; it is fissioned into a GEMM half (chunkable) and a reduce half:
 //     as shipped, whole kernel,      8 blocks   15.12-15.20 ms  (nsys: 14.76 ms, ~3%)
 //     seg111_gemm,                   8 blocks   14.41 ms
-//     seg111_gemm chunked,        1024 blocks    2.33 ms
+//     seg111_gemm chunked,        1024 blocks    2.32 ms
 //     seg111_reduce (init + max),    8 blocks    0.05 ms
-//     fissioned total                            2.38 ms   -> 6.4x  (at the cost of one extra
+//     fissioned total                            2.37 ms   -> 6.4x  (at the cost of one extra
 //                                                                    launch, ~4 us)
 //
 // Note the loop-bound rewrite alone costs ~6% on seg25 (chunked at 8 blocks is 14.63-14.83 ms),
@@ -60,6 +60,7 @@
 // See benchmarks/report-gh531-profile.md for the reading.
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <math.h>
 #include <cuda.h>
@@ -83,6 +84,20 @@ static char* slurp(const char* p, size_t* n) {
   size_t got = fread(b, 1, len, f); b[got] = 0; fclose(f);
   if (n) *n = got;
   return b;
+}
+
+// Deterministic but NON-PERIODIC fixture (splitmix64 on the flat index). Periodic inputs -- an
+// earlier revision used (i % 17), (i % 13), (i % 7) -- make the reference blind to exactly the
+// failures this harness exists to catch: with activation rows repeating every 13 tokens and weight
+// rows every 17 outputs, a kernel that duplicates or permutes a chunk still matches cell for cell.
+// With this generator every logical row and column is distinguishable, which is asserted at
+// startup by fixture_selfcheck().
+static float fixture(uint64_t i) {
+  uint64_t x = i * 0x9E3779B97F4A7C15ull + 0x0123456789ABCDEFull;
+  x ^= x >> 30; x *= 0xBF58476D1CE4E5B9ull;
+  x ^= x >> 27; x *= 0x94D049BB133111EBull;
+  x ^= x >> 31;
+  return (float)(((double)(x >> 11) / 9007199254740992.0) - 0.5) * 0.1f;
 }
 
 static float* hw;   // weight   [OUT][D]  (w1[j][k] resp. wte[k][v] -- see loaders)
@@ -156,9 +171,9 @@ int main(int argc, char** argv) {
   hw = (float*)malloc(wsz);
   hl = (float*)malloc((size_t)TOKENS * D * 4);
   hb = (float*)malloc((size_t)DFF * 4);
-  for (size_t i = 0; i < wsz / 4; ++i) hw[i] = (float)((int)(i % 17) - 8) * 0.01f;
-  for (int i = 0; i < TOKENS * D; ++i) hl[i] = (float)((i % 13) - 6) * 0.01f;
-  for (int i = 0; i < DFF; ++i) hb[i] = 0.001f * (float)(i % 7);
+  for (size_t i = 0; i < wsz / 4; ++i) hw[i] = fixture(i);
+  for (int i = 0; i < TOKENS * D; ++i) hl[i] = fixture(0x10000000ull + (uint64_t)i);
+  for (int i = 0; i < DFF; ++i) hb[i] = fixture(0x20000000ull + (uint64_t)i);
 
   CUdeviceptr dW, dL, dB, dOut, dAux;
   CU(cuMemAlloc(&dW, wsz)); CU(cuMemAlloc(&dL, (size_t)TOKENS * D * 4));
@@ -167,6 +182,27 @@ int main(int argc, char** argv) {
   CU(cuMemcpyHtoD(dW, hw, wsz));
   CU(cuMemcpyHtoD(dL, hl, (size_t)TOKENS * D * 4));
   CU(cuMemcpyHtoD(dB, hb, (size_t)DFF * 4));
+
+  // Fixture self-check: the reference must distinguish rows and columns, or a duplicated or
+  // permuted chunk would verify. These are the aliases the previous periodic fixture had.
+  {
+    int bad = 0;
+    for (int k = 0; k < D; ++k) {                       // token t vs t+13
+      if (hl[0 * D + k] != hl[13 * D + k]) { bad = 0; break; }
+      bad = 1;
+    }
+    if (!bad) {
+      int o = 0;                          // output row o vs o+17 and o+119
+      for (int shift = 17; shift <= 119 && !bad; shift += 102) {
+        int same = 1;
+        for (int k = 0; k < D; ++k)
+          if (hw[(size_t)o * D + k] != hw[(size_t)(o + shift) * D + k]) { same = 0; break; }
+        bad = same;
+      }
+    }
+    if (bad) { printf("FAIL: fixture is periodic -- rows or columns are not distinguishable\n");
+               return 2; }
+  }
 
   int i1 = 0;
   // seg25:  (i1, b1, w1, ln, n311, gelu)      seg111: (i1, logits, max_logits, lnf, wte)
