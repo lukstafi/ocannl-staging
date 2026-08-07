@@ -133,6 +133,18 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   the two agree on: loop-binder tokens `b<n>`, first-occurrence local-scope alpha, comment
   skipping, `mark_incomplete` on opaque statements. Golden + seam test:
   `test/operations/canonical_render.ml`.
+- Why a bespoke renderer rather than `to_doc` / `sexp_of_t`: (1) the digests must be
+  ALPHA-INVARIANT — `Indexing.symbol` and `scope_id` are global counters, so sibling lowerings of
+  one routine share no symbol numbers and any structural print misses 100% of the time; (2)
+  `to_doc`'s node names are NOT CONTEXT-FREE — `get_ident_within_code` pre-passes the whole code
+  array to find labels claimed by more than one uid and only disambiguates those, so a node prints
+  as bare `x` when alone, which COLLIDES two different routines rendered separately (a wrong hit,
+  and for the analysis cache a correctness failure) and makes a fragment's digest shift when a
+  sibling fragment changes (per-segment schedule matching needs the opposite); it also mutates
+  (`Tn.update_code_name`) and is layout- and config-dependent (`PPrint` width,
+  `ll_ident_style`/`output_prec_in_ll_files`). (3) `Low_level.t` derives no `compare`/`hash`
+  (`Staged_compilation` holds a closure), and the schedule cache's key becomes an on-disk FILENAME
+  (`Schedule_cache.cache_key`/`cache_file`) — so a string digest, not a structural key.
 - The `Low_level` analysis cache (gh-ocannl-560) makes sibling candidate compiles share one
   `analyze_proc` result keyed by that digest of the raw lowered code. Its identity policy is the
   OPPOSITE of `Schedule_cache.canonicalize`'s: tensor nodes and static symbols enter by identity
