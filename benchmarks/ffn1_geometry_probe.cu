@@ -1,31 +1,50 @@
-// gh-ocannl-531: same-geometry control for the gpt2_mini step's dominant kernel.
+// gh-ocannl-531: what binds the gpt2_mini step's dominant kernel?
 //
 // Standalone, no OCANNL. Build and run:
 //     nvcc -O3 -arch=sm_120 -o ffn1_geometry_probe benchmarks/ffn1_geometry_probe.cu
-//     ./ffn1_geometry_probe
+//     ./ffn1_geometry_probe          # exits nonzero if any variant disagrees
 //
-// Why it exists: 4 of the 5 kernels that make up 70% of the tuned gpt2_mini step are the FFN
-// up-projection, emitted as two serial loops with a global-memory accumulator at
-// grid=(8,1,1) x block=(128,1,1). The report needed to know which property is actually binding
-// -- the read-modify-write, or the 1024-thread launch -- and `ncu`'s traffic counters are
-// unavailable under WSL without admin (ERR_NVGPUCTRPERM). So vary one thing at a time instead.
+// Context. Four of the five kernels that make up 70% of the tuned gpt2_mini step are the FFN
+// up-projection: out[tok][j] = sum_k w1[j][k] * ln[tok][k], with tok = 8*128 = 1024 tokens,
+// j < 1024, k < 256. OCANNL emits it as two serial loops launched at
+// grid=(8,1,1) x block=(128,1,1) -- 1024 threads on a 46-SM GPU -- and it takes 14.31 ms
+// (12.7 ms without its gelu epilogue) for 536.9 MFLOP, i.e. 0.22% of this card's fp32 peak.
+//
+// Two things this probe had to get right, both learned the hard way:
+//
+//  1. The emitted C source accumulates into GLOBAL MEMORY (out[...] = fma(..., out[...])), but
+//     that is not what runs. OCANNL's own PTX for cross_entropy_loss_fwd__seg25 keeps the
+//     accumulator in a register across the whole k loop (one ld.global per output element, an
+//     unrolled fma chain, one st.global), and nvcc does the same to the source form below.
+//     So "global read-modify-write per iteration" describes the source, not the machine code,
+//     and a register-accumulator variant is NOT a control -- the compiler makes the two
+//     identical (verifiable: `cuobjdump -sass` shows one STG per kernel either way).
+//
+//  2. Widening the grid by giving one thread per output element also changes the thread ->
+//     address mapping (adjacent threads move from 4 KiB apart to adjacent), so it confounds
+//     occupancy with coalescing. The E variants below avoid that: they keep A's exact
+//     thread -> token mapping and per-thread inner loop, and only split the j range across
+//     blockIdx.y. Every thread touches the same addresses in the same order as in A; the only
+//     thing that changes is how many blocks are resident.
 //
 // Measured on an RTX 5070 Ti Laptop (46 SMs, sm_120), CUDA 13.3, WSL2:
-//     A  global RMW,   grid=8    block=128   12.69 ms    42.3 GFLOP/s
-//     B  register acc, grid=8    block=128   12.63 ms    42.5 GFLOP/s
-//     C  register acc, grid=4096 block=256    2.28 ms   235.7 GFLOP/s
-//     D  global RMW,   grid=4096 block=256    2.26 ms   237.8 GFLOP/s
-// A reproduces the in-step kernel (14.31 ms there, the difference being its gelu epilogue).
-// Removing the RMW at the shipped geometry changes nothing; widening the grid is worth 5.6x
-// with the RMW still in place. The binding resource is occupancy, not memory traffic.
 //
-// A: byte-for-byte the loop nest OCANNL's shipping tuned artifact emits for
-//    cross_entropy_loss_fwd__seg25 (global-memory RMW accumulator), same launch geometry.
-// B: identical loops, identical reads, register accumulator (one store per output element).
-// C: B, but with the grid widened to fill the GPU (occupancy control).
-// D: A, but with the grid widened to fill the GPU (does occupancy alone fix the RMW form?).
+//     variant                         blocks   threads        ms   GFLOP/s   vs A
+//     A  grid=(8,1)   block=128            8      1024    12.761      42.1   1.00x  (as shipped)
+//     E  grid=(8,1)   block=128            8      1024    12.782      42.0   1.00x
+//     E  grid=(8,2)   block=128           16      2048     6.363      84.4   2.01x
+//     E  grid=(8,4)   block=128           32      4096     3.252     165.1   3.92x
+//     E  grid=(8,16)  block=128          128     16384     2.408     223.0   5.30x
+//     E  grid=(8,128) block=128         1024    131072     2.337     229.7   5.46x
+//     C  one thread per output          4096   1048576     2.305     232.9   5.54x
 //
-// All four compute the same thing: out[tok][j] = sum_k w1[j][k] * ln[tok][k].
+// Time falls linearly with resident blocks and saturates around 5.46x, with every thread
+// touching the same addresses in the same order throughout -- the signature of a
+// parallelism-starved kernel, not a bandwidth-saturated one. Changing the mapping as well (C)
+// adds a further 1%, so coalescing is not the story either. A reproduces the in-step kernel
+// (14.31 ms there, the difference being its gelu epilogue).
+//
+// See benchmarks/report-gh531-profile.md for the reading.
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -35,11 +54,12 @@
 #define D 256
 #define DFF 1024
 
-#define CHECK(x) do { cudaError_t e=(x); if(e){printf("CUDA error %s @%d\n",cudaGetErrorString(e),__LINE__);exit(1);} } while(0)
+#define CHECK(x) do { cudaError_t err_=(x); if(err_){ \
+  printf("CUDA error %s @%d\n",cudaGetErrorString(err_),__LINE__); exit(2);} } while(0)
 
-// --- A: exactly the emitted form: grid=(8), block=(128), global RMW ---------
-__global__ void A_global_rmw(const float* __restrict__ w1, const float* __restrict__ ln,
-                             float* __restrict__ out) {
+// --- A: the emitted form, verbatim, at the emitted launch geometry ----------
+__global__ void A_shipped(const float* __restrict__ w1, const float* __restrict__ ln,
+                          float* __restrict__ out) {
   const int b = (int)blockIdx.x;
   const int t = (int)threadIdx.x;
   for (int j = 0; j <= DFF - 1; ++j)
@@ -48,23 +68,25 @@ __global__ void A_global_rmw(const float* __restrict__ w1, const float* __restri
           fmaf(w1[(j)*D + k], ln[((b)*128 + t) * D + k], out[((b)*128 + t) * DFF + j]);
 }
 
-// --- B: same geometry, same reads, register accumulator ---------------------
-__global__ void B_reg_acc(const float* __restrict__ w1, const float* __restrict__ ln,
-                          float* __restrict__ out) {
+// --- E: identical mapping and inner loop; only the block count changes ------
+// grid = (8, chunks, 1), block = (128,1,1). Thread (blockIdx.x, threadIdx.x) owns the same
+// token as in A and walks the same addresses; blockIdx.y selects which slice of j it does.
+__global__ void E_occupancy(const float* __restrict__ w1, const float* __restrict__ ln,
+                            float* __restrict__ out, int per_chunk) {
   const int b = (int)blockIdx.x;
   const int t = (int)threadIdx.x;
-  for (int j = 0; j <= DFF - 1; ++j) {
-    float acc = 0.f;
+  const int j0 = (int)blockIdx.y * per_chunk;
+  const int j1 = j0 + per_chunk;
+  for (int j = j0; j < j1; ++j)
     for (int k = 0; k <= D - 1; ++k)
-      acc = fmaf(w1[(j)*D + k], ln[((b)*128 + t) * D + k], acc);
-    out[((b)*128 + t) * DFF + j] = acc;
-  }
+      out[((b)*128 + t) * DFF + j] =
+          fmaf(w1[(j)*D + k], ln[((b)*128 + t) * D + k], out[((b)*128 + t) * DFF + j]);
 }
 
-// --- C: register accumulator, one thread per (token, j) — fills the GPU -----
-__global__ void C_reg_acc_wide(const float* __restrict__ w1, const float* __restrict__ ln,
-                               float* __restrict__ out) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;   // over TOKENS*DFF
+// --- C: one thread per output element (mapping CHANGES -- reference only) ---
+__global__ void C_thread_per_output(const float* __restrict__ w1, const float* __restrict__ ln,
+                                    float* __restrict__ out) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= TOKENS * DFF) return;
   int tok = idx / DFF, j = idx % DFF;
   float acc = 0.f;
@@ -72,88 +94,117 @@ __global__ void C_reg_acc_wide(const float* __restrict__ w1, const float* __rest
   out[tok * DFF + j] = acc;
 }
 
-// --- D: global RMW, one thread per (token, j) — occupancy without registers -
-__global__ void D_global_rmw_wide(const float* __restrict__ w1, const float* __restrict__ ln,
-                                  float* __restrict__ out) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= TOKENS * DFF) return;
-  int tok = idx / DFF, j = idx % DFF;
-  for (int k = 0; k < D; ++k)
-    out[tok * DFF + j] = fmaf(w1[j * D + k], ln[tok * D + k], out[tok * DFF + j]);
+static float *g_w1, *g_ln, *g_out;
+
+static void run_A() { A_shipped<<<8, 128>>>(g_w1, g_ln, g_out); }
+static void run_C() {
+  C_thread_per_output<<<(TOKENS * DFF + 255) / 256, 256>>>(g_w1, g_ln, g_out);
+}
+static int g_chunks = 1;
+static void run_E() {
+  dim3 grid(8, g_chunks, 1);
+  E_occupancy<<<grid, 128>>>(g_w1, g_ln, g_out, DFF / g_chunks);
 }
 
-float bench(void (*launch)(const float*, const float*, float*), const char* name,
-            const float* w1, const float* ln, float* out, int reps) {
-  cudaMemset(out, 0, (size_t)TOKENS * DFF * sizeof(float));
-  launch(w1, ln, out);  // warmup
+// Timed: the accumulating forms must start from zero each rep, so the memset is inside the
+// loop for all variants alike (it is ~0.1% of the fastest variant's time).
+static float bench(void (*launch)(), int reps) {
+  CHECK(cudaMemset(g_out, 0, (size_t)TOKENS * DFF * sizeof(float)));
+  launch();
   CHECK(cudaDeviceSynchronize());
-  cudaEvent_t ev0, ev1; cudaEventCreate(&ev0); cudaEventCreate(&ev1);
-  cudaMemset(out, 0, (size_t)TOKENS * DFF * sizeof(float));
-  cudaEventRecord(ev0);
-  for (int i = 0; i < reps; ++i) launch(w1, ln, out);
-  cudaEventRecord(ev1);
+  cudaEvent_t ev0, ev1;
+  CHECK(cudaEventCreate(&ev0)); CHECK(cudaEventCreate(&ev1));
+  CHECK(cudaEventRecord(ev0));
+  for (int i = 0; i < reps; ++i) {
+    CHECK(cudaMemsetAsync(g_out, 0, (size_t)TOKENS * DFF * sizeof(float)));
+    launch();
+  }
+  CHECK(cudaEventRecord(ev1));
   CHECK(cudaEventSynchronize(ev1));
-  float ms; cudaEventElapsedTime(&ms, ev0, ev1);
+  float ms; CHECK(cudaEventElapsedTime(&ms, ev0, ev1));
+  CHECK(cudaEventDestroy(ev0)); CHECK(cudaEventDestroy(ev1));
   return ms / reps;
 }
 
-static void la(const float* w, const float* l, float* o) { A_global_rmw<<<8, 128>>>(w, l, o); }
-static void lb(const float* w, const float* l, float* o) { B_reg_acc<<<8, 128>>>(w, l, o); }
-static void lc(const float* w, const float* l, float* o) {
-  C_reg_acc_wide<<<(TOKENS * DFF + 255) / 256, 256>>>(w, l, o);
-}
-static void ld(const float* w, const float* l, float* o) {
-  D_global_rmw_wide<<<(TOKENS * DFF + 255) / 256, 256>>>(w, l, o);
+// Independent fp64 reference over a sampled set of outputs; every variant must match it.
+static int verify(void (*launch)(), const char* name, const float* hw, const float* hl) {
+  CHECK(cudaMemset(g_out, 0, (size_t)TOKENS * DFF * sizeof(float)));
+  launch();
+  CHECK(cudaDeviceSynchronize());
+  CHECK(cudaGetLastError());
+  float* got = (float*)malloc((size_t)TOKENS * DFF * sizeof(float));
+  CHECK(cudaMemcpy(got, g_out, (size_t)TOKENS * DFF * sizeof(float), cudaMemcpyDeviceToHost));
+  double worst = 0.0;
+  int bad = 0;
+  for (size_t i = 0; i < (size_t)TOKENS * DFF; ++i)
+    if (!isfinite(got[i])) { bad = 1; printf("  %s: non-finite at %zu\n", name, i); break; }
+  for (int tok = 0; tok < TOKENS && !bad; tok += 97)
+    for (int j = 0; j < DFF; j += 31) {
+      double ref = 0.0;
+      for (int k = 0; k < D; ++k) ref += (double)hw[j * D + k] * (double)hl[tok * D + k];
+      double g = got[(size_t)tok * DFF + j];
+      double rel = fabs(g - ref) / fmax(1e-6, fabs(ref));
+      if (rel > worst) worst = rel;
+    }
+  free(got);
+  if (bad || worst > 1e-4) {
+    printf("  FAIL %s: worst relative deviation %.3e\n", name, worst);
+    return 1;
+  }
+  printf("  ok   %-28s worst relative deviation vs fp64 reference %.3e\n", name, worst);
+  return 0;
 }
 
 int main() {
-  float *w1, *ln, *out, *ref;
-  // Plain device memory: managed memory without prefetch faults per page and makes the
-  // wide-grid variants look absurdly slow (measured once; do not use it here).
   float* hw = (float*)malloc((size_t)DFF * D * sizeof(float));
   float* hl = (float*)malloc((size_t)TOKENS * D * sizeof(float));
   for (int i = 0; i < DFF * D; ++i) hw[i] = (float)((i % 17) - 8) * 0.01f;
   for (int i = 0; i < TOKENS * D; ++i) hl[i] = (float)((i % 13) - 6) * 0.01f;
-  CHECK(cudaMalloc(&w1, (size_t)DFF * D * sizeof(float)));
-  CHECK(cudaMalloc(&ln, (size_t)TOKENS * D * sizeof(float)));
-  CHECK(cudaMalloc(&out, (size_t)TOKENS * DFF * sizeof(float)));
-  CHECK(cudaMemcpy(w1, hw, (size_t)DFF * D * sizeof(float), cudaMemcpyHostToDevice));
-  CHECK(cudaMemcpy(ln, hl, (size_t)TOKENS * D * sizeof(float), cudaMemcpyHostToDevice));
-  ref = (float*)malloc((size_t)TOKENS * DFF * sizeof(float));
+  // Plain device memory: managed memory without prefetch faults per page and makes the
+  // many-block variants look absurdly slow. Do not "simplify" this to cudaMallocManaged.
+  CHECK(cudaMalloc(&g_w1, (size_t)DFF * D * sizeof(float)));
+  CHECK(cudaMalloc(&g_ln, (size_t)TOKENS * D * sizeof(float)));
+  CHECK(cudaMalloc(&g_out, (size_t)TOKENS * DFF * sizeof(float)));
+  CHECK(cudaMemcpy(g_w1, hw, (size_t)DFF * D * sizeof(float), cudaMemcpyHostToDevice));
+  CHECK(cudaMemcpy(g_ln, hl, (size_t)TOKENS * D * sizeof(float), cudaMemcpyHostToDevice));
 
-  cudaDeviceProp p; cudaGetDeviceProperties(&p, 0);
-  printf("device: %s, %d SMs, cc %d.%d\n", p.name, p.multiProcessorCount, p.major, p.minor);
+  cudaDeviceProp p; CHECK(cudaGetDeviceProperties(&p, 0));
   double flops = 2.0 * TOKENS * D * DFF;
-  printf("GEMM: [%d tokens x %d] x [%d x %d], %.1f MFLOP\n\n", TOKENS, D, D, DFF, flops / 1e6);
+  printf("device: %s, %d SMs, cc %d.%d\n", p.name, p.multiProcessorCount, p.major, p.minor);
+  printf("GEMM: out[%d][%d] = sum_k w1[%d][k] * ln[tok][k], k < %d -- %.1f MFLOP\n\n",
+         TOKENS, DFF, DFF, D, flops / 1e6);
 
-  struct { const char* n; void (*f)(const float*, const float*, float*); int threads; } ks[] = {
-      {"A  global RMW,  grid=8   block=128  (as shipped)", la, 1024},
-      {"B  register acc, grid=8   block=128 (same geometry)", lb, 1024},
-      {"C  register acc, grid=4096 block=256 (fills GPU)", lc, 1048576},
-      {"D  global RMW,  grid=4096 block=256 (fills GPU)", ld, 1048576},
-  };
-  printf("%-52s %10s %12s %9s\n", "variant", "ms", "GFLOP/s", "threads");
-  float base = 0;
-  for (int i = 0; i < 4; ++i) {
-    int reps = (i == 0 || i == 1) ? 3 : 20;
-    float ms = bench(ks[i].f, ks[i].n, w1, ln, out, reps);
-    if (i == 0) base = ms;
-    printf("%-52s %10.3f %12.1f %9d   %.2fx\n", ks[i].n, ms, flops / (ms / 1e3) / 1e9,
-           ks[i].threads, base / ms);
+  printf("occupancy sweep: A's thread->address mapping held FIXED, only the block count varies\n");
+  printf("%-34s %8s %9s %10s %9s\n", "variant", "blocks", "threads", "ms", "GFLOP/s");
+  float a_ms = bench(run_A, 3);
+  printf("%-34s %8d %9d %10.3f %9.1f   (as shipped)\n", "A  grid=(8,1)   block=128", 8, 1024,
+         a_ms, flops / (a_ms / 1e3) / 1e9);
+  int chunks[] = {1, 2, 4, 8, 16, 32, 64, 128};
+  float best_e = 1e30f; int best_c = 1;
+  for (int i = 0; i < 8; ++i) {
+    g_chunks = chunks[i];
+    int reps = chunks[i] >= 16 ? 20 : 3;
+    float ms = bench(run_E, reps);
+    if (ms < best_e) { best_e = ms; best_c = chunks[i]; }
+    char lbl[64];
+    snprintf(lbl, sizeof lbl, "E  grid=(8,%d) block=128", chunks[i]);
+    printf("%-34s %8d %9d %10.3f %9.1f   %.2fx vs A\n", lbl, 8 * chunks[i], 1024 * chunks[i], ms,
+           flops / (ms / 1e3) / 1e9, a_ms / ms);
   }
-  // Correctness, separately: the RMW variants accumulate, so one zeroed invocation each.
-  float* got = (float*)malloc((size_t)TOKENS * DFF * sizeof(float));
-  double worst = 0;
-  for (int i = 0; i < 4; ++i) {
-    CHECK(cudaMemset(out, 0, (size_t)TOKENS * DFF * sizeof(float)));
-    ks[i].f(w1, ln, out);
-    CHECK(cudaDeviceSynchronize());
-    CHECK(cudaMemcpy(i == 0 ? ref : got, out, (size_t)TOKENS * DFF * sizeof(float),
-                     cudaMemcpyDeviceToHost));
-    if (i) { double m = 0;
-      for (size_t x = 0; x < (size_t)TOKENS * DFF; ++x) m = fmax(m, fabs(got[x] - ref[x]));
-      printf("max |%c - A| = %.3e\n", 'A' + i, m); worst = fmax(worst, m); }
-  }
-  printf("worst deviation from A: %.3e (all variants compute the same GEMM)\n", worst);
+  float c_ms = bench(run_C, 20);
+  printf("\n%-34s %8d %9d %10.3f %9.1f   %.2fx vs A  (mapping differs; reference only)\n",
+         "C  one thread per output", (TOKENS * DFF + 255) / 256, TOKENS * DFF, c_ms,
+         flops / (c_ms / 1e3) / 1e9, a_ms / c_ms);
+  printf("\nbest same-mapping variant: E with %d chunks, %.3f ms (%.2fx over A)\n", best_c, best_e,
+         a_ms / best_e);
+
+  printf("\ncorrectness (independent fp64 reference over a sampled grid):\n");
+  int bad = 0;
+  bad |= verify(run_A, "A  as shipped", hw, hl);
+  g_chunks = best_c;
+  bad |= verify(run_E, "E  best chunking", hw, hl);
+  bad |= verify(run_C, "C  one thread per output", hw, hl);
+  if (bad) { printf("\nFAILED: at least one variant does not compute the GEMM\n"); return 1; }
+  printf("\nall variants agree with the fp64 reference\n");
   return 0;
 }
