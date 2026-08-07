@@ -6,9 +6,12 @@ tuned `gpt2_mini` inference step, kernel by kernel, so that
 [#483](https://github.com/ahrefs/ocannl/issues/483) (online-softmax / fused attention) is aimed — or
 re-aimed — by measurement rather than by elimination.
 
-This commit carries the measurement: the per-kernel timeline, the structure comparison against
-torch, and the roofline classification. The four deliverable bins and the verdict they support
-follow in the next commit.
+**Headline: elimination pointed at the wrong place.** Attention-adjacent `seq²` traffic — #483's
+entire prize — is **5.6 ms of the 103.8 ms step (5.4%)**. Five kernels that contain no attention at
+all are **72.3 ms (70.2%)**, and they are byte-for-byte identical in the tuned and untuned
+artifacts: tuning cannot touch them, because `gh-ocannl-521`'s companion-coverage rule declines
+every tensorized *and* scalar seed at their output geometry. Nothing in the step is at roofline;
+the closest kernel to any roofline leg reaches 11.9% of memory bandwidth.
 
 ## Provenance
 
@@ -224,3 +227,190 @@ out-projection and QKᵀ. **The rule declines the scalar seeds in the same propo
 tensorized ones** (10 and 10), so this is a site-geometry limitation, not a tensorization one —
 reading only its mma-labelled half would misdiagnose it as an mma problem, as the ledger already
 warned for the bf16 leg.
+
+## Deliverable bins
+
+### Bin 1 — attention-adjacent `seq²` traffic: **5.6 ms of 103.8 (5.4%)**
+
+This is **#483's prize, stated explicitly**. The 20 kernels per step that touch a `seq²` buffer
+(scores, exp, softmax output) total 5.599 / 5.589 / 5.617 ms across the three repetitions. Perfect
+fusion — an online-softmax attention costing *zero* — would take the step from 103.8 ms to ~98.2 ms,
+a **1.06× end-to-end win**, and would leave the gap to torch at 33.9× instead of 35.8×.
+
+### Bin 2 — unfused elementwise / normalization passes: **~3.3 ms (3.2%)**
+
+Cheaper remedies than #483, and correspondingly small. The named chains:
+
+- **LayerNorm splits across 2–3 kernels per site** (mean → variance/`sqrt_std_dev` → normalize; e.g.
+  `seg3`/`seg5`, `seg21`/`seg23`): 35 kernels, 2.3 ms total. Nine sites × 4 layers + `lnf`.
+- **The softmax chain is 4 kernels per layer** where torch uses 1 (`seg10`/`11` scores+max,
+  `seg12`/`13` exp+normalize): 0.99 ms, and it is the *most* roofline-efficient thing in the step at
+  11.9% of bandwidth — i.e. fusing it further buys little.
+- **The Virtual residual stream is re-summed at every consumer** (119 MiB/step, quadratic in depth).
+  Structurally the worst offender in the profile and worth a small issue on its own account, but
+  ~0.2 ms of time.
+
+### Bin 3 — under-roofline kernels: **99.3 ms (96.5%) — this is the step**
+
+Ordinary tuning residue, except that it is not residue: it is the entire workload, and the existing
+tuning machinery is *structurally blocked* from reaching it, not merely failing to find a win. The
+concentration is extreme:
+
+- 4 × FFN GEMM1 + gelu + 1 × lm_head = **72.3 ms (70.2%)**, blocked at `8x128x1024`.
+- 4 × attention out-projection = **12.6 ms (12.2%)**, blocked at `8x128x8x128`.
+
+**Size of the prize.** FFN GEMM2 is the same-shape, same-step, same-box control: it does 536.9 MFLOP
+in 0.63 ms. If GEMM1 and the lm_head reached the same per-FLOP rate, those five kernels would fall
+from 72.3 ms to ~3.1 ms and the step would land near **34 ms** — a **3.0× end-to-end win**, against
+bin 1's 1.06×. That estimate is a measured within-step control, not a model extrapolation.
+
+### Bin 4 — surprises
+
+**(a) Material, flagged prominently: the schedule cache key does not include the `tf32_matmuls`
+numerics policy.** Running the same workload with default flags against a cache populated by a tf32
+search produces `cache hit: F_saved[58 segs] ... [tensorized]` and replays a tensorized schedule
+under a policy that cannot support it. Measured cost:
+
+| configuration | step p50 |
+|---|---:|
+| tuned tf32 (cache built with tf32 on) | 103.83 ms |
+| untuned default | 188.13 ms |
+| **default flags replaying the tf32-built cache** | **1111.93 ms** |
+
+**10.7× slower than the tuned step it was derived from, and 5.9× slower than not tuning at all.**
+`docs/schedules_and_autotuning.md` states the invariant as "schedule identity pins numerics"; this
+is the converse hazard — the numerics policy changing under a pinned schedule. It is silent (a
+normal-looking cache hit), and any tf32-vs-default A/B sharing a cache directory will read it as a
+catastrophic regression of the default arm. Reported, not fixed; the secondary measurement below
+therefore uses an isolated `autotune_cache_dir`.
+
+**(b) The shared-tile overshoot is not on the CE head.** The gh-528 ledger update attributed the
+multi-MB shared-tile overshoot to "`cross_entropy_loss_fwd__seg25` … the CE head". In *this* compile
+`seg25` is the **layer-0 FFN up-projection** (`n311`, `n339_gelu`), and the overshoot reproduces
+exactly there (4,194,304–4,202,496 B against a 49,152 B limit). The routine is named after its root
+tensor — `Train.forward batch_loss` on a `cross_entropy_loss` root — so `cross_entropy_loss_fwd` is
+the *routine* name and carries no information about what any `__segN` computes. Segment numbering is
+also compile-specific, so I cannot say the bf16 replicate the ledger quoted numbered its segments
+the same way; what I can say is that the inference "seg25, therefore the CE head" does not follow,
+and that here the overshoot lands on the single most expensive kernel class in the step. That makes
+it more interesting than as a CE-head curiosity, not less.
+
+**(c) The declines are not an mma story.** 10 scalar seeds and 10 tensorized seeds die on the same
+`8x128x1024` rule. A fix there would help the untuned default too.
+
+**(d) The ledger's "tensorization adds ~7%" is confirmed per-kernel, and localized.** Step totals:
+untuned 188.26 → tuned all-scalar 110.53 → tuned tf32 102.95, so tensorization is worth **7.4%** on
+top of scalar tuning — the ledger's figure, now with a per-kernel account of *where*. Both kinds of
+tuning move the same three groups and only those, tf32 simply moving them further:
+
+| group | untuned → tuned-scalar | → tuned-tf32 |
+|---|---:|---:|
+| q/k/v projections ×12 | 3.1× | 5.1× |
+| FFN GEMM2 ×4 | 15.2× | 38.0× |
+| scores·V ×4 | 2.9× | 3.2× |
+
+Every other group is flat in both. So the search's reach — not its choice of instruction — is what
+is binding.
+
+## Secondary — does the profile's shape depend on tensorization?
+
+**No.** The default-flags tuned cell (tf32 policy off, so `mma_format_tiles` has no f32 entry and
+*zero* tensorized candidates are proposed) was searched cold into an **isolated
+`autotune_cache_dir`** — required, see bin 4(a) — crowning `F_sketch[gpu 16x16x8/2x2, gpu
+32x32x16/2x2, gpu 16x16x8/4x4]`, all scalar, at 113.61 ms; replay p50 **110.96 ms**.
+
+| bucket | tuned tf32 | tuned default (all-scalar) |
+|---|---:|---:|
+| FFN GEMMs | 57.6% | 55.7% |
+| attention | 25.5% | 28.6% |
+| embedding / logits | 14.6% | 13.7% |
+| layernorm / elementwise | 2.2% | 2.1% |
+| **`seq²`-touching kernels** | **5.4%** | **5.3%** |
+
+The bucket shape is the same to ~3 pp, and bin 1's number is the same to 0.1 pp. Per group, against
+the untuned baseline, the invariance is sharper still:
+
+| group | untuned | tuned default | tuned tf32 |
+|---|---:|---:|---:|
+| **FFN GEMM1 + gelu ×4** | 57.66 | 57.73 | 57.51 |
+| **lm_head** | 14.82 | 14.82 | 14.76 |
+| **attn out-projection ×4** | 12.64 | 12.62 | 12.58 |
+| QKᵀ ×4 | 2.16 | 2.14 | 2.15 |
+| softmax ×4 | 1.00 | 1.00 | 0.99 |
+| q/k/v projections ×12 | 38.69 | 12.65 | 7.62 |
+| FFN GEMM2 ×4 | 50.68 | 3.34 | 1.33 |
+| scores·V ×4 | 6.69 | 2.30 | 2.08 |
+| **step total** | **188.26** | **110.53** | **102.95** |
+
+**The five dominant kernels cost 72.48 / 72.55 / 72.27 ms — invariant to 0.4% across untuned,
+tuned-scalar and tuned-tensorized.** Everything either kind of tuning achieves happens in the other
+four rows. Their share of the step therefore *rises* as tuning succeeds elsewhere: 38.5% → 65.6% →
+70.2%.
+
+This is the strongest form of the report's claim. The 72 ms core is not a tuning failure that a
+better search would find; it is unreachable by the search space as currently gated, at every
+precision policy tested.
+
+## Verdict
+
+**Bin 3 dominates, and #483 should be re-scoped or deprioritized: its prize is 5.6 ms of the
+103.8 ms step (5.4%), against 72.3 ms (70.2%) sitting in five non-attention kernels that no
+configuration of the current tuner can reach.**
+
+The supporting facts, in the order that matters:
+
+1. `seq²`-touching kernels are 5.4% of the step, stable across three repetitions and unchanged
+   (5.3%) with tensorization off. A perfect fused attention buys **1.06×**.
+2. Five kernels — four FFN up-projections and the tied lm_head — are 70.2%, and cost
+   72.48 / 72.55 / 72.27 ms in the untuned, tuned-scalar and tuned-tensorized artifacts. **Invariant
+   to 0.4%.**
+3. Nothing is at roofline: 0.000 ms at-roofline, 96.5% of the step classified well under, the best
+   kernel reaching 11.9% of a bandwidth leg. So "the traffic must shrink" — the premise fusion work
+   rests on — is false here.
+4. The blocker is named and in the log: gh-521's companion-coverage rule declines 10 tensorized
+   **and 10 scalar** seeds at the `8x128x1024` output geometry, which is exactly FFN GEMM1 and the
+   lm_head; and 5+5 at `8x128x8x128`, which is the out-projection and QKᵀ.
+5. The prize on the other side is measured, not modelled: FFN GEMM2 is the same 536.9 MFLOP GEMM in
+   the same step and runs 17–23× faster. At that rate the step lands near **34 ms — 3.0×**.
+
+#483 is not wrong about attention being unfused; it is wrong about attention being where the time
+is. The recommendation is to re-aim at the `8x128x1024` / `8x128x8x128` companion-coverage declines
+(gh-521), and to revisit #483 afterwards, when `seq²` traffic would be a materially larger share of
+a ~34 ms step.
+
+Two caveats on the 3.0× estimate: it assumes the declined sites can reach GEMM2's *per-FLOP* rate,
+which the geometry difference may not permit in full, and GEMM2's rate is itself only 5.5% of the
+compute roofline — so 34 ms is a milestone, not a floor. Neither caveat affects the ranking of
+bin 3 over bin 1, which rests on the 5.4%/70.2% split alone.
+
+## Appendix — memory telemetry (ride-along for #550)
+
+Not in scope for this report; recorded because the profiling runs produced it. The cold search
+peaked at **11,911 MiB of 12,227 (97.4%)** and arm B's winner replay died of
+`CUDA_ERROR_OUT_OF_MEMORY` exactly as in the gh-528 addendum — the accumulation half of #550 is
+unchanged. The pass-2 replay processes that produced every number above need well under 1 GB.
+
+## Reproduction
+
+```bash
+cd benchmarks
+# pass 1: cold search, populates autotune_cache and emits the calibration TSV
+BENCH_FIXTURE=fixtures/gpt2_mini.safetensors BENCH_TUNE=1 OCANNL_AUTOTUNE_LOG=true \
+  ../_build/default/benchmarks/runners/ocannl/bench_gpt.exe \
+  --ocannl_backend=cuda --ocannl_tf32_matmuls=true \
+  --ocannl_autotune_calibration_file=/tmp/calib.tsv
+```
+
+```bash
+cd benchmarks
+# pass 2: profile the warm replay
+nsys profile --trace=cuda --sample=none --cpuctxsw=none --cuda-graph-trace=node -o /tmp/tf32 \
+  env BENCH_FIXTURE=fixtures/gpt2_mini.safetensors BENCH_TUNE=1 \
+  ../_build/default/benchmarks/runners/ocannl/bench_gpt.exe \
+  --ocannl_backend=cuda --ocannl_tf32_matmuls=true
+nsys stats --report cuda_gpu_kern_sum --format csv /tmp/tf32.nsys-rep
+```
+
+To read the *shipping* arm's source, snapshot `build_files/bench_gpt/cross_entropy_loss_fwd__seg.cu`
+while the run compiles — arm A is written first and arm B overwrites it. Arm A is the 117-kernel,
+20-`mma.sync` version.
