@@ -1,42 +1,70 @@
-// gh-ocannl-531: time the ACTUAL emitted FFN up-projection kernel through the SAME compilation
-// path OCANNL uses, so the report's replacement estimate is a production measurement rather than
-// an extrapolation from a differently-built standalone.
+// gh-ocannl-531: time the ACTUAL emitted kernels of the gpt2_mini step through the SAME
+// compilation path OCANNL uses, so the report's replacement estimate is a production measurement
+// rather than an extrapolation from a differently-built standalone.
 //
 // Build:
 //     gcc -O2 -o ffn1_nvrtc_harness benchmarks/ffn1_nvrtc_harness.c \
-//         -I/usr/local/cuda/include -L/usr/local/cuda/lib64 -L/usr/lib/wsl/lib -lnvrtc -lcuda
+//         -I/usr/local/cuda/include -L/usr/local/cuda/lib64 -L/usr/lib/wsl/lib -lnvrtc -lcuda -lm
 // Run (input is arm A's emitted source -- see report-gh531-profile.md for how to snapshot it):
-//     ./ffn1_nvrtc_harness armA-117.cu 1        # as shipped: grid=(8,1), 8 blocks
-//     ./ffn1_nvrtc_harness armA_chunk128.cu 128 # j range split across blockIdx.y
+//     ./ffn1_nvrtc_harness <file.cu> <kernel> <gridY>
+//   e.g. ./ffn1_nvrtc_harness armA-117.cu cross_entropy_loss_fwd__seg25 1
+//        ./ffn1_nvrtc_harness armA_chunk128.cu cross_entropy_loss_fwd__seg25 128
 //
 // Compilation matches arrayjit/lib/cuda_backend.ml's cuda_to_ptx: "#include <mma.h>" injected
 // (the source contains nvcuda::wmma), -I/usr/local/cuda/include, --use_fast_math, and
 // --gpu-architecture=compute_80 (gpu_arch_options' floor for a (wmma-tf32) marker).
 //
-// The chunked inputs are the same file with seg25's two output loops rebased onto blockIdx.y:
+// Two kernel shapes are known, selected by name:
+//   seg25  (FFN up-projection): (i1, l0_ffn_b1, l0_ffn_w1, n309_layer_norm, n311, n339_gelu)
+//          n311[tok][j] = sum_k w1[j][k]*ln[tok][k];  gelu[tok][j] = tanh-gelu(n311 + b1[j])
+//   seg111 (tied lm_head):      (i1, logits, max_logits, n794_layer_norm, wte)
+//          logits[tok][v] = sum_k wte[k][v]*lnf[tok][k];  max_logits[tok] = max_v logits[tok][v]
+//   seg111_gemm / seg111_reduce: the fission of seg111 used to measure a chunked lm_head, since
+//          seg111's vocabulary axis carries a REDUCTION and cannot simply be spread over
+//          blockIdx.y (that would give per-block partial maxima racing on one cell).
+//
+// EVERY run is verified pointwise against an independent fp64 host reference before its time is
+// reported, and the program exits nonzero on any mismatch or non-finite value -- a short,
+// duplicated, permuted or gridY-mismatched output cannot be timed and quoted.
+//
+// The chunked inputs are the same file with the output loop rebased onto blockIdx.y:
 //     for (int i1705 = 0; i1705 <= 1023; ++i1705)
 //  -> for (int i1705 = (int)blockIdx.y * P; i1705 < ((int)blockIdx.y + 1) * P; ++i1705)
-// (P = 1024 / chunks; same substitution for the gelu loop i1736). Every thread keeps its token
-// and its access order; only the number of resident blocks changes.
+// (P = 1024 / chunks). Every thread keeps its token and its access order; only the number of
+// resident blocks changes.
 //
-// Measured on an RTX 5070 Ti Laptop (46 SMs), CUDA 13.3, WSL2 -- checksums identical throughout:
-//     as shipped, 8 blocks        13.86-13.97 ms   (nsys measures 14.31 ms in the step: 2.8%)
-//     chunked,   16 blocks         7.24 ms
-//     chunked,   32 blocks         3.50 ms
-//     chunked,  128 blocks         2.47 ms
-//     chunked, 1024 blocks         2.37-2.40 ms    -> 5.8x
-// Note the loop-bound rewrite alone costs ~6% (chunk1 at 8 blocks is 14.63-14.83 ms), so the
-// same-code-shape ratio is 6.2x; 5.8x is quoted against what OCANNL emits today.
+// Measured on an RTX 5070 Ti Laptop (46 SMs), CUDA 13.3, WSL2. Every row verified before timing:
 //
+//   seg25 (FFN up-projection, GEMM + gelu, chunkable as-is)
+//     as shipped,     8 blocks   13.70-13.79 ms   (nsys measures 14.31 ms in the step: ~3%)
+//     chunked,       16 blocks    7.24 ms
+//     chunked,       32 blocks    3.50 ms
+//     chunked,     1024 blocks    2.32-2.37 ms    -> 5.8x
+//
+//   seg111 (tied lm_head). Its vocabulary axis carries the max_logits REDUCTION, so it cannot be
+//   chunked as one kernel; it is fissioned into a GEMM half (chunkable) and a reduce half:
+//     as shipped, whole kernel,      8 blocks   15.20 ms   (nsys measures 14.76 ms: ~3%)
+//     seg111_gemm,                   8 blocks   14.41 ms
+//     seg111_gemm chunked,        1024 blocks    2.32 ms
+//     seg111_reduce (init + max),    8 blocks    0.05 ms
+//     fissioned total                            2.38 ms   -> 6.4x  (at the cost of one extra
+//                                                                    launch, ~4 us)
+//
+// Note the loop-bound rewrite alone costs ~6% on seg25 (chunked at 8 blocks is 14.63-14.83 ms),
+// so its same-code-shape ratio is 6.2x; 5.8x is quoted against what OCANNL emits today.
+//
+// See benchmarks/report-gh531-profile.md for the reading.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <cuda.h>
 #include <nvrtc.h>
 
 #define TOKENS 1024
 #define D 256
 #define DFF 1024
+#define VOCAB 1024
 
 #define NV(x) do { nvrtcResult r=(x); if(r!=NVRTC_SUCCESS){ \
   printf("nvrtc error %s @%d\n", nvrtcGetErrorString(r), __LINE__); exit(2);} } while(0)
@@ -53,23 +81,62 @@ static char* slurp(const char* p, size_t* n) {
   return b;
 }
 
+static float* hw;   // weight   [OUT][D]  (w1[j][k] resp. wte[k][v] -- see loaders)
+static float* hl;   // activations [TOKENS][D]
+static float* hb;   // bias     [DFF]
+
+// Dot products, with the sum of absolute products alongside. A near-cancelling dot has a tiny
+// value and a large conditioning number, so a plain relative test on it is meaningless; the
+// checks below use |got - ref| <= tol * (sum |a_k b_k|), which is the fp32 error bound's shape.
+static double g_absum;
+static double ref_dot_w1(int j, int tok) {         // sum_k w1[j][k] * ln[tok][k]
+  double a = 0, s = 0;
+  for (int k = 0; k < D; ++k) {
+    double t = (double)hw[j * D + k] * (double)hl[tok * D + k];
+    a += t; s += fabs(t);
+  }
+  g_absum = s; return a;
+}
+static double ref_dot_wte(int v, int tok) {        // sum_k wte[k][v] * lnf[tok][k]
+  double a = 0, s = 0;
+  for (int k = 0; k < D; ++k) {
+    double t = (double)hw[k * VOCAB + v] * (double)hl[tok * D + k];
+    a += t; s += fabs(t);
+  }
+  g_absum = s; return a;
+}
+static double tanh_gelu(double v) {
+  return 0.5 * v * (1.0 + tanh(0.7978845608028654 * (0.044715 * v * v * v + v)));
+}
+
+static int fail(const char* what, double worst) {
+  printf("  FAIL %s: worst relative deviation %.3e\n", what, worst);
+  return 1;
+}
+
 int main(int argc, char** argv) {
-  if (argc < 3) { printf("usage: %s <file.cu> <gridY>\n", argv[0]); return 2; }
-  int gridY = atoi(argv[2]);
-  size_t n; char* body = slurp(argv[1], &n);
+  if (argc < 4) { printf("usage: %s <file.cu> <kernel> <gridY>\n", argv[0]); return 2; }
+  const char* path = argv[1];
+  const char* kname = argv[2];
+  int gridY = atoi(argv[3]);
+  int is25 = strstr(kname, "seg25") != NULL;
+  int is111 = strstr(kname, "seg111") != NULL;
+  int reduce_only = strstr(kname, "reduce") != NULL;
+  if (!is25 && !is111) { printf("unknown kernel shape %s\n", kname); return 2; }
+
+  size_t n; char* body = slurp(path, &n);
   const char* pre = "#include <mma.h>\n";
   char* src = (char*)malloc(n + strlen(pre) + 1);
   strcpy(src, pre); strcat(src, body);
 
   nvrtcProgram prog;
   NV(nvrtcCreateProgram(&prog, src, "seg.cu", 0, NULL, NULL));
-  const char* opts[] = { "-I/usr/local/cuda/include",
-                         "--gpu-architecture=compute_80",
+  const char* opts[] = { "-I/usr/local/cuda/include", "--gpu-architecture=compute_80",
                          "--use_fast_math" };
   nvrtcResult cr = nvrtcCompileProgram(prog, 3, opts);
   size_t logsz; nvrtcGetProgramLogSize(prog, &logsz);
-  if (logsz > 1) { char* log = (char*)malloc(logsz); nvrtcGetProgramLog(prog, log);
-                   if (cr != NVRTC_SUCCESS) printf("%s\n", log); free(log); }
+  if (logsz > 1 && cr != NVRTC_SUCCESS) {
+    char* log = (char*)malloc(logsz); nvrtcGetProgramLog(prog, log); printf("%s\n", log); }
   if (cr != NVRTC_SUCCESS) { printf("nvrtc compile failed\n"); return 2; }
   size_t ptxsz; NV(nvrtcGetPTXSize(prog, &ptxsz));
   char* ptx = (char*)malloc(ptxsz); NV(nvrtcGetPTX(prog, ptx));
@@ -78,45 +145,126 @@ int main(int argc, char** argv) {
   CUdevice dev; CU(cuDeviceGet(&dev, 0));
   CUcontext ctx; CU(cuDevicePrimaryCtxRetain(&ctx, dev)); CU(cuCtxSetCurrent(ctx));
   CUmodule mod; CU(cuModuleLoadData(&mod, ptx));
-  CUfunction fn; CU(cuModuleGetFunction(&fn, mod, "cross_entropy_loss_fwd__seg25"));
+  CUfunction fn; CU(cuModuleGetFunction(&fn, mod, kname));
 
-  CUdeviceptr b1, w1, ln, n311, gelu;
-  CU(cuMemAlloc(&b1, (size_t)DFF * 4));
-  CU(cuMemAlloc(&w1, (size_t)DFF * D * 4));
-  CU(cuMemAlloc(&ln, (size_t)TOKENS * D * 4));
-  CU(cuMemAlloc(&n311, (size_t)TOKENS * DFF * 4));
-  CU(cuMemAlloc(&gelu, (size_t)TOKENS * DFF * 4));
-  float* h = (float*)malloc((size_t)DFF * D * 4);
-  for (int i = 0; i < DFF * D; ++i) h[i] = (float)((i % 17) - 8) * 0.01f;
-  CU(cuMemcpyHtoD(w1, h, (size_t)DFF * D * 4));
-  for (int i = 0; i < TOKENS * D; ++i) h[i] = (float)((i % 13) - 6) * 0.01f;
-  CU(cuMemcpyHtoD(ln, h, (size_t)TOKENS * D * 4));
-  for (int i = 0; i < DFF; ++i) h[i] = 0.001f * (float)(i % 7);
-  CU(cuMemcpyHtoD(b1, h, (size_t)DFF * 4));
+  size_t wsz = (size_t)(is25 ? DFF * D : D * VOCAB) * 4;
+  size_t outsz = (size_t)TOKENS * (is25 ? DFF : VOCAB) * 4;
+  hw = (float*)malloc(wsz);
+  hl = (float*)malloc((size_t)TOKENS * D * 4);
+  hb = (float*)malloc((size_t)DFF * 4);
+  for (size_t i = 0; i < wsz / 4; ++i) hw[i] = (float)((int)(i % 17) - 8) * 0.01f;
+  for (int i = 0; i < TOKENS * D; ++i) hl[i] = (float)((i % 13) - 6) * 0.01f;
+  for (int i = 0; i < DFF; ++i) hb[i] = 0.001f * (float)(i % 7);
+
+  CUdeviceptr dW, dL, dB, dOut, dAux;
+  CU(cuMemAlloc(&dW, wsz)); CU(cuMemAlloc(&dL, (size_t)TOKENS * D * 4));
+  CU(cuMemAlloc(&dB, (size_t)DFF * 4));
+  CU(cuMemAlloc(&dOut, outsz)); CU(cuMemAlloc(&dAux, outsz));
+  CU(cuMemcpyHtoD(dW, hw, wsz));
+  CU(cuMemcpyHtoD(dL, hl, (size_t)TOKENS * D * 4));
+  CU(cuMemcpyHtoD(dB, hb, (size_t)DFF * 4));
 
   int i1 = 0;
-  void* args[] = { &i1, &b1, &w1, &ln, &n311, &gelu };
+  // seg25:  (i1, b1, w1, ln, n311, gelu)      seg111: (i1, logits, max_logits, lnf, wte)
+  void* a25[] = { &i1, &dB, &dW, &dL, &dOut, &dAux };
+  void* a111[] = { &i1, &dOut, &dAux, &dL, &dW };
+  void** args = is25 ? a25 : a111;
+
+  // The accumulating outputs must start zeroed; max_logits is initialized by the kernel itself
+  // except in the reduce-only fission, where the init stays with it. In reduce-only mode the
+  // logits buffer is NOT re-zeroed per rep -- it holds the GEMM half's real output, so the
+  // reduction is timed over representative data rather than over zeros.
+  #define RESET() do { if (!reduce_only) CU(cuMemsetD8(dOut, 0, outsz)); \
+      if (is111 && !reduce_only) CU(cuMemsetD8(dAux, 0, outsz)); } while (0)
 
   CUevent e0, e1; CU(cuEventCreate(&e0, 0)); CU(cuEventCreate(&e1, 0));
   int reps = gridY >= 16 ? 20 : 3;
-  // warmup
-  CU(cuMemsetD8(n311, 0, (size_t)TOKENS * DFF * 4));
+  RESET();
+  if (reduce_only) {  // fill logits with the GEMM half's real output first
+    CUfunction g; CU(cuModuleGetFunction(&g, mod, "cross_entropy_loss_fwd__seg111_gemm"));
+    CU(cuMemsetD8(dOut, 0, outsz));
+    CU(cuLaunchKernel(g, 8, 1, 1, 128, 1, 1, 0, 0, args, 0));
+    CU(cuCtxSynchronize());
+  }
   CU(cuLaunchKernel(fn, 8, gridY, 1, 128, 1, 1, 0, 0, args, 0));
   CU(cuCtxSynchronize());
   CU(cuEventRecord(e0, 0));
   for (int i = 0; i < reps; ++i) {
-    CU(cuMemsetD8Async(n311, 0, (size_t)TOKENS * DFF * 4, 0));
+    if (!reduce_only) CU(cuMemsetD8Async(dOut, 0, outsz, 0));
     CU(cuLaunchKernel(fn, 8, gridY, 1, 128, 1, 1, 0, 0, args, 0));
   }
   CU(cuEventRecord(e1, 0));
   CU(cuEventSynchronize(e1));
   float ms; CU(cuEventElapsedTime(&ms, e0, e1)); ms /= reps;
 
-  // checksum so a miscompiled/short kernel cannot pass unnoticed
-  float* out = (float*)malloc((size_t)TOKENS * DFF * 4);
-  CU(cuMemcpyDtoH(out, gelu, (size_t)TOKENS * DFF * 4));
-  double sum = 0; for (size_t i = 0; i < (size_t)TOKENS * DFF; ++i) sum += out[i];
-  printf("%-42s gridY=%-4d blocks=%-5d %8.3f ms   checksum %.6e\n",
-         argv[1], gridY, 8 * gridY, ms, sum);
+  // ---- verification: one clean run, checked pointwise against an fp64 host reference --------
+  RESET();
+  if (reduce_only) {  // the reduction consumes logits produced by the GEMM half.
+    // NOTE: run this against a file whose GEMM half is UNCHUNKED (gridY=1 covers the whole
+    // vocabulary); the reduce half is byte-identical across the chunked variants anyway.
+    CUfunction g; CU(cuModuleGetFunction(&g, mod, "cross_entropy_loss_fwd__seg111_gemm"));
+    CU(cuMemsetD8(dOut, 0, outsz));
+    CU(cuLaunchKernel(g, 8, 1, 1, 128, 1, 1, 0, 0, args, 0));
+  }
+  CU(cuLaunchKernel(fn, 8, gridY, 1, 128, 1, 1, 0, 0, args, 0));
+  CU(cuCtxSynchronize());
+  float* out = (float*)malloc(outsz);
+  float* aux = (float*)malloc(outsz);
+  CU(cuMemcpyDtoH(out, dOut, outsz));
+  CU(cuMemcpyDtoH(aux, dAux, outsz));
+
+  int OUTW = is25 ? DFF : VOCAB;
+  double worst = 0;
+  for (size_t i = 0; i < (size_t)TOKENS * OUTW; ++i)
+    if (!isfinite(out[i])) { printf("  FAIL %s: non-finite logits/n311 at %zu\n", kname, i); return 1; }
+  if (is25) {
+    for (size_t i = 0; i < (size_t)TOKENS * OUTW; ++i)
+      if (!isfinite(aux[i])) { printf("  FAIL %s: non-finite gelu at %zu\n", kname, i); return 1; }
+    for (int tok = 0; tok < TOKENS; tok += 37)
+      for (int j = 0; j < DFF; j += 13) {
+        double r = ref_dot_w1(j, tok);
+        double g = out[(size_t)tok * DFF + j];
+        double rel = fabs(g - r) / fmax(1e-30, g_absum);
+        if (rel > worst) worst = rel;
+      }
+    if (worst > 1e-5) return fail("GEMM (n311)", worst);   // fp32 over 256 terms
+    double wg = 0;   // gelu checked against the device's own n311, so it is an independent leg
+    for (int tok = 0; tok < TOKENS; tok += 37)
+      for (int j = 0; j < DFF; j += 13) {
+        double r = tanh_gelu((double)out[(size_t)tok * DFF + j] + (double)hb[j]);
+        double g = aux[(size_t)tok * DFF + j];
+        double rel = fabs(g - r) / fmax(1e-3, fabs(r));
+        if (rel > wg) wg = rel;
+      }
+    if (wg > 2e-3) return fail("gelu epilogue", wg);   // __tanhf under --use_fast_math
+    printf("  verified: GEMM %.2e, gelu %.2e   ", worst, wg);
+  } else {
+    for (int tok = 0; tok < TOKENS; tok += 37)
+      for (int v = 0; v < VOCAB; v += 13) {
+        double r = ref_dot_wte(v, tok);
+        double g = out[(size_t)tok * VOCAB + v];
+        double rel = fabs(g - r) / fmax(1e-30, g_absum);
+        if (rel > worst) worst = rel;
+      }
+    if (worst > 1e-5) return fail("lm_head GEMM (logits)", worst);   // fp32 over 256 terms
+    double wm = 0;   // max_logits must equal the row max of the logits the device produced
+    if (!strstr(kname, "_gemm")) {
+      for (int tok = 0; tok < TOKENS; tok += 37) {
+        double m = -INFINITY;
+        for (int v = 0; v < VOCAB; ++v) m = fmax(m, (double)out[(size_t)tok * VOCAB + v]);
+        double g = aux[(size_t)tok];
+        if (!isfinite(g)) { printf("  FAIL %s: non-finite max_logits\n", kname); return 1; }
+        double rel = fabs(g - m) / fmax(1e-6, fabs(m));
+        if (rel > wm) wm = rel;
+      }
+      if (wm > 1e-6) return fail("max_logits row max", wm);
+      printf("  verified: GEMM %.2e, rowmax %.2e   ", worst, wm);
+    } else {
+      printf("  verified: GEMM %.2e   ", worst);
+    }
+  }
+  printf("%-34s %-14s gridY=%-4d blocks=%-5d %8.3f ms\n",
+         strrchr(path, '/') ? strrchr(path, '/') + 1 : path,
+         strstr(kname, "seg") ? strstr(kname, "seg") : kname, gridY, 8 * gridY, ms);
   return 0;
 }

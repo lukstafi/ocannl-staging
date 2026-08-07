@@ -364,31 +364,49 @@ concentration is extreme:
 - 4 x FFN GEMM1 + gelu + 1 x lm_head = **72.3 ms (70.2%)**, blocked at `8x128x1024`.
 - 4 x attention out-projection = **12.6 ms (12.2%)**, blocked at `8x128x8x128`.
 
-**Size of the prize -- measured on the production kernel.** The measurement above is not a proxy:
-it is `seg25`'s own emitted source, compiled the way OCANNL compiles it, and spreading its `j` range
-over more blocks -- no tiling, no shared memory, no tensor cores, no change to any thread's access
-pattern -- takes it from 13.91 ms to **2.39 ms**, a factor of **5.82x**, with the gelu epilogue
-inside both numbers.
+**Size of the prize -- measured on the production kernels.** These are not proxies: they are the
+emitted sources, compiled the way OCANNL compiles them, verified pointwise against an fp64
+reference before any time is reported.
 
-The other four kernels in this group have the same `8x128x1024` output over a 256-deep reduction:
-`seg51`/`77`/`103` are the same FFN up-projection in layers 1-3, and `seg111` is the tied lm_head
-(`d -> vocab`, and vocab is 1024 too). Applying the measured factor:
+**FFN up-projection (`seg25`, and identically `seg51`/`77`/`103`).** Spreading its `j` range over
+more blocks -- no tiling, no shared memory, no tensor cores, no change to any thread's access
+pattern -- takes it from 13.79 ms to **2.37 ms**, **5.82x**, with the gelu epilogue inside both.
 
-| | now | with the `j` range spread over blocks |
+**Tied lm_head (`seg111`) needs one extra step, and it is not the same transformation.** Its output
+axis is the vocabulary, and that axis carries a *reduction*: the kernel computes the logits and then
+`max_logits[tok] = max_v logits[tok][v]`. Rebasing that loop onto `blockIdx.y` would leave every
+block computing a partial maximum into one cell -- a race, and wrong. It has to be **fissioned**
+first, into a GEMM half (which chunks like `seg25`) and a reduce half (which keeps the shipped
+geometry). Measured that way:
+
+| `seg111` | blocks | ms |
 |---|---:|---:|
-| FFN GEMM1 + gelu x4 | 57.51 | ~9.9 |
-| lm_head | 14.76 | ~2.5 |
-| **five-kernel total** | **72.27** | **~12.4** |
-| **step (kernel time)** | **102.95** | **~43.1** |
+| as shipped, one kernel | 8 | 15.20 |
+| GEMM half, as shipped | 8 | 14.41 |
+| **GEMM half, chunked** | 1,024 | **2.32** |
+| **reduce half** (init + max over vocab) | 8 | **0.05** |
+| **fissioned total** | | **2.38** (6.4x) |
+
+The reduce half is cheap because it is one pass over the logits, not a 256-deep accumulation. The
+fission costs one extra kernel launch, which the timeline above prices at ~4.2 us.
+
+Applying each measured factor to its own kernels:
+
+| | now | measured replacement |
+|---|---:|---:|
+| FFN GEMM1 + gelu x4 (5.82x) | 57.51 | ~9.9 |
+| lm_head, fissioned (6.4x) | 14.76 | ~2.3 |
+| **five-kernel total** | **72.27** | **~12.2** |
+| **step (kernel time)** | **102.95** | **~42.9** |
 
 That is a **~2.4x end-to-end floor**, against bin 1's 1.06x.
 
-It is a floor, not a target: at 2.39 ms this kernel still reaches only ~3.8% of what the card's fp32
-peak would allow for its FLOP count, so a tiled or tensorized schedule should go further. How much
+It is a floor, not a target: at ~2.3 ms these kernels still reach only ~4% of what the card's fp32
+peak would allow for their FLOP count, so a tiled or tensorized schedule should go further. How much
 further is not measured here -- FFN GEMM2 reaches 1609 GFLOP/s *in the step*, but that is a different
-output geometry and reduction depth and is **not** claimed as evidence for this shape. The
-defensible statement is: ~2.4x from spreading the output axis across blocks alone, with the ceiling
-unknown and plausibly well beyond it.
+output geometry and reduction depth and is **not** claimed as evidence for these shapes. The
+defensible statement is: ~2.4x from spreading the output axis across blocks (plus, for the lm_head,
+the fission that legalizes it), with the ceiling unknown and plausibly well beyond it.
 
 ### Bin 4 -- surprises
 
@@ -498,10 +516,12 @@ The supporting facts, in the order that matters:
 4. The blocker is named and in the log: gh-521's companion-coverage rule declines 10 tensorized
    **and 10 scalar** seeds at the `8x128x1024` output geometry, which is exactly FFN GEMM1 and the
    lm_head; and 5+5 at `8x128x8x128`, which is the out-projection and QK^T.
-5. The prize on the other side is measured **on the production kernel through OCANNL's own
-   compiler**: `seg25`'s emitted source, given more resident blocks and nothing else, goes
-   13.91 -> 2.39 ms (5.82x), which puts the step at **~43 ms -- ~2.4x**. The harness reproduces the
-   in-step time to 2.8%, so this is a replacement measurement rather than a cross-toolchain estimate.
+5. The prize on the other side is measured **on the production kernels through OCANNL's own
+   compiler**, each with its own transformation: the FFN up-projection goes 13.79 -> 2.37 ms (5.82x)
+   on block count alone, and the lm_head -- whose vocabulary axis carries the `max_logits` reduction
+   and so cannot simply be chunked -- goes 15.20 -> 2.38 ms (6.4x) once fissioned into a chunked
+   GEMM plus an unchanged reduce. That puts the step at **~43 ms -- ~2.4x**. The harness reproduces
+   both in-step times to ~3%, so these are replacement measurements, not extrapolations.
 
 #483 is not wrong about attention being unfused; it is wrong about attention being where the time
 is. The recommendation is to re-aim at the `8x128x1024` / `8x128x8x128` companion-coverage declines
