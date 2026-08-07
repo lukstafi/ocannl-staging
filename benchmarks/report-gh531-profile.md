@@ -10,8 +10,10 @@ re-aimed — by measurement rather than by elimination.
 entire prize — is **5.6 ms of the 103.8 ms step (5.4%)**. Five kernels that contain no attention at
 all are **72.3 ms (70.2%)**, and they are byte-for-byte identical in the tuned and untuned
 artifacts: tuning cannot touch them, because `gh-ocannl-521`'s companion-coverage rule declines
-every tensorized *and* scalar seed at their output geometry. Nothing in the step is at roofline;
-the closest kernel to any roofline leg reaches 11.9% of memory bandwidth.
+every tensorized *and* scalar seed at their output geometry. No kernel is compute-bound, and a
+same-geometry control shows the dominant one is not byte-bound either: what binds it is **occupancy
+— 1024 threads on a 46-SM GPU**. Parallelizing that one axis is worth **≥2.1×** end to end, against
+fused attention's 1.06×.
 
 ## Provenance
 
@@ -168,7 +170,16 @@ itself: **model 1.110 ms, measured 106.01 ms — 95× above the envelope**, at 1
 and 441 MB of compulsory traffic. (The model's flop count is independently correct: hand-counting
 the architecture gives 7.5 GFLOP.)
 
-So the traffic does not have to shrink. There is no kernel whose bytes are the binding constraint.
+Two caveats on how far that carries. The bytes column is **analytic compulsory traffic**, not
+measured DRAM traffic — `Cost_model.footprints` caps each node at its size per kernel, so it is a
+lower bound on what actually moves, and a schedule that re-reads a buffer many times could be
+closer to a memory limit than the column suggests. And `ncu`'s traffic counters were unavailable
+here (`ERR_NVGPUCTRPERM`). So the table alone establishes only that no kernel is *compute*-bound.
+
+The byte question is settled separately, and empirically, by the control in the next section: a
+variant with **identical** global read-modify-write traffic to the dominant kernel runs 5.6× faster
+purely by widening the grid. That is not consistent with traffic being the binding resource. With
+both legs accounted for: **the traffic does not have to shrink.**
 
 ### Why the dominant kernels are slow, and why tuning cannot help them
 
@@ -188,10 +199,12 @@ exactly one thing.
 `mma.sync` sites in arm A are exactly the kernels that did move: q/k/v projections, scores·V, and
 FFN GEMM2. Nothing else tensorized.
 
-The controlled comparison is **FFN GEMM1 against FFN GEMM2**, in the same step, on the same box:
-both are 536.9 MFLOP (`2·1024·256·1024`), differing only in which axis is the output minor axis.
-GEMM2 (output `8×128×256`) takes **0.63 ms**; GEMM1 (output `8×128×1024`) takes **14.31 ms** —
-**23× more for identical arithmetic.**
+The sharpest illustration is **FFN GEMM1 against FFN GEMM2**, in the same step, on the same box:
+both are 536.9 MFLOP (`2·1024·256·1024`). GEMM2 takes **0.63 ms**; GEMM1 takes **14.31 ms** —
+**23× more for the same FLOP count.** They are not the same problem, though: GEMM1's output is
+`8×128×1024` reducing over 256, GEMM2's is `8×128×256` reducing over 1024, and that difference is
+exactly what makes one reachable by the search and the other not. So this pair motivates the
+question rather than settling it — the same-geometry control below is what settles it.
 
 And the difference is *not* tensorization. In the all-scalar default-flags cell, where nothing
 tensorizes anywhere, GEMM2 still runs at 0.83 ms against GEMM1's 14.43 — **17×**. What separates
@@ -208,9 +221,37 @@ for (int i1705 = 0; i1705 <= 1023; ++i1705)          // output, serial
       fmaf(l0_ffn_w1[...], n309_layer_norm[...], n311[(...)*1024 + i1705]);
 ```
 
-— a **global-memory read-modify-write on every one of 262,144 inner iterations**, with no register
-accumulation, launched at `grid=(8,1,1) × block=(128,1,1)` = **1024 threads on 46 SMs**: 8 SMs hold
-any work at all, at roughly 1.4% occupancy. That is the whole explanation of 0.22% of peak.
+— both loops serial, a global-memory read-modify-write on every one of 262,144 inner iterations, and
+`grid=(8,1,1) × block=(128,1,1)` = **1024 threads on 46 SMs**: 8 SMs hold any work at all, at
+roughly 1.4% occupancy.
+
+### Which of those is actually binding — a same-geometry control
+
+`ncu`'s traffic counters are unavailable on this box (`ERR_NVGPUCTRPERM`; enabling them needs
+admin on WSL), so rather than assert a cause from the source, I reproduced this kernel standalone
+(`nvcc -O3 -arch=sm_120`, plain device memory) and varied one thing at a time. All four variants
+compute the same GEMM, verified bitwise identical:
+
+| variant | ms | GFLOP/s | threads |
+|---|---:|---:|---:|
+| **A** global RMW, `grid=8 × block=128` — as shipped | **12.69** | 42.3 | 1,024 |
+| **B** register accumulator, same geometry | 12.63 | 42.5 | 1,024 |
+| **C** register accumulator, one thread per output — fills the GPU | **2.28** | 235.7 | 1,048,576 |
+| **D** global RMW, one thread per output — fills the GPU | 2.26 | 237.8 | 1,048,576 |
+
+A reproduces the shipped kernel (12.69 ms here against 14.31 ms in the step, the difference being
+seg25's gelu epilogue), so the standalone is measuring the right thing.
+
+**The read-modify-write is not the binding constraint.** At the shipped geometry, removing it
+entirely (B) changes nothing — 12.63 vs 12.69 ms. Widening the grid gives **5.6×** whether the
+accumulator is in a register (C) or still in global memory (D). What binds is **occupancy: 1024
+threads on a 46-SM GPU.**
+
+This also answers the "is it really not byte-bound?" question empirically rather than from the
+analytic byte count. D performs *exactly* the same global read-modify-writes as A — identical
+memory-operation count, identical footprint — and is 5.6× faster. A workload whose binding resource
+were memory traffic could not behave that way. (The analytic compulsory-bytes column above is
+genuinely a lower bound on traffic, so on its own it could not have settled this; the control does.)
 
 And the reason it stays that way is in the search log. Arm A's decline census:
 
@@ -259,10 +300,26 @@ concentration is extreme:
 - 4 × FFN GEMM1 + gelu + 1 × lm_head = **72.3 ms (70.2%)**, blocked at `8x128x1024`.
 - 4 × attention out-projection = **12.6 ms (12.2%)**, blocked at `8x128x8x128`.
 
-**Size of the prize.** FFN GEMM2 is the same-shape, same-step, same-box control: it does 536.9 MFLOP
-in 0.63 ms. If GEMM1 and the lm_head reached the same per-FLOP rate, those five kernels would fall
-from 72.3 ms to ~3.1 ms and the step would land near **34 ms** — a **3.0× end-to-end win**, against
-bin 1's 1.06×. That estimate is a measured within-step control, not a model extrapolation.
+**Size of the prize — measured at the affected geometry.** The standalone control above runs the
+*same* `8×128×1024`-output GEMM that FFN GEMM1 and the lm_head compute, and the simplest possible
+repair — one thread per output element, no tiling, no shared memory, no tensor cores — takes it from
+12.69 ms to **2.28 ms**. Applying that to the five kernels (keeping seg25's ~1.6 ms gelu epilogue):
+
+| | now | with the naive parallel schedule |
+|---|---:|---:|
+| FFN GEMM1 + gelu ×4 | 57.51 | ~15.5 |
+| lm_head | 14.76 | ~2.4 |
+| **five-kernel total** | **72.27** | **~17.9** |
+| **step** | **102.95** | **~48.6** |
+
+That is a **2.1× end-to-end floor**, against bin 1's 1.06×, and it is measured at GEMM1's own
+geometry rather than extrapolated from another shape.
+
+It is a floor, not a target: variant C is a naive kernel at 235.7 GFLOP/s, still only **1.4%** of
+this card's fp32 peak. FFN GEMM2 reaches 1609 GFLOP/s *in the step*, which suggests considerably
+more is available — but GEMM2 has a different output geometry and reduction depth, so **that is a
+cross-shape extrapolation and is not claimed as a result here**. The defensible statement is:
+≥2.1× from parallelizing the output axis alone, with the ceiling unknown and plausibly much higher.
 
 ### Bin 4 — surprises
 
@@ -364,24 +421,27 @@ The supporting facts, in the order that matters:
 2. Five kernels — four FFN up-projections and the tied lm_head — are 70.2%, and cost
    72.48 / 72.55 / 72.27 ms in the untuned, tuned-scalar and tuned-tensorized artifacts. **Invariant
    to 0.4%.**
-3. Nothing is at roofline: 0.000 ms at-roofline, 96.5% of the step classified well under, the best
-   kernel reaching 11.9% of a bandwidth leg. So "the traffic must shrink" — the premise fusion work
-   rests on — is false here.
+3. No kernel is compute-bound (0.000 ms at-roofline, 96.5% well under), and the dominant kernel is
+   not byte-bound either — a standalone variant with **identical** global read-modify-write traffic
+   runs 5.6× faster purely by widening the grid. So "the traffic must shrink", the premise fusion
+   work rests on, is false here. What binds is occupancy: **1024 threads on 46 SMs**.
 4. The blocker is named and in the log: gh-521's companion-coverage rule declines 10 tensorized
    **and 10 scalar** seeds at the `8x128x1024` output geometry, which is exactly FFN GEMM1 and the
    lm_head; and 5+5 at `8x128x8x128`, which is the out-projection and QKᵀ.
-5. The prize on the other side is measured, not modelled: FFN GEMM2 is the same 536.9 MFLOP GEMM in
-   the same step and runs 17–23× faster. At that rate the step lands near **34 ms — 3.0×**.
+5. The prize on the other side is measured **at the affected geometry**: the same `8×128×1024`-output
+   GEMM, given the simplest possible repair (one thread per output, no tiling), goes 12.69 → 2.28 ms,
+   which puts the step at **~48.6 ms — 2.1×**.
 
 #483 is not wrong about attention being unfused; it is wrong about attention being where the time
 is. The recommendation is to re-aim at the `8x128x1024` / `8x128x8x128` companion-coverage declines
 (gh-521), and to revisit #483 afterwards, when `seq²` traffic would be a materially larger share of
-a ~34 ms step.
+a much smaller step.
 
-Two caveats on the 3.0× estimate: it assumes the declined sites can reach GEMM2's *per-FLOP* rate,
-which the geometry difference may not permit in full, and GEMM2's rate is itself only 5.5% of the
-compute roofline — so 34 ms is a milestone, not a floor. Neither caveat affects the ranking of
-bin 3 over bin 1, which rests on the 5.4%/70.2% split alone.
+The 2.1× is a **floor**, deliberately: it comes from a naive parallel kernel that is itself only
+1.4% of this card's fp32 peak, so the reachable ceiling is higher — but by how much is not measured
+here, and FFN GEMM2's much better in-step rate is a *different* geometry and is not evidence for
+this one. None of that affects the ranking of bin 3 over bin 1, which rests on the 5.4% / 70.2%
+split alone.
 
 ## Appendix — memory telemetry (ride-along for #550)
 
@@ -394,23 +454,55 @@ unchanged. The pass-2 replay processes that produced every number above need wel
 
 ```bash
 cd benchmarks
-# pass 1: cold search, populates autotune_cache and emits the calibration TSV
+# pass 1: COLD search -- the empty cache dir is load-bearing, otherwise this replays a
+# previous winner instead of searching, and compile_s/the calibration rows describe stale state.
+rm -rf /tmp/gh531-cache
 BENCH_FIXTURE=fixtures/gpt2_mini.safetensors BENCH_TUNE=1 OCANNL_AUTOTUNE_LOG=true \
   ../_build/default/benchmarks/runners/ocannl/bench_gpt.exe \
   --ocannl_backend=cuda --ocannl_tf32_matmuls=true \
+  --ocannl_autotune_cache_dir=/tmp/gh531-cache \
   --ocannl_autotune_calibration_file=/tmp/calib.tsv
 ```
 
 ```bash
 cd benchmarks
-# pass 2: profile the warm replay
+# pass 2: profile the warm replay of exactly that artifact
 nsys profile --trace=cuda --sample=none --cpuctxsw=none --cuda-graph-trace=node -o /tmp/tf32 \
   env BENCH_FIXTURE=fixtures/gpt2_mini.safetensors BENCH_TUNE=1 \
   ../_build/default/benchmarks/runners/ocannl/bench_gpt.exe \
-  --ocannl_backend=cuda --ocannl_tf32_matmuls=true
+  --ocannl_backend=cuda --ocannl_tf32_matmuls=true \
+  --ocannl_autotune_cache_dir=/tmp/gh531-cache
 nsys stats --report cuda_gpu_kern_sum --format csv /tmp/tf32.nsys-rep
 ```
 
+A cache directory must not be shared across numerics policies — see bin 4(a). Use a separate one
+for any default-flags (non-tf32) leg.
+
 To read the *shipping* arm's source, snapshot `build_files/bench_gpt/cross_entropy_loss_fwd__seg.cu`
-while the run compiles — arm A is written first and arm B overwrites it. Arm A is the 117-kernel,
-20-`mma.sync` version.
+while the run compiles: arm A is written first and arm B overwrites it. **Debug emission is off in
+`benchmarks/ocannl_config`, so it must be turned on explicitly** — without it there is no `.cu` to
+snapshot:
+
+```bash
+cd benchmarks
+rm -rf build_files
+( while :; do md5sum build_files/bench_gpt/cross_entropy_loss_fwd__seg.cu 2>/dev/null; done \
+    | uniq | while read h f; do cp "$f" "/tmp/armsnap-$h.cu" 2>/dev/null; done ) &
+BENCH_FIXTURE=fixtures/gpt2_mini.safetensors BENCH_TUNE=1 \
+  ../_build/default/benchmarks/runners/ocannl/bench_gpt.exe \
+  --ocannl_backend=cuda --ocannl_tf32_matmuls=true \
+  --ocannl_autotune_cache_dir=/tmp/gh531-cache \
+  --ocannl_output_debug_files_in_build_directory=true
+kill %1
+grep -c '__global__' /tmp/armsnap-*.cu   # arm A = 117 kernels (20 mma.sync); arm B = 130 (0)
+```
+
+Poll on content with no settling delay: on a warm replay both arms compile within ~0.4 s, and a
+watcher that waits for the file to stop changing before copying misses arm A entirely.
+
+The standalone same-geometry control is checked in as
+[`benchmarks/ffn1_geometry_probe.cu`](ffn1_geometry_probe.cu) — plain CUDA, no OCANNL:
+
+```bash
+nvcc -O3 -arch=sm_120 -o /tmp/ffn1_geometry_probe benchmarks/ffn1_geometry_probe.cu && /tmp/ffn1_geometry_probe
+```
