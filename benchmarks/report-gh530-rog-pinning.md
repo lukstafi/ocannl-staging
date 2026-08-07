@@ -150,10 +150,29 @@ shown too rather than picking whichever is more favourable.
 | 8 | 1.667x | 2.097x -> **-20.5%** | 1.752x -> -4.9% |
 | 16 | 1.323x | 1.919x -> **-31.1%** | n/a (no 16-P pool exists) |
 
-Read against the consistent E control, composition costs 20.5% at width 8 and 31.1% at width 16:
-substantial at both, and growing with width. The width-8 figure against the P control (-4.9%) is
-the same mixed arm measured against a *weaker* uniform baseline -- 8 P-cores tune to 1.752x where 8
-E-cores reach 2.097x -- and quoting only that number understates the effect.
+Read against the consistent E control, composition costs 20.5% at width 8 and 31.1% at width 16.
+Each of those is internally chunk-matched (both arms of each row use the same chunk count), so both
+are clean *within-width* effects. The width-8 figure against the P control (-4.9%) is the same
+mixed arm measured against a *weaker* uniform baseline -- 8 P-cores tune to 1.752x where 8 E-cores
+reach 2.097x -- and quoting only that number understates the effect.
+
+**On whether the penalty grows with width, the evidence is strong but one control is missing.**
+Comparing 20.5% against 31.1% spans a chunk-count change (32 at width 8, 64 at width 16), so it is
+worth checking that the penalty itself is chunk-invariant. Re-running the *width-8* pair with
+everything at 96 chunks:
+
+| width-8 arm | @ 32 chunks | @ 96 chunks | chunk sensitivity |
+|---|---|---|---|
+| uniform-E | 2.097x | 2.097x | **+0.02%** |
+| mixed | 1.667x | 1.678x | +0.6% |
+| **composition penalty** | **-20.5%** | **-20.0%** | -- |
+
+The penalty is chunk-invariant at width 8, and the width-16 *mixed* arm is chunk-invariant too
+(1.323x at 64 vs 1.337x at 96, +1.1%). The one arm not measured at a second chunk count is the
+**width-16 uniform-E control**; it was started and stopped as not worth the search time, since
+overturning the growth would require it to move ~13% between 64 and 96 chunks when every other arm
+measured moved by at most 1.1%. So the growth from ~20% to ~31% is well supported but not
+fully chunk-controlled at width 16, and that single arm would close it.
 
 A width-24 uniform arm is not constructible on this part: only 8 P-cores and 16 E-cores exist.
 
@@ -252,13 +271,21 @@ effect of all differences is small; it does not establish that WSL virtualizatio
 specifically is zero, since offsetting effects could cancel. What it does support is that the
 outlier is reproducible outside WSL and is not an artifact of running under it.
 
-**2. Core heterogeneity is causal at both widths measured, and grows with width.** Against the
-uniform-E control -- the only control type available at both widths -- **the mixed pool tunes 20.5%
-worse at width 8 and 31.1% worse at width 16** (equivalently, uniform-E is 25.8% and 45.0% better;
-the percentages differ because the denominators do, so the direction has to be stated). Against the
-width-8 uniform-P control the same mixed arm is only 4.9% worse, but that is a weaker baseline: 8
-P-cores tune to 1.752x where 8 E-cores reach 2.097x. The single-width design in the first version
-of this report could not have distinguished any of this from a pure width effect.
+**2. Core heterogeneity is causal at both widths measured.** Against the uniform-E control -- the
+only control type available at both widths -- **the mixed pool tunes 20.5% worse at width 8 and
+31.1% worse at width 16** (equivalently, uniform-E is 25.8% and 45.0% better; the percentages
+differ because the denominators do, so the direction has to be stated). Both are within-width,
+chunk-matched comparisons. Against the width-8 uniform-P control the same mixed arm is only 4.9%
+worse, but that is a weaker baseline: 8 P-cores tune to 1.752x where 8 E-cores reach 2.097x. The
+single-width design in the first version of this report could not have distinguished any of this
+from a pure width effect.
+
+The penalty appears to *grow* with width (20.5% -> 31.1%), and the width-8 pair re-run entirely at
+96 chunks gives -20.0%, showing the penalty is chunk-invariant there. But the cross-width
+comparison spans a chunk change, and the width-16 uniform-E control was not measured at a second
+chunk count -- so the growth is well supported (it would need that arm to move ~13% where every
+measured arm moved at most 1.1%) but not fully controlled. Treat "grows with width" as indicated,
+not established.
 
 **3. Pool width is causal over the interval where composition is controlled.** With
 `cc_parallel_chunks` fixed at 96 and composition fixed at 50% E-cores, the mixed pools decline
@@ -271,11 +298,24 @@ meanwhile barely move with width (2.097x at 8, 1.919x at 16). Note also that the
 width-16 mixed arms share the **same 50% E-core proportion** yet differ by 20%, so the driver is
 not the proportion of slow workers alone; mixing and pool size compound.
 
-**4. On the full machine the search yields nothing over materialize-all.** The crown is within
-+/-0.6% of the materialized control in both replicates, so the apparent 1.15-1.18x is the placement
-A/B selecting materialize-all rather than any schedule the search found. gh-530 recorded this
-crown-loses-to-materialized behaviour as specific to `cifar_stride` on rog; natively it reproduces
-on `cifar_conv` too, so it is not a strided-seed quirk.
+**4. On the full machine the search fails to crown the split-reduce family that wins on every
+narrower pool.** The crown is within +/-0.6% of the materialized control in both replicates, and
+the runner's emitted `tune` object says why rather than leaving it to be inferred from near-equal
+timings. Every arm ships **B**, the materialize-all placement (arm A is default placements, arm B
+materialize-all -- [bench_harness.ml:216](runners/ocannl/bench_harness.ml:216)), but the crowned
+*schedule label* differs by pool:
+
+| pool | arm A label | arm B label (shipped) |
+|---|---|---|
+| full machine, width 24 | `F_saved[15 segs]` | `F_saved[19 segs]` |
+| every width-8 and width-16 pool | `F_split_saved[31 prelude ops, 15 segs]` | `F_split_saved[31 prelude ops, 30 segs]` |
+
+On every subset the crown is a **split-reduce** schedule; on the full machine it is plain fission.
+That is the concrete difference behind the collapse -- not "the tuner found nothing", but "the
+tuner did not crown the split-reduce family here", and the shipped placement is materialize-all in
+all cases. (`cifar_stride` unpinned crowns `W_saved[0 ops]` on arm B, a third label.) gh-530
+recorded this crown-loses-to-materialized behaviour as specific to `cifar_stride` on rog; natively
+it reproduces on `cifar_conv` too, so it is not a strided-seed quirk.
 
 **5. The crowned P-only schedule does not transfer to the full machine.** It runs 768.71 ms on 8
 P-cores and 1332 ms on the full machine -- worse than materialize-all's 1164.80. So for *this*
@@ -331,11 +371,13 @@ composition/width confound; the width-controlled design was run on `cifar_conv` 
 
 From a clean checkout, build the runner and generate the fixture first (`fixtures/` is gitignored):
 
+Everything below is native Windows, so the venv's executables live under `Scripts\`, not `bin/`:
+
 ```
 dune build benchmarks/runners/ocannl/bench_conv.exe
-python3 -m venv benchmarks/.venv
-benchmarks/.venv/bin/pip install numpy safetensors
-benchmarks/.venv/bin/python benchmarks/gen_fixtures.py benchmarks/workloads/cifar_conv.json
+python -m venv benchmarks\.venv
+benchmarks\.venv\Scripts\python.exe -m pip install numpy safetensors
+benchmarks\.venv\Scripts\python.exe benchmarks\gen_fixtures.py benchmarks\workloads\cifar_conv.json
 ```
 
 A tuned cell is two passes against the same cache: pass 1 searches, pass 2 replays it from a fresh
