@@ -5,6 +5,9 @@
 // Build:
 //     gcc -O2 -o ffn1_nvrtc_harness benchmarks/ffn1_nvrtc_harness.c \
 //         -I/usr/local/cuda/include -L/usr/local/cuda/lib64 -L/usr/lib/wsl/lib -lnvrtc -lcuda -lm
+// The variant sources come from benchmarks/ffn1_make_variants.py, which rewrites arm A's own
+// emitted translation unit (and refuses input that is not the 117-kernel / 20-mma_sync arm A).
+//
 // Run (input is arm A's emitted source -- see report-gh531-profile.md for how to snapshot it):
 //     ./ffn1_nvrtc_harness <file.cu> <kernel> <gridY>
 //   e.g. ./ffn1_nvrtc_harness armA-117.cu cross_entropy_loss_fwd__seg25 1
@@ -23,9 +26,10 @@
 //          seg111's vocabulary axis carries a REDUCTION and cannot simply be spread over
 //          blockIdx.y (that would give per-block partial maxima racing on one cell).
 //
-// EVERY run is verified pointwise against an independent fp64 host reference before its time is
-// reported, and the program exits nonzero on any mismatch or non-finite value -- a short,
-// duplicated, permuted or gridY-mismatched output cannot be timed and quoted.
+// EVERY run is verified against an independent fp64 host reference before its time is reported --
+// every output cell, not a sample, because a chunk-count mismatch can leave a narrow unwritten
+// band that a strided sample steps over -- and the program exits nonzero on any mismatch or
+// non-finite value. A short, duplicated, permuted or gridY-mismatched output cannot be quoted.
 //
 // The chunked inputs are the same file with the output loop rebased onto blockIdx.y:
 //     for (int i1705 = 0; i1705 <= 1023; ++i1705)
@@ -36,16 +40,16 @@
 // Measured on an RTX 5070 Ti Laptop (46 SMs), CUDA 13.3, WSL2. Every row verified before timing:
 //
 //   seg25 (FFN up-projection, GEMM + gelu, chunkable as-is)
-//     as shipped,     8 blocks   13.70-13.79 ms   (nsys measures 14.31 ms in the step: ~3%)
+//     as shipped,     8 blocks   13.70-13.85 ms   (nsys measures 14.31 ms in the step: ~3%)
 //     chunked,       16 blocks    7.24 ms
 //     chunked,       32 blocks    3.50 ms
-//     chunked,     1024 blocks    2.32-2.37 ms    -> 5.8x
+//     chunked,     1024 blocks    2.32-2.37 ms    -> 5.9x
 //
 //   seg111 (tied lm_head). Its vocabulary axis carries the max_logits REDUCTION, so it cannot be
 //   chunked as one kernel; it is fissioned into a GEMM half (chunkable) and a reduce half:
-//     as shipped, whole kernel,      8 blocks   15.20 ms   (nsys measures 14.76 ms: ~3%)
+//     as shipped, whole kernel,      8 blocks   15.12-15.20 ms  (nsys: 14.76 ms, ~3%)
 //     seg111_gemm,                   8 blocks   14.41 ms
-//     seg111_gemm chunked,        1024 blocks    2.32 ms
+//     seg111_gemm chunked,        1024 blocks    2.33 ms
 //     seg111_reduce (init + max),    8 blocks    0.05 ms
 //     fissioned total                            2.38 ms   -> 6.4x  (at the cost of one extra
 //                                                                    launch, ~4 us)
@@ -214,54 +218,49 @@ int main(int argc, char** argv) {
   CU(cuMemcpyDtoH(aux, dAux, outsz));
 
   int OUTW = is25 ? DFF : VOCAB;
-  double worst = 0;
-  for (size_t i = 0; i < (size_t)TOKENS * OUTW; ++i)
-    if (!isfinite(out[i])) { printf("  FAIL %s: non-finite logits/n311 at %zu\n", kname, i); return 1; }
-  if (is25) {
-    for (size_t i = 0; i < (size_t)TOKENS * OUTW; ++i)
-      if (!isfinite(aux[i])) { printf("  FAIL %s: non-finite gelu at %zu\n", kname, i); return 1; }
-    for (int tok = 0; tok < TOKENS; tok += 37)
-      for (int j = 0; j < DFF; j += 13) {
-        double r = ref_dot_w1(j, tok);
-        double g = out[(size_t)tok * DFF + j];
-        double rel = fabs(g - r) / fmax(1e-30, g_absum);
-        if (rel > worst) worst = rel;
-      }
-    if (worst > 1e-5) return fail("GEMM (n311)", worst);   // fp32 over 256 terms
-    double wg = 0;   // gelu checked against the device's own n311, so it is an independent leg
-    for (int tok = 0; tok < TOKENS; tok += 37)
-      for (int j = 0; j < DFF; j += 13) {
-        double r = tanh_gelu((double)out[(size_t)tok * DFF + j] + (double)hb[j]);
-        double g = aux[(size_t)tok * DFF + j];
-        double rel = fabs(g - r) / fmax(1e-3, fabs(r));
-        if (rel > wg) wg = rel;
-      }
-    if (wg > 2e-3) return fail("gelu epilogue", wg);   // __tanhf under --use_fast_math
-    printf("  verified: GEMM %.2e, gelu %.2e   ", worst, wg);
-  } else {
-    for (int tok = 0; tok < TOKENS; tok += 37)
-      for (int v = 0; v < VOCAB; v += 13) {
-        double r = ref_dot_wte(v, tok);
-        double g = out[(size_t)tok * VOCAB + v];
-        double rel = fabs(g - r) / fmax(1e-30, g_absum);
-        if (rel > worst) worst = rel;
-      }
-    if (worst > 1e-5) return fail("lm_head GEMM (logits)", worst);   // fp32 over 256 terms
-    double wm = 0;   // max_logits must equal the row max of the logits the device produced
-    if (!strstr(kname, "_gemm")) {
-      for (int tok = 0; tok < TOKENS; tok += 37) {
-        double m = -INFINITY;
-        for (int v = 0; v < VOCAB; ++v) m = fmax(m, (double)out[(size_t)tok * VOCAB + v]);
-        double g = aux[(size_t)tok];
-        if (!isfinite(g)) { printf("  FAIL %s: non-finite max_logits\n", kname); return 1; }
-        double rel = fabs(g - m) / fmax(1e-6, fabs(m));
-        if (rel > wm) wm = rel;
-      }
-      if (wm > 1e-6) return fail("max_logits row max", wm);
-      printf("  verified: GEMM %.2e, rowmax %.2e   ", worst, wm);
-    } else {
-      printf("  verified: GEMM %.2e   ", worst);
+  // Verify EVERY output cell, not a sampled grid: a chunk-count mismatch can leave a narrow
+  // unwritten band (zeros are finite, and a strided sample can step straight over it).
+  // The fp64 reference is built once as a full [TOKENS][OUTW] product.
+  double* ref = (double*)malloc((size_t)TOKENS * OUTW * sizeof(double));
+  double* cond = (double*)malloc((size_t)TOKENS * OUTW * sizeof(double));
+  for (int tok = 0; tok < TOKENS; ++tok)
+    for (int o = 0; o < OUTW; ++o) {
+      double r = is25 ? ref_dot_w1(o, tok) : ref_dot_wte(o, tok);
+      ref[(size_t)tok * OUTW + o] = r;
+      cond[(size_t)tok * OUTW + o] = g_absum;
     }
+  double worst = 0;
+  for (size_t i = 0; i < (size_t)TOKENS * OUTW; ++i) {
+    if (!isfinite(out[i])) { printf("  FAIL %s: non-finite GEMM output at %zu\n", kname, i); return 1; }
+    double d = fabs((double)out[i] - ref[i]) / fmax(1e-30, cond[i]);
+    if (d > worst) worst = d;
+  }
+  if (worst > 1e-5) return fail(is25 ? "GEMM (n311)" : "lm_head GEMM (logits)", worst);
+
+  if (is25) {
+    double wg = 0;   // gelu checked against the device's own n311: an independent leg
+    for (size_t i = 0; i < (size_t)TOKENS * DFF; ++i) {
+      if (!isfinite(aux[i])) { printf("  FAIL %s: non-finite gelu at %zu\n", kname, i); return 1; }
+      double r = tanh_gelu((double)out[i] + (double)hb[i % DFF]);
+      double rel = fabs((double)aux[i] - r) / fmax(1e-3, fabs(r));
+      if (rel > wg) wg = rel;
+    }
+    if (wg > 2e-3) return fail("gelu epilogue", wg);   // __tanhf under --use_fast_math
+    printf("  verified(all %d cells): GEMM %.2e, gelu %.2e   ", TOKENS * DFF, worst, wg);
+  } else if (!strstr(kname, "_gemm")) {
+    double wm = 0;   // max_logits must equal the row max of the logits the device produced
+    for (int tok = 0; tok < TOKENS; ++tok) {
+      double m = -INFINITY;
+      for (int v = 0; v < VOCAB; ++v) m = fmax(m, (double)out[(size_t)tok * VOCAB + v]);
+      double g = aux[(size_t)tok];
+      if (!isfinite(g)) { printf("  FAIL %s: non-finite max_logits at %d\n", kname, tok); return 1; }
+      double rel = fabs(g - m) / fmax(1e-6, fabs(m));
+      if (rel > wm) wm = rel;
+    }
+    if (wm > 1e-6) return fail("max_logits row max", wm);
+    printf("  verified(all %d cells): GEMM %.2e, rowmax %.2e   ", TOKENS * VOCAB, worst, wm);
+  } else {
+    printf("  verified(all %d cells): GEMM %.2e   ", TOKENS * VOCAB, worst);
   }
   printf("%-34s %-14s gridY=%-4d blocks=%-5d %8.3f ms\n",
          strrchr(path, '/') ? strrchr(path, '/') + 1 : path,
