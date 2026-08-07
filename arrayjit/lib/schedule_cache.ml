@@ -71,40 +71,27 @@ let tn_of_ref c i =
          (Array.length c.ref_tns))
   else c.ref_tns.(i)
 
+(* The canonical identity of an optimized routine, for schedule replay: the code walk is
+   [LL.Canonical_render.emit], with the identity policy below (everything alpha-renamed, so a
+   schedule saved in one session replays onto an isomorphic lowering in another) plus this
+   consumer's extras — the [base_syms]/[tn_refs] resolution maps and the codegen-companion
+   sections. Opposite choices to [Low_level.analysis_digest]'s, which keys by identity; see
+   [LL.Canonical_render]. *)
 let canonicalize ?(static_indices = []) ?(with_placements = true) (opt : LL.optimized) : canonical =
   let buf = Buffer.create 4096 in
   let add = Buffer.add_string buf in
   let complete = ref true in
-  (* The in-scope rendering token per symbol (shadow-aware: inner binders overwrite). *)
-  let tokens = Hashtbl.create (module Idx.Symbol) in
   (* The exported resolution: the first binding of each symbol; duplicated binders are dropped. *)
   let first_bind = Hashtbl.create (module Idx.Symbol) in
   let dup_binders = Hash_set.create (module Idx.Symbol) in
-  List.iteri static_indices ~f:(fun k ss ->
-      let s = ss.Idx.static_symbol in
-      Hashtbl.set tokens ~key:s ~data:(Printf.sprintf "s%d" k);
-      Hashtbl.set first_bind ~key:s ~data:(Static k));
-  let base_count = ref 0 in
+  let initial_tokens =
+    List.mapi static_indices ~f:(fun k ss ->
+        let s = ss.Idx.static_symbol in
+        Hashtbl.set first_bind ~key:s ~data:(Static k);
+        (s, Printf.sprintf "s%d" k))
+  in
   let tn_refs = Hashtbl.create (module Tn) in
   let rev_tns = ref [] in
-  let bind_loop s =
-    let id = !base_count in
-    Int.incr base_count;
-    let tok = "b" ^ Int.to_string id in
-    if Hashtbl.mem first_bind s then (
-      Hash_set.add dup_binders s;
-      complete := false)
-    else Hashtbl.set first_bind ~key:s ~data:(Base id);
-    Hashtbl.set tokens ~key:s ~data:tok;
-    tok
-  in
-  let emit_sym s =
-    match Hashtbl.find tokens s with
-    | Some tok -> add tok
-    | None ->
-        complete := false;
-        add "?"
-  in
   let plc = opt.LL.optimize_ctx.LL.placements in
   let emit_tn tn =
     match Hashtbl.find tn_refs tn with
@@ -145,177 +132,25 @@ let canonicalize ?(static_indices = []) ?(with_placements = true) (opt : LL.opti
              (Sexp.to_string (Ops.sexp_of_prec (Lazy.force tn.Tn.storage_prec)))
              hc pc)
   in
-  (* Local scope ids come from a process-global counter freshly on each lowering (like loop
-     symbols), so digest their first-occurrence alpha index, not the raw id — otherwise sibling
-     compiles of local-heavy routines would never agree on a digest (Codex P2 on PR #103). *)
-  let scope_alpha = Hashtbl.create (module LL.Scope_id) in
-  let emit_scope (id : LL.scope_id) =
-    emit_tn id.tn;
-    let a = Hashtbl.find_or_add scope_alpha id ~default:(fun () -> Hashtbl.length scope_alpha) in
-    add ("." ^ Int.to_string a)
-  in
-  let emit_idx = function
-    | Idx.Fixed_idx i -> add ("#" ^ Int.to_string i)
-    | Idx.Iterator s -> emit_sym s
-    | Idx.Affine { symbols; offset } ->
-        add "(";
-        List.iter symbols ~f:(fun (c, s) ->
-            add (Int.to_string c ^ "*");
-            emit_sym s;
-            add "+");
-        add (Int.to_string offset ^ ")")
-    | Idx.Sub_axis -> add "_"
-    | Idx.Concat syms ->
-        add "cat(";
-        List.iter syms ~f:(fun s ->
-            emit_sym s;
-            add ",");
-        add ")"
-  in
-  let emit_idcs idcs =
-    add "[";
-    Array.iter idcs ~f:(fun idx ->
-        emit_idx idx;
-        add ",");
-    add "]"
-  in
-  let rec emit_scalar (sc : LL.scalar_t) =
-    match sc with
-    | LL.Local_scope { id; body; orig_indices } ->
-        add "scope(";
-        emit_scope id;
-        add ")";
-        emit_idcs orig_indices;
-        add "{";
-        emit body;
-        add "}"
-    | LL.Get_local id ->
-        add "getl(";
-        emit_scope id;
-        add ")"
-    | LL.Get (tn, idcs) ->
-        add "get ";
-        emit_tn tn;
-        emit_idcs idcs
-    | LL.Get_dynamic { tn; idcs; dyn_axis; dyn_value } ->
-        add "getd ";
-        emit_tn tn;
-        emit_idcs idcs;
-        add ("/" ^ Int.to_string dyn_axis ^ ":");
-        emit_arg dyn_value
-    | LL.Get_merge_buffer (tn, idcs) ->
-        add "getm ";
-        emit_tn tn;
-        emit_idcs idcs
-    | LL.Ternop (op, a, b, c) ->
-        add (Sexp.to_string (Ops.sexp_of_ternop op));
-        add "(";
-        emit_arg a;
-        add ",";
-        emit_arg b;
-        add ",";
-        emit_arg c;
-        add ")"
-    | LL.Binop (op, a, b) ->
-        add (Sexp.to_string (Ops.sexp_of_binop op));
-        add "(";
-        emit_arg a;
-        add ",";
-        emit_arg b;
-        add ")"
-    | LL.Unop (op, a) ->
-        add (Sexp.to_string (Ops.sexp_of_unop op));
-        add "(";
-        emit_arg a;
-        add ")"
-    | LL.Constant f -> add (Float.to_string f)
-    | LL.Constant_bits b -> add ("bits:" ^ Int64.to_string b)
-    | LL.Embed_index idx ->
-        add "ix:";
-        emit_idx idx
-  and emit_arg ((sc, prec) : LL.scalar_arg) =
-    emit_scalar sc;
-    add ("@" ^ Sexp.to_string (Ops.sexp_of_prec prec))
-  and emit (llc : LL.t) =
-    match llc with
-    | LL.Noop -> add "nop;"
-    (* Comment text is presentational (routine names, debug names): identical code under different
-       names should share one cache entry. *)
-    | LL.Comment _ -> add "c;"
-    | LL.Staged_compilation _ ->
-        complete := false;
-        add "staged;"
-    | LL.Seq (a, b) ->
-        emit a;
-        emit b
-    | LL.For_loop { index; from_; to_; body; axis } ->
-        let tok = bind_loop index in
-        add
-          (Printf.sprintf "for %s=%d..%d@%s{" tok from_ to_
-             (Sexp.to_string (LL.sexp_of_axis_type axis)));
-        emit body;
-        add "}"
-    | LL.Zero_out tn ->
-        add "zero ";
-        emit_tn tn;
-        add ";"
-    | LL.Set { tn; idcs; llsc; debug = _ } ->
-        add "set ";
-        emit_tn tn;
-        emit_idcs idcs;
-        add ":=";
-        emit_scalar llsc;
-        add ";"
-    | LL.Set_dynamic { tn; idcs; dyn_axis; dyn_value; llsc; debug = _ } ->
-        add "setdyn ";
-        emit_tn tn;
-        emit_idcs idcs;
-        add ("@" ^ Int.to_string dyn_axis ^ "=");
-        emit_arg dyn_value;
-        add ":=";
-        emit_scalar llsc;
-        add ";"
-    | LL.Set_from_vec { tn; idcs; length; vec_unop; arg; debug = _ } ->
-        add ("setv" ^ Int.to_string length ^ " ");
-        emit_tn tn;
-        emit_idcs idcs;
-        add (":=" ^ Sexp.to_string (Ops.sexp_of_vec_unop vec_unop));
-        add "(";
-        emit_arg arg;
-        add ");"
-    | LL.Set_local (id, sc) ->
-        add "setl ";
-        emit_scope id;
-        add ":=";
-        emit_scalar sc;
-        add ";"
-    | LL.Declare_local { id; needs_init } ->
-        add "decl ";
-        emit_scope id;
-        add (if needs_init then "0;" else ";")
-    | LL.Workgroup_barrier -> add "bar;"
-    | LL.If { cond; body } ->
-        add "if(";
-        emit_arg cond;
-        add "){";
-        emit body;
-        add "}"
-    | LL.Tile_mma { d; a; b; ta; tb; m; n; k; ldd; lda; ldb; lane; fallback } ->
-        let operand (tn, idcs) =
-          emit_tn tn;
-          emit_idcs idcs
-        in
-        add "mma ";
-        operand d;
-        operand a;
-        operand b;
-        add (Printf.sprintf " %b %b %d %d %d %d %d %d " ta tb m n k ldd lda ldb);
-        emit_sym lane;
-        add "{";
-        emit fallback;
-        add "}"
-  in
-  emit opt.LL.llc;
+  LL.Canonical_render.emit ~buf
+    {
+      emit_tn;
+      (* A symbol free in the code cannot be resolved to a saved reference. *)
+      emit_free_sym =
+        (fun _ ->
+          complete := false;
+          add "?");
+      on_bind_loop =
+        (fun s ~id ~shadowed ->
+          if shadowed then (
+            Hash_set.add dup_binders s;
+            complete := false)
+          else Hashtbl.set first_bind ~key:s ~data:(Base id));
+      mark_incomplete = (fun () -> complete := false);
+      mma = LL.Canonical_render.Structural_mma;
+      initial_tokens;
+    }
+    opt.LL.llc;
   (* Codegen-relevant companions of the code. *)
   add "shared:[";
   Set.iter opt.LL.workgroup_shared ~f:(fun tn ->

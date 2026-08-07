@@ -124,13 +124,35 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
 
 ## Lowering, virtualization, indexing
 
+- Both digests over lowered code — the analysis cache's key (`Low_level.analysis_digest`) and the
+  schedule cache's canonical identity (`Schedule_cache.canonicalize`) — share ONE walk,
+  `Low_level.Canonical_render.emit` (gh-ocannl-563). Render a newly added `Low_level.t` /
+  `scalar_t` construct there and nowhere else (the matches are exhaustive, so the build breaks);
+  a new digest-relevant *fact* is a `Canonical_render.policy` field if it is an identity choice, or
+  a consumer's own preamble/companion section if only one of them consults it. The walk owns what
+  the two agree on: loop-binder tokens `b<n>`, first-occurrence local-scope alpha, comment
+  skipping, `mark_incomplete` on opaque statements. Golden + seam test:
+  `test/operations/canonical_render.ml`.
+- Why a bespoke renderer rather than `to_doc` / `sexp_of_t`: (1) the digests must be
+  ALPHA-INVARIANT — `Indexing.symbol` and `scope_id` are global counters, so sibling lowerings of
+  one routine share no symbol numbers and any structural print misses 100% of the time; (2)
+  `to_doc`'s node names are NOT CONTEXT-FREE — `get_ident_within_code` pre-passes the whole code
+  array to find labels claimed by more than one uid and only disambiguates those, so a node prints
+  as bare `x` when alone, which COLLIDES two different routines rendered separately (a wrong hit,
+  and for the analysis cache a correctness failure) and makes a fragment's digest shift when a
+  sibling fragment changes (per-segment schedule matching needs the opposite); it also mutates
+  (`Tn.update_code_name`) and is layout- and config-dependent (`PPrint` width,
+  `ll_ident_style`/`output_prec_in_ll_files`). (3) `Low_level.t` derives no `compare`/`hash`
+  (`Staged_compilation` holds a closure), and the schedule cache's key becomes an on-disk FILENAME
+  (`Schedule_cache.cache_key`/`cache_file`) — so a string digest, not a structural key.
 - The `Low_level` analysis cache (gh-ocannl-560) makes sibling candidate compiles share one
-  `analyze_proc` result keyed by a digest of the raw lowered code. Its identity choices are the
+  `analyze_proc` result keyed by that digest of the raw lowered code. Its identity policy is the
   OPPOSITE of `Schedule_cache.canonicalize`'s: tensor nodes and static symbols enter by identity
   (`Tn.uid`; symbol ident + the mutable `static_range`/`used_as_extent` facts) because a hit
-  reuses the stored code verbatim, while loop binders and scope ids alpha-rename. Anything the
-  analysis consults beyond the code must enter the key — `inline_complex_computations` does, since
-  the rmw exemption changes what the coverage/multiplicity queries count. Two traps: (1) caches
+  reuses the stored code verbatim, while `canonicalize` alpha-renames everything so schedules
+  replay across sessions. Anything the analysis consults beyond the code must enter the key —
+  `inline_complex_computations` does, since the rmw exemption changes what the coverage /
+  multiplicity queries count. Two traps: (1) caches
   that retain lowered code keep tensor nodes (and, via pool finalizers, buffers) alive — register
   a clearer in `Tnode.before_accessibility_snapshot`, or `print_accessible_headers` goldens grow
   phantom "accessible" nodes (this is how the cache was caught); (2) on a hit, still re-run

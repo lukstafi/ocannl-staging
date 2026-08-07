@@ -1,0 +1,15 @@
+rendering:
+c;zero <cr_out>;for b0=0..2@Grid{for b1=1..3@Unrolled{if(get <cr_table>[#0,]@Single_prec){decl <cr_acc>.00;setl <cr_acc>.0:=Add(getl(<cr_acc>.0)@Single_prec,Neg(Where(1.5@Single_prec,bits:7@Single_prec,ix:b1@Single_prec)@Single_prec)@Single_prec);set <cr_out>[(2*b0+1*b1+5),]:=scope(<cr_acc>.1)[b0,]{nop;};}}}bar;setdyn <cr_out>[#0,]@0=get <cr_ids>[_,]@Single_prec:=getd <cr_table>[cat(?,?,),]/0:getm <cr_ids>[#1,]@Single_prec;setv4 <cr_out>[#2,]:=Uint4x32_to_prec_uniform(get <cr_table>[#3,]@Single_prec);
+
+delegated: bind:i1=b0 bind:i2=b1 free:i3 free:i4
+
+an alpha-variant lowering renders identically: true
+tensor-node identity is entirely the policy's: true
+Staged_compilation is reported incomplete: true
+a duplicated binder is reported shadowed: true
+an unbound symbol reaches the free-symbol hook: true
+initial_tokens pre-bind it instead: true
+and it then renders positionally: true
+structural mma: mma <cr_d>[#0,]<cr_a>[#0,]<cr_b>[#0,] false true 16 8 8 16 8 8 ?{nop;}
+structural mma is complete: true
+opaque mma renders a placeholder and reports incomplete: true
