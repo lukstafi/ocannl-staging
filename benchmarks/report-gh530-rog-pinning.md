@@ -5,9 +5,11 @@ seed or schedule code was changed.
 
 **Verdict: two factors, both large, and they compound.** Against a like-for-like uniform control a
 mixed pool tunes 20.5% worse at width 8 and 31.1% worse at width 16; independently, with grid
-decomposition held fixed, mixed pools decline from 1.678x to 1.176x as width goes 8 -> 24. The full
-24-wide mixed machine is the worst case of both, and is where the crowned schedule collapses to
-materialize-all.
+decomposition *and* composition held fixed, a mixed pool falls from 1.678x to 1.337x going from
+width 8 to width 16. The full 24-wide machine, which is both the widest pool and the most
+E-core-heavy (67%), is the worst case of both and is where the crowned schedule collapses to
+materialize-all -- though that last step cannot be attributed to either factor alone, since no
+composition-matched 24-wide pool exists on this part.
 
 The WSL rows in gh-530 remain the cross-machine ledger; the numbers here diagnose, they do not
 replace them.
@@ -28,6 +30,41 @@ replace them.
 | replication | `cifar_conv` n=2 on the three original arms; the composition- and chunk-controlled arms are n=1 |
 
 Absolute times are comparable *within* this report only. Ratios are the claim-bearing quantity.
+
+## Correctness gating
+
+A faster crown is only meaningful if it computes the same thing, so every timing below is gated on
+the loss trajectory each run reports. AGENTS.md asks that executed output be asserted "against a
+materialized or otherwise independent reference run"; the `BENCH_MATERIALIZE=1` arms provide
+exactly that, since materialize-all is a different execution path from both the default
+(recompute-intermediates) placement and from any tuned schedule.
+
+Every arm's 24-step parity trajectory was compared against its cell's unpinned **default** run,
+using orchestrate.py's own metric (`max |a-b| / max(|b|, 1e-6)`) and tolerance
+(`PARITY_TOL = 2e-3`):
+
+| cell | arms compared | worst relative deviation | tolerance | verdict |
+|---|---|---|---|---|
+| cifar_conv | 38 | **2.035e-7** | 2e-3 | PASS, ~4 orders of magnitude inside |
+| cifar_stride | 12 | **2.083e-7** | 2e-3 | PASS, ~4 orders of magnitude inside |
+
+Every *default* arm is bit-identical to the reference (deviation exactly 0), across all six pool
+configurations. The uniform ~2e-7 on the tuned and materialized arms is fp32 ordering difference
+between recomputing an intermediate and materializing it, not a semantic difference. No arm --
+tuned, materialized, replayed, or cross-arm -- deviates measurably.
+
+The trajectories also pass orchestrate.py's non-stationarity guard (`loss_moved`), which exists so
+a tolerance cannot rubber-stamp an input-independent forward: `cifar_conv` moves 3.341e-2 over the
+window against a 2.316e-6 threshold, `cifar_stride` 1.356e-2.
+
+**Limitation.** This is a materialized/independent-placement reference, not orchestrate.py's
+*cross-framework* gate against the PyTorch CPU reference. That gate could not be run here: torch
+would not install into the worktree venv (Windows `MAX_PATH` -- torch's nested license tree exceeds
+260 characters under this path), the Nsight-bundled CPython is stdlib-stripped and cannot import
+it, and the WSL image carries Python 3.14 with no pip and no torch wheels. So these results are
+gated against an independent *placement*, which would catch a miscompiling schedule, but not
+against an independent *framework*, which would additionally catch an error shared by every OCANNL
+placement. The gh-530 ledger rows for both cells did pass the cross-framework gate.
 
 ## Verified core-type map
 
@@ -132,11 +169,17 @@ claim cannot be read off them directly. These arms re-run the mixed pools at a *
 | MIXED | `0xC03FFF` | 16 | 96 | 1347.98 | 1007.88 | **1.337x** |
 | MIXED (full machine) | `0xFFFFFF` | 24 | 96 | 1377.18 | 1171.32 | **1.176x** |
 
-The monotonic decline survives with decomposition held fixed, so it is a width effect and not a
-chunking artifact. Chunk count turns out to barely matter at all for these pools: the same arm
-moves 0.6% between 32 and 96 chunks at width 8 (1.667x -> 1.678x) and 1.1% between 64 and 96 at
-width 16 (1.323x -> 1.337x), despite a 3x and 1.5x change in decomposition. These are independent
-from-scratch searches, not one replayed schedule.
+Chunk count turns out to barely matter for these pools: the same arm moves 0.6% between 32 and 96
+chunks at width 8 (1.667x -> 1.678x) and 1.1% between 64 and 96 at width 16 (1.323x -> 1.337x),
+despite a 3x and 1.5x change in decomposition. These are independent from-scratch searches, not one
+replayed schedule.
+
+**The controlled width interval is 8 -> 16 only.** Those two arms are both 50% E-cores, so with
+chunks fixed at 96 the 1.678x -> 1.337x decline isolates width. The 16 -> 24 step is *not*
+controlled: the full machine is 8P+16E, i.e. 67% E-cores, so that segment changes composition and
+width together and cannot be attributed to either alone. A width-24 arm at 50% E-cores would
+require 12 P-cores and is not constructible on this part, so this interval cannot be closed on
+this machine.
 
 ## Original three-arm decomposition
 
@@ -210,19 +253,23 @@ specifically is zero, since offsetting effects could cancel. What it does suppor
 outlier is reproducible outside WSL and is not an artifact of running under it.
 
 **2. Core heterogeneity is causal at both widths measured, and grows with width.** Against the
-uniform-E control -- the only control type available at both widths -- a uniform pool tunes 20.5%
-better than a mixed one at width 8 and 31.1% better at width 16. (Against the width-8 uniform-P
-control the same mixed arm is only 4.9% behind, but that is a weaker baseline: 8 P-cores tune to
-1.752x where 8 E-cores reach 2.097x.) The single-width design in the first version of this report
-could not have distinguished any of this from a pure width effect.
+uniform-E control -- the only control type available at both widths -- **the mixed pool tunes 20.5%
+worse at width 8 and 31.1% worse at width 16** (equivalently, uniform-E is 25.8% and 45.0% better;
+the percentages differ because the denominators do, so the direction has to be stated). Against the
+width-8 uniform-P control the same mixed arm is only 4.9% worse, but that is a weaker baseline: 8
+P-cores tune to 1.752x where 8 E-cores reach 2.097x. The single-width design in the first version
+of this report could not have distinguished any of this from a pure width effect.
 
-**3. Pool width matters independently, with grid decomposition held fixed.** At a constant
-`cc_parallel_chunks=96` the mixed pools decline monotonically with width: 1.678x (8) -> 1.337x (16)
--> 1.176x (24). Chunk count is not the driver -- the same pool moves 0.6% between 32 and 96 chunks
-at width 8 and 1.1% between 64 and 96 at width 16, across independent from-scratch searches.
-Uniform arms meanwhile barely move with width (2.097x at 8, 1.919x at 16). Note also that the
-width-8 and width-16 mixed arms share the **same 50% E-core proportion** yet differ by 20%, so the
-driver is not the proportion of slow workers alone; mixing and pool size compound.
+**3. Pool width is causal over the interval where composition is controlled.** With
+`cc_parallel_chunks` fixed at 96 and composition fixed at 50% E-cores, the mixed pools decline
+1.678x (width 8) -> 1.337x (width 16). Chunk count is not the driver -- the same pool moves 0.6%
+between 32 and 96 chunks at width 8 and 1.1% between 64 and 96 at width 16, across independent
+from-scratch searches. The further fall to 1.176x at width 24 is **not** a controlled width result:
+the full machine is 67% E-cores, so that segment varies composition and width together, and a
+50%-E pool at width 24 would need 12 P-cores and cannot be built on this part. Uniform arms
+meanwhile barely move with width (2.097x at 8, 1.919x at 16). Note also that the width-8 and
+width-16 mixed arms share the **same 50% E-core proportion** yet differ by 20%, so the driver is
+not the proportion of slow workers alone; mixing and pool size compound.
 
 **4. On the full machine the search yields nothing over materialize-all.** The crown is within
 +/-0.6% of the materialized control in both replicates, so the apparent 1.15-1.18x is the placement
@@ -257,9 +304,12 @@ alone as the first version of this report claimed. Both effects are large.
 
 - Heterogeneity is causal at every width measured: against the uniform-E control a mixed pool loses
   20.5% at width 8 and 31.1% at width 16.
-- Pool width is causal independently: with `cc_parallel_chunks` fixed at 96, mixed pools decline
-  1.678x -> 1.337x -> 1.176x from width 8 to 24.
-- The two compound, and the full machine (24 wide, 67% E-cores) is the worst case of both.
+- Pool width is causal over the interval where composition is held fixed: with
+  `cc_parallel_chunks` fixed at 96 and composition fixed at 50% E-cores, mixed pools decline
+  1.678x -> 1.337x from width 8 to 16.
+- The two compound. The full machine is both the widest pool and the most E-core-heavy (67%), and
+  is the worst case; its 1.176x cannot be apportioned between the two factors, because no
+  composition-matched 24-wide pool exists on this part.
 
 For the seed parameterization this means **effective width and core composition are both
 first-class inputs**, and a fix targeting only one is unlikely to port.
@@ -315,9 +365,19 @@ start "" /affinity %AFFMASK% /wait /b %*
 ```
 
 The empty title argument is required -- `START` otherwise consumes a quoted command path as a
-window title and silently launches a shell instead. Masks used: `C03C03` (8P), `3FC` (8E), `C3F`
-(4P+4E), `3FC3FC` (16E), `C03FFF` (8P+8E), `FFFFFF` (all 24); set `cc_parallel_chunks` to 4x the
-mask's population count.
+window title and silently launches a shell instead.
+
+Masks: `C03C03` (8P), `3FC` (8E), `C3F` (4P+4E), `3FC3FC` (16E), `C03FFF` (8P+8E), `FFFFFF` (all
+24). **The two experiments use different chunk rules and are not interchangeable:**
+
+| experiment | cells | `cc_parallel_chunks` |
+|---|---|---|
+| composition at matched width | `C03C03`, `3FC`, `C3F` (width 8); `3FC3FC`, `C03FFF` (width 16) | **4x the mask's population count** (32, 32, 32, 64, 64) |
+| width at fixed decomposition | `C3F`, `C03FFF`, `FFFFFF` | **96 for every cell** |
+
+Applying the 4x rule to the width series would give 32/64/96 and reproduce the confounded table
+instead of the claim-bearing one. Every tuned cell needs its own fresh `autotune_cache_dir`; reusing
+one silently replays another cell's winner.
 
 ## Environment note (Windows)
 
