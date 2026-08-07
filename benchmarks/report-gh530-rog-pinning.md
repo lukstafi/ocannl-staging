@@ -333,9 +333,35 @@ and possibly a different set of candidates, and no per-candidate count or compil
 measured, so it is reported as a cross-host difference in search time and is deliberately **not**
 attributed to any particular cause. It does not affect step-time ratios either way.
 
-**7. Within-native replication is tight** -- 0.1-2.0% on the ratio across independent from-scratch
-searches, so the arm ordering is solid. The 31% gap between the native and WSL `cifar_conv` tuned
-cells is therefore not run-to-run search noise on this box.
+**7. Within-native replication is tight, but only the original three arms are strictly
+replicated.** Those three were run twice at identical settings:
+
+| arm (n=2, identical config) | rep 1 | rep 2 | spread |
+|---|---|---|---|
+| unpinned, width 24 | 1.176x | 1.154x | 1.81% |
+| P-only, width 8 | 1.752x | 1.750x | 0.11% |
+| E-only, width 16 | 1.919x | 1.927x | 0.41% |
+
+The composition- and chunk-controlled arms are **n=1 at any single setting**, so this spread does
+not directly cover them and the causal conclusions in findings 2 and 3 do not inherit it. What
+those arms do have is a second independent from-scratch search at a different chunk count, which is
+a near-replicate rather than a replicate -- one factor differs, but that factor is measurably
+inert here:
+
+| controlled arm | search 1 | search 2 | difference |
+|---|---|---|---|
+| mixed, width 8 | 1.667x @ 32 | 1.678x @ 96 | 0.63% |
+| mixed, width 16 | 1.323x @ 64 | 1.337x @ 96 | 1.05% |
+| uniform-E, width 8 | 2.097x @ 32 | 2.097x @ 96 | 0.04% |
+
+So every controlled arm has been searched twice from scratch and landed within 1.1% both times,
+which is evidence that the beam is not selecting wildly different winners on these pools. It is
+not a substitute for a true replicate, and the width-16 uniform-E control has only ever been
+searched once. Read the controlled-arm ordering as well-supported but n=1; the strict replicate
+spread above belongs to the original three arms only.
+
+Separately, the 31% gap between the native and WSL `cifar_conv` tuned cells is much larger than any
+of these figures, so it is not run-to-run search noise on this box.
 
 ## Verdict
 
