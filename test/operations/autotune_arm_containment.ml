@@ -14,10 +14,10 @@
    arrives in position carrying the terminal failure, rather than being silently downgraded to
    "arm B lost".
 
-   gh-ocannl-564 extends the same suite one level down, to what a timing run does BEFORE it
-   dispatches: a failure of [Context.run]'s pre-dispatch validation writes nothing, so it must be a
-   per-candidate decline that the search survives — not the fatal that condemned the lineage when it
-   arrived tagged [Launch] with no backend able to attribute it. *)
+   gh-ocannl-564 extends the suite one level down, to what a timing run does BEFORE it dispatches:
+   a failure of [Context.run]'s pre-dispatch validation writes nothing, so it must be a decline the
+   search survives — not the fatal it was when it arrived tagged [Launch] with no backend able to
+   attribute it. *)
 
 open Base
 open Ocannl
@@ -50,9 +50,9 @@ let with_injected_failure ?exn ~arms_reported ~at ~message f =
   Exn.protect ~f ~finally:(fun () -> Autotune.on_candidate_attempt := fun _ -> ())
 
 (* gh-ocannl-564: the same discipline at the pre-dispatch validation seam. [at] counts preflights
-   across the whole call — 1 is arm A's baseline timing, so 2 is the first candidate arm A times —
-   and the count is returned so a scenario can assert the injection actually fired rather than
-   passing vacuously on a search that timed fewer candidates than expected. *)
+   across the whole call — 1 is arm A's baseline timing, 2 the first candidate it times — and the
+   count is returned so a scenario can assert the injection fired, rather than passing vacuously on
+   a search that timed fewer candidates than expected. *)
 let with_injected_preflight_failure ~at ~raise_it f =
   let preflights = ref 0 in
   (Autotune.on_candidate_preflight :=
@@ -322,16 +322,15 @@ let () =
   p "and the retry succeeds once the dependency has executed"
     (match Context.check_runnable ctx_r1 r2 with () -> true | exception _ -> false);
 
-  (* --- gh-ocannl-564: the candidate half of the same claim. A pre-dispatch rejection arrives
-     inside the candidate timing's failure boundary, which is tagged [Launch] and — with no backend
-     verdict, which is every C backend — used to make it fatal: the lineage was condemned and the
-     search died for a mistake nothing had yet acted on. It is now its own phase, so it is a
-     per-candidate decline: census-visible, lineage intact, search completes.
+  (* --- gh-ocannl-564: the candidate half. A pre-dispatch rejection arrives inside the candidate
+     timing's boundary, tagged [Launch] and — with no backend verdict, which is every C backend —
+     fatal: the lineage condemned and the search dead for a mistake nothing had yet acted on. Its
+     own phase makes it a per-candidate decline: census-visible, lineage intact, search completes.
 
-     The rejections themselves are produced by real validation of real routines (the injection only
-     decides WHICH candidate meets one): the causes are properties of the lineage and the bindings,
-     so a genuine one fails every candidate of every arm at once and could not show a search that
-     survived it. The whole-search form of that is the last scenario below. --- *)
+     The rejections are produced by real validation of real routines; the injection only decides
+     WHICH candidate meets one, since the causes belong to the lineage and the bindings and a
+     genuine one fails every candidate of every arm at once. The whole-search form of that is the
+     last scenario below. --- *)
   let negative_control () =
     let reports = ref [] in
     let ctx_n, routine_n =
@@ -349,9 +348,8 @@ let () =
   p "control: an uninjected search completes and ships"
     (control_ships && List.for_all control_reports ~f:(fun r -> not r.Autotune.partial));
 
-  (* An unsatisfied execution dependency, taken from a routine that genuinely has one: [dep_r2]
-     reads what [dep_r1] writes and [dep_r1] has not run, so [check_runnable] raises exactly what
-     the timing run's own validation would. *)
+  (* An unsatisfied execution dependency, from a routine that genuinely has one: [dep_r2] reads what
+     [dep_r1] writes and [dep_r1] has not run. *)
   let dep_ctx = Context.auto () in
   let dep_ctx1, _dep_r1 = Context.compile dep_ctx comp Ir.Indexing.Empty in
   let _dep_ctx2, dep_r2 = Context.compile dep_ctx1 comp Ir.Indexing.Empty in
@@ -376,11 +374,9 @@ let () =
   p "a winner still ships and computes the right values"
     (Array.for_all2_exn (Context.get_values ctx_d' t2.Tensor.value) expected ~f:approx);
 
-  (* An out-of-range static binding, likewise from real bind-time validation. [set_test_bindings]
-     only ever writes in-range values, so this is the shape of the mistake a caller makes: a binding
-     the tuner leaves alone because it declares no range, carrying a value the index width rejects.
-     A different exception constructor from the dependency case, so it also pins that the phase
-     rather than the exception is what classifies these. *)
+  (* An out-of-range static binding, likewise from real bind-time validation, and a different
+     exception constructor from the dependency case — so this also pins that the phase rather than
+     the exception is what classifies these. *)
   let osym, _ = Ir.Indexing.get_static_symbol ~static_range:4 Ir.Indexing.Empty in
   let ctx_b = Context.auto () in
   let reports_b = ref [] in
@@ -403,11 +399,10 @@ let () =
   p "a winner still ships and computes the right values"
     (Array.for_all2_exn (Context.get_values ctx_b' t2.Tensor.value) expected ~f:approx);
 
-  (* --- Containment stops at the one pre-dispatch condition that is not fixable. A poisoned lineage
-     has no restore (gh-ocannl-536), so every later timing run in it is dead too: declining the
-     candidate would decline every remaining candidate for the same terminal reason and then report
-     a completed search. The poisoning happens AFTER the baseline was timed, so a winner is in hand
-     and the search has something to wrongly report success with. --- *)
+  (* --- Containment stops at the one pre-dispatch condition that is not fixable: a poisoned lineage
+     has no restore (gh-ocannl-536), so every later timing run in it is dead too, and declining this
+     candidate would decline every remaining one for the same terminal reason. Poisoned AFTER the
+     baseline was timed, so the search has a winner to wrongly report success with. --- *)
   let ctx_z = Context.auto () in
   let attempts = ref 0 in
   let reports_z = ref [] in
@@ -418,7 +413,7 @@ let () =
            fun _ ->
              Int.incr attempts;
              (* Poisons without raising: the lineage's own state must stop the search, through the
-                timing run's pre-dispatch check rather than through an injected exception. *)
+                timing run's pre-dispatch check rather than an injected exception. *)
              if !attempts = 2 then
                Context.poison_lineage ctx_z ~routine_name:"injected"
                  (Failure "injected prior poisoning"));
@@ -433,20 +428,20 @@ let () =
   in
   p "a poisoned lineage is not declined like a fixable pre-dispatch failure"
     poisoned_stops_the_search;
-  (* Positionally arm A — the arm the poisoning happened inside. Read as "some report", this passes
-     without the fix too: arm B's baseline timing hits the same poisoned lineage and reports it,
-     while arm A goes on declining every remaining candidate, times nothing, and reports a COMPLETED
-     search that shipped an untuned fallback out of a dead lineage. *)
+  (* Positionally arm A, where the poisoning happened. Read as "some report" this passes without the
+     fix too: arm B's baseline hits the same lineage and reports it honestly, while arm A declines
+     its way to the end and reports a COMPLETED search that shipped an untuned fallback out of a
+     dead lineage. *)
   p "the arm it happened in reports a terminal failure, not a completed search"
     (Option.value_map (List.hd (List.rev !reports_z)) ~default:false ~f:(fun r ->
          r.Autotune.partial
          && Option.value_map r.Autotune.terminal_failure ~default:false ~f:(fun tf ->
                 String.is_substring tf.Autotune.detail ~substring:"poisoned")));
 
-  (* --- The genuine whole-search form, injection-free: the caller hands the tuner a lineage holding
-     an unexecuted compile of the same computation, so every routine the tuner compiles inherits an
-     unsatisfied dependency and both arms fail at their baseline's validation. That failure is the
-     caller's to fix — which it can only be if the lineage survives it. --- *)
+  (* --- The genuine whole-search form, injection-free: a lineage holding an unexecuted compile of
+     the same computation gives every routine the tuner compiles an unsatisfied dependency, failing
+     both arms at their baseline's validation. That failure is the caller's to fix — which it can
+     only be if the lineage survives it. --- *)
   let ctx_u = Context.auto () in
   let ctx_u1, r_unrun = Context.compile ctx_u comp Ir.Indexing.Empty in
   let unrunnable_raised =

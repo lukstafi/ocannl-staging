@@ -253,28 +253,25 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   need a device that can fail: `Autotune.on_candidate_attempt` injects one
   (`test/operations/autotune_arm_containment`).
 - A timing failure's *phase* decides whether the lineage is condemned, so pre-dispatch validation
-  has to be its own phase. `Context.run` validates (poisoned lineage, uninitialized inputs,
-  unsatisfied execution dependencies, out-of-range static bindings) before it dispatches; wrapped in
-  a `Launch`-tagged boundary those failures were unattributable — `classify_failure` returns `None`
-  on every C backend — so `classify_raw` made them `Fatal` and the handler poisoned the lineage.
-  A one-line user mistake (the `timing_ctx` scratch context missing one of the caller's
-  initializations, which its own docs warn about) therefore condemned the search *and* the context,
-  with no restore API (gh-ocannl-564, and #536 for why there is no restore). Since then
-  `Schedule_outcome.Preflight` tags that region and `classify_raw` classifies it as a contained
-  `No_device_writes` decline **without consulting the backend** — the validation is host-side, the
-  backend has no evidence, and a classifier guessing `Writes_may_have_occurred` would escalate a
-  failure that provably wrote nothing. When adding a new failure boundary around `Context.run`,
-  the rule is: tag what precedes `Ir.Task.run` as `Preflight`, or a fixable mistake will read as
-  device damage — **except the poisoned-lineage check**, which `check_runnable` performs first and
-  which is the one pre-dispatch condition that is *not* fixable (no restore API). `time_routine`
-  raises it outside the `Preflight` region on purpose: contained as a per-candidate decline, a
-  search whose serial baseline is not dispatched (every GPU search) declines every candidate for
-  the same terminal reason, finds nothing timed, and hands back the untuned default compiled from a
-  dead lineage under a report saying the search completed. "Contain the fixable, propagate the
-  terminal" is the split, and the two are adjacent inside one function. Note the injection asymmetry
-  these causes create — they are properties of the lineage and the bindings, not of a candidate, so
-  a genuine one fails *every* candidate at once; `Autotune.on_candidate_preflight` exists because
-  "declined, and the search shipped anyway" is otherwise untestable.
+  needs its own. `Context.run` validates (poisoned lineage, uninitialized inputs, unsatisfied
+  execution dependencies, out-of-range static bindings) before dispatching; inside a `Launch`-tagged
+  boundary those failures were unattributable — `classify_failure` returns `None` on every C
+  backend — so `classify_raw` made them `Fatal` and the handler poisoned the lineage. A one-line
+  user mistake (a `timing_ctx` scratch context missing one of the caller's initializations, which
+  its own docs warn about) thus condemned the search *and* the context, with no restore
+  (gh-ocannl-564; #536 for why there is no restore). `Schedule_outcome.Preflight` now tags that
+  region and classifies as a contained `No_device_writes` decline **without consulting the
+  backend** — host-side validation, so a classifier guessing `Writes_may_have_occurred` would
+  escalate a failure that provably wrote nothing. Rule for any new boundary around `Context.run`:
+  tag what precedes `Ir.Task.run` as `Preflight`, or a fixable mistake reads as device damage —
+  **except the poisoned-lineage check** that `check_runnable` performs first, the one pre-dispatch
+  condition that is not fixable. `time_routine` raises it outside the region: contained, a search
+  whose serial baseline is not dispatched (every GPU search) declines every candidate for that one
+  terminal reason, times nothing, and ships the untuned default out of a dead lineage under a
+  completed report. Contain the fixable, propagate the terminal — adjacent lines in one function.
+  These causes also resist injection: they belong to the lineage and the bindings, not to a
+  candidate, so a genuine one fails *every* candidate at once, which is why
+  `Autotune.on_candidate_preflight` exists.
 - Placement decides which tensorized candidates *exist*, not just how they rank, because
   `mma_tile_for_precisions` keys on the storage precisions of the nodes the site actually reads.
   Under the mixed-precision recipe on a uniform-format backend (Metal's `simdgroup_matrix`: no mixed

@@ -87,9 +87,8 @@ let is_compile_side = function
   | Transform | Hardware_limits | Backend_codegen | Backend_compile | Backend_link -> true
   | Preflight | Launch | Sync -> false
 
-(* gh-ocannl-564: everything in this phase happens before the routine is dispatched, so a failure it
-   raises proves the device did nothing — no partial write to bound, no lineage to condemn. That
-   makes it the one phase whose unattributed failures are always containable, [strict] or not. *)
+(* gh-ocannl-564: this phase precedes the dispatch, so its failures prove the device did nothing — no
+   partial write to bound, no lineage to condemn. The one phase always containable, strict or not. *)
 let is_pre_dispatch = function
   | Preflight -> true
   | Transform | Hardware_limits | Backend_codegen | Backend_compile | Backend_link | Launch | Sync
@@ -114,13 +113,11 @@ let classify_raw ~strict ~classify_backend ~provenance ~phase ~candidate exn bac
   if is_oom_or_interrupt exn then fatal ()
   else if is_assert_or_stack exn && not (equal_provenance provenance Cache_replay) then fatal ()
   else if is_pre_dispatch phase then
-    (* Decided WITHOUT consulting the backend (gh-ocannl-564): the pre-dispatch validation is
-       host-side and precedes every backend call, so a backend has no evidence about it — and a
-       classifier answering [Writes_may_have_occurred] for an unrecognized driver error would
-       escalate a failure that provably wrote nothing. The default classification for the other
-       phases is [Fatal], which is what condemned the lineage for a fixable mistake (an unsatisfied
-       execution dependency, an out-of-range static binding) on every backend whose
-       [classify_failure] answers [None]. *)
+    (* Not routed through the backend (gh-ocannl-564): this validation is host-side and precedes
+       every backend call, so a classifier answering [Writes_may_have_occurred] for an error it does
+       not recognize would escalate a failure that provably wrote nothing. The [Fatal] default the
+       other phases take is what condemned the lineage for a fixable mistake wherever
+       [classify_failure] answers [None] — every C backend. *)
     Classified (unclassified phase exn)
   else
     match classify_backend phase exn with

@@ -124,11 +124,9 @@ let record_decline declines (classified : Outcome.classified_cause) =
         acc);
   if first_for_key then
     match classified.cause with
-    (* Unclassified by construction and contained under strict classification just the same
-       (gh-ocannl-564): nothing was dispatched, so there is no verdict to be permissive about. The
-       warning below is for a compile-side failure that only permissiveness absorbed — saying
-       [strict_failure_classification=true would stop the search] about a pre-dispatch decline would
-       be false. *)
+    (* Unclassified by construction, and contained under strict classification too (gh-ocannl-564),
+       so the warning below — about a compile-side failure only permissiveness absorbed — would be
+       saying something false about it. *)
     | Outcome.Unclassified { phase = Outcome.Preflight; _ } -> ()
     | Outcome.Unclassified _ ->
         Stdio.eprintf
@@ -184,12 +182,11 @@ let set_test_bindings routine =
 let min_timing_ms = 25.
 let max_timing_runs = 64
 
-(* Sibling fault-injection seam to [on_candidate_attempt], at the pre-dispatch validation of a
-   timing run rather than at a candidate's compile (gh-ocannl-564). Default no-op, no config key
-   selects it, not a production seam: it exists because the failures this phase exists to contain —
-   an unsatisfied execution dependency, an out-of-range static binding — are properties of the
-   lineage and the bindings, so a genuine one hits every candidate at once and cannot express "this
-   candidate declined, the search went on". *)
+(* Sibling fault-injection seam to [on_candidate_attempt], at a timing run's pre-dispatch validation
+   rather than at a candidate's compile (gh-ocannl-564). Default no-op, no config key selects it.
+   Needed because the causes this phase contains — an unsatisfied dependency, an out-of-range
+   binding — belong to the lineage and the bindings, so a genuine one hits every candidate at once
+   and cannot express "this one declined, the search went on". *)
 let on_candidate_preflight : (string -> unit) ref = ref (fun _routine_name -> ())
 
 (* [Context.bindings] exposes the routine's live binding refs — restore them after timing (Codex P2
@@ -207,24 +204,17 @@ let time_routine ?(tag_failures = false) ~repeats cctx routine =
     ~finally:(fun () -> List.iter saved_bindings ~f:(fun (r, v) -> r := v))
     ~f:(fun () ->
       set_test_bindings routine;
-      (* The pre-dispatch validation of the runs below, hoisted out of the [Launch] tag into its own
-         phase (gh-ocannl-564). Once, and here: the state it checks — the lineage, the initialized
-         nodes, the dependencies, the bindings [set_test_bindings] has just written — is settled
-         before the warmup and only becomes more satisfied as the loop dispatches, so a later
-         iteration cannot newly fail it. Nothing has been dispatched at this point, which is exactly
-         what makes an unattributed failure of it containable while an unattributed one at [Launch]
-         is not. [Context.run] re-validates on each iteration, as it does for every caller; that one
-         stays inside the [Launch] tag, where it can no longer fail. *)
+      (* The runs' pre-dispatch validation, in its own phase so an unattributed failure of it is
+         contained rather than condemning the lineage (gh-ocannl-564). Here and once: what it checks
+         (lineage, initialized nodes, dependencies, the bindings just written) is settled before the
+         warmup and only becomes more satisfied as the loop dispatches. [Context.run] re-validates
+         per iteration inside the [Launch] tag, where it can no longer fail. *)
       if tag_failures then (
-        (* A poisoned lineage is the one thing [check_runnable] rejects that is NOT the caller's to
-           fix and retry: there is no restore API (gh-ocannl-536), so every later timing run in this
-           lineage is dead too. Raised OUTSIDE the [Preflight] region deliberately (Codex P2 on PR
-           #302). Contained as a per-candidate decline, a search whose serial baseline is not
-           dispatched — every GPU search — would decline every candidate for the same terminal
-           reason, find nothing timed, and hand back the untuned default compiled from a lineage
-           that can never run it, under a report saying the search completed. Unattributed at the
-           enclosing boundary it is fatal, which is what it is; that is also exactly where it landed
-           before the phase split. *)
+        (* Except a poisoned lineage: no restore API (gh-ocannl-536), so every later timing run in it
+           is dead too — terminal, not fixable-and-retryable. Raised outside the region on purpose
+           (Codex P2 on PR #302): contained, a search whose serial baseline is not dispatched (every
+           GPU search) declines every candidate for this one reason, times nothing, and ships the
+           untuned default out of a dead lineage under a completed report. *)
         Option.iter (Context.poisoned_failure cctx) ~f:raise;
         Outcome.tag Outcome.Preflight (fun () ->
             !on_candidate_preflight (Context.routine_name routine);
@@ -4202,12 +4192,10 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                candidate launch failure condemns it. *)
             let condemn phase exn =
               match phase with
-              (* [time_routine] validates in its own phase, which precedes every dispatch
-                 (gh-ocannl-564): the routine never ran, the device wrote nothing, and there is
-                 nothing to withdraw either — the execution claim is only made after a dispatch. An
-                 unsatisfied dependency or an out-of-range binding is the caller's to fix and retry,
-                 and on a backend whose classifier attributes nothing (every C backend) it would
-                 otherwise land in the [None] arm below and make that retry impossible. *)
+              (* Nothing to judge and nothing to withdraw (gh-ocannl-564): the routine never ran,
+                 and the execution claim is only made after a dispatch. Without this arm an
+                 unsatisfied dependency would fall to [None] below on every C backend and condemn
+                 the lineage the caller is meant to fix and retry in. *)
               | Outcome.Preflight -> ()
               | _ -> (
                   match Context.failure_classifier b.cctx phase exn with
@@ -4431,11 +4419,10 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                    distinguishes a launch refusal from an asynchronous failure at sync.
 
                    And from the third case, which is not the backend's to judge: [time_routine]'s
-                   pre-dispatch validation carries [Preflight], which classifies as a contained
-                   [No_device_writes] decline without asking the classifier (gh-ocannl-564). Tagged
-                   [Launch] it was unattributable on every C backend, hence fatal, hence a poisoned
-                   lineage — so a scratch context missing one of the caller's initializations
-                   condemned the whole search instead of declining a candidate. *)
+                   pre-dispatch validation carries [Preflight] and is contained without asking the
+                   classifier (gh-ocannl-564). Tagged [Launch] it was fatal on every C backend, so a
+                   scratch context missing one of the caller's initializations condemned the search
+                   instead of declining a candidate. *)
                 Outcome.protect ~classify_backend:(Context.failure_classifier c.cctx)
                   ~provenance:Outcome.Candidate ~phase:Outcome.Launch
                   ~candidate:(spec_label spec) (fun () ->
@@ -4487,9 +4474,8 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                       (* [Context.run] marks a routine executed before the later [sync] can report
                          an asynchronous failure. A rejection the backend proved wrote nothing
                          withdraws that claim, so the next candidate compiled in this lineage does
-                         not wait on a routine that never completed. A [Preflight] decline reaches
-                         here too and this is a no-op for it: the claim is made after a dispatch,
-                         and that phase precedes the first one. *)
+                         not wait on a routine that never completed. A no-op for a [Preflight]
+                         decline, which precedes the dispatch that makes the claim. *)
                       Context.rollback_execution c.cctx (Context.routine_id c.routine);
                       None
                   | Outcome.Writes_may_have_occurred ->
