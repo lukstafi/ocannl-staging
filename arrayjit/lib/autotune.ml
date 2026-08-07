@@ -400,6 +400,16 @@ type sketch_params = {
           The tuner, not a heuristic, decides whether the bank-conflict fix beats the plain tile:
           the same "propose both, measure" pattern as hoisted packing. Unstaged seeds have no shared
           tile to swizzle and are never twinned. *)
+  sk_depth : int;
+      (** Staged GPU mma/conv sketches: the cooperative stages' software-pipelining depth
+          ([Schedule.Stage ~pipeline_depth], gh-ocannl-487); 1 = unpipelined. Depths > 1 are seeded
+          as {e twins} of each staged seed — same tile sizes, same pipeline, so a timing
+          difference between the two is the prefetch overlap's (against the halved occupancy from
+          the doubled shared-memory footprint), and nothing else's — for exactly the depths the
+          backend advertises in {!Ir.Backend_intf.mma_capability.mma_pipeline_depths}. The
+          rendering is bitwise identical to the plain sibling, so the tuner's choice is free of
+          numerics concerns. Unstaged seeds have no cooperative copy to pipeline and are never
+          twinned. *)
 }
 
 (* Resolve the tensor-core input format from storage precision before seeding a typed matmul/conv
@@ -1546,8 +1556,8 @@ let cpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = b
    at all (gh-ocannl-521): before, only the [Fuse_epilogue] twin could survive a companion, and when
    the fusion declined the seed had no surviving form. *)
 let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
-    { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_simd = w; sk_epilogue; sk_swizzle; _ } : Sched.schedule
-    =
+    { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_simd = w; sk_epilogue; sk_swizzle; sk_depth; _ } :
+    Sched.schedule =
   (* The column role splits at the lane width, not at [bn]: the inner loop IS the workgroup slot
      the [Tile_mma]'s lane occupies, and a barrier-carrying kernel requires equal extents at a
      slot. The seeds constrain [sk_bn = sk_simd], so this is also the accumulation nest's column
@@ -1609,7 +1619,7 @@ let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
             hoisted = false;
             swizzle = sk_swizzle;
             pad_stride = None;
-            pipeline_depth = 1;
+            pipeline_depth = sk_depth;
           };
         Sched.Stage
           {
@@ -1620,7 +1630,7 @@ let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
             hoisted = false;
             swizzle = sk_swizzle;
             pad_stride = None;
-            pipeline_depth = 1;
+            pipeline_depth = sk_depth;
           };
         tz;
       ]
@@ -1911,11 +1921,11 @@ let cpu_conv_sketch_schedule ~(opt : LL.optimized) (site : conv_site)
    (batch, the non-row output spatial axis), so a second [Grid] block on [oc] would exceed the
    three-slot budget; [oc] stays the tensorized column extent. The block loop [row_o] carries no
    companion nest here (unzeroed segments), so no cross-nest zero geometry is needed. *)
-let gpu_conv_sketch_schedule (site : conv_site) { sk_simd = w; sk_bm; sk_bn; sk_bk; sk_tm; _ } :
-    Sched.schedule =
+let gpu_conv_sketch_schedule (site : conv_site)
+    { sk_simd = w; sk_bm; sk_bn; sk_bk; sk_tm; sk_depth; _ } : Sched.schedule =
   let stage source tile_loops =
     Sched.Stage
-      { source; tile_loops; shared = true; cooperative = Some w; hoisted = false; swizzle = None; pad_stride = None; pipeline_depth = 1 }
+      { source; tile_loops; shared = true; cooperative = Some w; hoisted = false; swizzle = None; pad_stride = None; pipeline_depth = sk_depth }
   in
   let outer_grid =
     List.map site.c_outer ~f:(fun (s, _) -> Sched.Retype { axis = s; ty = LL.Grid })
@@ -2058,6 +2068,7 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
           sk_conv = true;
           sk_epilogue = false;
           sk_swizzle = None;
+          sk_depth = 1;
         }
       in
       let cpu_seeds =
@@ -2158,16 +2169,16 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
                 let shared_bytes rows =
                   ((rows * nred_p) + (nred_p * noc_p)) * Ir.Ops.prec_in_bytes prec
                 in
-                let shared_fits rows =
+                let shared_fits ?(copies = 1) rows =
                   match limits.Ir.Backend_intf.max_workgroup_memory_bytes with
-                  | Some cap -> shared_bytes rows <= cap
+                  | Some cap -> copies * shared_bytes rows <= cap
                   | None -> true
                 in
                 let base_ok = offset_free && (not site.c_zeroed) && List.length real_stmts <= 2 in
                 if not base_ok then []
                 else
+                  let rows_p = blocks_of site.c_nrow tm_t * tm_t in
                   let whole =
-                    let rows_p = blocks_of site.c_nrow tm_t * tm_t in
                     let pad_m = if site.c_nrow % tm_t = 0 then 0 else tm_t in
                     if shared_fits rows_p then
                       [ { base with sk_gpu = true; sk_simd = w; sk_tm = pad_m; sk_bn = pad_n; sk_bk = pad_k } ]
@@ -2180,7 +2191,18 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
                             { base with sk_gpu = true; sk_simd = w; sk_bm = bm; sk_bn = pad_n; sk_bk = pad_k }
                         else None)
                   in
-                  whole @ blocked)
+                  (* The pipelined twins (gh-ocannl-487): every conv GPU flavor stages
+                     cooperatively, so each gets a twin per advertised depth — gated on the
+                     [copies]-multiplied footprint, since the rotation allocates that many tile
+                     copies. *)
+                  let depth_twins =
+                    List.concat_map (whole @ blocked) ~f:(fun p0 ->
+                        let rows = if p0.sk_bm = 0 then rows_p else p0.sk_bm in
+                        List.filter_map mma.Ir.Backend_intf.mma_pipeline_depths ~f:(fun d ->
+                            if shared_fits ~copies:d rows then Some { p0 with sk_depth = d }
+                            else None))
+                  in
+                  whole @ blocked @ depth_twins)
         | _ -> []
       in
       let seeds = cpu_seeds @ gpu_seeds in
@@ -2226,6 +2248,7 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                 sk_conv = false;
                 sk_epilogue = false;
                 sk_swizzle = None;
+                sk_depth = 1;
               }
           else None)
     else if is_cpu then
@@ -2248,6 +2271,7 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                   sk_conv = false;
                   sk_epilogue = false;
                   sk_swizzle = None;
+                  sk_depth = 1;
                 }
             else None)
       in
@@ -2327,12 +2351,22 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                       sk_conv = false;
                       sk_epilogue = false;
                       sk_swizzle = None;
+                      sk_depth = 1;
                     }
                   in
-                  base
+                  (* The pipelined twins (gh-ocannl-487): same tile sizes, same pipeline, only the
+                     cooperative copies double-buffered — seeded per advertised depth, staged seeds
+                     only (an unstaged seed has no cooperative copy to pipeline). Not composed with
+                     the swizzled twin: the paired instruments each measure one knob against the
+                     shared plain sibling. *)
+                  (base
                   :: (match swizzle_for ~bn ~bk with
                      | Some kind -> [ { base with sk_swizzle = Some kind } ]
-                     | None -> [])
+                     | None -> []))
+                  @ (if bk > 0 then
+                       List.map mma.Ir.Backend_intf.mma_pipeline_depths ~f:(fun d ->
+                           { base with sk_depth = d })
+                     else [])
                 else []))
     | _ when is_cpu ->
         (* The register-tiled [Tile_mma] rendering needs no MMA units (cc's [limits.mma] is a token
@@ -2386,6 +2420,7 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                       sk_conv = false;
                       sk_epilogue = false;
                       sk_swizzle = None;
+                      sk_depth = 1;
                     }
                 else None)
           in
@@ -2432,6 +2467,7 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                         sk_conv = false;
                         sk_epilogue = false;
                         sk_swizzle = None;
+                        sk_depth = 1;
                       },
                       full_div )
                 else None)
@@ -3035,16 +3071,20 @@ let swz_label p =
   | Some LL.Swizzle_elem -> " swz-elem"
   | Some LL.Swizzle_b128 -> " swz-b128"
 
+(* The pipelined staged twin likewise (gh-ocannl-487): identical to its plain sibling except the
+   cooperative-stage depth, so the label must carry it. *)
+let depth_label p = if p.sk_depth > 1 then Printf.sprintf " pd%d" p.sk_depth else ""
+
 let spec_label = function
   | Whole (W_saved s) -> Printf.sprintf "W_saved[%d ops]" (List.length s)
   | Whole (W_preset { block_size }) -> Printf.sprintf "W_preset[bs=%s]" (bs_label block_size)
   | Whole (W_sketch p) when p.sk_mma ->
-      Printf.sprintf "W_sketch[%smma-%s %dx%dx%d%s%s%s%s%s%s]"
+      Printf.sprintf "W_sketch[%smma-%s %dx%dx%d%s%s%s%s%s%s%s]"
         (if p.sk_conv then "conv-" else "")
         (if p.sk_gpu then "gpu" else "cpu")
         p.sk_bm p.sk_bn p.sk_bk
         (if p.sk_bk > 0 then if p.sk_gpu then " staged" else " pack" else "")
-        (swz_label p)
+        (swz_label p) (depth_label p)
         (if p.sk_hoist then " hoist" else "")
         (if p.sk_grid then " grid" else "")
         (if p.sk_pack_rest then " packrest" else "")
@@ -3064,13 +3104,13 @@ let spec_label = function
       Printf.sprintf "F_sketch[%s]"
         (String.concat ~sep:","
            (List.map entries ~f:(fun (_, p) ->
-                Printf.sprintf "%s%s%s %dx%dx%d%s%s%s%s%s%s"
+                Printf.sprintf "%s%s%s %dx%dx%d%s%s%s%s%s%s%s"
                   (if p.sk_conv then "conv-" else "")
                   (if p.sk_mma then "mma-" else "")
                   (if p.sk_gpu then "gpu" else "cpu")
                   p.sk_bm p.sk_bn p.sk_bk
                   (if p.sk_mma then "" else Printf.sprintf "/%dx%d" p.sk_tm p.sk_tn)
-                  (swz_label p)
+                  (swz_label p) (depth_label p)
                   (if p.sk_hoist then " hoist" else "")
                   (if p.sk_grid then " grid" else "")
                   (if p.sk_pack_rest then " packrest" else "")

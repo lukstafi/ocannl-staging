@@ -316,6 +316,7 @@ let () =
                   (16, 16, 16) );
               ];
             mma_staged_layouts = [];
+            mma_pipeline_depths = [];
           };
     }
   in
@@ -392,6 +393,7 @@ let () =
                      Ir.Backend_intf.Mma_swizzled_b128 );
                  ]
                else []);
+            mma_pipeline_depths = [];
           };
     }
   in

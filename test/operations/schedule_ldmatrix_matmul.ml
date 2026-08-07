@@ -316,6 +316,7 @@ let () =
             sk_conv = false;
             sk_epilogue = false;
             sk_swizzle = Some LL.Swizzle_b128;
+            sk_depth = 1;
           }
         opt)
     ~check:(bf16_check ~a_trans:false ~b_trans:true)

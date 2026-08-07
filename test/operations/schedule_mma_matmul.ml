@@ -228,6 +228,7 @@ let () =
                   (16, 16, 8) );
               ];
             mma_staged_layouts = [];
+            mma_pipeline_depths = [];
           };
     }
   in

@@ -93,6 +93,14 @@ type mma_capability = {
           feed A from [ldmatrix] in that orientation but not B — 4 fp8 bytes of a B register are
           strided there — so a swizzled fp8 twin would be timed and ranked as a tensorized candidate
           while rendering the scalar fallback. Empty everywhere the question does not arise. *)
+  mma_pipeline_depths : int list;
+      (** Software-pipelining depths beyond the unpipelined 1 that autotune's {e staged} mma/conv
+          sketches propose as twins of each staged seed ([Schedule.Stage ~pipeline_depth],
+          gh-ocannl-487) — a list, not a flag, so the search has a dimension. The portable
+          double-buffered rendering is backend-generic, but a depth is advertised only where the
+          arm has been validated on hardware: Metal ([[2]]) in phase 1; CUDA/HIP stay empty until
+          the phase-2 [cp.async] / LDS arms land. Empty on CPU backends (cooperative staging is not
+          renderable there). *)
 }
 [@@deriving sexp, compare, equal]
 (** Tensor-core capability descriptor (docs/proposals/tensorize-mma.md §6). Which operand precisions

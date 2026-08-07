@@ -379,4 +379,67 @@ let () =
                };
            ]
          in
-         ignore (Sched.apply schedule opt : LL.optimized)))
+         ignore (Sched.apply schedule opt : LL.optimized)));
+
+  (* --- Seeding pin (gh-ocannl-487): the depth twins follow the backend's advertised
+     [mma_pipeline_depths] — one twin per staged seed per advertised depth, identical to its plain
+     sibling except [sk_depth]; unstaged seeds are never twinned; an empty advertisement (the
+     CUDA/HIP phase-2 state, and cc) seeds no twins. Probed against synthetic capabilities so the
+     pin is backend-independent, like the schedule_pad seed checks. --- *)
+  let limits_with depths =
+    {
+      Ir.Backend_intf.no_hardware_limits with
+      max_threads_per_workgroup = Some 1024;
+      max_workgroup_memory_bytes = Some 32768;
+      mma =
+        Some
+          {
+            Ir.Backend_intf.mma_simd_width = 32;
+            mma_tile = (8, 8, 8);
+            mma_format_tiles =
+              [
+                ( (Ir.Backend_intf.Mma_f32, Ir.Backend_intf.Mma_f32, Ir.Backend_intf.Mma_f32),
+                  (8, 8, 8) );
+              ];
+            mma_staged_layouts = [];
+            mma_pipeline_depths = depths;
+          };
+    }
+  in
+  let seed_pin = ref None in
+  let seed_transform opt =
+    let seeds depths =
+      Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits:(limits_with depths) opt
+      |> List.filter ~f:(fun sp -> sp.Autotune.sk_mma && sp.Autotune.sk_gpu)
+    in
+    let advertised = seeds [ 2 ] and unadvertised = seeds [] in
+    let staged = List.filter advertised ~f:(fun sp -> sp.Autotune.sk_bk > 0) in
+    let plain_staged = List.filter staged ~f:(fun sp -> sp.Autotune.sk_depth = 1) in
+    let twins = List.filter staged ~f:(fun sp -> sp.Autotune.sk_depth > 1) in
+    let twin_of sp =
+      List.exists twins ~f:(fun tw ->
+          tw.Autotune.sk_depth = 2 && Poly.equal { tw with Autotune.sk_depth = 1 } sp)
+    in
+    seed_pin :=
+      Some
+        ( (not (List.is_empty plain_staged))
+          && List.length twins = List.length plain_staged
+          && List.for_all plain_staged ~f:twin_of
+          && List.for_all advertised ~f:(fun sp ->
+                 sp.Autotune.sk_bk > 0 || sp.Autotune.sk_depth = 1),
+          List.for_all unadvertised ~f:(fun sp -> sp.Autotune.sk_depth = 1) );
+    opt
+  in
+  let%op mc4 = ma * mb in
+  ignore
+    (Context.compile ~lowered_transform:seed_transform (Context.auto ())
+       (named "pipe_mm_seeds" (Train.forward mc4))
+       Ir.Indexing.Empty
+      : Context.t * Context.routine);
+  (match !seed_pin with
+  | Some (twinned, none_without) ->
+      p "advertised depth seeds one pd2 twin per plain staged seed, staged only" twinned;
+      p "no depth twins without the capability advertisement" none_without
+  | None ->
+      p "advertised depth seeds one pd2 twin per plain staged seed, staged only" false;
+      p "no depth twins without the capability advertisement" false)

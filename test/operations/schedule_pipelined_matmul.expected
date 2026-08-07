@@ -12,3 +12,5 @@ canonical digests distinguish depths 1/2/3 pairwise: true
 pipeline_depth 0 is rejected: true
 pipelining a non-cooperative (packing) Stage is rejected: true
 pipelining at a non-Serial anchor is rejected: true
+advertised depth seeds one pd2 twin per plain staged seed, staged only: true
+no depth twins without the capability advertisement: true

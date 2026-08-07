@@ -31,6 +31,7 @@ let cpu_mma_limits () =
           mma_tile = (1, 1, 1);
           mma_format_tiles = [];
           mma_staged_layouts = [];
+          mma_pipeline_depths = [];
         };
   }
 
