@@ -3,10 +3,10 @@
 Native-Windows measurement session decomposing rog's tuning-ratio outlier. Measurement only -- no
 seed or schedule code was changed.
 
-**Verdict: two factors, and they interact. Core heterogeneity is causal, but only at pool widths
-above 8, and pool width matters independently.** At a matched width of 16 workers, a uniform pool
-tunes 31% better than a mixed one; at width 8 the same contrast is worth under 5%. The full 24-wide
-mixed machine is the worst case of both and is where the crowned schedule collapses to
+**Verdict: two factors, both large, and they compound.** Against a like-for-like uniform control a
+mixed pool tunes 20.5% worse at width 8 and 31.1% worse at width 16; independently, with grid
+decomposition held fixed, mixed pools decline from 1.678x to 1.176x as width goes 8 -> 24. The full
+24-wide mixed machine is the worst case of both, and is where the crowned schedule collapses to
 materialize-all.
 
 The WSL rows in gh-530 remain the cross-machine ledger; the numbers here diagnose, they do not
@@ -25,7 +25,7 @@ replace them.
 | box state | otherwise idle, no CUDA work. An idle WSL VM (`vmmemWSL`, ~2.4 GB RSS) would not stay shut down, but measured **0 CPU-seconds per 10 s wall** -- parked, not competing. |
 | pinning | `start "" /affinity <mask> /wait /b` (children inherit; verified live via `Process.ProcessorAffinity` on running cells of every arm) |
 | protocol | from-scratch search per tuned cell against a **fresh `autotune_cache_dir`**; two-pass protocol (pass 1 searches, its `compile_s` is the search cost; a fresh pass 2 replays the cached winner for step times). All tuned p50 values below are replay-pass. |
-| replication | `cifar_conv` n=2 on the three original arms; the width-controlled arms are n=1 |
+| replication | `cifar_conv` n=2 on the three original arms; the composition- and chunk-controlled arms are n=1 |
 
 Absolute times are comparable *within* this report only. Ratios are the claim-bearing quantity.
 
@@ -104,14 +104,39 @@ chunks = 4 x threads; tuned p50 is replay-pass.
 | MIXED | `0xC03FFF` | 16 | 8P + 8E | 1342.76 | 1014.56 | **1.323x** |
 | MIXED (full machine) | `0xFFFFFF` | 24 | 8P + 16E | 1377.18 | 1171.32 | **1.176x** |
 
-Composition effect at matched width:
+Composition effect at matched width. Only an E-cored uniform control exists at width 16 (there are
+just 8 P-cores), so the E-vs-E column is the one comparable across widths; the width-8 P control is
+shown too rather than picking whichever is more favourable.
 
-| width | uniform | mixed | effect |
+| width | mixed | vs uniform-E | vs uniform-P |
 |---|---|---|---|
-| 8 | 1.752x (P) | 1.667x | **-4.9%** |
-| 16 | 1.919x (E) | 1.323x | **-31.0%** |
+| 8 | 1.667x | 2.097x -> **-20.5%** | 1.752x -> -4.9% |
+| 16 | 1.323x | 1.919x -> **-31.1%** | n/a (no 16-P pool exists) |
+
+Read against the consistent E control, composition costs 20.5% at width 8 and 31.1% at width 16:
+substantial at both, and growing with width. The width-8 figure against the P control (-4.9%) is
+the same mixed arm measured against a *weaker* uniform baseline -- 8 P-cores tune to 1.752x where 8
+E-cores reach 2.097x -- and quoting only that number understates the effect.
 
 A width-24 uniform arm is not constructible on this part: only 8 P-cores and 16 E-cores exist.
+
+### Width at constant chunk count
+
+The arms above set chunks = 4 x threads, so pool width and grid decomposition co-vary and a width
+claim cannot be read off them directly. These arms re-run the mixed pools at a **fixed absolute**
+`cc_parallel_chunks=96`, the value the full machine already used:
+
+| arm | mask | width | chunks | default | tuned | **tune ratio** |
+|---|---|---|---|---|---|---|
+| MIXED | `0xC3F` | 8 | 96 | 1364.79 | 813.54 | **1.678x** |
+| MIXED | `0xC03FFF` | 16 | 96 | 1347.98 | 1007.88 | **1.337x** |
+| MIXED (full machine) | `0xFFFFFF` | 24 | 96 | 1377.18 | 1171.32 | **1.176x** |
+
+The monotonic decline survives with decomposition held fixed, so it is a width effect and not a
+chunking artifact. Chunk count turns out to barely matter at all for these pools: the same arm
+moves 0.6% between 32 and 96 chunks at width 8 (1.667x -> 1.678x) and 1.1% between 64 and 96 at
+width 16 (1.323x -> 1.337x), despite a 3x and 1.5x change in decomposition. These are independent
+from-scratch searches, not one replayed schedule.
 
 ## Original three-arm decomposition
 
@@ -184,16 +209,20 @@ effect of all differences is small; it does not establish that WSL virtualizatio
 specifically is zero, since offsetting effects could cancel. What it does support is that the
 outlier is reproducible outside WSL and is not an artifact of running under it.
 
-**2. Core heterogeneity is causal at width 16, marginal at width 8.** With width and
-chunks-per-thread held constant, a uniform pool tunes 31.0% better than a mixed one at width 16
-(1.919x vs 1.323x), but only 4.9% better at width 8 (1.752x vs 1.667x). The single-width design in
-the first version of this report could not have distinguished this from a pure width effect.
+**2. Core heterogeneity is causal at both widths measured, and grows with width.** Against the
+uniform-E control -- the only control type available at both widths -- a uniform pool tunes 20.5%
+better than a mixed one at width 8 and 31.1% better at width 16. (Against the width-8 uniform-P
+control the same mixed arm is only 4.9% behind, but that is a weaker baseline: 8 P-cores tune to
+1.752x where 8 E-cores reach 2.097x.) The single-width design in the first version of this report
+could not have distinguished any of this from a pure width effect.
 
-**3. Pool width matters independently, and the two interact.** The mixed arms degrade monotonically
-with width -- 1.667x (8) -> 1.323x (16) -> 1.176x (24) -- while uniform arms barely move (2.097x at
-8, 1.919x at 16). Notably the width-8 and width-16 mixed arms have the **same 50% E-core
-proportion** yet differ by 20%, so the driver is not the proportion of slow workers alone; mixing
-and pool size compound.
+**3. Pool width matters independently, with grid decomposition held fixed.** At a constant
+`cc_parallel_chunks=96` the mixed pools decline monotonically with width: 1.678x (8) -> 1.337x (16)
+-> 1.176x (24). Chunk count is not the driver -- the same pool moves 0.6% between 32 and 96 chunks
+at width 8 and 1.1% between 64 and 96 at width 16, across independent from-scratch searches.
+Uniform arms meanwhile barely move with width (2.097x at 8, 1.919x at 16). Note also that the
+width-8 and width-16 mixed arms share the **same 50% E-core proportion** yet differ by 20%, so the
+driver is not the proportion of slow workers alone; mixing and pool size compound.
 
 **4. On the full machine the search yields nothing over materialize-all.** The crown is within
 +/-0.6% of the materialized control in both replicates, so the apparent 1.15-1.18x is the placement
@@ -210,10 +239,12 @@ core-type-aware schedule (one weighting work by core class, or restricting execu
 subset) was constructed or measured. Whether such a candidate would pay on a hybrid pool is open.
 
 **6. Searching is cheaper on narrower pools** -- `compile_s` 4798 s (width 24) vs 2269 s (width 8)
-on `cifar_conv`, since each candidate's timing run is faster. Absolute search cost on Windows is
-~8x the Linux/WSL figure for the same cell (minix recorded 620.93 s): the search spawns a compiler
-process per candidate and Windows `CreateProcess` is far more expensive than `fork`/`exec`. A host
-property; it does not affect step-time ratios.
+on `cifar_conv`, consistent with each candidate's timing run being faster on a pool that runs the
+workload faster. Separately, and only as an observation: the same cell's search took ~8x longer
+here than the 620.93 s minix recorded under WSL2/Linux. That comparison spans machine, OS, compiler
+and possibly a different set of candidates, and no per-candidate count or compiler-launch cost was
+measured, so it is reported as a cross-host difference in search time and is deliberately **not**
+attributed to any particular cause. It does not affect step-time ratios either way.
 
 **7. Within-native replication is tight** -- 0.1-2.0% on the ratio across independent from-scratch
 searches, so the arm ordering is solid. The 31% gap between the native and WSL `cifar_conv` tuned
@@ -222,18 +253,26 @@ cells is therefore not run-to-run search noise on this box.
 ## Verdict
 
 rog's outlier is produced by **pool width and core heterogeneity together**, not by heterogeneity
-alone as the first version of this report claimed.
+alone as the first version of this report claimed. Both effects are large.
 
-- Heterogeneity is causal: at matched width 16 a uniform pool tunes 31% better.
-- But it is width-dependent: the same contrast is worth under 5% at width 8, so heterogeneity by
-  itself does not explain the full-machine collapse.
+- Heterogeneity is causal at every width measured: against the uniform-E control a mixed pool loses
+  20.5% at width 8 and 31.1% at width 16.
+- Pool width is causal independently: with `cc_parallel_chunks` fixed at 96, mixed pools decline
+  1.678x -> 1.337x -> 1.176x from width 8 to 24.
 - The two compound, and the full machine (24 wide, 67% E-cores) is the worst case of both.
 
-For the seed parameterization this means **effective width is at least as important an input as
-core composition**, and a fix targeting only one of them is unlikely to port. Restricting the `cc`
-pool to a uniform subset is worth 26-39% on this machine, but the measurements do not establish
-that it is the *best* available response, because no core-type-aware schedule was ever constructed
-and measured -- that remains the open question, and it is the natural next experiment.
+For the seed parameterization this means **effective width and core composition are both
+first-class inputs**, and a fix targeting only one is unlikely to port.
+
+Restricting the `cc` pool to a uniform subset is worth **32-34% on `cifar_conv` and 25-26% on
+`cifar_stride`** -- that is the full-machine tuned time against the subset tuned time (1171.32 ms
+-> 768.71 / 793.12; 310.93 ms -> 229.56 / 233.24), which is what a restriction policy would
+actually buy. It is not the same quantity as the 26-39% by which a subset's crown beats
+materialize-all *within that subset*.
+
+The measurements do not establish that restriction is the *best* available response, because no
+core-type-aware schedule was ever constructed and measured -- that remains the open question and
+the natural next experiment.
 
 `cifar_stride` was measured only in the original three-arm form, so its numbers carry the same
 composition/width confound; the width-controlled design was run on `cifar_conv` only.
