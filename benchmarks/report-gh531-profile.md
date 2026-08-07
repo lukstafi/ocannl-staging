@@ -12,8 +12,9 @@ all are **72.3 ms (70.2%)**, and they are byte-for-byte identical in the tuned a
 artifacts: tuning cannot touch them, because `gh-ocannl-521`'s companion-coverage rule declines
 every tensorized *and* scalar seed at their output geometry. No kernel is compute-bound, and a
 same-geometry control shows the dominant one is not byte-bound either: what binds it is **occupancy
--- 1024 threads on a 46-SM GPU**. Parallelizing that one axis is worth **>=2.1x** end to end, against
-fused attention's 1.06x.
+-- 1024 threads on a 46-SM GPU**. Spreading that one axis across blocks is worth **~2.4x** end to
+end -- measured on the production kernel through OCANNL's own compiler -- against fused attention's
+1.06x.
 
 ## Provenance
 
@@ -85,15 +86,29 @@ Those nine kernels are **84.8 ms = 82.4% of the step**. The remaining 108 kernel
 
 ### Inter-kernel gaps: #488's coverage is complete
 
-| | ms/step | of kernel time |
-|---|---:|---:|
-| within-step inter-kernel idle (6,171 gaps, median **160 ns**, p90 288 ns) | 0.046 | **0.044%** |
-| step-boundary idle (29 gaps >50 us, median 396 us -- the parity steps' host loss reads) | 0.513 | 0.50% |
+Gaps are classified by *what they are*, not by duration: a `seg116 -> seg0` transition is a
+step boundary (one graph replay ending and the next beginning), everything else is internal to a
+replay. The counts come out exactly as the structure predicts -- 53 replays of a 117-kernel graph
+give `53 * 116 = 6,148` internal gaps and 52 boundaries:
+
+| | count | median | ms/step | of kernel time |
+|---|---:|---:|---:|---:|
+| within-replay inter-kernel idle | 6,148 | **160 ns** | 0.0439 | **0.043%** |
+| replay boundaries, asynchronous (4 warmup + 19 queued, no host sync) | 23 | **4.19 us** | 0.0018 | 0.002% |
+| replay boundaries, host-synced (parity steps' loss reads, sync points) | 29 | 396 us | 0.5126 | 0.50% |
+
+The middle row is the quantity this section exists to measure -- the cost of launching the step as
+one graph replay, with no host synchronization in the way. It is **4.19 us per step**, 0.002% of
+kernel time. (An earlier revision split these by a 50 us threshold, which folded those 23 boundaries
+into the within-replay row; they are broken out here because they are exactly the overhead #488
+addresses.) The host-synced row is not launch overhead at all: it is the benchmark's own
+`read_loss` round trip on the 8 parity steps.
 
 Graph capture launches the step as one replay and the timeline confirms it: the GPU is **99.6%
-busy** inside a step. There is no launch-overhead residue left to collect, and no finding against
-#488's coverage. This also retires the "58 segments each paying launch overhead" hypothesis in a
-second, independent way from the census that first retired it.
+busy** inside a step, internal idle is 0.043%, and the replay launch itself is 0.002%. There is no
+launch-overhead residue left to collect, and no finding against #488's coverage. This also retires
+the "58 segments each paying launch overhead" hypothesis in a second, independent way from the
+census that first retired it.
 
 ## Part 2 -- structure comparison vs torch
 
@@ -165,6 +180,15 @@ from nsys.
 table covers.** The single closest kernel to any roofline leg is the softmax normalize at 11.9% of
 bandwidth; every GEMM is between 0.2% and 5.5% of its compute leg.
 
+What that does and does not license. The roofline is a *device-wide* envelope, so being far under
+it establishes that a kernel is not saturating the machine's compute or bandwidth -- which is the
+classification Part 3 was asked for, and the quantity the gh-491 model prices. It does **not** by
+itself identify each kernel's binding resource: a serial dependency chain or thin instruction-level
+parallelism can bind a kernel at a few percent of peak FLOP/s. The next section identifies the
+binding resource for the dominant FFN/lm_head geometry specifically, which is 70% of the step; for
+the smaller kernels the table's claim is the weaker one -- under the envelope, mechanism not
+established here.
+
 The whole-step version of the same statement, from the gh-491 calibration TSV emitted by the search
 itself: **model 1.110 ms, measured 106.01 ms -- 95x above the envelope**, at 117 kernels, 7.72 GFLOP
 and 441 MB of compulsory traffic. (The model's flop count is independently correct: hand-counting
@@ -178,7 +202,7 @@ here (`ERR_NVGPUCTRPERM`). So the table alone establishes only that no kernel is
 
 The byte question is settled separately, and empirically, by the control in the next section: with
 each thread's addresses held **exactly** fixed and only the resident-block count varied, time falls
-linearly with blocks and saturates at 5.46x. A kernel whose binding resource were memory traffic
+linearly with blocks and saturates at 5.82x. A kernel whose binding resource were memory traffic
 would not scale with block count while touching the same bytes in the same order. With both legs
 accounted for: **the traffic does not have to shrink.**
 
@@ -254,31 +278,40 @@ conclusion from exactly that non-control; it has been withdrawn.)
 
 **Second: an occupancy sweep with the thread-to-address mapping held fixed.** Simply giving one
 thread per output element would widen the grid *and* change which addresses adjacent threads touch
-(from 4 KiB apart to adjacent), confounding occupancy with coalescing. So the control below keeps
-A's exact per-thread inner loop and token mapping and splits only the `j` range across
-`blockIdx.y`: every thread walks the same addresses in the same order, and the only thing that
-varies is how many blocks are resident
-([`benchmarks/ffn1_geometry_probe.cu`](ffn1_geometry_probe.cu), plain CUDA, no OCANNL):
+(from 4 KiB apart to adjacent), confounding occupancy with coalescing. So the control keeps the
+per-thread inner loop and token mapping and splits only the `j` range across `blockIdx.y`: every
+thread walks the same addresses in the same order, and the only thing that varies is how many
+blocks are resident.
 
-| variant | blocks | threads | ms | GFLOP/s | vs A |
-|---|---:|---:|---:|---:|---:|
-| **A** `grid=(8,1) block=128` -- as shipped | 8 | 1,024 | **12.76** | 42.1 | 1.00x |
-| E `grid=(8,1)` | 8 | 1,024 | 12.78 | 42.0 | 1.00x |
-| E `grid=(8,2)` | 16 | 2,048 | 6.36 | 84.4 | 2.01x |
-| E `grid=(8,4)` | 32 | 4,096 | 3.25 | 165.1 | 3.92x |
-| E `grid=(8,16)` | 128 | 16,384 | 2.41 | 223.0 | 5.30x |
-| **E** `grid=(8,128)` | 1,024 | 131,072 | **2.34** | 229.7 | **5.46x** |
-| C one thread per output (mapping *differs*) | 4,096 | 1,048,576 | 2.31 | 232.9 | 5.54x |
+Run on **the actual emitted kernel, through OCANNL's own compilation path** -- arm A's `seg25`
+source (gelu epilogue included) compiled by nvrtc with `--gpu-architecture=compute_80
+--use_fast_math` and `<mma.h>` injected, exactly as `cuda_backend.ml`'s `cuda_to_ptx` does
+([`benchmarks/ffn1_nvrtc_harness.c`](ffn1_nvrtc_harness.c)). Checksums are identical across every
+row:
 
-E at one chunk reproduces A (12.78 vs 12.76 ms), confirming the sweep is varying only the block
-count. Time then falls **linearly with resident blocks** -- 2.01x at 2x, 3.92x at 4x -- and
-saturates around 128 blocks at **5.46x**, which is what a parallelism-starved kernel looks like and
-is not what a bandwidth-saturated one looks like. Changing the mapping as well (C) adds a further
-1%, so coalescing is not the story either.
+| variant | blocks | ms | vs shipped |
+|---|---:|---:|---:|
+| **as shipped**, `grid=(8,1)` | 8 | **13.91** | 1.00x |
+| `j` chunked, `grid=(8,2)` | 16 | 7.24 | 1.92x |
+| `j` chunked, `grid=(8,4)` | 32 | 3.50 | 3.97x |
+| `j` chunked, `grid=(8,16)` | 128 | 2.47 | 5.63x |
+| **`j` chunked, `grid=(8,128)`** | 1,024 | **2.39** | **5.82x** |
 
-A reproduces the in-step kernel: 12.76 ms here against 14.31 ms in the step, the difference being
-seg25's gelu epilogue. All variants are checked against an independent fp64 reference and the probe
-exits nonzero on any mismatch.
+The harness reproduces production: 13.91 ms here against the **14.31 ms** nsys measures for `seg25`
+in the step, a 2.8% match, on the same source through the same compiler with the same flags. So
+this is a measured production replacement, not a cross-toolchain estimate, and the epilogue is
+inside both numbers rather than being an unmeasured residual. (Rewriting the loop bound costs ~6% on
+its own -- the chunked kernel at 8 blocks is 14.63-14.83 ms -- so the same-code-shape ratio is 6.2x;
+5.82x is quoted against what OCANNL emits today, which is the conservative choice.)
+
+Time falls **linearly with resident blocks** -- 1.92x at 2x, 3.97x at 4x -- and saturates around 128
+blocks, which is what a parallelism-starved kernel looks like and is not what a bandwidth-saturated
+one looks like: the bytes touched, and the order they are touched in, are identical in every row.
+
+A second, OCANNL-independent control ([`benchmarks/ffn1_geometry_probe.cu`](ffn1_geometry_probe.cu),
+plain CUDA, `nvcc`) reproduces the same curve on a clean-room version of the GEMM (12.76 -> 2.34 ms,
+5.46x, saturating at the same block count) and adds one datum: giving up the fixed mapping as well,
+one thread per output element, buys a further 1%. So coalescing is not the story either.
 
 **The binding resource is occupancy: 1024 threads on a 46-SM GPU.**
 
@@ -331,27 +364,31 @@ concentration is extreme:
 - 4 x FFN GEMM1 + gelu + 1 x lm_head = **72.3 ms (70.2%)**, blocked at `8x128x1024`.
 - 4 x attention out-projection = **12.6 ms (12.2%)**, blocked at `8x128x8x128`.
 
-**Size of the prize -- measured at the affected geometry.** The standalone control above runs the
-*same* `8x128x1024`-output GEMM that FFN GEMM1 and the lm_head compute, and the simplest possible
-repair -- spreading its `j` range over more blocks, with no tiling, no shared memory, no tensor
-cores and no change to any thread's access pattern -- takes it from
-12.76 ms to **2.34 ms**. Applying that to the five kernels (keeping seg25's ~1.6 ms gelu epilogue):
+**Size of the prize -- measured on the production kernel.** The measurement above is not a proxy:
+it is `seg25`'s own emitted source, compiled the way OCANNL compiles it, and spreading its `j` range
+over more blocks -- no tiling, no shared memory, no tensor cores, no change to any thread's access
+pattern -- takes it from 13.91 ms to **2.39 ms**, a factor of **5.82x**, with the gelu epilogue
+inside both numbers.
 
-| | now | with the naive parallel schedule |
+The other four kernels in this group have the same `8x128x1024` output over a 256-deep reduction:
+`seg51`/`77`/`103` are the same FFN up-projection in layers 1-3, and `seg111` is the tied lm_head
+(`d -> vocab`, and vocab is 1024 too). Applying the measured factor:
+
+| | now | with the `j` range spread over blocks |
 |---|---:|---:|
-| FFN GEMM1 + gelu x4 | 57.51 | ~15.8 |
-| lm_head | 14.76 | ~2.4 |
-| **five-kernel total** | **72.27** | **~18.2** |
-| **step** | **102.95** | **~48.9** |
+| FFN GEMM1 + gelu x4 | 57.51 | ~9.9 |
+| lm_head | 14.76 | ~2.5 |
+| **five-kernel total** | **72.27** | **~12.4** |
+| **step (kernel time)** | **102.95** | **~43.1** |
 
-That is a **2.1x end-to-end floor**, against bin 1's 1.06x, and it is measured at GEMM1's own
-geometry rather than extrapolated from another shape.
+That is a **~2.4x end-to-end floor**, against bin 1's 1.06x.
 
-It is a floor, not a target: the best control variant reaches 229.7 GFLOP/s, still only **1.3%** of
-this card's fp32 peak. FFN GEMM2 reaches 1609 GFLOP/s *in the step*, which suggests considerably
-more is available -- but GEMM2 has a different output geometry and reduction depth, so **that is a
-cross-shape extrapolation and is not claimed as a result here**. The defensible statement is:
->=2.1x from parallelizing the output axis alone, with the ceiling unknown and plausibly much higher.
+It is a floor, not a target: at 2.39 ms this kernel still reaches only ~3.8% of what the card's fp32
+peak would allow for its FLOP count, so a tiled or tensorized schedule should go further. How much
+further is not measured here -- FFN GEMM2 reaches 1609 GFLOP/s *in the step*, but that is a different
+output geometry and reduction depth and is **not** claimed as evidence for this shape. The
+defensible statement is: ~2.4x from spreading the output axis across blocks alone, with the ceiling
+unknown and plausibly well beyond it.
 
 ### Bin 4 -- surprises
 
@@ -455,26 +492,26 @@ The supporting facts, in the order that matters:
    to 0.4%.**
 3. No kernel is compute-bound (0.000 ms at-roofline, 96.5% well under), and the dominant kernel is
    not byte-bound either: holding each thread's addresses exactly fixed and varying only the block
-   count, its time falls **linearly with resident blocks** and saturates at 5.46x. So "the traffic
+   count, its time falls **linearly with resident blocks** and saturates at 5.82x. So "the traffic
    must shrink", the premise fusion work rests on, is false here. What binds is occupancy:
    **1024 threads on 46 SMs**.
 4. The blocker is named and in the log: gh-521's companion-coverage rule declines 10 tensorized
    **and 10 scalar** seeds at the `8x128x1024` output geometry, which is exactly FFN GEMM1 and the
    lm_head; and 5+5 at `8x128x8x128`, which is the out-projection and QK^T.
-5. The prize on the other side is measured **at the affected geometry**: the same `8x128x1024`-output
-   GEMM, given more resident blocks and nothing else, goes 12.76 -> 2.34 ms, which puts the step at
-   **~48.9 ms -- 2.1x**.
+5. The prize on the other side is measured **on the production kernel through OCANNL's own
+   compiler**: `seg25`'s emitted source, given more resident blocks and nothing else, goes
+   13.91 -> 2.39 ms (5.82x), which puts the step at **~43 ms -- ~2.4x**. The harness reproduces the
+   in-step time to 2.8%, so this is a replacement measurement rather than a cross-toolchain estimate.
 
 #483 is not wrong about attention being unfused; it is wrong about attention being where the time
 is. The recommendation is to re-aim at the `8x128x1024` / `8x128x8x128` companion-coverage declines
 (gh-521), and to revisit #483 afterwards, when `seq^2` traffic would be a materially larger share of
 a much smaller step.
 
-The 2.1x is a **floor**, deliberately: it comes from a naive parallel kernel that is itself only
-1.3% of this card's fp32 peak, so the reachable ceiling is higher -- but by how much is not measured
-here, and FFN GEMM2's much better in-step rate is a *different* geometry and is not evidence for
-this one. None of that affects the ranking of bin 3 over bin 1, which rests on the 5.4% / 70.2%
-split alone.
+The ~2.4x is a **floor**, deliberately: the replacement is still only ~3.8% of this card's fp32
+peak for its FLOP count, so the reachable ceiling is higher -- but by how much is not measured here,
+and FFN GEMM2's much better in-step rate is a *different* geometry and is not evidence for this one.
+None of that affects the ranking of bin 3 over bin 1, which rests on the 5.4% / 70.2% split alone.
 
 ## Appendix -- memory telemetry (ride-along for #550)
 
@@ -527,11 +564,26 @@ BENCH_FIXTURE=fixtures/gpt2_mini.safetensors BENCH_TUNE=1 \
   --ocannl_autotune_cache_dir=/tmp/gh531-cache \
   --ocannl_output_debug_files_in_build_directory=true
 kill %1
-grep -c '__global__' /tmp/armsnap-*.cu   # arm A = 117 kernels (20 mma.sync); arm B = 130 (0)
+# Arm A is the snapshot satisfying ALL THREE; a kernel count alone is not enough, because the
+# watcher can copy a partially written file and a prefix of arm B's 130-kernel emission can
+# contain exactly 117 '__global__'.
+for f in /tmp/armsnap-*.cu; do
+  printf '%s: %s globals, %s mma_sync, ' "$f" "$(grep -c '__global__' "$f")" "$(grep -c mma_sync "$f")"
+  # completeness: balanced braces, and it actually compiles
+  nvcc -arch=sm_120 --use_fast_math -I/usr/local/cuda/include -ptx -o /dev/null "$f" \
+    2>/dev/null && echo "compiles" || echo "INCOMPLETE"
+done
 ```
 
-Poll on content with no settling delay: on a warm replay both arms compile within ~0.4 s, and a
-watcher that waits for the file to stop changing before copying misses arm A entirely.
+Arm A is the file with **117 globals, 20 `mma_sync`, and a clean compile**; arm B has 130 and 0.
+Requiring all three matters: the watcher copies the file while it is being written (OCANNL writes it
+in place rather than publishing atomically), so a truncated arm B prefix can hit 117 globals -- but
+it cannot also carry 20 `mma_sync`, and it will not compile. Poll on content with no settling delay:
+on a warm replay both arms compile within ~0.4 s, and a watcher that waits for the file to stop
+changing before copying misses arm A entirely.
+
+The snapshot this report's source-level claims are read from was checked exactly that way: 117
+globals, 20 `mma_sync`, braces balanced, and it compiles to 117 PTX entries.
 
 The standalone same-geometry control is checked in as
 [`benchmarks/ffn1_geometry_probe.cu`](ffn1_geometry_probe.cu) -- plain CUDA, no OCANNL:
