@@ -3,13 +3,15 @@
 Native-Windows measurement session decomposing rog's tuning-ratio outlier. Measurement only -- no
 seed or schedule code was changed.
 
-**Verdict: two factors, both large, and they compound.** Against a like-for-like uniform control a
-mixed pool tunes 20.5% worse at width 8 and 31.1% worse at width 16; independently, with grid
-decomposition *and* composition held fixed, a mixed pool falls from 1.678x to 1.337x going from
-width 8 to width 16. The full 24-wide machine, which is both the widest pool and the most
-E-core-heavy (67%), is the worst case of both and is where the crowned schedule collapses to
-materialize-all -- though that last step cannot be attributed to either factor alone, since no
-composition-matched 24-wide pool exists on this part.
+**Verdict: two factors, both large, and they compound.** Mixing the core classes is causal at the
+one width where it can be isolated -- at width 8 a 4P+4E pool tunes *below both* its uniform
+endpoints (1.667x against 1.752x for 8P and 2.097x for 8E), which no monotone dependence on the
+P:E proportion allows. Pool width is separately causal: with grid decomposition and composition
+both held fixed, a mixed pool falls from 1.678x to 1.337x going from width 8 to width 16. The full
+24-wide machine, which is both the widest pool and the most E-core-heavy (67%), is the worst case
+and is where the crowned schedule collapses to materialize-all. Two contrasts remain
+non-decomposable on this part for want of pools it cannot form -- the width-16 composition effect
+(-31.1%, no 16-P control) and the step from width 16 to 24 (no composition-matched 24-wide pool).
 
 The WSL rows in gh-530 remain the cross-machine ledger; the numbers here diagnose, they do not
 replace them.
@@ -150,16 +152,32 @@ shown too rather than picking whichever is more favourable.
 | 8 | 1.667x | 2.097x -> **-20.5%** | 1.752x -> -4.9% |
 | 16 | 1.323x | 1.919x -> **-31.1%** | n/a (no 16-P pool exists) |
 
-Read against the consistent E control, composition costs 20.5% at width 8 and 31.1% at width 16.
-Each of those is internally chunk-matched (both arms of each row use the same chunk count), so both
-are clean *within-width* effects. The width-8 figure against the P control (-4.9%) is the same
-mixed arm measured against a *weaker* uniform baseline -- 8 P-cores tune to 1.752x where 8 E-cores
-reach 2.097x -- and quoting only that number understates the effect.
+Both rows are internally chunk-matched (both arms of each row use the same chunk count). But the
+two rows do not support the same claim, because going from a uniform pool to a mixed one changes
+*two* things at once -- whether the pool is heterogeneous, and which core classes it contains --
+and core class alone matters here: the two width-8 uniform pools differ by 16.5% (8P at 1.752x, 8E
+at 2.097x) with no mixing involved at all.
 
-**On whether the penalty grows with width, the evidence is strong but one control is missing.**
-Comparing 20.5% against 31.1% spans a chunk-count change (32 at width 8, 64 at width 16), so it is
-worth checking that the penalty itself is chunk-invariant. Re-running the *width-8* pair with
-everything at 96 chunks:
+**At width 8 the two effects can be separated, and mixing is causal.** Both uniform endpoints
+exist, and the mixed pool falls **below both of them** (1.667x against 1.752x and 2.097x). Under
+any model in which the tune ratio varies monotonically with the P:E proportion, a 50/50 pool would
+have to land *between* its two uniform endpoints. It lands under the lower one, so the ordering is
+non-monotone in composition and something about mixing itself -- not the core classes present --
+costs the ratio. That is the causal heterogeneity result, and it does not depend on interpolating
+anything.
+
+**At width 16 they cannot be separated.** The mixed arm is 8P+8E and its only available control is
+16E, so the -31.1% contrast bundles the mixing penalty together with the effect of swapping eight
+E-cores for eight P-cores -- and the width-8 endpoints show that swap is worth ~16% on its own. The
+separating control would be a 16-P-core uniform pool, which needs 12 more P-cores than this part
+has. So -31.1% is a real *combined* composition effect at width 16 and is reported as such; it is
+not an isolated heterogeneity measurement, and no design on this machine can make it one.
+
+**Whether the penalty grows with width is unresolved**, for two independent reasons. The first is
+the one above: -20.5% and -31.1% are not the same measurement, since only the width-8 row can
+separate mixing from core class. The second is that the two rows also differ in chunk count (32 at
+width 8, 64 at width 16). The chunk half was checked by re-running the *width-8* pair with
+everything at 96:
 
 | width-8 arm | @ 32 chunks | @ 96 chunks | chunk sensitivity |
 |---|---|---|---|
@@ -167,12 +185,11 @@ everything at 96 chunks:
 | mixed | 1.667x | 1.678x | +0.6% |
 | **composition penalty** | **-20.5%** | **-20.0%** | -- |
 
-The penalty is chunk-invariant at width 8, and the width-16 *mixed* arm is chunk-invariant too
-(1.323x at 64 vs 1.337x at 96, +1.1%). The one arm not measured at a second chunk count is the
-**width-16 uniform-E control**; it was started and stopped as not worth the search time, since
-overturning the growth would require it to move ~13% between 64 and 96 chunks when every other arm
-measured moved by at most 1.1%. So the growth from ~20% to ~31% is well supported but not
-fully chunk-controlled at width 16, and that single arm would close it.
+So the penalty is chunk-invariant at width 8, and the width-16 *mixed* arm is chunk-invariant too
+(1.323x at 64 vs 1.337x at 96, +1.1%). The width-16 uniform-E control was never measured at a
+second chunk count -- it was started and stopped as not worth the search time. But even with that
+arm, the growth would still not be established, because the width-16 contrast measures a different
+thing from the width-8 one; closing it needs a 16-P uniform pool, which this part cannot form.
 
 A width-24 uniform arm is not constructible on this part: only 8 P-cores and 16 E-cores exist.
 
@@ -271,21 +288,24 @@ effect of all differences is small; it does not establish that WSL virtualizatio
 specifically is zero, since offsetting effects could cancel. What it does support is that the
 outlier is reproducible outside WSL and is not an artifact of running under it.
 
-**2. Core heterogeneity is causal at both widths measured.** Against the uniform-E control -- the
-only control type available at both widths -- **the mixed pool tunes 20.5% worse at width 8 and
-31.1% worse at width 16** (equivalently, uniform-E is 25.8% and 45.0% better; the percentages
-differ because the denominators do, so the direction has to be stated). Both are within-width,
-chunk-matched comparisons. Against the width-8 uniform-P control the same mixed arm is only 4.9%
-worse, but that is a weaker baseline: 8 P-cores tune to 1.752x where 8 E-cores reach 2.097x. The
-single-width design in the first version of this report could not have distinguished any of this
-from a pure width effect.
+**2. Core heterogeneity is causal at width 8; at width 16 only a combined composition effect is
+measurable.** At width 8 both uniform endpoints exist and the mixed pool lands **below both**
+(1.667x against 8P's 1.752x and 8E's 2.097x). A 50/50 pool cannot sit below both of its endpoints
+under any monotone dependence on the P:E proportion, so mixing itself -- and not merely which core
+classes are present -- costs the ratio. That is the isolated result, and it needs no interpolation.
 
-The penalty appears to *grow* with width (20.5% -> 31.1%), and the width-8 pair re-run entirely at
-96 chunks gives -20.0%, showing the penalty is chunk-invariant there. But the cross-width
-comparison spans a chunk change, and the width-16 uniform-E control was not measured at a second
-chunk count -- so the growth is well supported (it would need that arm to move ~13% where every
-measured arm moved at most 1.1%) but not fully controlled. Treat "grows with width" as indicated,
-not established.
+At width 16 the mixed arm's only control is 16E, so its -31.1% bundles mixing with the effect of
+substituting eight E-cores for eight P-cores. That substitution is not negligible: the two width-8
+uniform pools differ by 16.5% with no mixing at all. The separating control is a 16-P uniform pool,
+which this part cannot form. So -31.1% stands as a combined composition effect, not as isolated
+heterogeneity.
+
+For the same reason, the apparent *growth* of the penalty (20.5% -> 31.1% against the E control) is
+not a like-for-like comparison: the two rows differ in what they hold fixed, as well as in chunk
+count (32 vs 64). Re-running the width-8 pair entirely at 96 chunks gives -20.0%, so chunk count is
+not the driver there, and the width-16 mixed arm is chunk-invariant too (+1.1%); but the width-16
+uniform-E control was never measured at a second chunk count. Treat "grows with width" as
+unresolved rather than indicated.
 
 **3. Pool width is causal over the interval where composition is controlled.** With
 `cc_parallel_chunks` fixed at 96 and composition fixed at 50% E-cores, the mixed pools decline
@@ -368,8 +388,10 @@ of these figures, so it is not run-to-run search noise on this box.
 rog's outlier is produced by **pool width and core heterogeneity together**, not by heterogeneity
 alone as the first version of this report claimed. Both effects are large.
 
-- Heterogeneity is causal at every width measured: against the uniform-E control a mixed pool loses
-  20.5% at width 8 and 31.1% at width 16.
+- Heterogeneity is causal where it can be isolated: at width 8 the mixed pool tunes below *both*
+  uniform endpoints (1.667x vs 1.752x and 2.097x), which composition alone cannot produce. At
+  width 16 the mixed arm has only a 16E control, so its -31.1% is a combined composition effect
+  and cannot be attributed to mixing alone.
 - Pool width is causal over the interval where composition is held fixed: with
   `cc_parallel_chunks` fixed at 96 and composition fixed at 50% E-cores, mixed pools decline
   1.678x -> 1.337x from width 8 to 16.
