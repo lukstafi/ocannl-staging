@@ -1141,6 +1141,15 @@ module C_syntax (B : C_syntax_config) = struct
   let swizzle_of tn = Map.find !current_swizzled tn
   let is_swizzled tn = Option.is_some (swizzle_of tn)
 
+  (* Set by [compile_proc]: software-pipelined staged tiles ([Schedule.Stage ~pipeline_depth], see
+     {!Low_level.optimized.pipelined}), allocated as [pt_depth] rotating copies with every element
+     access offset by a buffer-selection term ([pp_pipelined_rotation] below). Renderings that
+     assume single-copy storage (contiguous vector loads/stores, the register-tiled [Tile_mma]
+     path) must decline these nodes; the intrinsic [Tile_mma] arms are fine — their operand
+     pointers carry the rotation term. *)
+  let current_pipelined : Low_level.pipelined_tile Map.M(Tn).t ref = ref (Map.empty (module Tn))
+  let is_pipelined tn = Map.mem !current_pipelined tn
+
   (* Elements per 16-byte unit for [Low_level.Swizzle_b128]: [u] and its log, with [units] the
      (power-of-two, checked by [Schedule.Stage]) count of units in one row of [c] elements. *)
   let b128_units ~prec ~c =
@@ -1709,8 +1718,35 @@ module C_syntax (B : C_syntax_config) = struct
 
   (* Symbols of the serial [for] loops enclosing the current [pp_ll] rendering point (innermost
      first): maintained by [serial_loop] below, consulted by the [Set] case's [volatile_scalar_rmw]
-     rule. *)
+     rule and by [pp_pipelined_rotation]. *)
   let serial_loop_stack : Indexing.symbol list ref = ref []
+
+  (* gh-487: the buffer-selection term of a software-pipelined tile, prepended to the intra-copy
+     offset ([pp_tn_offset] / [pp_array_offset]) at every access site. Reads select the copy the
+     schedule loaded for the current rotor iteration ([rotor % depth]); writes select the copy
+     being loaded for the next one ([(rotor + 1) % depth]) — the schedule emits the in-loop load
+     nest one iteration ahead — except the prologue load before the rotor loop, which fills copy 0
+     (matching the first iteration's read of [from_ % depth = 0]; the rendering point's position
+     relative to the rotor loop is exactly [serial_loop_stack] membership, [from_ = 0] by the tile
+     loops' validation). This is the renderer half of the transform's bitwise-identity argument:
+     the IR keeps single-copy indices, and every read resolves to the copy holding exactly the
+     values the unpipelined form would read. *)
+  let pp_pipelined_rotation ~is_write tn =
+    let open PPrint in
+    match Map.find !current_pipelined tn with
+    | None -> empty
+    | Some { Low_level.pt_depth; pt_rotor } ->
+        if List.mem !serial_loop_stack pt_rotor ~equal:Indexing.equal_symbol then
+          let counter =
+            if is_write then parens (pp_symbol pt_rotor ^^ string " + 1") else pp_symbol pt_rotor
+          in
+          parens (counter ^^ string (" % " ^ Int.to_string pt_depth))
+          ^^ string (" * " ^ Int.to_string (Tn.num_elems tn) ^ " + ")
+        else if is_write then (* The prologue load: copy 0 at offset 0. *) empty
+        else
+          invalid_arg
+            ("C_syntax: read of pipelined tile " ^ Tn.debug_name tn
+           ^ " outside its rotor loop (the schedule only remaps reads within the staging scope)")
 
   (* Recognize the exact scalar fallback region synthesized by
      [Schedule.contract_tensorized_accumulator]:
@@ -1774,7 +1810,17 @@ module C_syntax (B : C_syntax_config) = struct
         else if Tn.Placements.is_materialized_force (placements ()) tn 441 then `Device
         else `Thread
       in
-      let ptr = parens (string (get_ident tn) ^^ string " + " ^^ pp_array_offset (idcs, dims)) in
+      let ptr =
+        (* Every fragment hook ignores the a/b pointer docs built here — only [target]'s is
+           emitted at scope level (and the accumulator target is never a pipelined tile); the
+           per-update operands re-render at their [Tile_mma] sites inside the reduction loop,
+           where the rotation is in scope. A pipelined tile's read rotation is NOT renderable at
+           this scope-level position (outside its rotor loop), so substitute an undefined
+           identifier: a future hook that starts emitting these pointers then fails C compilation
+           loudly instead of reading a frozen buffer copy. *)
+        if is_pipelined tn then string "OCANNL_PIPELINED_SCOPE_PTR_UNUSED__"
+        else parens (string (get_ident tn) ^^ string " + " ^^ pp_array_offset (idcs, dims))
+      in
       (prec, (ptr, ld, space, operand_layout tn ~ld ~idcs ~dims))
     in
     (* The target's leading-dimension stride: the stride of the axis carrying the transfer nest's
@@ -2207,7 +2253,7 @@ module C_syntax (B : C_syntax_config) = struct
         let vec_ext_machinery ~prec ~lanes ~vtyp ~written ~emit ~fresh ~need_typedef =
           let vload tn idcs =
             (* A swizzled layout breaks row-major contiguity within a row. *)
-            if is_swizzled tn then raise Bail;
+            if is_swizzled tn || is_pipelined tn then raise Bail;
             if not (contiguous idcs) then raise Bail;
             check_read ~written tn idcs;
             let name = fresh "vget" in
@@ -2325,7 +2371,7 @@ module C_syntax (B : C_syntax_config) = struct
                     vec_ext_machinery ~prec ~lanes ~vtyp ~written ~emit ~fresh ~need_typedef
                   in
                   List.iter sets ~f:(fun (tn, idcs, llsc) ->
-                      if is_swizzled tn then raise Bail;
+                      if is_swizzled tn || is_pipelined tn then raise Bail;
                       if not (contiguous idcs) then raise Bail;
                       let rhs = vec_operand llsc prec in
                       let vname = fresh "vset" in
@@ -2378,6 +2424,7 @@ module C_syntax (B : C_syntax_config) = struct
                     (* Stack and workgroup-shared arrays are only element-aligned. *)
                     && (not (Set.mem !current_workgroup_shared tn))
                     && not (is_swizzled tn)
+                    && not (is_pipelined tn)
                   in
                   let vload tn idcs =
                     if not (eligible tn idcs) then raise Bail;
@@ -2855,7 +2902,7 @@ module C_syntax (B : C_syntax_config) = struct
         let local_defs, val_doc = pp_scalar prec llsc in
         let val_doc = wrap_conversion narrowing val_doc in
         let local_defs = pp_local_defs local_defs in
-        let offset_doc = pp_tn_offset tn (idcs, dims) in
+        let offset_doc = pp_pipelined_rotation ~is_write:true tn ^^ pp_tn_offset tn (idcs, dims) in
         (* See {!C_syntax_config.volatile_scalar_rmw}: pin the per-iteration read-modify-write of
            loop-invariant-address accumulators by shadowing the node's pointer with a
            volatile-qualified alias for the whole statement (the shadow also covers reads inside
@@ -2983,9 +3030,9 @@ module C_syntax (B : C_syntax_config) = struct
            the runtime index (cast to [Ops.index_prec ()], mirroring the gather) at [dyn_axis]. The
            enclosing [If] guard (when interval analysis has not discharged it) guarantees the index
            is in range before this statement executes. *)
-        if is_swizzled tn then
+        if is_swizzled tn || is_pipelined tn then
           invalid_arg
-            ("C_syntax: Set_dynamic targets swizzled node " ^ Tn.debug_name tn
+            ("C_syntax: Set_dynamic targets swizzled or pipelined node " ^ Tn.debug_name tn
            ^ " (dynamic offsets are not swizzle-remapped)");
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
@@ -3065,9 +3112,9 @@ module C_syntax (B : C_syntax_config) = struct
         (* Multi-element consecutive-offset write: incompatible with a swizzled layout, and staged
            tiles are only ever written by the Stage-minted scalar load nest — fail loudly rather
            than miscompile if that invariant is ever broken. *)
-        if is_swizzled tn then
+        if is_swizzled tn || is_pipelined tn then
           invalid_arg
-            ("C_syntax: Set_from_vec targets swizzled node " ^ Tn.debug_name tn
+            ("C_syntax: Set_from_vec targets swizzled or pipelined node " ^ Tn.debug_name tn
            ^ " (row-major multi-element write into an XOR-swizzled layout)");
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
@@ -3281,7 +3328,12 @@ module C_syntax (B : C_syntax_config) = struct
                   else if Tn.Placements.is_materialized_force (placements ()) tn 440 then `Device
                   else `Thread
                 in
-                ( parens (string (get_ident tn) ^^ string " + " ^^ pp_array_offset (idcs, dims)),
+                ( parens
+                    (string (get_ident tn) ^^ string " + "
+                    (* A pipelined operand tile's pointer carries the read-side buffer rotation
+                       (gh-487) — the intrinsic loads then read the current iteration's copy. *)
+                    ^^ pp_pipelined_rotation ~is_write:false tn
+                    ^^ pp_array_offset (idcs, dims)),
                   ld,
                   space,
                   operand_layout tn ~ld ~idcs ~dims )
@@ -3379,6 +3431,13 @@ module C_syntax (B : C_syntax_config) = struct
           let* () =
             no_test ~reason:"swizzled operand layout"
               (List.exists [ fst d; fst a; fst b ] ~f:is_swizzled)
+          in
+          (* The register-tiled pointers stream rows from the raw base at row-major arithmetic; a
+             pipelined operand's live copy rotates per k-block (gh-487). The scalar fallback and
+             the intrinsic arms handle it — their accesses carry the rotation term. *)
+          let* () =
+            no_test ~reason:"pipelined operand layout (rotating buffer copies)"
+              (List.exists [ fst d; fst a; fst b ] ~f:is_pipelined)
           in
           let d_tn = fst d in
           let prec = Lazy.force d_tn.Tn.storage_prec in
@@ -3649,7 +3708,9 @@ module C_syntax (B : C_syntax_config) = struct
         let dims = Lazy.force tn.dims in
         let from_prec = Lazy.force tn.storage_prec in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
-        let offset_doc = pp_tn_offset tn (idcs, dims) in
+        let offset_doc =
+          pp_pipelined_rotation ~is_write:false tn ^^ pp_tn_offset tn (idcs, dims)
+        in
         let expr = string prefix ^^ ident_doc ^^ brackets offset_doc ^^ string postfix in
         ([], expr)
     | Get_dynamic { tn; idcs; dyn_axis; dyn_value = iv, iprec } ->
@@ -3659,9 +3720,9 @@ module C_syntax (B : C_syntax_config) = struct
            evaluated (C ternary short-circuits). Cast to [Ops.index_prec ()] so the index tracks the
            same width as loop counters (signed int32 normally, int64 under large_models), preventing
            truncation for very large table/vocabulary axes. *)
-        if is_swizzled tn then
+        if is_swizzled tn || is_pipelined tn then
           invalid_arg
-            ("C_syntax: Get_dynamic reads swizzled node " ^ Tn.debug_name tn
+            ("C_syntax: Get_dynamic reads swizzled or pipelined node " ^ Tn.debug_name tn
            ^ " (dynamic offsets are not swizzle-remapped)");
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
@@ -3819,7 +3880,9 @@ module C_syntax (B : C_syntax_config) = struct
         let dims = Lazy.force tn.dims in
         let from_prec = Lazy.force tn.storage_prec in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
-        let offset_doc = pp_tn_offset tn (idcs, dims) in
+        let offset_doc =
+          pp_pipelined_rotation ~is_write:false tn ^^ pp_tn_offset tn (idcs, dims)
+        in
         let access_doc = string prefix ^^ ident_doc ^^ brackets offset_doc ^^ string postfix in
         let expr_doc =
           string prefix ^^ ident_doc
@@ -3949,7 +4012,7 @@ module C_syntax (B : C_syntax_config) = struct
           workgroup_shared;
           simdgroup_fragments;
           swizzled;
-          pipelined = _;
+          pipelined;
           zero_fringe = _;
           flip_candidates = _;
         } : (string * kparam_source) list * PPrint.document * Low_level.launch_dims =
@@ -3981,6 +4044,33 @@ module C_syntax (B : C_syntax_config) = struct
     current_workgroup_shared := workgroup_shared;
     current_simdgroup_fragments := simdgroup_fragments;
     current_swizzled := swizzled;
+    current_pipelined := pipelined;
+    (* gh-487 sanity: the rotation renders off the rotor loop's serial counter; a schedule that
+       later retyped the rotor to a hardware axis would otherwise silently freeze the buffer
+       selection at copy 0 ([serial_loop_stack] only tracks serial loops). *)
+    (if not (Map.is_empty pipelined) then
+       let check_rotor index axis =
+         Map.iteri pipelined ~f:(fun ~key:tn ~data:{ Low_level.pt_rotor; _ } ->
+             if Indexing.equal_symbol index pt_rotor then
+               match axis with
+               | Low_level.Serial -> ()
+               | _ ->
+                   invalid_arg
+                     ("C_syntax.compile_proc: the rotor loop of pipelined tile " ^ Tn.debug_name tn
+                    ^ " is no longer Serial"))
+       in
+       let rec scan (llc : Low_level.t) =
+         match llc with
+         | For_loop { index; axis; body; _ } ->
+             check_rotor index axis;
+             scan body
+         | Seq (a, b) ->
+             scan a;
+             scan b
+         | If { body; _ } -> scan body
+         | _ -> ()
+       in
+       scan llc);
     rendered_simdgroup_fragments := Set.empty (module Tn);
     current_traced_store := Some traced_store;
     Hash_set.clear zero_out_seen;
@@ -4211,7 +4301,16 @@ module C_syntax (B : C_syntax_config) = struct
                  ^^ string (B.typ_of_prec @@ Lazy.force tn.storage_prec)
                  ^^ space
                  ^^ string (get_ident tn)
-                 ^^ brackets (OCaml.int (Tn.num_elems tn))
+                 (* A pipelined tile is [pt_depth] rotating copies (gh-487); the accesses select
+                    the copy via [pp_pipelined_rotation]. [Schedule.check_hardware_limits] accounts
+                    the same multiplier. *)
+                 ^^ brackets
+                      (OCaml.int
+                         (Tn.num_elems tn
+                         *
+                         match Map.find !current_pipelined tn with
+                         | Some { Low_level.pt_depth; _ } -> pt_depth
+                         | None -> 1))
                  ^^ semi ^^ hardline
                else
                  local_array_decl
