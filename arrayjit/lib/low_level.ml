@@ -175,6 +175,241 @@ and scalar_t =
 
 and scalar_arg = scalar_t * Ops.prec [@@deriving sexp_of, equal, compare]
 
+(* gh-563: the one canonical rendering of lowered code, shared by both digest consumers —
+   [analysis_digest] (the analysis cache, consulted inside [optimize]) and
+   [Schedule_cache.canonicalize] (schedule replay across sessions). The walk is the same for both:
+   index / scalar / statement emission, loop-binder tokens, local-scope alpha renaming, comment
+   skipping, opaque-statement handling. What deliberately differs is the {i identity policy} — the
+   analysis cache keys tensor nodes and static symbols by identity (a hit reuses the stored code
+   verbatim), the schedule cache alpha-renames everything (a hit replays a schedule onto a
+   different-but-isomorphic lowering) — and that is exactly what {!Canonical_render.policy}
+   parameterizes. Both digests are correctness-critical, so keep the split honest: a new [t] /
+   [scalar_t] construct is rendered here and only here (the matches are exhaustive, so it breaks the
+   build); a new digest-relevant {i fact} enters here if it belongs to the code itself, or in one
+   policy field / one consumer preamble if it is an identity choice or a consumer-specific
+   companion. *)
+module Canonical_render = struct
+  (** How [Tile_mma] enters the rendering. *)
+  type mma_policy =
+    | Opaque_mma
+        (** Mark the rendering incomplete and emit a placeholder — the consumer's guarantees do not
+            extend to the construct. *)
+    | Structural_mma  (** Render operands, extents, lane and fallback body. *)
+
+  type policy = {
+    emit_tn : Tn.t -> unit;  (** Render a tensor node reference. *)
+    emit_free_sym : Indexing.symbol -> unit;
+        (** Render a symbol that neither an enclosing loop binder nor {!initial_tokens} bound. *)
+    on_bind_loop : Indexing.symbol -> id:int -> shadowed:bool -> unit;
+        (** Called when a [For_loop] binder mints the token ["b<id>"]. [shadowed] iff the symbol
+            already had a token: a duplicated binder makes symbol references ambiguous. *)
+    mark_incomplete : unit -> unit;
+        (** Called when an opaque construct makes the rendering an unfaithful summary of the code.
+        *)
+    mma : mma_policy;
+    initial_tokens : (Indexing.symbol * string) list;
+        (** Symbols pre-bound to a rendering token before the walk — the static indices, for the
+            consumer that renders them positionally. *)
+  }
+
+  (** Appends the canonical rendering of [llc] to [buf]. Deterministic and allocation-light: the
+      caller digests [buf] (usually after its own preamble and companion sections). *)
+  let emit ~(buf : Buffer.t) (p : policy) (llc : t) : unit =
+    let add = Buffer.add_string buf in
+    (* The in-scope rendering token per symbol (shadow-aware: inner binders overwrite). *)
+    let tokens = Hashtbl.create (module Indexing.Symbol) in
+    List.iter p.initial_tokens ~f:(fun (key, data) -> Hashtbl.set tokens ~key ~data);
+    let base_count = ref 0 in
+    let bind_loop s =
+      let id = !base_count in
+      Int.incr base_count;
+      p.on_bind_loop s ~id ~shadowed:(Hashtbl.mem tokens s);
+      let tok = "b" ^ Int.to_string id in
+      Hashtbl.set tokens ~key:s ~data:tok;
+      tok
+    in
+    let emit_sym s =
+      match Hashtbl.find tokens s with Some tok -> add tok | None -> p.emit_free_sym s
+    in
+    let emit_tn = p.emit_tn in
+    (* Local scope ids come from a process-global counter freshly on each lowering (like loop
+       symbols), so render their first-occurrence alpha index, not the raw id — otherwise sibling
+       lowerings of one local-heavy routine would never agree on a digest. *)
+    let scope_alpha = Hashtbl.create (module Scope_id) in
+    let emit_scope (id : scope_id) =
+      emit_tn id.tn;
+      let a = Hashtbl.find_or_add scope_alpha id ~default:(fun () -> Hashtbl.length scope_alpha) in
+      add ("." ^ Int.to_string a)
+    in
+    let emit_idx = function
+      | Indexing.Fixed_idx i -> add ("#" ^ Int.to_string i)
+      | Indexing.Iterator s -> emit_sym s
+      | Indexing.Affine { symbols; offset } ->
+          add "(";
+          List.iter symbols ~f:(fun (c, s) ->
+              add (Int.to_string c ^ "*");
+              emit_sym s;
+              add "+");
+          add (Int.to_string offset ^ ")")
+      | Indexing.Sub_axis -> add "_"
+      | Indexing.Concat syms ->
+          add "cat(";
+          List.iter syms ~f:(fun s ->
+              emit_sym s;
+              add ",");
+          add ")"
+    in
+    let emit_idcs idcs =
+      add "[";
+      Array.iter idcs ~f:(fun idx ->
+          emit_idx idx;
+          add ",");
+      add "]"
+    in
+    let rec emit_scalar (sc : scalar_t) =
+      match sc with
+      | Local_scope { id; body; orig_indices } ->
+          add "scope(";
+          emit_scope id;
+          add ")";
+          emit_idcs orig_indices;
+          add "{";
+          emit body;
+          add "}"
+      | Get_local id ->
+          add "getl(";
+          emit_scope id;
+          add ")"
+      | Get (tn, idcs) ->
+          add "get ";
+          emit_tn tn;
+          emit_idcs idcs
+      | Get_dynamic { tn; idcs; dyn_axis; dyn_value } ->
+          add "getd ";
+          emit_tn tn;
+          emit_idcs idcs;
+          add ("/" ^ Int.to_string dyn_axis ^ ":");
+          emit_arg dyn_value
+      | Get_merge_buffer (tn, idcs) ->
+          add "getm ";
+          emit_tn tn;
+          emit_idcs idcs
+      | Ternop (op, a, b, c) ->
+          add (Sexp.to_string (Ops.sexp_of_ternop op));
+          add "(";
+          emit_arg a;
+          add ",";
+          emit_arg b;
+          add ",";
+          emit_arg c;
+          add ")"
+      | Binop (op, a, b) ->
+          add (Sexp.to_string (Ops.sexp_of_binop op));
+          add "(";
+          emit_arg a;
+          add ",";
+          emit_arg b;
+          add ")"
+      | Unop (op, a) ->
+          add (Sexp.to_string (Ops.sexp_of_unop op));
+          add "(";
+          emit_arg a;
+          add ")"
+      | Constant f -> add (Float.to_string f)
+      | Constant_bits b -> add ("bits:" ^ Int64.to_string b)
+      | Embed_index idx ->
+          add "ix:";
+          emit_idx idx
+    and emit_arg ((sc, prec) : scalar_arg) =
+      emit_scalar sc;
+      add ("@" ^ Sexp.to_string (Ops.sexp_of_prec prec))
+    and emit (llc : t) =
+      match llc with
+      | Noop -> add "nop;"
+      (* Comment text is presentational (routine names, debug names): identical code under
+         different names shares one digest. *)
+      | Comment _ -> add "c;"
+      | Staged_compilation _ ->
+          p.mark_incomplete ();
+          add "staged;"
+      | Seq (a, b) ->
+          emit a;
+          emit b
+      | For_loop { index; from_; to_; body; axis } ->
+          let tok = bind_loop index in
+          add
+            (Printf.sprintf "for %s=%d..%d@%s{" tok from_ to_
+               (Sexp.to_string (sexp_of_axis_type axis)));
+          emit body;
+          add "}"
+      | Zero_out tn ->
+          add "zero ";
+          emit_tn tn;
+          add ";"
+      | Set { tn; idcs; llsc; debug = _ } ->
+          add "set ";
+          emit_tn tn;
+          emit_idcs idcs;
+          add ":=";
+          emit_scalar llsc;
+          add ";"
+      | Set_dynamic { tn; idcs; dyn_axis; dyn_value; llsc; debug = _ } ->
+          add "setdyn ";
+          emit_tn tn;
+          emit_idcs idcs;
+          add ("@" ^ Int.to_string dyn_axis ^ "=");
+          emit_arg dyn_value;
+          add ":=";
+          emit_scalar llsc;
+          add ";"
+      | Set_from_vec { tn; idcs; length; vec_unop; arg; debug = _ } ->
+          add ("setv" ^ Int.to_string length ^ " ");
+          emit_tn tn;
+          emit_idcs idcs;
+          add (":=" ^ Sexp.to_string (Ops.sexp_of_vec_unop vec_unop));
+          add "(";
+          emit_arg arg;
+          add ");"
+      | Set_local (id, sc) ->
+          add "setl ";
+          emit_scope id;
+          add ":=";
+          emit_scalar sc;
+          add ";"
+      | Declare_local { id; needs_init } ->
+          add "decl ";
+          emit_scope id;
+          add (if needs_init then "0;" else ";")
+      | Workgroup_barrier -> add "bar;"
+      | If { cond; body } ->
+          add "if(";
+          emit_arg cond;
+          add "){";
+          emit body;
+          add "}"
+      | Tile_mma { d; a; b; ta; tb; m; n; k; ldd; lda; ldb; lane; fallback } -> (
+          match p.mma with
+          | Opaque_mma ->
+              p.mark_incomplete ();
+              add "mma;"
+          | Structural_mma ->
+              let operand (tn, idcs) =
+                emit_tn tn;
+                emit_idcs idcs
+              in
+              add "mma ";
+              operand d;
+              operand a;
+              operand b;
+              add (Printf.sprintf " %b %b %d %d %d %d %d %d " ta tb m n k ldd lda ldb);
+              emit_sym lane;
+              add "{";
+              emit fallback;
+              add "}")
+    in
+    emit llc
+end
+
 (** Extract the precision from a scalar value by examining its origin tensor node *)
 let scalar_precision = function
   | Get (tn, _) -> Lazy.force tn.Tn.storage_prec
@@ -4490,34 +4725,20 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
 
 (* gh-560: the identity of a routine's analysis inputs — a canonical rendering of the raw lowered
    code plus everything else [analyze_proc] (and the lazy queries it closes over) consults,
-   digested. Follows [Schedule_cache.canonicalize]'s approach with the opposite identity choices:
-   tensor nodes and static symbols enter by IDENTITY ([Tn.uid]; the symbol's unique ident, with the
-   mutable range facts that feed coverage universalization) because a cache hit reuses the stored
-   analysis' code verbatim — a same-shape routine over different nodes or differently-bound statics
-   must not share an entry — while loop binders and local-scope ids (minted fresh on every
-   lowering) are alpha-renamed by first occurrence so sibling lowerings of one routine agree.
-   Comment text is skipped: identical code under different names shares one analysis. [None] = not
-   cacheable: an opaque statement ([Staged_compilation]) or a duplicated binder would make the
-   rendering unfaithful. *)
+   digested. The code walk is [Canonical_render.emit]; what follows is its identity policy plus the
+   analysis-specific preamble. Opposite identity choices to [Schedule_cache.canonicalize]'s: tensor
+   nodes and static symbols enter by IDENTITY ([Tn.uid]; the symbol's unique ident, with the mutable
+   range facts that feed coverage universalization) because a cache hit reuses the stored analysis'
+   code verbatim — a same-shape routine over different nodes or differently-bound statics must not
+   share an entry — while loop binders and local-scope ids (minted fresh on every lowering) are
+   alpha-renamed by first occurrence so sibling lowerings of one routine agree. Comment text is
+   skipped: identical code under different names shares one analysis. [None] = not cacheable: an
+   opaque statement ([Staged_compilation]) or a duplicated binder would make the rendering
+   unfaithful. *)
 let analysis_digest (static_indices : Indexing.static_symbol list) (llc : t) : string option =
   let buf = Buffer.create 4096 in
   let add = Buffer.add_string buf in
   let cacheable = ref true in
-  (* Alpha tokens for loop binders; statics and any free symbols render by their raw ident. *)
-  let tokens = Hashtbl.create (module Indexing.Symbol) in
-  let base_count = ref 0 in
-  let bind_loop s =
-    if Hashtbl.mem tokens s then cacheable := false;
-    let tok = "b" ^ Int.to_string !base_count in
-    Int.incr base_count;
-    Hashtbl.set tokens ~key:s ~data:tok;
-    tok
-  in
-  let emit_sym s =
-    match Hashtbl.find tokens s with
-    | Some tok -> add tok
-    | None -> add (Indexing.symbol_ident s)
-  in
   (* The read-modify-write exemption setting changes which reads the coverage and multiplicity
      queries count, so it is part of the analysis identity. *)
   if virtualize_settings.inline_complex_computations then add "icc;";
@@ -4527,168 +4748,20 @@ let analysis_digest (static_indices : Indexing.static_symbol list) (llc : t) : s
            (Indexing.symbol_ident ss.Indexing.static_symbol)
            (Option.value_map ss.static_range ~default:"" ~f:Int.to_string)
            (if ss.used_as_extent then ";ext" else "")));
-  let emit_tn tn = add ("t" ^ Int.to_string tn.Tn.uid) in
-  (* Local scope ids come from a process-global counter freshly on each lowering (like loop
-     symbols): alpha-rename by first occurrence. *)
-  let scope_alpha = Hashtbl.create (module Int) in
-  let emit_scope (id : scope_id) =
-    emit_tn id.tn;
-    let a =
-      Hashtbl.find_or_add scope_alpha id.scope_id ~default:(fun () -> Hashtbl.length scope_alpha)
-    in
-    add ("." ^ Int.to_string a)
-  in
-  let emit_idx = function
-    | Indexing.Fixed_idx i -> add ("#" ^ Int.to_string i)
-    | Indexing.Iterator s -> emit_sym s
-    | Indexing.Affine { symbols; offset } ->
-        add "(";
-        List.iter symbols ~f:(fun (c, s) ->
-            add (Int.to_string c ^ "*");
-            emit_sym s;
-            add "+");
-        add (Int.to_string offset ^ ")")
-    | Indexing.Sub_axis -> add "_"
-    | Indexing.Concat syms ->
-        add "cat(";
-        List.iter syms ~f:(fun s ->
-            emit_sym s;
-            add ",");
-        add ")"
-  in
-  let emit_idcs idcs =
-    add "[";
-    Array.iter idcs ~f:(fun idx ->
-        emit_idx idx;
-        add ",");
-    add "]"
-  in
-  let rec emit_scalar (sc : scalar_t) =
-    match sc with
-    | Local_scope { id; body; orig_indices } ->
-        add "scope(";
-        emit_scope id;
-        add ")";
-        emit_idcs orig_indices;
-        add "{";
-        emit body;
-        add "}"
-    | Get_local id ->
-        add "getl(";
-        emit_scope id;
-        add ")"
-    | Get (tn, idcs) ->
-        add "get ";
-        emit_tn tn;
-        emit_idcs idcs
-    | Get_dynamic { tn; idcs; dyn_axis; dyn_value } ->
-        add "getd ";
-        emit_tn tn;
-        emit_idcs idcs;
-        add ("/" ^ Int.to_string dyn_axis ^ ":");
-        emit_arg dyn_value
-    | Get_merge_buffer (tn, idcs) ->
-        add "getm ";
-        emit_tn tn;
-        emit_idcs idcs
-    | Ternop (op, a, b, c) ->
-        add (Sexp.to_string (Ops.sexp_of_ternop op));
-        add "(";
-        emit_arg a;
-        add ",";
-        emit_arg b;
-        add ",";
-        emit_arg c;
-        add ")"
-    | Binop (op, a, b) ->
-        add (Sexp.to_string (Ops.sexp_of_binop op));
-        add "(";
-        emit_arg a;
-        add ",";
-        emit_arg b;
-        add ")"
-    | Unop (op, a) ->
-        add (Sexp.to_string (Ops.sexp_of_unop op));
-        add "(";
-        emit_arg a;
-        add ")"
-    | Constant f -> add (Float.to_string f)
-    | Constant_bits b -> add ("bits:" ^ Int64.to_string b)
-    | Embed_index idx ->
-        add "ix:";
-        emit_idx idx
-  and emit_arg ((sc, prec) : scalar_arg) =
-    emit_scalar sc;
-    add ("@" ^ Sexp.to_string (Ops.sexp_of_prec prec))
-  and emit (llc : t) =
-    match llc with
-    | Noop -> add "nop;"
-    | Comment _ -> add "c;"
-    | Staged_compilation _ ->
-        cacheable := false;
-        add "staged;"
-    | Seq (a, b) ->
-        emit a;
-        emit b
-    | For_loop { index; from_; to_; body; axis } ->
-        let tok = bind_loop index in
-        add
-          (Printf.sprintf "for %s=%d..%d@%s{" tok from_ to_
-             (Sexp.to_string (sexp_of_axis_type axis)));
-        emit body;
-        add "}"
-    | Zero_out tn ->
-        add "zero ";
-        emit_tn tn;
-        add ";"
-    | Set { tn; idcs; llsc; debug = _ } ->
-        add "set ";
-        emit_tn tn;
-        emit_idcs idcs;
-        add ":=";
-        emit_scalar llsc;
-        add ";"
-    | Set_dynamic { tn; idcs; dyn_axis; dyn_value; llsc; debug = _ } ->
-        add "setdyn ";
-        emit_tn tn;
-        emit_idcs idcs;
-        add ("@" ^ Int.to_string dyn_axis ^ "=");
-        emit_arg dyn_value;
-        add ":=";
-        emit_scalar llsc;
-        add ";"
-    | Set_from_vec { tn; idcs; length; vec_unop; arg; debug = _ } ->
-        add ("setv" ^ Int.to_string length ^ " ");
-        emit_tn tn;
-        emit_idcs idcs;
-        add (":=" ^ Sexp.to_string (Ops.sexp_of_vec_unop vec_unop));
-        add "(";
-        emit_arg arg;
-        add ");"
-    | Set_local (id, sc) ->
-        add "setl ";
-        emit_scope id;
-        add ":=";
-        emit_scalar sc;
-        add ";"
-    | Declare_local { id; needs_init } ->
-        add "decl ";
-        emit_scope id;
-        add (if needs_init then "0;" else ";")
-    | Workgroup_barrier -> add "bar;"
-    | If { cond; body } ->
-        add "if(";
-        emit_arg cond;
-        add "){";
-        emit body;
-        add "}"
-    | Tile_mma _ ->
-        (* Schedule transforms construct [Tile_mma] after the optimization pipeline ran; it never
-           reaches analysis. Defensive. *)
-        cacheable := false;
-        add "mma;"
-  in
-  emit llc;
+  Canonical_render.emit ~buf
+    {
+      (* Tensor nodes enter by identity: the stored analysis' code is reused verbatim. *)
+      emit_tn = (fun tn -> add ("t" ^ Int.to_string tn.Tn.uid));
+      (* Statics and any other free symbols render by their raw ident — see the preamble above. *)
+      emit_free_sym = (fun s -> add (Indexing.symbol_ident s));
+      on_bind_loop = (fun _ ~id:_ ~shadowed -> if shadowed then cacheable := false);
+      mark_incomplete = (fun () -> cacheable := false);
+      (* Schedule transforms construct [Tile_mma] after the optimization pipeline ran; it never
+         reaches analysis. Defensive. *)
+      mma = Canonical_render.Opaque_mma;
+      initial_tokens = [];
+    }
+    llc;
   if not !cacheable then None
   else Some (Stdlib.Digest.to_hex (Stdlib.Digest.string (Buffer.contents buf)))
 

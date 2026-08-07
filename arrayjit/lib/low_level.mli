@@ -158,6 +158,51 @@ and scalar_arg = scalar_t * Ops.prec [@@deriving sexp_of, equal, compare]
 (** The argument precision is preserved in heterogeneous precision operation arguments, and is
     ignored (overridden) in homogeneous precision operations. *)
 
+module Canonical_render : sig
+  (** gh-563: the one canonical rendering of lowered code, shared by both digest consumers —
+      {!analysis_cache_stats}' cache (keyed inside [optimize]) and [Schedule_cache.canonicalize]
+      (schedule replay across sessions).
+
+      The walk is the same for both: index / scalar / statement emission, loop-binder tokens,
+      local-scope alpha renaming, comment skipping, opaque-statement handling. What deliberately
+      differs is the identity {!policy} — the analysis cache keys tensor nodes and static symbols by
+      identity (a hit reuses the stored code verbatim), the schedule cache alpha-renames everything
+      (a hit replays a schedule onto a different-but-isomorphic lowering).
+
+      Both digests are correctness-critical, so keep the split honest: a new {!t} / {!scalar_t}
+      construct is rendered in the walk and only there (the matches are exhaustive, so omitting it
+      breaks the build); a new digest-relevant {i fact} enters the walk if it belongs to the code
+      itself, or exactly one {!policy} field / one consumer preamble if it is an identity choice or
+      a consumer-specific companion. *)
+
+  (** How [Tile_mma] enters the rendering. *)
+  type mma_policy =
+    | Opaque_mma
+        (** Mark the rendering incomplete and emit a placeholder — the consumer's guarantees do not
+            extend to the construct. *)
+    | Structural_mma  (** Render operands, extents, lane and fallback body. *)
+
+  type policy = {
+    emit_tn : Tnode.t -> unit;  (** Render a tensor node reference. *)
+    emit_free_sym : Indexing.symbol -> unit;
+        (** Render a symbol that neither an enclosing loop binder nor {!initial_tokens} bound. *)
+    on_bind_loop : Indexing.symbol -> id:int -> shadowed:bool -> unit;
+        (** Called when a [For_loop] binder mints the token ["b<id>"]. [shadowed] iff the symbol
+            already had a token: a duplicated binder makes symbol references ambiguous. *)
+    mark_incomplete : unit -> unit;
+        (** Called when an opaque construct makes the rendering an unfaithful summary of the code.
+        *)
+    mma : mma_policy;
+    initial_tokens : (Indexing.symbol * string) list;
+        (** Symbols pre-bound to a rendering token before the walk — the static indices, for the
+            consumer that renders them positionally. *)
+  }
+
+  val emit : buf:Buffer.t -> policy -> t -> unit
+  (** Appends the canonical rendering of the code to the buffer. Deterministic: the caller digests
+      the buffer, usually after its own preamble and companion sections. *)
+end
+
 val scalar_precision : scalar_t -> Ops.prec
 val apply_op : Ops.op -> scalar_t array -> scalar_t
 val flat_lines : t list -> t list
