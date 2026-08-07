@@ -168,4 +168,41 @@ let () =
     |> expect_fatal
   in
   assert (equal_phase tagged.phase Backend_link);
-  assert (Stdlib.Printexc.raw_backtrace_length tagged.backtrace > 0)
+  assert (Stdlib.Printexc.raw_backtrace_length tagged.backtrace > 0);
+  (* gh-ocannl-564: the same untyped failure at [Preflight] instead. Nothing was dispatched there,
+     so it is contained under [strict] and under the [Launch] boundary the tuner installs — where,
+     tagged [Launch], it would be the fatal above and would condemn the lineage. *)
+  let preflight_declined =
+    protect ~strict:true ~classify_backend:no_backend_classification ~provenance:Candidate
+      ~phase:Launch (fun () -> tag Preflight (fun () -> failwith "unexecuted dependencies"))
+    |> expect_classified
+  in
+  assert (equal_phase preflight_declined.phase Preflight);
+  assert (equal_execution_effect preflight_declined.execution_effect No_device_writes);
+  assert (
+    equal_rejection_key
+      (key_of_cause preflight_declined.cause)
+      (Unclassified_key (Preflight, "Failure")));
+  (* And not by asking the backend: a classifier guessing [Writes_may_have_occurred] for an error it
+     does not recognize must not escalate a failure that provably wrote nothing. *)
+  let preflight_not_backend_judged =
+    protect ~strict:true
+      ~classify_backend:(fun phase _exn ->
+        Some
+          {
+            phase;
+            cause =
+              Backend_rejected
+                { backend = "test"; stage = "driver"; severity = Expected; detail = "guessed" };
+            execution_effect = Writes_may_have_occurred;
+          })
+      ~provenance:Candidate ~phase:Launch (fun () ->
+        tag Preflight (fun () -> failwith "unexecuted dependencies"))
+    |> expect_classified
+  in
+  assert (equal_execution_effect preflight_not_backend_judged.execution_effect No_device_writes);
+  (* The process-level and compiler-invariant classes stay fatal wherever they are raised. *)
+  ignore
+    (protect ~strict:true ~classify_backend:no_backend_classification ~provenance:Candidate
+       ~phase:Launch (fun () -> tag Preflight (fun () -> assert false))
+     |> expect_fatal)

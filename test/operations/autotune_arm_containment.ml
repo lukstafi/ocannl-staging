@@ -12,12 +12,18 @@
    values), it is cached (a second, injection-free tune replays that same schedule from the disk
    cache instead of re-searching), and the failed arm is reported honestly — its partial report
    arrives in position carrying the terminal failure, rather than being silently downgraded to
-   "arm B lost". *)
+   "arm B lost".
+
+   gh-ocannl-564 extends the suite one level down, to what a timing run does BEFORE it dispatches:
+   a failure of [Context.run]'s pre-dispatch validation writes nothing, so it must be a decline the
+   search survives — not the fatal it was when it arrived tagged [Launch] with no backend able to
+   attribute it. *)
 
 open Base
 open Ocannl
 open Ocannl.Operation.DSL_modules
 module SC = Ir.Schedule_cache
+module SO = Ir.Schedule_outcome
 
 let p name b = Stdio.printf "%s: %b\n" name b
 let approx a b = Float.(abs (a - b) < 1e-4)
@@ -42,6 +48,29 @@ let with_injected_failure ?exn ~arms_reported ~at ~message f =
              (Option.value exn
                 ~default:(Failure (Printf.sprintf "%s at candidate %s" message label)))));
   Exn.protect ~f ~finally:(fun () -> Autotune.on_candidate_attempt := fun _ -> ())
+
+(* gh-ocannl-564: the same discipline at the pre-dispatch validation seam. [at] counts preflights
+   across the whole call — 1 is arm A's baseline timing, 2 the first candidate it times — and the
+   count is returned so a scenario can assert the injection fired, rather than passing vacuously on
+   a search that timed fewer candidates than expected. *)
+let with_injected_preflight_failure ~at ~raise_it f =
+  let preflights = ref 0 in
+  (Autotune.on_candidate_preflight :=
+     fun _routine_name ->
+       Int.incr preflights;
+       if !preflights = at then raise_it ());
+  let result = Exn.protect ~f ~finally:(fun () -> Autotune.on_candidate_preflight := fun _ -> ()) in
+  (result, !preflights)
+
+let preflight_declines (r : Autotune.report) =
+  List.filter r.Autotune.declines ~f:(fun d ->
+      match d.Autotune.key with SO.Unclassified_key (SO.Preflight, _) -> true | _ -> false)
+
+let declined_with (reports : Autotune.report list) ~substring =
+  List.exists reports ~f:(fun r ->
+      List.exists (preflight_declines r) ~f:(fun d ->
+          d.Autotune.count >= 1
+          && List.exists d.Autotune.sample_details ~f:(String.is_substring ~substring)))
 
 let () =
   let mav = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 7) *. 0.5) in
@@ -291,4 +320,146 @@ let () =
     (Option.is_none (Context.poisoned_failure ctx_r1));
   let ctx_r1 = Context.run ctx_r1 r1 in
   p "and the retry succeeds once the dependency has executed"
-    (match Context.check_runnable ctx_r1 r2 with () -> true | exception _ -> false)
+    (match Context.check_runnable ctx_r1 r2 with () -> true | exception _ -> false);
+
+  (* --- gh-ocannl-564: the candidate half. A pre-dispatch rejection arrives inside the candidate
+     timing's boundary, tagged [Launch] and — with no backend verdict, which is every C backend —
+     fatal: the lineage condemned and the search dead for a mistake nothing had yet acted on. Its
+     own phase makes it a per-candidate decline: census-visible, lineage intact, search completes.
+
+     The rejections are produced by real validation of real routines; the injection only decides
+     WHICH candidate meets one, since the causes belong to the lineage and the bindings and a
+     genuine one fails every candidate of every arm at once. The whole-search form of that is the
+     last scenario below. --- *)
+  let negative_control () =
+    let reports = ref [] in
+    let ctx_n, routine_n =
+      Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:""
+        ~report:(fun r -> reports := r :: !reports)
+        (Context.auto ()) t2 comp Ir.Indexing.Empty
+    in
+    let ctx_n = Context.run ctx_n routine_n in
+    ( List.rev !reports,
+      Array.for_all2_exn (Context.get_values ctx_n t2.Tensor.value) expected ~f:approx )
+  in
+  let control_reports, control_ships = negative_control () in
+  p "control: an uninjected search declines nothing at pre-dispatch validation"
+    (List.for_all control_reports ~f:(fun r -> List.is_empty (preflight_declines r)));
+  p "control: an uninjected search completes and ships"
+    (control_ships && List.for_all control_reports ~f:(fun r -> not r.Autotune.partial));
+
+  (* An unsatisfied execution dependency, from a routine that genuinely has one: [dep_r2] reads what
+     [dep_r1] writes and [dep_r1] has not run. *)
+  let dep_ctx = Context.auto () in
+  let dep_ctx1, _dep_r1 = Context.compile dep_ctx comp Ir.Indexing.Empty in
+  let _dep_ctx2, dep_r2 = Context.compile dep_ctx1 comp Ir.Indexing.Empty in
+  let ctx_d = Context.auto () in
+  let reports_d = ref [] in
+  let (ctx_d', routine_d), preflights_d =
+    with_injected_preflight_failure ~at:2
+      ~raise_it:(fun () -> Context.check_runnable dep_ctx1 dep_r2)
+      (fun () ->
+        Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:""
+          ~report:(fun r -> reports_d := r :: !reports_d)
+          ctx_d t2 comp Ir.Indexing.Empty)
+  in
+  let reports_d = List.rev !reports_d in
+  p "an unsatisfied dependency reached a candidate's timing run" (preflights_d >= 2);
+  p "it is a decline in the census, at the pre-dispatch phase"
+    (declined_with reports_d ~substring:"unexecuted dependencies");
+  p "the search that declined it completed"
+    (List.for_all reports_d ~f:(fun r -> not r.Autotune.partial));
+  p "and did not condemn the lineage" (Option.is_none (Context.poisoned_failure ctx_d));
+  let ctx_d' = Context.run ctx_d' routine_d in
+  p "a winner still ships and computes the right values"
+    (Array.for_all2_exn (Context.get_values ctx_d' t2.Tensor.value) expected ~f:approx);
+
+  (* An out-of-range static binding, likewise from real bind-time validation, and a different
+     exception constructor from the dependency case — so this also pins that the phase rather than
+     the exception is what classifies these. *)
+  let osym, _ = Ir.Indexing.get_static_symbol ~static_range:4 Ir.Indexing.Empty in
+  let ctx_b = Context.auto () in
+  let reports_b = ref [] in
+  let (ctx_b', routine_b), preflights_b =
+    with_injected_preflight_failure ~at:2
+      ~raise_it:(fun () -> Ir.Indexing.validate_lowered_bindings [ (osym, ref 9) ])
+      (fun () ->
+        Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:""
+          ~report:(fun r -> reports_b := r :: !reports_b)
+          ctx_b t2 comp Ir.Indexing.Empty)
+  in
+  let reports_b = List.rev !reports_b in
+  p "an out-of-range static binding reached a candidate's timing run" (preflights_b >= 2);
+  p "it too is a decline in the census, at the pre-dispatch phase"
+    (declined_with reports_b ~substring:"exceeds its declared range");
+  p "the search that declined it completed"
+    (List.for_all reports_b ~f:(fun r -> not r.Autotune.partial));
+  p "and did not condemn the lineage" (Option.is_none (Context.poisoned_failure ctx_b));
+  let ctx_b' = Context.run ctx_b' routine_b in
+  p "a winner still ships and computes the right values"
+    (Array.for_all2_exn (Context.get_values ctx_b' t2.Tensor.value) expected ~f:approx);
+
+  (* --- Containment stops at the one pre-dispatch condition that is not fixable: a poisoned lineage
+     has no restore (gh-ocannl-536), so every later timing run in it is dead too, and declining this
+     candidate would decline every remaining one for the same terminal reason. Poisoned AFTER the
+     baseline was timed, so the search has a winner to wrongly report success with. --- *)
+  let ctx_z = Context.auto () in
+  let attempts = ref 0 in
+  let reports_z = ref [] in
+  let poisoned_stops_the_search =
+    Exn.protect
+      ~f:(fun () ->
+        (Autotune.on_candidate_attempt :=
+           fun _ ->
+             Int.incr attempts;
+             (* Poisons without raising: the lineage's own state must stop the search, through the
+                timing run's pre-dispatch check rather than an injected exception. *)
+             if !attempts = 2 then
+               Context.poison_lineage ctx_z ~routine_name:"injected"
+                 (Failure "injected prior poisoning"));
+        match
+          Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:""
+            ~report:(fun r -> reports_z := r :: !reports_z)
+            ctx_z t2 comp Ir.Indexing.Empty
+        with
+        | _ -> false
+        | exception Failure msg -> String.is_substring msg ~substring:"poisoned")
+      ~finally:(fun () -> Autotune.on_candidate_attempt := fun _ -> ())
+  in
+  p "a poisoned lineage is not declined like a fixable pre-dispatch failure"
+    poisoned_stops_the_search;
+  (* Positionally arm A, where the poisoning happened. Read as "some report" this passes without the
+     fix too: arm B's baseline hits the same lineage and reports it honestly, while arm A declines
+     its way to the end and reports a COMPLETED search that shipped an untuned fallback out of a
+     dead lineage. *)
+  p "the arm it happened in reports a terminal failure, not a completed search"
+    (Option.value_map (List.hd (List.rev !reports_z)) ~default:false ~f:(fun r ->
+         r.Autotune.partial
+         && Option.value_map r.Autotune.terminal_failure ~default:false ~f:(fun tf ->
+                String.is_substring tf.Autotune.detail ~substring:"poisoned")));
+
+  (* --- The genuine whole-search form, injection-free: a lineage holding an unexecuted compile of
+     the same computation gives every routine the tuner compiles an unsatisfied dependency, failing
+     both arms at their baseline's validation. That failure is the caller's to fix — which it can
+     only be if the lineage survives it. --- *)
+  let ctx_u = Context.auto () in
+  let ctx_u1, r_unrun = Context.compile ctx_u comp Ir.Indexing.Empty in
+  let unrunnable_raised =
+    match
+      Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"" ctx_u1 t2 comp
+        Ir.Indexing.Empty
+    with
+    | _ -> false
+    | exception Failure msg -> String.is_substring msg ~substring:"unexecuted dependencies"
+  in
+  p "a tune whose lineage cannot run its own baseline fails with the validation error"
+    unrunnable_raised;
+  p "the lineage it failed in is not condemned" (Option.is_none (Context.poisoned_failure ctx_u1));
+  let ctx_u2 = Context.run ctx_u1 r_unrun in
+  let ctx_u3, routine_u =
+    Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"" ctx_u2 t2 comp
+      Ir.Indexing.Empty
+  in
+  let ctx_u3 = Context.run ctx_u3 routine_u in
+  p "and the retry in it succeeds once the dependency has executed"
+    (Array.for_all2_exn (Context.get_values ctx_u3 t2.Tensor.value) expected ~f:approx)

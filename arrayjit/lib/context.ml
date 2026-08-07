@@ -302,9 +302,10 @@ let poison_lineage ctx ~routine_name exn =
 (* The pre-dispatch validation of {!run}, callable on its own (gh-ocannl-550): everything here
    happens BEFORE [Ir.Task.run], so a failure it raises proves the routine was never dispatched and
    the device wrote nothing. A caller that wraps [run] in a launch-tagged failure boundary (the
-   autotuner's timing runs) validates through this first, so an unattributed failure inside that
-   boundary means dispatch was attempted — which is what makes condemning the lineage there sound,
-   and what keeps a mere unsatisfied dependency or an out-of-range binding from condemning it. *)
+   autotuner's timing runs) validates through this in its own [Schedule_outcome.Preflight] region,
+   so an unattributed failure at [Launch] means dispatch was attempted — which makes condemning the
+   lineage there sound, and keeps a mere unsatisfied dependency or an out-of-range binding from
+   condemning it (gh-ocannl-564). *)
 let check_runnable ctx routine =
   check_not_poisoned ctx;
   (* Check that all required inputs are initialized. A node counts as initialized if it was produced

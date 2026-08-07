@@ -6,6 +6,7 @@ type phase =
   | Backend_codegen
   | Backend_compile
   | Backend_link
+  | Preflight
   | Launch
   | Sync
 [@@deriving sexp_of, compare, equal]
@@ -84,7 +85,15 @@ let is_assert_or_stack = function Assert_failure _ | Stack_overflow -> true | _ 
 
 let is_compile_side = function
   | Transform | Hardware_limits | Backend_codegen | Backend_compile | Backend_link -> true
-  | Launch | Sync -> false
+  | Preflight | Launch | Sync -> false
+
+(* gh-ocannl-564: this phase precedes the dispatch, so its failures prove the device did nothing — no
+   partial write to bound, no lineage to condemn. The one phase always containable, strict or not. *)
+let is_pre_dispatch = function
+  | Preflight -> true
+  | Transform | Hardware_limits | Backend_codegen | Backend_compile | Backend_link | Launch | Sync
+    ->
+      false
 
 let unclassified phase exn =
   {
@@ -103,6 +112,13 @@ let classify_raw ~strict ~classify_backend ~provenance ~phase ~candidate exn bac
   let fatal () = Fatal { exn; backtrace; phase; candidate } in
   if is_oom_or_interrupt exn then fatal ()
   else if is_assert_or_stack exn && not (equal_provenance provenance Cache_replay) then fatal ()
+  else if is_pre_dispatch phase then
+    (* Not routed through the backend (gh-ocannl-564): this validation is host-side and precedes
+       every backend call, so a classifier answering [Writes_may_have_occurred] for an error it does
+       not recognize would escalate a failure that provably wrote nothing. The [Fatal] default the
+       other phases take is what condemned the lineage for a fixable mistake wherever
+       [classify_failure] answers [None] — every C backend. *)
+    Classified (unclassified phase exn)
   else
     match classify_backend phase exn with
     (* The backend is handed the phase, so the phase it reports back is not independent evidence:

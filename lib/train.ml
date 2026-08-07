@@ -247,6 +247,11 @@ let every_non_literal_materialized =
     attributing arms by arrival order should read [terminal_failure] (equivalently [partial]) before
     [best_ms], as benchmarks/runners/ocannl/bench_harness.ml does.
 
+    The in-position guarantee is {!Autotune.tune}'s reporting contract, and inherits its one
+    carve-out: an argument-precondition violation (an incompatible [timing_ctx]) is detected before
+    the call reaches any phase, so it reports nothing and propagates. Both arms are given the same
+    contexts, so both raise it; there is no surviving arm to misattribute.
+
     The arms differ in which candidates {e exist}, not only in how they rank: a tensorized candidate
     is seeded only when the matmul site's operand and destination storage precisions resolve to a
     tile the backend advertises ({!Autotune.mma_tile_for_precisions}), and placement decides which
@@ -366,43 +371,10 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
           if must_propagate exn then Stdlib.Printexc.raise_with_backtrace exn backtrace
           else Error (exn, backtrace)
     in
-    let r =
-      match (!last, result) with
-      | (Some _ as reported), _ -> reported
-      | None, Ok _ -> None
-      | None, Error (exn, _) ->
-          (* [?report] is positional and consumers name arms by arrival order, so an arm that
-             reported nothing must still occupy its slot — otherwise the surviving arm's report
-             arrives first and is attributed to this arm's position. {!Autotune.tune} now reports on
-             every path, each pre-search failure carrying the phase it died at, so this is the
-             backstop for a raise from outside that contract; [Transform] is the tuner's own
-             convention for an unattributed failure, and the detail says the phase is not known. *)
-          let slot =
-            {
-              Autotune.no_search_report with
-              partial = true;
-              best_label = "";
-              terminal_failure =
-                Some
-                  {
-                    Autotune.phase = Ir.Schedule_outcome.Transform;
-                    candidate = None;
-                    detail =
-                      Printf.sprintf
-                        "arm terminated before the search reported anything (phase unknown): %s"
-                        (Exn.to_string exn);
-                  };
-            }
-          in
-          last := Some slot;
-          (* Best-effort, like the tuner's own fatal-path reporting: this is already the failure
-             path, and the arm failure is the error worth propagating. *)
-          (try Option.iter to_report ~f:(fun f -> f slot)
-           with report_exn when not (must_propagate report_exn) ->
-             Stdio.eprintf "tune_placements: arm-slot report callback failed: %s\n%!"
-               (Exn.to_string report_exn));
-          Some slot
-    in
+    (* [?report] is positional and consumers name arms by arrival order, so a failing arm must still
+       occupy its slot. It does: {!Autotune.tune} reports exactly once per call on every path that
+       does any work, each pre-search failure carrying the phase it died at. *)
+    let r = !last in
     let best_ms =
       match result with
       (* Not [r.best_ms]: the partial report's best is a measurement of the search context, and no
