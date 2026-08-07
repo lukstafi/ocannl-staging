@@ -9,22 +9,23 @@
 
    THE INVARIANT (the whole point of the transform being a pure schedule transform): the pipelined
    rendering is bitwise identical to depth 1. The compute subtree is remapped identically — only
-   the copy for k_o+1 is issued before the compute of k_o (prologue before the loop, a single
-   in-loop barrier instead of two, a trailing barrier after), and the renderer's buffer rotation
-   makes every read resolve to the copy holding exactly the values the unpipelined form reads. So
-   depth 2 and depth 3 must match depth 1 BITWISE on the GPU backends (while all three only
-   approximate the serial twin — the tile reduction reassociates, which is Tensorize's license, not
-   pipelining's).
+   the copy for k_o+1 is issued before the compute of k_o (prologue before the loop, one shared
+   in-loop barrier with both stages' prefetches grouped behind it, a trailing barrier after), and
+   the renderer's buffer rotation makes every read resolve to the copy holding exactly the values
+   the unpipelined form reads. So depth 2 must match depth 1 BITWISE on the GPU backends (while
+   both only approximate the serial twin — the tile reduction reassociates, which is Tensorize's
+   license, not pipelining's). Phase 1 implements depth 2 only; deeper lookahead is the phase-2
+   async-copy arms', and depth 3 is pinned as a typed rejection.
 
    Structural pins (backend-independent, on the applied schedule): the pipelined map records both
-   tiles at the requested depth with k_o as rotor; the k_o body holds one barrier and one
-   If-guarded prefetch per stage (depth 1: two barriers per stage, no Ifs); both prologue loads sit
-   outside the loop. Canonical digests must distinguish depths 1/2/3 pairwise — depths >= 2 emit
-   identical IR and differ only in the renderer's rotation modulus, so this pins the digest's
-   pipelined companion section specifically. Validation legs pin the illegal placements. The C
-   backends cannot express shared placement and must reject the compile cleanly (the same pinning
-   as the SMEM matmul test); the schedule-level validation errors are the typed Illegal_schedule
-   declines autotune candidates see. *)
+   tiles at the requested depth with k_o as rotor; the k_o body holds ONE barrier for both
+   same-anchor stages with both If-guarded prefetches grouped behind it (depth 1: two barriers per
+   stage); both prologue loads sit outside the loop. Canonical digests distinguish the depths, and
+   the pipelined companion section alone must separate byte-identical IR whose side-table depths
+   differ (the phase-2 aliasing hazard, pinned by record surgery). Validation legs pin the illegal
+   placements. The C backends cannot express shared placement and must reject the compile cleanly
+   (the same pinning as the SMEM matmul test); the schedule-level validation errors are the typed
+   Illegal_schedule declines autotune candidates see. *)
 
 open Base
 open Ocannl
@@ -178,12 +179,10 @@ let () =
   in
   let%op mc1 = ma * mb in
   let%op mc2 = ma * mb in
-  let%op mc3 = ma * mb in
   let legs =
     [
       (1, mc1, named "pipe_mm_d1" (Train.forward mc1));
       (2, mc2, named "pipe_mm_d2" (Train.forward mc2));
-      (3, mc3, named "pipe_mm_d3" (Train.forward mc3));
     ]
   in
   if on_gpu then (
@@ -195,12 +194,10 @@ let () =
     in
     let got_d1 = List.Assoc.find_exn results 1 ~equal:Int.equal in
     let got_d2 = List.Assoc.find_exn results 2 ~equal:Int.equal in
-    let got_d3 = List.Assoc.find_exn results 3 ~equal:Int.equal in
     p "staged depths approximate the serial twin (GPU) or clean rejection (CPU)"
       (List.for_all results ~f:(fun (_, got) -> Array.for_all2_exn got got_serial ~f:approx));
     (* The invariant: pipelining is a pure prefetch-timing transform. *)
     p "depth 2 matches depth 1 BITWISE" (Array.for_all2_exn got_d2 got_d1 ~f:Float.equal);
-    p "depth 3 matches depth 1 BITWISE" (Array.for_all2_exn got_d3 got_d1 ~f:Float.equal);
     (match (read_generated "pipe_mm_d1", read_generated "pipe_mm_d2") with
     | Some src1, Some src2 ->
         let count_sub src sub =
@@ -234,14 +231,12 @@ let () =
     p "staged depths approximate the serial twin (GPU) or clean rejection (CPU)"
       (List.for_all legs ~f:rejects);
     p "depth 2 matches depth 1 BITWISE" true;
-    p "depth 3 matches depth 1 BITWISE" true;
     p "depth 2 rotates the buffers the depth-1 kernel does not" true);
 
   (* --- Structural pins on the applied schedules (all backends; captured by the transforms
      above). --- *)
   let opt_d1, k_o1 = Hashtbl.find_exn captured 1 in
   let opt_d2, k_o2 = Hashtbl.find_exn captured 2 in
-  let opt_d3, _ = Hashtbl.find_exn captured 3 in
   (* Both stages' tiles, at either depth: the workgroup-shared set. *)
   let is_tile opt tn = Set.mem opt.LL.workgroup_shared tn in
   p "depth 1 records no pipelined tiles" (Map.is_empty opt_d1.LL.pipelined);
@@ -260,14 +255,16 @@ let () =
   let d1_body = body_of k_o1 opt_d1.LL.llc in
   let d2_body = body_of k_o2 opt_d2.LL.llc in
   (* Depth 1: per stage, [loads; barrier; ...; barrier] nested inside k_o — 4 barriers, no
-     statement-level If-guarded prefetches, no tile writes outside the loop. Depth 2: one barrier
-     per stage inside k_o plus one If-guarded prefetch per stage (statement-level, so the lane
-     restriction Ifs nested within load nests are not miscounted); the prologue loads (tile writes
-     outside k_o) and the trailing barriers are the loop's siblings. *)
+     statement-level If-guarded prefetches, no tile writes outside the loop. Depth 2: the two
+     same-anchor stages share ONE barrier phase per iteration — both If-guarded prefetches
+     (statement-level, so the lane restriction Ifs nested within load nests are not miscounted)
+     grouped back to back behind the single barrier, so neither copy is forced to complete before
+     the compute — with the prologue loads (tile writes outside k_o) and one shared trailing
+     barrier as the loop's siblings. *)
   p "depth 1 keeps both phase barriers per stage inside k_o"
     (barriers d1_body = 4 && barriers opt_d1.LL.llc = 4);
-  p "depth 2 keeps one barrier per stage inside k_o, one trailing each outside"
-    (barriers d2_body = 2 && barriers opt_d2.LL.llc = 4);
+  p "depth 2 shares one barrier per iteration across both stages, one trailing outside"
+    (barriers d2_body = 1 && barriers opt_d2.LL.llc = 2);
   let stmt_prefetches opt llc =
     List.count (LL.flat_lines [ llc ]) ~f:(function
       | LL.If { body; _ } -> writes_tile ~is_tile:(is_tile opt) body
@@ -285,13 +282,24 @@ let () =
   p "depth 2 places both prologue loads outside k_o"
     (d1_total = 2 && d1_in = 2 && d2_total = 4 && d2_in = 2);
 
-  (* --- Cache identity: canonical digests distinguish all three depths pairwise. Depth 1 vs 2
-     differ in the IR itself; 2 vs 3 emit identical IR and differ only in the pipelined companion
-     section — the leg that would silently alias without it. --- *)
+  (* --- Cache identity: canonical digests distinguish the depths. In phase 1 (depth <= 2) the
+     depths already differ in the IR; the pipelined companion section is what keeps depths >= 2
+     distinct once the phase-2 async-copy arms widen the legal range (their IR is identical, only
+     the rotation modulus differs) — pinned here by digesting depth 2's optimized value against a
+     copy whose side-table alone records depth 3 (byte-identical IR by construction), rather than
+     discovered as an alias later. --- *)
   let dg opt = SC.digest (SC.canonicalize opt) in
-  let d1, d2, d3 = (dg opt_d1, dg opt_d2, dg opt_d3) in
-  p "canonical digests distinguish depths 1/2/3 pairwise"
-    ((not (String.equal d1 d2)) && (not (String.equal d2 d3)) && not (String.equal d1 d3));
+  p "canonical digests distinguish depths 1 and 2"
+    (not (String.equal (dg opt_d1) (dg opt_d2)));
+  let opt_d2_as_d3 =
+    {
+      opt_d2 with
+      LL.pipelined =
+        Map.map opt_d2.LL.pipelined ~f:(fun pt -> { pt with LL.pt_depth = 3 });
+    }
+  in
+  p "the pipelined companion section alone distinguishes same-IR depths"
+    (not (String.equal (dg opt_d2) (dg opt_d2_as_d3)));
 
   (* --- Validation legs: the illegal placements are typed schedule errors, not crashes. --- *)
   let expect_invalid name ~substring:sub (f : unit -> unit) =
@@ -314,6 +322,11 @@ let () =
   expect_invalid "pipeline_depth 0 is rejected" ~substring:"pipeline_depth must be >= 1"
     (reapply ~probe:"pipe_mm_probe0" ~f:(fun ~out opt ->
          let schedule, _ = staged_schedule ~pipeline_depth:0 ~out opt in
+         ignore (Sched.apply schedule opt : LL.optimized)));
+  expect_invalid "pipeline_depth 3 is rejected in phase 1"
+    ~substring:"not implemented in phase 1"
+    (reapply ~probe:"pipe_mm_probe3" ~f:(fun ~out opt ->
+         let schedule, _ = staged_schedule ~pipeline_depth:3 ~out opt in
          ignore (Sched.apply schedule opt : LL.optimized)));
   expect_invalid "pipelining a non-cooperative (packing) Stage is rejected"
     ~substring:"requires cooperative staging"

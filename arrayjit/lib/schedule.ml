@@ -1047,6 +1047,14 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
       "Schedule.Stage: pipeline_depth > 1 requires cooperative staging (the rotation pipelines the \
        cooperative copy against the compute; packing and reused-workgroup stagings have no \
        prefetch to overlap)";
+  if pipeline_depth > 2 then
+    invalid_arg
+      (Printf.sprintf
+         "Schedule.Stage: pipeline_depth %d is not implemented in phase 1 of gh-ocannl-487: the \
+          portable form's single-step lookahead (one prefetch per iteration behind one barrier) \
+          keeps at most one block in flight, so copies beyond 2 would only consume shared memory; \
+          deeper pipelines arrive with the phase-2 async-copy arms"
+         pipeline_depth);
   if hoisted && shared then
     invalid_arg "Schedule.Stage: hoisted staging requires shared = false (it emits no load nest)";
   if Option.is_some swizzle && not shared then
@@ -1620,6 +1628,16 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
       else
         match lstar_depth with
         | Some ld when (match stack0.(ld).axis with Serial -> true | _ -> false) ->
+            (* The prologue fills copy 0 and the renderer's first-iteration read is copy
+               [from_ mod depth], so a nonzero lower bound would read an uninitialized copy
+               (Codex P1 on PR #303). Unreachable today — lowering emits 0-based loops and a
+               Partition-segmented anchor fails the single-index-vector rule first — so this is a
+               defensive rejection, not a supported-case gate. *)
+            if stack0.(ld).from_ <> 0 then
+              invalid_arg
+                ("Schedule.Stage: pipeline_depth > 1 requires the staging anchor loop "
+                ^ Indexing.symbol_ident stack0.(ld).index
+                ^ " to start at 0 (the prologue fills buffer copy 0)");
             Some stack0.(ld).index
         | Some ld ->
             invalid_arg
@@ -1642,13 +1660,30 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
             (Embed_index (Indexing.Iterator rotor), iprec),
             (Constant (Float.of_int fc.to_), iprec) )
       in
-      let remapped =
-        remap_reads ~source ~from_idcs:idcs0 ~tile ~tile_idcs:tile_read_idcs fc.body
+      let guarded_prefetch = If { cond = (guard, iprec); body = prefetch } in
+      let remap llc = remap_reads ~source ~from_idcs:idcs0 ~tile ~tile_idcs:tile_read_idcs llc in
+      (* Same-anchor composition (Codex P2 on PR #303): a previous pipelined stage at this rotor
+         already restructured the body to [barrier; prefetches...; compute] and appended the
+         trailing barrier after the loop. Wrapping it again ([barrier; prefetch_B; barrier;
+         prefetch_A; compute]) would place a barrier between the two prefetches — the copy issued
+         before it must complete at that barrier, so its load no longer overlaps the compute.
+         Instead, group this stage's prefetch into the SAME phase: one barrier per iteration,
+         prefetches back to back, then the compute. Safety is unchanged — the prefetches write
+         next-iteration copies of distinct tiles, and the single barrier still separates every
+         copy's write from its reads (one iteration apart) and from its next overwrite. *)
+      let same_anchor =
+        Map.exists opt.pipelined ~f:(fun { pt_rotor; _ } -> Indexing.equal_symbol pt_rotor rotor)
       in
-      let body =
-        unflat_lines [ Workgroup_barrier; If { cond = (guard, iprec); body = prefetch }; remapped ]
-      in
-      unflat_lines [ prologue; for_loop { fc with body }; Workgroup_barrier ]
+      match (same_anchor, flat_lines [ fc.body ]) with
+      | true, Workgroup_barrier :: rest ->
+          let body =
+            unflat_lines [ Workgroup_barrier; guarded_prefetch; remap (unflat_lines rest) ]
+          in
+          (* The previous same-anchor stage's trailing barrier already follows the loop. *)
+          unflat_lines [ prologue; for_loop { fc with body } ]
+      | _ ->
+          let body = unflat_lines [ Workgroup_barrier; guarded_prefetch; remap fc.body ] in
+          unflat_lines [ prologue; for_loop { fc with body }; Workgroup_barrier ]
     in
     let llc =
       match (lstar_depth, pipeline_rotor) with
