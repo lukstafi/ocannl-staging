@@ -138,6 +138,7 @@ let () =
               hoisted = false;
               swizzle = None;
               pad_stride = None;
+              pipeline_depth = 1;
             };
           Sched.Stage
             {
@@ -148,6 +149,7 @@ let () =
               hoisted = false;
               swizzle = None;
               pad_stride = None;
+              pipeline_depth = 1;
             };
           Sched.Privatize { target = prod2.Tensor.value; over = k_o };
           Sched.Fuse_epilogue { target = prod2.Tensor.value; shared = false };

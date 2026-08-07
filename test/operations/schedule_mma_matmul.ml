@@ -744,6 +744,7 @@ let () =
           hoisted = false;
           swizzle = None;
           pad_stride = None;
+          pipeline_depth = 1;
         };
       Sched.Stage
         {
@@ -754,6 +755,7 @@ let () =
           hoisted = false;
           swizzle = None;
           pad_stride = None;
+          pipeline_depth = 1;
         };
       tz;
     ]

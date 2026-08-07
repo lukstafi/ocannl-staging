@@ -72,6 +72,8 @@ type saved_optop =
           (** Serialized only when set ([@sexp.option]), so pre-swizzle cache files parse. *)
       pad_stride : int option; [@sexp.option]
           (** Likewise omitted when unset, so pre-gh-481 cache files parse. *)
+      pipeline_depth : int option; [@sexp.option]
+          (** [None] encodes depth 1 and is omitted, so pre-gh-487 cache files parse. *)
     }
   | Privatize of { target : int; over : sym_ref }
   | Expand_zero of { tn : int }

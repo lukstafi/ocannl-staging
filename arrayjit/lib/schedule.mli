@@ -94,6 +94,7 @@ type optop =
       hoisted : bool;
       swizzle : Low_level.swizzle_kind option;
       pad_stride : int option;
+      pipeline_depth : int;
     }
       (** Stage reads of [source] through a tile: a fresh [Local]-mode node registered in the traced
           store, its dims derived per source axis from the range of the index terms over
@@ -185,7 +186,26 @@ type optop =
           [Effectively_constant] intent or a constant placement), no padding on the source, and
           every outer-part symbol bound by an enclosing loop (static/dynamic indices are rejected —
           packing runs at link time with no bindings). Note: later host-side writes to the source
-          (e.g. [set_values]) do NOT refresh the packed copy. *)
+          (e.g. [set_values]) do NOT refresh the packed copy.
+
+          [pipeline_depth = d] with [d > 1] software-pipelines a cooperative staging (gh-ocannl-487;
+          an int rather than a bool so a search has a dimension, not a switch — [1] is the identity,
+          taking exactly the unpipelined code path). Requires [cooperative = Some _] and an anchor
+          loop L* that is [Serial] (the rotation needs a well-defined iteration order; the
+          no-anchor broadcast case has no rotor). The staging composition then becomes: a prologue
+          copy of iteration [from_] before L*, per iteration [k] a single barrier followed by the
+          copy for [k + 1] under an [If (k < to_)] guard (folded away on 1-trip loops) followed by
+          the compute, and a trailing barrier after L* — [2N] barriers become [N + 1], and the
+          prefetch is issued before the compute whose latency hides it. The tile is recorded in
+          {!field:Low_level.pipelined}: codegen allocates [d] rotating copies and selects the
+          buffer by the loop counter (reads [k mod d], in-loop writes [(k+1) mod d], the prologue
+          write copy 0), so the compute reads exactly the values the unpipelined form reads, in the
+          same order — the pipelined rendering is bitwise identical to [pipeline_depth = 1], a pure
+          prefetch-timing transform ({!check_hardware_limits} accounts the tile's shared-memory
+          bytes times [d]). [Tile_mma] in the compute is compatible: its bracketing barriers are
+          uniformly reached and separate same-buffer phases even more strongly than required.
+          Backends that cannot render workgroup-shared staging (the serial C backends) reject the
+          composition exactly as they reject unpipelined shared staging. *)
   | Privatize of { target : Tn.t; over : Indexing.symbol }
       (** Accumulator privatization: contract the read-modify-write accumulation of the materialized
           [target] across the (Serial) [over] loop's whole subtree into a per-thread [Local]

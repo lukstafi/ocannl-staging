@@ -118,6 +118,7 @@ let () =
           hoisted = false;
           swizzle = None;
           pad_stride = None;
+          pipeline_depth = 1;
         };
       Sched.Stage
         {
@@ -128,6 +129,7 @@ let () =
           hoisted = false;
           swizzle = None;
           pad_stride = None;
+          pipeline_depth = 1;
         };
       Sched.Privatize { target = mc; over = k_o };
     ]
@@ -154,6 +156,7 @@ let () =
             hoisted = false;
             swizzle = None;
             pad_stride = None;
+            pipeline_depth = 1;
           };
         Sched.Stage
           {
@@ -164,6 +167,7 @@ let () =
             hoisted = false;
             swizzle = None;
             pad_stride = None;
+            pipeline_depth = 1;
           };
         Sched.Privatize { target = mc; over = k_o };
       ]
@@ -198,6 +202,7 @@ let () =
             hoisted = false;
             swizzle = None;
             pad_stride = None;
+            pipeline_depth = 1;
           };
         Sched.Stage
           {
@@ -208,6 +213,7 @@ let () =
             hoisted = false;
             swizzle = None;
             pad_stride = None;
+            pipeline_depth = 1;
           };
         Sched.Privatize { target = mc; over = k_o };
         Sched.Unroll { axis = i_t; materialize = true };
@@ -243,7 +249,7 @@ let () =
     let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner }) in
     let stage source tile_loops =
       Sched.Stage
-        { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None }
+        { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None; pipeline_depth = 1 }
     in
     let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1 in
     [ sp_i; sp_k ] @ sink j [ k_o ] @ sink i_i [ k_o ] @ sink i_o [ k_o ]
@@ -266,7 +272,7 @@ let () =
     let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner }) in
     let stage source tile_loops =
       Sched.Stage
-        { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None }
+        { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None; pipeline_depth = 1 }
     in
     let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1 in
     [ ez; sp_zi; sp_i; sp_k ] @ sink j [ k_o ] @ sink i_i [ k_o ] @ sink i_o [ k_o ]
@@ -290,7 +296,7 @@ let () =
     let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner }) in
     let stage ~hoisted source tile_loops =
       Sched.Stage
-        { source; tile_loops; shared = false; cooperative = None; hoisted; swizzle = None; pad_stride = None }
+        { source; tile_loops; shared = false; cooperative = None; hoisted; swizzle = None; pad_stride = None; pipeline_depth = 1 }
     in
     let stage_b =
       match pack_b with

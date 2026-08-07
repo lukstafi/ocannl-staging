@@ -71,6 +71,7 @@ let () =
       workgroup_shared = Base.Set.empty (module Tn);
       simdgroup_fragments = Base.Set.empty (module Tn);
       swizzled = Base.Map.empty (module Tn);
+      pipelined = Base.Map.empty (module Tn);
       zero_fringe = Base.Set.empty (module Tn);
       flip_candidates = [];
     }

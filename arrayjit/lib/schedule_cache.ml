@@ -41,6 +41,9 @@ type saved_optop =
       hoisted : bool;
       swizzle : LL.swizzle_kind option; [@sexp.option]
       pad_stride : int option; [@sexp.option]
+      pipeline_depth : int option; [@sexp.option]
+          (** [None] encodes depth 1, so pre-pipelining cache entries stay readable (the
+              [swizzle]/[pad_stride] precedent). *)
     }
   | Privatize of { target : int; over : sym_ref }
   | Expand_zero of { tn : int }
@@ -172,6 +175,18 @@ let canonicalize ?(static_indices = []) ?(with_placements = true) (opt : LL.opti
         (match kind with LL.Swizzle_elem -> () | LL.Swizzle_b128 -> add ":b128");
         add ",")
   end;
+  (* Gated on non-emptiness like [swizzled], and for the same reason. The depth is digest-relevant
+     on its own: pipeline depths >= 2 produce identical IR (the prologue/prefetch restructuring
+     does not mention the depth) and differ only in the renderer's rotation modulus, so without
+     this section a depth-2 winner would alias a depth-3 program (gh-ocannl-487). The rotor needs
+     no entry — it is the staging anchor loop, determined by the code itself. *)
+  if not (Map.is_empty opt.LL.pipelined) then begin
+    add "];pipelined:[";
+    Map.iteri opt.LL.pipelined ~f:(fun ~key:tn ~data:{ LL.pt_depth; pt_rotor = _ } ->
+        emit_tn tn;
+        add (":" ^ Int.to_string pt_depth);
+        add ",")
+  end;
   add "];merge:";
   (match opt.LL.merge_node with None -> add "-" | Some tn -> emit_tn tn);
   add ";";
@@ -264,7 +279,9 @@ let to_saved r (sched : Schedule.schedule) : saved_schedule * registry =
               (r, saved)
           | Schedule.Pad { axis; to_multiple_of } ->
               (r, Pad { axis = resolve_exn r axis; to_multiple_of })
-          | Schedule.Stage { source; tile_loops; shared; cooperative; hoisted; swizzle; pad_stride } ->
+          | Schedule.Stage
+              { source; tile_loops; shared; cooperative; hoisted; swizzle; pad_stride; pipeline_depth }
+            ->
               ( r,
                 Stage
                   {
@@ -275,6 +292,7 @@ let to_saved r (sched : Schedule.schedule) : saved_schedule * registry =
                     hoisted;
                     swizzle;
                     pad_stride;
+                    pipeline_depth = (if pipeline_depth = 1 then None else Some pipeline_depth);
                   } )
           | Schedule.Privatize { target; over } ->
               (r, Privatize { target = resolve_tn_exn r target; over = resolve_exn r over })
@@ -341,7 +359,9 @@ let of_saved canonical (saved : saved_schedule) : Schedule.schedule * registry =
               (r, op)
           | Pad { axis; to_multiple_of } ->
               (r, Schedule.Pad { axis = unresolve_exn r axis; to_multiple_of })
-          | Stage { source; tile_loops; shared; cooperative; hoisted; swizzle; pad_stride } ->
+          | Stage
+              { source; tile_loops; shared; cooperative; hoisted; swizzle; pad_stride; pipeline_depth }
+            ->
               ( r,
                 Schedule.Stage
                   {
@@ -352,6 +372,7 @@ let of_saved canonical (saved : saved_schedule) : Schedule.schedule * registry =
                     hoisted;
                     swizzle;
                     pad_stride;
+                    pipeline_depth = Option.value pipeline_depth ~default:1;
                   } )
           | Privatize { target; over } ->
               ( r,

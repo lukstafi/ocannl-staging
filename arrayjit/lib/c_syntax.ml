@@ -3949,6 +3949,7 @@ module C_syntax (B : C_syntax_config) = struct
           workgroup_shared;
           simdgroup_fragments;
           swizzled;
+          pipelined = _;
           zero_fringe = _;
           flip_candidates = _;
         } : (string * kparam_source) list * PPrint.document * Low_level.launch_dims =

@@ -38,6 +38,7 @@ type optop =
       hoisted : bool;
       swizzle : Low_level.swizzle_kind option;
       pad_stride : int option;
+      pipeline_depth : int;
     }
   | Privatize of { target : Tn.t; over : Indexing.symbol }
   | Expand_zero of { tn : Tn.t; indices : Indexing.symbol list }
@@ -1032,12 +1033,20 @@ let pack_constant_tile ~debug ~(src_nd : Ndarray.t) ~(src_dims : int array) ~(pr
   dst
 
 let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_stride
-    (opt : Low_level.optimized) : Low_level.optimized =
+    ~pipeline_depth (opt : Low_level.optimized) : Low_level.optimized =
   let open Low_level in
   if List.is_empty tile_loops then invalid_arg "Schedule.Stage: empty tile_loops";
   Option.iter cooperative ~f:(fun w ->
       if not shared then invalid_arg "Schedule.Stage: cooperative staging requires shared = true";
       if w <= 0 then invalid_arg "Schedule.Stage: cooperative simd width must be positive");
+  if pipeline_depth < 1 then
+    invalid_arg
+      (Printf.sprintf "Schedule.Stage: pipeline_depth must be >= 1, got %d" pipeline_depth);
+  if pipeline_depth > 1 && Option.is_none cooperative then
+    invalid_arg
+      "Schedule.Stage: pipeline_depth > 1 requires cooperative staging (the rotation pipelines the \
+       cooperative copy against the compute; packing and reused-workgroup stagings have no \
+       prefetch to overlap)";
   if hoisted && shared then
     invalid_arg "Schedule.Stage: hoisted staging requires shared = false (it emits no load nest)";
   if Option.is_some swizzle && not shared then
@@ -1593,15 +1602,66 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
       if shared then unflat_lines [ load_nest; Workgroup_barrier; remapped; Workgroup_barrier ]
       else unflat_lines [ load_nest; remapped ]
     in
+    (* Software pipelining (gh-ocannl-487): with [pipeline_depth > 1], the anchor L* — required
+       [Serial], the rotor whose counter selects the buffer copy at rendering — gets the staging
+       composition restructured from per-iteration [load(k); barrier; compute(k); barrier] to a
+       prologue [load(from_)] before the loop, per-iteration [barrier; If (k < to_) load(k+1);
+       compute(k)], and one trailing barrier after the loop. The compute subtree is remapped
+       exactly as in the unpipelined form and never otherwise touched, and the loads write the same
+       values into rotated copies the reads resolve to, so the rendering is bitwise identical to
+       depth 1 — only the prefetch timing changes. Same-phase safety is the renderer's rotation:
+       the in-loop copy targets buffer [(k+1) mod d] while the compute reads [k mod d], and the
+       single barrier separates each buffer's write from its reads (one iteration apart) and from
+       its next overwrite ([d - 1] iterations apart). The load nest contains no [Local_scope], so
+       duplicating it needs no scope refresh; the [If] guard interval-folds to [Noop] on 1-trip
+       loops (construct-then-fold, as for the edge guards above). *)
+    let pipeline_rotor =
+      if pipeline_depth = 1 then None
+      else
+        match lstar_depth with
+        | Some ld when (match stack0.(ld).axis with Serial -> true | _ -> false) ->
+            Some stack0.(ld).index
+        | Some ld ->
+            invalid_arg
+              ("Schedule.Stage: pipeline_depth > 1 requires the staging anchor loop "
+              ^ Indexing.symbol_ident stack0.(ld).index
+              ^ " to be Serial (the buffer rotation needs a well-defined iteration order)")
+        | None ->
+            invalid_arg
+              ("Schedule.Stage: pipeline_depth > 1 requires an anchored staging point (a serial \
+                loop carrying an outer-part symbol) for " ^ Tn.debug_name source
+             ^ "; an unanchored (broadcast) staging has no loop to rotate the buffers with")
+    in
+    let build_pipelined rotor fc =
+      let subst by = map_code ~fidx:(subst_axis_index ~sym:rotor ~by) load_nest in
+      let prologue = subst { terms = []; offset = fc.from_ } in
+      let prefetch = subst { terms = [ (1, rotor) ]; offset = 1 } in
+      let guard =
+        Binop
+          ( Ops.Cmplt,
+            (Embed_index (Indexing.Iterator rotor), iprec),
+            (Constant (Float.of_int fc.to_), iprec) )
+      in
+      let remapped =
+        remap_reads ~source ~from_idcs:idcs0 ~tile ~tile_idcs:tile_read_idcs fc.body
+      in
+      let body =
+        unflat_lines [ Workgroup_barrier; If { cond = (guard, iprec); body = prefetch }; remapped ]
+      in
+      unflat_lines [ prologue; for_loop { fc with body }; Workgroup_barrier ]
+    in
     let llc =
-      match lstar_depth with
-      | Some ld ->
+      match (lstar_depth, pipeline_rotor) with
+      | Some ld, Some rotor ->
+          rewrite_loop ~what:"Schedule.Stage" ~sym:stack0.(ld).index opt.llc
+            ~f:(build_pipelined rotor)
+      | Some ld, None ->
           rewrite_loop ~what:"Schedule.Stage" ~sym:stack0.(ld).index opt.llc ~f:(fun fc ->
               for_loop { fc with body = build fc.body })
-      | None when wrap_outermost_tile ->
+      | None, _ when wrap_outermost_tile ->
           rewrite_loop ~what:"Schedule.Stage" ~sym:stack0.(outermost_tile_depth).index opt.llc
             ~f:(fun fc -> build (for_loop fc))
-      | None -> build opt.llc
+      | None, _ -> build opt.llc
     in
     {
       opt with
@@ -1612,6 +1672,11 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
         (match swizzle with
         | Some kind -> Map.set opt.swizzled ~key:tile ~data:kind
         | None -> opt.swizzled);
+      pipelined =
+        (match pipeline_rotor with
+        | Some rotor ->
+            Map.set opt.pipelined ~key:tile ~data:{ pt_depth = pipeline_depth; pt_rotor = rotor }
+        | None -> opt.pipelined);
       zero_fringe = Set.add opt.zero_fringe tile;
     }
 
@@ -3237,8 +3302,10 @@ let can_fuse_epilogue ~target (opt : Low_level.optimized) : bool =
 
 let apply_opt_op (opt : Low_level.optimized) (op : optop) : Low_level.optimized =
   match op with
-  | Stage { source; tile_loops; shared; cooperative; hoisted; swizzle; pad_stride } ->
-      apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_stride opt
+  | Stage { source; tile_loops; shared; cooperative; hoisted; swizzle; pad_stride; pipeline_depth }
+    ->
+      apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_stride
+        ~pipeline_depth opt
   | Privatize { target; over } -> apply_privatize ~target ~over opt
   | Tensorize _ -> apply_tensorize op opt
   | Fuse_epilogue { target; shared } -> apply_fuse_epilogue ~target ~shared opt
@@ -5046,6 +5113,7 @@ let segment_optimized (full : Low_level.optimized) (llc : Low_level.t) : Low_lev
     workgroup_shared = Set.filter full.Low_level.workgroup_shared ~f:(Set.mem tns);
     simdgroup_fragments = Set.filter full.Low_level.simdgroup_fragments ~f:(Set.mem tns);
     swizzled = Map.filter_keys full.Low_level.swizzled ~f:(Set.mem tns);
+    pipelined = Map.filter_keys full.Low_level.pipelined ~f:(Set.mem tns);
     zero_fringe = Set.filter full.Low_level.zero_fringe ~f:(Set.mem tns);
     flip_candidates = full.Low_level.flip_candidates;
   }
@@ -5318,7 +5386,15 @@ let check_hardware_limits_classified ~name ~(limits : Backend_intf.hardware_limi
   Option.iter limits.max_workgroup_memory_bytes ~f:(fun max_bytes ->
       let shared_bytes =
         Set.fold opt.workgroup_shared ~init:0 ~f:(fun acc tn ->
-            acc + Lazy.force tn.Tn.size_in_bytes)
+            (* A pipelined tile is allocated as [pt_depth] rotating copies (gh-ocannl-487): the
+               IR-level dims stay single-copy, so the accounting multiplies here, matching the
+               codegen declaration. *)
+            let copies =
+              match Map.find opt.Low_level.pipelined tn with
+              | Some { Low_level.pt_depth; _ } -> pt_depth
+              | None -> 1
+            in
+            acc + (copies * Lazy.force tn.Tn.size_in_bytes))
       in
       if shared_bytes > max_bytes then
         let detail =
