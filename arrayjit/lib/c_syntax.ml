@@ -68,6 +68,22 @@ type mma_layout = [ `Plain | `Swizzled_b128 ]
 
 type mma_operand = PPrint.document * int * mma_space * mma_layout
 
+type mma_source = int * mma_space * mma_layout
+(** A tile-MMA input operand described but not addressed: leading-dimension stride in elements,
+    address space, physical layout — no pointer. This is how the a and b operands reach both
+    emission hooks, because a caller does not always have an address to give: a software-pipelined
+    tile's live copy rotates per k-block (gh-ocannl-487), so its pointer only exists inside the
+    rotor loop, and {!C_syntax_config.mma_fragment_syntax} runs outside it.
+
+    Everything an arm decides acceptance by is here — the pointer never was a criterion. *)
+
+type mma_emission = a_ptr:PPrint.document -> b_ptr:PPrint.document -> PPrint.document
+(** The emitting half of an accepted {!C_syntax_config.mma_syntax} call: the arm has committed, and
+    only the a/b tile addresses are still outstanding. Splitting the hook this way makes
+    [Option.is_some (mma_syntax ...)] a support predicate usable wherever a call is known but not
+    yet addressed — with no separate acceptance implementation that could drift from the emitting
+    one. *)
+
 module type C_syntax_config = sig
   val procs : Low_level.optimized array
   (** The low-level prcedure to compile, and the arrays of the context it will be linked to if not
@@ -247,23 +263,29 @@ module type C_syntax_config = sig
     n:int ->
     k:int ->
     d:mma_operand ->
-    a:mma_operand ->
-    b:mma_operand ->
-    PPrint.document option)
+    a:mma_source ->
+    b:mma_source ->
+    mma_emission option)
     option
   (** Cooperative tile-MMA emission for [Low_level.Tile_mma] (docs/proposals/tensorize-mma.md §4):
       given the per-operand precisions (the backend decides which combinations its units support —
       Metal [simdgroup_matrix] is uniform-precision only, CUDA wmma's flagship combination is mixed
       f16×f16→f32), the transposed-storage flags [ta]/[tb] (the operand's stored layout is the
       transpose of its role — load tiles with the hardware transpose flag and swapped offset
-      arithmetic), the covered block extents [m]/[n]/[k], and per operand a pointer expression to
-      the tile base (already offset), its leading-dimension stride in elements, its address space
-      and its physical layout ({!type-mma_layout}), emit the intrinsic sequence (fragment
-      declarations / loads / mma steps / stores) executed by every lane of the enclosing lane loop.
-      Return [None] to decline a particular call (unsupported precision combination, extents not
-      multiples of the intrinsic tile, thread-space operand, a swizzled layout the arm has no load
-      form for) — the caller then renders the scalar [fallback] under an [if (lane == 0)] guard,
-      which is also the path when the whole hook is [None] (cc, and any backend until wired).
+      arithmetic), the covered block extents [m]/[n]/[k], and per operand its leading-dimension
+      stride in elements, its address space and its physical layout ({!type-mma_layout}) — plus, for
+      [d], a pointer expression to the tile base (already offset) — emit the intrinsic sequence
+      (fragment declarations / loads / mma steps / stores) executed by every lane of the enclosing
+      lane loop. Return [None] to decline a particular call (unsupported precision combination,
+      extents not multiples of the intrinsic tile, thread-space operand, a swizzled layout the arm
+      has no load form for) — the caller then renders the scalar [fallback] under an [if (lane == 0)]
+      guard, which is also the path when the whole hook is [None] (cc, and any backend until wired).
+
+      Acceptance is thus decided without the a/b tile addresses: an accepting arm returns an
+      {!type-mma_emission} that the caller applies to them once it stands where they are
+      renderable. Callers that only need to know whether a call is supported — the fragment scope
+      deciding whether to alias its accumulator back to the backing target — test the outer option
+      and never apply the emission.
 
       Accepting a [`Swizzled_b128] operand is a promise that it was consumed through a
       swizzle-aware load: the caller records the call as {!Mma_intrinsics_ldmatrix} on that basis.
@@ -278,8 +300,8 @@ module type C_syntax_config = sig
     k:int ->
     fragment:string ->
     target:mma_operand ->
-    a:mma_operand ->
-    b:mma_operand ->
+    a:mma_source ->
+    b:mma_source ->
     body:(unit -> PPrint.document) ->
     PPrint.document option)
     option
@@ -287,7 +309,12 @@ module type C_syntax_config = sig
       target and one representative [Tile_mma]'s operands/shape, so it can decline before forcing
       [body]. When accepted, forcing [body] renders its [Tile_mma] with [d] identified as
       [`Fragment fragment], allowing the backend to emit update-only MMA steps between one outer
-      fragment load and store. *)
+      fragment load and store.
+
+      Only [target] carries a pointer: it is the one operand this emission addresses (the fragment
+      load and store bracketing the reduction). [a] and [b] arrive as {!type-mma_source} — extents,
+      space and layout to decide acceptance by, no address — because they are addressed by the
+      nested [Tile_mma]s, each at its own position inside the reduction loop. *)
 
   val kernel_log_param : (string * string) option
   (** Kernel parameter for logging, if any. E.g., (Some ("int", "log_id")) or (Some ("const char*",
@@ -1229,6 +1256,15 @@ module C_syntax (B : C_syntax_config) = struct
     | `Decline _ -> None
     | (`Plain | `Swizzled_b128) as layout -> Some (ptr, ld, space, layout)
 
+  let narrow_source (ld, space, layout) : mma_source option =
+    match layout with
+    | `Decline _ -> None
+    | (`Plain | `Swizzled_b128) as layout -> Some (ld, space, layout)
+
+  (* An addressed operand splits into what the hooks decide by and the address itself. *)
+  let operand_source ((_, ld, space, layout) : mma_operand) : mma_source = (ld, space, layout)
+  let operand_ptr ((ptr, _, _, _) : mma_operand) = ptr
+
   let operand_decline (_, _, _, layout) =
     match layout with `Decline reason -> Some reason | `Plain | `Swizzled_b128 -> None
 
@@ -1802,26 +1838,27 @@ module C_syntax (B : C_syntax_config) = struct
           | _ -> Indexing.Affine { symbols; offset })
       | other -> other
     in
+    let operand_space tn =
+      if Set.mem !current_workgroup_shared tn then `Shared
+      else if Tn.Placements.is_materialized_force (placements ()) tn 441 then `Device
+      else `Thread
+    in
+    (* The a/b operands of a fragment scope are described, not addressed: no pointer is rendered
+       for them here. Their addresses belong to the [Tile_mma] sites inside the reduction loop,
+       which re-render them where a pipelined tile's buffer rotation is in scope (gh-ocannl-487) —
+       at this scope-level position, outside the rotor loop, it is not renderable at all. *)
+    let source ld (tn, idcs) =
+      let dims = Lazy.force tn.Tn.dims in
+      let prec = Lazy.force tn.Tn.storage_prec in
+      (prec, (ld, operand_space tn, operand_layout tn ~ld ~idcs ~dims))
+    in
+    (* The accumulator target, in contrast, is addressed at scope level: the fragment load and
+       store bracketing the reduction read and write it. It is never a pipelined tile. *)
     let operand ld (tn, idcs) =
       let dims = Lazy.force tn.Tn.dims in
       let prec = Lazy.force tn.Tn.storage_prec in
-      let space =
-        if Set.mem !current_workgroup_shared tn then `Shared
-        else if Tn.Placements.is_materialized_force (placements ()) tn 441 then `Device
-        else `Thread
-      in
-      let ptr =
-        (* Every fragment hook ignores the a/b pointer docs built here — only [target]'s is
-           emitted at scope level (and the accumulator target is never a pipelined tile); the
-           per-update operands re-render at their [Tile_mma] sites inside the reduction loop,
-           where the rotation is in scope. A pipelined tile's read rotation is NOT renderable at
-           this scope-level position (outside its rotor loop), so substitute an undefined
-           identifier: a future hook that starts emitting these pointers then fails C compilation
-           loudly instead of reading a frozen buffer copy. *)
-        if is_pipelined tn then string "OCANNL_PIPELINED_SCOPE_PTR_UNUSED__"
-        else parens (string (get_ident tn) ^^ string " + " ^^ pp_array_offset (idcs, dims))
-      in
-      (prec, (ptr, ld, space, operand_layout tn ~ld ~idcs ~dims))
+      let ptr = parens (string (get_ident tn) ^^ string " + " ^^ pp_array_offset (idcs, dims)) in
+      (prec, (ptr, ld, operand_space tn, operand_layout tn ~ld ~idcs ~dims))
     in
     (* The target's leading-dimension stride: the stride of the axis carrying the transfer nest's
        outermost (row) copy symbol — the minor dim in the plain case, larger when interior batch
@@ -1873,8 +1910,8 @@ module C_syntax (B : C_syntax_config) = struct
                    copy symbol; [init_idcs] still carries it. *)
                 let t_ld = target_ld_of ~row_sym:(List.last init_syms) (target, init_idcs) in
                 let d_prec, target_raw = operand t_ld (target, target_base) in
-                let a_prec, a_raw = operand lda a in
-                let b_prec, b_raw = operand ldb b in
+                let a_prec, a_raw = source lda a in
+                let b_prec, b_raw = source ldb b in
                 (* Operands whose layout no intrinsic load form matches (the element-granularity
                    swizzle; a b128 tile not addressable from its origin) decline the fragment hooks;
                    falling through to [None] keeps the ordinary rendering, whose [Tile_mma]s decline
@@ -1882,8 +1919,8 @@ module C_syntax (B : C_syntax_config) = struct
                    decline here (gh-ocannl-481 item 3, D3): the per-call hooks below judge it, and
                    an accumulator-resident wmma scope that cannot feed from [ldmatrix] declines
                    there — leaving the ordinary [mma_syntax] path, which can. *)
-                match (narrow_operand target_raw, narrow_operand a_raw, narrow_operand b_raw) with
-                | Some target_op, Some a_op, Some b_op -> (
+                match (narrow_operand target_raw, narrow_source a_raw, narrow_source b_raw) with
+                | Some target_op, Some a_src, Some b_src -> (
                 let fragment_name = Printf.sprintf "__mma_fragment_%d" fragment.Tn.uid in
                 let render_with active =
                   let old = !active_mma_accumulator in
@@ -1897,7 +1934,7 @@ module C_syntax (B : C_syntax_config) = struct
                   else
                     Option.bind B.mma_fragment_syntax ~f:(fun emit ->
                         emit ~d_prec ~a_prec ~b_prec ~m ~n ~k ~fragment:fragment_name
-                          ~target:target_op ~a:a_op ~b:b_op ~body:(fun () ->
+                          ~target:target_op ~a:a_src ~b:b_src ~body:(fun () ->
                             render_with (Active_fragment (fragment, fragment_name))))
                 in
                 let rendered =
@@ -1911,10 +1948,15 @@ module C_syntax (B : C_syntax_config) = struct
                              precisions), preserve the existing per-[k_o] intrinsic path by aliasing
                              the marked local back to the original target when that exact MMA call
                              is supported. Unsupported calls retain the explicit lane-0 local-array
-                             fallback. *)
+                             fallback.
+
+                             This is [mma_syntax] as a support predicate: the emission it returns is
+                             never applied here — the reduction is re-rendered below, and each
+                             [Tile_mma] applies its own, in a position where the a/b addresses (a
+                             pipelined tile's rotating copy among them, gh-ocannl-487) exist. *)
                           match
-                            emit ~d_prec ~a_prec ~b_prec ~ta ~tb ~m ~n ~k ~d:target_op ~a:a_op
-                              ~b:b_op
+                            emit ~d_prec ~a_prec ~b_prec ~ta ~tb ~m ~n ~k ~d:target_op ~a:a_src
+                              ~b:b_src
                           with
                           | Some _ -> Some (render_with (Active_target (fragment, target_op)))
                           | None -> None)
@@ -3635,8 +3677,12 @@ module C_syntax (B : C_syntax_config) = struct
                 let d_op = Option.value_exn ~here:[%here] (narrow_operand d_raw) in
                 let a_op = Option.value_exn ~here:[%here] (narrow_operand a_raw) in
                 let b_op = Option.value_exn ~here:[%here] (narrow_operand b_raw) in
-                match emit ~d_prec ~a_prec ~b_prec ~ta ~tb ~m ~n ~k ~d:d_op ~a:a_op ~b:b_op with
-                | Some doc ->
+                (* Here — and only here — the a/b tile addresses are renderable, so this site both
+                   asks the hook and applies the emission it returns. *)
+                let a_ptr_doc, a_src = (operand_ptr a_op, operand_source a_op) in
+                let b_ptr_doc, b_src = (operand_ptr b_op, operand_source b_op) in
+                match emit ~d_prec ~a_prec ~b_prec ~ta ~tb ~m ~n ~k ~d:d_op ~a:a_src ~b:b_src with
+                | Some emission ->
                     (* Accepting a swizzled operand is a promise that it was read through a
                        swizzle-aware load; no other reading of that layout is correct. *)
                     let swizzled (_, _, _, layout) =
@@ -3645,7 +3691,7 @@ module C_syntax (B : C_syntax_config) = struct
                     record
                       (if List.exists [ d_op; a_op; b_op ] ~f:swizzled then Mma_intrinsics_ldmatrix
                        else Mma_intrinsics);
-                    doc
+                    emission ~a_ptr:a_ptr_doc ~b_ptr:b_ptr_doc
                 | None ->
                     declinef "Tile_mma intrinsics declined by the backend hook: %s" (describe ());
                     fallback_or_tiled ())))

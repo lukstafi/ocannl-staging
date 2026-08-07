@@ -666,8 +666,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           ~n
           ~k
           ~d:(d_ptr, ldd, d_space, d_layout)
-          ~a:(a_ptr, lda, a_space, a_layout)
-          ~b:(b_ptr, ldb, b_space, b_layout)
+          ~a:(lda, a_space, a_layout)
+          ~b:(ldb, b_space, b_layout)
         ->
           (* Pointer declarations use [typ_of_prec] of the operand's own precision, which coincides
              with [wmma_combo]'s fragment element types (tf32 fragments load from plain [float]
@@ -898,18 +898,19 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               string (Printf.sprintf "const unsigned char *%s = (const unsigned char *)(" name)
               ^^ ptr ^^ string ");"
             in
-            let body =
+            let body ~a_ptr ~b_ptr =
               string "float *__mma_dp = " ^^ d_ptr ^^ semi ^^ hardline ^^ cast_ptr "__mma_ap" a_ptr
               ^^ hardline ^^ cast_ptr "__mma_bp" b_ptr ^^ hardline
               ^^ separate_map hardline string body_lines
             in
             Some
-              (group
-                 (string
-                    (Printf.sprintf "{ /* tile_mma %dx%dx%d (mma-fp8) e5m2%s */" m n k
-                       (ldm_tag ~a:a_ldm ~b:b_ldm))
-                 ^^ nest 2 (hardline ^^ body)
-                 ^^ hardline ^^ rbrace))
+              (fun ~a_ptr ~b_ptr ->
+                group
+                  (string
+                     (Printf.sprintf "{ /* tile_mma %dx%dx%d (mma-fp8) e5m2%s */" m n k
+                        (ldm_tag ~a:a_ldm ~b:b_ldm))
+                  ^^ nest 2 (hardline ^^ body ~a_ptr ~b_ptr)
+                  ^^ hardline ^^ rbrace))
           else if
             (* Unlike fp8, both bf16 operands can come in through [ldmatrix] in either storage
                orientation: the fragment registers hold 16-bit element PAIRS, and the pair a lane
@@ -1057,7 +1058,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
             let ptr_decl name typ ptr =
               string (Printf.sprintf "%s *%s = " typ name) ^^ ptr ^^ semi
             in
-            let body =
+            let body ~a_ptr ~b_ptr =
               ptr_decl "__mma_dp" "__nv_bfloat16" d_ptr
               ^^ hardline
               ^^ ptr_decl "__mma_ap" "const __nv_bfloat16" a_ptr
@@ -1067,12 +1068,13 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               ^^ separate_map hardline string body_lines
             in
             Some
-              (group
-                 (string
-                    (Printf.sprintf "{ /* tile_mma %dx%dx%d (mma-bf16)%s */" m n k
-                       (ldm_tag ~a:a_swz ~b:b_swz))
-                 ^^ nest 2 (hardline ^^ body)
-                 ^^ hardline ^^ rbrace))
+              (fun ~a_ptr ~b_ptr ->
+                group
+                  (string
+                     (Printf.sprintf "{ /* tile_mma %dx%dx%d (mma-bf16)%s */" m n k
+                        (ldm_tag ~a:a_swz ~b:b_swz))
+                  ^^ nest 2 (hardline ^^ body ~a_ptr ~b_ptr)
+                  ^^ hardline ^^ rbrace))
           else
             (* wmma fragments are opaque: [load_matrix_sync] assumes row-major (or column-major)
                pointer+stride storage and there is no supported way to feed one from [ldmatrix]
@@ -1188,7 +1190,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                        by the enclosing [mma_fragment_syntax] scope (gh-ocannl-480): no
                        per-statement load/store of [d]. The trailing barrier releases the staged
                        shared tiles for the next serial iteration's cooperative loads. *)
-                    let body =
+                    let body ~a_ptr ~b_ptr =
                       ptr_decl "__mma_ap" ("const " ^ typ_of_prec a_prec) a_ptr
                       ^^ hardline
                       ^^ ptr_decl "__mma_bp" ("const " ^ typ_of_prec b_prec) b_ptr
@@ -1197,12 +1199,13 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                            (k_loop_lines ~ab_typ ~acc:fragment @ [ barrier ])
                     in
                     Some
-                      (group
-                         (string
-                            (Printf.sprintf "{ /* tile_mma fragment update %dx%dx%d (wmma%s) */" m n
-                               k marker)
-                         ^^ nest 2 (hardline ^^ body)
-                         ^^ hardline ^^ rbrace))
+                      (fun ~a_ptr ~b_ptr ->
+                        group
+                          (string
+                             (Printf.sprintf "{ /* tile_mma fragment update %dx%dx%d (wmma%s) */" m n
+                                k marker)
+                          ^^ nest 2 (hardline ^^ body ~a_ptr ~b_ptr)
+                          ^^ hardline ^^ rbrace))
                 | _ when ab_ok && ldd % d_ld_mult = 0 && loadable d_space ->
                     let body_lines =
                       [
@@ -1231,7 +1234,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                           barrier;
                         ]
                     in
-                    let body =
+                    let body ~a_ptr ~b_ptr =
                       ptr_decl "__mma_dp" (typ_of_prec d_prec) d_ptr
                       ^^ hardline
                       ^^ ptr_decl "__mma_ap" ("const " ^ typ_of_prec a_prec) a_ptr
@@ -1241,10 +1244,11 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                       ^^ separate_map hardline string body_lines
                     in
                     Some
-                      (group
-                         (string (Printf.sprintf "{ /* tile_mma %dx%dx%d (wmma%s) */" m n k marker)
-                         ^^ nest 2 (hardline ^^ body)
-                         ^^ hardline ^^ rbrace))
+                      (fun ~a_ptr ~b_ptr ->
+                        group
+                          (string (Printf.sprintf "{ /* tile_mma %dx%dx%d (wmma%s) */" m n k marker)
+                          ^^ nest 2 (hardline ^^ body ~a_ptr ~b_ptr)
+                          ^^ hardline ^^ rbrace))
                 | _ -> None))
 
     (* Cross-[k_o] accumulator residency (gh-ocannl-480), following the Metal emission: the marked
@@ -1268,8 +1272,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           ~k
           ~fragment
           ~target:(d_ptr, ldd, d_space, d_layout)
-          ~a:(_, lda, a_space, a_layout)
-          ~b:(_, ldb, b_space, b_layout)
+          ~a:(lda, a_space, a_layout)
+          ~b:(ldb, b_space, b_layout)
           ~body
         ->
           let loadable = function

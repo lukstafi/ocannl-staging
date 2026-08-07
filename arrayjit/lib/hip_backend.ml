@@ -577,8 +577,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           ~n
           ~k
           ~d:(d_ptr, ldd, d_space, d_layout)
-          ~a:(a_ptr, lda, a_space, a_layout)
-          ~b:(b_ptr, ldb, b_space, b_layout)
+          ~a:(lda, a_space, a_layout)
+          ~b:(ldb, b_space, b_layout)
         ->
           (* rocWMMA fragments are opaque like [nvcuda::wmma]'s: there is no swizzle-aware
              fragment load here, so a swizzled operand layout declines to the caller's scalar
@@ -682,7 +682,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                       barrier;
                     ]
                   in
-                  let body =
+                  let body ~a_ptr ~b_ptr =
                     ptr_decl "__mma_ap" ("const " ^ ab_typ) a_ptr
                     ^^ hardline
                     ^^ ptr_decl "__mma_bp" ("const " ^ ab_typ) b_ptr
@@ -690,12 +690,13 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                     ^^ separate_map hardline string body_lines
                   in
                   Some
-                    (group
-                       (string
-                          (Printf.sprintf "{ /* tile_mma fragment update %dx%dx%d (rocwmma) */" m n
-                             k)
-                       ^^ nest 2 (hardline ^^ body)
-                       ^^ hardline ^^ rbrace))
+                    (fun ~a_ptr ~b_ptr ->
+                      group
+                        (string
+                           (Printf.sprintf "{ /* tile_mma fragment update %dx%dx%d (rocwmma) */" m n
+                              k)
+                        ^^ nest 2 (hardline ^^ body ~a_ptr ~b_ptr)
+                        ^^ hardline ^^ rbrace))
               | _ -> None)
           | `Device | `Shared | `Thread -> (
               match combo with
@@ -784,7 +785,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                       barrier;
                     ]
                   in
-                  let body =
+                  let body ~a_ptr ~b_ptr =
                     ptr_decl "__mma_dp" acc_typ d_ptr ^^ hardline
                     ^^ ptr_decl "__mma_ap" ("const " ^ ab_typ) a_ptr
                     ^^ hardline
@@ -793,10 +794,11 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                     ^^ separate_map hardline string body_lines
                   in
                   Some
-                    (group
-                       (string (Printf.sprintf "{ /* tile_mma %dx%dx%d (rocwmma) */" m n k)
-                       ^^ nest 2 (hardline ^^ body)
-                       ^^ hardline ^^ rbrace))
+                    (fun ~a_ptr ~b_ptr ->
+                      group
+                        (string (Printf.sprintf "{ /* tile_mma %dx%dx%d (rocwmma) */" m n k)
+                        ^^ nest 2 (hardline ^^ body ~a_ptr ~b_ptr)
+                        ^^ hardline ^^ rbrace))
               | _ -> None))
 
     (* Cross-[k_o] accumulator residency (gh-ocannl-480): the marked local accumulator tile becomes
@@ -815,8 +817,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           ~k
           ~fragment
           ~target:(d_ptr, ldd, d_space, d_layout)
-          ~a:(_, lda, a_space, a_layout)
-          ~b:(_, ldb, b_space, b_layout)
+          ~a:(lda, a_space, a_layout)
+          ~b:(ldb, b_space, b_layout)
           ~body
         ->
           (* rocWMMA fragments are opaque like [nvcuda::wmma]'s: there is no swizzle-aware

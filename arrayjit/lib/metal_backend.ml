@@ -648,8 +648,8 @@ module Impl = struct
           ~n
           ~k
           ~d:(d_ptr, ldd, d_space, d_layout)
-          ~a:(a_ptr, lda, a_space, a_layout)
-          ~b:(b_ptr, ldb, b_space, b_layout)
+          ~a:(lda, a_space, a_layout)
+          ~b:(ldb, b_space, b_layout)
         ->
           (* [simdgroup_matrix] loads take a plain pointer and leading dimension; Metal has no
              [ldmatrix] analogue, so a swizzled operand layout declines to the caller's scalar
@@ -716,7 +716,7 @@ module Impl = struct
                   "}";
                 ]
               in
-              let body =
+              let body ~a_ptr ~b_ptr =
                 ptr_decl "__mma_ap" (Printf.sprintf "const %s" a_as) a_ptr
                 ^^ hardline
                 ^^ ptr_decl "__mma_bp" (Printf.sprintf "const %s" b_as) b_ptr
@@ -724,12 +724,13 @@ module Impl = struct
                 ^^ separate_map hardline string body_lines
               in
               Some
-                (group
-                   (string (Printf.sprintf "{ /* tile_mma fragment update %dx%dx%d */" m n k)
-                   ^^ nest 2 (hardline ^^ body)
-                   ^^ hardline
-                   ^^ string "threadgroup_barrier(mem_flags::mem_threadgroup);"
-                   ^^ hardline ^^ rbrace))
+                (fun ~a_ptr ~b_ptr ->
+                  group
+                    (string (Printf.sprintf "{ /* tile_mma fragment update %dx%dx%d */" m n k)
+                    ^^ nest 2 (hardline ^^ body ~a_ptr ~b_ptr)
+                    ^^ hardline
+                    ^^ string "threadgroup_barrier(mem_flags::mem_threadgroup);"
+                    ^^ hardline ^^ rbrace))
           | _ -> (
               match (frag_typ, addr_space d_space, addr_space a_space, addr_space b_space) with
               | Some frag, Some d_as, Some a_as, Some b_as
@@ -787,7 +788,7 @@ module Impl = struct
                       barrier;
                     ]
                   in
-                  let body =
+                  let body ~a_ptr ~b_ptr =
                     ptr_decl "__mma_dp" d_as d_ptr ^^ hardline
                     ^^ ptr_decl "__mma_ap" (Printf.sprintf "const %s" a_as) a_ptr
                     ^^ hardline
@@ -796,10 +797,11 @@ module Impl = struct
                     ^^ separate_map hardline string body_lines
                   in
                   Some
-                    (group
-                       (string (Printf.sprintf "{ /* tile_mma %dx%dx%d */" m n k)
-                       ^^ nest 2 (hardline ^^ body)
-                       ^^ hardline ^^ rbrace))
+                    (fun ~a_ptr ~b_ptr ->
+                      group
+                        (string (Printf.sprintf "{ /* tile_mma %dx%dx%d */" m n k)
+                        ^^ nest 2 (hardline ^^ body ~a_ptr ~b_ptr)
+                        ^^ hardline ^^ rbrace))
               | _ -> None))
 
     (* Cross-[k_o] accumulator residency (gh-ocannl-480): one marked local tile becomes a
@@ -815,8 +817,8 @@ module Impl = struct
           ~k
           ~fragment
           ~target:(d_ptr, ldd, d_space, d_layout)
-          ~a:(_, _, a_space, a_layout)
-          ~b:(_, _, b_space, b_layout)
+          ~a:(_, a_space, a_layout)
+          ~b:(_, b_space, b_layout)
           ~body
         ->
           (* [simdgroup_matrix] loads take a plain pointer and leading dimension; Metal has no
