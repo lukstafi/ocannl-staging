@@ -403,6 +403,46 @@ let () =
   p "a winner still ships and computes the right values"
     (Array.for_all2_exn (Context.get_values ctx_b' t2.Tensor.value) expected ~f:approx);
 
+  (* --- Containment stops at the one pre-dispatch condition that is not fixable. A poisoned lineage
+     has no restore (gh-ocannl-536), so every later timing run in it is dead too: declining the
+     candidate would decline every remaining candidate for the same terminal reason and then report
+     a completed search. The poisoning happens AFTER the baseline was timed, so a winner is in hand
+     and the search has something to wrongly report success with. --- *)
+  let ctx_z = Context.auto () in
+  let attempts = ref 0 in
+  let reports_z = ref [] in
+  let poisoned_stops_the_search =
+    Exn.protect
+      ~f:(fun () ->
+        (Autotune.on_candidate_attempt :=
+           fun _ ->
+             Int.incr attempts;
+             (* Poisons without raising: the lineage's own state must stop the search, through the
+                timing run's pre-dispatch check rather than through an injected exception. *)
+             if !attempts = 2 then
+               Context.poison_lineage ctx_z ~routine_name:"injected"
+                 (Failure "injected prior poisoning"));
+        match
+          Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:""
+            ~report:(fun r -> reports_z := r :: !reports_z)
+            ctx_z t2 comp Ir.Indexing.Empty
+        with
+        | _ -> false
+        | exception Failure msg -> String.is_substring msg ~substring:"poisoned")
+      ~finally:(fun () -> Autotune.on_candidate_attempt := fun _ -> ())
+  in
+  p "a poisoned lineage is not declined like a fixable pre-dispatch failure"
+    poisoned_stops_the_search;
+  (* Positionally arm A — the arm the poisoning happened inside. Read as "some report", this passes
+     without the fix too: arm B's baseline timing hits the same poisoned lineage and reports it,
+     while arm A goes on declining every remaining candidate, times nothing, and reports a COMPLETED
+     search that shipped an untuned fallback out of a dead lineage. *)
+  p "the arm it happened in reports a terminal failure, not a completed search"
+    (Option.value_map (List.hd (List.rev !reports_z)) ~default:false ~f:(fun r ->
+         r.Autotune.partial
+         && Option.value_map r.Autotune.terminal_failure ~default:false ~f:(fun tf ->
+                String.is_substring tf.Autotune.detail ~substring:"poisoned")));
+
   (* --- The genuine whole-search form, injection-free: the caller hands the tuner a lineage holding
      an unexecuted compile of the same computation, so every routine the tuner compiles inherits an
      unsatisfied dependency and both arms fail at their baseline's validation. That failure is the

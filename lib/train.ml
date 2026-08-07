@@ -247,6 +247,12 @@ let every_non_literal_materialized =
     attributing arms by arrival order should read [terminal_failure] (equivalently [partial]) before
     [best_ms], as benchmarks/runners/ocannl/bench_harness.ml does.
 
+    The in-position guarantee is exactly {!Autotune.tune}'s reporting contract, and inherits its one
+    carve-out: argument-precondition violations (an incompatible [timing_ctx]) are detected before
+    the call reaches any phase, so they report nothing and propagate. That is not an arm losing to
+    its sibling — both arms are given the same contexts, so both raise it — and fabricating a slot
+    report for one would attribute a phase to a call that never reached one.
+
     The arms differ in which candidates {e exist}, not only in how they rank: a tensorized candidate
     is seeded only when the matmul site's operand and destination storage precisions resolve to a
     tile the backend advertises ({!Autotune.mma_tile_for_precisions}), and placement decides which

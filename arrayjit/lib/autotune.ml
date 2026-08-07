@@ -215,10 +215,20 @@ let time_routine ?(tag_failures = false) ~repeats cctx routine =
          what makes an unattributed failure of it containable while an unattributed one at [Launch]
          is not. [Context.run] re-validates on each iteration, as it does for every caller; that one
          stays inside the [Launch] tag, where it can no longer fail. *)
-      if tag_failures then
+      if tag_failures then (
+        (* A poisoned lineage is the one thing [check_runnable] rejects that is NOT the caller's to
+           fix and retry: there is no restore API (gh-ocannl-536), so every later timing run in this
+           lineage is dead too. Raised OUTSIDE the [Preflight] region deliberately (Codex P2 on PR
+           #302). Contained as a per-candidate decline, a search whose serial baseline is not
+           dispatched — every GPU search — would decline every candidate for the same terminal
+           reason, find nothing timed, and hand back the untuned default compiled from a lineage
+           that can never run it, under a report saying the search completed. Unattributed at the
+           enclosing boundary it is fatal, which is what it is; that is also exactly where it landed
+           before the phase split. *)
+        Option.iter (Context.poisoned_failure cctx) ~f:raise;
         Outcome.tag Outcome.Preflight (fun () ->
             !on_candidate_preflight (Context.routine_name routine);
-            Context.check_runnable cctx routine);
+            Context.check_runnable cctx routine));
       (* Warmup run: absorbs lazy initialization and fills caches like a steady-state iteration. *)
       let ctx = ref (run cctx) in
       sync !ctx;

@@ -155,7 +155,10 @@
   `Writes_may_have_occurred` would escalate a failure that provably wrote nothing. A candidate whose
   timing run fails validation is now an ordinary census-visible decline (`Unclassified_key
   (Preflight, _)`) and the search runs on; the baseline's own such failure still propagates, as
-  every baseline timing failure does, but leaves the lineage usable and the retry possible.
+  every baseline timing failure does, but leaves the lineage usable and the retry possible. The one
+  pre-dispatch condition that is *not* fixable — an already-poisoned lineage, which has no restore —
+  is deliberately raised outside that region and stays terminal: contained, it would decline every
+  candidate for the same reason and then ship an untuned fallback out of a dead lineage.
   Coverage extends the GPU-free fault-injection suite (`test/operations/autotune_arm_containment`),
   with `Autotune.on_candidate_preflight` as the per-candidate seam — the real causes are properties
   of the lineage and the bindings, so a genuine one fails every candidate at once, which the suite

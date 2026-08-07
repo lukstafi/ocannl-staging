@@ -265,10 +265,16 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   backend has no evidence, and a classifier guessing `Writes_may_have_occurred` would escalate a
   failure that provably wrote nothing. When adding a new failure boundary around `Context.run`,
   the rule is: tag what precedes `Ir.Task.run` as `Preflight`, or a fixable mistake will read as
-  device damage. Note the injection asymmetry these causes create — they are properties of the
-  lineage and the bindings, not of a candidate, so a genuine one fails *every* candidate at once;
-  `Autotune.on_candidate_preflight` exists because "declined, and the search shipped anyway" is
-  otherwise untestable.
+  device damage — **except the poisoned-lineage check**, which `check_runnable` performs first and
+  which is the one pre-dispatch condition that is *not* fixable (no restore API). `time_routine`
+  raises it outside the `Preflight` region on purpose: contained as a per-candidate decline, a
+  search whose serial baseline is not dispatched (every GPU search) declines every candidate for
+  the same terminal reason, finds nothing timed, and hands back the untuned default compiled from a
+  dead lineage under a report saying the search completed. "Contain the fixable, propagate the
+  terminal" is the split, and the two are adjacent inside one function. Note the injection asymmetry
+  these causes create — they are properties of the lineage and the bindings, not of a candidate, so
+  a genuine one fails *every* candidate at once; `Autotune.on_candidate_preflight` exists because
+  "declined, and the search shipped anyway" is otherwise untestable.
 - Placement decides which tensorized candidates *exist*, not just how they rank, because
   `mma_tile_for_precisions` keys on the storage precisions of the nodes the site actually reads.
   Under the mixed-precision recipe on a uniform-format backend (Metal's `simdgroup_matrix`: no mixed
