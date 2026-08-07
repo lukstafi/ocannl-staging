@@ -602,6 +602,13 @@ that they earn a lookup rather than always-loaded space.
   With it in place, `--root .` and `dune promotion apply` are no longer needed from a worktree;
   `tools/promote.sh` remains the Windows path, for the CRLF stripping. Worktrees placed outside the
   repo need none of this, but see no `ocannl_config` on their ancestor path.
+- Deleting a file target out from under dune is not a way to force it to re-run: `dune build
+  <that target>` afterwards exits 0 having produced nothing (observed on dune 3.23.1 with
+  `test/operations/<name>.exe.output`), and `-f/--force` does not rescue it — `--force` only
+  re-runs actions attached to ALIASES. Either force the alias (`dune build --force
+  @<dir>/runtest`), or run the built exe directly with its cwd set to `_build/default/<dir>`, which
+  is exactly the environment dune gives it — the same cwd, hence the same `ocannl_config` search
+  root, that makes `dune exec` unusable (CLAUDE.md).
 - A record with `[@@deriving sexp]` makes every `.expected` file that prints the parent a hidden
   consumer of its FIELD NAMES, and `rg "\.field_name"` over sources is vacuous against that (sexp
   prints `(field_name value)`, not member access). Before claiming a rename has no serialization
