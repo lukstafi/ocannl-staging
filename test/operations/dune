@@ -1827,6 +1827,17 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; gh-ocannl-563: the canonical-rendering walk shared by the analysis-cache key and the
+; schedule-cache identity. Pure IR rendering — no backend, hence no config dependency.
+
+(test
+ (name canonical_render)
+ (package neural_nets_lib)
+ (modules canonical_render)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here)))
+
 (test
  (name autotune_arm_containment)
  (package neural_nets_lib)

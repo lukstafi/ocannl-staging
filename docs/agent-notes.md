@@ -124,13 +124,23 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
 
 ## Lowering, virtualization, indexing
 
+- Both digests over lowered code — the analysis cache's key (`Low_level.analysis_digest`) and the
+  schedule cache's canonical identity (`Schedule_cache.canonicalize`) — share ONE walk,
+  `Low_level.Canonical_render.emit` (gh-ocannl-563). Render a newly added `Low_level.t` /
+  `scalar_t` construct there and nowhere else (the matches are exhaustive, so the build breaks);
+  a new digest-relevant *fact* is a `Canonical_render.policy` field if it is an identity choice, or
+  a consumer's own preamble/companion section if only one of them consults it. The walk owns what
+  the two agree on: loop-binder tokens `b<n>`, first-occurrence local-scope alpha, comment
+  skipping, `mark_incomplete` on opaque statements. Golden + seam test:
+  `test/operations/canonical_render.ml`.
 - The `Low_level` analysis cache (gh-ocannl-560) makes sibling candidate compiles share one
-  `analyze_proc` result keyed by a digest of the raw lowered code. Its identity choices are the
+  `analyze_proc` result keyed by that digest of the raw lowered code. Its identity policy is the
   OPPOSITE of `Schedule_cache.canonicalize`'s: tensor nodes and static symbols enter by identity
   (`Tn.uid`; symbol ident + the mutable `static_range`/`used_as_extent` facts) because a hit
-  reuses the stored code verbatim, while loop binders and scope ids alpha-rename. Anything the
-  analysis consults beyond the code must enter the key — `inline_complex_computations` does, since
-  the rmw exemption changes what the coverage/multiplicity queries count. Two traps: (1) caches
+  reuses the stored code verbatim, while `canonicalize` alpha-renames everything so schedules
+  replay across sessions. Anything the analysis consults beyond the code must enter the key —
+  `inline_complex_computations` does, since the rmw exemption changes what the coverage /
+  multiplicity queries count. Two traps: (1) caches
   that retain lowered code keep tensor nodes (and, via pool finalizers, buffers) alive — register
   a clearer in `Tnode.before_accessibility_snapshot`, or `print_accessible_headers` goldens grow
   phantom "accessible" nodes (this is how the cache was caught); (2) on a hit, still re-run
