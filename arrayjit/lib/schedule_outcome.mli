@@ -4,6 +4,14 @@ type phase =
   | Backend_codegen
   | Backend_compile
   | Backend_link
+  | Preflight
+      (** {!Context.check_runnable}: the pre-dispatch validation of a launch — poisoned lineage,
+          uninitialized inputs, unsatisfied execution dependencies, out-of-range static bindings.
+          All of it precedes [Ir.Task.run], so a failure here proves nothing was dispatched, which
+          is why {!classify_raw} never makes one fatal (gh-ocannl-564): it is the caller's to fix
+          and retry, and the lineage stays usable. Distinguishing it from [Launch] is the whole
+          point — inside a [Launch]-tagged boundary such a failure was unattributable, hence fatal,
+          hence a condemned lineage for a one-line user mistake. *)
   | Launch
   | Sync
 [@@deriving sexp_of, compare, equal]
