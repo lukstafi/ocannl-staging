@@ -236,6 +236,19 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   opaque `Tensorize` lane, so a per-lane companion reads cells other lanes of the same simdgroup
   produced — safe only because the threadgroup is exactly one simd width; a cross-nest simdgroup
   barrier is the formal fix.
+- "`Tile_mma` is a barrier" is only half true, and the half that fails is the one barrier elision
+  wants. Every rendering form ENDS the intrinsic block with a workgroup barrier, so a staging
+  barrier that follows one is always redundant (`Schedule.elide_staged_barriers` drops it, and the
+  after-loop one, at any pipeline depth). The LEADING bracket is form-dependent: the fragment-scope
+  form (`render_mma_fragment_scope`, the crowned Metal/CUDA shape) emits it ONCE, on the scope
+  wrapping the whole anchor loop, not per iteration — so a barrier may never be elided against a
+  *following* `Tile_mma`. That is why a depth-1 staged k-block keeps exactly one explicit barrier
+  (between its loads and its compute) while the pipelined form keeps none: the pipelined prefetch
+  writes the *next* iteration's buffer copy, so the previous iteration's trailing bracket is what
+  separates it from its reads. Elision is a synchronization-only transform, so the test that pins it
+  is an executed BITWISE comparison against the same schedule with barriers re-inserted
+  (`schedule_pipelined_matmul`) — adding barriers is always conservative, which makes that reference
+  sound no matter what the elision does.
 - "Seeded" is not "timed". An autotune family can be enumerated in bulk and rejected in bulk at
   candidate compile, and a count of proposals then reads as coverage it does not have — assert on
   the *timed* counter (`report.mma_timed`, `fiss_sketch_timed`, `split_reduce_timed`), and follow it
