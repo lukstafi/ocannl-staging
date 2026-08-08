@@ -195,6 +195,16 @@ noisier than Part 2's (`ria`, `ehnlk`, `lc` under the fixed seed). The tutorial
 leaves this as a pedagogical demonstration of why running statistics matter;
 the framework-level fix is tracked as a follow-up to this task.
 
+Because of that collapse the Part 3 sample text is a readout of the `dice`
+stream rather than of the model's reading of its context, and its characters
+land on knife-edge boundaries of the sampling CDF — under the fixed seed one
+step of the second name sits 6.4e-5 from the boundary between two characters,
+so a weight wiggle far too small to move the printed losses flips it. Part 3
+therefore prints the names to **stderr** only; its `.expected` golden pins the
+losses, an in-alphabet check, and the top of the start-context distribution.
+Part 2 and Part 6, whose inference paths do read their context, still pin
+their sampled names.
+
 ## Part 4 — How OCANNL compiles gradients
 
 **Karpathy:** [*Building makemore Part 4: becoming a backprop
