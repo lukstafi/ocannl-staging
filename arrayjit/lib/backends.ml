@@ -1118,6 +1118,13 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
      nodes) and skipping per-device constants, i.e. the same rule the context [finalize] applies —
      this stands in for it on the path where no context was ever built. *)
   let free_delta context (ctx_buffers : ctx_buffers) =
+    (* Sync first, for the same reason [unwind_partial_delta] and the context [finalize] do
+       (gh-ocannl-550, round-five review): [allocate_delta] queues [Host_inits] uploads through
+       [Device.from_host], so a delta being discarded after a failed link can still have writes in
+       flight — and freeing the slab under them is device corruption, on a path that is otherwise a
+       contained candidate decline the search carries on from. Best-effort: the device may already be
+       refusing work, and that must not replace the link failure the caller has to classify. *)
+    (try Device.await context.device with _ -> ());
     Option.iter free_pool ~f:(fun free_pool ->
         Map.fold ctx_buffers ~init:(Set.empty (module Int))
           ~f:(fun ~key ~data:(loc : buffer_loc) freed ->
