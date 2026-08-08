@@ -3982,7 +3982,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
        consumer holding a clean, non-partial report for a call that then raised (Codex P2 on PR
        #291); a compile that raises reports its own failure instead (gh-ocannl-550). *)
     let result = compile_untuned_default () in
-    Option.iter report ~f:(fun f -> f no_search_report);
+    report_or_release no_search_report ~result;
     result)
   else
   let is_gpu = Sched.backend_is_gpu backend and is_cpu = Sched.backend_is_cpu backend in

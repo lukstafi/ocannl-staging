@@ -379,15 +379,33 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
         true
     | None -> false
 
+  (* gh-ocannl-550: [allocate] roots a pool in the backend table, and the transfer that follows adds
+     its location to the context only on success — so a failing upload leaves a pool no context can
+     ever reach, and therefore no [Context.release] can reclaim. Frees the one pool this operation
+     minted; unlike [allocate_delta]'s unwind there is no constant-cache involvement here (a transfer
+     destination is a working buffer by construction), so this needs nothing beyond the free. *)
+  let with_transfer_pool device (loc : Backend_intf.buffer_loc) ~f =
+    match f () with
+    | result -> result
+    | exception exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        (try
+           Backend.await device;
+           Option.iter Backend.free_pool ~f:(fun free -> free device ~pool_id:loc.pool_id);
+           Alloc_census.forget_pool ~device_id:device.device_id ~pool_id:loc.pool_id
+         with _ -> ());
+        Stdlib.Printexc.raise_with_backtrace exn backtrace
+
   let%track3_sexp init_from_host (ctx : Backend.context) (tn : Tn.t) (hosted : Ndarray.t) =
     match Map.find ctx.ctx_buffers tn with
     | None ->
         (* No zero-init: we are immediately copying from host. *)
         let dst = allocate ctx.device tn ~zero_init:false in
-        [%log "copying", Tn.debug_name tn, "to", (dst : Backend_intf.buffer_loc), "from host"];
-        Backend.from_host ~dst:ctx ~dst_loc:dst hosted;
-        update_writer_event ctx @@ Node tn;
-        { ctx with ctx_buffers = Map.add_exn ctx.ctx_buffers ~key:tn ~data:dst }
+        with_transfer_pool ctx.device dst ~f:(fun () ->
+            [%log "copying", Tn.debug_name tn, "to", (dst : Backend_intf.buffer_loc), "from host"];
+            Backend.from_host ~dst:ctx ~dst_loc:dst hosted;
+            update_writer_event ctx @@ Node tn;
+            { ctx with ctx_buffers = Map.add_exn ctx.ctx_buffers ~key:tn ~data:dst })
     | Some _ ->
         raise
         @@ Utils.User_error
@@ -493,18 +511,19 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
         | None ->
             (* No zero-init: we are immediately copying from another device. *)
             let d_loc = allocate dst.device tn ~zero_init:false in
-            Backend.(
-              device_to_device tn ~into_merge_buffer:No ~dst_loc:(Some d_loc) ~dst ~src_loc:s_loc
-                ~src);
-            update_writer_event dst @@ Node tn;
-            [%log
-              "copying",
-              Tn.debug_name tn,
-              "from",
-              Backend.get_name src.device,
-              "to",
-              Backend.get_name dst.device];
-            { dst with ctx_buffers = Map.add_exn dst.ctx_buffers ~key:tn ~data:d_loc })
+            with_transfer_pool dst.device d_loc ~f:(fun () ->
+                Backend.(
+                  device_to_device tn ~into_merge_buffer:No ~dst_loc:(Some d_loc) ~dst
+                    ~src_loc:s_loc ~src);
+                update_writer_event dst @@ Node tn;
+                [%log
+                  "copying",
+                  Tn.debug_name tn,
+                  "from",
+                  Backend.get_name src.device,
+                  "to",
+                  Backend.get_name dst.device];
+                { dst with ctx_buffers = Map.add_exn dst.ctx_buffers ~key:tn ~data:d_loc }))
 
   type r = Backend.context routine [@@deriving sexp_of]
 
@@ -1227,15 +1246,37 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
   let%debug3_sexp link_batch context code_batch =
     verify_prior_context ~plc:(get_optimize_ctx_batch code_batch).Low_level.placements
       ~ctx_arrays:context.ctx_buffers ~from_prior_context:code_batch.from_prior_context;
-    let ctx_buffers =
-      Array.mapi code_batch.lowereds ~f:(fun i ->
-          Option.map ~f:(fun l ->
-              let name = Option.value code_batch.names.(i) ~default:"<unnamed>" in
-              (* Batch compiles are not liveness-planned in v1 (they do not go through the
-                 fission/schedule seam of [compile]); [alias_spans:None] keeps bump packing. *)
-              allocate_delta context ~name ~alias_spans:None l))
+    (* gh-ocannl-550: the same unwind [link] gets, extended over the whole batch. Every member's delta
+       is allocated before the backend linker runs, so a later member's allocation or the link itself
+       raising used to abandon every completed member's pools -- rooted, with no context to reach them,
+       since the member contexts are only derived in the fold below. [free_delta] is applied per member
+       and skips per-device constants exactly as the context [finalize] does, so a partial batch gives
+       back its working pools and leaves the shared constants alone. *)
+    let allocated = ref [] in
+    let unwind_batch () =
+      List.iter !allocated ~f:(fun cb -> try free_delta context cb with _ -> ())
     in
-    let bindings, schedules = link_batch context code_batch.code_batch ctx_buffers in
+    let ctx_buffers, bindings, schedules =
+      match
+        let ctx_buffers =
+          Array.mapi code_batch.lowereds ~f:(fun i ->
+              Option.map ~f:(fun l ->
+                  let name = Option.value code_batch.names.(i) ~default:"<unnamed>" in
+                  (* Batch compiles are not liveness-planned in v1 (they do not go through the
+                     fission/schedule seam of [compile]); [alias_spans:None] keeps bump packing. *)
+                  let cb = allocate_delta context ~name ~alias_spans:None l in
+                  allocated := cb :: !allocated;
+                  cb))
+        in
+        let bindings, schedules = link_batch context code_batch.code_batch ctx_buffers in
+        (ctx_buffers, bindings, schedules)
+      with
+      | result -> result
+      | exception exn ->
+          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+          unwind_batch ();
+          Stdlib.Printexc.raise_with_backtrace exn backtrace
+    in
     Array.fold_mapi schedules ~init:context ~f:(fun i context -> function
       | None -> (context, None)
       | Some schedule ->
