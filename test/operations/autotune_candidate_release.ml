@@ -15,16 +15,29 @@
    taken against the first sample so that the caller's own contexts and the reference compile do not
    enter the count.
 
-   The two sequences this separates, measured on cc over an 18-candidate search (beam width 2):
-   released, the live-pool delta reads 0,1,2,2,2,2,2,3,4,4,4,... and flattens at the beam's
-   steady state; not released, it reads 0,1,2,3,...,17 — exactly one per candidate, to the end. *)
+   The two sequences this separates, measured on cc (beam width 2): released, the live working-pool
+   delta flattens at the beam's steady state (0,1,2,2,2,2,2,3,4,4,4,... over an 18-candidate search);
+   not released, it reads 0,1,2,3,...,17 — exactly one per candidate, to the end.
+
+   WORKING pools specifically, and the size below is chosen so that the distinction is not academic.
+   At n = 128 the search seeds hoisted [Stage] candidates (the [hoist] labels), and each application of
+   that transform mints a FRESH packed-constant tnode, which [allocate_delta] routes into the
+   per-device constant pool and registers in [constant_buffer_cache] under a unique key. Context
+   release skips every key in that cache — deliberately, since constants are shared per device and
+   outlive contexts — so the constant class still grows one pool per hoisted candidate: measured 1 ->
+   109 constant pools (0.1 -> 15.1 MiB) over 181 candidates, while working pools stayed within 2-6.
+   Bounding that needs a per-pool purity rule in the shared constant cache (a pool mixing a private
+   packed tile with genuinely shared weights must not be freed), which is eviction-policy work and
+   belongs to gh-ocannl-565. So this test asserts the class gh-ocannl-550 bounds and does not pretend
+   about the other one: asserting the constant class "bounded" would be a false green, and asserting
+   its current growth would pin a bug. *)
 
 open Base
 open Ocannl
 open Ocannl.Operation.DSL_modules
 
 let p name b = Stdio.printf "%s: %b\n" name b
-let n = 16
+let n = 128
 let beam_width = 2
 
 let clean_cache dir =
@@ -71,7 +84,11 @@ let () =
 
   let first = List.hd_exn samples in
   let deltas ~f = List.map samples ~f:(fun s -> f s - f first) in
-  let pool_deltas = deltas ~f:Ir.Alloc_census.live_pools in
+  (* [live_working_pools], not [live_pools]: the latter sums in the constant class, whose growth under
+     hoisted staging is a separate, unfixed matter (see the header). Summing them would fail this test
+     for a reason it is not about — and, on a workload with no hoisted candidates, would pass while
+     proving less than it appears to. *)
+  let pool_deltas = deltas ~f:(fun c -> c.Ir.Alloc_census.live_working_pools) in
   let ctx_deltas = deltas ~f:Ir.Alloc_census.live_contexts in
   let max_of = List.fold ~init:0 ~f:max in
 
@@ -96,11 +113,13 @@ let () =
   p "live contexts do not grow across the search" (max_of ctx_late <= max_of ctx_early + slack);
 
   (* Freeing has to be actual freeing, not just a dropped reference: the census counts a pool freed
-     only where the backend's [free_pool] ran. *)
+     only where the backend's [free_pool] ran. Phrased against contexts CREATED rather than against
+     the sample count, because a candidate declining before link never creates one — with the sample
+     count the threshold would silently depend on how many candidates happened to reach link. *)
   let last = List.last_exn samples in
   p "candidates were released, not merely dropped"
     (last.Ir.Alloc_census.pools_freed > 0
-    && last.Ir.Alloc_census.contexts_released >= List.length samples - bound);
+    && last.Ir.Alloc_census.contexts_released >= last.Ir.Alloc_census.contexts_created - bound);
 
   let ctx_t = Context.run ctx_t routine_t in
   let got = Context.get_values ctx_t t2.Tensor.value in
@@ -108,8 +127,16 @@ let () =
     (Array.for_all2_exn got expected ~f:(fun a b -> Float.(abs (a - b) < 1e-4)));
 
   (* And the exit sweep: with the search over and its routine in hand, nothing else it compiled is
-     still held. [live_pools] is read against the reference compile's own footprint, so this compares
-     the state after tuning against the state before the search's first candidate. *)
+     still held. Read against the state before the search's first candidate, so the reference
+     compile's own footprint does not enter. *)
   let after = Ir.Alloc_census.snapshot () in
   p "the search holds nothing beyond its winner once it has returned"
-    (Ir.Alloc_census.live_pools after - Ir.Alloc_census.live_pools first <= bound)
+    (after.Ir.Alloc_census.live_working_pools - first.Ir.Alloc_census.live_working_pools <= bound);
+
+  (* Hoisting coverage is a precondition, not a decoration: without hoisted candidates the assertions
+     above hold for a workload that never exercised the working/constant split, and this test would be
+     quietly weaker than it reads. *)
+  p "the search exercised hoisted staging (so the working/constant split is under test)"
+    (after.Ir.Alloc_census.constant_pools_allocated
+     - first.Ir.Alloc_census.constant_pools_allocated
+    > 4)
