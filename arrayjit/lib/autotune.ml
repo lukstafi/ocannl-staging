@@ -3922,7 +3922,16 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
       Stdio.eprintf "autotune: pre-search failure report callback failed: %s\n%!"
         (Exn.to_string report_exn)
   in
+  (* gh-ocannl-550: every [raise_pre_search] leaves [tune] without returning a routine, so the base
+     compile's artifact is dead on all of them — but the base is linked further down, after this is
+     defined, so the release action arrives by hook rather than by reference. A hook rather than a call
+     at each raise site on purpose: the previous rounds of this work fixed such sites one at a time and
+     each new one was a fresh leak (the fatal cache replay was the last of them), whereas a family with
+     one member cannot be partially updated. Harmless where nothing is linked yet — the two raises
+     above the base compile invoke the no-op default. *)
+  let release_baseline_hook = ref (fun () -> ()) in
   let raise_pre_search ?base (failure : Outcome.failure) =
+    !release_baseline_hook ();
     (match failure with
     | Outcome.Classified c ->
         emit_pre_search_failure ?base ~phase:c.Outcome.phase ~candidate:None
@@ -4054,6 +4063,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
         with exn when not (process_fatal_exn exn) ->
           logf "release of the baseline compile failed: %s" (Exn.to_string exn))
   in
+  release_baseline_hook := release_baseline;
   let base_digest = SC.digest canon in
   let use_cache = (not (String.is_empty cache_dir)) && SC.complete canon in
   let key = SC.cache_key canon ~backend in
