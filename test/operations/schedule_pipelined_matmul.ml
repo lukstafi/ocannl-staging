@@ -17,15 +17,24 @@
    license, not pipelining's). Phase 1 implements depth 2 only; deeper lookahead is the phase-2
    async-copy arms', and depth 3 is pinned as a typed rejection.
 
+   THE OTHER INVARIANT (gh-ocannl-567): the same-anchor load-phase grouping and the
+   Tile_mma-bracket barrier elision, both of which PR #303 landed [opt.pipelined]-gated and gh-567
+   widened to depth 1, change synchronization structure and never values. The reference is the
+   un-elided leg below: the applied depth-1 schedule with the pre-gh-567 barrier structure rebuilt
+   on top of it (a barrier after every load-phase statement and one closing the k-block — adding
+   barriers is always conservative). Depth 1 must match it BITWISE.
+
    Structural pins (backend-independent, on the applied schedule): the pipelined map records both
    tiles at the requested depth with k_o as rotor; the k_o body holds ONE barrier for both
-   same-anchor stages with both If-guarded prefetches grouped behind it (depth 1: two barriers per
-   stage); both prologue loads sit outside the loop. Canonical digests distinguish the depths, and
-   the pipelined companion section alone must separate byte-identical IR whose side-table depths
-   differ (the phase-2 aliasing hazard, pinned by record surgery). Validation legs pin the illegal
-   placements. The C backends cannot express shared placement and must reject the compile cleanly
-   (the same pinning as the SMEM matmul test); the schedule-level validation errors are the typed
-   Illegal_schedule declines autotune candidates see. *)
+   same-anchor stages with both If-guarded prefetches grouped behind it; both prologue loads sit
+   outside the loop. Depth 1 groups the same way and keeps exactly the one phase barrier the
+   intrinsic does not provide (its bracket ends each k-block, but only some rendering forms open
+   one per iteration — the fragment-scope form opens it once, outside the loop). Canonical digests
+   distinguish the depths, and the pipelined companion section alone must separate byte-identical
+   IR whose side-table depths differ (the phase-2 aliasing hazard, pinned by record surgery).
+   Validation legs pin the illegal placements. The C backends cannot express shared placement and
+   must reject the compile cleanly (the same pinning as the SMEM matmul test); the schedule-level
+   validation errors are the typed Illegal_schedule declines autotune candidates see. *)
 
 open Base
 open Ocannl
@@ -163,46 +172,88 @@ let () =
       k_o )
   in
 
-  (* One compile per depth; the transform captures the applied optimized code and the rotor for the
+  (* The gh-567 reference: rebuild the pre-gh-567 barrier structure on top of the applied depth-1
+     schedule — drop the surviving barriers, put one after every load-phase statement, and close
+     the k-block with one. Adding barriers can only remove races, so this leg is a sound reference
+     for the invariant regardless of what the elision does. *)
+  let reinsert_barriers ~is_tile ~k_o (llc : LL.t) : LL.t =
+    let rec go (llc : LL.t) : LL.t =
+      match llc with
+      | LL.For_loop { index; from_; to_; body; axis } when Ir.Indexing.equal_symbol index k_o ->
+          let stmts =
+            LL.flat_lines [ body ]
+            |> List.filter ~f:(function LL.Workgroup_barrier -> false | _ -> true)
+            |> List.concat_map ~f:(fun s ->
+                   if writes_tile ~is_tile s then [ s; LL.Workgroup_barrier ] else [ s ])
+          in
+          LL.For_loop
+            { index; from_; to_; axis; body = LL.unflat_lines (stmts @ [ LL.Workgroup_barrier ]) }
+      | LL.For_loop { index; from_; to_; body; axis } ->
+          LL.For_loop { index; from_; to_; axis; body = go body }
+      | LL.Seq (a, b) -> LL.Seq (go a, go b)
+      | LL.If { cond; body } -> LL.If { cond; body = go body }
+      | other -> other
+    in
+    go llc
+  in
+  (* One compile per leg; the transform captures the applied optimized code and the rotor for the
      backend-independent structural pins (on the C backends the capture still happens — the
-     rejection below comes later, from the backend's compile of the transformed code). *)
+     rejection below comes later, from the backend's compile of the transformed code). Key 0 is the
+     un-elided depth-1 reference. *)
   let captured : (int, LL.optimized * Ir.Indexing.symbol) Hashtbl.t = Hashtbl.create (module Int) in
-  let compile_depth ~pipeline_depth ~out comp =
+  let compile_depth ?post ~key ~pipeline_depth ~out comp =
     let transform opt =
       let schedule, k_o = staged_schedule ~pipeline_depth ~out opt in
       let applied = Sched.apply schedule opt in
-      Hashtbl.set captured ~key:pipeline_depth ~data:(applied, k_o);
+      let applied =
+        match post with
+        | None -> applied
+        | Some f ->
+            let is_tile tn = Set.mem applied.LL.workgroup_shared tn in
+            { applied with LL.llc = f ~is_tile ~k_o applied.LL.llc }
+      in
+      Hashtbl.set captured ~key ~data:(applied, k_o);
       applied
     in
     let ctx = Context.auto () in
     Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty
   in
+  let%op mc0b = ma * mb in
   let%op mc1 = ma * mb in
   let%op mc2 = ma * mb in
   let legs =
     [
+      (0, mc0b, named "pipe_mm_d1_barriers" (Train.forward mc0b));
       (1, mc1, named "pipe_mm_d1" (Train.forward mc1));
       (2, mc2, named "pipe_mm_d2" (Train.forward mc2));
     ]
   in
+  let compile_leg (key, mc, comp) =
+    let post = if key = 0 then Some reinsert_barriers else None in
+    compile_depth ?post ~key ~pipeline_depth:(max key 1) ~out:mc.Tensor.value comp
+  in
   if on_gpu then (
     let results =
-      List.map legs ~f:(fun (depth, mc, comp) ->
-          let ctx, routine = compile_depth ~pipeline_depth:depth ~out:mc.Tensor.value comp in
+      List.map legs ~f:(fun ((key, mc, _) as leg) ->
+          let ctx, routine = compile_leg leg in
           let ctx = Context.run ctx routine in
-          (depth, Context.get_values ctx mc.Tensor.value))
+          (key, Context.get_values ctx mc.Tensor.value))
     in
+    let got_ref = List.Assoc.find_exn results 0 ~equal:Int.equal in
     let got_d1 = List.Assoc.find_exn results 1 ~equal:Int.equal in
     let got_d2 = List.Assoc.find_exn results 2 ~equal:Int.equal in
     p "staged depths approximate the serial twin (GPU) or clean rejection (CPU)"
       (List.for_all results ~f:(fun (_, got) -> Array.for_all2_exn got got_serial ~f:approx));
     (* The invariant: pipelining is a pure prefetch-timing transform. *)
     p "depth 2 matches depth 1 BITWISE" (Array.for_all2_exn got_d2 got_d1 ~f:Float.equal);
+    (* The gh-567 invariant: grouping and eliding barriers is a pure synchronization transform. *)
+    p "depth 1 matches the un-elided barrier structure BITWISE"
+      (Array.for_all2_exn got_d1 got_ref ~f:Float.equal);
+    let count_sub src sub =
+      String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
+    in
     (match (read_generated "pipe_mm_d1", read_generated "pipe_mm_d2") with
     | Some src1, Some src2 ->
-        let count_sub src sub =
-          String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
-        in
         (* The depth-2 kernel rotates both tile buffers ([% 2] terms on reads and writes) and
            allocates each tile at twice the depth-1 size (16x16 -> [512] and 16x32 -> [1024]
            floats); the depth-1 kernel has no rotation and single-size tiles. *)
@@ -216,25 +267,35 @@ let () =
           (count_sub src2 "% 2" >= 4
           && count_sub src1 "% 2" = 0
           && decl_ok src1 1 && decl_ok src2 2)
-    | _ -> p "depth 2 rotates the buffers the depth-1 kernel does not" false))
+    | _ -> p "depth 2 rotates the buffers the depth-1 kernel does not" false);
+    (* The count in the EMITTED kernel, where the intrinsic's own brackets are visible too: the
+       reference and depth 1 differ by exactly the two barrier statements gh-567 dropped (the k-block
+       has one loop body in the source, so this counts statements, not executions). *)
+    match (read_generated "pipe_mm_d1", read_generated "pipe_mm_d1_barriers") with
+    | Some src1, Some src_ref ->
+        let barrier_kw = if on_metal then "threadgroup_barrier" else "__syncthreads" in
+        p "the emitted depth-1 kernel sheds exactly the two elided barriers"
+          (count_sub src_ref barrier_kw - count_sub src1 barrier_kw = 2)
+    | _ -> p "the emitted depth-1 kernel sheds exactly the two elided barriers" false)
   else (
     (* The C backends reject the shared staging composition at compile (workgroup-shared placement
        is not renderable there) — same clean rejection as the SMEM matmul test, at any depth. *)
-    let rejects (depth, mc, comp) =
+    let rejects leg =
       try
-        ignore
-          (compile_depth ~pipeline_depth:depth ~out:mc.Tensor.value comp
-            : Context.t * Context.routine);
+        ignore (compile_leg leg : Context.t * Context.routine);
         false
       with Invalid_argument msg -> String.is_substring msg ~substring:"not supported"
     in
     p "staged depths approximate the serial twin (GPU) or clean rejection (CPU)"
       (List.for_all legs ~f:rejects);
     p "depth 2 matches depth 1 BITWISE" true;
-    p "depth 2 rotates the buffers the depth-1 kernel does not" true);
+    p "depth 1 matches the un-elided barrier structure BITWISE" true;
+    p "depth 2 rotates the buffers the depth-1 kernel does not" true;
+    p "the emitted depth-1 kernel sheds exactly the two elided barriers" true);
 
   (* --- Structural pins on the applied schedules (all backends; captured by the transforms
      above). --- *)
+  let opt_ref, k_o_ref = Hashtbl.find_exn captured 0 in
   let opt_d1, k_o1 = Hashtbl.find_exn captured 1 in
   let opt_d2, k_o2 = Hashtbl.find_exn captured 2 in
   (* Both stages' tiles, at either depth: the workgroup-shared set. *)
@@ -252,19 +313,25 @@ let () =
     | Some (LL.For_loop { body; _ }) -> body
     | _ -> LL.Noop
   in
+  let ref_body = body_of k_o_ref opt_ref.LL.llc in
   let d1_body = body_of k_o1 opt_d1.LL.llc in
   let d2_body = body_of k_o2 opt_d2.LL.llc in
-  (* Depth 1: per stage, [loads; barrier; ...; barrier] nested inside k_o — 4 barriers, no
-     statement-level If-guarded prefetches, no tile writes outside the loop. Depth 2: the two
-     same-anchor stages share ONE barrier phase per iteration — both If-guarded prefetches
-     (statement-level, so the lane restriction Ifs nested within load nests are not miscounted)
-     grouped back to back — and since the tensorized compute ends every iteration with [Tile_mma]
-     (a barrier by the emission contract), the pipeline's own leading barrier is elided outright:
-     the k_o body carries NO explicit barrier, the intrinsic's bracket is the phase. The one
-     explicit barrier left in the routine is the trailing one after the contraction's store-back
-     (its elision would need the region contract across the store — kept conservative). *)
-  p "depth 1 keeps both phase barriers per stage inside k_o"
-    (barriers d1_body = 4 && barriers opt_d1.LL.llc = 4);
+  (* Depth 1 (gh-567): the two same-anchor stages share ONE barrier phase per k-block — both load
+     nests back to back, then the barrier the compute's reads need — and the phase CLOSER is left
+     to [Tile_mma]'s own trailing bracket ("Tile_mma is a barrier"). The k-block's opener stays
+     explicit: only some intrinsic rendering forms bracket the block on both sides per iteration
+     (the fragment-scope form opens once, outside the anchor loop). Without gh-567 that k-block
+     carried FOUR barriers — the reference leg rebuilds three of them (the duplicated closer is
+     semantically the same barrier). Depth 2 additionally elides the opener, against the previous
+     iteration's bracket: both If-guarded prefetches (counted statement-level, so the lane
+     restriction Ifs nested within load nests are not miscounted) sit behind no explicit barrier at
+     all. Either way the one explicit barrier left in the routine outside the k-block is the
+     trailing one after the contraction's store-back (its elision would need the region contract
+     across the store — kept conservative). *)
+  p "the un-elided reference carries a barrier per staged phase"
+    (barriers ref_body = 3 && barriers opt_ref.LL.llc = 3);
+  p "depth 1 groups both stages into one phase and leaves the closer to Tile_mma's bracket"
+    (barriers d1_body = 1 && barriers opt_d1.LL.llc = 1);
   p "depth 2 leaves the per-iteration phase to Tile_mma's bracket, one trailing barrier"
     (barriers d2_body = 0 && barriers opt_d2.LL.llc = 1);
   let stmt_prefetches opt llc =

@@ -108,7 +108,13 @@ type optop =
           accumulation identity) to out-of-range slots, so edge tiles of a non-dividing or padded
           staging are safe to read over their whole index space; every minted tile is recorded in
           {!Low_level.optimized.zero_fringe} accordingly (gh-ocannl-485) — and redundant loading
-          along non-participating workgroup axes is restricted to one representative thread. A shared stage with no anchor (no outer-part
+          along non-participating workgroup axes is restricted to one representative thread. Shared
+          stages sharing an anchor compose into ONE phase per iteration of it: a later stage's load
+          nest is grouped in front of the phase barrier the earlier one left, back to back with its
+          loads (gh-ocannl-567 — the loads write distinct tiles and depend on nothing of each
+          other's, so a barrier between them would only serialize two independent copies), and the
+          phase closer is shared rather than duplicated. Grouping requires that the phase already in
+          place read nothing this stage's remap turns into a read of its tile. A shared stage with no anchor (no outer-part
           symbol, no reused workgroup axis — e.g. staging a broadcast vector) wraps the outermost
           tile loop instead of the routine root, so enclosing workgroup axes can guard the loads;
           every workgroup slot active in the kernel's launch must be reused or bound by a loop
@@ -207,9 +213,11 @@ type optop =
           body ending in a [Tile_mma] — a barrier by the emission contract, bracketed on every
           barrier-capable backend — {!apply}'s finalization elides the pipeline's own barriers
           (the loop-leading one, and the after-loop one where still adjacent): the intrinsic's
-          bracket is the phase, so the tensorized pipelined kernel pays exactly one barrier per
-          iteration; a scalar pipelined compute keeps its explicit barriers. The tile is recorded
-          in {!field:Low_level.pipelined}:
+          bracket is the phase, so the tensorized pipelined kernel pays NO explicit barrier per
+          iteration, one fewer than the depth-1 form (whose k-block loads feed the SAME iteration's
+          compute, so its phase barrier is load-bearing — only the intrinsic's trailing bracket is
+          emitted per iteration on every rendering form; see {!apply}). A scalar pipelined compute
+          keeps its explicit barriers. The tile is recorded in {!field:Low_level.pipelined}:
           codegen allocates [d] rotating copies and selects the buffer by the loop counter (reads
           [k mod d], in-loop writes [(k+1) mod d], the prologue write copy 0), so the compute reads
           exactly the values the unpipelined form reads, in the same order — the pipelined
@@ -437,13 +445,23 @@ val apply :
   schedule ->
   Low_level.optimized ->
   Low_level.optimized
-(** Applies the ops left to right to the optimized code, then re-runs [Low_level.simplify_llc]
-    (which folds remainder and edge guards the loop extents prove) and, when a materializing
-    [Unroll] duplicated code, CSE + cross-statement hoisting. [Stage] registers its tile in the
-    traced store (and [workgroup_shared] when shared); the optimization context and merge node are
-    never changed. Raises [Invalid_argument] when an op references a loop that does not exist at its
-    point in the schedule, or violates an op precondition (see {!optop}). An empty schedule is the
-    identity. *)
+(** Applies the ops left to right to the optimized code, then elides the staging barriers a later
+    [Tensorize] made redundant, then re-runs [Low_level.simplify_llc] (which folds remainder and edge
+    guards the loop extents prove) and, when a materializing [Unroll] duplicated code, CSE +
+    cross-statement hoisting. [Stage] registers its tile in the traced store (and [workgroup_shared]
+    when shared); the optimization context and merge node are never changed. Raises
+    [Invalid_argument] when an op references a loop that does not exist at its point in the
+    schedule, or violates an op precondition (see {!optop}). An empty schedule is the identity.
+
+    The barrier elision (gh-ocannl-487, widened to every staged anchor by gh-ocannl-567) is a
+    synchronization-only rewrite — bitwise identical output, on every backend path. It rests on the
+    [Tile_mma] emission contract, whose two halves are NOT symmetric: every rendering form ENDS the
+    intrinsic block with a workgroup barrier, so a staging barrier that follows one (inside a staged
+    anchor's body, or right after the loop) is dropped at any pipeline depth; but only some forms
+    OPEN one per iteration — the fragment-scope form opens it once, on the scope wrapping the anchor
+    loop — so a barrier is never elided against a following [Tile_mma]. Hence the loop-carried arm
+    (a rotor body's leading barrier, against the previous iteration's bracket) stays pipelined-only,
+    and a depth-1 k-block keeps the barrier between its loads and its compute. *)
 
 val apply_classified :
   ?static_indices:Indexing.static_symbol list ->
