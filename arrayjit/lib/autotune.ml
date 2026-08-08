@@ -4186,10 +4186,26 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
       | _ -> None
     else None
   in
+  (* gh-ocannl-550: the base compile runs BEFORE the cache is consulted — its lowering is what every
+     candidate and every replay derives from — so on the two paths that do not search, its linked
+     artifact is dead as soon as that decision is taken, and nothing downstream can reach it. On the
+     search path it enters the beam instead and is released there. Without this, a warm-cache process
+     leaked one full base-candidate pool per [tune] call, permanently (the pool table roots it), which
+     for a repeatedly-tuning process is the very accumulation this issue is about. *)
+  let release_baseline () =
+    Option.iter baseline_linked ~f:(fun (bctx, _) ->
+        try Context.release bctx
+        with exn when not (process_fatal_exn exn) ->
+          logf "release of the baseline compile failed: %s" (Exn.to_string exn))
+  in
   match cached with
-  | Some result -> result
+  | Some result ->
+      release_baseline ();
+      result
   | None when not search ->
       logf "search disabled (autotune_search=false) and no cache entry: compiling the untuned default";
+      (* Before the fallback compile, which wants the memory. *)
+      release_baseline ();
       (* After the compile, as in the no-cache branch above. The census the base compile already
          produced is carried whether this succeeds or fails. *)
       let reached = census () in
@@ -4630,6 +4646,13 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                       Context.poison_lineage c.cctx
                         ~routine_name:(Context.routine_name c.routine)
                         (Outcome.exception_of_cause classified.cause);
+                      (* gh-ocannl-550: the exit sweep in [emit_partial_and_raise] can only reach
+                         what the beam or [best_so_far] holds, and this candidate is in neither — it
+                         failed before being admitted. Releasing it here is what keeps the in-flight
+                         one from outliving the arm, which matters precisely because
+                         [Train.tune_placements] CONTAINS this failure and goes on to search its
+                         sibling arm on the same device. *)
+                      release_candidate c;
                       emit_partial_and_raise
                         (Outcome.fatal_of_classified ~candidate:(spec_label spec) classified))
               | Error (Outcome.Fatal fatal) ->
@@ -4638,6 +4661,8 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                      it cannot reuse a ledger claiming the failed routine completed. *)
                   Context.poison_lineage c.cctx ~routine_name:(Context.routine_name c.routine)
                     fatal.Outcome.exn;
+                  (* Not in the beam either (see above). *)
+                  release_candidate c;
                   emit_partial_and_raise fatal)
       in
       (* gh-ocannl-550: the per-candidate allocation census, on the same [autotune_log] stream as the
@@ -4977,8 +5002,14 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
              | exception exn -> logf "untuned-default control run failed: %s" (Exn.to_string exn));
              (* A diagnostic's artifacts are dead the moment it has printed its number
                 (gh-ocannl-550) — and the diagnostic is on exactly when the memory question is being
-                measured, so leaving them behind would show up in the very census that reads it. *)
-             Context.release cctx
+                measured, so leaving them behind would show up in the very census that reads it.
+                Best-effort, like [release_candidate]: this runs after a timing failure the control
+                deliberately swallowed, and [release] awaits the device, so a backend still reporting
+                that failure must not be allowed to turn a completed search with a valid winner into
+                a fatal one. *)
+             (try Context.release cctx
+              with exn when not (process_fatal_exn exn) ->
+                logf "release of the untuned-default control failed: %s" (Exn.to_string exn))
          | exception exn -> logf "untuned-default control compile failed: %s" (Exn.to_string exn));
       let completed_report =
         {
@@ -5051,6 +5082,12 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                  fallback a failed replay takes. *)
               logf "winner replay produced an unparallelized routine, falling back: %s"
                 (spec_label spec);
+              (* gh-ocannl-550: rejected, so dead — and the fallback compile below wants the memory.
+                 Same one-liner as the rejected cache replay above; the pre-replay sweep could not
+                 cover this context, which did not exist yet. *)
+              (try Context.release c.cctx
+               with exn when not (process_fatal_exn exn) ->
+                 logf "release of the rejected winner replay failed: %s" (Exn.to_string exn));
               untuned_default_or_raise ()
           | Ok c ->
               logf "winner replay ok: %s" (spec_label spec);

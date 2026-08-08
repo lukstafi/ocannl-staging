@@ -267,9 +267,24 @@ val release : t -> unit
     no-op), and safe to call on a context derived from a still-live parent: sibling contexts never
     share a working pool, since each [compile] mints its own pool ids.
 
+    {b Precondition, not checked}: the context must have no live descendants. A context compiled
+    {e from} this one inherits its buffer locations while keeping it as their backend parent, so
+    releasing an ancestor leaves the descendant resolving a dropped pool id (or reading a freed
+    pointer). Release leaves, not interior nodes. This is the pre-existing contract of the underlying
+    {!Backends_deprecated.finalize} — what is new is that it is reachable from here — and it is
+    deliberately left as a precondition rather than enforced: tracking live descendants would mean
+    refcounting persistent context values, whose whole point is that a child can be derived at any
+    time and outlive the expression that made it. The one caller in-tree ({!Autotune.tune}) releases
+    only leaf siblings of one search context, which is the shape this is for.
+
     A context whose buffers were released must not be run or read again; it is a dead handle, exactly
     as after the finalizer had reclaimed it. Nothing in the context is invalidated for {e reading
     metadata} (placements, names, the ledger), only for touching buffers.
+
+    What it does {e not} free: per-device constants ({!Ir.Backend_intf.field-device.constant_buffer_cache}
+    entries), which are shared across contexts by design and outlive them. That is a real bound on
+    what this can do for a schedule search — a hoisted [Stage] candidate mints a fresh packed constant
+    per application, so those accumulate whatever the caller does here (gh-ocannl-565).
 
     This exists because releasing is otherwise not something a finalizer can be relied on to do
     (gh-ocannl-550): the backends' pool tables hold a strong reference to every slab they allocated,
