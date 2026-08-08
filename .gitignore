@@ -61,6 +61,7 @@ build_files/
 /autotune_fission_cache2/
 /autotune_sketch_cache/
 /autotune_split_cache/
+/autotune_arm_containment_cache/
 /conv_tune_cache/
 /conv_tune_cache_aligned/
 /conv_tune_cache_blocked/
