@@ -1066,6 +1066,42 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
         ctx_buffers := Map.add_exn !ctx_buffers ~key ~data);
     !ctx_buffers
 
+  (* gh-ocannl-550: [allocate_delta] runs BEFORE the backend link, and the pool table roots whatever
+     it allocated — so a link that raises (HIP's scratch-budget validator, a driver refusal, an
+     aliased-read rejection) used to leave that routine's pools behind with no context through which
+     anyone could ever release them. Those are the [Backend_link] declines an autotune search absorbs,
+     so they accumulated exactly like the candidates that succeeded.
+
+     Frees the delta of [ctx_buffers] against [context]: keyed by [pool_id] (one pool holds several
+     nodes) and skipping per-device constants, i.e. the same rule the context [finalize] applies —
+     this stands in for it on the path where no context was ever built. *)
+  let free_delta context (ctx_buffers : ctx_buffers) =
+    Option.iter free_pool ~f:(fun free_pool ->
+        Map.fold ctx_buffers ~init:(Set.empty (module Int))
+          ~f:(fun ~key ~data:(loc : buffer_loc) freed ->
+            if
+              (not (Map.mem context.ctx_buffers key))
+              && (not (Hashtbl.mem context.device.constant_buffer_cache key))
+              && not (Set.mem freed loc.pool_id)
+            then (
+              free_pool context.device ~pool_id:loc.pool_id;
+              Alloc_census.forget_pool ~device_id:context.device.device_id ~pool_id:loc.pool_id;
+              Set.add freed loc.pool_id)
+            else freed)
+        |> (ignore : Set.M(Int).t -> unit))
+
+  (* Runs [f] on a freshly allocated delta, freeing that delta if [f] raises. Everything after the
+     allocation belongs inside: a failure past [make_child] discards the child too, so its pools are
+     just as unreachable as if the child had never existed. *)
+  let with_delta context ctx_buffers ~f =
+    match f () with
+    | result -> result
+    | exception exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        (* Best-effort, and it must not replace the link failure the caller has to classify. *)
+        (try free_delta context ctx_buffers with _ -> ());
+        Stdlib.Printexc.raise_with_backtrace exn backtrace
+
   let%debug3_sexp link context (code : code) =
     verify_prior_context ~plc:code.lowered.Low_level.optimize_ctx.placements
       ~ctx_arrays:context.ctx_buffers ~from_prior_context:code.from_prior_context;
@@ -1078,6 +1114,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     let ctx_buffers =
       allocate_delta context ~name:code.name ~alias_spans:code.alias_spans code.lowered
     in
+    with_delta context ctx_buffers ~f:(fun () ->
     (* gh-ocannl-489: a routine reading a node whose buffer an earlier routine of this lineage
        aliased would read clobbered values -- fail at link time, before any schedule runs. Writes
        (outputs) are allowed: the aliasing routine rewrites everything it reads on each run. This
@@ -1136,7 +1173,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
           check_merge_buffer context.device ~code_node:code.expected_merge_node)
     in
     sync_routine
-      { context; schedule; bindings; name = code.name; inputs; merge_buffer_input; outputs }
+      { context; schedule; bindings; name = code.name; inputs; merge_buffer_input; outputs })
 
   let%debug3_sexp link_batch context code_batch =
     verify_prior_context ~plc:(get_optimize_ctx_batch code_batch).Low_level.placements
