@@ -209,16 +209,14 @@ let time_routine ?(tag_failures = false) ~repeats cctx routine =
          (lineage, initialized nodes, dependencies, the bindings just written) is settled before the
          warmup and only becomes more satisfied as the loop dispatches. [Context.run] re-validates
          per iteration inside the [Launch] tag, where it can no longer fail. *)
-      if tag_failures then (
-        (* Except a poisoned lineage: no restore API (gh-ocannl-536), so every later timing run in it
-           is dead too — terminal, not fixable-and-retryable. Raised outside the region on purpose
-           (Codex P2 on PR #302): contained, a search whose serial baseline is not dispatched (every
-           GPU search) declines every candidate for this one reason, times nothing, and ships the
-           untuned default out of a dead lineage under a completed report. *)
-        Option.iter (Context.poisoned_failure cctx) ~f:raise;
+      (* Only the PER-CANDIDATE half of the pre-dispatch validation is contained here. The
+         lineage-wide half ({!Context.check_lineage_runnable}) is run by the callers below, outside
+         their failure boundaries, because it fails every candidate of every arm identically —
+         see the comments at those two sites (gh-ocannl-569). *)
+      if tag_failures then
         Outcome.tag Outcome.Preflight (fun () ->
             !on_candidate_preflight (Context.routine_name routine);
-            Context.check_runnable cctx routine));
+            Context.check_launch_bindings routine);
       (* Warmup run: absorbs lazy initialization and fills caches like a steady-state iteration. *)
       let ctx = ref (run cctx) in
       sync !ctx;
@@ -4271,6 +4269,15 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                         exn)
             in
             match
+              (* Lineage-wide validation, tagged so [condemn] above reads it for what it is —
+                 pre-dispatch, nothing to withdraw — and raised here rather than inside the timing
+                 so a baseline failure keeps propagating as the pre-search failure it is. This is
+                 the site that made the containment gap invisible on the C backends: the serial
+                 baseline is dispatched there, hits this first, and takes the search down with the
+                 caller's error, where a GPU backend refuses the baseline outright (gh-ocannl-532)
+                 and never reaches it (gh-ocannl-569). *)
+              Outcome.tag Outcome.Preflight (fun () ->
+                  Context.check_lineage_runnable b.cctx b.routine);
               time_routine ~tag_failures:true ~repeats b.cctx b.routine
             with
             | ms -> ms
@@ -4487,6 +4494,15 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                    classifier (gh-ocannl-564). Tagged [Launch] it was fatal on every C backend, so a
                    scratch context missing one of the caller's initializations condemned the search
                    instead of declining a candidate. *)
+                (* The lineage-wide validation is OUTSIDE the boundary (gh-ocannl-569): a poisoned
+                   lineage, an uninitialized input and an unexecuted dependency are properties of
+                   the context and the computation, so a genuine one fails every candidate of every
+                   arm at once. Contained as a decline it is silent — on a backend whose serial
+                   baseline is not dispatched (every GPU backend) every candidate declines for the
+                   one reason, nothing is timed, and the search ships the untuned default out of an
+                   unusable lineage under a report that says it completed. It reaches the caller
+                   instead, which is the only party that can fix it. *)
+                Context.check_lineage_runnable c.cctx c.routine;
                 Outcome.protect ~classify_backend:(Context.failure_classifier c.cctx)
                   ~provenance:Outcome.Candidate ~phase:Outcome.Launch
                   ~candidate:(spec_label spec) (fun () ->

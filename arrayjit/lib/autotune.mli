@@ -531,13 +531,17 @@ val on_candidate_attempt : (string -> unit) ref
 val on_candidate_preflight : (string -> unit) ref
 (** Fault-injection seam for the pre-dispatch containment tests (gh-ocannl-564), called with a
     routine's name inside the {!Ir.Schedule_outcome.Preflight} region of its timing run, just before
-    {!Context.check_runnable}. Raising from it classifies exactly as a real validation failure does:
-    for a candidate a contained decline under [Unclassified_key (Preflight, _)]; for the baseline
-    the propagating pre-search failure a baseline timing failure always is. Needed because the real
-    triggers — an unsatisfied execution dependency, an out-of-range static binding — belong to the
-    lineage and the bindings rather than to a candidate, so a genuine one fails every candidate at
-    once and cannot exercise "declined, and the search shipped a winner anyway". Default a no-op; no
-    configuration selects it. *)
+    {!Context.check_launch_bindings}. Raising from it classifies exactly as a real per-candidate
+    validation failure does: for a candidate a contained decline under
+    [Unclassified_key (Preflight, _)]; for the baseline the propagating pre-search failure a
+    baseline timing failure always is.
+
+    It exists because even the per-candidate trigger — an out-of-range static binding — needs a
+    candidate whose static ranges differ from its siblings' to arise naturally, which the preset
+    families do not supply. The lineage-wide triggers cannot be reached through it at all any more:
+    {!Context.check_lineage_runnable} runs outside this region (gh-ocannl-569), so injecting one of
+    their exceptions here exercises the containment machinery with a realistic payload but does not
+    mirror where a real one is now raised. Default a no-op; no configuration selects it. *)
 
 val tune :
   ?search:bool ->

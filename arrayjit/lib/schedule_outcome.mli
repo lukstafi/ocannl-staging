@@ -5,12 +5,17 @@ type phase =
   | Backend_compile
   | Backend_link
   | Preflight
-      (** {!Context.check_runnable}: a launch's pre-dispatch validation — poisoned lineage,
-          uninitialized inputs, unsatisfied execution dependencies, out-of-range static bindings.
-          All of it precedes [Ir.Task.run], so {!classify_raw} never makes one fatal
-          (gh-ocannl-564): nothing was dispatched, the failure is the caller's to fix and retry, and
-          the lineage stays usable. Inside a [Launch]-tagged boundary it was instead unattributable,
-          hence fatal, hence a condemned lineage for a one-line user mistake. *)
+      (** {!Context.check_launch_bindings}: the per-candidate part of a launch's pre-dispatch
+          validation — out-of-range static bindings. It precedes [Ir.Task.run], so {!classify_raw}
+          never makes one fatal (gh-ocannl-564): nothing was dispatched, the failure is the caller's
+          to fix and retry, and the lineage stays usable. Inside a [Launch]-tagged boundary it was
+          instead unattributable, hence fatal, hence a condemned lineage for a one-line user
+          mistake.
+
+          Deliberately NOT the lineage-wide part ({!Context.check_lineage_runnable}: poisoned
+          lineage, uninitialized inputs, unexecuted dependencies), which a search raises outside
+          this region — it fails every candidate at once, so containing it would report a completed
+          search that timed nothing (gh-ocannl-569). *)
   | Launch
   | Sync
 [@@deriving sexp_of, compare, equal]

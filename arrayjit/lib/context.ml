@@ -299,14 +299,18 @@ let rollback_execution ctx routine_id =
 let poison_lineage ctx ~routine_name exn =
   if Option.is_none ctx.ledger.poisoned then ctx.ledger.poisoned <- Some (routine_name, exn)
 
-(* The pre-dispatch validation of {!run}, callable on its own (gh-ocannl-550): everything here
-   happens BEFORE [Ir.Task.run], so a failure it raises proves the routine was never dispatched and
-   the device wrote nothing. A caller that wraps [run] in a launch-tagged failure boundary (the
-   autotuner's timing runs) validates through this in its own [Schedule_outcome.Preflight] region,
-   so an unattributed failure at [Launch] means dispatch was attempted — which makes condemning the
-   lineage there sound, and keeps a mere unsatisfied dependency or an out-of-range binding from
-   condemning it (gh-ocannl-564). *)
-let check_runnable ctx routine =
+(* The LINEAGE-WIDE half of [check_runnable]: a poisoned lineage, an uninitialized input, an
+   unexecuted dependency. Each is a property of the context and of the computation, identical for
+   every candidate a search compiles from it, so a genuine one fails every candidate of every arm
+   at once — which is why it must reach the caller rather than being absorbed as a per-candidate
+   decline (gh-ocannl-569). Contained, a search whose serial baseline is not dispatched (every GPU
+   search, gh-ocannl-532) declines every candidate for this one reason, times nothing, and ships
+   the untuned default out of an unusable lineage under a COMPLETED report — the caller never
+   learns about the one-line fix. That is the reasoning the poisoned-lineage check was already
+   raised outside the [Preflight] region for; these two belong beside it. On the C backends the
+   dispatched serial baseline hit this first and took the arm down with it, which is why the
+   divergence was CPU-invisible until HIP ran the suite. *)
+let check_lineage_runnable ctx routine =
   check_not_poisoned ctx;
   (* Check that all required inputs are initialized. A node counts as initialized if it was produced
      by a prior routine ([initialized_nodes]) or is already allocated in the running context's
@@ -341,12 +345,24 @@ let check_runnable ctx routine =
      in
      failwith
        (Printf.sprintf "Context.run: routine %s (id=%d) has unexecuted dependencies: %s"
-          routine.name routine.routine_id dep_names));
+          routine.name routine.routine_id dep_names))
 
-  (* Bind-time validation of launch parameters (docs/proposals/signed-index-precision.md): each
-     bound value must be non-negative, within its declared static range, and within the index
-     width. *)
+(* The PER-CANDIDATE half: bind-time validation of launch parameters
+   (docs/proposals/signed-index-precision.md) — each bound value must be non-negative, within its
+   declared static range, and within the index width. Unlike the lineage checks above this reads
+   the bindings the caller just wrote for THIS routine, and candidates differ in their static
+   ranges, so one candidate can fail it while its siblings time cleanly. That makes it the half a
+   search should contain as a decline (gh-ocannl-564). *)
+let check_launch_bindings routine =
   Idx.validate_lowered_bindings ~width64:Utils.settings.large_models routine.bindings
+
+(* The pre-dispatch validation of {!run}, callable on its own (gh-ocannl-550): everything here
+   happens BEFORE [Ir.Task.run], so a failure it raises proves the routine was never dispatched and
+   the device wrote nothing. Callers that need the two halves apart — the autotuner's timing runs,
+   which contain only the per-candidate one — use them directly. *)
+let check_runnable ctx routine =
+  check_lineage_runnable ctx routine;
+  check_launch_bindings routine
 
 let run ctx routine =
   check_runnable ctx routine;
