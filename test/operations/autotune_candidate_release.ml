@@ -89,7 +89,7 @@ let () =
      for a reason it is not about — and, on a workload with no hoisted candidates, would pass while
      proving less than it appears to. *)
   let pool_deltas = deltas ~f:(fun c -> c.Ir.Alloc_census.live_working_pools) in
-  let ctx_deltas = deltas ~f:Ir.Alloc_census.live_contexts in
+  let ctx_deltas = deltas ~f:Ir.Alloc_census.unreleased_contexts in
   let max_of = List.fold ~init:0 ~f:max in
 
   (* The absolute bound: one candidate in flight, plus what the beam retains, plus the running best.

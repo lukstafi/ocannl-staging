@@ -1230,8 +1230,16 @@ end
 let finalize (type dev runner event)
     (module Backend : Backend with type dev = dev and type runner = runner and type event = event)
     (ctx : Backend.context) : unit =
-  if Atomic.compare_and_set ctx.finalized false true then (
-    Alloc_census.count_context_released ();
+  (* The flag means "this context's pools have been freed", NOT "a free was attempted" — so cleanup
+     that RAISES resets it (gh-ocannl-550). [Backend.await] is the realistic raiser: a device still
+     reporting an asynchronous error, or a dead worker domain. Left set, every later release of this
+     context would be a silent no-op and its pools would stay rooted for the process — restoring
+     exactly the unbounded growth this exists to end, and on the failure paths where it matters most,
+     since the tuner catches a failed release and carries on with the next candidate or arm. A retry
+     is safe: freeing is idempotent per [pool_id] on every backend (the table entry is gone after the
+     first success, and [Alloc_census.forget_pool] ignores an absent key), so a cleanup that got part
+     way through does not double-free on the next attempt. *)
+  let cleanup () =
     Option.iter Backend.free_pool ~f:(fun free_pool ->
         Backend.await ctx.device;
         (* One pool holds several nodes (gh-ocannl-344 bump packing / gh-ocannl-489 arenas), so the
@@ -1249,7 +1257,14 @@ let finalize (type dev runner event)
               Alloc_census.forget_pool ~device_id:ctx.device.device_id ~pool_id:loc.pool_id;
               Set.add freed loc.pool_id)
             else freed)
-        |> (ignore : Set.M(Int).t -> unit)))
+        |> (ignore : Set.M(Int).t -> unit))
+  in
+  if Atomic.compare_and_set ctx.finalized false true then
+    match cleanup () with
+    | () -> Alloc_census.count_context_released ()
+    | exception exn ->
+        Atomic.set ctx.finalized false;
+        raise exn
 
 (* {2 The implemented backends, as singletons}
 

@@ -75,16 +75,16 @@ let snapshot () =
 
 let live_pools c = c.live_working_pools + c.live_constant_pools
 let live_pool_bytes c = c.live_working_bytes + c.live_constant_bytes
-let live_contexts c = c.contexts_created - c.contexts_released
+let unreleased_contexts c = c.contexts_created - c.contexts_released
 let live_modules c = c.modules_loaded - c.modules_unloaded
 let mib bytes = Float.of_int bytes /. 1048576.
 
 let to_string c =
   Printf.sprintf
     "pools %d live = %d working (%.1f MiB) + %d constant (%.1f MiB); %d allocated, %d freed | \
-     contexts %d live (%d created, %d released) | modules %d live (%d loaded, %d unloaded)"
+     contexts %d unreleased (%d created, %d released) | modules %d live (%d loaded, %d unloaded)"
     (live_pools c) c.live_working_pools (mib c.live_working_bytes) c.live_constant_pools
     (mib c.live_constant_bytes)
     (c.working_pools_allocated + c.constant_pools_allocated)
-    c.pools_freed (live_contexts c) c.contexts_created c.contexts_released (live_modules c)
+    c.pools_freed (unreleased_contexts c) c.contexts_created c.contexts_released (live_modules c)
     c.modules_loaded c.modules_unloaded

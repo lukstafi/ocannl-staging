@@ -5114,6 +5114,17 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
               }
       in
       (* A callback failure on the ordinary completion path is the callback's own exception and
-         propagates normally; only fatal-path callbacks are best-effort. *)
-      emit_report completed_report;
+         propagates normally; only fatal-path callbacks are best-effort. But propagating means the
+         caller never receives [result], so its buffers become unreachable while the pool table keeps
+         rooting them (gh-ocannl-550) — one full winner's footprint per aborted report, which for a
+         caller that retries would accumulate exactly like the candidates used to. The exit sweep
+         above deliberately kept this one; nothing is keeping it now. *)
+      (match emit_report completed_report with
+      | () -> ()
+      | exception exn ->
+          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+          (try Context.release (fst result)
+           with release_exn when not (process_fatal_exn release_exn) ->
+             logf "release after a failed completion report failed: %s" (Exn.to_string release_exn));
+          Stdlib.Printexc.raise_with_backtrace exn backtrace);
       result)

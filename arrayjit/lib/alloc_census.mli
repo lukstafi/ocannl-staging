@@ -21,7 +21,10 @@
       at zero rather than reporting a wrong number.
 
     Consequently [live_*] is exact for what it covers and is not a device-memory total: use
-    [Context.get_used_memory] for the backend's own view. *)
+    [Context.get_used_memory] for the backend's own view. Note also which counters are {e live} and
+    which are not: pools and modules are (a pool is in the table or it is not; a module's unload is
+    counted by the finalizer that performs it), whereas contexts are only ever decremented by an
+    explicit release — see {!unreleased_contexts}. *)
 
 val record_pool : device_id:int -> pool_id:int -> constant:bool -> size_in_bytes:int -> unit
 (** Records a pool as live. Replacing an existing [(device_id, pool_id)] entry replaces its size
@@ -56,6 +59,13 @@ type t = {
 val snapshot : unit -> t
 val live_pools : t -> int
 val live_pool_bytes : t -> int
-val live_contexts : t -> int
+val unreleased_contexts : t -> int
+(** [contexts_created - contexts_released]. NOT a live count, and the difference matters: unlike a
+    pool, a context is not rooted by any table, so an unreleased one may well have been collected
+    already — nothing on the device depends on the record's liveness. What the number tracks is
+    contexts whose pools were never explicitly freed, which is the useful signal precisely because
+    those pools ARE rooted. Compare {!live_pools}, {!live_modules}: those two are genuinely live,
+    the former because the table is the authority and the latter because unloads are counted from
+    the GC finalizer that performs them. *)
 val live_modules : t -> int
 val to_string : t -> string
