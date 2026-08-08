@@ -44,11 +44,14 @@ exactly one of them.
 
 Read the columns against each other:
 
-- **Working pools grow one per candidate, ~102 MiB each, and `pools_freed` stays 0 for the whole
-  search.** That is the entire curve: `device MiB` (the backend's own `Context.get_used_memory`)
-  equals live working bytes plus the single 9.3 MiB constant pool, to the decimal, at every sample.
-- **Contexts grow one per candidate and `contexts_released` stays 0.** Same shape, same cause.
-- **Modules do NOT accumulate.** 82 loaded, 77 unloaded, live count flat at 2–5 across the whole
+- **Working pools grow by one per candidate that reaches link, ~102 MiB each, and `pools_freed`
+  stays 0 for the whole search.** 127 working pools over 261 attempts — precisely: 101 timed, 20
+  deduplicated, 2 non-dispatchable, and the handful that failed at `Backend_link` itself; the 134
+  that declined earlier (at `Transform` or `Backend_compile`) never link and never allocate. That is
+  the entire curve: `device MiB` (the backend's own `Context.get_used_memory`) equals live working
+  bytes plus the single 9.3 MiB constant pool, to the decimal, at every sample.
+- **Contexts grow in step, and `contexts_released` stays 0.** Same shape, same cause.
+- **Modules do NOT accumulate.** 127 loaded, 124 unloaded, live count flat at 2–5 across the whole
   search. cudajit unloads a module from its own GC finalizer and that finalizer fires perfectly
   well.
 - **Constant pools do not accumulate** (one, 9.3 MiB, flat): they are deduped per device by
@@ -97,8 +100,9 @@ So this is closer to a true leak than to a missed collection, and it changes the
 ### It scales with candidates *attempted* — not with kept, and not even with ranked
 
 The issue's first open question was whether peak memory scales with the kept candidates or with the
-whole ranked set. Neither. The pool is allocated at **link**, before the search decides anything
-about the candidate, so:
+whole ranked set. Neither: with the candidates that reach **link**, which happens before the search
+decides anything about the candidate. So a candidate the search immediately throws away has already
+paid:
 
 ```
 autotune: W_preset[bs=cfg]: dedup (digest 6bf339c4/84848ff5)
@@ -108,8 +112,15 @@ autotune: census after W_preset[bs=64]: pools 6 live = 5 working (322.8 MiB) ...
 ```
 
 Four *deduplicated* `W_preset` candidates — candidates the search discards as identical to one it
-already has — each pay a full 102 MiB working pool. `Backend_link` declines pay the same way, which
-is why an out-of-memory decline used to make the next one likelier rather than less.
+already has — each pay a full 102 MiB working pool. 20 of this run's 127 pools went to dedups.
+`Backend_link` declines pay the same way, which is why an out-of-memory decline used to make the next
+one likelier rather than less.
+
+The invariant holds across candidate families too: `W_preset`, `F_preset`, `F_sketch` and `F_split`
+candidates all cost ~102 MiB apiece here. gh-541's split-reduce expansion is therefore a real
+contributor by raising the attempt count, but not a special one — which answers the issue's third
+question (should `autotune_split_reduce_max_sites` become memory-aware?) with *no*: the fix belongs in
+candidate lifetime, and the cap bounded memory only incidentally, by bounding attempts.
 
 ## 2. The fix: eager release at the candidate boundary
 
@@ -188,6 +199,15 @@ One gap worth naming rather than fixing here: this test prints offsets but not t
 so a *packing* regression (the same non-overlapping offsets in a needlessly larger arena) would not
 show up in it. Answering that question needs a test that asserts on pool bytes;
 `Ir.Alloc_census.live_pool_bytes` now makes that cheap to write.
+
+## 5. Suite state
+
+`dune build @runtest @slow` exits 1 with exactly one promotion diff, `test/training/mlp_bn_names`, and
+it is **pre-existing**: at `c90d1abe` (this branch's merge base) that test produces output byte-identical
+to what it produces here, and both differ from the committed golden by one character of sampled text
+(`iaaayyareyoftznaayae` vs `…znbayae`) with all three loss lines identical. Deterministic — two solo
+runs agree — so not a concurrency artifact of the new unlocked test either. Not promoted here, since it
+belongs to neither half of gh-550.
 
 ## Provenance and hygiene
 
