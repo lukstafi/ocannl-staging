@@ -9,11 +9,12 @@
 
     Counting sites, and therefore the exact coverage:
 
-    - Pools: the {e shared} allocator seam ([Backends.allocate_delta], and the context [finalize] that
-      frees it). A device's reserved merge-buffer pool is NOT counted: it is one entry per device that
-      grows in place, so it cannot be a per-candidate growth class, and its allocation site is inside
-      each backend rather than at the shared seam. Read the device's [merge_buffer_capacity] for that
-      one.
+    - Pools: both shared allocation sites — [Backends.allocate_delta] (a compile's in-context delta) and
+      the [allocate] used when a [from_host] or [copy] destination is not in the context yet — against
+      the context [finalize] that frees either. A device's reserved merge-buffer pool is NOT counted: it
+      is one entry per device that grows in place, so it cannot be a growth class at all, and its
+      allocation site is inside each backend rather than at the shared seam. Read the device's
+      [merge_buffer_capacity] for that one.
     - Contexts: [Backend_impl.Device.make_context] / [make_child], shared by every backend, against
       the context [finalize].
     - Modules: per-backend link sites. Instrumented on [cc] and [cuda] (the backends the

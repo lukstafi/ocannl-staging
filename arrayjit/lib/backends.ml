@@ -332,6 +332,13 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
     in
     let mode = Option.map tn.Tn.memory_mode_intent ~f:fst in
     Backend.alloc_pool ?mode device ~pool_id ~size_in_bytes ~alignment:(Ops.prec_in_bytes prec);
+    (* gh-ocannl-550: the OTHER shared allocation site — a [from_host] or [copy] whose destination node
+       is not in the context yet allocates here, not through [allocate_delta]. Its slabs go into the
+       same backend pool tables and are freed by the same context [finalize], so leaving them
+       uncounted made the census silently underreport in data-loading and context-copy workflows. Not
+       working-vs-constant: this path is a working buffer by construction (a host transfer's
+       destination). *)
+    Alloc_census.record_pool ~device_id:device.device_id ~pool_id ~constant:false ~size_in_bytes;
     if zero_init then Backend.memset_zero device ~pool_id ~offset:0 ~size_in_bytes;
     { pool_id; offset = 0 }
 
@@ -950,9 +957,30 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
        per-class census records it. [~constant] separates the two groups below, whose lifetimes
        differ: a working pool belongs to the context and dies with it, a constant pool is deduped
        per device and outlives it. *)
+    (* What THIS call minted, so a failure part way through can give it back (gh-ocannl-550,
+       round-four review). [with_delta] in [link] covers failures after the delta is returned; it
+       cannot cover a failure inside this function, where the caller never receives [ctx_buffers] and
+       the slabs already allocated are rooted with nothing to reach them. Pool ids are fresh from
+       [device.next_pool_id], so every id here is unambiguously this call's. *)
+    let minted = ref [] in
+    let cache_inserts = ref [] in
     let alloc_pool_counted ~constant device ~pool_id ~size_in_bytes ~alignment =
       alloc_pool device ~pool_id ~size_in_bytes ~alignment;
+      minted := pool_id :: !minted;
       Alloc_census.record_pool ~device_id:device.device_id ~pool_id ~constant ~size_in_bytes
+    in
+    let unwind_partial_delta () =
+      (* The uploads scheduled above are asynchronous, so the pools must not be freed under them. *)
+      (try Device.await device with _ -> ());
+      (* Constant-cache entries this call inserted point INTO the pools about to go, so they have to
+         come out first or a later context would resolve a freed slab. Entries that were already
+         there belong to earlier compiles and are untouched. *)
+      List.iter !cache_inserts ~f:(Hashtbl.remove device.constant_buffer_cache);
+      Option.iter free_pool ~f:(fun free_pool ->
+          List.dedup_and_sort !minted ~compare:Int.compare
+          |> List.iter ~f:(fun pool_id ->
+                 free_pool device ~pool_id;
+                 Alloc_census.forget_pool ~device_id:device.device_id ~pool_id))
     in
     let pack ?arena ~constant (group : (Tn.t * Low_level.traced_array) list)
         ~(register : Tn.t -> alloc:(unit -> buffer_loc) -> unit) : unit =
@@ -1048,8 +1076,9 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     (* Pass 2a: working delta -> context-owned pool(s), recorded directly. Only this group is
        liveness-planned (gh-ocannl-489): constants are deduped per-device and outlive the context,
        so their lifetimes are not routine intervals. *)
-    pack ?arena:alias_spans ~constant:false working ~register:(fun key ~alloc ->
-        ctx_buffers := Map.add_exn !ctx_buffers ~key ~data:(alloc ()));
+    let passes () =
+      pack ?arena:alias_spans ~constant:false working ~register:(fun key ~alloc ->
+          ctx_buffers := Map.add_exn !ctx_buffers ~key ~data:(alloc ()));
     (* Pass 2b: constants / read-only -> per-device constant pool(s). Constants already allocated on
        this device (a hit in [constant_buffer_cache], possibly from another context tree) resolve
        directly and are excluded from the new slab, so the freshly-minted constant pool holds
@@ -1061,9 +1090,22 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
         match Hashtbl.find device.constant_buffer_cache key with
         | Some data -> ctx_buffers := Map.add_exn !ctx_buffers ~key ~data
         | None -> new_constants := (key, node) :: !new_constants);
-    pack ~constant:true (List.rev !new_constants) ~register:(fun key ~alloc ->
-        let data = Hashtbl.find_or_add device.constant_buffer_cache key ~default:alloc in
-        ctx_buffers := Map.add_exn !ctx_buffers ~key ~data);
+      pack ~constant:true (List.rev !new_constants) ~register:(fun key ~alloc ->
+          let data =
+            Hashtbl.find_or_add device.constant_buffer_cache key ~default:(fun () ->
+                cache_inserts := key :: !cache_inserts;
+                alloc ())
+          in
+          ctx_buffers := Map.add_exn !ctx_buffers ~key ~data)
+    in
+    (match passes () with
+    | () -> ()
+    | exception exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        (* Best-effort: giving the slabs back must not replace the allocation failure the caller has
+           to classify (an out-of-memory decline being the whole point). *)
+        (try unwind_partial_delta () with _ -> ());
+        Stdlib.Printexc.raise_with_backtrace exn backtrace);
     !ctx_buffers
 
   (* gh-ocannl-550: [allocate_delta] runs BEFORE the backend link, and the pool table roots whatever

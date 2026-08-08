@@ -441,6 +441,18 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
         Stdlib.Printexc.raise_with_backtrace exn backtrace
     | _ -> ()
   in
+  (* A [report] callback exception propagates by design (it is the caller's failure, not the search's),
+     which means it exits [tune_placements] without reaching any of the ship paths below — so results
+     already collected would be abandoned rooted. Every call after the first goes through this
+     (gh-ocannl-550, round-four review); the first needs nothing, since [produced] is still empty. *)
+  let tune_or_release ?to_report arm c t =
+    match tune ?to_report arm c t with
+    | r -> r
+    | exception exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        release_unshipped ();
+        Stdlib.Printexc.raise_with_backtrace exn backtrace
+  in
   let a, a_ms, a_report = tune "A (default placements)" ctx timing_ctx in
   record a;
   propagate_if_poisoned "A" a;
@@ -451,7 +463,7 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
      level. *)
   let materialize c = Context.decide_materialized c !embedded in
   let b, b_ms, b_report =
-    tune "B (materialize-all)" (materialize ctx) (Option.map timing_ctx ~f:materialize)
+    tune_or_release "B (materialize-all)" (materialize ctx) (Option.map timing_ctx ~f:materialize)
   in
   record b;
   (* Both arms gone: there is no winner to ship, and the first failure is the one that has not been
@@ -508,9 +520,9 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
      its incumbent with a strictly faster {e completed} search ([infinity] ranks a failed one). *)
   let ship = function
     | Ok compiled -> (
-        (* Before the poisoned-lineage check below, which can raise: either way this result is the only
-           one that could ship, so the others are dead. *)
-        release_unshipped ~keep:compiled ();
+        (* The poisoned check comes FIRST, and the retention decision after it (gh-ocannl-550,
+           round-four review): retaining [compiled] and then raising would leave the one artifact
+           nobody can reach. Whether this returns or raises, exactly one of the two calls below runs. *)
         (* A later arm can poison the lineage after this one succeeded. With a [timing_ctx] that is
            the scratch lineage and the winner — compiled from [ctx] — is unaffected. WITHOUT one the
            arms search in the caller's own lineage, so the winner's first [Context.run] is
@@ -518,9 +530,13 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
            execute, and blame it on whichever routine poisoned the ledger. The poisoning failure is
            the honest answer, at the point where it is known. *)
         match if Option.is_none timing_ctx then Context.poisoned_failure ctx else None with
-        | None -> compiled
+        | None ->
+            release_unshipped ~keep:compiled ();
+            compiled
         | Some poisoned ->
             logf "the winner cannot ship: a later arm poisoned the caller's lineage";
+            (* Nothing ships, so nothing is retained -- including this arm's own winner. *)
+            release_unshipped ();
             raise poisoned)
     | Error (exn, backtrace) ->
         (* Nothing ships, so nothing is retained. *)
@@ -582,7 +598,7 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
         if lineage_poisoned () then
           logf "flip refinement stopped: the shared lineage is poisoned"
         else
-          let r, ms, _rep = tune ~to_report:flip_report arm ctx' timing' in
+          let r, ms, _rep = tune_or_release ~to_report:flip_report arm ctx' timing' in
           record r;
           if Float.(ms < chain_ms) then chain := (r, ms, ctx', timing'));
     let chain_result, chain_ms, _, _ = !chain in
