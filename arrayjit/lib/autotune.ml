@@ -4042,6 +4042,18 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
     | Error (Outcome.Classified classified) -> (None, Some classified)
     | Error (Outcome.Fatal _ as failure) -> raise_pre_search failure
   in
+  (* gh-ocannl-550: the base compile runs BEFORE the cache is consulted — its lowering is what every
+     candidate and every replay derives from — so on the two paths that do not search, its linked
+     artifact is dead as soon as that decision is taken, and nothing downstream can reach it. On the
+     search path it enters the beam instead and is released there. Without this, a warm-cache process
+     leaked one full base-candidate pool per [tune] call, permanently (the pool table roots it), which
+     for a repeatedly-tuning process is the very accumulation this issue is about. *)
+  let release_baseline () =
+    Option.iter baseline_linked ~f:(fun (bctx, _) ->
+        try Context.release bctx
+        with exn when not (process_fatal_exn exn) ->
+          logf "release of the baseline compile failed: %s" (Exn.to_string exn))
+  in
   let base_digest = SC.digest canon in
   let use_cache = (not (String.is_empty cache_dir)) && SC.complete canon in
   let key = SC.cache_key canon ~backend in
@@ -4129,6 +4141,22 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
           | Ok c ->
               logf "cache hit: %s (best %.4f ms, baseline %.4f ms)" (spec_label spec)
                 entry.SC.best_ms entry.SC.baseline_ms;
+              (* gh-ocannl-550: the report happens INSIDE the construction of [cached], so a [report]
+                 callback that raises here never reaches the [Some result] arm below that releases the
+                 baseline, and abandons the replayed winner too — two rooted routine footprints per
+                 call, for a caller that retries. Both released before the callback's exception
+                 propagates; the exception and its backtrace are unchanged. *)
+              let emit_report report =
+                match emit_report report with
+                | () -> ()
+                | exception exn ->
+                    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+                    (try Context.release c.cctx
+                     with rel when not (process_fatal_exn rel) ->
+                       logf "release after a failed cache-hit report failed: %s" (Exn.to_string rel));
+                    release_baseline ();
+                    Stdlib.Printexc.raise_with_backtrace exn backtrace
+              in
               emit_report
                 {
                   cache_hit = true;
@@ -4185,18 +4213,6 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
           | Error (Outcome.Fatal _ as failure) -> raise_pre_search ~base:(census ()) failure)
       | _ -> None
     else None
-  in
-  (* gh-ocannl-550: the base compile runs BEFORE the cache is consulted — its lowering is what every
-     candidate and every replay derives from — so on the two paths that do not search, its linked
-     artifact is dead as soon as that decision is taken, and nothing downstream can reach it. On the
-     search path it enters the beam instead and is released there. Without this, a warm-cache process
-     leaked one full base-candidate pool per [tune] call, permanently (the pool table roots it), which
-     for a repeatedly-tuning process is the very accumulation this issue is about. *)
-  let release_baseline () =
-    Option.iter baseline_linked ~f:(fun (bctx, _) ->
-        try Context.release bctx
-        with exn when not (process_fatal_exn exn) ->
-          logf "release of the baseline compile failed: %s" (Exn.to_string exn))
   in
   match cached with
   | Some result ->
@@ -4297,12 +4313,17 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                 condemn phase exn;
                 emit_pre_search_failure ~base:(census ()) ~phase ~candidate:(Some "baseline")
                   ~detail:(Exn.to_string exn) ();
+                (* gh-ocannl-550: it never reaches the beam, so nothing downstream can release it —
+                   and a caller that CONTAINS this (a write-free preflight decline, a
+                   backend-classified failure) goes on to another arm or retries. *)
+                release_baseline ();
                 Stdlib.Printexc.raise_with_backtrace exn backtrace
             | exception exn ->
                 let backtrace = Stdlib.Printexc.get_raw_backtrace () in
                 condemn Outcome.Launch exn;
                 emit_pre_search_failure ~base:(census ()) ~phase:Outcome.Launch
                   ~candidate:(Some "baseline") ~detail:(Exn.to_string exn) ();
+                release_baseline ();
                 Stdlib.Printexc.raise_with_backtrace exn backtrace)
         | _ -> Float.infinity
       in
@@ -4373,6 +4394,11 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
          that needs no allocator to fix that: it knows each candidate's exact lifetime — timed, then
          dead unless it is a beam survivor. *)
       let beam = ref (Option.to_list (Option.map baseline ~f:(fun b -> (b, baseline_ms)))) in
+      (* The beam-expansion round's own bounded accumulator, hoisted to this scope for one reason: the
+         exit sweep has to be able to see it. A fatal launch/sync failure part way through a round used
+         to abandon up to [beam_width] already-timed survivors that were in neither [beam] nor
+         [best_so_far] (gh-ocannl-550, round-three review). Reset at the top of each round. *)
+      let round = ref [] in
       (* Set by the exit sweep: past it there is no reader left for any candidate the search compiled,
          so retention stops applying. A flag rather than clearing [best_so_far], which the reports
          still read for the winner's label after the sweep has freed its buffers. *)
@@ -4388,6 +4414,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
           !search_over
           || not
                (List.exists !beam ~f:(fun (c', _) -> phys_equal c c')
+               || List.exists !round ~f:(fun (c', _) -> phys_equal c c')
                || Option.exists (fst !best_so_far) ~f:(phys_equal c))
         then
           (* Best-effort: a failure to free must not replace the candidate's own outcome, and this
@@ -4410,8 +4437,11 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
          used to defeat (the winner replay and the untuned-default fallback behind it). *)
       let release_all_candidates ~keep () =
         search_over := true;
-        let live = List.map !beam ~f:fst @ Option.to_list (fst !best_so_far) in
+        let live =
+          List.map !beam ~f:fst @ List.map !round ~f:fst @ Option.to_list (fst !best_so_far)
+        in
         beam := [];
+        round := [];
         List.iter live ~f:(fun c ->
             if not (List.exists keep ~f:(phys_equal c)) then release_candidate c)
       in
@@ -4929,7 +4959,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
            round's also-rans must not (16 compiles per round on the gh-ocannl-543 chain). An evicted
            entry is provably outside [!round] by the time it is released, so [release_candidate]'s
            beam/best check is the whole guard it needs. *)
-        let round = ref [] in
+        round := [];
         let round_admit entry =
           let kept, evicted =
             List.split_n (List.sort (entry :: !round) ~compare:by_time) beam_width

@@ -402,6 +402,26 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
                   else Printf.sprintf "%.4f ms" r.Autotune.mma_best_ms))));
     (result, best_ms, r)
   in
+  (* gh-ocannl-550: every arm and every flip that SUCCEEDS produces a compiled routine, and exactly one
+     of them ships. Dropping the OCaml value does not free anything — the backend's pool table roots
+     the slabs (see {!Context.release}) — so an unshipped result is a permanently rooted routine
+     footprint, once per [tune_placements] call, plus one per attempted flip. Bounded per call, and
+     therefore not the per-candidate growth {!Autotune.tune} fixes, but a repeatedly-tuning process
+     (a benchmark sweep, a script tuning several routines) accumulates them without limit.
+
+     Collected here rather than released at each decision point, because "may still ship" is not a
+     local property: the flip chain bases on arm A's result, so A stays alive while the chain runs even
+     when B won the A/B, and the chain's incumbent stays alive until the final comparison. One sweep at
+     the single point where the answer is known avoids having to re-derive that per branch. *)
+  let produced = ref [] in
+  let record = function Ok compiled -> produced := compiled :: !produced | Error _ -> () in
+  let release_unshipped ?keep () =
+    List.iter !produced ~f:(fun ((cctx, _) as compiled) ->
+        if not (Option.exists keep ~f:(phys_equal compiled)) then
+          try Context.release cctx
+          with exn when not (must_propagate exn) ->
+            logf "release of an unshipped tune result failed: %s" (Exn.to_string exn))
+  in
   (* The arms are independent experiments but they are not independent lineages: the B arm searches
      in a {!Context.decide_materialized} sibling, which shares the execution ledger. A failure whose
      damage the backend could not bound ([Writes_may_have_occurred], or an unattributed launch/sync
@@ -416,10 +436,13 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
     | Error (exn, backtrace) when lineage_poisoned () ->
         logf "arm %s poisoned the shared %s lineage, so no sibling arm can run: propagating" who
           (if Option.is_some timing_ctx then "timing" else "caller's");
+        (* Nothing will ship (gh-ocannl-550): a sibling arm that already succeeded has no reader left. *)
+        release_unshipped ();
         Stdlib.Printexc.raise_with_backtrace exn backtrace
     | _ -> ()
   in
   let a, a_ms, a_report = tune "A (default placements)" ctx timing_ctx in
+  record a;
   propagate_if_poisoned "A" a;
   let embedded = ref [] in
   Tensor.iter_embedded ~f:(fun tn -> embedded := tn :: !embedded) loss;
@@ -430,6 +453,7 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
   let b, b_ms, b_report =
     tune "B (materialize-all)" (materialize ctx) (Option.map timing_ctx ~f:materialize)
   in
+  record b;
   (* Both arms gone: there is no winner to ship, and the first failure is the one that has not been
      cascaded from — a device the other arm's failure exhausted or a lineage it poisoned would
      otherwise be reported as the cause. *)
@@ -484,6 +508,9 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
      its incumbent with a strictly faster {e completed} search ([infinity] ranks a failed one). *)
   let ship = function
     | Ok compiled -> (
+        (* Before the poisoned-lineage check below, which can raise: either way this result is the only
+           one that could ship, so the others are dead. *)
+        release_unshipped ~keep:compiled ();
         (* A later arm can poison the lineage after this one succeeded. With a [timing_ctx] that is
            the scratch lineage and the winner — compiled from [ctx] — is unaffected. WITHOUT one the
            arms search in the caller's own lineage, so the winner's first [Context.run] is
@@ -495,7 +522,10 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
         | Some poisoned ->
             logf "the winner cannot ship: a later arm poisoned the caller's lineage";
             raise poisoned)
-    | Error (exn, backtrace) -> Stdlib.Printexc.raise_with_backtrace exn backtrace
+    | Error (exn, backtrace) ->
+        (* Nothing ships, so nothing is retained. *)
+        release_unshipped ();
+        Stdlib.Printexc.raise_with_backtrace exn backtrace
   in
   if inline_flips <= 0 then ship winner
   else (
@@ -553,6 +583,7 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
           logf "flip refinement stopped: the shared lineage is poisoned"
         else
           let r, ms, _rep = tune ~to_report:flip_report arm ctx' timing' in
+          record r;
           if Float.(ms < chain_ms) then chain := (r, ms, ctx', timing'));
     let chain_result, chain_ms, _, _ = !chain in
     if Float.(chain_ms < winner_ms) then (
