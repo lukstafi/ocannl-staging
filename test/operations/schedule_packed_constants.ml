@@ -26,6 +26,16 @@ module Asgns = Ir.Assignments
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p name b = Stdio.printf "%s: %b\n" name b
+
+(* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
+   that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
+   parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
+   reference array is pinned nonzero where it is produced, so the parity claims below have content.
+   *)
+let nonzero name (a : float array) =
+  if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
+    failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
+  a
 let approx a b = Float.(abs (a - b) < 1e-3)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
@@ -114,7 +124,7 @@ let () =
   let ma, mb = make_pair 32 in
   let%op mc0 = ma * mb in
   let ctx = run_forward (named "mmh_naive" (Train.forward mc0)) in
-  let got_naive = Context.get_values ctx mc0.Tensor.value in
+  let got_naive = nonzero "mmh_naive" (Context.get_values ctx mc0.Tensor.value) in
   let%op mc1 = ma * mb in
   let transform opt =
     Sched.apply
@@ -144,7 +154,7 @@ let () =
   let ma, mb = make_pair 20 in
   let%op mc0 = ma * mb in
   let ctx = run_forward (named "mme_naive" (Train.forward mc0)) in
-  let got_naive = Context.get_values ctx mc0.Tensor.value in
+  let got_naive = nonzero "mmh_naive" (Context.get_values ctx mc0.Tensor.value) in
   let%op mc1 = ma * mb in
   let transform opt =
     Sched.apply

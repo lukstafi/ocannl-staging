@@ -32,6 +32,16 @@ module SC = Ir.Schedule_cache
 module Asgns = Ir.Assignments
 
 let p name b = Stdio.printf "%s: %b\n" name b
+
+(* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
+   that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
+   parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
+   reference array is pinned nonzero where it is produced, so the parity claims below have content.
+   *)
+let nonzero name (a : float array) =
+  if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
+    failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
+  a
 let approx a b = Float.(abs (a - b) < 1e-2)
 
 let named name (comp : Asgns.comp) : Asgns.comp =
@@ -255,7 +265,7 @@ let () =
     Context.compile ~lowered_transform:(fun opt -> opt) sctx serial_comp Ir.Indexing.Empty
   in
   let sctx = Context.run sctx sroutine in
-  let got_serial = Context.get_values sctx mc0.Tensor.value in
+  let got_serial = nonzero "af_mm_serial" (Context.get_values sctx mc0.Tensor.value) in
   let%op mc1 = ma * mb in
   let mm_comp = named "af_mm_tuned" (Train.forward mc1) in
   let cache_dir3 = "autotune_sketch_cache" in
