@@ -3930,6 +3930,27 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
      one member cannot be partially updated. Harmless where nothing is linked yet — the two raises
      above the base compile invoke the no-op default. *)
   let release_baseline_hook = ref (fun () -> ()) in
+  (* The ONE way this function releases anything (gh-ocannl-550). Releasing is best-effort everywhere:
+     it runs on failure paths where the device may already be refusing work, and a failure to give
+     memory back must never replace the outcome the caller has to act on. Process-fatal conditions
+     still propagate. A helper rather than the ad-hoc guard this started as, because "is this call
+     wrapped?" produced its own review finding once already. *)
+  let release_quietly ~what ctx =
+    try Context.release ctx
+    with exn when not (process_fatal_exn exn) ->
+      logf "release of %s failed: %s" what (Exn.to_string exn)
+  in
+  (* [emit_report] on a path that then hands a routine back: the callback's exception propagates by
+     design, so the caller never receives [result] and its buffers become unreachable while the pool
+     table goes on rooting them. Every site that reports a compiled routine reports through this. *)
+  let report_or_release r ~result =
+    match emit_report r with
+    | () -> ()
+    | exception exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        release_quietly ~what:"the routine of a failed completion report" (fst result);
+        Stdlib.Printexc.raise_with_backtrace exn backtrace
+  in
   let raise_pre_search ?base (failure : Outcome.failure) =
     !release_baseline_hook ();
     (match failure with
@@ -4059,9 +4080,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
      for a repeatedly-tuning process is the very accumulation this issue is about. *)
   let release_baseline () =
     Option.iter baseline_linked ~f:(fun (bctx, _) ->
-        try Context.release bctx
-        with exn when not (process_fatal_exn exn) ->
-          logf "release of the baseline compile failed: %s" (Exn.to_string exn))
+        release_quietly ~what:"the baseline compile" bctx)
   in
   release_baseline_hook := release_baseline;
   let base_digest = SC.digest canon in
@@ -4146,7 +4165,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                 (spec_label spec);
               (* gh-ocannl-550: rejected, so its buffers are dead — and the fresh search below is
                  about to want them. *)
-              Context.release c.cctx;
+              release_quietly ~what:"a rejected cache replay" c.cctx;
               None
           | Ok c ->
               logf "cache hit: %s (best %.4f ms, baseline %.4f ms)" (spec_label spec)
@@ -4161,9 +4180,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                 | () -> ()
                 | exception exn ->
                     let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-                    (try Context.release c.cctx
-                     with rel when not (process_fatal_exn rel) ->
-                       logf "release after a failed cache-hit report failed: %s" (Exn.to_string rel));
+                    release_quietly ~what:"the replay of a failed cache-hit report" c.cctx;
                     release_baseline ();
                     Stdlib.Printexc.raise_with_backtrace exn backtrace
               in
@@ -4236,7 +4253,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
          produced is carried whether this succeeds or fails. *)
       let reached = census () in
       let result = compile_untuned_default ~base:reached () in
-      emit_report reached;
+      report_or_release reached ~result;
       result
   | None -> (
       let seen = Hash_set.create (module String) in
@@ -4430,9 +4447,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
           (* Best-effort: a failure to free must not replace the candidate's own outcome, and this
              runs on failure paths too, where the device may already be refusing work. Process-fatal
              conditions still propagate. *)
-          try Context.release c.cctx
-          with exn when not (process_fatal_exn exn) ->
-            logf "release of candidate %s failed: %s" (dshort c.digest_after) (Exn.to_string exn)
+          release_quietly ~what:("candidate " ^ dshort c.digest_after) c.cctx
       in
       let admit entry =
         let kept, evicted = List.split_n (List.sort (entry :: !beam) ~compare:by_time) beam_width in
@@ -5047,9 +5062,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                 deliberately swallowed, and [release] awaits the device, so a backend still reporting
                 that failure must not be allowed to turn a completed search with a valid winner into
                 a fatal one. *)
-             (try Context.release cctx
-              with exn when not (process_fatal_exn exn) ->
-                logf "release of the untuned-default control failed: %s" (Exn.to_string exn))
+             release_quietly ~what:"the untuned-default control" cctx
          | exception exn -> logf "untuned-default control compile failed: %s" (Exn.to_string exn));
       let completed_report =
         {
@@ -5125,9 +5138,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
               (* gh-ocannl-550: rejected, so dead — and the fallback compile below wants the memory.
                  Same one-liner as the rejected cache replay above; the pre-replay sweep could not
                  cover this context, which did not exist yet. *)
-              (try Context.release c.cctx
-               with exn when not (process_fatal_exn exn) ->
-                 logf "release of the rejected winner replay failed: %s" (Exn.to_string exn));
+              release_quietly ~what:"the rejected winner replay" c.cctx;
               untuned_default_or_raise ()
           | Ok c ->
               logf "winner replay ok: %s" (spec_label spec);
@@ -5159,12 +5170,5 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
          rooting them (gh-ocannl-550) — one full winner's footprint per aborted report, which for a
          caller that retries would accumulate exactly like the candidates used to. The exit sweep
          above deliberately kept this one; nothing is keeping it now. *)
-      (match emit_report completed_report with
-      | () -> ()
-      | exception exn ->
-          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-          (try Context.release (fst result)
-           with release_exn when not (process_fatal_exn release_exn) ->
-             logf "release after a failed completion report failed: %s" (Exn.to_string release_exn));
-          Stdlib.Printexc.raise_with_backtrace exn backtrace);
+      report_or_release completed_report ~result;
       result)
