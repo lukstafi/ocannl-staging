@@ -2,7 +2,7 @@
 //
 // Standalone, no OCANNL. Build and run:
 //     nvcc -O3 -arch=sm_120 -o ffn1_geometry_probe benchmarks/ffn1_geometry_probe.cu
-//     ./ffn1_geometry_probe          # exits nonzero if any variant disagrees
+//     ./ffn1_geometry_probe          # exits nonzero if ANY timed variant disagrees
 //
 // Context. Four of the five kernels that make up 70% of the tuned gpt2_mini step are the FFN
 // up-projection: out[tok][j] = sum_k w1[j][k] * ln[tok][k], with tok = 8*128 = 1024 tokens,
@@ -30,15 +30,15 @@
 // Measured on an RTX 5070 Ti Laptop (46 SMs, sm_120), CUDA 13.3, WSL2:
 //
 //     variant                         blocks   threads        ms   GFLOP/s   vs A
-//     A  grid=(8,1)   block=128            8      1024    12.761      42.1   1.00x  (as shipped)
-//     E  grid=(8,1)   block=128            8      1024    12.782      42.0   1.00x
-//     E  grid=(8,2)   block=128           16      2048     6.363      84.4   2.01x
-//     E  grid=(8,4)   block=128           32      4096     3.252     165.1   3.92x
-//     E  grid=(8,16)  block=128          128     16384     2.408     223.0   5.30x
-//     E  grid=(8,128) block=128         1024    131072     2.337     229.7   5.46x
-//     C  one thread per output          4096   1048576     2.305     232.9   5.54x
+//     A  grid=(8,1)   block=128            8      1024    12.730      42.2   1.00x  (as shipped)
+//     E  grid=(8,1)   block=128            8      1024    12.596      42.6   1.01x
+//     E  grid=(8,2)   block=128           16      2048     6.285      85.4   2.03x
+//     E  grid=(8,4)   block=128           32      4096     3.182     168.7   4.00x
+//     E  grid=(8,16)  block=128          128     16384     2.393     224.3   5.32x
+//     E  grid=(8,128) block=128         1024    131072     2.324     231.0   5.48x
+//     C  one thread per output          4096   1048576     2.282     235.2   5.58x
 //
-// Time falls linearly with resident blocks and saturates around 5.46x, with every thread
+// Time falls linearly with resident blocks and saturates around 5.48x, with every thread
 // touching the same addresses in the same order throughout -- the signature of a
 // parallelism-starved kernel, not a bandwidth-saturated one. Changing the mapping as well (C)
 // adds a further 1%, so coalescing is not the story either. A reproduces the in-step kernel
@@ -47,6 +47,7 @@
 // See benchmarks/report-gh531-profile.md for the reading.
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
 #include <cmath>
 #include <cuda_runtime.h>
 
@@ -94,6 +95,17 @@ __global__ void C_thread_per_output(const float* __restrict__ w1, const float* _
   out[tok * DFF + j] = acc;
 }
 
+// Deterministic but NON-PERIODIC inputs (splitmix64 on the flat index). Periodic fixtures make
+// the reference blind to mapping errors: with activation rows repeating every 13 tokens, a kernel
+// reading token t+13 instead of t matches cell for cell. Kept identical to ffn1_nvrtc_harness.c.
+static float fixture(uint64_t i) {
+  uint64_t x = i * 0x9E3779B97F4A7C15ull + 0x0123456789ABCDEFull;
+  x ^= x >> 30; x *= 0xBF58476D1CE4E5B9ull;
+  x ^= x >> 27; x *= 0x94D049BB133111EBull;
+  x ^= x >> 31;
+  return (float)(((double)(x >> 11) / 9007199254740992.0) - 0.5) * 0.1f;
+}
+
 static float *g_w1, *g_ln, *g_out;
 
 static void run_A() { A_shipped<<<8, 128>>>(g_w1, g_ln, g_out); }
@@ -126,8 +138,27 @@ static float bench(void (*launch)(), int reps) {
   return ms / reps;
 }
 
-// Independent fp64 reference over a sampled set of outputs; every variant must match it.
-static int verify(void (*launch)(), const char* name, const float* hw, const float* hl) {
+// Independent fp64 reference over EVERY output cell (a strided sample can step over a narrow
+// unwritten band, e.g. from a chunk-count mismatch). The reference is built once by the caller.
+static double* g_ref;   // [TOKENS][DFF] exact value
+static double* g_cond;  // [TOKENS][DFF] sum |a_k b_k| -- a near-cancelling dot has no meaningful
+                        // relative error, so the bound is |got - ref| <= tol * cond.
+static void build_reference(const float* hw, const float* hl) {
+  g_ref = (double*)malloc((size_t)TOKENS * DFF * sizeof(double));
+  g_cond = (double*)malloc((size_t)TOKENS * DFF * sizeof(double));
+  for (int tok = 0; tok < TOKENS; ++tok)
+    for (int j = 0; j < DFF; ++j) {
+      double a = 0, c = 0;
+      for (int k = 0; k < D; ++k) {
+        double t = (double)hw[j * D + k] * (double)hl[tok * D + k];
+        a += t; c += fabs(t);
+      }
+      g_ref[(size_t)tok * DFF + j] = a;
+      g_cond[(size_t)tok * DFF + j] = c;
+    }
+}
+
+static int verify(void (*launch)(), const char* name) {
   CHECK(cudaMemset(g_out, 0, (size_t)TOKENS * DFF * sizeof(float)));
   launch();
   CHECK(cudaDeviceSynchronize());
@@ -135,31 +166,23 @@ static int verify(void (*launch)(), const char* name, const float* hw, const flo
   float* got = (float*)malloc((size_t)TOKENS * DFF * sizeof(float));
   CHECK(cudaMemcpy(got, g_out, (size_t)TOKENS * DFF * sizeof(float), cudaMemcpyDeviceToHost));
   double worst = 0.0;
-  int bad = 0;
-  for (size_t i = 0; i < (size_t)TOKENS * DFF; ++i)
-    if (!isfinite(got[i])) { bad = 1; printf("  %s: non-finite at %zu\n", name, i); break; }
-  for (int tok = 0; tok < TOKENS && !bad; tok += 97)
-    for (int j = 0; j < DFF; j += 31) {
-      double ref = 0.0;
-      for (int k = 0; k < D; ++k) ref += (double)hw[j * D + k] * (double)hl[tok * D + k];
-      double g = got[(size_t)tok * DFF + j];
-      double rel = fabs(g - ref) / fmax(1e-6, fabs(ref));
-      if (rel > worst) worst = rel;
-    }
-  free(got);
-  if (bad || worst > 1e-4) {
-    printf("  FAIL %s: worst relative deviation %.3e\n", name, worst);
-    return 1;
+  for (size_t i = 0; i < (size_t)TOKENS * DFF; ++i) {
+    if (!isfinite(got[i])) {
+      printf("  FAIL %s: non-finite at %zu\n", name, i); free(got); return 1; }
+    double d = fabs((double)got[i] - g_ref[i]) / fmax(1e-30, g_cond[i]);
+    if (d > worst) worst = d;
   }
-  printf("  ok   %-28s worst relative deviation vs fp64 reference %.3e\n", name, worst);
+  free(got);
+  if (worst > 1e-5) { printf("  FAIL %s: worst deviation %.3e\n", name, worst); return 1; }
+  printf("  ok   %-34s all %d cells, worst %.2e\n", name, TOKENS * DFF, worst);
   return 0;
 }
 
 int main() {
   float* hw = (float*)malloc((size_t)DFF * D * sizeof(float));
   float* hl = (float*)malloc((size_t)TOKENS * D * sizeof(float));
-  for (int i = 0; i < DFF * D; ++i) hw[i] = (float)((i % 17) - 8) * 0.01f;
-  for (int i = 0; i < TOKENS * D; ++i) hl[i] = (float)((i % 13) - 6) * 0.01f;
+  for (int i = 0; i < DFF * D; ++i) hw[i] = fixture((uint64_t)i);
+  for (int i = 0; i < TOKENS * D; ++i) hl[i] = fixture(0x10000000ull + (uint64_t)i);
   // Plain device memory: managed memory without prefetch faults per page and makes the
   // many-block variants look absurdly slow. Do not "simplify" this to cudaMallocManaged.
   CHECK(cudaMalloc(&g_w1, (size_t)DFF * D * sizeof(float)));
@@ -198,13 +221,20 @@ int main() {
   printf("\nbest same-mapping variant: E with %d chunks, %.3f ms (%.2fx over A)\n", best_c, best_e,
          a_ms / best_e);
 
-  printf("\ncorrectness (independent fp64 reference over a sampled grid):\n");
+  // Correctness for EVERY variant that was timed above -- including each intermediate chunk
+  // count, since an invalid intermediate row would otherwise still support the scaling curve.
+  printf("\ncorrectness (independent fp64 reference, every cell, every timed variant):\n");
+  build_reference(hw, hl);
   int bad = 0;
-  bad |= verify(run_A, "A  as shipped", hw, hl);
-  g_chunks = best_c;
-  bad |= verify(run_E, "E  best chunking", hw, hl);
-  bad |= verify(run_C, "C  one thread per output", hw, hl);
-  if (bad) { printf("\nFAILED: at least one variant does not compute the GEMM\n"); return 1; }
-  printf("\nall variants agree with the fp64 reference\n");
+  bad |= verify(run_A, "A  as shipped");
+  for (int i = 0; i < 8; ++i) {
+    char lbl[64];
+    g_chunks = chunks[i];
+    snprintf(lbl, sizeof lbl, "E  grid=(8,%d)", chunks[i]);
+    bad |= verify(run_E, lbl);
+  }
+  bad |= verify(run_C, "C  one thread per output");
+  if (bad) { printf("\nFAILED: at least one timed variant does not compute the GEMM\n"); return 1; }
+  printf("\nevery timed variant agrees with the fp64 reference\n");
   return 0;
 }

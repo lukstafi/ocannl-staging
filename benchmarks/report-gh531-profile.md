@@ -199,7 +199,9 @@ Two caveats on how far that carries. The bytes column is **analytic compulsory t
 measured DRAM traffic -- `Cost_model.footprints` caps each node at its size per kernel, so it is a
 lower bound on what actually moves, and a schedule that re-reads a buffer many times could be
 closer to a memory limit than the column suggests. And `ncu`'s traffic counters were unavailable
-here (`ERR_NVGPUCTRPERM`). So the table alone establishes only that no kernel is *compute*-bound.
+here (`ERR_NVGPUCTRPERM`). So the table alone establishes only that no kernel *saturates the device-wide compute roofline* --
+not that none is compute-bound, since a serial dependency chain or thin instruction-level
+parallelism can bind a kernel far below device peak.
 
 The byte question is settled separately, and empirically, by the control in the next section: with
 each thread's addresses held **exactly** fixed and only the resident-block count varied, time falls
@@ -310,9 +312,10 @@ blocks, which is what a parallelism-starved kernel looks like and is not what a 
 one looks like: the bytes touched, and the order they are touched in, are identical in every row.
 
 A second, OCANNL-independent control ([`benchmarks/ffn1_geometry_probe.cu`](ffn1_geometry_probe.cu),
-plain CUDA, `nvcc`) reproduces the same curve on a clean-room version of the GEMM (12.76 -> 2.34 ms,
-5.46x, saturating at the same block count) and adds one datum: giving up the fixed mapping as well,
-one thread per output element, buys a further 1%. So coalescing is not the story either.
+plain CUDA, `nvcc`) reproduces the same curve on a clean-room version of the GEMM (12.73 -> 2.32 ms,
+5.48x, saturating at the same block count) and adds one datum: giving up the fixed mapping as well,
+one thread per output element, buys a further 1%. So coalescing is not the story either. It verifies
+every one of its ten timed variants against the fp64 reference, not just the winner.
 
 **The binding resource is occupancy: 1024 threads on a 46-SM GPU.**
 
@@ -403,8 +406,9 @@ Applying each measured factor to its own kernels:
 
 That is a **~2.4x end-to-end floor**, against bin 1's 1.06x.
 
-It is a floor, not a target: at ~2.3 ms these kernels still reach only ~4% of what the card's fp32
-peak would allow for their FLOP count, so a tiled or tensorized schedule should go further. How much
+It is a floor, not a target: at ~2.3 ms these kernels run at ~228 GFLOP/s, which is **1.3%** of the
+measured 17.2 TFLOP/s fp32 peak (536.9 MFLOP would take 31 us at peak), so a tiled or tensorized
+schedule should go further. How much
 further is not measured here -- FFN GEMM2 reaches 1609 GFLOP/s *in the step*, but that is a different
 output geometry and reduction depth and is **not** claimed as evidence for these shapes. The
 defensible statement is: ~2.4x from spreading the output axis across blocks (plus, for the lm_head,
@@ -533,8 +537,8 @@ is. The recommendation is to re-aim at the `8x128x1024` / `8x128x8x128` companio
 (gh-521), and to revisit #483 afterwards, when `seq^2` traffic would be a materially larger share of
 a much smaller step.
 
-The ~2.4x is a **floor**, deliberately: the replacement is still only ~3.8% of this card's fp32
-peak for its FLOP count, so the reachable ceiling is higher -- but by how much is not measured here,
+The ~2.4x is a **floor**, deliberately: the replacement still runs at ~228 GFLOP/s, **1.3%** of this
+card's measured fp32 peak, so the reachable ceiling is higher -- but by how much is not measured here,
 and FFN GEMM2's much better in-step rate is a *different* geometry and is not evidence for this one.
 None of that affects the ranking of bin 3 over bin 1, which rests on the 5.4% / 70.2% split alone.
 
@@ -582,9 +586,11 @@ snapshot:
 
 ```bash
 cd benchmarks
-rm -rf build_files
+# A FRESH capture directory each run: an arm-A snapshot from an earlier emission also has 117
+# globals, 20 mma_sync and compiles cleanly, so it is indistinguishable from this run's.
+rm -rf build_files /tmp/armsnap && mkdir -p /tmp/armsnap
 ( while :; do md5sum build_files/bench_gpt/cross_entropy_loss_fwd__seg.cu 2>/dev/null; done \
-    | uniq | while read h f; do cp "$f" "/tmp/armsnap-$h.cu" 2>/dev/null; done ) &
+    | uniq | while read h f; do cp "$f" "/tmp/armsnap/$h.cu" 2>/dev/null; done ) &
 BENCH_FIXTURE=fixtures/gpt2_mini.safetensors BENCH_TUNE=1 \
   ../_build/default/benchmarks/runners/ocannl/bench_gpt.exe \
   --ocannl_backend=cuda --ocannl_tf32_matmuls=true \
@@ -594,7 +600,7 @@ kill %1
 # Arm A is the snapshot satisfying ALL THREE; a kernel count alone is not enough, because the
 # watcher can copy a partially written file and a prefix of arm B's 130-kernel emission can
 # contain exactly 117 '__global__'.
-for f in /tmp/armsnap-*.cu; do
+for f in /tmp/armsnap/*.cu; do
   printf '%s: %s globals, %s mma_sync, ' "$f" "$(grep -c '__global__' "$f")" "$(grep -c mma_sync "$f")"
   # completeness: balanced braces, and it actually compiles
   nvcc -arch=sm_120 --use_fast_math -I/usr/local/cuda/include -ptx -o /dev/null "$f" \
