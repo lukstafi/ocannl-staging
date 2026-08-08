@@ -207,6 +207,13 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   within noise of an f32 schedule with none — and the reference for two facts that outlive it,
   that gfx1151's WMMA is not exactly-rounded in any format combination, and that `taskset -c 0-15`
   on that box is 8 SMT-shared cores rather than 16 private ones),
+  [report-gh569-hip.md](report-gh569-hip.md) (WSL2/HIP on gfx1151 — the cross-backend test of
+  gh-ocannl-569's companion-coverage blocker: the same rule declines the same sites at the same
+  `8x128x1024` geometry, and the same five kernels dominate in the same naive scalar form at the
+  same 1024-thread launch, but they are 47.2% of the step rather than CUDA's 70.2% and run at
+  5.6%/2.5% of a measured local peak rather than 1.3%; also the reference for the fact that
+  `rocprofv3` collects nothing under WSL2 for want of `/dev/kfd`, and for the profiler-free
+  per-kernel reconstruction that replaces it),
   [report-cifar-cuda.md](report-cifar-cuda.md) (Linux/CUDA, the cifar-scale conv baseline
   for gh-ocannl-500/502 with a per-layer breakdown) and
   [report-gh537-metal.md](report-gh537-metal.md) (macOS/Metal, the paired before/after A/B of
