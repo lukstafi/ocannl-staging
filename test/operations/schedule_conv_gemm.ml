@@ -41,6 +41,16 @@ module Asgns = Ir.Assignments
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p name b = Stdio.printf "%s: %b\n" name b
 
+(* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
+   that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
+   parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
+   reference array is pinned nonzero where it is produced, so the parity claims below have content.
+   *)
+let nonzero name (a : float array) =
+  if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
+    failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
+  a
+
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
@@ -102,7 +112,7 @@ let run_plain name y =
       Ir.Indexing.Empty
   in
   let ctx = Context.run ctx routine in
-  Context.get_values ctx y.Tensor.value
+  nonzero name (Context.get_values ctx y.Tensor.value)
 
 let () =
   (* === detect_conv across stride/padding variants (via the conv2d block: random params are fine,

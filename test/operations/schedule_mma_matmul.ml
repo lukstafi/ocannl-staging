@@ -33,6 +33,16 @@ module Numerics = Ir.Numerics
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let () = Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = false }
 let p name b = Stdio.printf "%s: %b\n" name b
+
+(* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
+   that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
+   parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
+   reference array is pinned nonzero where it is produced, so the parity claims below have content.
+   *)
+let nonzero name (a : float array) =
+  if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
+    failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
+  a
 let approx a b = Float.(abs (a - b) < 1e-2)
 let approx_rel a b = Float.(abs (a - b) <= 1e-2 * max 1. (abs b))
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
@@ -152,7 +162,7 @@ let () =
     Context.compile ~lowered_transform:(fun opt -> opt) ctx_s serial_comp Ir.Indexing.Empty
   in
   let ctx_s = Context.run ctx_s routine_s in
-  let got_serial = Context.get_values ctx_s mc0.Tensor.value in
+  let got_serial = nonzero "mm_serial" (Context.get_values ctx_s mc0.Tensor.value) in
 
   (* --- The tensorized schedule --- *)
   let mma_schedule ?(bm = bm) ~out (opt : LL.optimized) : Sched.schedule =
@@ -208,7 +218,7 @@ let () =
         Ir.Indexing.Empty
     in
     let ctx = Context.run ctx routine in
-    Context.get_values ctx tensor.Tensor.value
+    nonzero name (Context.get_values ctx tensor.Tensor.value)
   in
   let tf32_inputs ~tag ~k =
     let av =
@@ -398,7 +408,7 @@ let () =
       Ir.Indexing.Empty
   in
   let ctx_hs = Context.run ctx_hs routine_hs in
-  let got_h_serial = Context.get_values ctx_hs mch0.Tensor.value in
+  let got_h_serial = nonzero "mm_half_serial" (Context.get_values ctx_hs mch0.Tensor.value) in
   let%op mch1 = mah * mbh in
   Tn.update_prec mch1.Tensor.value Ir.Ops.half;
   let transform_h opt = Sched.apply (mma_schedule ~out:mch1.Tensor.value opt) opt in
@@ -476,7 +486,7 @@ let () =
         Ir.Indexing.Empty
     in
     let ctx_bs = Context.run ctx_bs routine_bs in
-    let want = Context.get_values ctx_bs mcb0.Tensor.value in
+    let want = nonzero "mm_bf16_serial" (Context.get_values ctx_bs mcb0.Tensor.value) in
     let mcb1 = build () in
     Tn.update_prec mcb1.Tensor.value acc_prec;
     let transform_b opt = Sched.apply (mma_schedule ?bm ~out:mcb1.Tensor.value opt) opt in
@@ -612,7 +622,7 @@ let () =
            Ir.Indexing.Empty
        in
        let ctx_fs = Context.run ctx_fs routine_fs in
-       let want = Context.get_values ctx_fs mcf0.Tensor.value in
+       let want = nonzero "mm_fp8_serial" (Context.get_values ctx_fs mcf0.Tensor.value) in
        let mcf1 = build () in
        Tn.update_prec mcf1.Tensor.value Ir.Ops.single;
        let transform_f8 opt = Sched.apply (mma_schedule ~out:mcf1.Tensor.value opt) opt in
@@ -673,7 +683,9 @@ let () =
         Ir.Indexing.Empty
     in
     let ctx_e0 = Context.run ctx_e0 routine_e0 in
-    let got_edge_serial = Context.get_values ctx_e0 ec0.Tensor.value in
+    let got_edge_serial =
+      nonzero "mm_edge_serial" (Context.get_values ctx_e0 ec0.Tensor.value)
+    in
     let%op ec1 = ea * eb in
     let edge_schedule (opt : LL.optimized) : Sched.schedule =
       let paths = nest_paths opt.LL.llc in
@@ -967,7 +979,7 @@ let () =
       Context.compile ~lowered_transform:(fun opt -> opt) ctx0 serial_comp Ir.Indexing.Empty
     in
     let ctx0 = Context.run ctx0 routine0 in
-    let want = Context.get_values ctx0 serial.Tensor.value in
+    let want = nonzero ("mm_" ^ tag ^ "_serial") (Context.get_values ctx0 serial.Tensor.value) in
     let mma_comp = named ("mm_" ^ tag ^ "_mma") (Train.forward tensorized) in
     let transform opt = Sched.apply (mma_schedule ~out:tensorized.Tensor.value opt) opt in
     let ctx1 = Context.auto () in

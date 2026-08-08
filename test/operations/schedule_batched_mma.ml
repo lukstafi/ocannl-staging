@@ -31,6 +31,16 @@ module Asgns = Ir.Assignments
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p name b = Stdio.printf "%s: %b\n" name b
+
+(* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
+   that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
+   parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
+   reference array is pinned nonzero where it is produced, so the parity claims below have content.
+   *)
+let nonzero name (a : float array) =
+  if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
+    failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
+  a
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
 (* A leg this backend cannot run still prints its line, so the golden stays backend-uniform — but
@@ -96,7 +106,7 @@ let compile_serial ~name tensor =
       Ir.Indexing.Empty
   in
   let ctx = Context.run ctx routine in
-  Context.get_values ctx tensor.Tensor.value
+  nonzero name (Context.get_values ctx tensor.Tensor.value)
 
 (* Compile [tensor] through [transform], capturing the lowering for the seeding assertions. *)
 let with_lowering ~name tensor ~(transform : LL.optimized -> LL.optimized) =
@@ -263,7 +273,7 @@ let () =
           (named (tag ^ "_bf16_serial") (Train.forward ref_t))
           Ir.Indexing.Empty
       in
-      Context.get_values (Context.run ctx routine) ref_t.Tensor.value
+      nonzero (tag ^ "_bf16_serial") (Context.get_values (Context.run ctx routine) ref_t.Tensor.value)
     in
     let cand = build () in
     let fwd = named (tag ^ "_bf16_mma") (Train.forward cand) in
