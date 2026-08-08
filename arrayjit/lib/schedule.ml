@@ -3494,9 +3494,29 @@ let split_reduce_hoist (opt : Low_level.optimized) (op : optop) : Indexing.symbo
       | exception Invalid_argument _ -> [])
   | _ -> []
 
-let elide_pipelined_barriers (opt : Low_level.optimized) : Low_level.optimized =
+(* gh-ocannl-487 (Codex P2 on PR #303), widened to depth 1 by gh-ocannl-567: "[Tile_mma] is a
+   barrier" — the intrinsic's emission contract ends its block with a workgroup barrier on every
+   barrier-capable backend and in every rendering form ({!ends_with_barrier} above). So once
+   Tensorize has replaced a staged anchor loop's compute with a Tile_mma, the staging composition's
+   own trailing barriers render as consecutive barriers with no work between, and are dropped:
+
+   - the barrier a staged anchor's body ends with, against the intrinsic's own trailing bracket
+     (depth 1: the phase closer the load-phase grouping left behind);
+   - a barrier immediately after such a loop, against its last iteration's bracket;
+   - a PIPELINED rotor body's LEADING barrier, against the previous iteration's trailing bracket —
+     loop-carried, hence still gated on the rotor: the first iteration is covered by the bracket
+     that precedes the intrinsic block (per statement, or once on the fragment scope wrapping the
+     loop), which is what separates the prologue copies from the first compute.
+
+   The dual — eliding a barrier against a FOLLOWING Tile_mma's leading bracket — is NOT sound and is
+   not done: the fragment-update form has no per-iteration leading bracket, so at depth 1 the phase
+   barrier between a k-block's loads and its compute is load-bearing and stays. Conservative
+   otherwise: a scalar (untensorized) staged compute keeps all its barriers. Runs at {!apply}'s
+   finalization, after Tensorize (Stage precedes Tensorize by Stage's own precondition, so the
+   schedule half cannot see the Tile_mma at splice time). *)
+let elide_staged_barriers (opt : Low_level.optimized) : Low_level.optimized =
   let open Low_level in
-  if Map.is_empty opt.pipelined then opt
+  if Set.is_empty opt.workgroup_shared then opt
   else
     let rotors =
       Map.data opt.pipelined
@@ -3504,23 +3524,38 @@ let elide_pipelined_barriers (opt : Low_level.optimized) : Low_level.optimized =
       |> List.dedup_and_sort ~compare:Indexing.Symbol.compare
     in
     let is_rotor s = List.mem rotors s ~equal:Indexing.equal_symbol in
+    (* A staged anchor: a loop whose subtree writes a staged tile — the load phase (depth 1) or the
+       prefetch (pipelined). Over-inclusive (an enclosing loop qualifies too), which is harmless:
+       every rule below is a local barrier-adjacency redundancy, sound wherever it fires. *)
+    let staged_anchor body =
+      not (Set.is_empty (Set.inter (written_nodes body) opt.workgroup_shared))
+    in
     let rec stmt (llc : Low_level.t) : Low_level.t =
       match llc with
-      | For_loop fc when is_rotor fc.index ->
+      | For_loop fc when is_rotor fc.index || staged_anchor fc.body ->
           let body_stmts = List.map (flat_lines [ fc.body ]) ~f:stmt in
-          let body_stmts =
+          (* The loop is cyclic: what precedes the body's first statement is the previous
+             iteration's last one — usable only for a rotor (see the header). *)
+          let after_previous_iteration =
+            is_rotor fc.index && fc.to_ >= fc.from_
+            &&
             match body_stmts with
-            | Workgroup_barrier :: rest when ends_with_barrier (unflat_lines rest) -> rest
-            | other -> other
+            | Workgroup_barrier :: rest -> ends_with_barrier (unflat_lines rest)
+            | _ -> false
           in
-          For_loop { fc with body = unflat_lines body_stmts }
+          let rec drop prev_ends = function
+            | [] -> []
+            | Workgroup_barrier :: tl when prev_ends -> drop prev_ends tl
+            | hd :: tl -> hd :: drop (ends_with_barrier hd) tl
+          in
+          For_loop { fc with body = unflat_lines (drop after_previous_iteration body_stmts) }
       | For_loop fc -> For_loop { fc with body = seq fc.body }
       | If { cond; body } -> If { cond; body = seq body }
       | other -> other
     and seq (llc : Low_level.t) : Low_level.t =
       let rec drop = function
         | (For_loop { index; from_; to_; body; _ } as lp) :: Workgroup_barrier :: tl
-          when is_rotor index && to_ >= from_ && ends_with_barrier body ->
+          when (is_rotor index || staged_anchor body) && to_ >= from_ && ends_with_barrier body ->
             lp :: drop tl
         | hd :: tl -> hd :: drop tl
         | [] -> []
@@ -3534,7 +3569,7 @@ let apply ?(static_indices = []) (sched : schedule) (opt : Low_level.optimized) 
   if List.is_empty sched then opt
   else
     let opt = List.fold sched ~init:opt ~f:apply_opt_op in
-    let opt = elide_pipelined_barriers opt in
+    let opt = elide_staged_barriers opt in
     let llc = opt.Low_level.llc in
     (* Transforms fold their own guards (schedule-ir-optops §2): the pipeline's simplify already
        ran, so re-run it here; and when a transform duplicated code, re-run CSE + hoisting too. *)
