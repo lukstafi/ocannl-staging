@@ -100,7 +100,8 @@ type t =
       (** Guarded statement: [body] executes iff [cond] is nonzero (renders as
           [if (cond != 0) { body }]). Introduced by launch-extent guards on hardware-annotated loops
           (docs/proposals/axis-types-for-loops.md §2); [simplify_llc] erases a guard whose condition
-          an interval proves. A conditional write is never a definite write; virtualization treats
+          an interval proves, and simplifies a surviving guard's body under the bounds the condition
+          implies. A conditional write is never a definite write; virtualization treats
           guarded computations as non-inlineable in v1. *)
   | Tile_mma of {
       d : Tnode.t * Indexing.axis_index array;  (** Accumulator block base. *)
@@ -510,8 +511,11 @@ val reads_scope_before_set : scope_id -> t -> bool
 
 val simplify_llc : Indexing.static_symbol list -> t -> t
 (** Top-down algebraic simplification with interval-driven comparison folding (in particular, it
-    erases [If] guards whose conditions the loop extents prove). Called internally by [optimize];
-    exposed for [Schedule.apply], whose transforms construct guards after the pipeline's simplify
+    erases [If] guards whose conditions the loop extents prove). The interval environment is
+    narrowed by every enclosing [If] condition that is a conjunction of integer-affine index
+    comparisons (gh-ocannl-566), so a guard the statement guard proves folds too — what is
+    simplified under a condition is valid only where that condition holds. Called internally by
+    [optimize]; exposed for [Schedule.apply], whose transforms construct guards after the pipeline's simplify
     already ran (docs/proposals/schedule-ir-optops.md §2), and for testing. Pure and idempotent. *)
 
 val rewrite_one_hot_reductions : ?static_indices:Indexing.static_symbol list -> t -> t

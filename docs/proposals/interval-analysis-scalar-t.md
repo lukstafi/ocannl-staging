@@ -55,6 +55,13 @@ prove indices in-bounds, and fold comparisons.
   candidate host pass; bounds are lost only to the per-pass idiom that strips the list
   to a bare-symbol membership `Set` (low_level.ml lines 613/796/1479 as of 2026-07-03).
   Seeding = building a `symbol → interval` map from the same list before the strip.
+  **Enclosing guards narrow it too** (gh-ocannl-566): an `If` condition holds on every
+  execution reaching its body, so `simplify_llc` refines the environment with the bounds
+  a conjunction of integer-affine index comparisons implies (the shapes
+  `Schedule.partition_breakpoints` reads) before recursing. Without it, construct-then-fold
+  has a blind spot wherever a guard is provable only *under* a statement guard — the
+  gh-ocannl-487 pipelined prefetch, whose `k := k+1` substitution widens the edge guard's
+  interval past exactly the block the enclosing `If (k < to_)` excludes.
   Verify at implementation time that `static_range` (a `mutable int option`) is settled
   before `optimize_proc` runs — dims are forced by lowering, so ranges derived from dims
   should be; assert rather than assume.
