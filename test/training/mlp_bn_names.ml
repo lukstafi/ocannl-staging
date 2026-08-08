@@ -12,7 +12,9 @@ module type Backend = Ir.Backend_intf.Backend
 
    Corresponds to Karpathy's "Building makemore Part 3: Activations & Gradients, BatchNorm". Extends
    Part 2 ([mlp_names.ml]) by inserting a [batch_norm1d] between the hidden linear and the [tanh]
-   non-linearity. Same data pipeline and output contract; see [docs/makemore_tutorial.md].
+   non-linearity. Same data pipeline; see [docs/makemore_tutorial.md]. The output contract differs
+   from Part 2's in its last two lines: the sampled names are not portable here (see the comment on
+   generation below), so they go to stderr and stdout summarizes them instead.
 
    Note: [batch_norm1d] inherits [batch_norm2d]'s FIXME — running statistics are not yet
    implemented, so inference falls back to the learned [gamma]/[beta] rather than population
@@ -314,6 +316,19 @@ let () =
     ignore (Context.set_values ctx infer_input.value buf : Context.t)
   in
 
+  (* One inference step: advance the [dice] counter, run the routine, and return the softmax
+     distribution over the next character alongside the drawn [dice] value. *)
+  let next_probs () =
+    Int.incr counter_ref;
+    Train.run ctx infer_step;
+    let dice_value = (ctx, dice).@[0] in
+    let logits_arr = Array.init vocab_size ~f:(fun v -> (ctx, infer_logits).@{[| 0; v |]}) in
+    let max_logit = Array.fold logits_arr ~init:Float.neg_infinity ~f:Float.max in
+    let exp_logits = Array.map logits_arr ~f:(fun l -> Float.exp (l -. max_logit)) in
+    let sum_exp = Array.fold exp_logits ~init:0. ~f:( +. ) in
+    (Array.map exp_logits ~f:(fun e -> e /. sum_exp), dice_value)
+  in
+
   let max_len = 20 in
   let gen_name () =
     let context = Array.create ~len:block_size dot_idx in
@@ -322,14 +337,7 @@ let () =
       if steps >= max_len then Buffer.contents buf
       else begin
         set_ctx_one_hot context;
-        Int.incr counter_ref;
-        Train.run ctx infer_step;
-        let dice_value = (ctx, dice).@[0] in
-        let logits_arr = Array.init vocab_size ~f:(fun v -> (ctx, infer_logits).@{[| 0; v |]}) in
-        let max_logit = Array.fold logits_arr ~init:Float.neg_infinity ~f:Float.max in
-        let exp_logits = Array.map logits_arr ~f:(fun l -> Float.exp (l -. max_logit)) in
-        let sum_exp = Array.fold exp_logits ~init:0. ~f:( +. ) in
-        let probs = Array.map exp_logits ~f:(fun e -> e /. sum_exp) in
+        let probs, dice_value = next_probs () in
         let max_i = vocab_size - 1 in
         let rec sample i acc =
           if i >= max_i then i
@@ -353,6 +361,43 @@ let () =
     aux 0
   in
 
-  (* Generate very few names because different hardware backends diverge quickly. *)
+  (* The sampled text is deliberately NOT part of the golden output. Two reasons, either one
+     fatal to a byte-exact expectation:
+
+     1. With a single-example inference batch the BatchNorm above collapses to [beta] regardless
+        of input (the running-statistics FIXME in [nn_blocks.ml], spelled out in
+        [docs/makemore_tutorial.md]), so the characters are essentially a readout of the [dice]
+        stream against a near-constant distribution, not of the model reading its context.
+
+     2. They sit on knife-edge boundaries of the sampling CDF. Under this seed, step 15 of the
+        second name draws dice=0.294824 against an 'a'/'b' boundary at 0.294888 — a margin of
+        6.4e-5. A ~2e-4 wiggle in the trained weights, small enough to leave all three printed
+        losses identical at 4 decimals, moves the boundary past the dice and flips the character;
+        that is exactly what differs between backends, config profiles, and hardware. Re-pinning
+        the text would just relocate the failure to the next machine.
+
+     So the names go to stderr for the reader (the [slow] rule captures only stdout), and stdout
+     keeps what is portable: that sampling stayed inside the alphabet, and the head of the
+     distribution the sampler consumes. *)
   let names = Array.init 3 ~f:(fun _ -> gen_name ()) in
-  Array.iter names ~f:print_endline
+  Array.iter names ~f:(fun name -> eprintf "sampled name (not part of the golden): %s\n%!" name);
+  let in_alphabet = Array.for_all names ~f:(String.for_all ~f:Char.is_alpha) in
+  printf "Generated %d names, all chars in alphabet=%b\n%!" (Array.length names) in_alphabet;
+
+  (* Head of the learned next-character distribution at the start context. Between the two builds
+     that disagree on the sampled text, these probabilities drift by ~3e-4, against gaps of ~0.08
+     between the top three characters — so two printed decimals carry the signal with ~20x
+     margin. *)
+  set_ctx_one_hot (Array.create ~len:block_size dot_idx);
+  let start_probs, _dice = next_probs () in
+  let ranked =
+    Array.mapi start_probs ~f:(fun i p -> (p, i))
+    |> Array.sorted_copy ~compare:(fun (p1, _) (p2, _) -> Float.descending p1 p2)
+  in
+  let top3 =
+    Array.sub ranked ~pos:0 ~len:3
+    |> Array.map ~f:(fun (p, i) ->
+           Printf.sprintf "%c=%.2f" (List.nth_exn Dataprep.Names.letters_with_dot i) p)
+    |> String.concat_array ~sep:" "
+  in
+  printf "Start-context top-3 next chars: %s\n%!" top3

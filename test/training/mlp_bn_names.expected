@@ -18,6 +18,5 @@ Epoch 14, mean train loss=2.2515 below 2.8=true
 Final train loss=2.2486 train_below=true
 Final dev   loss=2.2513 dev_below=true
 Final test  loss=2.2566 test_below=true
-eyeamartlmegyeatddaa
-iaaayyareyoftznbayae
-laysaaraolilvklxaiau
+Generated 3 names, all chars in alphabet=true
+Start-context top-3 next chars: a=0.28 e=0.17 i=0.10
