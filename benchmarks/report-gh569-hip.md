@@ -317,6 +317,11 @@ Scope: correctness of `Stage ~pipeline_depth` at depth > 1 on HIP, plus whether 
 phase 1 measured on Metal (~1.4–1.5x) reproduces off Apple silicon. **Not** a verdict on pipelining;
 a loss was the stated prediction.
 
+Answers up front: **the rendering is correct on HIP — bitwise depth-2/depth-1 parity holds with
+real rocWMMA in the loop — but the occupancy cost does not reproduce: at a precision where HIP's MMA
+is real, depth 2 is a measured null (1.01x).** Both answers changed once the emitted source was
+checked instead of the label; see the precision note under each.
+
 **Forcing depth 2 needed no scratch change.** `test/operations/schedule_pipelined_matmul` already
 builds the depth-2 cooperative Stage through an explicit hand-built schedule, bypassing the seeding
 path entirely, so HIP's empty `mma_pipeline_depths` advertisement is irrelevant to it — and it is
@@ -325,8 +330,23 @@ golden lines pass on HIP:
 
 - **executed bitwise parity**: both depths compiled, run, and read back — `depth 2 matches depth 1
   BITWISE: true`. Tolerance is used only where it belongs, against the serial twin (`approx`, 1e-2),
-  because Tensorize reassociates the tile reduction. The depth pair is compared bitwise because both
-  legs issue the same rocWMMA operations in the same order.
+  because Tensorize reassociates the tile reduction.
+
+  **At the suite's f32 this does not exercise rocWMMA**, and the distinction is worth stating rather
+  than glossing: RDNA3.5 has no f32 operand shape, so the micro-kernel under the staged tiles is the
+  lane-0 scalar fallback (`rocwmma::mma_sync = 0`, lane guard present, scalar `fmaf`). The parity
+  result is still exactly what it should be — both legs issue the same scalar chain in the same
+  order — but what it validates on HIP/f32 is the **rotation, barrier and staged-tile machinery**,
+  which is what phase 1 changed, not the tensor-core path.
+
+  Re-run at bf16 the same test renders **real rocWMMA** — `rocwmma::mma_sync = 1`, no lane guard —
+  and **`depth 2 matches depth 1 BITWISE` still holds**, which is the strong form of the claim: the
+  rotation is a pure prefetch-timing transform with tensor cores actually in the loop. Two of the
+  17 lines go false at that precision, and neither is about pipelining: the serial-twin `approx`
+  (1e-2) is tighter than bf16's mantissa affords, and the seeding pin probes a synthetic
+  **f32**-only capability that bf16 operands cannot match. Both are artifacts of running the test
+  off the precision its goldens were written for, so this leg is reported here rather than promoted
+  into the suite.
 - **rendering**, read out of the emitted `.hip` rather than from the test's substring counts:
 
   | | depth 1 | depth 2 |
@@ -341,26 +361,42 @@ golden lines pass on HIP:
   `Invalid_argument … "not supported"` at either depth, and the full `cc` suite is green (exit 0,
   zero diffs).
 
-**The occupancy cost reproduces.** `bin/schedule_bench.ml` already carries an `mma_pd1`/`mma_pd2`
-pair, but its `has_shared` gate listed only metal and cuda, so every HIP run fell into the CPU
-branch and the pair had never been timed on an AMD GPU. Adding `hip` to that disjunction (a
-one-line bug fix — HIP renders workgroup-shared placement exactly as CUDA and Metal do) makes it
-run. Matmul 512^3, f32, 20 repeats, 3 replicates, identical spot checks:
+**The occupancy cost does NOT reproduce here — on HIP it is a null.** `bin/schedule_bench.ml`
+already carries an `mma_pd1`/`mma_pd2` pair, but its `has_shared` gate listed only metal and cuda,
+so every HIP run fell into the CPU branch and the pair had never been timed on an AMD GPU. Adding
+`hip` to that disjunction (a one-line bug fix — HIP renders workgroup-shared placement exactly as
+CUDA and Metal do) makes it run.
 
-| | rep1 | rep2 | rep3 | ratio |
+**The precision matters, and checking it changed the answer.** RDNA3.5 WMMA has no f32 operand
+shape, so at the benchmark's default f32 the `Tensorize` renders as the **lane-0 scalar fallback** —
+verified in the emitted source, `rocwmma::mma_sync = 0` — and those numbers are not MMA
+measurements at all. Re-run at bf16 (`--ocannl_default_prec=bfloat16`), one of HIP's four advertised
+formats, the same kernels render `rocwmma::mma_sync = 1` with no lane-0 guard. Matmul 512^3, bf16,
+20 repeats, **9 replicates**, identical spot checks (33.0) throughout:
+
+| | median | mean | range | spread |
 |---|---:|---:|---:|---:|
-| `mma_pd1` | 4.773 ms | 4.820 ms | 4.786 ms | 1.00x |
-| `mma_pd2` | 6.236 ms | 6.268 ms | 6.303 ms | **1.31x cost** |
+| `mma_pd1` | 0.593 ms | 0.592 ms | 0.559–0.653 | 15.9% |
+| `mma_pd2` | 0.601 ms | 0.597 ms | 0.547–0.626 | 13.1% |
 
-**Depth 2 costs 1.31x on HIP against ~1.4–1.5x on Metal — same sign, same magnitude.** The portable
-double-buffered form is correct on HIP and loses there for the same reason it loses on Metal, which
-is the corroboration phase 1 wanted: the register/LDS staging cost is a property of the portable
-mechanism, not of Apple silicon. Nothing here bears on `cp.async`, which is the primitive that would
-change the story and is tested separately.
+**pd2 / pd1 = 1.01x on medians, 1.01x on means.** Per-replicate ratios run 0.88–1.11 and the two
+ranges overlap almost completely, so the difference is far inside each arm's own ~15% run-to-run
+spread: **depth 2 costs nothing measurable on gfx1151.**
 
-This is a 512^3 matmul cell rather than the suggested `mlp_wide` bf16 one — it is the same
-staged-mma composition with the pipelining knob, which is what the mechanism question needs, and it
-was already in the tree.
+That is neither the predicted loss nor a win, and it is stated as the null it is. **The null is
+informative rather than merely inconclusive**: an effect the size of Metal's would be ~1.4–1.5x
+against a ~15% spread, i.e. three to four times the noise floor, so this cell had ample power to see
+one. What it rules out is a device-independent cost, not a cost on Metal.
+
+So the appendix's second question gets a negative answer: the register/LDS staging penalty phase 1
+measured on Apple silicon **does not reproduce on gfx1151**, and "the portable form costs ~1.4x" is
+not a property of the portable mechanism as such. An earlier revision of this report claimed 1.31x
+here and said it corroborated Metal; that number was measured on the **f32 scalar-fallback** kernel
+described above — not an MMA measurement at all — and is withdrawn. Nothing here bears on
+`cp.async`.
+
+This is a 512^3 matmul cell rather than the suggested `mlp_wide` one — same staged-mma composition
+with the pipelining knob, already in the tree, and now at a precision where the MMA is real.
 
 ## Reproduction
 
@@ -420,7 +456,19 @@ hipcc --offload-arch=gfx1151 -O3 -o /tmp/roofline benchmarks/roofline_hip.cpp \
 # the gh-487 appendix
 cd _build/default/test/operations && OCANNL_BACKEND=hip ./schedule_pipelined_matmul.exe
 grep -c '% 2' build_files/schedule_pipelined_matmul/pipe_mm_d{1,2}.hip
-cd ../../bin && for r in 1 2 3; do
-  OCANNL_BACKEND=hip ./schedule_bench.exe 512 20 512 512 0 --ocannl_backend=hip | grep mma_pd
+# f32 renders the lane-0 scalar fallback here; bf16 puts real rocWMMA in the loop and the bitwise
+# parity line still holds (2 of 17 lines go false for unrelated precision reasons -- see above).
+grep -c 'rocwmma::mma_sync' build_files/schedule_pipelined_matmul/pipe_mm_d{1,2}.hip   # f32: 0
+OCANNL_BACKEND=hip ./schedule_pipelined_matmul.exe --ocannl_default_prec=bfloat16
+grep -c 'rocwmma::mma_sync' build_files/schedule_pipelined_matmul/pipe_mm_d{1,2}.hip   # bf16: 1
+# bf16 is load-bearing: at f32 RDNA3.5 has no WMMA operand shape and the Tensorize silently
+# renders as the lane-0 scalar fallback, so f32 numbers here are not MMA numbers. Check first.
+cd ../../bin && OCANNL_BACKEND=hip ./schedule_bench.exe 512 3 512 512 0 --ocannl_backend=hip \
+  --ocannl_default_prec=bfloat16 --ocannl_output_debug_files_in_build_directory=true
+grep -c 'rocwmma::mma_sync' build_files/schedule_bench/mm_mma_pd{1,2}.hip   # must be >= 1
+grep -c '== 0)' build_files/schedule_bench/mm_mma_pd{1,2}.hip               # must be 0
+for r in $(seq 9); do
+  OCANNL_BACKEND=hip ./schedule_bench.exe 512 20 512 512 0 --ocannl_backend=hip \
+    --ocannl_default_prec=bfloat16 | grep mma_pd
 done
 ```

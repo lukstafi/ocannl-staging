@@ -4501,8 +4501,13 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                    baseline is not dispatched (every GPU backend) every candidate declines for the
                    one reason, nothing is timed, and the search ships the untuned default out of an
                    unusable lineage under a report that says it completed. It reaches the caller
-                   instead, which is the only party that can fix it. *)
-                Context.check_lineage_runnable c.cctx c.routine;
+                   instead, which is the only party that can fix it.
+
+                   Tagged, though not contained: the tag carries no boundary here, it only labels
+                   the phase so the fallback handler at the end of [search] reports a pre-dispatch
+                   validation failure as [Preflight] rather than as its [Transform] default. *)
+                Outcome.tag Outcome.Preflight (fun () ->
+                    Context.check_lineage_runnable c.cctx c.routine);
                 Outcome.protect ~classify_backend:(Context.failure_classifier c.cctx)
                   ~provenance:Outcome.Candidate ~phase:Outcome.Launch
                   ~candidate:(spec_label spec) (fun () ->
@@ -4964,17 +4969,18 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
       (result, completed_report)
       in
       let result, completed_report =
-        try search () with exn ->
-          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        let escaped ~phase exn backtrace =
           if !partial_emitted then Stdlib.Printexc.raise_with_backtrace exn backtrace
-          else
-            emit_partial_and_raise
-              {
-                exn;
-                backtrace;
-                phase = Outcome.Transform;
-                candidate = None;
-              }
+          else emit_partial_and_raise { exn; backtrace; phase; candidate = None }
+        in
+        try search () with
+        (* A raise that carries its phase keeps it: the lineage-wide pre-dispatch validation is
+           deliberately raised outside the candidate loop's failure boundary (gh-ocannl-569), so it
+           arrives here rather than at a classifier, and reporting it under the [Transform] default
+           below would tell the caller a validation error was a transform failure. The original
+           exception is re-raised, not the wrapper, so the caller still sees its message. *)
+        | Outcome.Raised_at (phase, exn, backtrace) -> escaped ~phase exn backtrace
+        | exn -> escaped ~phase:Outcome.Transform exn (Stdlib.Printexc.get_raw_backtrace ())
       in
       (* A callback failure on the ordinary completion path is the callback's own exception and
          propagates normally; only fatal-path callbacks are best-effort. *)

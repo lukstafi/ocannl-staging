@@ -286,14 +286,27 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   backend** — host-side validation, so a classifier guessing `Writes_may_have_occurred` would
   escalate a failure that provably wrote nothing. Rule for any new boundary around `Context.run`:
   tag what precedes `Ir.Task.run` as `Preflight`, or a fixable mistake reads as device damage —
-  **except the poisoned-lineage check** that `check_runnable` performs first, the one pre-dispatch
-  condition that is not fixable. `time_routine` raises it outside the region: contained, a search
-  whose serial baseline is not dispatched (every GPU search) declines every candidate for that one
-  terminal reason, times nothing, and ships the untuned default out of a dead lineage under a
-  completed report. Contain the fixable, propagate the terminal — adjacent lines in one function.
+  **but only the per-candidate half of it may be contained** (gh-ocannl-569, found on HIP). The
+  split is `Context.check_lineage_runnable` (poisoned lineage, uninitialized inputs, unexecuted
+  dependencies) against `Context.check_launch_bindings` (out-of-range static bindings), and it is
+  the difference between a condition that belongs to the *lineage* and one that belongs to *this
+  candidate's* bindings. Only the second can fail one candidate while its siblings time cleanly;
+  the first fails every candidate of every arm identically, so containing it is silent —
+  a search whose serial baseline is not dispatched (**every GPU search**, gh-ocannl-532) then
+  declines every candidate for the one reason, times nothing, and `tune_placements` *returns
+  normally* shipping the untuned default out of an unusable lineage, with no exception and no
+  `terminal_failure`. On the C backends the dispatched serial baseline hits the condition first and
+  takes the arm down with the caller's message, which is why every golden encodes the CPU shape and
+  CI never saw it. So: **contain the per-candidate half, raise the lineage-wide half outside the
+  boundary** — at the candidate site before `Outcome.protect`, and inside the baseline's match
+  scrutinee so `condemn` still reads it as pre-dispatch and leaves the lineage usable. Tag the
+  hoisted raise `Preflight` anyway: it carries no boundary there, but `search`'s fallback handler
+  would otherwise report a validation error under its `Transform` default.
   These causes also resist injection: they belong to the lineage and the bindings, not to a
   candidate, so a genuine one fails *every* candidate at once, which is why
-  `Autotune.on_candidate_preflight` exists.
+  `Autotune.on_candidate_preflight` exists — though since the lineage-wide half now escapes the
+  region, injecting one of *its* exceptions through that hook exercises the containment machinery
+  with a realistic payload rather than mirroring where a real one is raised.
 - Placement decides which tensorized candidates *exist*, not just how they rank, because
   `mma_tile_for_precisions` keys on the storage precisions of the nodes the site actually reads.
   Under the mixed-precision recipe on a uniform-format backend (Metal's `simdgroup_matrix`: no mixed
