@@ -4122,6 +4122,9 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                  is a legitimate winner. *)
               logf "cache entry replays to an unparallelized routine, re-searching: %s"
                 (spec_label spec);
+              (* gh-ocannl-550: rejected, so its buffers are dead — and the fresh search below is
+                 about to want them. *)
+              Context.release c.cctx;
               None
           | Ok c ->
               logf "cache hit: %s (best %.4f ms, baseline %.4f ms)" (spec_label spec)
@@ -4334,6 +4337,68 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
       and n_fiss_sketch_candidates = ref 0
       and n_split_reduce_candidates = ref 0 in
       let best_so_far = ref (baseline, baseline_ms) in
+      let by_time (_, a) (_, b) = Float.compare a b in
+      (* gh-ocannl-550: the search's live artifacts are bounded by [beam_width], not by candidates
+         processed. [beam] IS the candidate pool — it holds the fastest [beam_width] entries seen so
+         far, and [admit] releases whatever falls out of it. It starts with the baseline when the
+         baseline is eligible; a declined one contributes no entry, so the beam can be empty and every
+         consumer below takes that as "nothing was timed" (gh-ocannl-533).
+
+         Bounding as we go is equivalent to the old "keep every timed candidate, sort, then take
+         [beam_width]" — keeping the k smallest incrementally keeps the k smallest overall — with one
+         difference: a tie between exactly equal times now resolves by arrival rather than by seed
+         order.
+
+         Why bound it at all: a candidate's device buffers are invisible to the OCaml GC, because the
+         backends' pool tables root every slab they allocate (see {!Context.release}), so a pool
+         holding every ranked candidate holds its device memory too — a cold tf32 gpt2_mini search
+         filled a 12 GB card a fifth of the way through and then ran the remaining candidates, its
+         winner replay and its fallback compile against a full device. The tune loop is the one place
+         that needs no allocator to fix that: it knows each candidate's exact lifetime — timed, then
+         dead unless it is a beam survivor. *)
+      let beam = ref (Option.to_list (Option.map baseline ~f:(fun b -> (b, baseline_ms)))) in
+      (* Set by the exit sweep: past it there is no reader left for any candidate the search compiled,
+         so retention stops applying. A flag rather than clearing [best_so_far], which the reports
+         still read for the winner's label after the sweep has freed its buffers. *)
+      let search_over = ref false in
+      let release_candidate c =
+        (* Physical identity, not digest: the beam is the authority on what is live, and a released
+           candidate's digest deliberately STAYS in [seen] — it must keep deduplicating, and dedup
+           cannot resurrect an artifact, since [seen], [timed_ms_by_digest] and [label_by_digest] hold
+           strings and floats and never a [compiled]. [best_so_far] is normally the beam's head, but
+           it can lag one round behind it (a sub-threshold improvement updates the former and not the
+           latter), so it is checked separately. *)
+        if
+          !search_over
+          || not
+               (List.exists !beam ~f:(fun (c', _) -> phys_equal c c')
+               || Option.exists (fst !best_so_far) ~f:(phys_equal c))
+        then
+          (* Best-effort: a failure to free must not replace the candidate's own outcome, and this
+             runs on failure paths too, where the device may already be refusing work. Process-fatal
+             conditions still propagate. *)
+          try Context.release c.cctx
+          with exn when not (process_fatal_exn exn) ->
+            logf "release of candidate %s failed: %s" (dshort c.digest_after) (Exn.to_string exn)
+      in
+      let admit entry =
+        let kept, evicted = List.split_n (List.sort (entry :: !beam) ~compare:by_time) beam_width in
+        beam := kept;
+        List.iter evicted ~f:(fun (c, _) -> release_candidate c)
+      in
+      (* The exit sweep. Once the search has produced its report, the beam survivors and the running
+         best have no reader left either — and on the [timing_ctx] path not even the winner does,
+         since it is recompiled from the caller's context out of its saved schedule, which is data.
+         Ordering matters twice: the sweep must run AFTER the report record has been built (it reads
+         [best_so_far]) and BEFORE the compiles that follow it, which are the two the exhausted device
+         used to defeat (the winner replay and the untuned-default fallback behind it). *)
+      let release_all_candidates ~keep () =
+        search_over := true;
+        let live = List.map !beam ~f:fst @ Option.to_list (fst !best_so_far) in
+        beam := [];
+        List.iter live ~f:(fun c ->
+            if not (List.exists keep ~f:(phys_equal c)) then release_candidate c)
+      in
       (* The gh-ocannl-552 reference point. [baseline_ms] is the serial form's time ([infinity] on
          GPU), so it cannot answer "did tuning beat what the user gets without tuning?". The
          untuned default pipeline is already in the pool — the [config_thresholds] seed reproduces
@@ -4410,6 +4475,11 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
          with report_exn when not (process_fatal_exn report_exn) ->
            Stdio.eprintf "autotune: partial-report callback failed: %s\n%!"
              (Exn.to_string report_exn));
+        (* gh-ocannl-550: this arm is over and returns no routine, so every artifact it still holds
+           is dead. It matters most exactly here: a caller that CONTAINS this failure per arm
+           ([Train.tune_placements]) goes on to search its other arm, and used to do so against a
+           device still holding everything this arm had compiled. *)
+        release_all_candidates ~keep:[] ();
         Outcome.raise_failure (Outcome.Fatal fatal)
       in
       (* The post-search fallbacks to the untuned default (nothing timed; the winner replay failed
@@ -4458,6 +4528,11 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
             | _ -> ());
             if Hash_set.mem seen c.digest_after then (
               logf "%s: dedup (digest %s)" (spec_label spec) (dshort c.digest_after);
+              (* gh-ocannl-550: a dedup still PAID for a compile and a link, so it holds a
+                 candidate's worth of device buffers — and its identical twin, already in the beam or
+                 already released, is the one the search reasons about. This one is dead on arrival.
+                 The digest stays in [seen]. *)
+              release_candidate c;
               None)
             else if not (dispatchable ~is_gpu c.all_opts) then (
               (* Degenerated to the serial form (gh-ocannl-532): recorded as seen, so an equivalent
@@ -4469,6 +4544,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                 ~detail:
                   (Printf.sprintf "%s degenerated to a form binding no hardware dimension"
                      (spec_label spec));
+              release_candidate c;
               None)
             else (
               Hash_set.add seen c.digest_after;
@@ -4541,6 +4617,10 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                          not wait on a routine that never completed. A no-op for a [Preflight]
                          decline, which precedes the dispatch that makes the claim. *)
                       Context.rollback_execution c.cctx (Context.routine_id c.routine);
+                      (* gh-ocannl-550: a candidate that failed to run is as dead as one that lost,
+                         and on the failure that motivated all of this it is deader — an
+                         out-of-memory decline is exactly when the freed buffers are worth most. *)
+                      release_candidate c;
                       None
                   | Outcome.Writes_may_have_occurred ->
                       (* Counted once as a decline (its cause is real evidence about the candidate)
@@ -4559,6 +4639,24 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                   Context.poison_lineage c.cctx ~routine_name:(Context.routine_name c.routine)
                     fatal.Outcome.exn;
                   emit_partial_and_raise fatal)
+      in
+      (* gh-ocannl-550: the per-candidate allocation census, on the same [autotune_log] stream as the
+         candidate lines it follows, so a growth curve can be read against the classes that produce
+         it instead of against wall-clock samples from outside the process. One line per attempt,
+         whether the candidate was timed, declined or deduped — a class that grows on the DECLINE
+         path is a different bug from one that grows on the timed path, and only per-attempt lines
+         distinguish them. The device figure is the backend's own accounting, which the census does
+         not replace: it covers pools the shared seam does not allocate (the merge buffer) and, on
+         [cc], counts host allocations whose GC finalizer has not yet run. *)
+      let try_spec spec =
+        let result = try_spec spec in
+        (* Gated explicitly, not just by [logf]: [logf]'s arguments are evaluated whether or not the
+           flag is on, and both readings here fold a hashtable. *)
+        if Lazy.force log_enabled then
+          logf "census after %s: %s | device %.1f MiB" (spec_label spec)
+            (Ir.Alloc_census.to_string (Ir.Alloc_census.snapshot ()))
+            (Float.of_int (Context.get_used_memory search_ctx) /. 1048576.);
+        result
       in
       let block_size_presets mk =
         mk None :: (if is_gpu then List.map seed_block_sizes ~f:(fun bs -> mk (Some bs)) else [])
@@ -4717,75 +4815,58 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
         @ List.map sketch_params ~f:(fun p -> Whole (W_sketch p))
         @ fiss_sketch_specs @ sr_specs
       in
-      let by_time (_, a) (_, b) = Float.compare a b in
       let fiss_single_results = ref [] in
       let sr_single_results = ref [] in
-      let pool =
-        (* A declined baseline contributes no pool entry, so the pool — and with it the beam — can
-           be empty; every consumer below takes that as "nothing was timed" (gh-ocannl-533). *)
-        Option.to_list (Option.map baseline ~f:(fun b -> (b, baseline_ms)))
-        @ List.filter_map seed_specs ~f:(fun spec ->
-            let result = try_spec spec in
-            (match (spec, result) with
-            | Fiss (F_sketch [ (key, p) ]), Some (_, ms) ->
-                Int.incr n_fiss_sketch_timed;
-                fiss_single_results := (key, (p, ms)) :: !fiss_single_results
-            | Fiss (F_sketch _), Some _ -> Int.incr n_fiss_sketch_timed
-            | Fiss (F_split { sites = [ (s, b) ] }), Some (_, ms) ->
-                Int.incr n_sr_timed;
-                sr_single_results := (s, b, ms) :: !sr_single_results
-            | Fiss (F_split _), Some _ -> Int.incr n_sr_timed
-            | _ -> ());
-            result)
-      in
+      List.iter seed_specs ~f:(fun spec ->
+          let result = try_spec spec in
+          (match (spec, result) with
+          | Fiss (F_sketch [ (key, p) ]), Some (_, ms) ->
+              Int.incr n_fiss_sketch_timed;
+              fiss_single_results := (key, (p, ms)) :: !fiss_single_results
+          | Fiss (F_sketch _), Some _ -> Int.incr n_fiss_sketch_timed
+          | Fiss (F_split { sites = [ (s, b) ] }), Some (_, ms) ->
+              Int.incr n_sr_timed;
+              sr_single_results := (s, b, ms) :: !sr_single_results
+          | Fiss (F_split _), Some _ -> Int.incr n_sr_timed
+          | _ -> ());
+          Option.iter result ~f:admit);
       (match default_ms () with
       | Some ms -> logf "untuned-default pipeline: %.4f ms (gh-ocannl-552 reference)" ms
       | None ->
           logf
             "untuned-default pipeline: not timed (gated to a form outside the pool, not seeded, \
              failed, or not dispatched)");
-      let pool =
-        (* Cross-segment recombination: the singles time every parameter set unmasked, but the best
-           full routine may sketch several segments at once. One extra composite candidate applies
-           each keyed segment's best-timed single simultaneously — informed by the singles' own
-           timings, where the full cartesian product would be exponential. *)
-        let recombined =
-          List.filter_map fiss_sketch_entries ~f:(fun (key, _) ->
-              List.filter !fiss_single_results ~f:(fun (k, _) -> String.equal k key)
-              |> List.min_elt ~compare:(fun (_, (_, a)) (_, (_, b)) -> Float.compare a b)
-              |> Option.map ~f:(fun (_, (p, _)) -> (key, p)))
-        in
-        if List.length recombined < 2 then pool
-        else
-          match try_spec (Fiss (F_sketch recombined)) with
-          | Some timed ->
-              Int.incr n_fiss_sketch_timed;
-              timed :: pool
-          | None -> pool
+      (* Cross-segment recombination: the singles time every parameter set unmasked, but the best
+         full routine may sketch several segments at once. One extra composite candidate applies
+         each keyed segment's best-timed single simultaneously — informed by the singles' own
+         timings, where the full cartesian product would be exponential. *)
+      let recombined =
+        List.filter_map fiss_sketch_entries ~f:(fun (key, _) ->
+            List.filter !fiss_single_results ~f:(fun (k, _) -> String.equal k key)
+            |> List.min_elt ~compare:(fun (_, (_, a)) (_, (_, b)) -> Float.compare a b)
+            |> Option.map ~f:(fun (_, (p, _)) -> (key, p)))
       in
-      let pool =
-        (* Multi-site split-reduce recombination: apply each detected site's best-timed
-           [num_blocks] simultaneously — the sites are distinct statements, so their preludes
-           compose. Same rationale as the sketch recombination above: singles keep every value
-           unmasked, one composite recovers the combination. *)
-        let recombined =
-          List.filter_map sr_sites ~f:(fun s ->
-              List.filter !sr_single_results ~f:(fun (s2, _, _) ->
-                  Idx.equal_symbol s2.sr_axis s.sr_axis)
-              |> List.min_elt ~compare:(fun (_, _, a) (_, _, b) -> Float.compare a b)
-              |> Option.map ~f:(fun (s2, b, _) -> (s2, b)))
-        in
-        if List.length recombined < 2 then pool
-        else
-          match try_spec (Fiss (F_split { sites = recombined })) with
-          | Some timed ->
-              Int.incr n_sr_timed;
-              timed :: pool
-          | None -> pool
+      if List.length recombined >= 2 then
+        Option.iter (try_spec (Fiss (F_sketch recombined))) ~f:(fun timed ->
+            Int.incr n_fiss_sketch_timed;
+            admit timed);
+      (* Multi-site split-reduce recombination: apply each detected site's best-timed [num_blocks]
+         simultaneously — the sites are distinct statements, so their preludes compose. Same
+         rationale as the sketch recombination above: singles keep every value unmasked, one
+         composite recovers the combination. *)
+      let recombined =
+        List.filter_map sr_sites ~f:(fun s ->
+            List.filter !sr_single_results ~f:(fun (s2, _, _) ->
+                Idx.equal_symbol s2.sr_axis s.sr_axis)
+            |> List.min_elt ~compare:(fun (_, _, a) (_, _, b) -> Float.compare a b)
+            |> Option.map ~f:(fun (s2, b, _) -> (s2, b)))
       in
-      let beam = ref (List.take (List.sort pool ~compare:by_time) beam_width) in
+      if List.length recombined >= 2 then
+        Option.iter (try_spec (Fiss (F_split { sites = recombined }))) ~f:(fun timed ->
+            Int.incr n_sr_timed;
+            admit timed);
       (* [None] iff the beam is empty: no candidate timed and the baseline was not eligible (an
-         undispatched GPU baseline never enters the pool with a finite rank; a declined one does not
+         undispatched GPU baseline never enters the beam with a finite rank; a declined one does not
          enter it at all). *)
       let best = ref (List.hd !beam) in
       let continue_ = ref true in
@@ -4817,15 +4898,39 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                                (optop_family op));
                         None))))
         in
-        let results = List.sort (List.filter_map cands ~f:try_spec) ~compare:by_time in
-        match results with
+        (* gh-ocannl-550: bounded like the seed pass, but in a SECOND accumulator, because a round's
+           decision compares its own best against the incumbent and, if it wins, replaces the beam
+           wholesale — so the previous beam has to stay alive until that decision is taken, and this
+           round's also-rans must not (16 compiles per round on the gh-ocannl-543 chain). An evicted
+           entry is provably outside [!round] by the time it is released, so [release_candidate]'s
+           beam/best check is the whole guard it needs. *)
+        let round = ref [] in
+        let round_admit entry =
+          let kept, evicted =
+            List.split_n (List.sort (entry :: !round) ~compare:by_time) beam_width
+          in
+          round := kept;
+          List.iter evicted ~f:(fun (c, _) -> release_candidate c)
+        in
+        List.iter cands ~f:(fun spec -> Option.iter (try_spec spec) ~f:round_admit);
+        match !round with
         | [] -> continue_ := false
         | (_, round_best_ms) :: _ ->
             let incumbent_ms = Option.value_map !best ~default:Float.infinity ~f:snd in
+            let previous = !beam in
             if Float.(round_best_ms < incumbent_ms *. (1. -. min_progress)) then (
-              beam := List.take results beam_width;
-              best := List.hd !beam)
-            else continue_ := false
+              beam := !round;
+              best := List.hd !beam;
+              (* The displaced incumbents are dead. *)
+              List.iter previous ~f:(fun (c, _) -> release_candidate c))
+            else (
+              continue_ := false;
+              (* The round did not beat the incumbent by enough: the beam is unchanged, so everything
+                 this round produced is dead — except a sub-threshold improvement that became
+                 [best_so_far], which [release_candidate] keeps and the exit cleanup releases. *)
+              let produced = !round in
+              round := [];
+              List.iter produced ~f:(fun (c, _) -> release_candidate c))
       done;
       let best_c, best_ms =
         match !best with Some (c, ms) -> (Some c, ms) | None -> (None, Float.infinity)
@@ -4866,10 +4971,14 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
          difference across processes on cuda). *)
       (if Lazy.force log_enabled then
          match Context.compile search_ctx comp bindings with
-         | cctx, croutine -> (
-             match time_routine ~repeats cctx croutine with
+         | cctx, croutine ->
+             (match time_routine ~repeats cctx croutine with
              | ms -> logf "untuned-default in-process control: %.4f ms" ms
-             | exception exn -> logf "untuned-default control run failed: %s" (Exn.to_string exn))
+             | exception exn -> logf "untuned-default control run failed: %s" (Exn.to_string exn));
+             (* A diagnostic's artifacts are dead the moment it has printed its number
+                (gh-ocannl-550) — and the diagnostic is on exactly when the memory question is being
+                measured, so leaving them behind would show up in the very census that reads it. *)
+             Context.release cctx
          | exception exn -> logf "untuned-default control compile failed: %s" (Exn.to_string exn));
       let completed_report =
         {
@@ -4911,11 +5020,15 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
              unbounded. The untuned default pipeline is the honest fallback: the same code the
              caller would have compiled without the tuner. *)
           logf "nothing was timed: falling back to the untuned default compile (gh-ocannl-532)";
+          release_all_candidates ~keep:[] ();
           untuned_default_or_raise ())
         else
           (* [nothing_timed] is false, so the beam holds a timed winner. *)
           let best_c = Option.value_exn best_c ~message:timed_winner_exists in
-          if Option.is_none timing_ctx then (best_c.cctx, best_c.routine)
+          if Option.is_none timing_ctx then (
+            (* The winner's own artifacts ARE the return value here; every other candidate is dead. *)
+            release_all_candidates ~keep:[ best_c ] ();
+            (best_c.cctx, best_c.routine))
           else
           (* The search ran against the scratch lineage; compile the winner from the caller's
              context (like the cache-hit path). Digest mismatch or replay failure falls back to the
@@ -4926,6 +5039,9 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
             | Fiss_saved assoc -> Fiss (F_saved assoc)
             | Split_saved (prelude, assoc) -> Fiss (F_split_saved (prelude, assoc))
           in
+          (* Nothing the replay needs is an artifact — [spec] above is the winner's saved schedule —
+             so the whole beam goes before the compile that reproduces it (gh-ocannl-550). *)
+          release_all_candidates ~keep:[] ();
           match compile_spec_real Outcome.Candidate spec with
           | Ok c when not (dispatchable ~is_gpu c.all_opts) ->
               (* Completes the invariant rather than fixing an observed bug: the winner was timed,

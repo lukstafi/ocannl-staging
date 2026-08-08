@@ -261,6 +261,23 @@ val get_used_memory : t -> int
     liveness memory planner (config [buffer_aliasing], gh-ocannl-489). *)
 (** Get the device ID. *)
 
+val release : t -> unit
+(** Eagerly frees the device buffers this context owns — the pools holding nodes it allocated that
+    its parent does not have, and that are not per-device constants. Idempotent (a second call is a
+    no-op), and safe to call on a context derived from a still-live parent: sibling contexts never
+    share a working pool, since each [compile] mints its own pool ids.
+
+    A context whose buffers were released must not be run or read again; it is a dead handle, exactly
+    as after the finalizer had reclaimed it. Nothing in the context is invalidated for {e reading
+    metadata} (placements, names, the ledger), only for touching buffers.
+
+    This exists because releasing is otherwise not something a finalizer can be relied on to do
+    (gh-ocannl-550): the backends' pool tables hold a strong reference to every slab they allocated,
+    so device memory is invisible to the OCaml GC and a process under no host-heap pressure never
+    reclaims it. Callers that know an exact lifetime should say so — [Autotune.tune] does, per
+    candidate. Everyone else can keep ignoring this: nothing regresses by not calling it, the
+    process just holds more device memory. *)
+
 val placements : t -> Ir.Tnode.Placements.t
 (** The context's compilation lineage's memory-mode resolution
     (docs/proposals/context-scoped-memory-modes.md): which nodes this lineage decided to inline

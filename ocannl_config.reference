@@ -341,6 +341,10 @@
 # error message), deduplicated against an already-seen post-schedule digest, or was timed (and
 # its time), plus the cache-hit, winner-replay and fallback outcomes. For debugging search
 # quality; independent of the ppx_minidebug log levels.
+# It also emits one `census` line per candidate attempt (gh-550): the live pools, contexts and
+# loaded code modules of `Ir.Alloc_census` next to the backend's own device-memory figure, so a
+# search's memory growth can be attributed to an allocation class rather than sampled from outside
+# the process.
 #autotune_log=false
 
 # gh-555: budget for the greedy per-node inlining refinement of `Train.tune_placements` — after

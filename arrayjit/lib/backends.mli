@@ -68,9 +68,19 @@ val finalize :
       and type runner = 'runner) ->
   ('dev, 'runner, 'event) Ir.Backend_intf.context ->
   unit
-(** Frees the pools that are specific to the context -- not contained in the parent context. Note:
-    use [finalize] to optimize memory, it is not obligatory because all pools are freed when their
-    backend buffers are garbage-collected. *)
+(** Frees the pools that are specific to the context -- not contained in the parent context, and not
+    per-device constants. Idempotent (guarded by the context's [finalized] flag), and freeing is
+    per-[pool_id] rather than per-node: one pool holds several nodes.
+
+    This is NOT optional if the memory matters (gh-ocannl-550, correcting the note that used to stand
+    here). A pool's backend buffer is never garbage-collected, because the backend's private
+    [(device_id, pool_id) -> base] table is a module-level strong root holding every slab it
+    allocated; dropping that entry -- which only this function does -- is what makes the buffer
+    collectable at all (and eagerly frees it where the backend has a raw deallocator). Measured: a
+    schedule search accumulated one unfreed pool per candidate to 12 GB while the OCaml GC ran
+    normally throughout, unloading code modules (which sit behind no such table) as it went.
+
+    {!Context.release} is the front-end entry point; prefer it over calling this directly. *)
 
 val lower_assignments :
   Ir.Low_level.optimize_ctx ->

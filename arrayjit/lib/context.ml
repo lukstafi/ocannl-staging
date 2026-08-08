@@ -666,6 +666,19 @@ let get_used_memory ctx =
         -> Backend.get_used_memory c.BI.device);
     }
 
+let release ctx =
+  Backends.query ctx.wrapped
+    {
+      q =
+        (fun (type dev runner event)
+          (module Backend : BI.Backend
+            with type dev = dev
+             and type runner = runner
+             and type event = event)
+          c
+        -> Backends.finalize (module Backend) c);
+    }
+
 let placements ctx =
   Backends.query ctx.wrapped { q = (fun _ c -> c.BI.optimize_ctx.Ir.Low_level.placements) }
 
