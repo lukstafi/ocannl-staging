@@ -219,6 +219,7 @@ struct
 
   let make_context ?(ctx_buffers = Map.empty (module Tnode)) ?optimize_ctx device =
     let optimize_ctx = Option.value_or_thunk optimize_ctx ~default:Low_level.empty_optimize_ctx in
+    Alloc_census.count_context_created ();
     {
       device;
       parent = None;
@@ -232,6 +233,7 @@ struct
     let ctx_buffers = Option.value ctx_buffers ~default:parent.ctx_buffers in
     let optimize_ctx = Option.value optimize_ctx ~default:parent.optimize_ctx in
     let merge_buffer_node = Option.value merge_buffer_node ~default:parent.merge_buffer_node in
+    Alloc_census.count_context_created ();
     {
       device = parent.device;
       parent = Some parent;

@@ -338,6 +338,16 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       Cu.Module.[ GENERATE_DEBUG_INFO true; GENERATE_LINE_INFO true ]
     else []
 
+  (* gh-ocannl-550: [Cu.Module] exposes no explicit unload — a module is unloaded by cudajit's own
+     GC finalizer — so loads counted against unloads is the only way to see whether a schedule
+     search's per-candidate modules are being reclaimed at all. The added finalizer only counts;
+     the unload stays cudajit's, and the two finalizers on one module are independent. *)
+  let load_module ptx =
+    let m = Cu.Module.load_data_ex ptx (run_options ()) in
+    Alloc_census.count_module_loaded ();
+    Stdlib.Gc.finalise (fun _ -> Alloc_census.count_module_unloaded ()) m;
+    m
+
   (* No longer need runtime linking since Threefry is included directly in each kernel *)
   let set_builtins_for_device ~primary_context:_ _kernel_module = assert !initialized
 
@@ -2071,7 +2081,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
   let%track3_sexp link prior_context (code : code) ctx_buffers =
     let ctx = ctx_of prior_context in
     set_ctx ctx;
-    let run_module = Cu.Module.load_data_ex code.ptx (run_options ()) in
+    let run_module = load_module code.ptx in
     prior_context.device.dev.set_builtins_in run_module;
     let idx_params = Indexing.bound_symbols code.bindings in
     let lowered_bindings : Indexing.lowered_bindings =
@@ -2090,7 +2100,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     in
     let ctx = ctx_of prior_context in
     set_ctx ctx;
-    let run_module = Cu.Module.load_data_ex code_batch.ptx (run_options ()) in
+    let run_module = load_module code_batch.ptx in
     prior_context.device.dev.set_builtins_in run_module;
     let procs =
       Array.mapi code_batch.kparams_and_names ~f:(fun i pns ->

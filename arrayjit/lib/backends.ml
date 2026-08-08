@@ -946,7 +946,15 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
       in
       register key ~alloc
     in
-    let pack ?arena (group : (Tn.t * Low_level.traced_array) list)
+    (* gh-ocannl-550: the shared seam is where a pool's byte size is known, so it is where the
+       per-class census records it. [~constant] separates the two groups below, whose lifetimes
+       differ: a working pool belongs to the context and dies with it, a constant pool is deduped
+       per device and outlives it. *)
+    let alloc_pool_counted ~constant device ~pool_id ~size_in_bytes ~alignment =
+      alloc_pool device ~pool_id ~size_in_bytes ~alignment;
+      Alloc_census.record_pool ~device_id:device.device_id ~pool_id ~constant ~size_in_bytes
+    in
+    let pack ?arena ~constant (group : (Tn.t * Low_level.traced_array) list)
         ~(register : Tn.t -> alloc:(unit -> buffer_loc) -> unit) : unit =
       if not (List.is_empty group) then begin
         (* gh-ocannl-498: lay every group out in CANONICAL (uid) order, which is the order
@@ -987,7 +995,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
               List.fold group ~init:1 ~f:(fun a (key, _) ->
                   max a (Ops.prec_in_bytes (Lazy.force key.Tn.storage_prec)))
             in
-            alloc_pool device ~pool_id ~size_in_bytes:total ~alignment;
+            alloc_pool_counted ~constant device ~pool_id ~size_in_bytes:total ~alignment;
             List.iter2_exn group offsets ~f:(fun entry offset ->
                 place entry ~pool_id ~offset ~register);
             if log_buffer_aliasing () then
@@ -1029,7 +1037,8 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
                 let a = Ops.prec_in_bytes (Lazy.force key.Tn.storage_prec) in
                 if a > !(seg_align.(seg)) then seg_align.(seg) := a);
             Array.iteri seg_pool_ids ~f:(fun seg (pool_id, size_in_bytes) ->
-                alloc_pool device ~pool_id ~size_in_bytes ~alignment:!(seg_align.(seg)));
+                alloc_pool_counted ~constant device ~pool_id ~size_in_bytes
+                  ~alignment:!(seg_align.(seg)));
             (* Place each node at its planned (segment, offset). *)
             List.iter2_exn group assignments ~f:(fun entry (seg, offset) ->
                 let pool_id, _ = seg_pool_ids.(seg) in
@@ -1039,7 +1048,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     (* Pass 2a: working delta -> context-owned pool(s), recorded directly. Only this group is
        liveness-planned (gh-ocannl-489): constants are deduped per-device and outlive the context,
        so their lifetimes are not routine intervals. *)
-    pack ?arena:alias_spans working ~register:(fun key ~alloc ->
+    pack ?arena:alias_spans ~constant:false working ~register:(fun key ~alloc ->
         ctx_buffers := Map.add_exn !ctx_buffers ~key ~data:(alloc ()));
     (* Pass 2b: constants / read-only -> per-device constant pool(s). Constants already allocated on
        this device (a hit in [constant_buffer_cache], possibly from another context tree) resolve
@@ -1052,7 +1061,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
         match Hashtbl.find device.constant_buffer_cache key with
         | Some data -> ctx_buffers := Map.add_exn !ctx_buffers ~key ~data
         | None -> new_constants := (key, node) :: !new_constants);
-    pack (List.rev !new_constants) ~register:(fun key ~alloc ->
+    pack ~constant:true (List.rev !new_constants) ~register:(fun key ~alloc ->
         let data = Hashtbl.find_or_add device.constant_buffer_cache key ~default:alloc in
         ctx_buffers := Map.add_exn !ctx_buffers ~key ~data);
     !ctx_buffers
@@ -1184,14 +1193,26 @@ end
 let finalize (type dev runner event)
     (module Backend : Backend with type dev = dev and type runner = runner and type event = event)
     (ctx : Backend.context) : unit =
-  Option.iter Backend.free_pool ~f:(fun free_pool ->
-      if Atomic.compare_and_set ctx.finalized false true then (
+  if Atomic.compare_and_set ctx.finalized false true then (
+    Alloc_census.count_context_released ();
+    Option.iter Backend.free_pool ~f:(fun free_pool ->
         Backend.await ctx.device;
-        Map.iteri ctx.ctx_buffers ~f:(fun ~key ~data:(loc : Ir.Backend_intf.buffer_loc) ->
+        (* One pool holds several nodes (gh-ocannl-344 bump packing / gh-ocannl-489 arenas), so the
+           same [pool_id] is reached through several keys; dedup before freeing, or the second visit
+           frees an already-freed slab. [Alloc_census.forget_pool] is idempotent for the same
+           reason, but the backend's [free_pool] is the one that must not run twice. *)
+        Map.fold ctx.ctx_buffers ~init:(Set.empty (module Int))
+          ~f:(fun ~key ~data:(loc : Ir.Backend_intf.buffer_loc) freed ->
             if
               (not (Option.exists ctx.parent ~f:(fun pc -> Map.mem pc.ctx_buffers key)))
-              && not (Hashtbl.mem ctx.device.constant_buffer_cache key)
-            then free_pool ctx.device ~pool_id:loc.pool_id)))
+              && (not (Hashtbl.mem ctx.device.constant_buffer_cache key))
+              && not (Set.mem freed loc.pool_id)
+            then (
+              free_pool ctx.device ~pool_id:loc.pool_id;
+              Alloc_census.forget_pool ~device_id:ctx.device.device_id ~pool_id:loc.pool_id;
+              Set.add freed loc.pool_id)
+            else freed)
+        |> (ignore : Set.M(Int).t -> unit)))
 
 (* {2 The implemented backends, as singletons}
 
