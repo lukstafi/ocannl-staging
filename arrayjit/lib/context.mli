@@ -99,10 +99,28 @@ val check_runnable : t -> routine -> unit
     unsatisfied execution dependencies, out-of-range bindings — raising exactly what [run] would.
     All of it precedes the dispatch, so a failure here proves nothing was executed and no device
     buffer was written. That is the point (gh-ocannl-550): a caller running a routine inside a
-    launch-tagged failure boundary validates through this in its own
-    {!Ir.Schedule_outcome.Preflight} region, so an unattributable failure at [Launch] means dispatch
-    was attempted and the lineage must be condemned, while an unsatisfied dependency — fixable, and
-    retryable — is the contained decline it is (gh-ocannl-564). *)
+    launch-tagged failure boundary validates through this rather than letting an unattributable
+    failure at [Launch] condemn the lineage for a mistake nothing had yet acted on
+    (gh-ocannl-564). Equivalent to {!check_lineage_runnable} followed by {!check_launch_bindings};
+    a caller that must treat the two halves differently calls them directly. *)
+
+val check_lineage_runnable : t -> routine -> unit
+(** The lineage-wide half of {!check_runnable}: poisoned lineage, uninitialized inputs, unsatisfied
+    execution dependencies. Every one is a property of the context and the computation rather than
+    of any particular compiled form, so a genuine failure here fails every candidate an autotuner
+    could compile in this lineage, and is the caller's to fix and retry.
+
+    A search must therefore let this one out (gh-ocannl-569). Contained as a per-candidate decline
+    it is silent: on a backend whose serial baseline is not dispatched — every GPU backend,
+    gh-ocannl-532 — every candidate declines for this one reason, nothing is timed, and
+    [Train.tune_placements] ships the untuned default out of an unusable lineage under a report
+    that says the search completed. *)
+
+val check_launch_bindings : routine -> unit
+(** The per-candidate half of {!check_runnable}: bind-time validation of the launch parameters the
+    caller just wrote (non-negative, within the declared static range, within the index width).
+    Candidates differ in their static ranges, so one can fail this while its siblings time cleanly
+    — which is what makes it the half a search contains as a decline (gh-ocannl-564). *)
 
 val sync : t -> unit
 (** Blocks until the context's device is idle. Host reads ({!to_host}, {!get_values}) synchronize on

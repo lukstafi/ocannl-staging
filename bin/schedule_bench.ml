@@ -382,8 +382,14 @@ let () =
   in
   p "matmul m=%d n=%d k=%d, %d repeats, backend from config/OCANNL_BACKEND\n" m n k repeats;
   let backend = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc") in
+  (* HIP belongs here too: the backend renders workgroup-shared placement exactly as CUDA and Metal
+     do, so the shared/staged/tensorized variants — including the gh-ocannl-487 [mma_pd1]/[mma_pd2]
+     pipelining pair — are expressible on it. Omitting it silently routed every HIP run into the
+     CPU branch below, which is why the pipelining pair had never been timed on an AMD GPU. *)
   let has_shared =
-    String.is_substring backend ~substring:"metal" || String.is_substring backend ~substring:"cuda"
+    String.is_substring backend ~substring:"metal"
+    || String.is_substring backend ~substring:"cuda"
+    || String.is_substring backend ~substring:"hip"
   in
   let t_naive =
     if naive_repeats > 0 then bench ~repeats:naive_repeats ~variant:"naive" ~schedule:None ()
