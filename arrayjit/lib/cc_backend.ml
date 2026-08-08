@@ -557,6 +557,9 @@ let%track7_sexp c_compile_and_load ~f_path =
             libname);
   (* Note: RTLD_DEEPBIND not available on MacOS. *)
   let result = { lib = Dl.dlopen ~filename:libname ~flags:[ RTLD_NOW ]; libname } in
+  Alloc_census.count_module_loaded ();
+  (* gh-ocannl-550: counted here, next to the unload the OpenMP arm deliberately does not perform,
+     so the census reports the mapping as live for as long as it really is. *)
   (match parallel_grid_syntax_setting () with
   | `Openmp ->
       (* Never dlclose kernels built with -fopenmp: unloading an object whose parallel regions
@@ -566,7 +569,10 @@ let%track7_sexp c_compile_and_load ~f_path =
          (ubuntu CI, PR #97). Leak the mapping instead; kernels are small. *)
       ()
   | `Dispatch | `None ->
-      let%track7_sexp finalize (lib : library) : unit = Dl.dlclose ~handle:lib.lib in
+      let%track7_sexp finalize (lib : library) : unit =
+        Dl.dlclose ~handle:lib.lib;
+        Alloc_census.count_module_unloaded ()
+      in
       Stdlib.Gc.finalise finalize result);
   result
 

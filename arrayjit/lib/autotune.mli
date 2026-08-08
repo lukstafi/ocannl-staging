@@ -596,4 +596,19 @@ val tune :
 (** Like {!Context.compile}, but returns the empirically fastest of the searched schedule
     candidates. The returned context/routine come from an ordinary sibling compile of [ctx], so
     execution-dependency tracking behaves as if the winning compile were the only one. Raises like
-    {!Context.run} would (e.g. uninitialized inputs) — tune in the same state you would run in. *)
+    {!Context.run} would (e.g. uninitialized inputs) — tune in the same state you would run in.
+
+    Memory (gh-ocannl-550): every candidate this searches is {!Context.release}d as soon as it stops
+    being a beam survivor, so the search's live {e working} pools and contexts are bounded by
+    [beam_width] rather than by candidates attempted. The bound holds across contained failures and
+    across dedups — a deduplicated candidate has still paid for a compile and a link — and the
+    returned routine is the only artifact left when [tune] returns. Nothing about the returned value
+    changes: it is the same live context and routine as before, from the same lineage.
+
+    The bound is on working pools, and that qualifier is load-bearing: {!Context.release} cannot free
+    per-device constants, and a hoisted [Stage] candidate mints a fresh packed constant per
+    application. A search that seeds those (the CPU [hoist] sketches) therefore still grows one
+    constant pool per such candidate — measured on [cc] at 1 -> 109 constant pools over 181
+    candidates, against working pools held within 2-6. Bounding it needs an eviction rule inside the
+    shared constant cache, which is gh-ocannl-565's subject; pinned as far as it can be by
+    [test/operations/autotune_candidate_release]. *)

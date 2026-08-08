@@ -52,6 +52,7 @@
   ops
   interval
   numerics
+  alloc_census
   ndarray
   indexing
   affine
