@@ -1032,6 +1032,63 @@ let pack_constant_tile ~debug ~(src_nd : Ndarray.t) ~(src_dims : int array) ~(pr
   Ndarray.apply2 { f2 } src_nd dst;
   dst
 
+(* "[Tile_mma] is a barrier": the intrinsic's emission contract brackets the block in workgroup
+   barriers on every barrier-capable backend ({!optop.Tensorize} docs) — every rendering form (the
+   per-statement intrinsic, the fragment-scope update, the register-tiled and lane-0 scalar
+   fallbacks) ENDS with one. Only the leading bracket is form-dependent: the fragment-update form
+   emits it once, on the scope that wraps the anchor loop, rather than per iteration — so a barrier
+   may be elided against what FOLLOWS it only when that is an explicit [Workgroup_barrier], never
+   against a [Tile_mma]'s leading bracket. Conservative on every other statement: [If] is
+   predicated, and a dead loop executes nothing. *)
+let rec ends_with_barrier (llc : Low_level.t) : bool =
+  match llc with
+  | Low_level.Workgroup_barrier | Low_level.Tile_mma _ -> true
+  | Low_level.Seq (_, b) -> ends_with_barrier b
+  (* Hardware axes bind rather than iterate; a serial loop ends with its (non-empty) last
+     iteration's end. A dead loop executes nothing, so it ends with no barrier. *)
+  | Low_level.For_loop { body; from_; to_; _ } -> to_ >= from_ && ends_with_barrier body
+  | _ -> false
+
+(* The tensor nodes a statement writes, recursing into loop / guard / local-scope bodies. *)
+let written_nodes (llc : Low_level.t) : Set.M(Tn).t =
+  let open Low_level in
+  let acc = ref (Set.empty (module Tn)) in
+  let rec code llc =
+    match llc with
+    | Noop | Comment _ | Staged_compilation _ | Declare_local _ | Workgroup_barrier -> ()
+    | Zero_out tn -> acc := Set.add !acc tn
+    | Tile_mma { d = tn, _; _ } -> acc := Set.add !acc tn
+    | Seq (a, b) ->
+        code a;
+        code b
+    | For_loop { body; _ } | If { body; _ } -> code body
+    | Set { tn; llsc; _ } ->
+        acc := Set.add !acc tn;
+        scalar llsc
+    | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
+        acc := Set.add !acc tn;
+        scalar v;
+        scalar llsc
+    | Set_from_vec { tn; arg = a, _; _ } ->
+        acc := Set.add !acc tn;
+        scalar a
+    | Set_local (_, llsc) -> scalar llsc
+  and scalar (llsc : scalar_t) =
+    match llsc with
+    | Local_scope { body; _ } -> code body
+    | Get _ | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
+    | Get_dynamic { dyn_value = v, _; _ } | Unop (_, (v, _)) -> scalar v
+    | Binop (_, (a, _), (b, _)) ->
+        scalar a;
+        scalar b
+    | Ternop (_, (a, _), (b, _), (c, _)) ->
+        scalar a;
+        scalar b;
+        scalar c
+  in
+  code llc;
+  !acc
+
 let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_stride
     ~pipeline_depth (opt : Low_level.optimized) : Low_level.optimized =
   let open Low_level in
@@ -1605,10 +1662,56 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
           For_loop
             { index = w_sym; from_ = 0; to_ = w - 1; axis = Workgroup; body }
     in
-    let build inner =
-      let remapped = remap_reads ~source ~from_idcs:idcs0 ~tile ~tile_idcs:tile_read_idcs inner in
-      if shared then unflat_lines [ load_nest; Workgroup_barrier; remapped; Workgroup_barrier ]
-      else unflat_lines [ load_nest; remapped ]
+    let remap llc = remap_reads ~source ~from_idcs:idcs0 ~tile ~tile_idcs:tile_read_idcs llc in
+    (* Same-anchor load-phase grouping at depth 1 (gh-ocannl-567; the [build_pipelined] arm below
+       is the same recognizer one depth up). A previous shared stage anchored at THIS loop left the
+       body as [loads; barrier; compute...; barrier]. Wrapping it again would render the k-block as
+       [loadA; barrier; loadB; barrier; compute; barrier; barrier]: the mid barrier serializes two
+       independent copies (distinct tiles, no dependency between them), and the two trailing ones
+       are adjacent with no work between. Group instead — [loadA; loadB; barrier; compute...;
+       barrier] — one phase per k-block. Safety: the barrier we drop between the two load nests
+       ordered this tile's writes against the previous phase's statements, so the recognizer
+       requires that phase to read nothing that the remap turns into a read of THIS tile (the tile
+       is freshly minted, so nothing else can reference it); and the trailing barrier we drop is
+       redundant with the one the previous stage already appended. The tile's writes stay separated
+       from its reads by the surviving mid barrier, and its reads from the next iteration's
+       overwrites by the trailing one — the same two phases as before, in one bracket instead of
+       two. *)
+    let same_anchor_load_phase inner =
+      let stmts = flat_lines [ inner ] in
+      let rec split acc = function
+        | Workgroup_barrier :: rest -> Some (List.rev acc, rest)
+        | hd :: tl -> split (hd :: acc) tl
+        | [] -> None
+      in
+      match split [] stmts with
+      | Some (loads, rest) when (not (List.is_empty loads)) && not (List.is_empty rest) ->
+          let is_staged_load stmt =
+            let w = written_nodes stmt in
+            (not (Set.is_empty w)) && Set.is_subset w ~of_:opt.workgroup_shared
+          in
+          if
+            List.for_all loads ~f:is_staged_load
+            (* No read of [source] in the load phase: otherwise the remap below would place a read
+               of this stage's tile before the barrier that orders its writes. *)
+            && List.for_all loads ~f:(fun s -> List.is_empty (collect_source_accesses ~source s))
+            && ends_with_barrier (unflat_lines rest)
+          then Some (loads, rest)
+          else None
+      | _ -> None
+    in
+    (* [group]: the splice wraps an anchor loop's body, so an already-present load phase there
+       belongs to a stage at the SAME anchor. The unanchored splices (routine root, outermost tile
+       loop) wrap a whole loop nest instead and never group. *)
+    let build ?(group = false) inner =
+      if not shared then unflat_lines [ load_nest; remap inner ]
+      else
+        match if group then same_anchor_load_phase inner else None with
+        | Some (loads, rest) ->
+            (* [loads] read no [source], so remapping them is the identity. *)
+            unflat_lines ((load_nest :: loads) @ [ Workgroup_barrier; remap (unflat_lines rest) ])
+        | None ->
+            unflat_lines [ load_nest; Workgroup_barrier; remap inner; Workgroup_barrier ]
     in
     (* Software pipelining (gh-ocannl-487): with [pipeline_depth > 1], the anchor L* — required
        [Serial], the rotor whose counter selects the buffer copy at rendering — gets the staging
@@ -1672,7 +1775,6 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
             (Constant (Float.of_int fc.to_), iprec) )
       in
       let guarded_prefetch = If { cond = (guard, iprec); body = prefetch } in
-      let remap llc = remap_reads ~source ~from_idcs:idcs0 ~tile ~tile_idcs:tile_read_idcs llc in
       (* Same-anchor composition (Codex P2 on PR #303): a previous pipelined stage at this rotor
          already restructured the body to [barrier; prefetches...; compute] and appended the
          trailing barrier after the loop. Wrapping it again ([barrier; prefetch_B; barrier;
@@ -1703,7 +1805,7 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
             ~f:(build_pipelined rotor)
       | Some ld, None ->
           rewrite_loop ~what:"Schedule.Stage" ~sym:stack0.(ld).index opt.llc ~f:(fun fc ->
-              for_loop { fc with body = build fc.body })
+              for_loop { fc with body = build ~group:true fc.body })
       | None, _ when wrap_outermost_tile ->
           rewrite_loop ~what:"Schedule.Stage" ~sym:stack0.(outermost_tile_depth).index opt.llc
             ~f:(fun fc -> build (for_loop fc))
@@ -3391,28 +3493,6 @@ let split_reduce_hoist (opt : Low_level.optimized) (op : optop) : Indexing.symbo
       | exception Split_reduce_inner_cell syms -> syms
       | exception Invalid_argument _ -> [])
   | _ -> []
-
-(* gh-ocannl-487 (Codex P2 on PR #303): the [Tile_mma] emission contract brackets the intrinsic
-   block in workgroup barriers on every barrier-capable backend ("Tile_mma is a barrier";
-   {!optop.Tensorize} docs) — so once Tensorize has replaced a pipelined rotor loop's compute with
-   a Tile_mma, every iteration already ends with a barrier and the pipeline's own barriers render
-   as consecutive barriers with no work between: the loop-leading one against the previous
-   iteration's trailing bracket, and the after-loop one against the last iteration's. Elide both
-   exactly when the rotor body provably ends with a barrier (conservative otherwise — a scalar
-   pipelined compute keeps its barriers). Phase separation is preserved: the bracket before the
-   intrinsic block separates the prologue copies from the first compute, and each iteration's
-   trailing bracket separates its copies' reads from the next iteration's prefetch overwrites and
-   the loop's last writes from whatever follows. Runs at {!apply}'s finalization, after Tensorize
-   (Stage precedes Tensorize by Stage's own precondition, so the schedule half cannot see the
-   Tile_mma at splice time). *)
-let rec ends_with_barrier (llc : Low_level.t) : bool =
-  match llc with
-  | Low_level.Workgroup_barrier | Low_level.Tile_mma _ -> true
-  | Low_level.Seq (_, b) -> ends_with_barrier b
-  (* Hardware axes bind rather than iterate; a serial loop ends with its (non-empty) last
-     iteration's end. A dead loop executes nothing, so it ends with no barrier. *)
-  | Low_level.For_loop { body; from_; to_; _ } -> to_ >= from_ && ends_with_barrier body
-  | _ -> false
 
 let elide_pipelined_barriers (opt : Low_level.optimized) : Low_level.optimized =
   let open Low_level in
