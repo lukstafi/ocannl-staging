@@ -200,7 +200,45 @@ so a *packing* regression (the same non-overlapping offsets in a needlessly larg
 show up in it. Answering that question needs a test that asserts on pool bytes;
 `Ir.Alloc_census.live_pool_bytes` now makes that cheap to write.
 
-## 5. Suite state
+## 5. What the fix does not bound: hoisted packed constants
+
+Found in review (Codex on PR #309) and then measured, because the claim "bounded by the beam" needed a
+qualifier it did not have.
+
+`Context.release` frees a context's **working** pools and deliberately skips every key in the
+per-device `constant_buffer_cache`: constants are shared across contexts and outlive them. That is
+right for a fixture weight, and wrong for a hoisted `Stage` candidate — `Schedule.apply_stage`'s
+hoisted path mints a **fresh** packed-constant tnode per application (`Tn.create … ~id:(fresh_tile_id
+())`), marks it `Effectively_constant` and read-only, so `allocate_delta` routes it into a new constant
+pool and registers it in the cache under a unique key. Nothing can dedup it (the uid is new) and
+release cannot free it.
+
+Measured on `cc`, one search over a 128×128 matmul whose operands are host constants (181 candidates,
+beam width 2, the `hoist` sketch labels present):
+
+| candidate # | working pools | working MiB | constant pools | constant MiB |
+|---|---|---|---|---|
+| 1 | 2 | 0.2 | 1 | 0.1 |
+| 20 | 4 | 0.5 | 6 | 0.9 |
+| 60 | 3 | 0.4 | 19 | 3.1 |
+| 100 | 4 | 0.5 | 32 | 5.5 |
+| 181 | 6 | 0.8 | **109** | **15.1** |
+
+So the fix holds for its class (working pools stay within 2–6 across the whole search) and the constant
+class still grows one pool per hoisted candidate. Why it is not fixed here rather than fixed badly:
+constants are **bump-packed several to a pool**, and the first candidate's constant pool mixes its
+private packed tile with the genuinely shared operand weights that every later candidate then reuses
+from the cache. Freeing that pool on release would free live buffers out from under sibling contexts —
+a correctness bug traded for memory. A safe rule ("free a constant pool only if every node in it is a
+transform-private tile") is an eviction policy inside a shared cache, which is gh-ocannl-565's subject
+and outside this issue's scope guard.
+
+Scale, so this is not mistaken for the thing that caused the OOM: ~0.14 MiB per hoisted candidate here
+versus ~102 MiB per candidate for the working-pool class on gpt2_mini, and the CUDA gpt2_mini search
+seeds **no** hoisted candidates at all (its constant pool count stayed at 1 for all 261). It is a real
+unbounded class on CPU-sketch searches, not the 12 GB one.
+
+## 6. Suite state
 
 `dune build @runtest @slow` exits 1 with exactly one promotion diff, `test/training/mlp_bn_names`, and
 it is **pre-existing**: at `c90d1abe` (this branch's merge base) that test produces output byte-identical

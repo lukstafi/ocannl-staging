@@ -353,7 +353,24 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   `beam_width + 2` live candidates instead of one per attempt. Not calling it is never a
   correctness bug, only a memory one. What `release` frees is precisely the pools a context holds
   that its parent does not and that are not per-device constants — so sibling contexts are
-  independent (each `compile` mints its own `pool_id`s) but a released context is a dead handle.
+  independent (each `compile` mints its own `pool_id`s) but a released context is a dead handle, and
+  **release leaves, never interior nodes**: a context compiled from another inherits its buffer
+  locations, so releasing an ancestor leaves the descendant resolving a dropped `pool_id`. Unchecked
+  precondition, deliberately (refcounting persistent context values would defeat their point).
+- **Two classes `release` cannot reach, so "bounded" always needs a qualifier.** (a) Per-device
+  constants: it skips every `constant_buffer_cache` key by design. That is right for a shared weight
+  and wrong for a hoisted `Stage` candidate, whose `apply_stage` mints a FRESH packed-constant tnode
+  per application (`fresh_tile_id ()`), so a CPU search seeding `hoist` sketches grows one constant
+  pool per such candidate — measured on `cc` at 1 → 109 constant pools over 181 candidates while
+  working pools stayed within 2–6. Not safely fixable in place, because constants are bump-packed
+  several to a pool and the first candidate's pool mixes its private tile with the shared operand
+  weights later candidates reuse; a safe rule is per-pool purity, i.e. gh-ocannl-565's eviction-policy
+  work. (b) A link that RAISES after `allocate_delta` — now handled (`Backends.with_delta` frees the
+  delta on the way out), but the shape is worth knowing: allocation precedes backend linking, so any
+  new failure point between them leaks a whole routine footprint with no context to release it
+  through. When asserting a memory bound, assert on `live_working_pools`, not `live_pools`: summing the
+  constant class in makes the assertion fail for a reason it is not about, and on a workload with no
+  hoisted candidates it passes while proving less than it looks like.
 - Fissioned-step segment batches go through the `sequence_segments` seam
   (`Backend_impl.Lowered_backend`): Metal encodes one serial-dispatch command buffer; CUDA/HIP
   stream-capture the launch loop into a graph replayed as one `cuGraphLaunch`/`hipGraphLaunch`
