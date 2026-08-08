@@ -1453,6 +1453,15 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name simplify_if_narrowing)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules simplify_if_narrowing)
+ (libraries base ocannl stdio))
+
+(test
  (name schedule_pipelined_matmul)
  (package neural_nets_lib)
  (deps
