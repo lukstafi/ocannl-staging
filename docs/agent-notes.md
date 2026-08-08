@@ -379,6 +379,20 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   through. When asserting a memory bound, assert on `live_working_pools`, not `live_pools`: summing the
   constant class in makes the assertion fail for a reason it is not about, and on a workload with no
   hoisted candidates it passes while proving less than it looks like.
+- Four facts about the allocation seams that each cost a review round to learn, and that any further
+  release work will meet again. (1) There are **two** shared allocation sites, not one:
+  `Backends.allocate_delta` for a compile's delta, and the `allocate` inside
+  `Add_buffer_retrieval_and_syncing` for a `from_host`/`copy` destination not yet in the context. Both
+  land in the same pool tables and are freed by the same context `finalize`. (2) `allocate_delta` is
+  **not atomic** — it schedules host uploads and can allocate several segments — so a guard wrapped
+  around it from outside cannot see a partial delta; the unwind has to live inside, and must `await`
+  before freeing because those uploads are asynchronous. (3) Constant-cache entries **point into**
+  pools, so unwinding an allocation must drop the entries that allocation inserted before freeing,
+  while leaving pre-existing ones (they belong to earlier compiles). (4) Retain-then-raise is the
+  standing bug shape in this area: decide what ships *after* the last thing that can raise, or the one
+  artifact you deliberately kept is the one nobody can reach. Corollary for reviewing such a change:
+  each fix adds a container, a guard or a retention decision, i.e. a new path with the same obligation
+  — re-examine the failure paths the fix itself created, not just the ones it closed.
 - Fissioned-step segment batches go through the `sequence_segments` seam
   (`Backend_impl.Lowered_backend`): Metal encodes one serial-dispatch command buffer; CUDA/HIP
   stream-capture the launch loop into a graph replayed as one `cuGraphLaunch`/`hipGraphLaunch`
