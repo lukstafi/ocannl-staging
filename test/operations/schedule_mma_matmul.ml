@@ -36,6 +36,14 @@ let p name b = Stdio.printf "%s: %b\n" name b
 let approx a b = Float.(abs (a - b) < 1e-2)
 let approx_rel a b = Float.(abs (a - b) <= 1e-2 * max 1. (abs b))
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
+
+(* A leg this backend cannot run still prints its line, so the golden stays backend-uniform — but
+   the skip is announced on stderr and marked in the source. A bare [p name true] is
+   indistinguishable, both in the transcript and in review, from a verified run: that is how a
+   Tensorize leg came to "cover" the gh-ocannl-528 interior-batch bug without ever checking it. *)
+let skipped name =
+  Stdio.eprintf "SKIPPED on %s (vacuous): %s\n%!" backend_name name;
+  p name true
 let on_metal = String.is_substring backend_name ~substring:"metal"
 
 let on_gpu =
@@ -317,14 +325,14 @@ let () =
           && String.is_substring src ~substring:"(wmma-tf32)"));
     Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = false })
   else (
-    p "tf32 policy-off matmul matches the serial twin bitwise" true;
-    p "tf32 policy-off renders and records the scalar fallback" true;
-    p "tf32 policy-off autotune omits tensorized candidates" true;
-    p "tf32 policy-on matmul matches the serial twin within tolerance" true;
-    p "tf32 policy-on renders and records wmma tf32" true;
-    p "tf32 k=24 divergent tile matches and emits" true;
-    p "tf32 k=24 autotune seeds tensorized candidates" true;
-    p "tf32 transposed-A matmul matches and emits" true);
+    skipped "tf32 policy-off matmul matches the serial twin bitwise";
+    skipped "tf32 policy-off renders and records the scalar fallback";
+    skipped "tf32 policy-off autotune omits tensorized candidates";
+    skipped "tf32 policy-on matmul matches the serial twin within tolerance";
+    skipped "tf32 policy-on renders and records wmma tf32";
+    skipped "tf32 k=24 divergent tile matches and emits";
+    skipped "tf32 k=24 autotune seeds tensorized candidates";
+    skipped "tf32 transposed-A matmul matches and emits");
 
   let%op mc1 = ma * mb in
   let mma_comp = named "mm_mma" (Train.forward mc1) in
@@ -575,8 +583,8 @@ let () =
      parity is what pins the per-lane layout. --- *)
   (if on_metal then
      List.iter [ "f8"; "f8_ta"; "f8_tb" ] ~f:(fun tag ->
-         p (Printf.sprintf "%s tensorized matmul matches the serial twin bitwise" tag) true;
-         p (Printf.sprintf "%s tensorized structure as expected" tag) true)
+         skipped (Printf.sprintf "%s tensorized matmul matches the serial twin bitwise" tag);
+         skipped (Printf.sprintf "%s tensorized structure as expected" tag))
    else
      let fp8_a ~l ~o ~i =
        NTDSL.init ~l ~prec:Ir.Ops.fp8 ?i ~o
@@ -701,8 +709,8 @@ let () =
         p "edge-extent register tiling with peeled edges"
           (has "Tile_mma register tiling" && has "full blocks 4x"))
   else (
-    p "edge-extent tensorized matmul matches the serial twin bitwise" true;
-    p "edge-extent register tiling with peeled edges" true);
+    skipped "edge-extent tensorized matmul matches the serial twin bitwise";
+    skipped "edge-extent register tiling with peeled edges");
 
   (* --- The staged + tensorized composition (lane-aware Stage): shared tiles for ma and mb,
      cooperatively loaded under fresh extent-32 Workgroup lane loops, then the micro-kernel
@@ -840,7 +848,7 @@ let () =
         p "staged+tensorized matmul parity (GPU) or clean rejection (CPU)"
           (String.is_substring msg ~substring:"not supported")
     | None -> p "staged+tensorized matmul parity (GPU) or clean rejection (CPU)" false);
-    p "staged+tensorized structure as expected" true);
+    skipped "staged+tensorized structure as expected");
 
   (* --- The staged + tensorized composition at half precision, accumulated in f32: the leg that
      pins the cross-[k_o] accumulator residency (gh-ocannl-480) on the tensor-core backends. The f32
@@ -895,8 +903,8 @@ let () =
         in
         p "staged+tensorized half fragment residency" ok)
   else (
-    p "staged+tensorized half matmul matches the serial twin" true;
-    p "staged+tensorized half fragment residency" true);
+    skipped "staged+tensorized half matmul matches the serial twin";
+    skipped "staged+tensorized half fragment residency");
 
   (* --- The same staged half composition with a uniform-f16 accumulator (gh-ocannl-480): the leg
      that exercises the same-type accumulator fragment element (half, not f32) on every tensor-core
@@ -934,8 +942,8 @@ let () =
         in
         p "staged+tensorized uniform-f16 fragment residency" ok)
   else (
-    p "staged+tensorized uniform-f16 matmul matches the serial twin bitwise" true;
-    p "staged+tensorized uniform-f16 fragment residency" true);
+    skipped "staged+tensorized uniform-f16 matmul matches the serial twin bitwise";
+    skipped "staged+tensorized uniform-f16 fragment residency");
 
   (* --- Transposed operand layouts (the gradient-GEMM access patterns): [d[i,j] += at[k,i] *
      b[k,j]] (a stored transposed) and [d[i,j] += a[i,k] * bt[j,k]] (b stored transposed). Tensorize

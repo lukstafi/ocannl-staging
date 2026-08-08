@@ -51,6 +51,14 @@ let () = Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = false }
 let p name b = Stdio.printf "%s: %b\n" name b
 let approx a b = Float.(abs (a - b) < 1e-2)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
+
+(* A leg this backend cannot run still prints its line, so the golden stays backend-uniform — but
+   the skip is announced on stderr and marked in the source. A bare [p name true] is
+   indistinguishable, both in the transcript and in review, from a verified run: that is how a
+   Tensorize leg came to "cover" the gh-ocannl-528 interior-batch bug without ever checking it. *)
+let skipped name =
+  Stdio.eprintf "SKIPPED on %s (vacuous): %s\n%!" backend_name name;
+  p name true
 let on_metal = String.is_substring backend_name ~substring:"metal"
 
 let on_gpu =
@@ -288,10 +296,10 @@ let () =
     in
     p "staged depths approximate the serial twin (GPU) or clean rejection (CPU)"
       (List.for_all legs ~f:rejects);
-    p "depth 2 matches depth 1 BITWISE" true;
-    p "depth 1 matches the un-elided barrier structure BITWISE" true;
-    p "depth 2 rotates the buffers the depth-1 kernel does not" true;
-    p "the emitted depth-1 kernel sheds exactly the two elided barriers" true);
+    skipped "depth 2 matches depth 1 BITWISE";
+    skipped "depth 1 matches the un-elided barrier structure BITWISE";
+    skipped "depth 2 rotates the buffers the depth-1 kernel does not";
+    skipped "the emitted depth-1 kernel sheds exactly the two elided barriers");
 
   (* --- Structural pins on the applied schedules (all backends; captured by the transforms
      above). --- *)

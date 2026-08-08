@@ -30,6 +30,14 @@ let p name b = Stdio.printf "%s: %b\n" name b
 let approx a b = Float.(abs (a - b) < 1e-3)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
+(* A leg this backend cannot run still prints its line, so the golden stays backend-uniform — but
+   the skip is announced on stderr and marked in the source. A bare [p name true] is
+   indistinguishable, both in the transcript and in review, from a verified run: that is how a
+   Tensorize leg came to "cover" the gh-ocannl-528 interior-batch bug without ever checking it. *)
+let skipped name =
+  Stdio.eprintf "SKIPPED on %s (vacuous): %s\n%!" backend_name name;
+  p name true
+
 let has_shared =
   String.is_substring backend_name ~substring:"metal"
   || String.is_substring backend_name ~substring:"cuda"
@@ -165,7 +173,7 @@ let () =
         p "SMEM matmul parity (GPU) or clean rejection (CPU)"
           (String.is_substring msg ~substring:"not supported")
     | None -> p "SMEM matmul parity (GPU) or clean rejection (CPU)" false);
-    p "shared tiles, barriers, no edge guards (GPU) or rejected (CPU)" true);
+    skipped "shared tiles, barriers, no edge guards (GPU) or rejected (CPU)");
 
   (* --- Broadcast-vector staging (PR #90 review regression): a shared Stage with no anchor — the
      source access has no outer-part symbols and no reused workgroup axis. The load nest must NOT go
@@ -242,4 +250,4 @@ let () =
         p "broadcast staging values correct (GPU) or clean rejection (CPU)"
           (String.is_substring msg ~substring:"not supported")
     | None -> p "broadcast staging values correct (GPU) or clean rejection (CPU)" false);
-    p "broadcast load is thread-0 guarded under the workgroup axis" true)
+    skipped "broadcast load is thread-0 guarded under the workgroup axis")

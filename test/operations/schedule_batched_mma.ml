@@ -33,6 +33,14 @@ let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p name b = Stdio.printf "%s: %b\n" name b
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
+(* A leg this backend cannot run still prints its line, so the golden stays backend-uniform — but
+   the skip is announced on stderr and marked in the source. A bare [p name true] is
+   indistinguishable, both in the transcript and in review, from a verified run: that is how a
+   Tensorize leg came to "cover" the gh-ocannl-528 interior-batch bug without ever checking it. *)
+let skipped name =
+  Stdio.eprintf "SKIPPED on %s (vacuous): %s\n%!" backend_name name;
+  p name true
+
 let on_gpu =
   List.exists [ "metal"; "cuda"; "hip" ] ~f:(fun s -> String.is_substring backend_name ~substring:s)
 
@@ -112,8 +120,8 @@ let check_leg ~tag ~serial ~tensorized =
   if on_gpu then (
     let opt, _ctx, _routine = with_lowering ~name:(tag ^ "_mma") tensorized ~transform:Fn.id in
     p (tag ^ ": cpu mma seeds present") (not (List.is_empty (cpu_mma_seeds opt)));
-    p (tag ^ " tensorized matches the serial twin bitwise") true;
-    p (tag ^ " tensorized structure as expected") true;
+    skipped (tag ^ " tensorized matches the serial twin bitwise");
+    skipped (tag ^ " tensorized structure as expected");
     opt)
   else
     let seed = ref None in

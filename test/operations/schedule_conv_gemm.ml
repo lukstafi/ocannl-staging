@@ -45,6 +45,14 @@ let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
+
+(* A leg this backend cannot run still prints its line, so the golden stays backend-uniform — but
+   the skip is announced on stderr and marked in the source. A bare [p name true] is
+   indistinguishable, both in the transcript and in review, from a verified run: that is how a
+   Tensorize leg came to "cover" the gh-ocannl-528 interior-batch bug without ever checking it. *)
+let skipped name =
+  Stdio.eprintf "SKIPPED on %s (vacuous): %s\n%!" backend_name name;
+  p name true
 let on_cpu = String.is_substring backend_name ~substring:"cc"
 let on_metal = String.is_substring backend_name ~substring:"metal"
 
@@ -273,8 +281,8 @@ let () =
         (tag ^ ": packed+tensorized conv matches the natural form within tolerance")
         (Array.for_all2_exn full want ~f:(fun a b -> Float.(abs (a - b) < 1e-3))))
     else (
-      p (tag ^ ": packed+tensorized conv matches the reorder-only twin bitwise") true;
-      p (tag ^ ": packed+tensorized conv matches the natural form within tolerance") true)
+      skipped (tag ^ ": packed+tensorized conv matches the reorder-only twin bitwise");
+      skipped (tag ^ ": packed+tensorized conv matches the natural form within tolerance"))
   in
   pipeline_leg "cvg" make_conv_s1v;
   (* The padded pipeline leg: the packing Stage's tile loads iterate the padded buffer (its edge
@@ -297,9 +305,9 @@ let () =
     p "cvg2 pipeline structure: compacted im2col packs, register tiling fires on the strided row"
       (struct_pin "cvg2_gemm.c"))
   else (
-    p "conv pipeline structure: im2col packs, register tiling, resident fragment" true;
-    p "cvg2 pipeline structure: compacted im2col packs, register tiling fires on the strided row"
-      true);
+    skipped "conv pipeline structure: im2col packs, register tiling, resident fragment";
+    skipped
+      "cvg2 pipeline structure: compacted im2col packs, register tiling fires on the strided row");
   (* v1 fence: hoisted (host-side) packing does not compact — a strided tile part is rejected
      loudly rather than silently packing a dilated tile. *)
   (let x, _kern, y = make_conv_s2v "cvg2_h" in
@@ -380,8 +388,8 @@ let () =
     p "cvs2: every seeded stride-2 candidate matches the natural form within tolerance"
       (List.for_alli !seeds ~f:run_seed))
   else (
-    p "cvs2: the stride-2 conv seeds are the serial pipeline and its Grid twin" true;
-    p "cvs2: every seeded stride-2 candidate matches the natural form within tolerance" true);
+    skipped "cvs2: the stride-2 conv seeds are the serial pipeline and its Grid twin";
+    skipped "cvs2: every seeded stride-2 candidate matches the natural form within tolerance");
 
   (* === Autotune seeding on conv+bias+relu: serial + Grid conv pipelines, each with its
      fused-epilogue twin (2-D convs fuse since the whole-window contraction, gh-ocannl-501; the
@@ -505,9 +513,9 @@ let () =
     p "cvf: fused conv twin matches the natural form within tolerance"
       (Array.for_all2_exn fused want_t ~f:(fun a b -> Float.(abs (a - b) < 1e-3))))
   else (
-    p "cvf: fusion merges the tail into the conv nest" true;
-    p "cvf: fused conv twin matches the unfused pipeline bitwise" true;
-    p "cvf: fused conv twin matches the natural form within tolerance" true);
+    skipped "cvf: fusion merges the tail into the conv nest";
+    skipped "cvf: fused conv twin matches the unfused pipeline bitwise";
+    skipped "cvf: fused conv twin matches the natural form within tolerance");
 
   (* === The GPU staged leg and the aligned-merged Grid flavor (gh-ocannl-493 follow-ups). Both legs
      use micro-kernel extents divisible by Metal's 8x8x8 intrinsic tile: row = 8, oc = 16, ic = 8.
@@ -621,7 +629,7 @@ let () =
     let got = run_fiss_sched "cvu_gpu" y ~conv_sched in
     p "cvu: GPU staged conv pipeline matches the natural form within tolerance"
       (Array.for_all2_exn got want8 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)))
-  else p "cvu: GPU staged conv pipeline matches the natural form within tolerance" true;
+  else skipped "cvu: GPU staged conv pipeline matches the natural form within tolerance";
   (* --- Seeding + tuning on the conv-alone graph: the C backends seed serial + Grid per fission
      segment (and whole-routine); metal seeds the staged GPU flavor per fission segment (the
      whole-routine site is zeroed, hence gated). --- *)
@@ -713,7 +721,7 @@ let () =
     p "cvu2: GPU staged stride-2 conv (compacted) matches the natural form within tolerance"
       (Array.for_all2_exn got want8s2 ~f:(fun a b -> Float.(abs (a - b) < 1e-3)))
   else
-    p "cvu2: GPU staged stride-2 conv (compacted) matches the natural form within tolerance" true;
+    skipped "cvu2: GPU staged stride-2 conv (compacted) matches the natural form within tolerance";
 
   (* --- The same stride-2 site through the seeding wave (gh-ocannl-502): the per-segment counts
      match the unit-stride [cvu] leg — the stride only changes the packing Stage's load arithmetic,
@@ -804,8 +812,8 @@ let () =
     p "cvs2b: every per-segment stride-2 candidate matches the natural form within tolerance"
       (List.for_alli !seeds ~f:run_seed))
   else (
-    p "cvs2b: the strided non-dividing row seeds a padded row-panel flavor" true;
-    p "cvs2b: every per-segment stride-2 candidate matches the natural form within tolerance" true);
+    skipped "cvs2b: the strided non-dividing row seeds a padded row-panel flavor";
+    skipped "cvs2b: every per-segment stride-2 candidate matches the natural form within tolerance");
 
   (* === Blocked tile flavors (gh-ocannl-500): the GEMM row is split into [Grid] panels before the
      reorder — cache-blocked pool panels on the C backends, extra threadgroups per row-block on GPU
@@ -985,7 +993,7 @@ let () =
     let got = run_fiss_sched "cvmb_cpu" y ~conv_sched in
     p "cvmb: merged-segment blocked conv pipeline matches the natural form within tolerance"
       (Array.for_all2_exn got want_mb ~f:(fun a b -> Float.(abs (a - b) < 1e-3)))
-  else p "cvmb: merged-segment blocked conv pipeline matches the natural form within tolerance" true;
+  else skipped "cvmb: merged-segment blocked conv pipeline matches the natural form within tolerance";
   clean_cache "conv_tune_cache_merged_blocked";
   let _, _, y = make_merged16 "cvmb_t" in
   let reports = ref [] in
@@ -1067,7 +1075,7 @@ let () =
     let got = run_fiss_sched "cva_gemm" y ~conv_sched in
     p "cva: aligned-grid conv pipeline on a merged segment matches within tolerance"
       (Array.for_all2_exn got want_m ~f:(fun a b -> Float.(abs (a - b) < 1e-3)))
-  else p "cva: aligned-grid conv pipeline on a merged segment matches within tolerance" true;
+  else skipped "cva: aligned-grid conv pipeline on a merged segment matches within tolerance";
   clean_cache "conv_tune_cache_aligned";
   let _, _, y = make_merged "cva_t" in
   let reports = ref [] in
