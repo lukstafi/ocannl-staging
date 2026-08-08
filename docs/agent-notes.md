@@ -339,6 +339,14 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   assume a class leaks just because another one does. `Ir.Alloc_census` (config `autotune_log`
   prints it per candidate) separates the four classes: working pools, constant pools, contexts,
   modules.
+- A CAS-guarded cleanup must not commit the flag before the cleanup succeeds. `Backends.finalize`'s
+  `ctx.finalized` means "the pools were freed", not "a free was attempted": `Backend.await` inside it
+  can raise (a device still reporting an asynchronous error, a dead worker domain), and committing
+  first made every later release of that context a silent no-op with its pools rooted for the process
+  — i.e. it reinstated gh-550's growth on precisely the failure paths where callers catch a failed
+  release and carry on. It resets the flag on exception instead; that is safe only because freeing is
+  idempotent per `pool_id` on every backend, so a partially completed cleanup does not double-free on
+  retry. Any new atomic "done" flag around fallible cleanup wants the same shape.
 - **On WSL2 a device-memory bug does not look like one.** The CUDA driver there backs allocations past
   VRAM with host memory, so the same unfixed search that OOMs promptly elsewhere reached **28.8 GB
   requested** on a 12,227 MiB card while `nvidia-smi` sat pinned at 11,879 MiB and reported headroom
