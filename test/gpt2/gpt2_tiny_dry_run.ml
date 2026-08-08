@@ -32,4 +32,11 @@ let () =
     (String.concat ~sep:"x" (Array.to_list (Array.map dims ~f:Int.to_string)));
   let vals = Context.get_values ctx logits.Tensor.value in
   printf "logits count: %d\n" (Array.length vals);
-  printf "all finite: %b\n" (Array.for_all vals ~f:Float.is_finite)
+  printf "all finite: %b\n" (Array.for_all vals ~f:Float.is_finite);
+  (* All-zeros logits are finite, so "all finite" alone would pass an Embed_dim fetch that read the
+     wrong node, or any collapse to a constant. Positions must produce different distributions, the
+     same guard the full-size gpt2_dry_run carries. *)
+  let row p = Array.sub vals ~pos:(p * config.vocab_size) ~len:config.vocab_size in
+  let first = row 0 and last = row (seq_len - 1) in
+  printf "positions differ: %b\n"
+    (Array.existsi first ~f:(fun i v -> Float.(abs (v - last.(i)) > 1e-6)))
