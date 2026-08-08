@@ -10,6 +10,7 @@ depth 1 groups both stages into one phase and leaves the closer to Tile_mma's br
 depth 2 leaves the per-iteration phase to Tile_mma's bracket, one trailing barrier: true
 depth 2 issues one If-guarded prefetch per stage inside k_o: true
 depth 2 places both prologue loads outside k_o: true
+the depth-2 prefetch's edge guard folds under its If: true
 canonical digests distinguish depths 1 and 2: true
 the pipelined companion section alone distinguishes same-IR depths: true
 pipeline_depth 0 is rejected: true
