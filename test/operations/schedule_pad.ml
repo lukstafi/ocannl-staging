@@ -34,8 +34,26 @@ module Asgns = Ir.Assignments
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p name b = Stdio.printf "%s: %b\n" name b
+
+(* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
+   that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
+   parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
+   reference array is pinned nonzero where it is produced, so the parity claims below have content.
+   *)
+let nonzero name (a : float array) =
+  if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
+    failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
+  a
 let approx a b = Float.(abs (a - b) < 1e-2)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
+
+(* A leg this backend cannot run still prints its line, so the golden stays backend-uniform — but
+   the skip is announced on stderr and marked in the source. A bare [p name true] is
+   indistinguishable, both in the transcript and in review, from a verified run: that is how a
+   Tensorize leg came to "cover" the gh-ocannl-528 interior-batch bug without ever checking it. *)
+let skipped name =
+  Stdio.eprintf "SKIPPED on %s (vacuous): %s\n%!" backend_name name;
+  p name true
 let on_metal = String.is_substring backend_name ~substring:"metal"
 let on_cpu = String.is_substring backend_name ~substring:"cc"
 
@@ -87,7 +105,7 @@ let run_serial ~name (out : Tensor.t) =
       Ir.Indexing.Empty
   in
   let ctx = Context.run ctx routine in
-  Context.get_values ctx out.Tensor.value
+  nonzero name (Context.get_values ctx out.Tensor.value)
 
 let mav = Array.init (m_ext * k_ext) ~f:(fun x -> Float.of_int (x % 13) *. 0.25)
 let mbv = Array.init (k_ext * n_ext) ~f:(fun x -> Float.of_int (x % 17) -. 8.)
@@ -221,20 +239,20 @@ let () =
     | None -> p "padded GPU intrinsics fire against the threadgroup fragment" false
     | Some src ->
         let has s = String.is_substring src ~substring:s in
-        p "padded GPU intrinsics fire against the threadgroup fragment"
-          (if on_metal then
-             has "simdgroup_multiply_accumulate"
-             && has "threadgroup float fragment_"
-             && not (has "Tile_mma renders the lane-0 scalar fallback")
-           else
-             (* CUDA/HIP: the wmma tile is 16x16x16; the 8-padded n extent (72) declines the
-                intrinsic and the lane-0 fallback must still be correct — parity above is the
-                pin. Pad-to-16 on all axes is the autotune-seeded variant for these backends. *)
-             true))
+        if on_metal then
+          p "padded GPU intrinsics fire against the threadgroup fragment"
+            (has "simdgroup_multiply_accumulate"
+            && has "threadgroup float fragment_"
+            && not (has "Tile_mma renders the lane-0 scalar fallback"))
+        else
+          (* CUDA/HIP: the wmma tile is 16x16x16; the 8-padded n extent (72) declines the intrinsic
+             and the lane-0 fallback must still be correct — parity above is the pin. Pad-to-16 on
+             all axes is the autotune-seeded variant for these backends, so nothing here fires. *)
+          skipped "padded GPU intrinsics fire against the threadgroup fragment")
   else
     (* Keep the printed transcript identical across backends. *)
-    p "padded staged+tensorized matmul parity (GPU)" true;
-  if not on_gpu then p "padded GPU intrinsics fire against the threadgroup fragment" true
+    skipped "padded staged+tensorized matmul parity (GPU)";
+  if not on_gpu then skipped "padded GPU intrinsics fire against the threadgroup fragment"
 
 (* === Autotune pad-composition seeding (issue task 3): the divisibility pre-filters are gone for
    fully staged tensorized pipelines — the awkward site seeds staged candidates on both the GPU MMA

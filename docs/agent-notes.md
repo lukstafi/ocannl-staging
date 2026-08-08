@@ -723,3 +723,24 @@ that they earn a lookup rather than always-loaded space.
   never be the empty string either: empty means "unset" at every source.
 - Prefer the minimal targeted fix over speculative hardening: offer hardening separately as an
   option with its costs, don't fold it into the fix.
+- A backend-gated leg must never print a bare `p "<claim>" true` on the backend that cannot run it:
+  the golden line is then byte-identical to a verified run's, so neither the transcript nor a
+  reviewer can tell the claim was never evaluated (this is how a `Tensorize` leg came to "cover" the
+  gh-528 interior-batch bug). The scheduling tests use a file-local `skipped name`, which prints the
+  same stdout line — the golden must stay backend-uniform, and dune's `(test)` stanza diffs stdout
+  ONLY, so stderr is free — and announces the skip on stderr. `grep SKIPPED` over a run then
+  enumerates exactly what that hardware did not verify. The other honest form is putting the
+  condition in the label itself (`"… (skipped: non-C backend)"`), which distinguishes the golden
+  line; a bare `true` whose label is indistinguishable is the one to reject.
+- Executed parity checks need a nonzero guard on the REFERENCE, not just the comparison: a fragment
+  mapping that reads outside a staged block, a candidate kernel that never ran, and a reference
+  whose own setup collapsed all produce all-zeros, and zeros compare equal to zeros. The convention
+  is a file-local `nonzero name a` that raises, applied where each reference array is produced —
+  once per producer, not per comparison. Guard the reference side only: a zero candidate against a
+  nonzero reference is already a `false` in the golden, which is more diagnosable than an exception.
+- A tolerance cannot reject an input-independent forward if the reference itself does not move:
+  every leg sits at one constant and every parity line reads `true`. `benchmarks/orchestrate.py`'s
+  `loss_moved` is the model; in-tree, require the reference's own spread to exceed the tolerance it
+  gates (`mixed_prec_parity`, `precision_policy_parity`) or that distinct inputs give distinct
+  outputs (`gpt2_dry_run`'s positions-differ). "All finite" is not such a guard — all-zeros is
+  finite.

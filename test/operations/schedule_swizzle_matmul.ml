@@ -42,8 +42,26 @@ module Asgns = Ir.Assignments
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p name b = Stdio.printf "%s: %b\n" name b
+
+(* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
+   that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
+   parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
+   reference array is pinned nonzero where it is produced, so the parity claims below have content.
+   *)
+let nonzero name (a : float array) =
+  if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
+    failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
+  a
 let approx a b = Float.(abs (a - b) < 1e-3)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
+
+(* A leg this backend cannot run still prints its line, so the golden stays backend-uniform — but
+   the skip is announced on stderr and marked in the source. A bare [p name true] is
+   indistinguishable, both in the transcript and in review, from a verified run: that is how a
+   Tensorize leg came to "cover" the gh-ocannl-528 interior-batch bug without ever checking it. *)
+let skipped name =
+  Stdio.eprintf "SKIPPED on %s (vacuous): %s\n%!" backend_name name;
+  p name true
 let on_metal = String.is_substring backend_name ~substring:"metal"
 
 let on_gpu =
@@ -101,7 +119,7 @@ let () =
     Context.compile ~lowered_transform:(fun opt -> opt) ctx_s serial_comp Ir.Indexing.Empty
   in
   let ctx_s = Context.run ctx_s routine_s in
-  let got_serial = Context.get_values ctx_s mc0.Tensor.value in
+  let got_serial = nonzero "swz_serial" (Context.get_values ctx_s mc0.Tensor.value) in
 
   (* --- The swizzled SMEM schedule (element-granularity XOR) --- *)
   let%op mc1 = ma * mb in
@@ -186,7 +204,7 @@ let () =
         p "swizzled SMEM matmul parity (GPU) or clean rejection (CPU)"
           (String.is_substring msg ~substring:"not supported")
     | None -> p "swizzled SMEM matmul parity (GPU) or clean rejection (CPU)" false);
-    p "tile accesses XOR-swizzled (GPU) or rejected (CPU)" true);
+    skipped "tile accesses XOR-swizzled (GPU) or rejected (CPU)");
 
   (* --- The same schedule under the 16-byte-unit flavor ([Swizzle_b128], gh-ocannl-481 item 3 D1):
      the XOR permutes whole 16-byte units of the row instead of single elements, leaving the offset
@@ -236,7 +254,7 @@ let () =
         p "b128-swizzled SMEM matmul parity (GPU) or clean rejection (CPU)"
           (String.is_substring msg ~substring:"not supported")
     | None -> p "b128-swizzled SMEM matmul parity (GPU) or clean rejection (CPU)" false);
-    p "tile accesses b128-swizzled (GPU) or rejected (CPU)" true);
+    skipped "tile accesses b128-swizzled (GPU) or rejected (CPU)");
 
   (* --- [Stage ~pad_stride] (gh-ocannl-481 item 4): the same schedule with the tiles' minor dim
      rounded up from 8 to a multiple of 12. Nothing about the DATA changes — the load nest and the
@@ -287,7 +305,7 @@ let () =
         p "pad_stride SMEM matmul parity (GPU) or clean rejection (CPU)"
           (String.is_substring msg ~substring:"not supported")
     | None -> p "pad_stride SMEM matmul parity (GPU) or clean rejection (CPU)" false);
-    p "pad_stride widens the tile stride (GPU) or rejected (CPU)" true);
+    skipped "pad_stride widens the tile stride (GPU) or rejected (CPU)");
 
   (* --- Swizzled tiles feeding Tensorize: the intrinsic/fragment renderings assume row-major
      pointer+stride operands, so they must decline and the lane-0 scalar fallback must run — and
@@ -384,7 +402,7 @@ let () =
         p "swizzled staged+tensorized parity (GPU) or clean rejection (CPU)"
           (String.is_substring msg ~substring:"not supported")
     | None -> p "swizzled staged+tensorized parity (GPU) or clean rejection (CPU)" false);
-    p "swizzled operands decline the MMA intrinsics to the lane-0 fallback" true);
+    skipped "swizzled operands decline the MMA intrinsics to the lane-0 fallback");
 
   (* --- Validation errors, uniform on every backend (raised by [Schedule.apply] before any
      backend-specific compilation) --- *)

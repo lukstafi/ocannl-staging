@@ -4,5 +4,6 @@ y activation (policy leg): bfloat16
 y activation (reference leg): single
 w1 gradient (grad_prec = None): single
 input x (explicitly single): single
+reference forward varies past the parity tolerance: true
 forward parity within 0.05: true
 loss parity within 0.05: true

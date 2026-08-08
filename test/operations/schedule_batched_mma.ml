@@ -31,7 +31,25 @@ module Asgns = Ir.Assignments
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p name b = Stdio.printf "%s: %b\n" name b
+
+(* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
+   that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
+   parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
+   reference array is pinned nonzero where it is produced, so the parity claims below have content.
+   *)
+let nonzero name (a : float array) =
+  if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
+    failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
+  a
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
+
+(* A leg this backend cannot run still prints its line, so the golden stays backend-uniform — but
+   the skip is announced on stderr and marked in the source. A bare [p name true] is
+   indistinguishable, both in the transcript and in review, from a verified run: that is how a
+   Tensorize leg came to "cover" the gh-ocannl-528 interior-batch bug without ever checking it. *)
+let skipped name =
+  Stdio.eprintf "SKIPPED on %s (vacuous): %s\n%!" backend_name name;
+  p name true
 
 let on_gpu =
   List.exists [ "metal"; "cuda"; "hip" ] ~f:(fun s -> String.is_substring backend_name ~substring:s)
@@ -88,7 +106,7 @@ let compile_serial ~name tensor =
       Ir.Indexing.Empty
   in
   let ctx = Context.run ctx routine in
-  Context.get_values ctx tensor.Tensor.value
+  nonzero name (Context.get_values ctx tensor.Tensor.value)
 
 (* Compile [tensor] through [transform], capturing the lowering for the seeding assertions. *)
 let with_lowering ~name tensor ~(transform : LL.optimized -> LL.optimized) =
@@ -112,8 +130,8 @@ let check_leg ~tag ~serial ~tensorized =
   if on_gpu then (
     let opt, _ctx, _routine = with_lowering ~name:(tag ^ "_mma") tensorized ~transform:Fn.id in
     p (tag ^ ": cpu mma seeds present") (not (List.is_empty (cpu_mma_seeds opt)));
-    p (tag ^ " tensorized matches the serial twin bitwise") true;
-    p (tag ^ " tensorized structure as expected") true;
+    skipped (tag ^ " tensorized matches the serial twin bitwise");
+    skipped (tag ^ " tensorized structure as expected");
     opt)
   else
     let seed = ref None in
@@ -255,7 +273,7 @@ let () =
           (named (tag ^ "_bf16_serial") (Train.forward ref_t))
           Ir.Indexing.Empty
       in
-      Context.get_values (Context.run ctx routine) ref_t.Tensor.value
+      nonzero (tag ^ "_bf16_serial") (Context.get_values (Context.run ctx routine) ref_t.Tensor.value)
     in
     let cand = build () in
     let fwd = named (tag ^ "_bf16_mma") (Train.forward cand) in

@@ -1,3 +1,4 @@
 logits dims: 4x11
 logits count: 44
 all finite: true
+positions differ: true

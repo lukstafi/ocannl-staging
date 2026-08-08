@@ -33,9 +33,27 @@ module Numerics = Ir.Numerics
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let () = Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = false }
 let p name b = Stdio.printf "%s: %b\n" name b
+
+(* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
+   that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
+   parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
+   reference array is pinned nonzero where it is produced, so the parity claims below have content.
+   *)
+let nonzero name (a : float array) =
+  if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
+    failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
+  a
 let approx a b = Float.(abs (a - b) < 1e-2)
 let approx_rel a b = Float.(abs (a - b) <= 1e-2 * max 1. (abs b))
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
+
+(* A leg this backend cannot run still prints its line, so the golden stays backend-uniform — but
+   the skip is announced on stderr and marked in the source. A bare [p name true] is
+   indistinguishable, both in the transcript and in review, from a verified run: that is how a
+   Tensorize leg came to "cover" the gh-ocannl-528 interior-batch bug without ever checking it. *)
+let skipped name =
+  Stdio.eprintf "SKIPPED on %s (vacuous): %s\n%!" backend_name name;
+  p name true
 let on_metal = String.is_substring backend_name ~substring:"metal"
 
 let on_gpu =
@@ -144,7 +162,7 @@ let () =
     Context.compile ~lowered_transform:(fun opt -> opt) ctx_s serial_comp Ir.Indexing.Empty
   in
   let ctx_s = Context.run ctx_s routine_s in
-  let got_serial = Context.get_values ctx_s mc0.Tensor.value in
+  let got_serial = nonzero "mm_serial" (Context.get_values ctx_s mc0.Tensor.value) in
 
   (* --- The tensorized schedule --- *)
   let mma_schedule ?(bm = bm) ~out (opt : LL.optimized) : Sched.schedule =
@@ -200,7 +218,7 @@ let () =
         Ir.Indexing.Empty
     in
     let ctx = Context.run ctx routine in
-    Context.get_values ctx tensor.Tensor.value
+    nonzero name (Context.get_values ctx tensor.Tensor.value)
   in
   let tf32_inputs ~tag ~k =
     let av =
@@ -317,14 +335,14 @@ let () =
           && String.is_substring src ~substring:"(wmma-tf32)"));
     Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = false })
   else (
-    p "tf32 policy-off matmul matches the serial twin bitwise" true;
-    p "tf32 policy-off renders and records the scalar fallback" true;
-    p "tf32 policy-off autotune omits tensorized candidates" true;
-    p "tf32 policy-on matmul matches the serial twin within tolerance" true;
-    p "tf32 policy-on renders and records wmma tf32" true;
-    p "tf32 k=24 divergent tile matches and emits" true;
-    p "tf32 k=24 autotune seeds tensorized candidates" true;
-    p "tf32 transposed-A matmul matches and emits" true);
+    skipped "tf32 policy-off matmul matches the serial twin bitwise";
+    skipped "tf32 policy-off renders and records the scalar fallback";
+    skipped "tf32 policy-off autotune omits tensorized candidates";
+    skipped "tf32 policy-on matmul matches the serial twin within tolerance";
+    skipped "tf32 policy-on renders and records wmma tf32";
+    skipped "tf32 k=24 divergent tile matches and emits";
+    skipped "tf32 k=24 autotune seeds tensorized candidates";
+    skipped "tf32 transposed-A matmul matches and emits");
 
   let%op mc1 = ma * mb in
   let mma_comp = named "mm_mma" (Train.forward mc1) in
@@ -390,7 +408,7 @@ let () =
       Ir.Indexing.Empty
   in
   let ctx_hs = Context.run ctx_hs routine_hs in
-  let got_h_serial = Context.get_values ctx_hs mch0.Tensor.value in
+  let got_h_serial = nonzero "mm_half_serial" (Context.get_values ctx_hs mch0.Tensor.value) in
   let%op mch1 = mah * mbh in
   Tn.update_prec mch1.Tensor.value Ir.Ops.half;
   let transform_h opt = Sched.apply (mma_schedule ~out:mch1.Tensor.value opt) opt in
@@ -468,7 +486,7 @@ let () =
         Ir.Indexing.Empty
     in
     let ctx_bs = Context.run ctx_bs routine_bs in
-    let want = Context.get_values ctx_bs mcb0.Tensor.value in
+    let want = nonzero "mm_bf16_serial" (Context.get_values ctx_bs mcb0.Tensor.value) in
     let mcb1 = build () in
     Tn.update_prec mcb1.Tensor.value acc_prec;
     let transform_b opt = Sched.apply (mma_schedule ?bm ~out:mcb1.Tensor.value opt) opt in
@@ -575,8 +593,8 @@ let () =
      parity is what pins the per-lane layout. --- *)
   (if on_metal then
      List.iter [ "f8"; "f8_ta"; "f8_tb" ] ~f:(fun tag ->
-         p (Printf.sprintf "%s tensorized matmul matches the serial twin bitwise" tag) true;
-         p (Printf.sprintf "%s tensorized structure as expected" tag) true)
+         skipped (Printf.sprintf "%s tensorized matmul matches the serial twin bitwise" tag);
+         skipped (Printf.sprintf "%s tensorized structure as expected" tag))
    else
      let fp8_a ~l ~o ~i =
        NTDSL.init ~l ~prec:Ir.Ops.fp8 ?i ~o
@@ -604,7 +622,7 @@ let () =
            Ir.Indexing.Empty
        in
        let ctx_fs = Context.run ctx_fs routine_fs in
-       let want = Context.get_values ctx_fs mcf0.Tensor.value in
+       let want = nonzero "mm_fp8_serial" (Context.get_values ctx_fs mcf0.Tensor.value) in
        let mcf1 = build () in
        Tn.update_prec mcf1.Tensor.value Ir.Ops.single;
        let transform_f8 opt = Sched.apply (mma_schedule ~out:mcf1.Tensor.value opt) opt in
@@ -665,7 +683,9 @@ let () =
         Ir.Indexing.Empty
     in
     let ctx_e0 = Context.run ctx_e0 routine_e0 in
-    let got_edge_serial = Context.get_values ctx_e0 ec0.Tensor.value in
+    let got_edge_serial =
+      nonzero "mm_edge_serial" (Context.get_values ctx_e0 ec0.Tensor.value)
+    in
     let%op ec1 = ea * eb in
     let edge_schedule (opt : LL.optimized) : Sched.schedule =
       let paths = nest_paths opt.LL.llc in
@@ -701,8 +721,8 @@ let () =
         p "edge-extent register tiling with peeled edges"
           (has "Tile_mma register tiling" && has "full blocks 4x"))
   else (
-    p "edge-extent tensorized matmul matches the serial twin bitwise" true;
-    p "edge-extent register tiling with peeled edges" true);
+    skipped "edge-extent tensorized matmul matches the serial twin bitwise";
+    skipped "edge-extent register tiling with peeled edges");
 
   (* --- The staged + tensorized composition (lane-aware Stage): shared tiles for ma and mb,
      cooperatively loaded under fresh extent-32 Workgroup lane loops, then the micro-kernel
@@ -840,7 +860,7 @@ let () =
         p "staged+tensorized matmul parity (GPU) or clean rejection (CPU)"
           (String.is_substring msg ~substring:"not supported")
     | None -> p "staged+tensorized matmul parity (GPU) or clean rejection (CPU)" false);
-    p "staged+tensorized structure as expected" true);
+    skipped "staged+tensorized structure as expected");
 
   (* --- The staged + tensorized composition at half precision, accumulated in f32: the leg that
      pins the cross-[k_o] accumulator residency (gh-ocannl-480) on the tensor-core backends. The f32
@@ -895,8 +915,8 @@ let () =
         in
         p "staged+tensorized half fragment residency" ok)
   else (
-    p "staged+tensorized half matmul matches the serial twin" true;
-    p "staged+tensorized half fragment residency" true);
+    skipped "staged+tensorized half matmul matches the serial twin";
+    skipped "staged+tensorized half fragment residency");
 
   (* --- The same staged half composition with a uniform-f16 accumulator (gh-ocannl-480): the leg
      that exercises the same-type accumulator fragment element (half, not f32) on every tensor-core
@@ -934,8 +954,8 @@ let () =
         in
         p "staged+tensorized uniform-f16 fragment residency" ok)
   else (
-    p "staged+tensorized uniform-f16 matmul matches the serial twin bitwise" true;
-    p "staged+tensorized uniform-f16 fragment residency" true);
+    skipped "staged+tensorized uniform-f16 matmul matches the serial twin bitwise";
+    skipped "staged+tensorized uniform-f16 fragment residency");
 
   (* --- Transposed operand layouts (the gradient-GEMM access patterns): [d[i,j] += at[k,i] *
      b[k,j]] (a stored transposed) and [d[i,j] += a[i,k] * bt[j,k]] (b stored transposed). Tensorize
@@ -959,7 +979,7 @@ let () =
       Context.compile ~lowered_transform:(fun opt -> opt) ctx0 serial_comp Ir.Indexing.Empty
     in
     let ctx0 = Context.run ctx0 routine0 in
-    let want = Context.get_values ctx0 serial.Tensor.value in
+    let want = nonzero ("mm_" ^ tag ^ "_serial") (Context.get_values ctx0 serial.Tensor.value) in
     let mma_comp = named ("mm_" ^ tag ^ "_mma") (Train.forward tensorized) in
     let transform opt = Sched.apply (mma_schedule ~out:tensorized.Tensor.value opt) opt in
     let ctx1 = Context.auto () in
