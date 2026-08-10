@@ -4313,16 +4313,24 @@ let path_loops (nest : Low_level.t) : Low_level.t list =
 (* Shared analysis of the default annotator presets (schedule-ir-optops §6): per top-level nest, the
    parallelizable chain of outermost Serial path loops, validated by the conservative race analysis
    (see {!default_gpu}'s doc). Nests linked by cross-nest dependencies keep a common aligned prefix
-   of their chains (see the module comment). Raises [Bail] when any check fails. *)
-let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list =
+   of their chains (see the module comment). Raises [Bail] when any check fails.
+
+   [max_chain] caps the per-nest chain length. The default 2 is the presets' shape — each annotated
+   nest carries exactly one Grid and one Workgroup loop. A sketch pipeline supplying its own
+   geometry per chain position (gh-ocannl-521 companion coverage, via {!aligned_chains}) is not
+   bound by that shape and passes its site's arity: a batched matmul's chain is batch loops plus
+   row plus column (gh-ocannl-569 — capping at 2 made every rank-3+ site's companion coverage
+   decline, serializing the axis whose spreading the hardware wanted most). The alignment rule is
+   arity-independent; a longer chain only asks the same per-position question more times. *)
+let analyze_parallel_chains ?(max_chain = 2) (opt : Low_level.optimized) : Low_level.t list list =
   let open Low_level in
   let plc = opt.optimize_ctx.placements in
   let nests, bare = split_nests plc opt.llc in
   (* Bare materialized writes cannot be covered by annotated loops. *)
   if List.exists bare ~f:(fun a -> a.a_write && Tn.Placements.is_materialized_peek plc a.a_tn) then
     raise Bail;
-  (* Chains: per nest, the outermost (up to two) Serial path loops whose index occurs as a plain
-     [Iterator] component in every materialized write vector of the nest. *)
+  (* Chains: per nest, the outermost (up to [max_chain]) Serial path loops whose index occurs as a
+     plain [Iterator] component in every materialized write vector of the nest. *)
   let chains =
     List.map nests ~f:(fun n ->
         let mat_writes =
@@ -4339,7 +4347,7 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
           List.filter (path_loops n.n_loops) ~f:(function
             | For_loop fc -> fc.from_ = 0 && qualifies fc.index
             | _ -> false)
-          |> fun l -> List.take l 2
+          |> fun l -> List.take l max_chain
         in
         if List.is_empty chain && not (List.is_empty mat_writes) then raise Bail;
         chain)
@@ -4511,7 +4519,7 @@ let analyze_parallel_chains (opt : Low_level.optimized) : Low_level.t list list 
              chain splits Grid x Workgroup while a 2-loop chain retypes in place, so even a shared
              axis maps differently across different chain shapes). *)
           let l_max =
-            List.fold members ~init:2 ~f:(fun m g -> min m (Array.length extent_arr.(g)))
+            List.fold members ~init:max_chain ~f:(fun m g -> min m (Array.length extent_arr.(g)))
           in
           let ext_eq k =
             match members with
@@ -4631,10 +4639,11 @@ let crosscheck_scratch_containment (opt : Low_level.optimized) (chains : Low_lev
     (* Canonical thread symbols: per chain position, the first nest's symbol (no fresh symbols —
        allocating here would drift symbol numbering when the crosscheck is enabled). Symbols are
        unique per loop construct, so a canonical symbol cannot occur in another nest already. *)
-    let canon = [| None; None |] in
+    let max_len = List.fold chains ~init:0 ~f:(fun m c -> max m (List.length c)) in
+    let canon = Array.create ~len:max_len None in
     List.iter chains ~f:(fun chain ->
         List.iteri (chain_syms chain) ~f:(fun k s ->
-            if k < 2 && Option.is_none canon.(k) then canon.(k) <- Some s));
+            if Option.is_none canon.(k) then canon.(k) <- Some s));
     let renames =
       List.map2_exn nests chains ~f:(fun n chain ->
           let idx, _ = Option.value_exn (List.findi stmts ~f:(fun _ s -> phys_equal s n.n_loops)) in
@@ -4739,7 +4748,7 @@ let max_parallel_size chains = List.fold chains ~init:0 ~f:(fun m chain -> max m
    trimmed chains lets the caller supply its own geometry per chain position while the alignment
    (positional thread identity across linked nests, equal extents within a dependency component)
    stays this module's rule. *)
-let aligned_chains ?(expanded_zeros = []) (opt : Low_level.optimized) :
+let aligned_chains ?max_chain ?(expanded_zeros = []) (opt : Low_level.optimized) :
     (Low_level.t * (Indexing.symbol * int) list) list option =
   (* A whole-node [Zero_out] is a bare materialized write, which the analysis rejects outright — but
      a caller that pairs this query with {!Expand_zero} turns it into a per-element nest carrying the
@@ -4758,7 +4767,7 @@ let aligned_chains ?(expanded_zeros = []) (opt : Low_level.optimized) :
       { opt with Low_level.llc = drop opt.Low_level.llc }
   in
   match
-    let chains = analyze_parallel_chains opt in
+    let chains = analyze_parallel_chains ?max_chain opt in
     crosscheck_scratch_containment opt chains;
     chains
   with
