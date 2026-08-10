@@ -149,6 +149,7 @@ let () =
     {
       SC.version = SC.entry_version;
       backend = Context.backend_name bctx;
+      numerics = SC.numerics_tag ();
       source_digest = SC.digest base_canon;
       saved = [];
       segments = Some !segments_assoc;

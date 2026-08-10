@@ -412,9 +412,29 @@ let of_saved canonical (saved : saved_schedule) : Schedule.schedule * registry =
 
 (** {2 The disk cache} *)
 
+(* gh-ocannl-568: the numerics policy is NOT a property of the code, so it cannot reach the canonical
+   digest — it is chosen by the user and consulted at codegen ([Numerics.get] in the backends' mma
+   and narrow-arithmetic paths) and by the tile-shape choice of the autotune sketches. Two processes
+   differing only in it therefore lower to byte-identical code with an equal digest while generating
+   different kernels, and a winner tuned under one policy would replay under the other: measured at
+   5.9x SLOWER than not tuning at all when a default-flags run replayed a tf32-tuned tensorized
+   schedule, whose rendering degrades to the scalar fallback under the stricter numerics. It also
+   breaks {!Numerics}'s invariant that the policy is identical across sibling candidates — a replayed
+   winner is a candidate from another policy regime. So the policy enters the disk-cache key (and the
+   entry, below), which is where the hazard lives: within one process the policy is fixed, across
+   processes only the cache carries schedules. *)
+let numerics_tag () =
+  String.prefix
+    (Stdlib.Digest.to_hex (Stdlib.Digest.string (Numerics.fingerprint (Numerics.get ()))))
+    8
+
 type entry = {
   version : int;
   backend : string;
+  numerics : string;
+      (** {!numerics_tag} of the policy the search ran under (gh-ocannl-568). Redundant with the
+          key, which carries the same tag — a self-description of the file, and a guard for a
+          hand-moved or hand-written entry. *)
   source_digest : string;
   saved : saved_schedule;
   segments : (string * saved_schedule) list option; [@sexp.option]
@@ -436,13 +456,14 @@ type entry = {
 }
 [@@deriving sexp]
 
-let entry_version = 3
+let entry_version = 4
 
 let sanitize name =
   String.map name ~f:(fun c ->
       if Char.is_alphanum c || Char.equal c '-' || Char.equal c '_' then c else '_')
 
-let cache_key canonical ~backend = canonical.digest ^ "-" ^ sanitize backend
+let cache_key canonical ~backend =
+  canonical.digest ^ "-" ^ sanitize backend ^ "-n" ^ numerics_tag ()
 
 let rec ensure_dir dir =
   if String.is_empty dir || String.equal dir "." || String.equal dir "/" then ()

@@ -54,6 +54,13 @@ let default () =
     narrow_compute_f32 = Utils.get_global_flag ~default:true ~arg_name:"narrow_compute_f32";
     fp16_arithmetic = Utils.get_global_flag ~default:false ~arg_name:"fp16_arithmetic";
   }
+
+(** A stable, exhaustive rendering of a policy, for cache keys and digests (gh-ocannl-568). Derived
+    from the sexp rather than spelled out field by field, so a knob added to this deliberately
+    open-ended record enters every fingerprint by construction — the failure mode being guarded
+    against is precisely a policy field that a cache key forgot about. *)
+let fingerprint p = Sexp.to_string (sexp_of_t p)
+
 let policy : t option ref = ref None
 
 (** The current policy; reads the global config on first use. *)

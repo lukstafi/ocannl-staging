@@ -244,6 +244,7 @@ let () =
     {
       SC.version = SC.entry_version;
       backend = backend_name;
+      numerics = SC.numerics_tag ();
       source_digest = SC.digest base_canon;
       saved = !prelude_saved;
       segments = Some !segments_assoc;

@@ -4139,7 +4139,13 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
   let cached =
     if use_cache then
       match SC.lookup ~dir:cache_dir ~key with
-      | Some entry when String.equal entry.SC.source_digest base_digest -> (
+      (* The numerics check is belt-and-braces: [key] already carries the same tag (gh-ocannl-568),
+         so a policy-mismatched entry normally lives in a different file and is never looked up.
+         It catches a hand-moved or hand-written entry, which is the shape of the misdirection this
+         guards against — a tf32-vs-default A/B whose cache directories got crossed. *)
+      | Some entry
+        when String.equal entry.SC.source_digest base_digest
+             && String.equal entry.SC.numerics (SC.numerics_tag ()) -> (
           let spec =
             match entry.SC.segments with
             (* A fissioned entry with a non-empty [saved] is a split-reduce winner: [saved] is the
@@ -5055,6 +5061,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
              {
                SC.version = SC.entry_version;
                backend;
+               numerics = SC.numerics_tag ();
                source_digest = base_digest;
                saved;
                segments;
