@@ -27,6 +27,16 @@ module Asgns = Ir.Assignments
 
 let p name b = Stdio.printf "%s: %b\n" name b
 
+(* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
+   that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
+   parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
+   reference array is pinned nonzero where it is produced, so the parity claims below have content.
+   *)
+let nonzero name (a : float array) =
+  if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
+    failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
+  a
+
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
@@ -114,7 +124,7 @@ let () =
     let%op y = relu x in
     y
   in
-  let want1 = run_with "sp_ref1" (fun opt -> opt) (make_graph1 ()) in
+  let want1 = nonzero "sp_ref1" (run_with "sp_ref1" (fun opt -> opt) (make_graph1 ())) in
 
   (* Reference discipline: a plain non-dividing Split leaves its remainder guard in-loop. *)
   let split_ifs = ref (-1) in
@@ -160,7 +170,7 @@ let () =
     ref_wheres := wheres;
     opt
   in
-  let want2 = run_with "sp_ref2" observe (make_graph2 ()) in
+  let want2 = nonzero "sp_ref2" (run_with "sp_ref2" observe (make_graph2 ())) in
   p "inlined concat consumer carries Where range guards" (!ref_wheres > 0);
   p "concat values are sin of the concatenation"
     (close want2 (Array.map [| 1.0; 2.0; 3.0; 4.0; 5.0 |] ~f:Float.sin));

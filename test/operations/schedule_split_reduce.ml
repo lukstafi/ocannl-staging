@@ -32,6 +32,16 @@ module IDX = Train.IDX
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p name b = Stdio.printf "%s: %b\n" name b
+
+(* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
+   that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
+   parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
+   reference array is pinned nonzero where it is produced, so the parity claims below have content.
+   *)
+let nonzero name (a : float array) =
+  if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
+    failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
+  a
 let approx a b = Float.(abs (a - b) < 1e-3 *. (1. +. abs b))
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_cpu = String.is_substring backend_name ~substring:"cc"
@@ -162,7 +172,7 @@ let run_forward ?(transform = fun (opt : LL.optimized) -> opt) ?transforms ~name
 let () =
   Tensor.unsafe_reinitialize ();
   let y0, _ = make_matvec "0" in
-  let want = run_forward ~name:"sr_serial" y0 in
+  let want = nonzero "sr_serial" (run_forward ~name:"sr_serial" y0) in
 
   (* -- Dividing split (B = 7, chunk = 10): guard folds away; structural pins. -- *)
   let stats = ref (-1, -1, -1) in
@@ -278,7 +288,7 @@ let () =
     ymax
   in
   let y0 = make () in
-  let want = run_forward ~name:"sr_max_serial" y0 in
+  let want = nonzero "sr_max_serial" (run_forward ~name:"sr_max_serial" y0) in
   let y1 = make () in
   let twin =
     run_forward
@@ -369,7 +379,7 @@ let scatter_stmt ~grad (llc : LL.t) : LL.t =
 let () =
   let expected = expected_grads () in
   let g0 = make_embedding "0" in
-  let want = run_update ~name:"sr_emb_serial" g0 in
+  let want = nonzero "sr_emb_serial" (run_update ~name:"sr_emb_serial" g0) in
   p "serial scatter gradient equals the analytic dense gradient bitwise" (bitwise want expected);
 
   (* -- Unbail (a): with no split at all, the default preset now annotates the scatter segment —

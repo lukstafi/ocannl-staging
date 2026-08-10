@@ -351,6 +351,74 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
 
 ## Backends
 
+- **Device buffers are not GC-reclaimable, and the reason is a table, not GC pressure**
+  (gh-ocannl-550). Each backend's private `Slab.pools` (`(device_id, pool_id) -> base`) holds a
+  strong reference to every slab it allocated, so no finalizer on a pool can ever run; the one
+  function that drops an entry, `Backends.finalize`, had **no caller anywhere in the repo** until
+  `Context.release` was added. Measured consequence, from the per-candidate census of a cold tf32
+  `gpt2_mini` search: +1 working pool and ~102 MiB per candidate *attempted* — dedups and
+  `Backend_link` declines pay in full, because the pool is allocated at link, before the dedup check
+  — monotone to 11.9 GB of a 12,227 MiB card, `pools_freed = 0` the whole way. Contrast the same
+  run's code modules: 35 loaded, 31 unloaded, live count flat at 3–4. Modules sit behind no such
+  table, so cudajit's `cuModuleUnload` finalizer fires fine on an ordinary host heap. So do not
+  reach for `Gc.full_major` when device memory grows — it cannot help a rooted table — and do not
+  assume a class leaks just because another one does. `Ir.Alloc_census` (config `autotune_log`
+  prints it per candidate) separates the four classes: working pools, constant pools, contexts,
+  modules.
+- A CAS-guarded cleanup must not commit the flag before the cleanup succeeds. `Backends.finalize`'s
+  `ctx.finalized` means "the pools were freed", not "a free was attempted": `Backend.await` inside it
+  can raise (a device still reporting an asynchronous error, a dead worker domain), and committing
+  first made every later release of that context a silent no-op with its pools rooted for the process
+  — i.e. it reinstated gh-550's growth on precisely the failure paths where callers catch a failed
+  release and carry on. It resets the flag on exception instead; that is safe only because freeing is
+  idempotent per `pool_id` on every backend, so a partially completed cleanup does not double-free on
+  retry. Any new atomic "done" flag around fallible cleanup wants the same shape.
+- **On WSL2 a device-memory bug does not look like one.** The CUDA driver there backs allocations past
+  VRAM with host memory, so the same unfixed search that OOMs promptly elsewhere reached **28.8 GB
+  requested** on a 12,227 MiB card while `nvidia-smi` sat pinned at 11,879 MiB and reported headroom
+  throughout; the observable symptom was thrashing (candidate times 105 ms → 3,563 ms, search wall
+  time 767 s vs 105 s fixed), and `CUDA_ERROR_OUT_OF_MEMORY` arrived only at the very end. Two
+  consequences: an OOM's *position* in a candidate stream is a property of the box's spare host RAM,
+  not of the bug (gh-550's "arm-B candidate 47" landmark reproduced at arm-B ~135 here), and
+  `nvidia-smi` is the wrong instrument — `Context.get_used_memory` sums the pool table's requested
+  bytes and matched the census to the decimal at every sample.
+- Anything that knows an artifact's exact lifetime should call `Context.release` (idempotent, eager,
+  finalizer-independent); `Autotune.tune` does it per candidate, bounding a search at
+  `beam_width + 2` live candidates instead of one per attempt. Not calling it is never a
+  correctness bug, only a memory one. What `release` frees is precisely the pools a context holds
+  that its parent does not and that are not per-device constants — so sibling contexts are
+  independent (each `compile` mints its own `pool_id`s) but a released context is a dead handle, and
+  **release leaves, never interior nodes**: a context compiled from another inherits its buffer
+  locations, so releasing an ancestor leaves the descendant resolving a dropped `pool_id`. Unchecked
+  precondition, deliberately (refcounting persistent context values would defeat their point).
+- **Two classes `release` cannot reach, so "bounded" always needs a qualifier.** (a) Per-device
+  constants: it skips every `constant_buffer_cache` key by design. That is right for a shared weight
+  and wrong for a hoisted `Stage` candidate, whose `apply_stage` mints a FRESH packed-constant tnode
+  per application (`fresh_tile_id ()`), so a CPU search seeding `hoist` sketches grows one constant
+  pool per such candidate — measured on `cc` at 1 → 109 constant pools over 181 candidates while
+  working pools stayed within 2–6. Not safely fixable in place, because constants are bump-packed
+  several to a pool and the first candidate's pool mixes its private tile with the shared operand
+  weights later candidates reuse; a safe rule is per-pool purity, i.e. gh-ocannl-565's eviction-policy
+  work. (b) A link that RAISES after `allocate_delta` — now handled (`Backends.with_delta` frees the
+  delta on the way out), but the shape is worth knowing: allocation precedes backend linking, so any
+  new failure point between them leaks a whole routine footprint with no context to release it
+  through. When asserting a memory bound, assert on `live_working_pools`, not `live_pools`: summing the
+  constant class in makes the assertion fail for a reason it is not about, and on a workload with no
+  hoisted candidates it passes while proving less than it looks like.
+- Four facts about the allocation seams that each cost a review round to learn, and that any further
+  release work will meet again. (1) There are **two** shared allocation sites, not one:
+  `Backends.allocate_delta` for a compile's delta, and the `allocate` inside
+  `Add_buffer_retrieval_and_syncing` for a `from_host`/`copy` destination not yet in the context. Both
+  land in the same pool tables and are freed by the same context `finalize`. (2) `allocate_delta` is
+  **not atomic** — it schedules host uploads and can allocate several segments — so a guard wrapped
+  around it from outside cannot see a partial delta; the unwind has to live inside, and must `await`
+  before freeing because those uploads are asynchronous. (3) Constant-cache entries **point into**
+  pools, so unwinding an allocation must drop the entries that allocation inserted before freeing,
+  while leaving pre-existing ones (they belong to earlier compiles). (4) Retain-then-raise is the
+  standing bug shape in this area: decide what ships *after* the last thing that can raise, or the one
+  artifact you deliberately kept is the one nobody can reach. Corollary for reviewing such a change:
+  each fix adds a container, a guard or a retention decision, i.e. a new path with the same obligation
+  — re-examine the failure paths the fix itself created, not just the ones it closed.
 - Fissioned-step segment batches go through the `sequence_segments` seam
   (`Backend_impl.Lowered_backend`): Metal encodes one serial-dispatch command buffer; CUDA/HIP
   stream-capture the launch loop into a graph replayed as one `cuGraphLaunch`/`hipGraphLaunch`
@@ -655,3 +723,24 @@ that they earn a lookup rather than always-loaded space.
   never be the empty string either: empty means "unset" at every source.
 - Prefer the minimal targeted fix over speculative hardening: offer hardening separately as an
   option with its costs, don't fold it into the fix.
+- A backend-gated leg must never print a bare `p "<claim>" true` on the backend that cannot run it:
+  the golden line is then byte-identical to a verified run's, so neither the transcript nor a
+  reviewer can tell the claim was never evaluated (this is how a `Tensorize` leg came to "cover" the
+  gh-528 interior-batch bug). The scheduling tests use a file-local `skipped name`, which prints the
+  same stdout line — the golden must stay backend-uniform, and dune's `(test)` stanza diffs stdout
+  ONLY, so stderr is free — and announces the skip on stderr. `grep SKIPPED` over a run then
+  enumerates exactly what that hardware did not verify. The other honest form is putting the
+  condition in the label itself (`"… (skipped: non-C backend)"`), which distinguishes the golden
+  line; a bare `true` whose label is indistinguishable is the one to reject.
+- Executed parity checks need a nonzero guard on the REFERENCE, not just the comparison: a fragment
+  mapping that reads outside a staged block, a candidate kernel that never ran, and a reference
+  whose own setup collapsed all produce all-zeros, and zeros compare equal to zeros. The convention
+  is a file-local `nonzero name a` that raises, applied where each reference array is produced —
+  once per producer, not per comparison. Guard the reference side only: a zero candidate against a
+  nonzero reference is already a `false` in the golden, which is more diagnosable than an exception.
+- A tolerance cannot reject an input-independent forward if the reference itself does not move:
+  every leg sits at one constant and every parity line reads `true`. `benchmarks/orchestrate.py`'s
+  `loss_moved` is the model; in-tree, require the reference's own spread to exceed the tolerance it
+  gates (`mixed_prec_parity`, `precision_policy_parity`) or that distinct inputs give distinct
+  outputs (`gpt2_dry_run`'s positions-differ). "All finite" is not such a guard — all-zeros is
+  finite.

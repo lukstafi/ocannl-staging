@@ -1,4 +1,5 @@
 oracle losses finite: true
+oracle loss trajectory moves past the parity tolerance: true
 bf16 leg master w1: single
 bf16 leg master w1 grad: single
 bf16 leg twin of w1: bfloat16

@@ -2016,3 +2016,18 @@
      hip_scratch_tune_survives.actual
      (run %{dep:hip_scratch_tune_survives.exe}))
     (diff hip_scratch_tune_survives.expected hip_scratch_tune_survives.actual)))))
+
+; gh-ocannl-550, the accumulation half: candidate artifacts are released at the candidate boundary,
+; so a search's live pools and contexts are bounded by the beam. GPU-free — the accumulation is
+; host-observable through Ir.Alloc_census on cc, even though the out-of-memory it caused is not.
+
+(test
+ (name autotune_candidate_release)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules autotune_candidate_release)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))

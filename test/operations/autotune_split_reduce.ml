@@ -29,6 +29,16 @@ module SC = Ir.Schedule_cache
 module Asgns = Ir.Assignments
 
 let p name b = Stdio.printf "%s: %b\n" name b
+
+(* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
+   that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
+   parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
+   reference array is pinned nonzero where it is produced, so the parity claims below have content.
+   *)
+let nonzero name (a : float array) =
+  if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
+    failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
+  a
 let approx a b = Float.(abs (a - b) < 1e-3 *. (1. +. abs b))
 
 let named name (comp : Asgns.comp) : Asgns.comp =
@@ -166,7 +176,7 @@ let () =
 
 let () =
   let y0 = make_matvec "ref" in
-  let want = run_forward ~name:"asr_serial" y0 in
+  let want = nonzero "asr_serial" (run_forward ~name:"asr_serial" y0) in
   let y1 = make_matvec "tuned" in
   let report = ref None in
   let ctx = Context.auto () in
@@ -198,7 +208,7 @@ let () =
   let cache_dir = "autotune_split_cache" in
   clean_cache cache_dir;
   let y0 = make_matvec "hcref" in
-  let want = run_forward ~name:"asr_hc_serial" y0 in
+  let want = nonzero "asr_hc_serial" (run_forward ~name:"asr_hc_serial" y0) in
   let y1 = make_matvec "hc" in
   let hc_comp = named "asr_hc" (Train.forward y1) in
   let base_opt = capture_base hc_comp in
@@ -285,7 +295,7 @@ let () =
     z
   in
   let z0 = make_pair "ref" in
-  let want = run_forward ~name:"asr_ms_serial" z0 in
+  let want = nonzero "asr_ms_serial" (run_forward ~name:"asr_ms_serial" z0) in
   let z1 = make_pair "tuned" in
   let base_opt = capture_base (named "asr_ms_probe" (Train.forward (make_pair "probe"))) in
   p "both accumulations are detected as split-reduce sites"
@@ -389,7 +399,7 @@ let () =
     Context.compile rctx (named "asr_cg_serial" (Train.grad_update loss0)) Ir.Indexing.Empty
   in
   let rctx = Context.run rctx rroutine in
-  let want = cg_grad rctx bias0 in
+  let want = nonzero "asr_cg_serial" (cg_grad rctx bias0) in
 
   let bias1, loss1 = make_bias_grad "tuned" in
   let report = ref None in
@@ -474,7 +484,7 @@ let () =
         && s3.Autotune.sr_out = 1 && s3.Autotune.sr_cost = rk_o
     | _ -> false);
   let z0 = make_ranked "ref" in
-  let want = run_forward ~name:"asr_rk_serial" z0 in
+  let want = nonzero "asr_rk_serial" (run_forward ~name:"asr_rk_serial" z0) in
   let z1 = make_ranked "capped" in
   let report = ref None in
   let ctx = Context.auto () in

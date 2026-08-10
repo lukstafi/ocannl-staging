@@ -332,6 +332,13 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
     in
     let mode = Option.map tn.Tn.memory_mode_intent ~f:fst in
     Backend.alloc_pool ?mode device ~pool_id ~size_in_bytes ~alignment:(Ops.prec_in_bytes prec);
+    (* gh-ocannl-550: the OTHER shared allocation site — a [from_host] or [copy] whose destination node
+       is not in the context yet allocates here, not through [allocate_delta]. Its slabs go into the
+       same backend pool tables and are freed by the same context [finalize], so leaving them
+       uncounted made the census silently underreport in data-loading and context-copy workflows. Not
+       working-vs-constant: this path is a working buffer by construction (a host transfer's
+       destination). *)
+    Alloc_census.record_pool ~device_id:device.device_id ~pool_id ~constant:false ~size_in_bytes;
     if zero_init then Backend.memset_zero device ~pool_id ~offset:0 ~size_in_bytes;
     { pool_id; offset = 0 }
 
@@ -372,15 +379,33 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
         true
     | None -> false
 
+  (* gh-ocannl-550: [allocate] roots a pool in the backend table, and the transfer that follows adds
+     its location to the context only on success — so a failing upload leaves a pool no context can
+     ever reach, and therefore no [Context.release] can reclaim. Frees the one pool this operation
+     minted; unlike [allocate_delta]'s unwind there is no constant-cache involvement here (a transfer
+     destination is a working buffer by construction), so this needs nothing beyond the free. *)
+  let with_transfer_pool device (loc : Backend_intf.buffer_loc) ~f =
+    match f () with
+    | result -> result
+    | exception exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        (try
+           Backend.await device;
+           Option.iter Backend.free_pool ~f:(fun free -> free device ~pool_id:loc.pool_id);
+           Alloc_census.forget_pool ~device_id:device.device_id ~pool_id:loc.pool_id
+         with _ -> ());
+        Stdlib.Printexc.raise_with_backtrace exn backtrace
+
   let%track3_sexp init_from_host (ctx : Backend.context) (tn : Tn.t) (hosted : Ndarray.t) =
     match Map.find ctx.ctx_buffers tn with
     | None ->
         (* No zero-init: we are immediately copying from host. *)
         let dst = allocate ctx.device tn ~zero_init:false in
-        [%log "copying", Tn.debug_name tn, "to", (dst : Backend_intf.buffer_loc), "from host"];
-        Backend.from_host ~dst:ctx ~dst_loc:dst hosted;
-        update_writer_event ctx @@ Node tn;
-        { ctx with ctx_buffers = Map.add_exn ctx.ctx_buffers ~key:tn ~data:dst }
+        with_transfer_pool ctx.device dst ~f:(fun () ->
+            [%log "copying", Tn.debug_name tn, "to", (dst : Backend_intf.buffer_loc), "from host"];
+            Backend.from_host ~dst:ctx ~dst_loc:dst hosted;
+            update_writer_event ctx @@ Node tn;
+            { ctx with ctx_buffers = Map.add_exn ctx.ctx_buffers ~key:tn ~data:dst })
     | Some _ ->
         raise
         @@ Utils.User_error
@@ -486,18 +511,19 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
         | None ->
             (* No zero-init: we are immediately copying from another device. *)
             let d_loc = allocate dst.device tn ~zero_init:false in
-            Backend.(
-              device_to_device tn ~into_merge_buffer:No ~dst_loc:(Some d_loc) ~dst ~src_loc:s_loc
-                ~src);
-            update_writer_event dst @@ Node tn;
-            [%log
-              "copying",
-              Tn.debug_name tn,
-              "from",
-              Backend.get_name src.device,
-              "to",
-              Backend.get_name dst.device];
-            { dst with ctx_buffers = Map.add_exn dst.ctx_buffers ~key:tn ~data:d_loc })
+            with_transfer_pool dst.device d_loc ~f:(fun () ->
+                Backend.(
+                  device_to_device tn ~into_merge_buffer:No ~dst_loc:(Some d_loc) ~dst
+                    ~src_loc:s_loc ~src);
+                update_writer_event dst @@ Node tn;
+                [%log
+                  "copying",
+                  Tn.debug_name tn,
+                  "from",
+                  Backend.get_name src.device,
+                  "to",
+                  Backend.get_name dst.device];
+                { dst with ctx_buffers = Map.add_exn dst.ctx_buffers ~key:tn ~data:d_loc }))
 
   type r = Backend.context routine [@@deriving sexp_of]
 
@@ -946,7 +972,36 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
       in
       register key ~alloc
     in
-    let pack ?arena (group : (Tn.t * Low_level.traced_array) list)
+    (* gh-ocannl-550: the shared seam is where a pool's byte size is known, so it is where the
+       per-class census records it. [~constant] separates the two groups below, whose lifetimes
+       differ: a working pool belongs to the context and dies with it, a constant pool is deduped
+       per device and outlives it. *)
+    (* What THIS call minted, so a failure part way through can give it back (gh-ocannl-550,
+       round-four review). [with_delta] in [link] covers failures after the delta is returned; it
+       cannot cover a failure inside this function, where the caller never receives [ctx_buffers] and
+       the slabs already allocated are rooted with nothing to reach them. Pool ids are fresh from
+       [device.next_pool_id], so every id here is unambiguously this call's. *)
+    let minted = ref [] in
+    let cache_inserts = ref [] in
+    let alloc_pool_counted ~constant device ~pool_id ~size_in_bytes ~alignment =
+      alloc_pool device ~pool_id ~size_in_bytes ~alignment;
+      minted := pool_id :: !minted;
+      Alloc_census.record_pool ~device_id:device.device_id ~pool_id ~constant ~size_in_bytes
+    in
+    let unwind_partial_delta () =
+      (* The uploads scheduled above are asynchronous, so the pools must not be freed under them. *)
+      (try Device.await device with _ -> ());
+      (* Constant-cache entries this call inserted point INTO the pools about to go, so they have to
+         come out first or a later context would resolve a freed slab. Entries that were already
+         there belong to earlier compiles and are untouched. *)
+      List.iter !cache_inserts ~f:(Hashtbl.remove device.constant_buffer_cache);
+      Option.iter free_pool ~f:(fun free_pool ->
+          List.dedup_and_sort !minted ~compare:Int.compare
+          |> List.iter ~f:(fun pool_id ->
+                 free_pool device ~pool_id;
+                 Alloc_census.forget_pool ~device_id:device.device_id ~pool_id))
+    in
+    let pack ?arena ~constant (group : (Tn.t * Low_level.traced_array) list)
         ~(register : Tn.t -> alloc:(unit -> buffer_loc) -> unit) : unit =
       if not (List.is_empty group) then begin
         (* gh-ocannl-498: lay every group out in CANONICAL (uid) order, which is the order
@@ -987,7 +1042,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
               List.fold group ~init:1 ~f:(fun a (key, _) ->
                   max a (Ops.prec_in_bytes (Lazy.force key.Tn.storage_prec)))
             in
-            alloc_pool device ~pool_id ~size_in_bytes:total ~alignment;
+            alloc_pool_counted ~constant device ~pool_id ~size_in_bytes:total ~alignment;
             List.iter2_exn group offsets ~f:(fun entry offset ->
                 place entry ~pool_id ~offset ~register);
             if log_buffer_aliasing () then
@@ -1029,7 +1084,8 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
                 let a = Ops.prec_in_bytes (Lazy.force key.Tn.storage_prec) in
                 if a > !(seg_align.(seg)) then seg_align.(seg) := a);
             Array.iteri seg_pool_ids ~f:(fun seg (pool_id, size_in_bytes) ->
-                alloc_pool device ~pool_id ~size_in_bytes ~alignment:!(seg_align.(seg)));
+                alloc_pool_counted ~constant device ~pool_id ~size_in_bytes
+                  ~alignment:!(seg_align.(seg)));
             (* Place each node at its planned (segment, offset). *)
             List.iter2_exn group assignments ~f:(fun entry (seg, offset) ->
                 let pool_id, _ = seg_pool_ids.(seg) in
@@ -1039,8 +1095,9 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     (* Pass 2a: working delta -> context-owned pool(s), recorded directly. Only this group is
        liveness-planned (gh-ocannl-489): constants are deduped per-device and outlive the context,
        so their lifetimes are not routine intervals. *)
-    pack ?arena:alias_spans working ~register:(fun key ~alloc ->
-        ctx_buffers := Map.add_exn !ctx_buffers ~key ~data:(alloc ()));
+    let passes () =
+      pack ?arena:alias_spans ~constant:false working ~register:(fun key ~alloc ->
+          ctx_buffers := Map.add_exn !ctx_buffers ~key ~data:(alloc ()));
     (* Pass 2b: constants / read-only -> per-device constant pool(s). Constants already allocated on
        this device (a hit in [constant_buffer_cache], possibly from another context tree) resolve
        directly and are excluded from the new slab, so the freshly-minted constant pool holds
@@ -1052,10 +1109,66 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
         match Hashtbl.find device.constant_buffer_cache key with
         | Some data -> ctx_buffers := Map.add_exn !ctx_buffers ~key ~data
         | None -> new_constants := (key, node) :: !new_constants);
-    pack (List.rev !new_constants) ~register:(fun key ~alloc ->
-        let data = Hashtbl.find_or_add device.constant_buffer_cache key ~default:alloc in
-        ctx_buffers := Map.add_exn !ctx_buffers ~key ~data);
+      pack ~constant:true (List.rev !new_constants) ~register:(fun key ~alloc ->
+          let data =
+            Hashtbl.find_or_add device.constant_buffer_cache key ~default:(fun () ->
+                cache_inserts := key :: !cache_inserts;
+                alloc ())
+          in
+          ctx_buffers := Map.add_exn !ctx_buffers ~key ~data)
+    in
+    (match passes () with
+    | () -> ()
+    | exception exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        (* Best-effort: giving the slabs back must not replace the allocation failure the caller has
+           to classify (an out-of-memory decline being the whole point). *)
+        (try unwind_partial_delta () with _ -> ());
+        Stdlib.Printexc.raise_with_backtrace exn backtrace);
     !ctx_buffers
+
+  (* gh-ocannl-550: [allocate_delta] runs BEFORE the backend link, and the pool table roots whatever
+     it allocated — so a link that raises (HIP's scratch-budget validator, a driver refusal, an
+     aliased-read rejection) used to leave that routine's pools behind with no context through which
+     anyone could ever release them. Those are the [Backend_link] declines an autotune search absorbs,
+     so they accumulated exactly like the candidates that succeeded.
+
+     Frees the delta of [ctx_buffers] against [context]: keyed by [pool_id] (one pool holds several
+     nodes) and skipping per-device constants, i.e. the same rule the context [finalize] applies —
+     this stands in for it on the path where no context was ever built. *)
+  let free_delta context (ctx_buffers : ctx_buffers) =
+    (* Sync first, for the same reason [unwind_partial_delta] and the context [finalize] do
+       (gh-ocannl-550, round-five review): [allocate_delta] queues [Host_inits] uploads through
+       [Device.from_host], so a delta being discarded after a failed link can still have writes in
+       flight — and freeing the slab under them is device corruption, on a path that is otherwise a
+       contained candidate decline the search carries on from. Best-effort: the device may already be
+       refusing work, and that must not replace the link failure the caller has to classify. *)
+    (try Device.await context.device with _ -> ());
+    Option.iter free_pool ~f:(fun free_pool ->
+        Map.fold ctx_buffers ~init:(Set.empty (module Int))
+          ~f:(fun ~key ~data:(loc : buffer_loc) freed ->
+            if
+              (not (Map.mem context.ctx_buffers key))
+              && (not (Hashtbl.mem context.device.constant_buffer_cache key))
+              && not (Set.mem freed loc.pool_id)
+            then (
+              free_pool context.device ~pool_id:loc.pool_id;
+              Alloc_census.forget_pool ~device_id:context.device.device_id ~pool_id:loc.pool_id;
+              Set.add freed loc.pool_id)
+            else freed)
+        |> (ignore : Set.M(Int).t -> unit))
+
+  (* Runs [f] on a freshly allocated delta, freeing that delta if [f] raises. Everything after the
+     allocation belongs inside: a failure past [make_child] discards the child too, so its pools are
+     just as unreachable as if the child had never existed. *)
+  let with_delta context ctx_buffers ~f =
+    match f () with
+    | result -> result
+    | exception exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        (* Best-effort, and it must not replace the link failure the caller has to classify. *)
+        (try free_delta context ctx_buffers with _ -> ());
+        Stdlib.Printexc.raise_with_backtrace exn backtrace
 
   let%debug3_sexp link context (code : code) =
     verify_prior_context ~plc:code.lowered.Low_level.optimize_ctx.placements
@@ -1069,6 +1182,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     let ctx_buffers =
       allocate_delta context ~name:code.name ~alias_spans:code.alias_spans code.lowered
     in
+    with_delta context ctx_buffers ~f:(fun () ->
     (* gh-ocannl-489: a routine reading a node whose buffer an earlier routine of this lineage
        aliased would read clobbered values -- fail at link time, before any schedule runs. Writes
        (outputs) are allowed: the aliasing routine rewrites everything it reads on each run. This
@@ -1127,20 +1241,42 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
           check_merge_buffer context.device ~code_node:code.expected_merge_node)
     in
     sync_routine
-      { context; schedule; bindings; name = code.name; inputs; merge_buffer_input; outputs }
+      { context; schedule; bindings; name = code.name; inputs; merge_buffer_input; outputs })
 
   let%debug3_sexp link_batch context code_batch =
     verify_prior_context ~plc:(get_optimize_ctx_batch code_batch).Low_level.placements
       ~ctx_arrays:context.ctx_buffers ~from_prior_context:code_batch.from_prior_context;
-    let ctx_buffers =
-      Array.mapi code_batch.lowereds ~f:(fun i ->
-          Option.map ~f:(fun l ->
-              let name = Option.value code_batch.names.(i) ~default:"<unnamed>" in
-              (* Batch compiles are not liveness-planned in v1 (they do not go through the
-                 fission/schedule seam of [compile]); [alias_spans:None] keeps bump packing. *)
-              allocate_delta context ~name ~alias_spans:None l))
+    (* gh-ocannl-550: the same unwind [link] gets, extended over the whole batch. Every member's delta
+       is allocated before the backend linker runs, so a later member's allocation or the link itself
+       raising used to abandon every completed member's pools -- rooted, with no context to reach them,
+       since the member contexts are only derived in the fold below. [free_delta] is applied per member
+       and skips per-device constants exactly as the context [finalize] does, so a partial batch gives
+       back its working pools and leaves the shared constants alone. *)
+    let allocated = ref [] in
+    let unwind_batch () =
+      List.iter !allocated ~f:(fun cb -> try free_delta context cb with _ -> ())
     in
-    let bindings, schedules = link_batch context code_batch.code_batch ctx_buffers in
+    let ctx_buffers, bindings, schedules =
+      match
+        let ctx_buffers =
+          Array.mapi code_batch.lowereds ~f:(fun i ->
+              Option.map ~f:(fun l ->
+                  let name = Option.value code_batch.names.(i) ~default:"<unnamed>" in
+                  (* Batch compiles are not liveness-planned in v1 (they do not go through the
+                     fission/schedule seam of [compile]); [alias_spans:None] keeps bump packing. *)
+                  let cb = allocate_delta context ~name ~alias_spans:None l in
+                  allocated := cb :: !allocated;
+                  cb))
+        in
+        let bindings, schedules = link_batch context code_batch.code_batch ctx_buffers in
+        (ctx_buffers, bindings, schedules)
+      with
+      | result -> result
+      | exception exn ->
+          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+          unwind_batch ();
+          Stdlib.Printexc.raise_with_backtrace exn backtrace
+    in
     Array.fold_mapi schedules ~init:context ~f:(fun i context -> function
       | None -> (context, None)
       | Some schedule ->
@@ -1184,14 +1320,41 @@ end
 let finalize (type dev runner event)
     (module Backend : Backend with type dev = dev and type runner = runner and type event = event)
     (ctx : Backend.context) : unit =
-  Option.iter Backend.free_pool ~f:(fun free_pool ->
-      if Atomic.compare_and_set ctx.finalized false true then (
+  (* The flag means "this context's pools have been freed", NOT "a free was attempted" — so cleanup
+     that RAISES resets it (gh-ocannl-550). [Backend.await] is the realistic raiser: a device still
+     reporting an asynchronous error, or a dead worker domain. Left set, every later release of this
+     context would be a silent no-op and its pools would stay rooted for the process — restoring
+     exactly the unbounded growth this exists to end, and on the failure paths where it matters most,
+     since the tuner catches a failed release and carries on with the next candidate or arm. A retry
+     is safe: freeing is idempotent per [pool_id] on every backend (the table entry is gone after the
+     first success, and [Alloc_census.forget_pool] ignores an absent key), so a cleanup that got part
+     way through does not double-free on the next attempt. *)
+  let cleanup () =
+    Option.iter Backend.free_pool ~f:(fun free_pool ->
         Backend.await ctx.device;
-        Map.iteri ctx.ctx_buffers ~f:(fun ~key ~data:(loc : Ir.Backend_intf.buffer_loc) ->
+        (* One pool holds several nodes (gh-ocannl-344 bump packing / gh-ocannl-489 arenas), so the
+           same [pool_id] is reached through several keys; dedup before freeing, or the second visit
+           frees an already-freed slab. [Alloc_census.forget_pool] is idempotent for the same
+           reason, but the backend's [free_pool] is the one that must not run twice. *)
+        Map.fold ctx.ctx_buffers ~init:(Set.empty (module Int))
+          ~f:(fun ~key ~data:(loc : Ir.Backend_intf.buffer_loc) freed ->
             if
               (not (Option.exists ctx.parent ~f:(fun pc -> Map.mem pc.ctx_buffers key)))
-              && not (Hashtbl.mem ctx.device.constant_buffer_cache key)
-            then free_pool ctx.device ~pool_id:loc.pool_id)))
+              && (not (Hashtbl.mem ctx.device.constant_buffer_cache key))
+              && not (Set.mem freed loc.pool_id)
+            then (
+              free_pool ctx.device ~pool_id:loc.pool_id;
+              Alloc_census.forget_pool ~device_id:ctx.device.device_id ~pool_id:loc.pool_id;
+              Set.add freed loc.pool_id)
+            else freed)
+        |> (ignore : Set.M(Int).t -> unit))
+  in
+  if Atomic.compare_and_set ctx.finalized false true then
+    match cleanup () with
+    | () -> Alloc_census.count_context_released ()
+    | exception exn ->
+        Atomic.set ctx.finalized false;
+        raise exn
 
 (* {2 The implemented backends, as singletons}
 

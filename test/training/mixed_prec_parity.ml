@@ -151,6 +151,13 @@ let () =
     run_plain base_ctx ~input_l:"xa" ~build:make_model ~prepare:(fun _ -> ()) ~w_vals
   in
   Stdio.printf "oracle losses finite: %b\n" (Array.for_all losses_a ~f:Float.is_finite);
+  (* Every leg below is held to "trajectory parity within 0.1" against this oracle. A tolerance
+     cannot reject an input-independent forward, or a step that never updates weights, if the
+     reference itself does not move: all legs would sit at one constant and every parity line would
+     read [true]. So the oracle's own spread has to exceed the tolerance it gates
+     (benchmarks/orchestrate.py's [loss_moved] guard, applied in-tree). *)
+  Stdio.printf "oracle loss trajectory moves past the parity tolerance: %b\n"
+    Float.(max_abs_diff losses_a (Array.create ~len:(Array.length losses_a) losses_a.(0)) > 0.1);
 
   (* Leg B: bf16 master weights, no loss scaling (bf16 has f32's exponent range). Masters and their
      gradient accumulators must settle at single; the graph-facing twins at bfloat16. *)
