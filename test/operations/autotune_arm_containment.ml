@@ -34,20 +34,33 @@ let clean_cache dir =
     Array.iter (Stdlib.Sys.readdir dir) ~f:(fun f ->
         Stdlib.Sys.remove (Stdlib.Filename.concat dir f))
 
-(* The injection is global state on a library ref, so it is restored unconditionally: a leaked
-   raiser would fail every later autotune call in this process. *)
-let with_injected_failure ?exn ~arms_reported ~at ~message f =
+(* The injection is global state on library refs, so they are restored unconditionally: a leaked
+   raiser would fail every later autotune call in this process.
+
+   [after_arm_timed] delays the attempt counting until the arm has completed that many timing runs.
+   "Fails after having timed candidates of its own" is not a fixed attempt index: how many attempts
+   precede an arm's first TIMED candidate is backend-dependent. On Metal the materialize-all arm's
+   baseline binds no hardware dimension (gh-ocannl-532) and the whole [W_preset] block then dedups
+   against that same digest, so attempts 1-6 time nothing at all and a fixed [~at:4] lands inside
+   that prefix — leaving the scenario asserting the opposite of what it says. Counting timing runs
+   states the precondition directly; [on_candidate_preflight] fires once per timing run. *)
+let with_injected_failure ?exn ?(after_arm_timed = 0) ~arms_reported ~at ~message f =
   let attempts = ref 0 in
+  let timed = ref 0 in
+  (Autotune.on_candidate_preflight :=
+     fun _routine_name -> if !arms_reported >= 1 then Int.incr timed);
   (Autotune.on_candidate_attempt :=
      fun label ->
        (* Arm A reports exactly once, when its search ends, so this fires within arm B only. *)
-       if !arms_reported >= 1 then (
+       if !arms_reported >= 1 && !timed >= after_arm_timed then (
          Int.incr attempts;
          if !attempts = at then
            raise
              (Option.value exn
                 ~default:(Failure (Printf.sprintf "%s at candidate %s" message label)))));
-  Exn.protect ~f ~finally:(fun () -> Autotune.on_candidate_attempt := fun _ -> ())
+  Exn.protect ~f ~finally:(fun () ->
+      Autotune.on_candidate_attempt := (fun _ -> ());
+      Autotune.on_candidate_preflight := fun _ -> ())
 
 (* gh-ocannl-564: the same discipline at the pre-dispatch validation seam. [at] counts preflights
    across the whole call — 1 is arm A's baseline timing, 2 the first candidate it times — and the
@@ -99,10 +112,12 @@ let () =
     reports := r :: !reports
   in
   let message = "injected candidate failure" in
-  (* Attempt 1 of an arm is its baseline compile; injecting later leaves arm B with timed
-     candidates of its own, which is the point of this scenario. *)
+  (* The first attempt after arm B has timed two runs: on a backend whose baseline is dispatchable
+     that is its baseline plus one candidate, and on one whose baseline is not (Metal here) it is
+     two candidates — either way arm B has a timed best of its own to lose, which is the point of
+     this scenario. *)
   let ctx_t, routine_t =
-    with_injected_failure ~arms_reported ~at:4 ~message (fun () ->
+    with_injected_failure ~arms_reported ~after_arm_timed:2 ~at:1 ~message (fun () ->
         Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir ~report
           (Context.auto ()) t2 comp Ir.Indexing.Empty)
   in
