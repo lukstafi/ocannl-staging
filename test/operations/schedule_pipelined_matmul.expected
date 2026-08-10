@@ -17,5 +17,8 @@ pipeline_depth 0 is rejected: true
 pipeline_depth 3 is rejected in phase 1: true
 pipelining a non-cooperative (packing) Stage is rejected: true
 pipelining at a non-Serial anchor is rejected: true
+a read outside the rotor loop is a candidate's typed decline, not a fatal: true
+so is a pipelined tile whose rotor loop is not Serial: true
+and the same schedule written by hand still raises at Context.compile: true
 advertised depth seeds one pd2 twin per plain staged seed, staged only: true
 no depth twins without the capability advertisement: true
