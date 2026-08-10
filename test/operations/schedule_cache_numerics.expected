@@ -1,0 +1,13 @@
+the cache key is stable within one numerics regime: true
+the cache key separates the tf32 regime from the default one: true
+a policy difference in any other field separates the key too: true
+the key still carries the source digest and the backend: true
+the cold search misses the cache: true
+the cold search computes correct values: true
+the search stored exactly one entry (or timed nothing, on GPU): true
+the entry replays under the policy that wrote it: true
+the replayed routine computes correct values: true
+the entry does NOT replay under a different policy (gh-ocannl-568): true
+the cross-policy run searches instead of replaying: true
+the cross-policy run computes correct values: true
+regime B's search did not overwrite regime A's winner: true
