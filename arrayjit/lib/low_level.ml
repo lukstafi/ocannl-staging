@@ -2214,6 +2214,140 @@ let ienv_extend ienv sym ~from_ ~to_ =
     memo = Phys_memo.create 16;
   }
 
+(** {3 Narrowing the environment from a statement guard (gh-ocannl-566)}
+
+    An [If] condition holds on every execution that reaches its body, so it is a fact about the
+    body's symbols just as a loop range is. Without it the environment only knows loop extents, and
+    a guard the enclosing condition proves survives as a per-element ternary -- the pipelined
+    prefetch's zero-fringe edge guard (gh-ocannl-487 phase 1), whose [k := k+1] substitution widens
+    the index interval past the extent that the enclosing [If (k < to_)] excludes.
+
+    Recognized conditions are conjunctions of integer-affine index comparisons -- the same shapes
+    {!Schedule.partition_breakpoints} reads. Everything else contributes nothing. Only loop-range /
+    static-index facts are consulted, never tensor-node bounds candidates, so a narrowing never
+    creates a source needing settlement (binding constraint 2). A comparison contributes only when
+    its machine evaluation is faithful to the mathematical integers over the incoming bounds
+    (binding constraint 5): each side must survive [Interval.at_prec] unchanged at both the index
+    precision and the condition's evaluation precision.
+
+    The result is guard-relative: a statement simplified under a condition is valid only where that
+    condition holds, exactly as a statement simplified under a loop range is valid only within it.
+    Nothing in [optimize_proc] moves statements across an [If] afterwards ([hoist_cross_statement_cse]
+    descends only into [Seq]/[For_loop] and never lifts a guarded body), and a schedule transform
+    that relocates code owes the same re-derivation it already owes for loop extents
+    (docs/proposals/schedule-ir-optops.md §2). *)
+
+(* Integer-affine view of a scalar as [(coefficient, symbol) terms, constant offset]; [None] for
+   anything that is not an integer index expression. *)
+let affine_terms_of_scalar (sc : scalar_t) : ((int * Indexing.symbol) list * int) option =
+  match sc with
+  | Constant c when Float.is_integer c && Float.(abs c < Interval.exact_int_cutoff) ->
+      Some ([], Float.to_int c)
+  | Embed_index (Indexing.Fixed_idx i) -> Some ([], i)
+  | Embed_index Indexing.Sub_axis -> Some ([], 0)
+  | Embed_index (Indexing.Iterator s) -> Some ([ (1, s) ], 0)
+  | Embed_index (Indexing.Affine { symbols; offset }) ->
+      Some (Indexing.coalesce_affine_terms symbols, offset)
+  | _ -> None
+
+(* Exact integer bounds of a symbol under [sym_env]; [None] when unbounded or inexact (loop ranges
+   and bounded static indices always qualify). *)
+let sym_int_bounds sym_env s =
+  match Map.find sym_env s with
+  | Some { Interval.integral = true; exact = true; lo; hi }
+    when Float.is_finite lo && Float.is_finite hi ->
+      Some (Float.to_int lo, Float.to_int hi)
+  | _ -> None
+
+(* Floor resp. ceiling division, for a nonzero divisor of either sign ([/] truncates towards zero
+   and [rem] takes the dividend's sign). *)
+let fdiv_int a b =
+  let q = a / b and r = Int.rem a b in
+  if r <> 0 && Bool.( <> ) (r > 0) (b > 0) then q - 1 else q
+
+let cdiv_int a b =
+  let q = a / b and r = Int.rem a b in
+  if r <> 0 && Bool.equal (r > 0) (b > 0) then q + 1 else q
+
+(* Narrows [sym_env] by the integer constraint [Σ terms + offset <= 0] (with [terms] coalesced, so
+   each symbol occurs once): rewriting it as [k*s <= -rest] for one term at a time, the minimum of
+   the remaining terms bounds [s] from above (positive [k]) or below (negative [k]). Every symbol is
+   narrowed against the {e incoming} bounds, so the result is a conjunction of independently sound
+   facts. Requires every symbol of the constraint to be bounded -- an unbounded one leaves the
+   remainder unbounded too, and the constraint yields nothing. *)
+let narrow_sym_env_le sym_env ~terms ~offset =
+  match
+    List.map terms ~f:(fun (c, s) -> Option.map (sym_int_bounds sym_env s) ~f:(fun b -> (c, s, b)))
+    |> Option.all
+  with
+  | None -> sym_env
+  | Some bounded ->
+      List.fold bounded ~init:sym_env ~f:(fun env (k, s, (lo, hi)) ->
+          (* [rest] is minimized by taking each other term's extreme in the direction of its sign. *)
+          let rest_lo =
+            List.fold bounded ~init:offset ~f:(fun acc (c, s', (lo', hi')) ->
+                if Indexing.equal_symbol s s' then acc
+                else acc + if c >= 0 then c * lo' else c * hi')
+          in
+          let bound = -rest_lo in
+          let lo, hi =
+            if k > 0 then (lo, min hi (fdiv_int bound k)) else (max lo (cdiv_int bound k), hi)
+          in
+          (* An empty range means the guard is unsatisfiable and the body dead; any environment is
+             sound there, so keep the incoming one rather than fabricating an empty interval. *)
+          if lo > hi then env else Map.set env ~key:s ~data:(Interval.of_int_range lo hi))
+
+let ienv_narrow_from_cond ienv ~(cprec : Ops.prec) (cond : scalar_t) : ienv =
+  (* The machine evaluates each comparison side at the index precision (the [Embed_index] boundary,
+     cf. [interval_of]) and converts it to [cprec], the condition's evaluation precision. The
+     comparison outcome is the mathematical-integer fact read off below only when both steps are
+     faithful over the side's whole range under the incoming bounds -- e.g. a single-precision
+     guard [k <= 2^24] is also true at [k = 2^24 + 1], which rounds down. Integer wrap is modular,
+     so an in-range final value suffices; float rounding is not, so [Interval.at_prec] widening to
+     top declines the narrowing. (Both checks are conservative for a pure-constant side, which
+     skips the index-precision step; declining is always sound.) *)
+  let side_faithful sym_env (terms, offset) =
+    let range =
+      List.fold terms ~init:(Some (offset, offset)) ~f:(fun acc (c, s) ->
+          match (acc, sym_int_bounds sym_env s) with
+          | Some (lo, hi), Some (slo, shi) ->
+              let a = c * slo and b = c * shi in
+              Some (lo + min a b, hi + max a b)
+          | _ -> None)
+    in
+    match range with
+    | None -> false
+    | Some (lo, hi) ->
+        let iv = Interval.of_int_range lo hi in
+        let faithful prec = Interval.equal (Interval.at_prec prec iv) iv in
+        faithful (Ops.index_prec ()) && faithful cprec
+  in
+  let le sym_env a b ~shift =
+    (* On integers [a < b] is [a - b + 1 <= 0] and [a <= b] is [a - b <= 0]. *)
+    match Option.both (affine_terms_of_scalar a) (affine_terms_of_scalar b) with
+    | Some ((ta, oa), (tb, ob))
+      when side_faithful sym_env (ta, oa) && side_faithful sym_env (tb, ob) ->
+        let terms =
+          Indexing.coalesce_affine_terms (ta @ List.map tb ~f:(fun (c, s) -> (-c, s)))
+        in
+        narrow_sym_env_le sym_env ~terms ~offset:(oa - ob + shift)
+    | _ -> sym_env
+  in
+  let rec narrow sym_env (sc : scalar_t) =
+    match sc with
+    (* Both conjuncts hold in the body; a disjunction implies neither. *)
+    | Binop (Ops.And, (a, _), (b, _)) -> narrow (narrow sym_env a) b
+    | Binop (Ops.Cmplt, (a, _), (b, _)) -> le sym_env a b ~shift:1
+    | Binop (Ops.Cmple, (a, _), (b, _)) -> le sym_env a b ~shift:0
+    | Binop (Ops.Cmpeq, (a, _), (b, _)) -> le (le sym_env a b ~shift:0) b a ~shift:0
+    | _ -> sym_env
+  in
+  let sym_env = narrow ienv.sym_env cond in
+  (* The memo is scoped to a symbol environment (binding constraint 8): keep it only when nothing
+     narrowed. *)
+  if Map.equal Interval.equal sym_env ienv.sym_env then ienv
+  else { sym_env; memo = Phys_memo.create 16 }
+
 (* Exact integral intervals of index expressions; machine validity (the unsigned index precision,
    binding constraint 7's crosses-zero widening) is applied by [interval_of] via [Interval.at_prec
    (Ops.index_prec ())] at the [Embed_index] boundary. *)
@@ -2456,7 +2590,14 @@ let simplify_llc static_indices llc =
         match c' with
         | Constant f when Float.(f = 0.) -> Noop
         | Constant _ -> loop body
-        | _ -> If { cond = (c', cprec); body = loop body })
+        | _ ->
+            (* gh-ocannl-566: a surviving guard is a fact about its body -- narrow the environment
+               with it, so the interval queries inside can discharge what only it proves. *)
+            If
+              {
+                cond = (c', cprec);
+                body = loop_proc ~ienv:(ienv_narrow_from_cond ienv ~cprec c') body;
+              })
   and loop_scalar ~ienv ((llsc, prec) : scalar_t * Ops.prec) : scalar_t * Ops.prec =
     let loop_scalar = loop_scalar ~ienv in
     let loop_proc = loop_proc ~ienv in

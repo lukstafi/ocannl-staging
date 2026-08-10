@@ -123,6 +123,26 @@ let rec count_stmts ~f (llc : LL.t) : int =
   | LL.For_loop { body; _ } | LL.If { body; _ } -> count_stmts ~f body
   | _ -> 0
 
+(* Per-element zero-fringe guards ([cond ? src : 0]) surviving in the statement tree. *)
+let rec where_guards (llc : LL.t) : int =
+  match llc with
+  | LL.Seq (a, b) -> where_guards a + where_guards b
+  | LL.For_loop { body; _ } | LL.If { body; _ } -> where_guards body
+  | LL.Tile_mma { fallback; _ } -> where_guards fallback
+  | LL.Set { llsc; _ } | LL.Set_local (_, llsc) -> where_guards_s llsc
+  | _ -> 0
+
+and where_guards_s (llsc : LL.scalar_t) : int =
+  match llsc with
+  | LL.Ternop (Ir.Ops.Where, (a, _), (b, _), (c, _)) ->
+      1 + where_guards_s a + where_guards_s b + where_guards_s c
+  | LL.Ternop (_, (a, _), (b, _), (c, _)) ->
+      where_guards_s a + where_guards_s b + where_guards_s c
+  | LL.Binop (_, (a, _), (b, _)) -> where_guards_s a + where_guards_s b
+  | LL.Unop (_, (a, _)) -> where_guards_s a
+  | LL.Local_scope { body; _ } -> where_guards body
+  | _ -> 0
+
 let rec writes_tile ~is_tile (llc : LL.t) : bool =
   match llc with
   | LL.Set { tn; _ } -> is_tile tn
@@ -368,6 +388,15 @@ let () =
   let d2_total = tile_sets opt_d2 opt_d2.LL.llc and d2_in = tile_sets opt_d2 d2_body in
   p "depth 2 places both prologue loads outside k_o"
     (d1_total = 2 && d1_in = 2 && d2_total = 4 && d2_in = 2);
+  (* gh-ocannl-566: the prefetch's zero-fringe edge guard is provably in range — the [k := k+1]
+     substitution widens its index interval past the extent, but the [If (k < to_)] the prefetch
+     sits under excludes exactly the block that would overrun. Before [simplify_llc] narrowed the
+     interval environment from enclosing [If] conditions, the guard survived as a per-element
+     ternary in every prefetch while the depth-1 form's identical guard folded on the loop range
+     alone — pure overhead, and a measurement bias against pipelining. Neither depth carries one
+     now. *)
+  p "the depth-2 prefetch's edge guard folds under its If"
+    (where_guards opt_d2.LL.llc = 0 && where_guards opt_d1.LL.llc = 0);
 
   (* --- Cache identity: canonical digests distinguish the depths. In phase 1 (depth <= 2) the
      depths already differ in the IR; the pipelined companion section is what keeps depths >= 2
