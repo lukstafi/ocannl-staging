@@ -61,7 +61,11 @@ prove indices in-bounds, and fold comparisons.
   `Schedule.partition_breakpoints` reads) before recursing. Without it, construct-then-fold
   has a blind spot wherever a guard is provable only *under* a statement guard — the
   gh-ocannl-487 pipelined prefetch, whose `k := k+1` substitution widens the edge guard's
-  interval past exactly the block the enclosing `If (k < to_)` excludes.
+  interval past exactly the block the enclosing `If (k < to_)` excludes. A comparison
+  contributes only when its machine evaluation is faithful to the mathematical integers
+  over the incoming bounds (each side must survive `Interval.at_prec` unchanged at both
+  the index precision and the condition's evaluation precision) — a single-precision
+  guard `k <= 2^24` is also machine-true at `k = 2^24 + 1`, which rounds down.
   Verify at implementation time that `static_range` (a `mutable int option`) is settled
   before `optimize_proc` runs — dims are forced by lowering, so ranges derived from dims
   should be; assert rather than assume.

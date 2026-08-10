@@ -2225,7 +2225,10 @@ let ienv_extend ienv sym ~from_ ~to_ =
     Recognized conditions are conjunctions of integer-affine index comparisons -- the same shapes
     {!Schedule.partition_breakpoints} reads. Everything else contributes nothing. Only loop-range /
     static-index facts are consulted, never tensor-node bounds candidates, so a narrowing never
-    creates a source needing settlement (binding constraint 2).
+    creates a source needing settlement (binding constraint 2). A comparison contributes only when
+    its machine evaluation is faithful to the mathematical integers over the incoming bounds
+    (binding constraint 5): each side must survive [Interval.at_prec] unchanged at both the index
+    precision and the condition's evaluation precision.
 
     The result is guard-relative: a statement simplified under a condition is valid only where that
     condition holds, exactly as a statement simplified under a loop range is valid only within it.
@@ -2294,16 +2297,41 @@ let narrow_sym_env_le sym_env ~terms ~offset =
              sound there, so keep the incoming one rather than fabricating an empty interval. *)
           if lo > hi then env else Map.set env ~key:s ~data:(Interval.of_int_range lo hi))
 
-let ienv_narrow_from_cond ienv (cond : scalar_t) : ienv =
+let ienv_narrow_from_cond ienv ~(cprec : Ops.prec) (cond : scalar_t) : ienv =
+  (* The machine evaluates each comparison side at the index precision (the [Embed_index] boundary,
+     cf. [interval_of]) and converts it to [cprec], the condition's evaluation precision. The
+     comparison outcome is the mathematical-integer fact read off below only when both steps are
+     faithful over the side's whole range under the incoming bounds -- e.g. a single-precision
+     guard [k <= 2^24] is also true at [k = 2^24 + 1], which rounds down. Integer wrap is modular,
+     so an in-range final value suffices; float rounding is not, so [Interval.at_prec] widening to
+     top declines the narrowing. (Both checks are conservative for a pure-constant side, which
+     skips the index-precision step; declining is always sound.) *)
+  let side_faithful sym_env (terms, offset) =
+    let range =
+      List.fold terms ~init:(Some (offset, offset)) ~f:(fun acc (c, s) ->
+          match (acc, sym_int_bounds sym_env s) with
+          | Some (lo, hi), Some (slo, shi) ->
+              let a = c * slo and b = c * shi in
+              Some (lo + min a b, hi + max a b)
+          | _ -> None)
+    in
+    match range with
+    | None -> false
+    | Some (lo, hi) ->
+        let iv = Interval.of_int_range lo hi in
+        let faithful prec = Interval.equal (Interval.at_prec prec iv) iv in
+        faithful (Ops.index_prec ()) && faithful cprec
+  in
   let le sym_env a b ~shift =
     (* On integers [a < b] is [a - b + 1 <= 0] and [a <= b] is [a - b <= 0]. *)
     match Option.both (affine_terms_of_scalar a) (affine_terms_of_scalar b) with
-    | Some ((ta, oa), (tb, ob)) ->
+    | Some ((ta, oa), (tb, ob))
+      when side_faithful sym_env (ta, oa) && side_faithful sym_env (tb, ob) ->
         let terms =
           Indexing.coalesce_affine_terms (ta @ List.map tb ~f:(fun (c, s) -> (-c, s)))
         in
         narrow_sym_env_le sym_env ~terms ~offset:(oa - ob + shift)
-    | None -> sym_env
+    | _ -> sym_env
   in
   let rec narrow sym_env (sc : scalar_t) =
     match sc with
@@ -2568,7 +2596,7 @@ let simplify_llc static_indices llc =
             If
               {
                 cond = (c', cprec);
-                body = loop_proc ~ienv:(ienv_narrow_from_cond ienv c') body;
+                body = loop_proc ~ienv:(ienv_narrow_from_cond ienv ~cprec c') body;
               })
   and loop_scalar ~ienv ((llsc, prec) : scalar_t * Ops.prec) : scalar_t * Ops.prec =
     let loop_scalar = loop_scalar ~ienv in

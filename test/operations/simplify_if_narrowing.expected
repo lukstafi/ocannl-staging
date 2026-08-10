@@ -13,3 +13,5 @@ without it the same edge guard survives: true
 an inner guard implied by the outer one is erased: true
 a data-dependent guard narrows nothing: true
 an unsatisfiable conjunction is left alone: true
+a float-precision guard past its exact-integer range narrows nothing: true
+the same guard at the index precision narrows: true

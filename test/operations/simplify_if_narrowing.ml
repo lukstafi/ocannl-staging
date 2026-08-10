@@ -185,4 +185,25 @@ let () =
             (conj (lt (ivar k) (ic 1)) (lt (ic 0) (ivar k)))
             (set dst k (LL.Get (src, [| iter k |])))))
   in
-  p "an unsatisfiable conjunction is left alone" (ifs dead = 1)
+  p "an unsatisfiable conjunction is left alone" (ifs dead = 1);
+
+  (* --- Evaluation-precision soundness: past a float precision's exact-integer range the machine
+     comparison is not the mathematical one -- single represents [2^24 + 1] as [2^24], so a
+     single-precision guard [k <= 2^24] is machine-true at [k = 2^24 + 1] too, and narrowing from
+     it would fold the (index-precision) edge guard to the wrong branch there. The identical guard
+     evaluated at the index precision is exact and narrows. --- *)
+  let lim = 16777216 (* 2^24, [Interval.float_exact_int_limit] of single *) in
+  let prec_case ~cond_prec =
+    let dst = mk "sin_dst7" and src = mk "sin_src7" in
+    let k = sym () in
+    simplify
+      (loop ~to_:(lim + 1) k
+         (LL.If
+            {
+              cond = (LL.Binop (Ops.Cmple, (ivar k, cond_prec), (ic lim, cond_prec)), cond_prec);
+              body = set dst k (where_zero (le (ivar k) (ic lim)) src k);
+            }))
+  in
+  p "a float-precision guard past its exact-integer range narrows nothing"
+    (wheres (prec_case ~cond_prec:single) = 1);
+  p "the same guard at the index precision narrows" (wheres (prec_case ~cond_prec:iprec) = 0)
