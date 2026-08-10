@@ -1266,6 +1266,13 @@ let rec nest_loop_syms acc (llc : LL.t) =
    match the site's in arity and extents. A [None] must fail the candidate rather than fall back to a
    bare companion: on GPU there is no all-serial fallback.
 
+   The query runs at the site's own arity ([max_chain = length site_syms], gh-ocannl-569): the
+   analysis' default cap of 2 is the preset annotators' Grid+Workgroup shape, and under it a batched
+   (rank-3+) site could never match its full chain — every seed for gpt2's FFN-class kernels
+   declined here, serializing the minor output axis. A companion that genuinely cannot follow the
+   full arity (a reduction over the site's minor axis, e.g. the lm_head's max-logits row) still
+   trims the component's common prefix below [site_syms] and correctly declines.
+
    Residual, shared with the zeroing geometry this reuses: a tensorized nest's workgroup slot is the
    [Tensorize] lane, whose per-lane element ownership is architecture-opaque, so a per-lane companion
    reads cells other lanes of the same simdgroup produced. The threadgroup is exactly one simd width
@@ -1326,7 +1333,7 @@ let companion_geometry ~(site_syms : (Idx.symbol * int) list) ~(skip : Idx.symbo
       go stmt;
       String.concat ~sep:"," (List.dedup_and_sort ~compare:String.compare !acc)
     in
-    match Sched.aligned_chains ~expanded_zeros opt with
+    match Sched.aligned_chains ~max_chain:(List.length site_syms) ~expanded_zeros opt with
     | None ->
         Error
           (Printf.sprintf
