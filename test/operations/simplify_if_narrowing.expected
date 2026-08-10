@@ -15,3 +15,12 @@ a data-dependent guard narrows nothing: true
 an unsatisfiable conjunction is left alone: true
 a float-precision guard past its exact-integer range narrows nothing: true
 the same guard at the index precision narrows: true
+exec Cmplt block raw and simplified execute bitwise-identically: true
+exec Cmplt block executed values match a nonzero hand-computed reference: true
+exec unguarded block raw and simplified execute bitwise-identically: true
+exec unguarded block executed values match a nonzero hand-computed reference: true
+exec And mixed raw and simplified execute bitwise-identically: true
+exec And mixed executed values match a nonzero hand-computed reference: true
+a lower-bound guard folds a proven edge guard to its then-branch: true
+exec lower-bound raw and simplified execute bitwise-identically: true
+exec lower-bound executed values match a nonzero hand-computed reference: true
