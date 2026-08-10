@@ -510,6 +510,7 @@ val schedule_legality : Low_level.optimized -> schedule -> (optop * op_verdict) 
     an op that fails to apply reports [Op_illegal] with the exception. *)
 
 val aligned_chains :
+  ?max_chain:int ->
   ?expanded_zeros:Tn.t list ->
   Low_level.optimized ->
   (Low_level.t * (Indexing.symbol * int) list) list option
@@ -519,6 +520,12 @@ val aligned_chains :
     [k] of two linked nests denotes the same hardware thread coordinate and the two extents at
     position [k] are equal. [None] when the analysis bails, i.e. when the kernel is not safely
     parallelizable at all.
+
+    [max_chain] caps each nest's chain length; the default 2 mirrors the presets' one-Grid +
+    one-Workgroup shape. A caller supplying its own geometry per chain position passes the arity it
+    needs — a batched matmul site's chain is its batch loops plus row plus column, and capping at 2
+    made every rank-3+ site's companion coverage decline (gh-ocannl-569). The alignment rule itself
+    is arity-independent.
 
     The presets consume this to emit their own Grid/Workgroup-per-nest geometry. A sketch pipeline
     (autotune) consumes it to cover the nests it does {e not} build — a tensorized accumulation nest

@@ -235,7 +235,13 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   them. Residual, shared with the shipped zeroing geometry: a tensorized nest's workgroup slot is the
   opaque `Tensorize` lane, so a per-lane companion reads cells other lanes of the same simdgroup
   produced — safe only because the threadgroup is exactly one simd width; a cross-nest simdgroup
-  barrier is the formal fix.
+  barrier is the formal fix. Query the analysis at the SITE'S arity (`aligned_chains ?max_chain`,
+  default 2 = the presets' Grid+Workgroup shape): a batched matmul's chain is batch loops + row +
+  column, and under the default cap a rank-3+ site can never match its full chain, so every seed for
+  such a site declines on companion coverage — that single decline held gpt2_mini's five FFN-class
+  kernels at a 1024-thread launch, 70% of the CUDA step at 1.3% of fp32 peak (gh-ocannl-569). A
+  companion that reduces OVER the site's minor axis (the lm_head's max-logits row) trims the common
+  prefix below the site's arity and correctly still declines — that one needs fission, not coverage.
 - "`Tile_mma` is a barrier" is only half true, and the half that fails is the one barrier elision
   wants. Every rendering form ENDS the intrinsic block with a workgroup barrier, so a staging
   barrier that follows one is always redundant (`Schedule.elide_staged_barriers` drops it, and the

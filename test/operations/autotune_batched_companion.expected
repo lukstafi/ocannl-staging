@@ -1,0 +1,7 @@
+bc: scalar GPU seeds exist for the batched site: true
+bc: no seed declines on companion coverage: true
+bc: constructed schedules spread the minor output axis across Grid blocks: true
+bc: every unfused GPU seed compiles and computes correctly: true
+bc: tuned batched head matches the reference: true
+bc: the tuning census records no companion-coverage decline: true
+bc: reduction-over-j companion still declines every GPU seed: true
