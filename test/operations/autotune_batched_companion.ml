@@ -99,17 +99,24 @@ let () =
   let declines = List.filter_map constructed ~f:(function Either.Second e -> Some e | _ -> None) in
   p "bc: no seed declines on companion coverage" (List.is_empty declines);
   List.iter declines ~f:(fun e -> Stdio.eprintf "bc decline: %s\n" e);
-  (* The point of the fix is reach: the minor output axis (j = 64) must actually carry [Grid]
-     blocks in the constructed schedule, not merely survive construction. Every scalar GPU seed
-     splits each of i and j into (Grid, Serial) then (Workgroup, Serial); a schedule constructed
-     under the old rule could not exist at all, but guard against a future regression that
-     constructs a j-serial form. *)
+  (* The point of the fix is reach: the minor output axis (j) must actually carry [Grid] blocks in
+     the constructed schedule, not merely survive construction. A schedule constructed under the
+     old rule could not exist at all, but guard against a future regression that constructs a
+     j-serial form: the split must be a real spread (factor < extent) of an axis of j's extent —
+     m = 64 is unique to the minor output axis here (b = 4, i = 32, k = 16), in the site's nest
+     and its companions alike. *)
+  let bounds = LL.loop_bounds opt.LL.llc in
   let spreads_j sched =
     List.exists sched ~f:(function
-      | Sched.Split { factor; outer = LL.Grid; _ } -> factor < m
+      | Sched.Split { axis; factor; outer = LL.Grid; _ } -> (
+          factor < m
+          &&
+          match List.Assoc.find bounds axis ~equal:Ir.Indexing.equal_symbol with
+          | Some (0, hi) -> hi + 1 = m
+          | _ -> false)
       | _ -> false)
   in
-  p "bc: constructed schedules spread an output axis across Grid blocks"
+  p "bc: constructed schedules spread the minor output axis across Grid blocks"
     (List.for_all constructed ~f:(function Either.First s -> spreads_j s | _ -> false));
 
   (* Executable parity, seed by seed, on backends that can run shared staging. Vacuous on cc —
@@ -152,13 +159,17 @@ let () =
   let got = Context.get_values ctx y.Tensor.value in
   p "bc: tuned batched head matches the reference"
     (Array.for_all2_exn got expected ~f:(fun a b -> Float.(abs (a - b) < 1e-3)));
+  (* Exactly one report, then its census — a vacuous [for_all] over zero reports would claim the
+     census was clean without having inspected one. *)
   p "bc: the tuning census records no companion-coverage decline"
-    (List.for_all !reports ~f:(fun r ->
-         List.for_all r.Autotune.declines ~f:(fun d ->
-             match d.Autotune.key with
-             | Ir.Schedule_outcome.Unsupported_key k ->
-                 not (String.equal k "autotune_sketch_companion_coverage")
-             | _ -> true)));
+    (match !reports with
+    | [ r ] ->
+        List.for_all r.Autotune.declines ~f:(fun d ->
+            match d.Autotune.key with
+            | Ir.Schedule_outcome.Unsupported_key k ->
+                not (String.equal k "autotune_sketch_companion_coverage")
+            | _ -> true)
+    | _ -> false);
 
   (* The safety boundary the lifted arity must NOT cross (the lm_head shape): a companion that
      REDUCES over the site's minor output axis reads cells every j-block wrote, with no intra-kernel
