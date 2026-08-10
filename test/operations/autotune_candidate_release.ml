@@ -20,7 +20,10 @@
    not released, it reads 0,1,2,3,...,17 — exactly one per candidate, to the end.
 
    WORKING pools specifically, and the size below is chosen so that the distinction is not academic.
-   At n = 128 the search seeds hoisted [Stage] candidates (the [hoist] labels), and each application of
+   At n = 128 the search seeds hoisted [Stage] candidates (the [hoist] labels) wherever that family
+   exists — a CPU one: [Autotune.matmul_seed_params] proposes [sk_hoist] only in its [is_cpu]
+   branch, so on a GPU backend the constant class stays empty and the last assertion below reads the
+   other side of its equivalence. Each application of
    that transform mints a FRESH packed-constant tnode, which [allocate_delta] routes into the
    per-device constant pool and registers in [constant_buffer_cache] under a unique key. Context
    release skips every key in that cache — deliberately, since constants are shared per device and
@@ -45,11 +48,12 @@ let clean_cache dir =
     Array.iter (Stdlib.Sys.readdir dir) ~f:(fun f ->
         Stdlib.Sys.remove (Stdlib.Filename.concat dir f))
 
-(* Samples of the census taken between candidates, oldest first. *)
+(* Samples of the census taken between candidates, oldest first, paired with the label of the
+   candidate each sample precedes. *)
 let sample_between_candidates f =
   let samples = ref [] in
   (Autotune.on_candidate_attempt :=
-     fun _label -> samples := Ir.Alloc_census.snapshot () :: !samples);
+     fun label -> samples := (label, Ir.Alloc_census.snapshot ()) :: !samples);
   let result =
     Exn.protect ~f ~finally:(fun () -> Autotune.on_candidate_attempt := fun _ -> ())
   in
@@ -73,11 +77,12 @@ let () =
 
   let cache_dir = "autotune_candidate_release_cache" in
   clean_cache cache_dir;
-  let (ctx_t, routine_t), samples =
+  let (ctx_t, routine_t), attempts =
     sample_between_candidates (fun () ->
         Autotune.tune ~beam_width ~rounds:1 ~repeats:1 ~cache_dir (Context.auto ()) comp
           Ir.Indexing.Empty)
   in
+  let labels = List.map attempts ~f:fst and samples = List.map attempts ~f:snd in
   (* A search that timed one or two candidates would satisfy every bound below vacuously. *)
   p "the search attempted enough candidates for accumulation to show"
     (List.length samples >= 8);
@@ -135,8 +140,23 @@ let () =
 
   (* Hoisting coverage is a precondition, not a decoration: without hoisted candidates the assertions
      above hold for a workload that never exercised the working/constant split, and this test would be
-     quietly weaker than it reads. *)
-  p "the search exercised hoisted staging (so the working/constant split is under test)"
-    (after.Ir.Alloc_census.constant_pools_allocated
-     - first.Ir.Alloc_census.constant_pools_allocated
-    > 4)
+     quietly weaker than it reads.
+
+     Whether this workload HAS hoisted candidates is a backend fact, not a workload fact:
+     [Autotune.matmul_seed_params] proposes [sk_hoist] only from its [is_cpu] branch — link-time
+     packing of a constant operand into a panel is a CPU packing family — so on a GPU backend no
+     candidate mints a packed-constant tnode and the constant class cannot grow. Asserting growth
+     outright is therefore false on Metal/CUDA, and dropping the assertion would hide the vacuity on
+     every backend at once. Asserted as the equivalence instead: the constant class grows exactly
+     where the search attempted hoisted candidates. On cc that reads "44 hoist labels, +50 constant
+     pools" and pins the split as before; on Metal it reads "no hoist labels, no constant growth" and
+     pins that the working-pool bounds above were measured on a search with nothing in the other
+     class — which is what makes them the whole story there. Either way a search that stopped minting
+     packed constants while still seeding hoisted candidates fails it. *)
+  let hoisted_attempted = List.exists labels ~f:(String.is_substring ~substring:" hoist") in
+  let constant_growth =
+    after.Ir.Alloc_census.constant_pools_allocated
+    - first.Ir.Alloc_census.constant_pools_allocated
+  in
+  p "the constant class grows exactly where the search seeded hoisted staging"
+    (Bool.equal hoisted_attempted (constant_growth > 4))
