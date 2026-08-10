@@ -141,6 +141,22 @@
 
 ### Fixed
 
+- **The schedule cache key covers the numerics policy** (gh-ocannl-568). `Ir.Numerics.t`
+  (`tf32_matmuls`, `narrow_compute_f32`, `fp16_arithmetic`) is chosen by the user and consulted at
+  codegen, not baked into the lowered code, so two runs differing only in it produced an equal
+  canonical digest — and the disk cache keyed on that digest plus the backend name alone. A
+  default-flags run sharing a cache directory with a tf32-tuned search therefore reported an
+  ordinary cache hit and replayed the tf32-tuned tensorized winner, whose mma rendering degrades to
+  the scalar fallback under the stricter numerics: measured at 1111.93 ms/step, 5.9x slower than not
+  tuning at all, silently. It also broke `Ir.Numerics`'s invariant that the policy is identical
+  across sibling candidates, a replayed winner being a candidate from another policy regime. The
+  key now ends in a digest of the policy record — derived from its sexp, so a knob added to that
+  deliberately open-ended record is covered by construction — and the entry records the same tag,
+  checked alongside the source digest on replay. Regimes coexist in one directory instead of
+  cross-replaying, so the cache-wipe discipline of the tf32-vs-default sweep protocols is no longer
+  the only thing standing between an A/B and a fictitious 6x regression. Entries written before
+  this change are invalidated (`entry_version` 4): one cold search per program.
+
 - **A fixable mistake before a timing run no longer condemns the autotuner's lineage**
   (gh-ocannl-564). `Context.run` validates — poisoned lineage, uninitialized inputs, unsatisfied
   execution dependencies, out-of-range static bindings — *before* it dispatches, but the candidate

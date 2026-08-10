@@ -146,9 +146,21 @@ val of_saved : canonical -> saved_schedule -> Schedule.schedule * registry
 
 (** {2 The disk cache} *)
 
+val numerics_tag : unit -> string
+(** A filename-safe short digest of the current {!Ir.Numerics} policy ({!Ir.Numerics.get}, so it
+    tracks {!Ir.Numerics.set_policy}). The policy is not a property of the code — it is consulted at
+    codegen and by the autotune tile-shape choice — so it cannot enter {!digest}, yet a schedule
+    tuned under one policy must never replay under another (gh-ocannl-568: a default-flags run
+    replaying a tf32-tuned tensorized winner measured 5.9x slower than not tuning at all, its mma
+    rendering degraded to the scalar fallback). Hence it enters {!cache_key} and {!entry}. *)
+
 type entry = {
   version : int;
   backend : string;
+  numerics : string;
+      (** {!numerics_tag} of the policy the search ran under; redundant with the key, which carries
+          the same tag, so it is a self-description of the file and a guard for a hand-moved
+          entry. *)
   source_digest : string;
   saved : saved_schedule;
   segments : (string * saved_schedule) list option; [@sexp.option]
@@ -183,9 +195,9 @@ val entry_version : int
     ignored by {!lookup}. *)
 
 val cache_key : canonical -> backend:string -> string
-(** Filename-safe cache key: the digest plus the backend name. Callers time kernels on a concrete
-    device, so include anything else that distinguishes performance environments in [backend] (e.g.
-    a device id) if needed. *)
+(** Filename-safe cache key: the digest, the backend name, and {!numerics_tag} of the current
+    numerics policy. Callers time kernels on a concrete device, so include anything else that
+    distinguishes performance environments in [backend] (e.g. a device id) if needed. *)
 
 val store : dir:string -> key:string -> entry -> unit
 (** Writes the entry to [dir]/[key].sexp, creating [dir] (and parents) if missing. Tolerates

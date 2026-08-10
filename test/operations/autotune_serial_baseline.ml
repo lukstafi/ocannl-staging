@@ -148,6 +148,7 @@ let () =
     {
       SC.version = SC.entry_version;
       backend;
+      numerics = SC.numerics_tag ();
       source_digest = SC.digest canon;
       saved = [];
       segments = None;

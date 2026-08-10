@@ -266,7 +266,12 @@ the retained procedural analyses alongside the affine engine and raises on diver
   kernel.
 - **Caching**: winners persist in `autotune_cache_dir`, keyed by `Schedule_cache.canonicalize` —
   an alpha-renamed structural digest of the optimized code including dims, precisions, operand
-  hoistability, and placement classes. Cached schedules rebind their symbols onto the fresh
+  hoistability, and placement classes — plus the backend name and a digest of the numerics
+  policy. The policy is *not* a property of the code (the backends consult `Ir.Numerics` at
+  codegen), so without it in the key a default-flags run would report an ordinary cache hit on a
+  tf32-tuned tensorized winner and replay it through the scalar fallback — measured at 5.9x
+  slower than not tuning at all (gh-ocannl-568). Policies therefore keep separate entries and can
+  share a cache directory. Cached schedules rebind their symbols onto the fresh
   lowering at each compile; a digest guard rejects stale entries. **Schedule identity pins
   numerics** (gh-ocannl-484): a reduction-reassociating op (`Split_reduce`, `Swap`/`Vectorized`
   over accumulations, `Tensorize`) makes the computed values a function of the schedule — e.g.

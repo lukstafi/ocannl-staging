@@ -1332,6 +1332,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name schedule_cache_numerics)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules schedule_cache_numerics)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name fission_equivalence)
  (package neural_nets_lib)
  (deps
