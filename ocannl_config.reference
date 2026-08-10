@@ -326,7 +326,11 @@
 #autotune_repeats=3
 
 # Directory of the autotuner's schedule disk cache, keyed by the canonical digest of the
-# optimized code and the backend name. Relative paths resolve against the working directory.
+# optimized code, the backend name, and a digest of the numerics policy (tf32_matmuls,
+# narrow_compute_f32, fp16_arithmetic -- gh-ocannl-568: the policy is not part of the code, so
+# without it a default-flags run would replay a tf32-tuned winner it cannot render). Runs under
+# different numerics policies therefore keep separate entries and can share one directory.
+# Relative paths resolve against the working directory.
 # An empty value disables the cache (every `Autotune.tune` call searches afresh).
 #autotune_cache_dir=autotune_cache
 
