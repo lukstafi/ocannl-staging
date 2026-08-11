@@ -43,6 +43,7 @@ module Tn = Ir.Tnode
 module LL = Ir.Low_level
 module Sched = Ir.Schedule
 module SC = Ir.Schedule_cache
+module SO = Ir.Schedule_outcome
 module Asgns = Ir.Assignments
 module Numerics = Ir.Numerics
 
@@ -509,6 +510,96 @@ let () =
            ]
          in
          ignore (Sched.apply schedule opt : LL.optimized)));
+
+  (* --- The RENDERER's own precondition, one level below schedule application (gh-ocannl-569). The
+     rotation term selects the copy for the current rotor iteration, so a read of a pipelined tile
+     reached outside its rotor loop has no copy to name and the renderer must refuse it. Schedule
+     application does not catch this — it validates the anchor, not every later read's position —
+     so a candidate can construct and only fail at render, which is how it reached a Metal search
+     as a hard [Invalid_argument] out of [C_syntax] and, unclassified at [Backend_codegen] under
+     [strict_failure_classification], ended the whole search. Typed, it is one candidate's decline.
+
+     Probed by pointing the applied depth-2 schedule's rotors at a symbol that encloses nothing —
+     which is what "outside its rotor loop" is, without needing the particular composition that
+     produced one. The public boundary is unchanged: [Context.compile] still renders the same
+     [Invalid_argument] for a hand-written schedule. --- *)
+  let rotorless_transform ~out opt =
+    let schedule, _ = staged_schedule ~pipeline_depth:2 ~out opt in
+    let applied = Sched.apply schedule opt in
+    let stray = Ir.Indexing.get_symbol () in
+    {
+      applied with
+      LL.pipelined = Map.map applied.LL.pipelined ~f:(fun pt -> { pt with LL.pt_rotor = stray });
+    }
+  in
+  (* The sibling precondition, checked up front in [compile_proc]: the rotation counter is the rotor
+     loop's SERIAL counter, so a rotor that is no longer Serial would silently freeze the buffer
+     selection at copy 0. A composition that retypes the anchor after the stages were applied
+     reaches it — which is what ended a Metal [autotune_candidate_release] search. *)
+  let unserial_rotor_transform ~out opt =
+    let schedule, _ = staged_schedule ~pipeline_depth:2 ~out opt in
+    let applied = Sched.apply schedule opt in
+    (* Re-pointed rather than retyped in place: retyping the anchor loop itself makes the
+       accumulation race and [Low_level.validate_parallel] — which runs first — declines it for that
+       instead, never reaching the rotor check. Pointing the rotor at a loop the composition already
+       parallelized leaves the IR valid and isolates the check under test. *)
+    let rec first_parallel (llc : LL.t) : Ir.Indexing.symbol option =
+      match llc with
+      | LL.For_loop { index; axis; body; _ } -> (
+          match axis with
+          | LL.Serial -> first_parallel body
+          | _ -> Some index)
+      | LL.Seq (a, b) -> (
+          match first_parallel a with Some _ as r -> r | None -> first_parallel b)
+      | LL.If { body; _ } -> first_parallel body
+      | _ -> None
+    in
+    let rotor = Option.value_exn (first_parallel applied.LL.llc) in
+    {
+      applied with
+      LL.pipelined = Map.map applied.LL.pipelined ~f:(fun pt -> { pt with LL.pt_rotor = rotor });
+    }
+  in
+  let declines_at_codegen ~feature ~substring transform =
+    let%op mcr = ma * mb in
+    match
+      Context.compile_outcome ~lowered_transform:(transform ~out:mcr.Tensor.value)
+        ~provenance:SO.Candidate ~candidate:feature (Context.auto ())
+        (named ("pipe_mm_" ^ feature) (Train.forward mcr))
+        Ir.Indexing.Empty
+    with
+    | Ok _ | Error (SO.Fatal _) -> false
+    | Error (SO.Classified { phase; cause; execution_effect }) -> (
+        SO.equal_phase phase SO.Backend_codegen
+        && SO.equal_execution_effect execution_effect SO.No_device_writes
+        &&
+        match cause with
+        | SO.Unsupported { feature = f; detail } ->
+            String.equal f feature && String.is_substring detail ~substring
+        | _ -> false)
+  in
+  if on_gpu then (
+    p "a read outside the rotor loop is a candidate's typed decline, not a fatal"
+      (declines_at_codegen ~feature:"pipelined tile read outside its rotor loop"
+         ~substring:"outside its rotor loop" rotorless_transform);
+    p "so is a pipelined tile whose rotor loop is not Serial"
+      (declines_at_codegen ~feature:"pipelined tile whose rotor loop is not Serial"
+         ~substring:"no longer Serial" unserial_rotor_transform);
+    let%op mcr2 = ma * mb in
+    expect_invalid "and the same schedule written by hand still raises at Context.compile"
+      ~substring:"outside its rotor loop" (fun () ->
+        ignore
+          (Context.compile ~lowered_transform:(rotorless_transform ~out:mcr2.Tensor.value)
+             (Context.auto ())
+             (named "pipe_mm_rotorless_user" (Train.forward mcr2))
+             Ir.Indexing.Empty
+            : Context.t * Context.routine)))
+  else (
+    (* The C backends reject the workgroup-shared composition before either check is reached, so the
+       renderer's preconditions are unreachable here. *)
+    skipped "a read outside the rotor loop is a candidate's typed decline, not a fatal";
+    skipped "so is a pipelined tile whose rotor loop is not Serial";
+    skipped "and the same schedule written by hand still raises at Context.compile");
 
   (* --- Seeding pin (gh-ocannl-487): the depth twins follow the backend's advertised
      [mma_pipeline_depths] — one twin per staged seed per advertised depth, identical to its plain

@@ -1780,9 +1780,24 @@ module C_syntax (B : C_syntax_config) = struct
           ^^ string (" * " ^ Int.to_string (Tn.num_elems tn) ^ " + ")
         else if is_write then (* The prologue load: copy 0 at offset 0. *) empty
         else
-          invalid_arg
-            ("C_syntax: read of pipelined tile " ^ Tn.debug_name tn
-           ^ " outside its rotor loop (the schedule only remaps reads within the staging scope)")
+          (* No copy of the rotating buffer is the right one here: outside the rotor loop there is no
+             rotor value to select with. A schedule that puts such a read there is one this renderer
+             cannot express, so it is a typed decline rather than a bare [invalid_arg]: reached as a
+             tuner candidate (a pipelined twin surviving into a beam round), an untyped exception is
+             classified [Fatal] under [strict_failure_classification] and ends the whole search. At
+             the public [Context.compile] boundary [Schedule_outcome.raise_cause] still renders it as
+             the same [Invalid_argument] carrying this message. *)
+          raise
+            (Schedule_outcome.Cause_at
+               ( Schedule_outcome.Backend_codegen,
+                 Schedule_outcome.Unsupported
+                   {
+                     feature = "pipelined tile read outside its rotor loop";
+                     detail =
+                       "C_syntax: read of pipelined tile " ^ Tn.debug_name tn
+                       ^ " outside its rotor loop (the schedule only remaps reads within the \
+                          staging scope)";
+                   } ))
 
   (* Recognize the exact scalar fallback region synthesized by
      [Schedule.contract_tensorized_accumulator]:
@@ -4093,7 +4108,10 @@ module C_syntax (B : C_syntax_config) = struct
     current_pipelined := pipelined;
     (* gh-487 sanity: the rotation renders off the rotor loop's serial counter; a schedule that
        later retyped the rotor to a hardware axis would otherwise silently freeze the buffer
-       selection at copy 0 ([serial_loop_stack] only tracks serial loops). *)
+       selection at copy 0 ([serial_loop_stack] only tracks serial loops). Typed for the same reason
+       as the read-position check in [pp_pipelined_rotation]: both say "this renderer cannot express
+       that pipelined tile", and a candidate composing its way into one is a decline, not a fatal
+       that ends the search around it. *)
     (if not (Map.is_empty pipelined) then
        let check_rotor index axis =
          Map.iteri pipelined ~f:(fun ~key:tn ~data:{ Low_level.pt_rotor; _ } ->
@@ -4101,9 +4119,16 @@ module C_syntax (B : C_syntax_config) = struct
                match axis with
                | Low_level.Serial -> ()
                | _ ->
-                   invalid_arg
-                     ("C_syntax.compile_proc: the rotor loop of pipelined tile " ^ Tn.debug_name tn
-                    ^ " is no longer Serial"))
+                   raise
+                     (Schedule_outcome.Cause_at
+                        ( Schedule_outcome.Backend_codegen,
+                          Schedule_outcome.Unsupported
+                            {
+                              feature = "pipelined tile whose rotor loop is not Serial";
+                              detail =
+                                "C_syntax.compile_proc: the rotor loop of pipelined tile "
+                                ^ Tn.debug_name tn ^ " is no longer Serial";
+                            } )))
        in
        let rec scan (llc : Low_level.t) =
          match llc with

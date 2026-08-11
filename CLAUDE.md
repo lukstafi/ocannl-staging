@@ -140,9 +140,12 @@ design history) that is not derivable from the code alone.
 
 ### Pull Requests
 
-- Prefer a series of 3-4 topical commits (one per coherent sub-feature) plus follow-up fixing commits, merged with a merge commit that preserves the series — not one big squashed commit. The series documents the design decomposition and keeps each piece independently reviewable and bisectable
+- A **PR accomplishes a goal**: one thing that is true about the system afterwards and was not before, stated in its title. Scope it generously — carry the goal to its natural completion (the change, the tests that pin it, the docs it justifies, the follow-on cleanups it exposes) rather than stopping at the smallest reviewable increment and opening three PRs. Velocity and clarity comes from finishing a goal in one pass
+- A **commit is one move toward the goal**, not one slice of the work by artifact type. Whatever a move needs — the logic change, the tests that pin it, its `.expected` goldens, the doc or agent-note it justifies — belongs in that one commit. Splitting a change away from its own tests or documentation makes the series harder to read, not easier
+- A goal usually takes several moves, so a series of topical commits is the norm — merged with a merge commit that preserves the series
+- When you notice unrelated code smells or design problems, file separate issues
+- Follow-up fixing commits are fine, and test-expectation promotions that span several topics can land in a final tests/promotions commit
 - Each commit should at least compile: loop `git checkout <rev> && dune build @check` over `git rev-list --reverse master..HEAD` (interactive rebase is unavailable in this harness)
-- Test-expectation promotions that mix topics can land in a final tests/promotions commit
 
 ### Configuration
 

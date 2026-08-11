@@ -255,6 +255,25 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   is an executed BITWISE comparison against the same schedule with barriers re-inserted
   (`schedule_pipelined_matmul`) — adding barriers is always conservative, which makes that reference
   sound no matter what the elision does.
+- A schedule can pass `Schedule.apply`'s validation and still be one the RENDERER cannot express:
+  the pipelined-tile checks in `c_syntax.ml` (a read reached outside its rotor loop; a rotor loop no
+  longer `Serial`) are positional facts about the final IR, which schedule application does not
+  re-derive. Such a check must raise `Schedule_outcome.Cause_at (Backend_codegen, Unsupported …)`,
+  not `invalid_arg` — an untyped exception at a compile-side phase is `Fatal` under
+  `strict_failure_classification`, so one composed candidate ends the whole search (seen on Metal
+  searches over `tile_acr_ma`). `raise_cause` re-renders the same `Invalid_argument` at the public
+  `Context.compile` boundary, so typing one costs nothing for hand-written schedules. To probe a
+  renderer precondition in a test, do surgery on the applied `optimized` (re-point `pt_rotor`)
+  rather than retyping loops — a retyped anchor trips `Low_level.validate_parallel` first and never
+  reaches the check under test.
+- Autotune fault injection keyed by ATTEMPT INDEX (`Autotune.on_candidate_attempt`) is
+  backend-dependent and silently vacuous: how many attempts precede an arm's first *timed* candidate
+  varies. On Metal a small matmul's materialize-all arm has a baseline binding no hardware dimension
+  (gh-532), and its whole `W_preset` block then dedups against that same digest — six attempts, none
+  timed. Count timing runs with `Autotune.on_candidate_preflight` (one per timing run) and inject
+  relative to that. Relatedly, hoisted (link-time packed) `Stage` candidates are a CPU family only —
+  `matmul_seed_params` proposes `sk_hoist` from its `is_cpu` branch — so any test precondition about
+  packed-constant pools is false on GPU backends and has to be stated as an equivalence.
 - "Seeded" is not "timed". An autotune family can be enumerated in bulk and rejected in bulk at
   candidate compile, and a count of proposals then reads as coverage it does not have — assert on
   the *timed* counter (`report.mma_timed`, `fiss_sketch_timed`, `split_reduce_timed`), and follow it
