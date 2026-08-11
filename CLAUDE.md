@@ -140,9 +140,10 @@ design history) that is not derivable from the code alone.
 
 ### Pull Requests
 
-- Prefer a series of 3-4 topical commits (one per coherent sub-feature) plus follow-up fixing commits, merged with a merge commit that preserves the series — not one big squashed commit. The series documents the design decomposition and keeps each piece independently reviewable and bisectable
+- A commit is one **move in the design**, not one slice of the work by artifact type. Whatever a move needs — the logic change, the tests that pin it, its `.expected` goldens, the doc or agent-note it justifies — belongs in that one commit. Splitting a change away from its own tests or documentation makes the series harder to read, not easier
+- So prefer a series of topical commits over one squashed commit, merged with a merge commit that preserves the series — but let the work decide the count. A PR making one coherent move is one commit; three independent moves are three. There is no target number, and padding a series to hit one is the failure mode this rule guards against
+- Follow-up fixing commits are fine, and test-expectation promotions that span several topics can land in a final tests/promotions commit
 - Each commit should at least compile: loop `git checkout <rev> && dune build @check` over `git rev-list --reverse master..HEAD` (interactive rebase is unavailable in this harness)
-- Test-expectation promotions that mix topics can land in a final tests/promotions commit
 
 ### Configuration
 
