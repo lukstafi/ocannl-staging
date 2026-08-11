@@ -168,8 +168,10 @@ Key points:
 - New tensor convenience functions: tensor/operation.ml (use %cd for forward/backprop).
 - Shape/projection changes: tensor/shape.ml, tensor/row.ml, arrayjit/lib/indexing.ml.
 - Add tests under test/ (einsum/operations/training/ppx as appropriate).
-- Prefer 3-4 coherent, independently compiling commits over one large squash; expectation-only
-  changes may be grouped in a final test/promotions commit.
+- Prefer a series of coherent, independently compiling commits over one large squash, with each
+  commit one move in the design — its logic change, the tests pinning it, and the docs it justifies
+  together, not split apart by artifact type. Let the work decide the count; expectation-only
+  changes may be grouped in a final test/promotions commit. See CLAUDE.md "Pull Requests".
 - When creating commits, include the work summary in the commit message and credit yourself as a co-author.
 
 ## Debugging & Logs
