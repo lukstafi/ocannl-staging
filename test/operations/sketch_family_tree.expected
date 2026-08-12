@@ -241,3 +241,11 @@ tree leaves = flat enumeration: true
   pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk256: packed tiles (589824 bytes) exceed the 262144-byte stack/cache-economy threshold (heuristic, not a compiler limit)
   pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk256: packed tiles (589824 bytes) exceed the 262144-byte stack/cache-economy threshold (heuristic, not a compiler limit)
 wide-N leaves: 10; with exclusions lifted: 11
+search with bounds: best=u1@1.0 stats=((st_expanded 3) (st_scored 4) (st_unscored 0) (st_fathomed 1) (st_refuted 1)
+ (st_excluded 1) (st_unknown 1))
+search without bounds: best=u1@1.0 stats=((st_expanded 4) (st_scored 5) (st_unscored 0) (st_fathomed 0) (st_refuted 1)
+ (st_excluded 1) (st_unknown 1))
+ties: first best wins: best=t1@2.0 stats=((st_expanded 1) (st_scored 2) (st_unscored 0) (st_fathomed 0) (st_refuted 0)
+ (st_excluded 0) (st_unknown 0))
+cost bound fathoms above a nested Unknown: best=good@3.0 stats=((st_expanded 1) (st_scored 1) (st_unscored 0) (st_fathomed 1) (st_refuted 0)
+ (st_excluded 0) (st_unknown 0))

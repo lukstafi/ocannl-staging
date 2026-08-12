@@ -4074,6 +4074,60 @@ let model_default ?report ctx comp bindings =
             Int.incr n_rejected;
             None
       in
+      let score_sketch base_opt p =
+        match
+          Sched.apply_classified ~static_indices (sketch_schedule ~p base_opt)
+            (scratch_of base_opt)
+        with
+        | exception Outcome.Cause_at _ ->
+            Int.incr n_rejected;
+            None
+        | post -> score_valid [ post ]
+      in
+      (* The branch-and-bound walk over the factored matmul family (gh-ocannl-514 phase 4):
+         verdict-carrying children are the construction-time fathoms, and the schedule-invariant
+         roofline floor is the bound — sketch completions share the base program's semantics, so
+         [completion_floor] lower-bounds every one uniformly; it fathoms the whole family exactly
+         when the incumbent already achieves it (the memory-bound kernels where the default
+         preset is optimal). Per-subtree differentiation of the bound needs symbolic tile extents
+         (phase 5). [None] = no matmul site: the caller keeps the flat path (conv seeds, which
+         factor as a follow-up). Returns the first leaf strictly better than [incumbent]. *)
+      let tree_search ~incumbent base_opt =
+        match matmul_sketch_tree ~is_gpu ~is_cpu ~limits base_opt with
+        | None -> None
+        | Some tree ->
+            let fb =
+              let f = CM.completion_floor base_opt.LL.llc in
+              CM.roofline_seconds ?peak_flops ?peak_memory_bandwidth ~flops:f.CM.fr_flops
+                ~bytes:f.CM.fr_bytes ()
+            in
+            (* Snapshot the caller-side counters so the log can split the driver's unscored
+               leaves into compiler rejections vs genuine no-coverage — st_unscored alone would
+               misclassify rejections as cost-model gaps in the phase-6 ledger. *)
+            let r0 = !n_rejected and k0 = !n_skipped in
+            let best, stats =
+              Sspace.search ~bound:(fun _sub -> fb) ~incumbent ~score:(score_sketch base_opt)
+                tree
+            in
+            logf
+              "model_default: family search: %d expanded, %d scored, %d unscored (%d rejected, \
+               %d without coverage), %d fathomed (bound %s), %d refuted, %d excluded"
+              stats.Sspace.st_expanded stats.Sspace.st_scored stats.Sspace.st_unscored
+              (!n_rejected - r0) (!n_skipped - k0) stats.Sspace.st_fathomed
+              (match fb with Some b -> Printf.sprintf "%.6f ms" (b *. 1e3) | None -> "n/a")
+              stats.Sspace.st_refuted stats.Sspace.st_excluded;
+            Some best
+      in
+      (* First leaf strictly under [threshold], in list order — the flat counterpart the
+         not-yet-factored levels (epilogue twins) go through, after the tree's leaves like the
+         flat enumeration's seeds-then-twins order. *)
+      let best_flat ~threshold base_opt ps =
+        List.fold ps ~init:(None, threshold) ~f:(fun (best, th) p ->
+            match score_sketch base_opt p with
+            | Some sc when Float.(sc < th) -> (Some (p, sc), sc)
+            | _ -> (best, th))
+        |> fst
+      in
       let default_segs () =
         Sched.maybe_default_schedules ~backend_name:backend ~limits ~static_indices opt
       in
@@ -4096,19 +4150,29 @@ let model_default ?report ctx comp bindings =
           | Some ds -> (
               (* Whole-routine sketch candidates. A candidate without coverage is skipped — it is
                  never picked over the default without a measured run ({!tune} covers that). *)
-              let whole =
-                List.filter_map (sketch_seed_params ~is_gpu ~is_cpu ~limits opt) ~f:(fun p ->
-                    match
-                      Sched.apply_classified ~static_indices (sketch_schedule ~p opt)
-                        (scratch_of opt)
-                    with
-                    | exception Outcome.Cause_at _ ->
-                        Int.incr n_rejected;
-                        None
-                    | post -> Option.map (score_valid [ post ]) ~f:(fun s -> (p, s)))
+              let whole_best =
+                match tree_search ~incumbent:ds opt with
+                | Some tree_best ->
+                    (* Matmul site: the tree's leaves searched with the default as incumbent;
+                       the epilogue twins compete after them at the tightened threshold. *)
+                    let twins =
+                      List.filter (sketch_seed_params ~is_gpu ~is_cpu ~limits opt) ~f:(fun p ->
+                          p.sk_epilogue)
+                    in
+                    let th =
+                      match tree_best with Some (_, sc) -> Float.min ds sc | None -> ds
+                    in
+                    (match best_flat ~threshold:th opt twins with
+                    | Some _ as tb -> tb
+                    | None -> tree_best)
+                | None ->
+                    (* No matmul site: the flat path covers the conv family. *)
+                    best_flat ~threshold:ds opt (sketch_seed_params ~is_gpu ~is_cpu ~limits opt)
               in
               let contenders =
-                List.map whole ~f:(fun (p, s) -> (spec_label (Whole (W_sketch p)), s, `Whole p))
+                match whole_best with
+                | Some (p, sc) -> [ (spec_label (Whole (W_sketch p)), sc, `Whole p) ]
+                | None -> []
               in
               (* Per-segment sketch substitution over the default fission segmentation (only when
                  the default actually fissioned; otherwise the whole-routine sketches cover the
@@ -4130,24 +4194,35 @@ let model_default ?report ctx comp bindings =
                             match kind with
                             | `Zeros | `Solo -> None
                             | `Normal -> (
-                                let base_score = score [ post ] in
-                                let best_sketch =
-                                  List.filter_map (sketch_seed_params ~is_gpu ~is_cpu ~limits pre)
-                                    ~f:(fun p ->
-                                      match
-                                        Sched.apply_classified ~static_indices
-                                          (sketch_schedule ~p pre)
-                                          (scratch_of pre)
-                                      with
-                                      | exception Outcome.Cause_at _ ->
-                                          Int.incr n_rejected;
-                                          None
-                                      | sp -> Option.map (score_valid [ sp ]) ~f:(fun s -> (p, s)))
-                                  |> List.min_elt ~compare:(fun (_, a) (_, b) -> Float.compare a b)
-                                in
-                                match (base_score, best_sketch) with
-                                | Some bs, Some (p, s) when Float.(s < bs) -> Some (seg_key pre, p)
-                                | _ -> None))
+                                match score [ post ] with
+                                | None -> None
+                                | Some bs -> (
+                                    (* The segment's family tree searched with the segment's own
+                                       default-preset score as incumbent; conv segments keep the
+                                       flat path. *)
+                                    let best_sketch =
+                                      match tree_search ~incumbent:bs pre with
+                                      | Some tree_best -> (
+                                          let twins =
+                                            List.filter
+                                              (sketch_seed_params ~is_gpu ~is_cpu ~limits pre)
+                                              ~f:(fun p -> p.sk_epilogue)
+                                          in
+                                          let th =
+                                            match tree_best with
+                                            | Some (_, sc) -> Float.min bs sc
+                                            | None -> bs
+                                          in
+                                          match best_flat ~threshold:th pre twins with
+                                          | Some _ as tb -> tb
+                                          | None -> tree_best)
+                                      | None ->
+                                          best_flat ~threshold:bs pre
+                                            (sketch_seed_params ~is_gpu ~is_cpu ~limits pre)
+                                    in
+                                    match best_sketch with
+                                    | Some (p, _s) -> Some (seg_key pre, p)
+                                    | None -> None)))
                       in
                       if List.is_empty entries then None
                       else
