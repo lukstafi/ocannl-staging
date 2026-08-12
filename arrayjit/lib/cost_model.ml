@@ -158,3 +158,121 @@ let roofline_seconds ?peak_flops ?peak_memory_bandwidth ~flops ~bytes () : float
       ]
   in
   match legs with [] -> None | l -> Some (List.reduce_exn l ~f:Float.max)
+
+module Calibration = struct
+  (* The calibration TSV schema and the envelope fitter over it (gh-ocannl-514 phase 0). This
+     module is the schema's single owner: rows are emitted through [to_line] (Autotune) and read
+     back through [of_line] (tools/fit_envelope.exe), so writer and reader cannot drift apart. *)
+
+  type row = {
+    backend : string;
+    digest : string;
+    label : string;
+    measured_ms : float;
+    model_ms : float option;
+    kernels : int;
+    flops : int;
+    bytes : int;
+    opaque : bool;
+  }
+  [@@deriving sexp_of]
+
+  let to_line r =
+    Printf.sprintf "%s\t%s\t%s\t%.6f\t%s\t%d\t%d\t%d\t%b" r.backend r.digest r.label r.measured_ms
+      (match r.model_ms with Some m -> Printf.sprintf "%.6f" m | None -> "")
+      r.kernels r.flops r.bytes r.opaque
+
+  let of_line line =
+    match String.split line ~on:'\t' with
+    | [ backend; digest; label; measured; model; kernels; flops; bytes; opaque ] -> (
+        try
+          Some
+            {
+              backend;
+              digest;
+              label;
+              measured_ms = Float.of_string measured;
+              model_ms =
+                (if String.is_empty model then None else Some (Float.of_string model));
+              kernels = Int.of_string kernels;
+              flops = Int.of_string flops;
+              bytes = Int.of_string bytes;
+              opaque = Bool.of_string opaque;
+            }
+        with _ -> None)
+    | _ -> None
+
+  type fit = {
+    fit_backend : string;
+    fit_rows : int;
+    fit_opaque : int;
+    fit_multi_kernel : int;
+    fit_violations : int;
+    fit_peak_flops : (float * string) option;
+    fit_peak_memory_bandwidth : (float * string) option;
+  }
+  [@@deriving sexp_of]
+
+  let fit rows =
+    let by_backend = Hashtbl.create (module String) in
+    let order = ref [] in
+    List.iter rows ~f:(fun r ->
+        let cell =
+          Hashtbl.find_or_add by_backend r.backend ~default:(fun () ->
+              order := r.backend :: !order;
+              ref [])
+        in
+        cell := r :: !cell);
+    List.rev_map !order ~f:(fun backend ->
+        let rows = List.rev !(Hashtbl.find_exn by_backend backend) in
+        (* Scoreable rows are the ones the recorded bound quantifies over: non-opaque (an opaque
+           row's counts may under-estimate, and the model never scores it) and positively timed.
+           The fitted constant per leg is the tightest sound one — [bound <= measured] needs
+           [peak >= counts/measured] on every row — so it is the maximum achieved [counts/time],
+           "achieved" by the model's own (upper-bound) counts. *)
+        let scoreable = List.filter rows ~f:(fun r -> (not r.opaque) && Float.(r.measured_ms > 0.)) in
+        let leg count =
+          List.fold scoreable ~init:None ~f:(fun acc r ->
+              let c = count r in
+              if c <= 0 then acc
+              else
+                let rate = Float.of_int c /. (r.measured_ms *. 1e-3) in
+                match acc with
+                | Some (best, _) when Float.(best >= rate) -> acc
+                | _ -> Some (rate, Printf.sprintf "%s (%s)" r.label r.digest))
+        in
+        {
+          fit_backend = backend;
+          fit_rows = List.length scoreable;
+          fit_opaque = List.count rows ~f:(fun r -> r.opaque);
+          fit_multi_kernel = List.count scoreable ~f:(fun r -> r.kernels > 1);
+          fit_violations =
+            List.count rows ~f:(fun r ->
+                match r.model_ms with
+                | Some m -> Float.(m > r.measured_ms)
+                | None -> false);
+          fit_peak_flops = leg (fun r -> r.flops);
+          fit_peak_memory_bandwidth = leg (fun r -> r.bytes);
+        })
+
+  let report f =
+    let buf = Buffer.create 256 in
+    let addf fmt = Printf.ksprintf (Buffer.add_string buf) fmt in
+    addf "# backend %s: %d scoreable row%s (%d opaque excluded, %d multi-kernel), %d recorded bound violation%s\n"
+      f.fit_backend f.fit_rows
+      (if f.fit_rows = 1 then "" else "s")
+      f.fit_opaque f.fit_multi_kernel f.fit_violations
+      (if f.fit_violations = 1 then "" else "s");
+    let constant ~key ~leg = function
+      | None -> addf "# no scoreable row constrains %s\n" key
+      | Some (implied, witness) ->
+          addf "# %s-leg binding row: %s\n" leg witness;
+          (* [concise_float] truncates to [prec + 1] significant digits (relative error below
+             [10^-prec] toward zero); the bump keeps the printed constant at or above the implied
+             minimum, so the recorded rows satisfy the bound under the printed value too. *)
+          addf "%s=%s\n" key (Ndarray.concise_float ~prec:6 (implied *. (1. +. 2e-6)))
+    in
+    constant ~key:"model_peak_flops" ~leg:"compute" f.fit_peak_flops;
+    constant ~key:"model_peak_memory_bandwidth" ~leg:"memory" f.fit_peak_memory_bandwidth;
+    Buffer.contents buf
+end

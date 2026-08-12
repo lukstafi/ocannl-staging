@@ -691,6 +691,17 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   the only thing left to measure. The refusals now carry a typed census key,
   `Not_dispatched_key of origin` (`baseline` | `candidate` | `beam_move`) — read it (or
   `BENCH_TUNE_REPORT=1`) before concluding a GPU search "found nothing".
+- The calibration TSV schema (`autotune_calibration_file`) is owned by
+  `Ir.Cost_model.Calibration` — writer (`Autotune.emit_calibration`) and reader
+  (`tools/fit_envelope.exe`) share `to_line`/`of_line`, so change it in one place only. The
+  fitter's constants are the tightest sound envelope (max achieved counts/time over non-opaque
+  rows, per backend); multi-kernel rows contribute necessary-only constraints (documented in the
+  mli). The bound-agreement invariant (gh-ocannl-514 phase 0) runs on EVERY candidate
+  `Autotune.tune` times whenever envelope constants are present — not gated by `autotune_log` or
+  the calibration file — so on machines whose class-level `hardware_limits` peaks understate the
+  hardware (e.g. Metal's 2e11 B/s vs a 4e11 B/s M-Max), tuning runs may newly print stderr
+  `BOUND VIOLATION` warnings. That is the invariant working: refit `model_peak_*` from
+  calibration data rather than silencing the check.
 - benchmarks/ is the cross-framework parity+timing suite (self-describing safetensors fixtures,
   one-JSON-line runners, loss-trajectory parity gate ~1e-7 fp32 vs pytorch/cpu). The gate
   doubles as a gradient oracle. tinygrad: realize the loss BEFORE `opt.step()` or it recomputes

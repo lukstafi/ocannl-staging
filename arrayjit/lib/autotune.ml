@@ -3057,27 +3057,52 @@ let dshort d =
 
 let bs_label = function None -> "cfg" | Some b -> Int.to_string b
 
-(* Calibration output (gh-ocannl-491 task 4): the model score next to the measured time — every
-   tuning run is free calibration data for the envelope constants. Human-readable stderr lines under
-   config [autotune_log]; durable tab-separated rows appended under config
-   [autotune_calibration_file]. The analysis runs on the candidate's actual compiled segments
-   ([compiled.all_opts]), so a calibration row prices exactly the code that was timed. *)
+(* Calibration output (gh-ocannl-491 task 4) and the bound-agreement invariant (gh-ocannl-514
+   phase 0): the model score next to the measured time — every tuning run is free calibration data
+   for the envelope constants, and every timed candidate is a test of the roofline bound's
+   soundness. Human-readable stderr lines under config [autotune_log]; durable tab-separated rows
+   (schema owned by {!CM.Calibration}) appended under config [autotune_calibration_file].
+
+   The analysis runs on the candidate's actual compiled segments ([compiled.all_opts]), so a row
+   prices exactly the code that was timed. A roofline LOWER bound exceeding a measured time means
+   the envelope constants understate this machine's achievable peaks — a search fathoming on that
+   bound would prune true winners — so the violation warns unconditionally, not gated by
+   [autotune_log]: per the gh-ocannl-498 lesson, an invariant between a scorer and reality is
+   checked continuously against every sample, never spot-checked. Refitting the constants from the
+   accumulated rows ([CM.Calibration.fit], [tools/fit_envelope.exe]) restores soundness. The
+   analysis therefore also runs whenever envelope constants are present, even with logging and the
+   calibration file off — one [CM.analyze] per compiled segment, trivial next to the compile and
+   timing runs the candidate already paid for. *)
 let calibration_file =
   lazy (String.strip (Utils.get_global_arg ~arg_name:"autotune_calibration_file" ~default:""))
 
 let emit_calibration ~backend ~limits ~label ~digest ~measured_ms (opts : LL.optimized list) =
   let file = Lazy.force calibration_file in
-  if Lazy.force log_enabled || not (String.is_empty file) then (
+  let peak_flops, peak_memory_bandwidth = envelope ~limits in
+  let have_envelope = Option.is_some peak_flops || Option.is_some peak_memory_bandwidth in
+  if Lazy.force log_enabled || (not (String.is_empty file)) || have_envelope then (
     let summaries = List.map opts ~f:(fun o -> CM.analyze o.LL.llc) in
     let flops = List.sum (module Int) summaries ~f:(fun s -> s.CM.flops) in
     let bytes = List.sum (module Int) summaries ~f:CM.total_bytes in
     let opaque = List.exists summaries ~f:(fun s -> s.CM.opaque) in
-    let peak_flops, peak_memory_bandwidth = envelope ~limits in
     let model_ms =
       Option.map (summaries_roofline ~peak_flops ~peak_memory_bandwidth summaries) ~f:(fun s ->
           s *. 1e3)
     in
-    let model_str = function Some m -> Printf.sprintf "%.6f" m | None -> "" in
+    let dtag = dshort digest in
+    (match model_ms with
+    | Some m when Float.(m > measured_ms) ->
+        let seconds = Float.max 1e-12 (measured_ms *. 1e-3) in
+        Stdio.eprintf
+          "autotune: BOUND VIOLATION: roofline lower bound %.6f ms > measured %.4f ms for %s \
+           (digest %s) on %s — the envelope constants understate this machine's peaks (this row \
+           implies model_peak_flops >= %.6g and model_peak_memory_bandwidth >= %.6g as necessary \
+           minima); refit with tools/fit_envelope.exe over autotune_calibration_file data\n\
+           %!"
+          m measured_ms label dtag backend
+          (Float.of_int flops /. seconds)
+          (Float.of_int bytes /. seconds)
+    | _ -> ());
     let n_kernels = List.length summaries in
     logf "calibration: %s measured %.4f ms, model %s, %d kernel%s, flops %d, bytes %d%s" label
       measured_ms
@@ -3088,8 +3113,19 @@ let emit_calibration ~backend ~limits ~label ~digest ~measured_ms (opts : LL.opt
       (if opaque then " (opaque: counts may under-estimate)" else "");
     if not (String.is_empty file) then
       let line =
-        Printf.sprintf "%s\t%s\t%s\t%.6f\t%s\t%d\t%d\t%d\t%b\n" backend (dshort digest) label
-          measured_ms (model_str model_ms) n_kernels flops bytes opaque
+        CM.Calibration.to_line
+          {
+            CM.Calibration.backend;
+            digest = dtag;
+            label;
+            measured_ms;
+            model_ms;
+            kernels = n_kernels;
+            flops;
+            bytes;
+            opaque;
+          }
+        ^ "\n"
       in
       try
         Stdio.Out_channel.with_file file ~append:true ~f:(fun oc ->

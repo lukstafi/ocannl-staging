@@ -74,3 +74,65 @@ val roofline_seconds :
     advisory {!Backend_intf.hardware_limits} fields); [None] when neither is given. Monotone:
     raising either constant never increases the bound. A lower bound only up to the model's
     upper-bound byte/op counts — rank with it, do not predict. *)
+
+module Calibration : sig
+  (** The calibration TSV schema (config [autotune_calibration_file], gh-ocannl-491 task 4) and
+      the envelope fitter over it (gh-ocannl-514 phase 0): one row per timed candidate, the
+      model's inputs and roofline score next to the measured time. This module is the schema's
+      single owner — rows are emitted through {!to_line} (by [Autotune]) and read back through
+      {!of_line} (by [tools/fit_envelope.exe]), so writer and reader cannot drift apart. *)
+
+  type row = {
+    backend : string;
+    digest : string;  (** The candidate's digest tag, already shortened at emission. *)
+    label : string;
+    measured_ms : float;
+    model_ms : float option;
+        (** The roofline bound under the envelope constants in force at recording time; [None]
+            when the model had no coverage (opaque code or no envelope constants). *)
+    kernels : int;
+    flops : int;  (** Aggregated over the candidate's kernels, like [bytes]. *)
+    bytes : int;
+    opaque : bool;
+  }
+  [@@deriving sexp_of]
+
+  val to_line : row -> string
+  (** Tab-separated, no trailing newline. [of_line (to_line r)] recovers [r] up to float
+      formatting ([measured_ms] and [model_ms] record 6 decimals). *)
+
+  val of_line : string -> row option
+  (** [None] on malformed lines (wrong column count, unparseable numbers). *)
+
+  type fit = {
+    fit_backend : string;
+    fit_rows : int;  (** Scoreable rows: non-opaque with a positive measured time. *)
+    fit_opaque : int;  (** Opaque rows, excluded — the model never scores them. *)
+    fit_multi_kernel : int;  (** Among scoreable rows; see {!fit} for the aggregate caveat. *)
+    fit_violations : int;
+        (** Rows whose recorded [model_ms] exceeds [measured_ms]: the envelope in force when
+            they were recorded understated this machine's peaks. *)
+    fit_peak_flops : (float * string) option;
+        (** The implied minimal sound constant and the binding row's [label (digest)]; [None]
+            when no scoreable row has a positive count for the leg. *)
+    fit_peak_memory_bandwidth : (float * string) option;
+  }
+  [@@deriving sexp_of]
+
+  val fit : row list -> fit list
+  (** Grouped by backend in order of first appearance. The fitted constants are the tightest
+      envelope under which the roofline bound is sound on the given data: per row,
+      [bound <= measured] requires [peak >= counts/measured] on each leg, so each leg's fit is
+      the maximum achieved [counts/time] over the scoreable rows — where "achieved" is by the
+      model's own upper-bound counts, exactly the direction bound-soundness needs. Overstating a
+      peak only weakens pruning (the bound stays a lower bound); understating one breaks
+      fathoming. Multi-kernel rows aggregate per-kernel counts, so their constraints are
+      necessary but not sufficient (a sum of per-kernel max-of-legs can exceed the aggregate
+      legs); residual violations surface through the continuous agreement check in
+      [Autotune.tune] and prompt a refit. *)
+
+  val report : fit -> string
+  (** Config-pasteable: [model_peak_*=...] lines under [#] comment lines naming the binding rows
+      (config comments must be whole lines). Printed constants carry a ~2e-6 relative bump so
+      that 7-significant-digit truncation cannot land below the implied minimum. *)
+end

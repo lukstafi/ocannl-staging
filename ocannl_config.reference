@@ -403,7 +403,9 @@
 # bytes columns aggregate over the candidate's kernels while the model column sums per-kernel
 # roofline bounds, so fitting the envelope constants from aggregates is exact only for rows with
 # kernel count 1. Every tuning run is free model-vs-measured divergence data for fitting the
-# envelope constants (see model_peak_flops).
+# envelope constants (see model_peak_flops): `tools/fit_envelope.exe <file>...` fits the
+# tightest sound model_peak_* constants from such files (grouped per backend) and prints
+# config-pasteable lines.
 # Relative paths resolve against the working directory. With autotune_log=true the same
 # calibration lines also go to stderr, human-readable.
 #autotune_calibration_file=
@@ -423,9 +425,14 @@
 
 # Overrides the backend's advisory peak arithmetic throughput, in FLOP/s (single precision, FMA
 # counted as two operations), used as the compute leg of the analytic cost model's roofline
-# envelope. Calibrated per-machine values (fit from autotune_calibration_file data) beat the
-# backends' class-level constants; unset/empty uses the backend's value (the C backends provide
-# none, so scoring on them requires setting this and/or model_peak_memory_bandwidth).
+# envelope. Calibrated per-machine values (fit from autotune_calibration_file data with
+# tools/fit_envelope.exe) beat the backends' class-level constants; unset/empty uses the
+# backend's value (the C backends provide none, so scoring on them requires setting this and/or
+# model_peak_memory_bandwidth). The constants must be honest peaks — at least the machine's
+# achievable throughput: whenever envelope constants are present, every candidate timed by
+# `Autotune.tune` checks the roofline lower bound against its measured time and an exceedance
+# warns unconditionally on stderr (gh-ocannl-514; understated peaks would let a bound-driven
+# search prune true winners), prompting a refit.
 #model_peak_flops=
 
 # Overrides the backend's advisory peak main-memory bandwidth, in bytes/s — the memory leg of
