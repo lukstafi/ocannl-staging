@@ -1489,8 +1489,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     let idx_params = Indexing.bound_symbols bindings in
     let kparams, proc_doc, launch = Syntax.compile_proc ~name idx_params lowered in
     let source =
-      Syntax.filter_and_prepend_builtins ~includes:hip_includes ~builtins:Builtins_hip.builtins
-        ~proc_doc
+      Syntax.filter_and_prepend_builtins ~routine_names:[ name ] ~includes:hip_includes
+        ~builtins:Builtins_hip.builtins ~proc_doc
     in
     let code = hip_to_code ~name source in
     { traced_store; code; kparams; bindings; name; launch }
@@ -1511,8 +1511,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     let all_proc_docs = List.filter_map (Array.to_list kparams_and_docs) ~f:(Option.map ~f:snd) in
     let final_doc = PPrint.(separate hardline all_proc_docs) in
     let source =
-      Syntax.filter_and_prepend_builtins ~includes:hip_includes ~builtins:Builtins_hip.builtins
-        ~proc_doc:final_doc
+      Syntax.filter_and_prepend_builtins
+        ~routine_names:(List.filter_opt (Array.to_list names))
+        ~includes:hip_includes ~builtins:Builtins_hip.builtins ~proc_doc:final_doc
     in
     let name : string =
       String.(

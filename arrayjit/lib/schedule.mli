@@ -196,9 +196,11 @@ type optop =
 
           [pipeline_depth = d] with [d > 1] software-pipelines a cooperative staging (gh-ocannl-487;
           an int rather than a bool so a search has a dimension, not a switch — [1] is the identity,
-          taking exactly the unpipelined code path; phase 1 implements [d = 2] only, the
-          single-step lookahead of the portable form — deeper pipelines arrive with the phase-2
-          async-copy arms and are rejected until then). Requires [cooperative = Some _] and an
+          taking exactly the unpipelined code path; [d = 2] only: both the portable form (phase 1)
+          and CUDA's [cp.async] arm (phase 2) have single-step lookahead — one prefetch per
+          iteration, completed behind one barrier resp. one wait-all — so deeper depths would only
+          consume shared memory and are rejected until the async arms grow
+          commit-group/wait-group bookkeeping). Requires [cooperative = Some _] and an
           anchor loop L* that is [Serial], starts at 0 and has at least one iteration (the
           rotation needs a well-defined iteration order and the prologue fills buffer copy 0 — a
           dead anchor must not execute it; the no-anchor broadcast case has no rotor). The staging composition then becomes: a prologue copy of iteration [from_] before

@@ -39,9 +39,21 @@ let () =
     ~expected:[ "--gpu-architecture=compute_75" ];
   check "wmma bf16 floor" ~device_cc:120 "nvcuda::wmma::mma_sync(x); /* (wmma-bf16) */"
     ~expected:[ "--gpu-architecture=compute_80" ];
+  (* The [cp.async] staging builtins (gh-ocannl-487 phase 2): the marker is the PTX instruction
+     text, which lives in the prepended helper definitions' asm literals — so the floor fires
+     exactly when a helper was actually emitted, and a routine merely NAMED like one (which the
+     token-scoped builtin filter declines to activate) raises nothing. *)
+  check "cp.async floor" ~device_cc:120
+    {|asm volatile("cp.async.ca.shared.global [d], [s], 4;");|}
+    ~expected:[ "--gpu-architecture=compute_80" ];
+  check "a helper-like routine name alone raises no floor" ~device_cc:75
+    {|extern "C" __global__ void ocannl_cp_async4_probe() {}|} ~expected:[];
   (* Batched sources take the max of the triggered floors, not the first match. *)
   check "batched floors take the max" ~device_cc:120
     "nvcuda::wmma::mma_sync(x); /* (mma-fp8) */" ~expected:[ "--gpu-architecture=compute_89" ];
+  check "cp.async batched with fp8 takes the max" ~device_cc:120
+    {|asm volatile("cp.async.wait_all;"); /* (mma-fp8) */|}
+    ~expected:[ "--gpu-architecture=compute_89" ];
   (* A device below the raise point keeps the literal floor (it must be paired with an nvrtc that
      still accepts it). *)
   check "half arithmetic on an old device" ~device_cc:70 "__hfma(a, b, c)"

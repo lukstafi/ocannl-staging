@@ -897,8 +897,8 @@ let%diagn_sexp compile ~(name : string) bindings (lowered : Low_level.optimized)
      absent barriers, which [pp_ll] rejects via [barrier_syntax = None]). *)
   let kparams, proc_doc, _launch = Syntax.compile_proc ~name idx_params lowered in
   let filtered_code =
-    Syntax.filter_and_prepend_builtins ~includes:Builtins_cc.includes ~builtins:Builtins_cc.builtins
-      ~proc_doc
+    Syntax.filter_and_prepend_builtins ~routine_names:[ name ] ~includes:Builtins_cc.includes
+      ~builtins:Builtins_cc.builtins ~proc_doc
   in
   (* Use ribbon = 1.0 for usual code formatting, width 110 *)
   Out_channel.output_string build_file.oc filtered_code;
@@ -933,8 +933,9 @@ let%diagn_sexp compile_batch ~names bindings (lowereds : Low_level.optimized opt
   in
   let combined_proc_doc = PPrint.separate PPrint.hardline all_proc_docs in
   let filtered_code =
-    Syntax.filter_and_prepend_builtins ~includes:Builtins_cc.includes ~builtins:Builtins_cc.builtins
-      ~proc_doc:combined_proc_doc
+    Syntax.filter_and_prepend_builtins
+      ~routine_names:(List.filter_opt (Array.to_list names))
+      ~includes:Builtins_cc.includes ~builtins:Builtins_cc.builtins ~proc_doc:combined_proc_doc
   in
   Out_channel.output_string build_file.oc filtered_code;
   build_file.finalize ();

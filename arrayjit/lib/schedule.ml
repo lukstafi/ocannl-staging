@@ -1107,10 +1107,11 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
   if pipeline_depth > 2 then
     invalid_arg
       (Printf.sprintf
-         "Schedule.Stage: pipeline_depth %d is not implemented in phase 1 of gh-ocannl-487: the \
-          portable form's single-step lookahead (one prefetch per iteration behind one barrier) \
-          keeps at most one block in flight, so copies beyond 2 would only consume shared memory; \
-          deeper pipelines arrive with the phase-2 async-copy arms"
+         "Schedule.Stage: pipeline_depth %d is not implemented in gh-ocannl-487: both the \
+          portable form and the cp.async arm have single-step lookahead (one prefetch per \
+          iteration, completed behind one barrier resp. one wait-all), keeping at most one block \
+          in flight — copies beyond 2 would only consume shared memory; deeper pipelines need \
+          commit-group/wait-group bookkeeping in the async arms"
          pipeline_depth);
   if hoisted && shared then
     invalid_arg "Schedule.Stage: hoisted staging requires shared = false (it emits no load nest)";

@@ -76,16 +76,20 @@ Code-synthesizing transforms:
   packed tile is dense and satisfies `Tensorize`'s unit-coefficient index discipline. Multi-term
   tile parts keep the range-sized layout, and hoisted staging rejects compaction (v1).
   `pipeline_depth = d > 1` software-pipelines a cooperative staging (gh-ocannl-487, an int so a
-  search has a dimension; phase 1 implements `d = 2` only — deeper lookahead arrives with the
-  phase-2 async-copy arms): the copy for k-block `k+1` issues before the compute of `k` (prologue
+  search has a dimension; `d = 2` only — both the portable form and CUDA's `cp.async` arm have
+  single-step lookahead, so deeper depths await commit-group/wait-group bookkeeping in the async
+  arms): the copy for k-block `k+1` issues before the compute of `k` (prologue
   copy before the serial anchor loop, one in-loop barrier instead of two, a trailing barrier;
   pipelined stages sharing the anchor group their prefetches behind that one barrier), and
   codegen allocates `d` rotating tile copies selected by the loop counter
   (`Low_level.optimized.pipelined`; shared-memory accounting multiplies by `d`). The rendering is
   bitwise identical to depth 1 — a pure prefetch-timing transform, searchable without a numerics
   gate. Autotune twins each staged mma/conv seed per depth in the backend's
-  `mma_capability.mma_pipeline_depths` (Metal `[2]`; CUDA/HIP empty until the phase-2 `cp.async`
-  / LDS arms).
+  `mma_capability.mma_pipeline_depths` (Metal `[2]`, portable form; CUDA `[2]` on sm_80+, where
+  the staging copies render as `cp.async` overlapping the compute; HIP empty until its LDS arm) —
+  but only for staged operands of at least 4-byte storage, the async arms' element floor: a
+  narrower twin could only render the portable synchronous form, paying the doubled shared-memory
+  footprint with no overlap to buy back.
 - **`Privatize { target; over }`** — contract a materialized accumulator's read-modify-write
   across a reduction loop into per-thread `Local` scratch with one init-load and one store-back;
   recovers for materialized nodes what virtualization gives virtual accumulators.

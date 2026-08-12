@@ -404,10 +404,12 @@ type sketch_params = {
           as {e twins} of each staged seed — same tile sizes, same pipeline, so a timing
           difference between the two is the prefetch overlap's (against the halved occupancy from
           the doubled shared-memory footprint), and nothing else's — for exactly the depths the
-          backend advertises in {!Ir.Backend_intf.mma_capability.mma_pipeline_depths}. The
-          rendering is bitwise identical to the plain sibling, so the tuner's choice is free of
-          numerics concerns. Unstaged seeds have no cooperative copy to pipeline and are never
-          twinned. *)
+          backend advertises in {!Ir.Backend_intf.mma_capability.mma_pipeline_depths}, and only
+          for staged operands of at least 4-byte storage — the async arms' element floor
+          ([C_syntax_config.async_copy]); a narrower twin could only render the portable
+          synchronous form, whose occupancy cost phase 1 measured. The rendering is bitwise
+          identical to the plain sibling, so the tuner's choice is free of numerics concerns.
+          Unstaged seeds have no cooperative copy to pipeline and are never twinned. *)
 }
 
 (* Resolve the tensor-core input format from storage precision before seeding a typed matmul/conv
@@ -2209,9 +2211,17 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
                     ||
                     if p0.sk_bm = 0 then p0.sk_tm > 0 else site.c_nrow % p0.sk_bm <> 0
                   in
+                  (* Depth twins additionally ride the async arms' element floor (Codex P2 on PR
+                     #317, as in the matmul sketch): staged tiles of sub-4-byte elements render
+                     the portable synchronous form only, so their twin could only pay the doubled
+                     footprint. *)
+                  let async_wide =
+                    Ir.Ops.prec_in_bytes (Lazy.force site.c_a.Ir.Tnode.storage_prec) >= 4
+                    && Ir.Ops.prec_in_bytes (Lazy.force site.c_b.Ir.Tnode.storage_prec) >= 4
+                  in
                   let depth_twins =
                     List.concat_map (whole @ blocked) ~f:(fun p0 ->
-                        if masked p0 then []
+                        if masked p0 || not async_wide then []
                         else
                           let rows = if p0.sk_bm = 0 then rows_p else p0.sk_bm in
                           List.filter_map mma.Ir.Backend_intf.mma_pipeline_depths ~f:(fun d ->
@@ -2386,6 +2396,14 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                   @ (if
                        bk > 0 && divides bm site.m_ni && divides bn site.m_nj
                        && divides bk site.m_nk
+                       (* Depth twins ride the async arms' element floor (Codex P2 on PR #317):
+                          [C_syntax]'s async staging needs >= 4-byte tile elements, so a
+                          narrower-precision twin could only render the portable synchronous
+                          form — the doubled-footprint occupancy cost phase 1 measured, with no
+                          overlap to buy back. The staged tiles inherit the operands' storage
+                          precisions. *)
+                       && Ir.Ops.prec_in_bytes a_prec >= 4
+                       && Ir.Ops.prec_in_bytes b_prec >= 4
                      then
                        List.map mma.Ir.Backend_intf.mma_pipeline_depths ~f:(fun d ->
                            { base with sk_depth = d })
