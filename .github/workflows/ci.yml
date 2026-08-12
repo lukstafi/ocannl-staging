@@ -27,6 +27,14 @@ jobs:
   run:
     name: Build
     strategy:
+      # These jobs are independent diagnostics, not stages, so one failing tells
+      # you nothing about the others -- and cancelling them destroys exactly the
+      # information you need. Concretely: the ~25min OCaml-floor job going red
+      # would cancel the 62-74min Windows job mid-run, losing that sweep's only
+      # Windows coverage for three or four days. It has already cost us on the
+      # per-PR side, where a macOS failure cancelled ubuntu and left it unclear
+      # whether a dependency-solve break was platform-specific.
+      fail-fast: false
       matrix:
         # Windows is off the per-PR path: it runs 62-74min against 20min on
         # macOS and 29min on ubuntu, so it set the whole matrix's latency while

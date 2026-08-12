@@ -117,10 +117,25 @@ if mkdir "$LOCK" 2>/dev/null; then
   :
 else
   owner=$(cat "$LOCK/pid" 2>/dev/null || true)
-  if [ -n "${owner:-}" ] && kill -0 "$owner" 2>/dev/null; then
+  if [ -z "${owner:-}" ]; then
+    # No pid recorded yet. Almost always that means another sweep is between its
+    # mkdir and its pid write -- it is very much alive, and reading the absence
+    # as staleness would let both run. Only a lock old enough that a
+    # mid-publication window cannot explain it is treated as abandoned.
+    if [ -z "$(find "$LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+      die "another sweep is starting up; refusing to share the worktree"
+    fi
+    echo "sweep: reclaiming abandoned lock with no owner recorded" >&2
+  elif kill -0 "$owner" 2>/dev/null; then
     die "another sweep is running (pid $owner); refusing to share the worktree"
+  else
+    echo "sweep: reclaiming stale lock from pid $owner" >&2
   fi
-  echo "sweep: reclaiming stale lock from pid ${owner:-unknown}" >&2
+  # Reclamation itself is best-effort: two sweeps starting simultaneously onto
+  # the SAME stale lock could both get here. Holding that off needs a real lock
+  # primitive rather than a directory, and the case it guards -- a crashed sweep
+  # plus a simultaneous double start -- is not worth that. The common path, a
+  # live holder, is exact.
   rm -rf "$LOCK"
   mkdir "$LOCK" 2>/dev/null || die "cannot acquire $LOCK"
 fi
@@ -219,7 +234,9 @@ capped_perl='
   alarm 0;
   exit($st & 127 ? 128 + ($st & 127) : $st >> 8);
 '
-capped() { perl -e "$capped_perl" -- "$CAP" "$@"; }
+# First argument is the budget in seconds, so the remote path can allow for
+# far-side cleanup and ssh teardown on top of its own cap.
+capped() { perl -e "$capped_perl" -- "$@"; }
 
 # Put a reused worktree exactly on $full_sha, and PROVE it rather than assume it.
 # `checkout --detach` is not sufficient on its own: a tracked edit that does not
@@ -305,7 +322,21 @@ for unit in "${UNITS[@]}"; do
     # whole unit, matching capped() locally -- a per-dune-call cap would let a
     # --slow unit run for twice the budget the script advertises.
     remote="$path_prefix timeout -k 10s ${CAP}s sh -c $(sq "$(test_cmd "$backend" "$wt")")"
-    ssh -o BatchMode=yes "$host" "$remote" >"$log" 2>&1
+    # The far-side cap does not bound the LOCAL ssh: if the connection blackholes
+    # after the command starts -- the box suspends, the WiFi drops -- the remote
+    # timeout may kill dune while this ssh sits waiting for a status that will
+    # never arrive. OpenSSH's defaults do not rescue it (`ssh -G` reports
+    # serveraliveinterval 0 and connecttimeout none), and because the unit is in
+    # the foreground, the whole sweep stalls behind it: no later units, no rows.
+    #
+    # Keepalives detect a dead peer in ~5min, and capped() is the backstop for
+    # the case where the connection is alive but the far side never returns. Its
+    # budget deliberately exceeds $CAP, so it can only fire after the remote
+    # timeout has had its chance plus room for cleanup and teardown; otherwise it
+    # would cut legitimate long runs short and call them timeouts.
+    capped "$(( CAP + 300 ))" \
+      ssh -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+      "$host" "$remote" >"$log" 2>&1
     rc=$?
   else
     wt=$HOME/ocannl-staging-worktrees/sweep
@@ -328,7 +359,7 @@ for unit in "${UNITS[@]}"; do
       fingerprint "$log" >"${log%.log}.fingerprint"
       continue
     fi
-    capped /bin/sh -c "$(test_cmd "$backend" "$wt")" >"$log" 2>&1
+    capped "$CAP" /bin/sh -c "$(test_cmd "$backend" "$wt")" >"$log" 2>&1
     rc=$?
   fi
 
