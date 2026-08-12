@@ -20,6 +20,55 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
   return __shfl_xor_sync(0xffffffffu, v, lane_mask);
 }|},
       [] );
+    ( "ocannl_cp_async",
+      (* Asynchronous global->shared staging copies for software-pipelined tiles (gh-ocannl-487
+         phase 2; [C_syntax_config.async_copy]). sm_80+; the substring also serves as
+         [gpu_arch_options]' arch-floor marker. Inline PTX rather than <cuda_pipeline.h> so nvrtc
+         needs no extra headers; [cvta.to.shared] inside the asm avoids relying on
+         [__cvta_generic_to_shared]'s availability. 4- and 8-byte copies must use [.ca]; 16-byte
+         uses [.cg] (L1-bypass, the streaming-staging default). The "memory" clobbers pin the
+         copies and the wait against compiler reordering of shared/global accesses.
+         [ocannl_cp_async_wait_all] completes ALL prior copies of the calling thread, committed
+         or not (PTX: wait_all = commit_group + wait_group 0), so the emission needs no commit
+         bookkeeping at the depth-2 single-step lookahead; deeper pipelines would switch to
+         commit_group/wait_group N. *)
+      {|__device__ __forceinline__ void ocannl_cp_async4(void *dst_shared, const void *src_global) {
+  asm volatile(
+      "{\n\t"
+      ".reg .u64 ocannl_cpa_d;\n\t"
+      "cvta.to.shared.u64 ocannl_cpa_d, %0;\n\t"
+      "cp.async.ca.shared.global [ocannl_cpa_d], [%1], 4;\n\t"
+      "}"
+      :
+      : "l"(dst_shared), "l"(src_global)
+      : "memory");
+}
+__device__ __forceinline__ void ocannl_cp_async8(void *dst_shared, const void *src_global) {
+  asm volatile(
+      "{\n\t"
+      ".reg .u64 ocannl_cpa_d;\n\t"
+      "cvta.to.shared.u64 ocannl_cpa_d, %0;\n\t"
+      "cp.async.ca.shared.global [ocannl_cpa_d], [%1], 8;\n\t"
+      "}"
+      :
+      : "l"(dst_shared), "l"(src_global)
+      : "memory");
+}
+__device__ __forceinline__ void ocannl_cp_async16(void *dst_shared, const void *src_global) {
+  asm volatile(
+      "{\n\t"
+      ".reg .u64 ocannl_cpa_d;\n\t"
+      "cvta.to.shared.u64 ocannl_cpa_d, %0;\n\t"
+      "cp.async.cg.shared.global [ocannl_cpa_d], [%1], 16;\n\t"
+      "}"
+      :
+      : "l"(dst_shared), "l"(src_global)
+      : "memory");
+}
+__device__ __forceinline__ void ocannl_cp_async_wait_all() {
+  asm volatile("cp.async.wait_all;" : : : "memory");
+}|},
+      [] );
     ("int32x4_t", {|typedef struct { int v[4]; } int32x4_t;|}, []);
     ("int64x2_t", {|typedef struct { long long v[2]; } int64x2_t;|}, []);
     ("int8x16_t", {|typedef struct { signed char v[16]; } int8x16_t;|}, []);

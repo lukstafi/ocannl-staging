@@ -177,6 +177,9 @@ let%diagn_sexp gpu_arch_options ~device_cc cu_src : string list =
            else None);
           (if has "(mma-fp8)" then Some 89 else None);
           (if has "(mma-bf16)" then Some 80 else None);
+          (* The [cp.async] staging builtins (gh-ocannl-487 phase 2); emission is gated on the
+             devices' own capability, so the floor only ever fires where it can also load. *)
+          (if has "ocannl_cp_async" then Some 80 else None);
           (if uses_h_arith then Some (if has "__nv_bfloat16" then 80 else 53) else None);
         ]
       |> List.max_elt ~compare:Int.compare
@@ -531,6 +534,24 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     let barrier_syntax = Some "__syncthreads();"
     let shared_decl_prefix = Some "__shared__ "
     let restrict_keyword = Some "__restrict__"
+
+    (* gh-ocannl-487 phase 2: [cp.async] staging for software-pipelined tiles (the
+       [ocannl_cp_async*] builtins; their name doubles as the [gpu_arch_options] sm_80 floor
+       marker). Gated on the attached devices' minimum compute capability, not the emission call:
+       pre-Ampere devices keep the portable synchronous rendering, which is correct at any depth
+       — the same posture as a hand-built pipelined schedule on a backend without the hook. *)
+    let async_copy =
+      if min_compute_capability () >= 80 then
+        Some
+          {
+            C_syntax.ac_copy =
+              (fun ~dst ~src ~bytes ->
+                PPrint.(
+                  string (Printf.sprintf "ocannl_cp_async%d(" bytes)
+                  ^^ dst ^^ string ", " ^^ src ^^ string ");"));
+            ac_wait_all = "ocannl_cp_async_wait_all();";
+          }
+      else None
 
     (* Warp-shuffle rendering of [Workgroup_reduce] accumulation loops (gh-ocannl-462):
        [ocannl_shfl_xor] wraps [__shfl_xor_sync] (builtins_cuda.ml). All supported devices have
@@ -2320,9 +2341,13 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                             (Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_bf16)
                             Backend_intf.Mma_swizzled_b128;
                         ];
-                    (* Phase 2 of gh-ocannl-487 (cp.async emission + hardware validation) flips
-                       this on. *)
-                    mma_pipeline_depths = [];
+                    (* gh-ocannl-487 phase 2: the depth-2 twins are worth proposing exactly where
+                       the [cp.async] arm renders them (sm_80+; [Cuda_syntax_config.async_copy]
+                       has the matching gate) — pre-Ampere the twin would be the portable
+                       synchronous form, whose occupancy cost was measured, not hypothesized
+                       (phase 1: ~1.4-1.5x on Metal). Depth 2 only: the wait-all emission has
+                       single-step lookahead; deeper pipelines need commit_group/wait_group N. *)
+                    mma_pipeline_depths = (if cc >= 80 then [ 2 ] else []);
                   }
               else None);
            simd_vector_bytes = 0;
