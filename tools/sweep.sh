@@ -56,10 +56,32 @@ UNITS=(
   "minix:hip:minix-amd-wsl"
 )
 
-mkdir -p "$LOGS"
-[ -f "$HISTORY" ] || printf 'when\tmachine\tbackend\tref\toutcome\tseconds\tlog\n' >"$HISTORY"
+# Errexit is off so that a FAILING TEST does not abort the remaining units --
+# that is the whole point. It must not extend to the harness: anything that
+# would make an outcome unrecordable, or make a recorded outcome describe a tree
+# that was not the one under test, has to be loud. A sweep that silently reports
+# coverage it did not perform is worse than one that does not run.
+die() { echo "sweep: $*" >&2; exit 2; }
 
-[ -d "$MAIN/.git" ] || { echo "no repo at $MAIN (set OCANNL_SWEEP_REPO)" >&2; exit 2; }
+mkdir -p "$LOGS" || die "cannot create $LOGS"
+[ -f "$HISTORY" ] ||
+  printf 'when\tmachine\tbackend\tref\toutcome\tseconds\tlog\n' >"$HISTORY" ||
+  die "cannot write $HISTORY"
+# Probe once up front, so a read-only or full state filesystem is reported here
+# with a clear message rather than as a run whose rows silently went nowhere.
+printf '' >>"$HISTORY" || die "cannot append to $HISTORY"
+
+[ -d "$MAIN/.git" ] || die "no repo at $MAIN (set OCANNL_SWEEP_REPO)"
+
+# An --only typo must not look like a clean sweep: without this, `--only cudaa`
+# selects nothing, records nothing, and exits 0 having tested nothing.
+known_backends=$(for u in "${UNITS[@]}"; do printf '%s\n' "$u" | cut -d: -f2; done)
+if [ ${#ONLY[@]} -gt 0 ]; then
+  for b in "${ONLY[@]}"; do
+    printf '%s\n' "$known_backends" | grep -qx "$b" ||
+      die "unknown backend '$b'; known: $(printf '%s' "$known_backends" | tr '\n' ' ')"
+  done
+fi
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 # Resolve the ref to a commit ONCE, here, and pin every machine to that commit.
@@ -67,9 +89,15 @@ stamp=$(date -u +%Y%m%dT%H%M%SZ)
 # different commits whenever a merge lands mid-sweep, which is exactly the
 # ambiguity a sweep exists to remove. It does mean --ref must name something
 # reachable from origin/master, since that is all the remotes fetch.
-git -C "$MAIN" fetch -q origin master
-full_sha=$(git -C "$MAIN" rev-parse "$REF" 2>/dev/null) || {
-  echo "cannot resolve $REF in $MAIN" >&2; exit 2; }
+#
+# The fetch is checked: an unchecked one that fails transiently still leaves
+# `origin/master` resolvable at whatever it pointed to last time, so the sweep
+# would pin every machine to a stale commit and record green coverage for a tree
+# nobody asked about -- the exact silent non-coverage this script exists to make
+# impossible.
+git -C "$MAIN" fetch -q origin master || die "cannot fetch origin master in $MAIN"
+full_sha=$(git -C "$MAIN" rev-parse "$REF" 2>/dev/null) ||
+  die "cannot resolve $REF in $MAIN"
 run_sha=$(git -C "$MAIN" rev-parse --short "$full_sha")
 
 wanted() {
@@ -91,9 +119,14 @@ dune_cmd() {
   printf '%s ' "${cmd[@]}"
 }
 
+# Fatal on write failure: the history file is deliberately the only verdict, so
+# a row that did not land is indistinguishable downstream from a unit that never
+# ran. Better to abort mid-sweep, loudly, than to hand the consumer a partial
+# history it will read as coverage.
 record() {
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$stamp" "$1" "$2" "$run_sha" "$3" "$4" "${5:--}" >>"$HISTORY"
+    "$stamp" "$1" "$2" "$run_sha" "$3" "$4" "${5:--}" >>"$HISTORY" ||
+    die "cannot record $1/$2 outcome in $HISTORY"
 }
 
 # A compact, diffable summary of what went wrong, so a caller can tell a NEW
@@ -134,10 +167,29 @@ for unit in "${UNITS[@]}"; do
     rc=$?
   else
     wt=$HOME/ocannl-staging-worktrees/sweep
-    git -C "$MAIN" worktree prune
-    git -C "$wt" rev-parse --git-dir >/dev/null 2>&1 ||
-      git -C "$MAIN" worktree add -q --detach "$wt" "$full_sha"
-    git -C "$wt" checkout -q --detach "$full_sha"
+    # Checked, and fatal for this UNIT rather than the run. The worktree is
+    # reused, so a checkout that fails -- a conflicting edit, a half-removed
+    # worktree -- leaves the previous revision's tree on disk; running the suite
+    # against it would record a pass under $run_sha for a commit that was never
+    # tested. The remote path needs no equivalent because its prep is already
+    # chained with && ahead of dune, so a prep failure cannot reach the tests.
+    #
+    # One error here is sticky and worth recognising: if the directory survives
+    # while its administrative entry does not (`git worktree prune` reaps the
+    # entry whenever the path is temporarily absent or replaced), every
+    # subsequent run reports `fatal: '<path>' already exists`. Recover by hand --
+    # move `_build` aside, remove the directory, `git worktree add --detach` it
+    # again, move `_build` back. Deliberately not automated: deleting a
+    # multi-gigabyte build tree unattended is worse than a loud repeated error.
+    if ! { git -C "$MAIN" worktree prune &&
+           { git -C "$wt" rev-parse --git-dir >/dev/null 2>&1 ||
+             git -C "$MAIN" worktree add -q --detach "$wt" "$full_sha"; } &&
+           git -C "$wt" checkout -q --detach "$full_sha"; } >"$log" 2>&1; then
+      echo "  $machine/$backend: error (cannot pin $wt to $run_sha)"
+      record "$machine" "$backend" error "$(( $(date +%s) - started ))" "$log"
+      fingerprint "$log" >"${log%.log}.fingerprint"
+      continue
+    fi
     perl -e 'alarm shift; exec @ARGV' "$CAP" \
       /bin/sh -c "$(dune_cmd "$backend" "$wt")" >"$log" 2>&1
     rc=$?
