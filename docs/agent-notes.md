@@ -756,6 +756,38 @@ that they earn a lookup rather than always-loaded space.
   disambiguates longer identifiers). Budget the resulting promote as expected work, in its own
   commit, after diff-confirming the delta is rename-only.
 
+### What CI actually covers
+
+- GitHub CI exercises exactly ONE backend. `test/config/ocannl_config` pins `backend=cc` and the
+  runners have no GPU, so a green `ci` run says nothing whatever about Metal, CUDA or HIP. Do not
+  read a green PR check as cross-backend validation; it is a CPU-backend and portability check.
+- Windows is off the per-PR matrix (62-74min against 20 on macOS and 29 on ubuntu) and runs on a
+  twice-weekly schedule, together with an ubuntu job on the OCaml floor the opam files claim
+  (`>= 5.3.0`, against 5.5 everywhere else). Both are reachable on demand through
+  `workflow_dispatch` with `extended: true` — dispatch from a branch when touching `.expected`
+  goldens or the cc backend's toolchain handling rather than waiting for the sweep, since those are
+  the changes that actually break on Windows (line endings, float formatting, mingw). Twice weekly
+  rather than weekly because actions/cache evicts entries unread for 7 days, and an exactly-weekly
+  cadence would pay the cold-switch cost every time. The two ride the same cadence because they
+  fail the same way: slowly, and through the dependency cone or the toolchain rather than through
+  a change under review.
+- `tools/sweep.sh` is the GPU-backend coverage: cc and metal locally, cuda on `rog-nv-wsl`, hip on
+  `minix-amd-wsl`, all pinned to ONE resolved commit so a mid-sweep merge cannot leave the machines
+  testing different trees. It records a row per unit in `~/.ocannl-sweep/history.tsv` and never
+  exits non-zero for test failures — its exit code is not a verdict, the history file is. A daily
+  scheduled task drives it.
+- The GPU boxes are usually powered off, so `skip (unreachable)` is the normal outcome and a sweep
+  of skips is not a failure. What IS a failure is silent non-coverage: track the age of the last
+  `pass` per backend, because nothing else in the project tests CUDA or HIP at all.
+- Report changes in the failure set, not the presence of failures. Metal's `test/operations` is
+  known-red, so a sweep that shouts on every red is one that gets ignored inside a week;
+  `sweep.sh` writes a sorted `.fingerprint` next to each non-pass log precisely so the previous
+  run's can be diffed against it.
+- The per-machine worktrees are reused, not recreated, so a sweep is incremental against an
+  existing `_build` — seconds rather than minutes when little changed. That is what makes a daily
+  cadence affordable; it also means a sweep is not a clean-tree build, and a genuine
+  from-scratch check still wants `dune clean` or a fresh CI run.
+
 ## Conventions
 
 - Releases use lightweight, un-prefixed git tags (`0.8`, not `v0.8`).

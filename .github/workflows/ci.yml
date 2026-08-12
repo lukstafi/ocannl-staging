@@ -8,19 +8,72 @@ on:
   pull_request:
     paths-ignore:
       - "docs/**"
+  # Sunday and Wednesday, 03:00 UTC. Twice weekly rather than weekly because
+  # actions/cache evicts entries not read for 7 days: on an exactly-weekly
+  # cadence the Windows opam cache would sit on that boundary and every sweep
+  # would pay the cold-switch cost (~74min against ~62min warm). The second run
+  # also halves the range to bisect when a sweep goes red, which at ~30 commits
+  # a day on master is the dominant triage cost. Runner minutes are free here
+  # (public repo), so the extra run is paid for in nothing but calendar noise.
+  schedule:
+    - cron: "0 3 * * 0,3"
+  workflow_dispatch:
+    inputs:
+      extended:
+        description: "Also run the scheduled-only jobs (Windows, OCaml floor)"
+        type: boolean
+        default: true
 jobs:
   run:
     name: Build
     strategy:
+      # These jobs are independent diagnostics, not stages, so one failing tells
+      # you nothing about the others -- and cancelling them destroys exactly the
+      # information you need. Concretely: the ~25min OCaml-floor job going red
+      # would cancel the 62-74min Windows job mid-run, losing that sweep's only
+      # Windows coverage for three or four days. It has already cost us on the
+      # per-PR side, where a macOS failure cancelled ubuntu and left it unclear
+      # whether a dependency-solve break was platform-specific.
+      fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
-          # Either the waiting queue for FreeBSD is very long, or it is not available.
-          # - freebsd-latest
+        # Windows is off the per-PR path: it runs 62-74min against 20min on
+        # macOS and 29min on ubuntu, so it set the whole matrix's latency while
+        # catching portability breaks that are rare and, when they do happen,
+        # are about line endings, float formatting and the mingw toolchain
+        # rather than about the change under review. It runs instead on the
+        # schedule above, and on demand via workflow_dispatch -- reach for the
+        # latter from a branch when touching .expected goldens or the cc
+        # backend's toolchain handling, rather than waiting for the sweep.
+        #
+        # The scheduled and dispatched runs carry ubuntu and macOS too: they are
+        # cheap next to Windows, and having them green in the same run is what
+        # distinguishes "Windows drifted" from "master is broken".
+        #
+        # `inputs` is empty (hence falsy) outside workflow_dispatch. The
+        # parentheses are load-bearing: && binds tighter than ||, so without
+        # them a scheduled run would select the bare boolean `true` and
+        # fromJSON would fail on it.
+        #
+        # Not listed: freebsd. Either the waiting queue for it is very long, or
+        # it is not available. (A comment cannot live inside the folded scalar
+        # below -- YAML reads anything indented under it as content.)
+        os: >-
+          ${{ fromJSON((github.event_name == 'schedule' || inputs.extended)
+          && '["ubuntu-latest", "macos-latest", "windows-latest"]'
+          || '["ubuntu-latest", "macos-latest"]') }}
         ocaml-compiler:
-          - 5.3.x
+          - 5.5.x
+        # The floor the opam files claim: `"ocaml" {>= "5.3.0"}`. Per-PR runs
+        # build only 5.5, so without this the lower bound is a promise nothing
+        # checks -- and the alternative, raising the constraint to the version we
+        # happen to test, would drop users for no technical reason. One extra
+        # ubuntu job on the schedule tests the claim instead. It rides the same
+        # cadence as Windows because a floor breaks the way Windows does: slowly,
+        # through the dependency cone rather than through this repo's code.
+        include: >-
+          ${{ fromJSON((github.event_name == 'schedule' || inputs.extended)
+          && '[{"os": "ubuntu-latest", "ocaml-compiler": "5.3.x"}]'
+          || '[]') }}
     runs-on: ${{ matrix.os }}
     # setup-ocaml's `dune-cache: true` exports DUNE_CACHE_ROOT but never
     # DUNE_CACHE, and dune's shared cache is opt-in -- so the cache it saves is
@@ -66,7 +119,7 @@ jobs:
     - name: Update apt package index
       if: runner.os == 'Linux'
       run: sudo apt-get update
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - uses: ocaml/setup-ocaml@v3
       with:
         ocaml-compiler: ${{ matrix.ocaml-compiler }}
@@ -133,7 +186,7 @@ jobs:
         echo "pins=$(printf %s "$digest" | cut -c1-12)" >>"$GITHUB_OUTPUT"
     - name: Cache opam dependencies
       id: opam-cache
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         # On Windows the mingw system libraries live in opam's internal cygwin
         # root, outside _opam. Without them a restored switch believes its

@@ -80,6 +80,20 @@
 
 ### Changed
 
+- **CI runs on OCaml 5.5, Windows on a schedule rather than per-PR, and the GPU backends on a
+  daily cross-machine sweep.** Windows took 62-74min against 20 on macOS and 29 on ubuntu, setting
+  the latency of every PR check; it now runs twice weekly plus on demand via `workflow_dispatch`.
+  Bumping the compiler surfaced that the `slipshow` `with-doc` dependency was vestigial — the slide
+  decks are compiled by the prebuilt binary `gh-pages-docs.yml` downloads, never by an
+  opam-installed one — while dragging `js_of_ocaml-compiler`, and hence an `ocaml < 5.5` bound,
+  into every `--with-doc` solve; it is dropped. Because CI pins `backend=cc` and its runners have
+  no GPU, Metal, CUDA and HIP were never covered there at all: `tools/sweep.sh` now runs the suite
+  per (machine, backend) pair across whichever machines are reachable, pinned to a single resolved
+  commit, reporting changes in the failure set rather than the presence of failures. The schedule
+  also carries an ubuntu job on the declared OCaml floor, so `"ocaml" {>= "5.3.0"}` is a tested
+  claim rather than an assumption; action references are pinned to release tags (two workflows
+  tracked `@main`) and moved off the deprecated Node 20 runtime.
+
 - **Native fp16 arithmetic on the CPU backends** (gh-ocannl-516): fp16 is the one 16-bit format a
   CPU can execute natively, and where it does, computing in it doubles the lane count against f32.
   `cc` probes the configured compiler once per process for `_Float16` and for whether its arithmetic

@@ -26,13 +26,13 @@ jobs:
       actions: read # Required for Claude to read CI results on PRs
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
       - uses: ocaml/setup-ocaml@v3
         with:
-          ocaml-compiler: 5.4.x
+          ocaml-compiler: 5.5.x
           dune-cache: true
           allow-prerelease-opam: false
 
