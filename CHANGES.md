@@ -89,7 +89,10 @@
   into every `--with-doc` solve; it is dropped. Because CI pins `backend=cc` and its runners have
   no GPU, Metal, CUDA and HIP were never covered there at all: `tools/sweep.sh` now runs the suite
   per (machine, backend) pair across whichever machines are reachable, pinned to a single resolved
-  commit, reporting changes in the failure set rather than the presence of failures.
+  commit, reporting changes in the failure set rather than the presence of failures. The schedule
+  also carries an ubuntu job on the declared OCaml floor, so `"ocaml" {>= "5.3.0"}` is a tested
+  claim rather than an assumption; action references are pinned to release tags (two workflows
+  tracked `@main`) and moved off the deprecated Node 20 runtime.
 
 - **Native fp16 arithmetic on the CPU backends** (gh-ocannl-516): fp16 is the one 16-bit format a
   CPU can execute natively, and where it does, computing in it doubles the lane count against f32.

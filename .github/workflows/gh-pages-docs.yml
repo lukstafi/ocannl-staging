@@ -13,7 +13,7 @@ jobs:
     # Avoid Ubuntu 24.04, see: https://github.com/ocaml/opam/issues/5968
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@main
+      - uses: actions/checkout@v7
 
       - name: Install slipshow
         run: |
@@ -28,7 +28,7 @@ jobs:
         run: slipshow compile docs/slides-RL-REINFORCE.md -o docs/html/RL-REINFORCE.html
         
       - name: Install pandoc
-        uses: pandoc/actions/setup@main
+        uses: pandoc/actions/setup@v1
         with:
           version: '3.7.0.2'
 

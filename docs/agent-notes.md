@@ -762,11 +762,15 @@ that they earn a lookup rather than always-loaded space.
   runners have no GPU, so a green `ci` run says nothing whatever about Metal, CUDA or HIP. Do not
   read a green PR check as cross-backend validation; it is a CPU-backend and portability check.
 - Windows is off the per-PR matrix (62-74min against 20 on macOS and 29 on ubuntu) and runs on a
-  twice-weekly schedule plus `workflow_dispatch` with a `windows` input. Dispatch it from a branch
-  when touching `.expected` goldens or the cc backend's toolchain handling rather than waiting for
-  the sweep — those are the changes that actually break there (line endings, float formatting,
-  mingw). Twice weekly rather than weekly because actions/cache evicts entries unread for 7 days,
-  and an exactly-weekly cadence would pay the cold-switch cost every time.
+  twice-weekly schedule, together with an ubuntu job on the OCaml floor the opam files claim
+  (`>= 5.3.0`, against 5.5 everywhere else). Both are reachable on demand through
+  `workflow_dispatch` with `extended: true` — dispatch from a branch when touching `.expected`
+  goldens or the cc backend's toolchain handling rather than waiting for the sweep, since those are
+  the changes that actually break on Windows (line endings, float formatting, mingw). Twice weekly
+  rather than weekly because actions/cache evicts entries unread for 7 days, and an exactly-weekly
+  cadence would pay the cold-switch cost every time. The two ride the same cadence because they
+  fail the same way: slowly, and through the dependency cone or the toolchain rather than through
+  a change under review.
 - `tools/sweep.sh` is the GPU-backend coverage: cc and metal locally, cuda on `rog-nv-wsl`, hip on
   `minix-amd-wsl`, all pinned to ONE resolved commit so a mid-sweep merge cannot leave the machines
   testing different trees. It records a row per unit in `~/.ocannl-sweep/history.tsv` and never

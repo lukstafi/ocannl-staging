@@ -13,11 +13,11 @@ jobs:
     # Avoid Ubuntu 24.04, see: https://github.com/ocaml/opam/issues/5968
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@main
+      - uses: actions/checkout@v7
 
       - name: Cache opam
         id: cache-opam
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.opam
           key: opam-ubuntu-22.04-5.5.0
