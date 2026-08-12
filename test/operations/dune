@@ -1765,6 +1765,19 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; The dual (floor) extraction over the same hand-checkable style of programs
+; (Ir.Cost_model.completion_floor, gh-ocannl-514 phase 3).
+(test
+ (name cost_model_floor)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules cost_model_floor)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
 ; Pure string/arithmetic test of the calibration schema and envelope fitter
 ; (Ir.Cost_model.Calibration, gh-ocannl-514 phase 0): no backend, no config sensitivity.
 (test

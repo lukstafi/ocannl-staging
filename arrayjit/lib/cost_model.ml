@@ -149,6 +149,109 @@ let analyze (code : Low_level.t) : summary =
 let total_bytes s = s.read_bytes + s.write_bytes
 let arithmetic_intensity s = Float.of_int s.flops /. Float.of_int (max 1 (total_bytes s))
 
+(* {2 The floor (dual) extraction — gh-ocannl-514 phase 3}
+
+   Lower bounds where [analyze] gives upper bounds, for bounding every completion of a partial
+   placement vector. The duality is exact: every approximation that biases the upper extraction UP
+   flips direction here — guarded ([If]) work floors to zero (guards-never-taken), a node's
+   multiple same-direction accesses take the MAX of the exact images (a union is at least its
+   largest member) instead of the capped sum, non-exact images contribute zero, and opaque code
+   ([Staged_compilation], merge-buffer reads) — the upper contract's one escape hatch — merely
+   loosens a floor without breaking it. [fr_exact] is [false] when any flooring-to-zero occurred:
+   the floor is then sound but not tight. *)
+
+type floor = { fr_flops : int; fr_bytes : int; fr_exact : bool } [@@deriving sexp_of]
+
+(* An access's certain distinct-cell count: the exact image, or zero when only an upper bound is
+   known. Reuses [access_cells]' exactness verdict. *)
+let access_cells_floor a =
+  let cells, approx = access_cells a in
+  if approx then 0 else cells
+
+let floor_flops (code : Low_level.t) : int * bool =
+  let exact = ref true in
+  let rec go ~scale ~env (c : Low_level.t) : int =
+    match c with
+    | Low_level.Noop | Comment _ | Zero_out _ | Declare_local _ | Workgroup_barrier -> 0
+    | Staged_compilation _ ->
+        exact := false;
+        0
+    | Seq (c1, c2) -> go ~scale ~env c1 + go ~scale ~env c2
+    | For_loop { index; from_; to_; body; _ } ->
+        let extent = max 0 (to_ - from_ + 1) in
+        go ~scale:(scale * extent) ~env:((index, extent) :: env) body
+    | Set { llsc; _ } -> scale * sc llsc
+    | Set_dynamic { dyn_value = dv, _; llsc; _ } -> scale * (sc dv + sc llsc)
+    | Set_from_vec { length; arg = a, _; _ } -> scale * (length + sc a)
+    | Set_local (_, llsc) -> scale * sc llsc
+    | If { cond = cnd, _; body = _ } ->
+        (* Guards-never-taken: the body's work is not certain, only the condition's is — the exact
+           dual of the upper walk's guards-taken. *)
+        exact := false;
+        scale * sc cnd
+    | Tile_mma { m; n; k; lane; _ } -> (
+        (* Same lane-cooperative attribution as the upper walk — the count is exact when the lane
+           binding is in scope; without it the certain floor is zero. *)
+        match List.Assoc.find env lane ~equal:Idx.equal_symbol with
+        | Some lane_extent -> scale / max 1 lane_extent * (2 * m * n * k)
+        | None ->
+            exact := false;
+            0)
+  and sc (s : Low_level.scalar_t) : int =
+    match s with
+    | Low_level.Local_scope { body; _ } -> go ~scale:1 ~env:[] body
+    | Get_local _ | Get _ | Constant _ | Constant_bits _ | Embed_index _ -> 0
+    | Get_merge_buffer _ ->
+        exact := false;
+        0
+    | Get_dynamic { dyn_value = dv, _; _ } -> sc dv
+    | Ternop ((Ops.FMA | Ops.Mul3), a1, a2, a3) -> 2 + arg a1 + arg a2 + arg a3
+    | Ternop (Ops.Where, a1, a2, a3) -> 1 + arg a1 + arg a2 + arg a3
+    | Binop ((Ops.Arg1 | Ops.Arg2), a1, a2) -> arg a1 + arg a2
+    | Binop (_, a1, a2) -> 1 + arg a1 + arg a2
+    | Unop (Ops.Identity, a1) -> arg a1
+    | Unop (_, a1) -> 1 + arg a1
+  and arg (s, _prec) = sc s in
+  let flops = go ~scale:1 ~env:[] code in
+  (flops, !exact)
+
+let completion_floor ?(open_placement = fun _ -> false) (code : Low_level.t) : floor =
+  let flops, flops_exact = floor_flops code in
+  (* Per node and direction, the certain traffic is the largest exact single-access image (a
+     union is at least its largest member). Nodes with an open placement level contribute zero:
+     their fully-inlined completion moves no bytes for them, and the floor quantifies over every
+     completion. Committing such a node to Materialize adds back {!node_floor_bytes} — the
+     monotone refinement delta. Guarded accesses are not certain and floor to zero. *)
+  let tbl = Hashtbl.create (module Tn) in
+  let inexact = ref (not flops_exact) in
+  List.iter (Low_level.affine_accesses code) ~f:(fun a ->
+      if open_placement a.Affine.a_tn then ()
+      else begin
+        let cells = access_cells_floor a in
+        if cells = 0 then inexact := true;
+        let reads, writes = Hashtbl.find tbl a.a_tn |> Option.value ~default:(0, 0) in
+        let next =
+          if a.a_write then (reads, max writes cells) else (max reads cells, writes)
+        in
+        Hashtbl.set tbl ~key:a.a_tn ~data:next
+      end);
+  let bytes =
+    Hashtbl.fold tbl ~init:0 ~f:(fun ~key:tn ~data:(reads, writes) acc ->
+        let width = Ops.prec_in_bytes (Lazy.force tn.Tn.storage_prec) in
+        acc + ((reads + writes) * width))
+  in
+  { fr_flops = flops; fr_bytes = bytes; fr_exact = not !inexact }
+
+let node_floor_bytes (code : Low_level.t) (tn : Tn.t) : int =
+  let reads, writes =
+    List.fold (Low_level.affine_accesses code) ~init:(0, 0) ~f:(fun (reads, writes) a ->
+        if not (Tn.equal a.Affine.a_tn tn) then (reads, writes)
+        else
+          let cells = access_cells_floor a in
+          if a.a_write then (reads, max writes cells) else (max reads cells, writes))
+  in
+  (reads + writes) * Ops.prec_in_bytes (Lazy.force tn.Tn.storage_prec)
+
 let footprint_approximate s = List.exists s.per_node ~f:(fun (_, fp) -> fp.fp_approx)
 let approximate s = s.flops_approx || footprint_approximate s
 

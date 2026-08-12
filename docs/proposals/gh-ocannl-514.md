@@ -26,7 +26,17 @@ advertised capabilities, explicit configuration; builder-settled analyses (compa
 auto-probed pool rendering) stay candidate-build concerns by design, their failures being
 classified declines rather than mislabeled timings. Recorded follow-ups: an A-orientation
 site classifier (the `m_tb` analogue for forms reading A in place), plus the conv-family and
-epilogue-twin factorings. Phases 3+ not started; each is its own PR.
+epilogue-twin factorings. Phase 3 implemented: the dual (floor) extraction —
+`Cost_model.completion_floor` and the `node_floor_bytes` refinement delta — with every
+approximation biased down, the exact mirror of `analyze`'s contract: guarded work counts
+guards-never-taken, a node's multi-access union floors to its largest exact image (dual to the
+capped sum), non-exact images and opaque code floor to zero (opacity, which breaks the upper
+contract, merely loosens a floor), and open placement levels contribute zero bytes with
+Materialize commitments adding back their per-node floor — the monotone-in-refinement direction
+that lets the bound prune. The Inline recompute floor ships as zero (sound; a nonzero floor
+needs lower-bound multiplicity metrics, deferred until the driver proves the need). Phase 4
+composes these floors with the fitted envelope through `roofline_seconds`. Phases 4+ not
+started; each is its own PR.
 **Issue**: [ahrefs/ocannl#514](https://github.com/ahrefs/ocannl/issues/514), split off #494
 (waypoint 4). Prerequisites landed: #494 waypoints 1–3 (`Ir.Affine`, the legality decision
 procedures, `Schedule.op_legality`), #491 (`Ir.Cost_model`, roofline envelope, `model_default`),

@@ -66,6 +66,40 @@ val footprint_approximate : summary -> bool
 (** [true] when any per-node footprint is an upper bound rather than exact ([fp_approx]) — the
     byte counts over-approximate while the op count may still be exact. *)
 
+type floor = { fr_flops : int; fr_bytes : int; fr_exact : bool } [@@deriving sexp_of]
+(** Lower bounds on arithmetic work and compulsory traffic — the dual extraction (gh-ocannl-514
+    phase 3), for bounding {e every completion} of a partial placement vector where {!analyze}
+    upper-bounds one concrete candidate. [fr_exact] is [false] when some flooring-to-zero
+    occurred (a guarded body, a non-exact access image, opaque code): the floor is then sound
+    but not tight. *)
+
+val completion_floor : ?open_placement:(Tnode.t -> bool) -> Low_level.t -> floor
+(** The floor of the roofline legs over placement completions, with every approximation biased
+    {e down} — the exact dual of {!analyze}'s contract:
+
+    - [fr_flops]: guarded ([If]) bodies count zero (guards-never-taken, dual to guards-taken);
+      opaque code counts zero (an under-count is sound in this direction); [Tile_mma] keeps the
+      lane-cooperative attribution, exact when the lane binding is in scope. Call this on the
+      {e all-materialized} specialization of the decision surface — recomputation only adds ops,
+      so its op count floors every placement completion's.
+    - [fr_bytes]: per node and direction, the largest exact single-access image (a union is at
+      least its largest member — dual to the upper extraction's capped sum); guarded and
+      non-exact accesses contribute zero. Nodes with [open_placement] contribute zero: their
+      fully-inlined completion moves no bytes for them, so the floor quantifies over the whole
+      subtree. Committing such a node to Materialize adds {!node_floor_bytes} — the monotone
+      refinement delta (the bound only rises as commitments accumulate, which is what lets it
+      prune). Committing to Inline adds zero for now: a nonzero recompute floor needs
+      lower-bound multiplicity metrics, deferred until the driver proves the need.
+
+    A [max (fr_flops/peak_flops) (fr_bytes/peak_bandwidth)] roofline over these floors
+    ({!roofline_seconds}) lower-bounds every completion — the two legs' minima need not be
+    simultaneously achievable for the max of the two to be sound. *)
+
+val node_floor_bytes : Low_level.t -> Tnode.t -> int
+(** One node's certain traffic in the given code (largest exact image per direction, times byte
+    width): the refinement delta a Materialize commitment adds to {!completion_floor}'s
+    [fr_bytes]. *)
+
 val approximate : summary -> bool
 (** [flops_approx || footprint_approximate]: some count is an upper bound rather than exact.
     Such counts are still upper bounds (unlike under [opaque]), but a candidate whose guards
