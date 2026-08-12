@@ -2255,8 +2255,22 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
 let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) site :
     sketch_params Sspace.tree =
   let divides c n = c <= n && n % c = 0 in
-  let leaf p = Sspace.Leaf p in
+  let leaf p = Sspace.Child (lazy (Sspace.Leaf p)) in
   let choice level children = Sspace.Choice { level; children } in
+  (* [subt] defers subtree construction into the child's lazy: verdicts are decided at
+     parent construction (fathoming needs them without expansion), subtrees are not. *)
+  let subt t = Sspace.Child (lazy (t ())) in
+  (* The first failing conjunct is the witness: a refutation names the one constraint whose
+     violation already refutes every completion, not the whole gate. *)
+  let refute_unless (conds : (bool * string) list) (ok : unit -> sketch_params Sspace.child) :
+      sketch_params Sspace.child =
+    match List.find conds ~f:(fun (c, _) -> not c) with
+    | Some (_, witness) -> Sspace.Refuted witness
+    | None -> ok ()
+  in
+  let ndiv what c ~into n =
+    (divides c n, Printf.sprintf "%s=%d does not divide %s=%d" what c into n)
+  in
   let base_params =
     {
       sk_gpu = false;
@@ -2276,20 +2290,23 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
       sk_depth = 1;
     }
   in
-  let blocktile () =
+  let blocktile_child =
     if is_gpu then
-      choice "geometry"
-        (List.filter_map
-           [ (64, 64, 8, 4, 4); (32, 32, 8, 4, 4); (16, 16, 8, 4, 4); (32, 32, 16, 2, 2); (16, 16, 8, 2, 2) ]
-           ~f:(fun (bm, bn, bk, tm, tn) ->
-             if
-               divides bm site.m_ni && divides bn site.m_nj && divides bk site.m_nk
-               && divides tm bm && divides tn bn
-             then
-               Some
-                 ( Printf.sprintf "bm%d bn%d bk%d tm%d tn%d" bm bn bk tm tn,
-                   lazy
-                     (leaf
+      subt (fun () -> choice "geometry"
+           (List.map
+              [ (64, 64, 8, 4, 4); (32, 32, 8, 4, 4); (16, 16, 8, 4, 4); (32, 32, 16, 2, 2); (16, 16, 8, 2, 2) ]
+              ~f:(fun (bm, bn, bk, tm, tn) ->
+                ( Printf.sprintf "bm%d bn%d bk%d tm%d tn%d" bm bn bk tm tn,
+                  refute_unless
+                    [
+                      ndiv "bm" bm ~into:"m" site.m_ni;
+                      ndiv "bn" bn ~into:"n" site.m_nj;
+                      ndiv "bk" bk ~into:"k" site.m_nk;
+                      ndiv "tm" tm ~into:"bm" bm;
+                      ndiv "tn" tn ~into:"bn" bn;
+                    ]
+                    (fun () ->
+                      leaf
                         {
                           base_params with
                           sk_gpu = true;
@@ -2298,8 +2315,7 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                           sk_bk = bk;
                           sk_tm = tm;
                           sk_tn = tn;
-                        }) )
-             else None))
+                        }) ))))
     else if is_cpu then
       (* Hoisted vs in-kernel packing stays a measured choice (gh-ocannl-470): when a constant
          operand can be packed at link time, propose each tiling in both flavors. The packing
@@ -2307,31 +2323,42 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
          before the hoisted twins. *)
       let geoms hoist =
         choice "geometry"
-          (List.filter_map [ 16; 8 ] ~f:(fun b ->
-               if divides b site.m_ni && divides b site.m_nj && divides b site.m_nk then
-                 Some
-                   ( Printf.sprintf "b%d" b,
-                     lazy (leaf { base_params with sk_bm = b; sk_bn = b; sk_bk = b; sk_hoist = hoist })
-                   )
-               else None))
+          (List.map [ 16; 8 ] ~f:(fun b ->
+               ( Printf.sprintf "b%d" b,
+                 refute_unless
+                   [
+                     ndiv "b" b ~into:"m" site.m_ni;
+                     ndiv "b" b ~into:"n" site.m_nj;
+                     ndiv "b" b ~into:"k" site.m_nk;
+                   ]
+                   (fun () ->
+                     leaf { base_params with sk_bm = b; sk_bn = b; sk_bk = b; sk_hoist = hoist }) )))
       in
-      choice "packing"
-        (("in-kernel", lazy (geoms false))
-        ::
-        (if hoistable site.m_a || hoistable site.m_b then [ ("hoisted", lazy (geoms true)) ]
-         else []))
-    else choice "geometry" []
+      subt (fun () -> choice "packing"
+           [
+             ("in-kernel", subt (fun () -> geoms false));
+             ( "hoisted",
+               if hoistable site.m_a || hoistable site.m_b then subt (fun () -> geoms true)
+               else
+                 Sspace.Refuted
+                   "hoisted packing needs a host-init-backed constant operand; neither operand is \
+                    one" );
+           ])
+    else Sspace.Refuted "backend kind seeds no scalar blocktile pipeline"
   in
-  let mma () =
+  let mma_child =
     match (is_gpu, limits.Ir.Backend_intf.mma) with
     | true, Some ({ Ir.Backend_intf.mma_simd_width = w; _ } as mma) -> (
-        match
-          mma_tile_for_precisions mma
-            ~a_prec:(Lazy.force site.m_a.Ir.Tnode.storage_prec)
-            ~b_prec:(Lazy.force site.m_b.Ir.Tnode.storage_prec)
-            ~d_prec:(Lazy.force site.m_d.Ir.Tnode.storage_prec)
-        with
-        | None -> choice "geometry" []
+        let a_prec = Lazy.force site.m_a.Ir.Tnode.storage_prec in
+        let b_prec = Lazy.force site.m_b.Ir.Tnode.storage_prec in
+        let d_prec = Lazy.force site.m_d.Ir.Tnode.storage_prec in
+        match mma_tile_for_precisions mma ~a_prec ~b_prec ~d_prec with
+        | None ->
+            Sspace.Refuted
+              (Printf.sprintf
+                 "backend advertises no mma format tile for operands (%s, %s) with accumulator %s"
+                 (Ir.Ops.prec_string a_prec) (Ir.Ops.prec_string b_prec)
+                 (Ir.Ops.prec_string d_prec))
         | Some (tm_t, tn_t, tk_t) ->
             (* [bn = w] keeps the zeroing's column grid blocks aligned with [j]'s (see
                [gpu_mma_sketch_schedule]); [bk = 0] = unstaged full-K block. Staged seeds
@@ -2339,85 +2366,113 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                non-multiple axes and [Tensorize] masks the edges (gh-ocannl-485) — block sizes must
                still be intrinsic-tile multiples. Unstaged seeds read the operands in place, so a
                pad cannot be absorbed and the full divisibility gates remain. *)
-            let a_prec = Lazy.force site.m_a.Ir.Tnode.storage_prec in
-            let b_prec = Lazy.force site.m_b.Ir.Tnode.storage_prec in
             (* The swizzled layout the emission can read for these formats, if any, and the tile
                extents it needs (gh-ocannl-481 item 3, D3): [Swizzle_b128] permutes whole 16-byte
                units, so each staged tile's minor extent — [bk] elements of A, [bn] of B — must span
-               a power-of-two count > 1 of them. Both are checked here rather than left to raise
-               inside [Schedule.apply]: an inapplicable twin should not exist, not merely fail. *)
-            let staged_layout =
-              mma_staged_layout_for_precisions mma ~a_prec ~b_prec
-                ~d_prec:(Lazy.force site.m_d.Ir.Tnode.storage_prec)
+               a power-of-two count > 1 of them. Judged here rather than left to raise inside
+               [Schedule.apply]: an inapplicable twin is refuted with its witness, not merely
+               failed. *)
+            let staged_layout = mma_staged_layout_for_precisions mma ~a_prec ~b_prec ~d_prec in
+            let b128_units_ok prec extent =
+              let bytes = extent * Ir.Ops.prec_in_bytes prec in
+              bytes % 16 = 0
+              &&
+              let units = bytes / 16 in
+              units > 1 && units land (units - 1) = 0
             in
-            let b128_rows_ok ~bn ~bk =
-              let units_ok prec extent =
-                let bytes = extent * Ir.Ops.prec_in_bytes prec in
-                bytes % 16 = 0
-                &&
-                let units = bytes / 16 in
-                units > 1 && units land (units - 1) = 0
-              in
-              units_ok a_prec bk && units_ok b_prec bn
+            let nmul what c ~of_ n =
+              (c % n = 0, Printf.sprintf "%s=%d is not a multiple of the intrinsic tile %s=%d" what c of_ n)
             in
-            let swizzle_for ~bn ~bk =
-              match staged_layout with
-              | Some LL.Swizzle_b128 when bk > 0 && b128_rows_ok ~bn ~bk -> Some LL.Swizzle_b128
-              | Some LL.Swizzle_elem | Some LL.Swizzle_b128 | None -> None
-            in
-            choice "geometry"
-              (List.filter_map
-                 [ (16, w, 0); (32, w, 0); (16, w, 32); (32, w, 32); (32, w, 16) ]
-                 ~f:(fun (bm, bn, bk) ->
-                   if
-                     bm % tm_t = 0
-                     && bn % tn_t = 0
-                     && (if bk = 0 then
-                           divides bm site.m_ni && divides bn site.m_nj && site.m_nk % tk_t = 0
-                         else bk % tk_t = 0)
-                   then
-                     let base =
-                       { base_params with sk_gpu = true; sk_mma = true; sk_simd = w; sk_bm = bm; sk_bn = bn; sk_bk = bk }
-                     in
-                     (* The twins level (per staged geometry): the swizzled layout and the pipelined
-                        depths, each measured against the shared plain sibling — see the field docs
-                        on [sk_swizzle]/[sk_depth] for why unstaged and masked geometries are not
-                        twinned (gh-ocannl-481 item 3 D3; Codex P2 on PRs #303 and #317). *)
-                     Some
-                       ( Printf.sprintf "bm%d bn%d bk%d" bm bn bk,
-                         lazy
-                           (choice "twin"
-                              (("plain", lazy (leaf base))
-                              :: (match swizzle_for ~bn ~bk with
-                                 | Some kind ->
-                                     [ ("swizzled", lazy (leaf { base with sk_swizzle = Some kind })) ]
-                                 | None -> [])
-                              @
-                              if
-                                bk > 0 && divides bm site.m_ni && divides bn site.m_nj
-                                && divides bk site.m_nk
-                                && Ir.Ops.prec_in_bytes a_prec >= 4
-                                && Ir.Ops.prec_in_bytes b_prec >= 4
-                              then
+            subt (fun () -> choice "geometry"
+                 (List.map
+                    [ (16, w, 0); (32, w, 0); (16, w, 32); (32, w, 32); (32, w, 16) ]
+                    ~f:(fun (bm, bn, bk) ->
+                      ( Printf.sprintf "bm%d bn%d bk%d" bm bn bk,
+                        refute_unless
+                          ([ nmul "bm" bm ~of_:"m" tm_t; nmul "bn" bn ~of_:"n" tn_t ]
+                          @
+                          if bk = 0 then
+                            [
+                              ndiv "bm" bm ~into:"m" site.m_ni;
+                              ndiv "bn" bn ~into:"n" site.m_nj;
+                              ( site.m_nk % tk_t = 0,
+                                Printf.sprintf
+                                  "unstaged full-K block: k=%d is not a multiple of the intrinsic \
+                                   tile k=%d"
+                                  site.m_nk tk_t );
+                            ]
+                          else [ nmul "bk" bk ~of_:"k" tk_t ])
+                          (fun () ->
+                            let base =
+                              { base_params with sk_gpu = true; sk_mma = true; sk_simd = w; sk_bm = bm; sk_bn = bn; sk_bk = bk }
+                            in
+                            (* The twins level (per staged geometry): the swizzled layout and the
+                               pipelined depths, each measured against the shared plain sibling —
+                               see the field docs on [sk_swizzle]/[sk_depth]. Unstaged geometries
+                               have no cooperative copy, so the twin choices do not arise at all;
+                               ineligible staged twins are refuted (emission constraint) or
+                               excluded (measured-cost policy) with their witnesses (gh-ocannl-481
+                               item 3 D3; Codex P2 on PRs #303 and #317). *)
+                            let swizzle_twins =
+                              match staged_layout with
+                              | None -> []
+                              | Some LL.Swizzle_elem -> []
+                              | Some LL.Swizzle_b128 when bk = 0 -> []
+                              | Some LL.Swizzle_b128 ->
+                                  [
+                                    ( "swizzled",
+                                      if b128_units_ok a_prec bk && b128_units_ok b_prec bn then
+                                        leaf { base with sk_swizzle = Some LL.Swizzle_b128 }
+                                      else
+                                        Sspace.Refuted
+                                          "Swizzle_b128 permutes whole 16-byte units: each staged \
+                                           tile's minor extent must span a power-of-two count > 1 \
+                                           of them" );
+                                  ]
+                            in
+                            let depth_twins =
+                              if List.is_empty mma.Ir.Backend_intf.mma_pipeline_depths || bk = 0
+                              then []
+                              else
                                 List.map mma.Ir.Backend_intf.mma_pipeline_depths ~f:(fun d ->
-                                    (Printf.sprintf "depth%d" d, lazy (leaf { base with sk_depth = d })))
-                              else [])) )
-                   else None)))
+                                    ( Printf.sprintf "depth%d" d,
+                                      if
+                                        not
+                                          (divides bm site.m_ni && divides bn site.m_nj
+                                          && divides bk site.m_nk)
+                                      then
+                                        Sspace.Excluded
+                                          "pad-masked site: Tensorize stays on the \
+                                           barrier-bracketed arm, so the twin could only pay the \
+                                           doubled shared-memory footprint (Codex P2 on PR #303)"
+                                      else if
+                                        Ir.Ops.prec_in_bytes a_prec < 4
+                                        || Ir.Ops.prec_in_bytes b_prec < 4
+                                      then
+                                        Sspace.Excluded
+                                          "below the async arms' 4-byte element floor: only the \
+                                           synchronous form would render — the occupancy cost \
+                                           phase 1 measured, with no overlap to buy back (Codex \
+                                           P2 on PR #317)"
+                                      else leaf { base with sk_depth = d } ))
+                            in
+                            subt (fun () -> choice "twin"
+                                 ((("plain", leaf base) :: swizzle_twins) @ depth_twins)) )
+                      )))))
+    | true, None -> Sspace.Refuted "backend advertises no mma capability"
     | _ when is_cpu ->
         (* The register-tiled [Tile_mma] rendering needs no MMA units (cc's [limits.mma] is a token
-           1x1x1 capability): the whole-triple form plus Grid-parallel row-block splits, and the
-           cache-blocked packed compositions. Statement rules the renderer checks per emission
-           ([C_syntax.try_register_tile]) that are already decidable here pre-filter the tree
-           (gh-ocannl-479): a candidate that statically must render the scalar fallback would
-           otherwise be timed — and possibly crowned, and cached — under a tensorized label, making
-           "the tensorized candidate lost" indistinguishable from "it never ran tensorized".
-           Statically decidable: operand-precision uniformity (f32/f64 only), the fused accumulation
-           form (candidate schedules rewrite operand reads, never the accumulation form), the
-           micro-kernel column extent vs. the vector lane count, and transposed-B storage for
-           renderings that read B {e in place} (a packing Stage normalizes the layout, so the packed
-           flavors are exempt). What is only knowable at emission (address spaces, footprint
-           interactions with other locals) is covered by the decline diagnostics and the
-           [C_syntax.mma_census]. *)
+           1x1x1 capability). Statement rules the renderer checks per emission
+           ([C_syntax.try_register_tile]) that are already decidable here judge the branch
+           (gh-ocannl-479): a candidate that statically must render the scalar fallback refutes
+           the family's tensorized promise — it would otherwise be timed, and possibly crowned and
+           cached, under a tensorized label, making "the tensorized candidate lost"
+           indistinguishable from "it never ran tensorized". Statically decidable: operand-precision
+           uniformity (f32/f64 only), the fused accumulation form, the micro-kernel column extent
+           vs. the vector lane count, and transposed-B storage for renderings that read B {e in
+           place} (a packing Stage normalizes the layout, so the packed flavors are exempt). What is
+           only knowable at emission (address spaces, footprint interactions with other locals) is
+           covered by the decline diagnostics and the [C_syntax.mma_census]. *)
         let prec = Lazy.force site.m_d.Ir.Tnode.storage_prec in
         let uniform_f32_64 =
           (match prec with Ir.Ops.Single_prec _ | Ir.Ops.Double_prec _ -> true | _ -> false)
@@ -2425,155 +2480,192 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
           && Ir.Ops.equal_prec (Lazy.force site.m_b.Ir.Tnode.storage_prec) prec
         in
         let lanes = limits.Ir.Backend_intf.simd_vector_bytes / max 1 (Ir.Ops.prec_in_bytes prec) in
-        let regtile_static_ok =
-          limits.Ir.Backend_intf.simd_vector_bytes >= 8
-          && lanes >= 2 && uniform_f32_64 && site.m_fma
-        in
         let tb_in_place = Option.value site.m_tb ~default:false in
-        if not regtile_static_ok then choice "geometry" []
-        else
-          let whole () =
-            choice "row-block"
-              (List.filter_map [ 0; 64; 16 ] ~f:(fun bm ->
-                   if
-                     (* Whole-triple [Tile_mma] reads both operands in place over the full column
-                        extent: the stored B orientation and [n = m_nj] reach the renderer as-is. *)
-                     (not tb_in_place) && site.m_nj >= lanes && (bm = 0 || divides bm site.m_ni)
-                   then
-                     Some
-                       ( Printf.sprintf "bm%d" bm,
-                         lazy (leaf { base_params with sk_mma = true; sk_bm = bm }) )
-                   else None))
-          in
-          (* Cache-blocked packed composition ([cpu_mma_pack_sketch_schedule]; [bk > 0] selects it):
-             [bn = 0] = unsplit column panel. The packed tiles are function-scope stack arrays, so
-             cap their combined footprint — which is also roughly the L2 residency the blocking aims
-             for. *)
-          let prec_bytes = Ir.Ops.prec_in_bytes (Lazy.force site.m_a.Ir.Tnode.storage_prec) in
-          let tile_bytes_cap = 256 * 1024 in
-          (* Non-multiple extents no longer gate the packed composition (gh-ocannl-485): both
-             operands pack through zero-fringe tiles, so the builder pads the axes to the block
-             sizes and [Tensorize] masks the edges. Variants that read an operand in place (the
-             hoisted-only Grid shape below) cannot absorb a pad, so each geometry carries whether
-             the extents divide outright ([full_div]) and those variants derive only from dividing
-             geometries. *)
-          let packed_div =
-            List.filter_map
-              [ (64, 0, 64); (64, 0, 256); (128, 128, 128); (64, 128, 256); (16, 0, 16) ]
-              ~f:(fun (bm, bn, bk) ->
-                let bn_eff = if bn = 0 then site.m_nj else bn in
-                if
-                  (* The packed micro-kernel's column extent is the B~ panel width. *)
-                  bn_eff >= lanes
-                  && ((bm * bk) + (bk * bn_eff)) * prec_bytes <= tile_bytes_cap
-                then
-                  let full_div =
-                    divides bm site.m_ni
-                    && (bn = 0 || divides bn site.m_nj)
-                    && divides bk site.m_nk
-                  in
-                  Some
-                    ( { base_params with sk_mma = true; sk_bm = bm; sk_bn = bn; sk_bk = bk },
-                      full_div )
-                else None)
-          in
-          let grid_ok p = blocks_of site.m_ni p.sk_bm >= 2 in
-          (* One packing shape's geometries: the shared packed menu filtered and transformed per
-             shape. The shape level sits ABOVE the geometries, matching the flat enumeration's
-             variant-major emission order. *)
-          let geoms ~f =
-            choice "geometry"
-              (List.filter_map packed_div ~f:(fun (p, full_div) ->
-                   Option.map (f p full_div) ~f:(fun p' ->
-                       (Printf.sprintf "bm%d bn%d bk%d" p'.sk_bm p'.sk_bn p'.sk_bk, lazy (leaf p')))))
-          in
-          (* Hoisted (link-time) packing stays a measured choice for constant operands, like the
-             scalar S4 pipeline (gh-ocannl-470). When a hoistable operand exists, the hoisted-only
-             composition pool-parallelizes ([sk_grid && sk_hoist]): hoisted packing emits no
-             in-kernel pack writes, so an outermost Grid split over the row blocks is trivially
-             race-free — pack only the hoistable operand(s), read the rest in place — except that
-             an in-place read of a transposed non-hoistable B statically declines the register
-             tiling, so that shape is skipped. Grid shapes need at least two row blocks
-             (c_syntax.ml [collect_parallel_grid] wants extent >= 2). Hoisted-only Grid reads
-             non-hoistable operands in place: no pad absorption, so it derives only from fully
-             dividing geometries — unless both operands are hoistable (both then pack, zero-fringe
-             included). When exactly one operand is hoistable — the typical inference GEMM — the
-             mixed grid-outermost shape (gh-ocannl-473, [sk_pack_rest]) additionally packs the
-             non-hoistable operand through an in-kernel Stage (privatized per chunk by the
-             renderer) instead of reading it in place. Without any hoistable operand,
-             grid-outermost with per-chunk B~ re-packing ([sk_pack_rest] without [sk_hoist],
-             gh-ocannl-475) is the only one-dispatch shape available — measured to beat the
-             dispatch-per-k-block shape across geometries (bin/schedule_bench.ml, pm_bpk vs
-             packmma_par) whenever the tiles fit the renderer's per-chunk privatization cap, so it
-             is proposed whenever they statically do (other per-chunk locals can still trip the
-             cap at render; the census and decline diagnostics cover that). The final Grid shape —
-             pool-parallel over the in-kernel packed composition, the renderer privatizing the
-             per-row-block A~ tile and sharing the read-only B~ panel
-             ([C_syntax.parallel_grid_safe]) — is a measured choice against the all-Serial and
-             hoisted-only Grid shapes. *)
-          let packed () =
-            choice "packing-shape"
-              ((("serial", lazy (geoms ~f:(fun p _ -> Some p)))
-               ::
-               (if hoistable site.m_a || hoistable site.m_b then
-                  [ ("hoisted", lazy (geoms ~f:(fun p _ -> Some { p with sk_hoist = true }))) ]
-                  @ (if tb_in_place && not (hoistable site.m_b) then []
-                     else
-                       [
-                         ( "hoisted-grid",
-                           lazy
-                             (geoms ~f:(fun p full_div ->
-                                  if
-                                    (full_div || (hoistable site.m_a && hoistable site.m_b))
-                                    && grid_ok p
-                                  then Some { p with sk_hoist = true; sk_grid = true }
-                                  else None)) );
-                       ])
-                  @
-                  if Bool.( <> ) (hoistable site.m_a) (hoistable site.m_b) then
-                    [
-                      ( "hoisted-grid-pack-rest",
-                        lazy
-                          (geoms ~f:(fun p _ ->
-                               if grid_ok p then
-                                 Some { p with sk_hoist = true; sk_grid = true; sk_pack_rest = true }
-                               else None)) );
-                    ]
-                  else []
-                else
-                  [
-                    ( "grid-pack-rest",
-                      lazy
-                        (let chunk_cap =
-                           match
-                             Int.of_string
-                               (String.strip
-                                  (Utils.get_global_arg ~arg_name:"cc_grid_private_bytes_cap"
-                                     ~default:"262144"))
-                           with
-                           | c when c > 0 -> c
-                           | _ -> 256 * 1024
-                           | exception _ -> 256 * 1024
-                         in
-                         geoms ~f:(fun p _ ->
-                             let bn_eff = if p.sk_bn = 0 then site.m_nj else p.sk_bn in
-                             let tiles_bytes =
-                               ((p.sk_bm * p.sk_bk) + (p.sk_bk * bn_eff)) * prec_bytes
-                             in
-                             if grid_ok p && tiles_bytes <= chunk_cap then
-                               Some { p with sk_grid = true; sk_pack_rest = true }
-                             else None)) );
-                  ]))
-              @ [
-                  ( "grid",
-                    lazy (geoms ~f:(fun p _ -> if grid_ok p then Some { p with sk_grid = true } else None))
+        refute_unless
+          [
+            ( limits.Ir.Backend_intf.simd_vector_bytes >= 8,
+              Printf.sprintf "no usable SIMD vector file (simd_vector_bytes=%d < 8)"
+                limits.Ir.Backend_intf.simd_vector_bytes );
+            ( lanes >= 2,
+              Printf.sprintf "fewer than two vector lanes at %s (simd_vector_bytes=%d)"
+                (Ir.Ops.prec_string prec) limits.Ir.Backend_intf.simd_vector_bytes );
+            ( uniform_f32_64,
+              "register tiling requires uniform f32/f64 operand and accumulator precisions" );
+            (site.m_fma, "register tiling requires the fused accumulation form");
+          ]
+          (fun () ->
+            let whole () =
+              (* Whole-triple [Tile_mma] reads both operands in place over the full column extent:
+                 the stored B orientation and [n = m_nj] reach the renderer as-is. *)
+              choice "row-block"
+                (List.map [ 0; 64; 16 ] ~f:(fun bm ->
+                     ( Printf.sprintf "bm%d" bm,
+                       refute_unless
+                         [
+                           ( bm = 0 || divides bm site.m_ni,
+                             Printf.sprintf "bm=%d does not divide m=%d" bm site.m_ni );
+                         ]
+                         (fun () -> leaf { base_params with sk_mma = true; sk_bm = bm }) )))
+            in
+            let whole_child =
+              refute_unless
+                [
+                  ( not tb_in_place,
+                    "stored B is transposed: whole-triple reads B in place, which the register \
+                     tiling statically declines" );
+                  ( site.m_nj >= lanes,
+                    Printf.sprintf "column extent n=%d is below one vector of lanes (%d)"
+                      site.m_nj lanes );
+                ]
+                (fun () ->
+                  match site.m_tb with
+                  | None ->
+                      (* Not refutable here: detection could not classify the stored B
+                         orientation, and only [Tensorize]'s own role check at candidate compile
+                         settles it. A fathom must not prune this. *)
+                      Sspace.Unknown
+                        ( "stored B orientation not cleanly detected; Tensorize's role check \
+                           settles it at candidate compile",
+                          lazy (whole ()) )
+                  | Some _ -> subt (fun () -> whole ()))
+            in
+            (* Cache-blocked packed composition ([cpu_mma_pack_sketch_schedule]; [bk > 0] selects
+               it): [bn = 0] = unsplit column panel. The packed tiles are function-scope stack
+               arrays, so their combined footprint is capped — which is also roughly the L2
+               residency the blocking aims for. Non-multiple extents no longer gate the packed
+               composition (gh-ocannl-485): both operands pack through zero-fringe tiles, so the
+               builder pads the axes to the block sizes and [Tensorize] masks the edges. Shapes
+               that read an operand in place cannot absorb a pad, so each geometry carries whether
+               the extents divide outright ([full_div]) and those shapes refute non-dividing
+               geometries. *)
+            let packed () =
+              let prec_bytes = Ir.Ops.prec_in_bytes (Lazy.force site.m_a.Ir.Tnode.storage_prec) in
+              let tile_bytes_cap = 256 * 1024 in
+              let menu =
+                List.map
+                  [ (64, 0, 64); (64, 0, 256); (128, 128, 128); (64, 128, 256); (16, 0, 16) ]
+                  ~f:(fun (bm, bn, bk) ->
+                    let bn_eff = if bn = 0 then site.m_nj else bn in
+                    let tiles_bytes = ((bm * bk) + (bk * bn_eff)) * prec_bytes in
+                    let verdict =
+                      (* The packed micro-kernel's column extent is the B~ panel width. *)
+                      if bn_eff < lanes then
+                        Some
+                          (Printf.sprintf
+                             "B~ panel width %d is below one vector of lanes (%d)" bn_eff lanes)
+                      else if tiles_bytes > tile_bytes_cap then
+                        Some
+                          (Printf.sprintf
+                             "packed tiles (%d bytes) exceed the stack-array footprint cap (%d)"
+                             tiles_bytes tile_bytes_cap)
+                      else None
+                    in
+                    let full_div =
+                      divides bm site.m_ni
+                      && (bn = 0 || divides bn site.m_nj)
+                      && divides bk site.m_nk
+                    in
+                    ( Printf.sprintf "bm%d bn%d bk%d" bm bn bk,
+                      { base_params with sk_mma = true; sk_bm = bm; sk_bn = bn; sk_bk = bk },
+                      verdict,
+                      full_div,
+                      tiles_bytes ))
+              in
+              let grid_ok p = blocks_of site.m_ni p.sk_bm >= 2 in
+              let too_few_blocks p =
+                Printf.sprintf "bm=%d gives %d row block(s); a Grid split needs at least 2"
+                  p.sk_bm (blocks_of site.m_ni p.sk_bm)
+              in
+              (* One packing shape's geometries: the shared menu judged per shape. The shape level
+                 sits ABOVE the geometries, matching the flat enumeration's variant-major emission
+                 order. *)
+              let geoms ~f =
+                choice "geometry"
+                  (List.map menu ~f:(fun (label, p, verdict, full_div, tiles_bytes) ->
+                       ( label,
+                         match verdict with
+                         | Some w -> Sspace.Refuted w
+                         | None -> f p full_div tiles_bytes )))
+              in
+              let any_hoistable = hoistable site.m_a || hoistable site.m_b in
+              let no_constant = "no host-init-backed constant operand to pack at link time" in
+              (* See the flat enumeration's rationale, now attached to the shapes it judges:
+                 hoisted packing (gh-ocannl-470) needs a constant operand; the hoisted-only Grid
+                 shape reads non-hoistable operands in place (no pad absorption, and a transposed
+                 non-hoistable B statically declines the register tiling); the mixed
+                 grid-outermost shape (gh-ocannl-473) exists exactly when one operand is hoistable
+                 and the other is not; grid-outermost per-chunk re-packing (gh-ocannl-475) is
+                 proposed only where no hoistable operand leaves a one-dispatch alternative, and
+                 its tiles must fit the renderer's per-chunk privatization cap. Grid shapes need
+                 at least two row blocks (c_syntax.ml [collect_parallel_grid]). *)
+              choice "packing-shape"
+                [
+                  ("serial", subt (fun () -> geoms ~f:(fun p _ _ -> leaf p)));
+                  ( "hoisted",
+                    if any_hoistable then subt (fun () -> geoms ~f:(fun p _ _ -> leaf { p with sk_hoist = true }))
+                    else Sspace.Refuted no_constant );
+                  ( "hoisted-grid",
+                    if not any_hoistable then Sspace.Refuted no_constant
+                    else if tb_in_place && not (hoistable site.m_b) then
+                      Sspace.Refuted
+                        "non-hoistable transposed B would be read in place, which the register \
+                         tiling statically declines"
+                    else
+                      subt (fun () -> geoms ~f:(fun p full_div _ ->
+                             if not (full_div || (hoistable site.m_a && hoistable site.m_b)) then
+                               Sspace.Refuted
+                                 "extents do not divide the blocks: the non-hoistable operand is \
+                                  read in place and cannot absorb the zero-fringe pad"
+                             else if not (grid_ok p) then Sspace.Refuted (too_few_blocks p)
+                             else leaf { p with sk_hoist = true; sk_grid = true })) );
+                  ( "hoisted-grid-pack-rest",
+                    if not any_hoistable then Sspace.Refuted no_constant
+                    else if hoistable site.m_a && hoistable site.m_b then
+                      Sspace.Excluded
+                        "both operands are hoistable: nothing is left to pack in-kernel, the \
+                         shape degenerates to hoisted-grid"
+                    else
+                      subt (fun () -> geoms ~f:(fun p _ _ ->
+                             if not (grid_ok p) then Sspace.Refuted (too_few_blocks p)
+                             else leaf { p with sk_hoist = true; sk_grid = true; sk_pack_rest = true }))
                   );
-                ])
-          in
-          choice "tensorized-form" [ ("whole-triple", lazy (whole ())); ("packed", lazy (packed ())) ]
-    | _ -> choice "geometry" []
+                  ( "grid-pack-rest",
+                    if any_hoistable then
+                      Sspace.Excluded
+                        "a hoistable operand exists: the hoisted shapes cover the one-dispatch \
+                         role without per-chunk re-packing"
+                    else
+                      let chunk_cap =
+                        match
+                          Int.of_string
+                            (String.strip
+                               (Utils.get_global_arg ~arg_name:"cc_grid_private_bytes_cap"
+                                  ~default:"262144"))
+                        with
+                        | c when c > 0 -> c
+                        | _ -> 256 * 1024
+                        | exception _ -> 256 * 1024
+                      in
+                      subt (fun () -> geoms ~f:(fun p _ tiles_bytes ->
+                             if not (grid_ok p) then Sspace.Refuted (too_few_blocks p)
+                             else if tiles_bytes > chunk_cap then
+                               Sspace.Refuted
+                                 (Printf.sprintf
+                                    "packed tiles (%d bytes) exceed the per-chunk privatization \
+                                     cap (%d, config cc_grid_private_bytes_cap)"
+                                    tiles_bytes chunk_cap)
+                             else leaf { p with sk_grid = true; sk_pack_rest = true })) );
+                  ( "grid",
+                    subt (fun () -> geoms ~f:(fun p _ _ ->
+                           if not (grid_ok p) then Sspace.Refuted (too_few_blocks p)
+                           else leaf { p with sk_grid = true })) );
+                ]
+            in
+            subt (fun () -> choice "tensorized-form"
+                 [ ("whole-triple", whole_child); ("packed", subt (fun () -> packed ())) ]))
+    | _ -> Sspace.Refuted "backend kind seeds no tensorized pipeline"
   in
-  choice "pipeline" [ ("blocktile", lazy (blocktile ())); ("tensorized", lazy (mma ())) ]
+  choice "pipeline" [ ("blocktile", blocktile_child); ("tensorized", mma_child) ]
 
 let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) site :
     sketch_params list =

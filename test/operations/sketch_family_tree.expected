@@ -91,12 +91,25 @@ pipeline = tensorized
       geometry = bm16 bn0 bk16
         * gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
     packing-shape = hoisted-grid
+      geometry = bm64 bn0 bk64  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
+      geometry = bm64 bn0 bk256  [refuted: extents do not divide the blocks: the non-hoistable operand is read in place and cannot absorb the zero-fringe pad]
+      geometry = bm128 bn128 bk128  [refuted: extents do not divide the blocks: the non-hoistable operand is read in place and cannot absorb the zero-fringe pad]
+      geometry = bm64 bn128 bk256  [refuted: extents do not divide the blocks: the non-hoistable operand is read in place and cannot absorb the zero-fringe pad]
       geometry = bm16 bn0 bk16
         * gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:true grid:true packrest:false epi:false swz:- depth:1
     packing-shape = hoisted-grid-pack-rest
+      geometry = bm64 bn0 bk64  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
+      geometry = bm64 bn0 bk256  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
+      geometry = bm128 bn128 bk128  [refuted: bm=128 gives 1 row block(s); a Grid split needs at least 2]
+      geometry = bm64 bn128 bk256  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
       geometry = bm16 bn0 bk16
         * gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:true grid:true packrest:true epi:false swz:- depth:1
+    packing-shape = grid-pack-rest  [excluded: a hoistable operand exists: the hoisted shapes cover the one-dispatch role without per-chunk re-packing]
     packing-shape = grid
+      geometry = bm64 bn0 bk64  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
+      geometry = bm64 bn0 bk256  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
+      geometry = bm128 bn128 bk128  [refuted: bm=128 gives 1 row block(s); a Grid split needs at least 2]
+      geometry = bm64 bn128 bk256  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
       geometry = bm16 bn0 bk16
         * gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:true packrest:false epi:false swz:- depth:1
 last leaf's decision path: pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm16 bn0 bk16
@@ -143,3 +156,61 @@ pipeline = tensorized
       * gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:2
 last leaf's decision path: pipeline=tensorized > geometry=bm32 bn32 bk16 > twin=depth2
 tree leaves = flat enumeration: true
+== awkward 20^3 gpu: 6 seeds ==
+tree leaves = flat enumeration: true
+-- refuted --
+  pipeline=blocktile > geometry=bm64 bn64 bk8 tm4 tn4: bm=64 does not divide m=20
+  pipeline=blocktile > geometry=bm32 bn32 bk8 tm4 tn4: bm=32 does not divide m=20
+  pipeline=blocktile > geometry=bm16 bn16 bk8 tm4 tn4: bm=16 does not divide m=20
+  pipeline=blocktile > geometry=bm32 bn32 bk16 tm2 tn2: bm=32 does not divide m=20
+  pipeline=blocktile > geometry=bm16 bn16 bk8 tm2 tn2: bm=16 does not divide m=20
+  pipeline=tensorized > geometry=bm16 bn32 bk0: bm=16 does not divide m=20
+  pipeline=tensorized > geometry=bm32 bn32 bk0: bm=32 does not divide m=20
+-- excluded --
+  pipeline=tensorized > geometry=bm16 bn32 bk32 > twin=depth2: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)
+  pipeline=tensorized > geometry=bm32 bn32 bk32 > twin=depth2: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)
+  pipeline=tensorized > geometry=bm32 bn32 bk16 > twin=depth2: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)
+== awkward 20^3 cpu: 8 seeds ==
+tree leaves = flat enumeration: true
+-- refuted --
+  pipeline=blocktile > packing=in-kernel > geometry=b16: b=16 does not divide m=20
+  pipeline=blocktile > packing=in-kernel > geometry=b8: b=8 does not divide m=20
+  pipeline=blocktile > packing=hoisted: hoisted packing needs a host-init-backed constant operand; neither operand is one
+  pipeline=tensorized > tensorized-form=whole-triple > row-block=bm64: bm=64 does not divide m=20
+  pipeline=tensorized > tensorized-form=whole-triple > row-block=bm16: bm=16 does not divide m=20
+  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted: no host-init-backed constant operand to pack at link time
+  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid: no host-init-backed constant operand to pack at link time
+  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid-pack-rest: no host-init-backed constant operand to pack at link time
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+== half-prec cpu: 2 seeds ==
+tree leaves = flat enumeration: true
+-- refuted --
+  pipeline=blocktile > packing=hoisted: hoisted packing needs a host-init-backed constant operand; neither operand is one
+  pipeline=tensorized: register tiling requires uniform f32/f64 operand and accumulator precisions
+== half-prec gpu: 5 seeds ==
+tree leaves = flat enumeration: true
+-- refuted --
+  pipeline=tensorized: backend advertises no mma format tile for operands (half, half) with accumulator half
+== transposed-B cpu: 9 seeds ==
+tree leaves = flat enumeration: true
+-- refuted --
+  pipeline=blocktile > packing=hoisted: hoisted packing needs a host-init-backed constant operand; neither operand is one
+  pipeline=tensorized > tensorized-form=whole-triple: stored B is transposed: whole-triple reads B in place, which the register tiling statically declines
+  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted: no host-init-backed constant operand to pack at link time
+  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid: no host-init-backed constant operand to pack at link time
+  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid-pack-rest: no host-init-backed constant operand to pack at link time
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
