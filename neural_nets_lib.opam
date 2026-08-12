@@ -42,7 +42,6 @@ depends: [
   "ppx_minidebug" {>= "3.0.0"}
   "odoc" {with-doc}
   "md2mld" {with-doc}
-  "slipshow" {with-doc}
 ]
 build: [
   ["dune" "subst"] {dev}

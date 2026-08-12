@@ -144,8 +144,11 @@
   (ppx_minidebug
    (>= 3.0.0))
   (odoc :with-doc)
-  (md2mld :with-doc)
-  (slipshow :with-doc))
+  ; No slipshow: the slide decks are compiled by the prebuilt binary that
+  ; gh-pages-docs.yml downloads, not by an opam-installed one, so the
+  ; dependency bought nothing while dragging js_of_ocaml-compiler -- and hence
+  ; a `ocaml < 5.5` bound -- into every --with-doc solve.
+  (md2mld :with-doc))
  (tags
   (deeplearning tensor backprop jit CUDA Metal)))
 
