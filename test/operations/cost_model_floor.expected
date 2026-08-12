@@ -1,0 +1,54 @@
+== pointwise map ==
+  floor: flops=20 bytes=180 exact
+  upper: flops=20 bytes=180
+  floor <= upper: true
+== matmul (rmw accumulator) ==
+  floor: flops=240 bytes=376 exact
+  upper: flops=240 bytes=376
+  floor <= upper: true
+== matmul, D's placement open ==
+  floor: flops=0 bytes=0 inexact
+  upper: flops=240 bytes=376
+  floor <= upper: true
+  commitment (narrowed open set) recovers the closed floor: true
+  floors are monotone in refinement: true
+== guarded write ==
+  floor: flops=4 bytes=16 inexact
+  upper: flops=8 bytes=32
+  floor <= upper: true
+== two reads, union floor = larger image ==
+  floor: flops=20 bytes=100 inexact
+  upper: flops=20 bytes=120
+  floor <= upper: true
+== dynamic gather ==
+  floor: flops=0 bytes=32 inexact
+  upper: flops=0 bytes=64
+  floor <= upper: true
+== where short-circuit ==
+  floor: flops=12 bytes=16 inexact
+  upper: flops=20 bytes=48
+  floor <= upper: true
+== over-producing closed ==
+  floor: flops=8 bytes=72 exact
+  upper: flops=8 bytes=72
+  floor <= upper: true
+== over-producing, P2's placement open ==
+  floor: flops=0 bytes=4 inexact
+  upper: flops=8 bytes=72
+  floor <= upper: true
+== and short-circuit ==
+  floor: flops=8 bytes=32 inexact
+  upper: flops=12 bytes=48
+  floor <= upper: true
+== arg1 discarded operand ==
+  floor: flops=0 bytes=32 exact
+  upper: flops=4 bytes=32
+  floor <= upper: true
+== relu-gate short-circuit ==
+  floor: flops=4 bytes=32 inexact
+  upper: flops=8 bytes=48
+  floor <= upper: true
+== dead loop ==
+  floor: flops=0 bytes=0 inexact
+  upper: flops=0 bytes=16
+  floor <= upper: true
