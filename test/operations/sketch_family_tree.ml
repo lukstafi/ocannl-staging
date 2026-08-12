@@ -222,4 +222,13 @@ let () =
   in
   let%op tmm = av +* "ik;jk=>ij" tb in
   let opt_t = with_lowering ~name:"sft_tb" tmm in
-  awkward_section "transposed-B cpu" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_t
+  awkward_section "transposed-B cpu" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_t;
+  (* A tight workgroup-memory limit: the staged operand tiles are a sound footprint floor, so
+     geometries whose depth-1 tiles exceed the cap refute outright and dividing geometries whose
+     doubled tiles exceed it refute their depth twins — pre-compile, where
+     Schedule.check_hardware_limits_classified would otherwise reject candidate by candidate.
+     6144 bytes fits bm16 bn32 bk32 (2048 + 4096) exactly at depth 1. *)
+  let gpu_tight_limits =
+    { gpu_full_limits with Ir.Backend_intf.max_workgroup_memory_bytes = Some 6144 }
+  in
+  awkward_section "gpu tight smem" ~is_gpu:true ~is_cpu:false ~limits:gpu_tight_limits opt

@@ -13,8 +13,9 @@ conv family and the epilogue-twin level factor the same way as mechanical follow
 implemented: legality over partial shapes for the factored family — tree children carry
 verdicts decided at parent construction, mirroring `op_legality`'s three values quantified
 over completions (`Refuted` with the violated constraint as witness — a decline explanation
-produced before any compilation, gh-479; `Unknown` never fathoms — e.g. a B orientation only
-the compile-time role check settles) plus a fourth, `Excluded`, keeping the gh-555
+produced before any compilation, gh-479; `Unknown` never fathoms — reserved for genuinely
+compile-settled questions, e.g. permissive site detection) plus a fourth, `Excluded`, keeping
+the gh-555
 policy/legality separation visible in the space itself (a driver may lift a policy exclusion
 by re-proposing; it must never re-propose a refutation). Every silent filter in the matmul
 tree now carries its witness; `refutations`/`exclusions`/`unknowns` collect them per shape.

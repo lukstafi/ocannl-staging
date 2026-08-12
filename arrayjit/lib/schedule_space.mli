@@ -38,9 +38,10 @@ type placement = Pl_inline | Pl_stage_at of Indexing.symbol | Pl_materialize
 type 'a child =
   | Child of 'a tree Lazy.t  (** Feasible as far as construction can decide. *)
   | Unknown of string * 'a tree Lazy.t
-      (** The [Op_unknown] analogue: construction cannot decide (the witness says why — e.g. an
-          orientation only a compile-time check resolves), so the subtree stays enumerable and a
-          fathom must never prune it; its completions settle at candidate compile. *)
+      (** The [Op_unknown] analogue: construction cannot decide (the witness says why — e.g. a
+          permissively detected site whose mis-detections only candidate compilation rejects), so
+          the subtree stays enumerable and a fathom must never prune it; its completions settle at
+          candidate compile. *)
   | Excluded of string
       (** Valid but not proposed: default-policy search economy (a dominated or degenerate shape,
           a twin whose measured cost exceeds its possible win). The witness states the policy. A

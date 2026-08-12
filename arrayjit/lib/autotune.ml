@@ -2383,6 +2383,31 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
             let nmul what c ~of_ n =
               (c % n = 0, Printf.sprintf "%s=%d is not a multiple of the intrinsic tile %s=%d" what c of_ n)
             in
+            (* A sound workgroup-memory floor for staged geometries: any completion allocates at
+               least the cooperative operand tiles ([bm x bk] of A, [bk x bn] of B), [depth]-fold
+               under software pipelining — other shared allocations only add. Exceeding the
+               advertised limit refutes every completion below the child pre-compile, where
+               [Schedule.check_hardware_limits_classified] would otherwise reject it one candidate
+               compile at a time. [None]/unknown limit refutes nothing. *)
+            let staged_tiles_exceed ~bm ~bn ~bk ~depth =
+              match limits.Ir.Backend_intf.max_workgroup_memory_bytes with
+              | Some cap when bk > 0 ->
+                  let bytes =
+                    ((bm * bk * Ir.Ops.prec_in_bytes a_prec)
+                    + (bk * bn * Ir.Ops.prec_in_bytes b_prec))
+                    * depth
+                  in
+                  if bytes > cap then
+                    Some
+                      (Printf.sprintf
+                         "staged operand tiles need %d bytes of workgroup memory%s, exceeding the \
+                          %d-byte limit"
+                         bytes
+                         (if depth > 1 then Printf.sprintf " at pipeline depth %d" depth else "")
+                         cap)
+                  else None
+              | _ -> None
+            in
             subt (fun () -> choice "geometry"
                  (List.map
                     [ (16, w, 0); (32, w, 0); (16, w, 32); (32, w, 32); (32, w, 16) ]
@@ -2390,6 +2415,9 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                       ( Printf.sprintf "bm%d bn%d bk%d" bm bn bk,
                         refute_unless
                           ([ nmul "bm" bm ~of_:"m" tm_t; nmul "bn" bn ~of_:"n" tn_t ]
+                          @ (match staged_tiles_exceed ~bm ~bn ~bk ~depth:1 with
+                            | Some w -> [ (false, w) ]
+                            | None -> [])
                           @
                           if bk = 0 then
                             [
@@ -2436,6 +2464,12 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                               else
                                 List.map mma.Ir.Backend_intf.mma_pipeline_depths ~f:(fun d ->
                                     ( Printf.sprintf "depth%d" d,
+                                      match staged_tiles_exceed ~bm ~bn ~bk ~depth:d with
+                                      | Some w ->
+                                          (* Legality beats policy: the multiplied footprint
+                                             refutes before the measured-cost exclusions apply. *)
+                                          Sspace.Refuted w
+                                      | None ->
                                       if
                                         not
                                           (divides bm site.m_ni && divides bn site.m_nj
@@ -2520,13 +2554,13 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                 (fun () ->
                   match site.m_tb with
                   | None ->
-                      (* Not refutable here: detection could not classify the stored B
-                         orientation, and only [Tensorize]'s own role check at candidate compile
-                         settles it. A fathom must not prune this. *)
-                      Sspace.Unknown
-                        ( "stored B orientation not cleanly detected; Tensorize's role check \
-                           settles it at candidate compile",
-                          lazy (whole ()) )
+                      (* Per [m_tb]'s own contract, [None] means no role symbol occupies B's minor
+                         axis — in-place reads inherit that layout and Tensorize's role check
+                         rejects every one of them at candidate compile, deterministically. The
+                         packed forms stay available: a packing Stage normalizes the layout. *)
+                      Sspace.Refuted
+                        "stored B has no role symbol on its minor axis: whole-triple reads B in \
+                         place and cannot satisfy Tensorize's role check"
                   | Some _ -> subt (fun () -> whole ()))
             in
             (* Cache-blocked packed composition ([cpu_mma_pack_sketch_schedule]; [bk > 0] selects
