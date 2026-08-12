@@ -3,7 +3,14 @@
 **Date**: 2026-08-12
 **Status**: Phase 0 implemented (envelope fitting `Ir.Cost_model.Calibration` +
 `tools/fit_envelope.exe`, the continuous bound-vs-measured agreement check in `Autotune.tune`,
-and this design). Search phases not started; each is its own PR.
+and this design; staging PR #320, hardened by four review rounds: per-leg count exactness,
+fission slack for multi-kernel aggregate rows, floored serialization). Phase 1 implemented:
+`Ir.Schedule_space` (placement levels including `Pl_stage_at`; the lazy refinement tree with
+labelled, commitment-dependent choices) and the matmul family factored into it —
+`Autotune.matmul_seed_params` {e is} `Schedule_space.leaves` of `matmul_sketch_tree`, pinned
+list-for-list against the pre-factoring golden by test/operations/sketch_family_tree.ml; the
+conv family and the epilogue-twin level factor the same way as mechanical follow-ups. Phases
+2+ not started; each is its own PR.
 **Issue**: [ahrefs/ocannl#514](https://github.com/ahrefs/ocannl/issues/514), split off #494
 (waypoint 4). Prerequisites landed: #494 waypoints 1–3 (`Ir.Affine`, the legality decision
 procedures, `Schedule.op_legality`), #491 (`Ir.Cost_model`, roofline envelope, `model_default`),

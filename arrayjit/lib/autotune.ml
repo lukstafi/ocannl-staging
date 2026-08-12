@@ -1,6 +1,7 @@
 open Base
 module SC = Ir.Schedule_cache
 module Sched = Ir.Schedule
+module Sspace = Ir.Schedule_space
 module LL = Ir.Low_level
 module Idx = Ir.Indexing
 module Outcome = Ir.Schedule_outcome
@@ -2240,75 +2241,88 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
            exactly-once check passes by construction — multi-window (2-D) convs included. *)
         Some (seeds, site.c_d)
 
-let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) site :
-    sketch_params list =
+(* The matmul family as a refinement tree (gh-ocannl-514 phase 1): the hand-written seed
+   enumeration factored into decision levels — pipeline, then per-pipeline shape/geometry levels,
+   twins as their own level — with the seed list recovered as the tree's {!Sspace.leaves}, in the
+   exact order the flat enumeration produced (enumeration order reaches candidate timing order and
+   dedup keep-first, so the factoring must preserve it; levels therefore appear in emission order,
+   e.g. the packing shape ABOVE its geometries). Children domains depend on earlier commitments —
+   a packing shape constrains which geometries remain, a twin exists only for staged geometries —
+   which is what makes this a tree of staged choices rather than a product of independent domains.
+   Subtrees are lazy so a future fathom (phase 4) can prune a choice without forcing what is below
+   it; a choice whose every child was filtered out is an infeasible node with no leaves. Pinned by
+   test/operations/sketch_family_tree.ml against the pre-factoring golden. *)
+let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) site :
+    sketch_params Sspace.tree =
   let divides c n = c <= n && n % c = 0 in
-  let blocktile =
-    if is_gpu then
-      List.filter_map
-        [
-          (64, 64, 8, 4, 4);
-          (32, 32, 8, 4, 4);
-          (16, 16, 8, 4, 4);
-          (32, 32, 16, 2, 2);
-          (16, 16, 8, 2, 2);
-        ]
-        ~f:(fun (bm, bn, bk, tm, tn) ->
-          if
-            divides bm site.m_ni && divides bn site.m_nj && divides bk site.m_nk && divides tm bm
-            && divides tn bn
-          then
-            Some
-              {
-                sk_gpu = true;
-                sk_mma = false;
-                sk_simd = 0;
-                sk_bm = bm;
-                sk_bn = bn;
-                sk_bk = bk;
-                sk_tm = tm;
-                sk_tn = tn;
-                sk_hoist = false;
-                sk_grid = false;
-                sk_pack_rest = false;
-                sk_conv = false;
-                sk_epilogue = false;
-                sk_swizzle = None;
-                sk_depth = 1;
-              }
-          else None)
-    else if is_cpu then
-      let base =
-        List.filter_map [ 16; 8 ] ~f:(fun b ->
-            if divides b site.m_ni && divides b site.m_nj && divides b site.m_nk then
-              Some
-                {
-                  sk_gpu = false;
-                  sk_mma = false;
-                  sk_simd = 0;
-                  sk_bm = b;
-                  sk_bn = b;
-                  sk_bk = b;
-                  sk_tm = 0;
-                  sk_tn = 0;
-                  sk_hoist = false;
-                  sk_grid = false;
-                  sk_pack_rest = false;
-                  sk_conv = false;
-                  sk_epilogue = false;
-                  sk_swizzle = None;
-                  sk_depth = 1;
-                }
-            else None)
-      in
-      (* Hoisted vs in-kernel packing stays a measured choice (gh-ocannl-470): when a constant
-         operand can be packed at link time, propose each tiling in both flavors. *)
-      if hoistable site.m_a || hoistable site.m_b then
-        base @ List.map base ~f:(fun p -> { p with sk_hoist = true })
-      else base
-    else []
+  let leaf p = Sspace.Leaf p in
+  let choice level children = Sspace.Choice { level; children } in
+  let base_params =
+    {
+      sk_gpu = false;
+      sk_mma = false;
+      sk_simd = 0;
+      sk_bm = 0;
+      sk_bn = 0;
+      sk_bk = 0;
+      sk_tm = 0;
+      sk_tn = 0;
+      sk_hoist = false;
+      sk_grid = false;
+      sk_pack_rest = false;
+      sk_conv = false;
+      sk_epilogue = false;
+      sk_swizzle = None;
+      sk_depth = 1;
+    }
   in
-  let mma =
+  let blocktile () =
+    if is_gpu then
+      choice "geometry"
+        (List.filter_map
+           [ (64, 64, 8, 4, 4); (32, 32, 8, 4, 4); (16, 16, 8, 4, 4); (32, 32, 16, 2, 2); (16, 16, 8, 2, 2) ]
+           ~f:(fun (bm, bn, bk, tm, tn) ->
+             if
+               divides bm site.m_ni && divides bn site.m_nj && divides bk site.m_nk
+               && divides tm bm && divides tn bn
+             then
+               Some
+                 ( Printf.sprintf "bm%d bn%d bk%d tm%d tn%d" bm bn bk tm tn,
+                   lazy
+                     (leaf
+                        {
+                          base_params with
+                          sk_gpu = true;
+                          sk_bm = bm;
+                          sk_bn = bn;
+                          sk_bk = bk;
+                          sk_tm = tm;
+                          sk_tn = tn;
+                        }) )
+             else None))
+    else if is_cpu then
+      (* Hoisted vs in-kernel packing stays a measured choice (gh-ocannl-470): when a constant
+         operand can be packed at link time, propose each tiling in both flavors. The packing
+         level sits ABOVE its geometries: the flat enumeration emitted all in-kernel tilings
+         before the hoisted twins. *)
+      let geoms hoist =
+        choice "geometry"
+          (List.filter_map [ 16; 8 ] ~f:(fun b ->
+               if divides b site.m_ni && divides b site.m_nj && divides b site.m_nk then
+                 Some
+                   ( Printf.sprintf "b%d" b,
+                     lazy (leaf { base_params with sk_bm = b; sk_bn = b; sk_bk = b; sk_hoist = hoist })
+                   )
+               else None))
+      in
+      choice "packing"
+        (("in-kernel", lazy (geoms false))
+        ::
+        (if hoistable site.m_a || hoistable site.m_b then [ ("hoisted", lazy (geoms true)) ]
+         else []))
+    else choice "geometry" []
+  in
+  let mma () =
     match (is_gpu, limits.Ir.Backend_intf.mma) with
     | true, Some ({ Ir.Backend_intf.mma_simd_width = w; _ } as mma) -> (
         match
@@ -2317,7 +2331,7 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
             ~b_prec:(Lazy.force site.m_b.Ir.Tnode.storage_prec)
             ~d_prec:(Lazy.force site.m_d.Ir.Tnode.storage_prec)
         with
-        | None -> []
+        | None -> choice "geometry" []
         | Some (tm_t, tn_t, tk_t) ->
             (* [bn = w] keeps the zeroing's column grid blocks aligned with [j]'s (see
                [gpu_mma_sketch_schedule]); [bk = 0] = unstaged full-K block. Staged seeds
@@ -2351,69 +2365,49 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
               | Some LL.Swizzle_b128 when bk > 0 && b128_rows_ok ~bn ~bk -> Some LL.Swizzle_b128
               | Some LL.Swizzle_elem | Some LL.Swizzle_b128 | None -> None
             in
-            List.concat_map
-              [ (16, w, 0); (32, w, 0); (16, w, 32); (32, w, 32); (32, w, 16) ]
-              ~f:(fun (bm, bn, bk) ->
-                if
-                  bm % tm_t = 0
-                  && bn % tn_t = 0
-                  && (if bk = 0 then
-                        divides bm site.m_ni && divides bn site.m_nj && site.m_nk % tk_t = 0
-                      else bk % tk_t = 0)
-                then
-                  let base =
-                    {
-                      sk_gpu = true;
-                      sk_mma = true;
-                      sk_simd = w;
-                      sk_bm = bm;
-                      sk_bn = bn;
-                      sk_bk = bk;
-                      sk_tm = 0;
-                      sk_tn = 0;
-                      sk_hoist = false;
-                      sk_grid = false;
-                      sk_pack_rest = false;
-                      sk_conv = false;
-                      sk_epilogue = false;
-                      sk_swizzle = None;
-                      sk_depth = 1;
-                    }
-                  in
-                  (* The pipelined twins (gh-ocannl-487): same tile sizes, same pipeline, only the
-                     cooperative copies double-buffered — seeded per advertised depth, staged seeds
-                     only (an unstaged seed has no cooperative copy to pipeline). Not composed with
-                     the swizzled twin: the paired instruments each measure one knob against the
-                     shared plain sibling. Masked sites (non-dividing extents, padded by the
-                     builder) are not twinned either: their pad masks keep [Tensorize] on the
-                     barrier-bracketed per-call arm, whose leading bracket sits between the
-                     prefetch and the compute — the copy must complete there, so the twin could
-                     only pay the doubled footprint (Codex P2 on PR #303). *)
-                  (base
-                  :: (match swizzle_for ~bn ~bk with
-                     | Some kind -> [ { base with sk_swizzle = Some kind } ]
-                     | None -> []))
-                  @ (if
-                       bk > 0 && divides bm site.m_ni && divides bn site.m_nj
-                       && divides bk site.m_nk
-                       (* Depth twins ride the async arms' element floor (Codex P2 on PR #317):
-                          [C_syntax]'s async staging needs >= 4-byte tile elements, so a
-                          narrower-precision twin could only render the portable synchronous
-                          form — the doubled-footprint occupancy cost phase 1 measured, with no
-                          overlap to buy back. The staged tiles inherit the operands' storage
-                          precisions. *)
-                       && Ir.Ops.prec_in_bytes a_prec >= 4
-                       && Ir.Ops.prec_in_bytes b_prec >= 4
-                     then
-                       List.map mma.Ir.Backend_intf.mma_pipeline_depths ~f:(fun d ->
-                           { base with sk_depth = d })
-                     else [])
-                else []))
+            choice "geometry"
+              (List.filter_map
+                 [ (16, w, 0); (32, w, 0); (16, w, 32); (32, w, 32); (32, w, 16) ]
+                 ~f:(fun (bm, bn, bk) ->
+                   if
+                     bm % tm_t = 0
+                     && bn % tn_t = 0
+                     && (if bk = 0 then
+                           divides bm site.m_ni && divides bn site.m_nj && site.m_nk % tk_t = 0
+                         else bk % tk_t = 0)
+                   then
+                     let base =
+                       { base_params with sk_gpu = true; sk_mma = true; sk_simd = w; sk_bm = bm; sk_bn = bn; sk_bk = bk }
+                     in
+                     (* The twins level (per staged geometry): the swizzled layout and the pipelined
+                        depths, each measured against the shared plain sibling — see the field docs
+                        on [sk_swizzle]/[sk_depth] for why unstaged and masked geometries are not
+                        twinned (gh-ocannl-481 item 3 D3; Codex P2 on PRs #303 and #317). *)
+                     Some
+                       ( Printf.sprintf "bm%d bn%d bk%d" bm bn bk,
+                         lazy
+                           (choice "twin"
+                              (("plain", lazy (leaf base))
+                              :: (match swizzle_for ~bn ~bk with
+                                 | Some kind ->
+                                     [ ("swizzled", lazy (leaf { base with sk_swizzle = Some kind })) ]
+                                 | None -> [])
+                              @
+                              if
+                                bk > 0 && divides bm site.m_ni && divides bn site.m_nj
+                                && divides bk site.m_nk
+                                && Ir.Ops.prec_in_bytes a_prec >= 4
+                                && Ir.Ops.prec_in_bytes b_prec >= 4
+                              then
+                                List.map mma.Ir.Backend_intf.mma_pipeline_depths ~f:(fun d ->
+                                    (Printf.sprintf "depth%d" d, lazy (leaf { base with sk_depth = d })))
+                              else [])) )
+                   else None)))
     | _ when is_cpu ->
         (* The register-tiled [Tile_mma] rendering needs no MMA units (cc's [limits.mma] is a token
-           1x1x1 capability): seed the whole-triple form plus Grid-parallel row-block splits, and
-           the cache-blocked packed compositions. Statement rules the renderer checks per emission
-           ([C_syntax.try_register_tile]) that are already decidable here pre-filter the seeds
+           1x1x1 capability): the whole-triple form plus Grid-parallel row-block splits, and the
+           cache-blocked packed compositions. Statement rules the renderer checks per emission
+           ([C_syntax.try_register_tile]) that are already decidable here pre-filter the tree
            (gh-ocannl-479): a candidate that statically must render the scalar fallback would
            otherwise be timed — and possibly crowned, and cached — under a tensorized label, making
            "the tensorized candidate lost" indistinguishable from "it never ran tensorized".
@@ -2436,34 +2430,20 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
           && lanes >= 2 && uniform_f32_64 && site.m_fma
         in
         let tb_in_place = Option.value site.m_tb ~default:false in
-        if not regtile_static_ok then []
+        if not regtile_static_ok then choice "geometry" []
         else
-          let whole =
-            List.filter_map [ 0; 64; 16 ] ~f:(fun bm ->
-                if
-                  (* Whole-triple [Tile_mma] reads both operands in place over the full column
-                     extent: the stored B orientation and [n = m_nj] reach the renderer as-is. *)
-                  (not tb_in_place) && site.m_nj >= lanes && (bm = 0 || divides bm site.m_ni)
-                then
-                  Some
-                    {
-                      sk_gpu = false;
-                      sk_mma = true;
-                      sk_simd = 0;
-                      sk_bm = bm;
-                      sk_bn = 0;
-                      sk_bk = 0;
-                      sk_tm = 0;
-                      sk_tn = 0;
-                      sk_hoist = false;
-                      sk_grid = false;
-                      sk_pack_rest = false;
-                      sk_conv = false;
-                      sk_epilogue = false;
-                      sk_swizzle = None;
-                      sk_depth = 1;
-                    }
-                else None)
+          let whole () =
+            choice "row-block"
+              (List.filter_map [ 0; 64; 16 ] ~f:(fun bm ->
+                   if
+                     (* Whole-triple [Tile_mma] reads both operands in place over the full column
+                        extent: the stored B orientation and [n = m_nj] reach the renderer as-is. *)
+                     (not tb_in_place) && site.m_nj >= lanes && (bm = 0 || divides bm site.m_ni)
+                   then
+                     Some
+                       ( Printf.sprintf "bm%d" bm,
+                         lazy (leaf { base_params with sk_mma = true; sk_bm = bm }) )
+                   else None))
           in
           (* Cache-blocked packed composition ([cpu_mma_pack_sketch_schedule]; [bk > 0] selects it):
              [bn = 0] = unsplit column panel. The packed tiles are function-scope stack arrays, so
@@ -2474,9 +2454,9 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
           (* Non-multiple extents no longer gate the packed composition (gh-ocannl-485): both
              operands pack through zero-fringe tiles, so the builder pads the axes to the block
              sizes and [Tensorize] masks the edges. Variants that read an operand in place (the
-             hoisted-only Grid shape below) cannot absorb a pad, so each seed carries whether the
-             extents divide outright ([full_div]) and those variants derive only from dividing
-             seeds. *)
+             hoisted-only Grid shape below) cannot absorb a pad, so each geometry carries whether
+             the extents divide outright ([full_div]) and those variants derive only from dividing
+             geometries. *)
           let packed_div =
             List.filter_map
               [ (64, 0, 64); (64, 0, 256); (128, 128, 128); (64, 128, 256); (16, 0, 16) ]
@@ -2493,103 +2473,111 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                     && divides bk site.m_nk
                   in
                   Some
-                    ( {
-                        sk_gpu = false;
-                        sk_mma = true;
-                        sk_simd = 0;
-                        sk_bm = bm;
-                        sk_bn = bn;
-                        sk_bk = bk;
-                        sk_tm = 0;
-                        sk_tn = 0;
-                        sk_hoist = false;
-                        sk_grid = false;
-                        sk_pack_rest = false;
-                        sk_conv = false;
-                        sk_epilogue = false;
-                        sk_swizzle = None;
-                        sk_depth = 1;
-                      },
+                    ( { base_params with sk_mma = true; sk_bm = bm; sk_bn = bn; sk_bk = bk },
                       full_div )
                 else None)
           in
-          let packed = List.map packed_div ~f:fst in
-          (* Hoisted (link-time) packing stays a measured choice for constant operands, like the
-             scalar S4 pipeline (gh-ocannl-470). And when a hoistable operand exists, the
-             hoisted-only composition pool-parallelizes ([sk_grid && sk_hoist]): hoisted packing
-             emits no in-kernel pack writes, so an outermost Grid split over the row blocks is
-             trivially race-free — pack only the hoistable operand(s), read the rest in place
-             ([cpu_mma_pack_sketch_schedule]) — except that an in-place read of a transposed
-             non-hoistable B statically declines the register tiling, so those seeds are skipped.
-             Grid seeds need at least two row blocks (c_syntax.ml [collect_parallel_grid] wants
-             extent >= 2). When exactly one operand is hoistable — the typical inference GEMM —
-             additionally seed the mixed grid-outermost shape (gh-ocannl-473, [sk_pack_rest]): the
-             non-hoistable operand gets an in-kernel packing Stage (privatized per chunk by the
-             renderer) instead of being read in place, which both recovers its pack and normalizes
-             its layout. *)
-          let base = packed in
           let grid_ok p = blocks_of site.m_ni p.sk_bm >= 2 in
-          (* Hoisted-only Grid seeds read non-hoistable operands in place: no pad absorption, so
-             they derive only from fully dividing seeds — unless both operands are hoistable (both
-             then pack, zero-fringe included). *)
-          let base_hoist_grid =
-            List.filter_map packed_div ~f:(fun (p, full_div) ->
-                if full_div || (hoistable site.m_a && hoistable site.m_b) then Some p else None)
+          (* One packing shape's geometries: the shared packed menu filtered and transformed per
+             shape. The shape level sits ABOVE the geometries, matching the flat enumeration's
+             variant-major emission order. *)
+          let geoms ~f =
+            choice "geometry"
+              (List.filter_map packed_div ~f:(fun (p, full_div) ->
+                   Option.map (f p full_div) ~f:(fun p' ->
+                       (Printf.sprintf "bm%d bn%d bk%d" p'.sk_bm p'.sk_bn p'.sk_bk, lazy (leaf p')))))
           in
-          let packed =
-            if hoistable site.m_a || hoistable site.m_b then
-              packed
-              @ List.map base ~f:(fun p -> { p with sk_hoist = true })
-              @ (if tb_in_place && not (hoistable site.m_b) then []
-                 else
-                   List.filter_map base_hoist_grid ~f:(fun p ->
-                       if grid_ok p then Some { p with sk_hoist = true; sk_grid = true } else None))
-              @
-              if Bool.( <> ) (hoistable site.m_a) (hoistable site.m_b) then
-                List.filter_map base ~f:(fun p ->
-                    if grid_ok p then
-                      Some { p with sk_hoist = true; sk_grid = true; sk_pack_rest = true }
-                    else None)
-              else []
-            else
-              (* No hoistable operand: grid-outermost with per-chunk B~ re-packing ([sk_pack_rest]
-                 without [sk_hoist], gh-ocannl-475) is the only one-dispatch shape available —
-                 measured to beat the dispatch-per-k-block shape across geometries
-                 (bin/schedule_bench.ml, pm_bpk vs packmma_par) whenever the tiles fit the
-                 renderer's per-chunk privatization cap, so propose it whenever they statically do
-                 (other per-chunk locals can still trip the cap at render; the census and decline
-                 diagnostics cover that). *)
-              let chunk_cap =
-                match
-                  Int.of_string
-                    (String.strip
-                       (Utils.get_global_arg ~arg_name:"cc_grid_private_bytes_cap" ~default:"262144"))
-                with
-                | c when c > 0 -> c
-                | _ -> 256 * 1024
-                | exception _ -> 256 * 1024
-              in
-              packed
-              @ List.filter_map base ~f:(fun p ->
-                  let bn_eff = if p.sk_bn = 0 then site.m_nj else p.sk_bn in
-                  let tiles_bytes = ((p.sk_bm * p.sk_bk) + (p.sk_bk * bn_eff)) * prec_bytes in
-                  if grid_ok p && tiles_bytes <= chunk_cap then
-                    Some { p with sk_grid = true; sk_pack_rest = true }
-                  else None)
+          (* Hoisted (link-time) packing stays a measured choice for constant operands, like the
+             scalar S4 pipeline (gh-ocannl-470). When a hoistable operand exists, the hoisted-only
+             composition pool-parallelizes ([sk_grid && sk_hoist]): hoisted packing emits no
+             in-kernel pack writes, so an outermost Grid split over the row blocks is trivially
+             race-free — pack only the hoistable operand(s), read the rest in place — except that
+             an in-place read of a transposed non-hoistable B statically declines the register
+             tiling, so that shape is skipped. Grid shapes need at least two row blocks
+             (c_syntax.ml [collect_parallel_grid] wants extent >= 2). Hoisted-only Grid reads
+             non-hoistable operands in place: no pad absorption, so it derives only from fully
+             dividing geometries — unless both operands are hoistable (both then pack, zero-fringe
+             included). When exactly one operand is hoistable — the typical inference GEMM — the
+             mixed grid-outermost shape (gh-ocannl-473, [sk_pack_rest]) additionally packs the
+             non-hoistable operand through an in-kernel Stage (privatized per chunk by the
+             renderer) instead of reading it in place. Without any hoistable operand,
+             grid-outermost with per-chunk B~ re-packing ([sk_pack_rest] without [sk_hoist],
+             gh-ocannl-475) is the only one-dispatch shape available — measured to beat the
+             dispatch-per-k-block shape across geometries (bin/schedule_bench.ml, pm_bpk vs
+             packmma_par) whenever the tiles fit the renderer's per-chunk privatization cap, so it
+             is proposed whenever they statically do (other per-chunk locals can still trip the
+             cap at render; the census and decline diagnostics cover that). The final Grid shape —
+             pool-parallel over the in-kernel packed composition, the renderer privatizing the
+             per-row-block A~ tile and sharing the read-only B~ panel
+             ([C_syntax.parallel_grid_safe]) — is a measured choice against the all-Serial and
+             hoisted-only Grid shapes. *)
+          let packed () =
+            choice "packing-shape"
+              ((("serial", lazy (geoms ~f:(fun p _ -> Some p)))
+               ::
+               (if hoistable site.m_a || hoistable site.m_b then
+                  [ ("hoisted", lazy (geoms ~f:(fun p _ -> Some { p with sk_hoist = true }))) ]
+                  @ (if tb_in_place && not (hoistable site.m_b) then []
+                     else
+                       [
+                         ( "hoisted-grid",
+                           lazy
+                             (geoms ~f:(fun p full_div ->
+                                  if
+                                    (full_div || (hoistable site.m_a && hoistable site.m_b))
+                                    && grid_ok p
+                                  then Some { p with sk_hoist = true; sk_grid = true }
+                                  else None)) );
+                       ])
+                  @
+                  if Bool.( <> ) (hoistable site.m_a) (hoistable site.m_b) then
+                    [
+                      ( "hoisted-grid-pack-rest",
+                        lazy
+                          (geoms ~f:(fun p _ ->
+                               if grid_ok p then
+                                 Some { p with sk_hoist = true; sk_grid = true; sk_pack_rest = true }
+                               else None)) );
+                    ]
+                  else []
+                else
+                  [
+                    ( "grid-pack-rest",
+                      lazy
+                        (let chunk_cap =
+                           match
+                             Int.of_string
+                               (String.strip
+                                  (Utils.get_global_arg ~arg_name:"cc_grid_private_bytes_cap"
+                                     ~default:"262144"))
+                           with
+                           | c when c > 0 -> c
+                           | _ -> 256 * 1024
+                           | exception _ -> 256 * 1024
+                         in
+                         geoms ~f:(fun p _ ->
+                             let bn_eff = if p.sk_bn = 0 then site.m_nj else p.sk_bn in
+                             let tiles_bytes =
+                               ((p.sk_bm * p.sk_bk) + (p.sk_bk * bn_eff)) * prec_bytes
+                             in
+                             if grid_ok p && tiles_bytes <= chunk_cap then
+                               Some { p with sk_grid = true; sk_pack_rest = true }
+                             else None)) );
+                  ]))
+              @ [
+                  ( "grid",
+                    lazy (geoms ~f:(fun p _ -> if grid_ok p then Some { p with sk_grid = true } else None))
+                  );
+                ])
           in
-          (* Pool-parallel Grid over the in-kernel packed composition: the renderer privatizes the
-             per-row-block A~ tile to per-chunk storage and shares the read-only B~ panel
-             ([C_syntax.parallel_grid_safe]). A measured choice against the all-Serial and
-             hoisted-only Grid flavors. *)
-          let packed =
-            packed
-            @ List.filter_map base ~f:(fun p ->
-                if blocks_of site.m_ni p.sk_bm >= 2 then Some { p with sk_grid = true } else None)
-          in
-          whole @ packed
-    | _ -> []
+          choice "tensorized-form" [ ("whole-triple", lazy (whole ())); ("packed", lazy (packed ())) ]
+    | _ -> choice "geometry" []
   in
-  blocktile @ mma
+  choice "pipeline" [ ("blocktile", lazy (blocktile ())); ("tensorized", lazy (mma ())) ]
+
+let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) site :
+    sketch_params list =
+  Sspace.leaves (matmul_family_tree ~is_gpu ~is_cpu ~limits site)
 
 let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
     (opt : LL.optimized) : sketch_params list =
@@ -2611,6 +2599,12 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
          fusion fail their candidate compile and are skipped. *)
       seeds @ List.map seeds ~f:(fun p -> { p with sk_epilogue = true })
   | seeds, _ -> seeds
+
+(* The exported tree view of the matmul family (site detection included); the conv family and the
+   epilogue-twin level factor the same way as mechanical follow-ups. *)
+let matmul_sketch_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
+    (opt : LL.optimized) : sketch_params Sspace.tree option =
+  Option.map (detect_matmul opt.LL.llc) ~f:(matmul_family_tree ~is_gpu ~is_cpu ~limits)
 
 (** {2 The privatized fission flavor}
 

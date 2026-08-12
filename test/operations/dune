@@ -1776,6 +1776,19 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; The matmul sketch family as a refinement tree (gh-ocannl-514 phase 1): golden of the seed
+; enumeration under synthetic limits (pure in the lowering, so GPU legs need no GPU).
+(test
+ (name sketch_family_tree)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules sketch_family_tree)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
 ; Run by a rule (not a test stanza) so the backend and the model_peak_* envelope overrides are
 ; pinned on the command line: the C backends carry no advisory envelope constants, and pinning
 ; makes the roofline-scoring output deterministic across the backend test matrix.
