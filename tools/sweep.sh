@@ -141,11 +141,27 @@ exec 9>"$LOCK" || die "cannot open $LOCK"
 perl -e 'use Fcntl ":flock"; exit(flock(STDIN, LOCK_EX | LOCK_NB) ? 0 : 1)' <&9 ||
   die "another sweep is running; refusing to share the worktree"
 
-# Nothing to release, so these only stop bash from RESUMING after the interrupted
-# command: it runs a trap and then carries on where it left off, which for a
-# sweep means continuing to the next unit as though nothing had happened.
-trap 'exit 130' INT
-trap 'exit 143' TERM
+# Signals aimed at THIS pid rather than at the process group -- `kill $pid` from a
+# supervisor, or the scheduler cancelling the task -- never reach the capped
+# supervisor on their own: bash defers a trap while it waits on a foreground
+# command, so the tests would run to completion (or to the 90-minute cap) holding
+# the lock, and every sweep queued behind them would be refused. Group signals
+# reach the supervisor directly and it forwards them itself; this is the other
+# half. Each unit therefore runs asynchronously and the trap relays to it.
+#
+# TERM rather than the signal received: bash sets SIGINT to ignored for
+# asynchronous children, so relaying INT could be a no-op, while the supervisor
+# installs its own TERM handler unconditionally.
+UNIT_PID=
+relay() {
+  if [ -n "$UNIT_PID" ]; then
+    kill -TERM "$UNIT_PID" 2>/dev/null
+    wait "$UNIT_PID" 2>/dev/null
+  fi
+  exit "$1"
+}
+trap 'relay 130' INT
+trap 'relay 143' TERM
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 # Resolve the ref to a commit ONCE, here, and pin every machine to that commit.
@@ -196,7 +212,9 @@ wanted() {
 # into the remote string via command substitution, which bash does not rescan.
 test_cmd() {
   local backend=$1 wt=$2
-  printf 'cd "%s" || exit 2; ' "$wt"
+  # 127, not a generic failure: a worktree that is not there means nothing ran,
+  # which the outcome mapping treats as non-coverage rather than a red suite.
+  printf 'cd "%s" || exit 127; ' "$wt"
   printf 'OCANNL_BACKEND=%s opam exec -- dune runtest %s; rc1=$?; ' "$backend" "$TARGET"
   if [ "$SLOW" = 1 ]; then
     printf 'OCANNL_BACKEND=%s opam exec -- dune build @slow; rc2=$?; ' "$backend"
@@ -255,6 +273,14 @@ capped_perl='
 # First argument is the budget in seconds, so the remote path can allow for
 # far-side cleanup and ssh teardown on top of its own cap.
 capped() { perl -e "$capped_perl" -- "$@"; }
+
+# The same supervisor, for the backgrounded unit calls. `exec` is the point:
+# backgrounding a shell FUNCTION runs it in a subshell, so `capped ... &` would
+# put the SUBSHELL's pid in $! -- and a relayed signal would kill that wrapper
+# while the supervisor, and dune under it, carried on. exec replaces the subshell
+# so $! names the supervisor itself. Valid only backgrounded: called
+# synchronously it would replace this script.
+capped_bg() { exec perl -e "$capped_perl" -- "$@"; }
 
 # Put a reused worktree exactly on $full_sha, and PROVE it rather than assume it.
 # `checkout --detach` is not sufficient on its own: a tracked edit that does not
@@ -336,12 +362,17 @@ for unit in "${UNITS[@]}"; do
     # remote that never got as far as dune tested nothing at all.
     remote_repo="$remote_home/ocannl-staging"
     remote_prep="git -C \"$remote_repo\" fetch -q origin master && $(prep_cmd "$remote_repo" "$wt")"
-    # Bounded too: a wedged `git fetch` here is indistinguishable from a wedged
-    # dune later, and both would stall every remaining unit. Generous, since a
-    # cold fetch on a slow link is legitimate work.
+    # Bounded on BOTH sides, for the reason the test leg documents below: an
+    # outer bound only kills the local ssh, and a wedged `git fetch` left running
+    # on the far side can finish later and reset the shared remote worktree --
+    # possibly while a subsequent sweep is building in it. The far-side timeout is
+    # what actually stops that; the outer budget is the backstop for a connection
+    # that dies without the remote noticing, and is larger so it cannot pre-empt
+    # the inner one. Generous overall, since a cold fetch on a slow link is
+    # legitimate work.
     if ! capped 900 ssh -o BatchMode=yes \
          -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-         "$host" "$path_prefix $remote_prep" >"$log" 2>&1; then
+         "$host" "timeout -k 10s 600s sh -c $(sq "$path_prefix $remote_prep")" >"$log" 2>&1; then
       echo "  $machine/$backend: error (cannot pin $host to $run_sha)"
       record "$machine" "$backend" error "$(( $(date +%s) - started ))" "$log"
       fingerprint "$log" >"${log%.log}.fingerprint"
@@ -364,10 +395,12 @@ for unit in "${UNITS[@]}"; do
     # budget deliberately exceeds $CAP, so it can only fire after the remote
     # timeout has had its chance plus room for cleanup and teardown; otherwise it
     # would cut legitimate long runs short and call them timeouts.
-    capped "$(( CAP + 300 ))" \
+    capped_bg "$(( CAP + 300 ))" \
       ssh -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-      "$host" "$remote" >"$log" 2>&1
-    rc=$?
+      "$host" "$remote" >"$log" 2>&1 &
+    UNIT_PID=$!
+    wait "$UNIT_PID"; rc=$?
+    UNIT_PID=
   else
     wt=$LOCAL_WT
     # Checked, and fatal for this UNIT rather than the run. The worktree is
@@ -389,8 +422,10 @@ for unit in "${UNITS[@]}"; do
       fingerprint "$log" >"${log%.log}.fingerprint"
       continue
     fi
-    capped "$CAP" /bin/sh -c "$(test_cmd "$backend" "$wt")" >"$log" 2>&1
-    rc=$?
+    capped_bg "$CAP" /bin/sh -c "$(test_cmd "$backend" "$wt")" >"$log" 2>&1 &
+    UNIT_PID=$!
+    wait "$UNIT_PID"; rc=$?
+    UNIT_PID=
   fi
 
   elapsed=$(( $(date +%s) - started ))
@@ -403,9 +438,15 @@ for unit in "${UNITS[@]}"; do
   # ssh reserves 255 for its own transport errors, so on the remote path that is
   # a connection lost mid-run: nothing was judged there either, which is `error`
   # (non-coverage) rather than a failing suite. Locally 255 is just an exit code.
+  #
+  # 126 and 127 mean the shell could not run what it was asked to: no opam, no
+  # dune in the selected switch, no worktree to cd into. Nothing was judged, so
+  # that is non-coverage, not a red suite -- a distinction that matters most on a
+  # GPU box used rarely enough for its switch to rot unnoticed.
   case $rc in
     0) outcome=pass ;;
     124 | 137 | 142) outcome=timeout ;;
+    126 | 127) outcome=error ;;
     255) [ -n "$host" ] && outcome=error || outcome=fail ;;
     *) outcome=fail ;;
   esac
