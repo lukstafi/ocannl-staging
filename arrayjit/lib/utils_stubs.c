@@ -1,8 +1,227 @@
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+/* sched_getaffinity / sched_setaffinity / CPU_* macros. */
+#define _GNU_SOURCE
+#endif
+
+#include <caml/alloc.h>
+#include <caml/memory.h>
 #include <caml/mlvalues.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#if defined(_WIN32)
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <sys/sysctl.h>
+#include <sys/types.h>
+#elif defined(__linux__)
+#include <sched.h>
+#endif
+
+#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
+#include <cpuid.h>
+#endif
 
 CAMLprim value ocannl_flush_c_streams(value unit) {
   (void)unit;
   fflush(NULL);
   return Val_unit;
+}
+
+/* --- CPU topology facts (gh-ocannl-530) ---
+
+   These stubs report facts only; the pool-restriction policy that consumes them lives in
+   Cc_backend. Each degrades to an "unknown" answer rather than failing: the callers treat
+   unknown conservatively (no restriction). */
+
+/* Perf-ranked core classes as a string "rank:count:maskhex;..." with higher rank = higher
+   performance, or "" when the platform reports no class structure this way (Linux answers via
+   sysfs, parsed on the OCaml side). */
+CAMLprim value ocannl_core_classes_str(value unit) {
+  CAMLparam1(unit);
+  CAMLlocal1(result);
+#if defined(_WIN32)
+  /* GetLogicalProcessorInformationEx(RelationProcessorCore): one entry per physical core,
+     carrying EfficiencyClass (higher value = higher performance; P=1, E=0 on Intel hybrid) and
+     the logical-processor group mask. Only processor group 0 is supported: hybrid client parts
+     fit in one 64-CPU group, and the policy no-ops rather than guessing on larger machines. */
+  DWORD len = 0;
+  char *buf = NULL;
+  char out[2048];
+  unsigned long long masks[256];
+  int seen[256];
+  memset(masks, 0, sizeof(masks));
+  memset(seen, 0, sizeof(seen));
+  out[0] = '\0';
+  GetLogicalProcessorInformationEx(RelationProcessorCore, NULL, &len);
+  if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || len == 0)
+    CAMLreturn(caml_copy_string(""));
+  buf = (char *)malloc(len);
+  if (buf == NULL) CAMLreturn(caml_copy_string(""));
+  if (!GetLogicalProcessorInformationEx(RelationProcessorCore,
+                                        (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)buf, &len)) {
+    free(buf);
+    CAMLreturn(caml_copy_string(""));
+  }
+  {
+    char *p = buf;
+    int ok = 1;
+    while (p < buf + len) {
+      PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX info =
+          (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)p;
+      if (info->Relationship == RelationProcessorCore) {
+        int cls = (int)info->Processor.EfficiencyClass;
+        WORD i;
+        for (i = 0; i < info->Processor.GroupCount; i++) {
+          if (info->Processor.GroupMask[i].Group != 0) {
+            ok = 0; /* Multi-group machine: report nothing rather than a partial map. */
+          } else {
+            masks[cls] |= (unsigned long long)info->Processor.GroupMask[i].Mask;
+            seen[cls] = 1;
+          }
+        }
+      }
+      p += info->Size;
+    }
+    if (ok) {
+      int cls;
+      size_t pos = 0;
+      for (cls = 255; cls >= 0; cls--) {
+        if (seen[cls]) {
+          unsigned long long m = masks[cls];
+          int count = 0;
+          while (m) {
+            count += (int)(m & 1);
+            m >>= 1;
+          }
+          pos += (size_t)snprintf(out + pos, sizeof(out) - pos, "%s%d:%d:%llx",
+                                  pos > 0 ? ";" : "", cls, count, masks[cls]);
+          if (pos >= sizeof(out)) {
+            out[0] = '\0';
+            break;
+          }
+        }
+      }
+    }
+  }
+  free(buf);
+  result = caml_copy_string(out);
+#elif defined(__APPLE__)
+  /* hw.nperflevels / hw.perflevelN.logicalcpu: perflevel0 is the highest-performance level.
+     No affinity masks exist on Darwin, so the mask field is 0 (informational classes only; the
+     cc pool there is libdispatch and the restriction policy never fires). */
+  char out[512];
+  int nlevels = 0;
+  size_t sz = sizeof(nlevels);
+  out[0] = '\0';
+  if (sysctlbyname("hw.nperflevels", &nlevels, &sz, NULL, 0) != 0 || nlevels <= 0 ||
+      nlevels > 16)
+    CAMLreturn(caml_copy_string(""));
+  {
+    int i;
+    size_t pos = 0;
+    for (i = 0; i < nlevels; i++) {
+      char name[64];
+      int count = 0;
+      sz = sizeof(count);
+      snprintf(name, sizeof(name), "hw.perflevel%d.logicalcpu", i);
+      if (sysctlbyname(name, &count, &sz, NULL, 0) != 0 || count <= 0) {
+        out[0] = '\0';
+        break;
+      }
+      pos += (size_t)snprintf(out + pos, sizeof(out) - pos, "%s%d:%d:0", pos > 0 ? ";" : "",
+                              nlevels - 1 - i, count);
+      if (pos >= sizeof(out)) {
+        out[0] = '\0';
+        break;
+      }
+    }
+  }
+  result = caml_copy_string(out);
+#else
+  result = caml_copy_string("");
+#endif
+  CAMLreturn(result);
+}
+
+/* Logical CPUs available to THIS process (affinity-respecting, unlike
+   Domain.recommended_domain_count, which is affinity-blind on Windows). 0 = unknown. */
+CAMLprim value ocannl_effective_cpu_count(value unit) {
+  (void)unit;
+#if defined(_WIN32)
+  {
+    DWORD_PTR pmask = 0, smask = 0;
+    int count = 0;
+    if (!GetProcessAffinityMask(GetCurrentProcess(), &pmask, &smask)) return Val_int(0);
+    while (pmask) {
+      count += (int)(pmask & 1);
+      pmask >>= 1;
+    }
+    return Val_int(count);
+  }
+#elif defined(__linux__)
+  {
+    cpu_set_t set;
+    if (sched_getaffinity(0, sizeof(set), &set) != 0) return Val_int(0);
+    return Val_int(CPU_COUNT(&set));
+  }
+#elif defined(__APPLE__)
+  {
+    int count = 0;
+    size_t sz = sizeof(count);
+    if (sysctlbyname("hw.logicalcpu", &count, &sz, NULL, 0) != 0) return Val_int(0);
+    return Val_int(count);
+  }
+#else
+  return Val_int(0);
+#endif
+}
+
+/* 1 = running under a hypervisor, 0 = bare metal, -1 = cannot tell. The x86 answer is CPUID
+   leaf 1 ECX bit 31, which WSL2, Hyper-V, KVM, VMware etc. all set. */
+CAMLprim value ocannl_hypervisor_present(value unit) {
+  (void)unit;
+#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
+  {
+    unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
+    if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return Val_int(-1);
+    return Val_int((ecx >> 31) & 1);
+  }
+#elif defined(__APPLE__)
+  {
+    int present = 0;
+    size_t sz = sizeof(present);
+    if (sysctlbyname("kern.hv_vmm_present", &present, &sz, NULL, 0) != 0) return Val_int(-1);
+    return Val_int(present ? 1 : 0);
+  }
+#else
+  return Val_int(-1);
+#endif
+}
+
+/* Restrict the whole process to the logical CPUs set in [mask] (bit i = logical CPU i).
+   0 = success; nonzero = failed or unsupported (macOS has no process affinity). */
+CAMLprim value ocannl_set_process_affinity(value mask) {
+#if defined(_WIN32)
+  {
+    DWORD_PTR m = (DWORD_PTR)Int64_val(mask);
+    if (m == 0) return Val_int(1);
+    return Val_int(SetProcessAffinityMask(GetCurrentProcess(), m) ? 0 : 1);
+  }
+#elif defined(__linux__)
+  {
+    unsigned long long m = (unsigned long long)Int64_val(mask);
+    cpu_set_t set;
+    int i;
+    if (m == 0) return Val_int(1);
+    CPU_ZERO(&set);
+    for (i = 0; i < 64; i++)
+      if ((m >> i) & 1) CPU_SET(i, &set);
+    return Val_int(sched_setaffinity(0, sizeof(set), &set) == 0 ? 0 : 1);
+  }
+#else
+  (void)mask;
+  return Val_int(-1);
+#endif
 }

@@ -1,0 +1,48 @@
+== parse_cpu_list ==
+"0-1,10-13,22-23" -> ((0 1 10 11 12 13 22 23))
+"2-9,14-21" -> ((2 3 4 5 6 7 8 9 14 15 16 17 18 19 20 21))
+"0-15" -> ((0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15))
+"3" -> ((3))
+"" -> ()
+"0-,2" -> ()
+"5-3" -> ()
+"1,foo" -> ()
+
+== mask_of_cpu_list ==
+"0-1,10-13,22-23" -> 0xc03c03
+"2-9,14-21" -> 0x3fc3fc
+"64" -> None
+[] -> None
+
+== parse_classes_str ==
+"1:8:c03c03;0:16:3fc3fc" -> (((perf_rank 1) (count 8) (mask 12598275))
+ ((perf_rank 0) (count 16) (mask 4178940)))
+"0:16:3fc3fc;1:8:c03c03" -> (((perf_rank 1) (count 8) (mask 12598275))
+ ((perf_rank 0) (count 16) (mask 4178940)))
+"1:12:0;0:4:0" -> (((perf_rank 1) (count 12) (mask 0)) ((perf_rank 0) (count 4) (mask 0)))
+"1:8" -> ()
+"1:0:ff" -> ()
+"" -> ()
+
+== classes_of_ranked_cpu_lists ==
+rog -> (((perf_rank 1) (count 8) (mask 12598275))
+ ((perf_rank 0) (count 16) (mask 4178940)))
+with cpu 64 -> ()
+
+== decide_pool_restriction ==
+rog native, auto                           -> restrict=0xc03c03 width=8 tag=w8P
+rog native, performance                    -> restrict=0xc03c03 width=8 tag=w8P
+rog native, efficiency                     -> restrict=0x3fc3fc width=16 tag=w16E
+rog native, all                            -> restrict=no width=24 tag=w24
+rog under WSL2 (fabricated topology), auto -> restrict=no width=24 tag=w24
+hypervisor unknown, auto                   -> restrict=no width=24 tag=w24
+libdispatch pool, auto                     -> restrict=no width=24 tag=w24
+uniform machine, auto                      -> restrict=no width=16 tag=w16
+classes without masks, auto                -> restrict=no width=16 tag=w16
+no class info, auto                        -> restrict=no width=8 tag=w8
+externally pinned, auto                    -> restrict=no width=8 tag=w8
+externally pinned, performance             -> restrict=0xc03c03 width=8 tag=w8P
+
+== live probe invariants ==
+effective_cpu_count >= 1: true
+classes well-formed: true

@@ -2053,3 +2053,12 @@
  (libraries base ocannl stdio)
  (preprocess
   (pps ppx_here ppx_ocannl)))
+
+(test
+ (name test_cpu_topology)
+ (package neural_nets_lib)
+ (modules test_cpu_topology)
+ (deps test_cpu_topology.expected)
+ (libraries base arrayjit.utils stdio)
+ (preprocess
+  (pps ppx_sexp_conv)))
