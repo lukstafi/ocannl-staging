@@ -40,8 +40,23 @@ re-evaluation with the narrowed open set: suppression only shrinks, so the floor
 refinement — the property that lets the bound prune (a per-node incremental delta cannot be
 sound in isolation and was removed in review). The Inline recompute floor ships as zero (sound;
 a nonzero floor needs lower-bound multiplicity metrics, deferred until the driver proves the
-need). Phase 4 composes these floors with the fitted envelope through `roofline_seconds`.
-Phases 4+ not started; each is its own PR.
+need). Phase 4a implemented: the branch-and-bound driver — `Schedule_space.search`, depth-first
+in emission order (preserving the flat enumerations' first-best tie behavior), threading a
+tightening incumbent with strict-improvement displacement, fathoming `Child` subtrees whose
+optimistic bound meets the threshold while `Unknown` children are never fathomed and
+`Refuted`/`Excluded` are the construction-time fathoms — with the fathomed-vs-scored
+`search_stats` ledger (phase 6's evaluation data). `model_default`'s sketch selection now walks
+the factored family through it, whole-routine and per-fission-segment, with the untuned
+default's score as incumbent and the schedule-invariant `completion_floor` roofline as the
+uniform bound (sketch completions share the base program's semantics, so the floor bounds them
+all; it fathoms the family exactly when the incumbent already achieves it — the memory-bound
+kernels where the default preset is optimal). Selections are unchanged (goldens byte-identical);
+the not-yet-factored levels (epilogue twins, conv family) compete through the flat path at the
+tightened threshold, after the tree's leaves like the flat seeds-then-twins order. Remaining for
+phase 4b: the measured-incumbent tuned path (pruning `tune`'s candidate timing against the
+incumbent's measured time in the admissible direction, top-K leaf measurement) and the
+placement-space search where phase 3's non-uniform floors actually differentiate subtrees;
+phase 5 makes the family bounds non-uniform via symbolic tile extents.
 **Issue**: [ahrefs/ocannl#514](https://github.com/ahrefs/ocannl/issues/514), split off #494
 (waypoint 4). Prerequisites landed: #494 waypoints 1–3 (`Ir.Affine`, the legality decision
 procedures, `Schedule.op_legality`), #491 (`Ir.Cost_model`, roofline envelope, `model_default`),

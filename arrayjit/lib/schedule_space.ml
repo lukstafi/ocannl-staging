@@ -58,6 +58,69 @@ let refutations tree = collect tree ~f:(function Refuted w -> Some w | _ -> None
 let exclusions tree = collect tree ~f:(function Excluded (w, _) -> Some w | _ -> None)
 let unknowns tree = collect tree ~f:(function Unknown (w, _) -> Some w | _ -> None)
 
+type search_stats = {
+  st_expanded : int;
+  st_scored : int;
+  st_unscored : int;
+  st_fathomed : int;
+  st_refuted : int;
+  st_excluded : int;
+  st_unknown : int;
+}
+[@@deriving sexp_of]
+
+let no_search_stats =
+  {
+    st_expanded = 0;
+    st_scored = 0;
+    st_unscored = 0;
+    st_fathomed = 0;
+    st_refuted = 0;
+    st_excluded = 0;
+    st_unknown = 0;
+  }
+
+let search ?bound ?incumbent ~score tree =
+  let stats = ref no_search_stats in
+  let best = ref None in
+  let threshold = ref (Option.value incumbent ~default:Float.infinity) in
+  let fathoms sub =
+    (* An optimistic bound at or above the threshold refutes strict improvement for every
+       completion below — equality fathoms because displacing the incumbent needs [<]. *)
+    match Option.bind bound ~f:(fun b -> b sub) with
+    | Some b -> Float.(b >= !threshold)
+    | None -> false
+  in
+  let rec leaf_or_choice t =
+    match t with
+    | Leaf a -> (
+        match score a with
+        | Some s ->
+            stats := { !stats with st_scored = !stats.st_scored + 1 };
+            if Float.(s < !threshold) then (
+              best := Some (a, s);
+              threshold := s)
+        | None -> stats := { !stats with st_unscored = !stats.st_unscored + 1 })
+    | Choice { children; _ } ->
+        stats := { !stats with st_expanded = !stats.st_expanded + 1 };
+        List.iter children ~f:(fun (_label, c) ->
+            match c with
+            | Refuted _ -> stats := { !stats with st_refuted = !stats.st_refuted + 1 }
+            | Excluded _ -> stats := { !stats with st_excluded = !stats.st_excluded + 1 }
+            | Unknown (_, sub) ->
+                (* Never fathomed: an unknown verdict must reach scoring (or, in a measured
+                   search, compilation). *)
+                stats := { !stats with st_unknown = !stats.st_unknown + 1 };
+                leaf_or_choice (Lazy.force sub)
+            | Child sub ->
+                let sub = Lazy.force sub in
+                if fathoms sub then
+                  stats := { !stats with st_fathomed = !stats.st_fathomed + 1 }
+                else leaf_or_choice sub)
+  in
+  (if fathoms tree then stats := { !stats with st_fathomed = 1 } else leaf_or_choice tree);
+  (!best, !stats)
+
 let rec count_choices = function
   | Leaf _ -> 0
   | Choice { children; _ } ->

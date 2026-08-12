@@ -280,4 +280,44 @@ let () =
       in
       Stdio.printf "wide-N leaves: %d; with exclusions lifted: %d\n"
         (List.length (Sspace.leaves tree))
-        (List.length (Sspace.leaves (lift_all tree))))
+        (List.length (Sspace.leaves (lift_all tree))));
+  (* --- The B&B driver's contract on a synthetic tree (phase 4): the bound fathoms Child
+     subtrees against the tightening threshold (equality fathoms — displacement needs strict
+     improvement), Unknown children are NEVER fathomed even when their bound would, Refuted and
+     Excluded children are never entered (an excluded 0-cost leaf must not leak into the
+     minimum), and without a bound the walk degenerates to the flat first-best scan. --- *)
+  let leafv name v = Sspace.Child (lazy (Sspace.Leaf (name, v))) in
+  let choice level children = Sspace.Choice { level; children } in
+  let syn =
+    choice "top"
+      [
+        ("a", leafv "a" 5.);
+        ("b", Sspace.Child (lazy (choice "bsub" [ ("b1", leafv "b1" 3.); ("b2", leafv "b2" 2.) ])));
+        ( "u",
+          Sspace.Unknown
+            ("compile-settled", lazy (choice "usub" [ ("u1", leafv "u1" 1.) ])) );
+        ("r", Sspace.Refuted "illegal");
+        ("x", Sspace.Excluded ("policy", lazy (leafv "x" 0.)));
+        ("c", Sspace.Child (lazy (choice "csub" [ ("c1", leafv "c1" 2.) ])));
+      ]
+  in
+  let bound sub =
+    match sub with
+    | Sspace.Choice { level = "bsub"; _ } -> Some 2.5
+    | Sspace.Choice { level = "usub"; _ } -> Some 100.
+    | Sspace.Choice { level = "csub"; _ } -> Some 10.
+    | _ -> None
+  in
+  let score (_, v) = Some v in
+  let show_run name (best, stats) =
+    Stdio.printf "%s: best=%s stats=%s\n" name
+      (match best with
+      | Some ((n, _), v) -> Printf.sprintf "%s@%.1f" n v
+      | None -> "none")
+      (Sexp.to_string_hum (Sspace.sexp_of_search_stats stats))
+  in
+  show_run "search with bounds" (Sspace.search ~bound ~incumbent:5.5 ~score syn);
+  show_run "search without bounds" (Sspace.search ~incumbent:5.5 ~score syn);
+  show_run "ties: first best wins"
+    (Sspace.search ~score
+       (choice "tie" [ ("t1", leafv "t1" 2.); ("t2", leafv "t2" 2.) ]))

@@ -88,6 +88,45 @@ val unknowns : 'a tree -> ((string * string) list * string) list
 (** Every [Unknown] child with path and witness — the branches whose verdicts only candidate
     compilation settles; a fathom must treat them as feasible. *)
 
+type search_stats = {
+  st_expanded : int;  (** Choice nodes entered. *)
+  st_scored : int;  (** Leaves the score hook priced. *)
+  st_unscored : int;  (** Leaves without coverage ([score] returned [None]) — never winners. *)
+  st_fathomed : int;  (** Subtrees pruned by the bound against the running threshold. *)
+  st_refuted : int;  (** [Refuted] children encountered (never entered). *)
+  st_excluded : int;  (** [Excluded] children encountered (never entered; a driver may lift). *)
+  st_unknown : int;  (** [Unknown] children entered — the bound never fathoms them. *)
+}
+[@@deriving sexp_of]
+(** The fathomed-vs-scored ledger (gh-ocannl-514 phase 6's evaluation data): how much of the
+    space the verdicts and the bound dispatched without pricing. *)
+
+val no_search_stats : search_stats
+
+val search :
+  ?bound:('a tree -> float option) ->
+  ?incumbent:float ->
+  score:('a -> float option) ->
+  'a tree ->
+  ('a * float) option * search_stats
+(** Branch-and-bound minimization over the refinement tree (gh-ocannl-514 phase 4). Depth-first
+    in child order — the emission order — so on a bound-free run the returned minimum is the
+    {e first} leaf achieving it, matching the flat enumerations' [min_elt] tie behavior that
+    candidate ordering relies on. The running threshold starts at [incumbent] (an existing
+    candidate's cost — e.g. the untuned default's model score, or a measured time) and tightens
+    to each new best score; a leaf wins only by {e strict} improvement, preserving
+    ties-to-the-incumbent.
+
+    [bound] is the optimistic (lower-bound) cost of a subtree's completions: a subtree whose
+    bound is at or above the threshold is fathomed — equality fathoms because displacement needs
+    strict improvement. Soundness is the caller's contract ({!Cost_model.completion_floor}'s):
+    a bound that can exceed a completion's true cost prunes true winners. [Unknown] children are
+    {e never} fathomed — an unknown verdict must reach scoring — and [Refuted]/[Excluded]
+    children are never entered (they are the construction-time fathoms, counted separately).
+    Unscored leaves ([score] = [None], the no-coverage case) are counted and never win: in the
+    untuned regime a pick must have a model price, and the measured regime handles no-coverage
+    candidates outside the bound-driven walk. *)
+
 val lift_excluded : 'a child -> 'a child
 (** The policy-lift operation: [Excluded (_, payload)] becomes the forced payload — the same
     judgment with only that one policy lifted, still subject to legality; any other child is
