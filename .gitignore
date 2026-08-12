@@ -62,6 +62,8 @@ build_files/
 /autotune_sketch_cache/
 /autotune_split_cache/
 /autotune_arm_containment_cache/
+/autotune_cache_numerics/
+/autotune_candidate_release_cache/
 /conv_tune_cache/
 /conv_tune_cache_aligned/
 /conv_tune_cache_blocked/
