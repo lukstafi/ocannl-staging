@@ -198,6 +198,9 @@ let floor_uncertainty ~open_placement (code : Low_level.t) =
         sc_reads ~into a;
         sc_reads ~into b;
         sc_reads ~into c
+    (* The projections' discarded operand is never evaluated ([affine_accesses] omits it too). *)
+    | Binop (Ops.Arg1, (a, _), _) -> sc_reads ~into a
+    | Binop (Ops.Arg2, _, (b, _)) -> sc_reads ~into b
     | Binop (_, (a, _), (b, _)) ->
         sc_reads ~into a;
         sc_reads ~into b
@@ -238,6 +241,13 @@ let floor_uncertainty ~open_placement (code : Low_level.t) =
         sc_walk a;
         sc_walk b;
         sc_walk c
+    | Binop ((Ops.And | Ops.Or), (a, _), (b, _)) ->
+        (* Short-circuiting: the right operand's reads are conditional. *)
+        sc_reads ~into:where_reads b;
+        sc_walk a;
+        sc_walk b
+    | Binop (Ops.Arg1, (a, _), _) -> sc_walk a
+    | Binop (Ops.Arg2, _, (b, _)) -> sc_walk b
     | Binop (_, (a, _), (b, _)) ->
         sc_walk a;
         sc_walk b
@@ -271,7 +281,11 @@ let floor_uncertainty ~open_placement (code : Low_level.t) =
     | Set_from_vec { tn; arg = a, _; _ } ->
         if open_placement tn then sc_reads ~into:open_reads a;
         sc_walk a
-    | Tile_mma { fallback; _ } -> walk fallback
+    | Tile_mma { d = d_tn, _; a = a_tn, _; b = b_tn, _; fallback; _ } ->
+        if open_placement d_tn then (
+          mark open_reads a_tn;
+          mark open_reads b_tn);
+        walk fallback
   in
   walk code;
   let read_uncertain tn =
@@ -303,14 +317,17 @@ let floor_flops ~open_placement (code : Low_level.t) : int * bool =
            exact dual of the upper walk\'s guards-taken. *)
         exact := false;
         scale * sc cnd
-    | Tile_mma { m; n; k; lane; _ } -> (
+    | Tile_mma { d = d_tn, _; m; n; k; lane; _ } -> (
         (* Same lane-cooperative attribution as the upper walk — the count is exact when the lane
-           binding is in scope; without it the certain floor is zero. *)
-        match List.Assoc.find env lane ~equal:Idx.equal_symbol with
-        | Some lane_extent -> scale / max 1 lane_extent * (2 * m * n * k)
-        | None ->
-            exact := false;
-            0)
+           binding is in scope; without it the certain floor is zero. An open accumulator is an
+           open producer like the Set family: its work attributes to the open placement. *)
+        if open_placement d_tn then set_open ()
+        else
+          match List.Assoc.find env lane ~equal:Idx.equal_symbol with
+          | Some lane_extent -> scale / max 1 lane_extent * (2 * m * n * k)
+          | None ->
+              exact := false;
+              0)
   and set_open () =
     (* An open producer\'s work attributes to the open placement: an inline completion computes
        it only at surviving consumer sites (possibly fewer cells than the setter loop covers), a
@@ -331,7 +348,14 @@ let floor_flops ~open_placement (code : Low_level.t) : int * bool =
         if c1 <> c2 then exact := false;
         1 + arg a1 + Int.min c1 c2
     | Ternop ((Ops.FMA | Ops.Mul3), a1, a2, a3) -> 2 + arg a1 + arg a2 + arg a3
-    | Binop ((Ops.Arg1 | Ops.Arg2), a1, a2) -> arg a1 + arg a2
+    (* The projections render only the selected operand ([C_syntax.pp_scalar]); the discarded
+       one's work cannot execute. *)
+    | Binop (Ops.Arg1, a1, _) -> arg a1
+    | Binop (Ops.Arg2, _, a2) -> arg a2
+    | Binop ((Ops.And | Ops.Or), a1, a2) ->
+        (* Rendered as the short-circuiting && / ||: the right operand's work is conditional. *)
+        (if arg a2 <> 0 then exact := false);
+        1 + arg a1
     | Binop (_, a1, a2) -> 1 + arg a1 + arg a2
     | Unop (Ops.Identity, a1) -> arg a1
     | Unop (_, a1) -> 1 + arg a1
@@ -363,6 +387,9 @@ let completion_floor ?(open_placement = fun _ -> false) (code : Low_level.t) : f
         let cells = if (not a.a_write) && read_uncertain a.a_tn then 0 else cells in
         if cells = 0 then inexact := true;
         let reads, writes = Hashtbl.find tbl a.a_tn |> Option.value ~default:(0, 0) in
+        (* A second nonzero contribution in a direction means the union exceeds the retained
+           maximum unless the images coincide — which is not proved, so the floor is loose. *)
+        (if cells > 0 && (if a.a_write then writes > 0 else reads > 0) then inexact := true);
         let next = if a.a_write then (reads, max writes cells) else (max reads cells, writes) in
         Hashtbl.set tbl ~key:a.a_tn ~data:next
       end);
@@ -372,20 +399,6 @@ let completion_floor ?(open_placement = fun _ -> false) (code : Low_level.t) : f
         acc + ((reads + writes) * width))
   in
   { fr_flops = flops; fr_bytes = bytes; fr_exact = not !inexact }
-
-let node_floor_bytes ?(open_placement = fun _ -> false) (code : Low_level.t) (tn : Tn.t) : int =
-  let read_uncertain, any_uncertain = floor_uncertainty ~open_placement code in
-  if any_uncertain tn then 0
-  else
-    let reads, writes =
-      List.fold (Low_level.affine_accesses code) ~init:(0, 0) ~f:(fun (reads, writes) a ->
-          if (not (Tn.equal a.Affine.a_tn tn)) || under_dead_loop a then (reads, writes)
-          else
-            let cells = access_cells_floor a in
-            let cells = if (not a.a_write) && read_uncertain tn then 0 else cells in
-            if a.a_write then (reads, max writes cells) else (max reads cells, writes))
-    in
-    (reads + writes) * Ops.prec_in_bytes (Lazy.force tn.Tn.storage_prec)
 
 let footprint_approximate s = List.exists s.per_node ~f:(fun (_, fp) -> fp.fp_approx)
 let approximate s = s.flops_approx || footprint_approximate s

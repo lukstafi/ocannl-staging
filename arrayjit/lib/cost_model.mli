@@ -78,33 +78,35 @@ val completion_floor : ?open_placement:(Tnode.t -> bool) -> Low_level.t -> floor
     {e down} — the exact dual of {!analyze}'s contract:
 
     - [fr_flops]: guarded ([If]) bodies count zero (guards-never-taken, dual to guards-taken);
-      [Where] counts its condition plus the cheaper arm (the renderers implement it as a
-      short-circuiting [?:], so exactly one arm executes); opaque code counts zero (an
-      under-count is sound in this direction); [Tile_mma] keeps the lane-cooperative
-      attribution, exact when the lane binding is in scope. Statements producing an
-      [open_placement] node count zero: an inline completion instantiates the producer only at
-      surviving consumer sites — possibly {e fewer} cells than the setter loop covers, so
-      "recomputation only adds ops" does not hold and the producer's whole effect attributes to
-      the open placement. Call this on the {e all-materialized} specialization of the decision
-      surface, where every open node's work sits in its own producer statement.
+      the short-circuiting forms count only their certain part — [Where] its condition plus the
+      cheaper arm (rendered as [?:]), [And]/[Or] the left operand (rendered as [&&]/[||]), the
+      [Arg1]/[Arg2] projections only the selected operand (the discarded one is never rendered);
+      opaque code counts zero (an under-count is sound in this direction); [Tile_mma] keeps the
+      lane-cooperative attribution, exact when the lane binding is in scope. Statements
+      producing an [open_placement] node — the [Set] family and [Tile_mma] with an open
+      accumulator — count zero: an inline completion instantiates the producer only at surviving
+      consumer sites, possibly {e fewer} cells than the setter loop covers, so "recomputation
+      only adds ops" does not hold and the producer's whole effect attributes to the open
+      placement. Call this on the {e all-materialized} specialization of the decision surface,
+      where every open node's work sits in its own producer statement.
     - [fr_bytes]: per node and direction, the largest exact single-access image (a union is at
-      least its largest member — dual to the upper extraction's capped sum); guarded, non-exact,
-      dead-loop-enclosed, [Where]-arm and open-producer-operand accesses contribute zero (their
-      execution is not certain in every completion). Nodes with [open_placement] contribute
-      zero; committing one to Materialize adds {!node_floor_bytes} — the monotone refinement
-      delta (the bound only rises as commitments accumulate, which is what lets it prune).
-      Committing to Inline adds zero for now: a nonzero recompute floor needs lower-bound
-      multiplicity metrics, deferred until the driver proves the need.
+      least its largest member — dual to the upper extraction's capped sum; a second nonzero
+      contribution marks the floor loose); guarded, non-exact, dead-loop-enclosed,
+      conditionally-evaluated ([Where] arm, [And]/[Or] right operand) and open-producer-operand
+      accesses contribute zero — their execution is not certain in every completion. Nodes with
+      [open_placement] contribute zero.
+
+    {e Committing} a placement decision is re-evaluation with the narrowed [open_placement]: the
+    suppression sets only shrink, so the floor is monotone in refinement — the property that
+    lets a bound prune as commitments accumulate. (An incremental per-node delta cannot be sound
+    in isolation: a Materialize commitment also makes its producer's operations and operand
+    reads certain, not just the node's own traffic.) Committing to Inline tightens nothing for
+    now: a nonzero recompute floor needs lower-bound multiplicity metrics, deferred until the
+    driver proves the need.
 
     A [max (fr_flops/peak_flops) (fr_bytes/peak_bandwidth)] roofline over these floors
     ({!roofline_seconds}) lower-bounds every completion — the two legs' minima need not be
     simultaneously achievable for the max of the two to be sound. *)
-
-val node_floor_bytes : ?open_placement:(Tnode.t -> bool) -> Low_level.t -> Tnode.t -> int
-(** One node's certain traffic in the given code (largest exact image per direction, times byte
-    width, under the same certainty analysis as {!completion_floor} — dead code, [Where] arms
-    and open producers' reads do not count): the refinement delta a Materialize commitment adds
-    to {!completion_floor}'s [fr_bytes]. *)
 
 val approximate : summary -> bool
 (** [flops_approx || footprint_approximate]: some count is an upper bound rather than exact.

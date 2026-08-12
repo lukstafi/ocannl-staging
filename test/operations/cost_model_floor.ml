@@ -4,14 +4,19 @@
    exceeds the upper extraction ([analyze]).
 
    - pointwise map: all accesses exact, floor = upper on both legs;
-   - matmul with an rmw accumulator: exact; opening the accumulator's placement drops exactly its
-     traffic, and [node_floor_bytes] is the Materialize refinement delta that adds it back;
+   - matmul with an rmw accumulator: exact when closed; opening the accumulator's placement
+     attributes the whole producer — its ops and operand reads — to the open level, and
+     committing (re-evaluation with the narrowed open set) recovers the closed floor, monotone
+     in refinement;
    - guarded write: the floor counts guards-never-taken (condition ops only, no write traffic)
      where the upper counts guards-taken — [fr_exact] false;
    - two reads of one node: the floor takes the larger exact image (a union is at least its
-     largest member) where the upper takes the capped sum;
-   - dynamic gather: the uninterpretable access floors to zero where the upper falls back to the
-     whole node. *)
+     largest member, flagged loose) where the upper takes the capped sum;
+   - short-circuiting forms: Where arms, And/Or right operands (conditional — cheaper-arm /
+     left-operand floors, conditional reads zeroed) and Arg1/Arg2 discarded operands (never
+     rendered at all);
+   - the over-producing open producer, dead loops, and the dynamic-gather fallback flooring to
+     zero where the upper falls back to the whole node. *)
 
 open Base
 open Ocannl.Operation.DSL_modules
@@ -95,8 +100,14 @@ let () =
   let opened =
     show "matmul, D's placement open" ~open_placement:(fun tn -> Tn.equal tn d) matmul
   in
-  Stdio.printf "  open + Materialize delta restores the closed floor: %b\n"
-    (opened.CM.fr_bytes + CM.node_floor_bytes matmul d = closed.CM.fr_bytes);
+  (* Committing a placement is re-evaluation with the narrowed open set: suppression only
+     shrinks, so the floor is monotone in refinement — here, committing D (the only open node)
+     recovers the closed floor exactly, and both legs are monotone. *)
+  let committed = CM.completion_floor ~open_placement:(fun _ -> false) matmul in
+  Stdio.printf "  commitment (narrowed open set) recovers the closed floor: %b\n"
+    (committed.CM.fr_bytes = closed.CM.fr_bytes && committed.CM.fr_flops = closed.CM.fr_flops);
+  Stdio.printf "  floors are monotone in refinement: %b\n"
+    (opened.CM.fr_bytes <= committed.CM.fr_bytes && opened.CM.fr_flops <= committed.CM.fr_flops);
   (* Guarded write: if (E[i] > 0) F[i] = E[i] * 2. Upper counts guards-taken (cmp + mul per
      iteration, F written); the floor counts only the certain condition ops and no F traffic. *)
   let e = fresh_tn "E" [| 4 |] in
@@ -219,6 +230,41 @@ let () =
     show "over-producing, P2's placement open" ~open_placement:(fun tn -> Tn.equal tn p2)
       over_produce
   in
+  (* And renders as the short-circuiting &&: the certain floor is the op plus the left operand;
+     the right comparison (reading M) is conditional — its op floors away and M's read floors to
+     zero. Arg1 renders only its selected operand: the discarded expensive right operand
+     contributes nothing to either extraction's floor. *)
+  let l = fresh_tn "L" [| 4 |] in
+  let and_case =
+    for_over i
+      (LL.Set
+         {
+           tn = l;
+           idcs = [| it i |];
+           llsc =
+             LL.Binop
+               ( Ops.And,
+                 (LL.Binop (Ops.Cmplt, (LL.Constant 0., sp), (get e2 [| it i |], sp)), sp),
+                 (LL.Binop (Ops.Cmplt, (get m [| it i |], sp), (LL.Constant 1., sp)), sp) );
+           debug = "";
+         })
+  in
+  let _ = show "and short-circuit" and_case in
+  let arg1_case =
+    for_over i
+      (LL.Set
+         {
+           tn = l;
+           idcs = [| it i |];
+           llsc =
+             LL.Binop
+               ( Ops.Arg1,
+                 (get e2 [| it i |], sp),
+                 (LL.Binop (Ops.Mul, (get m [| it i |], sp), (LL.Constant 3., sp)), sp) );
+           debug = "";
+         })
+  in
+  let _ = show "arg1 discarded operand" arg1_case in
   (* A dead loop's body never executes: its whole-node access must not reach the floor. *)
   let d2 = fresh_tn "D2" [| 4 |] in
   let dead =
