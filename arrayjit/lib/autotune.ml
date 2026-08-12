@@ -2846,6 +2846,25 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                                    leaf { p with sk_hoist = true; sk_grid = true; sk_pack_rest = true }))
                   );
                   ( "grid-pack-rest",
+                    (* The builder hoists every hoistable source in the grid-outermost form
+                       regardless of [sk_hoist], so only the non-hoistable tiles privatize per
+                       chunk — the cap judges exactly those (on a no-hoistable site this is both
+                       tiles; on a lifted one-hoistable site, just the in-kernel one). *)
+                    let privatized_bytes p =
+                      let bn_eff = if p.sk_bn = 0 then site.m_nj else p.sk_bn in
+                      (if hoistable site.m_a then 0 else p.sk_bm * p.sk_bk * prec_bytes)
+                      + if hoistable site.m_b then 0 else p.sk_bk * bn_eff * prec_bytes
+                    in
+                    let judged () =
+                      geoms ~f:(fun p _ _ ->
+                          if not (grid_ok p) then Sspace.Refuted (too_few_blocks p)
+                          else
+                            match
+                              over_chunk_cap ~what:"per-chunk packed tiles" (privatized_bytes p)
+                            with
+                            | Some w -> Sspace.Refuted w
+                            | None -> leaf { p with sk_grid = true; sk_pack_rest = true })
+                    in
                     if Option.is_some (Lazy.force cpu_grid_rendering_disabled) then
                       Sspace.Refuted
                         (Option.value_exn (Lazy.force cpu_grid_rendering_disabled))
@@ -2853,21 +2872,8 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                       Sspace.Excluded
                         ( "a hoistable operand exists: the hoisted shapes cover the one-dispatch \
                            role without per-chunk re-packing",
-                          lazy
-                            (subt (fun () -> geoms ~f:(fun p _ tiles_bytes ->
-                                 if not (grid_ok p) then Sspace.Refuted (too_few_blocks p)
-                                 else
-                                   match over_chunk_cap ~what:"per-chunk packed tiles" tiles_bytes
-                                   with
-                                   | Some w -> Sspace.Refuted w
-                                   | None -> leaf { p with sk_grid = true; sk_pack_rest = true }))) )
-                    else
-                      subt (fun () -> geoms ~f:(fun p _ tiles_bytes ->
-                             if not (grid_ok p) then Sspace.Refuted (too_few_blocks p)
-                             else
-                               match over_chunk_cap ~what:"per-chunk packed tiles" tiles_bytes with
-                               | Some w -> Sspace.Refuted w
-                               | None -> leaf { p with sk_grid = true; sk_pack_rest = true })) );
+                          lazy (subt judged) )
+                    else subt judged );
                   ( "grid",
                     match Lazy.force cpu_grid_rendering_disabled with
                     | Some w -> Sspace.Refuted w
