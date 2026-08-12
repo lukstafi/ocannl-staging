@@ -1977,8 +1977,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       else ""
     in
     let source =
-      Syntax.filter_and_prepend_builtins ~includes:cuda_includes ~builtins:Builtins_cuda.builtins
-        ~proc_doc
+      Syntax.filter_and_prepend_builtins ~routine_names:[ name ] ~includes:cuda_includes
+        ~builtins:Builtins_cuda.builtins ~proc_doc
     in
     let ptx = cuda_to_ptx ~name source in
     { traced_store; ptx; kparams; bindings; name; launch }
@@ -2016,8 +2016,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       else ""
     in
     let source =
-      Syntax.filter_and_prepend_builtins ~includes:cuda_includes ~builtins:Builtins_cuda.builtins
-        ~proc_doc:final_doc
+      Syntax.filter_and_prepend_builtins
+        ~routine_names:(List.filter_opt (Array.to_list names))
+        ~includes:cuda_includes ~builtins:Builtins_cuda.builtins ~proc_doc:final_doc
     in
 
     let name : string =

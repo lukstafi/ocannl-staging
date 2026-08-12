@@ -1174,7 +1174,7 @@ module Impl = struct
 using namespace metal;|} in
     let source =
       maybe_include_simdgroup_matrix
-      @@ Syntax.filter_and_prepend_builtins ~includes:metal_includes
+      @@ Syntax.filter_and_prepend_builtins ~routine_names:[ name ] ~includes:metal_includes
            ~builtins:Builtins_metal.builtins ~proc_doc
     in
     {
@@ -1207,8 +1207,9 @@ using namespace metal;|} in
 using namespace metal;|} in
     let source =
       maybe_include_simdgroup_matrix
-      @@ Syntax.filter_and_prepend_builtins ~includes:metal_includes
-           ~builtins:Builtins_metal.builtins ~proc_doc:final_doc
+      @@ Syntax.filter_and_prepend_builtins
+           ~routine_names:(List.filter_opt (Array.to_list names))
+           ~includes:metal_includes ~builtins:Builtins_metal.builtins ~proc_doc:final_doc
     in
     let traced_stores = Array.map lowereds ~f:(Option.map ~f:(fun l -> l.Low_level.traced_store)) in
     let funcs = Array.map funcs_and_docs ~f:(Option.map ~f:fst) in

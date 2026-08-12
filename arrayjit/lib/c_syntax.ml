@@ -885,7 +885,13 @@ module C_syntax (B : C_syntax_config) = struct
 
   let in_ctx tn = Tn.Placements.is_in_context_force (placements ()) tn 46
 
-  let filter_and_prepend_builtins ~includes ~builtins ~proc_doc =
+  (* [routine_names]: the kernel function names in [proc_doc] — their declarations (and the
+     name-echoing comments) are token occurrences the usage scan below must not count as builtin
+     uses. A routine named exactly like a builtin cannot genuinely use it (the definition would be
+     a duplicate C symbol), so excluding the name only converts a pathological collision from
+     silent helper injection — which on CUDA could raise the architecture floor past the device
+     (Codex P2 on PR #317, round 4) — into an ordinary compile error naming the conflict. *)
+  let filter_and_prepend_builtins ~routine_names ~includes ~builtins ~proc_doc =
     let doc_buffer = Buffer.create 4096 in
     PPrint.ToBuffer.pretty 1.0 110 doc_buffer proc_doc;
     let doc_string = Buffer.contents doc_buffer in
@@ -918,7 +924,10 @@ module C_syntax (B : C_syntax_config) = struct
     in
     let needed_keys = ref (Set.empty (module String)) in
     List.iter builtins ~f:(fun (key, _, _) ->
-        if mentions_token key then needed_keys := Set.add !needed_keys key);
+        if
+          (not (List.mem routine_names key ~equal:String.equal))
+          && mentions_token key
+        then needed_keys := Set.add !needed_keys key);
 
     (* Add dependencies recursively *)
     let processed_keys = ref (Set.empty (module String)) in
