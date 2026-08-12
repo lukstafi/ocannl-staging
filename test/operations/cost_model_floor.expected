@@ -44,6 +44,10 @@
   floor: flops=0 bytes=32 exact
   upper: flops=4 bytes=32
   floor <= upper: true
+== relu-gate short-circuit ==
+  floor: flops=4 bytes=32 inexact
+  upper: flops=8 bytes=48
+  floor <= upper: true
 == dead loop ==
   floor: flops=0 bytes=0 inexact
   upper: flops=0 bytes=16

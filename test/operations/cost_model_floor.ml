@@ -265,6 +265,23 @@ let () =
          })
   in
   let _ = show "arg1 discarded operand" arg1_case in
+  (* Relu_gate also renders with ?: — its right operand (the expensive product reading M) is
+     conditional: floor = gate + left operand per iteration, M's read zeroed. *)
+  let gate_case =
+    for_over i
+      (LL.Set
+         {
+           tn = l;
+           idcs = [| it i |];
+           llsc =
+             LL.Binop
+               ( Ops.Relu_gate,
+                 (get e2 [| it i |], sp),
+                 (LL.Binop (Ops.Mul, (get m [| it i |], sp), (LL.Constant 3., sp)), sp) );
+           debug = "";
+         })
+  in
+  let _ = show "relu-gate short-circuit" gate_case in
   (* A dead loop's body never executes: its whole-node access must not reach the floor. *)
   let d2 = fresh_tn "D2" [| 4 |] in
   let dead =

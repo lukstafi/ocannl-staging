@@ -241,8 +241,9 @@ let floor_uncertainty ~open_placement (code : Low_level.t) =
         sc_walk a;
         sc_walk b;
         sc_walk c
-    | Binop ((Ops.And | Ops.Or), (a, _), (b, _)) ->
-        (* Short-circuiting: the right operand's reads are conditional. *)
+    | Binop ((Ops.And | Ops.Or | Ops.Relu_gate | Ops.Satur01_gate), (a, _), (b, _)) ->
+        (* Short-circuiting (&& / || and the gates' ?:): the right operand's reads are
+           conditional. *)
         sc_reads ~into:where_reads b;
         sc_walk a;
         sc_walk b
@@ -352,8 +353,9 @@ let floor_flops ~open_placement (code : Low_level.t) : int * bool =
        one's work cannot execute. *)
     | Binop (Ops.Arg1, a1, _) -> arg a1
     | Binop (Ops.Arg2, _, a2) -> arg a2
-    | Binop ((Ops.And | Ops.Or), a1, a2) ->
-        (* Rendered as the short-circuiting && / ||: the right operand's work is conditional. *)
+    | Binop ((Ops.And | Ops.Or | Ops.Relu_gate | Ops.Satur01_gate), a1, a2) ->
+        (* Short-circuiting renderings: && / || and the gates' ?: evaluate the right operand only
+           when the left one passes. *)
         (if arg a2 <> 0 then exact := false);
         1 + arg a1
     | Binop (_, a1, a2) -> 1 + arg a1 + arg a2
