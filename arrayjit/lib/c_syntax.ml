@@ -893,11 +893,32 @@ module C_syntax (B : C_syntax_config) = struct
     Buffer.add_string result_buffer includes;
     Buffer.add_string result_buffer "\n";
 
-    (* Collect all needed keys, including dependencies *)
+    (* Collect all needed keys, including dependencies. A key is "used" when it occurs as a whole
+       C identifier token in the KERNEL source, not as an arbitrary substring: only direct uses
+       appear there (intra-builtin needs are the explicit dependency lists), and every direct use
+       — a call, a type name — is a token. Substring matching over-included on longer identifiers
+       containing a key, which was harmless noise until a key gained an architecture floor: a
+       ROUTINE named [ocannl_cp_async4_probe] would inject the sm_80 [cp.async] helper into a
+       pre-Ampere kernel and [gpu_arch_options] would then emit PTX that device cannot load
+       (Codex P2 on PR #317, round 3; routine names are not covered by the tensor-identifier
+       blacklist). *)
+    let is_ident_char c = Char.is_alphanum c || Char.equal c '_' in
+    let mentions_token key =
+      let klen = String.length key in
+      let dlen = String.length doc_string in
+      let rec scan pos =
+        match String.substr_index ~pos doc_string ~pattern:key with
+        | None -> false
+        | Some i ->
+            let pre_ok = i = 0 || not (is_ident_char doc_string.[i - 1]) in
+            let post_ok = i + klen >= dlen || not (is_ident_char doc_string.[i + klen]) in
+            if pre_ok && post_ok then true else scan (i + 1)
+      in
+      scan 0
+    in
     let needed_keys = ref (Set.empty (module String)) in
     List.iter builtins ~f:(fun (key, _, _) ->
-        if String.is_substring doc_string ~substring:key then
-          needed_keys := Set.add !needed_keys key);
+        if mentions_token key then needed_keys := Set.add !needed_keys key);
 
     (* Add dependencies recursively *)
     let processed_keys = ref (Set.empty (module String)) in
