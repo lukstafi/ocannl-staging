@@ -767,6 +767,22 @@ that they earn a lookup rather than always-loaded space.
   the sweep — those are the changes that actually break there (line endings, float formatting,
   mingw). Twice weekly rather than weekly because actions/cache evicts entries unread for 7 days,
   and an exactly-weekly cadence would pay the cold-switch cost every time.
+- `tools/sweep.sh` is the GPU-backend coverage: cc and metal locally, cuda on `rog-nv-wsl`, hip on
+  `minix-amd-wsl`, all pinned to ONE resolved commit so a mid-sweep merge cannot leave the machines
+  testing different trees. It records a row per unit in `~/.ocannl-sweep/history.tsv` and never
+  exits non-zero for test failures — its exit code is not a verdict, the history file is. A daily
+  scheduled task drives it.
+- The GPU boxes are usually powered off, so `skip (unreachable)` is the normal outcome and a sweep
+  of skips is not a failure. What IS a failure is silent non-coverage: track the age of the last
+  `pass` per backend, because nothing else in the project tests CUDA or HIP at all.
+- Report changes in the failure set, not the presence of failures. Metal's `test/operations` is
+  known-red, so a sweep that shouts on every red is one that gets ignored inside a week;
+  `sweep.sh` writes a sorted `.fingerprint` next to each non-pass log precisely so the previous
+  run's can be diffed against it.
+- The per-machine worktrees are reused, not recreated, so a sweep is incremental against an
+  existing `_build` — seconds rather than minutes when little changed. That is what makes a daily
+  cadence affordable; it also means a sweep is not a clean-tree build, and a genuine
+  from-scratch check still wants `dune clean` or a fresh CI run.
 
 ## Conventions
 
