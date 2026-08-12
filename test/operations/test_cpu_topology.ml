@@ -117,4 +117,16 @@ let () =
   eprintf "machine classes: %s\n" (sexp_str ([%sexp_of: CT.core_class list] classes));
   eprintf "machine effective_cpu_count: %d\n" effective;
   eprintf "machine hypervisor: %s\n"
-    (match CT.hypervisor_present () with `Yes -> "yes" | `No -> "no" | `Unknown -> "unknown")
+    (match CT.hypervisor_present () with `Yes -> "yes" | `No -> "no" | `Unknown -> "unknown");
+  (* Hardware-effect hook, off in golden runs: with OCANNL_TEST_RESTRICT_MASK=<hex> set, apply
+     the process restriction and report (stderr) the affinity-respecting count before/after —
+     verifying the setter stub end-to-end on a real machine, e.g. w8P on the gh-530 rog box via
+     OCANNL_TEST_RESTRICT_MASK=c03c03. *)
+  match Stdlib.Sys.getenv_opt "OCANNL_TEST_RESTRICT_MASK" with
+  | None | Some "" -> ()
+  | Some hex -> (
+      let mask = Int64.of_string ("0x" ^ hex) in
+      eprintf "restrict to 0x%Lx: before=%d " mask effective;
+      match CT.restrict_process_to_mask mask with
+      | Ok () -> eprintf "-> after=%d\n" (CT.effective_cpu_count ())
+      | Error msg -> eprintf "-> error: %s\n" msg)
