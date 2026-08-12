@@ -96,7 +96,16 @@ policy stays in `cc_backend`:
 - `effective_cpu_count ()`: affinity-respecting width (`GetProcessAffinityMask` /
   `sched_getaffinity`), fixing the recorded trap that `Domain.recommended_domain_count` is
   affinity-blind on Windows (and `_SC_NPROCESSORS_ONLN`-based elsewhere).
-- `hypervisor_present ()`: x86 CPUID leaf 1 ECX bit 31; `kern.hv_vmm_present` on macOS.
+- `hypervisor_present ()`: x86 CPUID leaf 1 ECX bit 31 — refined for Hyper-V, because the
+  native Windows host also sets that bit once the Hyper-V role (or WSL2, or VBS) is enabled,
+  yet sees real topology. The refinement is OS-based: on Windows, a "Microsoft Hv" hypervisor
+  is the host platform itself and reads as physical — Hyper-V guests are also told
+  "Microsoft Hv" but see fabricated *uniform* topology, so the ≥2-classes check is the
+  operative gate for them. (Recognizing the root partition by its CreatePartitions privilege,
+  CPUID 0x40000003 EBX bit 0, fails empirically: on the gh-530 rog box, a VBS-era Windows 11,
+  the privilege is not visible to the OS partition.) Windows under a non-Microsoft hypervisor,
+  and every hypervisor on other OSes (WSL2's Linux included), reads as guest.
+  `kern.hv_vmm_present` on macOS.
   `Unknown` (non-x86 Linux) blocks restriction — "cannot rule virtualization out" is treated
   like "virtualized". The one hybrid family this leaves unrestricted is ARM big.LITTLE Linux,
   which no measurement covers yet.

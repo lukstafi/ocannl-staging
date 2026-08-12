@@ -178,15 +178,41 @@ CAMLprim value ocannl_effective_cpu_count(value unit) {
 #endif
 }
 
-/* 1 = running under a hypervisor, 0 = bare metal, -1 = cannot tell. The x86 answer is CPUID
-   leaf 1 ECX bit 31, which WSL2, Hyper-V, KVM, VMware etc. all set. */
+/* 1 = running as a hypervisor GUEST (fabricated topology), 0 = the physical machine, -1 =
+   cannot tell. The x86 answer starts from CPUID leaf 1 ECX bit 31, which WSL2, Hyper-V, KVM,
+   VMware etc. all set — but which is ALSO set on the native Windows host once the Hyper-V role
+   (or WSL2, or VBS) is enabled, because the host then runs atop the hypervisor. The host sees
+   real topology (its processor APIs report the true core classes), so it must read as "physical
+   machine". Distinguishing it by the root partition's CreatePartitions privilege (CPUID
+   0x40000003, EBX bit 0) FAILS empirically: on a Windows 11 host with VBS the privilege is not
+   visible to the OS partition (verified on the gh-530 rog box, which the plain check classified
+   as a guest). The rule that holds instead is OS-based: on WINDOWS, a "Microsoft Hv" hypervisor
+   is the host platform itself — Hyper-V guests are still told "Microsoft Hv" but see fabricated
+   UNIFORM topology (no EfficiencyClass differentiation), so the core-classes check is the
+   operative gate there and this probe answers "physical". Windows under a non-Microsoft
+   hypervisor, and every hypervisor on other OSes (WSL2's Linux included), reads as guest. */
 CAMLprim value ocannl_hypervisor_present(value unit) {
   (void)unit;
 #if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
   {
     unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
     if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return Val_int(-1);
-    return Val_int((ecx >> 31) & 1);
+    if (!((ecx >> 31) & 1)) return Val_int(0);
+#if defined(_WIN32)
+    /* NOT __get_cpuid: it validates against the BASIC max leaf, which hypervisor leaves
+       (0x4000_00xx) always exceed, so it refuses them; the raw __cpuid macro has no check. */
+    __cpuid(0x40000000u, eax, ebx, ecx, edx);
+    {
+      char vendor[13];
+      memcpy(vendor, &ebx, 4);
+      memcpy(vendor + 4, &ecx, 4);
+      memcpy(vendor + 8, &edx, 4);
+      vendor[12] = '\0';
+      return Val_int(strcmp(vendor, "Microsoft Hv") == 0 ? 0 : 1);
+    }
+#else
+    return Val_int(1);
+#endif
   }
 #elif defined(__APPLE__)
   {

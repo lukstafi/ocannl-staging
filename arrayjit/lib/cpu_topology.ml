@@ -141,9 +141,14 @@ let effective_cpu_count () =
   let n = effective_cpu_count_stub () in
   if n > 0 then n else max 1 (Stdlib.Domain.recommended_domain_count ())
 
-(** Whether the machine runs under a hypervisor (WSL2, Hyper-V, KVM, ...), where guest-visible
-    topology is fabricated and must not drive geometry decisions (gh-ocannl-530). [`Unknown] on
-    platforms without a detection path (non-x86 Linux). *)
+(** Whether the process runs as a hypervisor {e guest} (WSL2, Hyper-V VMs, KVM, ...), where
+    guest-visible topology is fabricated and must not drive geometry decisions (gh-ocannl-530).
+    A native Windows host with the Hyper-V role (or WSL2/VBS) enabled sets the CPUID hypervisor
+    bit yet sees real topology, and reads as [`No] here: on Windows a "Microsoft Hv" hypervisor
+    is the host platform itself, while Hyper-V guests see fabricated {e uniform} topology, making
+    the core-classes check the operative gate for them (see the stub for why the root-partition
+    privilege check does not work). [`Unknown] on platforms without a detection path (non-x86
+    Linux). *)
 let hypervisor_present () =
   match hypervisor_present_stub () with 1 -> `Yes | 0 -> `No | _ -> `Unknown
 
