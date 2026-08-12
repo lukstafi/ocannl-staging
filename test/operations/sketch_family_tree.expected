@@ -214,9 +214,11 @@ tree leaves = flat enumeration: true
   pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
   pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
   pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
-== gpu tight smem: 11 seeds ==
+== gpu tight smem: 9 seeds ==
 tree leaves = flat enumeration: true
 -- refuted --
+  pipeline=blocktile > geometry=bm64 bn64 bk8 tm4 tn4: block tile launches 256 threads per workgroup (bm/tm * bn/tn), exceeding the 128-thread limit
+  pipeline=blocktile > geometry=bm32 bn32 bk16 tm2 tn2: block tile launches 256 threads per workgroup (bm/tm * bn/tn), exceeding the 128-thread limit
   pipeline=tensorized > geometry=bm16 bn32 bk32 > twin=depth2: staged operand tiles need 12288 bytes of workgroup memory at pipeline depth 2, exceeding the 6144-byte limit
   pipeline=tensorized > geometry=bm32 bn32 bk32: staged operand tiles need 8192 bytes of workgroup memory, exceeding the 6144-byte limit
   pipeline=tensorized > geometry=bm32 bn32 bk16 > twin=depth2: staged operand tiles need 8192 bytes of workgroup memory at pipeline depth 2, exceeding the 6144-byte limit

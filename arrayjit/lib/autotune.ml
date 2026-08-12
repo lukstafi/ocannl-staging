@@ -2298,13 +2298,28 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
               ~f:(fun (bm, bn, bk, tm, tn) ->
                 ( Printf.sprintf "bm%d bn%d bk%d tm%d tn%d" bm bn bk tm tn,
                   refute_unless
-                    [
-                      ndiv "bm" bm ~into:"m" site.m_ni;
-                      ndiv "bn" bn ~into:"n" site.m_nj;
-                      ndiv "bk" bk ~into:"k" site.m_nk;
-                      ndiv "tm" tm ~into:"bm" bm;
-                      ndiv "tn" tn ~into:"bn" bn;
-                    ]
+                    ([
+                       ndiv "bm" bm ~into:"m" site.m_ni;
+                       ndiv "bn" bn ~into:"n" site.m_nj;
+                       ndiv "bk" bk ~into:"k" site.m_nk;
+                       ndiv "tm" tm ~into:"bm" bm;
+                       ndiv "tn" tn ~into:"bn" bn;
+                     ]
+                    @
+                    (* The launch size is statically known — two Workgroup dimensions of [bm/tm]
+                       and [bn/tn] threads — so a known thread cap refutes pre-compile what
+                       [Schedule.check_hardware_limits_classified] would reject per candidate. *)
+                    match limits.Ir.Backend_intf.max_threads_per_workgroup with
+                    | Some cap when tm > 0 && tn > 0 && bm / tm * (bn / tn) > cap ->
+                        [
+                          ( false,
+                            Printf.sprintf
+                              "block tile launches %d threads per workgroup (bm/tm * bn/tn), \
+                               exceeding the %d-thread limit"
+                              (bm / tm * (bn / tn))
+                              cap );
+                        ]
+                    | _ -> [])
                     (fun () ->
                       leaf
                         {
@@ -2526,6 +2541,10 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
             ( uniform_f32_64,
               "register tiling requires uniform f32/f64 operand and accumulator precisions" );
             (site.m_fma, "register tiling requires the fused accumulation form");
+            ( not (Utils.debug_log_from_routines ()),
+              "routine logging is active (debug_log_from_routines): [C_syntax.try_register_tile] \
+               deterministically declines, so every leaf would time the scalar fallback under a \
+               tensorized label" );
           ]
           (fun () ->
             let whole () =
@@ -2610,6 +2629,32 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                 Printf.sprintf "bm=%d gives %d row block(s); a Grid split needs at least 2"
                   p.sk_bm (blocks_of site.m_ni p.sk_bm)
               in
+              (* Per-chunk privatized-tile floor for the Grid shapes ([C_syntax]'s
+                 [per_chunk_private_bytes_cap], config [cc_grid_private_bytes_cap]): a known
+                 in-kernel tile exceeding the cap makes [parallel_grid_safe] decline the Grid
+                 rendering — the candidate would run serially under a Grid label. Other per-chunk
+                 locals can still trip the cap at render; passing here is necessary, not
+                 sufficient (the census and decline diagnostics cover the rest). *)
+              let chunk_cap =
+                match
+                  Int.of_string
+                    (String.strip
+                       (Utils.get_global_arg ~arg_name:"cc_grid_private_bytes_cap"
+                          ~default:"262144"))
+                with
+                | c when c > 0 -> c
+                | _ -> 256 * 1024
+                | exception _ -> 256 * 1024
+              in
+              let over_chunk_cap ~what bytes =
+                if bytes > chunk_cap then
+                  Some
+                    (Printf.sprintf
+                       "%s (%d bytes) exceeds the per-chunk privatization cap (%d, config \
+                        cc_grid_private_bytes_cap)"
+                       what bytes chunk_cap)
+                else None
+              in
               (* One packing shape's geometries: the shared menu judged per shape. The shape level
                  sits ABOVE the geometries, matching the flat enumeration's variant-major emission
                  order. *)
@@ -2640,10 +2685,24 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                     else Sspace.Refuted no_constant );
                   ( "hoisted-grid",
                     if not any_hoistable then Sspace.Refuted no_constant
-                    else if tb_in_place && not (hoistable site.m_b) then
+                    else if
+                      (* A non-hoistable B is read in place by this shape (its stage is omitted),
+                         so only the clean untransposed orientation survives: transposed B
+                         statically declines the register tiling, and [m_tb = None] means no role
+                         symbol occupies B's minor axis — Tensorize's role check rejects every
+                         in-place read deterministically. *)
+                      (not (hoistable site.m_b))
+                      && not (Option.value_map site.m_tb ~default:false ~f:not)
+                    then
                       Sspace.Refuted
-                        "non-hoistable transposed B would be read in place, which the register \
-                         tiling statically declines"
+                        (match site.m_tb with
+                        | Some true ->
+                            "non-hoistable transposed B would be read in place, which the \
+                             register tiling statically declines"
+                        | _ ->
+                            "stored B has no role symbol on its minor axis: the hoisted-grid \
+                             shape reads non-hoistable B in place and cannot satisfy Tensorize's \
+                             role check")
                     else
                       subt (fun () -> geoms ~f:(fun p full_div _ ->
                              if not (full_div || (hoistable site.m_a && hoistable site.m_b)) then
@@ -2660,8 +2719,19 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                          shape degenerates to hoisted-grid"
                     else
                       subt (fun () -> geoms ~f:(fun p _ _ ->
+                             let bn_eff = if p.sk_bn = 0 then site.m_nj else p.sk_bn in
+                             (* The non-hoistable operand's in-kernel packing Stage lands inside
+                                the Grid body and privatizes per chunk. *)
+                             let rest_tile =
+                               if hoistable site.m_a then p.sk_bk * bn_eff * prec_bytes
+                               else p.sk_bm * p.sk_bk * prec_bytes
+                             in
                              if not (grid_ok p) then Sspace.Refuted (too_few_blocks p)
-                             else leaf { p with sk_hoist = true; sk_grid = true; sk_pack_rest = true }))
+                             else
+                               match over_chunk_cap ~what:"per-chunk packed tile" rest_tile with
+                               | Some w -> Sspace.Refuted w
+                               | None ->
+                                   leaf { p with sk_hoist = true; sk_grid = true; sk_pack_rest = true }))
                   );
                   ( "grid-pack-rest",
                     if any_hoistable then
@@ -2669,30 +2739,22 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                         "a hoistable operand exists: the hoisted shapes cover the one-dispatch \
                          role without per-chunk re-packing"
                     else
-                      let chunk_cap =
-                        match
-                          Int.of_string
-                            (String.strip
-                               (Utils.get_global_arg ~arg_name:"cc_grid_private_bytes_cap"
-                                  ~default:"262144"))
-                        with
-                        | c when c > 0 -> c
-                        | _ -> 256 * 1024
-                        | exception _ -> 256 * 1024
-                      in
                       subt (fun () -> geoms ~f:(fun p _ tiles_bytes ->
                              if not (grid_ok p) then Sspace.Refuted (too_few_blocks p)
-                             else if tiles_bytes > chunk_cap then
-                               Sspace.Refuted
-                                 (Printf.sprintf
-                                    "packed tiles (%d bytes) exceed the per-chunk privatization \
-                                     cap (%d, config cc_grid_private_bytes_cap)"
-                                    tiles_bytes chunk_cap)
-                             else leaf { p with sk_grid = true; sk_pack_rest = true })) );
+                             else
+                               match over_chunk_cap ~what:"per-chunk packed tiles" tiles_bytes with
+                               | Some w -> Sspace.Refuted w
+                               | None -> leaf { p with sk_grid = true; sk_pack_rest = true })) );
                   ( "grid",
                     subt (fun () -> geoms ~f:(fun p _ _ ->
+                           (* The per-row-block A~ tile privatizes per chunk; the read-only B~
+                              panel is shared and does not count against the cap. *)
+                           let a_tile = p.sk_bm * p.sk_bk * prec_bytes in
                            if not (grid_ok p) then Sspace.Refuted (too_few_blocks p)
-                           else leaf { p with sk_grid = true })) );
+                           else
+                             match over_chunk_cap ~what:"per-chunk privatized A~ tile" a_tile with
+                             | Some w -> Sspace.Refuted w
+                             | None -> leaf { p with sk_grid = true })) );
                 ]
             in
             subt (fun () -> choice "tensorized-form"
