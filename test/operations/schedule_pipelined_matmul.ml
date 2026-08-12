@@ -14,8 +14,9 @@
    the renderer's buffer rotation makes every read resolve to the copy holding exactly the values
    the unpipelined form reads. So depth 2 must match depth 1 BITWISE on the GPU backends (while
    both only approximate the serial twin — the tile reduction reassociates, which is Tensorize's
-   license, not pipelining's). Phase 1 implements depth 2 only; deeper lookahead is the phase-2
-   async-copy arms', and depth 3 is pinned as a typed rejection.
+   license, not pipelining's). Depth 2 only: both the portable form (phase 1) and the CUDA
+   cp.async arm (phase 2) have single-step lookahead, and depth 3 is pinned as a typed
+   rejection.
 
    THE OTHER INVARIANT (gh-ocannl-567): the same-anchor load-phase grouping and the
    Tile_mma-bracket barrier elision, both of which PR #303 landed [opt.pipelined]-gated and gh-567
@@ -307,6 +308,23 @@ let () =
           && count_sub src1 "% 2" = 0
           && decl_ok src1 1 && decl_ok src2 2)
     | _ -> p "depth 2 rotates the buffers the depth-1 kernel does not" false);
+    (* gh-487 phase 2: where the backend has an async-copy arm (CUDA sm_80+; the leg assumes the
+       device qualifies, like the wmma legs assume their arch floors), the depth-2 staging renders
+       as async copies — both prologues and both prefetches, 4 call sites — with one
+       wait-then-barrier opening each rotor iteration, while depth 1 stays fully synchronous: the
+       pd1/pd2 pair keeps comparing prefetch timing only. Backends without the arm (Metal, HIP)
+       keep the portable synchronous form at both depths — a real check that the hook does not
+       leak, not a skip. *)
+    (match (read_generated "pipe_mm_d1", read_generated "pipe_mm_d2") with
+    | Some src1, Some src2 ->
+        let on_cuda = String.is_substring backend_name ~substring:"cuda" in
+        p "async copies appear exactly on the depth-2 async arm"
+          (if on_cuda then
+             count_sub src2 "ocannl_cp_async4(&" = 4
+             && count_sub src2 "ocannl_cp_async_wait_all();" = 1
+             && count_sub src1 "ocannl_cp_async" = 0
+           else count_sub src2 "ocannl_cp_async" = 0 && count_sub src1 "ocannl_cp_async" = 0)
+    | _ -> p "async copies appear exactly on the depth-2 async arm" false);
     (* The count in the EMITTED kernel, where the intrinsic's own brackets are visible too: the
        reference and depth 1 differ by exactly the two barrier statements gh-567 dropped (the k-block
        has one loop body in the source, so this counts statements, not executions). *)
@@ -330,6 +348,7 @@ let () =
     skipped "depth 2 matches depth 1 BITWISE";
     skipped "depth 1 matches the un-elided barrier structure BITWISE";
     skipped "depth 2 rotates the buffers the depth-1 kernel does not";
+    skipped "async copies appear exactly on the depth-2 async arm";
     skipped "the emitted depth-1 kernel sheds exactly the two elided barriers");
 
   (* --- Structural pins on the applied schedules (all backends; captured by the transforms
@@ -440,8 +459,8 @@ let () =
     (reapply ~probe:"pipe_mm_probe0" ~f:(fun ~out opt ->
          let schedule, _ = staged_schedule ~pipeline_depth:0 ~out opt in
          ignore (Sched.apply schedule opt : LL.optimized)));
-  expect_invalid "pipeline_depth 3 is rejected in phase 1"
-    ~substring:"not implemented in phase 1"
+  expect_invalid "pipeline_depth 3 is rejected (single-step lookahead)"
+    ~substring:"not implemented in gh-ocannl-487"
     (reapply ~probe:"pipe_mm_probe3" ~f:(fun ~out opt ->
          let schedule, _ = staged_schedule ~pipeline_depth:3 ~out opt in
          ignore (Sched.apply schedule opt : LL.optimized)));
@@ -604,7 +623,8 @@ let () =
   (* --- Seeding pin (gh-ocannl-487): the depth twins follow the backend's advertised
      [mma_pipeline_depths] — one twin per staged seed per advertised depth, identical to its plain
      sibling except [sk_depth]; unstaged seeds are never twinned; an empty advertisement (the
-     CUDA/HIP phase-2 state, and cc) seeds no twins. Probed against synthetic capabilities so the
+     HIP state until its LDS arm lands, and cc) seeds no twins. Probed against synthetic
+     capabilities so the
      pin is backend-independent, like the schedule_pad seed checks. --- *)
   let limits_with depths =
     {
