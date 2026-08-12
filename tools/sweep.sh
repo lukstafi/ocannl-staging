@@ -163,6 +163,21 @@ relay() {
 trap 'relay 130' INT
 trap 'relay 143' TERM
 
+# Every long-running step goes through this, so that publishing UNIT_PID is not
+# re-derived per call site: a site that forgets it silently loses cancellation
+# and keeps holding the lock, which is how the preparation leg came to differ
+# from the test legs.
+run_capped() {
+  local budget=$1 rc
+  shift
+  capped_bg "$budget" "$@" &
+  UNIT_PID=$!
+  wait "$UNIT_PID"
+  rc=$?
+  UNIT_PID=
+  return "$rc"
+}
+
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 # Resolve the ref to a commit ONCE, here, and pin every machine to that commit.
 # Letting each box resolve `origin/master` itself would have them testing
@@ -228,6 +243,24 @@ test_cmd() {
 # POSIX single-quoting, so a generated command can be handed to `sh -c` on the
 # far side without the remote shell re-splitting or re-expanding any of it.
 sq() { printf "'%s'" "$(printf %s "$1" | sed "s/'/'\\\\''/g")"; }
+
+# The far-side counterpart of fd 9. A local lock cannot protect a worktree on
+# another machine, and the gap is reachable: when keepalives detect a blackholed
+# connection, ssh returns 255 EARLY -- well inside the outer budget -- so the
+# sweep records `error` and exits while the remote dune keeps running under its
+# own timeout for the rest of CAP. The next sweep's preparation would then reset
+# and clean that remote worktree underneath a live build. With this it is refused
+# instead, and recorded as non-coverage.
+#
+# 126 so the outcome mapping files a busy remote as `error`: nothing was judged.
+#
+# flock(1) rather than the perl the local side needs -- the remote boxes are WSL
+# Linux, where util-linux provides it. Orphaned remote processes inherit the
+# descriptor, so the lock outlives the ssh session that took it and clears when
+# the last of them exits: the same property the local lock relies on.
+remote_lock_cmd() {
+  printf 'mkdir -p "$(dirname "%s")" && exec 9>"%s.lock" && flock -n 9 || exit 126; ' "$1" "$1"
+}
 
 # Cap a local command, killing its whole process group when the cap expires.
 # `perl -e 'alarm N; exec ...'` is not enough on its own: alarm survives exec, so
@@ -343,6 +376,12 @@ for unit in "${UNITS[@]}"; do
     # running the remote command. A box that accepts the connection and then
     # wedges its shell would hang the whole sweep here, before any unit records
     # anything, so every ssh in this loop gets an outer bound as well.
+    #
+    # The one step NOT routed through run_capped: its output is captured, and
+    # command substitution runs in a subshell, so a UNIT_PID published there
+    # would be invisible to the trap in this shell. Its 60s budget bounds how
+    # long a cancellation can be delayed here, which is the reason that is
+    # tolerable where a 900s preparation leg was not.
     if ! remote_home=$(capped 60 ssh -o BatchMode=yes -o ConnectTimeout=8 \
          -o ServerAliveInterval=30 -o ServerAliveCountMax=4 \
          "$host" 'printf %s "$HOME"' 2>/dev/null) ||
@@ -370,9 +409,10 @@ for unit in "${UNITS[@]}"; do
     # that dies without the remote noticing, and is larger so it cannot pre-empt
     # the inner one. Generous overall, since a cold fetch on a slow link is
     # legitimate work.
-    if ! capped 900 ssh -o BatchMode=yes \
+    if ! run_capped 900 ssh -o BatchMode=yes \
          -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-         "$host" "timeout -k 10s 600s sh -c $(sq "$path_prefix $remote_prep")" >"$log" 2>&1; then
+         "$host" "timeout -k 10s 600s sh -c $(sq "$path_prefix $(remote_lock_cmd "$wt") $remote_prep")" \
+         >"$log" 2>&1; then
       echo "  $machine/$backend: error (cannot pin $host to $run_sha)"
       record "$machine" "$backend" error "$(( $(date +%s) - started ))" "$log"
       fingerprint "$log" >"${log%.log}.fingerprint"
@@ -382,7 +422,7 @@ for unit in "${UNITS[@]}"; do
     # the local ssh would leave the remote dune running. ONE timeout around the
     # whole unit, matching capped() locally -- a per-dune-call cap would let a
     # --slow unit run for twice the budget the script advertises.
-    remote="$path_prefix timeout -k 10s ${CAP}s sh -c $(sq "$(test_cmd "$backend" "$wt")")"
+    remote="$path_prefix timeout -k 10s ${CAP}s sh -c $(sq "$(remote_lock_cmd "$wt") $(test_cmd "$backend" "$wt")")"
     # The far-side cap does not bound the LOCAL ssh: if the connection blackholes
     # after the command starts -- the box suspends, the WiFi drops -- the remote
     # timeout may kill dune while this ssh sits waiting for a status that will
@@ -395,12 +435,10 @@ for unit in "${UNITS[@]}"; do
     # budget deliberately exceeds $CAP, so it can only fire after the remote
     # timeout has had its chance plus room for cleanup and teardown; otherwise it
     # would cut legitimate long runs short and call them timeouts.
-    capped_bg "$(( CAP + 300 ))" \
+    run_capped "$(( CAP + 300 ))" \
       ssh -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-      "$host" "$remote" >"$log" 2>&1 &
-    UNIT_PID=$!
-    wait "$UNIT_PID"; rc=$?
-    UNIT_PID=
+      "$host" "$remote" >"$log" 2>&1
+    rc=$?
   else
     wt=$LOCAL_WT
     # Checked, and fatal for this UNIT rather than the run. The worktree is
@@ -422,10 +460,8 @@ for unit in "${UNITS[@]}"; do
       fingerprint "$log" >"${log%.log}.fingerprint"
       continue
     fi
-    capped_bg "$CAP" /bin/sh -c "$(test_cmd "$backend" "$wt")" >"$log" 2>&1 &
-    UNIT_PID=$!
-    wait "$UNIT_PID"; rc=$?
-    UNIT_PID=
+    run_capped "$CAP" /bin/sh -c "$(test_cmd "$backend" "$wt")" >"$log" 2>&1
+    rc=$?
   fi
 
   elapsed=$(( $(date +%s) - started ))
