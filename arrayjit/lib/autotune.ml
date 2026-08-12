@@ -3064,11 +3064,14 @@ let bs_label = function None -> "cfg" | Some b -> Int.to_string b
    (schema owned by {!CM.Calibration}) appended under config [autotune_calibration_file].
 
    The analysis runs on the candidate's actual compiled segments ([compiled.all_opts]), so a row
-   prices exactly the code that was timed. A roofline LOWER bound exceeding a measured time means
-   the envelope constants understate this machine's achievable peaks — a search fathoming on that
-   bound would prune true winners — so the violation warns unconditionally, not gated by
-   [autotune_log]: per the gh-ocannl-498 lesson, an invariant between a scorer and reality is
-   checked continuously against every sample, never spot-checked. Refitting the constants from the
+   prices exactly the code that was timed. For an exact-count candidate, a roofline LOWER bound
+   exceeding a measured time can only mean the envelope constants understate this machine's
+   achievable peaks — a search fathoming on that bound would prune true winners — so the violation
+   warns unconditionally, not gated by [autotune_log]: per the gh-ocannl-498 lesson, an invariant
+   between a scorer and reality is checked continuously against every sample, never spot-checked.
+   Approximate counts ([CM.approximate]: guards-taken / union upper bounds) make an exceedance
+   ambiguous — mostly-failing guards over-count without implicating the envelope — so those log as
+   diagnostics and their rows are flagged for the fitter to exclude. Refitting the constants from the
    accumulated rows ([CM.Calibration.fit], [tools/fit_envelope.exe]) restores soundness. The
    analysis therefore also runs whenever envelope constants are present, even with logging and the
    calibration file off — one [CM.analyze] per compiled segment, trivial next to the compile and
@@ -3085,13 +3088,15 @@ let emit_calibration ~backend ~limits ~label ~digest ~measured_ms (opts : LL.opt
     let flops = List.sum (module Int) summaries ~f:(fun s -> s.CM.flops) in
     let bytes = List.sum (module Int) summaries ~f:CM.total_bytes in
     let opaque = List.exists summaries ~f:(fun s -> s.CM.opaque) in
+    let approx = List.exists summaries ~f:CM.approximate in
     let model_ms =
       Option.map (summaries_roofline ~peak_flops ~peak_memory_bandwidth summaries) ~f:(fun s ->
           s *. 1e3)
     in
     let dtag = dshort digest in
     (match model_ms with
-    | Some m when Float.(m > measured_ms) ->
+    | Some m when Float.(m > measured_ms) && not approx ->
+        (* Exact counts: the exceedance can only mean the envelope understates the machine. *)
         let seconds = Float.max 1e-12 (measured_ms *. 1e-3) in
         Stdio.eprintf
           "autotune: BOUND VIOLATION: roofline lower bound %.6f ms > measured %.4f ms for %s \
@@ -3102,6 +3107,15 @@ let emit_calibration ~backend ~limits ~label ~digest ~measured_ms (opts : LL.opt
           m measured_ms label dtag backend
           (Float.of_int flops /. seconds)
           (Float.of_int bytes /. seconds)
+    | Some m when Float.(m > measured_ms) ->
+        (* Approximate counts (guards-taken / union upper bounds): the exceedance may reflect
+           over-counting on this candidate rather than the envelope, so it is a diagnostic, not
+           an invariant violation — no unconditional warning, no implied-minima claim. *)
+        logf
+          "model bound %.6f ms > measured %.4f ms for %s (digest %s), but its counts are \
+           approximate upper bounds (guarded/masked code) — possibly over-counting, not the \
+           envelope"
+          m measured_ms label dtag
     | _ -> ());
     let n_kernels = List.length summaries in
     logf "calibration: %s measured %.4f ms, model %s, %d kernel%s, flops %d, bytes %d%s" label
@@ -3123,6 +3137,7 @@ let emit_calibration ~backend ~limits ~label ~digest ~measured_ms (opts : LL.opt
             kernels = n_kernels;
             flops;
             bytes;
+            approx;
             opaque;
           }
         ^ "\n"

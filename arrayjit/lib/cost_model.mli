@@ -62,6 +62,13 @@ val total_bytes : summary -> int
 val arithmetic_intensity : summary -> float
 (** FLOPs per byte moved, [flops / max 1 (total_bytes)]. *)
 
+val approximate : summary -> bool
+(** [true] when any count is an upper bound rather than exact: [flops_approx] (guards-taken op
+    counting) or any per-node [fp_approx]. Such counts are still upper bounds (unlike under
+    [opaque]), but a candidate whose guards mostly fail can carry counts far above the work it
+    performs — quantities derived from them (achieved throughput, the roofline bound vs. a
+    measurement) are not evidence about the hardware. *)
+
 val roofline_seconds :
   ?peak_flops:float ->
   ?peak_memory_bandwidth:float ->
@@ -93,22 +100,32 @@ module Calibration : sig
     kernels : int;
     flops : int;  (** Aggregated over the candidate's kernels, like [bytes]. *)
     bytes : int;
+    approx : bool;
+        (** Any kernel's counts are upper bounds rather than exact ({!approximate}): the row is
+            recorded for divergence analysis but excluded from envelope fitting. *)
     opaque : bool;
   }
   [@@deriving sexp_of]
 
   val to_line : row -> string
   (** Tab-separated, no trailing newline. [of_line (to_line r)] recovers [r] up to float
-      formatting ([measured_ms] and [model_ms] record 6 decimals). *)
+      formatting: [measured_ms] and [model_ms] record 6 decimals, {e floored} rather than
+      rounded — a stored time never exceeds the true measurement, so constants fit from a file
+      remain conservative with respect to the original in-process measurement (round-to-nearest
+      could overstate a 5 us kernel's time by a fitting-relevant 1e-4 relative). *)
 
   val of_line : string -> row option
   (** [None] on malformed lines (wrong column count, unparseable numbers). *)
 
   type fit = {
     fit_backend : string;
-    fit_rows : int;  (** Scoreable rows: non-opaque with a positive measured time. *)
+    fit_rows : int;
+        (** Rows the fit uses: exact-count ([approx] and [opaque] false), positively timed. *)
     fit_opaque : int;  (** Opaque rows, excluded — the model never scores them. *)
-    fit_multi_kernel : int;  (** Among scoreable rows; see {!fit} for the aggregate caveat. *)
+    fit_approx : int;
+        (** Approximate-count rows, excluded — guards-taken over-counting can fake a throughput
+            above any hardware peak, and one such row would inflate the envelope machine-wide. *)
+    fit_multi_kernel : int;  (** Among the rows used; see {!fit} for the aggregate caveat. *)
     fit_violations : int;
         (** Rows whose recorded [model_ms] exceeds [measured_ms]: the envelope in force when
             they were recorded understated this machine's peaks. *)
@@ -125,10 +142,10 @@ module Calibration : sig
 
   val fit : row list -> fit list
   (** Grouped by backend in order of first appearance. The fitted constants are the tightest
-      envelope under which the roofline bound respects every scoreable row: per row,
+      envelope under which the roofline bound respects every exact-count row: per row,
       [bound <= measured] requires [peak >= counts/measured] on each leg, so each leg starts as
-      the maximum achieved [counts/time] over the scoreable rows — where "achieved" is by the
-      model's own upper-bound counts, exactly the direction bound-soundness needs. Multi-kernel
+      the maximum achieved [counts/time] over the rows used — counts are exact there, so the
+      ratio is a throughput the machine demonstrably reached. Multi-kernel
       rows aggregate per-kernel counts, making those maxima necessary for them but not
       sufficient ([Autotune]'s bound sums per-kernel max-of-legs, which can approach twice the
       aggregate legs on a compute-bound + bandwidth-bound mix), so both legs are then raised

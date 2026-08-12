@@ -1,27 +1,28 @@
 emitted TSV (tabs shown as ' | '):
-  cc | aaaaaaaa/11111111 | copy_preset | 2.000000 |  | 1 | 0 | 16000000 | false
-  cc | bbbbbbbb/22222222 | matmul bs=64 | 4.000000 | 5.000000 | 1 | 2000000000 | 3000000 | false
-  cc | cccccccc/33333333 | staged | 1.000000 |  | 1 | 1000000 | 1000000 | true
-  toy | dddddddd/44444444 | fissioned fused | 10.000000 | 9.000000 | 3 | 5000000 | 400000000 | false
+  cc | aaaaaaaa/11111111 | copy_preset | 2.000000 |  | 1 | 0 | 16000000 | false | false
+  cc | bbbbbbbb/22222222 | matmul bs=64 | 4.000000 | 5.000000 | 1 | 2000000000 | 3000000 | false | false
+  cc | eeeeeeee/55555555 | masked fringe | 1.000000 |  | 1 | 50000000000 | 1000000 | true | false
+  cc | cccccccc/33333333 | staged | 1.000000 |  | 1 | 1000000 | 1000000 | false | true
+  toy | dddddddd/44444444 | fissioned fused | 10.000000 | 9.000000 | 3 | 5000000 | 400000000 | false | false
 
-round-trip: 4/4 rows parsed back, re-emission identical: true
+round-trip: 5/5 rows parsed back, re-emission identical: true
 malformed "cc\tonly\tthree" parses: false
-malformed "cc\td\tl\tnot_a_number\t\t1\t0\t0\tfalse" parses: false
-malformed "cc\td\tl\t1.0\t\t1\t0\t0\tmaybe" parses: false
+malformed "cc\td\tl\tnot_a_number\t\t1\t0\t0\tfalse\tfalse" parses: false
+malformed "cc\td\tl\t1.0\t\t1\t0\t0\tfalse\tmaybe" parses: false
 
 fits:
-# backend cc: 2 scoreable rows (1 opaque excluded, 0 multi-kernel), 1 recorded bound violation
+# backend cc: 2 exact rows (1 opaque and 1 approx-count excluded, 0 multi-kernel), 1 recorded bound violation
 # compute-leg binding row: matmul bs=64 (bbbbbbbb/22222222)
 model_peak_flops=5.000010e+11
 # memory-leg binding row: copy_preset (aaaaaaaa/11111111)
 model_peak_memory_bandwidth=8.000016e+9
-(scoreable 2, opaque 1, multi-kernel 0, violations 1)
+(exact 2, opaque 1, approx 1, multi-kernel 0, violations 1)
 
-# backend toy: 1 scoreable row (0 opaque excluded, 1 multi-kernel), 0 recorded bound violations
+# backend toy: 1 exact row (0 opaque and 0 approx-count excluded, 1 multi-kernel), 0 recorded bound violations
 # fission slack 2.000000 applied to both legs, forced by multi-kernel row: fissioned fused (dddddddd/44444444)
 # compute-leg binding row: fissioned fused (dddddddd/44444444)
 model_peak_flops=1.000002e+9
 # memory-leg binding row: fissioned fused (dddddddd/44444444)
 model_peak_memory_bandwidth=8.000016e+10
-(scoreable 1, opaque 0, multi-kernel 1, violations 0)
+(exact 1, opaque 0, approx 0, multi-kernel 1, violations 0)
 

@@ -119,9 +119,15 @@ every survivor measurement, so a broken fathom cannot stay silent.
 **Envelope fitting (implemented, phase 0).** `Ir.Cost_model.Calibration` owns the calibration
 TSV schema (one writer, `Autotune`; one reader, `tools/fit_envelope.exe`; they share the code)
 and the fitter: per backend, each leg starts at its tightest necessary constant — the maximum
-achieved `counts/time` over the scoreable (non-opaque, positively timed) rows, "achieved" by
-the model's own upper-bound counts, which is exactly the quantity bound-soundness needs.
-Multi-kernel rows aggregate per-kernel counts, so for them those maxima are necessary but not
+achieved `counts/time` over the *exact-count* rows (positively timed, neither opaque nor
+approximate: guards-taken/union over-counting can fake a throughput above any hardware peak,
+and one mostly-failing-guards candidate would inflate the envelope machine-wide, so approximate
+rows are recorded for divergence analysis but excluded from fitting — and their
+bound-exceedances are `autotune_log` diagnostics rather than unconditional warnings, since they
+may indict the counts, not the envelope). Serialized milliseconds are floored, not rounded, at
+the 6th decimal, so a stored time never exceeds the true measurement and file-fitted constants
+stay conservative with respect to it. Multi-kernel rows aggregate per-kernel counts, so for
+them the per-leg maxima are necessary but not
 sufficient (the bound sums per-kernel max-of-legs, which a compute-bound + bandwidth-bound mix
 pushes toward twice either aggregate leg); the fitter therefore raises both legs uniformly by
 the smallest *fission slack* enforcing the aggregate sufficient condition

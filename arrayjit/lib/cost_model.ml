@@ -149,6 +149,9 @@ let analyze (code : Low_level.t) : summary =
 let total_bytes s = s.read_bytes + s.write_bytes
 let arithmetic_intensity s = Float.of_int s.flops /. Float.of_int (max 1 (total_bytes s))
 
+let approximate s =
+  s.flops_approx || List.exists s.per_node ~f:(fun (_, fp) -> fp.fp_approx)
+
 let roofline_seconds ?peak_flops ?peak_memory_bandwidth ~flops ~bytes () : float option =
   let legs =
     List.filter_opt
@@ -173,18 +176,28 @@ module Calibration = struct
     kernels : int;
     flops : int;
     bytes : int;
+    approx : bool;
     opaque : bool;
   }
   [@@deriving sexp_of]
 
+  (* Milliseconds are serialized FLOORED at the 6th decimal (not rounded to nearest): a stored
+     time never exceeds the true measurement, so constants fit from the file remain conservative
+     with respect to the original in-process measurement — round-to-nearest could round a short
+     kernel's time up by 0.5 ns, a 1e-4 relative error at 5 us, far above [report]'s 2e-6 bump.
+     The floored decimal survives the round-trip: [d /. 1e6] for integral [d] is within ~1e-11 of
+     the decimal, so ["%.6f"] prints [d] back exactly. *)
+  let floor6 v = Float.round_down (v *. 1e6) /. 1e6
+
   let to_line r =
-    Printf.sprintf "%s\t%s\t%s\t%.6f\t%s\t%d\t%d\t%d\t%b" r.backend r.digest r.label r.measured_ms
-      (match r.model_ms with Some m -> Printf.sprintf "%.6f" m | None -> "")
-      r.kernels r.flops r.bytes r.opaque
+    Printf.sprintf "%s\t%s\t%s\t%.6f\t%s\t%d\t%d\t%d\t%b\t%b" r.backend r.digest r.label
+      (floor6 r.measured_ms)
+      (match r.model_ms with Some m -> Printf.sprintf "%.6f" (floor6 m) | None -> "")
+      r.kernels r.flops r.bytes r.approx r.opaque
 
   let of_line line =
     match String.split line ~on:'\t' with
-    | [ backend; digest; label; measured; model; kernels; flops; bytes; opaque ] -> (
+    | [ backend; digest; label; measured; model; kernels; flops; bytes; approx; opaque ] -> (
         try
           Some
             {
@@ -197,6 +210,7 @@ module Calibration = struct
               kernels = Int.of_string kernels;
               flops = Int.of_string flops;
               bytes = Int.of_string bytes;
+              approx = Bool.of_string approx;
               opaque = Bool.of_string opaque;
             }
         with _ -> None)
@@ -206,6 +220,7 @@ module Calibration = struct
     fit_backend : string;
     fit_rows : int;
     fit_opaque : int;
+    fit_approx : int;
     fit_multi_kernel : int;
     fit_violations : int;
     fit_fission_slack : (float * string) option;
@@ -226,12 +241,17 @@ module Calibration = struct
         cell := r :: !cell);
     List.rev_map !order ~f:(fun backend ->
         let rows = List.rev !(Hashtbl.find_exn by_backend backend) in
-        (* Scoreable rows are the ones the recorded bound quantifies over: non-opaque (an opaque
-           row's counts may under-estimate, and the model never scores it) and positively timed.
-           The fitted constant per leg is the tightest sound one — [bound <= measured] needs
+        (* The fit uses exact rows only: non-opaque (under-counting), non-approx (guards-taken /
+           union over-counting — a mask-heavy candidate whose guards mostly fail can "achieve" a
+           counts/time ratio far above any hardware peak, and letting it drive the maximum would
+           inflate the envelope machine-wide), positively timed. The fitted constant per leg is
+           the tightest sound one for those rows — [bound <= measured] needs
            [peak >= counts/measured] on every row — so it is the maximum achieved [counts/time],
-           "achieved" by the model's own (upper-bound) counts. *)
-        let scoreable = List.filter rows ~f:(fun r -> (not r.opaque) && Float.(r.measured_ms > 0.)) in
+           "achieved" by the model's own counts, which are exact on the rows used. *)
+        let scoreable =
+          List.filter rows ~f:(fun r ->
+              (not r.opaque) && (not r.approx) && Float.(r.measured_ms > 0.))
+        in
         let leg count =
           List.fold scoreable ~init:None ~f:(fun acc r ->
               let c = count r in
@@ -277,6 +297,7 @@ module Calibration = struct
           fit_backend = backend;
           fit_rows = List.length scoreable;
           fit_opaque = List.count rows ~f:(fun r -> r.opaque);
+          fit_approx = List.count rows ~f:(fun r -> r.approx && not r.opaque);
           fit_multi_kernel = List.count scoreable ~f:(fun r -> r.kernels > 1);
           fit_violations =
             List.count rows ~f:(fun r ->
@@ -291,10 +312,12 @@ module Calibration = struct
   let report f =
     let buf = Buffer.create 256 in
     let addf fmt = Printf.ksprintf (Buffer.add_string buf) fmt in
-    addf "# backend %s: %d scoreable row%s (%d opaque excluded, %d multi-kernel), %d recorded bound violation%s\n"
+    addf
+      "# backend %s: %d exact row%s (%d opaque and %d approx-count excluded, %d multi-kernel), \
+       %d recorded bound violation%s\n"
       f.fit_backend f.fit_rows
       (if f.fit_rows = 1 then "" else "s")
-      f.fit_opaque f.fit_multi_kernel f.fit_violations
+      f.fit_opaque f.fit_approx f.fit_multi_kernel f.fit_violations
       (if f.fit_violations = 1 then "" else "s");
     Option.iter f.fit_fission_slack ~f:(fun (s, witness) ->
         addf "# fission slack %s applied to both legs, forced by multi-kernel row: %s\n"
