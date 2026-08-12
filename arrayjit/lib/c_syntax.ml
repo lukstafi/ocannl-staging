@@ -908,16 +908,57 @@ module C_syntax (B : C_syntax_config) = struct
        pre-Ampere kernel and [gpu_arch_options] would then emit PTX that device cannot load
        (Codex P2 on PR #317, round 3; routine names are not covered by the tensor-identifier
        blacklist). *)
+    (* Comments and string literals are not uses either: [Comment] statements render arbitrary
+       text as [/* ... */] and the debug-log mode renders node names into printf format literals,
+       so a stray helper token there would activate a builtin — and, on CUDA, its architecture
+       floor — without any call (Codex P2 on PR #317, round 5). Strip both before scanning;
+       genuine uses are code tokens and survive. Removed regions become a single space so tokens
+       cannot concatenate across them. *)
+    let scannable =
+      let s = doc_string in
+      let n = String.length s in
+      let b = Buffer.create n in
+      let rec go i state =
+        if i < n then
+          match state with
+          | `Code ->
+              if i + 1 < n && Char.equal s.[i] '/' && Char.equal s.[i + 1] '*' then (
+                Buffer.add_char b ' ';
+                go (i + 2) `Block)
+              else if i + 1 < n && Char.equal s.[i] '/' && Char.equal s.[i + 1] '/' then
+                go (i + 2) `Line
+              else if Char.equal s.[i] '"' then (
+                Buffer.add_char b ' ';
+                go (i + 1) `Str)
+              else (
+                Buffer.add_char b s.[i];
+                go (i + 1) `Code)
+          | `Block ->
+              if i + 1 < n && Char.equal s.[i] '*' && Char.equal s.[i + 1] '/' then go (i + 2) `Code
+              else go (i + 1) `Block
+          | `Line ->
+              if Char.equal s.[i] '\n' then (
+                Buffer.add_char b '\n';
+                go (i + 1) `Code)
+              else go (i + 1) `Line
+          | `Str ->
+              if Char.equal s.[i] '\\' then go (i + 2) `Str
+              else if Char.equal s.[i] '"' then go (i + 1) `Code
+              else go (i + 1) `Str
+      in
+      go 0 `Code;
+      Buffer.contents b
+    in
     let is_ident_char c = Char.is_alphanum c || Char.equal c '_' in
     let mentions_token key =
       let klen = String.length key in
-      let dlen = String.length doc_string in
+      let dlen = String.length scannable in
       let rec scan pos =
-        match String.substr_index ~pos doc_string ~pattern:key with
+        match String.substr_index ~pos scannable ~pattern:key with
         | None -> false
         | Some i ->
-            let pre_ok = i = 0 || not (is_ident_char doc_string.[i - 1]) in
-            let post_ok = i + klen >= dlen || not (is_ident_char doc_string.[i + klen]) in
+            let pre_ok = i = 0 || not (is_ident_char scannable.[i - 1]) in
+            let post_ok = i + klen >= dlen || not (is_ident_char scannable.[i + klen]) in
             if pre_ok && post_ok then true else scan (i + 1)
       in
       scan 0

@@ -178,8 +178,12 @@ let%diagn_sexp gpu_arch_options ~device_cc cu_src : string list =
           (if has "(mma-fp8)" then Some 89 else None);
           (if has "(mma-bf16)" then Some 80 else None);
           (* The [cp.async] staging builtins (gh-ocannl-487 phase 2); emission is gated on the
-             devices' own capability, so the floor only ever fires where it can also load. *)
-          (if has "ocannl_cp_async" then Some 80 else None);
+             devices' own capability, so the floor only ever fires where it can also load. The
+             marker is the PTX instruction text, which appears exactly in the prepended helper
+             definitions' asm literals — never in an identifier — so a routine or label merely
+             NAMED like a helper (which the token-scoped builtin filter declines to activate)
+             cannot raise the floor past a pre-Ampere device (Codex P2 on PR #317, round 5). *)
+          (if has "cp.async." then Some 80 else None);
           (if uses_h_arith then Some (if has "__nv_bfloat16" then 80 else 53) else None);
         ]
       |> List.max_elt ~compare:Int.compare

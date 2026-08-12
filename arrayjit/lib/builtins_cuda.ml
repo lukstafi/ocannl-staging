@@ -21,8 +21,9 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
 }|},
       [] );
     (* Asynchronous global->shared staging copies for software-pipelined tiles (gh-ocannl-487
-       phase 2; [C_syntax_config.async_copy]). sm_80+; the shared [ocannl_cp_async] prefix serves
-       as [gpu_arch_options]' arch-floor marker. Inline PTX rather than <cuda_pipeline.h> so nvrtc
+       phase 2; [C_syntax_config.async_copy]). sm_80+; the [cp.async.] PTX instruction text in the
+       definitions serves as [gpu_arch_options]' arch-floor marker — it exists in the source
+       exactly when a definition was actually prepended. Inline PTX rather than <cuda_pipeline.h> so nvrtc
        needs no extra headers; [cvta.to.shared] inside the asm avoids relying on
        [__cvta_generic_to_shared]'s availability. 4- and 8-byte element copies only — the
        alignment plain shared declarations guarantee; a 16-byte [.cg] variant returns when a
