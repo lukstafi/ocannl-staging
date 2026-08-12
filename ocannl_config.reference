@@ -404,8 +404,10 @@
 # roofline bounds, so fitting the envelope constants from aggregates is exact only for rows with
 # kernel count 1. Every tuning run is free model-vs-measured divergence data for fitting the
 # envelope constants (see model_peak_flops): `tools/fit_envelope.exe <file>...` fits the
-# tightest sound model_peak_* constants from such files (grouped per backend) and prints
-# config-pasteable lines.
+# tightest model_peak_* constants respecting every row (multi-kernel rows via a uniform
+# "fission slack" on both legs) and prints config-pasteable lines; `--backend=NAME` selects
+# one backend when the data spans several (the keys are global), `--margin=F` adds headroom
+# for candidates faster than any yet measured.
 # Relative paths resolve against the working directory. With autotune_log=true the same
 # calibration lines also go to stderr, human-readable.
 #autotune_calibration_file=

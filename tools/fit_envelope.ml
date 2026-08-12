@@ -3,26 +3,49 @@
    [autotune_calibration_file] (gh-ocannl-514 phase 0; schema and fit semantics in
    [Ir.Cost_model.Calibration]).
 
-   Usage: dune exec tools/fit_envelope.exe -- <calibration.tsv> [<more.tsv> ...]
+   Usage: dune exec tools/fit_envelope.exe -- [--backend=NAME] [--margin=F] <calibration.tsv>...
 
-   Prints config-pasteable [model_peak_*] fits, grouped per backend, to stdout. Files from
-   several tuning runs on the same machine can be concatenated or passed together — the fit only
-   tightens with more rows. Linking [ir] makes this a config consumer like any OCANNL
-   executable, so config startup chatter can land on stdout ahead of the report; [--ocannl_*]
-   flags are left to the config machinery (pass [--ocannl_suppress_welcome_message=true
-   --ocannl_log_config_sourcing=false] for clean redirectable output). *)
+   Prints config-pasteable [model_peak_*] fits to stdout. The keys are global, so only a
+   single-backend report is pasteable as-is: pass [--backend] to select one when the data spans
+   several (without it, multi-backend output is printed for inspection with a stderr warning).
+   [--margin] multiplies the printed constants — headroom against candidates faster than any yet
+   measured (fitted peaks are floors, not certified maxima), at the cost of proportionally
+   looser bounds. Files from several tuning runs on the same machine can be concatenated or
+   passed together — the fit only tightens with more rows.
+
+   Linking [ir] makes this a config consumer like any OCANNL executable, so config startup
+   chatter can land on stdout ahead of the report; [--ocannl_*] flags are left to the config
+   machinery (pass [--ocannl_suppress_welcome_message=true --ocannl_log_config_sourcing=false]
+   for clean redirectable output). *)
 
 open Base
 module Cal = Ir.Cost_model.Calibration
 
+let usage () =
+  Stdio.eprintf "usage: fit_envelope [--backend=NAME] [--margin=F] <calibration.tsv>...\n";
+  Stdlib.exit 2
+
 let () =
-  let files =
+  let args =
     List.tl_exn (Array.to_list Stdlib.Sys.argv)
     |> List.filter ~f:(fun a -> not (String.is_prefix a ~prefix:"--ocannl_"))
   in
-  if List.is_empty files then (
-    Stdio.eprintf "usage: fit_envelope <calibration.tsv> [<more.tsv> ...]\n";
-    Stdlib.exit 2);
+  let backend = ref None and margin = ref 1.0 and files = ref [] in
+  List.iter args ~f:(fun a ->
+      match String.chop_prefix a ~prefix:"--backend=" with
+      | Some b -> backend := Some b
+      | None -> (
+          match String.chop_prefix a ~prefix:"--margin=" with
+          | Some m -> (
+              match Float.of_string m with
+              | f when Float.(f > 0.) -> margin := f
+              | _ | (exception _) ->
+                  Stdio.eprintf "fit_envelope: --margin needs a positive float, got %s\n" m;
+                  Stdlib.exit 2)
+          | None ->
+              if String.is_prefix a ~prefix:"--" then usage () else files := a :: !files));
+  let files = List.rev !files in
+  if List.is_empty files then usage ();
   let malformed = ref 0 in
   let rows =
     List.concat_map files ~f:(fun file ->
@@ -39,4 +62,32 @@ let () =
   if List.is_empty rows then (
     Stdio.eprintf "fit_envelope: no calibration rows\n";
     Stdlib.exit 1);
-  List.iter (Cal.fit rows) ~f:(fun f -> Stdio.print_string (Cal.report f))
+  let fits = Cal.fit rows in
+  let fits =
+    match !backend with
+    | None -> fits
+    | Some b -> (
+        match List.filter fits ~f:(fun f -> String.equal f.Cal.fit_backend b) with
+        | [] ->
+            Stdio.eprintf "fit_envelope: no rows for backend %s (backends present: %s)\n" b
+              (String.concat ~sep:", " (List.map fits ~f:(fun f -> f.Cal.fit_backend)));
+            Stdlib.exit 1
+        | selected -> selected)
+  in
+  (* The model_peak_* keys are global, so concatenated per-backend sections repeat them and are
+     not pasteable into one config file. *)
+  if List.length fits > 1 then
+    Stdio.eprintf
+      "fit_envelope: %d backends in the data (%s) — sections below repeat the global \
+       model_peak_* keys; pass --backend=NAME for a config-pasteable single section\n"
+      (List.length fits)
+      (String.concat ~sep:", " (List.map fits ~f:(fun f -> f.Cal.fit_backend)));
+  let with_margin f =
+    let scale = Option.map ~f:(fun (v, w) -> (v *. !margin, w)) in
+    {
+      f with
+      Cal.fit_peak_flops = scale f.Cal.fit_peak_flops;
+      fit_peak_memory_bandwidth = scale f.Cal.fit_peak_memory_bandwidth;
+    }
+  in
+  List.iter fits ~f:(fun f -> Stdio.print_string (Cal.report (with_margin f)))

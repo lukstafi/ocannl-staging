@@ -112,27 +112,42 @@ module Calibration : sig
     fit_violations : int;
         (** Rows whose recorded [model_ms] exceeds [measured_ms]: the envelope in force when
             they were recorded understated this machine's peaks. *)
+    fit_fission_slack : (float * string) option;
+        (** The uniform factor (> 1) applied to both legs so the aggregate sufficient condition
+            holds on every multi-kernel row (see {!fit}), and the row forcing it; [None] when
+            the per-leg maxima already suffice (or a leg is absent). *)
     fit_peak_flops : (float * string) option;
-        (** The implied minimal sound constant and the binding row's [label (digest)]; [None]
-            when no scoreable row has a positive count for the leg. *)
+        (** The fitted constant (fission slack included) and the binding row's
+            [label (digest)]; [None] when no scoreable row has a positive count for the leg. *)
     fit_peak_memory_bandwidth : (float * string) option;
   }
   [@@deriving sexp_of]
 
   val fit : row list -> fit list
   (** Grouped by backend in order of first appearance. The fitted constants are the tightest
-      envelope under which the roofline bound is sound on the given data: per row,
-      [bound <= measured] requires [peak >= counts/measured] on each leg, so each leg's fit is
+      envelope under which the roofline bound respects every scoreable row: per row,
+      [bound <= measured] requires [peak >= counts/measured] on each leg, so each leg starts as
       the maximum achieved [counts/time] over the scoreable rows — where "achieved" is by the
-      model's own upper-bound counts, exactly the direction bound-soundness needs. Overstating a
-      peak only weakens pruning (the bound stays a lower bound); understating one breaks
-      fathoming. Multi-kernel rows aggregate per-kernel counts, so their constraints are
-      necessary but not sufficient (a sum of per-kernel max-of-legs can exceed the aggregate
-      legs); residual violations surface through the continuous agreement check in
-      [Autotune.tune] and prompt a refit. *)
+      model's own upper-bound counts, exactly the direction bound-soundness needs. Multi-kernel
+      rows aggregate per-kernel counts, making those maxima necessary for them but not
+      sufficient ([Autotune]'s bound sums per-kernel max-of-legs, which can approach twice the
+      aggregate legs on a compute-bound + bandwidth-bound mix), so both legs are then raised
+      uniformly by the smallest {!field-fit_fission_slack} enforcing the aggregate sufficient
+      condition [flops/peak_flops + bytes/peak_memory_bandwidth <= time] on every multi-kernel
+      row — after which the recomputed bound respects every row it was fit from. Raising a peak
+      only weakens pruning (the bound stays a lower bound); understating one breaks fathoming.
+
+      Sound on the data, not certified for the machine: fitted peaks are floors a kernel
+      demonstrably reached, and a future candidate can achieve more. Between refits such a
+      candidate's bound can exceed its would-be measured time — caught by the continuous
+      agreement check when it is timed, but under [autotune_keep_fraction < 1] it may be
+      model-pre-filtered before timing, where the check cannot see it.
+      [tools/fit_envelope.exe]'s [--margin] trades pruning strength for headroom against
+      exactly that. *)
 
   val report : fit -> string
   (** Config-pasteable: [model_peak_*=...] lines under [#] comment lines naming the binding rows
-      (config comments must be whole lines). Printed constants carry a ~2e-6 relative bump so
-      that 7-significant-digit truncation cannot land below the implied minimum. *)
+      and any fission slack (config comments must be whole lines). Printed constants carry a
+      ~2e-6 relative bump so that 7-significant-digit truncation cannot land below the implied
+      minimum. *)
 end

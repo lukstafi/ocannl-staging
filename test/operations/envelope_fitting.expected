@@ -18,9 +18,10 @@ model_peak_memory_bandwidth=8.000016e+9
 (scoreable 2, opaque 1, multi-kernel 0, violations 1)
 
 # backend toy: 1 scoreable row (0 opaque excluded, 1 multi-kernel), 0 recorded bound violations
+# fission slack 2.000000 applied to both legs, forced by multi-kernel row: fissioned fused (dddddddd/44444444)
 # compute-leg binding row: fissioned fused (dddddddd/44444444)
-model_peak_flops=5.000010e+8
+model_peak_flops=1.000002e+9
 # memory-leg binding row: fissioned fused (dddddddd/44444444)
-model_peak_memory_bandwidth=4.000008e+10
+model_peak_memory_bandwidth=8.000016e+10
 (scoreable 1, opaque 0, multi-kernel 1, violations 0)
 

@@ -24,7 +24,10 @@ let () =
       (* Opaque row: excluded from the fit (its counts may under-estimate), still counted. *)
       row ~backend:"cc" ~digest:"cccccccc/33333333" ~label:"staged" ~measured_ms:1.0
         ~model_ms:None ~kernels:1 ~flops:1_000_000 ~bytes:1_000_000 ~opaque:true;
-      (* Second backend, multi-kernel aggregate row: fits are grouped per backend. *)
+      (* Second backend, multi-kernel aggregate row: fits are grouped per backend. With both
+         legs binding on this single row, each leg's necessary maximum alone equals the measured
+         time, so the aggregate sufficient condition (flops/pf + bytes/pb <= t) forces fission
+         slack 2 — the recomputed per-kernel-summed bound then respects the row. *)
       row ~backend:"toy" ~digest:"dddddddd/44444444" ~label:"fissioned fused" ~measured_ms:10.0
         ~model_ms:(Some 9.0) ~kernels:3 ~flops:5_000_000 ~bytes:400_000_000 ~opaque:false;
     ]

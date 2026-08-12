@@ -118,14 +118,26 @@ every survivor measurement, so a broken fathom cannot stay silent.
 
 **Envelope fitting (implemented, phase 0).** `Ir.Cost_model.Calibration` owns the calibration
 TSV schema (one writer, `Autotune`; one reader, `tools/fit_envelope.exe`; they share the code)
-and the fitter: per backend, each leg's fitted constant is the tightest sound one — the maximum
+and the fitter: per backend, each leg starts at its tightest necessary constant — the maximum
 achieved `counts/time` over the scoreable (non-opaque, positively timed) rows, "achieved" by
 the model's own upper-bound counts, which is exactly the quantity bound-soundness needs.
-Fitted values are floors the machine demonstrably reached, so they are honest by construction;
-a future kernel that beats them trips the agreement check and the fit tightens. Multi-kernel
-rows aggregate per-kernel counts, so their constraints are necessary but not sufficient (a sum
-of per-kernel max-of-legs can exceed the aggregate legs); residual violations again surface
-through the continuous check. Opaque rows are excluded — the model never scores them.
+Multi-kernel rows aggregate per-kernel counts, so for them those maxima are necessary but not
+sufficient (the bound sums per-kernel max-of-legs, which a compute-bound + bandwidth-bound mix
+pushes toward twice either aggregate leg); the fitter therefore raises both legs uniformly by
+the smallest *fission slack* enforcing the aggregate sufficient condition
+`flops/peak_flops + bytes/peak_bandwidth ≤ time` on every multi-kernel row, after which the
+recomputed bound respects every row it was fit from. Raising peaks is the safe direction —
+the bound stays a lower bound, only pruning weakens. Opaque rows are excluded — the model
+never scores them.
+
+The fit is sound on the data, not certified for the machine: fitted peaks are floors a kernel
+demonstrably reached, and a future candidate can achieve more. When it is *timed*, the
+agreement check catches the violation and the fit tightens; the blind spot is
+`autotune_keep_fraction < 1`, where a mis-bounded candidate can be model-pre-filtered before
+timing — no measurement, nothing for the check to see. That risk is inherent to any envelope
+not certified from above (class constants have it too, in both directions); the mitigations
+are the refit loop, the pre-filter's existing no-coverage exemption, and the fitter's
+`--margin` option, which trades pruning strength for headroom explicitly.
 
 **Envelope resolution order.** Per-machine fitted config values (`model_peak_flops`,
 `model_peak_memory_bandwidth`) beat the backend's class-level advisory constants

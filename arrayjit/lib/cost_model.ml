@@ -208,6 +208,7 @@ module Calibration = struct
     fit_opaque : int;
     fit_multi_kernel : int;
     fit_violations : int;
+    fit_fission_slack : (float * string) option;
     fit_peak_flops : (float * string) option;
     fit_peak_memory_bandwidth : (float * string) option;
   }
@@ -241,6 +242,37 @@ module Calibration = struct
                 | Some (best, _) when Float.(best >= rate) -> acc
                 | _ -> Some (rate, Printf.sprintf "%s (%s)" r.label r.digest))
         in
+        let peak_flops = leg (fun r -> r.flops) in
+        let peak_bandwidth = leg (fun r -> r.bytes) in
+        (* Multi-kernel rows aggregate per-kernel counts, so the per-leg maxima above are
+           necessary for them but not sufficient: [summaries_roofline] sums per-kernel
+           max-of-legs, which can exceed the aggregate legs (a compute-bound + bandwidth-bound
+           kernel mix approaches twice either). The aggregate SUFFICIENT condition is
+           [flops/peak_flops + bytes/peak_bandwidth <= time] (max <= sum per kernel), so both
+           legs are raised uniformly — preserving their ratio — by the smallest slack that
+           enforces it on every multi-kernel row. Raising peaks is the safe direction: the bound
+           stays a lower bound, only pruning weakens. With one leg absent the bound degenerates
+           to the other leg's aggregate, which the necessary maximum already covers. *)
+        let fission_slack =
+          match (peak_flops, peak_bandwidth) with
+          | Some (pf, _), Some (pb, _) ->
+              List.fold scoreable ~init:None ~f:(fun acc r ->
+                  if r.kernels <= 1 then acc
+                  else
+                    let t = r.measured_ms *. 1e-3 in
+                    let sum = (Float.of_int r.flops /. pf) +. (Float.of_int r.bytes /. pb) in
+                    let s = sum /. t in
+                    match acc with
+                    | Some (best, _) when Float.(best >= s) -> acc
+                    | _ when Float.(s <= 1.) -> acc
+                    | _ -> Some (s, Printf.sprintf "%s (%s)" r.label r.digest))
+          | _ -> None
+        in
+        let apply_slack =
+          match fission_slack with
+          | None -> fun p -> p
+          | Some (s, _) -> Option.map ~f:(fun (v, w) -> (v *. s, w))
+        in
         {
           fit_backend = backend;
           fit_rows = List.length scoreable;
@@ -251,8 +283,9 @@ module Calibration = struct
                 match r.model_ms with
                 | Some m -> Float.(m > r.measured_ms)
                 | None -> false);
-          fit_peak_flops = leg (fun r -> r.flops);
-          fit_peak_memory_bandwidth = leg (fun r -> r.bytes);
+          fit_fission_slack = fission_slack;
+          fit_peak_flops = apply_slack peak_flops;
+          fit_peak_memory_bandwidth = apply_slack peak_bandwidth;
         })
 
   let report f =
@@ -263,6 +296,9 @@ module Calibration = struct
       (if f.fit_rows = 1 then "" else "s")
       f.fit_opaque f.fit_multi_kernel f.fit_violations
       (if f.fit_violations = 1 then "" else "s");
+    Option.iter f.fit_fission_slack ~f:(fun (s, witness) ->
+        addf "# fission slack %s applied to both legs, forced by multi-kernel row: %s\n"
+          (Ndarray.concise_float ~prec:6 s) witness);
     let constant ~key ~leg = function
       | None -> addf "# no scoreable row constrains %s\n" key
       | Some (implied, witness) ->
