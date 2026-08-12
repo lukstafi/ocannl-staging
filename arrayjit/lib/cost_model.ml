@@ -153,11 +153,12 @@ let arithmetic_intensity s = Float.of_int s.flops /. Float.of_int (max 1 (total_
 
    Lower bounds where [analyze] gives upper bounds, for bounding every completion of a partial
    placement vector. The duality is exact: every approximation that biases the upper extraction UP
-   flips direction here — guarded ([If]) work floors to zero (guards-never-taken), a node's
-   multiple same-direction accesses take the MAX of the exact images (a union is at least its
-   largest member) instead of the capped sum, non-exact images contribute zero, and opaque code
-   ([Staged_compilation], merge-buffer reads) — the upper contract's one escape hatch — merely
-   loosens a floor without breaking it. [fr_exact] is [false] when any flooring-to-zero occurred:
+   flips direction here — guarded ([If]) work floors to zero (guards-never-taken), [Where] counts
+   its condition plus the cheaper arm (the renderers implement it as a short-circuiting [?:]), a
+   node's multiple same-direction accesses take the MAX of the exact images (a union is at least
+   its largest member) instead of the capped sum, non-exact images contribute zero, and opaque
+   code ([Staged_compilation], merge-buffer reads) — the upper contract's one escape hatch —
+   merely loosens a floor without breaking it. [fr_exact] is [false] when any flooring occurred:
    the floor is then sound but not tight. *)
 
 type floor = { fr_flops : int; fr_bytes : int; fr_exact : bool } [@@deriving sexp_of]
@@ -168,7 +169,118 @@ let access_cells_floor a =
   let cells, approx = access_cells a in
   if approx then 0 else cells
 
-let floor_flops (code : Low_level.t) : int * bool =
+(* The certainty pre-pass: which nodes' reads (or any accesses) are not certain to happen in
+   every completion. Node-granular and therefore conservative — one uncertain read of a node
+   floors that node's whole read contribution to zero, which only loosens the floor.
+
+   - [where_reads]: read inside a [Where] value arm — the renderers short-circuit, so at most one
+     arm's reads execute;
+   - [open_reads]: read by a producer statement of an open-placement node — an inline completion
+     instantiates the producer only at surviving consumer sites and [cleanup_virtual_llc] drops
+     the setter loop, its reads included (an open producer computing a larger domain than its
+     consumers demand makes "recomputation only adds ops" false, so its whole effect attributes
+     to the open placement);
+   - [dead]: any access under a dead loop ([to_ < from_]) — the body never executes. *)
+let floor_uncertainty ~open_placement (code : Low_level.t) =
+  let where_reads = Hashtbl.create (module Tn) in
+  let open_reads = Hashtbl.create (module Tn) in
+  let dead = Hashtbl.create (module Tn) in
+  let mark tbl tn = Hashtbl.set tbl ~key:tn ~data:() in
+  let rec sc_reads ~into (s : Low_level.scalar_t) =
+    match s with
+    | Low_level.Get (tn, _) -> mark into tn
+    | Get_dynamic { tn; dyn_value = v, _; _ } ->
+        mark into tn;
+        sc_reads ~into v
+    | Get_merge_buffer _ | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
+    | Local_scope { body; _ } -> code_reads ~into body
+    | Ternop (_, (a, _), (b, _), (c, _)) ->
+        sc_reads ~into a;
+        sc_reads ~into b;
+        sc_reads ~into c
+    | Binop (_, (a, _), (b, _)) ->
+        sc_reads ~into a;
+        sc_reads ~into b
+    | Unop (_, (a, _)) -> sc_reads ~into a
+  and code_reads ~into (c : Low_level.t) =
+    match c with
+    | Low_level.Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ -> ()
+    | Zero_out tn -> mark into tn
+    | Seq (a, b) ->
+        code_reads ~into a;
+        code_reads ~into b
+    | For_loop { body; _ } -> code_reads ~into body
+    | If { cond = c0, _; body } ->
+        sc_reads ~into c0;
+        code_reads ~into body
+    | Set { tn; llsc; _ } | Set_dynamic { tn; llsc; _ } ->
+        mark into tn;
+        sc_reads ~into llsc;
+        (match c with
+        | Set_dynamic { dyn_value = v, _; _ } -> sc_reads ~into v
+        | _ -> ())
+    | Set_local (_, llsc) -> sc_reads ~into llsc
+    | Set_from_vec { tn; arg = a, _; _ } ->
+        mark into tn;
+        sc_reads ~into a
+    | Tile_mma { fallback; _ } -> code_reads ~into fallback
+  in
+  let rec sc_walk (s : Low_level.scalar_t) =
+    match s with
+    | Low_level.Ternop (Ops.Where, (c0, _), (a1, _), (a2, _)) ->
+        sc_walk c0;
+        (* The arms' reads are conditional; their nested Where structure still walks. *)
+        sc_reads ~into:where_reads a1;
+        sc_reads ~into:where_reads a2;
+        sc_walk a1;
+        sc_walk a2
+    | Ternop (_, (a, _), (b, _), (c, _)) ->
+        sc_walk a;
+        sc_walk b;
+        sc_walk c
+    | Binop (_, (a, _), (b, _)) ->
+        sc_walk a;
+        sc_walk b
+    | Unop (_, (a, _)) -> sc_walk a
+    | Get_dynamic { dyn_value = v, _; _ } -> sc_walk v
+    | Local_scope { body; _ } -> walk body
+    | Get _ | Get_merge_buffer _ | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
+  and walk (c : Low_level.t) =
+    match c with
+    | Low_level.Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _
+    | Zero_out _ ->
+        ()
+    | Seq (a, b) ->
+        walk a;
+        walk b
+    | For_loop { from_; to_; body; _ } ->
+        if to_ < from_ then code_reads ~into:dead body else walk body
+    | If { cond = c0, _; body } ->
+        sc_walk c0;
+        walk body
+    | Set { tn; llsc; _ } ->
+        if open_placement tn then sc_reads ~into:open_reads llsc;
+        sc_walk llsc
+    | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
+        if open_placement tn then (
+          sc_reads ~into:open_reads llsc;
+          sc_reads ~into:open_reads v);
+        sc_walk llsc;
+        sc_walk v
+    | Set_local (_, llsc) -> sc_walk llsc
+    | Set_from_vec { tn; arg = a, _; _ } ->
+        if open_placement tn then sc_reads ~into:open_reads a;
+        sc_walk a
+    | Tile_mma { fallback; _ } -> walk fallback
+  in
+  walk code;
+  let read_uncertain tn =
+    Hashtbl.mem where_reads tn || Hashtbl.mem open_reads tn || Hashtbl.mem dead tn
+  in
+  let any_uncertain tn = Hashtbl.mem dead tn in
+  (read_uncertain, any_uncertain)
+
+let floor_flops ~open_placement (code : Low_level.t) : int * bool =
   let exact = ref true in
   let rec go ~scale ~env (c : Low_level.t) : int =
     match c with
@@ -180,13 +292,15 @@ let floor_flops (code : Low_level.t) : int * bool =
     | For_loop { index; from_; to_; body; _ } ->
         let extent = max 0 (to_ - from_ + 1) in
         go ~scale:(scale * extent) ~env:((index, extent) :: env) body
-    | Set { llsc; _ } -> scale * sc llsc
-    | Set_dynamic { dyn_value = dv, _; llsc; _ } -> scale * (sc dv + sc llsc)
-    | Set_from_vec { length; arg = a, _; _ } -> scale * (length + sc a)
+    | Set { tn; llsc; _ } -> if open_placement tn then set_open () else scale * sc llsc
+    | Set_dynamic { tn; dyn_value = dv, _; llsc; _ } ->
+        if open_placement tn then set_open () else scale * (sc dv + sc llsc)
+    | Set_from_vec { tn; length; arg = a, _; _ } ->
+        if open_placement tn then set_open () else scale * (length + sc a)
     | Set_local (_, llsc) -> scale * sc llsc
     | If { cond = cnd, _; body = _ } ->
-        (* Guards-never-taken: the body's work is not certain, only the condition's is — the exact
-           dual of the upper walk's guards-taken. *)
+        (* Guards-never-taken: the body\'s work is not certain, only the condition\'s is — the
+           exact dual of the upper walk\'s guards-taken. *)
         exact := false;
         scale * sc cnd
     | Tile_mma { m; n; k; lane; _ } -> (
@@ -197,6 +311,12 @@ let floor_flops (code : Low_level.t) : int * bool =
         | None ->
             exact := false;
             0)
+  and set_open () =
+    (* An open producer\'s work attributes to the open placement: an inline completion computes
+       it only at surviving consumer sites (possibly fewer cells than the setter loop covers), a
+       materialize completion as written. Zero is the certain floor across both. *)
+    exact := false;
+    0
   and sc (s : Low_level.scalar_t) : int =
     match s with
     | Low_level.Local_scope { body; _ } -> go ~scale:1 ~env:[] body
@@ -205,8 +325,12 @@ let floor_flops (code : Low_level.t) : int * bool =
         exact := false;
         0
     | Get_dynamic { dyn_value = dv, _; _ } -> sc dv
+    | Ternop (Ops.Where, a1, a2, a3) ->
+        (* Short-circuiting [?:] in every renderer: the condition and exactly one arm execute. *)
+        let c1 = arg a2 and c2 = arg a3 in
+        if c1 <> c2 then exact := false;
+        1 + arg a1 + Int.min c1 c2
     | Ternop ((Ops.FMA | Ops.Mul3), a1, a2, a3) -> 2 + arg a1 + arg a2 + arg a3
-    | Ternop (Ops.Where, a1, a2, a3) -> 1 + arg a1 + arg a2 + arg a3
     | Binop ((Ops.Arg1 | Ops.Arg2), a1, a2) -> arg a1 + arg a2
     | Binop (_, a1, a2) -> 1 + arg a1 + arg a2
     | Unop (Ops.Identity, a1) -> arg a1
@@ -215,24 +339,31 @@ let floor_flops (code : Low_level.t) : int * bool =
   let flops = go ~scale:1 ~env:[] code in
   (flops, !exact)
 
+(* An enclosing dead loop makes an access never execute; the per-access filter complements the
+   node-granular [dead] set (which covers whole-node fallbacks whose loop context is coarser). *)
+let under_dead_loop (a : Tn.t Affine.access) =
+  List.exists a.a_loops ~f:(fun (_, (lo, hi)) -> hi < lo)
+
 let completion_floor ?(open_placement = fun _ -> false) (code : Low_level.t) : floor =
-  let flops, flops_exact = floor_flops code in
+  let flops, flops_exact = floor_flops ~open_placement code in
+  let read_uncertain, any_uncertain = floor_uncertainty ~open_placement code in
   (* Per node and direction, the certain traffic is the largest exact single-access image (a
      union is at least its largest member). Nodes with an open placement level contribute zero:
      their fully-inlined completion moves no bytes for them, and the floor quantifies over every
      completion. Committing such a node to Materialize adds back {!node_floor_bytes} — the
-     monotone refinement delta. Guarded accesses are not certain and floor to zero. *)
+     monotone refinement delta. Reads that are not certain in every completion (Where arms, open
+     producers\' operands, dead code) floor to zero, as do guarded and non-exact accesses. *)
   let tbl = Hashtbl.create (module Tn) in
   let inexact = ref (not flops_exact) in
   List.iter (Low_level.affine_accesses code) ~f:(fun a ->
-      if open_placement a.Affine.a_tn then ()
+      if open_placement a.Affine.a_tn || under_dead_loop a || any_uncertain a.a_tn then
+        inexact := true
       else begin
         let cells = access_cells_floor a in
+        let cells = if (not a.a_write) && read_uncertain a.a_tn then 0 else cells in
         if cells = 0 then inexact := true;
         let reads, writes = Hashtbl.find tbl a.a_tn |> Option.value ~default:(0, 0) in
-        let next =
-          if a.a_write then (reads, max writes cells) else (max reads cells, writes)
-        in
+        let next = if a.a_write then (reads, max writes cells) else (max reads cells, writes) in
         Hashtbl.set tbl ~key:a.a_tn ~data:next
       end);
   let bytes =
@@ -242,15 +373,19 @@ let completion_floor ?(open_placement = fun _ -> false) (code : Low_level.t) : f
   in
   { fr_flops = flops; fr_bytes = bytes; fr_exact = not !inexact }
 
-let node_floor_bytes (code : Low_level.t) (tn : Tn.t) : int =
-  let reads, writes =
-    List.fold (Low_level.affine_accesses code) ~init:(0, 0) ~f:(fun (reads, writes) a ->
-        if not (Tn.equal a.Affine.a_tn tn) then (reads, writes)
-        else
-          let cells = access_cells_floor a in
-          if a.a_write then (reads, max writes cells) else (max reads cells, writes))
-  in
-  (reads + writes) * Ops.prec_in_bytes (Lazy.force tn.Tn.storage_prec)
+let node_floor_bytes ?(open_placement = fun _ -> false) (code : Low_level.t) (tn : Tn.t) : int =
+  let read_uncertain, any_uncertain = floor_uncertainty ~open_placement code in
+  if any_uncertain tn then 0
+  else
+    let reads, writes =
+      List.fold (Low_level.affine_accesses code) ~init:(0, 0) ~f:(fun (reads, writes) a ->
+          if (not (Tn.equal a.Affine.a_tn tn)) || under_dead_loop a then (reads, writes)
+          else
+            let cells = access_cells_floor a in
+            let cells = if (not a.a_write) && read_uncertain tn then 0 else cells in
+            if a.a_write then (reads, max writes cells) else (max reads cells, writes))
+    in
+    (reads + writes) * Ops.prec_in_bytes (Lazy.force tn.Tn.storage_prec)
 
 let footprint_approximate s = List.exists s.per_node ~f:(fun (_, fp) -> fp.fp_approx)
 let approximate s = s.flops_approx || footprint_approximate s

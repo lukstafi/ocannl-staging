@@ -162,4 +162,67 @@ let () =
          })
   in
   let _ = show "dynamic gather" gather in
+  (* Where short-circuits (?: in every renderer): K[i] = where(E>0, E*2, E+M[i]+1). The floor
+     counts cond + select + the cheaper arm (1+1+1 = 3/iter vs the upper's both-arms 5/iter),
+     and M — read only inside an arm — floors its read to zero; E is also read in an arm, so its
+     read floors too (node-granular certainty, conservative). *)
+  let kq = fresh_tn "K" [| 4 |] in
+  let e2 = fresh_tn "E2" [| 4 |] in
+  let m = fresh_tn "M" [| 4 |] in
+  let where_case =
+    for_over i
+      (LL.Set
+         {
+           tn = kq;
+           idcs = [| it i |];
+           llsc =
+             LL.Ternop
+               ( Ops.Where,
+                 (LL.Binop (Ops.Cmplt, (LL.Constant 0., sp), (get e2 [| it i |], sp)), sp),
+                 (LL.Binop (Ops.Mul, (get e2 [| it i |], sp), (LL.Constant 2., sp)), sp),
+                 ( LL.Binop
+                     ( Ops.Add,
+                       (get e2 [| it i |], sp),
+                       (LL.Binop (Ops.Add, (get m [| it i |], sp), (LL.Constant 1., sp)), sp) ),
+                   sp ) );
+           debug = "";
+         })
+  in
+  let _ = show "where short-circuit" where_case in
+  (* An open producer computing a larger domain than consumed: P2[0..7] = A3[0..7] * 2, then
+     C3[0] = P2[0]. The inline completion instantiates one multiply and one A3 read and drops
+     the setter loop, so with P2 open the floor keeps only C3's certain write — the producer's
+     ops AND its A3 reads attribute to the open placement. *)
+  let p2 = fresh_tn "P2" [| 8 |] in
+  let a3 = fresh_tn "A3" [| 8 |] in
+  let c3 = fresh_tn "C3" [| 1 |] in
+  let over_produce =
+    LL.Seq
+      ( for_over ~extent:8 j
+          (LL.Set
+             {
+               tn = p2;
+               idcs = [| it j |];
+               llsc = LL.Binop (Ops.Mul, (get a3 [| it j |], sp), (LL.Constant 2., sp));
+               debug = "";
+             }),
+        LL.Set
+          {
+            tn = c3;
+            idcs = [| Idx.Fixed_idx 0 |];
+            llsc = get p2 [| Idx.Fixed_idx 0 |];
+            debug = "";
+          } )
+  in
+  let _ = show "over-producing closed" over_produce in
+  let _ =
+    show "over-producing, P2's placement open" ~open_placement:(fun tn -> Tn.equal tn p2)
+      over_produce
+  in
+  (* A dead loop's body never executes: its whole-node access must not reach the floor. *)
+  let d2 = fresh_tn "D2" [| 4 |] in
+  let dead =
+    LL.For_loop { index = k; from_ = 0; to_ = -1; body = LL.Zero_out d2; axis = LL.Serial }
+  in
+  let _ = show "dead loop" dead in
   ()

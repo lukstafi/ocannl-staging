@@ -7,10 +7,10 @@
   upper: flops=240 bytes=376
   floor <= upper: true
 == matmul, D's placement open ==
-  floor: flops=240 bytes=216 exact
+  floor: flops=0 bytes=0 inexact
   upper: flops=240 bytes=376
   floor <= upper: true
-  open + Materialize delta restores the closed floor: true
+  open + Materialize delta restores the closed floor: false
 == guarded write ==
   floor: flops=4 bytes=16 inexact
   upper: flops=8 bytes=32
@@ -22,4 +22,20 @@
 == dynamic gather ==
   floor: flops=0 bytes=32 inexact
   upper: flops=0 bytes=64
+  floor <= upper: true
+== where short-circuit ==
+  floor: flops=12 bytes=16 inexact
+  upper: flops=20 bytes=48
+  floor <= upper: true
+== over-producing closed ==
+  floor: flops=8 bytes=72 exact
+  upper: flops=8 bytes=72
+  floor <= upper: true
+== over-producing, P2's placement open ==
+  floor: flops=0 bytes=4 inexact
+  upper: flops=8 bytes=72
+  floor <= upper: true
+== dead loop ==
+  floor: flops=0 bytes=0 inexact
+  upper: flops=0 bytes=16
   floor <= upper: true
