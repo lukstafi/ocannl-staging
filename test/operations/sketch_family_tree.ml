@@ -320,4 +320,23 @@ let () =
   show_run "search without bounds" (Sspace.search ~incumbent:5.5 ~score syn);
   show_run "ties: first best wins"
     (Sspace.search ~score
-       (choice "tie" [ ("t1", leafv "t1" 2.); ("t2", leafv "t2" 2.) ]))
+       (choice "tie" [ ("t1", leafv "t1" 2.); ("t2", leafv "t2" 2.) ]));
+  (* Cost-fathoming vs verdict-fathoming: a bounded Child subtree CONTAINING an Unknown below is
+     correctly fathomed by cost — bound soundness quantifies over every completion independently
+     of how verdicts resolve, so a subtree that cannot beat the incumbent even where legal is
+     pruned. Only a directly encountered Unknown skips the bound (its dominant unknown is
+     legality, where a bound over possibly-nonexistent completions is vacuous). *)
+  let nested =
+    choice "top"
+      [
+        ("good", leafv "good" 3.);
+        ( "deep",
+          Sspace.Child
+            (lazy
+              (choice "dsub"
+                 [ ("du", Sspace.Unknown ("compile-settled", lazy (Sspace.Leaf ("du", 1.)))) ]))
+        );
+      ]
+  in
+  let bound = function Sspace.Choice { level = "dsub"; _ } -> Some 5. | _ -> None in
+  show_run "cost bound fathoms above a nested Unknown" (Sspace.search ~bound ~score nested)

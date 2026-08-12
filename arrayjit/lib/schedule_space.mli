@@ -91,7 +91,10 @@ val unknowns : 'a tree -> ((string * string) list * string) list
 type search_stats = {
   st_expanded : int;  (** Choice nodes entered. *)
   st_scored : int;  (** Leaves the score hook priced. *)
-  st_unscored : int;  (** Leaves without coverage ([score] returned [None]) — never winners. *)
+  st_unscored : int;
+      (** Leaves the score hook declined to price ([None]) — never winners. The hook's [None]
+          covers both genuine no-coverage and caller-side rejections; a caller wanting the split
+          tracks it inside the hook (as [Autotune.model_default] does). *)
   st_fathomed : int;  (** Subtrees pruned by the bound against the running threshold. *)
   st_refuted : int;  (** [Refuted] children encountered (never entered). *)
   st_excluded : int;  (** [Excluded] children encountered (never entered; a driver may lift). *)
@@ -120,10 +123,17 @@ val search :
     [bound] is the optimistic (lower-bound) cost of a subtree's completions: a subtree whose
     bound is at or above the threshold is fathomed — equality fathoms because displacement needs
     strict improvement. Soundness is the caller's contract ({!Cost_model.completion_floor}'s):
-    a bound that can exceed a completion's true cost prunes true winners. [Unknown] children are
-    {e never} fathomed — an unknown verdict must reach scoring — and [Refuted]/[Excluded]
-    children are never entered (they are the construction-time fathoms, counted separately).
-    Unscored leaves ([score] = [None], the no-coverage case) are counted and never win: in the
+    a bound that can exceed a completion's true cost prunes true winners.
+
+    Verdict-fathoming and cost-fathoming are distinct relations. The [Op_unknown]-never-fathoms
+    contract is about {e verdicts}: an [Unknown] child is never treated as [Refuted], so a
+    directly encountered one is entered without consulting the bound (legality uncertainty is
+    its dominant unknown, and a sound bound over possibly-nonexistent completions is vacuous
+    there). A {e cost} bound, by contrast, may fathom any [Child] subtree — nested [Unknown]s
+    included — because its soundness quantifies over every completion independently of how
+    verdicts resolve: a subtree that cannot beat the incumbent even where legal is correctly
+    pruned. [Refuted]/[Excluded] children are never entered (the construction-time fathoms,
+    counted separately). Unscored leaves ([score] = [None]) are counted and never win: in the
     untuned regime a pick must have a model price, and the measured regime handles no-coverage
     candidates outside the bound-driven walk. *)
 

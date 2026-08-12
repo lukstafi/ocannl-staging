@@ -4101,15 +4101,19 @@ let model_default ?report ctx comp bindings =
               CM.roofline_seconds ?peak_flops ?peak_memory_bandwidth ~flops:f.CM.fr_flops
                 ~bytes:f.CM.fr_bytes ()
             in
+            (* Snapshot the caller-side counters so the log can split the driver's unscored
+               leaves into compiler rejections vs genuine no-coverage — st_unscored alone would
+               misclassify rejections as cost-model gaps in the phase-6 ledger. *)
+            let r0 = !n_rejected and k0 = !n_skipped in
             let best, stats =
               Sspace.search ~bound:(fun _sub -> fb) ~incumbent ~score:(score_sketch base_opt)
                 tree
             in
             logf
-              "model_default: family search: %d expanded, %d scored, %d unscored, %d fathomed \
-               (bound %s), %d refuted, %d excluded"
+              "model_default: family search: %d expanded, %d scored, %d unscored (%d rejected, \
+               %d without coverage), %d fathomed (bound %s), %d refuted, %d excluded"
               stats.Sspace.st_expanded stats.Sspace.st_scored stats.Sspace.st_unscored
-              stats.Sspace.st_fathomed
+              (!n_rejected - r0) (!n_skipped - k0) stats.Sspace.st_fathomed
               (match fb with Some b -> Printf.sprintf "%.6f ms" (b *. 1e3) | None -> "n/a")
               stats.Sspace.st_refuted stats.Sspace.st_excluded;
             Some best
