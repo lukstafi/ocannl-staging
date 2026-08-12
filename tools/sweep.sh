@@ -63,10 +63,23 @@ UNITS=(
 # coverage it did not perform is worse than one that does not run.
 die() { echo "sweep: $*" >&2; exit 2; }
 
+# The scope columns are load-bearing rather than bookkeeping. The consumer ages
+# the most recent `pass` per backend, so without them a narrow smoke run --
+# `--target test/einsum` while debugging this script, say -- refreshes that age
+# exactly as a full suite would, certifying coverage that never ran. `slow` is
+# separate for the same reason: a weekday sweep must not make Sunday's slow
+# coverage look current.
+header_line() { printf 'when\tmachine\tbackend\tref\toutcome\tseconds\ttarget\tslow\tlog\n'; }
+
 mkdir -p "$LOGS" || die "cannot create $LOGS"
-[ -f "$HISTORY" ] ||
-  printf 'when\tmachine\tbackend\tref\toutcome\tseconds\tlog\n' >"$HISTORY" ||
-  die "cannot write $HISTORY"
+if [ -f "$HISTORY" ]; then
+  # A file written by an older schema would be silently mis-columned by the
+  # consumer, which is worse than refusing to append to it.
+  [ "$(head -1 "$HISTORY")" = "$(header_line)" ] ||
+    die "$HISTORY has a different schema; archive it and let this run start a new one"
+else
+  header_line >"$HISTORY" || die "cannot write $HISTORY"
+fi
 # Probe once up front, so a read-only or full state filesystem is reported here
 # with a clear message rather than as a run whose rows silently went nowhere.
 printf '' >>"$HISTORY" || die "cannot append to $HISTORY"
@@ -114,7 +127,15 @@ fi
 printf '%s\n' "$$" >"$LOCK/pid"
 # Only after the lock is ours: an earlier trap would delete the holder's lock on
 # the refusal path above.
-trap 'rm -rf "$LOCK"' EXIT INT TERM
+#
+# The signal handlers terminate rather than sharing the EXIT body. Bash runs a
+# trap and then RESUMES after the interrupted command, so one handler across
+# EXIT INT TERM would release the lock while this sweep kept running dune --
+# letting a second sweep reset the worktree underneath it, and letting this
+# process's later EXIT trap delete that second sweep's lock in turn.
+trap 'rm -rf "$LOCK"' EXIT
+trap 'rm -rf "$LOCK"; exit 130' INT
+trap 'rm -rf "$LOCK"; exit 143' TERM
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 # Resolve the ref to a commit ONCE, here, and pin every machine to that commit.
@@ -226,8 +247,8 @@ prep_cmd() {
 # ran. Better to abort mid-sweep, loudly, than to hand the consumer a partial
 # history it will read as coverage.
 record() {
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$stamp" "$1" "$2" "$run_sha" "$3" "$4" "${5:--}" >>"$HISTORY" ||
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$stamp" "$1" "$2" "$run_sha" "$3" "$4" "${TARGET:-<all>}" "$SLOW" "${5:--}" >>"$HISTORY" ||
     die "cannot record $1/$2 outcome in $HISTORY"
 }
 
