@@ -2276,7 +2276,7 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
       sk_depth = 1;
     }
   in
-  let blocktile =
+  let blocktile () =
     if is_gpu then
       choice "geometry"
         (List.filter_map
@@ -2322,7 +2322,7 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
          else []))
     else choice "geometry" []
   in
-  let mma =
+  let mma () =
     match (is_gpu, limits.Ir.Backend_intf.mma) with
     | true, Some ({ Ir.Backend_intf.mma_simd_width = w; _ } as mma) -> (
         match
@@ -2432,7 +2432,7 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
         let tb_in_place = Option.value site.m_tb ~default:false in
         if not regtile_static_ok then choice "geometry" []
         else
-          let whole =
+          let whole () =
             choice "row-block"
               (List.filter_map [ 0; 64; 16 ] ~f:(fun bm ->
                    if
@@ -2511,7 +2511,7 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
              per-row-block A~ tile and sharing the read-only B~ panel
              ([C_syntax.parallel_grid_safe]) — is a measured choice against the all-Serial and
              hoisted-only Grid shapes. *)
-          let packed =
+          let packed () =
             choice "packing-shape"
               ((("serial", lazy (geoms ~f:(fun p _ -> Some p)))
                ::
@@ -2570,10 +2570,10 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                   );
                 ])
           in
-          choice "tensorized-form" [ ("whole-triple", lazy whole); ("packed", lazy packed) ]
+          choice "tensorized-form" [ ("whole-triple", lazy (whole ())); ("packed", lazy (packed ())) ]
     | _ -> choice "geometry" []
   in
-  choice "pipeline" [ ("blocktile", lazy blocktile); ("tensorized", lazy mma) ]
+  choice "pipeline" [ ("blocktile", lazy (blocktile ())); ("tensorized", lazy (mma ())) ]
 
 let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) site :
     sketch_params list =
