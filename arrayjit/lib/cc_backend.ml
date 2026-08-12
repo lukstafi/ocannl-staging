@@ -455,9 +455,16 @@ let pool_restriction =
      let openmp =
        match parallel_grid_syntax_setting () with `Openmp -> true | `Dispatch | `None -> false
      in
+     let effective = effective_cpu_count () in
+     let affinity_mask = current_affinity_mask () in
      let decision =
-       decide_pool_restriction ~openmp ~setting ~classes:(core_classes ())
-         ~hypervisor:(hypervisor_present ()) ~effective:(effective_cpu_count ())
+       (* The class and hypervisor probes only matter where a restriction is possible at all;
+          skip their syscalls when the outcome is structurally "keep". *)
+       if (not openmp) || Poly.equal setting `All then
+         unrestricted_decision ~effective ~affinity_mask
+       else
+         decide_pool_restriction ~openmp ~setting ~classes:(core_classes ())
+           ~hypervisor:(hypervisor_present ()) ~effective ~affinity_mask
      in
      match decision.pool_restrict with
      | None -> decision
@@ -467,12 +474,8 @@ let pool_restriction =
          | Error msg ->
              (* Degrade to the unrestricted pool; failing to pin must not fail the run. *)
              Stdlib.Printf.eprintf "OCANNL cc backend: cc_pool_core_class not applied: %s\n%!" msg;
-             let effective = effective_cpu_count () in
-             {
-               pool_restrict = None;
-               pool_width = effective;
-               pool_tag = "w" ^ Int.to_string effective;
-             }))
+             unrestricted_decision ~effective:(effective_cpu_count ())
+               ~affinity_mask:(current_affinity_mask ())))
 
 let effective_pool_width () = (Lazy.force pool_restriction).Utils.Cpu_topology.pool_width
 let pool_tag () = (Lazy.force pool_restriction).Utils.Cpu_topology.pool_tag
@@ -509,10 +512,11 @@ let get_global_run_id =
 let%track7_sexp c_compile_and_load ~f_path =
   (* The pool restriction (gh-ocannl-530) must be in force before the first [-fopenmp] kernel is
      dlopened, not merely before its first parallel region: libgomp computes its default team size
-     from the process affinity mask in its ELF/PE constructor, which runs at dlopen. *)
-  (match parallel_grid_syntax_setting () with
-  | `Openmp -> ignore (Lazy.force pool_restriction : Utils.Cpu_topology.pool_decision)
-  | `Dispatch | `None -> ());
+     from the affinity mask in its ELF/PE constructor, which runs at dlopen. Forced
+     unconditionally — the decision itself no-ops under [`Dispatch]/[`None], and re-reading the
+     syntax setting here would re-scan argv per kernel compile just to guard an already-memoized
+     force. *)
+  ignore (Lazy.force pool_restriction : Utils.Cpu_topology.pool_decision);
   let base_name : string = Stdlib.Filename.chop_extension f_path in
   (* There can be only one library with a given name, the object gets cached. Moreover, [Dl.dlclose]
      is not required to unload the library, although ideally it should. *)

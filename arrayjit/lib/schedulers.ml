@@ -199,15 +199,24 @@ module Multidev (Backend : For_add_scheduler) :
     Domain.join r.domain
 
   (* The device count is fixed at first use: [multidev_num_devices] if configured positive,
-     otherwise the domain count recommended for this machine. Worker domains spin up lazily, one per
-     device ordinal, on first [get_device] -- runs that never use multidev_cc pay nothing. *)
+     otherwise the effective pool width. Worker domains spin up lazily, one per device ordinal, on
+     first [get_device] -- runs that never use multidev_cc pay nothing.
+
+     Forcing the pool policy here, before any [Domain.spawn], is load-bearing on Linux:
+     [sched_setaffinity(0)] restricts the calling thread and threads spawned afterwards, so a
+     worker domain created before the restriction would keep the full-machine mask and its OpenMP
+     teams would run on the mixed pool the policy exists to avoid. It also makes the device count
+     affinity-respecting (gh-ocannl-530: [Domain.recommended_domain_count] is affinity-blind on
+     Windows), so a restricted or pinned run does not oversubscribe its CPU subset with worker
+     domains. *)
   let num_devices =
     let n =
       lazy
-        (let configured =
+        (let policy_width = Cc_backend.effective_pool_width () in
+         let configured =
            Int.of_string @@ Utils.get_global_arg ~default:"0" ~arg_name:"multidev_num_devices"
          in
-         if configured > 0 then configured else Domain.recommended_domain_count ())
+         if configured > 0 then configured else policy_width)
     in
     fun () -> Lazy.force n
 

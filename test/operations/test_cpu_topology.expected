@@ -33,14 +33,17 @@ with cpu 64 -> ()
 rog native, auto                           -> restrict=0xc03c03 width=8 tag=w8P
 rog native, performance                    -> restrict=0xc03c03 width=8 tag=w8P
 rog native, efficiency                     -> restrict=0x3fc3fc width=16 tag=w16E
+three classes, efficiency                  -> restrict=0xff00 width=8 tag=w8E
 rog native, all                            -> restrict=no width=24 tag=w24
 rog under WSL2 (fabricated topology), auto -> restrict=no width=24 tag=w24
 hypervisor unknown, auto                   -> restrict=no width=24 tag=w24
+hypervisor unknown, explicit performance   -> restrict=0xc03c03 width=8 tag=w8P
 libdispatch pool, auto                     -> restrict=no width=24 tag=w24
 uniform machine, auto                      -> restrict=no width=16 tag=w16
 classes without masks, auto                -> restrict=no width=16 tag=w16
 no class info, auto                        -> restrict=no width=8 tag=w8
-externally pinned, auto                    -> restrict=no width=8 tag=w8
+externally pinned to 8P, auto              -> restrict=no width=8 tag=w8xc03c03
+externally pinned to 8E, auto              -> restrict=no width=8 tag=w8x3fc
 externally pinned, performance             -> restrict=0xc03c03 width=8 tag=w8P
 
 == live probe invariants ==

@@ -54,8 +54,13 @@ New config key `cc_pool_core_class = auto | all | performance | efficiency` (def
   externally pinned below the full machine (an external mask is the user's decision — respect
   it). Otherwise no-op.
 - `all`: never restrict (pre-gh-530 behavior).
-- `performance` / `efficiency`: force that class on a hybrid native topology; no-op (the probe
-  cannot see through virtualization, and libdispatch owns its own pool) otherwise.
+- `performance` / `efficiency`: force that class on a hybrid topology, overriding an external
+  pinning and skipping the hypervisor gate (an explicit setting is the user's judgment — this
+  also keeps big.LITTLE ARM Linux forceable, where hypervisor detection is `Unknown`); no-op
+  when there is no restrictable class structure or the pool is libdispatch. `efficiency` picks
+  the class *just below* the performance class, not the slowest: on three-class parts
+  (P / E / LP-E) the low-power island is a near-serial pool nobody means by "efficiency
+  cores".
 
 The performance class is chosen over efficiency for `auto` because on the measured machine it
 had slightly better tuned absolute times (768.71 vs 793.12 ms on `cifar_conv`), a faster
@@ -76,10 +81,18 @@ size in its ELF/PE constructor, i.e. at `dlopen` of the first kernel linked with
 not at the first parallel region. The restriction must therefore be applied before the first
 `c_compile_and_load` dlopens anything, which is where the lazy is forced.
 
-Affinity is process-wide: OCaml domains, the Multidev worker domains, and child processes
-(candidate compiles during a search) inherit it. That matches how every gh-530 arm ran.
-Machines with more than 64 logical CPUs in one class/group are out of scope for v1 (the mask is
-64-bit, Windows processor groups are not crossed); the policy no-ops there.
+Scope of the affinity call differs by OS, and the difference is load-bearing: Windows
+`SetProcessAffinityMask` restricts the whole process including already-running threads, while
+Linux `sched_setaffinity(0)` restricts the *calling thread* and whatever it spawns afterwards.
+The Sync scheduler runs kernels on the calling thread, so the pre-dlopen force suffices there;
+Multidev forces the policy before spawning its worker domains (which it also sizes by the
+effective pool width, keeping a restricted or pinned run from oversubscribing its CPU subset).
+Child processes (candidate compiles during a search) inherit on both platforms — that matches
+how every gh-530 arm ran. The restriction is process-scoped in effect: a mixed-backend program
+that wants full-width host threads alongside occasional cc kernels should set
+`cc_pool_core_class=all`. Machines with more than 64 logical CPUs in one class/group are out of
+scope for v1 (the mask is 64-bit, Windows processor groups are not crossed); the policy no-ops
+there.
 
 ### Topology probe
 
@@ -124,10 +137,13 @@ width reported here.
    cross-arm replay: the P-only crown is worse than materialize-all on the full machine), so the
    pool must enter the disk-cache key the way the numerics policy already does.
    `hardware_limits` gains `worker_pool_tag : string option`; the CPU backends fill it with a
-   compact signature (`w8P`, `w24`, ...), GPU backends leave it `None` (their keys do not
-   change). `Schedule_cache.cache_key` appends it when present. Flipping the policy, or running
-   under a different external pinning, then re-tunes instead of replaying a crown measured on a
-   different pool.
+   compact signature, GPU backends leave it `None` (their keys do not change).
+   `Schedule_cache.cache_key` appends it when present. The tag grammar: `w8P`/`w16E` for a
+   policy-restricted class; `w24` for the unrestricted full machine; `w8xc03c03` for an
+   externally pinned pool, carrying the mask itself — two same-width pinnings over different
+   cores (8 P-cores vs 8 E-cores) are different pools whose crowns must not replay onto each
+   other. Flipping the policy, or running under a different pinning, then re-tunes instead of
+   replaying a crown measured on a different pool.
 
 ## Alternatives considered
 

@@ -62,25 +62,34 @@ let () =
     (sexp_str
        ([%sexp_of: CT.core_class list] (CT.classes_of_ranked_cpu_lists [ (1, [ 0 ]); (0, [ 64 ]) ])));
   printf "\n== decide_pool_restriction ==\n";
-  let show ~openmp ~setting ~classes ~hypervisor ~effective label =
-    let d = CT.decide_pool_restriction ~openmp ~setting ~classes ~hypervisor ~effective in
+  let show ?affinity_mask ~openmp ~setting ~classes ~hypervisor ~effective label =
+    let d =
+      CT.decide_pool_restriction ~openmp ~setting ~classes ~hypervisor ~effective ~affinity_mask
+    in
     printf "%-42s -> restrict=%s width=%d tag=%s\n" label
       (Option.value_map d.CT.pool_restrict ~default:"no" ~f:(fun c ->
            Printf.sprintf "0x%Lx" c.CT.mask))
       d.CT.pool_width d.CT.pool_tag
   in
+  (* Meteor-Lake-style three classes: P / E / low-power island. `Efficiency must pick the middle
+     class, not the near-serial LP-E island. *)
+  let three_classes = CT.parse_classes_str "2:8:ff;1:8:ff00;0:2:30000" in
   show ~openmp:true ~setting:`Auto ~classes:rog_classes ~hypervisor:`No ~effective:24
     "rog native, auto";
   show ~openmp:true ~setting:`Performance ~classes:rog_classes ~hypervisor:`No ~effective:24
     "rog native, performance";
   show ~openmp:true ~setting:`Efficiency ~classes:rog_classes ~hypervisor:`No ~effective:24
     "rog native, efficiency";
+  show ~openmp:true ~setting:`Efficiency ~classes:three_classes ~hypervisor:`No ~effective:18
+    "three classes, efficiency";
   show ~openmp:true ~setting:`All ~classes:rog_classes ~hypervisor:`No ~effective:24
     "rog native, all";
   show ~openmp:true ~setting:`Auto ~classes:rog_classes ~hypervisor:`Yes ~effective:24
     "rog under WSL2 (fabricated topology), auto";
   show ~openmp:true ~setting:`Auto ~classes:rog_classes ~hypervisor:`Unknown ~effective:24
     "hypervisor unknown, auto";
+  show ~openmp:true ~setting:`Performance ~classes:rog_classes ~hypervisor:`Unknown ~effective:24
+    "hypervisor unknown, explicit performance";
   show ~openmp:false ~setting:`Auto ~classes:rog_classes ~hypervisor:`No ~effective:24
     "libdispatch pool, auto";
   show ~openmp:true ~setting:`Auto ~classes:uniform_classes ~hypervisor:`No ~effective:16
@@ -90,19 +99,17 @@ let () =
   show ~openmp:true ~setting:`Auto ~classes:[] ~hypervisor:`No ~effective:8
     "no class info, auto";
   show ~openmp:true ~setting:`Auto ~classes:rog_classes ~hypervisor:`No ~effective:8
-    "externally pinned, auto";
+    ~affinity_mask:0xC03C03L "externally pinned to 8P, auto";
+  show ~openmp:true ~setting:`Auto ~classes:rog_classes ~hypervisor:`No ~effective:8
+    ~affinity_mask:0x3FCL "externally pinned to 8E, auto";
   show ~openmp:true ~setting:`Performance ~classes:rog_classes ~hypervisor:`No ~effective:8
-    "externally pinned, performance";
+    ~affinity_mask:0x3FCL "externally pinned, performance";
   printf "\n== live probe invariants ==\n";
   let classes = CT.core_classes () in
   let effective = CT.effective_cpu_count () in
   printf "effective_cpu_count >= 1: %b\n" (effective >= 1);
-  let rec strictly_decreasing = function
-    | a :: (b :: _ as rest) -> a.CT.perf_rank > b.CT.perf_rank && strictly_decreasing rest
-    | _ -> true
-  in
   printf "classes well-formed: %b\n"
-    (strictly_decreasing classes
+    (List.is_sorted_strictly classes ~compare:(fun a b -> Int.compare b.CT.perf_rank a.CT.perf_rank)
     && List.for_all classes ~f:(fun c -> c.CT.count > 0)
     && List.for_all classes ~f:(fun c ->
            Int64.(c.CT.mask = 0L)

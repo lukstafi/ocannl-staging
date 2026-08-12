@@ -6,6 +6,7 @@
 #include <caml/alloc.h>
 #include <caml/memory.h>
 #include <caml/mlvalues.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,6 +36,17 @@ CAMLprim value ocannl_flush_c_streams(value unit) {
    Cc_backend. Each degrades to an "unknown" answer rather than failing: the callers treat
    unknown conservatively (no restriction). */
 
+#if defined(_WIN32)
+static int popcount_ull(unsigned long long m) {
+  int count = 0;
+  while (m) {
+    count += (int)(m & 1);
+    m >>= 1;
+  }
+  return count;
+}
+#endif
+
 /* Perf-ranked core classes as a string "rank:count:maskhex;..." with higher rank = higher
    performance, or "" when the platform reports no class structure this way (Linux answers via
    sysfs, parsed on the OCaml side). */
@@ -50,9 +62,7 @@ CAMLprim value ocannl_core_classes_str(value unit) {
   char *buf = NULL;
   char out[2048];
   unsigned long long masks[256];
-  int seen[256];
   memset(masks, 0, sizeof(masks));
-  memset(seen, 0, sizeof(seen));
   out[0] = '\0';
   GetLogicalProcessorInformationEx(RelationProcessorCore, NULL, &len);
   if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || len == 0)
@@ -78,7 +88,6 @@ CAMLprim value ocannl_core_classes_str(value unit) {
             ok = 0; /* Multi-group machine: report nothing rather than a partial map. */
           } else {
             masks[cls] |= (unsigned long long)info->Processor.GroupMask[i].Mask;
-            seen[cls] = 1;
           }
         }
       }
@@ -88,15 +97,10 @@ CAMLprim value ocannl_core_classes_str(value unit) {
       int cls;
       size_t pos = 0;
       for (cls = 255; cls >= 0; cls--) {
-        if (seen[cls]) {
-          unsigned long long m = masks[cls];
-          int count = 0;
-          while (m) {
-            count += (int)(m & 1);
-            m >>= 1;
-          }
-          pos += (size_t)snprintf(out + pos, sizeof(out) - pos, "%s%d:%d:%llx",
-                                  pos > 0 ? ";" : "", cls, count, masks[cls]);
+        if (masks[cls] != 0ULL) {
+          pos += (size_t)snprintf(out + pos, sizeof(out) - pos, "%s%d:%d:%" PRIx64,
+                                  pos > 0 ? ";" : "", cls, popcount_ull(masks[cls]),
+                                  (uint64_t)masks[cls]);
           if (pos >= sizeof(out)) {
             out[0] = '\0';
             break;
@@ -152,13 +156,8 @@ CAMLprim value ocannl_effective_cpu_count(value unit) {
 #if defined(_WIN32)
   {
     DWORD_PTR pmask = 0, smask = 0;
-    int count = 0;
     if (!GetProcessAffinityMask(GetCurrentProcess(), &pmask, &smask)) return Val_int(0);
-    while (pmask) {
-      count += (int)(pmask & 1);
-      pmask >>= 1;
-    }
-    return Val_int(count);
+    return Val_int(popcount_ull((unsigned long long)pmask));
   }
 #elif defined(__linux__)
   {
@@ -175,6 +174,37 @@ CAMLprim value ocannl_effective_cpu_count(value unit) {
   }
 #else
   return Val_int(0);
+#endif
+}
+
+/* The process's current affinity mask over logical CPUs (bit i = CPU i); 0 = no such notion on
+   this platform (macOS), the mask involves CPUs beyond bit 63, or the query failed. Two
+   same-width pinnings over different cores are different worker pools, so the mask (not just
+   its popcount) enters the autotune pool tag. */
+CAMLprim value ocannl_affinity_mask(value unit) {
+  CAMLparam1(unit);
+#if defined(_WIN32)
+  {
+    DWORD_PTR pmask = 0, smask = 0;
+    if (!GetProcessAffinityMask(GetCurrentProcess(), &pmask, &smask))
+      CAMLreturn(caml_copy_int64(0));
+    CAMLreturn(caml_copy_int64((int64_t)pmask));
+  }
+#elif defined(__linux__)
+  {
+    cpu_set_t set;
+    unsigned long long m = 0;
+    int i;
+    if (sched_getaffinity(0, sizeof(set), &set) != 0) CAMLreturn(caml_copy_int64(0));
+    for (i = 0; i < CPU_SETSIZE; i++)
+      if (CPU_ISSET(i, &set)) {
+        if (i >= 64) CAMLreturn(caml_copy_int64(0)); /* Beyond the 64-bit mask: unknown. */
+        m |= 1ULL << i;
+      }
+    CAMLreturn(caml_copy_int64((int64_t)m));
+  }
+#else
+  CAMLreturn(caml_copy_int64(0));
 #endif
 }
 
@@ -208,7 +238,20 @@ CAMLprim value ocannl_hypervisor_present(value unit) {
       memcpy(vendor + 4, &ecx, 4);
       memcpy(vendor + 8, &edx, 4);
       vendor[12] = '\0';
-      return Val_int(strcmp(vendor, "Microsoft Hv") == 0 ? 0 : 1);
+      if (strcmp(vendor, "Microsoft Hv") != 0) return Val_int(1);
+    }
+    /* KVM/QEMU Windows guests with Hyper-V enlightenments also present "Microsoft Hv" at
+       0x40000000, but QEMU then moves the KVM signature to leaf 0x40000100 — a real Windows
+       host has nothing there. Without this, such a guest with topology passthrough could pass
+       both this gate and the >= 2-classes gate on fabricated masks. */
+    __cpuid(0x40000100u, eax, ebx, ecx, edx);
+    {
+      char vendor[13];
+      memcpy(vendor, &ebx, 4);
+      memcpy(vendor + 4, &ecx, 4);
+      memcpy(vendor + 8, &edx, 4);
+      vendor[12] = '\0';
+      return Val_int(strncmp(vendor, "KVMKVMKVM", 9) == 0 ? 1 : 0);
     }
 #else
     return Val_int(1);
