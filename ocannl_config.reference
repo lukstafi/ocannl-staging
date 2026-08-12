@@ -408,7 +408,9 @@
 # model_peak_* constants respecting every exact-count row (approx and opaque rows are excluded;
 # multi-kernel rows constrain via a uniform "fission slack" on both legs) and prints
 # config-pasteable lines; `--backend=NAME` selects one backend when the data spans several (the
-# keys are global), `--margin=F` adds headroom for candidates faster than any yet measured.
+# keys are global), `--margin=F` (F >= 1) adds headroom for candidates faster than any yet
+# measured. Rows recorded before the approx column (9-column schema) are skipped with a
+# warning — prefer re-recording calibration data with the current build.
 # Relative paths resolve against the working directory. With autotune_log=true the same
 # calibration lines also go to stderr, human-readable.
 #autotune_calibration_file=

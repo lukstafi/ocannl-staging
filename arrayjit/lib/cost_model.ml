@@ -300,9 +300,12 @@ module Calibration = struct
           fit_approx = List.count rows ~f:(fun r -> r.approx && not r.opaque);
           fit_multi_kernel = List.count scoreable ~f:(fun r -> r.kernels > 1);
           fit_violations =
+            (* Exact rows only, matching the runtime warning: on an approx row the exceedance
+               may reflect guards-taken over-counting, not an understated envelope, and this
+               counter prompts a refit. *)
             List.count rows ~f:(fun r ->
                 match r.model_ms with
-                | Some m -> Float.(m > r.measured_ms)
+                | Some m -> Float.(m > r.measured_ms) && (not r.approx) && not r.opaque
                 | None -> false);
           fit_fission_slack = fission_slack;
           fit_peak_flops = apply_slack peak_flops;

@@ -24,9 +24,11 @@ let () =
       row ~backend:"cc" ~digest:"bbbbbbbb/22222222" ~label:"matmul bs=64" ~measured_ms:4.0
         ~model_ms:(Some 5.0) ~kernels:1 ~flops:2_000_000_000 ~bytes:3_000_000 ();
       (* Approx-count row (guards-taken over-counting): its fake 100x throughput must not drive
-         the compute leg — excluded from the fit, counted apart from opaque. *)
+         the compute leg — excluded from the fit, counted apart from opaque — and its recorded
+         model > measured exceedance must not count as a bound violation (possible over-count,
+         not an understated envelope). *)
       row ~backend:"cc" ~digest:"eeeeeeee/55555555" ~label:"masked fringe" ~measured_ms:1.0
-        ~model_ms:None ~kernels:1 ~flops:50_000_000_000 ~bytes:1_000_000 ~approx:true ();
+        ~model_ms:(Some 2.5) ~kernels:1 ~flops:50_000_000_000 ~bytes:1_000_000 ~approx:true ();
       (* Opaque row: excluded from the fit (its counts may under-estimate), still counted. *)
       row ~backend:"cc" ~digest:"cccccccc/33333333" ~label:"staged" ~measured_ms:1.0
         ~model_ms:None ~kernels:1 ~flops:1_000_000 ~bytes:1_000_000 ~opaque:true ();

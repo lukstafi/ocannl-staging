@@ -38,15 +38,17 @@ let () =
           match String.chop_prefix a ~prefix:"--margin=" with
           | Some m -> (
               match Float.of_string m with
-              | f when Float.(f > 0.) -> margin := f
+              | f when Float.(f >= 1.) -> margin := f
               | _ | (exception _) ->
-                  Stdio.eprintf "fit_envelope: --margin needs a positive float, got %s\n" m;
+                  (* Below 1 the "headroom" would shrink the peaks — reintroducing exactly the
+                     bound violations the fit just removed. *)
+                  Stdio.eprintf "fit_envelope: --margin needs a float >= 1.0, got %s\n" m;
                   Stdlib.exit 2)
           | None ->
               if String.is_prefix a ~prefix:"--" then usage () else files := a :: !files));
   let files = List.rev !files in
   if List.is_empty files then usage ();
-  let malformed = ref 0 in
+  let malformed = ref 0 and legacy = ref 0 in
   let rows =
     List.concat_map files ~f:(fun file ->
         List.filter_map (Stdio.In_channel.read_lines file) ~f:(fun line ->
@@ -55,9 +57,20 @@ let () =
               match Cal.of_line line with
               | Some _ as r -> r
               | None ->
-                  Int.incr malformed;
+                  (* Rows recorded before the approx column (the original 9-column schema of
+                     gh-ocannl-491) cannot prove their counts exact, so they cannot enter the
+                     fit — but dropping them as generic garbage would hide that the file's
+                     fastest candidates may be missing. Name them explicitly. *)
+                  if List.length (String.split line ~on:'\t') = 9 then Int.incr legacy
+                  else Int.incr malformed;
                   None))
   in
+  if !legacy > 0 then
+    Stdio.eprintf
+      "fit_envelope: skipped %d legacy 9-column row(s) (recorded before the approx-count \
+       column): they cannot prove exact counts, so the fit may miss the fastest previously \
+       observed candidates — prefer re-recording calibration data with the current build\n"
+      !legacy;
   if !malformed > 0 then Stdio.eprintf "fit_envelope: skipped %d malformed line(s)\n" !malformed;
   if List.is_empty rows then (
     Stdio.eprintf "fit_envelope: no calibration rows\n";

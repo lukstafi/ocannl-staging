@@ -127,8 +127,10 @@ module Calibration : sig
             above any hardware peak, and one such row would inflate the envelope machine-wide. *)
     fit_multi_kernel : int;  (** Among the rows used; see {!fit} for the aggregate caveat. *)
     fit_violations : int;
-        (** Rows whose recorded [model_ms] exceeds [measured_ms]: the envelope in force when
-            they were recorded understated this machine's peaks. *)
+        (** Exact-count rows whose recorded [model_ms] exceeds [measured_ms]: the envelope in
+            force when they were recorded understated this machine's peaks. Approx rows are not
+            counted — their exceedance may reflect over-counting instead, mirroring the runtime
+            warning's gating. *)
     fit_fission_slack : (float * string) option;
         (** The uniform factor (> 1) applied to both legs so the aggregate sufficient condition
             holds on every multi-kernel row (see {!fit}), and the row forcing it; [None] when
