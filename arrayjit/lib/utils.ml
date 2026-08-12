@@ -136,6 +136,7 @@ let known_config_keys =
       "legality_crosscheck";
       "cc_parallel_grid";
       "cc_parallel_chunks";
+      "cc_pool_core_class";
       "cc_grid_private_bytes_cap";
       "cc_vector_bytes";
       "cc_fp16_arithmetic";
@@ -1220,6 +1221,7 @@ let%diagn_sexp log_trace_tree _logs =
     loop_logs _logs]
 
 include Datatypes
+module Cpu_topology = Cpu_topology
 
 type build_file_channel = { f_path : string; oc : Stdlib.out_channel; finalize : unit -> unit }
 

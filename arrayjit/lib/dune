@@ -3,7 +3,7 @@
  (public_name arrayjit.utils)
  (preprocessor_deps
   (env_var OCANNL_LOG_LEVEL))
- (modules utils datatypes)
+ (modules utils datatypes cpu_topology)
  (libraries base stdio pprint ppx_minidebug.runtime ppx_minidebug.db)
  (foreign_stubs
   (language c)

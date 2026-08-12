@@ -389,6 +389,7 @@ module Impl = struct
               else None);
            simd_vector_bytes = 0;
            native_fp16_arithmetic = false;
+           worker_pool_tag = None;
            (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the
               Apple-silicon class ([Device.attributes] exposes no throughput numbers — mid-range
               M-series: ~5 fp32 TFLOP/s, ~200 GB/s unified memory). The model only ranks, so

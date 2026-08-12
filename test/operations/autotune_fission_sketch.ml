@@ -145,7 +145,10 @@ let () =
       fctx chain_comp Ir.Indexing.Empty
   in
   SC.store ~dir:cache_dir
-    ~key:(SC.cache_key base_canon ~backend:(Context.backend_name bctx))
+    ~key:
+      (SC.cache_key
+         ?pool_tag:(Context.hardware_limits bctx).Ir.Backend_intf.worker_pool_tag base_canon
+         ~backend:(Context.backend_name bctx))
     {
       SC.version = SC.entry_version;
       backend = Context.backend_name bctx;
@@ -210,7 +213,10 @@ let () =
      thresholds, so a config change can redefine the default pipeline without missing the cache.
      Simulated by rewriting the stored entry's fingerprint: the entry still hits — the winner
      replay is config-independent — but the config-relative default reference is dropped. *)
-  let key2 = SC.cache_key base_canon ~backend:(Context.backend_name bctx) in
+  let key2 =
+    SC.cache_key ?pool_tag:(Context.hardware_limits bctx).Ir.Backend_intf.worker_pool_tag
+      base_canon ~backend:(Context.backend_name bctx)
+  in
   (match SC.lookup ~dir:cache_dir2 ~key:key2 with
   | Some entry ->
       SC.store ~dir:cache_dir2 ~key:key2

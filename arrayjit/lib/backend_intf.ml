@@ -146,6 +146,12 @@ type hardware_limits = {
 
           Always [false] on the GPU backends, whose 16-bit story is their native types and
           tensor-core shapes rather than a CPU vector width. *)
+  worker_pool_tag : string option;
+      (** Compact signature of the worker pool timings execute on ([w8P], [w24], ...), filled by
+          the CPU backends from the pool-uniformity policy (gh-ocannl-530). Enters the autotune
+          disk-cache key the way the numerics tag does: schedules crowned on one pool do not
+          transfer to another, so a policy flip or a different external pinning must re-tune
+          rather than replay. [None] (GPU backends) leaves the cache key unchanged. *)
 }
 [@@deriving sexp, compare, equal]
 
@@ -158,6 +164,7 @@ let no_hardware_limits =
     peak_flops = None;
     peak_memory_bandwidth = None;
     native_fp16_arithmetic = false;
+    worker_pool_tag = None;
   }
 
 (** The backend slab allocator, replacing the per-tnode [Alloc_buffer] interface. The shared

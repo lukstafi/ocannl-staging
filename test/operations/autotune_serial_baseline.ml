@@ -144,7 +144,9 @@ let () =
   in
   let canon = Option.value_exn ~here:[%here] !canon in
   SC.store ~dir:cache_dir
-    ~key:(SC.cache_key canon ~backend)
+    ~key:
+      (SC.cache_key ?pool_tag:(Context.hardware_limits ctx).Ir.Backend_intf.worker_pool_tag canon
+         ~backend)
     {
       SC.version = SC.entry_version;
       backend;
