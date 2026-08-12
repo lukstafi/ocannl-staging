@@ -84,6 +84,20 @@ type mma_emission = a_ptr:PPrint.document -> b_ptr:PPrint.document -> PPrint.doc
     yet addressed — with no separate acceptance implementation that could drift from the emitting
     one. *)
 
+type async_copy_syntax = {
+  ac_copy : dst:PPrint.document -> src:PPrint.document -> bytes:int -> PPrint.document;
+      (** One element-sized asynchronous global→workgroup-shared copy statement; [dst] and [src]
+          are element addresses ([&ident\[offset\]]) and [bytes] the element size (4, 8 or 16 —
+          the hardware copy sizes). The copy is byte-for-byte: eligibility (same storage precision
+          on both sides, no value transformation) is the caller's check. *)
+  ac_wait_all : string;
+      (** Statement completing every asynchronous copy issued so far by the calling thread,
+          committed or not (CUDA [cp.async.wait_all]). Cross-thread visibility still needs the
+          workgroup barrier the caller emits right after. *)
+}
+(** gh-ocannl-487 phase 2: asynchronous staging copies for software-pipelined tiles (see
+    {!C_syntax_config.async_copy}). *)
+
 module type C_syntax_config = sig
   val procs : Low_level.optimized array
   (** The low-level prcedure to compile, and the arrays of the context it will be linked to if not
@@ -164,6 +178,22 @@ module type C_syntax_config = sig
   val barrier_syntax : string option
   (** Workgroup barrier statement ([__syncthreads();] / [threadgroup_barrier(...);]); [None] makes
       [Workgroup_barrier] a compile-time error (serialization cannot implement a barrier). *)
+
+  val async_copy : async_copy_syntax option
+  (** gh-ocannl-487 phase 2: asynchronous global→workgroup-shared copies (CUDA [cp.async]) for the
+      staging loads of software-pipelined tiles ({!Low_level.optimized.pipelined}). When provided,
+      an eligible staging [Set] (a raw same-precision copy of a materialized global into an
+      async-eligible pipelined tile) renders as [ac_copy] instead of a load+store through
+      registers, so the prefetch issued for iteration [k+1] genuinely overlaps the compute of [k].
+      Completion is uniform, not per-group: the rotor loop's body is prefixed with [ac_wait_all]
+      followed by a workgroup barrier (re-inserting, for the async arm, exactly the phase opener
+      that {!Schedule.elide_staged_barriers} elides for synchronous stores — those are published
+      by the previous iteration's trailing bracket, an async copy needs its wait BEFORE the
+      publishing barrier). Per-statement eligibility is opportunistic: an ineligible staging
+      statement (precision conversion, a surviving fringe ternary, a non-global source) keeps the
+      plain store, which the same barrier publishes — correctness never depends on which
+      statements the arm accepted. [None] (the default, and every backend but CUDA today) keeps
+      the portable synchronous rendering everywhere. *)
 
   val parallel_grid_syntax : [ `None | `Dispatch | `Openmp ]
   (** Pool-backed [Grid] rendering (docs/proposals/gh-ocannl-164.md): how to render an eligible
@@ -547,6 +577,7 @@ struct
      absent barriers), and barriers / shared placements are compile-time errors. *)
   let hardware_index ~kind:_ ~slot:_ = None
   let barrier_syntax = None
+  let async_copy = None
   let parallel_grid_syntax = `None
   let parallel_grid_chunks = 1
   let vector_bytes = 0
@@ -1176,6 +1207,12 @@ module C_syntax (B : C_syntax_config) = struct
      pointers carry the rotation term. *)
   let current_pipelined : Low_level.pipelined_tile Map.M(Tn).t ref = ref (Map.empty (module Tn))
   let is_pipelined tn = Map.mem !current_pipelined tn
+
+  (* gh-487 phase 2: the pipelined tiles whose staging copies render asynchronously this proc
+     ([B.async_copy] provided, no kernel logging, element size the hardware can copy). Decided
+     once by [compile_proc]; membership drives both the [Set] case's copy emission and the rotor
+     loop's wait+barrier prefix, so the two can never disagree about whether a wait is needed. *)
+  let current_async_tiles : Set.M(Tn).t ref = ref (Set.empty (module Tn))
 
   (* Elements per 16-byte unit for [Low_level.Swizzle_b128]: [u] and its log, with [units] the
      (power-of-two, checked by [Schedule.Stage]) count of units in one row of [c] elements. *)
@@ -2074,12 +2111,48 @@ module C_syntax (B : C_syntax_config) = struct
             ^^ pp_symbol i ^^ string ")"
           in
           serial_loop_stack := i :: !serial_loop_stack;
+          let body_ir = body in
           let body =
             Exn.protect
               ~f:(fun () -> body_doc ?body:(Option.map fused ~f:snd) ())
               ~finally:(fun () -> serial_loop_stack := List.tl_exn !serial_loop_stack)
           in
-          group (header ^^ space ^^ lbrace ^^ nest 2 (hardline ^^ body) ^^ hardline ^^ rbrace)
+          (* gh-487 phase 2: the rotor loop of async-staged pipelined tiles opens each iteration
+             with wait-then-barrier — the calling thread's outstanding copies (the prefetch issued
+             one iteration back, or the prologue) complete, then the barrier publishes them to the
+             workgroup before the compute's reads. When the IR body still opens with its own
+             [Workgroup_barrier] (un-elided form), only the wait is prepended; when
+             [Schedule.elide_staged_barriers] dropped that opener against the previous iteration's
+             trailing [Tile_mma] bracket — sound for synchronous stores, which that bracket
+             publishes — the async arm re-inserts it, since a barrier BEFORE the wait publishes
+             nothing (and the intrinsic's leading bracket cannot be relied on: the fragment-scope
+             form opens it once outside the loop, not per iteration). *)
+          let async_prefix =
+            match B.async_copy with
+            | Some ac
+              when Map.existsi !current_pipelined ~f:(fun ~key ~data ->
+                       Set.mem !current_async_tiles key
+                       && Indexing.equal_symbol data.Low_level.pt_rotor i) ->
+                let rec first_real = function
+                  | (Low_level.Noop | Low_level.Comment _) :: tl -> first_real tl
+                  | hd :: _ -> Some hd
+                  | [] -> None
+                in
+                let has_leading_barrier =
+                  match first_real (Low_level.flat_lines [ body_ir ]) with
+                  | Some Low_level.Workgroup_barrier -> true
+                  | _ -> false
+                in
+                string ac.ac_wait_all ^^ hardline
+                ^^
+                if has_leading_barrier then empty
+                else string (Option.value_exn B.barrier_syntax) ^^ hardline
+            | _ -> empty
+          in
+          group
+            (header ^^ space ^^ lbrace
+            ^^ nest 2 (hardline ^^ async_prefix ^^ body)
+            ^^ hardline ^^ rbrace)
         in
         let hardware_binding kind =
           let slot =
@@ -2951,10 +3024,39 @@ module C_syntax (B : C_syntax_config) = struct
           pp_ll ~log_set_locals ~in_loop
             (Low_level.loop_over_dims (Lazy.force tn.dims) ~body:(fun idcs ->
                  Set { tn; idcs; llsc = Constant 0.0; debug = get_ident tn ^ " := 0" }))
-    | Set { tn; idcs; llsc; debug } ->
+    | Set { tn; idcs; llsc; debug } -> (
         let ident_doc = string (get_ident tn) in
         let dims = Lazy.force tn.dims in
         let store_prec = Lazy.force tn.storage_prec in
+        (* gh-487 phase 2: a staging copy into an async-eligible pipelined tile renders as the
+           backend's asynchronous copy — the same address arithmetic on both sides (the write-side
+           buffer rotation included), byte-for-byte, so the bitwise-identity invariant is
+           untouched; completion is the rotor loop's wait+barrier prefix. The eligibility pattern
+           is exact: a raw [Get] of a materialized (global) node at the tile's own storage
+           precision. Anything else — a precision conversion, a surviving zero-fringe ternary, a
+           non-global source — falls through to the plain synchronous store, which the same
+           barrier publishes. *)
+        let async_copy_doc =
+          if not (Set.mem !current_async_tiles tn) then None
+          else
+            match (B.async_copy, llsc) with
+            | Some ac, Low_level.Get (src, src_idcs)
+              when Ops.equal_prec (Lazy.force src.Tn.storage_prec) store_prec
+                   && Tn.Placements.is_materialized_force (placements ()) src 487 ->
+                let offset_doc =
+                  pp_pipelined_rotation ~is_write:true tn ^^ pp_tn_offset tn (idcs, dims)
+                in
+                let src_offset_doc = pp_tn_offset src (src_idcs, Lazy.force src.Tn.dims) in
+                Some
+                  (ac.ac_copy
+                     ~dst:(string "&" ^^ ident_doc ^^ brackets offset_doc)
+                     ~src:(string "&" ^^ string (get_ident src) ^^ brackets src_offset_doc)
+                     ~bytes:(Ops.prec_in_bytes store_prec))
+            | _ -> None
+        in
+        match async_copy_doc with
+        | Some doc -> doc
+        | None ->
         let prec, narrowing = store_precs ~store_prec llsc in
         let local_defs, val_doc = pp_scalar prec llsc in
         let val_doc = wrap_conversion narrowing val_doc in
@@ -3081,7 +3183,7 @@ module C_syntax (B : C_syntax_config) = struct
         else if PPrint.is_empty local_defs then wrap_rmw_volatile assignment
         else
           let block_content = local_defs ^^ hardline ^^ assignment in
-          wrap_rmw_volatile (lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace)
+          wrap_rmw_volatile (lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace))
     | Set_dynamic { tn; idcs; dyn_axis; dyn_value = iv, iprec; llsc; debug } ->
         (* gh-466: the scatter counterpart of the [Get_dynamic] gather — the write offset splices
            the runtime index (cast to [Ops.index_prec ()], mirroring the gather) at [dyn_axis]. The
@@ -4106,6 +4208,21 @@ module C_syntax (B : C_syntax_config) = struct
     current_simdgroup_fragments := simdgroup_fragments;
     current_swizzled := swizzled;
     current_pipelined := pipelined;
+    (* gh-487 phase 2: which pipelined tiles stage asynchronously — backend hook present, no
+       kernel logging (logged [Set]s read the written value back, which an in-flight copy cannot
+       provide), and an element size the hardware copies (4/8/16 bytes; 2-byte tiles keep the
+       portable form). Per-tile, not per-statement: the rotor loop's wait+barrier prefix keys on
+       the same set, so a tile with only ineligible statements merely pays a redundant wait. *)
+    current_async_tiles :=
+      (match B.async_copy with
+      | Some _ when not (Utils.debug_log_from_routines ()) ->
+          Map.keys pipelined
+          |> List.filter ~f:(fun tn ->
+                 match Ops.prec_in_bytes (Lazy.force tn.Tn.storage_prec) with
+                 | 4 | 8 | 16 -> true
+                 | _ -> false)
+          |> Set.of_list (module Tn)
+      | _ -> Set.empty (module Tn));
     (* gh-487 sanity: the rotation renders off the rotor loop's serial counter; a schedule that
        later retyped the rotor to a hardware axis would otherwise silently freeze the buffer
        selection at copy 0 ([serial_loop_stack] only tracks serial loops). Typed for the same reason
