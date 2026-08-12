@@ -86,6 +86,39 @@ let section name ~is_gpu ~is_cpu ~limits opt =
   List.iteri seeds ~f:(fun i p -> Stdio.printf "%2d  %s\n" i (show p));
   seeds
 
+(* The refinement-tree view of the same family (gh-ocannl-514 phase 1): decision levels with
+   commitment-dependent domains, whose leaves are exactly the flat enumeration above. An empty
+   choice is an infeasible node — every completion was filtered out. *)
+let rec print_tree ~indent tree =
+  match tree with
+  | Ir.Schedule_space.Leaf p -> Stdio.printf "%s* %s\n" indent (show p)
+  | Ir.Schedule_space.Choice { level; children } ->
+      if List.is_empty children then Stdio.printf "%s%s: infeasible\n" indent level
+      else
+        List.iter children ~f:(fun (label, sub) ->
+            Stdio.printf "%s%s = %s\n" indent level label;
+            print_tree ~indent:(indent ^ "  ") (Lazy.force sub))
+
+let tree_section name ~is_gpu ~is_cpu ~limits opt seeds =
+  match Autotune.matmul_sketch_tree ~is_gpu ~is_cpu ~limits opt with
+  | None -> Stdio.printf "== %s tree: no site detected ==\n" name
+  | Some tree ->
+      Stdio.printf "== %s tree: %d choice nodes, depth %d ==\n" name
+        (Ir.Schedule_space.count_choices tree)
+        (Ir.Schedule_space.depth tree);
+      print_tree ~indent:"" tree;
+      let paths = Ir.Schedule_space.enumerate tree in
+      (match List.last paths with
+      | Some (path, _) ->
+          Stdio.printf "last leaf's decision path: %s\n"
+            (String.concat ~sep:" > "
+               (List.map path ~f:(fun (level, label) -> level ^ "=" ^ label)))
+      | None -> Stdio.printf "no leaves\n");
+      Stdio.printf "tree leaves = flat enumeration: %b\n"
+        (List.equal
+           (fun a b -> String.equal (show a) (show b))
+           (Ir.Schedule_space.leaves tree) seeds)
+
 let () =
   let nn = 64 in
   (* A non-hoistable, B hoistable (host-init-backed constant): the exactly-one-hoistable case, so
@@ -100,7 +133,8 @@ let () =
   let bv = TDSL.ndarray bvv ~label:[ "bv" ] ~output_dims:[ nn; nn ] () in
   let%op mm = av +* "ik;kj=>ij" bv in
   let opt = with_lowering ~name:"sft_mm" mm in
-  let _ = section "cpu simd32" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt in
+  let cpu_seeds = section "cpu simd32" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt in
   let _ = section "gpu plain" ~is_gpu:true ~is_cpu:false ~limits:gpu_plain_limits opt in
-  let _ = section "gpu staged+depth" ~is_gpu:true ~is_cpu:false ~limits:gpu_full_limits opt in
-  ()
+  let gpu_seeds = section "gpu staged+depth" ~is_gpu:true ~is_cpu:false ~limits:gpu_full_limits opt in
+  tree_section "cpu simd32" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt cpu_seeds;
+  tree_section "gpu staged+depth" ~is_gpu:true ~is_cpu:false ~limits:gpu_full_limits opt gpu_seeds

@@ -185,6 +185,20 @@ val sketch_seed_params :
     at least one vector of lanes ([limits.simd_vector_bytes]), and transposed-B storage for shapes
     that read B in place. Exposed for tests. *)
 
+val matmul_sketch_tree :
+  is_gpu:bool ->
+  is_cpu:bool ->
+  limits:Ir.Backend_intf.hardware_limits ->
+  Ir.Low_level.optimized ->
+  sketch_params Ir.Schedule_space.tree option
+(** The matmul sketch family as a refinement tree (gh-ocannl-514 phase 1): decision levels —
+    pipeline, packing shape, geometry, twins — whose lazily-refined choices depend on earlier
+    commitments, and whose {!Ir.Schedule_space.leaves} are exactly the family's
+    {!sketch_seed_params} contribution, in enumeration order ([matmul_seed_params] {e is}
+    [leaves] of this tree). [None] when no matmul site is detected. The conv family and the
+    epilogue-twin level factor the same way as follow-ups. Exposed for tests and as the phase-4
+    search driver's entry into the family space. *)
+
 val sketch_schedule : p:sketch_params -> Ir.Low_level.optimized -> Ir.Schedule.schedule
 (** The composed pipeline a seed parameterizes, built against the given lowering (the site is
     re-detected). Raises [Invalid_argument] when no site is detected or the parameters do not fit
