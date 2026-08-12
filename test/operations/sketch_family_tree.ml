@@ -235,6 +235,22 @@ let () =
       gpu_full_limits with
       Ir.Backend_intf.max_workgroup_memory_bytes = Some 6144;
       max_threads_per_workgroup = Some 128;
+      (* An advertised depth outside Schedule.apply_stage's implemented 1..2 range refutes
+         rather than enumerating twins that fail every candidate compile. *)
+      mma =
+        Option.map gpu_full_limits.Ir.Backend_intf.mma ~f:(fun m ->
+            { m with Ir.Backend_intf.mma_pipeline_depths = [ 2; 3 ] });
     }
   in
-  awkward_section "gpu tight smem" ~is_gpu:true ~is_cpu:false ~limits:gpu_tight_limits opt
+  awkward_section "gpu tight smem" ~is_gpu:true ~is_cpu:false ~limits:gpu_tight_limits opt;
+  (* A wide output column extent: the unsplit B~ panel (bn = 0) of the (64, 0, 256) packed
+     geometry spans 589824 bytes of tiles — above the 256 KiB stack/cache-economy threshold,
+     which EXCLUDES (a driver may lift the policy) rather than refutes. *)
+  let wn =
+    NTDSL.init ~l:"wn" ~prec:Ir.Ops.single ~o:[ 64; 512 ]
+      ~f:(fun idcs -> Float.of_int (((idcs.(0) * 512) + idcs.(1)) % 9) *. 0.25)
+      ()
+  in
+  let%op wmm = av +* "ik;kj=>ij" wn in
+  let opt_w = with_lowering ~name:"sft_wide" wmm in
+  awkward_section "wide-N cpu" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_w

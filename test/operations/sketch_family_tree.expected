@@ -220,5 +220,24 @@ tree leaves = flat enumeration: true
   pipeline=blocktile > geometry=bm64 bn64 bk8 tm4 tn4: block tile launches 256 threads per workgroup (bm/tm * bn/tn), exceeding the 128-thread limit
   pipeline=blocktile > geometry=bm32 bn32 bk16 tm2 tn2: block tile launches 256 threads per workgroup (bm/tm * bn/tn), exceeding the 128-thread limit
   pipeline=tensorized > geometry=bm16 bn32 bk32 > twin=depth2: staged operand tiles need 12288 bytes of workgroup memory at pipeline depth 2, exceeding the 6144-byte limit
+  pipeline=tensorized > geometry=bm16 bn32 bk32 > twin=depth3: pipeline depth 3 is outside the implemented range 1..2 (Schedule.apply_stage)
   pipeline=tensorized > geometry=bm32 bn32 bk32: staged operand tiles need 8192 bytes of workgroup memory, exceeding the 6144-byte limit
   pipeline=tensorized > geometry=bm32 bn32 bk16 > twin=depth2: staged operand tiles need 8192 bytes of workgroup memory at pipeline depth 2, exceeding the 6144-byte limit
+  pipeline=tensorized > geometry=bm32 bn32 bk16 > twin=depth3: pipeline depth 3 is outside the implemented range 1..2 (Schedule.apply_stage)
+== wide-N cpu: 11 seeds ==
+tree leaves = flat enumeration: true
+-- refuted --
+  pipeline=blocktile > packing=hoisted: hoisted packing needs a host-init-backed constant operand; neither operand is one
+  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted: no host-init-backed constant operand to pack at link time
+  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid: no host-init-backed constant operand to pack at link time
+  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid-pack-rest: no host-init-backed constant operand to pack at link time
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+-- excluded --
+  pipeline=tensorized > tensorized-form=packed > packing-shape=serial > geometry=bm64 bn0 bk256: packed tiles (589824 bytes) exceed the 262144-byte stack/cache-economy threshold (heuristic, not a compiler limit)
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk256: packed tiles (589824 bytes) exceed the 262144-byte stack/cache-economy threshold (heuristic, not a compiler limit)
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk256: packed tiles (589824 bytes) exceed the 262144-byte stack/cache-economy threshold (heuristic, not a compiler limit)

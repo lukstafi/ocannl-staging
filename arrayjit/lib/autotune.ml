@@ -2292,6 +2292,8 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
   in
   let blocktile_child =
     if is_gpu then
+      let a_prec = Lazy.force site.m_a.Ir.Tnode.storage_prec in
+      let b_prec = Lazy.force site.m_b.Ir.Tnode.storage_prec in
       subt (fun () -> choice "geometry"
            (List.map
               [ (64, 64, 8, 4, 4); (32, 32, 8, 4, 4); (16, 16, 8, 4, 4); (32, 32, 16, 2, 2); (16, 16, 8, 2, 2) ]
@@ -2305,11 +2307,11 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                        ndiv "tm" tm ~into:"bm" bm;
                        ndiv "tn" tn ~into:"bn" bn;
                      ]
-                    @
-                    (* The launch size is statically known — two Workgroup dimensions of [bm/tm]
-                       and [bn/tn] threads — so a known thread cap refutes pre-compile what
-                       [Schedule.check_hardware_limits_classified] would reject per candidate. *)
-                    match limits.Ir.Backend_intf.max_threads_per_workgroup with
+                    @ (* The launch size is statically known — two Workgroup dimensions of [bm/tm]
+                         and [bn/tn] threads — so a known thread cap refutes pre-compile what
+                         [Schedule.check_hardware_limits_classified] would reject per candidate;
+                         likewise the two [shared] operand stages' workgroup-memory floor. *)
+                    (match limits.Ir.Backend_intf.max_threads_per_workgroup with
                     | Some cap when tm > 0 && tn > 0 && bm / tm * (bn / tn) > cap ->
                         [
                           ( false,
@@ -2317,6 +2319,22 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                               "block tile launches %d threads per workgroup (bm/tm * bn/tn), \
                                exceeding the %d-thread limit"
                               (bm / tm * (bn / tn))
+                              cap );
+                        ]
+                    | _ -> [])
+                    @
+                    match limits.Ir.Backend_intf.max_workgroup_memory_bytes with
+                    | Some cap
+                      when (bm * bk * Ir.Ops.prec_in_bytes a_prec)
+                           + (bk * bn * Ir.Ops.prec_in_bytes b_prec)
+                           > cap ->
+                        [
+                          ( false,
+                            Printf.sprintf
+                              "staged operand tiles need %d bytes of workgroup memory, exceeding \
+                               the %d-byte limit"
+                              ((bm * bk * Ir.Ops.prec_in_bytes a_prec)
+                              + (bk * bn * Ir.Ops.prec_in_bytes b_prec))
                               cap );
                         ]
                     | _ -> [])
@@ -2363,6 +2381,14 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
   in
   let mma_child =
     match (is_gpu, limits.Ir.Backend_intf.mma) with
+    | true, Some { Ir.Backend_intf.mma_simd_width = w; _ }
+      when Option.value_map limits.Ir.Backend_intf.max_threads_per_workgroup ~default:false
+             ~f:(fun cap -> w > cap) ->
+        (* The tensorization lane is a Workgroup axis of extent [w] in every geometry. *)
+        Sspace.Refuted
+          (Printf.sprintf
+             "mma lane width %d exceeds the %d-thread workgroup limit" w
+             (Option.value_exn limits.Ir.Backend_intf.max_threads_per_workgroup))
     | true, Some ({ Ir.Backend_intf.mma_simd_width = w; _ } as mma) -> (
         let a_prec = Lazy.force site.m_a.Ir.Tnode.storage_prec in
         let b_prec = Lazy.force site.m_b.Ir.Tnode.storage_prec in
@@ -2479,6 +2505,17 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                               else
                                 List.map mma.Ir.Backend_intf.mma_pipeline_depths ~f:(fun d ->
                                     ( Printf.sprintf "depth%d" d,
+                                      if d < 1 || d > 2 then
+                                        (* The capability list is advisory; the implemented range
+                                           is [Schedule.apply_stage]'s — the wait-all emission has
+                                           single-step lookahead, deeper pipelines need
+                                           commit_group/wait_group N. *)
+                                        Sspace.Refuted
+                                          (Printf.sprintf
+                                             "pipeline depth %d is outside the implemented range \
+                                              1..2 (Schedule.apply_stage)"
+                                             d)
+                                      else
                                       match staged_tiles_exceed ~bm ~bn ~bk ~depth:d with
                                       | Some w ->
                                           (* Legality beats policy: the multiplied footprint
@@ -2601,16 +2638,23 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                     let bn_eff = if bn = 0 then site.m_nj else bn in
                     let tiles_bytes = ((bm * bk) + (bk * bn_eff)) * prec_bytes in
                     let verdict =
-                      (* The packed micro-kernel's column extent is the B~ panel width. *)
+                      (* The packed micro-kernel's column extent is the B~ panel width — a
+                         legality floor. The footprint threshold is search economy (roughly the
+                         L2 residency the blocking aims for — an oversized tile still compiles,
+                         and a hoisted panel is not even a stack array), so it excludes rather
+                         than refutes: a driver may lift it. *)
                       if bn_eff < lanes then
                         Some
-                          (Printf.sprintf
-                             "B~ panel width %d is below one vector of lanes (%d)" bn_eff lanes)
+                          (`Refute
+                            (Printf.sprintf
+                               "B~ panel width %d is below one vector of lanes (%d)" bn_eff lanes))
                       else if tiles_bytes > tile_bytes_cap then
                         Some
-                          (Printf.sprintf
-                             "packed tiles (%d bytes) exceed the stack-array footprint cap (%d)"
-                             tiles_bytes tile_bytes_cap)
+                          (`Exclude
+                            (Printf.sprintf
+                               "packed tiles (%d bytes) exceed the %d-byte stack/cache-economy \
+                                threshold (heuristic, not a compiler limit)"
+                               tiles_bytes tile_bytes_cap))
                       else None
                     in
                     let full_div =
@@ -2663,7 +2707,8 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                   (List.map menu ~f:(fun (label, p, verdict, full_div, tiles_bytes) ->
                        ( label,
                          match verdict with
-                         | Some w -> Sspace.Refuted w
+                         | Some (`Refute w) -> Sspace.Refuted w
+                         | Some (`Exclude w) -> Sspace.Excluded w
                          | None -> f p full_div tiles_bytes )))
               in
               let any_hoistable = hoistable site.m_a || hoistable site.m_b in
