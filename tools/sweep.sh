@@ -112,7 +112,15 @@ fi
 #
 # mkdir is the atomic primitive available on every platform here; a lock whose
 # owner is gone is reclaimed rather than needing manual cleanup.
-LOCK=$STATE/lock
+#
+# The lock lives beside the WORKTREE, not under $STATE. OCANNL_SWEEP_STATE is a
+# supported override -- it is how this script gets tested against a throwaway
+# history -- and keying the lock there would split the lock namespace while
+# leaving the worktree shared, so a run with its own state directory would walk
+# straight past the lock and reset the tree under the scheduled sweep. A lock
+# belongs in the same namespace as the resource it protects.
+LOCAL_WT=$HOME/ocannl-staging-worktrees/sweep
+LOCK=$LOCAL_WT.lock
 if mkdir "$LOCK" 2>/dev/null; then
   :
 else
@@ -222,12 +230,35 @@ sq() { printf "'%s'" "$(printf %s "$1" | sed "s/'/'\\\\''/g")"; }
 # spawned keep running -- holding _build locks that the NEXT unit on this machine
 # (cc and metal share one worktree) would then contend with, turning one timeout
 # into a cascade. Exits 142 on expiry, matching the outcome mapping below.
+#
+# INT, TERM and HUP are forwarded to that group and REAPED before this exits.
+# Putting the child in its own group is what makes forwarding necessary: a signal
+# sent to the sweep's group (a terminal Ctrl-C, the scheduler cancelling the
+# task) reaches bash and this supervisor but not the child, so without this dune
+# would survive while the caller's trap released the lock -- letting the next
+# sweep reset the worktree under a still-running build, which is the corruption
+# the lock exists to prevent.
 capped_perl='
+  use POSIX ();
   my $cap = shift;
   my $pid = fork();
   die "fork: $!" unless defined $pid;
   if (!$pid) { setpgrp(0, 0); exec @ARGV; exit 127 }
-  $SIG{ALRM} = sub { kill "TERM", -$pid; sleep 5; kill "KILL", -$pid; exit 142 };
+  my $reap = sub {
+    my $code = shift;
+    kill "TERM", -$pid;
+    for (1 .. 50) {
+      last if waitpid($pid, POSIX::WNOHANG()) > 0;
+      select undef, undef, undef, 0.1;
+    }
+    kill "KILL", -$pid;
+    waitpid($pid, 0);
+    exit $code;
+  };
+  $SIG{ALRM} = sub { $reap->(142) };
+  $SIG{INT} = sub { $reap->(130) };
+  $SIG{TERM} = sub { $reap->(143) };
+  $SIG{HUP} = sub { $reap->(129) };
   alarm $cap;
   waitpid($pid, 0);
   my $st = $?;
@@ -294,7 +325,14 @@ for unit in "${UNITS[@]}"; do
     # every generated path is a literal and the whole test command can be
     # single-quoted for `sh -c`. Leaving `$HOME` in it would force double quotes
     # on the far side and leave the command open to re-expansion.
-    if ! remote_home=$(ssh -o BatchMode=yes -o ConnectTimeout=8 "$host" 'printf %s "$HOME"' 2>/dev/null) ||
+    # ConnectTimeout alone does not bound this: ssh_config(5) scopes it to
+    # establishing the connection, the handshake and key exchange -- not to
+    # running the remote command. A box that accepts the connection and then
+    # wedges its shell would hang the whole sweep here, before any unit records
+    # anything, so every ssh in this loop gets an outer bound as well.
+    if ! remote_home=$(capped 60 ssh -o BatchMode=yes -o ConnectTimeout=8 \
+         -o ServerAliveInterval=30 -o ServerAliveCountMax=4 \
+         "$host" 'printf %s "$HOME"' 2>/dev/null) ||
        [ -z "$remote_home" ]; then
       echo "  $machine/$backend: skip (unreachable)"
       record "$machine" "$backend" skip 0
@@ -311,7 +349,12 @@ for unit in "${UNITS[@]}"; do
     # remote that never got as far as dune tested nothing at all.
     remote_repo="$remote_home/ocannl-staging"
     remote_prep="git -C \"$remote_repo\" fetch -q origin master && $(prep_cmd "$remote_repo" "$wt")"
-    if ! ssh -o BatchMode=yes "$host" "$path_prefix $remote_prep" >"$log" 2>&1; then
+    # Bounded too: a wedged `git fetch` here is indistinguishable from a wedged
+    # dune later, and both would stall every remaining unit. Generous, since a
+    # cold fetch on a slow link is legitimate work.
+    if ! capped 900 ssh -o BatchMode=yes \
+         -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+         "$host" "$path_prefix $remote_prep" >"$log" 2>&1; then
       echo "  $machine/$backend: error (cannot pin $host to $run_sha)"
       record "$machine" "$backend" error "$(( $(date +%s) - started ))" "$log"
       fingerprint "$log" >"${log%.log}.fingerprint"
@@ -339,7 +382,7 @@ for unit in "${UNITS[@]}"; do
       "$host" "$remote" >"$log" 2>&1
     rc=$?
   else
-    wt=$HOME/ocannl-staging-worktrees/sweep
+    wt=$LOCAL_WT
     # Checked, and fatal for this UNIT rather than the run. The worktree is
     # reused, so a checkout that fails -- a conflicting edit, a half-removed
     # worktree -- leaves the previous revision's tree on disk; running the suite
