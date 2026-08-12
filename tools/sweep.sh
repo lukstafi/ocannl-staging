@@ -71,7 +71,11 @@ mkdir -p "$LOGS" || die "cannot create $LOGS"
 # with a clear message rather than as a run whose rows silently went nowhere.
 printf '' >>"$HISTORY" || die "cannot append to $HISTORY"
 
-[ -d "$MAIN/.git" ] || die "no repo at $MAIN (set OCANNL_SWEEP_REPO)"
+# Ask git rather than inspecting `.git`'s file type: in a linked worktree -- a
+# layout this project uses constantly -- `.git` is a regular file, and a -d test
+# rejects a repository every later `git -C` call would have handled fine.
+git -C "$MAIN" rev-parse --git-dir >/dev/null 2>&1 ||
+  die "no git repository at $MAIN (set OCANNL_SWEEP_REPO)"
 
 # An --only typo must not look like a clean sweep: without this, `--only cudaa`
 # selects nothing, records nothing, and exits 0 having tested nothing.
@@ -110,13 +114,74 @@ wanted() {
 # The dune invocation, shared by the local and remote paths so the two cannot
 # drift. Unpiped inside the shell that runs it: piping dune to anything reports
 # the pipe's status, not dune's, and a promotion diff then reads as green.
-dune_cmd() {
-  local backend=$1 wt=$2
+#
+# runtest and @slow are run UNCONDITIONALLY, their statuses combined, rather than
+# chained with &&. Metal's regular operations suite is known-red, so chaining
+# would mean the Sunday slow sweep never runs a single slow test on the one
+# backend whose slow tests are least covered elsewhere -- while its history row
+# reported only the already-known regular failure.
+#
+# $3 prefixes each dune call on the remote path, where coreutils `timeout` caps
+# the far side; locally the cap is applied by capped() around the whole shell,
+# which macOS needs anyway for want of timeout(1).
+#
+# Everything below is written with printf and single quotes so that `$?` and the
+# arithmetic survive into the shell that finally runs them. The result is spliced
+# into the remote string via command substitution, which bash does not rescan.
+test_cmd() {
+  local backend=$1 wt=$2 tmo=${3:-}
   # Double quotes, not single: on the remote path $wt is the literal string
   # "$HOME/..." and the remote shell has to expand it.
-  local -a cmd=("cd \"$wt\" &&" "OCANNL_BACKEND=$backend opam exec -- dune runtest ${TARGET}")
-  [ "$SLOW" = 1 ] && cmd+=("&& OCANNL_BACKEND=$backend opam exec -- dune build @slow")
-  printf '%s ' "${cmd[@]}"
+  printf 'cd "%s" || exit 2; ' "$wt"
+  printf 'OCANNL_BACKEND=%s %s opam exec -- dune runtest %s; rc1=$?; ' \
+    "$backend" "$tmo" "$TARGET"
+  if [ "$SLOW" = 1 ]; then
+    printf 'OCANNL_BACKEND=%s %s opam exec -- dune build @slow; rc2=$?; ' "$backend" "$tmo"
+  else
+    printf 'rc2=0; '
+  fi
+  printf 'exit $(( rc1 != 0 ? rc1 : rc2 ))'
+}
+
+# Cap a local command, killing its whole process group when the cap expires.
+# `perl -e 'alarm N; exec ...'` is not enough on its own: alarm survives exec, so
+# SIGALRM reaches only the immediate child while dune and every compiler it
+# spawned keep running -- holding _build locks that the NEXT unit on this machine
+# (cc and metal share one worktree) would then contend with, turning one timeout
+# into a cascade. Exits 142 on expiry, matching the outcome mapping below.
+capped_perl='
+  my $cap = shift;
+  my $pid = fork();
+  die "fork: $!" unless defined $pid;
+  if (!$pid) { setpgrp(0, 0); exec @ARGV; exit 127 }
+  $SIG{ALRM} = sub { kill "TERM", -$pid; sleep 5; kill "KILL", -$pid; exit 142 };
+  alarm $cap;
+  waitpid($pid, 0);
+  my $st = $?;
+  alarm 0;
+  exit($st & 127 ? 128 + ($st & 127) : $st >> 8);
+'
+capped() { perl -e "$capped_perl" -- "$CAP" "$@"; }
+
+# Put a reused worktree exactly on $full_sha, and PROVE it rather than assume it.
+# `checkout --detach` is not sufficient on its own: a tracked edit that does not
+# conflict with the target survives the checkout, which still exits 0 -- so the
+# suite would run against a tree that is not the commit the history row names.
+# `reset --hard` drops such edits and `clean -fd` drops untracked strays, while
+# leaving IGNORED files alone: `_build` is ignored, and reusing it is what makes
+# a daily cadence affordable. The porcelain check at the end is the proof.
+#
+# Emitted as shell text, and used by BOTH paths, so local and remote preparation
+# cannot drift apart.
+prep_cmd() {
+  local repo=$1 wt=$2
+  printf 'git -C "%s" worktree prune && ' "$repo"
+  printf '{ git -C "%s" rev-parse --git-dir >/dev/null 2>&1 || ' "$wt"
+  printf 'git -C "%s" worktree add -q --detach "%s" %s; } && ' "$repo" "$wt" "$full_sha"
+  printf 'git -C "%s" checkout -q --detach %s && ' "$wt" "$full_sha"
+  printf 'git -C "%s" reset -q --hard %s && ' "$wt" "$full_sha"
+  printf 'git -C "%s" clean -qfd && ' "$wt"
+  printf '[ -z "$(git -C "%s" status --porcelain)" ]' "$wt"
 }
 
 # Fatal on write failure: the history file is deliberately the only verdict, so
@@ -156,14 +221,27 @@ for unit in "${UNITS[@]}"; do
       continue
     fi
     wt="\$HOME/ocannl-staging-worktrees/sweep"
-    remote="cd ~/ocannl-staging && git fetch -q origin master && git worktree prune &&
-      { git -C $wt rev-parse --git-dir >/dev/null 2>&1 ||
-        git worktree add -q --detach $wt $full_sha; } &&
-      git -C $wt checkout -q --detach $full_sha && $(dune_cmd "$backend" "$wt")"
     # rog needs the CUDA and WSL lib dirs on PATH; harmless elsewhere.
-    remote="export PATH=/usr/local/cuda/bin:/usr/lib/wsl/lib:\$PATH; $remote"
-    perl -e 'alarm shift; exec @ARGV' "$CAP" \
-      ssh -o BatchMode=yes "$host" "$remote" >"$log" 2>&1
+    path_prefix="export PATH=/usr/local/cuda/bin:/usr/lib/wsl/lib:\$PATH;"
+    # Preparation is its own ssh round trip so that its failure -- a connection
+    # dropped after the probe, a full disk, a wedged worktree -- is recorded as
+    # `error`, matching the local path. Folded into the test command it would
+    # have surfaced as a non-zero status in the generic branch below and been
+    # written down as a FAILING SUITE, which is the opposite of the truth: a
+    # remote that never got as far as dune tested nothing at all.
+    remote_prep="git -C \"\$HOME/ocannl-staging\" fetch -q origin master && $(prep_cmd "\$HOME/ocannl-staging" "$wt")"
+    if ! ssh -o BatchMode=yes "$host" "$path_prefix $remote_prep" >"$log" 2>&1; then
+      echo "  $machine/$backend: error (cannot pin $host to $run_sha)"
+      record "$machine" "$backend" error "$(( $(date +%s) - started ))" "$log"
+      fingerprint "$log" >"${log%.log}.fingerprint"
+      continue
+    fi
+    # The cap is applied on the FAR side, where coreutils timeout exists: killing
+    # the local ssh would leave the remote dune running. Each remote host carries
+    # exactly one unit in this sweep, so a survivor there cannot contend with a
+    # later unit the way a local one could.
+    remote="$path_prefix $(test_cmd "$backend" "$wt" "timeout -k 10s ${CAP}s")"
+    ssh -o BatchMode=yes "$host" "$remote" >"$log" 2>&1
     rc=$?
   else
     wt=$HOME/ocannl-staging-worktrees/sweep
@@ -171,8 +249,7 @@ for unit in "${UNITS[@]}"; do
     # reused, so a checkout that fails -- a conflicting edit, a half-removed
     # worktree -- leaves the previous revision's tree on disk; running the suite
     # against it would record a pass under $run_sha for a commit that was never
-    # tested. The remote path needs no equivalent because its prep is already
-    # chained with && ahead of dune, so a prep failure cannot reach the tests.
+    # tested.
     #
     # One error here is sticky and worth recognising: if the directory survives
     # while its administrative entry does not (`git worktree prune` reaps the
@@ -181,26 +258,23 @@ for unit in "${UNITS[@]}"; do
     # move `_build` aside, remove the directory, `git worktree add --detach` it
     # again, move `_build` back. Deliberately not automated: deleting a
     # multi-gigabyte build tree unattended is worse than a loud repeated error.
-    if ! { git -C "$MAIN" worktree prune &&
-           { git -C "$wt" rev-parse --git-dir >/dev/null 2>&1 ||
-             git -C "$MAIN" worktree add -q --detach "$wt" "$full_sha"; } &&
-           git -C "$wt" checkout -q --detach "$full_sha"; } >"$log" 2>&1; then
+    if ! /bin/sh -c "$(prep_cmd "$MAIN" "$wt")" >"$log" 2>&1; then
       echo "  $machine/$backend: error (cannot pin $wt to $run_sha)"
       record "$machine" "$backend" error "$(( $(date +%s) - started ))" "$log"
       fingerprint "$log" >"${log%.log}.fingerprint"
       continue
     fi
-    perl -e 'alarm shift; exec @ARGV' "$CAP" \
-      /bin/sh -c "$(dune_cmd "$backend" "$wt")" >"$log" 2>&1
+    capped /bin/sh -c "$(test_cmd "$backend" "$wt")" >"$log" 2>&1
     rc=$?
   fi
 
   elapsed=$(( $(date +%s) - started ))
-  # perl's alarm kills with SIGALRM (142); distinguish it from a test failure,
-  # since a hang and a red test call for different responses.
+  # A hang and a red test call for different responses, so keep them apart. 142
+  # is capped()'s local expiry (128+SIGALRM); 124 is what coreutils `timeout`
+  # reports on the remote path.
   case $rc in
     0) outcome=pass ;;
-    142) outcome=timeout ;;
+    124 | 142) outcome=timeout ;;
     *) outcome=fail ;;
   esac
   echo "  $machine/$backend: $outcome (${elapsed}s)"
