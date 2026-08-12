@@ -255,6 +255,25 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   is an executed BITWISE comparison against the same schedule with barriers re-inserted
   (`schedule_pipelined_matmul`) — adding barriers is always conservative, which makes that reference
   sound no matter what the elision does.
+- The CUDA `cp.async` arm (gh-ocannl-487 phase 2, `C_syntax_config.async_copy`) keeps that
+  discipline by never touching the intrinsic's brackets: an async copy is only complete for the
+  issuing thread after a wait, and only visible to the workgroup after a barrier that FOLLOWS the
+  wait — so the rotor loop's body is uniformly prefixed with `ocannl_cp_async_wait_all();
+  __syncthreads();`, re-inserting for the async arm exactly the phase opener
+  `elide_staged_barriers` drops for synchronous stores (those are published by the previous
+  iteration's trailing bracket; an async copy waited AFTER a barrier is published to no one).
+  Wait-all (PTX `cp.async.wait_all` = commit_group + wait_group 0) instead of commit/wait-group
+  bookkeeping is what makes the emission per-`Set` opportunistic and safe: any staging statement
+  the arm declines (precision conversion, surviving fringe ternary, non-global source, 2-byte
+  elements — cp.async needs 4/8/16) falls back to a plain store published by the same barrier,
+  and correctness never depends on which statements were accepted. It is also why depth stays 2:
+  deeper lookahead needs per-group waits. Eligibility is per tile in `compile_proc`
+  (`current_async_tiles`; kernel logging disables it — a logged `Set` reads back what an
+  in-flight copy cannot provide). Measured on the RTX 5070 Ti (paired in-process pd1/pd2, 9
+  replicates, tf32 fragment-scope form): 512³ f32 pd2/pd1 = 0.97 median within a ~14% spread;
+  deep-K 256×256×2048 = 0.92 with all 9 replicates in 0.906–0.946 against ≤4.4% arm spread — the
+  overlap genuinely pays where the k_o loop dominates, reversing the portable form's Metal
+  ~1.4–1.5× cost and HIP's null.
 - A schedule can pass `Schedule.apply`'s validation and still be one the RENDERER cannot express:
   the pipelined-tile checks in `c_syntax.ml` (a read reached outside its rotor loop; a rotor loop no
   longer `Serial`) are positional facts about the final IR, which schedule application does not

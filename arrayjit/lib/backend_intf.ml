@@ -98,9 +98,9 @@ type mma_capability = {
           sketches propose as twins of each staged seed ([Schedule.Stage ~pipeline_depth],
           gh-ocannl-487) — a list, not a flag, so the search has a dimension. The portable
           double-buffered rendering is backend-generic, but a depth is advertised only where the
-          arm has been validated on hardware: Metal ([[2]]) in phase 1; CUDA/HIP stay empty until
-          the phase-2 [cp.async] / LDS arms land. Empty on CPU backends (cooperative staging is not
-          renderable there). *)
+          arm has been validated on hardware: Metal ([[2]], phase 1, portable form) and CUDA
+          ([[2]] on sm_80+, phase 2, the [cp.async] arm); HIP stays empty until its LDS async-copy
+          arm lands. Empty on CPU backends (cooperative staging is not renderable there). *)
 }
 [@@deriving sexp, compare, equal]
 (** Tensor-core capability descriptor (docs/proposals/tensorize-mma.md §6). Which operand precisions
