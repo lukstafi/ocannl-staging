@@ -152,6 +152,7 @@ let known_config_keys =
       "strict_failure_classification";
       (* Analytic cost model (gh-ocannl-491) *)
       "autotune_keep_fraction";
+      "autotune_bound_pruning";
       "autotune_calibration_file";
       "model_default_schedule";
       "model_peak_flops";

@@ -364,6 +364,11 @@ type report = {
   model_pruned : int;
       (** Of [model_scored], the candidates dropped before compilation and timing. Candidates
           without model coverage are never counted here — they are always kept. *)
+  bound_pruned : int;
+      (** Candidates the measured-incumbent bound pruning skipped before compile (gh-ocannl-514
+          phase 4b, config [autotune_bound_pruning]): their schedule-invariant roofline floor met
+          the best measured time so far — an admissible fathom, so no pruned candidate could have
+          won. Counted apart from [model_pruned] (the keep-fraction pre-filter). *)
   fissioned : bool;
       (** The winning candidate compiles as multiple fissioned kernels; [false] when nothing was
           timed. *)
