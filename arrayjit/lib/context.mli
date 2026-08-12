@@ -207,7 +207,7 @@ val copy : ?into_merge_buffer:Ir.Backend_intf.merge_buffer_use -> src:t -> dst:t
     is {b expensive on non-unified-memory backends} — prefer batching over polling.
 
     Which nodes are observable is determined by the compilation lineage's placement resolution
-    ({!placements}; the tnode's {!Ir.Tnode.field-memory_mode} only records declared intent):
+    ({!placements}; the tnode's {!Ir.Tnode.field-memory_mode_intent} only records declared intent):
     - [On_device] (materialized) nodes have a context buffer; {!to_host}/{!get_values} read it
       directly.
     - [Virtual] nodes have no buffer anywhere, but they remain observable: their defining

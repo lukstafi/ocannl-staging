@@ -355,7 +355,7 @@ type optimize_ctx = {
       (** Per-compilation-lineage memory-mode resolution
           (docs/proposals/context-scoped-memory-modes.md): the pipeline's placement decisions
           (Virtual / Local / On_device) land here, seeded by and never written back to the tnodes'
-          declared intent ({!Tnode.field-memory_mode}). *)
+          declared intent ({!Tnode.field-memory_mode_intent}). *)
   alias_candidates : Hash_set.M(Tnode).t;
       (** gh-ocannl-489 liveness-based buffer aliasing: nodes the memory planner may place at
           overlapping byte ranges within the routine's working pool (decided per compile, before
