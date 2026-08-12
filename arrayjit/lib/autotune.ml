@@ -5129,7 +5129,6 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
          would let [mma_timed] exceed [mma_candidates] on a multi-segment routine. *)
       let try_spec spec =
         !on_candidate_attempt (spec_label spec);
-        if spec_expects_mma spec then Int.incr n_mma_proposed;
         let pruned_by_bound =
           bound_prunable spec
           && Option.value_map (Lazy.force floor_bound_ms) ~default:false ~f:(fun fb ->
@@ -5142,7 +5141,10 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
             (Option.value_exn (Lazy.force floor_bound_ms))
             (snd !best_so_far);
           None)
-        else
+        else (
+        (* Counted only past the pruning gate: [mma_candidates]' contract is candidates put
+           through candidate compilation, and a bound-pruned sketch never was. *)
+        if spec_expects_mma spec then Int.incr n_mma_proposed;
         match compile_spec spec with
         | Error (Outcome.Classified classified) ->
             record_decline declines classified;
@@ -5297,6 +5299,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                   (* Not in the beam either (see above). *)
                   release_candidate c;
                   emit_partial_and_raise fatal)
+      )
       in
       (* gh-ocannl-550: the per-candidate allocation census, on the same [autotune_log] stream as the
          candidate lines it follows, so a growth curve can be read against the classes that produce
