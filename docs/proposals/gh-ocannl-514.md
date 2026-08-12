@@ -21,7 +21,12 @@ by re-proposing; it must never re-propose a refutation). Every silent filter in 
 tree now carries its witness; `refutations`/`exclusions`/`unknowns` collect them per shape.
 The parametric-op extension of `op_legality` itself (judging retype/split moves with open
 factors, for the beam/preset dimension) rides with phase 4's beam subsumption, where its
-consumer lives. Phases 3+ not started; each is its own PR.
+consumer lives. The tree judges what the seeding layer owns — site classification, caps,
+advertised capabilities, explicit configuration; builder-settled analyses (companion coverage,
+auto-probed pool rendering) stay candidate-build concerns by design, their failures being
+classified declines rather than mislabeled timings. Recorded follow-ups: an A-orientation
+site classifier (the `m_tb` analogue for forms reading A in place), plus the conv-family and
+epilogue-twin factorings. Phases 3+ not started; each is its own PR.
 **Issue**: [ahrefs/ocannl#514](https://github.com/ahrefs/ocannl/issues/514), split off #494
 (waypoint 4). Prerequisites landed: #494 waypoints 1–3 (`Ir.Affine`, the legality decision
 procedures, `Schedule.op_legality`), #491 (`Ir.Cost_model`, roofline envelope, `model_default`),

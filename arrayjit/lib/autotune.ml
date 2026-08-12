@@ -2252,6 +2252,32 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
    Subtrees are lazy so a future fathom (phase 4) can prune a choice without forcing what is below
    it; a choice whose every child was filtered out is an infeasible node with no leaves. Pinned by
    test/operations/sketch_family_tree.ml against the pre-factoring golden. *)
+(* CPU Grid shapes render on the pool only when the configuration allows it: an explicit
+   [cc_parallel_grid=none] or [cc_parallel_chunks=1] makes [C_syntax.collect_parallel_grid]
+   deterministically collect nothing, so the candidate runs serially under a Grid label. Only the
+   explicit settings are mirrored here — [auto] resolves through the backend's compiler probe and
+   pool sizing, which stay render-settled (the same seeding-vs-builder boundary as companion
+   coverage). *)
+let cpu_grid_rendering_disabled =
+  lazy
+    (let mode =
+       String.lowercase
+         (String.strip (Utils.get_global_arg ~arg_name:"cc_parallel_grid" ~default:"auto"))
+     in
+     if String.equal mode "none" then
+       Some "cc_parallel_grid=none: Grid loops render serially, the shape would time under a Grid label"
+     else
+       match
+         Int.of_string
+           (String.strip (Utils.get_global_arg ~arg_name:"cc_parallel_chunks" ~default:"0"))
+       with
+       | 1 ->
+           Some
+             "cc_parallel_chunks=1: a single chunk renders serially, the shape would time under a \
+              Grid label"
+       | _ -> None
+       | exception _ -> None)
+
 let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) site :
     sketch_params Sspace.tree =
   let divides c n = c <= n && n % c = 0 in
@@ -2381,6 +2407,13 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
   in
   let mma_child =
     match (is_gpu, limits.Ir.Backend_intf.mma) with
+    | true, Some _ when Utils.debug_log_from_routines () ->
+        (* Same predicate the GPU [mma_syntax] paths consult: under routine logging the emission
+           skips the intrinsic and renders the scalar fallback, so every leaf would be timed (and
+           cached) under a tensorized label. *)
+        Sspace.Refuted
+          "routine logging is active (debug_log_from_routines): the mma emission renders the \
+           scalar fallback, so every leaf would time under a tensorized label"
     | true, Some { Ir.Backend_intf.mma_simd_width = w; _ }
       when Option.value_map limits.Ir.Backend_intf.max_threads_per_workgroup ~default:false
              ~f:(fun cap -> w > cap) ->
@@ -2591,10 +2624,15 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                 (List.map [ 0; 64; 16 ] ~f:(fun bm ->
                      ( Printf.sprintf "bm%d" bm,
                        refute_unless
-                         [
-                           ( bm = 0 || divides bm site.m_ni,
-                             Printf.sprintf "bm=%d does not divide m=%d" bm site.m_ni );
-                         ]
+                         ([
+                            ( bm = 0 || divides bm site.m_ni,
+                              Printf.sprintf "bm=%d does not divide m=%d" bm site.m_ni );
+                          ]
+                         @
+                         (* [bm > 0] splits the rows into pool-rendered Grid blocks. *)
+                         match (bm > 0, Lazy.force cpu_grid_rendering_disabled) with
+                         | true, Some w -> [ (false, w) ]
+                         | _ -> [])
                          (fun () -> leaf { base_params with sk_mma = true; sk_bm = bm }) )))
             in
             let whole_child =
@@ -2730,6 +2768,9 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                     else Sspace.Refuted no_constant );
                   ( "hoisted-grid",
                     if not any_hoistable then Sspace.Refuted no_constant
+                    else if Option.is_some (Lazy.force cpu_grid_rendering_disabled) then
+                      Sspace.Refuted
+                        (Option.value_exn (Lazy.force cpu_grid_rendering_disabled))
                     else if
                       (* A non-hoistable B is read in place by this shape (its stage is omitted),
                          so only the clean untransposed orientation survives: transposed B
@@ -2758,6 +2799,9 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                              else leaf { p with sk_hoist = true; sk_grid = true })) );
                   ( "hoisted-grid-pack-rest",
                     if not any_hoistable then Sspace.Refuted no_constant
+                    else if Option.is_some (Lazy.force cpu_grid_rendering_disabled) then
+                      Sspace.Refuted
+                        (Option.value_exn (Lazy.force cpu_grid_rendering_disabled))
                     else if hoistable site.m_a && hoistable site.m_b then
                       Sspace.Excluded
                         "both operands are hoistable: nothing is left to pack in-kernel, the \
@@ -2779,7 +2823,10 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                                    leaf { p with sk_hoist = true; sk_grid = true; sk_pack_rest = true }))
                   );
                   ( "grid-pack-rest",
-                    if any_hoistable then
+                    if Option.is_some (Lazy.force cpu_grid_rendering_disabled) then
+                      Sspace.Refuted
+                        (Option.value_exn (Lazy.force cpu_grid_rendering_disabled))
+                    else if any_hoistable then
                       Sspace.Excluded
                         "a hoistable operand exists: the hoisted shapes cover the one-dispatch \
                          role without per-chunk re-packing"
@@ -2791,6 +2838,9 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                                | Some w -> Sspace.Refuted w
                                | None -> leaf { p with sk_grid = true; sk_pack_rest = true })) );
                   ( "grid",
+                    match Lazy.force cpu_grid_rendering_disabled with
+                    | Some w -> Sspace.Refuted w
+                    | None ->
                     subt (fun () -> geoms ~f:(fun p _ _ ->
                            (* The per-row-block A~ tile privatizes per chunk; the read-only B~
                               panel is shared and does not count against the cap. *)
