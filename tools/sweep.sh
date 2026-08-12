@@ -87,6 +87,35 @@ if [ ${#ONLY[@]} -gt 0 ]; then
   done
 fi
 
+# One sweep at a time. Every local unit reuses a single fixed worktree, so an
+# overlapping invocation -- a manual run started while the scheduled one is
+# going, which is exactly how these collide -- would reset and clean that tree
+# under a running dune. The earlier run's row would then describe a mixture of
+# revisions: the precise failure this script exists to make impossible. A
+# colliding sweep therefore refuses to start rather than queueing, so the miss is
+# loud and the routine reports it, instead of two runs quietly corrupting each
+# other. Per-invocation worktrees would also fix it, at the cost of the _build
+# reuse that makes a daily cadence affordable.
+#
+# mkdir is the atomic primitive available on every platform here; a lock whose
+# owner is gone is reclaimed rather than needing manual cleanup.
+LOCK=$STATE/lock
+if mkdir "$LOCK" 2>/dev/null; then
+  :
+else
+  owner=$(cat "$LOCK/pid" 2>/dev/null || true)
+  if [ -n "${owner:-}" ] && kill -0 "$owner" 2>/dev/null; then
+    die "another sweep is running (pid $owner); refusing to share the worktree"
+  fi
+  echo "sweep: reclaiming stale lock from pid ${owner:-unknown}" >&2
+  rm -rf "$LOCK"
+  mkdir "$LOCK" 2>/dev/null || die "cannot acquire $LOCK"
+fi
+printf '%s\n' "$$" >"$LOCK/pid"
+# Only after the lock is ours: an earlier trap would delete the holder's lock on
+# the refusal path above.
+trap 'rm -rf "$LOCK"' EXIT INT TERM
+
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 # Resolve the ref to a commit ONCE, here, and pin every machine to that commit.
 # Letting each box resolve `origin/master` itself would have them testing
@@ -121,27 +150,35 @@ wanted() {
 # backend whose slow tests are least covered elsewhere -- while its history row
 # reported only the already-known regular failure.
 #
-# $3 prefixes each dune call on the remote path, where coreutils `timeout` caps
-# the far side; locally the cap is applied by capped() around the whole shell,
-# which macOS needs anyway for want of timeout(1).
+# The cap wraps the WHOLE unit -- capped() locally, one `timeout` remotely -- not
+# each dune call. Per-call caps would let a --slow unit run for twice the budget
+# the script advertises.
+#
+# A timeout in either suite still outranks a failure in the other when the two
+# statuses combine. Otherwise, on a backend whose regular suite is known-red, a
+# slow suite that hung would be filed forever as the already-known regular
+# failure, and the distinct `timeout` verdict -- the one that says coverage was
+# lost rather than merely red -- would never appear.
 #
 # Everything below is written with printf and single quotes so that `$?` and the
 # arithmetic survive into the shell that finally runs them. The result is spliced
 # into the remote string via command substitution, which bash does not rescan.
 test_cmd() {
-  local backend=$1 wt=$2 tmo=${3:-}
-  # Double quotes, not single: on the remote path $wt is the literal string
-  # "$HOME/..." and the remote shell has to expand it.
+  local backend=$1 wt=$2
   printf 'cd "%s" || exit 2; ' "$wt"
-  printf 'OCANNL_BACKEND=%s %s opam exec -- dune runtest %s; rc1=$?; ' \
-    "$backend" "$tmo" "$TARGET"
+  printf 'OCANNL_BACKEND=%s opam exec -- dune runtest %s; rc1=$?; ' "$backend" "$TARGET"
   if [ "$SLOW" = 1 ]; then
-    printf 'OCANNL_BACKEND=%s %s opam exec -- dune build @slow; rc2=$?; ' "$backend" "$tmo"
+    printf 'OCANNL_BACKEND=%s opam exec -- dune build @slow; rc2=$?; ' "$backend"
   else
     printf 'rc2=0; '
   fi
+  printf 'for r in $rc1 $rc2; do case $r in 124|137|142) exit $r ;; esac; done; '
   printf 'exit $(( rc1 != 0 ? rc1 : rc2 ))'
 }
+
+# POSIX single-quoting, so a generated command can be handed to `sh -c` on the
+# far side without the remote shell re-splitting or re-expanding any of it.
+sq() { printf "'%s'" "$(printf %s "$1" | sed "s/'/'\\\\''/g")"; }
 
 # Cap a local command, killing its whole process group when the cap expires.
 # `perl -e 'alarm N; exec ...'` is not enough on its own: alarm survives exec, so
@@ -215,12 +252,17 @@ for unit in "${UNITS[@]}"; do
   started=$(date +%s)
 
   if [ -n "$host" ]; then
-    if ! ssh -o BatchMode=yes -o ConnectTimeout=8 "$host" true >/dev/null 2>&1; then
+    # The reachability probe doubles as the way the remote home is resolved, so
+    # every generated path is a literal and the whole test command can be
+    # single-quoted for `sh -c`. Leaving `$HOME` in it would force double quotes
+    # on the far side and leave the command open to re-expansion.
+    if ! remote_home=$(ssh -o BatchMode=yes -o ConnectTimeout=8 "$host" 'printf %s "$HOME"' 2>/dev/null) ||
+       [ -z "$remote_home" ]; then
       echo "  $machine/$backend: skip (unreachable)"
       record "$machine" "$backend" skip 0
       continue
     fi
-    wt="\$HOME/ocannl-staging-worktrees/sweep"
+    wt="$remote_home/ocannl-staging-worktrees/sweep"
     # rog needs the CUDA and WSL lib dirs on PATH; harmless elsewhere.
     path_prefix="export PATH=/usr/local/cuda/bin:/usr/lib/wsl/lib:\$PATH;"
     # Preparation is its own ssh round trip so that its failure -- a connection
@@ -229,7 +271,8 @@ for unit in "${UNITS[@]}"; do
     # have surfaced as a non-zero status in the generic branch below and been
     # written down as a FAILING SUITE, which is the opposite of the truth: a
     # remote that never got as far as dune tested nothing at all.
-    remote_prep="git -C \"\$HOME/ocannl-staging\" fetch -q origin master && $(prep_cmd "\$HOME/ocannl-staging" "$wt")"
+    remote_repo="$remote_home/ocannl-staging"
+    remote_prep="git -C \"$remote_repo\" fetch -q origin master && $(prep_cmd "$remote_repo" "$wt")"
     if ! ssh -o BatchMode=yes "$host" "$path_prefix $remote_prep" >"$log" 2>&1; then
       echo "  $machine/$backend: error (cannot pin $host to $run_sha)"
       record "$machine" "$backend" error "$(( $(date +%s) - started ))" "$log"
@@ -237,10 +280,10 @@ for unit in "${UNITS[@]}"; do
       continue
     fi
     # The cap is applied on the FAR side, where coreutils timeout exists: killing
-    # the local ssh would leave the remote dune running. Each remote host carries
-    # exactly one unit in this sweep, so a survivor there cannot contend with a
-    # later unit the way a local one could.
-    remote="$path_prefix $(test_cmd "$backend" "$wt" "timeout -k 10s ${CAP}s")"
+    # the local ssh would leave the remote dune running. ONE timeout around the
+    # whole unit, matching capped() locally -- a per-dune-call cap would let a
+    # --slow unit run for twice the budget the script advertises.
+    remote="$path_prefix timeout -k 10s ${CAP}s sh -c $(sq "$(test_cmd "$backend" "$wt")")"
     ssh -o BatchMode=yes "$host" "$remote" >"$log" 2>&1
     rc=$?
   else
@@ -269,12 +312,19 @@ for unit in "${UNITS[@]}"; do
   fi
 
   elapsed=$(( $(date +%s) - started ))
-  # A hang and a red test call for different responses, so keep them apart. 142
-  # is capped()'s local expiry (128+SIGALRM); 124 is what coreutils `timeout`
-  # reports on the remote path.
+  # A hang, a lost connection and a red test call for different responses, so
+  # keep them apart. 142 is capped()'s local expiry (128+SIGALRM); coreutils
+  # `timeout` reports 124, or 137 when its -k had to escalate to SIGKILL. 137 is
+  # also what an OOM kill looks like -- both mean the run was destroyed rather
+  # than judged, which is the distinction the outcome is carrying.
+  #
+  # ssh reserves 255 for its own transport errors, so on the remote path that is
+  # a connection lost mid-run: nothing was judged there either, which is `error`
+  # (non-coverage) rather than a failing suite. Locally 255 is just an exit code.
   case $rc in
     0) outcome=pass ;;
-    124 | 142) outcome=timeout ;;
+    124 | 137 | 142) outcome=timeout ;;
+    255) [ -n "$host" ] && outcome=error || outcome=fail ;;
     *) outcome=fail ;;
   esac
   echo "  $machine/$backend: $outcome (${elapsed}s)"
