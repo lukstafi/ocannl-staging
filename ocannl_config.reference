@@ -397,6 +397,17 @@
 # are never pruned.
 #autotune_keep_fraction=1
 
+# If true, `Autotune.tune` prunes enumerative sketch candidates (whole-routine and per-segment
+# sketches, split-reduce seeds) whose schedule-invariant roofline FLOOR
+# (`Cost_model.completion_floor` under the envelope constants) meets the best measured time so
+# far: such a candidate provably cannot win, so its compile and timing are skipped
+# (gh-ocannl-514 phase 4b; the report's bound_pruned counts them). Admissible-direction pruning
+# only — presets, saved schedules and the serial baseline are never pruned, and pruning is
+# sound exactly when the envelope constants are honest peaks (the continuous bound-vs-measured
+# agreement check guards them; an understated envelope over-prunes, which is why this is off by
+# default and changes which candidates get timed when on).
+#autotune_bound_pruning=false
+
 # When non-empty, `Autotune.tune` appends one tab-separated calibration row per timed candidate
 # to this file: backend, digest tag, candidate label, measured ms, model-roofline ms (empty when
 # the model cannot score the candidate), kernel count, flops, bytes, flops-approx flag,

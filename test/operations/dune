@@ -1765,6 +1765,36 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; Bound pruning against the measured incumbent (gh-ocannl-514 phase 4b). Run by a rule so the
+; backend, the gate and the tiny envelope are pinned on the command line — the floor then
+; dwarfs any measured time, pruning every sketch deterministically on any machine.
+(executable
+ (name autotune_bound_pruning)
+ (modules autotune_bound_pruning)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(rule
+ (target autotune_bound_pruning.actual)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (action
+  (with-stdout-to
+   %{target}
+   (run
+    %{dep:autotune_bound_pruning.exe}
+    "--ocannl_backend=cc"
+    "--ocannl_autotune_bound_pruning=true"
+    "--ocannl_model_peak_flops=1e3"
+    "--ocannl_model_peak_memory_bandwidth=1e3"))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff autotune_bound_pruning.expected autotune_bound_pruning.actual)))
+
 ; The dual (floor) extraction over the same hand-checkable style of programs
 ; (Ir.Cost_model.completion_floor, gh-ocannl-514 phase 3).
 (test

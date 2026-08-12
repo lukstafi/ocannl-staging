@@ -44,6 +44,11 @@ type report = {
           a duplicate digest means an identical candidate was already timed. *)
   model_scored : int;
   model_pruned : int;
+  bound_pruned : int;
+      (** Candidates the measured-incumbent bound pruning skipped before compile (gh-ocannl-514
+          phase 4b, config [autotune_bound_pruning]): their schedule-invariant roofline floor met
+          the best measured time so far. Counted apart from [model_pruned] (the keep-fraction
+          pre-filter) so the fathomed-vs-timed ledger attributes each mechanism. *)
   fissioned : bool;
   baseline_ms : float;
   default_ms : float option;
@@ -82,6 +87,7 @@ let no_search_report =
     mma_timed = 0;
     model_scored = 0;
     model_pruned = 0;
+    bound_pruned = 0;
     fissioned = false;
     baseline_ms = Float.infinity;
     default_ms = None;
@@ -3393,6 +3399,28 @@ let bs_label = function None -> "cfg" | Some b -> Int.to_string b
 let calibration_file =
   lazy (String.strip (Utils.get_global_arg ~arg_name:"autotune_calibration_file" ~default:""))
 
+(* Bound pruning against the measured incumbent (gh-ocannl-514 phase 4b): a sketch candidate whose
+   schedule-invariant roofline floor meets the best measured time so far provably cannot win, so
+   its compile and timing are skipped — the admissible-direction pruning of the issue's tuned
+   regime. Default off: it changes which candidates get timed (reports, test goldens), and its
+   soundness rests on honest envelope constants — the continuous agreement check guards them, but
+   an understated envelope over-prunes, so the gate is explicit. Only the enumerative sketch
+   flavors are prunable: presets, saved schedules and the baseline keep their reporting and
+   cache-replay roles regardless of winnability, mirroring the keep-fraction pre-filter's
+   exemptions. *)
+let bound_pruning_enabled =
+  lazy
+    (match
+       String.lowercase
+         (String.strip (Utils.get_global_arg ~arg_name:"autotune_bound_pruning" ~default:"false"))
+     with
+    | "true" | "1" -> true
+    | _ -> false)
+
+let bound_prunable = function
+  | Whole (W_sketch _) | Fiss (F_sketch _) | Fiss (F_split _) -> true
+  | _ -> false
+
 let emit_calibration ~backend ~limits ~label ~digest ~measured_ms (opts : LL.optimized list) =
   let file = Lazy.force calibration_file in
   let peak_flops, peak_memory_bandwidth = envelope ~limits in
@@ -4702,6 +4730,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                   mma_timed = 0;
                   model_scored = 0;
                   model_pruned = 0;
+                  bound_pruned = 0;
                   fissioned = is_fissioned c.form;
                   baseline_ms = entry.SC.baseline_ms;
                   default_ms =
@@ -4900,6 +4929,21 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
         Option.exists best_c ~f:(fun c -> saved_is_tensorized (flat_schedule c.form))
       in
       let n_model_scored = ref 0 and n_model_pruned = ref 0 in
+      let n_bound_pruned = ref 0 in
+      (* The schedule-invariant floor (gh-ocannl-514 phases 3-4): sketch completions share the
+         base program's semantics, so one floor bounds every prunable candidate; computed once,
+         only under the explicit gate. *)
+      let floor_bound_ms =
+        lazy
+          (if not (Lazy.force bound_pruning_enabled) then None
+           else
+             let peak_flops, peak_memory_bandwidth = envelope ~limits in
+             let f = CM.completion_floor base_opt.LL.llc in
+             Option.map
+               (CM.roofline_seconds ?peak_flops ?peak_memory_bandwidth ~flops:f.CM.fr_flops
+                  ~bytes:f.CM.fr_bytes ())
+               ~f:(fun sec -> sec *. 1e3))
+      in
       let n_fiss_sketch_timed = ref 0 and n_sr_timed = ref 0 in
       let rounds_run = ref 0 in
       let n_sketch_candidates = ref 0
@@ -5032,6 +5076,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
             mma_timed = !n_mma_timed;
             model_scored = !n_model_scored;
             model_pruned = !n_model_pruned;
+            bound_pruned = !n_bound_pruned;
             fissioned = Option.exists best_c ~f:(fun c -> is_fissioned c.form);
             baseline_ms;
             default_ms = default_ms ();
@@ -5085,6 +5130,19 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
       let try_spec spec =
         !on_candidate_attempt (spec_label spec);
         if spec_expects_mma spec then Int.incr n_mma_proposed;
+        let pruned_by_bound =
+          bound_prunable spec
+          && Option.value_map (Lazy.force floor_bound_ms) ~default:false ~f:(fun fb ->
+                 (* Equality prunes: displacing the incumbent needs strict improvement. *)
+                 Float.(fb >= snd !best_so_far))
+        in
+        if pruned_by_bound then (
+          Int.incr n_bound_pruned;
+          logf "%s: BOUND-PRUNED (floor %.4f ms >= best %.4f ms)" (spec_label spec)
+            (Option.value_exn (Lazy.force floor_bound_ms))
+            (snd !best_so_far);
+          None)
+        else
         match compile_spec spec with
         | Error (Outcome.Classified classified) ->
             record_decline declines classified;
@@ -5605,6 +5663,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
           mma_timed = !n_mma_timed;
           model_scored = !n_model_scored;
           model_pruned = !n_model_pruned;
+          bound_pruned = !n_bound_pruned;
           fissioned = Option.exists best_c ~f:(fun c -> is_fissioned c.form);
           baseline_ms;
           default_ms = default_ms ();

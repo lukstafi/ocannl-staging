@@ -52,11 +52,18 @@ uniform bound (sketch completions share the base program's semantics, so the flo
 all; it fathoms the family exactly when the incumbent already achieves it — the memory-bound
 kernels where the default preset is optimal). Selections are unchanged (goldens byte-identical);
 the not-yet-factored levels (epilogue twins, conv family) compete through the flat path at the
-tightened threshold, after the tree's leaves like the flat seeds-then-twins order. Remaining for
-phase 4b: the measured-incumbent tuned path (pruning `tune`'s candidate timing against the
-incumbent's measured time in the admissible direction, top-K leaf measurement) and the
-placement-space search where phase 3's non-uniform floors actually differentiate subtrees;
-phase 5 makes the family bounds non-uniform via symbolic tile extents.
+tightened threshold, after the tree's leaves like the flat seeds-then-twins order. Phase 4b (first half) implemented: bound pruning against the measured incumbent in `tune` —
+an enumerative sketch candidate (whole-routine/per-segment sketches, split-reduce seeds) whose
+schedule-invariant roofline floor meets the best measured time so far is skipped before
+compile, the admissible-direction pruning of the tuned regime; config-gated
+(`autotune_bound_pruning`, default off — it changes which candidates get timed, and soundness
+rests on honest envelope constants, which the continuous agreement check guards but an
+understated envelope over-prunes). Presets, saved schedules and the baseline are never pruned
+(their reporting and cache-replay roles outlive winnability), and the report's `bound_pruned`
+counts the fathoms apart from the keep-fraction pre-filter's. Remaining: the placement-space
+search where phase 3's non-uniform floors differentiate subtrees (the joint inline × tile ×
+fission space of the issue's routing comments); phase 5 makes the family bounds non-uniform
+via symbolic tile extents; phase 6 is the evaluation over `benchmarks/`.
 **Issue**: [ahrefs/ocannl#514](https://github.com/ahrefs/ocannl/issues/514), split off #494
 (waypoint 4). Prerequisites landed: #494 waypoints 1–3 (`Ir.Affine`, the legality decision
 procedures, `Schedule.op_legality`), #491 (`Ir.Cost_model`, roofline envelope, `model_default`),
