@@ -110,10 +110,21 @@ fi
 # other. Per-invocation worktrees would also fix it, at the cost of the _build
 # reuse that makes a daily cadence affordable.
 #
-# mkdir is the atomic primitive available on every platform here; a lock whose
-# owner is gone is reclaimed rather than needing manual cleanup.
+# The lock is an flock on an inherited descriptor rather than a directory plus a
+# pid file, so the KERNEL owns its lifetime. That removes the whole class of
+# problems a hand-rolled lock has: nothing to reclaim after a crash, no window
+# between creating the lock and publishing ownership, and no dependence on
+# `kill -0`, which answers only "does SOME process hold this pid" -- a recycled
+# pid belonging to an unrelated long-lived process would otherwise refuse every
+# sweep for as long as that process lived.
 #
-# The lock lives beside the WORKTREE, not under $STATE. OCANNL_SWEEP_STATE is a
+# perl takes the lock and exits, but a lock belongs to the open file DESCRIPTION,
+# which this shell still holds through fd 9; it is released when the last holder
+# closes it. Children inherit fd 9 deliberately: if the sweep is killed outright
+# mid-build, the orphaned dune keeps the lock, which is right -- the worktree
+# really is still in use -- and the lock clears by itself when that orphan exits.
+#
+# It lives beside the WORKTREE, not under $STATE. OCANNL_SWEEP_STATE is a
 # supported override -- it is how this script gets tested against a throwaway
 # history -- and keying the lock there would split the lock namespace while
 # leaving the worktree shared, so a run with its own state directory would walk
@@ -121,44 +132,20 @@ fi
 # belongs in the same namespace as the resource it protects.
 LOCAL_WT=$HOME/ocannl-staging-worktrees/sweep
 LOCK=$LOCAL_WT.lock
-if mkdir "$LOCK" 2>/dev/null; then
-  :
-else
-  owner=$(cat "$LOCK/pid" 2>/dev/null || true)
-  if [ -z "${owner:-}" ]; then
-    # No pid recorded yet. Almost always that means another sweep is between its
-    # mkdir and its pid write -- it is very much alive, and reading the absence
-    # as staleness would let both run. Only a lock old enough that a
-    # mid-publication window cannot explain it is treated as abandoned.
-    if [ -z "$(find "$LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
-      die "another sweep is starting up; refusing to share the worktree"
-    fi
-    echo "sweep: reclaiming abandoned lock with no owner recorded" >&2
-  elif kill -0 "$owner" 2>/dev/null; then
-    die "another sweep is running (pid $owner); refusing to share the worktree"
-  else
-    echo "sweep: reclaiming stale lock from pid $owner" >&2
-  fi
-  # Reclamation itself is best-effort: two sweeps starting simultaneously onto
-  # the SAME stale lock could both get here. Holding that off needs a real lock
-  # primitive rather than a directory, and the case it guards -- a crashed sweep
-  # plus a simultaneous double start -- is not worth that. The common path, a
-  # live holder, is exact.
-  rm -rf "$LOCK"
-  mkdir "$LOCK" 2>/dev/null || die "cannot acquire $LOCK"
-fi
-printf '%s\n' "$$" >"$LOCK/pid"
-# Only after the lock is ours: an earlier trap would delete the holder's lock on
-# the refusal path above.
-#
-# The signal handlers terminate rather than sharing the EXIT body. Bash runs a
-# trap and then RESUMES after the interrupted command, so one handler across
-# EXIT INT TERM would release the lock while this sweep kept running dune --
-# letting a second sweep reset the worktree underneath it, and letting this
-# process's later EXIT trap delete that second sweep's lock in turn.
-trap 'rm -rf "$LOCK"' EXIT
-trap 'rm -rf "$LOCK"; exit 130' INT
-trap 'rm -rf "$LOCK"; exit 143' TERM
+# The parent will not exist on a machine that has never run a sweep, and
+# bootstrapping is the one path a developer machine never exercises: without this
+# the open below fails, and the failure would surface as a confusing complaint
+# about another sweep rather than as a missing directory.
+mkdir -p "$(dirname "$LOCK")" || die "cannot create $(dirname "$LOCK")"
+exec 9>"$LOCK" || die "cannot open $LOCK"
+perl -e 'use Fcntl ":flock"; exit(flock(STDIN, LOCK_EX | LOCK_NB) ? 0 : 1)' <&9 ||
+  die "another sweep is running; refusing to share the worktree"
+
+# Nothing to release, so these only stop bash from RESUMING after the interrupted
+# command: it runs a trap and then carries on where it left off, which for a
+# sweep means continuing to the next unit as though nothing had happened.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 # Resolve the ref to a commit ONCE, here, and pin every machine to that commit.
