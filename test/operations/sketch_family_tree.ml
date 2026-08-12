@@ -1,10 +1,12 @@
 (* gh-ocannl-514 phase 1: the matmul sketch family as a refinement tree.
 
-   The flat sections below pin the family's seed enumeration — recorded against the hand-written
-   enumeration BEFORE the tree refactor, so the factoring must reproduce it list-for-list (order
-   included: enumeration order reaches candidate timing order and dedup keep-first). Synthetic
-   limits keep every leg machine-independent — seeding is a pure function of the lowering, so the
-   GPU legs enumerate (and twin: swizzle, pipeline depth) without any GPU present.
+   The flat sections below pin the family's seed enumeration — originally recorded against the
+   hand-written enumeration before the tree refactor (which reproduced it list-for-list, order
+   included: enumeration order reaches candidate timing order and dedup keep-first); the phase-2
+   pre-compile refutations have since deliberately removed statically-doomed entries (e.g. the
+   single-row-block whole-triple Grid form), pinned here as behavior. Synthetic limits keep every
+   leg machine-independent — seeding is a pure function of the lowering, so the GPU legs
+   enumerate (and twin: swizzle, pipeline depth) without any GPU present.
 
    The site is a 64x64x64 f32 matmul: every tile geometry in the curated menus divides it, so the
    menus enumerate in full. *)
@@ -106,7 +108,8 @@ let rec print_tree ~indent tree =
             | Sspace.Unknown (w, sub) ->
                 Stdio.printf "%s%s = %s  [unknown: %s]\n" indent level label w;
                 print_tree ~indent:(indent ^ "  ") (Lazy.force sub)
-            | Sspace.Excluded w -> Stdio.printf "%s%s = %s  [excluded: %s]\n" indent level label w
+            | Sspace.Excluded (w, _) ->
+                Stdio.printf "%s%s = %s  [excluded: %s]\n" indent level label w
             | Sspace.Refuted w -> Stdio.printf "%s%s = %s  [refuted: %s]\n" indent level label w)
 
 (* The three verdict collectors: a shape's pre-compilation decline explanations (gh-ocannl-479),
@@ -253,4 +256,28 @@ let () =
   in
   let%op wmm = av +* "ik;kj=>ij" wn in
   let opt_w = with_lowering ~name:"sft_wide" wmm in
-  awkward_section "wide-N cpu" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_w
+  awkward_section "wide-N cpu" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_w;
+  (* The lift operation: an Excluded child's payload is the same judgment with only that policy
+     lifted, still subject to legality — the serial shape's economy-capped geometry recovers a
+     leaf, while the Grid shapes' lifted payloads re-refute on the single-row-block rule. *)
+  (match Autotune.matmul_sketch_tree ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_w with
+  | None -> Stdio.printf "wide-N: no site\n"
+  | Some tree ->
+      let rec lift_all t =
+        match t with
+        | Sspace.Leaf p -> Sspace.Leaf p
+        | Sspace.Choice { level; children } ->
+            Sspace.Choice
+              {
+                level;
+                children =
+                  List.map children ~f:(fun (l, c) ->
+                      ( l,
+                        match Sspace.lift_excluded c with
+                        | Sspace.Child sub -> Sspace.Child (lazy (lift_all (Lazy.force sub)))
+                        | c -> c ));
+              }
+      in
+      Stdio.printf "wide-N leaves: %d; with exclusions lifted: %d\n"
+        (List.length (Sspace.leaves tree))
+        (List.length (Sspace.leaves (lift_all tree))))

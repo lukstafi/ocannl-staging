@@ -42,10 +42,14 @@ type 'a child =
           permissively detected site whose mis-detections only candidate compilation rejects), so
           the subtree stays enumerable and a fathom must never prune it; its completions settle at
           candidate compile. *)
-  | Excluded of string
+  | Excluded of string * 'a child Lazy.t
       (** Valid but not proposed: default-policy search economy (a dominated or degenerate shape,
-          a twin whose measured cost exceeds its possible win). The witness states the policy. A
-          later driver may lift the exclusion; {!leaves} does not enumerate it. *)
+          a twin whose measured cost exceeds its possible win). The witness states the policy;
+          the payload is the {e same judgment with only this policy lifted} — forcing it is the
+          driver's lift operation ({!lift_excluded}), and the result remains subject to legality
+          (a lifted branch may still be [Refuted] on other grounds). {!leaves}, {!enumerate} and
+          the collectors treat the exclusion as opaque: they neither enumerate nor descend into
+          the payload. *)
   | Refuted of string
       (** The [Op_illegal] analogue, quantified over completions: {e no} completion below this
           child satisfies the family's contract — an op precondition, a resource cap, or a
@@ -83,6 +87,12 @@ val exclusions : 'a tree -> ((string * string) list * string) list
 val unknowns : 'a tree -> ((string * string) list * string) list
 (** Every [Unknown] child with path and witness — the branches whose verdicts only candidate
     compilation settles; a fathom must treat them as feasible. *)
+
+val lift_excluded : 'a child -> 'a child
+(** The policy-lift operation: [Excluded (_, payload)] becomes the forced payload — the same
+    judgment with only that one policy lifted, still subject to legality; any other child is
+    returned unchanged. Lifting is per exclusion: a payload may itself contain further
+    [Excluded] children deeper in its subtree. *)
 
 val count_choices : 'a tree -> int
 (** Interior (decision) nodes reachable through [Child]/[Unknown]; forces them. *)

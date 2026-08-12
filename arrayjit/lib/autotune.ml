@@ -2561,18 +2561,21 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                                           && divides bk site.m_nk)
                                       then
                                         Sspace.Excluded
-                                          "pad-masked site: Tensorize stays on the \
-                                           barrier-bracketed arm, so the twin could only pay the \
-                                           doubled shared-memory footprint (Codex P2 on PR #303)"
+                                          ( "pad-masked site: Tensorize stays on the \
+                                             barrier-bracketed arm, so the twin could only pay \
+                                             the doubled shared-memory footprint (Codex P2 on PR \
+                                             #303)",
+                                            lazy (leaf { base with sk_depth = d }) )
                                       else if
                                         Ir.Ops.prec_in_bytes a_prec < 4
                                         || Ir.Ops.prec_in_bytes b_prec < 4
                                       then
                                         Sspace.Excluded
-                                          "below the async arms' 4-byte element floor: only the \
-                                           synchronous form would render — the occupancy cost \
-                                           phase 1 measured, with no overlap to buy back (Codex \
-                                           P2 on PR #317)"
+                                          ( "below the async arms' 4-byte element floor: only \
+                                             the synchronous form would render — the occupancy \
+                                             cost phase 1 measured, with no overlap to buy back \
+                                             (Codex P2 on PR #317)",
+                                            lazy (leaf { base with sk_depth = d }) )
                                       else leaf { base with sk_depth = d } ))
                             in
                             subt (fun () -> choice "twin"
@@ -2628,8 +2631,18 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                             ( bm = 0 || divides bm site.m_ni,
                               Printf.sprintf "bm=%d does not divide m=%d" bm site.m_ni );
                           ]
+                         @ (* [bm > 0] splits the rows into pool-rendered Grid blocks — which
+                              needs at least two of them, or the Grid loop renders serially under
+                              a Grid label, like the packed shapes' guard. *)
+                         (if bm > 0 && blocks_of site.m_ni bm < 2 then
+                            [
+                              ( false,
+                                Printf.sprintf
+                                  "bm=%d gives %d row block(s); a Grid split needs at least 2" bm
+                                  (blocks_of site.m_ni bm) );
+                            ]
+                          else [])
                          @
-                         (* [bm > 0] splits the rows into pool-rendered Grid blocks. *)
                          match (bm > 0, Lazy.force cpu_grid_rendering_disabled) with
                          | true, Some w -> [ (false, w) ]
                          | _ -> [])
@@ -2746,7 +2759,11 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                        ( label,
                          match verdict with
                          | Some (`Refute w) -> Sspace.Refuted w
-                         | Some (`Exclude w) -> Sspace.Excluded w
+                         | Some (`Exclude w) ->
+                             (* The payload re-judges the geometry under the shape with only the
+                                economy threshold lifted — it may still refute (block counts,
+                                per-chunk caps). *)
+                             Sspace.Excluded (w, lazy (f p full_div tiles_bytes))
                          | None -> f p full_div tiles_bytes )))
               in
               let any_hoistable = hoistable site.m_a || hoistable site.m_b in
@@ -2804,8 +2821,14 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                         (Option.value_exn (Lazy.force cpu_grid_rendering_disabled))
                     else if hoistable site.m_a && hoistable site.m_b then
                       Sspace.Excluded
-                        "both operands are hoistable: nothing is left to pack in-kernel, the \
-                         shape degenerates to hoisted-grid"
+                        ( "both operands are hoistable: nothing is left to pack in-kernel, the \
+                           shape degenerates to hoisted-grid",
+                          lazy
+                            (subt (fun () -> geoms ~f:(fun p _ _ ->
+                                 if not (grid_ok p) then Sspace.Refuted (too_few_blocks p)
+                                 else
+                                   leaf
+                                     { p with sk_hoist = true; sk_grid = true; sk_pack_rest = true }))) )
                     else
                       subt (fun () -> geoms ~f:(fun p _ _ ->
                              let bn_eff = if p.sk_bn = 0 then site.m_nj else p.sk_bn in
@@ -2828,8 +2851,16 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                         (Option.value_exn (Lazy.force cpu_grid_rendering_disabled))
                     else if any_hoistable then
                       Sspace.Excluded
-                        "a hoistable operand exists: the hoisted shapes cover the one-dispatch \
-                         role without per-chunk re-packing"
+                        ( "a hoistable operand exists: the hoisted shapes cover the one-dispatch \
+                           role without per-chunk re-packing",
+                          lazy
+                            (subt (fun () -> geoms ~f:(fun p _ tiles_bytes ->
+                                 if not (grid_ok p) then Sspace.Refuted (too_few_blocks p)
+                                 else
+                                   match over_chunk_cap ~what:"per-chunk packed tiles" tiles_bytes
+                                   with
+                                   | Some w -> Sspace.Refuted w
+                                   | None -> leaf { p with sk_grid = true; sk_pack_rest = true }))) )
                     else
                       subt (fun () -> geoms ~f:(fun p _ tiles_bytes ->
                              if not (grid_ok p) then Sspace.Refuted (too_few_blocks p)

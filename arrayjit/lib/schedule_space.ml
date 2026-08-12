@@ -8,7 +8,7 @@ type placement = Pl_inline | Pl_stage_at of Indexing.symbol | Pl_materialize
 type 'a child =
   | Child of 'a tree Lazy.t
   | Unknown of string * 'a tree Lazy.t
-  | Excluded of string
+  | Excluded of string * 'a child Lazy.t
   | Refuted of string
 
 and 'a tree = Leaf of 'a | Choice of { level : string; children : (string * 'a child) list }
@@ -16,6 +16,8 @@ and 'a tree = Leaf of 'a | Choice of { level : string; children : (string * 'a c
 let subtree = function
   | Child sub | Unknown (_, sub) -> Some sub
   | Excluded _ | Refuted _ -> None
+
+let lift_excluded = function Excluded (_, c) -> Lazy.force c | c -> c
 
 let rec leaves = function
   | Leaf a -> [ a ]
@@ -53,7 +55,7 @@ let collect ~f tree =
   go [] tree
 
 let refutations tree = collect tree ~f:(function Refuted w -> Some w | _ -> None)
-let exclusions tree = collect tree ~f:(function Excluded w -> Some w | _ -> None)
+let exclusions tree = collect tree ~f:(function Excluded (w, _) -> Some w | _ -> None)
 let unknowns tree = collect tree ~f:(function Unknown (w, _) -> Some w | _ -> None)
 
 let rec count_choices = function

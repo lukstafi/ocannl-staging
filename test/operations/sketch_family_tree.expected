@@ -1,24 +1,23 @@
-== cpu simd32: 20 seeds ==
+== cpu simd32: 19 seeds ==
  0  gpu:false mma:false simd:0  bm:16  bn:16  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
  1  gpu:false mma:false simd:0  bm:8   bn:8   bk:8   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
  2  gpu:false mma:false simd:0  bm:16  bn:16  bk:16  tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
  3  gpu:false mma:false simd:0  bm:8   bn:8   bk:8   tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
  4  gpu:false mma:true simd:0  bm:0   bn:0   bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
- 5  gpu:false mma:true simd:0  bm:64  bn:0   bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
- 6  gpu:false mma:true simd:0  bm:16  bn:0   bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
- 7  gpu:false mma:true simd:0  bm:64  bn:0   bk:64  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
- 8  gpu:false mma:true simd:0  bm:64  bn:0   bk:256 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
- 9  gpu:false mma:true simd:0  bm:128 bn:128 bk:128 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
-10  gpu:false mma:true simd:0  bm:64  bn:128 bk:256 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
-11  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
-12  gpu:false mma:true simd:0  bm:64  bn:0   bk:64  tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
-13  gpu:false mma:true simd:0  bm:64  bn:0   bk:256 tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
-14  gpu:false mma:true simd:0  bm:128 bn:128 bk:128 tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
-15  gpu:false mma:true simd:0  bm:64  bn:128 bk:256 tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
-16  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
-17  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:true grid:true packrest:false epi:false swz:- depth:1
-18  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:true grid:true packrest:true epi:false swz:- depth:1
-19  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:true packrest:false epi:false swz:- depth:1
+ 5  gpu:false mma:true simd:0  bm:16  bn:0   bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 6  gpu:false mma:true simd:0  bm:64  bn:0   bk:64  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 7  gpu:false mma:true simd:0  bm:64  bn:0   bk:256 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 8  gpu:false mma:true simd:0  bm:128 bn:128 bk:128 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 9  gpu:false mma:true simd:0  bm:64  bn:128 bk:256 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+10  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+11  gpu:false mma:true simd:0  bm:64  bn:0   bk:64  tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
+12  gpu:false mma:true simd:0  bm:64  bn:0   bk:256 tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
+13  gpu:false mma:true simd:0  bm:128 bn:128 bk:128 tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
+14  gpu:false mma:true simd:0  bm:64  bn:128 bk:256 tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
+15  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
+16  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:true grid:true packrest:false epi:false swz:- depth:1
+17  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:true grid:true packrest:true epi:false swz:- depth:1
+18  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:true packrest:false epi:false swz:- depth:1
 == gpu plain: 10 seeds ==
  0  gpu:true mma:false simd:0  bm:64  bn:64  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
  1  gpu:true mma:false simd:0  bm:32  bn:32  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
@@ -63,8 +62,7 @@ pipeline = tensorized
   tensorized-form = whole-triple
     row-block = bm0
       * gpu:false mma:true simd:0  bm:0   bn:0   bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
-    row-block = bm64
-      * gpu:false mma:true simd:0  bm:64  bn:0   bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+    row-block = bm64  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
     row-block = bm16
       * gpu:false mma:true simd:0  bm:16  bn:0   bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
   tensorized-form = packed
@@ -224,10 +222,11 @@ tree leaves = flat enumeration: true
   pipeline=tensorized > geometry=bm32 bn32 bk32: staged operand tiles need 8192 bytes of workgroup memory, exceeding the 6144-byte limit
   pipeline=tensorized > geometry=bm32 bn32 bk16 > twin=depth2: staged operand tiles need 8192 bytes of workgroup memory at pipeline depth 2, exceeding the 6144-byte limit
   pipeline=tensorized > geometry=bm32 bn32 bk16 > twin=depth3: pipeline depth 3 is outside the implemented range 1..2 (Schedule.apply_stage)
-== wide-N cpu: 11 seeds ==
+== wide-N cpu: 10 seeds ==
 tree leaves = flat enumeration: true
 -- refuted --
   pipeline=blocktile > packing=hoisted: hoisted packing needs a host-init-backed constant operand; neither operand is one
+  pipeline=tensorized > tensorized-form=whole-triple > row-block=bm64: bm=64 gives 1 row block(s); a Grid split needs at least 2
   pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted: no host-init-backed constant operand to pack at link time
   pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid: no host-init-backed constant operand to pack at link time
   pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid-pack-rest: no host-init-backed constant operand to pack at link time
@@ -241,3 +240,4 @@ tree leaves = flat enumeration: true
   pipeline=tensorized > tensorized-form=packed > packing-shape=serial > geometry=bm64 bn0 bk256: packed tiles (589824 bytes) exceed the 262144-byte stack/cache-economy threshold (heuristic, not a compiler limit)
   pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk256: packed tiles (589824 bytes) exceed the 262144-byte stack/cache-economy threshold (heuristic, not a compiler limit)
   pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk256: packed tiles (589824 bytes) exceed the 262144-byte stack/cache-economy threshold (heuristic, not a compiler limit)
+wide-N leaves: 10; with exclusions lifted: 11
