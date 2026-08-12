@@ -87,9 +87,13 @@ type mma_emission = a_ptr:PPrint.document -> b_ptr:PPrint.document -> PPrint.doc
 type async_copy_syntax = {
   ac_copy : dst:PPrint.document -> src:PPrint.document -> bytes:int -> PPrint.document;
       (** One element-sized asynchronous global→workgroup-shared copy statement; [dst] and [src]
-          are element addresses ([&ident\[offset\]]) and [bytes] the element size (4, 8 or 16 —
-          the hardware copy sizes). The copy is byte-for-byte: eligibility (same storage precision
-          on both sides, no value transformation) is the caller's check. *)
+          are element addresses ([&ident\[offset\]]) and [bytes] the element size — 4 or 8 today.
+          The hardware also copies 16, but a 16-byte copy requires a 16-byte-aligned destination,
+          and plain workgroup-shared declarations align to the element type only (4 for
+          [uint4x32_t]) — so 16 stays out of the per-element eligibility until a rendering
+          guarantees the alignment (Codex P2 on PR #317). The copy is byte-for-byte: eligibility
+          (same storage precision on both sides, no value transformation) is the caller's check.
+      *)
   ac_wait_all : string;
       (** Statement completing every asynchronous copy issued so far by the calling thread,
           committed or not (CUDA [cp.async.wait_all]). Cross-thread visibility still needs the
@@ -4210,16 +4214,19 @@ module C_syntax (B : C_syntax_config) = struct
     current_pipelined := pipelined;
     (* gh-487 phase 2: which pipelined tiles stage asynchronously — backend hook present, no
        kernel logging (logged [Set]s read the written value back, which an in-flight copy cannot
-       provide), and an element size the hardware copies (4/8/16 bytes; 2-byte tiles keep the
-       portable form). Per-tile, not per-statement: the rotor loop's wait+barrier prefix keys on
-       the same set, so a tile with only ineligible statements merely pays a redundant wait. *)
+       provide), and an element size the hardware copies at the alignment plain shared
+       declarations guarantee (4/8 bytes: element-type alignment; sub-4-byte tiles keep the
+       portable form, and 16-byte elements are excluded until a rendering guarantees 16-byte
+       destination alignment — see {!type-async_copy_syntax}). Per-tile, not per-statement: the
+       rotor loop's wait+barrier prefix keys on the same set, so a tile with only ineligible
+       statements merely pays a redundant wait. *)
     current_async_tiles :=
       (match B.async_copy with
       | Some _ when not (Utils.debug_log_from_routines ()) ->
           Map.keys pipelined
           |> List.filter ~f:(fun tn ->
                  match Ops.prec_in_bytes (Lazy.force tn.Tn.storage_prec) with
-                 | 4 | 8 | 16 -> true
+                 | 4 | 8 -> true
                  | _ -> false)
           |> Set.of_list (module Tn)
       | _ -> Set.empty (module Tn));

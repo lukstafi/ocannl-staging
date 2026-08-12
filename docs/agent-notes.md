@@ -264,8 +264,10 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   iteration's trailing bracket; an async copy waited AFTER a barrier is published to no one).
   Wait-all (PTX `cp.async.wait_all` = commit_group + wait_group 0) instead of commit/wait-group
   bookkeeping is what makes the emission per-`Set` opportunistic and safe: any staging statement
-  the arm declines (precision conversion, surviving fringe ternary, non-global source, 2-byte
-  elements — cp.async needs 4/8/16) falls back to a plain store published by the same barrier,
+  the arm declines (precision conversion, surviving fringe ternary, non-global source, elements
+  outside 4/8 bytes — sub-4-byte has no cp.async size, and 16-byte needs a destination alignment
+  plain shared declarations don't guarantee) falls back to a plain store published by the same
+  barrier,
   and correctness never depends on which statements were accepted. It is also why depth stays 2:
   deeper lookahead needs per-group waits. Eligibility is per tile in `compile_proc`
   (`current_async_tiles`; kernel logging disables it — a logged `Set` reads back what an

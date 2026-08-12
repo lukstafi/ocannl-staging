@@ -308,18 +308,25 @@ let () =
           && count_sub src1 "% 2" = 0
           && decl_ok src1 1 && decl_ok src2 2)
     | _ -> p "depth 2 rotates the buffers the depth-1 kernel does not" false);
-    (* gh-487 phase 2: where the backend has an async-copy arm (CUDA sm_80+; the leg assumes the
-       device qualifies, like the wmma legs assume their arch floors), the depth-2 staging renders
-       as async copies — both prologues and both prefetches, 4 call sites — with one
+    (* gh-487 phase 2: where the backend has an async-copy arm, the depth-2 staging renders as
+       async copies — both prologues and both prefetches, 4 call sites — with one
        wait-then-barrier opening each rotor iteration, while depth 1 stays fully synchronous: the
-       pd1/pd2 pair keeps comparing prefetch timing only. Backends without the arm (Metal, HIP)
-       keep the portable synchronous form at both depths — a real check that the hook does not
-       leak, not a skip. *)
+       pd1/pd2 pair keeps comparing prefetch timing only. The arm's presence is probed through
+       the capability it gates identically (CUDA advertises [mma_pipeline_depths] exactly where
+       [async_copy] is provided, sm_80+), so a pre-Ampere CUDA device expects the portable form
+       rather than failing (Codex P2 on PR #317). Backends without the arm (Metal — which
+       advertises depths for the portable form — and HIP) keep the synchronous rendering at both
+       depths: a real check that the hook does not leak, not a skip. *)
     (match (read_generated "pipe_mm_d1", read_generated "pipe_mm_d2") with
     | Some src1, Some src2 ->
-        let on_cuda = String.is_substring backend_name ~substring:"cuda" in
+        let cuda_async =
+          String.is_substring backend_name ~substring:"cuda"
+          && (match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
+             | Some m -> not (List.is_empty m.Ir.Backend_intf.mma_pipeline_depths)
+             | None -> false)
+        in
         p "async copies appear exactly on the depth-2 async arm"
-          (if on_cuda then
+          (if cuda_async then
              count_sub src2 "ocannl_cp_async4(&" = 4
              && count_sub src2 "ocannl_cp_async_wait_all();" = 1
              && count_sub src1 "ocannl_cp_async" = 0
