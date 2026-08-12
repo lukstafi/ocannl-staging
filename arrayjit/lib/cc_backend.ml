@@ -424,12 +424,68 @@ let kernel_link_flags =
     | "Win32" | "Cygwin" -> "-shared"
     | _ -> "-shared -fPIC")
 
+(* gh-ocannl-530 (docs/proposals/gh-ocannl-530-pool-uniformity.md): on hybrid CPUs, one pool
+   mixing two core speeds costs the tuned schedules 20-31% -- chunked Grid loops end at a barrier,
+   so the step is set by the slowest worker -- while restricting the pool to a uniform core class
+   recovers 25-34% of tuned time at no measured cost to the default (untuned) baselines. So [cc]
+   restricts its worker pool to the highest-performance core class by default, on hybrid, native
+   (non-virtualized) topologies; everything else -- libdispatch pools, fabricated guest topologies
+   (WSL2), externally pinned processes, uniform machines -- is a conservative no-op. *)
+let pool_core_class_of_string = function
+  | "auto" -> Some `Auto
+  | "all" -> Some `All
+  | "performance" -> Some `Performance
+  | "efficiency" -> Some `Efficiency
+  | _ -> None
+
+let pool_restriction =
+  lazy
+    (let open Utils.Cpu_topology in
+     let setting_str =
+       String.lowercase (Utils.get_global_arg ~default:"auto" ~arg_name:"cc_pool_core_class")
+     in
+     let setting =
+       match pool_core_class_of_string setting_str with
+       | Some s -> s
+       | None ->
+           invalid_arg
+             ("cc_pool_core_class: expected auto | all | performance | efficiency, got "
+             ^ setting_str)
+     in
+     let openmp =
+       match parallel_grid_syntax_setting () with `Openmp -> true | `Dispatch | `None -> false
+     in
+     let decision =
+       decide_pool_restriction ~openmp ~setting ~classes:(core_classes ())
+         ~hypervisor:(hypervisor_present ()) ~effective:(effective_cpu_count ())
+     in
+     match decision.pool_restrict with
+     | None -> decision
+     | Some cls -> (
+         match restrict_process_to_mask cls.mask with
+         | Ok () -> decision
+         | Error msg ->
+             (* Degrade to the unrestricted pool; failing to pin must not fail the run. *)
+             Stdlib.Printf.eprintf "OCANNL cc backend: cc_pool_core_class not applied: %s\n%!" msg;
+             let effective = effective_cpu_count () in
+             {
+               pool_restrict = None;
+               pool_width = effective;
+               pool_tag = "w" ^ Int.to_string effective;
+             }))
+
+let effective_pool_width () = (Lazy.force pool_restriction).Utils.Cpu_topology.pool_width
+let pool_tag () = (Lazy.force pool_restriction).Utils.Cpu_topology.pool_tag
+
 let parallel_grid_chunks_setting () =
   match Int.of_string @@ Utils.get_global_arg ~default:"0" ~arg_name:"cc_parallel_chunks" with
   | n when n > 0 -> n
-  (* Auto: a small multiple of the core count -- enough chunks that uneven per-chunk cost
-     load-balances, few enough that per-chunk overhead stays negligible. *)
-  | _ -> 4 * Stdlib.Domain.recommended_domain_count ()
+  (* Auto: a small multiple of the worker-pool width -- enough chunks that uneven per-chunk cost
+     load-balances, few enough that per-chunk overhead stays negligible. The width is the
+     pool-policy result (gh-ocannl-530), which is affinity-respecting -- unlike
+     [Domain.recommended_domain_count], which on Windows reports the full machine under any
+     pinning, silently mis-sizing the grid decomposition of a pinned run. *)
+  | _ -> 4 * effective_pool_width ()
 
 module Tn = Tnode
 
@@ -451,6 +507,12 @@ let get_global_run_id =
     !next_id
 
 let%track7_sexp c_compile_and_load ~f_path =
+  (* The pool restriction (gh-ocannl-530) must be in force before the first [-fopenmp] kernel is
+     dlopened, not merely before its first parallel region: libgomp computes its default team size
+     from the process affinity mask in its ELF/PE constructor, which runs at dlopen. *)
+  (match parallel_grid_syntax_setting () with
+  | `Openmp -> ignore (Lazy.force pool_restriction : Utils.Cpu_topology.pool_decision)
+  | `Dispatch | `None -> ());
   let base_name : string = Stdlib.Filename.chop_extension f_path in
   (* There can be only one library with a given name, the object gets cached. Moreover, [Dl.dlclose]
      is not required to unload the library, although ideally it should. *)

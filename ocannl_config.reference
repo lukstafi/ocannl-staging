@@ -275,8 +275,24 @@
 #cc_parallel_grid=auto
 
 # Target chunk count for parallel Grid rendering; the actual count is capped by the loop extent.
-# 0 (default) means automatic: 4 x the recommended domain count (core count).
+# 0 (default) means automatic: 4 x the worker-pool width (the pool-policy result, see
+# cc_pool_core_class; affinity-respecting, so a pinned run gets a matching grid decomposition).
 #cc_parallel_chunks=0
+
+# Worker-pool uniformity policy on hybrid CPUs (gh-ocannl-530,
+# docs/proposals/gh-ocannl-530-pool-uniformity.md). One OpenMP pool mixing two core speeds costs
+# tuned schedules 20-31% (chunked Grid loops end at a barrier, so the step is set by the slowest
+# worker), while restricting the pool to one core class recovers 25-34% of tuned time at no
+# measured cost to default (untuned) runs. "auto" (default) restricts the process to the
+# highest-performance core class when ALL of: the pool is OpenMP (not libdispatch/none), the
+# topology probe reports 2+ core classes with usable affinity masks, the machine is not
+# virtualized (guest topology is fabricated, e.g. under WSL2), and the process is not already
+# externally pinned below the full machine (an external mask is respected as the user's pool
+# decision). "all" never restricts (pre-gh-530 behavior). "performance"/"efficiency" force that
+# class on a hybrid native topology (overriding an external pinning) and no-op otherwise.
+# Changing the effective pool changes the autotune cache key (crowned schedules do not transfer
+# across pools), so a flip re-tunes instead of replaying stale crowns.
+#cc_pool_core_class=auto
 
 # Byte cap on the combined footprint of the per-chunk privatized tiles of one pool-parallel Grid
 # loop (block-scope arrays living on the pool workers' stacks; see the privatization rule in
