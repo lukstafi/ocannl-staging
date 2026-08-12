@@ -194,10 +194,12 @@ val entry_version : int
 (** Bumped when the canonical rendering or the saved-schedule format changes; stale entries are
     ignored by {!lookup}. *)
 
-val cache_key : canonical -> backend:string -> string
-(** Filename-safe cache key: the digest, the backend name, and {!numerics_tag} of the current
-    numerics policy. Callers time kernels on a concrete device, so include anything else that
-    distinguishes performance environments in [backend] (e.g. a device id) if needed. *)
+val cache_key : ?pool_tag:string -> canonical -> backend:string -> string
+(** Filename-safe cache key: the digest, the backend name, {!numerics_tag} of the current
+    numerics policy, and — when given — the worker-pool signature
+    ([hardware_limits.worker_pool_tag], gh-ocannl-530: CPU crowns do not transfer across pools).
+    Callers time kernels on a concrete device, so include anything else that distinguishes
+    performance environments in [backend] (e.g. a device id) if needed. *)
 
 val store : dir:string -> key:string -> entry -> unit
 (** Writes the entry to [dir]/[key].sexp, creating [dir] (and parents) if missing. Tolerates

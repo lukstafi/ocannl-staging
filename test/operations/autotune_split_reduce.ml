@@ -240,7 +240,9 @@ let () =
   p "the hand-crafted entry has a prelude and per-segment schedules"
     ((not (List.is_empty !prelude_saved)) && List.length !segments_assoc >= 2);
   SC.store ~dir:cache_dir
-    ~key:(SC.cache_key base_canon ~backend:backend_name)
+    ~key:
+      (SC.cache_key ?pool_tag:(Context.hardware_limits sctx).Ir.Backend_intf.worker_pool_tag
+         base_canon ~backend:backend_name)
     {
       SC.version = SC.entry_version;
       backend = backend_name;

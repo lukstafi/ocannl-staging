@@ -462,8 +462,11 @@ let sanitize name =
   String.map name ~f:(fun c ->
       if Char.is_alphanum c || Char.equal c '-' || Char.equal c '_' then c else '_')
 
-let cache_key canonical ~backend =
+let cache_key ?pool_tag canonical ~backend =
   canonical.digest ^ "-" ^ sanitize backend ^ "-n" ^ numerics_tag ()
+  ^ (* The worker-pool signature (gh-ocannl-530): CPU crowns do not transfer across pools, so a
+       pool change re-tunes instead of replaying. [None] (GPU backends) leaves keys unchanged. *)
+  match pool_tag with None -> "" | Some tag -> "-p" ^ sanitize tag
 
 let rec ensure_dir dir =
   if String.is_empty dir || String.equal dir "." || String.equal dir "/" then ()
