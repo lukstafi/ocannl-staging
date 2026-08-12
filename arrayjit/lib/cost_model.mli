@@ -62,12 +62,17 @@ val total_bytes : summary -> int
 val arithmetic_intensity : summary -> float
 (** FLOPs per byte moved, [flops / max 1 (total_bytes)]. *)
 
+val footprint_approximate : summary -> bool
+(** [true] when any per-node footprint is an upper bound rather than exact ([fp_approx]) — the
+    byte counts over-approximate while the op count may still be exact. *)
+
 val approximate : summary -> bool
-(** [true] when any count is an upper bound rather than exact: [flops_approx] (guards-taken op
-    counting) or any per-node [fp_approx]. Such counts are still upper bounds (unlike under
-    [opaque]), but a candidate whose guards mostly fail can carry counts far above the work it
-    performs — quantities derived from them (achieved throughput, the roofline bound vs. a
-    measurement) are not evidence about the hardware. *)
+(** [flops_approx || footprint_approximate]: some count is an upper bound rather than exact.
+    Such counts are still upper bounds (unlike under [opaque]), but a candidate whose guards
+    mostly fail can carry counts far above the work it performs — quantities derived from an
+    approximate count (achieved throughput, the roofline bound vs. a measurement) are not
+    evidence about the hardware. Exactness is per leg: op counts ([flops_approx]) and byte
+    counts ([footprint_approximate]) go approximate independently. *)
 
 val roofline_seconds :
   ?peak_flops:float ->
@@ -100,9 +105,12 @@ module Calibration : sig
     kernels : int;
     flops : int;  (** Aggregated over the candidate's kernels, like [bytes]. *)
     bytes : int;
-    approx : bool;
-        (** Any kernel's counts are upper bounds rather than exact ({!approximate}): the row is
-            recorded for divergence analysis but excluded from envelope fitting. *)
+    flops_approx : bool;
+        (** The op count is an upper bound rather than exact (guards-taken, any kernel): the
+            compute leg of the fit skips this row; likewise [bytes_approx] for the memory leg
+            ({!footprint_approximate}). Approximate legs are recorded for divergence analysis
+            but excluded from envelope fitting. *)
+    bytes_approx : bool;
     opaque : bool;
   }
   [@@deriving sexp_of]
@@ -119,18 +127,21 @@ module Calibration : sig
 
   type fit = {
     fit_backend : string;
-    fit_rows : int;
-        (** Rows the fit uses: exact-count ([approx] and [opaque] false), positively timed. *)
+    fit_rows : int;  (** Non-opaque, positively timed rows; each leg uses its exact subset. *)
     fit_opaque : int;  (** Opaque rows, excluded — the model never scores them. *)
-    fit_approx : int;
-        (** Approximate-count rows, excluded — guards-taken over-counting can fake a throughput
-            above any hardware peak, and one such row would inflate the envelope machine-wide. *)
-    fit_multi_kernel : int;  (** Among the rows used; see {!fit} for the aggregate caveat. *)
+    fit_flops_approx : int;
+        (** Among [fit_rows]: rows the compute leg skips (approximate op count — guards-taken
+            over-counting can fake a throughput above any hardware peak, and one such row would
+            inflate the envelope machine-wide); likewise [fit_bytes_approx] for the memory
+            leg. Exactness is per leg, so a row with an exact op count but a multi-read
+            (approximate) footprint still feeds the compute leg. *)
+    fit_bytes_approx : int;
+    fit_multi_kernel : int;  (** Among [fit_rows]; see {!fit} for the aggregate caveat. *)
     fit_violations : int;
-        (** Exact-count rows whose recorded [model_ms] exceeds [measured_ms]: the envelope in
-            force when they were recorded understated this machine's peaks. Approx rows are not
-            counted — their exceedance may reflect over-counting instead, mirroring the runtime
-            warning's gating. *)
+        (** Fully-exact rows whose recorded [model_ms] exceeds [measured_ms]: the envelope in
+            force when they were recorded understated this machine's peaks. Rows with an
+            approximate leg are not counted — their exceedance may reflect over-counting
+            instead, mirroring the runtime warning's gating. *)
     fit_fission_slack : (float * string) option;
         (** The uniform factor (> 1) applied to both legs so the aggregate sufficient condition
             holds on every multi-kernel row (see {!fit}), and the row forcing it; [None] when
@@ -144,16 +155,18 @@ module Calibration : sig
 
   val fit : row list -> fit list
   (** Grouped by backend in order of first appearance. The fitted constants are the tightest
-      envelope under which the roofline bound respects every exact-count row: per row,
+      envelope under which the roofline bound respects every row it can be audited on: per row,
       [bound <= measured] requires [peak >= counts/measured] on each leg, so each leg starts as
-      the maximum achieved [counts/time] over the rows used — counts are exact there, so the
-      ratio is a throughput the machine demonstrably reached. Multi-kernel
+      the maximum achieved [counts/time] over the rows where {e that leg's} counts are exact —
+      the ratio is then a throughput the machine demonstrably reached. Multi-kernel
       rows aggregate per-kernel counts, making those maxima necessary for them but not
       sufficient ([Autotune]'s bound sums per-kernel max-of-legs, which can approach twice the
       aggregate legs on a compute-bound + bandwidth-bound mix), so both legs are then raised
       uniformly by the smallest {!field-fit_fission_slack} enforcing the aggregate sufficient
-      condition [flops/peak_flops + bytes/peak_memory_bandwidth <= time] on every multi-kernel
-      row — after which the recomputed bound respects every row it was fit from. Raising a peak
+      condition [flops/peak_flops + bytes/peak_memory_bandwidth <= time] on every fully-exact
+      multi-kernel row — after which the recomputed bound respects every row it was fit from
+      (an over-counted leg is barred from forcing slack: it would inflate both constants).
+      Raising a peak
       only weakens pruning (the bound stays a lower bound); understating one breaks fathoming.
 
       Sound on the data, not certified for the machine: fitted peaks are floors a kernel

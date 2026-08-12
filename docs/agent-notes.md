@@ -694,11 +694,13 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
 - The calibration TSV schema (`autotune_calibration_file`) is owned by
   `Ir.Cost_model.Calibration` — writer (`Autotune.emit_calibration`) and reader
   (`tools/fit_envelope.exe`) share `to_line`/`of_line`, so change it in one place only. The
-  fitter's constants are the tightest envelope respecting every EXACT-count row: per-leg max
-  achieved counts/time (per backend; approx rows — guards-taken/union upper bounds — and opaque
-  rows are excluded, or one mostly-failing-guards candidate's fake throughput would inflate the
-  envelope machine-wide), then a uniform "fission slack" on both legs so the aggregate
-  sufficient condition (flops/pf + bytes/pb <= t) holds on multi-kernel rows — per-leg maxima
+  fitter's constants are the tightest envelope respecting every row a leg can be audited on:
+  per-leg max achieved counts/time (per backend), where each leg uses the rows whose counts are
+  exact FOR THAT LEG (flops-approx and bytes-approx are independent flags — a multi-read
+  footprint doesn't disqualify an exact op count; approx legs and opaque rows are excluded, or
+  one mostly-failing-guards candidate's fake throughput would inflate the envelope
+  machine-wide), then a uniform "fission slack" on both legs so the aggregate sufficient
+  condition (flops/pf + bytes/pb <= t) holds on fully-exact multi-kernel rows — per-leg maxima
   alone are necessary but NOT sufficient there (the bound sums per-kernel max-of-legs).
   Serialized milliseconds are FLOORED at the 6th decimal (round-to-nearest could store a 5 us
   kernel's time high by 1e-4 relative and break file-fit conservatism). Fitted peaks are

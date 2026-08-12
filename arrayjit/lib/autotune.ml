@@ -3088,35 +3088,62 @@ let emit_calibration ~backend ~limits ~label ~digest ~measured_ms (opts : LL.opt
     let flops = List.sum (module Int) summaries ~f:(fun s -> s.CM.flops) in
     let bytes = List.sum (module Int) summaries ~f:CM.total_bytes in
     let opaque = List.exists summaries ~f:(fun s -> s.CM.opaque) in
-    let approx = List.exists summaries ~f:CM.approximate in
+    let flops_approx = List.exists summaries ~f:(fun s -> s.CM.flops_approx) in
+    let bytes_approx = List.exists summaries ~f:CM.footprint_approximate in
     let model_ms =
       Option.map (summaries_roofline ~peak_flops ~peak_memory_bandwidth summaries) ~f:(fun s ->
           s *. 1e3)
     in
     let dtag = dshort digest in
-    (match model_ms with
-    | Some m when Float.(m > measured_ms) && not approx ->
-        (* Exact counts: the exceedance can only mean the envelope understates the machine. *)
-        let seconds = Float.max 1e-12 (measured_ms *. 1e-3) in
-        Stdio.eprintf
-          "autotune: BOUND VIOLATION: roofline lower bound %.6f ms > measured %.4f ms for %s \
-           (digest %s) on %s — the envelope constants understate this machine's peaks (this row \
-           implies model_peak_flops >= %.6g and model_peak_memory_bandwidth >= %.6g as necessary \
-           minima); refit with tools/fit_envelope.exe over autotune_calibration_file data\n\
-           %!"
-          m measured_ms label dtag backend
-          (Float.of_int flops /. seconds)
-          (Float.of_int bytes /. seconds)
-    | Some m when Float.(m > measured_ms) ->
-        (* Approximate counts (guards-taken / union upper bounds): the exceedance may reflect
-           over-counting on this candidate rather than the envelope, so it is a diagnostic, not
-           an invariant violation — no unconditional warning, no implied-minima claim. *)
-        logf
-          "model bound %.6f ms > measured %.4f ms for %s (digest %s), but its counts are \
-           approximate upper bounds (guarded/masked code) — possibly over-counting, not the \
-           envelope"
-          m measured_ms label dtag
-    | _ -> ());
+    (let seconds = Float.max 1e-12 (measured_ms *. 1e-3) in
+     (* Per-leg audit: an exact aggregate leg exceeding the measurement indicts the envelope no
+        matter what the other leg's counts are (the aggregate leg lower-bounds the per-kernel
+        sum). The whole-bound check additionally catches the fully-exact multi-kernel case where
+        the per-kernel max-of-legs sum exceeds the measurement without either aggregate leg
+        doing so. The implied minima name only legs that are configured AND exact — an absent
+        leg cannot have caused the exceedance, and an approximate one is not evidence. *)
+     let leg_exceeds exact count peak =
+       match peak with
+       | Some p -> exact && Float.(Float.of_int count /. seconds > p)
+       | None -> false
+     in
+     let flops_leg = leg_exceeds (not flops_approx) flops peak_flops in
+     let bytes_leg = leg_exceeds (not bytes_approx) bytes peak_memory_bandwidth in
+     let bound_exceeds =
+       match model_ms with Some m -> Float.(m > measured_ms) | None -> false
+     in
+     if flops_leg || bytes_leg || (bound_exceeds && (not flops_approx) && not bytes_approx) then
+       let minima =
+         String.concat ~sep:" and "
+           (List.filter_opt
+              [
+                (if Option.is_some peak_flops && not flops_approx then
+                   Some (Printf.sprintf "model_peak_flops >= %.6g" (Float.of_int flops /. seconds))
+                 else None);
+                (if Option.is_some peak_memory_bandwidth && not bytes_approx then
+                   Some
+                     (Printf.sprintf "model_peak_memory_bandwidth >= %.6g"
+                        (Float.of_int bytes /. seconds))
+                 else None);
+              ])
+       in
+       Stdio.eprintf
+         "autotune: BOUND VIOLATION: roofline lower bound %s ms > measured %.4f ms for %s \
+          (digest %s) on %s — the envelope constants understate this machine's peaks (this row \
+          implies %s as necessary minima); refit with tools/fit_envelope.exe over \
+          autotune_calibration_file data\n\
+          %!"
+         (match model_ms with Some m -> Printf.sprintf "%.6f" m | None -> "?")
+         measured_ms label dtag backend minima
+     else if bound_exceeds then
+       (* Only an approximate leg can explain the exceedance: possibly over-counting
+          (guards-taken / union upper bounds), not the envelope — a diagnostic, no
+          unconditional warning, no implied-minima claim. *)
+       logf
+         "model bound %.6f ms > measured %.4f ms for %s (digest %s), but its counts are \
+          approximate upper bounds (guarded/masked code) — possibly over-counting, not the \
+          envelope"
+         (Option.value_exn model_ms) measured_ms label dtag);
     let n_kernels = List.length summaries in
     logf "calibration: %s measured %.4f ms, model %s, %d kernel%s, flops %d, bytes %d%s" label
       measured_ms
@@ -3137,7 +3164,8 @@ let emit_calibration ~backend ~limits ~label ~digest ~measured_ms (opts : LL.opt
             kernels = n_kernels;
             flops;
             bytes;
-            approx;
+            flops_approx;
+            bytes_approx;
             opaque;
           }
         ^ "\n"
