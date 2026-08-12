@@ -9,8 +9,24 @@ fission slack for multi-kernel aggregate rows, floored serialization). Phase 1 i
 labelled, commitment-dependent choices) and the matmul family factored into it —
 `Autotune.matmul_seed_params` {e is} `Schedule_space.leaves` of `matmul_sketch_tree`, pinned
 list-for-list against the pre-factoring golden by test/operations/sketch_family_tree.ml; the
-conv family and the epilogue-twin level factor the same way as mechanical follow-ups. Phases
-2+ not started; each is its own PR.
+conv family and the epilogue-twin level factor the same way as mechanical follow-ups. Phase 2
+implemented: legality over partial shapes for the factored family — tree children carry
+verdicts decided at parent construction, mirroring `op_legality`'s three values quantified
+over completions (`Refuted` with the violated constraint as witness — a decline explanation
+produced before any compilation, gh-479; `Unknown` never fathoms — reserved for genuinely
+compile-settled questions, e.g. permissive site detection) plus a fourth, `Excluded`, keeping
+the gh-555
+policy/legality separation visible in the space itself (a driver may lift a policy exclusion
+by re-proposing; it must never re-propose a refutation). Every silent filter in the matmul
+tree now carries its witness; `refutations`/`exclusions`/`unknowns` collect them per shape.
+The parametric-op extension of `op_legality` itself (judging retype/split moves with open
+factors, for the beam/preset dimension) rides with phase 4's beam subsumption, where its
+consumer lives. The tree judges what the seeding layer owns — site classification, caps,
+advertised capabilities, explicit configuration; builder-settled analyses (companion coverage,
+auto-probed pool rendering) stay candidate-build concerns by design, their failures being
+classified declines rather than mislabeled timings. Recorded follow-ups: an A-orientation
+site classifier (the `m_tb` analogue for forms reading A in place), plus the conv-family and
+epilogue-twin factorings. Phases 3+ not started; each is its own PR.
 **Issue**: [ahrefs/ocannl#514](https://github.com/ahrefs/ocannl/issues/514), split off #494
 (waypoint 4). Prerequisites landed: #494 waypoints 1–3 (`Ir.Affine`, the legality decision
 procedures, `Schedule.op_legality`), #491 (`Ir.Cost_model`, roofline envelope, `model_default`),
