@@ -1765,6 +1765,17 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; Pure string/arithmetic test of the calibration schema and envelope fitter
+; (Ir.Cost_model.Calibration, gh-ocannl-514 phase 0): no backend, no config sensitivity.
+(test
+ (name envelope_fitting)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules envelope_fitting)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
 ; Run by a rule (not a test stanza) so the backend and the model_peak_* envelope overrides are
 ; pinned on the command line: the C backends carry no advisory envelope constants, and pinning
 ; makes the roofline-scoring output deterministic across the backend test matrix.

@@ -3057,27 +3057,93 @@ let dshort d =
 
 let bs_label = function None -> "cfg" | Some b -> Int.to_string b
 
-(* Calibration output (gh-ocannl-491 task 4): the model score next to the measured time — every
-   tuning run is free calibration data for the envelope constants. Human-readable stderr lines under
-   config [autotune_log]; durable tab-separated rows appended under config
-   [autotune_calibration_file]. The analysis runs on the candidate's actual compiled segments
-   ([compiled.all_opts]), so a calibration row prices exactly the code that was timed. *)
+(* Calibration output (gh-ocannl-491 task 4) and the bound-agreement invariant (gh-ocannl-514
+   phase 0): the model score next to the measured time — every tuning run is free calibration data
+   for the envelope constants, and every timed candidate is a test of the roofline bound's
+   soundness. Human-readable stderr lines under config [autotune_log]; durable tab-separated rows
+   (schema owned by {!CM.Calibration}) appended under config [autotune_calibration_file].
+
+   The analysis runs on the candidate's actual compiled segments ([compiled.all_opts]), so a row
+   prices exactly the code that was timed. For an exact-count candidate, a roofline LOWER bound
+   exceeding a measured time can only mean the envelope constants understate this machine's
+   achievable peaks — a search fathoming on that bound would prune true winners — so the violation
+   warns unconditionally, not gated by [autotune_log]: per the gh-ocannl-498 lesson, an invariant
+   between a scorer and reality is checked continuously against every sample, never spot-checked.
+   Approximate counts ([CM.approximate]: guards-taken / union upper bounds) make an exceedance
+   ambiguous — mostly-failing guards over-count without implicating the envelope — so those log as
+   diagnostics and their rows are flagged for the fitter to exclude. Refitting the constants from the
+   accumulated rows ([CM.Calibration.fit], [tools/fit_envelope.exe]) restores soundness. The
+   analysis therefore also runs whenever envelope constants are present, even with logging and the
+   calibration file off — one [CM.analyze] per compiled segment, trivial next to the compile and
+   timing runs the candidate already paid for. *)
 let calibration_file =
   lazy (String.strip (Utils.get_global_arg ~arg_name:"autotune_calibration_file" ~default:""))
 
 let emit_calibration ~backend ~limits ~label ~digest ~measured_ms (opts : LL.optimized list) =
   let file = Lazy.force calibration_file in
-  if Lazy.force log_enabled || not (String.is_empty file) then (
+  let peak_flops, peak_memory_bandwidth = envelope ~limits in
+  let have_envelope = Option.is_some peak_flops || Option.is_some peak_memory_bandwidth in
+  if Lazy.force log_enabled || (not (String.is_empty file)) || have_envelope then (
     let summaries = List.map opts ~f:(fun o -> CM.analyze o.LL.llc) in
     let flops = List.sum (module Int) summaries ~f:(fun s -> s.CM.flops) in
     let bytes = List.sum (module Int) summaries ~f:CM.total_bytes in
     let opaque = List.exists summaries ~f:(fun s -> s.CM.opaque) in
-    let peak_flops, peak_memory_bandwidth = envelope ~limits in
+    let flops_approx = List.exists summaries ~f:(fun s -> s.CM.flops_approx) in
+    let bytes_approx = List.exists summaries ~f:CM.footprint_approximate in
     let model_ms =
       Option.map (summaries_roofline ~peak_flops ~peak_memory_bandwidth summaries) ~f:(fun s ->
           s *. 1e3)
     in
-    let model_str = function Some m -> Printf.sprintf "%.6f" m | None -> "" in
+    let dtag = dshort digest in
+    (let seconds = Float.max 1e-12 (measured_ms *. 1e-3) in
+     (* Per-leg audit: an exact aggregate leg exceeding the measurement indicts the envelope no
+        matter what the other leg's counts are (the aggregate leg lower-bounds the per-kernel
+        sum). The whole-bound check additionally catches the fully-exact multi-kernel case where
+        the per-kernel max-of-legs sum exceeds the measurement without either aggregate leg
+        doing so. The implied minima name only legs that are configured AND exact — an absent
+        leg cannot have caused the exceedance, and an approximate one is not evidence. *)
+     let leg_exceeds exact count peak =
+       match peak with
+       | Some p -> exact && Float.(Float.of_int count /. seconds > p)
+       | None -> false
+     in
+     let flops_leg = leg_exceeds (not flops_approx) flops peak_flops in
+     let bytes_leg = leg_exceeds (not bytes_approx) bytes peak_memory_bandwidth in
+     let bound_exceeds =
+       match model_ms with Some m -> Float.(m > measured_ms) | None -> false
+     in
+     if flops_leg || bytes_leg || (bound_exceeds && (not flops_approx) && not bytes_approx) then
+       let minima =
+         String.concat ~sep:" and "
+           (List.filter_opt
+              [
+                (if Option.is_some peak_flops && not flops_approx then
+                   Some (Printf.sprintf "model_peak_flops >= %.6g" (Float.of_int flops /. seconds))
+                 else None);
+                (if Option.is_some peak_memory_bandwidth && not bytes_approx then
+                   Some
+                     (Printf.sprintf "model_peak_memory_bandwidth >= %.6g"
+                        (Float.of_int bytes /. seconds))
+                 else None);
+              ])
+       in
+       Stdio.eprintf
+         "autotune: BOUND VIOLATION: roofline lower bound %s ms > measured %.4f ms for %s \
+          (digest %s) on %s — the envelope constants understate this machine's peaks (this row \
+          implies %s as necessary minima); refit with tools/fit_envelope.exe over \
+          autotune_calibration_file data\n\
+          %!"
+         (match model_ms with Some m -> Printf.sprintf "%.6f" m | None -> "?")
+         measured_ms label dtag backend minima
+     else if bound_exceeds then
+       (* Only an approximate leg can explain the exceedance: possibly over-counting
+          (guards-taken / union upper bounds), not the envelope — a diagnostic, no
+          unconditional warning, no implied-minima claim. *)
+       logf
+         "model bound %.6f ms > measured %.4f ms for %s (digest %s), but its counts are \
+          approximate upper bounds (guarded/masked code) — possibly over-counting, not the \
+          envelope"
+         (Option.value_exn model_ms) measured_ms label dtag);
     let n_kernels = List.length summaries in
     logf "calibration: %s measured %.4f ms, model %s, %d kernel%s, flops %d, bytes %d%s" label
       measured_ms
@@ -3088,8 +3154,21 @@ let emit_calibration ~backend ~limits ~label ~digest ~measured_ms (opts : LL.opt
       (if opaque then " (opaque: counts may under-estimate)" else "");
     if not (String.is_empty file) then
       let line =
-        Printf.sprintf "%s\t%s\t%s\t%.6f\t%s\t%d\t%d\t%d\t%b\n" backend (dshort digest) label
-          measured_ms (model_str model_ms) n_kernels flops bytes opaque
+        CM.Calibration.to_line
+          {
+            CM.Calibration.backend;
+            digest = dtag;
+            label;
+            measured_ms;
+            model_ms;
+            kernels = n_kernels;
+            flops;
+            bytes;
+            flops_approx;
+            bytes_approx;
+            opaque;
+          }
+        ^ "\n"
       in
       try
         Stdio.Out_channel.with_file file ~append:true ~f:(fun oc ->

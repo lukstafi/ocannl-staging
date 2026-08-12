@@ -1,0 +1,225 @@
+# Schedule inference as branch-and-bound: search in constraint space
+
+**Date**: 2026-08-12
+**Status**: Phase 0 implemented (envelope fitting `Ir.Cost_model.Calibration` +
+`tools/fit_envelope.exe`, the continuous bound-vs-measured agreement check in `Autotune.tune`,
+and this design). Search phases not started; each is its own PR.
+**Issue**: [ahrefs/ocannl#514](https://github.com/ahrefs/ocannl/issues/514), split off #494
+(waypoint 4). Prerequisites landed: #494 waypoints 1–3 (`Ir.Affine`, the legality decision
+procedures, `Schedule.op_legality`), #491 (`Ir.Cost_model`, roofline envelope, `model_default`),
+#554/#555 (abstract tracer, `analyze_proc`/`specialize_proc` split, the inline decision vector,
+`optimized.flip_candidates`, greedy `tune_inline_flips`), #560/#563 (analysis cache, canonical
+identity in `Low_level.Canonical_render`).
+
+## Goal
+
+Autotuning today searches in op-list space: sketch families enumerate concrete schedules, each
+candidate is compiled and timed, and legality arrives by construction-then-validation. This
+proposal inverts it: the tuner proposes *shapes* of schedules — partial commitments with tile
+sizes, axis assignments, placement levels, and staging decisions still open — and the solver
+instantiates or refutes them before anything is compiled. Schedule inference, as the counterpart
+to shape inference. With the analytic cost model as the objective, the formulation is literally
+branch-and-bound:
+
+- **Node** = a partial decision vector (below). The hand-written sketch families are
+  enumerations of what should be B&B subtrees.
+- **Fathoming by infeasibility** = the landed legality queries, lifted to partial shapes: a
+  reduction-dependence edge refutes "parallelize k" for *every* completion of the subtree,
+  before a single tile size is named. Each fathom carries a witness — the violated constraint —
+  which is #479's declines-as-explanations produced *before* compilation instead of after.
+- **Bounding** = the roofline envelope, admissible by construction:
+  `max(FLOPs/peak-compute, compulsory-bytes/peak-bandwidth)` lower-bounds every completion by
+  definition of peak. Model omissions only weaken pruning; the single failure mode is
+  understated peak constants — hence phase 0.
+
+Telamon (Beaugnon et al.) is the architectural precedent — candidates as sets of open choices,
+optimistic analytic bounds, B&B to the leaves. Its acknowledged weak point, the hand-authored
+per-target legality constraint set, is the part OCANNL gets natively: the polyhedral description
+is never recovered, so legality is derived rather than authored. The second differentiator is
+determinism as a first-class constraint: reduction order is a legality dimension inside the same
+algebra (the `rmw` markers on access relations), so the search can *prune on* determinism — a
+dimension classical polyhedral work rarely models and e-graph reasoning erases.
+
+## The node: a partial decision vector
+
+A node is a vector of decision levels, each either committed or open. The dimensions, grounded
+in what already exists as data:
+
+- **Placement level per policy-decided node**: `Inline | Stage_at | Materialize`. The Inline
+  half exists (`Context.decide_inline`, `optimize_ctx.inline_preferences`); the surface is
+  reported per compile as `optimized.flip_candidates` / `Context.decision_surface` with
+  per-node recompute-cost bounds (reduction extent × per-cell read multiplicity, from the
+  gh-554 affine metrics). `Stage_at` — the compute-at middle of the spectrum, unifying the
+  vector with the `Stage` optop — is designed into the vector now so it is a decision level,
+  not a bolt-on: a partial commitment over placement levels is precisely the B&B node.
+- **Sketch family and its parameters**: which composed-optop pipeline (matmul sketches, conv
+  flavors, split-reduce sites), with tile/block sizes open until committed. Factoring each
+  family into a refinement subtree replaces its `sketch_params` enumeration.
+- **Fission/coverage choices**: segment boundaries and per-segment schedules — the dimension
+  where the measured wins live (the gh-528/531/569 attribution: mma share ~7% CUDA / ~0% HIP;
+  tuning wins are scheduling, and the top lever, gh-569's companion-arity rule, is a coverage
+  rule).
+
+Refinement commits one open level (or splits its domain); leaves are concrete schedules, exactly
+today's candidates. Candidate replay stays hermetic and cheap: one shared `analyze_proc` result,
+`specialize_proc` forks per vector (gh-555), and every new dimension registers its canonical
+identity once, in `Low_level.Canonical_render` (gh-563).
+
+Two invariants bound the space, carried from the landed design:
+
+- **Legality and observability stay outside the vector.** Preferences suppress heuristic caps
+  only; `check_and_store_virtual` and the observability contract are non-negotiable (gh-555).
+  The search varies cost decisions exclusively, so every node's subtree contains only
+  semantics-preserving completions and fathoming is purely about cost/feasibility of *schedules*.
+- **Bitwise-per-schedule discipline**: numerics-policy fields are uniform across the whole
+  search and part of cache identity (gh-568); a candidate may vary only what a schedule may vary.
+
+Default-off, bit-for-bit: with the search disabled, behavior is unchanged.
+
+## Fathoming
+
+1. **By infeasibility**: `Schedule.op_legality` extended from "is this concrete op valid" to
+   "is any completion of this partial shape valid" — three-valued as today. `Op_illegal` over a
+   partial shape fathoms the subtree and its witness is the explanation; `Op_unknown` never
+   fathoms (it forces refinement or measurement, preserving the advisory contract).
+   `hardware_limits` caps fathom the same way (a tile-size interval whose minimum footprint
+   exceeds shared memory refutes the whole box).
+2. **By bound**: the optimistic roofline of the partial shape meets or exceeds the incumbent.
+   In the untuned regime the incumbent is the best model score seen (exact argmin search); in
+   the tuned regime it is a *measured* time, and pruning happens only in the admissible
+   direction — the optimistic bound already exceeds the incumbent's measurement.
+
+## The bound, and its soundness statement
+
+**Statement.** A fathom on bound is sound iff for every node `v`,
+`bound(v) ≤ min { true_time(c) : c a completion of v }`. Two ingredients can break it, and they
+are audited separately:
+
+- **Counts.** Today's `Cost_model.analyze` computes *upper* bounds on a concrete candidate's
+  compulsory work — the right direction for ranking and calibration, the wrong direction for
+  partial-shape fathoming, because completions of one shape differ in materialized traffic (a
+  `Materialize` commit adds bytes that an `Inline` completion never moves). The partial-shape
+  bound needs a second, *lower*-bound counting mode: semantic FLOPs without recomputation, and
+  compulsory live-in/live-out traffic minimized over the open placement levels. This is phase
+  3's deliverable, and it is why phase 0 does not attempt a bound over partial shapes — the
+  extraction contract must be dualized first, not reused optimistically.
+- **Envelope.** The peak constants must be honest peaks: `bound ≤ measured` requires
+  `peak ≥ counts/measured` on each leg for every candidate ever timed. Overstated peaks are
+  safe (the bound stays a lower bound, pruning weakens); understated peaks are the one failure
+  mode that prunes true winners.
+
+**The agreement invariant (implemented, phase 0).** Per the gh-498 lesson — an invariant
+between a scorer and reality is checked continuously against every sample, never unit-tested on
+each side — every candidate timed by `Autotune.tune` now checks its roofline bound against its
+measured time whenever envelope constants are present, independent of logging and calibration
+settings. A violation warns unconditionally on stderr with the witness (candidate label, digest,
+the implied per-leg minima) and prompts a refit. Under the future search this same check runs on
+every survivor measurement, so a broken fathom cannot stay silent.
+
+**Envelope fitting (implemented, phase 0).** `Ir.Cost_model.Calibration` owns the calibration
+TSV schema (one writer, `Autotune`; one reader, `tools/fit_envelope.exe`; they share the code)
+and the fitter: per backend, each leg starts at its tightest necessary constant — the maximum
+achieved `counts/time` over the rows where *that leg's* counts are exact (exactness is per leg:
+guards-taken op counting and union/multi-read footprints go approximate independently, so a row
+with an exact op count still feeds the compute leg past an approximate footprint). Approximate
+legs are excluded from fitting because guards-taken over-counting can fake a throughput above
+any hardware peak, and one mostly-failing-guards candidate would inflate the envelope
+machine-wide; they stay recorded for divergence analysis, and a bound-exceedance attributable
+only to an approximate leg is an `autotune_log` diagnostic rather than an unconditional warning,
+since it may indict the counts, not the envelope (an *exact* aggregate leg exceeding the
+measurement indicts the envelope regardless of the other leg, and warns naming only the
+configured, exactly-counted legs). Serialized milliseconds are floored, not rounded, at
+the 6th decimal, so a stored time never exceeds the true measurement and file-fitted constants
+stay conservative with respect to it. Multi-kernel rows aggregate per-kernel counts, so for
+them the per-leg maxima are necessary but not
+sufficient (the bound sums per-kernel max-of-legs, which a compute-bound + bandwidth-bound mix
+pushes toward twice either aggregate leg); the fitter therefore raises both legs uniformly by
+the smallest *fission slack* enforcing the aggregate sufficient condition
+`flops/peak_flops + bytes/peak_bandwidth ≤ time` on every multi-kernel row, after which the
+recomputed bound respects every row it was fit from. Raising peaks is the safe direction —
+the bound stays a lower bound, only pruning weakens. Opaque rows are excluded — the model
+never scores them.
+
+The fit is sound on the data, not certified for the machine: fitted peaks are floors a kernel
+demonstrably reached, and a future candidate can achieve more. When it is *timed*, the
+agreement check catches the violation and the fit tightens; the blind spot is
+`autotune_keep_fraction < 1`, where a mis-bounded candidate can be model-pre-filtered before
+timing — no measurement, nothing for the check to see. That risk is inherent to any envelope
+not certified from above (class constants have it too, in both directions); the mitigations
+are the refit loop, the pre-filter's existing no-coverage exemption, and the fitter's
+`--margin` option, which trades pruning strength for headroom explicitly.
+
+**Envelope resolution order.** Per-machine fitted config values (`model_peak_flops`,
+`model_peak_memory_bandwidth`) beat the backend's class-level advisory constants
+(`hardware_limits`). Between them belongs a third source, designed for but not yet bound:
+per-device driver-derived peaks (SM count × clock for compute, memory clock × bus width for
+bandwidth; the occupancy/attribute queries being bound in lukstafi/ocaml-cudajit#20). The seam
+is `hardware_limits` itself — a backend that can query populates better `peak_*` values, and
+everything downstream (envelope, fitter, agreement check) is source-agnostic. Degradation
+without the queries is the current behavior: class constants, or none (cc), in which case there
+is no bound and fathoming is by legality alone — the model stays advisory at every source
+quality.
+
+## Incumbents and the two regimes
+
+1. **Untuned-default path** (first driver target): B&B computes the model-argmin exactly, with
+   no measurement. `model_default` is the 0-dimensional version of this regime — score a fixed
+   menu, ties to the default, any failure falls back. The search generalizes the menu to the
+   full vector space while keeping every advisory guarantee: candidates without model coverage
+   are never fathomed, ties go to the default, and the pick is validated before it replaces the
+   default pipeline. The floor rises from "default preset" to "model-optimal schedule shape"
+   for zero measurement cost, and the result is immediately checkable against the current
+   default — lowest-risk first deployment.
+2. **Tuned path**: prune against a measured incumbent only when the optimistic bound exceeds
+   the incumbent's measured time; return the top-K leaves for measurement. The greedy
+   `tune_inline_flips` chain — the minimal search over the placement dimension, one flip at a
+   time, no bounds — is both the incumbent-provider and the baseline any B&B must beat. The
+   model never overrides a measured result, and every survivor timing is a calibration row.
+
+## Node ordering: enablement, not marginal cost
+
+The gh-558 reduced-scope check (benchmarks/report-gh558-hip-flips.md) is the recorded lesson:
+recompute-cost bounds mis-rank *enablement* flips. On mlp_wide/hip/bf16 the greedy chain's
+most-expensive-first ordering put four `Inline` flips that seed nothing (cost 2048/1024) above
+the `Materialize` twin flips (512/256) whose acceptance unlocked an entire candidate family
+(tensorized seeding 0 → seeded+timed, −37%); a budget-5 chain reported nothing five times while
+budget 18 found it. The moral for B&B: neither the branching order nor any bound may be a
+function of the flipped node's own cost alone, because a placement decision's value includes
+which sketch families become *expressible* under it — the twin flip changes the feasible set,
+not just the objective. That is naturally a B&B concern (subtree value, not node cost), and a
+cheap enablement prior exists: whether materializing the node changes the precision triple at
+an mma-eligible site is computable from the seeders' own site classification, before any
+compile. The gh-558 data is the ready-made test case for whatever ordering replaces cost-only
+ranking.
+
+## Phases
+
+0. **This PR**: the design; envelope fitting (`Calibration` schema + fitter + tool); the
+   continuous agreement check. No search.
+1. **Partial-vector representation**: the decision-level types, the refinement relation, and
+   the factoring of one sketch family into a subtree (the others follow mechanically).
+   `Stage_at` enters the vector here.
+2. **Legality over partial shapes**: `op_legality` quantified over completions; witnesses as
+   pre-compile decline explanations.
+3. **Lower-bound counting mode** in `Cost_model`: semantic FLOPs and compulsory traffic
+   minimized over open placement levels; the envelope constants audited by the (by then
+   accumulated) calibration data.
+4. **The driver**: B&B for the untuned-default path, checked against `model_default` and the
+   current default; then the tuned path with measured incumbents and top-K leaf measurement,
+   with the greedy flip chain as the baseline to beat.
+5. **Interval bounding over symbolic tile parameters** (gated on #490): footprint and occupancy
+   are monotone in tile sizes, so whole boxes of the divisor lattice bound by interval
+   arithmetic — the regime where B&B strictly dominates the beam.
+6. **Evaluation as research output**: nodes fathomed vs. candidates compiled, model-vs-measured
+   divergence per backend (the calibration TSV is the ledger), and the untuned-default quality
+   delta on `benchmarks/` — honest reporting, including where the beam remains competitive
+   (short parameter enumerations without symbolic extents).
+
+## Relations
+
+Composes with #479 (fathoming witnesses are decline explanations produced pre-compilation) and
+rides on #560's analysis cache (one `analyze_proc` shared across a search's specializations —
+already landed, and load-bearing once searches multiply candidate counts). Disjoint from #261
+(superoptimization proposes new programs; this searches schedules of a given program). #267
+resolved as a study; its conclusions (incumbent pruning, decision-vector space) are subsumed
+here.

@@ -2,3 +2,8 @@
  (name minised)
  (modules minised)
  (libraries str))
+
+(executable
+ (name fit_envelope)
+ (modules fit_envelope)
+ (libraries base stdio ir))

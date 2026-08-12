@@ -691,6 +691,29 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   the only thing left to measure. The refusals now carry a typed census key,
   `Not_dispatched_key of origin` (`baseline` | `candidate` | `beam_move`) — read it (or
   `BENCH_TUNE_REPORT=1`) before concluding a GPU search "found nothing".
+- The calibration TSV schema (`autotune_calibration_file`) is owned by
+  `Ir.Cost_model.Calibration` — writer (`Autotune.emit_calibration`) and reader
+  (`tools/fit_envelope.exe`) share `to_line`/`of_line`, so change it in one place only. The
+  fitter's constants are the tightest envelope respecting every row a leg can be audited on:
+  per-leg max achieved counts/time (per backend), where each leg uses the rows whose counts are
+  exact FOR THAT LEG (flops-approx and bytes-approx are independent flags — a multi-read
+  footprint doesn't disqualify an exact op count; approx legs and opaque rows are excluded, or
+  one mostly-failing-guards candidate's fake throughput would inflate the envelope
+  machine-wide), then a uniform "fission slack" on both legs so the aggregate sufficient
+  condition (flops/pf + bytes/pb <= t) holds on fully-exact multi-kernel rows — per-leg maxima
+  alone are necessary but NOT sufficient there (the bound sums per-kernel max-of-legs).
+  Serialized milliseconds are FLOORED at the 6th decimal (round-to-nearest could store a 5 us
+  kernel's time high by 1e-4 relative and break file-fit conservatism). Fitted peaks are
+  demonstrated floors, not certified maxima; under autotune_keep_fraction < 1 a
+  faster-than-observed candidate can be pre-filtered before the agreement check can see it
+  (fit_envelope's --margin is the headroom knob). The bound-agreement invariant (gh-ocannl-514
+  phase 0) runs on EVERY candidate `Autotune.tune` times whenever envelope constants are
+  present — not gated by `autotune_log` or the calibration file — warning unconditionally on
+  stderr only for exact-count candidates (approx exceedances log under autotune_log as possible
+  over-counting). On machines whose class-level `hardware_limits` peaks understate the hardware
+  (e.g. Metal's 2e11 B/s vs a 4e11 B/s M-Max), tuning runs may newly print `BOUND VIOLATION`
+  warnings. That is the invariant working: refit `model_peak_*` from calibration data rather
+  than silencing the check.
 - benchmarks/ is the cross-framework parity+timing suite (self-describing safetensors fixtures,
   one-JSON-line runners, loss-trajectory parity gate ~1e-7 fp32 vs pytorch/cpu). The gate
   doubles as a gradient oracle. tinygrad: realize the loss BEFORE `opt.step()` or it recomputes

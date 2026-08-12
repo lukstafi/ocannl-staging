@@ -62,6 +62,18 @@ val total_bytes : summary -> int
 val arithmetic_intensity : summary -> float
 (** FLOPs per byte moved, [flops / max 1 (total_bytes)]. *)
 
+val footprint_approximate : summary -> bool
+(** [true] when any per-node footprint is an upper bound rather than exact ([fp_approx]) — the
+    byte counts over-approximate while the op count may still be exact. *)
+
+val approximate : summary -> bool
+(** [flops_approx || footprint_approximate]: some count is an upper bound rather than exact.
+    Such counts are still upper bounds (unlike under [opaque]), but a candidate whose guards
+    mostly fail can carry counts far above the work it performs — quantities derived from an
+    approximate count (achieved throughput, the roofline bound vs. a measurement) are not
+    evidence about the hardware. Exactness is per leg: op counts ([flops_approx]) and byte
+    counts ([footprint_approximate]) go approximate independently. *)
+
 val roofline_seconds :
   ?peak_flops:float ->
   ?peak_memory_bandwidth:float ->
@@ -74,3 +86,100 @@ val roofline_seconds :
     advisory {!Backend_intf.hardware_limits} fields); [None] when neither is given. Monotone:
     raising either constant never increases the bound. A lower bound only up to the model's
     upper-bound byte/op counts — rank with it, do not predict. *)
+
+module Calibration : sig
+  (** The calibration TSV schema (config [autotune_calibration_file], gh-ocannl-491 task 4) and
+      the envelope fitter over it (gh-ocannl-514 phase 0): one row per timed candidate, the
+      model's inputs and roofline score next to the measured time. This module is the schema's
+      single owner — rows are emitted through {!to_line} (by [Autotune]) and read back through
+      {!of_line} (by [tools/fit_envelope.exe]), so writer and reader cannot drift apart. *)
+
+  type row = {
+    backend : string;
+    digest : string;  (** The candidate's digest tag, already shortened at emission. *)
+    label : string;
+    measured_ms : float;
+    model_ms : float option;
+        (** The roofline bound under the envelope constants in force at recording time; [None]
+            when the model had no coverage (opaque code or no envelope constants). *)
+    kernels : int;
+    flops : int;  (** Aggregated over the candidate's kernels, like [bytes]. *)
+    bytes : int;
+    flops_approx : bool;
+        (** The op count is an upper bound rather than exact (guards-taken, any kernel): the
+            compute leg of the fit skips this row; likewise [bytes_approx] for the memory leg
+            ({!footprint_approximate}). Approximate legs are recorded for divergence analysis
+            but excluded from envelope fitting. *)
+    bytes_approx : bool;
+    opaque : bool;
+  }
+  [@@deriving sexp_of]
+
+  val to_line : row -> string
+  (** Tab-separated, no trailing newline. [of_line (to_line r)] recovers [r] up to float
+      formatting: [measured_ms] and [model_ms] record 6 decimals, {e floored} rather than
+      rounded — a stored time never exceeds the true measurement, so constants fit from a file
+      remain conservative with respect to the original in-process measurement (round-to-nearest
+      could overstate a 5 us kernel's time by a fitting-relevant 1e-4 relative). *)
+
+  val of_line : string -> row option
+  (** [None] on malformed lines (wrong column count, unparseable numbers). *)
+
+  type fit = {
+    fit_backend : string;
+    fit_rows : int;  (** Non-opaque, positively timed rows; each leg uses its exact subset. *)
+    fit_opaque : int;  (** Opaque rows, excluded — the model never scores them. *)
+    fit_flops_approx : int;
+        (** Among [fit_rows]: rows the compute leg skips (approximate op count — guards-taken
+            over-counting can fake a throughput above any hardware peak, and one such row would
+            inflate the envelope machine-wide); likewise [fit_bytes_approx] for the memory
+            leg. Exactness is per leg, so a row with an exact op count but a multi-read
+            (approximate) footprint still feeds the compute leg. *)
+    fit_bytes_approx : int;
+    fit_multi_kernel : int;  (** Among [fit_rows]; see {!fit} for the aggregate caveat. *)
+    fit_violations : int;
+        (** Fully-exact rows whose recorded [model_ms] exceeds [measured_ms]: the envelope in
+            force when they were recorded understated this machine's peaks. Rows with an
+            approximate leg are not counted — their exceedance may reflect over-counting
+            instead, mirroring the runtime warning's gating. *)
+    fit_fission_slack : (float * string) option;
+        (** The uniform factor (> 1) applied to both legs so the aggregate sufficient condition
+            holds on every multi-kernel row (see {!fit}), and the row forcing it; [None] when
+            the per-leg maxima already suffice (or a leg is absent). *)
+    fit_peak_flops : (float * string) option;
+        (** The fitted constant (fission slack included) and the binding row's
+            [label (digest)]; [None] when no scoreable row has a positive count for the leg. *)
+    fit_peak_memory_bandwidth : (float * string) option;
+  }
+  [@@deriving sexp_of]
+
+  val fit : row list -> fit list
+  (** Grouped by backend in order of first appearance. The fitted constants are the tightest
+      envelope under which the roofline bound respects every row it can be audited on: per row,
+      [bound <= measured] requires [peak >= counts/measured] on each leg, so each leg starts as
+      the maximum achieved [counts/time] over the rows where {e that leg's} counts are exact —
+      the ratio is then a throughput the machine demonstrably reached. Multi-kernel
+      rows aggregate per-kernel counts, making those maxima necessary for them but not
+      sufficient ([Autotune]'s bound sums per-kernel max-of-legs, which can approach twice the
+      aggregate legs on a compute-bound + bandwidth-bound mix), so both legs are then raised
+      uniformly by the smallest {!field-fit_fission_slack} enforcing the aggregate sufficient
+      condition [flops/peak_flops + bytes/peak_memory_bandwidth <= time] on every fully-exact
+      multi-kernel row — after which the recomputed bound respects every row it was fit from
+      (an over-counted leg is barred from forcing slack: it would inflate both constants).
+      Raising a peak
+      only weakens pruning (the bound stays a lower bound); understating one breaks fathoming.
+
+      Sound on the data, not certified for the machine: fitted peaks are floors a kernel
+      demonstrably reached, and a future candidate can achieve more. Between refits such a
+      candidate's bound can exceed its would-be measured time — caught by the continuous
+      agreement check when it is timed, but under [autotune_keep_fraction < 1] it may be
+      model-pre-filtered before timing, where the check cannot see it.
+      [tools/fit_envelope.exe]'s [--margin] trades pruning strength for headroom against
+      exactly that. *)
+
+  val report : fit -> string
+  (** Config-pasteable: [model_peak_*=...] lines under [#] comment lines naming the binding rows
+      and any fission slack (config comments must be whole lines). Printed constants carry a
+      ~2e-6 relative bump so that 7-significant-digit truncation cannot land below the implied
+      minimum. *)
+end
