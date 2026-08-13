@@ -30,7 +30,9 @@ candidate build (the phase-2 boundary doctrine's cost, now measurable).
 
 Tree `b65e0a7f` (staging master `33d3a963` + the dump instrument), all phases 0–5 merged
 (staging PRs #320–#327). Three machines, one process per cell, fresh `autotune_cache_dir` per
-search, `~rounds:0` as `bench_mlp` always passes, `--ocannl_autotune_log=true` throughout:
+cell (one `Train.tune_placements` invocation — the searches within a cell share it, which is
+harmless: cache identity includes the placement vector, so distinct arms and flips never
+replay each other's entries), `~rounds:0` as `bench_mlp` always passes, `--ocannl_autotune_log=true` throughout:
 
 - **metal**: Apple M4 Max (Metal), `BENCH_PRECISION=f16` for the tuned cells, f32 for the
   untuned reruns (see the harness-gap note).
@@ -221,19 +223,19 @@ One driver per box (`benchmarks/gh514_cells.sh <backend> <precision> <repo-root>
 e.g. `gh514_cells.sh hip bf16 ~/ocannl-staging taskset -c 0-15`); the hip headline cell alone:
 
 ```bash
-cd benchmarks && BENCH_FIXTURE=fixtures/mlp_wide.safetensors BENCH_TUNE=1 BENCH_TUNE_REPORT=1 BENCH_PRECISION=bf16 taskset -c 0-15 ../_build/default/benchmarks/runners/ocannl/bench_mlp.exe --ocannl_backend=hip --ocannl_autotune_log=true --ocannl_autotune_cache_dir=$(mktemp -d) --ocannl_model_peak_flops=1.485901e+12 --ocannl_tune_inline_flips=5 --ocannl_tune_flip_ordering=enablement
+cd benchmarks && BENCH_FIXTURE=fixtures/mlp_wide.safetensors BENCH_TUNE=1 BENCH_TUNE_REPORT=1 BENCH_PRECISION=bf16 taskset -c 0-15 ../_build/default/benchmarks/runners/ocannl/bench_mlp.exe --ocannl_backend=hip --ocannl_autotune_log=true --ocannl_autotune_cache_dir=$(mktemp -d) --ocannl_autotune_search=true --ocannl_autotune_keep_fraction=1 --ocannl_model_peak_flops=1.485901e+12 --ocannl_tune_inline_flips=5 --ocannl_tune_flip_ordering=enablement
 ```
 
 with `--ocannl_tune_flip_ordering=cost` as the baseline arm, and the untuned cells as
 
 ```bash
-cd benchmarks && BENCH_FIXTURE=fixtures/mlp_wide.safetensors BENCH_TUNE=0 ../_build/default/benchmarks/runners/ocannl/bench_mlp.exe --ocannl_backend=hip --ocannl_autotune_log=true --ocannl_model_peak_flops=1.485901e+12 --ocannl_model_default_schedule=true --ocannl_model_default_placements=5
+cd benchmarks && BENCH_FIXTURE=fixtures/mlp_wide.safetensors BENCH_TUNE=0 BENCH_PRECISION=bf16 ../_build/default/benchmarks/runners/ocannl/bench_mlp.exe --ocannl_backend=hip --ocannl_autotune_log=true --ocannl_model_peak_flops=1.485901e+12 --ocannl_model_default_schedule=true --ocannl_model_default_placements=5
 ```
 
 Runs behind this report: per box, 8 tuned cells (A, the two B arms of the pruning A/B, five
 budget-5 chains) — counted in the implementation's unit that is **41 `Autotune.tune` searches
 each** (every cell runs both placement arms, and each of the five chains measures its five
-flips as full searches) — plus 7 untuned compiles and the fit; serial per box, all three boxes
+flips as full searches) — plus the untuned compiles (7 per box, and hip retains the supplemental 4-cell f32 mlp battery alongside its bf16 one — 11 there) and the fit; serial per box, all three boxes
 in parallel, ~8 min (cuda) to ~25 min (metal) wall each. The checked-in driver additionally
 pins every cell's treatment explicitly — the tuned cells enable the search and zero the flip
 budget where it is not the treatment, the control arms disable their gates, the gpt cells pin

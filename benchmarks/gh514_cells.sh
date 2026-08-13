@@ -35,7 +35,7 @@ mlp() {
   local name=$1 tune=$2 prec=$3 st; shift 3
   echo "=== cell $name start $(date +%T) ==="
   BENCH_FIXTURE=fixtures/mlp_wide.safetensors BENCH_TUNE=$tune BENCH_TUNE_REPORT=1 \
-    BENCH_PRECISION=$prec \
+    BENCH_PRECISION=$prec BENCH_STATIC_SCALE=0 BENCH_GATE_INTERVAL=0 \
     ${PIN[@]+"${PIN[@]}"} "$EXE" --ocannl_backend="$BK" --ocannl_autotune_log=true \
     --ocannl_autotune_cache_dir="$(mktemp -d)" "$@" \
     > "$OUT/$name.out" 2> "$OUT/$name.err"
@@ -47,6 +47,7 @@ gpt() {
   local name=$1 st; shift
   echo "=== cell $name start $(date +%T) ==="
   BENCH_FIXTURE=fixtures/gpt2_mini.safetensors BENCH_TUNE=0 BENCH_PRECISION=$PREC \
+    BENCH_STATIC_SCALE=0 BENCH_GATE_INTERVAL=0 \
     ${PIN[@]+"${PIN[@]}"} "$GPT" --ocannl_backend="$BK" --ocannl_autotune_log=true "$@" \
     > "$OUT/$name.out" 2> "$OUT/$name.err"
   st=$?
@@ -55,8 +56,8 @@ gpt() {
 }
 
 # A: tuned baseline + calibration ledger (pruning pinned off — it is the B cells' treatment).
-mlp A 1 "$PREC" --ocannl_autotune_search=true --ocannl_tune_inline_flips=0 \
-  --ocannl_autotune_bound_pruning=false \
+mlp A 1 "$PREC" --ocannl_autotune_search=true --ocannl_autotune_keep_fraction=1 \
+  --ocannl_tune_inline_flips=0 --ocannl_autotune_bound_pruning=false \
   --ocannl_autotune_calibration_file="$OUT/calib.tsv"
 # Fit the envelope from A's rows; later cells pin the fitted peaks.
 if "$FIT" "$OUT/calib.tsv" > "$OUT/fit.txt" 2>/dev/null; then :; else FAILED="$FAILED fit"; fi
@@ -68,21 +69,23 @@ PEAKS=()
 echo "fitted peaks: ${PEAKS[*]:-none}"
 # B: tuned, measured-incumbent bound pruning off vs on, fitted envelope.
 mlp B-off 1 "$PREC" ${PEAKS[@]+"${PEAKS[@]}"} --ocannl_autotune_search=true \
+  --ocannl_autotune_keep_fraction=1 \
   --ocannl_tune_inline_flips=0 --ocannl_autotune_bound_pruning=false
 mlp B-on 1 "$PREC" ${PEAKS[@]+"${PEAKS[@]}"} --ocannl_autotune_search=true \
+  --ocannl_autotune_keep_fraction=1 \
   --ocannl_tune_inline_flips=0 --ocannl_autotune_bound_pruning=true
 # C: the flip chain at budget 5, legacy cost ordering vs enablement ordering, two replicates;
 # then enablement + bound pruning.
 for r in 1 2; do
   mlp C-cost-$r 1 "$PREC" ${PEAKS[@]+"${PEAKS[@]}"} --ocannl_autotune_search=true \
-    --ocannl_autotune_bound_pruning=false \
+    --ocannl_autotune_keep_fraction=1 --ocannl_autotune_bound_pruning=false \
     --ocannl_tune_inline_flips=5 --ocannl_tune_flip_ordering=cost
   mlp C-enab-$r 1 "$PREC" ${PEAKS[@]+"${PEAKS[@]}"} --ocannl_autotune_search=true \
-    --ocannl_autotune_bound_pruning=false \
+    --ocannl_autotune_keep_fraction=1 --ocannl_autotune_bound_pruning=false \
     --ocannl_tune_inline_flips=5 --ocannl_tune_flip_ordering=enablement
 done
 mlp C-enab-bp 1 "$PREC" ${PEAKS[@]+"${PEAKS[@]}"} --ocannl_autotune_search=true \
-  --ocannl_tune_inline_flips=5 \
+  --ocannl_autotune_keep_fraction=1 --ocannl_tune_inline_flips=5 \
   --ocannl_tune_flip_ordering=enablement --ocannl_autotune_bound_pruning=true
 # D: the untuned regime — default pipeline vs model_default, +placements, +lattice. At the
 # requested precision except f16 -> f32 (see the header note); each arm pins the gates the
