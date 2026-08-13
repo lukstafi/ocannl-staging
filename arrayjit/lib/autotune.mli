@@ -227,9 +227,11 @@ val sketch_path_traffic_floor :
     {!Ir.Cost_model.completion_floor}, read off the path's committed staging decisions — a
     committed staged geometry contributes its operand tiles' distinct-cell footprints exactly as
     {!Ir.Cost_model.analyze} charges them on every leaf (in-kernel GPU stages read and write; CPU
-    packed panels are read in kernel under every packing flavor), and a lattice box contributes
-    its most favorable (smallest-tiles) corner, so the increment is monotone in refinement. [0]
-    when no matmul site is detected or nothing is certain. Composed with the floor's legs, this
+    packed panels only under in-kernel [serial] packing — a hoisted panel replaces the original
+    operand's reads rather than adding traffic), and a lattice box contributes its most
+    favorable (smallest-tiles) corner priced at the same per-format intrinsic tile the lattice
+    is built from, so the increment is monotone in refinement. [0] when no matmul site is
+    detected or nothing is certain. Composed with the floor's legs, this
     is what makes the family bound non-uniform across the tree — the schedule-invariant floor
     differentiates only placements (phase 3), the increments differentiate the sketch-geometry
     subtrees. Detection runs once at partial application; the returned closure is cheap per

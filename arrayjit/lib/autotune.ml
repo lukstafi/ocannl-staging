@@ -2534,10 +2534,7 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                it under config [model_default_geometry_lattice]. Curated staged pairs reappear as
                lattice singletons — the search may re-score them, it never re-times anything. *)
             let lattice_child =
-              let mults t ~upto = List.init (upto / t) ~f:(fun i -> (i + 1) * t) in
-              let bms = Array.of_list (mults tm_t ~upto:site.m_ni) in
-              let bks = Array.of_list (mults tk_t ~upto:site.m_nk) in
-              if Array.length bms = 0 || Array.length bks = 0 then
+              if site.m_ni / tm_t = 0 || site.m_nk / tk_t = 0 then
                 Sspace.Refuted
                   (Printf.sprintf
                      "no staged lattice: m=%d or k=%d is below one intrinsic tile (%dx%d)"
@@ -2557,7 +2554,14 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                     lazy
                       (Sspace.Child
                          (lazy
-                           (interval_axis ~axis:"bm" ~values:bms
+                           (* The axis menus materialize only here, inside the exclusion's lazy
+                              payload: their lengths are m and k over the intrinsic tile, so an
+                              un-lifted tree — every ordinary autotuning run — must not pay for
+                              them (Codex P2 on PR #327). *)
+                           (let mults t ~upto = List.init (upto / t) ~f:(fun i -> (i + 1) * t) in
+                            let bms = Array.of_list (mults tm_t ~upto:site.m_ni) in
+                            let bks = Array.of_list (mults tk_t ~upto:site.m_nk) in
+                            interval_axis ~axis:"bm" ~values:bms
                               ~box_verdict:(fun bm_lo _bm_hi ->
                                 staged_tiles_exceed ~bm:bm_lo ~bn:w ~bk:bks.(0) ~depth:1)
                               ~singleton:(fun bm ->
@@ -3075,8 +3079,18 @@ let sketch_path_traffic_floor ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits
                 with _ -> ( try Some (`Bk (Stdlib.Scanf.sscanf label "bk=%d" (fun v -> v))) with _ -> None)))
       in
       let w = Option.value_map limits.Ir.Backend_intf.mma ~default:0 ~f:(fun m -> m.Ir.Backend_intf.mma_simd_width) in
+      (* The same per-format tile selection [matmul_family_tree] builds the lattice from — the
+         canonical [mma_tile] can be coarser than the selected format's (CUDA's TF32 16x16x8
+         against 16x16x16), and an open-axis corner priced at the coarser minimum would overstate
+         the floor over the finer completions (Codex P1 on PR #327). No format tile means the
+         tensorized branch is refuted and no staged completion exists; the increment is then
+         vacuous, priced at the canonical tile. *)
       let tile_min =
-        Option.value_map limits.Ir.Backend_intf.mma ~default:(1, 1, 1) ~f:(fun m -> m.Ir.Backend_intf.mma_tile)
+        Option.value_map limits.Ir.Backend_intf.mma ~default:(1, 1, 1) ~f:(fun m ->
+            let d_prec = Lazy.force site.m_d.Ir.Tnode.storage_prec in
+            match mma_tile_for_precisions m ~a_prec ~b_prec ~d_prec with
+            | Some tile -> tile
+            | None -> m.Ir.Backend_intf.mma_tile)
       in
       fun path ->
         let tensorized =
@@ -3111,17 +3125,19 @@ let sketch_path_traffic_floor ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits
                in place. *)
             if bk > 0 then 2 * tile_bytes ~bm ~bn ~bk else 0
         | Some (`Three (bm, bn, bk)) when (not is_gpu) && tensorized ->
-            (* CPU packed shapes: only the flavors that pack BOTH panels certainly read both in
-               kernel (the hoisted-only Grid shape reads the non-hoistable operand in place, and
-               the mixed grid-outermost shape packs one panel) — condition on the committed
-               packing shape, zero when it is open or partial. bn = 0 encodes the full column
-               extent. *)
-            let both_panels =
+            (* CPU packed shapes: only in-kernel packing of both panels ([serial]) certainly ADDS
+               traffic — the packing nest reads the original operands (already in the base floor)
+               and writes the panels, which the micro-kernel then reads. A hoisted panel is
+               packed at link time and REPLACES the original operand's reads, so its bytes are
+               not additional (with both operands hoisted the addition can be exactly zero —
+               Codex P1 on PR #327); the hoisted-only Grid and mixed grid-outermost shapes
+               likewise replace or split. Zero for all of those, and when the shape is still
+               open. bn = 0 encodes the full column extent. *)
+            let serial_packing =
               List.exists path ~f:(fun (level, label) ->
-                  String.equal level "packing-shape"
-                  && (String.equal label "serial" || String.equal label "hoisted"))
+                  String.equal level "packing-shape" && String.equal label "serial")
             in
-            if both_panels then
+            if serial_packing then
               let bn_eff = if bn = 0 then site.m_nj else bn in
               tile_bytes ~bm ~bn:bn_eff ~bk
             else 0

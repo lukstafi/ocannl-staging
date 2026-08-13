@@ -313,7 +313,9 @@ defaults to `enablement`; `cost` keeps the legacy ranking as the evaluation base
    fathom-by-infeasibility of §Fathoming) and whose certain staging traffic prices the bound:
    `sketch_path_traffic_floor` reads the committed staging decisions off the decision path — a
    committed staged geometry contributes its operand tiles' distinct-cell footprints exactly as
-   `analyze` charges them on every leaf, a box its smallest-tiles corner — so the family bound
+   `analyze` charges them on every leaf (only traffic that is *additional* counts: a hoisted CPU
+   panel replaces the original operand's reads and contributes zero), a box its smallest-tiles
+   corner priced at the same per-format intrinsic tile the lattice is built from — so the family bound
    is finally **non-uniform** across the tree, monotone in refinement, and whole boxes fathom
    without expansion (the schedule-invariant floor still differentiates only placements; the
    increments differentiate the sketch-geometry subtrees). The lattice hides behind an

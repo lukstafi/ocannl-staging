@@ -443,3 +443,45 @@ let () =
           Stdio.printf "  %s: %s\n"
             (String.concat ~sep:" > " (List.map path ~f:(fun (l, v) -> l ^ "=" ^ v)))
             w)
+;
+  (* Review round (Codex P1 on PR #327): the lattice minima and the open-corner pricing must come
+     from the same per-format tile selection the tree builds with — a canonical [mma_tile]
+     coarser than the selected format's (CUDA's TF32 shape) must not inflate the open-axis
+     corner. Canonical 16x16x16, f32 format tile 8x8x8: the open-corner increment prices 8s, and
+     the lattice enumerates 8-step multiples. *)
+  let gpu_coarse_canonical =
+    {
+      Ir.Backend_intf.no_hardware_limits with
+      mma =
+        Some
+          {
+            Ir.Backend_intf.mma_simd_width = 32;
+            mma_tile = (16, 16, 16);
+            mma_format_tiles = [ ((f32, f32, f32), (8, 8, 8)) ];
+            mma_staged_layouts = [];
+            mma_pipeline_depths = [];
+          };
+    }
+  in
+  match
+    Autotune.matmul_sketch_tree ~is_gpu:true ~is_cpu:false ~limits:gpu_coarse_canonical mm2
+  with
+  | None -> Stdio.printf "coarse-canonical: no site detected\n"
+  | Some tree ->
+      let lifted = Autotune.lift_geometry_lattice tree in
+      let lattice_leaves =
+        List.filter (Sspace.enumerate lifted) ~f:(fun (path, _) ->
+            List.exists path ~f:(fun (_, label) -> String.equal label "lattice"))
+      in
+      let inc =
+        Autotune.sketch_path_traffic_floor ~is_gpu:true ~limits:gpu_coarse_canonical mm2
+      in
+      Stdio.printf "== coarse canonical mma_tile 16^3, format tile 8^3 ==\n";
+      Stdio.printf "lattice leaves %d (8-step multiples of both axes: %b)\n"
+        (List.length lattice_leaves)
+        (List.for_all lattice_leaves ~f:(fun (_, p) ->
+             p.Autotune.sk_bm % 8 = 0 && p.Autotune.sk_bk % 8 = 0)
+        && List.exists lattice_leaves ~f:(fun (_, p) -> p.Autotune.sk_bm = 8)
+        && List.exists lattice_leaves ~f:(fun (_, p) -> p.Autotune.sk_bk = 8));
+      Stdio.printf "  open-corner lattice increment (format 8s, not canonical 16s) -> %d bytes\n"
+        (inc [ ("pipeline", "tensorized"); ("geometry", "lattice") ])
