@@ -189,7 +189,14 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   (einsum result-side scatter specs don't parse; gradients accumulate → stay materialized): pass
   `~name` to `Context.compile` (or wrap in `Asgns.Block_comment` for labeled debug dumps), set
   `embedded_nodes`, force the output materialized, seed inputs with `Context.set_values`, then
-  compile→run→`get_values`.
+  compile→run→`get_values`. When the shape under test is NOT reachable through `Assignments` at
+  all (the optimizer never emits it), build the `Low_level.optimized` directly — `LL.optimize` over
+  a hand-written `LL.t`, or `analyze_proc`+`specialize_proc` — and pass it as
+  `Context.compile ?prelowered` with `~name` and `Ir.Assignments.empty_comp` (gh-ocannl-562).
+  It replaces the compile's lowering wholesale, so the analysis layer and the kernels see one IR;
+  add `~lowered_transform:(fun o -> o)` to keep the default schedule annotator off hand-built code.
+  See `test/operations/prelowered_seam.ml`, and mind that scope bodies hoist ahead of the enclosing
+  statement while single-assignment scopes collapse into it (gh-ocannl-584).
 - A node-level "what happened at first touch" flag (`zero_initialized_by_code` and friends) cannot
   soundly drive a PER-OCCURRENCE codegen decision, because nothing clears it across the traversal: a
   guard keyed on it alone collapses `Zero_out; Set; Zero_out` to one zero and drops a `Zero_out`

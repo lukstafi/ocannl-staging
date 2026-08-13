@@ -2223,3 +2223,14 @@
  (package neural_nets_lib)
  (action
   (diff model_default_placements.expected model_default_placements.actual)))
+
+(test
+ (name prelowered_seam)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules prelowered_seam)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))

@@ -136,8 +136,8 @@ let auto () =
          as a spelling mistake. *)
       create_from_backend_name ~device_id:0 backend_name
 
-let compile_outcome ?name ?lowered_transform ?lowered_transforms ~provenance ?candidate ctx comp
-    bindings =
+let compile_outcome ?name ?lowered_transform ?lowered_transforms ?prelowered ~provenance ?candidate
+    ctx comp bindings =
   (* Compile and link on the wrapped backend context; only backend-independent routine components
      (and, via [with_backend]'s rebuilt constructor, the updated context) escape the dispatch. *)
   let wrapped, backend_outcome =
@@ -155,7 +155,7 @@ let compile_outcome ?name ?lowered_transform ?lowered_transforms ~provenance ?ca
               Ir.Schedule_outcome.protect ~classify_backend:Backend.classify_failure ~provenance
                 ~phase:Ir.Schedule_outcome.Transform ?candidate (fun () ->
                   let code =
-                    Backend.compile ?name ?lowered_transform ?lowered_transforms
+                    Backend.compile ?name ?lowered_transform ?lowered_transforms ?prelowered
                       bctx.BI.optimize_ctx bindings comp
                   in
                   Ir.Schedule_outcome.tag Ir.Schedule_outcome.Backend_link (fun () ->
@@ -250,9 +250,9 @@ let compile_outcome ?name ?lowered_transform ?lowered_transforms ~provenance ?ca
 
   Ok (updated_ctx, routine)
 
-let compile ?name ?lowered_transform ?lowered_transforms ctx comp bindings =
+let compile ?name ?lowered_transform ?lowered_transforms ?prelowered ctx comp bindings =
   match
-    compile_outcome ?name ?lowered_transform ?lowered_transforms
+    compile_outcome ?name ?lowered_transform ?lowered_transforms ?prelowered
       ~provenance:Ir.Schedule_outcome.User_schedule ctx comp bindings
   with
   | Ok result -> result

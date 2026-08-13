@@ -768,10 +768,21 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     Array.find_map code_batch.lowereds ~f:(Option.map ~f:(fun l -> l.Low_level.optimize_ctx))
     |> Option.value_or_thunk ~default:Low_level.empty_optimize_ctx
 
-  let%debug3_sexp compile optim_ctx ?name ?lowered_transform ?lowered_transforms bindings
-      (comp : Assignments.comp) : code =
+  let%debug3_sexp compile optim_ctx ?name ?lowered_transform ?lowered_transforms ?prelowered
+      bindings (comp : Assignments.comp) : code =
     let (name : string), (lowered : Low_level.optimized) =
-      lower_assignments optim_ctx ?name bindings comp.asgns
+      match prelowered with
+      | None -> lower_assignments optim_ctx ?name bindings comp.asgns
+      | Some (lowered : Low_level.optimized) ->
+          (* gh-ocannl-562 test seam: the caller supplies the lowering. Substituting only the
+             codegen input ([lowered_transform]) is not enough to execute hand-built IR — the
+             compile's own [code.lowered] is what drives I/O classification, liveness planning and
+             the context-buffer delta, so the two would disagree. Here the supplied record IS
+             [code.lowered], hence the analysis layer and the kernels see one and the same IR. The
+             incoming lineage [optim_ctx] is deliberately unused: the record carries its own
+             [optimize_ctx] (the caller's fork), which reaches the child context at link time. *)
+          ( Option.value_or_thunk name ~default:(fun () -> Assignments.get_name_exn comp.asgns),
+            lowered )
     in
     (* gh-ocannl-489 follow-up: with the liveness planner on, sink whole-node initializations toward
        their first use so live spans start there instead of at an up-front zeroing block (which
