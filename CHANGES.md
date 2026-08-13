@@ -1,6 +1,133 @@
-## [Unreleased]
+## [1.0] -- 2026-08-13
+
+> Release note: theme — advanced compiler tiers and schedule-quality follow-through. This release
+> marks the compilation side reaching the shape argued for in
+> [the compilation manifesto](docs/compilation_manifesto.md): schedule inference is a search in
+> constraint space, with legality and cost queries answered over *partial* schedules and every
+> refusal carrying its witness (gh-ocannl-514). Inlining joined scheduling as a first-class,
+> searchable decision (gh-ocannl-555) once the concrete-index tracer was retired in favor of the
+> affine access relations (gh-ocannl-554), so the two decision spaces are now one surface. The
+> advanced tiers filed for this milestone all landed: CUDA/HIP graph capture (gh-ocannl-488),
+> software-pipelined double-buffered staging (gh-ocannl-487), budget-driven rematerialization
+> (gh-ocannl-498), the CUDA tensor-core profile's remaining shapes (gh-ocannl-481), and CPU reduced
+> precision at both 16-bit tiers (gh-ocannl-517, gh-ocannl-516).
+>
+> The end-to-end number the milestone is measured by is `gpt2_mini`. The v0.9 sweep left it 72x off
+> torch CUDA; the attribution profile (gh-ocannl-531) put 70.2% of the step in five kernels declined
+> by one companion-coverage rule, and fixing that rule at the site's arity (gh-ocannl-569) took the
+> tuned step from 107.4 to 52.4 ms on CUDA (47.9 ms at tf32) and from 45.6 to 25.4 ms on HIP —
+> ~2.05x and ~1.79x, against a predicted floor of ~48.6 ms. Batched/rank-3 matmul sites are seeded
+> (gh-ocannl-528), so tensor cores are reachable on transformer workloads at all.
+>
+> Several results in this release are honest nulls, recorded as such rather than shipped as wins:
+> `ldmatrix` over swizzled staging is emitted, crowned and worth +0.1% (gh-ocannl-481); barrier
+> elision is free but not faster on a one-simdgroup Metal threadgroup (gh-ocannl-567); software
+> pipelining is a ~8% win on CUDA `cp.async`, a null on HIP, and a 1.4–1.5x *cost* on Metal
+> (gh-ocannl-487); site-targeted materialization works and loses to both A/B arms (gh-ocannl-558);
+> and branch-and-bound's fathoming is real and cheap while its promised strict dominance is not
+> reachable everywhere, with the reasons filed as gh-ocannl-577/578/579 (gh-ocannl-514,
+> [report](benchmarks/report-gh514-eval.md)). The advisory contract on the cost model held in every
+> measured cell: a candidate the model cannot price is never dropped.
 
 ### Added
+
+- **Schedule inference as branch-and-bound: search in constraint space, legality as fathoming**
+  (gh-ocannl-514). The enumerate-then-filter pipeline is replaced by a refinement tree over
+  *partial* schedules, so a subtree can be refuted or priced before any of its members is built.
+  `Ir.Schedule_space` represents a partial schedule as placement levels plus a lazily expanded
+  family tree, with the matmul sketch family factored into it so that its leaves stay
+  byte-identical to the previous flat enumeration. Legality answers four verdicts over a partial
+  shape, each carrying its witness, and `Excluded` carries the lifted judgment that killed the
+  subtree; hardware floors and emission gates therefore fathom pre-compile. Bound evaluation
+  mirrors the cost model downward — `Cost_model.completion_floor` is an admissible lower bound
+  over everything a partial schedule could still become, every upward bias in the model matched by
+  a downward one, and commitment is monotone re-evaluation. `Schedule_space.search` drives it,
+  distinguishing verdict-fathoming from cost-fathoming; `model_default` walks the family through
+  it (config `autotune_bound_pruning` extends the same pruning against the *measured* incumbent
+  inside `tune`), `model_default_placements` takes the joint placement×family argmin over an
+  enablement-ranked chain, and `model_default_geometry_lattice` lifts the staged tile geometry into
+  interval boxes judged at their corners, so a family's bound is non-uniform per subtree.
+  Phase 0's calibration schema, envelope fitter (`tools/fit_envelope.exe`) and continuous
+  bound-vs-measured agreement check ship with it: the check is what caught the one over-pruning
+  episode, with 33 warnings rather than a silent wrong answer.
+
+  The evaluation is a research output in its own right ([benchmarks/report-gh514-eval.md](benchmarks/report-gh514-eval.md)):
+  three machines, per-box fitted envelopes, a fathomed-vs-priced ledger, and the nulls stated as
+  nulls. Fathoming by infeasibility is real and cheap — 25 of 30 `gpt2` segment families are
+  dispatched by a single bound evaluation, and box corners refute before expansion — and the
+  enablement ordering closes gh-ocannl-558's budget failure on both GPU boxes. Where strict
+  dominance was not reached the evaluation says why, and the three causes are filed with their
+  evidence: statically-decidable builder preconditions not yet lifted into tree verdicts
+  (gh-ocannl-577), a memory leg unfittable from matmul-family calibration, which is what keeps the
+  placement floors toothless (gh-ocannl-578), and enablement promotion needing a profitability term
+  (gh-ocannl-579).
+
+- **Inlining as a first-class, searchable schedule decision** (gh-ocannl-555). Virtualization was a
+  fixed policy applied during optimization; it is now a decision surface the search can move.
+  `Low_level.optimize` splits into analyze and specialize, so one analysis can be replayed per
+  candidate; `Context.decide_inline` and `optimize_ctx.inline_preferences` carry per-node
+  preferences (the `virtualize_max_*` caps demote to priors of the default policy — legality and
+  observability are untouched, so a preference can never make an unobservable node observable);
+  and `optimized.flip_candidates` exposes the cost-ranked decisions as data. `Train.tune_placements`
+  gains a greedy per-node refinement level behind `tune_inline_flips` (default 0, which reproduces
+  the previous A/B exactly) with `tune_flip_ordering` selecting how flips are ranked.
+
+- **CUDA and HIP graph capture of the fissioned step** (gh-ocannl-488), generalizing Metal's fused
+  segment encoding: a routine's kernel sequence is captured once and replayed as a driver graph,
+  behind config `gpu_graph_capture`. Requires cudajit 0.8.0 / hipjit 0.2.0 for their `Graph`
+  modules; capture runs in RELAXED mode because GC finalizers can fire mid-capture, documented at
+  the implementation. Launch-bound steps gain what the launch overhead cost them and nothing else,
+  which is the prediction and the measurement both: `mlp_small` 0.105 → 0.055 ms p50 on CUDA and
+  ~2x on HIP, `mlp_wide` ~10% on HIP and ~1% on CUDA, `lenet` 114.7 → 114.6 ms unchanged. Loss
+  trajectories are bitwise identical with capture on and off.
+
+- **Software-pipelined double-buffered staging** (gh-ocannl-487). `Schedule.Stage ~pipeline_depth`
+  double-buffers a cooperative stage against its consumer with rotor anchoring, the doubled
+  footprint accounted through `check_hardware_limits`, and cache identity preserved by omitting the
+  field at depth 1 (so existing entries stay valid and `debug_log_from_routines` keeps the
+  unpipelined form). Metal and HIP run the portable double-buffered rendering; CUDA emits
+  `cp.async` through the new `C_syntax_config.async_copy` hook, advertised on sm_80+ so the tuner
+  measures the depth twin wherever staged seeds fire. Executed bitwise depth-2/depth-1 parity is
+  pinned on both GPU substrates. The verdict is per-substrate and is stated that way: CUDA
+  `cp.async` ~8% where the k-loop dominates (deep-K 0.92 ratio, 9/9 replicates favorable), HIP
+  null, Metal ~1.4–1.5x *cost*. The refinements — Metal `simdgroup_async_copy`, the HIP
+  direct-to-LDS arm, depths > 2 — are gh-ocannl-576.
+
+- **Budget-driven rematerialization** (gh-ocannl-498). On top of the gh-ocannl-489 liveness arena
+  planner, a peak-footprint score is computed for the arena layout and a deterministic selector
+  trades storage for recompute over `Inline`-direction flips on gh-ocannl-555's decision surface,
+  until the layout fits config `memory_budget` (`log_memory_budget` reports what it chose and why).
+  `memory_budget` deliberately overrides `model_default_schedule` on the specific-beats-general
+  principle, documented in the reference and logged when it fires. The selector is a bounded
+  planner: it accepts groups jointly and never checks whether a subset of an accepted group would
+  have achieved the same relief, so recompute paid can exceed what the footprint required.
+
+- **Batched and rank-3 matmul sites are seeded** (gh-ocannl-528), so a transformer can reach tensor
+  cores at all. The cause was a mis-detected variance site rather than the two limits the issue
+  quoted: a shared batched-site classifier, batch-aware sketch pipelines, and interior-batch
+  `Tensorize`/`Tile_mma` via recorded leading-dimension strides now cover the all-batched GEMM
+  population. On `gpt2_mini`, 16 tensorized candidates are timed where there were 0, and the
+  crowned cross-segment recombination runs at 106.2 ms against 187.5 ms untuned (1.77x), winner
+  replay verified.
+
+- **The CUDA tensor-core profile's remaining shapes** (gh-ocannl-481): fp8 `mma.sync` gathers
+  addressing transposed operands, a typed swizzle mark carried from `Low_level` through `Schedule`,
+  `ldmatrix` feeding the inline-PTX `mma.sync` arms over a swizzled staged tile (as autotuner twins
+  gated on an advertised layout), per-family arch markers, and `Stage ~pad_stride` padding a tile's
+  minor dimension. Emission is verified by grepping the generated `.cu` rather than by trusting a
+  candidate's label. The measurement is a null and stays on the record: pooled over 45 paired
+  twin-vs-plain timings on `gpt2_mini`/bf16, `ldmatrix` over a b128-swizzled tile is +0.096%
+  against per-lane gathers over a plain one — reproducing the +0.20% first measured on `mlp_wide`,
+  on a workload ~100x larger.
+
+- **Site-targeted materialization** (gh-ocannl-558), and the measurement that says it ships
+  nowhere. `Context.decide_materialized` pre-seeds individual nodes as materialized, and the cast
+  twins turn out to be ordinary policy-decided nodes on gh-ocannl-555's surface, so no seeding hook
+  was missing: one materialized twin suffices to seed and time mma from the default-placement arm's
+  context (`mlp_wide`/HIP/bf16: −37.0% on that arm, rocWMMA verified). It still loses 0/3 measured
+  cells — materialize-all reaches two tensorized sites where site-targeted reaches one, so that arm
+  stays 5.2% ahead at ~1/11th the search cost, inverting the Metal picture where the same arm was
+  the expensive one. Neither placement arm dominates globally, which is the A/B doing its job.
 
 - **Config profiles: `reproducible` and `performance`, with picker-inherited precedence**
   (gh-ocannl-559). A new `profile` setting picks a goal-oriented preset bundle through the ordinary
@@ -80,6 +207,71 @@
 
 ### Changed
 
+- **The concrete-index tracer is retired** (gh-ocannl-554). Virtualization metrics came from a
+  tracer that enumerated concrete indices, bounded by `virtualize_max_tracing_dim` — an enumeration
+  whose cost grew with the shapes and whose answers were approximations of what the affine access
+  relations (gh-ocannl-494) already state exactly. The tracer is deleted; `trace_node_facts`
+  (structural, non-enumerating), `read_multiplicity_query` / `reads_covered_query` over the access
+  relations, and `decide_placements` replace it, and `virtualize_max_tracing_dim` is gone. The
+  regular and `@slow` suites pass unchanged apart from the config-key golden and the probes that
+  referenced the tracer directly. Note for anyone reading multiplicities: a read-modify-write at the
+  same position is exempted, so a copy-read's multiplicity is zero there.
+
+- **`cc` restricts its worker pool to one core class on hybrid CPUs** (gh-ocannl-530), new config
+  key `cc_pool_core_class = auto | all | performance | efficiency`. Conv-sketch tuning wins did not
+  port across CPUs — 3.2x/2.5x on Apple silicon against 1.5x/1.1x on a 24-thread x86 — and the
+  campaign traced it to pool *heterogeneity* rather than to the seeds: the crown family a mixed pool
+  loses (`F_split_saved`) comes back for free on every uniform subset, worth 25–34% of tuned time,
+  with untuned baselines unmoved. The mechanism is process affinity applied lazily before the first
+  `-fopenmp` kernel is dlopened, because libgomp sizes its default team from the affinity mask in
+  its constructor. A new `Cpu_topology` module reads the class map (Windows
+  `GetLogicalProcessorInformationEx`, Linux `cpu_core`/`cpu_atom` sysfs with an ARM `cpu_capacity`
+  fallback, Darwin perflevels) behind a guest-vs-host hypervisor probe, and the policy is a
+  conservative no-op everywhere it cannot be sure: libdispatch pools, fabricated guest topologies,
+  uniform machines, class maps spanning more than one 64-CPU processor group, and externally pinned
+  processes (`auto` respects an external mask as the user's own pool decision). Two consequences:
+  auto `cc_parallel_chunks` is now 4x the *effective* pool width, since
+  `Domain.recommended_domain_count` is affinity-blind on Windows, and the pool signature enters the
+  autotune disk-cache key as `hardware_limits.worker_pool_tag`, because crowns do not transfer
+  across pools. Whether a core-type-*aware* schedule would beat restriction remains untested; no
+  such candidate has ever been constructed.
+
+- **One `Low_level` analysis is shared across sibling candidate compiles** (gh-ocannl-560). With
+  gh-ocannl-555 replaying one analysis per candidate, re-deriving it per sibling was pure waste: the
+  analysis is cached under a canonical digest of the raw lowered code plus static indices (tnodes
+  and statics by identity, binders and scope ids alpha-renamed), and the analyze-only
+  `Context.decision_surface` replaces the flip driver's capture compile.
+
+- **Affine access paths encode intra-statement order** (gh-ocannl-561). A path could not distinguish
+  an `If` condition from its body, which `read_covered_before` had been papering over with a prefix
+  hack. Path components are now typed — `Stmt`/`Cond`/`Body`/`Rhs`/`Write`, plus `Arg` evaluation
+  positions for sibling `Local_scope` operands, deliberately incomparable across operands — and the
+  rmw license, the serial-kernel recognizer and statement grouping move to `Affine.same_statement` /
+  `Affine.stmt_head` where they belong.
+
+- **A single canonical-llc emission core** (gh-ocannl-563). `Low_level.analysis_digest` and
+  `Schedule_cache.canonicalize` each maintained a hand-written construct-by-construct walk of the
+  same IR, which is two things to update per IR change and one silent cache-correctness hazard when
+  only one is updated. Both now call `Low_level.Canonical_render`, parameterized by the identity
+  policy that deliberately differs between them. Digests are byte-identical for both consumers, so
+  no cache invalidates.
+
+- **Four explicit barriers per k-block become one** (gh-ocannl-567). `apply_stage` recognizes a load
+  phase already in place at the same anchor and groups into it, and barrier elision is gated on
+  `workgroup_shared` rather than on `pipelined` (`elide_pipelined_barriers` →
+  `elide_staged_barriers`). One correction to the design, which sets the depth-1 floor at one rather
+  than zero: only some `Tile_mma` rendering forms open a barrier per iteration — the fragment-scope
+  form the crowns actually emit opens it once, on the scope wrapping the anchor loop — so a barrier
+  is never elidable against a *following* `Tile_mma`. Depth 2 is byte-identical. This is free rather
+  than faster: paired before/after on Metal, 8 replicates alternating arms, measured +0.2% against a
+  ±3–7% noise floor established by byte-identical-codegen controls in the same runs. A Metal
+  threadgroup barrier on a one-simdgroup composition is close to free; a multi-warp
+  `__syncthreads()` is a different regime, untested. What it does buy is removing the larger of two
+  confounds in gh-ocannl-487's depth-2-vs-depth-1 measurements.
+
+- **`cudajit` and `hipjit` are pinned to their releases** rather than to `main`, and the CUDA/HIP
+  graph capture above requires cudajit 0.8.0 / hipjit 0.2.0.
+
 - **Config startup chatter goes to stderr** (gh-ocannl-581). The "Welcome to OCANNL!" banner, the
   `log_config_sourcing` trace, and the profile-picked banner are diagnostics, and they were landing
   on stdout of every OCANNL-linked executable — so any tool whose stdout is a data channel (the
@@ -102,6 +294,15 @@
   also carries an ubuntu job on the declared OCaml floor, so `"ocaml" {>= "5.3.0"}` is a tested
   claim rather than an assumption; action references are pinned to release tags (two workflows
   tracked `@main`) and moved off the deprecated Node 20 runtime.
+
+  Two Windows-visible costs were paid down alongside it: the dune cache is enabled and the opam
+  cache restore shrunk, and the `cc` backend stopped re-probing its toolchain once per process. The
+  probe results — the compiler command from `ocamlc -config`, `cc_backend_simd_flags=auto`,
+  `cc_parallel_grid=auto` — are memoized under the temp directory and shared machine-wide, keyed by
+  compiler command, arch flags and `PATH` so an opam switch re-probes; new config key
+  `cc_backend_probe_cache` (default true) restores in-process probing. About five subprocesses per
+  process is nothing in a training run and most of the wall clock when a test suite runs hundreds of
+  short executables in sequence.
 
 - **Native fp16 arithmetic on the CPU backends** (gh-ocannl-516): fp16 is the one 16-bit format a
   CPU can execute natively, and where it does, computing in it doubles the lane count against f32.
@@ -163,6 +364,77 @@
   direct indexing is a dim-carrying use.
 
 ### Fixed
+
+- **Companion coverage is judged at the site's arity** (gh-ocannl-569) — the single largest
+  end-to-end win in this release. The gh-ocannl-521 rule that refuses a sketch whose companion nests
+  cannot be covered capped the chain it inspected at two loops, so five FFN-class kernels of
+  `gpt2_mini` — 70.2% of the CUDA step, 47.2% of the HIP one — were declined into a naive scalar
+  form running at 1.3% (CUDA) / 5.6% (HIP) of measured local peak. `aligned_chains` takes a
+  `?max_chain`, which lifts the cap to the site's own arity, and the batched GPU sketch seeds
+  become reachable on exactly those kernels. Tuned `gpt2_mini` step: 107.4 → 52.4 ms at f32 and
+  106.2 → 47.9 ms at tf32 on CUDA, 45.6 → 25.4 ms on HIP, against a predicted floor of ~48.6 ms;
+  the untuned default is unchanged by design. Values are bitwise verified against the declined
+  form. The residual — the `lm_head` segment needs fissioning apart from its `max_logits` reduction
+  before that GEMM's output axis can spread — is gh-ocannl-574.
+
+- **A backend's tensor-core capability is keyed on the accumulator format, not the multiplicand
+  pair** (gh-ocannl-545). `nvcuda::wmma` declares `__nv_bfloat16` operands against an f32
+  accumulator only, so the uniform bf16 x bf16 -> bf16 triple that a uniformly-bf16 network produces
+  has no wmma arm at all — yet `mma_format_tiles` advertised the bf16 *pair*, so CUDA seeded 36
+  candidates per arm, timed 20, and ranked and crowned among them with every one of the 20
+  rendering the lane-0 scalar fallback. Reported as "20 timed" that cell read as bf16 tensor-core
+  adoption; it measured scalar code. The table is now keyed on the format triple, with
+  `mma_tile_for_precisions` taking `~d_prec` through `mma_acc_format_of_prec` — the accumulator
+  admits no policy choice the way the multiplicands do, since it is read back from and written to
+  the node, so f32 storage accumulates as `Mma_f32` even under the tf32 policy. Each CUDA entry
+  additionally carries its own arch floor, so an sm_70 device stops advertising the sm_80 (bf16,
+  tf32) and sm_89 (fp8) shapes it would decline at emission. After the fix the same cell is 37
+  seeded / 21 timed with zero scalar-fallback notes, crowning a genuine mma candidate at 1.1075 ms
+  against 1.7581 ms for the best non-tensorized candidate of its arm. The trap generalizes and is
+  recorded in the agent notes: "timed" is not "tensorized", because a declined `Tile_mma` is still
+  timed, ranked and crownable under an `mma-*` label.
+
+- **The autotuner no longer accumulates device memory across candidates** (gh-ocannl-550,
+  accumulation half). Attribution refuted the mechanism the issue proposed: code modules loaded and
+  unloaded normally (127/124, live 2–5) while working pools and contexts grew one per *linked*
+  candidate — 127 over 261 attempts, none freed, 28.8 GB requested. A pool simply could not be
+  finalized: each backend's `Slab.pools` table is a module-level strong root, and `Backends.finalize`,
+  the only function that drops an entry, had no caller anywhere in the repo, behind a doc comment
+  asserting the opposite. Peak scaled with candidates reaching link, not with candidates kept or
+  ranked, since the pool is allocated before the search judges anything. `Context.release` gives
+  `finalize` a caller and `Autotune.tune` uses it where the lifetime is exactly known, with a hook
+  ensuring every pre-search exit releases the baseline. Three cold tf32 `gpt2_mini` replicates on
+  CUDA: exit 0, zero OOMs, 261 candidates each, 4–7 live working pools throughout, peak 1,924–1,935
+  MiB against 11,879 unfixed, and the shipped step time unchanged. One class stays out of reach
+  rather than deferred — hoisted packed constants, which need a per-pool purity rule in the shared
+  constant cache (gh-ocannl-565).
+
+- **A lineage-wide validation failure is not a candidate's decline.** `Context.check_runnable`
+  bundled two unlike things, and the `Preflight` containment below put both inside the region that
+  turns failures into per-candidate declines: lineage-wide conditions (a poisoned lineage, an
+  uninitialized input, an unexecuted dependency) fail every candidate of every arm identically,
+  while bind-time static-binding validation genuinely differs per candidate. Contained, the first
+  class was silent on every GPU backend — the serial baseline is refused there (gh-ocannl-532), so
+  nothing validates the lineage before the search, every candidate declines at `Preflight`, nothing
+  is timed, and `Train.tune_placements` *returns normally*, shipping the untuned default out of a
+  lineage in which that routine cannot run. On the C backends the dispatched baseline hits the error
+  first, which is why every golden encodes the CPU shape and CI never saw the divergence. Split into
+  `check_lineage_runnable` and `check_launch_bindings`, with only the per-candidate half contained;
+  `check_runnable`, and hence `Context.run`, is unchanged.
+
+- **A roofline bound violation is reported once per process** rather than once per compile: the
+  cost model's bound-vs-measured agreement check is a continuous invariant (gh-ocannl-514 phase 0),
+  and a violated bound in a tuning loop otherwise repeats the same warning hundreds of times. The
+  dedupe is keyed by candidate digest, backend and device — all three named in the warning — with
+  the test-and-set under a mutex so concurrent compiles cannot both print.
+
+- **`simplify_llc` narrows its interval environment from enclosing `If` conditions**
+  (gh-ocannl-566): every condition that is a conjunction of integer-affine index comparisons — the
+  shapes `partition_breakpoints` reads — now narrows the environment for its body, gated on faithful
+  machine evaluation at the condition's precision. The depth-2 pipelined prefetch's zero-fringe
+  guard folds as a result, pinned structurally and by executed bitwise parity on Metal; a per-rule
+  discriminating suite with executed references landed as `test/operations/simplify_if_narrowing`.
+  Results are guard-relative by construction, so a simplified body is only valid under its guard.
 
 - **The schedule cache key covers the numerics policy** (gh-ocannl-568). `Ir.Numerics.t`
   (`tf32_matmuls`, `narrow_compute_f32`, `fp16_arithmetic`) is chosen by the user and consulted at

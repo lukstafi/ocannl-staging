@@ -42,7 +42,7 @@ A possible route to learning OCANNL:
 6. Read the NN building blocks file [lib/nn_blocks.ml](lib/nn_blocks.ml) and the training recipes [lib/train.ml](lib/train.ml).
   * Work through the [makemore tutorial](docs/makemore_tutorial.md) — a character-level language-model progression mirroring Andrej Karpathy's *Neural Networks: Zero to Hero* lectures.
 7. Read the introductory part of the shape inference documentation [docs/shape_inference.md](docs/shape_inference.md).
-8. For the paper-facing account, read the workshop article [docs/ocannl_workshop_article_human.md](docs/ocannl_workshop_article_human.md) (an archival artifact: it was written for the OCaml Workshop / FProPer submission and describes the project as of the 0.8 release; the current paper target is IFL 2026), the formal core technical report [ocannl-formal-core-technical-report.pdf](https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf) (LaTeX source in [docs/](docs/ocannl-formal-core-technical-report.latex)), and the constraint-generation notes [docs/shape-constraint-generation.md](docs/shape-constraint-generation.md).
+8. For the paper-facing account, read the workshop article [docs/ocannl_workshop_article_human.md](docs/ocannl_workshop_article_human.md) (an archival artifact: it was written for the OCaml Workshop / FProPer submission and describes the project as of the 0.8 release; no conference submission is currently scheduled), the formal core technical report [ocannl-formal-core-technical-report.pdf](https://ahrefs.github.io/ocannl/docs/pdfs/ocannl-formal-core-technical-report.pdf) (LaTeX source in [docs/](docs/ocannl-formal-core-technical-report.latex)), and the constraint-generation notes [docs/shape-constraint-generation.md](docs/shape-constraint-generation.md).
 9. Skim the configuration documentation [ocannl_config.reference](ocannl_config.reference).
 10. Improve your understanding by reading or skimming the framework internals: [tensor/shape.mli](tensor/shape.mli), [tensor/tensor.mli](tensor/tensor.mli), [tensor/operation.ml](tensor/operation.ml), [arrayjit/lib/context.mli](arrayjit/lib/context.mli).
 11. Read the implementation overview:
@@ -59,13 +59,15 @@ NOTE: debug logging from CUDA or HIP in complex settings is a bit tricky, as it 
 
 ## Milestones
 
-See [ROADMAP.md](ROADMAP.md) for the detailed schedule. GitHub issue assignments are the source of truth for release scope. Headline target: **v1.0 at the [IFL 2026](https://ifl26.cse.chalmers.se/) draft-paper deadline (September 4, 2026)**.
+See [ROADMAP.md](ROADMAP.md) for the detailed schedule. GitHub issue assignments are the source of truth for release scope. **v1.0 was released on August 13, 2026**; the next target is **v1.1, soft-dated August 24, 2026**. Release dates are now project-internal and aspirational — through v1.0 they were pinned to conference deadlines.
 
-> Note (July 2026): **v0.7 shipped on July 3, 2026** as the consolidated paper-ready release. **v0.6.4 was skipped as a release** — its work (concatenation, RoPE, transformer toy) shipped inside v0.7 — and **v0.7.2 was consolidated into v0.7**. **v0.7.1 was dissolved**: its AMD HIP backend (#411) shipped in v0.8; completed examples and tokenizer work landed subsequently, while remaining work follows the current GitHub milestone assignments. The sequence is `0.7 → 0.8 → 0.9 → 1.0 → 1.1`.
+> Note (July 2026): **v0.7 shipped on July 3, 2026** as the consolidated paper-ready release. **v0.6.4 was skipped as a release** — its work (concatenation, RoPE, transformer toy) shipped inside v0.7 — and **v0.7.2 was consolidated into v0.7**. **v0.7.1 was dissolved**: its AMD HIP backend (#411) shipped in v0.8; completed examples and tokenizer work landed subsequently, while remaining work follows the current GitHub milestone assignments.
 >
 > Update (August 2026): **v0.9 shipped on August 3, 2026** with its milestone fully closed, so **v1.0 becomes the next paper-deadline release** and v1.1 follows it. CUDA/HIP graph capture (#488) moved from v0.9 to v1.0, and the training/deployment utilities (#96, #97, #122, #465, #467) plus the `lib/` design study (#435) moved from v1.0 to v1.1.
 >
-> Venue change (August 2026): the OCaml Workshop submission was not accepted — the article reads as a research report rather than an introductory demonstration, which put it outside that audience's scope. The paper track now targets **IFL 2026** (Gothenburg, October 28–30, 2026; draft papers due September 4, 2026), and the release dates follow it: **v1.0 on September 4** and **v1.1 on October 28**. The workshop article stays in the repository unchanged, as a historical artifact of the project at v0.8.
+> Venue history (August 2026): the OCaml Workshop submission was not accepted — the article reads as a research report rather than an introductory demonstration, which put it outside that audience's scope. IFL 2026 was then considered and decided against as a poor fit. **No conference submission is currently scheduled**; the workshop article stays in the repository unchanged, as a historical artifact of the project at v0.8, and the formal core technical report continues as live work.
+>
+> Update (August 13, 2026): **v1.0 shipped**, with its milestone fully closed (49 issues). Release dates are no longer pinned to paper deadlines: **v1.1's soft target is August 24, 2026** (the OCaml Workshop date, used as an anchor rather than as a submission). v1.1 and v1.2 were rebalanced along a different seam than the original split — **v1.1 is the compiler work plus the training-loop mechanics it needs**, **v1.2 the consumers and explorations**, including the training experience a user sees. The sequence is `0.9 → 1.0 → 1.1 → 1.2`.
 
 * **0.7 (Jul 3, 2026, released): Frontend finalization + compiler optimizations.** The consolidated paper-ready release for workshop submissions (OCaml Workshop, FProPer). Absorbs the former v0.6.4/v0.6.5/v0.7.0 frontend work and the former v0.7.2 optimization work.
   - [x] Migrate from the "hosted tensor" idea to always requiring a context when accessing tensors and dealing with devices directly; remove the `array` field of `Tnode.t` and the hosted memory mode (#333).
@@ -91,24 +93,37 @@ See [ROADMAP.md](ROADMAP.md) for the detailed schedule. GitHub issue assignments
   - [x] Tensor-core hardening delivered tf32 policy, CUDA 13 support, pad-to-tile scheduling, static partitioning, and packed-uniform retirement (#478, #482, #485, #508, #509).
   - [x] Search survivability: typed candidate-failure containment (#536), HIP scratch pre-validation (#533), no unparallelized GPU dispatches (#532), a complete decline census (#541, #543), and reachable GPU mma candidates (#521).
   - [x] CNN classifiers (#54), GPT-2 inference (#377), and the TVM, Tiramisu, superoptimizer, and Lean Attention studies (#242, #267, #261, #263).
-* **1.0 (Sep 4, 2026 — IFL draft-paper deadline): Advanced compiler tiers and schedule-quality follow-through.**
-  - [ ] Advanced schedules and algorithms: CUDA tensor-core completeness, fused attention, software pipelining, CUDA/HIP graph capture, rematerialization, remaining convolution tiers, and branch-and-bound schedule inference (#481, #483, #487, #488, #498, #503, #505, #514).
-  - [ ] Schedule-quality follow-through from the v0.9 sweep: rank-3 matmul seeding, CUDA bf16 mma fallbacks, and the tuner's serial baseline (#528, #545, #552); Metal's placement A/B measured and found sound (#546).
-  - [ ] CPU reduced precision: native fp16 arithmetic and 16-bit storage with f32 compute (#516, #517).
-  - [ ] Frontend and diagnostics: routine-name collision policy and use-site row resolution (#513, #544).
-  - [ ] Roadmap-only ergonomics: concise merge-buffer transfer composition and execution-dependency tracking.
-  - [x] Tracing design (#160), `%op` inline-initializer scoping (#511), the mixed-precision cost diagnosis (#535), and the f16/bf16 defects that shipped inside v0.9 (#547, #548, #549).
-* **1.1 (Oct 28, 2026 — IFL symposium week): Release completeness — training/deployment utilities, shape design, model examples, and integrations.**
-  - [ ] Training and deployment: resumable checkpoints, inference binaries, experiment tracking, training-loop utilities, and mmap checkpoints (#96, #97, #122, #465, #467).
-  - [ ] Shape schemes and the axis-label design direction (#404); user-facing library study of Simply/NanoDO for `lib/` (#435).
-  - [ ] Model surgery, LSTM and Bonsai RNN examples, digit addition, BERT/ModernBERT, and DisTrO (#33, #60, #182, #427, #297, #278).
-  - [ ] Plot polish, local `%cd` lets, Polars integration, and external-framework study (#103, #80, #219, #277).
-  - [ ] CUDA pinned/constant host-memory experiments, PoPE, and HIP CDNA tensor cores (#170, #195, #444, #477).
+* **1.0 (Aug 13, 2026, released): Advanced compiler tiers and schedule-quality follow-through.**
+  - [x] Branch-and-bound schedule inference: a refinement tree over partial schedules, legality verdicts with witnesses as fathoming, and admissible cost floors (#514).
+  - [x] Inlining as a first-class searchable decision (#555), on top of retiring the concrete-index tracer for affine access relations (#554, #560, #561).
+  - [x] CUDA tensor-core completeness, software pipelining, CUDA/HIP graph capture, and budget-driven rematerialization (#481, #487, #488, #498).
+  - [x] The `gpt2_mini` arc: attribute the step (#531), then judge companion coverage at the site's arity (#569) — tuned step 107.4 → 52.4 ms on CUDA, 45.6 → 25.4 ms on HIP; batched/rank-3 sites seeded (#528).
+  - [x] CPU reduced precision: 16-bit storage with f32 compute and native fp16 arithmetic (#516, #517); `cc` worker-pool uniformity on hybrid CPUs (#530).
+  - [x] Frontend, configuration and diagnostics: use-site row resolution and `stretch` (#544), config profiles (#559), the tuner's honest reference point (#552), routine-name collision policy (#513).
+* **1.1 (Aug 24, 2026, soft target): Performance carry-overs, algebraic rewrites, and training-loop utilities.**
+  - [ ] Training-loop mechanics: LR schedules, global-norm clipping, gradient accumulation, and mmap-backed checkpoint loading (#465, #467).
+  - [ ] Fused attention via online softmax and the remaining convolution tiers (#483, #503, #505).
+  - [ ] Search follow-ups from the v1.0 evaluation: builder preconditions as tree verdicts, a fittable memory leg, profitability in enablement promotion, sketch-family extraction (#577, #578, #579, #580).
+  - [ ] Narrow-operand tensor-core tiling (#575) and the `gpt2_mini` residue (#573, #574).
+  - [ ] Robustness and test seams: digest completeness, fault-injection inventory, executed parity for analysis-level passes (#562, #571, #572, #582).
+* **1.2 (undated): Consumers and explorations.**
+  - [ ] Training experience: resumable checkpoints, experiment tracking, and plot polish (#96, #122, #103).
+  - [ ] Models, reproductions and demos: model surgery, LSTM, Bonsai RNN, digit addition, BERT/ModernBERT, DisTrO, and a Gemma 3 demo target (#33, #60, #182, #427, #297, #278, #570).
+  - [ ] Frontend design, library and deployment: shape schemes, the Simply/NanoDO study for `lib/`, PoPE, and inference binaries (#404, #435, #444, #97).
+  - [ ] Integrations and external-framework study: Polars, krnl/autograph (#219, #277).
+  - [ ] Performance gated on hardware or on evidence not yet in hand: pressure-aware device memory management, async-copy staging refinements, HIP CDNA tensor cores, and CUDA pinned/constant host memory (#565, #576, #477, #170, #195).
 
 ### Releases
 
 For more details, see [CHANGES](CHANGES.md).
 
+* **1.0: Advanced compiler tiers and schedule-quality follow-through.**
+  * Schedule inference as branch-and-bound: a refinement tree over *partial* schedules, legality verdicts carrying their witnesses, and admissible cost floors, so a subtree is refuted or priced before any of its members is built.
+  * Inlining joined scheduling as a searchable decision surface, once the concrete-index tracer was retired in favor of the affine access relations.
+  * CUDA/HIP graph capture of the fissioned step, software-pipelined double-buffered staging (`cp.async` on CUDA), budget-driven rematerialization, and the CUDA tensor-core profile's remaining shapes (fp8, `ldmatrix` over swizzled staging).
+  * Reduced precision on CPU: 16-bit storage with f32 compute, and native fp16 arithmetic where the hardware has it (~2x on an M-series).
+  * The `gpt2_mini` step roughly halved on both GPU backends by judging companion coverage at the site's arity, after a time-attribution profile located 70% of the step in five declined kernels.
+  * Config profiles (`reproducible` / `performance`), `cc` worker-pool uniformity on hybrid CPUs, and use-site row resolution narrowed to the leaf-tensor rule it always was.
 * **0.9: Program search and optimization.**
   * Native affine program analysis and a `Schedule.op_legality` oracle; an analytic roofline cost model that picks untuned defaults and pre-filters the autotune beam (advisory throughout).
   * Deterministic split reductions, pad-to-tile scheduling (PADTO), static partitioning, epilogue fusion, and launch-time symbolic extents.
