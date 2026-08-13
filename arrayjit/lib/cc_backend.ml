@@ -80,29 +80,54 @@ let compiler_command_ref : (unit -> string) ref = ref (fun () -> "")
    walking PATH in process: asking anything would spend the subprocess the cache exists to save.
    Size and mtime, not a version string, for the same reason; an unresolvable command degrades to
    its spelling, which is what the key held before. *)
-let compiler_executable_identity command =
-  let exe =
-    match String.split (String.strip command) ~on:' ' with [] -> "" | token :: _ -> token
+(* Whitespace-separated tokens, honoring quotes: the command is spelled for a shell, so a path
+   containing spaces arrives quoted and splitting on the first space would fingerprint a fragment. *)
+let shell_tokens command =
+  let tokens = ref [] and current = Buffer.create 32 and quote = ref None in
+  let flush () =
+    if Buffer.length current > 0 then (
+      tokens := Buffer.contents current :: !tokens;
+      Buffer.clear current)
   in
+  String.iter command ~f:(fun c ->
+      match (!quote, c) with
+      | Some q, _ when Char.equal q c -> quote := None
+      | Some _, _ -> Buffer.add_char current c
+      | None, ('"' | '\'') -> quote := Some c
+      | None, (' ' | '\t') -> flush ()
+      | None, _ -> Buffer.add_char current c);
+  flush ();
+  List.rev !tokens
+
+let resolve_executable token =
   let candidates =
-    if String.is_empty exe then []
-    else if String.exists exe ~f:(fun c -> Char.equal c '/' || Char.equal c '\\') then [ exe ]
+    if String.is_empty token then []
+    else if String.exists token ~f:(fun c -> Char.equal c '/' || Char.equal c '\\') then [ token ]
     else
       let path = Option.value (Stdlib.Sys.getenv_opt "PATH") ~default:"" in
       let dirs = String.split path ~on:(if Sys.win32 then ';' else ':') in
       let exts = if Sys.win32 then [ ""; ".exe"; ".bat"; ".cmd" ] else [ "" ] in
       List.concat_map dirs ~f:(fun dir ->
-          List.map exts ~f:(fun ext -> Stdlib.Filename.concat dir (exe ^ ext)))
+          List.map exts ~f:(fun ext -> Stdlib.Filename.concat dir (token ^ ext)))
   in
-  let stat path = try Some (Unix.stat path) with _ -> None in
-  match
-    List.find_map candidates ~f:(fun path ->
-        match stat path with
-        | Some ({ Unix.st_kind = Unix.S_REG; _ } as st) -> Some (path, st)
-        | _ -> None)
-  with
-  | None -> "unresolved:" ^ exe
-  | Some (path, st) -> Printf.sprintf "%s:%d:%.0f" path st.Unix.st_size st.Unix.st_mtime
+  List.find_map candidates ~f:(fun path ->
+      match try Some (Unix.stat path) with _ -> None with
+      | Some ({ Unix.st_kind = Unix.S_REG; _ } as st) ->
+          (* [stat], not [lstat]: /usr/bin/cc is a symlink, and it is the TARGET whose size and
+             mtime move when the toolchain is upgraded. *)
+          Some (Printf.sprintf "%s:%d:%.0f" path st.Unix.st_size st.Unix.st_mtime)
+      | _ -> None)
+
+let compiler_executable_identity command =
+  (* EVERY token that names an executable, not just the first (Codex P1 on PR #337): the command can
+     be a wrapper — [ccache clang] — where the first token is the one that never changes, and flags
+     simply do not resolve. The residual is a wrapper that names no compiler on its command line (a
+     shell script calling one internally): its own file is fingerprinted, but not what it invokes,
+     which nothing short of running it could see — [cc_backend_probe_cache=false] is the escape
+     hatch there. *)
+  match List.filter_map (shell_tokens command) ~f:resolve_executable with
+  | [] -> "unresolved:" ^ String.strip command
+  | identities -> String.concat ~sep:"|" identities
 
 let probe_cache_path =
   let key_digest =
