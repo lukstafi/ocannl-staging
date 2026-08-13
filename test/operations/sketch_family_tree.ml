@@ -364,3 +364,82 @@ let () =
   in
   show_run "path-dependent bound fathoms the doubly-committed subtree"
     (Sspace.search ~bound ~incumbent:7. ~score placementish)
+;
+  (* --- Phase 5: the tile-size lattice and the non-uniform family bound --- *)
+  (* The lattice hides behind its exclusion: the un-lifted tree keeps the curated leaves (the
+     seed-list identity above already pinned that), and lifting turns the exclusion into interval
+     boxes over every intrinsic-tile multiple — 8 bm values x 8 staged bk values on the 64^3
+     site — whose leaves join the enumeration without disturbing the curated ones' order. *)
+  let mm2 =
+    (* A fresh lowering of the same 64^3 site: [opt] is still live above, but a dedicated name
+       keeps this section's output self-contained. *)
+    with_lowering ~name:"sft_lattice"
+      (let%op l2 = av +* "ik;kj=>ij" bv in
+       l2)
+  in
+  (match Autotune.matmul_sketch_tree ~is_gpu:true ~is_cpu:false ~limits:gpu_full_limits mm2 with
+  | None -> Stdio.printf "lattice: no site detected\n"
+  | Some tree ->
+      let curated = List.length (Sspace.leaves tree) in
+      let lifted = Autotune.lift_geometry_lattice tree in
+      let lifted_leaves = List.length (Sspace.leaves lifted) in
+      Stdio.printf "== lattice (64^3, tile 8x8x8) ==\n";
+      Stdio.printf "curated leaves %d, lifted leaves %d (+%d lattice singletons), depth %d -> %d\n"
+        curated lifted_leaves (lifted_leaves - curated) (Sspace.depth tree) (Sspace.depth lifted);
+      Stdio.printf "the lattice exclusion carries the lift instructions: %b\n"
+        (List.exists (Sspace.exclusions tree) ~f:(fun (_, w) ->
+             String.equal w Autotune.geometry_lattice_witness));
+      (* The certain-traffic increments that make the bound non-uniform: a committed staged
+         geometry prices its operand tiles, an unstaged one prices nothing, and a lattice box
+         prices its most favorable corner — monotone in refinement. *)
+      let inc = Autotune.sketch_path_traffic_floor ~is_gpu:true ~limits:gpu_full_limits mm2 in
+      let show_inc name path = Stdio.printf "  %-46s -> %d bytes\n" name (inc path) in
+      Stdio.printf "certain-traffic increments along paths:\n";
+      show_inc "curated staged bm16 bn32 bk32"
+        [ ("pipeline", "tensorized"); ("geometry", "bm16 bn32 bk32") ];
+      show_inc "curated unstaged bm16 bn32 bk0"
+        [ ("pipeline", "tensorized"); ("geometry", "bm16 bn32 bk0") ];
+      show_inc "lattice box bm 8..32, bk open"
+        [ ("pipeline", "tensorized"); ("geometry", "lattice"); ("bm", "bm 8..32") ];
+      show_inc "lattice box bm=32, bk 16..32"
+        [ ("pipeline", "tensorized"); ("geometry", "lattice"); ("bm", "bm=32"); ("bk", "bk 16..32") ];
+      show_inc "lattice singleton bm=32 bk=64"
+        [ ("pipeline", "tensorized"); ("geometry", "lattice"); ("bm", "bm=32"); ("bk", "bk=64") ];
+      (* Search over the lifted tree with the increment itself as the bound and an incumbent
+         between the small and large boxes' floors: large-tile boxes fathom without expansion, so
+         the walk scores a fraction of the lattice — the logarithmic-effective regime. The score
+         never displaces (infinity), pinning that fathoming alone dispatches the boxes. *)
+      let bound ~path _sub = Some (Float.of_int (inc path)) in
+      let score _p = Some Float.infinity in
+      let _best, stats = Sspace.search ~bound ~incumbent:6000. ~score lifted in
+      Stdio.printf
+        "lifted search at incumbent 6000: %d expanded, %d scored, %d fathomed, %d refuted, %d \
+         excluded\n"
+        stats.Sspace.st_expanded stats.Sspace.st_scored stats.Sspace.st_fathomed
+        stats.Sspace.st_refuted stats.Sspace.st_excluded);
+  (* Corner-judged box refutations: a workgroup-memory cap that admits only the smallest staged
+     tiles refutes the large-tile half-boxes at their most favorable corner, pre-expansion — the
+     "tile-size interval whose minimum footprint exceeds shared memory" fathom of the issue. *)
+  let gpu_tiny_smem =
+    { gpu_full_limits with Ir.Backend_intf.max_workgroup_memory_bytes = Some 2048 }
+  in
+  match Autotune.matmul_sketch_tree ~is_gpu:true ~is_cpu:false ~limits:gpu_tiny_smem mm2 with
+  | None -> Stdio.printf "lattice under 2KB smem: no site detected\n"
+  | Some tree ->
+      let lifted = Autotune.lift_geometry_lattice tree in
+      let box_refutations =
+        List.filter (Sspace.refutations lifted) ~f:(fun (path, _) ->
+            List.exists path ~f:(fun (_, label) ->
+                String.is_substring label ~substring:"..")
+            && List.exists path ~f:(fun (_, label) -> String.equal label "lattice"))
+      in
+      Stdio.printf "== lattice under a 2048-byte workgroup-memory cap ==\n";
+      Stdio.printf "surviving lattice leaves %d; box-level refutations %d, e.g.:\n"
+        (List.length
+           (List.filter (Sspace.enumerate lifted) ~f:(fun (path, _) ->
+                List.exists path ~f:(fun (_, label) -> String.equal label "lattice"))))
+        (List.length box_refutations);
+      List.iter (List.take box_refutations 2) ~f:(fun (path, w) ->
+          Stdio.printf "  %s: %s\n"
+            (String.concat ~sep:" > " (List.map path ~f:(fun (l, v) -> l ^ "=" ^ v)))
+            w)

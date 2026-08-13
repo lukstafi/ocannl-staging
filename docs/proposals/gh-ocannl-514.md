@@ -304,6 +304,28 @@ defaults to `enablement`; `cost` keeps the legacy ranking as the evaluation base
 5. **Interval bounding over symbolic tile parameters** (gated on #490): footprint and occupancy
    are monotone in tile sizes, so whole boxes of the divisor lattice bound by interval
    arithmetic — the regime where B&B strictly dominates the beam.
+
+   **Implemented.** The tile parameters go symbolic as interval boxes in the family tree: the
+   staged mma geometry level gains a lattice branch — every intrinsic-tile multiple of the row
+   block crossed with every staged depth block, as a binary interval refinement
+   (`Autotune.interval_axis`) whose half-boxes carry corner-judged verdicts (the
+   workgroup-memory floor at the most favorable corner refutes the whole box pre-expansion, the
+   fathom-by-infeasibility of §Fathoming) and whose certain staging traffic prices the bound:
+   `sketch_path_traffic_floor` reads the committed staging decisions off the decision path — a
+   committed staged geometry contributes its operand tiles' distinct-cell footprints exactly as
+   `analyze` charges them on every leaf, a box its smallest-tiles corner — so the family bound
+   is finally **non-uniform** across the tree, monotone in refinement, and whole boxes fathom
+   without expansion (the schedule-invariant floor still differentiates only placements; the
+   increments differentiate the sketch-geometry subtrees). The lattice hides behind an
+   `Excluded` branch (`geometry_lattice_witness`), so `leaves` — the tuner's seed lists, and
+   everything measured — are unchanged by its existence; config
+   `model_default_geometry_lattice` lifts it into `model_default`'s family search
+   (`lift_geometry_lattice`, laziness-preserving, lifted branches still subject to the box
+   refutations). On the 64³ pinned test site the lifted walk scores 13 of the 80 leaves with 26
+   subtrees fathomed — the logarithmic-effective slice. Bounding over symbolic *program*
+   extents (a site whose m/n/k are gh-490 `Row.Sym` dims) remains out of scope: site detection
+   is concrete-extent, and `set_test_bindings` already pins symbolic extents to their upper
+   bound for timing.
 6. **Evaluation as research output**: nodes fathomed vs. candidates compiled, model-vs-measured
    divergence per backend (the calibration TSV is the ledger), and the untuned-default quality
    delta on `benchmarks/` — honest reporting, including where the beam remains competitive

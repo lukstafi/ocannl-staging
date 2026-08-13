@@ -2284,6 +2284,42 @@ let cpu_grid_rendering_disabled =
        | _ -> None
        | exception _ -> None)
 
+(* gh-ocannl-514 phase 5: the witness marking the tile-size lattice branches beyond the curated
+   geometry menus. [leaves] (the tuner's seed lists) never enumerate an [Excluded] branch, so the
+   lattice exists in the space without changing what is timed; [lift_geometry_lattice] (config
+   [model_default_geometry_lattice]) is the driver's lift. *)
+let geometry_lattice_witness =
+  "beyond the curated menu (search economy): the staged tile-size lattice; config \
+   model_default_geometry_lattice lifts it for the model-argmin search"
+
+(* Binary interval refinement over a sorted axis menu (gh-ocannl-514 phase 5): interior choices
+   split the value range in half — boxes labelled "<axis> <lo>..<hi>", singletons "<axis>=<v>" —
+   and [box_verdict lo hi] judges a box by its extreme corners before it is built (a cap monotone
+   in the axis refutes the whole box from its most favorable corner: the issue's "a tile-size
+   interval whose minimum footprint exceeds shared memory refutes the whole box"). Subtrees stay
+   lazy, so a refuted (or, during search, fathomed) half is never expanded — the property that
+   makes searching the full lattice logarithmic-effective rather than enumerative. *)
+let interval_axis ~axis ~(values : int array) ~(box_verdict : int -> int -> string option)
+    ~(singleton : int -> 'a Sspace.child) : 'a Sspace.tree =
+  let label lo hi =
+    if lo = hi then Printf.sprintf "%s=%d" axis values.(lo)
+    else Printf.sprintf "%s %d..%d" axis values.(lo) values.(hi)
+  in
+  let rec child lo hi =
+    match box_verdict values.(lo) values.(hi) with
+    | Some w -> Sspace.Refuted w
+    | None when lo = hi -> singleton values.(lo)
+    | None -> Sspace.Child (lazy (split lo hi))
+  and split lo hi =
+    let mid = (lo + hi) / 2 in
+    Sspace.Choice
+      { level = axis; children = [ (label lo mid, child lo mid); (label (mid + 1) hi, child (mid + 1) hi) ] }
+  in
+  match Array.length values with
+  | 0 -> invalid_arg "Autotune.interval_axis: empty axis"
+  | 1 -> Sspace.Choice { level = axis; children = [ (label 0 0, child 0 0) ] }
+  | n -> split 0 (n - 1)
+
 let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) site :
     sketch_params Sspace.tree =
   let divides c n = c <= n && n % c = 0 in
@@ -2488,6 +2524,60 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                   else None
               | _ -> None
             in
+            (* gh-ocannl-514 phase 5: the staged tile-size lattice beyond the curated menu —
+               every intrinsic-tile multiple of bm crossed with every staged (> 0) multiple of
+               bk, bn pinned at the lane width like the curated staged seeds. Boxes are judged at
+               their most favorable corner (smallest tiles) against the workgroup-memory floor;
+               the certain staging traffic of a box's completions makes the search bound
+               non-uniform across the family ([sketch_path_traffic_floor]). Excluded so the
+               tuner's seed list ([leaves]) stays the curated menu; the model-argmin driver lifts
+               it under config [model_default_geometry_lattice]. Curated staged pairs reappear as
+               lattice singletons — the search may re-score them, it never re-times anything. *)
+            let lattice_child =
+              let mults t ~upto = List.init (upto / t) ~f:(fun i -> (i + 1) * t) in
+              let bms = Array.of_list (mults tm_t ~upto:site.m_ni) in
+              let bks = Array.of_list (mults tk_t ~upto:site.m_nk) in
+              if Array.length bms = 0 || Array.length bks = 0 then
+                Sspace.Refuted
+                  (Printf.sprintf
+                     "no staged lattice: m=%d or k=%d is below one intrinsic tile (%dx%d)"
+                     site.m_ni site.m_nk tm_t tk_t)
+              else if w % tn_t <> 0 then
+                (* The lattice pins bn at the lane width like the curated staged seeds, so the
+                   intrinsic column tile must divide it — the curated menu checks this per entry
+                   ([nmul "bn"]); here it refutes the whole branch. *)
+                Sspace.Refuted
+                  (Printf.sprintf
+                     "lattice pins bn at the lane width %d, which is not a multiple of the \
+                      intrinsic tile n=%d"
+                     w tn_t)
+              else
+                Sspace.Excluded
+                  ( geometry_lattice_witness,
+                    lazy
+                      (Sspace.Child
+                         (lazy
+                           (interval_axis ~axis:"bm" ~values:bms
+                              ~box_verdict:(fun bm_lo _bm_hi ->
+                                staged_tiles_exceed ~bm:bm_lo ~bn:w ~bk:bks.(0) ~depth:1)
+                              ~singleton:(fun bm ->
+                                Sspace.Child
+                                  (lazy
+                                    (interval_axis ~axis:"bk" ~values:bks
+                                       ~box_verdict:(fun bk_lo _bk_hi ->
+                                         staged_tiles_exceed ~bm ~bn:w ~bk:bk_lo ~depth:1)
+                                       ~singleton:(fun bk ->
+                                         leaf
+                                           {
+                                             base_params with
+                                             sk_gpu = true;
+                                             sk_mma = true;
+                                             sk_simd = w;
+                                             sk_bm = bm;
+                                             sk_bn = w;
+                                             sk_bk = bk;
+                                           }))))))))
+            in
             subt (fun () -> choice "geometry"
                  (List.map
                     [ (16, w, 0); (32, w, 0); (16, w, 32); (32, w, 32); (32, w, 16) ]
@@ -2586,7 +2676,8 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                             in
                             subt (fun () -> choice "twin"
                                  ((("plain", leaf base) :: swizzle_twins) @ depth_twins)) )
-                      )))))
+                      ))
+                 @ [ ("lattice", lattice_child) ])))
     | true, None -> Sspace.Refuted "backend advertises no mma capability"
     | _ when is_cpu ->
         (* The register-tiled [Tile_mma] rendering needs no MMA units (cc's [limits.mma] is a token
@@ -2931,6 +3022,132 @@ let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
 let matmul_sketch_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
     (opt : LL.optimized) : sketch_params Sspace.tree option =
   Option.map (detect_matmul opt.LL.llc) ~f:(matmul_family_tree ~is_gpu ~is_cpu ~limits)
+
+(* gh-ocannl-514 phase 5: lift every tile-lattice exclusion in the family tree, preserving the
+   laziness of everything else — a lifted branch remains subject to legality (box refutations),
+   and the recursion continues below the lift so nested exclusions of other policies stay
+   excluded. Used by [model_default] under config [model_default_geometry_lattice]. *)
+let lift_geometry_lattice (tree : sketch_params Sspace.tree) : sketch_params Sspace.tree =
+  let rec tree_f = function
+    | Sspace.Leaf _ as l -> l
+    | Sspace.Choice { level; children } ->
+        Sspace.Choice
+          { level; children = List.map children ~f:(fun (lbl, c) -> (lbl, child_f c)) }
+  and child_f = function
+    | Sspace.Excluded (w, _) as c when String.equal w geometry_lattice_witness ->
+        child_f (Sspace.lift_excluded c)
+    | Sspace.Child sub -> Sspace.Child (lazy (tree_f (Lazy.force sub)))
+    | Sspace.Unknown (w, sub) -> Sspace.Unknown (w, lazy (tree_f (Lazy.force sub)))
+    | (Sspace.Excluded _ | Sspace.Refuted _) as c -> c
+  in
+  tree_f tree
+
+(* gh-ocannl-514 phase 5: the certain-traffic increment of a family-tree decision path — bytes
+   that {e every} completion below the path moves beyond the schedule-invariant
+   [Cost_model.completion_floor], mirroring [Cost_model.analyze]'s counting downward so the
+   composed bound stays below every leaf's model score. The committed staging decisions are read
+   off the path's own labels (minted a few functions above — geometry commitments
+   "bm<B> bn<B> bk<B>[ tm<T> tn<T>]", lattice boxes "<axis> <lo>..<hi>", lattice singletons
+   "<axis>=<v>"); a box contributes its most favorable (smallest-tiles) corner, so the increment
+   is monotone in refinement like the floor it extends. Staged operand tiles are distinct nodes
+   whose distinct-cell footprints [analyze] charges on every staged leaf (reads and writes for
+   the in-kernel GPU stages; reads only for the CPU packed panels, whose hoisted flavors write at
+   link time); everything not certain contributes zero. *)
+let sketch_path_traffic_floor ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits)
+    (opt : LL.optimized) : (string * string) list -> int =
+  match detect_matmul opt.LL.llc with
+  | None -> fun _path -> 0
+  | Some site ->
+      let a_prec = Lazy.force site.m_a.Ir.Tnode.storage_prec in
+      let b_prec = Lazy.force site.m_b.Ir.Tnode.storage_prec in
+      let pa = Ir.Ops.prec_in_bytes a_prec and pb = Ir.Ops.prec_in_bytes b_prec in
+      let tile_bytes ~bm ~bn ~bk = (bm * bk * pa) + (bk * bn * pb) in
+      let scan2 fmt label = try Some (Stdlib.Scanf.sscanf label fmt (fun a b -> (a, b))) with _ -> None in
+      let scan_box label =
+        (* "bm 16..64" / "bk 16..32": the box's minimum; "bm=32" / "bk=32": the singleton. *)
+        match scan2 "bm %d..%d" label with
+        | Some (lo, _) -> Some (`Bm lo)
+        | None -> (
+            match scan2 "bk %d..%d" label with
+            | Some (lo, _) -> Some (`Bk lo)
+            | None -> (
+                try Some (`Bm (Stdlib.Scanf.sscanf label "bm=%d" (fun v -> v)))
+                with _ -> ( try Some (`Bk (Stdlib.Scanf.sscanf label "bk=%d" (fun v -> v))) with _ -> None)))
+      in
+      let w = Option.value_map limits.Ir.Backend_intf.mma ~default:0 ~f:(fun m -> m.Ir.Backend_intf.mma_simd_width) in
+      let tile_min =
+        Option.value_map limits.Ir.Backend_intf.mma ~default:(1, 1, 1) ~f:(fun m -> m.Ir.Backend_intf.mma_tile)
+      in
+      fun path ->
+        let tensorized =
+          List.exists path ~f:(fun (level, label) ->
+              String.equal level "pipeline" && String.equal label "tensorized")
+        in
+        (* Fully-committed geometry labels: the GPU blocktile's five fields, or the shared
+           three-field form (GPU mma menu; CPU packed shapes, where bn=0 encodes the full column
+           extent). *)
+        let committed =
+          List.find_map path ~f:(fun (level, label) ->
+              if not (String.equal level "geometry") then None
+              else
+                try
+                  Some
+                    (Stdlib.Scanf.sscanf label "bm%d bn%d bk%d tm%d tn%d" (fun bm bn bk _ _ ->
+                         `Blocktile (bm, bn, bk)))
+                with _ -> (
+                  try
+                    Some
+                      (Stdlib.Scanf.sscanf label "bm%d bn%d bk%d" (fun bm bn bk ->
+                           `Three (bm, bn, bk)))
+                  with _ -> None))
+        in
+        match committed with
+        | Some (`Blocktile (bm, bn, bk)) when is_gpu ->
+            (* The scalar blocktile pipeline stages both operand tiles in kernel: written and
+               read. *)
+            2 * tile_bytes ~bm ~bn ~bk
+        | Some (`Three (bm, bn, bk)) when is_gpu && tensorized ->
+            (* Staged mma geometries (bk > 0) stage both operand tiles in kernel; unstaged read
+               in place. *)
+            if bk > 0 then 2 * tile_bytes ~bm ~bn ~bk else 0
+        | Some (`Three (bm, bn, bk)) when (not is_gpu) && tensorized ->
+            (* CPU packed shapes: only the flavors that pack BOTH panels certainly read both in
+               kernel (the hoisted-only Grid shape reads the non-hoistable operand in place, and
+               the mixed grid-outermost shape packs one panel) — condition on the committed
+               packing shape, zero when it is open or partial. bn = 0 encodes the full column
+               extent. *)
+            let both_panels =
+              List.exists path ~f:(fun (level, label) ->
+                  String.equal level "packing-shape"
+                  && (String.equal label "serial" || String.equal label "hoisted"))
+            in
+            if both_panels then
+              let bn_eff = if bn = 0 then site.m_nj else bn in
+              tile_bytes ~bm ~bn:bn_eff ~bk
+            else 0
+        | Some _ | None ->
+            if not (is_gpu && tensorized) then 0
+            else
+              (* Lattice boxes: bn is pinned at the lane width, bm/bk at their box minima (the
+                 most favorable corner), the intrinsic tile when not yet committed. All lattice
+                 leaves are staged, so entering the lattice already floors at the intrinsic
+                 corner. *)
+              let on_lattice =
+                List.exists path ~f:(fun (level, label) ->
+                    String.equal level "geometry" && String.equal label "lattice")
+              in
+              if not on_lattice then 0
+              else
+                let tm_t, _, tk_t = tile_min in
+                let bm =
+                  List.fold path ~init:tm_t ~f:(fun acc (_, label) ->
+                      match scan_box label with Some (`Bm v) -> v | _ -> acc)
+                in
+                let bk =
+                  List.fold path ~init:tk_t ~f:(fun acc (_, label) ->
+                      match scan_box label with Some (`Bk v) -> v | _ -> acc)
+                in
+                2 * tile_bytes ~bm ~bn:w ~bk
 
 (** {2 The privatized fission flavor}
 
@@ -4162,6 +4379,12 @@ type model_choice = {
 let model_default_enabled =
   lazy (Utils.get_global_flag ~default:false ~arg_name:"model_default_schedule")
 
+(* gh-ocannl-514 phase 5: whether [model_default]'s family search lifts the tile-size lattice
+   exclusions ([lift_geometry_lattice]) — the full dividing lattice searched under non-uniform
+   bounds instead of the curated menus alone. Never affects [tune]'s seed lists. *)
+let geometry_lattice_enabled =
+  lazy (Utils.get_global_flag ~default:false ~arg_name:"model_default_geometry_lattice")
+
 (* The model ranks several scheduled forms without compiling them. Keep this eager validation in
    that ranking loop: removing it made an invalid tensorized argmin displace a viable schedule and
    then fall back all the way to the default. This is no longer needed for exception attribution or
@@ -4251,29 +4474,40 @@ let model_default ?report ctx comp bindings =
       | post -> score_valid [ post ]
     in
     (* The branch-and-bound walk over the factored matmul family (gh-ocannl-514 phase 4):
-       verdict-carrying children are the construction-time fathoms, and the schedule-invariant
-       roofline floor is the bound — sketch completions share the base program's semantics, so
-       [completion_floor] lower-bounds every one uniformly; it fathoms the whole family exactly
-       when the incumbent already achieves it (the memory-bound kernels where the default
-       preset is optimal). Per-subtree differentiation of the bound needs symbolic tile extents
-       (phase 5). [None] = no matmul site: the caller keeps the flat path (conv seeds, which
-       factor as a follow-up). Returns the first leaf strictly better than [incumbent]. *)
+       verdict-carrying children are the construction-time fathoms, and the bound is the
+       schedule-invariant roofline floor — sketch completions share the base program's
+       semantics, so [completion_floor] lower-bounds every one; it fathoms the whole family
+       exactly when the incumbent already achieves it (the memory-bound kernels where the
+       default preset is optimal) — raised per subtree by the committed staging decisions'
+       certain traffic (phase 5, [sketch_path_traffic_floor]). [None] = no matmul site: the
+       caller keeps the flat path (conv seeds, which factor as a follow-up). Returns the first
+       leaf strictly better than [incumbent]. *)
     let tree_search ~incumbent base_opt =
       match matmul_sketch_tree ~is_gpu ~is_cpu ~limits base_opt with
       | None -> None
       | Some tree ->
-          let fb =
-            let f = CM.completion_floor base_opt.LL.llc in
-            CM.roofline_seconds ?peak_flops ?peak_memory_bandwidth ~flops:f.CM.fr_flops
-              ~bytes:f.CM.fr_bytes ()
+          (* gh-ocannl-514 phase 5: the tile-size lattice beyond the curated menus enters the
+             searched space when lifted (config [model_default_geometry_lattice]), and the bound
+             is no longer uniform across the family — each subtree's committed staging decisions
+             contribute their certain traffic ([sketch_path_traffic_floor]) on top of the
+             schedule-invariant floor, so whole boxes of the lattice fathom without expansion. *)
+          let tree =
+            if Lazy.force geometry_lattice_enabled then lift_geometry_lattice tree else tree
           in
+          let f = CM.completion_floor base_opt.LL.llc in
+          let path_inc = sketch_path_traffic_floor ~is_gpu ~limits base_opt in
+          let bound_at inc =
+            CM.roofline_seconds ?peak_flops ?peak_memory_bandwidth ~flops:f.CM.fr_flops
+              ~bytes:(f.CM.fr_bytes + inc) ()
+          in
+          let fb = bound_at 0 in
           (* Snapshot the caller-side counters so the log can split the driver's unscored
              leaves into compiler rejections vs genuine no-coverage — st_unscored alone would
              misclassify rejections as cost-model gaps in the phase-6 ledger. *)
           let r0 = !n_rejected and k0 = !n_skipped in
           let best, stats =
             Sspace.search
-              ~bound:(fun ~path:_ _sub -> fb)
+              ~bound:(fun ~path _sub -> bound_at (path_inc path))
               ~incumbent ~score:(score_sketch base_opt) tree
           in
           logf

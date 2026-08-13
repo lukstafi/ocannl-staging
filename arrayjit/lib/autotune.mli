@@ -201,6 +201,40 @@ val matmul_sketch_tree :
     epilogue-twin level factor the same way as follow-ups. Exposed for tests and as the phase-4
     search driver's entry into the family space. *)
 
+val geometry_lattice_witness : string
+(** The exclusion witness marking the tile-size lattice branches beyond the curated geometry
+    menus (gh-ocannl-514 phase 5): binary interval refinements over the staged tile sizes —
+    every intrinsic-tile multiple of the row block crossed with every staged depth block — whose
+    boxes carry corner-judged verdicts (a workgroup-memory floor at the most favorable corner
+    refutes the whole box pre-expansion). {!Ir.Schedule_space.leaves} never enumerates an
+    excluded branch, so the tuner's seed lists are unchanged by the lattice's existence. *)
+
+val lift_geometry_lattice :
+  sketch_params Ir.Schedule_space.tree -> sketch_params Ir.Schedule_space.tree
+(** Lift every {!geometry_lattice_witness} exclusion, preserving the laziness of everything else;
+    lifted branches remain subject to legality (the box refutations), and other exclusions stay
+    excluded. {!model_default}'s family search applies this under config
+    [model_default_geometry_lattice]. Exposed for tests. *)
+
+val sketch_path_traffic_floor :
+  is_gpu:bool ->
+  limits:Ir.Backend_intf.hardware_limits ->
+  Ir.Low_level.optimized ->
+  (string * string) list ->
+  int
+(** The certain-traffic increment (bytes) of a family-tree decision path (gh-ocannl-514 phase 5):
+    traffic every completion below the path moves beyond the schedule-invariant
+    {!Ir.Cost_model.completion_floor}, read off the path's committed staging decisions — a
+    committed staged geometry contributes its operand tiles' distinct-cell footprints exactly as
+    {!Ir.Cost_model.analyze} charges them on every leaf (in-kernel GPU stages read and write; CPU
+    packed panels are read in kernel under every packing flavor), and a lattice box contributes
+    its most favorable (smallest-tiles) corner, so the increment is monotone in refinement. [0]
+    when no matmul site is detected or nothing is certain. Composed with the floor's legs, this
+    is what makes the family bound non-uniform across the tree — the schedule-invariant floor
+    differentiates only placements (phase 3), the increments differentiate the sketch-geometry
+    subtrees. Detection runs once at partial application; the returned closure is cheap per
+    path. Exposed for tests. *)
+
 val sketch_schedule : p:sketch_params -> Ir.Low_level.optimized -> Ir.Schedule.schedule
 (** The composed pipeline a seed parameterizes, built against the given lowering (the site is
     re-detected). Raises [Invalid_argument] when no site is detected or the parameters do not fit

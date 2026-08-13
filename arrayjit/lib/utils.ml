@@ -157,6 +157,7 @@ let known_config_keys =
       "autotune_calibration_file";
       "model_default_schedule";
       "model_default_placements";
+      "model_default_geometry_lattice";
       "model_peak_flops";
       "model_peak_memory_bandwidth";
       (* Numerics policy (gh-ocannl-478) *)

@@ -471,6 +471,20 @@
 # placements). 0 (the default) disables the placement levels.
 #model_default_placements=0
 
+# gh-ocannl-514 phase 5: with model_default_schedule=true, lift the tile-size lattice branches of
+# the sketch family trees into `Autotune.model_default`'s search. The lattice extends the curated
+# geometry menus to every intrinsic-tile multiple of the staged block sizes, organized as binary
+# interval boxes: a box is refuted from its most favorable corner when even the smallest tiles
+# exceed the workgroup-memory floor, and fathomed when the roofline floor plus the box's certain
+# staging traffic (monotone in the box's minima) already meets the incumbent score — so the
+# search visits a logarithmic-effective slice of the lattice instead of enumerating it, which is
+# the regime where branch-and-bound strictly dominates the beam (the ledger lines under
+# autotune_log report expanded/scored/fathomed). The model-argmin may then pick a geometry no
+# curated menu contains; the pick stays advisory and validated like any other. Never affects
+# `Autotune.tune`'s seed lists or anything measured: the lattice branches are excluded from
+# `leaves` by construction. Off by default.
+#model_default_geometry_lattice=false
+
 # Overrides the backend's advisory peak arithmetic throughput, in FLOP/s (single precision, FMA
 # counted as two operations), used as the compute leg of the analytic cost model's roofline
 # envelope. Calibrated per-machine values (fit from autotune_calibration_file data with
