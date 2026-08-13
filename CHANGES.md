@@ -80,6 +80,15 @@
 
 ### Changed
 
+- **Config startup chatter goes to stderr** (gh-ocannl-581). The "Welcome to OCANNL!" banner, the
+  `log_config_sourcing` trace, and the profile-picked banner are diagnostics, and they were landing
+  on stdout of every OCANNL-linked executable — so any tool whose stdout is a data channel (the
+  benchmark one-JSON-line runners, `tools/fit_envelope.exe`'s config-pasteable `model_peak_*` fits)
+  had to fight them off with `--ocannl_suppress_welcome_message=true
+  --ocannl_log_config_sourcing=false`. They now join the unknown-config-key warning on stderr, and
+  that incantation is gone. `.expected` goldens are unaffected (dune captures stdout), and the two
+  config tests drop their stdout-protecting guards on the chatter keys.
+
 - **CI runs on OCaml 5.5, Windows on a schedule rather than per-PR, and the GPU backends on a
   daily cross-machine sweep.** Windows took 62-74min against 20 on macOS and 29 on ubuntu, setting
   the latency of every PR check; it now runs twice weekly plus on demand via `workflow_dispatch`.

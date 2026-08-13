@@ -24,7 +24,8 @@
 # Only one `ocannl_config` file is used per run, searched for in the current directory
 # and in ancestor directories. Unless `log_config_sourcing` is false, the source of the
 # `log_level` config is always printed, and the sources of other configs are printed
-# when the log level > 0.
+# when the log level > 0. This startup chatter -- the welcome message included -- goes to
+# stderr, so an OCANNL-linked executable's stdout stays a clean data channel.
 #
 # Every setting below is COMMENTED OUT and its value is (one of) the defaults, so that
 # this file can be copied wholesale to an `ocannl_config` without thereby stating a
@@ -36,16 +37,16 @@
 
 # Bootstrap configurations (read before the config file search begins):
 
-# If true, suppresses the "Welcome to OCANNL!" startup message.
+# If true, suppresses the "Welcome to OCANNL!" startup message (printed to stderr).
 #suppress_welcome_message=false
 
 # If true, disables reading any ocannl_config file; only commandline and environment
 # variable configuration is used.
 #no_config_file=false
 
-# If true, prints where each configuration setting comes from (commandline, environment,
-# config file, or the hard-coded default): always for `log_level`, and for the remaining
-# settings when the log level > 0. Set to false to keep the output clean, e.g. in tests;
+# If true, prints to stderr where each configuration setting comes from (commandline,
+# environment, config file, or the hard-coded default): always for `log_level`, and for the
+# remaining settings when the log level > 0. Set to false to keep the output clean, e.g. in tests;
 # re-enable it (also for a single run, via `--ocannl_log_config_sourcing=true`) to debug
 # which configuration a run actually picks up.
 #log_config_sourcing=true
