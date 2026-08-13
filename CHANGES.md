@@ -31,6 +31,8 @@
   digest names, so a winner crowned under one of them used to replay under another — the shape of
   gh-ocannl-568. Existing cache entries miss once and are re-tuned. `Schedule_cache.cache_key` now
   takes the whole `hardware_limits` record instead of one optional tag per component.
+- The cc backend's on-disk probe cache keys on `cc_backend_simd_flags` too: the fp16 probe compiles
+  under those flags, so an explicit setting could be served another configuration's answer.
 
 ## [1.0] -- 2026-08-13
 

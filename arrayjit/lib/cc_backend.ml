@@ -75,12 +75,19 @@ let probe_cache_path =
       (* Raw settings, not resolved values: [arch_flags] is itself one of the probes cached here, so
          keying on its result would both invert the dependency and spend the probes the key exists
          to avoid. Nothing is lost -- what it resolves to is a function of the compiler and the
-         target, and both are already pinned by the entries below. *)
+         target, and both are already pinned by the entries below.
+
+         Every setting a cached probe CONSULTS has to be here (gh-ocannl-572, the same completeness
+         rule as the schedule cache's): the fp16 probe compiles under [arch_flags () ^ simd_flags
+         ()], so an explicit [cc_backend_simd_flags] can change its answer -- a target whose
+         [_Float16] vector arithmetic only appears under the added flags -- and without the setting
+         in the key the first run's answer would be served to the other configuration. *)
       (let key =
          String.concat ~sep:"\000"
            [
              Utils.get_global_arg ~default:"" ~arg_name:"cc_backend_compiler_command";
              Utils.get_global_arg ~default:"auto" ~arg_name:"cc_backend_arch_flags";
+             Utils.get_global_arg ~default:"auto" ~arg_name:"cc_backend_simd_flags";
              Option.value (Stdlib.Sys.getenv_opt "PATH") ~default:"";
            ]
        in
