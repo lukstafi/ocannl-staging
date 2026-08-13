@@ -232,7 +232,7 @@ reruns. The gap is now closed — `compile_train_step` routes every leg's work-c
 compile (the `Host_gated` gradient routine and the `Device_gated` fused routine, as well as
 `Plain_step`) through `Autotune.model_default`; only `Host_gated`'s tiny optimizer routine stays
 plainly compiled. The driver's D cells accordingly run at the requested precision instead of
-dropping to f32 (see Reproduction — `GH514_D_PREC=f32` restores the workaround). The f32 reruns
+dropping to f32 (see Reproduction — a `f16:f32` precision argument restores the workaround). The f32 reruns
 reported above stand as measured; f16 model-vs-default cells are measurable from here on
 without it.
 
@@ -271,10 +271,11 @@ cells are the commands, and the script is deliberately the single place they are
 The D rows of the f16 boxes were measured with the untuned mlp cells dropped to f32 (the
 harness gap above). The driver no longer drops them — with the gate reaching the gated step
 shapes, `cuda f16` now measures the f16 model-vs-default comparison the tables could not — so
-reproducing those rows as tabulated takes the override that restores the workaround:
+reproducing those rows as tabulated takes the split-precision argument that restores the
+workaround (results land in a `-df32`-suffixed directory of their own):
 
 ```bash
-GH514_D_PREC=f32 benchmarks/gh514_cells.sh cuda f16 ~/ocannl-staging
+benchmarks/gh514_cells.sh cuda f16:f32 ~/ocannl-staging
 ```
 
 Runs behind this report: per box, 8 tuned cells (A, the two B arms of the pruning A/B, five
@@ -286,4 +287,4 @@ pins every cell's treatment explicitly — the tuned cells enable the search and
 budget where it is not the treatment, the control arms disable their gates, and the gpt cells pin
 `BENCH_TUNE=0` — so an ambient config cannot contaminate the matrix; the original runs predate
 those pins but were executed with all gates at their defaults (off), so the driver reproduces
-exactly what is tabulated above (with `GH514_D_PREC=f32` for the f16 boxes' D rows, as above).
+exactly what is tabulated above (with the `f16:f32` argument for the f16 boxes' D rows, as above).

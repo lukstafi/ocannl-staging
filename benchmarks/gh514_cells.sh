@@ -1,19 +1,27 @@
 #!/bin/bash
 # gh-514 phase 6 evaluation cells, one box per invocation.
-# Usage: gh514_cells.sh <backend> <precision> <repo-root> [pin-prefix...]
+# Usage: gh514_cells.sh <backend> <precision>[:<D-cell precision>] <repo-root> [pin-prefix...]
 #
 # <precision> applies to every cell, the untuned mlp D cells included: since the model_default
 # gate reaches the loss-scale-gated step shapes too, an f16 D comparison measures the model
-# against the default rather than two identical executions. Set GH514_D_PREC to run the D cells
-# at a different precision than the tuned cells — GH514_D_PREC=f32 under f16 reproduces the D
-# rows as tabulated in report-gh514-eval.md, which were measured before that gate was extended.
-# Control cells pin their
+# against the default rather than two identical executions. The form <tuned>:<untuned> runs the
+# D cells at a different precision than the tuned cells — `f16:f32` reproduces the D rows as
+# tabulated in report-gh514-eval.md, which were measured before that gate was extended, and
+# labels its results directory accordingly. It is a positional treatment, not an environment
+# variable, so a split precision is visible in the invocation that produced the numbers and
+# cannot be inherited by the next run. Control cells pin their
 # experimental gates (and the tuned cells their search enables) to the treatment's values
 # explicitly: command-line settings out-rank every other config source, so an ambient profile or
 # config file cannot contaminate the matrix.
 set -u
-BK=$1; PREC=$2; ROOT=$3; shift 3
+BK=$1; PRECARG=$2; ROOT=$3; shift 3
 PIN=("$@")
+PREC=${PRECARG%%:*}
+DPREC=${PRECARG#*:}  # the whole argument when it carries no colon, i.e. the D cells follow PREC
+for p in "$PREC" "$DPREC"; do
+  case $p in f32|bf16|f16) ;; *) echo "bad precision: $p (want f32|bf16|f16[:f32|bf16|f16])"; exit 1;; esac
+done
+[ "$DPREC" = "$PREC" ] || echo "D cells at $DPREC (tuned cells at $PREC)"
 # Hermetic against ambient configuration, categorically: every OCANNL_* environment variable is
 # unset (each cell pins its treatment on the command line, which out-ranks all other sources),
 # and the cells run from benchmarks/, whose checked-in ocannl_config is the NEAREST file on the
@@ -23,9 +31,6 @@ while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(OCANNL_[A-Z0-9_]*\)=
 # The BENCH_* family symmetrically: the helpers set every variable a cell consumes, so ambient
 # diagnostic modes (BENCH_SR_SITES and kin) cannot leak into a labeled treatment either.
 while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(BENCH_[A-Z0-9_]*\)=.*/\1/p')
-DPREC=${GH514_D_PREC:-$PREC}
-case $DPREC in f32|bf16|f16) ;; *) echo "bad GH514_D_PREC: $DPREC"; exit 1;; esac
-[ "$DPREC" = "$PREC" ] || echo "D cells at $DPREC (tuned cells at $PREC)"
 FAILED=""
 cd "$ROOT" || exit 1
 opam exec -- dune build tools/fit_envelope.exe benchmarks/runners/ocannl/bench_mlp.exe \
@@ -59,7 +64,10 @@ fi
 EXE=../_build/default/benchmarks/runners/ocannl/bench_mlp.exe
 GPT=../_build/default/benchmarks/runners/ocannl/bench_gpt.exe
 FIT=../_build/default/tools/fit_envelope.exe
+# A split precision is part of the label: a D-cell rerun at another precision never lands in,
+# or overwrites, the matched run's directory.
 OUT="$HOME/gh514-eval-results-$BK-$PREC"
+[ "$DPREC" = "$PREC" ] || OUT="$OUT-d$DPREC"
 rm -rf "$OUT"; mkdir -p "$OUT"
 
 mlp() {
@@ -142,7 +150,7 @@ mlp C-enab-bp 1 "$PREC" ${PEAKS[@]+"${PEAKS[@]}"} --ocannl_autotune_search=true 
   --ocannl_tune_inline_flips=5 \
   --ocannl_tune_flip_ordering=enablement --ocannl_autotune_bound_pruning=true
 # D: the untuned regime — default pipeline vs model_default, +placements, +lattice. At the
-# requested precision unless GH514_D_PREC overrides it (see the header note); each arm pins the
+# requested precision, or at the argument's `:`-suffix (see the header note); each arm pins the
 # gates the treatment does not enable.
 mlp D-default 0 "$DPREC" --ocannl_model_peak_flops=0 --ocannl_model_peak_memory_bandwidth=0 \
   --ocannl_model_default_schedule=false
