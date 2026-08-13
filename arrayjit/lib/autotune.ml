@@ -3635,13 +3635,28 @@ let calibration_file =
 (* The same candidate can be timed repeatedly within a process (a test tuning the same preset in
    two arms, a re-tune after a cache miss). A repeat violation restates the first one — the implied
    minima move only by timing jitter — so the unconditional warning fires once per distinct
-   (backend, digest tag), while every timing still contributes its own calibration row and
+   (backend, device, digest tag), while every timing still contributes its own calibration row and
    autotune_log line. The backend and device belong in the key: the digest is schedule-level, so one
    process tuning the same code on another backend — or on another device of the same backend —
    produces an identical tag, and those measurements are exactly the ones [tune] refuses to
    substitute for each other (the [timing_ctx] backend-and-device check), so their implied minima
-   are independent evidence. *)
+   are independent evidence.
+
+   Claiming a key is the module's only mutation of process-wide state, so it takes a mutex rather
+   than assume its caller's threading: [tune] runs on whichever domain called it, and a
+   test-and-set torn across two domains would both duplicate the warning and race Base's hash table
+   internals. Uncontended, the lock is nothing next to the compile and timing runs the candidate
+   already paid for. *)
 let warned_bound_violations = Hash_set.create (module String)
+
+let warned_bound_violations_mutex = Stdlib.Mutex.create ()
+
+(* [true] exactly once per key per process: the winner of the test-and-set warns. *)
+let claim_bound_violation_warning key =
+  Stdlib.Mutex.protect warned_bound_violations_mutex (fun () ->
+      let fresh = not (Hash_set.mem warned_bound_violations key) in
+      if fresh then Hash_set.add warned_bound_violations key;
+      fresh)
 
 (* Bound pruning against the measured incumbent (gh-ocannl-514 phase 4b): a sketch candidate whose
    schedule-invariant roofline floor meets the best measured time so far provably cannot win, so
@@ -3701,9 +3716,8 @@ let emit_calibration ~backend ~device ~limits ~label ~digest ~measured_ms
      in
      if flops_leg || bytes_leg || (bound_exceeds && (not flops_approx) && not bytes_approx) then
        (let warn_key = Printf.sprintf "%s|%d|%s" backend device dtag in
-        if Hash_set.mem warned_bound_violations warn_key then ()
+        if not (claim_bound_violation_warning warn_key) then ()
         else
-          let () = Hash_set.add warned_bound_violations warn_key in
           let minima =
             String.concat ~sep:" and "
               (List.filter_opt
