@@ -3632,6 +3632,12 @@ let bs_label = function None -> "cfg" | Some b -> Int.to_string b
 let calibration_file =
   lazy (String.strip (Utils.get_global_arg ~arg_name:"autotune_calibration_file" ~default:""))
 
+(* The same candidate can be timed repeatedly within a process (a test tuning the same preset in
+   two arms, a re-tune after a cache miss). A repeat violation restates the first one — the implied
+   minima move only by timing jitter — so the unconditional warning fires once per distinct digest
+   tag, while every timing still contributes its own calibration row and autotune_log line. *)
+let warned_bound_violations = Hash_set.create (module String)
+
 (* Bound pruning against the measured incumbent (gh-ocannl-514 phase 4b): a sketch candidate whose
    schedule-invariant roofline floor meets the best measured time so far provably cannot win, so
    its compile and timing are skipped — the admissible-direction pruning of the issue's tuned
@@ -3688,28 +3694,32 @@ let emit_calibration ~backend ~limits ~label ~digest ~measured_ms (opts : LL.opt
        match model_ms with Some m -> Float.(m > measured_ms) | None -> false
      in
      if flops_leg || bytes_leg || (bound_exceeds && (not flops_approx) && not bytes_approx) then
-       let minima =
-         String.concat ~sep:" and "
-           (List.filter_opt
-              [
-                (if Option.is_some peak_flops && not flops_approx then
-                   Some (Printf.sprintf "model_peak_flops >= %.6g" (Float.of_int flops /. seconds))
-                 else None);
-                (if Option.is_some peak_memory_bandwidth && not bytes_approx then
-                   Some
-                     (Printf.sprintf "model_peak_memory_bandwidth >= %.6g"
-                        (Float.of_int bytes /. seconds))
-                 else None);
-              ])
-       in
-       Stdio.eprintf
-         "autotune: BOUND VIOLATION: roofline lower bound %s ms > measured %.4f ms for %s \
-          (digest %s) on %s — the envelope constants understate this machine's peaks (this row \
-          implies %s as necessary minima); refit with tools/fit_envelope.exe over \
-          autotune_calibration_file data\n\
-          %!"
-         (match model_ms with Some m -> Printf.sprintf "%.6f" m | None -> "?")
-         measured_ms label dtag backend minima
+       (if Hash_set.mem warned_bound_violations dtag then ()
+        else
+          let () = Hash_set.add warned_bound_violations dtag in
+          let minima =
+            String.concat ~sep:" and "
+              (List.filter_opt
+                 [
+                   (if Option.is_some peak_flops && not flops_approx then
+                      Some
+                        (Printf.sprintf "model_peak_flops >= %.6g" (Float.of_int flops /. seconds))
+                    else None);
+                   (if Option.is_some peak_memory_bandwidth && not bytes_approx then
+                      Some
+                        (Printf.sprintf "model_peak_memory_bandwidth >= %.6g"
+                           (Float.of_int bytes /. seconds))
+                    else None);
+                 ])
+          in
+          Stdio.eprintf
+            "autotune: BOUND VIOLATION: roofline lower bound %s ms > measured %.4f ms for %s \
+             (digest %s) on %s — the envelope constants understate this machine's peaks (this row \
+             implies %s as necessary minima); refit with tools/fit_envelope.exe over \
+             autotune_calibration_file data\n\
+             %!"
+            (match model_ms with Some m -> Printf.sprintf "%.6f" m | None -> "?")
+            measured_ms label dtag backend minima)
      else if bound_exceeds then
        (* Only an approximate leg can explain the exceedance: possibly over-counting
           (guards-taken / union upper bounds), not the envelope — a diagnostic, no
