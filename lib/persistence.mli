@@ -1,9 +1,21 @@
 (** {1 Tensor checkpoint persistence: save, load, and restore.}
 
-    Checkpoint files use an S-expression header for metadata followed by contiguous binary payloads
-    in native precision format. *)
+    A checkpoint file is a 4-byte big-endian header length, an S-expression header of per-tensor
+    metadata, then the binary payloads in little-endian native precision format, in the header's
+    order.
 
-val save : ctx:Context.t -> appending:bool -> Ocannl_tensor.Tensor.tn_set -> string -> unit
+    Payload offsets are relative to the first byte past the header, and are multiples of the
+    header's declared [alignment] (gh-ocannl-467) -- as is that first byte itself, the header being
+    space-padded to the boundary. So the offsets are absolute file alignments, which is what lets
+    the payloads be mapped rather than copied (see {!load}). *)
+
+val save :
+  ctx:Context.t ->
+  appending:bool ->
+  ?alignment:int ->
+  Ocannl_tensor.Tensor.tn_set ->
+  string ->
+  unit
 (** [save ~ctx ~appending t_set path] writes tensor data to a checkpoint file.
 
     When [~appending:false], creates a fresh checkpoint (overwriting any existing file). When
@@ -11,13 +23,32 @@ val save : ctx:Context.t -> appending:bool -> Ocannl_tensor.Tensor.tn_set -> str
     keeps non-overlapping entries from the existing file.
 
     Each tensor's data is retrieved on demand from its device buffer in [ctx] via {!Context.to_host}
-    (gh-ocannl-333). Raises if any tnode in [t_set] is not present in [ctx]. *)
+    (gh-ocannl-333). Raises if any tnode in [t_set] is not present in [ctx].
+
+    The file is written to [path ^ ".tmp"] and renamed over [path], so a failed save leaves the
+    previous checkpoint intact, and -- because the rename replaces the directory entry rather than
+    the inode -- mappings taken by an earlier {!load} of the same path keep seeing the data they
+    were mapped from.
+
+    [?alignment] (default 32, GGUF's [general.alignment] default) is the boundary payload offsets
+    are rounded up to. It buys SIMD-friendly data pointers; mapping works at any alignment. *)
 
 val load :
-  ctx:Context.t -> ?prefix_namespace:string -> string -> Context.t * Ocannl_tensor.Tensor.tn_set
+  ctx:Context.t ->
+  ?prefix_namespace:string ->
+  ?mmap:bool ->
+  string ->
+  Context.t * Ocannl_tensor.Tensor.tn_set
 (** [load ~ctx ?prefix_namespace path] reads tensors from a checkpoint file, creates new tnodes,
     uploads their data into [ctx] via {!Context.from_host}, and returns the updated context together
     with the loaded set (gh-ocannl-333).
+
+    [?mmap] overrides the [checkpoint_load_mmap] setting for this call: with mapping on (the default
+    off Windows), a payload whose file bytes are already its host buffer's bytes is wrapped as a
+    private, copy-on-write {!Unix.map_file} region instead of being decoded element by element into
+    a fresh buffer (gh-ocannl-467). Padded nodes keep the decoding path: their payload stores only
+    the logical region, which has to be scattered into the padded buffer. The mapping outlives the
+    call, so the values are the same either way but the pages are read from the file lazily.
 
     Raises if any loaded tensor's (namespace, id) pair clashes with an existing tnode in the
     registry. After loading, bumps the session ID floor so that subsequently created tensors get IDs
@@ -29,13 +60,20 @@ val load :
     [A-Za-z_][A-Za-z0-9_]*; [None] and [Some ""] keep the file namespaces as-is. Pre-namespace
     checkpoints that recorded the namespace as [""] are read as the default namespace [ocannl]. *)
 
-val restore : ctx:Context.t -> Ocannl_tensor.Tensor.tn_set -> string -> Context.t
+val ingestion_counts : unit -> int * int
+(** [(mapped, copied)] payload counts since the start of the process (gh-ocannl-467): how many
+    payloads {!load} and {!restore} wrapped as file mappings, and how many they decoded into fresh
+    host buffers. The two paths agree on values by construction, so this is the only way to observe
+    which one ran — for tests, and for diagnosing a load that copies more than expected. *)
+
+val restore : ctx:Context.t -> ?mmap:bool -> Ocannl_tensor.Tensor.tn_set -> string -> Context.t
 (** [restore ~ctx t_set path] updates existing tensor device buffers from a checkpoint file,
     returning the updated context.
 
     For each tnode in [t_set], finds its data in the file by (namespace, id) — file entries with the
-    legacy [""] namespace match the default namespace — reads it into a temporary host buffer, and
-    uploads it into the node's device buffer in [ctx] via {!Context.from_host} (gh-ocannl-333).
+    legacy [""] namespace match the default namespace — reads it into a temporary host buffer (or
+    maps it, see {!load}'s [?mmap]), and uploads it into the node's device buffer in [ctx] via
+    {!Context.from_host} (gh-ocannl-333).
 
     Raises if:
     - A tensor in [t_set] is missing from the file

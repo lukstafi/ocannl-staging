@@ -170,6 +170,7 @@ let known_config_keys =
       "default_prec";
       "limit_constant_fill_size";
       "max_shape_error_origins";
+      "checkpoint_load_mmap";
     ]
 
 let bool_of_config_string ~arg_name s =

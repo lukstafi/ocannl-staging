@@ -2,6 +2,17 @@
 
 ### Added
 
+- **Checkpoints load by mapping the file, not by copying it** (gh-ocannl-467): `Persistence.load`
+  and `Persistence.restore` wrap each payload as a private, copy-on-write `Unix.map_file` region
+  instead of decoding it element by element into a fresh host buffer — so a checkpoint's pages are
+  read lazily, by the OS, and only the ones actually touched. Padded tensor nodes keep the decoding
+  path: their payload holds only the logical region, which has to be scattered into the padded
+  buffer. The checkpoint format gained an `alignment` field (default 32, GGUF's `general.alignment`
+  default) and rounds payload offsets up to it; the header is space-padded to the same boundary, so
+  the offsets are absolute file alignments and the change breaks neither old readers nor old files.
+  Mapping is on by default except on Windows, where a mapped view holds the file open and would
+  make a later save over the same path fail (`checkpoint_load_mmap`, or the `?mmap` argument).
+
 - **Hand-built lowered code can be executed, not only analyzed** (gh-ocannl-562): `Context.compile`
   and backend `compile` take `?prelowered:Ir.Low_level.optimized`, which replaces the compile's own
   lowering of the comp. Unlike `?lowered_transform`, which substitutes the codegen input only, the

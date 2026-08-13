@@ -482,6 +482,29 @@ let%track7_sexp create_array ~debug:(_debug : string) (prec : Ops.prec) ~(dims :
   let _ : int = Atomic.fetch_and_add used_memory size_in_bytes in
   result
 
+(** Wraps the [dims]-shaped region of the file [fd] starting at [byte_offset] as an ndarray of
+    precision [prec], via {!Unix.map_file} (gh-ocannl-467).
+
+    The returned array {e owns} its mapping: the runtime unmaps it when the array is collected, and
+    the mapping stays valid after [fd] is closed. [byte_offset] need not be page aligned -- the
+    runtime maps from the enclosing page (on Windows, allocation-granularity) boundary and offsets
+    the data pointer accordingly.
+
+    With [~shared:false] (the default) the mapping is copy-on-write: writes to the array stay
+    private to the process and never reach the file.
+
+    A mapped array is read with the {e host's} byte order, whereas the payloads written by
+    {!write_payload_to_channel} are little-endian, so the caller is responsible for checking
+    {!Stdlib.Sys.big_endian} before mapping a payload. The mapping is not counted in
+    {!get_used_memory}: its pages are file-backed, not heap. *)
+let map_file_array ?(shared = false) (prec : Ops.prec) ~(dims : int array) ~(byte_offset : int) fd =
+  let f (type ocaml elt_t) (prec : (ocaml, elt_t) Ops.precision) : t =
+    let kind = precision_to_bigarray_kind prec in
+    as_array prec
+    @@ Unix.map_file fd ~pos:(Int64.of_int byte_offset) kind Bigarray.c_layout shared dims
+  in
+  Ops.apply_prec { f } prec
+
 (** See {!Bigarray.reshape}. *)
 let reshape nd dims =
   let f prec arr = as_array prec @@ Bigarray.reshape arr dims in

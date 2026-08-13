@@ -19,7 +19,15 @@ type tensor_meta = {
 }
 (** Metadata for a single tensor in a checkpoint file. *)
 
-type checkpoint_header = { version : int;  (** Currently 1. *) tensors : tensor_meta list }
+type checkpoint_header = {
+  version : int;  (** Currently 1. *)
+  alignment : int;
+      (** The boundary every payload offset is a multiple of, counted from the start of the file
+          (gh-ocannl-467): the data section itself starts on such a boundary, and the offsets are
+          relative to it. Files written before the field existed are read as [alignment = 1], i.e.
+          payloads packed back to back. Compare GGUF's [general.alignment]. *)
+  tensors : tensor_meta list;
+}
 
 (** {2 S-expression serialization for checkpoint types} *)
 
@@ -123,6 +131,7 @@ let sexp_of_checkpoint_header h =
   Sexp.List
     [
       Sexp.List [ Sexp.Atom "version"; Sexp.Atom (Int.to_string h.version) ];
+      Sexp.List [ Sexp.Atom "alignment"; Sexp.Atom (Int.to_string h.alignment) ];
       Sexp.List [ Sexp.Atom "tensors"; Sexp.List (List.map h.tensors ~f:sexp_of_tensor_meta) ];
     ]
 
@@ -143,21 +152,43 @@ let checkpoint_header_of_sexp sexp =
   let version =
     match find "version" with Sexp.Atom s -> Int.of_string s | _ -> failwith "bad version"
   in
+  (* Absent in checkpoints written before the field existed: they pack payloads back to back. *)
+  let alignment =
+    match List.Assoc.find fields "alignment" ~equal:String.equal with
+    | None -> 1
+    | Some (Sexp.Atom s) -> Int.of_string s
+    | Some _ -> failwith "bad alignment"
+  in
   let tensors =
     match find "tensors" with
     | Sexp.List metas -> List.map metas ~f:tensor_meta_of_sexp
     | _ -> failwith "bad tensors"
   in
-  { version; tensors }
+  { version; alignment; tensors }
 
 (** {2 File I/O helpers} *)
 
+(** The payload alignment written by default (gh-ocannl-467): SIMD-friendly data pointers, and the
+    same value GGUF defaults [general.alignment] to. Mapping does not need it -- {!Unix.map_file}
+    handles an arbitrary offset by mapping from the enclosing page boundary. *)
+let default_alignment = 32
+
+let round_up n alignment = if alignment <= 1 then n else (n + alignment - 1) / alignment * alignment
+
+(* The header is padded with spaces up to a multiple of the alignment, so that the data section --
+   which starts wherever the header ends -- begins on an aligned boundary and the payload offsets
+   relative to it are absolute file alignments too. Padding the header rather than the gap after it
+   keeps "the data starts at the first byte past the header" true, so a reader that predates the
+   alignment field still finds the payloads where their offsets say. *)
 let write_header oc header =
   let sexp = sexp_of_checkpoint_header header in
   let header_str = Sexp.to_string_hum sexp in
   let len = String.length header_str in
-  Stdlib.output_binary_int oc len;
-  Stdlib.output_string oc header_str
+  (* [output_binary_int] contributes the 4 bytes preceding the header string. *)
+  let padded_len = round_up (4 + len) header.alignment - 4 in
+  Stdlib.output_binary_int oc padded_len;
+  Stdlib.output_string oc header_str;
+  Stdlib.output_string oc (String.make (padded_len - len) ' ')
 
 let read_header ic =
   let len =
@@ -169,7 +200,7 @@ let read_header ic =
   let buf = Bytes.create len in
   (try Stdlib.really_input ic buf 0 len
    with End_of_file -> failwith "read_header: unexpected end of file (header data)");
-  let header_str = Bytes.to_string buf in
+  let header_str = String.strip (Bytes.to_string buf) in
   let sexp = Sexplib.Sexp.of_string header_str in
   checkpoint_header_of_sexp sexp
 
@@ -182,11 +213,90 @@ let meta_name m = Tn.ident_prefix (meta_namespace m) ^ Int.to_string m.id
 let validate_header header =
   if header.version <> 1 then
     failwith ("unsupported checkpoint version: " ^ Int.to_string header.version);
+  if header.alignment < 1 then
+    failwith ("invalid checkpoint payload alignment: " ^ Int.to_string header.alignment);
   (* Check for duplicate (namespace, id) pairs *)
   let ids = List.map header.tensors ~f:meta_key in
   let unique_ids = Set.of_list (module String) ids in
   if Set.length unique_ids <> List.length ids then
     failwith "checkpoint contains duplicate tensor IDs"
+
+(** {2 Payload ingestion: mapped or copied (gh-ocannl-467)} *)
+
+(* Whether a payload is wrapped as a mapping of the file instead of being decoded into a fresh host
+   buffer. Off by default on Windows: a mapped view holds the file open there, so a later [save]
+   over the same path fails -- its rename cannot replace a directory entry whose file is mapped --
+   whereas on POSIX the rename leaves the mapped inode alone. *)
+let mmap_by_default =
+  lazy (Utils.get_global_flag ~default:(not Stdlib.Sys.win32) ~arg_name:"checkpoint_load_mmap")
+
+let use_mmap = function Some flag -> flag | None -> Lazy.force mmap_by_default
+
+(* A payload can be mapped when the file's bytes ARE the host buffer's bytes. Padding is the only
+   real disqualifier: a padded node's payload holds just the logical region, which
+   [Nd.read_payload_from_channel] scatters into the padded buffer through [adjust_idx_for_padding].
+   The rest is byte-compatibility bookkeeping: payloads are little-endian while a mapping is read in
+   host order, and the payload has to be exactly the buffer -- which also rejects a header claiming
+   a byte length its dimensions and precision do not add up to. *)
+let is_mappable meta =
+  let numel = Array.fold meta.dims ~init:1 ~f:( * ) in
+  Option.is_none meta.padding
+  && (not Stdlib.Sys.big_endian)
+  && (not (Array.is_empty meta.dims))
+  && meta.byte_length > 0
+  && meta.byte_length = numel * Ops.prec_in_bytes meta.prec
+
+type payload_reader = {
+  path : string;  (** For error messages only: the payloads are addressed through [ic]. *)
+  ic : Stdlib.in_channel;
+  data_start : int;
+  mmap : bool;
+}
+
+let open_reader ?mmap path =
+  let ic = Stdlib.open_in_bin path in
+  { path; ic; data_start = 0; mmap = use_mmap mmap }
+
+(* The payload extents are checked against the file size up front: mapping past the end of a file is
+   an error worth reporting against the checkpoint rather than a partially-read buffer. *)
+let validate_extents reader header =
+  let file_size = Stdlib.in_channel_length reader.ic in
+  List.iter header.tensors ~f:(fun meta ->
+      if
+        meta.offset < 0 || meta.byte_length < 0
+        || reader.data_start + meta.offset + meta.byte_length > file_size
+      then
+        failwith
+          ("checkpoint " ^ reader.path ^ ": the payload of tensor " ^ meta_name meta
+         ^ " extends past the end of the file"))
+
+(* Which ingestion path each payload took is otherwise invisible -- the two produce equal values by
+   construction -- so it is counted, for tests and for diagnosing an unexpectedly slow load. *)
+let mapped_count = Atomic.make 0
+let copied_count = Atomic.make 0
+let ingestion_counts () = (Atomic.get mapped_count, Atomic.get copied_count)
+
+(** Ingests one tensor's payload: a mapping of the file where that is byte-equivalent, otherwise a
+    fresh buffer decoded from the channel. *)
+let ingest_payload reader ~debug meta =
+  if reader.mmap && is_mappable meta then begin
+    Atomic.incr mapped_count;
+    (* The descriptor behind the channel the header came from, NOT a fresh open of the path: a
+       concurrent atomic save would put a different inode at that name, and the offsets, extents and
+       precisions being mapped describe the file this read started on. The mapping outlives the
+       descriptor -- and the directory entry -- so nothing here depends on the file staying put. *)
+    Nd.map_file_array meta.prec ~dims:meta.dims
+      ~byte_offset:(reader.data_start + meta.offset)
+      (Unix.descr_of_in_channel reader.ic)
+  end
+  else begin
+    Atomic.incr copied_count;
+    let nd = Nd.create_array ~debug meta.prec ~dims:meta.dims ~padding:meta.padding in
+    Stdlib.seek_in reader.ic (reader.data_start + meta.offset);
+    let padding = Option.map ~f:fst meta.padding in
+    Nd.read_payload_from_channel ?padding nd reader.ic meta.byte_length;
+    nd
+  end
 
 (** Compute the byte length for a tensor's logical payload. *)
 let compute_byte_length prec dims padding =
@@ -204,7 +314,9 @@ let compute_byte_length prec dims padding =
 
 (** {2 Public API} *)
 
-let save ~ctx ~appending t_set path =
+let save ~ctx ~appending ?(alignment = default_alignment) t_set path =
+  if alignment < 1 then
+    invalid_arg ("Persistence.save: alignment must be positive, got " ^ Int.to_string alignment);
   let tn_list = Set.to_list t_set in
   (* Retrieve each tnode's data from its device buffer on demand (gh-ocannl-333). *)
   let host_of = Hashtbl.create (module Int) in
@@ -265,9 +377,10 @@ let save ~ctx ~appending t_set path =
     end
     else List.map new_entries ~f:(fun (m, tn) -> `New (m, tn))
   in
-  (* Compute sequential offsets *)
+  (* Compute sequential offsets, each rounded up to the declared alignment. *)
   let _, entries_with_offsets =
-    List.fold all_entries ~init:(0, []) ~f:(fun (offset, acc) entry ->
+    List.fold all_entries ~init:(0, []) ~f:(fun (cursor, acc) entry ->
+        let offset = round_up cursor alignment in
         let byte_length =
           match entry with `Existing (m, _) -> m.byte_length | `New (m, _) -> m.byte_length
         in
@@ -286,18 +399,25 @@ let save ~ctx ~appending t_set path =
     let header =
       {
         version = 1;
+        alignment;
         tensors =
           List.map entries_with_offsets ~f:(function `Existing (m, _) -> m | `New (m, _) -> m);
       }
     in
     write_header oc header;
-    List.iter entries_with_offsets ~f:(function
-      | `Existing (_, payload) -> Stdlib.output_bytes oc payload
-      | `New (_, tn) ->
-          let nd = Hashtbl.find_exn host_of tn.Tn.uid in
-          let padding = Option.map ~f:fst (Lazy.force tn.Tn.padding) in
-          let _n = Nd.write_payload_to_channel ?padding nd oc in
-          ())
+    let cursor = ref 0 in
+    List.iter entries_with_offsets ~f:(fun entry ->
+        let meta = match entry with `Existing (m, _) -> m | `New (m, _) -> m in
+        (* Fill the alignment gap ahead of this payload. *)
+        Stdlib.output_string oc (String.make (meta.offset - !cursor) '\000');
+        (match entry with
+        | `Existing (_, payload) -> Stdlib.output_bytes oc payload
+        | `New (_, tn) ->
+            let nd = Hashtbl.find_exn host_of tn.Tn.uid in
+            let padding = Option.map ~f:fst (Lazy.force tn.Tn.padding) in
+            let _n = Nd.write_payload_to_channel ?padding nd oc in
+            ());
+        cursor := meta.offset + meta.byte_length)
   with
   | () ->
       Stdlib.close_out oc;
@@ -307,7 +427,7 @@ let save ~ctx ~appending t_set path =
       (try Stdlib.Sys.remove tmp_path with _ -> ());
       raise exn
 
-let load ~ctx ?prefix_namespace path =
+let load ~ctx ?prefix_namespace ?mmap path =
   let prefix_namespace =
     match prefix_namespace with
     | None | Some "" -> None
@@ -322,12 +442,14 @@ let load ~ctx ?prefix_namespace path =
     | None -> meta_namespace meta
     | Some p -> p ^ "__" ^ meta_namespace meta
   in
-  let ic = Stdlib.open_in_bin path in
+  let reader = open_reader ?mmap path in
+  let ic = reader.ic in
   let result =
     match
       let header = read_header ic in
       validate_header header;
-      let data_start = Stdlib.pos_in ic in
+      let reader = { reader with data_start = Stdlib.pos_in ic } in
+      validate_extents reader header;
       (* Pre-check: verify no ID clashes before creating anything *)
       List.iter header.tensors ~f:(fun meta ->
           match Tn.find_namespaced ~namespace:(target_namespace meta) ~id:meta.id with
@@ -340,14 +462,7 @@ let load ~ctx ?prefix_namespace path =
       let max_id = ref (-1) in
       let loaded =
         List.map header.tensors ~f:(fun meta ->
-            (* Create ndarray *)
-            let nd =
-              Nd.create_array ~debug:"loaded" meta.prec ~dims:meta.dims ~padding:meta.padding
-            in
-            (* Seek and read payload *)
-            Stdlib.seek_in ic (data_start + meta.offset);
-            let padding = Option.map ~f:fst meta.padding in
-            Nd.read_payload_from_channel ?padding nd ic meta.byte_length;
+            let nd = ingest_payload reader ~debug:"loaded" meta in
             (* Create the tnode (no host data is stored on it); register the loaded buffer so it is
                uploaded into the context below (gh-ocannl-333). *)
             let tn, init =
@@ -377,14 +492,16 @@ let load ~ctx ?prefix_namespace path =
   in
   result
 
-let restore ~ctx t_set path =
+let restore ~ctx ?mmap t_set path =
   if Set.is_empty t_set then ctx
   else begin
-    let ic = Stdlib.open_in_bin path in
+    let reader = open_reader ?mmap path in
+    let ic = reader.ic in
     match
       let header = read_header ic in
       validate_header header;
-      let data_start = Stdlib.pos_in ic in
+      let reader = { reader with data_start = Stdlib.pos_in ic } in
+      validate_extents reader header;
       (* Build lookup map *)
       let file_tensors =
         Map.of_alist_exn (module String) (List.map header.tensors ~f:(fun m -> (meta_key m, m)))
@@ -412,14 +529,9 @@ let restore ~ctx t_set path =
                 | _ -> false
               in
               if not padding_equal then failwith ("restore: padding mismatch for tensor " ^ Tn.id tn);
-              (* Read the payload into a fresh host buffer and upload it into the context's device
-                 buffer (gh-ocannl-333). *)
-              let nd =
-                Nd.create_array ~debug:"restored" meta.prec ~dims:meta.dims ~padding:meta.padding
-              in
-              Stdlib.seek_in ic (data_start + meta.offset);
-              let padding = Option.map ~f:fst meta.padding in
-              Nd.read_payload_from_channel ?padding nd ic meta.byte_length;
+              (* Ingest the payload as a host buffer and upload it into the context's device buffer
+                 (gh-ocannl-333). *)
+              let nd = ingest_payload reader ~debug:"restored" meta in
               Context.from_host ctx tn nd)
     with
     | ctx ->

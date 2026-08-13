@@ -950,7 +950,7 @@
  (name test_tensor_persistence)
  (package neural_nets_lib)
  (modules test_tensor_persistence)
- (libraries base ocannl stdio)
+ (libraries base ocannl sexplib stdio)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1098,7 +1098,8 @@
     %{dep:../../arrayjit/lib/assignments.ml}
     %{dep:../../tensor/tensor.ml}
     %{dep:../../tensor/row.ml}
-    %{dep:../../lib/train.ml}))))
+    %{dep:../../lib/train.ml}
+    %{dep:../../lib/persistence.ml}))))
 
 (rule
  (alias runtest)
