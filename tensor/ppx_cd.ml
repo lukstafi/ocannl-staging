@@ -1890,18 +1890,15 @@ let translate ?ident_label (expr : expression) : result =
         in
         { cases_result with expr = { expr with pexp_desc = Pexp_match (expr1, transformed_cases) } }
     | { pexp_desc = Pexp_let (_recflag, _bindings, _body); _ } ->
-        (* TODO(#80): to properly support local bindings, we need to collect the type
-           environment. *)
         {
           default_result with
           typ = Unknown;
           expr =
             Ast_builder.Default.pexp_extension ~loc
             @@ Location.error_extensionf ~loc
-                 "ppx_ocannl %%cd: let-in: local let-bindings not implemented yet";
+                 "ppx_ocannl %%cd: let-in: local let-bindings are not supported; use an inline \
+                  declaration { ident } or bind outside the %%cd payload";
         }
-    (* let bindings = List.map bindings ~f:(fun binding -> {binding with pvb_expr=loop
-       binding.pvb_expr}) in {expr with pexp_desc=Pexp_let (recflag, bindings, loop body)} *)
     | { pexp_desc = Pexp_open (decl, expr1); _ } ->
         let res1 = loop ~proj_in_scope expr1 in
         { res1 with expr = { expr with pexp_desc = Pexp_open (decl, res1.expr) } }
