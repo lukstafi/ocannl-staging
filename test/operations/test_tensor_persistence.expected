@@ -24,4 +24,28 @@ Caught: load: tensor with id n0 already exists in registry
 next_id before load=0, after load=6 (should be >= 6)
 === Test 10: Padding mismatch on restore ===
 Caught: restore: padding mismatch for tensor n0
+=== Test 11: Payload alignment ===
+  alignment=32, data_start mod alignment=0
+  id=0 offset=0, offset mod alignment=0
+  id=1 offset=32, offset mod alignment=0
+  id=2 offset=64, offset mod alignment=0
+  alignment=32, data_start mod alignment=0
+  id=0 offset=0, offset mod alignment=0
+  id=2 offset=32, offset mod alignment=0
+  id=1 offset=64, offset mod alignment=0
+  id=0 values=[1.0; 2.0; 3.0]
+  id=2 values=[7.0]
+  id=1 values=[1.0; 2.0; 3.0; 4.0; 5.0]
+=== Test 12: Unaligned (legacy) layout ===
+  alignment=1, data_start mod alignment=0
+  id=0 offset=0, offset mod alignment=0
+  id=1 offset=12, offset mod alignment=0
+  id=2 offset=17, offset mod alignment=0
+  id=0 values=[1.0; 2.0; 3.0]
+  id=1 values=[1.0; 2.0; 3.0; 4.0; 5.0]
+  id=2 values=[7.0]
+  no-alignment-field checkpoint:
+  id=0 values=[1.0; 2.0; 3.0]
+  id=1 values=[1.0; 2.0; 3.0; 4.0; 5.0]
+  id=2 values=[7.0]
 === All persistence tests completed ===

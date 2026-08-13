@@ -207,4 +207,109 @@ let () =
    with Failure msg -> Stdio.printf "Caught: %s\n" msg);
   cleanup "padmismatch";
 
+  (* === Test 11: Aligned payload offsets (gh-ocannl-467) === *)
+  Stdio.printf "=== Test 11: Payload alignment ===\n";
+  (* Parses the file layout independently of Persistence's own reader, so that the on-disk format is
+     pinned rather than the writer's agreement with itself. *)
+  let file_layout path =
+    let ic = Stdlib.open_in_bin path in
+    let header_len = Stdlib.input_binary_int ic in
+    let buf = Bytes.create header_len in
+    Stdlib.really_input ic buf 0 header_len;
+    let data_start = Stdlib.pos_in ic in
+    Stdlib.close_in ic;
+    let sexp = Sexplib.Sexp.of_string (String.strip (Bytes.to_string buf)) in
+    let field key sexp =
+      match sexp with
+      | Sexp.List fields ->
+          List.find_map fields ~f:(function
+            | Sexp.List [ Sexp.Atom k; v ] when String.equal k key -> Some v
+            | _ -> None)
+      | _ -> None
+    in
+    let int_field key sexp =
+      match field key sexp with Some (Sexp.Atom s) -> Int.of_string s | _ -> failwith key
+    in
+    let tensors =
+      match field "tensors" sexp with
+      | Some (Sexp.List metas) ->
+          List.map metas ~f:(fun m -> (int_field "id" m, int_field "offset" m))
+      | _ -> failwith "tensors"
+    in
+    (int_field "alignment" sexp, data_start, tensors)
+  in
+  let report path =
+    let alignment, data_start, tensors = file_layout path in
+    Stdio.printf "  alignment=%d, data_start mod alignment=%d\n" alignment
+      (data_start % alignment);
+    List.iter tensors ~f:(fun (id, offset) ->
+        Stdio.printf "  id=%d offset=%d, offset mod alignment=%d\n" id offset (offset % alignment))
+  in
+  Tensor.unsafe_reinitialize ();
+  let ctx = Context.cpu () in
+  (* Byte lengths (12, 5, 4) that would leave every subsequent payload misaligned if packed. *)
+  let ctx, tn_a = make_tn ctx ~id:0 ~label:[ "a" ] Ops.single [| 3 |] [| 1.0; 2.0; 3.0 |] in
+  let ctx, tn_b =
+    make_tn ctx ~id:1 ~label:[ "b" ] Ops.byte [| 5 |] [| 1.0; 2.0; 3.0; 4.0; 5.0 |]
+  in
+  let ctx, tn_c = make_tn ctx ~id:2 ~label:[ "c" ] Ops.single [| 1 |] [| 7.0 |] in
+  let t_set = Set.of_list (module Tn) [ tn_a; tn_b; tn_c ] in
+  let path = tmp_file "aligned" in
+  Persistence.save ~ctx ~appending:false t_set path;
+  report path;
+  (* Appending re-lays out the file; the alignment invariant must survive it. *)
+  Persistence.save ~ctx ~appending:true (Set.of_list (module Tn) [ tn_b ]) path;
+  report path;
+  Tensor.unsafe_reinitialize ();
+  let ctx = Context.cpu () in
+  let ctx, loaded = Persistence.load ~ctx path in
+  Set.iter loaded ~f:(fun tn -> Stdio.printf "  id=%d values=[%s]\n" tn.Tn.id (show ctx tn));
+  cleanup "aligned";
+
+  (* An explicit alignment of 1 reproduces the pre-alignment layout: payloads packed back to back,
+     which is how checkpoints written before the field are read. *)
+  Stdio.printf "=== Test 12: Unaligned (legacy) layout ===\n";
+  Tensor.unsafe_reinitialize ();
+  let ctx = Context.cpu () in
+  let ctx, tn_a = make_tn ctx ~id:0 ~label:[ "a" ] Ops.single [| 3 |] [| 1.0; 2.0; 3.0 |] in
+  let ctx, tn_b =
+    make_tn ctx ~id:1 ~label:[ "b" ] Ops.byte [| 5 |] [| 1.0; 2.0; 3.0; 4.0; 5.0 |]
+  in
+  let ctx, tn_c = make_tn ctx ~id:2 ~label:[ "c" ] Ops.single [| 1 |] [| 7.0 |] in
+  let path = tmp_file "packed" in
+  Persistence.save ~ctx ~appending:false ~alignment:1
+    (Set.of_list (module Tn) [ tn_a; tn_b; tn_c ])
+    path;
+  report path;
+  Tensor.unsafe_reinitialize ();
+  let ctx = Context.cpu () in
+  let ctx, loaded = Persistence.load ~ctx path in
+  Set.iter loaded ~f:(fun tn -> Stdio.printf "  id=%d values=[%s]\n" tn.Tn.id (show ctx tn));
+  (* And a checkpoint written before the field existed -- the same layout with the field deleted
+     from the header -- must still read back. *)
+  let legacy_path = tmp_file "legacy" in
+  let ic = Stdlib.open_in_bin path in
+  let header_len = Stdlib.input_binary_int ic in
+  let buf = Bytes.create header_len in
+  Stdlib.really_input ic buf 0 header_len;
+  let data = Stdio.In_channel.input_all ic in
+  Stdlib.close_in ic;
+  let legacy_header =
+    String.substr_replace_first
+      (String.strip (Bytes.to_string buf))
+      ~pattern:"(alignment 1)" ~with_:""
+  in
+  let oc = Stdlib.open_out_bin legacy_path in
+  Stdlib.output_binary_int oc (String.length legacy_header);
+  Stdlib.output_string oc legacy_header;
+  Stdlib.output_string oc data;
+  Stdlib.close_out oc;
+  Tensor.unsafe_reinitialize ();
+  let ctx = Context.cpu () in
+  let ctx, loaded = Persistence.load ~ctx legacy_path in
+  Stdio.printf "  no-alignment-field checkpoint:\n";
+  Set.iter loaded ~f:(fun tn -> Stdio.printf "  id=%d values=[%s]\n" tn.Tn.id (show ctx tn));
+  cleanup "legacy";
+  cleanup "packed";
+
   Stdio.printf "=== All persistence tests completed ===\n"

@@ -1,9 +1,21 @@
 (** {1 Tensor checkpoint persistence: save, load, and restore.}
 
-    Checkpoint files use an S-expression header for metadata followed by contiguous binary payloads
-    in native precision format. *)
+    A checkpoint file is a 4-byte big-endian header length, an S-expression header of per-tensor
+    metadata, then the binary payloads in little-endian native precision format, in the header's
+    order.
 
-val save : ctx:Context.t -> appending:bool -> Ocannl_tensor.Tensor.tn_set -> string -> unit
+    Payload offsets are relative to the first byte past the header, and are multiples of the
+    header's declared [alignment] (gh-ocannl-467) -- as is that first byte itself, the header being
+    space-padded to the boundary. So the offsets are absolute file alignments, which is what lets
+    the payloads be mapped rather than copied (see {!load}). *)
+
+val save :
+  ctx:Context.t ->
+  appending:bool ->
+  ?alignment:int ->
+  Ocannl_tensor.Tensor.tn_set ->
+  string ->
+  unit
 (** [save ~ctx ~appending t_set path] writes tensor data to a checkpoint file.
 
     When [~appending:false], creates a fresh checkpoint (overwriting any existing file). When
@@ -11,7 +23,15 @@ val save : ctx:Context.t -> appending:bool -> Ocannl_tensor.Tensor.tn_set -> str
     keeps non-overlapping entries from the existing file.
 
     Each tensor's data is retrieved on demand from its device buffer in [ctx] via {!Context.to_host}
-    (gh-ocannl-333). Raises if any tnode in [t_set] is not present in [ctx]. *)
+    (gh-ocannl-333). Raises if any tnode in [t_set] is not present in [ctx].
+
+    The file is written to [path ^ ".tmp"] and renamed over [path], so a failed save leaves the
+    previous checkpoint intact, and -- because the rename replaces the directory entry rather than
+    the inode -- mappings taken by an earlier {!load} of the same path keep seeing the data they
+    were mapped from.
+
+    [?alignment] (default 32, GGUF's [general.alignment] default) is the boundary payload offsets
+    are rounded up to. It buys SIMD-friendly data pointers; mapping works at any alignment. *)
 
 val load :
   ctx:Context.t -> ?prefix_namespace:string -> string -> Context.t * Ocannl_tensor.Tensor.tn_set

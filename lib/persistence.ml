@@ -19,7 +19,15 @@ type tensor_meta = {
 }
 (** Metadata for a single tensor in a checkpoint file. *)
 
-type checkpoint_header = { version : int;  (** Currently 1. *) tensors : tensor_meta list }
+type checkpoint_header = {
+  version : int;  (** Currently 1. *)
+  alignment : int;
+      (** The boundary every payload offset is a multiple of, counted from the start of the file
+          (gh-ocannl-467): the data section itself starts on such a boundary, and the offsets are
+          relative to it. Files written before the field existed are read as [alignment = 1], i.e.
+          payloads packed back to back. Compare GGUF's [general.alignment]. *)
+  tensors : tensor_meta list;
+}
 
 (** {2 S-expression serialization for checkpoint types} *)
 
@@ -123,6 +131,7 @@ let sexp_of_checkpoint_header h =
   Sexp.List
     [
       Sexp.List [ Sexp.Atom "version"; Sexp.Atom (Int.to_string h.version) ];
+      Sexp.List [ Sexp.Atom "alignment"; Sexp.Atom (Int.to_string h.alignment) ];
       Sexp.List [ Sexp.Atom "tensors"; Sexp.List (List.map h.tensors ~f:sexp_of_tensor_meta) ];
     ]
 
@@ -143,21 +152,43 @@ let checkpoint_header_of_sexp sexp =
   let version =
     match find "version" with Sexp.Atom s -> Int.of_string s | _ -> failwith "bad version"
   in
+  (* Absent in checkpoints written before the field existed: they pack payloads back to back. *)
+  let alignment =
+    match List.Assoc.find fields "alignment" ~equal:String.equal with
+    | None -> 1
+    | Some (Sexp.Atom s) -> Int.of_string s
+    | Some _ -> failwith "bad alignment"
+  in
   let tensors =
     match find "tensors" with
     | Sexp.List metas -> List.map metas ~f:tensor_meta_of_sexp
     | _ -> failwith "bad tensors"
   in
-  { version; tensors }
+  { version; alignment; tensors }
 
 (** {2 File I/O helpers} *)
 
+(** The payload alignment written by default (gh-ocannl-467): SIMD-friendly data pointers, and the
+    same value GGUF defaults [general.alignment] to. Mapping does not need it -- {!Unix.map_file}
+    handles an arbitrary offset by mapping from the enclosing page boundary. *)
+let default_alignment = 32
+
+let round_up n alignment = if alignment <= 1 then n else (n + alignment - 1) / alignment * alignment
+
+(* The header is padded with spaces up to a multiple of the alignment, so that the data section --
+   which starts wherever the header ends -- begins on an aligned boundary and the payload offsets
+   relative to it are absolute file alignments too. Padding the header rather than the gap after it
+   keeps "the data starts at the first byte past the header" true, so a reader that predates the
+   alignment field still finds the payloads where their offsets say. *)
 let write_header oc header =
   let sexp = sexp_of_checkpoint_header header in
   let header_str = Sexp.to_string_hum sexp in
   let len = String.length header_str in
-  Stdlib.output_binary_int oc len;
-  Stdlib.output_string oc header_str
+  (* [output_binary_int] contributes the 4 bytes preceding the header string. *)
+  let padded_len = round_up (4 + len) header.alignment - 4 in
+  Stdlib.output_binary_int oc padded_len;
+  Stdlib.output_string oc header_str;
+  Stdlib.output_string oc (String.make (padded_len - len) ' ')
 
 let read_header ic =
   let len =
@@ -169,7 +200,7 @@ let read_header ic =
   let buf = Bytes.create len in
   (try Stdlib.really_input ic buf 0 len
    with End_of_file -> failwith "read_header: unexpected end of file (header data)");
-  let header_str = Bytes.to_string buf in
+  let header_str = String.strip (Bytes.to_string buf) in
   let sexp = Sexplib.Sexp.of_string header_str in
   checkpoint_header_of_sexp sexp
 
@@ -182,6 +213,8 @@ let meta_name m = Tn.ident_prefix (meta_namespace m) ^ Int.to_string m.id
 let validate_header header =
   if header.version <> 1 then
     failwith ("unsupported checkpoint version: " ^ Int.to_string header.version);
+  if header.alignment < 1 then
+    failwith ("invalid checkpoint payload alignment: " ^ Int.to_string header.alignment);
   (* Check for duplicate (namespace, id) pairs *)
   let ids = List.map header.tensors ~f:meta_key in
   let unique_ids = Set.of_list (module String) ids in
@@ -204,7 +237,9 @@ let compute_byte_length prec dims padding =
 
 (** {2 Public API} *)
 
-let save ~ctx ~appending t_set path =
+let save ~ctx ~appending ?(alignment = default_alignment) t_set path =
+  if alignment < 1 then
+    invalid_arg ("Persistence.save: alignment must be positive, got " ^ Int.to_string alignment);
   let tn_list = Set.to_list t_set in
   (* Retrieve each tnode's data from its device buffer on demand (gh-ocannl-333). *)
   let host_of = Hashtbl.create (module Int) in
@@ -265,9 +300,10 @@ let save ~ctx ~appending t_set path =
     end
     else List.map new_entries ~f:(fun (m, tn) -> `New (m, tn))
   in
-  (* Compute sequential offsets *)
+  (* Compute sequential offsets, each rounded up to the declared alignment. *)
   let _, entries_with_offsets =
-    List.fold all_entries ~init:(0, []) ~f:(fun (offset, acc) entry ->
+    List.fold all_entries ~init:(0, []) ~f:(fun (cursor, acc) entry ->
+        let offset = round_up cursor alignment in
         let byte_length =
           match entry with `Existing (m, _) -> m.byte_length | `New (m, _) -> m.byte_length
         in
@@ -286,18 +322,25 @@ let save ~ctx ~appending t_set path =
     let header =
       {
         version = 1;
+        alignment;
         tensors =
           List.map entries_with_offsets ~f:(function `Existing (m, _) -> m | `New (m, _) -> m);
       }
     in
     write_header oc header;
-    List.iter entries_with_offsets ~f:(function
-      | `Existing (_, payload) -> Stdlib.output_bytes oc payload
-      | `New (_, tn) ->
-          let nd = Hashtbl.find_exn host_of tn.Tn.uid in
-          let padding = Option.map ~f:fst (Lazy.force tn.Tn.padding) in
-          let _n = Nd.write_payload_to_channel ?padding nd oc in
-          ())
+    let cursor = ref 0 in
+    List.iter entries_with_offsets ~f:(fun entry ->
+        let meta = match entry with `Existing (m, _) -> m | `New (m, _) -> m in
+        (* Fill the alignment gap ahead of this payload. *)
+        Stdlib.output_string oc (String.make (meta.offset - !cursor) '\000');
+        (match entry with
+        | `Existing (_, payload) -> Stdlib.output_bytes oc payload
+        | `New (_, tn) ->
+            let nd = Hashtbl.find_exn host_of tn.Tn.uid in
+            let padding = Option.map ~f:fst (Lazy.force tn.Tn.padding) in
+            let _n = Nd.write_payload_to_channel ?padding nd oc in
+            ());
+        cursor := meta.offset + meta.byte_length)
   with
   | () ->
       Stdlib.close_out oc;
