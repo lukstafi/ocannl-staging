@@ -28,15 +28,17 @@ cd benchmarks || exit 1
 EXE=../_build/default/benchmarks/runners/ocannl/bench_mlp.exe
 GPT=../_build/default/benchmarks/runners/ocannl/bench_gpt.exe
 FIT=../_build/default/tools/fit_envelope.exe
-OUT="$HOME/gh514-eval-results-$BK"
+OUT="$HOME/gh514-eval-results-$BK-$PREC"
 rm -rf "$OUT"; mkdir -p "$OUT"
 
 mlp() {
   local name=$1 tune=$2 prec=$3 st; shift 3
   echo "=== cell $name start $(date +%T) ==="
   BENCH_FIXTURE=fixtures/mlp_wide.safetensors BENCH_TUNE=$tune BENCH_TUNE_REPORT=1 \
-    BENCH_PRECISION=$prec BENCH_STATIC_SCALE=0 BENCH_GATE_INTERVAL=0 \
+    BENCH_PRECISION=$prec BENCH_STATIC_SCALE=0 BENCH_GATE_INTERVAL=0 BENCH_MATERIALIZE=0 \
     ${PIN[@]+"${PIN[@]}"} "$EXE" --ocannl_backend="$BK" --ocannl_autotune_log=true \
+    --ocannl_tf32_matmuls=false --ocannl_fp16_arithmetic=false \
+    --ocannl_narrow_compute_f32=false \
     --ocannl_autotune_cache_dir="$(mktemp -d)" "$@" \
     > "$OUT/$name.out" 2> "$OUT/$name.err"
   st=$?
@@ -47,8 +49,10 @@ gpt() {
   local name=$1 st; shift
   echo "=== cell $name start $(date +%T) ==="
   BENCH_FIXTURE=fixtures/gpt2_mini.safetensors BENCH_TUNE=0 BENCH_PRECISION=$PREC \
-    BENCH_STATIC_SCALE=0 BENCH_GATE_INTERVAL=0 \
-    ${PIN[@]+"${PIN[@]}"} "$GPT" --ocannl_backend="$BK" --ocannl_autotune_log=true "$@" \
+    BENCH_STATIC_SCALE=0 BENCH_GATE_INTERVAL=0 BENCH_MATERIALIZE=0 \
+    ${PIN[@]+"${PIN[@]}"} "$GPT" --ocannl_backend="$BK" --ocannl_autotune_log=true \
+    --ocannl_tf32_matmuls=false --ocannl_fp16_arithmetic=false \
+    --ocannl_narrow_compute_f32=false "$@" \
     > "$OUT/$name.out" 2> "$OUT/$name.err"
   st=$?
   echo "=== cell $name exit $st $(date +%T) ==="
@@ -67,6 +71,12 @@ PEAKS=()
 [ -n "${PF:-}" ] && PEAKS+=("--ocannl_model_peak_flops=$PF")
 [ -n "${PB:-}" ] && PEAKS+=("--ocannl_model_peak_memory_bandwidth=$PB")
 echo "fitted peaks: ${PEAKS[*]:-none}"
+# The fitted constants are achieved throughputs at the tuned cells' precision; applying them to
+# a different-precision compile would shift the roofline balance, so the D cells receive them
+# only when they run at the calibrated precision — otherwise they use the backend's class-level
+# advisory constants, which is also the deployment default for the untuned regime.
+DPEAKS=()
+[ "$DPREC" = "$PREC" ] && DPEAKS=(${PEAKS[@]+"${PEAKS[@]}"})
 # B: tuned, measured-incumbent bound pruning off vs on, fitted envelope.
 mlp B-off 1 "$PREC" ${PEAKS[@]+"${PEAKS[@]}"} --ocannl_autotune_search=true \
   --ocannl_autotune_keep_fraction=1 \
@@ -91,11 +101,11 @@ mlp C-enab-bp 1 "$PREC" ${PEAKS[@]+"${PEAKS[@]}"} --ocannl_autotune_search=true 
 # requested precision except f16 -> f32 (see the header note); each arm pins the gates the
 # treatment does not enable.
 mlp D-default 0 "$DPREC" --ocannl_model_default_schedule=false
-mlp D-model 0 "$DPREC" ${PEAKS[@]+"${PEAKS[@]}"} --ocannl_model_default_schedule=true \
+mlp D-model 0 "$DPREC" ${DPEAKS[@]+"${DPEAKS[@]}"} --ocannl_model_default_schedule=true \
   --ocannl_model_default_placements=0 --ocannl_model_default_geometry_lattice=false
-mlp D-model-plc 0 "$DPREC" ${PEAKS[@]+"${PEAKS[@]}"} --ocannl_model_default_schedule=true \
+mlp D-model-plc 0 "$DPREC" ${DPEAKS[@]+"${DPEAKS[@]}"} --ocannl_model_default_schedule=true \
   --ocannl_model_default_placements=5 --ocannl_model_default_geometry_lattice=false
-mlp D-model-lat 0 "$DPREC" ${PEAKS[@]+"${PEAKS[@]}"} --ocannl_model_default_schedule=true \
+mlp D-model-lat 0 "$DPREC" ${DPEAKS[@]+"${DPEAKS[@]}"} --ocannl_model_default_schedule=true \
   --ocannl_model_default_placements=0 --ocannl_model_default_geometry_lattice=true
 # D on gpt2_mini (forward-only, requested precision): the bigger sites for the family/lattice
 # ledger.

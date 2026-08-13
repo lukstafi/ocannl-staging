@@ -65,11 +65,16 @@ Two structural facts with consequences downstream:
 
 1. **The memory leg is unfittable from this workload alone**: every row's byte count is a
    guards-taken/union upper bound (`bytes_approx`), so per the per-leg exactness rule no
-   bandwidth constant fits, and every envelope in this report is **compute-leg only**. The
-   floors that would differentiate placements (phase 3's whole point) are traffic floors — see
-   the placement-walk result below for what that costs. Fitting a bandwidth constant needs
-   rows with exact footprints (elementwise/streaming kernels), i.e. calibration diversity, not
-   more of the same workload.
+   bandwidth constant fits — the **fit** constrains only the compute leg. The **envelope in
+   force** is not compute-only: `Autotune.envelope` falls back to the backend's class-level
+   advisory `peak_memory_bandwidth` when no override is configured, and all three backends
+   provide one, so every search in this report ran under fitted-compute + class-bandwidth
+   legs. The distinction matters for honesty in both directions: the compute constants are
+   demonstrated floors, while the bandwidth constants are unaudited class advisories (Metal's
+   is a known understatement on this machine — the phase-0 notes record 2e11 advisory against
+   ~4e11 achievable). Fitting the memory leg needs rows with exact footprints
+   (elementwise/streaming kernels), i.e. calibration diversity, not more of the same
+   workload.
 2. On hip the compute-leg binding row is an unstaged **rocWMMA candidate at 1.49 TFLOP/s
    achieved** — the fitted peak is a demonstrated floor, and it is 3.3× cuda's and 6× metal's
    fitted constants on these cells (fitted peaks are per-machine *and* per-what-was-measured;
@@ -86,8 +91,8 @@ With the fitted envelopes pinned, `autotune_bound_pruning=true` on the `mlp_wide
 | hip | 31+51 | 31+50 | **1** | 1.272 → 1.258 ms (spread) |
 
 The admissible direction holds — winners are within run-to-run spread everywhere — but the
-compute-only floors sit well below the measured incumbents on these kernels, so the gate
-almost never fires on the A/B searches. Where it did fire hard, it demonstrated the documented
+floors (fitted compute leg maxed with the class-bandwidth traffic leg) sit well below the
+measured incumbents on these kernels, so the gate almost never fires on the A/B searches. Where it did fire hard, it demonstrated the documented
 blind spot: in cuda's C-enab-bp cell, one nested flip search pruned **16** candidates and
 finished at 6.59 ms where its unpruned analogues reached ~5.0 ms — the envelope had been
 fitted from cell A, this later search produced candidates *faster than anything the fit ever
@@ -176,11 +181,17 @@ without pricing:
   demanded, so cost-model gaps are not misclassified).
 - **The placement walk** (`model_default_placements=5`): 31 expanded / 32 scored /
   **0 fathomed** on all three boxes — the full 2⁵ product walked, ~0.4–0.6 s of compile-time
-  at N=5, ties to the default. Zero fathoming is the expected consequence of compute-only
-  envelopes: placement floors differentiate by *traffic* (phase 3), and with no bandwidth
-  constant the floor barely moves as materializations commit. The placement bound needs the
-  memory leg; see the calibration note. (The regression test pins the fathoming behavior
-  under a bandwidth-bearing envelope; this is a deployment observation, not a code gap.)
+  at N=5, ties to the default. The zero is a scale mismatch, not a missing leg: the traffic
+  leg was present (class bandwidth constants — see the calibration note), but on these cells
+  both the floor and the incumbent are dominated by the compute leg (metal: family bound
+  7.71 ms against the default's 7.82 ms score; cuda: 4.25 vs 4.31), and a placement
+  commitment's certain-traffic delta — a few MB of materialized activations over a
+  ~10¹¹ B/s class constant — is tens of microseconds against a ~0.1 ms incumbent-floor
+  slack. Placement fathoming becomes real where the materialization deltas are commensurate
+  with that slack (bigger footprints, or tighter incumbents), and where the bandwidth
+  constant is *fitted* rather than advisory, so the fathom is trustworthy in the admissible
+  direction. (The regression test pins the fathoming mechanics under a bandwidth-dominant
+  envelope; this is a deployment observation, not a code gap.)
 - **The tile lattice** (`model_default_geometry_lattice=true`): on `mlp_wide`/f32 the mma
   branch refutes (no f32 tile at these capabilities), the lattice is unreachable, and the
   ledger is bit-identical to the non-lattice cell — the excluded branch costs nothing, as
@@ -194,6 +205,17 @@ without pricing:
   like this it prices a space whose members cannot build — lifting statically-decidable
   builder preconditions into tree verdicts is the natural follow-up if the lattice is to pay
   off beyond synthetic sites.
+
+**A precision mismatch in the retained metal/cuda untuned cells, and its bound**: those D
+batteries ran at f32 while carrying the compute peaks fitted from the f16 cell A — a
+cross-precision application of achieved-throughput constants that could in principle shift the
+roofline balance. It could not have changed these picks: in every such cell the alternatives
+lost by *buildability* (all sketch candidates rejected at validation — `15 unbuildable` against
+`11 scored`), which no envelope constant can alter, and the placement walk's zero-fathom result
+only becomes more conservative under an overstated compute peak. The checked-in driver now
+withholds cross-precision fits from the D cells (they then run under the class advisories —
+also the deployment default for untuned compiles); hip's bf16 battery is precision-consistent
+throughout.
 
 **A harness gap found and worked around**: at f16 `bench_mlp`'s training step is
 loss-scale-gated (`Host_gated`/`Device_gated`), and those arms of
@@ -212,9 +234,11 @@ already beats, pre-compile refutation witnesses, an enablement comparator that r
 family-unlocking flips at one third of the budget gh-558 needed — not shipped-time
 improvements, which on these workloads are still decided by the placement A/B and the
 fissioned preset sweeps. The regimes where the bound machinery should strictly dominate
-remain: (a) placement search under a bandwidth-bearing envelope (needs calibration diversity),
-(b) the lattice on sites whose staged candidates actually build (needs the builder-precondition
-lift), and (c) workloads where the default is *not* the model-argmin. None of those were
+remain: (a) placement search on cells whose materialization deltas are commensurate with the
+incumbent slack, under a *fitted* memory leg (needs calibration diversity — the class
+advisories in force here are unaudited), (b) the lattice on sites whose staged candidates
+actually build (needs the builder-precondition lift), and (c) workloads where the default is
+*not* the model-argmin. None of those were
 reachable on these cells, and this report records that rather than sampling around it.
 
 ## Reproduction
