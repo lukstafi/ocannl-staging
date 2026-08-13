@@ -451,65 +451,21 @@ let extract_idents s =
   done;
   !result
 
-(** The (precision, operator) pairs a backend's renderers are exercised over -- by
-    {!op_syntax_idents} and by {!operand_conditionality_violations}. Enumerated by hand because the
-    operator types carry no enumeration; an operator missing from a list escapes both checks, which
-    is what the exhaustive matches in {!Ops} guard against on the classifier side. *)
-
+(** The precisions a backend's renderers are exercised over -- by {!op_syntax_idents} and by
+    {!operand_conditionality_violations}. The operator sweeps use [Ops]' derived enumerations
+    ([Ops.all_of_binop] and friends), so a newly added operator joins both checks automatically;
+    [Ops.prec] cannot be derived the same way -- its constructors carry the phantom-typed
+    [precision] witness -- so the exhaustive match below stands in for it: adding a precision is a
+    build error here, and the fix is to extend this list (or to leave the precision out
+    deliberately, as [Void_prec] is, since every renderer rejects it). *)
 let all_precs =
   Ops.[ byte; uint16; int32; uint32; int64; uint64; uint4x32; half; bfloat16; fp8; single; double ]
 
-let all_ternops = Ops.[ Where; FMA; Mul3 ]
-
-let all_binops =
-  Ops.
-    [
-      Arg1;
-      Arg2;
-      Add;
-      Sub;
-      Mul;
-      Div;
-      ToPowOf;
-      Relu_gate;
-      Satur01_gate;
-      Max;
-      Min;
-      Mod;
-      Cmplt;
-      Cmple;
-      Cmpeq;
-      Cmpne;
-      Or;
-      And;
-      Threefry4x32_crypto;
-      Threefry4x32_light;
-      Uint4x32_to_prec_uniform_lane;
-    ]
-
-let all_unops =
-  Ops.
-    [
-      Identity;
-      Relu;
-      Satur01;
-      Exp;
-      Log;
-      Exp2;
-      Log2;
-      Sin;
-      Cos;
-      Sqrt;
-      Recip;
-      Recip_sqrt;
-      Neg;
-      Trunc;
-      Tanh_approx;
-      Not;
-      Uint4x32_to_prec_uniform1;
-    ]
-
-let all_vec_unops = Ops.[ Uint4x32_to_prec_uniform ]
+let _all_precs_is_complete : Ops.prec -> unit = function
+  | Void_prec | Byte_prec _ | Uint16_prec _ | Int32_prec _ | Uint32_prec _ | Int64_prec _
+  | Uint64_prec _ | Uint4x32_prec _ | Half_prec _ | Bfloat16_prec _ | Fp8_prec _ | Single_prec _
+  | Double_prec _ ->
+      ()
 
 (** Every function and type name a backend's operator rendering can emit, obtained by rendering each
     (precision, operator) pair over a placeholder operand and harvesting the identifiers.
@@ -539,10 +495,10 @@ let op_syntax_idents ~ternop_syntax ~binop_syntax ~unop_syntax ~vec_unop_syntax 
     with _ -> ()
   in
   List.iter all_precs ~f:(fun prec ->
-      List.iter all_ternops ~f:(fun op -> add_doc (fun () -> ternop_syntax prec op arg arg arg));
-      List.iter all_binops ~f:(fun op -> add_doc (fun () -> binop_syntax prec op arg arg));
-      List.iter all_unops ~f:(fun op -> add_doc (fun () -> unop_syntax prec op arg));
-      List.iter all_vec_unops ~f:(fun op -> add_doc (fun () -> vec_unop_syntax prec op arg));
+      List.iter Ops.all_of_ternop ~f:(fun op -> add_doc (fun () -> ternop_syntax prec op arg arg arg));
+      List.iter Ops.all_of_binop ~f:(fun op -> add_doc (fun () -> binop_syntax prec op arg arg));
+      List.iter Ops.all_of_unop ~f:(fun op -> add_doc (fun () -> unop_syntax prec op arg));
+      List.iter Ops.all_of_vec_unop ~f:(fun op -> add_doc (fun () -> vec_unop_syntax prec op arg));
       List.iter all_precs ~f:(fun to_ ->
           try
             let prefix, suffix = convert_precision ~from:prec ~to_ in
@@ -574,8 +530,9 @@ let op_syntax_idents ~ternop_syntax ~binop_syntax ~unop_syntax ~vec_unop_syntax 
       rules out MSL's [select] (a call: it evaluates both arms, so a range guard lowered to [Where]
       would still perform its out-of-range read).
 
-    A (precision, operator) pair the backend rejects by raising contributes nothing, as in
-    {!op_syntax_idents}. *)
+    The operator sweep is [Ops]' derived enumeration, so an operator added to {!Ops.binop} or
+    {!Ops.ternop} is checked here without anyone remembering to list it. A (precision, operator)
+    pair the backend rejects by raising contributes nothing, as in {!op_syntax_idents}. *)
 let operand_conditionality_violations ~ternop_syntax ~binop_syntax =
   let violations = ref [] in
   let report what msg = violations := Printf.sprintf "%s: %s" what msg :: !violations in
@@ -597,7 +554,7 @@ let operand_conditionality_violations ~ternop_syntax ~binop_syntax =
   let gated_before s pos = gated_in (String.prefix s pos) in
   List.iter all_precs ~f:(fun prec ->
       let at_prec op_name = Printf.sprintf "%s at %s" op_name (Ops.prec_string prec) in
-      List.iter all_binops ~f:(fun op ->
+      List.iter Ops.all_of_binop ~f:(fun op ->
           match render (fun () -> binop_syntax prec op a1 a2) with
           | None -> ()
           | Some s -> (
@@ -628,7 +585,7 @@ let operand_conditionality_violations ~ternop_syntax ~binop_syntax =
                         report what
                           "classified as always evaluating both operands, but the rendering \
                            short-circuits ([?], [&&] or [||])")));
-      List.iter all_ternops ~f:(fun op ->
+      List.iter Ops.all_of_ternop ~f:(fun op ->
           match render (fun () -> ternop_syntax prec op a1 a2 a3) with
           | None -> ()
           | Some s -> (

@@ -294,10 +294,11 @@ let () =
   let _ = show "dead loop" dead in
   ()
 
-(* gh-ocannl-582: the classifier the cases above read from. Printing the whole table makes adding
-   an operator to [Ops] a visible promotion diff here, and the second half checks the plain-C
-   renderings against it — the same check every backend runs on itself at [C_syntax] functor
-   application, where the GPU spellings (which shadow these) get covered on their own hardware. *)
+(* gh-ocannl-582: the classifier the cases above read from. The table is printed over [Ops]' derived
+   enumeration, so adding an operator is a visible promotion diff here whether or not anyone
+   remembers this test; the second half checks the plain-C renderings against the classifier — the
+   same check every backend runs on itself at [C_syntax] functor application, where the GPU
+   spellings (which shadow these) get covered on their own hardware. *)
 module C_config = Ir.C_syntax.Pure_C_config (struct
   type buffer_ptr = unit
 
@@ -307,11 +308,11 @@ end)
 
 let () =
   Stdio.printf "\n== operand conditionality ==\n";
-  List.iter Ir.C_syntax.all_binops ~f:(fun op ->
+  List.iter Ops.all_of_binop ~f:(fun op ->
       Stdio.printf "  %-28s %s\n"
         (Ops.binop_cd_fallback_syntax op)
         (Sexp.to_string @@ Ops.sexp_of_binop_conditionality @@ Ops.binop_conditionality op));
-  List.iter Ir.C_syntax.all_ternops ~f:(fun op ->
+  List.iter Ops.all_of_ternop ~f:(fun op ->
       Stdio.printf "  %-28s %s\n" (Ops.ternop_cd_syntax op)
         (Sexp.to_string @@ Ops.sexp_of_ternop_conditionality @@ Ops.ternop_conditionality op));
   let violations =

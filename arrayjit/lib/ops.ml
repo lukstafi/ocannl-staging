@@ -453,7 +453,7 @@ type binop =
           minted by the virtualizer to inline packed-uniform results per cell; not exposed in the
           user-facing syntaxes. Heterogeneous: the arguments must not be converted to the result
           precision. *)
-[@@deriving sexp, compare, equal]
+[@@deriving sexp, compare, equal, enumerate]
 
 type unop =
   | Identity
@@ -477,7 +477,7 @@ type unop =
           single value of the output precision. Less bit-efficient but operates poitwise. For random
           bits, the result is uniform over the range of the precision for integer precisions, and
           over the range \[0.0, 1.0) for floating point precisions. *)
-[@@deriving sexp, compare, equal]
+[@@deriving sexp, compare, equal, enumerate]
 
 type vec_unop =
   | Uint4x32_to_prec_uniform
@@ -487,13 +487,13 @@ type vec_unop =
           pattern, the indices are converted to a byte offset depending on the given precision.
           NOTE: this operation, unlike any others, impacts projections and shape inference (one
           input cell corresponds to a few output cells). *)
-[@@deriving sexp, compare, equal]
+[@@deriving sexp, compare, equal, enumerate]
 
 type ternop =
   | Where  (** Where(a,b,c): if a then b else c *)
   | FMA  (** FMA(a,b,c): (a * b) + c, non-accumulating *)
   | Mul3  (** Mul3(a,b,c): a * b * c, non-accumulating *)
-[@@deriving sexp, compare, equal]
+[@@deriving sexp, compare, equal, enumerate]
 
 type op = Ternop of ternop | Binop of binop | Unop of unop [@@deriving sexp, compare, equal]
 

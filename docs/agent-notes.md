@@ -137,7 +137,11 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   syntax configs are sealed inside their `Impl` and unreachable from tests), which renders every
   (precision, operator) pair over placeholders and looks for the only C-family constructs that skip
   an operand: `?:`, `&&`, `||`. This is what forbids spelling `Where` as MSL's `select` or `Max` as
-  `(a > b ? a : b)`.
+  `(a > b ? a : b)`. The operator sweep (shared with `op_syntax_idents`) is `Ops`' derived
+  enumeration — the four operator types carry `[@@deriving enumerate]` — so a new operator cannot
+  escape either check by being left off a hand-maintained list. `Ops.prec` cannot be derived that
+  way (its constructors carry the phantom-typed `precision` witness), so `C_syntax.all_precs` keeps
+  a hand list next to an exhaustive match that turns a new precision into a build error.
 - The upper cost walk charges every operand that is *rendered*, which is more than can *execute*:
   a `Where` arm's (or a gated operand's) `Local_scope` renders as statements hoisted OUT of the
   conditional expression — `C_syntax.pp_scalar` returns its definitions separately — so both arms'
