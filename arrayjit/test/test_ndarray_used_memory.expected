@@ -4,3 +4,6 @@ create_array: 4 arrays of 524288 bytes each
 init_array: 3 arrays of 32768 bytes each
   delta while held = allocated bytes: true
   gauge returned to baseline after GC: true
+reshape: 1 array of 131072 bytes
+  still counted while only the view is held: true
+  gauge returned to baseline after GC: true

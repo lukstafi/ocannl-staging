@@ -506,10 +506,17 @@ let map_file_array ?(shared = false) (prec : Ops.prec) ~(dims : int array) ~(byt
   in
   Ops.apply_prec { f } prec
 
-(** See {!Bigarray.reshape}. *)
+(** See {!Bigarray.reshape}. The view shares [nd]'s data, so it keeps [nd] itself alive: [nd] is the
+    wrapper carrying the {!get_used_memory} finalizer, and collecting it while a view still holds
+    the bytes would end their accounting early. *)
 let reshape nd dims =
   let f prec arr = as_array prec @@ Bigarray.reshape arr dims in
-  apply_with_prec { f } nd
+  let result = apply_with_prec { f } nd in
+  (* The GC's finalizer table holds the closure for as long as [result] lives, and the closure holds
+     [nd] -- a keep-alive, not a deallocation hook. *)
+  let keep = ref (Some nd) in
+  Stdlib.Gc.finalise (fun _ -> keep := None) result;
+  result
 
 (** Initializes an array using a function from indices to values. Note: [dims] must include padding
     if padding is specified, but the callback [f] indices operate in the before-padding space.
@@ -549,9 +556,10 @@ let convert prec src =
     {!init_array}, which delegates to it). A {e live gauge}, not a cumulative total: the allocation
     adds and the array's finalizer subtracts, so the count returns to its earlier value once the
     arrays are collected. Since finalizers only run at collection time, a reading right after
-    dropping the arrays can still include them -- force a {!Stdlib.Gc.full_major} first. Arrays
-    obtained by other means -- {!map_file_array}, {!reshape} -- are not counted; the backends' own
-    device-side counters are separate (see {!Context.get_used_memory}). *)
+    dropping the arrays can still include them -- force a {!Stdlib.Gc.full_major} first. A
+    {!reshape} view is not counted on its own but keeps its source's bytes counted, since it shares
+    them; a {!map_file_array} mapping is not counted at all. The backends' own device-side counters
+    are separate (see {!Context.get_used_memory}). *)
 let get_used_memory () = Atomic.get used_memory
 
 (** {2 *** Printing ***} *)

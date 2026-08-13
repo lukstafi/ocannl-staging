@@ -973,25 +973,20 @@ let create_with_reshape ~id ~label ~base_ndarray ~unpadded_dims ~padding ~from_p
        let target_padding = Lazy.force padding in
        match (target_padding, from_padded) with
        | None, _ | _, true ->
-           (* Use reshape to conform to inferred dims *)
-           let f_reshape_with_prec prec arr =
-             (* [fold ~init:1] rather than [reduce_exn]: rank-0 tensors (empty dims) hold 1
-                element. *)
-             let total_elems = Array.fold padded_dims ~init:1 ~f:( * ) in
-             let source_total =
-               let source_dims = Bigarray.Genarray.dims arr in
-               Array.fold source_dims ~init:1 ~f:( * )
-             in
-             if total_elems <> source_total then
-               raise
-               @@ Utils.User_error
-                    [%string
-                      "create_with_reshape: target dims %{Nd.int_dims_to_string padded_dims} \
-                       require %{total_elems#Int} elements but source has %{source_total#Int} \
-                       elements"];
-             Nd.as_array prec (Bigarray.reshape arr padded_dims)
-           in
-           Nd.apply_with_prec { f = f_reshape_with_prec } base_ndarray
+           (* Use reshape to conform to inferred dims. [Nd.reshape] rather than a bare
+              [Bigarray.reshape]: the view shares the source's bytes, and only the former keeps the
+              source -- and hence its host-memory accounting -- alive for the view's lifetime. *)
+           (* [fold ~init:1] rather than [reduce_exn]: rank-0 tensors (empty dims) hold 1
+              element. *)
+           let total_elems = Array.fold padded_dims ~init:1 ~f:( * ) in
+           let source_total = Array.fold (Nd.dims base_ndarray) ~init:1 ~f:( * ) in
+           if total_elems <> source_total then
+             raise
+             @@ Utils.User_error
+                  [%string
+                    "create_with_reshape: target dims %{Nd.int_dims_to_string padded_dims} require \
+                     %{total_elems#Int} elements but source has %{source_total#Int} elements"];
+           Nd.reshape base_ndarray padded_dims
        | Some _, false ->
            (* Create new bigarray with padding and copy source into non-padding parts. semantic_dims
               are the data area dimensions (without padding). *)
