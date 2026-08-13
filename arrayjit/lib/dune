@@ -178,5 +178,5 @@
  (name autotune)
  (public_name arrayjit.autotune)
  (libraries base stdio unix mtime mtime.clock.os utils ir context)
- (modules autotune)
+ (modules autotune sketch_families)
  (modes best))

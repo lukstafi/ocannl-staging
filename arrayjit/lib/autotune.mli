@@ -106,7 +106,15 @@
       min-of-N, where fast routines get extra runs beyond [repeats] until ~25 ms of total measured
       time — on sub-millisecond kernels a min-of-3 is launch-jitter roulette and can crown the wrong
       candidate. Static indices are bound to the midpoint of their declared ranges during timing and
-      restored afterwards. *)
+      restored afterwards.
+
+    Implementation note: the {e structured} half of the candidate space — matmul/conv site detection,
+    the composed schedule pipelines those sites parameterize, and the refinement trees whose leaves
+    are the seed lists — lives in [sketch_families.ml] and is included here (gh-ocannl-580). This
+    interface is unchanged by that split and remains the library's only gate; the family entry points
+    below ({!sketch_params}, {!detect_conv}, {!matmul_sketch_tree}, {!sketch_schedule},
+    {!sketch_path_traffic_floor}, …) are defined there, and {!sketch_seed_params} is the composition
+    the search enumerates. *)
 
 open Base
 
