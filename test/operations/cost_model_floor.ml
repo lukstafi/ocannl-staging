@@ -14,9 +14,13 @@
      largest member, flagged loose) where the upper takes the capped sum;
    - short-circuiting forms: Where arms, And/Or right operands (conditional — cheaper-arm /
      left-operand floors, conditional reads zeroed) and Arg1/Arg2 discarded operands (never
-     rendered at all);
+     rendered at all, so absent from both extractions);
    - the over-producing open producer, dead loops, and the dynamic-gather fallback flooring to
-     zero where the upper falls back to the whole node. *)
+     zero where the upper falls back to the whole node.
+
+   The last section pins the classifier those short-circuiting cases now read from
+   ([Ops.binop_conditionality] / [Ops.ternop_conditionality], gh-ocannl-582) and its agreement with
+   the plain-C renderings. *)
 
 open Base
 open Ocannl.Operation.DSL_modules
@@ -233,7 +237,7 @@ let () =
   (* And renders as the short-circuiting &&: the certain floor is the op plus the left operand;
      the right comparison (reading M) is conditional — its op floors away and M's read floors to
      zero. Arg1 renders only its selected operand: the discarded expensive right operand
-     contributes nothing to either extraction's floor. *)
+     contributes to neither extraction — not its ops, not its M read. *)
   let l = fresh_tn "L" [| 4 |] in
   let and_case =
     for_over i
@@ -289,3 +293,31 @@ let () =
   in
   let _ = show "dead loop" dead in
   ()
+
+(* gh-ocannl-582: the classifier the cases above read from. The table is printed over [Ops]' derived
+   enumeration, so adding an operator is a visible promotion diff here whether or not anyone
+   remembers this test; the second half checks the plain-C renderings against the classifier — the
+   same check every backend runs on itself at [C_syntax] functor application, where the GPU
+   spellings (which shadow these) get covered on their own hardware. *)
+module C_config = Ir.C_syntax.Pure_C_config (struct
+  type buffer_ptr = unit
+
+  let procs = [||]
+  let full_printf_support = true
+end)
+
+let () =
+  Stdio.printf "\n== operand conditionality ==\n";
+  List.iter Ops.all_of_binop ~f:(fun op ->
+      Stdio.printf "  %-28s %s\n"
+        (Ops.binop_cd_fallback_syntax op)
+        (Sexp.to_string @@ Ops.sexp_of_binop_conditionality @@ Ops.binop_conditionality op));
+  List.iter Ops.all_of_ternop ~f:(fun op ->
+      Stdio.printf "  %-28s %s\n" (Ops.ternop_cd_syntax op)
+        (Sexp.to_string @@ Ops.sexp_of_ternop_conditionality @@ Ops.ternop_conditionality op));
+  let violations =
+    Ir.C_syntax.operand_conditionality_violations ~ternop_syntax:C_config.ternop_syntax
+      ~binop_syntax:C_config.binop_syntax
+  in
+  Stdio.printf "  plain-C renderings agree: %b\n" (List.is_empty violations);
+  List.iter violations ~f:(fun v -> Stdio.printf "  VIOLATION %s\n" v)

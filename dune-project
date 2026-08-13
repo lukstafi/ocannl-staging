@@ -64,6 +64,7 @@
   (ppxlib
    (>= 0.36.0))
   ppx_compare
+  ppx_enumerate
   ppx_hash
   ppx_here
   ppx_sexp_conv
@@ -132,6 +133,7 @@
   (ppxlib
    (>= 0.36.0))
   ppx_compare
+  ppx_enumerate
   ppx_fields_conv
   ppx_hash
   ppx_here

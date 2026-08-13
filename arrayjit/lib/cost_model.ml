@@ -125,13 +125,27 @@ let analyze (code : Low_level.t) : summary =
         opaque := true;
         0
     | Get_dynamic { dyn_value = dv, _; _ } -> sc_flops dv
-    | Ternop ((Ops.FMA | Ops.Mul3), a1, a2, a3) ->
-        (* Two arithmetic operations each — matching [peak_flops]' FMA-counted-as-two convention, so
-           an FMA-form kernel scores the same compute leg as its mul+add form. *)
-        2 + arg a1 + arg a2 + arg a3
-    | Ternop (Ops.Where, a1, a2, a3) -> 1 + arg a1 + arg a2 + arg a3
-    | Binop ((Ops.Arg1 | Ops.Arg2), a1, a2) -> arg a1 + arg a2
-    | Binop (_, a1, a2) -> 1 + arg a1 + arg a2
+    | Ternop (op, a1, a2, a3) ->
+        (* FMA and Mul3 count as two arithmetic operations each — matching [peak_flops]'
+           FMA-counted-as-two convention, so an FMA-form kernel scores the same compute leg as its
+           mul+add form; the select is one.
+
+           The upper walk charges every operand that is {e rendered}, which for a conditional one is
+           more than {!Ops.ternop_conditionality} says can execute: a [Where] arm's [Local_scope]
+           renders as statements hoisted OUT of the conditional expression ([C_syntax.pp_scalar]
+           returns its definitions separately), so both arms' scope bodies do run. Only an operand
+           no renderer emits at all — a projection's discarded one, below — may be dropped. The
+           floor's [Int.min] stays sound under the same hoisting: it only loosens. *)
+        let ops = match op with Ops.FMA | Ops.Mul3 -> 2 | Ops.Where -> 1 in
+        ops + arg a1 + arg a2 + arg a3
+    | Binop (op, a1, a2) -> (
+        match Ops.binop_conditionality op with
+        (* A projection is not an operation: it renders as its selected operand alone, and the
+           discarded one is not rendered at all, hoisted definitions included. *)
+        | Ops.Only_first -> arg a1
+        | Ops.Only_second -> arg a2
+        (* Guards-taken: a gated operand is charged as if the gate always passes. *)
+        | Ops.Both_operands | Ops.Gated_second -> 1 + arg a1 + arg a2)
     | Unop (Ops.Identity, a1) -> arg a1
     | Unop (_, a1) -> 1 + arg a1
   and arg (sc, _prec) = sc_flops sc in
@@ -153,8 +167,10 @@ let arithmetic_intensity s = Float.of_int s.flops /. Float.of_int (max 1 (total_
 
    Lower bounds where [analyze] gives upper bounds, for bounding every completion of a partial
    placement vector. The duality is exact: every approximation that biases the upper extraction UP
-   flips direction here — guarded ([If]) work floors to zero (guards-never-taken), [Where] counts
-   its condition plus the cheaper arm (the renderers implement it as a short-circuiting [?:]), a
+   flips direction here — guarded ([If]) work floors to zero (guards-never-taken), a
+   conditionally-evaluated operand ({!Ops.binop_conditionality} / {!Ops.ternop_conditionality})
+   counts at its cheapest instead of its dearest, so [Where] charges its condition plus the cheaper
+   arm where the upper walk charges the dearer one and a gated right operand floors away, a
    node's multiple same-direction accesses take the MAX of the exact images (a union is at least
    its largest member) instead of the capped sum, non-exact images contribute zero, and opaque
    code ([Staged_compilation], merge-buffer reads) — the upper contract's one escape hatch —
@@ -173,8 +189,9 @@ let access_cells_floor a =
    every completion. Node-granular and therefore conservative — one uncertain read of a node
    floors that node's whole read contribution to zero, which only loosens the floor.
 
-   - [where_reads]: read inside a [Where] value arm — the renderers short-circuit, so at most one
-     arm's reads execute;
+   - [gated_reads]: read by an operand the renderers evaluate conditionally
+     ({!Ops.binop_conditionality} / {!Ops.ternop_conditionality}): a [Where] arm, of which at most
+     one executes, or the gated right operand of [&&] / [||] / a gate;
    - [open_reads]: read by a producer statement of an open-placement node — an inline completion
      instantiates the producer only at surviving consumer sites and [cleanup_virtual_llc] drops
      the setter loop, its reads included (an open producer computing a larger domain than its
@@ -182,7 +199,7 @@ let access_cells_floor a =
      to the open placement);
    - [dead]: any access under a dead loop ([to_ < from_]) — the body never executes. *)
 let floor_uncertainty ~open_placement (code : Low_level.t) =
-  let where_reads = Hashtbl.create (module Tn) in
+  let gated_reads = Hashtbl.create (module Tn) in
   let open_reads = Hashtbl.create (module Tn) in
   let dead = Hashtbl.create (module Tn) in
   let mark tbl tn = Hashtbl.set tbl ~key:tn ~data:() in
@@ -198,12 +215,15 @@ let floor_uncertainty ~open_placement (code : Low_level.t) =
         sc_reads ~into a;
         sc_reads ~into b;
         sc_reads ~into c
-    (* The projections' discarded operand is never evaluated ([affine_accesses] omits it too). *)
-    | Binop (Ops.Arg1, (a, _), _) -> sc_reads ~into a
-    | Binop (Ops.Arg2, _, (b, _)) -> sc_reads ~into b
-    | Binop (_, (a, _), (b, _)) ->
-        sc_reads ~into a;
-        sc_reads ~into b
+    | Binop (op, (a, _), (b, _)) -> (
+        (* A projection's discarded operand is never evaluated ([affine_accesses] omits it too),
+           per {!Ops.binop_conditionality}. *)
+        match Ops.binop_conditionality op with
+        | Ops.Only_first -> sc_reads ~into a
+        | Ops.Only_second -> sc_reads ~into b
+        | Ops.Both_operands | Ops.Gated_second ->
+            sc_reads ~into a;
+            sc_reads ~into b)
     | Unop (_, (a, _)) -> sc_reads ~into a
   and code_reads ~into (c : Low_level.t) =
     match c with
@@ -230,28 +250,32 @@ let floor_uncertainty ~open_placement (code : Low_level.t) =
   in
   let rec sc_walk (s : Low_level.scalar_t) =
     match s with
-    | Low_level.Ternop (Ops.Where, (c0, _), (a1, _), (a2, _)) ->
-        sc_walk c0;
-        (* The arms' reads are conditional; their nested Where structure still walks. *)
-        sc_reads ~into:where_reads a1;
-        sc_reads ~into:where_reads a2;
-        sc_walk a1;
-        sc_walk a2
-    | Ternop (_, (a, _), (b, _), (c, _)) ->
-        sc_walk a;
-        sc_walk b;
-        sc_walk c
-    | Binop ((Ops.And | Ops.Or | Ops.Relu_gate | Ops.Satur01_gate), (a, _), (b, _)) ->
-        (* Short-circuiting (&& / || and the gates' ?:): the right operand's reads are
-           conditional. *)
-        sc_reads ~into:where_reads b;
-        sc_walk a;
-        sc_walk b
-    | Binop (Ops.Arg1, (a, _), _) -> sc_walk a
-    | Binop (Ops.Arg2, _, (b, _)) -> sc_walk b
-    | Binop (_, (a, _), (b, _)) ->
-        sc_walk a;
-        sc_walk b
+    | Low_level.Ternop (op, (a, _), (b, _), (c, _)) -> (
+        match Ops.ternop_conditionality op with
+        | Ops.All_three ->
+            sc_walk a;
+            sc_walk b;
+            sc_walk c
+        | Ops.Cond_and_one_arm ->
+            sc_walk a;
+            (* The arms' reads are conditional; their nested structure still walks. *)
+            sc_reads ~into:gated_reads b;
+            sc_reads ~into:gated_reads c;
+            sc_walk b;
+            sc_walk c)
+    | Binop (op, (a, _), (b, _)) -> (
+        match Ops.binop_conditionality op with
+        | Ops.Only_first -> sc_walk a
+        | Ops.Only_second -> sc_walk b
+        | Ops.Gated_second ->
+            (* Short-circuiting (&& / || and the gates' ?:): the right operand's reads are
+               conditional. *)
+            sc_reads ~into:gated_reads b;
+            sc_walk a;
+            sc_walk b
+        | Ops.Both_operands ->
+            sc_walk a;
+            sc_walk b)
     | Unop (_, (a, _)) -> sc_walk a
     | Get_dynamic { dyn_value = v, _; _ } -> sc_walk v
     | Local_scope { body; _ } -> walk body
@@ -290,7 +314,7 @@ let floor_uncertainty ~open_placement (code : Low_level.t) =
   in
   walk code;
   let read_uncertain tn =
-    Hashtbl.mem where_reads tn || Hashtbl.mem open_reads tn || Hashtbl.mem dead tn
+    Hashtbl.mem gated_reads tn || Hashtbl.mem open_reads tn || Hashtbl.mem dead tn
   in
   let any_uncertain tn = Hashtbl.mem dead tn in
   (read_uncertain, any_uncertain)
@@ -343,22 +367,30 @@ let floor_flops ~open_placement (code : Low_level.t) : int * bool =
         exact := false;
         0
     | Get_dynamic { dyn_value = dv, _; _ } -> sc dv
-    | Ternop (Ops.Where, a1, a2, a3) ->
-        (* Short-circuiting [?:] in every renderer: the condition and exactly one arm execute. *)
-        let c1 = arg a2 and c2 = arg a3 in
-        if c1 <> c2 then exact := false;
-        1 + arg a1 + Int.min c1 c2
-    | Ternop ((Ops.FMA | Ops.Mul3), a1, a2, a3) -> 2 + arg a1 + arg a2 + arg a3
-    (* The projections render only the selected operand ([C_syntax.pp_scalar]); the discarded
-       one's work cannot execute. *)
-    | Binop (Ops.Arg1, a1, _) -> arg a1
-    | Binop (Ops.Arg2, _, a2) -> arg a2
-    | Binop ((Ops.And | Ops.Or | Ops.Relu_gate | Ops.Satur01_gate), a1, a2) ->
-        (* Short-circuiting renderings: && / || and the gates' ?: evaluate the right operand only
-           when the left one passes. *)
-        (if arg a2 <> 0 then exact := false);
-        1 + arg a1
-    | Binop (_, a1, a2) -> 1 + arg a1 + arg a2
+    | Ternop (op, a1, a2, a3) -> (
+        (* The per-op arithmetic count is the upper walk's; only which operands are charged flips,
+           per {!Ops.ternop_conditionality}. *)
+        let ops = match op with Ops.FMA | Ops.Mul3 -> 2 | Ops.Where -> 1 in
+        match Ops.ternop_conditionality op with
+        | Ops.All_three -> ops + arg a1 + arg a2 + arg a3
+        | Ops.Cond_and_one_arm ->
+            (* Short-circuiting [?:] in every renderer: the condition and exactly one arm
+               execute. *)
+            let c1 = arg a2 and c2 = arg a3 in
+            if c1 <> c2 then exact := false;
+            ops + arg a1 + Int.min c1 c2)
+    | Binop (op, a1, a2) -> (
+        match Ops.binop_conditionality op with
+        (* The projections render only the selected operand ([C_syntax.pp_scalar]); the discarded
+           one's work cannot execute. *)
+        | Ops.Only_first -> arg a1
+        | Ops.Only_second -> arg a2
+        | Ops.Gated_second ->
+            (* Short-circuiting renderings: && / || and the gates' ?: evaluate the right operand
+               only when the left one passes. *)
+            (if arg a2 <> 0 then exact := false);
+            1 + arg a1
+        | Ops.Both_operands -> 1 + arg a1 + arg a2)
     | Unop (Ops.Identity, a1) -> arg a1
     | Unop (_, a1) -> 1 + arg a1
   and arg (s, _prec) = sc s in

@@ -451,6 +451,22 @@ let extract_idents s =
   done;
   !result
 
+(** The precisions a backend's renderers are exercised over -- by {!op_syntax_idents} and by
+    {!operand_conditionality_violations}. The operator sweeps use [Ops]' derived enumerations
+    ([Ops.all_of_binop] and friends), so a newly added operator joins both checks automatically;
+    [Ops.prec] cannot be derived the same way -- its constructors carry the phantom-typed
+    [precision] witness -- so the exhaustive match below stands in for it: adding a precision is a
+    build error here, and the fix is to extend this list (or to leave the precision out
+    deliberately, as [Void_prec] is, since every renderer rejects it). *)
+let all_precs =
+  Ops.[ byte; uint16; int32; uint32; int64; uint64; uint4x32; half; bfloat16; fp8; single; double ]
+
+let _all_precs_is_complete : Ops.prec -> unit = function
+  | Void_prec | Byte_prec _ | Uint16_prec _ | Int32_prec _ | Uint32_prec _ | Int64_prec _
+  | Uint64_prec _ | Uint4x32_prec _ | Half_prec _ | Bfloat16_prec _ | Fp8_prec _ | Single_prec _
+  | Double_prec _ ->
+      ()
+
 (** Every function and type name a backend's operator rendering can emit, obtained by rendering each
     (precision, operator) pair over a placeholder operand and harvesting the identifiers.
 
@@ -478,72 +494,128 @@ let op_syntax_idents ~ternop_syntax ~binop_syntax ~unop_syntax ~vec_unop_syntax 
       add_string (Buffer.contents buf)
     with _ -> ()
   in
-  let precs =
-    Ops.
-      [ byte; uint16; int32; uint32; int64; uint64; uint4x32; half; bfloat16; fp8; single; double ]
-  in
-  List.iter precs ~f:(fun prec ->
-      List.iter
-        Ops.[ Where; FMA; Mul3 ]
-        ~f:(fun op -> add_doc (fun () -> ternop_syntax prec op arg arg arg));
-      List.iter
-        Ops.
-          [
-            Arg1;
-            Arg2;
-            Add;
-            Sub;
-            Mul;
-            Div;
-            ToPowOf;
-            Relu_gate;
-            Satur01_gate;
-            Max;
-            Min;
-            Mod;
-            Cmplt;
-            Cmple;
-            Cmpeq;
-            Cmpne;
-            Or;
-            And;
-            Threefry4x32_crypto;
-            Threefry4x32_light;
-            Uint4x32_to_prec_uniform_lane;
-          ]
-        ~f:(fun op -> add_doc (fun () -> binop_syntax prec op arg arg));
-      List.iter
-        Ops.
-          [
-            Identity;
-            Relu;
-            Satur01;
-            Exp;
-            Log;
-            Exp2;
-            Log2;
-            Sin;
-            Cos;
-            Sqrt;
-            Recip;
-            Recip_sqrt;
-            Neg;
-            Trunc;
-            Tanh_approx;
-            Not;
-            Uint4x32_to_prec_uniform1;
-          ]
-        ~f:(fun op -> add_doc (fun () -> unop_syntax prec op arg));
-      List.iter
-        Ops.[ Uint4x32_to_prec_uniform ]
-        ~f:(fun op -> add_doc (fun () -> vec_unop_syntax prec op arg));
-      List.iter precs ~f:(fun to_ ->
+  List.iter all_precs ~f:(fun prec ->
+      List.iter Ops.all_of_ternop ~f:(fun op -> add_doc (fun () -> ternop_syntax prec op arg arg arg));
+      List.iter Ops.all_of_binop ~f:(fun op -> add_doc (fun () -> binop_syntax prec op arg arg));
+      List.iter Ops.all_of_unop ~f:(fun op -> add_doc (fun () -> unop_syntax prec op arg));
+      List.iter Ops.all_of_vec_unop ~f:(fun op -> add_doc (fun () -> vec_unop_syntax prec op arg));
+      List.iter all_precs ~f:(fun to_ ->
           try
             let prefix, suffix = convert_precision ~from:prec ~to_ in
             add_string prefix;
             add_string suffix
           with _ -> ()));
   Set.to_list !names
+
+(** What a backend's operator renderings actually emit, checked against the operand-evaluation
+    contract they are supposed to implement ({!Ops.binop_conditionality} /
+    {!Ops.ternop_conditionality}) -- returns one message per disagreement, [[]] when they agree
+    (gh-ocannl-582).
+
+    The classifier is what {!Low_level.affine_accesses} and both {!Cost_model} walks consume, and
+    the renderers are the ground truth it describes; checking rather than consulting is deliberate,
+    since a renderer cannot ask "am I allowed to short-circuit here" -- it either emits a
+    conditional or it does not. Each operator is rendered over distinguishable placeholder operands
+    at every precision, and the emitted text is read for the only C-family constructs that can skip
+    an operand: [?:], [&&] and [||]. So:
+
+    - a projection ([Only_first] / [Only_second]) must not mention its discarded operand -- every
+      backend rejects one outright, which satisfies this trivially, and {!C_syntax.pp_scalar} emits
+      the selected operand alone before [binop_syntax] is ever reached;
+    - [Gated_second] must place one of those constructs before its second operand;
+    - [Both_operands] / [All_three] must emit none of them anywhere -- an [Ops.Max] spelled
+      [(a > b ? a : b)] would evaluate [a] twice and [b] conditionally, and the cost model's floor
+      would keep charging both;
+    - [Cond_and_one_arm] must put its arms on the two sides of a [?:] alternative, which is what
+      rules out MSL's [select] (a call: it evaluates both arms, so a range guard lowered to [Where]
+      would still perform its out-of-range read).
+
+    The operator sweep is [Ops]' derived enumeration, so an operator added to {!Ops.binop} or
+    {!Ops.ternop} is checked here without anyone remembering to list it. A (precision, operator)
+    pair the backend rejects by raising contributes nothing, as in {!op_syntax_idents}. *)
+let operand_conditionality_violations ~ternop_syntax ~binop_syntax =
+  let violations = ref [] in
+  let report what msg = violations := Printf.sprintf "%s: %s" what msg :: !violations in
+  let a1 = PPrint.string "$1" and a2 = PPrint.string "$2" and a3 = PPrint.string "$3" in
+  let render f =
+    try
+      let buf = Buffer.create 256 in
+      (* A width no rendering reaches keeps the placeholders off line boundaries. *)
+      PPrint.ToBuffer.pretty 1.0 1_000_000 buf (f ());
+      Some (Buffer.contents buf)
+    with _ -> None
+  in
+  let at s ph = String.substr_index s ~pattern:ph in
+  let gated_in s =
+    String.exists s ~f:(Char.equal '?')
+    || String.is_substring s ~substring:"&&"
+    || String.is_substring s ~substring:"||"
+  in
+  let gated_before s pos = gated_in (String.prefix s pos) in
+  List.iter all_precs ~f:(fun prec ->
+      let at_prec op_name = Printf.sprintf "%s at %s" op_name (Ops.prec_string prec) in
+      List.iter Ops.all_of_binop ~f:(fun op ->
+          match render (fun () -> binop_syntax prec op a1 a2) with
+          | None -> ()
+          | Some s -> (
+              let what = at_prec (Ops.binop_cd_fallback_syntax op) in
+              let i1 = at s "$1" and i2 = at s "$2" in
+              match Ops.binop_conditionality op with
+              | Ops.Only_first ->
+                  if Option.is_some i2 then
+                    report what
+                      "classified as a projection onto the first operand, but the rendering \
+                       mentions the second"
+              | Ops.Only_second ->
+                  if Option.is_some i1 then
+                    report what
+                      "classified as a projection onto the second operand, but the rendering \
+                       mentions the first"
+              | (Ops.Both_operands | Ops.Gated_second) as cond -> (
+                  if Option.is_none i1 then report what "the first operand is not rendered";
+                  match (cond, i2) with
+                  | _, None -> report what "the second operand is not rendered"
+                  | Ops.Gated_second, Some i2 ->
+                      if not (gated_before s i2) then
+                        report what
+                          "classified as gating its second operand, but the rendering reaches it \
+                           without a [?], [&&] or [||]"
+                  | _, Some _ ->
+                      if gated_in s then
+                        report what
+                          "classified as always evaluating both operands, but the rendering \
+                           short-circuits ([?], [&&] or [||])")));
+      List.iter Ops.all_of_ternop ~f:(fun op ->
+          match render (fun () -> ternop_syntax prec op a1 a2 a3) with
+          | None -> ()
+          | Some s -> (
+              let what = at_prec (Ops.ternop_cd_syntax op) in
+              match (at s "$1", at s "$2", at s "$3") with
+              | None, _, _ | _, None, _ | _, _, None ->
+                  report what "not every operand is rendered"
+              | Some _, Some i2, Some i3 -> (
+                  match Ops.ternop_conditionality op with
+                  | Ops.All_three ->
+                      if gated_in s then
+                        report what
+                          "classified as always evaluating all three operands, but the rendering \
+                           short-circuits ([?], [&&] or [||])"
+                  | Ops.Cond_and_one_arm ->
+                      if not (gated_before s i2) then
+                        report what
+                          "classified as evaluating one arm, but the rendering reaches the first \
+                           arm without a [?]";
+                      if
+                        i3 <= i2
+                        || not
+                             (String.is_substring
+                                (String.sub s ~pos:i2 ~len:(i3 - i2))
+                                ~substring:":")
+                      then
+                        report what
+                          "classified as evaluating one arm, but its arms are not the two sides of \
+                           a [?:] alternative -- a call form (MSL's [select]) evaluates both"))));
+  List.rev !violations
 
 (** The names defined by a backend's builtins table (the keys of its
     [(name, definition, dependencies)] entries), for its [ident_blacklist]. A node taking one of
@@ -739,6 +811,22 @@ struct
 end
 
 module C_syntax (B : C_syntax_config) = struct
+  (* The backend's renderings must implement the operand-evaluation contract that
+     [Low_level.affine_accesses] and both [Cost_model] walks read off {!Ops.binop_conditionality} /
+     {!Ops.ternop_conditionality} -- checked here, once per functor application, rather than in a
+     test, because the GPU backends' syntax configs are sealed inside their [Impl] modules and only
+     reachable on the hardware that has them (gh-ocannl-582). A mismatch is an internal
+     inconsistency, not a user error: fix the classifier or the rendering. *)
+  let () =
+    match
+      operand_conditionality_violations ~ternop_syntax:B.ternop_syntax ~binop_syntax:B.binop_syntax
+    with
+    | [] -> ()
+    | violations ->
+        invalid_arg
+          ("C_syntax: operator renderings disagree with Ops.binop_conditionality / \
+            Ops.ternop_conditionality:\n" ^ String.concat ~sep:"\n" violations)
+
   (* Identifiers a tensor node's code name must not take: what the backend declares reserved (the
      language's keywords, its builtins, its intrinsic globals) plus what its own operator rendering
      actually emits -- see {!op_syntax_idents} for why the second half has to be derived from [B]
@@ -4003,8 +4091,6 @@ module C_syntax (B : C_syntax_config) = struct
         let idx_doc = if affine_needs_parens idx then parens idx_doc else idx_doc in
         let expr = string prefix ^^ idx_doc ^^ string postfix in
         ([], expr)
-    | Binop (Arg1, (v1, _), _v2) -> pp_scalar prec v1
-    | Binop (Arg2, _v1, (v2, _)) -> pp_scalar prec v2
     | Ternop (op, (v1, v1_prec), (v2, v2_prec), (v3, v3_prec)) ->
         (* A heterogeneous argument keeps its own precision, which -- like every precision reaching
            here from [Low_level] -- is a storage precision; the rendering takes [comp_prec] of it. *)
@@ -4041,24 +4127,31 @@ module C_syntax (B : C_syntax_config) = struct
         let defs = List.concat [ d1; d2; d3 ] in
         let expr = group (B.ternop_syntax prec op e1 e2 e3) in
         (defs, expr)
-    | Binop (op, (v1, v1_prec), (v2, v2_prec)) ->
-        let v1_prec = comp_prec v1_prec and v2_prec = comp_prec v2_prec in
-        let d1, e1, d2, e2 =
-          if Ops.is_homogeneous_prec_binop op then
-            (* Homogeneous: both arguments use result precision *)
-            let d1, e1 = pp_scalar prec v1 in
-            let d2, e2 = pp_scalar prec v2 in
-            (d1, e1, d2, e2)
-          else
-            (* Heterogeneous: arguments keep their natural precision *)
-            (* Currently all binops are homogeneous, but this is here for future extension *)
-            let d1, e1 = pp_scalar v1_prec v1 in
-            let d2, e2 = pp_scalar v2_prec v2 in
-            (d1, e1, d2, e2)
-        in
-        let defs = List.concat [ d1; d2 ] in
-        let expr = group (B.binop_syntax prec op e1 e2) in
-        (defs, expr)
+    | Binop (op, (v1, v1_prec), (v2, v2_prec)) -> (
+        match Ops.binop_conditionality op with
+        (* A projection emits its selected operand alone: the operator has no spelling of its own
+           (every backend's [binop_syntax] rejects one), and the discarded operand is not rendered
+           at all -- which is what lets [Low_level.affine_accesses] and [Cost_model] drop it. *)
+        | Ops.Only_first -> pp_scalar prec v1
+        | Ops.Only_second -> pp_scalar prec v2
+        | Ops.Both_operands | Ops.Gated_second ->
+            let v1_prec = comp_prec v1_prec and v2_prec = comp_prec v2_prec in
+            let d1, e1, d2, e2 =
+              if Ops.is_homogeneous_prec_binop op then
+                (* Homogeneous: both arguments use result precision *)
+                let d1, e1 = pp_scalar prec v1 in
+                let d2, e2 = pp_scalar prec v2 in
+                (d1, e1, d2, e2)
+              else
+                (* Heterogeneous: arguments keep their natural precision *)
+                (* Currently all binops are homogeneous, but this is here for future extension *)
+                let d1, e1 = pp_scalar v1_prec v1 in
+                let d2, e2 = pp_scalar v2_prec v2 in
+                (d1, e1, d2, e2)
+            in
+            let defs = List.concat [ d1; d2 ] in
+            let expr = group (B.binop_syntax prec op e1 e2) in
+            (defs, expr))
     | Unop (op, (v, v_prec)) ->
         let arg_prec =
           if Ops.is_homogeneous_prec_unop op then prec
@@ -4160,8 +4253,6 @@ module C_syntax (B : C_syntax_config) = struct
         let idx_doc = if PPrint.is_empty idx_doc then string "0" else idx_doc in
         (* Parenthesize multi-term affines, mirroring [pp_scalar]. *)
         ((if affine_needs_parens idx then parens idx_doc else idx_doc), [])
-    | Binop (Arg1, (v1, _), _v2) -> debug_float ?guard prec v1
-    | Binop (Arg2, _v1, (v2, _)) -> debug_float ?guard prec v2
     | Ternop (op, (v1, v1_prec), (v2, v2_prec), (v3, v3_prec)) ->
         let v1_prec = comp_prec v1_prec and v2_prec = comp_prec v2_prec in
         let v3_prec = comp_prec v3_prec in
@@ -4214,21 +4305,26 @@ module C_syntax (B : C_syntax_config) = struct
                 (v1_doc, idcs1, v2_doc, idcs2, v3_doc, idcs3)
         in
         (B.ternop_syntax prec op v1_doc v2_doc v3_doc, idcs1 @ idcs2 @ idcs3)
-    | Binop (op, (v1, v1_prec), (v2, v2_prec)) ->
-        let v1_prec = comp_prec v1_prec and v2_prec = comp_prec v2_prec in
-        let v1_doc, idcs1, v2_doc, idcs2 =
-          if Ops.is_homogeneous_prec_binop op then
-            (* Homogeneous: both arguments use result precision *)
-            let v1_doc, idcs1 = debug_float ?guard prec v1 in
-            let v2_doc, idcs2 = debug_float ?guard prec v2 in
-            (v1_doc, idcs1, v2_doc, idcs2)
-          else
-            (* Heterogeneous: arguments keep their natural precision *)
-            let v1_doc, idcs1 = debug_float ?guard v1_prec v1 in
-            let v2_doc, idcs2 = debug_float ?guard v2_prec v2 in
-            (v1_doc, idcs1, v2_doc, idcs2)
-        in
-        (B.binop_syntax prec op v1_doc v2_doc, idcs1 @ idcs2)
+    | Binop (op, (v1, v1_prec), (v2, v2_prec)) -> (
+        match Ops.binop_conditionality op with
+        (* A projection displays its selected operand alone, exactly as [pp_scalar] emits it. *)
+        | Ops.Only_first -> debug_float ?guard prec v1
+        | Ops.Only_second -> debug_float ?guard prec v2
+        | Ops.Both_operands | Ops.Gated_second ->
+            let v1_prec = comp_prec v1_prec and v2_prec = comp_prec v2_prec in
+            let v1_doc, idcs1, v2_doc, idcs2 =
+              if Ops.is_homogeneous_prec_binop op then
+                (* Homogeneous: both arguments use result precision *)
+                let v1_doc, idcs1 = debug_float ?guard prec v1 in
+                let v2_doc, idcs2 = debug_float ?guard prec v2 in
+                (v1_doc, idcs1, v2_doc, idcs2)
+              else
+                (* Heterogeneous: arguments keep their natural precision *)
+                let v1_doc, idcs1 = debug_float ?guard v1_prec v1 in
+                let v2_doc, idcs2 = debug_float ?guard v2_prec v2 in
+                (v1_doc, idcs1, v2_doc, idcs2)
+            in
+            (B.binop_syntax prec op v1_doc v2_doc, idcs1 @ idcs2))
     | Unop (op, (v, v_prec)) ->
         let arg_prec =
           if Ops.is_homogeneous_prec_unop op then prec
