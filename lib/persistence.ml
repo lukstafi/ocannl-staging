@@ -247,21 +247,15 @@ let is_mappable meta =
   && meta.byte_length = numel * Ops.prec_in_bytes meta.prec
 
 type payload_reader = {
-  path : string;
+  path : string;  (** For error messages only: the payloads are addressed through [ic]. *)
   ic : Stdlib.in_channel;
   data_start : int;
   mmap : bool;
-  fd : Unix.file_descr option ref;  (** Opened on the first mapped payload, if any. *)
 }
 
 let open_reader ?mmap path =
   let ic = Stdlib.open_in_bin path in
-  { path; ic; data_start = 0; mmap = use_mmap mmap; fd = ref None }
-
-let close_reader reader =
-  (* The mappings outlive the descriptor they were taken from. *)
-  Option.iter !(reader.fd) ~f:(fun fd -> try Unix.close fd with Unix.Unix_error _ -> ());
-  reader.fd := None
+  { path; ic; data_start = 0; mmap = use_mmap mmap }
 
 (* The payload extents are checked against the file size up front: mapping past the end of a file is
    an error worth reporting against the checkpoint rather than a partially-read buffer. *)
@@ -287,17 +281,13 @@ let ingestion_counts () = (Atomic.get mapped_count, Atomic.get copied_count)
 let ingest_payload reader ~debug meta =
   if reader.mmap && is_mappable meta then begin
     Atomic.incr mapped_count;
-    let fd =
-      match !(reader.fd) with
-      | Some fd -> fd
-      | None ->
-          let fd = Unix.openfile reader.path [ Unix.O_RDONLY ] 0 in
-          reader.fd := Some fd;
-          fd
-    in
+    (* The descriptor behind the channel the header came from, NOT a fresh open of the path: a
+       concurrent atomic save would put a different inode at that name, and the offsets, extents and
+       precisions being mapped describe the file this read started on. The mapping outlives the
+       descriptor -- and the directory entry -- so nothing here depends on the file staying put. *)
     Nd.map_file_array meta.prec ~dims:meta.dims
       ~byte_offset:(reader.data_start + meta.offset)
-      fd
+      (Unix.descr_of_in_channel reader.ic)
   end
   else begin
     Atomic.incr copied_count;
@@ -494,11 +484,9 @@ let load ~ctx ?prefix_namespace ?mmap path =
       (ctx, Set.of_list (module Tn) (List.map loaded ~f:fst))
     with
     | result ->
-        close_reader reader;
         Stdlib.close_in ic;
         result
     | exception exn ->
-        close_reader reader;
         Stdlib.close_in_noerr ic;
         raise exn
   in
@@ -547,11 +535,9 @@ let restore ~ctx ?mmap t_set path =
               Context.from_host ctx tn nd)
     with
     | ctx ->
-        close_reader reader;
         Stdlib.close_in ic;
         ctx
     | exception exn ->
-        close_reader reader;
         Stdlib.close_in_noerr ic;
         raise exn
   end
