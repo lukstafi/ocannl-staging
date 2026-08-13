@@ -768,6 +768,15 @@
 # in shape error exceptions.
 #max_shape_error_origins=20
 
+# Whether Persistence.load / Persistence.restore wrap a checkpoint's payloads as private
+# (copy-on-write) memory mappings of the file instead of decoding them into fresh host buffers.
+# Only payloads whose file bytes are already their buffer's bytes are mapped; padded tensor nodes
+# always take the decoding path. Defaults to true, except on Windows, where a mapped view holds
+# the file open, so saving over a path this process has loaded from would fail (the atomic rename
+# cannot replace the directory entry of a mapped file); POSIX renames leave the mapped inode
+# alone. Per-call override: the `?mmap` argument of `load` / `restore`.
+#checkpoint_load_mmap=true
+
 # ---------------------------------------------------------------------------
 # The built-in profile payloads
 #

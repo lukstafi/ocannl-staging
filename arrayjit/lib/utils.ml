@@ -170,6 +170,7 @@ let known_config_keys =
       "default_prec";
       "limit_constant_fill_size";
       "max_shape_error_origins";
+      "checkpoint_load_mmap";
     ]
 
 (** {2 Cache-identity classification of the configuration keys (gh-ocannl-572)} *)
@@ -359,8 +360,9 @@ let config_key_classification : (config_key_class * string * string list) list =
       [ "ll_ident_style"; "cd_ident_style"; "print_decimals_precision" ] );
     ( Execution_neutral,
       "host-side execution mechanics: where buffers sit, how many devices a scheduler opens, how \
-       launches are issued, how host-side initialization is seeded. The kernels are unchanged, and \
-       every candidate of a search meets the same mechanics as every other",
+       launches are issued, how initialization is seeded, how checkpoint payloads reach host \
+       memory. The kernels are unchanged, and every candidate of a search meets the same mechanics \
+       as every other",
       [
         "buffer_aliasing";
         "multidev_num_devices";
@@ -368,6 +370,7 @@ let config_key_classification : (config_key_class * string * string list) list =
         "cuda_printf_fifo_size";
         "hip_printf_fifo_size";
         "fixed_state_for_init";
+        "checkpoint_load_mmap";
       ] );
     ( Execution_neutral,
       "memoization of toolchain probes: it changes how long resolving a setting takes, not what it \

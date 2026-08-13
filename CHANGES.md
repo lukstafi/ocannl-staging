@@ -2,6 +2,17 @@
 
 ### Added
 
+- **Checkpoints load by mapping the file, not by copying it** (gh-ocannl-467): `Persistence.load`
+  and `Persistence.restore` wrap each payload as a private, copy-on-write `Unix.map_file` region
+  instead of decoding it element by element into a fresh host buffer — so a checkpoint's pages are
+  read lazily, by the OS, and only the ones actually touched. Padded tensor nodes keep the decoding
+  path: their payload holds only the logical region, which has to be scattered into the padded
+  buffer. The checkpoint format gained an `alignment` field (default 32, GGUF's `general.alignment`
+  default) and rounds payload offsets up to it; the header is space-padded to the same boundary, so
+  the offsets are absolute file alignments and the change breaks neither old readers nor old files.
+  Mapping is on by default except on Windows, where a mapped view holds the file open and would
+  make a later save over the same path fail (`checkpoint_load_mmap`, or the `?mmap` argument).
+
 - **Cache identity is complete by construction, not by vigilance** (gh-ocannl-572): every
   configuration key is classified in `Utils.config_key_classification` — code-borne (it reaches the
   canonical digest through the lowered code), keyed to a named cache-key component, search-shaping,

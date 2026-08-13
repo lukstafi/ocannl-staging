@@ -207,4 +207,198 @@ let () =
    with Failure msg -> Stdio.printf "Caught: %s\n" msg);
   cleanup "padmismatch";
 
+  (* === Test 11: Aligned payload offsets (gh-ocannl-467) === *)
+  Stdio.printf "=== Test 11: Payload alignment ===\n";
+  (* Parses the file layout independently of Persistence's own reader, so that the on-disk format is
+     pinned rather than the writer's agreement with itself. *)
+  let file_layout path =
+    let ic = Stdlib.open_in_bin path in
+    let header_len = Stdlib.input_binary_int ic in
+    let buf = Bytes.create header_len in
+    Stdlib.really_input ic buf 0 header_len;
+    let data_start = Stdlib.pos_in ic in
+    Stdlib.close_in ic;
+    let sexp = Sexplib.Sexp.of_string (String.strip (Bytes.to_string buf)) in
+    let field key sexp =
+      match sexp with
+      | Sexp.List fields ->
+          List.find_map fields ~f:(function
+            | Sexp.List [ Sexp.Atom k; v ] when String.equal k key -> Some v
+            | _ -> None)
+      | _ -> None
+    in
+    let int_field key sexp =
+      match field key sexp with Some (Sexp.Atom s) -> Int.of_string s | _ -> failwith key
+    in
+    let tensors =
+      match field "tensors" sexp with
+      | Some (Sexp.List metas) ->
+          List.map metas ~f:(fun m -> (int_field "id" m, int_field "offset" m))
+      | _ -> failwith "tensors"
+    in
+    (int_field "alignment" sexp, data_start, tensors)
+  in
+  let report path =
+    let alignment, data_start, tensors = file_layout path in
+    Stdio.printf "  alignment=%d, data_start mod alignment=%d\n" alignment
+      (data_start % alignment);
+    List.iter tensors ~f:(fun (id, offset) ->
+        Stdio.printf "  id=%d offset=%d, offset mod alignment=%d\n" id offset (offset % alignment))
+  in
+  Tensor.unsafe_reinitialize ();
+  let ctx = Context.cpu () in
+  (* Byte lengths (12, 5, 4) that would leave every subsequent payload misaligned if packed. *)
+  let ctx, tn_a = make_tn ctx ~id:0 ~label:[ "a" ] Ops.single [| 3 |] [| 1.0; 2.0; 3.0 |] in
+  let ctx, tn_b =
+    make_tn ctx ~id:1 ~label:[ "b" ] Ops.byte [| 5 |] [| 1.0; 2.0; 3.0; 4.0; 5.0 |]
+  in
+  let ctx, tn_c = make_tn ctx ~id:2 ~label:[ "c" ] Ops.single [| 1 |] [| 7.0 |] in
+  let t_set = Set.of_list (module Tn) [ tn_a; tn_b; tn_c ] in
+  let path = tmp_file "aligned" in
+  Persistence.save ~ctx ~appending:false t_set path;
+  report path;
+  (* Appending re-lays out the file; the alignment invariant must survive it. *)
+  Persistence.save ~ctx ~appending:true (Set.of_list (module Tn) [ tn_b ]) path;
+  report path;
+  Tensor.unsafe_reinitialize ();
+  let ctx = Context.cpu () in
+  let ctx, loaded = Persistence.load ~ctx path in
+  Set.iter loaded ~f:(fun tn -> Stdio.printf "  id=%d values=[%s]\n" tn.Tn.id (show ctx tn));
+  cleanup "aligned";
+
+  (* An explicit alignment of 1 reproduces the pre-alignment layout: payloads packed back to back,
+     which is how checkpoints written before the field are read. *)
+  Stdio.printf "=== Test 12: Unaligned (legacy) layout ===\n";
+  Tensor.unsafe_reinitialize ();
+  let ctx = Context.cpu () in
+  let ctx, tn_a = make_tn ctx ~id:0 ~label:[ "a" ] Ops.single [| 3 |] [| 1.0; 2.0; 3.0 |] in
+  let ctx, tn_b =
+    make_tn ctx ~id:1 ~label:[ "b" ] Ops.byte [| 5 |] [| 1.0; 2.0; 3.0; 4.0; 5.0 |]
+  in
+  let ctx, tn_c = make_tn ctx ~id:2 ~label:[ "c" ] Ops.single [| 1 |] [| 7.0 |] in
+  let path = tmp_file "packed" in
+  Persistence.save ~ctx ~appending:false ~alignment:1
+    (Set.of_list (module Tn) [ tn_a; tn_b; tn_c ])
+    path;
+  report path;
+  Tensor.unsafe_reinitialize ();
+  let ctx = Context.cpu () in
+  let ctx, loaded = Persistence.load ~ctx path in
+  Set.iter loaded ~f:(fun tn -> Stdio.printf "  id=%d values=[%s]\n" tn.Tn.id (show ctx tn));
+  (* And a checkpoint written before the field existed -- the same layout with the field deleted
+     from the header -- must still read back. *)
+  let legacy_path = tmp_file "legacy" in
+  let ic = Stdlib.open_in_bin path in
+  let header_len = Stdlib.input_binary_int ic in
+  let buf = Bytes.create header_len in
+  Stdlib.really_input ic buf 0 header_len;
+  let data = Stdio.In_channel.input_all ic in
+  Stdlib.close_in ic;
+  let legacy_header =
+    String.substr_replace_first
+      (String.strip (Bytes.to_string buf))
+      ~pattern:"(alignment 1)" ~with_:""
+  in
+  let oc = Stdlib.open_out_bin legacy_path in
+  Stdlib.output_binary_int oc (String.length legacy_header);
+  Stdlib.output_string oc legacy_header;
+  Stdlib.output_string oc data;
+  Stdlib.close_out oc;
+  Tensor.unsafe_reinitialize ();
+  let ctx = Context.cpu () in
+  let ctx, loaded = Persistence.load ~ctx legacy_path in
+  Stdio.printf "  no-alignment-field checkpoint:\n";
+  Set.iter loaded ~f:(fun tn -> Stdio.printf "  id=%d values=[%s]\n" tn.Tn.id (show ctx tn));
+  cleanup "legacy";
+  cleanup "packed";
+
+  (* === Test 13: Mapped load matches the copying load (gh-ocannl-467) === *)
+  Stdio.printf "=== Test 13: Mapped vs copied payloads ===\n";
+  (* The mapping reinterprets the payload bytes as the host buffer, so precisions whose in-memory
+     representation is not the payload's would silently decode to garbage: check them all. The
+     padded node exercises the fallback -- its payload holds only the logical region. *)
+  let precisions =
+    [
+      ("single", Ops.single);
+      ("double", Ops.double);
+      ("half", Ops.half);
+      ("bfloat16", Ops.bfloat16);
+      ("byte", Ops.byte);
+      ("fp8", Ops.fp8);
+      ("uint16", Ops.uint16);
+      ("int32", Ops.int32);
+      ("uint32", Ops.uint32);
+      ("int64", Ops.int64);
+      ("uint64", Ops.uint64);
+    ]
+  in
+  let values = [| 1.0; 2.0; 32.0; 5.0 |] in
+  let padding = Some ([| Ops.{ left = 1; right = 1 } |], 0.0) in
+  let path = tmp_file "mapped" in
+  Tensor.unsafe_reinitialize ();
+  let ctx = Context.cpu () in
+  let ctx, tns =
+    List.foldi precisions ~init:(ctx, []) ~f:(fun i (ctx, acc) (_name, prec) ->
+        let ctx, tn = make_tn ctx ~id:i ~label:[ "p" ] prec [| 4 |] values in
+        (ctx, tn :: acc))
+  in
+  let tns = List.rev tns in
+  let ctx, tn_padded =
+    make_tn ctx ~id:(List.length precisions) ~label:[ "padded" ] ~padding Ops.single [| 6 |]
+      [| 3.0; 4.0; 5.0; 6.0 |]
+  in
+  Persistence.save ~ctx ~appending:false (Set.of_list (module Tn) (tn_padded :: tns)) path;
+  let load_and_show ~mmap =
+    Tensor.unsafe_reinitialize ();
+    let ctx = Context.cpu () in
+    let mapped_before, copied_before = Persistence.ingestion_counts () in
+    let ctx, loaded = Persistence.load ~ctx ~mmap path in
+    let mapped_after, copied_after = Persistence.ingestion_counts () in
+    Stdio.printf "  load ~mmap:%b ingested %d payloads by mapping, %d by copying\n" mmap
+      (mapped_after - mapped_before)
+      (copied_after - copied_before);
+    List.map (Set.to_list loaded) ~f:(fun tn -> (tn.Tn.id, show ctx tn))
+  in
+  let copied = load_and_show ~mmap:false in
+  let mapped = load_and_show ~mmap:true in
+  List.iter2_exn copied mapped ~f:(fun (id, copied) (_, mapped) ->
+      let name =
+        if id < List.length precisions then fst (List.nth_exn precisions id) else "padded/single"
+      in
+      Stdio.printf "  %s: %s (mapped %s)\n" name copied
+        (if String.equal copied mapped then "identical" else "DIFFERS: " ^ mapped));
+  (* Restore takes the same path, into already-existing device buffers. *)
+  Tensor.unsafe_reinitialize ();
+  let ctx = Context.cpu () in
+  let ctx, tn = make_tn ctx ~id:0 ~label:[ "p" ] Ops.single [| 4 |] [| 0.0; 0.0; 0.0; 0.0 |] in
+  let t_set = Set.of_list (module Tn) [ tn ] in
+  let mapped_before, _ = Persistence.ingestion_counts () in
+  let ctx = Persistence.restore ~ctx ~mmap:true t_set path in
+  let mapped_after, _ = Persistence.ingestion_counts () in
+  Stdio.printf "  restored with mapping (%d mapped): [%s]\n" (mapped_after - mapped_before)
+    (show ctx tn);
+  cleanup "mapped";
+
+  (* === Test 14: Truncated file === *)
+  Stdio.printf "=== Test 14: Truncated checkpoint ===\n";
+  Tensor.unsafe_reinitialize ();
+  let ctx = Context.cpu () in
+  let ctx, tn = make_tn ctx ~id:0 ~label:[ "t" ] Ops.single [| 4 |] values in
+  let path = tmp_file "truncated" in
+  Persistence.save ~ctx ~appending:false (Set.of_list (module Tn) [ tn ]) path;
+  let full = Stdio.In_channel.read_all path in
+  let oc = Stdlib.open_out_bin path in
+  Stdlib.output_string oc (String.drop_suffix full 4);
+  Stdlib.close_out oc;
+  Tensor.unsafe_reinitialize ();
+  let ctx = Context.cpu () in
+  (try
+     let _ = Persistence.load ~ctx ~mmap:true path in
+     Stdio.printf "ERROR: should have raised\n"
+   with Failure msg ->
+     (* The message embeds the machine-dependent path. *)
+     Stdio.printf "Caught a payload-past-end-of-file failure: %b\n"
+       (String.is_suffix msg ~suffix:"extends past the end of the file"));
+  cleanup "truncated";
+
   Stdio.printf "=== All persistence tests completed ===\n"

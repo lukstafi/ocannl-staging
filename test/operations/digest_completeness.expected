@@ -137,8 +137,9 @@ execution-neutral -- identifier spelling in generated code and in printouts
   ll_ident_style
   print_decimals_precision
 
-execution-neutral -- host-side execution mechanics: where buffers sit, how many devices a scheduler opens, how launches are issued, how host-side initialization is seeded. The kernels are unchanged, and every candidate of a search meets the same mechanics as every other
+execution-neutral -- host-side execution mechanics: where buffers sit, how many devices a scheduler opens, how launches are issued, how initialization is seeded, how checkpoint payloads reach host memory. The kernels are unchanged, and every candidate of a search meets the same mechanics as every other
   buffer_aliasing
+  checkpoint_load_mmap
   cuda_printf_fifo_size [read at codegen]
   fixed_state_for_init
   gpu_graph_capture [read at codegen]
@@ -148,4 +149,4 @@ execution-neutral -- host-side execution mechanics: where buffers sit, how many 
 execution-neutral -- memoization of toolchain probes: it changes how long resolving a setting takes, not what it resolves to -- and the resolved values are what the codegen tag records
   cc_backend_probe_cache [read at codegen]
 
-OK: 109 config keys classified against 5 cache-key components.
+OK: 110 config keys classified against 5 cache-key components.
