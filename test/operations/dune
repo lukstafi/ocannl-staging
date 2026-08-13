@@ -1396,7 +1396,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules digest_identity_flips)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio unix)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 

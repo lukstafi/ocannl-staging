@@ -132,6 +132,20 @@ let () =
   p "an aliasing flip separates the key without touching the digest"
     (not (String.equal key0 key_a));
 
+  (* The OpenMP runtime's controls decide the team every Grid loop executes on, and the pool tag —
+     derived from process affinity — cannot see them (Codex P1 on PR #337). Only meaningful where
+     Grid loops render as OpenMP, so the setting is forced for the key computation alone; no compile
+     runs under it. *)
+  set_config "cc_parallel_grid" "openmp";
+  Unix.putenv "OMP_NUM_THREADS" "1";
+  let key_omp1 = key_of ctx canon in
+  Unix.putenv "OMP_NUM_THREADS" "16";
+  let key_omp16 = key_of ctx canon in
+  Unix.putenv "OMP_NUM_THREADS" "";
+  unset_config "cc_parallel_grid";
+  p "the OpenMP team size separates the key on the backend that runs OpenMP Grid loops"
+    (Bool.equal is_cc (not (String.equal key_omp1 key_omp16)));
+
   (* And the numerics component, whose omission was gh-ocannl-568. *)
   let base = Ir.Numerics.get () in
   Ir.Numerics.set_policy { base with Ir.Numerics.tf32_matmuls = not base.Ir.Numerics.tf32_matmuls };

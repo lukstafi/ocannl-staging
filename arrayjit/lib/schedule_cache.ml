@@ -455,7 +455,12 @@ let codegen_tag ~(limits : Backend_intf.hardware_limits) () =
          debug compilation ([--device-debug] / [-g]). *)
       gate "routine-logs" (Utils.debug_log_from_routines ());
       gate "debug-compile" (Utils.with_runtime_debug ());
-      config "debug_log_to_stream_files";
+      (* Where routine logs go matters only when there are routine logs: with the gate off, nothing
+         generated or timed depends on it, and hashing it would re-tune for nothing (Codex P2 on
+         PR #337). *)
+      gate "stream-logs"
+        (Utils.debug_log_from_routines ()
+        && Utils.get_global_flag ~default:false ~arg_name:"debug_log_to_stream_files");
       (* Not which backend runs — how the C-family backends spell their logging expressions
          ([full_printf_support]: [%g] vs scaled integers). Codex P2 on PR #337. *)
       config "prefer_backend_uniformity";

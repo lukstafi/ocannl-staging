@@ -73,13 +73,6 @@ let probe_cache_dir =
    so the key of the probes that RUN the compiler is built from it, not the other way round. *)
 let compiler_command_ref : (unit -> string) ref = ref (fun () -> "")
 
-(* The identity of the compiler EXECUTABLE, for the probe-cache key below (Codex P1 on PR #337). An
-   in-place toolchain upgrade leaves the command name, the flags and PATH unchanged, so keyed on
-   those alone every cached probe would keep answering for the old compiler indefinitely — the
-   target fingerprint most absurdly of all, since noticing exactly this is its job. Resolved by
-   walking PATH in process: asking anything would spend the subprocess the cache exists to save.
-   Size and mtime, not a version string, for the same reason; an unresolvable command degrades to
-   its spelling, which is what the key held before. *)
 (* Whitespace-separated tokens, honoring quotes: the command is spelled for a shell, so a path
    containing spaces arrives quoted and splitting on the first space would fingerprint a fragment. *)
 let shell_tokens command =
@@ -118,13 +111,21 @@ let resolve_executable token =
           Some (Printf.sprintf "%s:%d:%.0f" path st.Unix.st_size st.Unix.st_mtime)
       | _ -> None)
 
+(* The identity of the compiler EXECUTABLE, for the probe-cache key below (Codex P1 on PR #337). An
+   in-place toolchain upgrade leaves the command name, the flags and PATH unchanged, so keyed on
+   those alone every cached probe would keep answering for the old compiler indefinitely — the
+   target fingerprint most absurdly of all, since noticing exactly this is its job. Resolved by
+   walking PATH in process: asking anything would spend the subprocess the cache exists to save.
+   Size and mtime, not a version string, for the same reason; an unresolvable command degrades to
+   its spelling, which is what the key held before. *)
+
+(* EVERY token that names an executable, not just the first (Codex P1 on PR #337): the command can
+   be a wrapper — [ccache clang] — where the first token is the one that never changes, and flags
+   simply do not resolve. The residual is a wrapper that names no compiler on its command line (a
+   shell script calling one internally): its own file is fingerprinted, but not what it invokes,
+   which nothing short of running it could see — [cc_backend_probe_cache=false] is the escape hatch
+   there. *)
 let compiler_executable_identity command =
-  (* EVERY token that names an executable, not just the first (Codex P1 on PR #337): the command can
-     be a wrapper — [ccache clang] — where the first token is the one that never changes, and flags
-     simply do not resolve. The residual is a wrapper that names no compiler on its command line (a
-     shell script calling one internally): its own file is fingerprinted, but not what it invokes,
-     which nothing short of running it could see — [cc_backend_probe_cache=false] is the escape
-     hatch there. *)
   match List.filter_map (shell_tokens command) ~f:resolve_executable with
   | [] -> "unresolved:" ^ String.strip command
   | identities -> String.concat ~sep:"|" identities
@@ -269,9 +270,13 @@ let probe_compiles ?(mode = `Compile) ~flags ~data () =
     try
       Stdio.Out_channel.write_all src ~data;
       let compile_only = match mode with `Compile -> "-c " | `Link -> "" in
+      (* Quoted: [temp_file] inherits the system temp directory, which can contain whitespace (a
+         custom TMPDIR, and routinely on Windows), and an unquoted path would split into arguments
+         and fail the probe -- silently, since a failed probe is indistinguishable from a negative
+         answer here (Codex P1 on PR #337). *)
       let cmd =
-        Printf.sprintf "%s %s %s%s -o %s > %s 2>&1" (compiler_command ()) flags compile_only src out
-          log
+        Printf.sprintf "%s %s %s%s -o %s > %s 2>&1" (compiler_command ()) flags compile_only
+          (Stdlib.Filename.quote src) (Stdlib.Filename.quote out) (Stdlib.Filename.quote log)
       in
       Stdlib.Sys.command cmd = 0
     with _ -> false
@@ -608,7 +613,9 @@ let target_fingerprint =
            try
              Stdio.Out_channel.write_all src ~data:"";
              let cmd =
-               Printf.sprintf "%s %s -dM -E %s > %s 2> %s" (compiler_command ()) flags src out log
+               Printf.sprintf "%s %s -dM -E %s > %s 2> %s" (compiler_command ()) flags
+                 (Stdlib.Filename.quote src) (Stdlib.Filename.quote out)
+                 (Stdlib.Filename.quote log)
              in
              Stdlib.Sys.command cmd = 0
            with _ -> false
@@ -645,7 +652,19 @@ let codegen_tag () =
       | `Native -> "fp16-native");
       (match parallel_grid_syntax_setting () with
       | `Dispatch -> "grid-dispatch"
-      | `Openmp -> "grid-openmp"
+      | `Openmp ->
+          (* The OpenMP runtime's own controls decide the team every Grid loop executes on, and
+             they move nothing the pool tag is derived from -- that is process affinity (Codex P1 on
+             PR #337). OMP_NUM_THREADS=1 against 16 is the difference between a serial and a
+             parallel machine, which is the whole ranking. Recorded only under [`Openmp], where they
+             mean something: libdispatch reads none of them. *)
+          String.concat ~sep:","
+            ("grid-openmp"
+            :: List.map
+                 [ "OMP_NUM_THREADS"; "OMP_DYNAMIC"; "OMP_THREAD_LIMIT"; "OMP_PROC_BIND";
+                   "OMP_PLACES"; "OMP_MAX_ACTIVE_LEVELS" ]
+                 ~f:(fun var ->
+                   var ^ "=" ^ Option.value (Stdlib.Sys.getenv_opt var) ~default:""))
       | `None -> "grid-none");
       Int.to_string (parallel_grid_chunks_setting ());
       Int.to_string (Lazy.force C_syntax.per_chunk_private_bytes_cap);
@@ -723,8 +742,14 @@ let%track7_sexp c_compile_and_load ~f_path =
     |> List.filter_opt |> String.concat ~sep:" "
   in
   let cmdline : string =
-    Printf.sprintf "%s %s %s -o %s %s > %s 2>&1" (compiler_command ()) f_path compiler_flags libname
-      kernel_link_flags temp_log
+    (* Quoted for the same reason as the probes': these paths sit under the build or the system temp
+       directory, either of which can contain whitespace, and an unquoted one splits into arguments
+       and fails every compile with a "this is a bug in OCANNL" report against a command the shell
+       never saw whole. *)
+    Printf.sprintf "%s %s %s -o %s %s > %s 2>&1" (compiler_command ())
+      (Stdlib.Filename.quote f_path) compiler_flags (Stdlib.Filename.quote libname)
+      kernel_link_flags
+      (Stdlib.Filename.quote temp_log)
   in
   (* Debug: log the command if debugging is enabled *)
   [%log3 "command", cmdline];
