@@ -824,6 +824,11 @@ that they earn a lookup rather than always-loaded space.
   on it and rejects a line with two, which rules out payload/config values like `-mcpu=native`; a
   setting that needs one gets a word spelling instead (`cc_backend_arch_flags=none`). A value can
   never be the empty string either: empty means "unset" at every source.
+- An OCANNL-linked executable's stdout belongs to the program, not to the library: the config
+  startup chatter (welcome message, `log_config_sourcing` trace, profile banner) and every other
+  library diagnostic go to stderr. That is what lets a tool make stdout a data channel — the
+  benchmark one-JSON-line runners, `tools/fit_envelope.exe`'s config-pasteable fits — without
+  suppression flags. Keep new library-side reporting on stderr.
 - Prefer the minimal targeted fix over speculative hardening: offer hardening separately as an
   option with its costs, don't fold it into the fix.
 - A backend-gated leg must never print a bare `p "<claim>" true` on the backend that cannot run it:

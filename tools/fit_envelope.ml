@@ -13,10 +13,9 @@
    looser bounds. Files from several tuning runs on the same machine can be concatenated or
    passed together — the fit only tightens with more rows.
 
-   Linking [ir] makes this a config consumer like any OCANNL executable, so config startup
-   chatter can land on stdout ahead of the report; [--ocannl_*] flags are left to the config
-   machinery (pass [--ocannl_suppress_welcome_message=true --ocannl_log_config_sourcing=false]
-   for clean redirectable output). *)
+   Linking [ir] makes this a config consumer like any OCANNL executable, so [--ocannl_*] flags
+   are left to the config machinery; its startup chatter goes to stderr, leaving stdout a clean
+   redirectable data channel. *)
 
 open Base
 module Cal = Ir.Cost_model.Calibration

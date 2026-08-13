@@ -83,9 +83,11 @@ Testing notes:
 - `OCANNL_BACKEND` is special-cased by tests; other env vars may not retrigger tests without
   touching sources or cleaning.
 - Tests read `test/config/ocannl_config` and can emit .ll/.c/.cu/.metal into build_files/.
-- The test configs set `log_config_sourcing=false`, so `.expected` files contain no config-lookup
-  banner. Pass `--ocannl_log_config_sourcing=true` (or set it in the config file) to see where
-  each setting a run reads comes from; that output then has to be kept out of `.expected` files.
+- Config startup chatter (the welcome message, the `log_config_sourcing` trace, the profile
+  banner) goes to stderr, so an OCANNL-linked executable's stdout stays a clean data channel and
+  `.expected` goldens (dune captures stdout) never see it. Pass `--ocannl_log_config_sourcing=true`
+  (or set it in the config file) to see where each setting a run reads comes from; the test configs
+  set `log_config_sourcing=false` to keep terminal output quiet.
   Canonical workflow:
   write the test, run `dune build test/<...>.exe.output`, then either
   `cp _build/default/test/<...>.exe.output test/<name>.expected` or `dune promote`. Both

@@ -237,11 +237,11 @@ let read_cmdline_or_env_var n =
   in
   match read_cmdline_var n with
   | Some (result, arg) ->
-      if with_debug then Stdio.printf "Found %s, commandline %s\n%!" result arg;
+      if with_debug then Stdio.eprintf "Found %s, commandline %s\n%!" result arg;
       Some result
   | None ->
       Option.map (read_env_var n) ~f:(fun (result, env_n) ->
-          if with_debug then Stdio.printf "Found %s, environment %s\n%!" result env_n;
+          if with_debug then Stdio.eprintf "Found %s, environment %s\n%!" result env_n;
           result)
 
 (* Originally from the library core.filename_base. *)
@@ -310,7 +310,7 @@ let config_file_args =
         let rec find_up = function
           | [] ->
               if not (suppress_welcome_message ()) then
-                Stdio.printf
+                Stdio.eprintf
                   "\nWelcome to OCANNL! No ocannl_config file found along current path.\n%!";
               ("", [])
           | _ :: tl as rev_dirs -> (
@@ -330,11 +330,11 @@ let config_file_args =
         && not
              (Option.value_map ~default:false ~f:Bool.of_string
              @@ Hashtbl.find result "suppress_welcome_message")
-      then Stdio.printf "\nWelcome to OCANNL! Reading configuration defaults from %s.\n%!" fname;
+      then Stdio.eprintf "\nWelcome to OCANNL! Reading configuration defaults from %s.\n%!" fname;
       result
   | Some _ ->
       if not (suppress_welcome_message ()) then
-        Stdio.printf "\nWelcome to OCANNL! Configuration defaults file is disabled.\n%!";
+        Stdio.eprintf "\nWelcome to OCANNL! Configuration defaults file is disabled.\n%!";
       Hashtbl.create (module String)
 
 let () =
@@ -528,7 +528,7 @@ let active_profile =
           ^ String.concat ~sep:", " (List.map profile_payloads ~f:fst)
       | Some text ->
           if !log_config_sourcing then
-            Stdio.printf "\nOCANNL: using the configuration profile %S, picked via %s.\n%!" name
+            Stdio.eprintf "\nOCANNL: using the configuration profile %S, picked via %s.\n%!" name
               (describe_config_level level);
           (level, name, parse_profile_payload ~name text))
 
@@ -546,12 +546,12 @@ let get_global_arg_with_source ~default ~arg_name:n =
     && not (Hash_set.mem accessed_global_args n)
   in
   if with_debug then
-    Stdio.printf "Retrieving commandline, environment, or config file variable ocannl_%s\n%!" n;
+    Stdio.eprintf "Retrieving commandline, environment, or config file variable ocannl_%s\n%!" n;
   let result, source =
     resolve_config_value ~cmdline:read_cmdline_var ~env:read_env_var
       ~file:(Hashtbl.find config_file_args) ~profile:profile_lookup ~default ~arg_name:n
   in
-  if with_debug then Stdio.printf "%s\n%!" (describe_config_source ~value:result ~default source);
+  if with_debug then Stdio.eprintf "%s\n%!" (describe_config_source ~value:result ~default source);
   Hash_set.add accessed_global_args n;
   (result, source)
 
