@@ -154,7 +154,8 @@ type train_routines =
     so the runner supplies it). Each leg tunes the routine that carries the work: the
     dynamic-loss-scaling legs keep their step SHAPE — the gate is what they measure — so only the
     gradient/fused routine is tuned and the tiny optimizer routine is compiled plainly, from the
-    tuned context so the lineage's compile order is unchanged. *)
+    tuned context so the lineage's compile order is unchanged. The untuned arm is uniform by
+    contrast: every routine of the step goes through the model gate when it is enabled. *)
 let compile_train_step ~tune ~tuned ctx bindings parts =
   (* gh-ocannl-491: the model-picked untuned default (config [model_default_schedule=true]) — run
      the same benchmark with the gate off vs on for the before/after comparison. Every leg's
@@ -170,10 +171,14 @@ let compile_train_step ~tune ~tuned ctx bindings parts =
       (ctx, Plain routine)
   | Host_gated (scaler, checksum, grad_comp, sgd_comp) ->
       let ctx, grad_routine = if tune then tuned ctx grad_comp else untuned ctx grad_comp in
-      (* The optimizer routine stays plainly compiled in both the tuned and untuned arms: it is
-         tiny, it is not what the leg measures, and keeping it out of both search paths leaves the
-         lineage's compile order identical across the gate-off/gate-on comparison. *)
-      let ctx, sgd_routine = Context.compile ctx sgd_comp bindings in
+      (* The optimizer routine is not TUNED — timing it is not what this leg measures, and its
+         plain compile from the tuned context keeps the lineage's compile order unchanged — but it
+         does take the untuned arm's model gate: the leg's reported step time is both routines, so
+         a gate that skipped this one would understate its own treatment (and the config reference
+         defines the gate over a runner's untuned arm, not over a chosen routine of it). *)
+      let ctx, sgd_routine =
+        if tune then Context.compile ctx sgd_comp bindings else untuned ctx sgd_comp
+      in
       (ctx, Host_gate (scaler, checksum, grad_routine, sgd_routine))
   | Device_gated (scaler, wflag, comp, interval) ->
       let ctx, routine = if tune then tuned ctx comp else untuned ctx comp in

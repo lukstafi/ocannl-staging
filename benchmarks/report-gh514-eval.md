@@ -271,12 +271,18 @@ cells are the commands, and the script is deliberately the single place they are
 The D rows of the f16 boxes were measured with the untuned mlp cells dropped to f32 (the
 harness gap above). The driver no longer drops them — with the gate reaching the gated step
 shapes, `cuda f16` now measures the f16 model-vs-default comparison the tables could not — so
-reproducing those rows as tabulated takes the split-precision argument that restores the
-workaround (results land in a `-df32`-suffixed directory of their own):
+rerunning the f32 D cells takes the split-precision argument that restores the workaround
+(results land in a `-df32`-suffixed directory of their own):
 
 ```bash
 benchmarks/gh514_cells.sh cuda f16:f32 ~/ocannl-staging
 ```
+
+That rerun is not bit-for-bit the tabulated cells and is not meant to be: it runs them under
+the class-advisory envelope, because the driver deliberately withholds cross-precision fits (the
+precision-mismatch note above, which also bounds why the mismatch could not have moved those
+picks). Restoring the mismatch is not on offer — a mode that fed an f16 fit to an f32 compile
+would reproduce a defect rather than a result.
 
 Runs behind this report: per box, 8 tuned cells (A, the two B arms of the pruning A/B, five
 budget-5 chains) — counted in the implementation's unit that is **41 `Autotune.tune` searches
@@ -287,4 +293,6 @@ pins every cell's treatment explicitly — the tuned cells enable the search and
 budget where it is not the treatment, the control arms disable their gates, and the gpt cells pin
 `BENCH_TUNE=0` — so an ambient config cannot contaminate the matrix; the original runs predate
 those pins but were executed with all gates at their defaults (off), so the driver reproduces
-exactly what is tabulated above (with the `f16:f32` argument for the f16 boxes' D rows, as above).
+exactly what is tabulated above — except for the two documented deviations, both deliberate and
+both bounded where they are described: the f16 boxes' D cells (the `f16:f32` argument) and the
+class-advisory envelope those cells now run under.
