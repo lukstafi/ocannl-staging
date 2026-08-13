@@ -461,6 +461,7 @@ module type Backend = sig
     ?name:string ->
     ?lowered_transform:(Low_level.optimized -> Low_level.optimized) ->
     ?lowered_transforms:(Low_level.optimized -> Low_level.optimized list) ->
+    ?prelowered:Low_level.optimized ->
     Indexing.unit_bindings ->
     Assignments.comp ->
     code
@@ -473,7 +474,19 @@ module type Backend = sig
       {!Schedule.fission_scheduled}): the returned segments compile as one fissioned routine and run
       back-to-back on the routine's stream with a device-side event chained at each boundary,
       exactly as {!Schedule.maybe_default_schedules}' segments do. It must return a non-empty list;
-      passing both transforms raises [Invalid_argument]. *)
+      passing both transforms raises [Invalid_argument].
+
+      [prelowered] (gh-ocannl-562, a test seam) replaces this compile's own lowering of [comp] with
+      the given optimized code: it drives codegen, I/O classification, liveness planning and
+      context-node settlement alike, so a hand-built {!Low_level.optimized} becomes executable
+      rather than only analyzable. [comp] is then consulted for nothing but the routine's name (when
+      [name] is omitted) and its context-node/embedded-node bookkeeping — {!Assignments.empty_comp}
+      with an explicit [name] is the usual choice; a caller that wants the routine's nodes settled
+      against a prior context supplies a comp naming them. The record's [optimize_ctx] becomes the
+      linked context's lineage state in place of the fork a real compile would make, so the caller
+      owns its provenance. Everything downstream of lowering is unchanged, including the default
+      schedule annotator — pass [~lowered_transform:Fn.id] to keep hand-built code exactly as
+      written. *)
 
   val compile_batch :
     Low_level.optimize_ctx ->

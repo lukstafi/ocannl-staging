@@ -1,0 +1,9 @@
+phase1: the hand-built read-only node is a routine input: true
+phase1: the written node is a routine output: true
+phase1: executed values match the hand-built formula: true
+phase2: X is classified read-before-write: true
+phase2: X is a routine input: true
+phase2: X is also a routine output: true
+phase2: Y = 2*X_in + 10 (the scope reads preserved the input): true
+phase2: X was overwritten by the sibling scope: true
+prelowered seam: PASS

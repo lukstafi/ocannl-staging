@@ -1,3 +1,17 @@
+## [Unreleased]
+
+### Added
+
+- **Hand-built lowered code can be executed, not only analyzed** (gh-ocannl-562): `Context.compile`
+  and backend `compile` take `?prelowered:Ir.Low_level.optimized`, which replaces the compile's own
+  lowering of the comp. Unlike `?lowered_transform`, which substitutes the codegen input only, the
+  supplied record IS `code.lowered` — it drives I/O classification, liveness planning and the
+  context-buffer delta as well — so a test can seed a hand-built routine's inputs with `set_values`,
+  run it, and compare `get_values` against a reference. This is what lets the executed-parity
+  doctrine reach regressions whose subject is the analysis layer on IR shapes the `Assignments`
+  pipeline never emits; `test/operations/prelowered_seam` pins the sibling-`Local_scope`
+  read-before-write case that motivated it.
+
 ## [1.0] -- 2026-08-13
 
 > Release note: theme — advanced compiler tiers and schedule-quality follow-through. This release
