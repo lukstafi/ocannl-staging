@@ -5,6 +5,7 @@
   base
   stdio
   arrayjit.utils
+  unix
   ppx_here.runtime-lib
   ppx_minidebug.runtime
   arrayjit.ir

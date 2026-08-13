@@ -1098,7 +1098,8 @@
     %{dep:../../arrayjit/lib/assignments.ml}
     %{dep:../../tensor/tensor.ml}
     %{dep:../../tensor/row.ml}
-    %{dep:../../lib/train.ml}))))
+    %{dep:../../lib/train.ml}
+    %{dep:../../lib/persistence.ml}))))
 
 (rule
  (alias runtest)

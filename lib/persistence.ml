@@ -221,6 +221,93 @@ let validate_header header =
   if Set.length unique_ids <> List.length ids then
     failwith "checkpoint contains duplicate tensor IDs"
 
+(** {2 Payload ingestion: mapped or copied (gh-ocannl-467)} *)
+
+(* Whether a payload is wrapped as a mapping of the file instead of being decoded into a fresh host
+   buffer. Off by default on Windows: a mapped view holds the file open there, so a later [save]
+   over the same path fails -- its rename cannot replace a directory entry whose file is mapped --
+   whereas on POSIX the rename leaves the mapped inode alone. *)
+let mmap_by_default =
+  lazy (Utils.get_global_flag ~default:(not Stdlib.Sys.win32) ~arg_name:"checkpoint_load_mmap")
+
+let use_mmap = function Some flag -> flag | None -> Lazy.force mmap_by_default
+
+(* A payload can be mapped when the file's bytes ARE the host buffer's bytes. Padding is the only
+   real disqualifier: a padded node's payload holds just the logical region, which
+   [Nd.read_payload_from_channel] scatters into the padded buffer through [adjust_idx_for_padding].
+   The rest is byte-compatibility bookkeeping: payloads are little-endian while a mapping is read in
+   host order, and the payload has to be exactly the buffer -- which also rejects a header claiming
+   a byte length its dimensions and precision do not add up to. *)
+let is_mappable meta =
+  let numel = Array.fold meta.dims ~init:1 ~f:( * ) in
+  Option.is_none meta.padding
+  && (not Stdlib.Sys.big_endian)
+  && (not (Array.is_empty meta.dims))
+  && meta.byte_length > 0
+  && meta.byte_length = numel * Ops.prec_in_bytes meta.prec
+
+type payload_reader = {
+  path : string;
+  ic : Stdlib.in_channel;
+  data_start : int;
+  mmap : bool;
+  fd : Unix.file_descr option ref;  (** Opened on the first mapped payload, if any. *)
+}
+
+let open_reader ?mmap path =
+  let ic = Stdlib.open_in_bin path in
+  { path; ic; data_start = 0; mmap = use_mmap mmap; fd = ref None }
+
+let close_reader reader =
+  (* The mappings outlive the descriptor they were taken from. *)
+  Option.iter !(reader.fd) ~f:(fun fd -> try Unix.close fd with Unix.Unix_error _ -> ());
+  reader.fd := None
+
+(* The payload extents are checked against the file size up front: mapping past the end of a file is
+   an error worth reporting against the checkpoint rather than a partially-read buffer. *)
+let validate_extents reader header =
+  let file_size = Stdlib.in_channel_length reader.ic in
+  List.iter header.tensors ~f:(fun meta ->
+      if
+        meta.offset < 0 || meta.byte_length < 0
+        || reader.data_start + meta.offset + meta.byte_length > file_size
+      then
+        failwith
+          ("checkpoint " ^ reader.path ^ ": the payload of tensor " ^ meta_name meta
+         ^ " extends past the end of the file"))
+
+(* Which ingestion path each payload took is otherwise invisible -- the two produce equal values by
+   construction -- so it is counted, for tests and for diagnosing an unexpectedly slow load. *)
+let mapped_count = Atomic.make 0
+let copied_count = Atomic.make 0
+let ingestion_counts () = (Atomic.get mapped_count, Atomic.get copied_count)
+
+(** Ingests one tensor's payload: a mapping of the file where that is byte-equivalent, otherwise a
+    fresh buffer decoded from the channel. *)
+let ingest_payload reader ~debug meta =
+  if reader.mmap && is_mappable meta then begin
+    Atomic.incr mapped_count;
+    let fd =
+      match !(reader.fd) with
+      | Some fd -> fd
+      | None ->
+          let fd = Unix.openfile reader.path [ Unix.O_RDONLY ] 0 in
+          reader.fd := Some fd;
+          fd
+    in
+    Nd.map_file_array meta.prec ~dims:meta.dims
+      ~byte_offset:(reader.data_start + meta.offset)
+      fd
+  end
+  else begin
+    Atomic.incr copied_count;
+    let nd = Nd.create_array ~debug meta.prec ~dims:meta.dims ~padding:meta.padding in
+    Stdlib.seek_in reader.ic (reader.data_start + meta.offset);
+    let padding = Option.map ~f:fst meta.padding in
+    Nd.read_payload_from_channel ?padding nd reader.ic meta.byte_length;
+    nd
+  end
+
 (** Compute the byte length for a tensor's logical payload. *)
 let compute_byte_length prec dims padding =
   let n_elems =
@@ -350,7 +437,7 @@ let save ~ctx ~appending ?(alignment = default_alignment) t_set path =
       (try Stdlib.Sys.remove tmp_path with _ -> ());
       raise exn
 
-let load ~ctx ?prefix_namespace path =
+let load ~ctx ?prefix_namespace ?mmap path =
   let prefix_namespace =
     match prefix_namespace with
     | None | Some "" -> None
@@ -365,12 +452,14 @@ let load ~ctx ?prefix_namespace path =
     | None -> meta_namespace meta
     | Some p -> p ^ "__" ^ meta_namespace meta
   in
-  let ic = Stdlib.open_in_bin path in
+  let reader = open_reader ?mmap path in
+  let ic = reader.ic in
   let result =
     match
       let header = read_header ic in
       validate_header header;
-      let data_start = Stdlib.pos_in ic in
+      let reader = { reader with data_start = Stdlib.pos_in ic } in
+      validate_extents reader header;
       (* Pre-check: verify no ID clashes before creating anything *)
       List.iter header.tensors ~f:(fun meta ->
           match Tn.find_namespaced ~namespace:(target_namespace meta) ~id:meta.id with
@@ -383,14 +472,7 @@ let load ~ctx ?prefix_namespace path =
       let max_id = ref (-1) in
       let loaded =
         List.map header.tensors ~f:(fun meta ->
-            (* Create ndarray *)
-            let nd =
-              Nd.create_array ~debug:"loaded" meta.prec ~dims:meta.dims ~padding:meta.padding
-            in
-            (* Seek and read payload *)
-            Stdlib.seek_in ic (data_start + meta.offset);
-            let padding = Option.map ~f:fst meta.padding in
-            Nd.read_payload_from_channel ?padding nd ic meta.byte_length;
+            let nd = ingest_payload reader ~debug:"loaded" meta in
             (* Create the tnode (no host data is stored on it); register the loaded buffer so it is
                uploaded into the context below (gh-ocannl-333). *)
             let tn, init =
@@ -412,22 +494,26 @@ let load ~ctx ?prefix_namespace path =
       (ctx, Set.of_list (module Tn) (List.map loaded ~f:fst))
     with
     | result ->
+        close_reader reader;
         Stdlib.close_in ic;
         result
     | exception exn ->
+        close_reader reader;
         Stdlib.close_in_noerr ic;
         raise exn
   in
   result
 
-let restore ~ctx t_set path =
+let restore ~ctx ?mmap t_set path =
   if Set.is_empty t_set then ctx
   else begin
-    let ic = Stdlib.open_in_bin path in
+    let reader = open_reader ?mmap path in
+    let ic = reader.ic in
     match
       let header = read_header ic in
       validate_header header;
-      let data_start = Stdlib.pos_in ic in
+      let reader = { reader with data_start = Stdlib.pos_in ic } in
+      validate_extents reader header;
       (* Build lookup map *)
       let file_tensors =
         Map.of_alist_exn (module String) (List.map header.tensors ~f:(fun m -> (meta_key m, m)))
@@ -455,20 +541,17 @@ let restore ~ctx t_set path =
                 | _ -> false
               in
               if not padding_equal then failwith ("restore: padding mismatch for tensor " ^ Tn.id tn);
-              (* Read the payload into a fresh host buffer and upload it into the context's device
-                 buffer (gh-ocannl-333). *)
-              let nd =
-                Nd.create_array ~debug:"restored" meta.prec ~dims:meta.dims ~padding:meta.padding
-              in
-              Stdlib.seek_in ic (data_start + meta.offset);
-              let padding = Option.map ~f:fst meta.padding in
-              Nd.read_payload_from_channel ?padding nd ic meta.byte_length;
+              (* Ingest the payload as a host buffer and upload it into the context's device buffer
+                 (gh-ocannl-333). *)
+              let nd = ingest_payload reader ~debug:"restored" meta in
               Context.from_host ctx tn nd)
     with
     | ctx ->
+        close_reader reader;
         Stdlib.close_in ic;
         ctx
     | exception exn ->
+        close_reader reader;
         Stdlib.close_in_noerr ic;
         raise exn
   end

@@ -48,4 +48,22 @@ Caught: restore: padding mismatch for tensor n0
   id=0 values=[1.0; 2.0; 3.0]
   id=1 values=[1.0; 2.0; 3.0; 4.0; 5.0]
   id=2 values=[7.0]
+=== Test 13: Mapped vs copied payloads ===
+  load ~mmap:false ingested 0 payloads by mapping, 12 by copying
+  load ~mmap:true ingested 11 payloads by mapping, 1 by copying
+  single: 1.0; 2.0; 32.0; 5.0 (mapped identical)
+  double: 1.0; 2.0; 32.0; 5.0 (mapped identical)
+  half: 1.0; 2.0; 32.0; 5.0 (mapped identical)
+  bfloat16: 1.0; 2.0; 32.0; 5.0 (mapped identical)
+  byte: 1.0; 2.0; 32.0; 5.0 (mapped identical)
+  fp8: 1.0; 2.0; 32.0; 5.0 (mapped identical)
+  uint16: 1.0; 2.0; 32.0; 5.0 (mapped identical)
+  int32: 1.0; 2.0; 32.0; 5.0 (mapped identical)
+  uint32: 1.0; 2.0; 32.0; 5.0 (mapped identical)
+  int64: 1.0; 2.0; 32.0; 5.0 (mapped identical)
+  uint64: 1.0; 2.0; 32.0; 5.0 (mapped identical)
+  padded/single: 4.0; 5.0; 6.0; 0.0 (mapped identical)
+  restored with mapping (1 mapped): [1.0; 2.0; 32.0; 5.0]
+=== Test 14: Truncated checkpoint ===
+Caught a payload-past-end-of-file failure: true
 === All persistence tests completed ===
