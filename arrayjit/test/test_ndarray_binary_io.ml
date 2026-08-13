@@ -27,7 +27,15 @@ let test_round_trip_prec prec_name prec init_f =
   Stdlib.close_in ic;
   (* Compare using exact byte comparison *)
   if Nd.payloads_equal nd1 nd2 then Stdio.printf "PASS: %s\n" prec_name
-  else Stdio.printf "FAIL: %s\n" prec_name
+  else Stdio.printf "FAIL: %s\n" prec_name;
+  (* The mapped read (gh-ocannl-467) reinterprets the payload bytes in place instead of decoding
+     them element by element. That the two agree is the whole premise of mapped checkpoint loading:
+     each precision's payload encoding has to be its in-memory representation. *)
+  let fd = Unix.openfile tmp_file [ Unix.O_RDONLY ] 0 in
+  let nd3 = Nd.map_file_array prec ~dims ~byte_offset:0 fd in
+  Unix.close fd;
+  if Nd.payloads_equal nd1 nd3 then Stdio.printf "PASS: %s mapped\n" prec_name
+  else Stdio.printf "FAIL: %s mapped\n" prec_name
 
 let test_padded () =
   let prec = Ops.single in
@@ -58,6 +66,30 @@ let test_padded () =
   if Nd.payloads_equal ~padding:padding_arr nd1 nd2 then Stdio.printf "PASS: padded\n"
   else Stdio.printf "FAIL: padded\n"
 
+(* A payload does not start at the beginning of the file, and its offset is not page aligned: the
+   runtime maps from the enclosing page boundary and offsets the data pointer, so any offset works
+   (which is why checkpoint alignment is about SIMD-friendly pointers, not about mappability). *)
+let test_mapped_at_offset () =
+  let prec = Ops.double in
+  let dims = [| 5 |] in
+  let nd1 = Nd.create_array ~debug:"offset" prec ~dims ~padding:None in
+  for i = 0 to 4 do
+    Nd.set_from_float nd1 [| i |] (Float.of_int i *. 1.5)
+  done;
+  let path = Stdlib.Filename.temp_file "ndarray_map_offset" ".bin" in
+  let oc = Stdlib.open_out_bin path in
+  let byte_offset = 7 in
+  Stdlib.output_string oc (String.make byte_offset 'x');
+  let _n : int = Nd.write_payload_to_channel nd1 oc in
+  Stdlib.close_out oc;
+  let fd = Unix.openfile path [ Unix.O_RDONLY ] 0 in
+  let nd2 = Nd.map_file_array prec ~dims ~byte_offset fd in
+  Unix.close fd;
+  (* The mapping outlives the descriptor it was taken from, and the file it was taken from. *)
+  Stdlib.Sys.remove path;
+  if Nd.payloads_equal nd1 nd2 then Stdio.printf "PASS: mapped at unaligned offset\n"
+  else Stdio.printf "FAIL: mapped at unaligned offset\n"
+
 let () =
   (* Test each precision type *)
   test_round_trip_prec "Byte" Ops.byte (fun nd idx i ->
@@ -87,5 +119,6 @@ let () =
       Nd.set_from_float nd idx (Float.of_int ((i * 7) + 3)));
   (* Test padded tensor *)
   test_padded ();
+  test_mapped_at_offset ();
   (* Clean up *)
   Stdlib.Sys.remove tmp_file
