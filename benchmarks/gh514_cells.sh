@@ -36,6 +36,7 @@ mlp() {
   echo "=== cell $name start $(date +%T) ==="
   BENCH_FIXTURE=fixtures/mlp_wide.safetensors BENCH_TUNE=$tune BENCH_TUNE_REPORT=1 \
     BENCH_PRECISION=$prec BENCH_STATIC_SCALE=0 BENCH_GATE_INTERVAL=0 BENCH_MATERIALIZE=0 \
+    BENCH_DEBUG=0 BENCH_TWIN_PLACEMENT=auto BENCH_PRESEED_TWINS=0 \
     ${PIN[@]+"${PIN[@]}"} "$EXE" --ocannl_backend="$BK" --ocannl_autotune_log=true \
     --ocannl_tf32_matmuls=false --ocannl_fp16_arithmetic=false \
     --ocannl_narrow_compute_f32=false \
@@ -49,7 +50,7 @@ gpt() {
   local name=$1 st; shift
   echo "=== cell $name start $(date +%T) ==="
   BENCH_FIXTURE=fixtures/gpt2_mini.safetensors BENCH_TUNE=0 BENCH_PRECISION=$PREC \
-    BENCH_STATIC_SCALE=0 BENCH_GATE_INTERVAL=0 BENCH_MATERIALIZE=0 \
+    BENCH_STATIC_SCALE=0 BENCH_GATE_INTERVAL=0 BENCH_MATERIALIZE=0 BENCH_DEBUG=0 \
     ${PIN[@]+"${PIN[@]}"} "$GPT" --ocannl_backend="$BK" --ocannl_autotune_log=true \
     --ocannl_tf32_matmuls=false --ocannl_fp16_arithmetic=false \
     --ocannl_narrow_compute_f32=false "$@" \
@@ -60,7 +61,7 @@ gpt() {
 }
 
 # A: tuned baseline + calibration ledger (pruning pinned off — it is the B cells' treatment).
-mlp A 1 "$PREC" --ocannl_autotune_search=true --ocannl_autotune_keep_fraction=1 \
+mlp A 1 "$PREC" --ocannl_autotune_search=true --ocannl_autotune_keep_fraction=1 --ocannl_autotune_repeats=3 \
   --ocannl_tune_inline_flips=0 --ocannl_autotune_bound_pruning=false \
   --ocannl_autotune_calibration_file="$OUT/calib.tsv"
 # Fit the envelope from A's rows; later cells pin the fitted peaks.
@@ -79,23 +80,26 @@ DPEAKS=()
 [ "$DPREC" = "$PREC" ] && DPEAKS=(${PEAKS[@]+"${PEAKS[@]}"})
 # B: tuned, measured-incumbent bound pruning off vs on, fitted envelope.
 mlp B-off 1 "$PREC" ${PEAKS[@]+"${PEAKS[@]}"} --ocannl_autotune_search=true \
-  --ocannl_autotune_keep_fraction=1 \
+  --ocannl_autotune_keep_fraction=1 --ocannl_autotune_repeats=3 \
   --ocannl_tune_inline_flips=0 --ocannl_autotune_bound_pruning=false
 mlp B-on 1 "$PREC" ${PEAKS[@]+"${PEAKS[@]}"} --ocannl_autotune_search=true \
-  --ocannl_autotune_keep_fraction=1 \
+  --ocannl_autotune_keep_fraction=1 --ocannl_autotune_repeats=3 \
   --ocannl_tune_inline_flips=0 --ocannl_autotune_bound_pruning=true
 # C: the flip chain at budget 5, legacy cost ordering vs enablement ordering, two replicates;
 # then enablement + bound pruning.
 for r in 1 2; do
   mlp C-cost-$r 1 "$PREC" ${PEAKS[@]+"${PEAKS[@]}"} --ocannl_autotune_search=true \
-    --ocannl_autotune_keep_fraction=1 --ocannl_autotune_bound_pruning=false \
+    --ocannl_autotune_keep_fraction=1 --ocannl_autotune_repeats=3 \
+    --ocannl_autotune_bound_pruning=false \
     --ocannl_tune_inline_flips=5 --ocannl_tune_flip_ordering=cost
   mlp C-enab-$r 1 "$PREC" ${PEAKS[@]+"${PEAKS[@]}"} --ocannl_autotune_search=true \
-    --ocannl_autotune_keep_fraction=1 --ocannl_autotune_bound_pruning=false \
+    --ocannl_autotune_keep_fraction=1 --ocannl_autotune_repeats=3 \
+    --ocannl_autotune_bound_pruning=false \
     --ocannl_tune_inline_flips=5 --ocannl_tune_flip_ordering=enablement
 done
 mlp C-enab-bp 1 "$PREC" ${PEAKS[@]+"${PEAKS[@]}"} --ocannl_autotune_search=true \
-  --ocannl_autotune_keep_fraction=1 --ocannl_tune_inline_flips=5 \
+  --ocannl_autotune_keep_fraction=1 --ocannl_autotune_repeats=3 \
+  --ocannl_tune_inline_flips=5 \
   --ocannl_tune_flip_ordering=enablement --ocannl_autotune_bound_pruning=true
 # D: the untuned regime — default pipeline vs model_default, +placements, +lattice. At the
 # requested precision except f16 -> f32 (see the header note); each arm pins the gates the

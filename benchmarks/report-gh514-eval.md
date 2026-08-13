@@ -166,7 +166,10 @@ refutes (the very premise the tuned cells measure), so the lattice behind it is 
 the placement walk then prices all 32 leaves (375 family evaluations, 375 unbuildable sketch
 attempts) without surfacing a single buildable tensorized candidate. Reaching the family
 untuned needs the placement leaves' lowerings to make the twins' materialization pay off in
-the *model*, which a compute-only envelope cannot see (the traffic term again).
+the *model* — and under the envelope in force (fitted compute + class-bandwidth legs) the
+twins' traffic deltas are the same microseconds-against-a-0.1-ms-slack mismatch as the
+placement walk's, so no leaf can displace the default on price while the family it would
+unlock stays unbuildable.
 
 That the model-argmin *is* the default on these cells is the honest null: `gpt2_mini`'s
 segments are memory-bound (where the default preset is provably optimal at the floor —
@@ -247,13 +250,13 @@ One driver per box (`benchmarks/gh514_cells.sh <backend> <precision> <repo-root>
 e.g. `gh514_cells.sh hip bf16 ~/ocannl-staging taskset -c 0-15`); the hip headline cell alone:
 
 ```bash
-cd benchmarks && BENCH_FIXTURE=fixtures/mlp_wide.safetensors BENCH_TUNE=1 BENCH_TUNE_REPORT=1 BENCH_PRECISION=bf16 taskset -c 0-15 ../_build/default/benchmarks/runners/ocannl/bench_mlp.exe --ocannl_backend=hip --ocannl_autotune_log=true --ocannl_autotune_cache_dir=$(mktemp -d) --ocannl_autotune_search=true --ocannl_autotune_keep_fraction=1 --ocannl_model_peak_flops=1.485901e+12 --ocannl_tune_inline_flips=5 --ocannl_tune_flip_ordering=enablement
+cd benchmarks && BENCH_FIXTURE=fixtures/mlp_wide.safetensors BENCH_TUNE=1 BENCH_TUNE_REPORT=1 BENCH_PRECISION=bf16 BENCH_MATERIALIZE=0 BENCH_DEBUG=0 taskset -c 0-15 ../_build/default/benchmarks/runners/ocannl/bench_mlp.exe --ocannl_backend=hip --ocannl_autotune_log=true --ocannl_autotune_cache_dir=$(mktemp -d) --ocannl_autotune_search=true --ocannl_autotune_keep_fraction=1 --ocannl_model_peak_flops=1.485901e+12 --ocannl_tune_inline_flips=5 --ocannl_tune_flip_ordering=enablement
 ```
 
 with `--ocannl_tune_flip_ordering=cost` as the baseline arm, and the untuned cells as
 
 ```bash
-cd benchmarks && BENCH_FIXTURE=fixtures/mlp_wide.safetensors BENCH_TUNE=0 BENCH_PRECISION=bf16 ../_build/default/benchmarks/runners/ocannl/bench_mlp.exe --ocannl_backend=hip --ocannl_autotune_log=true --ocannl_model_peak_flops=1.485901e+12 --ocannl_model_default_schedule=true --ocannl_model_default_placements=5
+cd benchmarks && BENCH_FIXTURE=fixtures/mlp_wide.safetensors BENCH_TUNE=0 BENCH_PRECISION=bf16 BENCH_MATERIALIZE=0 BENCH_DEBUG=0 ../_build/default/benchmarks/runners/ocannl/bench_mlp.exe --ocannl_backend=hip --ocannl_autotune_log=true --ocannl_model_peak_flops=1.485901e+12 --ocannl_model_default_schedule=true --ocannl_model_default_placements=5
 ```
 
 Runs behind this report: per box, 8 tuned cells (A, the two B arms of the pruning A/B, five
