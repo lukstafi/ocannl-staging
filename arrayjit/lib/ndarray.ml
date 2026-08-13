@@ -472,8 +472,9 @@ let%track7_sexp create_array ~debug:(_debug : string) (prec : Ops.prec) ~(dims :
     =
   (* dims already includes padding if padding is specified *)
   let size_in_bytes : int = Array.fold dims ~init:1 ~f:( * ) * Ops.prec_in_bytes prec in
+  (* [used_memory] is a live gauge, so collecting the array must give the bytes back. *)
   let%track7_sexp finalizer (_result : t) =
-    let _ : int = Atomic.fetch_and_add used_memory size_in_bytes in
+    let _ : int = Atomic.fetch_and_add used_memory ~-size_in_bytes in
     ()
   in
   let f prec = as_array prec @@ create_bigarray prec ~dims ~padding in
@@ -517,11 +518,8 @@ let reshape nd dims =
     efficiency is a concern. *)
 let%track7_sexp init_array ~debug:(_debug : string) (prec : Ops.prec) ~(dims : int array) ~padding
     ~(f : int array -> float) =
-  let size_in_bytes : int = Array.fold dims ~init:1 ~f:( * ) * Ops.prec_in_bytes prec in
-  let%track7_sexp finalizer (_result : t) =
-    let _ : int = Atomic.fetch_and_add used_memory size_in_bytes in
-    ()
-  in
+  (* No [used_memory] bookkeeping here: [create_array] already accounts for the allocation and
+     registers the finalizer that gives the bytes back. *)
   let result = create_array ~debug:_debug prec ~dims ~padding in
   (* Initialize the array using the provided function *)
   let padding_arr = match padding with None -> None | Some (padding_arr, _) -> Some padding_arr in
@@ -537,8 +535,6 @@ let%track7_sexp init_array ~debug:(_debug : string) (prec : Ops.prec) ~(dims : i
       done
   in
   init_indices [] 0;
-  Stdlib.Gc.finalise finalizer result;
-  let _ : int = Atomic.fetch_and_add used_memory size_in_bytes in
   result
 
 (** [convert prec src] is a fresh ndarray of precision [prec] with [src]'s dimensions and values
@@ -549,6 +545,13 @@ let convert prec src =
   if Ops.equal_prec prec (get_prec src) then src
   else init_array ~debug:"convert" prec ~dims:(dims src) ~padding:None ~f:(get_as_float src)
 
+(** Bytes currently held by live host arrays created through {!create_array} (and therefore
+    {!init_array}, which delegates to it). A {e live gauge}, not a cumulative total: the allocation
+    adds and the array's finalizer subtracts, so the count returns to its earlier value once the
+    arrays are collected. Since finalizers only run at collection time, a reading right after
+    dropping the arrays can still include them -- force a {!Stdlib.Gc.full_major} first. Arrays
+    obtained by other means -- {!map_file_array}, {!reshape} -- are not counted; the backends' own
+    device-side counters are separate (see {!Context.get_used_memory}). *)
 let get_used_memory () = Atomic.get used_memory
 
 (** {2 *** Printing ***} *)
