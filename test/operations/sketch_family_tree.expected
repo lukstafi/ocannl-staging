@@ -152,6 +152,7 @@ pipeline = tensorized
       * gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
     twin = depth2
       * gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:2
+  geometry = lattice  [excluded: beyond the curated menu (search economy): the staged tile-size lattice; config model_default_geometry_lattice lifts it for the model-argmin search]
 last leaf's decision path: pipeline=tensorized > geometry=bm32 bn32 bk16 > twin=depth2
 tree leaves = flat enumeration: true
 == awkward 20^3 gpu: 6 seeds ==
@@ -168,6 +169,7 @@ tree leaves = flat enumeration: true
   pipeline=tensorized > geometry=bm16 bn32 bk32 > twin=depth2: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)
   pipeline=tensorized > geometry=bm32 bn32 bk32 > twin=depth2: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)
   pipeline=tensorized > geometry=bm32 bn32 bk16 > twin=depth2: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)
+  pipeline=tensorized > geometry=lattice: beyond the curated menu (search economy): the staged tile-size lattice; config model_default_geometry_lattice lifts it for the model-argmin search
 == awkward 20^3 cpu: 8 seeds ==
 tree leaves = flat enumeration: true
 -- refuted --
@@ -222,6 +224,8 @@ tree leaves = flat enumeration: true
   pipeline=tensorized > geometry=bm32 bn32 bk32: staged operand tiles need 8192 bytes of workgroup memory, exceeding the 6144-byte limit
   pipeline=tensorized > geometry=bm32 bn32 bk16 > twin=depth2: staged operand tiles need 8192 bytes of workgroup memory at pipeline depth 2, exceeding the 6144-byte limit
   pipeline=tensorized > geometry=bm32 bn32 bk16 > twin=depth3: pipeline depth 3 is outside the implemented range 1..2 (Schedule.apply_stage)
+-- excluded --
+  pipeline=tensorized > geometry=lattice: beyond the curated menu (search economy): the staged tile-size lattice; config model_default_geometry_lattice lifts it for the model-argmin search
 == wide-N cpu: 10 seeds ==
 tree leaves = flat enumeration: true
 -- refuted --
@@ -251,3 +255,20 @@ cost bound fathoms above a nested Unknown: best=good@3.0 stats=((st_expanded 1) 
  (st_excluded 0) (st_unknown 0))
 path-dependent bound fathoms the doubly-committed subtree: best=mk@6.0 stats=((st_expanded 3) (st_scored 3) (st_unscored 0) (st_fathomed 1) (st_refuted 0)
  (st_excluded 0) (st_unknown 0))
+== lattice (64^3, tile 8x8x8) ==
+curated leaves 16, lifted leaves 80 (+64 lattice singletons), depth 3 -> 8
+the lattice exclusion carries the lift instructions: true
+certain-traffic increments along paths:
+  curated staged bm16 bn32 bk32                  -> 12288 bytes
+  curated unstaged bm16 bn32 bk0                 -> 0 bytes
+  lattice box bm 8..32, bk open                  -> 2560 bytes
+  lattice box bm=32, bk 16..32                   -> 8192 bytes
+  lattice singleton bm=32 bk=64                  -> 32768 bytes
+lifted search at incumbent 6000: 33 expanded, 13 scored, 26 fathomed, 0 refuted, 0 excluded
+== lattice under a 2048-byte workgroup-memory cap ==
+surviving lattice leaves 4; box-level refutations 13, e.g.:
+  pipeline=tensorized > geometry=lattice > bm=bm 8..32 > bm=bm 8..16 > bm=bm=8 > bk=bk 8..32 > bk=bk 8..16 > bk=bk=16: staged operand tiles need 2560 bytes of workgroup memory, exceeding the 2048-byte limit
+  pipeline=tensorized > geometry=lattice > bm=bm 8..32 > bm=bm 8..16 > bm=bm=8 > bk=bk 8..32 > bk=bk 24..32: staged operand tiles need 3840 bytes of workgroup memory, exceeding the 2048-byte limit
+== coarse canonical mma_tile 16^3, format tile 8^3 ==
+lattice leaves 64 (8-step multiples of both axes: true)
+  open-corner lattice increment (format 8s, not canonical 16s) -> 2560 bytes
