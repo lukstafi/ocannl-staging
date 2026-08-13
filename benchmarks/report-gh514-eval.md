@@ -228,7 +228,15 @@ loss-scale-gated (`Host_gated`/`Device_gated`), and those arms of
 through it (bf16 keeps `Plain_step`, so hip is unaffected). The f16 D cells therefore measured
 nothing about the model (their variants are identical executions; metal's late-campaign f16
 "D" cells also drifted thermally), and the metal/cuda untuned comparisons above are f32
-reruns. Extending the gate to the gated arms is a one-line follow-up in the harness.
+reruns. The gap is now closed — `compile_train_step` routes *every* untuned compile of a step
+through `Autotune.model_default`, the `Host_gated` gradient and optimizer routines and the
+`Device_gated` fused routine alongside `Plain_step`'s. That the optimizer routine is in scope
+matters for reading a future f16 D cell: the leg's step time is both routines, so both compiles'
+model-selected schedules are part of the treatment (only the *tuned* arm keeps that routine on a
+plain compile, since timing it is not what the leg measures). The driver's D cells accordingly
+run at the requested precision instead of dropping to f32 (see Reproduction — a `f16:f32`
+precision argument restores the workaround). The f32 reruns reported above stand as measured;
+f16 model-vs-default cells are measurable from here on without it.
 
 ## Where the beam remains competitive
 
@@ -262,14 +270,31 @@ To reproduce a single cell — say the hip budget-5 enablement headline — run 
 that cell's `.out`/`.err`, or lift the cell's exact, fully-pinned argv from the script: the
 cells are the commands, and the script is deliberately the single place they are maintained.
 
+The D rows of the f16 boxes were measured with the untuned mlp cells dropped to f32 (the
+harness gap above). The driver no longer drops them — with the gate reaching the gated step
+shapes, `cuda f16` now measures the f16 model-vs-default comparison the tables could not — so
+rerunning the f32 D cells takes the split-precision argument that restores the workaround
+(results land in a `-df32`-suffixed directory of their own):
+
+```bash
+benchmarks/gh514_cells.sh cuda f16:f32 ~/ocannl-staging
+```
+
+That rerun is not bit-for-bit the tabulated cells and is not meant to be: it runs them under
+the class-advisory envelope, because the driver deliberately withholds cross-precision fits (the
+precision-mismatch note above, which also bounds why the mismatch could not have moved those
+picks). Restoring the mismatch is not on offer — a mode that fed an f16 fit to an f32 compile
+would reproduce a defect rather than a result.
+
 Runs behind this report: per box, 8 tuned cells (A, the two B arms of the pruning A/B, five
 budget-5 chains) — counted in the implementation's unit that is **41 `Autotune.tune` searches
 each** (every cell runs both placement arms, and each of the five chains measures its five
 flips as full searches) — plus the untuned compiles (7 per box; an untabulated supplemental hip f32 battery — see the untuned section — adds 4 more there) and the fit; serial per box, all three boxes
 in parallel, ~8 min (cuda) to ~25 min (metal) wall each. The checked-in driver additionally
 pins every cell's treatment explicitly — the tuned cells enable the search and zero the flip
-budget where it is not the treatment, the control arms disable their gates, the gpt cells pin
-`BENCH_TUNE=0`, and the untuned mlp cells drop to f32 only under f16 (bf16 keeps the gate
-reachable) — so an ambient config cannot contaminate the matrix; the original runs predate
+budget where it is not the treatment, the control arms disable their gates, and the gpt cells pin
+`BENCH_TUNE=0` — so an ambient config cannot contaminate the matrix; the original runs predate
 those pins but were executed with all gates at their defaults (off), so the driver reproduces
-exactly what is tabulated above.
+exactly what is tabulated above — except for the two documented deviations, both deliberate and
+both bounded where they are described: the f16 boxes' D cells (the `f16:f32` argument) and the
+class-advisory envelope those cells now run under.
