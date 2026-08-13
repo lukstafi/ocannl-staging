@@ -150,7 +150,7 @@ let () =
       SC.version = SC.entry_version;
       backend;
       numerics = SC.numerics_tag ();
-      codegen = Some (SC.codegen_tag ?backend_tag:limits.Ir.Backend_intf.codegen_tag ());
+      codegen = Some (SC.codegen_tag ~limits ());
       source_digest = SC.digest canon;
       saved = [];
       segments = None;

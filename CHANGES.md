@@ -40,7 +40,10 @@
   verbosity bump alone never churns keys) and the compiling backend's own codegen knobs, which it
   reports as `hardware_limits.codegen_tag` — for `cc`, the compiler command and its flags,
   `cc_vector_bytes`, `cc_fp16_arithmetic`, `cc_parallel_grid` / `cc_parallel_chunks`,
-  `cc_grid_private_bytes_cap`; for CUDA and HIP, the graph-capture regime. These are read after the lowered code the
+  `cc_grid_private_bytes_cap`; for CUDA and HIP, the graph-capture regime. The component also
+  hashes the whole `hardware_limits` record (the cache key otherwise named only the backend, so two
+  GPUs of one backend shared every key) and, on `cc`, a fingerprint of the toolchain's predefined
+  macros under the configured flags (`-mcpu=native` is a spelling, not a target). These are read after the lowered code the
   digest names, so a winner crowned under one of them used to replay under another — the shape of
   gh-ocannl-568. Existing cache entries miss once and are re-tuned. `Schedule_cache.cache_key` now
   takes the whole `hardware_limits` record instead of one optional tag per component.

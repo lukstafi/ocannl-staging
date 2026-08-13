@@ -433,11 +433,19 @@ let numerics_tag () =
    backend-independent ones handled here, and the backend's own, which it reports through
    [hardware_limits.codegen_tag] because only it knows which of its knobs reach its codegen. Neither
    layer is a property of the lowered code, so neither can reach {!digest}. *)
-let codegen_tag ?backend_tag () =
+let codegen_tag ~(limits : Backend_intf.hardware_limits) () =
   let gate name value = if value then name else "no-" ^ name in
   let config name = gate name (Utils.get_global_flag ~default:false ~arg_name:name) in
   let parts =
     [
+      (* The whole limits record, not just the backend's [codegen_tag] field (Codex P1 on PR #337):
+         [backend] is the backend NAME, so without this two GPUs of one backend -- differing in
+         compute capability, mma formats, shared-memory capacity, thread limits -- share every key
+         while generating, rendering and timing candidates differently. The record is exactly the
+         device description schedule construction already consults, so hashing it keeps the key as
+         discriminating as the decisions it stands for, and a device's own [codegen_tag] rides
+         along in it. *)
+      Sexp.to_string (Backend_intf.sexp_of_hardware_limits limits);
       (if Utils.settings.large_models then "wide-index" else "narrow-index");
       (* The EFFECTIVE predicates, not the raw flags (Codex P1 on PR #337): both gates additionally
          require [log_level > 1], so hashing the flags alone would give the logged and the unlogged
@@ -456,7 +464,6 @@ let codegen_tag ?backend_tag () =
          a real change to the emitted C, and to what the C compiler may then assume. Codex P1 on
          PR #337. *)
       config "buffer_aliasing";
-      Option.value backend_tag ~default:"";
     ]
   in
   String.prefix (Stdlib.Digest.to_hex (Stdlib.Digest.string (String.concat ~sep:"\000" parts))) 8
@@ -510,7 +517,7 @@ let cache_key ~(limits : Backend_intf.hardware_limits) canonical ~backend =
     | "digest" -> canonical.digest
     | "backend" -> sanitize backend
     | "numerics" -> "n" ^ numerics_tag ()
-    | "codegen" -> "c" ^ codegen_tag ?backend_tag:limits.codegen_tag ()
+    | "codegen" -> "c" ^ codegen_tag ~limits ()
     (* The worker-pool signature (gh-ocannl-530): CPU crowns do not transfer across pools, so a
        pool change re-tunes instead of replaying. [None] (GPU backends) contributes nothing. *)
     | "pool" -> (

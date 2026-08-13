@@ -353,8 +353,10 @@
 # effective routine-logging and runtime-debug predicates, and the compiling backend's own knobs --
 # for cc the compiler command and flags, cc_vector_bytes, cc_fp16_arithmetic,
 # cc_parallel_grid/chunks, cc_grid_private_bytes_cap; for CUDA and HIP the graph-capture regime:
-# all read AFTER lowering, so they are likewise invisible to the digest, gh-ocannl-572), and the
-# worker-pool signature on CPU
+# all read AFTER lowering, so they are likewise invisible to the digest, gh-ocannl-572, together
+# with the device's hardware limits and, on cc, a fingerprint of the toolchain's predefined macros
+# under the configured flags -- so entries do not transfer between unlike devices or toolchains),
+# and the worker-pool signature on CPU
 # backends (gh-ocannl-530). Runs under different regimes therefore keep separate entries and can
 # share one directory; flipping any of those knobs re-tunes rather than replaying a winner
 # crowned elsewhere. Which key belongs to which component is recorded key by key in

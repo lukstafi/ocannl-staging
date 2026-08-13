@@ -2321,7 +2321,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
   release_baseline_hook := release_baseline;
   let base_digest = SC.digest canon in
   let use_cache = (not (String.is_empty cache_dir)) && SC.complete canon in
-  let codegen_tag = SC.codegen_tag ?backend_tag:limits.Ir.Backend_intf.codegen_tag () in
+  let codegen_tag = SC.codegen_tag ~limits () in
   let key = SC.cache_key ~limits canon ~backend in
   let compile_spec =
     compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu

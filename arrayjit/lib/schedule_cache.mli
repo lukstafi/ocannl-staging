@@ -154,13 +154,17 @@ val numerics_tag : unit -> string
     replaying a tf32-tuned tensorized winner measured 5.9x slower than not tuning at all, its mma
     rendering degraded to the scalar fallback). Hence it enters {!cache_key} and {!entry}. *)
 
-val codegen_tag : ?backend_tag:string -> unit -> string
-(** A filename-safe short digest of the codegen configuration (gh-ocannl-572): the settings a
-    backend consults when it {e renders and compiles} a kernel, which happens after the lowered code
-    that {!digest} names — so, exactly like {!numerics_tag}, they are invisible to the digest while
-    changing the kernel, and a winner crowned under one such regime must not replay under another.
-    Covers the backend-independent ones itself (the index and pool-slot width [large_models], the
-    routine-logging emission); [backend_tag] is the compiling backend's own contribution,
+val codegen_tag : limits:Backend_intf.hardware_limits -> unit -> string
+(** A filename-safe short digest of the codegen environment (gh-ocannl-572): everything consulted
+    when a kernel is {e rendered, compiled or dispatched}, which happens after the lowered code that
+    {!digest} names — so, exactly like {!numerics_tag}, these are invisible to the digest while
+    changing the kernel or what a timing measures, and a winner crowned under one such regime must
+    not replay under another. Three layers: the process-wide gates (the index and pool-slot width
+    [large_models], [buffer_aliasing]'s [restrict] suppression, [prefer_backend_uniformity]'s
+    logging spelling, and the {e effective} routine-logging and runtime-debug predicates, which
+    include the [log_level > 1] threshold so a verbosity bump alone never churns keys); the whole
+    [limits] record, which describes the device candidates are generated, rendered and timed
+    against; and, inside it, the backend's own
     {!Ir.Backend_intf.hardware_limits.codegen_tag}. *)
 
 type entry = {

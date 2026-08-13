@@ -286,7 +286,13 @@ the retained procedural analyses alongside the affine engine and raises on diver
   (for `cc`: the compiler command and flags, `cc_vector_bytes`, `cc_fp16_arithmetic`,
   `cc_parallel_grid`/`cc_parallel_chunks`, `cc_grid_private_bytes_cap`; for CUDA and HIP the
   graph-capture regime, which moves a fissioned candidate's launch overhead relative to a
-  whole-routine one) — and the CPU worker-pool signature (gh-ocannl-530). Backends hand
+  whole-routine one) — and the CPU worker-pool signature (gh-ocannl-530). The tag also hashes the
+  whole `hardware_limits` record, since `backend` is a backend *name*: two GPUs of one backend
+  differ in compute capability, mma formats and memory limits, which is what candidate generation
+  and rendering read. On `cc` the toolchain is fingerprinted by its own predefined macros under
+  the configured flags (`-dM -E`), because `-mcpu=native` is a flag *spelling* — two machines
+  targeting different microarchitectures, or one target through two compiler versions, would
+  otherwise share a key. Backends hand
   their components to `cache_key` as the whole `hardware_limits` record, so a component added
   there reaches every call site. Every config key is classified against these components in
   `Utils.config_key_classification` — code-borne (it reaches the digest through the code), keyed

@@ -509,10 +509,52 @@ let parallel_grid_chunks_setting () =
    Resolved values, not raw settings: "auto" means a different thing per machine, and the resolvers
    are already forced by any compile that reaches here (the pool tag alone forces the parallel-grid
    probe). The pool signature itself is a separate key component and is not repeated here. *)
+(* The flags say what was ASKED for; this says what the toolchain will actually do with it (Codex
+   P1 on PR #337). [cc_backend_arch_flags=auto] resolves to the spelling [-mcpu=native], and
+   [compiler_command ()] usually to the word [cc] -- so two machines sharing a cache directory can
+   hold identical keys while targeting different microarchitectures, or the same one through
+   different compiler versions, and one machine's winner poisons the other's measurements. The
+   compiler's own predefined macros under the configured flags fingerprint both at once
+   ([__clang_major__], [__AVX2__], [__ARM_FEATURE_FP16_VECTOR_ARITHMETIC], ...): one subprocess,
+   cached per machine like every other probe. A toolchain that cannot dump them degrades to the
+   flag spelling, which is what the tag had before. *)
+let target_fingerprint =
+  lazy
+    (cached_probe ~name:"target"
+       ~compute:(fun () ->
+         let src = Stdlib.Filename.temp_file "ocannl_cc_probe_" ".c" in
+         let out = Stdlib.Filename.temp_file "ocannl_cc_probe_" ".txt" in
+         let log = Stdlib.Filename.temp_file "ocannl_cc_probe_" ".log" in
+         let flags = String.strip (arch_flags () ^ " " ^ simd_flags ()) in
+         let dumped =
+           try
+             Stdio.Out_channel.write_all src ~data:"";
+             let cmd =
+               Printf.sprintf "%s %s -dM -E %s > %s 2> %s" (compiler_command ()) flags src out log
+             in
+             Stdlib.Sys.command cmd = 0
+           with _ -> false
+         in
+         let fingerprint =
+           if not dumped then None
+           else
+             try
+               let data = Stdio.In_channel.read_all out in
+               (* An empty dump is a compiler that accepted the flags and printed nothing: no
+                  fingerprint, not a fingerprint of nothing. *)
+               if String.is_empty (String.strip data) then None
+               else Some (String.prefix (Stdlib.Digest.to_hex (Stdlib.Digest.string data)) 16)
+             with _ -> None
+         in
+         List.iter [ src; out; log ] ~f:(fun f -> try Stdlib.Sys.remove f with _ -> ());
+         Option.value fingerprint ~default:"no-target-fingerprint")
+       ())
+
 let codegen_tag () =
   let parts =
     [
       compiler_command ();
+      Lazy.force target_fingerprint;
       Int.to_string (optimization_level ());
       Bool.to_string (fast_math_enabled ());
       Option.value (fp_contract_flag ()) ~default:"fp-contract-default";
