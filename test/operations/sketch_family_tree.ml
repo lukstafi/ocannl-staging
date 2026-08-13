@@ -301,7 +301,7 @@ let () =
         ("c", Sspace.Child (lazy (choice "csub" [ ("c1", leafv "c1" 2.) ])));
       ]
   in
-  let bound sub =
+  let bound ~path:_ sub =
     match sub with
     | Sspace.Choice { level = "bsub"; _ } -> Some 2.5
     | Sspace.Choice { level = "usub"; _ } -> Some 100.
@@ -338,5 +338,29 @@ let () =
         );
       ]
   in
-  let bound = function Sspace.Choice { level = "dsub"; _ } -> Some 5. | _ -> None in
-  show_run "cost bound fathoms above a nested Unknown" (Sspace.search ~bound ~score nested)
+  let bound ~path:_ = function Sspace.Choice { level = "dsub"; _ } -> Some 5. | _ -> None in
+  show_run "cost bound fathoms above a nested Unknown" (Sspace.search ~bound ~score nested);
+  (* Path-dependent bounds (gh-ocannl-514, the placement-space search): the bound receives the
+     committed (level, label) vector down to and including the judged child — the partial vector
+     the subtree stands for — so a floor that tightens as commitments accumulate can price the
+     exact node being judged. Here the bound prices by the committed labels alone: committing
+     "mat" costs 4 per level, so the mat/mat subtree (floor 8) is fathomed against the incumbent
+     7 while mat/keep (floor 4) and keep/* (floor 0) are entered. (The fathomed leaf scores 1 —
+     this synthetic bound is deliberately dishonest about it, pinning the mechanics and the
+     documented caveat that an unsound bound prunes true winners.) *)
+  let placementish =
+    choice "n1"
+      [
+        ( "mat",
+          Sspace.Child
+            (lazy (choice "n2" [ ("mat", leafv "mm" 1.); ("keep", leafv "mk" 6.) ])) );
+        ( "keep",
+          Sspace.Child
+            (lazy (choice "n2" [ ("mat", leafv "km" 6.5); ("keep", leafv "kk" 6.9) ])) );
+      ]
+  in
+  let bound ~path _sub =
+    Some (4. *. Float.of_int (List.count path ~f:(fun (_, label) -> String.equal label "mat")))
+  in
+  show_run "path-dependent bound fathoms the doubly-committed subtree"
+    (Sspace.search ~bound ~incumbent:7. ~score placementish)

@@ -698,17 +698,30 @@ let release ctx =
 let placements ctx =
   Backends.query ctx.wrapped { q = (fun _ c -> c.BI.optimize_ctx.Ir.Low_level.placements) }
 
-(* gh-560: the analyze-only entry point — lowering and optimization without backend codegen or
-   linking. [Backends.lower_assignments] forks the lineage state itself, so the surface is read off
+(* gh-560: the analyze-only entry points — lowering and optimization without backend codegen or
+   linking. [Backends.lower_assignments] forks the lineage state itself, so the result is read off
    a hermetic sibling: the argument context, its ledger and frontier are unaffected. With the
    analysis cache (gh-560), a context that already compiled this routine (e.g. the tuner's arms)
    pays only the [specialize_proc] replay here. *)
-let decision_surface ?name ctx comp bindings =
+let lowered_for_decisions ?name ?(materialized = []) ?(inline = []) ctx comp bindings =
   let optim_ctx = Backends.query ctx.wrapped { q = (fun _ c -> c.BI.optimize_ctx) } in
+  let optim_ctx = Ir.Low_level.copy_optimize_ctx optim_ctx in
+  (* The same decision recording as [decide_materialized] / [decide_inline] below, applied to the
+     hermetic fork rather than a child context. *)
+  let plc = optim_ctx.Ir.Low_level.placements in
+  List.iter materialized ~f:(fun tn ->
+      match Tn.Placements.get plc tn with
+      | None | Some ((Tn.Never_virtual | Tn.On_device), _) ->
+          Tn.Placements.update plc tn Tn.On_device 31
+      | Some ((Tn.Virtual | Tn.Local | Tn.Effectively_constant), _) -> ());
+  List.iter inline ~f:(Hash_set.add optim_ctx.Ir.Low_level.inline_preferences);
   let _name, (lowered : Ir.Low_level.optimized) =
     Backends.lower_assignments optim_ctx ?name bindings comp.Asgns.asgns
   in
-  lowered.Ir.Low_level.flip_candidates
+  lowered
+
+let decision_surface ?name ctx comp bindings =
+  (lowered_for_decisions ?name ctx comp bindings).Ir.Low_level.flip_candidates
 
 let decide_materialized ctx tns =
   let wrapped, () =

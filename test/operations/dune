@@ -2129,3 +2129,96 @@
  (libraries base arrayjit.utils stdio)
  (preprocess
   (pps ppx_sexp_conv)))
+
+; gh-ocannl-514, the placement decision surface: enablement classification and ranking under
+; synthetic mma limits (pure in the lowerings, no GPU needed), and the partial-vector floor.
+; Run by a rule so the backend and the model_peak_* envelope overrides are pinned on the
+; command line (the C backends carry no advisory envelope constants).
+
+(executable
+ (name placement_surface)
+ (modules placement_surface)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(rule
+ (target placement_surface.actual)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (action
+  (with-stdout-to
+   %{target}
+   (run
+    %{dep:placement_surface.exe}
+    "--ocannl_backend=cc"
+    "--ocannl_model_peak_flops=1e9"
+    "--ocannl_model_peak_memory_bandwidth=1e9"))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff placement_surface.expected placement_surface.actual)))
+
+; gh-ocannl-514: bound pruning in the flip chain — the tiny pinned envelope makes every
+; materialize flip's partial-vector floor dwarf any measured time, fathoming them pre-search
+; deterministically on any machine; inline flips are never floor-pruned and still search.
+
+(executable
+ (name flip_bound_pruning)
+ (modules flip_bound_pruning)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(rule
+ (target flip_bound_pruning.actual)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (action
+  (with-stdout-to
+   %{target}
+   (run
+    %{dep:flip_bound_pruning.exe}
+    "--ocannl_backend=cc"
+    "--ocannl_autotune_bound_pruning=true"
+    "--ocannl_model_peak_flops=1e3"
+    "--ocannl_model_peak_memory_bandwidth=1e3"))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff flip_bound_pruning.expected flip_bound_pruning.actual)))
+
+; gh-ocannl-514: the placement levels of the untuned regime (model_default_placements), with the
+; envelope pinned so selection runs live on cc.
+
+(executable
+ (name model_default_placements)
+ (modules model_default_placements)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(rule
+ (target model_default_placements.actual)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (action
+  (with-stdout-to
+   %{target}
+   (run
+    %{dep:model_default_placements.exe}
+    "--ocannl_backend=cc"
+    "--ocannl_model_default_schedule=true"
+    "--ocannl_model_default_placements=3"
+    "--ocannl_model_peak_flops=1e9"
+    "--ocannl_model_peak_memory_bandwidth=1e12"))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff model_default_placements.expected model_default_placements.actual)))

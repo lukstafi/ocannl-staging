@@ -84,14 +84,14 @@ let search ?bound ?incumbent ~score tree =
   let stats = ref no_search_stats in
   let best = ref None in
   let threshold = ref (Option.value incumbent ~default:Float.infinity) in
-  let fathoms sub =
+  let fathoms rev_path sub =
     (* An optimistic bound at or above the threshold refutes strict improvement for every
        completion below — equality fathoms because displacing the incumbent needs [<]. *)
-    match Option.bind bound ~f:(fun b -> b sub) with
+    match Option.bind bound ~f:(fun b -> b ~path:(List.rev rev_path) sub) with
     | Some b -> Float.(b >= !threshold)
     | None -> false
   in
-  let rec leaf_or_choice t =
+  let rec leaf_or_choice rev_path t =
     match t with
     | Leaf a -> (
         match score a with
@@ -101,9 +101,10 @@ let search ?bound ?incumbent ~score tree =
               best := Some (a, s);
               threshold := s)
         | None -> stats := { !stats with st_unscored = !stats.st_unscored + 1 })
-    | Choice { children; _ } ->
+    | Choice { level; children } ->
         stats := { !stats with st_expanded = !stats.st_expanded + 1 };
-        List.iter children ~f:(fun (_label, c) ->
+        List.iter children ~f:(fun (label, c) ->
+            let rev_path = (level, label) :: rev_path in
             match c with
             | Refuted _ -> stats := { !stats with st_refuted = !stats.st_refuted + 1 }
             | Excluded _ -> stats := { !stats with st_excluded = !stats.st_excluded + 1 }
@@ -111,14 +112,14 @@ let search ?bound ?incumbent ~score tree =
                 (* Never fathomed: an unknown verdict must reach scoring (or, in a measured
                    search, compilation). *)
                 stats := { !stats with st_unknown = !stats.st_unknown + 1 };
-                leaf_or_choice (Lazy.force sub)
+                leaf_or_choice rev_path (Lazy.force sub)
             | Child sub ->
                 let sub = Lazy.force sub in
-                if fathoms sub then
+                if fathoms rev_path sub then
                   stats := { !stats with st_fathomed = !stats.st_fathomed + 1 }
-                else leaf_or_choice sub)
+                else leaf_or_choice rev_path sub)
   in
-  (if fathoms tree then stats := { !stats with st_fathomed = 1 } else leaf_or_choice tree);
+  (if fathoms [] tree then stats := { !stats with st_fathomed = 1 } else leaf_or_choice [] tree);
   (!best, !stats)
 
 let rec count_choices = function

@@ -107,7 +107,7 @@ type search_stats = {
 val no_search_stats : search_stats
 
 val search :
-  ?bound:('a tree -> float option) ->
+  ?bound:(path:(string * string) list -> 'a tree -> float option) ->
   ?incumbent:float ->
   score:('a -> float option) ->
   'a tree ->
@@ -123,7 +123,13 @@ val search :
     [bound] is the optimistic (lower-bound) cost of a subtree's completions: a subtree whose
     bound is at or above the threshold is fathomed — equality fathoms because displacement needs
     strict improvement. Soundness is the caller's contract ({!Cost_model.completion_floor}'s):
-    a bound that can exceed a completion's true cost prunes true winners.
+    a bound that can exceed a completion's true cost prunes true winners. [path] is the committed
+    [(level, label)] vector down to and including the judged child — the partial vector the
+    subtree stands for (a prefix of {!enumerate}'s paths; [[]] for the root) — so a bound whose
+    floor depends on the commitments (the placement levels, where
+    {!Cost_model.completion_floor}'s [open_placement] narrows as [Pl_materialize] commitments
+    accumulate) can price the exact node being judged; a commitment-invariant bound (the
+    schedule-invariant family floor) ignores it.
 
     Verdict-fathoming and cost-fathoming are distinct relations. The [Op_unknown]-never-fathoms
     contract is about {e verdicts}: an [Unknown] child is never treated as [Refuted], so a

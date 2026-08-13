@@ -3999,6 +3999,141 @@ let extend_spec (elem : compiled) (u : unit_gen) (op : SC.saved_optop) : spec op
                     if String.equal k key then (k, u.u_saved @ [ op ]) else (k, s)) )))
   | _ -> None
 
+(** {2 The placement decision surface (gh-ocannl-514, the placement-space search)}
+
+    The per-node inline/materialize levels of the joint decision space, prepared for search: the
+    deduplicated flip candidates ranked enablement-first (the gh-ocannl-558 lesson — a flip's value
+    includes which sketch families become expressible under it, which the recompute-cost bound has
+    no term for), and the roofline floor of a partial placement vector (phase 3's
+    [Cost_model.completion_floor] on the all-materialized specialization — the bound that
+    differentiates placement commitments, where the family levels' floor is schedule-invariant). *)
+
+(* The mma-eligible matmul sites of a lowering, seen the way the seeders see them: whole-routine
+   and per-fission-segment (the [F_sketch] granularity — [fission_scheduled] with empty per-segment
+   schedules, since only the pre-schedule segment slices are consulted). Fission not applying
+   degrades to the whole-routine site; a classified rejection degrades likewise rather than
+   failing the caller (the classification is a ranking input, not a legality fact). *)
+let mma_eligible_sites ~(limits : Ir.Backend_intf.hardware_limits) ~static_indices
+    (opt : LL.optimized) : matmul_site list =
+  match limits.Ir.Backend_intf.mma with
+  | None -> []
+  | Some mma ->
+      let segments =
+        match
+          Sched.fission_scheduled
+            ~preset:(fun _ -> [])
+            ~zero_sched:(fun _ -> [])
+            ~static_indices (scratch_of opt)
+        with
+        | tuples ->
+            List.filter_map tuples ~f:(fun (kind, pre, _sched, _post) ->
+                match kind with `Normal -> Some pre | `Zeros | `Solo -> None)
+        | exception Outcome.Cause_at _ -> [ opt ]
+      in
+      List.filter_map segments ~f:(fun seg -> detect_matmul seg.LL.llc)
+      |> List.filter ~f:(fun site ->
+             let a_prec = Lazy.force site.m_a.Ir.Tnode.storage_prec in
+             let b_prec = Lazy.force site.m_b.Ir.Tnode.storage_prec in
+             let d_prec = Lazy.force site.m_d.Ir.Tnode.storage_prec in
+             Option.is_some (mma_tile_for_precisions mma ~a_prec ~b_prec ~d_prec))
+
+let placement_enablement ~limits ~static_indices ~(base : LL.optimized) ~(allmat : LL.optimized) =
+  let site_tns sites =
+    List.fold sites
+      ~init:(Set.empty (module Ir.Tnode))
+      ~f:(fun acc site -> Set.add (Set.add (Set.add acc site.m_a) site.m_b) site.m_d)
+  in
+  let base_sites = mma_eligible_sites ~limits ~static_indices base in
+  let allmat_sites = mma_eligible_sites ~limits ~static_indices allmat in
+  (* An all-materialized site whose destination already carries an eligible default-placement site
+     is not enablement: the family is expressible either way, and promoting its operands would
+     rank ordinary mma-adjacent flips above genuinely family-unlocking ones. *)
+  let base_dests =
+    List.fold base_sites
+      ~init:(Set.empty (module Ir.Tnode))
+      ~f:(fun acc site -> Set.add acc site.m_d)
+  in
+  let enabling_sites =
+    List.filter allmat_sites ~f:(fun site -> not (Set.mem base_dests site.m_d))
+  in
+  (site_tns enabling_sites, site_tns base_sites)
+
+let flip_ordering () =
+  match
+    String.lowercase (String.strip (Utils.get_global_arg ~arg_name:"tune_flip_ordering" ~default:"enablement"))
+  with
+  | "cost" -> `Cost
+  | _ -> `Enablement
+
+let rank_flip_candidates ~ordering ~enablement ~disablement candidates =
+  let deduped =
+    List.fold candidates ~init:[] ~f:(fun acc (fc : LL.flip_candidate) ->
+        (* Identity is [Tn.uid] ([Tn.equal]), not the session [id], which can repeat across
+           namespaces and reinitializations. *)
+        if List.exists acc ~f:(fun c -> Ir.Tnode.equal c.LL.fc_tn fc.LL.fc_tn) then acc
+        else fc :: acc)
+    |> List.rev
+  in
+  let by_cost a b =
+    match Int.compare b.LL.fc_recompute_cost a.LL.fc_recompute_cost with
+    | 0 -> Ir.Tnode.compare a.LL.fc_tn b.LL.fc_tn
+    | c -> c
+  in
+  match ordering with
+  | `Cost -> List.sort deduped ~compare:by_cost
+  | `Enablement ->
+      (* Three classes, cost-descending within each: family-unlocking [`Materialize] flips first
+         (their acceptance changes the feasible set, not just the objective), neutral flips in the
+         middle, family-breaking [`Inline] flips last — inlining an operand or destination of an
+         eligible site (whether reached by default placements or only by further materialization)
+         can only move away from the tensorized family. *)
+      let cls (fc : LL.flip_candidate) =
+        match fc.LL.fc_flip with
+        | `Materialize when Set.mem enablement fc.LL.fc_tn -> 0
+        | `Inline when Set.mem enablement fc.LL.fc_tn || Set.mem disablement fc.LL.fc_tn -> 2
+        | `Materialize | `Inline -> 1
+      in
+      List.sort deduped ~compare:(fun a b ->
+          match Int.compare (cls a) (cls b) with 0 -> by_cost a b | c -> c)
+
+type placement_surface = {
+  ps_candidates : LL.flip_candidate list;
+  ps_enablement : Set.M(Ir.Tnode).t;
+  ps_disablement : Set.M(Ir.Tnode).t;
+  ps_floor_ms : materialized:Ir.Tnode.t list -> float option;
+}
+
+let placement_surface ?ordering ctx comp bindings =
+  let ordering = match ordering with Some o -> o | None -> flip_ordering () in
+  let limits = Context.hardware_limits ctx in
+  let static_indices = Idx.bound_symbols bindings in
+  let base = Context.lowered_for_decisions ctx comp bindings in
+  let candidates = base.LL.flip_candidates in
+  (* The all-materialized specialization of the decision surface: the [`Materialize] flips are the
+     default-virtual candidates, so deciding exactly those materialized makes every open node's
+     work sit in its own producer statement — the form [completion_floor]'s [open_placement]
+     contract asks for. *)
+  let to_materialize =
+    List.filter_map candidates ~f:(fun fc ->
+        match fc.LL.fc_flip with `Materialize -> Some fc.LL.fc_tn | `Inline -> None)
+  in
+  let allmat = Context.lowered_for_decisions ~materialized:to_materialize ctx comp bindings in
+  let enablement, disablement = placement_enablement ~limits ~static_indices ~base ~allmat in
+  let ps_candidates = rank_flip_candidates ~ordering ~enablement ~disablement candidates in
+  let candidate_set =
+    Set.of_list (module Ir.Tnode) (List.map ps_candidates ~f:(fun fc -> fc.LL.fc_tn))
+  in
+  let peak_flops, peak_memory_bandwidth = envelope ~limits in
+  let ps_floor_ms ~materialized =
+    let mat = Set.of_list (module Ir.Tnode) materialized in
+    let open_placement tn = Set.mem candidate_set tn && not (Set.mem mat tn) in
+    let f = CM.completion_floor ~open_placement allmat.LL.llc in
+    CM.roofline_seconds ?peak_flops ?peak_memory_bandwidth ~flops:f.CM.fr_flops
+      ~bytes:f.CM.fr_bytes ()
+    |> Option.map ~f:(fun s -> s *. 1e3)
+  in
+  { ps_candidates; ps_enablement = enablement; ps_disablement = disablement; ps_floor_ms }
+
 (** {2 Model-picked untuned defaults (gh-ocannl-491 task 3)}
 
     A drop-in for [Context.compile] that raises the untuned floor: with no measurement at all, the
@@ -4078,220 +4213,229 @@ let model_default ?report ctx comp bindings =
        default pipeline — the condition for the compile-level fallback below to have anywhere to
        fall back to. *)
     let applied_pick = ref false in
-    let transforms (opt : LL.optimized) : LL.optimized list =
-      let n_scored = ref 0 and n_skipped = ref 0 and n_rejected = ref 0 in
-      let score opts =
-        match
-          summaries_roofline ~peak_flops ~peak_memory_bandwidth
-            (List.map opts ~f:(fun o -> CM.analyze o.LL.llc))
-        with
-        | Some s ->
-            Int.incr n_scored;
-            Some s
+    (* Counters and scoring helpers at [model_default] scope rather than per-compile: the
+       placement pre-search (config [model_default_placements]) scores hermetic lowerings before
+       any compile runs, and its work accumulates into the same reported totals as the in-compile
+       selection. *)
+    let n_scored = ref 0 and n_skipped = ref 0 and n_rejected = ref 0 in
+    let score opts =
+      match
+        summaries_roofline ~peak_flops ~peak_memory_bandwidth
+          (List.map opts ~f:(fun o -> CM.analyze o.LL.llc))
+      with
+      | Some s ->
+          Int.incr n_scored;
+          Some s
+      | None ->
+          Int.incr n_skipped;
+          None
+    in
+    (* The model must rank the best viable schedule, not crown an invalid argmin and fall all the
+       way back to default. The validator is typed, so only an expected schedule rejection is
+       excluded; compiler assertions and other failures still escape. *)
+    let score_valid opts =
+      match validate_segments_for_model opts with
+      | opts -> score opts
+      | exception Outcome.Cause_at _ ->
+          Int.incr n_rejected;
+          None
+    in
+    let score_sketch base_opt p =
+      match
+        Sched.apply_classified ~static_indices (sketch_schedule ~p base_opt)
+          (scratch_of base_opt)
+      with
+      | exception Outcome.Cause_at _ ->
+          Int.incr n_rejected;
+          None
+      | post -> score_valid [ post ]
+    in
+    (* The branch-and-bound walk over the factored matmul family (gh-ocannl-514 phase 4):
+       verdict-carrying children are the construction-time fathoms, and the schedule-invariant
+       roofline floor is the bound — sketch completions share the base program's semantics, so
+       [completion_floor] lower-bounds every one uniformly; it fathoms the whole family exactly
+       when the incumbent already achieves it (the memory-bound kernels where the default
+       preset is optimal). Per-subtree differentiation of the bound needs symbolic tile extents
+       (phase 5). [None] = no matmul site: the caller keeps the flat path (conv seeds, which
+       factor as a follow-up). Returns the first leaf strictly better than [incumbent]. *)
+    let tree_search ~incumbent base_opt =
+      match matmul_sketch_tree ~is_gpu ~is_cpu ~limits base_opt with
+      | None -> None
+      | Some tree ->
+          let fb =
+            let f = CM.completion_floor base_opt.LL.llc in
+            CM.roofline_seconds ?peak_flops ?peak_memory_bandwidth ~flops:f.CM.fr_flops
+              ~bytes:f.CM.fr_bytes ()
+          in
+          (* Snapshot the caller-side counters so the log can split the driver's unscored
+             leaves into compiler rejections vs genuine no-coverage — st_unscored alone would
+             misclassify rejections as cost-model gaps in the phase-6 ledger. *)
+          let r0 = !n_rejected and k0 = !n_skipped in
+          let best, stats =
+            Sspace.search
+              ~bound:(fun ~path:_ _sub -> fb)
+              ~incumbent ~score:(score_sketch base_opt) tree
+          in
+          logf
+            "model_default: family search: %d expanded, %d scored, %d unscored (%d rejected, \
+             %d without coverage), %d fathomed (bound %s), %d refuted, %d excluded"
+            stats.Sspace.st_expanded stats.Sspace.st_scored stats.Sspace.st_unscored
+            (!n_rejected - r0) (!n_skipped - k0) stats.Sspace.st_fathomed
+            (match fb with Some b -> Printf.sprintf "%.6f ms" (b *. 1e3) | None -> "n/a")
+            stats.Sspace.st_refuted stats.Sspace.st_excluded;
+          Some best
+    in
+    (* First leaf strictly under [threshold], in list order — the flat counterpart the
+       not-yet-factored levels (epilogue twins) go through, after the tree's leaves like the
+       flat enumeration's seeds-then-twins order. *)
+    let best_flat ~threshold base_opt ps =
+      List.fold ps ~init:(None, threshold) ~f:(fun (best, th) p ->
+          match score_sketch base_opt p with
+          | Some sc when Float.(sc < th) -> (Some (p, sc), sc)
+          | _ -> (best, th))
+      |> fst
+    in
+    let preset seg = if is_gpu then Sched.default_gpu ~limits seg else Sched.default_cpu seg in
+    let zero_sched tns = if is_gpu then Sched.zero_expansion ~limits tns else [] in
+    let seg_key seg = SC.digest (SC.canonicalize ~static_indices ~with_placements:false seg) in
+    (* The model-argmin pipeline choice for one lowering — label, roofline score (seconds), and
+       the action reproducing it. Shared between the in-compile transform seam and the placement
+       pre-search's leaf scoring (hermetic lowerings of decided placement vectors). *)
+    let select (opt : LL.optimized) =
+      try
+        (* The untuned default pipeline, scored on a hermetic copy — it is both the anchor
+           candidate and the fallback. *)
+        let default_scratch =
+          Sched.maybe_default_schedules ~backend_name:backend ~limits ~static_indices
+            (scratch_of opt)
+        in
+        let default_score = score default_scratch in
+        match default_score with
         | None ->
-            Int.incr n_skipped;
-            None
-      in
-      (* The model must rank the best viable schedule, not crown an invalid argmin and fall all the
-         way back to default. The validator is typed, so only an expected schedule rejection is
-         excluded; compiler assertions and other failures still escape. *)
-      let score_valid opts =
-        match validate_segments_for_model opts with
-        | opts -> score opts
-        | exception Outcome.Cause_at _ ->
-            Int.incr n_rejected;
-            None
-      in
-      let score_sketch base_opt p =
-        match
-          Sched.apply_classified ~static_indices (sketch_schedule ~p base_opt)
-            (scratch_of base_opt)
-        with
-        | exception Outcome.Cause_at _ ->
-            Int.incr n_rejected;
-            None
-        | post -> score_valid [ post ]
-      in
-      (* The branch-and-bound walk over the factored matmul family (gh-ocannl-514 phase 4):
-         verdict-carrying children are the construction-time fathoms, and the schedule-invariant
-         roofline floor is the bound — sketch completions share the base program's semantics, so
-         [completion_floor] lower-bounds every one uniformly; it fathoms the whole family exactly
-         when the incumbent already achieves it (the memory-bound kernels where the default
-         preset is optimal). Per-subtree differentiation of the bound needs symbolic tile extents
-         (phase 5). [None] = no matmul site: the caller keeps the flat path (conv seeds, which
-         factor as a follow-up). Returns the first leaf strictly better than [incumbent]. *)
-      let tree_search ~incumbent base_opt =
-        match matmul_sketch_tree ~is_gpu ~is_cpu ~limits base_opt with
-        | None -> None
-        | Some tree ->
-            let fb =
-              let f = CM.completion_floor base_opt.LL.llc in
-              CM.roofline_seconds ?peak_flops ?peak_memory_bandwidth ~flops:f.CM.fr_flops
-                ~bytes:f.CM.fr_bytes ()
+            (* No coverage of the default itself: nothing to honestly compare against. *)
+            ("default", None, `Default)
+        | Some ds -> (
+            (* Whole-routine sketch candidates. A candidate without coverage is skipped — it is
+               never picked over the default without a measured run ({!tune} covers that). *)
+            let whole_best =
+              match tree_search ~incumbent:ds opt with
+              | Some tree_best ->
+                  (* Matmul site: the tree's leaves searched with the default as incumbent;
+                     the epilogue twins compete after them at the tightened threshold. *)
+                  let twins =
+                    List.filter (sketch_seed_params ~is_gpu ~is_cpu ~limits opt) ~f:(fun p ->
+                        p.sk_epilogue)
+                  in
+                  let th =
+                    match tree_best with Some (_, sc) -> Float.min ds sc | None -> ds
+                  in
+                  (match best_flat ~threshold:th opt twins with
+                  | Some _ as tb -> tb
+                  | None -> tree_best)
+              | None ->
+                  (* No matmul site: the flat path covers the conv family. *)
+                  best_flat ~threshold:ds opt (sketch_seed_params ~is_gpu ~is_cpu ~limits opt)
             in
-            (* Snapshot the caller-side counters so the log can split the driver's unscored
-               leaves into compiler rejections vs genuine no-coverage — st_unscored alone would
-               misclassify rejections as cost-model gaps in the phase-6 ledger. *)
-            let r0 = !n_rejected and k0 = !n_skipped in
-            let best, stats =
-              Sspace.search ~bound:(fun _sub -> fb) ~incumbent ~score:(score_sketch base_opt)
-                tree
+            let contenders =
+              match whole_best with
+              | Some (p, sc) -> [ (spec_label (Whole (W_sketch p)), sc, `Whole p) ]
+              | None -> []
             in
-            logf
-              "model_default: family search: %d expanded, %d scored, %d unscored (%d rejected, \
-               %d without coverage), %d fathomed (bound %s), %d refuted, %d excluded"
-              stats.Sspace.st_expanded stats.Sspace.st_scored stats.Sspace.st_unscored
-              (!n_rejected - r0) (!n_skipped - k0) stats.Sspace.st_fathomed
-              (match fb with Some b -> Printf.sprintf "%.6f ms" (b *. 1e3) | None -> "n/a")
-              stats.Sspace.st_refuted stats.Sspace.st_excluded;
-            Some best
-      in
-      (* First leaf strictly under [threshold], in list order — the flat counterpart the
-         not-yet-factored levels (epilogue twins) go through, after the tree's leaves like the
-         flat enumeration's seeds-then-twins order. *)
-      let best_flat ~threshold base_opt ps =
-        List.fold ps ~init:(None, threshold) ~f:(fun (best, th) p ->
-            match score_sketch base_opt p with
-            | Some sc when Float.(sc < th) -> (Some (p, sc), sc)
-            | _ -> (best, th))
-        |> fst
-      in
+            (* Per-segment sketch substitution over the default fission segmentation (only when
+               the default actually fissioned; otherwise the whole-routine sketches cover the
+               site). Mirrors [tune]'s [F_sketch] flavor: segments keyed by their structural
+               pre-schedule digest, a key miss degrading to the default preset. *)
+            let fiss =
+              if List.length default_scratch <= 1 then None
+              else
+                match
+                  Sched.fission_scheduled ~promote_locals:is_gpu ~preset ~zero_sched
+                    ~static_indices (scratch_of opt)
+                with
+                | exception Outcome.Cause_at _ ->
+                    Int.incr n_rejected;
+                    None
+                | tuples -> (
+                    let entries =
+                      List.filter_map tuples ~f:(fun (kind, pre, _sched, post) ->
+                          match kind with
+                          | `Zeros | `Solo -> None
+                          | `Normal -> (
+                              match score [ post ] with
+                              | None -> None
+                              | Some bs -> (
+                                  (* The segment's family tree searched with the segment's own
+                                     default-preset score as incumbent; conv segments keep the
+                                     flat path. *)
+                                  let best_sketch =
+                                    match tree_search ~incumbent:bs pre with
+                                    | Some tree_best -> (
+                                        let twins =
+                                          List.filter
+                                            (sketch_seed_params ~is_gpu ~is_cpu ~limits pre)
+                                            ~f:(fun p -> p.sk_epilogue)
+                                        in
+                                        let th =
+                                          match tree_best with
+                                          | Some (_, sc) -> Float.min bs sc
+                                          | None -> bs
+                                        in
+                                        match best_flat ~threshold:th pre twins with
+                                        | Some _ as tb -> tb
+                                        | None -> tree_best)
+                                    | None ->
+                                        best_flat ~threshold:bs pre
+                                          (sketch_seed_params ~is_gpu ~is_cpu ~limits pre)
+                                  in
+                                  match best_sketch with
+                                  | Some (p, _s) -> Some (seg_key pre, p)
+                                  | None -> None)))
+                    in
+                    if List.is_empty entries then None
+                    else
+                      let subst_preset seg =
+                        match List.Assoc.find entries ~equal:String.equal (seg_key seg) with
+                        | Some p -> sketch_schedule ~p seg
+                        | None -> preset seg
+                      in
+                      (* Score the substituted pipeline whole, so it competes on the same footing
+                         as the other candidates. *)
+                      match
+                        Sched.fission_scheduled ~promote_locals:is_gpu ~preset:subst_preset
+                          ~zero_sched ~static_indices (scratch_of opt)
+                      with
+                      | exception Outcome.Cause_at _ ->
+                          Int.incr n_rejected;
+                          None
+                      | tuples2 ->
+                          let posts = List.map tuples2 ~f:(fun (_, _, _, post) -> post) in
+                          Option.map (score_valid posts) ~f:(fun s -> (entries, s)))
+            in
+            let contenders =
+              contenders
+              @
+              match fiss with
+              | Some (entries, s) -> [ (spec_label (Fiss (F_sketch entries)), s, `Fiss entries) ]
+              | None -> []
+            in
+            (* Argmin with ties to the default: the model only displaces the honest default on a
+               strict improvement. *)
+            let best =
+              List.min_elt contenders ~compare:(fun (_, a, _) (_, b, _) -> Float.compare a b)
+            in
+            match best with
+            | Some (lbl, s, act) when Float.(s < ds) -> (lbl, Some s, act)
+            | _ -> ("default", Some ds, `Default))
+      with Outcome.Cause_at (_, cause) ->
+        logf "model_default: scoring declined (%s); using the default pipeline"
+          (Outcome.detail_of_cause cause);
+        ("default", None, `Default)
+    in
+    let transforms (opt : LL.optimized) : LL.optimized list =
       let default_segs () =
         Sched.maybe_default_schedules ~backend_name:backend ~limits ~static_indices opt
       in
-      let preset seg = if is_gpu then Sched.default_gpu ~limits seg else Sched.default_cpu seg in
-      let zero_sched tns = if is_gpu then Sched.zero_expansion ~limits tns else [] in
-      let seg_key seg = SC.digest (SC.canonicalize ~static_indices ~with_placements:false seg) in
-      let label, model_s, action =
-        try
-          (* The untuned default pipeline, scored on a hermetic copy — it is both the anchor
-             candidate and the fallback. *)
-          let default_scratch =
-            Sched.maybe_default_schedules ~backend_name:backend ~limits ~static_indices
-              (scratch_of opt)
-          in
-          let default_score = score default_scratch in
-          match default_score with
-          | None ->
-              (* No coverage of the default itself: nothing to honestly compare against. *)
-              ("default", None, `Default)
-          | Some ds -> (
-              (* Whole-routine sketch candidates. A candidate without coverage is skipped — it is
-                 never picked over the default without a measured run ({!tune} covers that). *)
-              let whole_best =
-                match tree_search ~incumbent:ds opt with
-                | Some tree_best ->
-                    (* Matmul site: the tree's leaves searched with the default as incumbent;
-                       the epilogue twins compete after them at the tightened threshold. *)
-                    let twins =
-                      List.filter (sketch_seed_params ~is_gpu ~is_cpu ~limits opt) ~f:(fun p ->
-                          p.sk_epilogue)
-                    in
-                    let th =
-                      match tree_best with Some (_, sc) -> Float.min ds sc | None -> ds
-                    in
-                    (match best_flat ~threshold:th opt twins with
-                    | Some _ as tb -> tb
-                    | None -> tree_best)
-                | None ->
-                    (* No matmul site: the flat path covers the conv family. *)
-                    best_flat ~threshold:ds opt (sketch_seed_params ~is_gpu ~is_cpu ~limits opt)
-              in
-              let contenders =
-                match whole_best with
-                | Some (p, sc) -> [ (spec_label (Whole (W_sketch p)), sc, `Whole p) ]
-                | None -> []
-              in
-              (* Per-segment sketch substitution over the default fission segmentation (only when
-                 the default actually fissioned; otherwise the whole-routine sketches cover the
-                 site). Mirrors [tune]'s [F_sketch] flavor: segments keyed by their structural
-                 pre-schedule digest, a key miss degrading to the default preset. *)
-              let fiss =
-                if List.length default_scratch <= 1 then None
-                else
-                  match
-                    Sched.fission_scheduled ~promote_locals:is_gpu ~preset ~zero_sched
-                      ~static_indices (scratch_of opt)
-                  with
-                  | exception Outcome.Cause_at _ ->
-                      Int.incr n_rejected;
-                      None
-                  | tuples -> (
-                      let entries =
-                        List.filter_map tuples ~f:(fun (kind, pre, _sched, post) ->
-                            match kind with
-                            | `Zeros | `Solo -> None
-                            | `Normal -> (
-                                match score [ post ] with
-                                | None -> None
-                                | Some bs -> (
-                                    (* The segment's family tree searched with the segment's own
-                                       default-preset score as incumbent; conv segments keep the
-                                       flat path. *)
-                                    let best_sketch =
-                                      match tree_search ~incumbent:bs pre with
-                                      | Some tree_best -> (
-                                          let twins =
-                                            List.filter
-                                              (sketch_seed_params ~is_gpu ~is_cpu ~limits pre)
-                                              ~f:(fun p -> p.sk_epilogue)
-                                          in
-                                          let th =
-                                            match tree_best with
-                                            | Some (_, sc) -> Float.min bs sc
-                                            | None -> bs
-                                          in
-                                          match best_flat ~threshold:th pre twins with
-                                          | Some _ as tb -> tb
-                                          | None -> tree_best)
-                                      | None ->
-                                          best_flat ~threshold:bs pre
-                                            (sketch_seed_params ~is_gpu ~is_cpu ~limits pre)
-                                    in
-                                    match best_sketch with
-                                    | Some (p, _s) -> Some (seg_key pre, p)
-                                    | None -> None)))
-                      in
-                      if List.is_empty entries then None
-                      else
-                        let subst_preset seg =
-                          match List.Assoc.find entries ~equal:String.equal (seg_key seg) with
-                          | Some p -> sketch_schedule ~p seg
-                          | None -> preset seg
-                        in
-                        (* Score the substituted pipeline whole, so it competes on the same footing
-                           as the other candidates. *)
-                        match
-                          Sched.fission_scheduled ~promote_locals:is_gpu ~preset:subst_preset
-                            ~zero_sched ~static_indices (scratch_of opt)
-                        with
-                        | exception Outcome.Cause_at _ ->
-                            Int.incr n_rejected;
-                            None
-                        | tuples2 ->
-                            let posts = List.map tuples2 ~f:(fun (_, _, _, post) -> post) in
-                            Option.map (score_valid posts) ~f:(fun s -> (entries, s)))
-              in
-              let contenders =
-                contenders
-                @
-                match fiss with
-                | Some (entries, s) -> [ (spec_label (Fiss (F_sketch entries)), s, `Fiss entries) ]
-                | None -> []
-              in
-              (* Argmin with ties to the default: the model only displaces the honest default on a
-                 strict improvement. *)
-              let best =
-                List.min_elt contenders ~compare:(fun (_, a, _) (_, b, _) -> Float.compare a b)
-              in
-              match best with
-              | Some (lbl, s, act) when Float.(s < ds) -> (lbl, Some s, act)
-              | _ -> ("default", Some ds, `Default))
-        with Outcome.Cause_at (_, cause) ->
-          logf "model_default: scoring declined (%s); using the default pipeline"
-            (Outcome.detail_of_cause cause);
-          ("default", None, `Default)
-      in
+      let label, model_s, action = select opt in
       choice :=
         {
           mc_label = label;
@@ -4346,12 +4490,137 @@ let model_default ?report ctx comp bindings =
         !choice.mc_label (Exn.to_string exn);
       choice := { !choice with mc_label = "default"; mc_model_ms = None }
     in
+    (* gh-ocannl-514, the placement levels of the untuned regime (config
+       [model_default_placements] = N > 0): before the compile, branch-and-bound over the top-N
+       ranked flip candidates of the decision surface — one keep/flip choice per level, the
+       all-keep leaf visited first so the default placements' own selection score is the running
+       incumbent (ties stay with the default placements), [select] pricing each leaf's hermetic
+       lowering ([Context.lowered_for_decisions]), and the partial-vector roofline floor
+       ([placement_surface.ps_floor_ms], monotone in the committed materializations) fathoming
+       subtrees that cannot beat it. This is where the bound differentiates {e within} the tree:
+       the family levels' floor is schedule-invariant, the placement levels' is not (phase 3). *)
+    let placement_budget =
+      Int.of_string
+        (String.strip (Utils.get_global_arg ~arg_name:"model_default_placements" ~default:"0"))
+    in
+    let placement_pick =
+      if placement_budget <= 0 then None
+      else
+        match
+          let surface = placement_surface ctx comp bindings in
+          let cands = List.take surface.ps_candidates placement_budget in
+          if List.is_empty cands then None
+          else
+            let level_name fc =
+              Printf.sprintf "placement#%d %s" fc.LL.fc_tn.Ir.Tnode.uid
+                (Ir.Tnode.debug_name fc.LL.fc_tn)
+            in
+            let assoc = List.map cands ~f:(fun fc -> (level_name fc, fc)) in
+            let rec build vector = function
+              | [] -> Sspace.Leaf (List.rev vector)
+              | fc :: rest ->
+                  Sspace.Choice
+                    {
+                      level = level_name fc;
+                      children =
+                        [
+                          ("keep", Sspace.Child (lazy (build ((fc, false) :: vector) rest)));
+                          ("flip", Sspace.Child (lazy (build ((fc, true) :: vector) rest)));
+                        ];
+                    }
+            in
+            let decisions vector =
+              List.fold (List.rev vector) ~init:([], [])
+                ~f:(fun (mat, inl) ((fc : LL.flip_candidate), flipped) ->
+                  if not flipped then (mat, inl)
+                  else
+                    match fc.LL.fc_flip with
+                    | `Materialize -> (fc.LL.fc_tn :: mat, inl)
+                    | `Inline -> (mat, fc.LL.fc_tn :: inl))
+            in
+            let score vector =
+              let mat, inl = decisions vector in
+              match Context.lowered_for_decisions ~materialized:mat ~inline:inl ctx comp bindings with
+              | opt_v ->
+                  let _lbl, s, _act = select opt_v in
+                  s
+              | exception Outcome.Cause_at _ -> None
+            in
+            let bound ~path _sub =
+              let mat =
+                List.filter_map path ~f:(fun (level, label) ->
+                    Option.bind (List.Assoc.find assoc ~equal:String.equal level) ~f:(fun fc ->
+                        (* Certainly materialized below this node: a committed Materialize flip,
+                           or a kept default-materialized ([`Inline]-flip) candidate. The other
+                           two commitments (and every open level) contribute zero. *)
+                        match (label, fc.LL.fc_flip) with
+                        | "flip", `Materialize | "keep", `Inline -> Some fc.LL.fc_tn
+                        | _ -> None))
+              in
+              (* [ps_floor_ms] is milliseconds; [select]'s scores are roofline seconds. *)
+              Option.map (surface.ps_floor_ms ~materialized:mat) ~f:(fun ms -> ms /. 1e3)
+            in
+            let best, stats = Sspace.search ~bound ~score (build [] cands) in
+            logf
+              "model_default: placement search over %d level(s): %d expanded, %d scored, \
+               %d unscored, %d fathomed"
+              (List.length cands) stats.Sspace.st_expanded stats.Sspace.st_scored
+              stats.Sspace.st_unscored stats.Sspace.st_fathomed;
+            (match best with
+            | Some (vector, s) when List.exists vector ~f:(fun (_, flipped) -> flipped) ->
+                let mat, inl = decisions vector in
+                let names tns = String.concat ~sep:"," (List.map tns ~f:Ir.Tnode.debug_name) in
+                logf "model_default: placement pick: materialize [%s], inline [%s] (model %.6f ms)"
+                  (names mat) (names inl) (s *. 1e3);
+                Some (mat, inl)
+            | _ -> None)
+        with
+        | pick -> pick
+        | exception Outcome.Cause_at (_, cause) ->
+            logf
+              "model_default: placement search declined (%s); selecting from the default \
+               placements"
+              (Outcome.detail_of_cause cause);
+            None
+    in
     (* With the model on the default pipeline (no sketch strictly improved on it, or the pick failed
        validation above), the compile that just failed IS the fallback: retrying it would duplicate
        an expensive failure and delay the honest error, so the exception propagates instead. *)
-    let result =
-      compile_advisory ~on_fallback ~fallback_if:(fun () -> !applied_pick) transforms ctx comp
+    let compile_from base_ctx =
+      compile_advisory ~on_fallback ~fallback_if:(fun () -> !applied_pick) transforms base_ctx comp
         bindings
+    in
+    let result =
+      match placement_pick with
+      | None -> compile_from ctx
+      | Some (mat, inl) -> (
+          let ctx' = Context.decide_inline (Context.decide_materialized ctx mat) inl in
+          match compile_from ctx' with
+          | result ->
+              (* The emitted label carries the placement decision: the in-compile selection only
+                 names the pipeline it chose under those placements. *)
+              let names tns = String.concat ~sep:"," (List.map tns ~f:Ir.Tnode.debug_name) in
+              choice :=
+                {
+                  !choice with
+                  mc_label =
+                    Printf.sprintf "placements[mat:%s inl:%s] %s" (names mat) (names inl)
+                      !choice.mc_label;
+                };
+              result
+          | exception ((Utils.User_error _ | Invalid_argument _) as exn) ->
+              (* A classified rejection that [compile_advisory] had nothing to fall back to under
+                 the picked placements ([applied_pick] was false: the pick's win was the placement
+                 move itself, so the failing compile was already the default pipeline — under
+                 [ctx'], not under [ctx]). The pick is advisory, so abandon it and rerun the
+                 ordinary selection from the caller's own placements; fatal failures propagate
+                 above. *)
+              logf
+                "model_default: compiling under the picked placements FAILED (%s); recompiling \
+                 from the default placements"
+                (Exn.to_string exn);
+              applied_pick := false;
+              compile_from ctx)
     in
     emit !choice;
     result

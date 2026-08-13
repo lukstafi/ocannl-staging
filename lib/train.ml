@@ -266,14 +266,22 @@ let every_non_literal_materialized =
     first, tiling/scheduling within each arm by the nested {!Autotune.tune}. [inline_flips] (config
     [tune_inline_flips], default 0) adds a greedy per-node refinement level: the default-policy
     arm's compile reports its searchable decision dimensions
-    ({!Ir.Low_level.field-flip_candidates}, ranked by the recompute-cost bound), and the top
-    candidates are tried one at a time from arm A's context — [Materialize] via
-    {!Context.decide_materialized} (walking toward arm B one node at a time), [Inline] via
-    {!Context.decide_inline} — each accepted flip becoming the base for the next, and the refined
-    result shipping only if it beats the A/B winner. Every tried flip costs a full search like an
-    arm, so the budget is explicit and defaults to zero. Flip searches report through
-    [flip_report], not [report]: the positional arm-A-then-arm-B contract of [report] is preserved
-    regardless of the budget. *)
+    ({!Ir.Low_level.field-flip_candidates}), and the candidates are tried one at a time from arm
+    A's context — [Materialize] via {!Context.decide_materialized} (walking toward arm B one node
+    at a time), [Inline] via {!Context.decide_inline} — each accepted flip becoming the base for
+    the next, and the refined result shipping only if it beats the A/B winner. Every measured flip
+    costs a full search like an arm, so the budget is explicit and defaults to zero. Flip searches
+    report through [flip_report], not [report]: the positional arm-A-then-arm-B contract of
+    [report] is preserved regardless of the budget.
+
+    gh-514, the tuned placement-space search: the chain walks the surface in
+    {!Autotune.placement_surface}'s ranking — family-unlocking (enablement) [Materialize] flips
+    before cost, per the gh-558 lesson; config [tune_flip_ordering=cost] restores the legacy
+    recompute-cost order as the evaluation baseline — and, under config [autotune_bound_pruning],
+    fathoms a [Materialize] flip pre-search when the roofline floor of the chain's partial
+    placement vector extended by it already meets the best measured time (admissible: the floor
+    lower-bounds every completion, so the flip cannot win). Fathomed flips do not consume the
+    budget, which counts measured flips. *)
 let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report ?flip_report
     ?inline_flips ctx loss comp bindings =
   (* Arm attribution on the same stderr trace as Autotune's config [autotune_log] — winner-arm
@@ -549,59 +557,102 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
        the default-policy arm (arm B's placements are caller-seeded wholesale, so its compile
        reports no policy decisions to flip), so the chain refines from arm A's context — a
        Materialize chain walks from A toward B one node at a time — and the refined result ships
-       only if it beats the A/B winner. The decision surface is read analyze-only (gh-560:
-       [Context.decision_surface] — no backend codegen, and the arms' compiles already populated
-       the analysis cache, so this costs one specialization replay). *)
+       only if it beats the A/B winner. The decision surface is read analyze-only (gh-560; the
+       arms' compiles already populated the analysis cache, so this costs specialization replays).
+
+       gh-514, the placement-space search over this chain: the surface arrives ranked
+       enablement-first ({!Autotune.placement_surface} — the gh-558 ordering lesson: a flip's
+       value includes which sketch families become expressible under it, so family-unlocking
+       Materialize flips outrank cost), and under config [autotune_bound_pruning] a [`Materialize]
+       flip whose partial-vector roofline floor ({!Ir.Cost_model.completion_floor}, monotone in
+       the chain's accumulated commitments) already meets the chain's best measured time is
+       fathomed without spending budget — the admissible direction, exactly phase 4b's rule one
+       level up. The budget counts {e measured} flips, so a fathomed candidate lets the next one
+       in. *)
     let module LL = Ir.Low_level in
-    let captured =
+    let surface =
       (* Outside the tuner's failure containment; a lowering failure (the A/B searches above can
          still have crowned a winner) must skip the refinement, not fail the tune. *)
-      match Context.decision_surface ctx comp bindings with
-      | candidates -> candidates
+      match Autotune.placement_surface ctx comp bindings with
+      | s -> Some s
       | exception exn ->
           logf "flip refinement skipped: the decision-surface lowering failed: %s"
             (Exn.to_string exn);
-          []
+          None
     in
-    let candidates =
-      List.fold captured ~init:[] ~f:(fun acc fc ->
-          (* Identity is [Tn.uid] ([Tn.equal]), not the session [id], which can repeat across
-             namespaces and reinitializations. *)
-          if List.exists acc ~f:(fun c -> Tn.equal c.LL.fc_tn fc.LL.fc_tn) then acc
-          else fc :: acc)
-      |> List.sort ~compare:(fun a b ->
-             match Int.compare b.LL.fc_recompute_cost a.LL.fc_recompute_cost with
-             | 0 -> Tn.compare a.LL.fc_tn b.LL.fc_tn
-             | c -> c)
-      |> fun l -> List.take l inline_flips
-    in
-    logf "flip refinement: trying %d candidate(s) within budget %d" (List.length candidates)
-      inline_flips;
-    let chain = ref (a, a_ms, ctx, timing_ctx) in
-    List.iter candidates ~f:(fun fc ->
-        let _, chain_ms, base_ctx, base_timing = !chain in
-        let apply c =
-          match fc.LL.fc_flip with
-          | `Materialize -> Context.decide_materialized c [ fc.LL.fc_tn ]
-          | `Inline -> Context.decide_inline c [ fc.LL.fc_tn ]
+    match surface with
+    | None -> ship winner
+    | Some surface ->
+        let bound_pruning =
+          Utils.get_global_flag ~default:false ~arg_name:"autotune_bound_pruning"
         in
-        let arm =
-          Printf.sprintf "flip %s %s (cost %d)"
-            (match fc.LL.fc_flip with `Inline -> "inline" | `Materialize -> "materialize")
-            (Tn.debug_name fc.LL.fc_tn) fc.LL.fc_recompute_cost
+        let candidates = surface.Autotune.ps_candidates in
+        logf "flip refinement: %d candidate(s), %d enablement-promoted, budget %d%s"
+          (List.length candidates)
+          (Set.length surface.Autotune.ps_enablement)
+          inline_flips
+          (if bound_pruning then ", bound pruning on" else "");
+        let chain = ref (a, a_ms, ctx, timing_ctx) in
+        (* The chain's accumulated placement commitments, for the floor: an accepted
+           [`Materialize] flip and a rejected [`Inline] flip both leave the node certainly
+           materialized in every completion the chain can still reach; the other two outcomes
+           leave it open (inline commitments never tighten the floor). *)
+        let certain_mat = ref [] in
+        let measured = ref 0 and pruned = ref 0 in
+        let rec walk = function
+          | [] -> ()
+          | _ when !measured >= inline_flips -> ()
+          (* Same lineage, same rule as the A/B above: a poisoned one refuses every timing run,
+             so a further search can only fail. Unlike the arms, there is nothing to propagate
+             here — the A/B winner is already in hand — so the refinement just stops. *)
+          | _ when lineage_poisoned () ->
+              logf "flip refinement stopped: the shared lineage is poisoned"
+          | fc :: rest -> (
+              let _, chain_ms, base_ctx, base_timing = !chain in
+              let arm =
+                Printf.sprintf "flip %s %s (cost %d%s)"
+                  (match fc.LL.fc_flip with `Inline -> "inline" | `Materialize -> "materialize")
+                  (Tn.debug_name fc.LL.fc_tn) fc.LL.fc_recompute_cost
+                  (if Set.mem surface.Autotune.ps_enablement fc.LL.fc_tn then ", enablement"
+                   else "")
+              in
+              let floor =
+                match fc.LL.fc_flip with
+                | `Materialize when bound_pruning ->
+                    surface.Autotune.ps_floor_ms ~materialized:(fc.LL.fc_tn :: !certain_mat)
+                | `Materialize | `Inline -> None
+              in
+              match floor with
+              | Some fl when Float.(fl >= chain_ms) ->
+                  (* Fathomed: the floor lower-bounds every completion with this node
+                     materialized, so no nested search from here can beat the incumbent. The
+                     node's placement stays open — nothing to commit. *)
+                  Int.incr pruned;
+                  logf "%s bound-pruned: floor %.4f ms >= incumbent %.4f ms" arm fl chain_ms;
+                  walk rest
+              | _ ->
+                  let apply c =
+                    match fc.LL.fc_flip with
+                    | `Materialize -> Context.decide_materialized c [ fc.LL.fc_tn ]
+                    | `Inline -> Context.decide_inline c [ fc.LL.fc_tn ]
+                  in
+                  let ctx' = apply base_ctx in
+                  let timing' = Option.map base_timing ~f:apply in
+                  let r, ms, _rep = tune_or_release ~to_report:flip_report arm ctx' timing' in
+                  record r;
+                  Int.incr measured;
+                  let accepted = Float.(ms < chain_ms) in
+                  if accepted then chain := (r, ms, ctx', timing');
+                  (match (fc.LL.fc_flip, accepted) with
+                  | `Materialize, true | `Inline, false ->
+                      certain_mat := fc.LL.fc_tn :: !certain_mat
+                  | `Materialize, false | `Inline, true -> ());
+                  walk rest)
         in
-        let ctx' = apply base_ctx in
-        let timing' = Option.map base_timing ~f:apply in
-        (* Same lineage, same rule as the A/B above: a poisoned one refuses every timing run, so a
-           further search can only fail. Unlike the arms, there is nothing to propagate here — the
-           A/B winner is already in hand — so the refinement just stops. *)
-        if lineage_poisoned () then
-          logf "flip refinement stopped: the shared lineage is poisoned"
-        else
-          let r, ms, _rep = tune_or_release ~to_report:flip_report arm ctx' timing' in
-          record r;
-          if Float.(ms < chain_ms) then chain := (r, ms, ctx', timing'));
-    let chain_result, chain_ms, _, _ = !chain in
+        walk candidates;
+        if !pruned > 0 then
+          logf "flip refinement: %d flip(s) bound-pruned, %d measured" !pruned !measured;
+        let chain_result, chain_ms, _, _ = !chain in
     if Float.(chain_ms < winner_ms) then (
       logf "flip refinement ships: %.4f ms (the placement A/B winner was %.4f ms)" chain_ms
         winner_ms;

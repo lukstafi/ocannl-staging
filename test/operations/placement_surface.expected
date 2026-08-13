@@ -1,0 +1,28 @@
+the enablement set is nonempty: true
+it contains the site operand mbs: true
+it contains the site destination mc: true
+it does not contain the decoy us: true
+no site is eligible under default placements (empty disablement): true
+cost ranking:
+  inline      n11          cost 8192 
+  inline      us           cost 32   
+  inline      mbs          cost 8      [enablement]
+  materialize mc           cost 8      [enablement]
+  materialize n12          cost 8    
+  materialize relu_t2      cost 1    
+  materialize d2           cost 1    
+enablement ranking:
+  materialize mc           cost 8      [enablement]
+  inline      n11          cost 8192 
+  inline      us           cost 32   
+  materialize n12          cost 8    
+  materialize relu_t2      cost 1    
+  materialize d2           cost 1    
+  inline      mbs          cost 8      [enablement]
+cost ranking buries the enablement candidates below the decoy: true
+enablement ranking puts the family-unlocking materialize flip first: true
+enablement ranking puts the family-breaking inline flip last: true
+the floor is present under the pinned envelope: true
+committing mbs does not lower the floor: true
+committing mc on top does not lower it either: true
+the two commitments strictly raise the floor: true

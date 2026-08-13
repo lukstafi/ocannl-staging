@@ -76,6 +76,25 @@ val compile_outcome :
 (** Internal containment-aware form of {!compile}. The caller supplies the schedule provenance;
     public user code should continue to use {!compile}. *)
 
+val lowered_for_decisions :
+  ?name:string ->
+  ?materialized:Ir.Tnode.t list ->
+  ?inline:Ir.Tnode.t list ->
+  t ->
+  Ir.Assignments.comp ->
+  Ir.Indexing.unit_bindings ->
+  Ir.Low_level.optimized
+(** The analyze-only entry point behind {!decision_surface} (gh-560), generalized over placement
+    decisions (gh-ocannl-514, the placement-space search): the routine's optimized lowering as
+    {!compile} would produce it from this context with [materialized] decided {!decide_materialized}
+    and [inline] preferred {!decide_inline} — computed by lowering and optimization alone: no
+    backend codegen, no linking, and no effect on the context (the lineage state is forked like a
+    compile's, the decisions are recorded in the fork, and the compilation frontier and ledger are
+    untouched). Sibling calls for the same routine share the underlying analysis via the analysis
+    cache, so each costs only the specialization replay. Used by [Autotune.placement_surface] to
+    read the all-materialized specialization of the decision surface, the form
+    {!Ir.Cost_model.completion_floor} bounds partial placement vectors on. *)
+
 val decision_surface :
   ?name:string ->
   t ->
