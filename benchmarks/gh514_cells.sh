@@ -34,12 +34,26 @@ opam exec -- dune build tools/fit_envelope.exe benchmarks/runners/ocannl/bench_m
   exit 1
 }
 cd benchmarks || exit 1
+# Fixtures are valid only while gen_fixtures.py and workloads/ are unchanged (docs/agent-notes),
+# so freshness is stamped by content hash, not existence: a revision switch regenerates.
+STAMP_WANT=$(python3 - <<'PY'
+import hashlib, glob
+h = hashlib.sha256()
+for f in ['gen_fixtures.py'] + sorted(glob.glob('workloads/*.json')):
+    h.update(open(f, 'rb').read())
+print(h.hexdigest())
+PY
+) || { echo "FIXTURE STAMPING FAILED (python3 required)"; exit 1; }
+NEED_GEN=0
+[ -f fixtures/.gh514-stamp ] && [ "$(cat fixtures/.gh514-stamp)" = "$STAMP_WANT" ] || NEED_GEN=1
 for fx in mlp_wide gpt2_mini; do
-  if [ ! -f "fixtures/$fx.safetensors" ]; then
-    echo "fixtures/$fx.safetensors missing; attempting gen_fixtures.py (needs numpy+safetensors)"
-    python3 gen_fixtures.py || { echo "FIXTURES MISSING"; exit 1; }
-  fi
+  [ -f "fixtures/$fx.safetensors" ] || NEED_GEN=1
 done
+if [ "$NEED_GEN" = 1 ]; then
+  echo "regenerating fixtures (gen_fixtures.py; needs numpy+safetensors)"
+  python3 gen_fixtures.py || { echo "FIXTURES MISSING"; exit 1; }
+  echo "$STAMP_WANT" > fixtures/.gh514-stamp
+fi
 EXE=../_build/default/benchmarks/runners/ocannl/bench_mlp.exe
 GPT=../_build/default/benchmarks/runners/ocannl/bench_gpt.exe
 FIT=../_build/default/tools/fit_envelope.exe

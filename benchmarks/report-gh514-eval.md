@@ -157,9 +157,11 @@ scores), every step time matched the plain default within spread, and no pick ev
 | metal f32 | 5.97 → 5.97 → 5.99 → 5.96 ms |
 | cuda f32 | 4.13 → 4.13 → 4.13 → 4.10 ms |
 | hip bf16 | 3.56 → 3.57 → 3.58 → 3.58 ms |
-| hip f32 | 1.51 → 1.51 → 1.50 → 1.52 ms |
 
-The hip bf16 row is the sharper null: at the precision under study the mma family is genuinely
+(An earlier supplemental hip f32 battery agreed on every conclusion — chose default, ties,
+step parity at 1.50–1.52 ms — but is not tabulated: it carried the box's bf16-fitted compute
+peak into f32 compiles, the very cross-precision provenance bounded below, and the driver
+deliberately produces no such combination.) The hip bf16 row is the sharper null: at the precision under study the mma family is genuinely
 in play, and the ledger shows why the pick still stays default — under the untuned default
 placements the cast twins are virtual, the site reads f32 masters, and the tensorized branch
 refutes (the very premise the tuned cells measure), so the lattice behind it is unreachable;
@@ -263,7 +265,7 @@ cells are the commands, and the script is deliberately the single place they are
 Runs behind this report: per box, 8 tuned cells (A, the two B arms of the pruning A/B, five
 budget-5 chains) — counted in the implementation's unit that is **41 `Autotune.tune` searches
 each** (every cell runs both placement arms, and each of the five chains measures its five
-flips as full searches) — plus the untuned compiles (7 per box, and hip retains the supplemental 4-cell f32 mlp battery alongside its bf16 one — 11 there) and the fit; serial per box, all three boxes
+flips as full searches) — plus the untuned compiles (7 per box; an untabulated supplemental hip f32 battery — see the untuned section — adds 4 more there) and the fit; serial per box, all three boxes
 in parallel, ~8 min (cuda) to ~25 min (metal) wall each. The checked-in driver additionally
 pins every cell's treatment explicitly — the tuned cells enable the search and zero the flip
 budget where it is not the treatment, the control arms disable their gates, the gpt cells pin
