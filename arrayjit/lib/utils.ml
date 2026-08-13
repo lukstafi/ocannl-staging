@@ -149,12 +149,14 @@ let known_config_keys =
       "autotune_split_reduce_max_sites";
       "autotune_log";
       "tune_inline_flips";
+      "tune_flip_ordering";
       "strict_failure_classification";
       (* Analytic cost model (gh-ocannl-491) *)
       "autotune_keep_fraction";
       "autotune_bound_pruning";
       "autotune_calibration_file";
       "model_default_schedule";
+      "model_default_placements";
       "model_peak_flops";
       "model_peak_memory_bandwidth";
       (* Numerics policy (gh-ocannl-478) *)

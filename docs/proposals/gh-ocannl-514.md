@@ -230,11 +230,33 @@ quality.
    default pipeline. The floor rises from "default preset" to "model-optimal schedule shape"
    for zero measurement cost, and the result is immediately checkable against the current
    default — lowest-risk first deployment.
+
+   **Implemented** — the family levels in phase 4a, the placement levels under config
+   `model_default_placements` (= N > 0): before the compile, B&B over the top-N ranked flip
+   candidates, one keep/flip choice per level, each leaf a placement vector whose hermetic
+   lowering (`Context.lowered_for_decisions`, riding the gh-560 analysis cache) is priced by
+   the same selection that scores the pipelines — so the search is joint over placements and
+   sketch families. The all-keep leaf is visited first, making the default placements' score
+   the incumbent (ties stay with the default), and `Schedule_space.search`'s bound receives
+   the decision path, so the partial-vector floor tightens per subtree — this is exactly where
+   phase 3's floors differentiate, the family levels' floor being schedule-invariant. The
+   picked vector applies through the same context-level decisions as the tuned chain's flips
+   and stays advisory: a classified failure under the picked placements falls back to
+   selecting from the caller's own placements.
 2. **Tuned path**: prune against a measured incumbent only when the optimistic bound exceeds
    the incumbent's measured time; return the top-K leaves for measurement. The greedy
    `tune_inline_flips` chain — the minimal search over the placement dimension, one flip at a
    time, no bounds — is both the incumbent-provider and the baseline any B&B must beat. The
    model never overrides a measured result, and every survivor timing is a calibration row.
+
+   **Implemented** as the chain upgraded in place, keeping the hierarchy (placements outer,
+   tiling/fission searched by the nested `Autotune.tune` per measured flip — the joint
+   inline × tile × fission space): the chain walks `Autotune.placement_surface`'s
+   enablement-first ranking (below), and under `autotune_bound_pruning` a `Materialize` flip
+   whose partial-vector floor — monotone in the chain's accumulated commitments (accepted
+   materializations, kept default-materialized nodes) — already meets the best measured time
+   is fathomed without spending budget, phase 4b's admissible rule one level up. The budget
+   counts measured flips, so fathomed candidates let deeper ones in.
 
 ## Node ordering: enablement, not marginal cost
 
@@ -252,6 +274,15 @@ an mma-eligible site is computable from the seeders' own site classification, be
 compile. The gh-558 data is the ready-made test case for whatever ordering replaces cost-only
 ranking.
 
+**Implemented.** `Autotune.placement_enablement` computes the prior from the seeders' own site
+classification, before any compile: the mma-eligible matmul sites (whole-routine and
+per-fission-segment, the granularity the seeders detect at) of the all-materialized
+specialization that have no eligible counterpart under default placements. A `Materialize` flip
+of such a site's operand or destination is family-unlocking and ranks first; an `Inline` flip
+of any eligible site's node can only move away from the family and ranks last; recompute cost
+orders within each class (`Autotune.rank_flip_candidates`). Config `tune_flip_ordering`
+defaults to `enablement`; `cost` keeps the legacy ranking as the evaluation baseline.
+
 ## Phases
 
 0. **This PR**: the design; envelope fitting (`Calibration` schema + fitter + tool); the
@@ -266,7 +297,10 @@ ranking.
    accumulated) calibration data.
 4. **The driver**: B&B for the untuned-default path, checked against `model_default` and the
    current default; then the tuned path with measured incumbents and top-K leaf measurement,
-   with the greedy flip chain as the baseline to beat.
+   with the greedy flip chain as the baseline to beat. Delivered in two steps: the family
+   levels (4a) with tuned bound pruning (4b), then the placement levels in both regimes — the
+   enablement ordering, the partial-vector floors, `model_default_placements`, and the
+   bound-pruned enablement-ranked chain (see the implemented notes above).
 5. **Interval bounding over symbolic tile parameters** (gated on #490): footprint and occupancy
    are monotone in tile sizes, so whole boxes of the divisor lattice bound by interval
    arithmetic — the regime where B&B strictly dominates the beam.

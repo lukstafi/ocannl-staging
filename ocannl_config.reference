@@ -381,6 +381,21 @@
 # alone, its cost being a full search per candidate.
 #tune_inline_flips=0
 
+# gh-ocannl-514: the ranking of the flip chain's candidates. `enablement` (the default) sorts the
+# decision surface family-first: a `materialize` flip whose node is an operand or destination of
+# an mma-eligible matmul site that exists only in the all-materialized specialization — so its
+# materialization is what makes the tensorized family expressible — ranks ahead of every
+# recompute-cost rank, and an `inline` flip of an operand or destination of any eligible site
+# ranks last (it can only move away from that family); recompute cost descending within each
+# class. `cost` restores the pure recompute-cost order (gh-555's), kept as the evaluation
+# baseline: on gh-558's mlp_wide/hip/bf16 cell it buried the family-unlocking cast twins below
+# four no-op inline flips and a budget-5 chain found nothing. With autotune_bound_pruning=true
+# the chain additionally skips, without spending budget, any materialize flip whose
+# partial-placement-vector roofline floor (`Cost_model.completion_floor` on the all-materialized
+# lowering, monotone in the chain's accumulated commitments) already meets the best measured
+# time — the same admissible direction as the sketch-level pruning.
+#tune_flip_ordering=enablement
+
 # If true, an exception crossing a candidate transform/codegen/compile/link boundary is fatal unless
 # a narrow compiler seam or the backend classifies it. If false, unattributed compile-side failures
 # of tuner/advisory/cache work are temporarily contained as `Unclassified` declines. Launch and sync
@@ -440,6 +455,21 @@
 # scheduled form fails that same check are excluded from the ranking, so the model chooses
 # among schedules that can actually be built.
 #model_default_schedule=false
+
+# gh-ocannl-514, the placement levels of the untuned regime: with model_default_schedule=true and
+# this set to N > 0, `Autotune.model_default` first branch-and-bounds over the top-N ranked flip
+# candidates of the placement decision surface (see tune_flip_ordering) — each level a keep/flip
+# choice, each leaf a placement vector whose hermetic lowering is scored by the same selection
+# that scores the pipelines (so the search is joint over placements and sketch families), the
+# all-keep leaf scored first so ties stay with the default placements, and subtrees fathomed by
+# the partial vector's roofline floor, which unlike the sketch levels' schedule-invariant floor
+# tightens as materialize commitments accumulate (gh-ocannl-514 phase 3). The picked vector is
+# applied via the same context-level decisions as `Train.tune_placements`' flips and remains
+# advisory: any classified failure under the picked placements falls back to selecting from the
+# caller's own placements. Zero timing runs either way; the walk costs up to 2^N hermetic
+# lowerings plus model scoring, so keep N small (the levels beyond N keep their default
+# placements). 0 (the default) disables the placement levels.
+#model_default_placements=0
 
 # Overrides the backend's advisory peak arithmetic throughput, in FLOP/s (single precision, FMA
 # counted as two operations), used as the compute leg of the analytic cost model's roofline

@@ -108,6 +108,8 @@
       candidate. Static indices are bound to the midpoint of their declared ranges during timing and
       restored afterwards. *)
 
+open Base
+
 type sketch_params = {
   sk_gpu : bool;
   sk_mma : bool;
@@ -467,6 +469,75 @@ val model_prefilter : keep_fraction:float -> ('a * float option) list -> ('a * f
     [ceil (keep_fraction * n)] of the [n] scored ones (at least one; ties at the cutoff are all
     kept, so the outcome is independent of enumeration order). The identity when
     [keep_fraction >= 1]. Exposed for tests. *)
+
+val placement_enablement :
+  limits:Ir.Backend_intf.hardware_limits ->
+  static_indices:Ir.Indexing.static_symbol list ->
+  base:Ir.Low_level.optimized ->
+  allmat:Ir.Low_level.optimized ->
+  Set.M(Ir.Tnode).t * Set.M(Ir.Tnode).t
+(** The enablement prior of the placement levels (gh-ocannl-514, the gh-ocannl-558 lesson): given
+    the default-policy lowering and its all-materialized specialization, classify the flip
+    candidates by whether their placement decides a sketch family's {e expressibility} — computable
+    from the seeders' own site classification, before any compile. Returns
+    [(enablement, disablement)]:
+
+    - [enablement]: operand/destination nodes of an mma-eligible matmul site (the backend
+      advertises a format tile for the site's storage-precision triple,
+      whole-routine or per-fission-segment — the granularity the seeders detect at) that exists in
+      the all-materialized lowering but has no eligible counterpart under default placements.
+      Materializing such a node is what makes the tensorized family expressible — the flip changes
+      the feasible set, not just the objective, which the per-node recompute-cost bound has no term
+      for (on gh-558's [mlp_wide]/hip/bf16, cost ranking buried the family-unlocking cast twins
+      below four no-op [`Inline] flips and a budget-5 chain found nothing).
+    - [disablement]: operand/destination nodes of sites already eligible under default placements.
+      An [`Inline] flip of a node in {e either} set can only move away from an eligible site —
+      {!rank_flip_candidates} demotes those.
+
+    Empty on backends without an [mma] capability. A classified fission failure degrades to
+    whole-routine detection; the classification is a ranking prior, never a legality fact. *)
+
+val rank_flip_candidates :
+  ordering:[ `Cost | `Enablement ] ->
+  enablement:Set.M(Ir.Tnode).t ->
+  disablement:Set.M(Ir.Tnode).t ->
+  Ir.Low_level.flip_candidate list ->
+  Ir.Low_level.flip_candidate list
+(** Deduplicate (by [Tn.uid], keep-first) and rank the decision surface. [`Cost] is the legacy
+    recompute-cost-descending order (the gh-555 chain's, kept as the evaluation baseline);
+    [`Enablement] sorts family-unlocking [`Materialize] flips ([enablement] members) first and
+    family-breaking [`Inline] flips (members of either set) last, cost-descending within each
+    class. Config [tune_flip_ordering] selects the default. Exposed for tests. *)
+
+type placement_surface = {
+  ps_candidates : Ir.Low_level.flip_candidate list;
+      (** Deduplicated, ranked per {!rank_flip_candidates} under config [tune_flip_ordering]. *)
+  ps_enablement : Set.M(Ir.Tnode).t;
+  ps_disablement : Set.M(Ir.Tnode).t;
+  ps_floor_ms : materialized:Ir.Tnode.t list -> float option;
+      (** The roofline floor (ms) of a partial placement vector: every completion in which
+          [materialized] holds costs at least this much — {!Ir.Cost_model.completion_floor} on the
+          all-materialized specialization with the other candidates' placements open, under the
+          same envelope constants as {!model_score}. Monotone in [materialized] (commitments only
+          narrow [open_placement]), so it is a sound branch-and-bound fathom: in the tuned regime,
+          a flip whose floor meets the best {e measured} time cannot win and is skipped without
+          spending budget (the admissible direction — the bound already exceeds the incumbent's
+          measurement). [None] when no envelope constant is present. *)
+}
+(** The placement decision surface prepared for search (gh-ocannl-514): the per-node
+    inline/materialize levels of the joint placement x sketch x fission space. *)
+
+val placement_surface :
+  ?ordering:[ `Cost | `Enablement ] ->
+  Context.t ->
+  Ir.Assignments.comp ->
+  Ir.Indexing.unit_bindings ->
+  placement_surface
+(** Read and rank the decision surface from [ctx] (analyze-only — two hermetic lowerings via
+    {!Context.lowered_for_decisions}, sharing the gh-560 analysis cache; no backend codegen, no
+    effect on [ctx]). [ordering] defaults from config [tune_flip_ordering] ([enablement]).
+    Consumed by [Train.tune_placements]' flip refinement and by {!model_default}'s placement
+    search (config [model_default_placements]). *)
 
 type model_choice = {
   mc_label : string;
