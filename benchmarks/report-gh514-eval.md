@@ -218,6 +218,12 @@ with `--ocannl_tune_flip_ordering=cost` as the baseline arm, and the untuned cel
 cd benchmarks && BENCH_FIXTURE=fixtures/mlp_wide.safetensors BENCH_TUNE=0 ../_build/default/benchmarks/runners/ocannl/bench_mlp.exe --ocannl_backend=hip --ocannl_autotune_log=true --ocannl_model_peak_flops=1.485901e+12 --ocannl_model_default_schedule=true --ocannl_model_default_placements=5
 ```
 
-Runs behind this report: 3 boxes × (1 calibration A/B + 2 pruning A/Bs + 5 budget-5 chain
-searches + 7–11 untuned compiles) plus the fits — 15 tuned `Autotune.tune` searches per GPU
-box, serial per box, all three boxes in parallel, ~8 min (cuda) to ~25 min (metal) wall each.
+Runs behind this report: per box, 8 tuned cells (A, the two B arms of the pruning A/B, five
+budget-5 chains) — counted in the implementation's unit that is **41 `Autotune.tune` searches
+each** (every cell runs both placement arms, and each of the five chains measures its five
+flips as full searches) — plus 7 untuned compiles and the fit; serial per box, all three boxes
+in parallel, ~8 min (cuda) to ~25 min (metal) wall each. The checked-in driver additionally
+pins every control cell's experimental gates to their disabled values (an ambient config could
+otherwise contaminate the matrix) and forces the untuned mlp cells to f32; the original runs
+predate those pins but were executed with all gates at their defaults (off) and the D cells
+rerun at f32, so the driver reproduces exactly what is tabulated above.
