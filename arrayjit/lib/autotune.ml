@@ -3634,8 +3634,11 @@ let calibration_file =
 
 (* The same candidate can be timed repeatedly within a process (a test tuning the same preset in
    two arms, a re-tune after a cache miss). A repeat violation restates the first one — the implied
-   minima move only by timing jitter — so the unconditional warning fires once per distinct digest
-   tag, while every timing still contributes its own calibration row and autotune_log line. *)
+   minima move only by timing jitter — so the unconditional warning fires once per distinct
+   (backend, digest tag), while every timing still contributes its own calibration row and
+   autotune_log line. The backend belongs in the key: the digest is schedule-level, so one process
+   tuning the same code on two backends can produce identical tags whose envelope constants — and
+   therefore whose implied minima — are independent. *)
 let warned_bound_violations = Hash_set.create (module String)
 
 (* Bound pruning against the measured incumbent (gh-ocannl-514 phase 4b): a sketch candidate whose
@@ -3694,9 +3697,10 @@ let emit_calibration ~backend ~limits ~label ~digest ~measured_ms (opts : LL.opt
        match model_ms with Some m -> Float.(m > measured_ms) | None -> false
      in
      if flops_leg || bytes_leg || (bound_exceeds && (not flops_approx) && not bytes_approx) then
-       (if Hash_set.mem warned_bound_violations dtag then ()
+       (let warn_key = backend ^ "|" ^ dtag in
+        if Hash_set.mem warned_bound_violations warn_key then ()
         else
-          let () = Hash_set.add warned_bound_violations dtag in
+          let () = Hash_set.add warned_bound_violations warn_key in
           let minima =
             String.concat ~sep:" and "
               (List.filter_opt
