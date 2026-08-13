@@ -355,7 +355,8 @@
 # likewise invisible to the digest, gh-ocannl-572), and the worker-pool signature on CPU
 # backends (gh-ocannl-530). Runs under different regimes therefore keep separate entries and can
 # share one directory; flipping any of those knobs re-tunes rather than replaying a winner
-# crowned elsewhere.
+# crowned elsewhere. Which key belongs to which component is recorded key by key in
+# `Utils.config_key_classification` and checked by `test/operations/digest_completeness`.
 # Relative paths resolve against the working directory.
 # An empty value disables the cache (every `Autotune.tune` call searches afresh).
 #autotune_cache_dir=autotune_cache

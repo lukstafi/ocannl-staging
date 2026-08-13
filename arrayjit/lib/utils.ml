@@ -172,6 +172,215 @@ let known_config_keys =
       "max_shape_error_origins";
     ]
 
+(** {2 Cache-identity classification of the configuration keys (gh-ocannl-572)} *)
+
+(** What a configuration key does to the identity a compilation cache keys on. A cache replays a
+    schedule crowned by an earlier process onto freshly lowered code, and the only thing between
+    "replay" and "replay from another regime" is that identity: gh-ocannl-568 measured a
+    default-flags run replaying a tf32-tuned winner at 5.9x slower than not tuning at all, because
+    the numerics policy was absent from the key. So every key is classified here, and
+    [test/operations/digest_completeness] fails on one that is not — adding a knob forces the
+    question "does this change what a cached schedule means?" while the answer is still fresh. *)
+type config_key_class =
+  | Aggregate
+      (** Selects values for other keys rather than acting itself; those keys carry the
+          classification. *)
+  | Code_borne
+      (** Changes the lowered code or its placements, hence the canonical digest
+          ([Ir.Schedule_cache.digest], the ["digest"] key component) that every cache key starts
+          with. Nothing to add: the code {e is} the identity. *)
+  | Keyed of string
+      (** Invisible to the lowered code, so it has to be carried explicitly — by this named
+          component of [Ir.Schedule_cache.key_components]. This is the class gh-ocannl-568 was an
+          omission from. *)
+  | Search_shaping
+      (** Shapes which schedule a search proposes, times or crowns, but not what a crowned one
+          means or how fast it then runs: a saved schedule carries its own ops and replay re-derives
+          nothing from these. Two processes differing only here may find different winners; each is
+          a valid winner for the other. *)
+  | Execution_neutral
+      (** Host-side behavior only: logging, debug artifacts, directories, validation and error
+          reporting, allocation layout, launch mechanics. Nothing a kernel does depends on it. *)
+
+(** The classification of every key in {!known_config_keys}, grouped by class and by reason. The
+    reason is the reviewable part: the class alone does not say why, and why is what a reviewer has
+    to check when a key is added to a group or moved between two. *)
+let config_key_classification : (config_key_class * string * string list) list =
+  [
+    ( Aggregate,
+      "picks the values other keys take; each of those carries its own classification",
+      [ "profile"; "no_config_file" ] );
+    ( Code_borne,
+      "an optimizer decision: it changes the code that comes out of lowering",
+      [
+        "virtualize_max_visits";
+        "virtualize_max_inline_reduction";
+        "enable_device_only";
+        "inline_scalar_constexprs";
+        "inline_simple_computations";
+        "inline_complex_computations";
+        "memory_budget";
+      ] );
+    ( Code_borne,
+      "it changes the assignments the front end builds, hence the code they lower to",
+      [ "default_prec"; "default_prng_variant"; "limit_constant_fill_size" ] );
+    ( Code_borne,
+      "it decides a tensor node's placement class, which the canonical digest carries: identical \
+       code over [Local] scratch and over an [On_device] buffer generates different kernels",
+      [ "stack_threshold_in_bytes" ] );
+    ( Keyed "backend",
+      "it decides which backend compiles, and the backend name is that component",
+      [ "backend"; "prefer_backend_uniformity" ] );
+    ( Keyed "numerics",
+      "the numerics policy is consulted at codegen and by the autotune tile-shape choice, never in \
+       the lowered code (gh-ocannl-568)",
+      [ "tf32_matmuls"; "narrow_compute_f32"; "fp16_arithmetic" ] );
+    ( Keyed "pool",
+      "it decides the worker pool timings execute on, and CPU crowns do not transfer across pools \
+       (gh-ocannl-530)",
+      [ "cc_pool_core_class" ] );
+    ( Keyed "codegen",
+      "a cc-backend codegen knob: rendering or compiling a kernel reads it, after the lowered code \
+       the digest names",
+      [
+        "cc_backend_optimization_level";
+        "cc_backend_compiler_command";
+        "cc_backend_arch_flags";
+        "cc_backend_simd_flags";
+        "cc_backend_fp_contract";
+        "cc_backend_fast_math";
+        "cc_vector_bytes";
+        "cc_fp16_arithmetic";
+        "cc_parallel_grid";
+        "cc_parallel_chunks";
+        "cc_grid_private_bytes_cap";
+      ] );
+    ( Keyed "codegen",
+      "a backend-independent codegen knob: every backend's emission reads it",
+      [
+        "large_models";
+        "big_models";
+        "debug_log_from_routines";
+        "debug_log_to_stream_files";
+      ] );
+    ( Search_shaping,
+      "it defines the untuned default pipeline, which a search seeds from and reports against; a \
+       cached winner carries its own ops and replays without consulting it \
+       ([Schedule.default_schedule_fingerprint] records these for the [default_ms] diagnostic)",
+      [
+        "automatic_gpu_schedule";
+        "gpu_schedule_block_size";
+        "gpu_schedule_min_parallel";
+        "automatic_cpu_schedule";
+        "cpu_schedule_min_parallel";
+        "schedule_fission";
+      ] );
+    ( Search_shaping,
+      "it steers the search: how wide, how long, what is proposed, what is pruned, how candidates \
+       are ranked, and when a candidate's failure ends the search",
+      [
+        "autotune_search";
+        "autotune_beam_width";
+        "autotune_rounds";
+        "autotune_repeats";
+        "autotune_split_reduce_max_sites";
+        "autotune_keep_fraction";
+        "autotune_bound_pruning";
+        "autotune_calibration_file";
+        "model_default_schedule";
+        "model_default_placements";
+        "model_default_geometry_lattice";
+        "model_peak_flops";
+        "model_peak_memory_bandwidth";
+        "strict_failure_classification";
+      ] );
+    ( Search_shaping,
+      "it makes the tuner try alternative inlining decisions; each alternative is a different \
+       program and keys on its own digest",
+      [ "tune_inline_flips"; "tune_flip_ordering" ] );
+    ( Execution_neutral,
+      "startup and configuration-sourcing chatter",
+      [ "suppress_welcome_message"; "log_config_sourcing"; "never_capture_stdout" ] );
+    ( Execution_neutral,
+      "debug artifacts and where they go: the files are written beside the run, the kernels are \
+       what they would have been",
+      [
+        "log_level";
+        "output_debug_files_in_build_directory";
+        "output_dlls_in_build_directory";
+        "build_files_prefix";
+        "clean_up_build_files_on_startup";
+        "clean_up_log_files_on_startup";
+        "output_prec_in_ll_files";
+        "autotune_cache_dir";
+        "autotune_log";
+        "log_buffer_aliasing";
+        "log_memory_budget";
+        "schedule_log_launches";
+        "schedule_log_declines";
+      ] );
+    ( Execution_neutral,
+      "ppx_minidebug logging of the library's own execution",
+      [
+        "snapshot_every_sec";
+        "time_tagged";
+        "elapsed_times";
+        "location_format";
+        "debug_backend";
+        "hyperlink_prefix";
+        "logs_print_scope_ids";
+        "logs_verbose_scope_ids";
+        "log_main_domain_to_stdout";
+        "log_file_stem";
+        "prev_run_prefix";
+        "toc_entry_minimal_depth";
+        "toc_entry_minimal_size";
+        "toc_entry_minimal_span";
+        "debug_highlights";
+        "debug_highlight_pcre";
+        "diff_ignore_pattern_pcre";
+        "diff_max_distance_factor";
+        "debug_scope_id_pairs";
+        "debug_log_truncate_children";
+        "debug_log_prune_upto";
+      ] );
+    ( Execution_neutral,
+      "a check that can refuse or report, but never changes what is emitted",
+      [
+        "check_half_prec_constants_cutoff";
+        "legality_crosscheck";
+        "hip_scratch_validation";
+        "cc_backend_verify_codesign";
+        "cc_backend_post_compile_timeout";
+        "max_shape_error_origins";
+      ] );
+    ( Execution_neutral,
+      "identifier spelling in generated code and in printouts",
+      [ "ll_ident_style"; "cd_ident_style"; "print_decimals_precision" ] );
+    ( Execution_neutral,
+      "host-side execution mechanics: where buffers sit, how many devices a scheduler opens, how \
+       launches are issued, how host-side initialization is seeded. The kernels are unchanged, and \
+       every candidate of a search meets the same mechanics as every other",
+      [
+        "buffer_aliasing";
+        "multidev_num_devices";
+        "gpu_graph_capture";
+        "cuda_printf_fifo_size";
+        "hip_printf_fifo_size";
+        "fixed_state_for_init";
+      ] );
+    ( Execution_neutral,
+      "memoization of toolchain probes: it changes how long resolving a setting takes, not what it \
+       resolves to -- and the resolved values are what the codegen tag records",
+      [ "cc_backend_probe_cache" ] );
+  ]
+
+(** The class and the reason recorded for [key], or [None] when it is unclassified (which
+    [test/operations/digest_completeness] rejects for every known key). *)
+let classify_config_key key =
+  List.find_map config_key_classification ~f:(fun (cls, why, keys) ->
+      if List.mem keys key ~equal:String.equal then Some (cls, why) else None)
+
 let bool_of_config_string ~arg_name s =
   match String.lowercase @@ String.strip s with
   | "true" | "1" -> true

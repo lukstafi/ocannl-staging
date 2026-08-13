@@ -2,6 +2,15 @@
 
 ### Added
 
+- **Cache identity is complete by construction, not by vigilance** (gh-ocannl-572): every
+  configuration key is classified in `Utils.config_key_classification` — code-borne (it reaches the
+  canonical digest through the lowered code), keyed to a named cache-key component, search-shaping,
+  or execution-neutral — with the reason recorded, and `test/operations/digest_completeness` fails
+  on a key that is not classified, on a claimed component that does not exist, and on a key read at
+  codegen yet classified code-borne. Generalizes gh-ocannl-568, where the numerics policy's absence
+  from the schedule-cache key let a default-flags run replay a tf32-tuned winner at 5.9x slower than
+  not tuning at all.
+
 - **Hand-built lowered code can be executed, not only analyzed** (gh-ocannl-562): `Context.compile`
   and backend `compile` take `?prelowered:Ir.Low_level.optimized`, which replaces the compile's own
   lowering of the comp. Unlike `?lowered_transform`, which substitutes the codegen input only, the

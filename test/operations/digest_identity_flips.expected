@@ -1,0 +1,11 @@
+the identity is stable across two compiles of the same program: true
+the code-borne flip took effect: true
+a code-borne knob (limit_constant_fill_size) changes the digest: true
+and therefore the cache key: true
+a keyed codegen knob (large_models) leaves the digest alone: true
+while the cache key separates the regimes: true
+a cc codegen knob (cc_vector_bytes) leaves the digest alone: true
+and separates the key exactly on the backend that reads it: true
+a search-shaping and an execution-neutral knob leave the identity untouched: true
+a numerics knob (tf32_matmuls) leaves the digest alone: true
+while the cache key separates the policies: true

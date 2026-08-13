@@ -284,7 +284,11 @@ the retained procedural analyses alongside the affine engine and raises on diver
   `cc_vector_bytes`, `cc_fp16_arithmetic`, `cc_parallel_grid`/`cc_parallel_chunks`,
   `cc_grid_private_bytes_cap`) — and the CPU worker-pool signature (gh-ocannl-530). Backends hand
   their components to `cache_key` as the whole `hardware_limits` record, so a component added
-  there reaches every call site.
+  there reaches every call site. Every config key is classified against these components in
+  `Utils.config_key_classification` — code-borne (it reaches the digest through the code), keyed
+  (it must be carried), search-shaping, or execution-neutral, each with its reason —
+  and `test/operations/digest_completeness` fails on a key that is not classified, with
+  `digest_identity_flips` calibrating one representative of each class against a real compile.
   **Schedule identity pins
   numerics** (gh-ocannl-484): a reduction-reassociating op (`Split_reduce`, `Swap`/`Vectorized`
   over accumulations, `Tensorize`) makes the computed values a function of the schedule — e.g.

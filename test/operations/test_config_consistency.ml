@@ -1,5 +1,6 @@
 open Base
 open Stdio
+module Config_key_scan = Test_utils.Config_key_scan
 
 (* The reference file ships with every setting COMMENTED OUT (gh-ocannl-559), so that copying it
    wholesale to an `ocannl_config` states no settings. A commented-out setting is spelled `#key=…`
@@ -41,34 +42,6 @@ let extract_keys filename =
         | None -> None)
   |> Set.of_list (module String)
 
-(* Scan OCaml source files for arg_name literal strings in get_global_arg/get_global_flag calls. Two
-   forms appear in the codebase: - ~arg_name:"key" (direct call sites) - ?(arg_name = "key")
-   (optional parameter defaults, e.g. get_style in tnode.ml) *)
-let extract_source_keys source_files =
-  let find_all_in content marker =
-    let mlen = String.length marker in
-    let n = String.length content in
-    let rec loop i acc =
-      match String.substr_index ~pos:i content ~pattern:marker with
-      | None -> acc
-      | Some start ->
-          let key_start = start + mlen in
-          let key_end =
-            match String.lfindi content ~pos:key_start ~f:(fun _ c -> Char.equal c '"') with
-            | None -> n
-            | Some j -> j
-          in
-          let key = String.sub content ~pos:key_start ~len:(key_end - key_start) in
-          loop (key_end + 1) (key :: acc)
-    in
-    loop 0 []
-  in
-  List.concat_map source_files ~f:(fun fname ->
-      let content = In_channel.read_all fname in
-      find_all_in content {|arg_name:"|} @ find_all_in content {|arg_name = "|})
-  |> List.filter ~f:(fun s -> (not (String.is_empty s)) && not (String.contains s '\n'))
-  |> Set.of_list (module String)
-
 let () =
   if Array.length Stdlib.Sys.argv < 3 then (
     eprintf "Usage: %s <reference_file> <source_file...>\n" Stdlib.Sys.argv.(0);
@@ -79,7 +52,7 @@ let () =
   in
   let file_keys = extract_keys reference_file in
   let code_keys = Utils.known_config_keys in
-  let source_keys = extract_source_keys source_files in
+  let source_keys = Config_key_scan.keys_in_files source_files in
   let ok = ref true in
   let fail msg =
     ok := false;

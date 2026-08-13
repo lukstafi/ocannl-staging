@@ -9,6 +9,10 @@
 open Base
 open Stdio
 
+(** Scanning OCaml sources for the config keys they read, shared by the configuration-consistency
+    tests. *)
+module Config_key_scan = Config_key_scan
+
 (** [concise_float ~prec v] formats [v] with [prec] decimals, normalizing exponent digits portably.
     Re-export of [Ir.Ndarray.concise_float]. *)
 let concise_float = Ir.Ndarray.concise_float

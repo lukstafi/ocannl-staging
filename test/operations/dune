@@ -1068,7 +1068,7 @@
 (executable
  (name test_config_consistency)
  (modules test_config_consistency)
- (libraries base arrayjit.utils stdio))
+ (libraries base arrayjit.utils stdio test_utils))
 
 (rule
  (target test_config_consistency.actual)
@@ -1089,9 +1089,11 @@
     %{dep:../../arrayjit/lib/context.ml}
     %{dep:../../arrayjit/lib/cuda_backend.ml}
     %{dep:../../arrayjit/lib/hip_backend.ml}
+    %{dep:../../arrayjit/lib/metal_backend.ml}
     %{dep:../../arrayjit/lib/low_level.ml}
     %{dep:../../arrayjit/lib/schedule.ml}
     %{dep:../../arrayjit/lib/schedule_outcome.ml}
+    %{dep:../../arrayjit/lib/schedulers.ml}
     %{dep:../../arrayjit/lib/autotune.ml}
     %{dep:../../arrayjit/lib/sketch_families.ml}
     %{dep:../../arrayjit/lib/tnode.ml}
@@ -1105,6 +1107,48 @@
  (package neural_nets_lib)
  (action
   (diff test_config_consistency.expected test_config_consistency.actual)))
+
+(executable
+ (name digest_completeness)
+ (modules digest_completeness)
+ (libraries base arrayjit.utils arrayjit.ir stdio test_utils))
+
+(rule
+ (target digest_completeness.actual)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (action
+  (with-stdout-to
+   %{target}
+   (run
+    %{dep:digest_completeness.exe}
+    %{dep:../../arrayjit/lib/utils.ml}
+    %{dep:../../arrayjit/lib/affine.ml}
+    %{dep:../../arrayjit/lib/numerics.ml}
+    %{dep:../../arrayjit/lib/backends.ml}
+    %{dep:../../arrayjit/lib/c_syntax.ml}
+    %{dep:../../arrayjit/lib/cc_backend.ml}
+    %{dep:../../arrayjit/lib/context.ml}
+    %{dep:../../arrayjit/lib/cuda_backend.ml}
+    %{dep:../../arrayjit/lib/hip_backend.ml}
+    %{dep:../../arrayjit/lib/metal_backend.ml}
+    %{dep:../../arrayjit/lib/low_level.ml}
+    %{dep:../../arrayjit/lib/schedule.ml}
+    %{dep:../../arrayjit/lib/schedule_outcome.ml}
+    %{dep:../../arrayjit/lib/schedulers.ml}
+    %{dep:../../arrayjit/lib/autotune.ml}
+    %{dep:../../arrayjit/lib/sketch_families.ml}
+    %{dep:../../arrayjit/lib/tnode.ml}
+    %{dep:../../arrayjit/lib/assignments.ml}
+    %{dep:../../tensor/tensor.ml}
+    %{dep:../../tensor/row.ml}
+    %{dep:../../lib/train.ml}))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff digest_completeness.expected digest_completeness.actual)))
 
 (test
  (name test_metal_pool_bindings)
@@ -1339,6 +1383,17 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_cache_numerics)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
+ (name digest_identity_flips)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules digest_identity_flips)
  (libraries base ocannl stdio)
  (preprocess
   (pps ppx_here ppx_ocannl)))
