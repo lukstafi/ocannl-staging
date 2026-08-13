@@ -3904,10 +3904,13 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
     | Get_merge_buffer _ | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ -> false
     | Local_scope { body; _ } -> body_reads uid body
     | Ternop (_, (a, _), (b, _), (c, _)) -> reads_tn uid a || reads_tn uid b || reads_tn uid c
-    (* The dead operand of a projection is never evaluated (codegen renders only the used one). *)
-    | Binop (Ops.Arg1, (a, _), _) -> reads_tn uid a
-    | Binop (Ops.Arg2, _, (b, _)) -> reads_tn uid b
-    | Binop (_, (a, _), (b, _)) -> reads_tn uid a || reads_tn uid b
+    | Binop (op, (a, _), (b, _)) -> (
+        (* The dead operand of a projection is never evaluated (codegen renders only the used one),
+           per {!Ops.binop_conditionality}. A gated operand can still evaluate, so it counts. *)
+        match Ops.binop_conditionality op with
+        | Ops.Only_first -> reads_tn uid a
+        | Ops.Only_second -> reads_tn uid b
+        | Ops.Both_operands | Ops.Gated_second -> reads_tn uid a || reads_tn uid b)
     | Unop (_, (a, _)) -> reads_tn uid a
   and body_reads uid (llc : t) =
     match llc with
@@ -4004,13 +4007,16 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
         scalar ~loops ~path ~guarded ~arg_c ?stmt_write a;
         scalar ~loops ~path ~guarded ~arg_c ?stmt_write b;
         scalar ~loops ~path ~guarded ~arg_c ?stmt_write c
-    (* The dead operand of a projection is never evaluated (codegen renders only the used one), so
-       it contributes no access. *)
-    | Binop (Ops.Arg1, (a, _), _) -> scalar ~loops ~path ~guarded ~arg_c ?stmt_write a
-    | Binop (Ops.Arg2, _, (b, _)) -> scalar ~loops ~path ~guarded ~arg_c ?stmt_write b
-    | Binop (_, (a, _), (b, _)) ->
-        scalar ~loops ~path ~guarded ~arg_c ?stmt_write a;
-        scalar ~loops ~path ~guarded ~arg_c ?stmt_write b
+    | Binop (op, (a, _), (b, _)) -> (
+        (* The dead operand of a projection is never evaluated (codegen renders only the used one),
+           so it contributes no access; a gated operand can evaluate, and these accesses are the
+           guards-taken upper bound — both per {!Ops.binop_conditionality}. *)
+        match Ops.binop_conditionality op with
+        | Ops.Only_first -> scalar ~loops ~path ~guarded ~arg_c ?stmt_write a
+        | Ops.Only_second -> scalar ~loops ~path ~guarded ~arg_c ?stmt_write b
+        | Ops.Both_operands | Ops.Gated_second ->
+            scalar ~loops ~path ~guarded ~arg_c ?stmt_write a;
+            scalar ~loops ~path ~guarded ~arg_c ?stmt_write b)
     | Unop (_, (a, _)) -> scalar ~loops ~path ~guarded ~arg_c ?stmt_write a
   in
   code ~loops:[] ~path:[] ~guarded:false llc;

@@ -124,6 +124,20 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
 
 ## Lowering, virtualization, indexing
 
+- **Which operands of an op actually evaluate is `Ops.binop_conditionality` /
+  `Ops.ternop_conditionality`, and nowhere else** (gh-ocannl-582). Both matches are exhaustive, so
+  adding an op forces the decision; the consumers are `Low_level.affine_accesses` (a discarded
+  projection operand makes no access), `Cost_model.analyze` (upper), `Cost_model.floor_flops` plus
+  its `floor_uncertainty` pre-pass (floor), and `C_syntax.pp_scalar` / `debug_float` (a projection
+  emits its selected operand alone). Before the classifier existed the same case analysis was
+  restated in each, and one phase-3 review re-aligned them three times running — `Where`, then
+  `And`/`Or` and the projections, then `Relu_gate`/`Satur01_gate`.
+- The upper cost walk charges every operand that is *rendered*, which is more than can *execute*:
+  a `Where` arm's (or a gated operand's) `Local_scope` renders as statements hoisted OUT of the
+  conditional expression — `C_syntax.pp_scalar` returns its definitions separately — so both arms'
+  scope bodies really do run. Only an operand no renderer emits at all (a projection's discarded
+  one) may be dropped from the upper bound. The floor's `Int.min` is unaffected: hoisting only
+  loosens a lower bound.
 - Both digests over lowered code — the analysis cache's key (`Low_level.analysis_digest`) and the
   schedule cache's canonical identity (`Schedule_cache.canonicalize`) — share ONE walk,
   `Low_level.Canonical_render.emit` (gh-ocannl-563). Render a newly added `Low_level.t` /

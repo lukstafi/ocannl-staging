@@ -497,6 +497,55 @@ type ternop =
 
 type op = Ternop of ternop | Binop of binop | Unop of unop [@@deriving sexp, compare, equal]
 
+(** {2 Operand evaluation}
+
+    Which of an operator's operands actually evaluate — decided here, next to the op definitions,
+    and nowhere else (gh-ocannl-582). An operator whose rendering discards or short-circuits an
+    operand is a fact three unrelated passes have to agree on:
+
+    - the renderers ({!binop_c_syntax}, {!ternop_c_syntax} and every backend's shadowing
+      [binop_syntax] / [ternop_syntax], plus {!C_syntax.pp_scalar}, which emits a projection's
+      selected operand alone) decide what a kernel actually evaluates;
+    - {!Low_level.affine_accesses} enumerates the accesses an unevaluated operand does not make;
+    - {!Cost_model}'s upper and floor walks charge, respectively, the most and the least an
+      operand tree can cost, and its certainty pre-pass decides whose reads are conditional.
+
+    They drifted apart three times in one review because each restated the same case analysis. Both
+    classifiers below are matched exhaustively (no wildcard arm), so adding an operator to {!binop}
+    or {!ternop} forces the decision here, and every consumer inherits it. The renderers are the
+    ground truth this describes, so they do not consult it. *)
+
+type binop_conditionality =
+  | Both_operands  (** Both operands are always evaluated. *)
+  | Gated_second
+      (** The first operand is always evaluated, the second one only when the first passes a test:
+          the C-family renderings are [&&], [||] and the gates' [?:]. Under a guards-taken upper
+          bound the second operand counts; under a guards-never-taken floor it does not. *)
+  | Only_first
+      (** A projection: the operator {e is} its first operand, and the second one is never rendered,
+          hence never evaluated — it costs nothing and accesses nothing under any bound. *)
+  | Only_second  (** A projection onto the second operand; the first is never rendered. *)
+[@@deriving sexp, compare, equal]
+
+type ternop_conditionality =
+  | All_three  (** All three operands are always evaluated. *)
+  | Cond_and_one_arm
+      (** The first operand (the condition) is always evaluated, then exactly one of the second and
+          third: the renderings are short-circuiting [?:] on every backend, deliberately so — MSL's
+          [select] would evaluate both arms and defeat the range guards that lower to [Where]
+          (see {!Metal_backend}'s [ternop_syntax]). *)
+[@@deriving sexp, compare, equal]
+
+let binop_conditionality = function
+  | Arg1 -> Only_first
+  | Arg2 -> Only_second
+  | Relu_gate | Satur01_gate | Or | And -> Gated_second
+  | Add | Sub | Mul | Div | ToPowOf | Max | Min | Mod | Cmplt | Cmple | Cmpeq | Cmpne
+  | Threefry4x32_crypto | Threefry4x32_light | Uint4x32_to_prec_uniform_lane (* | Shl | Shr *) ->
+      Both_operands
+
+let ternop_conditionality = function Where -> Cond_and_one_arm | FMA | Mul3 -> All_three
+
 (** Either the left-neutral or right-neutral element of the operation. Unspecified if the operation
     does not have a neutral element. *)
 let neutral_elem = function

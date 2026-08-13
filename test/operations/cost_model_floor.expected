@@ -42,7 +42,7 @@
   floor <= upper: true
 == arg1 discarded operand ==
   floor: flops=0 bytes=32 exact
-  upper: flops=4 bytes=32
+  upper: flops=0 bytes=32
   floor <= upper: true
 == relu-gate short-circuit ==
   floor: flops=4 bytes=32 inexact

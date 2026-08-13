@@ -14,9 +14,12 @@
      largest member, flagged loose) where the upper takes the capped sum;
    - short-circuiting forms: Where arms, And/Or right operands (conditional — cheaper-arm /
      left-operand floors, conditional reads zeroed) and Arg1/Arg2 discarded operands (never
-     rendered at all);
+     rendered at all, so absent from both extractions);
    - the over-producing open producer, dead loops, and the dynamic-gather fallback flooring to
-     zero where the upper falls back to the whole node. *)
+     zero where the upper falls back to the whole node.
+
+   The short-circuiting cases read their per-op behavior from [Ops.binop_conditionality] /
+   [Ops.ternop_conditionality] (gh-ocannl-582). *)
 
 open Base
 open Ocannl.Operation.DSL_modules
@@ -233,7 +236,7 @@ let () =
   (* And renders as the short-circuiting &&: the certain floor is the op plus the left operand;
      the right comparison (reading M) is conditional — its op floors away and M's read floors to
      zero. Arg1 renders only its selected operand: the discarded expensive right operand
-     contributes nothing to either extraction's floor. *)
+     contributes to neither extraction — not its ops, not its M read. *)
   let l = fresh_tn "L" [| 4 |] in
   let and_case =
     for_over i
