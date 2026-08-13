@@ -2,11 +2,12 @@
 # gh-514 phase 6 evaluation cells, one box per invocation.
 # Usage: gh514_cells.sh <backend> <precision> <repo-root> [pin-prefix...]
 #
-# <precision> applies to the tuned mlp cells (A/B/C) and the gpt cells; the untuned mlp D cells
-# run at the same precision EXCEPT under f16, where they drop to f32 — only the f16 training
-# step is loss-scale-gated (bf16 keeps Plain_step), and Bench_harness.compile_train_step's
-# gated arms bypass the model_default gate, so an f16 D comparison would measure identical
-# executions (see report-gh514-eval.md, the harness-gap note). Control cells pin their
+# <precision> applies to every cell, the untuned mlp D cells included: since the model_default
+# gate reaches the loss-scale-gated step shapes too, an f16 D comparison measures the model
+# against the default rather than two identical executions. Set GH514_D_PREC to run the D cells
+# at a different precision than the tuned cells — GH514_D_PREC=f32 under f16 reproduces the D
+# rows as tabulated in report-gh514-eval.md, which were measured before that gate was extended.
+# Control cells pin their
 # experimental gates (and the tuned cells their search enables) to the treatment's values
 # explicitly: command-line settings out-rank every other config source, so an ambient profile or
 # config file cannot contaminate the matrix.
@@ -22,8 +23,9 @@ while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(OCANNL_[A-Z0-9_]*\)=
 # The BENCH_* family symmetrically: the helpers set every variable a cell consumes, so ambient
 # diagnostic modes (BENCH_SR_SITES and kin) cannot leak into a labeled treatment either.
 while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(BENCH_[A-Z0-9_]*\)=.*/\1/p')
-DPREC=$PREC
-[ "$PREC" = f16 ] && DPREC=f32
+DPREC=${GH514_D_PREC:-$PREC}
+case $DPREC in f32|bf16|f16) ;; *) echo "bad GH514_D_PREC: $DPREC"; exit 1;; esac
+[ "$DPREC" = "$PREC" ] || echo "D cells at $DPREC (tuned cells at $PREC)"
 FAILED=""
 cd "$ROOT" || exit 1
 opam exec -- dune build tools/fit_envelope.exe benchmarks/runners/ocannl/bench_mlp.exe \
@@ -140,8 +142,8 @@ mlp C-enab-bp 1 "$PREC" ${PEAKS[@]+"${PEAKS[@]}"} --ocannl_autotune_search=true 
   --ocannl_tune_inline_flips=5 \
   --ocannl_tune_flip_ordering=enablement --ocannl_autotune_bound_pruning=true
 # D: the untuned regime — default pipeline vs model_default, +placements, +lattice. At the
-# requested precision except f16 -> f32 (see the header note); each arm pins the gates the
-# treatment does not enable.
+# requested precision unless GH514_D_PREC overrides it (see the header note); each arm pins the
+# gates the treatment does not enable.
 mlp D-default 0 "$DPREC" --ocannl_model_peak_flops=0 --ocannl_model_peak_memory_bandwidth=0 \
   --ocannl_model_default_schedule=false
 mlp D-model 0 "$DPREC" ${DPEAKS[@]+"${DPEAKS[@]}"} --ocannl_model_default_schedule=true \

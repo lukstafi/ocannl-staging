@@ -231,8 +231,10 @@ nothing about the model (their variants are identical executions; metal's late-c
 reruns. The gap is now closed — `compile_train_step` routes every leg's work-carrying untuned
 compile (the `Host_gated` gradient routine and the `Device_gated` fused routine, as well as
 `Plain_step`) through `Autotune.model_default`; only `Host_gated`'s tiny optimizer routine stays
-plainly compiled. The f32 reruns reported above stand as measured; f16 model-vs-default cells
-are measurable from here on without the workaround.
+plainly compiled. The driver's D cells accordingly run at the requested precision instead of
+dropping to f32 (see Reproduction — `GH514_D_PREC=f32` restores the workaround). The f32 reruns
+reported above stand as measured; f16 model-vs-default cells are measurable from here on
+without it.
 
 ## Where the beam remains competitive
 
@@ -266,14 +268,22 @@ To reproduce a single cell — say the hip budget-5 enablement headline — run 
 that cell's `.out`/`.err`, or lift the cell's exact, fully-pinned argv from the script: the
 cells are the commands, and the script is deliberately the single place they are maintained.
 
+The D rows of the f16 boxes were measured with the untuned mlp cells dropped to f32 (the
+harness gap above). The driver no longer drops them — with the gate reaching the gated step
+shapes, `cuda f16` now measures the f16 model-vs-default comparison the tables could not — so
+reproducing those rows as tabulated takes the override that restores the workaround:
+
+```bash
+GH514_D_PREC=f32 benchmarks/gh514_cells.sh cuda f16 ~/ocannl-staging
+```
+
 Runs behind this report: per box, 8 tuned cells (A, the two B arms of the pruning A/B, five
 budget-5 chains) — counted in the implementation's unit that is **41 `Autotune.tune` searches
 each** (every cell runs both placement arms, and each of the five chains measures its five
 flips as full searches) — plus the untuned compiles (7 per box; an untabulated supplemental hip f32 battery — see the untuned section — adds 4 more there) and the fit; serial per box, all three boxes
 in parallel, ~8 min (cuda) to ~25 min (metal) wall each. The checked-in driver additionally
 pins every cell's treatment explicitly — the tuned cells enable the search and zero the flip
-budget where it is not the treatment, the control arms disable their gates, the gpt cells pin
-`BENCH_TUNE=0`, and the untuned mlp cells drop to f32 only under f16 (bf16 keeps the gate
-reachable) — so an ambient config cannot contaminate the matrix; the original runs predate
+budget where it is not the treatment, the control arms disable their gates, and the gpt cells pin
+`BENCH_TUNE=0` — so an ambient config cannot contaminate the matrix; the original runs predate
 those pins but were executed with all gates at their defaults (off), so the driver reproduces
-exactly what is tabulated above.
+exactly what is tabulated above (with `GH514_D_PREC=f32` for the f16 boxes' D rows, as above).
