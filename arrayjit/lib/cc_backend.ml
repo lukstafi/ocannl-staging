@@ -69,6 +69,41 @@ let probe_cache_dir =
        Option.some_if ours dir
      with _ -> None)
 
+(* Forward reference to [compiler_command] below: resolving the command is itself a cached probe,
+   so the key of the probes that RUN the compiler is built from it, not the other way round. *)
+let compiler_command_ref : (unit -> string) ref = ref (fun () -> "")
+
+(* The identity of the compiler EXECUTABLE, for the probe-cache key below (Codex P1 on PR #337). An
+   in-place toolchain upgrade leaves the command name, the flags and PATH unchanged, so keyed on
+   those alone every cached probe would keep answering for the old compiler indefinitely — the
+   target fingerprint most absurdly of all, since noticing exactly this is its job. Resolved by
+   walking PATH in process: asking anything would spend the subprocess the cache exists to save.
+   Size and mtime, not a version string, for the same reason; an unresolvable command degrades to
+   its spelling, which is what the key held before. *)
+let compiler_executable_identity command =
+  let exe =
+    match String.split (String.strip command) ~on:' ' with [] -> "" | token :: _ -> token
+  in
+  let candidates =
+    if String.is_empty exe then []
+    else if String.exists exe ~f:(fun c -> Char.equal c '/' || Char.equal c '\\') then [ exe ]
+    else
+      let path = Option.value (Stdlib.Sys.getenv_opt "PATH") ~default:"" in
+      let dirs = String.split path ~on:(if Sys.win32 then ';' else ':') in
+      let exts = if Sys.win32 then [ ""; ".exe"; ".bat"; ".cmd" ] else [ "" ] in
+      List.concat_map dirs ~f:(fun dir ->
+          List.map exts ~f:(fun ext -> Stdlib.Filename.concat dir (exe ^ ext)))
+  in
+  let stat path = try Some (Unix.stat path) with _ -> None in
+  match
+    List.find_map candidates ~f:(fun path ->
+        match stat path with
+        | Some ({ Unix.st_kind = Unix.S_REG; _ } as st) -> Some (path, st)
+        | _ -> None)
+  with
+  | None -> "unresolved:" ^ exe
+  | Some (path, st) -> Printf.sprintf "%s:%d:%.0f" path st.Unix.st_size st.Unix.st_mtime
+
 let probe_cache_path =
   let key_digest =
     lazy
@@ -93,10 +128,26 @@ let probe_cache_path =
        in
        String.prefix (Stdlib.Digest.to_hex (Stdlib.Digest.string key)) 16)
   in
+  (* Two stages, because the compiler command is itself one of the probes: with the setting unset it
+     comes from [ocamlc -config], so a key that named the executable could not be built before that
+     probe answered. The "compiler" probe keeps the settings-only key; every probe that RUNS the
+     compiler keys on the executable it will run. *)
+  let full_digest =
+    lazy
+      (let key =
+         String.concat ~sep:"\000"
+           [
+             Lazy.force key_digest; compiler_executable_identity (compiler_command_ref.contents ());
+           ]
+       in
+       String.prefix (Stdlib.Digest.to_hex (Stdlib.Digest.string key)) 16)
+  in
   fun ~name ->
     Option.map (Lazy.force probe_cache_dir) ~f:(fun dir ->
-        Stdlib.Filename.concat dir
-          (Printf.sprintf "ocannl_cc_probe_%s_%s.txt" name (Lazy.force key_digest)))
+        let digest =
+          if String.equal name "compiler" then Lazy.force key_digest else Lazy.force full_digest
+        in
+        Stdlib.Filename.concat dir (Printf.sprintf "ocannl_cc_probe_%s_%s.txt" name digest))
 
 (* [compute] must be deterministic given the key above: its result is what every later process on
    this machine will use. [validate] rejects a cached value the caller cannot interpret, so that a
@@ -168,6 +219,8 @@ let compiler_command =
     match Utils.get_global_arg ~default:"" ~arg_name:"cc_backend_compiler_command" with
     | "" -> Lazy.force resolved
     | command -> command
+
+let () = compiler_command_ref := compiler_command
 
 (* gh-ocannl-164: explicit SIMD flags appended to the compiler invocation. The "auto" default
    probes in two stages (once per process, and once per machine via [cached_probe]). Stage 1

@@ -27,8 +27,8 @@ open Stdio
 module SC = Ir.Schedule_cache
 module Config_key_scan = Test_utils.Config_key_scan
 
-(* Modules that run AFTER lowering: rendering a kernel and compiling it. A key whose only reads are
-   here is invisible to the canonical digest by construction. *)
+(* Modules that run AFTER lowering: rendering a kernel, compiling it, dispatching it. A key whose
+   only reads are here is invisible to the canonical digest by construction. *)
 let codegen_stage_modules =
   [ "c_syntax.ml"; "cc_backend.ml"; "cuda_backend.ml"; "hip_backend.ml"; "metal_backend.ml" ]
 
@@ -110,7 +110,9 @@ let () =
          "keys read at codegen but classified code-borne: %s -- a codegen read happens after the \
           lowered code the canonical digest names, so it cannot reach the digest"
          (listing miscl));
-  (* The reviewable part: the classification itself, and which keys the scan found at codegen. *)
+  (* The reviewable part: the classification itself, and which keys the scan found at codegen. The
+     census counts both spellings of a read, [get_global_arg] call sites and [Utils.settings]
+     fields, so a settings-borne key cannot slip past check 3 (Codex P2 on PR #337). *)
   printf "Cache-key components (Schedule_cache.key_components): %s\n"
     (String.concat ~sep:", " SC.key_components);
   printf "Keys read at codegen (%s): %d\n"
