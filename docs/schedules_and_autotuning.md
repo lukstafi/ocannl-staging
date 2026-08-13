@@ -279,10 +279,14 @@ the retained procedural analyses alongside the affine engine and raises on diver
   lowering at each compile; a digest guard rejects stale entries.
   **Completeness is an invariant, not a habit** (gh-ocannl-572): everything else read *after*
   lowering shares that hazard, so the key carries a codegen tag as well — the backend-independent
-  emission gates (`large_models`, routine logging) plus the compiling backend's own knobs, which
-  it reports as `hardware_limits.codegen_tag` (for `cc`: the compiler command and flags,
-  `cc_vector_bytes`, `cc_fp16_arithmetic`, `cc_parallel_grid`/`cc_parallel_chunks`,
-  `cc_grid_private_bytes_cap`) — and the CPU worker-pool signature (gh-ocannl-530). Backends hand
+  emission gates (`large_models`, `buffer_aliasing`'s `restrict` suppression,
+  `prefer_backend_uniformity`'s logging spelling, and the *effective* routine-logging and
+  runtime-debug predicates, which fold in `log_level > 1` so a verbosity bump alone never churns
+  keys) plus the compiling backend's own knobs, which it reports as `hardware_limits.codegen_tag`
+  (for `cc`: the compiler command and flags, `cc_vector_bytes`, `cc_fp16_arithmetic`,
+  `cc_parallel_grid`/`cc_parallel_chunks`, `cc_grid_private_bytes_cap`; for CUDA and HIP the
+  graph-capture regime, which moves a fissioned candidate's launch overhead relative to a
+  whole-routine one) — and the CPU worker-pool signature (gh-ocannl-530). Backends hand
   their components to `cache_key` as the whole `hardware_limits` record, so a component added
   there reaches every call site. Every config key is classified against these components in
   `Utils.config_key_classification` — code-borne (it reaches the digest through the code), keyed

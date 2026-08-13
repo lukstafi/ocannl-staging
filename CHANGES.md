@@ -35,10 +35,12 @@
 ### Changed
 
 - The autotuner's schedule disk-cache key gained a **codegen component** (gh-ocannl-572): the
-  backend-independent emission gates (`large_models`, the routine-logging gates) and the compiling
-  backend's own codegen knobs, which it reports as `hardware_limits.codegen_tag` — for `cc`, the
-  compiler command and its flags, `cc_vector_bytes`, `cc_fp16_arithmetic`, `cc_parallel_grid` /
-  `cc_parallel_chunks`, `cc_grid_private_bytes_cap`. These are read after the lowered code the
+  backend-independent emission gates (`large_models`, `buffer_aliasing`, `prefer_backend_uniformity`,
+  and the effective routine-logging and runtime-debug predicates, which fold in `log_level > 1` so a
+  verbosity bump alone never churns keys) and the compiling backend's own codegen knobs, which it
+  reports as `hardware_limits.codegen_tag` — for `cc`, the compiler command and its flags,
+  `cc_vector_bytes`, `cc_fp16_arithmetic`, `cc_parallel_grid` / `cc_parallel_chunks`,
+  `cc_grid_private_bytes_cap`; for CUDA and HIP, the graph-capture regime. These are read after the lowered code the
   digest names, so a winner crowned under one of them used to replay under another — the shape of
   gh-ocannl-568. Existing cache entries miss once and are re-tuned. `Schedule_cache.cache_key` now
   takes the whole `hardware_limits` record instead of one optional tag per component.

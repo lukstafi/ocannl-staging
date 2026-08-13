@@ -31,7 +31,7 @@ let unset_config key = Hashtbl.remove Utils.config_file_args key
    second compile of the same graph would not re-decide anything. [a]'s eight values are small
    enough to be filled by generated code under the default [limit_constant_fill_size], which is what
    gives the code-borne flip below something to act on. *)
-let identity_of ctx =
+let canonical_of ctx =
   let a =
     TDSL.ndarray [| 1.; 2.; 3.; 4.; 5.; 6.; 7.; 8. |] ~label:[ "dif_a" ] ~output_dims:[ 8 ] ()
   in
@@ -46,9 +46,16 @@ let identity_of ctx =
         opt)
       ctx comp Ir.Indexing.Empty
   in
-  let canon = Option.value_exn ~here:[%here] !canon in
-  ( SC.digest canon,
-    SC.cache_key ~limits:(Context.hardware_limits ctx) canon ~backend:(Context.backend_name ctx) )
+  Option.value_exn ~here:[%here] !canon
+
+(* The key is a function of the canonical form and the current configuration, so a knob that cannot
+   touch the code is answered without recompiling. *)
+let key_of ctx canon =
+  SC.cache_key ~limits:(Context.hardware_limits ctx) canon ~backend:(Context.backend_name ctx)
+
+let identity_of ctx =
+  let canon = canonical_of ctx in
+  (SC.digest canon, key_of ctx canon)
 
 let () =
   let ctx = Context.auto () in
@@ -95,6 +102,35 @@ let () =
   unset_config "print_decimals_precision";
   p "a search-shaping and an execution-neutral knob leave the identity untouched"
     (String.equal digest0 digest_n && String.equal key0 key_n);
+
+  (* The debug gates bite only at log_level > 1, so the codegen component hashes the EFFECTIVE
+     predicates (Codex P1 on PR #337): the regimes must separate where they change the kernel, and
+     an ordinary verbosity bump must not churn cache keys. *)
+  let canon = canonical_of ctx in
+  let key_with ~logs ~level =
+    let logs0 = Utils.settings.debug_log_from_routines and level0 = Utils.settings.log_level in
+    Utils.settings.debug_log_from_routines <- logs;
+    Utils.settings.log_level <- level;
+    let key = key_of ctx canon in
+    Utils.settings.debug_log_from_routines <- logs0;
+    Utils.settings.log_level <- level0;
+    key
+  in
+  let quiet = key_with ~logs:false ~level:0 in
+  p "raising the log level alone does not churn the key"
+    (String.equal quiet (key_with ~logs:false ~level:2));
+  p "nor does asking for routine logs the log level keeps switched off"
+    (String.equal quiet (key_with ~logs:true ~level:0));
+  p "while logs that actually reach the kernel separate the key"
+    (not (String.equal quiet (key_with ~logs:true ~level:2)));
+
+  (* Buffer aliasing drops the [restrict] qualifier from an alias candidate's kernel parameter
+     (Codex P1 on PR #337): emitted C, not lowered code. *)
+  set_config "buffer_aliasing" "true";
+  let key_a = key_of ctx canon in
+  unset_config "buffer_aliasing";
+  p "an aliasing flip separates the key without touching the digest"
+    (not (String.equal key0 key_a));
 
   (* And the numerics component, whose omission was gh-ocannl-568. *)
   let base = Ir.Numerics.get () in

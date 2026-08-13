@@ -2358,10 +2358,17 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
            simd_vector_bytes = 0;
            native_fp16_arithmetic = false;
            worker_pool_tag = None;
-           (* gh-ocannl-572: no codegen knob of this backend is configurable — the kernel source
-              is a function of the lowered code, the device capabilities, and the numerics policy,
-              all of which the cache key already covers. *)
-           codegen_tag = None;
+           (* gh-ocannl-572: the kernel source is a function of the lowered code, the device
+              capabilities and the numerics policy, all already covered — but graph capture is a
+              dispatch-mechanics regime the search measures in (Codex P1 on PR #337): it fires only
+              for multi-segment routines, so it changes the launch overhead of a fissioned
+              candidate relative to a whole-routine one, and a crown from one regime is not
+              evidence about the other. *)
+           codegen_tag =
+             Some
+               (if Utils.get_global_flag ~default:true ~arg_name:"gpu_graph_capture" then
+                  "graph-capture"
+                else "no-graph-capture");
            (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the sm_70+
               discrete-GPU class (RTX-30/40 mid-range: ~15 fp32 TFLOP/s, ~450 GB/s). Per-device
               queries (SM count x clock, memory clock x bus width) are calibration follow-up work;

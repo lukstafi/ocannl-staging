@@ -24,7 +24,6 @@ code-borne (digest) -- it decides a tensor node's placement class, which the can
 
 keyed: backend -- it decides which backend compiles, and the backend name is that component
   backend [read at codegen]
-  prefer_backend_uniformity [read at codegen]
 
 keyed: numerics -- the numerics policy is consulted at codegen and by the autotune tile-shape choice, never in the lowered code (gh-ocannl-568)
   fp16_arithmetic
@@ -47,11 +46,18 @@ keyed: codegen -- a cc-backend codegen knob: rendering or compiling a kernel rea
   cc_parallel_grid [read at codegen]
   cc_vector_bytes [read at codegen]
 
-keyed: codegen -- a backend-independent codegen knob: every backend's emission reads it
+keyed: codegen -- a backend-independent codegen knob: every backend's emission reads it. The two debug gates bite only at log_level > 1, so the tag hashes the effective predicates ([Utils.debug_log_from_routines] rewrites the kernel and disables the parallel-grid, vectorized and mma renderings; [Utils.with_runtime_debug] switches the GPU backends to debug compilation) -- which is also why log_level itself belongs here, without an ordinary verbosity bump churning cache keys. prefer_backend_uniformity does not pick a backend: it picks how the C-family backends spell their logging expressions
   big_models
   debug_log_from_routines
   debug_log_to_stream_files [read at codegen]
   large_models
+  log_level
+  output_debug_files_in_build_directory
+  prefer_backend_uniformity [read at codegen]
+
+keyed: codegen -- it changes the emitted code or the mechanics a search measures in, without being a property of the lowered code: an aliasing candidate's kernel parameter drops its [restrict] qualifier (the liveness planner may overlap its bytes, gh-ocannl-489), and GPU graph capture fires only for multi-segment routines, so it moves a fissioned candidate's launch overhead relative to a whole-routine one
+  buffer_aliasing
+  gpu_graph_capture [read at codegen]
 
 search-shaping -- it defines the untuned default pipeline, which a search seeds from and reports against; a cached winner carries its own ops and replays without consulting it ([Schedule.default_schedule_fingerprint] records these for the [default_ms] diagnostic)
   automatic_cpu_schedule
@@ -93,9 +99,7 @@ execution-neutral -- debug artifacts and where they go: the files are written be
   clean_up_build_files_on_startup
   clean_up_log_files_on_startup
   log_buffer_aliasing
-  log_level
   log_memory_budget
-  output_debug_files_in_build_directory
   output_dlls_in_build_directory [read at codegen]
   output_prec_in_ll_files
   schedule_log_declines [read at codegen]
@@ -138,11 +142,9 @@ execution-neutral -- identifier spelling in generated code and in printouts
   print_decimals_precision
 
 execution-neutral -- host-side execution mechanics: where buffers sit, how many devices a scheduler opens, how launches are issued, how initialization is seeded, how checkpoint payloads reach host memory. The kernels are unchanged, and every candidate of a search meets the same mechanics as every other
-  buffer_aliasing
   checkpoint_load_mmap
   cuda_printf_fifo_size [read at codegen]
   fixed_state_for_init
-  gpu_graph_capture [read at codegen]
   hip_printf_fifo_size [read at codegen]
   multidev_num_devices
 

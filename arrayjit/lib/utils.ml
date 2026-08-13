@@ -231,7 +231,7 @@ let config_key_classification : (config_key_class * string * string list) list =
       [ "stack_threshold_in_bytes" ] );
     ( Keyed "backend",
       "it decides which backend compiles, and the backend name is that component",
-      [ "backend"; "prefer_backend_uniformity" ] );
+      [ "backend" ] );
     ( Keyed "numerics",
       "the numerics policy is consulted at codegen and by the autotune tile-shape choice, never in \
        the lowered code (gh-ocannl-568)",
@@ -257,13 +257,29 @@ let config_key_classification : (config_key_class * string * string list) list =
         "cc_grid_private_bytes_cap";
       ] );
     ( Keyed "codegen",
-      "a backend-independent codegen knob: every backend's emission reads it",
+      "a backend-independent codegen knob: every backend's emission reads it. The two debug gates \
+       bite only at log_level > 1, so the tag hashes the effective predicates \
+       ([Utils.debug_log_from_routines] rewrites the kernel and disables the parallel-grid, \
+       vectorized and mma renderings; [Utils.with_runtime_debug] switches the GPU backends to \
+       debug compilation) -- which is also why log_level itself belongs here, without an ordinary \
+       verbosity bump churning cache keys. prefer_backend_uniformity does not pick a backend: it \
+       picks how the C-family backends spell their logging expressions",
       [
         "large_models";
         "big_models";
+        "log_level";
         "debug_log_from_routines";
         "debug_log_to_stream_files";
+        "output_debug_files_in_build_directory";
+        "prefer_backend_uniformity";
       ] );
+    ( Keyed "codegen",
+      "it changes the emitted code or the mechanics a search measures in, without being a \
+       property of the lowered code: an aliasing candidate's kernel parameter drops its [restrict] \
+       qualifier (the liveness planner may overlap its bytes, gh-ocannl-489), and GPU graph \
+       capture fires only for multi-segment routines, so it moves a fissioned candidate's launch \
+       overhead relative to a whole-routine one",
+      [ "buffer_aliasing"; "gpu_graph_capture" ] );
     ( Search_shaping,
       "it defines the untuned default pipeline, which a search seeds from and reports against; a \
        cached winner carries its own ops and replays without consulting it \
@@ -306,8 +322,6 @@ let config_key_classification : (config_key_class * string * string list) list =
       "debug artifacts and where they go: the files are written beside the run, the kernels are \
        what they would have been",
       [
-        "log_level";
-        "output_debug_files_in_build_directory";
         "output_dlls_in_build_directory";
         "build_files_prefix";
         "clean_up_build_files_on_startup";
@@ -364,9 +378,7 @@ let config_key_classification : (config_key_class * string * string list) list =
        memory. The kernels are unchanged, and every candidate of a search meets the same mechanics \
        as every other",
       [
-        "buffer_aliasing";
         "multidev_num_devices";
-        "gpu_graph_capture";
         "cuda_printf_fifo_size";
         "hip_printf_fifo_size";
         "fixed_state_for_init";

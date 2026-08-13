@@ -429,19 +429,33 @@ let numerics_tag () =
     8
 
 (* gh-ocannl-572: the same argument as the numerics tag, for the rest of the settings a backend
-   consults when it renders and compiles a kernel. They come in two layers: the backend-independent
-   ones handled here (the index/pool-slot width, and the routine-logging emission — which also
-   suppresses the default schedule), and the backend's own, which it reports through
+   consults when it renders, compiles or dispatches a kernel. They come in two layers: the
+   backend-independent ones handled here, and the backend's own, which it reports through
    [hardware_limits.codegen_tag] because only it knows which of its knobs reach its codegen. Neither
    layer is a property of the lowered code, so neither can reach {!digest}. *)
 let codegen_tag ?backend_tag () =
+  let gate name value = if value then name else "no-" ^ name in
+  let config name = gate name (Utils.get_global_flag ~default:false ~arg_name:name) in
   let parts =
     [
       (if Utils.settings.large_models then "wide-index" else "narrow-index");
-      (if Utils.settings.debug_log_from_routines then "routine-logs" else "no-routine-logs");
-      (if Utils.get_global_flag ~default:false ~arg_name:"debug_log_to_stream_files" then
-         "stream-logs"
-       else "inline-logs");
+      (* The EFFECTIVE predicates, not the raw flags (Codex P1 on PR #337): both gates additionally
+         require [log_level > 1], so hashing the flags alone would give the logged and the unlogged
+         regime one key — and hashing [log_level] itself would churn keys on an ordinary verbosity
+         bump that changes no kernel. Routine logging rewrites the kernel and disables the
+         parallel-grid, vectorized and mma renderings; runtime debug switches the GPU backends to
+         debug compilation ([--device-debug] / [-g]). *)
+      gate "routine-logs" (Utils.debug_log_from_routines ());
+      gate "debug-compile" (Utils.with_runtime_debug ());
+      config "debug_log_to_stream_files";
+      (* Not which backend runs — how the C-family backends spell their logging expressions
+         ([full_printf_support]: [%g] vs scaled integers). Codex P2 on PR #337. *)
+      config "prefer_backend_uniformity";
+      (* An aliasing candidate's kernel parameter drops its [restrict] qualifier, since the
+         link-time liveness planner may overlap it with another parameter's bytes (gh-ocannl-489):
+         a real change to the emitted C, and to what the C compiler may then assume. Codex P1 on
+         PR #337. *)
+      config "buffer_aliasing";
       Option.value backend_tag ~default:"";
     ]
   in

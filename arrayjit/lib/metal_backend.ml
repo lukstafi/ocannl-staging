@@ -390,9 +390,9 @@ module Impl = struct
            simd_vector_bytes = 0;
            native_fp16_arithmetic = false;
            worker_pool_tag = None;
-           (* gh-ocannl-572: no codegen knob of this backend is configurable — the kernel source
-              is a function of the lowered code, the device capabilities, and the numerics policy,
-              all of which the cache key already covers. *)
+           (* gh-ocannl-572: no codegen or dispatch knob of this backend is configurable — the
+              kernel source is a function of the lowered code, the device capabilities and the
+              numerics policy, all of which the cache key already covers. *)
            codegen_tag = None;
            (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the
               Apple-silicon class ([Device.attributes] exposes no throughput numbers — mid-range
