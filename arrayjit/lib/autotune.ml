@@ -3636,9 +3636,11 @@ let calibration_file =
    two arms, a re-tune after a cache miss). A repeat violation restates the first one — the implied
    minima move only by timing jitter — so the unconditional warning fires once per distinct
    (backend, digest tag), while every timing still contributes its own calibration row and
-   autotune_log line. The backend belongs in the key: the digest is schedule-level, so one process
-   tuning the same code on two backends can produce identical tags whose envelope constants — and
-   therefore whose implied minima — are independent. *)
+   autotune_log line. The backend and device belong in the key: the digest is schedule-level, so one
+   process tuning the same code on another backend — or on another device of the same backend —
+   produces an identical tag, and those measurements are exactly the ones [tune] refuses to
+   substitute for each other (the [timing_ctx] backend-and-device check), so their implied minima
+   are independent evidence. *)
 let warned_bound_violations = Hash_set.create (module String)
 
 (* Bound pruning against the measured incumbent (gh-ocannl-514 phase 4b): a sketch candidate whose
@@ -3663,7 +3665,8 @@ let bound_prunable = function
   | Whole (W_sketch _) | Fiss (F_sketch _) | Fiss (F_split _) -> true
   | _ -> false
 
-let emit_calibration ~backend ~limits ~label ~digest ~measured_ms (opts : LL.optimized list) =
+let emit_calibration ~backend ~device ~limits ~label ~digest ~measured_ms
+    (opts : LL.optimized list) =
   let file = Lazy.force calibration_file in
   let peak_flops, peak_memory_bandwidth = envelope ~limits in
   let have_envelope = Option.is_some peak_flops || Option.is_some peak_memory_bandwidth in
@@ -3697,7 +3700,7 @@ let emit_calibration ~backend ~limits ~label ~digest ~measured_ms (opts : LL.opt
        match model_ms with Some m -> Float.(m > measured_ms) | None -> false
      in
      if flops_leg || bytes_leg || (bound_exceeds && (not flops_approx) && not bytes_approx) then
-       (let warn_key = backend ^ "|" ^ dtag in
+       (let warn_key = Printf.sprintf "%s|%d|%s" backend device dtag in
         if Hash_set.mem warned_bound_violations warn_key then ()
         else
           let () = Hash_set.add warned_bound_violations warn_key in
@@ -3718,12 +3721,12 @@ let emit_calibration ~backend ~limits ~label ~digest ~measured_ms (opts : LL.opt
           in
           Stdio.eprintf
             "autotune: BOUND VIOLATION: roofline lower bound %s ms > measured %.4f ms for %s \
-             (digest %s) on %s — the envelope constants understate this machine's peaks (this row \
-             implies %s as necessary minima); refit with tools/fit_envelope.exe over \
+             (digest %s) on %s device %d — the envelope constants understate this machine's peaks \
+             (this row implies %s as necessary minima); refit with tools/fit_envelope.exe over \
              autotune_calibration_file data\n\
              %!"
             (match model_ms with Some m -> Printf.sprintf "%.6f" m | None -> "?")
-            measured_ms label dtag backend minima)
+            measured_ms label dtag backend device minima)
      else if bound_exceeds then
        (* Only an approximate leg can explain the exceedance: possibly over-counting
           (guards-taken / union upper bounds), not the envelope — a diagnostic, no
@@ -4949,6 +4952,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
   in
   let static_indices = Idx.bound_symbols bindings in
   let backend = Context.backend_name ctx in
+  let device = Context.device_id ctx in
   let emit_report r = Option.iter report ~f:(fun f -> f r) in
   (* [tune] reports exactly once per call, on every path (gh-ocannl-550). The failures that happen
      before (or instead of) the search proper — the base compile failing before its lowering is
@@ -5430,7 +5434,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
       | None ->
           if baseline_dispatched then (
             logf "baseline: %.4f ms (digest %s)" baseline_ms (dshort base_digest);
-            emit_calibration ~backend ~limits ~label:"baseline" ~digest:base_digest
+            emit_calibration ~backend ~device ~limits ~label:"baseline" ~digest:base_digest
               ~measured_ms:baseline_ms [ base_opt ])
           else (
             (* No calibration row: the model column is only meaningful next to a measurement. *)
@@ -5766,7 +5770,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                   if saved_is_tensorized (flat_schedule c.form) && Float.(ms < !mma_best_ms) then
                     mma_best_ms := ms;
                   logf "%s: %.4f ms (digest %s)" (spec_label spec) ms (dshort c.digest_after);
-                  emit_calibration ~backend ~limits ~label:(spec_label spec) ~digest:c.digest_after
+                  emit_calibration ~backend ~device ~limits ~label:(spec_label spec) ~digest:c.digest_after
                     ~measured_ms:ms c.all_opts;
                   (* The rendering census next to the timing (gh-ocannl-479): a candidate labeled
                      tensorized whose [Tile_mma] statements all declined at emission timed the
