@@ -35,15 +35,17 @@ search, `~rounds:0` as `bench_mlp` always passes, `--ocannl_autotune_log=true` t
 - **metal**: Apple M4 Max (Metal), `BENCH_PRECISION=f16` for the tuned cells, f32 for the
   untuned reruns (see the harness-gap note).
 - **cuda**: ROG NUC, RTX 5070 Ti Laptop GPU (WSL2), f16 tuned / f32 untuned.
-- **hip**: Minix, Ryzen AI MAX+ 395 w/ Radeon 8060S, gfx1151 (WSL2), bf16 tuned (rocWMMA's
-  only route on RDNA3.5) / f32 untuned, `taskset -c 0-15` on every run (the gh-530 freeze
-  mitigation).
+- **hip**: Minix, Ryzen AI MAX+ 395 w/ Radeon 8060S, gfx1151 (WSL2), bf16 throughout —
+  rocWMMA's only route on RDNA3.5, and bf16 training keeps `Plain_step` (only f16 is
+  loss-scale-gated), so the untuned cells run at the precision under study; `taskset -c 0-15`
+  on every run (the gh-530 freeze mitigation).
 
 Cells per box, in order (driver checked in as `benchmarks/gh514_cells.sh`): **A** tuned `mlp_wide`
 placement A/B with `autotune_calibration_file`; **fit** `tools/fit_envelope.exe` over A's rows,
 all later cells pinning the fitted `model_peak_*`; **B** tuned A/B with
 `autotune_bound_pruning` off vs on; **C** the flip chain at budget 5, `tune_flip_ordering=cost`
-vs `enablement`, two replicates each, plus enablement+pruning; **D** untuned `mlp_wide` (f32)
+vs `enablement`, two replicates each, plus enablement+pruning; **D** untuned `mlp_wide` (f32 on
+the f16 boxes, bf16 on hip)
 and `gpt2_mini` (f16/bf16 forward): plain default vs `model_default_schedule` vs
 `+model_default_placements=5` vs `+model_default_geometry_lattice=true`.
 
@@ -145,9 +147,19 @@ scores), every step time matched the plain default within spread, and no pick ev
 
 | box | mlp_wide p50 default → model → +plc → +lattice |
 |---|---|
-| metal | 5.97 → 5.97 → 5.99 → 5.96 ms |
-| cuda | 4.13 → 4.13 → 4.13 → 4.10 ms |
-| hip | 1.51 → 1.51 → 1.50 → 1.52 ms |
+| metal f32 | 5.97 → 5.97 → 5.99 → 5.96 ms |
+| cuda f32 | 4.13 → 4.13 → 4.13 → 4.10 ms |
+| hip bf16 | 3.56 → 3.57 → 3.58 → 3.58 ms |
+| hip f32 | 1.51 → 1.51 → 1.50 → 1.52 ms |
+
+The hip bf16 row is the sharper null: at the precision under study the mma family is genuinely
+in play, and the ledger shows why the pick still stays default — under the untuned default
+placements the cast twins are virtual, the site reads f32 masters, and the tensorized branch
+refutes (the very premise the tuned cells measure), so the lattice behind it is unreachable;
+the placement walk then prices all 32 leaves (375 family evaluations, 375 unbuildable sketch
+attempts) without surfacing a single buildable tensorized candidate. Reaching the family
+untuned needs the placement leaves' lowerings to make the twins' materialization pay off in
+the *model*, which a compute-only envelope cannot see (the traffic term again).
 
 That the model-argmin *is* the default on these cells is the honest null: `gpt2_mini`'s
 segments are memory-bound (where the default preset is provably optimal at the floor —
@@ -181,13 +193,13 @@ without pricing:
   builder preconditions into tree verdicts is the natural follow-up if the lattice is to pay
   off beyond synthetic sites.
 
-**A harness gap found and worked around**: at reduced precision `bench_mlp`'s training step is
+**A harness gap found and worked around**: at f16 `bench_mlp`'s training step is
 loss-scale-gated (`Host_gated`/`Device_gated`), and those arms of
 `Bench_harness.compile_train_step` bypass the `model_default` gate — only `Plain_step` routes
-through it. The f16/bf16 D cells therefore measured nothing about the model (their variants
-are identical executions; metal's late-campaign f16 "D" cells also drifted thermally), and the
-untuned comparisons above are the f32 reruns. Extending the gate to the gated arms is a
-one-line follow-up in the harness.
+through it (bf16 keeps `Plain_step`, so hip is unaffected). The f16 D cells therefore measured
+nothing about the model (their variants are identical executions; metal's late-campaign f16
+"D" cells also drifted thermally), and the metal/cuda untuned comparisons above are f32
+reruns. Extending the gate to the gated arms is a one-line follow-up in the harness.
 
 ## Where the beam remains competitive
 
@@ -223,7 +235,9 @@ budget-5 chains) — counted in the implementation's unit that is **41 `Autotune
 each** (every cell runs both placement arms, and each of the five chains measures its five
 flips as full searches) — plus 7 untuned compiles and the fit; serial per box, all three boxes
 in parallel, ~8 min (cuda) to ~25 min (metal) wall each. The checked-in driver additionally
-pins every control cell's experimental gates to their disabled values (an ambient config could
-otherwise contaminate the matrix) and forces the untuned mlp cells to f32; the original runs
-predate those pins but were executed with all gates at their defaults (off) and the D cells
-rerun at f32, so the driver reproduces exactly what is tabulated above.
+pins every cell's treatment explicitly — the tuned cells enable the search and zero the flip
+budget where it is not the treatment, the control arms disable their gates, the gpt cells pin
+`BENCH_TUNE=0`, and the untuned mlp cells drop to f32 only under f16 (bf16 keeps the gate
+reachable) — so an ambient config cannot contaminate the matrix; the original runs predate
+those pins but were executed with all gates at their defaults (off), so the driver reproduces
+exactly what is tabulated above.
