@@ -713,7 +713,9 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   over-counting). On machines whose class-level `hardware_limits` peaks understate the hardware
   (e.g. Metal's 2e11 B/s vs a 4e11 B/s M-Max), tuning runs may newly print `BOUND VIOLATION`
   warnings. That is the invariant working: refit `model_peak_*` from calibration data rather
-  than silencing the check.
+  than silencing the check. The warning prints once per (backend, device, digest) per process —
+  a candidate timed again (two tuning arms, a re-tune) warns once — but every timing still writes
+  its own calibration row, so the fitter sees all of them.
 - benchmarks/ is the cross-framework parity+timing suite (self-describing safetensors fixtures,
   one-JSON-line runners, loss-trajectory parity gate ~1e-7 fp32 vs pytorch/cpu). The gate
   doubles as a gradient oracle. tinygrad: realize the loss BEFORE `opt.step()` or it recomputes
