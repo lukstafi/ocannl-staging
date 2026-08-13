@@ -228,7 +228,11 @@ loss-scale-gated (`Host_gated`/`Device_gated`), and those arms of
 through it (bf16 keeps `Plain_step`, so hip is unaffected). The f16 D cells therefore measured
 nothing about the model (their variants are identical executions; metal's late-campaign f16
 "D" cells also drifted thermally), and the metal/cuda untuned comparisons above are f32
-reruns. Extending the gate to the gated arms is a one-line follow-up in the harness.
+reruns. The gap is now closed — `compile_train_step` routes every leg's work-carrying untuned
+compile (the `Host_gated` gradient routine and the `Device_gated` fused routine, as well as
+`Plain_step`) through `Autotune.model_default`; only `Host_gated`'s tiny optimizer routine stays
+plainly compiled. The f32 reruns reported above stand as measured; f16 model-vs-default cells
+are measurable from here on without the workaround.
 
 ## Where the beam remains competitive
 

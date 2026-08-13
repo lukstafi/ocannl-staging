@@ -156,26 +156,27 @@ type train_routines =
     gradient/fused routine is tuned and the tiny optimizer routine is compiled plainly, from the
     tuned context so the lineage's compile order is unchanged. *)
 let compile_train_step ~tune ~tuned ctx bindings parts =
+  (* gh-ocannl-491: the model-picked untuned default (config [model_default_schedule=true]) — run
+     the same benchmark with the gate off vs on for the before/after comparison. Every leg's
+     work-carrying routine takes this path when it is not tuned, so the gated (f16) legs compare a
+     real model pick against the plain default rather than two identical executions. *)
+  let untuned ctx comp =
+    if Lazy.force Autotune.model_default_enabled then Autotune.model_default ctx comp bindings
+    else Context.compile ctx comp bindings
+  in
   match parts with
   | Plain_step comp ->
-      let ctx, routine =
-        if tune then tuned ctx comp
-        else if Lazy.force Autotune.model_default_enabled then
-          (* gh-ocannl-491: the model-picked untuned default (config
-             [model_default_schedule=true]) — run the same benchmark with the gate off vs on for
-             the before/after comparison. *)
-          Autotune.model_default ctx comp bindings
-        else Context.compile ctx comp bindings
-      in
+      let ctx, routine = if tune then tuned ctx comp else untuned ctx comp in
       (ctx, Plain routine)
   | Host_gated (scaler, checksum, grad_comp, sgd_comp) ->
-      let ctx, grad_routine =
-        if tune then tuned ctx grad_comp else Context.compile ctx grad_comp bindings
-      in
+      let ctx, grad_routine = if tune then tuned ctx grad_comp else untuned ctx grad_comp in
+      (* The optimizer routine stays plainly compiled in both the tuned and untuned arms: it is
+         tiny, it is not what the leg measures, and keeping it out of both search paths leaves the
+         lineage's compile order identical across the gate-off/gate-on comparison. *)
       let ctx, sgd_routine = Context.compile ctx sgd_comp bindings in
       (ctx, Host_gate (scaler, checksum, grad_routine, sgd_routine))
   | Device_gated (scaler, wflag, comp, interval) ->
-      let ctx, routine = if tune then tuned ctx comp else Context.compile ctx comp bindings in
+      let ctx, routine = if tune then tuned ctx comp else untuned ctx comp in
       (ctx, Device_gate (scaler, wflag, routine, interval))
 
 let train_step_bindings = function
