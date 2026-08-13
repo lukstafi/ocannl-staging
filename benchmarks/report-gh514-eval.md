@@ -247,10 +247,12 @@ reachable on these cells, and this report records that rather than sampling arou
 ## Reproduction
 
 One driver per box (`benchmarks/gh514_cells.sh <backend> <precision> <repo-root> [pin...]`,
-e.g. `gh514_cells.sh hip bf16 ~/ocannl-staging taskset -c 0-15`); the hip headline cell alone:
+e.g. `gh514_cells.sh hip bf16 ~/ocannl-staging taskset -c 0-15`) — the driver is the canonical,
+fully-pinned reproduction (it also generates missing fixtures via `gen_fixtures.py`); the hip
+headline cell alone:
 
 ```bash
-cd benchmarks && BENCH_FIXTURE=fixtures/mlp_wide.safetensors BENCH_TUNE=1 BENCH_TUNE_REPORT=1 BENCH_PRECISION=bf16 BENCH_MATERIALIZE=0 BENCH_DEBUG=0 taskset -c 0-15 ../_build/default/benchmarks/runners/ocannl/bench_mlp.exe --ocannl_backend=hip --ocannl_autotune_log=true --ocannl_autotune_cache_dir=$(mktemp -d) --ocannl_autotune_search=true --ocannl_autotune_keep_fraction=1 --ocannl_model_peak_flops=1.485901e+12 --ocannl_tune_inline_flips=5 --ocannl_tune_flip_ordering=enablement
+cd benchmarks && BENCH_FIXTURE=fixtures/mlp_wide.safetensors BENCH_TUNE=1 BENCH_TUNE_REPORT=1 BENCH_PRECISION=bf16 BENCH_MATERIALIZE=0 BENCH_DEBUG=0 taskset -c 0-15 ../_build/default/benchmarks/runners/ocannl/bench_mlp.exe --ocannl_backend=hip --ocannl_autotune_log=true --ocannl_autotune_cache_dir=$(mktemp -d) --ocannl_autotune_search=true --ocannl_autotune_keep_fraction=1 --ocannl_autotune_repeats=3 --ocannl_autotune_bound_pruning=false --ocannl_model_peak_flops=1.485901e+12 --ocannl_tune_inline_flips=5 --ocannl_tune_flip_ordering=enablement
 ```
 
 with `--ocannl_tune_flip_ordering=cost` as the baseline arm, and the untuned cells as
